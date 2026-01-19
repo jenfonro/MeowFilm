@@ -24,15 +24,24 @@ func init() {
 }
 
 func Handler(authMw *auth.Auth) http.Handler {
-	assetVersion := strings.TrimSpace(os.Getenv("ASSET_VERSION"))
-	if assetVersion == "" || strings.EqualFold(assetVersion, "timestamp") {
-		assetVersion = strconv.FormatInt(time.Now().UnixNano()/int64(time.Millisecond), 10)
+	rawVersion := strings.TrimSpace(os.Getenv("ASSET_VERSION"))
+	tagVersion := normalizeReleaseTag(rawVersion)
+
+	uiVersion := "beta"
+	assetVersion := strconv.FormatInt(time.Now().UnixNano()/int64(time.Millisecond), 10)
+	if tagVersion != "" {
+		uiVersion = tagVersion
+		assetVersion = tagVersion
 	}
 
 	indexHTML := mustReadFile("index.html")
 	dashboardHTML := mustReadFile("dashboard.html")
+	indexHTML = patchLegacyUiVersionPlaceholder(indexHTML)
+	dashboardHTML = patchLegacyUiVersionPlaceholder(dashboardHTML)
 	indexHTML = strings.ReplaceAll(indexHTML, "__ASSET_VERSION__", assetVersion)
+	indexHTML = strings.ReplaceAll(indexHTML, "__UI_VERSION__", uiVersion)
 	dashboardHTML = strings.ReplaceAll(dashboardHTML, "__ASSET_VERSION__", assetVersion)
+	dashboardHTML = strings.ReplaceAll(dashboardHTML, "__UI_VERSION__", uiVersion)
 
 	fsHandler := http.FileServer(http.FS(dist))
 
@@ -77,6 +86,51 @@ func NoStoreForHTMLCSSJS(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func patchLegacyUiVersionPlaceholder(html string) string {
+	if !strings.Contains(html, "__ASSET_VERSION__") {
+		return html
+	}
+	r := strings.NewReplacer(
+		"window.__TV_SERVER_VERSION__ = '__ASSET_VERSION__';", "window.__TV_SERVER_VERSION__ = '__UI_VERSION__';",
+		"window.__TV_SERVER_VERSION__='__ASSET_VERSION__';", "window.__TV_SERVER_VERSION__='__UI_VERSION__';",
+		"window.__TV_SERVER_VERSION__ = \"__ASSET_VERSION__\";", "window.__TV_SERVER_VERSION__ = \"__UI_VERSION__\";",
+		"window.__TV_SERVER_VERSION__=\"__ASSET_VERSION__\";", "window.__TV_SERVER_VERSION__=\"__UI_VERSION__\";",
+	)
+	return r.Replace(html)
+}
+
+func normalizeReleaseTag(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	s = strings.TrimPrefix(s, "refs/tags/")
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+
+	low := strings.ToLower(s)
+	if low == "timestamp" || low == "beta" {
+		return ""
+	}
+
+	// Accept both "v1.2.3" and "1.2.3".
+	if strings.HasPrefix(low, "v") {
+		s = s[1:]
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+
+	// Very lightweight validation: ensure it starts with a digit.
+	if s[0] < '0' || s[0] > '9' {
+		return ""
+	}
+	return "V" + s
 }
 
 func mustReadFile(name string) string {
