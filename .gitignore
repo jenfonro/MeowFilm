@@ -1,0 +1,17 @@
+# Build outputs / runtime data (do not commit)
+/build/
+/public/dist/
+/tvserver
+
+# Go tooling
+/.gocache/
+/.cache/
+*.out
+
+# Logs / temp
+*.log
+*.tmp
+*.temp
+*.swp
+.DS_Store
+
