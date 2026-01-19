@@ -74,7 +74,7 @@ go build -o tvserver .
 | `TV_SERVER_COOKIE_SECURE` | 登录 Cookie 是否 `Secure`（HTTPS 下建议设为 `1`） | `0` |
 | `TV_SERVER_DB_FILE` | 指定 DB 文件路径 | 空 |
 | `TV_SERVER_DATA_DIR` | 指定数据目录（DB 默认写入 `data.db`） | 空 |
-| `ASSET_VERSION` | 静态资源版本号（用于前端资源刷新） | `V1.0.0` |
+| `ASSET_VERSION` | 静态资源版本号（用于前端资源刷新；未设置时 UI 显示 `beta`，资源使用时间戳） | 空 |
 
 ## 相关项目
 
