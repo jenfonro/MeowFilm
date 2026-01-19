@@ -16,6 +16,11 @@ import (
 
 var dist fs.FS
 
+// BuildAssetVersion can be set at build time with:
+//   go build -ldflags "-X github.com/jenfonro/TV_Server/server/static.BuildAssetVersion=v1.0.0"
+// If ASSET_VERSION is set at runtime, it takes precedence over this value.
+var BuildAssetVersion string
+
 func init() {
 	sub, err := fs.Sub(public.Dist, "dist")
 	if err == nil {
@@ -25,13 +30,16 @@ func init() {
 
 func Handler(authMw *auth.Auth) http.Handler {
 	rawVersion := strings.TrimSpace(os.Getenv("ASSET_VERSION"))
-	tagVersion := normalizeReleaseTag(rawVersion)
+	if rawVersion == "" {
+		rawVersion = strings.TrimSpace(BuildAssetVersion)
+	}
+	semver := normalizeReleaseSemver(rawVersion)
 
 	uiVersion := "beta"
 	assetVersion := strconv.FormatInt(time.Now().UnixNano()/int64(time.Millisecond), 10)
-	if tagVersion != "" {
-		uiVersion = tagVersion
-		assetVersion = tagVersion
+	if semver != "" {
+		uiVersion = "V" + semver
+		assetVersion = semver
 	}
 
 	indexHTML := mustReadFile("index.html")
@@ -101,7 +109,7 @@ func patchLegacyUiVersionPlaceholder(html string) string {
 	return r.Replace(html)
 }
 
-func normalizeReleaseTag(raw string) string {
+func normalizeReleaseSemver(raw string) string {
 	s := strings.TrimSpace(raw)
 	if s == "" {
 		return ""
@@ -117,7 +125,7 @@ func normalizeReleaseTag(raw string) string {
 		return ""
 	}
 
-	// Accept both "v1.2.3" and "1.2.3".
+	// Accept "v1.2.3", "V1.2.3" and "1.2.3".
 	if strings.HasPrefix(low, "v") {
 		s = s[1:]
 	}
@@ -130,7 +138,7 @@ func normalizeReleaseTag(raw string) string {
 	if s[0] < '0' || s[0] > '9' {
 		return ""
 	}
-	return "V" + s
+	return s
 }
 
 func mustReadFile(name string) string {
