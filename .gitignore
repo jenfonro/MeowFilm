@@ -1,7 +1,6 @@
 # Build outputs / runtime data (do not commit)
-/build/
-/public/dist/
-/tvserver
+/build
+/public/dist
 
 # Go tooling
 /.gocache/
