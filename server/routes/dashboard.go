@@ -54,7 +54,7 @@ func DashboardHandler(database *db.DB, authMw *auth.Auth) http.Handler {
 					methodNotAllowed(w)
 					return
 				}
-				writeJSON(w, 200, map[string]any{"success": true, "videoSourceUrl": database.GetSetting("video_source_url")})
+				writeJSON(w, 200, map[string]any{"success": true, "videoSourceUrl": ""})
 			})).ServeHTTP(w, r)
 		case "/video/source/sites":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -62,7 +62,9 @@ func DashboardHandler(database *db.DB, authMw *auth.Auth) http.Handler {
 					methodNotAllowed(w)
 					return
 				}
-				writeJSON(w, 200, map[string]any{"success": true, "sites": mergeVideoSourceSites(database)})
+				sites := mergeVideoSourceSites(database)
+				cover := resolveSearchCoverSite(sites, database.GetSetting("video_source_search_cover_site"))
+				writeJSON(w, 200, map[string]any{"success": true, "sites": sites, "coverSite": cover})
 			})).ServeHTTP(w, r)
 		case "/video/source/sites/status":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -71,6 +73,10 @@ func DashboardHandler(database *db.DB, authMw *auth.Auth) http.Handler {
 		case "/video/source/sites/home":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardVideoSourceSiteHome(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/video/source/sites/cover":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardVideoSourceCoverSite(w, r, database)
 			})).ServeHTTP(w, r)
 		case "/video/source/sites/order":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -83,10 +89,6 @@ func DashboardHandler(database *db.DB, authMw *auth.Auth) http.Handler {
 		case "/video/source/sites/import":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardVideoSourceSitesImport(w, r, database)
-			})).ServeHTTP(w, r)
-		case "/search/settings":
-			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleDashboardSearchSettings(w, r, database)
 			})).ServeHTTP(w, r)
 		case "/magic/settings":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -327,9 +329,6 @@ func handleDashboardVideoSourceSave(w http.ResponseWriter, r *http.Request, data
 		methodNotAllowed(w)
 		return
 	}
-	parseForm(r)
-	rawURL := strings.TrimSpace(r.FormValue("videoSourceUrl"))
-	_ = database.SetSetting("video_source_url", rawURL)
 	writeJSON(w, 200, map[string]any{
 		"success":        true,
 		"sites":          mergeVideoSourceSites(database),
@@ -375,6 +374,52 @@ func handleDashboardVideoSourceSiteHome(w http.ResponseWriter, r *http.Request, 
 	b, _ := json.Marshal(m)
 	_ = database.SetSetting("video_source_site_home", string(b))
 	writeJSON(w, 200, map[string]any{"success": true, "key": key, "home": home})
+}
+
+func resolveSearchCoverSite(sites []map[string]any, preferredRaw string) string {
+	preferred := strings.TrimSpace(preferredRaw)
+	keySet := map[string]struct{}{}
+	enabledFirst := ""
+	first := ""
+	for _, s := range sites {
+		k, _ := s["key"].(string)
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		if first == "" {
+			first = k
+		}
+		keySet[k] = struct{}{}
+		if enabledFirst == "" {
+			enabled, _ := s["enabled"].(bool)
+			if enabled {
+				enabledFirst = k
+			}
+		}
+	}
+	if preferred != "" {
+		if _, ok := keySet[preferred]; ok {
+			return preferred
+		}
+	}
+	if enabledFirst != "" {
+		return enabledFirst
+	}
+	return first
+}
+
+func handleDashboardVideoSourceCoverSite(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	parseForm(r)
+	key := strings.TrimSpace(r.FormValue("key"))
+	sites := mergeVideoSourceSites(database)
+	cover := resolveSearchCoverSite(sites, key)
+	_ = database.SetSetting("video_source_search_cover_site", cover)
+	writeJSON(w, 200, map[string]any{"success": true, "coverSite": cover})
 }
 
 func handleDashboardVideoSourceSiteOrder(w http.ResponseWriter, r *http.Request, database *db.DB) {
@@ -448,12 +493,15 @@ func handleDashboardVideoSourceSitesCheck(w http.ResponseWriter, r *http.Request
 	}
 	_ = database.SetSetting("video_source_site_status", marshalJSON(statusMap))
 
-	writeJSON(w, 200, map[string]any{
-		"success": true,
-		"results": results,
-		"sites":   mergeVideoSourceSites(database),
-	})
-}
+		sites := mergeVideoSourceSites(database)
+		cover := resolveSearchCoverSite(sites, database.GetSetting("video_source_search_cover_site"))
+		writeJSON(w, 200, map[string]any{
+			"success":   true,
+			"results":   results,
+			"sites":     sites,
+			"coverSite": cover,
+		})
+	}
 
 func handleDashboardVideoSourceSitesImport(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
@@ -489,157 +537,9 @@ func handleDashboardVideoSourceSitesImport(w http.ResponseWriter, r *http.Reques
 	_ = database.SetSetting("video_source_site_order", marshalJSON(reconciled.Order))
 	_ = database.SetSetting("video_source_site_availability", marshalJSON(reconciled.Availability))
 
-	writeJSON(w, 200, map[string]any{"success": true, "sites": mergeVideoSourceSites(database)})
-}
-
-func handleDashboardSearchSettings(w http.ResponseWriter, r *http.Request, database *db.DB) {
-	switch r.Method {
-	case http.MethodGet:
-		sites := mergeVideoSourceSites(database)
-		keys := []string{}
-		keySet := map[string]struct{}{}
-		for _, s := range sites {
-			k, _ := s["key"].(string)
-			k = strings.TrimSpace(k)
-			if k == "" {
-				continue
-			}
-			keys = append(keys, k)
-			keySet[k] = struct{}{}
-		}
-
-		orderRaw := parseJSONStringArray(database.GetSetting("video_source_search_order"))
-		uniq := []string{}
-		seen := map[string]struct{}{}
-		for _, k := range orderRaw {
-			key := strings.TrimSpace(k)
-			if key == "" {
-				continue
-			}
-			if _, ok := keySet[key]; !ok {
-				continue
-			}
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			uniq = append(uniq, key)
-		}
-		for _, k := range keys {
-			if _, ok := seen[k]; ok {
-				continue
-			}
-			seen[k] = struct{}{}
-			uniq = append(uniq, k)
-		}
-
-		coverRaw := strings.TrimSpace(database.GetSetting("video_source_search_cover_site"))
-		cover := ""
-		if coverRaw != "" {
-			if _, ok := keySet[coverRaw]; ok {
-				cover = coverRaw
-			}
-		}
-
-		enabledFirst := ""
-		for _, s := range sites {
-			enabled, _ := s["enabled"].(bool)
-			if enabled {
-				k, _ := s["key"].(string)
-				enabledFirst = strings.TrimSpace(k)
-				break
-			}
-		}
-		fallbackCover := cover
-		if fallbackCover == "" {
-			if enabledFirst != "" {
-				fallbackCover = enabledFirst
-			} else if len(uniq) > 0 {
-				fallbackCover = uniq[0]
-			}
-		}
-
-		writeJSON(w, 200, map[string]any{
-			"success": true,
-			"sites":   sites,
-			"search":  map[string]any{"order": uniq, "coverSite": fallbackCover},
-		})
-	case http.MethodPost:
-		var body struct {
-			Order     []string `json:"order"`
-			CoverSite string   `json:"coverSite"`
-		}
-		_ = readJSONLoose(r, &body)
-
-		sites := mergeVideoSourceSites(database)
-		keys := []string{}
-		keySet := map[string]struct{}{}
-		for _, s := range sites {
-			k, _ := s["key"].(string)
-			k = strings.TrimSpace(k)
-			if k == "" {
-				continue
-			}
-			keys = append(keys, k)
-			keySet[k] = struct{}{}
-		}
-
-		orderIn := body.Order
-		uniq := []string{}
-		seen := map[string]struct{}{}
-		for _, k := range orderIn {
-			key := strings.TrimSpace(k)
-			if key == "" {
-				continue
-			}
-			if _, ok := keySet[key]; !ok {
-				continue
-			}
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			uniq = append(uniq, key)
-		}
-		for _, k := range keys {
-			if _, ok := seen[k]; ok {
-				continue
-			}
-			seen[k] = struct{}{}
-			uniq = append(uniq, k)
-		}
-
-		coverRaw := strings.TrimSpace(body.CoverSite)
-		cover := ""
-		if coverRaw != "" {
-			if _, ok := keySet[coverRaw]; ok {
-				cover = coverRaw
-			}
-		}
-		enabledFirst := ""
-		for _, s := range sites {
-			enabled, _ := s["enabled"].(bool)
-			if enabled {
-				k, _ := s["key"].(string)
-				enabledFirst = strings.TrimSpace(k)
-				break
-			}
-		}
-		fallbackCover := cover
-		if fallbackCover == "" {
-			if enabledFirst != "" {
-				fallbackCover = enabledFirst
-			} else if len(uniq) > 0 {
-				fallbackCover = uniq[0]
-			}
-		}
-
-		_ = database.SetSetting("video_source_search_order", marshalJSON(uniq))
-		_ = database.SetSetting("video_source_search_cover_site", fallbackCover)
-		writeJSON(w, 200, map[string]any{"success": true, "search": map[string]any{"order": uniq, "coverSite": fallbackCover}})
-	default:
-		methodNotAllowed(w)
-	}
+	sites := mergeVideoSourceSites(database)
+	cover := resolveSearchCoverSite(sites, database.GetSetting("video_source_search_cover_site"))
+	writeJSON(w, 200, map[string]any{"success": true, "sites": sites, "coverSite": cover})
 }
 
 func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, database *db.DB) {
