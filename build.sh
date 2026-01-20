@@ -31,8 +31,13 @@ rm -rf "${DST_DIST}"
 mkdir -p "${DST_DIST}"
 cp -a "${SRC_DIST}/." "${DST_DIST}/"
 
-mkdir -p "../.gocache"
-export GOCACHE="../.gocache"
+# Go requires GOCACHE to be an absolute path. Keep it inside the project root.
+GOCACHE_DIR="${ROOT_DIR}/.gocache"
+mkdir -p "${GOCACHE_DIR}"
+export GOCACHE="${GOCACHE_DIR}"
 
-go build -o "tvserver" .
-echo "built: tvserver"
+BUILD_DIR="${ROOT_DIR}/build"
+mkdir -p "${BUILD_DIR}"
+
+go build -o "${BUILD_DIR}/tvserver" .
+echo "built: ${BUILD_DIR}/tvserver"
