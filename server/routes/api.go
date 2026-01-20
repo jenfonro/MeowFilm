@@ -158,7 +158,6 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 			settings["doubanDataCustom"] = database.GetSetting("douban_data_custom")
 			settings["doubanImgProxy"] = defaultString(database.GetSetting("douban_img_proxy"), "direct-browser")
 			settings["doubanImgCustom"] = database.GetSetting("douban_img_custom")
-			settings["videoSourceUrl"] = database.GetSetting("video_source_url")
 			settings["videoSourceApiBase"] = database.GetSetting("video_source_api_base")
 			settings["catPawOpenApiBase"] = database.GetSetting("catpawopen_api_base")
 			settings["openListApiBase"] = database.GetSetting("openlist_api_base")
@@ -200,15 +199,16 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 			settings["userCatPawOpenProxy"] = userCatProxy
 			settings["searchThreadCount"] = threadCount
 
-			if u.Role == "user" {
-				settings["searchSiteOrder"] = parseJSONStringArray(searchOrder)
-				settings["searchCoverSite"] = strings.TrimSpace(searchCover)
-			} else {
-				settings["searchSiteOrder"] = parseJSONStringArray(database.GetSetting("video_source_search_order"))
-				settings["searchCoverSite"] = strings.TrimSpace(database.GetSetting("video_source_search_cover_site"))
+				if u.Role == "user" {
+					settings["searchSiteOrder"] = parseJSONStringArray(searchOrder)
+					settings["searchCoverSite"] = strings.TrimSpace(searchCover)
+				} else {
+					sites := mergeVideoSourceSites(database)
+					settings["searchSiteOrder"] = parseJSONStringArray(database.GetSetting("video_source_site_order"))
+					settings["searchCoverSite"] = resolveSearchCoverSite(sites, database.GetSetting("video_source_search_cover_site"))
+				}
 			}
 		}
-	}
 
 	var userCount int
 	if page == "dashboard" && u.Role == "admin" {
