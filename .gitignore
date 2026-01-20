@@ -3,8 +3,8 @@
 /public/dist
 
 # Go tooling
-/.gocache/
-/.cache/
+/.gocache
+/.cache
 *.out
 
 # Logs / temp

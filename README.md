@@ -55,8 +55,8 @@ npm run build
 在 `TV_Server/` 目录执行：
 
 ```bash
-go build -o tvserver .
-./tvserver -addr :8080
+go build -o build/tvserver .
+./build/tvserver -addr :8080
 ```
 
 数据库默认写入 `TV_Server/` 目录下的 `data.db`。
