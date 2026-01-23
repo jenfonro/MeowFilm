@@ -75,7 +75,7 @@ func parseAnyBool(v any, def bool) bool {
 func normalizeAvailability(v string) string {
 	raw := strings.TrimSpace(v)
 	switch raw {
-	case "valid", "invalid", "unknown", "unchecked":
+	case "valid", "invalid", "unknown", "unchecked", "category_error", "search_error":
 		return raw
 	default:
 		return "unchecked"
@@ -88,7 +88,7 @@ func isConfigCenterSite(s site) bool {
 	return strings.Contains(api, "/spider/baseset/") || strings.HasSuffix(api, "/spider/baseset") || strings.Contains(key, "baseset")
 }
 
-func mergeSitesWithState(sites []site, statusMap map[string]bool, homeMap map[string]bool, order []string, availability map[string]any, searchMap map[string]bool) []map[string]any {
+func mergeSitesWithState(sites []site, statusMap map[string]bool, homeMap map[string]bool, order []string, availability map[string]any, searchMap map[string]bool, errorMap map[string]string) []map[string]any {
 	ordered := applySiteOrder(sites, order)
 	out := make([]map[string]any, 0, len(ordered))
 	for _, s := range ordered {
@@ -113,6 +113,10 @@ func mergeSitesWithState(sites []site, statusMap map[string]bool, homeMap map[st
 				av = normalizeAvailability(sv)
 			}
 		}
+		errMsg := ""
+		if v, ok := errorMap[s.Key]; ok {
+			errMsg = strings.TrimSpace(v)
+		}
 		row := map[string]any{
 			"key":          s.Key,
 			"name":         s.Name,
@@ -121,6 +125,9 @@ func mergeSitesWithState(sites []site, statusMap map[string]bool, homeMap map[st
 			"home":         home,
 			"search":       searchEnabled,
 			"availability": av,
+		}
+		if errMsg != "" {
+			row["error"] = errMsg
 		}
 		if s.Type != nil {
 			row["type"] = *s.Type

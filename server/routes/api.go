@@ -1291,7 +1291,8 @@ func handleAPIUserSites(w http.ResponseWriter, r *http.Request, database *db.DB)
 		availabilityAny[k] = v
 	}
 	searchMap := parseJSONBoolMap(database.GetSetting("video_source_site_search"))
-	merged := mergeSitesWithState(state.Sites, state.Status, state.Home, state.Order, availabilityAny, searchMap)
+	errorMap := parseJSONStringMap(database.GetSetting("video_source_site_error"))
+	merged := mergeSitesWithState(state.Sites, state.Status, state.Home, state.Order, availabilityAny, searchMap, errorMap)
 	writeJSON(w, 200, map[string]any{"success": true, "sites": merged, "requiresCatApiBase": !state.HasUserAPI && !state.CanFallback})
 }
 
