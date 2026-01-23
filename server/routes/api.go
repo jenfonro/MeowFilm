@@ -262,6 +262,7 @@ func handleAPIHome(w http.ResponseWriter, r *http.Request, database *db.DB) {
 			  video_poster,
 			  video_remark,
 			  pan_label,
+			  pan_dir,
 			  play_flag,
 			  episode_index,
 			  episode_name,
@@ -286,12 +287,13 @@ func handleAPIHome(w http.ResponseWriter, r *http.Request, database *db.DB) {
 					videoPoster  string
 					videoRemark  string
 					panLabel     string
+					panDir       string
 					playFlag     string
 					episodeIndex int
 					episodeName  string
 					updatedAt    int64
 				)
-				_ = rows.Scan(&contentKey, &siteKey, &siteName, &spiderAPI, &videoID, &videoTitle, &videoPoster, &videoRemark, &panLabel, &playFlag, &episodeIndex, &episodeName, &updatedAt)
+				_ = rows.Scan(&contentKey, &siteKey, &siteName, &spiderAPI, &videoID, &videoTitle, &videoPoster, &videoRemark, &panLabel, &panDir, &playFlag, &episodeIndex, &episodeName, &updatedAt)
 				key := strings.TrimSpace(contentKey)
 				if key == "" {
 					key = normalizeContentKey(videoTitle)
@@ -317,6 +319,7 @@ func handleAPIHome(w http.ResponseWriter, r *http.Request, database *db.DB) {
 					"videoPoster":  videoPoster,
 					"videoRemark":  videoRemark,
 					"panLabel":     panLabel,
+					"videoPanDir":  panDir,
 					"playFlag":     playFlag,
 					"episodeIndex": episodeIndex,
 					"episodeName":  episodeName,
@@ -494,18 +497,19 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 		videoPoster  string
 		videoRemark  string
 		panLabel     string
+		panDir       string
 		playFlag     string
 		episodeIndex int
 		episodeName  string
 		updatedAt    int64
 	)
 	err := database.SQL().QueryRow(`
-		SELECT content_key, site_name, spider_api, video_title, video_poster, video_remark, pan_label, play_flag, episode_index, episode_name, updated_at
+		SELECT content_key, site_name, spider_api, video_title, video_poster, video_remark, pan_label, pan_dir, play_flag, episode_index, episode_name, updated_at
 		FROM play_history
 		WHERE user_id=? AND site_key=? AND video_id=?
 		ORDER BY updated_at DESC
 		LIMIT 1
-	`, u.ID, siteKey, videoID).Scan(&contentKey, &siteName, &spiderAPI, &videoTitle, &videoPoster, &videoRemark, &panLabel, &playFlag, &episodeIndex, &episodeName, &updatedAt)
+	`, u.ID, siteKey, videoID).Scan(&contentKey, &siteName, &spiderAPI, &videoTitle, &videoPoster, &videoRemark, &panLabel, &panDir, &playFlag, &episodeIndex, &episodeName, &updatedAt)
 	if err != nil {
 		writeJSON(w, 200, nil)
 		return
@@ -523,6 +527,7 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 		"videoPoster":  videoPoster,
 		"videoRemark":  videoRemark,
 		"panLabel":     panLabel,
+		"videoPanDir":  panDir,
 		"playFlag":     playFlag,
 		"episodeIndex": episodeIndex,
 		"episodeName":  episodeName,
@@ -537,7 +542,7 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		limit := parseIntQuery(r.URL.Query().Get("limit"), 20, 1, 50)
 		sourceLimit := minInt(500, maxInt(50, limit*10))
 		rows, err := database.SQL().Query(`
-			SELECT content_key, site_key, site_name, spider_api, video_id, video_title, video_poster, video_remark, pan_label, play_flag, episode_index, episode_name, updated_at
+			SELECT content_key, site_key, site_name, spider_api, video_id, video_title, video_poster, video_remark, pan_label, pan_dir, play_flag, episode_index, episode_name, updated_at
 			FROM play_history
 			WHERE user_id=?
 			ORDER BY updated_at DESC
@@ -561,12 +566,13 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 				videoPoster  string
 				videoRemark  string
 				panLabel     string
+				panDir       string
 				playFlag     string
 				episodeIndex int
 				episodeName  string
 				updatedAt    int64
 			)
-			_ = rows.Scan(&contentKey, &siteKey, &siteName, &spiderAPI, &videoID, &videoTitle, &videoPoster, &videoRemark, &panLabel, &playFlag, &episodeIndex, &episodeName, &updatedAt)
+			_ = rows.Scan(&contentKey, &siteKey, &siteName, &spiderAPI, &videoID, &videoTitle, &videoPoster, &videoRemark, &panLabel, &panDir, &playFlag, &episodeIndex, &episodeName, &updatedAt)
 			key := strings.TrimSpace(contentKey)
 			if key == "" {
 				key = normalizeContentKey(videoTitle)
@@ -592,6 +598,7 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 				"videoPoster":  videoPoster,
 				"videoRemark":  videoRemark,
 				"panLabel":     panLabel,
+				"videoPanDir":  panDir,
 				"playFlag":     playFlag,
 				"episodeIndex": episodeIndex,
 				"episodeName":  episodeName,
@@ -640,6 +647,7 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		videoPoster := getS("videoPoster")
 		videoRemark := getS("videoRemark")
 		panLabel := getS("panLabel")
+		panDir := getS("videoPanDir")
 		playFlag := getS("playFlag")
 		episodeIndex := getI("episodeIndex")
 		if episodeIndex < 0 {
@@ -684,9 +692,9 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		_, _ = database.SQL().Exec(`
 			INSERT INTO play_history(
 			  user_id, content_key, site_key, site_name, spider_api, video_id, video_title, video_poster, video_remark,
-			  pan_label, play_flag, episode_index, episode_name, updated_at
+			  pan_label, pan_dir, play_flag, episode_index, episode_name, updated_at
 			)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(user_id, site_key, video_id) DO UPDATE SET
 			  content_key = excluded.content_key,
 			  site_name = excluded.site_name,
@@ -695,11 +703,12 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 			  video_poster = excluded.video_poster,
 			  video_remark = excluded.video_remark,
 			  pan_label = excluded.pan_label,
+			  pan_dir = excluded.pan_dir,
 			  play_flag = excluded.play_flag,
 			  episode_index = excluded.episode_index,
 			  episode_name = excluded.episode_name,
 			  updated_at = excluded.updated_at
-		`, u.ID, contentKey, siteKey, siteName, spiderAPI, videoID, videoTitle, finalPoster, videoRemark, panLabel, playFlag, episodeIndex, episodeName, now)
+		`, u.ID, contentKey, siteKey, siteName, spiderAPI, videoID, videoTitle, finalPoster, videoRemark, panLabel, panDir, playFlag, episodeIndex, episodeName, now)
 		writeJSON(w, 200, map[string]any{"success": true})
 	default:
 		methodNotAllowed(w)
