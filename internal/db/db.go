@@ -201,6 +201,7 @@ func (d *DB) initSchema(fresh bool) error {
 		  video_poster TEXT DEFAULT '',
 		  video_remark TEXT DEFAULT '',
 		  pan_label TEXT DEFAULT '',
+		  pan_dir TEXT DEFAULT '',
 		  play_flag TEXT DEFAULT '',
 		  content_key TEXT DEFAULT '',
 		  episode_index INTEGER DEFAULT 0,
@@ -237,6 +238,10 @@ func (d *DB) initSchema(fresh bool) error {
 		return err
 	}
 
+	// Lightweight schema migrations (SQLite doesn't support IF NOT EXISTS for ADD COLUMN).
+	// Keep these idempotent and low-risk for existing installs.
+	_ = ensureSQLiteColumn(d.db, "play_history", "pan_dir", "TEXT DEFAULT ''")
+
 	if fresh {
 		if err := d.seedDefaults(); err != nil {
 			return err
@@ -244,6 +249,42 @@ func (d *DB) initSchema(fresh bool) error {
 	}
 
 	return d.ensureDefaultAdmin()
+}
+
+func ensureSQLiteColumn(db *sql.DB, table string, column string, definition string) error {
+	if db == nil {
+		return nil
+	}
+	t := strings.TrimSpace(table)
+	c := strings.TrimSpace(column)
+	def := strings.TrimSpace(definition)
+	if t == "" || c == "" || def == "" {
+		return nil
+	}
+
+	rows, err := db.Query(`PRAGMA table_info(` + t + `)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			typ        string
+			notnull    int
+			dfltValue  any
+			pk         int
+		)
+		_ = rows.Scan(&cid, &name, &typ, &notnull, &dfltValue, &pk)
+		if strings.EqualFold(strings.TrimSpace(name), c) {
+			return nil
+		}
+	}
+
+	_, err = db.Exec(`ALTER TABLE ` + t + ` ADD COLUMN ` + c + ` ` + def)
+	return err
 }
 
 func (d *DB) seedDefaults() error {
