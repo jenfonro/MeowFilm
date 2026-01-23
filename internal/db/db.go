@@ -312,6 +312,7 @@ func (d *DB) seedDefaults() error {
 		{"video_source_site_search", "{}"},
 		{"video_source_site_order", "[]"},
 		{"video_source_site_availability", "{}"},
+		{"video_source_site_error", "{}"},
 		{"video_source_search_order", "[]"},
 		{"video_source_search_cover_site", ""},
 		{"magic_episode_rules", `["{\"pattern\":\".*?([Ss]\\\\d{1,2})?(?:[第EePpXx\\\\.\\\\-\\\\_\\\\( ]{1,2}|^)(\\\\d{1,3})(?!\\\\d).*?\\\\.(mp4|mkv)\",\"replace\":\"$1E$2\"}"]`},

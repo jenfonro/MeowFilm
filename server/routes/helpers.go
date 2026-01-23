@@ -64,6 +64,27 @@ func parseJSONStringArray(text string) []string {
 	return out
 }
 
+func parseJSONStringMap(text string) map[string]string {
+	raw := parseJSONMap(text)
+	out := make(map[string]string, len(raw))
+	for k, v := range raw {
+		key := strings.TrimSpace(k)
+		if key == "" {
+			continue
+		}
+		s, ok := v.(string)
+		if !ok {
+			continue
+		}
+		val := strings.TrimSpace(s)
+		if val == "" {
+			continue
+		}
+		out[key] = val
+	}
+	return out
+}
+
 func parseBoolQuery(v string, def bool) bool {
 	s := strings.ToLower(strings.TrimSpace(v))
 	if s == "" {

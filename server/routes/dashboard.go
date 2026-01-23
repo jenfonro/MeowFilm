@@ -505,6 +505,26 @@ func handleDashboardVideoSourceSitesCheck(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	errorInput := map[string]string{}
+	rawErrors := strings.TrimSpace(r.FormValue("errors"))
+	if rawErrors != "" {
+		var errMap map[string]any
+		if err := json.Unmarshal([]byte(rawErrors), &errMap); err == nil && errMap != nil {
+			for k, v := range errMap {
+				key := strings.TrimSpace(k)
+				if key == "" {
+					continue
+				}
+				s, _ := v.(string)
+				s = strings.TrimSpace(s)
+				if s == "" {
+					continue
+				}
+				errorInput[key] = s
+			}
+		}
+	}
+
 	availabilityMap := parseAvailabilityJSON(database.GetSetting("video_source_site_availability"))
 	for k, v := range results {
 		availabilityMap[k] = normalizeAvailability(v)
@@ -512,22 +532,42 @@ func handleDashboardVideoSourceSitesCheck(w http.ResponseWriter, r *http.Request
 	_ = database.SetSetting("video_source_site_availability", marshalJSON(availabilityMap))
 
 	statusMap := parseJSONBoolMap(database.GetSetting("video_source_site_status"))
+	homeMap := parseJSONBoolMap(database.GetSetting("video_source_site_home"))
+	searchMap := parseJSONBoolMap(database.GetSetting("video_source_site_search"))
 	for k, v := range results {
 		if v == "invalid" {
 			statusMap[k] = false
 		}
+		if v == "category_error" {
+			homeMap[k] = false
+		}
+		if v == "search_error" {
+			searchMap[k] = false
+		}
 	}
 	_ = database.SetSetting("video_source_site_status", marshalJSON(statusMap))
+	_ = database.SetSetting("video_source_site_home", marshalJSON(homeMap))
+	_ = database.SetSetting("video_source_site_search", marshalJSON(searchMap))
 
-		sites := mergeVideoSourceSites(database)
-		cover := resolveSearchCoverSite(sites, database.GetSetting("video_source_search_cover_site"))
-		writeJSON(w, 200, map[string]any{
-			"success":   true,
-			"results":   results,
-			"sites":     sites,
-			"coverSite": cover,
-		})
+	errorMap := parseJSONStringMap(database.GetSetting("video_source_site_error"))
+	for k := range results {
+		if msg, ok := errorInput[k]; ok && strings.TrimSpace(msg) != "" {
+			errorMap[k] = strings.TrimSpace(msg)
+		} else {
+			delete(errorMap, k)
+		}
 	}
+	_ = database.SetSetting("video_source_site_error", marshalJSON(errorMap))
+
+	sites := mergeVideoSourceSites(database)
+	cover := resolveSearchCoverSite(sites, database.GetSetting("video_source_search_cover_site"))
+	writeJSON(w, 200, map[string]any{
+		"success":   true,
+		"results":   results,
+		"sites":     sites,
+		"coverSite": cover,
+	})
+}
 
 func handleDashboardVideoSourceSitesImport(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
@@ -564,12 +604,21 @@ func handleDashboardVideoSourceSitesImport(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	prevErrors := parseJSONStringMap(database.GetSetting("video_source_site_error"))
+	nextErrors := map[string]string{}
+	for _, s := range reconciled.Sites {
+		if msg, ok := prevErrors[s.Key]; ok && strings.TrimSpace(msg) != "" {
+			nextErrors[s.Key] = strings.TrimSpace(msg)
+		}
+	}
+
 	_ = database.SetSetting("video_source_sites", marshalJSON(reconciled.Sites))
 	_ = database.SetSetting("video_source_site_status", marshalJSON(reconciled.Status))
 	_ = database.SetSetting("video_source_site_home", marshalJSON(reconciled.Home))
 	_ = database.SetSetting("video_source_site_search", marshalJSON(reconciled.Search))
 	_ = database.SetSetting("video_source_site_order", marshalJSON(reconciled.Order))
 	_ = database.SetSetting("video_source_site_availability", marshalJSON(reconciled.Availability))
+	_ = database.SetSetting("video_source_site_error", marshalJSON(nextErrors))
 
 	sites := mergeVideoSourceSites(database)
 	cover := resolveSearchCoverSite(sites, database.GetSetting("video_source_search_cover_site"))
@@ -1002,5 +1051,6 @@ func mergeVideoSourceSites(database *db.DB) []map[string]any {
 	searchMap := parseJSONBoolMap(database.GetSetting("video_source_site_search"))
 	order := parseJSONStringArray(database.GetSetting("video_source_site_order"))
 	availability := parseJSONMap(database.GetSetting("video_source_site_availability"))
-	return mergeSitesWithState(sites, statusMap, homeMap, order, availability, searchMap)
+	errorMap := parseJSONStringMap(database.GetSetting("video_source_site_error"))
+	return mergeSitesWithState(sites, statusMap, homeMap, order, availability, searchMap, errorMap)
 }
