@@ -74,6 +74,10 @@ func DashboardHandler(database *db.DB, authMw *auth.Auth) http.Handler {
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardVideoSourceSiteHome(w, r, database)
 			})).ServeHTTP(w, r)
+		case "/video/source/sites/search":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardVideoSourceSiteSearch(w, r, database)
+			})).ServeHTTP(w, r)
 		case "/video/source/sites/cover":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardVideoSourceCoverSite(w, r, database)
@@ -376,6 +380,28 @@ func handleDashboardVideoSourceSiteHome(w http.ResponseWriter, r *http.Request, 
 	writeJSON(w, 200, map[string]any{"success": true, "key": key, "home": home})
 }
 
+func handleDashboardVideoSourceSiteSearch(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	parseForm(r)
+	key := strings.TrimSpace(r.FormValue("key"))
+	if key == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "key 不能为空"})
+		return
+	}
+	searchEnabled := boolFromForm(r.FormValue("search"))
+	if strings.Contains(strings.ToLower(key), "baseset") {
+		searchEnabled = false
+	}
+	m := parseJSONBoolMap(database.GetSetting("video_source_site_search"))
+	m[key] = searchEnabled
+	b, _ := json.Marshal(m)
+	_ = database.SetSetting("video_source_site_search", string(b))
+	writeJSON(w, 200, map[string]any{"success": true, "key": key, "search": searchEnabled})
+}
+
 func resolveSearchCoverSite(sites []map[string]any, preferredRaw string) string {
 	preferred := strings.TrimSpace(preferredRaw)
 	keySet := map[string]struct{}{}
@@ -527,13 +553,21 @@ func handleDashboardVideoSourceSitesImport(w http.ResponseWriter, r *http.Reques
 
 	prevStatus := parseJSONBoolMap(database.GetSetting("video_source_site_status"))
 	prevHome := parseJSONBoolMap(database.GetSetting("video_source_site_home"))
+	prevSearch := parseJSONBoolMap(database.GetSetting("video_source_site_search"))
 	prevOrder := parseJSONStringArray(database.GetSetting("video_source_site_order"))
 	prevAvailability := parseAvailabilityJSON(database.GetSetting("video_source_site_availability"))
-	reconciled := reconcileSites(normalized, prevStatus, prevHome, prevOrder, prevAvailability)
+	reconciled := reconcileSites(normalized, prevStatus, prevHome, prevSearch, prevOrder, prevAvailability)
+
+	for _, s := range reconciled.Sites {
+		if isConfigCenterSite(s) {
+			reconciled.Search[s.Key] = false
+		}
+	}
 
 	_ = database.SetSetting("video_source_sites", marshalJSON(reconciled.Sites))
 	_ = database.SetSetting("video_source_site_status", marshalJSON(reconciled.Status))
 	_ = database.SetSetting("video_source_site_home", marshalJSON(reconciled.Home))
+	_ = database.SetSetting("video_source_site_search", marshalJSON(reconciled.Search))
 	_ = database.SetSetting("video_source_site_order", marshalJSON(reconciled.Order))
 	_ = database.SetSetting("video_source_site_availability", marshalJSON(reconciled.Availability))
 
@@ -965,7 +999,8 @@ func mergeVideoSourceSites(database *db.DB) []map[string]any {
 	sites := normalizeSitesFromJSON(database.GetSetting("video_source_sites"))
 	statusMap := parseJSONBoolMap(database.GetSetting("video_source_site_status"))
 	homeMap := parseJSONBoolMap(database.GetSetting("video_source_site_home"))
+	searchMap := parseJSONBoolMap(database.GetSetting("video_source_site_search"))
 	order := parseJSONStringArray(database.GetSetting("video_source_site_order"))
 	availability := parseJSONMap(database.GetSetting("video_source_site_availability"))
-	return mergeSitesWithState(sites, statusMap, homeMap, order, availability)
+	return mergeSitesWithState(sites, statusMap, homeMap, order, availability, searchMap)
 }

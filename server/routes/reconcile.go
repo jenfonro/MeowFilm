@@ -9,6 +9,7 @@ type reconciledSiteState struct {
 	Sites         []site
 	Status        map[string]bool
 	Home          map[string]bool
+	Search        map[string]bool
 	Order         []string
 	Availability  map[string]string
 }
@@ -45,7 +46,7 @@ func parseAvailabilityJSON(text string) map[string]string {
 	return out
 }
 
-func reconcileSites(nextSites []site, prevStatus map[string]bool, prevHome map[string]bool, prevOrder []string, prevAvailability map[string]string) reconciledSiteState {
+func reconcileSites(nextSites []site, prevStatus map[string]bool, prevHome map[string]bool, prevSearch map[string]bool, prevOrder []string, prevAvailability map[string]string) reconciledSiteState {
 	normalizedNew := normalizeSitesSlice(nextSites)
 	keysInNewOrder := make([]string, 0, len(normalizedNew))
 	newKeySet := map[string]struct{}{}
@@ -78,6 +79,18 @@ func reconcileSites(nextSites []site, prevStatus map[string]bool, prevHome map[s
 		nextHome[key] = v
 	}
 
+	nextSearch := map[string]bool{}
+	for k, v := range prevSearch {
+		key := strings.TrimSpace(k)
+		if key == "" {
+			continue
+		}
+		if _, ok := newKeySet[key]; !ok {
+			continue
+		}
+		nextSearch[key] = v
+	}
+
 	nextAvailability := map[string]string{}
 	for k, v := range prevAvailability {
 		key := strings.TrimSpace(k)
@@ -96,6 +109,9 @@ func reconcileSites(nextSites []site, prevStatus map[string]bool, prevHome map[s
 		}
 		if _, ok := nextHome[s.Key]; !ok {
 			nextHome[s.Key] = defaultHomeForSite(s)
+		}
+		if _, ok := nextSearch[s.Key]; !ok {
+			nextSearch[s.Key] = true
 		}
 		if _, ok := nextAvailability[s.Key]; !ok {
 			nextAvailability[s.Key] = "unchecked"
@@ -146,6 +162,7 @@ func reconcileSites(nextSites []site, prevStatus map[string]bool, prevHome map[s
 		Sites:        normalizedNew,
 		Status:       nextStatus,
 		Home:         nextHome,
+		Search:       nextSearch,
 		Order:        nextOrder,
 		Availability: nextAvailability,
 	}
@@ -164,4 +181,3 @@ func marshalJSON(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
 }
-

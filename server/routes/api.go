@@ -988,7 +988,7 @@ func handleAPIUserSettings(w http.ResponseWriter, r *http.Request, database *db.
 					prevHome := parseJSONBoolMap(prev.CatSiteHome)
 					prevOrder := parseJSONStringArray(prev.CatSiteOrder)
 					prevAvail := parseAvailabilityJSON(prev.CatSiteAvail)
-					reconciled := reconcileSites(nextSites, prevStatus, prevHome, prevOrder, prevAvail)
+					reconciled := reconcileSites(nextSites, prevStatus, prevHome, nil, prevOrder, prevAvail)
 					reconciledSitesForSearch = reconciled.Sites
 					changed, err := persistUserCatSites(database, u.ID, prev, reconciled)
 					if err != nil {
@@ -1290,7 +1290,8 @@ func handleAPIUserSites(w http.ResponseWriter, r *http.Request, database *db.DB)
 	for k, v := range state.Availability {
 		availabilityAny[k] = v
 	}
-	merged := mergeSitesWithState(state.Sites, state.Status, state.Home, state.Order, availabilityAny)
+	searchMap := parseJSONBoolMap(database.GetSetting("video_source_site_search"))
+	merged := mergeSitesWithState(state.Sites, state.Status, state.Home, state.Order, availabilityAny, searchMap)
 	writeJSON(w, 200, map[string]any{"success": true, "sites": merged, "requiresCatApiBase": !state.HasUserAPI && !state.CanFallback})
 }
 

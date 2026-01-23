@@ -309,6 +309,7 @@ func (d *DB) seedDefaults() error {
 		{"openlist_quark_tv_mount", ""},
 		{"video_source_site_status", "{}"},
 		{"video_source_site_home", "{}"},
+		{"video_source_site_search", "{}"},
 		{"video_source_site_order", "[]"},
 		{"video_source_site_availability", "{}"},
 		{"video_source_search_order", "[]"},

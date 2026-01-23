@@ -53,7 +53,7 @@ func resolveUserCatSites(database *db.DB, u *auth.User) (userCatSitesState, erro
 
 	// Shared/admin users without their own CatPawOpen: use global list, but keep per-user enable/home/order.
 	if !hasUserAPI && canFallback {
-		reconciled := reconcileSites(sites, statusMap, homeMap, order, availability)
+		reconciled := reconcileSites(sites, statusMap, homeMap, nil, order, availability)
 		bSites, _ := json.Marshal(reconciled.Sites)
 		bStatus, _ := json.Marshal(reconciled.Status)
 		bHome, _ := json.Marshal(reconciled.Home)
