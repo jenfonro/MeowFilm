@@ -82,7 +82,13 @@ func normalizeAvailability(v string) string {
 	}
 }
 
-func mergeSitesWithState(sites []site, statusMap map[string]bool, homeMap map[string]bool, order []string, availability map[string]any) []map[string]any {
+func isConfigCenterSite(s site) bool {
+	api := strings.TrimSpace(s.API)
+	key := strings.ToLower(strings.TrimSpace(s.Key))
+	return strings.Contains(api, "/spider/baseset/") || strings.HasSuffix(api, "/spider/baseset") || strings.Contains(key, "baseset")
+}
+
+func mergeSitesWithState(sites []site, statusMap map[string]bool, homeMap map[string]bool, order []string, availability map[string]any, searchMap map[string]bool) []map[string]any {
 	ordered := applySiteOrder(sites, order)
 	out := make([]map[string]any, 0, len(ordered))
 	for _, s := range ordered {
@@ -93,6 +99,13 @@ func mergeSitesWithState(sites []site, statusMap map[string]bool, homeMap map[st
 		home, ok := homeMap[s.Key]
 		if !ok {
 			home = defaultHomeForSite(s)
+		}
+		searchEnabled, ok := searchMap[s.Key]
+		if !ok {
+			searchEnabled = true
+		}
+		if isConfigCenterSite(s) {
+			searchEnabled = false
 		}
 		av := "unchecked"
 		if v, ok := availability[s.Key]; ok {
@@ -106,6 +119,7 @@ func mergeSitesWithState(sites []site, statusMap map[string]bool, homeMap map[st
 			"api":          s.API,
 			"enabled":      enabled,
 			"home":         home,
+			"search":       searchEnabled,
 			"availability": av,
 		}
 		if s.Type != nil {
@@ -169,4 +183,3 @@ func isAllowedDoubanImageHost(hostname string) bool {
 		return false
 	}
 }
-
