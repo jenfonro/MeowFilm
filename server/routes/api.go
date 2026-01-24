@@ -199,16 +199,16 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 			settings["userCatPawOpenProxy"] = userCatProxy
 			settings["searchThreadCount"] = threadCount
 
-				if u.Role == "user" {
-					settings["searchSiteOrder"] = parseJSONStringArray(searchOrder)
-					settings["searchCoverSite"] = strings.TrimSpace(searchCover)
-				} else {
-					sites := mergeVideoSourceSites(database)
-					settings["searchSiteOrder"] = parseJSONStringArray(database.GetSetting("video_source_site_order"))
-					settings["searchCoverSite"] = resolveSearchCoverSite(sites, database.GetSetting("video_source_search_cover_site"))
-				}
+			if u.Role == "user" {
+				settings["searchSiteOrder"] = parseJSONStringArray(searchOrder)
+				settings["searchCoverSite"] = strings.TrimSpace(searchCover)
+			} else {
+				sites := mergeVideoSourceSites(database)
+				settings["searchSiteOrder"] = parseJSONStringArray(database.GetSetting("video_source_site_order"))
+				settings["searchCoverSite"] = resolveSearchCoverSite(sites, database.GetSetting("video_source_search_cover_site"))
 			}
 		}
+	}
 
 	var userCount int
 	if page == "dashboard" && u.Role == "admin" {
@@ -221,11 +221,11 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 
 	writeJSON(w, 200, map[string]any{
 		"authenticated": true,
-		"siteName":       siteName,
-		"user":           map[string]any{"username": u.Username, "role": u.Role},
-		"settings":       settings,
-		"users":          []any{},
-		"userCount":      userCount,
+		"siteName":      siteName,
+		"user":          map[string]any{"username": u.Username, "role": u.Role},
+		"settings":      settings,
+		"users":         []any{},
+		"userCount":     userCount,
 	})
 }
 
@@ -251,7 +251,7 @@ func handleAPIHome(w http.ResponseWriter, r *http.Request, database *db.DB) {
 
 	if includePlayHistory {
 		limit := minInt(500, maxInt(50, playHistoryLimit*10))
-			rows, err := database.SQL().Query(`
+		rows, err := database.SQL().Query(`
 				SELECT
 				  content_key,
 				  site_key,
@@ -275,12 +275,12 @@ func handleAPIHome(w http.ResponseWriter, r *http.Request, database *db.DB) {
 			defer rows.Close()
 			seen := map[string]struct{}{}
 			list := []map[string]any{}
-				for rows.Next() {
-					var (
-						contentKey   string
-						siteKey      string
-						siteName     string
-						spiderAPI    string
+			for rows.Next() {
+				var (
+					contentKey   string
+					siteKey      string
+					siteName     string
+					spiderAPI    string
 					videoID      string
 					videoTitle   string
 					videoPoster  string
@@ -292,14 +292,14 @@ func handleAPIHome(w http.ResponseWriter, r *http.Request, database *db.DB) {
 					updatedAt    int64
 				)
 				_ = rows.Scan(&contentKey, &siteKey, &siteName, &spiderAPI, &videoID, &videoTitle, &videoPoster, &videoRemark, &panLabel, &playFlag, &episodeIndex, &episodeName, &updatedAt)
-					if isNetDiskHistoryItem(videoID, playFlag) {
-						continue
-					}
-					key := strings.TrimSpace(contentKey)
-					if key == "" {
-						key = normalizeContentKey(videoTitle)
-						contentKey = key
-					}
+				if isNetDiskHistoryItem(videoID, playFlag) {
+					continue
+				}
+				key := strings.TrimSpace(contentKey)
+				if key == "" {
+					key = normalizeContentKey(videoTitle)
+					contentKey = key
+				}
 				if key == "" {
 					key = siteKey + "::" + videoID
 				}
@@ -315,16 +315,16 @@ func handleAPIHome(w http.ResponseWriter, r *http.Request, database *db.DB) {
 					"siteKey":      siteKey,
 					"siteName":     siteName,
 					"spiderApi":    spiderAPI,
-						"videoId":      videoID,
-						"videoTitle":   videoTitle,
-						"videoPoster":  videoPoster,
-						"videoRemark":  videoRemark,
-						"panLabel":     panLabel,
-						"playFlag":     playFlag,
-						"episodeIndex": episodeIndex,
-						"episodeName":  episodeName,
-						"updatedAt":    updatedAt,
-					})
+					"videoId":      videoID,
+					"videoTitle":   videoTitle,
+					"videoPoster":  videoPoster,
+					"videoRemark":  videoRemark,
+					"panLabel":     panLabel,
+					"playFlag":     playFlag,
+					"episodeIndex": episodeIndex,
+					"episodeName":  episodeName,
+					"updatedAt":    updatedAt,
+				})
 				if len(list) >= playHistoryLimit {
 					break
 				}
@@ -548,10 +548,10 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	u := auth.CurrentUser(r)
 	switch r.Method {
-		case http.MethodGet:
-			limit := parseIntQuery(r.URL.Query().Get("limit"), 20, 1, 50)
-			sourceLimit := minInt(500, maxInt(50, limit*10))
-			rows, err := database.SQL().Query(`
+	case http.MethodGet:
+		limit := parseIntQuery(r.URL.Query().Get("limit"), 20, 1, 50)
+		sourceLimit := minInt(500, maxInt(50, limit*10))
+		rows, err := database.SQL().Query(`
 				SELECT content_key, site_key, site_name, spider_api, video_id, video_title, video_poster, video_remark, pan_label, play_flag, episode_index, episode_name, updated_at
 				FROM play_history
 				WHERE user_id=?
@@ -565,31 +565,31 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		defer rows.Close()
 		seen := map[string]struct{}{}
 		list := []map[string]any{}
-				for rows.Next() {
-					var (
-						contentKey   string
-						siteKey      string
-						siteName     string
-						spiderAPI    string
-						videoID      string
-						videoTitle   string
-						videoPoster  string
-						videoRemark  string
-						panLabel     string
-						playFlag     string
-						episodeIndex int
-						episodeName  string
-						updatedAt    int64
-					)
-					_ = rows.Scan(&contentKey, &siteKey, &siteName, &spiderAPI, &videoID, &videoTitle, &videoPoster, &videoRemark, &panLabel, &playFlag, &episodeIndex, &episodeName, &updatedAt)
-					if isNetDiskHistoryItem(videoID, playFlag) {
-						continue
-					}
-					key := strings.TrimSpace(contentKey)
-				if key == "" {
-					key = normalizeContentKey(videoTitle)
-					contentKey = key
-				}
+		for rows.Next() {
+			var (
+				contentKey   string
+				siteKey      string
+				siteName     string
+				spiderAPI    string
+				videoID      string
+				videoTitle   string
+				videoPoster  string
+				videoRemark  string
+				panLabel     string
+				playFlag     string
+				episodeIndex int
+				episodeName  string
+				updatedAt    int64
+			)
+			_ = rows.Scan(&contentKey, &siteKey, &siteName, &spiderAPI, &videoID, &videoTitle, &videoPoster, &videoRemark, &panLabel, &playFlag, &episodeIndex, &episodeName, &updatedAt)
+			if isNetDiskHistoryItem(videoID, playFlag) {
+				continue
+			}
+			key := strings.TrimSpace(contentKey)
+			if key == "" {
+				key = normalizeContentKey(videoTitle)
+				contentKey = key
+			}
 			if key == "" {
 				key = siteKey + "::" + videoID
 			}
@@ -605,18 +605,18 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 				"siteKey":      siteKey,
 				"siteName":     siteName,
 				"spiderApi":    spiderAPI,
-						"videoId":      videoID,
-						"videoTitle":   videoTitle,
-						"videoPoster":  videoPoster,
-						"videoRemark":  videoRemark,
-						"panLabel":     panLabel,
-						"playFlag":     playFlag,
-						"episodeIndex": episodeIndex,
-						"episodeName":  episodeName,
-						"updatedAt":    updatedAt,
-					})
-					if len(list) >= limit {
-						break
+				"videoId":      videoID,
+				"videoTitle":   videoTitle,
+				"videoPoster":  videoPoster,
+				"videoRemark":  videoRemark,
+				"panLabel":     panLabel,
+				"playFlag":     playFlag,
+				"episodeIndex": episodeIndex,
+				"episodeName":  episodeName,
+				"updatedAt":    updatedAt,
+			})
+			if len(list) >= limit {
+				break
 			}
 		}
 		writeJSON(w, 200, list)
@@ -654,26 +654,26 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数不完整"})
 			return
 		}
-			siteName := getS("siteName")
-			videoPoster := getS("videoPoster")
-			videoRemark := getS("videoRemark")
-			panLabel := getS("panLabel")
-			playFlag := getS("playFlag")
-			episodeIndex := getI("episodeIndex")
-			if episodeIndex < 0 {
-				episodeIndex = 0
+		siteName := getS("siteName")
+		videoPoster := getS("videoPoster")
+		videoRemark := getS("videoRemark")
+		panLabel := getS("panLabel")
+		playFlag := getS("playFlag")
+		episodeIndex := getI("episodeIndex")
+		if episodeIndex < 0 {
+			episodeIndex = 0
 		}
-			episodeName := getS("episodeName")
+		episodeName := getS("episodeName")
 
-			if isNetDiskHistoryItem(videoID, playFlag) {
-				writeJSON(w, 200, map[string]any{"success": true})
-				return
-			}
+		if isNetDiskHistoryItem(videoID, playFlag) {
+			writeJSON(w, 200, map[string]any{"success": true})
+			return
+		}
 
-			forcePosterUpdate := false
-			if v, ok := body["forcePosterUpdate"]; ok && v != nil {
-				forcePosterUpdate = parseAnyBool(v, false)
-			}
+		forcePosterUpdate := false
+		if v, ok := body["forcePosterUpdate"]; ok && v != nil {
+			forcePosterUpdate = parseAnyBool(v, false)
+		}
 
 		contentKey := normalizeContentKey(videoTitle)
 		if contentKey == "" {
@@ -703,8 +703,8 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 			WHERE user_id = ? AND (content_key = ? OR video_title = ?)
 		`, u.ID, contentKey, videoTitle)
 
-			now := time.Now().Unix()
-			_, _ = database.SQL().Exec(`
+		now := time.Now().Unix()
+		_, _ = database.SQL().Exec(`
 				INSERT INTO play_history(
 				  user_id, content_key, site_key, site_name, spider_api, video_id, video_title, video_poster, video_remark,
 				  pan_label, play_flag, episode_index, episode_name, updated_at
@@ -723,11 +723,32 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 				  episode_name = excluded.episode_name,
 				  updated_at = excluded.updated_at
 			`, u.ID, contentKey, siteKey, siteName, spiderAPI, videoID, videoTitle, finalPoster, videoRemark, panLabel, playFlag, episodeIndex, episodeName, now)
-			writeJSON(w, 200, map[string]any{"success": true})
-		default:
-			methodNotAllowed(w)
+		writeJSON(w, 200, map[string]any{"success": true})
+	case http.MethodDelete:
+		contentKey := strings.TrimSpace(r.URL.Query().Get("contentKey"))
+		siteKey := strings.TrimSpace(r.URL.Query().Get("siteKey"))
+		videoID := strings.TrimSpace(r.URL.Query().Get("videoId"))
+		if contentKey == "" && (siteKey == "" || videoID == "") {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数不完整"})
+			return
 		}
+		deleted := int64(0)
+		if contentKey != "" {
+			res, err := database.SQL().Exec(`DELETE FROM play_history WHERE user_id=? AND content_key=?`, u.ID, contentKey)
+			if err == nil && res != nil {
+				deleted, _ = res.RowsAffected()
+			}
+		} else {
+			res, err := database.SQL().Exec(`DELETE FROM play_history WHERE user_id=? AND site_key=? AND video_id=?`, u.ID, siteKey, videoID)
+			if err == nil && res != nil {
+				deleted, _ = res.RowsAffected()
+			}
+		}
+		writeJSON(w, 200, map[string]any{"success": true, "deleted": deleted})
+	default:
+		methodNotAllowed(w)
 	}
+}
 
 func handleAPIFavorites(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodGet {
