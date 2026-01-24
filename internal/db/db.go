@@ -190,25 +190,24 @@ func (d *DB) initSchema(fresh bool) error {
 		  UNIQUE(user_id, keyword)
 		);
 		CREATE INDEX IF NOT EXISTS idx_search_history_user_id_updated_at ON search_history(user_id, updated_at DESC);
-		CREATE TABLE IF NOT EXISTS play_history (
-		  id INTEGER PRIMARY KEY AUTOINCREMENT,
-		  user_id INTEGER NOT NULL,
-		  site_key TEXT NOT NULL,
-		  site_name TEXT DEFAULT '',
-		  spider_api TEXT NOT NULL,
-		  video_id TEXT NOT NULL,
-		  video_title TEXT NOT NULL,
-		  video_poster TEXT DEFAULT '',
-		  video_remark TEXT DEFAULT '',
-		  pan_label TEXT DEFAULT '',
-		  pan_dir TEXT DEFAULT '',
-		  play_flag TEXT DEFAULT '',
-		  content_key TEXT DEFAULT '',
-		  episode_index INTEGER DEFAULT 0,
-		  episode_name TEXT DEFAULT '',
-		  updated_at INTEGER NOT NULL,
-		  UNIQUE(user_id, site_key, video_id)
-		);
+			CREATE TABLE IF NOT EXISTS play_history (
+			  id INTEGER PRIMARY KEY AUTOINCREMENT,
+			  user_id INTEGER NOT NULL,
+			  site_key TEXT NOT NULL,
+			  site_name TEXT DEFAULT '',
+			  spider_api TEXT NOT NULL,
+			  video_id TEXT NOT NULL,
+			  video_title TEXT NOT NULL,
+			  video_poster TEXT DEFAULT '',
+			  video_remark TEXT DEFAULT '',
+			  pan_label TEXT DEFAULT '',
+			  play_flag TEXT DEFAULT '',
+			  content_key TEXT DEFAULT '',
+			  episode_index INTEGER DEFAULT 0,
+			  episode_name TEXT DEFAULT '',
+			  updated_at INTEGER NOT NULL,
+			  UNIQUE(user_id, site_key, video_id)
+			);
 		CREATE INDEX IF NOT EXISTS idx_play_history_user_id_updated_at ON play_history(user_id, updated_at DESC);
 		CREATE INDEX IF NOT EXISTS idx_play_history_user_id_content_key_updated_at ON play_history(user_id, content_key, updated_at DESC);
 		CREATE TABLE IF NOT EXISTS favorites (
@@ -234,19 +233,19 @@ func (d *DB) initSchema(fresh bool) error {
 		CREATE INDEX IF NOT EXISTS idx_auth_tokens_user_id ON auth_tokens(user_id);
 		CREATE INDEX IF NOT EXISTS idx_auth_tokens_expires_at ON auth_tokens(expires_at);
 	`)
-	if err != nil {
-		return err
-	}
-
-	// Lightweight schema migrations (SQLite doesn't support IF NOT EXISTS for ADD COLUMN).
-	// Keep these idempotent and low-risk for existing installs.
-	_ = ensureSQLiteColumn(d.db, "play_history", "pan_dir", "TEXT DEFAULT ''")
-
-	if fresh {
-		if err := d.seedDefaults(); err != nil {
+		if err != nil {
 			return err
 		}
-	}
+
+		// Lightweight schema migrations (SQLite doesn't support IF NOT EXISTS for ADD COLUMN).
+		// Keep these idempotent and low-risk for existing installs.
+		_ = ensureSQLiteColumn(d.db, "play_history", "pan_label", "TEXT DEFAULT ''")
+
+		if fresh {
+			if err := d.seedDefaults(); err != nil {
+				return err
+			}
+		}
 
 	return d.ensureDefaultAdmin()
 }
