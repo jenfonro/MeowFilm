@@ -116,13 +116,13 @@ jobs:
           mkdir -p dist
           ext=""
           if [[ "${GOOS}" == "windows" ]]; then ext=".exe"; fi
-          out="dist/tvserver_${{ inputs.version }}_${GOOS}_${GOARCH}${ext}"
+          out="dist/tvserver_${GOOS}_${GOARCH}${ext}"
           go build -trimpath -ldflags="-s -w -X github.com/jenfonro/TV_Server/server/static.BuildAssetVersion=${{ inputs.version }}" -o "${out}" .
           echo "built: ${out}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: tvserver_${{ inputs.version }}_${{ matrix.goos }}_${{ matrix.goarch }}
+          name: tvserver_${{ matrix.goos }}_${{ matrix.goarch }}
           path: dist/
           if-no-files-found: error
 
