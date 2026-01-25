@@ -1,5 +1,7 @@
 # TV_Server
-
+<p align="center">
+<img src="https://raw.githubusercontent.com/jenfonro/TV_Server-Frontend/refs/heads/main/public/favicon.svg" alt="SVG Image" width="120" />
+</p>
 > 🎬 **TV_Server** 是一个 Go + Vue 的影视聚合 Web 应用。它通过 CatPawOpen 的 `/spider/*` 能力完成站点搜索/详情/播放解析，并提供后台管理页面用于配置与维护。
 
 <div align="center">
