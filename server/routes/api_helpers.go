@@ -190,3 +190,91 @@ func isAllowedDoubanImageHost(hostname string) bool {
 		return false
 	}
 }
+
+func normalizeProxyBase(value string) string {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return ""
+	}
+	if strings.HasSuffix(raw, "/") {
+		return raw
+	}
+	if strings.HasSuffix(raw, "?") || strings.HasSuffix(raw, "&") || strings.HasSuffix(raw, "=") {
+		return raw
+	}
+	return raw + "/"
+}
+
+func normalizeImageURL(value string) string {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "//") {
+		return "https:" + raw
+	}
+	if strings.HasPrefix(raw, "http://") {
+		return "https://" + strings.TrimPrefix(raw, "http://")
+	}
+	return raw
+}
+
+func normalizeProxyMode(value string) string {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return ""
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	})
+	if len(parts) > 0 {
+		return strings.TrimSpace(parts[0])
+	}
+	return raw
+}
+
+func rewriteVideoPosterURL(value string, doubanImgProxy string, doubanImgCustom string) string {
+	original := normalizeImageURL(value)
+	if original == "" {
+		return ""
+	}
+	parsed, err := url.Parse(original)
+	if err != nil || parsed.Host == "" {
+		return original
+	}
+	if parsed.Scheme != "" && parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return original
+	}
+	if !isAllowedDoubanImageHost(parsed.Hostname()) {
+		return original
+	}
+
+	mode := normalizeProxyMode(doubanImgProxy)
+	if mode == "" {
+		mode = "direct-browser"
+	}
+	switch mode {
+	case "server-proxy":
+		return "/api/douban/image?url=" + url.QueryEscape(original)
+	case "custom":
+		base := normalizeProxyBase(doubanImgCustom)
+		if base == "" {
+			return original
+		}
+		return base + url.QueryEscape(original)
+	case "douban-cdn-ali", "img3":
+		parsed.Scheme = "https"
+		parsed.Host = "img3.doubanio.com"
+		return parsed.String()
+	case "cdn-tx", "cmliussss-cdn-tencent":
+		parsed.Scheme = "https"
+		parsed.Host = "img.doubanio.cmliussss.net"
+		return parsed.String()
+	case "cdn-ali", "cmliussss-cdn-ali":
+		parsed.Scheme = "https"
+		parsed.Host = "img.doubanio.cmliussss.com"
+		return parsed.String()
+	default:
+		return original
+	}
+}
