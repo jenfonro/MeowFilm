@@ -17,9 +17,28 @@ import (
 var dist fs.FS
 
 // BuildAssetVersion can be set at build time with:
-//   go build -ldflags "-X github.com/jenfonro/TV_Server/server/static.BuildAssetVersion=v1.0.0"
+//
+//	go build -ldflags "-X github.com/jenfonro/TV_Server/server/static.BuildAssetVersion=v1.0.0"
+//
 // If ASSET_VERSION is set at runtime, it takes precedence over this value.
 var BuildAssetVersion string
+
+// ServerVersion returns the current server version string for logs/diagnostics.
+// It resolves the same release version source as the UI embedding:
+// - runtime env `ASSET_VERSION` (highest priority)
+// - build-time `BuildAssetVersion` (set via -ldflags)
+// and falls back to "beta" when not a release build.
+func ServerVersion() string {
+	rawVersion := strings.TrimSpace(os.Getenv("ASSET_VERSION"))
+	if rawVersion == "" {
+		rawVersion = strings.TrimSpace(BuildAssetVersion)
+	}
+	semver := normalizeReleaseSemver(rawVersion)
+	if semver == "" {
+		return "beta"
+	}
+	return semver
+}
 
 func init() {
 	sub, err := fs.Sub(public.Dist, "dist")
