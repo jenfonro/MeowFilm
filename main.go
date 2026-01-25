@@ -11,12 +11,15 @@ import (
 	"time"
 
 	"github.com/jenfonro/TV_Server/server"
+	"github.com/jenfonro/TV_Server/server/static"
 )
 
 func main() {
 	var addr string
 	flag.StringVar(&addr, "addr", envDefault("TV_SERVER_ADDR", ":8080"), "listen address")
 	flag.Parse()
+
+	log.Printf("tv_server version : %s", static.ServerVersion())
 
 	s, err := server.New(server.Config{
 		Addr:       addr,
