@@ -247,6 +247,9 @@ func handleAPIHome(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	playHistoryLimit := parseIntQuery(q.Get("playHistoryLimit"), 20, 1, 50)
 	favoritesLimit := parseIntQuery(q.Get("favoritesLimit"), 50, 1, 200)
 
+	doubanImgProxy := defaultString(database.GetSetting("douban_img_proxy"), "direct-browser")
+	doubanImgCustom := database.GetSetting("douban_img_custom")
+
 	out := map[string]any{"success": true}
 
 	if includePlayHistory {
@@ -317,7 +320,7 @@ func handleAPIHome(w http.ResponseWriter, r *http.Request, database *db.DB) {
 					"spiderApi":    spiderAPI,
 					"videoId":      videoID,
 					"videoTitle":   videoTitle,
-					"videoPoster":  videoPoster,
+					"videoPoster":  rewriteVideoPosterURL(videoPoster, doubanImgProxy, doubanImgCustom),
 					"videoRemark":  videoRemark,
 					"panLabel":     panLabel,
 					"playFlag":     playFlag,
@@ -362,7 +365,7 @@ func handleAPIHome(w http.ResponseWriter, r *http.Request, database *db.DB) {
 					"spiderApi":   spiderAPI,
 					"videoId":     videoID,
 					"videoTitle":  videoTitle,
-					"videoPoster": videoPoster,
+					"videoPoster": rewriteVideoPosterURL(videoPoster, doubanImgProxy, doubanImgCustom),
 					"videoRemark": videoRemark,
 					"updatedAt":   updatedAt,
 				})
@@ -528,6 +531,8 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 	if strings.TrimSpace(contentKey) == "" {
 		contentKey = normalizeContentKey(videoTitle)
 	}
+	doubanImgProxy := defaultString(database.GetSetting("douban_img_proxy"), "direct-browser")
+	doubanImgCustom := database.GetSetting("douban_img_custom")
 	writeJSON(w, 200, map[string]any{
 		"contentKey":   contentKey,
 		"siteKey":      siteKey,
@@ -535,7 +540,7 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 		"spiderApi":    spiderAPI,
 		"videoId":      videoID,
 		"videoTitle":   videoTitle,
-		"videoPoster":  videoPoster,
+		"videoPoster":  rewriteVideoPosterURL(videoPoster, doubanImgProxy, doubanImgCustom),
 		"videoRemark":  videoRemark,
 		"panLabel":     panLabel,
 		"playFlag":     playFlag,
@@ -549,6 +554,8 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 	u := auth.CurrentUser(r)
 	switch r.Method {
 	case http.MethodGet:
+		doubanImgProxy := defaultString(database.GetSetting("douban_img_proxy"), "direct-browser")
+		doubanImgCustom := database.GetSetting("douban_img_custom")
 		limit := parseIntQuery(r.URL.Query().Get("limit"), 20, 1, 50)
 		sourceLimit := minInt(500, maxInt(50, limit*10))
 		rows, err := database.SQL().Query(`
@@ -607,7 +614,7 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 				"spiderApi":    spiderAPI,
 				"videoId":      videoID,
 				"videoTitle":   videoTitle,
-				"videoPoster":  videoPoster,
+				"videoPoster":  rewriteVideoPosterURL(videoPoster, doubanImgProxy, doubanImgCustom),
 				"videoRemark":  videoRemark,
 				"panLabel":     panLabel,
 				"playFlag":     playFlag,
@@ -756,6 +763,8 @@ func handleAPIFavorites(w http.ResponseWriter, r *http.Request, database *db.DB)
 		return
 	}
 	u := auth.CurrentUser(r)
+	doubanImgProxy := defaultString(database.GetSetting("douban_img_proxy"), "direct-browser")
+	doubanImgCustom := database.GetSetting("douban_img_custom")
 	limit := parseIntQuery(strings.TrimSpace(r.URL.Query().Get("limit")), 200, 1, 200)
 	rows, err := database.SQL().Query(`
 		SELECT site_key, site_name, spider_api, video_id, video_title, video_poster, video_remark, updated_at
@@ -788,7 +797,7 @@ func handleAPIFavorites(w http.ResponseWriter, r *http.Request, database *db.DB)
 			"spiderApi":   spiderAPI,
 			"videoId":     videoID,
 			"videoTitle":  videoTitle,
-			"videoPoster": videoPoster,
+			"videoPoster": rewriteVideoPosterURL(videoPoster, doubanImgProxy, doubanImgCustom),
 			"videoRemark": videoRemark,
 			"updatedAt":   updatedAt,
 		})
