@@ -40,6 +40,30 @@ func DashboardHandler(database *db.DB, authMw *auth.Auth) http.Handler {
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardPanSettings(w, r, database)
 			})).ServeHTTP(w, r)
+		case "/pan/baidu/qr/start":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardBaiduQRStart(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/baidu/qr/image":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardBaiduQRImage(w, r)
+			})).ServeHTTP(w, r)
+		case "/pan/baidu/qr/cookie":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardBaiduQRCookie(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/quark/qr/start":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardQuarkQRStart(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/quark/qr/image":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardQuarkQRImage(w, r)
+			})).ServeHTTP(w, r)
+		case "/pan/quark/qr/cookie":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardQuarkQRCookie(w, r, database)
+			})).ServeHTTP(w, r)
 		case "/video/pans/list":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardVideoPansList(w, r, database)
@@ -177,20 +201,20 @@ func handleDashboardSiteSettings(w http.ResponseWriter, r *http.Request, databas
 		return
 	}
 	writeJSON(w, 200, map[string]any{
-		"success":             true,
-		"siteName":            database.GetSetting("site_name"),
-		"catPawOpenApiBase":   database.GetSetting("catpawopen_api_base"),
-		"openListApiBase":     database.GetSetting("openlist_api_base"),
-		"openListToken":       database.GetSetting("openlist_token"),
-		"openListQuarkTvMode": strings.TrimSpace(database.GetSetting("openlist_quark_tv_mode")) == "1",
+		"success":              true,
+		"siteName":             database.GetSetting("site_name"),
+		"catPawOpenApiBase":    database.GetSetting("catpawopen_api_base"),
+		"openListApiBase":      database.GetSetting("openlist_api_base"),
+		"openListToken":        database.GetSetting("openlist_token"),
+		"openListQuarkTvMode":  strings.TrimSpace(database.GetSetting("openlist_quark_tv_mode")) == "1",
 		"openListQuarkTvMount": database.GetSetting("openlist_quark_tv_mount"),
-		"goProxyEnabled":      strings.TrimSpace(database.GetSetting("goproxy_enabled")) == "1",
-		"goProxyAutoSelect":   strings.TrimSpace(database.GetSetting("goproxy_auto_select")) == "1",
-		"goProxyServersJson":  defaultString(database.GetSetting("goproxy_servers"), "[]"),
-		"doubanDataProxy":     defaultString(database.GetSetting("douban_data_proxy"), "direct"),
-		"doubanDataCustom":    database.GetSetting("douban_data_custom"),
-		"doubanImgProxy":      defaultString(database.GetSetting("douban_img_proxy"), "direct-browser"),
-		"doubanImgCustom":     database.GetSetting("douban_img_custom"),
+		"goProxyEnabled":       strings.TrimSpace(database.GetSetting("goproxy_enabled")) == "1",
+		"goProxyAutoSelect":    strings.TrimSpace(database.GetSetting("goproxy_auto_select")) == "1",
+		"goProxyServersJson":   defaultString(database.GetSetting("goproxy_servers"), "[]"),
+		"doubanDataProxy":      defaultString(database.GetSetting("douban_data_proxy"), "direct"),
+		"doubanDataCustom":     database.GetSetting("douban_data_custom"),
+		"doubanImgProxy":       defaultString(database.GetSetting("douban_img_proxy"), "direct-browser"),
+		"doubanImgCustom":      database.GetSetting("douban_img_custom"),
 	})
 }
 
@@ -732,11 +756,11 @@ func handleDashboardUserList(w http.ResponseWriter, r *http.Request, database *d
 		var username, role, status, catAPIBase, catProxy string
 		_ = rows.Scan(&username, &role, &status, &catAPIBase, &catProxy)
 		users = append(users, map[string]any{
-			"username":    username,
-			"role":        role,
-			"status":      status,
+			"username":     username,
+			"role":         role,
+			"status":       status,
 			"cat_api_base": catAPIBase,
-			"cat_proxy":   catProxy,
+			"cat_proxy":    catProxy,
 		})
 	}
 	writeJSON(w, 200, map[string]any{"success": true, "users": users, "userCount": len(users)})
@@ -982,9 +1006,9 @@ func handleDashboardUserUpdate(w http.ResponseWriter, r *http.Request, database 
 	}
 
 	writeJSON(w, 200, map[string]any{
-		"success":   true,
-		"username":  finalUsername,
-		"role":      defaultString(finalRole, "user"),
+		"success":    true,
+		"username":   finalUsername,
+		"role":       defaultString(finalRole, "user"),
 		"catApiBase": rowCatBase,
 		"catProxy":   rowCatProxy,
 	})
