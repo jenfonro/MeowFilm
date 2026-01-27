@@ -6,12 +6,12 @@ import (
 )
 
 type reconciledSiteState struct {
-	Sites         []site
-	Status        map[string]bool
-	Home          map[string]bool
-	Search        map[string]bool
-	Order         []string
-	Availability  map[string]string
+	Sites        []site
+	Status       map[string]bool
+	Home         map[string]bool
+	Search       map[string]bool
+	Order        []string
+	Availability map[string]string
 }
 
 func normalizeSitesSlice(input []site) []site {
