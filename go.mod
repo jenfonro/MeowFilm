@@ -1,4 +1,4 @@
-module github.com/jenfonro/TV_Server
+module github.com/jenfonro/meowfilm
 
 go 1.23.4
 

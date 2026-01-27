@@ -45,7 +45,7 @@ func Open() (*DB, error) {
 }
 
 func resolveDBFile() (filePath string, fresh bool, _ error) {
-	if v := strings.TrimSpace(os.Getenv("TV_SERVER_DB_FILE")); v != "" {
+	if v := strings.TrimSpace(os.Getenv("MEOWFILM_DB_FILE")); v != "" {
 		fp := filepath.Clean(v)
 		st, err := os.Stat(fp)
 		if err == nil && st.Size() > 0 {
@@ -57,7 +57,7 @@ func resolveDBFile() (filePath string, fresh bool, _ error) {
 		return "", false, err
 	}
 
-	dataDir := strings.TrimSpace(os.Getenv("TV_SERVER_DATA_DIR"))
+	dataDir := strings.TrimSpace(os.Getenv("MEOWFILM_DATA_DIR"))
 	base := dataDir
 	if base == "" {
 		base = discoverDefaultDataDir()
@@ -79,8 +79,8 @@ func discoverDefaultDataDir() string {
 		return "."
 	}
 
-	// Prefer a sibling `TV_Server` directory (same default as the Node version).
-	sibling := filepath.Clean(filepath.Join(wd, "..", "TV_Server"))
+	// Prefer a sibling project directory when running from a subfolder.
+	sibling := filepath.Clean(filepath.Join(wd, "..", "MeowFilm"))
 	if st, err := os.Stat(sibling); err == nil && st.IsDir() {
 		if isDir(filepath.Join(sibling, "server")) && isDir(filepath.Join(sibling, "web")) {
 			return sibling
@@ -233,19 +233,19 @@ func (d *DB) initSchema(fresh bool) error {
 		CREATE INDEX IF NOT EXISTS idx_auth_tokens_user_id ON auth_tokens(user_id);
 		CREATE INDEX IF NOT EXISTS idx_auth_tokens_expires_at ON auth_tokens(expires_at);
 	`)
-		if err != nil {
+	if err != nil {
+		return err
+	}
+
+	// Lightweight schema migrations (SQLite doesn't support IF NOT EXISTS for ADD COLUMN).
+	// Keep these idempotent and low-risk for existing installs.
+	_ = ensureSQLiteColumn(d.db, "play_history", "pan_label", "TEXT DEFAULT ''")
+
+	if fresh {
+		if err := d.seedDefaults(); err != nil {
 			return err
 		}
-
-		// Lightweight schema migrations (SQLite doesn't support IF NOT EXISTS for ADD COLUMN).
-		// Keep these idempotent and low-risk for existing installs.
-		_ = ensureSQLiteColumn(d.db, "play_history", "pan_label", "TEXT DEFAULT ''")
-
-		if fresh {
-			if err := d.seedDefaults(); err != nil {
-				return err
-			}
-		}
+	}
 
 	return d.ensureDefaultAdmin()
 }
@@ -269,12 +269,12 @@ func ensureSQLiteColumn(db *sql.DB, table string, column string, definition stri
 
 	for rows.Next() {
 		var (
-			cid        int
-			name       string
-			typ        string
-			notnull    int
-			dfltValue  any
-			pk         int
+			cid       int
+			name      string
+			typ       string
+			notnull   int
+			dfltValue any
+			pk        int
 		)
 		_ = rows.Scan(&cid, &name, &typ, &notnull, &dfltValue, &pk)
 		if strings.EqualFold(strings.TrimSpace(name), c) {
@@ -289,7 +289,7 @@ func ensureSQLiteColumn(db *sql.DB, table string, column string, definition stri
 func (d *DB) seedDefaults() error {
 	type kv struct{ k, v string }
 	seeds := []kv{
-		{"site_name", "TV Server"},
+		{"site_name", "MeowFilm"},
 		{"douban_data_proxy", "direct"},
 		{"douban_data_custom", ""},
 		{"douban_img_proxy", "direct-browser"},

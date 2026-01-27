@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jenfonro/TV_Server/internal/db"
+	"github.com/jenfonro/meowfilm/internal/db"
 )
 
 type pan115QRSession struct {

@@ -10,15 +10,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jenfonro/TV_Server/internal/auth"
-	"github.com/jenfonro/TV_Server/public"
+	"github.com/jenfonro/meowfilm/internal/auth"
+	"github.com/jenfonro/meowfilm/public"
 )
 
 var dist fs.FS
 
 // BuildAssetVersion can be set at build time with:
 //
-//	go build -ldflags "-X github.com/jenfonro/TV_Server/server/static.BuildAssetVersion=v1.0.0"
+//	go build -ldflags "-X github.com/jenfonro/meowfilm/server/static.BuildAssetVersion=v1.0.0"
 //
 // If ASSET_VERSION is set at runtime, it takes precedence over this value.
 var BuildAssetVersion string
@@ -63,8 +63,8 @@ func Handler(authMw *auth.Auth) http.Handler {
 
 	indexHTML := mustReadFile("index.html")
 	dashboardHTML := mustReadFile("dashboard.html")
-	indexHTML = patchLegacyUiVersionPlaceholder(indexHTML)
-	dashboardHTML = patchLegacyUiVersionPlaceholder(dashboardHTML)
+	indexHTML = patchUiVersionPlaceholders(indexHTML)
+	dashboardHTML = patchUiVersionPlaceholders(dashboardHTML)
 	indexHTML = strings.ReplaceAll(indexHTML, "__ASSET_VERSION__", assetVersion)
 	indexHTML = strings.ReplaceAll(indexHTML, "__UI_VERSION__", uiVersion)
 	dashboardHTML = strings.ReplaceAll(dashboardHTML, "__ASSET_VERSION__", assetVersion)
@@ -115,15 +115,15 @@ func NoStoreForHTMLCSSJS(next http.Handler) http.Handler {
 	})
 }
 
-func patchLegacyUiVersionPlaceholder(html string) string {
-	if !strings.Contains(html, "__ASSET_VERSION__") {
+func patchUiVersionPlaceholders(html string) string {
+	if !strings.Contains(html, "__ASSET_VERSION__") && !strings.Contains(html, "__UI_VERSION__") {
 		return html
 	}
 	r := strings.NewReplacer(
-		"window.__TV_SERVER_VERSION__ = '__ASSET_VERSION__';", "window.__TV_SERVER_VERSION__ = '__UI_VERSION__';",
-		"window.__TV_SERVER_VERSION__='__ASSET_VERSION__';", "window.__TV_SERVER_VERSION__='__UI_VERSION__';",
-		"window.__TV_SERVER_VERSION__ = \"__ASSET_VERSION__\";", "window.__TV_SERVER_VERSION__ = \"__UI_VERSION__\";",
-		"window.__TV_SERVER_VERSION__=\"__ASSET_VERSION__\";", "window.__TV_SERVER_VERSION__=\"__UI_VERSION__\";",
+		"window.__MEOWFILM_VERSION__ = '__ASSET_VERSION__';", "window.__MEOWFILM_VERSION__ = '__UI_VERSION__';",
+		"window.__MEOWFILM_VERSION__='__ASSET_VERSION__';", "window.__MEOWFILM_VERSION__='__UI_VERSION__';",
+		"window.__MEOWFILM_VERSION__ = \"__ASSET_VERSION__\";", "window.__MEOWFILM_VERSION__ = \"__UI_VERSION__\";",
+		"window.__MEOWFILM_VERSION__=\"__ASSET_VERSION__\";", "window.__MEOWFILM_VERSION__=\"__UI_VERSION__\";",
 	)
 	return r.Replace(html)
 }
