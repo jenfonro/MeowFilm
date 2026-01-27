@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jenfonro/TV_Server/internal/db"
+	"github.com/jenfonro/meowfilm/internal/db"
 )
 
 type baiduQRSession struct {
@@ -514,7 +514,7 @@ func handleDashboardBaiduQRCookie(w http.ResponseWriter, r *http.Request, databa
 	}
 	s.Cookie = cookie
 
-	// Persist into TV_Server pan_login_settings for admin to review/edit later.
+	// Persist into pan_login_settings for admin to review/edit later.
 	store := parseJSONMap(database.GetSetting("pan_login_settings"))
 	cur, _ := store["baidu"].(map[string]any)
 	if cur == nil {

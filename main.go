@@ -10,20 +10,20 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jenfonro/TV_Server/server"
-	"github.com/jenfonro/TV_Server/server/static"
+	"github.com/jenfonro/meowfilm/server"
+	"github.com/jenfonro/meowfilm/server/static"
 )
 
 func main() {
 	var addr string
-	flag.StringVar(&addr, "addr", envDefault("TV_SERVER_ADDR", ":8080"), "listen address")
+	flag.StringVar(&addr, "addr", envDefault("MEOWFILM_ADDR", ":8080"), "listen address")
 	flag.Parse()
 
-	log.Printf("tv_server version : %s", static.ServerVersion())
+	log.Printf("meowfilm version : %s", static.ServerVersion())
 
 	s, err := server.New(server.Config{
 		Addr:       addr,
-		TrustProxy: os.Getenv("TV_SERVER_TRUST_PROXY") == "1",
+		TrustProxy: os.Getenv("MEOWFILM_TRUST_PROXY") == "1",
 	})
 	if err != nil {
 		log.Fatalf("init server: %v", err)
@@ -36,7 +36,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("tv_server listening on %s", httpServer.Addr)
+		log.Printf("meowfilm listening on %s", httpServer.Addr)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("listen: %v", err)
 		}

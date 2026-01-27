@@ -73,14 +73,14 @@ jobs:
       - name: Checkout frontend
         uses: actions/checkout@v4
         with:
-          repository: jenfonro/TV_Server-Frontend
-          path: TV_Server-Frontend
+          repository: jenfonro/MeowFilm-Frontend
+          path: MeowFilm-Frontend
 
       - name: Build frontend
         shell: bash
         run: |
           set -euo pipefail
-          cd TV_Server-Frontend
+          cd MeowFilm-Frontend
           if [[ -f package-lock.json ]]; then
             npm ci
           else
@@ -94,7 +94,7 @@ jobs:
           set -euo pipefail
           rm -rf public/dist
           mkdir -p public/dist
-          cp -a TV_Server-Frontend/dist/. public/dist/
+          cp -a MeowFilm-Frontend/dist/. public/dist/
 
       - name: Test
         shell: bash
@@ -116,13 +116,13 @@ jobs:
           mkdir -p dist
           ext=""
           if [[ "${GOOS}" == "windows" ]]; then ext=".exe"; fi
-          out="dist/tvserver_${GOOS}_${GOARCH}${ext}"
-          go build -trimpath -ldflags="-s -w -X github.com/jenfonro/TV_Server/server/static.BuildAssetVersion=${{ inputs.version }}" -o "${out}" .
+          out="dist/meowfilm_${GOOS}_${GOARCH}${ext}"
+          go build -trimpath -ldflags="-s -w -X github.com/jenfonro/meowfilm/server/static.BuildAssetVersion=${{ inputs.version }}" -o "${out}" .
           echo "built: ${out}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: tvserver_${{ matrix.goos }}_${{ matrix.goarch }}
+          name: meowfilm_${{ matrix.goos }}_${{ matrix.goarch }}
           path: dist/
           if-no-files-found: error
 

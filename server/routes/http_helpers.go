@@ -54,4 +54,3 @@ func boolFromForm(v string) bool {
 	s := strings.ToLower(strings.TrimSpace(v))
 	return s == "1" || s == "true" || s == "on" || s == "yes"
 }
-
