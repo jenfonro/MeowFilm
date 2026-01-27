@@ -64,6 +64,18 @@ func DashboardHandler(database *db.DB, authMw *auth.Auth) http.Handler {
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardQuarkQRCookie(w, r, database)
 			})).ServeHTTP(w, r)
+		case "/pan/uc/qr/start":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardUCQRStart(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/uc/qr/image":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardUCQRImage(w, r)
+			})).ServeHTTP(w, r)
+		case "/pan/uc/qr/cookie":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardUCQRCookie(w, r, database)
+			})).ServeHTTP(w, r)
 		case "/video/pans/list":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardVideoPansList(w, r, database)
