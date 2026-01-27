@@ -128,10 +128,6 @@ func APIHandler(database *db.DB, authMw *auth.Auth) http.Handler {
 			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleAPIDoubanImage(w, r)
 			})).ServeHTTP(w, r)
-		case "/catpawopen/spider/home", "/catpawopen/spider/category", "/catpawopen/spider/detail", "/catpawopen/spider/play", "/catpawopen/spider/search":
-			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				writeJSON(w, http.StatusGone, map[string]any{"success": false, "message": "CatPawOpen 接口异常"})
-			})).ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
