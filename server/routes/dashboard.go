@@ -8,8 +8,8 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/jenfonro/TV_Server/internal/auth"
-	"github.com/jenfonro/TV_Server/internal/db"
+	"github.com/jenfonro/meowfilm/internal/auth"
+	"github.com/jenfonro/meowfilm/internal/db"
 )
 
 func DashboardHandler(database *db.DB, authMw *auth.Auth) http.Handler {

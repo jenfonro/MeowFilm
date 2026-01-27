@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/jenfonro/TV_Server/internal/auth"
-	"github.com/jenfonro/TV_Server/internal/db"
+	"github.com/jenfonro/meowfilm/internal/auth"
+	"github.com/jenfonro/meowfilm/internal/db"
 )
 
 type userCatSitesState struct {

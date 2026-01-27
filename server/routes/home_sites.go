@@ -3,8 +3,8 @@ package routes
 import (
 	"strings"
 
-	"github.com/jenfonro/TV_Server/internal/auth"
-	"github.com/jenfonro/TV_Server/internal/db"
+	"github.com/jenfonro/meowfilm/internal/auth"
+	"github.com/jenfonro/meowfilm/internal/db"
 )
 
 func fetchHomeSites(database *db.DB) []map[string]any {
@@ -49,7 +49,7 @@ func fetchUserHomeSites(database *db.DB, u *auth.User) []map[string]any {
 		return []map[string]any{}
 	}
 
-	// Shared/admin users without their own CatPawOpen: use TV_Server (global) home sites directly.
+	// Shared/admin users without their own CatPawOpen: use global home sites directly.
 	if !hasUserAPI && (u.Role == "shared" || u.Role == "admin") {
 		return fetchHomeSites(database)
 	}

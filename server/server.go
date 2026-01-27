@@ -6,10 +6,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/jenfonro/TV_Server/internal/auth"
-	"github.com/jenfonro/TV_Server/internal/db"
-	"github.com/jenfonro/TV_Server/server/routes"
-	"github.com/jenfonro/TV_Server/server/static"
+	"github.com/jenfonro/meowfilm/internal/auth"
+	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/routes"
+	"github.com/jenfonro/meowfilm/server/static"
 )
 
 type Config struct {
@@ -36,7 +36,7 @@ func New(cfg Config) (*Server, error) {
 
 	authMw := auth.New(database, auth.Options{
 		TrustProxy:   cfg.TrustProxy,
-		CookieSecure: os.Getenv("TV_SERVER_COOKIE_SECURE") == "1",
+		CookieSecure: os.Getenv("MEOWFILM_COOKIE_SECURE") == "1",
 	})
 
 	mux := http.NewServeMux()
@@ -59,7 +59,7 @@ func New(cfg Config) (*Server, error) {
 	return &Server{addr: cfg.Addr, db: database, mux: mux, h: handler}, nil
 }
 
-func (s *Server) Addr() string { return s.addr }
+func (s *Server) Addr() string          { return s.addr }
 func (s *Server) Handler() http.Handler { return s.h }
 
 func (s *Server) Close() error {

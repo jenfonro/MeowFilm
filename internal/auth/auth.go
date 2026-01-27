@@ -12,10 +12,10 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/jenfonro/TV_Server/internal/db"
+	"github.com/jenfonro/meowfilm/internal/db"
 )
 
-const CookieName = "tv_server_auth"
+const CookieName = "meowfilm_auth"
 
 var tokenTTL = 30 * 24 * time.Hour
 
