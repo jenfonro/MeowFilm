@@ -161,6 +161,11 @@ func normalizeCatPawOpenAPIBase(inputURL string) string {
 		}
 	}
 
+	// If user pasted an id-prefixed spider API like "/<id>/spider/...", drop the id segment.
+	if isCatPawOpenRuntimeIDPath(path) {
+		path = "/"
+	}
+
 	path = strings.TrimRight(path, "/")
 	if strings.HasSuffix(path, "/spider") {
 		path = strings.TrimSuffix(path, "/spider")
@@ -183,6 +188,25 @@ func normalizeCatPawOpenAPIBase(inputURL string) string {
 	u.RawQuery = ""
 	u.Fragment = ""
 	return u.String()
+}
+
+func isCatPawOpenRuntimeIDPath(path string) bool {
+	p := strings.TrimSpace(path)
+	if p == "" {
+		return false
+	}
+	p = strings.TrimRight(p, "/")
+	if len(p) != 11 || p[0] != '/' {
+		return false
+	}
+	id := strings.ToLower(p[1:])
+	for _, ch := range id {
+		if (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func normalizeMountPath(value string) string {
