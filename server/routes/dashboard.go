@@ -338,7 +338,7 @@ func handleDashboardPanSettings(w http.ResponseWriter, r *http.Request, database
 			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "key 不能为空"})
 			return
 		}
-		if typ != "cookie" && typ != "account" {
+		if typ != "cookie" && typ != "account" && typ != "authorization" {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "type 参数无效"})
 			return
 		}
@@ -352,6 +352,10 @@ func handleDashboardPanSettings(w http.ResponseWriter, r *http.Request, database
 			cookie := r.FormValue("cookie")
 			cur["cookie"] = cookie
 			payload = map[string]any{"cookie": cookie}
+		} else if typ == "authorization" {
+			authorization := r.FormValue("authorization")
+			cur["authorization"] = authorization
+			payload = map[string]any{"authorization": authorization}
 		} else {
 			username := r.FormValue("username")
 			password := r.FormValue("password")
