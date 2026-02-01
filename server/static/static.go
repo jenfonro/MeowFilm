@@ -22,6 +22,8 @@ var dist fs.FS
 //
 // If ASSET_VERSION is set at runtime, it takes precedence over this value.
 var BuildAssetVersion string
+var BuildBackendCommit string
+var BuildFrontendCommit string
 
 // ServerVersion returns the current server version string for logs/diagnostics.
 // It resolves the same release version source as the UI embedding:
@@ -53,12 +55,20 @@ func Handler(authMw *auth.Auth) http.Handler {
 		rawVersion = strings.TrimSpace(BuildAssetVersion)
 	}
 	semver := normalizeReleaseSemver(rawVersion)
+	backendCommit := strings.TrimSpace(BuildBackendCommit)
+	frontendCommit := strings.TrimSpace(BuildFrontendCommit)
 
 	uiVersion := "beta"
 	assetVersion := strconv.FormatInt(time.Now().UnixNano()/int64(time.Millisecond), 10)
 	if semver != "" {
 		uiVersion = "V" + semver
 		assetVersion = semver
+	}
+	if backendCommit == "" {
+		backendCommit = semver
+	}
+	if frontendCommit == "" {
+		frontendCommit = semver
 	}
 
 	indexHTML := mustReadFile("index.html")
@@ -67,8 +77,12 @@ func Handler(authMw *auth.Auth) http.Handler {
 	dashboardHTML = patchUiVersionPlaceholders(dashboardHTML)
 	indexHTML = strings.ReplaceAll(indexHTML, "__ASSET_VERSION__", assetVersion)
 	indexHTML = strings.ReplaceAll(indexHTML, "__UI_VERSION__", uiVersion)
+	indexHTML = strings.ReplaceAll(indexHTML, "__BACKEND_COMMIT__", backendCommit)
+	indexHTML = strings.ReplaceAll(indexHTML, "__FRONTEND_COMMIT__", frontendCommit)
 	dashboardHTML = strings.ReplaceAll(dashboardHTML, "__ASSET_VERSION__", assetVersion)
 	dashboardHTML = strings.ReplaceAll(dashboardHTML, "__UI_VERSION__", uiVersion)
+	dashboardHTML = strings.ReplaceAll(dashboardHTML, "__BACKEND_COMMIT__", backendCommit)
+	dashboardHTML = strings.ReplaceAll(dashboardHTML, "__FRONTEND_COMMIT__", frontendCommit)
 
 	fsHandler := http.FileServer(http.FS(dist))
 
