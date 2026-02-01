@@ -1,7 +1,6 @@
 package routes
 
 import (
-	"encoding/json"
 	"strings"
 
 	"github.com/jenfonro/meowfilm/internal/auth"
@@ -51,27 +50,6 @@ func resolveUserCatSites(database *db.DB, u *auth.User) (userCatSitesState, erro
 	order := parseJSONStringArray(row.CatOrder)
 	availability := parseAvailabilityJSON(row.CatAvailability)
 
-	// Shared/admin users without their own CatPawOpen: use global list, but keep per-user enable/home/order.
-	if !hasUserAPI && canFallback {
-		reconciled := reconcileSites(sites, statusMap, homeMap, nil, order, availability)
-		bSites, _ := json.Marshal(reconciled.Sites)
-		bStatus, _ := json.Marshal(reconciled.Status)
-		bHome, _ := json.Marshal(reconciled.Home)
-		bOrder, _ := json.Marshal(reconciled.Order)
-		bAvail, _ := json.Marshal(reconciled.Availability)
-		_, _ = database.SQL().Exec(`
-			UPDATE users
-			SET cat_sites = ?, cat_site_status = ?, cat_site_home = ?, cat_site_order = ?, cat_site_availability = ?
-			WHERE id = ?
-		`, string(bSites), string(bStatus), string(bHome), string(bOrder), string(bAvail), u.ID)
-
-		sites = reconciled.Sites
-		statusMap = reconciled.Status
-		homeMap = reconciled.Home
-		order = reconciled.Order
-		availability = reconciled.Availability
-	}
-
 	return userCatSitesState{
 		Sites:        sites,
 		Status:       statusMap,
@@ -81,6 +59,17 @@ func resolveUserCatSites(database *db.DB, u *auth.User) (userCatSitesState, erro
 		HasUserAPI:   hasUserAPI,
 		CanFallback:  canFallback,
 	}, nil
+}
+
+func userHasCatAPIBase(database *db.DB, u *auth.User) (bool, error) {
+	if database == nil || u == nil {
+		return false, nil
+	}
+	var base string
+	if err := database.SQL().QueryRow(`SELECT cat_api_base FROM users WHERE id=? LIMIT 1`, u.ID).Scan(&base); err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(base) != "", nil
 }
 
 func userSiteKeySet(sites []site) map[string]struct{} {

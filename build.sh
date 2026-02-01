@@ -40,5 +40,25 @@ export GOCACHE="${GOCACHE_DIR}"
 BUILD_DIR="${ROOT_DIR}/build"
 mkdir -p "${BUILD_DIR}"
 
-go build -o "${BUILD_DIR}/meowfilm" .
+BACKEND_COMMIT=""
+FRONTEND_COMMIT=""
+if command -v git >/dev/null 2>&1; then
+  BACKEND_COMMIT="$(git -C "${ROOT_DIR}" rev-parse --short HEAD 2>/dev/null || true)"
+  FRONTEND_COMMIT="$(git -C "${FRONTEND_DIR}" rev-parse --short HEAD 2>/dev/null || true)"
+fi
+
+LDFLAGS=""
+if [[ -n "${BACKEND_COMMIT}" ]]; then
+  LDFLAGS+=" -X github.com/jenfonro/meowfilm/server/static.BuildBackendCommit=${BACKEND_COMMIT}"
+fi
+if [[ -n "${FRONTEND_COMMIT}" ]]; then
+  LDFLAGS+=" -X github.com/jenfonro/meowfilm/server/static.BuildFrontendCommit=${FRONTEND_COMMIT}"
+fi
+LDFLAGS="${LDFLAGS# }"
+
+if [[ -n "${LDFLAGS}" ]]; then
+  go build -ldflags "${LDFLAGS}" -o "${BUILD_DIR}/meowfilm" .
+else
+  go build -o "${BUILD_DIR}/meowfilm" .
+fi
 echo "built: ${BUILD_DIR}/meowfilm"
