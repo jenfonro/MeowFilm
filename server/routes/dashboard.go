@@ -363,11 +363,11 @@ func handleDashboardPanSettings(w http.ResponseWriter, r *http.Request, database
 			cur["password"] = password
 			payload = map[string]any{"username": username, "password": password}
 		}
-		store[key] = cur
-		b, _ := json.Marshal(store)
-		_ = database.SetSetting("pan_login_settings", string(b))
-		writeJSON(w, 200, map[string]any{"success": true, "settings": store, "sync": map[string]any{"ok": nil, "skipped": true}, "payload": payload})
-	default:
+			store[key] = cur
+			b, _ := json.Marshal(store)
+			_ = database.SetSetting("pan_login_settings", string(b))
+			writeJSON(w, 200, map[string]any{"success": true, "settings": store, "sync": map[string]any{"ok": nil, "skipped": true}, "payload": payload})
+		default:
 		methodNotAllowed(w)
 	}
 }

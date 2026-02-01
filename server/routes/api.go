@@ -1321,6 +1321,24 @@ func handleAPIUserSites(w http.ResponseWriter, r *http.Request, database *db.DB)
 		return
 	}
 	u := auth.CurrentUser(r)
+	// Admin/shared users:
+	// - If the user has their own CatPawOpen configured => use their own stored site list.
+	// - Otherwise => use the global video source list managed by the dashboard.
+	if u != nil && (u.Role == "admin" || u.Role == "shared") {
+		hasUserAPI, err := userHasCatAPIBase(database, u)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": "请求失败"})
+			return
+		}
+		if !hasUserAPI {
+			writeJSON(w, 200, map[string]any{
+				"success":           true,
+				"sites":             mergeVideoSourceSites(database),
+				"requiresCatApiBase": false,
+			})
+			return
+		}
+	}
 	state, err := resolveUserCatSites(database, u)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": "请求失败"})
@@ -1352,6 +1370,37 @@ func handleAPIUserSitesAvailability(w http.ResponseWriter, r *http.Request, data
 	if key == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数无效"})
 		return
+	}
+	// Admin/shared without user CatPawOpen: update global availability state.
+	if u != nil && (u.Role == "admin" || u.Role == "shared") {
+		hasUserAPI, err := userHasCatAPIBase(database, u)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": "请求失败"})
+			return
+		}
+		if !hasUserAPI {
+		sites := normalizeSitesFromJSON(database.GetSetting("video_source_sites"))
+		keySet := map[string]struct{}{}
+		for _, s := range sites {
+			if s.Key == "" {
+				continue
+			}
+			keySet[s.Key] = struct{}{}
+		}
+		if _, ok := keySet[key]; !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "站点不存在"})
+			return
+		}
+		availability := parseAvailabilityJSON(database.GetSetting("video_source_site_availability"))
+		if availability[key] == avail {
+			writeJSON(w, 200, map[string]any{"success": true})
+			return
+		}
+		availability[key] = avail
+		_ = database.SetSetting("video_source_site_availability", marshalJSON(availability))
+		writeJSON(w, 200, map[string]any{"success": true})
+		return
+		}
 	}
 	state, err := resolveUserCatSites(database, u)
 	if err != nil {
@@ -1387,6 +1436,41 @@ func handleAPIUserSitesStatus(w http.ResponseWriter, r *http.Request, database *
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数无效"})
 		return
 	}
+	// Admin/shared without user CatPawOpen: update global enabled state.
+	if u != nil && (u.Role == "admin" || u.Role == "shared") {
+		hasUserAPI, err := userHasCatAPIBase(database, u)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": "请求失败"})
+			return
+		}
+		if !hasUserAPI {
+		sites := normalizeSitesFromJSON(database.GetSetting("video_source_sites"))
+		keySet := map[string]struct{}{}
+		for _, s := range sites {
+			if s.Key == "" {
+				continue
+			}
+			keySet[s.Key] = struct{}{}
+		}
+		if _, ok := keySet[key]; !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "站点不存在"})
+			return
+		}
+		statusMap := parseJSONBoolMap(database.GetSetting("video_source_site_status"))
+		cur, ok := statusMap[key]
+		if !ok {
+			cur = true
+		}
+		if cur == *body.Enabled {
+			writeJSON(w, 200, map[string]any{"success": true})
+			return
+		}
+		statusMap[key] = *body.Enabled
+		_ = database.SetSetting("video_source_site_status", marshalJSON(statusMap))
+		writeJSON(w, 200, map[string]any{"success": true})
+		return
+		}
+	}
 	state, err := resolveUserCatSites(database, u)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": "请求失败"})
@@ -1421,6 +1505,33 @@ func handleAPIUserSitesHome(w http.ResponseWriter, r *http.Request, database *db
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数无效"})
 		return
 	}
+	// Admin/shared without user CatPawOpen: update global home toggle.
+	if u != nil && (u.Role == "admin" || u.Role == "shared") {
+		hasUserAPI, err := userHasCatAPIBase(database, u)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": "请求失败"})
+			return
+		}
+		if !hasUserAPI {
+		sites := normalizeSitesFromJSON(database.GetSetting("video_source_sites"))
+		keySet := map[string]struct{}{}
+		for _, s := range sites {
+			if s.Key == "" {
+				continue
+			}
+			keySet[s.Key] = struct{}{}
+		}
+		if _, ok := keySet[key]; !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "站点不存在"})
+			return
+		}
+		homeMap := parseJSONBoolMap(database.GetSetting("video_source_site_home"))
+		homeMap[key] = *body.Home
+		_ = database.SetSetting("video_source_site_home", marshalJSON(homeMap))
+		writeJSON(w, 200, map[string]any{"success": true})
+		return
+		}
+	}
 	state, err := resolveUserCatSites(database, u)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": "请求失败"})
@@ -1449,6 +1560,53 @@ func handleAPIUserSitesOrder(w http.ResponseWriter, r *http.Request, database *d
 		Order []string `json:"order"`
 	}
 	_ = readJSONLoose(r, &body)
+	// Admin/shared without user CatPawOpen: update global order.
+	if u != nil && (u.Role == "admin" || u.Role == "shared") {
+		hasUserAPI, err := userHasCatAPIBase(database, u)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": "请求失败"})
+			return
+		}
+		if !hasUserAPI {
+		sites := normalizeSitesFromJSON(database.GetSetting("video_source_sites"))
+		keySet := map[string]struct{}{}
+		for _, s := range sites {
+			if s.Key == "" {
+				continue
+			}
+			keySet[s.Key] = struct{}{}
+		}
+		next := []string{}
+		seen := map[string]struct{}{}
+		for _, k := range body.Order {
+			key := strings.TrimSpace(k)
+			if key == "" {
+				continue
+			}
+			if _, ok := keySet[key]; !ok {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			next = append(next, key)
+		}
+		for _, s := range sites {
+			if s.Key == "" {
+				continue
+			}
+			if _, ok := seen[s.Key]; ok {
+				continue
+			}
+			seen[s.Key] = struct{}{}
+			next = append(next, s.Key)
+		}
+		_ = database.SetSetting("video_source_site_order", marshalJSON(next))
+		writeJSON(w, 200, map[string]any{"success": true})
+		return
+		}
+	}
 	state, err := resolveUserCatSites(database, u)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": "请求失败"})
