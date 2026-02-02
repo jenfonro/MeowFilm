@@ -69,6 +69,13 @@ jobs:
           repository: jenfonro/MeowFilm-Frontend
           path: MeowFilm-Frontend
 
+      - name: Compute commit metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "BACKEND_COMMIT=$(git rev-parse --short=7 HEAD)" >> "${GITHUB_ENV}"
+          echo "FRONTEND_COMMIT=$(git -C MeowFilm-Frontend rev-parse --short=7 HEAD)" >> "${GITHUB_ENV}"
+
       - name: Build frontend
         shell: bash
         run: |
@@ -110,7 +117,10 @@ jobs:
           ext=""
           if [[ "${GOOS}" == "windows" ]]; then ext=".exe"; fi
           out="dist/meowfilm_${GOOS}_${GOARCH}${ext}"
-          go build -trimpath -ldflags="-s -w -X github.com/jenfonro/meowfilm/server/static.BuildAssetVersion=${{ env.BETA_BUILD_VERSION }}" -o "${out}" .
+          go build -trimpath -ldflags="-s -w \
+            -X github.com/jenfonro/meowfilm/server/static.BuildAssetVersion=${{ env.BETA_BUILD_VERSION }} \
+            -X github.com/jenfonro/meowfilm/server/static.BuildBackendCommit=${{ env.BACKEND_COMMIT }} \
+            -X github.com/jenfonro/meowfilm/server/static.BuildFrontendCommit=${{ env.FRONTEND_COMMIT }}" -o "${out}" .
           echo "built: ${out}"
 
       - uses: actions/upload-artifact@v4
@@ -126,6 +136,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
+
+      - name: Checkout frontend (for release notes)
+        uses: actions/checkout@v4
+        with:
+          repository: jenfonro/MeowFilm-Frontend
+          path: MeowFilm-Frontend
           fetch-depth: 0
 
       - uses: actions/download-artifact@v4
@@ -154,18 +171,36 @@ jobs:
           )"
 
           {
-            echo "beta build: ${{ env.BETA_BUILD_VERSION }}"
-            echo "commit: ${{ github.sha }}"
+            echo "## Build"
+            echo "- version: ${{ env.BETA_BUILD_VERSION }}"
+            echo "- backend: $(git rev-parse --short=7 HEAD) ($(git rev-parse HEAD))"
+            echo "- frontend: $(git -C MeowFilm-Frontend rev-parse --short=7 HEAD) ($(git -C MeowFilm-Frontend rev-parse HEAD))"
             echo
             if [[ -n "${base_tag}" ]]; then
-              echo "base: ${base_tag} ($(git rev-parse "${base_tag}"))"
-              echo "commits since ${base_tag}: $(git rev-list --count "${base_tag}..HEAD")"
+              base_sha="$(git rev-parse "${base_tag}")"
+              base_date="$(git log -1 --format=%cI "${base_tag}")"
+
+              echo "## Backend changes"
+              echo "- base: ${base_tag} (${base_sha})"
+              echo "- commits: $(git rev-list --count "${base_tag}..HEAD")"
               echo
-              git log --oneline "${base_tag}..HEAD"
+              git log --oneline "${base_tag}..HEAD" || true
+              echo
+
+              echo "## Frontend changes"
+              echo "- since: ${base_tag} (${base_date})"
+              echo
+              git -C MeowFilm-Frontend log --oneline --since="${base_date}" || true
             else
-              echo "base: (no stable v* tag found on this branch)"
+              echo "## Backend changes"
+              echo "(no stable v* tag found on this branch)"
               echo
-              git log --oneline -n 50
+              git log --oneline -n 50 || true
+              echo
+
+              echo "## Frontend changes"
+              echo
+              git -C MeowFilm-Frontend log --oneline -n 50 || true
             fi
           } > notes.md
 

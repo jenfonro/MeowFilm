@@ -1,6 +1,7 @@
 package static
 
 import (
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -59,10 +60,15 @@ func Handler(authMw *auth.Auth) http.Handler {
 	frontendCommit := strings.TrimSpace(BuildFrontendCommit)
 
 	uiVersion := "beta"
-	assetVersion := strconv.FormatInt(time.Now().UnixNano()/int64(time.Millisecond), 10)
+	// In local/dev builds we want a stable "beta-<timestamp>" that is computed once per process,
+	// not a per-request value (which can make caching/debugging confusing).
+	betaStamp := strconv.FormatInt(time.Now().UnixNano()/int64(time.Millisecond), 10)
+	assetVersion := betaStamp
 	if semver != "" {
 		uiVersion = "V" + semver
 		assetVersion = semver
+	} else {
+		uiVersion = fmt.Sprintf("beta-%s", betaStamp)
 	}
 	if backendCommit == "" {
 		backendCommit = semver

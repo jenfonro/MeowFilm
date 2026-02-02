@@ -39,6 +39,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Validate version
         shell: bash
@@ -75,6 +77,14 @@ jobs:
         with:
           repository: jenfonro/MeowFilm-Frontend
           path: MeowFilm-Frontend
+          fetch-depth: 0
+
+      - name: Compute commit metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "BACKEND_COMMIT=$(git rev-parse --short=7 HEAD)" >> "${GITHUB_ENV}"
+          echo "FRONTEND_COMMIT=$(git -C MeowFilm-Frontend rev-parse --short=7 HEAD)" >> "${GITHUB_ENV}"
 
       - name: Build frontend
         shell: bash
@@ -117,7 +127,10 @@ jobs:
           ext=""
           if [[ "${GOOS}" == "windows" ]]; then ext=".exe"; fi
           out="dist/meowfilm_${GOOS}_${GOARCH}${ext}"
-          go build -trimpath -ldflags="-s -w -X github.com/jenfonro/meowfilm/server/static.BuildAssetVersion=${{ inputs.version }}" -o "${out}" .
+          go build -trimpath -ldflags="-s -w \
+            -X github.com/jenfonro/meowfilm/server/static.BuildAssetVersion=${{ inputs.version }} \
+            -X github.com/jenfonro/meowfilm/server/static.BuildBackendCommit=${{ env.BACKEND_COMMIT }} \
+            -X github.com/jenfonro/meowfilm/server/static.BuildFrontendCommit=${{ env.FRONTEND_COMMIT }}" -o "${out}" .
           echo "built: ${out}"
 
       - uses: actions/upload-artifact@v4
@@ -131,6 +144,17 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout frontend (for release notes)
+        uses: actions/checkout@v4
+        with:
+          repository: jenfonro/MeowFilm-Frontend
+          path: MeowFilm-Frontend
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           path: release-dist
@@ -143,9 +167,60 @@ jobs:
           find release-dist -maxdepth 2 -type f -print0 | xargs -0 -I{} mv {} dist/
           ls -la dist
 
+      - name: Generate release notes (backend + frontend)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          current_tag="${{ inputs.version }}"
+          base_tag="$(
+            git tag --merged HEAD --list 'v*' \
+              | grep -Ev '(^$|beta|timestamp)' \
+              | grep -vx "${current_tag}" \
+              | sort -V \
+              | tail -n 1 \
+              || true
+          )"
+
+          {
+            echo "## Build"
+            echo "- version: ${current_tag}"
+            echo "- backend: $(git rev-parse --short=7 HEAD) ($(git rev-parse HEAD))"
+            echo "- frontend: $(git -C MeowFilm-Frontend rev-parse --short=7 HEAD) ($(git -C MeowFilm-Frontend rev-parse HEAD))"
+            echo
+
+            if [[ -n "${base_tag}" ]]; then
+              base_sha="$(git rev-parse "${base_tag}")"
+              base_date="$(git log -1 --format=%cI "${base_tag}")"
+
+              echo "## Backend changes"
+              echo "- base: ${base_tag} (${base_sha})"
+              echo "- commits: $(git rev-list --count "${base_tag}..HEAD")"
+              echo
+              git log --oneline "${base_tag}..HEAD" || true
+              echo
+
+              echo "## Frontend changes"
+              echo "- since: ${base_tag} (${base_date})"
+              echo
+              git -C MeowFilm-Frontend log --oneline --since="${base_date}" || true
+            else
+              echo "## Backend changes"
+              echo "(no stable v* tag found on this branch)"
+              echo
+              git log --oneline -n 50 || true
+              echo
+
+              echo "## Frontend changes"
+              echo
+              git -C MeowFilm-Frontend log --oneline -n 50 || true
+            fi
+          } > notes.md
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.version }}
           name: ${{ inputs.version }}
+          body_path: notes.md
           files: dist/*
