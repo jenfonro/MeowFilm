@@ -42,19 +42,25 @@ mkdir -p "${BUILD_DIR}"
 
 BACKEND_COMMIT=""
 FRONTEND_COMMIT=""
-if command -v git >/dev/null 2>&1; then
-  BACKEND_COMMIT="$(git -C "${ROOT_DIR}" rev-parse --short HEAD 2>/dev/null || true)"
-  FRONTEND_COMMIT="$(git -C "${FRONTEND_DIR}" rev-parse --short HEAD 2>/dev/null || true)"
+# By default, local builds should look like "beta-<timestamp>" in the UI (see README).
+# Only embed git commits when explicitly enabled (or when ASSET_VERSION is set for release-like builds).
+EMBED_COMMITS="${MEOWFILM_EMBED_COMMITS:-}"
+if [[ -z "${EMBED_COMMITS}" ]] && [[ -n "${ASSET_VERSION:-}" ]]; then
+  EMBED_COMMITS="1"
 fi
 
 LDFLAGS=""
-if [[ -n "${BACKEND_COMMIT}" ]]; then
-  LDFLAGS+=" -X github.com/jenfonro/meowfilm/server/static.BuildBackendCommit=${BACKEND_COMMIT}"
+if [[ "${EMBED_COMMITS}" == "1" ]] && command -v git >/dev/null 2>&1; then
+  BACKEND_COMMIT="$(git -C "${ROOT_DIR}" rev-parse --short HEAD 2>/dev/null || true)"
+  FRONTEND_COMMIT="$(git -C "${FRONTEND_DIR}" rev-parse --short HEAD 2>/dev/null || true)"
+  if [[ -n "${BACKEND_COMMIT}" ]]; then
+    LDFLAGS+=" -X github.com/jenfonro/meowfilm/server/static.BuildBackendCommit=${BACKEND_COMMIT}"
+  fi
+  if [[ -n "${FRONTEND_COMMIT}" ]]; then
+    LDFLAGS+=" -X github.com/jenfonro/meowfilm/server/static.BuildFrontendCommit=${FRONTEND_COMMIT}"
+  fi
+  LDFLAGS="${LDFLAGS# }"
 fi
-if [[ -n "${FRONTEND_COMMIT}" ]]; then
-  LDFLAGS+=" -X github.com/jenfonro/meowfilm/server/static.BuildFrontendCommit=${FRONTEND_COMMIT}"
-fi
-LDFLAGS="${LDFLAGS# }"
 
 if [[ -n "${LDFLAGS}" ]]; then
   go build -ldflags "${LDFLAGS}" -o "${BUILD_DIR}/meowfilm" .

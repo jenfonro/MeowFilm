@@ -128,9 +128,7 @@ jobs:
           if [[ "${GOOS}" == "windows" ]]; then ext=".exe"; fi
           out="dist/meowfilm_${GOOS}_${GOARCH}${ext}"
           go build -trimpath -ldflags="-s -w \
-            -X github.com/jenfonro/meowfilm/server/static.BuildAssetVersion=${{ inputs.version }} \
-            -X github.com/jenfonro/meowfilm/server/static.BuildBackendCommit=${{ env.BACKEND_COMMIT }} \
-            -X github.com/jenfonro/meowfilm/server/static.BuildFrontendCommit=${{ env.FRONTEND_COMMIT }}" -o "${out}" .
+            -X github.com/jenfonro/meowfilm/server/static.BuildAssetVersion=${{ inputs.version }}" -o "${out}" .
           echo "built: ${out}"
 
       - uses: actions/upload-artifact@v4

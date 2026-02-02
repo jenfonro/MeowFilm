@@ -71,10 +71,10 @@ func Handler(authMw *auth.Auth) http.Handler {
 		uiVersion = fmt.Sprintf("beta-%s", betaStamp)
 	}
 	if backendCommit == "" {
-		backendCommit = semver
+		backendCommit = uiVersion
 	}
 	if frontendCommit == "" {
-		frontendCommit = semver
+		frontendCommit = uiVersion
 	}
 
 	indexHTML := mustReadFile("index.html")
