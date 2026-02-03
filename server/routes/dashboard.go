@@ -24,6 +24,10 @@ func DashboardHandler(database *db.DB, authMw *auth.Auth) http.Handler {
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardCatPawOpenSave(w, r, database)
 			})).ServeHTTP(w, r)
+		case "/catpawopen/delete":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardCatPawOpenDelete(w, r, database)
+			})).ServeHTTP(w, r)
 		case "/site/settings":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardSiteSettings(w, r, database)
@@ -215,19 +219,178 @@ func handleDashboardCatPawOpenSave(w http.ResponseWriter, r *http.Request, datab
 		return
 	}
 	parseForm(r)
-	prev := database.GetSetting("catpawopen_api_base")
+	prevBase := database.GetSetting("catpawopen_api_base")
+	serverKey := strings.TrimSpace(r.FormValue("catPawOpenServerKey"))
+	name := strings.TrimSpace(r.FormValue("catPawOpenName"))
 	base := r.FormValue("catPawOpenApiBase")
-	normalized := normalizeCatPawOpenAPIBase(base)
-	if normalized == "" {
+	normalizedBase := normalizeCatPawOpenAPIBase(base)
+	if normalizedBase == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "CatPawOpen 接口地址不是合法 URL"})
 		return
 	}
-	_ = database.SetSetting("catpawopen_api_base", normalized)
+
+	type catPawOpenServer struct {
+		Name    string `json:"name"`
+		APIBase string `json:"apiBase"`
+	}
+	parseServers := func(raw string) []catPawOpenServer {
+		var out []catPawOpenServer
+		_ = json.Unmarshal([]byte(defaultString(strings.TrimSpace(raw), "[]")), &out)
+		clean := make([]catPawOpenServer, 0, len(out))
+		for _, it := range out {
+			n := strings.TrimSpace(it.Name)
+			a := normalizeCatPawOpenAPIBase(it.APIBase)
+			if n == "" || a == "" {
+				continue
+			}
+			clean = append(clean, catPawOpenServer{Name: n, APIBase: a})
+		}
+		return clean
+	}
+
+	servers := parseServers(database.GetSetting("catpawopen_servers"))
+	if len(servers) == 0 {
+		legacyBase := normalizeCatPawOpenAPIBase(database.GetSetting("catpawopen_api_base"))
+		if legacyBase != "" {
+			legacyName := strings.TrimSpace(database.GetSetting("catpawopen_name"))
+			if legacyName == "" {
+				legacyName = "默认"
+			}
+			servers = append(servers, catPawOpenServer{Name: legacyName, APIBase: legacyBase})
+		}
+	}
+
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "服务器名称不能为空"})
+		return
+	}
+
+	// "__new__" (front-end draft) behaves like "append".
+	key := serverKey
+	if key == "__new__" {
+		key = ""
+	}
+
+	existsName := func(n string, skipIdx int) bool {
+		for i, s := range servers {
+			if i == skipIdx {
+				continue
+			}
+			if s.Name == n {
+				return true
+			}
+		}
+		return false
+	}
+
+	updatedIdx := -1
+	if key != "" {
+		for i, s := range servers {
+			if s.Name == key {
+				updatedIdx = i
+				break
+			}
+		}
+	}
+	if updatedIdx >= 0 {
+		if existsName(name, updatedIdx) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "服务器名称已存在"})
+			return
+		}
+		servers[updatedIdx] = catPawOpenServer{Name: name, APIBase: normalizedBase}
+	} else {
+		if existsName(name, -1) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "服务器名称已存在"})
+			return
+		}
+		servers = append(servers, catPawOpenServer{Name: name, APIBase: normalizedBase})
+	}
+
+	serversJSON, _ := json.Marshal(servers)
+	_ = database.SetSetting("catpawopen_servers", string(serversJSON))
+	// Keep legacy single fields as the currently saved server for compatibility.
+	_ = database.SetSetting("catpawopen_name", name)
+	_ = database.SetSetting("catpawopen_api_base", normalizedBase)
 	writeJSON(w, 200, map[string]any{
 		"success":        true,
-		"apiBaseChanged": strings.TrimSpace(prev) != strings.TrimSpace(normalized),
+		"apiBaseChanged": strings.TrimSpace(prevBase) != strings.TrimSpace(normalizedBase),
 		"proxySync":      map[string]any{"ok": nil, "skipped": true},
 		"goProxySync":    map[string]any{"ok": nil, "skipped": true},
+	})
+}
+
+func handleDashboardCatPawOpenDelete(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	parseForm(r)
+	key := strings.TrimSpace(r.FormValue("catPawOpenServerKey"))
+	if key == "" || key == "__new__" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数无效"})
+		return
+	}
+
+	type catPawOpenServer struct {
+		Name    string `json:"name"`
+		APIBase string `json:"apiBase"`
+	}
+	parseServers := func(raw string) []catPawOpenServer {
+		var out []catPawOpenServer
+		_ = json.Unmarshal([]byte(defaultString(strings.TrimSpace(raw), "[]")), &out)
+		clean := make([]catPawOpenServer, 0, len(out))
+		for _, it := range out {
+			n := strings.TrimSpace(it.Name)
+			a := normalizeCatPawOpenAPIBase(it.APIBase)
+			if n == "" || a == "" {
+				continue
+			}
+			clean = append(clean, catPawOpenServer{Name: n, APIBase: a})
+		}
+		return clean
+	}
+
+	servers := parseServers(database.GetSetting("catpawopen_servers"))
+	if len(servers) == 0 {
+		legacyBase := normalizeCatPawOpenAPIBase(database.GetSetting("catpawopen_api_base"))
+		if legacyBase != "" {
+			legacyName := strings.TrimSpace(database.GetSetting("catpawopen_name"))
+			if legacyName == "" {
+				legacyName = "默认"
+			}
+			servers = append(servers, catPawOpenServer{Name: legacyName, APIBase: legacyBase})
+		}
+	}
+
+	removed := false
+	next := make([]catPawOpenServer, 0, len(servers))
+	for _, s := range servers {
+		if s.Name == key {
+			removed = true
+			continue
+		}
+		next = append(next, s)
+	}
+	if !removed {
+		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "message": "服务器不存在"})
+		return
+	}
+
+	serversJSON, _ := json.Marshal(next)
+	_ = database.SetSetting("catpawopen_servers", string(serversJSON))
+
+	// Keep legacy single fields aligned to the first remaining server (or clear if none).
+	if len(next) == 0 {
+		_ = database.SetSetting("catpawopen_name", "")
+		_ = database.SetSetting("catpawopen_api_base", "")
+	} else {
+		_ = database.SetSetting("catpawopen_name", next[0].Name)
+		_ = database.SetSetting("catpawopen_api_base", next[0].APIBase)
+	}
+
+	writeJSON(w, 200, map[string]any{
+		"success": true,
+		"servers": next,
 	})
 }
 
@@ -236,9 +399,36 @@ func handleDashboardSiteSettings(w http.ResponseWriter, r *http.Request, databas
 		methodNotAllowed(w)
 		return
 	}
+	type catPawOpenServer struct {
+		Name    string `json:"name"`
+		APIBase string `json:"apiBase"`
+	}
+	var servers []catPawOpenServer
+	_ = json.Unmarshal([]byte(defaultString(database.GetSetting("catpawopen_servers"), "[]")), &servers)
+	cleanServers := make([]catPawOpenServer, 0, len(servers))
+	for _, s := range servers {
+		n := strings.TrimSpace(s.Name)
+		a := normalizeCatPawOpenAPIBase(s.APIBase)
+		if n == "" || a == "" {
+			continue
+		}
+		cleanServers = append(cleanServers, catPawOpenServer{Name: n, APIBase: a})
+	}
+	if len(cleanServers) == 0 {
+		legacyBase := normalizeCatPawOpenAPIBase(database.GetSetting("catpawopen_api_base"))
+		if legacyBase != "" {
+			legacyName := strings.TrimSpace(database.GetSetting("catpawopen_name"))
+			if legacyName == "" {
+				legacyName = "默认"
+			}
+			cleanServers = append(cleanServers, catPawOpenServer{Name: legacyName, APIBase: legacyBase})
+		}
+	}
 	writeJSON(w, 200, map[string]any{
 		"success":              true,
 		"siteName":             database.GetSetting("site_name"),
+		"catPawOpenServers":    cleanServers,
+		"catPawOpenName":       database.GetSetting("catpawopen_name"),
 		"catPawOpenApiBase":    database.GetSetting("catpawopen_api_base"),
 		"openListApiBase":      database.GetSetting("openlist_api_base"),
 		"openListToken":        database.GetSetting("openlist_token"),
