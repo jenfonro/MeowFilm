@@ -7,9 +7,10 @@ import (
 )
 
 type goProxyServer struct {
-	Name string      `json:"name"`
-	Base string      `json:"base"`
-	Pans goProxyPans `json:"pans"`
+	Name        string      `json:"name"`
+	DisplayName string      `json:"displayName"`
+	Base        string      `json:"base"`
+	Pans        goProxyPans `json:"pans"`
 }
 
 type goProxyPans struct {
@@ -27,6 +28,7 @@ func normalizeGoProxyServers(value string) []goProxyServer {
 	for _, it := range list {
 		var base string
 		var name string
+		var displayName string
 		var pans map[string]any
 		switch vv := it.(type) {
 		case string:
@@ -34,6 +36,9 @@ func normalizeGoProxyServers(value string) []goProxyServer {
 		case map[string]any:
 			if n, ok := vv["name"].(string); ok {
 				name = strings.TrimSpace(n)
+			}
+			if n, ok := vv["displayName"].(string); ok {
+				displayName = strings.TrimSpace(n)
 			}
 			if b, ok := vv["base"].(string); ok {
 				base = normalizeHTTPBase(b)
@@ -58,6 +63,9 @@ func normalizeGoProxyServers(value string) []goProxyServer {
 				}
 			}
 		}
+		if displayName == "" {
+			displayName = name
+		}
 		baidu := true
 		quark := true
 		if pans != nil {
@@ -68,7 +76,12 @@ func normalizeGoProxyServers(value string) []goProxyServer {
 				quark = parseAnyBool(v, true)
 			}
 		}
-		out = append(out, goProxyServer{Name: name, Base: base, Pans: goProxyPans{Baidu: baidu, Quark: quark}})
+		out = append(out, goProxyServer{
+			Name:        name,
+			DisplayName: displayName,
+			Base:        base,
+			Pans:        goProxyPans{Baidu: baidu, Quark: quark},
+		})
 	}
 	return out
 }
