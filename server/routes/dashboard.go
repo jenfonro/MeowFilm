@@ -219,7 +219,8 @@ func handleDashboardCatPawOpenSave(w http.ResponseWriter, r *http.Request, datab
 		return
 	}
 	parseForm(r)
-	prevBase := database.GetSetting("catpawopen_api_base")
+	servers := parseCatPawOpenServers(database.GetSetting("catpawopen_servers"))
+	prevBase := resolveCatPawOpenActiveBase(servers, database.GetSetting("catpawopen_active"))
 	serverKey := strings.TrimSpace(r.FormValue("catPawOpenServerKey"))
 	name := strings.TrimSpace(r.FormValue("catPawOpenName"))
 	base := r.FormValue("catPawOpenApiBase")
@@ -227,37 +228,6 @@ func handleDashboardCatPawOpenSave(w http.ResponseWriter, r *http.Request, datab
 	if normalizedBase == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "CatPawOpen 接口地址不是合法 URL"})
 		return
-	}
-
-	type catPawOpenServer struct {
-		Name    string `json:"name"`
-		APIBase string `json:"apiBase"`
-	}
-	parseServers := func(raw string) []catPawOpenServer {
-		var out []catPawOpenServer
-		_ = json.Unmarshal([]byte(defaultString(strings.TrimSpace(raw), "[]")), &out)
-		clean := make([]catPawOpenServer, 0, len(out))
-		for _, it := range out {
-			n := strings.TrimSpace(it.Name)
-			a := normalizeCatPawOpenAPIBase(it.APIBase)
-			if n == "" || a == "" {
-				continue
-			}
-			clean = append(clean, catPawOpenServer{Name: n, APIBase: a})
-		}
-		return clean
-	}
-
-	servers := parseServers(database.GetSetting("catpawopen_servers"))
-	if len(servers) == 0 {
-		legacyBase := normalizeCatPawOpenAPIBase(database.GetSetting("catpawopen_api_base"))
-		if legacyBase != "" {
-			legacyName := strings.TrimSpace(database.GetSetting("catpawopen_name"))
-			if legacyName == "" {
-				legacyName = "默认"
-			}
-			servers = append(servers, catPawOpenServer{Name: legacyName, APIBase: legacyBase})
-		}
 	}
 
 	if name == "" {
@@ -308,9 +278,7 @@ func handleDashboardCatPawOpenSave(w http.ResponseWriter, r *http.Request, datab
 
 	serversJSON, _ := json.Marshal(servers)
 	_ = database.SetSetting("catpawopen_servers", string(serversJSON))
-	// Keep legacy single fields as the currently saved server for compatibility.
-	_ = database.SetSetting("catpawopen_name", name)
-	_ = database.SetSetting("catpawopen_api_base", normalizedBase)
+	_ = database.SetSetting("catpawopen_active", name)
 	writeJSON(w, 200, map[string]any{
 		"success":        true,
 		"apiBaseChanged": strings.TrimSpace(prevBase) != strings.TrimSpace(normalizedBase),
@@ -330,37 +298,7 @@ func handleDashboardCatPawOpenDelete(w http.ResponseWriter, r *http.Request, dat
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数无效"})
 		return
 	}
-
-	type catPawOpenServer struct {
-		Name    string `json:"name"`
-		APIBase string `json:"apiBase"`
-	}
-	parseServers := func(raw string) []catPawOpenServer {
-		var out []catPawOpenServer
-		_ = json.Unmarshal([]byte(defaultString(strings.TrimSpace(raw), "[]")), &out)
-		clean := make([]catPawOpenServer, 0, len(out))
-		for _, it := range out {
-			n := strings.TrimSpace(it.Name)
-			a := normalizeCatPawOpenAPIBase(it.APIBase)
-			if n == "" || a == "" {
-				continue
-			}
-			clean = append(clean, catPawOpenServer{Name: n, APIBase: a})
-		}
-		return clean
-	}
-
-	servers := parseServers(database.GetSetting("catpawopen_servers"))
-	if len(servers) == 0 {
-		legacyBase := normalizeCatPawOpenAPIBase(database.GetSetting("catpawopen_api_base"))
-		if legacyBase != "" {
-			legacyName := strings.TrimSpace(database.GetSetting("catpawopen_name"))
-			if legacyName == "" {
-				legacyName = "默认"
-			}
-			servers = append(servers, catPawOpenServer{Name: legacyName, APIBase: legacyBase})
-		}
-	}
+	servers := parseCatPawOpenServers(database.GetSetting("catpawopen_servers"))
 
 	removed := false
 	next := make([]catPawOpenServer, 0, len(servers))
@@ -378,19 +316,13 @@ func handleDashboardCatPawOpenDelete(w http.ResponseWriter, r *http.Request, dat
 
 	serversJSON, _ := json.Marshal(next)
 	_ = database.SetSetting("catpawopen_servers", string(serversJSON))
-
-	// Keep legacy single fields aligned to the first remaining server (or clear if none).
-	if len(next) == 0 {
-		_ = database.SetSetting("catpawopen_name", "")
-		_ = database.SetSetting("catpawopen_api_base", "")
-	} else {
-		_ = database.SetSetting("catpawopen_name", next[0].Name)
-		_ = database.SetSetting("catpawopen_api_base", next[0].APIBase)
-	}
+	active := pickCatPawOpenActiveName(next, database.GetSetting("catpawopen_active"))
+	_ = database.SetSetting("catpawopen_active", active)
 
 	writeJSON(w, 200, map[string]any{
 		"success": true,
 		"servers": next,
+		"active":  active,
 	})
 }
 
@@ -399,37 +331,13 @@ func handleDashboardSiteSettings(w http.ResponseWriter, r *http.Request, databas
 		methodNotAllowed(w)
 		return
 	}
-	type catPawOpenServer struct {
-		Name    string `json:"name"`
-		APIBase string `json:"apiBase"`
-	}
-	var servers []catPawOpenServer
-	_ = json.Unmarshal([]byte(defaultString(database.GetSetting("catpawopen_servers"), "[]")), &servers)
-	cleanServers := make([]catPawOpenServer, 0, len(servers))
-	for _, s := range servers {
-		n := strings.TrimSpace(s.Name)
-		a := normalizeCatPawOpenAPIBase(s.APIBase)
-		if n == "" || a == "" {
-			continue
-		}
-		cleanServers = append(cleanServers, catPawOpenServer{Name: n, APIBase: a})
-	}
-	if len(cleanServers) == 0 {
-		legacyBase := normalizeCatPawOpenAPIBase(database.GetSetting("catpawopen_api_base"))
-		if legacyBase != "" {
-			legacyName := strings.TrimSpace(database.GetSetting("catpawopen_name"))
-			if legacyName == "" {
-				legacyName = "默认"
-			}
-			cleanServers = append(cleanServers, catPawOpenServer{Name: legacyName, APIBase: legacyBase})
-		}
-	}
+	servers := parseCatPawOpenServers(database.GetSetting("catpawopen_servers"))
+	active := pickCatPawOpenActiveName(servers, database.GetSetting("catpawopen_active"))
 	writeJSON(w, 200, map[string]any{
 		"success":              true,
 		"siteName":             database.GetSetting("site_name"),
-		"catPawOpenServers":    cleanServers,
-		"catPawOpenName":       database.GetSetting("catpawopen_name"),
-		"catPawOpenApiBase":    database.GetSetting("catpawopen_api_base"),
+		"catPawOpenServers":    servers,
+		"catPawOpenActive":     active,
 		"openListApiBase":      database.GetSetting("openlist_api_base"),
 		"openListToken":        database.GetSetting("openlist_token"),
 		"openListQuarkTvMode":  strings.TrimSpace(database.GetSetting("openlist_quark_tv_mode")) == "1",
@@ -553,11 +461,11 @@ func handleDashboardPanSettings(w http.ResponseWriter, r *http.Request, database
 			cur["password"] = password
 			payload = map[string]any{"username": username, "password": password}
 		}
-			store[key] = cur
-			b, _ := json.Marshal(store)
-			_ = database.SetSetting("pan_login_settings", string(b))
-			writeJSON(w, 200, map[string]any{"success": true, "settings": store, "sync": map[string]any{"ok": nil, "skipped": true}, "payload": payload})
-		default:
+		store[key] = cur
+		b, _ := json.Marshal(store)
+		_ = database.SetSetting("pan_login_settings", string(b))
+		writeJSON(w, 200, map[string]any{"success": true, "settings": store, "sync": map[string]any{"ok": nil, "skipped": true}, "payload": payload})
+	default:
 		methodNotAllowed(w)
 	}
 }

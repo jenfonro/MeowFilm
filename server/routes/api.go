@@ -155,7 +155,8 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 			settings["doubanImgProxy"] = defaultString(database.GetSetting("douban_img_proxy"), "direct-browser")
 			settings["doubanImgCustom"] = database.GetSetting("douban_img_custom")
 			settings["videoSourceApiBase"] = database.GetSetting("video_source_api_base")
-			settings["catPawOpenApiBase"] = database.GetSetting("catpawopen_api_base")
+			catPawOpenServers := parseCatPawOpenServers(database.GetSetting("catpawopen_servers"))
+			settings["catPawOpenApiBase"] = resolveCatPawOpenActiveBase(catPawOpenServers, database.GetSetting("catpawopen_active"))
 			settings["openListApiBase"] = database.GetSetting("openlist_api_base")
 			settings["openListToken"] = database.GetSetting("openlist_token")
 			settings["openListQuarkTvMode"] = strings.TrimSpace(database.GetSetting("openlist_quark_tv_mode")) == "1"
@@ -165,13 +166,7 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 			settings["goProxyServers"] = normalizeGoProxyServers(database.GetSetting("goproxy_servers"))
 
 			settings["magicEpisodeRules"] = parseJSONStringArray(database.GetSetting("magic_episode_rules"))
-			cleanRules := parseJSONStringArray(database.GetSetting("magic_episode_clean_regex_rules"))
-			settings["magicEpisodeCleanRegexRules"] = cleanRules
-			if len(cleanRules) > 0 {
-				settings["magicEpisodeCleanRegex"] = cleanRules[0]
-			} else {
-				settings["magicEpisodeCleanRegex"] = strings.TrimSpace(database.GetSetting("magic_episode_clean_regex"))
-			}
+			settings["magicEpisodeCleanRegexRules"] = parseJSONStringArray(database.GetSetting("magic_episode_clean_regex_rules"))
 			settings["magicAggregateRules"] = parseJSONStringArray(database.GetSetting("magic_aggregate_rules"))
 			settings["magicAggregateRegexRules"] = parseJSONStringArray(database.GetSetting("magic_aggregate_regex_rules"))
 
@@ -1332,8 +1327,8 @@ func handleAPIUserSites(w http.ResponseWriter, r *http.Request, database *db.DB)
 		}
 		if !hasUserAPI {
 			writeJSON(w, 200, map[string]any{
-				"success":           true,
-				"sites":             mergeVideoSourceSites(database),
+				"success":            true,
+				"sites":              mergeVideoSourceSites(database),
 				"requiresCatApiBase": false,
 			})
 			return
@@ -1379,27 +1374,27 @@ func handleAPIUserSitesAvailability(w http.ResponseWriter, r *http.Request, data
 			return
 		}
 		if !hasUserAPI {
-		sites := normalizeSitesFromJSON(database.GetSetting("video_source_sites"))
-		keySet := map[string]struct{}{}
-		for _, s := range sites {
-			if s.Key == "" {
-				continue
+			sites := normalizeSitesFromJSON(database.GetSetting("video_source_sites"))
+			keySet := map[string]struct{}{}
+			for _, s := range sites {
+				if s.Key == "" {
+					continue
+				}
+				keySet[s.Key] = struct{}{}
 			}
-			keySet[s.Key] = struct{}{}
-		}
-		if _, ok := keySet[key]; !ok {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "站点不存在"})
-			return
-		}
-		availability := parseAvailabilityJSON(database.GetSetting("video_source_site_availability"))
-		if availability[key] == avail {
+			if _, ok := keySet[key]; !ok {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "站点不存在"})
+				return
+			}
+			availability := parseAvailabilityJSON(database.GetSetting("video_source_site_availability"))
+			if availability[key] == avail {
+				writeJSON(w, 200, map[string]any{"success": true})
+				return
+			}
+			availability[key] = avail
+			_ = database.SetSetting("video_source_site_availability", marshalJSON(availability))
 			writeJSON(w, 200, map[string]any{"success": true})
 			return
-		}
-		availability[key] = avail
-		_ = database.SetSetting("video_source_site_availability", marshalJSON(availability))
-		writeJSON(w, 200, map[string]any{"success": true})
-		return
 		}
 	}
 	state, err := resolveUserCatSites(database, u)
@@ -1444,31 +1439,31 @@ func handleAPIUserSitesStatus(w http.ResponseWriter, r *http.Request, database *
 			return
 		}
 		if !hasUserAPI {
-		sites := normalizeSitesFromJSON(database.GetSetting("video_source_sites"))
-		keySet := map[string]struct{}{}
-		for _, s := range sites {
-			if s.Key == "" {
-				continue
+			sites := normalizeSitesFromJSON(database.GetSetting("video_source_sites"))
+			keySet := map[string]struct{}{}
+			for _, s := range sites {
+				if s.Key == "" {
+					continue
+				}
+				keySet[s.Key] = struct{}{}
 			}
-			keySet[s.Key] = struct{}{}
-		}
-		if _, ok := keySet[key]; !ok {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "站点不存在"})
-			return
-		}
-		statusMap := parseJSONBoolMap(database.GetSetting("video_source_site_status"))
-		cur, ok := statusMap[key]
-		if !ok {
-			cur = true
-		}
-		if cur == *body.Enabled {
+			if _, ok := keySet[key]; !ok {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "站点不存在"})
+				return
+			}
+			statusMap := parseJSONBoolMap(database.GetSetting("video_source_site_status"))
+			cur, ok := statusMap[key]
+			if !ok {
+				cur = true
+			}
+			if cur == *body.Enabled {
+				writeJSON(w, 200, map[string]any{"success": true})
+				return
+			}
+			statusMap[key] = *body.Enabled
+			_ = database.SetSetting("video_source_site_status", marshalJSON(statusMap))
 			writeJSON(w, 200, map[string]any{"success": true})
 			return
-		}
-		statusMap[key] = *body.Enabled
-		_ = database.SetSetting("video_source_site_status", marshalJSON(statusMap))
-		writeJSON(w, 200, map[string]any{"success": true})
-		return
 		}
 	}
 	state, err := resolveUserCatSites(database, u)
@@ -1513,23 +1508,23 @@ func handleAPIUserSitesHome(w http.ResponseWriter, r *http.Request, database *db
 			return
 		}
 		if !hasUserAPI {
-		sites := normalizeSitesFromJSON(database.GetSetting("video_source_sites"))
-		keySet := map[string]struct{}{}
-		for _, s := range sites {
-			if s.Key == "" {
-				continue
+			sites := normalizeSitesFromJSON(database.GetSetting("video_source_sites"))
+			keySet := map[string]struct{}{}
+			for _, s := range sites {
+				if s.Key == "" {
+					continue
+				}
+				keySet[s.Key] = struct{}{}
 			}
-			keySet[s.Key] = struct{}{}
-		}
-		if _, ok := keySet[key]; !ok {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "站点不存在"})
+			if _, ok := keySet[key]; !ok {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "站点不存在"})
+				return
+			}
+			homeMap := parseJSONBoolMap(database.GetSetting("video_source_site_home"))
+			homeMap[key] = *body.Home
+			_ = database.SetSetting("video_source_site_home", marshalJSON(homeMap))
+			writeJSON(w, 200, map[string]any{"success": true})
 			return
-		}
-		homeMap := parseJSONBoolMap(database.GetSetting("video_source_site_home"))
-		homeMap[key] = *body.Home
-		_ = database.SetSetting("video_source_site_home", marshalJSON(homeMap))
-		writeJSON(w, 200, map[string]any{"success": true})
-		return
 		}
 	}
 	state, err := resolveUserCatSites(database, u)
@@ -1568,43 +1563,43 @@ func handleAPIUserSitesOrder(w http.ResponseWriter, r *http.Request, database *d
 			return
 		}
 		if !hasUserAPI {
-		sites := normalizeSitesFromJSON(database.GetSetting("video_source_sites"))
-		keySet := map[string]struct{}{}
-		for _, s := range sites {
-			if s.Key == "" {
-				continue
+			sites := normalizeSitesFromJSON(database.GetSetting("video_source_sites"))
+			keySet := map[string]struct{}{}
+			for _, s := range sites {
+				if s.Key == "" {
+					continue
+				}
+				keySet[s.Key] = struct{}{}
 			}
-			keySet[s.Key] = struct{}{}
-		}
-		next := []string{}
-		seen := map[string]struct{}{}
-		for _, k := range body.Order {
-			key := strings.TrimSpace(k)
-			if key == "" {
-				continue
+			next := []string{}
+			seen := map[string]struct{}{}
+			for _, k := range body.Order {
+				key := strings.TrimSpace(k)
+				if key == "" {
+					continue
+				}
+				if _, ok := keySet[key]; !ok {
+					continue
+				}
+				if _, ok := seen[key]; ok {
+					continue
+				}
+				seen[key] = struct{}{}
+				next = append(next, key)
 			}
-			if _, ok := keySet[key]; !ok {
-				continue
+			for _, s := range sites {
+				if s.Key == "" {
+					continue
+				}
+				if _, ok := seen[s.Key]; ok {
+					continue
+				}
+				seen[s.Key] = struct{}{}
+				next = append(next, s.Key)
 			}
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			next = append(next, key)
-		}
-		for _, s := range sites {
-			if s.Key == "" {
-				continue
-			}
-			if _, ok := seen[s.Key]; ok {
-				continue
-			}
-			seen[s.Key] = struct{}{}
-			next = append(next, s.Key)
-		}
-		_ = database.SetSetting("video_source_site_order", marshalJSON(next))
-		writeJSON(w, 200, map[string]any{"success": true})
-		return
+			_ = database.SetSetting("video_source_site_order", marshalJSON(next))
+			writeJSON(w, 200, map[string]any{"success": true})
+			return
 		}
 	}
 	state, err := resolveUserCatSites(database, u)
