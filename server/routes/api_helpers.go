@@ -43,6 +43,15 @@ func normalizeGoProxyServers(value string) []goProxyServer {
 			if b, ok := vv["base"].(string); ok {
 				base = normalizeHTTPBase(b)
 			}
+			if base == "" {
+				if b, ok := vv["apiBase"].(string); ok {
+					base = normalizeHTTPBase(b)
+				} else if b, ok := vv["api"].(string); ok {
+					base = normalizeHTTPBase(b)
+				} else if b, ok := vv["url"].(string); ok {
+					base = normalizeHTTPBase(b)
+				}
+			}
 			if p, ok := vv["pans"].(map[string]any); ok {
 				pans = p
 			}
