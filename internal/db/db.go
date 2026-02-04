@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -159,38 +160,59 @@ func (d *DB) SettingsVersion() int64 {
 }
 
 func (d *DB) initSchema(fresh bool) error {
-	_, err := d.db.Exec(`
-		CREATE TABLE IF NOT EXISTS settings (
-		  key TEXT PRIMARY KEY,
-		  value TEXT
-		);
-		CREATE TABLE IF NOT EXISTS users (
-		  id INTEGER PRIMARY KEY AUTOINCREMENT,
-		  username TEXT UNIQUE NOT NULL,
-		  password TEXT NOT NULL,
-		  role TEXT DEFAULT 'user',
-		  status TEXT DEFAULT 'active',
-		  cat_api_base TEXT DEFAULT '',
-		  cat_api_key TEXT DEFAULT '',
-		  cat_proxy TEXT DEFAULT '',
-		  search_thread_count INTEGER DEFAULT 5,
-		  cat_sites TEXT DEFAULT '[]',
-		  cat_site_status TEXT DEFAULT '{}',
-		  cat_site_home TEXT DEFAULT '{}',
-		  cat_site_order TEXT DEFAULT '[]',
-		  cat_site_availability TEXT DEFAULT '{}',
-		  cat_search_order TEXT DEFAULT '[]',
-		  cat_search_cover_site TEXT DEFAULT ''
-		);
-		CREATE TABLE IF NOT EXISTS search_history (
-		  id INTEGER PRIMARY KEY AUTOINCREMENT,
-		  user_id INTEGER NOT NULL,
-		  keyword TEXT NOT NULL,
-		  updated_at INTEGER NOT NULL,
-		  UNIQUE(user_id, keyword)
-		);
-		CREATE INDEX IF NOT EXISTS idx_search_history_user_id_updated_at ON search_history(user_id, updated_at DESC);
-			CREATE TABLE IF NOT EXISTS play_history (
+	if fresh {
+		_, err := d.db.Exec(`
+			CREATE TABLE IF NOT EXISTS settings (
+			  key TEXT PRIMARY KEY,
+			  value TEXT
+			);
+			CREATE TABLE IF NOT EXISTS users (
+			  id INTEGER PRIMARY KEY AUTOINCREMENT,
+			  username TEXT UNIQUE NOT NULL,
+			  password TEXT NOT NULL,
+			  role TEXT DEFAULT 'user',
+			  status TEXT DEFAULT 'active',
+			  cat_api_base TEXT DEFAULT '',
+			  cat_api_key TEXT DEFAULT '',
+			  cat_proxy TEXT DEFAULT '',
+			  search_thread_count INTEGER DEFAULT 5,
+			  cat_sites TEXT DEFAULT '[]',
+			  cat_site_status TEXT DEFAULT '{}',
+			  cat_site_home TEXT DEFAULT '{}',
+			  cat_site_order TEXT DEFAULT '[]',
+			  cat_site_availability TEXT DEFAULT '{}',
+			  cat_search_order TEXT DEFAULT '[]',
+			  cat_search_cover_site TEXT DEFAULT ''
+			);
+			CREATE TABLE IF NOT EXISTS search_history (
+			  id INTEGER PRIMARY KEY AUTOINCREMENT,
+			  user_id INTEGER NOT NULL,
+			  keyword TEXT NOT NULL,
+			  updated_at INTEGER NOT NULL,
+			  UNIQUE(user_id, keyword)
+			);
+			CREATE INDEX IF NOT EXISTS idx_search_history_user_id_updated_at ON search_history(user_id, updated_at DESC);
+				CREATE TABLE IF NOT EXISTS play_history (
+				  id INTEGER PRIMARY KEY AUTOINCREMENT,
+				  user_id INTEGER NOT NULL,
+				  site_key TEXT NOT NULL,
+				  site_name TEXT DEFAULT '',
+				  spider_api TEXT NOT NULL,
+				  video_id TEXT NOT NULL,
+				  video_title TEXT NOT NULL,
+				  video_poster TEXT DEFAULT '',
+				  video_remark TEXT DEFAULT '',
+				  pan_label TEXT DEFAULT '',
+				  play_flag TEXT DEFAULT '',
+				  content_key TEXT DEFAULT '',
+				  episode_index INTEGER DEFAULT 0,
+				  episode_name TEXT DEFAULT '',
+				  updated_at INTEGER NOT NULL,
+				  UNIQUE(user_id, site_key, video_id)
+				);
+			CREATE INDEX IF NOT EXISTS idx_play_history_user_id_updated_at ON play_history(user_id, updated_at DESC);
+			CREATE INDEX IF NOT EXISTS idx_play_history_user_id_content_key_updated_at ON play_history(user_id, content_key, updated_at DESC);
+			CREATE TABLE IF NOT EXISTS favorites (
 			  id INTEGER PRIMARY KEY AUTOINCREMENT,
 			  user_id INTEGER NOT NULL,
 			  site_key TEXT NOT NULL,
@@ -200,49 +222,27 @@ func (d *DB) initSchema(fresh bool) error {
 			  video_title TEXT NOT NULL,
 			  video_poster TEXT DEFAULT '',
 			  video_remark TEXT DEFAULT '',
-			  pan_label TEXT DEFAULT '',
-			  play_flag TEXT DEFAULT '',
-			  content_key TEXT DEFAULT '',
-			  episode_index INTEGER DEFAULT 0,
-			  episode_name TEXT DEFAULT '',
 			  updated_at INTEGER NOT NULL,
 			  UNIQUE(user_id, site_key, video_id)
 			);
-		CREATE INDEX IF NOT EXISTS idx_play_history_user_id_updated_at ON play_history(user_id, updated_at DESC);
-		CREATE INDEX IF NOT EXISTS idx_play_history_user_id_content_key_updated_at ON play_history(user_id, content_key, updated_at DESC);
-		CREATE TABLE IF NOT EXISTS favorites (
-		  id INTEGER PRIMARY KEY AUTOINCREMENT,
-		  user_id INTEGER NOT NULL,
-		  site_key TEXT NOT NULL,
-		  site_name TEXT DEFAULT '',
-		  spider_api TEXT NOT NULL,
-		  video_id TEXT NOT NULL,
-		  video_title TEXT NOT NULL,
-		  video_poster TEXT DEFAULT '',
-		  video_remark TEXT DEFAULT '',
-		  updated_at INTEGER NOT NULL,
-		  UNIQUE(user_id, site_key, video_id)
-		);
-		CREATE INDEX IF NOT EXISTS idx_favorites_user_id_updated_at ON favorites(user_id, updated_at DESC);
-		CREATE TABLE IF NOT EXISTS auth_tokens (
-		  token TEXT PRIMARY KEY,
-		  user_id INTEGER NOT NULL,
-		  created_at INTEGER NOT NULL,
-		  expires_at INTEGER NOT NULL
-		);
-		CREATE INDEX IF NOT EXISTS idx_auth_tokens_user_id ON auth_tokens(user_id);
-		CREATE INDEX IF NOT EXISTS idx_auth_tokens_expires_at ON auth_tokens(expires_at);
-	`)
-	if err != nil {
-		return err
-	}
-
-	// Lightweight schema migrations (SQLite doesn't support IF NOT EXISTS for ADD COLUMN).
-	// Keep these idempotent and low-risk for existing installs.
-	_ = ensureSQLiteColumn(d.db, "play_history", "pan_label", "TEXT DEFAULT ''")
-
-	if fresh {
+			CREATE INDEX IF NOT EXISTS idx_favorites_user_id_updated_at ON favorites(user_id, updated_at DESC);
+			CREATE TABLE IF NOT EXISTS auth_tokens (
+			  token TEXT PRIMARY KEY,
+			  user_id INTEGER NOT NULL,
+			  created_at INTEGER NOT NULL,
+			  expires_at INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_auth_tokens_user_id ON auth_tokens(user_id);
+			CREATE INDEX IF NOT EXISTS idx_auth_tokens_expires_at ON auth_tokens(expires_at);
+		`)
+		if err != nil {
+			return err
+		}
 		if err := d.seedDefaults(); err != nil {
+			return err
+		}
+	} else {
+		if err := requireSchema(d.db); err != nil {
 			return err
 		}
 	}
@@ -250,20 +250,88 @@ func (d *DB) initSchema(fresh bool) error {
 	return d.ensureDefaultAdmin()
 }
 
-func ensureSQLiteColumn(db *sql.DB, table string, column string, definition string) error {
+func requireSchema(db *sql.DB) error {
 	if db == nil {
-		return nil
+		return errors.New("database not initialized")
+	}
+
+	requiredTables := []string{"settings", "users", "search_history", "play_history", "favorites", "auth_tokens"}
+	for _, t := range requiredTables {
+		if err := requireSQLiteTable(db, t); err != nil {
+			return err
+		}
+	}
+
+	requiredColumns := [][2]string{
+		{"settings", "key"},
+		{"settings", "value"},
+		{"users", "username"},
+		{"users", "password"},
+		{"users", "role"},
+		{"users", "status"},
+		{"users", "cat_api_base"},
+		{"users", "cat_api_key"},
+		{"users", "cat_proxy"},
+		{"users", "search_thread_count"},
+		{"users", "cat_sites"},
+		{"users", "cat_site_status"},
+		{"users", "cat_site_home"},
+		{"users", "cat_site_order"},
+		{"users", "cat_site_availability"},
+		{"users", "cat_search_order"},
+		{"users", "cat_search_cover_site"},
+		{"play_history", "pan_label"},
+	}
+	for _, pair := range requiredColumns {
+		if err := requireSQLiteColumn(db, pair[0], pair[1]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func requireSQLiteTable(db *sql.DB, table string) error {
+	t := strings.TrimSpace(table)
+	if t == "" {
+		return errors.New("empty table name")
+	}
+	var cnt int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM sqlite_master WHERE type='table' AND name=?`, t).Scan(&cnt); err != nil {
+		return err
+	}
+	if cnt == 0 {
+		return fmt.Errorf("检测到旧数据库（不再兼容）：缺少表 %q；请删除数据库文件后重启（默认 data.db）", t)
+	}
+	return nil
+}
+
+func requireSQLiteColumn(db *sql.DB, table, column string) error {
+	ok, err := hasSQLiteColumn(db, table, column)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("检测到旧数据库（不再兼容）：缺少列 %s.%s；请删除数据库文件后重启（默认 data.db）", table, column)
+	}
+	return nil
+}
+
+func hasSQLiteColumn(db *sql.DB, table, column string) (bool, error) {
+	if db == nil {
+		return false, nil
 	}
 	t := strings.TrimSpace(table)
 	c := strings.TrimSpace(column)
-	def := strings.TrimSpace(definition)
-	if t == "" || c == "" || def == "" {
-		return nil
+	if t == "" || c == "" {
+		return false, nil
+	}
+	if !isSQLiteIdent(t) || !isSQLiteIdent(c) {
+		return false, fmt.Errorf("invalid sqlite identifier %q.%q", t, c)
 	}
 
 	rows, err := db.Query(`PRAGMA table_info(` + t + `)`)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer rows.Close()
 
@@ -278,12 +346,25 @@ func ensureSQLiteColumn(db *sql.DB, table string, column string, definition stri
 		)
 		_ = rows.Scan(&cid, &name, &typ, &notnull, &dfltValue, &pk)
 		if strings.EqualFold(strings.TrimSpace(name), c) {
-			return nil
+			return true, nil
 		}
 	}
 
-	_, err = db.Exec(`ALTER TABLE ` + t + ` ADD COLUMN ` + c + ` ` + def)
-	return err
+	return false, nil
+}
+
+func isSQLiteIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func (d *DB) seedDefaults() error {
@@ -294,16 +375,10 @@ func (d *DB) seedDefaults() error {
 		{"douban_data_custom", ""},
 		{"douban_img_proxy", "direct-browser"},
 		{"douban_img_custom", ""},
-		{"video_source_url", ""},
-		{"video_source_final_url", ""},
 		{"video_source_api_base", ""},
-		{"video_source_api_headers", ""},
 		{"video_source_sites", "[]"},
-		{"video_source_md5", ""},
 		{"catpawopen_servers", "[]"},
-		{"catpawopen_name", ""},
-		{"catpawopen_api_base", ""},
-		{"catpawopen_proxy", ""},
+		{"catpawopen_active", ""},
 		{"openlist_api_base", ""},
 		{"openlist_token", ""},
 		{"openlist_quark_tv_mode", "0"},
@@ -317,7 +392,6 @@ func (d *DB) seedDefaults() error {
 		{"video_source_search_order", "[]"},
 		{"video_source_search_cover_site", ""},
 		{"magic_episode_rules", `["{\"pattern\":\".*?([Ss]\\\\d{1,2})?(?:[第EePpXx\\\\.\\\\-\\\\_\\\\( ]{1,2}|^)(\\\\d{1,3})(?!\\\\d).*?\\\\.(mp4|mkv)\",\"replace\":\"$1E$2\"}"]`},
-		{"magic_episode_clean_regex", ""},
 		{"magic_episode_clean_regex_rules", `["\\\\[\\\\s*\\\\d+(?:\\\\.\\\\d+)?\\\\s*(?:B|KB|MB|GB|TB)\\\\s*\\\\]|【[^】]*】"]`},
 		{"magic_aggregate_rules", "[]"},
 		{"magic_aggregate_regex_rules", "[]"},
