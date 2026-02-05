@@ -247,7 +247,39 @@ func (d *DB) initSchema(fresh bool) error {
 		}
 	}
 
+	// One-time cleanup for removed settings keys.
+	_ = d.cleanupLegacySettings()
+
 	return d.ensureDefaultAdmin()
+}
+
+func (d *DB) cleanupLegacySettings() error {
+	if d == nil || d.db == nil {
+		return nil
+	}
+
+	legacyKeys := []string{
+		"openlist_quark_tv_mode",
+		"openlist_quark_tv_mount",
+	}
+
+	// Best-effort: ignore if keys do not exist.
+	res, err := d.db.Exec(`DELETE FROM settings WHERE key IN (?, ?)`, legacyKeys[0], legacyKeys[1])
+	if err != nil {
+		return err
+	}
+	affected, _ := res.RowsAffected()
+	if affected <= 0 {
+		return nil
+	}
+
+	d.mu.Lock()
+	d.settingsVersion++
+	for _, k := range legacyKeys {
+		delete(d.settingsCache, k)
+	}
+	d.mu.Unlock()
+	return nil
 }
 
 func requireSchema(db *sql.DB) error {
@@ -381,8 +413,6 @@ func (d *DB) seedDefaults() error {
 		{"catpawopen_active", ""},
 		{"openlist_api_base", ""},
 		{"openlist_token", ""},
-		{"openlist_quark_tv_mode", "0"},
-		{"openlist_quark_tv_mount", ""},
 		{"video_source_site_status", "{}"},
 		{"video_source_site_home", "{}"},
 		{"video_source_site_search", "{}"},
