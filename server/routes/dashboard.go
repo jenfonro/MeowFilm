@@ -391,7 +391,7 @@ func handleDashboardPanSettings(w http.ResponseWriter, r *http.Request, database
 			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "key 不能为空"})
 			return
 		}
-		if typ != "cookie" && typ != "account" && typ != "authorization" && typ != "quark_tv" {
+		if typ != "cookie" && typ != "account" && typ != "authorization" && typ != "quark_tv" && typ != "uc_tv" {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "type 参数无效"})
 			return
 		}
@@ -409,7 +409,7 @@ func handleDashboardPanSettings(w http.ResponseWriter, r *http.Request, database
 			authorization := r.FormValue("authorization")
 			cur["authorization"] = authorization
 			payload = map[string]any{"authorization": authorization}
-		} else if typ == "quark_tv" {
+		} else if typ == "quark_tv" || typ == "uc_tv" {
 			refreshToken := r.FormValue("refresh_token")
 			deviceID := r.FormValue("device_id")
 			cur["refresh_token"] = refreshToken
