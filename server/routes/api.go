@@ -159,8 +159,6 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 			settings["catPawOpenApiBase"] = resolveCatPawOpenActiveBase(catPawOpenServers, database.GetSetting("catpawopen_active"))
 			settings["openListApiBase"] = database.GetSetting("openlist_api_base")
 			settings["openListToken"] = database.GetSetting("openlist_token")
-			settings["openListQuarkTvMode"] = strings.TrimSpace(database.GetSetting("openlist_quark_tv_mode")) == "1"
-			settings["openListQuarkTvMount"] = database.GetSetting("openlist_quark_tv_mount")
 			settings["goProxyEnabled"] = strings.TrimSpace(database.GetSetting("goproxy_enabled")) == "1"
 			settings["goProxyAutoSelect"] = strings.TrimSpace(database.GetSetting("goproxy_auto_select")) == "1"
 			settings["goProxyServers"] = normalizeGoProxyServers(database.GetSetting("goproxy_servers"))

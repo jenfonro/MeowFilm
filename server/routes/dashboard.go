@@ -340,8 +340,6 @@ func handleDashboardSiteSettings(w http.ResponseWriter, r *http.Request, databas
 		"catPawOpenActive":     active,
 		"openListApiBase":      database.GetSetting("openlist_api_base"),
 		"openListToken":        database.GetSetting("openlist_token"),
-		"openListQuarkTvMode":  strings.TrimSpace(database.GetSetting("openlist_quark_tv_mode")) == "1",
-		"openListQuarkTvMount": database.GetSetting("openlist_quark_tv_mount"),
 		"goProxyEnabled":       strings.TrimSpace(database.GetSetting("goproxy_enabled")) == "1",
 		"goProxyAutoSelect":    strings.TrimSpace(database.GetSetting("goproxy_auto_select")) == "1",
 		"goProxyServersJson":   defaultString(database.GetSetting("goproxy_servers"), "[]"),
@@ -360,8 +358,6 @@ func handleDashboardOpenListSave(w http.ResponseWriter, r *http.Request, databas
 	parseForm(r)
 	apiBase := strings.TrimSpace(r.FormValue("openListApiBase"))
 	token := strings.TrimSpace(r.FormValue("openListToken"))
-	quarkTv := boolFromForm(r.FormValue("openListQuarkTvMode"))
-	mount := strings.TrimSpace(r.FormValue("openListQuarkTvMount"))
 
 	if apiBase != "" {
 		normalized := normalizeHTTPBase(apiBase)
@@ -377,15 +373,6 @@ func handleDashboardOpenListSave(w http.ResponseWriter, r *http.Request, databas
 		_ = database.SetSetting("openlist_api_base", "")
 	}
 	_ = database.SetSetting("openlist_token", token)
-	if quarkTv {
-		_ = database.SetSetting("openlist_quark_tv_mode", "1")
-	} else {
-		_ = database.SetSetting("openlist_quark_tv_mode", "0")
-	}
-	if mount != "" {
-		mount = normalizeMountPath(mount)
-	}
-	_ = database.SetSetting("openlist_quark_tv_mount", mount)
 	writeJSON(w, 200, map[string]any{"success": true})
 }
 
