@@ -259,12 +259,19 @@ func (d *DB) cleanupLegacySettings() error {
 	}
 
 	legacyKeys := []string{
+		"openlist_api_base",
+		"openlist_token",
 		"openlist_quark_tv_mode",
 		"openlist_quark_tv_mount",
 	}
 
 	// Best-effort: ignore if keys do not exist.
-	res, err := d.db.Exec(`DELETE FROM settings WHERE key IN (?, ?)`, legacyKeys[0], legacyKeys[1])
+	args := make([]any, 0, len(legacyKeys))
+	for _, k := range legacyKeys {
+		args = append(args, k)
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(args)), ",")
+	res, err := d.db.Exec(`DELETE FROM settings WHERE key IN (`+placeholders+`)`, args...)
 	if err != nil {
 		return err
 	}
@@ -411,8 +418,6 @@ func (d *DB) seedDefaults() error {
 		{"video_source_sites", "[]"},
 		{"catpawopen_servers", "[]"},
 		{"catpawopen_active", ""},
-		{"openlist_api_base", ""},
-		{"openlist_token", ""},
 		{"video_source_site_status", "{}"},
 		{"video_source_site_home", "{}"},
 		{"video_source_site_search", "{}"},
