@@ -32,10 +32,6 @@ func DashboardHandler(database *db.DB, authMw *auth.Auth) http.Handler {
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardSiteSettings(w, r, database)
 			})).ServeHTTP(w, r)
-		case "/openlist/save":
-			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleDashboardOpenListSave(w, r, database)
-			})).ServeHTTP(w, r)
 		case "/goproxy/save":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardGoProxySave(w, r, database)
@@ -338,8 +334,6 @@ func handleDashboardSiteSettings(w http.ResponseWriter, r *http.Request, databas
 		"siteName":             database.GetSetting("site_name"),
 		"catPawOpenServers":    servers,
 		"catPawOpenActive":     active,
-		"openListApiBase":      database.GetSetting("openlist_api_base"),
-		"openListToken":        database.GetSetting("openlist_token"),
 		"goProxyEnabled":       strings.TrimSpace(database.GetSetting("goproxy_enabled")) == "1",
 		"goProxyAutoSelect":    strings.TrimSpace(database.GetSetting("goproxy_auto_select")) == "1",
 		"goProxyServersJson":   defaultString(database.GetSetting("goproxy_servers"), "[]"),
@@ -348,32 +342,6 @@ func handleDashboardSiteSettings(w http.ResponseWriter, r *http.Request, databas
 		"doubanImgProxy":       defaultString(database.GetSetting("douban_img_proxy"), "direct-browser"),
 		"doubanImgCustom":      database.GetSetting("douban_img_custom"),
 	})
-}
-
-func handleDashboardOpenListSave(w http.ResponseWriter, r *http.Request, database *db.DB) {
-	if r.Method != http.MethodPost {
-		methodNotAllowed(w)
-		return
-	}
-	parseForm(r)
-	apiBase := strings.TrimSpace(r.FormValue("openListApiBase"))
-	token := strings.TrimSpace(r.FormValue("openListToken"))
-
-	if apiBase != "" {
-		normalized := normalizeHTTPBase(apiBase)
-		if normalized == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "OpenList 服务器地址不是合法 URL"})
-			return
-		}
-		if !strings.HasSuffix(normalized, "/") {
-			normalized += "/"
-		}
-		_ = database.SetSetting("openlist_api_base", normalized)
-	} else {
-		_ = database.SetSetting("openlist_api_base", "")
-	}
-	_ = database.SetSetting("openlist_token", token)
-	writeJSON(w, 200, map[string]any{"success": true})
 }
 
 func handleDashboardGoProxySave(w http.ResponseWriter, r *http.Request, database *db.DB) {
