@@ -757,6 +757,12 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 		if len(cleanRules) > 0 {
 			episodeCleanRegex = cleanRules[0]
 		}
+		smartSourcePriorityTokens := parseJSONStringArray(database.GetSetting("smart_source_priority_tokens"))
+		smartPanMatchTokens := parseJSONStringArray(database.GetSetting("smart_pan_match_tokens"))
+		smartPanExtractMode := strings.TrimSpace(database.GetSetting("smart_pan_extract_mode"))
+		if smartPanExtractMode != "pan-first" {
+			smartPanExtractMode = "rule-first"
+		}
 		writeJSON(w, 200, map[string]any{
 			"success":                true,
 			"episodeCleanRegex":      episodeCleanRegex,
@@ -764,6 +770,9 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 			"episodeRules":           parseJSONStringArray(database.GetSetting("magic_episode_rules")),
 			"aggregateRules":         parseJSONStringArray(database.GetSetting("magic_aggregate_rules")),
 			"aggregateRegexRules":    parseJSONStringArray(database.GetSetting("magic_aggregate_regex_rules")),
+			"smartSourcePriorityTokens": smartSourcePriorityTokens,
+			"smartPanMatchTokens":       smartPanMatchTokens,
+			"smartPanExtractMode":       smartPanExtractMode,
 		})
 	case http.MethodPost:
 		var body map[string]any
@@ -816,6 +825,40 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 		saveStrArrSetting(database, "magic_episode_clean_regex_rules", cleanRules)
 		saveStrArrSetting(database, "magic_episode_rules", readList("episodeRules"))
 		saveStrArrSetting(database, "magic_aggregate_regex_rules", readList("aggregateRegexRules"))
+
+		readCommaTokens := func(key string) []string {
+			raw, ok := body[key]
+			if !ok || raw == nil {
+				return []string{}
+			}
+			switch vv := raw.(type) {
+			case []any:
+				out := []string{}
+				for _, it := range vv {
+					s, _ := it.(string)
+					s = strings.TrimSpace(s)
+					if s != "" {
+						out = append(out, s)
+					}
+				}
+				return normalizeSmartCommaTokens(strings.Join(out, ","))
+			case string:
+				return normalizeSmartCommaTokens(vv)
+			default:
+				return []string{}
+			}
+		}
+
+		saveStrArrSetting(database, "smart_source_priority_tokens", readCommaTokens("smartSourcePriorityTokens"))
+		saveStrArrSetting(database, "smart_pan_match_tokens", readCommaTokens("smartPanMatchTokens"))
+
+		modeRaw, _ := body["smartPanExtractMode"].(string)
+		mode := strings.TrimSpace(modeRaw)
+		if mode != "pan-first" {
+			mode = "rule-first"
+		}
+		_ = database.SetSetting("smart_pan_extract_mode", mode)
+
 		if legacy := readList("aggregateRules"); len(legacy) > 0 {
 			saveStrArrSetting(database, "magic_aggregate_rules", legacy)
 		}
@@ -826,6 +869,12 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 		if len(outClean) > 0 {
 			outEpisodeClean = outClean[0]
 		}
+		smartSourcePriorityTokens := parseJSONStringArray(database.GetSetting("smart_source_priority_tokens"))
+		smartPanMatchTokens := parseJSONStringArray(database.GetSetting("smart_pan_match_tokens"))
+		smartPanExtractMode := strings.TrimSpace(database.GetSetting("smart_pan_extract_mode"))
+		if smartPanExtractMode != "pan-first" {
+			smartPanExtractMode = "rule-first"
+		}
 		writeJSON(w, 200, map[string]any{
 			"success":                true,
 			"episodeCleanRegex":      outEpisodeClean,
@@ -833,10 +882,37 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 			"episodeRules":           parseJSONStringArray(database.GetSetting("magic_episode_rules")),
 			"aggregateRules":         parseJSONStringArray(database.GetSetting("magic_aggregate_rules")),
 			"aggregateRegexRules":    parseJSONStringArray(database.GetSetting("magic_aggregate_regex_rules")),
+			"smartSourcePriorityTokens": smartSourcePriorityTokens,
+			"smartPanMatchTokens":       smartPanMatchTokens,
+			"smartPanExtractMode":       smartPanExtractMode,
 		})
 	default:
 		methodNotAllowed(w)
 	}
+}
+
+func normalizeSmartCommaTokens(input string) []string {
+	raw := strings.TrimSpace(input)
+	if raw == "" {
+		return []string{}
+	}
+	raw = strings.ReplaceAll(raw, "，", ",")
+	parts := strings.Split(raw, ",")
+	out := []string{}
+	seen := map[string]struct{}{}
+	for _, p := range parts {
+		t := strings.TrimSpace(p)
+		if t == "" {
+			continue
+		}
+		key := strings.ToLower(t)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, t)
+	}
+	return out
 }
 
 func handleDashboardUserList(w http.ResponseWriter, r *http.Request, database *db.DB) {
