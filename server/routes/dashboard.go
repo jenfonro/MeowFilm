@@ -751,6 +751,7 @@ func handleDashboardVideoSourceSitesImport(w http.ResponseWriter, r *http.Reques
 func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	switch r.Method {
 	case http.MethodGet:
+		_ = migrateMagicAggregateKeywordRulesToRegex(database)
 		cleanRules := parseJSONStringArray(database.GetSetting("magic_episode_clean_regex_rules"))
 		episodeCleanRegex := ""
 		if len(cleanRules) > 0 {
@@ -814,8 +815,11 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 
 		saveStrArrSetting(database, "magic_episode_clean_regex_rules", cleanRules)
 		saveStrArrSetting(database, "magic_episode_rules", readList("episodeRules"))
-		saveStrArrSetting(database, "magic_aggregate_rules", readList("aggregateRules"))
 		saveStrArrSetting(database, "magic_aggregate_regex_rules", readList("aggregateRegexRules"))
+		if legacy := readList("aggregateRules"); len(legacy) > 0 {
+			saveStrArrSetting(database, "magic_aggregate_rules", legacy)
+		}
+		_ = migrateMagicAggregateKeywordRulesToRegex(database)
 
 		outClean := parseJSONStringArray(database.GetSetting("magic_episode_clean_regex_rules"))
 		outEpisodeClean := ""
