@@ -111,7 +111,7 @@ func parseAnyBool(v any, def bool) bool {
 func normalizeAvailability(v string) string {
 	raw := strings.TrimSpace(v)
 	switch raw {
-	case "valid", "invalid", "unknown", "unchecked", "category_error", "search_error":
+	case "valid", "invalid", "unknown", "unchecked", "skipped", "category_error", "search_error":
 		return raw
 	default:
 		return "unchecked"
