@@ -161,9 +161,9 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 			settings["goProxyAutoSelect"] = strings.TrimSpace(database.GetSetting("goproxy_auto_select")) == "1"
 			settings["goProxyServers"] = normalizeGoProxyServers(database.GetSetting("goproxy_servers"))
 
+			_ = migrateMagicAggregateKeywordRulesToRegex(database)
 			settings["magicEpisodeRules"] = parseJSONStringArray(database.GetSetting("magic_episode_rules"))
 			settings["magicEpisodeCleanRegexRules"] = parseJSONStringArray(database.GetSetting("magic_episode_clean_regex_rules"))
-			settings["magicAggregateRules"] = parseJSONStringArray(database.GetSetting("magic_aggregate_rules"))
 			settings["magicAggregateRegexRules"] = parseJSONStringArray(database.GetSetting("magic_aggregate_regex_rules"))
 
 			var (
