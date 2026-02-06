@@ -165,6 +165,13 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 			settings["magicEpisodeRules"] = parseJSONStringArray(database.GetSetting("magic_episode_rules"))
 			settings["magicEpisodeCleanRegexRules"] = parseJSONStringArray(database.GetSetting("magic_episode_clean_regex_rules"))
 			settings["magicAggregateRegexRules"] = parseJSONStringArray(database.GetSetting("magic_aggregate_regex_rules"))
+			settings["smartSourcePriorityTokens"] = parseJSONStringArray(database.GetSetting("smart_source_priority_tokens"))
+			settings["smartPanMatchTokens"] = parseJSONStringArray(database.GetSetting("smart_pan_match_tokens"))
+			mode := strings.TrimSpace(database.GetSetting("smart_pan_extract_mode"))
+			if mode != "pan-first" {
+				mode = "rule-first"
+			}
+			settings["smartPanExtractMode"] = mode
 
 			var (
 				userCatBase  string
