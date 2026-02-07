@@ -677,7 +677,20 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 			forcePosterUpdate = parseAnyBool(v, false)
 		}
 
-		contentKey := normalizeContentKey(videoTitle)
+		// Allow client-provided contentKey to de-duplicate history across sources,
+		// e.g. when titles differ only by quality / "更新至xx" noise that can be normalized on the client.
+		contentKey := strings.TrimSpace(getS("contentKey"))
+		if contentKey == "" {
+			contentKey = strings.TrimSpace(getS("content_key"))
+		}
+		if contentKey != "" {
+			contentKey = strings.ToLower(contentKey)
+			if len(contentKey) > 200 {
+				contentKey = contentKey[:200]
+			}
+		} else {
+			contentKey = normalizeContentKey(videoTitle)
+		}
 		if contentKey == "" {
 			contentKey = siteKey + "::" + videoID
 		}
