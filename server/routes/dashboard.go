@@ -768,6 +768,7 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 			"episodeCleanRegex":      episodeCleanRegex,
 			"episodeCleanRegexRules": cleanRules,
 			"episodeRules":           parseJSONStringArray(database.GetSetting("magic_episode_rules")),
+			"movieRules":             parseJSONStringArray(database.GetSetting("magic_movie_rules")),
 			"aggregateRules":         parseJSONStringArray(database.GetSetting("magic_aggregate_rules")),
 			"aggregateRegexRules":    parseJSONStringArray(database.GetSetting("magic_aggregate_regex_rules")),
 			"smartSourcePriorityTokens": smartSourcePriorityTokens,
@@ -824,6 +825,7 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 
 		saveStrArrSetting(database, "magic_episode_clean_regex_rules", cleanRules)
 		saveStrArrSetting(database, "magic_episode_rules", readList("episodeRules"))
+		saveStrArrSetting(database, "magic_movie_rules", readList("movieRules"))
 		saveStrArrSetting(database, "magic_aggregate_regex_rules", readList("aggregateRegexRules"))
 
 		readCommaTokens := func(key string) []string {
@@ -880,6 +882,7 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 			"episodeCleanRegex":      outEpisodeClean,
 			"episodeCleanRegexRules": outClean,
 			"episodeRules":           parseJSONStringArray(database.GetSetting("magic_episode_rules")),
+			"movieRules":             parseJSONStringArray(database.GetSetting("magic_movie_rules")),
 			"aggregateRules":         parseJSONStringArray(database.GetSetting("magic_aggregate_rules")),
 			"aggregateRegexRules":    parseJSONStringArray(database.GetSetting("magic_aggregate_regex_rules")),
 			"smartSourcePriorityTokens": smartSourcePriorityTokens,
