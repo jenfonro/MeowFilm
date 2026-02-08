@@ -177,9 +177,15 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 				mode = "rule-first"
 			}
 			settings["smartPanExtractMode"] = mode
-			tmdbEnabled := strings.TrimSpace(database.GetSetting("tmdb_enabled")) == "1"
-			settings["tmdbEnabled"] = tmdbEnabled
-			settings["tmdbSmartSearchEnabled"] = tmdbEnabled && strings.TrimSpace(database.GetSetting("tmdb_smart_search_enabled")) == "1"
+			settings["smartPlayEnabled"] = strings.TrimSpace(database.GetSetting("smart_play_enabled")) != "0"
+			settings["smartListEnabled"] = strings.TrimSpace(database.GetSetting("smart_list_enabled")) != "0"
+			settings["smartQualityPref"] = strings.TrimSpace(database.GetSetting("smart_quality_pref"))
+			settings["smartFpsPref"] = strings.TrimSpace(database.GetSetting("smart_fps_pref"))
+			displayMode := strings.TrimSpace(database.GetSetting("search_display_mode"))
+			if displayMode != "tmdb" && displayMode != "both" && displayMode != "sites" {
+				displayMode = "sites"
+			}
+			settings["searchDisplayMode"] = displayMode
 
 			var (
 				userCatBase  string
