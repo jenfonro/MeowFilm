@@ -158,6 +158,10 @@ func DashboardHandler(database *db.DB, authMw *auth.Auth) http.Handler {
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardMagicSettings(w, r, database)
 			})).ServeHTTP(w, r)
+		case "/tmdb/settings":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardTMDBSettings(w, r, database)
+			})).ServeHTTP(w, r)
 		case "/user/list":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardUserList(w, r, database)
@@ -182,6 +186,85 @@ func DashboardHandler(database *db.DB, authMw *auth.Auth) http.Handler {
 			http.NotFound(w, r)
 		}
 	})
+}
+
+func handleDashboardTMDBSettings(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	bool01 := func(b bool) string {
+		if b {
+			return "1"
+		}
+		return "0"
+	}
+	readBool := func(key string) bool {
+		return strings.TrimSpace(database.GetSetting(key)) == "1"
+	}
+	readStringDefault := func(key, def string) string {
+		v := strings.TrimSpace(database.GetSetting(key))
+		if v == "" {
+			return def
+		}
+		return v
+	}
+	writeOut := func() {
+		enabled := readBool("tmdb_enabled")
+		writeJSON(w, 200, map[string]any{
+			"success":            true,
+			"tmdbEnabled":        enabled,
+			"smartSearchEnabled": enabled && readBool("tmdb_smart_search_enabled"),
+			"v4Token":            strings.TrimSpace(database.GetSetting("tmdb_v4_token")),
+			"v3Key":              strings.TrimSpace(database.GetSetting("tmdb_v3_key")),
+			"language":           readStringDefault("tmdb_language", "zh-CN"),
+			"region":             readStringDefault("tmdb_region", "CN"),
+			"includeAdult":       readBool("tmdb_include_adult"),
+		})
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		writeOut()
+	case http.MethodPost:
+		var body map[string]any
+		_ = readJSONLoose(r, &body)
+
+		readBoolBody := func(key string) bool {
+			v, ok := body[key]
+			if !ok || v == nil {
+				return false
+			}
+			switch vv := v.(type) {
+			case bool:
+				return vv
+			case float64:
+				return int(vv) != 0
+			case string:
+				s := strings.TrimSpace(vv)
+				return s == "1" || strings.EqualFold(s, "true") || strings.EqualFold(s, "yes") || strings.EqualFold(s, "on")
+			default:
+				return false
+			}
+		}
+		readStrBody := func(key string) string {
+			v, ok := body[key]
+			if !ok || v == nil {
+				return ""
+			}
+			s, _ := v.(string)
+			return strings.TrimSpace(s)
+		}
+
+		enabled := readBoolBody("tmdbEnabled")
+		_ = database.SetSetting("tmdb_enabled", bool01(enabled))
+		_ = database.SetSetting("tmdb_smart_search_enabled", bool01(enabled && readBoolBody("smartSearchEnabled")))
+		_ = database.SetSetting("tmdb_v4_token", readStrBody("v4Token"))
+		_ = database.SetSetting("tmdb_v3_key", readStrBody("v3Key"))
+		_ = database.SetSetting("tmdb_language", readStrBody("language"))
+		_ = database.SetSetting("tmdb_region", readStrBody("region"))
+		_ = database.SetSetting("tmdb_include_adult", bool01(readBoolBody("includeAdult")))
+
+		writeOut()
+	default:
+		methodNotAllowed(w)
+	}
 }
 
 func handleDashboardSiteSave(w http.ResponseWriter, r *http.Request, database *db.DB) {
