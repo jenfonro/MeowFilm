@@ -158,6 +158,10 @@ func DashboardHandler(database *db.DB, authMw *auth.Auth) http.Handler {
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardMagicSettings(w, r, database)
 			})).ServeHTTP(w, r)
+		case "/smart/settings":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardSmartSettings(w, r, database)
+			})).ServeHTTP(w, r)
 		case "/tmdb/settings":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardTMDBSettings(w, r, database)
@@ -188,6 +192,121 @@ func DashboardHandler(database *db.DB, authMw *auth.Auth) http.Handler {
 	})
 }
 
+func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	readBoolEnabled := func(key string) bool {
+		return strings.TrimSpace(database.GetSetting(key)) != "0"
+	}
+	writeOut := func() {
+		smartPanExtractMode := strings.TrimSpace(database.GetSetting("smart_pan_extract_mode"))
+		if smartPanExtractMode != "pan-first" {
+			smartPanExtractMode = "rule-first"
+		}
+		writeJSON(w, 200, map[string]any{
+			"success":                true,
+			"smartPlayEnabled":       readBoolEnabled("smart_play_enabled"),
+			"smartListEnabled":       readBoolEnabled("smart_list_enabled"),
+			"smartQualityPref":       strings.TrimSpace(database.GetSetting("smart_quality_pref")),
+			"smartFpsPref":           strings.TrimSpace(database.GetSetting("smart_fps_pref")),
+			"smartSourcePriorityTokens": parseJSONStringArray(database.GetSetting("smart_source_priority_tokens")),
+			"smartPanMatchTokens":       parseJSONStringArray(database.GetSetting("smart_pan_match_tokens")),
+			"smartPanExtractMode":       smartPanExtractMode,
+		})
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		writeOut()
+	case http.MethodPost:
+		var body map[string]any
+		_ = readJSONLoose(r, &body)
+
+		readBoolBody := func(key string) bool {
+			v, ok := body[key]
+			if !ok || v == nil {
+				return false
+			}
+			switch vv := v.(type) {
+			case bool:
+				return vv
+			case float64:
+				return int(vv) != 0
+			case string:
+				s := strings.TrimSpace(vv)
+				return s == "1" || strings.EqualFold(s, "true") || strings.EqualFold(s, "yes") || strings.EqualFold(s, "on")
+			default:
+				return false
+			}
+		}
+		readStrBody := func(key string) string {
+			v, ok := body[key]
+			if !ok || v == nil {
+				return ""
+			}
+			s, _ := v.(string)
+			return strings.TrimSpace(s)
+		}
+
+		bool01 := func(b bool) string {
+			if b {
+				return "1"
+			}
+			return "0"
+		}
+
+		_ = database.SetSetting("smart_play_enabled", bool01(readBoolBody("smartPlayEnabled")))
+		_ = database.SetSetting("smart_list_enabled", bool01(readBoolBody("smartListEnabled")))
+		_ = database.SetSetting("smart_quality_pref", readStrBody("smartQualityPref"))
+		_ = database.SetSetting("smart_fps_pref", readStrBody("smartFpsPref"))
+
+		saveArr := func(key string, list any) {
+			switch vv := list.(type) {
+			case []any:
+				out := []string{}
+				for _, it := range vv {
+					s, _ := it.(string)
+					s = strings.TrimSpace(s)
+					if s != "" {
+						out = append(out, s)
+					}
+				}
+				saveStrArrSetting(database, key, out)
+			case []string:
+				out := []string{}
+				for _, s := range vv {
+					t := strings.TrimSpace(s)
+					if t != "" {
+						out = append(out, t)
+					}
+				}
+				saveStrArrSetting(database, key, out)
+			case string:
+				saveStrArrSetting(database, key, parseJSONStringArray(vv))
+			default:
+				// ignore
+			}
+		}
+
+		if v, ok := body["smartSourcePriorityTokens"]; ok && v != nil {
+			saveArr("smart_source_priority_tokens", v)
+		}
+		if v, ok := body["smartPanMatchTokens"]; ok && v != nil {
+			saveArr("smart_pan_match_tokens", v)
+		}
+		if v, ok := body["smartPanExtractMode"]; ok && v != nil {
+			modeRaw, _ := v.(string)
+			mode := strings.TrimSpace(modeRaw)
+			if mode != "pan-first" {
+				mode = "rule-first"
+			}
+			_ = database.SetSetting("smart_pan_extract_mode", mode)
+		}
+
+		writeOut()
+	default:
+		methodNotAllowed(w)
+	}
+}
+
 func handleDashboardTMDBSettings(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	bool01 := func(b bool) string {
 		if b {
@@ -206,11 +325,8 @@ func handleDashboardTMDBSettings(w http.ResponseWriter, r *http.Request, databas
 		return v
 	}
 	writeOut := func() {
-		enabled := readBool("tmdb_enabled")
 		writeJSON(w, 200, map[string]any{
 			"success":            true,
-			"tmdbEnabled":        enabled,
-			"smartSearchEnabled": enabled && readBool("tmdb_smart_search_enabled"),
 			"v4Token":            strings.TrimSpace(database.GetSetting("tmdb_v4_token")),
 			"v3Key":              strings.TrimSpace(database.GetSetting("tmdb_v3_key")),
 			"language":           readStringDefault("tmdb_language", "zh-CN"),
@@ -252,9 +368,6 @@ func handleDashboardTMDBSettings(w http.ResponseWriter, r *http.Request, databas
 			return strings.TrimSpace(s)
 		}
 
-		enabled := readBoolBody("tmdbEnabled")
-		_ = database.SetSetting("tmdb_enabled", bool01(enabled))
-		_ = database.SetSetting("tmdb_smart_search_enabled", bool01(enabled && readBoolBody("smartSearchEnabled")))
 		_ = database.SetSetting("tmdb_v4_token", readStrBody("v4Token"))
 		_ = database.SetSetting("tmdb_v3_key", readStrBody("v3Key"))
 		_ = database.SetSetting("tmdb_language", readStrBody("language"))
@@ -274,6 +387,7 @@ func handleDashboardSiteSave(w http.ResponseWriter, r *http.Request, database *d
 	}
 	parseForm(r)
 	siteName := strings.TrimSpace(r.FormValue("siteName"))
+	searchDisplayMode := strings.TrimSpace(r.FormValue("searchDisplayMode"))
 	doubanDataProxy := strings.TrimSpace(r.FormValue("doubanDataProxy"))
 	doubanDataCustom := strings.TrimSpace(r.FormValue("doubanDataCustom"))
 	doubanImgProxy := strings.TrimSpace(r.FormValue("doubanImgProxy"))
@@ -284,6 +398,16 @@ func handleDashboardSiteSave(w http.ResponseWriter, r *http.Request, database *d
 	}
 	if siteName != "" {
 		_ = database.SetSetting("site_name", siteName)
+	}
+	switch searchDisplayMode {
+	case "", "sites", "tmdb", "both":
+		if searchDisplayMode == "" {
+			searchDisplayMode = "sites"
+		}
+		_ = database.SetSetting("search_display_mode", searchDisplayMode)
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数无效"})
+		return
 	}
 	_ = database.SetSetting("douban_data_proxy", doubanDataProxy)
 	_ = database.SetSetting("douban_data_custom", doubanDataCustom)
@@ -412,9 +536,14 @@ func handleDashboardSiteSettings(w http.ResponseWriter, r *http.Request, databas
 	}
 	servers := parseCatPawOpenServers(database.GetSetting("catpawopen_servers"))
 	active := pickCatPawOpenActiveName(servers, database.GetSetting("catpawopen_active"))
+	mode := strings.TrimSpace(database.GetSetting("search_display_mode"))
+	if mode != "tmdb" && mode != "both" && mode != "sites" {
+		mode = "sites"
+	}
 	writeJSON(w, 200, map[string]any{
 		"success":              true,
 		"siteName":             database.GetSetting("site_name"),
+		"searchDisplayMode":    mode,
 		"catPawOpenServers":    servers,
 		"catPawOpenActive":     active,
 		"goProxyEnabled":       strings.TrimSpace(database.GetSetting("goproxy_enabled")) == "1",
