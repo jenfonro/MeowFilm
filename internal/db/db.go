@@ -434,6 +434,13 @@ func (d *DB) seedDefaults() error {
 		{"goproxy_enabled", "0"},
 		{"goproxy_auto_select", "0"},
 		{"goproxy_servers", "[]"},
+		{"tmdb_enabled", "0"},
+		{"tmdb_smart_search_enabled", "0"},
+		{"tmdb_v4_token", ""},
+		{"tmdb_v3_key", ""},
+		{"tmdb_language", "zh-CN"},
+		{"tmdb_region", "CN"},
+		{"tmdb_include_adult", "0"},
 	}
 	for _, it := range seeds {
 		if _, err := d.db.Exec(`INSERT INTO settings(key,value) VALUES (?,?)`, it.k, it.v); err != nil {

@@ -128,6 +128,10 @@ func APIHandler(database *db.DB, authMw *auth.Auth) http.Handler {
 			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleAPIDoubanImage(w, r)
 			})).ServeHTTP(w, r)
+		case "/tmdb/search":
+			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleAPITMDBSearch(w, r, database)
+			})).ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -173,6 +177,9 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 				mode = "rule-first"
 			}
 			settings["smartPanExtractMode"] = mode
+			tmdbEnabled := strings.TrimSpace(database.GetSetting("tmdb_enabled")) == "1"
+			settings["tmdbEnabled"] = tmdbEnabled
+			settings["tmdbSmartSearchEnabled"] = tmdbEnabled && strings.TrimSpace(database.GetSetting("tmdb_smart_search_enabled")) == "1"
 
 			var (
 				userCatBase  string
