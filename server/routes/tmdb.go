@@ -48,11 +48,6 @@ func handleAPITMDBSearch(w http.ResponseWriter, r *http.Request, database *db.DB
 		return
 	}
 
-	if strings.TrimSpace(database.GetSetting("tmdb_enabled")) != "1" {
-		writeJSON(w, 200, map[string]any{"success": true, "list": []any{}})
-		return
-	}
-
 	v4 := strings.TrimSpace(database.GetSetting("tmdb_v4_token"))
 	v3 := strings.TrimSpace(database.GetSetting("tmdb_v3_key"))
 	if v4 == "" && v3 == "" {
