@@ -198,8 +198,8 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 	}
 	writeOut := func() {
 		smartPanExtractMode := strings.TrimSpace(database.GetSetting("smart_pan_extract_mode"))
-		if smartPanExtractMode != "pan-first" {
-			smartPanExtractMode = "rule-first"
+		if smartPanExtractMode != "pan-first" && smartPanExtractMode != "rule-first" && smartPanExtractMode != "quality-first" {
+			smartPanExtractMode = "quality-first"
 		}
 		writeJSON(w, 200, map[string]any{
 			"success":                true,
@@ -207,6 +207,8 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 			"smartListEnabled":       readBoolEnabled("smart_list_enabled"),
 			"smartQualityPref":       strings.TrimSpace(database.GetSetting("smart_quality_pref")),
 			"smartFpsPref":           strings.TrimSpace(database.GetSetting("smart_fps_pref")),
+			"smartBalanceQuality":    readBoolEnabled("smart_balance_quality"),
+			"smartBalanceFps":        readBoolEnabled("smart_balance_fps"),
 			"smartSourcePriorityTokens": parseJSONStringArray(database.GetSetting("smart_source_priority_tokens")),
 			"smartPanMatchTokens":       parseJSONStringArray(database.GetSetting("smart_pan_match_tokens")),
 			"smartPanExtractMode":       smartPanExtractMode,
@@ -257,6 +259,8 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 		_ = database.SetSetting("smart_list_enabled", bool01(readBoolBody("smartListEnabled")))
 		_ = database.SetSetting("smart_quality_pref", readStrBody("smartQualityPref"))
 		_ = database.SetSetting("smart_fps_pref", readStrBody("smartFpsPref"))
+		_ = database.SetSetting("smart_balance_quality", bool01(readBoolBody("smartBalanceQuality")))
+		_ = database.SetSetting("smart_balance_fps", bool01(readBoolBody("smartBalanceFps")))
 
 		saveArr := func(key string, list any) {
 			switch vv := list.(type) {
@@ -295,8 +299,8 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 		if v, ok := body["smartPanExtractMode"]; ok && v != nil {
 			modeRaw, _ := v.(string)
 			mode := strings.TrimSpace(modeRaw)
-			if mode != "pan-first" {
-				mode = "rule-first"
+			if mode != "pan-first" && mode != "rule-first" && mode != "quality-first" {
+				mode = "quality-first"
 			}
 			_ = database.SetSetting("smart_pan_extract_mode", mode)
 		}
@@ -972,8 +976,8 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 		smartSourcePriorityTokens := parseJSONStringArray(database.GetSetting("smart_source_priority_tokens"))
 		smartPanMatchTokens := parseJSONStringArray(database.GetSetting("smart_pan_match_tokens"))
 		smartPanExtractMode := strings.TrimSpace(database.GetSetting("smart_pan_extract_mode"))
-		if smartPanExtractMode != "pan-first" {
-			smartPanExtractMode = "rule-first"
+		if smartPanExtractMode != "pan-first" && smartPanExtractMode != "rule-first" && smartPanExtractMode != "quality-first" {
+			smartPanExtractMode = "quality-first"
 		}
 		writeJSON(w, 200, map[string]any{
 			"success":                true,
@@ -1068,8 +1072,8 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 
 		modeRaw, _ := body["smartPanExtractMode"].(string)
 		mode := strings.TrimSpace(modeRaw)
-		if mode != "pan-first" {
-			mode = "rule-first"
+		if mode != "pan-first" && mode != "rule-first" && mode != "quality-first" {
+			mode = "quality-first"
 		}
 		_ = database.SetSetting("smart_pan_extract_mode", mode)
 
@@ -1086,8 +1090,8 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 		smartSourcePriorityTokens := parseJSONStringArray(database.GetSetting("smart_source_priority_tokens"))
 		smartPanMatchTokens := parseJSONStringArray(database.GetSetting("smart_pan_match_tokens"))
 		smartPanExtractMode := strings.TrimSpace(database.GetSetting("smart_pan_extract_mode"))
-		if smartPanExtractMode != "pan-first" {
-			smartPanExtractMode = "rule-first"
+		if smartPanExtractMode != "pan-first" && smartPanExtractMode != "rule-first" && smartPanExtractMode != "quality-first" {
+			smartPanExtractMode = "quality-first"
 		}
 		writeJSON(w, 200, map[string]any{
 			"success":                true,
