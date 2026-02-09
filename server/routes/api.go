@@ -173,10 +173,12 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 			settings["smartSourcePriorityTokens"] = parseJSONStringArray(database.GetSetting("smart_source_priority_tokens"))
 			settings["smartPanMatchTokens"] = parseJSONStringArray(database.GetSetting("smart_pan_match_tokens"))
 			mode := strings.TrimSpace(database.GetSetting("smart_pan_extract_mode"))
-			if mode != "pan-first" {
-				mode = "rule-first"
+			if mode != "pan-first" && mode != "rule-first" && mode != "quality-first" {
+				mode = "quality-first"
 			}
 			settings["smartPanExtractMode"] = mode
+			settings["smartBalanceQuality"] = strings.TrimSpace(database.GetSetting("smart_balance_quality")) != "0"
+			settings["smartBalanceFps"] = strings.TrimSpace(database.GetSetting("smart_balance_fps")) != "0"
 			settings["smartPlayEnabled"] = strings.TrimSpace(database.GetSetting("smart_play_enabled")) != "0"
 			settings["smartListEnabled"] = strings.TrimSpace(database.GetSetting("smart_list_enabled")) != "0"
 			settings["smartQualityPref"] = strings.TrimSpace(database.GetSetting("smart_quality_pref"))
