@@ -192,26 +192,53 @@ func DashboardHandler(database *db.DB, authMw *auth.Auth) http.Handler {
 	})
 }
 
+func normalizeSourceExtractPriority(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "画质"
+	}
+	s = strings.ReplaceAll(s, "，", ",")
+	parts := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == '/' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	})
+	allowed := map[string]struct{}{"画质": {}, "帧率": {}, "关键字": {}, "网盘": {}}
+	seen := map[string]struct{}{}
+	out := []string{}
+	for _, p := range parts {
+		t := strings.TrimSpace(p)
+		if t == "" {
+			continue
+		}
+		if _, ok := allowed[t]; !ok {
+			continue
+		}
+		if _, ok := seen[t]; ok {
+			continue
+		}
+		seen[t] = struct{}{}
+		out = append(out, t)
+	}
+	if len(out) == 0 {
+		return "画质"
+	}
+	return strings.Join(out, ",")
+}
+
 func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	readBoolEnabled := func(key string) bool {
 		return strings.TrimSpace(database.GetSetting(key)) != "0"
 	}
+
 	writeOut := func() {
-		smartPanExtractMode := strings.TrimSpace(database.GetSetting("smart_pan_extract_mode"))
-		if smartPanExtractMode != "pan-first" && smartPanExtractMode != "rule-first" && smartPanExtractMode != "quality-first" {
-			smartPanExtractMode = "quality-first"
-		}
 		writeJSON(w, 200, map[string]any{
 			"success":                true,
 			"smartPlayEnabled":       readBoolEnabled("smart_play_enabled"),
 			"smartListEnabled":       readBoolEnabled("smart_list_enabled"),
 			"smartQualityPref":       strings.TrimSpace(database.GetSetting("smart_quality_pref")),
 			"smartFpsPref":           strings.TrimSpace(database.GetSetting("smart_fps_pref")),
-			"smartBalanceQuality":    readBoolEnabled("smart_balance_quality"),
-			"smartBalanceFps":        readBoolEnabled("smart_balance_fps"),
+			"smartSourceExtractPriority": normalizeSourceExtractPriority(database.GetSetting("smart_source_extract_priority")),
 			"smartSourcePriorityTokens": parseJSONStringArray(database.GetSetting("smart_source_priority_tokens")),
 			"smartPanMatchTokens":       parseJSONStringArray(database.GetSetting("smart_pan_match_tokens")),
-			"smartPanExtractMode":       smartPanExtractMode,
 		})
 	}
 
@@ -259,8 +286,7 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 		_ = database.SetSetting("smart_list_enabled", bool01(readBoolBody("smartListEnabled")))
 		_ = database.SetSetting("smart_quality_pref", readStrBody("smartQualityPref"))
 		_ = database.SetSetting("smart_fps_pref", readStrBody("smartFpsPref"))
-		_ = database.SetSetting("smart_balance_quality", bool01(readBoolBody("smartBalanceQuality")))
-		_ = database.SetSetting("smart_balance_fps", bool01(readBoolBody("smartBalanceFps")))
+		_ = database.SetSetting("smart_source_extract_priority", normalizeSourceExtractPriority(readStrBody("smartSourceExtractPriority")))
 
 		saveArr := func(key string, list any) {
 			switch vv := list.(type) {
@@ -295,14 +321,6 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 		}
 		if v, ok := body["smartPanMatchTokens"]; ok && v != nil {
 			saveArr("smart_pan_match_tokens", v)
-		}
-		if v, ok := body["smartPanExtractMode"]; ok && v != nil {
-			modeRaw, _ := v.(string)
-			mode := strings.TrimSpace(modeRaw)
-			if mode != "pan-first" && mode != "rule-first" && mode != "quality-first" {
-				mode = "quality-first"
-			}
-			_ = database.SetSetting("smart_pan_extract_mode", mode)
 		}
 
 		writeOut()
@@ -392,6 +410,7 @@ func handleDashboardSiteSave(w http.ResponseWriter, r *http.Request, database *d
 	parseForm(r)
 	siteName := strings.TrimSpace(r.FormValue("siteName"))
 	searchDisplayMode := strings.TrimSpace(r.FormValue("searchDisplayMode"))
+	searchBadgePreferEpisode := boolFromForm(r.FormValue("searchBadgePreferEpisode"))
 	doubanDataProxy := strings.TrimSpace(r.FormValue("doubanDataProxy"))
 	doubanDataCustom := strings.TrimSpace(r.FormValue("doubanDataCustom"))
 	doubanImgProxy := strings.TrimSpace(r.FormValue("doubanImgProxy"))
@@ -417,6 +436,11 @@ func handleDashboardSiteSave(w http.ResponseWriter, r *http.Request, database *d
 	_ = database.SetSetting("douban_data_custom", doubanDataCustom)
 	_ = database.SetSetting("douban_img_proxy", doubanImgProxy)
 	_ = database.SetSetting("douban_img_custom", doubanImgCustom)
+	if searchBadgePreferEpisode {
+		_ = database.SetSetting("search_badge_prefer_episode", "1")
+	} else {
+		_ = database.SetSetting("search_badge_prefer_episode", "0")
+	}
 	writeJSON(w, 200, map[string]any{"success": true})
 }
 
@@ -548,6 +572,7 @@ func handleDashboardSiteSettings(w http.ResponseWriter, r *http.Request, databas
 		"success":              true,
 		"siteName":             database.GetSetting("site_name"),
 		"searchDisplayMode":    mode,
+		"searchBadgePreferEpisode": strings.TrimSpace(database.GetSetting("search_badge_prefer_episode")) == "1",
 		"catPawOpenServers":    servers,
 		"catPawOpenActive":     active,
 		"goProxyEnabled":       strings.TrimSpace(database.GetSetting("goproxy_enabled")) == "1",
@@ -975,10 +1000,8 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 		}
 		smartSourcePriorityTokens := parseJSONStringArray(database.GetSetting("smart_source_priority_tokens"))
 		smartPanMatchTokens := parseJSONStringArray(database.GetSetting("smart_pan_match_tokens"))
-		smartPanExtractMode := strings.TrimSpace(database.GetSetting("smart_pan_extract_mode"))
-		if smartPanExtractMode != "pan-first" && smartPanExtractMode != "rule-first" && smartPanExtractMode != "quality-first" {
-			smartPanExtractMode = "quality-first"
-		}
+		smartSourceExtractPriority := strings.TrimSpace(database.GetSetting("smart_source_extract_priority"))
+		smartSourceExtractPriority = normalizeSourceExtractPriority(smartSourceExtractPriority)
 		writeJSON(w, 200, map[string]any{
 			"success":                true,
 			"episodeCleanRegex":      episodeCleanRegex,
@@ -989,7 +1012,7 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 			"aggregateRegexRules":    parseJSONStringArray(database.GetSetting("magic_aggregate_regex_rules")),
 			"smartSourcePriorityTokens": smartSourcePriorityTokens,
 			"smartPanMatchTokens":       smartPanMatchTokens,
-			"smartPanExtractMode":       smartPanExtractMode,
+			"smartSourceExtractPriority": smartSourceExtractPriority,
 		})
 	case http.MethodPost:
 		var body map[string]any
@@ -1070,12 +1093,8 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 		saveStrArrSetting(database, "smart_source_priority_tokens", readCommaTokens("smartSourcePriorityTokens"))
 		saveStrArrSetting(database, "smart_pan_match_tokens", readCommaTokens("smartPanMatchTokens"))
 
-		modeRaw, _ := body["smartPanExtractMode"].(string)
-		mode := strings.TrimSpace(modeRaw)
-		if mode != "pan-first" && mode != "rule-first" && mode != "quality-first" {
-			mode = "quality-first"
-		}
-		_ = database.SetSetting("smart_pan_extract_mode", mode)
+		priorityRaw, _ := body["smartSourceExtractPriority"].(string)
+		_ = database.SetSetting("smart_source_extract_priority", normalizeSourceExtractPriority(priorityRaw))
 
 		if legacy := readList("aggregateRules"); len(legacy) > 0 {
 			saveStrArrSetting(database, "magic_aggregate_rules", legacy)
@@ -1089,10 +1108,8 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 		}
 		smartSourcePriorityTokens := parseJSONStringArray(database.GetSetting("smart_source_priority_tokens"))
 		smartPanMatchTokens := parseJSONStringArray(database.GetSetting("smart_pan_match_tokens"))
-		smartPanExtractMode := strings.TrimSpace(database.GetSetting("smart_pan_extract_mode"))
-		if smartPanExtractMode != "pan-first" && smartPanExtractMode != "rule-first" && smartPanExtractMode != "quality-first" {
-			smartPanExtractMode = "quality-first"
-		}
+		smartSourceExtractPriority := strings.TrimSpace(database.GetSetting("smart_source_extract_priority"))
+		smartSourceExtractPriority = normalizeSourceExtractPriority(smartSourceExtractPriority)
 		writeJSON(w, 200, map[string]any{
 			"success":                true,
 			"episodeCleanRegex":      outEpisodeClean,
@@ -1103,7 +1120,7 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 			"aggregateRegexRules":    parseJSONStringArray(database.GetSetting("magic_aggregate_regex_rules")),
 			"smartSourcePriorityTokens": smartSourcePriorityTokens,
 			"smartPanMatchTokens":       smartPanMatchTokens,
-			"smartPanExtractMode":       smartPanExtractMode,
+			"smartSourceExtractPriority": smartSourceExtractPriority,
 		})
 	default:
 		methodNotAllowed(w)
