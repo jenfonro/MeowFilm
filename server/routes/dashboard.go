@@ -224,6 +224,37 @@ func normalizeSourceExtractPriority(raw string) string {
 	return strings.Join(out, ",")
 }
 
+func readBoolJSONBody(body map[string]any, key string) bool {
+	if body == nil || key == "" {
+		return false
+	}
+	v, ok := body[key]
+	if !ok || v == nil {
+		return false
+	}
+	b, _ := v.(bool)
+	return b
+}
+
+func readStrJSONBody(body map[string]any, key string) string {
+	if body == nil || key == "" {
+		return ""
+	}
+	v, ok := body[key]
+	if !ok || v == nil {
+		return ""
+	}
+	s, _ := v.(string)
+	return strings.TrimSpace(s)
+}
+
+func bool01(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
+}
+
 func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	readBoolEnabled := func(key string) bool {
 		return strings.TrimSpace(database.GetSetting(key)) != "0"
@@ -249,44 +280,14 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 		var body map[string]any
 		_ = readJSONLoose(r, &body)
 
-		readBoolBody := func(key string) bool {
-			v, ok := body[key]
-			if !ok || v == nil {
-				return false
-			}
-			switch vv := v.(type) {
-			case bool:
-				return vv
-			case float64:
-				return int(vv) != 0
-			case string:
-				s := strings.TrimSpace(vv)
-				return s == "1" || strings.EqualFold(s, "true") || strings.EqualFold(s, "yes") || strings.EqualFold(s, "on")
-			default:
-				return false
-			}
-		}
-		readStrBody := func(key string) string {
-			v, ok := body[key]
-			if !ok || v == nil {
-				return ""
-			}
-			s, _ := v.(string)
-			return strings.TrimSpace(s)
-		}
-
-		bool01 := func(b bool) string {
-			if b {
-				return "1"
-			}
-			return "0"
-		}
-
-		_ = database.SetSetting("smart_play_enabled", bool01(readBoolBody("smartPlayEnabled")))
-		_ = database.SetSetting("smart_list_enabled", bool01(readBoolBody("smartListEnabled")))
-		_ = database.SetSetting("smart_quality_pref", readStrBody("smartQualityPref"))
-		_ = database.SetSetting("smart_fps_pref", readStrBody("smartFpsPref"))
-		_ = database.SetSetting("smart_source_extract_priority", normalizeSourceExtractPriority(readStrBody("smartSourceExtractPriority")))
+		_ = database.SetSetting("smart_play_enabled", bool01(readBoolJSONBody(body, "smartPlayEnabled")))
+		_ = database.SetSetting("smart_list_enabled", bool01(readBoolJSONBody(body, "smartListEnabled")))
+		_ = database.SetSetting("smart_quality_pref", readStrJSONBody(body, "smartQualityPref"))
+		_ = database.SetSetting("smart_fps_pref", readStrJSONBody(body, "smartFpsPref"))
+		_ = database.SetSetting(
+			"smart_source_extract_priority",
+			normalizeSourceExtractPriority(readStrJSONBody(body, "smartSourceExtractPriority")),
+		)
 
 		saveArr := func(key string, list any) {
 			switch vv := list.(type) {
@@ -300,17 +301,6 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 					}
 				}
 				saveStrArrSetting(database, key, out)
-			case []string:
-				out := []string{}
-				for _, s := range vv {
-					t := strings.TrimSpace(s)
-					if t != "" {
-						out = append(out, t)
-					}
-				}
-				saveStrArrSetting(database, key, out)
-			case string:
-				saveStrArrSetting(database, key, parseJSONStringArray(vv))
 			default:
 				// ignore
 			}
@@ -364,37 +354,11 @@ func handleDashboardTMDBSettings(w http.ResponseWriter, r *http.Request, databas
 		var body map[string]any
 		_ = readJSONLoose(r, &body)
 
-		readBoolBody := func(key string) bool {
-			v, ok := body[key]
-			if !ok || v == nil {
-				return false
-			}
-			switch vv := v.(type) {
-			case bool:
-				return vv
-			case float64:
-				return int(vv) != 0
-			case string:
-				s := strings.TrimSpace(vv)
-				return s == "1" || strings.EqualFold(s, "true") || strings.EqualFold(s, "yes") || strings.EqualFold(s, "on")
-			default:
-				return false
-			}
-		}
-		readStrBody := func(key string) string {
-			v, ok := body[key]
-			if !ok || v == nil {
-				return ""
-			}
-			s, _ := v.(string)
-			return strings.TrimSpace(s)
-		}
-
-		_ = database.SetSetting("tmdb_v4_token", readStrBody("v4Token"))
-		_ = database.SetSetting("tmdb_v3_key", readStrBody("v3Key"))
-		_ = database.SetSetting("tmdb_language", readStrBody("language"))
-		_ = database.SetSetting("tmdb_region", readStrBody("region"))
-		_ = database.SetSetting("tmdb_include_adult", bool01(readBoolBody("includeAdult")))
+		_ = database.SetSetting("tmdb_v4_token", readStrJSONBody(body, "v4Token"))
+		_ = database.SetSetting("tmdb_v3_key", readStrJSONBody(body, "v3Key"))
+		_ = database.SetSetting("tmdb_language", readStrJSONBody(body, "language"))
+		_ = database.SetSetting("tmdb_region", readStrJSONBody(body, "region"))
+		_ = database.SetSetting("tmdb_include_adult", bool01(readBoolJSONBody(body, "includeAdult")))
 
 		writeOut()
 	default:
