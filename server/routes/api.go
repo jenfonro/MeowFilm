@@ -172,13 +172,37 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 			settings["magicAggregateRegexRules"] = parseJSONStringArray(database.GetSetting("magic_aggregate_regex_rules"))
 			settings["smartSourcePriorityTokens"] = parseJSONStringArray(database.GetSetting("smart_source_priority_tokens"))
 			settings["smartPanMatchTokens"] = parseJSONStringArray(database.GetSetting("smart_pan_match_tokens"))
-			mode := strings.TrimSpace(database.GetSetting("smart_pan_extract_mode"))
-			if mode != "pan-first" && mode != "rule-first" && mode != "quality-first" {
-				mode = "quality-first"
+			priority := strings.TrimSpace(database.GetSetting("smart_source_extract_priority"))
+			if priority == "" {
+				priority = "画质"
 			}
-			settings["smartPanExtractMode"] = mode
-			settings["smartBalanceQuality"] = strings.TrimSpace(database.GetSetting("smart_balance_quality")) != "0"
-			settings["smartBalanceFps"] = strings.TrimSpace(database.GetSetting("smart_balance_fps")) != "0"
+			priority = strings.ReplaceAll(priority, "，", ",")
+			allowed := map[string]struct{}{"画质": {}, "帧率": {}, "关键字": {}, "网盘": {}}
+			seen := map[string]struct{}{}
+			parts := strings.FieldsFunc(priority, func(r rune) bool {
+				return r == ',' || r == '/' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+			})
+			out := []string{}
+			for _, p := range parts {
+				t := strings.TrimSpace(p)
+				if t == "" {
+					continue
+				}
+				if _, ok := allowed[t]; !ok {
+					continue
+				}
+				if _, ok := seen[t]; ok {
+					continue
+				}
+				seen[t] = struct{}{}
+				out = append(out, t)
+			}
+			if len(out) == 0 {
+				priority = "画质"
+			} else {
+				priority = strings.Join(out, ",")
+			}
+			settings["smartSourceExtractPriority"] = priority
 			settings["smartPlayEnabled"] = strings.TrimSpace(database.GetSetting("smart_play_enabled")) != "0"
 			settings["smartListEnabled"] = strings.TrimSpace(database.GetSetting("smart_list_enabled")) != "0"
 			settings["smartQualityPref"] = strings.TrimSpace(database.GetSetting("smart_quality_pref"))
@@ -188,6 +212,7 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 				displayMode = "sites"
 			}
 			settings["searchDisplayMode"] = displayMode
+			settings["searchBadgePreferEpisode"] = strings.TrimSpace(database.GetSetting("search_badge_prefer_episode")) == "1"
 
 			var (
 				userCatBase  string
