@@ -433,7 +433,7 @@ func (d *DB) seedDefaults() error {
 		{"magic_aggregate_regex_rules", "[]"},
 		{"smart_play_enabled", "1"},
 		{"smart_list_enabled", "1"},
-		{"smart_quality_pref", "4k_1080p"},
+		{"smart_quality_pref", "4k"},
 		{"smart_fps_pref", ""},
 		{"smart_source_extract_priority", "画质"},
 		{"smart_source_priority_tokens", "[]"},
