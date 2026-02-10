@@ -192,7 +192,7 @@ func (d *DB) initSchema(fresh bool) error {
 			  UNIQUE(user_id, keyword)
 			);
 			CREATE INDEX IF NOT EXISTS idx_search_history_user_id_updated_at ON search_history(user_id, updated_at DESC);
-				CREATE TABLE IF NOT EXISTS play_history (
+			CREATE TABLE IF NOT EXISTS play_history (
 				  id INTEGER PRIMARY KEY AUTOINCREMENT,
 				  user_id INTEGER NOT NULL,
 				  site_key TEXT NOT NULL,
@@ -202,6 +202,8 @@ func (d *DB) initSchema(fresh bool) error {
 				  video_title TEXT NOT NULL,
 				  video_poster TEXT DEFAULT '',
 				  video_remark TEXT DEFAULT '',
+				  tmdb_id INTEGER DEFAULT 0,
+				  tmdb_type TEXT DEFAULT '',
 				  pan_label TEXT DEFAULT '',
 				  play_flag TEXT DEFAULT '',
 				  content_key TEXT DEFAULT '',
@@ -249,8 +251,34 @@ func (d *DB) initSchema(fresh bool) error {
 
 	// One-time cleanup for removed settings keys.
 	_ = d.cleanupLegacySettings()
+	_ = d.ensurePlayHistoryTMDBColumns()
 
 	return d.ensureDefaultAdmin()
+}
+
+func (d *DB) ensurePlayHistoryTMDBColumns() error {
+	if d == nil || d.db == nil {
+		return nil
+	}
+	cols := []struct {
+		name string
+		ddl  string
+	}{
+		{name: "tmdb_id", ddl: "ALTER TABLE play_history ADD COLUMN tmdb_id INTEGER DEFAULT 0"},
+		{name: "tmdb_type", ddl: "ALTER TABLE play_history ADD COLUMN tmdb_type TEXT DEFAULT ''"},
+		{name: "tmdb_seasons_json", ddl: "ALTER TABLE play_history ADD COLUMN tmdb_seasons_json TEXT DEFAULT ''"},
+	}
+	for _, c := range cols {
+		ok, err := hasSQLiteColumn(d.db, "play_history", c.name)
+		if err != nil {
+			return err
+		}
+		if ok {
+			continue
+		}
+		_, _ = d.db.Exec(c.ddl)
+	}
+	return nil
 }
 
 func (d *DB) cleanupLegacySettings() error {
@@ -433,9 +461,7 @@ func (d *DB) seedDefaults() error {
 		{"magic_aggregate_regex_rules", "[]"},
 		{"smart_play_enabled", "1"},
 		{"smart_list_enabled", "1"},
-		{"smart_quality_pref", "4k"},
-		{"smart_fps_pref", ""},
-		{"smart_source_extract_priority", "画质"},
+		{"smart_source_extract_priority", "无"},
 		{"smart_source_priority_tokens", "[]"},
 		{"smart_pan_match_tokens", `["逸动","天意","夸父","优夕","百度"]`},
 		{"goproxy_enabled", "0"},
