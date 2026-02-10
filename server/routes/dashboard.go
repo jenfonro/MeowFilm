@@ -195,33 +195,14 @@ func DashboardHandler(database *db.DB, authMw *auth.Auth) http.Handler {
 func normalizeSourceExtractPriority(raw string) string {
 	s := strings.TrimSpace(raw)
 	if s == "" {
-		return "画质"
+		return "无"
 	}
-	s = strings.ReplaceAll(s, "，", ",")
-	parts := strings.FieldsFunc(s, func(r rune) bool {
-		return r == ',' || r == '/' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
-	})
-	allowed := map[string]struct{}{"画质": {}, "帧率": {}, "关键字": {}, "网盘": {}}
-	seen := map[string]struct{}{}
-	out := []string{}
-	for _, p := range parts {
-		t := strings.TrimSpace(p)
-		if t == "" {
-			continue
-		}
-		if _, ok := allowed[t]; !ok {
-			continue
-		}
-		if _, ok := seen[t]; ok {
-			continue
-		}
-		seen[t] = struct{}{}
-		out = append(out, t)
+
+	// New mode: one of "无" | "网盘" | "关键字"
+	if s == "无" || s == "网盘" || s == "关键字" {
+		return s
 	}
-	if len(out) == 0 {
-		return "画质"
-	}
-	return strings.Join(out, ",")
+	return "无"
 }
 
 func readBoolJSONBody(body map[string]any, key string) bool {
@@ -265,8 +246,6 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 			"success":                true,
 			"smartPlayEnabled":       readBoolEnabled("smart_play_enabled"),
 			"smartListEnabled":       readBoolEnabled("smart_list_enabled"),
-			"smartQualityPref":       strings.TrimSpace(database.GetSetting("smart_quality_pref")),
-			"smartFpsPref":           strings.TrimSpace(database.GetSetting("smart_fps_pref")),
 			"smartSourceExtractPriority": normalizeSourceExtractPriority(database.GetSetting("smart_source_extract_priority")),
 			"smartSourcePriorityTokens": parseJSONStringArray(database.GetSetting("smart_source_priority_tokens")),
 			"smartPanMatchTokens":       parseJSONStringArray(database.GetSetting("smart_pan_match_tokens")),
@@ -280,14 +259,19 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 		var body map[string]any
 		_ = readJSONLoose(r, &body)
 
-		_ = database.SetSetting("smart_play_enabled", bool01(readBoolJSONBody(body, "smartPlayEnabled")))
-		_ = database.SetSetting("smart_list_enabled", bool01(readBoolJSONBody(body, "smartListEnabled")))
-		_ = database.SetSetting("smart_quality_pref", readStrJSONBody(body, "smartQualityPref"))
-		_ = database.SetSetting("smart_fps_pref", readStrJSONBody(body, "smartFpsPref"))
-		_ = database.SetSetting(
-			"smart_source_extract_priority",
-			normalizeSourceExtractPriority(readStrJSONBody(body, "smartSourceExtractPriority")),
-		)
+		// Partial update: only overwrite settings that are present in the request body.
+		if _, ok := body["smartPlayEnabled"]; ok {
+			_ = database.SetSetting("smart_play_enabled", bool01(readBoolJSONBody(body, "smartPlayEnabled")))
+		}
+		if _, ok := body["smartListEnabled"]; ok {
+			_ = database.SetSetting("smart_list_enabled", bool01(readBoolJSONBody(body, "smartListEnabled")))
+		}
+		if _, ok := body["smartSourceExtractPriority"]; ok {
+			_ = database.SetSetting(
+				"smart_source_extract_priority",
+				normalizeSourceExtractPriority(readStrJSONBody(body, "smartSourceExtractPriority")),
+			)
+		}
 
 		saveArr := func(key string, list any) {
 			switch vv := list.(type) {

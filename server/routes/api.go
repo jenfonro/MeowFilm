@@ -132,6 +132,10 @@ func APIHandler(database *db.DB, authMw *auth.Auth) http.Handler {
 			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleAPITMDBSearch(w, r, database)
 			})).ServeHTTP(w, r)
+		case "/tmdb/detail":
+			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleAPITMDBDetail(w, r, database)
+			})).ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -175,8 +179,6 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 			settings["smartSourceExtractPriority"] = normalizeSourceExtractPriority(database.GetSetting("smart_source_extract_priority"))
 			settings["smartPlayEnabled"] = strings.TrimSpace(database.GetSetting("smart_play_enabled")) != "0"
 			settings["smartListEnabled"] = strings.TrimSpace(database.GetSetting("smart_list_enabled")) != "0"
-			settings["smartQualityPref"] = strings.TrimSpace(database.GetSetting("smart_quality_pref"))
-			settings["smartFpsPref"] = strings.TrimSpace(database.GetSetting("smart_fps_pref"))
 			displayMode := strings.TrimSpace(database.GetSetting("search_display_mode"))
 			if displayMode != "tmdb" && displayMode != "both" && displayMode != "sites" {
 				displayMode = "sites"
@@ -269,6 +271,8 @@ func handleAPIHome(w http.ResponseWriter, r *http.Request, database *db.DB) {
 				  video_title,
 				  video_poster,
 				  video_remark,
+				  tmdb_id,
+				  tmdb_type,
 				  pan_label,
 				  play_flag,
 				  episode_index,
@@ -293,13 +297,15 @@ func handleAPIHome(w http.ResponseWriter, r *http.Request, database *db.DB) {
 					videoTitle   string
 					videoPoster  string
 					videoRemark  string
+					tmdbID       int
+					tmdbType     string
 					panLabel     string
 					playFlag     string
 					episodeIndex int
 					episodeName  string
 					updatedAt    int64
 				)
-				_ = rows.Scan(&contentKey, &siteKey, &siteName, &spiderAPI, &videoID, &videoTitle, &videoPoster, &videoRemark, &panLabel, &playFlag, &episodeIndex, &episodeName, &updatedAt)
+				_ = rows.Scan(&contentKey, &siteKey, &siteName, &spiderAPI, &videoID, &videoTitle, &videoPoster, &videoRemark, &tmdbID, &tmdbType, &panLabel, &playFlag, &episodeIndex, &episodeName, &updatedAt)
 				if isNetDiskHistoryItem(videoID, playFlag) {
 					continue
 				}
@@ -327,6 +333,8 @@ func handleAPIHome(w http.ResponseWriter, r *http.Request, database *db.DB) {
 					"videoTitle":   videoTitle,
 					"videoPoster":  rewriteVideoPosterURL(videoPoster, doubanImgProxy, doubanImgCustom),
 					"videoRemark":  videoRemark,
+					"tmdbId":       tmdbID,
+					"tmdbType":     strings.TrimSpace(tmdbType),
 					"panLabel":     panLabel,
 					"playFlag":     playFlag,
 					"episodeIndex": episodeIndex,
@@ -512,6 +520,9 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 		videoTitle   string
 		videoPoster  string
 		videoRemark  string
+		tmdbID       int
+		tmdbType     string
+		tmdbSeasons  string
 		panLabel     string
 		playFlag     string
 		episodeIndex int
@@ -519,12 +530,12 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 		updatedAt    int64
 	)
 	err := database.SQL().QueryRow(`
-		SELECT content_key, site_name, spider_api, video_title, video_poster, video_remark, pan_label, play_flag, episode_index, episode_name, updated_at
+		SELECT content_key, site_name, spider_api, video_title, video_poster, video_remark, tmdb_id, tmdb_type, tmdb_seasons_json, pan_label, play_flag, episode_index, episode_name, updated_at
 		FROM play_history
 		WHERE user_id=? AND site_key=? AND video_id=?
 		ORDER BY updated_at DESC
 		LIMIT 1
-	`, u.ID, siteKey, videoID).Scan(&contentKey, &siteName, &spiderAPI, &videoTitle, &videoPoster, &videoRemark, &panLabel, &playFlag, &episodeIndex, &episodeName, &updatedAt)
+	`, u.ID, siteKey, videoID).Scan(&contentKey, &siteName, &spiderAPI, &videoTitle, &videoPoster, &videoRemark, &tmdbID, &tmdbType, &tmdbSeasons, &panLabel, &playFlag, &episodeIndex, &episodeName, &updatedAt)
 	if err != nil {
 		writeJSON(w, 200, nil)
 		return
@@ -547,6 +558,9 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 		"videoTitle":   videoTitle,
 		"videoPoster":  rewriteVideoPosterURL(videoPoster, doubanImgProxy, doubanImgCustom),
 		"videoRemark":  videoRemark,
+		"tmdbId":       tmdbID,
+		"tmdbType":     strings.TrimSpace(tmdbType),
+		"tmdbSeasons":  strings.TrimSpace(tmdbSeasons),
 		"panLabel":     panLabel,
 		"playFlag":     playFlag,
 		"episodeIndex": episodeIndex,
@@ -564,7 +578,7 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		limit := parseIntQuery(r.URL.Query().Get("limit"), 20, 1, 50)
 		sourceLimit := minInt(500, maxInt(50, limit*10))
 		rows, err := database.SQL().Query(`
-				SELECT content_key, site_key, site_name, spider_api, video_id, video_title, video_poster, video_remark, pan_label, play_flag, episode_index, episode_name, updated_at
+				SELECT content_key, site_key, site_name, spider_api, video_id, video_title, video_poster, video_remark, tmdb_id, tmdb_type, tmdb_seasons_json, pan_label, play_flag, episode_index, episode_name, updated_at
 				FROM play_history
 				WHERE user_id=?
 				ORDER BY updated_at DESC
@@ -587,13 +601,16 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 				videoTitle   string
 				videoPoster  string
 				videoRemark  string
+				tmdbID       int
+				tmdbType     string
+				tmdbSeasons  string
 				panLabel     string
 				playFlag     string
 				episodeIndex int
 				episodeName  string
 				updatedAt    int64
 			)
-			_ = rows.Scan(&contentKey, &siteKey, &siteName, &spiderAPI, &videoID, &videoTitle, &videoPoster, &videoRemark, &panLabel, &playFlag, &episodeIndex, &episodeName, &updatedAt)
+			_ = rows.Scan(&contentKey, &siteKey, &siteName, &spiderAPI, &videoID, &videoTitle, &videoPoster, &videoRemark, &tmdbID, &tmdbType, &tmdbSeasons, &panLabel, &playFlag, &episodeIndex, &episodeName, &updatedAt)
 			if isNetDiskHistoryItem(videoID, playFlag) {
 				continue
 			}
@@ -621,6 +638,9 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 				"videoTitle":   videoTitle,
 				"videoPoster":  rewriteVideoPosterURL(videoPoster, doubanImgProxy, doubanImgCustom),
 				"videoRemark":  videoRemark,
+				"tmdbId":       tmdbID,
+				"tmdbType":     strings.TrimSpace(tmdbType),
+				"tmdbSeasons":  strings.TrimSpace(tmdbSeasons),
 				"panLabel":     panLabel,
 				"playFlag":     playFlag,
 				"episodeIndex": episodeIndex,
@@ -669,6 +689,17 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		siteName := getS("siteName")
 		videoPoster := getS("videoPoster")
 		videoRemark := getS("videoRemark")
+		tmdbID := getI("tmdbId")
+		tmdbType := getS("tmdbType")
+		tmdbSeasons := strings.TrimSpace(getS("tmdbSeasons"))
+		if tmdbType != "tv" && tmdbType != "movie" {
+			tmdbType = ""
+			tmdbID = 0
+			tmdbSeasons = ""
+		}
+		if tmdbType != "tv" || tmdbID <= 0 {
+			tmdbSeasons = ""
+		}
 		panLabel := getS("panLabel")
 		playFlag := getS("playFlag")
 		episodeIndex := getI("episodeIndex")
@@ -732,9 +763,9 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		_, _ = database.SQL().Exec(`
 				INSERT INTO play_history(
 				  user_id, content_key, site_key, site_name, spider_api, video_id, video_title, video_poster, video_remark,
-				  pan_label, play_flag, episode_index, episode_name, updated_at
+				  tmdb_id, tmdb_type, tmdb_seasons_json, pan_label, play_flag, episode_index, episode_name, updated_at
 				)
-				VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+				VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 				ON CONFLICT(user_id, site_key, video_id) DO UPDATE SET
 				  content_key = excluded.content_key,
 				  site_name = excluded.site_name,
@@ -742,12 +773,15 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 				  video_title = excluded.video_title,
 				  video_poster = excluded.video_poster,
 				  video_remark = excluded.video_remark,
+				  tmdb_id = excluded.tmdb_id,
+				  tmdb_type = excluded.tmdb_type,
+				  tmdb_seasons_json = excluded.tmdb_seasons_json,
 				  pan_label = excluded.pan_label,
 				  play_flag = excluded.play_flag,
 				  episode_index = excluded.episode_index,
 				  episode_name = excluded.episode_name,
 				  updated_at = excluded.updated_at
-			`, u.ID, contentKey, siteKey, siteName, spiderAPI, videoID, videoTitle, finalPoster, videoRemark, panLabel, playFlag, episodeIndex, episodeName, now)
+			`, u.ID, contentKey, siteKey, siteName, spiderAPI, videoID, videoTitle, finalPoster, videoRemark, tmdbID, tmdbType, tmdbSeasons, panLabel, playFlag, episodeIndex, episodeName, now)
 		writeJSON(w, 200, map[string]any{"success": true})
 	case http.MethodDelete:
 		contentKey := strings.TrimSpace(r.URL.Query().Get("contentKey"))
