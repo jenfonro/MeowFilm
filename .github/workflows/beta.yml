@@ -28,17 +28,11 @@ jobs:
       matrix:
         include:
           - goos: linux
-            goarch: 386
-            zig_target: x86-linux-gnu
-          - goos: linux
             goarch: amd64
             zig_target: x86_64-linux-gnu
           - goos: linux
             goarch: arm64
             zig_target: aarch64-linux-gnu
-          - goos: windows
-            goarch: 386
-            zig_target: x86-windows-gnu
           - goos: windows
             goarch: amd64
             zig_target: x86_64-windows-gnu
@@ -68,6 +62,7 @@ jobs:
         with:
           repository: jenfonro/MeowFilm-Frontend
           path: MeowFilm-Frontend
+          token: ${{ secrets.FRONTEND_TOKEN }}
 
       - name: Compute commit metadata
         shell: bash
@@ -144,6 +139,7 @@ jobs:
           repository: jenfonro/MeowFilm-Frontend
           path: MeowFilm-Frontend
           fetch-depth: 0
+          token: ${{ secrets.FRONTEND_TOKEN }}
 
       - uses: actions/download-artifact@v4
         with:
