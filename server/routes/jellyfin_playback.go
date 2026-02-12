@@ -47,8 +47,6 @@ func handleJellyfinPlaybackInfo(w http.ResponseWriter, r *http.Request, database
 		return
 	}
 
-	forcedURL := strings.TrimSpace(os.Getenv("MEOWFILM_JELLYFIN_FORCE_PLAY_URL"))
-
 	// For Douban IDs (movie/series), resolve to TMDB before selecting playback.
 	if parsed.Source == "douban" && parsed.TMDBID <= 0 && parsed.DoubanID != "" {
 		m, _ := jellyfinGetDoubanTMDBMap(database, parsed.Kind, parsed.DoubanID)
@@ -71,18 +69,7 @@ func handleJellyfinPlaybackInfo(w http.ResponseWriter, r *http.Request, database
 		parsed.TMDBID = tid
 	}
 
-	playURL := ""
-	headers := map[string]string{}
-	var err error
-	if forcedURL != "" {
-		playURL = forcedURL
-		headers = map[string]string{}
-		if jellyfinDebugLogEnabled() {
-			jellyfinDebugPrintf("[jellyfin][playback] forced item=%s url=%q", jellyfinID, forcedURL)
-		}
-	} else {
-		playURL, headers, err = jellyfinResolvePlaybackFromTMDB(database, u, parsed)
-	}
+	playURL, headers, err := jellyfinResolvePlaybackFromTMDB(database, u, parsed)
 	if err != nil {
 		if jellyfinDebugLogEnabled() {
 			jellyfinDebugPrintf("[jellyfin][playback] fail item=%s err=%q cost=%s", jellyfinID, err.Error(), time.Since(startAt).String())

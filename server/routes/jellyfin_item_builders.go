@@ -141,6 +141,7 @@ func jellyfinBuildItem(database *db.DB, jellyfinID string) (map[string]any, erro
 		}
 		id := jellyfinBuildMovieID(parsed.TMDBID)
 		mediaSourceID := jellyfinStableHex32(id)
+		mediaPath := "/jellyfin/media/" + url.PathEscape(id) + ".mp4"
 		out := map[string]any{
 			"Id":           id,
 			"Name":         d.Title,
@@ -150,7 +151,7 @@ func jellyfinBuildItem(database *db.DB, jellyfinID string) (map[string]any, erro
 			"MediaType":    "Video",
 			"IsFolder":     false,
 			"LocationType": "Remote",
-			"Path":         "meowfilm://" + id,
+			"Path":         mediaPath,
 			"ParentId":     "view_tmdb_movies",
 
 			"ProductionYear":    d.Year,
@@ -164,7 +165,7 @@ func jellyfinBuildItem(database *db.DB, jellyfinID string) (map[string]any, erro
 					"MediaSourceId":        mediaSourceID,
 					"Protocol":             "File",
 					"IsRemote":             false,
-					"Path":                 "/jellyfin/media/" + url.PathEscape(id) + ".mp4",
+					"Path":                 mediaPath,
 					"Container":            "mp4",
 					"RequiredHttpHeaders":  map[string]string{},
 					"SupportsDirectPlay":   true,
@@ -271,6 +272,7 @@ func jellyfinBuildItem(database *db.DB, jellyfinID string) (map[string]any, erro
 			}
 			episodeID := jellyfinBuildEpisodeID(parsed.TMDBID, parsed.Season, parsed.Episode)
 			mediaSourceID := jellyfinStableHex32(episodeID)
+			mediaPath := "/jellyfin/media/" + url.PathEscape(episodeID) + ".mp4"
 			return map[string]any{
 				"Id":                      episodeID,
 				"Name":                    epName,
@@ -288,7 +290,7 @@ func jellyfinBuildItem(database *db.DB, jellyfinID string) (map[string]any, erro
 				"IndexNumber":             parsed.Episode,
 				"ParentIndexNumber":       parsed.Season,
 				"LocationType":            "Remote",
-				"Path":                    "meowfilm://" + episodeID,
+				"Path":                    mediaPath,
 				"ImageTags":               map[string]any{"Primary": "tmdb"},
 				"ProviderIds":             map[string]any{"Tmdb": strconv.Itoa(parsed.TMDBID)},
 				"UserData":                map[string]any{"Played": false},
@@ -298,7 +300,7 @@ func jellyfinBuildItem(database *db.DB, jellyfinID string) (map[string]any, erro
 						"MediaSourceId":        mediaSourceID,
 						"Protocol":             "File",
 						"IsRemote":             false,
-						"Path":                 "/jellyfin/media/" + url.PathEscape(episodeID) + ".mp4",
+						"Path":                 mediaPath,
 						"Container":            "mp4",
 						"RequiredHttpHeaders":  map[string]string{},
 						"SupportsDirectPlay":   true,
