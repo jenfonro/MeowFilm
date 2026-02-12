@@ -323,6 +323,7 @@ func handleDashboardTMDBSettings(w http.ResponseWriter, r *http.Request, databas
 			"success":      true,
 			"v4Token":      strings.TrimSpace(database.GetSetting("tmdb_v4_token")),
 			"v3Key":        strings.TrimSpace(database.GetSetting("tmdb_v3_key")),
+			"apiBase":      strings.TrimSpace(database.GetSetting("tmdb_api_base")),
 			"language":     readStringDefault("tmdb_language", "zh-CN"),
 			"region":       readStringDefault("tmdb_region", "CN"),
 			"includeAdult": readBool("tmdb_include_adult"),
@@ -338,6 +339,7 @@ func handleDashboardTMDBSettings(w http.ResponseWriter, r *http.Request, databas
 
 		_ = database.SetSetting("tmdb_v4_token", readStrJSONBody(body, "v4Token"))
 		_ = database.SetSetting("tmdb_v3_key", readStrJSONBody(body, "v3Key"))
+		_ = database.SetSetting("tmdb_api_base", normalizeHTTPBase(readStrJSONBody(body, "apiBase")))
 		_ = database.SetSetting("tmdb_language", readStrJSONBody(body, "language"))
 		_ = database.SetSetting("tmdb_region", readStrJSONBody(body, "region"))
 		_ = database.SetSetting("tmdb_include_adult", bool01(readBoolJSONBody(body, "includeAdult")))
