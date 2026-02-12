@@ -252,8 +252,32 @@ func (d *DB) initSchema(fresh bool) error {
 	// One-time cleanup for removed settings keys.
 	_ = d.cleanupLegacySettings()
 	_ = d.ensurePlayHistoryTMDBColumns()
+	_ = d.ensureDoubanTMDBMapTable()
 
 	return d.ensureDefaultAdmin()
+}
+
+func (d *DB) ensureDoubanTMDBMapTable() error {
+	if d == nil || d.db == nil {
+		return nil
+	}
+	_, err := d.db.Exec(`
+		CREATE TABLE IF NOT EXISTS douban_tmdb_map (
+		  id INTEGER PRIMARY KEY AUTOINCREMENT,
+		  kind TEXT NOT NULL,              -- "movie" | "tv"
+		  douban_id TEXT NOT NULL,
+		  title TEXT DEFAULT '',
+		  year INTEGER DEFAULT 0,
+		  tmdb_id INTEGER DEFAULT 0,
+		  tmdb_kind TEXT DEFAULT '',
+		  last_try_at INTEGER DEFAULT 0,
+		  updated_at INTEGER NOT NULL,
+		  UNIQUE(kind, douban_id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_douban_tmdb_map_kind_updated_at ON douban_tmdb_map(kind, updated_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_douban_tmdb_map_tmdb_id ON douban_tmdb_map(tmdb_id);
+	`)
+	return err
 }
 
 func (d *DB) ensurePlayHistoryTMDBColumns() error {
