@@ -2,7 +2,6 @@ package routes
 
 import (
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -10,10 +9,6 @@ import (
 )
 
 func handleJellyfinVideos(w http.ResponseWriter, r *http.Request, database *db.DB, serverID string, parts []string) {
-	_, ok := jellyfinRequireUser(w, r, database)
-	if !ok {
-		return
-	}
 	if len(parts) < 2 {
 		http.NotFound(w, r)
 		return
@@ -30,12 +25,11 @@ func handleJellyfinVideos(w http.ResponseWriter, r *http.Request, database *db.D
 		handleJellyfinVideoStream(w, r, database, serverID, itemID)
 		return
 	}
-
 	http.NotFound(w, r)
 }
 
 func handleJellyfinVideoStream(w http.ResponseWriter, r *http.Request, database *db.DB, serverID string, itemID string) {
-	_, ok := jellyfinRequireUser(w, r, database)
+	u, ok := jellyfinRequireUser(w, r, database)
 	if !ok {
 		return
 	}
@@ -49,6 +43,7 @@ func handleJellyfinVideoStream(w http.ResponseWriter, r *http.Request, database 
 	if mediaSourceID == "" {
 		mediaSourceID = strings.TrimSpace(q.Get("mediaSourceId"))
 	}
+
 	if mediaSourceID != "" {
 		jellyfinStreams.Lock()
 		sess, ok := jellyfinStreams.M[mediaSourceID]
@@ -61,15 +56,11 @@ func handleJellyfinVideoStream(w http.ResponseWriter, r *http.Request, database 
 		jellyfinStreams.Unlock()
 
 		if ok && strings.TrimSpace(sess.URL) != "" {
-			handleJellyfinStream(w, r, database, serverID, []string{mediaSourceID})
+			http.Redirect(w, r, strings.TrimSpace(sess.URL), http.StatusFound)
 			return
 		}
 	}
 
-	u, ok := jellyfinRequireUser(w, r, database)
-	if !ok {
-		return
-	}
 	parsed, ok := jellyfinParseItemID(itemID)
 	if !ok || parsed == nil {
 		http.NotFound(w, r)
@@ -92,24 +83,5 @@ func handleJellyfinVideoStream(w http.ResponseWriter, r *http.Request, database 
 		http.Redirect(w, r, finalURL, http.StatusFound)
 		return
 	}
-
-	streamID := jellyfinNewStreamID()
-	jellyfinStreams.Lock()
-	jellyfinStreams.M[streamID] = jellyfinStreamSession{
-		URL:     finalURL,
-		Headers: finalHeaders,
-		Expire:  time.Now().Add(20 * time.Minute),
-	}
-	jellyfinStreams.Unlock()
-
-	base := jellyfinBaseURL(r)
-	mediaPath := strings.TrimRight(base, "/") + "/jellyfin/stream/" + url.PathEscape(streamID)
-	if tok := jellyfinReadToken(r); tok != "" {
-		u2, _ := url.Parse(mediaPath)
-		q2 := u2.Query()
-		q2.Set("api_key", tok)
-		u2.RawQuery = q2.Encode()
-		mediaPath = u2.String()
-	}
-	http.Redirect(w, r, mediaPath, http.StatusFound)
+	jellyfinWriteError(w, 501, "该源需要自定义请求头，暂不支持")
 }

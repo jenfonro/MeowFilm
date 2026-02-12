@@ -29,4 +29,3 @@ func jellyfinRequireUser(w http.ResponseWriter, r *http.Request, database *db.DB
 	}
 	return u, true
 }
-

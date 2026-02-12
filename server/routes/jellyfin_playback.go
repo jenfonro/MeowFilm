@@ -3,7 +3,7 @@ package routes
 import (
 	"bytes"
 	"crypto/rand"
-	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -17,9 +17,8 @@ import (
 )
 
 type jellyfinStreamSession struct {
-	URL     string
-	Headers map[string]string
-	Expire  time.Time
+	URL    string
+	Expire time.Time
 }
 
 var jellyfinStreams = struct {
@@ -27,12 +26,6 @@ var jellyfinStreams = struct {
 	M map[string]jellyfinStreamSession
 }{
 	M: map[string]jellyfinStreamSession{},
-}
-
-func jellyfinNewStreamID() string {
-	b := make([]byte, 18)
-	_, _ = rand.Read(b)
-	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 func handleJellyfinPlaybackInfo(w http.ResponseWriter, r *http.Request, database *db.DB, serverID string, jellyfinID string) {
@@ -105,44 +98,8 @@ func handleJellyfinPlaybackInfo(w http.ResponseWriter, r *http.Request, database
 	if u != nil {
 		tvUser = u.Username
 	}
-	apiBase := jellyfinResolveCatApiBaseForUser(database, u)
-
-	// If headers are present, try to eliminate them for Infuse:
-	// - For m3u8: register CatPawOpen m3u8 proxy playlist and return proxy URL (headers cleared).
-	// - For non-m3u8: proxy through MeowFilm /jellyfin/stream/{id}.
-	if len(finalHeaders) > 0 && jellyfinIsProbablyM3U8(finalURL) && apiBase != "" {
-		_, proxyURL, err := jellyfinRegisterCatM3U8(apiBase, tvUser, finalURL, finalHeaders)
-		if err == nil && strings.TrimSpace(proxyURL) != "" {
-			finalURL = strings.TrimSpace(proxyURL)
-			finalHeaders = map[string]string{}
-		}
-	}
-
-	usedProxy := "direct"
-	playSessionID := jellyfinNewStreamID()
-	streamID := jellyfinNewStreamID()
-	if len(finalHeaders) > 0 {
-		usedProxy = "stream"
-		jellyfinStreams.Lock()
-		jellyfinStreams.M[streamID] = jellyfinStreamSession{
-			URL:     finalURL,
-			Headers: finalHeaders,
-			Expire:  time.Now().Add(20 * time.Minute),
-		}
-		jellyfinStreams.Unlock()
-
-		base := jellyfinBaseURL(r)
-		proxyURL := strings.TrimRight(base, "/") + "/jellyfin/stream/" + url.PathEscape(streamID)
-		if tok := jellyfinReadToken(r); tok != "" {
-			u2, _ := url.Parse(proxyURL)
-			q2 := u2.Query()
-			q2.Set("api_key", tok)
-			u2.RawQuery = q2.Encode()
-			proxyURL = u2.String()
-		}
-		finalURL = proxyURL
-		finalHeaders = map[string]string{}
-	}
+	playSessionID := jellyfinNewHexID()
+	mediaSourceID := jellyfinStableHex32(jellyfinID)
 
 	container := ""
 	if u0, err := url.Parse(originURL); err == nil {
@@ -159,87 +116,120 @@ func handleJellyfinPlaybackInfo(w http.ResponseWriter, r *http.Request, database
 	}
 
 	if debugLog {
-		jellyfinDebugPrintf("[jellyfin][playback] ok item=%s user=%s proxy=%s url=%q container=%s cost=%s", jellyfinID, tvUser, usedProxy, finalURL, container, time.Since(startAt).String())
+		jellyfinDebugPrintf("[jellyfin][playback] ok item=%s user=%s url=%q container=%s cost=%s", jellyfinID, tvUser, finalURL, container, time.Since(startAt).String())
 	}
 
-	mediaSourceID := streamID
+	if len(finalHeaders) != 0 {
+		jellyfinWriteError(w, 501, "该源需要自定义请求头，暂不支持")
+		return
+	}
+
+	etag := mediaSourceID
+
+	// Playback is served via /Videos/{itemId}/stream.* using MediaSourceId.
+	jellyfinStreams.Lock()
+	jellyfinStreams.M[mediaSourceID] = jellyfinStreamSession{
+		URL:    finalURL,
+		Expire: time.Now().Add(20 * time.Minute),
+	}
+	jellyfinStreams.Unlock()
+
+	containerList := container
+	switch container {
+	case "mkv", "webm":
+		containerList = "mkv,webm"
+	case "mp4", "m4v":
+		containerList = "mp4,m4v"
+	}
 
 	mediaStreams := []map[string]any{
 		{
-			"Codec":           "h264",
-			"Index":           0,
-			"IsDefault":       true,
-			"IsForced":        false,
-			"IsExternal":      false,
-			"Type":            "Video",
-			"IsInterlaced":    false,
-			"BitRate":         0,
-			"Width":           0,
-			"Height":          0,
-			"Level":           0,
-			"Profile":         "",
-			"PixelFormat":     "",
-			"RefFrames":       0,
-			"IsAnamorphic":    false,
-			"Rotation":        0,
-			"Language":        "",
-			"DisplayTitle":    "",
-			"DisplayLanguage": "",
+			"Codec":                  "h264",
+			"Index":                  0,
+			"Type":                   "Video",
+			"IsDefault":              true,
+			"IsForced":               false,
+			"IsExternal":             false,
+			"IsInterlaced":           false,
+			"RefFrames":              1,
+			"AverageFrameRate":       0,
+			"RealFrameRate":          0,
+			"CodecTimeBase":          "",
+			"VideoRange":             "",
+			"Language":               "",
+			"DisplayTitle":           "",
+			"Height":                 0,
+			"Width":                  0,
+			"BitRate":                0,
+			"Profile":                "",
+			"Level":                  0,
+			"PixelFormat":            "",
+			"AspectRatio":            "",
+			"IsTextSubtitleStream":   false,
+			"SupportsExternalStream": false,
+			"TimeBase":               "1/1000",
 		},
 		{
-			"Codec":           "aac",
-			"Index":           1,
-			"IsDefault":       true,
-			"IsForced":        false,
-			"IsExternal":      false,
-			"Type":            "Audio",
-			"Channels":        2,
-			"SampleRate":      0,
-			"BitRate":         0,
-			"Language":        "",
-			"DisplayTitle":    "",
-			"DisplayLanguage": "",
+			"Codec":                  "aac",
+			"Index":                  1,
+			"Type":                   "Audio",
+			"IsDefault":              true,
+			"IsForced":               false,
+			"IsExternal":             false,
+			"IsInterlaced":           false,
+			"Language":               "",
+			"DisplayTitle":           "",
+			"Channels":               2,
+			"SampleRate":             0,
+			"BitRate":                0,
+			"CodecTimeBase":          "",
+			"SupportsExternalStream": false,
+			"IsTextSubtitleStream":   false,
+			"TimeBase":               "1/1000",
+			"Level":                  0,
 		},
 	}
 
 	resp := map[string]any{
 		"MediaSources": []map[string]any{
 			{
+				"MediaAttachments": []any{},
+				"RunTimeTicks":     0,
+				"RequiresLooping":  false,
+				"MediaStreams":     mediaStreams,
+				"RequiresOpening":  false,
+
+				"Path":          "/jellyfin/media/" + url.PathEscape(jellyfinID) + "." + url.PathEscape(container),
+				"ETag":          etag,
+				"Name":          jellyfinID,
 				"Id":            mediaSourceID,
 				"MediaSourceId": mediaSourceID,
-				"Path":                       finalURL,
-				"Protocol":                   "Http",
-				"Type":                       "Default",
-				"IsRemote":                   true,
-				"Container":                  container,
-				"Size":                       0,
-				"RunTimeTicks":               0,
-				"Bitrate":                    0,
+				"Type":          "Default",
+				"Size":          0,
+				"Bitrate":       0,
+
+				"SupportsDirectPlay":   true,
+				"SupportsDirectStream": true,
+				"SupportsProbing":      true,
+				"SupportsTranscoding":  true,
+
+				"RequiresClosing":            false,
+				"Formats":                    []any{},
+				"RequiredHttpHeaders":        map[string]string{},
+				"IsRemote":                   false,
+				"IgnoreIndex":                false,
 				"IsInfiniteStream":           false,
-				"ReadAtNativeFramerate":      false,
-				"MediaStreams":               mediaStreams,
+				"IgnoreDts":                  false,
+				"Container":                  containerList,
+				"VideoType":                  "VideoFile",
 				"DefaultAudioStreamIndex":    1,
 				"DefaultSubtitleStreamIndex": -1,
-				"RequiredHttpHeaders":        map[string]string{},
-				"RequiresOpening":            false,
-				"RequiresClosing":            false,
-				"RequiresLooping":            false,
-				"SupportsDirectPlay":         true,
-				"SupportsDirectStream":       true,
-				"SupportsSeeking":            true,
-				"SupportsProbing":            true,
-				"SupportsTranscoding":        false,
-				"VideoType":                  "VideoFile",
+				"GenPtsInput":                false,
+				"ReadAtNativeFramerate":      false,
+				"Protocol":                   "File",
 			},
 		},
-		"PlaySessionId":          playSessionID,
-		"PlaybackStartTimeTicks": 0,
-		"DirectPlayUrl":          finalURL,
-		"DirectStreamUrl":        finalURL,
-
-		"EnableDirectPlay":   true,
-		"EnableDirectStream": true,
-		"EnableTranscoding":  true,
+		"PlaySessionId": playSessionID,
 	}
 
 	if debugLog {
@@ -255,4 +245,10 @@ func handleJellyfinPlaybackInfo(w http.ResponseWriter, r *http.Request, database
 		}
 	}
 	writeJSON(w, 200, resp)
+}
+
+func jellyfinNewHexID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }

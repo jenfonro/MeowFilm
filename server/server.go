@@ -44,10 +44,6 @@ func New(cfg Config) (*Server, error) {
 	mux.Handle("/api/", routes.APIHandler(database, authMw))
 	jellyfinAPI := routes.JellyfinHandler(database)
 	mux.Handle("/jellyfin/", jellyfinAPI)
-	// Some clients use absolute Jellyfin URLs like "/Videos/..." even when configured with a base path.
-	// Expose a minimal root mount for playback.
-	mux.Handle("/Videos/", jellyfinAPI)
-	mux.Handle("/videos/", jellyfinAPI)
 	dashboardAPI := routes.DashboardHandler(database, authMw)
 	staticHandler := static.Handler(authMw)
 	mux.Handle("/dashboard/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
