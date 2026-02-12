@@ -73,6 +73,12 @@ func JellyfinHandler(database *db.DB) http.Handler {
 				jellyfinLogDone(r, lw)
 			}
 			return
+		case "persons":
+			handleJellyfinPersons(lw, r, database, serverID, parts[1:])
+			if debugLog {
+				jellyfinLogDone(r, lw)
+			}
+			return
 		case "system":
 			handleJellyfinSystem(lw, r, database, serverID, parts[1:])
 			if debugLog {

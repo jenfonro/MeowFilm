@@ -79,23 +79,25 @@ func jellyfinBuildBaseItemFromSearch(it jellyfinTMDBSearchItem) map[string]any {
 	switch it.MediaType {
 	case "tv":
 		return map[string]any{
-			"Id":             jellyfinBuildSeriesID(it.ID),
-			"Name":           title,
-			"Type":           "Series",
-			"IsFolder":       true,
-			"ProductionYear": it.Year,
-			"ImageTags":      map[string]any{"Primary": "tmdb"},
-			"ProviderIds":    map[string]any{"Tmdb": strconv.Itoa(it.ID)},
+			"Id":                jellyfinBuildSeriesID(it.ID),
+			"Name":              title,
+			"Type":              "Series",
+			"IsFolder":          true,
+			"ProductionYear":    it.Year,
+			"ImageTags":         map[string]any{"Primary": "tmdb"},
+			"BackdropImageTags": []string{"tmdb"},
+			"ProviderIds":       map[string]any{"Tmdb": strconv.Itoa(it.ID)},
 		}
 	case "movie":
 		return map[string]any{
-			"Id":             jellyfinBuildMovieID(it.ID),
-			"Name":           title,
-			"Type":           "Movie",
-			"IsFolder":       false,
-			"ProductionYear": it.Year,
-			"ImageTags":      map[string]any{"Primary": "tmdb"},
-			"ProviderIds":    map[string]any{"Tmdb": strconv.Itoa(it.ID)},
+			"Id":                jellyfinBuildMovieID(it.ID),
+			"Name":              title,
+			"Type":              "Movie",
+			"IsFolder":          false,
+			"ProductionYear":    it.Year,
+			"ImageTags":         map[string]any{"Primary": "tmdb"},
+			"BackdropImageTags": []string{"tmdb"},
+			"ProviderIds":       map[string]any{"Tmdb": strconv.Itoa(it.ID)},
 		}
 	default:
 		return nil
