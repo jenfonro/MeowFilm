@@ -6,7 +6,9 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -269,12 +271,12 @@ func handleJellyfinUsers(w http.ResponseWriter, r *http.Request, database *db.DB
 			return
 		}
 		parent := jellyfinQueryGetCI(r, "ParentId")
-		excludeLocationTypes := strings.TrimSpace(jellyfinQueryGetCI(r, "ExcludeLocationTypes"))
-
-		if parent == "" {
-			http.NotFound(w, r)
-			return
+		searchTerm := strings.TrimSpace(jellyfinQueryGetCI(r, "SearchTerm"))
+		if searchTerm == "" {
+			searchTerm = strings.TrimSpace(jellyfinQueryGetCI(r, "searchTerm"))
 		}
+		fieldsParam := jellyfinQueryGetCI(r, "fields")
+		excludeLocationTypes := strings.TrimSpace(jellyfinQueryGetCI(r, "ExcludeLocationTypes"))
 
 		// For Infuse MVP: populate the two main views from Douban "recent hot",
 		// then lazily resolve/cache a TMDB id for stable metadata & posters.
@@ -311,6 +313,121 @@ func handleJellyfinUsers(w http.ResponseWriter, r *http.Request, database *db.DB
 				"StartIndex":       startIndex,
 				"TotalRecordCount": len(out),
 			})
+			return
+		}
+
+		// Search: /Users/{id}/Items?searchTerm=...&recursive=true&limit=...
+		// Only needs TMDB search results.
+		if parent == "" && searchTerm != "" {
+			startIndex, _ := strconv.Atoi(jellyfinQueryGetCI(r, "StartIndex"))
+			if startIndex < 0 {
+				startIndex = 0
+			}
+			limit, _ := strconv.Atoi(jellyfinQueryGetCI(r, "Limit"))
+			if limit <= 0 {
+				limit = 24
+			}
+			if limit > 60 {
+				limit = 60
+			}
+
+			results, err := jellyfinTMDBSearchMulti(database, searchTerm)
+			if err != nil {
+				jellyfinWriteError(w, 502, err.Error())
+				return
+			}
+
+			out := make([]map[string]any, 0, limit)
+			rank := 0
+			for _, it := range results {
+				base := jellyfinBuildBaseItemFromSearch(it)
+				if base == nil {
+					continue
+				}
+				// Match Jellyfin-style search results: no ParentId in root search.
+				base["ParentId"] = nil
+				id, _ := base["Id"].(string)
+				jellyfinEnsureInfuseItemFields(base, id, fieldsParam, serverID)
+				// Preserve TMDB relevance order even if the client sorts locally.
+				base["SortName"] = fmt.Sprintf("%06d", rank)
+				rank++
+
+				// Some clients treat search results as direct playable items and use Path/MediaSources
+				// to locate the media file. For non-folder items, expose a server-relative media path.
+				isFolder, _ := base["IsFolder"].(bool)
+				if !isFolder && strings.TrimSpace(id) != "" {
+					mediaPath := "/jellyfin/media/" + url.PathEscape(id) + ".mp4"
+					mediaSourceID := jellyfinStableHex32(id)
+					base["LocationType"] = "FileSystem"
+					base["Path"] = mediaPath
+					base["Container"] = "mp4,m4v"
+					base["MediaSources"] = []map[string]any{
+						{
+							"Protocol":                "File",
+							"Id":                      mediaSourceID,
+							"MediaSourceId":           mediaSourceID,
+							"Path":                    mediaPath,
+							"Type":                    "Default",
+							"Container":               "mp4",
+							"Size":                    0,
+							"Name":                    base["Name"],
+							"IsRemote":                false,
+							"ETag":                    mediaSourceID,
+							"RunTimeTicks":            0,
+							"ReadAtNativeFramerate":   false,
+							"IgnoreDts":               false,
+							"IgnoreIndex":             false,
+							"GenPtsInput":             false,
+							"SupportsTranscoding":     true,
+							"SupportsDirectStream":    true,
+							"SupportsDirectPlay":      true,
+							"IsInfiniteStream":        false,
+							"RequiresOpening":         false,
+							"RequiresClosing":         false,
+							"RequiresLooping":         false,
+							"SupportsProbing":         true,
+							"VideoType":               "VideoFile",
+							"MediaStreams":            []any{},
+							"MediaAttachments":        []any{},
+							"Formats":                 []any{},
+							"Bitrate":                 0,
+							"RequiredHttpHeaders":     map[string]any{},
+							"DefaultAudioStreamIndex": 0,
+						},
+					}
+					base["AlternateMediaSources"] = []any{}
+				}
+
+				out = append(out, base)
+				if len(out) >= startIndex+limit {
+					break
+				}
+			}
+			total := len(out)
+			if startIndex > total {
+				startIndex = total
+			}
+			end := startIndex + limit
+			if end > total {
+				end = total
+			}
+			page := out
+			if startIndex < total {
+				page = out[startIndex:end]
+			} else {
+				page = []map[string]any{}
+			}
+			page = jellyfinFilterItemsByExcludeLocationTypes(page, excludeLocationTypes)
+			writeJSON(w, 200, map[string]any{
+				"Items":            page,
+				"StartIndex":       startIndex,
+				"TotalRecordCount": total,
+			})
+			return
+		}
+
+		if parent == "" {
+			http.NotFound(w, r)
 			return
 		}
 
