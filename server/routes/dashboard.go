@@ -198,7 +198,6 @@ func normalizeSourceExtractPriority(raw string) string {
 		return "无"
 	}
 
-	// New mode: one of "无" | "网盘" | "关键字"
 	if s == "无" || s == "网盘" || s == "关键字" {
 		return s
 	}
@@ -243,12 +242,12 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 
 	writeOut := func() {
 		writeJSON(w, 200, map[string]any{
-			"success":                true,
-			"smartPlayEnabled":       readBoolEnabled("smart_play_enabled"),
-			"smartListEnabled":       readBoolEnabled("smart_list_enabled"),
+			"success":                    true,
+			"smartPlayEnabled":           readBoolEnabled("smart_play_enabled"),
+			"smartListEnabled":           readBoolEnabled("smart_list_enabled"),
 			"smartSourceExtractPriority": normalizeSourceExtractPriority(database.GetSetting("smart_source_extract_priority")),
-			"smartSourcePriorityTokens": parseJSONStringArray(database.GetSetting("smart_source_priority_tokens")),
-			"smartPanMatchTokens":       parseJSONStringArray(database.GetSetting("smart_pan_match_tokens")),
+			"smartSourcePriorityTokens":  parseJSONStringArray(database.GetSetting("smart_source_priority_tokens")),
+			"smartPanMatchTokens":        parseJSONStringArray(database.GetSetting("smart_pan_match_tokens")),
 		})
 	}
 
@@ -259,7 +258,6 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 		var body map[string]any
 		_ = readJSONLoose(r, &body)
 
-		// Partial update: only overwrite settings that are present in the request body.
 		if _, ok := body["smartPlayEnabled"]; ok {
 			_ = database.SetSetting("smart_play_enabled", bool01(readBoolJSONBody(body, "smartPlayEnabled")))
 		}
@@ -322,12 +320,12 @@ func handleDashboardTMDBSettings(w http.ResponseWriter, r *http.Request, databas
 	}
 	writeOut := func() {
 		writeJSON(w, 200, map[string]any{
-			"success":            true,
-			"v4Token":            strings.TrimSpace(database.GetSetting("tmdb_v4_token")),
-			"v3Key":              strings.TrimSpace(database.GetSetting("tmdb_v3_key")),
-			"language":           readStringDefault("tmdb_language", "zh-CN"),
-			"region":             readStringDefault("tmdb_region", "CN"),
-			"includeAdult":       readBool("tmdb_include_adult"),
+			"success":      true,
+			"v4Token":      strings.TrimSpace(database.GetSetting("tmdb_v4_token")),
+			"v3Key":        strings.TrimSpace(database.GetSetting("tmdb_v3_key")),
+			"language":     readStringDefault("tmdb_language", "zh-CN"),
+			"region":       readStringDefault("tmdb_region", "CN"),
+			"includeAdult": readBool("tmdb_include_adult"),
 		})
 	}
 
@@ -517,19 +515,19 @@ func handleDashboardSiteSettings(w http.ResponseWriter, r *http.Request, databas
 		mode = "sites"
 	}
 	writeJSON(w, 200, map[string]any{
-		"success":              true,
-		"siteName":             database.GetSetting("site_name"),
-		"searchDisplayMode":    mode,
+		"success":                  true,
+		"siteName":                 database.GetSetting("site_name"),
+		"searchDisplayMode":        mode,
 		"searchBadgePreferEpisode": strings.TrimSpace(database.GetSetting("search_badge_prefer_episode")) == "1",
-		"catPawOpenServers":    servers,
-		"catPawOpenActive":     active,
-		"goProxyEnabled":       strings.TrimSpace(database.GetSetting("goproxy_enabled")) == "1",
-		"goProxyAutoSelect":    strings.TrimSpace(database.GetSetting("goproxy_auto_select")) == "1",
-		"goProxyServersJson":   defaultString(database.GetSetting("goproxy_servers"), "[]"),
-		"doubanDataProxy":      defaultString(database.GetSetting("douban_data_proxy"), "direct"),
-		"doubanDataCustom":     database.GetSetting("douban_data_custom"),
-		"doubanImgProxy":       defaultString(database.GetSetting("douban_img_proxy"), "direct-browser"),
-		"doubanImgCustom":      database.GetSetting("douban_img_custom"),
+		"catPawOpenServers":        servers,
+		"catPawOpenActive":         active,
+		"goProxyEnabled":           strings.TrimSpace(database.GetSetting("goproxy_enabled")) == "1",
+		"goProxyAutoSelect":        strings.TrimSpace(database.GetSetting("goproxy_auto_select")) == "1",
+		"goProxyServersJson":       defaultString(database.GetSetting("goproxy_servers"), "[]"),
+		"doubanDataProxy":          defaultString(database.GetSetting("douban_data_proxy"), "direct"),
+		"doubanDataCustom":         database.GetSetting("douban_data_custom"),
+		"doubanImgProxy":           defaultString(database.GetSetting("douban_img_proxy"), "direct-browser"),
+		"doubanImgCustom":          database.GetSetting("douban_img_custom"),
 	})
 }
 
@@ -951,15 +949,15 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 		smartSourceExtractPriority := strings.TrimSpace(database.GetSetting("smart_source_extract_priority"))
 		smartSourceExtractPriority = normalizeSourceExtractPriority(smartSourceExtractPriority)
 		writeJSON(w, 200, map[string]any{
-			"success":                true,
-			"episodeCleanRegex":      episodeCleanRegex,
-			"episodeCleanRegexRules": cleanRules,
-			"episodeRules":           parseJSONStringArray(database.GetSetting("magic_episode_rules")),
-			"movieRules":             parseJSONStringArray(database.GetSetting("magic_movie_rules")),
-			"aggregateRules":         parseJSONStringArray(database.GetSetting("magic_aggregate_rules")),
-			"aggregateRegexRules":    parseJSONStringArray(database.GetSetting("magic_aggregate_regex_rules")),
-			"smartSourcePriorityTokens": smartSourcePriorityTokens,
-			"smartPanMatchTokens":       smartPanMatchTokens,
+			"success":                    true,
+			"episodeCleanRegex":          episodeCleanRegex,
+			"episodeCleanRegexRules":     cleanRules,
+			"episodeRules":               parseJSONStringArray(database.GetSetting("magic_episode_rules")),
+			"movieRules":                 parseJSONStringArray(database.GetSetting("magic_movie_rules")),
+			"aggregateRules":             parseJSONStringArray(database.GetSetting("magic_aggregate_rules")),
+			"aggregateRegexRules":        parseJSONStringArray(database.GetSetting("magic_aggregate_regex_rules")),
+			"smartSourcePriorityTokens":  smartSourcePriorityTokens,
+			"smartPanMatchTokens":        smartPanMatchTokens,
 			"smartSourceExtractPriority": smartSourceExtractPriority,
 		})
 	case http.MethodPost:
@@ -1059,15 +1057,15 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 		smartSourceExtractPriority := strings.TrimSpace(database.GetSetting("smart_source_extract_priority"))
 		smartSourceExtractPriority = normalizeSourceExtractPriority(smartSourceExtractPriority)
 		writeJSON(w, 200, map[string]any{
-			"success":                true,
-			"episodeCleanRegex":      outEpisodeClean,
-			"episodeCleanRegexRules": outClean,
-			"episodeRules":           parseJSONStringArray(database.GetSetting("magic_episode_rules")),
-			"movieRules":             parseJSONStringArray(database.GetSetting("magic_movie_rules")),
-			"aggregateRules":         parseJSONStringArray(database.GetSetting("magic_aggregate_rules")),
-			"aggregateRegexRules":    parseJSONStringArray(database.GetSetting("magic_aggregate_regex_rules")),
-			"smartSourcePriorityTokens": smartSourcePriorityTokens,
-			"smartPanMatchTokens":       smartPanMatchTokens,
+			"success":                    true,
+			"episodeCleanRegex":          outEpisodeClean,
+			"episodeCleanRegexRules":     outClean,
+			"episodeRules":               parseJSONStringArray(database.GetSetting("magic_episode_rules")),
+			"movieRules":                 parseJSONStringArray(database.GetSetting("magic_movie_rules")),
+			"aggregateRules":             parseJSONStringArray(database.GetSetting("magic_aggregate_rules")),
+			"aggregateRegexRules":        parseJSONStringArray(database.GetSetting("magic_aggregate_regex_rules")),
+			"smartSourcePriorityTokens":  smartSourcePriorityTokens,
+			"smartPanMatchTokens":        smartPanMatchTokens,
 			"smartSourceExtractPriority": smartSourceExtractPriority,
 		})
 	default:

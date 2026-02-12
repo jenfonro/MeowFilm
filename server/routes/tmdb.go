@@ -104,7 +104,6 @@ func tmdbDetailCacheSet(cacheKey string, out map[string]any, ttl time.Duration, 
 		tmdbDetailCache.M = map[string]tmdbDetailCacheEntry{}
 	}
 	tmdbDetailCache.M[cacheKey] = tmdbDetailCacheEntry{At: now, ExpireAt: exp, Data: out}
-	// simple bound: prune expired entries first; if still over limit, drop random keys.
 	if len(tmdbDetailCache.M) > tmdbDetailCacheMaxEntries {
 		cut := len(tmdbDetailCache.M) - tmdbDetailCacheMaxEntries
 		if cut < 1 {
@@ -375,7 +374,6 @@ func handleAPITMDBSearch(w http.ResponseWriter, r *http.Request, database *db.DB
 			}
 		}
 
-		// Populate the detail cache so /api/tmdb/detail can reuse it without another upstream request.
 		ttl := tmdbDetailCacheTTL
 		if ended {
 			ttl = tmdbDetailCacheTTLEnded
@@ -547,39 +545,39 @@ func handleAPITMDBDetail(w http.ResponseWriter, r *http.Request, database *db.DB
 	pic := ""
 	title := ""
 	year := 0
-		overview := ""
-		badge := ""
-		latestEpisode := 0
-		latestSeason := 0
-		episodeCount := 0
-		statusRaw := ""
-		seasons := []map[string]any{}
+	overview := ""
+	badge := ""
+	latestEpisode := 0
+	latestSeason := 0
+	episodeCount := 0
+	statusRaw := ""
+	seasons := []map[string]any{}
 
-		if typ == "tv" {
-			var d tmdbTVDetailsResponse
-			if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+	if typ == "tv" {
+		var d tmdbTVDetailsResponse
+		if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{
 				"error": "TMDB 解析失败",
 				"code":  "TMDB_PARSE_FAILED",
 			})
 			return
 		}
-			title = strings.TrimSpace(d.Name)
-			year = parseYear(d.FirstAir)
-			overview = strings.TrimSpace(d.Overview)
-			statusRaw = strings.TrimSpace(d.Status)
-			if strings.TrimSpace(d.PosterPath) != "" {
-				pic = "https://image.tmdb.org/t/p/w500" + strings.TrimSpace(d.PosterPath)
+		title = strings.TrimSpace(d.Name)
+		year = parseYear(d.FirstAir)
+		overview = strings.TrimSpace(d.Overview)
+		statusRaw = strings.TrimSpace(d.Status)
+		if strings.TrimSpace(d.PosterPath) != "" {
+			pic = "https://image.tmdb.org/t/p/w500" + strings.TrimSpace(d.PosterPath)
+		}
+		if d.LastEpisodeToAir != nil && d.LastEpisodeToAir.EpisodeNumber > 0 {
+			latestEpisode = d.LastEpisodeToAir.EpisodeNumber
+			if d.LastEpisodeToAir.SeasonNumber > 0 {
+				latestSeason = d.LastEpisodeToAir.SeasonNumber
 			}
-			if d.LastEpisodeToAir != nil && d.LastEpisodeToAir.EpisodeNumber > 0 {
-				latestEpisode = d.LastEpisodeToAir.EpisodeNumber
-				if d.LastEpisodeToAir.SeasonNumber > 0 {
-					latestSeason = d.LastEpisodeToAir.SeasonNumber
-				}
-			}
-			if d.NumberOfEpisodes > 0 {
-				episodeCount = d.NumberOfEpisodes
-			}
+		}
+		if d.NumberOfEpisodes > 0 {
+			episodeCount = d.NumberOfEpisodes
+		}
 		ended := statusRaw == "Ended"
 		seasonCount := 0
 		for _, s := range d.Seasons {
@@ -596,28 +594,28 @@ func handleAPITMDBDetail(w http.ResponseWriter, r *http.Request, database *db.DB
 				"season":       s.SeasonNumber,
 				"episodeCount": s.EpisodeCount,
 				"airDate":      strings.TrimSpace(s.AirDate),
-				})
-			}
-			if ended {
-				if episodeCount > 0 {
-					if seasonCount >= 2 {
-						badge = "共" + strconv.Itoa(seasonCount) + "季" + strconv.Itoa(episodeCount) + "集"
-					} else {
-						badge = "共" + strconv.Itoa(episodeCount) + "集"
-					}
-				} else if latestEpisode > 0 {
-					badge = "共" + strconv.Itoa(latestEpisode) + "集"
+			})
+		}
+		if ended {
+			if episodeCount > 0 {
+				if seasonCount >= 2 {
+					badge = "共" + strconv.Itoa(seasonCount) + "季" + strconv.Itoa(episodeCount) + "集"
 				} else {
-					badge = "完结"
+					badge = "共" + strconv.Itoa(episodeCount) + "集"
 				}
+			} else if latestEpisode > 0 {
+				badge = "共" + strconv.Itoa(latestEpisode) + "集"
 			} else {
-				if latestEpisode > 0 {
-					badge = "更新至" + strconv.Itoa(latestEpisode) + "集"
-				} else {
-					badge = "更新中"
-				}
+				badge = "完结"
 			}
 		} else {
+			if latestEpisode > 0 {
+				badge = "更新至" + strconv.Itoa(latestEpisode) + "集"
+			} else {
+				badge = "更新中"
+			}
+		}
+	} else {
 		var d tmdbMovieDetailsResponse
 		if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{
@@ -632,12 +630,12 @@ func handleAPITMDBDetail(w http.ResponseWriter, r *http.Request, database *db.DB
 		if strings.TrimSpace(d.PosterPath) != "" {
 			pic = "https://image.tmdb.org/t/p/w500" + strings.TrimSpace(d.PosterPath)
 		}
-			badge = "电影"
-			latestEpisode = 1
-			latestSeason = 1
-			episodeCount = 1
-			statusRaw = strings.TrimSpace(d.Status)
-		}
+		badge = "电影"
+		latestEpisode = 1
+		latestSeason = 1
+		episodeCount = 1
+		statusRaw = strings.TrimSpace(d.Status)
+	}
 
 	out := map[string]any{
 		"success":       true,
@@ -647,12 +645,12 @@ func handleAPITMDBDetail(w http.ResponseWriter, r *http.Request, database *db.DB
 		"year":          year,
 		"pic":           pic,
 		"overview":      overview,
-			"badge":         badge,
-			"status":        statusRaw,
-			"latestSeason":  latestSeason,
-			"latestEpisode": latestEpisode,
-			"episodeCount":  episodeCount,
-			"seasons":       seasons,
+		"badge":         badge,
+		"status":        statusRaw,
+		"latestSeason":  latestSeason,
+		"latestEpisode": latestEpisode,
+		"episodeCount":  episodeCount,
+		"seasons":       seasons,
 	}
 
 	ttl := tmdbDetailCacheTTL
@@ -665,7 +663,7 @@ func handleAPITMDBDetail(w http.ResponseWriter, r *http.Request, database *db.DB
 	tmdbDetailCacheSet(cacheKey, out, ttl, now)
 
 	writeJSON(w, 200, out)
-	}
+}
 
 func boolToStr(v bool) string {
 	if v {
