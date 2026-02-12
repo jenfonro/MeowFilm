@@ -2,11 +2,73 @@ package routes
 
 import (
 	"errors"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/jenfonro/meowfilm/internal/db"
 )
+
+func jellyfinBuildPeople(database *db.DB, mediaType string, tmdbID int) []map[string]any {
+	credits, err := jellyfinTMDBGetCredits(database, mediaType, tmdbID)
+	if err != nil || credits == nil {
+		return nil
+	}
+
+	out := make([]map[string]any, 0, 16)
+	seen := map[string]bool{}
+
+	add := func(personID int, name string, role string, typ string, profilePath string) {
+		n := strings.TrimSpace(name)
+		t := strings.TrimSpace(typ)
+		if n == "" || t == "" {
+			return
+		}
+		k := t + ":" + strconv.Itoa(personID) + ":" + n
+		if seen[k] {
+			return
+		}
+		seen[k] = true
+		obj := map[string]any{
+			"Name": n,
+			"Role": strings.TrimSpace(role),
+			"Type": t,
+		}
+		if personID > 0 {
+			obj["Id"] = jellyfinBuildPersonID(personID)
+			obj["PrimaryImageTag"] = "tmdb"
+		}
+		if strings.TrimSpace(profilePath) != "" {
+			jellyfinRememberPersonProfile(personID, profilePath)
+		}
+		out = append(out, obj)
+	}
+
+	for _, c := range credits.Crew {
+		if strings.EqualFold(strings.TrimSpace(c.Job), "Director") {
+			add(c.ID, c.Name, "", "Director", c.Profile)
+		}
+	}
+
+	cast := make([]jellyfinTMDBCast, 0, len(credits.Cast))
+	for _, c := range credits.Cast {
+		cast = append(cast, c)
+	}
+	sort.SliceStable(cast, func(i, j int) bool {
+		if cast[i].Order == cast[j].Order {
+			return cast[i].ID < cast[j].ID
+		}
+		return cast[i].Order < cast[j].Order
+	})
+	for _, c := range cast {
+		add(c.ID, c.Name, c.Role, "Actor", c.Profile)
+		if len(out) >= 20 {
+			break
+		}
+	}
+
+	return out
+}
 
 func jellyfinBuildBaseItemFromSearch(it jellyfinTMDBSearchItem) map[string]any {
 	title := strings.TrimSpace(it.Title)
@@ -74,16 +136,29 @@ func jellyfinBuildItem(database *db.DB, jellyfinID string) (map[string]any, erro
 			}
 			return nil, err
 		}
-		return map[string]any{
-			"Id":             jellyfinBuildMovieID(parsed.TMDBID),
-			"Name":           d.Title,
-			"Overview":       d.Overview,
-			"Type":           "Movie",
-			"IsFolder":       false,
-			"ProductionYear": d.Year,
-			"ImageTags":      map[string]any{"Primary": "tmdb"},
-			"ProviderIds":    map[string]any{"Tmdb": strconv.Itoa(parsed.TMDBID)},
-		}, nil
+		id := jellyfinBuildMovieID(parsed.TMDBID)
+		out := map[string]any{
+			"Id":           id,
+			"Name":         d.Title,
+			"SortName":     d.Title,
+			"Overview":     d.Overview,
+			"Type":         "Movie",
+			"MediaType":    "Video",
+			"IsFolder":     false,
+			"LocationType": "Remote",
+			"Path":         "meowfilm://" + id,
+			"ParentId":     "view_tmdb_movies",
+
+			"ProductionYear":    d.Year,
+			"ImageTags":         map[string]any{"Primary": "tmdb"},
+			"BackdropImageTags": []string{"tmdb"},
+			"ProviderIds":       map[string]any{"Tmdb": strconv.Itoa(parsed.TMDBID)},
+			"UserData":          map[string]any{"Played": false},
+		}
+		if people := jellyfinBuildPeople(database, "movie", parsed.TMDBID); len(people) > 0 {
+			out["People"] = people
+		}
+		return out, nil
 
 	case "tv":
 		switch parsed.SubKind {
@@ -95,16 +170,38 @@ func jellyfinBuildItem(database *db.DB, jellyfinID string) (map[string]any, erro
 				}
 				return nil, err
 			}
-			return map[string]any{
-				"Id":             jellyfinBuildSeriesID(parsed.TMDBID),
-				"Name":           d.Title,
-				"Overview":       d.Overview,
-				"Type":           "Series",
-				"IsFolder":       true,
-				"ProductionYear": d.Year,
-				"ImageTags":      map[string]any{"Primary": "tmdb"},
-				"ProviderIds":    map[string]any{"Tmdb": strconv.Itoa(parsed.TMDBID)},
-			}, nil
+			id := jellyfinBuildSeriesID(parsed.TMDBID)
+			childCount := len(d.Seasons)
+			recursiveCount := 0
+			for _, s := range d.Seasons {
+				if s.EpisodeCount > 0 {
+					recursiveCount += s.EpisodeCount
+				}
+			}
+			out := map[string]any{
+				"Id":           id,
+				"Name":         d.Title,
+				"SortName":     d.Title,
+				"Overview":     d.Overview,
+				"Type":         "Series",
+				"MediaType":    "Video",
+				"IsFolder":     true,
+				"LocationType": "Remote",
+				"Path":         "meowfilm://" + id,
+				"ParentId":     "view_tmdb_tv",
+
+				"ProductionYear":     d.Year,
+				"ChildCount":         childCount,
+				"RecursiveItemCount": recursiveCount,
+				"ImageTags":          map[string]any{"Primary": "tmdb"},
+				"BackdropImageTags":  []string{"tmdb"},
+				"ProviderIds":        map[string]any{"Tmdb": strconv.Itoa(parsed.TMDBID)},
+				"UserData":           map[string]any{"Played": false},
+			}
+			if people := jellyfinBuildPeople(database, "tv", parsed.TMDBID); len(people) > 0 {
+				out["People"] = people
+			}
+			return out, nil
 		case "season":
 			seriesID := jellyfinBuildSeriesID(parsed.TMDBID)
 			name := "特别篇"
@@ -124,17 +221,55 @@ func jellyfinBuildItem(database *db.DB, jellyfinID string) (map[string]any, erro
 		case "episode":
 			seriesID := jellyfinBuildSeriesID(parsed.TMDBID)
 			seasonID := jellyfinBuildSeasonID(parsed.TMDBID, parsed.Season)
+			seriesName := ""
+			seasonName := "第" + strconv.Itoa(parsed.Season) + "季"
+			if parsed.Season == 0 {
+				seasonName = "特别篇"
+			}
+			epName := ""
+			epOverview := ""
+			sd, err := jellyfinTMDBGetTVSeasonDetail(database, parsed.TMDBID, parsed.Season)
+			if err == nil && sd != nil {
+				if strings.TrimSpace(sd.Name) != "" {
+					seasonName = strings.TrimSpace(sd.Name)
+				}
+				for _, e := range sd.Episodes {
+					if e.Episode == parsed.Episode {
+						epName = strings.TrimSpace(e.Name)
+						epOverview = strings.TrimSpace(e.Overview)
+						break
+					}
+				}
+			}
+			tv, err := jellyfinTMDBGetTVDetail(database, parsed.TMDBID)
+			if err == nil && tv != nil {
+				seriesName = strings.TrimSpace(tv.Title)
+			}
+			if epName == "" {
+				epName = "第" + strconv.Itoa(parsed.Episode) + "集"
+			}
+			episodeID := jellyfinBuildEpisodeID(parsed.TMDBID, parsed.Season, parsed.Episode)
 			return map[string]any{
-				"Id":                jellyfinBuildEpisodeID(parsed.TMDBID, parsed.Season, parsed.Episode),
-				"Name":              "第" + strconv.Itoa(parsed.Episode) + "集",
-				"Type":              "Episode",
-				"IsFolder":          false,
-				"SeriesId":          seriesID,
-				"SeasonId":          seasonID,
-				"ParentId":          seasonID,
-				"IndexNumber":       parsed.Episode,
-				"ParentIndexNumber": parsed.Season,
-				"ImageTags":         map[string]any{"Primary": "tmdb"},
+				"Id":                      episodeID,
+				"Name":                    epName,
+				"SeriesName":              seriesName,
+				"SeasonName":              seasonName,
+				"Overview":                epOverview,
+				"Type":                    "Episode",
+				"MediaType":               "Video",
+				"IsFolder":                false,
+				"SeriesId":                seriesID,
+				"SeasonId":                seasonID,
+				"ParentId":                seasonID,
+				"ParentBackdropItemId":    seriesID,
+				"ParentBackdropImageTags": []string{"tmdb"},
+				"IndexNumber":             parsed.Episode,
+				"ParentIndexNumber":       parsed.Season,
+				"LocationType":            "Remote",
+				"Path":                    "meowfilm://" + episodeID,
+				"ImageTags":               map[string]any{"Primary": "tmdb"},
+				"ProviderIds":             map[string]any{"Tmdb": strconv.Itoa(parsed.TMDBID)},
+				"UserData":                map[string]any{"Played": false},
 			}, nil
 		default:
 			return nil, nil

@@ -32,14 +32,16 @@ type tmdbTVDetailsResponse struct {
 		SeasonNumber  int `json:"season_number"`
 		EpisodeNumber int `json:"episode_number"`
 	} `json:"last_episode_to_air"`
-	Name       string `json:"name"`
-	PosterPath string `json:"poster_path"`
-	FirstAir   string `json:"first_air_date"`
-	Overview   string `json:"overview"`
-	Seasons    []struct {
+	Name         string `json:"name"`
+	PosterPath   string `json:"poster_path"`
+	BackdropPath string `json:"backdrop_path"`
+	FirstAir     string `json:"first_air_date"`
+	Overview     string `json:"overview"`
+	Seasons      []struct {
 		SeasonNumber int    `json:"season_number"`
 		EpisodeCount int    `json:"episode_count"`
 		AirDate      string `json:"air_date"`
+		PosterPath   string `json:"poster_path"`
 	} `json:"seasons"`
 }
 

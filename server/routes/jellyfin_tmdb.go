@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
@@ -45,6 +46,7 @@ type jellyfinTMDBTVDetail struct {
 	Overview string
 	Year     int
 	Poster   string
+	Backdrop string
 	Seasons  []jellyfinTMDBSeason
 }
 
@@ -68,6 +70,86 @@ type jellyfinTMDBMovieDetail struct {
 	Overview string
 	Year     int
 	Poster   string
+}
+
+type jellyfinTMDBCredits struct {
+	MediaType string // "movie" | "tv"
+	ID        int
+	Cast      []jellyfinTMDBCast
+	Crew      []jellyfinTMDBCrew
+}
+
+type jellyfinTMDBCast struct {
+	ID      int
+	Name    string
+	Role    string
+	Profile string
+	Order   int
+}
+
+type jellyfinTMDBCrew struct {
+	ID      int
+	Name    string
+	Job     string
+	Dept    string
+	Profile string
+}
+
+type jellyfinPersonProfileCacheEntry struct {
+	At     time.Time
+	Expire time.Time
+	Path   string
+}
+
+var jellyfinPersonProfileCache = struct {
+	sync.Mutex
+	M map[int]jellyfinPersonProfileCacheEntry
+}{
+	M: map[int]jellyfinPersonProfileCacheEntry{},
+}
+
+const jellyfinPersonProfileCacheTTL = 24 * time.Hour
+
+func jellyfinRememberPersonProfile(personID int, profilePath string) {
+	if personID <= 0 {
+		return
+	}
+	p := strings.TrimSpace(profilePath)
+	if p == "" {
+		return
+	}
+	now := time.Now()
+	jellyfinPersonProfileCache.Lock()
+	if jellyfinPersonProfileCache.M == nil {
+		jellyfinPersonProfileCache.M = map[int]jellyfinPersonProfileCacheEntry{}
+	}
+	jellyfinPersonProfileCache.M[personID] = jellyfinPersonProfileCacheEntry{
+		At:     now,
+		Expire: now.Add(jellyfinPersonProfileCacheTTL),
+		Path:   p,
+	}
+	jellyfinPersonProfileCache.Unlock()
+}
+
+func jellyfinCachedPersonProfile(personID int) string {
+	if personID <= 0 {
+		return ""
+	}
+	now := time.Now()
+	jellyfinPersonProfileCache.Lock()
+	defer jellyfinPersonProfileCache.Unlock()
+	if jellyfinPersonProfileCache.M == nil {
+		return ""
+	}
+	hit, ok := jellyfinPersonProfileCache.M[personID]
+	if !ok || strings.TrimSpace(hit.Path) == "" {
+		return ""
+	}
+	if !hit.Expire.IsZero() && hit.Expire.Before(now) {
+		delete(jellyfinPersonProfileCache.M, personID)
+		return ""
+	}
+	return strings.TrimSpace(hit.Path)
 }
 
 func jellyfinTMDBImageURL(path string, size string) string {
@@ -422,7 +504,7 @@ func jellyfinTMDBGetTVDetail(database *db.DB, tmdbID int) (*jellyfinTMDBTVDetail
 		seasons = append(seasons, jellyfinTMDBSeason{
 			Season:       s.SeasonNumber,
 			EpisodeCount: s.EpisodeCount,
-			Poster:       "",
+			Poster:       strings.TrimSpace(s.PosterPath),
 		})
 	}
 	return &jellyfinTMDBTVDetail{
@@ -431,14 +513,51 @@ func jellyfinTMDBGetTVDetail(database *db.DB, tmdbID int) (*jellyfinTMDBTVDetail
 		Overview: strings.TrimSpace(data.Overview),
 		Year:     year,
 		Poster:   strings.TrimSpace(data.PosterPath),
+		Backdrop: strings.TrimSpace(data.BackdropPath),
 		Seasons:  seasons,
 	}, nil
 }
 
-func jellyfinTMDBGetTVSeasonEpisodes(database *db.DB, tmdbID int, season int) ([]jellyfinTMDBSeasonEpisode, error) {
+type jellyfinTMDBTVSeasonDetail struct {
+	ID       int
+	Season   int
+	Name     string
+	Poster   string
+	Episodes []jellyfinTMDBSeasonEpisode
+}
+
+type jellyfinSeasonDetailCacheEntry struct {
+	At     time.Time
+	Expire time.Time
+	Data   *jellyfinTMDBTVSeasonDetail
+}
+
+var jellyfinSeasonDetailCache = struct {
+	sync.Mutex
+	M map[string]jellyfinSeasonDetailCacheEntry
+}{
+	M: map[string]jellyfinSeasonDetailCacheEntry{},
+}
+
+const jellyfinSeasonDetailCacheTTL = 10 * time.Minute
+
+func jellyfinTMDBGetTVSeasonDetail(database *db.DB, tmdbID int, season int) (*jellyfinTMDBTVSeasonDetail, error) {
 	if tmdbID <= 0 || season < 0 {
 		return nil, errors.New("invalid args")
 	}
+
+	cacheKey := fmt.Sprintf("tv:%d:s:%d", tmdbID, season)
+	now := time.Now()
+	jellyfinSeasonDetailCache.Lock()
+	if jellyfinSeasonDetailCache.M != nil {
+		if hit, ok := jellyfinSeasonDetailCache.M[cacheKey]; ok && hit.Data != nil && hit.Expire.After(now) {
+			d := hit.Data
+			jellyfinSeasonDetailCache.Unlock()
+			return d, nil
+		}
+	}
+	jellyfinSeasonDetailCache.Unlock()
+
 	client, v4, v3, lang, _, _ := jellyfinTMDBClient(database)
 	if v4 == "" && v3 == "" {
 		return nil, errors.New("TMDB not configured")
@@ -468,7 +587,9 @@ func jellyfinTMDBGetTVSeasonEpisodes(database *db.DB, tmdbID int, season int) ([
 		return nil, fmt.Errorf("tmdb http %d", resp.StatusCode)
 	}
 	var raw struct {
-		Episodes []struct {
+		Name       string `json:"name"`
+		PosterPath string `json:"poster_path"`
+		Episodes   []struct {
 			EpisodeNumber int    `json:"episode_number"`
 			Name          string `json:"name"`
 			Overview      string `json:"overview"`
@@ -492,7 +613,40 @@ func jellyfinTMDBGetTVSeasonEpisodes(database *db.DB, tmdbID int, season int) ([
 			AirDate:  strings.TrimSpace(e.AirDate),
 		})
 	}
-	return out, nil
+	outDetail := &jellyfinTMDBTVSeasonDetail{
+		ID:       tmdbID,
+		Season:   season,
+		Name:     strings.TrimSpace(raw.Name),
+		Poster:   strings.TrimSpace(raw.PosterPath),
+		Episodes: out,
+	}
+
+	jellyfinSeasonDetailCache.Lock()
+	if jellyfinSeasonDetailCache.M == nil {
+		jellyfinSeasonDetailCache.M = map[string]jellyfinSeasonDetailCacheEntry{}
+	}
+	jellyfinSeasonDetailCache.M[cacheKey] = jellyfinSeasonDetailCacheEntry{
+		At:     now,
+		Expire: now.Add(jellyfinSeasonDetailCacheTTL),
+		Data:   outDetail,
+	}
+	jellyfinSeasonDetailCache.Unlock()
+
+	return outDetail, nil
+}
+
+func jellyfinTMDBGetTVSeasonEpisodes(database *db.DB, tmdbID int, season int) ([]jellyfinTMDBSeasonEpisode, error) {
+	if tmdbID <= 0 || season < 0 {
+		return nil, errors.New("invalid args")
+	}
+	d, err := jellyfinTMDBGetTVSeasonDetail(database, tmdbID, season)
+	if err != nil {
+		return nil, err
+	}
+	if d == nil {
+		return []jellyfinTMDBSeasonEpisode{}, nil
+	}
+	return d.Episodes, nil
 }
 
 func jellyfinTMDBGetMovieDetail(database *db.DB, tmdbID int) (*jellyfinTMDBMovieDetail, error) {
@@ -544,4 +698,188 @@ func jellyfinTMDBGetMovieDetail(database *db.DB, tmdbID int) (*jellyfinTMDBMovie
 		Year:     year,
 		Poster:   strings.TrimSpace(data.PosterPath),
 	}, nil
+}
+
+type jellyfinCreditsCacheEntry struct {
+	At     time.Time
+	Expire time.Time
+	Data   *jellyfinTMDBCredits
+}
+
+var jellyfinCreditsCache = struct {
+	sync.Mutex
+	M map[string]jellyfinCreditsCacheEntry
+}{
+	M: map[string]jellyfinCreditsCacheEntry{},
+}
+
+const jellyfinCreditsCacheTTL = 10 * time.Minute
+
+func jellyfinTMDBGetCredits(database *db.DB, mediaType string, tmdbID int) (*jellyfinTMDBCredits, error) {
+	typ := strings.ToLower(strings.TrimSpace(mediaType))
+	if (typ != "movie" && typ != "tv") || tmdbID <= 0 {
+		return nil, errors.New("invalid args")
+	}
+
+	cacheKey := typ + ":" + strconv.Itoa(tmdbID) + ":credits"
+	now := time.Now()
+	jellyfinCreditsCache.Lock()
+	if jellyfinCreditsCache.M != nil {
+		if hit, ok := jellyfinCreditsCache.M[cacheKey]; ok && hit.Data != nil && hit.Expire.After(now) {
+			d := hit.Data
+			jellyfinCreditsCache.Unlock()
+			return d, nil
+		}
+	}
+	jellyfinCreditsCache.Unlock()
+
+	client, v4, v3, lang, _, _ := jellyfinTMDBClient(database)
+	if v4 == "" && v3 == "" {
+		return nil, errors.New("TMDB not configured")
+	}
+
+	u, _ := url.Parse(fmt.Sprintf("https://api.themoviedb.org/3/%s/%d/credits", typ, tmdbID))
+	params := u.Query()
+	if strings.TrimSpace(lang) != "" {
+		params.Set("language", strings.TrimSpace(lang))
+	}
+	if v3 != "" {
+		params.Set("api_key", v3)
+	}
+	u.RawQuery = params.Encode()
+
+	req, _ := http.NewRequest(http.MethodGet, u.String(), nil)
+	req.Header.Set("Accept", "application/json")
+	if v4 != "" {
+		req.Header.Set("Authorization", "Bearer "+v4)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("tmdb http %d", resp.StatusCode)
+	}
+
+	var raw struct {
+		Cast []struct {
+			ID          int    `json:"id"`
+			Name        string `json:"name"`
+			Character   string `json:"character"`
+			Order       int    `json:"order"`
+			ProfilePath string `json:"profile_path"`
+		} `json:"cast"`
+		Crew []struct {
+			ID          int    `json:"id"`
+			Name        string `json:"name"`
+			Job         string `json:"job"`
+			Department  string `json:"department"`
+			ProfilePath string `json:"profile_path"`
+		} `json:"crew"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+
+	out := &jellyfinTMDBCredits{MediaType: typ, ID: tmdbID}
+	if len(raw.Cast) > 0 {
+		out.Cast = make([]jellyfinTMDBCast, 0, len(raw.Cast))
+		for _, c := range raw.Cast {
+			name := strings.TrimSpace(c.Name)
+			if c.ID <= 0 || name == "" {
+				continue
+			}
+			jellyfinRememberPersonProfile(c.ID, c.ProfilePath)
+			out.Cast = append(out.Cast, jellyfinTMDBCast{
+				ID:      c.ID,
+				Name:    name,
+				Role:    strings.TrimSpace(c.Character),
+				Profile: strings.TrimSpace(c.ProfilePath),
+				Order:   c.Order,
+			})
+		}
+	}
+	if len(raw.Crew) > 0 {
+		out.Crew = make([]jellyfinTMDBCrew, 0, len(raw.Crew))
+		for _, c := range raw.Crew {
+			name := strings.TrimSpace(c.Name)
+			if c.ID <= 0 || name == "" {
+				continue
+			}
+			jellyfinRememberPersonProfile(c.ID, c.ProfilePath)
+			out.Crew = append(out.Crew, jellyfinTMDBCrew{
+				ID:      c.ID,
+				Name:    name,
+				Job:     strings.TrimSpace(c.Job),
+				Dept:    strings.TrimSpace(c.Department),
+				Profile: strings.TrimSpace(c.ProfilePath),
+			})
+		}
+	}
+
+	jellyfinCreditsCache.Lock()
+	if jellyfinCreditsCache.M == nil {
+		jellyfinCreditsCache.M = map[string]jellyfinCreditsCacheEntry{}
+	}
+	jellyfinCreditsCache.M[cacheKey] = jellyfinCreditsCacheEntry{
+		At:     now,
+		Expire: now.Add(jellyfinCreditsCacheTTL),
+		Data:   out,
+	}
+	jellyfinCreditsCache.Unlock()
+
+	return out, nil
+}
+
+func jellyfinTMDBGetPersonProfile(database *db.DB, personID int) (string, error) {
+	if personID <= 0 {
+		return "", errors.New("invalid person id")
+	}
+	if hit := jellyfinCachedPersonProfile(personID); hit != "" {
+		return hit, nil
+	}
+
+	client, v4, v3, lang, _, _ := jellyfinTMDBClient(database)
+	if v4 == "" && v3 == "" {
+		return "", errors.New("TMDB not configured")
+	}
+
+	u, _ := url.Parse(fmt.Sprintf("https://api.themoviedb.org/3/person/%d", personID))
+	params := u.Query()
+	if strings.TrimSpace(lang) != "" {
+		params.Set("language", strings.TrimSpace(lang))
+	}
+	if v3 != "" {
+		params.Set("api_key", v3)
+	}
+	u.RawQuery = params.Encode()
+
+	req, _ := http.NewRequest(http.MethodGet, u.String(), nil)
+	req.Header.Set("Accept", "application/json")
+	if v4 != "" {
+		req.Header.Set("Authorization", "Bearer "+v4)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("tmdb http %d", resp.StatusCode)
+	}
+
+	var raw struct {
+		ProfilePath string `json:"profile_path"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return "", err
+	}
+	p := strings.TrimSpace(raw.ProfilePath)
+	if p != "" {
+		jellyfinRememberPersonProfile(personID, p)
+	}
+	return p, nil
 }
