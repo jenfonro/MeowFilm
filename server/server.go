@@ -42,6 +42,8 @@ func New(cfg Config) (*Server, error) {
 	mux := http.NewServeMux()
 
 	mux.Handle("/api/", routes.APIHandler(database, authMw))
+	jellyfinAPI := routes.JellyfinHandler(database)
+	mux.Handle("/jellyfin/", jellyfinAPI)
 	dashboardAPI := routes.DashboardHandler(database, authMw)
 	staticHandler := static.Handler(authMw)
 	mux.Handle("/dashboard/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
