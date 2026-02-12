@@ -473,6 +473,7 @@ func (d *DB) seedDefaults() error {
 		{"tmdb_smart_search_enabled", "0"},
 		{"tmdb_v4_token", ""},
 		{"tmdb_v3_key", ""},
+		{"tmdb_api_base", ""},
 		{"tmdb_language", "zh-CN"},
 		{"tmdb_region", "CN"},
 		{"tmdb_include_adult", "0"},
