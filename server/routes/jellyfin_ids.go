@@ -8,12 +8,12 @@ import (
 
 type jellyfinItemID struct {
 	Source   string // "tmdb" | "douban"
-	Kind     string // "tv" | "movie"
+	Kind     string // "tv" | "movie" | "person"
 	TMDBID   int
 	DoubanID string
 	Season   int
 	Episode  int
-	SubKind  string // "series" | "season" | "episode" | "movie"
+	SubKind  string // "series" | "season" | "episode" | "movie" | "person"
 }
 
 func jellyfinBuildSeriesID(tmdbID int) string {
@@ -32,6 +32,10 @@ func jellyfinBuildMovieID(tmdbID int) string {
 	return fmt.Sprintf("tmdb_movie_%d", tmdbID)
 }
 
+func jellyfinBuildPersonID(tmdbPersonID int) string {
+	return fmt.Sprintf("tmdb_person_%d", tmdbPersonID)
+}
+
 func jellyfinBuildDoubanSeriesID(doubanID string) string {
 	return fmt.Sprintf("douban_tv_%s", strings.TrimSpace(doubanID))
 }
@@ -44,6 +48,13 @@ func jellyfinParseItemID(id string) (*jellyfinItemID, bool) {
 	raw := strings.TrimSpace(id)
 	if raw == "" {
 		return nil, false
+	}
+	if strings.HasPrefix(raw, "tmdb_person_") {
+		n, err := strconv.Atoi(strings.TrimPrefix(raw, "tmdb_person_"))
+		if err != nil || n <= 0 {
+			return nil, false
+		}
+		return &jellyfinItemID{Source: "tmdb", Kind: "person", TMDBID: n, SubKind: "person"}, true
 	}
 	if strings.HasPrefix(raw, "tmdb_movie_") {
 		n, err := strconv.Atoi(strings.TrimPrefix(raw, "tmdb_movie_"))

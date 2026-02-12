@@ -253,6 +253,7 @@ func (d *DB) initSchema(fresh bool) error {
 	_ = d.cleanupLegacySettings()
 	_ = d.ensurePlayHistoryTMDBColumns()
 	_ = d.ensureDoubanTMDBMapTable()
+	_ = d.ensureGoCompatibleMagicEpisodeRules()
 
 	return d.ensureDefaultAdmin()
 }
@@ -478,7 +479,7 @@ func (d *DB) seedDefaults() error {
 		{"video_source_site_error", "{}"},
 		{"video_source_search_order", "[]"},
 		{"video_source_search_cover_site", ""},
-		{"magic_episode_rules", `["{\"pattern\":\".*?([Ss]\\\\d{1,2})?(?:[第EePpXx\\\\.\\\\-\\\\_\\\\( ]{1,2}|^)(\\\\d{1,3})(?!\\\\d).*?\\\\.(mp4|mkv)\",\"replace\":\"$1E$2\"}"]`},
+		{"magic_episode_rules", `["{\"pattern\":\".*?([Ss]\\\\d{1,2})?(?:[第EePpXx\\\\.\\\\-\\\\_\\\\( ]{1,2}|^)(\\\\d{1,3})(?:$|\\\\D).*?\\\\.(mp4|mkv)\",\"replace\":\"$1E$2\"}"]`},
 		{"magic_episode_clean_regex_rules", `["\\\\[\\\\s*\\\\d+(?:\\\\.\\\\d+)?\\\\s*(?:B|KB|MB|GB|TB)\\\\s*\\\\]|【[^】]*】"]`},
 		{"magic_movie_rules", "[]"},
 		{"magic_aggregate_rules", "[]"},
@@ -509,6 +510,23 @@ func (d *DB) seedDefaults() error {
 		d.settingsCache[it.k] = it.v
 	}
 	return nil
+}
+
+func (d *DB) ensureGoCompatibleMagicEpisodeRules() error {
+	if d == nil || d.db == nil {
+		return nil
+	}
+	const (
+		key = "magic_episode_rules"
+		old = `["{\"pattern\":\".*?([Ss]\\\\d{1,2})?(?:[第EePpXx\\\\.\\\\-\\\\_\\\\( ]{1,2}|^)(\\\\d{1,3})(?!\\\\d).*?\\\\.(mp4|mkv)\",\"replace\":\"$1E$2\"}"]`
+		mid = `["{\"pattern\":\".*?([Ss]\\\\d{1,2})?(?:[第EePpXx\\\\.\\\\-\\\\_\\\\( ]{1,2}|^)(\\\\d{1,3})[^0-9]*\\\\.(mp4|mkv)\",\"replace\":\"$1E$2\"}"]`
+		new = `["{\"pattern\":\".*?([Ss]\\\\d{1,2})?(?:[第EePpXx\\\\.\\\\-\\\\_\\\\( ]{1,2}|^)(\\\\d{1,3})(?:$|\\\\D).*?\\\\.(mp4|mkv)\",\"replace\":\"$1E$2\"}"]`
+	)
+	cur := strings.TrimSpace(d.GetSetting(key))
+	if cur != old && cur != mid {
+		return nil
+	}
+	return d.SetSetting(key, new)
 }
 
 func (d *DB) ensureDefaultAdmin() error {

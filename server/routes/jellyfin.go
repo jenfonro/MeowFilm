@@ -18,6 +18,7 @@ import (
 // - Auth via /Users/AuthenticateByName -> api_key (token)
 // - Series/movie browsing for Infuse
 // - PlaybackInfo -> returns a single auto-picked media source
+// - Stream proxy endpoint for sources requiring headers
 //
 // Notes:
 // - This is not a full Jellyfin server implementation.
@@ -72,6 +73,12 @@ func JellyfinHandler(database *db.DB) http.Handler {
 				jellyfinLogDone(r, lw)
 			}
 			return
+		case "mediasegments":
+			handleJellyfinMediaSegments(lw, r, database, serverID, parts[1:])
+			if debugLog {
+				jellyfinLogDone(r, lw)
+			}
+			return
 		case "displaypreferences":
 			handleJellyfinDisplayPreferences(lw, r, database, serverID, parts[1:])
 			if debugLog {
@@ -98,6 +105,24 @@ func JellyfinHandler(database *db.DB) http.Handler {
 			return
 		case "shows":
 			handleJellyfinShows(lw, r, database, serverID, parts[1:])
+			if debugLog {
+				jellyfinLogDone(r, lw)
+			}
+			return
+		case "sessions":
+			handleJellyfinSessions(lw, r, database, serverID, parts[1:])
+			if debugLog {
+				jellyfinLogDone(r, lw)
+			}
+			return
+		case "stream":
+			handleJellyfinStream(lw, r, database, serverID, parts[1:])
+			if debugLog {
+				jellyfinLogDone(r, lw)
+			}
+			return
+		case "videos":
+			handleJellyfinVideos(lw, r, database, serverID, parts[1:])
 			if debugLog {
 				jellyfinLogDone(r, lw)
 			}

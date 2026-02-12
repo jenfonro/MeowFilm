@@ -3,6 +3,7 @@ package routes
 import (
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -12,6 +13,10 @@ import (
 func handleJellyfinStream(w http.ResponseWriter, r *http.Request, database *db.DB, serverID string, parts []string) {
 	_, ok := jellyfinRequireUser(w, r, database)
 	if !ok {
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 	if len(parts) < 1 || strings.TrimSpace(parts[0]) == "" {
@@ -37,7 +42,13 @@ func handleJellyfinStream(w http.ResponseWriter, r *http.Request, database *db.D
 	}
 
 	upstream := strings.TrimSpace(sess.URL)
-	req, err := http.NewRequest(http.MethodGet, upstream, nil)
+	forceProxyAll := strings.TrimSpace(os.Getenv("MEOWFILM_JELLYFIN_STREAM_PROXY_ALL")) == "1"
+	if len(sess.Headers) == 0 && !forceProxyAll {
+		http.Redirect(w, r, upstream, http.StatusFound)
+		return
+	}
+
+	req, err := http.NewRequest(r.Method, upstream, nil)
 	if err != nil {
 		jellyfinWriteError(w, 502, "上游地址无效")
 		return
@@ -82,6 +93,7 @@ func handleJellyfinStream(w http.ResponseWriter, r *http.Request, database *db.D
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	if r.Method != http.MethodHead {
+		_, _ = io.Copy(w, resp.Body)
+	}
 }
-

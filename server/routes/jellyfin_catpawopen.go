@@ -328,162 +328,14 @@ func jellyfinResolvePlaybackFromTMDB(database *db.DB, u *jellyfinUser, parsed *j
 	if parsed == nil {
 		return "", nil, errors.New("invalid item")
 	}
-	apiBase := jellyfinResolveCatApiBaseForUser(database, u)
-	if apiBase == "" {
-		return "", nil, errors.New("CatPawOpen 接口地址未设置")
+	req := smartPlaybackRequest{
+		Kind:    strings.TrimSpace(parsed.Kind),
+		TMDBID:  parsed.TMDBID,
+		Season:  parsed.Season,
+		Episode: parsed.Episode,
+		SubKind: strings.TrimSpace(parsed.SubKind),
 	}
-	tvUser := ""
-	if u != nil {
-		tvUser = u.Username
-	}
-
-	// Build search query from TMDB title.
-	searchTitle := ""
-	var globalEpisodeNo int
-	if parsed.Kind == "movie" {
-		md, err := jellyfinTMDBGetMovieDetail(database, parsed.TMDBID)
-		if err != nil || md == nil || strings.TrimSpace(md.Title) == "" {
-			return "", nil, errors.New("TMDB 请求失败")
-		}
-		searchTitle = md.Title
-		globalEpisodeNo = 1
-	} else if parsed.Kind == "tv" {
-		td, err := jellyfinTMDBGetTVDetail(database, parsed.TMDBID)
-		if err != nil || td == nil || strings.TrimSpace(td.Title) == "" {
-			return "", nil, errors.New("TMDB 请求失败")
-		}
-		searchTitle = td.Title
-		// Convert (season, episode) to global episode number for single-list spiders.
-		if parsed.SubKind == "episode" {
-			globalEpisodeNo = jellyfinGlobalEpisodeNo(td.Seasons, parsed.Season, parsed.Episode)
-		} else {
-			globalEpisodeNo = 1
-		}
-	} else {
-		return "", nil, errors.New("unsupported kind")
-	}
-	searchTitle = strings.TrimSpace(searchTitle)
-	if searchTitle == "" {
-		return "", nil, errors.New("missing title")
-	}
-
-	// Search across enabled sites (server-level).
-	sites := normalizeSitesFromJSON(database.GetSetting("video_source_sites"))
-	statusMap := parseJSONBoolMap(database.GetSetting("video_source_site_status"))
-	searchMap := parseJSONBoolMap(database.GetSetting("video_source_site_search"))
-	ordered := applySiteOrder(sites, parseJSONStringArray(database.GetSetting("video_source_site_order")))
-
-	type cand struct {
-		Site site
-		Item jellyfinCatSearchItem
-		Score int
-	}
-	best := cand{Score: -1}
-
-	qKey := jellyfinNormalizeAggKey(searchTitle)
-	for _, s := range ordered {
-		if s.Key == "" || s.API == "" {
-			continue
-		}
-		if isConfigCenterSite(s) {
-			continue
-		}
-		enabled, ok := statusMap[s.Key]
-		if ok && !enabled {
-			continue
-		}
-		searchEnabled, ok := searchMap[s.Key]
-		if ok && !searchEnabled {
-			continue
-		}
-
-		raw, err := jellyfinCatRequestSpider(apiBase, s.API, "search", map[string]any{"wd": searchTitle, "page": 1})
-		if err != nil {
-			continue
-		}
-		items := jellyfinCatNormalizeSearchList(raw)
-		for _, it := range items {
-			key := jellyfinNormalizeAggKey(it.Name)
-			if key == "" {
-				continue
-			}
-			score := jellyfinMatchScore(qKey, key)
-			if score > best.Score {
-				best = cand{Site: s, Item: it, Score: score}
-			}
-		}
-		// quick exit on exact
-		if best.Score >= 1000 {
-			break
-		}
-	}
-
-	if best.Score < 0 || best.Item.ID == "" {
-		return "", nil, errors.New("未找到可用资源")
-	}
-
-	// Detail to get episode ids.
-	detailRaw, err := jellyfinCatRequestSpider(apiBase, best.Site.API, "detail", map[string]any{"id": best.Item.ID})
-	if err != nil {
-		return "", nil, errors.New("获取详情失败")
-	}
-	playFrom, playURL := jellyfinExtractDetailPlayFromURL(detailRaw)
-	pans := jellyfinParsePlaySources(playFrom, playURL)
-	if len(pans) == 0 {
-		return "", nil, errors.New("该资源无可用播放列表")
-	}
-	pan := pans[0]
-	if len(pan.Episodes) == 0 {
-		return "", nil, errors.New("该资源无可用剧集")
-	}
-	idx := 0
-	if globalEpisodeNo > 0 {
-		idx = globalEpisodeNo - 1
-	}
-	if idx < 0 {
-		idx = 0
-	}
-	if idx >= len(pan.Episodes) {
-		idx = len(pan.Episodes) - 1
-	}
-	ep := pan.Episodes[idx]
-	if ep.URL == "" {
-		return "", nil, errors.New("剧集无效")
-	}
-
-	siteID := jellyfinExtractSiteIDFromSpiderAPI(best.Site.API)
-	playPayload := map[string]any{
-		"flag":    strings.TrimSpace(ep.Flag),
-		"id":      strings.TrimSpace(ep.URL),
-		"siteApi": strings.TrimSpace(best.Site.API),
-	}
-	if siteID != "" {
-		playPayload["siteId"] = siteID
-	}
-	playRaw, err := jellyfinCatRequestPlay(apiBase, tvUser, playPayload)
-	if err != nil {
-		return "", nil, errors.New("获取播放地址失败")
-	}
-	urlPicked := jellyfinPickFirstPlayableURL(playRaw)
-	if urlPicked == "" {
-		return "", nil, errors.New("无可用播放地址")
-	}
-	urlPicked = jellyfinRewriteProxyURLToBase(urlPicked, apiBase, tvUser)
-	headers := map[string]string{}
-	if h, ok := playRaw["header"].(map[string]any); ok {
-		for k, v := range h {
-			kk := strings.TrimSpace(k)
-			if kk == "" {
-				continue
-			}
-			sv := strings.TrimSpace(jellyfinAnyToString(v))
-			if sv == "" {
-				continue
-			}
-			headers[kk] = sv
-		}
-	}
-	return urlPicked, headers, nil
+	return smartResolvePlaybackFromTMDB(database, u, req)
 }
 
 func jellyfinNormalizeAggKey(s string) string {
@@ -565,8 +417,8 @@ func jellyfinPickFirstPlayableURL(playRaw map[string]any) string {
 	}
 	// special-case: [id, httpUrl]
 	if len(arrAny) >= 2 {
-			s0 := strings.TrimSpace(jellyfinAnyToString(arrAny[0]))
-			s1 := strings.TrimSpace(jellyfinAnyToString(arrAny[1]))
+		s0 := strings.TrimSpace(jellyfinAnyToString(arrAny[0]))
+		s1 := strings.TrimSpace(jellyfinAnyToString(arrAny[1]))
 		if !strings.HasPrefix(strings.ToLower(s0), "http") && strings.HasPrefix(strings.ToLower(s1), "http") {
 			return s1
 		}
