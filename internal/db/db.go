@@ -252,6 +252,7 @@ func (d *DB) initSchema(fresh bool) error {
 	// One-time cleanup for removed settings keys.
 	_ = d.cleanupLegacySettings()
 	_ = d.ensurePlayHistoryTMDBColumns()
+	_ = d.ensurePlayHistoryProgressColumns()
 	_ = d.ensureDoubanTMDBMapTable()
 	_ = d.ensureGoCompatibleMagicEpisodeRules()
 
@@ -292,6 +293,30 @@ func (d *DB) ensurePlayHistoryTMDBColumns() error {
 		{name: "tmdb_id", ddl: "ALTER TABLE play_history ADD COLUMN tmdb_id INTEGER DEFAULT 0"},
 		{name: "tmdb_type", ddl: "ALTER TABLE play_history ADD COLUMN tmdb_type TEXT DEFAULT ''"},
 		{name: "tmdb_seasons_json", ddl: "ALTER TABLE play_history ADD COLUMN tmdb_seasons_json TEXT DEFAULT ''"},
+	}
+	for _, c := range cols {
+		ok, err := hasSQLiteColumn(d.db, "play_history", c.name)
+		if err != nil {
+			return err
+		}
+		if ok {
+			continue
+		}
+		_, _ = d.db.Exec(c.ddl)
+	}
+	return nil
+}
+
+func (d *DB) ensurePlayHistoryProgressColumns() error {
+	if d == nil || d.db == nil {
+		return nil
+	}
+	cols := []struct {
+		name string
+		ddl  string
+	}{
+		{name: "playback_position_ticks", ddl: "ALTER TABLE play_history ADD COLUMN playback_position_ticks INTEGER DEFAULT 0"},
+		{name: "playback_runtime_ticks", ddl: "ALTER TABLE play_history ADD COLUMN playback_runtime_ticks INTEGER DEFAULT 0"},
 	}
 	for _, c := range cols {
 		ok, err := hasSQLiteColumn(d.db, "play_history", c.name)

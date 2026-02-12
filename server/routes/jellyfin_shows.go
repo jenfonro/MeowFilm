@@ -2,9 +2,11 @@ package routes
 
 import (
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
 )
@@ -153,8 +155,18 @@ func handleJellyfinShows(w http.ResponseWriter, r *http.Request, database *db.DB
 			if name == "" {
 				name = "第" + intToCN(e.Episode) + "集"
 			}
+			epID := jellyfinBuildEpisodeID(parsed.TMDBID, seasonNo, e.Episode)
+			mediaPath := "/jellyfin/media/" + url.PathEscape(epID) + ".mp4"
+			mediaSourceID := jellyfinStableHex32(epID)
+			premiere := strings.TrimSpace(e.AirDate)
+			premiereISO := ""
+			if premiere != "" {
+				if t, err := time.Parse("2006-01-02", premiere); err == nil {
+					premiereISO = t.UTC().Format(time.RFC3339)
+				}
+			}
 			out = append(out, map[string]any{
-				"Id":                      jellyfinBuildEpisodeID(parsed.TMDBID, seasonNo, e.Episode),
+				"Id":                      epID,
 				"Name":                    name,
 				"SeriesName":              seriesName,
 				"SeasonName":              seasonName,
@@ -163,6 +175,14 @@ func handleJellyfinShows(w http.ResponseWriter, r *http.Request, database *db.DB
 				"MediaType":               "Video",
 				"IsFolder":                false,
 				"LocationType":            "Remote",
+				"Path":                    mediaPath,
+				"Container":               "mp4,m4v",
+				"PremiereDate":            premiereISO,
+				"CanDownload":             false,
+				"RunTimeTicks":            0,
+				"Chapters":                []any{},
+				"People":                  []any{},
+				"Size":                    0,
 				"SeriesId":                seriesID,
 				"SeasonId":                seasonID,
 				"ParentId":                seasonID,
@@ -172,6 +192,23 @@ func handleJellyfinShows(w http.ResponseWriter, r *http.Request, database *db.DB
 				"ParentIndexNumber":       seasonNo,
 				"ImageTags":               map[string]any{"Primary": "tmdb", "Thumb": "tmdb"},
 				"UserData":                map[string]any{"Played": false},
+				"MediaSources": []map[string]any{
+					{
+						"Id":                   mediaSourceID,
+						"MediaSourceId":        mediaSourceID,
+						"Protocol":             "File",
+						"IsRemote":             false,
+						"Path":                 mediaPath,
+						"Container":            "mp4",
+						"RequiredHttpHeaders":  map[string]string{},
+						"SupportsDirectPlay":   true,
+						"SupportsDirectStream": true,
+						"SupportsTranscoding":  true,
+						"SupportsProbing":      true,
+						"Type":                 "Default",
+					},
+				},
+				"AlternateMediaSources": []any{},
 			})
 		}
 		sort.Slice(out, func(i, j int) bool {
@@ -182,9 +219,6 @@ func handleJellyfinShows(w http.ResponseWriter, r *http.Request, database *db.DB
 			if id, ok := it["Id"].(string); ok && strings.TrimSpace(id) != "" {
 				if _, ok := it["Etag"]; !ok {
 					it["Etag"] = jellyfinStableEtag(strings.TrimSpace(id))
-				}
-				if _, ok := it["Path"]; !ok {
-					it["Path"] = "meowfilm://" + strings.TrimSpace(id)
 				}
 			}
 			if _, ok := it["ServerId"]; !ok && strings.TrimSpace(serverID) != "" {
@@ -206,6 +240,12 @@ func jellyfinEnsureShowsItemFields(obj map[string]any, fieldsParam string) {
 	if obj == nil {
 		return
 	}
+	id, _ := obj["Id"].(string)
+	id = strings.TrimSpace(id)
+	isFolder, _ := obj["IsFolder"].(bool)
+	typ, _ := obj["Type"].(string)
+	typ = strings.TrimSpace(typ)
+
 	fields := map[string]struct{}{}
 	for _, part := range strings.Split(fieldsParam, ",") {
 		p := strings.TrimSpace(part)
@@ -213,6 +253,8 @@ func jellyfinEnsureShowsItemFields(obj map[string]any, fieldsParam string) {
 			fields[p] = struct{}{}
 		}
 	}
+	nowISO := time.Now().UTC().Format(time.RFC3339)
+
 	if _, want := fields["Genres"]; want {
 		if _, ok := obj["Genres"]; !ok {
 			obj["Genres"] = []string{}
@@ -225,7 +267,28 @@ func jellyfinEnsureShowsItemFields(obj map[string]any, fieldsParam string) {
 	}
 	if _, want := fields["MediaSources"]; want {
 		if _, ok := obj["MediaSources"]; !ok {
-			obj["MediaSources"] = []any{}
+			if !isFolder && id != "" && (typ == "Episode" || typ == "Movie") {
+				mediaPath := "/jellyfin/media/" + url.PathEscape(id) + ".mp4"
+				mediaSourceID := jellyfinStableHex32(id)
+				obj["MediaSources"] = []map[string]any{
+					{
+						"Id":                   mediaSourceID,
+						"MediaSourceId":        mediaSourceID,
+						"Protocol":             "File",
+						"IsRemote":             false,
+						"Path":                 mediaPath,
+						"Container":            "mp4",
+						"RequiredHttpHeaders":  map[string]string{},
+						"SupportsDirectPlay":   true,
+						"SupportsDirectStream": true,
+						"SupportsTranscoding":  true,
+						"SupportsProbing":      true,
+						"Type":                 "Default",
+					},
+				}
+			} else {
+				obj["MediaSources"] = []any{}
+			}
 		}
 	}
 	if _, want := fields["AlternateMediaSources"]; want {
@@ -241,6 +304,47 @@ func jellyfinEnsureShowsItemFields(obj map[string]any, fieldsParam string) {
 	if _, want := fields["Overview"]; want {
 		if _, ok := obj["Overview"]; !ok {
 			obj["Overview"] = ""
+		}
+	}
+	if _, want := fields["Path"]; want {
+		if _, ok := obj["Path"]; !ok {
+			if !isFolder && id != "" {
+				obj["Path"] = "/jellyfin/media/" + url.PathEscape(id) + ".mp4"
+			} else if id != "" {
+				obj["Path"] = "meowfilm://" + id
+			} else {
+				obj["Path"] = ""
+			}
+		}
+	}
+	if _, want := fields["RunTimeTicks"]; want {
+		if _, ok := obj["RunTimeTicks"]; !ok {
+			obj["RunTimeTicks"] = 0
+		}
+	}
+	if _, want := fields["Chapters"]; want {
+		if _, ok := obj["Chapters"]; !ok {
+			obj["Chapters"] = []any{}
+		}
+	}
+	if _, want := fields["People"]; want {
+		if _, ok := obj["People"]; !ok {
+			obj["People"] = []any{}
+		}
+	}
+	if _, want := fields["Size"]; want {
+		if _, ok := obj["Size"]; !ok {
+			obj["Size"] = 0
+		}
+	}
+	if _, want := fields["CanDownload"]; want {
+		if _, ok := obj["CanDownload"]; !ok {
+			obj["CanDownload"] = false
+		}
+	}
+	if _, want := fields["DateModified"]; want {
+		if _, ok := obj["DateModified"]; !ok {
+			obj["DateModified"] = nowISO
 		}
 	}
 }
