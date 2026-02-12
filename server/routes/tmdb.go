@@ -68,6 +68,30 @@ const tmdbDetailCacheTTL = 10 * time.Minute
 const tmdbDetailCacheTTLEnded = 24 * time.Hour
 const tmdbDetailCacheMaxEntries = 2000
 
+func resolveTMDBAPIBase(database *db.DB) string {
+	raw := ""
+	if database != nil {
+		raw = strings.TrimSpace(database.GetSetting("tmdb_api_base"))
+	}
+	base := normalizeHTTPBase(raw)
+	if base == "" {
+		return "https://api.themoviedb.org/3"
+	}
+	return base
+}
+
+func joinTMDBAPI(base, path string) string {
+	b := strings.TrimRight(strings.TrimSpace(base), "/")
+	p := strings.TrimLeft(strings.TrimSpace(path), "/")
+	if b == "" {
+		b = "https://api.themoviedb.org/3"
+	}
+	if p == "" {
+		return b
+	}
+	return b + "/" + p
+}
+
 func tmdbDetailCacheGet(cacheKey string, now int64) (map[string]any, bool) {
 	cacheKey = strings.TrimSpace(cacheKey)
 	if cacheKey == "" {
@@ -163,7 +187,8 @@ func handleAPITMDBSearch(w http.ResponseWriter, r *http.Request, database *db.DB
 	}
 	includeAdult := strings.TrimSpace(database.GetSetting("tmdb_include_adult")) == "1"
 
-	u, _ := url.Parse("https://api.themoviedb.org/3/search/multi")
+	apiBase := resolveTMDBAPIBase(database)
+	u, _ := url.Parse(joinTMDBAPI(apiBase, "search/multi"))
 	params := u.Query()
 	params.Set("query", q)
 	params.Set("page", "1")
@@ -269,7 +294,7 @@ func handleAPITMDBSearch(w http.ResponseWriter, r *http.Request, database *db.DB
 		if id <= 0 {
 			return "", 0, false
 		}
-		cacheKey := "tv::" + strconv.Itoa(id) + "::" + language
+		cacheKey := apiBase + "::tv::" + strconv.Itoa(id) + "::" + language
 		now := time.Now().Unix()
 		if hit, ok := tmdbDetailCacheGet(cacheKey, now); ok && hit != nil {
 			if b, ok := hit["badge"].(string); ok && strings.TrimSpace(b) != "" {
@@ -296,7 +321,7 @@ func handleAPITMDBSearch(w http.ResponseWriter, r *http.Request, database *db.DB
 				return strings.TrimSpace(b), seasonCount, true
 			}
 		}
-		u, _ := url.Parse("https://api.themoviedb.org/3/tv/" + strconv.Itoa(id))
+		u, _ := url.Parse(joinTMDBAPI(apiBase, "tv/"+strconv.Itoa(id)))
 		q := u.Query()
 		if language != "" {
 			q.Set("language", language)
@@ -495,14 +520,15 @@ func handleAPITMDBDetail(w http.ResponseWriter, r *http.Request, database *db.DB
 		language = "zh-CN"
 	}
 
-	cacheKey := typ + "::" + strconv.Itoa(id) + "::" + language
+	apiBase := resolveTMDBAPIBase(database)
+	cacheKey := apiBase + "::" + typ + "::" + strconv.Itoa(id) + "::" + language
 	now := time.Now().Unix()
 	if hit, ok := tmdbDetailCacheGet(cacheKey, now); ok && hit != nil {
 		writeJSON(w, 200, hit)
 		return
 	}
 
-	u, _ := url.Parse("https://api.themoviedb.org/3/" + typ + "/" + strconv.Itoa(id))
+	u, _ := url.Parse(joinTMDBAPI(apiBase, typ+"/"+strconv.Itoa(id)))
 	params := u.Query()
 	if language != "" {
 		params.Set("language", language)
