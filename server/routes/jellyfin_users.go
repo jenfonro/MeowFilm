@@ -230,6 +230,7 @@ func handleJellyfinUsers(w http.ResponseWriter, r *http.Request, database *db.DB
 			jellyfinWriteError(w, 404, "Not found")
 			return
 		}
+		fieldsParam := jellyfinQueryGetCI(r, "fields")
 		itemID := strings.TrimSpace(parts[2])
 		if itemID == "" {
 			http.NotFound(w, r)
@@ -256,6 +257,7 @@ func handleJellyfinUsers(w http.ResponseWriter, r *http.Request, database *db.DB
 		if _, ok := obj["UserData"]; !ok {
 			obj["UserData"] = map[string]any{"Played": false}
 		}
+		jellyfinEnsureInfuseItemFields(obj, itemID, fieldsParam, serverID)
 		writeJSON(w, 200, obj)
 		return
 	}
@@ -322,6 +324,111 @@ func handleJellyfinUsers(w http.ResponseWriter, r *http.Request, database *db.DB
 	}
 
 	http.NotFound(w, r)
+}
+
+func jellyfinEnsureInfuseItemFields(obj map[string]any, itemID string, fieldsParam string, serverID string) {
+	if obj == nil {
+		return
+	}
+
+	// Ensure a stable Id; prefer the response Id if present.
+	id := itemID
+	if v, ok := obj["Id"].(string); ok && strings.TrimSpace(v) != "" {
+		id = strings.TrimSpace(v)
+	} else if strings.TrimSpace(id) != "" {
+		obj["Id"] = strings.TrimSpace(id)
+	}
+
+	name, _ := obj["Name"].(string)
+	name = strings.TrimSpace(name)
+	if name != "" {
+		if _, ok := obj["SortName"]; !ok {
+			obj["SortName"] = name
+		}
+	}
+
+	if _, ok := obj["Etag"]; !ok && strings.TrimSpace(id) != "" {
+		obj["Etag"] = jellyfinStableEtag(id)
+	}
+	if _, ok := obj["ServerId"]; !ok && strings.TrimSpace(serverID) != "" {
+		obj["ServerId"] = serverID
+	}
+
+	// Provide a non-empty Path for non-virtual items; some clients treat missing Path as invalid.
+	if _, ok := obj["Path"]; !ok && strings.TrimSpace(id) != "" {
+		obj["Path"] = "meowfilm://" + strings.TrimSpace(id)
+	}
+
+	// Ensure LocationType for browsable items.
+	if _, ok := obj["LocationType"]; !ok {
+		obj["LocationType"] = "Remote"
+	}
+
+	// If the client requests additional fields, ensure type-correct empty defaults.
+	fields := map[string]struct{}{}
+	for _, part := range strings.Split(fieldsParam, ",") {
+		p := strings.TrimSpace(part)
+		if p != "" {
+			fields[p] = struct{}{}
+		}
+	}
+
+	nowISO := time.Now().UTC().Format(time.RFC3339)
+	if _, want := fields["DateCreated"]; want {
+		if _, ok := obj["DateCreated"]; !ok {
+			obj["DateCreated"] = nowISO
+		}
+	}
+	if _, want := fields["Genres"]; want {
+		if _, ok := obj["Genres"]; !ok {
+			obj["Genres"] = []string{}
+		}
+	}
+	if _, want := fields["MediaSources"]; want {
+		if _, ok := obj["MediaSources"]; !ok {
+			obj["MediaSources"] = []any{}
+		}
+	}
+	if _, want := fields["AlternateMediaSources"]; want {
+		if _, ok := obj["AlternateMediaSources"]; !ok {
+			obj["AlternateMediaSources"] = []any{}
+		}
+	}
+	if _, want := fields["Overview"]; want {
+		if _, ok := obj["Overview"]; !ok {
+			obj["Overview"] = ""
+		}
+	}
+	if _, want := fields["ParentId"]; want {
+		if _, ok := obj["ParentId"]; !ok {
+			obj["ParentId"] = ""
+		}
+	}
+	if _, want := fields["ProviderIds"]; want {
+		if _, ok := obj["ProviderIds"]; !ok {
+			obj["ProviderIds"] = map[string]any{}
+		}
+	}
+	if _, want := fields["RecursiveItemCount"]; want {
+		if _, ok := obj["RecursiveItemCount"]; !ok {
+			obj["RecursiveItemCount"] = 0
+		}
+	}
+	if _, want := fields["ChildCount"]; want {
+		if _, ok := obj["ChildCount"]; !ok {
+			obj["ChildCount"] = 0
+		}
+	}
+	if _, want := fields["SortName"]; want {
+		if _, ok := obj["SortName"]; !ok {
+			obj["SortName"] = name
+		}
+	}
+	if _, want := fields["Path"]; want {
+		if _, ok := obj["Path"]; !ok && strings.TrimSpace(id) != "" {
+			obj["Path"] = "meowfilm://" + strings.TrimSpace(id)
+		}
+	}
 }
 
 func jellyfinBuildDoubanHotListItems(database *db.DB, kind string, category string, hotType string, startIndex int, limit int, serverID string, parentID string) []map[string]any {
@@ -405,7 +512,7 @@ func jellyfinBuildDoubanHotListItems(database *db.DB, kind string, category stri
 				"CommunityRating":         rating,
 				"ProviderIds":             provider,
 				"ImageTags":               imgTags,
-				"BackdropImageTags":       []any{},
+				"BackdropImageTags":       []string{"tmdb"},
 				"ServerId":                serverID,
 				"UserData":                map[string]any{"Played": false},
 				"PrimaryImageAspectRatio": 0.6666667,
@@ -424,6 +531,7 @@ func jellyfinBuildDoubanHotListItems(database *db.DB, kind string, category stri
 				"Name":                    name,
 				"SortName":                name,
 				"Type":                    "Series",
+				"MediaType":               "Video",
 				"LocationType":            "Remote",
 				"IsFolder":                true,
 				"ProductionYear":          year,
@@ -440,7 +548,7 @@ func jellyfinBuildDoubanHotListItems(database *db.DB, kind string, category stri
 				"CommunityRating":         rating,
 				"ProviderIds":             provider,
 				"ImageTags":               imgTags,
-				"BackdropImageTags":       []any{},
+				"BackdropImageTags":       []string{"tmdb"},
 				"ServerId":                serverID,
 				"UserData":                map[string]any{"Played": false},
 				"PrimaryImageAspectRatio": 0.6666667,
