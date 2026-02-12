@@ -11,7 +11,8 @@ import (
 
 // /jellyfin/media/{itemId}.{ext}
 // Some third-party clients treat MediaSources[].Path as a server-relative HTTP path.
-// Redirect to the standard /jellyfin/Videos stream endpoint.
+// Serve via the standard /jellyfin/Videos stream handler (without additional redirects),
+// so clients don't drop auth headers when following a 302 within the same origin.
 func handleJellyfinMediaFiles(w http.ResponseWriter, r *http.Request, database *db.DB, serverID string, parts []string) {
 	_, ok := jellyfinRequireUser(w, r, database)
 	if !ok {
@@ -46,15 +47,10 @@ func handleJellyfinMediaFiles(w http.ResponseWriter, r *http.Request, database *
 	}
 	mediaSourceID := jellyfinStableHex32(itemID)
 
-	base := jellyfinBaseURL(r)
-	target := strings.TrimRight(base, "/") + "/jellyfin/Videos/" + url.PathEscape(itemID) + "/stream." + url.PathEscape(container)
-	u2, _ := url.Parse(target)
-	q := u2.Query()
+	r2 := r.Clone(r.Context())
+	q := r2.URL.Query()
 	q.Set("static", "true")
 	q.Set("MediaSourceId", mediaSourceID)
-	if tok := jellyfinReadToken(r); tok != "" {
-		q.Set("api_key", tok)
-	}
-	u2.RawQuery = q.Encode()
-	http.Redirect(w, r, u2.String(), http.StatusFound)
+	r2.URL.RawQuery = q.Encode()
+	handleJellyfinVideoStream(w, r2, database, serverID, itemID)
 }
