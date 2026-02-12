@@ -67,6 +67,12 @@ func JellyfinHandler(database *db.DB) http.Handler {
 		}
 
 		switch strings.ToLower(parts[0]) {
+		case "media":
+			handleJellyfinMediaFiles(lw, r, database, serverID, parts[1:])
+			if debugLog {
+				jellyfinLogDone(r, lw)
+			}
+			return
 		case "system":
 			handleJellyfinSystem(lw, r, database, serverID, parts[1:])
 			if debugLog {
@@ -111,12 +117,6 @@ func JellyfinHandler(database *db.DB) http.Handler {
 			return
 		case "sessions":
 			handleJellyfinSessions(lw, r, database, serverID, parts[1:])
-			if debugLog {
-				jellyfinLogDone(r, lw)
-			}
-			return
-		case "stream":
-			handleJellyfinStream(lw, r, database, serverID, parts[1:])
 			if debugLog {
 				jellyfinLogDone(r, lw)
 			}
