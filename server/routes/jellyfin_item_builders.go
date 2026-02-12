@@ -2,6 +2,7 @@ package routes
 
 import (
 	"errors"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -137,6 +138,7 @@ func jellyfinBuildItem(database *db.DB, jellyfinID string) (map[string]any, erro
 			return nil, err
 		}
 		id := jellyfinBuildMovieID(parsed.TMDBID)
+		mediaSourceID := jellyfinStableHex32(id)
 		out := map[string]any{
 			"Id":           id,
 			"Name":         d.Title,
@@ -154,6 +156,23 @@ func jellyfinBuildItem(database *db.DB, jellyfinID string) (map[string]any, erro
 			"BackdropImageTags": []string{"tmdb"},
 			"ProviderIds":       map[string]any{"Tmdb": strconv.Itoa(parsed.TMDBID)},
 			"UserData":          map[string]any{"Played": false},
+			"MediaSources": []map[string]any{
+				{
+					"Id":                   mediaSourceID,
+					"MediaSourceId":        mediaSourceID,
+					"Protocol":             "File",
+					"IsRemote":             false,
+					"Path":                 "/jellyfin/media/" + url.PathEscape(id) + ".mp4",
+					"Container":            "mp4",
+					"RequiredHttpHeaders":  map[string]string{},
+					"SupportsDirectPlay":   true,
+					"SupportsDirectStream": true,
+					"SupportsTranscoding":  true,
+					"SupportsProbing":      true,
+					"Type":                 "Default",
+				},
+			},
+			"AlternateMediaSources": []any{},
 		}
 		if people := jellyfinBuildPeople(database, "movie", parsed.TMDBID); len(people) > 0 {
 			out["People"] = people
@@ -249,6 +268,7 @@ func jellyfinBuildItem(database *db.DB, jellyfinID string) (map[string]any, erro
 				epName = "第" + strconv.Itoa(parsed.Episode) + "集"
 			}
 			episodeID := jellyfinBuildEpisodeID(parsed.TMDBID, parsed.Season, parsed.Episode)
+			mediaSourceID := jellyfinStableHex32(episodeID)
 			return map[string]any{
 				"Id":                      episodeID,
 				"Name":                    epName,
@@ -270,6 +290,23 @@ func jellyfinBuildItem(database *db.DB, jellyfinID string) (map[string]any, erro
 				"ImageTags":               map[string]any{"Primary": "tmdb"},
 				"ProviderIds":             map[string]any{"Tmdb": strconv.Itoa(parsed.TMDBID)},
 				"UserData":                map[string]any{"Played": false},
+				"MediaSources": []map[string]any{
+					{
+						"Id":                   mediaSourceID,
+						"MediaSourceId":        mediaSourceID,
+						"Protocol":             "File",
+						"IsRemote":             false,
+						"Path":                 "/jellyfin/media/" + url.PathEscape(episodeID) + ".mp4",
+						"Container":            "mp4",
+						"RequiredHttpHeaders":  map[string]string{},
+						"SupportsDirectPlay":   true,
+						"SupportsDirectStream": true,
+						"SupportsTranscoding":  true,
+						"SupportsProbing":      true,
+						"Type":                 "Default",
+					},
+				},
+				"AlternateMediaSources": []any{},
 			}, nil
 		default:
 			return nil, nil
