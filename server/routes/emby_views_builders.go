@@ -1,0 +1,39 @@
+package routes
+
+func embyDefaultGroupingOptions() []map[string]any {
+	return []map[string]any{
+		{"Name": "TMDB 剧集", "Id": embyViewTMDBTV},
+		{"Name": "TMDB 电影", "Id": embyViewTMDBMovies},
+	}
+}
+
+func embyDefaultViewFolders(serverID string) []map[string]any {
+	return []map[string]any{
+		embyBuildViewFolderItem(serverID, embyViewTMDBTV, "TMDB 剧集", "tvshows"),
+		embyBuildViewFolderItem(serverID, embyViewTMDBMovies, "TMDB 电影", "movies"),
+	}
+}
+
+func embyDefaultViewFolderItemByID(serverID string, id string) (map[string]any, bool) {
+	switch id {
+	case embyViewTMDBTV:
+		return embyBuildViewFolderItem(serverID, id, "TMDB 剧集", "tvshows"), true
+	case embyViewTMDBMovies:
+		return embyBuildViewFolderItem(serverID, id, "TMDB 电影", "movies"), true
+	default:
+		return nil, false
+	}
+}
+
+func embyDefaultUsersViewsResponse(serverID string) map[string]any {
+	items := embyDefaultViewFolders(serverID)
+	return map[string]any{
+		"Items":            items,
+		"TotalRecordCount": len(items),
+	}
+}
+
+func embyDefaultUserViewsResponse(serverID string) map[string]any {
+	items := embyDefaultViewFolders(serverID)
+	return embyPagedItems(items, 0, len(items))
+}

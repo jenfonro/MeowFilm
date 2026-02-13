@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -570,7 +569,7 @@ func smartBuildCandidateLowerText(texts []string) string {
 	return strings.TrimSpace(strings.Join(out, " "))
 }
 
-func smartExtractEpisodeCandidateTexts(ep jellyfinCatEpisode, rules []smartMagicRule) []string {
+func smartExtractEpisodeCandidateTexts(ep embyCatEpisode, rules []smartMagicRule) []string {
 	rawNames := smartExtractRawNamesFromEpisodeURL(ep.URL)
 	displayName := strings.TrimSpace(ep.Name)
 	rawLooksUseful := false
@@ -808,7 +807,7 @@ type smartCandidate struct {
 	SrcRemarkLower   string
 	PanLabel         string
 	PanTokenIdx      int
-	Ep               jellyfinCatEpisode
+	Ep               embyCatEpisode
 	RawLower         string
 	MatchSeason      int
 	HasSeasonMarker  bool
@@ -1003,7 +1002,7 @@ type smartDetailCacheEntry struct {
 	NextRetryAt     time.Time
 	LastError       string
 	Source          smartSource
-	Pans            []jellyfinCatPan
+	Pans            []embyCatPan
 	EpisodeMap      map[int][]smartCandidate
 	EpisodeMapLoose map[int][]smartCandidate
 }
@@ -1017,7 +1016,7 @@ var smartDetailCache = struct {
 	InFlight: map[string]chan struct{}{},
 }
 
-func smartGetSearchThreadCount(database *db.DB, u *jellyfinUser) int {
+func smartGetSearchThreadCount(database *db.DB, u *embyUser) int {
 	if database == nil {
 		return 5
 	}
@@ -1038,7 +1037,7 @@ func smartGetSearchThreadCount(database *db.DB, u *jellyfinUser) int {
 	return threadCount
 }
 
-func smartLoadSiteOrder(database *db.DB, u *jellyfinUser) []string {
+func smartLoadSiteOrder(database *db.DB, u *embyUser) []string {
 	if database == nil {
 		return nil
 	}
@@ -1052,7 +1051,7 @@ func smartLoadSiteOrder(database *db.DB, u *jellyfinUser) []string {
 	return parseJSONStringArray(database.GetSetting("video_source_site_order"))
 }
 
-func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle string, u *jellyfinUser) ([]smartSource, map[string]int) {
+func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle string, u *embyUser) ([]smartSource, map[string]int) {
 	sites := normalizeSitesFromJSON(database.GetSetting("video_source_sites"))
 	statusMap := parseJSONBoolMap(database.GetSetting("video_source_site_status"))
 	searchMap := parseJSONBoolMap(database.GetSetting("video_source_site_search"))
@@ -1066,7 +1065,7 @@ func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle st
 		orderMap[s.Key] = i
 	}
 
-	qKey := jellyfinNormalizeAggKey(searchTitle)
+	qKey := embyNormalizeAggKey(searchTitle)
 	seq := 0
 	out := []smartSource{}
 	for _, s := range ordered {
@@ -1082,21 +1081,21 @@ func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle st
 		if searchEnabled, ok := searchMap[s.Key]; ok && !searchEnabled {
 			continue
 		}
-		raw, err := jellyfinCatRequestSpider(apiBase, s.API, "search", map[string]any{"wd": searchTitle, "page": 1})
+		raw, err := embyCatRequestSpider(apiBase, s.API, "search", map[string]any{"wd": searchTitle, "page": 1})
 		if err != nil {
 			continue
 		}
-		items := jellyfinCatNormalizeSearchList(raw)
+		items := embyCatNormalizeSearchList(raw)
 		for _, it := range items {
 			name := strings.TrimSpace(it.Name)
 			if strings.TrimSpace(it.ID) == "" || name == "" {
 				continue
 			}
-			key := jellyfinNormalizeAggKey(name)
+			key := embyNormalizeAggKey(name)
 			if key == "" {
 				continue
 			}
-			score := jellyfinMatchScore(qKey, key)
+			score := embyMatchScore(qKey, key)
 			if score <= 0 {
 				continue
 			}
@@ -1230,7 +1229,7 @@ func smartBuildCandidates(aggregated []smartSource, orderMap map[string]int, tmd
 	return out
 }
 
-func smartTMDBSeasonEpisodeOfGlobal(seasons []jellyfinTMDBSeason, global int) smartSeasonEpisode {
+func smartTMDBSeasonEpisodeOfGlobal(seasons []embyTMDBSeason, global int) smartSeasonEpisode {
 	g := global
 	if g <= 0 {
 		return smartSeasonEpisode{Season: 0, Episode: 0}
@@ -1251,7 +1250,7 @@ func smartTMDBSeasonEpisodeOfGlobal(seasons []jellyfinTMDBSeason, global int) sm
 	return smartSeasonEpisode{Season: 0, Episode: g}
 }
 
-func smartTMDBGlobalEpisodeNoOf(seasons []jellyfinTMDBSeason, season int, episode int) int {
+func smartTMDBGlobalEpisodeNoOf(seasons []embyTMDBSeason, season int, episode int) int {
 	if episode <= 0 {
 		return 0
 	}
@@ -1270,7 +1269,7 @@ func smartTMDBGlobalEpisodeNoOf(seasons []jellyfinTMDBSeason, season int, episod
 	return sum + episode
 }
 
-func smartNormalizeMaybeGlobalSeasonEpisode(seasons []jellyfinTMDBSeason, se smartSeasonEpisode) smartSeasonEpisode {
+func smartNormalizeMaybeGlobalSeasonEpisode(seasons []embyTMDBSeason, se smartSeasonEpisode) smartSeasonEpisode {
 	s := se.Season
 	e := se.Episode
 	if e <= 0 {
@@ -1304,7 +1303,7 @@ func smartNormalizeMaybeGlobalSeasonEpisode(seasons []jellyfinTMDBSeason, se sma
 	return smartSeasonEpisode{Season: s, Episode: mapped.Episode}
 }
 
-func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSource, tmdbSeasons []jellyfinTMDBSeason, tmdbHasMultiSeason bool, settings smartPlaybackSettings, rules []smartMagicRule, cleanRules []*regexp.Regexp) *smartDetailCacheEntry {
+func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSource, tmdbSeasons []embyTMDBSeason, tmdbHasMultiSeason bool, settings smartPlaybackSettings, rules []smartMagicRule, cleanRules []*regexp.Regexp) *smartDetailCacheEntry {
 	key := smartBuildSourceKey(src)
 	if key == "" {
 		return nil
@@ -1349,12 +1348,12 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 			NextRetryAt:     time.Time{},
 			LastError:       "",
 			Source:          src,
-			Pans:            []jellyfinCatPan{},
+			Pans:            []embyCatPan{},
 			EpisodeMap:      map[int][]smartCandidate{},
 			EpisodeMapLoose: map[int][]smartCandidate{},
 		}
 
-		detailRaw, err := jellyfinCatRequestSpider(apiBase, src.SpiderAPI, "detail", map[string]any{"id": src.VideoID})
+		detailRaw, err := embyCatRequestSpider(apiBase, src.SpiderAPI, "detail", map[string]any{"id": src.VideoID})
 		if err != nil {
 			smartDetailCache.Lock()
 			prev := smartDetailCache.M[key]
@@ -1371,8 +1370,8 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 			smartDetailCache.Unlock()
 			return
 		}
-		playFrom, playURL := jellyfinExtractDetailPlayFromURL(detailRaw)
-		pans := jellyfinParsePlaySources(playFrom, playURL)
+		playFrom, playURL := embyExtractDetailPlayFromURL(detailRaw)
+		pans := embyParsePlaySources(playFrom, playURL)
 		entry.Pans = pans
 
 		srcRemarkLower := strings.ToLower(strings.TrimSpace(src.VideoRemark))
@@ -1476,7 +1475,7 @@ type smartPickResult struct {
 	Headers map[string]string
 }
 
-func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser string, src smartSource, tmdbSeasons []jellyfinTMDBSeason, tmdbHasMultiSeason bool, preferSeasonNo int, want int, settings smartPlaybackSettings, rules []smartMagicRule, cleanRules []*regexp.Regexp, requireSeasoned bool) *smartPickResult {
+func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser string, src smartSource, tmdbSeasons []embyTMDBSeason, tmdbHasMultiSeason bool, preferSeasonNo int, want int, settings smartPlaybackSettings, rules []smartMagicRule, cleanRules []*regexp.Regexp, requireSeasoned bool) *smartPickResult {
 	siteKey := strings.TrimSpace(src.SiteKey)
 	spiderApi := strings.TrimSpace(src.SpiderAPI)
 	videoId := strings.TrimSpace(src.VideoID)
@@ -1552,7 +1551,7 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 	}
 
 	// Verify by calling play and ensure we have a playable url.
-	siteID := jellyfinExtractSiteIDFromSpiderAPI(spiderApi)
+	siteID := embyExtractSiteIDFromSpiderAPI(spiderApi)
 	playPayload := map[string]any{
 		"flag":    strings.TrimSpace(best.Ep.Flag),
 		"id":      strings.TrimSpace(best.Ep.URL),
@@ -1561,15 +1560,15 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 	if siteID != "" {
 		playPayload["siteId"] = siteID
 	}
-	playRaw, err := jellyfinCatRequestPlay(apiBase, tvUser, playPayload)
+	playRaw, err := embyCatRequestPlay(apiBase, tvUser, playPayload)
 	if err != nil {
 		return nil
 	}
-	urlPicked := jellyfinPickFirstPlayableURL(playRaw)
+	urlPicked := embyPickFirstPlayableURL(playRaw)
 	if strings.TrimSpace(urlPicked) == "" {
 		return nil
 	}
-	urlPicked = jellyfinRewriteProxyURLToBase(urlPicked, apiBase, tvUser)
+	urlPicked = embyRewriteProxyURLToBase(urlPicked, apiBase, tvUser)
 	headers := map[string]string{}
 	if h, ok := playRaw["header"].(map[string]any); ok {
 		for k, v := range h {
@@ -1577,7 +1576,7 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 			if kk == "" {
 				continue
 			}
-			sv := strings.TrimSpace(jellyfinAnyToString(v))
+			sv := strings.TrimSpace(embyAnyToString(v))
 			if sv == "" {
 				continue
 			}
@@ -1587,7 +1586,7 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 	return &smartPickResult{Cand: *best, PlayURL: urlPicked, Headers: headers}
 }
 
-func smartResolvePlaybackFromTMDB(database *db.DB, u *jellyfinUser, req smartPlaybackRequest) (finalURL string, finalHeaders map[string]string, err error) {
+func smartResolvePlaybackFromTMDB(database *db.DB, u *embyUser, req smartPlaybackRequest) (finalURL string, finalHeaders map[string]string, err error) {
 	if database == nil {
 		return "", nil, errors.New("invalid database")
 	}
@@ -1595,7 +1594,7 @@ func smartResolvePlaybackFromTMDB(database *db.DB, u *jellyfinUser, req smartPla
 		return "", nil, errors.New("invalid tmdb id")
 	}
 
-	apiBase := jellyfinResolveCatApiBaseForUser(database, u)
+	apiBase := embyResolveCatApiBaseForUser(database, u)
 	if apiBase == "" {
 		return "", nil, errors.New("CatPawOpen 接口地址未设置")
 	}
@@ -1607,16 +1606,16 @@ func smartResolvePlaybackFromTMDB(database *db.DB, u *jellyfinUser, req smartPla
 	// Resolve TMDB title and want episode (global index for tv).
 	searchTitle := ""
 	want := 1
-	tmdbSeasons := []jellyfinTMDBSeason{}
+	tmdbSeasons := []embyTMDBSeason{}
 	if strings.TrimSpace(req.Kind) == "movie" {
-		md, err := jellyfinTMDBGetMovieDetail(database, req.TMDBID)
+		md, err := embyTMDBGetMovieDetail(database, req.TMDBID)
 		if err != nil || md == nil || strings.TrimSpace(md.Title) == "" {
 			return "", nil, errors.New("TMDB 请求失败")
 		}
 		searchTitle = strings.TrimSpace(md.Title)
 		want = 1
 	} else if strings.TrimSpace(req.Kind) == "tv" {
-		td, err := jellyfinTMDBGetTVDetail(database, req.TMDBID)
+		td, err := embyTMDBGetTVDetail(database, req.TMDBID)
 		if err != nil || td == nil || strings.TrimSpace(td.Title) == "" {
 			return "", nil, errors.New("TMDB 请求失败")
 		}
@@ -1666,7 +1665,7 @@ func smartResolvePlaybackFromTMDB(database *db.DB, u *jellyfinUser, req smartPla
 		concurrency = 5
 	}
 
-	debugLog := strings.TrimSpace(os.Getenv("MEOWFILM_JELLYFIN_DEBUG_LOG")) == "1"
+	debugLog := embyDebugLogEnabled()
 
 	tryPickOnce := func(requireSeasoned bool) *smartPickResult {
 		bestOverall := (*smartPickResult)(nil)
@@ -1740,7 +1739,7 @@ func smartResolvePlaybackFromTMDB(database *db.DB, u *jellyfinUser, req smartPla
 	}
 
 	if debugLog {
-		jellyfinDebugPrintf("[smartplay] picked site=%s pan=%q url=%q headers=%d", best.Cand.SiteKey, best.Cand.PanLabel, best.PlayURL, len(best.Headers))
+		embyDebugPrintf("[smartplay] picked site=%s pan=%q url=%q headers=%d", best.Cand.SiteKey, best.Cand.PanLabel, best.PlayURL, len(best.Headers))
 	}
 	return best.PlayURL, best.Headers, nil
 }

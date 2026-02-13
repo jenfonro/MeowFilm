@@ -253,6 +253,7 @@ func (d *DB) initSchema(fresh bool) error {
 	_ = d.cleanupLegacySettings()
 	_ = d.ensurePlayHistoryTMDBColumns()
 	_ = d.ensurePlayHistoryProgressColumns()
+	_ = d.ensurePlayHistoryJellyfinColumns()
 	_ = d.ensureDoubanTMDBMapTable()
 	_ = d.ensureGoCompatibleMagicEpisodeRules()
 
@@ -317,6 +318,29 @@ func (d *DB) ensurePlayHistoryProgressColumns() error {
 	}{
 		{name: "playback_position_ticks", ddl: "ALTER TABLE play_history ADD COLUMN playback_position_ticks INTEGER DEFAULT 0"},
 		{name: "playback_runtime_ticks", ddl: "ALTER TABLE play_history ADD COLUMN playback_runtime_ticks INTEGER DEFAULT 0"},
+	}
+	for _, c := range cols {
+		ok, err := hasSQLiteColumn(d.db, "play_history", c.name)
+		if err != nil {
+			return err
+		}
+		if ok {
+			continue
+		}
+		_, _ = d.db.Exec(c.ddl)
+	}
+	return nil
+}
+
+func (d *DB) ensurePlayHistoryJellyfinColumns() error {
+	if d == nil || d.db == nil {
+		return nil
+	}
+	cols := []struct {
+		name string
+		ddl  string
+	}{
+		{name: "playback_item_id", ddl: "ALTER TABLE play_history ADD COLUMN playback_item_id TEXT DEFAULT ''"},
 	}
 	for _, c := range cols {
 		ok, err := hasSQLiteColumn(d.db, "play_history", c.name)
