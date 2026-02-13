@@ -92,13 +92,6 @@ func embyResolveTMDBForDouban(database *db.DB, kind string, doubanID string, tit
 		return existing.TMDBID, nil
 	}
 
-	// Throttle failing lookups to avoid hammering TMDB.
-	if existing != nil && existing.TMDBID <= 0 && existing.LastTryAt > 0 {
-		if time.Since(time.UnixMilli(existing.LastTryAt)) < 12*time.Hour {
-			return 0, nil
-		}
-	}
-
 	q := strings.TrimSpace(title)
 	if q == "" && existing != nil {
 		q = strings.TrimSpace(existing.Title)
@@ -121,6 +114,16 @@ func embyResolveTMDBForDouban(database *db.DB, kind string, doubanID string, tit
 
 	q = embyNormalizeTitleForTMDB(k, q)
 
+	// Throttle failing lookups to avoid hammering TMDB, but allow retry when our query changes
+	// (e.g. after stripping "第X季/Season X" suffix) or when the stored year/title is stale.
+	if existing != nil && existing.TMDBID <= 0 && existing.LastTryAt > 0 {
+		sameTitle := strings.TrimSpace(existing.Title) == strings.TrimSpace(q)
+		sameYear := existing.Year == yy || yy <= 0 || existing.Year <= 0
+		if sameTitle && sameYear && time.Since(time.UnixMilli(existing.LastTryAt)) < 12*time.Hour {
+			return 0, nil
+		}
+	}
+
 	// Search TMDB once, then cache.
 	items, err := embyTMDBSearchMulti(database, q)
 	if err != nil {
@@ -141,7 +144,8 @@ func embyResolveTMDBForDouban(database *db.DB, kind string, doubanID string, tit
 		if it.MediaType != k {
 			continue
 		}
-		if yy > 0 && it.Year > 0 && yy != it.Year {
+		// First pass: strict year match when we have a year (if TMDB doesn't return a year, don't accept it here).
+		if yy > 0 && yy != it.Year {
 			continue
 		}
 		best = it.ID
