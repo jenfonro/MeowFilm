@@ -55,43 +55,6 @@ func smartComparePriorityMatch(a smartPriorityMatch, b smartPriorityMatch) int {
 	return len(a.Indices) - len(b.Indices)
 }
 
-type smartMagicRule struct {
-	Re      *regexp.Regexp
-	Replace string
-}
-
-func smartNormalizeRegexText(text string) string {
-	s := text
-	if s == "" {
-		return ""
-	}
-
-	allowed := func(b byte) bool {
-		switch b {
-		case 'd', 'D', 's', 'S', 'w', 'W', 'b', 'B',
-			'.', '(', ')', '[', ']', '{', '}', '+', '*', '?', '^', '$', '|',
-			'\\', '-', '_', '/', '"':
-			return true
-		default:
-			return false
-		}
-	}
-
-	in := []byte(s)
-	out := make([]byte, 0, len(in))
-	for i := 0; i < len(in); i++ {
-		// pattern: \\X
-		if in[i] == '\\' && i+2 < len(in) && in[i+1] == '\\' && allowed(in[i+2]) {
-			out = append(out, '\\')
-			// skip one extra backslash (keep X as-is)
-			i++
-			continue
-		}
-		out = append(out, in[i])
-	}
-	return string(out)
-}
-
 func smartDecodeEpisodeRule(raw string) (pattern string, replace string, flags string) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
@@ -105,7 +68,7 @@ func smartDecodeEpisodeRule(raw string) (pattern string, replace string, flags s
 			Flags   string `json:"flags"`
 		}
 		if err := json.Unmarshal([]byte(s), &obj); err == nil && strings.TrimSpace(obj.Pattern) != "" {
-			return smartNormalizeRegexText(strings.TrimSpace(obj.Pattern)), obj.Replace, strings.TrimSpace(obj.Flags)
+			return strings.TrimSpace(obj.Pattern), obj.Replace, strings.TrimSpace(obj.Flags)
 		}
 	}
 	// /pattern/flags
@@ -115,23 +78,11 @@ func smartDecodeEpisodeRule(raw string) (pattern string, replace string, flags s
 			p := strings.TrimSpace(s[1:last])
 			f := strings.TrimSpace(s[last+1:])
 			if p != "" {
-				return smartNormalizeRegexText(p), "", f
+				return p, "", f
 			}
 		}
 	}
-	return smartNormalizeRegexText(s), "", ""
-}
-
-func smartRewriteUnsupportedRegexSyntax(pattern string) string {
-	p := pattern
-	if p == "" {
-		return ""
-	}
-	// Go (RE2) doesn't support lookahead/lookbehind. Emulate the common `(?!\d)` guard used
-	// in user rules to mean "not followed by a digit".
-	p = strings.ReplaceAll(p, `(?!\d)`, `(?:$|\D)`)
-	p = strings.ReplaceAll(p, `(?!\\d)`, `(?:$|\\D)`)
-	return p
+	return s, "", ""
 }
 
 func smartNormalizeReplaceTemplate(replaceRaw string) string {
@@ -141,87 +92,6 @@ func smartNormalizeReplaceTemplate(replaceRaw string) string {
 	}
 	re := regexp.MustCompile(`\\(\d+)`)
 	return re.ReplaceAllString(replaceRaw, `$$$1`)
-}
-
-func smartCompileMagicEpisodeRules(database *db.DB) []smartMagicRule {
-	raw := parseJSONStringArray(database.GetSetting("magic_episode_rules"))
-	out := make([]smartMagicRule, 0, len(raw))
-	for _, row := range raw {
-		p, rep, flags := smartDecodeEpisodeRule(row)
-		p = smartRewriteUnsupportedRegexSyntax(p)
-		if strings.TrimSpace(p) == "" {
-			continue
-		}
-		f := flags
-		if f == "" {
-			f = "i"
-		}
-		// go regex doesn't support all JS flags; keep i only.
-		if strings.Contains(f, "g") {
-			f = strings.ReplaceAll(f, "g", "")
-		}
-		if strings.Contains(f, "m") {
-			// Go is multiline by default for ^/$? Not exactly; ignore.
-			f = strings.ReplaceAll(f, "m", "")
-		}
-		if strings.Contains(f, "s") {
-			// dotall unsupported by flags; ignore.
-			f = strings.ReplaceAll(f, "s", "")
-		}
-		if strings.Contains(f, "i") {
-			// Go uses (?i)
-			p = "(?i)" + p
-		}
-		re, err := regexp.Compile(p)
-		if err != nil || re == nil {
-			continue
-		}
-		out = append(out, smartMagicRule{
-			Re:      re,
-			Replace: smartNormalizeReplaceTemplate(rep),
-		})
-	}
-	return out
-}
-
-func smartCompileCleanRegexRules(database *db.DB) []*regexp.Regexp {
-	raw := parseJSONStringArray(database.GetSetting("magic_episode_clean_regex_rules"))
-	out := make([]*regexp.Regexp, 0, len(raw))
-	for _, row := range raw {
-		pat, _, flags := smartDecodeEpisodeRule(row)
-		pat = smartRewriteUnsupportedRegexSyntax(pat)
-		if strings.TrimSpace(pat) == "" {
-			continue
-		}
-		if flags == "" {
-			flags = "i"
-		}
-		if strings.Contains(flags, "i") {
-			pat = "(?i)" + pat
-		}
-		re, err := regexp.Compile(pat)
-		if err != nil || re == nil {
-			continue
-		}
-		out = append(out, re)
-	}
-	return out
-}
-
-func smartCleanMagicEpisodeText(text string, cleanRules []*regexp.Regexp) string {
-	s := strings.TrimSpace(text)
-	if s == "" || len(cleanRules) == 0 {
-		return s
-	}
-	out := s
-	for _, re := range cleanRules {
-		if re == nil {
-			continue
-		}
-		out = re.ReplaceAllString(out, "")
-	}
-	out = regexp.MustCompile(`\s+`).ReplaceAllString(out, " ")
-	return strings.TrimSpace(out)
 }
 
 func smartParseChineseNumeralToInt(text string) int {
@@ -336,99 +206,6 @@ type smartSeasonEpisode struct {
 	Episode int
 }
 
-func smartExtractSeasonEpisodeFromText(text string, rules []smartMagicRule, cleanRules []*regexp.Regexp) smartSeasonEpisode {
-	s := smartCleanMagicEpisodeText(text, cleanRules)
-	if s == "" || len(rules) == 0 {
-		return smartSeasonEpisode{Season: 0, Episode: 0}
-	}
-	for i := 0; i < len(rules); i++ {
-		r := rules[i]
-		if r.Re == nil {
-			continue
-		}
-		m := r.Re.FindStringSubmatch(s)
-		if m == nil {
-			continue
-		}
-		if strings.TrimSpace(r.Replace) != "" {
-			normalized := ""
-			func() {
-				defer func() { _ = recover() }()
-				normalized = r.Re.ReplaceAllString(s, r.Replace)
-			}()
-			mm := regexp.MustCompile(`(?i)(?:S(\d{1,2}))?\s*E(\d{1,3})`).FindStringSubmatch(normalized)
-			if len(mm) >= 3 && mm[2] != "" {
-				season := 0
-				if mm[1] != "" {
-					if n := intFromDigits(mm[1]); n >= 0 && n <= 99 {
-						season = n
-					}
-				}
-				episode := intFromDigits(mm[2])
-				if episode >= 1 && episode <= 99999 {
-					return smartSeasonEpisode{Season: season, Episode: episode}
-				}
-			}
-		}
-
-		seasonFrom := func(val string) int {
-			sm := regexp.MustCompile(`(?i)S(\d{1,2})`).FindStringSubmatch(val)
-			if len(sm) >= 2 && sm[1] != "" {
-				if n := intFromDigits(sm[1]); n >= 0 && n <= 99 {
-					return n
-				}
-			}
-			return 0
-		}
-		picked := ""
-		if len(m) > 2 && m[2] != "" {
-			picked = m[2]
-		} else if len(m) > 1 && m[1] != "" {
-			picked = m[1]
-		} else {
-			picked = m[0]
-		}
-		season := seasonFrom(func() string {
-			if len(m) > 1 {
-				return m[1]
-			}
-			return ""
-		}())
-		if season == 0 {
-			season = seasonFrom(picked)
-		}
-		if season == 0 {
-			season = seasonFrom(m[0])
-		}
-		digits := regexp.MustCompile(`\D+`).ReplaceAllString(strings.TrimSpace(picked), "")
-		if digits != "" {
-			episode := intFromDigits(digits)
-			if episode >= 1 && episode <= 99999 {
-				return smartSeasonEpisode{Season: season, Episode: episode}
-			}
-			continue
-		}
-		cn := regexp.MustCompile(`第\s*([一二三四五六七八九十百千两零〇万]{1,16})\s*(?:集|话|回|期)`).FindStringSubmatch(picked)
-		if len(cn) >= 2 && cn[1] != "" {
-			episode := smartParseChineseNumeralToInt(cn[1])
-			if episode >= 1 && episode <= 99999 {
-				return smartSeasonEpisode{Season: season, Episode: episode}
-			}
-		}
-	}
-	return smartSeasonEpisode{Season: 0, Episode: 0}
-}
-
-func smartExtractSeasonEpisodeFromCandidates(candidates []string, rules []smartMagicRule, cleanRules []*regexp.Regexp) smartSeasonEpisode {
-	for i := 0; i < len(candidates); i++ {
-		r := smartExtractSeasonEpisodeFromText(candidates[i], rules, cleanRules)
-		if r.Episode > 0 {
-			return r
-		}
-	}
-	return smartSeasonEpisode{Season: 0, Episode: 0}
-}
-
 func smartExtractRawNamesFromEpisodeURL(episodeURL string) []string {
 	raw := episodeURL
 	if strings.TrimSpace(raw) == "" {
@@ -477,80 +254,6 @@ func smartExtractRawNamesFromEpisodeURL(episodeURL string) []string {
 	return out
 }
 
-func smartMatchesAnyMagicRule(text string, rules []smartMagicRule) bool {
-	s := normalizeForMagic(text)
-	if s == "" || len(rules) == 0 {
-		return false
-	}
-	for _, r := range rules {
-		if r.Re == nil {
-			continue
-		}
-		if r.Re.MatchString(s) {
-			return true
-		}
-	}
-	sNoSpace := regexp.MustCompile(`\s+`).ReplaceAllString(s, "")
-	if sNoSpace != "" && sNoSpace != s {
-		for _, r := range rules {
-			if r.Re == nil {
-				continue
-			}
-			if r.Re.MatchString(sNoSpace) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func normalizeForMagic(input string) string {
-	raw := input
-	if raw == "" {
-		return ""
-	}
-	out := strings.TrimSpace(raw)
-	out = strings.Map(func(r rune) rune {
-		switch r {
-		case '０':
-			return '0'
-		case '１':
-			return '1'
-		case '２':
-			return '2'
-		case '３':
-			return '3'
-		case '４':
-			return '4'
-		case '５':
-			return '5'
-		case '６':
-			return '6'
-		case '７':
-			return '7'
-		case '８':
-			return '8'
-		case '９':
-			return '9'
-		default:
-			return r
-		}
-	}, out)
-	out = regexp.MustCompile(`\s+`).ReplaceAllString(out, " ")
-	return out
-}
-
-func smartIsInformativeEpisodeText(text string, rules []smartMagicRule) bool {
-	s := strings.TrimSpace(text)
-	if s == "" {
-		return false
-	}
-	if len(rules) == 0 {
-		return true
-	}
-	return smartMatchesAnyMagicRule(s, rules)
-}
-
 func smartBuildCandidateLowerText(texts []string) string {
 	seen := map[string]bool{}
 	out := make([]string, 0, len(texts))
@@ -569,16 +272,9 @@ func smartBuildCandidateLowerText(texts []string) string {
 	return strings.TrimSpace(strings.Join(out, " "))
 }
 
-func smartExtractEpisodeCandidateTexts(ep embyCatEpisode, rules []smartMagicRule) []string {
+func smartExtractEpisodeCandidateTexts(ep embyCatEpisode) []string {
 	rawNames := smartExtractRawNamesFromEpisodeURL(ep.URL)
 	displayName := strings.TrimSpace(ep.Name)
-	rawLooksUseful := false
-	for _, n := range rawNames {
-		if smartIsInformativeEpisodeText(n, rules) {
-			rawLooksUseful = true
-			break
-		}
-	}
 	out := make([]string, 0, 6)
 	push := func(s string) {
 		v := strings.TrimSpace(s)
@@ -592,59 +288,13 @@ func smartExtractEpisodeCandidateTexts(ep embyCatEpisode, rules []smartMagicRule
 		}
 		out = append(out, v)
 	}
-	if !rawLooksUseful && displayName != "" {
+	if displayName != "" {
 		push(displayName)
 	}
 	for _, n := range rawNames {
 		push(n)
 	}
-	if rawLooksUseful && displayName != "" {
-		push(displayName)
-	}
 	return out
-}
-
-func smartParseLooseSeasonEpisodeFromText(text string) smartSeasonEpisode {
-	s := strings.TrimSpace(text)
-	if s == "" {
-		return smartSeasonEpisode{Season: 0, Episode: 0}
-	}
-	if m := regexp.MustCompile(`(?i)(?:S(\d{1,2}))?\s*E(\d{1,5})`).FindStringSubmatch(s); len(m) >= 3 && m[2] != "" {
-		season := 0
-		if m[1] != "" {
-			if n := intFromDigits(m[1]); n >= 0 && n <= 99 {
-				season = n
-			}
-		}
-		episode := intFromDigits(m[2])
-		if episode >= 1 && episode <= 99999 {
-			return smartSeasonEpisode{Season: season, Episode: episode}
-		}
-	}
-	if m := regexp.MustCompile(`第\s*(\d{1,5})\s*(?:集|话|回)`).FindStringSubmatch(s); len(m) >= 2 && m[1] != "" {
-		episode := intFromDigits(m[1])
-		if episode >= 1 && episode <= 99999 {
-			return smartSeasonEpisode{Season: 0, Episode: episode}
-		}
-	}
-	if m := regexp.MustCompile(`(?i)(?:ep|episode|e)\s*(\d{1,5})`).FindStringSubmatch(s); len(m) >= 2 && m[1] != "" {
-		episode := intFromDigits(m[1])
-		if episode >= 1 && episode <= 99999 {
-			return smartSeasonEpisode{Season: 0, Episode: episode}
-		}
-	}
-	groups := regexp.MustCompile(`\d{1,5}`).FindAllString(s, -1)
-	for i := len(groups) - 1; i >= 0; i-- {
-		n := intFromDigits(groups[i])
-		if n <= 0 || n > 99999 {
-			continue
-		}
-		if n >= 1900 && n <= 2100 {
-			continue
-		}
-		return smartSeasonEpisode{Season: 0, Episode: n}
-	}
-	return smartSeasonEpisode{Season: 0, Episode: 0}
 }
 
 type smartPlaybackSettings struct {
@@ -1303,7 +953,7 @@ func smartNormalizeMaybeGlobalSeasonEpisode(seasons []embyTMDBSeason, se smartSe
 	return smartSeasonEpisode{Season: s, Episode: mapped.Episode}
 }
 
-func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSource, tmdbSeasons []embyTMDBSeason, tmdbHasMultiSeason bool, settings smartPlaybackSettings, rules []smartMagicRule, cleanRules []*regexp.Regexp) *smartDetailCacheEntry {
+func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSource, tmdbSeasons []embyTMDBSeason, tmdbHasMultiSeason bool, settings smartPlaybackSettings, rawCleanRules []string, rawEpisodeRules []string) *smartDetailCacheEntry {
 	key := smartBuildSourceKey(src)
 	if key == "" {
 		return nil
@@ -1382,7 +1032,7 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 				if strings.TrimSpace(ep.URL) == "" {
 					continue
 				}
-				texts := smartExtractEpisodeCandidateTexts(ep, rules)
+					texts := smartExtractEpisodeCandidateTexts(ep)
 				primary := ""
 				if len(texts) > 0 {
 					primary = texts[0]
@@ -1395,12 +1045,25 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 					rawLower = strings.ToLower(strings.TrimSpace(primary))
 				}
 
-				var match smartSeasonEpisode
-				if len(rules) > 0 {
-					match = smartExtractSeasonEpisodeFromCandidates(texts, rules, cleanRules)
-				} else {
-					match = smartParseLooseSeasonEpisodeFromText(primary)
-				}
+					if len(rawCleanRules) == 0 || len(rawEpisodeRules) == 0 {
+						entry.FailCount++
+						entry.LastError = "missing magic regex rules"
+						entry.NextRetryAt = time.Now().Add(10 * time.Minute)
+						smartDetailCache.Lock()
+						smartDetailCache.M[key] = entry
+						smartDetailCache.Unlock()
+						return
+					}
+					match, err := jsMagicEpisodeExtractFromCandidates(texts, rawCleanRules, rawEpisodeRules)
+					if err != nil {
+						entry.FailCount++
+						entry.LastError = "js regex error"
+						entry.NextRetryAt = time.Now().Add(10 * time.Minute)
+						smartDetailCache.Lock()
+						smartDetailCache.M[key] = entry
+						smartDetailCache.Unlock()
+						return
+					}
 				match = smartNormalizeMaybeGlobalSeasonEpisode(tmdbSeasons, match)
 				seasonNo := match.Season
 				epNo := match.Episode
@@ -1475,7 +1138,7 @@ type smartPickResult struct {
 	Headers map[string]string
 }
 
-func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser string, src smartSource, tmdbSeasons []embyTMDBSeason, tmdbHasMultiSeason bool, preferSeasonNo int, want int, settings smartPlaybackSettings, rules []smartMagicRule, cleanRules []*regexp.Regexp, requireSeasoned bool) *smartPickResult {
+func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser string, src smartSource, tmdbSeasons []embyTMDBSeason, tmdbHasMultiSeason bool, preferSeasonNo int, want int, settings smartPlaybackSettings, rawCleanRules []string, rawEpisodeRules []string, requireSeasoned bool) *smartPickResult {
 	siteKey := strings.TrimSpace(src.SiteKey)
 	spiderApi := strings.TrimSpace(src.SpiderAPI)
 	videoId := strings.TrimSpace(src.VideoID)
@@ -1484,7 +1147,7 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 	}
 	searchSeasonHint := smartExtractSeasonHintFromSource(src)
 
-	cache := smartLoadOrBuildDetailCache(database, apiBase, src, tmdbSeasons, tmdbHasMultiSeason, settings, rules, cleanRules)
+	cache := smartLoadOrBuildDetailCache(database, apiBase, src, tmdbSeasons, tmdbHasMultiSeason, settings, rawCleanRules, rawEpisodeRules)
 	if cache == nil || !cache.OK {
 		return nil
 	}
@@ -1647,8 +1310,11 @@ func smartResolvePlaybackFromTMDB(database *db.DB, u *embyUser, req smartPlaybac
 	}
 
 	settings := smartLoadPlaybackSettings(database)
-	rules := smartCompileMagicEpisodeRules(database)
-	cleanRules := smartCompileCleanRegexRules(database)
+	rawEpisodeRules := parseJSONStringArray(database.GetSetting("magic_episode_rules"))
+	rawCleanRules := parseJSONStringArray(database.GetSetting("magic_episode_clean_regex_rules"))
+	if len(rawEpisodeRules) == 0 || len(rawCleanRules) == 0 {
+		return "", nil, errors.New("magic regex rules 未设置")
+	}
 
 	// Search sources and build candidates list.
 	aggregated, orderMap := smartBuildAggregatedSources(database, apiBase, searchTitle, u)
@@ -1685,10 +1351,10 @@ func smartResolvePlaybackFromTMDB(database *db.DB, u *embyUser, req smartPlaybac
 		launch := func(idx int) {
 			src := candidates[idx]
 			go func() {
-				res := smartFetchDetailAndPickAndPlay(database, apiBase, tvUser, src, tmdbSeasons, tmdbHasMultiSeason, preferSeasonNo, want, settings, rules, cleanRules, requireSeasoned)
-				results <- settled{Idx: idx, Res: res}
-			}()
-		}
+					res := smartFetchDetailAndPickAndPlay(database, apiBase, tvUser, src, tmdbSeasons, tmdbHasMultiSeason, preferSeasonNo, want, settings, rawCleanRules, rawEpisodeRules, requireSeasoned)
+					results <- settled{Idx: idx, Res: res}
+				}()
+			}
 
 		for cursor < len(candidates) && inFlight < poolSize {
 			launch(cursor)

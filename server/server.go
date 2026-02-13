@@ -42,6 +42,9 @@ func New(cfg Config) (*Server, error) {
 	mux := http.NewServeMux()
 
 	mux.Handle("/api/", routes.APIHandler(database, authMw))
+	// Debug endpoints (enabled only when MEOWFILM_DEBUG=1).
+	mux.Handle("/listdebug", routes.RegexListDebugHandler(database))
+	mux.Handle("/searchdebug", routes.RegexSearchDebugHandler(database))
 	embyAPI := routes.EmbyHandler(database)
 	// Emby is the canonical API surface; keep a compatible legacy alias path.
 	mux.Handle("/emby/", embyAPI)

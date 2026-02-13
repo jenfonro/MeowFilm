@@ -63,8 +63,8 @@ if [[ "${EMBED_COMMITS}" == "1" ]] && command -v git >/dev/null 2>&1; then
 fi
 
 if [[ -n "${LDFLAGS}" ]]; then
-  go build -ldflags "${LDFLAGS}" -o "${BUILD_DIR}/meowfilm" .
+  CGO_ENABLED=1 go build -ldflags "${LDFLAGS}" -o "${BUILD_DIR}/meowfilm" .
 else
-  go build -o "${BUILD_DIR}/meowfilm" .
+  CGO_ENABLED=1 go build -o "${BUILD_DIR}/meowfilm" .
 fi
 echo "built: ${BUILD_DIR}/meowfilm"

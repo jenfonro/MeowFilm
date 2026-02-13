@@ -26,4 +26,7 @@ fi
 
 (cd "${FRONTEND_DIR}" && npm ci && npm run build)
 
+# QuickJS uses cgo.
+export CGO_ENABLED=1
+
 exec "${SCRIPT_DIR}/build.sh"
