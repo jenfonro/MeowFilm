@@ -1372,7 +1372,11 @@ func smartResolvePlaybackFromTMDB(database *db.DB, u *embyUser, req smartPlaybac
 	debugLog := embyDebugLogEnabled()
 
 	tryPickOnce := func(requireSeasoned bool) *smartPickResult {
-		bestOverall := (*smartPickResult)(nil)
+		hasPanOrder := len(settings.PanTokenOrderLower) > 0
+		bestPreferredNoHeaders := (*smartPickResult)(nil)
+		bestOtherNoHeaders := (*smartPickResult)(nil)
+		bestPreferredWithHeaders := (*smartPickResult)(nil)
+		bestOtherWithHeaders := (*smartPickResult)(nil)
 		poolSize := concurrency
 		if poolSize < 1 {
 			poolSize = 1
@@ -1417,11 +1421,30 @@ func smartResolvePlaybackFromTMDB(database *db.DB, u *embyUser, req smartPlaybac
 			}
 			inFlight--
 			if got.Res != nil && strings.TrimSpace(got.Res.PlayURL) != "" {
+				isPreferredPan := hasPanOrder && got.Res.Cand.PanTokenIdx >= 0
 				if len(got.Res.Headers) == 0 {
-					return got.Res
+					if isPreferredPan {
+						if bestPreferredNoHeaders == nil || smartCompareSmartMatch(bestPreferredNoHeaders.Cand, got.Res.Cand, tmdbHasMultiSeason, preferSeasonNo, settings) > 0 {
+							bestPreferredNoHeaders = got.Res
+						}
+						// If we have a clear season fit, return early; otherwise keep collecting preferred results
+						// to reduce the chance of picking a wrong-season source just because it returned first.
+						if tmdbHasMultiSeason && preferSeasonNo > 0 && (got.Res.Cand.MatchSeason == preferSeasonNo || got.Res.Cand.SearchSeasonHint == preferSeasonNo) {
+							return bestPreferredNoHeaders
+						}
+					}
+					if bestOtherNoHeaders == nil || smartCompareSmartMatch(bestOtherNoHeaders.Cand, got.Res.Cand, tmdbHasMultiSeason, preferSeasonNo, settings) > 0 {
+						bestOtherNoHeaders = got.Res
+					}
 				} else {
-					if bestOverall == nil || smartCompareSmartMatch(bestOverall.Cand, got.Res.Cand, tmdbHasMultiSeason, preferSeasonNo, settings) > 0 {
-						bestOverall = got.Res
+					if isPreferredPan {
+						if bestPreferredWithHeaders == nil || smartCompareSmartMatch(bestPreferredWithHeaders.Cand, got.Res.Cand, tmdbHasMultiSeason, preferSeasonNo, settings) > 0 {
+							bestPreferredWithHeaders = got.Res
+						}
+					} else {
+						if bestOtherWithHeaders == nil || smartCompareSmartMatch(bestOtherWithHeaders.Cand, got.Res.Cand, tmdbHasMultiSeason, preferSeasonNo, settings) > 0 {
+							bestOtherWithHeaders = got.Res
+						}
 					}
 				}
 			}
@@ -1431,7 +1454,16 @@ func smartResolvePlaybackFromTMDB(database *db.DB, u *embyUser, req smartPlaybac
 				inFlight++
 			}
 		}
-		return bestOverall
+		if bestPreferredNoHeaders != nil {
+			return bestPreferredNoHeaders
+		}
+		if bestOtherNoHeaders != nil {
+			return bestOtherNoHeaders
+		}
+		if bestPreferredWithHeaders != nil {
+			return bestPreferredWithHeaders
+		}
+		return bestOtherWithHeaders
 	}
 
 	best := tryPickOnce(true)
