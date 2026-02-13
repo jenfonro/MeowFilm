@@ -31,10 +31,6 @@ jobs:
             goarch: amd64
             runner: ubuntu-22.04
             cc: gcc
-          - goos: linux
-            goarch: arm64
-            runner: ubuntu-22.04
-            cc: aarch64-linux-gnu-gcc
 
     steps:
       - uses: actions/checkout@v4
