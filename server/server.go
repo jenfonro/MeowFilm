@@ -42,8 +42,10 @@ func New(cfg Config) (*Server, error) {
 	mux := http.NewServeMux()
 
 	mux.Handle("/api/", routes.APIHandler(database, authMw))
-	jellyfinAPI := routes.JellyfinHandler(database)
-	mux.Handle("/jellyfin/", jellyfinAPI)
+	embyAPI := routes.EmbyHandler(database)
+	// Emby is the canonical API surface; keep a compatible legacy alias path.
+	mux.Handle("/emby/", embyAPI)
+	mux.Handle("/jellyfin/", embyAPI)
 	dashboardAPI := routes.DashboardHandler(database, authMw)
 	staticHandler := static.Handler(authMw)
 	mux.Handle("/dashboard/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
