@@ -188,6 +188,9 @@ func handleAPITMDBSearch(w http.ResponseWriter, r *http.Request, database *db.DB
 		region = "CN"
 	}
 	includeAdult := strings.TrimSpace(database.GetSetting("tmdb_include_adult")) == "1"
+	lite := strings.TrimSpace(r.URL.Query().Get("lite")) == "1" ||
+		strings.TrimSpace(r.URL.Query().Get("simple")) == "1" ||
+		strings.TrimSpace(r.URL.Query().Get("noDetail")) == "1"
 
 	apiBase := resolveTMDBAPIBase(database)
 	u, _ := url.Parse(joinTMDBAPI(apiBase, "search/multi"))
@@ -292,6 +295,24 @@ func handleAPITMDBSearch(w http.ResponseWriter, r *http.Request, database *db.DB
 			Badge:     badge,
 			SeasonCnt: 0,
 		})
+	}
+
+	if lite {
+		list := make([]map[string]any, 0, len(items))
+		for _, it := range items {
+			row := map[string]any{
+				"id":        it.ID,
+				"tmdbId":    it.TMDBID,
+				"mediaType": it.MediaType,
+				"name":      it.Name,
+				"pic":       it.Pic,
+				"year":      it.Year,
+				"badge":     strings.TrimSpace(it.Badge),
+			}
+			list = append(list, row)
+		}
+		writeJSON(w, 200, map[string]any{"success": true, "list": list})
+		return
 	}
 
 	fetchTVBadge := func(id int) (badge string, seasonCount int, _ bool) {
