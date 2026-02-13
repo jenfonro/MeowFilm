@@ -38,7 +38,7 @@ func embyDoubanAPIBase(database *db.DB) (base string, proxyBase string) {
 		return "https://m.douban.com", "https://cors-anywhere.com/"
 	case "custom":
 		if custom != "" {
-			return strings.TrimRight(custom, "/"), ""
+			return "https://m.douban.com", strings.TrimSpace(custom)
 		}
 		return "https://m.douban.com", ""
 	default:

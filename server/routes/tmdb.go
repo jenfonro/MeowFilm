@@ -279,6 +279,8 @@ func handleAPITMDBSearch(w http.ResponseWriter, r *http.Request, database *db.DB
 		badge := ""
 		if typ == "movie" {
 			badge = "电影"
+		} else if typ == "tv" {
+			badge = "剧集"
 		}
 		items = append(items, outItem{
 			ID:        typ + ":" + strconv.Itoa(it.ID),
@@ -300,8 +302,8 @@ func handleAPITMDBSearch(w http.ResponseWriter, r *http.Request, database *db.DB
 		now := time.Now().Unix()
 		if hit, ok := tmdbDetailCacheGet(cacheKey, now); ok && hit != nil {
 			if b, ok := hit["badge"].(string); ok && strings.TrimSpace(b) != "" {
-				if seasons, ok := hit["seasons"].([]any); ok && len(seasons) > 0 {
-					for _, v := range seasons {
+				if seasonsAny, ok := hit["seasons"].([]any); ok && len(seasonsAny) > 0 {
+					for _, v := range seasonsAny {
 						m, _ := v.(map[string]any)
 						if m == nil {
 							continue
@@ -323,6 +325,7 @@ func handleAPITMDBSearch(w http.ResponseWriter, r *http.Request, database *db.DB
 				return strings.TrimSpace(b), seasonCount, true
 			}
 		}
+
 		u, _ := url.Parse(joinTMDBAPI(apiBase, "tv/"+strconv.Itoa(id)))
 		q := u.Query()
 		if language != "" {
@@ -341,6 +344,7 @@ func handleAPITMDBSearch(w http.ResponseWriter, r *http.Request, database *db.DB
 		if v4 != "" {
 			req.Header.Set("Authorization", "Bearer "+v4)
 		}
+
 		resp, err := client.Do(req)
 		if err != nil {
 			return "", 0, false
@@ -349,6 +353,7 @@ func handleAPITMDBSearch(w http.ResponseWriter, r *http.Request, database *db.DB
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return "", 0, false
 		}
+
 		var d tmdbTVDetailsResponse
 		if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
 			return "", 0, false
@@ -432,6 +437,7 @@ func handleAPITMDBSearch(w http.ResponseWriter, r *http.Request, database *db.DB
 			}
 		}
 		tmdbDetailCacheSet(cacheKey, out, ttl, now)
+
 		return strings.TrimSpace(badge), seasonCount, true
 	}
 
@@ -456,8 +462,6 @@ func handleAPITMDBSearch(w http.ResponseWriter, r *http.Request, database *db.DB
 				if sc > 0 {
 					items[idx].SeasonCnt = sc
 				}
-			} else if items[idx].Badge == "" {
-				items[idx].Badge = "剧集"
 			}
 		}(i)
 	}
