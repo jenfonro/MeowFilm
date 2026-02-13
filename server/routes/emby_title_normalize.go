@@ -6,9 +6,9 @@ import (
 )
 
 var (
-	embyReCNSeasonSuffix = regexp.MustCompile(`(?i)\s*[（(\[]?\s*第\s*\d+\s*季\s*[）)\]]?\s*$`)
-	embyReENSeasonSuffix = regexp.MustCompile(`(?i)\s*[（(\[]?\s*season\s*\d+\s*[）)\]]?\s*$`)
-	embyReSSeasonSuffix  = regexp.MustCompile(`(?i)\s*[（(\[]?\s*s\s*\d+\s*[）)\]]?\s*$`)
+	embyReCNSeasonSuffix = regexp.MustCompile(`(?i)\s*[（(\[]?\s*第\s*(?:\d+|[一二三四五六七八九十百零〇两]+)\s*季\s*[）)\]]?\s*$`)
+	embyReENSeasonSuffix = regexp.MustCompile(`(?i)\s*[（(\[]?\s*season\s*(?:\d+|[ivxlcdm]+)\s*[）)\]]?\s*$`)
+	embyReSSeasonSuffix  = regexp.MustCompile(`(?i)\s*[（(\[]?\s*s\s*(?:\d+|[ivxlcdm]+)\s*[）)\]]?\s*$`)
 )
 
 func embyNormalizeTitleForTMDB(kind string, title string) string {
@@ -30,4 +30,3 @@ func embyNormalizeTitleForTMDB(kind string, title string) string {
 	}
 	return s
 }
-
