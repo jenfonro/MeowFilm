@@ -22,23 +22,19 @@ env:
 jobs:
   build:
     name: build-${{ matrix.goos }}-${{ matrix.goarch }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - goos: linux
             goarch: amd64
-            zig_target: x86_64-linux-gnu
+            runner: ubuntu-22.04
+            cc: gcc
           - goos: linux
             goarch: arm64
-            zig_target: aarch64-linux-gnu
-          - goos: windows
-            goarch: amd64
-            zig_target: x86_64-windows-gnu
-          - goos: windows
-            goarch: arm64
-            zig_target: aarch64-windows-gnu
+            runner: ubuntu-22.04
+            cc: aarch64-linux-gnu-gcc
 
     steps:
       - uses: actions/checkout@v4
@@ -56,6 +52,14 @@ jobs:
       - uses: mlugg/setup-zig@v1
         with:
           version: 0.13.0
+
+      - name: Install linux arm64 cross compiler
+        if: matrix.goos == 'linux' && matrix.goarch == 'arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
 
       - name: Checkout frontend
         uses: actions/checkout@v4
@@ -105,7 +109,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "1"
-          CC: zig cc -target ${{ matrix.zig_target }}
+          CC: ${{ matrix.cc }}
         run: |
           set -euo pipefail
           mkdir -p dist
