@@ -40,6 +40,20 @@ type tmdbSearchMovieResponse struct {
 	} `json:"results"`
 }
 
+type tmdbDiscoverResponse struct {
+	Page       int `json:"page"`
+	TotalPages int `json:"total_pages"`
+	Total      int `json:"total_results"`
+	Results    []struct {
+		ID           int    `json:"id"`
+		Title        string `json:"title"`          // movie
+		Name         string `json:"name"`           // tv
+		PosterPath   string `json:"poster_path"`    // both
+		ReleaseDate  string `json:"release_date"`   // movie
+		FirstAirDate string `json:"first_air_date"` // tv
+	} `json:"results"`
+}
+
 type embyTMDBTVDetail struct {
 	ID       int
 	Title    string
@@ -449,6 +463,116 @@ func embyTMDBSearchMulti(database *db.DB, query string) ([]embyTMDBSearchItem, e
 	}
 
 	return items, nil
+}
+
+func embyTMDBDiscover(database *db.DB, mediaType string, yearStart int, yearEnd int, sortBy string, page int) (items []embyTMDBSearchItem, total int, err error) {
+	mt := strings.TrimSpace(strings.ToLower(mediaType))
+	if mt != "movie" && mt != "tv" {
+		return nil, 0, errors.New("invalid mediaType")
+	}
+	if yearStart <= 0 {
+		return nil, 0, errors.New("invalid year")
+	}
+	if yearEnd <= 0 {
+		yearEnd = yearStart
+	}
+	if yearEnd < yearStart {
+		yearStart, yearEnd = yearEnd, yearStart
+	}
+	if page <= 0 {
+		page = 1
+	}
+
+	client, v4, v3, lang, region, includeAdult := embyTMDBClient(database)
+	if v4 == "" && v3 == "" {
+		return nil, 0, errors.New("TMDB not configured")
+	}
+
+	sort := strings.TrimSpace(sortBy)
+	if sort == "" {
+		sort = "popularity.desc"
+	}
+
+	endpoint := "https://api.themoviedb.org/3/discover/" + mt
+	u, _ := url.Parse(endpoint)
+	params := u.Query()
+	params.Set("page", strconv.Itoa(page))
+	params.Set("include_adult", boolToStr(includeAdult))
+	params.Set("sort_by", sort)
+	if strings.TrimSpace(lang) != "" {
+		params.Set("language", strings.TrimSpace(lang))
+	}
+	if mt == "movie" {
+		if strings.TrimSpace(region) != "" {
+			params.Set("region", strings.TrimSpace(region))
+		}
+		if yearStart == yearEnd {
+			params.Set("primary_release_year", strconv.Itoa(yearStart))
+		} else {
+			params.Set("primary_release_date.gte", fmt.Sprintf("%04d-01-01", yearStart))
+			params.Set("primary_release_date.lte", fmt.Sprintf("%04d-12-31", yearEnd))
+		}
+	} else {
+		if yearStart == yearEnd {
+			params.Set("first_air_date_year", strconv.Itoa(yearStart))
+		} else {
+			params.Set("first_air_date.gte", fmt.Sprintf("%04d-01-01", yearStart))
+			params.Set("first_air_date.lte", fmt.Sprintf("%04d-12-31", yearEnd))
+		}
+	}
+	if v3 != "" {
+		params.Set("api_key", v3)
+	}
+	u.RawQuery = params.Encode()
+
+	req, _ := http.NewRequest(http.MethodGet, u.String(), nil)
+	req.Header.Set("Accept", "application/json")
+	if v4 != "" {
+		req.Header.Set("Authorization", "Bearer "+v4)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, 0, fmt.Errorf("tmdb http %d", resp.StatusCode)
+	}
+	var data tmdbDiscoverResponse
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, 0, err
+	}
+	out := make([]embyTMDBSearchItem, 0, len(data.Results))
+	for _, it := range data.Results {
+		if it.ID <= 0 {
+			continue
+		}
+		title := strings.TrimSpace(it.Title)
+		if mt == "tv" {
+			title = strings.TrimSpace(it.Name)
+		}
+		if title == "" {
+			continue
+		}
+		y := 0
+		date := strings.TrimSpace(it.ReleaseDate)
+		if mt == "tv" {
+			date = strings.TrimSpace(it.FirstAirDate)
+		}
+		if len(date) >= 4 {
+			if yy, err := strconv.Atoi(date[:4]); err == nil && yy > 0 {
+				y = yy
+			}
+		}
+		out = append(out, embyTMDBSearchItem{
+			ID:         it.ID,
+			MediaType:  mt,
+			Title:      title,
+			PosterPath: strings.TrimSpace(it.PosterPath),
+			Year:       y,
+		})
+	}
+	return out, data.Total, nil
 }
 
 func embyTMDBGetTVDetail(database *db.DB, tmdbID int) (*embyTMDBTVDetail, error) {

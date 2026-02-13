@@ -161,6 +161,14 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			kind = "movie"
 			category = "热门"
 			hotType = "全部"
+		} else if parentID == embyViewTMDBAnime {
+			kind = "tv"
+			category = "tv"
+			hotType = "tv_animation"
+		} else if parentID == embyViewTMDBShow {
+			kind = "tv"
+			category = "show"
+			hotType = "show"
 		} else {
 			embyWriteEmptyArrayOK(w)
 			return
@@ -318,20 +326,37 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		}
 		parent := embyQueryTrimCI(r, "ParentId")
 		searchTerm := embyQueryTrimCI(r, "SearchTerm")
+		includeItemTypes := embyQueryTrimCI(r, "IncludeItemTypes")
 		fieldsParam := embyQueryGetCI(r, "fields")
 		excludeLocationTypes := embyQueryTrimCI(r, "ExcludeLocationTypes")
 
-		if parent == embyViewTMDBMovies || parent == embyViewTMDBTV {
+		if parent == embyViewTMDBMovies || parent == embyViewTMDBTV || parent == embyViewTMDBAnime || parent == embyViewTMDBShow {
 			startIndex := embyQueryIntClamped(r, "StartIndex", 0, 0, 1<<30)
 			limit := embyQueryIntClamped(r, "Limit", 24, 1, 60)
 
-			kind := "movie"
-			category := "热门"
-			hotType := "全部"
-			if parent == embyViewTMDBTV {
+			kind := ""
+			category := ""
+			hotType := ""
+			switch parent {
+			case embyViewTMDBTV:
 				kind = "tv"
 				category = "tv"
 				hotType = "tv"
+			case embyViewTMDBMovies:
+				kind = "movie"
+				category = "热门"
+				hotType = "全部"
+			case embyViewTMDBAnime:
+				kind = "tv"
+				category = "tv"
+				hotType = "tv_animation"
+			case embyViewTMDBShow:
+				kind = "tv"
+				category = "show"
+				hotType = "show"
+			default:
+				embyNotFound(w)
+				return
 			}
 
 			out := embyBuildDoubanHotListItems(database, kind, category, hotType, startIndex, limit, serverID, parent)
@@ -340,7 +365,220 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 				embyDebugPrintf("[emby][debug] users.items empty parent=%q kind=%s start=%d limit=%d", parent, kind, startIndex, limit)
 			}
 
-			writeJSON(w, 200, embyPagedItems(out, startIndex, len(out)))
+			// Emby clients page based on TotalRecordCount; Douban doesn't provide a reliable total here.
+			// Use a "has more" hint when we return a full page.
+			total := startIndex + len(out)
+			if len(out) == limit {
+				total++
+			}
+			writeJSON(w, 200, embyPagedItems(out, startIndex, total))
+			return
+		}
+
+		// Library-style browsing (Filmly/Infuse/Jellyfin clients):
+		// /Users/{id}/Items?IncludeItemTypes=Movie,Series&SortBy=DateLastContentAdded&...
+		// We don't have a real library index, so expose a deterministic "virtual library" feed derived from our hot lists.
+		if parent == "" && searchTerm == "" {
+			startIndex := embyQueryIntClamped(r, "StartIndex", 0, 0, 1<<30)
+			limit := embyQueryIntClamped(r, "Limit", 24, 1, 100)
+			yearsParam := embyQueryTrimCI(r, "Years")
+			sortByParam := embyQueryTrimCI(r, "SortBy")
+
+			typesSet := map[string]struct{}{}
+			for _, p := range strings.Split(includeItemTypes, ",") {
+				t := strings.ToLower(strings.TrimSpace(p))
+				if t != "" {
+					typesSet[t] = struct{}{}
+				}
+			}
+			// Default to Movie+Series if not specified.
+			if len(typesSet) == 0 {
+				typesSet["movie"] = struct{}{}
+				typesSet["series"] = struct{}{}
+			}
+
+			// If the client applies a Year filter, use TMDB discover so the results actually reflect that year.
+			yearStart := 0
+			yearEnd := 0
+			if yearsParam != "" {
+				minY := 0
+				maxY := 0
+				for _, part := range strings.Split(yearsParam, ",") {
+					p := strings.TrimSpace(part)
+					if p == "" {
+						continue
+					}
+					y := intValStr(p)
+					if y <= 0 {
+						continue
+					}
+					if minY == 0 || y < minY {
+						minY = y
+					}
+					if maxY == 0 || y > maxY {
+						maxY = y
+					}
+				}
+				yearStart, yearEnd = minY, maxY
+			}
+
+			if yearStart > 0 {
+				tmdbSortMovie := "popularity.desc"
+				tmdbSortTV := "popularity.desc"
+				sb := strings.ToLower(strings.TrimSpace(sortByParam))
+				switch sb {
+				case "communityrating":
+					tmdbSortMovie = "vote_average.desc"
+					tmdbSortTV = "vote_average.desc"
+				case "productionyear", "premieredate":
+					tmdbSortMovie = "primary_release_date.desc"
+					tmdbSortTV = "first_air_date.desc"
+				case "datelastcontentadded":
+					tmdbSortMovie = "popularity.desc"
+					tmdbSortTV = "popularity.desc"
+				}
+
+				// TMDB discover uses 20 items/page. We may need to fetch multiple pages to cover StartIndex+Limit.
+				want := startIndex + limit
+				pages := want/20 + 1
+				if pages < 1 {
+					pages = 1
+				}
+				if pages > 5 {
+					pages = 5
+				}
+
+				var movies []embyTMDBSearchItem
+				var tvs []embyTMDBSearchItem
+				totalMovies := 0
+				totalTV := 0
+				if _, ok := typesSet["movie"]; ok {
+					for p := 1; p <= pages; p++ {
+						items, total, err := embyTMDBDiscover(database, "movie", yearStart, yearEnd, tmdbSortMovie, p)
+						if err != nil {
+							embyBadGateway(w, err)
+							return
+						}
+						if totalMovies == 0 {
+							totalMovies = total
+						}
+						movies = append(movies, items...)
+						if len(items) == 0 {
+							break
+						}
+					}
+				}
+				if _, ok := typesSet["series"]; ok {
+					for p := 1; p <= pages; p++ {
+						items, total, err := embyTMDBDiscover(database, "tv", yearStart, yearEnd, tmdbSortTV, p)
+						if err != nil {
+							embyBadGateway(w, err)
+							return
+						}
+						if totalTV == 0 {
+							totalTV = total
+						}
+						tvs = append(tvs, items...)
+						if len(items) == 0 {
+							break
+						}
+					}
+				}
+
+				combined := make([]map[string]any, 0, limit)
+				tmp := make([]map[string]any, 0, len(movies)+len(tvs))
+				for _, it := range movies {
+					base := embyBuildBaseItemFromSearch(it)
+					if base == nil {
+						continue
+					}
+					id, _ := base["Id"].(string)
+					embyEnsureInfuseItemFields(base, id, fieldsParam, serverID)
+					embyEnsureStandardItem(base, serverID)
+					tmp = append(tmp, base)
+				}
+				for _, it := range tvs {
+					base := embyBuildBaseItemFromSearch(it)
+					if base == nil {
+						continue
+					}
+					id, _ := base["Id"].(string)
+					embyEnsureInfuseItemFields(base, id, fieldsParam, serverID)
+					embyEnsureStandardItem(base, serverID)
+					tmp = append(tmp, base)
+				}
+
+				// Slice by StartIndex/Limit.
+				if startIndex < len(tmp) {
+					end := startIndex + limit
+					if end > len(tmp) {
+						end = len(tmp)
+					}
+					combined = tmp[startIndex:end]
+				}
+				combined = embyFilterItemsByExcludeLocationTypes(combined, excludeLocationTypes)
+
+				total := totalMovies + totalTV
+				if total <= 0 {
+					// Best-effort fallback.
+					total = startIndex + len(combined)
+					if len(combined) == limit {
+						total++
+					}
+				}
+				writeJSON(w, 200, embyPagedItems(combined, startIndex, total))
+				return
+			}
+
+			fetchLimit := startIndex + limit
+			var movies []map[string]any
+			var tv []map[string]any
+			if _, ok := typesSet["movie"]; ok {
+				movies = embyBuildDoubanHotListItems(database, "movie", "热门", "全部", 0, fetchLimit, serverID, "")
+			}
+			if _, ok := typesSet["series"]; ok {
+				tv = embyBuildDoubanHotListItems(database, "tv", "tv", "tv", 0, fetchLimit, serverID, "")
+			}
+
+			combined := make([]map[string]any, 0, len(movies)+len(tv))
+			maxLen := len(movies)
+			if len(tv) > maxLen {
+				maxLen = len(tv)
+			}
+			for i := 0; i < maxLen; i++ {
+				if i < len(movies) {
+					combined = append(combined, movies[i])
+				}
+				if i < len(tv) {
+					combined = append(combined, tv[i])
+				}
+			}
+
+			page := []map[string]any{}
+			if startIndex < len(combined) {
+				end := startIndex + limit
+				if end > len(combined) {
+					end = len(combined)
+				}
+				page = combined[startIndex:end]
+			}
+			page = embyFilterItemsByExcludeLocationTypes(page, excludeLocationTypes)
+
+			// Ensure fields requested by clients exist and remain type-correct.
+			for _, obj := range page {
+				if obj == nil {
+					continue
+				}
+				jid, _ := obj["Id"].(string)
+				embyEnsureInfuseItemFields(obj, jid, fieldsParam, serverID)
+				embyEnsureStandardItem(obj, serverID)
+			}
+
+			total := startIndex + len(page)
+			if len(page) == limit {
+				total++
+			}
+			writeJSON(w, 200, embyPagedItems(page, startIndex, total))
 			return
 		}
 

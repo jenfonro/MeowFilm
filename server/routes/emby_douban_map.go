@@ -119,6 +119,8 @@ func embyResolveTMDBForDouban(database *db.DB, kind string, doubanID string, tit
 		return 0, nil
 	}
 
+	q = embyNormalizeTitleForTMDB(k, q)
+
 	// Search TMDB once, then cache.
 	items, err := embyTMDBSearchMulti(database, q)
 	if err != nil {
