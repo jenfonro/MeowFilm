@@ -86,4 +86,3 @@ func migrateMagicAggregateKeywordRulesToRegex(database *db.DB) (changed bool) {
 	_ = database.SetSetting("magic_aggregate_rules", "[]")
 	return added > 0 || len(legacy) > 0
 }
-

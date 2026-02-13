@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -678,6 +679,21 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 				return 0
 			}
 		}
+		getI64 := func(k string) int64 {
+			v, ok := body[k]
+			if !ok || v == nil {
+				return 0
+			}
+			switch vv := v.(type) {
+			case float64:
+				return int64(vv)
+			case string:
+				n, _ := strconv.ParseInt(strings.TrimSpace(vv), 10, 64)
+				return n
+			default:
+				return 0
+			}
+		}
 		siteKey := getS("siteKey")
 		spiderAPI := getS("spiderApi")
 		videoID := getS("videoId")
@@ -708,6 +724,48 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		}
 		episodeName := getS("episodeName")
 
+		// Playback ticks (Emby/Emby use 10,000,000 ticks per second).
+		positionTicks := getI64("playbackPositionTicks")
+		if positionTicks <= 0 {
+			positionTicks = getI64("PlaybackPositionTicks")
+		}
+		if positionTicks <= 0 {
+			// seconds -> ticks
+			sec := getI64("playbackPositionSeconds")
+			if sec > 0 {
+				positionTicks = sec * 10_000_000
+			}
+		}
+		if positionTicks < 0 {
+			positionTicks = 0
+		}
+		runtimeTicks := getI64("playbackRuntimeTicks")
+		if runtimeTicks <= 0 {
+			runtimeTicks = getI64("RunTimeTicks")
+		}
+		if runtimeTicks <= 0 {
+			sec := getI64("playbackDurationSeconds")
+			if sec > 0 {
+				runtimeTicks = sec * 10_000_000
+			}
+		}
+		if runtimeTicks < 0 {
+			runtimeTicks = 0
+		}
+
+		playbackItemID := strings.TrimSpace(getS("playbackItemId"))
+		if playbackItemID == "" {
+			playbackItemID = strings.TrimSpace(getS("playback_item_id"))
+		}
+		tmdbSeason := getI("tmdbSeason")
+		tmdbEpisode := getI("tmdbEpisode")
+		if tmdbSeason <= 0 {
+			tmdbSeason = getI("season")
+		}
+		if tmdbEpisode <= 0 {
+			tmdbEpisode = getI("episode")
+		}
+
 		if isNetDiskHistoryItem(videoID, playFlag) {
 			writeJSON(w, 200, map[string]any{"success": true})
 			return
@@ -732,8 +790,37 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		} else {
 			contentKey = normalizeContentKey(videoTitle)
 		}
+		// Prefer a stable TMDB-based contentKey to sync across devices/clients.
+		if tmdbID > 0 && (tmdbType == "tv" || tmdbType == "movie") {
+			contentKey = strings.ToLower("tmdb:" + tmdbType + ":" + strconv.Itoa(tmdbID))
+		}
 		if contentKey == "" {
 			contentKey = siteKey + "::" + videoID
+		}
+
+		// Derive a Emby item id for resume syncing when possible.
+		if playbackItemID == "" && tmdbID > 0 {
+			if tmdbType == "movie" {
+				playbackItemID = embyBuildMovieID(tmdbID)
+			} else if tmdbType == "tv" {
+				seasonNo := tmdbSeason
+				epNo := tmdbEpisode
+				if seasonNo <= 0 || epNo <= 0 {
+					// Try to parse from episodeName / playFlag (e.g. "S01E04")
+					hay := episodeName
+					if hay == "" {
+						hay = playFlag
+					}
+					m := regexp.MustCompile(`(?i)\bS(\d{1,2})E(\d{1,3})\b`).FindStringSubmatch(hay)
+					if len(m) == 3 {
+						seasonNo, _ = strconv.Atoi(m[1])
+						epNo, _ = strconv.Atoi(m[2])
+					}
+				}
+				if seasonNo > 0 && epNo > 0 {
+					playbackItemID = embyBuildEpisodeID(tmdbID, seasonNo, epNo)
+				}
+			}
 		}
 
 		lockedPoster := ""
@@ -763,9 +850,10 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		_, _ = database.SQL().Exec(`
 				INSERT INTO play_history(
 				  user_id, content_key, site_key, site_name, spider_api, video_id, video_title, video_poster, video_remark,
-				  tmdb_id, tmdb_type, tmdb_seasons_json, pan_label, play_flag, episode_index, episode_name, updated_at
+				  tmdb_id, tmdb_type, tmdb_seasons_json, pan_label, play_flag, episode_index, episode_name, updated_at,
+				  playback_position_ticks, playback_runtime_ticks, playback_item_id
 				)
-				VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+				VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 				ON CONFLICT(user_id, site_key, video_id) DO UPDATE SET
 				  content_key = excluded.content_key,
 				  site_name = excluded.site_name,
@@ -780,8 +868,11 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 				  play_flag = excluded.play_flag,
 				  episode_index = excluded.episode_index,
 				  episode_name = excluded.episode_name,
-				  updated_at = excluded.updated_at
-			`, u.ID, contentKey, siteKey, siteName, spiderAPI, videoID, videoTitle, finalPoster, videoRemark, tmdbID, tmdbType, tmdbSeasons, panLabel, playFlag, episodeIndex, episodeName, now)
+				  updated_at = excluded.updated_at,
+				  playback_position_ticks = CASE WHEN excluded.playback_position_ticks > 0 THEN excluded.playback_position_ticks ELSE play_history.playback_position_ticks END,
+				  playback_runtime_ticks = CASE WHEN excluded.playback_runtime_ticks > 0 THEN excluded.playback_runtime_ticks ELSE play_history.playback_runtime_ticks END,
+				  playback_item_id = CASE WHEN excluded.playback_item_id <> '' THEN excluded.playback_item_id ELSE play_history.playback_item_id END
+			`, u.ID, contentKey, siteKey, siteName, spiderAPI, videoID, videoTitle, finalPoster, videoRemark, tmdbID, tmdbType, tmdbSeasons, panLabel, playFlag, episodeIndex, episodeName, now, positionTicks, runtimeTicks, playbackItemID)
 		writeJSON(w, 200, map[string]any{"success": true})
 	case http.MethodDelete:
 		contentKey := strings.TrimSpace(r.URL.Query().Get("contentKey"))
