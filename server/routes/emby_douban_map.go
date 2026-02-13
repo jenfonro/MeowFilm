@@ -10,14 +10,15 @@ import (
 )
 
 type embyDoubanTMDBMap struct {
-	Kind      string // "movie" | "tv"
-	DoubanID  string
-	Title     string
-	Year      int
-	TMDBID    int
-	TMDBKind  string
-	LastTryAt int64
-	UpdatedAt int64
+	Kind       string // "movie" | "tv"
+	DoubanID   string
+	Title      string
+	Year       int
+	TMDBID     int
+	TMDBKind   string
+	LastTryAt  int64
+	LastTryKey string
+	UpdatedAt  int64
 }
 
 func embyGetDoubanTMDBMap(database *db.DB, kind string, doubanID string) (*embyDoubanTMDBMap, error) {
@@ -31,11 +32,11 @@ func embyGetDoubanTMDBMap(database *db.DB, kind string, doubanID string) (*embyD
 	}
 	var row embyDoubanTMDBMap
 	err := database.SQL().QueryRow(`
-		SELECT kind, douban_id, title, year, tmdb_id, tmdb_kind, last_try_at, updated_at
+		SELECT kind, douban_id, title, year, tmdb_id, tmdb_kind, last_try_at, last_try_key, updated_at
 		FROM douban_tmdb_map
 		WHERE kind=? AND douban_id=?
 		LIMIT 1
-	`, k, id).Scan(&row.Kind, &row.DoubanID, &row.Title, &row.Year, &row.TMDBID, &row.TMDBKind, &row.LastTryAt, &row.UpdatedAt)
+	`, k, id).Scan(&row.Kind, &row.DoubanID, &row.Title, &row.Year, &row.TMDBID, &row.TMDBKind, &row.LastTryAt, &row.LastTryKey, &row.UpdatedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -63,17 +64,19 @@ func embyUpsertDoubanTMDBMap(database *db.DB, m embyDoubanTMDBMap) error {
 	if lastTryAt <= 0 {
 		lastTryAt = 0
 	}
+	lastTryKey := strings.TrimSpace(m.LastTryKey)
 	_, err := database.SQL().Exec(`
-		INSERT INTO douban_tmdb_map(kind, douban_id, title, year, tmdb_id, tmdb_kind, last_try_at, updated_at)
-		VALUES(?,?,?,?,?,?,?,?)
+		INSERT INTO douban_tmdb_map(kind, douban_id, title, year, tmdb_id, tmdb_kind, last_try_at, last_try_key, updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(kind, douban_id) DO UPDATE SET
 		  title = CASE WHEN excluded.title != '' THEN excluded.title ELSE douban_tmdb_map.title END,
 		  year = CASE WHEN excluded.year > 0 THEN excluded.year ELSE douban_tmdb_map.year END,
 		  tmdb_id = CASE WHEN excluded.tmdb_id > 0 THEN excluded.tmdb_id ELSE douban_tmdb_map.tmdb_id END,
 		  tmdb_kind = CASE WHEN excluded.tmdb_kind != '' THEN excluded.tmdb_kind ELSE douban_tmdb_map.tmdb_kind END,
 		  last_try_at = CASE WHEN excluded.last_try_at > 0 THEN excluded.last_try_at ELSE douban_tmdb_map.last_try_at END,
+		  last_try_key = CASE WHEN excluded.last_try_key != '' THEN excluded.last_try_key ELSE douban_tmdb_map.last_try_key END,
 		  updated_at = excluded.updated_at
-	`, k, id, title, year, tmdbID, tmdbKind, lastTryAt, now)
+	`, k, id, title, year, tmdbID, tmdbKind, lastTryAt, lastTryKey, now)
 	return err
 }
 
@@ -83,6 +86,7 @@ func embyResolveTMDBForDouban(database *db.DB, kind string, doubanID string, tit
 	if k == "" || id == "" {
 		return 0, errors.New("invalid args")
 	}
+	tryKey := resolveTMDBAPIBase(database)
 
 	existing, err := embyGetDoubanTMDBMap(database, k, id)
 	if err != nil {
@@ -103,11 +107,12 @@ func embyResolveTMDBForDouban(database *db.DB, kind string, doubanID string, tit
 	if q == "" {
 		// Persist at least the existence so future calls can fill it.
 		_ = embyUpsertDoubanTMDBMap(database, embyDoubanTMDBMap{
-			Kind:      k,
-			DoubanID:  id,
-			Title:     title,
-			Year:      year,
-			LastTryAt: time.Now().UnixMilli(),
+			Kind:       k,
+			DoubanID:   id,
+			Title:      title,
+			Year:       year,
+			LastTryAt:  time.Now().UnixMilli(),
+			LastTryKey: tryKey,
 		})
 		return 0, nil
 	}
@@ -119,7 +124,8 @@ func embyResolveTMDBForDouban(database *db.DB, kind string, doubanID string, tit
 	if existing != nil && existing.TMDBID <= 0 && existing.LastTryAt > 0 {
 		sameTitle := strings.TrimSpace(existing.Title) == strings.TrimSpace(q)
 		sameYear := existing.Year == yy || yy <= 0 || existing.Year <= 0
-		if sameTitle && sameYear && time.Since(time.UnixMilli(existing.LastTryAt)) < 12*time.Hour {
+		sameKey := strings.TrimSpace(existing.LastTryKey) != "" && strings.TrimSpace(existing.LastTryKey) == strings.TrimSpace(tryKey)
+		if sameTitle && sameYear && sameKey && time.Since(time.UnixMilli(existing.LastTryAt)) < 12*time.Hour {
 			return 0, nil
 		}
 	}
@@ -128,11 +134,12 @@ func embyResolveTMDBForDouban(database *db.DB, kind string, doubanID string, tit
 	items, err := embyTMDBSearchMulti(database, q)
 	if err != nil {
 		_ = embyUpsertDoubanTMDBMap(database, embyDoubanTMDBMap{
-			Kind:      k,
-			DoubanID:  id,
-			Title:     q,
-			Year:      yy,
-			LastTryAt: time.Now().UnixMilli(),
+			Kind:       k,
+			DoubanID:   id,
+			Title:      q,
+			Year:       yy,
+			LastTryAt:  time.Now().UnixMilli(),
+			LastTryKey: tryKey,
 		})
 		return 0, err
 	}
@@ -162,13 +169,14 @@ func embyResolveTMDBForDouban(database *db.DB, kind string, doubanID string, tit
 	}
 
 	_ = embyUpsertDoubanTMDBMap(database, embyDoubanTMDBMap{
-		Kind:      k,
-		DoubanID:  id,
-		Title:     q,
-		Year:      yy,
-		TMDBID:    best,
-		TMDBKind:  k,
-		LastTryAt: time.Now().UnixMilli(),
+		Kind:       k,
+		DoubanID:   id,
+		Title:      q,
+		Year:       yy,
+		TMDBID:     best,
+		TMDBKind:   k,
+		LastTryAt:  time.Now().UnixMilli(),
+		LastTryKey: tryKey,
 	})
 	return best, nil
 }

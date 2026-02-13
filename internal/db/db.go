@@ -274,13 +274,24 @@ func (d *DB) ensureDoubanTMDBMapTable() error {
 		  tmdb_id INTEGER DEFAULT 0,
 		  tmdb_kind TEXT DEFAULT '',
 		  last_try_at INTEGER DEFAULT 0,
+		  last_try_key TEXT DEFAULT '',
 		  updated_at INTEGER NOT NULL,
 		  UNIQUE(kind, douban_id)
 		);
 		CREATE INDEX IF NOT EXISTS idx_douban_tmdb_map_kind_updated_at ON douban_tmdb_map(kind, updated_at DESC);
 		CREATE INDEX IF NOT EXISTS idx_douban_tmdb_map_tmdb_id ON douban_tmdb_map(tmdb_id);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+	ok, err := hasSQLiteColumn(d.db, "douban_tmdb_map", "last_try_key")
+	if err != nil {
+		return err
+	}
+	if !ok {
+		_, _ = d.db.Exec(`ALTER TABLE douban_tmdb_map ADD COLUMN last_try_key TEXT DEFAULT ''`)
+	}
+	return nil
 }
 
 func (d *DB) ensurePlayHistoryTMDBColumns() error {
