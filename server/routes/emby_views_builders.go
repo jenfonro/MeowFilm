@@ -2,24 +2,32 @@ package routes
 
 func embyDefaultGroupingOptions() []map[string]any {
 	return []map[string]any{
-		{"Name": "TMDB 剧集", "Id": embyViewTMDBTV},
-		{"Name": "TMDB 电影", "Id": embyViewTMDBMovies},
+		{"Name": "剧集", "Id": embyViewTMDBTV},
+		{"Name": "电影", "Id": embyViewTMDBMovies},
+		{"Name": "动漫", "Id": embyViewTMDBAnime},
+		{"Name": "综艺", "Id": embyViewTMDBShow},
 	}
 }
 
 func embyDefaultViewFolders(serverID string) []map[string]any {
 	return []map[string]any{
-		embyBuildViewFolderItem(serverID, embyViewTMDBTV, "TMDB 剧集", "tvshows"),
-		embyBuildViewFolderItem(serverID, embyViewTMDBMovies, "TMDB 电影", "movies"),
+		embyBuildViewFolderItem(serverID, embyViewTMDBTV, "剧集", "tvshows"),
+		embyBuildViewFolderItem(serverID, embyViewTMDBMovies, "电影", "movies"),
+		embyBuildViewFolderItem(serverID, embyViewTMDBAnime, "动漫", "tvshows"),
+		embyBuildViewFolderItem(serverID, embyViewTMDBShow, "综艺", "tvshows"),
 	}
 }
 
 func embyDefaultViewFolderItemByID(serverID string, id string) (map[string]any, bool) {
 	switch id {
 	case embyViewTMDBTV:
-		return embyBuildViewFolderItem(serverID, id, "TMDB 剧集", "tvshows"), true
+		return embyBuildViewFolderItem(serverID, id, "剧集", "tvshows"), true
 	case embyViewTMDBMovies:
-		return embyBuildViewFolderItem(serverID, id, "TMDB 电影", "movies"), true
+		return embyBuildViewFolderItem(serverID, id, "电影", "movies"), true
+	case embyViewTMDBAnime:
+		return embyBuildViewFolderItem(serverID, id, "动漫", "tvshows"), true
+	case embyViewTMDBShow:
+		return embyBuildViewFolderItem(serverID, id, "综艺", "tvshows"), true
 	default:
 		return nil, false
 	}
