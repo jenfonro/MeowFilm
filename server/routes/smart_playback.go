@@ -417,6 +417,12 @@ func smartExtractSeasonHintFromSource(src smartSource) int {
 			return n
 		}
 	}
+	if m := regexp.MustCompile(`(?i)\bseason\s*(\d{1,2})\b`).FindStringSubmatch(t); len(m) >= 2 && m[1] != "" {
+		n := intFromDigits(m[1])
+		if n >= 0 && n <= 99 {
+			return n
+		}
+	}
 	if m := regexp.MustCompile(`第\s*(\d{1,2})\s*季`).FindStringSubmatch(t); len(m) >= 2 && m[1] != "" {
 		n := intFromDigits(m[1])
 		if n >= 0 && n <= 99 {
@@ -1032,7 +1038,7 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 				if strings.TrimSpace(ep.URL) == "" {
 					continue
 				}
-					texts := smartExtractEpisodeCandidateTexts(ep)
+				texts := smartExtractEpisodeCandidateTexts(ep)
 				primary := ""
 				if len(texts) > 0 {
 					primary = texts[0]
@@ -1045,25 +1051,25 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 					rawLower = strings.ToLower(strings.TrimSpace(primary))
 				}
 
-					if len(rawCleanRules) == 0 || len(rawEpisodeRules) == 0 {
-						entry.FailCount++
-						entry.LastError = "missing magic regex rules"
-						entry.NextRetryAt = time.Now().Add(10 * time.Minute)
-						smartDetailCache.Lock()
-						smartDetailCache.M[key] = entry
-						smartDetailCache.Unlock()
-						return
-					}
-					match, err := jsMagicEpisodeExtractFromCandidates(texts, rawCleanRules, rawEpisodeRules)
-					if err != nil {
-						entry.FailCount++
-						entry.LastError = "js regex error"
-						entry.NextRetryAt = time.Now().Add(10 * time.Minute)
-						smartDetailCache.Lock()
-						smartDetailCache.M[key] = entry
-						smartDetailCache.Unlock()
-						return
-					}
+				if len(rawCleanRules) == 0 || len(rawEpisodeRules) == 0 {
+					entry.FailCount++
+					entry.LastError = "missing magic regex rules"
+					entry.NextRetryAt = time.Now().Add(10 * time.Minute)
+					smartDetailCache.Lock()
+					smartDetailCache.M[key] = entry
+					smartDetailCache.Unlock()
+					return
+				}
+				match, err := jsMagicEpisodeExtractFromCandidates(texts, rawCleanRules, rawEpisodeRules)
+				if err != nil {
+					entry.FailCount++
+					entry.LastError = "js regex error"
+					entry.NextRetryAt = time.Now().Add(10 * time.Minute)
+					smartDetailCache.Lock()
+					smartDetailCache.M[key] = entry
+					smartDetailCache.Unlock()
+					return
+				}
 				match = smartNormalizeMaybeGlobalSeasonEpisode(tmdbSeasons, match)
 				seasonNo := match.Season
 				epNo := match.Episode
@@ -1303,12 +1309,6 @@ func smartResolvePlaybackFromTMDB(database *db.DB, u *embyUser, req smartPlaybac
 		return "", nil, errors.New("missing title")
 	}
 
-	tmdbHasMultiSeason := len(tmdbSeasons) >= 2
-	preferSeasonNo := 0
-	if tmdbHasMultiSeason && req.Season > 0 {
-		preferSeasonNo = req.Season
-	}
-
 	settings := smartLoadPlaybackSettings(database)
 	rawEpisodeRules := parseJSONStringArray(database.GetSetting("magic_episode_rules"))
 	rawCleanRules := parseJSONStringArray(database.GetSetting("magic_episode_clean_regex_rules"))
@@ -1321,6 +1321,44 @@ func smartResolvePlaybackFromTMDB(database *db.DB, u *embyUser, req smartPlaybac
 	if len(aggregated) == 0 {
 		return "", nil, errors.New("未找到可用资源")
 	}
+
+	// If TMDB suggests single-season but sources clearly indicate multi-season,
+	// probe Douban and only apply it when it actually remaps the requested global episode
+	// into a later season (and matches the max season hinted by sources).
+	if strings.TrimSpace(req.Kind) == "tv" && strings.TrimSpace(req.SubKind) == "episode" && len(tmdbSeasons) < 2 && strings.TrimSpace(searchTitle) != "" {
+		maxHint := 0
+		for _, src := range aggregated {
+			if h := smartExtractSeasonHintFromSource(src); h > maxHint {
+				maxHint = h
+			}
+		}
+		if maxHint >= 2 {
+			if over, ok := doubanProbeSeasons(database, req.TMDBID, searchTitle); ok && len(over) >= 2 {
+				mapped := smartTMDBSeasonEpisodeOfGlobal(over, want)
+				if mapped.Season >= 2 && mapped.Season <= maxHint {
+					tmdbSeasons = over
+					if embyDebugLogEnabled() {
+						embyDebugPrintf("[smart][douban] override tmdbId=%d want=%d sourcesMaxSeason=%d -> mapped=S%02dE%03d", req.TMDBID, want, maxHint, mapped.Season, mapped.Episode)
+					}
+				}
+			}
+		}
+	}
+
+	tmdbHasMultiSeason := len(tmdbSeasons) >= 2
+	preferSeasonNo := 0
+	if tmdbHasMultiSeason {
+		mapped := smartTMDBSeasonEpisodeOfGlobal(tmdbSeasons, want)
+		if mapped.Season > 0 {
+			preferSeasonNo = mapped.Season
+		} else if req.Season > 0 {
+			preferSeasonNo = req.Season
+		}
+		if embyDebugLogEnabled() && mapped.Season > 0 && req.Season > 0 && mapped.Season != req.Season {
+			embyDebugPrintf("[smart][douban] season_remap tmdbId=%d want=%d req=S%02dE%03d -> prefer=S%02dE%03d", req.TMDBID, want, req.Season, req.Episode, mapped.Season, mapped.Episode)
+		}
+	}
+
 	candidates := smartBuildCandidates(aggregated, orderMap, tmdbHasMultiSeason, preferSeasonNo, want)
 	if len(candidates) == 0 {
 		return "", nil, errors.New("未找到可用资源")
@@ -1351,10 +1389,10 @@ func smartResolvePlaybackFromTMDB(database *db.DB, u *embyUser, req smartPlaybac
 		launch := func(idx int) {
 			src := candidates[idx]
 			go func() {
-					res := smartFetchDetailAndPickAndPlay(database, apiBase, tvUser, src, tmdbSeasons, tmdbHasMultiSeason, preferSeasonNo, want, settings, rawCleanRules, rawEpisodeRules, requireSeasoned)
-					results <- settled{Idx: idx, Res: res}
-				}()
-			}
+				res := smartFetchDetailAndPickAndPlay(database, apiBase, tvUser, src, tmdbSeasons, tmdbHasMultiSeason, preferSeasonNo, want, settings, rawCleanRules, rawEpisodeRules, requireSeasoned)
+				results <- settled{Idx: idx, Res: res}
+			}()
+		}
 
 		for cursor < len(candidates) && inFlight < poolSize {
 			launch(cursor)
