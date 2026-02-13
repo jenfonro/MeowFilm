@@ -16,6 +16,14 @@ func handleEmbyItems(w http.ResponseWriter, r *http.Request, database *db.DB, se
 	if len(parts) >= 3 && strings.EqualFold(parts[1], "Images") && r.Method == http.MethodGet {
 		jid := parts[0]
 		imgType := strings.ToLower(strings.TrimSpace(parts[2]))
+
+		// Virtual view folders (e.g. view_tmdb_tv, view_tmdb_movies) still need to expose an image endpoint.
+		// Use a built-in static asset as a lightweight placeholder.
+		if jid == embyViewTMDBMovies || jid == embyViewTMDBTV || jid == embyViewTMDBAnime || jid == embyViewTMDBShow {
+			http.Redirect(w, r, "/favicon.png", http.StatusFound)
+			return
+		}
+
 		index := 0
 		if len(parts) >= 4 {
 			// /Backdrop/0
