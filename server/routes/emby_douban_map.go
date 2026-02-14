@@ -86,7 +86,7 @@ func embyResolveTMDBForDouban(database *db.DB, kind string, doubanID string, tit
 	if k == "" || id == "" {
 		return 0, errors.New("invalid args")
 	}
-	tryKey := resolveTMDBAPIBase(database)
+	tryKeyBase := resolveTMDBAPIBase(database)
 
 	existing, err := embyGetDoubanTMDBMap(database, k, id)
 	if err != nil {
@@ -112,17 +112,30 @@ func embyResolveTMDBForDouban(database *db.DB, kind string, doubanID string, tit
 			Title:      title,
 			Year:       year,
 			LastTryAt:  time.Now().UnixMilli(),
-			LastTryKey: tryKey,
+			LastTryKey: tryKeyBase,
 		})
 		return 0, nil
 	}
 
-	q = embyNormalizeTitleForTMDB(k, q)
+	cands := embyNormalizeTitleForTMDBCandidates(k, q)
+	if len(cands) == 0 {
+		return 0, nil
+	}
+	qPrimary := strings.TrimSpace(cands[0])
+	qUsed := qPrimary
+	// Include candidates hash in the throttling key, so a new normalization rule can retry immediately.
+	tryKey := strings.TrimSpace(tryKeyBase) + "|" + embyStableHex32(strings.Join(cands, "\n"))
 
 	// Throttle failing lookups to avoid hammering TMDB, but allow retry when our query changes
 	// (e.g. after stripping "第X季/Season X" suffix) or when the stored year/title is stale.
 	if existing != nil && existing.TMDBID <= 0 && existing.LastTryAt > 0 {
-		sameTitle := strings.TrimSpace(existing.Title) == strings.TrimSpace(q)
+		sameTitle := false
+		for _, qq := range cands {
+			if strings.TrimSpace(existing.Title) == strings.TrimSpace(qq) {
+				sameTitle = true
+				break
+			}
+		}
 		sameYear := existing.Year == yy || yy <= 0 || existing.Year <= 0
 		sameKey := strings.TrimSpace(existing.LastTryKey) != "" && strings.TrimSpace(existing.LastTryKey) == strings.TrimSpace(tryKey)
 		if sameTitle && sameYear && sameKey && time.Since(time.UnixMilli(existing.LastTryAt)) < 12*time.Hour {
@@ -130,40 +143,49 @@ func embyResolveTMDBForDouban(database *db.DB, kind string, doubanID string, tit
 		}
 	}
 
-	// Search TMDB once, then cache.
-	items, err := embyTMDBSearchMulti(database, q)
-	if err != nil {
-		_ = embyUpsertDoubanTMDBMap(database, embyDoubanTMDBMap{
-			Kind:       k,
-			DoubanID:   id,
-			Title:      q,
-			Year:       yy,
-			LastTryAt:  time.Now().UnixMilli(),
-			LastTryKey: tryKey,
-		})
-		return 0, err
-	}
-	best := 0
-	for _, it := range items {
-		if it.ID <= 0 {
-			continue
-		}
-		if it.MediaType != k {
-			continue
-		}
-		// First pass: strict year match when we have a year (if TMDB doesn't return a year, don't accept it here).
-		if yy > 0 && yy != it.Year {
-			continue
-		}
-		best = it.ID
-		break
-	}
-	if best == 0 {
+	pickBest := func(items []embyTMDBSearchItem) int {
+		best := 0
 		for _, it := range items {
 			if it.ID <= 0 || it.MediaType != k {
 				continue
 			}
+			// First pass: strict year match when we have a year (if TMDB doesn't return a year, don't accept it here).
+			if yy > 0 && yy != it.Year {
+				continue
+			}
 			best = it.ID
+			break
+		}
+		if best != 0 {
+			return best
+		}
+		for _, it := range items {
+			if it.ID <= 0 || it.MediaType != k {
+				continue
+			}
+			return it.ID
+		}
+		return 0
+	}
+
+	// Search TMDB (try a few normalized query variants), then cache.
+	best := 0
+	for _, qq := range cands {
+		items, err := embyTMDBSearchMulti(database, qq)
+		if err != nil {
+			_ = embyUpsertDoubanTMDBMap(database, embyDoubanTMDBMap{
+				Kind:       k,
+				DoubanID:   id,
+				Title:      qPrimary,
+				Year:       yy,
+				LastTryAt:  time.Now().UnixMilli(),
+				LastTryKey: tryKey,
+			})
+			return 0, err
+		}
+		best = pickBest(items)
+		if best > 0 {
+			qUsed = strings.TrimSpace(qq)
 			break
 		}
 	}
@@ -171,7 +193,7 @@ func embyResolveTMDBForDouban(database *db.DB, kind string, doubanID string, tit
 	_ = embyUpsertDoubanTMDBMap(database, embyDoubanTMDBMap{
 		Kind:       k,
 		DoubanID:   id,
-		Title:      q,
+		Title:      qUsed,
 		Year:       yy,
 		TMDBID:     best,
 		TMDBKind:   k,
