@@ -55,13 +55,17 @@ type tmdbDiscoverResponse struct {
 }
 
 type embyTMDBTVDetail struct {
-	ID       int
-	Title    string
-	Overview string
-	Year     int
-	Poster   string
-	Backdrop string
-	Seasons  []embyTMDBSeason
+	ID            int
+	Title         string
+	Overview      string
+	Year          int
+	Poster        string
+	Backdrop      string
+	Status        string
+	EpisodeCount  int
+	LatestSeason  int
+	LatestEpisode int
+	Seasons       []embyTMDBSeason
 }
 
 type embyTMDBSeason struct {
@@ -634,14 +638,30 @@ func embyTMDBGetTVDetail(database *db.DB, tmdbID int) (*embyTMDBTVDetail, error)
 			Poster:       strings.TrimSpace(s.PosterPath),
 		})
 	}
+	latestSeason := 0
+	latestEpisode := 0
+	if data.LastEpisodeToAir != nil && data.LastEpisodeToAir.EpisodeNumber > 0 {
+		latestEpisode = data.LastEpisodeToAir.EpisodeNumber
+		if data.LastEpisodeToAir.SeasonNumber > 0 {
+			latestSeason = data.LastEpisodeToAir.SeasonNumber
+		}
+	}
+	episodeCount := 0
+	if data.NumberOfEpisodes > 0 {
+		episodeCount = data.NumberOfEpisodes
+	}
 	return &embyTMDBTVDetail{
-		ID:       id,
-		Title:    strings.TrimSpace(data.Name),
-		Overview: strings.TrimSpace(data.Overview),
-		Year:     year,
-		Poster:   strings.TrimSpace(data.PosterPath),
-		Backdrop: strings.TrimSpace(data.BackdropPath),
-		Seasons:  seasons,
+		ID:            id,
+		Title:         strings.TrimSpace(data.Name),
+		Overview:      strings.TrimSpace(data.Overview),
+		Year:          year,
+		Poster:        strings.TrimSpace(data.PosterPath),
+		Backdrop:      strings.TrimSpace(data.BackdropPath),
+		Status:        strings.TrimSpace(data.Status),
+		EpisodeCount:  episodeCount,
+		LatestSeason:  latestSeason,
+		LatestEpisode: latestEpisode,
+		Seasons:       seasons,
 	}, nil
 }
 

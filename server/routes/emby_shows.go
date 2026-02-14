@@ -10,6 +10,19 @@ import (
 	"github.com/jenfonro/meowfilm/internal/db"
 )
 
+func embyIsAiredDate(airDate string, now time.Time) bool {
+	s := strings.TrimSpace(airDate)
+	if s == "" {
+		return true
+	}
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return true
+	}
+	// Treat "air_date" as UTC midnight for a stable comparison.
+	return !t.UTC().After(now.UTC())
+}
+
 func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, serverID string, parts []string) {
 	// GET /Shows/NextUp?UserId=...
 	if len(parts) >= 1 && strings.EqualFold(parts[0], "NextUp") && r.Method == http.MethodGet {
@@ -45,6 +58,14 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			if s.Season < 0 || s.EpisodeCount <= 0 {
 				continue
 			}
+			// Strict: only include seasons that have aired (based on TMDB last_episode_to_air).
+			if d.LatestSeason > 0 && s.Season > d.LatestSeason {
+				continue
+			}
+			childCnt := s.EpisodeCount
+			if d.LatestSeason > 0 && s.Season == d.LatestSeason && d.LatestEpisode > 0 && d.LatestEpisode < childCnt {
+				childCnt = d.LatestEpisode
+			}
 			name := "特别篇"
 			if s.Season > 0 {
 				name = "第" + intToCN(s.Season) + "季"
@@ -62,7 +83,7 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 				"ParentBackdropImageTags": []string{"tmdb"},
 				"IndexNumber":             s.Season,
 				"ProductionYear":          d.Year,
-				"ChildCount":              s.EpisodeCount,
+				"ChildCount":              childCnt,
 				"ImageTags":               map[string]any{"Primary": "tmdb", "Thumb": "tmdb"},
 				"UserData":                map[string]any{"Played": false},
 			})
@@ -131,14 +152,31 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		if seasonNo == 0 {
 			seasonName = "特别篇"
 		}
+		// Strict: season beyond latest aired => empty.
+		if d.LatestSeason > 0 && seasonNo > d.LatestSeason {
+			writeJSON(w, 200, embyPagedItems([]map[string]any{}, 0, 0))
+			return
+		}
+		maxEpisodeAllowed := 0
+		if d.LatestSeason > 0 && seasonNo == d.LatestSeason && d.LatestEpisode > 0 {
+			maxEpisodeAllowed = d.LatestEpisode
+		}
 		episodes, err := embyTMDBGetTVSeasonEpisodes(database, parsed.TMDBID, seasonNo)
 		if err != nil {
 			embyWriteError(w, 502, "TMDB 请求失败")
 			return
 		}
 		out := make([]map[string]any, 0, len(episodes))
+		now := time.Now().UTC()
 		for _, e := range episodes {
 			if e.Episode <= 0 {
+				continue
+			}
+			if maxEpisodeAllowed > 0 && e.Episode > maxEpisodeAllowed {
+				continue
+			}
+			// Filter unaired episodes by air_date when present.
+			if !embyIsAiredDate(e.AirDate, now) {
 				continue
 			}
 			name := strings.TrimSpace(e.Name)

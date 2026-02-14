@@ -380,9 +380,13 @@ func handleAPITMDBSearch(w http.ResponseWriter, r *http.Request, database *db.DB
 			return "", 0, false
 		}
 		status := strings.TrimSpace(d.Status)
-		last := 0
+		latestSeason := 0
+		latestEpisode := 0
 		if d.LastEpisodeToAir != nil && d.LastEpisodeToAir.EpisodeNumber > 0 {
-			last = d.LastEpisodeToAir.EpisodeNumber
+			latestEpisode = d.LastEpisodeToAir.EpisodeNumber
+			if d.LastEpisodeToAir.SeasonNumber > 0 {
+				latestSeason = d.LastEpisodeToAir.SeasonNumber
+			}
 		}
 		total := 0
 		if d.NumberOfEpisodes > 0 {
@@ -397,9 +401,17 @@ func handleAPITMDBSearch(w http.ResponseWriter, r *http.Request, database *db.DB
 			if s.SeasonNumber < 0 || s.EpisodeCount < 0 {
 				continue
 			}
+			// Strict: exclude unaired future seasons; cap last season by last aired episode.
+			if status != "Ended" && latestSeason > 0 && s.SeasonNumber > latestSeason {
+				continue
+			}
+			epCnt := s.EpisodeCount
+			if latestSeason > 0 && s.SeasonNumber == latestSeason && latestEpisode > 0 && latestEpisode < epCnt {
+				epCnt = latestEpisode
+			}
 			seasons = append(seasons, map[string]any{
 				"season":       s.SeasonNumber,
-				"episodeCount": s.EpisodeCount,
+				"episodeCount": epCnt,
 				"airDate":      strings.TrimSpace(s.AirDate),
 			})
 		}
@@ -412,14 +424,14 @@ func handleAPITMDBSearch(w http.ResponseWriter, r *http.Request, database *db.DB
 				} else {
 					badge = "共" + strconv.Itoa(total) + "集"
 				}
-			} else if last > 0 {
-				badge = "共" + strconv.Itoa(last) + "集"
+			} else if latestEpisode > 0 {
+				badge = "共" + strconv.Itoa(latestEpisode) + "集"
 			} else {
 				badge = "完结"
 			}
 		} else {
-			if last > 0 {
-				badge = "更新至" + strconv.Itoa(last) + "集"
+			if latestEpisode > 0 {
+				badge = "更新至" + strconv.Itoa(latestEpisode) + "集"
 			} else if total > 0 {
 				badge = "更新至" + strconv.Itoa(total) + "集"
 			} else {
@@ -449,12 +461,14 @@ func handleAPITMDBSearch(w http.ResponseWriter, r *http.Request, database *db.DB
 		if strings.TrimSpace(d.PosterPath) != "" {
 			out["pic"] = "https://image.tmdb.org/t/p/w500" + strings.TrimSpace(d.PosterPath)
 		}
-		if d.LastEpisodeToAir != nil {
-			if d.LastEpisodeToAir.SeasonNumber > 0 {
-				out["latestSeason"] = d.LastEpisodeToAir.SeasonNumber
-			}
-			if d.LastEpisodeToAir.EpisodeNumber > 0 {
-				out["latestEpisode"] = d.LastEpisodeToAir.EpisodeNumber
+		if latestSeason > 0 {
+			out["latestSeason"] = latestSeason
+		}
+		if latestEpisode > 0 {
+			out["latestEpisode"] = latestEpisode
+			// For ongoing series, expose aired episode count to avoid inflating to planned totals.
+			if !ended {
+				out["episodeCount"] = latestEpisode
 			}
 		}
 		tmdbDetailCacheSet(cacheKey, out, ttl, now)
@@ -643,9 +657,17 @@ func handleAPITMDBDetail(w http.ResponseWriter, r *http.Request, database *db.DB
 			if s.SeasonNumber > 0 {
 				seasonCount += 1
 			}
+			// Strict: exclude unaired future seasons; cap last season by last aired episode.
+			if !ended && latestSeason > 0 && s.SeasonNumber > latestSeason {
+				continue
+			}
+			epCnt := s.EpisodeCount
+			if latestSeason > 0 && s.SeasonNumber == latestSeason && latestEpisode > 0 && latestEpisode < epCnt {
+				epCnt = latestEpisode
+			}
 			seasons = append(seasons, map[string]any{
 				"season":       s.SeasonNumber,
-				"episodeCount": s.EpisodeCount,
+				"episodeCount": epCnt,
 				"airDate":      strings.TrimSpace(s.AirDate),
 			})
 		}
@@ -666,6 +688,10 @@ func handleAPITMDBDetail(w http.ResponseWriter, r *http.Request, database *db.DB
 				badge = "更新至" + strconv.Itoa(latestEpisode) + "集"
 			} else {
 				badge = "更新中"
+			}
+			// For ongoing series, expose aired episode count to avoid inflating to planned totals.
+			if latestEpisode > 0 {
+				episodeCount = latestEpisode
 			}
 		}
 	} else {
