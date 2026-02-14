@@ -197,11 +197,23 @@ func embyBuildItem(database *db.DB, embyID string) (map[string]any, error) {
 				return nil, err
 			}
 			id := embyBuildSeriesID(parsed.TMDBID)
-			childCount := len(d.Seasons)
+			childCount := 0
 			recursiveCount := 0
 			for _, s := range d.Seasons {
-				if s.EpisodeCount > 0 {
-					recursiveCount += s.EpisodeCount
+				if s.Season < 0 || s.EpisodeCount <= 0 {
+					continue
+				}
+				// Strict: do not count unaired future seasons; cap last season by last aired episode.
+				if d.LatestSeason > 0 && s.Season > d.LatestSeason {
+					continue
+				}
+				childCount++
+				cnt := s.EpisodeCount
+				if d.LatestSeason > 0 && s.Season == d.LatestSeason && d.LatestEpisode > 0 && d.LatestEpisode < cnt {
+					cnt = d.LatestEpisode
+				}
+				if cnt > 0 {
+					recursiveCount += cnt
 				}
 			}
 			out := map[string]any{
