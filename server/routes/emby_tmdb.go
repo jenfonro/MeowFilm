@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/tmdb"
 )
 
 type embyTMDBSearchItem struct {
@@ -209,7 +210,7 @@ func embyTMDBSearchMulti(database *db.DB, query string) ([]embyTMDBSearchItem, e
 	if v4 == "" && v3 == "" {
 		return nil, errors.New("TMDB not configured")
 	}
-	apiBase := resolveTMDBAPIBase(database)
+	apiBase := tmdb.ResolveAPIBase(database)
 
 	searchOnce := func(query string) ([]embyTMDBSearchItem, error) {
 		qq := strings.TrimSpace(query)
@@ -218,11 +219,11 @@ func embyTMDBSearchMulti(database *db.DB, query string) ([]embyTMDBSearchItem, e
 		}
 
 		doTV := func(language string) ([]embyTMDBSearchItem, error) {
-			u, _ := url.Parse(joinTMDBAPI(apiBase, "search/tv"))
+			u, _ := url.Parse(tmdb.JoinAPI(apiBase, "search/tv"))
 			params := u.Query()
 			params.Set("query", qq)
 			params.Set("page", "1")
-			params.Set("include_adult", boolToStr(includeAdult))
+			params.Set("include_adult", tmdb.BoolToStr(includeAdult))
 			if strings.TrimSpace(language) != "" {
 				params.Set("language", strings.TrimSpace(language))
 			}
@@ -274,11 +275,11 @@ func embyTMDBSearchMulti(database *db.DB, query string) ([]embyTMDBSearchItem, e
 		}
 
 		doMovie := func(language string) ([]embyTMDBSearchItem, error) {
-			u, _ := url.Parse(joinTMDBAPI(apiBase, "search/movie"))
+			u, _ := url.Parse(tmdb.JoinAPI(apiBase, "search/movie"))
 			params := u.Query()
 			params.Set("query", qq)
 			params.Set("page", "1")
-			params.Set("include_adult", boolToStr(includeAdult))
+			params.Set("include_adult", tmdb.BoolToStr(includeAdult))
 			if strings.TrimSpace(language) != "" {
 				params.Set("language", strings.TrimSpace(language))
 			}
@@ -330,11 +331,11 @@ func embyTMDBSearchMulti(database *db.DB, query string) ([]embyTMDBSearchItem, e
 		}
 
 		doReq := func(language string, region string) ([]embyTMDBSearchItem, error) {
-			u, _ := url.Parse(joinTMDBAPI(apiBase, "search/multi"))
+			u, _ := url.Parse(tmdb.JoinAPI(apiBase, "search/multi"))
 			params := u.Query()
 			params.Set("query", qq)
 			params.Set("page", "1")
-			params.Set("include_adult", boolToStr(includeAdult))
+			params.Set("include_adult", tmdb.BoolToStr(includeAdult))
 			if strings.TrimSpace(language) != "" {
 				params.Set("language", strings.TrimSpace(language))
 			}
@@ -361,7 +362,7 @@ func embyTMDBSearchMulti(database *db.DB, query string) ([]embyTMDBSearchItem, e
 				return nil, fmt.Errorf("tmdb http %d", resp.StatusCode)
 			}
 
-			var data tmdbMultiSearchResponse
+			var data tmdb.MultiSearchResponse
 			if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 				return nil, err
 			}
@@ -492,18 +493,18 @@ func embyTMDBDiscover(database *db.DB, mediaType string, yearStart int, yearEnd 
 	if v4 == "" && v3 == "" {
 		return nil, 0, errors.New("TMDB not configured")
 	}
-	apiBase := resolveTMDBAPIBase(database)
+	apiBase := tmdb.ResolveAPIBase(database)
 
 	sort := strings.TrimSpace(sortBy)
 	if sort == "" {
 		sort = "popularity.desc"
 	}
 
-	endpoint := joinTMDBAPI(apiBase, "discover/"+mt)
+	endpoint := tmdb.JoinAPI(apiBase, "discover/"+mt)
 	u, _ := url.Parse(endpoint)
 	params := u.Query()
 	params.Set("page", strconv.Itoa(page))
-	params.Set("include_adult", boolToStr(includeAdult))
+	params.Set("include_adult", tmdb.BoolToStr(includeAdult))
 	params.Set("sort_by", sort)
 	if strings.TrimSpace(lang) != "" {
 		params.Set("language", strings.TrimSpace(lang))
@@ -590,9 +591,9 @@ func embyTMDBGetTVDetail(database *db.DB, tmdbID int) (*embyTMDBTVDetail, error)
 	if v4 == "" && v3 == "" {
 		return nil, errors.New("TMDB not configured")
 	}
-	apiBase := resolveTMDBAPIBase(database)
+	apiBase := tmdb.ResolveAPIBase(database)
 
-	u, _ := url.Parse(joinTMDBAPI(apiBase, fmt.Sprintf("tv/%d", id)))
+	u, _ := url.Parse(tmdb.JoinAPI(apiBase, fmt.Sprintf("tv/%d", id)))
 	params := u.Query()
 	if lang != "" {
 		params.Set("language", lang)
@@ -617,7 +618,7 @@ func embyTMDBGetTVDetail(database *db.DB, tmdbID int) (*embyTMDBTVDetail, error)
 		return nil, fmt.Errorf("tmdb http %d", resp.StatusCode)
 	}
 
-	var data tmdbTVDetailsResponse
+	var data tmdb.TVDetailsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return nil, err
 	}
@@ -709,8 +710,8 @@ func embyTMDBGetTVSeasonDetail(database *db.DB, tmdbID int, season int) (*embyTM
 	if v4 == "" && v3 == "" {
 		return nil, errors.New("TMDB not configured")
 	}
-	apiBase := resolveTMDBAPIBase(database)
-	u, _ := url.Parse(joinTMDBAPI(apiBase, fmt.Sprintf("tv/%d/season/%d", tmdbID, season)))
+	apiBase := tmdb.ResolveAPIBase(database)
+	u, _ := url.Parse(tmdb.JoinAPI(apiBase, fmt.Sprintf("tv/%d/season/%d", tmdbID, season)))
 	params := u.Query()
 	if lang != "" {
 		params.Set("language", lang)
@@ -806,8 +807,8 @@ func embyTMDBGetMovieDetail(database *db.DB, tmdbID int) (*embyTMDBMovieDetail, 
 	if v4 == "" && v3 == "" {
 		return nil, errors.New("TMDB not configured")
 	}
-	apiBase := resolveTMDBAPIBase(database)
-	u, _ := url.Parse(joinTMDBAPI(apiBase, fmt.Sprintf("movie/%d", id)))
+	apiBase := tmdb.ResolveAPIBase(database)
+	u, _ := url.Parse(tmdb.JoinAPI(apiBase, fmt.Sprintf("movie/%d", id)))
 	params := u.Query()
 	if lang != "" {
 		params.Set("language", lang)
@@ -830,7 +831,7 @@ func embyTMDBGetMovieDetail(database *db.DB, tmdbID int) (*embyTMDBMovieDetail, 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("tmdb http %d", resp.StatusCode)
 	}
-	var data tmdbMovieDetailsResponse
+	var data tmdb.MovieDetailsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return nil, err
 	}
@@ -887,8 +888,8 @@ func embyTMDBGetCredits(database *db.DB, mediaType string, tmdbID int) (*embyTMD
 		return nil, errors.New("TMDB not configured")
 	}
 
-	apiBase := resolveTMDBAPIBase(database)
-	u, _ := url.Parse(joinTMDBAPI(apiBase, fmt.Sprintf("%s/%d/credits", typ, tmdbID)))
+	apiBase := tmdb.ResolveAPIBase(database)
+	u, _ := url.Parse(tmdb.JoinAPI(apiBase, fmt.Sprintf("%s/%d/credits", typ, tmdbID)))
 	params := u.Query()
 	if strings.TrimSpace(lang) != "" {
 		params.Set("language", strings.TrimSpace(lang))
@@ -996,8 +997,8 @@ func embyTMDBGetPersonProfile(database *db.DB, personID int) (string, error) {
 		return "", errors.New("TMDB not configured")
 	}
 
-	apiBase := resolveTMDBAPIBase(database)
-	u, _ := url.Parse(joinTMDBAPI(apiBase, fmt.Sprintf("person/%d", personID)))
+	apiBase := tmdb.ResolveAPIBase(database)
+	u, _ := url.Parse(tmdb.JoinAPI(apiBase, fmt.Sprintf("person/%d", personID)))
 	params := u.Query()
 	if strings.TrimSpace(lang) != "" {
 		params.Set("language", strings.TrimSpace(lang))
