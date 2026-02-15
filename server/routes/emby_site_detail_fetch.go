@@ -52,7 +52,7 @@ func embyLoadSiteDetailPans(database *db.DB, u *embyUser, seriesID string) ([]em
 
 	for i, pan := range pans {
 		seasonNo := i + 1
-		label := strings.TrimSpace(pan.Label)
+		label := embyNormalizePanDisplayLabel(pan.Label)
 		if label == "" {
 			label = "源" + intToCN(seasonNo)
 		}
@@ -101,4 +101,3 @@ func embyLoadSiteDetailPans(database *db.DB, u *embyUser, seriesID string) ([]em
 
 	return pans, siteEntry, nil
 }
-
