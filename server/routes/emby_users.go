@@ -312,6 +312,18 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 				if siteName == "" {
 					siteName = strings.TrimSpace(e.SiteKey)
 				}
+				overview := strings.TrimSpace(e.Remark)
+				// Best-effort: load site detail so users see a concrete error when the spider fails (502/404) or data can't be parsed.
+				// Keep HTTP 200 to avoid strict clients treating the whole detail page as a protocol failure.
+				if pans, _, err := embyLoadSiteDetailPans(database, u, itemID); err != nil {
+					msg := strings.TrimSpace(err.Error())
+					if msg == "" {
+						msg = "未知错误"
+					}
+					overview = "站点详情获取失败: " + msg
+				} else if len(pans) == 0 {
+					overview = "站点详情无可解析播放源"
+				}
 				obj = map[string]any{
 					"Id":                itemID,
 					"Name":              strings.TrimSpace(e.Name),
@@ -325,7 +337,7 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 					"ImageTags":         map[string]any{"Primary": "site"},
 					"BackdropImageTags": []string{},
 					"ProviderIds":       map[string]any{},
-					"Overview":          strings.TrimSpace(e.Remark),
+					"Overview":          overview,
 					"ParentId":          "",
 					"UserData":          map[string]any{"Played": false},
 				}
