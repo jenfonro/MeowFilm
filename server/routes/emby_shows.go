@@ -45,21 +45,30 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		parsed, ok := embyParseItemID(seriesID)
 		if !ok || parsed == nil || parsed.Kind != "tv" || parsed.SubKind != "series" {
 			// Site-mapped series: expose seasons derived from the spider "detail" play sources.
-			if e, ok := embySiteMapGet(seriesID); ok && strings.TrimSpace(e.Name) != "" {
-				pans, _, err := embyLoadSiteDetailPans(database, u, seriesID)
+			if p, ok := embyDecodeSiteSeriesID(seriesID); ok && strings.TrimSpace(p.Name) != "" {
+				pans, err := embyFetchSiteDetailPansDedup(database, u, p.SiteAPI, p.VideoID)
 				if err != nil {
 					writeJSON(w, 200, embyPagedItems([]map[string]any{}, 0, 0))
 					return
 				}
-				seriesName := strings.TrimSpace(e.Name)
+				seriesName := strings.TrimSpace(p.Name)
 				seasons := make([]map[string]any, 0, len(pans))
 				for i, pan := range pans {
 					seasonNo := i + 1
-					label := strings.TrimSpace(pan.Label)
+					label := embyNormalizePanDisplayLabel(pan.Label)
 					if label == "" {
 						label = "第" + intToCN(seasonNo) + "季"
 					}
-					seasonID := embyBuildSiteSeasonID(seriesID, seasonNo, label)
+					seasonID := embyEncodeSiteSeasonID(embySiteSeasonIDPayload{
+						SiteKey: strings.TrimSpace(p.SiteKey),
+						Site:    strings.TrimSpace(p.Site),
+						SiteAPI: strings.TrimSpace(p.SiteAPI),
+						VideoID: strings.TrimSpace(p.VideoID),
+						Pan:     seasonNo,
+						Label:   label,
+						Pic:     strings.TrimSpace(p.Pic),
+						Remark:  strings.TrimSpace(p.Remark),
+					})
 					if seasonID == "" {
 						continue
 					}
@@ -171,36 +180,38 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		parsed, ok := embyParseItemID(seriesID)
 		if !ok || parsed == nil || parsed.Kind != "tv" || parsed.SubKind != "series" {
 			// Site-mapped series: list episodes from the spider "detail" play sources.
-			if e, ok := embySiteMapGet(seriesID); ok && strings.TrimSpace(e.Name) != "" {
-				pans, _, err := embyLoadSiteDetailPans(database, u, seriesID)
+			if p, ok := embyDecodeSiteSeriesID(seriesID); ok && strings.TrimSpace(p.Name) != "" {
+				pans, err := embyFetchSiteDetailPansDedup(database, u, p.SiteAPI, p.VideoID)
 				if err != nil {
 					writeJSON(w, 200, embyPagedItems([]map[string]any{}, 0, 0))
 					return
 				}
-				seriesName := strings.TrimSpace(e.Name)
+				seriesName := strings.TrimSpace(p.Name)
 				seasonID := embyQueryTrimCI(r, "SeasonId")
 				seasonNo := 1
 				label := ""
 				if strings.TrimSpace(seasonID) != "" {
-					if s, ok := embySiteSeasonMapGet(seasonID); ok && strings.TrimSpace(s.SeriesID) == strings.TrimSpace(seriesID) {
-						seasonNo = s.SeasonNo
-						label = strings.TrimSpace(s.Label)
-					} else {
-						// If cache was cold, try to rebuild once (embyLoadSiteDetailPans populates the maps).
-						if _, _, err := embyLoadSiteDetailPans(database, u, seriesID); err == nil {
-							if s, ok := embySiteSeasonMapGet(seasonID); ok && strings.TrimSpace(s.SeriesID) == strings.TrimSpace(seriesID) {
-								seasonNo = s.SeasonNo
-								label = strings.TrimSpace(s.Label)
-							}
-						}
+					if sp, ok := embyDecodeSiteSeasonID(seasonID); ok && strings.EqualFold(strings.TrimSpace(sp.SiteKey), strings.TrimSpace(p.SiteKey)) && strings.TrimSpace(sp.VideoID) == strings.TrimSpace(p.VideoID) {
+						seasonNo = sp.Pan
+						label = strings.TrimSpace(sp.Label)
 					}
-				} else {
-					// Default to first season.
+				}
+				if strings.TrimSpace(seasonID) == "" {
+					// Default to first pan.
 					if len(pans) > 0 {
 						seasonNo = 1
-						label = strings.TrimSpace(pans[0].Label)
+						label = embyNormalizePanDisplayLabel(pans[0].Label)
 					}
-					seasonID = embyBuildSiteSeasonID(seriesID, seasonNo, label)
+					seasonID = embyEncodeSiteSeasonID(embySiteSeasonIDPayload{
+						SiteKey: strings.TrimSpace(p.SiteKey),
+						Site:    strings.TrimSpace(p.Site),
+						SiteAPI: strings.TrimSpace(p.SiteAPI),
+						VideoID: strings.TrimSpace(p.VideoID),
+						Pan:     seasonNo,
+						Label:   label,
+						Pic:     strings.TrimSpace(p.Pic),
+						Remark:  strings.TrimSpace(p.Remark),
+					})
 				}
 				if seasonNo <= 0 {
 					seasonNo = 1
@@ -215,7 +226,7 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 				}
 				seasonName := strings.TrimSpace(label)
 				if seasonName == "" {
-					seasonName = strings.TrimSpace(pan.Label)
+					seasonName = embyNormalizePanDisplayLabel(pan.Label)
 				}
 				if seasonName == "" {
 					seasonName = "第" + intToCN(seasonNo) + "季"
@@ -232,7 +243,18 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 					if epName == "" {
 						epName = "第" + intToCN(epIndex) + "集"
 					}
-					epID := embyBuildSiteEpisodeID(seasonID, epIndex, epURL)
+					epID := embyEncodeSiteEpisodeID(embySiteEpisodeIDPayload{
+						SiteKey: strings.TrimSpace(p.SiteKey),
+						Site:    strings.TrimSpace(p.Site),
+						SiteAPI: strings.TrimSpace(p.SiteAPI),
+						VideoID: strings.TrimSpace(p.VideoID),
+						Pan:     seasonNo,
+						Ep:      epIndex,
+						Flag:    strings.TrimSpace(ep.Flag),
+						URL:     strings.TrimSpace(epURL),
+						Pic:     strings.TrimSpace(p.Pic),
+						Remark:  strings.TrimSpace(p.Remark),
+					})
 					if epID == "" {
 						continue
 					}

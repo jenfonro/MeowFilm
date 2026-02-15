@@ -25,8 +25,8 @@ func handleEmbyPlaybackInfo(w http.ResponseWriter, r *http.Request, database *db
 	}
 	parsed, ok := embyParseItemID(embyID)
 	if !ok || parsed == nil {
-		// Site-mapped episodes: resolve via CatPawOpen play API.
-		if ep, ok := embySiteEpisodeMapGet(embyID); ok && strings.TrimSpace(ep.SpiderAPI) != "" && strings.TrimSpace(ep.EpisodeURL) != "" {
+		// Stateless site episodes: resolve via CatPawOpen play API.
+		if ep, ok := embyDecodeSiteEpisodeID(embyID); ok {
 			apiBase := strings.TrimSpace(embyResolveCatApiBaseForUser(database, u))
 			if apiBase == "" {
 				embyWriteError(w, 502, "CatPawOpen 接口地址未设置")
@@ -37,11 +37,11 @@ func handleEmbyPlaybackInfo(w http.ResponseWriter, r *http.Request, database *db
 				tvUser = u.Username
 			}
 			playPayload := map[string]any{
-				"flag":    strings.TrimSpace(ep.EpisodePlayFlg),
-				"id":      strings.TrimSpace(ep.EpisodeURL),
-				"siteApi": strings.TrimSpace(ep.SpiderAPI),
+				"flag":    strings.TrimSpace(ep.Flag),
+				"id":      strings.TrimSpace(ep.URL),
+				"siteApi": strings.TrimSpace(ep.SiteAPI),
 			}
-			if siteID := embyExtractSiteIDFromSpiderAPI(ep.SpiderAPI); siteID != "" {
+			if siteID := embyExtractSiteIDFromSpiderAPI(ep.SiteAPI); siteID != "" {
 				playPayload["siteId"] = siteID
 			}
 			playRaw, err := embyCatRequestPlay(apiBase, tvUser, playPayload)

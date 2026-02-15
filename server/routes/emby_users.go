@@ -307,15 +307,16 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		}
 		if obj == nil {
 			// Site-mapped items: return a minimal, Emby-shaped item so strict clients can open/browse it.
-			if e, ok := embySiteMapGet(itemID); ok && strings.TrimSpace(e.Name) != "" {
-				siteName := strings.TrimSpace(e.SiteName)
+			if p, ok := embyDecodeSiteSeriesID(itemID); ok && strings.TrimSpace(p.Name) != "" {
+				siteName := strings.TrimSpace(p.Site)
 				if siteName == "" {
-					siteName = strings.TrimSpace(e.SiteKey)
+					siteName = strings.TrimSpace(p.SiteKey)
 				}
-				overview := strings.TrimSpace(e.Remark)
+				overview := strings.TrimSpace(p.Remark)
 				// Best-effort: load site detail so users see a concrete error when the spider fails (502/404) or data can't be parsed.
 				// Keep HTTP 200 to avoid strict clients treating the whole detail page as a protocol failure.
-				if pans, _, err := embyLoadSiteDetailPans(database, u, itemID); err != nil {
+				pans, err := embyFetchSiteDetailPansDedup(database, u, p.SiteAPI, p.VideoID)
+				if err != nil {
 					msg := strings.TrimSpace(err.Error())
 					if msg == "" {
 						msg = "未知错误"
@@ -326,8 +327,8 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 				}
 				obj = map[string]any{
 					"Id":                itemID,
-					"Name":              strings.TrimSpace(e.Name),
-					"SortName":          strings.TrimSpace(e.Name),
+					"Name":              strings.TrimSpace(p.Name),
+					"SortName":          strings.TrimSpace(p.Name),
 					"Type":              "Series",
 					"MediaType":         "Video",
 					"IsFolder":          true,
@@ -344,13 +345,89 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 				if siteName != "" {
 					obj["ProductionLocations"] = []string{siteName}
 				}
-				if hit, ok := embySiteDetailCacheGet(itemID); ok && hit.Pans != nil {
-					obj["ChildCount"] = len(hit.Pans)
+				if len(pans) > 0 {
+					obj["ChildCount"] = len(pans)
 					recursive := 0
-					for _, p := range hit.Pans {
-						recursive += len(p.Episodes)
+					for _, pan := range pans {
+						recursive += len(pan.Episodes)
 					}
 					obj["RecursiveItemCount"] = recursive
+				}
+			} else if sp, ok := embyDecodeSiteSeasonID(itemID); ok {
+				seriesName := strings.TrimSpace(sp.Label)
+				if seriesName == "" {
+					seriesName = "网盘资源"
+				}
+				name := strings.TrimSpace(sp.Label)
+				if name == "" {
+					name = "第" + intToCN(sp.Pan) + "季"
+				}
+				obj = map[string]any{
+					"Id":           itemID,
+					"Name":         name,
+					"SeriesName":   seriesName,
+					"Type":         "Season",
+					"IsFolder":     true,
+					"LocationType": "Remote",
+					"SeriesId":     "",
+					"ParentId":     "",
+					"IndexNumber":  sp.Pan,
+					"ImageTags":    map[string]any{"Primary": "site", "Thumb": "site"},
+					"UserData":     map[string]any{"Played": false},
+				}
+				if strings.TrimSpace(sp.Site) != "" {
+					obj["ProductionLocations"] = []string{strings.TrimSpace(sp.Site)}
+				}
+			} else if ep, ok := embyDecodeSiteEpisodeID(itemID); ok {
+				seriesName := "网盘资源"
+				if strings.TrimSpace(ep.Site) != "" {
+					seriesName = strings.TrimSpace(ep.Site)
+				}
+				seasonName := "第" + intToCN(ep.Pan) + "季"
+				name := "第" + intToCN(ep.Ep) + "集"
+				mediaPath := embyBuildMediaPath(itemID, "mp4")
+				mediaSourceID := embyStableHex32(itemID)
+				obj = map[string]any{
+					"Id":                itemID,
+					"Name":              name,
+					"SeriesName":        seriesName,
+					"SeasonName":        seasonName,
+					"Overview":          strings.TrimSpace(ep.Remark),
+					"Type":              "Episode",
+					"MediaType":         "Video",
+					"IsFolder":          false,
+					"LocationType":      "Remote",
+					"Path":              mediaPath,
+					"Container":         "mp4,m4v",
+					"CanDownload":       false,
+					"RunTimeTicks":      int64(0),
+					"Chapters":          []any{},
+					"People":            []any{},
+					"Size":              0,
+					"SeriesId":          "",
+					"SeasonId":          "",
+					"ParentId":          "",
+					"IndexNumber":       ep.Ep,
+					"ParentIndexNumber": ep.Pan,
+					"ImageTags":         map[string]any{"Primary": "site", "Thumb": "site"},
+					"UserData":          map[string]any{"Played": false},
+					"MediaSources": []map[string]any{
+						{
+							"Id":                   mediaSourceID,
+							"MediaSourceId":        mediaSourceID,
+							"Protocol":             "File",
+							"IsRemote":             false,
+							"Path":                 mediaPath,
+							"Container":            "mp4",
+							"RequiredHttpHeaders":  map[string]string{},
+							"SupportsDirectPlay":   true,
+							"SupportsDirectStream": true,
+							"SupportsTranscoding":  true,
+							"SupportsProbing":      true,
+							"Type":                 "Default",
+						},
+					},
+					"AlternateMediaSources": []any{},
 				}
 			} else if s, ok := embySiteSeasonMapGet(itemID); ok && strings.TrimSpace(s.SeriesID) != "" {
 				seriesName := ""
@@ -916,23 +993,26 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 				}
 
 				h := siteSorted[idx-len(tmdbSorted)]
-				siteID := embyBuildSiteItemID(h.SiteKey, h.SpiderAPI, h.VideoID)
-				if strings.TrimSpace(siteID) == "" || strings.TrimSpace(h.Name) == "" {
+				if strings.TrimSpace(h.Name) == "" {
 					continue
 				}
 				siteName := strings.TrimSpace(h.SiteName)
 				if siteName == "" {
 					siteName = strings.TrimSpace(h.SiteKey)
 				}
-				embySiteMapPut(siteID, embySiteMapEntry{
-					SiteKey:   strings.TrimSpace(h.SiteKey),
-					SiteName:  siteName,
-					SpiderAPI: strings.TrimSpace(h.SpiderAPI),
-					VideoID:   strings.TrimSpace(h.VideoID),
-					Name:      strings.TrimSpace(h.Name),
-					Pic:       strings.TrimSpace(h.Pic),
-					Remark:    strings.TrimSpace(h.Remark),
-				}, 30*time.Minute)
+
+				siteID := embyEncodeSiteSeriesID(embySiteSeriesIDPayload{
+					SiteKey: strings.TrimSpace(h.SiteKey),
+					Site:    siteName,
+					SiteAPI: strings.TrimSpace(h.SpiderAPI),
+					VideoID: strings.TrimSpace(h.VideoID),
+					Name:    strings.TrimSpace(h.Name),
+					Pic:     strings.TrimSpace(h.Pic),
+					Remark:  strings.TrimSpace(h.Remark),
+				})
+				if strings.TrimSpace(siteID) == "" {
+					continue
+				}
 
 				obj := map[string]any{
 					"Id":                siteID,
