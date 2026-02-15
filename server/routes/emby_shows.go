@@ -44,6 +44,12 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		seriesID := parts[0]
 		parsed, ok := embyParseItemID(seriesID)
 		if !ok || parsed == nil || parsed.Kind != "tv" || parsed.SubKind != "series" {
+			// Site-mapped search items: strict clients (e.g. Infuse) may probe seasons for each result.
+			// Return an empty list instead of 404 so the search UI doesn't fail.
+			if _, ok := embySiteMapGet(seriesID); ok {
+				writeJSON(w, 200, embyPagedItems([]map[string]any{}, 0, 0))
+				return
+			}
 			embyNotFound(w)
 			return
 		}
@@ -116,6 +122,11 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		seriesID := parts[0]
 		parsed, ok := embyParseItemID(seriesID)
 		if !ok || parsed == nil || parsed.Kind != "tv" || parsed.SubKind != "series" {
+			// Site-mapped search items: return empty episodes instead of 404 for strict clients.
+			if _, ok := embySiteMapGet(seriesID); ok {
+				writeJSON(w, 200, embyPagedItems([]map[string]any{}, 0, 0))
+				return
+			}
 			embyNotFound(w)
 			return
 		}

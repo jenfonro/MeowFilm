@@ -68,6 +68,10 @@ func embyNormalizeCatPawOpenAPIBase(input string) string {
 }
 
 func embyCatRequestSpider(apiBase string, spiderAPI string, action string, payload any) (map[string]any, error) {
+	return embyCatRequestSpiderWithTimeout(apiBase, spiderAPI, action, payload, 12*time.Second)
+}
+
+func embyCatRequestSpiderWithTimeout(apiBase string, spiderAPI string, action string, payload any, timeout time.Duration) (map[string]any, error) {
 	base := embyNormalizeCatPawOpenAPIBase(apiBase)
 	if base == "" {
 		return nil, errors.New("CatPawOpen 接口地址未设置")
@@ -94,7 +98,10 @@ func embyCatRequestSpider(apiBase string, spiderAPI string, action string, paylo
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	client := &http.Client{Timeout: 12 * time.Second}
+	if timeout <= 0 {
+		timeout = 12 * time.Second
+	}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
