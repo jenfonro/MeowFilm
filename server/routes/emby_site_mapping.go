@@ -8,6 +8,7 @@ import (
 
 type embySiteMapEntry struct {
 	SiteKey   string
+	SiteName  string
 	SpiderAPI string
 	VideoID   string
 	Name      string
