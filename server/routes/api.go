@@ -12,6 +12,7 @@ import (
 
 	"github.com/jenfonro/meowfilm/internal/auth"
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/tmdb"
 )
 
 type userSettingsRow struct {
@@ -131,11 +132,11 @@ func APIHandler(database *db.DB, authMw *auth.Auth) http.Handler {
 			})).ServeHTTP(w, r)
 		case "/tmdb/search":
 			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleAPITMDBSearch(w, r, database)
+				tmdb.HandleSearch(w, r, database)
 			})).ServeHTTP(w, r)
 		case "/tmdb/detail":
 			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleAPITMDBDetail(w, r, database)
+				tmdb.HandleDetail(w, r, database)
 			})).ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
