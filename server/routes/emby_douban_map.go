@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/tmdb"
 )
 
 type embyDoubanTMDBMap struct {
@@ -86,7 +87,7 @@ func embyResolveTMDBForDouban(database *db.DB, kind string, doubanID string, tit
 	if k == "" || id == "" {
 		return 0, errors.New("invalid args")
 	}
-	tryKeyBase := resolveTMDBAPIBase(database)
+	tryKeyBase := tmdb.ResolveAPIBase(database)
 
 	existing, err := embyGetDoubanTMDBMap(database, k, id)
 	if err != nil {
