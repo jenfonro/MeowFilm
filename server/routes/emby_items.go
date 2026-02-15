@@ -71,6 +71,25 @@ func handleEmbyItems(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		}
 		parsed, ok := embyParseItemID(jid)
 		if !ok || parsed == nil {
+			// Stateless site IDs (v1): picture is embedded for restart-safety.
+			if sp, ok := embyDecodeSiteSeriesID(jid); ok {
+				if poster := embyNormalizeRedirectImageURL(sp.Pic); poster != "" {
+					http.Redirect(w, r, poster, http.StatusFound)
+					return
+				}
+			}
+			if ss, ok := embyDecodeSiteSeasonID(jid); ok {
+				if poster := embyNormalizeRedirectImageURL(ss.Pic); poster != "" {
+					http.Redirect(w, r, poster, http.StatusFound)
+					return
+				}
+			}
+			if ep, ok := embyDecodeSiteEpisodeID(jid); ok {
+				if poster := embyNormalizeRedirectImageURL(ep.Pic); poster != "" {
+					http.Redirect(w, r, poster, http.StatusFound)
+					return
+				}
+			}
 			// Site-mapped items: reuse the picture URL from search results.
 			if e, ok := embySiteMapGet(jid); ok {
 				if poster := embyNormalizeRedirectImageURL(e.Pic); poster != "" {
