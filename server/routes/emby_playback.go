@@ -25,6 +25,70 @@ func handleEmbyPlaybackInfo(w http.ResponseWriter, r *http.Request, database *db
 	}
 	parsed, ok := embyParseItemID(embyID)
 	if !ok || parsed == nil {
+		// Site-mapped episodes: resolve via CatPawOpen play API.
+		if ep, ok := embySiteEpisodeMapGet(embyID); ok && strings.TrimSpace(ep.SpiderAPI) != "" && strings.TrimSpace(ep.EpisodeURL) != "" {
+			apiBase := strings.TrimSpace(embyResolveCatApiBaseForUser(database, u))
+			if apiBase == "" {
+				embyWriteError(w, 502, "CatPawOpen 接口地址未设置")
+				return
+			}
+			tvUser := ""
+			if u != nil {
+				tvUser = u.Username
+			}
+			playPayload := map[string]any{
+				"flag":    strings.TrimSpace(ep.EpisodePlayFlg),
+				"id":      strings.TrimSpace(ep.EpisodeURL),
+				"siteApi": strings.TrimSpace(ep.SpiderAPI),
+			}
+			if siteID := embyExtractSiteIDFromSpiderAPI(ep.SpiderAPI); siteID != "" {
+				playPayload["siteId"] = siteID
+			}
+			playRaw, err := embyCatRequestPlay(apiBase, tvUser, playPayload)
+			if err != nil {
+				if embyDebugLogEnabled() {
+					embyDebugPrintf("[emby][playback] fail item=%s err=%q cost=%s", embyID, err.Error(), time.Since(startAt).String())
+				}
+				embyBadGateway(w, err)
+				return
+			}
+			urlPicked := strings.TrimSpace(embyPickFirstPlayableURL(playRaw))
+			if urlPicked == "" {
+				embyWriteError(w, 502, "站点未返回可播放地址")
+				return
+			}
+			urlPicked = embyRewriteProxyURLToBase(urlPicked, apiBase, tvUser)
+			headers := map[string]string{}
+			if h, ok := playRaw["header"].(map[string]any); ok {
+				for k, v := range h {
+					kk := strings.TrimSpace(k)
+					if kk == "" {
+						continue
+					}
+					sv := strings.TrimSpace(embyAnyToString(v))
+					if sv == "" {
+						continue
+					}
+					headers[kk] = sv
+				}
+			}
+
+			container, containerList := embyDetectContainerFromURL(urlPicked)
+			if embyDebugLogEnabled() {
+				embyDebugPrintf("[emby][playback] ok item=%s user=%s url=%q container=%s cost=%s", embyID, tvUser, urlPicked, container, time.Since(startAt).String())
+			}
+			if len(headers) != 0 {
+				embyWriteError(w, 501, "该源需要自定义请求头，暂不支持")
+				return
+			}
+
+			playSessionID := embyNewHexID()
+			mediaSourceID := embyStableHex32(embyID)
+			embyStreams.Set(mediaSourceID, urlPicked, 20*time.Minute)
+			resp := embyBuildPlaybackInfoResponse(embyID, container, containerList, mediaSourceID, playSessionID)
+			writeJSON(w, 200, resp)
+			return
+		}
 		embyNotFound(w)
 		return
 	}

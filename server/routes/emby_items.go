@@ -78,6 +78,19 @@ func handleEmbyItems(w http.ResponseWriter, r *http.Request, database *db.DB, se
 					return
 				}
 			}
+			// Site-mapped seasons/episodes: reuse series poster as well.
+			if s, ok := embySiteSeasonMapGet(jid); ok {
+				if poster := embyNormalizeRedirectImageURL(s.Pic); poster != "" {
+					http.Redirect(w, r, poster, http.StatusFound)
+					return
+				}
+			}
+			if ep, ok := embySiteEpisodeMapGet(jid); ok {
+				if poster := embyNormalizeRedirectImageURL(ep.Pic); poster != "" {
+					http.Redirect(w, r, poster, http.StatusFound)
+					return
+				}
+			}
 			embyNotFound(w)
 			return
 		}

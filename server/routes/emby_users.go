@@ -306,19 +306,120 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			return
 		}
 		if obj == nil {
-			// Site-mapped search items: return a minimal, TMDB-like shell so strict clients can open it.
+			// Site-mapped items: return a minimal, Emby-shaped item so strict clients can open/browse it.
 			if e, ok := embySiteMapGet(itemID); ok && strings.TrimSpace(e.Name) != "" {
+				siteName := strings.TrimSpace(e.SiteName)
+				if siteName == "" {
+					siteName = strings.TrimSpace(e.SiteKey)
+				}
 				obj = map[string]any{
 					"Id":                itemID,
 					"Name":              strings.TrimSpace(e.Name),
+					"SortName":          strings.TrimSpace(e.Name),
 					"Type":              "Series",
+					"MediaType":         "Video",
 					"IsFolder":          true,
+					"LocationType":      "Remote",
+					"Path":              "meowfilm://" + itemID,
 					"ProductionYear":    0,
 					"ImageTags":         map[string]any{"Primary": "site"},
 					"BackdropImageTags": []string{},
 					"ProviderIds":       map[string]any{},
 					"Overview":          strings.TrimSpace(e.Remark),
 					"ParentId":          "",
+					"UserData":          map[string]any{"Played": false},
+				}
+				if siteName != "" {
+					obj["ProductionLocations"] = []string{siteName}
+				}
+				if hit, ok := embySiteDetailCacheGet(itemID); ok && hit.Pans != nil {
+					obj["ChildCount"] = len(hit.Pans)
+					recursive := 0
+					for _, p := range hit.Pans {
+						recursive += len(p.Episodes)
+					}
+					obj["RecursiveItemCount"] = recursive
+				}
+			} else if s, ok := embySiteSeasonMapGet(itemID); ok && strings.TrimSpace(s.SeriesID) != "" {
+				seriesName := ""
+				if se, ok := embySiteMapGet(s.SeriesID); ok {
+					seriesName = strings.TrimSpace(se.Name)
+				}
+				name := strings.TrimSpace(s.Label)
+				if name == "" {
+					name = "第" + intToCN(s.SeasonNo) + "季"
+				}
+				obj = map[string]any{
+					"Id":           itemID,
+					"Name":         name,
+					"SeriesName":   seriesName,
+					"Type":         "Season",
+					"IsFolder":     true,
+					"LocationType": "Remote",
+					"SeriesId":     strings.TrimSpace(s.SeriesID),
+					"ParentId":     strings.TrimSpace(s.SeriesID),
+					"IndexNumber":  s.SeasonNo,
+					"ImageTags":    map[string]any{"Primary": "site", "Thumb": "site"},
+					"UserData":     map[string]any{"Played": false},
+				}
+			} else if ep, ok := embySiteEpisodeMapGet(itemID); ok && strings.TrimSpace(ep.SeriesID) != "" {
+				seriesName := ""
+				if se, ok := embySiteMapGet(ep.SeriesID); ok {
+					seriesName = strings.TrimSpace(se.Name)
+				}
+				seasonName := "第" + intToCN(ep.SeasonNo) + "季"
+				if strings.TrimSpace(ep.SeasonID) != "" {
+					if ss, ok := embySiteSeasonMapGet(ep.SeasonID); ok && strings.TrimSpace(ss.Label) != "" {
+						seasonName = strings.TrimSpace(ss.Label)
+					}
+				}
+				name := strings.TrimSpace(ep.EpisodeName)
+				if name == "" {
+					name = "第" + intToCN(ep.EpisodeIndex) + "集"
+				}
+				mediaPath := embyBuildMediaPath(itemID, "mp4")
+				mediaSourceID := embyStableHex32(itemID)
+				obj = map[string]any{
+					"Id":           itemID,
+					"Name":         name,
+					"SeriesName":   seriesName,
+					"SeasonName":   seasonName,
+					"Overview":     strings.TrimSpace(ep.Remark),
+					"Type":         "Episode",
+					"MediaType":    "Video",
+					"IsFolder":     false,
+					"LocationType": "Remote",
+					"Path":         mediaPath,
+					"Container":    "mp4,m4v",
+					"CanDownload":  false,
+					"RunTimeTicks": int64(0),
+					"Chapters":     []any{},
+					"People":       []any{},
+					"Size":         0,
+					"SeriesId":     strings.TrimSpace(ep.SeriesID),
+					"SeasonId":     strings.TrimSpace(ep.SeasonID),
+					"ParentId":     strings.TrimSpace(ep.SeasonID),
+					"IndexNumber":  ep.EpisodeIndex,
+					"ParentIndexNumber": ep.SeasonNo,
+					"ImageTags":         map[string]any{"Primary": "site", "Thumb": "site"},
+					"UserData":          map[string]any{"Played": false},
+					"MediaSources": []map[string]any{
+						{
+							"Id":                   mediaSourceID,
+							"MediaSourceId":        mediaSourceID,
+							"Protocol":             "File",
+							"IsRemote":             false,
+							"Path":                 mediaPath,
+							"Container":            "mp4",
+							"RequiredHttpHeaders":  map[string]string{},
+							"SupportsDirectPlay":   true,
+							"SupportsDirectStream": true,
+							"SupportsTranscoding":  true,
+							"SupportsProbing":      true,
+							"Type":                 "Default",
+						},
+					},
+					"AlternateMediaSources": []any{},
 				}
 			}
 		}
@@ -813,6 +914,7 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 				}
 				embySiteMapPut(siteID, embySiteMapEntry{
 					SiteKey:   strings.TrimSpace(h.SiteKey),
+					SiteName:  siteName,
 					SpiderAPI: strings.TrimSpace(h.SpiderAPI),
 					VideoID:   strings.TrimSpace(h.VideoID),
 					Name:      strings.TrimSpace(h.Name),
