@@ -2,10 +2,45 @@ package routes
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/jenfonro/meowfilm/internal/db"
 )
+
+func embyNormalizeRedirectImageURL(raw string) string {
+	u := strings.TrimSpace(raw)
+	if u == "" {
+		return ""
+	}
+	// Some spiders return "/https://..." which must be treated as an absolute URL.
+	if strings.HasPrefix(u, "/http://") || strings.HasPrefix(u, "/https://") {
+		u = strings.TrimPrefix(u, "/")
+	}
+	// Some spiders return duplicated prefixes like:
+	// "https://img.xx.com/https://img.xx.com/path.jpg"
+	// Keep the last absolute URL portion.
+	lastHTTP := strings.LastIndex(u, "http://")
+	lastHTTPS := strings.LastIndex(u, "https://")
+	last := lastHTTP
+	if lastHTTPS > last {
+		last = lastHTTPS
+	}
+	if last > 0 {
+		u = strings.TrimSpace(u[last:])
+	}
+	parsed, err := url.Parse(u)
+	if err != nil || parsed == nil {
+		return ""
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return ""
+	}
+	if strings.TrimSpace(parsed.Host) == "" {
+		return ""
+	}
+	return u
+}
 
 func handleEmbyItems(w http.ResponseWriter, r *http.Request, database *db.DB, serverID string, parts []string) {
 	// /Items/{id}/Images/{type}...
@@ -36,6 +71,13 @@ func handleEmbyItems(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		}
 		parsed, ok := embyParseItemID(jid)
 		if !ok || parsed == nil {
+			// Site-mapped items: reuse the picture URL from search results.
+			if e, ok := embySiteMapGet(jid); ok {
+				if poster := embyNormalizeRedirectImageURL(e.Pic); poster != "" {
+					http.Redirect(w, r, poster, http.StatusFound)
+					return
+				}
+			}
 			embyNotFound(w)
 			return
 		}

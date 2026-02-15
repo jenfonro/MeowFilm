@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -305,6 +306,23 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			return
 		}
 		if obj == nil {
+			// Site-mapped search items: return a minimal, TMDB-like shell so strict clients can open it.
+			if e, ok := embySiteMapGet(itemID); ok && strings.TrimSpace(e.Name) != "" {
+				obj = map[string]any{
+					"Id":                itemID,
+					"Name":              strings.TrimSpace(e.Name),
+					"Type":              "Series",
+					"IsFolder":          true,
+					"ProductionYear":    0,
+					"ImageTags":         map[string]any{"Primary": "site"},
+					"BackdropImageTags": []string{},
+					"ProviderIds":       map[string]any{},
+					"Overview":          strings.TrimSpace(e.Remark),
+					"ParentId":          "",
+				}
+			}
+		}
+		if obj == nil {
 			embyNotFound(w)
 			return
 		}
@@ -320,7 +338,7 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 
 	// GET /Users/{id}/Items?ParentId=view_...
 	if len(parts) >= 2 && strings.EqualFold(parts[1], "Items") && r.Method == http.MethodGet {
-		_, ok := embyRequireUser(w, r, database)
+		u, ok := embyRequireUser(w, r, database)
 		if !ok {
 			return
 		}
@@ -583,97 +601,245 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		}
 
 		// Search: /Users/{id}/Items?searchTerm=...&recursive=true&limit=...
-		// Only needs TMDB search results.
+		// TMDB search results are returned to clients.
+		// In parallel, we trigger a best-effort site search (3s cap) and render the site hits as additional
+		// cards using the same item schema as TMDB (no extra/unknown fields for strict clients like Infuse).
+		// Mapping from site card Id -> site detail/playback is stored server-side.
 		if parent == "" && searchTerm != "" {
 			startIndex := embyQueryIntClamped(r, "StartIndex", 0, 0, 1<<30)
 			limit := embyQueryIntClamped(r, "Limit", 24, 1, 60)
-
-			results, err := embyTMDBSearchMulti(database, searchTerm)
-			if err != nil {
-				embyBadGateway(w, err)
-				return
+			startAt := time.Now()
+			scoreTerm := embyCanonicalSearchTerm(searchTerm)
+			if scoreTerm == "" {
+				scoreTerm = searchTerm
 			}
 
-			out := make([]map[string]any, 0, limit)
-			rank := 0
-			for _, it := range results {
-				base := embyBuildBaseItemFromSearch(it)
-				if base == nil {
-					continue
+			// Infuse may send a pair of search requests (Simplified + Traditional) back-to-back.
+			// If we detect a folded-duplicate for the same user+device, return an empty page to avoid
+			// the client "combining" two near-identical result sets.
+			if embyIsInfuseClient(r) {
+				deviceID := embyClientDeviceID(r)
+				userID := ""
+				if u != nil {
+					userID = u.ID
 				}
-				// Match Emby-style search results: no ParentId in root search.
-				base["ParentId"] = nil
-				id, _ := base["Id"].(string)
-				embyEnsureInfuseItemFields(base, id, fieldsParam, serverID)
-				// Preserve TMDB relevance order even if the client sorts locally.
-				base["SortName"] = fmt.Sprintf("%06d", rank)
-				rank++
+				if embyInfuseShouldDropFoldedDuplicate(userID, deviceID, searchTerm, scoreTerm, startAt) {
+					embyDebugPrintf("[emby][search][infuse] drop folded-duplicate term=%q folded=%q user=%q device=%q", searchTerm, scoreTerm, userID, deviceID)
+					writeJSON(w, 200, embyPagedEmpty(startIndex))
+					return
+				}
+			}
 
-				// Some clients treat search results as direct playable items and use Path/MediaSources
-				// to locate the media file. For non-folder items, expose a server-relative media path.
-				isFolder, _ := base["IsFolder"].(bool)
-				if !isFolder && strings.TrimSpace(id) != "" {
-					mediaPath := embyBuildMediaPath(id, "mp4")
-					mediaSourceID := embyStableHex32(id)
-					base["LocationType"] = "FileSystem"
-					base["Path"] = mediaPath
-					base["Container"] = "mp4,m4v"
-					base["MediaSources"] = []map[string]any{
-						{
-							"Protocol":                "File",
-							"Id":                      mediaSourceID,
-							"MediaSourceId":           mediaSourceID,
-							"Path":                    mediaPath,
-							"Type":                    "Default",
-							"Container":               "mp4",
-							"Size":                    0,
-							"Name":                    base["Name"],
-							"IsRemote":                false,
-							"ETag":                    mediaSourceID,
-							"RunTimeTicks":            0,
-							"ReadAtNativeFramerate":   false,
-							"IgnoreDts":               false,
-							"IgnoreIndex":             false,
-							"GenPtsInput":             false,
-							"SupportsTranscoding":     true,
-							"SupportsDirectStream":    true,
-							"SupportsDirectPlay":      true,
-							"IsInfiniteStream":        false,
-							"RequiresOpening":         false,
-							"RequiresClosing":         false,
-							"RequiresLooping":         false,
-							"SupportsProbing":         true,
-							"VideoType":               "VideoFile",
-							"MediaStreams":            []any{},
-							"MediaAttachments":        []any{},
-							"Formats":                 []any{},
-							"Bitrate":                 0,
-							"RequiredHttpHeaders":     map[string]any{},
-							"DefaultAudioStreamIndex": 0,
-						},
+			cacheKey := embySearchCacheKey(u, includeItemTypes, searchTerm)
+			cached, ok := embySearchCacheGet(cacheKey)
+			tmdbSorted := cached.TMDB
+			siteSorted := cached.Sites
+
+			typesSet := map[string]struct{}{}
+			for _, p := range strings.Split(includeItemTypes, ",") {
+				t := strings.ToLower(strings.TrimSpace(p))
+				if t != "" {
+					typesSet[t] = struct{}{}
+				}
+			}
+			if len(typesSet) == 0 {
+				typesSet["movie"] = struct{}{}
+				typesSet["series"] = struct{}{}
+			}
+
+			if !ok {
+				// Site search fanout: cap at 3s total. Results arriving after the deadline are discarded.
+				siteCh := make(chan []embySiteSearchHit, 1)
+				go func() { siteCh <- embySearchSitesHits(database, u, scoreTerm, 3*time.Second, 0) }()
+
+				results, err := embyTMDBSearchMulti(database, searchTerm)
+				if err != nil {
+					embyDebugPrintf("[emby][search] tmdb search failed term=%q err=%q", searchTerm, err.Error())
+					results = nil
+				}
+
+				siteHits := []embySiteSearchHit{}
+				select {
+				case siteHits = <-siteCh:
+				case <-time.After(3 * time.Second):
+				}
+				if siteHits == nil {
+					siteHits = []embySiteSearchHit{}
+				}
+
+				// Sort TMDB items by the same match score as frontend (TMDB always comes first).
+				type tmdbRow struct {
+					Item     embyTMDBSearchItem
+					Score    int
+					TitleLen int
+					Seq      int
+				}
+				rows := make([]tmdbRow, 0, len(results))
+				seq := 0
+				for _, it := range results {
+					if it.ID <= 0 || strings.TrimSpace(it.Title) == "" {
+						continue
 					}
-					base["AlternateMediaSources"] = []any{}
+					mt := strings.ToLower(strings.TrimSpace(it.MediaType))
+					if mt == "tv" {
+						mt = "series"
+					}
+					if _, ok := typesSet[mt]; !ok {
+						continue
+					}
+					seq++
+					rows = append(rows, tmdbRow{
+						Item:     it,
+						Score:    embyComputeMatchScore(scoreTerm, it.Title),
+						TitleLen: embyTitleLenForSort(it.Title),
+						Seq:      seq,
+					})
+				}
+				sort.SliceStable(rows, func(i, j int) bool {
+					a := rows[i]
+					b := rows[j]
+					if a.TitleLen != b.TitleLen {
+						return a.TitleLen < b.TitleLen
+					}
+					if a.Score != b.Score {
+						return a.Score > b.Score
+					}
+					return a.Seq < b.Seq
+				})
+				tmdbSorted = make([]embyTMDBSearchItem, 0, len(rows))
+				for _, r := range rows {
+					tmdbSorted = append(tmdbSorted, r.Item)
 				}
 
-				out = append(out, base)
-				if len(out) >= startIndex+limit {
-					break
+				// Filter site hits by IncludeItemTypes. Site cards are emitted as Series.
+				if _, ok := typesSet["series"]; !ok {
+					siteHits = []embySiteSearchHit{}
+				}
+				siteSorted = siteHits
+
+				embySearchCachePut(cacheKey, embySearchCacheEntry{TMDB: tmdbSorted, Sites: siteSorted}, 30*time.Minute)
+				if strings.TrimSpace(scoreTerm) != "" && strings.TrimSpace(scoreTerm) != strings.TrimSpace(searchTerm) {
+					embyDebugPrintf("[emby][search] term=%q folded=%q tmdb=%d sites=%d cost=%s", searchTerm, scoreTerm, len(tmdbSorted), len(siteSorted), time.Since(startAt).String())
+				} else {
+					embyDebugPrintf("[emby][search] term=%q tmdb=%d sites=%d cost=%s", searchTerm, len(tmdbSorted), len(siteSorted), time.Since(startAt).String())
 				}
 			}
-			total := len(out)
+
+			total := len(tmdbSorted) + len(siteSorted)
 			if startIndex > total {
 				startIndex = total
 			}
-			end := startIndex + limit
+			// Infuse search UI often doesn't page; return full results so it can show the complete list.
+			effectiveLimit := limit
+			if embyIsInfuseClient(r) {
+				effectiveLimit = 1 << 30
+			}
+			end := startIndex + effectiveLimit
 			if end > total {
 				end = total
 			}
-			page := out
-			if startIndex < total {
-				page = out[startIndex:end]
-			} else {
-				page = []map[string]any{}
+
+			page := make([]map[string]any, 0, maxInt(0, end-startIndex))
+			for idx := startIndex; idx < end; idx++ {
+				rank := idx
+				if idx < len(tmdbSorted) {
+					it := tmdbSorted[idx]
+					base := embyBuildBaseItemFromSearch(it)
+					if base == nil {
+						continue
+					}
+					base["ParentId"] = nil
+					id, _ := base["Id"].(string)
+
+					// Some clients treat movie search results as playable items and rely on MediaSources.
+					isFolder, _ := base["IsFolder"].(bool)
+					if !isFolder && strings.TrimSpace(id) != "" {
+						mediaPath := embyBuildMediaPath(id, "mp4")
+						mediaSourceID := embyStableHex32(id)
+						base["LocationType"] = "FileSystem"
+						base["Path"] = mediaPath
+						base["Container"] = "mp4,m4v"
+						base["MediaSources"] = []map[string]any{
+							{
+								"Protocol":                "File",
+								"Id":                      mediaSourceID,
+								"MediaSourceId":           mediaSourceID,
+								"Path":                    mediaPath,
+								"Type":                    "Default",
+								"Container":               "mp4",
+								"Size":                    0,
+								"Name":                    base["Name"],
+								"IsRemote":                false,
+								"ETag":                    mediaSourceID,
+								"RunTimeTicks":            0,
+								"ReadAtNativeFramerate":   false,
+								"IgnoreDts":               false,
+								"IgnoreIndex":             false,
+								"GenPtsInput":             false,
+								"SupportsTranscoding":     true,
+								"SupportsDirectStream":    true,
+								"SupportsDirectPlay":      true,
+								"IsInfiniteStream":        false,
+								"RequiresOpening":         false,
+								"RequiresClosing":         false,
+								"RequiresLooping":         false,
+								"SupportsProbing":         true,
+								"VideoType":               "VideoFile",
+								"MediaStreams":            []any{},
+								"MediaAttachments":        []any{},
+								"Formats":                 []any{},
+								"Bitrate":                 0,
+								"RequiredHttpHeaders":     map[string]any{},
+								"DefaultAudioStreamIndex": 0,
+							},
+						}
+						base["AlternateMediaSources"] = []any{}
+					}
+
+					embyEnsureInfuseItemFields(base, id, fieldsParam, serverID)
+					base["SortName"] = fmt.Sprintf("%06d", rank)
+					page = append(page, base)
+					continue
+				}
+
+				h := siteSorted[idx-len(tmdbSorted)]
+				siteID := embyBuildSiteItemID(h.SiteKey, h.SpiderAPI, h.VideoID)
+				if strings.TrimSpace(siteID) == "" || strings.TrimSpace(h.Name) == "" {
+					continue
+				}
+				siteName := strings.TrimSpace(h.SiteName)
+				if siteName == "" {
+					siteName = strings.TrimSpace(h.SiteKey)
+				}
+				embySiteMapPut(siteID, embySiteMapEntry{
+					SiteKey:   strings.TrimSpace(h.SiteKey),
+					SpiderAPI: strings.TrimSpace(h.SpiderAPI),
+					VideoID:   strings.TrimSpace(h.VideoID),
+					Name:      strings.TrimSpace(h.Name),
+					Pic:       strings.TrimSpace(h.Pic),
+					Remark:    strings.TrimSpace(h.Remark),
+				}, 30*time.Minute)
+
+				obj := map[string]any{
+					"Id":                siteID,
+					"Name":              strings.TrimSpace(h.Name),
+					"Type":              "Series",
+					"IsFolder":          true,
+					"ProductionYear":    0,
+					"ImageTags":         map[string]any{"Primary": "site"},
+					"BackdropImageTags": []string{},
+					"ProviderIds":       map[string]any{},
+					"Overview":          strings.TrimSpace(h.Remark),
+				}
+				if siteName != "" {
+					obj["ProductionLocations"] = []string{siteName}
+				}
+				obj["ParentId"] = nil
+				embyEnsureInfuseItemFields(obj, siteID, fieldsParam, serverID)
+				obj["SortName"] = fmt.Sprintf("%06d", rank)
+				page = append(page, obj)
 			}
+
 			page = embyFilterItemsByExcludeLocationTypes(page, excludeLocationTypes)
 			writeJSON(w, 200, embyPagedItems(page, startIndex, total))
 			return
@@ -779,6 +945,11 @@ func embyEnsureInfuseItemFields(obj map[string]any, itemID string, fieldsParam s
 	if _, want := fields["ProviderIds"]; want {
 		if _, ok := obj["ProviderIds"]; !ok {
 			obj["ProviderIds"] = map[string]any{}
+		}
+	}
+	if _, want := fields["ProductionLocations"]; want {
+		if _, ok := obj["ProductionLocations"]; !ok {
+			obj["ProductionLocations"] = []string{}
 		}
 	}
 	if _, want := fields["RecursiveItemCount"]; want {
