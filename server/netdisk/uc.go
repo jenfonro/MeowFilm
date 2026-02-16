@@ -102,6 +102,361 @@ func ucQRDoReq(client *http.Client, method string, urlStr string, body []byte, h
 	return buf, resp.Header, nil
 }
 
+// --- Share list/play (direct cloud-drive API) ---
+
+const (
+	ucShareAPIBase      = "https://pc-api.uc.cn/1/clouddrive"
+	ucShareReferer      = "https://drive.uc.cn"
+	ucShareUA           = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) uc-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch"
+	ucShareAPIQueryBase = ucShareAPIBase + "?pr=UCBrowser&fr=pc"
+)
+
+func parseUCShareIDFromFlag(flag string) string {
+	s := strings.TrimSpace(flag)
+	if s == "" {
+		return ""
+	}
+	if strings.HasPrefix(s, "优夕-") {
+		return strings.TrimSpace(strings.TrimPrefix(s, "优夕-"))
+	}
+	if strings.HasPrefix(strings.ToLower(s), "uc-") {
+		return strings.TrimSpace(s[3:])
+	}
+	return ""
+}
+
+func buildUCShareHeaders(cookie string) http.Header {
+	h := http.Header{}
+	h.Set("User-Agent", ucShareUA)
+	h.Set("Referer", ucShareReferer)
+	h.Set("Accept", "application/json, text/plain, */*")
+	h.Set("Content-Type", "application/json")
+	h.Set("Accept-Encoding", "gzip, deflate, br")
+	if strings.TrimSpace(cookie) != "" {
+		h.Set("Cookie", strings.TrimSpace(cookie))
+	}
+	return h
+}
+
+func ucShareDoJSON(method string, urlStr string, headers http.Header, body []byte, out any) error {
+	client := &http.Client{Timeout: 18 * time.Second}
+	req, err := http.NewRequest(method, urlStr, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	for k, vv := range headers {
+		for _, v := range vv {
+			req.Header.Add(k, v)
+		}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return errors.New("uc http " + strconv.Itoa(resp.StatusCode) + ": " + strings.TrimSpace(string(b)))
+	}
+	return json.Unmarshal(bytes.TrimSpace(b), out)
+}
+
+type ucShareTokenResp struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    struct {
+		Stoken string `json:"stoken"`
+	} `json:"data"`
+}
+
+func ucShareGetStoken(shareID string, passcode string, cookie string) (string, error) {
+	pwdID := strings.TrimSpace(shareID)
+	if pwdID == "" {
+		return "", errors.New("missing shareId")
+	}
+	u := ucShareAPIBase + "/share/sharepage/token?pr=UCBrowser&fr=pc"
+	body := map[string]any{"pwd_id": pwdID}
+	pc := strings.TrimSpace(passcode)
+	if pc != "" {
+		body["passcode"] = pc
+	}
+	b, _ := json.Marshal(body)
+	var resp ucShareTokenResp
+	if err := ucShareDoJSON(http.MethodPost, u, buildUCShareHeaders(cookie), b, &resp); err != nil {
+		return "", err
+	}
+	if resp.Code != 0 && resp.Code != 200 {
+		msg := strings.TrimSpace(resp.Message)
+		if msg == "" {
+			msg = "share token failed"
+		}
+		return "", errors.New(msg)
+	}
+	st := strings.TrimSpace(resp.Data.Stoken)
+	if st == "" {
+		return "", errors.New("stoken not found")
+	}
+	return st, nil
+}
+
+type ucShareDetailResp struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    struct {
+		List []map[string]any `json:"list"`
+	} `json:"data"`
+}
+
+func ucShareDetail(shareID string, stoken string, cookie string) (ucShareDetailResp, error) {
+	pwdID := strings.TrimSpace(shareID)
+	sToken := strings.TrimSpace(stoken)
+	if pwdID == "" || sToken == "" {
+		return ucShareDetailResp{}, errors.New("missing uc share parameters")
+	}
+	u, _ := url.Parse(ucShareAPIBase + "/share/sharepage/detail?pr=UCBrowser&fr=pc")
+	q := u.Query()
+	q.Set("pwd_id", pwdID)
+	q.Set("stoken", sToken)
+	q.Set("pdir_fid", "0")
+	q.Set("force", "0")
+	q.Set("_page", "1")
+	q.Set("_size", "200")
+	q.Set("_sort", "file_type:asc,file_name:asc")
+	u.RawQuery = q.Encode()
+
+	var resp ucShareDetailResp
+	h := buildUCShareHeaders(cookie)
+	h.Del("Content-Type")
+	if err := ucShareDoJSON(http.MethodGet, u.String(), h, nil, &resp); err != nil {
+		return ucShareDetailResp{}, err
+	}
+	if resp.Code != 0 && resp.Code != 200 {
+		msg := strings.TrimSpace(resp.Message)
+		if msg == "" {
+			msg = "share detail failed"
+		}
+		return ucShareDetailResp{}, errors.New(msg)
+	}
+	return resp, nil
+}
+
+func ucShareIsDirItem(it map[string]any) bool {
+	if it == nil {
+		return false
+	}
+	if v, ok := it["dir"].(bool); ok && v {
+		return true
+	}
+	if v, ok := it["file"].(bool); ok && !v {
+		return true
+	}
+	if ft, ok := it["file_type"].(float64); ok && int(ft) == 0 {
+		return true
+	}
+	return false
+}
+
+func ucShareItemFid(it map[string]any) string {
+	if it == nil {
+		return ""
+	}
+	if v := strings.TrimSpace(toString(it["fid"])); v != "" {
+		return v
+	}
+	return strings.TrimSpace(toString(it["file_id"]))
+}
+
+func ucShareItemFidToken(it map[string]any) string {
+	if it == nil {
+		return ""
+	}
+	if v := strings.TrimSpace(toString(it["share_fid_token"])); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(toString(it["fid_token"])); v != "" {
+		return v
+	}
+	return strings.TrimSpace(toString(it["token"]))
+}
+
+func ucShareItemName(it map[string]any) string {
+	if it == nil {
+		return ""
+	}
+	if v := strings.TrimSpace(toString(it["file_name"])); v != "" {
+		return v
+	}
+	return strings.TrimSpace(toString(it["name"]))
+}
+
+func UCList(database *db.DB, flag string, passcode string) (string, string, error) {
+	shareID := parseUCShareIDFromFlag(flag)
+	if shareID == "" {
+		return "", "", errors.New("missing/invalid flag (expected: 优夕-<shareId>)")
+	}
+	store := readPanLoginSettings(database)
+	cookie := getPanField(store, "uc", "cookie")
+	if cookie == "" {
+		return "", "", errors.New("missing uc cookie (pan_login_settings[\"uc\"].cookie)")
+	}
+	stoken, err := ucShareGetStoken(shareID, passcode, cookie)
+	if err != nil {
+		return "", shareID, err
+	}
+	detail, err := ucShareDetail(shareID, stoken, cookie)
+	if err != nil {
+		return "", shareID, err
+	}
+	parts := []string{}
+	for _, it := range detail.Data.List {
+		if ucShareIsDirItem(it) {
+			continue
+		}
+		fid := ucShareItemFid(it)
+		fidToken := ucShareItemFidToken(it)
+		name := ucShareItemName(it)
+		if fid == "" || fidToken == "" || name == "" {
+			continue
+		}
+		id := shareID + "*" + stoken + "*" + fid + "*" + fidToken + "***" + name
+		parts = append(parts, name+"$"+id)
+	}
+	return strings.Join(parts, "#"), shareID, nil
+}
+
+type ucDownloadResp struct {
+	Data any `json:"data"`
+}
+
+func ucDirectDownload(fid string, fidToken string, cookie string, want string) (string, error) {
+	fID := strings.TrimSpace(fid)
+	if fID == "" {
+		return "", errors.New("missing fid")
+	}
+	wantMode := strings.TrimSpace(want)
+	if wantMode == "" {
+		wantMode = "download_url"
+	}
+	u := ucShareAPIBase + "/file/download?pr=UCBrowser&fr=pc"
+	body := map[string]any{"fid": fID, "fids": []any{fID}}
+	if strings.TrimSpace(fidToken) != "" {
+		body["fid_token"] = strings.TrimSpace(fidToken)
+		body["fid_token_list"] = []any{strings.TrimSpace(fidToken)}
+	}
+	b, _ := json.Marshal(body)
+	var resp ucDownloadResp
+	if err := ucShareDoJSON(http.MethodPost, u, buildUCShareHeaders(cookie), b, &resp); err != nil {
+		return "", err
+	}
+	var out string
+	if m, ok := resp.Data.(map[string]any); ok {
+		if inner, ok := m["data"]; ok {
+			switch x := inner.(type) {
+			case []any:
+				for _, it := range x {
+					im, _ := it.(map[string]any)
+					if im == nil {
+						continue
+					}
+					if v, ok := im[wantMode].(string); ok && strings.TrimSpace(v) != "" {
+						out = strings.TrimSpace(v)
+						break
+					}
+					if v, ok := im["download_url"].(string); ok && strings.TrimSpace(v) != "" {
+						out = strings.TrimSpace(v)
+						break
+					}
+					if v, ok := im["play_url"].(string); ok && strings.TrimSpace(v) != "" {
+						out = strings.TrimSpace(v)
+						break
+					}
+				}
+			case map[string]any:
+				if v, ok := x[wantMode].(string); ok && strings.TrimSpace(v) != "" {
+					out = strings.TrimSpace(v)
+				} else if v, ok := x["download_url"].(string); ok && strings.TrimSpace(v) != "" {
+					out = strings.TrimSpace(v)
+				} else if v, ok := x["play_url"].(string); ok && strings.TrimSpace(v) != "" {
+					out = strings.TrimSpace(v)
+				}
+			}
+		}
+	}
+	if out == "" {
+		return "", errors.New("direct download url not found")
+	}
+	return out, nil
+}
+
+func UCPlay(database *db.DB, id string, want string) (string, map[string]string, error) {
+	_, _, fid, fidToken, _ := parseQuarkPlayID(id)
+	if fid == "" {
+		return "", nil, errors.New("invalid id (missing fid)")
+	}
+	store := readPanLoginSettings(database)
+	cookie := getPanField(store, "uc", "cookie")
+	if cookie == "" {
+		return "", nil, errors.New("missing uc cookie (pan_login_settings[\"uc\"].cookie)")
+	}
+	u, err := ucDirectDownload(fid, fidToken, cookie, want)
+	if err != nil {
+		return "", nil, err
+	}
+	headers := map[string]string{
+		"Cookie":     cookie,
+		"Referer":    ucShareReferer,
+		"User-Agent": ucShareUA,
+	}
+	return u, headers, nil
+}
+
+func HandleAPIUCList(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var body struct {
+		Flag     string `json:"flag"`
+		Passcode string `json:"passcode"`
+		Pwd      string `json:"pwd"`
+	}
+	_ = readJSONLoose(r, &body)
+	flag := strings.TrimSpace(body.Flag)
+	passcode := strings.TrimSpace(body.Passcode)
+	if passcode == "" {
+		passcode = strings.TrimSpace(body.Pwd)
+	}
+	vod, shareID, err := UCList(database, flag, passcode)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "flag": flag, "shareId": shareID, "vod_play_url": vod})
+}
+
+func HandleAPIUCPlay(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var body struct {
+		ID   string `json:"id"`
+		Want string `json:"want"`
+	}
+	_ = readJSONLoose(r, &body)
+	id := strings.TrimSpace(body.ID)
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "missing id"})
+		return
+	}
+	u, header, err := UCPlay(database, id, strings.TrimSpace(body.Want))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "parse": 0, "url": u, "headers": header})
+}
+
 func buildUCHeaders(extra map[string]string) map[string]string {
 	h := map[string]string{
 		"User-Agent":      ucQRUA,
