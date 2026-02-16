@@ -8,8 +8,9 @@ import (
 
 	"github.com/jenfonro/meowfilm/internal/auth"
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/api"
+	"github.com/jenfonro/meowfilm/server/dashboard"
 	"github.com/jenfonro/meowfilm/server/emby"
-	"github.com/jenfonro/meowfilm/server/routes"
 	"github.com/jenfonro/meowfilm/server/static"
 )
 
@@ -42,7 +43,7 @@ func New(cfg Config) (*Server, error) {
 
 	mux := http.NewServeMux()
 
-	mux.Handle("/api/", routes.APIHandler(database, authMw))
+	mux.Handle("/api/", api.Handler(database, authMw))
 	// Debug endpoints (enabled only when MEOWFILM_DEBUG=1).
 	mux.Handle("/listdebug", emby.RegexListDebugHandler(database))
 	mux.Handle("/searchdebug", emby.RegexSearchDebugHandler(database))
@@ -50,7 +51,7 @@ func New(cfg Config) (*Server, error) {
 	// Emby is the canonical API surface; keep a compatible legacy alias path.
 	mux.Handle("/emby/", embyAPI)
 	mux.Handle("/jellyfin/", embyAPI)
-	dashboardAPI := routes.DashboardHandler(database, authMw)
+	dashboardAPI := dashboard.Handler(database, authMw)
 	staticHandler := static.Handler(authMw)
 	mux.Handle("/dashboard/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/dashboard/" {
