@@ -1,4 +1,4 @@
-package routes
+package netdisk
 
 import (
 	"bytes"
@@ -323,7 +323,7 @@ func pan115LoginCookie(client *http.Client, uid string) (string, error) {
 	return "", errors.New("115 cookie missing")
 }
 
-func handleDashboard115QRStart(w http.ResponseWriter, r *http.Request, database *db.DB) {
+func HandleDashboard115QRStart(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return
@@ -361,7 +361,7 @@ func handleDashboard115QRStart(w http.ResponseWriter, r *http.Request, database 
 	_ = database
 }
 
-func handleDashboard115QRImage(w http.ResponseWriter, r *http.Request) {
+func HandleDashboard115QRImage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
 		return
@@ -391,7 +391,7 @@ func handleDashboard115QRImage(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(s.Image)
 }
 
-func handleDashboard115QRCookie(w http.ResponseWriter, r *http.Request, database *db.DB) {
+func HandleDashboard115QRCookie(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return

@@ -1,4 +1,4 @@
-package routes
+package netdisk
 
 import (
 	"bytes"
@@ -294,7 +294,7 @@ func biliPollStatus(client *http.Client, qrKey string) (status string, redirectU
 	}
 }
 
-func handleDashboardBiliQRStart(w http.ResponseWriter, r *http.Request, database *db.DB) {
+func HandleDashboardBiliQRStart(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return
@@ -343,7 +343,7 @@ func handleDashboardBiliQRStart(w http.ResponseWriter, r *http.Request, database
 	_ = database
 }
 
-func handleDashboardBiliQRImage(w http.ResponseWriter, r *http.Request) {
+func HandleDashboardBiliQRImage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
 		return
@@ -369,7 +369,7 @@ func handleDashboardBiliQRImage(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(s.Image)
 }
 
-func handleDashboardBiliQRCookie(w http.ResponseWriter, r *http.Request, database *db.DB) {
+func HandleDashboardBiliQRCookie(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return
