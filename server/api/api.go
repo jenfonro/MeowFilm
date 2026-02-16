@@ -18,8 +18,8 @@ import (
 	"github.com/jenfonro/meowfilm/server/magic"
 	"github.com/jenfonro/meowfilm/server/metadata/douban"
 	"github.com/jenfonro/meowfilm/server/metadata/tmdb"
-	"github.com/jenfonro/meowfilm/server/netdisk"
 	mfnet "github.com/jenfonro/meowfilm/server/net"
+	"github.com/jenfonro/meowfilm/server/netdisk"
 	"github.com/jenfonro/meowfilm/server/search"
 	"github.com/jenfonro/meowfilm/server/static"
 )
@@ -360,8 +360,12 @@ func handleAPIHome(w http.ResponseWriter, r *http.Request, database *db.DB) {
 				if isNetDiskHistoryItem(videoID, playFlag) {
 					continue
 				}
+				tmdbType = strings.TrimSpace(tmdbType)
 				key := strings.TrimSpace(contentKey)
-				if key == "" {
+				if tmdbID > 0 && (tmdbType == "tv" || tmdbType == "movie") {
+					key = strings.ToLower("tmdb:" + tmdbType + ":" + strconv.Itoa(tmdbID))
+					contentKey = key
+				} else if key == "" {
 					key = normalizeContentKey(videoTitle)
 					contentKey = key
 				}
@@ -385,7 +389,7 @@ func handleAPIHome(w http.ResponseWriter, r *http.Request, database *db.DB) {
 					"videoPoster":  douban.RewriteVideoPosterURL(videoPoster, doubanImgProxy, doubanImgCustom),
 					"videoRemark":  videoRemark,
 					"tmdbId":       tmdbID,
-					"tmdbType":     strings.TrimSpace(tmdbType),
+					"tmdbType":     tmdbType,
 					"panLabel":     panLabel,
 					"playFlag":     playFlag,
 					"episodeIndex": episodeIndex,
@@ -531,7 +535,10 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 		writeJSON(w, 200, nil)
 		return
 	}
-	if strings.TrimSpace(contentKey) == "" {
+	tmdbType = strings.TrimSpace(tmdbType)
+	if tmdbID > 0 && (tmdbType == "tv" || tmdbType == "movie") {
+		contentKey = strings.ToLower("tmdb:" + tmdbType + ":" + strconv.Itoa(tmdbID))
+	} else if strings.TrimSpace(contentKey) == "" {
 		contentKey = normalizeContentKey(videoTitle)
 	}
 	doubanImgProxy := defaultString(database.GetSetting("douban_img_proxy"), "direct-browser")
@@ -546,7 +553,7 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 		"videoPoster":  douban.RewriteVideoPosterURL(videoPoster, doubanImgProxy, doubanImgCustom),
 		"videoRemark":  videoRemark,
 		"tmdbId":       tmdbID,
-		"tmdbType":     strings.TrimSpace(tmdbType),
+		"tmdbType":     tmdbType,
 		"tmdbSeasons":  strings.TrimSpace(tmdbSeasons),
 		"panLabel":     panLabel,
 		"playFlag":     playFlag,
@@ -601,8 +608,12 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 			if isNetDiskHistoryItem(videoID, playFlag) {
 				continue
 			}
+			tmdbType = strings.TrimSpace(tmdbType)
 			key := strings.TrimSpace(contentKey)
-			if key == "" {
+			if tmdbID > 0 && (tmdbType == "tv" || tmdbType == "movie") {
+				key = strings.ToLower("tmdb:" + tmdbType + ":" + strconv.Itoa(tmdbID))
+				contentKey = key
+			} else if key == "" {
 				key = normalizeContentKey(videoTitle)
 				contentKey = key
 			}
@@ -626,7 +637,7 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 				"videoPoster":  douban.RewriteVideoPosterURL(videoPoster, doubanImgProxy, doubanImgCustom),
 				"videoRemark":  videoRemark,
 				"tmdbId":       tmdbID,
-				"tmdbType":     strings.TrimSpace(tmdbType),
+				"tmdbType":     tmdbType,
 				"tmdbSeasons":  strings.TrimSpace(tmdbSeasons),
 				"panLabel":     panLabel,
 				"playFlag":     playFlag,
@@ -827,10 +838,17 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		}
 
 		// Keep only one record per content (videoTitle) per user: always the latest played site.
-		_, _ = database.SQL().Exec(`
-			DELETE FROM play_history
-			WHERE user_id = ? AND (content_key = ? OR video_title = ?)
-		`, u.ID, contentKey, videoTitle)
+		if tmdbID > 0 && (tmdbType == "tv" || tmdbType == "movie") {
+			_, _ = database.SQL().Exec(`
+				DELETE FROM play_history
+				WHERE user_id = ? AND (content_key = ? OR video_title = ? OR (tmdb_id = ? AND tmdb_type = ?))
+			`, u.ID, contentKey, videoTitle, tmdbID, tmdbType)
+		} else {
+			_, _ = database.SQL().Exec(`
+				DELETE FROM play_history
+				WHERE user_id = ? AND (content_key = ? OR video_title = ?)
+			`, u.ID, contentKey, videoTitle)
+		}
 
 		now := time.Now().Unix()
 		_, _ = database.SQL().Exec(`
