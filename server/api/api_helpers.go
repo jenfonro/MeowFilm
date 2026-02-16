@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/url"
 	"strings"
+
+	"github.com/jenfonro/meowfilm/server/metadata/douban"
 )
 
 type goProxyServer struct {
@@ -138,28 +140,7 @@ func normalizeHTTPBase(value string) string {
 }
 
 func isAllowedDoubanImageHost(hostname string) bool {
-	host := strings.ToLower(strings.TrimSpace(hostname))
-	if host == "" {
-		return false
-	}
-	if strings.HasPrefix(host, "img") && strings.HasSuffix(host, ".doubanio.com") {
-		mid := strings.TrimSuffix(strings.TrimPrefix(host, "img"), ".doubanio.com")
-		if mid == "" {
-			return false
-		}
-		for i := 0; i < len(mid); i++ {
-			if mid[i] < '0' || mid[i] > '9' {
-				return false
-			}
-		}
-		return true
-	}
-	switch host {
-	case "img3.doubanio.com", "img.doubanio.cmliussss.net", "img.doubanio.cmliussss.com":
-		return true
-	default:
-		return false
-	}
+	return douban.IsAllowedImageHost(hostname)
 }
 
 func normalizeProxyBase(value string) string {
