@@ -1,4 +1,4 @@
-package routes
+package netdisk
 
 import (
 	"bytes"
@@ -448,7 +448,7 @@ func quarkQRFinalizeCookies(client *http.Client, jar http.CookieJar, serviceTick
 	return cookieStr, nil
 }
 
-func handleDashboardQuarkQRStart(w http.ResponseWriter, r *http.Request, database *db.DB) {
+func HandleDashboardQuarkQRStart(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return
@@ -501,7 +501,7 @@ func handleDashboardQuarkQRStart(w http.ResponseWriter, r *http.Request, databas
 	_ = database
 }
 
-func handleDashboardQuarkQRImage(w http.ResponseWriter, r *http.Request) {
+func HandleDashboardQuarkQRImage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
 		return
@@ -527,7 +527,7 @@ func handleDashboardQuarkQRImage(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(s.Image)
 }
 
-func handleDashboardQuarkQRCookie(w http.ResponseWriter, r *http.Request, database *db.DB) {
+func HandleDashboardQuarkQRCookie(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return
