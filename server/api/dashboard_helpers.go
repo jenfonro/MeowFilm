@@ -6,18 +6,6 @@ import (
 	"github.com/jenfonro/meowfilm/internal/db"
 )
 
-func normalizeSourceExtractPriority(raw string) string {
-	s := strings.TrimSpace(raw)
-	if s == "" {
-		return "无"
-	}
-
-	if s == "无" || s == "网盘" || s == "关键字" {
-		return s
-	}
-	return "无"
-}
-
 func resolveSearchCoverSite(sites []map[string]any, preferredRaw string) string {
 	preferred := strings.TrimSpace(preferredRaw)
 	keySet := map[string]struct{}{}

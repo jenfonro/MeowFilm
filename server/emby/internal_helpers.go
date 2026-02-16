@@ -2,7 +2,6 @@ package emby
 
 import (
 	"net/http"
-	"strings"
 
 	mfnet "github.com/jenfonro/meowfilm/server/net"
 )
@@ -33,15 +32,4 @@ func minInt(a, b int) int {
 
 func maxInt(a, b int) int {
 	return mfnet.MaxInt(a, b)
-}
-
-func normalizeSourceExtractPriority(raw string) string {
-	s := strings.TrimSpace(raw)
-	if s == "" {
-		return "无"
-	}
-	if s == "无" || s == "网盘" || s == "关键字" {
-		return s
-	}
-	return "无"
 }
