@@ -11,6 +11,7 @@ import (
 
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/catpawopen"
+	"github.com/jenfonro/meowfilm/server/config"
 	"github.com/jenfonro/meowfilm/server/magic"
 )
 
@@ -268,7 +269,7 @@ type smartPlaybackSettings struct {
 }
 
 func smartLoadPlaybackSettings(database *db.DB) smartPlaybackSettings {
-	mode := normalizeSourceExtractPriority(database.GetSetting("smart_source_extract_priority"))
+	mode := config.NormalizeSourceExtractPriority(database.GetSetting("smart_source_extract_priority"))
 	if mode == "" {
 		mode = "无"
 	}

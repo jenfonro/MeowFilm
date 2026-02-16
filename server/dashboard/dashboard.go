@@ -11,6 +11,7 @@ import (
 	"github.com/jenfonro/meowfilm/internal/auth"
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/catpawopen"
+	"github.com/jenfonro/meowfilm/server/config"
 	"github.com/jenfonro/meowfilm/server/magic"
 	"github.com/jenfonro/meowfilm/server/netdisk"
 )
@@ -195,18 +196,6 @@ func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
 	})
 }
 
-func normalizeSourceExtractPriority(raw string) string {
-	s := strings.TrimSpace(raw)
-	if s == "" {
-		return "无"
-	}
-
-	if s == "无" || s == "网盘" || s == "关键字" {
-		return s
-	}
-	return "无"
-}
-
 func readBoolJSONBody(body map[string]any, key string) bool {
 	if body == nil || key == "" {
 		return false
@@ -248,7 +237,7 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 			"success":                    true,
 			"smartPlayEnabled":           readBoolEnabled("smart_play_enabled"),
 			"smartListEnabled":           readBoolEnabled("smart_list_enabled"),
-			"smartSourceExtractPriority": normalizeSourceExtractPriority(database.GetSetting("smart_source_extract_priority")),
+			"smartSourceExtractPriority": config.NormalizeSourceExtractPriority(database.GetSetting("smart_source_extract_priority")),
 			"smartSourcePriorityTokens":  parseJSONStringArray(database.GetSetting("smart_source_priority_tokens")),
 			"smartPanMatchTokens":        parseJSONStringArray(database.GetSetting("smart_pan_match_tokens")),
 		})
@@ -270,7 +259,7 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 		if _, ok := body["smartSourceExtractPriority"]; ok {
 			_ = database.SetSetting(
 				"smart_source_extract_priority",
-				normalizeSourceExtractPriority(readStrJSONBody(body, "smartSourceExtractPriority")),
+				config.NormalizeSourceExtractPriority(readStrJSONBody(body, "smartSourceExtractPriority")),
 			)
 		}
 
@@ -890,7 +879,7 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 		smartSourcePriorityTokens := parseJSONStringArray(database.GetSetting("smart_source_priority_tokens"))
 		smartPanMatchTokens := parseJSONStringArray(database.GetSetting("smart_pan_match_tokens"))
 		smartSourceExtractPriority := strings.TrimSpace(database.GetSetting("smart_source_extract_priority"))
-		smartSourceExtractPriority = normalizeSourceExtractPriority(smartSourceExtractPriority)
+		smartSourceExtractPriority = config.NormalizeSourceExtractPriority(smartSourceExtractPriority)
 		writeJSON(w, 200, map[string]any{
 			"success":                    true,
 			"episodeCleanRegex":          episodeCleanRegex,
@@ -983,7 +972,7 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 		saveStrArrSetting(database, "smart_pan_match_tokens", readCommaTokens("smartPanMatchTokens"))
 
 		priorityRaw, _ := body["smartSourceExtractPriority"].(string)
-		_ = database.SetSetting("smart_source_extract_priority", normalizeSourceExtractPriority(priorityRaw))
+		_ = database.SetSetting("smart_source_extract_priority", config.NormalizeSourceExtractPriority(priorityRaw))
 
 		if legacy := readList("aggregateRules"); len(legacy) > 0 {
 			saveStrArrSetting(database, "magic_aggregate_rules", legacy)
@@ -998,7 +987,7 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 		smartSourcePriorityTokens := parseJSONStringArray(database.GetSetting("smart_source_priority_tokens"))
 		smartPanMatchTokens := parseJSONStringArray(database.GetSetting("smart_pan_match_tokens"))
 		smartSourceExtractPriority := strings.TrimSpace(database.GetSetting("smart_source_extract_priority"))
-		smartSourceExtractPriority = normalizeSourceExtractPriority(smartSourceExtractPriority)
+		smartSourceExtractPriority = config.NormalizeSourceExtractPriority(smartSourceExtractPriority)
 		writeJSON(w, 200, map[string]any{
 			"success":                    true,
 			"episodeCleanRegex":          outEpisodeClean,
