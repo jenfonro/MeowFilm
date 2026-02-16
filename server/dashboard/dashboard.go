@@ -166,9 +166,9 @@ func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardSmartSettings(w, r, database)
 			})).ServeHTTP(w, r)
-		case "/tmdb/settings":
+		case "/metadata/settings":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleDashboardTMDBSettings(w, r, database)
+				handleDashboardMetadataSettings(w, r, database)
 			})).ServeHTTP(w, r)
 		case "/user/list":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -293,7 +293,7 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 	}
 }
 
-func handleDashboardTMDBSettings(w http.ResponseWriter, r *http.Request, database *db.DB) {
+func handleDashboardMetadataSettings(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	bool01 := func(b bool) string {
 		if b {
 			return "1"
@@ -312,13 +312,17 @@ func handleDashboardTMDBSettings(w http.ResponseWriter, r *http.Request, databas
 	}
 	writeOut := func() {
 		writeJSON(w, 200, map[string]any{
-			"success":      true,
-			"v4Token":      strings.TrimSpace(database.GetSetting("tmdb_v4_token")),
-			"v3Key":        strings.TrimSpace(database.GetSetting("tmdb_v3_key")),
-			"apiBase":      strings.TrimSpace(database.GetSetting("tmdb_api_base")),
-			"language":     readStringDefault("tmdb_language", "zh-CN"),
-			"region":       readStringDefault("tmdb_region", "CN"),
-			"includeAdult": readBool("tmdb_include_adult"),
+			"success":            true,
+			"doubanDataProxy":    defaultString(database.GetSetting("douban_data_proxy"), "direct"),
+			"doubanDataCustom":   database.GetSetting("douban_data_custom"),
+			"doubanImgProxy":     defaultString(database.GetSetting("douban_img_proxy"), "direct-browser"),
+			"doubanImgCustom":    database.GetSetting("douban_img_custom"),
+			"tmdbApiToken":       strings.TrimSpace(database.GetSetting("tmdb_api_token")),
+			"tmdbDataProxyBase":  strings.TrimSpace(database.GetSetting("tmdb_api_base")),
+			"tmdbImageProxyBase": strings.TrimSpace(database.GetSetting("tmdb_img_base")),
+			"language":           readStringDefault("tmdb_language", "zh-CN"),
+			"region":             readStringDefault("tmdb_region", "CN"),
+			"includeAdult":       readBool("tmdb_include_adult"),
 		})
 	}
 
@@ -329,9 +333,14 @@ func handleDashboardTMDBSettings(w http.ResponseWriter, r *http.Request, databas
 		var body map[string]any
 		_ = readJSONLoose(r, &body)
 
-		_ = database.SetSetting("tmdb_v4_token", readStrJSONBody(body, "v4Token"))
-		_ = database.SetSetting("tmdb_v3_key", readStrJSONBody(body, "v3Key"))
-		_ = database.SetSetting("tmdb_api_base", normalizeHTTPBase(readStrJSONBody(body, "apiBase")))
+		_ = database.SetSetting("douban_data_proxy", readStrJSONBody(body, "doubanDataProxy"))
+		_ = database.SetSetting("douban_data_custom", readStrJSONBody(body, "doubanDataCustom"))
+		_ = database.SetSetting("douban_img_proxy", readStrJSONBody(body, "doubanImgProxy"))
+		_ = database.SetSetting("douban_img_custom", readStrJSONBody(body, "doubanImgCustom"))
+
+		_ = database.SetSetting("tmdb_api_token", readStrJSONBody(body, "tmdbApiToken"))
+		_ = database.SetSetting("tmdb_api_base", normalizeHTTPBase(readStrJSONBody(body, "tmdbDataProxyBase")))
+		_ = database.SetSetting("tmdb_img_base", normalizeHTTPBase(readStrJSONBody(body, "tmdbImageProxyBase")))
 		_ = database.SetSetting("tmdb_language", readStrJSONBody(body, "language"))
 		_ = database.SetSetting("tmdb_region", readStrJSONBody(body, "region"))
 		_ = database.SetSetting("tmdb_include_adult", bool01(readBoolJSONBody(body, "includeAdult")))
@@ -351,14 +360,6 @@ func handleDashboardSiteSave(w http.ResponseWriter, r *http.Request, database *d
 	siteName := strings.TrimSpace(r.FormValue("siteName"))
 	searchDisplayMode := strings.TrimSpace(r.FormValue("searchDisplayMode"))
 	searchBadgePreferEpisode := boolFromForm(r.FormValue("searchBadgePreferEpisode"))
-	doubanDataProxy := strings.TrimSpace(r.FormValue("doubanDataProxy"))
-	doubanDataCustom := strings.TrimSpace(r.FormValue("doubanDataCustom"))
-	doubanImgProxy := strings.TrimSpace(r.FormValue("doubanImgProxy"))
-	doubanImgCustom := strings.TrimSpace(r.FormValue("doubanImgCustom"))
-	if doubanDataProxy == "" || doubanImgProxy == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数无效"})
-		return
-	}
 	if siteName != "" {
 		_ = database.SetSetting("site_name", siteName)
 	}
@@ -372,10 +373,6 @@ func handleDashboardSiteSave(w http.ResponseWriter, r *http.Request, database *d
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数无效"})
 		return
 	}
-	_ = database.SetSetting("douban_data_proxy", doubanDataProxy)
-	_ = database.SetSetting("douban_data_custom", doubanDataCustom)
-	_ = database.SetSetting("douban_img_proxy", doubanImgProxy)
-	_ = database.SetSetting("douban_img_custom", doubanImgCustom)
 	if searchBadgePreferEpisode {
 		_ = database.SetSetting("search_badge_prefer_episode", "1")
 	} else {
@@ -518,10 +515,6 @@ func handleDashboardSiteSettings(w http.ResponseWriter, r *http.Request, databas
 		"goProxyEnabled":           strings.TrimSpace(database.GetSetting("goproxy_enabled")) == "1",
 		"goProxyAutoSelect":        strings.TrimSpace(database.GetSetting("goproxy_auto_select")) == "1",
 		"goProxyServersJson":       defaultString(database.GetSetting("goproxy_servers"), "[]"),
-		"doubanDataProxy":          defaultString(database.GetSetting("douban_data_proxy"), "direct"),
-		"doubanDataCustom":         database.GetSetting("douban_data_custom"),
-		"doubanImgProxy":           defaultString(database.GetSetting("douban_img_proxy"), "direct-browser"),
-		"doubanImgCustom":          database.GetSetting("douban_img_custom"),
 	})
 }
 
