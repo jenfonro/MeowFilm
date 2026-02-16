@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/metadata/douban"
 )
 
 type embyDoubanHotItem struct {
@@ -22,46 +23,11 @@ type embyDoubanHotItem struct {
 }
 
 func embyDoubanAPIBase(database *db.DB) (base string, proxyBase string) {
-	if database == nil {
-		return "https://m.douban.com", ""
-	}
-	mode := strings.TrimSpace(database.GetSetting("douban_data_proxy"))
-	custom := strings.TrimSpace(database.GetSetting("douban_data_custom"))
-	switch mode {
-	case "cdn-tx", "cmliussss-cdn-tencent":
-		return "https://m.douban.cmliussss.net", ""
-	case "cdn-ali", "cmliussss-cdn-ali":
-		return "https://m.douban.cmliussss.com", ""
-	case "cors", "cors-proxy-zwei", "ciao-cors":
-		return "https://m.douban.com", "https://ciao-cors.is-an.org/"
-	case "cors-anywhere":
-		return "https://m.douban.com", "https://cors-anywhere.com/"
-	case "custom":
-		if custom != "" {
-			return "https://m.douban.com", strings.TrimSpace(custom)
-		}
-		return "https://m.douban.com", ""
-	default:
-		return "https://m.douban.com", ""
-	}
+	return douban.APIBase(database)
 }
 
 func embyDoubanToProxiedURL(targetURL string, proxyBase string) string {
-	t := strings.TrimSpace(targetURL)
-	p := strings.TrimSpace(proxyBase)
-	if t == "" || p == "" {
-		return t
-	}
-	if !strings.HasSuffix(p, "/") && !strings.HasSuffix(p, "?") && !strings.HasSuffix(p, "&") && !strings.HasSuffix(p, "=") {
-		p = p + "/"
-	}
-	// Match frontend behavior:
-	// - cors-anywhere: proxyBase + targetUrl
-	// - others: proxyBase + encodeURIComponent(targetUrl)
-	if strings.Contains(p, "cors-anywhere.com/") {
-		return p + t
-	}
-	return p + url.PathEscape(t)
+	return douban.ToProxiedURL(targetURL, proxyBase)
 }
 
 func embyDoubanFetchRecentHot(database *db.DB, kind string, category string, hotType string, start int, limit int) ([]embyDoubanHotItem, error) {
