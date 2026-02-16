@@ -187,6 +187,10 @@ func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
 			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				netdisk.HandleAPIBaiduPlay(w, r, database)
 			})).ServeHTTP(w, r)
+		case "/pan/batch/list":
+			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleAPIPanBatchList(w, r, database)
+			})).ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
