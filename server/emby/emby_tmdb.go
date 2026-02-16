@@ -171,7 +171,7 @@ func embyCachedPersonProfile(personID int) string {
 	return strings.TrimSpace(hit.Path)
 }
 
-func embyTMDBImageURL(path string, size string) string {
+func embyTMDBImageURL(database *db.DB, path string, size string) string {
 	p := strings.TrimSpace(path)
 	if p == "" {
 		return ""
@@ -183,12 +183,18 @@ func embyTMDBImageURL(path string, size string) string {
 	if sz == "" {
 		sz = "w500"
 	}
-	return "https://image.tmdb.org/t/p/" + sz + p
+	return tmdb.JoinImage(tmdb.ResolveImageBase(database), "t/p/"+sz+p)
 }
 
 func embyTMDBClient(database *db.DB) (*http.Client, string, string, string, string, bool) {
-	v4 := strings.TrimSpace(database.GetSetting("tmdb_v4_token"))
-	v3 := strings.TrimSpace(database.GetSetting("tmdb_v3_key"))
+	token, tokenKind := tmdb.ResolveToken(database)
+	v4 := ""
+	v3 := ""
+	if tokenKind == "v4" {
+		v4 = token
+	} else if tokenKind == "v3" {
+		v3 = token
+	}
 	lang := strings.TrimSpace(database.GetSetting("tmdb_language"))
 	if lang == "" {
 		lang = "zh-CN"

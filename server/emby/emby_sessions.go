@@ -231,7 +231,7 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 		videoTitle = itemID
 	}
 	if videoPoster != "" {
-		videoPoster = embyTMDBImageURL(videoPoster, "w500")
+		videoPoster = embyTMDBImageURL(database, videoPoster, "w500")
 	}
 
 	contentKey := strings.TrimSpace(strings.ToLower(fmt.Sprintf("tmdb:%s:%d", tmdbType, tmdbID)))
