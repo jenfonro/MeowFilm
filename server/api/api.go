@@ -13,8 +13,10 @@ import (
 	"github.com/jenfonro/meowfilm/internal/auth"
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/catpawopen"
+	"github.com/jenfonro/meowfilm/server/config"
 	"github.com/jenfonro/meowfilm/server/emby"
 	"github.com/jenfonro/meowfilm/server/magic"
+	"github.com/jenfonro/meowfilm/server/metadata/douban"
 	"github.com/jenfonro/meowfilm/server/metadata/tmdb"
 	mfnet "github.com/jenfonro/meowfilm/server/net"
 	"github.com/jenfonro/meowfilm/server/search"
@@ -184,7 +186,7 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 			settings["magicAggregateRegexRules"] = parseJSONStringArray(database.GetSetting("magic_aggregate_regex_rules"))
 			settings["smartSourcePriorityTokens"] = parseJSONStringArray(database.GetSetting("smart_source_priority_tokens"))
 			settings["smartPanMatchTokens"] = parseJSONStringArray(database.GetSetting("smart_pan_match_tokens"))
-			settings["smartSourceExtractPriority"] = normalizeSourceExtractPriority(database.GetSetting("smart_source_extract_priority"))
+			settings["smartSourceExtractPriority"] = config.NormalizeSourceExtractPriority(database.GetSetting("smart_source_extract_priority"))
 			settings["smartPlayEnabled"] = strings.TrimSpace(database.GetSetting("smart_play_enabled")) != "0"
 			settings["smartListEnabled"] = strings.TrimSpace(database.GetSetting("smart_list_enabled")) != "0"
 			displayMode := strings.TrimSpace(database.GetSetting("search_display_mode"))
@@ -339,7 +341,7 @@ func handleAPIHome(w http.ResponseWriter, r *http.Request, database *db.DB) {
 					"spiderApi":    spiderAPI,
 					"videoId":      videoID,
 					"videoTitle":   videoTitle,
-					"videoPoster":  rewriteVideoPosterURL(videoPoster, doubanImgProxy, doubanImgCustom),
+					"videoPoster":  douban.RewriteVideoPosterURL(videoPoster, doubanImgProxy, doubanImgCustom),
 					"videoRemark":  videoRemark,
 					"tmdbId":       tmdbID,
 					"tmdbType":     strings.TrimSpace(tmdbType),
@@ -386,7 +388,7 @@ func handleAPIHome(w http.ResponseWriter, r *http.Request, database *db.DB) {
 					"spiderApi":   spiderAPI,
 					"videoId":     videoID,
 					"videoTitle":  videoTitle,
-					"videoPoster": rewriteVideoPosterURL(videoPoster, doubanImgProxy, doubanImgCustom),
+					"videoPoster": douban.RewriteVideoPosterURL(videoPoster, doubanImgProxy, doubanImgCustom),
 					"videoRemark": videoRemark,
 					"updatedAt":   updatedAt,
 				})
@@ -500,7 +502,7 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 		"spiderApi":    spiderAPI,
 		"videoId":      videoID,
 		"videoTitle":   videoTitle,
-		"videoPoster":  rewriteVideoPosterURL(videoPoster, doubanImgProxy, doubanImgCustom),
+		"videoPoster":  douban.RewriteVideoPosterURL(videoPoster, doubanImgProxy, doubanImgCustom),
 		"videoRemark":  videoRemark,
 		"tmdbId":       tmdbID,
 		"tmdbType":     strings.TrimSpace(tmdbType),
@@ -580,7 +582,7 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 				"spiderApi":    spiderAPI,
 				"videoId":      videoID,
 				"videoTitle":   videoTitle,
-				"videoPoster":  rewriteVideoPosterURL(videoPoster, doubanImgProxy, doubanImgCustom),
+				"videoPoster":  douban.RewriteVideoPosterURL(videoPoster, doubanImgProxy, doubanImgCustom),
 				"videoRemark":  videoRemark,
 				"tmdbId":       tmdbID,
 				"tmdbType":     strings.TrimSpace(tmdbType),
@@ -883,7 +885,7 @@ func handleAPIFavorites(w http.ResponseWriter, r *http.Request, database *db.DB)
 			"spiderApi":   spiderAPI,
 			"videoId":     videoID,
 			"videoTitle":  videoTitle,
-			"videoPoster": rewriteVideoPosterURL(videoPoster, doubanImgProxy, doubanImgCustom),
+			"videoPoster": douban.RewriteVideoPosterURL(videoPoster, doubanImgProxy, doubanImgCustom),
 			"videoRemark": videoRemark,
 			"updatedAt":   updatedAt,
 		})
@@ -1732,7 +1734,7 @@ func handleAPIDoubanImage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "URL 无效"})
 		return
 	}
-	if !isAllowedDoubanImageHost(parsed.Hostname()) {
+	if !douban.IsAllowedImageHost(parsed.Hostname()) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"success": false, "message": "不允许的图片域名"})
 		return
 	}
