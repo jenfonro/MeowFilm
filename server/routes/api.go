@@ -13,6 +13,7 @@ import (
 	"github.com/jenfonro/meowfilm/internal/auth"
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/catpawopen"
+	"github.com/jenfonro/meowfilm/server/emby"
 	"github.com/jenfonro/meowfilm/server/search"
 	"github.com/jenfonro/meowfilm/server/tmdb"
 )
@@ -740,7 +741,7 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		// Derive a Emby item id for resume syncing when possible.
 		if playbackItemID == "" && tmdbID > 0 {
 			if tmdbType == "movie" {
-				playbackItemID = embyBuildMovieID(tmdbID)
+				playbackItemID = emby.BuildMovieID(tmdbID)
 			} else if tmdbType == "tv" {
 				seasonNo := tmdbSeason
 				epNo := tmdbEpisode
@@ -757,7 +758,7 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 					}
 				}
 				if seasonNo > 0 && epNo > 0 {
-					playbackItemID = embyBuildEpisodeID(tmdbID, seasonNo, epNo)
+					playbackItemID = emby.BuildEpisodeID(tmdbID, seasonNo, epNo)
 				}
 			}
 		}
