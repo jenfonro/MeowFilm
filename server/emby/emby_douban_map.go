@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
-	"github.com/jenfonro/meowfilm/server/tmdb"
+	"github.com/jenfonro/meowfilm/server/metadata/tmdb"
 )
 
 type embyDoubanTMDBMap struct {

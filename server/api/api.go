@@ -15,9 +15,9 @@ import (
 	"github.com/jenfonro/meowfilm/server/catpawopen"
 	"github.com/jenfonro/meowfilm/server/emby"
 	"github.com/jenfonro/meowfilm/server/magic"
+	"github.com/jenfonro/meowfilm/server/metadata/tmdb"
 	"github.com/jenfonro/meowfilm/server/search"
 	"github.com/jenfonro/meowfilm/server/static"
-	"github.com/jenfonro/meowfilm/server/tmdb"
 )
 
 type userSettingsRow struct {
