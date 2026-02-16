@@ -14,6 +14,7 @@ import (
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/catpawopen"
 	"github.com/jenfonro/meowfilm/server/emby"
+	"github.com/jenfonro/meowfilm/server/magic"
 	"github.com/jenfonro/meowfilm/server/search"
 	"github.com/jenfonro/meowfilm/server/tmdb"
 )
@@ -174,7 +175,7 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 			settings["goProxyAutoSelect"] = strings.TrimSpace(database.GetSetting("goproxy_auto_select")) == "1"
 			settings["goProxyServers"] = normalizeGoProxyServers(database.GetSetting("goproxy_servers"))
 
-			_ = migrateMagicAggregateKeywordRulesToRegex(database)
+			_ = magic.MigrateAggregateKeywordRulesToRegex(database)
 			settings["magicEpisodeRules"] = parseJSONStringArray(database.GetSetting("magic_episode_rules"))
 			settings["magicEpisodeCleanRegexRules"] = parseJSONStringArray(database.GetSetting("magic_episode_clean_regex_rules"))
 			settings["magicMovieRules"] = parseJSONStringArray(database.GetSetting("magic_movie_rules"))

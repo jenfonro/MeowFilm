@@ -1,0 +1,1384 @@
+package dashboard
+
+import (
+	"database/sql"
+	"encoding/json"
+	"net/http"
+	"strings"
+
+	"golang.org/x/crypto/bcrypt"
+
+	"github.com/jenfonro/meowfilm/internal/auth"
+	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/catpawopen"
+	"github.com/jenfonro/meowfilm/server/magic"
+	"github.com/jenfonro/meowfilm/server/netdisk"
+)
+
+func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/dashboard")
+		switch path {
+		case "/site/save":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardSiteSave(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/catpawopen/save":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardCatPawOpenSave(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/catpawopen/delete":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardCatPawOpenDelete(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/site/settings":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardSiteSettings(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/goproxy/save":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardGoProxySave(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/settings":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleDashboardPanSettings(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/baidu/qr/start":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleDashboardBaiduQRStart(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/baidu/qr/image":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleDashboardBaiduQRImage(w, r)
+			})).ServeHTTP(w, r)
+		case "/pan/baidu/qr/cookie":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleDashboardBaiduQRCookie(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/quark/qr/start":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleDashboardQuarkQRStart(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/quark/qr/image":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleDashboardQuarkQRImage(w, r)
+			})).ServeHTTP(w, r)
+		case "/pan/quark/qr/cookie":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleDashboardQuarkQRCookie(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/uc/qr/start":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleDashboardUCQRStart(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/uc/qr/image":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleDashboardUCQRImage(w, r)
+			})).ServeHTTP(w, r)
+		case "/pan/uc/qr/cookie":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleDashboardUCQRCookie(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/115/qr/start":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleDashboard115QRStart(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/115/qr/image":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleDashboard115QRImage(w, r)
+			})).ServeHTTP(w, r)
+		case "/pan/115/qr/cookie":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleDashboard115QRCookie(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/bili/qr/start":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleDashboardBiliQRStart(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/bili/qr/image":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleDashboardBiliQRImage(w, r)
+			})).ServeHTTP(w, r)
+		case "/pan/bili/qr/cookie":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleDashboardBiliQRCookie(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/video/pans/list":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardVideoPansList(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/video/source/save":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardVideoSourceSave(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/video/source/settings":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					methodNotAllowed(w)
+					return
+				}
+				writeJSON(w, 200, map[string]any{"success": true, "videoSourceUrl": ""})
+			})).ServeHTTP(w, r)
+		case "/video/source/sites":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					methodNotAllowed(w)
+					return
+				}
+				sites := mergeVideoSourceSites(database)
+				cover := resolveSearchCoverSite(sites, database.GetSetting("video_source_search_cover_site"))
+				writeJSON(w, 200, map[string]any{"success": true, "sites": sites, "coverSite": cover})
+			})).ServeHTTP(w, r)
+		case "/video/source/sites/status":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardVideoSourceSiteStatus(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/video/source/sites/home":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardVideoSourceSiteHome(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/video/source/sites/search":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardVideoSourceSiteSearch(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/video/source/sites/cover":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardVideoSourceCoverSite(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/video/source/sites/order":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardVideoSourceSiteOrder(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/video/source/sites/check":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardVideoSourceSitesCheck(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/video/source/sites/import":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardVideoSourceSitesImport(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/magic/settings":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardMagicSettings(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/smart/settings":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardSmartSettings(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/tmdb/settings":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardTMDBSettings(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/user/list":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardUserList(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/user/add":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardUserAdd(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/user/ban":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardUserBan(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/user/delete":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardUserDelete(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/user/update":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardUserUpdate(w, r, database)
+			})).ServeHTTP(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+func normalizeSourceExtractPriority(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "无"
+	}
+
+	if s == "无" || s == "网盘" || s == "关键字" {
+		return s
+	}
+	return "无"
+}
+
+func readBoolJSONBody(body map[string]any, key string) bool {
+	if body == nil || key == "" {
+		return false
+	}
+	v, ok := body[key]
+	if !ok || v == nil {
+		return false
+	}
+	b, _ := v.(bool)
+	return b
+}
+
+func readStrJSONBody(body map[string]any, key string) string {
+	if body == nil || key == "" {
+		return ""
+	}
+	v, ok := body[key]
+	if !ok || v == nil {
+		return ""
+	}
+	s, _ := v.(string)
+	return strings.TrimSpace(s)
+}
+
+func bool01(b bool) string {
+	if b {
+		return "1"
+	}
+	return "0"
+}
+
+func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	readBoolEnabled := func(key string) bool {
+		return strings.TrimSpace(database.GetSetting(key)) != "0"
+	}
+
+	writeOut := func() {
+		writeJSON(w, 200, map[string]any{
+			"success":                    true,
+			"smartPlayEnabled":           readBoolEnabled("smart_play_enabled"),
+			"smartListEnabled":           readBoolEnabled("smart_list_enabled"),
+			"smartSourceExtractPriority": normalizeSourceExtractPriority(database.GetSetting("smart_source_extract_priority")),
+			"smartSourcePriorityTokens":  parseJSONStringArray(database.GetSetting("smart_source_priority_tokens")),
+			"smartPanMatchTokens":        parseJSONStringArray(database.GetSetting("smart_pan_match_tokens")),
+		})
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		writeOut()
+	case http.MethodPost:
+		var body map[string]any
+		_ = readJSONLoose(r, &body)
+
+		if _, ok := body["smartPlayEnabled"]; ok {
+			_ = database.SetSetting("smart_play_enabled", bool01(readBoolJSONBody(body, "smartPlayEnabled")))
+		}
+		if _, ok := body["smartListEnabled"]; ok {
+			_ = database.SetSetting("smart_list_enabled", bool01(readBoolJSONBody(body, "smartListEnabled")))
+		}
+		if _, ok := body["smartSourceExtractPriority"]; ok {
+			_ = database.SetSetting(
+				"smart_source_extract_priority",
+				normalizeSourceExtractPriority(readStrJSONBody(body, "smartSourceExtractPriority")),
+			)
+		}
+
+		saveArr := func(key string, list any) {
+			switch vv := list.(type) {
+			case []any:
+				out := []string{}
+				for _, it := range vv {
+					s, _ := it.(string)
+					s = strings.TrimSpace(s)
+					if s != "" {
+						out = append(out, s)
+					}
+				}
+				saveStrArrSetting(database, key, out)
+			default:
+				// ignore
+			}
+		}
+
+		if v, ok := body["smartSourcePriorityTokens"]; ok && v != nil {
+			saveArr("smart_source_priority_tokens", v)
+		}
+		if v, ok := body["smartPanMatchTokens"]; ok && v != nil {
+			saveArr("smart_pan_match_tokens", v)
+		}
+
+		writeOut()
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func handleDashboardTMDBSettings(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	bool01 := func(b bool) string {
+		if b {
+			return "1"
+		}
+		return "0"
+	}
+	readBool := func(key string) bool {
+		return strings.TrimSpace(database.GetSetting(key)) == "1"
+	}
+	readStringDefault := func(key, def string) string {
+		v := strings.TrimSpace(database.GetSetting(key))
+		if v == "" {
+			return def
+		}
+		return v
+	}
+	writeOut := func() {
+		writeJSON(w, 200, map[string]any{
+			"success":      true,
+			"v4Token":      strings.TrimSpace(database.GetSetting("tmdb_v4_token")),
+			"v3Key":        strings.TrimSpace(database.GetSetting("tmdb_v3_key")),
+			"apiBase":      strings.TrimSpace(database.GetSetting("tmdb_api_base")),
+			"language":     readStringDefault("tmdb_language", "zh-CN"),
+			"region":       readStringDefault("tmdb_region", "CN"),
+			"includeAdult": readBool("tmdb_include_adult"),
+		})
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		writeOut()
+	case http.MethodPost:
+		var body map[string]any
+		_ = readJSONLoose(r, &body)
+
+		_ = database.SetSetting("tmdb_v4_token", readStrJSONBody(body, "v4Token"))
+		_ = database.SetSetting("tmdb_v3_key", readStrJSONBody(body, "v3Key"))
+		_ = database.SetSetting("tmdb_api_base", normalizeHTTPBase(readStrJSONBody(body, "apiBase")))
+		_ = database.SetSetting("tmdb_language", readStrJSONBody(body, "language"))
+		_ = database.SetSetting("tmdb_region", readStrJSONBody(body, "region"))
+		_ = database.SetSetting("tmdb_include_adult", bool01(readBoolJSONBody(body, "includeAdult")))
+
+		writeOut()
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func handleDashboardSiteSave(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	parseForm(r)
+	siteName := strings.TrimSpace(r.FormValue("siteName"))
+	searchDisplayMode := strings.TrimSpace(r.FormValue("searchDisplayMode"))
+	searchBadgePreferEpisode := boolFromForm(r.FormValue("searchBadgePreferEpisode"))
+	doubanDataProxy := strings.TrimSpace(r.FormValue("doubanDataProxy"))
+	doubanDataCustom := strings.TrimSpace(r.FormValue("doubanDataCustom"))
+	doubanImgProxy := strings.TrimSpace(r.FormValue("doubanImgProxy"))
+	doubanImgCustom := strings.TrimSpace(r.FormValue("doubanImgCustom"))
+	if doubanDataProxy == "" || doubanImgProxy == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数无效"})
+		return
+	}
+	if siteName != "" {
+		_ = database.SetSetting("site_name", siteName)
+	}
+	switch searchDisplayMode {
+	case "", "sites", "tmdb", "both":
+		if searchDisplayMode == "" {
+			searchDisplayMode = "sites"
+		}
+		_ = database.SetSetting("search_display_mode", searchDisplayMode)
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数无效"})
+		return
+	}
+	_ = database.SetSetting("douban_data_proxy", doubanDataProxy)
+	_ = database.SetSetting("douban_data_custom", doubanDataCustom)
+	_ = database.SetSetting("douban_img_proxy", doubanImgProxy)
+	_ = database.SetSetting("douban_img_custom", doubanImgCustom)
+	if searchBadgePreferEpisode {
+		_ = database.SetSetting("search_badge_prefer_episode", "1")
+	} else {
+		_ = database.SetSetting("search_badge_prefer_episode", "0")
+	}
+	writeJSON(w, 200, map[string]any{"success": true})
+}
+
+func handleDashboardCatPawOpenSave(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	parseForm(r)
+	servers := catpawopen.ParseServers(database.GetSetting("catpawopen_servers"))
+	prevBase := catpawopen.ResolveActiveBase(servers, database.GetSetting("catpawopen_active"))
+	serverKey := strings.TrimSpace(r.FormValue("catPawOpenServerKey"))
+	name := strings.TrimSpace(r.FormValue("catPawOpenName"))
+	base := r.FormValue("catPawOpenApiBase")
+	normalizedBase := normalizeCatPawOpenAPIBase(base)
+	if normalizedBase == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "CatPawOpen 接口地址不是合法 URL"})
+		return
+	}
+
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "服务器名称不能为空"})
+		return
+	}
+
+	// "__new__" (front-end draft) behaves like "append".
+	key := serverKey
+	if key == "__new__" {
+		key = ""
+	}
+
+	existsName := func(n string, skipIdx int) bool {
+		for i, s := range servers {
+			if i == skipIdx {
+				continue
+			}
+			if s.Name == n {
+				return true
+			}
+		}
+		return false
+	}
+
+	updatedIdx := -1
+	if key != "" {
+		for i, s := range servers {
+			if s.Name == key {
+				updatedIdx = i
+				break
+			}
+		}
+	}
+	if updatedIdx >= 0 {
+		if existsName(name, updatedIdx) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "服务器名称已存在"})
+			return
+		}
+		servers[updatedIdx] = catpawopen.Server{Name: name, APIBase: normalizedBase}
+	} else {
+		if existsName(name, -1) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "服务器名称已存在"})
+			return
+		}
+		servers = append(servers, catpawopen.Server{Name: name, APIBase: normalizedBase})
+	}
+
+	serversJSON, _ := json.Marshal(servers)
+	_ = database.SetSetting("catpawopen_servers", string(serversJSON))
+	_ = database.SetSetting("catpawopen_active", name)
+	writeJSON(w, 200, map[string]any{
+		"success":        true,
+		"apiBaseChanged": strings.TrimSpace(prevBase) != strings.TrimSpace(normalizedBase),
+		"proxySync":      map[string]any{"ok": nil, "skipped": true},
+		"goProxySync":    map[string]any{"ok": nil, "skipped": true},
+	})
+}
+
+func handleDashboardCatPawOpenDelete(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	parseForm(r)
+	key := strings.TrimSpace(r.FormValue("catPawOpenServerKey"))
+	if key == "" || key == "__new__" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数无效"})
+		return
+	}
+	servers := catpawopen.ParseServers(database.GetSetting("catpawopen_servers"))
+
+	removed := false
+	next := make([]catpawopen.Server, 0, len(servers))
+	for _, s := range servers {
+		if s.Name == key {
+			removed = true
+			continue
+		}
+		next = append(next, s)
+	}
+	if !removed {
+		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "message": "服务器不存在"})
+		return
+	}
+
+	serversJSON, _ := json.Marshal(next)
+	_ = database.SetSetting("catpawopen_servers", string(serversJSON))
+	active := catpawopen.PickActiveName(next, database.GetSetting("catpawopen_active"))
+	_ = database.SetSetting("catpawopen_active", active)
+
+	writeJSON(w, 200, map[string]any{
+		"success": true,
+		"servers": next,
+		"active":  active,
+	})
+}
+
+func handleDashboardSiteSettings(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	servers := catpawopen.ParseServers(database.GetSetting("catpawopen_servers"))
+	active := catpawopen.PickActiveName(servers, database.GetSetting("catpawopen_active"))
+	mode := strings.TrimSpace(database.GetSetting("search_display_mode"))
+	if mode != "tmdb" && mode != "both" && mode != "sites" {
+		mode = "sites"
+	}
+	writeJSON(w, 200, map[string]any{
+		"success":                  true,
+		"siteName":                 database.GetSetting("site_name"),
+		"searchDisplayMode":        mode,
+		"searchBadgePreferEpisode": strings.TrimSpace(database.GetSetting("search_badge_prefer_episode")) == "1",
+		"catPawOpenServers":        servers,
+		"catPawOpenActive":         active,
+		"goProxyEnabled":           strings.TrimSpace(database.GetSetting("goproxy_enabled")) == "1",
+		"goProxyAutoSelect":        strings.TrimSpace(database.GetSetting("goproxy_auto_select")) == "1",
+		"goProxyServersJson":       defaultString(database.GetSetting("goproxy_servers"), "[]"),
+		"doubanDataProxy":          defaultString(database.GetSetting("douban_data_proxy"), "direct"),
+		"doubanDataCustom":         database.GetSetting("douban_data_custom"),
+		"doubanImgProxy":           defaultString(database.GetSetting("douban_img_proxy"), "direct-browser"),
+		"doubanImgCustom":          database.GetSetting("douban_img_custom"),
+	})
+}
+
+func handleDashboardGoProxySave(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	parseForm(r)
+	enabled := boolFromForm(r.FormValue("goProxyEnabled"))
+	autoSelect := boolFromForm(r.FormValue("goProxyAutoSelect"))
+	serversJSON := r.FormValue("goProxyServersJson")
+	servers := normalizeGoProxyServers(serversJSON)
+	if enabled {
+		_ = database.SetSetting("goproxy_enabled", "1")
+	} else {
+		_ = database.SetSetting("goproxy_enabled", "0")
+	}
+	if autoSelect {
+		_ = database.SetSetting("goproxy_auto_select", "1")
+	} else {
+		_ = database.SetSetting("goproxy_auto_select", "0")
+	}
+	b, _ := json.Marshal(servers)
+	_ = database.SetSetting("goproxy_servers", string(b))
+	writeJSON(w, 200, map[string]any{"success": true, "goProxySync": map[string]any{"ok": nil, "skipped": true}})
+}
+
+func handleDashboardVideoPansList(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, 200, map[string]any{"success": true, "pans": normalizePansList(database.GetSetting("catpawopen_pans_list"))})
+	case http.MethodPost:
+		parseForm(r)
+		listRaw := r.FormValue("list")
+		var list any
+		if strings.TrimSpace(listRaw) != "" {
+			_ = json.Unmarshal([]byte(listRaw), &list)
+		}
+		norm := normalizePansAny(list)
+		b, _ := json.Marshal(norm)
+		_ = database.SetSetting("catpawopen_pans_list", string(b))
+		writeJSON(w, 200, map[string]any{"success": true, "pans": norm})
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func handleDashboardVideoSourceSave(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"success":        true,
+		"sites":          mergeVideoSourceSites(database),
+		"sitesRefreshed": false,
+		"pans":           normalizePansList(database.GetSetting("catpawopen_pans_list")),
+		"panSync":        map[string]any{"ok": nil, "skipped": true},
+	})
+}
+
+func handleDashboardVideoSourceSiteStatus(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	parseForm(r)
+	key := strings.TrimSpace(r.FormValue("key"))
+	if key == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "key 不能为空"})
+		return
+	}
+	enabled := boolFromForm(r.FormValue("enabled"))
+	m := parseJSONBoolMap(database.GetSetting("video_source_site_status"))
+	m[key] = enabled
+	b, _ := json.Marshal(m)
+	_ = database.SetSetting("video_source_site_status", string(b))
+	writeJSON(w, 200, map[string]any{"success": true, "key": key, "enabled": enabled})
+}
+
+func handleDashboardVideoSourceSiteHome(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	parseForm(r)
+	key := strings.TrimSpace(r.FormValue("key"))
+	if key == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "key 不能为空"})
+		return
+	}
+	home := boolFromForm(r.FormValue("home"))
+	m := parseJSONBoolMap(database.GetSetting("video_source_site_home"))
+	m[key] = home
+	b, _ := json.Marshal(m)
+	_ = database.SetSetting("video_source_site_home", string(b))
+	writeJSON(w, 200, map[string]any{"success": true, "key": key, "home": home})
+}
+
+func handleDashboardVideoSourceSiteSearch(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	parseForm(r)
+	key := strings.TrimSpace(r.FormValue("key"))
+	if key == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "key 不能为空"})
+		return
+	}
+	searchEnabled := boolFromForm(r.FormValue("search"))
+	if strings.Contains(strings.ToLower(key), "baseset") {
+		searchEnabled = false
+	}
+	m := parseJSONBoolMap(database.GetSetting("video_source_site_search"))
+	m[key] = searchEnabled
+	b, _ := json.Marshal(m)
+	_ = database.SetSetting("video_source_site_search", string(b))
+	writeJSON(w, 200, map[string]any{"success": true, "key": key, "search": searchEnabled})
+}
+
+func resolveSearchCoverSite(sites []map[string]any, preferredRaw string) string {
+	preferred := strings.TrimSpace(preferredRaw)
+	keySet := map[string]struct{}{}
+	enabledFirst := ""
+	first := ""
+	for _, s := range sites {
+		k, _ := s["key"].(string)
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		if first == "" {
+			first = k
+		}
+		keySet[k] = struct{}{}
+		if enabledFirst == "" {
+			enabled, _ := s["enabled"].(bool)
+			if enabled {
+				enabledFirst = k
+			}
+		}
+	}
+	if preferred != "" {
+		if _, ok := keySet[preferred]; ok {
+			return preferred
+		}
+	}
+	if enabledFirst != "" {
+		return enabledFirst
+	}
+	return first
+}
+
+func handleDashboardVideoSourceCoverSite(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	parseForm(r)
+	key := strings.TrimSpace(r.FormValue("key"))
+	sites := mergeVideoSourceSites(database)
+	cover := resolveSearchCoverSite(sites, key)
+	_ = database.SetSetting("video_source_search_cover_site", cover)
+	writeJSON(w, 200, map[string]any{"success": true, "coverSite": cover})
+}
+
+func handleDashboardVideoSourceSiteOrder(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	parseForm(r)
+	orderRaw := strings.TrimSpace(r.FormValue("order"))
+	var order []string
+	_ = json.Unmarshal([]byte(orderRaw), &order)
+	uniq := []string{}
+	seen := map[string]struct{}{}
+	for _, k := range order {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		uniq = append(uniq, k)
+	}
+	b, _ := json.Marshal(uniq)
+	_ = database.SetSetting("video_source_site_order", string(b))
+	writeJSON(w, 200, map[string]any{"success": true})
+}
+
+func handleDashboardVideoSourceSitesCheck(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	parseForm(r)
+	raw := strings.TrimSpace(r.FormValue("results"))
+	if raw == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "results 参数无效"})
+		return
+	}
+	var input map[string]any
+	if err := json.Unmarshal([]byte(raw), &input); err != nil || input == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "results 参数无效"})
+		return
+	}
+	results := map[string]string{}
+	for k, v := range input {
+		key := strings.TrimSpace(k)
+		if key == "" {
+			continue
+		}
+		s, _ := v.(string)
+		results[key] = normalizeAvailability(s)
+	}
+	if len(results) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "results 参数无效"})
+		return
+	}
+
+	errorInput := map[string]string{}
+	rawErrors := strings.TrimSpace(r.FormValue("errors"))
+	if rawErrors != "" {
+		var errMap map[string]any
+		if err := json.Unmarshal([]byte(rawErrors), &errMap); err == nil && errMap != nil {
+			for k, v := range errMap {
+				key := strings.TrimSpace(k)
+				if key == "" {
+					continue
+				}
+				s, _ := v.(string)
+				s = strings.TrimSpace(s)
+				if s == "" {
+					continue
+				}
+				errorInput[key] = s
+			}
+		}
+	}
+
+	availabilityMap := parseAvailabilityJSON(database.GetSetting("video_source_site_availability"))
+	for k, v := range results {
+		availabilityMap[k] = normalizeAvailability(v)
+	}
+	_ = database.SetSetting("video_source_site_availability", marshalJSON(availabilityMap))
+
+	statusMap := parseJSONBoolMap(database.GetSetting("video_source_site_status"))
+	homeMap := parseJSONBoolMap(database.GetSetting("video_source_site_home"))
+	searchMap := parseJSONBoolMap(database.GetSetting("video_source_site_search"))
+	for k, v := range results {
+		if v == "invalid" {
+			statusMap[k] = false
+		}
+		if v == "category_error" {
+			homeMap[k] = false
+		}
+		if v == "search_error" {
+			searchMap[k] = false
+		}
+	}
+	_ = database.SetSetting("video_source_site_status", marshalJSON(statusMap))
+	_ = database.SetSetting("video_source_site_home", marshalJSON(homeMap))
+	_ = database.SetSetting("video_source_site_search", marshalJSON(searchMap))
+
+	errorMap := parseJSONStringMap(database.GetSetting("video_source_site_error"))
+	for k := range results {
+		if msg, ok := errorInput[k]; ok && strings.TrimSpace(msg) != "" {
+			errorMap[k] = strings.TrimSpace(msg)
+		} else {
+			delete(errorMap, k)
+		}
+	}
+	_ = database.SetSetting("video_source_site_error", marshalJSON(errorMap))
+
+	sites := mergeVideoSourceSites(database)
+	cover := resolveSearchCoverSite(sites, database.GetSetting("video_source_search_cover_site"))
+	writeJSON(w, 200, map[string]any{
+		"success":   true,
+		"results":   results,
+		"sites":     sites,
+		"coverSite": cover,
+	})
+}
+
+func handleDashboardVideoSourceSitesImport(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	parseForm(r)
+	raw := strings.TrimSpace(r.FormValue("sites"))
+	if raw == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "sites 参数无效"})
+		return
+	}
+	var input []site
+	if err := json.Unmarshal([]byte(raw), &input); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "sites 参数无效"})
+		return
+	}
+	normalized := normalizeSitesSlice(input)
+	if len(normalized) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "sites 参数无效"})
+		return
+	}
+
+	prevStatus := parseJSONBoolMap(database.GetSetting("video_source_site_status"))
+	prevHome := parseJSONBoolMap(database.GetSetting("video_source_site_home"))
+	prevSearch := parseJSONBoolMap(database.GetSetting("video_source_site_search"))
+	prevOrder := parseJSONStringArray(database.GetSetting("video_source_site_order"))
+	prevAvailability := parseAvailabilityJSON(database.GetSetting("video_source_site_availability"))
+	reconciled := reconcileSites(normalized, prevStatus, prevHome, prevSearch, prevOrder, prevAvailability)
+
+	for _, s := range reconciled.Sites {
+		if isConfigCenterSite(s) {
+			reconciled.Search[s.Key] = false
+		}
+	}
+
+	prevErrors := parseJSONStringMap(database.GetSetting("video_source_site_error"))
+	nextErrors := map[string]string{}
+	for _, s := range reconciled.Sites {
+		if msg, ok := prevErrors[s.Key]; ok && strings.TrimSpace(msg) != "" {
+			nextErrors[s.Key] = strings.TrimSpace(msg)
+		}
+	}
+
+	_ = database.SetSetting("video_source_sites", marshalJSON(reconciled.Sites))
+	_ = database.SetSetting("video_source_site_status", marshalJSON(reconciled.Status))
+	_ = database.SetSetting("video_source_site_home", marshalJSON(reconciled.Home))
+	_ = database.SetSetting("video_source_site_search", marshalJSON(reconciled.Search))
+	_ = database.SetSetting("video_source_site_order", marshalJSON(reconciled.Order))
+	_ = database.SetSetting("video_source_site_availability", marshalJSON(reconciled.Availability))
+	_ = database.SetSetting("video_source_site_error", marshalJSON(nextErrors))
+
+	sites := mergeVideoSourceSites(database)
+	cover := resolveSearchCoverSite(sites, database.GetSetting("video_source_search_cover_site"))
+	writeJSON(w, 200, map[string]any{"success": true, "sites": sites, "coverSite": cover})
+}
+
+func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	switch r.Method {
+	case http.MethodGet:
+		_ = magic.MigrateAggregateKeywordRulesToRegex(database)
+		cleanRules := parseJSONStringArray(database.GetSetting("magic_episode_clean_regex_rules"))
+		episodeCleanRegex := ""
+		if len(cleanRules) > 0 {
+			episodeCleanRegex = cleanRules[0]
+		}
+		smartSourcePriorityTokens := parseJSONStringArray(database.GetSetting("smart_source_priority_tokens"))
+		smartPanMatchTokens := parseJSONStringArray(database.GetSetting("smart_pan_match_tokens"))
+		smartSourceExtractPriority := strings.TrimSpace(database.GetSetting("smart_source_extract_priority"))
+		smartSourceExtractPriority = normalizeSourceExtractPriority(smartSourceExtractPriority)
+		writeJSON(w, 200, map[string]any{
+			"success":                    true,
+			"episodeCleanRegex":          episodeCleanRegex,
+			"episodeCleanRegexRules":     cleanRules,
+			"episodeRules":               parseJSONStringArray(database.GetSetting("magic_episode_rules")),
+			"movieRules":                 parseJSONStringArray(database.GetSetting("magic_movie_rules")),
+			"aggregateRules":             parseJSONStringArray(database.GetSetting("magic_aggregate_rules")),
+			"aggregateRegexRules":        parseJSONStringArray(database.GetSetting("magic_aggregate_regex_rules")),
+			"smartSourcePriorityTokens":  smartSourcePriorityTokens,
+			"smartPanMatchTokens":        smartPanMatchTokens,
+			"smartSourceExtractPriority": smartSourceExtractPriority,
+		})
+	case http.MethodPost:
+		var body map[string]any
+		_ = readJSONLoose(r, &body)
+
+		episodeCleanRegex, _ := body["episodeCleanRegex"].(string)
+
+		cleanRules := []string{}
+		if v, ok := body["episodeCleanRegexRules"]; ok && v != nil {
+			switch vv := v.(type) {
+			case []any:
+				for _, it := range vv {
+					s, _ := it.(string)
+					s = strings.TrimSpace(s)
+					if s != "" {
+						cleanRules = append(cleanRules, s)
+					}
+				}
+			case string:
+				cleanRules = parseJSONStringArray(vv)
+			}
+		}
+		if len(cleanRules) == 0 && strings.TrimSpace(episodeCleanRegex) != "" {
+			cleanRules = []string{strings.TrimSpace(episodeCleanRegex)}
+		}
+
+		readList := func(key string) []string {
+			v, ok := body[key]
+			if !ok || v == nil {
+				return []string{}
+			}
+			switch vv := v.(type) {
+			case []any:
+				out := []string{}
+				for _, it := range vv {
+					s, _ := it.(string)
+					s = strings.TrimSpace(s)
+					if s != "" {
+						out = append(out, s)
+					}
+				}
+				return out
+			case string:
+				return parseJSONStringArray(vv)
+			default:
+				return []string{}
+			}
+		}
+
+		saveStrArrSetting(database, "magic_episode_clean_regex_rules", cleanRules)
+		saveStrArrSetting(database, "magic_episode_rules", readList("episodeRules"))
+		saveStrArrSetting(database, "magic_movie_rules", readList("movieRules"))
+		saveStrArrSetting(database, "magic_aggregate_regex_rules", readList("aggregateRegexRules"))
+
+		readCommaTokens := func(key string) []string {
+			raw, ok := body[key]
+			if !ok || raw == nil {
+				return []string{}
+			}
+			switch vv := raw.(type) {
+			case []any:
+				out := []string{}
+				for _, it := range vv {
+					s, _ := it.(string)
+					s = strings.TrimSpace(s)
+					if s != "" {
+						out = append(out, s)
+					}
+				}
+				return normalizeSmartCommaTokens(strings.Join(out, ","))
+			case string:
+				return normalizeSmartCommaTokens(vv)
+			default:
+				return []string{}
+			}
+		}
+
+		saveStrArrSetting(database, "smart_source_priority_tokens", readCommaTokens("smartSourcePriorityTokens"))
+		saveStrArrSetting(database, "smart_pan_match_tokens", readCommaTokens("smartPanMatchTokens"))
+
+		priorityRaw, _ := body["smartSourceExtractPriority"].(string)
+		_ = database.SetSetting("smart_source_extract_priority", normalizeSourceExtractPriority(priorityRaw))
+
+		if legacy := readList("aggregateRules"); len(legacy) > 0 {
+			saveStrArrSetting(database, "magic_aggregate_rules", legacy)
+		}
+		_ = magic.MigrateAggregateKeywordRulesToRegex(database)
+
+		outClean := parseJSONStringArray(database.GetSetting("magic_episode_clean_regex_rules"))
+		outEpisodeClean := ""
+		if len(outClean) > 0 {
+			outEpisodeClean = outClean[0]
+		}
+		smartSourcePriorityTokens := parseJSONStringArray(database.GetSetting("smart_source_priority_tokens"))
+		smartPanMatchTokens := parseJSONStringArray(database.GetSetting("smart_pan_match_tokens"))
+		smartSourceExtractPriority := strings.TrimSpace(database.GetSetting("smart_source_extract_priority"))
+		smartSourceExtractPriority = normalizeSourceExtractPriority(smartSourceExtractPriority)
+		writeJSON(w, 200, map[string]any{
+			"success":                    true,
+			"episodeCleanRegex":          outEpisodeClean,
+			"episodeCleanRegexRules":     outClean,
+			"episodeRules":               parseJSONStringArray(database.GetSetting("magic_episode_rules")),
+			"movieRules":                 parseJSONStringArray(database.GetSetting("magic_movie_rules")),
+			"aggregateRules":             parseJSONStringArray(database.GetSetting("magic_aggregate_rules")),
+			"aggregateRegexRules":        parseJSONStringArray(database.GetSetting("magic_aggregate_regex_rules")),
+			"smartSourcePriorityTokens":  smartSourcePriorityTokens,
+			"smartPanMatchTokens":        smartPanMatchTokens,
+			"smartSourceExtractPriority": smartSourceExtractPriority,
+		})
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func normalizeSmartCommaTokens(input string) []string {
+	raw := strings.TrimSpace(input)
+	if raw == "" {
+		return []string{}
+	}
+	raw = strings.ReplaceAll(raw, "，", ",")
+	parts := strings.Split(raw, ",")
+	out := []string{}
+	seen := map[string]struct{}{}
+	for _, p := range parts {
+		t := strings.TrimSpace(p)
+		if t == "" {
+			continue
+		}
+		key := strings.ToLower(t)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, t)
+	}
+	return out
+}
+
+func handleDashboardUserList(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	rows, err := database.SQL().Query(`
+		SELECT username, role, status, cat_api_base, cat_proxy
+		FROM users
+		ORDER BY CASE WHEN role = 'admin' THEN 0 ELSE 1 END, username
+	`)
+	if err != nil {
+		writeJSON(w, 200, map[string]any{"success": true, "users": []any{}})
+		return
+	}
+	defer rows.Close()
+	users := []map[string]any{}
+	for rows.Next() {
+		var username, role, status, catAPIBase, catProxy string
+		_ = rows.Scan(&username, &role, &status, &catAPIBase, &catProxy)
+		users = append(users, map[string]any{
+			"username":     username,
+			"role":         role,
+			"status":       status,
+			"cat_api_base": catAPIBase,
+			"cat_proxy":    catProxy,
+		})
+	}
+	writeJSON(w, 200, map[string]any{"success": true, "users": users, "userCount": len(users)})
+}
+
+func handleDashboardUserAdd(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	parseForm(r)
+	username := strings.TrimSpace(r.FormValue("username"))
+	password := strings.TrimSpace(r.FormValue("password"))
+	roleRaw := strings.TrimSpace(r.FormValue("role"))
+	role := "user"
+	if roleRaw == "shared" {
+		role = "shared"
+	}
+	catAPIBase := strings.TrimSpace(r.FormValue("catApiBase"))
+	catProxy := strings.TrimSpace(r.FormValue("catProxy"))
+
+	if username == "" || password == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "添加用户失败，可能是用户名已存在或参数无效"})
+		return
+	}
+
+	hashed, err := bcrypt.GenerateFromPassword([]byte(password), 10)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "添加用户失败，可能是用户名已存在或参数无效"})
+		return
+	}
+	_, err = database.SQL().Exec(
+		`INSERT INTO users(username, password, role, status, cat_api_base, cat_proxy) VALUES (?, ?, ?, 'active', ?, ?)`,
+		username,
+		string(hashed),
+		role,
+		catAPIBase,
+		catProxy,
+	)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "添加用户失败，可能是用户名已存在或参数无效"})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"success": true})
+}
+
+func handleDashboardUserBan(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	parseForm(r)
+	username := strings.TrimSpace(r.FormValue("username"))
+	if username == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "用户名不能为空"})
+		return
+	}
+	var role, status string
+	if err := database.SQL().QueryRow(`SELECT role, status FROM users WHERE username = ? LIMIT 1`, username).Scan(&role, &status); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "操作失败"})
+		return
+	}
+	if role == "admin" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "操作失败"})
+		return
+	}
+	next := "active"
+	if status == "active" {
+		next = "banned"
+	}
+	res, _ := database.SQL().Exec(`UPDATE users SET status = ? WHERE username = ? AND role <> 'admin'`, next, username)
+	changed, _ := res.RowsAffected()
+	if changed <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "操作失败"})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"success": true, "status": next})
+}
+
+func handleDashboardUserDelete(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	parseForm(r)
+	username := strings.TrimSpace(r.FormValue("username"))
+	if username == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "用户名不能为空"})
+		return
+	}
+	var id int64
+	var role string
+	if err := database.SQL().QueryRow(`SELECT id, role FROM users WHERE username = ? LIMIT 1`, username).Scan(&id, &role); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "删除失败"})
+		return
+	}
+	if role == "admin" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "删除失败"})
+		return
+	}
+
+	tx, err := database.SQL().Begin()
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "删除失败"})
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	tokens, _ := tx.Exec(`DELETE FROM auth_tokens WHERE user_id = ?`, id)
+	history, _ := tx.Exec(`DELETE FROM search_history WHERE user_id = ?`, id)
+	playHistory, _ := tx.Exec(`DELETE FROM play_history WHERE user_id = ?`, id)
+	favorites, _ := tx.Exec(`DELETE FROM favorites WHERE user_id = ?`, id)
+	userRes, _ := tx.Exec(`DELETE FROM users WHERE id = ? AND role <> 'admin'`, id)
+
+	userDeleted, _ := userRes.RowsAffected()
+	if userDeleted <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "删除失败"})
+		return
+	}
+	_ = tx.Commit()
+
+	tokenDeleted, _ := tokens.RowsAffected()
+	historyDeleted, _ := history.RowsAffected()
+	playHistoryDeleted, _ := playHistory.RowsAffected()
+	favoritesDeleted, _ := favorites.RowsAffected()
+	writeJSON(w, 200, map[string]any{
+		"success": true,
+		"deleted": map[string]any{
+			"tokenDeleted":       tokenDeleted,
+			"historyDeleted":     historyDeleted,
+			"playHistoryDeleted": playHistoryDeleted,
+			"favoritesDeleted":   favoritesDeleted,
+			"userDeleted":        userDeleted,
+		},
+	})
+}
+
+func handleDashboardUserUpdate(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	parseForm(r)
+	username := strings.TrimSpace(r.FormValue("username"))
+	newUsername := strings.TrimSpace(r.FormValue("newUsername"))
+	newPassword := strings.TrimSpace(r.FormValue("newPassword"))
+	roleRaw := strings.TrimSpace(r.FormValue("role"))
+	_, hasCatAPIBase := r.PostForm["catApiBase"]
+	_, hasCatProxy := r.PostForm["catProxy"]
+	catAPIBase := ""
+	catProxy := ""
+	if hasCatAPIBase {
+		catAPIBase = strings.TrimSpace(r.FormValue("catApiBase"))
+	}
+	if hasCatProxy {
+		catProxy = strings.TrimSpace(r.FormValue("catProxy"))
+	}
+
+	if username == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "用户名不能为空"})
+		return
+	}
+	if newUsername == "" && newPassword == "" && roleRaw == "" && !hasCatAPIBase && !hasCatProxy {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "未提供修改内容"})
+		return
+	}
+
+	var id int64
+	if err := database.SQL().QueryRow(`SELECT id FROM users WHERE username = ? LIMIT 1`, username).Scan(&id); err != nil {
+		if err == sql.ErrNoRows {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "用户不存在"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "用户不存在"})
+		return
+	}
+
+	var curUsername, curRole string
+	if err := database.SQL().QueryRow(`SELECT username, role FROM users WHERE id = ? LIMIT 1`, id).Scan(&curUsername, &curRole); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "用户不存在"})
+		return
+	}
+
+	finalUsername := curUsername
+	finalRole := curRole
+	if newUsername != "" && newUsername != finalUsername {
+		if _, err := database.SQL().Exec(`UPDATE users SET username = ? WHERE id = ?`, newUsername, id); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "用户名已存在或不合法"})
+			return
+		}
+		finalUsername = newUsername
+	}
+
+	if newPassword != "" {
+		hashed, err := bcrypt.GenerateFromPassword([]byte(newPassword), 10)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "修改失败"})
+			return
+		}
+		res, _ := database.SQL().Exec(`UPDATE users SET password = ? WHERE id = ?`, string(hashed), id)
+		changed, _ := res.RowsAffected()
+		if changed <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "修改失败"})
+			return
+		}
+	}
+
+	if roleRaw != "" {
+		if finalRole == "admin" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "管理员角色不可修改"})
+			return
+		}
+		nextRole := ""
+		if roleRaw == "shared" {
+			nextRole = "shared"
+		} else if roleRaw == "user" {
+			nextRole = "user"
+		}
+		if nextRole == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "角色无效"})
+			return
+		}
+		res, _ := database.SQL().Exec(`UPDATE users SET role = ? WHERE id = ?`, nextRole, id)
+		changed, _ := res.RowsAffected()
+		if changed <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "修改失败"})
+			return
+		}
+		finalRole = nextRole
+	}
+
+	if hasCatAPIBase {
+		_, _ = database.SQL().Exec(`UPDATE users SET cat_api_base = ? WHERE id = ?`, catAPIBase, id)
+	}
+	if hasCatProxy {
+		_, _ = database.SQL().Exec(`UPDATE users SET cat_proxy = ? WHERE id = ?`, catProxy, id)
+	}
+
+	var rowRole, rowCatBase, rowCatProxy string
+	_ = database.SQL().QueryRow(`SELECT role, cat_api_base, cat_proxy FROM users WHERE id = ? LIMIT 1`, id).Scan(&rowRole, &rowCatBase, &rowCatProxy)
+	if strings.TrimSpace(rowRole) != "" {
+		finalRole = rowRole
+	}
+
+	writeJSON(w, 200, map[string]any{
+		"success":    true,
+		"username":   finalUsername,
+		"role":       defaultString(finalRole, "user"),
+		"catApiBase": rowCatBase,
+		"catProxy":   rowCatProxy,
+	})
+}
+
+func saveStrArrSetting(database *db.DB, key string, values []string) {
+	uniq := []string{}
+	seen := map[string]struct{}{}
+	for _, v := range values {
+		v = strings.TrimSpace(v)
+		if v == "" || len(v) > 1000 {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		uniq = append(uniq, v)
+	}
+	b, _ := json.Marshal(uniq)
+	_ = database.SetSetting(key, string(b))
+}
+
+func normalizePansList(text string) []map[string]any {
+	var raw []any
+	if err := json.Unmarshal([]byte(text), &raw); err != nil {
+		return []map[string]any{}
+	}
+	return normalizePansAny(raw)
+}
+
+func normalizePansAny(list any) []map[string]any {
+	arr, ok := list.([]any)
+	if !ok {
+		return []map[string]any{}
+	}
+	out := []map[string]any{}
+	seen := map[string]struct{}{}
+	for _, it := range arr {
+		m, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		key, _ := m["key"].(string)
+		name, _ := m["name"].(string)
+		enable := parseAnyBool(m["enable"], false)
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, map[string]any{"key": key, "name": name, "enable": enable})
+	}
+	return out
+}
+
+func mergeVideoSourceSites(database *db.DB) []map[string]any {
+	sites := normalizeSitesFromJSON(database.GetSetting("video_source_sites"))
+	statusMap := parseJSONBoolMap(database.GetSetting("video_source_site_status"))
+	homeMap := parseJSONBoolMap(database.GetSetting("video_source_site_home"))
+	searchMap := parseJSONBoolMap(database.GetSetting("video_source_site_search"))
+	order := parseJSONStringArray(database.GetSetting("video_source_site_order"))
+	availability := parseJSONMap(database.GetSetting("video_source_site_availability"))
+	errorMap := parseJSONStringMap(database.GetSetting("video_source_site_error"))
+	return mergeSitesWithState(sites, statusMap, homeMap, order, availability, searchMap, errorMap)
+}
