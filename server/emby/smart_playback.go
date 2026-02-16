@@ -1579,8 +1579,12 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 				if picked == nil || strings.TrimSpace(picked.Ep.URL) == "" {
 					return nil
 				}
-				u, err := netdisk.Yun139Play(database, strings.TrimSpace(base.PanLabel), picked.Ep.URL)
-				if err != nil || strings.TrimSpace(u) == "" {
+				downloadURL, playURL, err := netdisk.Yun139Play(database, strings.TrimSpace(base.PanLabel), picked.Ep.URL)
+				u := strings.TrimSpace(playURL)
+				if u == "" {
+					u = strings.TrimSpace(downloadURL)
+				}
+				if err != nil || u == "" {
 					return nil
 				}
 				return &smartPickResult{Cand: *picked, PlayURL: u, Headers: map[string]string{}}

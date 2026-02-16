@@ -51,8 +51,8 @@ func getPanField(store panLoginSettingsStore, key string, field string) string {
 	if m == nil {
 		return ""
 	}
-	v, _ := m[strings.TrimSpace(field)].(string)
-	return strings.TrimSpace(v)
+	v := m[strings.TrimSpace(field)]
+	return strings.TrimSpace(toString(v))
 }
 
 func setPanField(store panLoginSettingsStore, key string, field string, value string) {
