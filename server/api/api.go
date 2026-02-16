@@ -16,6 +16,7 @@ import (
 	"github.com/jenfonro/meowfilm/server/emby"
 	"github.com/jenfonro/meowfilm/server/magic"
 	"github.com/jenfonro/meowfilm/server/search"
+	"github.com/jenfonro/meowfilm/server/static"
 	"github.com/jenfonro/meowfilm/server/tmdb"
 )
 
@@ -1768,16 +1769,7 @@ func handleAPIDoubanImage(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusRequestEntityTooLarge)
 		return
 	}
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
-		w.Header().Set("Content-Type", ct)
-	}
-	if cc := resp.Header.Get("Cache-Control"); cc != "" {
-		w.Header().Set("Cache-Control", cc)
-	}
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(body)
+	static.WriteProxiedResponse(w, resp, body)
 }
 
 func minInt(a, b int) int {
