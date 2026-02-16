@@ -323,7 +323,7 @@ func pan115LoginCookie(client *http.Client, uid string) (string, error) {
 	return "", errors.New("115 cookie missing")
 }
 
-func HandleDashboard115QRStart(w http.ResponseWriter, r *http.Request, database *db.DB) {
+func HandleDashboard115Start(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return
@@ -356,12 +356,12 @@ func HandleDashboard115QRStart(w http.ResponseWriter, r *http.Request, database 
 		"success":   true,
 		"qid":       qid,
 		"expiresAt": s.ExpiresAt.UnixMilli(),
-		"imageUrl":  "/dashboard/pan/115/qr/image?qid=" + url.QueryEscape(qid),
+		"imageUrl":  "/dashboard/pan/115/image?qid=" + url.QueryEscape(qid),
 	})
 	_ = database
 }
 
-func HandleDashboard115QRImage(w http.ResponseWriter, r *http.Request) {
+func HandleDashboard115Image(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
 		return
@@ -391,7 +391,7 @@ func HandleDashboard115QRImage(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(s.Image)
 }
 
-func HandleDashboard115QRCookie(w http.ResponseWriter, r *http.Request, database *db.DB) {
+func HandleDashboard115Cookie(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return

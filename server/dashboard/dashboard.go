@@ -44,65 +44,65 @@ func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				netdisk.HandleDashboardPanSettings(w, r, database)
 			})).ServeHTTP(w, r)
-		case "/pan/baidu/qr/start":
+		case "/pan/baidu/start":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleDashboardBaiduQRStart(w, r, database)
+				netdisk.HandleDashboardBaiduStart(w, r, database)
 			})).ServeHTTP(w, r)
-		case "/pan/baidu/qr/image":
+		case "/pan/baidu/image":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleDashboardBaiduQRImage(w, r)
+				netdisk.HandleDashboardBaiduImage(w, r)
 			})).ServeHTTP(w, r)
-		case "/pan/baidu/qr/cookie":
+		case "/pan/baidu/cookie":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleDashboardBaiduQRCookie(w, r, database)
+				netdisk.HandleDashboardBaiduCookie(w, r, database)
 			})).ServeHTTP(w, r)
-		case "/pan/quark/qr/start":
+		case "/pan/quark/start":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleDashboardQuarkQRStart(w, r, database)
+				netdisk.HandleDashboardQuarkStart(w, r, database)
 			})).ServeHTTP(w, r)
-		case "/pan/quark/qr/image":
+		case "/pan/quark/image":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleDashboardQuarkQRImage(w, r)
+				netdisk.HandleDashboardQuarkImage(w, r)
 			})).ServeHTTP(w, r)
-		case "/pan/quark/qr/cookie":
+		case "/pan/quark/cookie":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleDashboardQuarkQRCookie(w, r, database)
+				netdisk.HandleDashboardQuarkCookie(w, r, database)
 			})).ServeHTTP(w, r)
-		case "/pan/uc/qr/start":
+		case "/pan/uc/start":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleDashboardUCQRStart(w, r, database)
+				netdisk.HandleDashboardUCStart(w, r, database)
 			})).ServeHTTP(w, r)
-		case "/pan/uc/qr/image":
+		case "/pan/uc/image":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleDashboardUCQRImage(w, r)
+				netdisk.HandleDashboardUCImage(w, r)
 			})).ServeHTTP(w, r)
-		case "/pan/uc/qr/cookie":
+		case "/pan/uc/cookie":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleDashboardUCQRCookie(w, r, database)
+				netdisk.HandleDashboardUCCookie(w, r, database)
 			})).ServeHTTP(w, r)
-		case "/pan/115/qr/start":
+		case "/pan/115/start":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleDashboard115QRStart(w, r, database)
+				netdisk.HandleDashboard115Start(w, r, database)
 			})).ServeHTTP(w, r)
-		case "/pan/115/qr/image":
+		case "/pan/115/image":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleDashboard115QRImage(w, r)
+				netdisk.HandleDashboard115Image(w, r)
 			})).ServeHTTP(w, r)
-		case "/pan/115/qr/cookie":
+		case "/pan/115/cookie":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleDashboard115QRCookie(w, r, database)
+				netdisk.HandleDashboard115Cookie(w, r, database)
 			})).ServeHTTP(w, r)
-		case "/pan/bili/qr/start":
+		case "/pan/bili/start":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleDashboardBiliQRStart(w, r, database)
+				netdisk.HandleDashboardBiliStart(w, r, database)
 			})).ServeHTTP(w, r)
-		case "/pan/bili/qr/image":
+		case "/pan/bili/image":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleDashboardBiliQRImage(w, r)
+				netdisk.HandleDashboardBiliImage(w, r)
 			})).ServeHTTP(w, r)
-		case "/pan/bili/qr/cookie":
+		case "/pan/bili/cookie":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleDashboardBiliQRCookie(w, r, database)
+				netdisk.HandleDashboardBiliCookie(w, r, database)
 			})).ServeHTTP(w, r)
 		case "/video/pans/list":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

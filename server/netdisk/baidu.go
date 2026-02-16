@@ -377,7 +377,7 @@ func baiduQRDoReqWithHeaders(client *http.Client, method string, urlStr string, 
 	return buf, resp.Header, nil
 }
 
-func HandleDashboardBaiduQRStart(w http.ResponseWriter, r *http.Request, database *db.DB) {
+func HandleDashboardBaiduStart(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return
@@ -420,11 +420,11 @@ func HandleDashboardBaiduQRStart(w http.ResponseWriter, r *http.Request, databas
 		"success":   true,
 		"qid":       qid,
 		"expiresAt": s.ExpiresAt.UnixMilli(),
-		"imageUrl":  "/dashboard/pan/baidu/qr/image?qid=" + url.QueryEscape(qid),
+		"imageUrl":  "/dashboard/pan/baidu/image?qid=" + url.QueryEscape(qid),
 	})
 }
 
-func HandleDashboardBaiduQRImage(w http.ResponseWriter, r *http.Request) {
+func HandleDashboardBaiduImage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
 		return
@@ -455,7 +455,7 @@ func HandleDashboardBaiduQRImage(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(s.Image)
 }
 
-func HandleDashboardBaiduQRCookie(w http.ResponseWriter, r *http.Request, database *db.DB) {
+func HandleDashboardBaiduCookie(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return

@@ -294,7 +294,7 @@ func biliPollStatus(client *http.Client, qrKey string) (status string, redirectU
 	}
 }
 
-func HandleDashboardBiliQRStart(w http.ResponseWriter, r *http.Request, database *db.DB) {
+func HandleDashboardBiliStart(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return
@@ -338,12 +338,12 @@ func HandleDashboardBiliQRStart(w http.ResponseWriter, r *http.Request, database
 		"success":   true,
 		"qid":       qid,
 		"expiresAt": s.ExpiresAt.UnixMilli(),
-		"imageUrl":  "/dashboard/pan/bili/qr/image?qid=" + url.QueryEscape(qid) + "&_t=" + url.QueryEscape(strconv.FormatInt(now.UnixMilli(), 10)),
+		"imageUrl":  "/dashboard/pan/bili/image?qid=" + url.QueryEscape(qid) + "&_t=" + url.QueryEscape(strconv.FormatInt(now.UnixMilli(), 10)),
 	})
 	_ = database
 }
 
-func HandleDashboardBiliQRImage(w http.ResponseWriter, r *http.Request) {
+func HandleDashboardBiliImage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
 		return
@@ -369,7 +369,7 @@ func HandleDashboardBiliQRImage(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(s.Image)
 }
 
-func HandleDashboardBiliQRCookie(w http.ResponseWriter, r *http.Request, database *db.DB) {
+func HandleDashboardBiliCookie(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return
