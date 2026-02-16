@@ -1,4 +1,4 @@
-package routes
+package magic
 
 import (
 	"regexp"
@@ -45,9 +45,9 @@ func normalizeRegexRulePattern(rule string) string {
 	return s
 }
 
-// migrateMagicAggregateKeywordRulesToRegex converts legacy "magic_aggregate_rules" (keyword list)
+// MigrateAggregateKeywordRulesToRegex converts legacy "magic_aggregate_rules" (keyword list)
 // into escaped regex patterns stored in "magic_aggregate_regex_rules", then clears the legacy setting.
-func migrateMagicAggregateKeywordRulesToRegex(database *db.DB) (changed bool) {
+func MigrateAggregateKeywordRulesToRegex(database *db.DB) (changed bool) {
 	legacy := parseJSONStringArray(database.GetSetting("magic_aggregate_rules"))
 	if len(legacy) == 0 {
 		return false
