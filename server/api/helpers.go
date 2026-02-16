@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -156,103 +155,4 @@ func normalizeMountPath(value string) string {
 		p = strings.ReplaceAll(p, "//", "/")
 	}
 	return p
-}
-
-type site struct {
-	Key  string `json:"key"`
-	Name string `json:"name"`
-	API  string `json:"api"`
-	Type *int   `json:"type,omitempty"`
-}
-
-func normalizeSitesFromJSON(text string) []site {
-	var raw []map[string]any
-	if err := json.Unmarshal([]byte(text), &raw); err != nil {
-		return []site{}
-	}
-	out := make([]site, 0, len(raw))
-	seen := map[string]struct{}{}
-	for _, it := range raw {
-		key, _ := it["key"].(string)
-		api, _ := it["api"].(string)
-		name, _ := it["name"].(string)
-		key = strings.TrimSpace(key)
-		api = strings.TrimSpace(api)
-		if key == "" || api == "" {
-			continue
-		}
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-
-		var tptr *int
-		switch v := it["type"].(type) {
-		case float64:
-			n := int(v)
-			tptr = &n
-		}
-		out = append(out, site{Key: key, Name: name, API: api, Type: tptr})
-	}
-	return out
-}
-
-func extractSpiderNameFromAPI(api string) string {
-	raw := strings.TrimSpace(api)
-	if raw == "" {
-		return ""
-	}
-	// /spider/<name>/
-	const marker = "/spider/"
-	i := strings.Index(raw, marker)
-	if i < 0 {
-		return ""
-	}
-	rest := raw[i+len(marker):]
-	j := strings.Index(rest, "/")
-	if j < 0 {
-		return ""
-	}
-	return rest[:j]
-}
-
-func defaultHomeForSite(s site) bool {
-	if extractSpiderNameFromAPI(s.API) == "baseset" {
-		return false
-	}
-	return true
-}
-
-func applySiteOrder(sites []site, order []string) []site {
-	if len(order) == 0 || len(sites) == 0 {
-		return sites
-	}
-	idx := map[string]int{}
-	for i, k := range order {
-		idx[k] = i
-	}
-	type decorated struct {
-		s site
-		i int
-		o int
-	}
-	ds := make([]decorated, 0, len(sites))
-	for i, s := range sites {
-		o, ok := idx[s.Key]
-		if !ok {
-			o = 1_000_000_000
-		}
-		ds = append(ds, decorated{s: s, i: i, o: o})
-	}
-	sort.Slice(ds, func(i, j int) bool {
-		if ds[i].o != ds[j].o {
-			return ds[i].o < ds[j].o
-		}
-		return ds[i].i < ds[j].i
-	})
-	out := make([]site, 0, len(ds))
-	for _, d := range ds {
-		out = append(out, d.s)
-	}
-	return out
 }
