@@ -53,12 +53,17 @@ func HandleDashboardPanSettings(w http.ResponseWriter, r *http.Request, database
 			deviceID := r.FormValue("device_id")
 			cur["refresh_token"] = refreshToken
 			cur["device_id"] = deviceID
+			// Clear derived fields so backend can re-fetch fresh access_token.
+			delete(cur, "access_token")
+			delete(cur, "access_token_exp_at")
 			payload = map[string]any{"refresh_token": refreshToken, "device_id": deviceID}
 		} else {
 			username := r.FormValue("username")
 			password := r.FormValue("password")
 			cur["username"] = username
 			cur["password"] = password
+			// Clear persisted cookie when account changes.
+			delete(cur, "cookie")
 			payload = map[string]any{"username": username, "password": password}
 		}
 		store[key] = cur
