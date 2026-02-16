@@ -2,6 +2,9 @@ package netdisk
 
 import (
 	"bytes"
+	"crypto/md5"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -110,6 +113,28 @@ const (
 	ucShareUA           = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) uc-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch"
 	ucShareAPIQueryBase = ucShareAPIBase + "?pr=UCBrowser&fr=pc"
 )
+
+// UCTV (open-api-drive): ported from CatPawOpen `panUc.js`.
+const (
+	ucTVAPIBase      = "https://open-api-drive.uc.cn"
+	ucTVCodeAPIBase  = "http://api.extscreen.com/ucdrive"
+	ucTVClientID     = "5acf882d27b74502b7040b0c65519aa7"
+	ucTVSignKey      = "l3srvtd7p42l0d0x1u8d7yc8ye9kki4d"
+	ucTVAppVer       = "1.7.2.2"
+	ucTVChannel      = "UCTVOFFICIALWEB"
+	ucTVUA           = "Mozilla/5.0 (Linux; U; Android 13; zh-cn; M2004J7AC Build/UKQ1.231108.001) AppleWebKit/533.1 (KHTML, like Gecko) Mobile Safari/533.1"
+	ucTVTokenSkewMs  = int64(60_000)
+	ucTVBrand        = "Xiaomi"
+	ucTVPlatform     = "tv"
+	ucTVDeviceName   = "M2004J7AC"
+	ucTVDeviceModel  = "M2004J7AC"
+	ucTVBuildDevice  = "M2004J7AC"
+	ucTVBuildProduct = "M2004J7AC"
+	ucTVDeviceGPU    = "Adreno (TM) 550"
+	ucTVActivityRect = "{}"
+)
+
+var ucTVTokenMu sync.Mutex
 
 func parseUCShareIDFromFlag(flag string) string {
 	s := strings.TrimSpace(flag)
@@ -388,12 +413,314 @@ func ucDirectDownload(fid string, fidToken string, cookie string, want string) (
 	return out, nil
 }
 
+func ucMD5Hex(s string) string {
+	sum := md5.Sum([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+func ucSHA256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+func ucTVGenerateReqSign(method string, pathname string, deviceID string) (tm string, xPanToken string, reqID string) {
+	m := strings.ToUpper(strings.TrimSpace(method))
+	if m == "" {
+		m = "GET"
+	}
+	p := strings.TrimSpace(pathname)
+	if p == "" {
+		p = "/"
+	}
+	ts := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	dev := strings.TrimSpace(deviceID)
+	reqID = ucMD5Hex(dev + ts)
+	tokenData := m + "&" + p + "&" + ts + "&" + ucTVSignKey
+	xPanToken = ucSHA256Hex(tokenData)
+	return ts, xPanToken, reqID
+}
+
+type ucTVRefreshResp struct {
+	Code int `json:"code"`
+	Data struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int64  `json:"expires_in"`
+	} `json:"data"`
+	Message string `json:"message"`
+	Msg     string `json:"msg"`
+}
+
+func ucTVRefreshAccessToken(refreshToken string, deviceID string) (accessToken string, nextRefresh string, expAtMs int64, err error) {
+	rt := strings.TrimSpace(refreshToken)
+	dev := strings.TrimSpace(deviceID)
+	if rt == "" {
+		return "", "", 0, errors.New("missing uc_tv refresh_token")
+	}
+	if dev == "" {
+		return "", "", 0, errors.New("missing uc_tv device_id")
+	}
+	_, _, reqID := ucTVGenerateReqSign(http.MethodPost, "/token", dev)
+	u := strings.TrimSpace(ucTVCodeAPIBase + "/token")
+	payload := map[string]any{
+		"req_id":        reqID,
+		"app_ver":       ucTVAppVer,
+		"device_id":     dev,
+		"device_brand":  ucTVBrand,
+		"platform":      ucTVPlatform,
+		"device_name":   ucTVDeviceName,
+		"device_model":  ucTVDeviceModel,
+		"build_device":  ucTVBuildDevice,
+		"build_product": ucTVBuildProduct,
+		"device_gpu":    ucTVDeviceGPU,
+		"activity_rect": ucTVActivityRect,
+		"channel":       ucTVChannel,
+		"refresh_token": rt,
+	}
+	b, _ := json.Marshal(payload)
+	client := &http.Client{Timeout: 12 * time.Second}
+	req, err := http.NewRequest(http.MethodPost, u, bytes.NewReader(b))
+	if err != nil {
+		return "", "", 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", 0, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", "", 0, errors.New("uc_tv http " + strconv.Itoa(resp.StatusCode) + ": " + strings.TrimSpace(string(body)))
+	}
+	var out ucTVRefreshResp
+	if err := json.Unmarshal(bytes.TrimSpace(body), &out); err != nil {
+		return "", "", 0, err
+	}
+	if out.Code != 200 {
+		msg := strings.TrimSpace(out.Message)
+		if msg == "" {
+			msg = strings.TrimSpace(out.Msg)
+		}
+		if msg == "" {
+			msg = "refresh failed"
+		}
+		return "", "", 0, errors.New("uc_tv refresh failed: " + msg)
+	}
+	at := strings.TrimSpace(out.Data.AccessToken)
+	if at == "" {
+		return "", "", 0, errors.New("uc_tv refresh failed: empty access_token")
+	}
+	nrt := strings.TrimSpace(out.Data.RefreshToken)
+	if nrt == "" {
+		nrt = rt
+	}
+	expAt := int64(0)
+	if out.Data.ExpiresIn > 0 {
+		expAt = time.Now().UnixMilli() + out.Data.ExpiresIn*1000
+	}
+	return at, nrt, expAt, nil
+}
+
+type ucTVFileResp struct {
+	Status    int    `json:"status"`
+	Errno     int    `json:"errno"`
+	ErrorInfo string `json:"error_info"`
+	Message   string `json:"message"`
+	Data      struct {
+		DownloadURL string `json:"download_url"`
+		VideoInfo   []struct {
+			URL string `json:"url"`
+		} `json:"video_info"`
+	} `json:"data"`
+}
+
+func ucTVIsAccessTokenInvalid(resp ucTVFileResp) bool {
+	return resp.Status == -1 && resp.Errno == 10001
+}
+
+func ucTVLinkByFid(fid string, accessToken string, deviceID string, method string) (string, ucTVFileResp, error) {
+	fid2 := strings.TrimSpace(fid)
+	if fid2 == "" {
+		return "", ucTVFileResp{}, errors.New("missing fid")
+	}
+	at := strings.TrimSpace(accessToken)
+	dev := strings.TrimSpace(deviceID)
+	if at == "" {
+		return "", ucTVFileResp{}, errors.New("missing uc_tv access_token")
+	}
+	if dev == "" {
+		return "", ucTVFileResp{}, errors.New("missing uc_tv device_id")
+	}
+	m := strings.ToLower(strings.TrimSpace(method))
+	apiMethod := "streaming"
+	if m == "download" {
+		apiMethod = "download"
+	}
+	tm, xPanToken, reqID := ucTVGenerateReqSign(http.MethodGet, "/file", dev)
+
+	u, _ := url.Parse(ucTVAPIBase + "/file")
+	q := u.Query()
+	q.Set("req_id", reqID)
+	q.Set("access_token", at)
+	q.Set("app_ver", ucTVAppVer)
+	q.Set("device_id", dev)
+	q.Set("device_brand", ucTVBrand)
+	q.Set("platform", ucTVPlatform)
+	q.Set("device_name", ucTVDeviceName)
+	q.Set("device_model", ucTVDeviceModel)
+	q.Set("build_device", ucTVBuildDevice)
+	q.Set("build_product", ucTVBuildProduct)
+	q.Set("device_gpu", ucTVDeviceGPU)
+	q.Set("activity_rect", ucTVActivityRect)
+	q.Set("channel", ucTVChannel)
+	q.Set("method", apiMethod)
+	q.Set("group_by", "source")
+	q.Set("fid", fid2)
+	q.Set("resolution", "low,normal,high,super,2k,4k")
+	q.Set("support", "dolby_vision")
+	u.RawQuery = q.Encode()
+
+	client := &http.Client{Timeout: 18 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		return "", ucTVFileResp{}, err
+	}
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("User-Agent", ucTVUA)
+	req.Header.Set("x-pan-tm", tm)
+	req.Header.Set("x-pan-token", xPanToken)
+	req.Header.Set("x-pan-client-id", ucTVClientID)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", ucTVFileResp{}, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", ucTVFileResp{}, errors.New("uc_tv http " + strconv.Itoa(resp.StatusCode) + ": " + strings.TrimSpace(string(body)))
+	}
+	var out ucTVFileResp
+	if err := json.Unmarshal(bytes.TrimSpace(body), &out); err != nil {
+		return "", ucTVFileResp{}, err
+	}
+	if out.Errno != 0 {
+		msg := strings.TrimSpace(out.ErrorInfo)
+		if msg == "" {
+			msg = strings.TrimSpace(out.Message)
+		}
+		if msg == "" {
+			msg = "request failed"
+		}
+		return "", out, errors.New("uc_tv errno=" + strconv.Itoa(out.Errno) + ": " + msg)
+	}
+	if apiMethod == "download" {
+		dl := strings.TrimSpace(out.Data.DownloadURL)
+		if dl == "" {
+			return "", out, errors.New("uc_tv download_url not found")
+		}
+		return dl, out, nil
+	}
+	for _, it := range out.Data.VideoInfo {
+		if u := strings.TrimSpace(it.URL); u != "" {
+			return u, out, nil
+		}
+	}
+	return "", out, errors.New("uc_tv streaming url not found")
+}
+
+func ensureUCTVAccessToken(database *db.DB) (accessToken string, deviceID string, err error) {
+	store := readPanLoginSettings(database)
+	rt := getPanField(store, "uc", "refresh_token")
+	dev := getPanField(store, "uc", "device_id")
+	at := getPanField(store, "uc", "access_token")
+	expAtRaw := getPanField(store, "uc", "access_token_exp_at")
+	expAtMs, _ := strconv.ParseInt(strings.TrimSpace(expAtRaw), 10, 64)
+
+	if at != "" && expAtMs > 0 {
+		if time.Now().UnixMilli()+ucTVTokenSkewMs < expAtMs {
+			return at, dev, nil
+		}
+	}
+	if at != "" && expAtMs == 0 {
+		return at, dev, nil
+	}
+	if rt == "" || dev == "" {
+		return "", "", errors.New("missing uc_tv credentials (pan_login_settings[\"uc\"].refresh_token + device_id)")
+	}
+
+	ucTVTokenMu.Lock()
+	defer ucTVTokenMu.Unlock()
+
+	store = readPanLoginSettings(database)
+	at = getPanField(store, "uc", "access_token")
+	expAtRaw = getPanField(store, "uc", "access_token_exp_at")
+	expAtMs, _ = strconv.ParseInt(strings.TrimSpace(expAtRaw), 10, 64)
+	if at != "" && expAtMs > 0 {
+		if time.Now().UnixMilli()+ucTVTokenSkewMs < expAtMs {
+			return at, dev, nil
+		}
+	}
+	if at != "" && expAtMs == 0 {
+		return at, dev, nil
+	}
+
+	newAT, newRT, newExpAt, err := ucTVRefreshAccessToken(rt, dev)
+	if err != nil {
+		return "", "", err
+	}
+	setPanField(store, "uc", "access_token", newAT)
+	if newExpAt > 0 {
+		setPanField(store, "uc", "access_token_exp_at", strconv.FormatInt(newExpAt, 10))
+	} else {
+		setPanField(store, "uc", "access_token_exp_at", "")
+	}
+	if newRT != "" && newRT != rt {
+		setPanField(store, "uc", "refresh_token", newRT)
+	}
+	_ = writePanLoginSettings(database, store)
+	return newAT, dev, nil
+}
+
 func UCPlay(database *db.DB, id string, want string) (string, map[string]string, error) {
 	_, _, fid, fidToken, _ := parseQuarkPlayID(id)
 	if fid == "" {
 		return "", nil, errors.New("invalid id (missing fid)")
 	}
 	store := readPanLoginSettings(database)
+	// Prefer UCTV link when credentials exist (no cookie headers needed).
+	if getPanField(store, "uc", "refresh_token") != "" && getPanField(store, "uc", "device_id") != "" {
+		at, dev, err := ensureUCTVAccessToken(database)
+		if err == nil && at != "" && dev != "" {
+			u, resp, err2 := ucTVLinkByFid(fid, at, dev, "streaming")
+			if err2 == nil && strings.TrimSpace(u) != "" {
+				return u, map[string]string{}, nil
+			}
+			if err2 != nil && ucTVIsAccessTokenInvalid(resp) {
+				store2 := readPanLoginSettings(database)
+				rt := getPanField(store2, "uc", "refresh_token")
+				dev2 := getPanField(store2, "uc", "device_id")
+				if rt != "" && dev2 != "" {
+					newAT, newRT, newExpAt, e3 := ucTVRefreshAccessToken(rt, dev2)
+					if e3 == nil && strings.TrimSpace(newAT) != "" {
+						setPanField(store2, "uc", "access_token", newAT)
+						if newExpAt > 0 {
+							setPanField(store2, "uc", "access_token_exp_at", strconv.FormatInt(newExpAt, 10))
+						}
+						if newRT != "" && newRT != rt {
+							setPanField(store2, "uc", "refresh_token", newRT)
+						}
+						_ = writePanLoginSettings(database, store2)
+						u2, _, e4 := ucTVLinkByFid(fid, newAT, dev2, "streaming")
+						if e4 == nil && strings.TrimSpace(u2) != "" {
+							return u2, map[string]string{}, nil
+						}
+					}
+				}
+			}
+		}
+	}
+
 	cookie := getPanField(store, "uc", "cookie")
 	if cookie == "" {
 		return "", nil, errors.New("missing uc cookie (pan_login_settings[\"uc\"].cookie)")

@@ -2,7 +2,9 @@ package netdisk
 
 import (
 	"bytes"
+	"crypto/md5"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -139,6 +141,28 @@ const (
 	quarkShareReferer = "https://pan.quark.cn/"
 	quarkShareUA      = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch"
 )
+
+// QuarkTV (open-api-drive): ported from CatPawOpen `panQuark.js`.
+const (
+	quarkTVAPIBase      = "https://open-api-drive.quark.cn"
+	quarkTVCodeAPIBase  = "http://api.extscreen.com/quarkdrive"
+	quarkTVClientID     = "d3194e61504e493eb6222857bccfed94"
+	quarkTVSignKey      = "kw2dvtd7p4t3pjl2d9ed9yc8yej8kw2d"
+	quarkTVAppVer       = "1.8.2.2"
+	quarkTVChannel      = "GENERAL"
+	quarkTVUA           = "Mozilla/5.0 (Linux; U; Android 13; zh-cn; M2004J7AC Build/UKQ1.231108.001) AppleWebKit/533.1 (KHTML, like Gecko) Mobile Safari/533.1"
+	quarkTVTokenSkewMs  = int64(60_000)
+	quarkTVBrand        = "Xiaomi"
+	quarkTVPlatform     = "tv"
+	quarkTVDeviceName   = "M2004J7AC"
+	quarkTVDeviceModel  = "M2004J7AC"
+	quarkTVBuildDevice  = "M2004J7AC"
+	quarkTVBuildProduct = "M2004J7AC"
+	quarkTVDeviceGPU    = "Adreno (TM) 550"
+	quarkTVActivityRect = "{}"
+)
+
+var quarkTVTokenMu sync.Mutex
 
 func parseQuarkShareIDFromFlag(flag string) string {
 	s := strings.TrimSpace(flag)
@@ -444,12 +468,313 @@ func quarkDirectDownload(fid string, fidToken string, cookie string, want string
 	return out, nil
 }
 
+func quarkMD5Hex(s string) string {
+	sum := md5.Sum([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+func quarkSHA256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+func quarkTVGenerateReqSign(method string, pathname string, deviceID string) (tm string, xPanToken string, reqID string) {
+	m := strings.ToUpper(strings.TrimSpace(method))
+	if m == "" {
+		m = "GET"
+	}
+	p := strings.TrimSpace(pathname)
+	if p == "" {
+		p = "/"
+	}
+	ts := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	dev := strings.TrimSpace(deviceID)
+	reqID = quarkMD5Hex(dev + ts)
+	tokenData := m + "&" + p + "&" + ts + "&" + quarkTVSignKey
+	xPanToken = quarkSHA256Hex(tokenData)
+	return ts, xPanToken, reqID
+}
+
+type quarkTVRefreshResp struct {
+	Code int `json:"code"`
+	Data struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int64  `json:"expires_in"`
+	} `json:"data"`
+	Message string `json:"message"`
+	Msg     string `json:"msg"`
+}
+
+func quarkTVRefreshAccessToken(refreshToken string, deviceID string) (accessToken string, nextRefresh string, expAtMs int64, err error) {
+	rt := strings.TrimSpace(refreshToken)
+	dev := strings.TrimSpace(deviceID)
+	if rt == "" {
+		return "", "", 0, errors.New("missing quark_tv refresh_token")
+	}
+	if dev == "" {
+		return "", "", 0, errors.New("missing quark_tv device_id")
+	}
+	_, _, reqID := quarkTVGenerateReqSign(http.MethodPost, "/token", dev)
+	u := strings.TrimSpace(quarkTVCodeAPIBase + "/token")
+	payload := map[string]any{
+		"req_id":        reqID,
+		"app_ver":       quarkTVAppVer,
+		"device_id":     dev,
+		"device_brand":  quarkTVBrand,
+		"platform":      quarkTVPlatform,
+		"device_name":   quarkTVDeviceName,
+		"device_model":  quarkTVDeviceModel,
+		"build_device":  quarkTVBuildDevice,
+		"build_product": quarkTVBuildProduct,
+		"device_gpu":    quarkTVDeviceGPU,
+		"activity_rect": quarkTVActivityRect,
+		"channel":       quarkTVChannel,
+		"refresh_token": rt,
+	}
+	b, _ := json.Marshal(payload)
+	client := &http.Client{Timeout: 12 * time.Second}
+	req, err := http.NewRequest(http.MethodPost, u, bytes.NewReader(b))
+	if err != nil {
+		return "", "", 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", 0, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", "", 0, errors.New("quark_tv http " + strconv.Itoa(resp.StatusCode) + ": " + strings.TrimSpace(string(body)))
+	}
+	var out quarkTVRefreshResp
+	if err := json.Unmarshal(bytes.TrimSpace(body), &out); err != nil {
+		return "", "", 0, err
+	}
+	if out.Code != 200 {
+		msg := strings.TrimSpace(out.Message)
+		if msg == "" {
+			msg = strings.TrimSpace(out.Msg)
+		}
+		if msg == "" {
+			msg = "refresh failed"
+		}
+		return "", "", 0, errors.New("quark_tv refresh failed: " + msg)
+	}
+	at := strings.TrimSpace(out.Data.AccessToken)
+	if at == "" {
+		return "", "", 0, errors.New("quark_tv refresh failed: empty access_token")
+	}
+	nrt := strings.TrimSpace(out.Data.RefreshToken)
+	if nrt == "" {
+		nrt = rt
+	}
+	expAt := int64(0)
+	if out.Data.ExpiresIn > 0 {
+		expAt = time.Now().UnixMilli() + out.Data.ExpiresIn*1000
+	}
+	return at, nrt, expAt, nil
+}
+
+type quarkTVFileResp struct {
+	Status    int    `json:"status"`
+	Errno     int    `json:"errno"`
+	ErrorInfo string `json:"error_info"`
+	Message   string `json:"message"`
+	Data      struct {
+		DownloadURL string `json:"download_url"`
+		VideoInfo   []struct {
+			URL string `json:"url"`
+		} `json:"video_info"`
+	} `json:"data"`
+}
+
+func quarkTVIsAccessTokenInvalid(resp quarkTVFileResp) bool {
+	return resp.Status == -1 && resp.Errno == 10001
+}
+
+func quarkTVLinkByFid(fid string, accessToken string, deviceID string, method string) (string, quarkTVFileResp, error) {
+	fid2 := strings.TrimSpace(fid)
+	if fid2 == "" {
+		return "", quarkTVFileResp{}, errors.New("missing fid")
+	}
+	at := strings.TrimSpace(accessToken)
+	dev := strings.TrimSpace(deviceID)
+	if at == "" {
+		return "", quarkTVFileResp{}, errors.New("missing quark_tv access_token")
+	}
+	if dev == "" {
+		return "", quarkTVFileResp{}, errors.New("missing quark_tv device_id")
+	}
+	m := strings.ToLower(strings.TrimSpace(method))
+	apiMethod := "streaming"
+	if m == "download" {
+		apiMethod = "download"
+	}
+	tm, xPanToken, reqID := quarkTVGenerateReqSign(http.MethodGet, "/file", dev)
+
+	u, _ := url.Parse(quarkTVAPIBase + "/file")
+	q := u.Query()
+	q.Set("req_id", reqID)
+	q.Set("access_token", at)
+	q.Set("app_ver", quarkTVAppVer)
+	q.Set("device_id", dev)
+	q.Set("device_brand", quarkTVBrand)
+	q.Set("platform", quarkTVPlatform)
+	q.Set("device_name", quarkTVDeviceName)
+	q.Set("device_model", quarkTVDeviceModel)
+	q.Set("build_device", quarkTVBuildDevice)
+	q.Set("build_product", quarkTVBuildProduct)
+	q.Set("device_gpu", quarkTVDeviceGPU)
+	q.Set("activity_rect", quarkTVActivityRect)
+	q.Set("channel", quarkTVChannel)
+	q.Set("method", apiMethod)
+	q.Set("group_by", "source")
+	q.Set("fid", fid2)
+	q.Set("resolution", "low,normal,high,super,2k,4k")
+	q.Set("support", "dolby_vision")
+	u.RawQuery = q.Encode()
+
+	client := &http.Client{Timeout: 18 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		return "", quarkTVFileResp{}, err
+	}
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("User-Agent", quarkTVUA)
+	req.Header.Set("x-pan-tm", tm)
+	req.Header.Set("x-pan-token", xPanToken)
+	req.Header.Set("x-pan-client-id", quarkTVClientID)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", quarkTVFileResp{}, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", quarkTVFileResp{}, errors.New("quark_tv http " + strconv.Itoa(resp.StatusCode) + ": " + strings.TrimSpace(string(body)))
+	}
+	var out quarkTVFileResp
+	if err := json.Unmarshal(bytes.TrimSpace(body), &out); err != nil {
+		return "", quarkTVFileResp{}, err
+	}
+	if out.Errno != 0 {
+		msg := strings.TrimSpace(out.ErrorInfo)
+		if msg == "" {
+			msg = strings.TrimSpace(out.Message)
+		}
+		if msg == "" {
+			msg = "request failed"
+		}
+		return "", out, errors.New("quark_tv errno=" + strconv.Itoa(out.Errno) + ": " + msg)
+	}
+	if apiMethod == "download" {
+		dl := strings.TrimSpace(out.Data.DownloadURL)
+		if dl == "" {
+			return "", out, errors.New("quark_tv download_url not found")
+		}
+		return dl, out, nil
+	}
+	for _, it := range out.Data.VideoInfo {
+		if u := strings.TrimSpace(it.URL); u != "" {
+			return u, out, nil
+		}
+	}
+	return "", out, errors.New("quark_tv streaming url not found")
+}
+
+func ensureQuarkTVAccessToken(database *db.DB) (accessToken string, deviceID string, err error) {
+	store := readPanLoginSettings(database)
+	rt := getPanField(store, "quark", "refresh_token")
+	dev := getPanField(store, "quark", "device_id")
+	at := getPanField(store, "quark", "access_token")
+	expAtRaw := getPanField(store, "quark", "access_token_exp_at")
+	expAtMs, _ := strconv.ParseInt(strings.TrimSpace(expAtRaw), 10, 64)
+
+	if at != "" && expAtMs > 0 {
+		if time.Now().UnixMilli()+quarkTVTokenSkewMs < expAtMs {
+			return at, dev, nil
+		}
+	}
+	if at != "" && expAtMs == 0 {
+		return at, dev, nil
+	}
+	if rt == "" || dev == "" {
+		return "", "", errors.New("missing quark_tv credentials (pan_login_settings[\"quark\"].refresh_token + device_id)")
+	}
+
+	quarkTVTokenMu.Lock()
+	defer quarkTVTokenMu.Unlock()
+
+	store = readPanLoginSettings(database)
+	at = getPanField(store, "quark", "access_token")
+	expAtRaw = getPanField(store, "quark", "access_token_exp_at")
+	expAtMs, _ = strconv.ParseInt(strings.TrimSpace(expAtRaw), 10, 64)
+	if at != "" && expAtMs > 0 {
+		if time.Now().UnixMilli()+quarkTVTokenSkewMs < expAtMs {
+			return at, dev, nil
+		}
+	}
+	if at != "" && expAtMs == 0 {
+		return at, dev, nil
+	}
+
+	newAT, newRT, newExpAt, err := quarkTVRefreshAccessToken(rt, dev)
+	if err != nil {
+		return "", "", err
+	}
+	setPanField(store, "quark", "access_token", newAT)
+	if newExpAt > 0 {
+		setPanField(store, "quark", "access_token_exp_at", strconv.FormatInt(newExpAt, 10))
+	} else {
+		setPanField(store, "quark", "access_token_exp_at", "")
+	}
+	if newRT != "" && newRT != rt {
+		setPanField(store, "quark", "refresh_token", newRT)
+	}
+	_ = writePanLoginSettings(database, store)
+	return newAT, dev, nil
+}
+
 func QuarkPlay(database *db.DB, id string, want string) (string, map[string]string, error) {
 	_, _, fid, fidToken, _ := parseQuarkPlayID(id)
 	if fid == "" {
 		return "", nil, errors.New("invalid id (missing fid)")
 	}
 	store := readPanLoginSettings(database)
+	// Prefer QuarkTV link when credentials exist (no cookie headers needed).
+	if getPanField(store, "quark", "refresh_token") != "" && getPanField(store, "quark", "device_id") != "" {
+		at, dev, err := ensureQuarkTVAccessToken(database)
+		if err == nil && at != "" && dev != "" {
+			u, resp, err2 := quarkTVLinkByFid(fid, at, dev, "streaming")
+			if err2 == nil && strings.TrimSpace(u) != "" {
+				return u, map[string]string{}, nil
+			}
+			if err2 != nil && quarkTVIsAccessTokenInvalid(resp) {
+				store2 := readPanLoginSettings(database)
+				rt := getPanField(store2, "quark", "refresh_token")
+				dev2 := getPanField(store2, "quark", "device_id")
+				if rt != "" && dev2 != "" {
+					newAT, newRT, newExpAt, e3 := quarkTVRefreshAccessToken(rt, dev2)
+					if e3 == nil && strings.TrimSpace(newAT) != "" {
+						setPanField(store2, "quark", "access_token", newAT)
+						if newExpAt > 0 {
+							setPanField(store2, "quark", "access_token_exp_at", strconv.FormatInt(newExpAt, 10))
+						}
+						if newRT != "" && newRT != rt {
+							setPanField(store2, "quark", "refresh_token", newRT)
+						}
+						_ = writePanLoginSettings(database, store2)
+						u2, _, e4 := quarkTVLinkByFid(fid, newAT, dev2, "streaming")
+						if e4 == nil && strings.TrimSpace(u2) != "" {
+							return u2, map[string]string{}, nil
+						}
+					}
+				}
+			}
+		}
+	}
 	cookie := getPanField(store, "quark", "cookie")
 	if cookie == "" {
 		return "", nil, errors.New("missing quark cookie (pan_login_settings[\"quark\"].cookie)")

@@ -13,6 +13,7 @@ import (
 	"github.com/jenfonro/meowfilm/server/catpawopen"
 	"github.com/jenfonro/meowfilm/server/config"
 	"github.com/jenfonro/meowfilm/server/magic"
+	"github.com/jenfonro/meowfilm/server/netdisk"
 )
 
 type smartPlaybackRequest struct {
@@ -215,6 +216,190 @@ func smartExtractRawNamesFromEpisodeURL(episodeURL string) []string {
 		}
 	}
 	return out
+}
+
+func smartCompareSmartMatchIgnorePanOrder(a smartCandidate, b smartCandidate, tmdbHasMultiSeason bool, preferSeasonNo int, settings smartPlaybackSettings) int {
+	af := smartComputeCandidateFeatures(a)
+	bf := smartComputeCandidateFeatures(b)
+	if af.TierRank != bf.TierRank {
+		return bf.TierRank - af.TierRank
+	}
+
+	if tmdbHasMultiSeason && preferSeasonNo > 0 {
+		seasonRank := func(m smartCandidate) int {
+			matchSeason := m.MatchSeason
+			if matchSeason == preferSeasonNo {
+				return 4
+			}
+			hint := m.SearchSeasonHint
+			if hint == preferSeasonNo {
+				return 3
+			}
+			hasSeason := m.HasSeasonMarker || hint > 0
+			if hasSeason {
+				return 1
+			}
+			return 0
+		}
+		ar := seasonRank(a)
+		br := seasonRank(b)
+		if ar != br {
+			return br - ar
+		}
+	}
+
+	ah := smartComputeBigHitCount(a, af, settings.ExplicitKeys)
+	bh := smartComputeBigHitCount(b, bf, settings.ExplicitKeys)
+	if ah != bh {
+		return bh - ah
+	}
+
+	ok := settings.OrderKeys
+	for _, key := range ok {
+		if key == "网盘" {
+			continue
+		}
+		q := 0
+		if key == "画质" {
+			q = bf.QualityRank - af.QualityRank
+		} else if key == "帧率" {
+			if bf.Fps60 != af.Fps60 {
+				if bf.Fps60 {
+					q = 1
+				} else {
+					q = -1
+				}
+			}
+		} else if key == "关键字" {
+			q = smartComparePriorityMatch(a.MatchKeyword, b.MatchKeyword)
+		}
+		if q != 0 {
+			return q
+		}
+	}
+
+	ex := smartComparePriorityMatch(af.EnhanceMatch, bf.EnhanceMatch)
+	if ex != 0 {
+		return ex
+	}
+	return 0
+}
+
+func smartPickBestMatchIgnorePanOrder(list []smartCandidate, tmdbHasMultiSeason bool, preferSeasonNo int, settings smartPlaybackSettings) *smartCandidate {
+	items := make([]smartCandidate, 0, len(list))
+	for _, it := range list {
+		items = append(items, it)
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	best := items[0]
+	for i := 1; i < len(items); i++ {
+		if smartCompareSmartMatchIgnorePanOrder(best, items[i], tmdbHasMultiSeason, preferSeasonNo, settings) > 0 {
+			best = items[i]
+		}
+	}
+	return &best
+}
+
+func smartParseVodPlayURLToEpisodes(vodPlayURL string) []catpawopen.Episode {
+	raw := strings.TrimSpace(vodPlayURL)
+	if raw == "" {
+		return nil
+	}
+	chunks := strings.Split(raw, "#")
+	out := make([]catpawopen.Episode, 0, len(chunks))
+	for _, chunk := range chunks {
+		s := strings.TrimSpace(chunk)
+		if s == "" {
+			continue
+		}
+		name := s
+		url := ""
+		if idx := strings.Index(s, "$"); idx >= 0 {
+			name = strings.TrimSpace(s[:idx])
+			url = strings.TrimSpace(s[idx+1:])
+		}
+		if strings.TrimSpace(url) == "" {
+			continue
+		}
+		out = append(out, catpawopen.Episode{Name: name, URL: url})
+	}
+	return out
+}
+
+func smartPanMockProviderID(panLabel string) string {
+	s := strings.TrimSpace(panLabel)
+	if s == "" {
+		return ""
+	}
+	if strings.Contains(s, "天意") {
+		return "tianyi"
+	}
+	if strings.Contains(s, "逸动") {
+		return "139"
+	}
+	if strings.Contains(s, "夸父") {
+		return "quark"
+	}
+	if strings.Contains(s, "优夕") {
+		return "uc"
+	}
+	if strings.Contains(s, "百度") {
+		return "baidu"
+	}
+	return ""
+}
+
+func smartExtractMockPasscodeFromCandidate(c smartCandidate) string {
+	names := smartExtractRawNamesFromEpisodeURL(c.Ep.URL)
+	if len(names) == 0 {
+		return ""
+	}
+	raw := strings.TrimSpace(names[0])
+	if raw == "" {
+		return ""
+	}
+	out := raw
+	if strings.HasSuffix(strings.ToLower(out), ".mp4") {
+		out = strings.TrimSpace(out[:len(out)-4])
+	}
+	if strings.EqualFold(out, "nopass") {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
+func smartExtractTianyiMockMetaFromCandidate(c smartCandidate) (shareCode string, accessCode string) {
+	url := strings.TrimSpace(c.Ep.URL)
+	if url != "" {
+		parts := strings.Split(url, "*")
+		if len(parts) >= 3 {
+			p3 := strings.TrimSpace(parts[2])
+			if p3 != "" && !strings.Contains(p3, ".") && regexp.MustCompile(`^[A-Za-z0-9]{6,64}$`).MatchString(p3) {
+				shareCode = p3
+			}
+		}
+	}
+	pass := strings.TrimSpace(smartExtractMockPasscodeFromCandidate(c))
+	if pass == "" {
+		return shareCode, ""
+	}
+	if strings.Contains(pass, "-") {
+		seg := strings.SplitN(pass, "-", 2)
+		if shareCode == "" && strings.TrimSpace(seg[0]) != "" {
+			shareCode = strings.TrimSpace(seg[0])
+		}
+		if len(seg) == 2 {
+			accessCode = strings.TrimSpace(seg[1])
+		}
+	} else {
+		accessCode = pass
+	}
+	if strings.EqualFold(accessCode, "nopass") {
+		accessCode = ""
+	}
+	return shareCode, accessCode
 }
 
 func smartBuildCandidateLowerText(texts []string) string {
@@ -622,6 +807,7 @@ type smartDetailCacheEntry struct {
 	LastError       string
 	Source          smartSource
 	Pans            []catpawopen.Pan
+	PanMockEnabled  bool
 	EpisodeMap      map[int][]smartCandidate
 	EpisodeMapLoose map[int][]smartCandidate
 }
@@ -989,6 +1175,16 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 			smartDetailCache.Unlock()
 			return
 		}
+		if v, ok := detailRaw["pan_mock"]; ok {
+			switch x := v.(type) {
+			case bool:
+				entry.PanMockEnabled = x
+			case string:
+				entry.PanMockEnabled = strings.TrimSpace(x) == "1" || strings.EqualFold(strings.TrimSpace(x), "true")
+			case float64:
+				entry.PanMockEnabled = int(x) == 1
+			}
+		}
 		playFrom, playURL := catpawopen.ExtractDetailPlayFromURL(detailRaw)
 		pans := catpawopen.ParsePlaySources(playFrom, playURL)
 		entry.Pans = pans
@@ -1177,6 +1373,315 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 	if len(candidatesForNo) == 0 {
 		return nil
 	}
+
+	if cache.PanMockEnabled {
+		type groupAttempt struct {
+			Key      string
+			Allowed  bool
+			Provider string
+			Base     smartCandidate
+			MetaA    string // provider-specific meta: shareCode for tianyi, passcode for others
+			MetaB    string // provider-specific meta: accessCode for tianyi
+		}
+
+		allowedTokens := settings.PanTokenOrderLower
+		isAllowedLabel := func(label string) bool {
+			if len(allowedTokens) == 0 {
+				return true
+			}
+			ll := strings.ToLower(strings.TrimSpace(label))
+			for _, t := range allowedTokens {
+				tt := strings.ToLower(strings.TrimSpace(t))
+				if tt == "" {
+					continue
+				}
+				if strings.Contains(ll, tt) {
+					return true
+				}
+			}
+			return false
+		}
+
+		groups := map[string]groupAttempt{}
+		normalAllowed := []smartCandidate{}
+		normalFallback := []smartCandidate{}
+		for _, c := range candidatesForNo {
+			pid := smartPanMockProviderID(c.PanLabel)
+			allowed := isAllowedLabel(c.PanLabel)
+			if pid == "" {
+				if allowed {
+					normalAllowed = append(normalAllowed, c)
+				} else {
+					normalFallback = append(normalFallback, c)
+				}
+				continue
+			}
+			if pid == "baidu" {
+				// Baidu play is not implemented in MeowFilm netdisk yet; treat it as fallback.
+				allowed = false
+			}
+
+			shareKey := strings.TrimSpace(c.PanLabel)
+			metaA := ""
+			metaB := ""
+			if pid == "tianyi" {
+				sc, ac := smartExtractTianyiMockMetaFromCandidate(c)
+				metaA = sc
+				metaB = ac
+				if sc != "" {
+					shareKey = sc
+				}
+			} else {
+				metaA = smartExtractMockPasscodeFromCandidate(c)
+			}
+			key := pid + "|" + shareKey
+			if prev, ok := groups[key]; ok {
+				best := smartPickBestMatchIgnorePanOrder([]smartCandidate{prev.Base, c}, tmdbHasMultiSeason, preferSeasonNo, settings)
+				if best != nil && strings.TrimSpace(best.Ep.URL) != strings.TrimSpace(prev.Base.Ep.URL) {
+					prev.Base = c
+				}
+				groups[key] = prev
+				continue
+			}
+			groups[key] = groupAttempt{
+				Key:      key,
+				Allowed:  allowed,
+				Provider: pid,
+				Base:     c,
+				MetaA:    metaA,
+				MetaB:    metaB,
+			}
+		}
+
+		resolveFromVod := func(base smartCandidate, vodPlayURL string) *smartCandidate {
+			eps := smartParseVodPlayURLToEpisodes(vodPlayURL)
+			if len(eps) == 0 {
+				return nil
+			}
+			matches := []smartCandidate{}
+			for _, ep := range eps {
+				if strings.TrimSpace(ep.URL) == "" {
+					continue
+				}
+				texts := smartExtractEpisodeCandidateTexts(ep)
+				if len(texts) == 0 || strings.TrimSpace(texts[0]) == "" {
+					texts = []string{strings.TrimSpace(ep.Name)}
+				}
+				jsMatch, err := magic.MagicEpisodeExtractFromCandidates(texts, rawCleanRules, rawEpisodeRules)
+				if err != nil {
+					continue
+				}
+				match := smartNormalizeMaybeGlobalSeasonEpisode(tmdbSeasons, smartSeasonEpisode{Season: jsMatch.Season, Episode: jsMatch.Episode})
+				seasonNo := match.Season
+				epNo := match.Episode
+				if epNo <= 0 {
+					continue
+				}
+				keyNo := epNo
+				if seasonNo > 0 {
+					if g := smartTMDBGlobalEpisodeNoOf(tmdbSeasons, seasonNo, epNo); g > 0 {
+						keyNo = g
+					}
+				}
+				if keyNo != want {
+					continue
+				}
+				rawLower := smartBuildCandidateLowerText(texts)
+				if rawLower == "" {
+					rawLower = strings.ToLower(strings.TrimSpace(ep.Name))
+				}
+				cand := base
+				cand.Ep = ep
+				cand.RawLower = rawLower
+				cand.MatchSeason = seasonNo
+				cand.HasSeasonMarker = seasonNo > 0
+				cand.MatchKeyword = smartComputePriorityMatch(rawLower, settings.KeywordTokensLower)
+				matches = append(matches, cand)
+			}
+			if len(matches) == 0 {
+				return nil
+			}
+			return smartPickBestMatchIgnorePanOrder(matches, tmdbHasMultiSeason, preferSeasonNo, settings)
+		}
+
+		tryGroup := func(at groupAttempt) *smartPickResult {
+			base := at.Base
+			switch at.Provider {
+			case "tianyi":
+				sc := strings.TrimSpace(at.MetaA)
+				ac := strings.TrimSpace(at.MetaB)
+				if sc == "" {
+					sc2, ac2 := smartExtractTianyiMockMetaFromCandidate(base)
+					if sc == "" {
+						sc = sc2
+					}
+					if ac == "" {
+						ac = ac2
+					}
+				}
+				if sc == "" {
+					return nil
+				}
+				flag := "天意-" + sc
+				vod, _, _, err := netdisk.Tianyi189List(database, flag, ac)
+				if err != nil {
+					return nil
+				}
+				picked := resolveFromVod(base, vod)
+				if picked == nil || strings.TrimSpace(picked.Ep.URL) == "" {
+					return nil
+				}
+				u, _, _, _, err := netdisk.Tianyi189Play(database, picked.Ep.URL, ac)
+				if err != nil || strings.TrimSpace(u) == "" {
+					return nil
+				}
+				return &smartPickResult{Cand: *picked, PlayURL: u, Headers: map[string]string{}}
+			case "quark":
+				vod, _, err := netdisk.QuarkList(database, strings.TrimSpace(base.PanLabel), strings.TrimSpace(at.MetaA))
+				if err != nil {
+					return nil
+				}
+				picked := resolveFromVod(base, vod)
+				if picked == nil || strings.TrimSpace(picked.Ep.URL) == "" {
+					return nil
+				}
+				u, header, err := netdisk.QuarkPlay(database, picked.Ep.URL, "")
+				if err != nil || strings.TrimSpace(u) == "" {
+					return nil
+				}
+				if header == nil {
+					header = map[string]string{}
+				}
+				return &smartPickResult{Cand: *picked, PlayURL: u, Headers: header}
+			case "uc":
+				vod, _, err := netdisk.UCList(database, strings.TrimSpace(base.PanLabel), strings.TrimSpace(at.MetaA))
+				if err != nil {
+					return nil
+				}
+				picked := resolveFromVod(base, vod)
+				if picked == nil || strings.TrimSpace(picked.Ep.URL) == "" {
+					return nil
+				}
+				u, header, err := netdisk.UCPlay(database, picked.Ep.URL, "")
+				if err != nil || strings.TrimSpace(u) == "" {
+					return nil
+				}
+				if header == nil {
+					header = map[string]string{}
+				}
+				return &smartPickResult{Cand: *picked, PlayURL: u, Headers: header}
+			case "139":
+				vod, _, err := netdisk.Yun139List(database, strings.TrimSpace(base.PanLabel))
+				if err != nil {
+					return nil
+				}
+				picked := resolveFromVod(base, vod)
+				if picked == nil || strings.TrimSpace(picked.Ep.URL) == "" {
+					return nil
+				}
+				u, err := netdisk.Yun139Play(database, strings.TrimSpace(base.PanLabel), picked.Ep.URL)
+				if err != nil || strings.TrimSpace(u) == "" {
+					return nil
+				}
+				return &smartPickResult{Cand: *picked, PlayURL: u, Headers: map[string]string{}}
+			case "baidu":
+				// Baidu play is not implemented in MeowFilm netdisk yet.
+				_, _, _ = netdisk.BaiduList(database, strings.TrimSpace(base.PanLabel), strings.TrimSpace(at.MetaA))
+				return nil
+			default:
+				return nil
+			}
+		}
+
+		allowedAttempts := []groupAttempt{}
+		fallbackAttempts := []groupAttempt{}
+		for _, at := range groups {
+			if at.Allowed {
+				allowedAttempts = append(allowedAttempts, at)
+			} else {
+				fallbackAttempts = append(fallbackAttempts, at)
+			}
+		}
+
+		if len(allowedAttempts) > 0 {
+			resCh := make(chan *smartPickResult, len(allowedAttempts))
+			var wg sync.WaitGroup
+			for _, at := range allowedAttempts {
+				wg.Add(1)
+				go func(a groupAttempt) {
+					defer wg.Done()
+					if res := tryGroup(a); res != nil && strings.TrimSpace(res.PlayURL) != "" {
+						resCh <- res
+					}
+				}(at)
+			}
+			go func() {
+				wg.Wait()
+				close(resCh)
+			}()
+			if res, ok := <-resCh; ok && res != nil {
+				return res
+			}
+		}
+
+		tryNormalPlay := func(best *smartCandidate) *smartPickResult {
+			if best == nil || strings.TrimSpace(best.Ep.URL) == "" {
+				return nil
+			}
+			siteID := catpawopen.ExtractSiteIDFromSpiderAPI(spiderApi)
+			playPayload := map[string]any{
+				"flag":    strings.TrimSpace(best.Ep.Flag),
+				"id":      strings.TrimSpace(best.Ep.URL),
+				"siteApi": spiderApi,
+			}
+			if siteID != "" {
+				playPayload["siteId"] = siteID
+			}
+			playRaw, err := catpawopen.RequestPlay(apiBase, tvUser, playPayload)
+			if err != nil {
+				return nil
+			}
+			urlPicked := strings.TrimSpace(catpawopen.PickFirstPlayableURL(playRaw))
+			if urlPicked == "" {
+				return nil
+			}
+			urlPicked = catpawopen.RewriteProxyURLToBase(urlPicked, apiBase, tvUser)
+			headers := map[string]string{}
+			if h, ok := playRaw["header"].(map[string]any); ok {
+				for k, v := range h {
+					kk := strings.TrimSpace(k)
+					if kk == "" {
+						continue
+					}
+					sv := strings.TrimSpace(embyAnyToString(v))
+					if sv == "" {
+						continue
+					}
+					headers[kk] = sv
+				}
+			}
+			return &smartPickResult{Cand: *best, PlayURL: urlPicked, Headers: headers}
+		}
+
+		if len(normalAllowed) > 0 {
+			best := smartPickBestMatchIgnorePanOrder(normalAllowed, tmdbHasMultiSeason, preferSeasonNo, settings)
+			if res := tryNormalPlay(best); res != nil {
+				return res
+			}
+		}
+		if len(normalFallback) > 0 {
+			best := smartPickBestMatchIgnorePanOrder(normalFallback, tmdbHasMultiSeason, preferSeasonNo, settings)
+			if res := tryNormalPlay(best); res != nil {
+				return res
+			}
+		}
+		for _, at := range fallbackAttempts {
+			if res := tryGroup(at); res != nil && strings.TrimSpace(res.PlayURL) != "" {
+				return res
+			}
+		}
+	}
+
 	best := smartPickBestMatch(candidatesForNo, tmdbHasMultiSeason, preferSeasonNo, settings)
 	if best == nil || strings.TrimSpace(best.Ep.URL) == "" {
 		return nil
