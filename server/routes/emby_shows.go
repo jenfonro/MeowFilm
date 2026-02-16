@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/catpawopen"
 )
 
 func embyIsAiredDate(airDate string, now time.Time) bool {
@@ -217,7 +218,7 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 					seasonNo = 1
 				}
 				// Pick the pan by seasonNo.
-				var pan embyCatPan
+				var pan catpawopen.Pan
 				if seasonNo-1 >= 0 && seasonNo-1 < len(pans) {
 					pan = pans[seasonNo-1]
 				} else {

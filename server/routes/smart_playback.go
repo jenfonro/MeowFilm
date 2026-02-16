@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/catpawopen"
 )
 
 type smartPlaybackRequest struct {
@@ -272,7 +273,7 @@ func smartBuildCandidateLowerText(texts []string) string {
 	return strings.TrimSpace(strings.Join(out, " "))
 }
 
-func smartExtractEpisodeCandidateTexts(ep embyCatEpisode) []string {
+func smartExtractEpisodeCandidateTexts(ep catpawopen.Episode) []string {
 	rawNames := smartExtractRawNamesFromEpisodeURL(ep.URL)
 	displayName := strings.TrimSpace(ep.Name)
 	out := make([]string, 0, 6)
@@ -463,7 +464,7 @@ type smartCandidate struct {
 	SrcRemarkLower   string
 	PanLabel         string
 	PanTokenIdx      int
-	Ep               embyCatEpisode
+	Ep               catpawopen.Episode
 	RawLower         string
 	MatchSeason      int
 	HasSeasonMarker  bool
@@ -658,7 +659,7 @@ type smartDetailCacheEntry struct {
 	NextRetryAt     time.Time
 	LastError       string
 	Source          smartSource
-	Pans            []embyCatPan
+	Pans            []catpawopen.Pan
 	EpisodeMap      map[int][]smartCandidate
 	EpisodeMapLoose map[int][]smartCandidate
 }
@@ -737,11 +738,11 @@ func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle st
 		if searchEnabled, ok := searchMap[s.Key]; ok && !searchEnabled {
 			continue
 		}
-		raw, err := embyCatRequestSpider(apiBase, s.API, "search", map[string]any{"wd": searchTitle, "page": 1})
+		raw, err := catpawopen.RequestSpider(apiBase, s.API, "search", map[string]any{"wd": searchTitle, "page": 1})
 		if err != nil {
 			continue
 		}
-		items := embyCatNormalizeSearchList(raw)
+		items := catpawopen.NormalizeSearchList(raw)
 		for _, it := range items {
 			name := strings.TrimSpace(it.Name)
 			if strings.TrimSpace(it.ID) == "" || name == "" {
@@ -1004,12 +1005,12 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 			NextRetryAt:     time.Time{},
 			LastError:       "",
 			Source:          src,
-			Pans:            []embyCatPan{},
+			Pans:            []catpawopen.Pan{},
 			EpisodeMap:      map[int][]smartCandidate{},
 			EpisodeMapLoose: map[int][]smartCandidate{},
 		}
 
-		detailRaw, err := embyCatRequestSpider(apiBase, src.SpiderAPI, "detail", map[string]any{"id": src.VideoID})
+		detailRaw, err := catpawopen.RequestSpider(apiBase, src.SpiderAPI, "detail", map[string]any{"id": src.VideoID})
 		if err != nil {
 			smartDetailCache.Lock()
 			prev := smartDetailCache.M[key]
@@ -1026,8 +1027,8 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 			smartDetailCache.Unlock()
 			return
 		}
-		playFrom, playURL := embyExtractDetailPlayFromURL(detailRaw)
-		pans := embyParsePlaySources(playFrom, playURL)
+		playFrom, playURL := catpawopen.ExtractDetailPlayFromURL(detailRaw)
+		pans := catpawopen.ParsePlaySources(playFrom, playURL)
 		entry.Pans = pans
 
 		srcRemarkLower := strings.ToLower(strings.TrimSpace(src.VideoRemark))
@@ -1220,7 +1221,7 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 	}
 
 	// Verify by calling play and ensure we have a playable url.
-	siteID := embyExtractSiteIDFromSpiderAPI(spiderApi)
+	siteID := catpawopen.ExtractSiteIDFromSpiderAPI(spiderApi)
 	playPayload := map[string]any{
 		"flag":    strings.TrimSpace(best.Ep.Flag),
 		"id":      strings.TrimSpace(best.Ep.URL),
@@ -1229,15 +1230,15 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 	if siteID != "" {
 		playPayload["siteId"] = siteID
 	}
-	playRaw, err := embyCatRequestPlay(apiBase, tvUser, playPayload)
+	playRaw, err := catpawopen.RequestPlay(apiBase, tvUser, playPayload)
 	if err != nil {
 		return nil
 	}
-	urlPicked := embyPickFirstPlayableURL(playRaw)
+	urlPicked := catpawopen.PickFirstPlayableURL(playRaw)
 	if strings.TrimSpace(urlPicked) == "" {
 		return nil
 	}
-	urlPicked = embyRewriteProxyURLToBase(urlPicked, apiBase, tvUser)
+	urlPicked = catpawopen.RewriteProxyURLToBase(urlPicked, apiBase, tvUser)
 	headers := map[string]string{}
 	if h, ok := playRaw["header"].(map[string]any); ok {
 		for k, v := range h {

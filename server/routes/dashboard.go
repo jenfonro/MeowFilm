@@ -10,6 +10,7 @@ import (
 
 	"github.com/jenfonro/meowfilm/internal/auth"
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/catpawopen"
 )
 
 func DashboardHandler(database *db.DB, authMw *auth.Auth) http.Handler {
@@ -398,8 +399,8 @@ func handleDashboardCatPawOpenSave(w http.ResponseWriter, r *http.Request, datab
 		return
 	}
 	parseForm(r)
-	servers := parseCatPawOpenServers(database.GetSetting("catpawopen_servers"))
-	prevBase := resolveCatPawOpenActiveBase(servers, database.GetSetting("catpawopen_active"))
+	servers := catpawopen.ParseServers(database.GetSetting("catpawopen_servers"))
+	prevBase := catpawopen.ResolveActiveBase(servers, database.GetSetting("catpawopen_active"))
 	serverKey := strings.TrimSpace(r.FormValue("catPawOpenServerKey"))
 	name := strings.TrimSpace(r.FormValue("catPawOpenName"))
 	base := r.FormValue("catPawOpenApiBase")
@@ -446,13 +447,13 @@ func handleDashboardCatPawOpenSave(w http.ResponseWriter, r *http.Request, datab
 			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "服务器名称已存在"})
 			return
 		}
-		servers[updatedIdx] = catPawOpenServer{Name: name, APIBase: normalizedBase}
+		servers[updatedIdx] = catpawopen.Server{Name: name, APIBase: normalizedBase}
 	} else {
 		if existsName(name, -1) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "服务器名称已存在"})
 			return
 		}
-		servers = append(servers, catPawOpenServer{Name: name, APIBase: normalizedBase})
+		servers = append(servers, catpawopen.Server{Name: name, APIBase: normalizedBase})
 	}
 
 	serversJSON, _ := json.Marshal(servers)
@@ -477,10 +478,10 @@ func handleDashboardCatPawOpenDelete(w http.ResponseWriter, r *http.Request, dat
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数无效"})
 		return
 	}
-	servers := parseCatPawOpenServers(database.GetSetting("catpawopen_servers"))
+	servers := catpawopen.ParseServers(database.GetSetting("catpawopen_servers"))
 
 	removed := false
-	next := make([]catPawOpenServer, 0, len(servers))
+	next := make([]catpawopen.Server, 0, len(servers))
 	for _, s := range servers {
 		if s.Name == key {
 			removed = true
@@ -495,7 +496,7 @@ func handleDashboardCatPawOpenDelete(w http.ResponseWriter, r *http.Request, dat
 
 	serversJSON, _ := json.Marshal(next)
 	_ = database.SetSetting("catpawopen_servers", string(serversJSON))
-	active := pickCatPawOpenActiveName(next, database.GetSetting("catpawopen_active"))
+	active := catpawopen.PickActiveName(next, database.GetSetting("catpawopen_active"))
 	_ = database.SetSetting("catpawopen_active", active)
 
 	writeJSON(w, 200, map[string]any{
@@ -510,8 +511,8 @@ func handleDashboardSiteSettings(w http.ResponseWriter, r *http.Request, databas
 		methodNotAllowed(w)
 		return
 	}
-	servers := parseCatPawOpenServers(database.GetSetting("catpawopen_servers"))
-	active := pickCatPawOpenActiveName(servers, database.GetSetting("catpawopen_active"))
+	servers := catpawopen.ParseServers(database.GetSetting("catpawopen_servers"))
+	active := catpawopen.PickActiveName(servers, database.GetSetting("catpawopen_active"))
 	mode := strings.TrimSpace(database.GetSetting("search_display_mode"))
 	if mode != "tmdb" && mode != "both" && mode != "sites" {
 		mode = "sites"

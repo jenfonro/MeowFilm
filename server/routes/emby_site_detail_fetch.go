@@ -6,9 +6,10 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/catpawopen"
 )
 
-func embyLoadSiteDetailPans(database *db.DB, u *embyUser, seriesID string) ([]embyCatPan, embySiteMapEntry, error) {
+func embyLoadSiteDetailPans(database *db.DB, u *embyUser, seriesID string) ([]catpawopen.Pan, embySiteMapEntry, error) {
 	if database == nil {
 		return nil, embySiteMapEntry{}, errors.New("invalid database")
 	}
@@ -29,14 +30,14 @@ func embyLoadSiteDetailPans(database *db.DB, u *embyUser, seriesID string) ([]em
 		return nil, embySiteMapEntry{}, errors.New("CatPawOpen 接口地址未设置")
 	}
 
-	detailRaw, err := embyCatRequestSpider(apiBase, strings.TrimSpace(siteEntry.SpiderAPI), "detail", map[string]any{"id": strings.TrimSpace(siteEntry.VideoID)})
+	detailRaw, err := catpawopen.RequestSpider(apiBase, strings.TrimSpace(siteEntry.SpiderAPI), "detail", map[string]any{"id": strings.TrimSpace(siteEntry.VideoID)})
 	if err != nil {
 		return nil, siteEntry, err
 	}
-	playFrom, playURL := embyExtractDetailPlayFromURL(detailRaw)
-	pans := embyParsePlaySources(playFrom, playURL)
+	playFrom, playURL := catpawopen.ExtractDetailPlayFromURL(detailRaw)
+	pans := catpawopen.ParsePlaySources(playFrom, playURL)
 	if pans == nil {
-		pans = []embyCatPan{}
+		pans = []catpawopen.Pan{}
 	}
 
 	ttl := 30 * time.Minute
@@ -82,19 +83,19 @@ func embyLoadSiteDetailPans(database *db.DB, u *embyUser, seriesID string) ([]em
 				continue
 			}
 			embySiteEpisodeMapPut(epID, embySiteEpisodeMapEntry{
-				SeriesID:        sid,
-				SeasonID:        seasonID,
-				SiteKey:         siteKey,
-				SiteName:        siteName,
-				SpiderAPI:       spiderAPI,
-				VideoID:         videoID,
-				SeasonNo:        seasonNo,
-				EpisodeIndex:    j + 1,
-				EpisodeName:     strings.TrimSpace(ep.Name),
-				EpisodeURL:      epURL,
-				EpisodePlayFlg:  strings.TrimSpace(ep.Flag),
-				Pic:             pic,
-				Remark:          remark,
+				SeriesID:       sid,
+				SeasonID:       seasonID,
+				SiteKey:        siteKey,
+				SiteName:       siteName,
+				SpiderAPI:      spiderAPI,
+				VideoID:        videoID,
+				SeasonNo:       seasonNo,
+				EpisodeIndex:   j + 1,
+				EpisodeName:    strings.TrimSpace(ep.Name),
+				EpisodeURL:     epURL,
+				EpisodePlayFlg: strings.TrimSpace(ep.Flag),
+				Pic:            pic,
+				Remark:         remark,
 			}, ttl)
 		}
 	}

@@ -6,10 +6,11 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/catpawopen"
 )
 
 type embySiteDetailDedupEntry struct {
-	Pans     []embyCatPan
+	Pans     []catpawopen.Pan
 	ErrMsg   string
 	ExpireAt time.Time
 }
@@ -22,7 +23,7 @@ var embySiteDetailDedup struct {
 
 const embySiteDetailDedupTTL = 12 * time.Second
 
-func embyFetchSiteDetailPansDedup(database *db.DB, u *embyUser, spiderAPI string, videoID string) ([]embyCatPan, error) {
+func embyFetchSiteDetailPansDedup(database *db.DB, u *embyUser, spiderAPI string, videoID string) ([]catpawopen.Pan, error) {
 	if database == nil {
 		return nil, nil
 	}
@@ -82,7 +83,7 @@ func embyFetchSiteDetailPansDedup(database *db.DB, u *embyUser, spiderAPI string
 	embySiteDetailDedup.mu.Unlock()
 
 	var (
-		pans []embyCatPan
+		pans []catpawopen.Pan
 		err  error
 	)
 	defer func() {
@@ -112,4 +113,3 @@ func errString(err error) string {
 type errorString string
 
 func (e errorString) Error() string { return string(e) }
-

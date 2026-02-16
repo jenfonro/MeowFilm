@@ -5,9 +5,10 @@ import (
 	"strings"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/catpawopen"
 )
 
-func embyFetchSiteDetailPans(database *db.DB, u *embyUser, spiderAPI string, videoID string) ([]embyCatPan, error) {
+func embyFetchSiteDetailPans(database *db.DB, u *embyUser, spiderAPI string, videoID string) ([]catpawopen.Pan, error) {
 	if database == nil {
 		return nil, errors.New("invalid database")
 	}
@@ -20,15 +21,14 @@ func embyFetchSiteDetailPans(database *db.DB, u *embyUser, spiderAPI string, vid
 	if apiBase == "" {
 		return nil, errors.New("CatPawOpen 接口地址未设置")
 	}
-	detailRaw, err := embyCatRequestSpider(apiBase, sp, "detail", map[string]any{"id": vid})
+	detailRaw, err := catpawopen.RequestSpider(apiBase, sp, "detail", map[string]any{"id": vid})
 	if err != nil {
 		return nil, err
 	}
-	playFrom, playURL := embyExtractDetailPlayFromURL(detailRaw)
-	pans := embyParsePlaySources(playFrom, playURL)
+	playFrom, playURL := catpawopen.ExtractDetailPlayFromURL(detailRaw)
+	pans := catpawopen.ParsePlaySources(playFrom, playURL)
 	if pans == nil {
-		pans = []embyCatPan{}
+		pans = []catpawopen.Pan{}
 	}
 	return pans, nil
 }
-
