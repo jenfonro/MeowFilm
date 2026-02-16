@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/catpawopen"
 )
 
 var embyStreams = newEmbyStreamStore()
@@ -41,10 +42,10 @@ func handleEmbyPlaybackInfo(w http.ResponseWriter, r *http.Request, database *db
 				"id":      strings.TrimSpace(ep.URL),
 				"siteApi": strings.TrimSpace(ep.SiteAPI),
 			}
-			if siteID := embyExtractSiteIDFromSpiderAPI(ep.SiteAPI); siteID != "" {
+			if siteID := catpawopen.ExtractSiteIDFromSpiderAPI(ep.SiteAPI); siteID != "" {
 				playPayload["siteId"] = siteID
 			}
-			playRaw, err := embyCatRequestPlay(apiBase, tvUser, playPayload)
+			playRaw, err := catpawopen.RequestPlay(apiBase, tvUser, playPayload)
 			if err != nil {
 				if embyDebugLogEnabled() {
 					embyDebugPrintf("[emby][playback] fail item=%s err=%q cost=%s", embyID, err.Error(), time.Since(startAt).String())
@@ -52,12 +53,12 @@ func handleEmbyPlaybackInfo(w http.ResponseWriter, r *http.Request, database *db
 				embyBadGateway(w, err)
 				return
 			}
-			urlPicked := strings.TrimSpace(embyPickFirstPlayableURL(playRaw))
+			urlPicked := strings.TrimSpace(catpawopen.PickFirstPlayableURL(playRaw))
 			if urlPicked == "" {
 				embyWriteError(w, 502, "站点未返回可播放地址")
 				return
 			}
-			urlPicked = embyRewriteProxyURLToBase(urlPicked, apiBase, tvUser)
+			urlPicked = catpawopen.RewriteProxyURLToBase(urlPicked, apiBase, tvUser)
 			headers := map[string]string{}
 			if h, ok := playRaw["header"].(map[string]any); ok {
 				for k, v := range h {
