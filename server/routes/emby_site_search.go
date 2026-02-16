@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/catpawopen"
 )
 
 type embySiteSearchHit struct {
@@ -18,10 +19,10 @@ type embySiteSearchHit struct {
 	Pic       string
 	Remark    string
 
-	Score    int
-	TitleLen int
+	Score     int
+	TitleLen  int
 	SiteOrder int
-	Seq      int
+	Seq       int
 }
 
 // embySearchSitesHits runs a best-effort, concurrent search across all enabled sites and returns a
@@ -79,7 +80,7 @@ func embySearchSitesHits(database *db.DB, u *embyUser, query string, maxWait tim
 	type job struct{ S site }
 	type result struct {
 		Site site
-		List []embyCatSearchItem
+		List []catpawopen.SearchItem
 	}
 
 	expected := len(searchSites)
@@ -104,11 +105,11 @@ func embySearchSitesHits(database *db.DB, u *embyUser, query string, maxWait tim
 				if remain <= 0 {
 					continue
 				}
-				raw, err := embyCatRequestSpiderWithTimeout(apiBase, jb.S.API, "search", map[string]any{"wd": q, "page": 1}, remain)
+				raw, err := catpawopen.RequestSpiderWithTimeout(apiBase, jb.S.API, "search", map[string]any{"wd": q, "page": 1}, remain)
 				if err != nil || raw == nil {
 					continue
 				}
-				items := embyCatNormalizeSearchList(raw)
+				items := catpawopen.NormalizeSearchList(raw)
 				if len(items) == 0 {
 					continue
 				}
@@ -142,7 +143,7 @@ func embySearchSitesHits(database *db.DB, u *embyUser, query string, maxWait tim
 	}
 
 	seq := 0
-	apply := func(s site, items []embyCatSearchItem) {
+	apply := func(s site, items []catpawopen.SearchItem) {
 		for _, it := range items {
 			vid := strings.TrimSpace(it.ID)
 			name := strings.TrimSpace(it.Name)

@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/jenfonro/meowfilm/server/catpawopen"
 )
 
 func parseJSONMap(text string) map[string]any {
@@ -136,77 +138,7 @@ func normalizeHttpBase(value string) string {
 }
 
 func normalizeCatPawOpenAPIBase(inputURL string) string {
-	raw := strings.TrimSpace(inputURL)
-	if raw == "" {
-		return ""
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return ""
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return ""
-	}
-
-	path := u.Path
-	if path == "" {
-		path = "/"
-	}
-
-	// If user pasted a spider API (/spider/...), trim back to the service base.
-	if idx := strings.Index(path, "/spider/"); idx >= 0 {
-		path = path[:idx]
-		if path == "" {
-			path = "/"
-		}
-	}
-
-	// If user pasted an id-prefixed spider API like "/<id>/spider/...", drop the id segment.
-	if isCatPawOpenRuntimeIDPath(path) {
-		path = "/"
-	}
-
-	path = strings.TrimRight(path, "/")
-	if strings.HasSuffix(path, "/spider") {
-		path = strings.TrimSuffix(path, "/spider")
-	}
-	path = strings.TrimRight(path, "/")
-	for _, suffix := range []string{"/full-config", "/config", "/website"} {
-		if strings.HasSuffix(path, suffix) {
-			path = strings.TrimSuffix(path, suffix)
-			path = strings.TrimRight(path, "/")
-		}
-	}
-	if path == "" {
-		path = "/"
-	}
-	if !strings.HasSuffix(path, "/") {
-		path += "/"
-	}
-
-	u.Path = path
-	u.RawQuery = ""
-	u.Fragment = ""
-	return u.String()
-}
-
-func isCatPawOpenRuntimeIDPath(path string) bool {
-	p := strings.TrimSpace(path)
-	if p == "" {
-		return false
-	}
-	p = strings.TrimRight(p, "/")
-	if len(p) != 11 || p[0] != '/' {
-		return false
-	}
-	id := strings.ToLower(p[1:])
-	for _, ch := range id {
-		if (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') {
-			continue
-		}
-		return false
-	}
-	return true
+	return catpawopen.NormalizeAPIBase(inputURL)
 }
 
 func normalizeMountPath(value string) string {

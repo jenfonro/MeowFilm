@@ -12,6 +12,7 @@ import (
 
 	"github.com/jenfonro/meowfilm/internal/auth"
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/catpawopen"
 	"github.com/jenfonro/meowfilm/server/tmdb"
 )
 
@@ -165,8 +166,8 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 			settings["doubanImgProxy"] = defaultString(database.GetSetting("douban_img_proxy"), "direct-browser")
 			settings["doubanImgCustom"] = database.GetSetting("douban_img_custom")
 			settings["videoSourceApiBase"] = database.GetSetting("video_source_api_base")
-			catPawOpenServers := parseCatPawOpenServers(database.GetSetting("catpawopen_servers"))
-			settings["catPawOpenApiBase"] = resolveCatPawOpenActiveBase(catPawOpenServers, database.GetSetting("catpawopen_active"))
+			catPawOpenServers := catpawopen.ParseServers(database.GetSetting("catpawopen_servers"))
+			settings["catPawOpenApiBase"] = catpawopen.ResolveActiveBase(catPawOpenServers, database.GetSetting("catpawopen_active"))
 			settings["goProxyEnabled"] = strings.TrimSpace(database.GetSetting("goproxy_enabled")) == "1"
 			settings["goProxyAutoSelect"] = strings.TrimSpace(database.GetSetting("goproxy_auto_select")) == "1"
 			settings["goProxyServers"] = normalizeGoProxyServers(database.GetSetting("goproxy_servers"))
@@ -1077,11 +1078,9 @@ func handleAPIUserSettings(w http.ResponseWriter, r *http.Request, database *db.
 			return s, true
 		}
 
-		// CatPawOpen settings (support both camelCase and snake_case input).
+		// CatPawOpen settings (camelCase only).
 		catApiBase := prev.CatAPIBase
 		if s, ok := getOptionalString("catApiBase"); ok {
-			catApiBase = strings.TrimSpace(s)
-		} else if s, ok := getOptionalString("cat_api_base"); ok {
 			catApiBase = strings.TrimSpace(s)
 		}
 		normalizedApiBase := ""
@@ -1100,21 +1099,14 @@ func handleAPIUserSettings(w http.ResponseWriter, r *http.Request, database *db.
 		catApiKey := prev.CatAPIKey
 		if s, ok := getOptionalString("catApiKey"); ok {
 			catApiKey = s
-		} else if s, ok := getOptionalString("cat_api_key"); ok {
-			catApiKey = s
 		}
 		catProxy := prev.CatProxy
 		if s, ok := getOptionalString("catProxy"); ok {
 			catProxy = s
-		} else if s, ok := getOptionalString("cat_proxy"); ok {
-			catProxy = s
 		}
 
-		// search_thread_count (supports string/number)
+		// searchThreadCount (supports string/number)
 		stRaw, hasST := body["searchThreadCount"]
-		if !hasST {
-			stRaw, hasST = body["search_thread_count"]
-		}
 		if !hasST || stRaw == nil {
 			stRaw = prev.ThreadCount
 		}
@@ -1142,22 +1134,9 @@ func handleAPIUserSettings(w http.ResponseWriter, r *http.Request, database *db.
 					providedSearchOrder = []string{}
 				}
 			}
-		} else if v, ok := body["search_site_order"]; ok {
-			if v != nil {
-				hasProvidedSearchOrder = true
-				providedSearchOrder = parseStringArrayAny(v)
-				if providedSearchOrder == nil {
-					providedSearchOrder = []string{}
-				}
-			}
 		}
 		var providedSearchCover *string
 		if v, ok := body["searchCoverSite"]; ok {
-			if v != nil {
-				s := strings.TrimSpace(anyToString(v))
-				providedSearchCover = &s
-			}
-		} else if v, ok := body["search_cover_site"]; ok {
 			if v != nil {
 				s := strings.TrimSpace(anyToString(v))
 				providedSearchCover = &s

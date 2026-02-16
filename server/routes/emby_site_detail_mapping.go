@@ -5,10 +5,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jenfonro/meowfilm/server/catpawopen"
 )
 
 type embySiteDetailCacheEntry struct {
-	Pans     []embyCatPan
+	Pans     []catpawopen.Pan
 	ExpireAt time.Time
 }
 
@@ -104,7 +106,7 @@ func embySiteDetailCacheGet(seriesID string) (embySiteDetailCacheEntry, bool) {
 	return e, true
 }
 
-func embySiteDetailCachePut(seriesID string, pans []embyCatPan, ttl time.Duration) {
+func embySiteDetailCachePut(seriesID string, pans []catpawopen.Pan, ttl time.Duration) {
 	k := strings.TrimSpace(seriesID)
 	if k == "" {
 		return
@@ -203,4 +205,3 @@ func embySiteEpisodeMapGet(id string) (embySiteEpisodeMapEntry, bool) {
 	}
 	return e, true
 }
-

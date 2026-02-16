@@ -1,24 +1,19 @@
-package routes
+package catpawopen
 
 import (
 	"encoding/json"
 	"strings"
 )
 
-type catPawOpenServer struct {
-	Name    string `json:"name"`
-	APIBase string `json:"apiBase"`
-}
-
-func parseCatPawOpenServers(raw string) []catPawOpenServer {
-	var out []catPawOpenServer
+func ParseServers(raw string) []Server {
+	var out []Server
 	_ = json.Unmarshal([]byte(defaultString(strings.TrimSpace(raw), "[]")), &out)
 
-	clean := make([]catPawOpenServer, 0, len(out))
+	clean := make([]Server, 0, len(out))
 	seen := map[string]struct{}{}
 	for _, it := range out {
 		n := strings.TrimSpace(it.Name)
-		a := normalizeCatPawOpenAPIBase(it.APIBase)
+		a := NormalizeAPIBase(it.APIBase)
 		if n == "" || a == "" {
 			continue
 		}
@@ -26,12 +21,12 @@ func parseCatPawOpenServers(raw string) []catPawOpenServer {
 			continue
 		}
 		seen[n] = struct{}{}
-		clean = append(clean, catPawOpenServer{Name: n, APIBase: a})
+		clean = append(clean, Server{Name: n, APIBase: a})
 	}
 	return clean
 }
 
-func pickCatPawOpenActiveName(servers []catPawOpenServer, desired string) string {
+func PickActiveName(servers []Server, desired string) string {
 	k := strings.TrimSpace(desired)
 	if k != "" {
 		for _, s := range servers {
@@ -46,8 +41,8 @@ func pickCatPawOpenActiveName(servers []catPawOpenServer, desired string) string
 	return ""
 }
 
-func resolveCatPawOpenActiveBase(servers []catPawOpenServer, activeName string) string {
-	k := pickCatPawOpenActiveName(servers, activeName)
+func ResolveActiveBase(servers []Server, activeName string) string {
+	k := PickActiveName(servers, activeName)
 	if k == "" {
 		return ""
 	}
@@ -57,4 +52,11 @@ func resolveCatPawOpenActiveBase(servers []catPawOpenServer, activeName string) 
 		}
 	}
 	return ""
+}
+
+func defaultString(v, def string) string {
+	if strings.TrimSpace(v) == "" {
+		return def
+	}
+	return v
 }
