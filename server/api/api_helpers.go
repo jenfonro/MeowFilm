@@ -1,11 +1,11 @@
 package api
 
 import (
-	"encoding/json"
 	"net/url"
 	"strings"
 
 	"github.com/jenfonro/meowfilm/server/metadata/douban"
+	mfnet "github.com/jenfonro/meowfilm/server/net"
 )
 
 type goProxyServer struct {
@@ -21,93 +21,17 @@ type goProxyPans struct {
 }
 
 func normalizeGoProxyServers(value string) []goProxyServer {
-	var list []any
-	if err := json.Unmarshal([]byte(value), &list); err != nil {
-		return []goProxyServer{}
-	}
-	out := []goProxyServer{}
-	seen := map[string]struct{}{}
-	for _, it := range list {
-		var base string
-		var name string
-		var displayName string
-		var pans map[string]any
-		switch vv := it.(type) {
-		case string:
-			base = normalizeHTTPBase(vv)
-		case map[string]any:
-			if n, ok := vv["name"].(string); ok {
-				name = strings.TrimSpace(n)
-			}
-			if n, ok := vv["displayName"].(string); ok {
-				displayName = strings.TrimSpace(n)
-			}
-			if b, ok := vv["base"].(string); ok {
-				base = normalizeHTTPBase(b)
-			}
-			if base == "" {
-				if b, ok := vv["apiBase"].(string); ok {
-					base = normalizeHTTPBase(b)
-				} else if b, ok := vv["api"].(string); ok {
-					base = normalizeHTTPBase(b)
-				} else if b, ok := vv["url"].(string); ok {
-					base = normalizeHTTPBase(b)
-				}
-			}
-			if p, ok := vv["pans"].(map[string]any); ok {
-				pans = p
-			}
-		}
-		if base == "" {
-			continue
-		}
-		key := strings.ToLower(base)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		if name == "" {
-			if u, err := url.Parse(base); err == nil {
-				name = strings.TrimSpace(u.Hostname())
-				if name == "" {
-					name = strings.TrimSpace(u.Host)
-				}
-			}
-		}
-		if displayName == "" {
-			displayName = name
-		}
-		baidu := true
-		quark := true
-		if pans != nil {
-			if v, ok := pans["baidu"]; ok {
-				baidu = parseAnyBool(v, true)
-			}
-			if v, ok := pans["quark"]; ok {
-				quark = parseAnyBool(v, true)
-			}
-		}
+	servers := mfnet.NormalizeGoProxyServers(value)
+	out := make([]goProxyServer, 0, len(servers))
+	for _, s := range servers {
 		out = append(out, goProxyServer{
-			Name:        name,
-			DisplayName: displayName,
-			Base:        base,
-			Pans:        goProxyPans{Baidu: baidu, Quark: quark},
+			Name:        s.Name,
+			DisplayName: s.DisplayName,
+			Base:        s.Base,
+			Pans:        goProxyPans{Baidu: s.Pans.Baidu, Quark: s.Pans.Quark},
 		})
 	}
 	return out
-}
-
-func parseAnyBool(v any, def bool) bool {
-	switch vv := v.(type) {
-	case bool:
-		return vv
-	case float64:
-		return vv != 0
-	case string:
-		return parseBoolQuery(vv, def)
-	default:
-		return def
-	}
 }
 
 func normalizeContentKey(s string) string {
@@ -115,28 +39,11 @@ func normalizeContentKey(s string) string {
 }
 
 func defaultString(v, def string) string {
-	if strings.TrimSpace(v) == "" {
-		return def
-	}
-	return v
+	return mfnet.DefaultString(v, def)
 }
 
 func normalizeHTTPBase(value string) string {
-	raw := strings.TrimSpace(value)
-	if raw == "" {
-		return ""
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return ""
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return ""
-	}
-	u.RawQuery = ""
-	u.Fragment = ""
-	u.Path = strings.TrimRight(u.Path, "/")
-	return strings.TrimRight(u.String(), "/")
+	return mfnet.NormalizeHTTPBase(value)
 }
 
 func isAllowedDoubanImageHost(hostname string) bool {
@@ -144,45 +51,15 @@ func isAllowedDoubanImageHost(hostname string) bool {
 }
 
 func normalizeProxyBase(value string) string {
-	raw := strings.TrimSpace(value)
-	if raw == "" {
-		return ""
-	}
-	if strings.HasSuffix(raw, "/") {
-		return raw
-	}
-	if strings.HasSuffix(raw, "?") || strings.HasSuffix(raw, "&") || strings.HasSuffix(raw, "=") {
-		return raw
-	}
-	return raw + "/"
+	return mfnet.NormalizeProxyBase(value)
 }
 
 func normalizeImageURL(value string) string {
-	raw := strings.TrimSpace(value)
-	if raw == "" {
-		return ""
-	}
-	if strings.HasPrefix(raw, "//") {
-		return "https:" + raw
-	}
-	if strings.HasPrefix(raw, "http://") {
-		return "https://" + strings.TrimPrefix(raw, "http://")
-	}
-	return raw
+	return mfnet.NormalizeImageURL(value)
 }
 
 func normalizeProxyMode(value string) string {
-	raw := strings.TrimSpace(value)
-	if raw == "" {
-		return ""
-	}
-	parts := strings.FieldsFunc(raw, func(r rune) bool {
-		return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
-	})
-	if len(parts) > 0 {
-		return strings.TrimSpace(parts[0])
-	}
-	return raw
+	return mfnet.NormalizeProxyMode(value)
 }
 
 func rewriteVideoPosterURL(value string, doubanImgProxy string, doubanImgCustom string) string {
