@@ -16,6 +16,7 @@ import (
 	"github.com/jenfonro/meowfilm/server/emby"
 	"github.com/jenfonro/meowfilm/server/magic"
 	"github.com/jenfonro/meowfilm/server/metadata/tmdb"
+	mfnet "github.com/jenfonro/meowfilm/server/net"
 	"github.com/jenfonro/meowfilm/server/search"
 	"github.com/jenfonro/meowfilm/server/static"
 )
@@ -1773,15 +1774,9 @@ func handleAPIDoubanImage(w http.ResponseWriter, r *http.Request) {
 }
 
 func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+	return mfnet.MinInt(a, b)
 }
 
 func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
+	return mfnet.MaxInt(a, b)
 }

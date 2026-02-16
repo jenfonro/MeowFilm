@@ -1,15 +1,13 @@
 package search
 
 import (
-	"encoding/json"
-	"errors"
-	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/auth"
 	"github.com/jenfonro/meowfilm/internal/db"
+	mfnet "github.com/jenfonro/meowfilm/server/net"
 )
 
 func HistoryHandler(database *db.DB) http.Handler {
@@ -79,29 +77,17 @@ func cloneWithMethod(r *http.Request, method string) *http.Request {
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(false)
-	_ = enc.Encode(payload)
+	mfnet.WriteJSON(w, status, payload)
 }
 
 func readJSONLoose(r *http.Request, dst any) error {
-	if r == nil || dst == nil {
-		return errors.New("invalid args")
-	}
-	defer func() { _ = r.Body.Close() }()
-	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
-	return dec.Decode(dst)
+	return mfnet.ReadJSONLoose(r, dst)
 }
 
 func methodNotAllowed(w http.ResponseWriter) {
-	writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "message": "Method not allowed"})
+	mfnet.MethodNotAllowed(w)
 }
 
 func parseForm(r *http.Request) {
-	if r == nil {
-		return
-	}
-	_ = r.ParseForm()
+	mfnet.ParseForm(r)
 }

@@ -1,54 +1,27 @@
 package magic
 
 import (
-	"encoding/json"
 	"regexp"
 	"strings"
 	"unicode"
+
+	"github.com/jenfonro/meowfilm/server/net"
 )
 
 func marshalJSON(v any) string {
-	b, _ := json.Marshal(v)
-	return string(b)
+	return net.MarshalJSON(v)
 }
 
 func parseJSONStringArray(text string) []string {
-	var arr []any
-	if err := json.Unmarshal([]byte(text), &arr); err != nil {
-		return []string{}
-	}
-	out := make([]string, 0, len(arr))
-	seen := map[string]struct{}{}
-	for _, v := range arr {
-		s, ok := v.(string)
-		if !ok {
-			continue
-		}
-		s = strings.TrimSpace(s)
-		if s == "" {
-			continue
-		}
-		if _, ok := seen[s]; ok {
-			continue
-		}
-		seen[s] = struct{}{}
-		out = append(out, s)
-	}
-	return out
+	return net.ParseJSONStringArray(text)
 }
 
 func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+	return net.MinInt(a, b)
 }
 
 func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
+	return net.MaxInt(a, b)
 }
 
 func intFromDigits(s string) int {

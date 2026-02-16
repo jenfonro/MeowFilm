@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	mfnet "github.com/jenfonro/meowfilm/server/net"
 )
 
 type tmdbMultiSearchResponse struct {
@@ -486,28 +487,11 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) map[st
 }
 
 func defaultString(v, def string) string {
-	if strings.TrimSpace(v) == "" {
-		return def
-	}
-	return v
+	return mfnet.DefaultString(v, def)
 }
 
 func normalizeHTTPBase(value string) string {
-	raw := strings.TrimSpace(value)
-	if raw == "" {
-		return ""
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return ""
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return ""
-	}
-	u.RawQuery = ""
-	u.Fragment = ""
-	u.Path = strings.TrimRight(u.Path, "/")
-	return strings.TrimRight(u.String(), "/")
+	return mfnet.NormalizeHTTPBase(value)
 }
 
 func boolToStr(v bool) string {
@@ -520,15 +504,11 @@ func boolToStr(v bool) string {
 func BoolToStr(v bool) string { return boolToStr(v) }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(false)
-	_ = enc.Encode(payload)
+	mfnet.WriteJSON(w, status, payload)
 }
 
 func methodNotAllowed(w http.ResponseWriter) {
-	writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "message": "Method not allowed"})
+	mfnet.MethodNotAllowed(w)
 }
 
 func parseYearFromDate(v string) int {
