@@ -104,6 +104,57 @@ func joinTMDBAPI(base, path string) string {
 
 func JoinAPI(base, path string) string { return joinTMDBAPI(base, path) }
 
+func resolveTMDBImageBase(database *db.DB) string {
+	raw := ""
+	if database != nil {
+		raw = strings.TrimSpace(database.GetSetting("tmdb_img_base"))
+	}
+	base := normalizeHTTPBase(raw)
+	if base == "" {
+		return "https://image.tmdb.org"
+	}
+	return base
+}
+
+func joinTMDBImage(base, path string) string {
+	b := strings.TrimRight(strings.TrimSpace(base), "/")
+	p := strings.TrimLeft(strings.TrimSpace(path), "/")
+	if b == "" {
+		b = "https://image.tmdb.org"
+	}
+	if p == "" {
+		return b
+	}
+	return b + "/" + p
+}
+
+func resolveTMDBToken(database *db.DB) (token string, kind string) {
+	if database == nil {
+		return "", ""
+	}
+	raw := strings.TrimSpace(database.GetSetting("tmdb_api_token"))
+	if raw == "" {
+		return "", ""
+	}
+	raw = strings.TrimSpace(strings.TrimPrefix(raw, "Bearer "))
+	if raw == "" {
+		return "", ""
+	}
+	// Heuristic:
+	// - v4 read access tokens are JWT-like (contain '.' segments)
+	// - v3 api keys are plain strings (commonly 32 chars)
+	if strings.Contains(raw, ".") {
+		return raw, "v4"
+	}
+	return raw, "v3"
+}
+
+func ResolveToken(database *db.DB) (token string, kind string) { return resolveTMDBToken(database) }
+
+func ResolveImageBase(database *db.DB) string { return resolveTMDBImageBase(database) }
+
+func JoinImage(base, path string) string { return joinTMDBImage(base, path) }
+
 func tmdbDetailCacheGet(cacheKey string, now int64) (map[string]any, bool) {
 	cacheKey = strings.TrimSpace(cacheKey)
 	if cacheKey == "" {
@@ -179,9 +230,8 @@ func HandleSearch(w http.ResponseWriter, r *http.Request, database *db.DB) {
 		return
 	}
 
-	v4 := strings.TrimSpace(database.GetSetting("tmdb_v4_token"))
-	v3 := strings.TrimSpace(database.GetSetting("tmdb_v3_key"))
-	if v4 == "" && v3 == "" {
+	token, tokenKind := resolveTMDBToken(database)
+	if token == "" || tokenKind == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"error": "TMDB 未配置",
 			"code":  "TMDB_TOKEN_INVALID",
@@ -211,8 +261,8 @@ func HandleSearch(w http.ResponseWriter, r *http.Request, database *db.DB) {
 		params.Set("region", region)
 	}
 	params.Set("include_adult", boolToStr(includeAdult))
-	if v3 != "" {
-		params.Set("api_key", v3)
+	if tokenKind == "v3" {
+		params.Set("api_key", token)
 	}
 	u.RawQuery = params.Encode()
 
@@ -222,8 +272,8 @@ func HandleSearch(w http.ResponseWriter, r *http.Request, database *db.DB) {
 		return
 	}
 	req.Header.Set("Accept", "application/json")
-	if v4 != "" {
-		req.Header.Set("Authorization", "Bearer "+v4)
+	if tokenKind == "v4" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
 	client := &http.Client{Timeout: 15 * time.Second}
@@ -269,7 +319,7 @@ func HandleSearch(w http.ResponseWriter, r *http.Request, database *db.DB) {
 		}
 		poster := strings.TrimSpace(it.PosterPath)
 		if poster != "" && !strings.HasPrefix(poster, "http://") && !strings.HasPrefix(poster, "https://") {
-			poster = "https://image.tmdb.org/t/p/w500" + poster
+			poster = joinTMDBImage(resolveTMDBImageBase(database), "t/p/w500"+poster)
 		}
 		release := strings.TrimSpace(it.ReleaseDate)
 		if release == "" {
@@ -315,9 +365,8 @@ func HandleDetail(w http.ResponseWriter, r *http.Request, database *db.DB) {
 		return
 	}
 
-	v4 := strings.TrimSpace(database.GetSetting("tmdb_v4_token"))
-	v3 := strings.TrimSpace(database.GetSetting("tmdb_v3_key"))
-	if v4 == "" && v3 == "" {
+	token, tokenKind := resolveTMDBToken(database)
+	if token == "" || tokenKind == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"error": "TMDB 未配置",
 			"code":  "TMDB_TOKEN_INVALID",
@@ -357,9 +406,8 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) map[st
 		return nil
 	}
 
-	v4 := strings.TrimSpace(database.GetSetting("tmdb_v4_token"))
-	v3 := strings.TrimSpace(database.GetSetting("tmdb_v3_key"))
-	if v4 == "" && v3 == "" {
+	token, tokenKind := resolveTMDBToken(database)
+	if token == "" || tokenKind == "" {
 		return nil
 	}
 
@@ -374,8 +422,8 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) map[st
 	if language != "" {
 		params.Set("language", language)
 	}
-	if v3 != "" {
-		params.Set("api_key", v3)
+	if tokenKind == "v3" {
+		params.Set("api_key", token)
 	}
 	u.RawQuery = params.Encode()
 
@@ -384,8 +432,8 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) map[st
 		return nil
 	}
 	req.Header.Set("Accept", "application/json")
-	if v4 != "" {
-		req.Header.Set("Authorization", "Bearer "+v4)
+	if tokenKind == "v4" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
 	client := &http.Client{Timeout: 15 * time.Second}
@@ -406,11 +454,11 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) map[st
 		}
 		pic := strings.TrimSpace(detail.PosterPath)
 		if pic != "" && !strings.HasPrefix(pic, "http://") && !strings.HasPrefix(pic, "https://") {
-			pic = "https://image.tmdb.org/t/p/w500" + pic
+			pic = joinTMDBImage(resolveTMDBImageBase(database), "t/p/w500"+pic)
 		}
 		backdrop := strings.TrimSpace(detail.BackdropPath)
 		if backdrop != "" && !strings.HasPrefix(backdrop, "http://") && !strings.HasPrefix(backdrop, "https://") {
-			backdrop = "https://image.tmdb.org/t/p/w780" + backdrop
+			backdrop = joinTMDBImage(resolveTMDBImageBase(database), "t/p/w780"+backdrop)
 		}
 		year := parseYearFromDate(detail.FirstAir)
 		latestSeason := 0
@@ -431,10 +479,10 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) map[st
 			if s.SeasonNumber < 0 {
 				continue
 			}
-			p := strings.TrimSpace(s.PosterPath)
-			if p != "" && !strings.HasPrefix(p, "http://") && !strings.HasPrefix(p, "https://") {
-				p = "https://image.tmdb.org/t/p/w500" + p
-			}
+				p := strings.TrimSpace(s.PosterPath)
+				if p != "" && !strings.HasPrefix(p, "http://") && !strings.HasPrefix(p, "https://") {
+					p = joinTMDBImage(resolveTMDBImageBase(database), "t/p/w500"+p)
+				}
 			seasons = append(seasons, map[string]any{
 				"season":   s.SeasonNumber,
 				"episodes": s.EpisodeCount,
@@ -467,10 +515,10 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) map[st
 	if err := dec.Decode(&detail); err != nil {
 		return nil
 	}
-	pic := strings.TrimSpace(detail.PosterPath)
-	if pic != "" && !strings.HasPrefix(pic, "http://") && !strings.HasPrefix(pic, "https://") {
-		pic = "https://image.tmdb.org/t/p/w500" + pic
-	}
+		pic := strings.TrimSpace(detail.PosterPath)
+		if pic != "" && !strings.HasPrefix(pic, "http://") && !strings.HasPrefix(pic, "https://") {
+			pic = joinTMDBImage(resolveTMDBImageBase(database), "t/p/w500"+pic)
+		}
 	year := parseYearFromDate(detail.ReleaseDate)
 	out := map[string]any{
 		"success":  true,

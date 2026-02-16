@@ -146,20 +146,20 @@ func handleEmbyItems(w http.ResponseWriter, r *http.Request, database *db.DB, se
 				embyNotFound(w)
 				return
 			}
-			http.Redirect(w, r, embyTMDBImageURL(imgPath, size), http.StatusFound)
-			return
-		case "backdrop":
-			imgPath = embyResolveItemImagePath(database, parsed, "backdrop", index)
-			if imgPath == "" {
+				http.Redirect(w, r, embyTMDBImageURL(database, imgPath, size), http.StatusFound)
+				return
+			case "backdrop":
+				imgPath = embyResolveItemImagePath(database, parsed, "backdrop", index)
+				if imgPath == "" {
+					embyNotFound(w)
+					return
+				}
+				http.Redirect(w, r, embyTMDBImageURL(database, imgPath, "w1280"), http.StatusFound)
+				return
+			default:
 				embyNotFound(w)
 				return
 			}
-			http.Redirect(w, r, embyTMDBImageURL(imgPath, "w1280"), http.StatusFound)
-			return
-		default:
-			embyNotFound(w)
-			return
-		}
 	}
 
 	// /Items/{id}/PlaybackInfo
