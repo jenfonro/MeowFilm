@@ -448,7 +448,7 @@ func quarkQRFinalizeCookies(client *http.Client, jar http.CookieJar, serviceTick
 	return cookieStr, nil
 }
 
-func HandleDashboardQuarkQRStart(w http.ResponseWriter, r *http.Request, database *db.DB) {
+func HandleDashboardQuarkStart(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return
@@ -496,12 +496,12 @@ func HandleDashboardQuarkQRStart(w http.ResponseWriter, r *http.Request, databas
 		"success":   true,
 		"qid":       qid,
 		"expiresAt": s.ExpiresAt.UnixMilli(),
-		"imageUrl":  "/dashboard/pan/quark/qr/image?qid=" + url.QueryEscape(qid) + "&_t=" + url.QueryEscape(strconv.FormatInt(now.UnixMilli(), 10)),
+		"imageUrl":  "/dashboard/pan/quark/image?qid=" + url.QueryEscape(qid) + "&_t=" + url.QueryEscape(strconv.FormatInt(now.UnixMilli(), 10)),
 	})
 	_ = database
 }
 
-func HandleDashboardQuarkQRImage(w http.ResponseWriter, r *http.Request) {
+func HandleDashboardQuarkImage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
 		return
@@ -527,7 +527,7 @@ func HandleDashboardQuarkQRImage(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(s.Image)
 }
 
-func HandleDashboardQuarkQRCookie(w http.ResponseWriter, r *http.Request, database *db.DB) {
+func HandleDashboardQuarkCookie(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return

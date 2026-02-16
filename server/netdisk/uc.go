@@ -361,7 +361,7 @@ func ucQRFinalizeCookies(client *http.Client, jar http.CookieJar, serviceTicket 
 	return finalCookieStr, nil
 }
 
-func HandleDashboardUCQRStart(w http.ResponseWriter, r *http.Request, database *db.DB) {
+func HandleDashboardUCStart(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return
@@ -409,12 +409,12 @@ func HandleDashboardUCQRStart(w http.ResponseWriter, r *http.Request, database *
 		"success":   true,
 		"qid":       qid,
 		"expiresAt": s.ExpiresAt.UnixMilli(),
-		"imageUrl":  "/dashboard/pan/uc/qr/image?qid=" + url.QueryEscape(qid) + "&_t=" + url.QueryEscape(strconv.FormatInt(now.UnixMilli(), 10)),
+		"imageUrl":  "/dashboard/pan/uc/image?qid=" + url.QueryEscape(qid) + "&_t=" + url.QueryEscape(strconv.FormatInt(now.UnixMilli(), 10)),
 	})
 	_ = database
 }
 
-func HandleDashboardUCQRImage(w http.ResponseWriter, r *http.Request) {
+func HandleDashboardUCImage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
 		return
@@ -440,7 +440,7 @@ func HandleDashboardUCQRImage(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(s.Image)
 }
 
-func HandleDashboardUCQRCookie(w http.ResponseWriter, r *http.Request, database *db.DB) {
+func HandleDashboardUCCookie(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return
