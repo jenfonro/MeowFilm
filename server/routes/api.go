@@ -13,6 +13,7 @@ import (
 	"github.com/jenfonro/meowfilm/internal/auth"
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/catpawopen"
+	"github.com/jenfonro/meowfilm/server/search"
 	"github.com/jenfonro/meowfilm/server/tmdb"
 )
 
@@ -77,7 +78,7 @@ func APIHandler(database *db.DB, authMw *auth.Auth) http.Handler {
 			http.Redirect(w, r, "/", http.StatusFound)
 		case "/searchhistory":
 			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleAPISearchHistory(w, r, database)
+				search.HistoryHandler(database).ServeHTTP(w, r)
 			})).ServeHTTP(w, r)
 		case "/playhistory/one":
 			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -430,70 +431,6 @@ func handleAPIVideoSites(w http.ResponseWriter, r *http.Request, database *db.DB
 		out = append(out, row)
 	}
 	writeJSON(w, 200, map[string]any{"success": true, "sites": out})
-}
-
-func handleAPISearchHistory(w http.ResponseWriter, r *http.Request, database *db.DB) {
-	u := auth.CurrentUser(r)
-	if u == nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "Unauthorized"})
-		return
-	}
-	switch r.Method {
-	case http.MethodGet:
-		rows, err := database.SQL().Query(`SELECT keyword FROM search_history WHERE user_id=? ORDER BY updated_at DESC LIMIT 20`, u.ID)
-		if err != nil {
-			writeJSON(w, 200, []string{})
-			return
-		}
-		defer rows.Close()
-		list := []string{}
-		for rows.Next() {
-			var kw string
-			_ = rows.Scan(&kw)
-			kw = strings.TrimSpace(kw)
-			if kw != "" {
-				list = append(list, kw)
-			}
-		}
-		writeJSON(w, 200, list)
-	case http.MethodPost:
-		parseForm(r)
-		kw := strings.TrimSpace(r.FormValue("keyword"))
-		if kw == "" && strings.Contains(r.Header.Get("Content-Type"), "application/json") {
-			var body struct {
-				Keyword string `json:"keyword"`
-			}
-			_ = readJSONLoose(r, &body)
-			kw = strings.TrimSpace(body.Keyword)
-		}
-		kw = strings.Join(strings.Fields(kw), " ")
-		if kw == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Keyword is required"})
-			return
-		}
-		_, _ = database.SQL().Exec(`
-			INSERT INTO search_history(user_id, keyword, updated_at)
-			VALUES(?,?,?)
-			ON CONFLICT(user_id, keyword) DO UPDATE SET updated_at = excluded.updated_at
-		`, u.ID, kw, time.Now().Unix())
-		handleAPISearchHistory(w, withMethod(r, http.MethodGet), database)
-	case http.MethodDelete:
-		kw := strings.TrimSpace(r.URL.Query().Get("keyword"))
-		if kw != "" {
-			_, _ = database.SQL().Exec(`DELETE FROM search_history WHERE user_id=? AND keyword=?`, u.ID, kw)
-		} else {
-			_, _ = database.SQL().Exec(`DELETE FROM search_history WHERE user_id=?`, u.ID)
-		}
-		handleAPISearchHistory(w, withMethod(r, http.MethodGet), database)
-	default:
-		methodNotAllowed(w)
-	}
-}
-
-func withMethod(r *http.Request, method string) *http.Request {
-	cp := r.Clone(r.Context())
-	cp.Method = method
-	return cp
 }
 
 func isNetDiskHistoryItem(videoID string, playFlag string) bool {

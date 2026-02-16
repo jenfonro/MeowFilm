@@ -5,33 +5,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="${SCRIPT_DIR}"
 cd "${ROOT_DIR}"
 
-FRONTEND_REPO_URL="${FRONTEND_REPO_URL:-}"
-FRONTEND_DIR="${FRONTEND_DIR:-../MeowFilm-Frontend}"
-
-SRC_DIST="${FRONTEND_DIR}/dist"
 DST_DIST="public/dist"
 
-SYNC_FRONTEND_DIST="${MEOWFILM_SYNC_FRONTEND_DIST:-}"
-
-# Prefer building with an already-prepared ${DST_DIST} (e.g. in CI, or when dist is committed/copied in advance).
-if [[ -z "${SYNC_FRONTEND_DIST}" ]]; then
-  if [[ -f "${DST_DIST}/index.html" ]]; then
-    echo "using existing frontend dist: ${DST_DIST}"
-  else
-    echo "missing frontend dist: ${DST_DIST}" >&2
-    echo "either provide ${DST_DIST} (recommended), or set MEOWFILM_SYNC_FRONTEND_DIST=1 to copy from ${SRC_DIST}" >&2
-    exit 1
-  fi
-else
-  if [[ ! -d "${SRC_DIST}" ]]; then
-    echo "missing frontend dist: ${SRC_DIST}" >&2
-    echo "run: cd ${FRONTEND_DIR} && npm ci && npm run build" >&2
-    exit 1
-  fi
-
-  rm -rf "${DST_DIST}"
-  mkdir -p "${DST_DIST}"
-  cp -a "${SRC_DIST}/." "${DST_DIST}/"
+# This script only builds the backend binary. It does not build/copy the frontend.
+# Ensure the embedded frontend dist exists (it is served from the Go embed at public/dist).
+if [[ ! -f "${DST_DIST}/index.html" ]]; then
+  echo "missing embedded frontend dist: ${DST_DIST}/index.html" >&2
+  echo "run: ./build-all.sh (build frontend + sync to ${DST_DIST} + build backend)" >&2
+  exit 1
 fi
 
 # Go requires GOCACHE to be an absolute path. Keep it inside the project root.
