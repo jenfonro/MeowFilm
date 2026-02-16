@@ -3,8 +3,10 @@ package api
 import (
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -36,6 +38,21 @@ type userSettingsRow struct {
 	CatSiteHome     string
 	CatSiteOrder    string
 	CatSiteAvail    string
+}
+
+func panAPINoAuthAllowed(r *http.Request) bool {
+	if strings.TrimSpace(os.Getenv("MEOWFILM_PAN_API_NOAUTH")) != "1" {
+		return false
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		host = strings.TrimSpace(r.RemoteAddr)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
 }
 
 func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
@@ -148,49 +165,103 @@ func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
 				tmdb.HandleDetail(w, r, database)
 			})).ServeHTTP(w, r)
 		case "/pan/189/list":
-			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleAPI189List(w, r, database)
-			})).ServeHTTP(w, r)
+			h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { netdisk.HandleAPI189List(w, r, database) })
+			if panAPINoAuthAllowed(r) {
+				h.ServeHTTP(w, r)
+			} else {
+				authMw.RequireAuthAPI(h).ServeHTTP(w, r)
+			}
 		case "/pan/189/play":
-			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleAPI189Play(w, r, database)
-			})).ServeHTTP(w, r)
+			h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { netdisk.HandleAPI189Play(w, r, database) })
+			if panAPINoAuthAllowed(r) {
+				h.ServeHTTP(w, r)
+			} else {
+				authMw.RequireAuthAPI(h).ServeHTTP(w, r)
+			}
 		case "/pan/139/list":
-			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleAPI139List(w, r, database)
-			})).ServeHTTP(w, r)
+			h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { netdisk.HandleAPI139List(w, r, database) })
+			if panAPINoAuthAllowed(r) {
+				h.ServeHTTP(w, r)
+			} else {
+				authMw.RequireAuthAPI(h).ServeHTTP(w, r)
+			}
 		case "/pan/139/play":
-			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleAPI139Play(w, r, database)
-			})).ServeHTTP(w, r)
+			h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { netdisk.HandleAPI139Play(w, r, database) })
+			if panAPINoAuthAllowed(r) {
+				h.ServeHTTP(w, r)
+			} else {
+				authMw.RequireAuthAPI(h).ServeHTTP(w, r)
+			}
 		case "/pan/quark/list":
-			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleAPIQuarkList(w, r, database)
-			})).ServeHTTP(w, r)
+			h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { netdisk.HandleAPIQuarkList(w, r, database) })
+			if panAPINoAuthAllowed(r) {
+				h.ServeHTTP(w, r)
+			} else {
+				authMw.RequireAuthAPI(h).ServeHTTP(w, r)
+			}
+		case "/pan/quark/status":
+			h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { netdisk.HandleAPIQuarkStatus(w, r, database) })
+			if panAPINoAuthAllowed(r) {
+				h.ServeHTTP(w, r)
+			} else {
+				authMw.RequireAuthAPI(h).ServeHTTP(w, r)
+			}
+		case "/pan/quark_tv/refresh":
+			h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { netdisk.HandleAPIQuarkTVRefresh(w, r, database) })
+			if panAPINoAuthAllowed(r) {
+				h.ServeHTTP(w, r)
+			} else {
+				authMw.RequireAuthAPI(h).ServeHTTP(w, r)
+			}
 		case "/pan/quark/play":
-			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleAPIQuarkPlay(w, r, database)
-			})).ServeHTTP(w, r)
+			h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { netdisk.HandleAPIQuarkPlay(w, r, database) })
+			if panAPINoAuthAllowed(r) {
+				h.ServeHTTP(w, r)
+			} else {
+				authMw.RequireAuthAPI(h).ServeHTTP(w, r)
+			}
 		case "/pan/uc/list":
-			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleAPIUCList(w, r, database)
-			})).ServeHTTP(w, r)
+			h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { netdisk.HandleAPIUCList(w, r, database) })
+			if panAPINoAuthAllowed(r) {
+				h.ServeHTTP(w, r)
+			} else {
+				authMw.RequireAuthAPI(h).ServeHTTP(w, r)
+			}
 		case "/pan/uc/play":
-			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleAPIUCPlay(w, r, database)
-			})).ServeHTTP(w, r)
+			h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { netdisk.HandleAPIUCPlay(w, r, database) })
+			if panAPINoAuthAllowed(r) {
+				h.ServeHTTP(w, r)
+			} else {
+				authMw.RequireAuthAPI(h).ServeHTTP(w, r)
+			}
+		case "/pan/uc_tv/refresh":
+			h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { netdisk.HandleAPIUCTVRefresh(w, r, database) })
+			if panAPINoAuthAllowed(r) {
+				h.ServeHTTP(w, r)
+			} else {
+				authMw.RequireAuthAPI(h).ServeHTTP(w, r)
+			}
 		case "/pan/baidu/list":
-			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleAPIBaiduList(w, r, database)
-			})).ServeHTTP(w, r)
+			h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { netdisk.HandleAPIBaiduList(w, r, database) })
+			if panAPINoAuthAllowed(r) {
+				h.ServeHTTP(w, r)
+			} else {
+				authMw.RequireAuthAPI(h).ServeHTTP(w, r)
+			}
 		case "/pan/baidu/play":
-			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleAPIBaiduPlay(w, r, database)
-			})).ServeHTTP(w, r)
+			h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { netdisk.HandleAPIBaiduPlay(w, r, database) })
+			if panAPINoAuthAllowed(r) {
+				h.ServeHTTP(w, r)
+			} else {
+				authMw.RequireAuthAPI(h).ServeHTTP(w, r)
+			}
 		case "/pan/batch/list":
-			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				netdisk.HandleAPIPanBatchList(w, r, database)
-			})).ServeHTTP(w, r)
+			h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { netdisk.HandleAPIPanBatchList(w, r, database) })
+			if panAPINoAuthAllowed(r) {
+				h.ServeHTTP(w, r)
+			} else {
+				authMw.RequireAuthAPI(h).ServeHTTP(w, r)
+			}
 		default:
 			http.NotFound(w, r)
 		}
