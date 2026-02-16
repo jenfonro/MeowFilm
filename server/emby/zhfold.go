@@ -1,12 +1,14 @@
-package routes
+package emby
 
-import "strings"
+import (
+	"strings"
+)
 
-// embyToSimplifiedGuess performs a lightweight Traditional->Simplified fold for common characters.
+// toSimplifiedGuess performs a lightweight Traditional->Simplified fold for common characters.
 // It is not a full OpenCC replacement; it is designed to make client-side "double search"
 // (e.g. Infuse sending both 繁/简) converge to the same server-side cache/search in practice.
-func embyToSimplifiedGuess(s string) string {
-	in := strings.TrimSpace(s)
+func toSimplifiedGuess(input string) string {
+	in := strings.TrimSpace(input)
 	if in == "" {
 		return ""
 	}
@@ -77,11 +79,10 @@ func embyToSimplifiedGuess(s string) string {
 	return out
 }
 
-func embyCanonicalSearchTerm(term string) string {
+func CanonicalSearchTerm(term string) string {
 	t := strings.TrimSpace(term)
 	if t == "" {
 		return ""
 	}
-	return embyToSimplifiedGuess(t)
+	return toSimplifiedGuess(t)
 }
-

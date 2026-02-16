@@ -17,6 +17,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/emby"
 )
 
 func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, serverID string, parts []string) {
@@ -469,26 +470,26 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 				mediaPath := embyBuildMediaPath(itemID, "mp4")
 				mediaSourceID := embyStableHex32(itemID)
 				obj = map[string]any{
-					"Id":           itemID,
-					"Name":         name,
-					"SeriesName":   seriesName,
-					"SeasonName":   seasonName,
-					"Overview":     strings.TrimSpace(ep.Remark),
-					"Type":         "Episode",
-					"MediaType":    "Video",
-					"IsFolder":     false,
-					"LocationType": "Remote",
-					"Path":         mediaPath,
-					"Container":    "mp4,m4v",
-					"CanDownload":  false,
-					"RunTimeTicks": int64(0),
-					"Chapters":     []any{},
-					"People":       []any{},
-					"Size":         0,
-					"SeriesId":     strings.TrimSpace(ep.SeriesID),
-					"SeasonId":     strings.TrimSpace(ep.SeasonID),
-					"ParentId":     strings.TrimSpace(ep.SeasonID),
-					"IndexNumber":  ep.EpisodeIndex,
+					"Id":                itemID,
+					"Name":              name,
+					"SeriesName":        seriesName,
+					"SeasonName":        seasonName,
+					"Overview":          strings.TrimSpace(ep.Remark),
+					"Type":              "Episode",
+					"MediaType":         "Video",
+					"IsFolder":          false,
+					"LocationType":      "Remote",
+					"Path":              mediaPath,
+					"Container":         "mp4,m4v",
+					"CanDownload":       false,
+					"RunTimeTicks":      int64(0),
+					"Chapters":          []any{},
+					"People":            []any{},
+					"Size":              0,
+					"SeriesId":          strings.TrimSpace(ep.SeriesID),
+					"SeasonId":          strings.TrimSpace(ep.SeasonID),
+					"ParentId":          strings.TrimSpace(ep.SeasonID),
+					"IndexNumber":       ep.EpisodeIndex,
 					"ParentIndexNumber": ep.SeasonNo,
 					"ImageTags":         map[string]any{"Primary": "site", "Thumb": "site"},
 					"UserData":          map[string]any{"Played": false},
@@ -799,7 +800,7 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			startIndex := embyQueryIntClamped(r, "StartIndex", 0, 0, 1<<30)
 			limit := embyQueryIntClamped(r, "Limit", 24, 1, 60)
 			startAt := time.Now()
-			scoreTerm := embyCanonicalSearchTerm(searchTerm)
+			scoreTerm := emby.CanonicalSearchTerm(searchTerm)
 			if scoreTerm == "" {
 				scoreTerm = searchTerm
 			}
@@ -813,15 +814,15 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 				if u != nil {
 					userID = u.ID
 				}
-				if embyInfuseShouldDropFoldedDuplicate(userID, deviceID, searchTerm, scoreTerm, startAt) {
+				if emby.InfuseShouldDropFoldedDuplicate(userID, deviceID, searchTerm, scoreTerm, startAt) {
 					embyDebugPrintf("[emby][search][infuse] drop folded-duplicate term=%q folded=%q user=%q device=%q", searchTerm, scoreTerm, userID, deviceID)
 					writeJSON(w, 200, embyPagedEmpty(startIndex))
 					return
 				}
 			}
 
-			cacheKey := embySearchCacheKey(u, includeItemTypes, searchTerm)
-			cached, ok := embySearchCacheGet(cacheKey)
+			cacheKey := emby.SearchCacheKey(u.ID, includeItemTypes, searchTerm)
+			cached, ok := emby.SearchCacheGet[embyTMDBSearchItem, embySiteSearchHit](cacheKey)
 			tmdbSorted := cached.TMDB
 			siteSorted := cached.Sites
 
@@ -907,7 +908,7 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 				}
 				siteSorted = siteHits
 
-				embySearchCachePut(cacheKey, embySearchCacheEntry{TMDB: tmdbSorted, Sites: siteSorted}, 30*time.Minute)
+				emby.SearchCachePut(cacheKey, emby.SearchCacheEntry[embyTMDBSearchItem, embySiteSearchHit]{TMDB: tmdbSorted, Sites: siteSorted}, 30*time.Minute)
 				if strings.TrimSpace(scoreTerm) != "" && strings.TrimSpace(scoreTerm) != strings.TrimSpace(searchTerm) {
 					embyDebugPrintf("[emby][search] term=%q folded=%q tmdb=%d sites=%d cost=%s", searchTerm, scoreTerm, len(tmdbSorted), len(siteSorted), time.Since(startAt).String())
 				} else {
