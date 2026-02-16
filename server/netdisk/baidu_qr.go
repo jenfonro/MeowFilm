@@ -1,4 +1,4 @@
-package routes
+package netdisk
 
 import (
 	"bytes"
@@ -377,7 +377,7 @@ func baiduQRDoReqWithHeaders(client *http.Client, method string, urlStr string, 
 	return buf, resp.Header, nil
 }
 
-func handleDashboardBaiduQRStart(w http.ResponseWriter, r *http.Request, database *db.DB) {
+func HandleDashboardBaiduQRStart(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return
@@ -424,7 +424,7 @@ func handleDashboardBaiduQRStart(w http.ResponseWriter, r *http.Request, databas
 	})
 }
 
-func handleDashboardBaiduQRImage(w http.ResponseWriter, r *http.Request) {
+func HandleDashboardBaiduQRImage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
 		return
@@ -455,7 +455,7 @@ func handleDashboardBaiduQRImage(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(s.Image)
 }
 
-func handleDashboardBaiduQRCookie(w http.ResponseWriter, r *http.Request, database *db.DB) {
+func HandleDashboardBaiduQRCookie(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return

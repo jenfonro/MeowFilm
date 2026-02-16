@@ -11,6 +11,7 @@ import (
 	"github.com/jenfonro/meowfilm/internal/auth"
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/catpawopen"
+	"github.com/jenfonro/meowfilm/server/netdisk"
 )
 
 func DashboardHandler(database *db.DB, authMw *auth.Auth) http.Handler {
@@ -39,67 +40,67 @@ func DashboardHandler(database *db.DB, authMw *auth.Auth) http.Handler {
 			})).ServeHTTP(w, r)
 		case "/pan/settings":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleDashboardPanSettings(w, r, database)
+				netdisk.HandleDashboardPanSettings(w, r, database)
 			})).ServeHTTP(w, r)
 		case "/pan/baidu/qr/start":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleDashboardBaiduQRStart(w, r, database)
+				netdisk.HandleDashboardBaiduQRStart(w, r, database)
 			})).ServeHTTP(w, r)
 		case "/pan/baidu/qr/image":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleDashboardBaiduQRImage(w, r)
+				netdisk.HandleDashboardBaiduQRImage(w, r)
 			})).ServeHTTP(w, r)
 		case "/pan/baidu/qr/cookie":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleDashboardBaiduQRCookie(w, r, database)
+				netdisk.HandleDashboardBaiduQRCookie(w, r, database)
 			})).ServeHTTP(w, r)
 		case "/pan/quark/qr/start":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleDashboardQuarkQRStart(w, r, database)
+				netdisk.HandleDashboardQuarkQRStart(w, r, database)
 			})).ServeHTTP(w, r)
 		case "/pan/quark/qr/image":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleDashboardQuarkQRImage(w, r)
+				netdisk.HandleDashboardQuarkQRImage(w, r)
 			})).ServeHTTP(w, r)
 		case "/pan/quark/qr/cookie":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleDashboardQuarkQRCookie(w, r, database)
+				netdisk.HandleDashboardQuarkQRCookie(w, r, database)
 			})).ServeHTTP(w, r)
 		case "/pan/uc/qr/start":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleDashboardUCQRStart(w, r, database)
+				netdisk.HandleDashboardUCQRStart(w, r, database)
 			})).ServeHTTP(w, r)
 		case "/pan/uc/qr/image":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleDashboardUCQRImage(w, r)
+				netdisk.HandleDashboardUCQRImage(w, r)
 			})).ServeHTTP(w, r)
 		case "/pan/uc/qr/cookie":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleDashboardUCQRCookie(w, r, database)
+				netdisk.HandleDashboardUCQRCookie(w, r, database)
 			})).ServeHTTP(w, r)
 		case "/pan/115/qr/start":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleDashboard115QRStart(w, r, database)
+				netdisk.HandleDashboard115QRStart(w, r, database)
 			})).ServeHTTP(w, r)
 		case "/pan/115/qr/image":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleDashboard115QRImage(w, r)
+				netdisk.HandleDashboard115QRImage(w, r)
 			})).ServeHTTP(w, r)
 		case "/pan/115/qr/cookie":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleDashboard115QRCookie(w, r, database)
+				netdisk.HandleDashboard115QRCookie(w, r, database)
 			})).ServeHTTP(w, r)
 		case "/pan/bili/qr/start":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleDashboardBiliQRStart(w, r, database)
+				netdisk.HandleDashboardBiliQRStart(w, r, database)
 			})).ServeHTTP(w, r)
 		case "/pan/bili/qr/image":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleDashboardBiliQRImage(w, r)
+				netdisk.HandleDashboardBiliQRImage(w, r)
 			})).ServeHTTP(w, r)
 		case "/pan/bili/qr/cookie":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleDashboardBiliQRCookie(w, r, database)
+				netdisk.HandleDashboardBiliQRCookie(w, r, database)
 			})).ServeHTTP(w, r)
 		case "/video/pans/list":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -557,68 +558,6 @@ func handleDashboardGoProxySave(w http.ResponseWriter, r *http.Request, database
 	b, _ := json.Marshal(servers)
 	_ = database.SetSetting("goproxy_servers", string(b))
 	writeJSON(w, 200, map[string]any{"success": true, "goProxySync": map[string]any{"ok": nil, "skipped": true}})
-}
-
-func handleDashboardPanSettings(w http.ResponseWriter, r *http.Request, database *db.DB) {
-	parseForm(r)
-	switch r.Method {
-	case http.MethodGet:
-		key := strings.TrimSpace(r.URL.Query().Get("key"))
-		store := parseJSONMap(database.GetSetting("pan_login_settings"))
-		if key != "" {
-			v, ok := store[key]
-			if !ok {
-				v = map[string]any{}
-			}
-			writeJSON(w, 200, map[string]any{"success": true, "settings": map[string]any{key: v}})
-			return
-		}
-		writeJSON(w, 200, map[string]any{"success": true, "settings": store})
-	case http.MethodPost:
-		key := strings.TrimSpace(r.FormValue("key"))
-		typ := strings.TrimSpace(r.FormValue("type"))
-		if key == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "key 不能为空"})
-			return
-		}
-		if typ != "cookie" && typ != "account" && typ != "authorization" && typ != "quark_tv" && typ != "uc_tv" {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "type 参数无效"})
-			return
-		}
-		store := parseJSONMap(database.GetSetting("pan_login_settings"))
-		cur, _ := store[key].(map[string]any)
-		if cur == nil {
-			cur = map[string]any{}
-		}
-		var payload any
-		if typ == "cookie" {
-			cookie := r.FormValue("cookie")
-			cur["cookie"] = cookie
-			payload = map[string]any{"cookie": cookie}
-		} else if typ == "authorization" {
-			authorization := r.FormValue("authorization")
-			cur["authorization"] = authorization
-			payload = map[string]any{"authorization": authorization}
-		} else if typ == "quark_tv" || typ == "uc_tv" {
-			refreshToken := r.FormValue("refresh_token")
-			deviceID := r.FormValue("device_id")
-			cur["refresh_token"] = refreshToken
-			cur["device_id"] = deviceID
-			payload = map[string]any{"refresh_token": refreshToken, "device_id": deviceID}
-		} else {
-			username := r.FormValue("username")
-			password := r.FormValue("password")
-			cur["username"] = username
-			cur["password"] = password
-			payload = map[string]any{"username": username, "password": password}
-		}
-		store[key] = cur
-		b, _ := json.Marshal(store)
-		_ = database.SetSetting("pan_login_settings", string(b))
-		writeJSON(w, 200, map[string]any{"success": true, "settings": store, "sync": map[string]any{"ok": nil, "skipped": true}, "payload": payload})
-	default:
-		methodNotAllowed(w)
-	}
 }
 
 func handleDashboardVideoPansList(w http.ResponseWriter, r *http.Request, database *db.DB) {
