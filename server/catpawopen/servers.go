@@ -3,6 +3,8 @@ package catpawopen
 import (
 	"encoding/json"
 	"strings"
+
+	mfnet "github.com/jenfonro/meowfilm/server/net"
 )
 
 func ParseServers(raw string) []Server {
@@ -55,8 +57,5 @@ func ResolveActiveBase(servers []Server, activeName string) string {
 }
 
 func defaultString(v, def string) string {
-	if strings.TrimSpace(v) == "" {
-		return def
-	}
-	return v
+	return mfnet.DefaultString(v, def)
 }
