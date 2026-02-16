@@ -132,6 +132,387 @@ func quarkQRDoReq(client *http.Client, method string, urlStr string, body []byte
 	return buf, resp.Header, nil
 }
 
+// --- Share list/play (direct cloud-drive API) ---
+
+const (
+	quarkShareAPIBase = "https://drive.quark.cn"
+	quarkShareReferer = "https://pan.quark.cn/"
+	quarkShareUA      = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch"
+)
+
+func parseQuarkShareIDFromFlag(flag string) string {
+	s := strings.TrimSpace(flag)
+	if s == "" {
+		return ""
+	}
+	if strings.HasPrefix(s, "夸父-") {
+		return strings.TrimSpace(strings.TrimPrefix(s, "夸父-"))
+	}
+	if strings.HasPrefix(strings.ToLower(s), "quark-") {
+		return strings.TrimSpace(s[6:])
+	}
+	return ""
+}
+
+func buildQuarkShareHeaders(cookie string) http.Header {
+	h := http.Header{}
+	h.Set("User-Agent", quarkShareUA)
+	h.Set("Referer", quarkShareReferer)
+	h.Set("Accept", "application/json, text/plain, */*")
+	h.Set("Content-Type", "application/json")
+	h.Set("Accept-Encoding", "gzip, deflate, br")
+	if strings.TrimSpace(cookie) != "" {
+		h.Set("Cookie", strings.TrimSpace(cookie))
+	}
+	return h
+}
+
+func quarkShareDoJSON(method string, urlStr string, headers http.Header, body []byte, out any) error {
+	client := &http.Client{Timeout: 18 * time.Second}
+	req, err := http.NewRequest(method, urlStr, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	for k, vv := range headers {
+		for _, v := range vv {
+			req.Header.Add(k, v)
+		}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return errors.New("quark http " + strconv.Itoa(resp.StatusCode) + ": " + strings.TrimSpace(string(b)))
+	}
+	return json.Unmarshal(bytes.TrimSpace(b), out)
+}
+
+type quarkShareTokenResp struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    struct {
+		Stoken string `json:"stoken"`
+	} `json:"data"`
+}
+
+func quarkShareGetStoken(shareID string, passcode string, cookie string) (string, error) {
+	pwdID := strings.TrimSpace(shareID)
+	if pwdID == "" {
+		return "", errors.New("missing shareId")
+	}
+	u := quarkShareAPIBase + "/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc"
+	body := map[string]any{"pwd_id": pwdID}
+	pc := strings.TrimSpace(passcode)
+	if pc != "" {
+		body["passcode"] = pc
+	}
+	b, _ := json.Marshal(body)
+	var resp quarkShareTokenResp
+	if err := quarkShareDoJSON(http.MethodPost, u, buildQuarkShareHeaders(cookie), b, &resp); err != nil {
+		return "", err
+	}
+	if resp.Code != 0 && resp.Code != 200 {
+		msg := strings.TrimSpace(resp.Message)
+		if msg == "" {
+			msg = "share token failed"
+		}
+		return "", errors.New(msg)
+	}
+	st := strings.TrimSpace(resp.Data.Stoken)
+	if st == "" {
+		return "", errors.New("stoken not found")
+	}
+	return st, nil
+}
+
+type quarkShareDetailResp struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    struct {
+		List []map[string]any `json:"list"`
+	} `json:"data"`
+}
+
+func quarkShareDetail(shareID string, stoken string, cookie string) (quarkShareDetailResp, error) {
+	pwdID := strings.TrimSpace(shareID)
+	sToken := strings.TrimSpace(stoken)
+	if pwdID == "" || sToken == "" {
+		return quarkShareDetailResp{}, errors.New("missing quark share parameters")
+	}
+	u, _ := url.Parse(quarkShareAPIBase + "/1/clouddrive/share/sharepage/detail?pr=ucpro&fr=pc")
+	q := u.Query()
+	q.Set("pwd_id", pwdID)
+	q.Set("stoken", sToken)
+	q.Set("pdir_fid", "0")
+	q.Set("force", "0")
+	q.Set("_page", "1")
+	q.Set("_size", "200")
+	q.Set("_sort", "file_type:asc,file_name:asc")
+	u.RawQuery = q.Encode()
+
+	var resp quarkShareDetailResp
+	h := buildQuarkShareHeaders(cookie)
+	h.Del("Content-Type")
+	if err := quarkShareDoJSON(http.MethodGet, u.String(), h, nil, &resp); err != nil {
+		return quarkShareDetailResp{}, err
+	}
+	if resp.Code != 0 && resp.Code != 200 {
+		msg := strings.TrimSpace(resp.Message)
+		if msg == "" {
+			msg = "share detail failed"
+		}
+		return quarkShareDetailResp{}, errors.New(msg)
+	}
+	return resp, nil
+}
+
+func quarkShareIsDirItem(it map[string]any) bool {
+	if it == nil {
+		return false
+	}
+	if v, ok := it["dir"].(bool); ok && v {
+		return true
+	}
+	if v, ok := it["file"].(bool); ok && !v {
+		return true
+	}
+	if ft, ok := it["file_type"].(float64); ok && int(ft) == 0 {
+		return true
+	}
+	kind := strings.ToLower(strings.TrimSpace(toString(it["type"])))
+	return kind == "folder" || kind == "dir" || kind == "directory"
+}
+
+func quarkShareItemFid(it map[string]any) string {
+	if it == nil {
+		return ""
+	}
+	if v := strings.TrimSpace(toString(it["fid"])); v != "" {
+		return v
+	}
+	return strings.TrimSpace(toString(it["file_id"]))
+}
+
+func quarkShareItemFidToken(it map[string]any) string {
+	if it == nil {
+		return ""
+	}
+	if v := strings.TrimSpace(toString(it["share_fid_token"])); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(toString(it["fid_token"])); v != "" {
+		return v
+	}
+	return strings.TrimSpace(toString(it["token"]))
+}
+
+func quarkShareItemName(it map[string]any) string {
+	if it == nil {
+		return ""
+	}
+	if v := strings.TrimSpace(toString(it["file_name"])); v != "" {
+		return v
+	}
+	return strings.TrimSpace(toString(it["name"]))
+}
+
+func QuarkList(database *db.DB, flag string, passcode string) (string, string, error) {
+	shareID := parseQuarkShareIDFromFlag(flag)
+	if shareID == "" {
+		return "", "", errors.New("missing/invalid flag (expected: 夸父-<shareId>)")
+	}
+	store := readPanLoginSettings(database)
+	cookie := getPanField(store, "quark", "cookie")
+	if cookie == "" {
+		return "", "", errors.New("missing quark cookie (pan_login_settings[\"quark\"].cookie)")
+	}
+	stoken, err := quarkShareGetStoken(shareID, passcode, cookie)
+	if err != nil {
+		return "", shareID, err
+	}
+	detail, err := quarkShareDetail(shareID, stoken, cookie)
+	if err != nil {
+		return "", shareID, err
+	}
+	parts := []string{}
+	for _, it := range detail.Data.List {
+		if quarkShareIsDirItem(it) {
+			continue
+		}
+		fid := quarkShareItemFid(it)
+		fidToken := quarkShareItemFidToken(it)
+		name := quarkShareItemName(it)
+		if fid == "" || fidToken == "" || name == "" {
+			continue
+		}
+		id := shareID + "*" + stoken + "*" + fid + "*" + fidToken + "***" + name
+		parts = append(parts, name+"$"+id)
+	}
+	return strings.Join(parts, "#"), shareID, nil
+}
+
+func parseQuarkPlayID(id string) (shareID string, stoken string, fid string, fidToken string, fileName string) {
+	raw := strings.TrimSpace(id)
+	if raw == "" {
+		return "", "", "", "", ""
+	}
+	p := strings.SplitN(raw, "***", 2)
+	left := p[0]
+	if len(p) == 2 {
+		fileName = strings.TrimSpace(p[1])
+	}
+	parts := strings.Split(left, "*")
+	if len(parts) >= 1 {
+		shareID = strings.TrimSpace(parts[0])
+	}
+	if len(parts) >= 2 {
+		stoken = strings.TrimSpace(parts[1])
+	}
+	if len(parts) >= 3 {
+		fid = strings.TrimSpace(parts[2])
+	}
+	if len(parts) >= 4 {
+		fidToken = strings.TrimSpace(parts[3])
+	}
+	return
+}
+
+type quarkDownloadResp struct {
+	Data any `json:"data"`
+}
+
+func quarkDirectDownload(fid string, fidToken string, cookie string, want string) (string, error) {
+	fID := strings.TrimSpace(fid)
+	if fID == "" {
+		return "", errors.New("missing fid")
+	}
+	wantMode := strings.TrimSpace(want)
+	if wantMode == "" {
+		wantMode = "download_url"
+	}
+	u := quarkShareAPIBase + "/1/clouddrive/file/download?pr=ucpro&fr=pc"
+	body := map[string]any{"fid": fID, "fids": []any{fID}}
+	if strings.TrimSpace(fidToken) != "" {
+		body["fid_token"] = strings.TrimSpace(fidToken)
+		body["fid_token_list"] = []any{strings.TrimSpace(fidToken)}
+	}
+	b, _ := json.Marshal(body)
+	var resp quarkDownloadResp
+	if err := quarkShareDoJSON(http.MethodPost, u, buildQuarkShareHeaders(cookie), b, &resp); err != nil {
+		return "", err
+	}
+	var out string
+	if m, ok := resp.Data.(map[string]any); ok {
+		if inner, ok := m["data"]; ok {
+			switch x := inner.(type) {
+			case []any:
+				for _, it := range x {
+					im, _ := it.(map[string]any)
+					if im == nil {
+						continue
+					}
+					if v, ok := im[wantMode].(string); ok && strings.TrimSpace(v) != "" {
+						out = strings.TrimSpace(v)
+						break
+					}
+					if v, ok := im["download_url"].(string); ok && strings.TrimSpace(v) != "" {
+						out = strings.TrimSpace(v)
+						break
+					}
+					if v, ok := im["play_url"].(string); ok && strings.TrimSpace(v) != "" {
+						out = strings.TrimSpace(v)
+						break
+					}
+				}
+			case map[string]any:
+				if v, ok := x[wantMode].(string); ok && strings.TrimSpace(v) != "" {
+					out = strings.TrimSpace(v)
+				} else if v, ok := x["download_url"].(string); ok && strings.TrimSpace(v) != "" {
+					out = strings.TrimSpace(v)
+				} else if v, ok := x["play_url"].(string); ok && strings.TrimSpace(v) != "" {
+					out = strings.TrimSpace(v)
+				}
+			}
+		}
+	}
+	if out == "" {
+		return "", errors.New("direct download url not found")
+	}
+	return out, nil
+}
+
+func QuarkPlay(database *db.DB, id string, want string) (string, map[string]string, error) {
+	_, _, fid, fidToken, _ := parseQuarkPlayID(id)
+	if fid == "" {
+		return "", nil, errors.New("invalid id (missing fid)")
+	}
+	store := readPanLoginSettings(database)
+	cookie := getPanField(store, "quark", "cookie")
+	if cookie == "" {
+		return "", nil, errors.New("missing quark cookie (pan_login_settings[\"quark\"].cookie)")
+	}
+	u, err := quarkDirectDownload(fid, fidToken, cookie, want)
+	if err != nil {
+		return "", nil, err
+	}
+	headers := map[string]string{
+		"Cookie":     cookie,
+		"Referer":    quarkShareReferer,
+		"User-Agent": quarkShareUA,
+	}
+	return u, headers, nil
+}
+
+func HandleAPIQuarkList(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var body struct {
+		Flag     string `json:"flag"`
+		Passcode string `json:"passcode"`
+		Pwd      string `json:"pwd"`
+	}
+	_ = readJSONLoose(r, &body)
+	flag := strings.TrimSpace(body.Flag)
+	passcode := strings.TrimSpace(body.Passcode)
+	if passcode == "" {
+		passcode = strings.TrimSpace(body.Pwd)
+	}
+	vod, shareID, err := QuarkList(database, flag, passcode)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "flag": flag, "shareId": shareID, "vod_play_url": vod})
+}
+
+func HandleAPIQuarkPlay(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var body struct {
+		ID   string `json:"id"`
+		Want string `json:"want"`
+	}
+	_ = readJSONLoose(r, &body)
+	id := strings.TrimSpace(body.ID)
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "missing id"})
+		return
+	}
+	u, header, err := QuarkPlay(database, id, strings.TrimSpace(body.Want))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "parse": 0, "url": u, "headers": header})
+}
+
 func buildQuarkHeaders(extra map[string]string) map[string]string {
 	h := map[string]string{
 		"User-Agent":      quarkQRUA,

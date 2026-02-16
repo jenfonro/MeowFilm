@@ -18,6 +18,7 @@ import (
 	"github.com/jenfonro/meowfilm/server/magic"
 	"github.com/jenfonro/meowfilm/server/metadata/douban"
 	"github.com/jenfonro/meowfilm/server/metadata/tmdb"
+	"github.com/jenfonro/meowfilm/server/netdisk"
 	mfnet "github.com/jenfonro/meowfilm/server/net"
 	"github.com/jenfonro/meowfilm/server/search"
 	"github.com/jenfonro/meowfilm/server/static"
@@ -145,6 +146,46 @@ func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
 		case "/tmdb/detail":
 			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				tmdb.HandleDetail(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/189/list":
+			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleAPI189List(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/189/play":
+			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleAPI189Play(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/139/list":
+			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleAPI139List(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/139/play":
+			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleAPI139Play(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/quark/list":
+			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleAPIQuarkList(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/quark/play":
+			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleAPIQuarkPlay(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/uc/list":
+			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleAPIUCList(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/uc/play":
+			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleAPIUCPlay(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/baidu/list":
+			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleAPIBaiduList(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/pan/baidu/play":
+			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleAPIBaiduPlay(w, r, database)
 			})).ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
