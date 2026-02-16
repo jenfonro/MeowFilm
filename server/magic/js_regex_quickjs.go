@@ -2,7 +2,7 @@
 // +build cgo
 // +build linux darwin
 
-package emby
+package magic
 
 import (
 	"crypto/sha1"
@@ -17,7 +17,7 @@ import (
 	"github.com/jenfonro/meowfilm/internal/db"
 )
 
-func jsRegexAvailable() bool { return true }
+func RegexAvailable() bool { return true }
 
 func jsEval(ctx *quickjs.Context, code string) (*quickjs.Value, error) {
 	if ctx == nil {
@@ -180,40 +180,40 @@ func (e *jsMagicEngine) ensureRules(cleanRaw []string, episodeRaw []string) erro
 	return nil
 }
 
-func jsMagicEpisodeExtractFromCandidates(candidates []string, cleanRaw []string, episodeRaw []string) (smartSeasonEpisode, error) {
+func MagicEpisodeExtractFromCandidates(candidates []string, cleanRaw []string, episodeRaw []string) (SeasonEpisode, error) {
 	if len(candidates) == 0 {
-		return smartSeasonEpisode{Season: 0, Episode: 0}, nil
+		return SeasonEpisode{Season: 0, Episode: 0}, nil
 	}
 	engine := jsMagicEnginePool.Get().(*jsMagicEngine)
 	defer jsMagicEnginePool.Put(engine)
 
 	if err := engine.ensureRules(cleanRaw, episodeRaw); err != nil {
 		engine.close()
-		return smartSeasonEpisode{Season: 0, Episode: 0}, err
+		return SeasonEpisode{Season: 0, Episode: 0}, err
 	}
 
 	val, err := jsEval(engine.ctx, fmt.Sprintf(`JSON.stringify(__mf_extract_from_candidates(%s))`, marshalJSON(candidates)))
 	if err != nil {
 		engine.close()
-		return smartSeasonEpisode{Season: 0, Episode: 0}, err
+		return SeasonEpisode{Season: 0, Episode: 0}, err
 	}
 	defer val.Free()
 
 	raw := strings.TrimSpace(val.String())
 	if raw == "" {
-		return smartSeasonEpisode{Season: 0, Episode: 0}, nil
+		return SeasonEpisode{Season: 0, Episode: 0}, nil
 	}
 	var obj struct {
 		Season  int `json:"season"`
 		Episode int `json:"episode"`
 	}
 	if err := json.Unmarshal([]byte(raw), &obj); err != nil {
-		return smartSeasonEpisode{Season: 0, Episode: 0}, err
+		return SeasonEpisode{Season: 0, Episode: 0}, err
 	}
-	return smartSeasonEpisode{Season: obj.Season, Episode: obj.Episode}, nil
+	return SeasonEpisode{Season: obj.Season, Episode: obj.Episode}, nil
 }
 
-func jsCompileRulesDebug(database *db.DB) (any, error) {
+func CompileRulesDebug(database *db.DB) (any, error) {
 	if database == nil {
 		return nil, errors.New("db nil")
 	}
@@ -288,7 +288,7 @@ func jsCompileRulesDebug(database *db.DB) (any, error) {
 
 	compilePlain := func(row string) (jsCompileInfo, error) {
 		// Movie/aggregate rules are usually plain patterns, but may be stored as {"pattern":...}.
-		pat, _, flags := smartDecodeEpisodeRule(row)
+		pat, _, flags := DecodeEpisodeRule(row)
 		if strings.TrimSpace(pat) == "" {
 			pat = strings.TrimSpace(row)
 		}
@@ -334,7 +334,7 @@ func jsCompileRulesDebug(database *db.DB) (any, error) {
 	}, nil
 }
 
-func jsMagicEpisodeDebug(q string, cleanRaw []string, episodeRaw []string) (any, error) {
+func MagicEpisodeDebug(q string, cleanRaw []string, episodeRaw []string) (any, error) {
 	text := strings.TrimSpace(q)
 	if text == "" {
 		return map[string]any{"q": "", "message": "missing q"}, nil
