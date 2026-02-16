@@ -8,6 +8,7 @@ import (
 
 	"github.com/jenfonro/meowfilm/internal/auth"
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/emby"
 	"github.com/jenfonro/meowfilm/server/routes"
 	"github.com/jenfonro/meowfilm/server/static"
 )
@@ -43,9 +44,9 @@ func New(cfg Config) (*Server, error) {
 
 	mux.Handle("/api/", routes.APIHandler(database, authMw))
 	// Debug endpoints (enabled only when MEOWFILM_DEBUG=1).
-	mux.Handle("/listdebug", routes.RegexListDebugHandler(database))
-	mux.Handle("/searchdebug", routes.RegexSearchDebugHandler(database))
-	embyAPI := routes.EmbyHandler(database)
+	mux.Handle("/listdebug", emby.RegexListDebugHandler(database))
+	mux.Handle("/searchdebug", emby.RegexSearchDebugHandler(database))
+	embyAPI := emby.EmbyHandler(database)
 	// Emby is the canonical API surface; keep a compatible legacy alias path.
 	mux.Handle("/emby/", embyAPI)
 	mux.Handle("/jellyfin/", embyAPI)
