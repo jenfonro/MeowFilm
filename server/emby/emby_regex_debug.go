@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/magic"
 )
 
 func regexDebugWantsHTML(r *http.Request) bool {
@@ -118,11 +119,11 @@ func RegexListDebugHandler(database *db.DB) http.Handler {
 		}
 
 		decodeEpisodeRule := func(raw string, isClean bool) ruleInfo {
-			pat, rep, flags := smartDecodeEpisodeRule(raw)
+			pat, rep, flags := magic.DecodeEpisodeRule(raw)
 			if strings.TrimSpace(flags) == "" {
 				flags = "i"
 			}
-			used := jsDecodeRule(raw, isClean)
+			used := magic.DecodeRule(raw, isClean)
 			// Expose the final rule that will be executed by QuickJS.
 			usedMap := map[string]any{
 				"pattern":  strings.TrimSpace(used.Pattern),
@@ -133,7 +134,7 @@ func RegexListDebugHandler(database *db.DB) http.Handler {
 			}
 			// Keep `replace` in the top-level for quick scan (mirrors legacy debug output).
 			if !isClean {
-				rep = smartNormalizeReplaceTemplate(rep)
+				rep = magic.NormalizeReplaceTemplate(rep)
 			}
 			return ruleInfo{
 				Raw:     raw,
@@ -214,14 +215,14 @@ func RegexListDebugHandler(database *db.DB) http.Handler {
 			}
 		}
 
-		if jsRegexAvailable() {
-			if jsInfo, err := jsCompileRulesDebug(database); err == nil && jsInfo != nil {
+		if magic.RegexAvailable() {
+			if jsInfo, err := magic.CompileRulesDebug(database); err == nil && jsInfo != nil {
 				resp["js"] = jsInfo
 			} else if err != nil {
 				resp["jsError"] = err.Error()
 			}
 			if q != "" {
-				if jsRes, err := jsMagicEpisodeDebug(q, rawCleanRules, rawEpisodeRules); err == nil && jsRes != nil {
+				if jsRes, err := magic.MagicEpisodeDebug(q, rawCleanRules, rawEpisodeRules); err == nil && jsRes != nil {
 					resp["jsMagicEpisode"] = jsRes
 					if s, e, ok := regexDebugExtractSE(jsRes); ok {
 						resp["extracted"] = map[string]any{"season": s, "episode": e}
@@ -265,10 +266,10 @@ func RegexSearchDebugHandler(database *db.DB) http.Handler {
 			},
 		}
 
-		if jsRegexAvailable() {
+		if magic.RegexAvailable() {
 			rawCleanRules := parseJSONStringArray(database.GetSetting("magic_episode_clean_regex_rules"))
 			rawEpisodeRules := parseJSONStringArray(database.GetSetting("magic_episode_rules"))
-			if jsRes, err := jsMagicEpisodeDebug(q, rawCleanRules, rawEpisodeRules); err == nil && jsRes != nil {
+			if jsRes, err := magic.MagicEpisodeDebug(q, rawCleanRules, rawEpisodeRules); err == nil && jsRes != nil {
 				resp["jsMagicEpisode"] = jsRes
 				if s, e, ok := regexDebugExtractSE(jsRes); ok {
 					resp["extracted"] = map[string]any{"season": s, "episode": e}

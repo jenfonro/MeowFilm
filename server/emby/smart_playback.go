@@ -1,7 +1,6 @@
 package emby
 
 import (
-	"encoding/json"
 	"errors"
 	"math"
 	"regexp"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/catpawopen"
+	"github.com/jenfonro/meowfilm/server/magic"
 )
 
 type smartPlaybackRequest struct {
@@ -54,45 +54,6 @@ func smartComparePriorityMatch(a smartPriorityMatch, b smartPriorityMatch) int {
 		}
 	}
 	return len(a.Indices) - len(b.Indices)
-}
-
-func smartDecodeEpisodeRule(raw string) (pattern string, replace string, flags string) {
-	s := strings.TrimSpace(raw)
-	if s == "" {
-		return "", "", ""
-	}
-	// JSON object string: {"pattern":"...","replace":"...","flags":"i"}
-	if strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}") {
-		var obj struct {
-			Pattern string `json:"pattern"`
-			Replace string `json:"replace"`
-			Flags   string `json:"flags"`
-		}
-		if err := json.Unmarshal([]byte(s), &obj); err == nil && strings.TrimSpace(obj.Pattern) != "" {
-			return strings.TrimSpace(obj.Pattern), obj.Replace, strings.TrimSpace(obj.Flags)
-		}
-	}
-	// /pattern/flags
-	if strings.HasPrefix(s, "/") {
-		last := strings.LastIndex(s, "/")
-		if last > 0 {
-			p := strings.TrimSpace(s[1:last])
-			f := strings.TrimSpace(s[last+1:])
-			if p != "" {
-				return p, "", f
-			}
-		}
-	}
-	return s, "", ""
-}
-
-func smartNormalizeReplaceTemplate(replaceRaw string) string {
-	// mirror frontend normalizeReplaceTemplate: `\1` -> `$1`
-	if replaceRaw == "" {
-		return ""
-	}
-	re := regexp.MustCompile(`\\(\d+)`)
-	return re.ReplaceAllString(replaceRaw, `$$$1`)
 }
 
 func smartParseChineseNumeralToInt(text string) int {
@@ -1061,7 +1022,7 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 					smartDetailCache.Unlock()
 					return
 				}
-				match, err := jsMagicEpisodeExtractFromCandidates(texts, rawCleanRules, rawEpisodeRules)
+				jsMatch, err := magic.MagicEpisodeExtractFromCandidates(texts, rawCleanRules, rawEpisodeRules)
 				if err != nil {
 					entry.FailCount++
 					entry.LastError = "js regex error"
@@ -1071,7 +1032,7 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 					smartDetailCache.Unlock()
 					return
 				}
-				match = smartNormalizeMaybeGlobalSeasonEpisode(tmdbSeasons, match)
+				match := smartNormalizeMaybeGlobalSeasonEpisode(tmdbSeasons, smartSeasonEpisode{Season: jsMatch.Season, Episode: jsMatch.Episode})
 				seasonNo := match.Season
 				epNo := match.Episode
 				if epNo <= 0 {
