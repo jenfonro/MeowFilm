@@ -1,6 +1,6 @@
 //go:build !(cgo && (linux || darwin))
 
-package emby
+package magic
 
 import (
 	"errors"
@@ -10,7 +10,7 @@ import (
 	"github.com/jenfonro/meowfilm/internal/db"
 )
 
-func jsRegexAvailable() bool { return true }
+func RegexAvailable() bool { return true }
 
 type goRule struct {
 	Raw     string
@@ -22,10 +22,10 @@ type goRule struct {
 }
 
 func goDecodeRule(raw string, forClean bool) (pattern string, replace string, flags string) {
-	pat, rep, fl := smartDecodeEpisodeRule(raw)
+	pat, rep, fl := DecodeEpisodeRule(raw)
 	pat = strings.TrimSpace(pat)
 	fl = strings.TrimSpace(fl)
-	rep = strings.TrimSpace(smartNormalizeReplaceTemplate(rep))
+	rep = strings.TrimSpace(NormalizeReplaceTemplate(rep))
 	if fl == "" {
 		fl = "i"
 	}
@@ -121,9 +121,9 @@ func goExtractSE(cleaned string, episodeRaw []string) (season int, episode int, 
 	return 0, 0, "", -1
 }
 
-func jsMagicEpisodeExtractFromCandidates(candidates []string, cleanRaw []string, episodeRaw []string) (smartSeasonEpisode, error) {
+func MagicEpisodeExtractFromCandidates(candidates []string, cleanRaw []string, episodeRaw []string) (SeasonEpisode, error) {
 	if len(candidates) == 0 {
-		return smartSeasonEpisode{Season: 0, Episode: 0}, nil
+		return SeasonEpisode{Season: 0, Episode: 0}, nil
 	}
 	for i := 0; i < len(candidates); i++ {
 		q := strings.TrimSpace(candidates[i])
@@ -133,13 +133,13 @@ func jsMagicEpisodeExtractFromCandidates(candidates []string, cleanRaw []string,
 		cleaned, _ := goApplyClean(q, cleanRaw)
 		sn, en, _, _ := goExtractSE(cleaned, episodeRaw)
 		if en > 0 {
-			return smartSeasonEpisode{Season: sn, Episode: en}, nil
+			return SeasonEpisode{Season: sn, Episode: en}, nil
 		}
 	}
-	return smartSeasonEpisode{Season: 0, Episode: 0}, nil
+	return SeasonEpisode{Season: 0, Episode: 0}, nil
 }
 
-func jsCompileRulesDebug(database *db.DB) (any, error) {
+func CompileRulesDebug(database *db.DB) (any, error) {
 	if database == nil {
 		return nil, errors.New("db nil")
 	}
@@ -171,7 +171,7 @@ func jsCompileRulesDebug(database *db.DB) (any, error) {
 	}
 
 	compilePlain := func(row string) info {
-		pat, _, fl := smartDecodeEpisodeRule(row)
+		pat, _, fl := DecodeEpisodeRule(row)
 		pat = strings.TrimSpace(pat)
 		fl = strings.TrimSpace(fl)
 		if pat == "" {
@@ -221,7 +221,7 @@ func jsCompileRulesDebug(database *db.DB) (any, error) {
 	}, nil
 }
 
-func jsMagicEpisodeDebug(q string, cleanRaw []string, episodeRaw []string) (any, error) {
+func MagicEpisodeDebug(q string, cleanRaw []string, episodeRaw []string) (any, error) {
 	text := strings.TrimSpace(q)
 	if text == "" {
 		return map[string]any{"q": "", "message": "missing q"}, nil

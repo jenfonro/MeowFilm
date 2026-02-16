@@ -1,15 +1,15 @@
 //go:build !(cgo && (linux || darwin))
 
-package emby
+package magic
 
 import (
 	"strings"
 )
 
-func jsSearchComputeMatchScore(q string, title string) (int, error) {
+func ComputeMatchScore(q string, title string) (int, error) {
 	qRaw := strings.TrimSpace(q)
-	qNorm := embyNormalizeForMatch(qRaw)
-	name := embyNormalizeForMatch(title)
+	qNorm := NormalizeForMatch(qRaw)
+	name := NormalizeForMatch(title)
 	if qNorm == "" || name == "" {
 		return 0, nil
 	}

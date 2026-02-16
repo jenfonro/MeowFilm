@@ -2,7 +2,7 @@
 // +build cgo
 // +build linux darwin
 
-package emby
+package magic
 
 import (
 	"encoding/json"
@@ -89,7 +89,7 @@ func (e *jsSearchScoreEngine) ensure() error {
 	`)
 }
 
-func jsSearchComputeMatchScore(q string, title string) (int, error) {
+func ComputeMatchScore(q string, title string) (int, error) {
 	engine := jsSearchScorePool.Get().(*jsSearchScoreEngine)
 	defer jsSearchScorePool.Put(engine)
 

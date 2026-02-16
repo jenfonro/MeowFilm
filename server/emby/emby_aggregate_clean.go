@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/magic"
 )
 
 var embyCleanSpace = regexp.MustCompile(`\s+`)
@@ -12,7 +13,7 @@ var embyCleanSpace = regexp.MustCompile(`\s+`)
 func embyCompileCleanRegexRules(raw []string) []*regexp.Regexp {
 	out := make([]*regexp.Regexp, 0, len(raw))
 	for _, row := range raw {
-		pat, _, fl := smartDecodeEpisodeRule(row)
+		pat, _, fl := magic.DecodeEpisodeRule(row)
 		pat = strings.TrimSpace(pat)
 		fl = strings.TrimSpace(fl)
 		if pat == "" {
