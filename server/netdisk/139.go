@@ -1332,6 +1332,13 @@ func HandleAPI139Play(w http.ResponseWriter, r *http.Request, database *db.DB) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "missing id"})
 		return
 	}
+
+	cacheKey := buildPlayCacheKey("139", flag, id, want)
+	if u, _, ok := getPlayCache(cacheKey); ok {
+		writeJSON(w, 200, map[string]any{"ok": true, "url": u})
+		return
+	}
+
 	linkID, contentID, coID := parse139PlayID(id)
 	isStarID := strings.Contains(id, "*") && !strings.Contains(id, "|")
 	if isStarID && strings.TrimSpace(coID) == "" && strings.TrimSpace(contentID) != "" {
@@ -1355,6 +1362,7 @@ func HandleAPI139Play(w http.ResponseWriter, r *http.Request, database *db.DB) {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "message": "play url unavailable"})
 			return
 		}
+		setPlayCache(cacheKey, u, nil)
 		writeJSON(w, 200, map[string]any{"ok": true, "url": strings.TrimSpace(u)})
 		return
 	}
@@ -1367,5 +1375,6 @@ func HandleAPI139Play(w http.ResponseWriter, r *http.Request, database *db.DB) {
 		}
 		return
 	}
+	setPlayCache(cacheKey, u, nil)
 	writeJSON(w, 200, map[string]any{"ok": true, "url": strings.TrimSpace(u)})
 }

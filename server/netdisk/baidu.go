@@ -890,6 +890,17 @@ func HandleAPIBaiduPlay(w http.ResponseWriter, r *http.Request, database *db.DB)
 	if !strings.HasPrefix(dirPath, "/") {
 		dirPath = "/" + dirPath
 	}
+
+	cacheKey := buildPlayCacheKey("baidu", flag, id, dirPath)
+	if u, header, ok := getPlayCache(cacheKey); ok {
+		resp := map[string]any{"ok": true, "url": u}
+		if len(header) > 0 {
+			resp["header"] = header
+		}
+		writeJSON(w, 200, resp)
+		return
+	}
+
 	u, headers, err := BaiduPlay(database, flag, id, dirPath)
 	if err != nil {
 		code := http.StatusBadRequest
@@ -899,6 +910,9 @@ func HandleAPIBaiduPlay(w http.ResponseWriter, r *http.Request, database *db.DB)
 		}
 		writeJSON(w, code, map[string]any{"ok": false, "message": msg})
 		return
+	}
+	if strings.TrimSpace(u) != "" {
+		setPlayCache(cacheKey, u, headers)
 	}
 	writeJSON(w, 200, map[string]any{
 		"ok":     true,

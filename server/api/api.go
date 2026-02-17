@@ -255,13 +255,6 @@ func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
 			} else {
 				authMw.RequireAuthAPI(h).ServeHTTP(w, r)
 			}
-		case "/pan/batch/list":
-			h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { netdisk.HandleAPIPanBatchList(w, r, database) })
-			if panAPINoAuthAllowed(r) {
-				h.ServeHTTP(w, r)
-			} else {
-				authMw.RequireAuthAPI(h).ServeHTTP(w, r)
-			}
 		default:
 			http.NotFound(w, r)
 		}

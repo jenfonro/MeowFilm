@@ -1279,6 +1279,13 @@ func HandleAPI189Play(w http.ResponseWriter, r *http.Request, database *db.DB) {
 		accessCode = strings.TrimSpace(body.Password)
 	}
 	dt := strings.TrimSpace(body.DT)
+
+	cacheKey := buildPlayCacheKey("189", id, accessCode, dt)
+	if u, _, ok := getPlayCache(cacheKey); ok {
+		writeJSON(w, 200, map[string]any{"ok": true, "url": u})
+		return
+	}
+
 	u, shareID, fileID, fileName, err := tianyi189PlayWithDT(database, id, accessCode, dt)
 	if err != nil {
 		if tianyiNeedAccessCodeMessage(err.Error()) {
@@ -1289,6 +1296,9 @@ func HandleAPI189Play(w http.ResponseWriter, r *http.Request, database *db.DB) {
 		return
 	}
 	_, _, _ = shareID, fileID, fileName
+	if strings.TrimSpace(u) != "" {
+		setPlayCache(cacheKey, u, nil)
+	}
 	writeJSON(w, 200, map[string]any{"ok": true, "url": u})
 }
 
