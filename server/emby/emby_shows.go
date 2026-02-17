@@ -312,6 +312,28 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 						"AlternateMediaSources": []any{},
 					})
 				}
+				// Populate per-episode playback position from play_history so clients can render resume/progress.
+				{
+					ids := make([]string, 0, len(out))
+					for _, it := range out {
+						if id, ok := it["Id"].(string); ok && strings.TrimSpace(id) != "" {
+							ids = append(ids, strings.TrimSpace(id))
+						}
+					}
+					hit := embyQueryPlayHistoryByItemIDs(database, u.ID, ids)
+					if len(hit) > 0 {
+						for _, it := range out {
+							id, _ := it["Id"].(string)
+							id = strings.TrimSpace(id)
+							if id == "" {
+								continue
+							}
+							if snap, ok := hit[id]; ok {
+								embyApplyPlayHistoryToItemUserData(u.ID, id, it, snap)
+							}
+						}
+					}
+				}
 				sort.Slice(out, func(i, j int) bool {
 					return intVal(out[i]["IndexNumber"]) < intVal(out[j]["IndexNumber"])
 				})
@@ -451,6 +473,28 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 				},
 				"AlternateMediaSources": []any{},
 			})
+		}
+		// Populate per-episode playback position from play_history so clients can render resume/progress.
+		{
+			ids := make([]string, 0, len(out))
+			for _, it := range out {
+				if id, ok := it["Id"].(string); ok && strings.TrimSpace(id) != "" {
+					ids = append(ids, strings.TrimSpace(id))
+				}
+			}
+			hit := embyQueryPlayHistoryByItemIDs(database, u.ID, ids)
+			if len(hit) > 0 {
+				for _, it := range out {
+					id, _ := it["Id"].(string)
+					id = strings.TrimSpace(id)
+					if id == "" {
+						continue
+					}
+					if snap, ok := hit[id]; ok {
+						embyApplyPlayHistoryToItemUserData(u.ID, id, it, snap)
+					}
+				}
+			}
 		}
 		sort.Slice(out, func(i, j int) bool {
 			return intVal(out[i]["IndexNumber"]) < intVal(out[j]["IndexNumber"])
