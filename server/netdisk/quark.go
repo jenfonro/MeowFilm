@@ -1788,7 +1788,18 @@ func HandleAPIQuarkPlay(w http.ResponseWriter, r *http.Request, database *db.DB)
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "missing id"})
 		return
 	}
-	u, header, err := quarkPlayImpl(database, id, strings.TrimSpace(body.Want), tvUser)
+	want := strings.TrimSpace(body.Want)
+
+	cacheKey := buildPlayCacheKey("quark", tvUser, id, want)
+	if u, header, ok := getPlayCache(cacheKey); ok {
+		resp := map[string]any{"ok": true, "parse": 0, "url": u}
+		if len(header) > 0 {
+			resp["header"] = header
+		}
+		writeJSON(w, 200, resp)
+		return
+	}
+	u, header, err := quarkPlayImpl(database, id, want, tvUser)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": err.Error()})
 		return
@@ -1796,6 +1807,9 @@ func HandleAPIQuarkPlay(w http.ResponseWriter, r *http.Request, database *db.DB)
 	resp := map[string]any{"ok": true, "parse": 0, "url": u}
 	if len(header) > 0 {
 		resp["header"] = header
+	}
+	if strings.TrimSpace(u) != "" {
+		setPlayCache(cacheKey, u, header)
 	}
 	writeJSON(w, 200, resp)
 }
