@@ -1434,6 +1434,9 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 				}
 				continue
 			}
+			// pan_mock sources should not be affected by pan priority/order filters:
+			// always allow them, and let whichever provider resolves fastest win.
+			allowed = true
 
 			shareKey := strings.TrimSpace(c.PanLabel)
 			metaA := ""
@@ -1904,7 +1907,14 @@ func smartResolvePlaybackFromTMDB(database *db.DB, u *embyUser, req smartPlaybac
 		}
 	}
 
-	tmdbHasMultiSeason := len(tmdbSeasons) >= 2
+	positiveSeasons := 0
+	for _, s := range tmdbSeasons {
+		if s.Season > 0 {
+			positiveSeasons++
+		}
+	}
+	// Ignore season 0 (specials) when deciding multi-season behavior.
+	tmdbHasMultiSeason := positiveSeasons >= 2
 	preferSeasonNo := 0
 	if tmdbHasMultiSeason {
 		mapped := smartTMDBSeasonEpisodeOfGlobal(tmdbSeasons, want)
@@ -1932,6 +1942,7 @@ func smartResolvePlaybackFromTMDB(database *db.DB, u *embyUser, req smartPlaybac
 
 	tryPickOnce := func(requireSeasoned bool) *smartPickResult {
 		hasPanOrder := len(settings.PanTokenOrderLower) > 0
+		fastReturn := !tmdbHasMultiSeason || preferSeasonNo <= 1
 		bestPreferredNoHeaders := (*smartPickResult)(nil)
 		bestOtherNoHeaders := (*smartPickResult)(nil)
 		bestPreferredWithHeaders := (*smartPickResult)(nil)
@@ -1982,6 +1993,9 @@ func smartResolvePlaybackFromTMDB(database *db.DB, u *embyUser, req smartPlaybac
 			if got.Res != nil && strings.TrimSpace(got.Res.PlayURL) != "" {
 				isPreferredPan := hasPanOrder && got.Res.Cand.PanTokenIdx >= 0
 				if len(got.Res.Headers) == 0 {
+					if fastReturn {
+						return got.Res
+					}
 					if isPreferredPan {
 						if bestPreferredNoHeaders == nil || smartCompareSmartMatch(bestPreferredNoHeaders.Cand, got.Res.Cand, tmdbHasMultiSeason, preferSeasonNo, settings) > 0 {
 							bestPreferredNoHeaders = got.Res
@@ -2025,8 +2039,10 @@ func smartResolvePlaybackFromTMDB(database *db.DB, u *embyUser, req smartPlaybac
 		return bestOtherWithHeaders
 	}
 
-	best := tryPickOnce(true)
-	if best == nil {
+	// Only enforce season markers when targeting later seasons (S2+).
+	requireSeasonedFirst := tmdbHasMultiSeason && preferSeasonNo >= 2
+	best := tryPickOnce(requireSeasonedFirst)
+	if best == nil && requireSeasonedFirst {
 		best = tryPickOnce(false)
 	}
 	if best == nil || strings.TrimSpace(best.PlayURL) == "" {
