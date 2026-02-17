@@ -1892,7 +1892,22 @@ func HandleAPIUCPlay(w http.ResponseWriter, r *http.Request, database *db.DB) {
 		return
 	}
 	tvUser := getTVUserFromRequest(r)
-	u, header, err := ucPlayImpl(database, strings.TrimSpace(body.Flag), id, strings.TrimSpace(body.Want), tvUser, strings.TrimSpace(body.ToPdirPath), strings.TrimSpace(body.ToPdirFid))
+	flag := strings.TrimSpace(body.Flag)
+	want := strings.TrimSpace(body.Want)
+	toPdirPath := strings.TrimSpace(body.ToPdirPath)
+	toPdirFid := strings.TrimSpace(body.ToPdirFid)
+
+	cacheKey := buildPlayCacheKey("uc", tvUser, flag, id, want, toPdirPath, toPdirFid)
+	if u, header, ok := getPlayCache(cacheKey); ok {
+		resp := map[string]any{"ok": true, "parse": 0, "url": u}
+		if len(header) > 0 {
+			resp["header"] = header
+		}
+		writeJSON(w, 200, resp)
+		return
+	}
+
+	u, header, err := ucPlayImpl(database, flag, id, want, tvUser, toPdirPath, toPdirFid)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": err.Error()})
 		return
@@ -1900,6 +1915,9 @@ func HandleAPIUCPlay(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	resp := map[string]any{"ok": true, "parse": 0, "url": u}
 	if len(header) > 0 {
 		resp["header"] = header
+	}
+	if strings.TrimSpace(u) != "" {
+		setPlayCache(cacheKey, u, header)
 	}
 	writeJSON(w, 200, resp)
 }
