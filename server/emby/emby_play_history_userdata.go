@@ -1,6 +1,7 @@
 package emby
 
 import (
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,13 +14,43 @@ type embyPlayHistorySnapshot struct {
 	Updated int64
 }
 
+func embyQueryPlayHistoryByVideoID(database *db.DB, userID string, videoID string) (embyPlayHistorySnapshot, bool) {
+	if database == nil {
+		return embyPlayHistorySnapshot{}, false
+	}
+	uidRaw := strings.TrimSpace(userID)
+	uid, _ := strconv.ParseInt(uidRaw, 10, 64)
+	vid := strings.TrimSpace(videoID)
+	if uid <= 0 || vid == "" {
+		return embyPlayHistorySnapshot{}, false
+	}
+	var (
+		pos     int64
+		runtime int64
+		updated int64
+	)
+	err := database.SQL().QueryRow(
+		`SELECT playback_position_ticks, playback_runtime_ticks, updated_at
+		 FROM play_history
+		 WHERE user_id = ? AND site_key = 'emby' AND video_id = ?
+		 ORDER BY updated_at DESC
+		 LIMIT 1`,
+		uid, vid,
+	).Scan(&pos, &runtime, &updated)
+	if err != nil {
+		return embyPlayHistorySnapshot{}, false
+	}
+	return embyPlayHistorySnapshot{Pos: pos, Runtime: runtime, Updated: updated}, true
+}
+
 func embyQueryPlayHistoryByItemIDs(database *db.DB, userID string, itemIDs []string) map[string]embyPlayHistorySnapshot {
 	out := map[string]embyPlayHistorySnapshot{}
 	if database == nil {
 		return out
 	}
-	uid := strings.TrimSpace(userID)
-	if uid == "" || len(itemIDs) == 0 {
+	uidRaw := strings.TrimSpace(userID)
+	uid, _ := strconv.ParseInt(uidRaw, 10, 64)
+	if uid <= 0 || len(itemIDs) == 0 {
 		return out
 	}
 	uniq := make([]string, 0, len(itemIDs))
