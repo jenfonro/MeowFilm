@@ -520,7 +520,11 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		if _, ok := obj["UserData"]; !ok {
 			obj["UserData"] = map[string]any{"Played": false}
 		}
-		if hit := embyQueryPlayHistoryByItemIDs(database, u.ID, []string{itemID}); len(hit) > 0 {
+		if parsed, ok := embyParseItemID(itemID); ok && parsed != nil && parsed.Kind == "tv" && parsed.SubKind == "series" {
+			if snap, ok := embyQueryPlayHistoryByVideoID(database, u.ID, itemID); ok {
+				embyApplyPlayHistoryToItemUserData(u.ID, itemID, obj, snap)
+			}
+		} else if hit := embyQueryPlayHistoryByItemIDs(database, u.ID, []string{itemID}); len(hit) > 0 {
 			if snap, ok := hit[itemID]; ok {
 				embyApplyPlayHistoryToItemUserData(u.ID, itemID, obj, snap)
 			}

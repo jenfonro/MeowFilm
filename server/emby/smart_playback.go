@@ -1631,9 +1631,9 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 			case "139":
 				{
 					downloadURL, playURL, err := netdisk.Yun139Play(database, strings.TrimSpace(base.PanLabel), strings.TrimSpace(base.Ep.URL))
-					u := strings.TrimSpace(playURL)
+					u := strings.TrimSpace(downloadURL)
 					if u == "" {
-						u = strings.TrimSpace(downloadURL)
+						u = strings.TrimSpace(playURL)
 					}
 					if err == nil && u != "" {
 						return &smartPickResult{Cand: base, PlayURL: u, Headers: map[string]string{}}
@@ -1648,9 +1648,9 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 					return nil
 				}
 				downloadURL, playURL, err := netdisk.Yun139Play(database, strings.TrimSpace(base.PanLabel), picked.Ep.URL)
-				u := strings.TrimSpace(playURL)
+				u := strings.TrimSpace(downloadURL)
 				if u == "" {
-					u = strings.TrimSpace(downloadURL)
+					u = strings.TrimSpace(playURL)
 				}
 				if err != nil || u == "" {
 					return nil
