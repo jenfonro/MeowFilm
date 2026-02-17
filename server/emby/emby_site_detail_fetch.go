@@ -85,6 +85,12 @@ func embyLoadSiteDetailPans(database *db.DB, u *embyUser, seriesID string) ([]ca
 			if epID == "" {
 				continue
 			}
+			epName := strings.TrimSpace(ep.Name)
+			if smartPanMockProviderID(strings.TrimSpace(ep.Flag)) != "" {
+				if rawNames := smartExtractRawNamesFromEpisodeURL(epURL); len(rawNames) > 0 && strings.TrimSpace(rawNames[0]) != "" {
+					epName = strings.TrimSpace(rawNames[0])
+				}
+			}
 			embySiteEpisodeMapPut(epID, embySiteEpisodeMapEntry{
 				SeriesID:       sid,
 				SeasonID:       seasonID,
@@ -94,7 +100,7 @@ func embyLoadSiteDetailPans(database *db.DB, u *embyUser, seriesID string) ([]ca
 				VideoID:        videoID,
 				SeasonNo:       seasonNo,
 				EpisodeIndex:   j + 1,
-				EpisodeName:    strings.TrimSpace(ep.Name),
+				EpisodeName:    epName,
 				EpisodeURL:     epURL,
 				EpisodePlayFlg: strings.TrimSpace(ep.Flag),
 				Pic:            pic,
