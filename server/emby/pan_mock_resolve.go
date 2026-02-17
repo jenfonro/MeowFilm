@@ -194,18 +194,18 @@ func embyResolvePanMockDetailPans(database *db.DB, pans []catpawopen.Pan) ([]cat
 				for k := range eps {
 					eps[k].Flag = label
 				}
-					mu.Lock()
-					out[i].Episodes = eps
-					if strings.TrimSpace(shareID) != "" && strings.TrimSpace(ac) != "" {
-						sid := strings.TrimSpace(shareID)
-						acc := strings.TrimSpace(ac)
-						accessByShareID[sid] = acc
-						embyPanMock189AccessPut(sid, acc)
-					}
-					mu.Unlock()
-				case "quark":
-					pass := embyExtractMockPasscodeFromEpisodeURL(firstURL)
-					vod, _, err := netdisk.QuarkList(database, label, pass)
+				mu.Lock()
+				out[i].Episodes = eps
+				if strings.TrimSpace(shareID) != "" && strings.TrimSpace(ac) != "" {
+					sid := strings.TrimSpace(shareID)
+					acc := strings.TrimSpace(ac)
+					accessByShareID[sid] = acc
+					embyPanMock189AccessPut(sid, acc)
+				}
+				mu.Unlock()
+			case "quark":
+				pass := embyExtractMockPasscodeFromEpisodeURL(firstURL)
+				vod, _, err := netdisk.QuarkList(database, label, pass)
 				if err != nil || strings.TrimSpace(vod) == "" {
 					return
 				}

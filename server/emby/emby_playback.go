@@ -26,161 +26,161 @@ func handleEmbyPlaybackInfo(w http.ResponseWriter, r *http.Request, database *db
 		embyDebugPrintf("[emby][playback] start item=%s user=%s", embyID, strings.TrimSpace(u.Username))
 	}
 	parsed, ok := embyParseItemID(embyID)
-		if !ok || parsed == nil {
-			// Stateless site episodes: resolve via MeowFilm netdisk play (pan_mock) or CatPawOpen play API.
-			if ep, ok := embyDecodeSiteEpisodeID(embyID); ok {
-				tvUser := ""
-				if u != nil {
-					tvUser = u.Username
-				}
-				urlPicked := ""
-				headers := map[string]string{}
-				if pid := smartPanMockProviderID(strings.TrimSpace(ep.Flag)); pid != "" {
-					switch pid {
-					case "tianyi":
-						ac := ""
-						parts := strings.Split(strings.TrimSpace(ep.URL), "*")
-						if len(parts) >= 2 {
-							if v, ok := embyPanMock189AccessGet(strings.TrimSpace(parts[1])); ok {
-								ac = v
-							}
+	if !ok || parsed == nil {
+		// Stateless site episodes: resolve via MeowFilm netdisk play (pan_mock) or CatPawOpen play API.
+		if ep, ok := embyDecodeSiteEpisodeID(embyID); ok {
+			tvUser := ""
+			if u != nil {
+				tvUser = u.Username
+			}
+			urlPicked := ""
+			headers := map[string]string{}
+			if pid := smartPanMockProviderID(strings.TrimSpace(ep.Flag)); pid != "" {
+				switch pid {
+				case "tianyi":
+					ac := ""
+					parts := strings.Split(strings.TrimSpace(ep.URL), "*")
+					if len(parts) >= 2 {
+						if v, ok := embyPanMock189AccessGet(strings.TrimSpace(parts[1])); ok {
+							ac = v
 						}
-						u2, _, _, _, err := netdisk.Tianyi189Play(database, strings.TrimSpace(ep.URL), strings.TrimSpace(ac))
-						if err != nil {
-							if embyDebugLogEnabled() {
-								embyDebugPrintf("[emby][playback] fail item=%s pid=%s err=%q cost=%s", embyID, pid, err.Error(), time.Since(startAt).String())
-							}
-							embyBadGateway(w, err)
-							return
-						}
-						urlPicked = strings.TrimSpace(u2)
-					case "quark":
-						u2, header, err := netdisk.QuarkPlay(database, strings.TrimSpace(ep.URL), "")
-						if err != nil {
-							if embyDebugLogEnabled() {
-								embyDebugPrintf("[emby][playback] fail item=%s pid=%s err=%q cost=%s", embyID, pid, err.Error(), time.Since(startAt).String())
-							}
-							embyBadGateway(w, err)
-							return
-						}
-						urlPicked = strings.TrimSpace(u2)
-						if header != nil {
-							for k, v := range header {
-								kk := strings.TrimSpace(k)
-								sv := strings.TrimSpace(v)
-								if kk != "" && sv != "" {
-									headers[kk] = sv
-								}
-							}
-						}
-					case "uc":
-						u2, header, err := netdisk.UCPlay(database, strings.TrimSpace(ep.URL), "")
-						if err != nil {
-							if embyDebugLogEnabled() {
-								embyDebugPrintf("[emby][playback] fail item=%s pid=%s err=%q cost=%s", embyID, pid, err.Error(), time.Since(startAt).String())
-							}
-							embyBadGateway(w, err)
-							return
-						}
-						urlPicked = strings.TrimSpace(u2)
-						if header != nil {
-							for k, v := range header {
-								kk := strings.TrimSpace(k)
-								sv := strings.TrimSpace(v)
-								if kk != "" && sv != "" {
-									headers[kk] = sv
-								}
-							}
-						}
-					case "139":
-						downloadURL, playURL, err := netdisk.Yun139Play(database, strings.TrimSpace(ep.Flag), strings.TrimSpace(ep.URL))
-						u2 := strings.TrimSpace(playURL)
-						if u2 == "" {
-							u2 = strings.TrimSpace(downloadURL)
-						}
-						if err != nil {
-							if embyDebugLogEnabled() {
-								embyDebugPrintf("[emby][playback] fail item=%s pid=%s err=%q cost=%s", embyID, pid, err.Error(), time.Since(startAt).String())
-							}
-							embyBadGateway(w, err)
-							return
-						}
-						urlPicked = strings.TrimSpace(u2)
-					case "baidu":
-						u2, header, err := netdisk.BaiduPlay(database, strings.TrimSpace(ep.Flag), strings.TrimSpace(ep.URL), "/MeowFilm")
-						if err != nil {
-							if embyDebugLogEnabled() {
-								embyDebugPrintf("[emby][playback] fail item=%s pid=%s err=%q cost=%s", embyID, pid, err.Error(), time.Since(startAt).String())
-							}
-							embyBadGateway(w, err)
-							return
-						}
-						urlPicked = strings.TrimSpace(u2)
-						if header != nil {
-							for k, v := range header {
-								kk := strings.TrimSpace(k)
-								sv := strings.TrimSpace(v)
-								if kk != "" && sv != "" {
-									headers[kk] = sv
-								}
-							}
-						}
-					default:
-						embyNotFound(w)
-						return
 					}
-				} else {
-					apiBase := strings.TrimSpace(embyResolveCatApiBaseForUser(database, u))
-					if apiBase == "" {
-						embyWriteError(w, 502, "CatPawOpen 接口地址未设置")
-						return
-					}
-					playPayload := map[string]any{
-						"flag":    strings.TrimSpace(ep.Flag),
-						"id":      strings.TrimSpace(ep.URL),
-						"siteApi": strings.TrimSpace(ep.SiteAPI),
-					}
-					if siteID := catpawopen.ExtractSiteIDFromSpiderAPI(ep.SiteAPI); siteID != "" {
-						playPayload["siteId"] = siteID
-					}
-					playRaw, err := catpawopen.RequestPlay(apiBase, tvUser, playPayload)
+					u2, _, _, _, err := netdisk.Tianyi189Play(database, strings.TrimSpace(ep.URL), strings.TrimSpace(ac))
 					if err != nil {
 						if embyDebugLogEnabled() {
-							embyDebugPrintf("[emby][playback] fail item=%s err=%q cost=%s", embyID, err.Error(), time.Since(startAt).String())
+							embyDebugPrintf("[emby][playback] fail item=%s pid=%s err=%q cost=%s", embyID, pid, err.Error(), time.Since(startAt).String())
 						}
 						embyBadGateway(w, err)
 						return
 					}
-					urlPicked = strings.TrimSpace(catpawopen.PickFirstPlayableURL(playRaw))
-					if urlPicked == "" {
-						embyWriteError(w, 502, "站点未返回可播放地址")
+					urlPicked = strings.TrimSpace(u2)
+				case "quark":
+					u2, header, err := netdisk.QuarkPlay(database, strings.TrimSpace(ep.URL), "")
+					if err != nil {
+						if embyDebugLogEnabled() {
+							embyDebugPrintf("[emby][playback] fail item=%s pid=%s err=%q cost=%s", embyID, pid, err.Error(), time.Since(startAt).String())
+						}
+						embyBadGateway(w, err)
 						return
 					}
-					urlPicked = catpawopen.RewriteProxyURLToBase(urlPicked, apiBase, tvUser)
-					if h, ok := playRaw["header"].(map[string]any); ok {
-						for k, v := range h {
+					urlPicked = strings.TrimSpace(u2)
+					if header != nil {
+						for k, v := range header {
 							kk := strings.TrimSpace(k)
-							if kk == "" {
-								continue
+							sv := strings.TrimSpace(v)
+							if kk != "" && sv != "" {
+								headers[kk] = sv
 							}
-							sv := strings.TrimSpace(embyAnyToString(v))
-							if sv == "" {
-								continue
-							}
-							headers[kk] = sv
 						}
 					}
+				case "uc":
+					u2, header, err := netdisk.UCPlay(database, strings.TrimSpace(ep.URL), "")
+					if err != nil {
+						if embyDebugLogEnabled() {
+							embyDebugPrintf("[emby][playback] fail item=%s pid=%s err=%q cost=%s", embyID, pid, err.Error(), time.Since(startAt).String())
+						}
+						embyBadGateway(w, err)
+						return
+					}
+					urlPicked = strings.TrimSpace(u2)
+					if header != nil {
+						for k, v := range header {
+							kk := strings.TrimSpace(k)
+							sv := strings.TrimSpace(v)
+							if kk != "" && sv != "" {
+								headers[kk] = sv
+							}
+						}
+					}
+				case "139":
+					downloadURL, playURL, err := netdisk.Yun139Play(database, strings.TrimSpace(ep.Flag), strings.TrimSpace(ep.URL))
+					u2 := strings.TrimSpace(playURL)
+					if u2 == "" {
+						u2 = strings.TrimSpace(downloadURL)
+					}
+					if err != nil {
+						if embyDebugLogEnabled() {
+							embyDebugPrintf("[emby][playback] fail item=%s pid=%s err=%q cost=%s", embyID, pid, err.Error(), time.Since(startAt).String())
+						}
+						embyBadGateway(w, err)
+						return
+					}
+					urlPicked = strings.TrimSpace(u2)
+				case "baidu":
+					u2, header, err := netdisk.BaiduPlay(database, strings.TrimSpace(ep.Flag), strings.TrimSpace(ep.URL), "/MeowFilm")
+					if err != nil {
+						if embyDebugLogEnabled() {
+							embyDebugPrintf("[emby][playback] fail item=%s pid=%s err=%q cost=%s", embyID, pid, err.Error(), time.Since(startAt).String())
+						}
+						embyBadGateway(w, err)
+						return
+					}
+					urlPicked = strings.TrimSpace(u2)
+					if header != nil {
+						for k, v := range header {
+							kk := strings.TrimSpace(k)
+							sv := strings.TrimSpace(v)
+							if kk != "" && sv != "" {
+								headers[kk] = sv
+							}
+						}
+					}
+				default:
+					embyNotFound(w)
+					return
 				}
-				if strings.TrimSpace(urlPicked) == "" {
+			} else {
+				apiBase := strings.TrimSpace(embyResolveCatApiBaseForUser(database, u))
+				if apiBase == "" {
+					embyWriteError(w, 502, "CatPawOpen 接口地址未设置")
+					return
+				}
+				playPayload := map[string]any{
+					"flag":    strings.TrimSpace(ep.Flag),
+					"id":      strings.TrimSpace(ep.URL),
+					"siteApi": strings.TrimSpace(ep.SiteAPI),
+				}
+				if siteID := catpawopen.ExtractSiteIDFromSpiderAPI(ep.SiteAPI); siteID != "" {
+					playPayload["siteId"] = siteID
+				}
+				playRaw, err := catpawopen.RequestPlay(apiBase, tvUser, playPayload)
+				if err != nil {
+					if embyDebugLogEnabled() {
+						embyDebugPrintf("[emby][playback] fail item=%s err=%q cost=%s", embyID, err.Error(), time.Since(startAt).String())
+					}
+					embyBadGateway(w, err)
+					return
+				}
+				urlPicked = strings.TrimSpace(catpawopen.PickFirstPlayableURL(playRaw))
+				if urlPicked == "" {
 					embyWriteError(w, 502, "站点未返回可播放地址")
 					return
 				}
-
-				container, containerList := embyDetectContainerFromURL(urlPicked)
-				if embyDebugLogEnabled() {
-					embyDebugPrintf("[emby][playback] ok item=%s user=%s url=%q container=%s cost=%s", embyID, tvUser, urlPicked, container, time.Since(startAt).String())
+				urlPicked = catpawopen.RewriteProxyURLToBase(urlPicked, apiBase, tvUser)
+				if h, ok := playRaw["header"].(map[string]any); ok {
+					for k, v := range h {
+						kk := strings.TrimSpace(k)
+						if kk == "" {
+							continue
+						}
+						sv := strings.TrimSpace(embyAnyToString(v))
+						if sv == "" {
+							continue
+						}
+						headers[kk] = sv
+					}
 				}
-				if len(headers) != 0 {
+			}
+			if strings.TrimSpace(urlPicked) == "" {
+				embyWriteError(w, 502, "站点未返回可播放地址")
+				return
+			}
+
+			container, containerList := embyDetectContainerFromURL(urlPicked)
+			if embyDebugLogEnabled() {
+				embyDebugPrintf("[emby][playback] ok item=%s user=%s url=%q container=%s cost=%s", embyID, tvUser, urlPicked, container, time.Since(startAt).String())
+			}
+			if len(headers) != 0 {
 				embyWriteError(w, 501, "该源需要自定义请求头，暂不支持")
 				return
 			}
