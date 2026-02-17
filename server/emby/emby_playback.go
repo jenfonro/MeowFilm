@@ -94,9 +94,9 @@ func handleEmbyPlaybackInfo(w http.ResponseWriter, r *http.Request, database *db
 					}
 				case "139":
 					downloadURL, playURL, err := netdisk.Yun139Play(database, strings.TrimSpace(ep.Flag), strings.TrimSpace(ep.URL))
-					u2 := strings.TrimSpace(playURL)
+					u2 := strings.TrimSpace(downloadURL)
 					if u2 == "" {
-						u2 = strings.TrimSpace(downloadURL)
+						u2 = strings.TrimSpace(playURL)
 					}
 					if err != nil {
 						if embyDebugLogEnabled() {
