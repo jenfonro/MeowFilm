@@ -39,6 +39,9 @@ func embyLoadSiteDetailPans(database *db.DB, u *embyUser, seriesID string) ([]ca
 	if pans == nil {
 		pans = []catpawopen.Pan{}
 	}
+	if embyIsPanMockEnabled(detailRaw) {
+		pans, _ = embyResolvePanMockDetailPans(database, pans)
+	}
 
 	ttl := 30 * time.Minute
 	embySiteDetailCachePut(sid, pans, ttl)

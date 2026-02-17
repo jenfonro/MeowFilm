@@ -205,6 +205,16 @@ func smartExtractRawNamesFromEpisodeURL(episodeURL string) []string {
 	}
 	suffix := pickSuffix()
 	if strings.TrimSpace(suffix) == "" {
+		// Fallback for ids that embed filename as the last "*" segment (e.g. Tianyi: "<fileId>*<shareId>*<name>").
+		if strings.Contains(raw, "*") {
+			parts := strings.Split(raw, "*")
+			if len(parts) > 0 {
+				last := stripMeta(parts[len(parts)-1])
+				if last != "" {
+					return []string{last}
+				}
+			}
+		}
 		return nil
 	}
 	parts := strings.Split(suffix, "#")
@@ -333,19 +343,20 @@ func smartPanMockProviderID(panLabel string) string {
 	if s == "" {
 		return ""
 	}
-	if strings.Contains(s, "天意") {
+	lower := strings.ToLower(s)
+	if strings.Contains(s, "天意") || strings.Contains(s, "天翼") || strings.Contains(s, "189") || strings.Contains(lower, "tianyi") {
 		return "tianyi"
 	}
-	if strings.Contains(s, "逸动") {
+	if strings.Contains(s, "逸动") || strings.Contains(s, "和彩云") || strings.Contains(s, "139") || strings.Contains(lower, "yidong") {
 		return "139"
 	}
-	if strings.Contains(s, "夸父") {
+	if strings.Contains(s, "夸父") || strings.Contains(s, "夸克") || strings.Contains(lower, "quark") {
 		return "quark"
 	}
-	if strings.Contains(s, "优夕") {
+	if strings.Contains(s, "优夕") || strings.Contains(lower, "uc") {
 		return "uc"
 	}
-	if strings.Contains(s, "百度") {
+	if strings.Contains(s, "百度") || strings.Contains(lower, "baidu") {
 		return "baidu"
 	}
 	return ""
@@ -360,6 +371,10 @@ func smartExtractMockPasscodeFromCandidate(c smartCandidate) string {
 	if raw == "" {
 		return ""
 	}
+	if !strings.HasSuffix(strings.ToLower(raw), ".mp4") {
+		// Only placeholder filenames encode passcodes as "<pass>.mp4".
+		return ""
+	}
 	out := raw
 	if strings.HasSuffix(strings.ToLower(out), ".mp4") {
 		out = strings.TrimSpace(out[:len(out)-4])
@@ -371,15 +386,9 @@ func smartExtractMockPasscodeFromCandidate(c smartCandidate) string {
 }
 
 func smartExtractTianyiMockMetaFromCandidate(c smartCandidate) (shareCode string, accessCode string) {
-	url := strings.TrimSpace(c.Ep.URL)
-	if url != "" {
-		parts := strings.Split(url, "*")
-		if len(parts) >= 3 {
-			p3 := strings.TrimSpace(parts[2])
-			if p3 != "" && !strings.Contains(p3, ".") && regexp.MustCompile(`^[A-Za-z0-9]{6,64}$`).MatchString(p3) {
-				shareCode = p3
-			}
-		}
+	label := strings.TrimSpace(c.PanLabel)
+	if m := regexp.MustCompile(`(?:天意|天翼)-([A-Za-z0-9]{6,64})`).FindStringSubmatch(label); len(m) == 2 {
+		shareCode = strings.TrimSpace(m[1])
 	}
 	pass := strings.TrimSpace(smartExtractMockPasscodeFromCandidate(c))
 	if pass == "" {
@@ -808,6 +817,7 @@ type smartDetailCacheEntry struct {
 	Source          smartSource
 	Pans            []catpawopen.Pan
 	PanMockEnabled  bool
+	PanMock189AccessByShareID map[string]string
 	EpisodeMap      map[int][]smartCandidate
 	EpisodeMapLoose map[int][]smartCandidate
 }
@@ -1156,6 +1166,7 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 			Pans:            []catpawopen.Pan{},
 			EpisodeMap:      map[int][]smartCandidate{},
 			EpisodeMapLoose: map[int][]smartCandidate{},
+			PanMock189AccessByShareID: map[string]string{},
 		}
 
 		detailRaw, err := catpawopen.RequestSpider(apiBase, src.SpiderAPI, "detail", map[string]any{"id": src.VideoID})
@@ -1187,6 +1198,13 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 		}
 		playFrom, playURL := catpawopen.ExtractDetailPlayFromURL(detailRaw)
 		pans := catpawopen.ParsePlaySources(playFrom, playURL)
+		if entry.PanMockEnabled && pans != nil {
+			resolved, accessMap := embyResolvePanMockDetailPans(database, pans)
+			pans = resolved
+			if len(accessMap) > 0 {
+				entry.PanMock189AccessByShareID = accessMap
+			}
+		}
 		entry.Pans = pans
 
 		srcRemarkLower := strings.ToLower(strings.TrimSpace(src.VideoRemark))
@@ -1416,10 +1434,6 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 				}
 				continue
 			}
-			if pid == "baidu" {
-				// Baidu play is not implemented in MeowFilm netdisk yet; treat it as fallback.
-				allowed = false
-			}
 
 			shareKey := strings.TrimSpace(c.PanLabel)
 			metaA := ""
@@ -1504,43 +1518,75 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 			return smartPickBestMatchIgnorePanOrder(matches, tmdbHasMultiSeason, preferSeasonNo, settings)
 		}
 
-		tryGroup := func(at groupAttempt) *smartPickResult {
-			base := at.Base
-			switch at.Provider {
-			case "tianyi":
-				sc := strings.TrimSpace(at.MetaA)
-				ac := strings.TrimSpace(at.MetaB)
-				if sc == "" {
-					sc2, ac2 := smartExtractTianyiMockMetaFromCandidate(base)
+			tryGroup := func(at groupAttempt) *smartPickResult {
+				base := at.Base
+				switch at.Provider {
+				case "tianyi":
+					sc := strings.TrimSpace(at.MetaA)
+					ac := strings.TrimSpace(at.MetaB)
 					if sc == "" {
-						sc = sc2
+						sc2, ac2 := smartExtractTianyiMockMetaFromCandidate(base)
+						sc = strings.TrimSpace(sc2)
+						if ac == "" {
+							ac = strings.TrimSpace(ac2)
+						}
 					}
-					if ac == "" {
-						ac = ac2
+					if strings.TrimSpace(ac) == "" && cache != nil && len(cache.PanMock189AccessByShareID) > 0 {
+						parts := strings.Split(strings.TrimSpace(base.Ep.URL), "*")
+						if len(parts) >= 2 {
+							shareID := strings.TrimSpace(parts[1])
+							if shareID != "" {
+								if v, ok := cache.PanMock189AccessByShareID[shareID]; ok {
+									ac = strings.TrimSpace(v)
+								}
+							}
+						}
 					}
-				}
-				if sc == "" {
-					return nil
-				}
-				flag := "天意-" + sc
-				vod, _, _, err := netdisk.Tianyi189List(database, flag, ac)
-				if err != nil {
+					if u, _, _, _, err := netdisk.Tianyi189Play(database, strings.TrimSpace(base.Ep.URL), ac); err == nil && strings.TrimSpace(u) != "" {
+						return &smartPickResult{Cand: base, PlayURL: strings.TrimSpace(u), Headers: map[string]string{}}
+					}
+					if sc == "" {
+						return nil
+					}
+					flag := "天意-" + sc
+					vod, _, _, err := netdisk.Tianyi189List(database, flag, ac)
+					if err != nil {
 					return nil
 				}
 				picked := resolveFromVod(base, vod)
-				if picked == nil || strings.TrimSpace(picked.Ep.URL) == "" {
-					return nil
+					if picked == nil || strings.TrimSpace(picked.Ep.URL) == "" {
+						return nil
+					}
+					if strings.TrimSpace(ac) == "" && cache != nil && len(cache.PanMock189AccessByShareID) > 0 {
+					parts := strings.Split(strings.TrimSpace(picked.Ep.URL), "*")
+					if len(parts) >= 2 {
+						shareID := strings.TrimSpace(parts[1])
+						if shareID != "" {
+							if v, ok := cache.PanMock189AccessByShareID[shareID]; ok {
+								ac = strings.TrimSpace(v)
+							}
+						}
+					}
 				}
-				u, _, _, _, err := netdisk.Tianyi189Play(database, picked.Ep.URL, ac)
-				if err != nil || strings.TrimSpace(u) == "" {
-					return nil
-				}
-				return &smartPickResult{Cand: *picked, PlayURL: u, Headers: map[string]string{}}
-			case "quark":
-				vod, _, err := netdisk.QuarkList(database, strings.TrimSpace(base.PanLabel), strings.TrimSpace(at.MetaA))
-				if err != nil {
-					return nil
-				}
+					u, _, _, _, err := netdisk.Tianyi189Play(database, picked.Ep.URL, ac)
+					if err != nil || strings.TrimSpace(u) == "" {
+						return nil
+					}
+					return &smartPickResult{Cand: *picked, PlayURL: u, Headers: map[string]string{}}
+				case "quark":
+					if strings.TrimSpace(at.MetaA) == "" {
+						u, header, err := netdisk.QuarkPlay(database, strings.TrimSpace(base.Ep.URL), "")
+						if err == nil && strings.TrimSpace(u) != "" {
+							if header == nil {
+								header = map[string]string{}
+							}
+							return &smartPickResult{Cand: base, PlayURL: strings.TrimSpace(u), Headers: header}
+						}
+					}
+					vod, _, err := netdisk.QuarkList(database, strings.TrimSpace(base.PanLabel), strings.TrimSpace(at.MetaA))
+					if err != nil {
+						return nil
+					}
 				picked := resolveFromVod(base, vod)
 				if picked == nil || strings.TrimSpace(picked.Ep.URL) == "" {
 					return nil
@@ -1552,12 +1598,21 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 				if header == nil {
 					header = map[string]string{}
 				}
-				return &smartPickResult{Cand: *picked, PlayURL: u, Headers: header}
-			case "uc":
-				vod, _, err := netdisk.UCList(database, strings.TrimSpace(base.PanLabel), strings.TrimSpace(at.MetaA))
-				if err != nil {
-					return nil
-				}
+					return &smartPickResult{Cand: *picked, PlayURL: u, Headers: header}
+				case "uc":
+					if strings.TrimSpace(at.MetaA) == "" {
+						u, header, err := netdisk.UCPlay(database, strings.TrimSpace(base.Ep.URL), "")
+						if err == nil && strings.TrimSpace(u) != "" {
+							if header == nil {
+								header = map[string]string{}
+							}
+							return &smartPickResult{Cand: base, PlayURL: strings.TrimSpace(u), Headers: header}
+						}
+					}
+					vod, _, err := netdisk.UCList(database, strings.TrimSpace(base.PanLabel), strings.TrimSpace(at.MetaA))
+					if err != nil {
+						return nil
+					}
 				picked := resolveFromVod(base, vod)
 				if picked == nil || strings.TrimSpace(picked.Ep.URL) == "" {
 					return nil
@@ -1569,12 +1624,22 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 				if header == nil {
 					header = map[string]string{}
 				}
-				return &smartPickResult{Cand: *picked, PlayURL: u, Headers: header}
-			case "139":
-				vod, _, err := netdisk.Yun139List(database, strings.TrimSpace(base.PanLabel))
-				if err != nil {
-					return nil
-				}
+					return &smartPickResult{Cand: *picked, PlayURL: u, Headers: header}
+				case "139":
+					{
+						downloadURL, playURL, err := netdisk.Yun139Play(database, strings.TrimSpace(base.PanLabel), strings.TrimSpace(base.Ep.URL))
+						u := strings.TrimSpace(playURL)
+						if u == "" {
+							u = strings.TrimSpace(downloadURL)
+						}
+						if err == nil && u != "" {
+							return &smartPickResult{Cand: base, PlayURL: u, Headers: map[string]string{}}
+						}
+					}
+					vod, _, err := netdisk.Yun139List(database, strings.TrimSpace(base.PanLabel))
+					if err != nil {
+						return nil
+					}
 				picked := resolveFromVod(base, vod)
 				if picked == nil || strings.TrimSpace(picked.Ep.URL) == "" {
 					return nil
@@ -1586,12 +1651,34 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 				}
 				if err != nil || u == "" {
 					return nil
+					}
+					return &smartPickResult{Cand: *picked, PlayURL: u, Headers: map[string]string{}}
+				case "baidu":
+					if strings.TrimSpace(at.MetaA) == "" {
+						u, header, err := netdisk.BaiduPlay(database, strings.TrimSpace(base.PanLabel), strings.TrimSpace(base.Ep.URL), "/MeowFilm")
+						if err == nil && strings.TrimSpace(u) != "" {
+							if header == nil {
+								header = map[string]string{}
+							}
+							return &smartPickResult{Cand: base, PlayURL: strings.TrimSpace(u), Headers: header}
+						}
+					}
+					vod, _, err := netdisk.BaiduList(database, strings.TrimSpace(base.PanLabel), strings.TrimSpace(at.MetaA))
+					if err != nil {
+						return nil
+					}
+				picked := resolveFromVod(base, vod)
+				if picked == nil || strings.TrimSpace(picked.Ep.URL) == "" {
+					return nil
 				}
-				return &smartPickResult{Cand: *picked, PlayURL: u, Headers: map[string]string{}}
-			case "baidu":
-				// Baidu play is not implemented in MeowFilm netdisk yet.
-				_, _, _ = netdisk.BaiduList(database, strings.TrimSpace(base.PanLabel), strings.TrimSpace(at.MetaA))
-				return nil
+				u, header, err := netdisk.BaiduPlay(database, strings.TrimSpace(base.PanLabel), picked.Ep.URL, "/MeowFilm")
+				if err != nil || strings.TrimSpace(u) == "" {
+					return nil
+				}
+				if header == nil {
+					header = map[string]string{}
+				}
+				return &smartPickResult{Cand: *picked, PlayURL: strings.TrimSpace(u), Headers: header}
 			default:
 				return nil
 			}
