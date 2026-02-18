@@ -230,7 +230,8 @@ func embyResolvePanMockDetailPans(database *db.DB, pans []catpawopen.Pan) ([]cat
 				out[i].Episodes = eps
 				mu.Unlock()
 			case "139":
-				vod, _, err := netdisk.Yun139List(database, label)
+				pass := embyExtractMockPasscodeFromEpisodeURL(firstURL)
+				vod, _, err := netdisk.Yun139List(database, label, pass)
 				if err != nil || strings.TrimSpace(vod) == "" {
 					return
 				}
