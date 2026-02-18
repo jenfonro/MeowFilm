@@ -850,6 +850,8 @@ func tianyiListShareDir(shareID string, fileID string, shareMode string, pageNum
 }
 
 func tianyiGetFileDownloadURL(shareID string, fileID string, dt string, accessCode string, cookie string) (tianyiGetDownloadURLResp, error) {
+	// NOTE: This legacy API may fail for large files (FileTooLarge) depending on dt/provider.
+	// Keep the implementation for reference / future use, but current MeowFilm play flow prefers VLC portal API.
 	dt0 := strings.TrimSpace(dt)
 	candidates := []string{dt0}
 	if dt0 == "" {
@@ -1422,50 +1424,25 @@ func tianyi189PlayWithDT(database *db.DB, id string, accessCode string, dt strin
 	if err != nil {
 		return "", "", "", "", err
 	}
-	out, err := tianyiGetFileDownloadURL(shareID, fileID, dt, accessCode, cookie)
+	// Prefer VLC portal API for play. This requires cookie and supports dt fallback (1 -> 3).
+	vlc, err := tianyiGetNewVlcVideoPlayURL(shareID, fileID, dt, cookie)
 	if err != nil {
-		if tianyiIsSessionExpiredError(err) {
-			cookie2, _, err2 := ensure189Cookie(database, true)
-			if err2 != nil || strings.TrimSpace(cookie2) == "" {
-				return "", "", "", "", err
-			}
-			out2, err3 := tianyiGetFileDownloadURL(shareID, fileID, dt, accessCode, cookie2)
-			if err3 != nil {
-				return "", "", "", "", err
-			}
-			out = out2
-			cookie = cookie2
-		} else if tianyiIsFileTooLargeError(err) {
-			// Fall back for large files: portal VLC play url (requires cookie).
-			vlc, err2 := tianyiGetNewVlcVideoPlayURL(shareID, fileID, dt, cookie)
-			if err2 != nil {
-				return "", "", "", "", err2
-			}
-			u := pickTianyiVlcPlayURL(vlc)
-			if strings.TrimSpace(u) == "" {
-				return "", "", "", "", errors.New("tianyi vlc play url not found: upstream missing fileDownloadUrl")
-			}
-			finalURL, err = resolveFinalRedirectURL(u, 8)
-			if err != nil {
-				return "", "", "", "", err
-			}
-			return finalURL, shareID, fileID, fileName, nil
-		} else {
+		if !tianyiIsSessionExpiredError(err) {
 			return "", "", "", "", err
 		}
+		cookie2, _, err2 := ensure189Cookie(database, true)
+		if err2 != nil || strings.TrimSpace(cookie2) == "" {
+			return "", "", "", "", err
+		}
+		vlc2, err3 := tianyiGetNewVlcVideoPlayURL(shareID, fileID, dt, cookie2)
+		if err3 != nil {
+			return "", "", "", "", err3
+		}
+		vlc = vlc2
 	}
-
-	u := pickTianyiDownloadURL(out)
+	u := pickTianyiVlcPlayURL(vlc)
 	if strings.TrimSpace(u) == "" {
-		raw, _ := json.Marshal(out.Data)
-		s := strings.TrimSpace(string(raw))
-		if len(s) > 800 {
-			s = s[:800]
-		}
-		if s == "" || s == "null" {
-			return "", "", "", "", errors.New("tianyi download url not found (empty data)")
-		}
-		return "", "", "", "", errors.New("tianyi download url not found: data=" + s)
+		return "", "", "", "", errors.New("tianyi vlc play url not found")
 	}
 	finalURL, err = resolveFinalRedirectURL(u, 8)
 	if err != nil {

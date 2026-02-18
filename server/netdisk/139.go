@@ -28,7 +28,7 @@ const (
 	pan139DeviceInfo  = "||9|12.27.0|chrome|143.0.0.0|pda50460feabd10141fb59a3ba787afb||windows 10|1624X1305|zh-CN|||"
 	// Matches config/0119.js anonymous OutLink list request header.
 	pan139DeviceInfo0119 = "||3|12.27.0|chrome|131.0.0.0|5c7c68368f048245e1ce47f1c0f8f2d0||windows 10|1536X695|zh-CN|||"
-	pan139KeyStr      = "PVGDwmcvfs1uV3d1"
+	pan139KeyStr         = "PVGDwmcvfs1uV3d1"
 )
 
 var pan139SkipDirRe = regexp.MustCompile(`App|活动中心|免费|1T空间|免流`)
@@ -598,16 +598,21 @@ func toFriendlyOutlinkErrorMessage(code string, desc string) string {
 	return c
 }
 
-func getOutLinkInfoV6_0119(linkID string, pCaID string, bNum int, eNum int) (map[string]any, error) {
+func getOutLinkInfoV6_0119(linkID string, pCaID string, bNum int, eNum int, passcode string) (map[string]any, error) {
 	lid := strings.TrimSpace(linkID)
 	pid := strings.TrimSpace(pCaID)
+	pw := strings.TrimSpace(passcode)
 	if bNum <= 0 {
 		bNum = 1
 	}
 	if eNum <= 0 {
 		eNum = 200
 	}
-	key := lid + "-" + pid + "-" + strconv.Itoa(bNum) + "-" + strconv.Itoa(eNum)
+	passSig := ""
+	if pw != "" {
+		passSig = md5HexLower(pw)
+	}
+	key := lid + "-" + pid + "-" + strconv.Itoa(bNum) + "-" + strconv.Itoa(eNum) + "-" + passSig
 	if v, ok := pan139Outlink0119Cache.Load(key); ok {
 		if ent, _ := v.(pan139Outlink0119CacheEntry); !ent.ExpiresAt.IsZero() {
 			if time.Now().Before(ent.ExpiresAt) {
@@ -624,7 +629,7 @@ func getOutLinkInfoV6_0119(linkID string, pCaID string, bNum int, eNum int) (map
 		"getOutLinkInfoReq": map[string]any{
 			"account": "",
 			"linkID":  lid,
-			"passwd":  "",
+			"passwd":  pw,
 			"caSrt":   0,
 			"coSrt":   0,
 			"srtDr":   1,
@@ -641,6 +646,9 @@ func getOutLinkInfoV6_0119(linkID string, pCaID string, bNum int, eNum int) (map
 		return nil, err
 	}
 	if code, desc, ok := pickOutlinkError(parsed); !ok {
+		if strings.TrimSpace(code) == "9188" && strings.TrimSpace(passcode) == "" {
+			return nil, errors.New("该分享需要密码,但是上游未提供")
+		}
 		return nil, errors.New(toFriendlyOutlinkErrorMessage(code, desc))
 	}
 	data, _ := parsed["data"].(map[string]any)
@@ -655,7 +663,7 @@ func getOutLinkInfoV6_0119(linkID string, pCaID string, bNum int, eNum int) (map
 	return data, nil
 }
 
-func getShareFile_0119(linkID string, pCaID string) ([]pan139DirItem, error) {
+func getShareFile_0119(linkID string, pCaID string, passcode string) ([]pan139DirItem, error) {
 	if strings.TrimSpace(pCaID) == "" {
 		return nil, nil
 	}
@@ -663,7 +671,7 @@ func getShareFile_0119(linkID string, pCaID string) ([]pan139DirItem, error) {
 	if strings.HasPrefix(ca, "http") {
 		ca = "root"
 	}
-	o, err := getOutLinkInfoV6_0119(linkID, ca, 1, 200)
+	o, err := getOutLinkInfoV6_0119(linkID, ca, 1, 200, passcode)
 	if err != nil {
 		return nil, err
 	}
@@ -711,7 +719,7 @@ func getShareFile_0119(linkID string, pCaID string) ([]pan139DirItem, error) {
 		path := p
 		go func() {
 			defer wg.Done()
-			ch, _ := getShareFile_0119(linkID, path)
+			ch, _ := getShareFile_0119(linkID, path, passcode)
 			children[i] = ch
 		}()
 	}
@@ -727,8 +735,8 @@ func getShareFile_0119(linkID string, pCaID string) ([]pan139DirItem, error) {
 	return out, nil
 }
 
-func getShareUrl_0119(linkID string, pCaID string) ([]pan139FileItem, error) {
-	t, err := getOutLinkInfoV6_0119(linkID, pCaID, 1, 200)
+func getShareUrl_0119(linkID string, pCaID string, passcode string) ([]pan139FileItem, error) {
+	t, err := getOutLinkInfoV6_0119(linkID, pCaID, 1, 200, passcode)
 	if err != nil {
 		return nil, err
 	}
@@ -786,7 +794,7 @@ func getShareUrl_0119(linkID string, pCaID string) ([]pan139FileItem, error) {
 			path := p
 			go func() {
 				defer wg.Done()
-				ch, _ := getShareUrl_0119(linkID, path)
+				ch, _ := getShareUrl_0119(linkID, path, passcode)
 				children[i] = ch
 			}()
 		}
@@ -878,7 +886,7 @@ type pan139OutlinkPageResult struct {
 	Suspect   bool
 }
 
-func getOutLinkInfoV6AllPages(linkID string, pCaID string, eNum int, maxPages int) (pan139OutlinkPageResult, error) {
+func getOutLinkInfoV6AllPages(linkID string, pCaID string, eNum int, maxPages int, passcode string) (pan139OutlinkPageResult, error) {
 	if eNum <= 0 {
 		eNum = 200
 	}
@@ -893,7 +901,7 @@ func getOutLinkInfoV6AllPages(linkID string, pCaID string, eNum int, maxPages in
 	out := pan139OutlinkPageResult{CA: []pan139DirItem{}, CO: []pan139FileItem{}, Pages: 0}
 	for bn := 1; bn <= maxPages; bn++ {
 		out.Pages = bn
-		data, err := getOutLinkInfoV6_0119(linkID, pCaID, bn, eNum)
+		data, err := getOutLinkInfoV6_0119(linkID, pCaID, bn, eNum, passcode)
 		if err != nil {
 			return pan139OutlinkPageResult{}, err
 		}
@@ -959,7 +967,7 @@ func getOutLinkInfoV6AllPages(linkID string, pCaID string, eNum int, maxPages in
 	return out, nil
 }
 
-func resolveLogicalRoot(linkID string, pCaID string, eNum int, maxPages int) (string, error) {
+func resolveLogicalRoot(linkID string, pCaID string, eNum int, maxPages int, passcode string) (string, error) {
 	cur := strings.TrimSpace(pCaID)
 	if cur == "" {
 		cur = "root"
@@ -968,7 +976,7 @@ func resolveLogicalRoot(linkID string, pCaID string, eNum int, maxPages int) (st
 		return cur, nil
 	}
 	for i := 0; i < 10; i++ {
-		page, err := getOutLinkInfoV6AllPages(linkID, cur, eNum, maxPages)
+		page, err := getOutLinkInfoV6AllPages(linkID, cur, eNum, maxPages, passcode)
 		if err != nil {
 			return "", err
 		}
@@ -987,12 +995,12 @@ func resolveLogicalRoot(linkID string, pCaID string, eNum int, maxPages int) (st
 	return cur, nil
 }
 
-func collectShareFilesRecursive(linkID string, pCaID string, dirParts []string, eNum int, maxPages int) ([]pan139ShareFile, error) {
+func collectShareFilesRecursive(linkID string, pCaID string, dirParts []string, eNum int, maxPages int, passcode string) ([]pan139ShareFile, error) {
 	caID := strings.TrimSpace(pCaID)
 	if caID == "" {
 		caID = "root"
 	}
-	page, err := getOutLinkInfoV6AllPages(linkID, caID, eNum, maxPages)
+	page, err := getOutLinkInfoV6AllPages(linkID, caID, eNum, maxPages, passcode)
 	if err != nil {
 		return nil, err
 	}
@@ -1039,7 +1047,7 @@ func collectShareFilesRecursive(linkID string, pCaID string, dirParts []string, 
 				name = strings.TrimSpace(child.Path)
 			}
 			nextParts := append(append([]string{}, dirParts...), name)
-			files, err := collectShareFilesRecursive(linkID, child.Path, nextParts, eNum, maxPages)
+			files, err := collectShareFilesRecursive(linkID, child.Path, nextParts, eNum, maxPages, passcode)
 			if err != nil {
 				mu.Lock()
 				if firstErr == nil {
@@ -1063,16 +1071,16 @@ func collectShareFilesRecursive(linkID string, pCaID string, dirParts []string, 
 	return out, nil
 }
 
-func Yun139List(_ *db.DB, flag string) (string, string, error) {
+func Yun139List(_ *db.DB, flag string, passcode string) (string, string, error) {
 	linkID := parse139LinkIDFromFlag(flag)
 	if linkID == "" {
 		return "", "", errors.New("missing/invalid flag (expected: 逸动-<linkID>)")
 	}
-	start, err := resolveLogicalRoot(linkID, "root", 200, 50)
+	start, err := resolveLogicalRoot(linkID, "root", 200, 50, passcode)
 	if err != nil {
 		return "", linkID, err
 	}
-	files, err := collectShareFilesRecursive(linkID, start, []string{}, 200, 50)
+	files, err := collectShareFilesRecursive(linkID, start, []string{}, 200, 50, passcode)
 	if err != nil {
 		return "", linkID, err
 	}
@@ -1282,24 +1290,18 @@ func HandleAPI139List(w http.ResponseWriter, r *http.Request, database *db.DB) {
 		return
 	}
 	var body struct {
-		Flag   string `json:"flag"`
-		LinkID string `json:"linkID"`
-		LinkId string `json:"linkId"`
+		Flag     string `json:"flag"`
+		Passcode string `json:"passcode"`
 	}
 	_ = readJSONLoose(r, &body)
 	flag := strings.TrimSpace(body.Flag)
-	linkID := strings.TrimSpace(body.LinkID)
-	if linkID == "" {
-		linkID = strings.TrimSpace(body.LinkId)
-	}
-	if linkID == "" {
-		linkID = parse139LinkIDFromFlag(flag)
-	}
+	passcode := strings.TrimSpace(body.Passcode)
+	linkID := parse139LinkIDFromFlag(flag)
 	if linkID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "missing/invalid flag (expected: 逸动-<linkID>)"})
 		return
 	}
-	vod, _, err := Yun139List(database, "逸动-"+linkID)
+	vod, _, err := Yun139List(database, "逸动-"+linkID, passcode)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": err.Error()})
 		return
