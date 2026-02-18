@@ -27,7 +27,7 @@ import (
 const (
 	tianyiAuthBase = "https://open.e.189.cn"
 	tianyiAPIBase  = "https://cloud.189.cn"
-	tianyiUA       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+	tianyiUA       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
 )
 
 var (
@@ -74,6 +74,12 @@ type tianyiShareInfoResp struct {
 	ShareMode  any    `json:"shareMode"`
 }
 
+type tianyiCheckAccessCodeResp struct {
+	ResCode    any    `json:"res_code"`
+	ResMessage string `json:"res_message"`
+	ShareId    any    `json:"shareId"`
+}
+
 type tianyiListShareDirResp struct {
 	ResCode    any    `json:"res_code"`
 	ResMessage string `json:"res_message"`
@@ -101,7 +107,11 @@ type tianyiListShareDirResp struct {
 type tianyiGetDownloadURLResp struct {
 	ResCode    any    `json:"res_code"`
 	ResMessage string `json:"res_message"`
-	Data any `json:"data"`
+	Data       any    `json:"data"`
+}
+
+type tianyiVlcPlayURLResp struct {
+	FileDownloadURL string
 }
 
 func parse189ShareCodeLike(flagOrURL string) string {
@@ -520,7 +530,33 @@ func tianyiJSONGet(urlStr string, cookie string, referer string, out any) error 
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return errors.New("tianyi http " + strconv.Itoa(resp.StatusCode) + ": " + strings.TrimSpace(string(b)))
+		body := strings.TrimSpace(string(b))
+		if len(body) > 2048 {
+			body = body[:2048]
+		}
+
+		var code any
+		var msg string
+		{
+			dec := json.NewDecoder(bytes.NewReader(bytes.TrimSpace(b)))
+			dec.UseNumber()
+			var root map[string]any
+			if err := dec.Decode(&root); err == nil && root != nil {
+				code = root["res_code"]
+				if code == nil {
+					code = root["resCode"]
+				}
+				msg = strings.TrimSpace(toString(root["res_message"]))
+				if msg == "" {
+					msg = strings.TrimSpace(toString(root["resMessage"]))
+				}
+			}
+		}
+		extra := ""
+		if strings.TrimSpace(tianyiResCodeString(code)) != "" || strings.TrimSpace(msg) != "" {
+			extra = " (res_code=" + strings.TrimSpace(tianyiResCodeString(code)) + ", res_message=" + strings.TrimSpace(msg) + ")"
+		}
+		return errors.New("tianyi http " + strconv.Itoa(resp.StatusCode) + " GET " + urlStr + extra + ": " + body)
 	}
 	dec := json.NewDecoder(bytes.NewReader(bytes.TrimSpace(b)))
 	dec.UseNumber()
@@ -692,6 +728,14 @@ func tianyiIsSessionExpiredError(err error) bool {
 	return tianyiSessionExpiredMessage(err.Error())
 }
 
+func tianyiIsFileTooLargeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	m := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(m, "filetoolarge") || strings.Contains(m, "file too large")
+}
+
 func tianyiGetShareInfoByCode(shareCode string, accessCode string, cookie string) (tianyiShareInfoResp, error) {
 	u, _ := url.Parse(tianyiAPIBase + "/api/open/share/getShareInfoByCodeV2.action")
 	q := u.Query()
@@ -717,6 +761,41 @@ func tianyiGetShareInfoByCode(shareCode string, accessCode string, cookie string
 		return tianyiShareInfoResp{}, errors.New(msg)
 	}
 	return resp, nil
+}
+
+func tianyiCheckAccessCode(shareCode string, accessCode string, cookie string) (shareID string, err error) {
+	sc := strings.TrimSpace(shareCode)
+	ac := strings.TrimSpace(accessCode)
+	if sc == "" || ac == "" {
+		return "", errors.New("missing shareCode/accessCode")
+	}
+
+	u, _ := url.Parse(tianyiAPIBase + "/api/open/share/checkAccessCode.action")
+	q := u.Query()
+	q.Set("key", "noCache")
+	q.Set("shareCode", sc)
+	q.Set("accessCode", ac)
+	u.RawQuery = q.Encode()
+
+	var resp tianyiCheckAccessCodeResp
+	if err := tianyiJSONGet(u.String(), cookie, "https://cloud.189.cn/web/share?code="+sc, &resp); err != nil {
+		return "", err
+	}
+	if !tianyiResCodeOk(resp.ResCode) {
+		msg := strings.TrimSpace(resp.ResMessage)
+		if msg == "" {
+			msg = "checkAccessCode failed"
+		}
+		if tianyiNeedAccessCodeMessage(msg) {
+			return "", errors.New("need accessCode: " + msg)
+		}
+		return "", errors.New(msg)
+	}
+	shareID = strings.TrimSpace(toString(resp.ShareId))
+	if shareID == "" {
+		return "", errors.New("checkAccessCode failed: empty shareId")
+	}
+	return shareID, nil
 }
 
 func tianyiListShareDir(shareID string, fileID string, shareMode string, pageNum int, pageSize int, accessCode string, cookie string) (tianyiListShareDirResp, error) {
@@ -771,42 +850,173 @@ func tianyiListShareDir(shareID string, fileID string, shareMode string, pageNum
 }
 
 func tianyiGetFileDownloadURL(shareID string, fileID string, dt string, accessCode string, cookie string) (tianyiGetDownloadURLResp, error) {
-	u, _ := url.Parse(tianyiAPIBase + "/api/open/file/getFileDownloadUrl.action")
-	q := u.Query()
-	q.Set("shareId", strings.TrimSpace(shareID))
-	q.Set("fileId", strings.TrimSpace(fileID))
-	if strings.TrimSpace(dt) == "" {
-		dt = "1"
+	dt0 := strings.TrimSpace(dt)
+	candidates := []string{dt0}
+	if dt0 == "" {
+		// dt=1 occasionally returns 400 FileTooLarge for large files; fallback to dt=3.
+		candidates = []string{"1", "3"}
 	}
-	q.Set("dt", strings.TrimSpace(dt))
-	if strings.TrimSpace(accessCode) != "" {
-		q.Set("accessCode", strings.TrimSpace(accessCode))
-	}
-	u.RawQuery = q.Encode()
 
-	var root map[string]any
-	if err := tianyiJSONGet(u.String(), cookie, "https://cloud.189.cn/", &root); err != nil {
-		return tianyiGetDownloadURLResp{}, err
-	}
-	code := root["res_code"]
-	if code == nil {
-		code = root["resCode"]
-	}
-	msg := strings.TrimSpace(toString(root["res_message"]))
-	if msg == "" {
-		msg = strings.TrimSpace(toString(root["resMessage"]))
-	}
-	if !tianyiResCodeOk(code) {
+	var lastErr error
+	for i, cand := range candidates {
+		u, _ := url.Parse(tianyiAPIBase + "/api/open/file/getFileDownloadUrl.action")
+		q := u.Query()
+		q.Set("shareId", strings.TrimSpace(shareID))
+		q.Set("fileId", strings.TrimSpace(fileID))
+		if strings.TrimSpace(cand) == "" {
+			cand = "1"
+		}
+		q.Set("dt", strings.TrimSpace(cand))
+		if strings.TrimSpace(accessCode) != "" {
+			q.Set("accessCode", strings.TrimSpace(accessCode))
+		}
+		u.RawQuery = q.Encode()
+
+		var root map[string]any
+		if err := tianyiJSONGet(u.String(), cookie, "https://cloud.189.cn/", &root); err != nil {
+			lastErr = err
+			if dt0 == "" && i == 0 && tianyiIsFileTooLargeError(err) && len(candidates) > 1 {
+				continue
+			}
+			return tianyiGetDownloadURLResp{}, err
+		}
+		code := root["res_code"]
+		if code == nil {
+			code = root["resCode"]
+		}
+		msg := strings.TrimSpace(toString(root["res_message"]))
 		if msg == "" {
-			msg = "getFileDownloadUrl failed"
+			msg = strings.TrimSpace(toString(root["resMessage"]))
 		}
-		if tianyiNeedAccessCodeMessage(msg) {
-			return tianyiGetDownloadURLResp{}, errors.New("need accessCode: " + msg)
+		if !tianyiResCodeOk(code) {
+			if msg == "" {
+				msg = "getFileDownloadUrl failed"
+			}
+			if tianyiNeedAccessCodeMessage(msg) {
+				return tianyiGetDownloadURLResp{}, errors.New("need accessCode: " + msg)
+			}
+			lastErr = errors.New(msg)
+			return tianyiGetDownloadURLResp{}, lastErr
 		}
-		return tianyiGetDownloadURLResp{}, errors.New(msg)
+		resp := tianyiGetDownloadURLResp{ResCode: code, ResMessage: msg, Data: root}
+		return resp, nil
 	}
-	resp := tianyiGetDownloadURLResp{ResCode: code, ResMessage: msg, Data: root}
-	return resp, nil
+	if lastErr != nil {
+		return tianyiGetDownloadURLResp{}, lastErr
+	}
+	return tianyiGetDownloadURLResp{}, errors.New("tianyi getFileDownloadUrl failed")
+}
+
+func tianyiGetRawJSON(urlStr string, cookie string, referer string) (status int, rawText string, root map[string]any, err error) {
+	client := &http.Client{Timeout: 18 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, urlStr, nil)
+	if err != nil {
+		return 0, "", nil, err
+	}
+	req.Header.Set("User-Agent", tianyiUA)
+	req.Header.Set("Accept", "application/json;charset=UTF-8")
+	req.Header.Set("Accept-Encoding", "identity")
+	if strings.TrimSpace(referer) != "" {
+		req.Header.Set("Referer", referer)
+	}
+	if strings.TrimSpace(cookie) != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, "", nil, err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	rawText = strings.TrimSpace(string(b))
+	// Keep error message as upstream raw JSON text (no extra prefix), but avoid gigantic payloads.
+	if len(rawText) > 4096 {
+		rawText = rawText[:4096]
+	}
+	status = resp.StatusCode
+	if status < 200 || status >= 300 {
+		if rawText == "" {
+			rawText = "{\"res_message\":\"http error\",\"res_code\":\"HTTP" + strconv.Itoa(status) + "\"}"
+		}
+		return status, rawText, nil, errors.New(rawText)
+	}
+	dec := json.NewDecoder(bytes.NewReader(bytes.TrimSpace(b)))
+	dec.UseNumber()
+	if err := dec.Decode(&root); err != nil {
+		if rawText == "" {
+			rawText = "{}"
+		}
+		return status, rawText, nil, errors.New(rawText)
+	}
+	return status, rawText, root, nil
+}
+
+func tianyiGetNewVlcVideoPlayURL(shareID string, fileID string, dt string, cookie string) (tianyiVlcPlayURLResp, error) {
+	dt0 := strings.TrimSpace(dt)
+	candidates := []string{dt0}
+	if dt0 == "" {
+		candidates = []string{"1", "3"}
+	}
+
+	var lastErr error
+	for i, cand := range candidates {
+		u, _ := url.Parse(tianyiAPIBase + "/api/portal/getNewVlcVideoPlayUrl.action")
+		q := u.Query()
+		q.Set("shareId", strings.TrimSpace(shareID))
+		q.Set("fileId", strings.TrimSpace(fileID))
+		if strings.TrimSpace(cand) == "" {
+			cand = "1"
+		}
+		q.Set("dt", strings.TrimSpace(cand))
+		q.Set("type", "4")
+		u.RawQuery = q.Encode()
+
+		_, rawText, root, err := tianyiGetRawJSON(u.String(), cookie, "https://cloud.189.cn/")
+		if err != nil {
+			lastErr = err
+			if dt0 == "" && i == 0 && tianyiIsFileTooLargeError(err) && len(candidates) > 1 {
+				continue
+			}
+			return tianyiVlcPlayURLResp{}, err
+		}
+
+		code := root["res_code"]
+		if code == nil {
+			code = root["resCode"]
+		}
+		if !tianyiResCodeOk(code) {
+			// Preserve upstream raw JSON as error message.
+			if rawText == "" {
+				rawText = "{}"
+			}
+			lastErr = errors.New(rawText)
+			return tianyiVlcPlayURLResp{}, lastErr
+		}
+
+		fileDownloadURL := strings.TrimSpace(toString(root["fileDownloadUrl"]))
+		if fileDownloadURL == "" {
+			// Some responses embed the url under a variant object: {"normal": {"url": "..."} , "res_code":0}
+			if normalAny, ok := root["normal"]; ok {
+				if normalObj, _ := normalAny.(map[string]any); normalObj != nil {
+					fileDownloadURL = strings.TrimSpace(toString(normalObj["url"]))
+				}
+			}
+		}
+		if fileDownloadURL == "" {
+			// Preserve upstream raw JSON as error message.
+			if rawText == "" {
+				rawText = "{}"
+			}
+			return tianyiVlcPlayURLResp{}, errors.New(rawText)
+		}
+
+		resp := tianyiVlcPlayURLResp{FileDownloadURL: fileDownloadURL}
+		return resp, nil
+	}
+	if lastErr != nil {
+		return tianyiVlcPlayURLResp{}, lastErr
+	}
+	return tianyiVlcPlayURLResp{}, errors.New("tianyi getNewVlcVideoPlayUrl failed")
 }
 
 func pickTianyiDownloadURL(resp tianyiGetDownloadURLResp) string {
@@ -839,6 +1049,10 @@ func pickTianyiDownloadURL(resp tianyiGetDownloadURLResp) string {
 		return s
 	}
 	return ""
+}
+
+func pickTianyiVlcPlayURL(resp tianyiVlcPlayURLResp) string {
+	return strings.TrimSpace(resp.FileDownloadURL)
 }
 
 func resolveSingleRedirectLocation(urlStr string) (string, error) {
@@ -948,11 +1162,33 @@ func Tianyi189List(database *db.DB, flag string, accessCode string) (vodPlayURL 
 	if sc == "" {
 		return "", "", "", errors.New("missing/invalid flag/shareCode (expected: 天翼-<shareCode> or https://cloud.189.cn/t/<shareCode>)")
 	}
+	ac := strings.TrimSpace(accessCode)
 	cookie, _, err := ensure189Cookie(database, false)
 	if err != nil {
 		return "", "", "", err
 	}
-	info, err := tianyiGetShareInfoByCode(sc, accessCode, cookie)
+
+	// When accessCode is provided, shareId might only be obtainable via checkAccessCode.
+	if ac != "" {
+		shareID, err = tianyiCheckAccessCode(sc, ac, cookie)
+		if err != nil {
+			if !tianyiIsSessionExpiredError(err) {
+				return "", "", "", err
+			}
+			cookie2, _, err2 := ensure189Cookie(database, true)
+			if err2 != nil || strings.TrimSpace(cookie2) == "" {
+				return "", "", "", err
+			}
+			shareID2, err3 := tianyiCheckAccessCode(sc, ac, cookie2)
+			if err3 != nil {
+				return "", "", "", err
+			}
+			shareID = shareID2
+			cookie = cookie2
+		}
+	}
+
+	info, err := tianyiGetShareInfoByCode(sc, ac, cookie)
 	if err != nil {
 		if !tianyiIsSessionExpiredError(err) {
 			return "", "", "", err
@@ -961,17 +1197,22 @@ func Tianyi189List(database *db.DB, flag string, accessCode string) (vodPlayURL 
 		if err2 != nil || strings.TrimSpace(cookie2) == "" {
 			return "", "", "", err
 		}
-		info2, err3 := tianyiGetShareInfoByCode(sc, accessCode, cookie2)
+		info2, err3 := tianyiGetShareInfoByCode(sc, ac, cookie2)
 		if err3 != nil {
 			return "", "", "", err
 		}
 		info = info2
 		cookie = cookie2
 	}
-	shareID = strings.TrimSpace(toString(info.ShareId))
+	if strings.TrimSpace(shareID) == "" {
+		shareID = strings.TrimSpace(toString(info.ShareId))
+	}
 	rootFileID := strings.TrimSpace(toString(info.FileId))
 	sm := strings.TrimSpace(toString(info.ShareMode))
 	if shareID == "" {
+		if ac == "" {
+			return "", "", "", errors.New("need accessCode: missing shareId")
+		}
 		return "", "", "", errors.New("tianyi share info missing shareId")
 	}
 	if rootFileID == "" {
@@ -981,56 +1222,131 @@ func Tianyi189List(database *db.DB, flag string, accessCode string) (vodPlayURL 
 	const maxItems = 20000
 	const pageSize = 200
 
-		isFolderValue := func(v any) bool {
-			switch x := v.(type) {
-			case bool:
-				return x
-			case string:
-				s := strings.TrimSpace(x)
-				return s == "true" || s == "1"
-			case float64:
-				return int(x) == 1
-			case json.Number:
-				i, _ := x.Int64()
-				return int(i) == 1
-			default:
-				return false
-			}
+	isFolderValue := func(v any) bool {
+		switch x := v.(type) {
+		case bool:
+			return x
+		case string:
+			s := strings.TrimSpace(x)
+			return s == "true" || s == "1"
+		case float64:
+			return int(x) == 1
+		case json.Number:
+			i, _ := x.Int64()
+			return int(i) == 1
+		default:
+			return false
 		}
+	}
 
-		type dirItem struct {
-			fileID string
-			path   string
+	type dirItem struct {
+		fileID string
+		path   string
+	}
+	ensureLeadingSlash := func(p string) string {
+		p = strings.TrimSpace(strings.ReplaceAll(p, "\\", "/"))
+		p = strings.ReplaceAll(p, "//", "/")
+		if p == "" {
+			return "/"
 		}
-		ensureLeadingSlash := func(p string) string {
-			p = strings.TrimSpace(strings.ReplaceAll(p, "\\", "/"))
-			p = strings.ReplaceAll(p, "//", "/")
-			if p == "" {
-				return "/"
-			}
-			if strings.HasPrefix(p, "/") {
-				return p
-			}
-			return "/" + p
+		if strings.HasPrefix(p, "/") {
+			return p
 		}
-		joinPath := func(a, b string) string {
-			aa := ensureLeadingSlash(a)
-			bb := strings.TrimSpace(b)
-			if bb == "" {
-				return aa
-			}
-			if aa == "/" {
-				return "/" + bb
-			}
-			return strings.TrimRight(aa, "/") + "/" + bb
+		return "/" + p
+	}
+	joinPath := func(a, b string) string {
+		aa := ensureLeadingSlash(a)
+		bb := strings.TrimSpace(b)
+		if bb == "" {
+			return aa
 		}
+		if aa == "/" {
+			return "/" + bb
+		}
+		return strings.TrimRight(aa, "/") + "/" + bb
+	}
 
-		// Root listing: determine effective root and handle single-file shares.
-		rootFolders := []dirItem{}
-		rootFiles := 0
-		rootTotal := 0
+	// Root listing: determine effective root and handle single-file shares.
+	rootFolders := []dirItem{}
+	rootFiles := 0
+	rootTotal := 0
+	for page := 1; page <= 500; page++ {
+		list, err := tianyiListShareDir(shareID, rootFileID, sm, page, pageSize, ac, cookie)
+		if err != nil {
+			if !tianyiIsSessionExpiredError(err) {
+				return "", "", "", err
+			}
+			cookie2, _, err2 := ensure189Cookie(database, true)
+			if err2 != nil || strings.TrimSpace(cookie2) == "" {
+				return "", "", "", err
+			}
+			list2, err3 := tianyiListShareDir(shareID, rootFileID, sm, page, pageSize, ac, cookie2)
+			if err3 != nil {
+				return "", "", "", err
+			}
+			list = list2
+			cookie = cookie2
+		}
+		itemsFile := list.FileListAO.FileList
+		itemsFolder := list.FileListAO.FolderList
+		if len(itemsFile) == 0 && len(itemsFolder) == 0 {
+			break
+		}
+		if list.FileListAO.Count > 0 && list.FileListAO.Count > rootTotal {
+			rootTotal = list.FileListAO.Count
+		}
+		for _, it := range itemsFolder {
+			name := strings.TrimSpace(it.Name)
+			idStr := strings.TrimSpace(toString(it.ID))
+			if idStr == "" || name == "" {
+				continue
+			}
+			rootFolders = append(rootFolders, dirItem{fileID: idStr, path: joinPath("/", name)})
+		}
+		for _, it := range itemsFile {
+			idStr := strings.TrimSpace(toString(it.ID))
+			name := strings.TrimSpace(it.Name)
+			if idStr == "" || name == "" {
+				continue
+			}
+			// fileList may include folders too; handle by isFolderValue.
+			if isFolderValue(it.IsFolder) {
+				rootFolders = append(rootFolders, dirItem{fileID: idStr, path: joinPath("/", name)})
+				continue
+			}
+			rootFiles += 1
+		}
+		if len(itemsFile)+len(itemsFolder) < pageSize {
+			break
+		}
+		if list.FileListAO.Count > 0 && page*pageSize >= list.FileListAO.Count {
+			break
+		}
+	}
+	if rootFiles == 0 && len(rootFolders) == 0 {
+		// Single-file share (no listable dir content); fall back to shareInfo fields.
+		fileName := strings.TrimSpace(info.FileName)
+		if fileName == "" {
+			fileName = "file"
+		}
+		id := rootFileID + "*" + shareID + "*" + fileName
+		return "/$" + id, shareID, sc, nil
+	}
+	effectiveRootID := rootFileID
+	if rootFiles == 0 && len(rootFolders) == 1 && rootTotal > 0 && rootTotal <= len(rootFolders) {
+		effectiveRootID = rootFolders[0].fileID
+	}
+
+	queue := []dirItem{{fileID: effectiveRootID, path: "/"}}
+	seenDir := map[string]struct{}{effectiveRootID: {}}
+
+	parts := []string{}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+
 		for page := 1; page <= 500; page++ {
-			list, err := tianyiListShareDir(shareID, rootFileID, sm, page, pageSize, accessCode, cookie)
+			list, err := tianyiListShareDir(shareID, cur.fileID, sm, page, pageSize, ac, cookie)
 			if err != nil {
 				if !tianyiIsSessionExpiredError(err) {
 					return "", "", "", err
@@ -1039,138 +1355,63 @@ func Tianyi189List(database *db.DB, flag string, accessCode string) (vodPlayURL 
 				if err2 != nil || strings.TrimSpace(cookie2) == "" {
 					return "", "", "", err
 				}
-				list2, err3 := tianyiListShareDir(shareID, rootFileID, sm, page, pageSize, accessCode, cookie2)
+				list2, err3 := tianyiListShareDir(shareID, cur.fileID, sm, page, pageSize, ac, cookie2)
 				if err3 != nil {
 					return "", "", "", err
 				}
 				list = list2
 				cookie = cookie2
 			}
-			itemsFile := list.FileListAO.FileList
-			itemsFolder := list.FileListAO.FolderList
-			if len(itemsFile) == 0 && len(itemsFolder) == 0 {
+			files1 := list.FileListAO.FileList
+			folders1 := list.FileListAO.FolderList
+			if len(files1) == 0 && len(folders1) == 0 {
 				break
 			}
-			if list.FileListAO.Count > 0 && list.FileListAO.Count > rootTotal {
-				rootTotal = list.FileListAO.Count
-			}
-			for _, it := range itemsFolder {
+			// folderList is authoritative folders.
+			for _, it := range folders1 {
 				name := strings.TrimSpace(it.Name)
 				idStr := strings.TrimSpace(toString(it.ID))
 				if idStr == "" || name == "" {
 					continue
 				}
-				rootFolders = append(rootFolders, dirItem{fileID: idStr, path: joinPath("/", name)})
+				if _, ok := seenDir[idStr]; ok {
+					continue
+				}
+				seenDir[idStr] = struct{}{}
+				queue = append(queue, dirItem{fileID: idStr, path: joinPath(cur.path, name)})
 			}
-			for _, it := range itemsFile {
-				idStr := strings.TrimSpace(toString(it.ID))
+			for _, it := range files1 {
 				name := strings.TrimSpace(it.Name)
+				idStr := strings.TrimSpace(toString(it.ID))
 				if idStr == "" || name == "" {
 					continue
 				}
-				// fileList may include folders too; handle by isFolderValue.
 				if isFolderValue(it.IsFolder) {
-					rootFolders = append(rootFolders, dirItem{fileID: idStr, path: joinPath("/", name)})
+					if _, ok := seenDir[idStr]; ok {
+						continue
+					}
+					seenDir[idStr] = struct{}{}
+					queue = append(queue, dirItem{fileID: idStr, path: joinPath(cur.path, name)})
 					continue
 				}
-				rootFiles += 1
+				id := idStr + "*" + shareID + "*" + name
+				display := ensureLeadingSlash(cur.path)
+				parts = append(parts, display+"$"+id)
+				if len(parts) >= maxItems {
+					return strings.Join(parts, "#"), shareID, sc, errors.New("tianyi share too large (exceeded max items)")
+				}
 			}
-			if len(itemsFile)+len(itemsFolder) < pageSize {
+			// Stop paging when the page is not full, or when count is reached.
+			if len(files1)+len(folders1) < pageSize {
 				break
 			}
 			if list.FileListAO.Count > 0 && page*pageSize >= list.FileListAO.Count {
 				break
 			}
 		}
-		if rootFiles == 0 && len(rootFolders) == 0 {
-			// Single-file share (no listable dir content); fall back to shareInfo fields.
-			fileName := strings.TrimSpace(info.FileName)
-			if fileName == "" {
-				fileName = "file"
-			}
-			id := rootFileID + "*" + shareID + "*" + fileName
-			return "/$" + id, shareID, sc, nil
-		}
-		effectiveRootID := rootFileID
-		if rootFiles == 0 && len(rootFolders) == 1 && rootTotal > 0 && rootTotal <= len(rootFolders) {
-			effectiveRootID = rootFolders[0].fileID
-		}
-
-		queue := []dirItem{{fileID: effectiveRootID, path: "/"}}
-		seenDir := map[string]struct{}{effectiveRootID: {}}
-
-		parts := []string{}
-		for len(queue) > 0 {
-			cur := queue[0]
-			queue = queue[1:]
-
-			for page := 1; page <= 500; page++ {
-				list, err := tianyiListShareDir(shareID, cur.fileID, sm, page, pageSize, accessCode, cookie)
-				if err != nil {
-					if !tianyiIsSessionExpiredError(err) {
-						return "", "", "", err
-					}
-					cookie2, _, err2 := ensure189Cookie(database, true)
-					if err2 != nil || strings.TrimSpace(cookie2) == "" {
-						return "", "", "", err
-					}
-					list2, err3 := tianyiListShareDir(shareID, cur.fileID, sm, page, pageSize, accessCode, cookie2)
-					if err3 != nil {
-						return "", "", "", err
-					}
-					list = list2
-					cookie = cookie2
-				}
-				files1 := list.FileListAO.FileList
-				folders1 := list.FileListAO.FolderList
-				if len(files1) == 0 && len(folders1) == 0 {
-					break
-				}
-				// folderList is authoritative folders.
-				for _, it := range folders1 {
-					name := strings.TrimSpace(it.Name)
-					idStr := strings.TrimSpace(toString(it.ID))
-					if idStr == "" || name == "" {
-						continue
-					}
-					if _, ok := seenDir[idStr]; ok {
-						continue
-					}
-					seenDir[idStr] = struct{}{}
-					queue = append(queue, dirItem{fileID: idStr, path: joinPath(cur.path, name)})
-				}
-				for _, it := range files1 {
-					name := strings.TrimSpace(it.Name)
-					idStr := strings.TrimSpace(toString(it.ID))
-					if idStr == "" || name == "" {
-						continue
-					}
-					if isFolderValue(it.IsFolder) {
-						if _, ok := seenDir[idStr]; ok {
-							continue
-						}
-						seenDir[idStr] = struct{}{}
-						queue = append(queue, dirItem{fileID: idStr, path: joinPath(cur.path, name)})
-						continue
-					}
-					id := idStr + "*" + shareID + "*" + name
-					display := ensureLeadingSlash(cur.path)
-					parts = append(parts, display+"$"+id)
-					if len(parts) >= maxItems {
-						return strings.Join(parts, "#"), shareID, sc, errors.New("tianyi share too large (exceeded max items)")
-					}
-				}
-				// Stop paging when the page is not full, or when count is reached.
-				if len(files1)+len(folders1) < pageSize {
-					break
-				}
-				if list.FileListAO.Count > 0 && page*pageSize >= list.FileListAO.Count {
-					break
-				}
-			}
-		}
-		return strings.Join(parts, "#"), shareID, sc, nil
 	}
+	return strings.Join(parts, "#"), shareID, sc, nil
+}
 
 func tianyi189PlayWithDT(database *db.DB, id string, accessCode string, dt string) (finalURL string, shareID string, fileID string, fileName string, err error) {
 	fileID, shareID, fileName = parse189PlayID(id)
@@ -1183,19 +1424,37 @@ func tianyi189PlayWithDT(database *db.DB, id string, accessCode string, dt strin
 	}
 	out, err := tianyiGetFileDownloadURL(shareID, fileID, dt, accessCode, cookie)
 	if err != nil {
-		if !tianyiIsSessionExpiredError(err) {
+		if tianyiIsSessionExpiredError(err) {
+			cookie2, _, err2 := ensure189Cookie(database, true)
+			if err2 != nil || strings.TrimSpace(cookie2) == "" {
+				return "", "", "", "", err
+			}
+			out2, err3 := tianyiGetFileDownloadURL(shareID, fileID, dt, accessCode, cookie2)
+			if err3 != nil {
+				return "", "", "", "", err
+			}
+			out = out2
+			cookie = cookie2
+		} else if tianyiIsFileTooLargeError(err) {
+			// Fall back for large files: portal VLC play url (requires cookie).
+			vlc, err2 := tianyiGetNewVlcVideoPlayURL(shareID, fileID, dt, cookie)
+			if err2 != nil {
+				return "", "", "", "", err2
+			}
+			u := pickTianyiVlcPlayURL(vlc)
+			if strings.TrimSpace(u) == "" {
+				return "", "", "", "", errors.New("tianyi vlc play url not found: upstream missing fileDownloadUrl")
+			}
+			finalURL, err = resolveFinalRedirectURL(u, 8)
+			if err != nil {
+				return "", "", "", "", err
+			}
+			return finalURL, shareID, fileID, fileName, nil
+		} else {
 			return "", "", "", "", err
 		}
-		cookie2, _, err2 := ensure189Cookie(database, true)
-		if err2 != nil || strings.TrimSpace(cookie2) == "" {
-			return "", "", "", "", err
-		}
-		out2, err3 := tianyiGetFileDownloadURL(shareID, fileID, dt, accessCode, cookie2)
-		if err3 != nil {
-			return "", "", "", "", err
-		}
-		out = out2
 	}
+
 	u := pickTianyiDownloadURL(out)
 	if strings.TrimSpace(u) == "" {
 		raw, _ := json.Marshal(out.Data)
@@ -1256,7 +1515,6 @@ func HandleAPI189Play(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	var body struct {
 		Flag       string `json:"flag"`
 		ID         string `json:"id"`
-		DT         string `json:"dt"`
 		AccessCode string `json:"accessCode"`
 		Passcode   string `json:"passcode"`
 		Pwd        string `json:"pwd"`
@@ -1278,7 +1536,8 @@ func HandleAPI189Play(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if accessCode == "" {
 		accessCode = strings.TrimSpace(body.Password)
 	}
-	dt := strings.TrimSpace(body.DT)
+	// dt is intentionally not user-configurable: we always try dt=1 first, then fallback to dt=3.
+	dt := ""
 
 	cacheKey := buildPlayCacheKey("189", id, accessCode, dt)
 	if u, _, ok := getPlayCache(cacheKey); ok {
