@@ -881,9 +881,14 @@ func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle st
 	}
 
 	qKey := embyNormalizeAggKey(searchTitle)
-	seq := 0
-	out := []smartSource{}
-	for _, s := range ordered {
+
+	// Search across sites concurrently; Emby smart-play should not block on the slowest site.
+	type task struct {
+		Site site
+		Idx  int // stable order index
+	}
+	tasks := make([]task, 0, len(ordered))
+	for i, s := range ordered {
 		if s.Key == "" || s.API == "" {
 			continue
 		}
@@ -896,42 +901,81 @@ func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle st
 		if searchEnabled, ok := searchMap[s.Key]; ok && !searchEnabled {
 			continue
 		}
-		raw, err := catpawopen.RequestSpider(apiBase, s.API, "search", map[string]any{"wd": searchTitle, "page": 1})
-		if err != nil {
-			continue
-		}
-		items := catpawopen.NormalizeSearchList(raw)
-		for _, it := range items {
-			name := strings.TrimSpace(it.Name)
-			if strings.TrimSpace(it.ID) == "" || name == "" {
-				continue
+		tasks = append(tasks, task{Site: s, Idx: i})
+	}
+	if len(tasks) == 0 {
+		return nil, orderMap
+	}
+
+	threadCount := smartGetSearchThreadCount(database, u)
+	if threadCount < 1 {
+		threadCount = 5
+	}
+	if threadCount > 20 {
+		threadCount = 20
+	}
+	sem := make(chan struct{}, threadCount)
+	resCh := make(chan []smartSource, len(tasks))
+	var wg sync.WaitGroup
+
+	for _, t := range tasks {
+		wg.Add(1)
+		go func(tt task) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			raw, err := catpawopen.RequestSpider(apiBase, tt.Site.API, "search", map[string]any{"wd": searchTitle, "page": 1})
+			if err != nil {
+				return
 			}
-			key := embyNormalizeAggKey(name)
-			if key == "" {
-				continue
+			items := catpawopen.NormalizeSearchList(raw)
+			local := make([]smartSource, 0, smartMinInt(20, len(items)))
+			localSeq := 0
+			for _, it := range items {
+				name := strings.TrimSpace(it.Name)
+				if strings.TrimSpace(it.ID) == "" || name == "" {
+					continue
+				}
+				key := embyNormalizeAggKey(name)
+				if key == "" {
+					continue
+				}
+				score := embyMatchScore(qKey, key)
+				if score <= 0 {
+					continue
+				}
+				localSeq++
+				local = append(local, smartSource{
+					SiteKey:     tt.Site.Key,
+					SiteName:    tt.Site.Name,
+					SpiderAPI:   tt.Site.API,
+					VideoID:     strings.TrimSpace(it.ID),
+					VideoRemark: strings.TrimSpace(it.Remark),
+					Score:       score,
+					Seq:         (tt.Idx+1)*1000 + localSeq, // deterministic tie-break
+					NoNoise:     key == qKey,
+				})
+				if len(local) >= 200 {
+					break
+				}
 			}
-			score := embyMatchScore(qKey, key)
-			if score <= 0 {
-				continue
+			if len(local) > 0 {
+				resCh <- local
 			}
-			seq++
-			out = append(out, smartSource{
-				SiteKey:     s.Key,
-				SiteName:    s.Name,
-				SpiderAPI:   s.API,
-				VideoID:     strings.TrimSpace(it.ID),
-				VideoRemark: strings.TrimSpace(it.Remark),
-				Score:       score,
-				Seq:         seq,
-				NoNoise:     key == qKey,
-			})
-			if len(out) >= 200 {
-				break
-			}
-		}
-		if len(out) >= 200 {
-			break
-		}
+		}(t)
+	}
+	go func() {
+		wg.Wait()
+		close(resCh)
+	}()
+
+	out := make([]smartSource, 0, 64)
+	for batch := range resCh {
+		out = append(out, batch...)
+	}
+	if len(out) > 200 {
+		out = out[:200]
 	}
 	return out, orderMap
 }
