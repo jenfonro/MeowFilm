@@ -1865,12 +1865,19 @@ func HandleAPIUCList(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if passcode == "" {
 		passcode = strings.TrimSpace(body.Pwd)
 	}
-	vod, shareID, err := UCList(database, flag, passcode)
+	key := flag + "|" + passcode
+	val, fromCache, err := ucListCache.Do(key, func() (ucListAPIValue, error) {
+		vod, shareID, err := UCList(database, flag, passcode)
+		if err != nil {
+			return ucListAPIValue{}, err
+		}
+		return ucListAPIValue{Vod: vod, ShareID: shareID}, nil
+	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": err.Error()})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "flag": flag, "shareId": shareID, "vod_play_url": vod})
+	writeJSON(w, 200, map[string]any{"ok": true, "flag": flag, "shareId": val.ShareID, "vod_play_url": val.Vod, "cache": fromCache})
 }
 
 func HandleAPIUCPlay(w http.ResponseWriter, r *http.Request, database *db.DB) {
@@ -1954,8 +1961,8 @@ func HandleAPIUCTVRefresh(w http.ResponseWriter, r *http.Request, database *db.D
 		return
 	}
 	writeJSON(w, 200, map[string]any{
-		"ok": true,
-		"device_id": dev,
+		"ok":                  true,
+		"device_id":           dev,
 		"access_token_exp_at": strings.TrimSpace(getPanField(store2, "uc_tv", "access_token_exp_at")),
 	})
 }

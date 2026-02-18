@@ -1472,7 +1472,19 @@ func HandleAPI189List(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if shareCode != "" {
 		flag = shareCode
 	}
-	vod, _, _, err := Tianyi189List(database, flag, accessCode)
+	keyShareCode := parse189ShareCodeLike(flag)
+	keyBase := strings.TrimSpace(keyShareCode)
+	if keyBase == "" {
+		keyBase = strings.TrimSpace(flag)
+	}
+	key := keyBase + "|" + accessCode
+	val, fromCache, err := tianyi189ListCache.Do(key, func() (tianyi189ListAPIValue, error) {
+		vod, _, _, err := Tianyi189List(database, flag, accessCode)
+		if err != nil {
+			return tianyi189ListAPIValue{}, err
+		}
+		return tianyi189ListAPIValue{Vod: vod}, nil
+	})
 	if err != nil {
 		if tianyiNeedAccessCodeMessage(err.Error()) {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "needAccessCode": true, "message": "tianyi share requires accessCode"})
@@ -1481,7 +1493,7 @@ func HandleAPI189List(w http.ResponseWriter, r *http.Request, database *db.DB) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": err.Error()})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "vod_play_url": vod})
+	writeJSON(w, 200, map[string]any{"ok": true, "vod_play_url": val.Vod, "cache": fromCache})
 }
 
 func HandleAPI189Play(w http.ResponseWriter, r *http.Request, database *db.DB) {
