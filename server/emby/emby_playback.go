@@ -10,11 +10,19 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/cache"
 	"github.com/jenfonro/meowfilm/server/catpawopen"
 	"github.com/jenfonro/meowfilm/server/netdisk"
 )
 
 var embyStreams = newEmbyStreamStore()
+
+type embyPlaybackResolved struct {
+	URL     string
+	Headers map[string]string
+}
+
+var embyPlaybackResolveDedup = cache.NewTTLInflightCache[embyPlaybackResolved](15*time.Second, 4096)
 
 func handleEmbyPlaybackInfo(w http.ResponseWriter, r *http.Request, database *db.DB, serverID string, embyID string) {
 	startAt := time.Now()
@@ -200,29 +208,60 @@ func handleEmbyPlaybackInfo(w http.ResponseWriter, r *http.Request, database *db
 		return
 	}
 
-	// For Douban IDs (movie/series), resolve to TMDB before selecting playback.
-	if parsed.Source == "douban" && parsed.TMDBID <= 0 && parsed.DoubanID != "" {
-		m, _ := embyGetDoubanTMDBMap(database, parsed.Kind, parsed.DoubanID)
-		title := ""
-		year := 0
-		if m != nil {
-			title = m.Title
-			year = m.Year
-		}
-		tid, err := embyResolveTMDBForDouban(database, parsed.Kind, parsed.DoubanID, title, year)
-		if err != nil {
-			embyBadGateway(w, err)
-			return
-		}
-		if tid <= 0 {
-			embyWriteError(w, 404, "TMDB 未匹配")
-			return
-		}
-		parsed.Source = "tmdb"
-		parsed.TMDBID = tid
+	tvUser := ""
+	if u != nil {
+		tvUser = u.Username
 	}
+	key := strings.TrimSpace(serverID) + "|" + strings.TrimSpace(u.ID) + "|" + strings.TrimSpace(embyID)
+	res, _, err := embyPlaybackResolveDedup.DoWithOptions(key, cache.TTLInflightCacheOptions{
+		Sliding:      true,
+		MaxLife:      1 * time.Minute,
+		MaxRefreshes: 5,
+		CacheErrors:  false,
+	}, func() (embyPlaybackResolved, error) {
+		if parsed == nil {
+			return embyPlaybackResolved{}, errorString("invalid item id")
+		}
+		p := *parsed
 
-	playURL, headers, err := embyResolvePlaybackFromTMDB(database, u, parsed)
+		// For Douban IDs (movie/series), resolve to TMDB before selecting playback.
+		if p.Source == "douban" && p.TMDBID <= 0 && strings.TrimSpace(p.DoubanID) != "" {
+			m, _ := embyGetDoubanTMDBMap(database, p.Kind, p.DoubanID)
+			title := ""
+			year := 0
+			if m != nil {
+				title = m.Title
+				year = m.Year
+			}
+			tid, err := embyResolveTMDBForDouban(database, p.Kind, p.DoubanID, title, year)
+			if err != nil {
+				return embyPlaybackResolved{}, err
+			}
+			if tid <= 0 {
+				return embyPlaybackResolved{}, errorString("TMDB 未匹配")
+			}
+			p.Source = "tmdb"
+			p.TMDBID = tid
+		}
+
+		playURL, headers, err := embyResolvePlaybackFromTMDB(database, u, &p)
+		if err != nil {
+			return embyPlaybackResolved{}, err
+		}
+		out := embyPlaybackResolved{URL: strings.TrimSpace(playURL)}
+		if headers != nil && len(headers) > 0 {
+			cp := make(map[string]string, len(headers))
+			for k, v := range headers {
+				kk := strings.TrimSpace(k)
+				vv := strings.TrimSpace(v)
+				if kk != "" && vv != "" {
+					cp[kk] = vv
+				}
+			}
+			out.Headers = cp
+		}
+		return out, nil
+	})
 	if err != nil {
 		if embyDebugLogEnabled() {
 			embyDebugPrintf("[emby][playback] fail item=%s err=%q cost=%s", embyID, err.Error(), time.Since(startAt).String())
@@ -230,18 +269,13 @@ func handleEmbyPlaybackInfo(w http.ResponseWriter, r *http.Request, database *db
 		embyBadGateway(w, err)
 		return
 	}
-	originURL := strings.TrimSpace(playURL)
-	finalURL := originURL
-	finalHeaders := headers
+	finalURL := strings.TrimSpace(res.URL)
+	finalHeaders := res.Headers
 	debugLog := embyDebugLogEnabled()
-	tvUser := ""
-	if u != nil {
-		tvUser = u.Username
-	}
 	playSessionID := embyNewHexID()
 	mediaSourceID := embyStableHex32(embyID)
 
-	container, containerList := embyDetectContainerFromURL(originURL)
+	container, containerList := embyDetectContainerFromURL(finalURL)
 
 	if debugLog {
 		embyDebugPrintf("[emby][playback] ok item=%s user=%s url=%q container=%s cost=%s", embyID, tvUser, finalURL, container, time.Since(startAt).String())
