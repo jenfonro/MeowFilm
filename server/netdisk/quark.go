@@ -403,9 +403,9 @@ type quarkShareDetailResp struct {
 	Message string `json:"message"`
 	Data    struct {
 		List     []map[string]any `json:"list"`
-		Total    int             `json:"total"`
-		HasMore  bool            `json:"has_more"`
-		NextPage int             `json:"next_page"`
+		Total    int              `json:"total"`
+		HasMore  bool             `json:"has_more"`
+		NextPage int              `json:"next_page"`
 	} `json:"data"`
 }
 
@@ -1717,8 +1717,8 @@ func HandleAPIQuarkTVRefresh(w http.ResponseWriter, r *http.Request, database *d
 		return
 	}
 	writeJSON(w, 200, map[string]any{
-		"ok":                true,
-		"device_id":         dev,
+		"ok":                  true,
+		"device_id":           dev,
 		"access_token_exp_at": strings.TrimSpace(getPanField(store2, tvKey2, "access_token_exp_at")),
 	})
 }
@@ -1739,12 +1739,19 @@ func HandleAPIQuarkList(w http.ResponseWriter, r *http.Request, database *db.DB)
 	if passcode == "" {
 		passcode = strings.TrimSpace(body.Pwd)
 	}
-	vod, shareID, err := QuarkList(database, flag, passcode)
+	key := flag + "|" + passcode
+	val, fromCache, err := quarkListCache.Do(key, func() (quarkListAPIValue, error) {
+		vod, shareID, err := QuarkList(database, flag, passcode)
+		if err != nil {
+			return quarkListAPIValue{}, err
+		}
+		return quarkListAPIValue{Vod: vod, ShareID: shareID}, nil
+	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": err.Error()})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "flag": flag, "shareId": shareID, "vod_play_url": vod})
+	writeJSON(w, 200, map[string]any{"ok": true, "flag": flag, "shareId": val.ShareID, "vod_play_url": val.Vod, "cache": fromCache})
 }
 
 func HandleAPIQuarkStatus(w http.ResponseWriter, r *http.Request, database *db.DB) {
@@ -1759,10 +1766,10 @@ func HandleAPIQuarkStatus(w http.ResponseWriter, r *http.Request, database *db.D
 	hasAT := strings.TrimSpace(getPanField(store, tvKey, "access_token")) != ""
 	expAt := strings.TrimSpace(getPanField(store, tvKey, "access_token_exp_at"))
 	writeJSON(w, 200, map[string]any{
-		"ok": true,
-		"hasCookie": hasCookie,
-		"hasQuarkTV": hasTV,
-		"hasAccessToken": hasAT,
+		"ok":               true,
+		"hasCookie":        hasCookie,
+		"hasQuarkTV":       hasTV,
+		"hasAccessToken":   hasAT,
 		"accessTokenExpAt": expAt,
 	})
 }
