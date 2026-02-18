@@ -1301,12 +1301,20 @@ func HandleAPI139List(w http.ResponseWriter, r *http.Request, database *db.DB) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "missing/invalid flag (expected: 逸动-<linkID>)"})
 		return
 	}
-	vod, _, err := Yun139List(database, "逸动-"+linkID, passcode)
+	normalizedFlag := "逸动-" + linkID
+	key := linkID + "|" + passcode
+	val, fromCache, err := yun139ListCache.Do(key, func() (yun139ListAPIValue, error) {
+		vod, _, err := Yun139List(database, normalizedFlag, passcode)
+		if err != nil {
+			return yun139ListAPIValue{}, err
+		}
+		return yun139ListAPIValue{Vod: vod}, nil
+	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": err.Error()})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "vod_play_url": vod})
+	writeJSON(w, 200, map[string]any{"ok": true, "vod_play_url": val.Vod, "cache": fromCache})
 }
 
 func HandleAPI139Play(w http.ResponseWriter, r *http.Request, database *db.DB) {

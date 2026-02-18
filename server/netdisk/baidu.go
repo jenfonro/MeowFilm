@@ -42,12 +42,12 @@ type baiduQRSession struct {
 var baiduQRSessions sync.Map // id -> *baiduQRSession
 
 const (
-	baiduQRUA      = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-	baiduQRBasePan = "https://pan.baidu.com/"
-	baiduScriptWebUA = "Mozilla/5.0 (Linux; Android 12; V2238A) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.40 Safari/537.36"
+	baiduQRUA            = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+	baiduQRBasePan       = "https://pan.baidu.com/"
+	baiduScriptWebUA     = "Mozilla/5.0 (Linux; Android 12; V2238A) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.40 Safari/537.36"
 	baiduScriptNetdiskUA = "netdisk;12.11.9;V2238A;android-android;12;JSbridge4.4.0;jointBridge;1.1.0;"
-	baiduPlayUA = "com.android.chrome/131.0.6778.200 (Linux;Android 10) AndroidXMedia3/1.5.1"
-	baiduAppID  = "250528"
+	baiduPlayUA          = "com.android.chrome/131.0.6778.200 (Linux;Android 10) AndroidXMedia3/1.5.1"
+	baiduAppID           = "250528"
 )
 
 var (
@@ -172,11 +172,11 @@ func baiduQRPoll(client *http.Client, sign string, gid string, cb string) (statu
 	if strings.TrimSpace(gid) != "" {
 		qs.Set("gid", gid)
 	}
-		if strings.TrimSpace(cb) != "" {
-			qs.Set("callback", cb)
-		} else {
-			qs.Set("callback", "bd__cbs__"+randHex(6))
-		}
+	if strings.TrimSpace(cb) != "" {
+		qs.Set("callback", cb)
+	} else {
+		qs.Set("callback", "bd__cbs__"+randHex(6))
+	}
 	u.RawQuery = qs.Encode()
 
 	body, _ := baiduQRDoReq(client, "GET", u.String(), nil, map[string]string{
@@ -208,12 +208,12 @@ func baiduQRPoll(client *http.Client, sign string, gid string, cb string) (statu
 		Status int    `json:"status"`
 		V      string `json:"v"`
 	}
-		if err := json.Unmarshal([]byte(resp.ChannelV), &cv); err != nil {
-			var tmp string
-			if err2 := json.Unmarshal([]byte(strconvQuoteIfNeeded(resp.ChannelV)), &tmp); err2 == nil {
-				_ = json.Unmarshal([]byte(tmp), &cv)
-			}
+	if err := json.Unmarshal([]byte(resp.ChannelV), &cv); err != nil {
+		var tmp string
+		if err2 := json.Unmarshal([]byte(strconvQuoteIfNeeded(resp.ChannelV)), &tmp); err2 == nil {
+			_ = json.Unmarshal([]byte(tmp), &cv)
 		}
+	}
 	switch cv.Status {
 	case 0:
 		if strings.TrimSpace(cv.V) == "" {
@@ -250,19 +250,19 @@ func baiduQRFinalize(client *http.Client, bduss string) (string, error) {
 		"Referer":    baiduQRBasePan,
 	})
 
-		_, _ = baiduQRDoReq(client, "GET", baiduQRBasePan, nil, map[string]string{
-			"User-Agent": baiduQRUA,
-			"Referer":    baiduQRBasePan,
-		})
+	_, _ = baiduQRDoReq(client, "GET", baiduQRBasePan, nil, map[string]string{
+		"User-Agent": baiduQRUA,
+		"Referer":    baiduQRBasePan,
+	})
 
-		panURL, _ := url.Parse(baiduQRBasePan)
-		cookies := client.Jar.Cookies(panURL)
-		cookieStr := formatCookieHeader(cookies)
-		if !strings.Contains(cookieStr, "BDUSS=") {
-			passURL, _ := url.Parse("https://passport.baidu.com/")
-			more := client.Jar.Cookies(passURL)
-			cookieStr = formatCookieHeader(append(cookies, more...))
-		}
+	panURL, _ := url.Parse(baiduQRBasePan)
+	cookies := client.Jar.Cookies(panURL)
+	cookieStr := formatCookieHeader(cookies)
+	if !strings.Contains(cookieStr, "BDUSS=") {
+		passURL, _ := url.Parse("https://passport.baidu.com/")
+		more := client.Jar.Cookies(passURL)
+		cookieStr = formatCookieHeader(append(cookies, more...))
+	}
 	if !strings.Contains(cookieStr, "BDUSS=") {
 		return "", errors.New("cookie missing BDUSS")
 	}
@@ -645,8 +645,8 @@ func baiduShareListAllFiles(surl string, pwd string, baseCookie string) (cookie 
 	}
 
 	type baiduShareFile struct {
-		Fsid    string
-		RealName string
+		Fsid       string
+		RealName   string
 		DirDisplay string
 	}
 
@@ -763,17 +763,17 @@ func baiduShareListAllFiles(surl string, pwd string, baseCookie string) (cookie 
 		data, err := baiduShareListDir(surl, cur.dir, cookie)
 		if err != nil {
 			return cookie, nil, shareID, uk, err
-			}
-			list := baiduGetShareListArray(data)
-			if err := handleList(list, cur.dir, cur.depth); err != nil {
-				return cookie, nil, shareID, uk, err
-			}
 		}
+		list := baiduGetShareListArray(data)
+		if err := handleList(list, cur.dir, cur.depth); err != nil {
+			return cookie, nil, shareID, uk, err
+		}
+	}
 
 	parts := make([]map[string]any, 0, len(out))
 	for _, f := range out {
 		parts = append(parts, map[string]any{
-			"fs_id":          f.Fsid,
+			"fs_id":           f.Fsid,
 			"server_filename": f.RealName,
 			"__dir_display":   f.DirDisplay,
 			"__suffix_name":   sanitizeToken(f.RealName),
@@ -849,7 +849,14 @@ func HandleAPIBaiduList(w http.ResponseWriter, r *http.Request, database *db.DB)
 	if pwd == "" {
 		pwd = strings.TrimSpace(body.Password)
 	}
-	vod, _, err := BaiduList(database, flag, pwd)
+	key := flag + "|" + pwd
+	val, fromCache, err := baiduListCache.Do(key, func() (baiduListAPIValue, error) {
+		vod, _, err := BaiduList(database, flag, pwd)
+		if err != nil {
+			return baiduListAPIValue{}, err
+		}
+		return baiduListAPIValue{Vod: vod}, nil
+	})
 	if err != nil {
 		code := http.StatusBadRequest
 		msg := err.Error()
@@ -859,7 +866,7 @@ func HandleAPIBaiduList(w http.ResponseWriter, r *http.Request, database *db.DB)
 		writeJSON(w, code, map[string]any{"ok": false, "message": msg})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "vod_play_url": vod})
+	writeJSON(w, 200, map[string]any{"ok": true, "vod_play_url": val.Vod, "cache": fromCache})
 }
 
 func HandleAPIBaiduPlay(w http.ResponseWriter, r *http.Request, database *db.DB) {
@@ -1241,8 +1248,8 @@ func baiduCreateDir(cookie string, dirPath string, bdstoken string) (map[string]
 	form.Set("isdir", "1")
 	form.Set("block_list", "[]")
 	objAny, setCookie, err := baiduFetchJSONWithHeaders(http.MethodPost, u.String(), cookie, []byte(form.Encode()), map[string]string{
-		"User-Agent":    baiduScriptWebUA,
-		"Content-Type":  "application/x-www-form-urlencoded",
+		"User-Agent":   baiduScriptWebUA,
+		"Content-Type": "application/x-www-form-urlencoded",
 	})
 	if err != nil {
 		return nil, cookie, err
@@ -1305,8 +1312,8 @@ func baiduShareTransferToDir(cookie string, shareID string, uk string, surl stri
 	form.Set("fsidlist", string(fsidList))
 	form.Set("path", strings.TrimSpace(destPath))
 	objAny, setCookie, err := baiduFetchJSONWithHeaders(http.MethodPost, u.String(), cookie, []byte(form.Encode()), map[string]string{
-		"User-Agent":    baiduScriptWebUA,
-		"Content-Type":  "application/x-www-form-urlencoded",
+		"User-Agent":   baiduScriptWebUA,
+		"Content-Type": "application/x-www-form-urlencoded",
 	})
 	if err != nil {
 		return cookie, err
