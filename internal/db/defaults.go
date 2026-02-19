@@ -1,0 +1,125 @@
+package db
+
+import (
+	"database/sql"
+	"time"
+)
+
+func (d *DB) ensureDefaults(_ bool) error {
+	if d == nil || d.db == nil {
+		return nil
+	}
+
+	now := time.Now().Unix()
+
+	// Ensure per-domain app config rows exist (id=1).
+	_, _ = d.db.Exec(`INSERT INTO app_site(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
+	_, _ = d.db.Exec(`INSERT INTO app_douban(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
+	_, _ = d.db.Exec(`INSERT INTO app_tmdb(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
+	_, _ = d.db.Exec(`INSERT INTO app_video_source(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
+	_, _ = d.db.Exec(`INSERT INTO app_search(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
+	_, _ = d.db.Exec(`INSERT INTO app_smart(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
+	_, _ = d.db.Exec(`INSERT INTO app_goproxy(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
+	_, _ = d.db.Exec(`INSERT INTO app_catpawopen(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
+
+	type seedTable struct {
+		Table string
+		Seed  func(tx *sql.Tx) error
+	}
+	seeds := []seedTable{
+		{
+			Table: "magic_episode_rule",
+			Seed: func(tx *sql.Tx) error {
+				// Keep the legacy front-end compatible payload shape: a JSON array of JSON-string rules.
+				// Defaults aligned with MeowFilm-Frontend "restore defaults".
+				rules := []string{
+					`{"pattern":".*?([Ss]\\\\d{1,2})?(?:第\\\\s*(\\\\d{1,4})\\\\s*(?:集|话)|[Ee][Pp]?\\\\s*(\\\\d{1,4})(?:$|\\\\D)).*?.*","replace":"$1E$2$3","flags":"i"}`,
+					`{"pattern":"^[\\\\s\\\\[\\\\]\\\\(\\\\){}【】._-]*0*(\\\\d{1,4})[\\\\s\\\\[\\\\]\\\\(\\\\){}【】._-]*(?:\\\\.[A-Za-z0-9]{1,6})?\\\\s*$","replace":"E$1","flags":"i"}`,
+				}
+				for i, r := range rules {
+					if _, err := tx.Exec(`INSERT INTO magic_episode_rule(pos, rule_text) VALUES(?, ?)`, i, r); err != nil {
+						return err
+					}
+				}
+				return nil
+			},
+		},
+		{
+			Table: "magic_episode_clean_regex_rule",
+			Seed: func(tx *sql.Tx) error {
+				// Defaults aligned with MeowFilm-Frontend "restore defaults".
+				rules := []string{
+					`\[(?!\s*[Ss]\d{1,2}(?:\s*[Ee]\d{1,5})?\s*\])[^\]]*\]`,
+					`【(?!\s*[Ss]\d{1,2}(?:\s*[Ee]\d{1,5})?\s*】)[^】]*】`,
+					`\((?!\s*[Ss]\d{1,2}(?:\s*[Ee]\d{1,5})?\s*\))[^)]*\)`,
+					`（(?!\s*[Ss]\d{1,2}(?:\s*[Ee]\d{1,5})?\s*）)[^）]*）`,
+					`(?:^|[\s\[\]\(\){}【】._-])(?:4k|8k|2160p|1080p|720p)(?=$|[\s\[\]\(\){}【】._-])`,
+					`高\s*码\s*(?:率|资源|直链)?|码\s*率`,
+				}
+				for i, r := range rules {
+					if _, err := tx.Exec(`INSERT INTO magic_episode_clean_regex_rule(pos, pattern) VALUES(?, ?)`, i, r); err != nil {
+						return err
+					}
+				}
+				return nil
+			},
+		},
+		{
+			Table: "magic_movie_rule",
+			Seed: func(tx *sql.Tx) error {
+				// Defaults aligned with MeowFilm-Frontend "restore defaults".
+				rules := []string{
+					`{"pattern":"^\\\\s*(?!.*(?:S\\\\d{1,2}\\\\s*E\\\\d{1,3}|第\\\\s*\\\\d+\\\\s*[集话期]|(?:^|[\\\\s._-])(?:EP?|E)\\\\s*\\\\d+(?:$|[\\\\s._-])))(?=.*\\\\b(?:19\\\\d{2}|20\\\\d{2})\\\\b).*\\\\.(?:mkv|mp4)\\\\s*$","replace":"","flags":"i"}`,
+				}
+				for i, r := range rules {
+					if _, err := tx.Exec(`INSERT INTO magic_movie_rule(pos, rule_text) VALUES(?, ?)`, i, r); err != nil {
+						return err
+					}
+				}
+				return nil
+			},
+		},
+		{
+			Table: "magic_aggregate_regex_rule",
+			Seed: func(tx *sql.Tx) error {
+				// Defaults aligned with MeowFilm-Frontend "restore defaults".
+				rules := []string{
+					`\([^)]*\)|（[^）]*）|\[[^\]]*\]|\{[^}]*\}|【[^】]*】`,
+					`(?<!新)年\s*番\s*\d+|(?<!新)年\s*番`,
+					`更新\s*中|(?:更新(?:至|到)?|更(?:至|到)?|更|首\s*更)\s*(?:EP|E)?\s*\d{1,4}\s*(?:集|话)?|首\s*更`,
+					`(?:HD\s*)?(?:4[kK]|8[kK])|(?:2160|1080|720)[pP]|国\s*漫|臻\s*彩|杜\s*比\s*音\s*效|已\s*刮\s*削|连\s*载\s*中|10\s*[- ]?bit`,
+					`(?:19\d{2}|20\d{2})(?=\s*(?:(?:HD\s*)?(?:4[kK]|8[kK])|(?:更新|更)))`,
+					`最\s*新\s*(?:一\s*集|更\s*新)`,
+					`(?<=\D)\d{1,4}$`,
+				}
+				for i, r := range rules {
+					if _, err := tx.Exec(`INSERT INTO magic_aggregate_regex_rule(pos, pattern) VALUES(?, ?)`, i, r); err != nil {
+						return err
+					}
+				}
+				return nil
+			},
+		},
+	}
+
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, it := range seeds {
+		var cnt int
+		if err := tx.QueryRow(`SELECT COUNT(1) FROM ` + it.Table).Scan(&cnt); err != nil {
+			return err
+		}
+		if cnt > 0 {
+			continue
+		}
+		if err := it.Seed(tx); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}

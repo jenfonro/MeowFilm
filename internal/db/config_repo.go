@@ -1,0 +1,724 @@
+package db
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"sort"
+	"strings"
+	"time"
+)
+
+type AppConfig struct {
+	SiteName                 string
+	DoubanDataProxy           string
+	DoubanDataCustom          string
+	DoubanImgProxy            string
+	DoubanImgCustom           string
+	VideoSourceAPIBase        string
+	VideoSourceSearchCoverSite string
+	SearchDisplayMode         string
+	SearchBadgePreferEpisode  bool
+	SmartPlayEnabled          bool
+	SmartListEnabled          bool
+	SmartSourceExtractPriority string
+	GoProxyEnabled            bool
+	GoProxyAutoSelect         bool
+	TMDBAPIToken              string
+	TMDBAPIBase               string
+	TMDBImgBase               string
+	TMDBLanguage              string
+	TMDBRegion                string
+	TMDBIncludeAdult          bool
+	CatPawOpenActive          string
+}
+
+func (d *DB) ReadAppConfig() (AppConfig, error) {
+	if d == nil || d.db == nil {
+		return AppConfig{}, nil
+	}
+
+	var (
+		siteName sql.NullString
+		dDataProxy, dDataCustom, dImgProxy, dImgCustom sql.NullString
+		vsAPIBase, vsCover sql.NullString
+		sDisplay sql.NullString
+		sBadgePrefer sql.NullInt64
+		smartPlay, smartList sql.NullInt64
+		smartPriority sql.NullString
+		gEnabled, gAuto sql.NullInt64
+		tToken, tAPIBase, tImgBase, tLang, tRegion sql.NullString
+		tAdult sql.NullInt64
+		cActive sql.NullString
+	)
+
+	_ = d.db.QueryRow(`SELECT site_name FROM app_site WHERE id=1 LIMIT 1`).Scan(&siteName)
+	_ = d.db.QueryRow(`SELECT data_proxy, data_custom, img_proxy, img_custom FROM app_douban WHERE id=1 LIMIT 1`).Scan(&dDataProxy, &dDataCustom, &dImgProxy, &dImgCustom)
+	_ = d.db.QueryRow(`SELECT api_base, search_cover_site FROM app_video_source WHERE id=1 LIMIT 1`).Scan(&vsAPIBase, &vsCover)
+	_ = d.db.QueryRow(`SELECT display_mode, badge_prefer_episode FROM app_search WHERE id=1 LIMIT 1`).Scan(&sDisplay, &sBadgePrefer)
+	_ = d.db.QueryRow(`SELECT play_enabled, list_enabled, source_extract_priority FROM app_smart WHERE id=1 LIMIT 1`).Scan(&smartPlay, &smartList, &smartPriority)
+	_ = d.db.QueryRow(`SELECT enabled, auto_select FROM app_goproxy WHERE id=1 LIMIT 1`).Scan(&gEnabled, &gAuto)
+	_ = d.db.QueryRow(`SELECT api_token, api_base, img_base, language, region, include_adult FROM app_tmdb WHERE id=1 LIMIT 1`).Scan(&tToken, &tAPIBase, &tImgBase, &tLang, &tRegion, &tAdult)
+	_ = d.db.QueryRow(`SELECT active FROM app_catpawopen WHERE id=1 LIMIT 1`).Scan(&cActive)
+
+	cfg := AppConfig{
+		SiteName:                  defaultIfEmpty(siteName.String, "MeowFilm"),
+		DoubanDataProxy:           defaultIfEmpty(dDataProxy.String, "direct"),
+		DoubanDataCustom:          dDataCustom.String,
+		DoubanImgProxy:            defaultIfEmpty(dImgProxy.String, "direct-browser"),
+		DoubanImgCustom:           dImgCustom.String,
+		VideoSourceAPIBase:        vsAPIBase.String,
+		VideoSourceSearchCoverSite: vsCover.String,
+		SearchDisplayMode:         defaultIfEmpty(sDisplay.String, "sites"),
+		SearchBadgePreferEpisode:  sBadgePrefer.Int64 != 0,
+		SmartPlayEnabled:          smartPlay.Int64 != 0,
+		SmartListEnabled:          smartList.Int64 != 0,
+		SmartSourceExtractPriority: defaultIfEmpty(smartPriority.String, "无"),
+		GoProxyEnabled:            gEnabled.Int64 != 0,
+		GoProxyAutoSelect:         gAuto.Int64 != 0,
+		TMDBAPIToken:              tToken.String,
+		TMDBAPIBase:               tAPIBase.String,
+		TMDBImgBase:               tImgBase.String,
+		TMDBLanguage:              defaultIfEmpty(tLang.String, "zh-CN"),
+		TMDBRegion:                defaultIfEmpty(tRegion.String, "CN"),
+		TMDBIncludeAdult:          tAdult.Int64 != 0,
+		CatPawOpenActive:          cActive.String,
+	}
+	return cfg, nil
+}
+
+func (d *DB) UpdateAppConfig(update func(*AppConfig)) error {
+	if d == nil || d.db == nil {
+		return nil
+	}
+	cfg, err := d.ReadAppConfig()
+	if err != nil {
+		return err
+	}
+	update(&cfg)
+
+	now := time.Now().Unix()
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	_, _ = tx.Exec(`
+		INSERT INTO app_site(id, site_name, updated_at)
+		VALUES(1, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET site_name=excluded.site_name, updated_at=excluded.updated_at
+	`, strings.TrimSpace(cfg.SiteName), now)
+
+	_, _ = tx.Exec(`
+		INSERT INTO app_douban(id, data_proxy, data_custom, img_proxy, img_custom, updated_at)
+		VALUES(1, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+		  data_proxy=excluded.data_proxy,
+		  data_custom=excluded.data_custom,
+		  img_proxy=excluded.img_proxy,
+		  img_custom=excluded.img_custom,
+		  updated_at=excluded.updated_at
+	`, strings.TrimSpace(cfg.DoubanDataProxy), strings.TrimSpace(cfg.DoubanDataCustom),
+		strings.TrimSpace(cfg.DoubanImgProxy), strings.TrimSpace(cfg.DoubanImgCustom), now)
+
+	_, _ = tx.Exec(`
+		INSERT INTO app_video_source(id, api_base, search_cover_site, updated_at)
+		VALUES(1, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET api_base=excluded.api_base, search_cover_site=excluded.search_cover_site, updated_at=excluded.updated_at
+	`, strings.TrimSpace(cfg.VideoSourceAPIBase), strings.TrimSpace(cfg.VideoSourceSearchCoverSite), now)
+
+	_, _ = tx.Exec(`
+		INSERT INTO app_search(id, display_mode, badge_prefer_episode, updated_at)
+		VALUES(1, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET display_mode=excluded.display_mode, badge_prefer_episode=excluded.badge_prefer_episode, updated_at=excluded.updated_at
+	`, strings.TrimSpace(cfg.SearchDisplayMode), bool01Int(cfg.SearchBadgePreferEpisode), now)
+
+	_, _ = tx.Exec(`
+		INSERT INTO app_smart(id, play_enabled, list_enabled, source_extract_priority, updated_at)
+		VALUES(1, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+		  play_enabled=excluded.play_enabled,
+		  list_enabled=excluded.list_enabled,
+		  source_extract_priority=excluded.source_extract_priority,
+		  updated_at=excluded.updated_at
+	`, bool01Int(cfg.SmartPlayEnabled), bool01Int(cfg.SmartListEnabled), strings.TrimSpace(cfg.SmartSourceExtractPriority), now)
+
+	_, _ = tx.Exec(`
+		INSERT INTO app_goproxy(id, enabled, auto_select, updated_at)
+		VALUES(1, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled, auto_select=excluded.auto_select, updated_at=excluded.updated_at
+	`, bool01Int(cfg.GoProxyEnabled), bool01Int(cfg.GoProxyAutoSelect), now)
+
+	_, _ = tx.Exec(`
+		INSERT INTO app_tmdb(id, api_token, api_base, img_base, language, region, include_adult, updated_at)
+		VALUES(1, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+		  api_token=excluded.api_token,
+		  api_base=excluded.api_base,
+		  img_base=excluded.img_base,
+		  language=excluded.language,
+		  region=excluded.region,
+		  include_adult=excluded.include_adult,
+		  updated_at=excluded.updated_at
+	`, strings.TrimSpace(cfg.TMDBAPIToken), strings.TrimSpace(cfg.TMDBAPIBase), strings.TrimSpace(cfg.TMDBImgBase),
+		strings.TrimSpace(cfg.TMDBLanguage), strings.TrimSpace(cfg.TMDBRegion), bool01Int(cfg.TMDBIncludeAdult), now)
+
+	_, _ = tx.Exec(`
+		INSERT INTO app_catpawopen(id, active, updated_at)
+		VALUES(1, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET active=excluded.active, updated_at=excluded.updated_at
+	`, strings.TrimSpace(cfg.CatPawOpenActive), now)
+
+	return tx.Commit()
+}
+
+type CatPawOpenServer struct {
+	Name    string
+	APIBase string
+}
+
+func (d *DB) ListCatPawOpenServers() ([]CatPawOpenServer, error) {
+	rows, err := d.db.Query(`SELECT name, api_base FROM catpawopen_server ORDER BY order_index ASC, name ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []CatPawOpenServer{}
+	for rows.Next() {
+		var it CatPawOpenServer
+		_ = rows.Scan(&it.Name, &it.APIBase)
+		it.Name = strings.TrimSpace(it.Name)
+		it.APIBase = strings.TrimSpace(it.APIBase)
+		if it.Name == "" || it.APIBase == "" {
+			continue
+		}
+		out = append(out, it)
+	}
+	return out, nil
+}
+
+func (d *DB) ReplaceCatPawOpenServers(servers []CatPawOpenServer) error {
+	if d == nil || d.db == nil {
+		return nil
+	}
+	now := time.Now().Unix()
+	seen := map[string]struct{}{}
+	list := make([]CatPawOpenServer, 0, len(servers))
+	for _, it := range servers {
+		it.Name = strings.TrimSpace(it.Name)
+		it.APIBase = strings.TrimSpace(it.APIBase)
+		if it.Name == "" || it.APIBase == "" {
+			continue
+		}
+		if _, ok := seen[it.Name]; ok {
+			continue
+		}
+		seen[it.Name] = struct{}{}
+		list = append(list, it)
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`DELETE FROM catpawopen_server`); err != nil {
+		return err
+	}
+	for i, it := range list {
+		if _, err := tx.Exec(`INSERT INTO catpawopen_server(name, api_base, order_index, updated_at) VALUES(?,?,?,?)`, it.Name, it.APIBase, i, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+type CatPawOpenPan struct {
+	Key     string
+	Name    string
+	Enabled bool
+}
+
+func (d *DB) ListCatPawOpenPans() ([]CatPawOpenPan, error) {
+	rows, err := d.db.Query(`SELECT key, name, enabled FROM catpawopen_pan ORDER BY key ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []CatPawOpenPan{}
+	for rows.Next() {
+		var (
+			key string
+			name string
+			en int
+		)
+		_ = rows.Scan(&key, &name, &en)
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		out = append(out, CatPawOpenPan{Key: key, Name: name, Enabled: en != 0})
+	}
+	return out, nil
+}
+
+func (d *DB) ReplaceCatPawOpenPans(pans []CatPawOpenPan) error {
+	now := time.Now().Unix()
+	seen := map[string]struct{}{}
+	list := make([]CatPawOpenPan, 0, len(pans))
+	for _, it := range pans {
+		it.Key = strings.TrimSpace(it.Key)
+		if it.Key == "" {
+			continue
+		}
+		if _, ok := seen[it.Key]; ok {
+			continue
+		}
+		seen[it.Key] = struct{}{}
+		list = append(list, it)
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`DELETE FROM catpawopen_pan`); err != nil {
+		return err
+	}
+	for _, it := range list {
+		en := 0
+		if it.Enabled {
+			en = 1
+		}
+		if _, err := tx.Exec(`INSERT INTO catpawopen_pan(key, name, enabled, updated_at) VALUES(?,?,?,?)`, it.Key, it.Name, en, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+type GoProxyServer struct {
+	Name        string
+	DisplayName string
+	Base        string
+	PansBaidu   bool
+	PansQuark   bool
+}
+
+func (d *DB) ListGoProxyServers() ([]GoProxyServer, error) {
+	rows, err := d.db.Query(`SELECT name, display_name, base, pans_baidu, pans_quark FROM goproxy_server ORDER BY order_index ASC, name ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []GoProxyServer{}
+	for rows.Next() {
+		var (
+			name string
+			displayName string
+			base string
+			bd int
+			qk int
+		)
+		_ = rows.Scan(&name, &displayName, &base, &bd, &qk)
+		name = strings.TrimSpace(name)
+		base = strings.TrimSpace(base)
+		if name == "" || base == "" {
+			continue
+		}
+		out = append(out, GoProxyServer{Name: name, DisplayName: displayName, Base: base, PansBaidu: bd != 0, PansQuark: qk != 0})
+	}
+	return out, nil
+}
+
+func (d *DB) ReplaceGoProxyServers(servers []GoProxyServer) error {
+	now := time.Now().Unix()
+	seen := map[string]struct{}{}
+	list := make([]GoProxyServer, 0, len(servers))
+	for _, it := range servers {
+		it.Name = strings.TrimSpace(it.Name)
+		it.Base = strings.TrimSpace(it.Base)
+		if it.Name == "" || it.Base == "" {
+			continue
+		}
+		if _, ok := seen[it.Name]; ok {
+			continue
+		}
+		seen[it.Name] = struct{}{}
+		list = append(list, it)
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`DELETE FROM goproxy_server`); err != nil {
+		return err
+	}
+	for i, it := range list {
+		bd := 0
+		qk := 0
+		if it.PansBaidu {
+			bd = 1
+		}
+		if it.PansQuark {
+			qk = 1
+		}
+		if _, err := tx.Exec(`INSERT INTO goproxy_server(name, display_name, base, pans_baidu, pans_quark, order_index, updated_at) VALUES(?,?,?,?,?,?,?)`,
+			it.Name, it.DisplayName, it.Base, bd, qk, i, now,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+type VideoSourceSite struct {
+	Key  string
+	Name string
+	API  string
+	Type *int
+}
+
+type VideoSourceSiteState struct {
+	Enabled      bool
+	Home         bool
+	Search       bool
+	Availability string
+	Error        string
+	OrderIndex   int
+}
+
+func (d *DB) ListVideoSourceSites() ([]VideoSourceSite, error) {
+	rows, err := d.db.Query(`SELECT key, name, api, type FROM video_source_site ORDER BY key ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []VideoSourceSite{}
+	for rows.Next() {
+		var (
+			key string
+			name string
+			api string
+			typ sql.NullInt64
+		)
+		_ = rows.Scan(&key, &name, &api, &typ)
+		key = strings.TrimSpace(key)
+		api = strings.TrimSpace(api)
+		if key == "" || api == "" {
+			continue
+		}
+		var tptr *int
+		if typ.Valid {
+			n := int(typ.Int64)
+			tptr = &n
+		}
+		out = append(out, VideoSourceSite{Key: key, Name: name, API: api, Type: tptr})
+	}
+	return out, nil
+}
+
+func (d *DB) ReplaceVideoSourceSites(sites []VideoSourceSite) error {
+	now := time.Now().Unix()
+	seen := map[string]struct{}{}
+	list := make([]VideoSourceSite, 0, len(sites))
+	for _, it := range sites {
+		it.Key = strings.TrimSpace(it.Key)
+		it.API = strings.TrimSpace(it.API)
+		if it.Key == "" || it.API == "" {
+			continue
+		}
+		if _, ok := seen[it.Key]; ok {
+			continue
+		}
+		seen[it.Key] = struct{}{}
+		list = append(list, it)
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`DELETE FROM video_source_site`); err != nil {
+		return err
+	}
+	for _, it := range list {
+		if _, err := tx.Exec(`INSERT INTO video_source_site(key, name, api, type, updated_at) VALUES(?,?,?,?,?)`,
+			it.Key, it.Name, it.API, it.Type, now,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (d *DB) ReadVideoSourceSiteStates() (map[string]VideoSourceSiteState, error) {
+	rows, err := d.db.Query(`SELECT site_key, enabled, home, search, availability, error, order_index FROM video_source_site_state`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]VideoSourceSiteState{}
+	for rows.Next() {
+		var (
+			key string
+			en int
+			home int
+			search int
+			avail string
+			errStr string
+			ord int
+		)
+		_ = rows.Scan(&key, &en, &home, &search, &avail, &errStr, &ord)
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		out[key] = VideoSourceSiteState{
+			Enabled:      en != 0,
+			Home:         home != 0,
+			Search:       search != 0,
+			Availability: strings.TrimSpace(avail),
+			Error:        strings.TrimSpace(errStr),
+			OrderIndex:   ord,
+		}
+	}
+	return out, nil
+}
+
+func (d *DB) UpsertVideoSourceSiteState(key string, patch func(*VideoSourceSiteState)) error {
+	k := strings.TrimSpace(key)
+	if k == "" {
+		return errors.New("site key empty")
+	}
+	states, err := d.ReadVideoSourceSiteStates()
+	if err != nil {
+		return err
+	}
+	s := states[k]
+	patch(&s)
+	if strings.TrimSpace(s.Availability) == "" {
+		s.Availability = "unchecked"
+	}
+	now := time.Now().Unix()
+	_, err = d.db.Exec(`
+		INSERT INTO video_source_site_state(site_key, enabled, home, search, availability, error, order_index, updated_at)
+		VALUES(?,?,?,?,?,?,?,?)
+		ON CONFLICT(site_key) DO UPDATE SET
+		  enabled=excluded.enabled,
+		  home=excluded.home,
+		  search=excluded.search,
+		  availability=excluded.availability,
+		  error=excluded.error,
+		  order_index=excluded.order_index,
+		  updated_at=excluded.updated_at
+	`, k, bool01Int(s.Enabled), bool01Int(s.Home), bool01Int(s.Search), s.Availability, s.Error, s.OrderIndex, now)
+	return err
+}
+
+func (d *DB) ReplaceVideoSourceSiteOrder(order []string) error {
+	now := time.Now().Unix()
+	seen := map[string]struct{}{}
+	next := []string{}
+	for _, k := range order {
+		key := strings.TrimSpace(k)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		next = append(next, key)
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	_, _ = tx.Exec(`UPDATE video_source_site_state SET order_index = 1000000000, updated_at = ?`, now)
+	for i, key := range next {
+		if _, err := tx.Exec(`
+			INSERT INTO video_source_site_state(site_key, order_index, updated_at)
+			VALUES(?,?,?)
+			ON CONFLICT(site_key) DO UPDATE SET order_index=excluded.order_index, updated_at=excluded.updated_at
+		`, key, i, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (d *DB) ReadPanLoginSettings() (map[string]map[string]any, error) {
+	rows, err := d.db.Query(`SELECT provider, field, value FROM pan_login_setting ORDER BY provider ASC, field ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	root := map[string]map[string]any{}
+	for rows.Next() {
+		var p, f, v string
+		_ = rows.Scan(&p, &f, &v)
+		p = strings.TrimSpace(p)
+		f = strings.TrimSpace(f)
+		if p == "" || f == "" {
+			continue
+		}
+		m := root[p]
+		if m == nil {
+			m = map[string]any{}
+		}
+		var anyVal any
+		if err := json.Unmarshal([]byte(v), &anyVal); err == nil {
+			m[f] = anyVal
+		} else {
+			m[f] = v
+		}
+		root[p] = m
+	}
+	return root, nil
+}
+
+func (d *DB) ReplacePanLoginSettings(root map[string]map[string]any) error {
+	type row struct {
+		provider string
+		field    string
+		value    string
+	}
+	rows := []row{}
+	for pk, pv := range root {
+		provider := strings.TrimSpace(pk)
+		if provider == "" || pv == nil {
+			continue
+		}
+		for fk, fv := range pv {
+			field := strings.TrimSpace(fk)
+			if field == "" {
+				continue
+			}
+			b, err := json.Marshal(fv)
+			if err != nil {
+				continue
+			}
+			rows = append(rows, row{provider: provider, field: field, value: string(b)})
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].provider != rows[j].provider {
+			return rows[i].provider < rows[j].provider
+		}
+		return rows[i].field < rows[j].field
+	})
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`DELETE FROM pan_login_setting`); err != nil {
+		return err
+	}
+	for _, it := range rows {
+		if _, err := tx.Exec(`INSERT INTO pan_login_setting(provider, field, value) VALUES(?,?,?)`, it.provider, it.field, it.value); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (d *DB) listStringTable(table, col string) ([]string, error) {
+	t := strings.TrimSpace(table)
+	c := strings.TrimSpace(col)
+	if t == "" || c == "" {
+		return nil, errors.New("invalid table")
+	}
+	rows, err := d.db.Query(`SELECT ` + c + ` FROM ` + t + ` ORDER BY pos ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var s sql.NullString
+		_ = rows.Scan(&s)
+		if s.Valid && strings.TrimSpace(s.String) != "" {
+			out = append(out, s.String)
+		}
+	}
+	return out, nil
+}
+
+func (d *DB) replaceStringTable(table, col string, list []string) error {
+	t := strings.TrimSpace(table)
+	c := strings.TrimSpace(col)
+	if t == "" || c == "" {
+		return errors.New("invalid table")
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`DELETE FROM ` + t); err != nil {
+		return err
+	}
+	pos := 0
+	for _, it := range list {
+		s := strings.TrimSpace(it)
+		if s == "" {
+			continue
+		}
+		if _, err := tx.Exec(`INSERT INTO `+t+`(pos, `+c+`) VALUES(?, ?)`, pos, s); err != nil {
+			return err
+		}
+		pos++
+	}
+	return tx.Commit()
+}
+
+func (d *DB) ListMagicEpisodeRules() ([]string, error) { return d.listStringTable("magic_episode_rule", "rule_text") }
+func (d *DB) ReplaceMagicEpisodeRules(list []string) error {
+	return d.replaceStringTable("magic_episode_rule", "rule_text", list)
+}
+func (d *DB) ListMagicEpisodeCleanRegexRules() ([]string, error) {
+	return d.listStringTable("magic_episode_clean_regex_rule", "pattern")
+}
+func (d *DB) ReplaceMagicEpisodeCleanRegexRules(list []string) error {
+	return d.replaceStringTable("magic_episode_clean_regex_rule", "pattern", list)
+}
+func (d *DB) ListMagicMovieRules() ([]string, error) { return d.listStringTable("magic_movie_rule", "rule_text") }
+func (d *DB) ReplaceMagicMovieRules(list []string) error {
+	return d.replaceStringTable("magic_movie_rule", "rule_text", list)
+}
+func (d *DB) ListMagicAggregateRegexRules() ([]string, error) {
+	return d.listStringTable("magic_aggregate_regex_rule", "pattern")
+}
+func (d *DB) ReplaceMagicAggregateRegexRules(list []string) error {
+	return d.replaceStringTable("magic_aggregate_regex_rule", "pattern", list)
+}
+func (d *DB) ListSmartSourcePriorityTokens() ([]string, error) {
+	return d.listStringTable("smart_source_priority_token", "token")
+}
+func (d *DB) ReplaceSmartSourcePriorityTokens(list []string) error {
+	return d.replaceStringTable("smart_source_priority_token", "token", list)
+}
+func (d *DB) ListSmartPanMatchTokens() ([]string, error) {
+	return d.listStringTable("smart_pan_match_token", "token")
+}
+func (d *DB) ReplaceSmartPanMatchTokens(list []string) error {
+	return d.replaceStringTable("smart_pan_match_token", "token", list)
+}
+
+func bool01Int(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func defaultIfEmpty(v, def string) string {
+	if strings.TrimSpace(v) == "" {
+		return def
+	}
+	return v
+}

@@ -16,7 +16,8 @@ import (
 // - This is not a full Emby server implementation.
 // - Only routes needed by supported clients are exposed; add more incrementally as clients request them.
 func EmbyHandler(database *db.DB) http.Handler {
-	serverID := embyStableServerID(defaultString(database.GetSetting("site_name"), "MeowFilm"))
+	cfg, _ := database.ReadAppConfig()
+	serverID := embyStableServerID(defaultString(cfg.SiteName, "MeowFilm"))
 	type routeHandler func(w http.ResponseWriter, r *http.Request, tail []string)
 	routes := map[string]routeHandler{
 		"branding": func(w http.ResponseWriter, r *http.Request, tail []string) {

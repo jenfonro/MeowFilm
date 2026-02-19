@@ -217,10 +217,10 @@ func CompileRulesDebug(database *db.DB) (any, error) {
 	if database == nil {
 		return nil, errors.New("db nil")
 	}
-	rawEpisodeRules := parseJSONStringArray(database.GetSetting("magic_episode_rules"))
-	rawCleanRules := parseJSONStringArray(database.GetSetting("magic_episode_clean_regex_rules"))
-	rawMovieRules := parseJSONStringArray(database.GetSetting("magic_movie_rules"))
-	rawAggRules := parseJSONStringArray(database.GetSetting("magic_aggregate_regex_rules"))
+	rawEpisodeRules, _ := database.ListMagicEpisodeRules()
+	rawCleanRules, _ := database.ListMagicEpisodeCleanRegexRules()
+	rawMovieRules, _ := database.ListMagicMovieRules()
+	rawAggRules, _ := database.ListMagicAggregateRegexRules()
 
 	type jsCompileInfo struct {
 		Raw     string `json:"raw"`

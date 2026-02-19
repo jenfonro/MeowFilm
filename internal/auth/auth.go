@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -133,23 +134,20 @@ func (a *Auth) Login(w http.ResponseWriter, username, password string) (status i
 	if u == "" || p == "" {
 		return http.StatusBadRequest, "用户名与密码不能为空"
 	}
-	var hashed string
-	var role string
-	var statusStr string
-	err := a.db.SQL().QueryRow(`SELECT password, role, status FROM users WHERE username = ? LIMIT 1`, u).Scan(&hashed, &role, &statusStr)
+	row, err := a.db.GetUserAuthByUsername(u)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return http.StatusUnauthorized, "用户名或密码错误"
 		}
 		return http.StatusInternalServerError, "请求失败"
 	}
-	if statusStr != "active" {
+	if strings.TrimSpace(row.Status) != "active" {
 		return http.StatusForbidden, "该账户已禁用"
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(hashed), []byte(p)); err != nil {
+	if err := bcrypt.CompareHashAndPassword([]byte(row.PasswordHash), []byte(p)); err != nil {
 		return http.StatusUnauthorized, "用户名或密码错误"
 	}
-	token, err := a.issueToken(u)
+	token, err := a.issueToken(row.ID)
 	if err != nil || token == "" {
 		return http.StatusInternalServerError, "请求失败"
 	}
@@ -166,23 +164,21 @@ func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Auth) resolveToken(token string) (*User, time.Time) {
-	var u User
-	var expMS int64
-	err := a.db.SQL().QueryRow(`
-		SELECT u.id, u.username, u.role, u.status, t.expires_at
-		FROM auth_tokens t JOIN users u ON u.id = t.user_id
-		WHERE t.token = ? LIMIT 1
-	`, token).Scan(&u.ID, &u.Username, &u.Role, &u.Status, &expMS)
+	row, err := a.db.ResolveToken(token)
 	if err != nil {
 		return nil, time.Time{}
 	}
-	return &u, time.UnixMilli(expMS)
+	return &User{
+		ID:       row.UserID,
+		Username: row.Username,
+		Role:     row.Role,
+		Status:   row.Status,
+	}, row.ExpiresAt
 }
 
-func (a *Auth) issueToken(username string) (string, error) {
-	var userID int64
-	if err := a.db.SQL().QueryRow(`SELECT id FROM users WHERE username = ? LIMIT 1`, username).Scan(&userID); err != nil {
-		return "", err
+func (a *Auth) issueToken(userID int64) (string, error) {
+	if userID <= 0 {
+		return "", errors.New("invalid user id")
 	}
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
@@ -191,16 +187,14 @@ func (a *Auth) issueToken(username string) (string, error) {
 	token := base64.RawURLEncoding.EncodeToString(b)
 	now := time.Now()
 	exp := now.Add(tokenTTL)
-	_, err := a.db.SQL().Exec(`INSERT INTO auth_tokens(token, user_id, created_at, expires_at) VALUES (?,?,?,?)`,
-		token, userID, now.UnixMilli(), exp.UnixMilli())
-	if err != nil {
+	if err := a.db.InsertToken(token, userID, exp); err != nil {
 		return "", err
 	}
 	return token, nil
 }
 
 func (a *Auth) deleteToken(token string) {
-	_, _ = a.db.SQL().Exec(`DELETE FROM auth_tokens WHERE token = ?`, token)
+	_ = a.db.DeleteToken(token)
 }
 
 func readCookie(r *http.Request) string {

@@ -77,6 +77,6 @@ func embyCompileAggregateCleanRules(database *db.DB) []*regexp.Regexp {
 	if database == nil {
 		return nil
 	}
-	raw := parseJSONStringArray(database.GetSetting("magic_aggregate_regex_rules"))
+	raw, _ := database.ListMagicAggregateRegexRules()
 	return embyCompileCleanRegexRules(raw)
 }

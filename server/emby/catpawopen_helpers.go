@@ -3,7 +3,6 @@ package emby
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/catpawopen"
@@ -26,17 +25,12 @@ func embyResolveCatApiBaseForUser(database *db.DB, u *embyUser) string {
 	if database == nil {
 		return ""
 	}
-	var userBase string
-	if u != nil && strings.TrimSpace(u.Username) != "" {
-		_ = database.SQL().QueryRow(`SELECT cat_api_base FROM users WHERE username=? LIMIT 1`, strings.TrimSpace(u.Username)).Scan(&userBase)
+	cfg, _ := database.ReadAppConfig()
+	raw, _ := database.ListCatPawOpenServers()
+	servers := make([]catpawopen.Server, 0, len(raw))
+	for _, s := range raw {
+		servers = append(servers, catpawopen.Server{Name: s.Name, APIBase: s.APIBase})
 	}
-	userBase = strings.TrimSpace(userBase)
-	serverBase := strings.TrimSpace(catpawopen.ResolveActiveBase(catpawopen.ParseServers(database.GetSetting("catpawopen_servers")), database.GetSetting("catpawopen_active")))
-	if u != nil && strings.TrimSpace(u.Role) == "user" {
-		return strings.TrimSpace(userBase)
-	}
-	if userBase != "" {
-		return userBase
-	}
-	return serverBase
+	_ = u
+	return catpawopen.ResolveActiveBase(servers, cfg.CatPawOpenActive)
 }

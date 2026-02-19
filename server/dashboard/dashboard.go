@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
@@ -12,7 +13,6 @@ import (
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/catpawopen"
 	"github.com/jenfonro/meowfilm/server/config"
-	"github.com/jenfonro/meowfilm/server/magic"
 	"github.com/jenfonro/meowfilm/server/netdisk"
 )
 
@@ -127,7 +127,8 @@ func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
 					return
 				}
 				sites := mergeVideoSourceSites(database)
-				cover := resolveSearchCoverSite(sites, database.GetSetting("video_source_search_cover_site"))
+				cfg, _ := database.ReadAppConfig()
+				cover := resolveSearchCoverSite(sites, cfg.VideoSourceSearchCoverSite)
 				writeJSON(w, 200, map[string]any{"success": true, "sites": sites, "coverSite": cover})
 			})).ServeHTTP(w, r)
 		case "/video/source/sites/status":
@@ -228,18 +229,17 @@ func bool01(b bool) string {
 }
 
 func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, database *db.DB) {
-	readBoolEnabled := func(key string) bool {
-		return strings.TrimSpace(database.GetSetting(key)) != "0"
-	}
-
 	writeOut := func() {
+		cfg, _ := database.ReadAppConfig()
+		sourceTokens, _ := database.ListSmartSourcePriorityTokens()
+		panTokens, _ := database.ListSmartPanMatchTokens()
 		writeJSON(w, 200, map[string]any{
 			"success":                    true,
-			"smartPlayEnabled":           readBoolEnabled("smart_play_enabled"),
-			"smartListEnabled":           readBoolEnabled("smart_list_enabled"),
-			"smartSourceExtractPriority": config.NormalizeSourceExtractPriority(database.GetSetting("smart_source_extract_priority")),
-			"smartSourcePriorityTokens":  parseJSONStringArray(database.GetSetting("smart_source_priority_tokens")),
-			"smartPanMatchTokens":        parseJSONStringArray(database.GetSetting("smart_pan_match_tokens")),
+			"smartPlayEnabled":           cfg.SmartPlayEnabled,
+			"smartListEnabled":           cfg.SmartListEnabled,
+			"smartSourceExtractPriority": config.NormalizeSourceExtractPriority(cfg.SmartSourceExtractPriority),
+			"smartSourcePriorityTokens":  defaultStringArray(sourceTokens),
+			"smartPanMatchTokens":        defaultStringArray(panTokens),
 		})
 	}
 
@@ -251,19 +251,23 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 		_ = readJSONLoose(r, &body)
 
 		if _, ok := body["smartPlayEnabled"]; ok {
-			_ = database.SetSetting("smart_play_enabled", bool01(readBoolJSONBody(body, "smartPlayEnabled")))
+			_ = database.UpdateAppConfig(func(c *db.AppConfig) {
+				c.SmartPlayEnabled = readBoolJSONBody(body, "smartPlayEnabled")
+			})
 		}
 		if _, ok := body["smartListEnabled"]; ok {
-			_ = database.SetSetting("smart_list_enabled", bool01(readBoolJSONBody(body, "smartListEnabled")))
+			_ = database.UpdateAppConfig(func(c *db.AppConfig) {
+				c.SmartListEnabled = readBoolJSONBody(body, "smartListEnabled")
+			})
 		}
 		if _, ok := body["smartSourceExtractPriority"]; ok {
-			_ = database.SetSetting(
-				"smart_source_extract_priority",
-				config.NormalizeSourceExtractPriority(readStrJSONBody(body, "smartSourceExtractPriority")),
-			)
+			priority := config.NormalizeSourceExtractPriority(readStrJSONBody(body, "smartSourceExtractPriority"))
+			_ = database.UpdateAppConfig(func(c *db.AppConfig) {
+				c.SmartSourceExtractPriority = priority
+			})
 		}
 
-		saveArr := func(key string, list any) {
+		saveArr := func(set func([]string) error, list any) {
 			switch vv := list.(type) {
 			case []any:
 				out := []string{}
@@ -274,17 +278,17 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 						out = append(out, s)
 					}
 				}
-				saveStrArrSetting(database, key, out)
+				_ = set(out)
 			default:
 				// ignore
 			}
 		}
 
 		if v, ok := body["smartSourcePriorityTokens"]; ok && v != nil {
-			saveArr("smart_source_priority_tokens", v)
+			saveArr(database.ReplaceSmartSourcePriorityTokens, v)
 		}
 		if v, ok := body["smartPanMatchTokens"]; ok && v != nil {
-			saveArr("smart_pan_match_tokens", v)
+			saveArr(database.ReplaceSmartPanMatchTokens, v)
 		}
 
 		writeOut()
@@ -293,36 +297,28 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 	}
 }
 
+func defaultStringArray(v []string) []string {
+	if v == nil {
+		return []string{}
+	}
+	return v
+}
+
 func handleDashboardMetadataSettings(w http.ResponseWriter, r *http.Request, database *db.DB) {
-	bool01 := func(b bool) string {
-		if b {
-			return "1"
-		}
-		return "0"
-	}
-	readBool := func(key string) bool {
-		return strings.TrimSpace(database.GetSetting(key)) == "1"
-	}
-	readStringDefault := func(key, def string) string {
-		v := strings.TrimSpace(database.GetSetting(key))
-		if v == "" {
-			return def
-		}
-		return v
-	}
 	writeOut := func() {
+		cfg, _ := database.ReadAppConfig()
 		writeJSON(w, 200, map[string]any{
 			"success":            true,
-			"doubanDataProxy":    defaultString(database.GetSetting("douban_data_proxy"), "direct"),
-			"doubanDataCustom":   database.GetSetting("douban_data_custom"),
-			"doubanImgProxy":     defaultString(database.GetSetting("douban_img_proxy"), "direct-browser"),
-			"doubanImgCustom":    database.GetSetting("douban_img_custom"),
-			"tmdbApiToken":       strings.TrimSpace(database.GetSetting("tmdb_api_token")),
-			"tmdbDataProxyBase":  strings.TrimSpace(database.GetSetting("tmdb_api_base")),
-			"tmdbImageProxyBase": strings.TrimSpace(database.GetSetting("tmdb_img_base")),
-			"language":           readStringDefault("tmdb_language", "zh-CN"),
-			"region":             readStringDefault("tmdb_region", "CN"),
-			"includeAdult":       readBool("tmdb_include_adult"),
+			"doubanDataProxy":    defaultString(cfg.DoubanDataProxy, "direct"),
+			"doubanDataCustom":   cfg.DoubanDataCustom,
+			"doubanImgProxy":     defaultString(cfg.DoubanImgProxy, "direct-browser"),
+			"doubanImgCustom":    cfg.DoubanImgCustom,
+			"tmdbApiToken":       strings.TrimSpace(cfg.TMDBAPIToken),
+			"tmdbDataProxyBase":  strings.TrimSpace(cfg.TMDBAPIBase),
+			"tmdbImageProxyBase": strings.TrimSpace(cfg.TMDBImgBase),
+			"language":           defaultString(strings.TrimSpace(cfg.TMDBLanguage), "zh-CN"),
+			"region":             defaultString(strings.TrimSpace(cfg.TMDBRegion), "CN"),
+			"includeAdult":       cfg.TMDBIncludeAdult,
 		})
 	}
 
@@ -333,17 +329,19 @@ func handleDashboardMetadataSettings(w http.ResponseWriter, r *http.Request, dat
 		var body map[string]any
 		_ = readJSONLoose(r, &body)
 
-		_ = database.SetSetting("douban_data_proxy", readStrJSONBody(body, "doubanDataProxy"))
-		_ = database.SetSetting("douban_data_custom", readStrJSONBody(body, "doubanDataCustom"))
-		_ = database.SetSetting("douban_img_proxy", readStrJSONBody(body, "doubanImgProxy"))
-		_ = database.SetSetting("douban_img_custom", readStrJSONBody(body, "doubanImgCustom"))
+		_ = database.UpdateAppConfig(func(c *db.AppConfig) {
+			c.DoubanDataProxy = readStrJSONBody(body, "doubanDataProxy")
+			c.DoubanDataCustom = readStrJSONBody(body, "doubanDataCustom")
+			c.DoubanImgProxy = readStrJSONBody(body, "doubanImgProxy")
+			c.DoubanImgCustom = readStrJSONBody(body, "doubanImgCustom")
 
-		_ = database.SetSetting("tmdb_api_token", readStrJSONBody(body, "tmdbApiToken"))
-		_ = database.SetSetting("tmdb_api_base", normalizeHTTPBase(readStrJSONBody(body, "tmdbDataProxyBase")))
-		_ = database.SetSetting("tmdb_img_base", normalizeHTTPBase(readStrJSONBody(body, "tmdbImageProxyBase")))
-		_ = database.SetSetting("tmdb_language", readStrJSONBody(body, "language"))
-		_ = database.SetSetting("tmdb_region", readStrJSONBody(body, "region"))
-		_ = database.SetSetting("tmdb_include_adult", bool01(readBoolJSONBody(body, "includeAdult")))
+			c.TMDBAPIToken = readStrJSONBody(body, "tmdbApiToken")
+			c.TMDBAPIBase = normalizeHTTPBase(readStrJSONBody(body, "tmdbDataProxyBase"))
+			c.TMDBImgBase = normalizeHTTPBase(readStrJSONBody(body, "tmdbImageProxyBase"))
+			c.TMDBLanguage = readStrJSONBody(body, "language")
+			c.TMDBRegion = readStrJSONBody(body, "region")
+			c.TMDBIncludeAdult = readBoolJSONBody(body, "includeAdult")
+		})
 
 		writeOut()
 	default:
@@ -360,24 +358,22 @@ func handleDashboardSiteSave(w http.ResponseWriter, r *http.Request, database *d
 	siteName := strings.TrimSpace(r.FormValue("siteName"))
 	searchDisplayMode := strings.TrimSpace(r.FormValue("searchDisplayMode"))
 	searchBadgePreferEpisode := boolFromForm(r.FormValue("searchBadgePreferEpisode"))
-	if siteName != "" {
-		_ = database.SetSetting("site_name", siteName)
-	}
 	switch searchDisplayMode {
 	case "", "sites", "tmdb", "both":
 		if searchDisplayMode == "" {
 			searchDisplayMode = "sites"
 		}
-		_ = database.SetSetting("search_display_mode", searchDisplayMode)
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数无效"})
 		return
 	}
-	if searchBadgePreferEpisode {
-		_ = database.SetSetting("search_badge_prefer_episode", "1")
-	} else {
-		_ = database.SetSetting("search_badge_prefer_episode", "0")
-	}
+	_ = database.UpdateAppConfig(func(c *db.AppConfig) {
+		if siteName != "" {
+			c.SiteName = siteName
+		}
+		c.SearchDisplayMode = searchDisplayMode
+		c.SearchBadgePreferEpisode = searchBadgePreferEpisode
+	})
 	writeJSON(w, 200, map[string]any{"success": true})
 }
 
@@ -387,8 +383,13 @@ func handleDashboardCatPawOpenSave(w http.ResponseWriter, r *http.Request, datab
 		return
 	}
 	parseForm(r)
-	servers := catpawopen.ParseServers(database.GetSetting("catpawopen_servers"))
-	prevBase := catpawopen.ResolveActiveBase(servers, database.GetSetting("catpawopen_active"))
+	cfg, _ := database.ReadAppConfig()
+	raw, _ := database.ListCatPawOpenServers()
+	servers := make([]catpawopen.Server, 0, len(raw))
+	for _, s := range raw {
+		servers = append(servers, catpawopen.Server{Name: s.Name, APIBase: s.APIBase})
+	}
+	prevBase := catpawopen.ResolveActiveBase(servers, cfg.CatPawOpenActive)
 	serverKey := strings.TrimSpace(r.FormValue("catPawOpenServerKey"))
 	name := strings.TrimSpace(r.FormValue("catPawOpenName"))
 	base := r.FormValue("catPawOpenApiBase")
@@ -444,9 +445,12 @@ func handleDashboardCatPawOpenSave(w http.ResponseWriter, r *http.Request, datab
 		servers = append(servers, catpawopen.Server{Name: name, APIBase: normalizedBase})
 	}
 
-	serversJSON, _ := json.Marshal(servers)
-	_ = database.SetSetting("catpawopen_servers", string(serversJSON))
-	_ = database.SetSetting("catpawopen_active", name)
+	next := make([]db.CatPawOpenServer, 0, len(servers))
+	for _, s := range servers {
+		next = append(next, db.CatPawOpenServer{Name: s.Name, APIBase: s.APIBase})
+	}
+	_ = database.ReplaceCatPawOpenServers(next)
+	_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.CatPawOpenActive = name })
 	writeJSON(w, 200, map[string]any{
 		"success":        true,
 		"apiBaseChanged": strings.TrimSpace(prevBase) != strings.TrimSpace(normalizedBase),
@@ -466,7 +470,12 @@ func handleDashboardCatPawOpenDelete(w http.ResponseWriter, r *http.Request, dat
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数无效"})
 		return
 	}
-	servers := catpawopen.ParseServers(database.GetSetting("catpawopen_servers"))
+	cfg, _ := database.ReadAppConfig()
+	raw, _ := database.ListCatPawOpenServers()
+	servers := make([]catpawopen.Server, 0, len(raw))
+	for _, s := range raw {
+		servers = append(servers, catpawopen.Server{Name: s.Name, APIBase: s.APIBase})
+	}
 
 	removed := false
 	next := make([]catpawopen.Server, 0, len(servers))
@@ -482,10 +491,14 @@ func handleDashboardCatPawOpenDelete(w http.ResponseWriter, r *http.Request, dat
 		return
 	}
 
-	serversJSON, _ := json.Marshal(next)
-	_ = database.SetSetting("catpawopen_servers", string(serversJSON))
-	active := catpawopen.PickActiveName(next, database.GetSetting("catpawopen_active"))
-	_ = database.SetSetting("catpawopen_active", active)
+	// Persist list + pick active.
+	out := make([]db.CatPawOpenServer, 0, len(next))
+	for _, s := range next {
+		out = append(out, db.CatPawOpenServer{Name: s.Name, APIBase: s.APIBase})
+	}
+	_ = database.ReplaceCatPawOpenServers(out)
+	active := catpawopen.PickActiveName(next, cfg.CatPawOpenActive)
+	_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.CatPawOpenActive = active })
 
 	writeJSON(w, 200, map[string]any{
 		"success": true,
@@ -499,22 +512,38 @@ func handleDashboardSiteSettings(w http.ResponseWriter, r *http.Request, databas
 		methodNotAllowed(w)
 		return
 	}
-	servers := catpawopen.ParseServers(database.GetSetting("catpawopen_servers"))
-	active := catpawopen.PickActiveName(servers, database.GetSetting("catpawopen_active"))
-	mode := strings.TrimSpace(database.GetSetting("search_display_mode"))
+	cfg, _ := database.ReadAppConfig()
+	raw, _ := database.ListCatPawOpenServers()
+	servers := make([]catpawopen.Server, 0, len(raw))
+	for _, s := range raw {
+		servers = append(servers, catpawopen.Server{Name: s.Name, APIBase: s.APIBase})
+	}
+	active := catpawopen.PickActiveName(servers, cfg.CatPawOpenActive)
+	mode := strings.TrimSpace(cfg.SearchDisplayMode)
 	if mode != "tmdb" && mode != "both" && mode != "sites" {
 		mode = "sites"
 	}
+	rawGoProxy, _ := database.ListGoProxyServers()
+	goProxyForUI := make([]map[string]any, 0, len(rawGoProxy))
+	for _, s := range rawGoProxy {
+		goProxyForUI = append(goProxyForUI, map[string]any{
+			"name":        s.Name,
+			"displayName": s.DisplayName,
+			"base":        s.Base,
+			"pans":        map[string]any{"baidu": s.PansBaidu, "quark": s.PansQuark},
+		})
+	}
+	goProxyJSON, _ := json.Marshal(goProxyForUI)
 	writeJSON(w, 200, map[string]any{
 		"success":                  true,
-		"siteName":                 database.GetSetting("site_name"),
+		"siteName":                 cfg.SiteName,
 		"searchDisplayMode":        mode,
-		"searchBadgePreferEpisode": strings.TrimSpace(database.GetSetting("search_badge_prefer_episode")) == "1",
+		"searchBadgePreferEpisode": cfg.SearchBadgePreferEpisode,
 		"catPawOpenServers":        servers,
 		"catPawOpenActive":         active,
-		"goProxyEnabled":           strings.TrimSpace(database.GetSetting("goproxy_enabled")) == "1",
-		"goProxyAutoSelect":        strings.TrimSpace(database.GetSetting("goproxy_auto_select")) == "1",
-		"goProxyServersJson":       defaultString(database.GetSetting("goproxy_servers"), "[]"),
+		"goProxyEnabled":           cfg.GoProxyEnabled,
+		"goProxyAutoSelect":        cfg.GoProxyAutoSelect,
+		"goProxyServersJson":       defaultString(string(goProxyJSON), "[]"),
 	})
 }
 
@@ -528,25 +557,33 @@ func handleDashboardGoProxySave(w http.ResponseWriter, r *http.Request, database
 	autoSelect := boolFromForm(r.FormValue("goProxyAutoSelect"))
 	serversJSON := r.FormValue("goProxyServersJson")
 	servers := normalizeGoProxyServers(serversJSON)
-	if enabled {
-		_ = database.SetSetting("goproxy_enabled", "1")
-	} else {
-		_ = database.SetSetting("goproxy_enabled", "0")
+	_ = database.UpdateAppConfig(func(c *db.AppConfig) {
+		c.GoProxyEnabled = enabled
+		c.GoProxyAutoSelect = autoSelect
+	})
+	out := make([]db.GoProxyServer, 0, len(servers))
+	for _, s := range servers {
+		out = append(out, db.GoProxyServer{
+			Name:        s.Name,
+			DisplayName: s.DisplayName,
+			Base:        s.Base,
+			PansBaidu:   s.Pans.Baidu,
+			PansQuark:   s.Pans.Quark,
+		})
 	}
-	if autoSelect {
-		_ = database.SetSetting("goproxy_auto_select", "1")
-	} else {
-		_ = database.SetSetting("goproxy_auto_select", "0")
-	}
-	b, _ := json.Marshal(servers)
-	_ = database.SetSetting("goproxy_servers", string(b))
+	_ = database.ReplaceGoProxyServers(out)
 	writeJSON(w, 200, map[string]any{"success": true, "goProxySync": map[string]any{"ok": nil, "skipped": true}})
 }
 
 func handleDashboardVideoPansList(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, 200, map[string]any{"success": true, "pans": normalizePansList(database.GetSetting("catpawopen_pans_list"))})
+		raw, _ := database.ListCatPawOpenPans()
+		out := make([]map[string]any, 0, len(raw))
+		for _, p := range raw {
+			out = append(out, map[string]any{"key": p.Key, "name": p.Name, "enable": p.Enabled})
+		}
+		writeJSON(w, 200, map[string]any{"success": true, "pans": out})
 	case http.MethodPost:
 		parseForm(r)
 		listRaw := r.FormValue("list")
@@ -555,8 +592,14 @@ func handleDashboardVideoPansList(w http.ResponseWriter, r *http.Request, databa
 			_ = json.Unmarshal([]byte(listRaw), &list)
 		}
 		norm := normalizePansAny(list)
-		b, _ := json.Marshal(norm)
-		_ = database.SetSetting("catpawopen_pans_list", string(b))
+		pans := make([]db.CatPawOpenPan, 0, len(norm))
+		for _, m := range norm {
+			key, _ := m["key"].(string)
+			name, _ := m["name"].(string)
+			enable := parseAnyBool(m["enable"], false)
+			pans = append(pans, db.CatPawOpenPan{Key: strings.TrimSpace(key), Name: name, Enabled: enable})
+		}
+		_ = database.ReplaceCatPawOpenPans(pans)
 		writeJSON(w, 200, map[string]any{"success": true, "pans": norm})
 	default:
 		methodNotAllowed(w)
@@ -568,11 +611,16 @@ func handleDashboardVideoSourceSave(w http.ResponseWriter, r *http.Request, data
 		methodNotAllowed(w)
 		return
 	}
+	rawPans, _ := database.ListCatPawOpenPans()
+	pans := make([]map[string]any, 0, len(rawPans))
+	for _, p := range rawPans {
+		pans = append(pans, map[string]any{"key": p.Key, "name": p.Name, "enable": p.Enabled})
+	}
 	writeJSON(w, 200, map[string]any{
 		"success":        true,
 		"sites":          mergeVideoSourceSites(database),
 		"sitesRefreshed": false,
-		"pans":           normalizePansList(database.GetSetting("catpawopen_pans_list")),
+		"pans":           pans,
 		"panSync":        map[string]any{"ok": nil, "skipped": true},
 	})
 }
@@ -589,10 +637,7 @@ func handleDashboardVideoSourceSiteStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 	enabled := boolFromForm(r.FormValue("enabled"))
-	m := parseJSONBoolMap(database.GetSetting("video_source_site_status"))
-	m[key] = enabled
-	b, _ := json.Marshal(m)
-	_ = database.SetSetting("video_source_site_status", string(b))
+	_ = database.UpsertVideoSourceSiteState(key, func(s *db.VideoSourceSiteState) { s.Enabled = enabled })
 	writeJSON(w, 200, map[string]any{"success": true, "key": key, "enabled": enabled})
 }
 
@@ -608,10 +653,7 @@ func handleDashboardVideoSourceSiteHome(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	home := boolFromForm(r.FormValue("home"))
-	m := parseJSONBoolMap(database.GetSetting("video_source_site_home"))
-	m[key] = home
-	b, _ := json.Marshal(m)
-	_ = database.SetSetting("video_source_site_home", string(b))
+	_ = database.UpsertVideoSourceSiteState(key, func(s *db.VideoSourceSiteState) { s.Home = home })
 	writeJSON(w, 200, map[string]any{"success": true, "key": key, "home": home})
 }
 
@@ -630,10 +672,7 @@ func handleDashboardVideoSourceSiteSearch(w http.ResponseWriter, r *http.Request
 	if strings.Contains(strings.ToLower(key), "baseset") {
 		searchEnabled = false
 	}
-	m := parseJSONBoolMap(database.GetSetting("video_source_site_search"))
-	m[key] = searchEnabled
-	b, _ := json.Marshal(m)
-	_ = database.SetSetting("video_source_site_search", string(b))
+	_ = database.UpsertVideoSourceSiteState(key, func(s *db.VideoSourceSiteState) { s.Search = searchEnabled })
 	writeJSON(w, 200, map[string]any{"success": true, "key": key, "search": searchEnabled})
 }
 
@@ -679,7 +718,7 @@ func handleDashboardVideoSourceCoverSite(w http.ResponseWriter, r *http.Request,
 	key := strings.TrimSpace(r.FormValue("key"))
 	sites := mergeVideoSourceSites(database)
 	cover := resolveSearchCoverSite(sites, key)
-	_ = database.SetSetting("video_source_search_cover_site", cover)
+	_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.VideoSourceSearchCoverSite = cover })
 	writeJSON(w, 200, map[string]any{"success": true, "coverSite": cover})
 }
 
@@ -705,9 +744,8 @@ func handleDashboardVideoSourceSiteOrder(w http.ResponseWriter, r *http.Request,
 		seen[k] = struct{}{}
 		uniq = append(uniq, k)
 	}
-	b, _ := json.Marshal(uniq)
-	_ = database.SetSetting("video_source_site_order", string(b))
-	writeJSON(w, 200, map[string]any{"success": true})
+	_ = database.ReplaceVideoSourceSiteOrder(uniq)
+	writeJSON(w, 200, map[string]any{"success": true, "order": uniq})
 }
 
 func handleDashboardVideoSourceSitesCheck(w http.ResponseWriter, r *http.Request, database *db.DB) {
@@ -760,42 +798,35 @@ func handleDashboardVideoSourceSitesCheck(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	availabilityMap := parseAvailabilityJSON(database.GetSetting("video_source_site_availability"))
 	for k, v := range results {
-		availabilityMap[k] = normalizeAvailability(v)
+		key := strings.TrimSpace(k)
+		if key == "" {
+			continue
+		}
+		avail := normalizeAvailability(v)
+		msg := strings.TrimSpace(errorInput[key])
+		_ = database.UpsertVideoSourceSiteState(key, func(s *db.VideoSourceSiteState) {
+			s.Availability = avail
+			if msg != "" {
+				s.Error = msg
+			} else {
+				s.Error = ""
+			}
+			if avail == "invalid" {
+				s.Enabled = false
+			}
+			if avail == "category_error" {
+				s.Home = false
+			}
+			if avail == "search_error" {
+				s.Search = false
+			}
+		})
 	}
-	_ = database.SetSetting("video_source_site_availability", marshalJSON(availabilityMap))
-
-	statusMap := parseJSONBoolMap(database.GetSetting("video_source_site_status"))
-	homeMap := parseJSONBoolMap(database.GetSetting("video_source_site_home"))
-	searchMap := parseJSONBoolMap(database.GetSetting("video_source_site_search"))
-	for k, v := range results {
-		if v == "invalid" {
-			statusMap[k] = false
-		}
-		if v == "category_error" {
-			homeMap[k] = false
-		}
-		if v == "search_error" {
-			searchMap[k] = false
-		}
-	}
-	_ = database.SetSetting("video_source_site_status", marshalJSON(statusMap))
-	_ = database.SetSetting("video_source_site_home", marshalJSON(homeMap))
-	_ = database.SetSetting("video_source_site_search", marshalJSON(searchMap))
-
-	errorMap := parseJSONStringMap(database.GetSetting("video_source_site_error"))
-	for k := range results {
-		if msg, ok := errorInput[k]; ok && strings.TrimSpace(msg) != "" {
-			errorMap[k] = strings.TrimSpace(msg)
-		} else {
-			delete(errorMap, k)
-		}
-	}
-	_ = database.SetSetting("video_source_site_error", marshalJSON(errorMap))
 
 	sites := mergeVideoSourceSites(database)
-	cover := resolveSearchCoverSite(sites, database.GetSetting("video_source_search_cover_site"))
+	cfg, _ := database.ReadAppConfig()
+	cover := resolveSearchCoverSite(sites, cfg.VideoSourceSearchCoverSite)
 	writeJSON(w, 200, map[string]any{
 		"success":   true,
 		"results":   results,
@@ -826,11 +857,37 @@ func handleDashboardVideoSourceSitesImport(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	prevStatus := parseJSONBoolMap(database.GetSetting("video_source_site_status"))
-	prevHome := parseJSONBoolMap(database.GetSetting("video_source_site_home"))
-	prevSearch := parseJSONBoolMap(database.GetSetting("video_source_site_search"))
-	prevOrder := parseJSONStringArray(database.GetSetting("video_source_site_order"))
-	prevAvailability := parseAvailabilityJSON(database.GetSetting("video_source_site_availability"))
+	prevStates, _ := database.ReadVideoSourceSiteStates()
+	prevStatus := map[string]bool{}
+	prevHome := map[string]bool{}
+	prevSearch := map[string]bool{}
+	prevAvailability := map[string]string{}
+	prevErrors := map[string]string{}
+	for k, st := range prevStates {
+		key := strings.TrimSpace(k)
+		if key == "" {
+			continue
+		}
+		prevStatus[key] = st.Enabled
+		prevHome[key] = st.Home
+		prevSearch[key] = st.Search
+		if strings.TrimSpace(st.Availability) != "" {
+			prevAvailability[key] = st.Availability
+		}
+		if strings.TrimSpace(st.Error) != "" {
+			prevErrors[key] = st.Error
+		}
+	}
+	// Use current merged order as prevOrder input.
+	prevMerged := mergeVideoSourceSites(database)
+	prevOrder := []string{}
+	for _, s := range prevMerged {
+		k, _ := s["key"].(string)
+		k = strings.TrimSpace(k)
+		if k != "" {
+			prevOrder = append(prevOrder, k)
+		}
+	}
 	reconciled := reconcileSites(normalized, prevStatus, prevHome, prevSearch, prevOrder, prevAvailability)
 
 	for _, s := range reconciled.Sites {
@@ -839,7 +896,6 @@ func handleDashboardVideoSourceSitesImport(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	prevErrors := parseJSONStringMap(database.GetSetting("video_source_site_error"))
 	nextErrors := map[string]string{}
 	for _, s := range reconciled.Sites {
 		if msg, ok := prevErrors[s.Key]; ok && strings.TrimSpace(msg) != "" {
@@ -847,42 +903,74 @@ func handleDashboardVideoSourceSitesImport(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	_ = database.SetSetting("video_source_sites", marshalJSON(reconciled.Sites))
-	_ = database.SetSetting("video_source_site_status", marshalJSON(reconciled.Status))
-	_ = database.SetSetting("video_source_site_home", marshalJSON(reconciled.Home))
-	_ = database.SetSetting("video_source_site_search", marshalJSON(reconciled.Search))
-	_ = database.SetSetting("video_source_site_order", marshalJSON(reconciled.Order))
-	_ = database.SetSetting("video_source_site_availability", marshalJSON(reconciled.Availability))
-	_ = database.SetSetting("video_source_site_error", marshalJSON(nextErrors))
+	nextSites := make([]db.VideoSourceSite, 0, len(reconciled.Sites))
+	for _, s := range reconciled.Sites {
+		nextSites = append(nextSites, db.VideoSourceSite{Key: s.Key, Name: s.Name, API: s.API, Type: s.Type})
+	}
+	_ = database.ReplaceVideoSourceSites(nextSites)
+
+	orderIndex := map[string]int{}
+	for i, k := range reconciled.Order {
+		key := strings.TrimSpace(k)
+		if key == "" {
+			continue
+		}
+		if _, ok := orderIndex[key]; ok {
+			continue
+		}
+		orderIndex[key] = i
+	}
+	for _, s := range reconciled.Sites {
+		key := strings.TrimSpace(s.Key)
+		if key == "" {
+			continue
+		}
+		ord, ok := orderIndex[key]
+		if !ok {
+			ord = 1_000_000_000
+		}
+		errMsg := strings.TrimSpace(nextErrors[key])
+		_ = database.UpsertVideoSourceSiteState(key, func(st *db.VideoSourceSiteState) {
+			st.Enabled = reconciled.Status[key]
+			st.Home = reconciled.Home[key]
+			st.Search = reconciled.Search[key]
+			st.Availability = reconciled.Availability[key]
+			st.Error = errMsg
+			st.OrderIndex = ord
+		})
+	}
 
 	sites := mergeVideoSourceSites(database)
-	cover := resolveSearchCoverSite(sites, database.GetSetting("video_source_search_cover_site"))
+	cfg, _ := database.ReadAppConfig()
+	cover := resolveSearchCoverSite(sites, cfg.VideoSourceSearchCoverSite)
 	writeJSON(w, 200, map[string]any{"success": true, "sites": sites, "coverSite": cover})
 }
 
 func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	switch r.Method {
 	case http.MethodGet:
-		_ = magic.MigrateAggregateKeywordRulesToRegex(database)
-		cleanRules := parseJSONStringArray(database.GetSetting("magic_episode_clean_regex_rules"))
+		cfg, _ := database.ReadAppConfig()
+		cleanRules, _ := database.ListMagicEpisodeCleanRegexRules()
 		episodeCleanRegex := ""
 		if len(cleanRules) > 0 {
 			episodeCleanRegex = cleanRules[0]
 		}
-		smartSourcePriorityTokens := parseJSONStringArray(database.GetSetting("smart_source_priority_tokens"))
-		smartPanMatchTokens := parseJSONStringArray(database.GetSetting("smart_pan_match_tokens"))
-		smartSourceExtractPriority := strings.TrimSpace(database.GetSetting("smart_source_extract_priority"))
-		smartSourceExtractPriority = config.NormalizeSourceExtractPriority(smartSourceExtractPriority)
+		smartSourcePriorityTokens, _ := database.ListSmartSourcePriorityTokens()
+		smartPanMatchTokens, _ := database.ListSmartPanMatchTokens()
+		smartSourceExtractPriority := config.NormalizeSourceExtractPriority(strings.TrimSpace(cfg.SmartSourceExtractPriority))
+		episodeRules, _ := database.ListMagicEpisodeRules()
+		movieRules, _ := database.ListMagicMovieRules()
+		aggregateRegexRules, _ := database.ListMagicAggregateRegexRules()
 		writeJSON(w, 200, map[string]any{
 			"success":                    true,
 			"episodeCleanRegex":          episodeCleanRegex,
-			"episodeCleanRegexRules":     cleanRules,
-			"episodeRules":               parseJSONStringArray(database.GetSetting("magic_episode_rules")),
-			"movieRules":                 parseJSONStringArray(database.GetSetting("magic_movie_rules")),
-			"aggregateRules":             parseJSONStringArray(database.GetSetting("magic_aggregate_rules")),
-			"aggregateRegexRules":        parseJSONStringArray(database.GetSetting("magic_aggregate_regex_rules")),
-			"smartSourcePriorityTokens":  smartSourcePriorityTokens,
-			"smartPanMatchTokens":        smartPanMatchTokens,
+			"episodeCleanRegexRules":     defaultStringArray(cleanRules),
+			"episodeRules":               defaultStringArray(episodeRules),
+			"movieRules":                 defaultStringArray(movieRules),
+			"aggregateRules":             []string{},
+			"aggregateRegexRules":        defaultStringArray(aggregateRegexRules),
+			"smartSourcePriorityTokens":  defaultStringArray(smartSourcePriorityTokens),
+			"smartPanMatchTokens":        defaultStringArray(smartPanMatchTokens),
 			"smartSourceExtractPriority": smartSourceExtractPriority,
 		})
 	case http.MethodPost:
@@ -933,10 +1021,10 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 			}
 		}
 
-		saveStrArrSetting(database, "magic_episode_clean_regex_rules", cleanRules)
-		saveStrArrSetting(database, "magic_episode_rules", readList("episodeRules"))
-		saveStrArrSetting(database, "magic_movie_rules", readList("movieRules"))
-		saveStrArrSetting(database, "magic_aggregate_regex_rules", readList("aggregateRegexRules"))
+		_ = database.ReplaceMagicEpisodeCleanRegexRules(cleanRules)
+		_ = database.ReplaceMagicEpisodeRules(readList("episodeRules"))
+		_ = database.ReplaceMagicMovieRules(readList("movieRules"))
+		_ = database.ReplaceMagicAggregateRegexRules(readList("aggregateRegexRules"))
 
 		readCommaTokens := func(key string) []string {
 			raw, ok := body[key]
@@ -961,36 +1049,36 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 			}
 		}
 
-		saveStrArrSetting(database, "smart_source_priority_tokens", readCommaTokens("smartSourcePriorityTokens"))
-		saveStrArrSetting(database, "smart_pan_match_tokens", readCommaTokens("smartPanMatchTokens"))
+		_ = database.ReplaceSmartSourcePriorityTokens(readCommaTokens("smartSourcePriorityTokens"))
+		_ = database.ReplaceSmartPanMatchTokens(readCommaTokens("smartPanMatchTokens"))
 
 		priorityRaw, _ := body["smartSourceExtractPriority"].(string)
-		_ = database.SetSetting("smart_source_extract_priority", config.NormalizeSourceExtractPriority(priorityRaw))
+		_ = database.UpdateAppConfig(func(c *db.AppConfig) {
+			c.SmartSourceExtractPriority = config.NormalizeSourceExtractPriority(priorityRaw)
+		})
 
-		if legacy := readList("aggregateRules"); len(legacy) > 0 {
-			saveStrArrSetting(database, "magic_aggregate_rules", legacy)
-		}
-		_ = magic.MigrateAggregateKeywordRulesToRegex(database)
-
-		outClean := parseJSONStringArray(database.GetSetting("magic_episode_clean_regex_rules"))
+		outClean, _ := database.ListMagicEpisodeCleanRegexRules()
 		outEpisodeClean := ""
 		if len(outClean) > 0 {
 			outEpisodeClean = outClean[0]
 		}
-		smartSourcePriorityTokens := parseJSONStringArray(database.GetSetting("smart_source_priority_tokens"))
-		smartPanMatchTokens := parseJSONStringArray(database.GetSetting("smart_pan_match_tokens"))
-		smartSourceExtractPriority := strings.TrimSpace(database.GetSetting("smart_source_extract_priority"))
-		smartSourceExtractPriority = config.NormalizeSourceExtractPriority(smartSourceExtractPriority)
+		cfg, _ := database.ReadAppConfig()
+		smartSourcePriorityTokens, _ := database.ListSmartSourcePriorityTokens()
+		smartPanMatchTokens, _ := database.ListSmartPanMatchTokens()
+		smartSourceExtractPriority := config.NormalizeSourceExtractPriority(strings.TrimSpace(cfg.SmartSourceExtractPriority))
+		episodeRules, _ := database.ListMagicEpisodeRules()
+		movieRules, _ := database.ListMagicMovieRules()
+		aggregateRegexRules, _ := database.ListMagicAggregateRegexRules()
 		writeJSON(w, 200, map[string]any{
 			"success":                    true,
 			"episodeCleanRegex":          outEpisodeClean,
-			"episodeCleanRegexRules":     outClean,
-			"episodeRules":               parseJSONStringArray(database.GetSetting("magic_episode_rules")),
-			"movieRules":                 parseJSONStringArray(database.GetSetting("magic_movie_rules")),
-			"aggregateRules":             parseJSONStringArray(database.GetSetting("magic_aggregate_rules")),
-			"aggregateRegexRules":        parseJSONStringArray(database.GetSetting("magic_aggregate_regex_rules")),
-			"smartSourcePriorityTokens":  smartSourcePriorityTokens,
-			"smartPanMatchTokens":        smartPanMatchTokens,
+			"episodeCleanRegexRules":     defaultStringArray(outClean),
+			"episodeRules":               defaultStringArray(episodeRules),
+			"movieRules":                 defaultStringArray(movieRules),
+			"aggregateRules":             []string{},
+			"aggregateRegexRules":        defaultStringArray(aggregateRegexRules),
+			"smartSourcePriorityTokens":  defaultStringArray(smartSourcePriorityTokens),
+			"smartPanMatchTokens":        defaultStringArray(smartPanMatchTokens),
 			"smartSourceExtractPriority": smartSourceExtractPriority,
 		})
 	default:
@@ -1027,26 +1115,17 @@ func handleDashboardUserList(w http.ResponseWriter, r *http.Request, database *d
 		methodNotAllowed(w)
 		return
 	}
-	rows, err := database.SQL().Query(`
-		SELECT username, role, status, cat_api_base, cat_proxy
-		FROM users
-		ORDER BY CASE WHEN role = 'admin' THEN 0 ELSE 1 END, username
-	`)
+	rows, err := database.ListUsers()
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"success": true, "users": []any{}})
 		return
 	}
-	defer rows.Close()
-	users := []map[string]any{}
-	for rows.Next() {
-		var username, role, status, catAPIBase, catProxy string
-		_ = rows.Scan(&username, &role, &status, &catAPIBase, &catProxy)
+	users := make([]map[string]any, 0, len(rows))
+	for _, r := range rows {
 		users = append(users, map[string]any{
-			"username":     username,
-			"role":         role,
-			"status":       status,
-			"cat_api_base": catAPIBase,
-			"cat_proxy":    catProxy,
+			"username":     r.Username,
+			"role":         r.Role,
+			"status":       r.Status,
 		})
 	}
 	writeJSON(w, 200, map[string]any{"success": true, "users": users, "userCount": len(users)})
@@ -1060,13 +1139,6 @@ func handleDashboardUserAdd(w http.ResponseWriter, r *http.Request, database *db
 	parseForm(r)
 	username := strings.TrimSpace(r.FormValue("username"))
 	password := strings.TrimSpace(r.FormValue("password"))
-	roleRaw := strings.TrimSpace(r.FormValue("role"))
-	role := "user"
-	if roleRaw == "shared" {
-		role = "shared"
-	}
-	catAPIBase := strings.TrimSpace(r.FormValue("catApiBase"))
-	catProxy := strings.TrimSpace(r.FormValue("catProxy"))
 
 	if username == "" || password == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "添加用户失败，可能是用户名已存在或参数无效"})
@@ -1078,15 +1150,8 @@ func handleDashboardUserAdd(w http.ResponseWriter, r *http.Request, database *db
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "添加用户失败，可能是用户名已存在或参数无效"})
 		return
 	}
-	_, err = database.SQL().Exec(
-		`INSERT INTO users(username, password, role, status, cat_api_base, cat_proxy) VALUES (?, ?, ?, 'active', ?, ?)`,
-		username,
-		string(hashed),
-		role,
-		catAPIBase,
-		catProxy,
-	)
-	if err != nil {
+	userID, err := database.CreateUser(username, string(hashed), "user")
+	if err != nil || userID <= 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "添加用户失败，可能是用户名已存在或参数无效"})
 		return
 	}
@@ -1104,22 +1169,8 @@ func handleDashboardUserBan(w http.ResponseWriter, r *http.Request, database *db
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "用户名不能为空"})
 		return
 	}
-	var role, status string
-	if err := database.SQL().QueryRow(`SELECT role, status FROM users WHERE username = ? LIMIT 1`, username).Scan(&role, &status); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "操作失败"})
-		return
-	}
-	if role == "admin" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "操作失败"})
-		return
-	}
-	next := "active"
-	if status == "active" {
-		next = "banned"
-	}
-	res, _ := database.SQL().Exec(`UPDATE users SET status = ? WHERE username = ? AND role <> 'admin'`, next, username)
-	changed, _ := res.RowsAffected()
-	if changed <= 0 {
+	next, err := database.ToggleUserStatusByUsername(username)
+	if err != nil || next == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "操作失败"})
 		return
 	}
@@ -1137,49 +1188,19 @@ func handleDashboardUserDelete(w http.ResponseWriter, r *http.Request, database 
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "用户名不能为空"})
 		return
 	}
-	var id int64
-	var role string
-	if err := database.SQL().QueryRow(`SELECT id, role FROM users WHERE username = ? LIMIT 1`, username).Scan(&id, &role); err != nil {
+	stats, err := database.DeleteUserCascadeByUsername(username)
+	if err != nil || stats.UserDeleted <= 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "删除失败"})
 		return
 	}
-	if role == "admin" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "删除失败"})
-		return
-	}
-
-	tx, err := database.SQL().Begin()
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "删除失败"})
-		return
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	tokens, _ := tx.Exec(`DELETE FROM auth_tokens WHERE user_id = ?`, id)
-	history, _ := tx.Exec(`DELETE FROM search_history WHERE user_id = ?`, id)
-	playHistory, _ := tx.Exec(`DELETE FROM play_history WHERE user_id = ?`, id)
-	favorites, _ := tx.Exec(`DELETE FROM favorites WHERE user_id = ?`, id)
-	userRes, _ := tx.Exec(`DELETE FROM users WHERE id = ? AND role <> 'admin'`, id)
-
-	userDeleted, _ := userRes.RowsAffected()
-	if userDeleted <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "删除失败"})
-		return
-	}
-	_ = tx.Commit()
-
-	tokenDeleted, _ := tokens.RowsAffected()
-	historyDeleted, _ := history.RowsAffected()
-	playHistoryDeleted, _ := playHistory.RowsAffected()
-	favoritesDeleted, _ := favorites.RowsAffected()
 	writeJSON(w, 200, map[string]any{
 		"success": true,
 		"deleted": map[string]any{
-			"tokenDeleted":       tokenDeleted,
-			"historyDeleted":     historyDeleted,
-			"playHistoryDeleted": playHistoryDeleted,
-			"favoritesDeleted":   favoritesDeleted,
-			"userDeleted":        userDeleted,
+			"tokenDeleted":       stats.TokenDeleted,
+			"historyDeleted":     stats.HistoryDeleted,
+			"playHistoryDeleted": stats.PlayHistoryDeleted,
+			"favoritesDeleted":   stats.FavoritesDeleted,
+			"userDeleted":        stats.UserDeleted,
 		},
 	})
 }
@@ -1193,29 +1214,18 @@ func handleDashboardUserUpdate(w http.ResponseWriter, r *http.Request, database 
 	username := strings.TrimSpace(r.FormValue("username"))
 	newUsername := strings.TrimSpace(r.FormValue("newUsername"))
 	newPassword := strings.TrimSpace(r.FormValue("newPassword"))
-	roleRaw := strings.TrimSpace(r.FormValue("role"))
-	_, hasCatAPIBase := r.PostForm["catApiBase"]
-	_, hasCatProxy := r.PostForm["catProxy"]
-	catAPIBase := ""
-	catProxy := ""
-	if hasCatAPIBase {
-		catAPIBase = strings.TrimSpace(r.FormValue("catApiBase"))
-	}
-	if hasCatProxy {
-		catProxy = strings.TrimSpace(r.FormValue("catProxy"))
-	}
 
 	if username == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "用户名不能为空"})
 		return
 	}
-	if newUsername == "" && newPassword == "" && roleRaw == "" && !hasCatAPIBase && !hasCatProxy {
+	if newUsername == "" && newPassword == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "未提供修改内容"})
 		return
 	}
 
-	var id int64
-	if err := database.SQL().QueryRow(`SELECT id FROM users WHERE username = ? LIMIT 1`, username).Scan(&id); err != nil {
+	id, err := database.GetUserIDByUsername(username)
+	if err != nil {
 		if err == sql.ErrNoRows {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "用户不存在"})
 			return
@@ -1224,16 +1234,16 @@ func handleDashboardUserUpdate(w http.ResponseWriter, r *http.Request, database 
 		return
 	}
 
-	var curUsername, curRole string
-	if err := database.SQL().QueryRow(`SELECT username, role FROM users WHERE id = ? LIMIT 1`, id).Scan(&curUsername, &curRole); err != nil {
+	cur, err := database.GetUserAuthByUsername(username)
+	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "用户不存在"})
 		return
 	}
 
-	finalUsername := curUsername
-	finalRole := curRole
+	finalUsername := cur.Username
+	finalRole := cur.Role
 	if newUsername != "" && newUsername != finalUsername {
-		if _, err := database.SQL().Exec(`UPDATE users SET username = ? WHERE id = ?`, newUsername, id); err != nil {
+		if err := database.UpdateUserUsernameByID(id, newUsername); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "用户名已存在或不合法"})
 			return
 		}
@@ -1246,84 +1256,22 @@ func handleDashboardUserUpdate(w http.ResponseWriter, r *http.Request, database 
 			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "修改失败"})
 			return
 		}
-		res, _ := database.SQL().Exec(`UPDATE users SET password = ? WHERE id = ?`, string(hashed), id)
-		changed, _ := res.RowsAffected()
-		if changed <= 0 {
+		if err := database.UpdateUserPasswordByID(id, string(hashed)); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "修改失败"})
 			return
 		}
 	}
 
-	if roleRaw != "" {
-		if finalRole == "admin" {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "管理员角色不可修改"})
-			return
-		}
-		nextRole := ""
-		if roleRaw == "shared" {
-			nextRole = "shared"
-		} else if roleRaw == "user" {
-			nextRole = "user"
-		}
-		if nextRole == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "角色无效"})
-			return
-		}
-		res, _ := database.SQL().Exec(`UPDATE users SET role = ? WHERE id = ?`, nextRole, id)
-		changed, _ := res.RowsAffected()
-		if changed <= 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "修改失败"})
-			return
-		}
-		finalRole = nextRole
-	}
-
-	if hasCatAPIBase {
-		_, _ = database.SQL().Exec(`UPDATE users SET cat_api_base = ? WHERE id = ?`, catAPIBase, id)
-	}
-	if hasCatProxy {
-		_, _ = database.SQL().Exec(`UPDATE users SET cat_proxy = ? WHERE id = ?`, catProxy, id)
-	}
-
-	var rowRole, rowCatBase, rowCatProxy string
-	_ = database.SQL().QueryRow(`SELECT role, cat_api_base, cat_proxy FROM users WHERE id = ? LIMIT 1`, id).Scan(&rowRole, &rowCatBase, &rowCatProxy)
-	if strings.TrimSpace(rowRole) != "" {
-		finalRole = rowRole
+	latest, _ := database.GetUserAuthByUsername(finalUsername)
+	if strings.TrimSpace(latest.Role) != "" {
+		finalRole = latest.Role
 	}
 
 	writeJSON(w, 200, map[string]any{
 		"success":    true,
 		"username":   finalUsername,
 		"role":       defaultString(finalRole, "user"),
-		"catApiBase": rowCatBase,
-		"catProxy":   rowCatProxy,
 	})
-}
-
-func saveStrArrSetting(database *db.DB, key string, values []string) {
-	uniq := []string{}
-	seen := map[string]struct{}{}
-	for _, v := range values {
-		v = strings.TrimSpace(v)
-		if v == "" || len(v) > 1000 {
-			continue
-		}
-		if _, ok := seen[v]; ok {
-			continue
-		}
-		seen[v] = struct{}{}
-		uniq = append(uniq, v)
-	}
-	b, _ := json.Marshal(uniq)
-	_ = database.SetSetting(key, string(b))
-}
-
-func normalizePansList(text string) []map[string]any {
-	var raw []any
-	if err := json.Unmarshal([]byte(text), &raw); err != nil {
-		return []map[string]any{}
-	}
-	return normalizePansAny(raw)
 }
 
 func normalizePansAny(list any) []map[string]any {
@@ -1355,12 +1303,62 @@ func normalizePansAny(list any) []map[string]any {
 }
 
 func mergeVideoSourceSites(database *db.DB) []map[string]any {
-	sites := normalizeSitesFromJSON(database.GetSetting("video_source_sites"))
-	statusMap := parseJSONBoolMap(database.GetSetting("video_source_site_status"))
-	homeMap := parseJSONBoolMap(database.GetSetting("video_source_site_home"))
-	searchMap := parseJSONBoolMap(database.GetSetting("video_source_site_search"))
-	order := parseJSONStringArray(database.GetSetting("video_source_site_order"))
-	availability := parseJSONMap(database.GetSetting("video_source_site_availability"))
-	errorMap := parseJSONStringMap(database.GetSetting("video_source_site_error"))
-	return mergeSitesWithState(sites, statusMap, homeMap, order, availability, searchMap, errorMap)
+	if database == nil {
+		return []map[string]any{}
+	}
+	rawSites, err := database.ListVideoSourceSites()
+	if err != nil || len(rawSites) == 0 {
+		return []map[string]any{}
+	}
+	states, _ := database.ReadVideoSourceSiteStates()
+
+	sites := make([]site, 0, len(rawSites))
+	for _, s := range rawSites {
+		sites = append(sites, site{Key: s.Key, Name: s.Name, API: s.API, Type: s.Type})
+	}
+
+	statusMap := map[string]bool{}
+	homeMap := map[string]bool{}
+	searchMap := map[string]bool{}
+	availabilityAny := map[string]any{}
+	errorMap := map[string]string{}
+
+	type decorated struct {
+		k string
+		o int
+		i int
+	}
+	ds := make([]decorated, 0, len(sites))
+	for i, s := range sites {
+		st, ok := states[s.Key]
+		if ok {
+			statusMap[s.Key] = st.Enabled
+			homeMap[s.Key] = st.Home
+			searchMap[s.Key] = st.Search
+			if strings.TrimSpace(st.Availability) != "" {
+				availabilityAny[s.Key] = st.Availability
+			}
+			if strings.TrimSpace(st.Error) != "" {
+				errorMap[s.Key] = st.Error
+			}
+			ds = append(ds, decorated{k: s.Key, o: st.OrderIndex, i: i})
+		} else {
+			statusMap[s.Key] = true
+			homeMap[s.Key] = defaultHomeForSite(s)
+			searchMap[s.Key] = false
+			ds = append(ds, decorated{k: s.Key, o: 1_000_000_000, i: i})
+		}
+	}
+	sort.Slice(ds, func(i, j int) bool {
+		if ds[i].o != ds[j].o {
+			return ds[i].o < ds[j].o
+		}
+		return ds[i].i < ds[j].i
+	})
+	order := make([]string, 0, len(ds))
+	for _, d := range ds {
+		order = append(order, d.k)
+	}
+
+	return mergeSitesWithState(sites, statusMap, homeMap, order, availabilityAny, searchMap, errorMap)
 }

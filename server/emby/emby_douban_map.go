@@ -1,7 +1,6 @@
 package emby
 
 import (
-	"database/sql"
 	"errors"
 	"strings"
 	"time"
@@ -31,20 +30,21 @@ func embyGetDoubanTMDBMap(database *db.DB, kind string, doubanID string) (*embyD
 	if k == "" || id == "" {
 		return nil, errors.New("invalid args")
 	}
-	var row embyDoubanTMDBMap
-	err := database.SQL().QueryRow(`
-		SELECT kind, douban_id, title, year, tmdb_id, tmdb_kind, last_try_at, last_try_key, updated_at
-		FROM douban_tmdb_map
-		WHERE kind=? AND douban_id=?
-		LIMIT 1
-	`, k, id).Scan(&row.Kind, &row.DoubanID, &row.Title, &row.Year, &row.TMDBID, &row.TMDBKind, &row.LastTryAt, &row.LastTryKey, &row.UpdatedAt)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
+	row, err := database.GetDoubanTMDBMap(k, id)
+	if err != nil || row == nil {
 		return nil, err
 	}
-	return &row, nil
+	return &embyDoubanTMDBMap{
+		Kind:       row.Kind,
+		DoubanID:   row.DoubanID,
+		Title:      row.Title,
+		Year:       row.Year,
+		TMDBID:     row.TMDBID,
+		TMDBKind:   row.TMDBKind,
+		LastTryAt:  row.LastTryAt,
+		LastTryKey: row.LastTryKey,
+		UpdatedAt:  row.UpdatedAt,
+	}, nil
 }
 
 func embyUpsertDoubanTMDBMap(database *db.DB, m embyDoubanTMDBMap) error {
@@ -56,7 +56,6 @@ func embyUpsertDoubanTMDBMap(database *db.DB, m embyDoubanTMDBMap) error {
 	if k == "" || id == "" {
 		return errors.New("invalid args")
 	}
-	now := time.Now().UnixMilli()
 	title := strings.TrimSpace(m.Title)
 	year := m.Year
 	tmdbID := m.TMDBID
@@ -66,18 +65,19 @@ func embyUpsertDoubanTMDBMap(database *db.DB, m embyDoubanTMDBMap) error {
 		lastTryAt = 0
 	}
 	lastTryKey := strings.TrimSpace(m.LastTryKey)
-	_, err := database.SQL().Exec(`
-		INSERT INTO douban_tmdb_map(kind, douban_id, title, year, tmdb_id, tmdb_kind, last_try_at, last_try_key, updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(kind, douban_id) DO UPDATE SET
-		  title = CASE WHEN excluded.title != '' THEN excluded.title ELSE douban_tmdb_map.title END,
-		  year = CASE WHEN excluded.year > 0 THEN excluded.year ELSE douban_tmdb_map.year END,
-		  tmdb_id = CASE WHEN excluded.tmdb_id > 0 THEN excluded.tmdb_id ELSE douban_tmdb_map.tmdb_id END,
-		  tmdb_kind = CASE WHEN excluded.tmdb_kind != '' THEN excluded.tmdb_kind ELSE douban_tmdb_map.tmdb_kind END,
-		  last_try_at = CASE WHEN excluded.last_try_at > 0 THEN excluded.last_try_at ELSE douban_tmdb_map.last_try_at END,
-		  last_try_key = CASE WHEN excluded.last_try_key != '' THEN excluded.last_try_key ELSE douban_tmdb_map.last_try_key END,
-		  updated_at = excluded.updated_at
-	`, k, id, title, year, tmdbID, tmdbKind, lastTryAt, lastTryKey, now)
+	err := database.UpsertDoubanTMDBMap(db.DoubanTMDBMap{
+		Kind:       k,
+		DoubanID:   id,
+		Title:      title,
+		Year:       year,
+		TMDBID:     tmdbID,
+		TMDBKind:   tmdbKind,
+		LastTryAt:  lastTryAt,
+		LastTryKey: lastTryKey,
+	})
+	if err == nil && tmdbID > 0 && (tmdbKind == "tv" || tmdbKind == "movie") {
+		_ = database.UpsertTMDBExternalID(tmdbKind, tmdbID, "douban", id)
+	}
 	return err
 }
 
