@@ -24,23 +24,11 @@ func embyQueryPlayHistoryByVideoID(database *db.DB, userID string, videoID strin
 	if uid <= 0 || vid == "" {
 		return embyPlayHistorySnapshot{}, false
 	}
-	var (
-		pos     int64
-		runtime int64
-		updated int64
-	)
-	err := database.SQL().QueryRow(
-		`SELECT playback_position_ticks, playback_runtime_ticks, updated_at
-		 FROM play_history
-		 WHERE user_id = ? AND site_key = 'emby' AND video_id = ?
-		 ORDER BY updated_at DESC
-		 LIMIT 1`,
-		uid, vid,
-	).Scan(&pos, &runtime, &updated)
-	if err != nil {
+	snap, ok := database.GetPlayHistorySnapshotBySiteVideo(uid, "emby", vid)
+	if !ok {
 		return embyPlayHistorySnapshot{}, false
 	}
-	return embyPlayHistorySnapshot{Pos: pos, Runtime: runtime, Updated: updated}, true
+	return embyPlayHistorySnapshot{Pos: snap.Pos, Runtime: snap.Runtime, Updated: snap.Updated}, true
 }
 
 func embyQueryPlayHistoryByItemIDs(database *db.DB, userID string, itemIDs []string) map[string]embyPlayHistorySnapshot {
@@ -54,51 +42,28 @@ func embyQueryPlayHistoryByItemIDs(database *db.DB, userID string, itemIDs []str
 		return out
 	}
 	uniq := make([]string, 0, len(itemIDs))
-	seen := map[string]bool{}
+	seen := map[string]struct{}{}
 	for _, id := range itemIDs {
 		k := strings.TrimSpace(id)
-		if k == "" || seen[k] {
+		if k == "" {
 			continue
 		}
-		seen[k] = true
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
 		uniq = append(uniq, k)
 	}
 	if len(uniq) == 0 {
 		return out
 	}
 
-	placeholders := strings.Repeat("?,", len(uniq))
-	placeholders = strings.TrimSuffix(placeholders, ",")
-	args := make([]any, 0, 1+len(uniq))
-	args = append(args, uid)
-	for _, id := range uniq {
-		args = append(args, id)
-	}
-
-	rows, err := database.SQL().Query(
-		`SELECT playback_item_id, playback_position_ticks, playback_runtime_ticks, updated_at
-		 FROM play_history
-		 WHERE user_id = ? AND playback_item_id IN (`+placeholders+`)`,
-		args...,
-	)
+	m, err := database.GetPlayHistorySnapshotsByPlaybackItemIDs(uid, uniq)
 	if err != nil {
 		return out
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var (
-			itemID  string
-			pos     int64
-			runtime int64
-			updated int64
-		)
-		_ = rows.Scan(&itemID, &pos, &runtime, &updated)
-		itemID = strings.TrimSpace(itemID)
-		if itemID == "" {
-			continue
-		}
-		out[itemID] = embyPlayHistorySnapshot{Pos: pos, Runtime: runtime, Updated: updated}
+	for id, s := range m {
+		out[id] = embyPlayHistorySnapshot{Pos: s.Pos, Runtime: s.Runtime, Updated: s.Updated}
 	}
 	return out
 }

@@ -20,20 +20,12 @@ jobs:
         include:
           - goos: linux
             goarch: amd64
-            runner: ubuntu-22.04
+            runner: ubuntu-20.04
             cc: gcc
           - goos: linux
             goarch: arm64
-            runner: ubuntu-22.04
+            runner: ubuntu-20.04
             cc: aarch64-linux-gnu-gcc
-          - goos: windows
-            goarch: amd64
-            runner: ubuntu-latest
-            cc: zig cc -target x86_64-windows-gnu
-          - goos: windows
-            goarch: arm64
-            runner: ubuntu-latest
-            cc: zig cc -target aarch64-windows-gnu
 
     steps:
       - uses: actions/checkout@v4
@@ -65,10 +57,6 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-
-      - uses: mlugg/setup-zig@v1
-        with:
-          version: 0.13.0
 
       - name: Install linux arm64 cross compiler
         if: matrix.goos == 'linux' && matrix.goarch == 'arm64'

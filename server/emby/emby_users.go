@@ -43,13 +43,7 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			return
 		}
 
-		var (
-			id     int64
-			hashed string
-			role   string
-			status string
-		)
-		err := database.SQL().QueryRow(`SELECT id, password, role, status FROM users WHERE username=? LIMIT 1`, username).Scan(&id, &hashed, &role, &status)
+		row, err := database.GetUserAuthByUsername(username)
 		if err != nil {
 			if err == sql.ErrNoRows {
 				embyWriteError(w, 401, "用户名或密码错误")
@@ -58,11 +52,14 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			embyWriteError(w, 500, "请求失败")
 			return
 		}
+		id := row.ID
+		role := row.Role
+		status := row.Status
 		if strings.TrimSpace(status) != "active" {
 			embyWriteError(w, 403, "该账户已禁用")
 			return
 		}
-		if bcrypt.CompareHashAndPassword([]byte(hashed), []byte(password)) != nil {
+		if bcrypt.CompareHashAndPassword([]byte(row.PasswordHash), []byte(password)) != nil {
 			embyWriteError(w, 401, "用户名或密码错误")
 			return
 		}
@@ -202,13 +199,8 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		fieldsParam := embyQueryGetCI(r, "fields")
 		// Some clients pass MediaTypes=Video; ignore for now and always return video resume.
 
-		rows, err := database.SQL().Query(`
-			SELECT playback_item_id, playback_position_ticks, playback_runtime_ticks, updated_at
-			FROM play_history
-			WHERE user_id = ? AND playback_item_id <> ''
-			ORDER BY updated_at DESC
-			LIMIT ? OFFSET ?
-		`, u.ID, limit, startIndex)
+		uid, _ := strconv.ParseInt(strings.TrimSpace(u.ID), 10, 64)
+		snaps, ids, err := database.ListResumePlaybackItems(uid, limit, startIndex)
 		if err != nil {
 			if debug {
 				embyDebugPrintf("[emby][resume] query failed err=%q", err.Error())
@@ -216,17 +208,10 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			writeJSON(w, 200, embyPagedEmpty(startIndex))
 			return
 		}
-		defer rows.Close()
 
 		items := make([]map[string]any, 0, limit)
-		for rows.Next() {
-			var (
-				jid     string
-				pos     int64
-				runtime int64
-				updated int64
-			)
-			_ = rows.Scan(&jid, &pos, &runtime, &updated)
+		for i, jid := range ids {
+			snap := snaps[i]
 			jid = strings.TrimSpace(jid)
 			if jid == "" {
 				continue
@@ -239,15 +224,16 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			if ud == nil {
 				ud = map[string]any{}
 			}
+			pos := snap.Pos
 			if pos < 0 {
 				pos = 0
 			}
 			ud["PlaybackPositionTicks"] = pos
-			if runtime > 0 && pos > 0 {
-				ud["PlayedPercentage"] = (float64(pos) / float64(runtime)) * 100.0
+			if snap.Runtime > 0 && pos > 0 {
+				ud["PlayedPercentage"] = (float64(pos) / float64(snap.Runtime)) * 100.0
 			}
-			if updated > 0 {
-				ud["LastPlayedDate"] = time.Unix(updated, 0).UTC().Format(time.RFC3339Nano)
+			if snap.Updated > 0 {
+				ud["LastPlayedDate"] = time.Unix(snap.Updated, 0).UTC().Format(time.RFC3339Nano)
 			}
 			if _, ok := ud["Key"]; !ok {
 				ud["Key"] = embyStableKeyDigits(u.ID + ":" + jid)
@@ -261,9 +247,9 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			ud["Played"] = false
 			obj["UserData"] = ud
 
-			if runtime > 0 {
+			if snap.Runtime > 0 {
 				if _, ok := obj["RunTimeTicks"]; !ok {
-					obj["RunTimeTicks"] = runtime
+					obj["RunTimeTicks"] = snap.Runtime
 				}
 			}
 			embyEnsureInfuseItemFields(obj, jid, fieldsParam, serverID)
@@ -273,7 +259,9 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 
 		// TotalRecordCount: best-effort (count query).
 		total := 0
-		if err := database.SQL().QueryRow(`SELECT COUNT(1) FROM play_history WHERE user_id = ? AND playback_item_id <> ''`, u.ID).Scan(&total); err != nil && debug {
+		if n, err := database.CountResumePlaybackItems(uid); err == nil {
+			total = n
+		} else if debug {
 			embyDebugPrintf("[emby][resume] count failed err=%q", err.Error())
 		}
 		writeJSON(w, 200, embyPagedItems(items, startIndex, total))
@@ -894,17 +882,14 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 						Seq:      seq,
 					})
 				}
-				sort.SliceStable(rows, func(i, j int) bool {
-					a := rows[i]
-					b := rows[j]
-					if a.TitleLen != b.TitleLen {
-						return a.TitleLen < b.TitleLen
-					}
-					if a.Score != b.Score {
-						return a.Score > b.Score
-					}
-					return a.Seq < b.Seq
-				})
+					sort.SliceStable(rows, func(i, j int) bool {
+						a := rows[i]
+						b := rows[j]
+						if a.Score != b.Score {
+							return a.Score > b.Score
+						}
+						return a.Seq < b.Seq
+					})
 				tmdbSorted = make([]embyTMDBSearchItem, 0, len(rows))
 				for _, r := range rows {
 					tmdbSorted = append(tmdbSorted, r.Item)
@@ -1371,9 +1356,7 @@ func embyIssueToken(database *db.DB, userID int64) (token string, exp time.Time,
 	token = base64.RawURLEncoding.EncodeToString(b)
 	now := time.Now()
 	exp = now.Add(30 * 24 * time.Hour)
-	_, err = database.SQL().Exec(`INSERT INTO auth_tokens(token, user_id, created_at, expires_at) VALUES (?,?,?,?)`,
-		token, userID, now.UnixMilli(), exp.UnixMilli())
-	if err != nil {
+	if err := database.InsertToken(token, userID, exp); err != nil {
 		return "", time.Time{}, err
 	}
 	return token, exp, nil

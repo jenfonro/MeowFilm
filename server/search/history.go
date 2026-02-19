@@ -3,7 +3,6 @@ package search
 import (
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/jenfonro/meowfilm/internal/auth"
 	"github.com/jenfonro/meowfilm/internal/db"
@@ -19,20 +18,9 @@ func HistoryHandler(database *db.DB) http.Handler {
 		}
 		switch r.Method {
 		case http.MethodGet:
-			rows, err := database.SQL().Query(`SELECT keyword FROM search_history WHERE user_id=? ORDER BY updated_at DESC LIMIT 20`, u.ID)
+			list, err := database.ListSearchHistory(u.ID, 20)
 			if err != nil {
-				writeJSON(w, 200, []string{})
-				return
-			}
-			defer func() { _ = rows.Close() }()
-			list := []string{}
-			for rows.Next() {
-				var kw string
-				_ = rows.Scan(&kw)
-				kw = strings.TrimSpace(kw)
-				if kw != "" {
-					list = append(list, kw)
-				}
+				list = []string{}
 			}
 			writeJSON(w, 200, list)
 		case http.MethodPost:
@@ -50,18 +38,14 @@ func HistoryHandler(database *db.DB) http.Handler {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Keyword is required"})
 				return
 			}
-			_, _ = database.SQL().Exec(`
-				INSERT INTO search_history(user_id, keyword, updated_at)
-				VALUES(?,?,?)
-				ON CONFLICT(user_id, keyword) DO UPDATE SET updated_at = excluded.updated_at
-			`, u.ID, kw, time.Now().Unix())
+			_ = database.UpsertSearchHistory(u.ID, kw)
 			HistoryHandler(database).ServeHTTP(w, cloneWithMethod(r, http.MethodGet))
 		case http.MethodDelete:
 			kw := strings.TrimSpace(r.URL.Query().Get("keyword"))
 			if kw != "" {
-				_, _ = database.SQL().Exec(`DELETE FROM search_history WHERE user_id=? AND keyword=?`, u.ID, kw)
+				_ = database.DeleteSearchHistoryKeyword(u.ID, kw)
 			} else {
-				_, _ = database.SQL().Exec(`DELETE FROM search_history WHERE user_id=?`, u.ID)
+				_ = database.ClearSearchHistory(u.ID)
 			}
 			HistoryHandler(database).ServeHTTP(w, cloneWithMethod(r, http.MethodGet))
 		default:

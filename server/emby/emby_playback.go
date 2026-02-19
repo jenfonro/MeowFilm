@@ -43,13 +43,13 @@ func handleEmbyPlaybackInfo(w http.ResponseWriter, r *http.Request, database *db
 			}
 			urlPicked := ""
 			headers := map[string]string{}
-			if pid := smartPanMockProviderID(strings.TrimSpace(ep.Flag)); pid != "" {
-				switch pid {
-				case "tianyi":
-					ac := ""
-					parts := strings.Split(strings.TrimSpace(ep.URL), "*")
-					if len(parts) >= 2 {
-						if v, ok := embyPanMock189AccessGet(strings.TrimSpace(parts[1])); ok {
+					if pid := smartPanMockProviderID(strings.TrimSpace(ep.Flag)); pid != "" {
+						switch pid {
+						case "189":
+							ac := ""
+							parts := strings.Split(strings.TrimSpace(ep.URL), "*")
+							if len(parts) >= 2 {
+								if v, ok := embyPanMock189AccessGet(strings.TrimSpace(parts[1])); ok {
 							ac = v
 						}
 					}

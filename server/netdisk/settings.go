@@ -11,14 +11,19 @@ type panLoginSettingsStore map[string]map[string]any
 
 
 func readPanLoginSettings(database *db.DB) panLoginSettingsStore {
-	root := parseJSONMap(database.GetSetting("pan_login_settings"))
 	out := panLoginSettingsStore{}
-	for k, v := range root {
+	if database == nil {
+		return out
+	}
+	root, err := database.ReadPanLoginSettings()
+	if err != nil || root == nil {
+		return out
+	}
+	for k, m := range root {
 		key := strings.TrimSpace(k)
 		if key == "" {
 			continue
 		}
-		m, _ := v.(map[string]any)
 		if m == nil {
 			m = map[string]any{}
 		}
@@ -28,7 +33,7 @@ func readPanLoginSettings(database *db.DB) panLoginSettingsStore {
 }
 
 func writePanLoginSettings(database *db.DB, store panLoginSettingsStore) error {
-	root := map[string]any{}
+	root := map[string]map[string]any{}
 	for k, v := range store {
 		key := strings.TrimSpace(k)
 		if key == "" {
@@ -39,11 +44,12 @@ func writePanLoginSettings(database *db.DB, store panLoginSettingsStore) error {
 		}
 		root[key] = v
 	}
-	b, err := json.Marshal(root)
-	if err != nil {
-		return err
+	if database == nil {
+		return nil
 	}
-	return database.SetSetting("pan_login_settings", string(b))
+	// Keep deterministic encoding for any callers that log the payload.
+	_, _ = json.Marshal(root)
+	return database.ReplacePanLoginSettings(root)
 }
 
 func getPanField(store panLoginSettingsStore, key string, field string) string {

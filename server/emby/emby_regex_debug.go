@@ -105,10 +105,10 @@ func RegexListDebugHandler(database *db.DB) http.Handler {
 			return
 		}
 
-		rawEpisodeRules := parseJSONStringArray(database.GetSetting("magic_episode_rules"))
-		rawCleanRules := parseJSONStringArray(database.GetSetting("magic_episode_clean_regex_rules"))
-		rawMovieRules := parseJSONStringArray(database.GetSetting("magic_movie_rules"))
-		rawAggRules := parseJSONStringArray(database.GetSetting("magic_aggregate_regex_rules"))
+		rawEpisodeRules, _ := database.ListMagicEpisodeRules()
+		rawCleanRules, _ := database.ListMagicEpisodeCleanRegexRules()
+		rawMovieRules, _ := database.ListMagicMovieRules()
+		rawAggRules, _ := database.ListMagicAggregateRegexRules()
 
 		type ruleInfo struct {
 			Raw     string `json:"raw"`
@@ -267,8 +267,8 @@ func RegexSearchDebugHandler(database *db.DB) http.Handler {
 		}
 
 		if magic.RegexAvailable() {
-			rawCleanRules := parseJSONStringArray(database.GetSetting("magic_episode_clean_regex_rules"))
-			rawEpisodeRules := parseJSONStringArray(database.GetSetting("magic_episode_rules"))
+			rawCleanRules, _ := database.ListMagicEpisodeCleanRegexRules()
+			rawEpisodeRules, _ := database.ListMagicEpisodeRules()
 			if jsRes, err := magic.MagicEpisodeDebug(q, rawCleanRules, rawEpisodeRules); err == nil && jsRes != nil {
 				resp["jsMagicEpisode"] = jsRes
 				if s, e, ok := regexDebugExtractSE(jsRes); ok {

@@ -473,7 +473,7 @@ func tianyiLoginWithPassword(username string, password string) (cookie string, e
 func ensure189Cookie(database *db.DB, forceRefresh bool) (cookie string, refreshed bool, err error) {
 	// MeowFilm DB stores Tianyi(189) credentials under a single key.
 	// Keep it strict to avoid ambiguous state.
-	const storeKey = "tianyi"
+	const storeKey = "189"
 
 	store := readPanLoginSettings(database)
 	existing := getPanField(store, storeKey, "cookie")
@@ -486,7 +486,7 @@ func ensure189Cookie(database *db.DB, forceRefresh bool) (cookie string, refresh
 		if existing != "" {
 			return existing, false, nil
 		}
-		return "", false, errors.New("missing 189 cookie; set pan_login_settings[\"tianyi\"].cookie or username/password")
+		return "", false, errors.New("missing 189 cookie; set pan_login_settings[\"189\"].cookie or username/password")
 	}
 
 	pan189LoginMu.Lock()

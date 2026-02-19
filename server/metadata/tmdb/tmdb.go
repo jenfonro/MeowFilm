@@ -33,28 +33,38 @@ type tmdbTVDetailsResponse struct {
 	LastEpisodeToAir *struct {
 		SeasonNumber  int `json:"season_number"`
 		EpisodeNumber int `json:"episode_number"`
+		AirDate       string `json:"air_date"`
 	} `json:"last_episode_to_air"`
 	Name         string `json:"name"`
+	OriginalName string `json:"original_name"`
 	PosterPath   string `json:"poster_path"`
 	BackdropPath string `json:"backdrop_path"`
 	FirstAir     string `json:"first_air_date"`
 	Overview     string `json:"overview"`
-	Seasons      []struct {
-		SeasonNumber int    `json:"season_number"`
-		EpisodeCount int    `json:"episode_count"`
-		AirDate      string `json:"air_date"`
-		PosterPath   string `json:"poster_path"`
-	} `json:"seasons"`
+	Seasons      []tmdbTVSeason `json:"seasons"`
 }
 
 type TVDetailsResponse = tmdbTVDetailsResponse
 
+type tmdbTVSeason struct {
+	SeasonNumber int    `json:"season_number"`
+	Name         string `json:"name"`
+	EpisodeCount int    `json:"episode_count"`
+	AirDate      string `json:"air_date"`
+	PosterPath   string `json:"poster_path"`
+	Overview     string `json:"overview"`
+}
+
 type tmdbMovieDetailsResponse struct {
 	Title       string `json:"title"`
+	Original    string `json:"original_title"`
 	PosterPath  string `json:"poster_path"`
 	ReleaseDate string `json:"release_date"`
 	Overview    string `json:"overview"`
 	Status      string `json:"status"`
+	Tagline     string `json:"tagline"`
+	Runtime     int    `json:"runtime"`
+	Backdrop    string `json:"backdrop_path"`
 }
 
 type MovieDetailsResponse = tmdbMovieDetailsResponse
@@ -76,10 +86,50 @@ const tmdbDetailCacheTTL = 10 * time.Minute
 const tmdbDetailCacheTTLEnded = 24 * time.Hour
 const tmdbDetailCacheMaxEntries = 2000
 
+func isTMDBAirDateInFuture(dateText string, now time.Time) bool {
+	s := strings.TrimSpace(dateText)
+	if s == "" {
+		return false
+	}
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return false
+	}
+	// Compare by date only.
+	n := now
+	y, m, d := n.Date()
+	today := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	return t.After(today)
+}
+
+func pickLatestAiredFromSeasons(seasons []tmdbTVSeason, now time.Time) (int, int) {
+	bestSeason := 0
+	bestEpisodes := 0
+	for _, s := range seasons {
+		if s.SeasonNumber <= 0 || s.EpisodeCount <= 0 {
+			continue
+		}
+		air := strings.TrimSpace(s.AirDate)
+		if air == "" {
+			continue
+		}
+		if isTMDBAirDateInFuture(air, now) {
+			continue
+		}
+		if s.SeasonNumber > bestSeason {
+			bestSeason = s.SeasonNumber
+			bestEpisodes = s.EpisodeCount
+		}
+	}
+	return bestSeason, bestEpisodes
+}
+
 func resolveTMDBAPIBase(database *db.DB) string {
 	raw := ""
 	if database != nil {
-		raw = strings.TrimSpace(database.GetSetting("tmdb_api_base"))
+		if cfg, err := database.ReadAppConfig(); err == nil {
+			raw = strings.TrimSpace(cfg.TMDBAPIBase)
+		}
 	}
 	base := normalizeHTTPBase(raw)
 	if base == "" {
@@ -107,7 +157,9 @@ func JoinAPI(base, path string) string { return joinTMDBAPI(base, path) }
 func resolveTMDBImageBase(database *db.DB) string {
 	raw := ""
 	if database != nil {
-		raw = strings.TrimSpace(database.GetSetting("tmdb_img_base"))
+		if cfg, err := database.ReadAppConfig(); err == nil {
+			raw = strings.TrimSpace(cfg.TMDBImgBase)
+		}
 	}
 	base := normalizeHTTPBase(raw)
 	if base == "" {
@@ -132,7 +184,11 @@ func resolveTMDBToken(database *db.DB) (token string, kind string) {
 	if database == nil {
 		return "", ""
 	}
-	raw := strings.TrimSpace(database.GetSetting("tmdb_api_token"))
+	cfg, err := database.ReadAppConfig()
+	if err != nil {
+		return "", ""
+	}
+	raw := strings.TrimSpace(cfg.TMDBAPIToken)
 	if raw == "" {
 		return "", ""
 	}
@@ -239,15 +295,16 @@ func HandleSearch(w http.ResponseWriter, r *http.Request, database *db.DB) {
 		return
 	}
 
-	language := strings.TrimSpace(database.GetSetting("tmdb_language"))
+	cfg, _ := database.ReadAppConfig()
+	language := strings.TrimSpace(cfg.TMDBLanguage)
 	if language == "" {
 		language = "zh-CN"
 	}
-	region := strings.TrimSpace(database.GetSetting("tmdb_region"))
+	region := strings.TrimSpace(cfg.TMDBRegion)
 	if region == "" {
 		region = "CN"
 	}
-	includeAdult := strings.TrimSpace(database.GetSetting("tmdb_include_adult")) == "1"
+	includeAdult := cfg.TMDBIncludeAdult
 
 	apiBase := resolveTMDBAPIBase(database)
 	u, _ := url.Parse(joinTMDBAPI(apiBase, "search/multi"))
@@ -411,9 +468,80 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) map[st
 		return nil
 	}
 
-	language := strings.TrimSpace(database.GetSetting("tmdb_language"))
+	cfg, _ := database.ReadAppConfig()
+	language := strings.TrimSpace(cfg.TMDBLanguage)
 	if language == "" {
 		language = "zh-CN"
+	}
+
+	// Persistent normalized cache (SQLite)
+	if d, err := database.ReadTMDBDetailForAPI(mediaType, tmdbID, language); err == nil && d != nil {
+		imgBase := resolveTMDBImageBase(database)
+		if d.TMDBType == "tv" {
+			pic := strings.TrimSpace(d.PosterPath)
+			if pic != "" && !strings.HasPrefix(pic, "http://") && !strings.HasPrefix(pic, "https://") {
+				pic = joinTMDBImage(imgBase, "t/p/w500"+pic)
+			}
+			backdrop := strings.TrimSpace(d.Backdrop)
+			if backdrop != "" && !strings.HasPrefix(backdrop, "http://") && !strings.HasPrefix(backdrop, "https://") {
+				backdrop = joinTMDBImage(imgBase, "t/p/w780"+backdrop)
+			}
+			year := parseYearFromDate(d.FirstAir)
+			seasons := make([]map[string]any, 0, len(d.Seasons))
+			for _, s := range d.Seasons {
+				p := strings.TrimSpace(s.PosterPath)
+				if p != "" && !strings.HasPrefix(p, "http://") && !strings.HasPrefix(p, "https://") {
+					p = joinTMDBImage(imgBase, "t/p/w500"+p)
+				}
+				seasons = append(seasons, map[string]any{
+					"season":   s.SeasonNumber,
+					"episodes": s.EpisodeCount,
+					"airDate":  strings.TrimSpace(s.AirDate),
+					"poster":   p,
+				})
+			}
+			badge := ""
+			if d.LatestSeason > 0 && d.LatestEpisode > 0 {
+				badge = "更新至 S" + strconv.Itoa(d.LatestSeason) + "E" + strconv.Itoa(d.LatestEpisode)
+			} else if d.EpisodeCount > 0 {
+				badge = "共" + strconv.Itoa(d.EpisodeCount) + "集"
+			}
+			out := map[string]any{
+				"success":     true,
+				"id":          tmdbID,
+				"type":        "tv",
+				"title":       strings.TrimSpace(d.Title),
+				"year":        year,
+				"poster":      pic,
+				"backdrop":    backdrop,
+				"overview":    strings.TrimSpace(d.Overview),
+				"badge":       badge,
+				"status":      strings.TrimSpace(d.Status),
+				"latestSeason":  d.LatestSeason,
+				"latestEpisode": d.LatestEpisode,
+				"episodeCount":  d.EpisodeCount,
+				"seasons":     seasons,
+				"seasonCount": len(seasons),
+			}
+			return out
+		}
+		pic := strings.TrimSpace(d.PosterPath)
+		if pic != "" && !strings.HasPrefix(pic, "http://") && !strings.HasPrefix(pic, "https://") {
+			pic = joinTMDBImage(imgBase, "t/p/w500"+pic)
+		}
+		year := parseYearFromDate(d.Release)
+		out := map[string]any{
+			"success":  true,
+			"id":       tmdbID,
+			"type":     "movie",
+			"title":    strings.TrimSpace(d.Title),
+			"year":     year,
+			"poster":   pic,
+			"overview": strings.TrimSpace(d.Overview),
+			"badge":    "",
+			"status":   strings.TrimSpace(d.Status),
+		}
+		return out
 	}
 
 	apiBase := resolveTMDBAPIBase(database)
@@ -452,6 +580,32 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) map[st
 		if err := dec.Decode(&detail); err != nil {
 			return nil
 		}
+		// Upsert normalized TMDB library
+		_, _ = database.UpsertTMDBMedia(db.TMDBUpsertMedia{
+			Type:         "tv",
+			ID:           tmdbID,
+			Lang:         language,
+			Title:        strings.TrimSpace(detail.Name),
+			Original:     strings.TrimSpace(detail.OriginalName),
+			Overview:     strings.TrimSpace(detail.Overview),
+			Status:       strings.TrimSpace(detail.Status),
+			PosterPath:   strings.TrimSpace(detail.PosterPath),
+			BackdropPath: strings.TrimSpace(detail.BackdropPath),
+			FirstAirDate: strings.TrimSpace(detail.FirstAir),
+		})
+		seasonRows := make([]db.TMDBSeason, 0, len(detail.Seasons))
+		for _, s := range detail.Seasons {
+			seasonRows = append(seasonRows, db.TMDBSeason{
+				SeasonNumber: s.SeasonNumber,
+				EpisodeCount: s.EpisodeCount,
+				AirDate:      strings.TrimSpace(s.AirDate),
+				PosterPath:   strings.TrimSpace(s.PosterPath),
+				Name:         strings.TrimSpace(s.Name),
+				Overview:     strings.TrimSpace(s.Overview),
+			})
+		}
+		_ = database.UpsertTMDBSeasons("tv", tmdbID, language, seasonRows)
+
 		pic := strings.TrimSpace(detail.PosterPath)
 		if pic != "" && !strings.HasPrefix(pic, "http://") && !strings.HasPrefix(pic, "https://") {
 			pic = joinTMDBImage(resolveTMDBImageBase(database), "t/p/w500"+pic)
@@ -464,8 +618,16 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) map[st
 		latestSeason := 0
 		latestEpisode := 0
 		if detail.LastEpisodeToAir != nil {
-			latestSeason = detail.LastEpisodeToAir.SeasonNumber
-			latestEpisode = detail.LastEpisodeToAir.EpisodeNumber
+			if !isTMDBAirDateInFuture(detail.LastEpisodeToAir.AirDate, time.Now().UTC()) {
+				latestSeason = detail.LastEpisodeToAir.SeasonNumber
+				latestEpisode = detail.LastEpisodeToAir.EpisodeNumber
+			}
+		}
+		if latestSeason <= 0 || latestEpisode <= 0 {
+			if sNo, eNo := pickLatestAiredFromSeasons(detail.Seasons, time.Now().UTC()); sNo > 0 && eNo > 0 {
+				latestSeason = sNo
+				latestEpisode = eNo
+			}
 		}
 		badge := ""
 		if latestSeason > 0 && latestEpisode > 0 {
@@ -515,10 +677,24 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) map[st
 	if err := dec.Decode(&detail); err != nil {
 		return nil
 	}
-		pic := strings.TrimSpace(detail.PosterPath)
-		if pic != "" && !strings.HasPrefix(pic, "http://") && !strings.HasPrefix(pic, "https://") {
-			pic = joinTMDBImage(resolveTMDBImageBase(database), "t/p/w500"+pic)
-		}
+	_, _ = database.UpsertTMDBMedia(db.TMDBUpsertMedia{
+		Type:         "movie",
+		ID:           tmdbID,
+		Lang:         language,
+		Title:        strings.TrimSpace(detail.Title),
+		Original:     strings.TrimSpace(detail.Original),
+		Overview:     strings.TrimSpace(detail.Overview),
+		Tagline:      strings.TrimSpace(detail.Tagline),
+		Status:       strings.TrimSpace(detail.Status),
+		PosterPath:   strings.TrimSpace(detail.PosterPath),
+		BackdropPath: strings.TrimSpace(detail.Backdrop),
+		ReleaseDate:  strings.TrimSpace(detail.ReleaseDate),
+		Runtime:      detail.Runtime,
+	})
+	pic := strings.TrimSpace(detail.PosterPath)
+	if pic != "" && !strings.HasPrefix(pic, "http://") && !strings.HasPrefix(pic, "https://") {
+		pic = joinTMDBImage(resolveTMDBImageBase(database), "t/p/w500"+pic)
+	}
 	year := parseYearFromDate(detail.ReleaseDate)
 	out := map[string]any{
 		"success":  true,
