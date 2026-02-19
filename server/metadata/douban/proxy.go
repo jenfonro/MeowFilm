@@ -13,8 +13,12 @@ func APIBase(database *db.DB) (base string, proxyBase string) {
 	if database == nil {
 		return "https://m.douban.com", ""
 	}
-	mode := strings.TrimSpace(database.GetSetting("douban_data_proxy"))
-	custom := strings.TrimSpace(database.GetSetting("douban_data_custom"))
+	cfg, err := database.ReadAppConfig()
+	if err != nil {
+		return "https://m.douban.com", ""
+	}
+	mode := strings.TrimSpace(cfg.DoubanDataProxy)
+	custom := strings.TrimSpace(cfg.DoubanDataCustom)
 	switch mode {
 	case "cdn-tx", "cmliussss-cdn-tencent":
 		return "https://m.douban.cmliussss.net", ""

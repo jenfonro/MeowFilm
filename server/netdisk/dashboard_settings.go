@@ -1,7 +1,6 @@
 package netdisk
 
 import (
-	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -13,7 +12,7 @@ func HandleDashboardPanSettings(w http.ResponseWriter, r *http.Request, database
 	switch r.Method {
 	case http.MethodGet:
 		key := strings.TrimSpace(r.URL.Query().Get("key"))
-		store := parseJSONMap(database.GetSetting("pan_login_settings"))
+		store := readPanLoginSettings(database)
 		if key != "" {
 			v, ok := store[key]
 			if !ok {
@@ -34,8 +33,8 @@ func HandleDashboardPanSettings(w http.ResponseWriter, r *http.Request, database
 			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "type 参数无效"})
 			return
 		}
-		store := parseJSONMap(database.GetSetting("pan_login_settings"))
-		cur, _ := store[key].(map[string]any)
+		store := readPanLoginSettings(database)
+		cur := store[key]
 		if cur == nil {
 			cur = map[string]any{}
 		}
@@ -51,24 +50,41 @@ func HandleDashboardPanSettings(w http.ResponseWriter, r *http.Request, database
 		} else if typ == "quark_tv" || typ == "uc_tv" {
 			refreshToken := r.FormValue("refresh_token")
 			deviceID := r.FormValue("device_id")
+			accessToken := r.FormValue("access_token")
+			accessTokenExpAt := r.FormValue("access_token_exp_at")
 			cur["refresh_token"] = refreshToken
 			cur["device_id"] = deviceID
-			// Clear derived fields so backend can re-fetch fresh access_token.
-			delete(cur, "access_token")
-			delete(cur, "access_token_exp_at")
-			payload = map[string]any{"refresh_token": refreshToken, "device_id": deviceID}
+			if strings.TrimSpace(accessToken) != "" || strings.TrimSpace(accessTokenExpAt) != "" {
+				cur["access_token"] = accessToken
+				cur["access_token_exp_at"] = accessTokenExpAt
+			} else {
+				// Clear derived fields so backend can re-fetch fresh access_token.
+				delete(cur, "access_token")
+				delete(cur, "access_token_exp_at")
+			}
+			payload = map[string]any{
+				"refresh_token":        refreshToken,
+				"device_id":           deviceID,
+				"access_token":        accessToken,
+				"access_token_exp_at": accessTokenExpAt,
+			}
 		} else {
 			username := r.FormValue("username")
 			password := r.FormValue("password")
 			cur["username"] = username
 			cur["password"] = password
-			// Clear persisted cookie when account changes.
-			delete(cur, "cookie")
-			payload = map[string]any{"username": username, "password": password}
+			if key == "189" {
+				cookie := r.FormValue("cookie")
+				cur["cookie"] = cookie
+				payload = map[string]any{"username": username, "password": password, "cookie": cookie}
+			} else {
+				// Clear persisted cookie when account changes.
+				delete(cur, "cookie")
+				payload = map[string]any{"username": username, "password": password}
+			}
 		}
 		store[key] = cur
-		b, _ := json.Marshal(store)
-		_ = database.SetSetting("pan_login_settings", string(b))
+		_ = writePanLoginSettings(database, store)
 		writeJSON(w, 200, map[string]any{"success": true, "settings": store, "sync": map[string]any{"ok": nil, "skipped": true}, "payload": payload})
 	default:
 		methodNotAllowed(w)

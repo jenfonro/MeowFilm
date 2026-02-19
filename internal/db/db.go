@@ -3,22 +3,20 @@ package db
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/crypto/bcrypt"
 )
 
 type DB struct {
-	mu              sync.Mutex
-	db              *sql.DB
-	settingsCache   map[string]string
-	settingsVersion int64
+	mu sync.Mutex
+	db *sql.DB
 }
 
 func Open() (*DB, error) {
@@ -29,7 +27,7 @@ func Open() (*DB, error) {
 	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
 		return nil, err
 	}
-	raw, err := sql.Open("sqlite3", filePath+"?_journal_mode=WAL&_busy_timeout=5000")
+	raw, err := sql.Open("sqlite3", filePath+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on")
 	if err != nil {
 		return nil, err
 	}
@@ -37,7 +35,7 @@ func Open() (*DB, error) {
 		_ = raw.Close()
 		return nil, err
 	}
-	d := &DB{db: raw, settingsCache: map[string]string{}}
+	d := &DB{db: raw}
 	if err := d.initSchema(fresh); err != nil {
 		_ = raw.Close()
 		return nil, err
@@ -104,489 +102,573 @@ func (d *DB) Close() error {
 
 func (d *DB) SQL() *sql.DB { return d.db }
 
-func (d *DB) GetSetting(key string) string {
-	k := strings.TrimSpace(key)
-	if k == "" {
-		return ""
-	}
-	d.mu.Lock()
-	if v, ok := d.settingsCache[k]; ok {
-		d.mu.Unlock()
-		return v
-	}
-	d.mu.Unlock()
-
-	var v sql.NullString
-	_ = d.db.QueryRow(`SELECT value FROM settings WHERE key = ? LIMIT 1`, k).Scan(&v)
-	out := ""
-	if v.Valid {
-		out = v.String
-	}
-	d.mu.Lock()
-	d.settingsCache[k] = out
-	d.mu.Unlock()
-	return out
-}
-
-func (d *DB) SetSetting(key, value string) error {
-	k := strings.TrimSpace(key)
-	if k == "" {
-		return nil
-	}
-	v := value
-	res, err := d.db.Exec(`
-		INSERT INTO settings(key, value) VALUES (?, ?)
-		ON CONFLICT(key) DO UPDATE SET value = excluded.value
-		WHERE settings.value IS NOT excluded.value
-	`, k, v)
-	if err != nil {
+func (d *DB) initSchema(fresh bool) error {
+	if err := d.ensureSchema(); err != nil {
 		return err
 	}
-	changes, _ := res.RowsAffected()
-
-	d.mu.Lock()
-	if changes > 0 {
-		d.settingsVersion++
+	// Seed defaults if this is a fresh DB, or if the normalized config row is missing.
+	if err := d.ensureDefaults(fresh); err != nil {
+		return err
 	}
-	d.settingsCache[k] = v
-	d.mu.Unlock()
-	return nil
-}
-
-func (d *DB) SettingsVersion() int64 {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.settingsVersion
-}
-
-func (d *DB) initSchema(fresh bool) error {
-	if fresh {
-		_, err := d.db.Exec(`
-			CREATE TABLE IF NOT EXISTS settings (
-			  key TEXT PRIMARY KEY,
-			  value TEXT
-			);
-			CREATE TABLE IF NOT EXISTS users (
-			  id INTEGER PRIMARY KEY AUTOINCREMENT,
-			  username TEXT UNIQUE NOT NULL,
-			  password TEXT NOT NULL,
-			  role TEXT DEFAULT 'user',
-			  status TEXT DEFAULT 'active',
-			  cat_api_base TEXT DEFAULT '',
-			  cat_api_key TEXT DEFAULT '',
-			  cat_proxy TEXT DEFAULT '',
-			  search_thread_count INTEGER DEFAULT 5,
-			  cat_sites TEXT DEFAULT '[]',
-			  cat_site_status TEXT DEFAULT '{}',
-			  cat_site_home TEXT DEFAULT '{}',
-			  cat_site_order TEXT DEFAULT '[]',
-			  cat_site_availability TEXT DEFAULT '{}',
-			  cat_search_order TEXT DEFAULT '[]',
-			  cat_search_cover_site TEXT DEFAULT ''
-			);
-			CREATE TABLE IF NOT EXISTS search_history (
-			  id INTEGER PRIMARY KEY AUTOINCREMENT,
-			  user_id INTEGER NOT NULL,
-			  keyword TEXT NOT NULL,
-			  updated_at INTEGER NOT NULL,
-			  UNIQUE(user_id, keyword)
-			);
-			CREATE INDEX IF NOT EXISTS idx_search_history_user_id_updated_at ON search_history(user_id, updated_at DESC);
-			CREATE TABLE IF NOT EXISTS play_history (
-				  id INTEGER PRIMARY KEY AUTOINCREMENT,
-				  user_id INTEGER NOT NULL,
-				  site_key TEXT NOT NULL,
-				  site_name TEXT DEFAULT '',
-				  spider_api TEXT NOT NULL,
-				  video_id TEXT NOT NULL,
-				  video_title TEXT NOT NULL,
-				  video_poster TEXT DEFAULT '',
-				  video_remark TEXT DEFAULT '',
-				  tmdb_id INTEGER DEFAULT 0,
-				  tmdb_type TEXT DEFAULT '',
-				  pan_label TEXT DEFAULT '',
-				  play_flag TEXT DEFAULT '',
-				  content_key TEXT DEFAULT '',
-				  episode_index INTEGER DEFAULT 0,
-				  episode_name TEXT DEFAULT '',
-				  updated_at INTEGER NOT NULL,
-				  UNIQUE(user_id, site_key, video_id)
-				);
-			CREATE INDEX IF NOT EXISTS idx_play_history_user_id_updated_at ON play_history(user_id, updated_at DESC);
-			CREATE INDEX IF NOT EXISTS idx_play_history_user_id_content_key_updated_at ON play_history(user_id, content_key, updated_at DESC);
-			CREATE TABLE IF NOT EXISTS favorites (
-			  id INTEGER PRIMARY KEY AUTOINCREMENT,
-			  user_id INTEGER NOT NULL,
-			  site_key TEXT NOT NULL,
-			  site_name TEXT DEFAULT '',
-			  spider_api TEXT NOT NULL,
-			  video_id TEXT NOT NULL,
-			  video_title TEXT NOT NULL,
-			  video_poster TEXT DEFAULT '',
-			  video_remark TEXT DEFAULT '',
-			  updated_at INTEGER NOT NULL,
-			  UNIQUE(user_id, site_key, video_id)
-			);
-			CREATE INDEX IF NOT EXISTS idx_favorites_user_id_updated_at ON favorites(user_id, updated_at DESC);
-			CREATE TABLE IF NOT EXISTS auth_tokens (
-			  token TEXT PRIMARY KEY,
-			  user_id INTEGER NOT NULL,
-			  created_at INTEGER NOT NULL,
-			  expires_at INTEGER NOT NULL
-			);
-			CREATE INDEX IF NOT EXISTS idx_auth_tokens_user_id ON auth_tokens(user_id);
-			CREATE INDEX IF NOT EXISTS idx_auth_tokens_expires_at ON auth_tokens(expires_at);
-		`)
-		if err != nil {
-			return err
-		}
-		if err := d.seedDefaults(); err != nil {
-			return err
-		}
-	} else {
-		if err := requireSchema(d.db); err != nil {
-			return err
-		}
-	}
-
-	// One-time cleanup for removed settings keys.
-	_ = d.cleanupLegacySettings()
-	_ = d.ensurePlayHistoryTMDBColumns()
-	_ = d.ensurePlayHistoryProgressColumns()
-	_ = d.ensurePlayHistoryJellyfinColumns()
-	_ = d.ensureDoubanTMDBMapTable()
-	_ = d.ensureGoCompatibleMagicEpisodeRules()
 
 	return d.ensureDefaultAdmin()
 }
 
-func (d *DB) ensureDoubanTMDBMapTable() error {
+func (d *DB) ensureSchema() error {
 	if d == nil || d.db == nil {
 		return nil
 	}
-	_, err := d.db.Exec(`
-		CREATE TABLE IF NOT EXISTS douban_tmdb_map (
-		  id INTEGER PRIMARY KEY AUTOINCREMENT,
-		  kind TEXT NOT NULL,              -- "movie" | "tv"
-		  douban_id TEXT NOT NULL,
-		  title TEXT DEFAULT '',
-		  year INTEGER DEFAULT 0,
-		  tmdb_id INTEGER DEFAULT 0,
-		  tmdb_kind TEXT DEFAULT '',
-		  last_try_at INTEGER DEFAULT 0,
-		  last_try_key TEXT DEFAULT '',
-		  updated_at INTEGER NOT NULL,
-		  UNIQUE(kind, douban_id)
-		);
-		CREATE INDEX IF NOT EXISTS idx_douban_tmdb_map_kind_updated_at ON douban_tmdb_map(kind, updated_at DESC);
-		CREATE INDEX IF NOT EXISTS idx_douban_tmdb_map_tmdb_id ON douban_tmdb_map(tmdb_id);
-	`)
+
+	// No migration/compat layer: always ensure the latest schema exists.
+	schemaSQL := `
+				CREATE TABLE IF NOT EXISTS users (
+				  id INTEGER PRIMARY KEY AUTOINCREMENT,
+				  username TEXT UNIQUE NOT NULL,
+				  password TEXT NOT NULL,
+				  role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin','user')),
+				  status TEXT DEFAULT 'active',
+				  created_at INTEGER NOT NULL DEFAULT 0,
+				  updated_at INTEGER NOT NULL DEFAULT 0
+				);
+				CREATE INDEX IF NOT EXISTS idx_users_role_status ON users(role, status);
+
+					-- Search history (3NF)
+					CREATE TABLE IF NOT EXISTS search_keyword (
+					  id INTEGER PRIMARY KEY AUTOINCREMENT,
+					  keyword TEXT UNIQUE NOT NULL,
+					  created_at INTEGER NOT NULL DEFAULT 0,
+					  updated_at INTEGER NOT NULL DEFAULT 0
+					);
+					CREATE TABLE IF NOT EXISTS user_search_history (
+					  user_id INTEGER NOT NULL,
+					  keyword_id INTEGER NOT NULL,
+					  updated_at INTEGER NOT NULL,
+					  PRIMARY KEY(user_id, keyword_id),
+					  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+					  FOREIGN KEY(keyword_id) REFERENCES search_keyword(id) ON DELETE CASCADE
+					);
+					CREATE INDEX IF NOT EXISTS idx_user_search_history_user_updated_at ON user_search_history(user_id, updated_at DESC);
+
+					-- Content registry (3NF)
+					CREATE TABLE IF NOT EXISTS content (
+					  id INTEGER PRIMARY KEY AUTOINCREMENT,
+					  content_key TEXT UNIQUE NOT NULL,
+					  created_at INTEGER NOT NULL DEFAULT 0,
+					  updated_at INTEGER NOT NULL DEFAULT 0
+					);
+					CREATE TABLE IF NOT EXISTS content_tmdb (
+					  content_id INTEGER PRIMARY KEY,
+					  tmdb_id INTEGER NOT NULL,
+					  tmdb_type TEXT NOT NULL,
+					  updated_at INTEGER NOT NULL,
+					  UNIQUE(tmdb_type, tmdb_id),
+					  FOREIGN KEY(content_id) REFERENCES content(id) ON DELETE CASCADE
+					);
+
+					-- TMDB library (normalized, multi-language ready)
+					CREATE TABLE IF NOT EXISTS tmdb_media (
+					  id INTEGER PRIMARY KEY AUTOINCREMENT,
+					  tmdb_type TEXT NOT NULL, -- 'tv' | 'movie'
+					  tmdb_id INTEGER NOT NULL,
+					  poster_path TEXT NOT NULL DEFAULT '',
+					  backdrop_path TEXT NOT NULL DEFAULT '',
+					  status TEXT NOT NULL DEFAULT '',
+					  first_air_date TEXT NOT NULL DEFAULT '',
+					  release_date TEXT NOT NULL DEFAULT '',
+					  runtime INTEGER NOT NULL DEFAULT 0,
+					  updated_at INTEGER NOT NULL,
+					  UNIQUE(tmdb_type, tmdb_id)
+					);
+					CREATE INDEX IF NOT EXISTS idx_tmdb_media_type_id ON tmdb_media(tmdb_type, tmdb_id);
+					CREATE TABLE IF NOT EXISTS tmdb_media_i18n (
+					  media_id INTEGER NOT NULL,
+					  lang TEXT NOT NULL, -- e.g. 'zh-CN'
+					  title TEXT NOT NULL DEFAULT '',
+					  original_title TEXT NOT NULL DEFAULT '',
+					  overview TEXT NOT NULL DEFAULT '',
+					  tagline TEXT NOT NULL DEFAULT '',
+					  updated_at INTEGER NOT NULL,
+					  PRIMARY KEY(media_id, lang),
+					  FOREIGN KEY(media_id) REFERENCES tmdb_media(id) ON DELETE CASCADE
+					);
+					CREATE INDEX IF NOT EXISTS idx_tmdb_media_i18n_lang ON tmdb_media_i18n(lang);
+
+					CREATE TABLE IF NOT EXISTS tmdb_season (
+					  id INTEGER PRIMARY KEY AUTOINCREMENT,
+					  media_id INTEGER NOT NULL,
+					  season_number INTEGER NOT NULL,
+					  air_date TEXT NOT NULL DEFAULT '',
+					  poster_path TEXT NOT NULL DEFAULT '',
+					  episode_count INTEGER NOT NULL DEFAULT 0,
+					  updated_at INTEGER NOT NULL,
+					  UNIQUE(media_id, season_number),
+					  FOREIGN KEY(media_id) REFERENCES tmdb_media(id) ON DELETE CASCADE
+					);
+					CREATE INDEX IF NOT EXISTS idx_tmdb_season_media ON tmdb_season(media_id, season_number);
+					CREATE TABLE IF NOT EXISTS tmdb_season_i18n (
+					  season_id INTEGER NOT NULL,
+					  lang TEXT NOT NULL,
+					  name TEXT NOT NULL DEFAULT '',
+					  overview TEXT NOT NULL DEFAULT '',
+					  updated_at INTEGER NOT NULL,
+					  PRIMARY KEY(season_id, lang),
+					  FOREIGN KEY(season_id) REFERENCES tmdb_season(id) ON DELETE CASCADE
+					);
+
+					CREATE TABLE IF NOT EXISTS tmdb_episode (
+					  id INTEGER PRIMARY KEY AUTOINCREMENT,
+					  media_id INTEGER NOT NULL,
+					  season_number INTEGER NOT NULL,
+					  episode_number INTEGER NOT NULL,
+					  air_date TEXT NOT NULL DEFAULT '',
+					  runtime INTEGER NOT NULL DEFAULT 0,
+					  still_path TEXT NOT NULL DEFAULT '',
+					  updated_at INTEGER NOT NULL,
+					  UNIQUE(media_id, season_number, episode_number),
+					  FOREIGN KEY(media_id) REFERENCES tmdb_media(id) ON DELETE CASCADE
+					);
+					CREATE INDEX IF NOT EXISTS idx_tmdb_episode_media ON tmdb_episode(media_id, season_number, episode_number);
+					CREATE TABLE IF NOT EXISTS tmdb_episode_i18n (
+					  episode_id INTEGER NOT NULL,
+					  lang TEXT NOT NULL,
+					  name TEXT NOT NULL DEFAULT '',
+					  overview TEXT NOT NULL DEFAULT '',
+					  updated_at INTEGER NOT NULL,
+					  PRIMARY KEY(episode_id, lang),
+					  FOREIGN KEY(episode_id) REFERENCES tmdb_episode(id) ON DELETE CASCADE
+					);
+
+					-- Season hints/overrides from other sources (e.g. Douban)
+					CREATE TABLE IF NOT EXISTS tmdb_season_hint (
+					  media_id INTEGER NOT NULL,
+					  source TEXT NOT NULL, -- 'douban' | ...
+					  season_number INTEGER NOT NULL,
+					  episode_count INTEGER NOT NULL DEFAULT 0,
+					  updated_at INTEGER NOT NULL,
+					  PRIMARY KEY(media_id, source, season_number),
+					  FOREIGN KEY(media_id) REFERENCES tmdb_media(id) ON DELETE CASCADE
+					);
+					CREATE INDEX IF NOT EXISTS idx_tmdb_season_hint_media_source ON tmdb_season_hint(media_id, source);
+
+					-- External IDs (Douban/IMDB/TVDB/...) - flexible mapping
+					CREATE TABLE IF NOT EXISTS tmdb_external_id (
+					  media_id INTEGER NOT NULL,
+					  source TEXT NOT NULL, -- 'douban' | 'imdb' | 'tvdb' ...
+					  external_id TEXT NOT NULL,
+					  updated_at INTEGER NOT NULL,
+					  PRIMARY KEY(media_id, source),
+					  UNIQUE(source, external_id),
+					  FOREIGN KEY(media_id) REFERENCES tmdb_media(id) ON DELETE CASCADE
+					);
+					CREATE INDEX IF NOT EXISTS idx_tmdb_external_id_source ON tmdb_external_id(source, external_id);
+
+					-- Site video (3NF)
+					-- site_kind: 'global' | 'emby' (extensible)
+					-- owner_user_id: reserved for future scoping (currently always 0)
+					CREATE TABLE IF NOT EXISTS site_video (
+					  id INTEGER PRIMARY KEY AUTOINCREMENT,
+					  site_kind TEXT NOT NULL DEFAULT 'global',
+					  owner_user_id INTEGER NOT NULL DEFAULT 0,
+					  site_key TEXT NOT NULL,
+					  video_id TEXT NOT NULL,
+					  title TEXT NOT NULL,
+					  poster TEXT NOT NULL DEFAULT '',
+					  remark TEXT NOT NULL DEFAULT '',
+					  updated_at INTEGER NOT NULL,
+					  UNIQUE(site_kind, owner_user_id, site_key, video_id)
+					);
+					CREATE INDEX IF NOT EXISTS idx_site_video_site ON site_video(site_kind, owner_user_id, site_key);
+
+					-- Playback history (3NF)
+					CREATE TABLE IF NOT EXISTS user_play_history (
+					  id INTEGER PRIMARY KEY AUTOINCREMENT,
+					  user_id INTEGER NOT NULL,
+					  content_id INTEGER NOT NULL,
+					  site_video_id INTEGER NOT NULL,
+					  pan_label TEXT NOT NULL DEFAULT '',
+					  play_flag TEXT NOT NULL DEFAULT '',
+					  episode_index INTEGER NOT NULL DEFAULT 0,
+					  episode_name TEXT NOT NULL DEFAULT '',
+					  playback_position_ticks INTEGER NOT NULL DEFAULT 0,
+					  playback_runtime_ticks INTEGER NOT NULL DEFAULT 0,
+					  playback_item_id TEXT NOT NULL DEFAULT '',
+					  updated_at INTEGER NOT NULL,
+					  UNIQUE(user_id, site_video_id),
+					  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+					  FOREIGN KEY(content_id) REFERENCES content(id) ON DELETE CASCADE,
+					  FOREIGN KEY(site_video_id) REFERENCES site_video(id) ON DELETE CASCADE
+					);
+					CREATE INDEX IF NOT EXISTS idx_user_play_history_user_updated_at ON user_play_history(user_id, updated_at DESC);
+					CREATE INDEX IF NOT EXISTS idx_user_play_history_user_content_updated_at ON user_play_history(user_id, content_id, updated_at DESC);
+					CREATE INDEX IF NOT EXISTS idx_user_play_history_user_playback_item ON user_play_history(user_id, playback_item_id);
+
+					-- Favorites (3NF)
+					CREATE TABLE IF NOT EXISTS user_favorite (
+					  id INTEGER PRIMARY KEY AUTOINCREMENT,
+					  user_id INTEGER NOT NULL,
+					  site_video_id INTEGER NOT NULL,
+					  updated_at INTEGER NOT NULL,
+					  UNIQUE(user_id, site_video_id),
+					  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+					  FOREIGN KEY(site_video_id) REFERENCES site_video(id) ON DELETE CASCADE
+					);
+					CREATE INDEX IF NOT EXISTS idx_user_favorite_user_updated_at ON user_favorite(user_id, updated_at DESC);
+
+					CREATE TABLE IF NOT EXISTS auth_tokens (
+					  token TEXT PRIMARY KEY,
+					  user_id INTEGER NOT NULL,
+					  created_at INTEGER NOT NULL,
+					  expires_at INTEGER NOT NULL
+					);
+				CREATE INDEX IF NOT EXISTS idx_auth_tokens_user_id ON auth_tokens(user_id);
+				CREATE INDEX IF NOT EXISTS idx_auth_tokens_expires_at ON auth_tokens(expires_at);
+					CREATE TABLE IF NOT EXISTS catpawopen_server (
+					  name TEXT PRIMARY KEY,
+					  api_base TEXT NOT NULL,
+					  order_index INTEGER NOT NULL DEFAULT 0,
+				  updated_at INTEGER NOT NULL
+				);
+				CREATE INDEX IF NOT EXISTS idx_catpawopen_server_order ON catpawopen_server(order_index);
+				CREATE TABLE IF NOT EXISTS catpawopen_pan (
+				  key TEXT PRIMARY KEY,
+				  name TEXT NOT NULL DEFAULT '',
+				  enabled INTEGER NOT NULL DEFAULT 0,
+				  updated_at INTEGER NOT NULL
+				);
+				CREATE TABLE IF NOT EXISTS goproxy_server (
+				  name TEXT PRIMARY KEY,
+				  display_name TEXT NOT NULL DEFAULT '',
+				  base TEXT NOT NULL,
+				  pans_baidu INTEGER NOT NULL DEFAULT 0,
+				  pans_quark INTEGER NOT NULL DEFAULT 0,
+				  order_index INTEGER NOT NULL DEFAULT 0,
+				  updated_at INTEGER NOT NULL
+				);
+				CREATE INDEX IF NOT EXISTS idx_goproxy_server_order ON goproxy_server(order_index);
+				CREATE TABLE IF NOT EXISTS video_source_site (
+				  key TEXT PRIMARY KEY,
+				  name TEXT NOT NULL DEFAULT '',
+				  api TEXT NOT NULL,
+				  type INTEGER,
+				  updated_at INTEGER NOT NULL
+				);
+				CREATE TABLE IF NOT EXISTS video_source_site_state (
+				  site_key TEXT PRIMARY KEY,
+				  enabled INTEGER NOT NULL DEFAULT 1,
+				  home INTEGER NOT NULL DEFAULT 0,
+				  search INTEGER NOT NULL DEFAULT 0,
+				  availability TEXT NOT NULL DEFAULT 'unchecked',
+				  error TEXT NOT NULL DEFAULT '',
+				  order_index INTEGER NOT NULL DEFAULT 0,
+				  updated_at INTEGER NOT NULL,
+				  FOREIGN KEY(site_key) REFERENCES video_source_site(key) ON DELETE CASCADE
+				);
+				CREATE INDEX IF NOT EXISTS idx_video_source_site_state_order ON video_source_site_state(order_index);
+				CREATE TABLE IF NOT EXISTS magic_episode_rule (
+				  pos INTEGER PRIMARY KEY,
+				  rule_text TEXT NOT NULL
+				);
+				CREATE TABLE IF NOT EXISTS magic_episode_clean_regex_rule (
+				  pos INTEGER PRIMARY KEY,
+				  pattern TEXT NOT NULL
+				);
+				CREATE TABLE IF NOT EXISTS magic_movie_rule (
+				  pos INTEGER PRIMARY KEY,
+				  rule_text TEXT NOT NULL
+				);
+				CREATE TABLE IF NOT EXISTS magic_aggregate_rule (
+				  pos INTEGER PRIMARY KEY,
+				  rule_text TEXT NOT NULL
+				);
+				CREATE TABLE IF NOT EXISTS magic_aggregate_regex_rule (
+				  pos INTEGER PRIMARY KEY,
+				  pattern TEXT NOT NULL
+				);
+				CREATE TABLE IF NOT EXISTS smart_source_priority_token (
+				  pos INTEGER PRIMARY KEY,
+				  token TEXT NOT NULL
+				);
+				CREATE TABLE IF NOT EXISTS smart_pan_match_token (
+				  pos INTEGER PRIMARY KEY,
+				  token TEXT NOT NULL
+				);
+				CREATE TABLE IF NOT EXISTS pan_login_setting (
+				  provider TEXT NOT NULL,
+				  field TEXT NOT NULL,
+				  value TEXT NOT NULL,
+				  PRIMARY KEY(provider, field)
+				);
+				CREATE INDEX IF NOT EXISTS idx_pan_login_setting_provider ON pan_login_setting(provider);
+					-- Douban media & TMDB link (normalized, multi-language ready)
+					CREATE TABLE IF NOT EXISTS douban_media (
+					  id INTEGER PRIMARY KEY AUTOINCREMENT,
+					  kind TEXT NOT NULL, -- "movie" | "tv"
+					  douban_id TEXT NOT NULL,
+					  year INTEGER NOT NULL DEFAULT 0,
+					  created_at INTEGER NOT NULL DEFAULT 0,
+					  updated_at INTEGER NOT NULL,
+					  UNIQUE(kind, douban_id)
+					);
+					CREATE INDEX IF NOT EXISTS idx_douban_media_kind_updated_at ON douban_media(kind, updated_at DESC);
+					CREATE TABLE IF NOT EXISTS douban_media_i18n (
+					  media_id INTEGER NOT NULL,
+					  lang TEXT NOT NULL, -- e.g. 'zh-CN'
+					  title TEXT NOT NULL DEFAULT '',
+					  updated_at INTEGER NOT NULL,
+					  PRIMARY KEY(media_id, lang),
+					  FOREIGN KEY(media_id) REFERENCES douban_media(id) ON DELETE CASCADE
+					);
+					CREATE TABLE IF NOT EXISTS douban_media_state (
+					  media_id INTEGER PRIMARY KEY,
+					  last_try_at INTEGER NOT NULL DEFAULT 0,
+					  last_try_key TEXT NOT NULL DEFAULT '',
+					  updated_at INTEGER NOT NULL,
+					  FOREIGN KEY(media_id) REFERENCES douban_media(id) ON DELETE CASCADE
+					);
+					CREATE TABLE IF NOT EXISTS douban_tmdb_link (
+					  douban_media_id INTEGER NOT NULL,
+					  tmdb_media_id INTEGER NOT NULL,
+					  updated_at INTEGER NOT NULL,
+					  PRIMARY KEY(douban_media_id),
+					  FOREIGN KEY(douban_media_id) REFERENCES douban_media(id) ON DELETE CASCADE,
+					  FOREIGN KEY(tmdb_media_id) REFERENCES tmdb_media(id) ON DELETE CASCADE
+					);
+					CREATE INDEX IF NOT EXISTS idx_douban_tmdb_link_tmdb_media ON douban_tmdb_link(tmdb_media_id);
+
+					-- Cache domain (fully normalized)
+					CREATE TABLE IF NOT EXISTS cache_site_pan (
+					  id INTEGER PRIMARY KEY AUTOINCREMENT,
+					  site_kind TEXT NOT NULL DEFAULT 'global', -- 'global' | 'user' | 'emby'
+					  owner_user_id INTEGER NOT NULL DEFAULT 0,
+					  site_id TEXT NOT NULL,
+					  site_pan_id TEXT NOT NULL,
+					  spider_api TEXT NOT NULL,
+					  video_id TEXT NOT NULL,
+					  pan_label TEXT NOT NULL DEFAULT '',
+					  updated_at INTEGER NOT NULL,
+					  UNIQUE(site_kind, owner_user_id, site_id, site_pan_id)
+					);
+					CREATE INDEX IF NOT EXISTS idx_cache_site_pan_site ON cache_site_pan(site_kind, owner_user_id, site_id, updated_at DESC);
+					CREATE TABLE IF NOT EXISTS cache_site_pan_state (
+					  site_pan_id INTEGER PRIMARY KEY,
+					  status TEXT NOT NULL DEFAULT 'active',
+					  fail_count INTEGER NOT NULL DEFAULT 0,
+					  cooldown_until INTEGER NOT NULL DEFAULT 0,
+					  last_refresh_at INTEGER NOT NULL DEFAULT 0,
+					  updated_at INTEGER NOT NULL,
+					  FOREIGN KEY(site_pan_id) REFERENCES cache_site_pan(id) ON DELETE CASCADE
+					);
+
+					CREATE TABLE IF NOT EXISTS cache_pan (
+					  id INTEGER PRIMARY KEY AUTOINCREMENT,
+					  provider TEXT NOT NULL,
+					  pan_id TEXT NOT NULL,
+					  updated_at INTEGER NOT NULL,
+					  UNIQUE(provider, pan_id)
+					);
+					CREATE INDEX IF NOT EXISTS idx_cache_pan_provider ON cache_pan(provider, updated_at DESC);
+					CREATE TABLE IF NOT EXISTS cache_pan_state (
+					  pan_id INTEGER PRIMARY KEY,
+					  status TEXT NOT NULL DEFAULT 'active',
+					  fail_count INTEGER NOT NULL DEFAULT 0,
+					  cooldown_until INTEGER NOT NULL DEFAULT 0,
+					  last_verified_at INTEGER NOT NULL DEFAULT 0,
+					  updated_at INTEGER NOT NULL,
+					  FOREIGN KEY(pan_id) REFERENCES cache_pan(id) ON DELETE CASCADE
+					);
+					CREATE TABLE IF NOT EXISTS cache_pan_play_hint (
+					  pan_id INTEGER PRIMARY KEY,
+					  play_flag TEXT NOT NULL DEFAULT '',
+					  play_share_url TEXT NOT NULL DEFAULT '',
+					  play_filename TEXT NOT NULL DEFAULT '',
+					  updated_at INTEGER NOT NULL,
+					  FOREIGN KEY(pan_id) REFERENCES cache_pan(id) ON DELETE CASCADE
+					);
+
+					CREATE TABLE IF NOT EXISTS cache_episode (
+					  id INTEGER PRIMARY KEY AUTOINCREMENT,
+					  tmdb_media_id INTEGER NOT NULL,
+					  season INTEGER NOT NULL DEFAULT 0,
+					  episode INTEGER NOT NULL DEFAULT 0,
+					  updated_at INTEGER NOT NULL,
+					  UNIQUE(tmdb_media_id, season, episode),
+					  FOREIGN KEY(tmdb_media_id) REFERENCES tmdb_media(id) ON DELETE CASCADE
+					);
+					CREATE INDEX IF NOT EXISTS idx_cache_episode_lookup ON cache_episode(tmdb_media_id, season, episode);
+
+					CREATE TABLE IF NOT EXISTS cache_quality (
+					  id INTEGER PRIMARY KEY AUTOINCREMENT,
+					  resolution TEXT NOT NULL DEFAULT '',
+					  codec TEXT NOT NULL DEFAULT '',
+					  hdr INTEGER NOT NULL DEFAULT 0,
+					  fps INTEGER NOT NULL DEFAULT 0,
+					  updated_at INTEGER NOT NULL,
+					  UNIQUE(resolution, codec, hdr, fps)
+					);
+					CREATE TABLE IF NOT EXISTS cache_candidate (
+					  id INTEGER PRIMARY KEY AUTOINCREMENT,
+					  episode_id INTEGER NOT NULL,
+					  quality_id INTEGER NOT NULL,
+					  site_pan_id INTEGER NOT NULL,
+					  pan_id INTEGER NOT NULL,
+					  rank INTEGER NOT NULL DEFAULT 0,
+					  status TEXT NOT NULL DEFAULT 'active',
+					  fail_count INTEGER NOT NULL DEFAULT 0,
+					  cooldown_until INTEGER NOT NULL DEFAULT 0,
+					  last_ok_at INTEGER NOT NULL DEFAULT 0,
+					  updated_at INTEGER NOT NULL,
+					  UNIQUE(episode_id, quality_id, site_pan_id, pan_id),
+					  FOREIGN KEY(episode_id) REFERENCES cache_episode(id) ON DELETE CASCADE,
+					  FOREIGN KEY(quality_id) REFERENCES cache_quality(id) ON DELETE CASCADE,
+					  FOREIGN KEY(site_pan_id) REFERENCES cache_site_pan(id) ON DELETE CASCADE,
+					  FOREIGN KEY(pan_id) REFERENCES cache_pan(id) ON DELETE CASCADE
+						);
+						CREATE INDEX IF NOT EXISTS idx_cache_candidate_episode ON cache_candidate(episode_id, updated_at DESC);
+						CREATE INDEX IF NOT EXISTS idx_cache_candidate_cooldown ON cache_candidate(episode_id, cooldown_until);
+
+					-- Normalized config & user preferences (no legacy KV table).
+						-- App config (fully split by domain; single-row per domain)
+						CREATE TABLE IF NOT EXISTS app_site (
+						  id INTEGER PRIMARY KEY CHECK (id = 1),
+						  site_name TEXT NOT NULL DEFAULT 'MeowFilm',
+					  updated_at INTEGER NOT NULL
+					);
+					CREATE TABLE IF NOT EXISTS app_douban (
+					  id INTEGER PRIMARY KEY CHECK (id = 1),
+					  data_proxy TEXT NOT NULL DEFAULT 'direct',
+					  data_custom TEXT NOT NULL DEFAULT '',
+					  img_proxy TEXT NOT NULL DEFAULT 'direct-browser',
+					  img_custom TEXT NOT NULL DEFAULT '',
+					  updated_at INTEGER NOT NULL
+					);
+					CREATE TABLE IF NOT EXISTS app_tmdb (
+					  id INTEGER PRIMARY KEY CHECK (id = 1),
+					  api_token TEXT NOT NULL DEFAULT '',
+					  api_base TEXT NOT NULL DEFAULT '',
+					  img_base TEXT NOT NULL DEFAULT '',
+					  language TEXT NOT NULL DEFAULT 'zh-CN',
+					  region TEXT NOT NULL DEFAULT 'CN',
+					  include_adult INTEGER NOT NULL DEFAULT 0,
+					  updated_at INTEGER NOT NULL
+					);
+					CREATE TABLE IF NOT EXISTS app_video_source (
+					  id INTEGER PRIMARY KEY CHECK (id = 1),
+					  api_base TEXT NOT NULL DEFAULT '',
+					  search_cover_site TEXT NOT NULL DEFAULT '',
+					  updated_at INTEGER NOT NULL
+					);
+					CREATE TABLE IF NOT EXISTS app_search (
+					  id INTEGER PRIMARY KEY CHECK (id = 1),
+					  display_mode TEXT NOT NULL DEFAULT 'sites',
+					  badge_prefer_episode INTEGER NOT NULL DEFAULT 0,
+					  updated_at INTEGER NOT NULL
+					);
+					CREATE TABLE IF NOT EXISTS app_smart (
+					  id INTEGER PRIMARY KEY CHECK (id = 1),
+					  play_enabled INTEGER NOT NULL DEFAULT 1,
+					  list_enabled INTEGER NOT NULL DEFAULT 1,
+					  source_extract_priority TEXT NOT NULL DEFAULT '无',
+					  updated_at INTEGER NOT NULL
+					);
+					CREATE TABLE IF NOT EXISTS app_goproxy (
+					  id INTEGER PRIMARY KEY CHECK (id = 1),
+					  enabled INTEGER NOT NULL DEFAULT 0,
+					  auto_select INTEGER NOT NULL DEFAULT 0,
+					  updated_at INTEGER NOT NULL
+					);
+					CREATE TABLE IF NOT EXISTS app_catpawopen (
+					  id INTEGER PRIMARY KEY CHECK (id = 1),
+					  active TEXT NOT NULL DEFAULT '',
+					  updated_at INTEGER NOT NULL
+					);
+				CREATE TABLE IF NOT EXISTS catpawopen_server (
+				  name TEXT PRIMARY KEY,
+				  api_base TEXT NOT NULL,
+				  order_index INTEGER NOT NULL DEFAULT 0,
+				  updated_at INTEGER NOT NULL
+				);
+				CREATE INDEX IF NOT EXISTS idx_catpawopen_server_order ON catpawopen_server(order_index);
+				CREATE TABLE IF NOT EXISTS catpawopen_pan (
+				  key TEXT PRIMARY KEY,
+				  name TEXT NOT NULL DEFAULT '',
+				  enabled INTEGER NOT NULL DEFAULT 0,
+				  updated_at INTEGER NOT NULL
+				);
+				CREATE TABLE IF NOT EXISTS goproxy_server (
+				  name TEXT PRIMARY KEY,
+				  display_name TEXT NOT NULL DEFAULT '',
+				  base TEXT NOT NULL,
+				  pans_baidu INTEGER NOT NULL DEFAULT 0,
+				  pans_quark INTEGER NOT NULL DEFAULT 0,
+				  order_index INTEGER NOT NULL DEFAULT 0,
+				  updated_at INTEGER NOT NULL
+				);
+				CREATE INDEX IF NOT EXISTS idx_goproxy_server_order ON goproxy_server(order_index);
+				CREATE TABLE IF NOT EXISTS video_source_site (
+				  key TEXT PRIMARY KEY,
+				  name TEXT NOT NULL DEFAULT '',
+				  api TEXT NOT NULL,
+				  type INTEGER,
+				  updated_at INTEGER NOT NULL
+				);
+				CREATE TABLE IF NOT EXISTS video_source_site_state (
+				  site_key TEXT PRIMARY KEY,
+				  enabled INTEGER NOT NULL DEFAULT 1,
+				  home INTEGER NOT NULL DEFAULT 0,
+				  search INTEGER NOT NULL DEFAULT 0,
+				  availability TEXT NOT NULL DEFAULT 'unchecked',
+				  error TEXT NOT NULL DEFAULT '',
+				  order_index INTEGER NOT NULL DEFAULT 0,
+				  updated_at INTEGER NOT NULL,
+				  FOREIGN KEY(site_key) REFERENCES video_source_site(key) ON DELETE CASCADE
+				);
+				CREATE INDEX IF NOT EXISTS idx_video_source_site_state_order ON video_source_site_state(order_index);
+				CREATE TABLE IF NOT EXISTS magic_episode_rule (
+				  pos INTEGER PRIMARY KEY,
+				  rule_text TEXT NOT NULL
+				);
+				CREATE TABLE IF NOT EXISTS magic_episode_clean_regex_rule (
+				  pos INTEGER PRIMARY KEY,
+				  pattern TEXT NOT NULL
+				);
+				CREATE TABLE IF NOT EXISTS magic_movie_rule (
+				  pos INTEGER PRIMARY KEY,
+				  rule_text TEXT NOT NULL
+				);
+				CREATE TABLE IF NOT EXISTS magic_aggregate_rule (
+				  pos INTEGER PRIMARY KEY,
+				  rule_text TEXT NOT NULL
+				);
+				CREATE TABLE IF NOT EXISTS magic_aggregate_regex_rule (
+				  pos INTEGER PRIMARY KEY,
+				  pattern TEXT NOT NULL
+				);
+				CREATE TABLE IF NOT EXISTS smart_source_priority_token (
+				  pos INTEGER PRIMARY KEY,
+				  token TEXT NOT NULL
+				);
+				CREATE TABLE IF NOT EXISTS smart_pan_match_token (
+				  pos INTEGER PRIMARY KEY,
+				  token TEXT NOT NULL
+				);
+				CREATE TABLE IF NOT EXISTS pan_login_setting (
+				  provider TEXT NOT NULL,
+				  field TEXT NOT NULL,
+				  value TEXT NOT NULL,
+				  PRIMARY KEY(provider, field)
+				);
+				CREATE INDEX IF NOT EXISTS idx_pan_login_setting_provider ON pan_login_setting(provider);
+	`
+
+	tx, err := d.db.Begin()
 	if err != nil {
 		return err
 	}
-	ok, err := hasSQLiteColumn(d.db, "douban_tmdb_map", "last_try_key")
-	if err != nil {
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(schemaSQL); err != nil {
 		return err
 	}
-	if !ok {
-		_, _ = d.db.Exec(`ALTER TABLE douban_tmdb_map ADD COLUMN last_try_key TEXT DEFAULT ''`)
-	}
-	return nil
-}
-
-func (d *DB) ensurePlayHistoryTMDBColumns() error {
-	if d == nil || d.db == nil {
-		return nil
-	}
-	cols := []struct {
-		name string
-		ddl  string
-	}{
-		{name: "tmdb_id", ddl: "ALTER TABLE play_history ADD COLUMN tmdb_id INTEGER DEFAULT 0"},
-		{name: "tmdb_type", ddl: "ALTER TABLE play_history ADD COLUMN tmdb_type TEXT DEFAULT ''"},
-		{name: "tmdb_seasons_json", ddl: "ALTER TABLE play_history ADD COLUMN tmdb_seasons_json TEXT DEFAULT ''"},
-	}
-	for _, c := range cols {
-		ok, err := hasSQLiteColumn(d.db, "play_history", c.name)
-		if err != nil {
-			return err
-		}
-		if ok {
-			continue
-		}
-		_, _ = d.db.Exec(c.ddl)
-	}
-	return nil
-}
-
-func (d *DB) ensurePlayHistoryProgressColumns() error {
-	if d == nil || d.db == nil {
-		return nil
-	}
-	cols := []struct {
-		name string
-		ddl  string
-	}{
-		{name: "playback_position_ticks", ddl: "ALTER TABLE play_history ADD COLUMN playback_position_ticks INTEGER DEFAULT 0"},
-		{name: "playback_runtime_ticks", ddl: "ALTER TABLE play_history ADD COLUMN playback_runtime_ticks INTEGER DEFAULT 0"},
-	}
-	for _, c := range cols {
-		ok, err := hasSQLiteColumn(d.db, "play_history", c.name)
-		if err != nil {
-			return err
-		}
-		if ok {
-			continue
-		}
-		_, _ = d.db.Exec(c.ddl)
-	}
-	return nil
-}
-
-func (d *DB) ensurePlayHistoryJellyfinColumns() error {
-	if d == nil || d.db == nil {
-		return nil
-	}
-	cols := []struct {
-		name string
-		ddl  string
-	}{
-		{name: "playback_item_id", ddl: "ALTER TABLE play_history ADD COLUMN playback_item_id TEXT DEFAULT ''"},
-	}
-	for _, c := range cols {
-		ok, err := hasSQLiteColumn(d.db, "play_history", c.name)
-		if err != nil {
-			return err
-		}
-		if ok {
-			continue
-		}
-		_, _ = d.db.Exec(c.ddl)
-	}
-	return nil
-}
-
-func (d *DB) cleanupLegacySettings() error {
-	if d == nil || d.db == nil {
-		return nil
-	}
-
-	legacyKeys := []string{
-		"openlist_api_base",
-		"openlist_token",
-		"openlist_quark_tv_mode",
-		"openlist_quark_tv_mount",
-	}
-
-	// Best-effort: ignore if keys do not exist.
-	args := make([]any, 0, len(legacyKeys))
-	for _, k := range legacyKeys {
-		args = append(args, k)
-	}
-	placeholders := strings.TrimRight(strings.Repeat("?,", len(args)), ",")
-	res, err := d.db.Exec(`DELETE FROM settings WHERE key IN (`+placeholders+`)`, args...)
-	if err != nil {
-		return err
-	}
-	affected, _ := res.RowsAffected()
-	if affected <= 0 {
-		return nil
-	}
-
-	d.mu.Lock()
-	d.settingsVersion++
-	for _, k := range legacyKeys {
-		delete(d.settingsCache, k)
-	}
-	d.mu.Unlock()
-	return nil
-}
-
-func requireSchema(db *sql.DB) error {
-	if db == nil {
-		return errors.New("database not initialized")
-	}
-
-	requiredTables := []string{"settings", "users", "search_history", "play_history", "favorites", "auth_tokens"}
-	for _, t := range requiredTables {
-		if err := requireSQLiteTable(db, t); err != nil {
-			return err
-		}
-	}
-
-	requiredColumns := [][2]string{
-		{"settings", "key"},
-		{"settings", "value"},
-		{"users", "username"},
-		{"users", "password"},
-		{"users", "role"},
-		{"users", "status"},
-		{"users", "cat_api_base"},
-		{"users", "cat_api_key"},
-		{"users", "cat_proxy"},
-		{"users", "search_thread_count"},
-		{"users", "cat_sites"},
-		{"users", "cat_site_status"},
-		{"users", "cat_site_home"},
-		{"users", "cat_site_order"},
-		{"users", "cat_site_availability"},
-		{"users", "cat_search_order"},
-		{"users", "cat_search_cover_site"},
-		{"play_history", "pan_label"},
-	}
-	for _, pair := range requiredColumns {
-		if err := requireSQLiteColumn(db, pair[0], pair[1]); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func requireSQLiteTable(db *sql.DB, table string) error {
-	t := strings.TrimSpace(table)
-	if t == "" {
-		return errors.New("empty table name")
-	}
-	var cnt int
-	if err := db.QueryRow(`SELECT COUNT(1) FROM sqlite_master WHERE type='table' AND name=?`, t).Scan(&cnt); err != nil {
-		return err
-	}
-	if cnt == 0 {
-		return fmt.Errorf("检测到旧数据库（不再兼容）：缺少表 %q；请删除数据库文件后重启（默认 data.db）", t)
-	}
-	return nil
-}
-
-func requireSQLiteColumn(db *sql.DB, table, column string) error {
-	ok, err := hasSQLiteColumn(db, table, column)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return fmt.Errorf("检测到旧数据库（不再兼容）：缺少列 %s.%s；请删除数据库文件后重启（默认 data.db）", table, column)
-	}
-	return nil
-}
-
-func hasSQLiteColumn(db *sql.DB, table, column string) (bool, error) {
-	if db == nil {
-		return false, nil
-	}
-	t := strings.TrimSpace(table)
-	c := strings.TrimSpace(column)
-	if t == "" || c == "" {
-		return false, nil
-	}
-	if !isSQLiteIdent(t) || !isSQLiteIdent(c) {
-		return false, fmt.Errorf("invalid sqlite identifier %q.%q", t, c)
-	}
-
-	rows, err := db.Query(`PRAGMA table_info(` + t + `)`)
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var (
-			cid       int
-			name      string
-			typ       string
-			notnull   int
-			dfltValue any
-			pk        int
-		)
-		_ = rows.Scan(&cid, &name, &typ, &notnull, &dfltValue, &pk)
-		if strings.EqualFold(strings.TrimSpace(name), c) {
-			return true, nil
-		}
-	}
-
-	return false, nil
-}
-
-func isSQLiteIdent(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		ch := s[i]
-		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' {
-			continue
-		}
-		return false
-	}
-	return true
-}
-
-func (d *DB) seedDefaults() error {
-	type kv struct{ k, v string }
-	seeds := []kv{
-		{"site_name", "MeowFilm"},
-		{"douban_data_proxy", "direct"},
-		{"douban_data_custom", ""},
-		{"douban_img_proxy", "direct-browser"},
-		{"douban_img_custom", ""},
-		{"video_source_api_base", ""},
-		{"video_source_sites", "[]"},
-		{"catpawopen_servers", "[]"},
-		{"catpawopen_active", ""},
-		{"video_source_site_status", "{}"},
-		{"video_source_site_home", "{}"},
-		{"video_source_site_search", "{}"},
-		{"video_source_site_order", "[]"},
-		{"video_source_site_availability", "{}"},
-		{"video_source_site_error", "{}"},
-		{"video_source_search_order", "[]"},
-		{"video_source_search_cover_site", ""},
-		{"magic_episode_rules", `["{\"pattern\":\".*?([Ss]\\\\d{1,2})?(?:[第EePpXx\\\\.\\\\-\\\\_\\\\( ]{1,2}|^)(\\\\d{1,3})(?:$|\\\\D).*?\\\\.(mp4|mkv)\",\"replace\":\"$1E$2\"}"]`},
-		{"magic_episode_clean_regex_rules", `["\\\\[\\\\s*\\\\d+(?:\\\\.\\\\d+)?\\\\s*(?:B|KB|MB|GB|TB)\\\\s*\\\\]|【[^】]*】"]`},
-		{"magic_movie_rules", "[]"},
-		{"magic_aggregate_rules", "[]"},
-		{"magic_aggregate_regex_rules", "[]"},
-		{"smart_play_enabled", "1"},
-		{"smart_list_enabled", "1"},
-		{"smart_source_extract_priority", "无"},
-		{"smart_source_priority_tokens", "[]"},
-		{"smart_pan_match_tokens", `["逸动","天意","夸父","优夕","百度"]`},
-		{"goproxy_enabled", "0"},
-		{"goproxy_auto_select", "0"},
-		{"goproxy_servers", "[]"},
-		{"search_display_mode", "sites"},
-		{"search_badge_prefer_episode", "0"},
-		{"tmdb_enabled", "0"},
-		{"tmdb_smart_search_enabled", "0"},
-		{"tmdb_v4_token", ""},
-		{"tmdb_v3_key", ""},
-		{"tmdb_api_base", ""},
-		{"tmdb_language", "zh-CN"},
-		{"tmdb_region", "CN"},
-		{"tmdb_include_adult", "0"},
-	}
-	for _, it := range seeds {
-		if _, err := d.db.Exec(`INSERT INTO settings(key,value) VALUES (?,?)`, it.k, it.v); err != nil {
-			return err
-		}
-		d.settingsCache[it.k] = it.v
-	}
-	return nil
-}
-
-func (d *DB) ensureGoCompatibleMagicEpisodeRules() error {
-	if d == nil || d.db == nil {
-		return nil
-	}
-	const (
-		key = "magic_episode_rules"
-		old = `["{\"pattern\":\".*?([Ss]\\\\d{1,2})?(?:[第EePpXx\\\\.\\\\-\\\\_\\\\( ]{1,2}|^)(\\\\d{1,3})(?!\\\\d).*?\\\\.(mp4|mkv)\",\"replace\":\"$1E$2\"}"]`
-		mid = `["{\"pattern\":\".*?([Ss]\\\\d{1,2})?(?:[第EePpXx\\\\.\\\\-\\\\_\\\\( ]{1,2}|^)(\\\\d{1,3})[^0-9]*\\\\.(mp4|mkv)\",\"replace\":\"$1E$2\"}"]`
-		new = `["{\"pattern\":\".*?([Ss]\\\\d{1,2})?(?:[第EePpXx\\\\.\\\\-\\\\_\\\\( ]{1,2}|^)(\\\\d{1,3})(?:$|\\\\D).*?\\\\.(mp4|mkv)\",\"replace\":\"$1E$2\"}"]`
-	)
-	cur := strings.TrimSpace(d.GetSetting(key))
-	if cur != old && cur != mid {
-		return nil
-	}
-	return d.SetSetting(key, new)
+	return tx.Commit()
 }
 
 func (d *DB) ensureDefaultAdmin() error {
@@ -602,7 +684,12 @@ func (d *DB) ensureDefaultAdmin() error {
 	if err != nil {
 		return err
 	}
-	_, err = d.db.Exec(`INSERT INTO users(username,password,role,status) VALUES (?,?, 'admin','active')`, "admin", string(hashed))
+	now := time.Now().Unix()
+	res, err := d.db.Exec(`INSERT INTO users(username,password,role,status,created_at,updated_at) VALUES (?,?, 'admin','active',?,?)`, "admin", string(hashed), now, now)
+	if err != nil {
+		return err
+	}
+	_, _ = res.LastInsertId()
 	return err
 }
 

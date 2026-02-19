@@ -2273,15 +2273,14 @@ func HandleDashboardQuarkCookie(w http.ResponseWriter, r *http.Request, database
 	}
 	s.Cookie = cookie
 
-	store := parseJSONMap(database.GetSetting("pan_login_settings"))
-	cur, _ := store["quark"].(map[string]any)
+	store := readPanLoginSettings(database)
+	cur := store["quark"]
 	if cur == nil {
 		cur = map[string]any{}
 	}
 	cur["cookie"] = cookie
 	store["quark"] = cur
-	b, _ := json.Marshal(store)
-	_ = database.SetSetting("pan_login_settings", string(b))
+	_ = writePanLoginSettings(database, store)
 
 	writeJSON(w, 200, map[string]any{"success": true, "status": "confirmed", "cookie": cookie})
 }

@@ -1617,15 +1617,14 @@ func HandleDashboardBaiduCookie(w http.ResponseWriter, r *http.Request, database
 	}
 	s.Cookie = cookie
 
-	store := parseJSONMap(database.GetSetting("pan_login_settings"))
-	cur, _ := store["baidu"].(map[string]any)
+	store := readPanLoginSettings(database)
+	cur := store["baidu"]
 	if cur == nil {
 		cur = map[string]any{}
 	}
 	cur["cookie"] = cookie
 	store["baidu"] = cur
-	b, _ := json.Marshal(store)
-	_ = database.SetSetting("pan_login_settings", string(b))
+	_ = writePanLoginSettings(database, store)
 
 	writeJSON(w, 200, map[string]any{"success": true, "status": "confirmed", "cookie": cookie})
 }

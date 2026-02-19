@@ -94,30 +94,15 @@ func embyResolveToken(database *db.DB, token string) (u *embyUser, exp time.Time
 	if tok == "" {
 		return nil, time.Time{}, false
 	}
-
-	var (
-		userID    int64
-		expiresAt int64
-		username  string
-		role      string
-		status    string
-	)
-	err := database.SQL().QueryRow(`
-		SELECT t.user_id, t.expires_at, u.username, u.role, u.status
-		FROM auth_tokens t
-		JOIN users u ON u.id = t.user_id
-		WHERE t.token = ?
-		LIMIT 1
-	`, tok).Scan(&userID, &expiresAt, &username, &role, &status)
-	if err != nil {
+	row, err := database.ResolveToken(tok)
+	if err != nil || row == nil {
 		return nil, time.Time{}, false
 	}
-
-	exp = time.UnixMilli(expiresAt)
+	exp = row.ExpiresAt
 	return &embyUser{
-		ID:       int64ToStr(userID),
-		Username: strings.TrimSpace(username),
-		Role:     strings.TrimSpace(role),
-		Status:   strings.TrimSpace(status),
+		ID:       int64ToStr(row.UserID),
+		Username: row.Username,
+		Role:     row.Role,
+		Status:   row.Status,
 	}, exp, true
 }

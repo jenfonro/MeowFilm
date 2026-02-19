@@ -1,7 +1,6 @@
 package emby
 
 import (
-	"database/sql"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -240,34 +239,25 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 	}
 
 	now := time.Now().Unix()
-
-	_, err := database.SQL().Exec(`
-		INSERT INTO play_history(
-		  user_id, content_key, site_key, site_name, spider_api, video_id, video_title, video_poster, video_remark,
-		  tmdb_id, tmdb_type, pan_label, play_flag, episode_index, episode_name, updated_at,
-		  playback_position_ticks, playback_runtime_ticks, playback_item_id
-		)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(user_id, site_key, video_id) DO UPDATE SET
-		  content_key = excluded.content_key,
-		  video_title = excluded.video_title,
-		  video_poster = CASE WHEN excluded.video_poster <> '' THEN excluded.video_poster ELSE play_history.video_poster END,
-		  video_remark = excluded.video_remark,
-		  tmdb_id = excluded.tmdb_id,
-		  tmdb_type = excluded.tmdb_type,
-		  episode_index = excluded.episode_index,
-		  episode_name = excluded.episode_name,
-		  updated_at = excluded.updated_at,
-		  playback_position_ticks = excluded.playback_position_ticks,
-		  playback_runtime_ticks = excluded.playback_runtime_ticks,
-		  playback_item_id = excluded.playback_item_id
-	`, userID, contentKey,
-		"emby", "Emby", "emby", videoID, videoTitle, videoPoster, videoRemark,
-		tmdbID, tmdbType, "", "emby", episodeIndex, episodeName, now,
-		position, runtime, itemID,
-	)
-	if err != nil && err != sql.ErrNoRows {
-		return err
-	}
-	return nil
+	return database.UpsertPlayHistory(db.PlayHistoryUpsert{
+		UserID:                userID,
+		ContentKey:            contentKey,
+		SiteKey:               "emby",
+		SiteName:              "Emby",
+		SpiderAPI:             "emby",
+		VideoID:               videoID,
+		VideoTitle:            videoTitle,
+		VideoPoster:           videoPoster,
+		VideoRemark:           videoRemark,
+		TMDBID:                tmdbID,
+		TMDBType:              tmdbType,
+		PanLabel:              "",
+		PlayFlag:              "emby",
+		EpisodeIndex:          episodeIndex,
+		EpisodeName:           episodeName,
+		UpdatedAt:             now,
+		PlaybackPositionTicks: position,
+		PlaybackRuntimeTicks:  runtime,
+		PlaybackItemID:        itemID,
+	})
 }

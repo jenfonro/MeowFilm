@@ -213,6 +213,17 @@ func doubanProbeSeasons(database *db.DB, tmdbID int, keyword string) ([]embyTMDB
 	if hit, ok := doubanSeasonMetaCacheGet(id); ok && len(hit) >= 2 {
 		return hit, true
 	}
+	// Persistent hint cache (SQLite): stored as tmdb_season_hint source='douban'
+	if database != nil {
+		if hints, err := database.ListTMDBSeasonHints("tv", id, "douban"); err == nil && len(hints) >= 2 {
+			out := make([]embyTMDBSeason, 0, len(hints))
+			for _, h := range hints {
+				out = append(out, embyTMDBSeason{Season: h.SeasonNumber, EpisodeCount: h.EpisodeCount})
+			}
+			doubanSeasonMetaCacheSet(id, out)
+			return out, true
+		}
+	}
 
 	base, proxyBase := embyDoubanAPIBase(database)
 	u, _ := url.Parse(strings.TrimRight(base, "/") + "/rexxar/api/v2/search")
@@ -395,6 +406,16 @@ func doubanProbeSeasons(database *db.DB, tmdbID int, keyword string) ([]embyTMDB
 	sort.Slice(seasons, func(i, j int) bool { return seasons[i].Season < seasons[j].Season })
 	if len(seasons) < 2 {
 		return nil, false
+	}
+	// Persist season hints (best-effort)
+	if database != nil {
+		hints := make([]db.TMDBSeasonHint, 0, len(seasons))
+		for _, s := range seasons {
+			if s.Season > 0 && s.EpisodeCount > 0 {
+				hints = append(hints, db.TMDBSeasonHint{SeasonNumber: s.Season, EpisodeCount: s.EpisodeCount})
+			}
+		}
+		_ = database.UpsertTMDBSeasonHints("tv", id, "douban", hints)
 	}
 	doubanSeasonMetaCacheSet(id, seasons)
 	return seasons, true

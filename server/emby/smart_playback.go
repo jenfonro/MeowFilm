@@ -345,7 +345,7 @@ func smartPanMockProviderID(panLabel string) string {
 	}
 	lower := strings.ToLower(s)
 	if strings.Contains(s, "天意") || strings.Contains(s, "天翼") || strings.Contains(s, "189") || strings.Contains(lower, "tianyi") {
-		return "tianyi"
+		return "189"
 	}
 	if strings.Contains(s, "逸动") || strings.Contains(s, "和彩云") || strings.Contains(s, "139") || strings.Contains(lower, "yidong") {
 		return "139"
@@ -463,7 +463,8 @@ type smartPlaybackSettings struct {
 }
 
 func smartLoadPlaybackSettings(database *db.DB) smartPlaybackSettings {
-	mode := config.NormalizeSourceExtractPriority(database.GetSetting("smart_source_extract_priority"))
+	cfg, _ := database.ReadAppConfig()
+	mode := config.NormalizeSourceExtractPriority(cfg.SmartSourceExtractPriority)
 	if mode == "" {
 		mode = "无"
 	}
@@ -477,7 +478,7 @@ func smartLoadPlaybackSettings(database *db.DB) smartPlaybackSettings {
 		orderKeys = []string{"关键字", "网盘"}
 	}
 
-	rawKeyword := parseJSONStringArray(database.GetSetting("smart_source_priority_tokens"))
+	rawKeyword, _ := database.ListSmartSourcePriorityTokens()
 	kw := make([]string, 0, len(rawKeyword))
 	seen := map[string]bool{}
 	for _, t := range rawKeyword {
@@ -489,7 +490,7 @@ func smartLoadPlaybackSettings(database *db.DB) smartPlaybackSettings {
 		kw = append(kw, s)
 	}
 
-	rawPan := parseJSONStringArray(database.GetSetting("smart_pan_match_tokens"))
+	rawPan, _ := database.ListSmartPanMatchTokens()
 	pan := make([]string, 0, len(rawPan))
 	seen2 := map[string]bool{}
 	for _, t := range rawPan {
@@ -835,41 +836,85 @@ func smartGetSearchThreadCount(database *db.DB, u *embyUser) int {
 	if database == nil {
 		return 5
 	}
-	threadCount := 5
-	if u != nil && strings.TrimSpace(u.Username) != "" {
-		var n int
-		_ = database.SQL().QueryRow(`SELECT search_thread_count FROM users WHERE username=? LIMIT 1`, strings.TrimSpace(u.Username)).Scan(&n)
-		if n > 0 {
-			threadCount = n
+	_ = u
+	rawSites, _ := database.ListVideoSourceSites()
+	states, _ := database.ReadVideoSourceSiteStates()
+	n := 0
+	for _, s := range rawSites {
+		key := strings.TrimSpace(s.Key)
+		api := strings.TrimSpace(s.API)
+		if key == "" || api == "" {
+			continue
 		}
+		if isConfigCenterSite(site{Key: key, API: api, Name: s.Name, Type: s.Type}) {
+			continue
+		}
+		st, ok := states[key]
+		if ok {
+			if !st.Enabled || !st.Search {
+				continue
+			}
+		}
+		n++
 	}
-	if threadCount < 1 {
-		threadCount = 5
+	if n < 1 {
+		return 5
 	}
-	if threadCount > 20 {
-		threadCount = 20
-	}
-	return threadCount
+	return n
 }
 
 func smartLoadSiteOrder(database *db.DB, u *embyUser) []string {
 	if database == nil {
 		return nil
 	}
-	if u != nil && strings.TrimSpace(u.Role) == "user" && strings.TrimSpace(u.Username) != "" {
-		var raw string
-		_ = database.SQL().QueryRow(`SELECT cat_search_order FROM users WHERE username=? LIMIT 1`, strings.TrimSpace(u.Username)).Scan(&raw)
-		if strings.TrimSpace(raw) != "" {
-			return parseJSONStringArray(raw)
-		}
+	rawSites, _ := database.ListVideoSourceSites()
+	states, _ := database.ReadVideoSourceSiteStates()
+	type decorated struct {
+		k string
+		o int
+		i int
 	}
-	return parseJSONStringArray(database.GetSetting("video_source_site_order"))
+	ds := make([]decorated, 0, len(rawSites))
+	for i, s := range rawSites {
+		key := strings.TrimSpace(s.Key)
+		if key == "" {
+			continue
+		}
+		ord := 1_000_000_000
+		if st, ok := states[key]; ok {
+			ord = st.OrderIndex
+		}
+		ds = append(ds, decorated{k: key, o: ord, i: i})
+	}
+	sort.Slice(ds, func(i, j int) bool {
+		if ds[i].o != ds[j].o {
+			return ds[i].o < ds[j].o
+		}
+		return ds[i].i < ds[j].i
+	})
+	out := make([]string, 0, len(ds))
+	for _, d := range ds {
+		out = append(out, d.k)
+	}
+	return out
 }
 
 func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle string, u *embyUser) ([]smartSource, map[string]int) {
-	sites := normalizeSitesFromJSON(database.GetSetting("video_source_sites"))
-	statusMap := parseJSONBoolMap(database.GetSetting("video_source_site_status"))
-	searchMap := parseJSONBoolMap(database.GetSetting("video_source_site_search"))
+	rawSites, _ := database.ListVideoSourceSites()
+	sites := make([]site, 0, len(rawSites))
+	for _, s := range rawSites {
+		sites = append(sites, site{Key: s.Key, Name: s.Name, API: s.API, Type: s.Type})
+	}
+	states, _ := database.ReadVideoSourceSiteStates()
+	statusMap := map[string]bool{}
+	searchMap := map[string]bool{}
+	for k, st := range states {
+		if strings.TrimSpace(k) == "" {
+			continue
+		}
+		statusMap[k] = st.Enabled
+		searchMap[k] = st.Search
+	}
 	ordered := applySiteOrder(sites, smartLoadSiteOrder(database, u))
 
 	orderMap := map[string]int{}
@@ -907,12 +952,9 @@ func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle st
 		return nil, orderMap
 	}
 
-	threadCount := smartGetSearchThreadCount(database, u)
+	threadCount := len(tasks)
 	if threadCount < 1 {
-		threadCount = 5
-	}
-	if threadCount > 20 {
-		threadCount = 20
+		threadCount = 1
 	}
 	sem := make(chan struct{}, threadCount)
 	resCh := make(chan []smartSource, len(tasks))
@@ -1467,9 +1509,9 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 		groups := map[string]groupAttempt{}
 		normalAllowed := []smartCandidate{}
 		normalFallback := []smartCandidate{}
-		for _, c := range candidatesForNo {
-			pid := smartPanMockProviderID(c.PanLabel)
-			allowed := isAllowedLabel(c.PanLabel)
+			for _, c := range candidatesForNo {
+				pid := smartPanMockProviderID(c.PanLabel)
+				allowed := isAllowedLabel(c.PanLabel)
 			if pid == "" {
 				if allowed {
 					normalAllowed = append(normalAllowed, c)
@@ -1485,11 +1527,11 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 			shareKey := strings.TrimSpace(c.PanLabel)
 			metaA := ""
 			metaB := ""
-			if pid == "tianyi" {
-				sc, ac := smartExtractTianyiMockMetaFromCandidate(c)
-				metaA = sc
-				metaB = ac
-				if sc != "" {
+				if pid == "189" {
+					sc, ac := smartExtractTianyiMockMetaFromCandidate(c)
+					metaA = sc
+					metaB = ac
+					if sc != "" {
 					shareKey = sc
 				}
 			} else {
@@ -1565,14 +1607,14 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 			return smartPickBestMatchIgnorePanOrder(matches, tmdbHasMultiSeason, preferSeasonNo, settings)
 		}
 
-		tryGroup := func(at groupAttempt) *smartPickResult {
-			base := at.Base
-			switch at.Provider {
-			case "tianyi":
-				sc := strings.TrimSpace(at.MetaA)
-				ac := strings.TrimSpace(at.MetaB)
-				if sc == "" {
-					sc2, ac2 := smartExtractTianyiMockMetaFromCandidate(base)
+			tryGroup := func(at groupAttempt) *smartPickResult {
+				base := at.Base
+				switch at.Provider {
+				case "189":
+					sc := strings.TrimSpace(at.MetaA)
+					ac := strings.TrimSpace(at.MetaB)
+					if sc == "" {
+						sc2, ac2 := smartExtractTianyiMockMetaFromCandidate(base)
 					sc = strings.TrimSpace(sc2)
 					if ac == "" {
 						ac = strings.TrimSpace(ac2)
@@ -1916,8 +1958,8 @@ func smartResolvePlaybackFromTMDB(database *db.DB, u *embyUser, req smartPlaybac
 	}
 
 	settings := smartLoadPlaybackSettings(database)
-	rawEpisodeRules := parseJSONStringArray(database.GetSetting("magic_episode_rules"))
-	rawCleanRules := parseJSONStringArray(database.GetSetting("magic_episode_clean_regex_rules"))
+	rawEpisodeRules, _ := database.ListMagicEpisodeRules()
+	rawCleanRules, _ := database.ListMagicEpisodeCleanRegexRules()
 	if len(rawEpisodeRules) == 0 || len(rawCleanRules) == 0 {
 		return "", nil, errors.New("magic regex rules 未设置")
 	}

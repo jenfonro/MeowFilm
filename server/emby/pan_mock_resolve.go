@@ -179,12 +179,12 @@ func embyResolvePanMockDetailPans(database *db.DB, pans []catpawopen.Pan) ([]cat
 		go func() {
 			defer wg.Done()
 
-			switch pid {
-			case "tianyi":
-				sc, ac := embyExtractTianyiMockMeta(label, firstURL)
-				if sc == "" {
-					return
-				}
+				switch pid {
+				case "189":
+					sc, ac := embyExtractTianyiMockMeta(label, firstURL)
+					if sc == "" {
+						return
+					}
 				flag := "天意-" + sc
 				vod, shareID, _, err := netdisk.Tianyi189List(database, flag, ac)
 				if err != nil || strings.TrimSpace(vod) == "" {
