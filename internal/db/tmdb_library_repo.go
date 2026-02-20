@@ -231,16 +231,16 @@ func (d *DB) UpsertTMDBEpisodes(tmdbID int, lang string, episodes []TMDBEpisode)
 }
 
 type TMDBDetailForAPI struct {
-	TMDBID     int
-	TMDBType   string
-	Title      string
-	Overview   string
-	Status     string
-	PosterPath string
-	Backdrop   string
-	FirstAir   string
-	Release    string
-	Seasons    []TMDBSeason
+	TMDBID        int
+	TMDBType      string
+	Title         string
+	Overview      string
+	Status        string
+	PosterPath    string
+	Backdrop      string
+	FirstAir      string
+	Release       string
+	Seasons       []TMDBSeason
 	EpisodeCount  int
 	LatestSeason  int
 	LatestEpisode int
@@ -326,21 +326,36 @@ func (d *DB) ReadTMDBDetailForAPI(tmdbType string, tmdbID int, lang string) (*TM
 		if s.EpisodeCount > 0 {
 			total += s.EpisodeCount
 		}
-		if s.SeasonNumber > latestSeason {
-			latestSeason = s.SeasonNumber
-			latestEpisode = s.EpisodeCount
-		}
 	}
-	// If episodes table exists, use it for a better latest ep.
+	// If episodes table exists, use it for a better latest ep (based on aired air_date).
+	today := time.Now().UTC().Format("2006-01-02")
 	var ls, le sql.NullInt64
 	_ = d.db.QueryRow(`
-		SELECT MAX(season_number) AS s, MAX(episode_number) AS e
+		SELECT season_number, episode_number
 		FROM tmdb_episode
 		WHERE media_id = ?
-	`, mediaRowID).Scan(&ls, &le)
-	if ls.Valid && ls.Int64 > 0 {
+		  AND season_number > 0
+		  AND air_date <> ''
+		  AND air_date <= ?
+		ORDER BY season_number DESC, episode_number DESC
+		LIMIT 1
+	`, mediaRowID, today).Scan(&ls, &le)
+	if ls.Valid && ls.Int64 > 0 && le.Valid && le.Int64 > 0 {
 		latestSeason = int(ls.Int64)
 		latestEpisode = int(le.Int64)
+	} else {
+		_ = d.db.QueryRow(`
+			SELECT season_number, episode_number
+			FROM tmdb_episode
+			WHERE media_id = ?
+			  AND season_number > 0
+			ORDER BY season_number DESC, episode_number DESC
+			LIMIT 1
+		`, mediaRowID).Scan(&ls, &le)
+		if ls.Valid && ls.Int64 > 0 && le.Valid && le.Int64 > 0 {
+			latestSeason = int(ls.Int64)
+			latestEpisode = int(le.Int64)
+		}
 	}
 	out.EpisodeCount = total
 	out.LatestSeason = latestSeason
