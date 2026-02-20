@@ -882,14 +882,17 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 						Seq:      seq,
 					})
 				}
-					sort.SliceStable(rows, func(i, j int) bool {
-						a := rows[i]
-						b := rows[j]
-						if a.Score != b.Score {
-							return a.Score > b.Score
-						}
-						return a.Seq < b.Seq
-					})
+				sort.SliceStable(rows, func(i, j int) bool {
+					a := rows[i]
+					b := rows[j]
+					if a.Score != b.Score {
+						return a.Score > b.Score
+					}
+					if a.TitleLen != b.TitleLen {
+						return a.TitleLen < b.TitleLen
+					}
+					return a.Seq < b.Seq
+				})
 				tmdbSorted = make([]embyTMDBSearchItem, 0, len(rows))
 				for _, r := range rows {
 					tmdbSorted = append(tmdbSorted, r.Item)
