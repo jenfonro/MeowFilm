@@ -2,6 +2,7 @@ package tmdb
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -31,16 +32,16 @@ type tmdbTVDetailsResponse struct {
 	Status           string `json:"status"`
 	NumberOfEpisodes int    `json:"number_of_episodes"`
 	LastEpisodeToAir *struct {
-		SeasonNumber  int `json:"season_number"`
-		EpisodeNumber int `json:"episode_number"`
+		SeasonNumber  int    `json:"season_number"`
+		EpisodeNumber int    `json:"episode_number"`
 		AirDate       string `json:"air_date"`
 	} `json:"last_episode_to_air"`
-	Name         string `json:"name"`
-	OriginalName string `json:"original_name"`
-	PosterPath   string `json:"poster_path"`
-	BackdropPath string `json:"backdrop_path"`
-	FirstAir     string `json:"first_air_date"`
-	Overview     string `json:"overview"`
+	Name         string         `json:"name"`
+	OriginalName string         `json:"original_name"`
+	PosterPath   string         `json:"poster_path"`
+	BackdropPath string         `json:"backdrop_path"`
+	FirstAir     string         `json:"first_air_date"`
+	Overview     string         `json:"overview"`
 	Seasons      []tmdbTVSeason `json:"seasons"`
 }
 
@@ -53,6 +54,20 @@ type tmdbTVSeason struct {
 	AirDate      string `json:"air_date"`
 	PosterPath   string `json:"poster_path"`
 	Overview     string `json:"overview"`
+}
+
+type tmdbTVSeasonDetailResponse struct {
+	SeasonNumber int    `json:"season_number"`
+	Name         string `json:"name"`
+	PosterPath   string `json:"poster_path"`
+	Episodes     []struct {
+		EpisodeNumber int    `json:"episode_number"`
+		AirDate       string `json:"air_date"`
+		Name          string `json:"name"`
+		Overview      string `json:"overview"`
+		StillPath     string `json:"still_path"`
+		Runtime       int    `json:"runtime"`
+	} `json:"episodes"`
 }
 
 type tmdbMovieDetailsResponse struct {
@@ -102,6 +117,20 @@ func isTMDBAirDateInFuture(dateText string, now time.Time) bool {
 	return t.After(today)
 }
 
+func isTMDBAirDateAiredOrToday(dateText string, now time.Time) bool {
+	s := strings.TrimSpace(dateText)
+	if s == "" {
+		return false
+	}
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return false
+	}
+	y, m, d := now.UTC().Date()
+	today := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	return !t.After(today)
+}
+
 func pickLatestAiredFromSeasons(seasons []tmdbTVSeason, now time.Time) (int, int) {
 	bestSeason := 0
 	bestEpisodes := 0
@@ -113,7 +142,7 @@ func pickLatestAiredFromSeasons(seasons []tmdbTVSeason, now time.Time) (int, int
 		if air == "" {
 			continue
 		}
-		if isTMDBAirDateInFuture(air, now) {
+		if !isTMDBAirDateAiredOrToday(air, now) {
 			continue
 		}
 		if s.SeasonNumber > bestSeason {
@@ -122,6 +151,117 @@ func pickLatestAiredFromSeasons(seasons []tmdbTVSeason, now time.Time) (int, int
 		}
 	}
 	return bestSeason, bestEpisodes
+}
+
+func fetchTMDBTVSeasonDetail(database *db.DB, tmdbID int, season int, language string) (*tmdbTVSeasonDetailResponse, error) {
+	if database == nil || tmdbID <= 0 || season < 0 {
+		return nil, fmt.Errorf("invalid args")
+	}
+	token, tokenKind := resolveTMDBToken(database)
+	if token == "" || tokenKind == "" {
+		return nil, fmt.Errorf("tmdb not configured")
+	}
+	apiBase := resolveTMDBAPIBase(database)
+	u, _ := url.Parse(joinTMDBAPI(apiBase, fmt.Sprintf("tv/%d/season/%d", tmdbID, season)))
+	params := u.Query()
+	if strings.TrimSpace(language) != "" {
+		params.Set("language", strings.TrimSpace(language))
+	}
+	if tokenKind == "v3" {
+		params.Set("api_key", token)
+	}
+	u.RawQuery = params.Encode()
+
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	if tokenKind == "v4" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("tmdb http %d", resp.StatusCode)
+	}
+	var raw tmdbTVSeasonDetailResponse
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+	return &raw, nil
+}
+
+func probeLatestAiredEpisodeFromSeasons(database *db.DB, tmdbID int, seasons []tmdbTVSeason, language string, now time.Time) (int, int) {
+	if database == nil || tmdbID <= 0 || len(seasons) == 0 {
+		return 0, 0
+	}
+	today := now.UTC().Format("2006-01-02")
+
+	type row struct {
+		no   int
+		date string
+	}
+	list := make([]row, 0, len(seasons))
+	for _, s := range seasons {
+		if s.SeasonNumber <= 0 {
+			continue
+		}
+		ad := strings.TrimSpace(s.AirDate)
+		if ad == "" || ad > today {
+			continue
+		}
+		list = append(list, row{no: s.SeasonNumber, date: ad})
+	}
+	for i := len(list) - 1; i >= 0; i-- {
+		seasonNo := list[i].no
+		detail, err := fetchTMDBTVSeasonDetail(database, tmdbID, seasonNo, language)
+		if err != nil || detail == nil {
+			continue
+		}
+		if len(detail.Episodes) > 0 {
+			episodes := make([]db.TMDBEpisode, 0, len(detail.Episodes))
+			for _, e := range detail.Episodes {
+				if e.EpisodeNumber <= 0 {
+					continue
+				}
+				episodes = append(episodes, db.TMDBEpisode{
+					SeasonNumber:  seasonNo,
+					EpisodeNumber: e.EpisodeNumber,
+					AirDate:       strings.TrimSpace(e.AirDate),
+					Runtime:       e.Runtime,
+					StillPath:     strings.TrimSpace(e.StillPath),
+					Name:          strings.TrimSpace(e.Name),
+					Overview:      strings.TrimSpace(e.Overview),
+				})
+			}
+			_ = database.UpsertTMDBEpisodes(tmdbID, defaultString(language, "zh-CN"), episodes)
+			_ = database.UpsertTMDBSeasons("tv", tmdbID, defaultString(language, "zh-CN"), []db.TMDBSeason{{
+				SeasonNumber: seasonNo,
+				PosterPath:   strings.TrimSpace(detail.PosterPath),
+				Name:         strings.TrimSpace(detail.Name),
+			}})
+		}
+
+		latestEp := 0
+		for _, e := range detail.Episodes {
+			ad := strings.TrimSpace(e.AirDate)
+			if ad == "" || ad > today {
+				continue
+			}
+			if e.EpisodeNumber > latestEp {
+				latestEp = e.EpisodeNumber
+			}
+		}
+		if latestEp > 0 {
+			return seasonNo, latestEp
+		}
+	}
+	return 0, 0
 }
 
 func resolveTMDBAPIBase(database *db.DB) string {
@@ -488,10 +628,14 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) map[st
 			}
 			year := parseYearFromDate(d.FirstAir)
 			seasons := make([]map[string]any, 0, len(d.Seasons))
+			seasonCount := 0
 			for _, s := range d.Seasons {
 				p := strings.TrimSpace(s.PosterPath)
 				if p != "" && !strings.HasPrefix(p, "http://") && !strings.HasPrefix(p, "https://") {
 					p = joinTMDBImage(imgBase, "t/p/w500"+p)
+				}
+				if s.SeasonNumber > 0 {
+					seasonCount++
 				}
 				seasons = append(seasons, map[string]any{
 					"season":   s.SeasonNumber,
@@ -500,30 +644,34 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) map[st
 					"poster":   p,
 				})
 			}
+			status := strings.TrimSpace(d.Status)
+			ended := strings.EqualFold(status, "Ended")
 			badge := ""
 			if d.LatestSeason > 0 && d.LatestEpisode > 0 {
 				badge = "更新至 S" + strconv.Itoa(d.LatestSeason) + "E" + strconv.Itoa(d.LatestEpisode)
-			} else if d.EpisodeCount > 0 {
+			} else if ended && d.EpisodeCount > 0 {
 				badge = "共" + strconv.Itoa(d.EpisodeCount) + "集"
 			}
 			out := map[string]any{
-				"success":     true,
-				"id":          tmdbID,
-				"type":        "tv",
-				"title":       strings.TrimSpace(d.Title),
-				"year":        year,
-				"poster":      pic,
-				"backdrop":    backdrop,
-				"overview":    strings.TrimSpace(d.Overview),
-				"badge":       badge,
-				"status":      strings.TrimSpace(d.Status),
+				"success":       true,
+				"id":            tmdbID,
+				"type":          "tv",
+				"title":         strings.TrimSpace(d.Title),
+				"year":          year,
+				"poster":        pic,
+				"backdrop":      backdrop,
+				"overview":      strings.TrimSpace(d.Overview),
+				"badge":         badge,
+				"status":        status,
 				"latestSeason":  d.LatestSeason,
 				"latestEpisode": d.LatestEpisode,
 				"episodeCount":  d.EpisodeCount,
-				"seasons":     seasons,
-				"seasonCount": len(seasons),
+				"seasons":       seasons,
+				"seasonCount":   seasonCount,
 			}
-			return out
+			if ended || (d.LatestSeason > 0 && d.LatestEpisode > 0) {
+				return out
+			}
 		}
 		pic := strings.TrimSpace(d.PosterPath)
 		if pic != "" && !strings.HasPrefix(pic, "http://") && !strings.HasPrefix(pic, "https://") {
@@ -618,33 +766,38 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) map[st
 		latestSeason := 0
 		latestEpisode := 0
 		if detail.LastEpisodeToAir != nil {
-			if !isTMDBAirDateInFuture(detail.LastEpisodeToAir.AirDate, time.Now().UTC()) {
+			if isTMDBAirDateAiredOrToday(detail.LastEpisodeToAir.AirDate, time.Now().UTC()) {
 				latestSeason = detail.LastEpisodeToAir.SeasonNumber
 				latestEpisode = detail.LastEpisodeToAir.EpisodeNumber
 			}
 		}
 		if latestSeason <= 0 || latestEpisode <= 0 {
-			if sNo, eNo := pickLatestAiredFromSeasons(detail.Seasons, time.Now().UTC()); sNo > 0 && eNo > 0 {
+			if sNo, eNo := probeLatestAiredEpisodeFromSeasons(database, tmdbID, detail.Seasons, language, time.Now().UTC()); sNo > 0 && eNo > 0 {
 				latestSeason = sNo
 				latestEpisode = eNo
 			}
 		}
+		ended := strings.EqualFold(strings.TrimSpace(detail.Status), "Ended")
 		badge := ""
 		if latestSeason > 0 && latestEpisode > 0 {
 			badge = "更新至 S" + strconv.Itoa(latestSeason) + "E" + strconv.Itoa(latestEpisode)
-		} else if detail.NumberOfEpisodes > 0 {
+		} else if ended && detail.NumberOfEpisodes > 0 {
 			badge = "共" + strconv.Itoa(detail.NumberOfEpisodes) + "集"
 		}
 
 		seasons := make([]map[string]any, 0, len(detail.Seasons))
+		seasonCount := 0
 		for _, s := range detail.Seasons {
 			if s.SeasonNumber < 0 {
 				continue
 			}
-				p := strings.TrimSpace(s.PosterPath)
-				if p != "" && !strings.HasPrefix(p, "http://") && !strings.HasPrefix(p, "https://") {
-					p = joinTMDBImage(resolveTMDBImageBase(database), "t/p/w500"+p)
-				}
+			if s.SeasonNumber > 0 {
+				seasonCount++
+			}
+			p := strings.TrimSpace(s.PosterPath)
+			if p != "" && !strings.HasPrefix(p, "http://") && !strings.HasPrefix(p, "https://") {
+				p = joinTMDBImage(resolveTMDBImageBase(database), "t/p/w500"+p)
+			}
 			seasons = append(seasons, map[string]any{
 				"season":   s.SeasonNumber,
 				"episodes": s.EpisodeCount,
@@ -667,7 +820,7 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) map[st
 			"latestEpisode": latestEpisode,
 			"episodeCount":  detail.NumberOfEpisodes,
 			"seasons":       seasons,
-			"seasonCount":   len(seasons),
+			"seasonCount":   seasonCount,
 		}
 		return out
 	}
