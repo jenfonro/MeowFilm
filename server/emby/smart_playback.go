@@ -854,6 +854,9 @@ func smartGetSearchThreadCount(database *db.DB, u *embyUser) int {
 			if !st.Enabled || !st.Search {
 				continue
 			}
+			if st.SmartSkip {
+				continue
+			}
 		}
 		n++
 	}
@@ -944,6 +947,9 @@ func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle st
 			continue
 		}
 		if searchEnabled, ok := searchMap[s.Key]; ok && !searchEnabled {
+			continue
+		}
+		if st, ok := states[s.Key]; ok && st.SmartSkip {
 			continue
 		}
 		tasks = append(tasks, task{Site: s, Idx: i})

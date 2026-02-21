@@ -245,6 +245,7 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 		writeJSON(w, 200, map[string]any{
 			"success":                    true,
 			"smartSourceExtractPriority": config.NormalizeSourceExtractPriority(cfg.SmartSourceExtractPriority),
+			"siteCleanKeywords":          strings.TrimSpace(cfg.SmartSiteCleanKeywords),
 			"smartSourcePriorityTokens":  defaultStringArray(sourceTokens),
 			"smartPanMatchTokens":        defaultStringArray(panTokens),
 		})
@@ -262,6 +263,13 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 			_ = database.UpdateAppConfig(func(c *db.AppConfig) {
 				c.SmartSourceExtractPriority = priority
 			})
+		}
+		if _, ok := body["siteCleanKeywords"]; ok {
+			raw := strings.TrimSpace(readStrJSONBody(body, "siteCleanKeywords"))
+			_ = database.UpdateAppConfig(func(c *db.AppConfig) {
+				c.SmartSiteCleanKeywords = raw
+			})
+			_ = database.RecomputeSmartSkipSites()
 		}
 
 		saveArr := func(set func([]string) error, list any) {
@@ -433,6 +441,7 @@ func handleDashboardBackup(w http.ResponseWriter, r *http.Request, database *db.
 		},
 		"smart": map[string]any{
 			"smartSourceExtractPriority": config.NormalizeSourceExtractPriority(strings.TrimSpace(cfg.SmartSourceExtractPriority)),
+			"siteCleanKeywords":          strings.TrimSpace(cfg.SmartSiteCleanKeywords),
 			"smartSourcePriorityTokens":  defaultStringArray(smartSourcePriorityTokens),
 			"smartPanMatchTokens":        defaultStringArray(smartPanMatchTokens),
 		},
@@ -524,6 +533,9 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 			}
 			if s, ok := readStr("SmartSourceExtractPriority", "smartSourceExtractPriority"); ok && s != "" {
 				c.SmartSourceExtractPriority = s
+			}
+			if s, ok := readStr("SmartSiteCleanKeywords", "smartSiteCleanKeywords", "siteCleanKeywords"); ok {
+				c.SmartSiteCleanKeywords = s
 			}
 			if b, ok := readBool("GoProxyEnabled", "goProxyEnabled"); ok {
 				c.GoProxyEnabled = b
@@ -778,6 +790,11 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 				_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.SmartSourceExtractPriority = priority })
 			}
 		}
+		if v, ok := smart["siteCleanKeywords"]; ok && v != nil {
+			if s, _ := v.(string); true {
+				_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.SmartSiteCleanKeywords = strings.TrimSpace(s) })
+			}
+		}
 		_ = database.ReplaceSmartSourcePriorityTokens(defaultStringArrayFromAny(smart["smartSourcePriorityTokens"]))
 		_ = database.ReplaceSmartPanMatchTokens(defaultStringArrayFromAny(smart["smartPanMatchTokens"]))
 		applied["smart"] = true
@@ -838,6 +855,8 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 		})
 		applied["metadata"] = true
 	}
+
+	_ = database.RecomputeSmartSkipSites()
 
 	writeJSON(w, 200, map[string]any{"success": true, "applied": applied})
 }
