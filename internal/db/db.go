@@ -393,6 +393,28 @@ func (d *DB) ensureSchema() error {
 				  pos INTEGER PRIMARY KEY,
 				  token TEXT NOT NULL
 				);
+				CREATE TABLE IF NOT EXISTS smart_match_block_keyword (
+				  id INTEGER PRIMARY KEY AUTOINCREMENT,
+				  keyword TEXT NOT NULL,
+				  created_at INTEGER NOT NULL,
+				  updated_at INTEGER NOT NULL,
+				  UNIQUE(keyword)
+				);
+				CREATE INDEX IF NOT EXISTS idx_smart_match_block_keyword_updated_at ON smart_match_block_keyword(updated_at DESC);
+				CREATE TABLE IF NOT EXISTS smart_match_block_item (
+				  id INTEGER PRIMARY KEY AUTOINCREMENT,
+				  keyword_id INTEGER NOT NULL,
+				  site_key TEXT NOT NULL,
+				  spider_api TEXT NOT NULL DEFAULT '',
+				  video_id TEXT NOT NULL,
+				  poster TEXT NOT NULL DEFAULT '',
+				  created_at INTEGER NOT NULL,
+				  updated_at INTEGER NOT NULL,
+				  UNIQUE(keyword_id, site_key, video_id),
+				  FOREIGN KEY(keyword_id) REFERENCES smart_match_block_keyword(id) ON DELETE CASCADE
+				);
+				CREATE INDEX IF NOT EXISTS idx_smart_match_block_item_keyword_site_video ON smart_match_block_item(keyword_id, site_key, video_id);
+				CREATE INDEX IF NOT EXISTS idx_smart_match_block_item_keyword_updated_at ON smart_match_block_item(keyword_id, updated_at DESC);
 				CREATE TABLE IF NOT EXISTS pan_login_setting (
 				  provider TEXT NOT NULL,
 				  field TEXT NOT NULL,

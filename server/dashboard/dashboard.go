@@ -176,6 +176,22 @@ func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardSmartSettings(w, r, database)
 			})).ServeHTTP(w, r)
+		case "/smart/matchblock/keywords":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardSmartMatchBlockKeywords(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/smart/matchblock/items":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardSmartMatchBlockItems(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/smart/matchblock/delete":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardSmartMatchBlockDelete(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/smart/matchblock/keyword/delete":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardSmartMatchBlockKeywordDelete(w, r, database)
+			})).ServeHTTP(w, r)
 		case "/metadata/settings":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardMetadataSettings(w, r, database)
