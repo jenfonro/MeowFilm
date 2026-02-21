@@ -266,7 +266,6 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 					displayMode = "sites"
 				}
 				settings["searchDisplayMode"] = displayMode
-				settings["searchBadgePreferEpisode"] = cfg.SearchBadgePreferEpisode
 			}
 
 			// Only include heavy playback/magic settings on pages that need them.
@@ -311,8 +310,6 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 					settings["smartPanMatchTokens"] = []string{}
 				}
 				settings["smartSourceExtractPriority"] = config.NormalizeSourceExtractPriority(cfg.SmartSourceExtractPriority)
-				settings["smartPlayEnabled"] = cfg.SmartPlayEnabled
-				settings["smartListEnabled"] = cfg.SmartListEnabled
 			}
 
 			// User search configuration: used by search/play pages only.

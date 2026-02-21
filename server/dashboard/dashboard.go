@@ -244,8 +244,6 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 		panTokens, _ := database.ListSmartPanMatchTokens()
 		writeJSON(w, 200, map[string]any{
 			"success":                    true,
-			"smartPlayEnabled":           cfg.SmartPlayEnabled,
-			"smartListEnabled":           cfg.SmartListEnabled,
 			"smartSourceExtractPriority": config.NormalizeSourceExtractPriority(cfg.SmartSourceExtractPriority),
 			"smartSourcePriorityTokens":  defaultStringArray(sourceTokens),
 			"smartPanMatchTokens":        defaultStringArray(panTokens),
@@ -259,16 +257,6 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 		var body map[string]any
 		_ = readJSONLoose(r, &body)
 
-		if _, ok := body["smartPlayEnabled"]; ok {
-			_ = database.UpdateAppConfig(func(c *db.AppConfig) {
-				c.SmartPlayEnabled = readBoolJSONBody(body, "smartPlayEnabled")
-			})
-		}
-		if _, ok := body["smartListEnabled"]; ok {
-			_ = database.UpdateAppConfig(func(c *db.AppConfig) {
-				c.SmartListEnabled = readBoolJSONBody(body, "smartListEnabled")
-			})
-		}
 		if _, ok := body["smartSourceExtractPriority"]; ok {
 			priority := config.NormalizeSourceExtractPriority(readStrJSONBody(body, "smartSourceExtractPriority"))
 			_ = database.UpdateAppConfig(func(c *db.AppConfig) {
@@ -444,8 +432,6 @@ func handleDashboardBackup(w http.ResponseWriter, r *http.Request, database *db.
 			"aggregateRegexRules":    defaultStringArray(magicAggregateRegexRules),
 		},
 		"smart": map[string]any{
-			"smartPlayEnabled":           cfg.SmartPlayEnabled,
-			"smartListEnabled":           cfg.SmartListEnabled,
 			"smartSourceExtractPriority": config.NormalizeSourceExtractPriority(strings.TrimSpace(cfg.SmartSourceExtractPriority)),
 			"smartSourcePriorityTokens":  defaultStringArray(smartSourcePriorityTokens),
 			"smartPanMatchTokens":        defaultStringArray(smartPanMatchTokens),
@@ -530,20 +516,11 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 			if s, ok := readStr("SearchDisplayMode", "searchDisplayMode"); ok && s != "" {
 				c.SearchDisplayMode = s
 			}
-			if b, ok := readBool("SearchBadgePreferEpisode", "searchBadgePreferEpisode"); ok {
-				c.SearchBadgePreferEpisode = b
-			}
 			if s, ok := readStr("VideoSourceAPIBase", "videoSourceApiBase"); ok {
 				c.VideoSourceAPIBase = s
 			}
 			if s, ok := readStr("VideoSourceSearchCoverSite", "videoSourceSearchCoverSite"); ok {
 				c.VideoSourceSearchCoverSite = s
-			}
-			if b, ok := readBool("SmartPlayEnabled", "smartPlayEnabled"); ok {
-				c.SmartPlayEnabled = b
-			}
-			if b, ok := readBool("SmartListEnabled", "smartListEnabled"); ok {
-				c.SmartListEnabled = b
 			}
 			if s, ok := readStr("SmartSourceExtractPriority", "smartSourceExtractPriority"); ok && s != "" {
 				c.SmartSourceExtractPriority = s
@@ -795,16 +772,6 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 	}
 
 	if smart := readObj(body, "smart"); smart != nil {
-		if v, ok := smart["smartPlayEnabled"]; ok {
-			if b, _ := v.(bool); true {
-				_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.SmartPlayEnabled = b })
-			}
-		}
-		if v, ok := smart["smartListEnabled"]; ok {
-			if b, _ := v.(bool); true {
-				_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.SmartListEnabled = b })
-			}
-		}
 		if v, ok := smart["smartSourceExtractPriority"]; ok && v != nil {
 			if s, _ := v.(string); true {
 				priority := config.NormalizeSourceExtractPriority(strings.TrimSpace(s))
@@ -928,7 +895,6 @@ func handleDashboardSiteSave(w http.ResponseWriter, r *http.Request, database *d
 	parseForm(r)
 	siteName := strings.TrimSpace(r.FormValue("siteName"))
 	searchDisplayMode := strings.TrimSpace(r.FormValue("searchDisplayMode"))
-	searchBadgePreferEpisode := boolFromForm(r.FormValue("searchBadgePreferEpisode"))
 	switch searchDisplayMode {
 	case "", "sites", "tmdb", "both":
 		if searchDisplayMode == "" {
@@ -943,7 +909,6 @@ func handleDashboardSiteSave(w http.ResponseWriter, r *http.Request, database *d
 			c.SiteName = siteName
 		}
 		c.SearchDisplayMode = searchDisplayMode
-		c.SearchBadgePreferEpisode = searchBadgePreferEpisode
 	})
 	writeJSON(w, 200, map[string]any{"success": true})
 }
@@ -1109,7 +1074,6 @@ func handleDashboardSiteSettings(w http.ResponseWriter, r *http.Request, databas
 		"success":                  true,
 		"siteName":                 cfg.SiteName,
 		"searchDisplayMode":        mode,
-		"searchBadgePreferEpisode": cfg.SearchBadgePreferEpisode,
 		"catPawOpenServers":        servers,
 		"catPawOpenActive":         active,
 		"goProxyEnabled":           cfg.GoProxyEnabled,
