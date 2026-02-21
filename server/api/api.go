@@ -313,24 +313,29 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 			}
 
 			// User search configuration: used by search/play pages only.
-				if page == "search" || page == "play" || page == "site" {
-					sites := mergeVideoSourceSites(database)
-					keys := make([]string, 0, len(sites))
-					for _, s := range sites {
-						k, _ := s["key"].(string)
-						k = strings.TrimSpace(k)
-						if k != "" {
-							keys = append(keys, k)
-						}
+			if page == "search" || page == "play" || page == "site" {
+				sites := mergeVideoSourceSites(database)
+				keys := make([]string, 0, len(sites))
+				for _, s := range sites {
+					k, _ := s["key"].(string)
+					k = strings.TrimSpace(k)
+					if k != "" {
+						keys = append(keys, k)
 					}
-					if len(keys) > 0 {
-						settings["searchThreadCount"] = len(keys)
-					} else {
-						settings["searchThreadCount"] = 5
-					}
-					settings["searchSiteOrder"] = keys
-					settings["searchCoverSite"] = resolveSearchCoverSite(sites, cfg.VideoSourceSearchCoverSite)
 				}
+				if len(keys) > 0 {
+					settings["searchThreadCount"] = len(keys)
+				} else {
+					settings["searchThreadCount"] = 5
+				}
+				settings["searchSiteOrder"] = keys
+				settings["searchCoverSite"] = resolveSearchCoverSite(sites, cfg.VideoSourceSearchCoverSite)
+				if v, _ := database.ListSmartSkipSiteKeys(); v != nil {
+					settings["smartSkipSiteKeys"] = v
+				} else {
+					settings["smartSkipSiteKeys"] = []string{}
+				}
+			}
 			}
 		}
 

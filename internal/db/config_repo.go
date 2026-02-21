@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 )
 
 type AppConfig struct {
@@ -19,6 +20,7 @@ type AppConfig struct {
 	VideoSourceSearchCoverSite string
 	SearchDisplayMode         string
 	SmartSourceExtractPriority string
+	SmartSiteCleanKeywords     string
 	GoProxyEnabled            bool
 	GoProxyAutoSelect         bool
 	TMDBAPIToken              string
@@ -41,6 +43,7 @@ func (d *DB) ReadAppConfig() (AppConfig, error) {
 		vsAPIBase, vsCover sql.NullString
 		sDisplay sql.NullString
 		smartPriority sql.NullString
+		smartSiteClean sql.NullString
 		gEnabled, gAuto sql.NullInt64
 		tToken, tAPIBase, tImgBase, tLang, tRegion sql.NullString
 		tAdult sql.NullInt64
@@ -51,7 +54,7 @@ func (d *DB) ReadAppConfig() (AppConfig, error) {
 	_ = d.db.QueryRow(`SELECT data_proxy, data_custom, img_proxy, img_custom FROM app_douban WHERE id=1 LIMIT 1`).Scan(&dDataProxy, &dDataCustom, &dImgProxy, &dImgCustom)
 	_ = d.db.QueryRow(`SELECT api_base, search_cover_site FROM app_video_source WHERE id=1 LIMIT 1`).Scan(&vsAPIBase, &vsCover)
 	_ = d.db.QueryRow(`SELECT display_mode FROM app_search WHERE id=1 LIMIT 1`).Scan(&sDisplay)
-	_ = d.db.QueryRow(`SELECT source_extract_priority FROM app_smart WHERE id=1 LIMIT 1`).Scan(&smartPriority)
+	_ = d.db.QueryRow(`SELECT source_extract_priority, site_clean_keywords FROM app_smart WHERE id=1 LIMIT 1`).Scan(&smartPriority, &smartSiteClean)
 	_ = d.db.QueryRow(`SELECT enabled, auto_select FROM app_goproxy WHERE id=1 LIMIT 1`).Scan(&gEnabled, &gAuto)
 	_ = d.db.QueryRow(`SELECT api_token, api_base, img_base, language, region, include_adult FROM app_tmdb WHERE id=1 LIMIT 1`).Scan(&tToken, &tAPIBase, &tImgBase, &tLang, &tRegion, &tAdult)
 	_ = d.db.QueryRow(`SELECT active FROM app_catpawopen WHERE id=1 LIMIT 1`).Scan(&cActive)
@@ -66,6 +69,7 @@ func (d *DB) ReadAppConfig() (AppConfig, error) {
 		VideoSourceSearchCoverSite: vsCover.String,
 		SearchDisplayMode:         defaultIfEmpty(sDisplay.String, "sites"),
 		SmartSourceExtractPriority: defaultIfEmpty(smartPriority.String, "无"),
+		SmartSiteCleanKeywords:     strings.TrimSpace(smartSiteClean.String),
 		GoProxyEnabled:            gEnabled.Int64 != 0,
 		GoProxyAutoSelect:         gAuto.Int64 != 0,
 		TMDBAPIToken:              tToken.String,
@@ -127,12 +131,13 @@ func (d *DB) UpdateAppConfig(update func(*AppConfig)) error {
 	`, strings.TrimSpace(cfg.SearchDisplayMode), now)
 
 	_, _ = tx.Exec(`
-		INSERT INTO app_smart(id, source_extract_priority, updated_at)
-		VALUES(1, ?, ?)
+		INSERT INTO app_smart(id, source_extract_priority, site_clean_keywords, updated_at)
+		VALUES(1, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		  source_extract_priority=excluded.source_extract_priority,
+		  site_clean_keywords=excluded.site_clean_keywords,
 		  updated_at=excluded.updated_at
-	`, strings.TrimSpace(cfg.SmartSourceExtractPriority), now)
+	`, strings.TrimSpace(cfg.SmartSourceExtractPriority), strings.TrimSpace(cfg.SmartSiteCleanKeywords), now)
 
 	_, _ = tx.Exec(`
 		INSERT INTO app_goproxy(id, enabled, auto_select, updated_at)
@@ -374,6 +379,7 @@ type VideoSourceSiteState struct {
 	Enabled      bool
 	Home         bool
 	Search       bool
+	SmartSkip    bool
 	Availability string
 	Error        string
 	OrderIndex   int
@@ -440,11 +446,15 @@ func (d *DB) ReplaceVideoSourceSites(sites []VideoSourceSite) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	_ = d.RecomputeSmartSkipSites()
+	return nil
 }
 
 func (d *DB) ReadVideoSourceSiteStates() (map[string]VideoSourceSiteState, error) {
-	rows, err := d.db.Query(`SELECT site_key, enabled, home, search, availability, error, order_index FROM video_source_site_state`)
+	rows, err := d.db.Query(`SELECT site_key, enabled, home, search, smart_skip, availability, error, order_index FROM video_source_site_state`)
 	if err != nil {
 		return nil, err
 	}
@@ -456,11 +466,12 @@ func (d *DB) ReadVideoSourceSiteStates() (map[string]VideoSourceSiteState, error
 			en int
 			home int
 			search int
+			smartSkip int
 			avail string
 			errStr string
 			ord int
 		)
-		_ = rows.Scan(&key, &en, &home, &search, &avail, &errStr, &ord)
+		_ = rows.Scan(&key, &en, &home, &search, &smartSkip, &avail, &errStr, &ord)
 		key = strings.TrimSpace(key)
 		if key == "" {
 			continue
@@ -469,6 +480,7 @@ func (d *DB) ReadVideoSourceSiteStates() (map[string]VideoSourceSiteState, error
 			Enabled:      en != 0,
 			Home:         home != 0,
 			Search:       search != 0,
+			SmartSkip:    smartSkip != 0,
 			Availability: strings.TrimSpace(avail),
 			Error:        strings.TrimSpace(errStr),
 			OrderIndex:   ord,
@@ -538,6 +550,127 @@ func (d *DB) ReplaceVideoSourceSiteOrder(order []string) error {
 		}
 	}
 	return tx.Commit()
+}
+
+func (d *DB) ListSmartSkipSiteKeys() ([]string, error) {
+	if d == nil || d.db == nil {
+		return []string{}, nil
+	}
+	rows, err := d.db.Query(`SELECT site_key FROM video_source_site_state WHERE smart_skip != 0 ORDER BY order_index ASC, site_key ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var k string
+		_ = rows.Scan(&k)
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
+		}
+		out = append(out, k)
+	}
+	return out, nil
+}
+
+func (d *DB) RecomputeSmartSkipSites() error {
+	if d == nil || d.db == nil {
+		return nil
+	}
+	cfg, err := d.ReadAppConfig()
+	if err != nil {
+		return err
+	}
+	keywords := normalizeSmartSiteCleanKeywords(cfg.SmartSiteCleanKeywords)
+	rawSites, err := d.ListVideoSourceSites()
+	if err != nil {
+		return err
+	}
+
+	now := time.Now().Unix()
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, s := range rawSites {
+		key := strings.TrimSpace(s.Key)
+		if key == "" {
+			continue
+		}
+		skip := smartSiteNameMatchesKeywords(s.Name, keywords)
+		if _, err := tx.Exec(`
+			INSERT INTO video_source_site_state(site_key, smart_skip, updated_at)
+			VALUES(?,?,?)
+			ON CONFLICT(site_key) DO UPDATE SET smart_skip=excluded.smart_skip, updated_at=excluded.updated_at
+		`, key, bool01Int(skip), now); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+func normalizeSmartSiteCleanKeywords(text string) []string {
+	raw := strings.TrimSpace(text)
+	if raw == "" {
+		return []string{}
+	}
+	parts := strings.Split(strings.ReplaceAll(raw, "，", ","), ",")
+	seen := map[string]struct{}{}
+	out := []string{}
+	for _, p := range parts {
+		s := normalizeSiteNameToken(p)
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+func normalizeSiteNameToken(text string) string {
+	raw := strings.TrimSpace(text)
+	if raw == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(raw))
+	for _, r := range raw {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			b.WriteRune(unicode.ToLower(r))
+			continue
+		}
+		if r >= 0x4E00 && r <= 0x9FFF {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func smartSiteNameMatchesKeywords(siteName string, keywords []string) bool {
+	if len(keywords) == 0 {
+		return false
+	}
+	n := normalizeSiteNameToken(siteName)
+	if n == "" {
+		return false
+	}
+	for _, kw := range keywords {
+		if kw == "" {
+			continue
+		}
+		if strings.Contains(n, kw) {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *DB) ReadPanLoginSettings() (map[string]map[string]any, error) {
