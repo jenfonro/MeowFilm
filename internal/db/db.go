@@ -357,6 +357,7 @@ func (d *DB) ensureSchema() error {
 				  enabled INTEGER NOT NULL DEFAULT 1,
 				  home INTEGER NOT NULL DEFAULT 0,
 				  search INTEGER NOT NULL DEFAULT 0,
+				  smart_skip INTEGER NOT NULL DEFAULT 0,
 				  availability TEXT NOT NULL DEFAULT 'unchecked',
 				  error TEXT NOT NULL DEFAULT '',
 				  order_index INTEGER NOT NULL DEFAULT 0,
@@ -565,6 +566,7 @@ func (d *DB) ensureSchema() error {
 					CREATE TABLE IF NOT EXISTS app_smart (
 					  id INTEGER PRIMARY KEY CHECK (id = 1),
 					  source_extract_priority TEXT NOT NULL DEFAULT '无',
+					  site_clean_keywords TEXT NOT NULL DEFAULT '直播,体育,短剧,听书,舞曲,哔哩',
 					  updated_at INTEGER NOT NULL
 					);
 					CREATE TABLE IF NOT EXISTS app_goproxy (
@@ -613,6 +615,7 @@ func (d *DB) ensureSchema() error {
 				  enabled INTEGER NOT NULL DEFAULT 1,
 				  home INTEGER NOT NULL DEFAULT 0,
 				  search INTEGER NOT NULL DEFAULT 0,
+				  smart_skip INTEGER NOT NULL DEFAULT 0,
 				  availability TEXT NOT NULL DEFAULT 'unchecked',
 				  error TEXT NOT NULL DEFAULT '',
 				  order_index INTEGER NOT NULL DEFAULT 0,
