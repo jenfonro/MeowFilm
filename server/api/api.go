@@ -124,6 +124,18 @@ func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
 			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				tmdb.HandleDetail(w, r, database)
 			})).ServeHTTP(w, r)
+		case "/smart/matchblock/items":
+			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleAPISmartMatchBlockItems(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/smart/matchblock/add":
+			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleAPISmartMatchBlockAdd(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/smart/matchblock/delete":
+			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleAPISmartMatchBlockDelete(w, r, database)
+			})).ServeHTTP(w, r)
 		case "/pan/189/list":
 			h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { netdisk.HandleAPI189List(w, r, database) })
 			if panAPINoAuthAllowed(r) {
