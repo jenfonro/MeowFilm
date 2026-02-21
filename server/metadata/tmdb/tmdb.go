@@ -3,6 +3,7 @@ package tmdb
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -578,12 +579,26 @@ func HandleDetail(w http.ResponseWriter, r *http.Request, database *db.DB) {
 		return
 	}
 
-	data := fetchTMDBDetailForAPI(database, t, id)
+	data, fetchErr := fetchTMDBDetailForAPI(database, t, id)
 	if data == nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{
+		payload := map[string]any{
 			"error": "TMDB 请求失败",
 			"code":  "TMDB_REQUEST_FAILED",
-		})
+		}
+		if fetchErr != nil {
+			payload["raw"] = fetchErr.Error()
+			if ue, ok := fetchErr.(*tmdbUpstreamError); ok && ue != nil {
+				if ue.StatusCode > 0 {
+					payload["upstreamStatus"] = ue.StatusCode
+				}
+				if ue.Body != "" {
+					payload["upstreamBody"] = ue.Body
+				}
+			}
+		} else {
+			payload["raw"] = "tmdb detail fetch returned empty result"
+		}
+		writeJSON(w, http.StatusBadGateway, payload)
 		return
 	}
 
@@ -595,17 +610,39 @@ func HandleDetail(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	writeJSON(w, 200, data)
 }
 
-func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) map[string]any {
+type tmdbUpstreamError struct {
+	StatusCode int
+	Body       string
+	Message    string
+}
+
+func (e *tmdbUpstreamError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.StatusCode > 0 {
+		if e.Message != "" {
+			return fmt.Sprintf("%s (http %d)", e.Message, e.StatusCode)
+		}
+		return fmt.Sprintf("tmdb http %d", e.StatusCode)
+	}
+	if e.Message != "" {
+		return e.Message
+	}
+	return "tmdb upstream error"
+}
+
+func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) (map[string]any, error) {
 	if mediaType != "tv" && mediaType != "movie" {
-		return nil
+		return nil, fmt.Errorf("invalid mediaType")
 	}
 	if tmdbID <= 0 || database == nil {
-		return nil
+		return nil, fmt.Errorf("invalid tmdbID/db")
 	}
 
 	token, tokenKind := resolveTMDBToken(database)
 	if token == "" || tokenKind == "" {
-		return nil
+		return nil, fmt.Errorf("tmdb not configured")
 	}
 
 	cfg, _ := database.ReadAppConfig()
@@ -617,7 +654,12 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) map[st
 	// Persistent normalized cache (SQLite)
 	if d, err := database.ReadTMDBDetailForAPI(mediaType, tmdbID, language); err == nil && d != nil {
 		imgBase := resolveTMDBImageBase(database)
-		if d.TMDBType == "tv" {
+		if mediaType == "tv" {
+			// For TV requests, never return a movie-shaped payload.
+			// If the cached row is incomplete (no latest episode and not ended), force a re-fetch.
+			if d.TMDBType != "tv" {
+				return nil, fmt.Errorf("tmdb cache type mismatch (want tv, got %s)", d.TMDBType)
+			}
 			pic := strings.TrimSpace(d.PosterPath)
 			if pic != "" && !strings.HasPrefix(pic, "http://") && !strings.HasPrefix(pic, "https://") {
 				pic = joinTMDBImage(imgBase, "t/p/w500"+pic)
@@ -670,26 +712,33 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) map[st
 				"seasonCount":   seasonCount,
 			}
 			if ended || (d.LatestSeason > 0 && d.LatestEpisode > 0) {
-				return out
+				return out, nil
 			}
+			// Not ended and no known latest aired episode yet: bypass persistent cache and re-fetch from TMDB
+			// so we can probe seasons/episodes and get an accurate latest aired episode.
 		}
-		pic := strings.TrimSpace(d.PosterPath)
-		if pic != "" && !strings.HasPrefix(pic, "http://") && !strings.HasPrefix(pic, "https://") {
-			pic = joinTMDBImage(imgBase, "t/p/w500"+pic)
+		if mediaType == "movie" {
+			if d.TMDBType != "movie" {
+				return nil, fmt.Errorf("tmdb cache type mismatch (want movie, got %s)", d.TMDBType)
+			}
+			pic := strings.TrimSpace(d.PosterPath)
+			if pic != "" && !strings.HasPrefix(pic, "http://") && !strings.HasPrefix(pic, "https://") {
+				pic = joinTMDBImage(imgBase, "t/p/w500"+pic)
+			}
+			year := parseYearFromDate(d.Release)
+			out := map[string]any{
+				"success":  true,
+				"id":       tmdbID,
+				"type":     "movie",
+				"title":    strings.TrimSpace(d.Title),
+				"year":     year,
+				"poster":   pic,
+				"overview": strings.TrimSpace(d.Overview),
+				"badge":    "",
+				"status":   strings.TrimSpace(d.Status),
+			}
+			return out, nil
 		}
-		year := parseYearFromDate(d.Release)
-		out := map[string]any{
-			"success":  true,
-			"id":       tmdbID,
-			"type":     "movie",
-			"title":    strings.TrimSpace(d.Title),
-			"year":     year,
-			"poster":   pic,
-			"overview": strings.TrimSpace(d.Overview),
-			"badge":    "",
-			"status":   strings.TrimSpace(d.Status),
-		}
-		return out
 	}
 
 	apiBase := resolveTMDBAPIBase(database)
@@ -705,7 +754,7 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) map[st
 
 	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
 	if tokenKind == "v4" {
@@ -715,18 +764,23 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) map[st
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, &tmdbUpstreamError{
+			StatusCode: resp.StatusCode,
+			Body:       strings.TrimSpace(string(body)),
+			Message:    "tmdb request failed",
+		}
 	}
 
 	if mediaType == "tv" {
 		var detail tmdbTVDetailsResponse
 		dec := json.NewDecoder(resp.Body)
 		if err := dec.Decode(&detail); err != nil {
-			return nil
+			return nil, err
 		}
 		// Upsert normalized TMDB library
 		_, _ = database.UpsertTMDBMedia(db.TMDBUpsertMedia{
@@ -822,13 +876,13 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) map[st
 			"seasons":       seasons,
 			"seasonCount":   seasonCount,
 		}
-		return out
+		return out, nil
 	}
 
 	var detail tmdbMovieDetailsResponse
 	dec := json.NewDecoder(resp.Body)
 	if err := dec.Decode(&detail); err != nil {
-		return nil
+		return nil, err
 	}
 	_, _ = database.UpsertTMDBMedia(db.TMDBUpsertMedia{
 		Type:         "movie",
@@ -860,7 +914,7 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) map[st
 		"badge":    "",
 		"status":   strings.TrimSpace(detail.Status),
 	}
-	return out
+	return out, nil
 }
 
 func defaultString(v, def string) string {
