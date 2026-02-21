@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -20,6 +21,14 @@ func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/dashboard")
 		switch path {
+		case "/backup":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardBackup(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/restore":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardRestore(w, r, database)
+			})).ServeHTTP(w, r)
 		case "/site/save":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardSiteSave(w, r, database)
@@ -302,6 +311,568 @@ func defaultStringArray(v []string) []string {
 		return []string{}
 	}
 	return v
+}
+
+func defaultStringArrayFromAny(v any) []string {
+	out := []string{}
+	switch vv := v.(type) {
+	case []any:
+		for _, it := range vv {
+			s, _ := it.(string)
+			s = strings.TrimSpace(s)
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+	case []string:
+		for _, s := range vv {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
+
+type dashboardBackupVideoSourceState struct {
+	Enabled    bool `json:"enabled"`
+	Home       bool `json:"home"`
+	Search     bool `json:"search"`
+	OrderIndex int  `json:"orderIndex"`
+}
+
+func handleDashboardBackup(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	cfg, _ := database.ReadAppConfig()
+
+	catServersRaw, _ := database.ListCatPawOpenServers()
+	catServers := make([]map[string]any, 0, len(catServersRaw))
+	for _, s := range catServersRaw {
+		catServers = append(catServers, map[string]any{"name": s.Name, "apiBase": s.APIBase})
+	}
+	catPansRaw, _ := database.ListCatPawOpenPans()
+	catPans := make([]map[string]any, 0, len(catPansRaw))
+	for _, p := range catPansRaw {
+		catPans = append(catPans, map[string]any{"key": p.Key, "name": p.Name, "enable": p.Enabled})
+	}
+
+	goProxyServersRaw, _ := database.ListGoProxyServers()
+	goProxyServers := make([]map[string]any, 0, len(goProxyServersRaw))
+	for _, s := range goProxyServersRaw {
+		goProxyServers = append(goProxyServers, map[string]any{
+			"name":        s.Name,
+			"displayName": s.DisplayName,
+			"base":        s.Base,
+			"pans":        map[string]any{"baidu": s.PansBaidu, "quark": s.PansQuark},
+		})
+	}
+
+	panLogin, _ := database.ReadPanLoginSettings()
+
+	videoSites, _ := database.ListVideoSourceSites()
+	videoStatesRaw, _ := database.ReadVideoSourceSiteStates()
+	videoStates := map[string]dashboardBackupVideoSourceState{}
+	for k, st := range videoStatesRaw {
+		if strings.TrimSpace(k) == "" {
+			continue
+		}
+		videoStates[k] = dashboardBackupVideoSourceState{Enabled: st.Enabled, Home: st.Home, Search: st.Search, OrderIndex: st.OrderIndex}
+	}
+	type ordRow struct {
+		Key string
+		Ord int
+	}
+	ordRows := make([]ordRow, 0, len(videoStatesRaw))
+	for k, st := range videoStatesRaw {
+		if strings.TrimSpace(k) == "" {
+			continue
+		}
+		ordRows = append(ordRows, ordRow{Key: k, Ord: st.OrderIndex})
+	}
+	sort.SliceStable(ordRows, func(i, j int) bool {
+		if ordRows[i].Ord != ordRows[j].Ord {
+			return ordRows[i].Ord < ordRows[j].Ord
+		}
+		return ordRows[i].Key < ordRows[j].Key
+	})
+	orderKeys := []string{}
+	for _, row := range ordRows {
+		orderKeys = append(orderKeys, row.Key)
+	}
+
+	magicEpisodeRules, _ := database.ListMagicEpisodeRules()
+	magicEpisodeCleanRegexRules, _ := database.ListMagicEpisodeCleanRegexRules()
+	magicMovieRules, _ := database.ListMagicMovieRules()
+	magicAggregateRegexRules, _ := database.ListMagicAggregateRegexRules()
+
+	smartSourcePriorityTokens, _ := database.ListSmartSourcePriorityTokens()
+	smartPanMatchTokens, _ := database.ListSmartPanMatchTokens()
+
+	writeJSON(w, 200, map[string]any{
+		"success":    true,
+		"version":    1,
+		"exportedAt": time.Now().Unix(),
+		"appConfig":  cfg,
+		"catPawOpen": map[string]any{
+			"active":  strings.TrimSpace(cfg.CatPawOpenActive),
+			"servers": catServers,
+			"pans":    catPans,
+		},
+		"goProxy": map[string]any{
+			"enabled":    cfg.GoProxyEnabled,
+			"autoSelect": cfg.GoProxyAutoSelect,
+			"servers":    goProxyServers,
+		},
+		"pan": map[string]any{
+			"loginSettings": panLogin,
+		},
+		"videoSource": map[string]any{
+			"apiBase":         strings.TrimSpace(cfg.VideoSourceAPIBase),
+			"searchCoverSite": strings.TrimSpace(cfg.VideoSourceSearchCoverSite),
+			"sites":           videoSites,
+			"states":          videoStates,
+			"order":           orderKeys,
+		},
+		"magic": map[string]any{
+			"episodeRules":           defaultStringArray(magicEpisodeRules),
+			"episodeCleanRegexRules": defaultStringArray(magicEpisodeCleanRegexRules),
+			"movieRules":             defaultStringArray(magicMovieRules),
+			"aggregateRegexRules":    defaultStringArray(magicAggregateRegexRules),
+		},
+		"smart": map[string]any{
+			"smartPlayEnabled":           cfg.SmartPlayEnabled,
+			"smartListEnabled":           cfg.SmartListEnabled,
+			"smartSourceExtractPriority": config.NormalizeSourceExtractPriority(strings.TrimSpace(cfg.SmartSourceExtractPriority)),
+			"smartSourcePriorityTokens":  defaultStringArray(smartSourcePriorityTokens),
+			"smartPanMatchTokens":        defaultStringArray(smartPanMatchTokens),
+		},
+		"metadata": map[string]any{
+			"doubanDataProxy":    defaultString(cfg.DoubanDataProxy, "direct"),
+			"doubanDataCustom":   cfg.DoubanDataCustom,
+			"doubanImgProxy":     defaultString(cfg.DoubanImgProxy, "direct-browser"),
+			"doubanImgCustom":    cfg.DoubanImgCustom,
+			"tmdbApiToken":       strings.TrimSpace(cfg.TMDBAPIToken),
+			"tmdbDataProxyBase":  strings.TrimSpace(cfg.TMDBAPIBase),
+			"tmdbImageProxyBase": strings.TrimSpace(cfg.TMDBImgBase),
+			"language":           defaultString(strings.TrimSpace(cfg.TMDBLanguage), "zh-CN"),
+			"region":             defaultString(strings.TrimSpace(cfg.TMDBRegion), "CN"),
+			"includeAdult":       cfg.TMDBIncludeAdult,
+		},
+	})
+}
+
+func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var body map[string]any
+	_ = readJSONLoose(r, &body)
+
+	readObj := func(m map[string]any, key string) map[string]any {
+		if m == nil {
+			return nil
+		}
+		v, ok := m[key]
+		if !ok || v == nil {
+			return nil
+		}
+		o, _ := v.(map[string]any)
+		return o
+	}
+	readArr := func(m map[string]any, key string) []any {
+		if m == nil {
+			return nil
+		}
+		v, ok := m[key]
+		if !ok || v == nil {
+			return nil
+		}
+		a, _ := v.([]any)
+		return a
+	}
+
+	applied := map[string]any{}
+
+	if cfgObj := readObj(body, "appConfig"); cfgObj != nil {
+		readStr := func(keys ...string) (string, bool) {
+			for _, k := range keys {
+				v, ok := cfgObj[k]
+				if !ok || v == nil {
+					continue
+				}
+				s, _ := v.(string)
+				return strings.TrimSpace(s), true
+			}
+			return "", false
+		}
+		readBool := func(keys ...string) (bool, bool) {
+			for _, k := range keys {
+				v, ok := cfgObj[k]
+				if !ok || v == nil {
+					continue
+				}
+				b, ok := v.(bool)
+				if ok {
+					return b, true
+				}
+			}
+			return false, false
+		}
+		_ = database.UpdateAppConfig(func(c *db.AppConfig) {
+			if s, ok := readStr("SiteName", "siteName"); ok && s != "" {
+				c.SiteName = s
+			}
+			if s, ok := readStr("SearchDisplayMode", "searchDisplayMode"); ok && s != "" {
+				c.SearchDisplayMode = s
+			}
+			if b, ok := readBool("SearchBadgePreferEpisode", "searchBadgePreferEpisode"); ok {
+				c.SearchBadgePreferEpisode = b
+			}
+			if s, ok := readStr("VideoSourceAPIBase", "videoSourceApiBase"); ok {
+				c.VideoSourceAPIBase = s
+			}
+			if s, ok := readStr("VideoSourceSearchCoverSite", "videoSourceSearchCoverSite"); ok {
+				c.VideoSourceSearchCoverSite = s
+			}
+			if b, ok := readBool("SmartPlayEnabled", "smartPlayEnabled"); ok {
+				c.SmartPlayEnabled = b
+			}
+			if b, ok := readBool("SmartListEnabled", "smartListEnabled"); ok {
+				c.SmartListEnabled = b
+			}
+			if s, ok := readStr("SmartSourceExtractPriority", "smartSourceExtractPriority"); ok && s != "" {
+				c.SmartSourceExtractPriority = s
+			}
+			if b, ok := readBool("GoProxyEnabled", "goProxyEnabled"); ok {
+				c.GoProxyEnabled = b
+			}
+			if b, ok := readBool("GoProxyAutoSelect", "goProxyAutoSelect"); ok {
+				c.GoProxyAutoSelect = b
+			}
+			if s, ok := readStr("DoubanDataProxy", "doubanDataProxy"); ok && s != "" {
+				c.DoubanDataProxy = s
+			}
+			if s, ok := readStr("DoubanDataCustom", "doubanDataCustom"); ok {
+				c.DoubanDataCustom = s
+			}
+			if s, ok := readStr("DoubanImgProxy", "doubanImgProxy"); ok && s != "" {
+				c.DoubanImgProxy = s
+			}
+			if s, ok := readStr("DoubanImgCustom", "doubanImgCustom"); ok {
+				c.DoubanImgCustom = s
+			}
+			if s, ok := readStr("TMDBAPIToken", "tmdbApiToken"); ok {
+				c.TMDBAPIToken = s
+			}
+			if s, ok := readStr("TMDBAPIBase", "tmdbDataProxyBase"); ok {
+				c.TMDBAPIBase = normalizeHTTPBase(s)
+			}
+			if s, ok := readStr("TMDBImgBase", "tmdbImageProxyBase"); ok {
+				c.TMDBImgBase = normalizeHTTPBase(s)
+			}
+			if s, ok := readStr("TMDBLanguage", "language"); ok && s != "" {
+				c.TMDBLanguage = s
+			}
+			if s, ok := readStr("TMDBRegion", "region"); ok && s != "" {
+				c.TMDBRegion = s
+			}
+			if b, ok := readBool("TMDBIncludeAdult", "includeAdult"); ok {
+				c.TMDBIncludeAdult = b
+			}
+			if s, ok := readStr("CatPawOpenActive", "catPawOpenActive"); ok {
+				c.CatPawOpenActive = s
+			}
+		})
+		applied["appConfig"] = true
+	}
+
+	if cat := readObj(body, "catPawOpen"); cat != nil {
+		if arr := readArr(cat, "servers"); arr != nil {
+			list := []db.CatPawOpenServer{}
+			for _, it := range arr {
+				row, _ := it.(map[string]any)
+				if row == nil {
+					continue
+				}
+				n, _ := row["name"].(string)
+				a, _ := row["apiBase"].(string)
+				n = strings.TrimSpace(n)
+				a = strings.TrimSpace(a)
+				if n == "" || a == "" {
+					continue
+				}
+				list = append(list, db.CatPawOpenServer{Name: n, APIBase: a})
+			}
+			_ = database.ReplaceCatPawOpenServers(list)
+		}
+		if arr := readArr(cat, "pans"); arr != nil {
+			list := []db.CatPawOpenPan{}
+			for _, it := range arr {
+				row, _ := it.(map[string]any)
+				if row == nil {
+					continue
+				}
+				key, _ := row["key"].(string)
+				name, _ := row["name"].(string)
+				en, _ := row["enable"].(bool)
+				key = strings.TrimSpace(key)
+				if key == "" {
+					continue
+				}
+				list = append(list, db.CatPawOpenPan{Key: key, Name: strings.TrimSpace(name), Enabled: en})
+			}
+			_ = database.ReplaceCatPawOpenPans(list)
+		}
+		if v, ok := cat["active"]; ok && v != nil {
+			if s, _ := v.(string); true {
+				_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.CatPawOpenActive = strings.TrimSpace(s) })
+			}
+		}
+		applied["catPawOpen"] = true
+	}
+
+	if goProxy := readObj(body, "goProxy"); goProxy != nil {
+		if v, ok := goProxy["enabled"]; ok {
+			if b, _ := v.(bool); true {
+				_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.GoProxyEnabled = b })
+			}
+		}
+		if v, ok := goProxy["autoSelect"]; ok {
+			if b, _ := v.(bool); true {
+				_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.GoProxyAutoSelect = b })
+			}
+		}
+		if arr := readArr(goProxy, "servers"); arr != nil {
+			list := []db.GoProxyServer{}
+			for _, it := range arr {
+				row, _ := it.(map[string]any)
+				if row == nil {
+					continue
+				}
+				name, _ := row["name"].(string)
+				displayName, _ := row["displayName"].(string)
+				base, _ := row["base"].(string)
+				pans, _ := row["pans"].(map[string]any)
+				if strings.TrimSpace(name) == "" || strings.TrimSpace(base) == "" {
+					continue
+				}
+				bd := false
+				qk := false
+				if pans != nil {
+					bd, _ = pans["baidu"].(bool)
+					qk, _ = pans["quark"].(bool)
+				}
+				list = append(list, db.GoProxyServer{
+					Name:        strings.TrimSpace(name),
+					DisplayName: strings.TrimSpace(displayName),
+					Base:        strings.TrimSpace(base),
+					PansBaidu:   bd,
+					PansQuark:   qk,
+				})
+			}
+			_ = database.ReplaceGoProxyServers(list)
+		}
+		applied["goProxy"] = true
+	}
+
+	if pan := readObj(body, "pan"); pan != nil {
+		if v, ok := pan["loginSettings"]; ok && v != nil {
+			root := map[string]map[string]any{}
+			if m, ok := v.(map[string]any); ok {
+				for provider, raw := range m {
+					pk := strings.TrimSpace(provider)
+					if pk == "" {
+						continue
+					}
+					obj, _ := raw.(map[string]any)
+					if obj == nil {
+						continue
+					}
+					root[pk] = obj
+				}
+			}
+			_ = database.ReplacePanLoginSettings(root)
+			applied["panLoginSettings"] = true
+		}
+	}
+
+	if vs := readObj(body, "videoSource"); vs != nil {
+		if arr := readArr(vs, "sites"); arr != nil {
+			list := []db.VideoSourceSite{}
+			for _, it := range arr {
+				row, _ := it.(map[string]any)
+				if row == nil {
+					continue
+				}
+				key, _ := row["Key"].(string)
+				if key == "" {
+					key, _ = row["key"].(string)
+				}
+				name, _ := row["Name"].(string)
+				if name == "" {
+					name, _ = row["name"].(string)
+				}
+				api, _ := row["API"].(string)
+				if api == "" {
+					api, _ = row["api"].(string)
+				}
+				key = strings.TrimSpace(key)
+				api = strings.TrimSpace(api)
+				if key == "" || api == "" {
+					continue
+				}
+				var tptr *int
+				if v, ok := row["Type"]; ok && v != nil {
+					if f, ok := v.(float64); ok {
+						n := int(f)
+						tptr = &n
+					}
+				}
+				if v, ok := row["type"]; ok && v != nil {
+					if f, ok := v.(float64); ok {
+						n := int(f)
+						tptr = &n
+					}
+				}
+				list = append(list, db.VideoSourceSite{Key: key, Name: strings.TrimSpace(name), API: api, Type: tptr})
+			}
+			_ = database.ReplaceVideoSourceSites(list)
+		}
+		if v, ok := vs["searchCoverSite"]; ok && v != nil {
+			if s, _ := v.(string); true {
+				_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.VideoSourceSearchCoverSite = strings.TrimSpace(s) })
+			}
+		}
+		if arr := readArr(vs, "order"); arr != nil {
+			next := []string{}
+			for _, it := range arr {
+				s, _ := it.(string)
+				s = strings.TrimSpace(s)
+				if s != "" {
+					next = append(next, s)
+				}
+			}
+			_ = database.ReplaceVideoSourceSiteOrder(next)
+		}
+		if v, ok := vs["states"]; ok && v != nil {
+			if m, ok := v.(map[string]any); ok {
+				for k, raw := range m {
+					key := strings.TrimSpace(k)
+					obj, _ := raw.(map[string]any)
+					if key == "" || obj == nil {
+						continue
+					}
+					enabled, _ := obj["enabled"].(bool)
+					home, _ := obj["home"].(bool)
+					search, _ := obj["search"].(bool)
+					orderIndex := 0
+					if f, ok := obj["orderIndex"].(float64); ok {
+						orderIndex = int(f)
+					}
+					_ = database.UpsertVideoSourceSiteState(key, func(s *db.VideoSourceSiteState) {
+						s.Enabled = enabled
+						s.Home = home
+						s.Search = search
+						s.OrderIndex = orderIndex
+					})
+				}
+			}
+		}
+		applied["videoSource"] = true
+	}
+
+	if magic := readObj(body, "magic"); magic != nil {
+		_ = database.ReplaceMagicEpisodeRules(defaultStringArrayFromAny(magic["episodeRules"]))
+		_ = database.ReplaceMagicEpisodeCleanRegexRules(defaultStringArrayFromAny(magic["episodeCleanRegexRules"]))
+		_ = database.ReplaceMagicMovieRules(defaultStringArrayFromAny(magic["movieRules"]))
+		_ = database.ReplaceMagicAggregateRegexRules(defaultStringArrayFromAny(magic["aggregateRegexRules"]))
+		applied["magic"] = true
+	}
+
+	if smart := readObj(body, "smart"); smart != nil {
+		if v, ok := smart["smartPlayEnabled"]; ok {
+			if b, _ := v.(bool); true {
+				_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.SmartPlayEnabled = b })
+			}
+		}
+		if v, ok := smart["smartListEnabled"]; ok {
+			if b, _ := v.(bool); true {
+				_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.SmartListEnabled = b })
+			}
+		}
+		if v, ok := smart["smartSourceExtractPriority"]; ok && v != nil {
+			if s, _ := v.(string); true {
+				priority := config.NormalizeSourceExtractPriority(strings.TrimSpace(s))
+				_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.SmartSourceExtractPriority = priority })
+			}
+		}
+		_ = database.ReplaceSmartSourcePriorityTokens(defaultStringArrayFromAny(smart["smartSourcePriorityTokens"]))
+		_ = database.ReplaceSmartPanMatchTokens(defaultStringArrayFromAny(smart["smartPanMatchTokens"]))
+		applied["smart"] = true
+	}
+
+	if meta := readObj(body, "metadata"); meta != nil {
+		_ = database.UpdateAppConfig(func(c *db.AppConfig) {
+			if v, ok := meta["doubanDataProxy"]; ok {
+				if s, _ := v.(string); strings.TrimSpace(s) != "" {
+					c.DoubanDataProxy = strings.TrimSpace(s)
+				}
+			}
+			if v, ok := meta["doubanDataCustom"]; ok {
+				if s, _ := v.(string); true {
+					c.DoubanDataCustom = strings.TrimSpace(s)
+				}
+			}
+			if v, ok := meta["doubanImgProxy"]; ok {
+				if s, _ := v.(string); strings.TrimSpace(s) != "" {
+					c.DoubanImgProxy = strings.TrimSpace(s)
+				}
+			}
+			if v, ok := meta["doubanImgCustom"]; ok {
+				if s, _ := v.(string); true {
+					c.DoubanImgCustom = strings.TrimSpace(s)
+				}
+			}
+			if v, ok := meta["tmdbApiToken"]; ok {
+				if s, _ := v.(string); true {
+					c.TMDBAPIToken = strings.TrimSpace(s)
+				}
+			}
+			if v, ok := meta["tmdbDataProxyBase"]; ok {
+				if s, _ := v.(string); true {
+					c.TMDBAPIBase = normalizeHTTPBase(strings.TrimSpace(s))
+				}
+			}
+			if v, ok := meta["tmdbImageProxyBase"]; ok {
+				if s, _ := v.(string); true {
+					c.TMDBImgBase = normalizeHTTPBase(strings.TrimSpace(s))
+				}
+			}
+			if v, ok := meta["language"]; ok {
+				if s, _ := v.(string); strings.TrimSpace(s) != "" {
+					c.TMDBLanguage = strings.TrimSpace(s)
+				}
+			}
+			if v, ok := meta["region"]; ok {
+				if s, _ := v.(string); strings.TrimSpace(s) != "" {
+					c.TMDBRegion = strings.TrimSpace(s)
+				}
+			}
+			if v, ok := meta["includeAdult"]; ok {
+				if b, _ := v.(bool); true {
+					c.TMDBIncludeAdult = b
+				}
+			}
+		})
+		applied["metadata"] = true
+	}
+
+	writeJSON(w, 200, map[string]any{"success": true, "applied": applied})
 }
 
 func handleDashboardMetadataSettings(w http.ResponseWriter, r *http.Request, database *db.DB) {
@@ -1123,9 +1694,9 @@ func handleDashboardUserList(w http.ResponseWriter, r *http.Request, database *d
 	users := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
 		users = append(users, map[string]any{
-			"username":     r.Username,
-			"role":         r.Role,
-			"status":       r.Status,
+			"username": r.Username,
+			"role":     r.Role,
+			"status":   r.Status,
 		})
 	}
 	writeJSON(w, 200, map[string]any{"success": true, "users": users, "userCount": len(users)})
@@ -1268,9 +1839,9 @@ func handleDashboardUserUpdate(w http.ResponseWriter, r *http.Request, database 
 	}
 
 	writeJSON(w, 200, map[string]any{
-		"success":    true,
-		"username":   finalUsername,
-		"role":       defaultString(finalRole, "user"),
+		"success":  true,
+		"username": finalUsername,
+		"role":     defaultString(finalRole, "user"),
 	})
 }
 
