@@ -18,9 +18,6 @@ type AppConfig struct {
 	VideoSourceAPIBase        string
 	VideoSourceSearchCoverSite string
 	SearchDisplayMode         string
-	SearchBadgePreferEpisode  bool
-	SmartPlayEnabled          bool
-	SmartListEnabled          bool
 	SmartSourceExtractPriority string
 	GoProxyEnabled            bool
 	GoProxyAutoSelect         bool
@@ -43,8 +40,6 @@ func (d *DB) ReadAppConfig() (AppConfig, error) {
 		dDataProxy, dDataCustom, dImgProxy, dImgCustom sql.NullString
 		vsAPIBase, vsCover sql.NullString
 		sDisplay sql.NullString
-		sBadgePrefer sql.NullInt64
-		smartPlay, smartList sql.NullInt64
 		smartPriority sql.NullString
 		gEnabled, gAuto sql.NullInt64
 		tToken, tAPIBase, tImgBase, tLang, tRegion sql.NullString
@@ -55,8 +50,8 @@ func (d *DB) ReadAppConfig() (AppConfig, error) {
 	_ = d.db.QueryRow(`SELECT site_name FROM app_site WHERE id=1 LIMIT 1`).Scan(&siteName)
 	_ = d.db.QueryRow(`SELECT data_proxy, data_custom, img_proxy, img_custom FROM app_douban WHERE id=1 LIMIT 1`).Scan(&dDataProxy, &dDataCustom, &dImgProxy, &dImgCustom)
 	_ = d.db.QueryRow(`SELECT api_base, search_cover_site FROM app_video_source WHERE id=1 LIMIT 1`).Scan(&vsAPIBase, &vsCover)
-	_ = d.db.QueryRow(`SELECT display_mode, badge_prefer_episode FROM app_search WHERE id=1 LIMIT 1`).Scan(&sDisplay, &sBadgePrefer)
-	_ = d.db.QueryRow(`SELECT play_enabled, list_enabled, source_extract_priority FROM app_smart WHERE id=1 LIMIT 1`).Scan(&smartPlay, &smartList, &smartPriority)
+	_ = d.db.QueryRow(`SELECT display_mode FROM app_search WHERE id=1 LIMIT 1`).Scan(&sDisplay)
+	_ = d.db.QueryRow(`SELECT source_extract_priority FROM app_smart WHERE id=1 LIMIT 1`).Scan(&smartPriority)
 	_ = d.db.QueryRow(`SELECT enabled, auto_select FROM app_goproxy WHERE id=1 LIMIT 1`).Scan(&gEnabled, &gAuto)
 	_ = d.db.QueryRow(`SELECT api_token, api_base, img_base, language, region, include_adult FROM app_tmdb WHERE id=1 LIMIT 1`).Scan(&tToken, &tAPIBase, &tImgBase, &tLang, &tRegion, &tAdult)
 	_ = d.db.QueryRow(`SELECT active FROM app_catpawopen WHERE id=1 LIMIT 1`).Scan(&cActive)
@@ -70,9 +65,6 @@ func (d *DB) ReadAppConfig() (AppConfig, error) {
 		VideoSourceAPIBase:        vsAPIBase.String,
 		VideoSourceSearchCoverSite: vsCover.String,
 		SearchDisplayMode:         defaultIfEmpty(sDisplay.String, "sites"),
-		SearchBadgePreferEpisode:  sBadgePrefer.Int64 != 0,
-		SmartPlayEnabled:          smartPlay.Int64 != 0,
-		SmartListEnabled:          smartList.Int64 != 0,
 		SmartSourceExtractPriority: defaultIfEmpty(smartPriority.String, "无"),
 		GoProxyEnabled:            gEnabled.Int64 != 0,
 		GoProxyAutoSelect:         gAuto.Int64 != 0,
@@ -129,20 +121,18 @@ func (d *DB) UpdateAppConfig(update func(*AppConfig)) error {
 	`, strings.TrimSpace(cfg.VideoSourceAPIBase), strings.TrimSpace(cfg.VideoSourceSearchCoverSite), now)
 
 	_, _ = tx.Exec(`
-		INSERT INTO app_search(id, display_mode, badge_prefer_episode, updated_at)
-		VALUES(1, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET display_mode=excluded.display_mode, badge_prefer_episode=excluded.badge_prefer_episode, updated_at=excluded.updated_at
-	`, strings.TrimSpace(cfg.SearchDisplayMode), bool01Int(cfg.SearchBadgePreferEpisode), now)
+		INSERT INTO app_search(id, display_mode, updated_at)
+		VALUES(1, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET display_mode=excluded.display_mode, updated_at=excluded.updated_at
+	`, strings.TrimSpace(cfg.SearchDisplayMode), now)
 
 	_, _ = tx.Exec(`
-		INSERT INTO app_smart(id, play_enabled, list_enabled, source_extract_priority, updated_at)
-		VALUES(1, ?, ?, ?, ?)
+		INSERT INTO app_smart(id, source_extract_priority, updated_at)
+		VALUES(1, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
-		  play_enabled=excluded.play_enabled,
-		  list_enabled=excluded.list_enabled,
 		  source_extract_priority=excluded.source_extract_priority,
 		  updated_at=excluded.updated_at
-	`, bool01Int(cfg.SmartPlayEnabled), bool01Int(cfg.SmartListEnabled), strings.TrimSpace(cfg.SmartSourceExtractPriority), now)
+	`, strings.TrimSpace(cfg.SmartSourceExtractPriority), now)
 
 	_, _ = tx.Exec(`
 		INSERT INTO app_goproxy(id, enabled, auto_select, updated_at)

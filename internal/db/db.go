@@ -560,13 +560,10 @@ func (d *DB) ensureSchema() error {
 					CREATE TABLE IF NOT EXISTS app_search (
 					  id INTEGER PRIMARY KEY CHECK (id = 1),
 					  display_mode TEXT NOT NULL DEFAULT 'sites',
-					  badge_prefer_episode INTEGER NOT NULL DEFAULT 0,
 					  updated_at INTEGER NOT NULL
 					);
 					CREATE TABLE IF NOT EXISTS app_smart (
 					  id INTEGER PRIMARY KEY CHECK (id = 1),
-					  play_enabled INTEGER NOT NULL DEFAULT 1,
-					  list_enabled INTEGER NOT NULL DEFAULT 1,
 					  source_extract_priority TEXT NOT NULL DEFAULT '无',
 					  updated_at INTEGER NOT NULL
 					);
