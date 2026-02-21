@@ -99,3 +99,15 @@ func normalizeMountPath(value string) string {
 	}
 	return p
 }
+
+func readStrJSONBody(body map[string]any, key string) string {
+	if body == nil || key == "" {
+		return ""
+	}
+	v, ok := body[key]
+	if !ok || v == nil {
+		return ""
+	}
+	s, _ := v.(string)
+	return strings.TrimSpace(s)
+}

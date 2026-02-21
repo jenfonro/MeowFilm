@@ -929,6 +929,17 @@ func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle st
 	}
 
 	qKey := embyNormalizeAggKey(searchTitle)
+	blocked := map[string]struct{}{}
+	if rows, _ := database.ListSmartMatchBlockItems(searchTitle); len(rows) > 0 {
+		for _, it := range rows {
+			sk := strings.TrimSpace(it.SiteKey)
+			vid := strings.TrimSpace(it.VideoID)
+			if sk == "" || vid == "" {
+				continue
+			}
+			blocked[sk+"::"+vid] = struct{}{}
+		}
+	}
 
 	// Search across sites concurrently; Emby smart-play should not block on the slowest site.
 	type task struct {
@@ -983,6 +994,9 @@ func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle st
 			for _, it := range items {
 				name := strings.TrimSpace(it.Name)
 				if strings.TrimSpace(it.ID) == "" || name == "" {
+					continue
+				}
+				if _, ok := blocked[tt.Site.Key+"::"+strings.TrimSpace(it.ID)]; ok {
 					continue
 				}
 				key := embyNormalizeAggKey(name)
