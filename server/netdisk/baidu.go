@@ -677,7 +677,7 @@ func baiduShareListAllFiles(surl string, pwd string, baseCookie string) (cookie 
 	pushFile := func(it map[string]any, currentDir string) error {
 		fsid := getFsid(it)
 		name := getName(it)
-		if fsid == "" || name == "" {
+		if fsid == "" || name == "" || !isSupportedVideoFilename(name) {
 			return nil
 		}
 		dir := strings.TrimSpace(currentDir)
@@ -729,7 +729,7 @@ func baiduShareListAllFiles(surl string, pwd string, baseCookie string) (cookie 
 		}
 		if baiduIsDirItem(it) {
 			rootDirs = append(rootDirs, it)
-		} else if getFsid(it) != "" {
+		} else if getFsid(it) != "" && isSupportedVideoFilename(getName(it)) {
 			rootFiles++
 		}
 	}

@@ -700,7 +700,9 @@ func UCList(database *db.DB, flag string, passcode string) (string, string, erro
 			if ucShareIsDirItem(it) {
 				dirs = append(dirs, it)
 			} else {
-				files = append(files, it)
+				if it != nil && isSupportedVideoFilename(strings.TrimSpace(ucShareItemName(it))) {
+					files = append(files, it)
+				}
 			}
 		}
 		if len(files) == 0 && len(dirs) == 1 && len(detail.List) < ucListPageSize {
@@ -783,7 +785,7 @@ func UCList(database *db.DB, flag string, passcode string) (string, string, erro
 				fid := ucShareItemFid(it)
 				fidToken := ucShareItemFidToken(it)
 				name := ucShareItemName(it)
-				if fid == "" || fidToken == "" || name == "" {
+				if fid == "" || fidToken == "" || name == "" || !isSupportedVideoFilename(name) {
 					continue
 				}
 				if _, ok := seenFile[fid]; ok {
