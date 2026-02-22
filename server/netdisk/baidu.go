@@ -554,10 +554,10 @@ func baiduItemPath(it map[string]any) string {
 	return strings.TrimSpace(toString(it["server_path"]))
 }
 
-func baiduShareListAllFiles(surl string, pwd string, baseCookie string) (cookie string, files []map[string]any, shareID string, uk string, err error) {
+func baiduShareListAllFiles(surl string, pwd string, baseCookie string) (cookie string, files []map[string]any, shareID string, uk string, rootPrefix string, err error) {
 	cookie, rootData, shareID, uk, err := baiduShareListRoot(surl, pwd, baseCookie)
 	if err != nil {
-		return cookie, nil, "", "", err
+		return cookie, nil, "", "", "", err
 	}
 	initial := baiduGetShareListArray(rootData)
 
@@ -744,16 +744,16 @@ func baiduShareListAllFiles(surl string, pwd string, baseCookie string) (cookie 
 		if strings.HasPrefix(p, "/") {
 			effectiveRootPrefix = p
 			if err := pushDir(p, 0); err != nil {
-				return cookie, nil, shareID, uk, err
+				return cookie, nil, shareID, uk, "", err
 			}
 		} else {
 			if err := handleList(initial, "/", 0); err != nil {
-				return cookie, nil, shareID, uk, err
+				return cookie, nil, shareID, uk, "", err
 			}
 		}
 	} else {
 		if err := handleList(initial, "/", 0); err != nil {
-			return cookie, nil, shareID, uk, err
+			return cookie, nil, shareID, uk, "", err
 		}
 	}
 
@@ -762,11 +762,11 @@ func baiduShareListAllFiles(surl string, pwd string, baseCookie string) (cookie 
 		queue = queue[1:]
 		data, err := baiduShareListDir(surl, cur.dir, cookie)
 		if err != nil {
-			return cookie, nil, shareID, uk, err
+			return cookie, nil, shareID, uk, "", err
 		}
 		list := baiduGetShareListArray(data)
 		if err := handleList(list, cur.dir, cur.depth); err != nil {
-			return cookie, nil, shareID, uk, err
+			return cookie, nil, shareID, uk, "", err
 		}
 	}
 
@@ -779,7 +779,13 @@ func baiduShareListAllFiles(surl string, pwd string, baseCookie string) (cookie 
 			"__suffix_name":   sanitizeToken(f.RealName),
 		})
 	}
-	return cookie, parts, shareID, uk, nil
+	rootPrefix = "根目录"
+	if strings.TrimSpace(effectiveRootPrefix) != "" {
+		if seg := strings.Trim(strings.TrimSpace(effectiveRootPrefix), "/"); seg != "" {
+			rootPrefix = seg
+		}
+	}
+	return cookie, parts, shareID, uk, rootPrefix, nil
 }
 
 func BaiduList(database *db.DB, flag string, pwd string) (string, string, error) {
@@ -792,7 +798,7 @@ func BaiduList(database *db.DB, flag string, pwd string) (string, string, error)
 	if baseCookie == "" {
 		return "", surl, errors.New("missing baidu cookie (pan_login_settings[\"baidu\"].cookie)")
 	}
-	_, files, shareID, uk, err := baiduShareListAllFiles(surl, pwd, baseCookie)
+	_, files, shareID, uk, rootPrefix, err := baiduShareListAllFiles(surl, pwd, baseCookie)
 	if err != nil {
 		return "", surl, err
 	}
@@ -808,6 +814,7 @@ func BaiduList(database *db.DB, flag string, pwd string) (string, string, error)
 		if dirDisplay == "" {
 			dirDisplay = "/"
 		}
+		dirDisplay = prefixRootDirDisplay(dirDisplay, rootPrefix)
 		if suffixName == "" {
 			suffixName = name
 		}

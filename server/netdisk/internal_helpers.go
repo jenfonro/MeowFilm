@@ -2,8 +2,8 @@ package netdisk
 
 import (
 	"fmt"
-	"net/http"
 	"encoding/json"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -62,4 +62,60 @@ func toString(v any) string {
 	default:
 		return strings.TrimSpace(fmt.Sprint(x))
 	}
+}
+
+func sanitizePanDisplaySegment(value string) string {
+	s := strings.TrimSpace(value)
+	if s == "" {
+		return ""
+	}
+	s = strings.ReplaceAll(s, "\\", "/")
+	s = strings.ReplaceAll(s, "#", " ")
+	s = strings.ReplaceAll(s, "$", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\x00", "")
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > 120 {
+		s = s[:120]
+	}
+	return s
+}
+
+func sanitizePanRootPrefix(prefix string) string {
+	raw := strings.TrimSpace(prefix)
+	if raw == "" {
+		return ""
+	}
+	raw = strings.ReplaceAll(raw, "\\", "/")
+	parts := strings.Split(raw, "/")
+	segs := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if seg := sanitizePanDisplaySegment(p); seg != "" && seg != "." && seg != ".." {
+			segs = append(segs, strings.Trim(seg, "/"))
+		}
+	}
+	return strings.Join(segs, "/")
+}
+
+func prefixRootDirDisplay(dirDisplay string, rootPrefix string) string {
+	root := sanitizePanRootPrefix(rootPrefix)
+	if root == "" {
+		return dirDisplay
+	}
+	d := strings.TrimSpace(dirDisplay)
+	if d == "" {
+		d = "/"
+	}
+	if d == "/" {
+		return "/" + root
+	}
+	if strings.HasPrefix(d, "/") {
+		return "/" + root + d
+	}
+	return "/" + root + "/" + strings.TrimLeft(d, "/")
 }

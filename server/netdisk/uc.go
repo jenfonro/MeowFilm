@@ -688,6 +688,7 @@ func UCList(database *db.DB, flag string, passcode string) (string, string, erro
 	)
 
 	rootFid := "0"
+	rootPrefixSegs := []string{}
 	for i := 0; i < ucMaxVirtualRootHop; i++ {
 		detail, err := ucShareDetailPageFetch(shareID, stoken, rootFid, 1, ucListPageSize, &cookie)
 		if err != nil {
@@ -707,10 +708,17 @@ func UCList(database *db.DB, flag string, passcode string) (string, string, erro
 			if next == "" || next == rootFid {
 				break
 			}
+			if n := strings.TrimSpace(ucShareItemName(dirs[0])); n != "" {
+				rootPrefixSegs = append(rootPrefixSegs, n)
+			}
 			rootFid = next
 			continue
 		}
 		break
+	}
+	rootPrefix := "根目录"
+	if len(rootPrefixSegs) > 0 {
+		rootPrefix = strings.Join(rootPrefixSegs, "/")
 	}
 
 	type dirItem struct {
@@ -791,6 +799,7 @@ func UCList(database *db.DB, flag string, passcode string) (string, string, erro
 				if len(cur.pathSegs) > 0 {
 					dirPath = "/" + strings.Join(cur.pathSegs, "/")
 				}
+				dirPath = prefixRootDirDisplay(dirPath, rootPrefix)
 				id := shareID + "*" + stoken + "*" + fid + "*" + fidToken + "***" + name
 				parts = append(parts, dirPath+"$"+id)
 				newCount++
