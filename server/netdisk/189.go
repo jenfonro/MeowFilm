@@ -1211,6 +1211,10 @@ func Tianyi189List(database *db.DB, flag string, accessCode string) (vodPlayURL 
 	}
 	rootFileID := strings.TrimSpace(toString(info.FileId))
 	sm := strings.TrimSpace(toString(info.ShareMode))
+	rootPrefix := strings.TrimSpace(info.FileName)
+	if rootPrefix == "" {
+		rootPrefix = "根目录"
+	}
 	if shareID == "" {
 		if ac == "" {
 			return "", "", "", errors.New("need accessCode: missing shareId")
@@ -1332,11 +1336,16 @@ func Tianyi189List(database *db.DB, flag string, accessCode string) (vodPlayURL 
 			fileName = "file"
 		}
 		id := rootFileID + "*" + shareID + "*" + fileName
-		return "/$" + id, shareID, sc, nil
+		return prefixRootDirDisplay("/", rootPrefix) + "$" + id, shareID, sc, nil
 	}
 	effectiveRootID := rootFileID
 	if rootFiles == 0 && len(rootFolders) == 1 && rootTotal > 0 && rootTotal <= len(rootFolders) {
 		effectiveRootID = rootFolders[0].fileID
+		if strings.TrimSpace(rootFolders[0].path) != "" {
+			if seg := strings.Trim(strings.TrimSpace(rootFolders[0].path), "/"); seg != "" {
+				rootPrefix = seg
+			}
+		}
 	}
 
 	queue := []dirItem{{fileID: effectiveRootID, path: "/"}}
@@ -1397,7 +1406,7 @@ func Tianyi189List(database *db.DB, flag string, accessCode string) (vodPlayURL 
 					continue
 				}
 				id := idStr + "*" + shareID + "*" + name
-				display := ensureLeadingSlash(cur.path)
+				display := prefixRootDirDisplay(ensureLeadingSlash(cur.path), rootPrefix)
 				parts = append(parts, display+"$"+id)
 				if len(parts) >= maxItems {
 					return strings.Join(parts, "#"), shareID, sc, errors.New("tianyi share too large (exceeded max items)")

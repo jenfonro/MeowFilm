@@ -869,6 +869,7 @@ func QuarkList(database *db.DB, flag string, passcode string) (string, string, e
 	const maxDepth = 20
 
 	startFid := "0"
+	rootPrefix := "根目录"
 	if rootItems, e := quarkShareListDirAllPages(shareID, stoken, "0", cookie, 2, pageSize); e == nil {
 		rootDirs := []map[string]any{}
 		rootFileCount := 0
@@ -891,6 +892,9 @@ func QuarkList(database *db.DB, flag string, passcode string) (string, string, e
 		if rootFileCount == 0 && len(rootDirs) == 1 {
 			if fid := quarkShareItemFid(rootDirs[0]); fid != "" {
 				startFid = fid
+				if n := strings.TrimSpace(quarkShareItemName(rootDirs[0])); n != "" {
+					rootPrefix = n
+				}
 			}
 		}
 	}
@@ -953,6 +957,7 @@ func QuarkList(database *db.DB, flag string, passcode string) (string, string, e
 			if len(pathSegs) > 0 {
 				display = "/" + strings.Join(pathSegs, "/")
 			}
+			display = prefixRootDirDisplay(display, rootPrefix)
 			id := shareID + "*" + stoken + "*" + fid + "*" + fidToken
 			if strings.TrimSpace(name) != "" {
 				id = id + "***" + strings.TrimSpace(name)
