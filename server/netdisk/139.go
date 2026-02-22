@@ -981,7 +981,12 @@ func resolveLogicalRoot(linkID string, pCaID string, eNum int, maxPages int, pas
 		if err != nil {
 			return "", nil, err
 		}
-		files := page.CO
+		files := []pan139FileItem{}
+		for _, f := range page.CO {
+			if isSupportedVideoFilename(strings.TrimSpace(f.Name)) {
+				files = append(files, f)
+			}
+		}
 		dirs := page.CA
 		if len(files) == 0 && len(dirs) == 1 {
 			if n := strings.TrimSpace(dirs[0].Name); n != "" {
@@ -1028,6 +1033,9 @@ func collectShareFilesRecursive(linkID string, pCaID string, dirParts []string, 
 
 	out := make([]pan139ShareFile, 0, len(page.CO)+16)
 	for _, it := range page.CO {
+		if !isSupportedVideoFilename(strings.TrimSpace(it.Name)) {
+			continue
+		}
 		out = append(out, pan139ShareFile{
 			Name:    it.Name,
 			CoID:    it.CoID,

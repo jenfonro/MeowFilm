@@ -119,3 +119,24 @@ func prefixRootDirDisplay(dirDisplay string, rootPrefix string) string {
 	}
 	return "/" + root + "/" + strings.TrimLeft(d, "/")
 }
+
+func isSupportedVideoFilename(name string) bool {
+	s := strings.ToLower(strings.TrimSpace(name))
+	if s == "" {
+		return false
+	}
+	switch {
+	case strings.HasSuffix(s, ".mp4"):
+		return true
+	case strings.HasSuffix(s, ".mkv"):
+		return true
+	case strings.HasSuffix(s, ".mov"):
+		return true
+	case strings.HasSuffix(s, ".iso"):
+		return true
+	case strings.HasSuffix(s, ".flv"):
+		return true
+	default:
+		return false
+	}
+}

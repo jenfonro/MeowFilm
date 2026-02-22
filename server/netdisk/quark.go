@@ -885,7 +885,8 @@ func QuarkList(database *db.DB, flag string, passcode string) (string, string, e
 			}
 			fid := quarkShareItemFid(it)
 			fidToken := quarkShareItemFidToken(it)
-			if fid != "" && fidToken != "" {
+			name := strings.TrimSpace(quarkShareItemName(it))
+			if fid != "" && fidToken != "" && isSupportedVideoFilename(name) {
 				rootFileCount++
 			}
 		}
@@ -950,7 +951,7 @@ func QuarkList(database *db.DB, flag string, passcode string) (string, string, e
 			fid := quarkShareItemFid(it)
 			fidToken := quarkShareItemFidToken(it)
 			name := quarkShareItemName(it)
-			if fid == "" || fidToken == "" || name == "" {
+			if fid == "" || fidToken == "" || name == "" || !isSupportedVideoFilename(name) {
 				continue
 			}
 			display := "/"

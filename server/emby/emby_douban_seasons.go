@@ -128,7 +128,7 @@ func doubanParseEpisodeCountFromInfo(text string) int {
 			return n
 		}
 	}
-	reUp := regexp.MustCompile(`更新至\s*(\d{1,4})\s*集`)
+	reUp := regexp.MustCompile(`更新至\s*第?\s*(\d{1,4})\s*(?:集|话)`)
 	if m := reUp.FindStringSubmatch(s); len(m) >= 2 {
 		if n, err := strconv.Atoi(m[1]); err == nil && n > 0 {
 			return n
@@ -136,6 +136,20 @@ func doubanParseEpisodeCountFromInfo(text string) int {
 	}
 	reCnt := regexp.MustCompile(`(\d{1,4})\s*集`)
 	if m := reCnt.FindStringSubmatch(s); len(m) >= 2 {
+		if n, err := strconv.Atoi(m[1]); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 0
+}
+
+func doubanParseUpdatedEpisodeCountFromInfo(text string) int {
+	s := strings.TrimSpace(text)
+	if s == "" {
+		return 0
+	}
+	reUp := regexp.MustCompile(`更新至\s*第?\s*(\d{1,4})\s*(?:集|话)`)
+	if m := reUp.FindStringSubmatch(s); len(m) >= 2 {
 		if n, err := strconv.Atoi(m[1]); err == nil && n > 0 {
 			return n
 		}
@@ -379,19 +393,21 @@ func doubanProbeSeasons(database *db.DB, tmdbID int, keyword string) ([]embyTMDB
 			if err := json.Unmarshal(b, &d); err != nil {
 				return
 			}
-			epCount := 0
+			epCount := doubanParseUpdatedEpisodeCountFromInfo(d.EpisodesInfo)
 			switch vv := d.EpisodesCount.(type) {
 			case float64:
-				if vv > 0 {
+				if epCount <= 0 && vv > 0 {
 					epCount = int(vv)
 				}
 			case int:
-				if vv > 0 {
+				if epCount <= 0 && vv > 0 {
 					epCount = vv
 				}
 			case string:
-				if n, err := strconv.Atoi(strings.TrimSpace(vv)); err == nil && n > 0 {
-					epCount = n
+				if epCount <= 0 {
+					if n, err := strconv.Atoi(strings.TrimSpace(vv)); err == nil && n > 0 {
+						epCount = n
+					}
 				}
 			}
 			if epCount <= 0 {
