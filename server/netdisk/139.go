@@ -967,22 +967,30 @@ func getOutLinkInfoV6AllPages(linkID string, pCaID string, eNum int, maxPages in
 	return out, nil
 }
 
-func resolveLogicalRoot(linkID string, pCaID string, eNum int, maxPages int, passcode string) (string, error) {
+func resolveLogicalRoot(linkID string, pCaID string, eNum int, maxPages int, passcode string) (string, []string, error) {
 	cur := strings.TrimSpace(pCaID)
 	if cur == "" {
 		cur = "root"
 	}
 	if cur != "root" {
-		return cur, nil
+		return cur, nil, nil
 	}
+	rootPrefixSegs := []string{}
 	for i := 0; i < 10; i++ {
 		page, err := getOutLinkInfoV6AllPages(linkID, cur, eNum, maxPages, passcode)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		files := page.CO
 		dirs := page.CA
 		if len(files) == 0 && len(dirs) == 1 {
+			if n := strings.TrimSpace(dirs[0].Name); n != "" {
+				rootPrefixSegs = append(rootPrefixSegs, n)
+			} else if p := strings.TrimSpace(dirs[0].Path); p != "" {
+				if seg := strings.Trim(p, "/"); seg != "" {
+					rootPrefixSegs = append(rootPrefixSegs, seg)
+				}
+			}
 			next := strings.TrimSpace(dirs[0].Path)
 			if next == "" || next == cur {
 				break
@@ -992,7 +1000,7 @@ func resolveLogicalRoot(linkID string, pCaID string, eNum int, maxPages int, pas
 		}
 		break
 	}
-	return cur, nil
+	return cur, rootPrefixSegs, nil
 }
 
 func collectShareFilesRecursive(linkID string, pCaID string, dirParts []string, eNum int, maxPages int, passcode string) ([]pan139ShareFile, error) {
@@ -1076,9 +1084,13 @@ func Yun139List(_ *db.DB, flag string, passcode string) (string, string, error) 
 	if linkID == "" {
 		return "", "", errors.New("missing/invalid flag (expected: 逸动-<linkID>)")
 	}
-	start, err := resolveLogicalRoot(linkID, "root", 200, 50, passcode)
+	start, rootPrefixSegs, err := resolveLogicalRoot(linkID, "root", 200, 50, passcode)
 	if err != nil {
 		return "", linkID, err
+	}
+	rootPrefix := "根目录"
+	if len(rootPrefixSegs) > 0 {
+		rootPrefix = strings.Join(rootPrefixSegs, "/")
 	}
 	files, err := collectShareFilesRecursive(linkID, start, []string{}, 200, 50, passcode)
 	if err != nil {
@@ -1094,7 +1106,7 @@ func Yun139List(_ *db.DB, flag string, passcode string) (string, string, error) 
 		if dirPath == "" {
 			dirPath = "/"
 		}
-		parts = append(parts, dirPath+"$"+f.CoID+"*"+linkID+"***"+strings.TrimSpace(f.Name))
+		parts = append(parts, prefixRootDirDisplay(dirPath, rootPrefix)+"$"+f.CoID+"*"+linkID+"***"+strings.TrimSpace(f.Name))
 	}
 	return strings.Join(parts, "#"), linkID, nil
 }
