@@ -1320,7 +1320,9 @@ func Tianyi189List(database *db.DB, flag string, accessCode string) (vodPlayURL 
 				rootFolders = append(rootFolders, dirItem{fileID: idStr, path: joinPath("/", name)})
 				continue
 			}
-			rootFiles += 1
+			if isSupportedVideoFilename(name) {
+				rootFiles += 1
+			}
 		}
 		if len(itemsFile)+len(itemsFolder) < pageSize {
 			break
@@ -1334,6 +1336,9 @@ func Tianyi189List(database *db.DB, flag string, accessCode string) (vodPlayURL 
 		fileName := strings.TrimSpace(info.FileName)
 		if fileName == "" {
 			fileName = "file"
+		}
+		if !isSupportedVideoFilename(fileName) {
+			return "", shareID, sc, nil
 		}
 		id := rootFileID + "*" + shareID + "*" + fileName
 		return prefixRootDirDisplay("/", rootPrefix) + "$" + id, shareID, sc, nil
@@ -1403,6 +1408,9 @@ func Tianyi189List(database *db.DB, flag string, accessCode string) (vodPlayURL 
 					}
 					seenDir[idStr] = struct{}{}
 					queue = append(queue, dirItem{fileID: idStr, path: joinPath(cur.path, name)})
+					continue
+				}
+				if !isSupportedVideoFilename(name) {
 					continue
 				}
 				id := idStr + "*" + shareID + "*" + name
