@@ -7,7 +7,6 @@ import (
 
 const (
 	embyPathPrefix       = "/emby"
-	embyLegacyPathPrefix = "/jellyfin"
 	embyMediaPrefix      = "/emby/media/"
 )
 
@@ -18,8 +17,6 @@ func embyTrimAPIPrefix(path string) string {
 	}
 	if p == embyPathPrefix || strings.HasPrefix(p, embyPathPrefix+"/") {
 		p = strings.TrimPrefix(p, embyPathPrefix)
-	} else if p == embyLegacyPathPrefix || strings.HasPrefix(p, embyLegacyPathPrefix+"/") {
-		p = strings.TrimPrefix(p, embyLegacyPathPrefix)
 	}
 	if p == "" {
 		p = "/"

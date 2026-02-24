@@ -56,7 +56,7 @@ func handleEmbyVideoStream(w http.ResponseWriter, r *http.Request, database *db.
 		return
 	}
 
-	playURL, headers, err := embyResolvePlaybackFromTMDB(database, u, parsed)
+	playURL, headers, _, err := embyResolvePlaybackFromTMDB(database, u, parsed)
 	if err != nil {
 		embyBadGateway(w, err)
 		return

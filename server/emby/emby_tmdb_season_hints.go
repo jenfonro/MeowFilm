@@ -7,7 +7,7 @@ import "github.com/jenfonro/meowfilm/internal/db"
 //
 // It returns the season hints found (may be empty) and whether probing succeeded.
 func ProbeDoubanTMDBSeasonHints(database *db.DB, tmdbID int, keyword string) ([]db.TMDBSeasonHint, bool) {
-	seasons, ok := doubanProbeSeasons(database, tmdbID, keyword)
+	seasons, ok := doubanProbeSeasons(database, tmdbID, keyword, 0)
 	if !ok || len(seasons) == 0 {
 		return nil, ok
 	}

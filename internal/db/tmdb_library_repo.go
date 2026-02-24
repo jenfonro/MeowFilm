@@ -316,7 +316,7 @@ func (d *DB) ReadTMDBDetailForAPI(tmdbType string, tmdbID int, lang string) (*TM
 	sort.Slice(out.Seasons, func(i, j int) bool { return out.Seasons[i].SeasonNumber < out.Seasons[j].SeasonNumber })
 
 	// Derived stats (no extra storage needed)
-	total := 0
+	totalFromSeasons := 0
 	latestSeason := 0
 	latestEpisode := 0
 	for _, s := range out.Seasons {
@@ -324,11 +324,16 @@ func (d *DB) ReadTMDBDetailForAPI(tmdbType string, tmdbID int, lang string) (*TM
 			continue
 		}
 		if s.EpisodeCount > 0 {
-			total += s.EpisodeCount
+			totalFromSeasons += s.EpisodeCount
 		}
 	}
 	// If episodes table exists, use it for a better latest ep (based on aired air_date).
-	today := time.Now().UTC().Format("2006-01-02")
+	// Compare by CN date only (avoid UTC day-shift causing "today" episodes to be excluded).
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil || loc == nil {
+		loc = time.FixedZone("CST", 8*3600)
+	}
+	today := time.Now().In(loc).Format("2006-01-02")
 	var ls, le sql.NullInt64
 	_ = d.db.QueryRow(`
 		SELECT season_number, episode_number
@@ -357,6 +362,51 @@ func (d *DB) ReadTMDBDetailForAPI(tmdbType string, tmdbID int, lang string) (*TM
 			latestEpisode = int(le.Int64)
 		}
 	}
+
+	// Prefer episode-derived totals when available (season meta can be stale for airing shows).
+	totalFromEpisodes := 0
+	if rows, err := d.db.Query(`
+		SELECT season_number, MAX(episode_number)
+		FROM tmdb_episode
+		WHERE media_id = ?
+		  AND season_number > 0
+		  AND episode_number > 0
+		GROUP BY season_number
+	`, mediaRowID); err == nil && rows != nil {
+		defer rows.Close()
+		for rows.Next() {
+			var seasonNo sql.NullInt64
+			var maxEp sql.NullInt64
+			_ = rows.Scan(&seasonNo, &maxEp)
+			if maxEp.Valid && maxEp.Int64 > 0 {
+				totalFromEpisodes += int(maxEp.Int64)
+			}
+		}
+	}
+
+	// Guard: total should never be lower than the currently known latest aired episode (global minimum).
+	minTotalByLatest := 0
+	if latestSeason > 0 && latestEpisode > 0 {
+		sumPrev := 0
+		for _, s := range out.Seasons {
+			if s.SeasonNumber <= 0 || s.SeasonNumber >= latestSeason {
+				continue
+			}
+			if s.EpisodeCount > 0 {
+				sumPrev += s.EpisodeCount
+			}
+		}
+		minTotalByLatest = sumPrev + latestEpisode
+	}
+
+	total := totalFromSeasons
+	if totalFromEpisodes > total {
+		total = totalFromEpisodes
+	}
+	if minTotalByLatest > total {
+		total = minTotalByLatest
+	}
+
 	out.EpisodeCount = total
 	out.LatestSeason = latestSeason
 	out.LatestEpisode = latestEpisode

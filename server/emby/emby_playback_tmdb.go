@@ -7,9 +7,9 @@ import (
 	"github.com/jenfonro/meowfilm/internal/db"
 )
 
-func embyResolvePlaybackFromTMDB(database *db.DB, u *embyUser, parsed *embyItemID) (finalURL string, finalHeaders map[string]string, err error) {
+func embyResolvePlaybackFromTMDB(database *db.DB, u *embyUser, parsed *embyItemID) (finalURL string, finalHeaders map[string]string, picked *smartPlaybackPickedMeta, err error) {
 	if parsed == nil {
-		return "", nil, errors.New("invalid item")
+		return "", nil, nil, errors.New("invalid item")
 	}
 	req := smartPlaybackRequest{
 		Kind:    strings.TrimSpace(parsed.Kind),
