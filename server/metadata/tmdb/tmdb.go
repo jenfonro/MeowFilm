@@ -101,6 +101,27 @@ var tmdbDetailCache = struct {
 const tmdbDetailCacheTTL = 10 * time.Minute
 const tmdbDetailCacheTTLEnded = 24 * time.Hour
 const tmdbDetailCacheMaxEntries = 2000
+const tmdbSoonAirDays = 0 // only include episodes scheduled for "today" (local CN date)
+
+func tmdbCNLocation() *time.Location {
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err == nil && loc != nil {
+		return loc
+	}
+	// Fallback: fixed UTC+8
+	return time.FixedZone("CST", 8*3600)
+}
+
+func tmdbCNDayStart(t time.Time) time.Time {
+	loc := tmdbCNLocation()
+	tt := t.In(loc)
+	y, m, d := tt.Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, loc)
+}
+
+func tmdbCNDayStartPlus(t time.Time, days int) time.Time {
+	return tmdbCNDayStart(t).AddDate(0, 0, days)
+}
 
 func isTMDBAirDateInFuture(dateText string, now time.Time) bool {
 	s := strings.TrimSpace(dateText)
@@ -111,11 +132,10 @@ func isTMDBAirDateInFuture(dateText string, now time.Time) bool {
 	if err != nil {
 		return false
 	}
-	// Compare by date only.
-	n := now
-	y, m, d := n.Date()
-	today := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
-	return t.After(today)
+	loc := tmdbCNLocation()
+	y, m, d := t.Date()
+	airDay := time.Date(y, m, d, 0, 0, 0, 0, loc)
+	return airDay.After(tmdbCNDayStart(now))
 }
 
 func isTMDBAirDateAiredOrToday(dateText string, now time.Time) bool {
@@ -127,14 +147,31 @@ func isTMDBAirDateAiredOrToday(dateText string, now time.Time) bool {
 	if err != nil {
 		return false
 	}
-	y, m, d := now.UTC().Date()
-	today := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
-	return !t.After(today)
+	loc := tmdbCNLocation()
+	y, m, d := t.Date()
+	airDay := time.Date(y, m, d, 0, 0, 0, 0, loc)
+	return !airDay.After(tmdbCNDayStart(now))
+}
+
+func isTMDBAirDateNotAfter(dateText string, cutoff time.Time) bool {
+	s := strings.TrimSpace(dateText)
+	if s == "" {
+		return false
+	}
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return false
+	}
+	loc := tmdbCNLocation()
+	y, m, d := t.Date()
+	airDay := time.Date(y, m, d, 0, 0, 0, 0, loc)
+	return !airDay.After(tmdbCNDayStart(cutoff))
 }
 
 func pickLatestAiredFromSeasons(seasons []tmdbTVSeason, now time.Time) (int, int) {
 	bestSeason := 0
 	bestEpisodes := 0
+	cutoff := tmdbCNDayStartPlus(now, tmdbSoonAirDays)
 	for _, s := range seasons {
 		if s.SeasonNumber <= 0 || s.EpisodeCount <= 0 {
 			continue
@@ -143,7 +180,7 @@ func pickLatestAiredFromSeasons(seasons []tmdbTVSeason, now time.Time) (int, int
 		if air == "" {
 			continue
 		}
-		if !isTMDBAirDateAiredOrToday(air, now) {
+		if !isTMDBAirDateNotAfter(air, cutoff) {
 			continue
 		}
 		if s.SeasonNumber > bestSeason {
@@ -201,7 +238,7 @@ func probeLatestAiredEpisodeFromSeasons(database *db.DB, tmdbID int, seasons []t
 	if database == nil || tmdbID <= 0 || len(seasons) == 0 {
 		return 0, 0
 	}
-	today := now.UTC().Format("2006-01-02")
+	cutoff := tmdbCNDayStartPlus(now, tmdbSoonAirDays).Format("2006-01-02")
 
 	type row struct {
 		no   int
@@ -213,7 +250,7 @@ func probeLatestAiredEpisodeFromSeasons(database *db.DB, tmdbID int, seasons []t
 			continue
 		}
 		ad := strings.TrimSpace(s.AirDate)
-		if ad == "" || ad > today {
+		if ad == "" || ad > cutoff {
 			continue
 		}
 		list = append(list, row{no: s.SeasonNumber, date: ad})
@@ -251,7 +288,7 @@ func probeLatestAiredEpisodeFromSeasons(database *db.DB, tmdbID int, seasons []t
 		latestEp := 0
 		for _, e := range detail.Episodes {
 			ad := strings.TrimSpace(e.AirDate)
-			if ad == "" || ad > today {
+			if ad == "" || ad > cutoff {
 				continue
 			}
 			if e.EpisodeNumber > latestEp {
@@ -820,7 +857,7 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) (map[s
 		latestSeason := 0
 		latestEpisode := 0
 		if detail.LastEpisodeToAir != nil {
-			if isTMDBAirDateAiredOrToday(detail.LastEpisodeToAir.AirDate, time.Now().UTC()) {
+			if isTMDBAirDateNotAfter(detail.LastEpisodeToAir.AirDate, time.Now().AddDate(0, 0, tmdbSoonAirDays)) {
 				latestSeason = detail.LastEpisodeToAir.SeasonNumber
 				latestEpisode = detail.LastEpisodeToAir.EpisodeNumber
 			}

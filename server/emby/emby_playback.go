@@ -20,6 +20,7 @@ var embyStreams = newEmbyStreamStore()
 type embyPlaybackResolved struct {
 	URL     string
 	Headers map[string]string
+	Picked  *smartPlaybackPickedMeta
 }
 
 var embyPlaybackResolveDedup = cache.NewTTLInflightCache[embyPlaybackResolved](15*time.Second, 4096)
@@ -244,11 +245,11 @@ func handleEmbyPlaybackInfo(w http.ResponseWriter, r *http.Request, database *db
 			p.TMDBID = tid
 		}
 
-		playURL, headers, err := embyResolvePlaybackFromTMDB(database, u, &p)
+		playURL, headers, picked, err := embyResolvePlaybackFromTMDB(database, u, &p)
 		if err != nil {
 			return embyPlaybackResolved{}, err
 		}
-		out := embyPlaybackResolved{URL: strings.TrimSpace(playURL)}
+		out := embyPlaybackResolved{URL: strings.TrimSpace(playURL), Picked: picked}
 		if headers != nil && len(headers) > 0 {
 			cp := make(map[string]string, len(headers))
 			for k, v := range headers {
@@ -271,6 +272,7 @@ func handleEmbyPlaybackInfo(w http.ResponseWriter, r *http.Request, database *db
 	}
 	finalURL := strings.TrimSpace(res.URL)
 	finalHeaders := res.Headers
+	finalPicked := res.Picked
 	debugLog := embyDebugLogEnabled()
 	playSessionID := embyNewHexID()
 	mediaSourceID := embyStableHex32(embyID)
@@ -278,7 +280,24 @@ func handleEmbyPlaybackInfo(w http.ResponseWriter, r *http.Request, database *db
 	container, containerList := embyDetectContainerFromURL(finalURL)
 
 	if debugLog {
-		embyDebugPrintf("[emby][playback] ok item=%s user=%s url=%q container=%s cost=%s", embyID, tvUser, finalURL, container, time.Since(startAt).String())
+		if finalPicked != nil && (strings.TrimSpace(finalPicked.SiteKey) != "" || strings.TrimSpace(finalPicked.PanFlag) != "") {
+			embyDebugPrintf(
+				"[emby][playback] ok item=%s user=%s site=%s(%s) panFlag=%s provider=%s showName=%s rawName=%s url=%q container=%s cost=%s",
+				embyID,
+				tvUser,
+				strings.TrimSpace(finalPicked.SiteKey),
+				strings.TrimSpace(finalPicked.SiteName),
+				strings.TrimSpace(finalPicked.PanFlag),
+				strings.TrimSpace(finalPicked.Provider),
+				strings.TrimSpace(finalPicked.ShowName),
+				strings.TrimSpace(finalPicked.RawName),
+				finalURL,
+				container,
+				time.Since(startAt).String(),
+			)
+		} else {
+			embyDebugPrintf("[emby][playback] ok item=%s user=%s url=%q container=%s cost=%s", embyID, tvUser, finalURL, container, time.Since(startAt).String())
+		}
 	}
 
 	if len(finalHeaders) != 0 {

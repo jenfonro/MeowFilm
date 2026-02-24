@@ -48,9 +48,8 @@ func New(cfg Config) (*Server, error) {
 	mux.Handle("/listdebug", emby.RegexListDebugHandler(database))
 	mux.Handle("/searchdebug", emby.RegexSearchDebugHandler(database))
 	embyAPI := emby.EmbyHandler(database)
-	// Emby is the canonical API surface; keep a compatible legacy alias path.
+	// Emby is the canonical API surface.
 	mux.Handle("/emby/", embyAPI)
-	mux.Handle("/jellyfin/", embyAPI)
 	dashboardAPI := dashboard.Handler(database, authMw)
 	staticHandler := static.Handler(authMw)
 	mux.Handle("/dashboard/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
