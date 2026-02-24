@@ -36,12 +36,12 @@ func embyLoadSiteDetailPans(database *db.DB, u *embyUser, seriesID string) ([]ca
 	}
 	playFrom, playURL := catpawopen.ExtractDetailPlayFromURL(detailRaw)
 	pans := catpawopen.ParsePlaySources(playFrom, playURL)
-	if pans == nil {
-		pans = []catpawopen.Pan{}
-	}
-	if embyIsPanMockEnabled(detailRaw) {
-		pans, _ = embyResolvePanMockDetailPans(database, pans)
-	}
+		if pans == nil {
+			pans = []catpawopen.Pan{}
+		}
+		if embyIsPanMockEnabled(detailRaw) {
+			pans, _ = embyResolvePanMockDetailPans(database, strings.TrimSpace(siteEntry.SiteKey), strings.TrimSpace(siteEntry.SiteName), 0, nil, false, nil, nil, pans)
+		}
 
 	ttl := 30 * time.Minute
 	embySiteDetailCachePut(sid, pans, ttl)

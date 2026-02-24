@@ -27,11 +27,11 @@ func embyFetchSiteDetailPans(database *db.DB, u *embyUser, spiderAPI string, vid
 	}
 	playFrom, playURL := catpawopen.ExtractDetailPlayFromURL(detailRaw)
 	pans := catpawopen.ParsePlaySources(playFrom, playURL)
-	if pans == nil {
-		pans = []catpawopen.Pan{}
+		if pans == nil {
+			pans = []catpawopen.Pan{}
+		}
+		if embyIsPanMockEnabled(detailRaw) {
+			pans, _ = embyResolvePanMockDetailPans(database, "", "", 0, nil, false, nil, nil, pans)
+		}
+		return pans, nil
 	}
-	if embyIsPanMockEnabled(detailRaw) {
-		pans, _ = embyResolvePanMockDetailPans(database, pans)
-	}
-	return pans, nil
-}
