@@ -61,9 +61,9 @@ func (d *DB) ReadAppConfig() (AppConfig, error) {
 
 	cfg := AppConfig{
 		SiteName:                  defaultIfEmpty(siteName.String, "MeowFilm"),
-		DoubanDataProxy:           defaultIfEmpty(dDataProxy.String, "direct"),
+		DoubanDataProxy:           defaultIfEmpty(dDataProxy.String, "server-proxy"),
 		DoubanDataCustom:          dDataCustom.String,
-		DoubanImgProxy:            defaultIfEmpty(dImgProxy.String, "direct-browser"),
+		DoubanImgProxy:            defaultIfEmpty(dImgProxy.String, "server-proxy"),
 		DoubanImgCustom:           dImgCustom.String,
 		VideoSourceAPIBase:        vsAPIBase.String,
 		VideoSourceSearchCoverSite: vsCover.String,

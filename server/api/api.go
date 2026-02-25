@@ -1,6 +1,8 @@
 package api
 
 import (
+	"bytes"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -42,6 +44,15 @@ func panAPINoAuthAllowed(r *http.Request) bool {
 func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/api")
+
+		// Douban API proxy (rexxar v2): frontend uses same params; backend chooses upstream base.
+		if strings.HasPrefix(path, "/douban/rexxar/api/v2/") {
+			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleAPIDoubanRexxarProxy(w, r, database)
+			})).ServeHTTP(w, r)
+			return
+		}
+
 		switch path {
 		case "/home":
 			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -259,8 +270,6 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 
 			// Index page includes Douban browse sections.
 			if page == "index" {
-				settings["doubanDataProxy"] = defaultString(cfg.DoubanDataProxy, "direct")
-				settings["doubanDataCustom"] = cfg.DoubanDataCustom
 				settings["doubanImgProxy"] = defaultString(cfg.DoubanImgProxy, "direct-browser")
 				settings["doubanImgCustom"] = cfg.DoubanImgCustom
 			}
@@ -991,6 +1000,7 @@ func handleAPIDoubanImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	const maxBytes = 15 * 1024 * 1024
+	const doubanReferer = "https://movie.douban.com"
 	raw := strings.TrimSpace(r.URL.Query().Get("url"))
 	if raw == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数无效"})
@@ -1010,37 +1020,161 @@ func handleAPIDoubanImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	applyHeaders := func(req *http.Request, cookie string) {
+		if req == nil {
+			return
+		}
+		// Keep headers minimal; Douban may return 418 if Host/Referer is missing.
+		req.Header = make(http.Header)
+		req.Host = req.URL.Host
+		req.Header.Set("Referer", doubanReferer)
+		req.Header.Set("Cache-Control", "no-cache")
+		if strings.TrimSpace(cookie) != "" {
+			req.Header.Set("Cookie", strings.TrimSpace(cookie))
+		}
+		// Use curl-like headers to avoid EO bot challenge pages (Go default UA is empty).
+		req.Header.Set("User-Agent", "curl/8.5.0")
+		req.Header.Set("Accept", "*/*")
+	}
+
 	client := &http.Client{
 		Timeout: 10 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 5 {
-				return http.ErrUseLastResponse
-			}
-			return nil
-		},
+		// Handle redirects manually to keep headers consistent.
+		CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	req, _ := http.NewRequest(http.MethodGet, parsed.String(), nil)
-	req.Header.Set("User-Agent", "Mozilla/5.0")
-	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
-	req.Header.Set("Referer", "https://movie.douban.com/")
-	resp, err := client.Do(req)
+
+	fetch := func(target *url.URL, cookie string) (*http.Response, []byte, error) {
+		if target == nil {
+			return nil, nil, http.ErrNoLocation
+		}
+		cur := target
+		for i := 0; i < 5; i++ {
+			req, _ := http.NewRequest(http.MethodGet, cur.String(), nil)
+			applyHeaders(req, cookie)
+			resp, err := client.Do(req)
+			if err != nil || resp == nil {
+				if resp != nil && resp.Body != nil {
+					_ = resp.Body.Close()
+				}
+				return nil, nil, err
+			}
+
+			if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+				loc := strings.TrimSpace(resp.Header.Get("Location"))
+				_ = resp.Body.Close()
+				if loc == "" {
+					return resp, []byte{}, nil
+				}
+				next, err := url.Parse(loc)
+				if err != nil {
+					return resp, []byte{}, nil
+				}
+				cur = cur.ResolveReference(next)
+				continue
+			}
+
+			defer resp.Body.Close()
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+			if readErr != nil {
+				return resp, nil, readErr
+			}
+			return resp, body, nil
+		}
+		return nil, nil, http.ErrUseLastResponse
+	}
+
+	isBotHTML := func(resp *http.Response, body []byte) bool {
+		if resp == nil || len(body) == 0 {
+			return false
+		}
+		ct := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Type")))
+		if strings.HasPrefix(ct, "text/html") || strings.Contains(ct, "text/html") {
+			return true
+		}
+		// EO bot challenge script markers.
+		if bytes.Contains(body, []byte("EO_Bot_Ssid")) || bytes.Contains(body, []byte("__tst_status")) {
+			return true
+		}
+		return false
+	}
+
+	parseBotCookies := func(html string) (string, bool) {
+		s := html
+		if s == "" {
+			return "", false
+		}
+		low := strings.ToLower(s)
+		if !strings.Contains(low, "eo_bot_ssid") || !strings.Contains(low, "__tst_status") {
+			return "", false
+		}
+
+		findNum := func(re string) int64 {
+			rx := regexp.MustCompile(re)
+			m := rx.FindStringSubmatch(s)
+			if len(m) < 2 {
+				return 0
+			}
+			v, _ := strconv.ParseInt(m[1], 10, 64)
+			if v < 0 {
+				return 0
+			}
+			return v
+		}
+
+		wtk := findNum(`WTKkN:\s*(\d+)`)
+		boy := findNum(`bOYDu:\s*(\d+)`)
+		wye := findNum(`wyeCN:\s*(\d+)`)
+		if wtk == 0 || boy == 0 || wye == 0 {
+			return "", false
+		}
+		tst := wtk + boy + wye
+
+		idx := strings.Index(s, "EO_Bot_Ssid")
+		if idx < 0 {
+			idx = strings.Index(low, "eo_bot_ssid")
+		}
+		if idx < 0 {
+			return "", false
+		}
+		window := s[idx:]
+		if len(window) > 400 {
+			window = window[:400]
+		}
+		rxSsid := regexp.MustCompile(`\b(\d{6,})\b`)
+		m2 := rxSsid.FindStringSubmatch(window)
+		if len(m2) < 2 {
+			return "", false
+		}
+		ssid, _ := strconv.ParseInt(m2[1], 10, 64)
+		if ssid <= 0 {
+			return "", false
+		}
+
+		return fmt.Sprintf("__tst_status=%d#; EO_Bot_Ssid=%d", tst, ssid), true
+	}
+
+	resp, body, err := fetch(parsed, "")
 	if err != nil || resp == nil {
 		w.WriteHeader(http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		w.WriteHeader(resp.StatusCode)
-		return
+	// If upstream returns EO bot-challenge HTML (often 200 + text/html), parse cookies and retry once.
+	if isBotHTML(resp, body) {
+		if cookie, ok := parseBotCookies(string(body)); ok {
+			if resp2, body2, err2 := fetch(parsed, cookie); err2 == nil && resp2 != nil && len(body2) > 0 {
+				resp = resp2
+				body = body2
+			}
+		}
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
-	if err != nil {
-		w.WriteHeader(http.StatusBadGateway)
-		return
-	}
+
 	if len(body) > maxBytes {
 		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		return
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		w.WriteHeader(resp.StatusCode)
 		return
 	}
 	static.WriteProxiedResponse(w, resp, body)
