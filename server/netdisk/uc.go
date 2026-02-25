@@ -1860,6 +1860,10 @@ func UCPlay(database *db.DB, id string, want string) (string, map[string]string,
 	return ucPlayImpl(database, "", id, want, "", "", "")
 }
 
+func UCPlayWithTVUser(database *db.DB, id string, want string, tvUser string) (string, map[string]string, error) {
+	return ucPlayImpl(database, "", id, want, tvUser, "", "")
+}
+
 func HandleAPIUCList(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
