@@ -602,6 +602,11 @@ func (d *DB) ensureSchema() error {
 					  active TEXT NOT NULL DEFAULT '',
 					  updated_at INTEGER NOT NULL
 					);
+					CREATE TABLE IF NOT EXISTS app_emby (
+					  id INTEGER PRIMARY KEY CHECK (id = 1),
+					  home_sections_json TEXT NOT NULL DEFAULT '[]',
+					  updated_at INTEGER NOT NULL
+					);
 	`
 
 	tx, err := d.db.Begin()

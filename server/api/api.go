@@ -623,24 +623,34 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 			}
 			tmdbType := strings.TrimSpace(row.TMDBType)
 			contentKey := strings.TrimSpace(row.ContentKey)
-			key := contentKey
+			// Normalize display/dedupe across TMDB + site history: use title key primarily.
+			titleKey := normalizeContentKey(row.VideoTitle)
+			dedupeKey := ""
+			if titleKey != "" {
+				// include tmdbType when known to reduce accidental tv/movie merges
+				dedupeKey = "title:" + strings.ToLower(strings.TrimSpace(tmdbType)) + ":" + titleKey
+			} else {
+				dedupeKey = strings.TrimSpace(contentKey)
+			}
+			if dedupeKey == "" && row.SiteKey != "" && row.VideoID != "" {
+				dedupeKey = row.SiteKey + "::" + row.VideoID
+			}
+			if dedupeKey == "" {
+				continue
+			}
+			if _, ok := seen[dedupeKey]; ok {
+				continue
+			}
+			seen[dedupeKey] = struct{}{}
+
+			// Keep stable contentKey for clients that rely on it.
 			if row.TMDBID > 0 && (tmdbType == "tv" || tmdbType == "movie") {
-				key = strings.ToLower("tmdb:" + tmdbType + ":" + strconv.Itoa(row.TMDBID))
-				contentKey = key
-			} else if key == "" {
-				key = normalizeContentKey(row.VideoTitle)
-				contentKey = key
+				contentKey = strings.ToLower("tmdb:" + tmdbType + ":" + strconv.Itoa(row.TMDBID))
+			} else if contentKey == "" && titleKey != "" {
+				contentKey = titleKey
+			} else if contentKey == "" {
+				contentKey = normalizeContentKey(row.VideoTitle)
 			}
-			if key == "" {
-				key = row.SiteKey + "::" + row.VideoID
-			}
-			if key == "" {
-				continue
-			}
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
 			list = append(list, map[string]any{
 				"contentKey":   contentKey,
 				"siteKey":      row.SiteKey,

@@ -8,15 +8,18 @@ import (
 	"time"
 )
 
-const embyDebugSlowRequestThreshold = 250 * time.Millisecond
-
 func embyLogDone(r *http.Request, w *embyLogWriter, elapsed time.Duration) {
 	if r == nil || w == nil {
 		return
 	}
-	if w.Status() < 400 && elapsed < embyDebugSlowRequestThreshold {
+
+	// Images are extremely noisy and usually unhelpful when debugging API flows.
+	// Suppress them to keep console output readable.
+	pathLower := strings.ToLower(strings.TrimSpace(r.URL.Path))
+	if strings.Contains(pathLower, "/images/") || strings.HasSuffix(pathLower, "/images") {
 		return
 	}
+
 	if w.Status() >= 400 {
 		embyDebugPrintf("[emby] %s %s -> %d (%d bytes) cost=%s %q", r.Method, embyDebugURL(r, true), w.Status(), w.Bytes(), elapsed.String(), w.Sample())
 		return

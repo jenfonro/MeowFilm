@@ -31,6 +31,21 @@ func embyClientDeviceID(r *http.Request) string {
 	if r == nil {
 		return ""
 	}
+	// Common explicit device id headers.
+	// (Different clients use different casings; Go normalizes header keys.)
+	if id := embyHeaderTrim(r, "X-Emby-Device-Id"); id != "" {
+		return id
+	}
+	if id := embyHeaderTrim(r, "X-Emby-DeviceId"); id != "" {
+		return id
+	}
+	if id := embyHeaderTrim(r, "X-Jellyfin-Device-Id"); id != "" {
+		return id
+	}
+	if id := embyHeaderTrim(r, "X-Device-Id"); id != "" {
+		return id
+	}
+
 	// Prefer Emby auth header if present.
 	if v := embyHeaderTrim(r, "X-Emby-Authorization"); v != "" {
 		if id := embyParseAuthQuotedKV(v, "DeviceId"); id != "" {
@@ -42,6 +57,14 @@ func embyClientDeviceID(r *http.Request) string {
 		if id := embyParseAuthQuotedKV(v, "DeviceId"); id != "" {
 			return id
 		}
+	}
+
+	// Some clients pass DeviceId as a query param.
+	if id := embyQueryTrimCI(r, "DeviceId"); id != "" {
+		return id
+	}
+	if id := embyQueryTrimCI(r, "deviceId"); id != "" {
+		return id
 	}
 	return ""
 }

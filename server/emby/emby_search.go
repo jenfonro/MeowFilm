@@ -44,11 +44,18 @@ func handleEmbySearch(w http.ResponseWriter, r *http.Request, database *db.DB, s
 
 	// GET /Search/Hints?SearchTerm=...
 	if len(parts) >= 1 && strings.EqualFold(parts[0], "Hints") && r.Method == http.MethodGet {
-		_, ok := embyRequireUser(w, r, database)
+		u, ok := embyRequireUser(w, r, database)
 		if !ok {
 			return
 		}
 		q := embyQueryTrimCI(r, "SearchTerm")
+		// During active playback, ignore derived background hints, but still allow user-initiated searches.
+		if playing, ok := embyGetPlaying(u.ID, embyClientDeviceID(r)); ok {
+			if embyIsDerivedSearchTerm(playing, q) {
+				writeJSON(w, 200, map[string]any{"SearchHints": []any{}, "TotalRecordCount": 0})
+				return
+			}
+		}
 		if q == "" {
 			writeJSON(w, 200, map[string]any{"SearchHints": []any{}, "TotalRecordCount": 0})
 			return

@@ -7,6 +7,17 @@ import (
 	"time"
 )
 
+type SiteVideo struct {
+	ID        int64
+	SiteKind  string
+	SiteKey   string
+	VideoID   string
+	Title     string
+	Poster    string
+	Remark    string
+	UpdatedAt int64
+}
+
 func (d *DB) resolveSiteKindAndOwner(userID int64, siteKey string) (siteKind string, ownerUserID int64) {
 	key := strings.TrimSpace(siteKey)
 	if key == "" {
@@ -16,6 +27,105 @@ func (d *DB) resolveSiteKindAndOwner(userID int64, siteKey string) (siteKind str
 		return "emby", 0
 	}
 	return "global", 0
+}
+
+func (d *DB) UpsertSiteVideo(siteKey string, videoID string, title string, poster string, remark string, updatedAt int64) (siteVideoID int64, err error) {
+	if d == nil || d.db == nil {
+		return 0, nil
+	}
+	sk := strings.TrimSpace(siteKey)
+	vid := strings.TrimSpace(videoID)
+	t := strings.TrimSpace(title)
+	if sk == "" || vid == "" || t == "" {
+		return 0, errors.New("invalid args")
+	}
+	now := updatedAt
+	if now <= 0 {
+		now = time.Now().Unix()
+	}
+	siteKind, ownerID := d.resolveSiteKindAndOwner(0, sk)
+
+	d.mu.Lock()
+	tx, err := d.db.Begin()
+	d.mu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+			return
+		}
+		_ = tx.Commit()
+	}()
+
+	id, err := d.upsertSiteVideo(tx, siteKind, ownerID, sk, vid, t, poster, remark, now)
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+func (d *DB) GetSiteVideoByKey(siteKey string, videoID string) (*SiteVideo, error) {
+	if d == nil || d.db == nil {
+		return nil, nil
+	}
+	sk := strings.TrimSpace(siteKey)
+	vid := strings.TrimSpace(videoID)
+	if sk == "" || vid == "" {
+		return nil, nil
+	}
+	siteKind, ownerID := d.resolveSiteKindAndOwner(0, sk)
+	var row SiteVideo
+	row.SiteKind = siteKind
+	row.SiteKey = sk
+	row.VideoID = vid
+	var poster sql.NullString
+	var remark sql.NullString
+	err := d.db.QueryRow(`
+		SELECT id, title, poster, remark, updated_at
+		FROM site_video
+		WHERE site_kind=? AND owner_user_id=? AND site_key=? AND video_id=?
+		LIMIT 1
+	`, strings.TrimSpace(siteKind), ownerID, sk, vid).Scan(&row.ID, &row.Title, &poster, &remark, &row.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	row.Poster = strings.TrimSpace(poster.String)
+	row.Remark = strings.TrimSpace(remark.String)
+	return &row, nil
+}
+
+func (d *DB) GetSiteVideoByID(id int64) (*SiteVideo, error) {
+	if d == nil || d.db == nil || id <= 0 {
+		return nil, nil
+	}
+	var row SiteVideo
+	var poster sql.NullString
+	var remark sql.NullString
+	err := d.db.QueryRow(`
+		SELECT site_kind, site_key, video_id, title, poster, remark, updated_at
+		FROM site_video
+		WHERE id=?
+		LIMIT 1
+	`, id).Scan(&row.SiteKind, &row.SiteKey, &row.VideoID, &row.Title, &poster, &remark, &row.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	row.ID = id
+	row.Poster = strings.TrimSpace(poster.String)
+	row.Remark = strings.TrimSpace(remark.String)
+	row.SiteKind = strings.TrimSpace(row.SiteKind)
+	row.SiteKey = strings.TrimSpace(row.SiteKey)
+	row.VideoID = strings.TrimSpace(row.VideoID)
+	row.Title = strings.TrimSpace(row.Title)
+	return &row, nil
 }
 
 func (d *DB) upsertSiteVideo(tx *sql.Tx, siteKind string, ownerUserID int64, siteKey string, videoID string, title string, poster string, remark string, updatedAt int64) (siteVideoID int64, err error) {
