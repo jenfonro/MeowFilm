@@ -558,9 +558,9 @@ func (d *DB) ensureSchema() error {
 					);
 					CREATE TABLE IF NOT EXISTS app_douban (
 					  id INTEGER PRIMARY KEY CHECK (id = 1),
-					  data_proxy TEXT NOT NULL DEFAULT 'direct',
+					  data_proxy TEXT NOT NULL DEFAULT 'server-proxy',
 					  data_custom TEXT NOT NULL DEFAULT '',
-					  img_proxy TEXT NOT NULL DEFAULT 'direct-browser',
+					  img_proxy TEXT NOT NULL DEFAULT 'server-proxy',
 					  img_custom TEXT NOT NULL DEFAULT '',
 					  updated_at INTEGER NOT NULL
 					);
