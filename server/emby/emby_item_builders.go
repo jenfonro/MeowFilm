@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/metadata/tmdb"
 )
 
 func embyBuildPeople(database *db.DB, mediaType string, tmdbID int) []map[string]any {
@@ -105,29 +106,147 @@ func embyBuildBaseItemFromSearch(it embyTMDBSearchItem) map[string]any {
 }
 
 func embyBuildItem(database *db.DB, embyID string) (map[string]any, error) {
+	// Short site IDs: keep items small; season/episode lists are provided by /Shows endpoints.
+	if siteVideoID, ok := embyParseSiteSeriesIDV2(embyID); ok {
+		if database == nil {
+			return nil, nil
+		}
+		sv, err := database.GetSiteVideoByID(siteVideoID)
+		if err != nil || sv == nil {
+			return nil, err
+		}
+		title := strings.TrimSpace(sv.Title)
+		if title == "" {
+			return nil, nil
+		}
+		siteName := strings.TrimSpace(sv.SiteKey)
+		out := map[string]any{
+			"Id":                      embyID,
+			"Name":                    title,
+			"SortName":                title,
+			"Overview":                strings.TrimSpace(sv.Remark),
+			"Type":                    "Series",
+			"MediaType":               "Video",
+			"IsFolder":                true,
+			"LocationType":            "Remote",
+			"Path":                    "meowfilm://" + strings.TrimSpace(embyID),
+			"ProductionYear":          0,
+			"ImageTags":               map[string]any{"Primary": "site"},
+			"BackdropImageTags":       []string{},
+			"ProviderIds":             map[string]any{},
+			"UserData":                map[string]any{"Played": false},
+			"PrimaryImageAspectRatio": 0.6666667,
+		}
+		if siteName != "" {
+			out["ProductionLocations"] = []string{siteName}
+		}
+		embyEnsureStandardItem(out, "")
+		return out, nil
+	}
+	if siteVideoID, pan, ok := embyParseSiteSeasonIDV2(embyID); ok {
+		if database == nil {
+			return nil, nil
+		}
+		sv, err := database.GetSiteVideoByID(siteVideoID)
+		if err != nil || sv == nil {
+			return nil, err
+		}
+		seriesID := embyBuildSiteSeriesIDV2(siteVideoID)
+		seriesName := strings.TrimSpace(sv.Title)
+		if seriesName == "" {
+			seriesName = "站点资源"
+		}
+		name := "第" + intToCN(pan) + "季"
+		out := map[string]any{
+			"Id":           embyID,
+			"Name":         name,
+			"SeriesName":   seriesName,
+			"Type":         "Season",
+			"IsFolder":     true,
+			"LocationType": "Remote",
+			"SeriesId":     seriesID,
+			"ParentId":     seriesID,
+			"IndexNumber":  pan,
+			"ImageTags":    map[string]any{"Primary": "site", "Thumb": "site"},
+			"UserData":     map[string]any{"Played": false},
+		}
+		embyEnsureStandardItem(out, "")
+		return out, nil
+	}
+	if siteVideoID, pan, epIndex, ok := embyParseSiteEpisodeIDV2(embyID); ok {
+		if database == nil {
+			return nil, nil
+		}
+		sv, err := database.GetSiteVideoByID(siteVideoID)
+		if err != nil || sv == nil {
+			return nil, err
+		}
+		seriesID := embyBuildSiteSeriesIDV2(siteVideoID)
+		seasonID := embyBuildSiteSeasonIDV2(siteVideoID, pan)
+		seriesName := strings.TrimSpace(sv.Title)
+		if seriesName == "" {
+			seriesName = "站点资源"
+		}
+		seasonName := "第" + intToCN(pan) + "季"
+		name := "第" + intToCN(epIndex) + "集"
+		mediaPath := embyBuildMediaPath(embyID, "mp4")
+		mediaSourceID := embyStableHex32(embyID)
+		out := map[string]any{
+			"Id":                      embyID,
+			"Name":                    name,
+			"SeriesName":              seriesName,
+			"SeasonName":              seasonName,
+			"Overview":                "",
+			"Type":                    "Episode",
+			"MediaType":               "Video",
+			"IsFolder":                false,
+			"SeriesId":                seriesID,
+			"SeasonId":                seasonID,
+			"ParentId":                seasonID,
+			"ParentBackdropItemId":    seriesID,
+			"ParentBackdropImageTags": []string{"site"},
+			"IndexNumber":             epIndex,
+			"ParentIndexNumber":       pan,
+			"LocationType":            "Remote",
+			"Path":                    mediaPath,
+			"Container":               "mp4,m4v",
+			"CanDownload":             true,
+			"RunTimeTicks":            int64(0),
+			"Chapters":                []any{},
+			"People":                  []any{},
+			"Size":                    0,
+			"ImageTags":               map[string]any{"Primary": "site", "Thumb": "site"},
+			"UserData":                map[string]any{"Played": false},
+			"MediaSources": []map[string]any{
+				{
+					"Id":                   mediaSourceID,
+					"MediaSourceId":        mediaSourceID,
+					"Protocol":             "File",
+					"IsRemote":             false,
+					"Path":                 mediaPath,
+					"Container":            "mp4",
+					"RequiredHttpHeaders":  map[string]string{},
+					"SupportsDirectPlay":   true,
+					"SupportsDirectStream": true,
+					"SupportsTranscoding":  true,
+					"SupportsProbing":      true,
+					"Type":                 "Default",
+				},
+			},
+			"AlternateMediaSources": []any{},
+		}
+		embyEnsureStandardItem(out, "")
+		return out, nil
+	}
+
 	parsed, ok := embyParseItemID(embyID)
 	if !ok || parsed == nil {
 		return nil, nil
 	}
 
 	// For Douban IDs, resolve and cache a TMDB mapping on-demand.
-	if parsed.Source == "douban" && parsed.TMDBID <= 0 && parsed.DoubanID != "" {
-		m, _ := embyGetDoubanTMDBMap(database, parsed.Kind, parsed.DoubanID)
-		title := ""
-		year := 0
-		if m != nil {
-			title = m.Title
-			year = m.Year
-		}
-		tid, err := embyResolveTMDBForDouban(database, parsed.Kind, parsed.DoubanID, title, year)
-		if err != nil {
-			return nil, err
-		}
-		if tid <= 0 {
-			return nil, errors.New("TMDB 未匹配")
-		}
-		parsed.Source = "tmdb"
-		parsed.TMDBID = tid
+	if err := embyNormalizeParsedToTMDB(database, parsed, true); err != nil {
+		return nil, err
 	}
 
 	switch parsed.Kind {
@@ -294,7 +413,7 @@ func embyBuildItem(database *db.DB, embyID string) (map[string]any, error) {
 			mediaPath := embyBuildMediaPath(episodeID, "mp4")
 			premiereISO := ""
 			if epAirDate != "" {
-				if t, err := time.Parse("2006-01-02", epAirDate); err == nil {
+				if t, ok := tmdb.ParseAirDateCNMidnight(epAirDate); ok {
 					premiereISO = t.UTC().Format(time.RFC3339)
 				}
 			}

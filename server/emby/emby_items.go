@@ -52,9 +52,9 @@ func handleEmbyItems(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		jid := parts[0]
 		imgType := strings.ToLower(strings.TrimSpace(parts[2]))
 
-		// Virtual view folders (e.g. view_tmdb_tv, view_tmdb_movies) still need to expose an image endpoint.
+		// Virtual view folders (e.g. view_*) still need to expose an image endpoint.
 		// Use a built-in static asset as a lightweight placeholder.
-		if jid == embyViewTMDBMovies || jid == embyViewTMDBTV || jid == embyViewTMDBAnime || jid == embyViewTMDBShow {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(jid)), "view_") {
 			http.Redirect(w, r, "/favicon.png", http.StatusFound)
 			return
 		}
@@ -71,41 +71,30 @@ func handleEmbyItems(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		}
 		parsed, ok := embyParseItemID(jid)
 		if !ok || parsed == nil {
-			// Stateless site IDs (v1): picture is embedded for restart-safety.
-			if sp, ok := embyDecodeSiteSeriesID(jid); ok {
-				if poster := embyNormalizeRedirectImageURL(sp.Pic); poster != "" {
+			resolveSitePoster := func(siteVideoID int64) string {
+				if database == nil || siteVideoID <= 0 {
+					return ""
+				}
+				row, err := database.GetSiteVideoByID(siteVideoID)
+				if err == nil && row != nil {
+					return embyNormalizeRedirectImageURL(row.Poster)
+				}
+				return ""
+			}
+			if siteVideoID, ok := embyParseSiteSeriesIDV2(jid); ok {
+				if poster := resolveSitePoster(siteVideoID); poster != "" {
 					http.Redirect(w, r, poster, http.StatusFound)
 					return
 				}
 			}
-			if ss, ok := embyDecodeSiteSeasonID(jid); ok {
-				if poster := embyNormalizeRedirectImageURL(ss.Pic); poster != "" {
+			if siteVideoID, _, ok := embyParseSiteSeasonIDV2(jid); ok {
+				if poster := resolveSitePoster(siteVideoID); poster != "" {
 					http.Redirect(w, r, poster, http.StatusFound)
 					return
 				}
 			}
-			if ep, ok := embyDecodeSiteEpisodeID(jid); ok {
-				if poster := embyNormalizeRedirectImageURL(ep.Pic); poster != "" {
-					http.Redirect(w, r, poster, http.StatusFound)
-					return
-				}
-			}
-			// Site-mapped items: reuse the picture URL from search results.
-			if e, ok := embySiteMapGet(jid); ok {
-				if poster := embyNormalizeRedirectImageURL(e.Pic); poster != "" {
-					http.Redirect(w, r, poster, http.StatusFound)
-					return
-				}
-			}
-			// Site-mapped seasons/episodes: reuse series poster as well.
-			if s, ok := embySiteSeasonMapGet(jid); ok {
-				if poster := embyNormalizeRedirectImageURL(s.Pic); poster != "" {
-					http.Redirect(w, r, poster, http.StatusFound)
-					return
-				}
-			}
-			if ep, ok := embySiteEpisodeMapGet(jid); ok {
-				if poster := embyNormalizeRedirectImageURL(ep.Pic); poster != "" {
+			if siteVideoID, _, _, ok := embyParseSiteEpisodeIDV2(jid); ok {
+				if poster := resolveSitePoster(siteVideoID); poster != "" {
 					http.Redirect(w, r, poster, http.StatusFound)
 					return
 				}
@@ -113,20 +102,7 @@ func handleEmbyItems(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			embyNotFound(w)
 			return
 		}
-		if parsed.Source == "douban" && parsed.TMDBID <= 0 && parsed.DoubanID != "" {
-			m, _ := embyGetDoubanTMDBMap(database, parsed.Kind, parsed.DoubanID)
-			title := ""
-			year := 0
-			if m != nil {
-				title = m.Title
-				year = m.Year
-			}
-			tid, _ := embyResolveTMDBForDouban(database, parsed.Kind, parsed.DoubanID, title, year)
-			if tid > 0 {
-				parsed.Source = "tmdb"
-				parsed.TMDBID = tid
-			}
-		}
+		_ = embyNormalizeParsedToTMDB(database, parsed, false)
 
 		imgPath := ""
 		switch imgType {
@@ -146,20 +122,20 @@ func handleEmbyItems(w http.ResponseWriter, r *http.Request, database *db.DB, se
 				embyNotFound(w)
 				return
 			}
-				http.Redirect(w, r, embyTMDBImageURL(database, imgPath, size), http.StatusFound)
-				return
-			case "backdrop":
-				imgPath = embyResolveItemImagePath(database, parsed, "backdrop", index)
-				if imgPath == "" {
-					embyNotFound(w)
-					return
-				}
-				http.Redirect(w, r, embyTMDBImageURL(database, imgPath, "w1280"), http.StatusFound)
-				return
-			default:
+			http.Redirect(w, r, embyTMDBImageURL(database, imgPath, size), http.StatusFound)
+			return
+		case "backdrop":
+			imgPath = embyResolveItemImagePath(database, parsed, "backdrop", index)
+			if imgPath == "" {
 				embyNotFound(w)
 				return
 			}
+			http.Redirect(w, r, embyTMDBImageURL(database, imgPath, "w1280"), http.StatusFound)
+			return
+		default:
+			embyNotFound(w)
+			return
+		}
 	}
 
 	// /Items/{id}/PlaybackInfo

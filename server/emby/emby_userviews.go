@@ -18,7 +18,7 @@ func handleEmbyUserViews(w http.ResponseWriter, r *http.Request, database *db.DB
 		if !embyAllowEmptyOrRequireSameUserOrNotFound(w, u.ID, userID) {
 			return
 		}
-		writeJSON(w, 200, embyDefaultGroupingOptions())
+		writeJSON(w, 200, embyGroupingOptions(database))
 		return
 	}
 
@@ -32,7 +32,7 @@ func handleEmbyUserViews(w http.ResponseWriter, r *http.Request, database *db.DB
 		if !embyAllowEmptyOrRequireSameUserOrNotFound(w, u.ID, userID) {
 			return
 		}
-		writeJSON(w, 200, embyDefaultUserViewsResponse(serverID))
+		writeJSON(w, 200, embyUserViewsResponse(database, serverID))
 		return
 	}
 

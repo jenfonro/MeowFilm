@@ -66,3 +66,40 @@ func (s *embyStreamStore) cleanupLocked(now time.Time) {
 		}
 	}
 }
+
+// ExtendIfLow extends an existing session TTL when it is close to expiring.
+// - Only extends when remaining <= capRemaining.
+// - Extends by add, but caps the new expiry to now+capRemaining.
+func (s *embyStreamStore) ExtendIfLow(id string, add time.Duration, capRemaining time.Duration) bool {
+	if s == nil {
+		return false
+	}
+	key := strings.TrimSpace(id)
+	if key == "" {
+		return false
+	}
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.m[key]
+	if !ok || strings.TrimSpace(sess.URL) == "" || sess.Expire.Before(now) {
+		s.cleanupLocked(now)
+		return false
+	}
+	remain := sess.Expire.Sub(now)
+	if remain > capRemaining {
+		s.cleanupLocked(now)
+		return false
+	}
+	newExp := sess.Expire.Add(add)
+	maxExp := now.Add(capRemaining)
+	if newExp.After(maxExp) {
+		newExp = maxExp
+	}
+	if newExp.After(sess.Expire) {
+		sess.Expire = newExp
+		s.m[key] = sess
+	}
+	s.cleanupLocked(now)
+	return true
+}

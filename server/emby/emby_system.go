@@ -21,5 +21,45 @@ func handleEmbySystem(w http.ResponseWriter, r *http.Request, database *db.DB, s
 		})
 		return
 	}
+	if len(parts) >= 1 && strings.EqualFold(parts[0], "Configuration") && r.Method == http.MethodGet {
+		// Minimal system configuration for clients that probe this endpoint during startup.
+		// Keep it stable and permissive; clients typically treat missing fields as false/empty.
+		writeJSON(w, 200, map[string]any{
+			"EnableUPnP":                            false,
+			"EnableRemoteAccess":                    true,
+			"ServerName":                            "MeowFilm",
+			"PublicPort":                            0,
+			"HttpServerPortNumber":                  0,
+			"HttpsPortNumber":                       0,
+			"RequireHttps":                          false,
+			"EnableHttps":                           false,
+			"IsPortAuthorized":                      true,
+			"EnableAutoDiscovery":                   true,
+			"EnableCaseSensitiveItemIds":            false,
+			"EnableAnonymousUsageReporting":         false,
+			"EnableLocalizedGuids":                  false,
+			"DisplaySpecialsWithinSeasons":          true,
+			"EnableExternalContentInSuggestions":    true,
+			"EnableNewEpisodeNotifications":         false,
+			"EnableContentRemovalDuringLibraryScan": false,
+			"EnableLibraryMonitor":                  false,
+			"LibraryScanFanoutConcurrency":          0,
+			"ImageExtractionTimeoutMs":              0,
+			"MetadataRefreshOnExit":                 false,
+			"MetadataRefreshOnStartup":              false,
+			"RemoteClientBitrateLimit":              0,
+			"EnableSlowResponseWarnings":            false,
+			"SlowResponseWarningThresholdMs":        0,
+			"EnableDashVttSubtitleExtraction":       false,
+			"EnableHlsVttSubtitleExtraction":        false,
+			"EnableMetrics":                         false,
+			"EnableLiveTv":                          false,
+			// Let clients enable download UI.
+			"EnableContentDownloading":                true,
+			"EnableTrickplayImageExtraction":          false,
+			"EnableTrickplayImageExtractionOnLibrary": false,
+		})
+		return
+	}
 	embyNotFound(w)
 }

@@ -12,3 +12,15 @@ func embyFieldsSet(fieldsParam string) map[string]struct{} {
 	}
 	return out
 }
+
+func embyFieldsHasCI(fieldsParam string, name string) bool {
+	if strings.TrimSpace(fieldsParam) == "" || strings.TrimSpace(name) == "" {
+		return false
+	}
+	for _, part := range strings.Split(fieldsParam, ",") {
+		if strings.EqualFold(strings.TrimSpace(part), strings.TrimSpace(name)) {
+			return true
+		}
+	}
+	return false
+}

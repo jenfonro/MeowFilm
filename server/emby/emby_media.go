@@ -14,7 +14,7 @@ import (
 // Serve via the standard /emby/Videos stream handler (without additional redirects),
 // so clients don't drop auth headers when following a 302 within the same origin.
 func handleEmbyMediaFiles(w http.ResponseWriter, r *http.Request, database *db.DB, serverID string, parts []string) {
-	_, ok := embyRequireUser(w, r, database)
+	u, ok := embyRequireUser(w, r, database)
 	if !ok {
 		return
 	}
@@ -45,7 +45,11 @@ func handleEmbyMediaFiles(w http.ResponseWriter, r *http.Request, database *db.D
 	if container == "" {
 		container = "mp4"
 	}
-	mediaSourceID := embyStableHex32(itemID)
+	mediaSourceID := embyComputeMediaSourceIDForItem(u.ID, embyClientDeviceID(r), itemID)
+	if mediaSourceID == "" {
+		embyNotFound(w)
+		return
+	}
 
 	r2 := r.Clone(r.Context())
 	q := r2.URL.Query()

@@ -21,6 +21,7 @@ func (d *DB) ensureDefaults(_ bool) error {
 	_, _ = d.db.Exec(`INSERT INTO app_smart(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
 	_, _ = d.db.Exec(`INSERT INTO app_goproxy(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
 	_, _ = d.db.Exec(`INSERT INTO app_catpawopen(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
+	_, _ = d.db.Exec(`INSERT INTO app_emby(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
 
 	type seedTable struct {
 		Table string

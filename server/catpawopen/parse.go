@@ -8,6 +8,14 @@ import (
 
 func NormalizeSearchList(data map[string]any) []SearchItem {
 	listAny, _ := data["list"].([]any)
+	if len(listAny) == 0 {
+		// Some spiders wrap payload in {data:{list:[...]}}.
+		if d, ok := data["data"].(map[string]any); ok && d != nil {
+			if v, ok := d["list"].([]any); ok && len(v) > 0 {
+				listAny = v
+			}
+		}
+	}
 	out := []SearchItem{}
 	for _, it := range listAny {
 		m, ok := it.(map[string]any)

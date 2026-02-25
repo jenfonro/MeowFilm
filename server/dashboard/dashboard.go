@@ -196,6 +196,18 @@ func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardMetadataSettings(w, r, database)
 			})).ServeHTTP(w, r)
+		case "/thirdparty/settings":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardThirdPartySettings(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/thirdparty/save":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardThirdPartySave(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/thirdparty/site/categories":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardThirdPartySiteCategories(w, r, database)
+			})).ServeHTTP(w, r)
 		case "/user/list":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardUserList(w, r, database)
@@ -1106,14 +1118,14 @@ func handleDashboardSiteSettings(w http.ResponseWriter, r *http.Request, databas
 	}
 	goProxyJSON, _ := json.Marshal(goProxyForUI)
 	writeJSON(w, 200, map[string]any{
-		"success":                  true,
-		"siteName":                 cfg.SiteName,
-		"searchDisplayMode":        mode,
-		"catPawOpenServers":        servers,
-		"catPawOpenActive":         active,
-		"goProxyEnabled":           cfg.GoProxyEnabled,
-		"goProxyAutoSelect":        cfg.GoProxyAutoSelect,
-		"goProxyServersJson":       defaultString(string(goProxyJSON), "[]"),
+		"success":            true,
+		"siteName":           cfg.SiteName,
+		"searchDisplayMode":  mode,
+		"catPawOpenServers":  servers,
+		"catPawOpenActive":   active,
+		"goProxyEnabled":     cfg.GoProxyEnabled,
+		"goProxyAutoSelect":  cfg.GoProxyAutoSelect,
+		"goProxyServersJson": defaultString(string(goProxyJSON), "[]"),
 	})
 }
 
