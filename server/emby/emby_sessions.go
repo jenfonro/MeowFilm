@@ -1,7 +1,10 @@
 package emby
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -9,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/magic"
 )
 
 func handleEmbySessions(w http.ResponseWriter, r *http.Request, database *db.DB, serverID string, parts []string) {
@@ -33,6 +37,47 @@ func handleEmbySessions(w http.ResponseWriter, r *http.Request, database *db.DB,
 		if r.Method != http.MethodPost {
 			embyMethodNotAllowed(w)
 			return
+		}
+		// Refresh/clear "playing" state based on session reports, so suppression remains accurate during
+		// long playback sessions.
+		deviceID := embyClientDeviceID(r)
+		if tail == "stopped" {
+			embyClearPlaying(u.ID, deviceID)
+		} else {
+			// Read body once, reuse for both playing guard + history recorder.
+			var raw []byte
+			if r.Body != nil {
+				raw, _ = io.ReadAll(r.Body)
+			}
+			_ = r.Body.Close()
+			r.Body = io.NopCloser(bytes.NewReader(raw))
+
+			var dto embySessionReport
+			_ = json.Unmarshal(raw, &dto)
+			itemID := strings.TrimSpace(dto.ItemId)
+			if itemID == "" && dto.NowPlaying != nil {
+				itemID = strings.TrimSpace(dto.NowPlaying.Id)
+			}
+			if itemID != "" {
+				e := embyPlayingGuardEntry{
+					ExpireAt: time.Now().Add(embyPlayingGuardTTL),
+					ItemID:   itemID,
+				}
+				if dto.NowPlaying != nil {
+					e.NowItemName = strings.TrimSpace(dto.NowPlaying.Name)
+					e.SeriesName = strings.TrimSpace(dto.NowPlaying.SeriesName)
+					e.SeasonNumber = dto.NowPlaying.ParentIndexNo
+					e.EpisodeNo = dto.NowPlaying.IndexNumber
+				}
+				embyNotePlayingProgress(u.ID, deviceID, e)
+				// Maintain a short-lived 302 mapping window for this item to avoid repeated smart resolution
+				// when clients re-request playback URLs during active playback.
+				if msid := embyComputeMediaSourceID(u.ID, deviceID, itemID); msid != "" {
+					embyStreams.ExtendIfLow(msid, 15*time.Second, 20*time.Second)
+				}
+			}
+			// Rewind for history recorder.
+			r.Body = io.NopCloser(bytes.NewReader(raw))
 		}
 		if err := embyRecordPlayHistoryFromSession(r, database, u); err != nil && debug {
 			embyDebugPrintf("[emby][sessions] record play history failed err=%q", err.Error())
@@ -125,10 +170,20 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 	}
 
 	parsed, ok := embyParseItemID(itemID)
+	isSiteEpisode := false
+	siteVideoID := int64(0)
+	sitePan := 0
+	siteEp := 0
 	if !ok || parsed == nil {
-		return nil
-	}
-	if parsed.SubKind == "series" || parsed.SubKind == "season" {
+		if v, pan, ep, ok := embyParseSiteEpisodeIDV2(itemID); ok {
+			isSiteEpisode = true
+			siteVideoID = v
+			sitePan = pan
+			siteEp = ep
+		} else {
+			return nil
+		}
+	} else if parsed.SubKind == "series" || parsed.SubKind == "season" {
 		return nil
 	}
 
@@ -137,12 +192,15 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 		return nil
 	}
 
-	tmdbID := parsed.TMDBID
+	tmdbID := 0
 	tmdbType := ""
-	if parsed.Kind == "tv" {
-		tmdbType = "tv"
-	} else if parsed.Kind == "movie" {
-		tmdbType = "movie"
+	if !isSiteEpisode && parsed != nil {
+		tmdbID = parsed.TMDBID
+		if parsed.Kind == "tv" {
+			tmdbType = "tv"
+		} else if parsed.Kind == "movie" {
+			tmdbType = "movie"
+		}
 	}
 
 	videoID := strings.TrimSpace(itemID)
@@ -165,7 +223,7 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 		}
 	}
 
-	if parsed.Kind == "tv" && parsed.SubKind == "episode" {
+	if !isSiteEpisode && parsed != nil && parsed.Kind == "tv" && parsed.SubKind == "episode" {
 		videoID = embyBuildSeriesID(parsed.TMDBID)
 		episodeIndex = parsed.Episode
 		if dto.NowPlaying != nil && strings.TrimSpace(dto.NowPlaying.Name) != "" {
@@ -178,7 +236,7 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 
 	// Fill missing title/poster from TMDB (cached).
 	metaKey := tmdbType + ":" + strconv.Itoa(tmdbID)
-	if (videoTitle == "" || videoPoster == "" || videoRemark == "") && tmdbID > 0 && tmdbType != "" {
+	if !isSiteEpisode && (videoTitle == "" || videoPoster == "" || videoRemark == "") && tmdbID > 0 && tmdbType != "" {
 		if hit, ok := embyCachedBasicMeta(metaKey); ok {
 			if videoTitle == "" {
 				videoTitle = hit.Title
@@ -229,30 +287,160 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 	if videoTitle == "" {
 		videoTitle = itemID
 	}
-	if videoPoster != "" {
+	if !isSiteEpisode && videoPoster != "" {
 		videoPoster = embyTMDBImageURL(database, videoPoster, "w500")
 	}
 
-	contentKey := strings.TrimSpace(strings.ToLower(fmt.Sprintf("tmdb:%s:%d", tmdbType, tmdbID)))
-	if contentKey == "tmdb::0" || contentKey == "tmdb:0:0" || tmdbID <= 0 || tmdbType == "" {
-		contentKey = "emby::" + strings.ToLower(videoID)
+	contentKey := ""
+	siteKey := "emby"
+	playFlag := "emby"
+	panLabel := ""
+	if isSiteEpisode {
+		sv, err := database.GetSiteVideoByID(siteVideoID)
+		if err != nil || sv == nil {
+			return nil
+		}
+		siteKey = strings.TrimSpace(sv.SiteKey)
+		videoID = strings.TrimSpace(sv.VideoID)
+		videoTitle = strings.TrimSpace(sv.Title)
+		videoRemark = strings.TrimSpace(sv.Remark)
+		videoPoster = embyNormalizeRedirectImageURL(strings.TrimSpace(sv.Poster))
+		episodeIndex = siteEp
+		if dto.NowPlaying != nil && strings.TrimSpace(dto.NowPlaying.Name) != "" {
+			episodeName = strings.TrimSpace(dto.NowPlaying.Name)
+		}
+		if episodeName == "" {
+			episodeName = fmt.Sprintf("P%dE%02d", sitePan, siteEp)
+		}
+		playFlag = "site"
+		contentKey = strings.ToLower(strings.TrimSpace(fmt.Sprintf("site:%s:%s", siteKey, videoID)))
+
+		// Normalize: try to map site playback to TMDB play history using magic episode rules.
+		// If we can extract an episode and find a strong TMDB match, update the TMDB history too
+		// (so users don't see duplicated entries for the same show).
+		{
+			cands := make([]string, 0, 6)
+			if dto.NowPlaying != nil {
+				if strings.TrimSpace(dto.NowPlaying.Name) != "" {
+					cands = append(cands, strings.TrimSpace(dto.NowPlaying.Name))
+				}
+				if strings.TrimSpace(dto.NowPlaying.SeriesName) != "" {
+					cands = append(cands, strings.TrimSpace(dto.NowPlaying.SeriesName))
+				}
+			}
+			if strings.TrimSpace(episodeName) != "" {
+				cands = append(cands, strings.TrimSpace(episodeName))
+			}
+			if strings.TrimSpace(videoTitle) != "" {
+				cands = append(cands, strings.TrimSpace(videoTitle))
+			}
+			if siteEp > 0 {
+				cands = append(cands, fmt.Sprintf("第%d集", siteEp))
+				cands = append(cands, fmt.Sprintf("E%02d", siteEp))
+			}
+
+			cleanRules, _ := database.ListMagicEpisodeCleanRegexRules()
+			episodeRules, _ := database.ListMagicEpisodeRules()
+			se, err := magic.MagicEpisodeExtractFromCandidates(cands, cleanRules, episodeRules)
+			if err == nil && se.Episode > 0 && strings.TrimSpace(videoTitle) != "" {
+				bestID := 0
+				bestScore := 0
+				results, err := embyTMDBSearchMulti(database, strings.TrimSpace(videoTitle))
+				if err == nil && len(results) > 0 {
+					for _, it := range results {
+						if strings.ToLower(strings.TrimSpace(it.MediaType)) != "tv" {
+							continue
+						}
+						t := strings.TrimSpace(it.Title)
+						if t == "" {
+							continue
+						}
+						score := embyComputeMatchScore(strings.TrimSpace(videoTitle), t)
+						if score > bestScore {
+							bestScore = score
+							bestID = it.ID
+						}
+					}
+				}
+				if bestID > 0 && bestScore >= 75 {
+					season := se.Season
+					if season <= 0 {
+						season = 1
+					}
+					ep := se.Episode
+
+					tmdbSeriesID := embyBuildSeriesID(bestID)
+					tmdbEpisodeID := embyBuildEpisodeID(bestID, season, ep)
+
+					tmdbTitle := ""
+					tmdbPoster := ""
+					metaKey := "tv:" + strconv.Itoa(bestID)
+					if hit, ok := embyCachedBasicMeta(metaKey); ok {
+						tmdbTitle = strings.TrimSpace(hit.Title)
+						tmdbPoster = strings.TrimSpace(hit.Poster)
+					} else {
+						if d, err := embyTMDBGetTVDetail(database, bestID); err == nil && d != nil {
+							tmdbTitle = strings.TrimSpace(d.Title)
+							tmdbPoster = strings.TrimSpace(d.Poster)
+							embyRememberBasicMeta(metaKey, embyBasicMeta{
+								Expire: time.Now().Add(embyBasicMetaTTL),
+								Title:  tmdbTitle,
+								Poster: tmdbPoster,
+								Year:   d.Year,
+							})
+						}
+					}
+					if tmdbTitle == "" {
+						tmdbTitle = strings.TrimSpace(videoTitle)
+					}
+					if tmdbPoster != "" {
+						tmdbPoster = embyTMDBImageURL(database, tmdbPoster, "w500")
+					}
+					now2 := time.Now().Unix()
+					_ = database.UpsertPlayHistory(db.PlayHistoryUpsert{
+						UserID:                userID,
+						ContentKey:            strings.ToLower(strings.TrimSpace(fmt.Sprintf("tmdb:tv:%d", bestID))),
+						SiteKey:               "emby",
+						VideoID:               tmdbSeriesID,
+						VideoTitle:            tmdbTitle,
+						VideoPoster:           tmdbPoster,
+						VideoRemark:           "",
+						TMDBID:                bestID,
+						TMDBType:              "tv",
+						PanLabel:              "",
+						PlayFlag:              "emby",
+						EpisodeIndex:          ep,
+						EpisodeName:           fmt.Sprintf("S%02dE%03d", season, ep),
+						UpdatedAt:             now2,
+						PlaybackPositionTicks: position,
+						PlaybackRuntimeTicks:  runtime,
+						PlaybackItemID:        tmdbEpisodeID,
+					})
+				}
+			}
+		}
+	} else {
+		contentKey = strings.TrimSpace(strings.ToLower(fmt.Sprintf("tmdb:%s:%d", tmdbType, tmdbID)))
+		if contentKey == "tmdb::0" || contentKey == "tmdb:0:0" || tmdbID <= 0 || tmdbType == "" {
+			contentKey = "emby::" + strings.ToLower(videoID)
+		}
 	}
 
 	now := time.Now().Unix()
 	return database.UpsertPlayHistory(db.PlayHistoryUpsert{
 		UserID:                userID,
 		ContentKey:            contentKey,
-		SiteKey:               "emby",
-		SiteName:              "Emby",
-		SpiderAPI:             "emby",
+		SiteKey:               siteKey,
+		SiteName:              "",
+		SpiderAPI:             "",
 		VideoID:               videoID,
 		VideoTitle:            videoTitle,
 		VideoPoster:           videoPoster,
 		VideoRemark:           videoRemark,
 		TMDBID:                tmdbID,
 		TMDBType:              tmdbType,
-		PanLabel:              "",
-		PlayFlag:              "emby",
+		PanLabel:              panLabel,
+		PlayFlag:              playFlag,
 		EpisodeIndex:          episodeIndex,
 		EpisodeName:           episodeName,
 		UpdatedAt:             now,

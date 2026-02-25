@@ -1,47 +1,91 @@
 package emby
 
-func embyDefaultGroupingOptions() []map[string]any {
-	return []map[string]any{
-		{"Name": "剧集", "Id": embyViewTMDBTV},
-		{"Name": "电影", "Id": embyViewTMDBMovies},
-		{"Name": "动漫", "Id": embyViewTMDBAnime},
-		{"Name": "综艺", "Id": embyViewTMDBShow},
+import (
+	"strings"
+
+	"github.com/jenfonro/meowfilm/internal/db"
+)
+
+func embyHomeSections(database *db.DB) []db.EmbyHomeSection {
+	if database == nil {
+		return db.DefaultEmbyHomeSections()
 	}
+	list, err := database.ReadEmbyHomeSections()
+	if err != nil || len(list) == 0 {
+		return db.DefaultEmbyHomeSections()
+	}
+	return list
 }
 
-func embyDefaultViewFolders(serverID string) []map[string]any {
-	return []map[string]any{
-		embyBuildViewFolderItem(serverID, embyViewTMDBTV, "剧集", "tvshows"),
-		embyBuildViewFolderItem(serverID, embyViewTMDBMovies, "电影", "movies"),
-		embyBuildViewFolderItem(serverID, embyViewTMDBAnime, "动漫", "tvshows"),
-		embyBuildViewFolderItem(serverID, embyViewTMDBShow, "综艺", "tvshows"),
+func embyGroupingOptions(database *db.DB) []map[string]any {
+	secs := embyHomeSections(database)
+	out := make([]map[string]any, 0, len(secs))
+	for _, s := range secs {
+		out = append(out, map[string]any{
+			"Name": strings.TrimSpace(s.Name),
+			"Id":   strings.TrimSpace(s.ID),
+		})
 	}
+	return out
 }
 
-func embyDefaultViewFolderItemByID(serverID string, id string) (map[string]any, bool) {
-	switch id {
-	case embyViewTMDBTV:
-		return embyBuildViewFolderItem(serverID, id, "剧集", "tvshows"), true
-	case embyViewTMDBMovies:
-		return embyBuildViewFolderItem(serverID, id, "电影", "movies"), true
-	case embyViewTMDBAnime:
-		return embyBuildViewFolderItem(serverID, id, "动漫", "tvshows"), true
-	case embyViewTMDBShow:
-		return embyBuildViewFolderItem(serverID, id, "综艺", "tvshows"), true
-	default:
+func embyViewFolders(database *db.DB, serverID string) []map[string]any {
+	secs := embyHomeSections(database)
+	out := make([]map[string]any, 0, len(secs))
+	for _, s := range secs {
+		ct := "tvshows"
+		if strings.EqualFold(strings.TrimSpace(s.MediaType), "movie") {
+			ct = "movies"
+		}
+		out = append(out, embyBuildViewFolderItem(
+			serverID,
+			strings.TrimSpace(s.ID),
+			strings.TrimSpace(s.Name),
+			ct,
+		))
+	}
+	return out
+}
+
+func embyViewFolderItemByID(database *db.DB, serverID string, id string) (map[string]any, bool) {
+	want := strings.TrimSpace(id)
+	if want == "" {
 		return nil, false
 	}
+	for _, s := range embyHomeSections(database) {
+		if strings.TrimSpace(s.ID) == want {
+			ct := "tvshows"
+			if strings.EqualFold(strings.TrimSpace(s.MediaType), "movie") {
+				ct = "movies"
+			}
+			return embyBuildViewFolderItem(serverID, want, strings.TrimSpace(s.Name), ct), true
+		}
+	}
+	return nil, false
 }
 
-func embyDefaultUsersViewsResponse(serverID string) map[string]any {
-	items := embyDefaultViewFolders(serverID)
+func embyUsersViewsResponse(database *db.DB, serverID string) map[string]any {
+	items := embyViewFolders(database, serverID)
 	return map[string]any{
 		"Items":            items,
 		"TotalRecordCount": len(items),
 	}
 }
 
-func embyDefaultUserViewsResponse(serverID string) map[string]any {
-	items := embyDefaultViewFolders(serverID)
+func embyUserViewsResponse(database *db.DB, serverID string) map[string]any {
+	items := embyViewFolders(database, serverID)
 	return embyPagedItems(items, 0, len(items))
+}
+
+func embyResolveHomeSectionByID(database *db.DB, id string) (db.EmbyHomeSection, bool) {
+	want := strings.TrimSpace(id)
+	if want == "" {
+		return db.EmbyHomeSection{}, false
+	}
+	for _, s := range embyHomeSections(database) {
+		if strings.TrimSpace(s.ID) == want {
+			return s, true
+		}
+	}
+	return db.EmbyHomeSection{}, false
 }

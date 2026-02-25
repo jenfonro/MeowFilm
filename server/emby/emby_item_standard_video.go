@@ -67,6 +67,8 @@ func embyEnsureStandardVideoItem(obj map[string]any) {
 		obj["Size"] = int64(0)
 	}
 	if _, ok := obj["CanDownload"]; !ok {
-		obj["CanDownload"] = false
+		// Assume downloads are permitted for video items; clients use this to decide whether to show
+		// a download button and to run capability probes.
+		obj["CanDownload"] = true
 	}
 }

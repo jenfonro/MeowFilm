@@ -9,29 +9,112 @@ import (
 
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/catpawopen"
+	"github.com/jenfonro/meowfilm/server/metadata/tmdb"
 )
 
 func embyIsAiredDate(airDate string, now time.Time) bool {
+	// Treat TMDB air_date (date-only) as Beijing midnight, regardless of server timezone.
 	s := strings.TrimSpace(airDate)
 	if s == "" {
 		return true
 	}
-	t, err := time.Parse("2006-01-02", s)
-	if err != nil {
-		return true
-	}
-	// Treat "air_date" as UTC midnight for a stable comparison.
-	return !t.UTC().After(now.UTC())
+	return tmdb.IsAirDateAiredOrToday(s, now)
 }
 
 func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, serverID string, parts []string) {
 	// GET /Shows/NextUp?UserId=...
 	if len(parts) >= 1 && strings.EqualFold(parts[0], "NextUp") && r.Method == http.MethodGet {
-		_, ok := embyRequireUser(w, r, database)
+		u, ok := embyRequireUser(w, r, database)
 		if !ok {
 			return
 		}
-		writeJSON(w, 200, embyPagedEmpty(0))
+		userID := embyQueryTrimCI(r, "UserId")
+		if userID != "" && !strings.EqualFold(strings.TrimSpace(userID), strings.TrimSpace(u.ID)) {
+			writeJSON(w, 200, embyPagedEmpty(0))
+			return
+		}
+		seriesID := embyQueryTrimCI(r, "SeriesId")
+		if strings.TrimSpace(seriesID) == "" {
+			writeJSON(w, 200, embyPagedEmpty(0))
+			return
+		}
+		startIndex := embyQueryIntClamped(r, "StartIndex", 0, 0, 1<<30)
+		limit := embyQueryIntClamped(r, "Limit", 12, 1, 60)
+		fieldsParam := embyQueryGetCI(r, "fields")
+
+		// Support both TMDB series ids and short site series ids.
+		isSeries := false
+		siteSeriesVideoID := int64(0)
+		if parsed, ok := embyParseItemID(seriesID); ok && parsed != nil && parsed.Kind == "tv" && parsed.SubKind == "series" {
+			isSeries = true
+		} else if v, ok := embyParseSiteSeriesIDV2(seriesID); ok && v > 0 {
+			isSeries = true
+			siteSeriesVideoID = v
+		}
+		if !isSeries {
+			writeJSON(w, 200, embyPagedEmpty(startIndex))
+			return
+		}
+
+		uid, _ := strconv.ParseInt(strings.TrimSpace(u.ID), 10, 64)
+		if uid <= 0 || database == nil {
+			writeJSON(w, 200, embyPagedEmpty(startIndex))
+			return
+		}
+		siteKey := "emby"
+		videoID := strings.TrimSpace(seriesID)
+		if siteSeriesVideoID > 0 {
+			// sitev_<id>: query by real site key + spider video id.
+			if sv, err := database.GetSiteVideoByID(siteSeriesVideoID); err == nil && sv != nil {
+				if strings.TrimSpace(sv.SiteKey) != "" && strings.TrimSpace(sv.VideoID) != "" {
+					siteKey = strings.TrimSpace(sv.SiteKey)
+					videoID = strings.TrimSpace(sv.VideoID)
+				}
+			}
+		}
+		row, err := database.GetPlayHistoryLatestBySiteVideo(uid, siteKey, videoID)
+		if err != nil || row == nil || strings.TrimSpace(row.PlaybackItemID) == "" {
+			writeJSON(w, 200, embyPagedEmpty(startIndex))
+			return
+		}
+
+		total := 1
+		if startIndex > 0 || limit <= 0 {
+			writeJSON(w, 200, embyPagedItems([]map[string]any{}, startIndex, total))
+			return
+		}
+
+		itemID := strings.TrimSpace(row.PlaybackItemID)
+		obj, err := embyBuildItem(database, itemID)
+		if err != nil || obj == nil {
+			writeJSON(w, 200, embyPagedEmpty(startIndex))
+			return
+		}
+
+		snap := embyPlayHistorySnapshot{
+			Pos:     row.PlaybackPositionTicks,
+			Runtime: row.PlaybackRuntimeTicks,
+			Updated: row.UpdatedAt,
+		}
+		embyApplyPlayHistoryToItemUserData(u.ID, itemID, obj, snap)
+
+		pos := row.PlaybackPositionTicks
+		if pos < 0 {
+			pos = 0
+		}
+		runtime := row.PlaybackRuntimeTicks
+		if runtime <= 0 && pos > 0 {
+			runtime = pos + int64(60*1e7)
+		}
+		if runtime > 0 {
+			obj["RunTimeTicks"] = runtime
+		}
+
+		embyEnsureShowsItemFields(obj, fieldsParam)
+		if _, ok := obj["ServerId"]; !ok && strings.TrimSpace(serverID) != "" {
+			obj["ServerId"] = serverID
+		}
+		writeJSON(w, 200, embyPagedItems([]map[string]any{obj}, startIndex, total))
 		return
 	}
 
@@ -45,14 +128,27 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		seriesID := parts[0]
 		parsed, ok := embyParseItemID(seriesID)
 		if !ok || parsed == nil || parsed.Kind != "tv" || parsed.SubKind != "series" {
-			// Site-mapped series: expose seasons derived from the spider "detail" play sources.
-			if p, ok := embyDecodeSiteSeriesID(seriesID); ok && strings.TrimSpace(p.Name) != "" {
-				pans, err := embyFetchSiteDetailPansDedup(database, u, p.SiteAPI, p.VideoID)
+			// Short site series: expose seasons derived from spider "detail" play sources.
+			if siteVideoID, ok := embyParseSiteSeriesIDV2(seriesID); ok {
+				sv, err := database.GetSiteVideoByID(siteVideoID)
+				if err != nil || sv == nil {
+					writeJSON(w, 200, embyPagedItems([]map[string]any{}, 0, 0))
+					return
+				}
+				spiderAPI := embyResolveSpiderAPIBySiteKey(database, sv.SiteKey)
+				if strings.TrimSpace(spiderAPI) == "" {
+					writeJSON(w, 200, embyPagedItems([]map[string]any{}, 0, 0))
+					return
+				}
+				pans, err := embyFetchSiteDetailPansDedup(database, u, strings.TrimSpace(spiderAPI), strings.TrimSpace(sv.VideoID))
 				if err != nil {
 					writeJSON(w, 200, embyPagedItems([]map[string]any{}, 0, 0))
 					return
 				}
-				seriesName := strings.TrimSpace(p.Name)
+				seriesName := strings.TrimSpace(sv.Title)
+				if seriesName == "" {
+					seriesName = "站点资源"
+				}
 				seasons := make([]map[string]any, 0, len(pans))
 				for i, pan := range pans {
 					seasonNo := i + 1
@@ -60,16 +156,7 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 					if label == "" {
 						label = "第" + intToCN(seasonNo) + "季"
 					}
-					seasonID := embyEncodeSiteSeasonID(embySiteSeasonIDPayload{
-						SiteKey: strings.TrimSpace(p.SiteKey),
-						Site:    strings.TrimSpace(p.Site),
-						SiteAPI: strings.TrimSpace(p.SiteAPI),
-						VideoID: strings.TrimSpace(p.VideoID),
-						Pan:     seasonNo,
-						Label:   label,
-						Pic:     strings.TrimSpace(p.Pic),
-						Remark:  strings.TrimSpace(p.Remark),
-					})
+					seasonID := embyBuildSiteSeasonIDV2(siteVideoID, seasonNo)
 					if seasonID == "" {
 						continue
 					}
@@ -180,21 +267,33 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		seriesID := parts[0]
 		parsed, ok := embyParseItemID(seriesID)
 		if !ok || parsed == nil || parsed.Kind != "tv" || parsed.SubKind != "series" {
-			// Site-mapped series: list episodes from the spider "detail" play sources.
-			if p, ok := embyDecodeSiteSeriesID(seriesID); ok && strings.TrimSpace(p.Name) != "" {
-				pans, err := embyFetchSiteDetailPansDedup(database, u, p.SiteAPI, p.VideoID)
+			// Short site series: list episodes from spider "detail" play sources.
+			if siteVideoID, ok := embyParseSiteSeriesIDV2(seriesID); ok {
+				sv, err := database.GetSiteVideoByID(siteVideoID)
+				if err != nil || sv == nil {
+					writeJSON(w, 200, embyPagedItems([]map[string]any{}, 0, 0))
+					return
+				}
+				spiderAPI := embyResolveSpiderAPIBySiteKey(database, sv.SiteKey)
+				if strings.TrimSpace(spiderAPI) == "" {
+					writeJSON(w, 200, embyPagedItems([]map[string]any{}, 0, 0))
+					return
+				}
+				pans, err := embyFetchSiteDetailPansDedup(database, u, strings.TrimSpace(spiderAPI), strings.TrimSpace(sv.VideoID))
 				if err != nil {
 					writeJSON(w, 200, embyPagedItems([]map[string]any{}, 0, 0))
 					return
 				}
-				seriesName := strings.TrimSpace(p.Name)
+				seriesName := strings.TrimSpace(sv.Title)
+				if seriesName == "" {
+					seriesName = "站点资源"
+				}
 				seasonID := embyQueryTrimCI(r, "SeasonId")
 				seasonNo := 1
 				label := ""
 				if strings.TrimSpace(seasonID) != "" {
-					if sp, ok := embyDecodeSiteSeasonID(seasonID); ok && strings.EqualFold(strings.TrimSpace(sp.SiteKey), strings.TrimSpace(p.SiteKey)) && strings.TrimSpace(sp.VideoID) == strings.TrimSpace(p.VideoID) {
-						seasonNo = sp.Pan
-						label = strings.TrimSpace(sp.Label)
+					if sv2, pan2, ok := embyParseSiteSeasonIDV2(seasonID); ok && sv2 == siteVideoID {
+						seasonNo = pan2
 					}
 				}
 				if strings.TrimSpace(seasonID) == "" {
@@ -203,16 +302,7 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 						seasonNo = 1
 						label = embyNormalizePanDisplayLabel(pans[0].Label)
 					}
-					seasonID = embyEncodeSiteSeasonID(embySiteSeasonIDPayload{
-						SiteKey: strings.TrimSpace(p.SiteKey),
-						Site:    strings.TrimSpace(p.Site),
-						SiteAPI: strings.TrimSpace(p.SiteAPI),
-						VideoID: strings.TrimSpace(p.VideoID),
-						Pan:     seasonNo,
-						Label:   label,
-						Pic:     strings.TrimSpace(p.Pic),
-						Remark:  strings.TrimSpace(p.Remark),
-					})
+					seasonID = embyBuildSiteSeasonIDV2(siteVideoID, seasonNo)
 				}
 				if seasonNo <= 0 {
 					seasonNo = 1
@@ -249,18 +339,7 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 					if epName == "" {
 						epName = "第" + intToCN(epIndex) + "集"
 					}
-					epID := embyEncodeSiteEpisodeID(embySiteEpisodeIDPayload{
-						SiteKey: strings.TrimSpace(p.SiteKey),
-						Site:    strings.TrimSpace(p.Site),
-						SiteAPI: strings.TrimSpace(p.SiteAPI),
-						VideoID: strings.TrimSpace(p.VideoID),
-						Pan:     seasonNo,
-						Ep:      epIndex,
-						Flag:    strings.TrimSpace(ep.Flag),
-						URL:     strings.TrimSpace(epURL),
-						Pic:     strings.TrimSpace(p.Pic),
-						Remark:  strings.TrimSpace(p.Remark),
-					})
+					epID := embyBuildSiteEpisodeIDV2(siteVideoID, seasonNo, epIndex)
 					if epID == "" {
 						continue
 					}
@@ -279,7 +358,7 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 						"Path":                    mediaPath,
 						"Container":               "mp4,m4v",
 						"PremiereDate":            "",
-						"CanDownload":             false,
+						"CanDownload":             true,
 						"RunTimeTicks":            0,
 						"Chapters":                []any{},
 						"People":                  []any{},
@@ -402,7 +481,7 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			return
 		}
 		out := make([]map[string]any, 0, len(episodes))
-		now := time.Now().UTC()
+		now := time.Now()
 		for _, e := range episodes {
 			if e.Episode <= 0 {
 				continue
@@ -424,7 +503,7 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			premiere := strings.TrimSpace(e.AirDate)
 			premiereISO := ""
 			if premiere != "" {
-				if t, err := time.Parse("2006-01-02", premiere); err == nil {
+				if t, ok := tmdb.ParseAirDateCNMidnight(premiere); ok {
 					premiereISO = t.UTC().Format(time.RFC3339)
 				}
 			}
@@ -441,7 +520,7 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 				"Path":                    mediaPath,
 				"Container":               "mp4,m4v",
 				"PremiereDate":            premiereISO,
-				"CanDownload":             false,
+				"CanDownload":             true,
 				"RunTimeTicks":            0,
 				"Chapters":                []any{},
 				"People":                  []any{},
@@ -614,7 +693,13 @@ func embyEnsureShowsItemFields(obj map[string]any, fieldsParam string) {
 	}
 	if _, want := fields["CanDownload"]; want {
 		if _, ok := obj["CanDownload"]; !ok {
-			obj["CanDownload"] = false
+			// Allow download for non-folder video items by default.
+			isFolder, _ := obj["IsFolder"].(bool)
+			if !isFolder {
+				obj["CanDownload"] = true
+			} else {
+				obj["CanDownload"] = false
+			}
 		}
 	}
 	if _, want := fields["DateModified"]; want {

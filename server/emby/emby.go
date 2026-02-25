@@ -44,6 +44,9 @@ func EmbyHandler(database *db.DB) http.Handler {
 		"displaypreferences": func(w http.ResponseWriter, r *http.Request, tail []string) {
 			handleEmbyDisplayPreferences(w, r, database, serverID, tail)
 		},
+		"genres": func(w http.ResponseWriter, r *http.Request, tail []string) {
+			handleEmbyGenres(w, r, database, serverID, tail)
+		},
 		"library": func(w http.ResponseWriter, r *http.Request, tail []string) {
 			handleEmbyLibrary(w, r, database, serverID, tail)
 		},

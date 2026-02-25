@@ -1,6 +1,7 @@
 package api
 
 import (
+	"regexp"
 	"strings"
 
 	mfnet "github.com/jenfonro/meowfilm/server/net"
@@ -32,8 +33,19 @@ func normalizeGoProxyServers(value string) []goProxyServer {
 	return out
 }
 
+var reNormalizeContentKey = regexp.MustCompile(`[\s\.\-_,，:：;；!！?？·•/\\|]+`)
+
 func normalizeContentKey(s string) string {
-	return strings.TrimSpace(strings.ToLower(strings.Join(strings.Fields(s), "")))
+	raw := strings.ToLower(strings.TrimSpace(s))
+	if raw == "" {
+		return ""
+	}
+	raw = reNormalizeContentKey.ReplaceAllString(raw, "")
+	raw = strings.ReplaceAll(raw, "\u200b", "")
+	raw = strings.ReplaceAll(raw, "\u200c", "")
+	raw = strings.ReplaceAll(raw, "\u200d", "")
+	raw = strings.ReplaceAll(raw, "\ufeff", "")
+	return strings.TrimSpace(raw)
 }
 
 func defaultString(v, def string) string {

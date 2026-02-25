@@ -75,7 +75,8 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 				"Id":   int64ToStr(id),
 				"Name": username,
 				"Policy": map[string]any{
-					"IsAdministrator": strings.TrimSpace(role) == "admin",
+					"IsAdministrator":          strings.TrimSpace(role) == "admin",
+					"EnableContentDownloading": true,
 				},
 			},
 			"AccessToken": token,
@@ -95,8 +96,7 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			return
 		}
 		// Emby expects SpecialViewOptionDto[].
-		// Return a minimal, static set to satisfy client probes.
-		writeJSON(w, 200, embyDefaultGroupingOptions())
+		writeJSON(w, 200, embyGroupingOptions(database))
 		return
 	}
 
@@ -114,6 +114,8 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			"Name": u.Username,
 			"Policy": map[string]any{
 				"IsAdministrator": strings.TrimSpace(u.Role) == "admin",
+				// Allow content downloads (clients may hide download UI if this is false).
+				"EnableContentDownloading": true,
 			},
 		})
 		return
@@ -125,7 +127,7 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		if !ok {
 			return
 		}
-		writeJSON(w, 200, embyDefaultUsersViewsResponse(serverID))
+		writeJSON(w, 200, embyUsersViewsResponse(database, serverID))
 		return
 	}
 
@@ -140,6 +142,7 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		}
 		startIndex := embyQueryIntClamped(r, "StartIndex", 0, 0, 1<<30)
 		limit := embyQueryIntClamped(r, "Limit", 24, 1, 60)
+		fieldsParam := embyQueryGetCI(r, "fields")
 
 		parentID := embyQueryTrimCI(r, "ParentId")
 		excludeLocationTypes := embyQueryTrimCI(r, "ExcludeLocationTypes")
@@ -148,37 +151,15 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			return
 		}
 
-		kind := ""
-		category := ""
-		hotType := ""
-		if parentID == embyViewTMDBTV {
-			kind = "tv"
-			category = "tv"
-			hotType = "tv"
-		} else if parentID == embyViewTMDBMovies {
-			kind = "movie"
-			category = "热门"
-			hotType = "全部"
-		} else if parentID == embyViewTMDBAnime {
-			kind = "tv"
-			category = "tv"
-			hotType = "tv_animation"
-		} else if parentID == embyViewTMDBShow {
-			kind = "tv"
-			category = "show"
-			hotType = "show"
-		} else {
+		sec, ok := embyResolveHomeSectionByID(database, parentID)
+		if !ok {
 			embyWriteEmptyArrayOK(w)
 			return
 		}
 
-		items := embyBuildDoubanHotListItems(database, kind, category, hotType, startIndex, limit, serverID, parentID)
+		items := embyBuildHomeSectionItems(database, u, sec, startIndex, limit, fieldsParam, serverID, parentID)
 
 		items = embyFilterItemsByExcludeLocationTypes(items, excludeLocationTypes)
-
-		if debug && len(items) == 0 {
-			embyDebugPrintf("[emby][debug] latest empty kind=%s parentId=%q", kind, parentID)
-		}
 
 		// Emby typically returns an array for this endpoint.
 		writeJSON(w, 200, items)
@@ -209,13 +190,34 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			return
 		}
 
-		items := make([]map[string]any, 0, limit)
-		for i, jid := range ids {
-			snap := snaps[i]
-			jid = strings.TrimSpace(jid)
-			if jid == "" {
+		// Return the actual playable item (episode/movie) for Emby clients' "recently watched" section.
+		// Dedupe exact duplicates only.
+		type resumeRow struct {
+			itemID string
+			snap   db.PlayHistorySnapshot
+		}
+		seen := map[string]struct{}{}
+		rows := make([]resumeRow, 0, len(ids))
+		for i, rawID := range ids {
+			rawID = strings.TrimSpace(rawID)
+			if rawID == "" {
 				continue
 			}
+			snap := snaps[i]
+			if snap.Pos <= 0 {
+				continue
+			}
+			if _, ok := seen[rawID]; ok {
+				continue
+			}
+			seen[rawID] = struct{}{}
+			rows = append(rows, resumeRow{itemID: rawID, snap: snap})
+		}
+
+		items := make([]map[string]any, 0, len(rows))
+		for _, row := range rows {
+			jid := strings.TrimSpace(row.itemID)
+			snap := row.snap
 			obj, err := embyBuildItem(database, jid)
 			if err != nil || obj == nil {
 				continue
@@ -229,8 +231,14 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 				pos = 0
 			}
 			ud["PlaybackPositionTicks"] = pos
-			if snap.Runtime > 0 && pos > 0 {
-				ud["PlayedPercentage"] = (float64(pos) / float64(snap.Runtime)) * 100.0
+			runtime := snap.Runtime
+			if runtime <= 0 {
+				// Some clients won't render resume cards without RunTimeTicks.
+				// Use a conservative fallback based on current position.
+				runtime = pos + int64(60*1e7) // +60s
+			}
+			if runtime > 0 && pos > 0 {
+				ud["PlayedPercentage"] = (float64(pos) / float64(runtime)) * 100.0
 			}
 			if snap.Updated > 0 {
 				ud["LastPlayedDate"] = time.Unix(snap.Updated, 0).UTC().Format(time.RFC3339Nano)
@@ -247,11 +255,7 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			ud["Played"] = false
 			obj["UserData"] = ud
 
-			if snap.Runtime > 0 {
-				if _, ok := obj["RunTimeTicks"]; !ok {
-					obj["RunTimeTicks"] = snap.Runtime
-				}
-			}
+			obj["RunTimeTicks"] = runtime
 			embyEnsureInfuseItemFields(obj, jid, fieldsParam, serverID)
 			embyEnsureStandardItem(obj, serverID)
 			items = append(items, obj)
@@ -264,7 +268,71 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		} else if debug {
 			embyDebugPrintf("[emby][resume] count failed err=%q", err.Error())
 		}
+		// Some clients decide visibility purely based on TotalRecordCount.
+		if total < startIndex+len(items) {
+			total = startIndex + len(items)
+		}
+		if debug && len(items) == 0 {
+			embyDebugPrintf("[emby][resume] empty start=%d limit=%d raw=%d dedup=%d", startIndex, limit, len(ids), len(rows))
+		}
 		writeJSON(w, 200, embyPagedItems(items, startIndex, total))
+		return
+	}
+
+	// POST /Users/{id}/Items/{itemId}/HideFromResume
+	// Some clients call this for each resume item; 404 may cause them to hide the entire "recently watched" section.
+	if len(parts) == 4 && strings.EqualFold(parts[1], "Items") && strings.EqualFold(parts[3], "HideFromResume") && r.Method == http.MethodPost {
+		u, ok := embyRequireUser(w, r, database)
+		if !ok {
+			return
+		}
+		if !embyRequireSameUserOrNotFound(w, u.ID, parts[0]) {
+			return
+		}
+		itemID := strings.TrimSpace(parts[2])
+		var body struct {
+			Hide bool `json:"Hide"`
+		}
+		_ = readJSONLoose(r, &body)
+
+		uid, _ := strconv.ParseInt(strings.TrimSpace(u.ID), 10, 64)
+		snap := db.PlayHistorySnapshot{}
+		if uid > 0 && database != nil && itemID != "" {
+			if m, err := database.GetPlayHistorySnapshotsByPlaybackItemIDs(uid, []string{itemID}); err == nil {
+				if v, ok := m[itemID]; ok {
+					snap = v
+				}
+			}
+		}
+
+		pos := snap.Pos
+		if pos < 0 {
+			pos = 0
+		}
+		runtime := snap.Runtime
+		if runtime <= 0 && pos > 0 {
+			runtime = pos + int64(60*1e7)
+		}
+		playedPct := 0.0
+		if runtime > 0 && pos > 0 {
+			playedPct = (float64(pos) / float64(runtime)) * 100.0
+		}
+		lastPlayed := ""
+		if snap.Updated > 0 {
+			lastPlayed = time.Unix(snap.Updated, 0).UTC().Format(time.RFC3339Nano)
+		}
+
+		// Mimic Emby: return user-data JSON even when Hide=false (clients treat it as a capability probe).
+		// We currently ignore Hide=true to avoid the client accidentally wiping the resume list.
+		_ = body.Hide
+		writeJSON(w, 200, map[string]any{
+			"PlayedPercentage":      playedPct,
+			"PlaybackPositionTicks": pos,
+			"PlayCount":             0,
+			"IsFavorite":            false,
+			"LastPlayedDate":        lastPlayed,
+			"Played":                false,
+		})
 		return
 	}
 
@@ -284,221 +352,35 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			embyNotFound(w)
 			return
 		}
-		if v, ok := embyDefaultViewFolderItemByID(serverID, itemID); ok {
+
+		// Some clients probe download capability by requesting item details with CanDownload field,
+		// then immediately issuing a burst of playback/episode requests. Avoid heavy smart probing
+		// for a short window after detecting this pattern.
+		if embyFieldsHasCI(fieldsParam, "CanDownload") {
+			if parsed, ok := embyParseItemID(itemID); ok && parsed != nil && parsed.TMDBID > 0 {
+				embyNoteDownloadProbe(u.ID, embyClientDeviceID(r), parsed.TMDBID)
+			}
+		}
+		if v, ok := embyViewFolderItemByID(database, serverID, itemID); ok {
 			writeJSON(w, 200, v)
 			return
 		}
+
+		// During active playback, some clients issue a burst of detail requests derived from the playing item.
+		// Return a minimal item shape and avoid any extra parsing/network work.
+		if playing, ok := embyGetPlaying(u.ID, embyClientDeviceID(r)); ok {
+			if embyIsDerivedFromPlaying(playing.ItemID, itemID) {
+				if quick := embyBuildQuickNowPlayingItem(serverID, itemID, playing); quick != nil {
+					writeJSON(w, 200, quick)
+					return
+				}
+			}
+		}
+
 		obj, err := embyBuildItem(database, itemID)
 		if err != nil {
 			embyBadGateway(w, err)
 			return
-		}
-		if obj == nil {
-			// Site-mapped items: return a minimal, Emby-shaped item so strict clients can open/browse it.
-			if p, ok := embyDecodeSiteSeriesID(itemID); ok && strings.TrimSpace(p.Name) != "" {
-				siteName := strings.TrimSpace(p.Site)
-				if siteName == "" {
-					siteName = strings.TrimSpace(p.SiteKey)
-				}
-				overview := strings.TrimSpace(p.Remark)
-				// Best-effort: load site detail so users see a concrete error when the spider fails (502/404) or data can't be parsed.
-				// Keep HTTP 200 to avoid strict clients treating the whole detail page as a protocol failure.
-				pans, err := embyFetchSiteDetailPansDedup(database, u, p.SiteAPI, p.VideoID)
-				if err != nil {
-					msg := strings.TrimSpace(err.Error())
-					if msg == "" {
-						msg = "未知错误"
-					}
-					overview = "站点详情获取失败: " + msg
-				} else if len(pans) == 0 {
-					overview = "站点详情无可解析播放源"
-				}
-				obj = map[string]any{
-					"Id":                itemID,
-					"Name":              strings.TrimSpace(p.Name),
-					"SortName":          strings.TrimSpace(p.Name),
-					"Type":              "Series",
-					"MediaType":         "Video",
-					"IsFolder":          true,
-					"LocationType":      "Remote",
-					"Path":              "meowfilm://" + itemID,
-					"ProductionYear":    0,
-					"ImageTags":         map[string]any{"Primary": "site"},
-					"BackdropImageTags": []string{},
-					"ProviderIds":       map[string]any{},
-					"Overview":          overview,
-					"ParentId":          "",
-					"UserData":          map[string]any{"Played": false},
-				}
-				if siteName != "" {
-					obj["ProductionLocations"] = []string{siteName}
-				}
-				if len(pans) > 0 {
-					obj["ChildCount"] = len(pans)
-					recursive := 0
-					for _, pan := range pans {
-						recursive += len(pan.Episodes)
-					}
-					obj["RecursiveItemCount"] = recursive
-				}
-			} else if sp, ok := embyDecodeSiteSeasonID(itemID); ok {
-				seriesName := strings.TrimSpace(sp.Label)
-				if seriesName == "" {
-					seriesName = "网盘资源"
-				}
-				name := strings.TrimSpace(sp.Label)
-				if name == "" {
-					name = "第" + intToCN(sp.Pan) + "季"
-				}
-				obj = map[string]any{
-					"Id":           itemID,
-					"Name":         name,
-					"SeriesName":   seriesName,
-					"Type":         "Season",
-					"IsFolder":     true,
-					"LocationType": "Remote",
-					"SeriesId":     "",
-					"ParentId":     "",
-					"IndexNumber":  sp.Pan,
-					"ImageTags":    map[string]any{"Primary": "site", "Thumb": "site"},
-					"UserData":     map[string]any{"Played": false},
-				}
-				if strings.TrimSpace(sp.Site) != "" {
-					obj["ProductionLocations"] = []string{strings.TrimSpace(sp.Site)}
-				}
-			} else if ep, ok := embyDecodeSiteEpisodeID(itemID); ok {
-				seriesName := "网盘资源"
-				if strings.TrimSpace(ep.Site) != "" {
-					seriesName = strings.TrimSpace(ep.Site)
-				}
-				seasonName := "第" + intToCN(ep.Pan) + "季"
-				name := "第" + intToCN(ep.Ep) + "集"
-				mediaPath := embyBuildMediaPath(itemID, "mp4")
-				mediaSourceID := embyStableHex32(itemID)
-				obj = map[string]any{
-					"Id":                itemID,
-					"Name":              name,
-					"SeriesName":        seriesName,
-					"SeasonName":        seasonName,
-					"Overview":          strings.TrimSpace(ep.Remark),
-					"Type":              "Episode",
-					"MediaType":         "Video",
-					"IsFolder":          false,
-					"LocationType":      "Remote",
-					"Path":              mediaPath,
-					"Container":         "mp4,m4v",
-					"CanDownload":       false,
-					"RunTimeTicks":      int64(0),
-					"Chapters":          []any{},
-					"People":            []any{},
-					"Size":              0,
-					"SeriesId":          "",
-					"SeasonId":          "",
-					"ParentId":          "",
-					"IndexNumber":       ep.Ep,
-					"ParentIndexNumber": ep.Pan,
-					"ImageTags":         map[string]any{"Primary": "site", "Thumb": "site"},
-					"UserData":          map[string]any{"Played": false},
-					"MediaSources": []map[string]any{
-						{
-							"Id":                   mediaSourceID,
-							"MediaSourceId":        mediaSourceID,
-							"Protocol":             "File",
-							"IsRemote":             false,
-							"Path":                 mediaPath,
-							"Container":            "mp4",
-							"RequiredHttpHeaders":  map[string]string{},
-							"SupportsDirectPlay":   true,
-							"SupportsDirectStream": true,
-							"SupportsTranscoding":  true,
-							"SupportsProbing":      true,
-							"Type":                 "Default",
-						},
-					},
-					"AlternateMediaSources": []any{},
-				}
-			} else if s, ok := embySiteSeasonMapGet(itemID); ok && strings.TrimSpace(s.SeriesID) != "" {
-				seriesName := ""
-				if se, ok := embySiteMapGet(s.SeriesID); ok {
-					seriesName = strings.TrimSpace(se.Name)
-				}
-				name := strings.TrimSpace(s.Label)
-				if name == "" {
-					name = "第" + intToCN(s.SeasonNo) + "季"
-				}
-				obj = map[string]any{
-					"Id":           itemID,
-					"Name":         name,
-					"SeriesName":   seriesName,
-					"Type":         "Season",
-					"IsFolder":     true,
-					"LocationType": "Remote",
-					"SeriesId":     strings.TrimSpace(s.SeriesID),
-					"ParentId":     strings.TrimSpace(s.SeriesID),
-					"IndexNumber":  s.SeasonNo,
-					"ImageTags":    map[string]any{"Primary": "site", "Thumb": "site"},
-					"UserData":     map[string]any{"Played": false},
-				}
-			} else if ep, ok := embySiteEpisodeMapGet(itemID); ok && strings.TrimSpace(ep.SeriesID) != "" {
-				seriesName := ""
-				if se, ok := embySiteMapGet(ep.SeriesID); ok {
-					seriesName = strings.TrimSpace(se.Name)
-				}
-				seasonName := "第" + intToCN(ep.SeasonNo) + "季"
-				if strings.TrimSpace(ep.SeasonID) != "" {
-					if ss, ok := embySiteSeasonMapGet(ep.SeasonID); ok && strings.TrimSpace(ss.Label) != "" {
-						seasonName = strings.TrimSpace(ss.Label)
-					}
-				}
-				name := strings.TrimSpace(ep.EpisodeName)
-				if name == "" {
-					name = "第" + intToCN(ep.EpisodeIndex) + "集"
-				}
-				mediaPath := embyBuildMediaPath(itemID, "mp4")
-				mediaSourceID := embyStableHex32(itemID)
-				obj = map[string]any{
-					"Id":                itemID,
-					"Name":              name,
-					"SeriesName":        seriesName,
-					"SeasonName":        seasonName,
-					"Overview":          strings.TrimSpace(ep.Remark),
-					"Type":              "Episode",
-					"MediaType":         "Video",
-					"IsFolder":          false,
-					"LocationType":      "Remote",
-					"Path":              mediaPath,
-					"Container":         "mp4,m4v",
-					"CanDownload":       false,
-					"RunTimeTicks":      int64(0),
-					"Chapters":          []any{},
-					"People":            []any{},
-					"Size":              0,
-					"SeriesId":          strings.TrimSpace(ep.SeriesID),
-					"SeasonId":          strings.TrimSpace(ep.SeasonID),
-					"ParentId":          strings.TrimSpace(ep.SeasonID),
-					"IndexNumber":       ep.EpisodeIndex,
-					"ParentIndexNumber": ep.SeasonNo,
-					"ImageTags":         map[string]any{"Primary": "site", "Thumb": "site"},
-					"UserData":          map[string]any{"Played": false},
-					"MediaSources": []map[string]any{
-						{
-							"Id":                   mediaSourceID,
-							"MediaSourceId":        mediaSourceID,
-							"Protocol":             "File",
-							"IsRemote":             false,
-							"Path":                 mediaPath,
-							"Container":            "mp4",
-							"RequiredHttpHeaders":  map[string]string{},
-							"SupportsDirectPlay":   true,
-							"SupportsDirectStream": true,
-							"SupportsTranscoding":  true,
-							"SupportsProbing":      true,
-							"Type":                 "Default",
-						},
-					},
-					"AlternateMediaSources": []any{},
-				}
-			}
 		}
 		if obj == nil {
 			embyNotFound(w)
@@ -532,43 +414,16 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		parent := embyQueryTrimCI(r, "ParentId")
 		searchTerm := embyQueryTrimCI(r, "SearchTerm")
 		includeItemTypes := embyQueryTrimCI(r, "IncludeItemTypes")
+		excludeItemTypes := embyQueryTrimCI(r, "ExcludeItemTypes")
 		fieldsParam := embyQueryGetCI(r, "fields")
 		excludeLocationTypes := embyQueryTrimCI(r, "ExcludeLocationTypes")
 
-		if parent == embyViewTMDBMovies || parent == embyViewTMDBTV || parent == embyViewTMDBAnime || parent == embyViewTMDBShow {
+		if sec, ok := embyResolveHomeSectionByID(database, parent); ok {
 			startIndex := embyQueryIntClamped(r, "StartIndex", 0, 0, 1<<30)
 			limit := embyQueryIntClamped(r, "Limit", 24, 1, 60)
 
-			kind := ""
-			category := ""
-			hotType := ""
-			switch parent {
-			case embyViewTMDBTV:
-				kind = "tv"
-				category = "tv"
-				hotType = "tv"
-			case embyViewTMDBMovies:
-				kind = "movie"
-				category = "热门"
-				hotType = "全部"
-			case embyViewTMDBAnime:
-				kind = "tv"
-				category = "tv"
-				hotType = "tv_animation"
-			case embyViewTMDBShow:
-				kind = "tv"
-				category = "show"
-				hotType = "show"
-			default:
-				embyNotFound(w)
-				return
-			}
-
-			out := embyBuildDoubanHotListItems(database, kind, category, hotType, startIndex, limit, serverID, parent)
+			out := embyBuildHomeSectionItems(database, u, sec, startIndex, limit, fieldsParam, serverID, parent)
 			out = embyFilterItemsByExcludeLocationTypes(out, excludeLocationTypes)
-			if debug && len(out) == 0 {
-				embyDebugPrintf("[emby][debug] users.items empty parent=%q kind=%s start=%d limit=%d", parent, kind, startIndex, limit)
-			}
 
 			// Emby clients page based on TotalRecordCount; Douban doesn't provide a reliable total here.
 			// Use a "has more" hint when we return a full page.
@@ -577,6 +432,65 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 				total++
 			}
 			writeJSON(w, 200, embyPagedItems(out, startIndex, total))
+			return
+		}
+
+		// Some clients (e.g. 网易爆米花 iOS) probe /Users/{id}/Items without ParentId to obtain "libraries".
+		// If we return actual movies/series here, the client may treat each item as a library root and then
+		// call /Items/Latest with ParentId=tmdb_movie_xxx (which doesn't match our view logic).
+		// Detect this probe shape (ExcludeItemTypes present, no IncludeItemTypes) and return view folders instead.
+		if parent == "" && searchTerm == "" && strings.TrimSpace(includeItemTypes) == "" && strings.TrimSpace(excludeItemTypes) != "" {
+			startIndex := embyQueryIntClamped(r, "StartIndex", 0, 0, 1<<30)
+			limit := embyQueryIntClamped(r, "Limit", 24, 1, 100)
+			all := embyViewFolders(database, serverID)
+			total := len(all)
+			page := []map[string]any{}
+			if startIndex < total {
+				end := startIndex + limit
+				if end > total {
+					end = total
+				}
+				page = all[startIndex:end]
+			}
+			// Keep schema consistent with other /Items responses.
+			for _, obj := range page {
+				if obj == nil {
+					continue
+				}
+				jid, _ := obj["Id"].(string)
+				embyEnsureInfuseItemFields(obj, jid, fieldsParam, serverID)
+				embyEnsureStandardItem(obj, serverID)
+			}
+			writeJSON(w, 200, embyPagedItems(page, startIndex, total))
+			return
+		}
+
+		// Some mobile clients send a "library browse" request with IncludeItemTypes but still expect the response
+		// to be library roots (views). If we return real items here, the client may treat each item as a library
+		// and then call /Items/Latest with ParentId=tmdb_movie_xxx which we don't support.
+		// Keep the richer virtual library feed only for Infuse.
+		if parent == "" && searchTerm == "" && strings.TrimSpace(includeItemTypes) != "" && !embyIsInfuseClient(r) {
+			startIndex := embyQueryIntClamped(r, "StartIndex", 0, 0, 1<<30)
+			limit := embyQueryIntClamped(r, "Limit", 24, 1, 100)
+			all := embyViewFolders(database, serverID)
+			total := len(all)
+			page := []map[string]any{}
+			if startIndex < total {
+				end := startIndex + limit
+				if end > total {
+					end = total
+				}
+				page = all[startIndex:end]
+			}
+			for _, obj := range page {
+				if obj == nil {
+					continue
+				}
+				jid, _ := obj["Id"].(string)
+				embyEnsureInfuseItemFields(obj, jid, fieldsParam, serverID)
+				embyEnsureStandardItem(obj, serverID)
+			}
+			writeJSON(w, 200, embyPagedItems(page, startIndex, total))
 			return
 		}
 
@@ -794,6 +708,13 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		// Mapping from site card Id -> site detail/playback is stored server-side.
 		if parent == "" && searchTerm != "" {
 			startIndex := embyQueryIntClamped(r, "StartIndex", 0, 0, 1<<30)
+			// During active playback, ignore background search requests to avoid extra parsing/network work.
+			if playing, ok := embyGetPlaying(u.ID, embyClientDeviceID(r)); ok {
+				if embyIsDerivedSearchTerm(playing, searchTerm) {
+					writeJSON(w, 200, embyPagedEmpty(startIndex))
+					return
+				}
+			}
 			limit := embyQueryIntClamped(r, "Limit", 24, 1, 60)
 			startAt := time.Now()
 			scoreTerm := CanonicalSearchTerm(searchTerm)
@@ -998,15 +919,14 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 					siteName = strings.TrimSpace(h.SiteKey)
 				}
 
-				siteID := embyEncodeSiteSeriesID(embySiteSeriesIDPayload{
-					SiteKey: strings.TrimSpace(h.SiteKey),
-					Site:    siteName,
-					SiteAPI: strings.TrimSpace(h.SpiderAPI),
-					VideoID: strings.TrimSpace(h.VideoID),
-					Name:    strings.TrimSpace(h.Name),
-					Pic:     strings.TrimSpace(h.Pic),
-					Remark:  strings.TrimSpace(h.Remark),
-				})
+				// Persist poster/remark for short site ids (images resolved via DB).
+				siteVideoID := int64(0)
+				if database != nil {
+					id, _ := database.UpsertSiteVideo(strings.TrimSpace(h.SiteKey), strings.TrimSpace(h.VideoID), strings.TrimSpace(h.Name), strings.TrimSpace(h.Pic), strings.TrimSpace(h.Remark), time.Now().Unix())
+					siteVideoID = id
+				}
+
+				siteID := embyBuildSiteSeriesIDV2(siteVideoID)
 				if strings.TrimSpace(siteID) == "" {
 					continue
 				}
@@ -1335,13 +1255,16 @@ func embyStableEtag(id string) string {
 }
 
 func embyBuildViewFolderItem(serverID string, id string, name string, collectionType string) map[string]any {
+	etag := embyStableEtag(strings.TrimSpace(id) + "|" + strings.TrimSpace(name) + "|" + strings.TrimSpace(collectionType))
 	return map[string]any{
 		"Id":                id,
 		"Name":              name,
+		"SortName":          name,
 		"Type":              "CollectionFolder",
 		"CollectionType":    collectionType,
 		"IsFolder":          true,
 		"ServerId":          serverID,
+		"Etag":              etag,
 		"UserData":          map[string]any{"Played": false},
 		"ImageTags":         map[string]any{},
 		"BackdropImageTags": []any{},

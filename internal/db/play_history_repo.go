@@ -540,3 +540,26 @@ func (d *DB) CountResumePlaybackItems(userID int64) (int, error) {
 	err := d.db.QueryRow(`SELECT COUNT(1) FROM user_play_history WHERE user_id = ? AND playback_item_id <> ''`, userID).Scan(&total)
 	return total, err
 }
+
+// DeleteResumePlaybackItemsByPrefix removes resume/play-history entries by playback_item_id prefix.
+// This matches Emby-style HideFromResume calls that may target a series ID while stored rows are episodes.
+func (d *DB) DeleteResumePlaybackItemsByPrefix(userID int64, prefix string) (int64, error) {
+	if d == nil || d.db == nil || userID <= 0 {
+		return 0, nil
+	}
+	p := strings.ToLower(strings.TrimSpace(prefix))
+	if p == "" {
+		return 0, nil
+	}
+	res, err := d.db.Exec(`
+		DELETE FROM user_play_history
+		WHERE user_id = ?
+		  AND playback_item_id <> ''
+		  AND lower(playback_item_id) LIKE ?
+	`, userID, p+"%")
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
