@@ -44,13 +44,13 @@ func handleEmbyPlaybackInfo(w http.ResponseWriter, r *http.Request, database *db
 			}
 			urlPicked := ""
 			headers := map[string]string{}
-					if pid := smartPanMockProviderID(strings.TrimSpace(ep.Flag)); pid != "" {
-						switch pid {
-						case "189":
-							ac := ""
-							parts := strings.Split(strings.TrimSpace(ep.URL), "*")
-							if len(parts) >= 2 {
-								if v, ok := embyPanMock189AccessGet(strings.TrimSpace(parts[1])); ok {
+			if pid := smartPanMockProviderID(strings.TrimSpace(ep.Flag)); pid != "" {
+				switch pid {
+				case "189":
+					ac := ""
+					parts := strings.Split(strings.TrimSpace(ep.URL), "*")
+					if len(parts) >= 2 {
+						if v, ok := embyPanMock189AccessGet(strings.TrimSpace(parts[1])); ok {
 							ac = v
 						}
 					}
@@ -64,7 +64,7 @@ func handleEmbyPlaybackInfo(w http.ResponseWriter, r *http.Request, database *db
 					}
 					urlPicked = strings.TrimSpace(u2)
 				case "quark":
-					u2, header, err := netdisk.QuarkPlay(database, strings.TrimSpace(ep.URL), "")
+					u2, header, err := netdisk.QuarkPlayWithTVUser(database, strings.TrimSpace(ep.URL), "", tvUser)
 					if err != nil {
 						if embyDebugLogEnabled() {
 							embyDebugPrintf("[emby][playback] fail item=%s pid=%s err=%q cost=%s", embyID, pid, err.Error(), time.Since(startAt).String())
@@ -83,7 +83,7 @@ func handleEmbyPlaybackInfo(w http.ResponseWriter, r *http.Request, database *db
 						}
 					}
 				case "uc":
-					u2, header, err := netdisk.UCPlay(database, strings.TrimSpace(ep.URL), "")
+					u2, header, err := netdisk.UCPlayWithTVUser(database, strings.TrimSpace(ep.URL), "", tvUser)
 					if err != nil {
 						if embyDebugLogEnabled() {
 							embyDebugPrintf("[emby][playback] fail item=%s pid=%s err=%q cost=%s", embyID, pid, err.Error(), time.Since(startAt).String())

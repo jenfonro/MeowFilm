@@ -1689,6 +1689,10 @@ func QuarkPlay(database *db.DB, id string, want string) (string, map[string]stri
 	return quarkPlayImpl(database, id, want, "")
 }
 
+func QuarkPlayWithTVUser(database *db.DB, id string, want string, tvUser string) (string, map[string]string, error) {
+	return quarkPlayImpl(database, id, want, tvUser)
+}
+
 func HandleAPIQuarkTVRefresh(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
