@@ -38,7 +38,7 @@ func RewriteVideoPosterURL(value string, doubanImgProxy string, doubanImgCustom 
 
 	mode := NormalizeProxyMode(doubanImgProxy)
 	if mode == "" {
-		mode = "direct-browser"
+		mode = "server-proxy"
 	}
 	switch mode {
 	case "server-proxy":

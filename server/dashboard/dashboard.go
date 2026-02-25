@@ -462,9 +462,9 @@ func handleDashboardBackup(w http.ResponseWriter, r *http.Request, database *db.
 			"smartPanMatchTokens":        defaultStringArray(smartPanMatchTokens),
 		},
 		"metadata": map[string]any{
-			"doubanDataProxy":    defaultString(cfg.DoubanDataProxy, "direct"),
+			"doubanDataProxy":    defaultString(cfg.DoubanDataProxy, "server-proxy"),
 			"doubanDataCustom":   cfg.DoubanDataCustom,
-			"doubanImgProxy":     defaultString(cfg.DoubanImgProxy, "direct-browser"),
+			"doubanImgProxy":     defaultString(cfg.DoubanImgProxy, "server-proxy"),
 			"doubanImgCustom":    cfg.DoubanImgCustom,
 			"tmdbApiToken":       strings.TrimSpace(cfg.TMDBAPIToken),
 			"tmdbDataProxyBase":  strings.TrimSpace(cfg.TMDBAPIBase),
@@ -882,9 +882,9 @@ func handleDashboardMetadataSettings(w http.ResponseWriter, r *http.Request, dat
 		cfg, _ := database.ReadAppConfig()
 		writeJSON(w, 200, map[string]any{
 			"success":            true,
-			"doubanDataProxy":    defaultString(cfg.DoubanDataProxy, "direct"),
+			"doubanDataProxy":    defaultString(cfg.DoubanDataProxy, "server-proxy"),
 			"doubanDataCustom":   cfg.DoubanDataCustom,
-			"doubanImgProxy":     defaultString(cfg.DoubanImgProxy, "direct-browser"),
+			"doubanImgProxy":     defaultString(cfg.DoubanImgProxy, "server-proxy"),
 			"doubanImgCustom":    cfg.DoubanImgCustom,
 			"tmdbApiToken":       strings.TrimSpace(cfg.TMDBAPIToken),
 			"tmdbDataProxyBase":  strings.TrimSpace(cfg.TMDBAPIBase),

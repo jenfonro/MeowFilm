@@ -7,8 +7,8 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
-	"strings"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,8 +32,8 @@ const doubanSeasonMetaCacheMaxEntries = 2000
 const doubanSeasonHintSource = "douban"
 
 type doubanProbeInFlightEntry struct {
-	done   chan struct{}
-	ok     bool
+	done    chan struct{}
+	ok      bool
 	seasons []embyTMDBSeason
 }
 
@@ -422,28 +422,9 @@ func doubanProbeSeasons(database *db.DB, tmdbID int, keyword string, wantGlobal 
 		return nil, false
 	}
 
-		var raw struct {
-			Subjects struct {
-				Items []struct {
-					TargetType string `json:"target_type"`
-					TargetID   any    `json:"target_id"`
-					Target     struct {
-						ID               any      `json:"id"`
-						Title            string   `json:"title"`
-						Year             any      `json:"year"`
-						CardSubtitle     string   `json:"card_subtitle"`
-						CardSubTitle     string   `json:"cardSubTitle"`
-						Subtitle         string   `json:"subtitle"`
-						SubTitle         string   `json:"sub_title"`
-						NullRatingReason string   `json:"null_rating_reason"`
-						IsReleased       *bool    `json:"is_released"`
-						CanRate          *bool    `json:"can_rate"`
-						VendorCount      any      `json:"vendor_count"`
-						Pubdate          []string `json:"pubdate"`
-					} `json:"target"`
-				} `json:"items"`
-			} `json:"subjects"`
-			SmartBox []struct {
+	var raw struct {
+		Subjects struct {
+			Items []struct {
 				TargetType string `json:"target_type"`
 				TargetID   any    `json:"target_id"`
 				Target     struct {
@@ -460,8 +441,27 @@ func doubanProbeSeasons(database *db.DB, tmdbID int, keyword string, wantGlobal 
 					VendorCount      any      `json:"vendor_count"`
 					Pubdate          []string `json:"pubdate"`
 				} `json:"target"`
-			} `json:"smart_box"`
-		}
+			} `json:"items"`
+		} `json:"subjects"`
+		SmartBox []struct {
+			TargetType string `json:"target_type"`
+			TargetID   any    `json:"target_id"`
+			Target     struct {
+				ID               any      `json:"id"`
+				Title            string   `json:"title"`
+				Year             any      `json:"year"`
+				CardSubtitle     string   `json:"card_subtitle"`
+				CardSubTitle     string   `json:"cardSubTitle"`
+				Subtitle         string   `json:"subtitle"`
+				SubTitle         string   `json:"sub_title"`
+				NullRatingReason string   `json:"null_rating_reason"`
+				IsReleased       *bool    `json:"is_released"`
+				CanRate          *bool    `json:"can_rate"`
+				VendorCount      any      `json:"vendor_count"`
+				Pubdate          []string `json:"pubdate"`
+			} `json:"target"`
+		} `json:"smart_box"`
+	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		if inFlightEntry != nil {
 			doubanProbeFinish(id, inFlightEntry, nil, false)
@@ -499,47 +499,47 @@ func doubanProbeSeasons(database *db.DB, tmdbID int, keyword string, wantGlobal 
 		keywordBase = strings.TrimSpace(seg[0])
 	}
 	baseKey := normalizeForMatch(keywordBase)
-		isLikelyUnreleased := func(sub string) bool {
-			s := strings.TrimSpace(sub)
-			if s == "" {
-				return false
-			}
-			return regexp.MustCompile(`(尚未上映|尚未播出|即将上映|即将播出)`).MatchString(s)
+	isLikelyUnreleased := func(sub string) bool {
+		s := strings.TrimSpace(sub)
+		if s == "" {
+			return false
 		}
-		isLikelyUnreleasedByDetail := func(nullReason string, isReleased *bool, canRate *bool, vendorCount any, pubdate []string) bool {
-			if strings.TrimSpace(nullReason) != "" && regexp.MustCompile(`(尚未上映|尚未播出)`).MatchString(nullReason) {
+		return regexp.MustCompile(`(尚未上映|尚未播出|即将上映|即将播出)`).MatchString(s)
+	}
+	isLikelyUnreleasedByDetail := func(nullReason string, isReleased *bool, canRate *bool, vendorCount any, pubdate []string) bool {
+		if strings.TrimSpace(nullReason) != "" && regexp.MustCompile(`(尚未上映|尚未播出)`).MatchString(nullReason) {
+			return true
+		}
+		if isReleased != nil && !*isReleased {
+			return true
+		}
+		if canRate != nil && !*canRate {
+			vc := 0
+			if n, err := strconv.Atoi(strings.TrimSpace(doubanAnyIDToString(vendorCount))); err == nil {
+				vc = n
+			}
+			if vc <= 0 {
 				return true
 			}
-			if isReleased != nil && !*isReleased {
+		}
+		for _, p := range pubdate {
+			ps := strings.TrimSpace(p)
+			if ps == "" {
+				continue
+			}
+			if regexp.MustCompile(`(尚未上映|尚未播出|即将上映|即将播出|未定)`).MatchString(ps) {
 				return true
 			}
-			if canRate != nil && !*canRate {
-				vc := 0
-				if n, err := strconv.Atoi(strings.TrimSpace(doubanAnyIDToString(vendorCount))); err == nil {
-					vc = n
-				}
-				if vc <= 0 {
-					return true
-				}
-			}
-			for _, p := range pubdate {
-				ps := strings.TrimSpace(p)
-				if ps == "" {
-					continue
-				}
-				if regexp.MustCompile(`(尚未上映|尚未播出|即将上映|即将播出|未定)`).MatchString(ps) {
-					return true
-				}
-				if m := regexp.MustCompile(`\b(19|20)\d{2}-\d{2}-\d{2}\b`).FindString(ps); m != "" {
-					if d, err := time.Parse("2006-01-02", m); err == nil {
-						if d.After(time.Now()) {
-							return true
-						}
+			if m := regexp.MustCompile(`\b(19|20)\d{2}-\d{2}-\d{2}\b`).FindString(ps); m != "" {
+				if d, err := time.Parse("2006-01-02", m); err == nil {
+					if d.After(time.Now()) {
+						return true
 					}
 				}
 			}
-			return false
 		}
+		return false
+	}
 	parseYear := func(v any) int {
 		s := strings.TrimSpace(doubanAnyIDToString(v))
 		if s == "" {
@@ -577,26 +577,26 @@ func doubanProbeSeasons(database *db.DB, tmdbID int, keyword string, wantGlobal 
 		return false
 	}
 
-		push := func(typ string, id any, targetID any, title string, year any, sub string, nullReason string, isReleased *bool, canRate *bool, vendorCount any, pubdate []string) {
-			if strings.TrimSpace(typ) != "tv" {
-				return
-			}
-			t := strings.TrimSpace(title)
+	push := func(typ string, id any, targetID any, title string, year any, sub string, nullReason string, isReleased *bool, canRate *bool, vendorCount any, pubdate []string) {
+		if strings.TrimSpace(typ) != "tv" {
+			return
+		}
+		t := strings.TrimSpace(title)
 		if t == "" {
 			return
 		}
-			if !isStrictTitleMatch(t) {
-				return
-			}
-			if isLikelyUnreleased(sub) {
-				return
-			}
-			if isLikelyUnreleasedByDetail(nullReason, isReleased, canRate, vendorCount, pubdate) {
-				return
-			}
-			nowY := time.Now().Year()
-			if y := parseYear(year); y > 0 && y > nowY {
-				return
+		if !isStrictTitleMatch(t) {
+			return
+		}
+		if isLikelyUnreleased(sub) {
+			return
+		}
+		if isLikelyUnreleasedByDetail(nullReason, isReleased, canRate, vendorCount, pubdate) {
+			return
+		}
+		nowY := time.Now().Year()
+		if y := parseYear(year); y > 0 && y > nowY {
+			return
 		}
 		did := doubanAnyIDToString(id)
 		if did == "" {
@@ -607,32 +607,32 @@ func doubanProbeSeasons(database *db.DB, tmdbID int, keyword string, wantGlobal 
 		}
 		items = append(items, cand{ID: did, Title: t, Year: doubanAnyIDToString(year), Sub: strings.TrimSpace(sub)})
 	}
-		for _, it := range raw.Subjects.Items {
-			sub := strings.TrimSpace(it.Target.CardSubtitle)
-			if sub == "" {
-				sub = strings.TrimSpace(it.Target.CardSubTitle)
-			}
-			if sub == "" {
-				sub = strings.TrimSpace(it.Target.Subtitle)
-			}
-			if sub == "" {
-				sub = strings.TrimSpace(it.Target.SubTitle)
-			}
-			push(it.TargetType, it.Target.ID, it.TargetID, it.Target.Title, it.Target.Year, sub, it.Target.NullRatingReason, it.Target.IsReleased, it.Target.CanRate, it.Target.VendorCount, it.Target.Pubdate)
+	for _, it := range raw.Subjects.Items {
+		sub := strings.TrimSpace(it.Target.CardSubtitle)
+		if sub == "" {
+			sub = strings.TrimSpace(it.Target.CardSubTitle)
 		}
-		for _, it := range raw.SmartBox {
-			sub := strings.TrimSpace(it.Target.CardSubtitle)
-			if sub == "" {
-				sub = strings.TrimSpace(it.Target.CardSubTitle)
-			}
-			if sub == "" {
-				sub = strings.TrimSpace(it.Target.Subtitle)
-			}
-			if sub == "" {
-				sub = strings.TrimSpace(it.Target.SubTitle)
-			}
-			push(it.TargetType, it.Target.ID, it.TargetID, it.Target.Title, it.Target.Year, sub, it.Target.NullRatingReason, it.Target.IsReleased, it.Target.CanRate, it.Target.VendorCount, it.Target.Pubdate)
+		if sub == "" {
+			sub = strings.TrimSpace(it.Target.Subtitle)
 		}
+		if sub == "" {
+			sub = strings.TrimSpace(it.Target.SubTitle)
+		}
+		push(it.TargetType, it.Target.ID, it.TargetID, it.Target.Title, it.Target.Year, sub, it.Target.NullRatingReason, it.Target.IsReleased, it.Target.CanRate, it.Target.VendorCount, it.Target.Pubdate)
+	}
+	for _, it := range raw.SmartBox {
+		sub := strings.TrimSpace(it.Target.CardSubtitle)
+		if sub == "" {
+			sub = strings.TrimSpace(it.Target.CardSubTitle)
+		}
+		if sub == "" {
+			sub = strings.TrimSpace(it.Target.Subtitle)
+		}
+		if sub == "" {
+			sub = strings.TrimSpace(it.Target.SubTitle)
+		}
+		push(it.TargetType, it.Target.ID, it.TargetID, it.Target.Title, it.Target.Year, sub, it.Target.NullRatingReason, it.Target.IsReleased, it.Target.CanRate, it.Target.VendorCount, it.Target.Pubdate)
+	}
 	if len(items) == 0 {
 		if embyDebugLogEnabled() {
 			embyDebugPrintf("[smart][douban_probe] tmdbId=%d miss=search_empty q=%q", id, q)
@@ -684,23 +684,33 @@ func doubanProbeSeasons(database *db.DB, tmdbID int, keyword string, wantGlobal 
 		list = list[:10]
 	}
 
-	seasons := make([]embyTMDBSeason, 0, len(list))
-	for _, it := range list {
-		detailURL := strings.TrimRight(base, "/") + "/rexxar/api/v2/tv/" + url.PathEscape(it.ID)
-		if proxyBase != "" {
-			detailURL = embyDoubanToProxiedURL(detailURL, proxyBase)
-		}
-		dreq, _ := http.NewRequest(http.MethodGet, detailURL, nil)
-		dreq.Header.Set("Accept", "application/json, text/plain, */*")
-		dreq.Header.Set("User-Agent", "Mozilla/5.0 (compatible; MeowFilm/1.0; +https://github.com/jenfonro/meowfilm)")
-		dreq.Header.Set("Referer", "https://m.douban.com/")
-		dreq.Header.Set("Origin", "https://m.douban.com")
+	type seasonResult struct {
+		Season  int
+		EpCount int
+	}
+	resCh := make(chan seasonResult, len(list))
+	var wg sync.WaitGroup
 
-		dresp, err := client.Do(dreq)
-		if err != nil || dresp == nil {
-			continue
-		}
-		func() {
+	for _, it := range list {
+		it := it
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			detailURL := strings.TrimRight(base, "/") + "/rexxar/api/v2/tv/" + url.PathEscape(it.ID)
+			if proxyBase != "" {
+				detailURL = embyDoubanToProxiedURL(detailURL, proxyBase)
+			}
+			dreq, _ := http.NewRequest(http.MethodGet, detailURL, nil)
+			dreq.Header.Set("Accept", "application/json, text/plain, */*")
+			dreq.Header.Set("User-Agent", "Mozilla/5.0 (compatible; MeowFilm/1.0; +https://github.com/jenfonro/meowfilm)")
+			dreq.Header.Set("Referer", "https://m.douban.com/")
+			dreq.Header.Set("Origin", "https://m.douban.com")
+
+			dresp, err := client.Do(dreq)
+			if err != nil || dresp == nil {
+				return
+			}
 			defer dresp.Body.Close()
 			if dresp.StatusCode < 200 || dresp.StatusCode >= 300 {
 				if embyDebugLogEnabled() {
@@ -725,6 +735,7 @@ func doubanProbeSeasons(database *db.DB, tmdbID int, keyword string, wantGlobal 
 				}
 				return
 			}
+
 			// Prefer total episode count for season mapping (stable across "更新至").
 			epCount := 0
 			epCountSource := ""
@@ -770,8 +781,18 @@ func doubanProbeSeasons(database *db.DB, tmdbID int, keyword string, wantGlobal 
 					strings.TrimSpace(d.EpisodesInfo),
 				)
 			}
-			seasons = append(seasons, embyTMDBSeason{Season: it.Season, EpisodeCount: epCount})
+			resCh <- seasonResult{Season: it.Season, EpCount: epCount}
 		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(resCh)
+	}()
+
+	seasons := make([]embyTMDBSeason, 0, len(list))
+	for r := range resCh {
+		seasons = append(seasons, embyTMDBSeason{Season: r.Season, EpisodeCount: r.EpCount})
 	}
 	sort.Slice(seasons, func(i, j int) bool { return seasons[i].Season < seasons[j].Season })
 	if len(seasons) < 2 {

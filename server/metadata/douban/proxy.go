@@ -20,6 +20,8 @@ func APIBase(database *db.DB) (base string, proxyBase string) {
 	mode := strings.TrimSpace(cfg.DoubanDataProxy)
 	custom := strings.TrimSpace(cfg.DoubanDataCustom)
 	switch mode {
+	case "server-proxy":
+		return "https://m.douban.com", ""
 	case "cdn-tx", "cmliussss-cdn-tencent":
 		return "https://m.douban.cmliussss.net", ""
 	case "cdn-ali", "cmliussss-cdn-ali":
@@ -62,8 +64,11 @@ func IsAllowedImageHost(hostname string) bool {
 	if host == "" {
 		return false
 	}
-	if strings.HasPrefix(host, "img") && strings.HasSuffix(host, ".doubanio.com") {
-		mid := strings.TrimSuffix(strings.TrimPrefix(host, "img"), ".doubanio.com")
+	isDigitSuffix := func(suffix string) bool {
+		if !strings.HasPrefix(host, "img") || !strings.HasSuffix(host, suffix) {
+			return false
+		}
+		mid := strings.TrimSuffix(strings.TrimPrefix(host, "img"), suffix)
 		if mid == "" {
 			return false
 		}
@@ -74,8 +79,11 @@ func IsAllowedImageHost(hostname string) bool {
 		}
 		return true
 	}
+	if isDigitSuffix(".doubanio.com") || isDigitSuffix(".douban.com") {
+		return true
+	}
 	switch host {
-	case "img3.doubanio.com", "img.doubanio.cmliussss.net", "img.doubanio.cmliussss.com":
+	case "img.doubanio.com", "img.douban.com", "img3.doubanio.com", "img.doubanio.cmliussss.net", "img.doubanio.cmliussss.com":
 		return true
 	default:
 		return false
