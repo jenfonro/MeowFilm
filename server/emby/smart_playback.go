@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 	"sync/atomic"
+	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/catpawopen"
@@ -1379,11 +1379,11 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 		playFrom, playURL := catpawopen.ExtractDetailPlayFromURL(detailRaw)
 		pans := catpawopen.ParsePlaySources(playFrom, playURL)
 		if entry.PanMockEnabled && pans != nil {
-				resolved, accessMap := embyResolvePanMockDetailPans(database, src.SiteKey, src.SiteName, 0, tmdbSeasons, tmdbHasMultiSeason, rawCleanRules, rawEpisodeRules, pans)
-				pans = resolved
-				if len(accessMap) > 0 {
-					entry.PanMock189AccessByShareID = accessMap
-				}
+			resolved, accessMap := embyResolvePanMockDetailPans(database, src.SiteKey, src.SiteName, 0, tmdbSeasons, tmdbHasMultiSeason, rawCleanRules, rawEpisodeRules, pans)
+			pans = resolved
+			if len(accessMap) > 0 {
+				entry.PanMock189AccessByShareID = accessMap
+			}
 		}
 		entry.Pans = pans
 
@@ -1598,7 +1598,7 @@ func smartBuildEpisodeMapsFromPans(
 				SrcRemarkLower:  srcRemarkLower,
 				PanLabel:        panLabel,
 				PanTokenIdx:     panTokenIdx,
-				Ep:             ep,
+				Ep:              ep,
 				RawLower:        rawLower,
 				MatchSeason:     seasonNo,
 				HasSeasonMarker: seasonNo > 0,
@@ -1744,7 +1744,7 @@ func smartTryPlayPickedCandidate(database *db.DB, apiBase string, tvUser string,
 		}
 		return &smartPickResult{Cand: cand, PlayURL: strings.TrimSpace(u), Headers: map[string]string{}}
 	case "quark":
-		u, header, err := netdisk.QuarkPlay(database, strings.TrimSpace(cand.Ep.URL), "")
+		u, header, err := netdisk.QuarkPlayWithTVUser(database, strings.TrimSpace(cand.Ep.URL), "", tvUser)
 		if err != nil || strings.TrimSpace(u) == "" {
 			return nil
 		}
@@ -1753,7 +1753,7 @@ func smartTryPlayPickedCandidate(database *db.DB, apiBase string, tvUser string,
 		}
 		return &smartPickResult{Cand: cand, PlayURL: strings.TrimSpace(u), Headers: header}
 	case "uc":
-		u, header, err := netdisk.UCPlay(database, strings.TrimSpace(cand.Ep.URL), "")
+		u, header, err := netdisk.UCPlayWithTVUser(database, strings.TrimSpace(cand.Ep.URL), "", tvUser)
 		if err != nil || strings.TrimSpace(u) == "" {
 			return nil
 		}
@@ -1921,9 +1921,9 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 		groups := map[string]groupAttempt{}
 		normalAllowed := []smartCandidate{}
 		normalFallback := []smartCandidate{}
-			for _, c := range candidatesForNo {
-				pid := smartPanMockProviderID(c.PanLabel)
-				allowed := isAllowedLabel(c.PanLabel)
+		for _, c := range candidatesForNo {
+			pid := smartPanMockProviderID(c.PanLabel)
+			allowed := isAllowedLabel(c.PanLabel)
 			if pid == "" {
 				if allowed {
 					normalAllowed = append(normalAllowed, c)
@@ -1939,11 +1939,11 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 			shareKey := strings.TrimSpace(c.PanLabel)
 			metaA := ""
 			metaB := ""
-				if pid == "189" {
-					sc, ac := smartExtractTianyiMockMetaFromCandidate(c)
-					metaA = sc
-					metaB = ac
-					if sc != "" {
+			if pid == "189" {
+				sc, ac := smartExtractTianyiMockMetaFromCandidate(c)
+				metaA = sc
+				metaB = ac
+				if sc != "" {
 					shareKey = sc
 				}
 			} else {
@@ -2019,14 +2019,14 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 			return smartPickBestMatchIgnorePanOrder(matches, tmdbHasMultiSeason, preferSeasonNo, settings)
 		}
 
-			tryGroup := func(at groupAttempt) *smartPickResult {
-				base := at.Base
-				switch at.Provider {
-				case "189":
-					sc := strings.TrimSpace(at.MetaA)
-					ac := strings.TrimSpace(at.MetaB)
-					if sc == "" {
-						sc2, ac2 := smartExtractTianyiMockMetaFromCandidate(base)
+		tryGroup := func(at groupAttempt) *smartPickResult {
+			base := at.Base
+			switch at.Provider {
+			case "189":
+				sc := strings.TrimSpace(at.MetaA)
+				ac := strings.TrimSpace(at.MetaB)
+				if sc == "" {
+					sc2, ac2 := smartExtractTianyiMockMetaFromCandidate(base)
 					sc = strings.TrimSpace(sc2)
 					if ac == "" {
 						ac = strings.TrimSpace(ac2)
@@ -2076,7 +2076,7 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 				return &smartPickResult{Cand: *picked, PlayURL: u, Headers: map[string]string{}}
 			case "quark":
 				if strings.TrimSpace(at.MetaA) == "" {
-					u, header, err := netdisk.QuarkPlay(database, strings.TrimSpace(base.Ep.URL), "")
+					u, header, err := netdisk.QuarkPlayWithTVUser(database, strings.TrimSpace(base.Ep.URL), "", tvUser)
 					if err == nil && strings.TrimSpace(u) != "" {
 						if header == nil {
 							header = map[string]string{}
@@ -2092,7 +2092,7 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 				if picked == nil || strings.TrimSpace(picked.Ep.URL) == "" {
 					return nil
 				}
-				u, header, err := netdisk.QuarkPlay(database, picked.Ep.URL, "")
+				u, header, err := netdisk.QuarkPlayWithTVUser(database, picked.Ep.URL, "", tvUser)
 				if err != nil || strings.TrimSpace(u) == "" {
 					return nil
 				}
@@ -2102,7 +2102,7 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 				return &smartPickResult{Cand: *picked, PlayURL: u, Headers: header}
 			case "uc":
 				if strings.TrimSpace(at.MetaA) == "" {
-					u, header, err := netdisk.UCPlay(database, strings.TrimSpace(base.Ep.URL), "")
+					u, header, err := netdisk.UCPlayWithTVUser(database, strings.TrimSpace(base.Ep.URL), "", tvUser)
 					if err == nil && strings.TrimSpace(u) != "" {
 						if header == nil {
 							header = map[string]string{}
@@ -2118,7 +2118,7 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 				if picked == nil || strings.TrimSpace(picked.Ep.URL) == "" {
 					return nil
 				}
-				u, header, err := netdisk.UCPlay(database, picked.Ep.URL, "")
+				u, header, err := netdisk.UCPlayWithTVUser(database, picked.Ep.URL, "", tvUser)
 				if err != nil || strings.TrimSpace(u) == "" {
 					return nil
 				}
@@ -2432,6 +2432,12 @@ func smartResolvePlaybackFromTMDBAligned(
 
 	flowStart := time.Now()
 	var require4KUntilScanDone int32 = 1
+	done := make(chan struct{})
+	var doneOnce sync.Once
+	stop := func() {
+		doneOnce.Do(func() { close(done) })
+	}
+	defer stop()
 
 	buildPicked := func(c smartCandidate, feat smartCandidateFeatures) *smartPlaybackPickedMeta {
 		rawNames := smartExtractRawNamesFromEpisodeURL(c.Ep.URL)
@@ -2534,6 +2540,11 @@ func smartResolvePlaybackFromTMDBAligned(
 	if needDouban {
 		go func() {
 			defer func() { close(metaDone) }()
+			select {
+			case <-done:
+				return
+			default:
+			}
 			if over, ok := doubanProbeSeasons(database, req.TMDBID, searchTitle, want); ok && len(over) >= 2 {
 				recomputeMeta(over)
 				if embyDebugLogEnabled() {
@@ -2578,6 +2589,11 @@ func smartResolvePlaybackFromTMDBAligned(
 	for _, t := range tasks {
 		tt := t
 		go func() {
+			select {
+			case <-done:
+				return
+			default:
+			}
 			raw, err := catpawopen.RequestSpider(apiBase, tt.Site.API, "search", map[string]any{"wd": searchTitle, "page": 1})
 			if err == nil {
 				items := catpawopen.NormalizeSearchList(raw)
@@ -2615,10 +2631,18 @@ func smartResolvePlaybackFromTMDBAligned(
 					}
 				}
 				if len(local) > 0 {
-					searchCh <- searchMsg{siteKey: tt.Site.Key, sources: local}
+					select {
+					case <-done:
+						return
+					case searchCh <- searchMsg{siteKey: tt.Site.Key, sources: local}:
+					}
 				}
 			}
-			searchCh <- searchMsg{siteKey: tt.Site.Key, done: true}
+			select {
+			case <-done:
+				return
+			case searchCh <- searchMsg{siteKey: tt.Site.Key, done: true}:
+			}
 		}()
 	}
 
@@ -2635,10 +2659,23 @@ func smartResolvePlaybackFromTMDBAligned(
 
 	launchPlayAttempt := func(cand smartCandidate, access map[string]string) {
 		go func() {
-			playSem <- struct{}{}
+			select {
+			case <-done:
+				return
+			case playSem <- struct{}{}:
+			}
 			defer func() { <-playSem }()
+			select {
+			case <-done:
+				return
+			default:
+			}
 			if res := smartTryPlayPickedCandidate(database, apiBase, tvUser, cand, access); res != nil && strings.TrimSpace(res.PlayURL) != "" {
-				results <- res
+				select {
+				case <-done:
+					return
+				case results <- res:
+				}
 			}
 		}()
 	}
@@ -2684,9 +2721,16 @@ func smartResolvePlaybackFromTMDBAligned(
 			return
 		}
 		select {
+		case <-done:
+			return
 		case <-metaDone:
 		case <-time.After(18 * time.Second):
 			return
+		}
+		select {
+		case <-done:
+			return
+		default:
 		}
 		seasons, hasMulti, prefer, require := metaSnapshot()
 		_, _, pans, access, _, _ := st.snapshot()
@@ -2735,14 +2779,24 @@ func smartResolvePlaybackFromTMDBAligned(
 		}
 	}
 
-		fetchDetailState := func(src smartSource) (*smartDetailState, error) {
-			atomic.AddInt64(&inFlightScans, 1)
-			defer atomic.AddInt64(&inFlightScans, -1)
+	fetchDetailState := func(src smartSource) (*smartDetailState, error) {
+		select {
+		case <-done:
+			return nil, errors.New("canceled")
+		default:
+		}
+		atomic.AddInt64(&inFlightScans, 1)
+		defer atomic.AddInt64(&inFlightScans, -1)
 
-			detailRaw, err := catpawopen.RequestSpider(apiBase, src.SpiderAPI, "detail", map[string]any{"id": src.VideoID})
-			if err != nil {
-				return nil, err
-			}
+		detailRaw, err := catpawopen.RequestSpider(apiBase, src.SpiderAPI, "detail", map[string]any{"id": src.VideoID})
+		if err != nil {
+			return nil, err
+		}
+		select {
+		case <-done:
+			return nil, errors.New("canceled")
+		default:
+		}
 		panMockEnabled := embyIsPanMockEnabled(detailRaw)
 		playFrom, playURL := catpawopen.ExtractDetailPlayFromURL(detailRaw)
 		pans := catpawopen.ParsePlaySources(playFrom, playURL)
@@ -2760,87 +2814,115 @@ func smartResolvePlaybackFromTMDBAligned(
 			EpisodeMapLoose:           map[int][]smartCandidate{},
 		}
 
-			if !panMockEnabled {
-				close(state.PanMockDone)
-				return state, nil
-			}
+		if !panMockEnabled {
+			close(state.PanMockDone)
+			return state, nil
+		}
 
-			// Resolve pan_mock list asynchronously (does not block fetching next details).
-			atomic.AddInt64(&inFlightScans, 1)
-			go func() {
-				defer atomic.AddInt64(&inFlightScans, -1)
-				defer func() {
-					// Ensure the done channel is always closed.
-					defer func() { recover() }()
-					close(state.PanMockDone)
+		// Resolve pan_mock list asynchronously (does not block fetching next details).
+		atomic.AddInt64(&inFlightScans, 1)
+		go func() {
+			defer atomic.AddInt64(&inFlightScans, -1)
+			defer func() {
+				// Ensure the done channel is always closed.
+				defer func() { recover() }()
+				close(state.PanMockDone)
 			}()
-					seasons, hasMulti, _, _ := metaSnapshot()
-					resolved, accessMap := embyResolvePanMockDetailPansIncremental(
-						database,
-						src.SiteKey,
-						src.SiteName,
-						want,
-						seasons,
-						hasMulti,
-						rawCleanRules,
-						rawEpisodeRules,
-						pans,
-						func(panIndex int, episodes []catpawopen.Episode, accessDelta map[string]string) {
-							// Update the specific pan episodes as soon as it resolves so matching can proceed immediately.
-							if panIndex >= 0 && panIndex < len(state.Pans) {
-								state.mu.Lock()
-								state.Pans[panIndex].Episodes = episodes
-								if len(accessDelta) > 0 {
-									for k, v := range accessDelta {
-										state.PanMock189AccessByShareID[k] = v
-									}
-								}
-								state.mu.Unlock()
-							} else if len(accessDelta) > 0 {
-								state.mu.Lock()
-								for k, v := range accessDelta {
-									state.PanMock189AccessByShareID[k] = v
-								}
-								state.mu.Unlock()
-							}
-							// Try pick+play as soon as any single list returns (will wait for metaDone).
-							tryPickAndPlayFromState(state)
-						},
-					)
-					state.mu.Lock()
-					state.Pans = resolved
-					for k, v := range accessMap {
-						state.PanMock189AccessByShareID[k] = v
+			select {
+			case <-done:
+				return
+			default:
+			}
+			seasons, hasMulti, _, _ := metaSnapshot()
+			resolved, accessMap := embyResolvePanMockDetailPansIncremental(
+				database,
+				src.SiteKey,
+				src.SiteName,
+				want,
+				seasons,
+				hasMulti,
+				rawCleanRules,
+				rawEpisodeRules,
+				pans,
+				func(panIndex int, episodes []catpawopen.Episode, accessDelta map[string]string) {
+					select {
+					case <-done:
+						return
+					default:
 					}
+					// Update the specific pan episodes as soon as it resolves so matching can proceed immediately.
+					if panIndex >= 0 && panIndex < len(state.Pans) {
+						state.mu.Lock()
+						state.Pans[panIndex].Episodes = episodes
+						if len(accessDelta) > 0 {
+							for k, v := range accessDelta {
+								state.PanMock189AccessByShareID[k] = v
+							}
+						}
+						state.mu.Unlock()
+					} else if len(accessDelta) > 0 {
+						state.mu.Lock()
+						for k, v := range accessDelta {
+							state.PanMock189AccessByShareID[k] = v
+						}
+						state.mu.Unlock()
+					}
+					// Try pick+play as soon as any single list returns (will wait for metaDone).
+					tryPickAndPlayFromState(state)
+				},
+			)
+			select {
+			case <-done:
+				return
+			default:
+			}
+			state.mu.Lock()
+			state.Pans = resolved
+			for k, v := range accessMap {
+				state.PanMock189AccessByShareID[k] = v
+			}
 			state.mu.Unlock()
 			// When all lists resolve, attempt one more pick+play (will wait for metaDone).
 			tryPickAndPlayFromState(state)
 		}()
-			return state, nil
-		}
+		return state, nil
+	}
 
-		runSiteWorker := func(siteKey string, q *siteQueue) {
-			go func() {
-				for src := range q.ch {
+	runSiteWorker := func(siteKey string, q *siteQueue) {
+		go func() {
+			for {
+				select {
+				case <-done:
+					return
+				case src, ok := <-q.ch:
+					if !ok {
+						return
+					}
 					atomic.AddInt64(&queuedSources, -1)
 					st, err := fetchDetailState(src)
 					if err != nil || st == nil || !st.OK {
 						continue
 					}
-				// Defer matching until meta is ready; do NOT block detail/list fetching.
-				go tryPickAndPlayFromState(st)
+					select {
+					case <-done:
+						return
+					default:
+					}
+					// Defer matching until meta is ready; do NOT block detail/list fetching.
+					go tryPickAndPlayFromState(st)
+				}
 			}
 		}()
 	}
 
-		doneSearchSites := 0
-		expectedSites := len(tasks)
-		deadline := time.Now().Add(18 * time.Second)
-		bestFallback := (*smartPickResult)(nil)
+	doneSearchSites := 0
+	expectedSites := len(tasks)
+	deadline := time.Now().Add(18 * time.Second)
+	bestFallback := (*smartPickResult)(nil)
 
 	for doneSearchSites < expectedSites {
-			remain := time.Until(deadline)
-			if remain <= 0 {
+		remain := time.Until(deadline)
+		if remain <= 0 {
 			break
 		}
 		select {
@@ -2884,54 +2966,54 @@ func smartResolvePlaybackFromTMDBAligned(
 				atomic.AddInt64(&queuedSources, 1)
 				ch <- s
 			}
-			case res := <-results:
-				if res == nil || strings.TrimSpace(res.PlayURL) == "" {
-					continue
-				}
-				feat := smartComputeCandidateFeatures(res.Cand)
-				if feat.QualityRank == 3 {
-					if embyDebugLogEnabled() {
-						rawNames := smartExtractRawNamesFromEpisodeURL(res.Cand.Ep.URL)
-						raw0 := ""
-						if len(rawNames) > 0 {
-							raw0 = strings.TrimSpace(rawNames[0])
-						}
-						embyDebugPrintf(
-							"[smart][playback_ok] ms=%d site=%s(%s) panFlag=%s provider=%s showName=%s rawName=%s url=%s",
-							time.Since(flowStart).Milliseconds(),
-							strings.TrimSpace(res.Cand.SiteKey),
-							strings.TrimSpace(res.Cand.SiteName),
-							strings.TrimSpace(res.Cand.PanLabel),
-							smartPanMockProviderID(strings.TrimSpace(res.Cand.PanLabel)),
-							strings.TrimSpace(res.Cand.Ep.Name),
-							raw0,
-							smartShortURLForLog(res.PlayURL),
-						)
+		case res := <-results:
+			if res == nil || strings.TrimSpace(res.PlayURL) == "" {
+				continue
+			}
+			feat := smartComputeCandidateFeatures(res.Cand)
+			if feat.QualityRank == 3 {
+				if embyDebugLogEnabled() {
+					rawNames := smartExtractRawNamesFromEpisodeURL(res.Cand.Ep.URL)
+					raw0 := ""
+					if len(rawNames) > 0 {
+						raw0 = strings.TrimSpace(rawNames[0])
 					}
-					return res.PlayURL, res.Headers, buildPicked(res.Cand, feat), nil
+					embyDebugPrintf(
+						"[smart][playback_ok] ms=%d site=%s(%s) panFlag=%s provider=%s showName=%s rawName=%s url=%s",
+						time.Since(flowStart).Milliseconds(),
+						strings.TrimSpace(res.Cand.SiteKey),
+						strings.TrimSpace(res.Cand.SiteName),
+						strings.TrimSpace(res.Cand.PanLabel),
+						smartPanMockProviderID(strings.TrimSpace(res.Cand.PanLabel)),
+						strings.TrimSpace(res.Cand.Ep.Name),
+						raw0,
+						smartShortURLForLog(res.PlayURL),
+					)
 				}
-				_, hasMulti, prefer, _ := metaSnapshot()
-				if bestFallback == nil || smartCompareSmartMatch(bestFallback.Cand, res.Cand, hasMulti, prefer, settings) > 0 {
-					bestFallback = res
-				}
-			case <-time.After(time.Duration(smartMinInt(int(remain.Milliseconds()), 200)) * time.Millisecond):
+				return res.PlayURL, res.Headers, buildPicked(res.Cand, feat), nil
 			}
-		}
-
-		// First round: wait for scan completion (all queued sources consumed + detail/list in-flight done) before allowing downgrade.
-		for time.Now().Before(deadline) {
-			if atomic.LoadInt64(&queuedSources) <= 0 && atomic.LoadInt64(&inFlightScans) <= 0 {
-				break
+			_, hasMulti, prefer, _ := metaSnapshot()
+			if bestFallback == nil || smartCompareSmartMatch(bestFallback.Cand, res.Cand, hasMulti, prefer, settings) > 0 {
+				bestFallback = res
 			}
-			time.Sleep(80 * time.Millisecond)
+		case <-time.After(time.Duration(smartMinInt(int(remain.Milliseconds()), 200)) * time.Millisecond):
 		}
-		atomic.StoreInt32(&require4KUntilScanDone, 0)
-		launchFallbackIfAny("scan_done_no_4k")
+	}
 
-		// Drain any late results until deadline for a final chance at 4K.
-		for time.Now().Before(deadline) {
-			select {
-			case res := <-results:
+	// First round: wait for scan completion (all queued sources consumed + detail/list in-flight done) before allowing downgrade.
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt64(&queuedSources) <= 0 && atomic.LoadInt64(&inFlightScans) <= 0 {
+			break
+		}
+		time.Sleep(80 * time.Millisecond)
+	}
+	atomic.StoreInt32(&require4KUntilScanDone, 0)
+	launchFallbackIfAny("scan_done_no_4k")
+
+	// Drain any late results until deadline for a final chance at 4K.
+	for time.Now().Before(deadline) {
+		select {
+		case res := <-results:
 			if res == nil || strings.TrimSpace(res.PlayURL) == "" {
 				continue
 			}
