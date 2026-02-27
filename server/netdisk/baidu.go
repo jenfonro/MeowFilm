@@ -83,8 +83,9 @@ func makeBaiduQRClient() (*http.Client, http.CookieJar, error) {
 		return nil, nil, err
 	}
 	return &http.Client{
-		Timeout: 12 * time.Second,
-		Jar:     jar,
+		Timeout:   12 * time.Second,
+		Jar:       jar,
+		Transport: netdiskHTTPTransport,
 	}, jar, nil
 }
 
@@ -354,7 +355,7 @@ func mergeCookieFromSetCookie(baseCookie string, setCookie []string) string {
 }
 
 func baiduFetchJSON(method string, urlStr string, cookie string, body []byte) (any, []string, error) {
-	client := &http.Client{Timeout: 18 * time.Second}
+	client := &http.Client{Timeout: 18 * time.Second, Transport: netdiskHTTPTransport}
 	req, err := http.NewRequest(method, urlStr, bytes.NewReader(body))
 	if err != nil {
 		return nil, nil, err
@@ -1058,7 +1059,7 @@ func baiduQRDoReqWithHeaders(client *http.Client, method string, urlStr string, 
 }
 
 func baiduFetchJSONWithHeaders(method string, urlStr string, cookie string, body []byte, headers map[string]string) (any, []string, error) {
-	client := &http.Client{Timeout: 25 * time.Second}
+	client := &http.Client{Timeout: 25 * time.Second, Transport: netdiskHTTPTransport}
 	req, err := http.NewRequest(method, urlStr, bytes.NewReader(body))
 	if err != nil {
 		return nil, nil, err
@@ -1397,7 +1398,8 @@ func baiduResolveFinalURLFromDlink(dlink string) (string, error) {
 		return "", errors.New("missing dlink")
 	}
 	client := &http.Client{
-		Timeout: 20 * time.Second,
+		Timeout:   20 * time.Second,
+		Transport: netdiskHTTPTransport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

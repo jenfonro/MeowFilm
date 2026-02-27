@@ -585,6 +585,12 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 			if b, ok := readBool("GoProxyAutoSelect", "goProxyAutoSelect"); ok {
 				c.GoProxyAutoSelect = b
 			}
+			if b, ok := readBool("NetdiskProxyEnabled", "netdiskProxyEnabled"); ok {
+				c.NetdiskProxyEnabled = b
+			}
+			if s, ok := readStr("NetdiskProxyURL", "netdiskProxyUrl", "netdiskProxyURL"); ok {
+				c.NetdiskProxyURL = s
+			}
 			if s, ok := readStr("DoubanDataProxy", "doubanDataProxy"); ok && s != "" {
 				c.DoubanDataProxy = s
 			}
@@ -898,6 +904,7 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 		applied["metadata"] = true
 	}
 
+	netdisk.InitNetdiskProxyFromDB(database)
 	_ = database.RecomputeSmartSkipSites()
 
 	writeJSON(w, 200, map[string]any{"success": true, "applied": applied})
@@ -956,6 +963,26 @@ func handleDashboardSiteSave(w http.ResponseWriter, r *http.Request, database *d
 	parseForm(r)
 	siteName := strings.TrimSpace(r.FormValue("siteName"))
 	searchDisplayMode := strings.TrimSpace(r.FormValue("searchDisplayMode"))
+	netdiskProxyEnabled := boolFromForm(r.FormValue("netdiskProxyEnabled"))
+	netdiskProxyURLRaw := strings.TrimSpace(r.FormValue("netdiskProxyUrl"))
+	netdiskProxyURL := strings.TrimSpace(netdiskProxyURLRaw)
+	if netdiskProxyEnabled {
+		norm, err := normalizeNetdiskProxyURL(netdiskProxyURLRaw)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": err.Error()})
+			return
+		}
+		if strings.TrimSpace(norm) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "代理地址不能为空"})
+			return
+		}
+		netdiskProxyURL = norm
+	} else {
+		// Normalize if possible, but keep invalid drafts so the user can fix later.
+		if norm, err := normalizeNetdiskProxyURL(netdiskProxyURLRaw); err == nil && strings.TrimSpace(norm) != "" {
+			netdiskProxyURL = norm
+		}
+	}
 	switch searchDisplayMode {
 	case "", "sites", "tmdb", "both":
 		if searchDisplayMode == "" {
@@ -970,7 +997,10 @@ func handleDashboardSiteSave(w http.ResponseWriter, r *http.Request, database *d
 			c.SiteName = siteName
 		}
 		c.SearchDisplayMode = searchDisplayMode
+		c.NetdiskProxyEnabled = netdiskProxyEnabled
+		c.NetdiskProxyURL = netdiskProxyURL
 	})
+	netdisk.SetNetdiskProxySettings(netdiskProxyEnabled, netdiskProxyURL)
 	writeJSON(w, 200, map[string]any{"success": true})
 }
 
@@ -1132,14 +1162,16 @@ func handleDashboardSiteSettings(w http.ResponseWriter, r *http.Request, databas
 	}
 	goProxyJSON, _ := json.Marshal(goProxyForUI)
 	writeJSON(w, 200, map[string]any{
-		"success":            true,
-		"siteName":           cfg.SiteName,
-		"searchDisplayMode":  mode,
-		"catPawOpenServers":  servers,
-		"catPawOpenActive":   active,
-		"goProxyEnabled":     cfg.GoProxyEnabled,
-		"goProxyAutoSelect":  cfg.GoProxyAutoSelect,
-		"goProxyServersJson": defaultString(string(goProxyJSON), "[]"),
+		"success":             true,
+		"siteName":            cfg.SiteName,
+		"searchDisplayMode":   mode,
+		"netdiskProxyEnabled": cfg.NetdiskProxyEnabled,
+		"netdiskProxyUrl":     strings.TrimSpace(cfg.NetdiskProxyURL),
+		"catPawOpenServers":   servers,
+		"catPawOpenActive":    active,
+		"goProxyEnabled":      cfg.GoProxyEnabled,
+		"goProxyAutoSelect":   cfg.GoProxyAutoSelect,
+		"goProxyServersJson":  defaultString(string(goProxyJSON), "[]"),
 	})
 }
 

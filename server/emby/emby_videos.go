@@ -133,11 +133,13 @@ func handleEmbyVideoStream(w http.ResponseWriter, r *http.Request, database *db.
 		return
 	}
 
+	var pickedMeta *smartPlaybackPickedMeta
 	finalURL, err := embyResolveStreamOnce(resolveKey, func() (string, error) {
 		playURL, headers, picked, err := embyResolvePlaybackFromTMDB(database, u, &p)
 		if err != nil {
 			return "", err
 		}
+		pickedMeta = picked
 		u0 := strings.TrimSpace(playURL)
 		h0 := headers
 		if len(h0) != 0 {
@@ -165,11 +167,28 @@ func handleEmbyVideoStream(w http.ResponseWriter, r *http.Request, database *db.
 	}
 	// Cache the resolved playback URL so subsequent PlaybackInfo/stream calls can avoid
 	// triggering smart search/detail/pick again.
+	meta := embyStreamMeta{}
+	if pickedMeta != nil {
+		meta = embyStreamMeta{
+			SiteKey:  strings.TrimSpace(pickedMeta.SiteKey),
+			VideoID:  strings.TrimSpace(pickedMeta.VideoID),
+			PanLabel: strings.TrimSpace(pickedMeta.PanFlag),
+			Provider: strings.TrimSpace(pickedMeta.Provider),
+		}
+	}
 	if mediaSourceID != "" {
-		embyStreams.Set(mediaSourceID, strings.TrimSpace(finalURL), 60*time.Second)
+		if strings.TrimSpace(meta.SiteKey) != "" && strings.TrimSpace(meta.VideoID) != "" {
+			embyStreams.SetMeta(mediaSourceID, strings.TrimSpace(finalURL), 60*time.Second, meta)
+		} else {
+			embyStreams.Set(mediaSourceID, strings.TrimSpace(finalURL), 60*time.Second)
+		}
 	}
 	if computedMediaSourceID != "" && computedMediaSourceID != mediaSourceID {
-		embyStreams.Set(computedMediaSourceID, strings.TrimSpace(finalURL), 60*time.Second)
+		if strings.TrimSpace(meta.SiteKey) != "" && strings.TrimSpace(meta.VideoID) != "" {
+			embyStreams.SetMeta(computedMediaSourceID, strings.TrimSpace(finalURL), 60*time.Second, meta)
+		} else {
+			embyStreams.Set(computedMediaSourceID, strings.TrimSpace(finalURL), 60*time.Second)
+		}
 	}
 	http.Redirect(w, r, strings.TrimSpace(finalURL), http.StatusFound)
 }

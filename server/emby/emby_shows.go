@@ -61,18 +61,26 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			writeJSON(w, 200, embyPagedEmpty(startIndex))
 			return
 		}
-		siteKey := "emby"
-		videoID := strings.TrimSpace(seriesID)
-		if siteSeriesVideoID > 0 {
-			// sitev_<id>: query by real site key + spider video id.
-			if sv, err := database.GetSiteVideoByID(siteSeriesVideoID); err == nil && sv != nil {
-				if strings.TrimSpace(sv.SiteKey) != "" && strings.TrimSpace(sv.VideoID) != "" {
-					siteKey = strings.TrimSpace(sv.SiteKey)
-					videoID = strings.TrimSpace(sv.VideoID)
+
+		// Prefer TMDB contentKey for canonical series ids so web-generated history drives NextUp.
+		var row *db.PlayHistoryRow
+		var err error
+		if parsed, ok := embyParseItemID(seriesID); ok && parsed != nil && parsed.Source == "tmdb" && parsed.Kind == "tv" && parsed.SubKind == "series" && parsed.TMDBID > 0 {
+			row, err = database.GetPlayHistoryLatestByContentKey(uid, "tmdb:tv:"+strconv.Itoa(parsed.TMDBID))
+		} else {
+			siteKey := "emby"
+			videoID := strings.TrimSpace(seriesID)
+			if siteSeriesVideoID > 0 {
+				// sitev_<id>: query by real site key + spider video id.
+				if sv, e := database.GetSiteVideoByID(siteSeriesVideoID); e == nil && sv != nil {
+					if strings.TrimSpace(sv.SiteKey) != "" && strings.TrimSpace(sv.VideoID) != "" {
+						siteKey = strings.TrimSpace(sv.SiteKey)
+						videoID = strings.TrimSpace(sv.VideoID)
+					}
 				}
 			}
+			row, err = database.GetPlayHistoryLatestBySiteVideo(uid, siteKey, videoID)
 		}
-		row, err := database.GetPlayHistoryLatestBySiteVideo(uid, siteKey, videoID)
 		if err != nil || row == nil || strings.TrimSpace(row.PlaybackItemID) == "" {
 			writeJSON(w, 200, embyPagedEmpty(startIndex))
 			return

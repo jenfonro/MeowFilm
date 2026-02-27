@@ -101,8 +101,9 @@ func makeQuarkQRClient() (*http.Client, http.CookieJar, error) {
 		return nil, nil, err
 	}
 	return &http.Client{
-		Timeout: 12 * time.Second,
-		Jar:     jar,
+		Timeout:   12 * time.Second,
+		Jar:       jar,
+		Transport: netdiskHTTPTransport,
 	}, jar, nil
 }
 
@@ -326,7 +327,7 @@ func buildQuarkShareHeaders(cookie string) http.Header {
 }
 
 func quarkShareDoJSON(method string, urlStr string, headers http.Header, body []byte, out any) error {
-	client := &http.Client{Timeout: 18 * time.Second}
+	client := &http.Client{Timeout: 18 * time.Second, Transport: netdiskHTTPTransport}
 	req, err := http.NewRequest(method, urlStr, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -1157,7 +1158,7 @@ func quarkTVRefreshAccessToken(refreshToken string, deviceID string) (accessToke
 		"refresh_token": rt,
 	}
 	b, _ := json.Marshal(payload)
-	client := &http.Client{Timeout: 12 * time.Second}
+	client := &http.Client{Timeout: 12 * time.Second, Transport: netdiskHTTPTransport}
 	req, err := http.NewRequest(http.MethodPost, u, bytes.NewReader(b))
 	if err != nil {
 		return "", "", 0, err
@@ -1276,7 +1277,7 @@ func quarkTVLinkByFid(fid string, accessToken string, deviceID string, method st
 	q.Set("support", "dolby_vision")
 	u.RawQuery = q.Encode()
 
-	client := &http.Client{Timeout: 18 * time.Second}
+	client := &http.Client{Timeout: 18 * time.Second, Transport: netdiskHTTPTransport}
 	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
 	if err != nil {
 		return "", quarkTVFileResp{}, err

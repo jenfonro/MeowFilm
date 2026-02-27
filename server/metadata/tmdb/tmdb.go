@@ -731,6 +731,26 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) (map[s
 			} else if ended && d.EpisodeCount > 0 {
 				badge = "共" + strconv.Itoa(d.EpisodeCount) + "集"
 			}
+			latestGlobalEpisode := 0
+			if d.LatestSeason > 0 && d.LatestEpisode > 0 {
+				sum := 0
+				for _, s := range d.Seasons {
+					if s.SeasonNumber <= 0 || s.EpisodeCount <= 0 {
+						continue
+					}
+					if s.SeasonNumber < d.LatestSeason {
+						sum += s.EpisodeCount
+					} else if s.SeasonNumber == d.LatestSeason {
+						sum += d.LatestEpisode
+						break
+					}
+				}
+				if sum > 0 {
+					latestGlobalEpisode = sum
+				}
+			} else if ended && d.EpisodeCount > 0 {
+				latestGlobalEpisode = d.EpisodeCount
+			}
 			out := map[string]any{
 				"success":       true,
 				"id":            tmdbID,
@@ -744,6 +764,7 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) (map[s
 				"status":        status,
 				"latestSeason":  d.LatestSeason,
 				"latestEpisode": d.LatestEpisode,
+				"latestGlobal":  latestGlobalEpisode,
 				"episodeCount":  d.EpisodeCount,
 				"seasons":       seasons,
 				"seasonCount":   seasonCount,
@@ -878,6 +899,26 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) (map[s
 
 		seasons := make([]map[string]any, 0, len(detail.Seasons))
 		seasonCount := 0
+		latestGlobalEpisode := 0
+		if latestSeason > 0 && latestEpisode > 0 {
+			sum := 0
+			for _, s := range detail.Seasons {
+				if s.SeasonNumber <= 0 || s.EpisodeCount <= 0 {
+					continue
+				}
+				if s.SeasonNumber < latestSeason {
+					sum += s.EpisodeCount
+				} else if s.SeasonNumber == latestSeason {
+					sum += latestEpisode
+					break
+				}
+			}
+			if sum > 0 {
+				latestGlobalEpisode = sum
+			}
+		} else if ended && detail.NumberOfEpisodes > 0 {
+			latestGlobalEpisode = detail.NumberOfEpisodes
+		}
 		for _, s := range detail.Seasons {
 			if s.SeasonNumber < 0 {
 				continue
@@ -909,6 +950,7 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) (map[s
 			"status":        strings.TrimSpace(detail.Status),
 			"latestSeason":  latestSeason,
 			"latestEpisode": latestEpisode,
+			"latestGlobal":  latestGlobalEpisode,
 			"episodeCount":  detail.NumberOfEpisodes,
 			"seasons":       seasons,
 			"seasonCount":   seasonCount,

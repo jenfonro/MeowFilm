@@ -8,7 +8,15 @@ import (
 
 type embyStreamSession struct {
 	URL    string
+	Meta   embyStreamMeta
 	Expire time.Time
+}
+
+type embyStreamMeta struct {
+	SiteKey  string
+	VideoID  string
+	PanLabel string
+	Provider string
 }
 
 type embyStreamStore struct {
@@ -21,6 +29,10 @@ func newEmbyStreamStore() *embyStreamStore {
 }
 
 func (s *embyStreamStore) Set(id string, url string, ttl time.Duration) {
+	s.SetMeta(id, url, ttl, embyStreamMeta{})
+}
+
+func (s *embyStreamStore) SetMeta(id string, url string, ttl time.Duration, meta embyStreamMeta) {
 	if s == nil {
 		return
 	}
@@ -32,7 +44,7 @@ func (s *embyStreamStore) Set(id string, url string, ttl time.Duration) {
 	now := time.Now()
 	exp := now.Add(ttl)
 	s.mu.Lock()
-	s.m[key] = embyStreamSession{URL: val, Expire: exp}
+	s.m[key] = embyStreamSession{URL: val, Meta: meta, Expire: exp}
 	s.cleanupLocked(now)
 	s.mu.Unlock()
 }
@@ -54,6 +66,28 @@ func (s *embyStreamStore) Get(id string) (string, bool) {
 		return "", false
 	}
 	return strings.TrimSpace(sess.URL), true
+}
+
+func (s *embyStreamStore) GetMeta(id string) (embyStreamMeta, bool) {
+	if s == nil {
+		return embyStreamMeta{}, false
+	}
+	key := strings.TrimSpace(id)
+	if key == "" {
+		return embyStreamMeta{}, false
+	}
+	now := time.Now()
+	s.mu.Lock()
+	sess, ok := s.m[key]
+	s.cleanupLocked(now)
+	s.mu.Unlock()
+	if !ok || strings.TrimSpace(sess.URL) == "" || sess.Expire.Before(now) {
+		return embyStreamMeta{}, false
+	}
+	if strings.TrimSpace(sess.Meta.SiteKey) == "" || strings.TrimSpace(sess.Meta.VideoID) == "" {
+		return embyStreamMeta{}, false
+	}
+	return sess.Meta, true
 }
 
 func (s *embyStreamStore) cleanupLocked(now time.Time) {
