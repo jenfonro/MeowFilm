@@ -666,18 +666,34 @@ func quarkShareSave(shareID string, stoken string, fid string, fidToken string, 
 	if err := quarkShareDoJSON(http.MethodPost, saveURL, buildQuarkShareHeaders(cookie), b, &saveResp); err != nil {
 		return "", err
 	}
-	data, _ := saveResp["data"].(map[string]any)
-	taskID := ""
-	if data != nil {
-		taskID = strings.TrimSpace(toString(data["task_id"]))
-		if taskID == "" {
-			taskID = strings.TrimSpace(toString(data["taskId"]))
-		}
-		if taskID == "" {
-			taskID = strings.TrimSpace(toString(data["taskID"]))
+	// Quark APIs usually return HTTP 200 even on application-level errors.
+	// If we don't surface their code/message, callers only see "task_id not found" which is misleading.
+	if saveResp != nil {
+		code := strings.TrimSpace(toString(saveResp["code"]))
+		if code != "" && code != "0" && code != "200" {
+			msg := strings.TrimSpace(toString(saveResp["message"]))
+			if msg == "" {
+				msg = strings.TrimSpace(toString(saveResp["msg"]))
+			}
+			if msg == "" {
+				msg = "quark save failed"
+			}
+			return "", errors.New(msg + " (code=" + code + ")")
 		}
 	}
+	taskID := strings.TrimSpace(quarkExtractFirstStringByKeys(saveResp, []string{"task_id", "taskid"}))
 	if taskID == "" {
+		// Best-effort fallback: include api message if present.
+		msg := ""
+		if saveResp != nil {
+			msg = strings.TrimSpace(toString(saveResp["message"]))
+			if msg == "" {
+				msg = strings.TrimSpace(toString(saveResp["msg"]))
+			}
+		}
+		if msg != "" {
+			return "", errors.New("quark save failed: " + msg)
+		}
 		return "", errors.New("quark save: task_id not found")
 	}
 
@@ -696,6 +712,19 @@ func quarkShareSave(shareID string, stoken string, fid string, fidToken string, 
 			break
 		}
 		lastTask = taskResp
+		if taskResp != nil {
+			code := strings.TrimSpace(toString(taskResp["code"]))
+			if code != "" && code != "0" && code != "200" {
+				msg := strings.TrimSpace(toString(taskResp["message"]))
+				if msg == "" {
+					msg = strings.TrimSpace(toString(taskResp["msg"]))
+				}
+				if msg == "" {
+					msg = "quark task query failed"
+				}
+				return "", errors.New(msg + " (code=" + code + ")")
+			}
+		}
 		td, _ := taskResp["data"].(map[string]any)
 		state := -1
 		if td != nil {
