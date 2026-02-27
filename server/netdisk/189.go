@@ -1433,8 +1433,13 @@ func tianyi189ListUncached(database *db.DB, flag string, accessCode string) (vod
 }
 
 func Tianyi189List(database *db.DB, flag string, accessCode string) (vodPlayURL string, shareID string, shareCode string, err error) {
+	vod, sid, sc, _, err := Tianyi189ListWithCacheHit(database, flag, accessCode)
+	return vod, sid, sc, err
+}
+
+func Tianyi189ListWithCacheHit(database *db.DB, flag string, accessCode string) (vodPlayURL string, shareID string, shareCode string, fromCache bool, err error) {
 	key := listCacheKey("189_list", flag, accessCode)
-	got, _, e := t189ListCacheTwoTier.Do(key, func() (listCache3, error) {
+	got, hit, e := t189ListCacheTwoTier.Do(key, func() (listCache3, error) {
 		vod, sid, sc, err2 := tianyi189ListUncached(database, flag, accessCode)
 		if err2 != nil {
 			return listCache3{}, err2
@@ -1442,9 +1447,9 @@ func Tianyi189List(database *db.DB, flag string, accessCode string) (vodPlayURL 
 		return listCache3{Vod: vod, ShareID: sid, ShareCode: sc}, nil
 	})
 	if e != nil {
-		return "", "", "", e
+		return "", "", "", hit, e
 	}
-	return strings.TrimSpace(got.Vod), strings.TrimSpace(got.ShareID), strings.TrimSpace(got.ShareCode), nil
+	return strings.TrimSpace(got.Vod), strings.TrimSpace(got.ShareID), strings.TrimSpace(got.ShareCode), hit, nil
 }
 
 func tianyi189PlayWithDT(database *db.DB, id string, accessCode string, dt string) (finalURL string, shareID string, fileID string, fileName string, err error) {

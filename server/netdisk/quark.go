@@ -1007,15 +1007,20 @@ func quarkListUncached(database *db.DB, flag string, passcode string) (string, s
 }
 
 func QuarkList(database *db.DB, flag string, passcode string) (string, string, error) {
+	vod, shareID, _, err := QuarkListWithCacheHit(database, flag, passcode)
+	return vod, shareID, err
+}
+
+func QuarkListWithCacheHit(database *db.DB, flag string, passcode string) (vod string, shareID string, fromCache bool, err error) {
 	key := listCacheKey("quark_list", flag, passcode)
-	got, _, err := quarkListCacheTwoTier.Do(key, func() (listCache2, error) {
+	got, hit, err := quarkListCacheTwoTier.Do(key, func() (listCache2, error) {
 		vod, shareID, e := quarkListUncached(database, flag, passcode)
 		if e != nil {
 			return listCache2{}, e
 		}
 		return listCache2{Vod: vod, ShareID: shareID}, nil
 	})
-	return strings.TrimSpace(got.Vod), strings.TrimSpace(got.ShareID), err
+	return strings.TrimSpace(got.Vod), strings.TrimSpace(got.ShareID), hit, err
 }
 
 func parseQuarkPlayID(id string) (shareID string, stoken string, fid string, fidToken string, fileName string) {

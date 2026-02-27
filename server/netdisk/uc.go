@@ -829,15 +829,20 @@ func ucListUncached(database *db.DB, flag string, passcode string) (string, stri
 }
 
 func UCList(database *db.DB, flag string, passcode string) (string, string, error) {
+	vod, shareID, _, err := UCListWithCacheHit(database, flag, passcode)
+	return vod, shareID, err
+}
+
+func UCListWithCacheHit(database *db.DB, flag string, passcode string) (vod string, shareID string, fromCache bool, err error) {
 	key := listCacheKey("uc_list", flag, passcode)
-	got, _, err := ucListCacheTwoTier.Do(key, func() (listCache2, error) {
+	got, hit, err := ucListCacheTwoTier.Do(key, func() (listCache2, error) {
 		vod, shareID, e := ucListUncached(database, flag, passcode)
 		if e != nil {
 			return listCache2{}, e
 		}
 		return listCache2{Vod: vod, ShareID: shareID}, nil
 	})
-	return strings.TrimSpace(got.Vod), strings.TrimSpace(got.ShareID), err
+	return strings.TrimSpace(got.Vod), strings.TrimSpace(got.ShareID), hit, err
 }
 
 type ucDownloadResp struct {
