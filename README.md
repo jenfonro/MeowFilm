@@ -26,6 +26,7 @@
 ## 🗺 目录
 
 - [技术栈](#技术栈)
+- [快速开始](#快速开始)
 - [部署](#部署)
 - [默认账号](#默认账号)
 - [环境变量](#环境变量)
@@ -41,27 +42,35 @@
 | 数据库 | SQLite（`go-sqlite3`） |
 | 播放 | `artplayer` + `hls.js` + `flv.js` + `shaka-player` |
 
+## 快速开始
+
+> 必须先配好 **CatPawOpen 地址** + **站点列表** 才能正常搜索/播放。
+
+推荐直接看：`docs/使用说明.md`（只讲配置与使用）。
+
 ## 部署
 
 通常搭配 CatPawOpen 一起使用（CatPawOpen 负责加载/运行站点脚本）。
 
-### 方式一：本地运行（生产）
+### 方式一：本地运行（推荐脚本）
 
-在前端目录执行：
-
-```bash
-npm ci
-npm run build
-```
-
-在后端目录执行：
+在后端目录执行（默认前端目录为 `../MeowFilm-Frontend`；可用 `FRONTEND_DIR` 覆盖）：
 
 ```bash
-go build -o build/meowfilm .
-./build/meowfilm -addr :8080
+bash build-all.sh
 ```
 
-数据库默认写入当前目录的 `data.db`（或通过环境变量指定）。
+启动：
+
+```bash
+MEOWFILM_ADDR=":8080" ./build/meowfilm
+```
+
+说明：
+
+- `build-all.sh` 会构建前端并同步到后端内嵌目录 `public/dist`，再构建后端二进制。
+- 如果你只想构建后端（二进制），可以先保证 `public/dist/index.html` 存在，然后执行 `./build.sh`。
+- 也可以用 `./start.sh` 一键 `build-all.sh` + 启动（默认 `MEOWFILM_DEBUG=1` 且 `MEOWFILM_DATA_DIR=./build/`）。
 
 ## 默认账号
 
@@ -76,6 +85,8 @@ go build -o build/meowfilm .
 | `MEOWFILM_COOKIE_SECURE` | 登录 Cookie 是否 `Secure`（HTTPS 下建议设为 `1`） | `0` |
 | `MEOWFILM_DB_FILE` | 指定 DB 文件路径 | 空 |
 | `MEOWFILM_DATA_DIR` | 指定数据目录（DB 默认写入 `data.db`） | 空 |
+| `MEOWFILM_DEBUG` | 启用调试接口（如 `/listdebug`、`/searchdebug`） | `0` |
+| `MEOWFILM_PAN_API_NOAUTH` | 允许回环地址免登录访问部分网盘 API（仅 `127.0.0.1`/`::1` 生效） | `0` |
 | `ASSET_VERSION` | 静态资源版本号（用于前端资源刷新；未设置时 UI 显示 `beta`，资源使用时间戳） | 空 |
 
 ## 相关项目

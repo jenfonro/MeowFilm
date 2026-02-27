@@ -146,8 +146,9 @@ func newTianyiClient() (*http.Client, error) {
 		return nil, err
 	}
 	return &http.Client{
-		Timeout: 18 * time.Second,
-		Jar:     jar,
+		Timeout:   18 * time.Second,
+		Jar:       jar,
+		Transport: netdiskHTTPTransport,
 	}, nil
 }
 
@@ -509,7 +510,7 @@ func ensure189Cookie(database *db.DB, forceRefresh bool) (cookie string, refresh
 }
 
 func tianyiJSONGet(urlStr string, cookie string, referer string, out any) error {
-	client := &http.Client{Timeout: 18 * time.Second}
+	client := &http.Client{Timeout: 18 * time.Second, Transport: netdiskHTTPTransport}
 	req, err := http.NewRequest(http.MethodGet, urlStr, nil)
 	if err != nil {
 		return err
@@ -910,7 +911,7 @@ func tianyiGetFileDownloadURL(shareID string, fileID string, dt string, accessCo
 }
 
 func tianyiGetRawJSON(urlStr string, cookie string, referer string) (status int, rawText string, root map[string]any, err error) {
-	client := &http.Client{Timeout: 18 * time.Second}
+	client := &http.Client{Timeout: 18 * time.Second, Transport: netdiskHTTPTransport}
 	req, err := http.NewRequest(http.MethodGet, urlStr, nil)
 	if err != nil {
 		return 0, "", nil, err
@@ -1059,7 +1060,8 @@ func pickTianyiVlcPlayURL(resp tianyiVlcPlayURLResp) string {
 
 func resolveSingleRedirectLocation(urlStr string) (string, error) {
 	client := &http.Client{
-		Timeout: 18 * time.Second,
+		Timeout:   18 * time.Second,
+		Transport: netdiskHTTPTransport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -1104,7 +1106,8 @@ func resolveFinalRedirectURL(urlStr string, maxRedirects int) (string, error) {
 		limit = 20
 	}
 	client := &http.Client{
-		Timeout: 18 * time.Second,
+		Timeout:   18 * time.Second,
+		Transport: netdiskHTTPTransport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

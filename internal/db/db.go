@@ -279,22 +279,24 @@ func (d *DB) ensureSchema() error {
 					);
 					CREATE INDEX IF NOT EXISTS idx_site_video_site ON site_video(site_kind, owner_user_id, site_key);
 
-					-- Playback history (3NF)
-					CREATE TABLE IF NOT EXISTS user_play_history (
-					  id INTEGER PRIMARY KEY AUTOINCREMENT,
-					  user_id INTEGER NOT NULL,
-					  content_id INTEGER NOT NULL,
-					  site_video_id INTEGER NOT NULL,
-					  pan_label TEXT NOT NULL DEFAULT '',
-					  play_flag TEXT NOT NULL DEFAULT '',
-					  episode_index INTEGER NOT NULL DEFAULT 0,
-					  episode_name TEXT NOT NULL DEFAULT '',
-					  playback_position_ticks INTEGER NOT NULL DEFAULT 0,
-					  playback_runtime_ticks INTEGER NOT NULL DEFAULT 0,
-					  playback_item_id TEXT NOT NULL DEFAULT '',
-					  updated_at INTEGER NOT NULL,
-					  UNIQUE(user_id, site_video_id),
-					  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+						-- Playback history (3NF)
+						CREATE TABLE IF NOT EXISTS user_play_history (
+						  id INTEGER PRIMARY KEY AUTOINCREMENT,
+						  user_id INTEGER NOT NULL,
+						  content_id INTEGER NOT NULL,
+						  site_video_id INTEGER NOT NULL,
+						  pan_label TEXT NOT NULL DEFAULT '',
+						  play_flag TEXT NOT NULL DEFAULT '',
+						  episode_index INTEGER NOT NULL DEFAULT 0,
+						  episode_name TEXT NOT NULL DEFAULT '',
+						  tmdb_season INTEGER NOT NULL DEFAULT 0,
+						  tmdb_episode INTEGER NOT NULL DEFAULT 0,
+						  playback_position_ticks INTEGER NOT NULL DEFAULT 0,
+						  playback_runtime_ticks INTEGER NOT NULL DEFAULT 0,
+						  playback_item_id TEXT NOT NULL DEFAULT '',
+						  updated_at INTEGER NOT NULL,
+						  UNIQUE(user_id, site_video_id),
+						  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
 					  FOREIGN KEY(content_id) REFERENCES content(id) ON DELETE CASCADE,
 					  FOREIGN KEY(site_video_id) REFERENCES site_video(id) ON DELETE CASCADE
 					);
@@ -595,6 +597,12 @@ func (d *DB) ensureSchema() error {
 					  id INTEGER PRIMARY KEY CHECK (id = 1),
 					  enabled INTEGER NOT NULL DEFAULT 0,
 					  auto_select INTEGER NOT NULL DEFAULT 0,
+					  updated_at INTEGER NOT NULL
+					);
+					CREATE TABLE IF NOT EXISTS app_netdisk_proxy (
+					  id INTEGER PRIMARY KEY CHECK (id = 1),
+					  enabled INTEGER NOT NULL DEFAULT 0,
+					  proxy_url TEXT NOT NULL DEFAULT '',
 					  updated_at INTEGER NOT NULL
 					);
 					CREATE TABLE IF NOT EXISTS app_catpawopen (

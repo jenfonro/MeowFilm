@@ -1,7 +1,9 @@
 package dashboard
 
 import (
+	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -39,6 +41,32 @@ func defaultString(v, def string) string {
 
 func normalizeHTTPBase(value string) string {
 	return mfnet.NormalizeHTTPBase(value)
+}
+
+func normalizeNetdiskProxyURL(input string) (string, error) {
+	raw := strings.TrimSpace(input)
+	if raw == "" {
+		return "", nil
+	}
+	s := raw
+	if !strings.Contains(s, "://") {
+		s = "http://" + s
+	}
+	u, err := url.Parse(s)
+	if err != nil || u == nil {
+		return "", errors.New("代理地址不是合法 URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", errors.New("代理仅支持 http/https")
+	}
+	if strings.TrimSpace(u.Host) == "" {
+		return "", errors.New("代理地址缺少 host:port")
+	}
+	// Keep as an origin, since it is a proxy base.
+	u.Path = ""
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String(), nil
 }
 
 func normalizeCatPawOpenAPIBase(inputURL string) string {

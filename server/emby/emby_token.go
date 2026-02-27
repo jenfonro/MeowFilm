@@ -27,6 +27,13 @@ func embyReadToken(r *http.Request) string {
 	if v := embyQueryTrimCI(r, "token"); v != "" {
 		return v
 	}
+	// Some clients pass token as query param using header-like names.
+	if v := embyQueryTrimCI(r, "X-Emby-Token"); v != "" {
+		return v
+	}
+	if v := embyQueryTrimCI(r, "X-MediaBrowser-Token"); v != "" {
+		return v
+	}
 
 	// Simple token headers.
 	if v := embyHeaderTrim(r, "X-Emby-Token"); v != "" {
@@ -53,6 +60,13 @@ func embyReadToken(r *http.Request) string {
 		}
 	}
 
+	// Cookie fallback (some embedded clients).
+	if c := embyHeaderTrim(r, "Cookie"); c != "" {
+		if tok := parseTokenFromCookie(c); tok != "" {
+			return tok
+		}
+	}
+
 	return ""
 }
 
@@ -63,6 +77,16 @@ func parseTokenFromAuthorization(v string) string {
 	s := strings.TrimSpace(v)
 	if s == "" {
 		return ""
+	}
+	low := strings.ToLower(s)
+	// Common schemes:
+	// - "Bearer <token>"
+	// - "Token <token>"
+	if strings.HasPrefix(low, "bearer ") {
+		return strings.TrimSpace(s[len("bearer "):])
+	}
+	if strings.HasPrefix(low, "token ") {
+		return strings.TrimSpace(s[len("token "):])
 	}
 	// Normalize separators.
 	for _, key := range []string{"Token=\"", "Token="} {
@@ -82,6 +106,34 @@ func parseTokenFromAuthorization(v string) string {
 			end = j
 		}
 		return strings.TrimSpace(rest[:end])
+	}
+	return ""
+}
+
+func parseTokenFromCookie(cookieHeader string) string {
+	s := strings.TrimSpace(cookieHeader)
+	if s == "" {
+		return ""
+	}
+	parts := strings.Split(s, ";")
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		kv := strings.SplitN(p, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		k := strings.ToLower(strings.TrimSpace(kv[0]))
+		v := strings.TrimSpace(kv[1])
+		v = strings.Trim(v, "\"")
+		if v == "" {
+			continue
+		}
+		if k == "x-emby-token" || k == "x-mediabrowser-token" || k == "api_key" || k == "token" {
+			return v
+		}
 	}
 	return ""
 }

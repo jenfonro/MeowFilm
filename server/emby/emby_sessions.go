@@ -148,6 +148,8 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 		return nil
 	}
 
+	deviceID := embyClientDeviceID(r)
+
 	var dto embySessionReport
 	if err := readJSONLoose(r, &dto); err != nil {
 		return nil
@@ -312,8 +314,13 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 		if episodeName == "" {
 			episodeName = fmt.Sprintf("P%dE%02d", sitePan, siteEp)
 		}
-		playFlag = "site"
-		contentKey = strings.ToLower(strings.TrimSpace(fmt.Sprintf("site:%s:%s", siteKey, videoID)))
+		playFlag = "emby_site"
+		// Canonicalize site playback as keyword key so cross-site plays collapse into one history entry.
+		// If we later discover TMDB id for the same title, DB layer will promote keyword-key rows to tmdb:*.
+		contentKey = strings.ToLower(strings.TrimSpace(database.ComputePlayHistoryKeywordKey(videoTitle)))
+		if contentKey == "" {
+			contentKey = strings.ToLower(strings.TrimSpace(fmt.Sprintf("site:%s:%s", siteKey, videoID)))
+		}
 
 		// Normalize: try to map site playback to TMDB play history using magic episode rules.
 		// If we can extract an episode and find a strong TMDB match, update the TMDB history too
@@ -369,7 +376,6 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 					}
 					ep := se.Episode
 
-					tmdbSeriesID := embyBuildSeriesID(bestID)
 					tmdbEpisodeID := embyBuildEpisodeID(bestID, season, ep)
 
 					tmdbTitle := ""
@@ -396,26 +402,20 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 					if tmdbPoster != "" {
 						tmdbPoster = embyTMDBImageURL(database, tmdbPoster, "w500")
 					}
-					now2 := time.Now().Unix()
-					_ = database.UpsertPlayHistory(db.PlayHistoryUpsert{
-						UserID:                userID,
-						ContentKey:            strings.ToLower(strings.TrimSpace(fmt.Sprintf("tmdb:tv:%d", bestID))),
-						SiteKey:               "emby",
-						VideoID:               tmdbSeriesID,
-						VideoTitle:            tmdbTitle,
-						VideoPoster:           tmdbPoster,
-						VideoRemark:           "",
-						TMDBID:                bestID,
-						TMDBType:              "tv",
-						PanLabel:              "",
-						PlayFlag:              "emby",
-						EpisodeIndex:          ep,
-						EpisodeName:           fmt.Sprintf("S%02dE%03d", season, ep),
-						UpdatedAt:             now2,
-						PlaybackPositionTicks: position,
-						PlaybackRuntimeTicks:  runtime,
-						PlaybackItemID:        tmdbEpisodeID,
-					})
+
+					// Promote the canonical record to TMDB id to avoid duplicated keyword+TMDB rows.
+					tmdbID = bestID
+					tmdbType = "tv"
+					contentKey = strings.ToLower(strings.TrimSpace(fmt.Sprintf("tmdb:tv:%d", bestID)))
+					episodeIndex = ep
+					episodeName = fmt.Sprintf("S%02dE%03d", season, ep)
+					itemID = tmdbEpisodeID
+					if tmdbTitle != "" {
+						videoTitle = tmdbTitle
+					}
+					if tmdbPoster != "" {
+						videoPoster = tmdbPoster
+					}
 				}
 			}
 		}
@@ -426,7 +426,61 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 		}
 	}
 
+	// Prefer the site source picked during the actual stream resolution window (report-time only).
+	// This lets web and emby share the same canonical history row for quick-start.
+	if !isSiteEpisode && strings.HasPrefix(strings.ToLower(contentKey), "tmdb:") {
+		if msid := embyComputeMediaSourceIDForItem(u.ID, deviceID, itemID); msid != "" {
+			if meta, ok := embyStreams.GetMeta(msid); ok {
+				if sk := strings.TrimSpace(meta.SiteKey); sk != "" && !strings.EqualFold(sk, "emby") && strings.TrimSpace(meta.VideoID) != "" {
+					siteKey = strings.TrimSpace(meta.SiteKey)
+					videoID = strings.TrimSpace(meta.VideoID)
+					if strings.TrimSpace(panLabel) == "" {
+						panLabel = strings.TrimSpace(meta.PanLabel)
+					}
+					if playFlag == "emby" {
+						playFlag = "emby_smart"
+					}
+				}
+			}
+		}
+	}
+
+	// If this is a TMDB item played from Emby, try to bind the canonical history row to a real site source
+	// (last picked smart-play site) so both Emby and Web can "quick start" from the same record.
+	// This is best-effort: if no site source exists yet, we fall back to siteKey="emby".
+	if !isSiteEpisode && strings.HasPrefix(strings.ToLower(contentKey), "tmdb:") && strings.EqualFold(strings.TrimSpace(siteKey), "emby") {
+		if prev, err := database.GetPlayHistoryLatestByContentKey(userID, contentKey); err == nil && prev != nil {
+			if sk := strings.TrimSpace(prev.SiteKey); sk != "" && !strings.EqualFold(sk, "emby") &&
+				strings.TrimSpace(prev.SpiderAPI) != "" && strings.TrimSpace(prev.VideoID) != "" {
+				siteKey = strings.TrimSpace(prev.SiteKey)
+				videoID = strings.TrimSpace(prev.VideoID)
+				if strings.TrimSpace(videoTitle) == "" {
+					videoTitle = strings.TrimSpace(prev.VideoTitle)
+				}
+				if strings.TrimSpace(videoPoster) == "" {
+					videoPoster = strings.TrimSpace(prev.VideoPoster)
+				}
+				if strings.TrimSpace(videoRemark) == "" {
+					videoRemark = strings.TrimSpace(prev.VideoRemark)
+				}
+				if strings.TrimSpace(panLabel) == "" {
+					panLabel = strings.TrimSpace(prev.PanLabel)
+				}
+			}
+		}
+	}
+
 	now := time.Now().Unix()
+	tmdbSeason := 0
+	tmdbEpisode := 0
+	if parsed, ok := embyParseItemID(itemID); ok && parsed != nil && parsed.Source == "tmdb" && parsed.Kind == "tv" {
+		if parsed.Season > 0 {
+			tmdbSeason = parsed.Season
+		}
+		if parsed.Episode > 0 {
+			tmdbEpisode = parsed.Episode
+		}
+	}
 	return database.UpsertPlayHistory(db.PlayHistoryUpsert{
 		UserID:                userID,
 		ContentKey:            contentKey,
@@ -443,6 +497,8 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 		PlayFlag:              playFlag,
 		EpisodeIndex:          episodeIndex,
 		EpisodeName:           episodeName,
+		TMDBSeason:            tmdbSeason,
+		TMDBEpisode:           tmdbEpisode,
 		UpdatedAt:             now,
 		PlaybackPositionTicks: position,
 		PlaybackRuntimeTicks:  runtime,

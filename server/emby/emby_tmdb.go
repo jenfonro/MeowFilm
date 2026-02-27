@@ -625,41 +625,41 @@ func embyTMDBGetTVDetail(database *db.DB, tmdbID int) (*embyTMDBTVDetail, error)
 		return nil, fmt.Errorf("tmdb http %d", resp.StatusCode)
 	}
 
-		var data tmdb.TVDetailsResponse
-		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-			return nil, err
-		}
-		// Persist normalized TMDB library (best-effort)
-		if database != nil {
-			_, _ = database.UpsertTMDBMedia(db.TMDBUpsertMedia{
-				Type:         "tv",
-				ID:           id,
-				Lang:         defaultString(lang, "zh-CN"),
-				Title:        strings.TrimSpace(data.Name),
-				Original:     strings.TrimSpace(data.OriginalName),
-				Overview:     strings.TrimSpace(data.Overview),
-				Status:       strings.TrimSpace(data.Status),
-				PosterPath:   strings.TrimSpace(data.PosterPath),
-				BackdropPath: strings.TrimSpace(data.BackdropPath),
-				FirstAirDate: strings.TrimSpace(data.FirstAir),
+	var data tmdb.TVDetailsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, err
+	}
+	// Persist normalized TMDB library (best-effort)
+	if database != nil {
+		_, _ = database.UpsertTMDBMedia(db.TMDBUpsertMedia{
+			Type:         "tv",
+			ID:           id,
+			Lang:         defaultString(lang, "zh-CN"),
+			Title:        strings.TrimSpace(data.Name),
+			Original:     strings.TrimSpace(data.OriginalName),
+			Overview:     strings.TrimSpace(data.Overview),
+			Status:       strings.TrimSpace(data.Status),
+			PosterPath:   strings.TrimSpace(data.PosterPath),
+			BackdropPath: strings.TrimSpace(data.BackdropPath),
+			FirstAirDate: strings.TrimSpace(data.FirstAir),
+		})
+		seasonRows := make([]db.TMDBSeason, 0, len(data.Seasons))
+		for _, s := range data.Seasons {
+			seasonRows = append(seasonRows, db.TMDBSeason{
+				SeasonNumber: s.SeasonNumber,
+				EpisodeCount: s.EpisodeCount,
+				AirDate:      strings.TrimSpace(s.AirDate),
+				PosterPath:   strings.TrimSpace(s.PosterPath),
+				Name:         strings.TrimSpace(s.Name),
 			})
-			seasonRows := make([]db.TMDBSeason, 0, len(data.Seasons))
-			for _, s := range data.Seasons {
-				seasonRows = append(seasonRows, db.TMDBSeason{
-					SeasonNumber: s.SeasonNumber,
-					EpisodeCount: s.EpisodeCount,
-					AirDate:      strings.TrimSpace(s.AirDate),
-					PosterPath:   strings.TrimSpace(s.PosterPath),
-					Name:         strings.TrimSpace(s.Name),
-				})
-			}
-			_ = database.UpsertTMDBSeasons("tv", id, defaultString(lang, "zh-CN"), seasonRows)
 		}
-		year := 0
-		if len(strings.TrimSpace(data.FirstAir)) >= 4 {
-			if y, err := strconv.Atoi(strings.TrimSpace(data.FirstAir)[:4]); err == nil {
-				year = y
-			}
+		_ = database.UpsertTMDBSeasons("tv", id, defaultString(lang, "zh-CN"), seasonRows)
+	}
+	year := 0
+	if len(strings.TrimSpace(data.FirstAir)) >= 4 {
+		if y, err := strconv.Atoi(strings.TrimSpace(data.FirstAir)[:4]); err == nil {
+			year = y
+		}
 	}
 	seasons := make([]embyTMDBSeason, 0, len(data.Seasons))
 	for _, s := range data.Seasons {
@@ -672,12 +672,91 @@ func embyTMDBGetTVDetail(database *db.DB, tmdbID int) (*embyTMDBTVDetail, error)
 			Poster:       strings.TrimSpace(s.PosterPath),
 		})
 	}
+	// Compute latest aired season/episode deterministically from TMDB seasons + season detail.
+	// Do not rely on last_episode_to_air, which can lag behind or be inconsistent.
 	latestSeason := 0
 	latestEpisode := 0
-	if data.LastEpisodeToAir != nil && data.LastEpisodeToAir.EpisodeNumber > 0 {
-		latestEpisode = data.LastEpisodeToAir.EpisodeNumber
-		if data.LastEpisodeToAir.SeasonNumber > 0 {
-			latestSeason = data.LastEpisodeToAir.SeasonNumber
+	ended := strings.EqualFold(strings.TrimSpace(data.Status), "Ended")
+	now0 := time.Now()
+	// 1) Pick latest season that has started airing (CN day).
+	for _, s := range data.Seasons {
+		if s.SeasonNumber <= 0 || s.EpisodeCount <= 0 {
+			continue
+		}
+		if strings.TrimSpace(s.AirDate) == "" {
+			// If TMDB doesn't provide air_date for a season, keep it eligible only when ended.
+			if !ended {
+				continue
+			}
+		} else if !embyIsAiredDate(s.AirDate, now0) {
+			continue
+		}
+		if s.SeasonNumber > latestSeason {
+			latestSeason = s.SeasonNumber
+		}
+	}
+		// 2) Find latest aired episode within that season by episode air_date.
+		if latestSeason > 0 {
+			seasonCount := 0
+			for _, s := range data.Seasons {
+				if s.SeasonNumber == latestSeason && s.EpisodeCount > 0 {
+					seasonCount = s.EpisodeCount
+					break
+				}
+			}
+			if seasonCount > 0 {
+				maxAired := 0
+				if eps, err := embyTMDBGetTVSeasonEpisodesAtLeast(database, id, latestSeason, seasonCount); err == nil && len(eps) > 0 {
+					for _, e := range eps {
+					if e.Episode <= 0 {
+						continue
+					}
+					ad := strings.TrimSpace(e.AirDate)
+					if ad == "" {
+						if ended {
+							if e.Episode > maxAired {
+								maxAired = e.Episode
+							}
+						}
+						continue
+					}
+					if !embyIsAiredDate(ad, now0) {
+						continue
+					}
+					if e.Episode > maxAired {
+						maxAired = e.Episode
+					}
+				}
+			}
+			if ended && maxAired <= 0 {
+				maxAired = seasonCount
+			}
+				latestEpisode = maxAired
+			}
+		}
+		// 2.5) Reconcile with TMDB last_episode_to_air when it is newer than our season-detail view.
+		// This avoids off-by-one issues when TMDB's season episode_count or cached season detail lags,
+		// while still respecting air_date (CN day).
+		if data.LastEpisodeToAir != nil && data.LastEpisodeToAir.EpisodeNumber > 0 {
+			ad := strings.TrimSpace(data.LastEpisodeToAir.AirDate)
+			if ad == "" || embyIsAiredDate(ad, now0) {
+				if latestSeason <= 0 && data.LastEpisodeToAir.SeasonNumber > 0 {
+					latestSeason = data.LastEpisodeToAir.SeasonNumber
+				}
+				if data.LastEpisodeToAir.SeasonNumber > 0 && data.LastEpisodeToAir.SeasonNumber == latestSeason {
+					if data.LastEpisodeToAir.EpisodeNumber > latestEpisode {
+						latestEpisode = data.LastEpisodeToAir.EpisodeNumber
+					}
+				}
+			}
+		}
+		// 3) Fallback: if we couldn't determine it, use last_episode_to_air as a last resort.
+		if (latestSeason <= 0 || latestEpisode <= 0) && data.LastEpisodeToAir != nil && data.LastEpisodeToAir.EpisodeNumber > 0 {
+			if latestSeason <= 0 && data.LastEpisodeToAir.SeasonNumber > 0 {
+				latestSeason = data.LastEpisodeToAir.SeasonNumber
+			}
+		if latestEpisode <= 0 {
+			latestEpisode = data.LastEpisodeToAir.EpisodeNumber
 		}
 	}
 	episodeCount := 0
@@ -727,14 +806,26 @@ func embyTMDBGetTVSeasonDetail(database *db.DB, tmdbID int, season int) (*embyTM
 		return nil, errors.New("invalid args")
 	}
 
+	return embyTMDBGetTVSeasonDetailAtLeast(database, tmdbID, season, 0)
+}
+
+func embyTMDBGetTVSeasonDetailAtLeast(database *db.DB, tmdbID int, season int, minEpisodes int) (*embyTMDBTVSeasonDetail, error) {
+	if tmdbID <= 0 || season < 0 {
+		return nil, errors.New("invalid args")
+	}
+
 	cacheKey := fmt.Sprintf("tv:%d:s:%d", tmdbID, season)
 	now := time.Now()
 	embySeasonDetailCache.Lock()
 	if embySeasonDetailCache.M != nil {
 		if hit, ok := embySeasonDetailCache.M[cacheKey]; ok && hit.Data != nil && hit.Expire.After(now) {
-			d := hit.Data
-			embySeasonDetailCache.Unlock()
-			return d, nil
+			if minEpisodes > 0 && len(hit.Data.Episodes) < minEpisodes {
+				embySeasonDetailCache.Unlock()
+			} else {
+				d := hit.Data
+				embySeasonDetailCache.Unlock()
+				return d, nil
+			}
 		}
 	}
 	embySeasonDetailCache.Unlock()
@@ -779,37 +870,37 @@ func embyTMDBGetTVSeasonDetail(database *db.DB, tmdbID int, season int) (*embyTM
 			AirDate       string `json:"air_date"`
 		} `json:"episodes"`
 	}
-		if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-			return nil, err
-		}
-		// Persist normalized TMDB episodes (best-effort)
-		if database != nil {
-			episodes := make([]db.TMDBEpisode, 0, len(raw.Episodes))
-			for _, e := range raw.Episodes {
-				if e.EpisodeNumber <= 0 {
-					continue
-				}
-				episodes = append(episodes, db.TMDBEpisode{
-					SeasonNumber:  season,
-					EpisodeNumber: e.EpisodeNumber,
-					AirDate:       strings.TrimSpace(e.AirDate),
-					StillPath:     strings.TrimSpace(e.StillPath),
-					Name:          strings.TrimSpace(e.Name),
-					Overview:      strings.TrimSpace(e.Overview),
-				})
-			}
-			_ = database.UpsertTMDBEpisodes(tmdbID, defaultString(lang, "zh-CN"), episodes)
-			// Also store season meta/name
-			_ = database.UpsertTMDBSeasons("tv", tmdbID, defaultString(lang, "zh-CN"), []db.TMDBSeason{{
-				SeasonNumber: season,
-				PosterPath:   strings.TrimSpace(raw.PosterPath),
-				Name:         strings.TrimSpace(raw.Name),
-			}})
-		}
-		out := make([]embyTMDBSeasonEpisode, 0, len(raw.Episodes))
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+	// Persist normalized TMDB episodes (best-effort)
+	if database != nil {
+		episodes := make([]db.TMDBEpisode, 0, len(raw.Episodes))
 		for _, e := range raw.Episodes {
 			if e.EpisodeNumber <= 0 {
 				continue
+			}
+			episodes = append(episodes, db.TMDBEpisode{
+				SeasonNumber:  season,
+				EpisodeNumber: e.EpisodeNumber,
+				AirDate:       strings.TrimSpace(e.AirDate),
+				StillPath:     strings.TrimSpace(e.StillPath),
+				Name:          strings.TrimSpace(e.Name),
+				Overview:      strings.TrimSpace(e.Overview),
+			})
+		}
+		_ = database.UpsertTMDBEpisodes(tmdbID, defaultString(lang, "zh-CN"), episodes)
+		// Also store season meta/name
+		_ = database.UpsertTMDBSeasons("tv", tmdbID, defaultString(lang, "zh-CN"), []db.TMDBSeason{{
+			SeasonNumber: season,
+			PosterPath:   strings.TrimSpace(raw.PosterPath),
+			Name:         strings.TrimSpace(raw.Name),
+		}})
+	}
+	out := make([]embyTMDBSeasonEpisode, 0, len(raw.Episodes))
+	for _, e := range raw.Episodes {
+		if e.EpisodeNumber <= 0 {
+			continue
 		}
 		out = append(out, embyTMDBSeasonEpisode{
 			Episode:  e.EpisodeNumber,
@@ -842,10 +933,14 @@ func embyTMDBGetTVSeasonDetail(database *db.DB, tmdbID int, season int) (*embyTM
 }
 
 func embyTMDBGetTVSeasonEpisodes(database *db.DB, tmdbID int, season int) ([]embyTMDBSeasonEpisode, error) {
+	return embyTMDBGetTVSeasonEpisodesAtLeast(database, tmdbID, season, 0)
+}
+
+func embyTMDBGetTVSeasonEpisodesAtLeast(database *db.DB, tmdbID int, season int, minEpisodes int) ([]embyTMDBSeasonEpisode, error) {
 	if tmdbID <= 0 || season < 0 {
 		return nil, errors.New("invalid args")
 	}
-	d, err := embyTMDBGetTVSeasonDetail(database, tmdbID, season)
+	d, err := embyTMDBGetTVSeasonDetailAtLeast(database, tmdbID, season, minEpisodes)
 	if err != nil {
 		return nil, err
 	}
@@ -888,32 +983,32 @@ func embyTMDBGetMovieDetail(database *db.DB, tmdbID int) (*embyTMDBMovieDetail, 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("tmdb http %d", resp.StatusCode)
 	}
-		var data tmdb.MovieDetailsResponse
-		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-			return nil, err
+	var data tmdb.MovieDetailsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, err
+	}
+	// Persist normalized TMDB library (best-effort)
+	if database != nil {
+		_, _ = database.UpsertTMDBMedia(db.TMDBUpsertMedia{
+			Type:         "movie",
+			ID:           id,
+			Lang:         defaultString(lang, "zh-CN"),
+			Title:        strings.TrimSpace(data.Title),
+			Original:     strings.TrimSpace(data.Original),
+			Overview:     strings.TrimSpace(data.Overview),
+			Tagline:      strings.TrimSpace(data.Tagline),
+			Status:       strings.TrimSpace(data.Status),
+			PosterPath:   strings.TrimSpace(data.PosterPath),
+			BackdropPath: strings.TrimSpace(data.Backdrop),
+			ReleaseDate:  strings.TrimSpace(data.ReleaseDate),
+			Runtime:      data.Runtime,
+		})
+	}
+	year := 0
+	if len(strings.TrimSpace(data.ReleaseDate)) >= 4 {
+		if y, err := strconv.Atoi(strings.TrimSpace(data.ReleaseDate)[:4]); err == nil {
+			year = y
 		}
-		// Persist normalized TMDB library (best-effort)
-		if database != nil {
-			_, _ = database.UpsertTMDBMedia(db.TMDBUpsertMedia{
-				Type:        "movie",
-				ID:          id,
-				Lang:        defaultString(lang, "zh-CN"),
-				Title:       strings.TrimSpace(data.Title),
-				Original:    strings.TrimSpace(data.Original),
-				Overview:    strings.TrimSpace(data.Overview),
-				Tagline:     strings.TrimSpace(data.Tagline),
-				Status:      strings.TrimSpace(data.Status),
-				PosterPath:  strings.TrimSpace(data.PosterPath),
-				BackdropPath: strings.TrimSpace(data.Backdrop),
-				ReleaseDate: strings.TrimSpace(data.ReleaseDate),
-				Runtime:     data.Runtime,
-			})
-		}
-		year := 0
-		if len(strings.TrimSpace(data.ReleaseDate)) >= 4 {
-			if y, err := strconv.Atoi(strings.TrimSpace(data.ReleaseDate)[:4]); err == nil {
-				year = y
-			}
 	}
 	return &embyTMDBMovieDetail{
 		ID:       id,

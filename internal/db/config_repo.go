@@ -11,25 +11,27 @@ import (
 )
 
 type AppConfig struct {
-	SiteName                 string
-	DoubanDataProxy           string
-	DoubanDataCustom          string
-	DoubanImgProxy            string
-	DoubanImgCustom           string
-	VideoSourceAPIBase        string
+	SiteName                   string
+	DoubanDataProxy            string
+	DoubanDataCustom           string
+	DoubanImgProxy             string
+	DoubanImgCustom            string
+	VideoSourceAPIBase         string
 	VideoSourceSearchCoverSite string
-	SearchDisplayMode         string
+	SearchDisplayMode          string
 	SmartSourceExtractPriority string
 	SmartSiteCleanKeywords     string
-	GoProxyEnabled            bool
-	GoProxyAutoSelect         bool
-	TMDBAPIToken              string
-	TMDBAPIBase               string
-	TMDBImgBase               string
-	TMDBLanguage              string
-	TMDBRegion                string
-	TMDBIncludeAdult          bool
-	CatPawOpenActive          string
+	GoProxyEnabled             bool
+	GoProxyAutoSelect          bool
+	NetdiskProxyEnabled        bool
+	NetdiskProxyURL            string
+	TMDBAPIToken               string
+	TMDBAPIBase                string
+	TMDBImgBase                string
+	TMDBLanguage               string
+	TMDBRegion                 string
+	TMDBIncludeAdult           bool
+	CatPawOpenActive           string
 }
 
 func (d *DB) ReadAppConfig() (AppConfig, error) {
@@ -38,16 +40,18 @@ func (d *DB) ReadAppConfig() (AppConfig, error) {
 	}
 
 	var (
-		siteName sql.NullString
+		siteName                                       sql.NullString
 		dDataProxy, dDataCustom, dImgProxy, dImgCustom sql.NullString
-		vsAPIBase, vsCover sql.NullString
-		sDisplay sql.NullString
-		smartPriority sql.NullString
-		smartSiteClean sql.NullString
-		gEnabled, gAuto sql.NullInt64
-		tToken, tAPIBase, tImgBase, tLang, tRegion sql.NullString
-		tAdult sql.NullInt64
-		cActive sql.NullString
+		vsAPIBase, vsCover                             sql.NullString
+		sDisplay                                       sql.NullString
+		smartPriority                                  sql.NullString
+		smartSiteClean                                 sql.NullString
+		gEnabled, gAuto                                sql.NullInt64
+		ndEnabled                                      sql.NullInt64
+		ndProxy                                        sql.NullString
+		tToken, tAPIBase, tImgBase, tLang, tRegion     sql.NullString
+		tAdult                                         sql.NullInt64
+		cActive                                        sql.NullString
 	)
 
 	_ = d.db.QueryRow(`SELECT site_name FROM app_site WHERE id=1 LIMIT 1`).Scan(&siteName)
@@ -56,29 +60,32 @@ func (d *DB) ReadAppConfig() (AppConfig, error) {
 	_ = d.db.QueryRow(`SELECT display_mode FROM app_search WHERE id=1 LIMIT 1`).Scan(&sDisplay)
 	_ = d.db.QueryRow(`SELECT source_extract_priority, site_clean_keywords FROM app_smart WHERE id=1 LIMIT 1`).Scan(&smartPriority, &smartSiteClean)
 	_ = d.db.QueryRow(`SELECT enabled, auto_select FROM app_goproxy WHERE id=1 LIMIT 1`).Scan(&gEnabled, &gAuto)
+	_ = d.db.QueryRow(`SELECT enabled, proxy_url FROM app_netdisk_proxy WHERE id=1 LIMIT 1`).Scan(&ndEnabled, &ndProxy)
 	_ = d.db.QueryRow(`SELECT api_token, api_base, img_base, language, region, include_adult FROM app_tmdb WHERE id=1 LIMIT 1`).Scan(&tToken, &tAPIBase, &tImgBase, &tLang, &tRegion, &tAdult)
 	_ = d.db.QueryRow(`SELECT active FROM app_catpawopen WHERE id=1 LIMIT 1`).Scan(&cActive)
 
 	cfg := AppConfig{
-		SiteName:                  defaultIfEmpty(siteName.String, "MeowFilm"),
-		DoubanDataProxy:           defaultIfEmpty(dDataProxy.String, "server-proxy"),
-		DoubanDataCustom:          dDataCustom.String,
-		DoubanImgProxy:            defaultIfEmpty(dImgProxy.String, "server-proxy"),
-		DoubanImgCustom:           dImgCustom.String,
-		VideoSourceAPIBase:        vsAPIBase.String,
+		SiteName:                   defaultIfEmpty(siteName.String, "MeowFilm"),
+		DoubanDataProxy:            defaultIfEmpty(dDataProxy.String, "server-proxy"),
+		DoubanDataCustom:           dDataCustom.String,
+		DoubanImgProxy:             defaultIfEmpty(dImgProxy.String, "server-proxy"),
+		DoubanImgCustom:            dImgCustom.String,
+		VideoSourceAPIBase:         vsAPIBase.String,
 		VideoSourceSearchCoverSite: vsCover.String,
-		SearchDisplayMode:         defaultIfEmpty(sDisplay.String, "sites"),
+		SearchDisplayMode:          defaultIfEmpty(sDisplay.String, "sites"),
 		SmartSourceExtractPriority: defaultIfEmpty(smartPriority.String, "无"),
 		SmartSiteCleanKeywords:     strings.TrimSpace(smartSiteClean.String),
-		GoProxyEnabled:            gEnabled.Int64 != 0,
-		GoProxyAutoSelect:         gAuto.Int64 != 0,
-		TMDBAPIToken:              tToken.String,
-		TMDBAPIBase:               tAPIBase.String,
-		TMDBImgBase:               tImgBase.String,
-		TMDBLanguage:              defaultIfEmpty(tLang.String, "zh-CN"),
-		TMDBRegion:                defaultIfEmpty(tRegion.String, "CN"),
-		TMDBIncludeAdult:          tAdult.Int64 != 0,
-		CatPawOpenActive:          cActive.String,
+		GoProxyEnabled:             gEnabled.Int64 != 0,
+		GoProxyAutoSelect:          gAuto.Int64 != 0,
+		NetdiskProxyEnabled:        ndEnabled.Int64 != 0,
+		NetdiskProxyURL:            strings.TrimSpace(ndProxy.String),
+		TMDBAPIToken:               tToken.String,
+		TMDBAPIBase:                tAPIBase.String,
+		TMDBImgBase:                tImgBase.String,
+		TMDBLanguage:               defaultIfEmpty(tLang.String, "zh-CN"),
+		TMDBRegion:                 defaultIfEmpty(tRegion.String, "CN"),
+		TMDBIncludeAdult:           tAdult.Int64 != 0,
+		CatPawOpenActive:           cActive.String,
 	}
 	return cfg, nil
 }
@@ -144,6 +151,12 @@ func (d *DB) UpdateAppConfig(update func(*AppConfig)) error {
 		VALUES(1, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled, auto_select=excluded.auto_select, updated_at=excluded.updated_at
 	`, bool01Int(cfg.GoProxyEnabled), bool01Int(cfg.GoProxyAutoSelect), now)
+
+	_, _ = tx.Exec(`
+		INSERT INTO app_netdisk_proxy(id, enabled, proxy_url, updated_at)
+		VALUES(1, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled, proxy_url=excluded.proxy_url, updated_at=excluded.updated_at
+	`, bool01Int(cfg.NetdiskProxyEnabled), strings.TrimSpace(cfg.NetdiskProxyURL), now)
 
 	_, _ = tx.Exec(`
 		INSERT INTO app_tmdb(id, api_token, api_base, img_base, language, region, include_adult, updated_at)
@@ -243,9 +256,9 @@ func (d *DB) ListCatPawOpenPans() ([]CatPawOpenPan, error) {
 	out := []CatPawOpenPan{}
 	for rows.Next() {
 		var (
-			key string
+			key  string
 			name string
-			en int
+			en   int
 		)
 		_ = rows.Scan(&key, &name, &en)
 		key = strings.TrimSpace(key)
@@ -309,11 +322,11 @@ func (d *DB) ListGoProxyServers() ([]GoProxyServer, error) {
 	out := []GoProxyServer{}
 	for rows.Next() {
 		var (
-			name string
+			name        string
 			displayName string
-			base string
-			bd int
-			qk int
+			base        string
+			bd          int
+			qk          int
 		)
 		_ = rows.Scan(&name, &displayName, &base, &bd, &qk)
 		name = strings.TrimSpace(name)
@@ -394,10 +407,10 @@ func (d *DB) ListVideoSourceSites() ([]VideoSourceSite, error) {
 	out := []VideoSourceSite{}
 	for rows.Next() {
 		var (
-			key string
+			key  string
 			name string
-			api string
-			typ sql.NullInt64
+			api  string
+			typ  sql.NullInt64
 		)
 		_ = rows.Scan(&key, &name, &api, &typ)
 		key = strings.TrimSpace(key)
@@ -462,14 +475,14 @@ func (d *DB) ReadVideoSourceSiteStates() (map[string]VideoSourceSiteState, error
 	out := map[string]VideoSourceSiteState{}
 	for rows.Next() {
 		var (
-			key string
-			en int
-			home int
-			search int
+			key       string
+			en        int
+			home      int
+			search    int
 			smartSkip int
-			avail string
-			errStr string
-			ord int
+			avail     string
+			errStr    string
+			ord       int
 		)
 		_ = rows.Scan(&key, &en, &home, &search, &smartSkip, &avail, &errStr, &ord)
 		key = strings.TrimSpace(key)
@@ -799,7 +812,9 @@ func (d *DB) replaceStringTable(table, col string, list []string) error {
 	return tx.Commit()
 }
 
-func (d *DB) ListMagicEpisodeRules() ([]string, error) { return d.listStringTable("magic_episode_rule", "rule_text") }
+func (d *DB) ListMagicEpisodeRules() ([]string, error) {
+	return d.listStringTable("magic_episode_rule", "rule_text")
+}
 func (d *DB) ReplaceMagicEpisodeRules(list []string) error {
 	return d.replaceStringTable("magic_episode_rule", "rule_text", list)
 }
@@ -809,7 +824,9 @@ func (d *DB) ListMagicEpisodeCleanRegexRules() ([]string, error) {
 func (d *DB) ReplaceMagicEpisodeCleanRegexRules(list []string) error {
 	return d.replaceStringTable("magic_episode_clean_regex_rule", "pattern", list)
 }
-func (d *DB) ListMagicMovieRules() ([]string, error) { return d.listStringTable("magic_movie_rule", "rule_text") }
+func (d *DB) ListMagicMovieRules() ([]string, error) {
+	return d.listStringTable("magic_movie_rule", "rule_text")
+}
 func (d *DB) ReplaceMagicMovieRules(list []string) error {
 	return d.replaceStringTable("magic_movie_rule", "rule_text", list)
 }

@@ -71,8 +71,9 @@ func makeUCQRClient() (*http.Client, http.CookieJar, error) {
 		return nil, nil, err
 	}
 	return &http.Client{
-		Timeout: 12 * time.Second,
-		Jar:     jar,
+		Timeout:   12 * time.Second,
+		Jar:       jar,
+		Transport: netdiskHTTPTransport,
 	}, jar, nil
 }
 
@@ -275,7 +276,7 @@ func buildUCShareHeaders(cookie string) http.Header {
 }
 
 func ucShareDoJSON(method string, urlStr string, headers http.Header, body []byte, out any) error {
-	client := &http.Client{Timeout: 18 * time.Second}
+	client := &http.Client{Timeout: 18 * time.Second, Transport: netdiskHTTPTransport}
 	req, err := http.NewRequest(method, urlStr, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -312,7 +313,7 @@ func ucShareDoJSONWithCookie(method string, urlStr string, cookie *string, heade
 	if cookie != nil {
 		curCookie = strings.TrimSpace(*cookie)
 	}
-	client := &http.Client{Timeout: 18 * time.Second}
+	client := &http.Client{Timeout: 18 * time.Second, Transport: netdiskHTTPTransport}
 	req, err := http.NewRequest(method, urlStr, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -953,7 +954,7 @@ func ucTVRefreshAccessToken(refreshToken string, deviceID string) (accessToken s
 		"refresh_token": rt,
 	}
 	b, _ := json.Marshal(payload)
-	client := &http.Client{Timeout: 12 * time.Second}
+	client := &http.Client{Timeout: 12 * time.Second, Transport: netdiskHTTPTransport}
 	req, err := http.NewRequest(http.MethodPost, u, bytes.NewReader(b))
 	if err != nil {
 		return "", "", 0, err
@@ -1059,7 +1060,7 @@ func ucTVLinkByFid(fid string, accessToken string, deviceID string, method strin
 	q.Set("support", "dolby_vision")
 	u.RawQuery = q.Encode()
 
-	client := &http.Client{Timeout: 18 * time.Second}
+	client := &http.Client{Timeout: 18 * time.Second, Transport: netdiskHTTPTransport}
 	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
 	if err != nil {
 		return "", ucTVFileResp{}, err
@@ -1389,7 +1390,7 @@ func ucEnsureTransferCookie(shareID string, cookie *string) {
 		req1.Header.Set("User-Agent", ucShareUA)
 		req1.Header.Set("Referer", ucShareReferer)
 		req1.Header.Set("Cookie", strings.TrimSpace(*cookie))
-		client := &http.Client{Timeout: 12 * time.Second}
+		client := &http.Client{Timeout: 12 * time.Second, Transport: netdiskHTTPTransport}
 		if resp, e2 := client.Do(req1); e2 == nil && resp != nil {
 			_ = resp.Body.Close()
 			*cookie = mergeCookieFromSetCookie(strings.TrimSpace(*cookie), resp.Header.Values("Set-Cookie"))

@@ -93,7 +93,7 @@ func handleEmbyPlaybackInfo(w http.ResponseWriter, r *http.Request, database *db
 	// starts streaming. Do not trigger smart resolution here; defer it to the actual stream request
 	// (/emby/media/... or /emby/Videos/.../stream) where we can cache the resulting 302 mapping.
 	playSessionID := embyNewHexID()
-	resp := embyBuildPlaybackInfoResponse(embyID, "mp4", "mkv,webm,mp4,m4v,m3u8", mediaSourceID, playSessionID)
+	resp := embyBuildPlaybackInfoResponse(embyID, "mp4", "mkv,webm,mp4,m4v", mediaSourceID, playSessionID)
 	writeJSON(w, 200, resp)
 }
 

@@ -296,6 +296,11 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		_ = readJSONLoose(r, &body)
 
 		uid, _ := strconv.ParseInt(strings.TrimSpace(u.ID), 10, 64)
+		if uid > 0 && body.Hide && database != nil && itemID != "" {
+			// Emby clients use this to remove items from the "continue watching" list.
+			// They may send a series id while stored rows are episodes, so delete by prefix.
+			_, _ = database.DeleteResumePlaybackItemsByPrefix(uid, itemID)
+		}
 		snap := db.PlayHistorySnapshot{}
 		if uid > 0 && database != nil && itemID != "" {
 			if m, err := database.GetPlayHistorySnapshotsByPlaybackItemIDs(uid, []string{itemID}); err == nil {

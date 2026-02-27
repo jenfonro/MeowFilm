@@ -52,10 +52,10 @@ func embyBuildHistorySectionItems(database *db.DB, u *embyUser, startIndex int, 
 	}
 
 	type histRow struct {
-		itemID   string
-		groupID  string
-		titleKey string
-		snap     db.PlayHistorySnapshot
+		itemID    string
+		groupID   string
+		dedupeKey string
+		snap      db.PlayHistorySnapshot
 	}
 	seen := map[string]struct{}{}
 	rows := make([]histRow, 0, len(hist))
@@ -64,12 +64,21 @@ func embyBuildHistorySectionItems(database *db.DB, u *embyUser, startIndex int, 
 		if itemID == "" {
 			continue
 		}
-		title := strings.TrimSpace(h.VideoTitle)
-		titleKey := strings.ToLower(strings.TrimSpace(embyNormalizeAggKey(title)))
-		if titleKey == "" {
-			titleKey = strings.ToLower(strings.TrimSpace(itemID))
+		// Dedupe key priority:
+		// 1) TMDB id (collapses per-episode/per-item rows into one series/movie card)
+		// 2) normalized title (keyword-based collapse when no TMDB id)
+		// 3) group id / item id fallback
+		dedupeKey := ""
+		typ := strings.TrimSpace(h.TMDBType)
+		if h.TMDBID > 0 && (typ == "tv" || typ == "movie") {
+			dedupeKey = "tmdb:" + typ + ":" + fmt.Sprintf("%d", h.TMDBID)
+		} else {
+			title := strings.TrimSpace(h.VideoTitle)
+			titleKey := strings.ToLower(strings.TrimSpace(embyNormalizeAggKey(title)))
+			if titleKey != "" {
+				dedupeKey = "kw:" + titleKey
+			}
 		}
-		titleKey = "title:" + titleKey
 
 		groupID := ""
 		if strings.TrimSpace(h.TMDBType) == "tv" && h.TMDBID > 0 {
@@ -88,17 +97,20 @@ func embyBuildHistorySectionItems(database *db.DB, u *embyUser, startIndex int, 
 			continue
 		}
 
-		// Dedupe by normalized title: this merges same-title records across different sites.
-		if _, ok := seen[titleKey]; ok {
+		if strings.TrimSpace(dedupeKey) == "" {
+			dedupeKey = "gid:" + groupID
+		}
+		// Dedupe: ensure history contains only one card per keyword/TMDB id.
+		if _, ok := seen[dedupeKey]; ok {
 			continue
 		}
-		seen[titleKey] = struct{}{}
+		seen[dedupeKey] = struct{}{}
 
 		rows = append(rows, histRow{
-			itemID:   itemID,
-			groupID:  groupID,
-			titleKey: titleKey,
-			snap:     db.PlayHistorySnapshot{Pos: h.PlaybackPositionTicks, Runtime: h.PlaybackRuntimeTicks, Updated: h.UpdatedAt},
+			itemID:    itemID,
+			groupID:   groupID,
+			dedupeKey: dedupeKey,
+			snap:      db.PlayHistorySnapshot{Pos: h.PlaybackPositionTicks, Runtime: h.PlaybackRuntimeTicks, Updated: h.UpdatedAt},
 		})
 		if len(rows) >= limit {
 			break
