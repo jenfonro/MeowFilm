@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/cache"
 	"github.com/jenfonro/meowfilm/server/catpawopen"
 )
 
@@ -114,7 +115,7 @@ func embySearchSitesHits(database *db.DB, u *embyUser, query string, maxWait tim
 				if remain <= 0 {
 					continue
 				}
-				raw, err := catpawopen.RequestSpiderWithTimeout(apiBase, jb.S.API, "search", map[string]any{"wd": q, "page": 1}, remain)
+				raw, err := cache.RequestSpiderSearchCachedWithTimeout(apiBase, jb.S.API, q, 1, remain)
 				if err != nil || raw == nil {
 					continue
 				}
