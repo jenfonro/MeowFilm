@@ -2,6 +2,7 @@ package emby
 
 import (
 	"net/http"
+	"strings"
 
 	mfnet "github.com/jenfonro/meowfilm/server/net"
 )
@@ -32,4 +33,22 @@ func minInt(a, b int) int {
 
 func maxInt(a, b int) int {
 	return mfnet.MaxInt(a, b)
+}
+
+func smartLogSiteName(siteKey string, siteName string) string {
+	name := strings.TrimSpace(siteName)
+	if strings.EqualFold(name, "nodejs_wuming") {
+		name = ""
+	}
+	if name == "" {
+		key := strings.TrimSpace(siteKey)
+		if strings.EqualFold(key, "nodejs_wuming") {
+			key = ""
+		}
+		name = key
+	}
+	if name == "" {
+		name = "unknown"
+	}
+	return name
 }
