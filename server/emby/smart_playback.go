@@ -2,9 +2,11 @@ package emby
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2457,6 +2459,153 @@ func smartResolvePlaybackFromTMDBAligned(
 		}
 	}
 
+	upsertSmartPlayHistoryBestEffort := func(c smartCandidate) {
+		if database == nil || u == nil {
+			return
+		}
+		uid, _ := strconv.ParseInt(strings.TrimSpace(u.ID), 10, 64)
+		if uid <= 0 {
+			return
+		}
+		kind := strings.TrimSpace(req.Kind)
+		if kind != "tv" && kind != "movie" {
+			return
+		}
+		contentKey := strings.ToLower(strings.TrimSpace("tmdb:" + kind + ":" + strconv.Itoa(req.TMDBID)))
+		now := time.Now().Unix()
+
+		episodeIndex := 0
+		episodeName := ""
+		playbackItemID := ""
+		if kind == "tv" && strings.TrimSpace(req.SubKind) == "episode" {
+			if req.Episode > 0 {
+				episodeIndex = req.Episode
+				seasonNo := req.Season
+				if seasonNo <= 0 {
+					seasonNo = 1
+				}
+				episodeName = fmt.Sprintf("S%02dE%03d", seasonNo, req.Episode)
+				playbackItemID = embyBuildEpisodeID(req.TMDBID, seasonNo, req.Episode)
+			}
+		} else if kind == "movie" {
+			playbackItemID = embyBuildMovieID(req.TMDBID)
+		}
+
+		_ = database.UpsertPlayHistory(db.PlayHistoryUpsert{
+			UserID:                uid,
+			ContentKey:            contentKey,
+			SiteKey:               strings.TrimSpace(c.SiteKey),
+			VideoID:               strings.TrimSpace(c.VideoID),
+			VideoTitle:            strings.TrimSpace(searchTitle),
+			VideoPoster:           "",
+			VideoRemark:           "",
+			TMDBID:                req.TMDBID,
+			TMDBType:              kind,
+			PanLabel:              strings.TrimSpace(c.PanLabel),
+			PlayFlag:              "smart",
+			EpisodeIndex:          episodeIndex,
+			EpisodeName:           episodeName,
+			UpdatedAt:             now,
+			PlaybackPositionTicks: 0,
+			PlaybackRuntimeTicks:  0,
+			PlaybackItemID:        playbackItemID,
+		})
+	}
+
+	tryResolveFromPlayHistory := func(seasons []embyTMDBSeason, hasMulti bool, prefer int, require bool) (string, map[string]string, *smartPlaybackPickedMeta, bool) {
+		if database == nil || u == nil {
+			return "", nil, nil, false
+		}
+		uid, _ := strconv.ParseInt(strings.TrimSpace(u.ID), 10, 64)
+		if uid <= 0 {
+			return "", nil, nil, false
+		}
+		kind := strings.TrimSpace(req.Kind)
+		if kind != "tv" && kind != "movie" {
+			return "", nil, nil, false
+		}
+		contentKey := strings.ToLower(strings.TrimSpace("tmdb:" + kind + ":" + strconv.Itoa(req.TMDBID)))
+		row, e := database.GetPlayHistoryLatestByContentKey(uid, contentKey)
+		if e != nil || row == nil {
+			return "", nil, nil, false
+		}
+		siteKey := strings.TrimSpace(row.SiteKey)
+		videoID := strings.TrimSpace(row.VideoID)
+		panLabel := strings.TrimSpace(row.PanLabel)
+		if siteKey == "" || videoID == "" || panLabel == "" {
+			return "", nil, nil, false
+		}
+		spiderAPI := strings.TrimSpace(embyResolveSpiderAPIBySiteKey(database, siteKey))
+		if spiderAPI == "" {
+			return "", nil, nil, false
+		}
+
+		src := smartSource{
+			SiteKey:     siteKey,
+			SiteName:    strings.TrimSpace(row.SiteName),
+			SpiderAPI:   spiderAPI,
+			VideoID:     videoID,
+			VideoRemark: strings.TrimSpace(row.VideoRemark),
+			Score:       1000,
+			Seq:         0,
+			NoNoise:     true,
+		}
+
+		detailRaw, e2 := cache.RequestSpiderDetailCached(apiBase, spiderAPI, videoID)
+		if e2 != nil || detailRaw == nil {
+			return "", nil, nil, false
+		}
+		playFrom, playURL := catpawopen.ExtractDetailPlayFromURL(detailRaw)
+		pans := catpawopen.ParsePlaySources(playFrom, playURL)
+		if pans == nil || len(pans) == 0 {
+			return "", nil, nil, false
+		}
+
+		// Keep only the previously successful pan label.
+		wantPan := strings.TrimSpace(panLabel)
+		chosen := []catpawopen.Pan{}
+		for _, p := range pans {
+			if strings.TrimSpace(p.Label) == wantPan {
+				chosen = append(chosen, p)
+				break
+			}
+		}
+		if len(chosen) == 0 {
+			return "", nil, nil, false
+		}
+
+		accessByShareID := map[string]string{}
+		if embyIsPanMockEnabled(detailRaw) && smartPanMockProviderID(wantPan) != "" {
+			resolved, access := embyResolvePanMockDetailPansIncremental(
+				database,
+				src.SiteKey,
+				src.SiteName,
+				want,
+				seasons,
+				hasMulti,
+				rawCleanRules,
+				rawEpisodeRules,
+				chosen,
+				nil,
+			)
+			chosen = resolved
+			accessByShareID = access
+		}
+
+		epMap, epLoose := smartBuildEpisodeMapsFromPans(src, chosen, seasons, hasMulti, settings, rawCleanRules, rawEpisodeRules)
+		cand := smartPickCandidateFromMaps(epMap, epLoose, src, seasons, hasMulti, prefer, want, settings, require)
+		if cand == nil {
+			return "", nil, nil, false
+		}
+		res := smartTryPlayPickedCandidate(database, apiBase, tvUser, *cand, accessByShareID)
+		if res == nil || strings.TrimSpace(res.PlayURL) == "" {
+			return "", nil, nil, false
+		}
+		upsertSmartPlayHistoryBestEffort(res.Cand)
+		feat := smartComputeCandidateFeatures(res.Cand)
+		return strings.TrimSpace(res.PlayURL), res.Headers, buildPicked(res.Cand, feat), true
+	}
+
 	rawSites, _ := database.ListVideoSourceSites()
 	sites := make([]site, 0, len(rawSites))
 	for _, s := range rawSites {
@@ -2564,6 +2713,15 @@ func smartResolvePlaybackFromTMDBAligned(
 		out := make([]embyTMDBSeason, 0, len(seasonsForMapping))
 		out = append(out, seasonsForMapping...)
 		return out, tmdbHasMultiSeason, preferSeasonNo, requireSeasoned
+	}
+
+	// History fast path: if we have a previously successful site+pan match, try it first to avoid
+	// triggering the full smart search/detail/list storm. Fall back to the full pipeline on any miss.
+	{
+		seasons, hasMulti, prefer, require := metaSnapshot()
+		if u1, h1, p1, ok := tryResolveFromPlayHistory(seasons, hasMulti, prefer, require); ok && strings.TrimSpace(u1) != "" {
+			return u1, h1, p1, nil
+		}
 	}
 
 	qKey := embyNormalizeAggKey(searchTitle)
@@ -2991,6 +3149,7 @@ func smartResolvePlaybackFromTMDBAligned(
 						smartShortURLForLog(res.PlayURL),
 					)
 				}
+				upsertSmartPlayHistoryBestEffort(res.Cand)
 				return res.PlayURL, res.Headers, buildPicked(res.Cand, feat), nil
 			}
 			_, hasMulti, prefer, _ := metaSnapshot()
@@ -3020,6 +3179,7 @@ func smartResolvePlaybackFromTMDBAligned(
 			}
 			feat := smartComputeCandidateFeatures(res.Cand)
 			if feat.QualityRank == 3 {
+				upsertSmartPlayHistoryBestEffort(res.Cand)
 				return res.PlayURL, res.Headers, buildPicked(res.Cand, feat), nil
 			}
 			_, hasMulti, prefer, _ := metaSnapshot()
@@ -3052,6 +3212,7 @@ func smartResolvePlaybackFromTMDBAligned(
 			)
 		}
 		feat := smartComputeCandidateFeatures(bestFallback.Cand)
+		upsertSmartPlayHistoryBestEffort(bestFallback.Cand)
 		return bestFallback.PlayURL, bestFallback.Headers, buildPicked(bestFallback.Cand, feat), nil
 	}
 	return "", nil, nil, errors.New("无可用播放地址")

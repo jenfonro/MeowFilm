@@ -360,6 +360,85 @@ func (d *DB) GetPlayHistoryLatestBySiteVideo(userID int64, siteKey string, video
 	return &r, nil
 }
 
+func (d *DB) GetPlayHistoryLatestByContentKey(userID int64, contentKey string) (*PlayHistoryRow, error) {
+	if d == nil || d.db == nil || userID <= 0 {
+		return nil, nil
+	}
+	key := strings.ToLower(strings.TrimSpace(contentKey))
+	if key == "" {
+		return nil, nil
+	}
+	var r PlayHistoryRow
+	err := d.db.QueryRow(`
+		SELECT
+		  c.content_key,
+		  sv.site_key,
+		  COALESCE(gs.name, CASE WHEN sv.site_kind='emby' THEN 'Emby' ELSE '' END) AS site_name,
+		  COALESCE(gs.api, CASE WHEN sv.site_kind='emby' THEN 'emby' ELSE '' END) AS spider_api,
+		  sv.video_id,
+		  sv.title,
+		  sv.poster,
+		  sv.remark,
+		  COALESCE(tm.tmdb_id, 0) AS tmdb_id,
+		  COALESCE(tm.tmdb_type, '') AS tmdb_type,
+		  h.pan_label,
+		  h.play_flag,
+		  h.episode_index,
+		  h.episode_name,
+		  h.updated_at,
+		  h.playback_position_ticks,
+		  h.playback_runtime_ticks,
+		  h.playback_item_id
+		FROM user_play_history h
+		JOIN content c ON c.id = h.content_id
+		JOIN site_video sv ON sv.id = h.site_video_id
+		LEFT JOIN content_tmdb tm ON tm.content_id = c.id
+		LEFT JOIN video_source_site gs ON sv.site_kind='global' AND gs.key = sv.site_key
+		WHERE h.user_id = ? AND c.content_key = ?
+		ORDER BY h.updated_at DESC
+		LIMIT 1
+	`, userID, key).Scan(
+		&r.ContentKey,
+		&r.SiteKey,
+		&r.SiteName,
+		&r.SpiderAPI,
+		&r.VideoID,
+		&r.VideoTitle,
+		&r.VideoPoster,
+		&r.VideoRemark,
+		&r.TMDBID,
+		&r.TMDBType,
+		&r.PanLabel,
+		&r.PlayFlag,
+		&r.EpisodeIndex,
+		&r.EpisodeName,
+		&r.UpdatedAt,
+		&r.PlaybackPositionTicks,
+		&r.PlaybackRuntimeTicks,
+		&r.PlaybackItemID,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	r.ContentKey = strings.TrimSpace(r.ContentKey)
+	r.SiteKey = strings.TrimSpace(r.SiteKey)
+	r.SiteName = strings.TrimSpace(r.SiteName)
+	r.SpiderAPI = strings.TrimSpace(r.SpiderAPI)
+	r.VideoID = strings.TrimSpace(r.VideoID)
+	r.VideoTitle = strings.TrimSpace(r.VideoTitle)
+	r.VideoPoster = strings.TrimSpace(r.VideoPoster)
+	r.VideoRemark = strings.TrimSpace(r.VideoRemark)
+	r.TMDBType = strings.TrimSpace(r.TMDBType)
+	r.PanLabel = strings.TrimSpace(r.PanLabel)
+	r.PlayFlag = strings.TrimSpace(r.PlayFlag)
+	r.EpisodeName = strings.TrimSpace(r.EpisodeName)
+	r.PlaybackItemID = strings.TrimSpace(r.PlaybackItemID)
+	return &r, nil
+}
+
 func (d *DB) DeletePlayHistoryByContentKey(userID int64, contentKey string) (int64, error) {
 	if d == nil || d.db == nil || userID <= 0 {
 		return 0, nil
