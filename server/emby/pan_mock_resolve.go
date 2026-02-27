@@ -246,10 +246,9 @@ func embyResolvePanMockDetailPans(
 					errMsg = strings.TrimSpace(err.Error())
 				}
 				embyDebugPrintf(
-					"[smart][pan_list_%s] site=%s(%s) panFlag=%s provider=%s ms=%d episodes=%d matchShowName=%s matchRawName=%s err=%s",
+					"[smart][pan_list_%s] site=(%s) panFlag=%s provider=%s ms=%d episodes=%d matchShowName=%s matchRawName=%s err=%s",
 					status,
-					strings.TrimSpace(siteKey),
-					strings.TrimSpace(siteName),
+					smartLogSiteName(siteKey, siteName),
 					label,
 					pid,
 					ms,
@@ -474,10 +473,9 @@ func embyResolvePanMockDetailPansIncremental(
 						errMsg = strings.TrimSpace(err.Error())
 					}
 					embyDebugPrintf(
-						"[smart][pan_list_%s] site=%s(%s) panFlag=%s provider=%s ms=%d episodes=%d matchShowName=%s matchRawName=%s err=%s",
+						"[smart][pan_list_%s] site=(%s) panFlag=%s provider=%s ms=%d episodes=%d matchShowName=%s matchRawName=%s err=%s",
 						status,
-						strings.TrimSpace(siteKey),
-						strings.TrimSpace(siteName),
+						smartLogSiteName(siteKey, siteName),
 						label,
 						pid,
 						ms,
