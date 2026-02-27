@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/cache"
 	"github.com/jenfonro/meowfilm/server/catpawopen"
 )
 
@@ -21,7 +22,7 @@ func embyFetchSiteDetailPans(database *db.DB, u *embyUser, spiderAPI string, vid
 	if apiBase == "" {
 		return nil, errors.New("CatPawOpen 接口地址未设置")
 	}
-	detailRaw, err := catpawopen.RequestSpider(apiBase, sp, "detail", map[string]any{"id": vid})
+	detailRaw, err := cache.RequestSpiderDetailCached(apiBase, sp, vid)
 	if err != nil {
 		return nil, err
 	}
