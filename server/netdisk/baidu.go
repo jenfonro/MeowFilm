@@ -788,7 +788,7 @@ func baiduShareListAllFiles(surl string, pwd string, baseCookie string) (cookie 
 	return cookie, parts, shareID, uk, rootPrefix, nil
 }
 
-func BaiduList(database *db.DB, flag string, pwd string) (string, string, error) {
+func baiduListUncached(database *db.DB, flag string, pwd string) (string, string, error) {
 	surl := parseBaiduSurlFromFlag(flag)
 	if surl == "" {
 		return "", "", errors.New("missing/invalid flag (expected: 百度*-<surl>)")
@@ -834,6 +834,18 @@ func BaiduList(database *db.DB, flag string, pwd string) (string, string, error)
 		parts = append(parts, dirDisplay+"$"+id)
 	}
 	return strings.Join(parts, "#"), surl, nil
+}
+
+func BaiduList(database *db.DB, flag string, pwd string) (string, string, error) {
+	key := listCacheKey("baidu_list", flag, pwd)
+	got, _, err := baiduListCacheTwoTier.Do(key, func() (listCache2, error) {
+		vod, surl, e := baiduListUncached(database, flag, pwd)
+		if e != nil {
+			return listCache2{}, e
+		}
+		return listCache2{Vod: vod, ShareID: surl}, nil
+	})
+	return strings.TrimSpace(got.Vod), strings.TrimSpace(got.ShareID), err
 }
 
 func HandleAPIBaiduList(w http.ResponseWriter, r *http.Request, database *db.DB) {

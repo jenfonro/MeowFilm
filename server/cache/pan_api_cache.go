@@ -1,6 +1,8 @@
 package cache
 
 import (
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -55,6 +57,49 @@ func NewTTLInflightCache[V any](ttl time.Duration, maxItems int) *TTLInflightCac
 	}
 }
 
+func (c *TTLInflightCache[V]) Get(key string) (val V, ok bool) {
+	if c == nil {
+		var zero V
+		return zero, false
+	}
+	k := strings.TrimSpace(key)
+	if k == "" {
+		var zero V
+		return zero, false
+	}
+	now := time.Now()
+	c.mu.Lock()
+	e, hit := c.items[k]
+	if hit && !e.expireAt.IsZero() && now.Before(e.expireAt) {
+		v := e.value
+		c.cleanupLocked(now)
+		c.mu.Unlock()
+		return v, true
+	}
+	if hit && (!e.expireAt.IsZero() && now.After(e.expireAt)) {
+		delete(c.items, k)
+	}
+	c.cleanupLocked(now)
+	c.mu.Unlock()
+	var zero V
+	return zero, false
+}
+
+func (c *TTLInflightCache[V]) Set(key string, val V) {
+	if c == nil {
+		return
+	}
+	k := strings.TrimSpace(key)
+	if k == "" {
+		return
+	}
+	now := time.Now()
+	c.mu.Lock()
+	c.items[k] = ttlEntry[V]{expireAt: now.Add(c.ttl), createdAt: now, refreshes: 0, value: val}
+	c.cleanupLocked(now)
+	c.mu.Unlock()
+}
+
 func (c *TTLInflightCache[V]) cleanupLocked(now time.Time) {
 	if len(c.items) <= c.maxItems {
 		return
@@ -63,6 +108,44 @@ func (c *TTLInflightCache[V]) cleanupLocked(now time.Time) {
 		if !v.expireAt.IsZero() && now.After(v.expireAt) {
 			delete(c.items, k)
 		}
+	}
+
+	// Hard cap: if still over maxItems, evict the oldest entries (best-effort).
+	if len(c.items) <= c.maxItems {
+		return
+	}
+	type kv struct {
+		k string
+		t time.Time
+	}
+	arr := make([]kv, 0, len(c.items))
+	for k, v := range c.items {
+		t := v.createdAt
+		if t.IsZero() {
+			t = v.expireAt
+		}
+		arr = append(arr, kv{k: k, t: t})
+	}
+	sort.Slice(arr, func(i, j int) bool {
+		a := arr[i].t
+		b := arr[j].t
+		if a.IsZero() && b.IsZero() {
+			return arr[i].k < arr[j].k
+		}
+		if a.IsZero() {
+			return true
+		}
+		if b.IsZero() {
+			return false
+		}
+		if a.Equal(b) {
+			return arr[i].k < arr[j].k
+		}
+		return a.Before(b)
+	})
+	excess := len(c.items) - c.maxItems
+	for i := 0; i < excess && i < len(arr); i++ {
+		delete(c.items, arr[i].k)
 	}
 }
 
