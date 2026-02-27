@@ -1007,7 +1007,7 @@ func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle st
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			raw, err := catpawopen.RequestSpider(apiBase, tt.Site.API, "search", map[string]any{"wd": searchTitle, "page": 1})
+			raw, err := cache.RequestSpiderSearchCached(apiBase, tt.Site.API, searchTitle, 1)
 			if err != nil {
 				return
 			}
@@ -2595,7 +2595,7 @@ func smartResolvePlaybackFromTMDBAligned(
 				return
 			default:
 			}
-			raw, err := catpawopen.RequestSpider(apiBase, tt.Site.API, "search", map[string]any{"wd": searchTitle, "page": 1})
+			raw, err := cache.RequestSpiderSearchCached(apiBase, tt.Site.API, searchTitle, 1)
 			if err == nil {
 				items := catpawopen.NormalizeSearchList(raw)
 				local := make([]smartSource, 0, smartMinInt(200, len(items)))
