@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/goproxy"
 )
 
 func handleEmbyVideos(w http.ResponseWriter, r *http.Request, database *db.DB, serverID string, parts []string) {
@@ -72,11 +73,18 @@ func handleEmbyVideoStream(w http.ResponseWriter, r *http.Request, database *db.
 				embyBadGateway(w, err)
 				return
 			}
-			if len(headers) != 0 {
+			finalURL := strings.TrimSpace(playURL)
+			finalHeaders := headers
+			if len(finalHeaders) != 0 {
+				if pickedURL, ok, err2 := goproxy.ProxyIfNeeded(database, "", finalURL, finalHeaders); err2 == nil && ok && strings.TrimSpace(pickedURL) != "" {
+					finalURL = strings.TrimSpace(pickedURL)
+					finalHeaders = nil
+				}
+			}
+			if len(finalHeaders) != 0 {
 				embyWriteError(w, 501, "该源需要自定义请求头，暂不支持")
 				return
 			}
-			finalURL := strings.TrimSpace(playURL)
 			if finalURL == "" {
 				embyWriteError(w, 502, "站点未返回可播放地址")
 				return
@@ -112,13 +120,24 @@ func handleEmbyVideoStream(w http.ResponseWriter, r *http.Request, database *db.
 		return
 	}
 
-	playURL, headers, _, err := embyResolvePlaybackFromTMDB(database, u, &p)
+	playURL, headers, picked, err := embyResolvePlaybackFromTMDB(database, u, &p)
 	if err != nil {
 		embyBadGateway(w, err)
 		return
 	}
 	finalURL := strings.TrimSpace(playURL)
 	finalHeaders := headers
+	if len(finalHeaders) != 0 {
+		// Best-effort: register to GoProxy and return a header-free proxy URL for Emby clients.
+		provider := ""
+		if picked != nil {
+			provider = strings.TrimSpace(picked.Provider)
+		}
+		if pickedURL, ok, err2 := goproxy.ProxyIfNeeded(database, provider, finalURL, finalHeaders); err2 == nil && ok && strings.TrimSpace(pickedURL) != "" {
+			finalURL = strings.TrimSpace(pickedURL)
+			finalHeaders = nil
+		}
+	}
 
 	if len(finalHeaders) == 0 {
 		// Cache the resolved playback URL so subsequent PlaybackInfo/stream calls can avoid
