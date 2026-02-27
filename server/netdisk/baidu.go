@@ -837,15 +837,20 @@ func baiduListUncached(database *db.DB, flag string, pwd string) (string, string
 }
 
 func BaiduList(database *db.DB, flag string, pwd string) (string, string, error) {
+	vod, surl, _, err := BaiduListWithCacheHit(database, flag, pwd)
+	return vod, surl, err
+}
+
+func BaiduListWithCacheHit(database *db.DB, flag string, pwd string) (vod string, surl string, fromCache bool, err error) {
 	key := listCacheKey("baidu_list", flag, pwd)
-	got, _, err := baiduListCacheTwoTier.Do(key, func() (listCache2, error) {
+	got, hit, err := baiduListCacheTwoTier.Do(key, func() (listCache2, error) {
 		vod, surl, e := baiduListUncached(database, flag, pwd)
 		if e != nil {
 			return listCache2{}, e
 		}
 		return listCache2{Vod: vod, ShareID: surl}, nil
 	})
-	return strings.TrimSpace(got.Vod), strings.TrimSpace(got.ShareID), err
+	return strings.TrimSpace(got.Vod), strings.TrimSpace(got.ShareID), hit, err
 }
 
 func HandleAPIBaiduList(w http.ResponseWriter, r *http.Request, database *db.DB) {

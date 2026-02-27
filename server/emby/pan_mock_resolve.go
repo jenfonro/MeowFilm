@@ -191,7 +191,7 @@ func embyResolvePanMockDetailPans(
 			defer wg.Done()
 			start := time.Now()
 
-			logDone := func(status string, eps []catpawopen.Episode, err error) {
+			logDone := func(status string, eps []catpawopen.Episode, err error, fromCache bool) {
 				if !embyDebugLogEnabled() {
 					return
 				}
@@ -263,17 +263,17 @@ func embyResolvePanMockDetailPans(
 			case "189":
 				sc, ac := embyExtractTianyiMockMeta(label, firstURL)
 				if sc == "" {
-					logDone("skip", nil, nil)
+					logDone("skip", nil, nil, false)
 					return
 				}
 				flag := "天意-" + sc
-				vod, shareID, _, err := netdisk.Tianyi189List(database, flag, ac)
+				vod, shareID, _, hit, err := netdisk.Tianyi189ListWithCacheHit(database, flag, ac)
 				if err != nil {
-					logDone("err", nil, err)
+					logDone("err", nil, err, hit)
 					return
 				}
 				if strings.TrimSpace(vod) == "" {
-					logDone("empty", nil, nil)
+					logDone("empty", nil, nil, hit)
 					return
 				}
 				eps := smartParseVodPlayURLToEpisodes(vod)
@@ -289,16 +289,16 @@ func embyResolvePanMockDetailPans(
 					embyPanMock189AccessPut(sid, acc)
 				}
 				mu.Unlock()
-				logDone("ok", eps, nil)
+				logDone("ok", eps, nil, hit)
 			case "quark":
 				pass := embyExtractMockPasscodeFromEpisodeURL(firstURL)
-				vod, _, err := netdisk.QuarkList(database, label, pass)
+				vod, _, hit, err := netdisk.QuarkListWithCacheHit(database, label, pass)
 				if err != nil {
-					logDone("err", nil, err)
+					logDone("err", nil, err, hit)
 					return
 				}
 				if strings.TrimSpace(vod) == "" {
-					logDone("empty", nil, nil)
+					logDone("empty", nil, nil, hit)
 					return
 				}
 				eps := smartParseVodPlayURLToEpisodes(vod)
@@ -308,16 +308,16 @@ func embyResolvePanMockDetailPans(
 				mu.Lock()
 				out[i].Episodes = eps
 				mu.Unlock()
-				logDone("ok", eps, nil)
+				logDone("ok", eps, nil, hit)
 			case "uc":
 				pass := embyExtractMockPasscodeFromEpisodeURL(firstURL)
-				vod, _, err := netdisk.UCList(database, label, pass)
+				vod, _, hit, err := netdisk.UCListWithCacheHit(database, label, pass)
 				if err != nil {
-					logDone("err", nil, err)
+					logDone("err", nil, err, hit)
 					return
 				}
 				if strings.TrimSpace(vod) == "" {
-					logDone("empty", nil, nil)
+					logDone("empty", nil, nil, hit)
 					return
 				}
 				eps := smartParseVodPlayURLToEpisodes(vod)
@@ -327,16 +327,16 @@ func embyResolvePanMockDetailPans(
 				mu.Lock()
 				out[i].Episodes = eps
 				mu.Unlock()
-				logDone("ok", eps, nil)
+				logDone("ok", eps, nil, hit)
 			case "139":
 				pass := embyExtractMockPasscodeFromEpisodeURL(firstURL)
-				vod, _, err := netdisk.Yun139List(database, label, pass)
+				vod, _, hit, err := netdisk.Yun139ListWithCacheHit(database, label, pass)
 				if err != nil {
-					logDone("err", nil, err)
+					logDone("err", nil, err, hit)
 					return
 				}
 				if strings.TrimSpace(vod) == "" {
-					logDone("empty", nil, nil)
+					logDone("empty", nil, nil, hit)
 					return
 				}
 				eps := smartParseVodPlayURLToEpisodes(vod)
@@ -346,16 +346,16 @@ func embyResolvePanMockDetailPans(
 				mu.Lock()
 				out[i].Episodes = eps
 				mu.Unlock()
-				logDone("ok", eps, nil)
+				logDone("ok", eps, nil, hit)
 			case "baidu":
 				pass := embyExtractMockPasscodeFromEpisodeURL(firstURL)
-				vod, _, err := netdisk.BaiduList(database, label, pass)
+				vod, _, hit, err := netdisk.BaiduListWithCacheHit(database, label, pass)
 				if err != nil {
-					logDone("err", nil, err)
+					logDone("err", nil, err, hit)
 					return
 				}
 				if strings.TrimSpace(vod) == "" {
-					logDone("empty", nil, nil)
+					logDone("empty", nil, nil, hit)
 					return
 				}
 				eps := smartParseVodPlayURLToEpisodes(vod)
@@ -365,9 +365,9 @@ func embyResolvePanMockDetailPans(
 				mu.Lock()
 				out[i].Episodes = eps
 				mu.Unlock()
-				logDone("ok", eps, nil)
+				logDone("ok", eps, nil, hit)
 			default:
-				logDone("skip", nil, nil)
+				logDone("skip", nil, nil, false)
 				return
 			}
 		}()
@@ -422,7 +422,7 @@ func embyResolvePanMockDetailPansIncremental(
 			defer wg.Done()
 			start := time.Now()
 
-			emit := func(status string, eps []catpawopen.Episode, err error, accessDelta map[string]string) {
+			emit := func(status string, eps []catpawopen.Episode, err error, accessDelta map[string]string, fromCache bool) {
 				if embyDebugLogEnabled() {
 					ms := time.Since(start).Milliseconds()
 					epCount := 0
@@ -472,18 +472,11 @@ func embyResolvePanMockDetailPansIncremental(
 					if err != nil {
 						errMsg = strings.TrimSpace(err.Error())
 					}
-					embyDebugPrintf(
-						"[smart][pan_list_%s] site=(%s) panFlag=%s provider=%s ms=%d episodes=%d matchShowName=%s matchRawName=%s err=%s",
-						status,
-						smartLogSiteName(siteKey, siteName),
-						label,
-						pid,
-						ms,
-						epCount,
-						matchShowName,
-						matchRawName,
-						errMsg,
-					)
+					pat := "[smart][pan_list_%s] site=(%s) panFlag=%s provider=%s ms=%d episodes=%d matchShowName=%s matchRawName=%s err=%s"
+					if fromCache {
+						pat = "[smart][cache][pan_list_%s] site=(%s) panFlag=%s provider=%s ms=%d episodes=%d matchShowName=%s matchRawName=%s err=%s"
+					}
+					embyDebugPrintf(pat, status, smartLogSiteName(siteKey, siteName), label, pid, ms, epCount, matchShowName, matchRawName, errMsg)
 				}
 				if onPanResolved != nil {
 					onPanResolved(i, eps, accessDelta)
@@ -494,17 +487,17 @@ func embyResolvePanMockDetailPansIncremental(
 			case "189":
 				sc, ac := embyExtractTianyiMockMeta(label, firstURL)
 				if sc == "" {
-					emit("skip", nil, nil, nil)
+					emit("skip", nil, nil, nil, false)
 					return
 				}
 				flag := "天意-" + sc
-				vod, shareID, _, err := netdisk.Tianyi189List(database, flag, ac)
+				vod, shareID, _, hit, err := netdisk.Tianyi189ListWithCacheHit(database, flag, ac)
 				if err != nil {
-					emit("err", nil, err, nil)
+					emit("err", nil, err, nil, hit)
 					return
 				}
 				if strings.TrimSpace(vod) == "" {
-					emit("empty", nil, nil, nil)
+					emit("empty", nil, nil, nil, hit)
 					return
 				}
 				eps := smartParseVodPlayURLToEpisodes(vod)
@@ -522,16 +515,16 @@ func embyResolvePanMockDetailPansIncremental(
 					embyPanMock189AccessPut(sid, acc)
 				}
 				mu.Unlock()
-				emit("ok", eps, nil, delta)
+				emit("ok", eps, nil, delta, hit)
 			case "quark":
 				pass := embyExtractMockPasscodeFromEpisodeURL(firstURL)
-				vod, _, err := netdisk.QuarkList(database, label, pass)
+				vod, _, hit, err := netdisk.QuarkListWithCacheHit(database, label, pass)
 				if err != nil {
-					emit("err", nil, err, nil)
+					emit("err", nil, err, nil, hit)
 					return
 				}
 				if strings.TrimSpace(vod) == "" {
-					emit("empty", nil, nil, nil)
+					emit("empty", nil, nil, nil, hit)
 					return
 				}
 				eps := smartParseVodPlayURLToEpisodes(vod)
@@ -541,16 +534,16 @@ func embyResolvePanMockDetailPansIncremental(
 				mu.Lock()
 				out[i].Episodes = eps
 				mu.Unlock()
-				emit("ok", eps, nil, nil)
+				emit("ok", eps, nil, nil, hit)
 			case "uc":
 				pass := embyExtractMockPasscodeFromEpisodeURL(firstURL)
-				vod, _, err := netdisk.UCList(database, label, pass)
+				vod, _, hit, err := netdisk.UCListWithCacheHit(database, label, pass)
 				if err != nil {
-					emit("err", nil, err, nil)
+					emit("err", nil, err, nil, hit)
 					return
 				}
 				if strings.TrimSpace(vod) == "" {
-					emit("empty", nil, nil, nil)
+					emit("empty", nil, nil, nil, hit)
 					return
 				}
 				eps := smartParseVodPlayURLToEpisodes(vod)
@@ -560,16 +553,16 @@ func embyResolvePanMockDetailPansIncremental(
 				mu.Lock()
 				out[i].Episodes = eps
 				mu.Unlock()
-				emit("ok", eps, nil, nil)
+				emit("ok", eps, nil, nil, hit)
 			case "139":
 				pass := embyExtractMockPasscodeFromEpisodeURL(firstURL)
-				vod, _, err := netdisk.Yun139List(database, label, pass)
+				vod, _, hit, err := netdisk.Yun139ListWithCacheHit(database, label, pass)
 				if err != nil {
-					emit("err", nil, err, nil)
+					emit("err", nil, err, nil, hit)
 					return
 				}
 				if strings.TrimSpace(vod) == "" {
-					emit("empty", nil, nil, nil)
+					emit("empty", nil, nil, nil, hit)
 					return
 				}
 				eps := smartParseVodPlayURLToEpisodes(vod)
@@ -579,16 +572,16 @@ func embyResolvePanMockDetailPansIncremental(
 				mu.Lock()
 				out[i].Episodes = eps
 				mu.Unlock()
-				emit("ok", eps, nil, nil)
+				emit("ok", eps, nil, nil, hit)
 			case "baidu":
 				pass := embyExtractMockPasscodeFromEpisodeURL(firstURL)
-				vod, _, err := netdisk.BaiduList(database, label, pass)
+				vod, _, hit, err := netdisk.BaiduListWithCacheHit(database, label, pass)
 				if err != nil {
-					emit("err", nil, err, nil)
+					emit("err", nil, err, nil, hit)
 					return
 				}
 				if strings.TrimSpace(vod) == "" {
-					emit("empty", nil, nil, nil)
+					emit("empty", nil, nil, nil, hit)
 					return
 				}
 				eps := smartParseVodPlayURLToEpisodes(vod)
@@ -598,9 +591,9 @@ func embyResolvePanMockDetailPansIncremental(
 				mu.Lock()
 				out[i].Episodes = eps
 				mu.Unlock()
-				emit("ok", eps, nil, nil)
+				emit("ok", eps, nil, nil, hit)
 			default:
-				emit("skip", nil, nil, nil)
+				emit("skip", nil, nil, nil, false)
 				return
 			}
 		}()

@@ -33,6 +33,9 @@ type smartPriorityMatch struct {
 	Indices []int
 }
 
+var smartPlayTrySeq uint64
+var smartPlayFlowSeq uint64
+
 func smartComputePriorityMatch(textLower string, tokensLower []string) smartPriorityMatch {
 	text := strings.TrimSpace(textLower)
 	tokens := tokensLower
@@ -1640,6 +1643,25 @@ func smartPickCandidateFromMaps(
 	settings smartPlaybackSettings,
 	requireSeasoned bool,
 ) *smartCandidate {
+	list := smartCandidatesForWant(episodeMap, episodeMapLoose, src, tmdbSeasons, tmdbHasMultiSeason, preferSeasonNo, want, settings, requireSeasoned)
+	if len(list) == 0 {
+		return nil
+	}
+	best := list[0]
+	return &best
+}
+
+func smartCandidatesForWant(
+	episodeMap map[int][]smartCandidate,
+	episodeMapLoose map[int][]smartCandidate,
+	src smartSource,
+	tmdbSeasons []embyTMDBSeason,
+	tmdbHasMultiSeason bool,
+	preferSeasonNo int,
+	want int,
+	settings smartPlaybackSettings,
+	requireSeasoned bool,
+) []smartCandidate {
 	searchSeasonHint := smartExtractSeasonHintFromSource(src)
 	wantedInSeason := smartSeasonEpisode{Season: 0, Episode: want}
 	if tmdbHasMultiSeason {
@@ -1695,16 +1717,22 @@ func smartPickCandidateFromMaps(
 	if len(candidatesForNo) == 0 {
 		return nil
 	}
-	return smartPickBestMatchIgnorePanOrder(candidatesForNo, tmdbHasMultiSeason, preferSeasonNo, settings)
+	// Order matches smartPickBestMatchIgnorePanOrder selection behavior.
+	sort.SliceStable(candidatesForNo, func(i, j int) bool {
+		return smartCompareSmartMatchIgnorePanOrder(candidatesForNo[i], candidatesForNo[j], tmdbHasMultiSeason, preferSeasonNo, settings) < 0
+	})
+	return candidatesForNo
 }
 
-func smartTryPlayPickedCandidate(database *db.DB, apiBase string, tvUser string, cand smartCandidate, accessByShareID map[string]string) *smartPickResult {
+func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string, tvUser string, cand smartCandidate, accessByShareID map[string]string) *smartPickResult {
 	if strings.TrimSpace(apiBase) == "" || strings.TrimSpace(tvUser) == "" {
 		// tvUser can be empty for unauthenticated; still allow catpawopen play below.
 	}
 	if strings.TrimSpace(cand.Ep.URL) == "" {
 		return nil
 	}
+	tryID := atomic.AddUint64(&smartPlayTrySeq, 1)
+	tryStart := time.Now()
 	logStatus := func(status string, playURL string, headers map[string]string, err error) {
 		if !embyDebugLogEnabled() {
 			return
@@ -1722,7 +1750,10 @@ func smartTryPlayPickedCandidate(database *db.DB, apiBase string, tvUser string,
 			hc = len(headers)
 		}
 		embyDebugPrintf(
-			"[smart][play_try_status] site=(%s) panFlag=%s provider=%s status=%s headers=%d url=%s err=%s spider=%s videoId=%s",
+			"[smart][play_try_status] flow=%d id=%d ms=%d site=(%s) panFlag=%s provider=%s status=%s headers=%d url=%s err=%s spider=%s videoId=%s",
+			flowID,
+			tryID,
+			time.Since(tryStart).Milliseconds(),
 			smartLogSiteName(cand.SiteKey, cand.SiteName),
 			strings.TrimSpace(cand.PanLabel),
 			smartPanMockProviderID(strings.TrimSpace(cand.PanLabel)),
@@ -1741,7 +1772,9 @@ func smartTryPlayPickedCandidate(database *db.DB, apiBase string, tvUser string,
 			raw0 = strings.TrimSpace(rawNames[0])
 		}
 		embyDebugPrintf(
-			"[smart][play_try] site=(%s) panFlag=%s provider=%s matchShowName=%s matchRawName=%s spider=%s videoId=%s",
+			"[smart][play_try] flow=%d id=%d site=(%s) panFlag=%s provider=%s matchShowName=%s matchRawName=%s spider=%s videoId=%s",
+			flowID,
+			tryID,
 			smartLogSiteName(cand.SiteKey, cand.SiteName),
 			strings.TrimSpace(cand.PanLabel),
 			smartPanMockProviderID(strings.TrimSpace(cand.PanLabel)),
@@ -2495,6 +2528,7 @@ func smartResolvePlaybackFromTMDBAligned(
 	}
 
 	flowStart := time.Now()
+	flowID := atomic.AddUint64(&smartPlayFlowSeq, 1)
 	var require4KUntilScanDone int32 = 1
 	done := make(chan struct{})
 	var doneOnce sync.Once
@@ -2658,7 +2692,7 @@ func smartResolvePlaybackFromTMDBAligned(
 		if cand == nil {
 			return "", nil, nil, false
 		}
-		res := smartTryPlayPickedCandidate(database, apiBase, tvUser, *cand, accessByShareID)
+		res := smartTryPlayPickedCandidate(flowID, database, apiBase, tvUser, *cand, accessByShareID)
 		if res == nil || strings.TrimSpace(res.PlayURL) == "" {
 			return "", nil, nil, false
 		}
@@ -2874,31 +2908,95 @@ func smartResolvePlaybackFromTMDBAligned(
 	var qMu sync.Mutex
 
 	results := make(chan *smartPickResult, 256)
-	playSemSize := smartMinInt(50, smartMaxInt(8, len(tasks)*2))
-	playSem := make(chan struct{}, playSemSize)
+	type playAttempt struct {
+		Cand   smartCandidate
+		Access map[string]string
+		Reason string
+	}
+	attemptCh := make(chan playAttempt, 1024)
+	var attemptMu sync.Mutex
+	queuedAttempt := map[string]struct{}{}
+	attempted := map[string]struct{}{}
+	attemptKey := func(c smartCandidate) string {
+		return strings.TrimSpace(c.SiteKey) + "|" + strings.TrimSpace(c.VideoID) + "|" + strings.TrimSpace(c.PanLabel) + "|" + strings.TrimSpace(c.Ep.URL)
+	}
+	enqueueAttempt := func(c smartCandidate, access map[string]string, reason string) {
+		k := attemptKey(c)
+		if strings.TrimSpace(k) == "|||" {
+			return
+		}
+		attemptMu.Lock()
+		if _, ok := attempted[k]; ok {
+			attemptMu.Unlock()
+			return
+		}
+		if _, ok := queuedAttempt[k]; ok {
+			attemptMu.Unlock()
+			return
+		}
+		queuedAttempt[k] = struct{}{}
+		attemptMu.Unlock()
 
-	launchPlayAttempt := func(cand smartCandidate, access map[string]string) {
-		go func() {
+		select {
+		case <-done:
+			return
+		case attemptCh <- playAttempt{Cand: c, Access: access, Reason: strings.TrimSpace(reason)}:
+			return
+		default:
+			// Queue is saturated; allow future enqueues by removing the queued mark.
+			attemptMu.Lock()
+			delete(queuedAttempt, k)
+			attemptMu.Unlock()
+			if embyDebugLogEnabled() {
+				embyDebugPrintf(
+					"[smart][play_try_queue_full] flow=%d site=(%s) panFlag=%s provider=%s reason=%s",
+					flowID,
+					smartLogSiteName(c.SiteKey, c.SiteName),
+					strings.TrimSpace(c.PanLabel),
+					smartPanMockProviderID(strings.TrimSpace(c.PanLabel)),
+					strings.TrimSpace(reason),
+				)
+			}
+			return
+		}
+	}
+	// Single worker: strict sequential play attempts in queue order.
+	go func() {
+		for {
 			select {
 			case <-done:
 				return
-			case playSem <- struct{}{}:
-			}
-			defer func() { <-playSem }()
-			select {
-			case <-done:
-				return
-			default:
-			}
-			if res := smartTryPlayPickedCandidate(database, apiBase, tvUser, cand, access); res != nil && strings.TrimSpace(res.PlayURL) != "" {
+			case at, ok := <-attemptCh:
+				if !ok {
+					return
+				}
+				// Even if we dequeued an attempt, do not proceed when the flow is already stopped.
+				// (Select can still pick attemptCh after done is closed.)
 				select {
 				case <-done:
 					return
-				case results <- res:
+				default:
+				}
+				k := attemptKey(at.Cand)
+				attemptMu.Lock()
+				delete(queuedAttempt, k)
+				attempted[k] = struct{}{}
+				attemptMu.Unlock()
+
+				if strings.TrimSpace(k) == "|||" {
+					continue
+				}
+				if res := smartTryPlayPickedCandidate(flowID, database, apiBase, tvUser, at.Cand, at.Access); res != nil && strings.TrimSpace(res.PlayURL) != "" {
+					// Deliver the winner first, then stop the whole flow to avoid extra upstream play attempts.
+					// NOTE: do NOT select on `done` here because we are the one calling stop() and a closed
+					// `done` would make the send path lose the winner.
+					results <- res
+					stop()
+					return
 				}
 			}
-		}()
-	}
+		}
+	}()
 
 	type delayedFallback struct {
 		has    bool
@@ -2921,7 +3019,8 @@ func smartResolvePlaybackFromTMDBAligned(
 		if embyDebugLogEnabled() {
 			feat := smartComputeCandidateFeatures(cand)
 			embyDebugPrintf(
-				"[smart][fallback_launch] ms=%d reason=%s site=(%s) panFlag=%s quality=%s",
+				"[smart][fallback_launch] flow=%d ms=%d reason=%s site=(%s) panFlag=%s quality=%s",
+				flowID,
 				time.Since(flowStart).Milliseconds(),
 				strings.TrimSpace(reason),
 				smartLogSiteName(cand.SiteKey, cand.SiteName),
@@ -2929,8 +3028,23 @@ func smartResolvePlaybackFromTMDBAligned(
 				strings.TrimSpace(feat.Quality),
 			)
 		}
-		launchPlayAttempt(cand, access)
+		enqueueAttempt(cand, access, "fallback:"+reason)
 	}
+
+	// Do not wait for all pan_mock list scans to finish before allowing a non-4K fallback.
+	// Some list resolutions can be slow enough that the whole flow hits the deadline and returns 502.
+	// After a short grace period, launch the best non-4K fallback (if any) while scans continue.
+	go func() {
+		t := time.NewTimer(6 * time.Second)
+		defer t.Stop()
+		select {
+		case <-done:
+			return
+		case <-t.C:
+			atomic.StoreInt32(&require4KUntilScanDone, 0)
+			launchFallbackIfAny("early_timeout")
+		}
+	}()
 
 	var queuedSources int64
 	var inFlightScans int64
@@ -2954,42 +3068,76 @@ func smartResolvePlaybackFromTMDBAligned(
 		seasons, hasMulti, prefer, require := metaSnapshot()
 		_, _, pans, access, _, _ := st.snapshot()
 		epMap, epLoose := smartBuildEpisodeMapsFromPans(st.Source, pans, seasons, hasMulti, settings, rawCleanRules, rawEpisodeRules)
-		if cand := smartPickCandidateFromMaps(epMap, epLoose, st.Source, seasons, hasMulti, prefer, want, settings, require); cand != nil {
-			feat := smartComputeCandidateFeatures(*cand)
-			if embyDebugLogEnabled() {
-				embyDebugPrintf(
-					"[smart][pick] ms=%d site=(%s) panFlag=%s quality=%s want=%d",
-					time.Since(flowStart).Milliseconds(),
-					smartLogSiteName(cand.SiteKey, cand.SiteName),
-					strings.TrimSpace(cand.PanLabel),
-					strings.TrimSpace(feat.Quality),
-					want,
-				)
+		// Collect candidates in the same order as smartPickCandidateFromMaps would select, but keep a list
+		// so we can try sequentially on failure.
+		cands := smartCandidatesForWant(epMap, epLoose, st.Source, seasons, hasMulti, prefer, want, settings, require)
+		if len(cands) == 0 {
+			return
+		}
+
+		// Log the current best pick for visibility.
+		if embyDebugLogEnabled() {
+			best := cands[0]
+			feat := smartComputeCandidateFeatures(best)
+			embyDebugPrintf(
+				"[smart][pick] ms=%d site=(%s) panFlag=%s quality=%s want=%d",
+				time.Since(flowStart).Milliseconds(),
+				smartLogSiteName(best.SiteKey, best.SiteName),
+				strings.TrimSpace(best.PanLabel),
+				strings.TrimSpace(feat.Quality),
+				want,
+			)
+		}
+
+		need4K := atomic.LoadInt32(&require4KUntilScanDone) != 0
+		if !need4K {
+			// Second round: enqueue a few best candidates sequentially.
+			limit := smartMinInt(5, len(cands))
+			for i := 0; i < limit; i++ {
+				enqueueAttempt(cands[i], access, "pick")
 			}
-			if feat.QualityRank == 3 || atomic.LoadInt32(&require4KUntilScanDone) == 0 {
-				launchPlayAttempt(*cand, access)
-				return
+			return
+		}
+
+		// First round: only enqueue 4K/2160p candidates; remember best non-4K as fallback.
+		queued4K := 0
+		bestNon4K := (*smartCandidate)(nil)
+		for i := 0; i < len(cands); i++ {
+			feat := smartComputeCandidateFeatures(cands[i])
+			if feat.QualityRank == 3 {
+				enqueueAttempt(cands[i], access, "pick4k")
+				queued4K++
+				if queued4K >= 3 {
+					break
+				}
+				continue
 			}
-			// Strict first round: only accept 4K/2160p. Store best non-4K as fallback for the second round.
+			if bestNon4K == nil {
+				cp := cands[i]
+				bestNon4K = &cp
+			}
+		}
+		if bestNon4K != nil {
 			fbMu.Lock()
 			replace := !fb.has
 			if fb.has {
-				if smartCompareSmartMatch(fb.cand, *cand, hasMulti, prefer, settings) > 0 {
+				if smartCompareSmartMatch(fb.cand, *bestNon4K, hasMulti, prefer, settings) > 0 {
 					replace = true
 				}
 			}
 			if replace {
 				fb.has = true
-				fb.cand = *cand
+				fb.cand = *bestNon4K
 				fb.access = access
 			}
 			fbMu.Unlock()
 			if embyDebugLogEnabled() {
+				feat := smartComputeCandidateFeatures(*bestNon4K)
 				embyDebugPrintf(
 					"[smart][pick_hold] ms=%d site=(%s) panFlag=%s quality=%s",
 					time.Since(flowStart).Milliseconds(),
-					smartLogSiteName(cand.SiteKey, cand.SiteName),
-					strings.TrimSpace(cand.PanLabel),
+					smartLogSiteName(bestNon4K.SiteKey, bestNon4K.SiteName),
+					strings.TrimSpace(bestNon4K.PanLabel),
 					strings.TrimSpace(feat.Quality),
 				)
 			}
@@ -3137,52 +3285,73 @@ func smartResolvePlaybackFromTMDBAligned(
 	deadline := time.Now().Add(18 * time.Second)
 	bestFallback := (*smartPickResult)(nil)
 
+	// Drain searchCh in a dedicated goroutine so the main flow can focus on returning
+	// the first successful play result without being starved by search bursts.
+	var doneSearchSitesAtomic int64
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case msg := <-searchCh:
+				if msg.done {
+					atomic.AddInt64(&doneSearchSitesAtomic, 1)
+					qMu.Lock()
+					if q, ok := queues[msg.siteKey]; ok && q != nil && !q.closed {
+						q.closed = true
+						close(q.ch)
+					}
+					qMu.Unlock()
+					continue
+				}
+				if len(msg.sources) == 0 {
+					continue
+				}
+				qMu.Lock()
+				q, ok := queues[msg.siteKey]
+				if !ok || q == nil {
+					q = &siteQueue{ch: make(chan smartSource, 256), closed: false}
+					queues[msg.siteKey] = q
+					runSiteWorker(msg.siteKey, q)
+				}
+				qMu.Unlock()
+			enqueueLoop:
+				for _, s := range msg.sources {
+					if strings.TrimSpace(s.SiteKey) == "" || strings.TrimSpace(s.SpiderAPI) == "" || strings.TrimSpace(s.VideoID) == "" {
+						continue
+					}
+					qMu.Lock()
+					qq := queues[msg.siteKey]
+					closed := qq == nil || qq.closed
+					ch := (chan smartSource)(nil)
+					if qq != nil {
+						ch = qq.ch
+					}
+					qMu.Unlock()
+					if closed || ch == nil {
+						break
+					}
+					select {
+					case <-done:
+						break enqueueLoop
+					case ch <- s:
+						atomic.AddInt64(&queuedSources, 1)
+					default:
+						// Avoid blocking on a full per-site queue; we prefer returning a winner promptly.
+						// Detail workers will still process what has already been queued.
+						break enqueueLoop
+					}
+				}
+			}
+		}
+	}()
+
 	for doneSearchSites < expectedSites {
 		remain := time.Until(deadline)
 		if remain <= 0 {
 			break
 		}
 		select {
-		case msg := <-searchCh:
-			if msg.done {
-				doneSearchSites++
-				qMu.Lock()
-				if q, ok := queues[msg.siteKey]; ok && q != nil && !q.closed {
-					q.closed = true
-					close(q.ch)
-				}
-				qMu.Unlock()
-				continue
-			}
-			if len(msg.sources) == 0 {
-				continue
-			}
-			qMu.Lock()
-			q, ok := queues[msg.siteKey]
-			if !ok || q == nil {
-				q = &siteQueue{ch: make(chan smartSource, 256), closed: false}
-				queues[msg.siteKey] = q
-				runSiteWorker(msg.siteKey, q)
-			}
-			qMu.Unlock()
-			for _, s := range msg.sources {
-				if strings.TrimSpace(s.SiteKey) == "" || strings.TrimSpace(s.SpiderAPI) == "" || strings.TrimSpace(s.VideoID) == "" {
-					continue
-				}
-				qMu.Lock()
-				qq := queues[msg.siteKey]
-				closed := qq == nil || qq.closed
-				ch := (chan smartSource)(nil)
-				if qq != nil {
-					ch = qq.ch
-				}
-				qMu.Unlock()
-				if closed || ch == nil {
-					break
-				}
-				atomic.AddInt64(&queuedSources, 1)
-				ch <- s
-			}
 		case res := <-results:
 			if res == nil || strings.TrimSpace(res.PlayURL) == "" {
 				continue
@@ -3196,7 +3365,8 @@ func smartResolvePlaybackFromTMDBAligned(
 						raw0 = strings.TrimSpace(rawNames[0])
 					}
 					embyDebugPrintf(
-						"[smart][playback_ok] ms=%d site=(%s) panFlag=%s provider=%s matchShowName=%s matchRawName=%s url=%s",
+						"[smart][playback_ok] flow=%d ms=%d site=(%s) panFlag=%s provider=%s matchShowName=%s matchRawName=%s url=%s",
+						flowID,
 						time.Since(flowStart).Milliseconds(),
 						smartLogSiteName(res.Cand.SiteKey, res.Cand.SiteName),
 						strings.TrimSpace(res.Cand.PanLabel),
@@ -3215,14 +3385,31 @@ func smartResolvePlaybackFromTMDBAligned(
 			}
 		case <-time.After(time.Duration(smartMinInt(int(remain.Milliseconds()), 200)) * time.Millisecond):
 		}
+		doneSearchSites = int(atomic.LoadInt64(&doneSearchSitesAtomic))
 	}
 
-	// First round: wait for scan completion (all queued sources consumed + detail/list in-flight done) before allowing downgrade.
+	// First round: while waiting for scan completion (all queued sources consumed + detail/list in-flight done),
+	// keep consuming results so a successful fallback doesn't get stuck behind a long-running scan and miss the deadline.
 	for time.Now().Before(deadline) {
+		select {
+		case res := <-results:
+			if res == nil || strings.TrimSpace(res.PlayURL) == "" {
+				break
+			}
+			feat := smartComputeCandidateFeatures(res.Cand)
+			if feat.QualityRank == 3 {
+				upsertSmartPlayHistoryBestEffort(res.Cand)
+				return res.PlayURL, res.Headers, buildPicked(res.Cand, feat), nil
+			}
+			_, hasMulti, prefer, _ := metaSnapshot()
+			if bestFallback == nil || smartCompareSmartMatch(bestFallback.Cand, res.Cand, hasMulti, prefer, settings) > 0 {
+				bestFallback = res
+			}
+		case <-time.After(120 * time.Millisecond):
+		}
 		if atomic.LoadInt64(&queuedSources) <= 0 && atomic.LoadInt64(&inFlightScans) <= 0 {
 			break
 		}
-		time.Sleep(80 * time.Millisecond)
 	}
 	atomic.StoreInt32(&require4KUntilScanDone, 0)
 	launchFallbackIfAny("scan_done_no_4k")
@@ -3256,7 +3443,8 @@ func smartResolvePlaybackFromTMDBAligned(
 			}
 			feat := smartComputeCandidateFeatures(bestFallback.Cand)
 			embyDebugPrintf(
-				"[smart][playback_ok] ms=%d site=(%s) panFlag=%s provider=%s matchShowName=%s matchRawName=%s quality=%s url=%s",
+				"[smart][playback_ok] flow=%d ms=%d site=(%s) panFlag=%s provider=%s matchShowName=%s matchRawName=%s quality=%s url=%s",
+				flowID,
 				time.Since(flowStart).Milliseconds(),
 				smartLogSiteName(bestFallback.Cand.SiteKey, bestFallback.Cand.SiteName),
 				strings.TrimSpace(bestFallback.Cand.PanLabel),

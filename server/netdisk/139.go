@@ -1120,15 +1120,20 @@ func yun139ListUncached(_ *db.DB, flag string, passcode string) (string, string,
 }
 
 func Yun139List(database *db.DB, flag string, passcode string) (string, string, error) {
+	vod, linkID, _, err := Yun139ListWithCacheHit(database, flag, passcode)
+	return vod, linkID, err
+}
+
+func Yun139ListWithCacheHit(database *db.DB, flag string, passcode string) (vod string, linkID string, fromCache bool, err error) {
 	key := listCacheKey("139_list", flag, passcode)
-	got, _, err := y139ListCacheTwoTier.Do(key, func() (listCache2, error) {
+	got, hit, err := y139ListCacheTwoTier.Do(key, func() (listCache2, error) {
 		vod, linkID, e := yun139ListUncached(database, flag, passcode)
 		if e != nil {
 			return listCache2{}, e
 		}
 		return listCache2{Vod: vod, ShareID: linkID}, nil
 	})
-	return strings.TrimSpace(got.Vod), strings.TrimSpace(got.ShareID), err
+	return strings.TrimSpace(got.Vod), strings.TrimSpace(got.ShareID), hit, err
 }
 
 func parse139PlayID(id string) (linkID string, contentID string, coID string) {
