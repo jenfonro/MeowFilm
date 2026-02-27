@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/cache"
 	"github.com/jenfonro/meowfilm/server/catpawopen"
 	"github.com/jenfonro/meowfilm/server/config"
 	"github.com/jenfonro/meowfilm/server/magic"
@@ -1349,7 +1350,7 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 			PanMock189AccessByShareID: map[string]string{},
 		}
 
-		detailRaw, err := catpawopen.RequestSpider(apiBase, src.SpiderAPI, "detail", map[string]any{"id": src.VideoID})
+		detailRaw, err := cache.RequestSpiderDetailCached(apiBase, src.SpiderAPI, src.VideoID)
 		if err != nil {
 			smartDetailCache.Lock()
 			prev := smartDetailCache.M[key]
@@ -2788,7 +2789,7 @@ func smartResolvePlaybackFromTMDBAligned(
 		atomic.AddInt64(&inFlightScans, 1)
 		defer atomic.AddInt64(&inFlightScans, -1)
 
-		detailRaw, err := catpawopen.RequestSpider(apiBase, src.SpiderAPI, "detail", map[string]any{"id": src.VideoID})
+		detailRaw, err := cache.RequestSpiderDetailCached(apiBase, src.SpiderAPI, src.VideoID)
 		if err != nil {
 			return nil, err
 		}
