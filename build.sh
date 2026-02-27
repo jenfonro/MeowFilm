@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="${SCRIPT_DIR}"
 cd "${ROOT_DIR}"
 
+FRONTEND_DIR="${FRONTEND_DIR:-../MeowFilm-Frontend}"
 DST_DIST="public/dist"
 
 # This script only builds the backend binary. It does not build/copy the frontend.
