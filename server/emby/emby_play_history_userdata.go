@@ -24,6 +24,33 @@ func embyQueryPlayHistoryByVideoID(database *db.DB, userID string, videoID strin
 	if uid <= 0 || vid == "" {
 		return embyPlayHistorySnapshot{}, false
 	}
+
+	// Prefer contentKey-based lookup for TMDB series/movie ids so play history created by the web UI
+	// (siteKey != "emby") can still drive Emby "resume/next up" behaviors.
+	if parsed, ok := embyParseItemID(vid); ok && parsed != nil && parsed.Source == "tmdb" && parsed.TMDBID > 0 {
+		if parsed.Kind == "tv" && parsed.SubKind == "series" {
+			key := "tmdb:tv:" + strconv.Itoa(parsed.TMDBID)
+			if row, err := database.GetPlayHistoryLatestByContentKey(uid, key); err == nil && row != nil {
+				return embyPlayHistorySnapshot{
+					Pos:     row.PlaybackPositionTicks,
+					Runtime: row.PlaybackRuntimeTicks,
+					Updated: row.UpdatedAt,
+				}, true
+			}
+		}
+		if parsed.Kind == "movie" && parsed.SubKind == "movie" {
+			key := "tmdb:movie:" + strconv.Itoa(parsed.TMDBID)
+			if row, err := database.GetPlayHistoryLatestByContentKey(uid, key); err == nil && row != nil {
+				return embyPlayHistorySnapshot{
+					Pos:     row.PlaybackPositionTicks,
+					Runtime: row.PlaybackRuntimeTicks,
+					Updated: row.UpdatedAt,
+				}, true
+			}
+		}
+	}
+
+	// Fallback for legacy Emby-only rows keyed by a synthetic site_video (siteKey="emby", videoID=itemID).
 	snap, ok := database.GetPlayHistorySnapshotBySiteVideo(uid, "emby", vid)
 	if !ok {
 		return embyPlayHistorySnapshot{}, false

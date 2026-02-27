@@ -89,9 +89,17 @@ else
   echo "garble install failed; building without obfuscation" >&2
 fi
 
-BUILD_MODE_ARGS=("-buildmode=pie")
+BUILD_MODE_ARGS=()
+if [[ "${GOOS:-}" != "windows" ]]; then
+  BUILD_MODE_ARGS=("-buildmode=pie")
+fi
 
 set +e
+ext=""
+if [[ "${GOOS:-}" == "windows" ]]; then ext=".exe"; fi
+OUT_BIN="${OUT_DIR}/meowfilm_${WATERMARK}${ext}"
+OUT_MAIN="${OUT_DIR}/meowfilm${ext}"
+
 CGO_ENABLED=1 "${GO_TOOL}" build "${BUILD_MODE_ARGS[@]}" -tags userlimit -ldflags "${LDFLAGS}" -o "${OUT_BIN}" .
 rc=$?
 set -e
@@ -99,6 +107,6 @@ if [[ $rc -ne 0 ]]; then
   echo "pie build failed; retry without -buildmode=pie" >&2
   CGO_ENABLED=1 "${GO_TOOL}" build -tags userlimit -ldflags "${LDFLAGS}" -o "${OUT_BIN}" .
 fi
-cp -f "${OUT_BIN}" "${OUT_DIR}/meowfilm"
+cp -f "${OUT_BIN}" "${OUT_MAIN}"
 echo "built: ${OUT_BIN}"
-echo "built: ${OUT_DIR}/meowfilm"
+echo "built: ${OUT_MAIN}"

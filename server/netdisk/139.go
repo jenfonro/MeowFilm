@@ -345,7 +345,7 @@ func outlinkPostEncrypted(path string, plainBody string, authorization string) (
 	for k, v := range h {
 		req.Header.Set(k, v)
 	}
-	client := &http.Client{Timeout: 18 * time.Second}
+	client := &http.Client{Timeout: 18 * time.Second, Transport: netdiskHTTPTransport}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, "", "", err
@@ -510,7 +510,7 @@ func outlinkPostEncryptedAnon0119(path string, plainBody string, linkID string) 
 	for k, v := range buildOutlinkAnonHeaders0119WithReferer(linkID) {
 		req.Header.Set(k, v)
 	}
-	client := &http.Client{Timeout: 18 * time.Second}
+	client := &http.Client{Timeout: 18 * time.Second, Transport: netdiskHTTPTransport}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, "", "", err
@@ -1180,7 +1180,7 @@ func getContentInfoFromOutLinkPresentURL(linkID string, coID string) (string, er
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept-Encoding", "identity")
 
-	client := &http.Client{Timeout: 18 * time.Second}
+	client := &http.Client{Timeout: 18 * time.Second, Transport: netdiskHTTPTransport}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err

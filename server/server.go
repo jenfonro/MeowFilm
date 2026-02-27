@@ -16,6 +16,7 @@ import (
 	"github.com/jenfonro/meowfilm/server/api"
 	"github.com/jenfonro/meowfilm/server/dashboard"
 	"github.com/jenfonro/meowfilm/server/emby"
+	"github.com/jenfonro/meowfilm/server/netdisk"
 	"github.com/jenfonro/meowfilm/server/static"
 )
 
@@ -42,6 +43,7 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	netdisk.InitNetdiskProxyFromDB(database)
 
 	if wm := buildinfo.WatermarkTrim(); wm != "" {
 		_, _ = fmt.Fprintf(os.Stderr, "build=%s\n", wm)
