@@ -64,37 +64,50 @@ func handleEmbyVideoStream(w http.ResponseWriter, r *http.Request, database *db.
 		}
 	}
 
+	resolveKey := computedMediaSourceID
+	if strings.TrimSpace(resolveKey) == "" {
+		resolveKey = mediaSourceID
+	}
+	if strings.TrimSpace(resolveKey) == "" {
+		// Last resort: still dedupe within the same process for the same user+device+item.
+		resolveKey = strings.TrimSpace(u.ID) + "|" + strings.TrimSpace(deviceID) + "|" + strings.TrimSpace(itemID)
+	}
+
 	parsed, ok := embyParseItemID(itemID)
 	if !ok || parsed == nil {
 		// Stateless site episodes: resolve on demand and cache the resulting 302 mapping.
 		if siteVideoID, pan, epIndex, ok := embyParseSiteEpisodeIDV2(itemID); ok {
-			playURL, headers, err := embyResolveStatelessSiteEpisodePlayback(database, u, siteVideoID, pan, epIndex)
+			finalURL, err := embyResolveStreamOnce(resolveKey, func() (string, error) {
+				playURL, headers, err := embyResolveStatelessSiteEpisodePlayback(database, u, siteVideoID, pan, epIndex)
+				if err != nil {
+					return "", err
+				}
+				u0 := strings.TrimSpace(playURL)
+				h0 := headers
+				if len(h0) != 0 {
+					if pickedURL, ok, err2 := goproxy.ProxyIfNeeded(database, "", u0, h0); err2 == nil && ok && strings.TrimSpace(pickedURL) != "" {
+						u0 = strings.TrimSpace(pickedURL)
+						h0 = nil
+					}
+				}
+				if len(h0) != 0 {
+					return "", fmt.Errorf("该源需要自定义请求头，暂不支持")
+				}
+				if u0 == "" {
+					return "", fmt.Errorf("站点未返回可播放地址")
+				}
+				return u0, nil
+			})
 			if err != nil {
 				embyBadGateway(w, err)
 				return
 			}
-			finalURL := strings.TrimSpace(playURL)
-			finalHeaders := headers
-			if len(finalHeaders) != 0 {
-				if pickedURL, ok, err2 := goproxy.ProxyIfNeeded(database, "", finalURL, finalHeaders); err2 == nil && ok && strings.TrimSpace(pickedURL) != "" {
-					finalURL = strings.TrimSpace(pickedURL)
-					finalHeaders = nil
-				}
-			}
-			if len(finalHeaders) != 0 {
-				embyWriteError(w, 501, "该源需要自定义请求头，暂不支持")
-				return
-			}
-			if finalURL == "" {
-				embyWriteError(w, 502, "站点未返回可播放地址")
-				return
-			}
 			// Cache and respond.
 			if mediaSourceID != "" {
-				embyStreams.Set(mediaSourceID, finalURL, 60*time.Second)
+				embyStreams.Set(mediaSourceID, strings.TrimSpace(finalURL), 60*time.Second)
 			}
 			if computedMediaSourceID != "" && computedMediaSourceID != mediaSourceID {
-				embyStreams.Set(computedMediaSourceID, finalURL, 60*time.Second)
+				embyStreams.Set(computedMediaSourceID, strings.TrimSpace(finalURL), 60*time.Second)
 			}
 			// If the client requests an HLS manifest, return a minimal single-segment playlist.
 			if strings.HasSuffix(strings.ToLower(strings.TrimSpace(r.URL.Path)), ".m3u8") {
@@ -103,7 +116,7 @@ func handleEmbyVideoStream(w http.ResponseWriter, r *http.Request, database *db.
 				_, _ = fmt.Fprintf(w, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:3600\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:3600.0,\n%s\n#EXT-X-ENDLIST\n", finalURL)
 				return
 			}
-			http.Redirect(w, r, finalURL, http.StatusFound)
+			http.Redirect(w, r, strings.TrimSpace(finalURL), http.StatusFound)
 			return
 		}
 		embyNotFound(w)
@@ -120,36 +133,43 @@ func handleEmbyVideoStream(w http.ResponseWriter, r *http.Request, database *db.
 		return
 	}
 
-	playURL, headers, picked, err := embyResolvePlaybackFromTMDB(database, u, &p)
+	finalURL, err := embyResolveStreamOnce(resolveKey, func() (string, error) {
+		playURL, headers, picked, err := embyResolvePlaybackFromTMDB(database, u, &p)
+		if err != nil {
+			return "", err
+		}
+		u0 := strings.TrimSpace(playURL)
+		h0 := headers
+		if len(h0) != 0 {
+			// Best-effort: register to GoProxy and return a header-free proxy URL for Emby clients.
+			provider := ""
+			if picked != nil {
+				provider = strings.TrimSpace(picked.Provider)
+			}
+			if pickedURL, ok, err2 := goproxy.ProxyIfNeeded(database, provider, u0, h0); err2 == nil && ok && strings.TrimSpace(pickedURL) != "" {
+				u0 = strings.TrimSpace(pickedURL)
+				h0 = nil
+			}
+		}
+		if len(h0) != 0 {
+			return "", fmt.Errorf("该源需要自定义请求头，暂不支持")
+		}
+		if u0 == "" {
+			return "", fmt.Errorf("无可用播放地址")
+		}
+		return u0, nil
+	})
 	if err != nil {
 		embyBadGateway(w, err)
 		return
 	}
-	finalURL := strings.TrimSpace(playURL)
-	finalHeaders := headers
-	if len(finalHeaders) != 0 {
-		// Best-effort: register to GoProxy and return a header-free proxy URL for Emby clients.
-		provider := ""
-		if picked != nil {
-			provider = strings.TrimSpace(picked.Provider)
-		}
-		if pickedURL, ok, err2 := goproxy.ProxyIfNeeded(database, provider, finalURL, finalHeaders); err2 == nil && ok && strings.TrimSpace(pickedURL) != "" {
-			finalURL = strings.TrimSpace(pickedURL)
-			finalHeaders = nil
-		}
+	// Cache the resolved playback URL so subsequent PlaybackInfo/stream calls can avoid
+	// triggering smart search/detail/pick again.
+	if mediaSourceID != "" {
+		embyStreams.Set(mediaSourceID, strings.TrimSpace(finalURL), 60*time.Second)
 	}
-
-	if len(finalHeaders) == 0 {
-		// Cache the resolved playback URL so subsequent PlaybackInfo/stream calls can avoid
-		// triggering smart search/detail/pick again.
-		if mediaSourceID != "" {
-			embyStreams.Set(mediaSourceID, finalURL, 60*time.Second)
-		}
-		if computedMediaSourceID != "" && computedMediaSourceID != mediaSourceID {
-			embyStreams.Set(computedMediaSourceID, finalURL, 60*time.Second)
-		}
-		http.Redirect(w, r, finalURL, http.StatusFound)
-		return
+	if computedMediaSourceID != "" && computedMediaSourceID != mediaSourceID {
+		embyStreams.Set(computedMediaSourceID, strings.TrimSpace(finalURL), 60*time.Second)
 	}
-	embyWriteError(w, 501, "该源需要自定义请求头，暂不支持")
+	http.Redirect(w, r, strings.TrimSpace(finalURL), http.StatusFound)
 }
