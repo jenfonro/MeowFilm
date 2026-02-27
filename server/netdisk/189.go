@@ -1159,7 +1159,7 @@ func parse189PlayID(id string) (fileID string, shareID string, fileName string) 
 	return
 }
 
-func Tianyi189List(database *db.DB, flag string, accessCode string) (vodPlayURL string, shareID string, shareCode string, err error) {
+func tianyi189ListUncached(database *db.DB, flag string, accessCode string) (vodPlayURL string, shareID string, shareCode string, err error) {
 	sc := parse189ShareCodeLike(flag)
 	if sc == "" {
 		return "", "", "", errors.New("missing/invalid flag/shareCode (expected: 天翼-<shareCode> or https://cloud.189.cn/t/<shareCode>)")
@@ -1430,6 +1430,21 @@ func Tianyi189List(database *db.DB, flag string, accessCode string) (vodPlayURL 
 		}
 	}
 	return strings.Join(parts, "#"), shareID, sc, nil
+}
+
+func Tianyi189List(database *db.DB, flag string, accessCode string) (vodPlayURL string, shareID string, shareCode string, err error) {
+	key := listCacheKey("189_list", flag, accessCode)
+	got, _, e := t189ListCacheTwoTier.Do(key, func() (listCache3, error) {
+		vod, sid, sc, err2 := tianyi189ListUncached(database, flag, accessCode)
+		if err2 != nil {
+			return listCache3{}, err2
+		}
+		return listCache3{Vod: vod, ShareID: sid, ShareCode: sc}, nil
+	})
+	if e != nil {
+		return "", "", "", e
+	}
+	return strings.TrimSpace(got.Vod), strings.TrimSpace(got.ShareID), strings.TrimSpace(got.ShareCode), nil
 }
 
 func tianyi189PlayWithDT(database *db.DB, id string, accessCode string, dt string) (finalURL string, shareID string, fileID string, fileName string, err error) {

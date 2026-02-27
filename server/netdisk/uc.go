@@ -657,7 +657,7 @@ func ucShareItemName(it map[string]any) string {
 	return strings.TrimSpace(toString(it["name"]))
 }
 
-func UCList(database *db.DB, flag string, passcode string) (string, string, error) {
+func ucListUncached(database *db.DB, flag string, passcode string) (string, string, error) {
 	shareID := parseUCShareIDFromFlag(flag)
 	if shareID == "" {
 		return "", "", errors.New("missing/invalid flag (expected: 优夕-<shareId>)")
@@ -826,6 +826,18 @@ func UCList(database *db.DB, flag string, passcode string) (string, string, erro
 		_ = writePanLoginSettings(database, store2)
 	}
 	return strings.Join(parts, "#"), shareID, nil
+}
+
+func UCList(database *db.DB, flag string, passcode string) (string, string, error) {
+	key := listCacheKey("uc_list", flag, passcode)
+	got, _, err := ucListCacheTwoTier.Do(key, func() (listCache2, error) {
+		vod, shareID, e := ucListUncached(database, flag, passcode)
+		if e != nil {
+			return listCache2{}, e
+		}
+		return listCache2{Vod: vod, ShareID: shareID}, nil
+	})
+	return strings.TrimSpace(got.Vod), strings.TrimSpace(got.ShareID), err
 }
 
 type ucDownloadResp struct {

@@ -878,7 +878,7 @@ func quarkShareListDirAllPages(shareID string, stoken string, pdirFid string, co
 	return out, nil
 }
 
-func QuarkList(database *db.DB, flag string, passcode string) (string, string, error) {
+func quarkListUncached(database *db.DB, flag string, passcode string) (string, string, error) {
 	shareID := parseQuarkShareIDFromFlag(flag)
 	if shareID == "" {
 		return "", "", errors.New("missing/invalid flag (expected: 夸父-<shareId>)")
@@ -1004,6 +1004,18 @@ func QuarkList(database *db.DB, flag string, passcode string) (string, string, e
 		return "", shareID, err
 	}
 	return strings.Join(parts, "#"), shareID, nil
+}
+
+func QuarkList(database *db.DB, flag string, passcode string) (string, string, error) {
+	key := listCacheKey("quark_list", flag, passcode)
+	got, _, err := quarkListCacheTwoTier.Do(key, func() (listCache2, error) {
+		vod, shareID, e := quarkListUncached(database, flag, passcode)
+		if e != nil {
+			return listCache2{}, e
+		}
+		return listCache2{Vod: vod, ShareID: shareID}, nil
+	})
+	return strings.TrimSpace(got.Vod), strings.TrimSpace(got.ShareID), err
 }
 
 func parseQuarkPlayID(id string) (shareID string, stoken string, fid string, fidToken string, fileName string) {

@@ -1087,7 +1087,7 @@ func collectShareFilesRecursive(linkID string, pCaID string, dirParts []string, 
 	return out, nil
 }
 
-func Yun139List(_ *db.DB, flag string, passcode string) (string, string, error) {
+func yun139ListUncached(_ *db.DB, flag string, passcode string) (string, string, error) {
 	linkID := parse139LinkIDFromFlag(flag)
 	if linkID == "" {
 		return "", "", errors.New("missing/invalid flag (expected: 逸动-<linkID>)")
@@ -1117,6 +1117,18 @@ func Yun139List(_ *db.DB, flag string, passcode string) (string, string, error) 
 		parts = append(parts, prefixRootDirDisplay(dirPath, rootPrefix)+"$"+f.CoID+"*"+linkID+"***"+strings.TrimSpace(f.Name))
 	}
 	return strings.Join(parts, "#"), linkID, nil
+}
+
+func Yun139List(database *db.DB, flag string, passcode string) (string, string, error) {
+	key := listCacheKey("139_list", flag, passcode)
+	got, _, err := y139ListCacheTwoTier.Do(key, func() (listCache2, error) {
+		vod, linkID, e := yun139ListUncached(database, flag, passcode)
+		if e != nil {
+			return listCache2{}, e
+		}
+		return listCache2{Vod: vod, ShareID: linkID}, nil
+	})
+	return strings.TrimSpace(got.Vod), strings.TrimSpace(got.ShareID), err
 }
 
 func parse139PlayID(id string) (linkID string, contentID string, coID string) {
