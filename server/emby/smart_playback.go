@@ -1705,6 +1705,35 @@ func smartTryPlayPickedCandidate(database *db.DB, apiBase string, tvUser string,
 	if strings.TrimSpace(cand.Ep.URL) == "" {
 		return nil
 	}
+	logStatus := func(status string, playURL string, headers map[string]string, err error) {
+		if !embyDebugLogEnabled() {
+			return
+		}
+		errMsg := ""
+		if err != nil {
+			errMsg = strings.TrimSpace(err.Error())
+		}
+		u := strings.TrimSpace(playURL)
+		if u != "" {
+			u = smartShortURLForLog(u)
+		}
+		hc := 0
+		if headers != nil {
+			hc = len(headers)
+		}
+		embyDebugPrintf(
+			"[smart][play_try_status] site=(%s) panFlag=%s provider=%s status=%s headers=%d url=%s err=%s spider=%s videoId=%s",
+			smartLogSiteName(cand.SiteKey, cand.SiteName),
+			strings.TrimSpace(cand.PanLabel),
+			smartPanMockProviderID(strings.TrimSpace(cand.PanLabel)),
+			strings.TrimSpace(status),
+			hc,
+			u,
+			errMsg,
+			strings.TrimSpace(cand.SpiderAPI),
+			strings.TrimSpace(cand.VideoID),
+		)
+	}
 	if embyDebugLogEnabled() {
 		rawNames := smartExtractRawNamesFromEpisodeURL(cand.Ep.URL)
 		raw0 := ""
@@ -1712,9 +1741,8 @@ func smartTryPlayPickedCandidate(database *db.DB, apiBase string, tvUser string,
 			raw0 = strings.TrimSpace(rawNames[0])
 		}
 		embyDebugPrintf(
-			"[smart][play_try] site=%s(%s) panFlag=%s provider=%s showName=%s rawName=%s spider=%s videoId=%s",
-			strings.TrimSpace(cand.SiteKey),
-			strings.TrimSpace(cand.SiteName),
+			"[smart][play_try] site=(%s) panFlag=%s provider=%s matchShowName=%s matchRawName=%s spider=%s videoId=%s",
+			smartLogSiteName(cand.SiteKey, cand.SiteName),
 			strings.TrimSpace(cand.PanLabel),
 			smartPanMockProviderID(strings.TrimSpace(cand.PanLabel)),
 			strings.TrimSpace(cand.Ep.Name),
@@ -1743,26 +1771,44 @@ func smartTryPlayPickedCandidate(database *db.DB, apiBase string, tvUser string,
 		}
 		u, _, _, _, err := netdisk.Tianyi189Play(database, strings.TrimSpace(cand.Ep.URL), ac)
 		if err != nil || strings.TrimSpace(u) == "" {
+			if err != nil {
+				logStatus("err", "", nil, err)
+			} else {
+				logStatus("empty", "", nil, nil)
+			}
 			return nil
 		}
+		logStatus("ok", u, nil, nil)
 		return &smartPickResult{Cand: cand, PlayURL: strings.TrimSpace(u), Headers: map[string]string{}}
 	case "quark":
 		u, header, err := netdisk.QuarkPlayWithTVUser(database, strings.TrimSpace(cand.Ep.URL), "", tvUser)
 		if err != nil || strings.TrimSpace(u) == "" {
+			if err != nil {
+				logStatus("err", "", nil, err)
+			} else {
+				logStatus("empty", "", nil, nil)
+			}
 			return nil
 		}
 		if header == nil {
 			header = map[string]string{}
 		}
+		logStatus("ok", u, header, nil)
 		return &smartPickResult{Cand: cand, PlayURL: strings.TrimSpace(u), Headers: header}
 	case "uc":
 		u, header, err := netdisk.UCPlayWithTVUser(database, strings.TrimSpace(cand.Ep.URL), "", tvUser)
 		if err != nil || strings.TrimSpace(u) == "" {
+			if err != nil {
+				logStatus("err", "", nil, err)
+			} else {
+				logStatus("empty", "", nil, nil)
+			}
 			return nil
 		}
 		if header == nil {
 			header = map[string]string{}
 		}
+		logStatus("ok", u, header, nil)
 		return &smartPickResult{Cand: cand, PlayURL: strings.TrimSpace(u), Headers: header}
 	case "139":
 		downloadURL, playURL, err := netdisk.Yun139Play(database, strings.TrimSpace(cand.PanLabel), strings.TrimSpace(cand.Ep.URL))
@@ -1771,17 +1817,29 @@ func smartTryPlayPickedCandidate(database *db.DB, apiBase string, tvUser string,
 			u = strings.TrimSpace(playURL)
 		}
 		if err != nil || u == "" {
+			if err != nil {
+				logStatus("err", "", nil, err)
+			} else {
+				logStatus("empty", "", nil, nil)
+			}
 			return nil
 		}
+		logStatus("ok", u, nil, nil)
 		return &smartPickResult{Cand: cand, PlayURL: u, Headers: map[string]string{}}
 	case "baidu":
 		u, header, err := netdisk.BaiduPlay(database, strings.TrimSpace(cand.PanLabel), strings.TrimSpace(cand.Ep.URL), "/MeowFilm")
 		if err != nil || strings.TrimSpace(u) == "" {
+			if err != nil {
+				logStatus("err", "", nil, err)
+			} else {
+				logStatus("empty", "", nil, nil)
+			}
 			return nil
 		}
 		if header == nil {
 			header = map[string]string{}
 		}
+		logStatus("ok", u, header, nil)
 		return &smartPickResult{Cand: cand, PlayURL: strings.TrimSpace(u), Headers: header}
 	default:
 		// Normal site play.
@@ -1797,10 +1855,12 @@ func smartTryPlayPickedCandidate(database *db.DB, apiBase string, tvUser string,
 		}
 		playRaw, err := catpawopen.RequestPlay(apiBase, tvUser, playPayload)
 		if err != nil {
+			logStatus("err", "", nil, err)
 			return nil
 		}
 		urlPicked := strings.TrimSpace(catpawopen.PickFirstPlayableURL(playRaw))
 		if urlPicked == "" {
+			logStatus("empty", "", nil, nil)
 			return nil
 		}
 		urlPicked = catpawopen.RewriteProxyURLToBase(urlPicked, apiBase, tvUser)
@@ -1818,6 +1878,7 @@ func smartTryPlayPickedCandidate(database *db.DB, apiBase string, tvUser string,
 				headers[kk] = sv
 			}
 		}
+		logStatus("ok", urlPicked, headers, nil)
 		return &smartPickResult{Cand: cand, PlayURL: urlPicked, Headers: headers}
 	}
 }
@@ -2860,11 +2921,10 @@ func smartResolvePlaybackFromTMDBAligned(
 		if embyDebugLogEnabled() {
 			feat := smartComputeCandidateFeatures(cand)
 			embyDebugPrintf(
-				"[smart][fallback_launch] ms=%d reason=%s site=%s(%s) panFlag=%s quality=%s",
+				"[smart][fallback_launch] ms=%d reason=%s site=(%s) panFlag=%s quality=%s",
 				time.Since(flowStart).Milliseconds(),
 				strings.TrimSpace(reason),
-				strings.TrimSpace(cand.SiteKey),
-				strings.TrimSpace(cand.SiteName),
+				smartLogSiteName(cand.SiteKey, cand.SiteName),
 				strings.TrimSpace(cand.PanLabel),
 				strings.TrimSpace(feat.Quality),
 			)
@@ -2898,10 +2958,9 @@ func smartResolvePlaybackFromTMDBAligned(
 			feat := smartComputeCandidateFeatures(*cand)
 			if embyDebugLogEnabled() {
 				embyDebugPrintf(
-					"[smart][pick] ms=%d site=%s(%s) panFlag=%s quality=%s want=%d",
+					"[smart][pick] ms=%d site=(%s) panFlag=%s quality=%s want=%d",
 					time.Since(flowStart).Milliseconds(),
-					strings.TrimSpace(cand.SiteKey),
-					strings.TrimSpace(cand.SiteName),
+					smartLogSiteName(cand.SiteKey, cand.SiteName),
 					strings.TrimSpace(cand.PanLabel),
 					strings.TrimSpace(feat.Quality),
 					want,
@@ -2927,10 +2986,9 @@ func smartResolvePlaybackFromTMDBAligned(
 			fbMu.Unlock()
 			if embyDebugLogEnabled() {
 				embyDebugPrintf(
-					"[smart][pick_hold] ms=%d site=%s(%s) panFlag=%s quality=%s",
+					"[smart][pick_hold] ms=%d site=(%s) panFlag=%s quality=%s",
 					time.Since(flowStart).Milliseconds(),
-					strings.TrimSpace(cand.SiteKey),
-					strings.TrimSpace(cand.SiteName),
+					smartLogSiteName(cand.SiteKey, cand.SiteName),
 					strings.TrimSpace(cand.PanLabel),
 					strings.TrimSpace(feat.Quality),
 				)
@@ -3138,10 +3196,9 @@ func smartResolvePlaybackFromTMDBAligned(
 						raw0 = strings.TrimSpace(rawNames[0])
 					}
 					embyDebugPrintf(
-						"[smart][playback_ok] ms=%d site=%s(%s) panFlag=%s provider=%s showName=%s rawName=%s url=%s",
+						"[smart][playback_ok] ms=%d site=(%s) panFlag=%s provider=%s matchShowName=%s matchRawName=%s url=%s",
 						time.Since(flowStart).Milliseconds(),
-						strings.TrimSpace(res.Cand.SiteKey),
-						strings.TrimSpace(res.Cand.SiteName),
+						smartLogSiteName(res.Cand.SiteKey, res.Cand.SiteName),
 						strings.TrimSpace(res.Cand.PanLabel),
 						smartPanMockProviderID(strings.TrimSpace(res.Cand.PanLabel)),
 						strings.TrimSpace(res.Cand.Ep.Name),
@@ -3199,10 +3256,9 @@ func smartResolvePlaybackFromTMDBAligned(
 			}
 			feat := smartComputeCandidateFeatures(bestFallback.Cand)
 			embyDebugPrintf(
-				"[smart][playback_ok] ms=%d site=%s(%s) panFlag=%s provider=%s showName=%s rawName=%s quality=%s url=%s",
+				"[smart][playback_ok] ms=%d site=(%s) panFlag=%s provider=%s matchShowName=%s matchRawName=%s quality=%s url=%s",
 				time.Since(flowStart).Milliseconds(),
-				strings.TrimSpace(bestFallback.Cand.SiteKey),
-				strings.TrimSpace(bestFallback.Cand.SiteName),
+				smartLogSiteName(bestFallback.Cand.SiteKey, bestFallback.Cand.SiteName),
 				strings.TrimSpace(bestFallback.Cand.PanLabel),
 				smartPanMockProviderID(strings.TrimSpace(bestFallback.Cand.PanLabel)),
 				strings.TrimSpace(bestFallback.Cand.Ep.Name),
