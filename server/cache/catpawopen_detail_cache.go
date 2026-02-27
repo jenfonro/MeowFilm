@@ -22,9 +22,9 @@ func catPawOpenDetailCacheKey(apiBase string, spiderAPI string, videoID string) 
 	return strings.TrimSpace(apiBase) + "|" + strings.TrimSpace(spiderAPI) + "|" + strings.TrimSpace(videoID)
 }
 
-// RequestSpiderDetailCached fetches CatPawOpen spider detail and caches the full raw JSON response.
+// RequestSpiderDetailCachedWithTimeout fetches CatPawOpen spider detail and caches the full raw JSON response.
 // Cache key includes apiBase to avoid cross-user pollution when apiBase is user-dependent.
-func RequestSpiderDetailCached(apiBase string, spiderAPI string, videoID string) (map[string]any, error) {
+func RequestSpiderDetailCachedWithTimeout(apiBase string, spiderAPI string, videoID string, timeout time.Duration) (map[string]any, error) {
 	base := strings.TrimSpace(apiBase)
 	sp := strings.TrimSpace(spiderAPI)
 	vid := strings.TrimSpace(videoID)
@@ -37,7 +37,7 @@ func RequestSpiderDetailCached(apiBase string, spiderAPI string, videoID string)
 
 	key := catPawOpenDetailCacheKey(base, sp, vid)
 	val, _, err := catPawOpenDetailCache.Do(key, func() (catPawOpenDetailRawValue, error) {
-		raw, e := catpawopen.RequestSpider(base, sp, "detail", map[string]any{"id": vid})
+		raw, e := catpawopen.RequestSpiderWithTimeout(base, sp, "detail", map[string]any{"id": vid}, timeout)
 		if e != nil {
 			return catPawOpenDetailRawValue{}, e
 		}
@@ -63,3 +63,8 @@ func RequestSpiderDetailCached(apiBase string, spiderAPI string, videoID string)
 	return out, nil
 }
 
+// RequestSpiderDetailCached fetches CatPawOpen spider detail and caches the full raw JSON response.
+// Cache key includes apiBase to avoid cross-user pollution when apiBase is user-dependent.
+func RequestSpiderDetailCached(apiBase string, spiderAPI string, videoID string) (map[string]any, error) {
+	return RequestSpiderDetailCachedWithTimeout(apiBase, spiderAPI, videoID, 12*time.Second)
+}

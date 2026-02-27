@@ -70,6 +70,10 @@ func RequestSpiderWithTimeout(apiBase string, spiderAPI string, action string, p
 }
 
 func RequestPlay(apiBase string, tvUser string, payload any) (map[string]any, error) {
+	return RequestPlayWithTimeout(apiBase, tvUser, payload, 15*time.Second)
+}
+
+func RequestPlayWithTimeout(apiBase string, tvUser string, payload any, timeout time.Duration) (map[string]any, error) {
 	base := NormalizeAPIBase(apiBase)
 	if base == "" {
 		return nil, errors.New("CatPawOpen 接口地址未设置")
@@ -89,7 +93,10 @@ func RequestPlay(apiBase string, tvUser string, payload any) (map[string]any, er
 		req.Header.Set("X-TV-User", strings.TrimSpace(tvUser))
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err

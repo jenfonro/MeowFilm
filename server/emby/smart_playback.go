@@ -1,8 +1,11 @@
 package emby
 
 import (
+	"container/heap"
+	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"math"
 	"regexp"
 	"sort"
@@ -35,6 +38,11 @@ type smartPriorityMatch struct {
 
 var smartPlayTrySeq uint64
 var smartPlayFlowSeq uint64
+
+const (
+	smartPlayTryTimeout       = 5 * time.Second
+	smartPlayMaxPendingOffers = 5000
+)
 
 func smartComputePriorityMatch(textLower string, tokensLower []string) smartPriorityMatch {
 	text := strings.TrimSpace(textLower)
@@ -1733,6 +1741,42 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 	}
 	tryID := atomic.AddUint64(&smartPlayTrySeq, 1)
 	tryStart := time.Now()
+	classifyReason := func(status string, err error) string {
+		s := strings.ToLower(strings.TrimSpace(status))
+		if s == "ok" {
+			return ""
+		}
+		if s == "timeout" {
+			return "timeout"
+		}
+		if s == "empty" {
+			return "empty_url"
+		}
+		if err == nil {
+			return ""
+		}
+		msg := strings.ToLower(strings.TrimSpace(err.Error()))
+		if msg == "" {
+			return "unknown"
+		}
+		if strings.Contains(msg, "http 401") || strings.Contains(msg, "http 403") || strings.Contains(msg, "unauthorized") || strings.Contains(msg, "forbidden") {
+			return "auth"
+		}
+		if strings.Contains(msg, "风险") || strings.Contains(msg, "风控") || strings.Contains(msg, "频繁") || strings.Contains(msg, "too many") || strings.Contains(msg, "rate") || strings.Contains(msg, "captcha") || strings.Contains(msg, "验证码") {
+			return "risk_control"
+		}
+		if strings.Contains(msg, "json") || strings.Contains(msg, "unmarshal") || strings.Contains(msg, "parse") {
+			return "parse"
+		}
+		if strings.Contains(msg, "http ") {
+			return "http_status"
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return "timeout"
+		}
+		return "upstream"
+	}
+
 	logStatus := func(status string, playURL string, headers map[string]string, err error) {
 		if !embyDebugLogEnabled() {
 			return
@@ -1741,6 +1785,7 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 		if err != nil {
 			errMsg = strings.TrimSpace(err.Error())
 		}
+		reason := classifyReason(status, err)
 		u := strings.TrimSpace(playURL)
 		if u != "" {
 			u = smartShortURLForLog(u)
@@ -1750,7 +1795,7 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 			hc = len(headers)
 		}
 		embyDebugPrintf(
-			"[smart][play_try_status] flow=%d id=%d ms=%d site=(%s) panFlag=%s provider=%s status=%s headers=%d url=%s err=%s spider=%s videoId=%s",
+			"[smart][play_try_status] flow=%d id=%d ms=%d site=(%s) panFlag=%s provider=%s status=%s reason=%s headers=%d url=%s err=%s spider=%s videoId=%s",
 			flowID,
 			tryID,
 			time.Since(tryStart).Milliseconds(),
@@ -1758,6 +1803,7 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 			strings.TrimSpace(cand.PanLabel),
 			smartPanMockProviderID(strings.TrimSpace(cand.PanLabel)),
 			strings.TrimSpace(status),
+			strings.TrimSpace(reason),
 			hc,
 			u,
 			errMsg,
@@ -1784,135 +1830,149 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 			strings.TrimSpace(cand.VideoID),
 		)
 	}
-	pid := smartPanMockProviderID(strings.TrimSpace(cand.PanLabel))
-	switch pid {
-	case "189":
-		ac := ""
-		parts := strings.Split(strings.TrimSpace(cand.Ep.URL), "*")
-		if len(parts) >= 2 {
-			shareID := strings.TrimSpace(parts[1])
-			if shareID != "" {
-				if v, ok := accessByShareID[shareID]; ok {
-					ac = strings.TrimSpace(v)
-				}
-				if ac == "" {
-					if v, ok := embyPanMock189AccessGet(shareID); ok {
+
+	type playResult struct {
+		status  string // ok|empty|err
+		playURL string
+		headers map[string]string
+		err     error
+	}
+
+	doPlay := func() playResult {
+		pid := smartPanMockProviderID(strings.TrimSpace(cand.PanLabel))
+		switch pid {
+		case "189":
+			ac := ""
+			parts := strings.Split(strings.TrimSpace(cand.Ep.URL), "*")
+			if len(parts) >= 2 {
+				shareID := strings.TrimSpace(parts[1])
+				if shareID != "" {
+					if v, ok := accessByShareID[shareID]; ok {
 						ac = strings.TrimSpace(v)
+					}
+					if ac == "" {
+						if v, ok := embyPanMock189AccessGet(shareID); ok {
+							ac = strings.TrimSpace(v)
+						}
 					}
 				}
 			}
-		}
-		u, _, _, _, err := netdisk.Tianyi189Play(database, strings.TrimSpace(cand.Ep.URL), ac)
-		if err != nil || strings.TrimSpace(u) == "" {
-			if err != nil {
-				logStatus("err", "", nil, err)
-			} else {
-				logStatus("empty", "", nil, nil)
+			u, _, _, _, err := netdisk.Tianyi189Play(database, strings.TrimSpace(cand.Ep.URL), ac)
+			if err != nil || strings.TrimSpace(u) == "" {
+				if err != nil {
+					return playResult{status: "err", err: err}
+				}
+				return playResult{status: "empty"}
 			}
-			return nil
-		}
-		logStatus("ok", u, nil, nil)
-		return &smartPickResult{Cand: cand, PlayURL: strings.TrimSpace(u), Headers: map[string]string{}}
-	case "quark":
-		u, header, err := netdisk.QuarkPlayWithTVUser(database, strings.TrimSpace(cand.Ep.URL), "", tvUser)
-		if err != nil || strings.TrimSpace(u) == "" {
-			if err != nil {
-				logStatus("err", "", nil, err)
-			} else {
-				logStatus("empty", "", nil, nil)
+			return playResult{status: "ok", playURL: strings.TrimSpace(u), headers: map[string]string{}}
+		case "quark":
+			u, header, err := netdisk.QuarkPlayWithTVUser(database, strings.TrimSpace(cand.Ep.URL), "", tvUser)
+			if err != nil || strings.TrimSpace(u) == "" {
+				if err != nil {
+					return playResult{status: "err", err: err}
+				}
+				return playResult{status: "empty"}
 			}
-			return nil
-		}
-		if header == nil {
-			header = map[string]string{}
-		}
-		logStatus("ok", u, header, nil)
-		return &smartPickResult{Cand: cand, PlayURL: strings.TrimSpace(u), Headers: header}
-	case "uc":
-		u, header, err := netdisk.UCPlayWithTVUser(database, strings.TrimSpace(cand.Ep.URL), "", tvUser)
-		if err != nil || strings.TrimSpace(u) == "" {
-			if err != nil {
-				logStatus("err", "", nil, err)
-			} else {
-				logStatus("empty", "", nil, nil)
+			if header == nil {
+				header = map[string]string{}
 			}
-			return nil
-		}
-		if header == nil {
-			header = map[string]string{}
-		}
-		logStatus("ok", u, header, nil)
-		return &smartPickResult{Cand: cand, PlayURL: strings.TrimSpace(u), Headers: header}
-	case "139":
-		downloadURL, playURL, err := netdisk.Yun139Play(database, strings.TrimSpace(cand.PanLabel), strings.TrimSpace(cand.Ep.URL))
-		u := strings.TrimSpace(downloadURL)
-		if u == "" {
-			u = strings.TrimSpace(playURL)
-		}
-		if err != nil || u == "" {
-			if err != nil {
-				logStatus("err", "", nil, err)
-			} else {
-				logStatus("empty", "", nil, nil)
+			return playResult{status: "ok", playURL: strings.TrimSpace(u), headers: header}
+		case "uc":
+			u, header, err := netdisk.UCPlayWithTVUser(database, strings.TrimSpace(cand.Ep.URL), "", tvUser)
+			if err != nil || strings.TrimSpace(u) == "" {
+				if err != nil {
+					return playResult{status: "err", err: err}
+				}
+				return playResult{status: "empty"}
 			}
-			return nil
-		}
-		logStatus("ok", u, nil, nil)
-		return &smartPickResult{Cand: cand, PlayURL: u, Headers: map[string]string{}}
-	case "baidu":
-		u, header, err := netdisk.BaiduPlay(database, strings.TrimSpace(cand.PanLabel), strings.TrimSpace(cand.Ep.URL), "/MeowFilm")
-		if err != nil || strings.TrimSpace(u) == "" {
-			if err != nil {
-				logStatus("err", "", nil, err)
-			} else {
-				logStatus("empty", "", nil, nil)
+			if header == nil {
+				header = map[string]string{}
 			}
+			return playResult{status: "ok", playURL: strings.TrimSpace(u), headers: header}
+		case "139":
+			downloadURL, playURL, err := netdisk.Yun139Play(database, strings.TrimSpace(cand.PanLabel), strings.TrimSpace(cand.Ep.URL))
+			u := strings.TrimSpace(downloadURL)
+			if u == "" {
+				u = strings.TrimSpace(playURL)
+			}
+			if err != nil || u == "" {
+				if err != nil {
+					return playResult{status: "err", err: err}
+				}
+				return playResult{status: "empty"}
+			}
+			return playResult{status: "ok", playURL: u, headers: map[string]string{}}
+		case "baidu":
+			u, header, err := netdisk.BaiduPlay(database, strings.TrimSpace(cand.PanLabel), strings.TrimSpace(cand.Ep.URL), "/MeowFilm")
+			if err != nil || strings.TrimSpace(u) == "" {
+				if err != nil {
+					return playResult{status: "err", err: err}
+				}
+				return playResult{status: "empty"}
+			}
+			if header == nil {
+				header = map[string]string{}
+			}
+			return playResult{status: "ok", playURL: strings.TrimSpace(u), headers: header}
+		default:
+			// Normal site play.
+			spiderApi := strings.TrimSpace(cand.SpiderAPI)
+			siteID := catpawopen.ExtractSiteIDFromSpiderAPI(spiderApi)
+			playPayload := map[string]any{
+				"flag":    strings.TrimSpace(cand.Ep.Flag),
+				"id":      strings.TrimSpace(cand.Ep.URL),
+				"siteApi": spiderApi,
+			}
+			if siteID != "" {
+				playPayload["siteId"] = siteID
+			}
+			playRaw, err := catpawopen.RequestPlayWithTimeout(apiBase, tvUser, playPayload, smartPlayTryTimeout)
+			if err != nil {
+				return playResult{status: "err", err: err}
+			}
+			urlPicked := strings.TrimSpace(catpawopen.PickFirstPlayableURL(playRaw))
+			if urlPicked == "" {
+				return playResult{status: "empty"}
+			}
+			urlPicked = catpawopen.RewriteProxyURLToBase(urlPicked, apiBase, tvUser)
+			headers := map[string]string{}
+			if h, ok := playRaw["header"].(map[string]any); ok {
+				for k, v := range h {
+					kk := strings.TrimSpace(k)
+					if kk == "" {
+						continue
+					}
+					sv := strings.TrimSpace(embyAnyToString(v))
+					if sv == "" {
+						continue
+					}
+					headers[kk] = sv
+				}
+			}
+			return playResult{status: "ok", playURL: urlPicked, headers: headers}
+		}
+	}
+
+	resCh := make(chan playResult, 1)
+	go func() { resCh <- doPlay() }()
+	timer := time.NewTimer(smartPlayTryTimeout)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		logStatus("timeout", "", nil, context.DeadlineExceeded)
+		return nil
+	case res := <-resCh:
+		switch strings.TrimSpace(res.status) {
+		case "ok":
+			logStatus("ok", res.playURL, res.headers, nil)
+			return &smartPickResult{Cand: cand, PlayURL: strings.TrimSpace(res.playURL), Headers: res.headers}
+		case "err":
+			logStatus("err", "", nil, res.err)
 			return nil
-		}
-		if header == nil {
-			header = map[string]string{}
-		}
-		logStatus("ok", u, header, nil)
-		return &smartPickResult{Cand: cand, PlayURL: strings.TrimSpace(u), Headers: header}
-	default:
-		// Normal site play.
-		spiderApi := strings.TrimSpace(cand.SpiderAPI)
-		siteID := catpawopen.ExtractSiteIDFromSpiderAPI(spiderApi)
-		playPayload := map[string]any{
-			"flag":    strings.TrimSpace(cand.Ep.Flag),
-			"id":      strings.TrimSpace(cand.Ep.URL),
-			"siteApi": spiderApi,
-		}
-		if siteID != "" {
-			playPayload["siteId"] = siteID
-		}
-		playRaw, err := catpawopen.RequestPlay(apiBase, tvUser, playPayload)
-		if err != nil {
-			logStatus("err", "", nil, err)
-			return nil
-		}
-		urlPicked := strings.TrimSpace(catpawopen.PickFirstPlayableURL(playRaw))
-		if urlPicked == "" {
+		default:
 			logStatus("empty", "", nil, nil)
 			return nil
 		}
-		urlPicked = catpawopen.RewriteProxyURLToBase(urlPicked, apiBase, tvUser)
-		headers := map[string]string{}
-		if h, ok := playRaw["header"].(map[string]any); ok {
-			for k, v := range h {
-				kk := strings.TrimSpace(k)
-				if kk == "" {
-					continue
-				}
-				sv := strings.TrimSpace(embyAnyToString(v))
-				if sv == "" {
-					continue
-				}
-				headers[kk] = sv
-			}
-		}
-		logStatus("ok", urlPicked, headers, nil)
-		return &smartPickResult{Cand: cand, PlayURL: urlPicked, Headers: headers}
 	}
 }
 
@@ -2488,7 +2548,7 @@ func smartResolvePlaybackFromTMDB(database *db.DB, u *embyUser, req smartPlaybac
 	// - search across sites concurrently
 	// - per-site detail requests are sequential
 	// - pan_mock list resolving does not block fetching next details
-	resolvedURL, resolvedHeaders, picked, resolveErr := smartResolvePlaybackFromTMDBAligned(database, u, req, apiBase, tvUser, searchTitle, want, tmdbSeasons, settings, rawCleanRules, rawEpisodeRules)
+	resolvedURL, resolvedHeaders, picked, resolveErr := smartResolvePlaybackFromTMDBAlignedCoordinator(database, u, req, apiBase, tvUser, searchTitle, want, tmdbSeasons, settings, rawCleanRules, rawEpisodeRules)
 	if resolveErr == nil && strings.TrimSpace(resolvedURL) != "" {
 		return resolvedURL, resolvedHeaders, picked, nil
 	}
@@ -2504,7 +2564,34 @@ func smartResolvePlaybackFromTMDB(database *db.DB, u *embyUser, req smartPlaybac
 	return "", nil, nil, errors.New("无可用播放地址")
 }
 
-func smartResolvePlaybackFromTMDBAligned(
+type smartCandidateOffer struct {
+	Cand          smartCandidate
+	AccessByShare map[string]string // for 189 play
+}
+
+type smartCandidateOfferPQ struct {
+	items         []smartCandidateOffer
+	hasMulti      bool
+	preferSeason  int
+	matchSettings smartPlaybackSettings
+}
+
+func (pq smartCandidateOfferPQ) Len() int { return len(pq.items) }
+func (pq smartCandidateOfferPQ) Less(i, j int) bool {
+	a := pq.items[i].Cand
+	b := pq.items[j].Cand
+	return smartCompareSmartMatch(a, b, pq.hasMulti, pq.preferSeason, pq.matchSettings) > 0
+}
+func (pq smartCandidateOfferPQ) Swap(i, j int) { pq.items[i], pq.items[j] = pq.items[j], pq.items[i] }
+func (pq *smartCandidateOfferPQ) Push(x any)   { pq.items = append(pq.items, x.(smartCandidateOffer)) }
+func (pq *smartCandidateOfferPQ) Pop() any {
+	n := len(pq.items)
+	x := pq.items[n-1]
+	pq.items = pq.items[:n-1]
+	return x
+}
+
+func smartResolvePlaybackFromTMDBAlignedCoordinator(
 	database *db.DB,
 	u *embyUser,
 	req smartPlaybackRequest,
@@ -2529,13 +2616,24 @@ func smartResolvePlaybackFromTMDBAligned(
 
 	flowStart := time.Now()
 	flowID := atomic.AddUint64(&smartPlayFlowSeq, 1)
-	var require4KUntilScanDone int32 = 1
-	done := make(chan struct{})
-	var doneOnce sync.Once
-	stop := func() {
-		doneOnce.Do(func() { close(done) })
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(18*time.Second))
+	defer cancel()
+
+	attemptKey := func(c smartCandidate) uint64 {
+		raw0 := smartFirstRawNameFromURL(strings.TrimSpace(c.Ep.URL))
+		h := fnv.New64a()
+		_, _ = h.Write([]byte(strings.TrimSpace(c.SiteKey)))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(strings.TrimSpace(c.VideoID)))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(strings.TrimSpace(c.PanLabel)))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(strings.TrimSpace(c.Ep.Flag)))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(strings.TrimSpace(raw0)))
+		return h.Sum64()
 	}
-	defer stop()
 
 	buildPicked := func(c smartCandidate, feat smartCandidateFeatures) *smartPlaybackPickedMeta {
 		rawNames := smartExtractRawNamesFromEpisodeURL(c.Ep.URL)
@@ -2607,104 +2705,115 @@ func smartResolvePlaybackFromTMDBAligned(
 		})
 	}
 
-	tryResolveFromPlayHistory := func(seasons []embyTMDBSeason, hasMulti bool, prefer int, require bool) (string, map[string]string, *smartPlaybackPickedMeta, bool) {
-		if database == nil || u == nil {
-			return "", nil, nil, false
-		}
-		uid, _ := strconv.ParseInt(strings.TrimSpace(u.ID), 10, 64)
-		if uid <= 0 {
-			return "", nil, nil, false
-		}
-		kind := strings.TrimSpace(req.Kind)
-		if kind != "tv" && kind != "movie" {
-			return "", nil, nil, false
-		}
-		contentKey := strings.ToLower(strings.TrimSpace("tmdb:" + kind + ":" + strconv.Itoa(req.TMDBID)))
-		row, e := database.GetPlayHistoryLatestByContentKey(uid, contentKey)
-		if e != nil || row == nil {
-			return "", nil, nil, false
-		}
-		siteKey := strings.TrimSpace(row.SiteKey)
-		videoID := strings.TrimSpace(row.VideoID)
-		panLabel := strings.TrimSpace(row.PanLabel)
-		if siteKey == "" || videoID == "" || panLabel == "" {
-			return "", nil, nil, false
-		}
-		spiderAPI := strings.TrimSpace(embyResolveSpiderAPIBySiteKey(database, siteKey))
-		if spiderAPI == "" {
-			return "", nil, nil, false
-		}
-
-		src := smartSource{
-			SiteKey:     siteKey,
-			SiteName:    strings.TrimSpace(row.SiteName),
-			SpiderAPI:   spiderAPI,
-			VideoID:     videoID,
-			VideoRemark: strings.TrimSpace(row.VideoRemark),
-			Score:       1000,
-			Seq:         0,
-			NoNoise:     true,
-		}
-
-		detailRaw, e2 := cache.RequestSpiderDetailCached(apiBase, spiderAPI, videoID)
-		if e2 != nil || detailRaw == nil {
-			return "", nil, nil, false
-		}
-		playFrom, playURL := catpawopen.ExtractDetailPlayFromURL(detailRaw)
-		pans := catpawopen.ParsePlaySources(playFrom, playURL)
-		if pans == nil || len(pans) == 0 {
-			return "", nil, nil, false
-		}
-
-		// Keep only the previously successful pan label.
-		wantPan := strings.TrimSpace(panLabel)
-		chosen := []catpawopen.Pan{}
-		for _, p := range pans {
-			if strings.TrimSpace(p.Label) == wantPan {
-				chosen = append(chosen, p)
-				break
+	recomputeMeta := func(seasons []embyTMDBSeason) (out []embyTMDBSeason, hasMulti bool, prefer int, require bool) {
+		positiveSeasons := 0
+		for _, s := range seasons {
+			if s.Season > 0 {
+				positiveSeasons++
 			}
 		}
-		if len(chosen) == 0 {
-			return "", nil, nil, false
+		hasMulti = positiveSeasons >= 2
+		prefer = 0
+		if hasMulti {
+			mapped := smartTMDBSeasonEpisodeOfGlobal(seasons, want)
+			if mapped.Season > 0 {
+				prefer = mapped.Season
+			} else if req.Season > 0 {
+				prefer = req.Season
+			}
 		}
+		require = hasMulti && prefer >= 2
+		out = make([]embyTMDBSeason, 0, len(seasons))
+		out = append(out, seasons...)
+		return out, hasMulti, prefer, require
+	}
 
-		accessByShareID := map[string]string{}
-		if embyIsPanMockEnabled(detailRaw) && smartPanMockProviderID(wantPan) != "" {
-			resolved, access := embyResolvePanMockDetailPansIncremental(
-				database,
-				src.SiteKey,
-				src.SiteName,
-				want,
-				seasons,
-				hasMulti,
-				rawCleanRules,
-				rawEpisodeRules,
-				chosen,
-				nil,
-			)
-			chosen = resolved
-			accessByShareID = access
+	seasonsForMapping, hasMulti, preferSeasonNo, requireSeasoned := recomputeMeta(tmdbSeasons)
+	needDouban := strings.TrimSpace(req.Kind) == "tv" && strings.TrimSpace(req.SubKind) == "episode" && len(tmdbSeasons) < 2 && strings.TrimSpace(searchTitle) != ""
+	if needDouban {
+		if over, ok := doubanProbeSeasons(database, req.TMDBID, searchTitle, want); ok && len(over) >= 2 {
+			seasonsForMapping, hasMulti, preferSeasonNo, requireSeasoned = recomputeMeta(over)
+			if embyDebugLogEnabled() {
+				mapped := smartTMDBSeasonEpisodeOfGlobal(over, want)
+				embyDebugPrintf("[smart][douban] override tmdbId=%d want=%d -> mapped=S%02dE%03d", req.TMDBID, want, mapped.Season, mapped.Episode)
+			}
 		}
+	}
 
-		epMap, epLoose := smartBuildEpisodeMapsFromPans(src, chosen, seasons, hasMulti, settings, rawCleanRules, rawEpisodeRules)
-		cand := smartPickCandidateFromMaps(epMap, epLoose, src, seasons, hasMulti, prefer, want, settings, require)
-		if cand == nil {
-			return "", nil, nil, false
+	// History fast path: use last successful site+pan first, then fall back to full search.
+	{
+		if database != nil && u != nil {
+			uid, _ := strconv.ParseInt(strings.TrimSpace(u.ID), 10, 64)
+			if uid > 0 {
+				kind := strings.TrimSpace(req.Kind)
+				if kind == "tv" || kind == "movie" {
+					contentKey := strings.ToLower(strings.TrimSpace("tmdb:" + kind + ":" + strconv.Itoa(req.TMDBID)))
+					if row, e := database.GetPlayHistoryLatestByContentKey(uid, contentKey); e == nil && row != nil {
+						siteKey := strings.TrimSpace(row.SiteKey)
+						videoID := strings.TrimSpace(row.VideoID)
+						panLabel := strings.TrimSpace(row.PanLabel)
+						if siteKey != "" && videoID != "" && panLabel != "" {
+							spiderAPI := strings.TrimSpace(embyResolveSpiderAPIBySiteKey(database, siteKey))
+							if spiderAPI != "" {
+								src := smartSource{SiteKey: siteKey, SiteName: strings.TrimSpace(row.SiteName), SpiderAPI: spiderAPI, VideoID: videoID, Score: 1000, Seq: 0, NoNoise: true}
+								if detailRaw, e2 := cache.RequestSpiderDetailCached(apiBase, spiderAPI, videoID); e2 == nil && detailRaw != nil {
+									playFrom, playURL := catpawopen.ExtractDetailPlayFromURL(detailRaw)
+									pans := catpawopen.ParsePlaySources(playFrom, playURL)
+									chosen := []catpawopen.Pan{}
+									for _, p := range pans {
+										if strings.TrimSpace(p.Label) == panLabel {
+											chosen = append(chosen, p)
+											break
+										}
+									}
+									accessByShareID := map[string]string{}
+									if embyIsPanMockEnabled(detailRaw) && smartPanMockProviderID(panLabel) != "" && len(chosen) > 0 {
+										resolved, access := embyResolvePanMockDetailPansIncremental(database, src.SiteKey, src.SiteName, want, seasonsForMapping, hasMulti, rawCleanRules, rawEpisodeRules, chosen, nil)
+										chosen = resolved
+										accessByShareID = access
+									}
+									if len(chosen) > 0 {
+										epMap, epLoose := smartBuildEpisodeMapsFromPans(src, chosen, seasonsForMapping, hasMulti, settings, rawCleanRules, rawEpisodeRules)
+										cands := smartCandidatesForWant(epMap, epLoose, src, seasonsForMapping, hasMulti, preferSeasonNo, want, settings, requireSeasoned)
+										limit := 3
+										if len(cands) < limit {
+											limit = len(cands)
+										}
+										for i := 0; i < limit; i++ {
+											c := cands[i]
+											if res := smartTryPlayPickedCandidate(flowID, database, apiBase, tvUser, c, accessByShareID); res != nil && strings.TrimSpace(res.PlayURL) != "" {
+												feat := smartComputeCandidateFeatures(res.Cand)
+												upsertSmartPlayHistoryBestEffort(res.Cand)
+												return strings.TrimSpace(res.PlayURL), res.Headers, buildPicked(res.Cand, feat), nil
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
 		}
-		res := smartTryPlayPickedCandidate(flowID, database, apiBase, tvUser, *cand, accessByShareID)
-		if res == nil || strings.TrimSpace(res.PlayURL) == "" {
-			return "", nil, nil, false
+	}
+
+	qKey := embyNormalizeAggKey(searchTitle)
+	blocked := map[string]struct{}{}
+	if rows, _ := database.ListSmartMatchBlockItems(searchTitle); len(rows) > 0 {
+		for _, it := range rows {
+			sk := strings.TrimSpace(it.SiteKey)
+			vid := strings.TrimSpace(it.VideoID)
+			if sk == "" || vid == "" {
+				continue
+			}
+			blocked[sk+"::"+vid] = struct{}{}
 		}
-		upsertSmartPlayHistoryBestEffort(res.Cand)
-		feat := smartComputeCandidateFeatures(res.Cand)
-		return strings.TrimSpace(res.PlayURL), res.Headers, buildPicked(res.Cand, feat), true
 	}
 
 	rawSites, _ := database.ListVideoSourceSites()
-	sites := make([]site, 0, len(rawSites))
+	sitesList := make([]site, 0, len(rawSites))
 	for _, s := range rawSites {
-		sites = append(sites, site{Key: s.Key, Name: s.Name, API: s.API, Type: s.Type})
+		sitesList = append(sitesList, site{Key: s.Key, Name: s.Name, API: s.API, Type: s.Type})
 	}
 	states, _ := database.ReadVideoSourceSiteStates()
 	statusMap := map[string]bool{}
@@ -2716,7 +2825,7 @@ func smartResolvePlaybackFromTMDBAligned(
 		statusMap[k] = st.Enabled
 		searchMap[k] = st.Search
 	}
-	ordered := applySiteOrder(sites, smartLoadSiteOrder(database, u))
+	ordered := applySiteOrder(sitesList, smartLoadSiteOrder(database, u))
 	type task struct {
 		Site site
 		Idx  int
@@ -2744,722 +2853,306 @@ func smartResolvePlaybackFromTMDBAligned(
 		return "", nil, nil, errors.New("未找到可用资源")
 	}
 
-	// Meta readiness gate (aligned with frontend):
-	// - TMDB is required for title (already fetched by caller)
-	// - Douban multi-season probing (if needed) runs concurrently
-	// - Do NOT block detail/list API requests; only defer matching/picking until meta is ready.
-	metaDone := make(chan struct{})
-	var metaMu sync.Mutex
-	seasonsForMapping := make([]embyTMDBSeason, 0, len(tmdbSeasons))
-	seasonsForMapping = append(seasonsForMapping, tmdbSeasons...)
-	tmdbHasMultiSeason := false
-	preferSeasonNo := 0
-	requireSeasoned := false
-	recomputeMeta := func(seasons []embyTMDBSeason) {
-		positiveSeasons := 0
-		for _, s := range seasons {
-			if s.Season > 0 {
-				positiveSeasons++
-			}
-		}
-		hasMulti := positiveSeasons >= 2
-		prefer := 0
-		if hasMulti {
-			mapped := smartTMDBSeasonEpisodeOfGlobal(seasons, want)
-			if mapped.Season > 0 {
-				prefer = mapped.Season
-			} else if req.Season > 0 {
-				prefer = req.Season
-			}
-		}
-		metaMu.Lock()
-		seasonsForMapping = seasons
-		tmdbHasMultiSeason = hasMulti
-		preferSeasonNo = prefer
-		requireSeasoned = hasMulti && prefer >= 2
-		metaMu.Unlock()
-	}
-	recomputeMeta(seasonsForMapping)
+	offerCh := make(chan smartCandidateOffer, 1024)
+	var workersWG sync.WaitGroup
 
-	needDouban := strings.TrimSpace(req.Kind) == "tv" && strings.TrimSpace(req.SubKind) == "episode" && len(tmdbSeasons) < 2 && strings.TrimSpace(searchTitle) != ""
-	if needDouban {
-		go func() {
-			defer func() { close(metaDone) }()
-			select {
-			case <-done:
-				return
-			default:
-			}
-			if over, ok := doubanProbeSeasons(database, req.TMDBID, searchTitle, want); ok && len(over) >= 2 {
-				recomputeMeta(over)
-				if embyDebugLogEnabled() {
-					mapped := smartTMDBSeasonEpisodeOfGlobal(over, want)
-					embyDebugPrintf("[smart][douban] override tmdbId=%d want=%d -> mapped=S%02dE%03d", req.TMDBID, want, mapped.Season, mapped.Episode)
-				}
-			}
-		}()
-	} else {
-		close(metaDone)
-	}
+	var offersSeen int64
+	var offersDeduped int64
+	var offersQueued int64
+	var offersDroppedFull int64
+	attempts := 0
 
-	metaSnapshot := func() (seasons []embyTMDBSeason, hasMulti bool, prefer int, require bool) {
-		metaMu.Lock()
-		defer metaMu.Unlock()
-		out := make([]embyTMDBSeason, 0, len(seasonsForMapping))
-		out = append(out, seasonsForMapping...)
-		return out, tmdbHasMultiSeason, preferSeasonNo, requireSeasoned
-	}
-
-	// History fast path: if we have a previously successful site+pan match, try it first to avoid
-	// triggering the full smart search/detail/list storm. Fall back to the full pipeline on any miss.
-	{
-		seasons, hasMulti, prefer, require := metaSnapshot()
-		if u1, h1, p1, ok := tryResolveFromPlayHistory(seasons, hasMulti, prefer, require); ok && strings.TrimSpace(u1) != "" {
-			return u1, h1, p1, nil
-		}
-	}
-
-	qKey := embyNormalizeAggKey(searchTitle)
-	blocked := map[string]struct{}{}
-	if rows, _ := database.ListSmartMatchBlockItems(searchTitle); len(rows) > 0 {
-		for _, it := range rows {
-			sk := strings.TrimSpace(it.SiteKey)
-			vid := strings.TrimSpace(it.VideoID)
-			if sk == "" || vid == "" {
-				continue
-			}
-			blocked[sk+"::"+vid] = struct{}{}
-		}
-	}
-
-	type searchMsg struct {
-		siteKey string
-		sources []smartSource
-		done    bool
-	}
-	searchCh := make(chan searchMsg, len(tasks)*2)
-
-	// Search across sites concurrently; stream results to detail workers.
-	for _, t := range tasks {
-		tt := t
-		go func() {
-			select {
-			case <-done:
-				return
-			default:
-			}
-			raw, err := cache.RequestSpiderSearchCached(apiBase, tt.Site.API, searchTitle, 1)
-			if err == nil {
-				items := catpawopen.NormalizeSearchList(raw)
-				local := make([]smartSource, 0, smartMinInt(200, len(items)))
-				localSeq := 0
-				for _, it := range items {
-					name := strings.TrimSpace(it.Name)
-					if strings.TrimSpace(it.ID) == "" || name == "" {
-						continue
-					}
-					if _, ok := blocked[tt.Site.Key+"::"+strings.TrimSpace(it.ID)]; ok {
-						continue
-					}
-					key := embyNormalizeAggKey(name)
-					if key == "" {
-						continue
-					}
-					score := embyMatchScore(qKey, key)
-					if score <= 0 {
-						continue
-					}
-					localSeq++
-					local = append(local, smartSource{
-						SiteKey:     tt.Site.Key,
-						SiteName:    tt.Site.Name,
-						SpiderAPI:   tt.Site.API,
-						VideoID:     strings.TrimSpace(it.ID),
-						VideoRemark: strings.TrimSpace(it.Remark),
-						Score:       score,
-						Seq:         (tt.Idx+1)*1000 + localSeq,
-						NoNoise:     key == qKey,
-					})
-					if len(local) >= 200 {
-						break
-					}
-				}
-				if len(local) > 0 {
-					select {
-					case <-done:
-						return
-					case searchCh <- searchMsg{siteKey: tt.Site.Key, sources: local}:
-					}
-				}
-			}
-			select {
-			case <-done:
-				return
-			case searchCh <- searchMsg{siteKey: tt.Site.Key, done: true}:
-			}
-		}()
-	}
-
-	type siteQueue struct {
-		ch     chan smartSource
-		closed bool
-	}
-	queues := map[string]*siteQueue{}
-	var qMu sync.Mutex
-
-	results := make(chan *smartPickResult, 256)
-	type playAttempt struct {
-		Cand   smartCandidate
-		Access map[string]string
-		Reason string
-	}
-	attemptCh := make(chan playAttempt, 1024)
-	var attemptMu sync.Mutex
-	queuedAttempt := map[string]struct{}{}
-	attempted := map[string]struct{}{}
-	attemptKey := func(c smartCandidate) string {
-		return strings.TrimSpace(c.SiteKey) + "|" + strings.TrimSpace(c.VideoID) + "|" + strings.TrimSpace(c.PanLabel) + "|" + strings.TrimSpace(c.Ep.URL)
-	}
-	enqueueAttempt := func(c smartCandidate, access map[string]string, reason string) {
-		k := attemptKey(c)
-		if strings.TrimSpace(k) == "|||" {
-			return
-		}
-		attemptMu.Lock()
-		if _, ok := attempted[k]; ok {
-			attemptMu.Unlock()
-			return
-		}
-		if _, ok := queuedAttempt[k]; ok {
-			attemptMu.Unlock()
-			return
-		}
-		queuedAttempt[k] = struct{}{}
-		attemptMu.Unlock()
-
+	siteWorker := func(t task) {
+		defer workersWG.Done()
 		select {
-		case <-done:
-			return
-		case attemptCh <- playAttempt{Cand: c, Access: access, Reason: strings.TrimSpace(reason)}:
-			return
-		default:
-			// Queue is saturated; allow future enqueues by removing the queued mark.
-			attemptMu.Lock()
-			delete(queuedAttempt, k)
-			attemptMu.Unlock()
-			if embyDebugLogEnabled() {
-				embyDebugPrintf(
-					"[smart][play_try_queue_full] flow=%d site=(%s) panFlag=%s provider=%s reason=%s",
-					flowID,
-					smartLogSiteName(c.SiteKey, c.SiteName),
-					strings.TrimSpace(c.PanLabel),
-					smartPanMockProviderID(strings.TrimSpace(c.PanLabel)),
-					strings.TrimSpace(reason),
-				)
-			}
-			return
-		}
-	}
-	// Single worker: strict sequential play attempts in queue order.
-	go func() {
-		for {
-			select {
-			case <-done:
-				return
-			case at, ok := <-attemptCh:
-				if !ok {
-					return
-				}
-				// Even if we dequeued an attempt, do not proceed when the flow is already stopped.
-				// (Select can still pick attemptCh after done is closed.)
-				select {
-				case <-done:
-					return
-				default:
-				}
-				k := attemptKey(at.Cand)
-				attemptMu.Lock()
-				delete(queuedAttempt, k)
-				attempted[k] = struct{}{}
-				attemptMu.Unlock()
-
-				if strings.TrimSpace(k) == "|||" {
-					continue
-				}
-				if res := smartTryPlayPickedCandidate(flowID, database, apiBase, tvUser, at.Cand, at.Access); res != nil && strings.TrimSpace(res.PlayURL) != "" {
-					// Deliver the winner first, then stop the whole flow to avoid extra upstream play attempts.
-					// NOTE: do NOT select on `done` here because we are the one calling stop() and a closed
-					// `done` would make the send path lose the winner.
-					results <- res
-					stop()
-					return
-				}
-			}
-		}
-	}()
-
-	type delayedFallback struct {
-		has    bool
-		cand   smartCandidate
-		access map[string]string
-	}
-	var fbMu sync.Mutex
-	fb := delayedFallback{}
-
-	launchFallbackIfAny := func(reason string) {
-		fbMu.Lock()
-		if !fb.has {
-			fbMu.Unlock()
-			return
-		}
-		cand := fb.cand
-		access := fb.access
-		fb.has = false
-		fbMu.Unlock()
-		if embyDebugLogEnabled() {
-			feat := smartComputeCandidateFeatures(cand)
-			embyDebugPrintf(
-				"[smart][fallback_launch] flow=%d ms=%d reason=%s site=(%s) panFlag=%s quality=%s",
-				flowID,
-				time.Since(flowStart).Milliseconds(),
-				strings.TrimSpace(reason),
-				smartLogSiteName(cand.SiteKey, cand.SiteName),
-				strings.TrimSpace(cand.PanLabel),
-				strings.TrimSpace(feat.Quality),
-			)
-		}
-		enqueueAttempt(cand, access, "fallback:"+reason)
-	}
-
-	// Do not wait for all pan_mock list scans to finish before allowing a non-4K fallback.
-	// Some list resolutions can be slow enough that the whole flow hits the deadline and returns 502.
-	// After a short grace period, launch the best non-4K fallback (if any) while scans continue.
-	go func() {
-		t := time.NewTimer(6 * time.Second)
-		defer t.Stop()
-		select {
-		case <-done:
-			return
-		case <-t.C:
-			atomic.StoreInt32(&require4KUntilScanDone, 0)
-			launchFallbackIfAny("early_timeout")
-		}
-	}()
-
-	var queuedSources int64
-	var inFlightScans int64
-
-	tryPickAndPlayFromState := func(st *smartDetailState) {
-		if st == nil || !st.OK {
-			return
-		}
-		select {
-		case <-done:
-			return
-		case <-metaDone:
-		case <-time.After(18 * time.Second):
-			return
-		}
-		select {
-		case <-done:
+		case <-ctx.Done():
 			return
 		default:
 		}
-		seasons, hasMulti, prefer, require := metaSnapshot()
-		_, _, pans, access, _, _ := st.snapshot()
-		epMap, epLoose := smartBuildEpisodeMapsFromPans(st.Source, pans, seasons, hasMulti, settings, rawCleanRules, rawEpisodeRules)
-		// Collect candidates in the same order as smartPickCandidateFromMaps would select, but keep a list
-		// so we can try sequentially on failure.
-		cands := smartCandidatesForWant(epMap, epLoose, st.Source, seasons, hasMulti, prefer, want, settings, require)
-		if len(cands) == 0 {
-			return
-		}
 
-		// Log the current best pick for visibility.
-		if embyDebugLogEnabled() {
-			best := cands[0]
-			feat := smartComputeCandidateFeatures(best)
-			embyDebugPrintf(
-				"[smart][pick] ms=%d site=(%s) panFlag=%s quality=%s want=%d",
-				time.Since(flowStart).Milliseconds(),
-				smartLogSiteName(best.SiteKey, best.SiteName),
-				strings.TrimSpace(best.PanLabel),
-				strings.TrimSpace(feat.Quality),
-				want,
-			)
-		}
-
-		need4K := atomic.LoadInt32(&require4KUntilScanDone) != 0
-		if !need4K {
-			// Second round: enqueue a few best candidates sequentially.
-			limit := smartMinInt(5, len(cands))
-			for i := 0; i < limit; i++ {
-				enqueueAttempt(cands[i], access, "pick")
-			}
-			return
-		}
-
-		// First round: only enqueue 4K/2160p candidates; remember best non-4K as fallback.
-		queued4K := 0
-		bestNon4K := (*smartCandidate)(nil)
-		for i := 0; i < len(cands); i++ {
-			feat := smartComputeCandidateFeatures(cands[i])
-			if feat.QualityRank == 3 {
-				enqueueAttempt(cands[i], access, "pick4k")
-				queued4K++
-				if queued4K >= 3 {
-					break
-				}
-				continue
-			}
-			if bestNon4K == nil {
-				cp := cands[i]
-				bestNon4K = &cp
-			}
-		}
-		if bestNon4K != nil {
-			fbMu.Lock()
-			replace := !fb.has
-			if fb.has {
-				if smartCompareSmartMatch(fb.cand, *bestNon4K, hasMulti, prefer, settings) > 0 {
-					replace = true
-				}
-			}
-			if replace {
-				fb.has = true
-				fb.cand = *bestNon4K
-				fb.access = access
-			}
-			fbMu.Unlock()
-			if embyDebugLogEnabled() {
-				feat := smartComputeCandidateFeatures(*bestNon4K)
-				embyDebugPrintf(
-					"[smart][pick_hold] ms=%d site=(%s) panFlag=%s quality=%s",
-					time.Since(flowStart).Milliseconds(),
-					smartLogSiteName(bestNon4K.SiteKey, bestNon4K.SiteName),
-					strings.TrimSpace(bestNon4K.PanLabel),
-					strings.TrimSpace(feat.Quality),
-				)
-			}
-		}
-	}
-
-	fetchDetailState := func(src smartSource) (*smartDetailState, error) {
-		select {
-		case <-done:
-			return nil, errors.New("canceled")
-		default:
-		}
-		atomic.AddInt64(&inFlightScans, 1)
-		defer atomic.AddInt64(&inFlightScans, -1)
-
-		detailRaw, err := cache.RequestSpiderDetailCached(apiBase, src.SpiderAPI, src.VideoID)
+		raw, err := cache.RequestSpiderSearchCachedWithTimeout(apiBase, t.Site.API, searchTitle, 1, 6*time.Second)
 		if err != nil {
-			return nil, err
+			return
 		}
-		select {
-		case <-done:
-			return nil, errors.New("canceled")
-		default:
-		}
-		panMockEnabled := embyIsPanMockEnabled(detailRaw)
-		playFrom, playURL := catpawopen.ExtractDetailPlayFromURL(detailRaw)
-		pans := catpawopen.ParsePlaySources(playFrom, playURL)
-		if pans == nil {
-			pans = []catpawopen.Pan{}
-		}
-		state := &smartDetailState{
-			Source:                    src,
-			OK:                        true,
-			PanMockEnabled:            panMockEnabled,
-			PanMockDone:               make(chan struct{}),
-			Pans:                      pans,
-			PanMock189AccessByShareID: map[string]string{},
-			EpisodeMap:                map[int][]smartCandidate{},
-			EpisodeMapLoose:           map[int][]smartCandidate{},
-		}
-
-		if !panMockEnabled {
-			close(state.PanMockDone)
-			return state, nil
-		}
-
-		// Resolve pan_mock list asynchronously (does not block fetching next details).
-		atomic.AddInt64(&inFlightScans, 1)
-		go func() {
-			defer atomic.AddInt64(&inFlightScans, -1)
-			defer func() {
-				// Ensure the done channel is always closed.
-				defer func() { recover() }()
-				close(state.PanMockDone)
-			}()
-			select {
-			case <-done:
-				return
-			default:
-			}
-			seasons, hasMulti, _, _ := metaSnapshot()
-			resolved, accessMap := embyResolvePanMockDetailPansIncremental(
-				database,
-				src.SiteKey,
-				src.SiteName,
-				want,
-				seasons,
-				hasMulti,
-				rawCleanRules,
-				rawEpisodeRules,
-				pans,
-				func(panIndex int, episodes []catpawopen.Episode, accessDelta map[string]string) {
-					select {
-					case <-done:
-						return
-					default:
-					}
-					// Update the specific pan episodes as soon as it resolves so matching can proceed immediately.
-					if panIndex >= 0 && panIndex < len(state.Pans) {
-						state.mu.Lock()
-						state.Pans[panIndex].Episodes = episodes
-						if len(accessDelta) > 0 {
-							for k, v := range accessDelta {
-								state.PanMock189AccessByShareID[k] = v
-							}
-						}
-						state.mu.Unlock()
-					} else if len(accessDelta) > 0 {
-						state.mu.Lock()
-						for k, v := range accessDelta {
-							state.PanMock189AccessByShareID[k] = v
-						}
-						state.mu.Unlock()
-					}
-					// Try pick+play as soon as any single list returns (will wait for metaDone).
-					tryPickAndPlayFromState(state)
-				},
-			)
-			select {
-			case <-done:
-				return
-			default:
-			}
-			state.mu.Lock()
-			state.Pans = resolved
-			for k, v := range accessMap {
-				state.PanMock189AccessByShareID[k] = v
-			}
-			state.mu.Unlock()
-			// When all lists resolve, attempt one more pick+play (will wait for metaDone).
-			tryPickAndPlayFromState(state)
-		}()
-		return state, nil
-	}
-
-	runSiteWorker := func(siteKey string, q *siteQueue) {
-		go func() {
-			for {
-				select {
-				case <-done:
-					return
-				case src, ok := <-q.ch:
-					if !ok {
-						return
-					}
-					atomic.AddInt64(&queuedSources, -1)
-					st, err := fetchDetailState(src)
-					if err != nil || st == nil || !st.OK {
-						continue
-					}
-					select {
-					case <-done:
-						return
-					default:
-					}
-					// Defer matching until meta is ready; do NOT block detail/list fetching.
-					go tryPickAndPlayFromState(st)
-				}
-			}
-		}()
-	}
-
-	doneSearchSites := 0
-	expectedSites := len(tasks)
-	deadline := time.Now().Add(18 * time.Second)
-	bestFallback := (*smartPickResult)(nil)
-
-	// Drain searchCh in a dedicated goroutine so the main flow can focus on returning
-	// the first successful play result without being starved by search bursts.
-	var doneSearchSitesAtomic int64
-	go func() {
-		for {
-			select {
-			case <-done:
-				return
-			case msg := <-searchCh:
-				if msg.done {
-					atomic.AddInt64(&doneSearchSitesAtomic, 1)
-					qMu.Lock()
-					if q, ok := queues[msg.siteKey]; ok && q != nil && !q.closed {
-						q.closed = true
-						close(q.ch)
-					}
-					qMu.Unlock()
-					continue
-				}
-				if len(msg.sources) == 0 {
-					continue
-				}
-				qMu.Lock()
-				q, ok := queues[msg.siteKey]
-				if !ok || q == nil {
-					q = &siteQueue{ch: make(chan smartSource, 256), closed: false}
-					queues[msg.siteKey] = q
-					runSiteWorker(msg.siteKey, q)
-				}
-				qMu.Unlock()
-			enqueueLoop:
-				for _, s := range msg.sources {
-					if strings.TrimSpace(s.SiteKey) == "" || strings.TrimSpace(s.SpiderAPI) == "" || strings.TrimSpace(s.VideoID) == "" {
-						continue
-					}
-					qMu.Lock()
-					qq := queues[msg.siteKey]
-					closed := qq == nil || qq.closed
-					ch := (chan smartSource)(nil)
-					if qq != nil {
-						ch = qq.ch
-					}
-					qMu.Unlock()
-					if closed || ch == nil {
-						break
-					}
-					select {
-					case <-done:
-						break enqueueLoop
-					case ch <- s:
-						atomic.AddInt64(&queuedSources, 1)
-					default:
-						// Avoid blocking on a full per-site queue; we prefer returning a winner promptly.
-						// Detail workers will still process what has already been queued.
-						break enqueueLoop
-					}
-				}
-			}
-		}
-	}()
-
-	for doneSearchSites < expectedSites {
-		remain := time.Until(deadline)
-		if remain <= 0 {
-			break
-		}
-		select {
-		case res := <-results:
-			if res == nil || strings.TrimSpace(res.PlayURL) == "" {
+		items := catpawopen.NormalizeSearchList(raw)
+		local := make([]smartSource, 0, smartMinInt(80, len(items)))
+		localSeq := 0
+		for _, it := range items {
+			name := strings.TrimSpace(it.Name)
+			id := strings.TrimSpace(it.ID)
+			if id == "" || name == "" {
 				continue
 			}
-			feat := smartComputeCandidateFeatures(res.Cand)
-			if feat.QualityRank == 3 {
-				if embyDebugLogEnabled() {
-					rawNames := smartExtractRawNamesFromEpisodeURL(res.Cand.Ep.URL)
-					raw0 := ""
-					if len(rawNames) > 0 {
-						raw0 = strings.TrimSpace(rawNames[0])
-					}
-					embyDebugPrintf(
-						"[smart][playback_ok] flow=%d ms=%d site=(%s) panFlag=%s provider=%s matchShowName=%s matchRawName=%s url=%s",
-						flowID,
-						time.Since(flowStart).Milliseconds(),
-						smartLogSiteName(res.Cand.SiteKey, res.Cand.SiteName),
-						strings.TrimSpace(res.Cand.PanLabel),
-						smartPanMockProviderID(strings.TrimSpace(res.Cand.PanLabel)),
-						strings.TrimSpace(res.Cand.Ep.Name),
-						raw0,
-						smartShortURLForLog(res.PlayURL),
-					)
-				}
-				upsertSmartPlayHistoryBestEffort(res.Cand)
-				return res.PlayURL, res.Headers, buildPicked(res.Cand, feat), nil
+			if _, ok := blocked[t.Site.Key+"::"+id]; ok {
+				continue
 			}
-			_, hasMulti, prefer, _ := metaSnapshot()
-			if bestFallback == nil || smartCompareSmartMatch(bestFallback.Cand, res.Cand, hasMulti, prefer, settings) > 0 {
-				bestFallback = res
+			key := embyNormalizeAggKey(name)
+			if key == "" {
+				continue
 			}
-		case <-time.After(time.Duration(smartMinInt(int(remain.Milliseconds()), 200)) * time.Millisecond):
-		}
-		doneSearchSites = int(atomic.LoadInt64(&doneSearchSitesAtomic))
-	}
-
-	// First round: while waiting for scan completion (all queued sources consumed + detail/list in-flight done),
-	// keep consuming results so a successful fallback doesn't get stuck behind a long-running scan and miss the deadline.
-	for time.Now().Before(deadline) {
-		select {
-		case res := <-results:
-			if res == nil || strings.TrimSpace(res.PlayURL) == "" {
+			score := embyMatchScore(qKey, key)
+			if score <= 0 {
+				continue
+			}
+			localSeq++
+			local = append(local, smartSource{
+				SiteKey:     t.Site.Key,
+				SiteName:    t.Site.Name,
+				SpiderAPI:   t.Site.API,
+				VideoID:     id,
+				VideoRemark: strings.TrimSpace(it.Remark),
+				Score:       score,
+				Seq:         (t.Idx+1)*1000 + localSeq,
+				NoNoise:     key == qKey,
+			})
+			if len(local) >= 80 {
 				break
 			}
-			feat := smartComputeCandidateFeatures(res.Cand)
-			if feat.QualityRank == 3 {
-				upsertSmartPlayHistoryBestEffort(res.Cand)
-				return res.PlayURL, res.Headers, buildPicked(res.Cand, feat), nil
-			}
-			_, hasMulti, prefer, _ := metaSnapshot()
-			if bestFallback == nil || smartCompareSmartMatch(bestFallback.Cand, res.Cand, hasMulti, prefer, settings) > 0 {
-				bestFallback = res
-			}
-		case <-time.After(120 * time.Millisecond):
 		}
-		if atomic.LoadInt64(&queuedSources) <= 0 && atomic.LoadInt64(&inFlightScans) <= 0 {
-			break
+		if len(local) == 0 {
+			return
 		}
-	}
-	atomic.StoreInt32(&require4KUntilScanDone, 0)
-	launchFallbackIfAny("scan_done_no_4k")
+		sort.SliceStable(local, func(i, j int) bool {
+			ai := local[i]
+			aj := local[j]
+			if ai.Score != aj.Score {
+				return ai.Score > aj.Score
+			}
+			if ai.NoNoise != aj.NoNoise {
+				return ai.NoNoise
+			}
+			return ai.Seq < aj.Seq
+		})
+		if len(local) > 20 {
+			local = local[:20]
+		}
 
-	// Drain any late results until deadline for a final chance at 4K.
-	for time.Now().Before(deadline) {
-		select {
-		case res := <-results:
-			if res == nil || strings.TrimSpace(res.PlayURL) == "" {
+		for _, src := range local {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			detailRaw, err := cache.RequestSpiderDetailCachedWithTimeout(apiBase, src.SpiderAPI, src.VideoID, 8*time.Second)
+			if err != nil || detailRaw == nil {
 				continue
 			}
-			feat := smartComputeCandidateFeatures(res.Cand)
-			if feat.QualityRank == 3 {
-				upsertSmartPlayHistoryBestEffort(res.Cand)
-				return res.PlayURL, res.Headers, buildPicked(res.Cand, feat), nil
+			playFrom, playURL := catpawopen.ExtractDetailPlayFromURL(detailRaw)
+			pans := catpawopen.ParsePlaySources(playFrom, playURL)
+			if pans == nil {
+				pans = []catpawopen.Pan{}
 			}
-			_, hasMulti, prefer, _ := metaSnapshot()
-			if bestFallback == nil || smartCompareSmartMatch(bestFallback.Cand, res.Cand, hasMulti, prefer, settings) > 0 {
-				bestFallback = res
+			accessByShareID := map[string]string{}
+			if embyIsPanMockEnabled(detailRaw) {
+				resolved, access := embyResolvePanMockDetailPansIncremental(
+					database,
+					src.SiteKey,
+					src.SiteName,
+					want,
+					seasonsForMapping,
+					hasMulti,
+					rawCleanRules,
+					rawEpisodeRules,
+					pans,
+					nil,
+				)
+				pans = resolved
+				accessByShareID = access
 			}
-		case <-time.After(120 * time.Millisecond):
+
+			epMap, epLoose := smartBuildEpisodeMapsFromPans(src, pans, seasonsForMapping, hasMulti, settings, rawCleanRules, rawEpisodeRules)
+			cands := smartCandidatesForWant(epMap, epLoose, src, seasonsForMapping, hasMulti, preferSeasonNo, want, settings, requireSeasoned)
+			if len(cands) == 0 {
+				continue
+			}
+
+			queued4K := 0
+			queuedAny := 0
+			for _, c := range cands {
+				feat := smartComputeCandidateFeatures(c)
+				if feat.QualityRank == 3 {
+					queued4K++
+				}
+				queuedAny++
+				offer := smartCandidateOffer{
+					Cand:          c,
+					AccessByShare: accessByShareID,
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case offerCh <- offer:
+				}
+				if queued4K >= 2 && queuedAny >= 4 {
+					break
+				}
+			}
 		}
 	}
 
-	if bestFallback != nil && strings.TrimSpace(bestFallback.PlayURL) != "" {
-		if embyDebugLogEnabled() {
-			rawNames := smartExtractRawNamesFromEpisodeURL(bestFallback.Cand.Ep.URL)
-			raw0 := ""
-			if len(rawNames) > 0 {
-				raw0 = strings.TrimSpace(rawNames[0])
-			}
-			feat := smartComputeCandidateFeatures(bestFallback.Cand)
-			embyDebugPrintf(
-				"[smart][playback_ok] flow=%d ms=%d site=(%s) panFlag=%s provider=%s matchShowName=%s matchRawName=%s quality=%s url=%s",
-				flowID,
-				time.Since(flowStart).Milliseconds(),
-				smartLogSiteName(bestFallback.Cand.SiteKey, bestFallback.Cand.SiteName),
-				strings.TrimSpace(bestFallback.Cand.PanLabel),
-				smartPanMockProviderID(strings.TrimSpace(bestFallback.Cand.PanLabel)),
-				strings.TrimSpace(bestFallback.Cand.Ep.Name),
-				raw0,
-				strings.TrimSpace(feat.Quality),
-				smartShortURLForLog(bestFallback.PlayURL),
-			)
-		}
-		feat := smartComputeCandidateFeatures(bestFallback.Cand)
-		upsertSmartPlayHistoryBestEffort(bestFallback.Cand)
-		return bestFallback.PlayURL, bestFallback.Headers, buildPicked(bestFallback.Cand, feat), nil
+	for _, t := range tasks {
+		workersWG.Add(1)
+		go siteWorker(t)
 	}
-	return "", nil, nil, errors.New("无可用播放地址")
+	go func() {
+		workersWG.Wait()
+		close(offerCh)
+	}()
+
+	pendingSet := map[uint64]struct{}{}
+	attempted := map[uint64]struct{}{}
+	pq := &smartCandidateOfferPQ{hasMulti: hasMulti, preferSeason: preferSeasonNo, matchSettings: settings}
+	heap.Init(pq)
+
+	var mu sync.Mutex
+	var offersClosed bool
+	wakeCh := make(chan struct{}, 1)
+
+	go func() {
+		for off := range offerCh {
+			atomic.AddInt64(&offersSeen, 1)
+			k := attemptKey(off.Cand)
+			mu.Lock()
+			if _, ok := attempted[k]; ok {
+				atomic.AddInt64(&offersDeduped, 1)
+				mu.Unlock()
+				continue
+			}
+			if _, ok := pendingSet[k]; ok {
+				atomic.AddInt64(&offersDeduped, 1)
+				mu.Unlock()
+				continue
+			}
+			if pq.Len() >= smartPlayMaxPendingOffers {
+				atomic.AddInt64(&offersDroppedFull, 1)
+				mu.Unlock()
+				continue
+			}
+			pendingSet[k] = struct{}{}
+			heap.Push(pq, off)
+			atomic.AddInt64(&offersQueued, 1)
+			mu.Unlock()
+			select {
+			case wakeCh <- struct{}{}:
+			default:
+			}
+		}
+		mu.Lock()
+		offersClosed = true
+		mu.Unlock()
+		select {
+		case wakeCh <- struct{}{}:
+		default:
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			if embyDebugLogEnabled() {
+				embyDebugPrintf(
+					"[smart][flow_done] flow=%d ms=%d status=deadline offers=%d queued=%d dedup=%d dropped=%d attempts=%d",
+					flowID,
+					time.Since(flowStart).Milliseconds(),
+					atomic.LoadInt64(&offersSeen),
+					atomic.LoadInt64(&offersQueued),
+					atomic.LoadInt64(&offersDeduped),
+					atomic.LoadInt64(&offersDroppedFull),
+					attempts,
+				)
+			}
+			return "", nil, nil, errors.New("无可用播放地址")
+		default:
+		}
+
+		mu.Lock()
+		if pq.Len() == 0 {
+			closed := offersClosed
+			mu.Unlock()
+			if closed {
+				if embyDebugLogEnabled() {
+					embyDebugPrintf(
+						"[smart][flow_done] flow=%d ms=%d status=exhausted offers=%d queued=%d dedup=%d dropped=%d attempts=%d",
+						flowID,
+						time.Since(flowStart).Milliseconds(),
+						atomic.LoadInt64(&offersSeen),
+						atomic.LoadInt64(&offersQueued),
+						atomic.LoadInt64(&offersDeduped),
+						atomic.LoadInt64(&offersDroppedFull),
+						attempts,
+					)
+				}
+				return "", nil, nil, errors.New("无可用播放地址")
+			}
+			select {
+			case <-ctx.Done():
+				if embyDebugLogEnabled() {
+					embyDebugPrintf(
+						"[smart][flow_done] flow=%d ms=%d status=deadline offers=%d queued=%d dedup=%d dropped=%d attempts=%d",
+						flowID,
+						time.Since(flowStart).Milliseconds(),
+						atomic.LoadInt64(&offersSeen),
+						atomic.LoadInt64(&offersQueued),
+						atomic.LoadInt64(&offersDeduped),
+						atomic.LoadInt64(&offersDroppedFull),
+						attempts,
+					)
+				}
+				return "", nil, nil, errors.New("无可用播放地址")
+			case <-wakeCh:
+			}
+			continue
+		}
+
+		at := heap.Pop(pq).(smartCandidateOffer)
+		k := attemptKey(at.Cand)
+		delete(pendingSet, k)
+		attempted[k] = struct{}{}
+		mu.Unlock()
+
+		attempts++
+		if res := smartTryPlayPickedCandidate(flowID, database, apiBase, tvUser, at.Cand, at.AccessByShare); res != nil && strings.TrimSpace(res.PlayURL) != "" {
+			feat := smartComputeCandidateFeatures(res.Cand)
+			if embyDebugLogEnabled() {
+				raw0 := smartFirstRawNameFromURL(res.Cand.Ep.URL)
+				embyDebugPrintf(
+					"[smart][playback_ok] flow=%d ms=%d site=(%s) panFlag=%s provider=%s matchShowName=%s matchRawName=%s quality=%s url=%s",
+					flowID,
+					time.Since(flowStart).Milliseconds(),
+					smartLogSiteName(res.Cand.SiteKey, res.Cand.SiteName),
+					strings.TrimSpace(res.Cand.PanLabel),
+					smartPanMockProviderID(strings.TrimSpace(res.Cand.PanLabel)),
+					strings.TrimSpace(res.Cand.Ep.Name),
+					strings.TrimSpace(raw0),
+					strings.TrimSpace(feat.Quality),
+					smartShortURLForLog(res.PlayURL),
+				)
+			}
+			upsertSmartPlayHistoryBestEffort(res.Cand)
+			cancel()
+			if embyDebugLogEnabled() {
+				embyDebugPrintf(
+					"[smart][flow_done] flow=%d ms=%d status=ok offers=%d queued=%d dedup=%d dropped=%d attempts=%d",
+					flowID,
+					time.Since(flowStart).Milliseconds(),
+					atomic.LoadInt64(&offersSeen),
+					atomic.LoadInt64(&offersQueued),
+					atomic.LoadInt64(&offersDeduped),
+					atomic.LoadInt64(&offersDroppedFull),
+					attempts,
+				)
+			}
+			return strings.TrimSpace(res.PlayURL), res.Headers, buildPicked(res.Cand, feat), nil
+		}
+	}
+}
+
+func smartFirstRawNameFromURL(u string) string {
+	rawNames := smartExtractRawNamesFromEpisodeURL(u)
+	if len(rawNames) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(rawNames[0])
 }
 
 func containsInt(list []int, v int) bool {
