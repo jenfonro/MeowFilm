@@ -83,6 +83,9 @@ func (d *DB) CreateUser(username string, passwordHash string, role string) (int6
 	if d == nil || d.db == nil {
 		return 0, errors.New("db nil")
 	}
+	if err := d.EnforceUsersLimitBeforeInsert(); err != nil {
+		return 0, err
+	}
 	u := strings.TrimSpace(username)
 	if u == "" || strings.TrimSpace(passwordHash) == "" {
 		return 0, errors.New("invalid args")
