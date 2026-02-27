@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/auth"
+	"github.com/jenfonro/meowfilm/internal/buildinfo"
 	"github.com/jenfonro/meowfilm/public"
 )
 
@@ -58,6 +59,7 @@ func Handler(authMw *auth.Auth) http.Handler {
 	semver := normalizeReleaseSemver(rawVersion)
 	backendCommit := strings.TrimSpace(BuildBackendCommit)
 	frontendCommit := strings.TrimSpace(BuildFrontendCommit)
+	wm := buildinfo.WatermarkTrim()
 
 	uiVersion := "beta"
 	// In local/dev builds we want a stable "beta-<timestamp>" that is computed once per process,
@@ -75,6 +77,9 @@ func Handler(authMw *auth.Auth) http.Handler {
 	}
 	if frontendCommit == "" {
 		frontendCommit = uiVersion
+	}
+	if wm != "" {
+		backendCommit = backendCommit + "+" + wm
 	}
 
 	indexHTML := mustReadFile("index.html")

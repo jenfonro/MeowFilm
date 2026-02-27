@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/auth"
+	"github.com/jenfonro/meowfilm/internal/buildinfo"
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/internal/limit"
 	"github.com/jenfonro/meowfilm/server/catpawopen"
 	"github.com/jenfonro/meowfilm/server/config"
 	"github.com/jenfonro/meowfilm/server/emby"
@@ -43,6 +45,18 @@ func panAPINoAuthAllowed(r *http.Request) bool {
 
 func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if exceeded, err := limit.GuardAPI(database); err == nil && exceeded {
+			w.Header().Set(limit.HeaderErrKey(), limit.Code())
+			if wm := buildinfo.WatermarkTrim(); wm != "" {
+				w.Header().Set(limit.HeaderWatermarkKey(), wm)
+			}
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"success": false,
+				"code":    limit.PublicCode(),
+			})
+			return
+		}
+
 		path := strings.TrimPrefix(r.URL.Path, "/api")
 
 		// Douban API proxy (rexxar v2): frontend uses same params; backend chooses upstream base.
@@ -357,8 +371,8 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 					settings["smartSkipSiteKeys"] = []string{}
 				}
 			}
-			}
 		}
+	}
 
 	var userCount int
 	if page == "dashboard" && u.Role == "admin" {
@@ -534,21 +548,21 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid params"})
 		return
 	}
-		var (
-			contentKey  string
-			siteName    string
-			spiderAPI   string
-			videoTitle  string
-			videoPoster string
-			videoRemark string
-			tmdbID      int
-			tmdbType    string
-			panLabel    string
-			playFlag    string
-			episodeIndex int
-			episodeName  string
-			updatedAt    int64
-		)
+	var (
+		contentKey   string
+		siteName     string
+		spiderAPI    string
+		videoTitle   string
+		videoPoster  string
+		videoRemark  string
+		tmdbID       int
+		tmdbType     string
+		panLabel     string
+		playFlag     string
+		episodeIndex int
+		episodeName  string
+		updatedAt    int64
+	)
 	row, err := database.GetPlayHistoryLatestBySiteVideo(u.ID, siteKey, videoID)
 	if err != nil || row == nil {
 		writeJSON(w, 200, nil)
@@ -559,13 +573,13 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 	spiderAPI = row.SpiderAPI
 	videoTitle = row.VideoTitle
 	videoPoster = row.VideoPoster
-		videoRemark = row.VideoRemark
-		tmdbID = row.TMDBID
-		tmdbType = row.TMDBType
-		panLabel = row.PanLabel
-		playFlag = row.PlayFlag
-		episodeIndex = row.EpisodeIndex
-		episodeName = row.EpisodeName
+	videoRemark = row.VideoRemark
+	tmdbID = row.TMDBID
+	tmdbType = row.TMDBType
+	panLabel = row.PanLabel
+	playFlag = row.PlayFlag
+	episodeIndex = row.EpisodeIndex
+	episodeName = row.EpisodeName
 	updatedAt = row.UpdatedAt
 
 	if isNetDiskHistoryItem(videoID, playFlag) {
@@ -589,14 +603,14 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 		"videoId":      videoID,
 		"videoTitle":   videoTitle,
 		"videoPoster":  douban.RewriteVideoPosterURL(videoPoster, doubanImgProxy, doubanImgCustom),
-			"videoRemark":  videoRemark,
-			"tmdbId":       tmdbID,
-			"tmdbType":     tmdbType,
-			"tmdbSeasons":  "",
-			"panLabel":     panLabel,
-			"playFlag":     playFlag,
-			"episodeIndex": episodeIndex,
-			"episodeName":  episodeName,
+		"videoRemark":  videoRemark,
+		"tmdbId":       tmdbID,
+		"tmdbType":     tmdbType,
+		"tmdbSeasons":  "",
+		"panLabel":     panLabel,
+		"playFlag":     playFlag,
+		"episodeIndex": episodeIndex,
+		"episodeName":  episodeName,
 		"updatedAt":    updatedAt,
 	})
 }
@@ -728,12 +742,12 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		videoRemark := getS("videoRemark")
 		tmdbID := getI("tmdbId")
 		tmdbType := getS("tmdbType")
-			tmdbSeasons := ""
+		tmdbSeasons := ""
 		if tmdbType != "tv" && tmdbType != "movie" {
 			tmdbType = ""
 			tmdbID = 0
-			}
-			_ = tmdbSeasons
+		}
+		_ = tmdbSeasons
 		panLabel := getS("panLabel")
 		playFlag := getS("playFlag")
 		episodeIndex := getI("episodeIndex")
@@ -866,7 +880,7 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 			VideoRemark:           videoRemark,
 			TMDBID:                tmdbID,
 			TMDBType:              tmdbType,
-				PanLabel:              panLabel,
+			PanLabel:              panLabel,
 			PlayFlag:              playFlag,
 			EpisodeIndex:          episodeIndex,
 			EpisodeName:           episodeName,

@@ -7,7 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jenfonro/meowfilm/internal/buildinfo"
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/internal/limit"
 )
 
 // EmbyHandler implements a minimal subset of the Emby API surface (compatible with Emby clients).
@@ -89,6 +91,15 @@ func EmbyHandler(database *db.DB) http.Handler {
 				skipLogDone = true
 				embyDebugPrintf("[emby] %s %s -> %d (preflight)", r.Method, embyDebugURL(r, true), lw.Status())
 			}
+			return
+		}
+
+		if exceeded, err := limit.GuardEmby(database); err == nil && exceeded {
+			lw.Header().Set(limit.HeaderErrKey(), limit.Code())
+			if wm := buildinfo.WatermarkTrim(); wm != "" {
+				lw.Header().Set(limit.HeaderWatermarkKey(), wm)
+			}
+			embyWriteError(lw, http.StatusServiceUnavailable, limit.PublicCode())
 			return
 		}
 
