@@ -446,6 +446,7 @@ func handleDashboardBackup(w http.ResponseWriter, r *http.Request, database *db.
 	magicEpisodeCleanRegexRules, _ := database.ListMagicEpisodeCleanRegexRules()
 	magicMovieRules, _ := database.ListMagicMovieRules()
 	magicAggregateRegexRules, _ := database.ListMagicAggregateRegexRules()
+	embyHomeSections, _ := database.ReadEmbyHomeSections()
 
 	smartSourcePriorityTokens, _ := database.ListSmartSourcePriorityTokens()
 	smartPanMatchTokens, _ := database.ListSmartPanMatchTokens()
@@ -498,6 +499,9 @@ func handleDashboardBackup(w http.ResponseWriter, r *http.Request, database *db.
 			"language":           defaultString(strings.TrimSpace(cfg.TMDBLanguage), "zh-CN"),
 			"region":             defaultString(strings.TrimSpace(cfg.TMDBRegion), "CN"),
 			"includeAdult":       cfg.TMDBIncludeAdult,
+		},
+		"thirdParty": map[string]any{
+			"embyHomeSections": embyHomeSections,
 		},
 	})
 }
@@ -902,6 +906,21 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 			}
 		})
 		applied["metadata"] = true
+	}
+
+	thirdPartyObj := readObj(body, "thirdParty")
+	if thirdPartyObj == nil {
+		thirdPartyObj = readObj(body, "thirdparty")
+	}
+	if thirdPartyObj != nil {
+		if arr := readArr(thirdPartyObj, "embyHomeSections"); arr != nil {
+			raw, _ := json.Marshal(arr)
+			var sections []db.EmbyHomeSection
+			if err := json.Unmarshal(raw, &sections); err == nil {
+				_ = database.ReplaceEmbyHomeSections(sections)
+			}
+		}
+		applied["thirdParty"] = true
 	}
 
 	netdisk.InitNetdiskProxyFromDB(database)
