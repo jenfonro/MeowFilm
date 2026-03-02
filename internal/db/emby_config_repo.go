@@ -21,10 +21,11 @@ type EmbyHomeSection struct {
 
 func DefaultEmbyHomeSections() []EmbyHomeSection {
 	return []EmbyHomeSection{
-		{ID: "view_tmdb_tv", Name: "最新剧集", Module: "douban_tv", MediaType: "tv"},
-		{ID: "view_tmdb_movies", Name: "最新电影", Module: "douban_movie", MediaType: "movie"},
-		{ID: "view_tmdb_anime", Name: "最新动漫", Module: "bangumi_anime", MediaType: "tv"},
-		{ID: "view_tmdb_show", Name: "最新综艺", Module: "douban_variety", MediaType: "tv"},
+		{ID: "view_history", Name: "历史", Module: "history", MediaType: "tv"},
+		{ID: "view_tmdb_tv", Name: "剧集", Module: "douban_tv", MediaType: "tv"},
+		{ID: "view_tmdb_movies", Name: "电影", Module: "douban_movie", MediaType: "movie"},
+		{ID: "view_tmdb_anime", Name: "动漫", Module: "bangumi_anime", MediaType: "tv"},
+		{ID: "view_tmdb_show", Name: "综艺", Module: "douban_variety", MediaType: "tv"},
 	}
 }
 
