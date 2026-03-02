@@ -865,7 +865,10 @@ func HandleAPIBaiduList(w http.ResponseWriter, r *http.Request, database *db.DB)
 		Pass     string `json:"pass"`
 		Password string `json:"password"`
 	}
-	_ = readJSONLoose(r, &body)
+	if err := readJSONLoose(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "invalid json body"})
+		return
+	}
 	flag := strings.TrimSpace(body.Flag)
 	pwd := strings.TrimSpace(body.Pwd)
 	if pwd == "" {
@@ -905,7 +908,10 @@ func HandleAPIBaiduPlay(w http.ResponseWriter, r *http.Request, database *db.DB)
 		DestName string `json:"destName"`
 		DestPath string `json:"destPath"`
 	}
-	_ = readJSONLoose(r, &body)
+	if err := readJSONLoose(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "message": "invalid json body"})
+		return
+	}
 	id := strings.TrimSpace(body.ID)
 	flag := strings.TrimSpace(body.Flag)
 	if id == "" {
@@ -1114,9 +1120,6 @@ func baiduDecodePlayIDToJSON(id string) (map[string]any, string) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, ""
-	}
-	if u, err := url.QueryUnescape(raw); err == nil {
-		raw = u
 	}
 	b, err := base64.StdEncoding.DecodeString(raw)
 	if err != nil {
