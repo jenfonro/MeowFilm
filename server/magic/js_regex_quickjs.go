@@ -52,8 +52,28 @@ type jsMagicEngine struct {
 	rulesKey string
 }
 
+type jsMovieEngine struct {
+	rt       *quickjs.Runtime
+	ctx      *quickjs.Context
+	rulesKey string
+}
+
+type jsAggregateEngine struct {
+	rt       *quickjs.Runtime
+	ctx      *quickjs.Context
+	rulesKey string
+}
+
 var jsMagicEnginePool = sync.Pool{
 	New: func() any { return &jsMagicEngine{} },
+}
+
+var jsMovieEnginePool = sync.Pool{
+	New: func() any { return &jsMovieEngine{} },
+}
+
+var jsAggregateEnginePool = sync.Pool{
+	New: func() any { return &jsAggregateEngine{} },
 }
 
 func jsRulesKey(cleanRaw []string, episodeRaw []string) string {
@@ -70,7 +90,60 @@ func jsRulesKey(cleanRaw []string, episodeRaw []string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+func jsMovieRulesKey(cleanRaw []string, movieRaw []string) string {
+	h := sha1.New()
+	for _, s := range cleanRaw {
+		h.Write([]byte(s))
+		h.Write([]byte{0})
+	}
+	h.Write([]byte{2})
+	for _, s := range movieRaw {
+		h.Write([]byte(s))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func jsAggregateRulesKey(aggregateRaw []string) string {
+	h := sha1.New()
+	for _, s := range aggregateRaw {
+		h.Write([]byte(s))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 func (e *jsMagicEngine) close() {
+	if e == nil {
+		return
+	}
+	if e.ctx != nil {
+		e.ctx.Close()
+		e.ctx = nil
+	}
+	if e.rt != nil {
+		e.rt.Close()
+		e.rt = nil
+	}
+	e.rulesKey = ""
+}
+
+func (e *jsMovieEngine) close() {
+	if e == nil {
+		return
+	}
+	if e.ctx != nil {
+		e.ctx.Close()
+		e.ctx = nil
+	}
+	if e.rt != nil {
+		e.rt.Close()
+		e.rt = nil
+	}
+	e.rulesKey = ""
+}
+
+func (e *jsAggregateEngine) close() {
 	if e == nil {
 		return
 	}
@@ -180,6 +253,139 @@ func (e *jsMagicEngine) ensureRules(cleanRaw []string, episodeRaw []string) erro
 	return nil
 }
 
+func (e *jsMovieEngine) ensureRules(cleanRaw []string, movieRaw []string) error {
+	if e == nil {
+		return errors.New("engine nil")
+	}
+	key := jsMovieRulesKey(cleanRaw, movieRaw)
+	if e.ctx != nil && e.rt != nil && e.rulesKey == key {
+		return nil
+	}
+	e.close()
+
+	e.rt = quickjs.NewRuntime()
+	e.ctx = e.rt.NewContext()
+	e.rulesKey = key
+
+	cleanRules := make([]jsRule, 0, len(cleanRaw))
+	for _, row := range cleanRaw {
+		r := jsDecodeRule(row, true)
+		if strings.TrimSpace(r.Pattern) == "" {
+			continue
+		}
+		cleanRules = append(cleanRules, r)
+	}
+	movieRules := make([]jsRule, 0, len(movieRaw))
+	for _, row := range movieRaw {
+		r := jsDecodeRule(row, false)
+		if strings.TrimSpace(r.Pattern) == "" {
+			continue
+		}
+		// Avoid stateful RegExp behavior from /g in repeated test() calls.
+		r.Flags = strings.ReplaceAll(strings.TrimSpace(r.Flags), "g", "")
+		movieRules = append(movieRules, r)
+	}
+
+	if err := jsEvalVoid(e.ctx, `
+			globalThis.__mf_movie_set_rules = function(cleanRules, movieRules) {
+				globalThis.__mf_movie_clean = [];
+				for (let i=0;i<cleanRules.length;i++) {
+					const r = cleanRules[i] || {};
+					let flags = String(r.flags || "");
+					if (!flags.includes("g")) flags += "g";
+					__mf_movie_clean.push({ re: new RegExp(String(r.pattern||""), flags), replace: String(r.replace||"") });
+				}
+				globalThis.__mf_movie_rules = [];
+				for (let i=0;i<movieRules.length;i++) {
+					const r = movieRules[i] || {};
+					let flags = String(r.flags || "").replace(/g/g, "");
+					__mf_movie_rules.push(new RegExp(String(r.pattern||""), flags));
+				}
+			};
+
+			globalThis.__mf_movie_clean_text = function(text) {
+				let out = String(text || "");
+				for (let i=0;i<__mf_movie_clean.length;i++) {
+					const r = __mf_movie_clean[i];
+					out = out.replace(r.re, r.replace);
+				}
+				return out.replace(/\s+/g, " ").trim();
+			};
+
+			globalThis.__mf_movie_hit = function(cands) {
+				for (let i=0;i<cands.length;i++) {
+					const cleaned = __mf_movie_clean_text(cands[i]);
+					if (!cleaned) continue;
+					for (let j=0;j<__mf_movie_rules.length;j++) {
+						const re = __mf_movie_rules[j];
+						if (re.test(cleaned)) return true;
+					}
+				}
+				return false;
+			};
+		`); err != nil {
+		e.close()
+		return err
+	}
+
+	if err := jsEvalVoid(e.ctx, fmt.Sprintf(`__mf_movie_set_rules(%s,%s)`, marshalJSON(cleanRules), marshalJSON(movieRules))); err != nil {
+		e.close()
+		return err
+	}
+	return nil
+}
+
+func (e *jsAggregateEngine) ensureRules(aggregateRaw []string) error {
+	if e == nil {
+		return errors.New("engine nil")
+	}
+	key := jsAggregateRulesKey(aggregateRaw)
+	if e.ctx != nil && e.rt != nil && e.rulesKey == key {
+		return nil
+	}
+	e.close()
+
+	e.rt = quickjs.NewRuntime()
+	e.ctx = e.rt.NewContext()
+	e.rulesKey = key
+
+	rules := make([]jsRule, 0, len(aggregateRaw))
+	for _, row := range aggregateRaw {
+		r := jsDecodeRule(row, true)
+		if strings.TrimSpace(r.Pattern) == "" {
+			continue
+		}
+		rules = append(rules, r)
+	}
+	if err := jsEvalVoid(e.ctx, `
+			globalThis.__mf_agg_set_rules = function(rules) {
+				globalThis.__mf_agg_rules = [];
+				for (let i=0;i<rules.length;i++) {
+					const r = rules[i] || {};
+					let flags = String(r.flags || "");
+					if (!flags.includes("g")) flags += "g";
+					__mf_agg_rules.push({ re: new RegExp(String(r.pattern||""), flags), replace: String(r.replace||"") });
+				}
+			};
+			globalThis.__mf_agg_clean = function(text) {
+				let out = String(text || "");
+				for (let i=0;i<__mf_agg_rules.length;i++) {
+					const r = __mf_agg_rules[i];
+					out = out.replace(r.re, r.replace);
+				}
+				return out.replace(/\s+/g, " ").trim();
+			};
+		`); err != nil {
+		e.close()
+		return err
+	}
+	if err := jsEvalVoid(e.ctx, fmt.Sprintf(`__mf_agg_set_rules(%s)`, marshalJSON(rules))); err != nil {
+		e.close()
+		return err
+	}
+	return nil
+}
+
 func MagicEpisodeExtractFromCandidates(candidates []string, cleanRaw []string, episodeRaw []string) (SeasonEpisode, error) {
 	if len(candidates) == 0 {
 		return SeasonEpisode{Season: 0, Episode: 0}, nil
@@ -211,6 +417,51 @@ func MagicEpisodeExtractFromCandidates(candidates []string, cleanRaw []string, e
 		return SeasonEpisode{Season: 0, Episode: 0}, err
 	}
 	return SeasonEpisode{Season: obj.Season, Episode: obj.Episode}, nil
+}
+
+func MagicMovieMatchFromCandidates(candidates []string, cleanRaw []string, movieRaw []string) (bool, error) {
+	if len(candidates) == 0 || len(movieRaw) == 0 {
+		return false, nil
+	}
+	engine := jsMovieEnginePool.Get().(*jsMovieEngine)
+	defer jsMovieEnginePool.Put(engine)
+
+	if err := engine.ensureRules(cleanRaw, movieRaw); err != nil {
+		engine.close()
+		return false, err
+	}
+	val, err := jsEval(engine.ctx, fmt.Sprintf(`__mf_movie_hit(%s)`, marshalJSON(candidates)))
+	if err != nil {
+		engine.close()
+		return false, err
+	}
+	defer val.Free()
+	s := strings.ToLower(strings.TrimSpace(val.String()))
+	return s == "true" || s == "1", nil
+}
+
+func MagicAggregateNormalize(text string, aggregateRaw []string) (string, error) {
+	in := strings.TrimSpace(text)
+	if in == "" {
+		return "", nil
+	}
+	if len(aggregateRaw) == 0 {
+		return in, nil
+	}
+	engine := jsAggregateEnginePool.Get().(*jsAggregateEngine)
+	defer jsAggregateEnginePool.Put(engine)
+
+	if err := engine.ensureRules(aggregateRaw); err != nil {
+		engine.close()
+		return "", err
+	}
+	val, err := jsEval(engine.ctx, fmt.Sprintf(`__mf_agg_clean(%s)`, marshalJSON(in)))
+	if err != nil {
+		engine.close()
+		return "", err
+	}
+	defer val.Free()
+	return strings.TrimSpace(val.String()), nil
 }
 
 func CompileRulesDebug(database *db.DB) (any, error) {

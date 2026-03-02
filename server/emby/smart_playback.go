@@ -938,6 +938,7 @@ func smartLoadSiteOrder(database *db.DB, u *embyUser) []string {
 }
 
 func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle string, u *embyUser) ([]smartSource, map[string]int) {
+	aggregateRules := embyLoadAggregateCleanRules(database)
 	rawSites, _ := database.ListVideoSourceSites()
 	sites := make([]site, 0, len(rawSites))
 	for _, s := range rawSites {
@@ -963,7 +964,7 @@ func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle st
 		orderMap[s.Key] = i
 	}
 
-	qKey := embyNormalizeAggKey(searchTitle)
+	qKey := embyAggKeyWithRules(searchTitle, aggregateRules)
 	blocked := map[string]struct{}{}
 	if rows, _ := database.ListSmartMatchBlockItems(searchTitle); len(rows) > 0 {
 		for _, it := range rows {
@@ -1034,7 +1035,7 @@ func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle st
 				if _, ok := blocked[tt.Site.Key+"::"+strings.TrimSpace(it.ID)]; ok {
 					continue
 				}
-				key := embyNormalizeAggKey(name)
+				key := embyAggKeyWithRules(name, aggregateRules)
 				if key == "" {
 					continue
 				}
@@ -1639,6 +1640,69 @@ func smartBuildEpisodeMapsFromPans(
 	return episodeMap, episodeMapLoose
 }
 
+func smartBuildMovieCandidatesFromPans(
+	src smartSource,
+	pans []catpawopen.Pan,
+	settings smartPlaybackSettings,
+	rawCleanRules []string,
+	rawMovieRules []string,
+) []smartCandidate {
+	if len(rawMovieRules) == 0 || len(pans) == 0 {
+		return nil
+	}
+	out := make([]smartCandidate, 0, 16)
+	srcRemarkLower := strings.ToLower(strings.TrimSpace(src.VideoRemark))
+	for _, pan := range pans {
+		panLabel := strings.TrimSpace(pan.Label)
+		panTokenIdx := smartLabelTokenIdx(panLabel, settings.PanTokenOrderLower)
+		for _, ep := range pan.Episodes {
+			if strings.TrimSpace(ep.URL) == "" {
+				continue
+			}
+			rawNames := smartExtractRawNamesFromEpisodeURL(ep.URL)
+			rawName := ""
+			for i := len(rawNames) - 1; i >= 0; i-- {
+				if strings.TrimSpace(rawNames[i]) != "" {
+					rawName = strings.TrimSpace(rawNames[i])
+					break
+				}
+			}
+			if rawName == "" {
+				continue
+			}
+			texts := []string{rawName}
+			hit, err := magic.MagicMovieMatchFromCandidates(texts, rawCleanRules, rawMovieRules)
+			if err != nil || !hit {
+				continue
+			}
+			rawLower := smartBuildCandidateLowerText(texts)
+			if rawLower == "" {
+				rawLower = strings.ToLower(rawName)
+			}
+			rawLower = strings.TrimSpace(rawLower + " " + srcRemarkLower)
+			out = append(out, smartCandidate{
+				SiteKey:        src.SiteKey,
+				SiteName:       src.SiteName,
+				SpiderAPI:      src.SpiderAPI,
+				VideoID:        src.VideoID,
+				SrcRemarkLower: srcRemarkLower,
+				PanLabel:       panLabel,
+				PanTokenIdx:    panTokenIdx,
+				Ep:             ep,
+				RawLower:       rawLower,
+				MatchKeyword:   smartComputePriorityMatch(rawLower, settings.KeywordTokensLower),
+			})
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return smartCompareSmartMatchIgnorePanOrder(out[i], out[j], false, 0, settings) < 0
+	})
+	return out
+}
+
 func smartPickCandidateFromMaps(
 	episodeMap map[int][]smartCandidate,
 	episodeMapLoose map[int][]smartCandidate,
@@ -1786,9 +1850,6 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 		}
 		reason := classifyReason(status, err)
 		u := strings.TrimSpace(playURL)
-		if u != "" {
-			u = smartShortURLForLog(u)
-		}
 		hc := 0
 		if headers != nil {
 			hc = len(headers)
@@ -2539,7 +2600,8 @@ func smartResolvePlaybackFromTMDB(database *db.DB, u *embyUser, req smartPlaybac
 	settings := smartLoadPlaybackSettings(database)
 	rawEpisodeRules, _ := database.ListMagicEpisodeRules()
 	rawCleanRules, _ := database.ListMagicEpisodeCleanRegexRules()
-	if len(rawEpisodeRules) == 0 || len(rawCleanRules) == 0 {
+	rawMovieRules, _ := database.ListMagicMovieRules()
+	if strings.TrimSpace(req.Kind) != "movie" && (len(rawEpisodeRules) == 0 || len(rawCleanRules) == 0) {
 		return "", nil, nil, errors.New("magic regex rules 未设置")
 	}
 
@@ -2548,7 +2610,7 @@ func smartResolvePlaybackFromTMDB(database *db.DB, u *embyUser, req smartPlaybac
 	// - search across sites concurrently
 	// - per-site detail requests are sequential
 	// - pan_mock list resolving does not block fetching next details
-	resolvedURL, resolvedHeaders, picked, resolveErr := smartResolvePlaybackFromTMDBAlignedCoordinator(database, u, req, apiBase, tvUser, searchTitle, want, tmdbSeasons, settings, rawCleanRules, rawEpisodeRules)
+	resolvedURL, resolvedHeaders, picked, resolveErr := smartResolvePlaybackFromTMDBAlignedCoordinator(database, u, req, apiBase, tvUser, searchTitle, want, tmdbSeasons, settings, rawCleanRules, rawEpisodeRules, rawMovieRules)
 	if resolveErr == nil && strings.TrimSpace(resolvedURL) != "" {
 		return resolvedURL, resolvedHeaders, picked, nil
 	}
@@ -2603,6 +2665,7 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 	settings smartPlaybackSettings,
 	rawCleanRules []string,
 	rawEpisodeRules []string,
+	rawMovieRules []string,
 ) (finalURL string, finalHeaders map[string]string, picked *smartPlaybackPickedMeta, err error) {
 	if database == nil {
 		return "", nil, nil, errors.New("invalid database")
@@ -2613,6 +2676,7 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 	if strings.TrimSpace(searchTitle) == "" || want <= 0 {
 		return "", nil, nil, errors.New("missing title")
 	}
+	isMovieMode := strings.TrimSpace(req.Kind) == "movie" || strings.TrimSpace(req.SubKind) == "movie"
 
 	flowStart := time.Now()
 	flowID := atomic.AddUint64(&smartPlayFlowSeq, 1)
@@ -2695,6 +2759,7 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 	}
 
 	seasonsForMapping, hasMulti, preferSeasonNo, requireSeasoned := recomputeMeta(tmdbSeasons)
+	aggregateRules := embyLoadAggregateCleanRules(database)
 	needDouban := strings.TrimSpace(req.Kind) == "tv" && strings.TrimSpace(req.SubKind) == "episode" && len(tmdbSeasons) < 2 && strings.TrimSpace(searchTitle) != ""
 	if needDouban {
 		if over, ok := doubanProbeSeasons(database, req.TMDBID, searchTitle, want); ok && len(over) >= 2 {
@@ -2739,8 +2804,13 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 										accessByShareID = access
 									}
 									if len(chosen) > 0 {
-										epMap, epLoose := smartBuildEpisodeMapsFromPans(src, chosen, seasonsForMapping, hasMulti, settings, rawCleanRules, rawEpisodeRules)
-										cands := smartCandidatesForWant(epMap, epLoose, src, seasonsForMapping, hasMulti, preferSeasonNo, want, settings, requireSeasoned)
+										cands := []smartCandidate{}
+										if isMovieMode {
+											cands = smartBuildMovieCandidatesFromPans(src, chosen, settings, rawCleanRules, rawMovieRules)
+										} else {
+											epMap, epLoose := smartBuildEpisodeMapsFromPans(src, chosen, seasonsForMapping, hasMulti, settings, rawCleanRules, rawEpisodeRules)
+											cands = smartCandidatesForWant(epMap, epLoose, src, seasonsForMapping, hasMulti, preferSeasonNo, want, settings, requireSeasoned)
+										}
 										limit := 3
 										if len(cands) < limit {
 											limit = len(cands)
@@ -2763,7 +2833,7 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 		}
 	}
 
-	qKey := embyNormalizeAggKey(searchTitle)
+	qKey := embyAggKeyWithRules(searchTitle, aggregateRules)
 	blocked := map[string]struct{}{}
 	if rows, _ := database.ListSmartMatchBlockItems(searchTitle); len(rows) > 0 {
 		for _, it := range rows {
@@ -2879,7 +2949,7 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 			if _, ok := blocked[t.Site.Key+"::"+id]; ok {
 				continue
 			}
-			key := embyNormalizeAggKey(name)
+			key := embyAggKeyWithRules(name, aggregateRules)
 			if key == "" {
 				continue
 			}
@@ -2953,8 +3023,25 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 				accessByShareID = access
 			}
 
-			epMap, epLoose := smartBuildEpisodeMapsFromPans(src, pans, seasonsForMapping, hasMulti, settings, rawCleanRules, rawEpisodeRules)
-			cands := smartCandidatesForWant(epMap, epLoose, src, seasonsForMapping, hasMulti, preferSeasonNo, want, settings, requireSeasoned)
+			cands := []smartCandidate{}
+			scanned := 0
+			if isMovieMode {
+				for _, p := range pans {
+					scanned += len(p.Episodes)
+				}
+				cands = smartBuildMovieCandidatesFromPans(src, pans, settings, rawCleanRules, rawMovieRules)
+			} else {
+				epMap, epLoose := smartBuildEpisodeMapsFromPans(src, pans, seasonsForMapping, hasMulti, settings, rawCleanRules, rawEpisodeRules)
+				cands = smartCandidatesForWant(epMap, epLoose, src, seasonsForMapping, hasMulti, preferSeasonNo, want, settings, requireSeasoned)
+			}
+			if isMovieMode && embyDebugLogEnabled() {
+				embyDebugPrintf(
+					"[smart][movie_rules_eval] site=(%s) scanned=%d hit=%d",
+					smartLogSiteName(src.SiteKey, src.SiteName),
+					scanned,
+					len(cands),
+				)
+			}
 			if len(cands) == 0 {
 				continue
 			}
@@ -3107,10 +3194,24 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 		mu.Lock()
 		now := time.Now()
 		at, tier, ok := pickNext(now)
+		p1 := pq1.Len()
+		p2 := pq2.Len()
+		p3 := pq3.Len()
 		if !ok {
 			closed := offersClosed
 			mu.Unlock()
 			if closed {
+				// Do not end early when only gated tiers are pending.
+				// Example: queued tier2/tier3 offers, workers finished quickly,
+				// but gate time has not arrived yet.
+				if p1 == 0 && p2 > 0 && now.Before(tierGate2At) {
+					waitUntilOrWake(tierGate2At)
+					continue
+				}
+				if p1 == 0 && p2 == 0 && p3 > 0 && now.Before(tierGate3At) {
+					waitUntilOrWake(tierGate3At)
+					continue
+				}
 				if embyDebugLogEnabled() {
 					embyDebugPrintf(
 						"[smart][flow_done] flow=%d ms=%d status=exhausted offers=%d queued=%d dedup=%d dropped=%d attempts=%d",
