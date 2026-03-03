@@ -1,6 +1,6 @@
-package catpawopen
+package catpawrunner
 
-// Server is an admin-managed CatPawOpen server entry.
+// Server is an admin-managed catpawrunner server entry.
 type Server struct {
 	Name    string `json:"name"`
 	APIBase string `json:"apiBase"`

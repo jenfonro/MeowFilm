@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
-	"github.com/jenfonro/meowfilm/server/catpawopen"
+	"github.com/jenfonro/meowfilm/server/catpawrunner"
 	"github.com/jenfonro/meowfilm/server/metadata/tmdb"
 )
 
@@ -316,7 +316,7 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 					seasonNo = 1
 				}
 				// Pick the pan by seasonNo.
-				var pan catpawopen.Pan
+				var pan catpawrunner.Pan
 				if seasonNo-1 >= 0 && seasonNo-1 < len(pans) {
 					pan = pans[seasonNo-1]
 				} else {

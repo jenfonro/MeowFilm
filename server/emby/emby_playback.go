@@ -37,7 +37,7 @@ func handleEmbyPlaybackInfo(w http.ResponseWriter, r *http.Request, database *db
 	}
 	parsed, ok := embyParseItemID(embyID)
 	if !ok || parsed == nil {
-		// Stateless site episodes: resolve via MeowFilm netdisk play (pan_mock) or CatPawOpen play API.
+		// Stateless site episodes: resolve via MeowFilm netdisk play (pan_mock) or catpawrunner play API.
 		if siteVideoID, pan, epIndex, ok := embyParseSiteEpisodeIDV2(embyID); ok {
 			urlPicked, headers, err := embyResolveStatelessSiteEpisodePlayback(database, u, siteVideoID, pan, epIndex)
 			if err != nil {

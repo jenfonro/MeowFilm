@@ -5,7 +5,7 @@ import (
 	"path"
 	"strings"
 
-	"github.com/jenfonro/meowfilm/server/catpawopen"
+	"github.com/jenfonro/meowfilm/server/catpawrunner"
 )
 
 func embyDetectContainerFromURL(originURL string) (container string, containerList string) {
@@ -17,7 +17,7 @@ func embyDetectContainerFromURL(originURL string) (container string, containerLi
 			container = ext[1:]
 		}
 	}
-	if container == "" && catpawopen.IsProbablyM3U8(u) {
+	if container == "" && catpawrunner.IsProbablyM3U8(u) {
 		container = "m3u8"
 	}
 	if container == "" {

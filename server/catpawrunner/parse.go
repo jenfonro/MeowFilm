@@ -1,4 +1,4 @@
-package catpawopen
+package catpawrunner
 
 import (
 	"encoding/json"

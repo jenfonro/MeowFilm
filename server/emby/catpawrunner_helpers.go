@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/jenfonro/meowfilm/internal/db"
-	"github.com/jenfonro/meowfilm/server/catpawopen"
+	"github.com/jenfonro/meowfilm/server/catpawrunner"
 )
 
 func embyAnyToString(v any) string {
@@ -26,11 +26,11 @@ func embyResolveCatApiBaseForUser(database *db.DB, u *embyUser) string {
 		return ""
 	}
 	cfg, _ := database.ReadAppConfig()
-	raw, _ := database.ListCatPawOpenServers()
-	servers := make([]catpawopen.Server, 0, len(raw))
+	raw, _ := database.ListcatpawrunnerServers()
+	servers := make([]catpawrunner.Server, 0, len(raw))
 	for _, s := range raw {
-		servers = append(servers, catpawopen.Server{Name: s.Name, APIBase: s.APIBase})
+		servers = append(servers, catpawrunner.Server{Name: s.Name, APIBase: s.APIBase})
 	}
 	_ = u
-	return catpawopen.ResolveActiveBase(servers, cfg.CatPawOpenActive)
+	return catpawrunner.ResolveActiveBase(servers, cfg.CatpawrunnerActive)
 }
