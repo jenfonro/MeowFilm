@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jenfonro/meowfilm/server/catpawopen"
+	"github.com/jenfonro/meowfilm/server/catpawrunner"
 	mfnet "github.com/jenfonro/meowfilm/server/net"
 )
 
@@ -69,8 +69,8 @@ func normalizeNetdiskProxyURL(input string) (string, error) {
 	return u.String(), nil
 }
 
-func normalizeCatPawOpenAPIBase(inputURL string) string {
-	return catpawopen.NormalizeAPIBase(inputURL)
+func normalizecatpawrunnerAPIBase(inputURL string) string {
+	return catpawrunner.NormalizeAPIBase(inputURL)
 }
 
 func parseJSONMap(text string) map[string]any {

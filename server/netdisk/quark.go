@@ -145,7 +145,7 @@ const (
 	quarkShareUA      = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch"
 )
 
-// QuarkTV (open-api-drive): ported from CatPawOpen `panQuark.js`.
+// QuarkTV (open-api-drive): ported from catpawrunner `panQuark.js`.
 const (
 	quarkTVAPIBase      = "https://open-api-drive.quark.cn"
 	quarkTVCodeAPIBase  = "http://api.extscreen.com/quarkdrive"

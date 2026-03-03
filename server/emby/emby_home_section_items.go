@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
-	"github.com/jenfonro/meowfilm/server/catpawopen"
+	"github.com/jenfonro/meowfilm/server/catpawrunner"
 )
 
 func embyBuildHomeSectionItems(database *db.DB, u *embyUser, sec db.EmbyHomeSection, startIndex int, limit int, fieldsParam string, serverID string, parentID string) []map[string]any {
@@ -222,7 +222,7 @@ func embyBuildSiteCategorySectionItems(database *db.DB, u *embyUser, sec db.Emby
 		maxPages = 1
 	}
 
-	collected := make([]catpawopen.SearchItem, 0, need)
+	collected := make([]catpawrunner.SearchItem, 0, need)
 	lastErr := ""
 	emptySummary := ""
 	homeSummary := ""
@@ -230,7 +230,7 @@ func embyBuildSiteCategorySectionItems(database *db.DB, u *embyUser, sec db.Emby
 		// Ensure filters is always an object (some spiders call Object.keys(filters)).
 		// Use empty filters so the spider's own defaults apply (often "time" for latest).
 		filters := map[string]any{}
-		raw, err := catpawopen.RequestSpider(apiBase, spiderAPI, "category", map[string]any{
+		raw, err := catpawrunner.RequestSpider(apiBase, spiderAPI, "category", map[string]any{
 			// Different spiders expect different parameter names; send a superset for compatibility.
 			"id":   categoryID,
 			"tid":  categoryID,
@@ -247,7 +247,7 @@ func embyBuildSiteCategorySectionItems(database *db.DB, u *embyUser, sec db.Emby
 			}
 			break
 		}
-		list := catpawopen.NormalizeSearchList(raw)
+		list := catpawrunner.NormalizeSearchList(raw)
 		if len(list) == 0 {
 			if emptySummary == "" && embyDebugLogEnabled() {
 				topLen := 0
@@ -279,9 +279,9 @@ func embyBuildSiteCategorySectionItems(database *db.DB, u *embyUser, sec db.Emby
 
 	// Fallback: if category returns nothing, try home list (some spiders don't implement category filters).
 	if len(collected) == 0 {
-		homeRaw, err := catpawopen.RequestSpider(apiBase, spiderAPI, "home", map[string]any{})
+		homeRaw, err := catpawrunner.RequestSpider(apiBase, spiderAPI, "home", map[string]any{})
 		if err == nil && homeRaw != nil {
-			homeList := catpawopen.NormalizeSearchList(homeRaw)
+			homeList := catpawrunner.NormalizeSearchList(homeRaw)
 			if embyDebugLogEnabled() && homeSummary == "" {
 				topLen := 0
 				if v, ok := homeRaw["list"].([]any); ok {
@@ -373,7 +373,7 @@ func embyExtractSiteDetailMeta(raw map[string]any) embySiteDetailMeta {
 	return embySiteDetailMeta{}
 }
 
-func embyBuildSiteCardsFromDetail(database *db.DB, u *embyUser, apiBase string, siteKey string, siteName string, spiderAPI string, items []catpawopen.SearchItem, fieldsParam string, serverID string, parentID string) []map[string]any {
+func embyBuildSiteCardsFromDetail(database *db.DB, u *embyUser, apiBase string, siteKey string, siteName string, spiderAPI string, items []catpawrunner.SearchItem, fieldsParam string, serverID string, parentID string) []map[string]any {
 	parent := strings.TrimSpace(parentID)
 	if len(items) == 0 {
 		return []map[string]any{}
@@ -381,7 +381,7 @@ func embyBuildSiteCardsFromDetail(database *db.DB, u *embyUser, apiBase string, 
 
 	type job struct {
 		idx int
-		it  catpawopen.SearchItem
+		it  catpawrunner.SearchItem
 	}
 	type res struct {
 		idx  int
@@ -406,7 +406,7 @@ func embyBuildSiteCardsFromDetail(database *db.DB, u *embyUser, apiBase string, 
 				if vid == "" {
 					continue
 				}
-				raw, err := catpawopen.RequestSpiderWithTimeout(apiBase, spiderAPI, "detail", map[string]any{"id": vid}, remain)
+				raw, err := catpawrunner.RequestSpiderWithTimeout(apiBase, spiderAPI, "detail", map[string]any{"id": vid}, remain)
 				if err != nil || raw == nil {
 					continue
 				}
@@ -480,7 +480,7 @@ func embyBuildSiteCardsFromDetail(database *db.DB, u *embyUser, apiBase string, 
 	return out
 }
 
-func embyBuildTMDBCardsFromSiteList(database *db.DB, u *embyUser, siteKey string, siteName string, spiderAPI string, items []catpawopen.SearchItem, mediaType string, fieldsParam string, serverID string, parentID string) []map[string]any {
+func embyBuildTMDBCardsFromSiteList(database *db.DB, u *embyUser, siteKey string, siteName string, spiderAPI string, items []catpawrunner.SearchItem, mediaType string, fieldsParam string, serverID string, parentID string) []map[string]any {
 	parent := strings.TrimSpace(parentID)
 	out := make([]map[string]any, 0, len(items))
 	wantKind := "tv"
@@ -563,7 +563,7 @@ func embyBuildTMDBCardsFromSiteList(database *db.DB, u *embyUser, siteKey string
 	return out
 }
 
-func embyBuildSiteCardsFromCategoryList(database *db.DB, siteKey string, siteName string, spiderAPI string, items []catpawopen.SearchItem, mediaType string, cardStyle string, serverID string, parentID string) []map[string]any {
+func embyBuildSiteCardsFromCategoryList(database *db.DB, siteKey string, siteName string, spiderAPI string, items []catpawrunner.SearchItem, mediaType string, cardStyle string, serverID string, parentID string) []map[string]any {
 	parent := strings.TrimSpace(parentID)
 	out := make([]map[string]any, 0, len(items))
 	for _, it := range items {
@@ -649,7 +649,7 @@ func embyApplyStableRankSortName(items []map[string]any, startIndex int) {
 	}
 }
 
-func embyPreviewCatPawOpenItems(list []catpawopen.SearchItem, n int) string {
+func embyPreviewcatpawrunnerItems(list []catpawrunner.SearchItem, n int) string {
 	if n <= 0 {
 		n = 5
 	}

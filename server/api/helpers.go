@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jenfonro/meowfilm/server/catpawopen"
+	"github.com/jenfonro/meowfilm/server/catpawrunner"
 	mfnet "github.com/jenfonro/meowfilm/server/net"
 )
 
@@ -79,8 +79,8 @@ func normalizeHttpBase(value string) string {
 	return strings.TrimRight(u.String(), "/")
 }
 
-func normalizeCatPawOpenAPIBase(inputURL string) string {
-	return catpawopen.NormalizeAPIBase(inputURL)
+func normalizecatpawrunnerAPIBase(inputURL string) string {
+	return catpawrunner.NormalizeAPIBase(inputURL)
 }
 
 func normalizeMountPath(value string) string {

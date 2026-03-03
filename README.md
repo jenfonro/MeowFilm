@@ -2,7 +2,7 @@
 <p align="center">
 <img src="https://raw.githubusercontent.com/jenfonro/MeowFilm-Frontend/refs/heads/main/public/favicon.svg" alt="MeowFilm" width="120" />
 </p>
-> MeowFilm 是一个基于 Go + Vue 的影视聚合 Web 应用，提供 UI、账号与配置管理、聚合与播放等核心能力；解析能力由自定义脚本通过 CatPawOpen 提供。
+> MeowFilm 是一个基于 Go + Vue 的影视聚合 Web 应用，提供 UI、账号与配置管理、聚合与播放等核心能力；解析能力由自定义脚本通过 catpawrunner 提供。
 
 <div align="center">
 
@@ -17,7 +17,7 @@
 
 ## ✨ 功能特性
 
-- 🔌 **插件化站点解析**：通过 CatPawOpen `/spider/*` 对接你自己的脚本/规则
+- 🔌 **插件化站点解析**：通过 catpawrunner `/spider/*` 对接你自己的脚本/规则
 - 🔍 **聚合能力**：搜索 / 详情 / 选集 / 播放（基于站点解析结果）
 - ❤️ **收藏 + 继续观看**：收藏与播放历史记录
 - 🪄 **魔法匹配**：列表清洗正则 + 选集匹配规则（用于生成/匹配集数）
@@ -44,13 +44,13 @@
 
 ## 快速开始
 
-> 必须先配好 **CatPawOpen 地址** + **站点列表** 才能正常搜索/播放。
+> 必须先配好 **catpawrunner 地址** + **站点列表** 才能正常搜索/播放。
 
 推荐直接看：`docs/使用说明.md`（只讲配置与使用）。
 
 ## 部署
 
-通常搭配 CatPawOpen 一起使用（CatPawOpen 负责加载/运行站点脚本）。
+通常搭配 catpawrunner 一起使用（catpawrunner 负责加载/运行站点脚本）。
 
 ### 方式一：本地运行（推荐脚本）
 
@@ -91,7 +91,7 @@ MEOWFILM_ADDR=":8080" ./build/meowfilm
 
 ## 相关项目
 
-- CatPawOpen：https://github.com/jenfonro/CatPawOpen
+- catpawrunner：https://github.com/jenfonro/catpawrunner
 - GoProxy（可选）：https://github.com/jenfonro/GoProxy
 
 ## 致谢

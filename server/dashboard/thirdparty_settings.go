@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/jenfonro/meowfilm/internal/db"
-	"github.com/jenfonro/meowfilm/server/catpawopen"
+	"github.com/jenfonro/meowfilm/server/catpawrunner"
 )
 
 func handleDashboardThirdPartySettings(w http.ResponseWriter, r *http.Request, database *db.DB) {
@@ -79,22 +79,22 @@ func handleDashboardThirdPartySiteCategories(w http.ResponseWriter, r *http.Requ
 	}
 
 	cfg, _ := database.ReadAppConfig()
-	rawServers, _ := database.ListCatPawOpenServers()
-	servers := make([]catpawopen.Server, 0, len(rawServers))
+	rawServers, _ := database.ListcatpawrunnerServers()
+	servers := make([]catpawrunner.Server, 0, len(rawServers))
 	for _, s := range rawServers {
-		servers = append(servers, catpawopen.Server{Name: s.Name, APIBase: s.APIBase})
+		servers = append(servers, catpawrunner.Server{Name: s.Name, APIBase: s.APIBase})
 	}
-	apiBase := catpawopen.ResolveActiveBase(servers, cfg.CatPawOpenActive)
+	apiBase := catpawrunner.ResolveActiveBase(servers, cfg.CatpawrunnerActive)
 	if strings.TrimSpace(apiBase) == "" {
-		writeJSON(w, 200, map[string]any{"success": false, "message": "CatPawOpen 接口地址未设置"})
+		writeJSON(w, 200, map[string]any{"success": false, "message": "catpawrunner 接口地址未设置"})
 		return
 	}
 	if _, err := url.ParseRequestURI(apiBase); err != nil {
-		writeJSON(w, 200, map[string]any{"success": false, "message": "CatPawOpen 接口地址不是合法 URL"})
+		writeJSON(w, 200, map[string]any{"success": false, "message": "catpawrunner 接口地址不是合法 URL"})
 		return
 	}
 
-	raw, err := catpawopen.RequestSpider(apiBase, spiderAPI, "home", map[string]any{})
+	raw, err := catpawrunner.RequestSpider(apiBase, spiderAPI, "home", map[string]any{})
 	if err != nil || raw == nil {
 		msg := "获取分类失败"
 		if err != nil && strings.TrimSpace(err.Error()) != "" {

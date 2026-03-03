@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
-	"github.com/jenfonro/meowfilm/server/catpawopen"
+	"github.com/jenfonro/meowfilm/server/catpawrunner"
 	"github.com/jenfonro/meowfilm/server/magic"
 	"github.com/jenfonro/meowfilm/server/netdisk"
 )
@@ -161,9 +161,9 @@ func embyResolvePanMockDetailPans(
 	tmdbHasMultiSeason bool,
 	rawCleanRules []string,
 	rawEpisodeRules []string,
-	pans []catpawopen.Pan,
-) ([]catpawopen.Pan, map[string]string) {
-	out := make([]catpawopen.Pan, 0, len(pans))
+	pans []catpawrunner.Pan,
+) ([]catpawrunner.Pan, map[string]string) {
+	out := make([]catpawrunner.Pan, 0, len(pans))
 	for _, p := range pans {
 		out = append(out, p)
 	}
@@ -191,7 +191,7 @@ func embyResolvePanMockDetailPans(
 			defer wg.Done()
 			start := time.Now()
 
-			logDone := func(status string, eps []catpawopen.Episode, err error, fromCache bool) {
+			logDone := func(status string, eps []catpawrunner.Episode, err error, fromCache bool) {
 				if !embyDebugLogEnabled() {
 					return
 				}
@@ -391,10 +391,10 @@ func embyResolvePanMockDetailPansIncremental(
 	tmdbHasMultiSeason bool,
 	rawCleanRules []string,
 	rawEpisodeRules []string,
-	pans []catpawopen.Pan,
-	onPanResolved func(panIndex int, episodes []catpawopen.Episode, accessDelta map[string]string),
-) ([]catpawopen.Pan, map[string]string) {
-	out := make([]catpawopen.Pan, 0, len(pans))
+	pans []catpawrunner.Pan,
+	onPanResolved func(panIndex int, episodes []catpawrunner.Episode, accessDelta map[string]string),
+) ([]catpawrunner.Pan, map[string]string) {
+	out := make([]catpawrunner.Pan, 0, len(pans))
 	for _, p := range pans {
 		out = append(out, p)
 	}
@@ -422,7 +422,7 @@ func embyResolvePanMockDetailPansIncremental(
 			defer wg.Done()
 			start := time.Now()
 
-			emit := func(status string, eps []catpawopen.Episode, err error, accessDelta map[string]string, fromCache bool) {
+			emit := func(status string, eps []catpawrunner.Episode, err error, accessDelta map[string]string, fromCache bool) {
 				if embyDebugLogEnabled() {
 					ms := time.Since(start).Milliseconds()
 					epCount := 0

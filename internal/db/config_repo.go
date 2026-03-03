@@ -31,7 +31,7 @@ type AppConfig struct {
 	TMDBLanguage               string
 	TMDBRegion                 string
 	TMDBIncludeAdult           bool
-	CatPawOpenActive           string
+	CatpawrunnerActive         string
 }
 
 func (d *DB) ReadAppConfig() (AppConfig, error) {
@@ -62,7 +62,7 @@ func (d *DB) ReadAppConfig() (AppConfig, error) {
 	_ = d.db.QueryRow(`SELECT enabled, auto_select FROM app_goproxy WHERE id=1 LIMIT 1`).Scan(&gEnabled, &gAuto)
 	_ = d.db.QueryRow(`SELECT enabled, proxy_url FROM app_netdisk_proxy WHERE id=1 LIMIT 1`).Scan(&ndEnabled, &ndProxy)
 	_ = d.db.QueryRow(`SELECT api_token, api_base, img_base, language, region, include_adult FROM app_tmdb WHERE id=1 LIMIT 1`).Scan(&tToken, &tAPIBase, &tImgBase, &tLang, &tRegion, &tAdult)
-	_ = d.db.QueryRow(`SELECT active FROM app_catpawopen WHERE id=1 LIMIT 1`).Scan(&cActive)
+	_ = d.db.QueryRow(`SELECT active FROM app_catpawrunner WHERE id=1 LIMIT 1`).Scan(&cActive)
 
 	cfg := AppConfig{
 		SiteName:                   defaultIfEmpty(siteName.String, "MeowFilm"),
@@ -85,7 +85,7 @@ func (d *DB) ReadAppConfig() (AppConfig, error) {
 		TMDBLanguage:               defaultIfEmpty(tLang.String, "zh-CN"),
 		TMDBRegion:                 defaultIfEmpty(tRegion.String, "CN"),
 		TMDBIncludeAdult:           tAdult.Int64 != 0,
-		CatPawOpenActive:           cActive.String,
+		CatpawrunnerActive:         cActive.String,
 	}
 	return cfg, nil
 }
@@ -173,28 +173,28 @@ func (d *DB) UpdateAppConfig(update func(*AppConfig)) error {
 		strings.TrimSpace(cfg.TMDBLanguage), strings.TrimSpace(cfg.TMDBRegion), bool01Int(cfg.TMDBIncludeAdult), now)
 
 	_, _ = tx.Exec(`
-		INSERT INTO app_catpawopen(id, active, updated_at)
+		INSERT INTO app_catpawrunner(id, active, updated_at)
 		VALUES(1, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET active=excluded.active, updated_at=excluded.updated_at
-	`, strings.TrimSpace(cfg.CatPawOpenActive), now)
+	`, strings.TrimSpace(cfg.CatpawrunnerActive), now)
 
 	return tx.Commit()
 }
 
-type CatPawOpenServer struct {
+type CatpawrunnerServer struct {
 	Name    string
 	APIBase string
 }
 
-func (d *DB) ListCatPawOpenServers() ([]CatPawOpenServer, error) {
-	rows, err := d.db.Query(`SELECT name, api_base FROM catpawopen_server ORDER BY order_index ASC, name ASC`)
+func (d *DB) ListcatpawrunnerServers() ([]CatpawrunnerServer, error) {
+	rows, err := d.db.Query(`SELECT name, api_base FROM catpawrunner_server ORDER BY order_index ASC, name ASC`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := []CatPawOpenServer{}
+	out := []CatpawrunnerServer{}
 	for rows.Next() {
-		var it CatPawOpenServer
+		var it CatpawrunnerServer
 		_ = rows.Scan(&it.Name, &it.APIBase)
 		it.Name = strings.TrimSpace(it.Name)
 		it.APIBase = strings.TrimSpace(it.APIBase)
@@ -206,13 +206,13 @@ func (d *DB) ListCatPawOpenServers() ([]CatPawOpenServer, error) {
 	return out, nil
 }
 
-func (d *DB) ReplaceCatPawOpenServers(servers []CatPawOpenServer) error {
+func (d *DB) ReplacecatpawrunnerServers(servers []CatpawrunnerServer) error {
 	if d == nil || d.db == nil {
 		return nil
 	}
 	now := time.Now().Unix()
 	seen := map[string]struct{}{}
-	list := make([]CatPawOpenServer, 0, len(servers))
+	list := make([]CatpawrunnerServer, 0, len(servers))
 	for _, it := range servers {
 		it.Name = strings.TrimSpace(it.Name)
 		it.APIBase = strings.TrimSpace(it.APIBase)
@@ -230,30 +230,30 @@ func (d *DB) ReplaceCatPawOpenServers(servers []CatPawOpenServer) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.Exec(`DELETE FROM catpawopen_server`); err != nil {
+	if _, err := tx.Exec(`DELETE FROM catpawrunner_server`); err != nil {
 		return err
 	}
 	for i, it := range list {
-		if _, err := tx.Exec(`INSERT INTO catpawopen_server(name, api_base, order_index, updated_at) VALUES(?,?,?,?)`, it.Name, it.APIBase, i, now); err != nil {
+		if _, err := tx.Exec(`INSERT INTO catpawrunner_server(name, api_base, order_index, updated_at) VALUES(?,?,?,?)`, it.Name, it.APIBase, i, now); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
-type CatPawOpenPan struct {
+type CatpawrunnerPan struct {
 	Key     string
 	Name    string
 	Enabled bool
 }
 
-func (d *DB) ListCatPawOpenPans() ([]CatPawOpenPan, error) {
-	rows, err := d.db.Query(`SELECT key, name, enabled FROM catpawopen_pan ORDER BY key ASC`)
+func (d *DB) ListcatpawrunnerPans() ([]CatpawrunnerPan, error) {
+	rows, err := d.db.Query(`SELECT key, name, enabled FROM catpawrunner_pan ORDER BY key ASC`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := []CatPawOpenPan{}
+	out := []CatpawrunnerPan{}
 	for rows.Next() {
 		var (
 			key  string
@@ -265,15 +265,15 @@ func (d *DB) ListCatPawOpenPans() ([]CatPawOpenPan, error) {
 		if key == "" {
 			continue
 		}
-		out = append(out, CatPawOpenPan{Key: key, Name: name, Enabled: en != 0})
+		out = append(out, CatpawrunnerPan{Key: key, Name: name, Enabled: en != 0})
 	}
 	return out, nil
 }
 
-func (d *DB) ReplaceCatPawOpenPans(pans []CatPawOpenPan) error {
+func (d *DB) ReplacecatpawrunnerPans(pans []CatpawrunnerPan) error {
 	now := time.Now().Unix()
 	seen := map[string]struct{}{}
-	list := make([]CatPawOpenPan, 0, len(pans))
+	list := make([]CatpawrunnerPan, 0, len(pans))
 	for _, it := range pans {
 		it.Key = strings.TrimSpace(it.Key)
 		if it.Key == "" {
@@ -290,7 +290,7 @@ func (d *DB) ReplaceCatPawOpenPans(pans []CatPawOpenPan) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.Exec(`DELETE FROM catpawopen_pan`); err != nil {
+	if _, err := tx.Exec(`DELETE FROM catpawrunner_pan`); err != nil {
 		return err
 	}
 	for _, it := range list {
@@ -298,7 +298,7 @@ func (d *DB) ReplaceCatPawOpenPans(pans []CatPawOpenPan) error {
 		if it.Enabled {
 			en = 1
 		}
-		if _, err := tx.Exec(`INSERT INTO catpawopen_pan(key, name, enabled, updated_at) VALUES(?,?,?,?)`, it.Key, it.Name, en, now); err != nil {
+		if _, err := tx.Exec(`INSERT INTO catpawrunner_pan(key, name, enabled, updated_at) VALUES(?,?,?,?)`, it.Key, it.Name, en, now); err != nil {
 			return err
 		}
 	}

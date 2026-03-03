@@ -5,8 +5,8 @@ import (
 	"strings"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/catpawrunner"
 	"github.com/jenfonro/meowfilm/server/goproxy"
-	"github.com/jenfonro/meowfilm/server/catpawopen"
 	"github.com/jenfonro/meowfilm/server/netdisk"
 )
 
@@ -48,7 +48,7 @@ func embyResolveStatelessSiteEpisodePlayback(database *db.DB, u *embyUser, siteV
 	}
 	epFlag := strings.TrimSpace(it.Flag)
 	if epFlag == "" {
-		// Some spiders omit flag; treat as CatPawOpen default.
+		// Some spiders omit flag; treat as catpawrunner default.
 		epFlag = ""
 	}
 
@@ -137,25 +137,25 @@ func embyResolveStatelessSiteEpisodePlayback(database *db.DB, u *embyUser, siteV
 	} else {
 		apiBase := strings.TrimSpace(embyResolveCatApiBaseForUser(database, u))
 		if apiBase == "" {
-			return "", nil, errorString("CatPawOpen 接口地址未设置")
+			return "", nil, errorString("catpawrunner 接口地址未设置")
 		}
 		playPayload := map[string]any{
 			"flag":    strings.TrimSpace(epFlag),
 			"id":      strings.TrimSpace(epURL),
 			"siteApi": strings.TrimSpace(spiderAPI),
 		}
-		if siteID := catpawopen.ExtractSiteIDFromSpiderAPI(spiderAPI); siteID != "" {
+		if siteID := catpawrunner.ExtractSiteIDFromSpiderAPI(spiderAPI); siteID != "" {
 			playPayload["siteId"] = siteID
 		}
-		playRaw, e := catpawopen.RequestPlay(apiBase, tvUser, playPayload)
+		playRaw, e := catpawrunner.RequestPlay(apiBase, tvUser, playPayload)
 		if e != nil {
 			return "", nil, e
 		}
-		urlPicked = strings.TrimSpace(catpawopen.PickFirstPlayableURL(playRaw))
+		urlPicked = strings.TrimSpace(catpawrunner.PickFirstPlayableURL(playRaw))
 		if urlPicked == "" {
 			return "", nil, errorString("站点未返回可播放地址")
 		}
-		urlPicked = catpawopen.RewriteProxyURLToBase(urlPicked, apiBase, tvUser)
+		urlPicked = catpawrunner.RewriteProxyURLToBase(urlPicked, apiBase, tvUser)
 		if h, ok := playRaw["header"].(map[string]any); ok {
 			for k, v := range h {
 				kk := strings.TrimSpace(k)

@@ -17,7 +17,7 @@ import (
 	"github.com/jenfonro/meowfilm/internal/buildinfo"
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/internal/limit"
-	"github.com/jenfonro/meowfilm/server/catpawopen"
+	"github.com/jenfonro/meowfilm/server/catpawrunner"
 	"github.com/jenfonro/meowfilm/server/config"
 	"github.com/jenfonro/meowfilm/server/emby"
 	"github.com/jenfonro/meowfilm/server/metadata/douban"
@@ -275,12 +275,12 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 	settings := map[string]any{}
 	if page == "index" || page == "search" || page == "play" || page == "site" || page == "dashboard" {
 		if page != "dashboard" {
-			rawCat, _ := database.ListCatPawOpenServers()
-			catServers := make([]catpawopen.Server, 0, len(rawCat))
+			rawCat, _ := database.ListcatpawrunnerServers()
+			catServers := make([]catpawrunner.Server, 0, len(rawCat))
 			for _, s := range rawCat {
-				catServers = append(catServers, catpawopen.Server{Name: s.Name, APIBase: s.APIBase})
+				catServers = append(catServers, catpawrunner.Server{Name: s.Name, APIBase: s.APIBase})
 			}
-			settings["catPawOpenApiBase"] = catpawopen.ResolveActiveBase(catServers, cfg.CatPawOpenActive)
+			settings["catpawrunnerApiBase"] = catpawrunner.ResolveActiveBase(catServers, cfg.CatpawrunnerActive)
 
 			// Index page includes Douban browse sections.
 			if page == "index" {
@@ -288,7 +288,7 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 				settings["doubanImgCustom"] = cfg.DoubanImgCustom
 			}
 
-			// Search / playback: settings used by front-end to talk to CatPawOpen and to normalize titles.
+			// Search / playback: settings used by front-end to talk to catpawrunner and to normalize titles.
 			if page == "search" || page == "play" || page == "site" {
 				if v, _ := database.ListMagicAggregateRegexRules(); v != nil {
 					settings["magicAggregateRegexRules"] = v
@@ -496,17 +496,17 @@ func buildNormalizedPlayHistoryList(rows []db.PlayHistoryRow, limit int, doubanI
 	seen := map[string]struct{}{}
 	out := make([]map[string]any, 0, minInt(limit, len(rows)))
 
-		for i := range rows {
-			if len(out) >= limit {
-				break
-			}
-			row := rows[i]
-			contentKey := strings.ToLower(strings.TrimSpace(row.ContentKey))
-			tmdbType := strings.ToLower(strings.TrimSpace(row.TMDBType))
-			tmdbID := row.TMDBID
-			tmdbOK := tmdbID > 0 && (tmdbType == "tv" || tmdbType == "movie")
-			if tmdbOK {
-				contentKey = strings.ToLower("tmdb:" + tmdbType + ":" + strconv.Itoa(tmdbID))
+	for i := range rows {
+		if len(out) >= limit {
+			break
+		}
+		row := rows[i]
+		contentKey := strings.ToLower(strings.TrimSpace(row.ContentKey))
+		tmdbType := strings.ToLower(strings.TrimSpace(row.TMDBType))
+		tmdbID := row.TMDBID
+		tmdbOK := tmdbID > 0 && (tmdbType == "tv" || tmdbType == "movie")
+		if tmdbOK {
+			contentKey = strings.ToLower("tmdb:" + tmdbType + ":" + strconv.Itoa(tmdbID))
 		}
 		if contentKey == "" {
 			contentKey = normalizeContentKey(row.VideoTitle)
@@ -522,22 +522,22 @@ func buildNormalizedPlayHistoryList(rows []db.PlayHistoryRow, limit int, doubanI
 		}
 		seen[contentKey] = struct{}{}
 
-			title := strings.TrimSpace(row.VideoTitle)
-			poster := strings.TrimSpace(row.VideoPoster)
-			remark := strings.TrimSpace(row.VideoRemark)
-			playbackItemID := strings.TrimSpace(row.PlaybackItemID)
-			tmdbSeason := row.TMDBSeason
-			tmdbEpisode := row.TMDBEpisode
-			if tmdbSeason <= 0 || tmdbEpisode <= 0 {
-				if typ, tid, s, e, ok := parseTMDBFromPlaybackItemID(playbackItemID); ok && typ == "tv" && tid > 0 {
-					tmdbSeason = s
-					tmdbEpisode = e
-				}
+		title := strings.TrimSpace(row.VideoTitle)
+		poster := strings.TrimSpace(row.VideoPoster)
+		remark := strings.TrimSpace(row.VideoRemark)
+		playbackItemID := strings.TrimSpace(row.PlaybackItemID)
+		tmdbSeason := row.TMDBSeason
+		tmdbEpisode := row.TMDBEpisode
+		if tmdbSeason <= 0 || tmdbEpisode <= 0 {
+			if typ, tid, s, e, ok := parseTMDBFromPlaybackItemID(playbackItemID); ok && typ == "tv" && tid > 0 {
+				tmdbSeason = s
+				tmdbEpisode = e
 			}
+		}
 
-			siteKey := strings.TrimSpace(row.SiteKey)
-			spiderAPI := strings.TrimSpace(row.SpiderAPI)
-			videoID := strings.TrimSpace(row.VideoID)
+		siteKey := strings.TrimSpace(row.SiteKey)
+		spiderAPI := strings.TrimSpace(row.SpiderAPI)
+		videoID := strings.TrimSpace(row.VideoID)
 		siteName := strings.TrimSpace(row.SiteName)
 
 		// If this record isn't directly playable via web (no spider api / emby-only), emit a TMDB-only card.
@@ -888,29 +888,29 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		}
 
 		now := time.Now().Unix()
-			_ = database.UpsertPlayHistory(db.PlayHistoryUpsert{
-				UserID:                u.ID,
-				ContentKey:            contentKey,
-				SiteKey:               siteKey,
-				SiteName:              siteName,
-				SpiderAPI:             spiderAPI,
-				VideoID:               videoID,
-				VideoTitle:            videoTitle,
-				VideoPoster:           finalPoster,
-				VideoRemark:           videoRemark,
-				TMDBID:                tmdbID,
-				TMDBType:              tmdbType,
-				PanLabel:              panLabel,
-				PlayFlag:              playFlag,
-				EpisodeIndex:          episodeIndex,
-				EpisodeName:           episodeName,
-				TMDBSeason:            tmdbSeason,
-				TMDBEpisode:           tmdbEpisode,
-				UpdatedAt:             now,
-				PlaybackPositionTicks: positionTicks,
-				PlaybackRuntimeTicks:  runtimeTicks,
-				PlaybackItemID:        playbackItemID,
-			})
+		_ = database.UpsertPlayHistory(db.PlayHistoryUpsert{
+			UserID:                u.ID,
+			ContentKey:            contentKey,
+			SiteKey:               siteKey,
+			SiteName:              siteName,
+			SpiderAPI:             spiderAPI,
+			VideoID:               videoID,
+			VideoTitle:            videoTitle,
+			VideoPoster:           finalPoster,
+			VideoRemark:           videoRemark,
+			TMDBID:                tmdbID,
+			TMDBType:              tmdbType,
+			PanLabel:              panLabel,
+			PlayFlag:              playFlag,
+			EpisodeIndex:          episodeIndex,
+			EpisodeName:           episodeName,
+			TMDBSeason:            tmdbSeason,
+			TMDBEpisode:           tmdbEpisode,
+			UpdatedAt:             now,
+			PlaybackPositionTicks: positionTicks,
+			PlaybackRuntimeTicks:  runtimeTicks,
+			PlaybackItemID:        playbackItemID,
+		})
 		writeJSON(w, 200, map[string]any{"success": true})
 	case http.MethodDelete:
 		contentKey := strings.TrimSpace(r.URL.Query().Get("contentKey"))

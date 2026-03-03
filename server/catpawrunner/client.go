@@ -1,4 +1,4 @@
-package catpawopen
+package catpawrunner
 
 import (
 	"bytes"
@@ -18,7 +18,7 @@ func RequestSpider(apiBase string, spiderAPI string, action string, payload any)
 func RequestSpiderWithTimeout(apiBase string, spiderAPI string, action string, payload any, timeout time.Duration) (map[string]any, error) {
 	base := NormalizeAPIBase(apiBase)
 	if base == "" {
-		return nil, errors.New("CatPawOpen 接口地址未设置")
+		return nil, errors.New("catpawrunner 接口地址未设置")
 	}
 	act := strings.TrimSpace(action)
 	sp := strings.TrimSpace(spiderAPI)
@@ -30,7 +30,7 @@ func RequestSpiderWithTimeout(apiBase string, spiderAPI string, action string, p
 	spiderPath := strings.TrimSuffix(sp, "/")
 	target, err := url.Parse(base)
 	if err != nil {
-		return nil, errors.New("CatPawOpen base invalid")
+		return nil, errors.New("catpawrunner base invalid")
 	}
 	target, _ = target.Parse(strings.TrimPrefix(spiderPath, "/") + "/" + url.PathEscape(act))
 
@@ -76,7 +76,7 @@ func RequestPlay(apiBase string, tvUser string, payload any) (map[string]any, er
 func RequestPlayWithTimeout(apiBase string, tvUser string, payload any, timeout time.Duration) (map[string]any, error) {
 	base := NormalizeAPIBase(apiBase)
 	if base == "" {
-		return nil, errors.New("CatPawOpen 接口地址未设置")
+		return nil, errors.New("catpawrunner 接口地址未设置")
 	}
 	target, _ := url.Parse(base)
 	target, _ = target.Parse("play")
