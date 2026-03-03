@@ -117,7 +117,7 @@ const (
 	ucShareAPIQueryBase = ucShareAPIBase + "?pr=UCBrowser&fr=pc"
 )
 
-// UCTV (open-api-drive): ported from CatPawOpen `panUc.js`.
+// UCTV (open-api-drive): ported from catpawrunner `panUc.js`.
 const (
 	ucTVAPIBase      = "https://open-api-drive.uc.cn"
 	ucTVCodeAPIBase  = "http://api.extscreen.com/ucdrive"

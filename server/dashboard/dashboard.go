@@ -14,7 +14,7 @@ import (
 	"github.com/jenfonro/meowfilm/internal/buildinfo"
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/internal/limit"
-	"github.com/jenfonro/meowfilm/server/catpawopen"
+	"github.com/jenfonro/meowfilm/server/catpawrunner"
 	"github.com/jenfonro/meowfilm/server/config"
 	"github.com/jenfonro/meowfilm/server/netdisk"
 )
@@ -47,13 +47,13 @@ func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardSiteSave(w, r, database)
 			})).ServeHTTP(w, r)
-		case "/catpawopen/save":
+		case "/catpawrunner/save":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleDashboardCatPawOpenSave(w, r, database)
+				handleDashboardcatpawrunnerSave(w, r, database)
 			})).ServeHTTP(w, r)
-		case "/catpawopen/delete":
+		case "/catpawrunner/delete":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleDashboardCatPawOpenDelete(w, r, database)
+				handleDashboardcatpawrunnerDelete(w, r, database)
 			})).ServeHTTP(w, r)
 		case "/site/settings":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -387,12 +387,12 @@ func handleDashboardBackup(w http.ResponseWriter, r *http.Request, database *db.
 	}
 	cfg, _ := database.ReadAppConfig()
 
-	catServersRaw, _ := database.ListCatPawOpenServers()
+	catServersRaw, _ := database.ListcatpawrunnerServers()
 	catServers := make([]map[string]any, 0, len(catServersRaw))
 	for _, s := range catServersRaw {
 		catServers = append(catServers, map[string]any{"name": s.Name, "apiBase": s.APIBase})
 	}
-	catPansRaw, _ := database.ListCatPawOpenPans()
+	catPansRaw, _ := database.ListcatpawrunnerPans()
 	catPans := make([]map[string]any, 0, len(catPansRaw))
 	for _, p := range catPansRaw {
 		catPans = append(catPans, map[string]any{"key": p.Key, "name": p.Name, "enable": p.Enabled})
@@ -456,8 +456,8 @@ func handleDashboardBackup(w http.ResponseWriter, r *http.Request, database *db.
 		"version":    1,
 		"exportedAt": time.Now().Unix(),
 		"appConfig":  cfg,
-		"catPawOpen": map[string]any{
-			"active":  strings.TrimSpace(cfg.CatPawOpenActive),
+		"catpawrunner": map[string]any{
+			"active":  strings.TrimSpace(cfg.CatpawrunnerActive),
 			"servers": catServers,
 			"pans":    catPans,
 		},
@@ -625,16 +625,16 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 			if b, ok := readBool("TMDBIncludeAdult", "includeAdult"); ok {
 				c.TMDBIncludeAdult = b
 			}
-			if s, ok := readStr("CatPawOpenActive", "catPawOpenActive"); ok {
-				c.CatPawOpenActive = s
+			if s, ok := readStr("CatpawrunnerActive", "CatpawrunnerActive"); ok {
+				c.CatpawrunnerActive = s
 			}
 		})
 		applied["appConfig"] = true
 	}
 
-	if cat := readObj(body, "catPawOpen"); cat != nil {
+	if cat := readObj(body, "catpawrunner"); cat != nil {
 		if arr := readArr(cat, "servers"); arr != nil {
-			list := []db.CatPawOpenServer{}
+			list := []db.CatpawrunnerServer{}
 			for _, it := range arr {
 				row, _ := it.(map[string]any)
 				if row == nil {
@@ -647,12 +647,12 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 				if n == "" || a == "" {
 					continue
 				}
-				list = append(list, db.CatPawOpenServer{Name: n, APIBase: a})
+				list = append(list, db.CatpawrunnerServer{Name: n, APIBase: a})
 			}
-			_ = database.ReplaceCatPawOpenServers(list)
+			_ = database.ReplacecatpawrunnerServers(list)
 		}
 		if arr := readArr(cat, "pans"); arr != nil {
-			list := []db.CatPawOpenPan{}
+			list := []db.CatpawrunnerPan{}
 			for _, it := range arr {
 				row, _ := it.(map[string]any)
 				if row == nil {
@@ -665,16 +665,16 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 				if key == "" {
 					continue
 				}
-				list = append(list, db.CatPawOpenPan{Key: key, Name: strings.TrimSpace(name), Enabled: en})
+				list = append(list, db.CatpawrunnerPan{Key: key, Name: strings.TrimSpace(name), Enabled: en})
 			}
-			_ = database.ReplaceCatPawOpenPans(list)
+			_ = database.ReplacecatpawrunnerPans(list)
 		}
 		if v, ok := cat["active"]; ok && v != nil {
 			if s, _ := v.(string); true {
-				_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.CatPawOpenActive = strings.TrimSpace(s) })
+				_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.CatpawrunnerActive = strings.TrimSpace(s) })
 			}
 		}
-		applied["catPawOpen"] = true
+		applied["catpawrunner"] = true
 	}
 
 	if goProxy := readObj(body, "goProxy"); goProxy != nil {
@@ -1023,25 +1023,25 @@ func handleDashboardSiteSave(w http.ResponseWriter, r *http.Request, database *d
 	writeJSON(w, 200, map[string]any{"success": true})
 }
 
-func handleDashboardCatPawOpenSave(w http.ResponseWriter, r *http.Request, database *db.DB) {
+func handleDashboardcatpawrunnerSave(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return
 	}
 	parseForm(r)
 	cfg, _ := database.ReadAppConfig()
-	raw, _ := database.ListCatPawOpenServers()
-	servers := make([]catpawopen.Server, 0, len(raw))
+	raw, _ := database.ListcatpawrunnerServers()
+	servers := make([]catpawrunner.Server, 0, len(raw))
 	for _, s := range raw {
-		servers = append(servers, catpawopen.Server{Name: s.Name, APIBase: s.APIBase})
+		servers = append(servers, catpawrunner.Server{Name: s.Name, APIBase: s.APIBase})
 	}
-	prevBase := catpawopen.ResolveActiveBase(servers, cfg.CatPawOpenActive)
-	serverKey := strings.TrimSpace(r.FormValue("catPawOpenServerKey"))
-	name := strings.TrimSpace(r.FormValue("catPawOpenName"))
-	base := r.FormValue("catPawOpenApiBase")
-	normalizedBase := normalizeCatPawOpenAPIBase(base)
+	prevBase := catpawrunner.ResolveActiveBase(servers, cfg.CatpawrunnerActive)
+	serverKey := strings.TrimSpace(r.FormValue("catpawrunnerServerKey"))
+	name := strings.TrimSpace(r.FormValue("catpawrunnerName"))
+	base := r.FormValue("catpawrunnerApiBase")
+	normalizedBase := normalizecatpawrunnerAPIBase(base)
 	if normalizedBase == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "CatPawOpen 接口地址不是合法 URL"})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "catpawrunner 接口地址不是合法 URL"})
 		return
 	}
 
@@ -1082,21 +1082,21 @@ func handleDashboardCatPawOpenSave(w http.ResponseWriter, r *http.Request, datab
 			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "服务器名称已存在"})
 			return
 		}
-		servers[updatedIdx] = catpawopen.Server{Name: name, APIBase: normalizedBase}
+		servers[updatedIdx] = catpawrunner.Server{Name: name, APIBase: normalizedBase}
 	} else {
 		if existsName(name, -1) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "服务器名称已存在"})
 			return
 		}
-		servers = append(servers, catpawopen.Server{Name: name, APIBase: normalizedBase})
+		servers = append(servers, catpawrunner.Server{Name: name, APIBase: normalizedBase})
 	}
 
-	next := make([]db.CatPawOpenServer, 0, len(servers))
+	next := make([]db.CatpawrunnerServer, 0, len(servers))
 	for _, s := range servers {
-		next = append(next, db.CatPawOpenServer{Name: s.Name, APIBase: s.APIBase})
+		next = append(next, db.CatpawrunnerServer{Name: s.Name, APIBase: s.APIBase})
 	}
-	_ = database.ReplaceCatPawOpenServers(next)
-	_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.CatPawOpenActive = name })
+	_ = database.ReplacecatpawrunnerServers(next)
+	_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.CatpawrunnerActive = name })
 	writeJSON(w, 200, map[string]any{
 		"success":        true,
 		"apiBaseChanged": strings.TrimSpace(prevBase) != strings.TrimSpace(normalizedBase),
@@ -1105,26 +1105,26 @@ func handleDashboardCatPawOpenSave(w http.ResponseWriter, r *http.Request, datab
 	})
 }
 
-func handleDashboardCatPawOpenDelete(w http.ResponseWriter, r *http.Request, database *db.DB) {
+func handleDashboardcatpawrunnerDelete(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
 		return
 	}
 	parseForm(r)
-	key := strings.TrimSpace(r.FormValue("catPawOpenServerKey"))
+	key := strings.TrimSpace(r.FormValue("catpawrunnerServerKey"))
 	if key == "" || key == "__new__" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数无效"})
 		return
 	}
 	cfg, _ := database.ReadAppConfig()
-	raw, _ := database.ListCatPawOpenServers()
-	servers := make([]catpawopen.Server, 0, len(raw))
+	raw, _ := database.ListcatpawrunnerServers()
+	servers := make([]catpawrunner.Server, 0, len(raw))
 	for _, s := range raw {
-		servers = append(servers, catpawopen.Server{Name: s.Name, APIBase: s.APIBase})
+		servers = append(servers, catpawrunner.Server{Name: s.Name, APIBase: s.APIBase})
 	}
 
 	removed := false
-	next := make([]catpawopen.Server, 0, len(servers))
+	next := make([]catpawrunner.Server, 0, len(servers))
 	for _, s := range servers {
 		if s.Name == key {
 			removed = true
@@ -1138,13 +1138,13 @@ func handleDashboardCatPawOpenDelete(w http.ResponseWriter, r *http.Request, dat
 	}
 
 	// Persist list + pick active.
-	out := make([]db.CatPawOpenServer, 0, len(next))
+	out := make([]db.CatpawrunnerServer, 0, len(next))
 	for _, s := range next {
-		out = append(out, db.CatPawOpenServer{Name: s.Name, APIBase: s.APIBase})
+		out = append(out, db.CatpawrunnerServer{Name: s.Name, APIBase: s.APIBase})
 	}
-	_ = database.ReplaceCatPawOpenServers(out)
-	active := catpawopen.PickActiveName(next, cfg.CatPawOpenActive)
-	_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.CatPawOpenActive = active })
+	_ = database.ReplacecatpawrunnerServers(out)
+	active := catpawrunner.PickActiveName(next, cfg.CatpawrunnerActive)
+	_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.CatpawrunnerActive = active })
 
 	writeJSON(w, 200, map[string]any{
 		"success": true,
@@ -1159,12 +1159,12 @@ func handleDashboardSiteSettings(w http.ResponseWriter, r *http.Request, databas
 		return
 	}
 	cfg, _ := database.ReadAppConfig()
-	raw, _ := database.ListCatPawOpenServers()
-	servers := make([]catpawopen.Server, 0, len(raw))
+	raw, _ := database.ListcatpawrunnerServers()
+	servers := make([]catpawrunner.Server, 0, len(raw))
 	for _, s := range raw {
-		servers = append(servers, catpawopen.Server{Name: s.Name, APIBase: s.APIBase})
+		servers = append(servers, catpawrunner.Server{Name: s.Name, APIBase: s.APIBase})
 	}
-	active := catpawopen.PickActiveName(servers, cfg.CatPawOpenActive)
+	active := catpawrunner.PickActiveName(servers, cfg.CatpawrunnerActive)
 	mode := strings.TrimSpace(cfg.SearchDisplayMode)
 	if mode != "tmdb" && mode != "both" && mode != "sites" {
 		mode = "sites"
@@ -1186,8 +1186,8 @@ func handleDashboardSiteSettings(w http.ResponseWriter, r *http.Request, databas
 		"searchDisplayMode":   mode,
 		"netdiskProxyEnabled": cfg.NetdiskProxyEnabled,
 		"netdiskProxyUrl":     strings.TrimSpace(cfg.NetdiskProxyURL),
-		"catPawOpenServers":   servers,
-		"catPawOpenActive":    active,
+		"catpawrunnerServers": servers,
+		"CatpawrunnerActive":  active,
 		"goProxyEnabled":      cfg.GoProxyEnabled,
 		"goProxyAutoSelect":   cfg.GoProxyAutoSelect,
 		"goProxyServersJson":  defaultString(string(goProxyJSON), "[]"),
@@ -1225,7 +1225,7 @@ func handleDashboardGoProxySave(w http.ResponseWriter, r *http.Request, database
 func handleDashboardVideoPansList(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	switch r.Method {
 	case http.MethodGet:
-		raw, _ := database.ListCatPawOpenPans()
+		raw, _ := database.ListcatpawrunnerPans()
 		out := make([]map[string]any, 0, len(raw))
 		for _, p := range raw {
 			out = append(out, map[string]any{"key": p.Key, "name": p.Name, "enable": p.Enabled})
@@ -1239,14 +1239,14 @@ func handleDashboardVideoPansList(w http.ResponseWriter, r *http.Request, databa
 			_ = json.Unmarshal([]byte(listRaw), &list)
 		}
 		norm := normalizePansAny(list)
-		pans := make([]db.CatPawOpenPan, 0, len(norm))
+		pans := make([]db.CatpawrunnerPan, 0, len(norm))
 		for _, m := range norm {
 			key, _ := m["key"].(string)
 			name, _ := m["name"].(string)
 			enable := parseAnyBool(m["enable"], false)
-			pans = append(pans, db.CatPawOpenPan{Key: strings.TrimSpace(key), Name: name, Enabled: enable})
+			pans = append(pans, db.CatpawrunnerPan{Key: strings.TrimSpace(key), Name: name, Enabled: enable})
 		}
-		_ = database.ReplaceCatPawOpenPans(pans)
+		_ = database.ReplacecatpawrunnerPans(pans)
 		writeJSON(w, 200, map[string]any{"success": true, "pans": norm})
 	default:
 		methodNotAllowed(w)
@@ -1258,7 +1258,7 @@ func handleDashboardVideoSourceSave(w http.ResponseWriter, r *http.Request, data
 		methodNotAllowed(w)
 		return
 	}
-	rawPans, _ := database.ListCatPawOpenPans()
+	rawPans, _ := database.ListcatpawrunnerPans()
 	pans := make([]map[string]any, 0, len(rawPans))
 	for _, p := range rawPans {
 		pans = append(pans, map[string]any{"key": p.Key, "name": p.Name, "enable": p.Enabled})

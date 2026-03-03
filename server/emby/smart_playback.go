@@ -16,7 +16,7 @@ import (
 
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/cache"
-	"github.com/jenfonro/meowfilm/server/catpawopen"
+	"github.com/jenfonro/meowfilm/server/catpawrunner"
 	"github.com/jenfonro/meowfilm/server/config"
 	"github.com/jenfonro/meowfilm/server/magic"
 	"github.com/jenfonro/meowfilm/server/netdisk"
@@ -351,13 +351,13 @@ func smartPickBestMatchIgnorePanOrder(list []smartCandidate, tmdbHasMultiSeason 
 	return &best
 }
 
-func smartParseVodPlayURLToEpisodes(vodPlayURL string) []catpawopen.Episode {
+func smartParseVodPlayURLToEpisodes(vodPlayURL string) []catpawrunner.Episode {
 	raw := strings.TrimSpace(vodPlayURL)
 	if raw == "" {
 		return nil
 	}
 	chunks := strings.Split(raw, "#")
-	out := make([]catpawopen.Episode, 0, len(chunks))
+	out := make([]catpawrunner.Episode, 0, len(chunks))
 	for _, chunk := range chunks {
 		s := strings.TrimSpace(chunk)
 		if s == "" {
@@ -372,7 +372,7 @@ func smartParseVodPlayURLToEpisodes(vodPlayURL string) []catpawopen.Episode {
 		if strings.TrimSpace(url) == "" {
 			continue
 		}
-		out = append(out, catpawopen.Episode{Name: name, URL: url})
+		out = append(out, catpawrunner.Episode{Name: name, URL: url})
 	}
 	return out
 }
@@ -468,7 +468,7 @@ func smartBuildCandidateLowerText(texts []string) string {
 	return strings.TrimSpace(strings.Join(out, " "))
 }
 
-func smartExtractEpisodeCandidateTexts(ep catpawopen.Episode) []string {
+func smartExtractEpisodeCandidateTexts(ep catpawrunner.Episode) []string {
 	rawNames := smartExtractRawNamesFromEpisodeURL(ep.URL)
 	displayName := strings.TrimSpace(ep.Name)
 	out := make([]string, 0, 6)
@@ -660,7 +660,7 @@ type smartCandidate struct {
 	SrcRemarkLower   string
 	PanLabel         string
 	PanTokenIdx      int
-	Ep               catpawopen.Episode
+	Ep               catpawrunner.Episode
 	RawLower         string
 	MatchSeason      int
 	HasSeasonMarker  bool
@@ -851,7 +851,7 @@ type smartDetailCacheEntry struct {
 	NextRetryAt               time.Time
 	LastError                 string
 	Source                    smartSource
-	Pans                      []catpawopen.Pan
+	Pans                      []catpawrunner.Pan
 	PanMockEnabled            bool
 	PanMock189AccessByShareID map[string]string
 	EpisodeMap                map[int][]smartCandidate
@@ -1024,7 +1024,7 @@ func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle st
 			if err != nil {
 				return
 			}
-			items := catpawopen.NormalizeSearchList(raw)
+			items := catpawrunner.NormalizeSearchList(raw)
 			local := make([]smartSource, 0, smartMinInt(20, len(items)))
 			localSeq := 0
 			for _, it := range items {
@@ -1357,7 +1357,7 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 			NextRetryAt:               time.Time{},
 			LastError:                 "",
 			Source:                    src,
-			Pans:                      []catpawopen.Pan{},
+			Pans:                      []catpawrunner.Pan{},
 			EpisodeMap:                map[int][]smartCandidate{},
 			EpisodeMapLoose:           map[int][]smartCandidate{},
 			PanMock189AccessByShareID: map[string]string{},
@@ -1390,8 +1390,8 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 				entry.PanMockEnabled = int(x) == 1
 			}
 		}
-		playFrom, playURL := catpawopen.ExtractDetailPlayFromURL(detailRaw)
-		pans := catpawopen.ParsePlaySources(playFrom, playURL)
+		playFrom, playURL := catpawrunner.ExtractDetailPlayFromURL(detailRaw)
+		pans := catpawrunner.ParsePlaySources(playFrom, playURL)
 		if entry.PanMockEnabled && pans != nil {
 			resolved, accessMap := embyResolvePanMockDetailPans(database, src.SiteKey, src.SiteName, 0, tmdbSeasons, tmdbHasMultiSeason, rawCleanRules, rawEpisodeRules, pans)
 			pans = resolved
@@ -1522,7 +1522,7 @@ type smartDetailState struct {
 	PanMockDone    chan struct{}
 
 	// Updated when pan_mock list resolves (or immediately for non-pan_mock).
-	Pans                      []catpawopen.Pan
+	Pans                      []catpawrunner.Pan
 	PanMock189AccessByShareID map[string]string
 	EpisodeMap                map[int][]smartCandidate
 	EpisodeMapLoose           map[int][]smartCandidate
@@ -1530,13 +1530,13 @@ type smartDetailState struct {
 	mu sync.Mutex
 }
 
-func (s *smartDetailState) snapshot() (ok bool, panMockEnabled bool, pans []catpawopen.Pan, access map[string]string, epMap map[int][]smartCandidate, epLoose map[int][]smartCandidate) {
+func (s *smartDetailState) snapshot() (ok bool, panMockEnabled bool, pans []catpawrunner.Pan, access map[string]string, epMap map[int][]smartCandidate, epLoose map[int][]smartCandidate) {
 	if s == nil {
 		return false, false, nil, nil, nil, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	outPans := make([]catpawopen.Pan, 0, len(s.Pans))
+	outPans := make([]catpawrunner.Pan, 0, len(s.Pans))
 	for _, p := range s.Pans {
 		outPans = append(outPans, p)
 	}
@@ -1561,7 +1561,7 @@ func (s *smartDetailState) snapshot() (ok bool, panMockEnabled bool, pans []catp
 
 func smartBuildEpisodeMapsFromPans(
 	src smartSource,
-	pans []catpawopen.Pan,
+	pans []catpawrunner.Pan,
 	tmdbSeasons []embyTMDBSeason,
 	tmdbHasMultiSeason bool,
 	settings smartPlaybackSettings,
@@ -1642,7 +1642,7 @@ func smartBuildEpisodeMapsFromPans(
 
 func smartBuildMovieCandidatesFromPans(
 	src smartSource,
-	pans []catpawopen.Pan,
+	pans []catpawrunner.Pan,
 	settings smartPlaybackSettings,
 	rawCleanRules []string,
 	rawMovieRules []string,
@@ -1797,7 +1797,7 @@ func smartCandidatesForWant(
 
 func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string, tvUser string, cand smartCandidate, accessByShareID map[string]string) *smartPickResult {
 	if strings.TrimSpace(apiBase) == "" || strings.TrimSpace(tvUser) == "" {
-		// tvUser can be empty for unauthenticated; still allow catpawopen play below.
+		// tvUser can be empty for unauthenticated; still allow catpawrunner play below.
 	}
 	if strings.TrimSpace(cand.Ep.URL) == "" {
 		return nil
@@ -1977,7 +1977,7 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 		default:
 			// Normal site play.
 			spiderApi := strings.TrimSpace(cand.SpiderAPI)
-			siteID := catpawopen.ExtractSiteIDFromSpiderAPI(spiderApi)
+			siteID := catpawrunner.ExtractSiteIDFromSpiderAPI(spiderApi)
 			playPayload := map[string]any{
 				"flag":    strings.TrimSpace(cand.Ep.Flag),
 				"id":      strings.TrimSpace(cand.Ep.URL),
@@ -1986,15 +1986,15 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 			if siteID != "" {
 				playPayload["siteId"] = siteID
 			}
-			playRaw, err := catpawopen.RequestPlayWithTimeout(apiBase, tvUser, playPayload, smartPlayTryTimeout)
+			playRaw, err := catpawrunner.RequestPlayWithTimeout(apiBase, tvUser, playPayload, smartPlayTryTimeout)
 			if err != nil {
 				return playResult{status: "err", err: err}
 			}
-			urlPicked := strings.TrimSpace(catpawopen.PickFirstPlayableURL(playRaw))
+			urlPicked := strings.TrimSpace(catpawrunner.PickFirstPlayableURL(playRaw))
 			if urlPicked == "" {
 				return playResult{status: "empty"}
 			}
-			urlPicked = catpawopen.RewriteProxyURLToBase(urlPicked, apiBase, tvUser)
+			urlPicked = catpawrunner.RewriteProxyURLToBase(urlPicked, apiBase, tvUser)
 			headers := map[string]string{}
 			if h, ok := playRaw["header"].(map[string]any); ok {
 				for k, v := range h {
@@ -2437,7 +2437,7 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 			if best == nil || strings.TrimSpace(best.Ep.URL) == "" {
 				return nil
 			}
-			siteID := catpawopen.ExtractSiteIDFromSpiderAPI(spiderApi)
+			siteID := catpawrunner.ExtractSiteIDFromSpiderAPI(spiderApi)
 			playPayload := map[string]any{
 				"flag":    strings.TrimSpace(best.Ep.Flag),
 				"id":      strings.TrimSpace(best.Ep.URL),
@@ -2446,15 +2446,15 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 			if siteID != "" {
 				playPayload["siteId"] = siteID
 			}
-			playRaw, err := catpawopen.RequestPlay(apiBase, tvUser, playPayload)
+			playRaw, err := catpawrunner.RequestPlay(apiBase, tvUser, playPayload)
 			if err != nil {
 				return nil
 			}
-			urlPicked := strings.TrimSpace(catpawopen.PickFirstPlayableURL(playRaw))
+			urlPicked := strings.TrimSpace(catpawrunner.PickFirstPlayableURL(playRaw))
 			if urlPicked == "" {
 				return nil
 			}
-			urlPicked = catpawopen.RewriteProxyURLToBase(urlPicked, apiBase, tvUser)
+			urlPicked = catpawrunner.RewriteProxyURLToBase(urlPicked, apiBase, tvUser)
 			headers := map[string]string{}
 			if h, ok := playRaw["header"].(map[string]any); ok {
 				for k, v := range h {
@@ -2497,7 +2497,7 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 	}
 
 	// Verify by calling play and ensure we have a playable url.
-	siteID := catpawopen.ExtractSiteIDFromSpiderAPI(spiderApi)
+	siteID := catpawrunner.ExtractSiteIDFromSpiderAPI(spiderApi)
 	playPayload := map[string]any{
 		"flag":    strings.TrimSpace(best.Ep.Flag),
 		"id":      strings.TrimSpace(best.Ep.URL),
@@ -2506,15 +2506,15 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 	if siteID != "" {
 		playPayload["siteId"] = siteID
 	}
-	playRaw, err := catpawopen.RequestPlay(apiBase, tvUser, playPayload)
+	playRaw, err := catpawrunner.RequestPlay(apiBase, tvUser, playPayload)
 	if err != nil {
 		return nil
 	}
-	urlPicked := catpawopen.PickFirstPlayableURL(playRaw)
+	urlPicked := catpawrunner.PickFirstPlayableURL(playRaw)
 	if strings.TrimSpace(urlPicked) == "" {
 		return nil
 	}
-	urlPicked = catpawopen.RewriteProxyURLToBase(urlPicked, apiBase, tvUser)
+	urlPicked = catpawrunner.RewriteProxyURLToBase(urlPicked, apiBase, tvUser)
 	headers := map[string]string{}
 	if h, ok := playRaw["header"].(map[string]any); ok {
 		for k, v := range h {
@@ -2553,7 +2553,7 @@ func smartResolvePlaybackFromTMDB(database *db.DB, u *embyUser, req smartPlaybac
 
 	apiBase := embyResolveCatApiBaseForUser(database, u)
 	if apiBase == "" {
-		return "", nil, nil, errors.New("CatPawOpen 接口地址未设置")
+		return "", nil, nil, errors.New("catpawrunner 接口地址未设置")
 	}
 	tvUser := ""
 	if u != nil {
@@ -2671,7 +2671,7 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 		return "", nil, nil, errors.New("invalid database")
 	}
 	if strings.TrimSpace(apiBase) == "" {
-		return "", nil, nil, errors.New("CatPawOpen 接口地址未设置")
+		return "", nil, nil, errors.New("catpawrunner 接口地址未设置")
 	}
 	if strings.TrimSpace(searchTitle) == "" || want <= 0 {
 		return "", nil, nil, errors.New("missing title")
@@ -2788,9 +2788,9 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 							if spiderAPI != "" {
 								src := smartSource{SiteKey: siteKey, SiteName: strings.TrimSpace(row.SiteName), SpiderAPI: spiderAPI, VideoID: videoID, Score: 1000, Seq: 0, NoNoise: true}
 								if detailRaw, e2 := cache.RequestSpiderDetailCached(apiBase, spiderAPI, videoID); e2 == nil && detailRaw != nil {
-									playFrom, playURL := catpawopen.ExtractDetailPlayFromURL(detailRaw)
-									pans := catpawopen.ParsePlaySources(playFrom, playURL)
-									chosen := []catpawopen.Pan{}
+									playFrom, playURL := catpawrunner.ExtractDetailPlayFromURL(detailRaw)
+									pans := catpawrunner.ParsePlaySources(playFrom, playURL)
+									chosen := []catpawrunner.Pan{}
 									for _, p := range pans {
 										if strings.TrimSpace(p.Label) == panLabel {
 											chosen = append(chosen, p)
@@ -2937,7 +2937,7 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 		if err != nil {
 			return
 		}
-		items := catpawopen.NormalizeSearchList(raw)
+		items := catpawrunner.NormalizeSearchList(raw)
 		local := make([]smartSource, 0, smartMinInt(80, len(items)))
 		localSeq := 0
 		for _, it := range items {
@@ -3000,10 +3000,10 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 			if err != nil || detailRaw == nil {
 				continue
 			}
-			playFrom, playURL := catpawopen.ExtractDetailPlayFromURL(detailRaw)
-			pans := catpawopen.ParsePlaySources(playFrom, playURL)
+			playFrom, playURL := catpawrunner.ExtractDetailPlayFromURL(detailRaw)
+			pans := catpawrunner.ParsePlaySources(playFrom, playURL)
 			if pans == nil {
-				pans = []catpawopen.Pan{}
+				pans = []catpawrunner.Pan{}
 			}
 			accessByShareID := map[string]string{}
 			if embyIsPanMockEnabled(detailRaw) {

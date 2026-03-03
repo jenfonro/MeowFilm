@@ -8,7 +8,7 @@ import (
 
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/cache"
-	"github.com/jenfonro/meowfilm/server/catpawopen"
+	"github.com/jenfonro/meowfilm/server/catpawrunner"
 )
 
 type embySiteSearchHit struct {
@@ -93,17 +93,17 @@ func embySearchSitesHits(database *db.DB, u *embyUser, query string, maxWait tim
 	type job struct{ S site }
 	type result struct {
 		Site site
-		List []catpawopen.SearchItem
+		List []catpawrunner.SearchItem
 	}
 
 	expected := len(searchSites)
 	jobs := make(chan job, expected)
 	results := make(chan result, expected)
 
-		workers := len(searchSites)
-		if workers < 1 {
-			workers = 1
-		}
+	workers := len(searchSites)
+	if workers < 1 {
+		workers = 1
+	}
 
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
@@ -119,7 +119,7 @@ func embySearchSitesHits(database *db.DB, u *embyUser, query string, maxWait tim
 				if err != nil || raw == nil {
 					continue
 				}
-				items := catpawopen.NormalizeSearchList(raw)
+				items := catpawrunner.NormalizeSearchList(raw)
 				if len(items) == 0 {
 					continue
 				}
@@ -153,7 +153,7 @@ func embySearchSitesHits(database *db.DB, u *embyUser, query string, maxWait tim
 	}
 
 	seq := 0
-	apply := func(s site, items []catpawopen.SearchItem) {
+	apply := func(s site, items []catpawrunner.SearchItem) {
 		for _, it := range items {
 			vid := strings.TrimSpace(it.ID)
 			name := strings.TrimSpace(it.Name)
@@ -194,26 +194,26 @@ func embySearchSitesHits(database *db.DB, u *embyUser, query string, maxWait tim
 		}
 	}
 
-	done:
-		sort.SliceStable(out, func(i, j int) bool {
-			a := out[i]
-			b := out[j]
-			// Primary: relevance score (same as frontend computeMatchScore).
-			if a.Score != b.Score {
-				return a.Score > b.Score
-			}
-			// Prefer earlier (higher-priority) sites when score ties.
-			if a.SiteOrder != b.SiteOrder {
-				return a.SiteOrder < b.SiteOrder
-			}
-			// Prefer shorter titles after relevance + site order tie.
-			if a.TitleLen != b.TitleLen {
-				return a.TitleLen < b.TitleLen
-			}
-			// Deterministic tie-breakers to keep ordering stable across runs.
-			if a.SiteKey != b.SiteKey {
-				return a.SiteKey < b.SiteKey
-			}
+done:
+	sort.SliceStable(out, func(i, j int) bool {
+		a := out[i]
+		b := out[j]
+		// Primary: relevance score (same as frontend computeMatchScore).
+		if a.Score != b.Score {
+			return a.Score > b.Score
+		}
+		// Prefer earlier (higher-priority) sites when score ties.
+		if a.SiteOrder != b.SiteOrder {
+			return a.SiteOrder < b.SiteOrder
+		}
+		// Prefer shorter titles after relevance + site order tie.
+		if a.TitleLen != b.TitleLen {
+			return a.TitleLen < b.TitleLen
+		}
+		// Deterministic tie-breakers to keep ordering stable across runs.
+		if a.SiteKey != b.SiteKey {
+			return a.SiteKey < b.SiteKey
+		}
 		if a.VideoID != b.VideoID {
 			return a.VideoID < b.VideoID
 		}

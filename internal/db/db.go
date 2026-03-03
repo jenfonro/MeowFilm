@@ -324,14 +324,14 @@ func (d *DB) ensureSchema() error {
 					);
 				CREATE INDEX IF NOT EXISTS idx_auth_tokens_user_id ON auth_tokens(user_id);
 				CREATE INDEX IF NOT EXISTS idx_auth_tokens_expires_at ON auth_tokens(expires_at);
-					CREATE TABLE IF NOT EXISTS catpawopen_server (
+					CREATE TABLE IF NOT EXISTS catpawrunner_server (
 					  name TEXT PRIMARY KEY,
 					  api_base TEXT NOT NULL,
 					  order_index INTEGER NOT NULL DEFAULT 0,
 				  updated_at INTEGER NOT NULL
 				);
-				CREATE INDEX IF NOT EXISTS idx_catpawopen_server_order ON catpawopen_server(order_index);
-				CREATE TABLE IF NOT EXISTS catpawopen_pan (
+				CREATE INDEX IF NOT EXISTS idx_catpawrunner_server_order ON catpawrunner_server(order_index);
+				CREATE TABLE IF NOT EXISTS catpawrunner_pan (
 				  key TEXT PRIMARY KEY,
 				  name TEXT NOT NULL DEFAULT '',
 				  enabled INTEGER NOT NULL DEFAULT 0,
@@ -605,7 +605,7 @@ func (d *DB) ensureSchema() error {
 					  proxy_url TEXT NOT NULL DEFAULT '',
 					  updated_at INTEGER NOT NULL
 					);
-					CREATE TABLE IF NOT EXISTS app_catpawopen (
+					CREATE TABLE IF NOT EXISTS app_catpawrunner (
 					  id INTEGER PRIMARY KEY CHECK (id = 1),
 					  active TEXT NOT NULL DEFAULT '',
 					  updated_at INTEGER NOT NULL

@@ -1,4 +1,4 @@
-package catpawopen
+package catpawrunner
 
 import (
 	"bytes"
@@ -97,7 +97,7 @@ func RewriteProxyURLToBase(raw string, apiBase string, tvUser string) string {
 func RegisterM3U8(apiBase string, tvUser string, playURL string, headers map[string]string) (indexURL string, proxyURL string, err error) {
 	base := NormalizeAPIBase(apiBase)
 	if base == "" {
-		return "", "", errors.New("CatPawOpen 接口地址未设置")
+		return "", "", errors.New("catpawrunner 接口地址未设置")
 	}
 	target, _ := url.Parse(base)
 	target, _ = target.Parse("api/m3u8/register")
@@ -123,7 +123,7 @@ func RegisterM3U8(apiBase string, tvUser string, playURL string, headers map[str
 	indexPath := strings.TrimSpace(anyToString(out["index"]))
 	proxyPath := strings.TrimSpace(anyToString(out["proxy"]))
 	if token == "" || indexPath == "" || proxyPath == "" {
-		return "", "", errors.New("CatPawOpen m3u8 register 返回无效")
+		return "", "", errors.New("catpawrunner m3u8 register 返回无效")
 	}
 	bu, _ := url.Parse(base)
 	indexU, _ := bu.Parse(strings.TrimPrefix(indexPath, "/"))

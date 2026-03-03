@@ -6,10 +6,10 @@ import (
 
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/cache"
-	"github.com/jenfonro/meowfilm/server/catpawopen"
+	"github.com/jenfonro/meowfilm/server/catpawrunner"
 )
 
-func embyFetchSiteDetailPans(database *db.DB, u *embyUser, spiderAPI string, videoID string) ([]catpawopen.Pan, error) {
+func embyFetchSiteDetailPans(database *db.DB, u *embyUser, spiderAPI string, videoID string) ([]catpawrunner.Pan, error) {
 	if database == nil {
 		return nil, errors.New("invalid database")
 	}
@@ -20,19 +20,19 @@ func embyFetchSiteDetailPans(database *db.DB, u *embyUser, spiderAPI string, vid
 	}
 	apiBase := strings.TrimSpace(embyResolveCatApiBaseForUser(database, u))
 	if apiBase == "" {
-		return nil, errors.New("CatPawOpen 接口地址未设置")
+		return nil, errors.New("catpawrunner 接口地址未设置")
 	}
 	detailRaw, err := cache.RequestSpiderDetailCached(apiBase, sp, vid)
 	if err != nil {
 		return nil, err
 	}
-	playFrom, playURL := catpawopen.ExtractDetailPlayFromURL(detailRaw)
-	pans := catpawopen.ParsePlaySources(playFrom, playURL)
-		if pans == nil {
-			pans = []catpawopen.Pan{}
-		}
-		if embyIsPanMockEnabled(detailRaw) {
-			pans, _ = embyResolvePanMockDetailPans(database, "", "", 0, nil, false, nil, nil, pans)
-		}
-		return pans, nil
+	playFrom, playURL := catpawrunner.ExtractDetailPlayFromURL(detailRaw)
+	pans := catpawrunner.ParsePlaySources(playFrom, playURL)
+	if pans == nil {
+		pans = []catpawrunner.Pan{}
 	}
+	if embyIsPanMockEnabled(detailRaw) {
+		pans, _ = embyResolvePanMockDetailPans(database, "", "", 0, nil, false, nil, nil, pans)
+	}
+	return pans, nil
+}

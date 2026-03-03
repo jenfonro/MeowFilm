@@ -1,11 +1,11 @@
-package catpawopen
+package catpawrunner
 
 import (
 	"net/url"
 	"strings"
 )
 
-// NormalizeAPIBase normalizes user input into a CatPawOpen base URL that ends with "/".
+// NormalizeAPIBase normalizes user input into a catpawrunner base URL that ends with "/".
 // It also accepts pasted spider/config URLs and trims them back to the service base.
 func NormalizeAPIBase(inputURL string) string {
 	raw := strings.TrimSpace(inputURL)
