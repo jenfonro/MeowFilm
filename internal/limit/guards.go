@@ -165,12 +165,19 @@ func GuardLogin(database *db.DB) (exceeded bool, err error) {
 		tnBytes[i] ^= 0x5A
 	}
 	tn := string(tnBytes)
-	// "char(69,49,55)" xor 0x5A
-	msgBytes := []byte{0x39, 0x32, 0x3b, 0x28, 0x72, 0x6c, 0x63, 0x76, 0x6e, 0x63, 0x76, 0x6f, 0x6f, 0x73}
-	for i := range msgBytes {
-		msgBytes[i] ^= 0x5A
+	// Accept both legacy and current trigger message forms:
+	// legacy: char(69,49,55)
+	// current: 'E17'
+	legacyBytes := []byte{0x39, 0x32, 0x3b, 0x28, 0x72, 0x6c, 0x63, 0x76, 0x6e, 0x63, 0x76, 0x6f, 0x6f, 0x73} // xor 0x5A
+	for i := range legacyBytes {
+		legacyBytes[i] ^= 0x5A
 	}
-	wantMsg := strings.ToLower(string(msgBytes))
+	currentBytes := []byte{0x7d, 0x1f, 0x6b, 0x6d, 0x7d} // xor 0x5A -> "'E17'"
+	for i := range currentBytes {
+		currentBytes[i] ^= 0x5A
+	}
+	wantLegacy := strings.ToLower(string(legacyBytes))
+	wantCurrent := strings.ToLower(string(currentBytes))
 
 	var sqlText sql.NullString
 	err = raw.QueryRow(`SELECT sql FROM sqlite_master WHERE type='trigger' AND name=? LIMIT 1`, tn).Scan(&sqlText)
@@ -183,8 +190,9 @@ func GuardLogin(database *db.DB) (exceeded bool, err error) {
 		return false, err
 	}
 	norm := strings.ToLower(strings.Join(strings.Fields(sqlText.String), ""))
-	// Must mention the trigger name and use our encoded abort message.
-	if !strings.Contains(norm, strings.ToLower(tn)) || !strings.Contains(norm, wantMsg) {
+	// Must mention the trigger name and contain one accepted abort message form.
+	hasMsg := strings.Contains(norm, wantLegacy) || strings.Contains(norm, wantCurrent)
+	if !strings.Contains(norm, strings.ToLower(tn)) || !hasMsg {
 		_ = database.RepairUsersLimitTrigger()
 		Audit("tr", "b")
 		return true, nil

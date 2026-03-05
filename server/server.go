@@ -2,7 +2,6 @@ package server
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -44,10 +43,6 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	netdisk.InitNetdiskProxyFromDB(database)
-
-	if wm := buildinfo.WatermarkTrim(); wm != "" {
-		_, _ = fmt.Fprintf(os.Stderr, "build=%s\n", wm)
-	}
 
 	authMw := auth.New(database, auth.Options{
 		TrustProxy:   cfg.TrustProxy,

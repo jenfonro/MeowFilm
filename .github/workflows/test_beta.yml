@@ -24,6 +24,8 @@ jobs:
   build:
     name: test-build-${{ matrix.goos }}-${{ matrix.goarch }}
     runs-on: ubuntu-latest
+    container:
+      image: ubuntu:20.04
     strategy:
       fail-fast: false
       matrix:
@@ -45,6 +47,13 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      - name: Install base toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y build-essential ca-certificates curl git
 
       - name: Checkout frontend
         if: ${{ inputs.skip_frontend != 'true' }}

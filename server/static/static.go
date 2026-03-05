@@ -1,7 +1,6 @@
 package static
 
 import (
-	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -12,7 +11,6 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/auth"
-	"github.com/jenfonro/meowfilm/internal/buildinfo"
 	"github.com/jenfonro/meowfilm/public"
 )
 
@@ -59,7 +57,6 @@ func Handler(authMw *auth.Auth) http.Handler {
 	semver := normalizeReleaseSemver(rawVersion)
 	backendCommit := strings.TrimSpace(BuildBackendCommit)
 	frontendCommit := strings.TrimSpace(BuildFrontendCommit)
-	wm := buildinfo.WatermarkTrim()
 
 	uiVersion := "beta"
 	// In local/dev builds we want a stable "beta-<timestamp>" that is computed once per process,
@@ -70,16 +67,15 @@ func Handler(authMw *auth.Auth) http.Handler {
 		uiVersion = "V" + semver
 		assetVersion = semver
 	} else {
-		uiVersion = fmt.Sprintf("beta-%s", betaStamp)
+		// Keep beta/dev UI label stable; commit lines are shown separately.
+		uiVersion = "beta"
+		assetVersion = betaStamp
 	}
 	if backendCommit == "" {
 		backendCommit = uiVersion
 	}
 	if frontendCommit == "" {
 		frontendCommit = uiVersion
-	}
-	if wm != "" {
-		backendCommit = backendCommit + "+" + wm
 	}
 
 	indexHTML := mustReadFile("index.html")
@@ -180,6 +176,10 @@ func normalizeReleaseSemver(raw string) string {
 
 	// Very lightweight validation: ensure it starts with a digit.
 	if s[0] < '0' || s[0] > '9' {
+		return ""
+	}
+	// Treat pre-release/build metadata as non-stable (e.g. 1.0.0-beta.1).
+	if strings.Contains(s, "-") || strings.Contains(s, "+") {
 		return ""
 	}
 	return s

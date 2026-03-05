@@ -19,6 +19,8 @@ jobs:
   build:
     name: test-build-${{ matrix.goos }}-${{ matrix.goarch }}-${{ matrix.flavor }}
     runs-on: ubuntu-latest
+    container:
+      image: ubuntu:20.04
     strategy:
       fail-fast: false
       matrix:
@@ -58,41 +60,34 @@ jobs:
         with:
           go-version: "1.25.x"
 
-      - name: Install linux arm64 cross compiler
-        if: matrix.goos == 'linux' && matrix.goarch == 'arm64' && matrix.flavor == 'glibc'
+      - name: Install toolchains
         shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          FLAVOR: ${{ matrix.flavor }}
+          CC_KIND: ${{ matrix.cc }}
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          apt-get update
+          pkgs=(build-essential ca-certificates curl git xz-utils)
+          if [[ "${GOOS}" == "linux" && "${GOARCH}" == "arm64" && "${FLAVOR}" == "glibc" ]]; then
+            pkgs+=(gcc-aarch64-linux-gnu libc6-dev-arm64-cross)
+          fi
+          if [[ "${GOOS}" == "linux" && "${FLAVOR}" == "musl" && "${GOARCH}" == "amd64" ]]; then
+            pkgs+=(musl-tools)
+          fi
+          if [[ "${GOOS}" == "windows" && "${GOARCH}" == "amd64" ]]; then
+            pkgs+=(mingw-w64)
+          fi
+          apt-get install -y "${pkgs[@]}"
 
-      - name: Install musl toolchain
-        if: matrix.goos == 'linux' && matrix.flavor == 'musl' && matrix.goarch == 'amd64'
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
-
-      - name: Install mingw toolchain
-        if: matrix.goos == 'windows' && matrix.goarch == 'amd64'
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y mingw-w64
-
-      - name: Install zig toolchain
-        if: matrix.cc == 'zig'
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y xz-utils curl
-          curl -fsSL "https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz" -o /tmp/zig.tar.xz
-          sudo mkdir -p /opt/zig
-          sudo tar -xf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
-          echo "/opt/zig" >> "${GITHUB_PATH}"
+          if [[ "${CC_KIND}" == "zig" ]]; then
+            curl -fsSL "https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz" -o /tmp/zig.tar.xz
+            mkdir -p /opt/zig
+            tar -xf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+            echo "/opt/zig" >> "${GITHUB_PATH}"
+          fi
 
       - name: Prepare zig cross-cc wrapper
         if: matrix.cc == 'zig'
