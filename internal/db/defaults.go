@@ -102,6 +102,18 @@ func (d *DB) ensureDefaults(_ bool) error {
 				return nil
 			},
 		},
+		{
+			Table: "smart_pan_match_token",
+			Seed: func(tx *sql.Tx) error {
+				tokens := []string{"逸动", "天意", "夸父", "优夕", "百度"}
+				for i, t := range tokens {
+					if _, err := tx.Exec(`INSERT INTO smart_pan_match_token(pos, token) VALUES(?, ?)`, i, t); err != nil {
+						return err
+					}
+				}
+				return nil
+			},
+		},
 	}
 
 	tx, err := d.db.Begin()
