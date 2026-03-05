@@ -1,6 +1,7 @@
 package emby
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/jenfonro/meowfilm/internal/db"
@@ -32,17 +33,20 @@ func embyGroupingOptions(database *db.DB) []map[string]any {
 func embyViewFolders(database *db.DB, serverID string) []map[string]any {
 	secs := embyHomeSections(database)
 	out := make([]map[string]any, 0, len(secs))
-	for _, s := range secs {
+	for i, s := range secs {
 		ct := "tvshows"
 		if strings.EqualFold(strings.TrimSpace(s.MediaType), "movie") {
 			ct = "movies"
 		}
-		out = append(out, embyBuildViewFolderItem(
+		it := embyBuildViewFolderItem(
 			serverID,
 			strings.TrimSpace(s.ID),
 			strings.TrimSpace(s.Name),
 			ct,
-		))
+		)
+		// Keep configured section order stable on clients that auto-sort by SortName.
+		it["SortName"] = fmt.Sprintf("%06d", i)
+		out = append(out, it)
 	}
 	return out
 }
@@ -52,13 +56,15 @@ func embyViewFolderItemByID(database *db.DB, serverID string, id string) (map[st
 	if want == "" {
 		return nil, false
 	}
-	for _, s := range embyHomeSections(database) {
+	for i, s := range embyHomeSections(database) {
 		if strings.TrimSpace(s.ID) == want {
 			ct := "tvshows"
 			if strings.EqualFold(strings.TrimSpace(s.MediaType), "movie") {
 				ct = "movies"
 			}
-			return embyBuildViewFolderItem(serverID, want, strings.TrimSpace(s.Name), ct), true
+			it := embyBuildViewFolderItem(serverID, want, strings.TrimSpace(s.Name), ct)
+			it["SortName"] = fmt.Sprintf("%06d", i)
+			return it, true
 		}
 	}
 	return nil, false
