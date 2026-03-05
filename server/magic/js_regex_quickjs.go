@@ -1,6 +1,5 @@
-//go:build cgo && (linux || darwin)
+//go:build cgo
 // +build cgo
-// +build linux darwin
 
 package magic
 
