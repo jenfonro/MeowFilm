@@ -22,9 +22,9 @@ func usersLimitTriggerName() string {
 func usersLimitTriggerCreateSQL() string {
 	tn := usersLimitTriggerName()
 
-	// Avoid plain abort message string; use SQLite char() to build it.
-	// "char(69,49,55)" xor 0x5A
-	msgBytes := []byte{0x39, 0x32, 0x3b, 0x28, 0x72, 0x6c, 0x63, 0x76, 0x6e, 0x63, 0x76, 0x6f, 0x6f, 0x73}
+	// Keep message as a SQL string literal for broad SQLite compatibility.
+	// "'E17'" xor 0x5A
+	msgBytes := []byte{0x7d, 0x1f, 0x6b, 0x6d, 0x7d}
 	for i := range msgBytes {
 		msgBytes[i] ^= 0x5A
 	}
