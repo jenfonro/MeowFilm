@@ -34,10 +34,7 @@ func embyViewFolders(database *db.DB, serverID string) []map[string]any {
 	secs := embyHomeSections(database)
 	out := make([]map[string]any, 0, len(secs))
 	for i, s := range secs {
-		ct := "tvshows"
-		if strings.EqualFold(strings.TrimSpace(s.MediaType), "movie") {
-			ct = "movies"
-		}
+		ct := embyCollectionTypeForHomeSection(s)
 		it := embyBuildViewFolderItem(
 			serverID,
 			strings.TrimSpace(s.ID),
@@ -58,16 +55,24 @@ func embyViewFolderItemByID(database *db.DB, serverID string, id string) (map[st
 	}
 	for i, s := range embyHomeSections(database) {
 		if strings.TrimSpace(s.ID) == want {
-			ct := "tvshows"
-			if strings.EqualFold(strings.TrimSpace(s.MediaType), "movie") {
-				ct = "movies"
-			}
+			ct := embyCollectionTypeForHomeSection(s)
 			it := embyBuildViewFolderItem(serverID, want, strings.TrimSpace(s.Name), ct)
 			it["SortName"] = fmt.Sprintf("%06d", i)
 			return it, true
 		}
 	}
 	return nil, false
+}
+
+func embyCollectionTypeForHomeSection(s db.EmbyHomeSection) string {
+	// History is naturally mixed (movie + tv); don't force a single CollectionType.
+	if strings.EqualFold(strings.TrimSpace(s.Module), "history") {
+		return ""
+	}
+	if strings.EqualFold(strings.TrimSpace(s.MediaType), "movie") {
+		return "movies"
+	}
+	return "tvshows"
 }
 
 func embyUsersViewsResponse(database *db.DB, serverID string) map[string]any {

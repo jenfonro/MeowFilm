@@ -1261,12 +1261,11 @@ func embyStableEtag(id string) string {
 
 func embyBuildViewFolderItem(serverID string, id string, name string, collectionType string) map[string]any {
 	etag := embyStableEtag(strings.TrimSpace(id) + "|" + strings.TrimSpace(name) + "|" + strings.TrimSpace(collectionType))
-	return map[string]any{
+	out := map[string]any{
 		"Id":                id,
 		"Name":              name,
 		"SortName":          name,
 		"Type":              "CollectionFolder",
-		"CollectionType":    collectionType,
 		"IsFolder":          true,
 		"ServerId":          serverID,
 		"Etag":              etag,
@@ -1274,6 +1273,10 @@ func embyBuildViewFolderItem(serverID string, id string, name string, collection
 		"ImageTags":         map[string]any{},
 		"BackdropImageTags": []any{},
 	}
+	if strings.TrimSpace(collectionType) != "" {
+		out["CollectionType"] = collectionType
+	}
+	return out
 }
 
 func embyIssueToken(database *db.DB, userID int64) (token string, exp time.Time, err error) {
