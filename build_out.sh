@@ -38,6 +38,7 @@ fi
 
 OUT_DIR="${OUT_DIR:-${ROOT_DIR}/out_build}"
 mkdir -p "${OUT_DIR}"
+STRICT_PROTECTED="${MEOWFILM_STRICT_PROTECTED:-0}"
 
 WATERMARK="${MEOWFILM_WATERMARK:-}"
 if [[ -z "${WATERMARK}" ]]; then
@@ -69,9 +70,7 @@ fi
 OUT_BIN="${OUT_DIR}/meowfilm_${WATERMARK}"
 
 # Obfuscation: default enabled.
-# - If `garble` exists, use it.
-# - Otherwise, try to install it into a project-local tools dir.
-# - If install fails (offline env), fall back to plain `go build`.
+# In strict mode, garble is mandatory and any fallback is forbidden.
 GO_TOOL="go"
 TOOLS_DIR="${ROOT_DIR}/.tools"
 TOOLS_BIN="${TOOLS_DIR}/bin"
@@ -81,11 +80,20 @@ export PATH="${TOOLS_BIN}:${PATH}"
 if ! command -v garble >/dev/null 2>&1; then
   echo "garble not found; installing..." >&2
   # Install to local tools bin to avoid depending on global GOPATH/GOBIN permissions.
-  GOBIN="${TOOLS_BIN}" go install mvdan.cc/garble@latest >/dev/null 2>&1 || true
+  if ! GOBIN="${TOOLS_BIN}" go install mvdan.cc/garble@latest >/dev/null 2>&1; then
+    if [[ "${STRICT_PROTECTED}" == "1" ]]; then
+      echo "garble install failed in strict mode" >&2
+      exit 1
+    fi
+  fi
 fi
 if command -v garble >/dev/null 2>&1; then
   GO_TOOL="garble"
 else
+  if [[ "${STRICT_PROTECTED}" == "1" ]]; then
+    echo "garble not available in strict mode" >&2
+    exit 1
+  fi
   echo "garble install failed; building without obfuscation" >&2
 fi
 
@@ -94,19 +102,46 @@ if [[ "${GOOS:-}" != "windows" ]]; then
   BUILD_MODE_ARGS=("-buildmode=pie")
 fi
 
-set +e
+# Windows quickjs-go static lib needs pthread symbols and __p__environ shim.
+if [[ "${GOOS:-}" == "windows" ]]; then
+  if [[ -z "${CC:-}" ]]; then
+    echo "windows build requires CC (e.g. x86_64-w64-mingw32-gcc)" >&2
+    exit 1
+  fi
+  if [[ "${GOARCH:-}" != "amd64" ]]; then
+    echo "unsupported windows GOARCH in build_out.sh: ${GOARCH:-}" >&2
+    exit 1
+  fi
+
+  ar_bin="${AR:-x86_64-w64-mingw32-ar}"
+  if ! command -v "${ar_bin}" >/dev/null 2>&1; then
+    echo "missing archiver: ${ar_bin}" >&2
+    exit 1
+  fi
+
+  shim_dir="$(mktemp -d /tmp/mf_win_shim.XXXXXX)"
+  trap 'rm -rf "${shim_dir}"' EXIT
+  shim_c="${shim_dir}/environ_shim.c"
+  shim_o="${shim_dir}/environ_shim.o"
+  shim_a="${shim_dir}/libenviron_shim.a"
+  cat > "${shim_c}" <<'EOF'
+#ifdef _WIN32
+static char **mf_dummy_environ = 0;
+char ***__p__environ(void) { return &mf_dummy_environ; }
+void *__imp___p__environ = (void *)&__p__environ;
+#endif
+EOF
+  "${CC}" -c "${shim_c}" -o "${shim_o}"
+  "${ar_bin}" rcs "${shim_a}" "${shim_o}"
+  LDFLAGS+=" -extldflags \"-L${shim_dir} -lenviron_shim -lwinpthread -lmsvcrt\""
+fi
+
 ext=""
 if [[ "${GOOS:-}" == "windows" ]]; then ext=".exe"; fi
 OUT_BIN="${OUT_DIR}/meowfilm_${WATERMARK}${ext}"
 OUT_MAIN="${OUT_DIR}/meowfilm${ext}"
 
 CGO_ENABLED=1 "${GO_TOOL}" build "${BUILD_MODE_ARGS[@]}" -tags userlimit -ldflags "${LDFLAGS}" -o "${OUT_BIN}" .
-rc=$?
-set -e
-if [[ $rc -ne 0 ]]; then
-  echo "pie build failed; retry without -buildmode=pie" >&2
-  CGO_ENABLED=1 "${GO_TOOL}" build -tags userlimit -ldflags "${LDFLAGS}" -o "${OUT_BIN}" .
-fi
 cp -f "${OUT_BIN}" "${OUT_MAIN}"
 echo "built: ${OUT_BIN}"
 echo "built: ${OUT_MAIN}"

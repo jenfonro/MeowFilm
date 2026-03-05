@@ -1,0 +1,118 @@
+name: Test Beta
+
+run-name: Test Beta #${{ github.run_number }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_frontend:
+        description: "Skip frontend checkout/build (true/false)"
+        required: false
+        default: "false"
+
+concurrency:
+  group: test-beta-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  TEST_BUILD_VERSION: v0.0.0-test.${{ github.run_id }}.${{ github.run_attempt }}
+
+jobs:
+  build:
+    name: test-build-${{ matrix.goos }}-${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            cc: gcc
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        if: ${{ inputs.skip_frontend != 'true' }}
+        with:
+          node-version: 20
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Checkout frontend
+        if: ${{ inputs.skip_frontend != 'true' }}
+        uses: actions/checkout@v4
+        with:
+          repository: jenfonro/MeowFilm-Frontend
+          path: MeowFilm-Frontend
+          token: ${{ secrets.FRONTEND_TOKEN }}
+
+      - name: Compute backend metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "BACKEND_COMMIT=$(git rev-parse --short=6 HEAD)" >> "${GITHUB_ENV}"
+          echo "FRONTEND_COMMIT=skip-frontend" >> "${GITHUB_ENV}"
+
+      - name: Compute frontend metadata
+        if: ${{ inputs.skip_frontend != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "FRONTEND_COMMIT=$(git -C MeowFilm-Frontend rev-parse --short=6 HEAD)" >> "${GITHUB_ENV}"
+
+      - name: Build frontend
+        if: ${{ inputs.skip_frontend != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd MeowFilm-Frontend
+          if [[ -f package-lock.json ]]; then
+            npm ci
+          else
+            npm install
+          fi
+          npm run build
+
+      - name: Copy frontend dist
+        if: ${{ inputs.skip_frontend != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf public/dist
+          mkdir -p public/dist
+          cp -a MeowFilm-Frontend/dist/. public/dist/
+
+      - name: Test
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          set -euo pipefail
+          go test ./...
+
+      - name: Build (compile check only)
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "1"
+          CC: ${{ matrix.cc }}
+        run: |
+          set -euo pipefail
+          ext=""
+          if [[ "${GOOS}" == "windows" ]]; then ext=".exe"; fi
+          out="/tmp/meowfilm_${GOOS}_${GOARCH}${ext}"
+          go build -trimpath -ldflags="-s -w \
+            -X github.com/jenfonro/meowfilm/server/static.BuildAssetVersion=${{ env.TEST_BUILD_VERSION }} \
+            -X github.com/jenfonro/meowfilm/server/static.BuildBackendCommit=${{ env.BACKEND_COMMIT }} \
+            -X github.com/jenfonro/meowfilm/server/static.BuildFrontendCommit=${{ env.FRONTEND_COMMIT }}" -o "${out}" .
+          rm -f "${out}"
+          echo "compile ok: ${GOOS}/${GOARCH}"
