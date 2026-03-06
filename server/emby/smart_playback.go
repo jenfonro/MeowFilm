@@ -596,9 +596,113 @@ func smartBuildCandidateLowerText(texts []string) string {
 	return strings.TrimSpace(strings.Join(out, " "))
 }
 
+func smartSplitDisplayPathSegments(display string) []string {
+	raw := strings.TrimSpace(display)
+	if raw == "" {
+		return nil
+	}
+	raw = strings.ReplaceAll(raw, "\\", "/")
+	raw = strings.Trim(raw, "/")
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, "/")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		t := strings.TrimSpace(p)
+		if t == "" {
+			continue
+		}
+		out = append(out, t)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func smartEpisodePathLayers(ep catpawrunner.Episode) (fileName string, currentDir string, parentDir string) {
+	rawNames := smartExtractRawNamesFromEpisodeURL(ep.URL)
+	for _, n := range rawNames {
+		t := strings.TrimSpace(n)
+		if t == "" {
+			continue
+		}
+		fileName = t
+		break
+	}
+	segs := smartSplitDisplayPathSegments(ep.Name)
+	if len(segs) > 0 {
+		currentDir = segs[len(segs)-1]
+	}
+	if len(segs) > 1 {
+		parentDir = segs[len(segs)-2]
+	}
+	return strings.TrimSpace(fileName), strings.TrimSpace(currentDir), strings.TrimSpace(parentDir)
+}
+
+func smartExtractSeasonMarkerText(text string) string {
+	t := strings.TrimSpace(text)
+	if t == "" {
+		return ""
+	}
+	found := map[int]struct{}{}
+	push := func(n int) {
+		if n > 0 && n <= 99 {
+			found[n] = struct{}{}
+		}
+	}
+	for _, m := range regexp.MustCompile(`(?i)\bS\s*(\d{1,2})\b`).FindAllStringSubmatch(t, -1) {
+		if len(m) >= 2 {
+			push(intFromDigits(m[1]))
+		}
+	}
+	for _, m := range regexp.MustCompile(`(?i)\bseason\s*(\d{1,2})\b`).FindAllStringSubmatch(t, -1) {
+		if len(m) >= 2 {
+			push(intFromDigits(m[1]))
+		}
+	}
+	for _, m := range regexp.MustCompile(`第\s*([0-9一二三四五六七八九十百千两〇零]{1,16})\s*季`).FindAllStringSubmatch(t, -1) {
+		if len(m) < 2 {
+			continue
+		}
+		n := intFromDigits(m[1])
+		if n <= 0 {
+			n = smartParseChineseNumeralToInt(m[1])
+		}
+		push(n)
+	}
+	if len(found) != 1 {
+		return ""
+	}
+	for n := range found {
+		return "第" + strconv.Itoa(n) + "季"
+	}
+	return ""
+}
+
+func smartGuessQualityByLayers(fileName string, currentDir string, parentDir string) (quality string, currentDirIs4K bool) {
+	f := strings.TrimSpace(fileName)
+	c := strings.TrimSpace(currentDir)
+	p := strings.TrimSpace(parentDir)
+	if q := smartGuessQuality(f); q != "" {
+		return q, false
+	}
+	qCurr := smartGuessQuality(c)
+	if qCurr != "" {
+		return qCurr, strings.EqualFold(qCurr, "4K")
+	}
+	if smartExtractSeasonMarkerText(c) != "" {
+		if qParent := smartGuessQuality(p); qParent != "" {
+			return qParent, false
+		}
+	}
+	return "", false
+}
+
 func smartExtractEpisodeCandidateTexts(ep catpawrunner.Episode) []string {
 	rawNames := smartExtractRawNamesFromEpisodeURL(ep.URL)
-	displayName := strings.TrimSpace(ep.Name)
+	fileName, currentDir, parentDir := smartEpisodePathLayers(ep)
 	out := make([]string, 0, 6)
 	push := func(s string) {
 		v := strings.TrimSpace(s)
@@ -612,11 +716,32 @@ func smartExtractEpisodeCandidateTexts(ep catpawrunner.Episode) []string {
 		}
 		out = append(out, v)
 	}
-	if displayName != "" {
-		push(displayName)
+	fileHasSeason := false
+	if marker := smartExtractSeasonMarkerText(fileName); marker != "" {
+		fileHasSeason = true
+	}
+	if fileName != "" {
+		push(fileName)
 	}
 	for _, n := range rawNames {
 		push(n)
+	}
+	if !fileHasSeason {
+		if currentDir != "" {
+			currentMarker := smartExtractSeasonMarkerText(currentDir)
+			if currentMarker != "" {
+				push(currentMarker)
+			}
+			push(currentDir)
+			if currentMarker == "" {
+				if qCurr := smartGuessQuality(currentDir); qCurr != "" && parentDir != "" {
+					if parentMarker := smartExtractSeasonMarkerText(parentDir); parentMarker != "" {
+						push(parentMarker)
+						push(parentDir)
+					}
+				}
+			}
+		}
 	}
 	return out
 }
@@ -852,13 +977,29 @@ var smartEnhanceTokens = []string{"60fps", "60帧", "hdr", "ddp", "臻彩"}
 
 func smartGuessQuality(hayRaw string) string {
 	hay := strings.ToUpper(hayRaw)
-	if regexp.MustCompile(`(2160P|2160|4K)`).MatchString(hay) {
+	has4k := regexp.MustCompile(`(2160P|2160|4K)`).MatchString(hay)
+	has1080 := regexp.MustCompile(`(1080P|1080)`).MatchString(hay)
+	has720 := regexp.MustCompile(`(720P|720)`).MatchString(hay)
+	hitCount := 0
+	if has4k {
+		hitCount++
+	}
+	if has1080 {
+		hitCount++
+	}
+	if has720 {
+		hitCount++
+	}
+	if hitCount >= 2 {
+		return ""
+	}
+	if has4k {
 		return "4K"
 	}
-	if regexp.MustCompile(`(1080P|1080)`).MatchString(hay) {
+	if has1080 {
 		return "1080P"
 	}
-	if regexp.MustCompile(`(720P|720)`).MatchString(hay) {
+	if has720 {
 		return "720P"
 	}
 	return ""
@@ -884,12 +1025,28 @@ func smartQualityRankOf(q string) int {
 }
 
 func smartBuildHayLower(c smartCandidate) string {
-	return strings.TrimSpace(c.RawLower + " " + strings.ToLower(strings.TrimSpace(c.Ep.Name)) + " " + strings.ToLower(strings.TrimSpace(c.SrcRemarkLower)))
+	fileName, currentDir, parentDir := smartEpisodePathLayers(c.Ep)
+	_ = parentDir
+	parts := make([]string, 0, 4)
+	if fileName != "" {
+		parts = append(parts, strings.ToLower(fileName))
+	}
+	if currentDir != "" {
+		parts = append(parts, strings.ToLower(currentDir))
+	}
+	if q, _ := smartGuessQualityByLayers(fileName, currentDir, parentDir); q != "" {
+		parts = append(parts, strings.ToLower(q))
+	}
+	if len(parts) == 0 {
+		return strings.TrimSpace(c.RawLower)
+	}
+	return strings.TrimSpace(strings.Join(parts, " "))
 }
 
 func smartComputeCandidateFeatures(c smartCandidate) smartCandidateFeatures {
 	hayLower := smartBuildHayLower(c)
-	quality := smartGuessQuality(hayLower)
+	fileName, currentDir, parentDir := smartEpisodePathLayers(c.Ep)
+	quality, _ := smartGuessQualityByLayers(fileName, currentDir, parentDir)
 	qualityRank := smartQualityRankOf(quality)
 	enhance := smartComputePriorityMatch(hayLower, smartEnhanceTokens)
 	idx := enhance.Indices
