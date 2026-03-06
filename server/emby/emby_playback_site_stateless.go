@@ -6,7 +6,6 @@ import (
 
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/catpawrunner"
-	"github.com/jenfonro/meowfilm/server/goproxy"
 	"github.com/jenfonro/meowfilm/server/netdisk"
 )
 
@@ -60,7 +59,7 @@ func embyResolveStatelessSiteEpisodePlayback(database *db.DB, u *embyUser, siteV
 	urlPicked := ""
 	headers := map[string]string{}
 	providerForProxy := ""
-	if pid := smartPanMockProviderID(strings.TrimSpace(epFlag)); pid != "" {
+	if pid := smartPanMockProviderID(database, strings.TrimSpace(epFlag)); pid != "" {
 		providerForProxy = pid
 		switch pid {
 		case "189":
@@ -174,11 +173,7 @@ func embyResolveStatelessSiteEpisodePlayback(database *db.DB, u *embyUser, siteV
 	if strings.TrimSpace(urlPicked) == "" {
 		return "", nil, errorString("站点未返回可播放地址: " + fmt.Sprintf("site=%s video=%d pan=%d ep=%d", strings.TrimSpace(sv.SiteKey), siteVideoID, pan, epIndex))
 	}
-	if len(headers) != 0 {
-		if proxied, ok, err := goproxy.ProxyIfNeeded(database, providerForProxy, strings.TrimSpace(urlPicked), headers); err == nil && ok && strings.TrimSpace(proxied) != "" {
-			return strings.TrimSpace(proxied), nil, nil
-		}
-	}
+	urlPicked, headers = embyProxyIfNeeded(database, u, providerForProxy, strings.TrimSpace(urlPicked), headers)
 	if len(headers) == 0 {
 		return strings.TrimSpace(urlPicked), nil, nil
 	}

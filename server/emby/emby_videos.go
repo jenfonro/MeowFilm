@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
-	"github.com/jenfonro/meowfilm/server/goproxy"
 )
 
 func handleEmbyVideos(w http.ResponseWriter, r *http.Request, database *db.DB, serverID string, parts []string) {
@@ -84,12 +83,7 @@ func handleEmbyVideoStream(w http.ResponseWriter, r *http.Request, database *db.
 				}
 				u0 := strings.TrimSpace(playURL)
 				h0 := headers
-				if len(h0) != 0 {
-					if pickedURL, ok, err2 := goproxy.ProxyIfNeeded(database, "", u0, h0); err2 == nil && ok && strings.TrimSpace(pickedURL) != "" {
-						u0 = strings.TrimSpace(pickedURL)
-						h0 = nil
-					}
-				}
+				u0, h0 = embyProxyIfNeeded(database, u, "", u0, h0)
 				if len(h0) != 0 {
 					return "", fmt.Errorf("该源需要自定义请求头，暂不支持")
 				}
@@ -142,17 +136,11 @@ func handleEmbyVideoStream(w http.ResponseWriter, r *http.Request, database *db.
 		pickedMeta = picked
 		u0 := strings.TrimSpace(playURL)
 		h0 := headers
-		if len(h0) != 0 {
-			// Best-effort: register to GoProxy and return a header-free proxy URL for Emby clients.
-			provider := ""
-			if picked != nil {
-				provider = strings.TrimSpace(picked.Provider)
-			}
-			if pickedURL, ok, err2 := goproxy.ProxyIfNeeded(database, provider, u0, h0); err2 == nil && ok && strings.TrimSpace(pickedURL) != "" {
-				u0 = strings.TrimSpace(pickedURL)
-				h0 = nil
-			}
+		provider := ""
+		if picked != nil {
+			provider = strings.TrimSpace(picked.Provider)
 		}
+		u0, h0 = embyProxyIfNeeded(database, u, provider, u0, h0)
 		if len(h0) != 0 {
 			return "", fmt.Errorf("该源需要自定义请求头，暂不支持")
 		}
