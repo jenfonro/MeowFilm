@@ -131,6 +131,40 @@ func RegisterM3U8(apiBase string, tvUser string, playURL string, headers map[str
 	return indexU.String(), proxyU.String(), nil
 }
 
+func RegisterProxy(apiBase string, tvUser string, playURL string, headers map[string]string) (proxyURL string, err error) {
+	base := NormalizeAPIBase(apiBase)
+	if base == "" {
+		return "", errors.New("catpawrunner 接口地址未设置")
+	}
+	target, _ := url.Parse(base)
+	target, _ = target.Parse("api/proxy/register")
+	payload := map[string]any{"url": strings.TrimSpace(playURL), "headers": headers}
+	b, _ := json.Marshal(payload)
+	req, _ := http.NewRequest(http.MethodPost, target.String(), bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	if strings.TrimSpace(tvUser) != "" {
+		req.Header.Set("X-TV-User", strings.TrimSpace(tvUser))
+	}
+	client := &http.Client{Timeout: 12 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("proxy register http %d", resp.StatusCode)
+	}
+	proxyPath := strings.TrimSpace(anyToString(out["proxy"]))
+	if proxyPath == "" {
+		return "", errors.New("catpawrunner proxy register 返回无效")
+	}
+	bu, _ := url.Parse(base)
+	proxyU, _ := bu.Parse(strings.TrimPrefix(proxyPath, "/"))
+	return proxyU.String(), nil
+}
+
 func IsProbablyM3U8(u string) bool {
 	s := strings.ToLower(strings.TrimSpace(u))
 	return strings.Contains(s, ".m3u8")

@@ -28,6 +28,8 @@ type registerResp struct {
 
 var pickedBaseCache = cache.NewTTLInflightCache[string](30*time.Minute, 32)
 
+const registerTimeout = 1 * time.Second
+
 func eligibleServers(raw []db.GoProxyServer, pan string) []string {
 	p := strings.ToLower(strings.TrimSpace(pan))
 	out := make([]string, 0, len(raw))
@@ -174,7 +176,7 @@ func Register(base string, playURL string, headers map[string]string) (proxyURL 
 	body, _ := json.Marshal(payload)
 	req, _ := http.NewRequest(http.MethodPost, registerURL, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 12 * time.Second}
+	client := &http.Client{Timeout: registerTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err

@@ -377,31 +377,154 @@ func smartParseVodPlayURLToEpisodes(vodPlayURL string) []catpawrunner.Episode {
 	return out
 }
 
-func smartPanMockProviderID(panLabel string) string {
-	s := strings.TrimSpace(panLabel)
+type smartPanMatchEntry struct {
+	TokenLower string
+	PanLower   string
+}
+
+var smartPanMatchEntriesCache = struct {
+	mu       sync.RWMutex
+	expireAt time.Time
+	entries  []smartPanMatchEntry
+}{}
+
+func smartPanToProviderID(panLower string) string {
+	s := strings.ToLower(strings.TrimSpace(panLower))
 	if s == "" {
 		return ""
 	}
-	head2 := []rune(s)
-	if len(head2) > 2 {
-		head2 = head2[:2]
-	}
-	h := string(head2)
-	lh := strings.ToLower(h)
-	if h == "天意" || h == "天翼" {
+	switch {
+	case strings.Contains(s, "百度"), strings.Contains(s, "baidu"):
+		return "baidu"
+	case strings.Contains(s, "夸克"), strings.Contains(s, "quark"):
+		return "quark"
+	case strings.Contains(s, "uc"):
+		return "uc"
+	case strings.Contains(s, "天翼"):
 		return "189"
-	}
-	if h == "逸动" || h == "和彩" || h == "移动" {
+	case strings.Contains(s, "移动"):
 		return "139"
+	default:
+		return ""
 	}
-	if h == "夸父" || h == "夸克" {
+}
+
+func smartLoadPanMatchEntries(database *db.DB) []smartPanMatchEntry {
+	now := time.Now()
+	smartPanMatchEntriesCache.mu.RLock()
+	if now.Before(smartPanMatchEntriesCache.expireAt) && len(smartPanMatchEntriesCache.entries) > 0 {
+		out := make([]smartPanMatchEntry, 0, len(smartPanMatchEntriesCache.entries))
+		out = append(out, smartPanMatchEntriesCache.entries...)
+		smartPanMatchEntriesCache.mu.RUnlock()
+		return out
+	}
+	smartPanMatchEntriesCache.mu.RUnlock()
+
+	buildDefault := func() []smartPanMatchEntry {
+		return []smartPanMatchEntry{
+			{TokenLower: "百度", PanLower: "百度"},
+			{TokenLower: "夸克", PanLower: "夸克"},
+			{TokenLower: "uc", PanLower: "uc"},
+			{TokenLower: "天翼", PanLower: "天翼"},
+			{TokenLower: "移动", PanLower: "移动"},
+		}
+	}
+	if database == nil {
+		return buildDefault()
+	}
+
+	rawPan, errPan := database.ListSmartPanMatchTokens()
+	rawMap, _ := database.ListSmartPanAliasMappings()
+	if errPan != nil || len(rawPan) == 0 {
+		return buildDefault()
+	}
+
+	aliasMap := map[string][]string{}
+	for _, row := range rawMap {
+		pan := strings.ToLower(strings.TrimSpace(row.Pan))
+		if pan == "" {
+			continue
+		}
+		parts := strings.Split(strings.ReplaceAll(strings.TrimSpace(row.Aliases), "，", ","), ",")
+		list := make([]string, 0, len(parts))
+		seenAlias := map[string]bool{}
+		for _, p := range parts {
+			a := strings.ToLower(strings.TrimSpace(p))
+			if a == "" || seenAlias[a] {
+				continue
+			}
+			seenAlias[a] = true
+			list = append(list, a)
+		}
+		if len(list) > 0 {
+			aliasMap[pan] = list
+		}
+	}
+
+	entries := make([]smartPanMatchEntry, 0, 16)
+	seen := map[string]bool{}
+	for _, t := range rawPan {
+		pan := strings.ToLower(strings.TrimSpace(t))
+		if pan == "" {
+			continue
+		}
+		add := func(token string) {
+			k := strings.ToLower(strings.TrimSpace(token))
+			if k == "" {
+				return
+			}
+			dupKey := pan + "::" + k
+			if seen[dupKey] {
+				return
+			}
+			seen[dupKey] = true
+			entries = append(entries, smartPanMatchEntry{TokenLower: k, PanLower: pan})
+		}
+		add(pan)
+		for _, a := range aliasMap[pan] {
+			add(a)
+		}
+	}
+	if len(entries) == 0 {
+		return buildDefault()
+	}
+
+	smartPanMatchEntriesCache.mu.Lock()
+	smartPanMatchEntriesCache.entries = make([]smartPanMatchEntry, 0, len(entries))
+	smartPanMatchEntriesCache.entries = append(smartPanMatchEntriesCache.entries, entries...)
+	smartPanMatchEntriesCache.expireAt = now.Add(10 * time.Second)
+	smartPanMatchEntriesCache.mu.Unlock()
+	return entries
+}
+
+func smartPanMockProviderID(database *db.DB, panLabel string) string {
+	_ = database
+	raw := strings.TrimSpace(panLabel)
+	if raw == "" || !strings.Contains(raw, "-") {
+		// Current pan_mock only supports strict "<flag>-..." formats.
+		// Labels without '-' are treated as non-pan_mock for now.
+		return ""
+	}
+	s := smartPanMatchLabelText(raw)
+	if s == "" {
+		return ""
+	}
+	// pan_mock detection is intentionally fixed (strict legacy pan flags):
+	// 百度 / 夸父 / 优夕 / 天意 / 逸动
+	if strings.Contains(s, "百度") {
+		return "baidu"
+	}
+	if strings.Contains(s, "夸父") {
 		return "quark"
 	}
-	if h == "优夕" || lh == "uc" {
+	if strings.Contains(s, "优夕") {
 		return "uc"
 	}
-	if h == "百度" {
-		return "baidu"
+	if strings.Contains(s, "天意") {
+		return "189"
+	}
+	if strings.Contains(s, "逸动") {
+		return "139"
 	}
 	return ""
 }
@@ -1908,7 +2031,7 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 			time.Since(tryStart).Milliseconds(),
 			smartLogSiteName(cand.SiteKey, cand.SiteName),
 			strings.TrimSpace(cand.PanLabel),
-			smartPanMockProviderID(strings.TrimSpace(cand.PanLabel)),
+			smartPanMockProviderID(database, strings.TrimSpace(cand.PanLabel)),
 			strings.TrimSpace(status),
 			strings.TrimSpace(reason),
 			hc,
@@ -1930,7 +2053,7 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 			tryID,
 			smartLogSiteName(cand.SiteKey, cand.SiteName),
 			strings.TrimSpace(cand.PanLabel),
-			smartPanMockProviderID(strings.TrimSpace(cand.PanLabel)),
+			smartPanMockProviderID(database, strings.TrimSpace(cand.PanLabel)),
 			strings.TrimSpace(cand.Ep.Name),
 			raw0,
 			strings.TrimSpace(cand.SpiderAPI),
@@ -1946,7 +2069,7 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 	}
 
 	doPlay := func() playResult {
-		pid := smartPanMockProviderID(strings.TrimSpace(cand.PanLabel))
+		pid := smartPanMockProviderID(database, strings.TrimSpace(cand.PanLabel))
 		switch pid {
 		case "189":
 			ac := ""
@@ -2186,7 +2309,7 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 		normalAllowed := []smartCandidate{}
 		normalFallback := []smartCandidate{}
 		for _, c := range candidatesForNo {
-			pid := smartPanMockProviderID(c.PanLabel)
+			pid := smartPanMockProviderID(database, c.PanLabel)
 			allowed := isAllowedLabel(c.PanLabel)
 			if pid == "" {
 				if allowed {
@@ -2760,7 +2883,7 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 			SiteName: strings.TrimSpace(c.SiteName),
 			VideoID:  strings.TrimSpace(c.VideoID),
 			PanFlag:  strings.TrimSpace(c.PanLabel),
-			Provider: smartPanMockProviderID(strings.TrimSpace(c.PanLabel)),
+			Provider: smartPanMockProviderID(database, strings.TrimSpace(c.PanLabel)),
 			ShowName: strings.TrimSpace(c.Ep.Name),
 			RawName:  raw0,
 			Quality:  strings.TrimSpace(feat.Quality),
@@ -2845,7 +2968,7 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 										}
 									}
 									accessByShareID := map[string]string{}
-									if embyIsPanMockEnabled(detailRaw) && smartPanMockProviderID(panLabel) != "" && len(chosen) > 0 {
+									if embyIsPanMockEnabled(detailRaw) && smartPanMockProviderID(database, panLabel) != "" && len(chosen) > 0 {
 										resolved, access := embyResolvePanMockDetailPansIncremental(database, src.SiteKey, src.SiteName, want, seasonsForMapping, hasMulti, rawCleanRules, rawEpisodeRules, chosen, nil)
 										chosen = resolved
 										accessByShareID = access
@@ -3298,7 +3421,7 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 				tier,
 				smartLogSiteName(at.Cand.SiteKey, at.Cand.SiteName),
 				strings.TrimSpace(at.Cand.PanLabel),
-				smartPanMockProviderID(strings.TrimSpace(at.Cand.PanLabel)),
+				smartPanMockProviderID(database, strings.TrimSpace(at.Cand.PanLabel)),
 				strings.TrimSpace(at.Cand.Ep.Name),
 				strings.TrimSpace(smartFirstRawNameFromURL(at.Cand.Ep.URL)),
 				strings.TrimSpace(feat.Quality),
@@ -3314,7 +3437,7 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 					time.Since(flowStart).Milliseconds(),
 					smartLogSiteName(res.Cand.SiteKey, res.Cand.SiteName),
 					strings.TrimSpace(res.Cand.PanLabel),
-					smartPanMockProviderID(strings.TrimSpace(res.Cand.PanLabel)),
+					smartPanMockProviderID(database, strings.TrimSpace(res.Cand.PanLabel)),
 					strings.TrimSpace(res.Cand.Ep.Name),
 					strings.TrimSpace(raw0),
 					strings.TrimSpace(feat.Quality),
