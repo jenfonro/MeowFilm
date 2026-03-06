@@ -339,7 +339,7 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 					}
 					epIndex := i + 1
 					epName := strings.TrimSpace(ep.Name)
-					if smartPanMockProviderID(strings.TrimSpace(ep.Flag)) != "" {
+					if smartPanMockProviderID(database, strings.TrimSpace(ep.Flag)) != "" {
 						if rawNames := smartExtractRawNamesFromEpisodeURL(epURL); len(rawNames) > 0 && strings.TrimSpace(rawNames[0]) != "" {
 							epName = strings.TrimSpace(rawNames[0])
 						}
