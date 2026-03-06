@@ -34,6 +34,11 @@ type AppConfig struct {
 	CatpawrunnerActive         string
 }
 
+type SmartPanAliasMapping struct {
+	Pan     string
+	Aliases string
+}
+
 func (d *DB) ReadAppConfig() (AppConfig, error) {
 	if d == nil || d.db == nil {
 		return AppConfig{}, nil
@@ -847,6 +852,51 @@ func (d *DB) ListSmartPanMatchTokens() ([]string, error) {
 }
 func (d *DB) ReplaceSmartPanMatchTokens(list []string) error {
 	return d.replaceStringTable("smart_pan_match_token", "token", list)
+}
+
+func (d *DB) ListSmartPanAliasMappings() ([]SmartPanAliasMapping, error) {
+	rows, err := d.db.Query(`SELECT pan, aliases FROM smart_pan_alias_mapping ORDER BY pos ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]SmartPanAliasMapping, 0)
+	for rows.Next() {
+		var pan sql.NullString
+		var aliases sql.NullString
+		_ = rows.Scan(&pan, &aliases)
+		p := strings.TrimSpace(pan.String)
+		a := strings.TrimSpace(aliases.String)
+		if p == "" {
+			continue
+		}
+		out = append(out, SmartPanAliasMapping{Pan: p, Aliases: a})
+	}
+	return out, nil
+}
+
+func (d *DB) ReplaceSmartPanAliasMappings(list []SmartPanAliasMapping) error {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`DELETE FROM smart_pan_alias_mapping`); err != nil {
+		return err
+	}
+	pos := 0
+	for _, it := range list {
+		pan := strings.TrimSpace(it.Pan)
+		aliases := strings.TrimSpace(it.Aliases)
+		if pan == "" {
+			continue
+		}
+		if _, err := tx.Exec(`INSERT INTO smart_pan_alias_mapping(pos, pan, aliases) VALUES(?, ?, ?)`, pos, pan, aliases); err != nil {
+			return err
+		}
+		pos++
+	}
+	return tx.Commit()
 }
 
 func bool01Int(b bool) int {
