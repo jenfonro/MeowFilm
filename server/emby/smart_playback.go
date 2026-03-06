@@ -535,15 +535,45 @@ func smartLoadPlaybackSettings(database *db.DB) smartPlaybackSettings {
 	}
 
 	rawPan, _ := database.ListSmartPanMatchTokens()
+	rawPanAliasMap, _ := database.ListSmartPanAliasMappings()
+	panAliasMap := map[string][]string{}
+	for _, row := range rawPanAliasMap {
+		panKey := strings.ToLower(strings.TrimSpace(row.Pan))
+		if panKey == "" {
+			continue
+		}
+		parts := strings.Split(strings.ReplaceAll(strings.TrimSpace(row.Aliases), "，", ","), ",")
+		aliases := make([]string, 0, len(parts))
+		seenAlias := map[string]bool{}
+		for _, p := range parts {
+			a := strings.ToLower(strings.TrimSpace(p))
+			if a == "" || seenAlias[a] {
+				continue
+			}
+			seenAlias[a] = true
+			aliases = append(aliases, a)
+		}
+		panAliasMap[panKey] = aliases
+	}
 	pan := make([]string, 0, len(rawPan))
 	seen2 := map[string]bool{}
 	for _, t := range rawPan {
 		s := strings.ToLower(strings.TrimSpace(t))
-		if s == "" || seen2[s] {
+		if s == "" {
 			continue
 		}
-		seen2[s] = true
-		pan = append(pan, s)
+		tokens := []string{s}
+		if aliases, ok := panAliasMap[s]; ok && len(aliases) > 0 {
+			tokens = append(tokens, aliases...)
+		}
+		for _, tk := range tokens {
+			k := strings.ToLower(strings.TrimSpace(tk))
+			if k == "" || seen2[k] {
+				continue
+			}
+			seen2[k] = true
+			pan = append(pan, k)
+		}
 	}
 
 	return smartPlaybackSettings{
@@ -555,8 +585,20 @@ func smartLoadPlaybackSettings(database *db.DB) smartPlaybackSettings {
 	}
 }
 
-func smartLabelTokenIdx(label string, panTokenOrderLower []string) int {
+func smartPanMatchLabelText(label string) string {
 	s := strings.ToLower(strings.TrimSpace(label))
+	if s == "" {
+		return ""
+	}
+	if strings.Contains(s, "-") {
+		parts := strings.SplitN(s, "-", 2)
+		return strings.TrimSpace(parts[0])
+	}
+	return s
+}
+
+func smartLabelTokenIdx(label string, panTokenOrderLower []string) int {
+	s := smartPanMatchLabelText(label)
 	if s == "" {
 		return -1
 	}
@@ -2127,7 +2169,7 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 			if len(allowedTokens) == 0 {
 				return true
 			}
-			ll := strings.ToLower(strings.TrimSpace(label))
+			ll := smartPanMatchLabelText(label)
 			for _, t := range allowedTokens {
 				tt := strings.ToLower(strings.TrimSpace(t))
 				if tt == "" {

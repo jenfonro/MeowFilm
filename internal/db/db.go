@@ -395,6 +395,11 @@ func (d *DB) ensureSchema() error {
 				  pos INTEGER PRIMARY KEY,
 				  token TEXT NOT NULL
 				);
+				CREATE TABLE IF NOT EXISTS smart_pan_alias_mapping (
+				  pos INTEGER PRIMARY KEY,
+				  pan TEXT NOT NULL,
+				  aliases TEXT NOT NULL DEFAULT ''
+				);
 				CREATE TABLE IF NOT EXISTS smart_match_block_keyword (
 				  id INTEGER PRIMARY KEY AUTOINCREMENT,
 				  keyword TEXT NOT NULL,
@@ -613,6 +618,10 @@ func (d *DB) ensureSchema() error {
 					CREATE TABLE IF NOT EXISTS app_emby (
 					  id INTEGER PRIMARY KEY CHECK (id = 1),
 					  home_sections_json TEXT NOT NULL DEFAULT '[]',
+					  updated_at INTEGER NOT NULL
+					);
+					CREATE TABLE IF NOT EXISTS app_migration_flag (
+					  name TEXT PRIMARY KEY,
 					  updated_at INTEGER NOT NULL
 					);
 	`

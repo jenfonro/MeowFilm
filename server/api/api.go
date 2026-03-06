@@ -344,6 +344,18 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 				} else {
 					settings["smartPanMatchTokens"] = []string{}
 				}
+				if v, _ := database.ListSmartPanAliasMappings(); v != nil {
+					out := make([]map[string]string, 0, len(v))
+					for _, it := range v {
+						out = append(out, map[string]string{
+							"pan":     strings.TrimSpace(it.Pan),
+							"aliases": strings.TrimSpace(it.Aliases),
+						})
+					}
+					settings["smartPanAliasMappings"] = out
+				} else {
+					settings["smartPanAliasMappings"] = []map[string]string{}
+				}
 				settings["smartSourceExtractPriority"] = config.NormalizeSourceExtractPriority(cfg.SmartSourceExtractPriority)
 			}
 
