@@ -1013,7 +1013,7 @@ func QuarkList(database *db.DB, flag string, passcode string) (string, string, e
 }
 
 func QuarkListWithCacheHit(database *db.DB, flag string, passcode string) (vod string, shareID string, fromCache bool, err error) {
-	key := listCacheKey("quark_list", flag, passcode)
+	key := listCacheKey("quark_list", flag, listCacheCredentialPart(passcode))
 	got, hit, err := quarkListCacheTwoTier.Do(key, func() (listCache2, error) {
 		vod, shareID, e := quarkListUncached(database, flag, passcode)
 		if e != nil {

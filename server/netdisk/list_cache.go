@@ -42,3 +42,11 @@ func listCacheKey(prefix string, parts ...string) string {
 	}
 	return sb.String()
 }
+
+func listCacheCredentialPart(raw string) string {
+	p := strings.TrimSpace(raw)
+	if p == "" {
+		return "cred:none"
+	}
+	return "cred:provided:" + p
+}

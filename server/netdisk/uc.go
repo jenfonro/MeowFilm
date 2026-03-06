@@ -835,7 +835,7 @@ func UCList(database *db.DB, flag string, passcode string) (string, string, erro
 }
 
 func UCListWithCacheHit(database *db.DB, flag string, passcode string) (vod string, shareID string, fromCache bool, err error) {
-	key := listCacheKey("uc_list", flag, passcode)
+	key := listCacheKey("uc_list", flag, listCacheCredentialPart(passcode))
 	got, hit, err := ucListCacheTwoTier.Do(key, func() (listCache2, error) {
 		vod, shareID, e := ucListUncached(database, flag, passcode)
 		if e != nil {

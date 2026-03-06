@@ -1125,7 +1125,7 @@ func Yun139List(database *db.DB, flag string, passcode string) (string, string, 
 }
 
 func Yun139ListWithCacheHit(database *db.DB, flag string, passcode string) (vod string, linkID string, fromCache bool, err error) {
-	key := listCacheKey("139_list", flag, passcode)
+	key := listCacheKey("139_list", flag, listCacheCredentialPart(passcode))
 	got, hit, err := y139ListCacheTwoTier.Do(key, func() (listCache2, error) {
 		vod, linkID, e := yun139ListUncached(database, flag, passcode)
 		if e != nil {
