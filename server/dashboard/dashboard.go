@@ -284,12 +284,21 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 		cfg, _ := database.ReadAppConfig()
 		sourceTokens, _ := database.ListSmartSourcePriorityTokens()
 		panTokens, _ := database.ListSmartPanMatchTokens()
+		panAliasMappings, _ := database.ListSmartPanAliasMappings()
+		panAliasOut := make([]map[string]string, 0, len(panAliasMappings))
+		for _, it := range panAliasMappings {
+			panAliasOut = append(panAliasOut, map[string]string{
+				"pan":     strings.TrimSpace(it.Pan),
+				"aliases": strings.TrimSpace(it.Aliases),
+			})
+		}
 		writeJSON(w, 200, map[string]any{
 			"success":                    true,
 			"smartSourceExtractPriority": config.NormalizeSourceExtractPriority(cfg.SmartSourceExtractPriority),
 			"siteCleanKeywords":          strings.TrimSpace(cfg.SmartSiteCleanKeywords),
 			"smartSourcePriorityTokens":  defaultStringArray(sourceTokens),
 			"smartPanMatchTokens":        defaultStringArray(panTokens),
+			"smartPanAliasMappings":      panAliasOut,
 		})
 	}
 
@@ -336,6 +345,26 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 		}
 		if v, ok := body["smartPanMatchTokens"]; ok && v != nil {
 			saveArr(database.ReplaceSmartPanMatchTokens, v)
+		}
+		if v, ok := body["smartPanAliasMappings"]; ok && v != nil {
+			if arr, ok := v.([]any); ok {
+				out := make([]db.SmartPanAliasMapping, 0, len(arr))
+				for _, it := range arr {
+					m, ok := it.(map[string]any)
+					if !ok || m == nil {
+						continue
+					}
+					pan, _ := m["pan"].(string)
+					aliases, _ := m["aliases"].(string)
+					pan = strings.TrimSpace(pan)
+					aliases = strings.TrimSpace(aliases)
+					if pan == "" {
+						continue
+					}
+					out = append(out, db.SmartPanAliasMapping{Pan: pan, Aliases: aliases})
+				}
+				_ = database.ReplaceSmartPanAliasMappings(out)
+			}
 		}
 
 		writeOut()
@@ -450,6 +479,14 @@ func handleDashboardBackup(w http.ResponseWriter, r *http.Request, database *db.
 
 	smartSourcePriorityTokens, _ := database.ListSmartSourcePriorityTokens()
 	smartPanMatchTokens, _ := database.ListSmartPanMatchTokens()
+	smartPanAliasMappings, _ := database.ListSmartPanAliasMappings()
+	smartPanAliasOut := make([]map[string]string, 0, len(smartPanAliasMappings))
+	for _, it := range smartPanAliasMappings {
+		smartPanAliasOut = append(smartPanAliasOut, map[string]string{
+			"pan":     strings.TrimSpace(it.Pan),
+			"aliases": strings.TrimSpace(it.Aliases),
+		})
+	}
 
 	writeJSON(w, 200, map[string]any{
 		"success":    true,
@@ -487,6 +524,7 @@ func handleDashboardBackup(w http.ResponseWriter, r *http.Request, database *db.
 			"siteCleanKeywords":          strings.TrimSpace(cfg.SmartSiteCleanKeywords),
 			"smartSourcePriorityTokens":  defaultStringArray(smartSourcePriorityTokens),
 			"smartPanMatchTokens":        defaultStringArray(smartPanMatchTokens),
+			"smartPanAliasMappings":      smartPanAliasOut,
 		},
 		"metadata": map[string]any{
 			"doubanDataProxy":    defaultString(cfg.DoubanDataProxy, "server-proxy"),
@@ -849,6 +887,26 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 		}
 		_ = database.ReplaceSmartSourcePriorityTokens(defaultStringArrayFromAny(smart["smartSourcePriorityTokens"]))
 		_ = database.ReplaceSmartPanMatchTokens(defaultStringArrayFromAny(smart["smartPanMatchTokens"]))
+		if v, ok := smart["smartPanAliasMappings"]; ok && v != nil {
+			if arr, ok := v.([]any); ok {
+				out := make([]db.SmartPanAliasMapping, 0, len(arr))
+				for _, it := range arr {
+					m, ok := it.(map[string]any)
+					if !ok || m == nil {
+						continue
+					}
+					pan, _ := m["pan"].(string)
+					aliases, _ := m["aliases"].(string)
+					pan = strings.TrimSpace(pan)
+					aliases = strings.TrimSpace(aliases)
+					if pan == "" {
+						continue
+					}
+					out = append(out, db.SmartPanAliasMapping{Pan: pan, Aliases: aliases})
+				}
+				_ = database.ReplaceSmartPanAliasMappings(out)
+			}
+		}
 		applied["smart"] = true
 	}
 
@@ -1604,6 +1662,14 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 		}
 		smartSourcePriorityTokens, _ := database.ListSmartSourcePriorityTokens()
 		smartPanMatchTokens, _ := database.ListSmartPanMatchTokens()
+		smartPanAliasMappings, _ := database.ListSmartPanAliasMappings()
+		smartPanAliasOut := make([]map[string]string, 0, len(smartPanAliasMappings))
+		for _, it := range smartPanAliasMappings {
+			smartPanAliasOut = append(smartPanAliasOut, map[string]string{
+				"pan":     strings.TrimSpace(it.Pan),
+				"aliases": strings.TrimSpace(it.Aliases),
+			})
+		}
 		smartSourceExtractPriority := config.NormalizeSourceExtractPriority(strings.TrimSpace(cfg.SmartSourceExtractPriority))
 		episodeRules, _ := database.ListMagicEpisodeRules()
 		movieRules, _ := database.ListMagicMovieRules()
@@ -1618,6 +1684,7 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 			"aggregateRegexRules":        defaultStringArray(aggregateRegexRules),
 			"smartSourcePriorityTokens":  defaultStringArray(smartSourcePriorityTokens),
 			"smartPanMatchTokens":        defaultStringArray(smartPanMatchTokens),
+			"smartPanAliasMappings":      smartPanAliasOut,
 			"smartSourceExtractPriority": smartSourceExtractPriority,
 		})
 	case http.MethodPost:
@@ -1698,6 +1765,26 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 
 		_ = database.ReplaceSmartSourcePriorityTokens(readCommaTokens("smartSourcePriorityTokens"))
 		_ = database.ReplaceSmartPanMatchTokens(readCommaTokens("smartPanMatchTokens"))
+		if v, ok := body["smartPanAliasMappings"]; ok && v != nil {
+			if arr, ok := v.([]any); ok {
+				out := make([]db.SmartPanAliasMapping, 0, len(arr))
+				for _, it := range arr {
+					m, ok := it.(map[string]any)
+					if !ok || m == nil {
+						continue
+					}
+					pan, _ := m["pan"].(string)
+					aliases, _ := m["aliases"].(string)
+					pan = strings.TrimSpace(pan)
+					aliases = strings.TrimSpace(aliases)
+					if pan == "" {
+						continue
+					}
+					out = append(out, db.SmartPanAliasMapping{Pan: pan, Aliases: aliases})
+				}
+				_ = database.ReplaceSmartPanAliasMappings(out)
+			}
+		}
 
 		priorityRaw, _ := body["smartSourceExtractPriority"].(string)
 		_ = database.UpdateAppConfig(func(c *db.AppConfig) {
@@ -1712,6 +1799,14 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 		cfg, _ := database.ReadAppConfig()
 		smartSourcePriorityTokens, _ := database.ListSmartSourcePriorityTokens()
 		smartPanMatchTokens, _ := database.ListSmartPanMatchTokens()
+		smartPanAliasMappings, _ := database.ListSmartPanAliasMappings()
+		smartPanAliasOut := make([]map[string]string, 0, len(smartPanAliasMappings))
+		for _, it := range smartPanAliasMappings {
+			smartPanAliasOut = append(smartPanAliasOut, map[string]string{
+				"pan":     strings.TrimSpace(it.Pan),
+				"aliases": strings.TrimSpace(it.Aliases),
+			})
+		}
 		smartSourceExtractPriority := config.NormalizeSourceExtractPriority(strings.TrimSpace(cfg.SmartSourceExtractPriority))
 		episodeRules, _ := database.ListMagicEpisodeRules()
 		movieRules, _ := database.ListMagicMovieRules()
@@ -1726,6 +1821,7 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 			"aggregateRegexRules":        defaultStringArray(aggregateRegexRules),
 			"smartSourcePriorityTokens":  defaultStringArray(smartSourcePriorityTokens),
 			"smartPanMatchTokens":        defaultStringArray(smartPanMatchTokens),
+			"smartPanAliasMappings":      smartPanAliasOut,
 			"smartSourceExtractPriority": smartSourceExtractPriority,
 		})
 	default:

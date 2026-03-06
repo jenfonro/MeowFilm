@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"strings"
 	"time"
 )
 
@@ -105,9 +106,31 @@ func (d *DB) ensureDefaults(_ bool) error {
 		{
 			Table: "smart_pan_match_token",
 			Seed: func(tx *sql.Tx) error {
-				tokens := []string{"逸动", "天意", "夸父", "优夕", "百度"}
+				tokens := []string{"移动", "天翼", "夸克", "uc", "百度", "115"}
 				for i, t := range tokens {
 					if _, err := tx.Exec(`INSERT INTO smart_pan_match_token(pos, token) VALUES(?, ?)`, i, t); err != nil {
+						return err
+					}
+				}
+				return nil
+			},
+		},
+		{
+			Table: "smart_pan_alias_mapping",
+			Seed: func(tx *sql.Tx) error {
+				rows := []struct {
+					Pan     string
+					Aliases string
+				}{
+					{Pan: "百度", Aliases: "百度,baidu"},
+					{Pan: "夸克", Aliases: "夸克,quark,夸父"},
+					{Pan: "uc", Aliases: "uc,优夕"},
+					{Pan: "天翼", Aliases: "天翼,天意,189"},
+					{Pan: "移动", Aliases: "移动,139,逸动"},
+					{Pan: "115", Aliases: "115,Pan115"},
+				}
+				for i, it := range rows {
+					if _, err := tx.Exec(`INSERT INTO smart_pan_alias_mapping(pos, pan, aliases) VALUES(?, ?, ?)`, i, it.Pan, it.Aliases); err != nil {
 						return err
 					}
 				}
@@ -135,5 +158,88 @@ func (d *DB) ensureDefaults(_ bool) error {
 		}
 	}
 
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return d.runOneTimePanMatchTokenUpgrade()
+}
+
+func (d *DB) runOneTimePanMatchTokenUpgrade() error {
+	if d == nil || d.db == nil {
+		return nil
+	}
+	const migrationName = "smart_pan_match_token_standardize_v1"
+
+	var done int
+	if err := d.db.QueryRow(`SELECT COUNT(1) FROM app_migration_flag WHERE name=?`, migrationName).Scan(&done); err != nil {
+		return err
+	}
+	if done > 0 {
+		return nil
+	}
+
+	rows, err := d.db.Query(`SELECT token FROM smart_pan_match_token ORDER BY pos ASC`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	tokens := make([]string, 0)
+	for rows.Next() {
+		var token sql.NullString
+		_ = rows.Scan(&token)
+		t := strings.TrimSpace(token.String)
+		if t != "" {
+			tokens = append(tokens, t)
+		}
+	}
+
+	legacyToStandard := map[string]string{
+		"逸动": "移动",
+		"天意": "天翼",
+		"夸父": "夸克",
+		"优夕": "uc",
+	}
+
+	converted := make([]string, 0, len(tokens))
+	seen := map[string]bool{}
+	changed := false
+	for _, t := range tokens {
+		nv, ok := legacyToStandard[t]
+		next := t
+		if ok {
+			next = nv
+			if next != t {
+				changed = true
+			}
+		}
+		key := strings.ToLower(strings.TrimSpace(next))
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		converted = append(converted, next)
+	}
+
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if changed {
+		if _, err := tx.Exec(`DELETE FROM smart_pan_match_token`); err != nil {
+			return err
+		}
+		for i, t := range converted {
+			if _, err := tx.Exec(`INSERT INTO smart_pan_match_token(pos, token) VALUES(?, ?)`, i, t); err != nil {
+				return err
+			}
+		}
+	}
+
+	if _, err := tx.Exec(`INSERT INTO app_migration_flag(name, updated_at) VALUES(?, ?)`, migrationName, time.Now().Unix()); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
