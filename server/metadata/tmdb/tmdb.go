@@ -191,6 +191,13 @@ func pickLatestAiredFromSeasons(seasons []tmdbTVSeason, now time.Time) (int, int
 	return bestSeason, bestEpisodes
 }
 
+func isNewerEpisodePair(seasonA, episodeA, seasonB, episodeB int) bool {
+	if seasonA != seasonB {
+		return seasonA > seasonB
+	}
+	return episodeA > episodeB
+}
+
 func fetchTMDBTVSeasonDetail(database *db.DB, tmdbID int, season int, language string) (*tmdbTVSeasonDetailResponse, error) {
 	if database == nil || tmdbID <= 0 || season < 0 {
 		return nil, fmt.Errorf("invalid args")
@@ -769,11 +776,11 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) (map[s
 				"seasons":       seasons,
 				"seasonCount":   seasonCount,
 			}
-			if ended || (d.LatestSeason > 0 && d.LatestEpisode > 0) {
+			if ended {
 				return out, nil
 			}
-			// Not ended and no known latest aired episode yet: bypass persistent cache and re-fetch from TMDB
-			// so we can probe seasons/episodes and get an accurate latest aired episode.
+			// For ongoing TV, do not short-circuit on persistent cache latest values.
+			// TMDB last_episode_to_air can lag for newly aired episodes; continue to upstream fetch/probe.
 		}
 		if mediaType == "movie" {
 			if d.TMDBType != "movie" {
@@ -883,8 +890,8 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) (map[s
 				latestEpisode = detail.LastEpisodeToAir.EpisodeNumber
 			}
 		}
-		if latestSeason <= 0 || latestEpisode <= 0 {
-			if sNo, eNo := probeLatestAiredEpisodeFromSeasons(database, tmdbID, detail.Seasons, language, time.Now().UTC()); sNo > 0 && eNo > 0 {
+		if sNo, eNo := probeLatestAiredEpisodeFromSeasons(database, tmdbID, detail.Seasons, language, time.Now().UTC()); sNo > 0 && eNo > 0 {
+			if latestSeason <= 0 || latestEpisode <= 0 || isNewerEpisodePair(sNo, eNo, latestSeason, latestEpisode) {
 				latestSeason = sNo
 				latestEpisode = eNo
 			}
