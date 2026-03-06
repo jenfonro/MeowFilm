@@ -382,20 +382,25 @@ func smartPanMockProviderID(panLabel string) string {
 	if s == "" {
 		return ""
 	}
-	lower := strings.ToLower(s)
-	if strings.Contains(s, "天意") || strings.Contains(s, "天翼") || strings.Contains(s, "189") || strings.Contains(lower, "tianyi") {
+	head2 := []rune(s)
+	if len(head2) > 2 {
+		head2 = head2[:2]
+	}
+	h := string(head2)
+	lh := strings.ToLower(h)
+	if h == "天意" || h == "天翼" {
 		return "189"
 	}
-	if strings.Contains(s, "逸动") || strings.Contains(s, "和彩云") || strings.Contains(s, "139") || strings.Contains(lower, "yidong") {
+	if h == "逸动" || h == "和彩" || h == "移动" {
 		return "139"
 	}
-	if strings.Contains(s, "夸父") || strings.Contains(s, "夸克") || strings.Contains(lower, "quark") {
+	if h == "夸父" || h == "夸克" {
 		return "quark"
 	}
-	if strings.Contains(s, "优夕") || strings.Contains(lower, "uc") {
+	if h == "优夕" || lh == "uc" {
 		return "uc"
 	}
-	if strings.Contains(s, "百度") || strings.Contains(lower, "baidu") {
+	if h == "百度" {
 		return "baidu"
 	}
 	return ""
