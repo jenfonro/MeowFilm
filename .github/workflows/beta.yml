@@ -69,6 +69,9 @@ jobs:
           - goos: linux
             goarch: amd64
             cc: gcc
+          - goos: windows
+            goarch: amd64
+            cc: x86_64-w64-mingw32-gcc
 
     steps:
       - uses: actions/checkout@v4
@@ -89,6 +92,14 @@ jobs:
           set -euo pipefail
           apt-get update
           apt-get install -y build-essential ca-certificates curl git
+
+      - name: Install mingw toolchain
+        if: matrix.goos == 'windows' && matrix.goarch == 'amd64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y mingw-w64
 
       - name: Checkout frontend
         uses: actions/checkout@v4
@@ -141,14 +152,32 @@ jobs:
           CC: ${{ matrix.cc }}
         run: |
           set -euo pipefail
+          ldflags="-s -w \
+            -X github.com/jenfonro/meowfilm/server/static.BuildAssetVersion=${{ env.BETA_BUILD_VERSION }} \
+            -X github.com/jenfonro/meowfilm/server/static.BuildBackendCommit=${{ env.BACKEND_COMMIT }} \
+            -X github.com/jenfonro/meowfilm/server/static.BuildFrontendCommit=${{ env.FRONTEND_COMMIT }}"
+
+          if [[ "${GOOS}" == "windows" ]]; then
+            ar_bin="x86_64-w64-mingw32-ar"
+            command -v "${ar_bin}" >/dev/null 2>&1 || { echo "missing archiver: ${ar_bin}" >&2; exit 1; }
+            shim_dir="$(mktemp -d /tmp/mf_win_shim.XXXXXX)"
+            trap 'rm -rf "${shim_dir}"' EXIT
+            printf '%s\n' \
+              '#ifdef _WIN32' \
+              'static char **mf_dummy_environ = 0;' \
+              'char ***__p__environ(void) { return &mf_dummy_environ; }' \
+              'void *__imp___p__environ = (void *)&__p__environ;' \
+              '#endif' > "${shim_dir}/environ_shim.c"
+            "${CC}" -c "${shim_dir}/environ_shim.c" -o "${shim_dir}/environ_shim.o"
+            "${ar_bin}" rcs "${shim_dir}/libenviron_shim.a" "${shim_dir}/environ_shim.o"
+            ldflags+=" -extldflags \"-L${shim_dir} -lenviron_shim -lwinpthread -lmsvcrt\""
+          fi
+
           mkdir -p dist
           ext=""
           if [[ "${GOOS}" == "windows" ]]; then ext=".exe"; fi
           out="dist/meowfilm_${GOOS}_${GOARCH}${ext}"
-          go build -trimpath -ldflags="-s -w \
-            -X github.com/jenfonro/meowfilm/server/static.BuildAssetVersion=${{ env.BETA_BUILD_VERSION }} \
-            -X github.com/jenfonro/meowfilm/server/static.BuildBackendCommit=${{ env.BACKEND_COMMIT }} \
-            -X github.com/jenfonro/meowfilm/server/static.BuildFrontendCommit=${{ env.FRONTEND_COMMIT }}" -o "${out}" .
+          go build -trimpath -ldflags "${ldflags}" -o "${out}" .
           echo "built: ${out}"
           echo "ASSET_PATH=${out}" >> "${GITHUB_ENV}"
 
