@@ -393,6 +393,7 @@ func smartPanToProviderID(panLower string) string {
 	if s == "" {
 		return ""
 	}
+	// Canonical pan token -> provider mapping.
 	switch {
 	case strings.Contains(s, "百度"), strings.Contains(s, "baidu"):
 		return "baidu"
@@ -403,6 +404,35 @@ func smartPanToProviderID(panLower string) string {
 	case strings.Contains(s, "天翼"):
 		return "189"
 	case strings.Contains(s, "移动"):
+		return "139"
+	default:
+		return ""
+	}
+}
+
+func smartPlayFlagProviderID(flagLabel string) string {
+	s := strings.TrimSpace(flagLabel)
+	if s == "" {
+		return ""
+	}
+	if !strings.Contains(s, "-") {
+		return ""
+	}
+	head := strings.TrimSpace(strings.SplitN(s, "-", 2)[0])
+	if head == "" {
+		return ""
+	}
+	// playFlag routing must be strict and fixed (legacy emitted flags).
+	switch {
+	case strings.Contains(head, "百度"):
+		return "baidu"
+	case strings.Contains(head, "夸父"):
+		return "quark"
+	case strings.Contains(head, "优夕"):
+		return "uc"
+	case strings.Contains(head, "天意"):
+		return "189"
+	case strings.Contains(head, "逸动"):
 		return "139"
 	default:
 		return ""
@@ -509,24 +539,7 @@ func smartPanMockProviderID(database *db.DB, panLabel string) string {
 	if s == "" {
 		return ""
 	}
-	// pan_mock detection is intentionally fixed (strict legacy pan flags):
-	// 百度 / 夸父 / 优夕 / 天意 / 逸动
-	if strings.Contains(s, "百度") {
-		return "baidu"
-	}
-	if strings.Contains(s, "夸父") {
-		return "quark"
-	}
-	if strings.Contains(s, "优夕") {
-		return "uc"
-	}
-	if strings.Contains(s, "天意") {
-		return "189"
-	}
-	if strings.Contains(s, "逸动") {
-		return "139"
-	}
-	return ""
+	return smartPlayFlagProviderID(s)
 }
 
 func smartExtractMockPasscodeFromCandidate(c smartCandidate) string {
@@ -3127,17 +3140,31 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 			return nil
 		}
 		src := smartSource{SiteKey: siteKey, SiteName: strings.TrimSpace(row.SiteName), SpiderAPI: spiderAPI, VideoID: videoID, Score: 1000, Seq: 0, NoNoise: true}
-
-		tryPlayFromVod := func(vod string, label string, accessByShareID map[string]string) *smartPickResult {
-			episodes := smartParseVodPlayURLToEpisodes(vod)
-			if len(episodes) == 0 {
+		panProviderOfLabel := func(label string) string {
+			raw := strings.TrimSpace(label)
+			if raw == "" {
+				return ""
+			}
+			key := smartPanMatchLabelText(raw)
+			if key == "" {
+				return ""
+			}
+			entries := smartLoadPanMatchEntries(database)
+			for _, it := range entries {
+				t := strings.TrimSpace(it.TokenLower)
+				if t == "" || !strings.Contains(key, t) {
+					continue
+				}
+				if pid := smartPanToProviderID(it.PanLower); pid != "" {
+					return pid
+				}
+			}
+			return ""
+		}
+		tryPlayFromPans := func(pans []catpawrunner.Pan, accessByShareID map[string]string, ignorePanOrder bool) *smartPickResult {
+			if len(pans) == 0 {
 				return nil
 			}
-			chooseLabel := strings.TrimSpace(label)
-			if chooseLabel == "" {
-				chooseLabel = "历史"
-			}
-			pans := []catpawrunner.Pan{{Label: chooseLabel, Episodes: episodes}}
 			cands := []smartCandidate{}
 			if isMovieMode {
 				cands = smartBuildMovieCandidatesFromPans(src, pans, settings, rawCleanRules, rawMovieRules)
@@ -3147,6 +3174,13 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 			}
 			if len(cands) == 0 {
 				return nil
+			}
+			if ignorePanOrder {
+				if best := smartPickBestMatchIgnorePanOrder(cands, hasMulti, preferSeasonNo, settings); best != nil {
+					if res := smartTryPlayPickedCandidate(flowID, database, apiBase, tvUser, *best, accessByShareID); res != nil && strings.TrimSpace(res.PlayURL) != "" {
+						return res
+					}
+				}
 			}
 			limit := 3
 			if len(cands) < limit {
@@ -3159,6 +3193,19 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 				}
 			}
 			return nil
+		}
+
+		tryPlayFromVod := func(vod string, label string, accessByShareID map[string]string) *smartPickResult {
+			episodes := smartParseVodPlayURLToEpisodes(vod)
+			if len(episodes) == 0 {
+				return nil
+			}
+			chooseLabel := strings.TrimSpace(label)
+			if chooseLabel == "" {
+				chooseLabel = "历史"
+			}
+			pans := []catpawrunner.Pan{{Label: chooseLabel, Episodes: episodes}}
+			return tryPlayFromPans(pans, accessByShareID, true)
 		}
 
 		// 1) History playFlag fast path: only for pan_mock-like flags.
@@ -3234,22 +3281,28 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 		if len(chosen) == 0 {
 			return nil
 		}
-		cands := []smartCandidate{}
-		if isMovieMode {
-			cands = smartBuildMovieCandidatesFromPans(src, chosen, settings, rawCleanRules, rawMovieRules)
-		} else {
-			epMap, epLoose := smartBuildEpisodeMapsFromPans(src, chosen, seasonsForMapping, hasMulti, settings, rawCleanRules, rawEpisodeRules)
-			cands = smartCandidatesForWant(epMap, epLoose, src, seasonsForMapping, hasMulti, preferSeasonNo, want, settings, requireSeasoned)
+
+		// Round 1: when list fails, prefer history playFlag mapped pan provider first.
+		// Round 2: fallback to generic smart matching rules over all pans.
+		historyProvider := panProviderOfLabel(playFlag)
+		if historyProvider == "" {
+			historyProvider = panProviderOfLabel(panLabel)
 		}
-		limit := 3
-		if len(cands) < limit {
-			limit = len(cands)
-		}
-		for i := 0; i < limit; i++ {
-			c := cands[i]
-			if res := smartTryPlayPickedCandidate(flowID, database, apiBase, tvUser, c, accessByShareID); res != nil && strings.TrimSpace(res.PlayURL) != "" {
-				return res
+		if historyProvider != "" {
+			preferred := make([]catpawrunner.Pan, 0, len(chosen))
+			for _, p := range chosen {
+				if panProviderOfLabel(strings.TrimSpace(p.Label)) == historyProvider {
+					preferred = append(preferred, p)
+				}
 			}
+			if len(preferred) > 0 {
+				if picked := tryPlayFromPans(preferred, accessByShareID, false); picked != nil {
+					return picked
+				}
+			}
+		}
+		if picked := tryPlayFromPans(chosen, accessByShareID, false); picked != nil {
+			return picked
 		}
 		return nil
 	}
