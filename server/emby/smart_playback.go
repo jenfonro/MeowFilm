@@ -61,6 +61,83 @@ type smartPanMatchEntry struct {
 	PanLower   string
 }
 
+type smartMatchBlockEntry struct {
+	BlockAll bool
+	PanFlags map[string]struct{}
+}
+
+func smartMatchBlockKeyword(searchTitle string, aggregateRules []string) string {
+	title := strings.TrimSpace(searchTitle)
+	if title == "" {
+		return ""
+	}
+	if len(aggregateRules) > 0 {
+		if out, err := magic.MagicAggregateNormalize(title, aggregateRules); err == nil {
+			if cleaned := strings.TrimSpace(out); cleaned != "" {
+				return cleaned
+			}
+		}
+	}
+	return title
+}
+
+func smartLoadMatchBlockIndex(database *db.DB, keyword string) map[string]*smartMatchBlockEntry {
+	out := map[string]*smartMatchBlockEntry{}
+	if database == nil {
+		return out
+	}
+	kw := strings.TrimSpace(keyword)
+	if kw == "" {
+		return out
+	}
+	rows, _ := database.ListSmartMatchBlockItems(kw)
+	for _, it := range rows {
+		sk := strings.TrimSpace(it.SiteKey)
+		vid := strings.TrimSpace(it.VideoID)
+		if sk == "" || vid == "" {
+			continue
+		}
+		key := sk + "::" + vid
+		entry := out[key]
+		if entry == nil {
+			entry = &smartMatchBlockEntry{BlockAll: false, PanFlags: map[string]struct{}{}}
+			out[key] = entry
+		}
+		src := strings.TrimSpace(it.Source)
+		if src == "" || src == "search" {
+			entry.BlockAll = true
+			entry.PanFlags = map[string]struct{}{}
+			continue
+		}
+		if src == "play" {
+			pf := strings.TrimSpace(it.PanFlag)
+			if pf != "" && !entry.BlockAll {
+				entry.PanFlags[pf] = struct{}{}
+			}
+		}
+	}
+	return out
+}
+
+func smartFilterPansByBlockedFlags(pans []catpawrunner.Pan, blocked map[string]struct{}) []catpawrunner.Pan {
+	if len(pans) == 0 || len(blocked) == 0 {
+		return pans
+	}
+	out := make([]catpawrunner.Pan, 0, len(pans))
+	for _, p := range pans {
+		label := strings.TrimSpace(p.Label)
+		if label == "" {
+			out = append(out, p)
+			continue
+		}
+		if _, ok := blocked[label]; ok {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
 var smartPanMatchEntriesCache = struct {
 	mu       sync.RWMutex
 	expireAt time.Time
@@ -345,6 +422,8 @@ func smartLoadSiteOrder(database *db.DB, u *embyUser) []string {
 
 func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle string, u *embyUser) ([]smartSource, map[string]int) {
 	aggregateRules := embyLoadAggregateCleanRules(database)
+	matchBlockKeyword := smartMatchBlockKeyword(searchTitle, aggregateRules)
+	matchBlockIndex := smartLoadMatchBlockIndex(database, matchBlockKeyword)
 	rawSites, _ := database.ListVideoSourceSites()
 	sites := make([]site, 0, len(rawSites))
 	for _, s := range rawSites {
@@ -371,17 +450,6 @@ func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle st
 	}
 
 	qKey := embyAggKeyWithRules(searchTitle, aggregateRules)
-	blocked := map[string]struct{}{}
-	if rows, _ := database.ListSmartMatchBlockItems(searchTitle); len(rows) > 0 {
-		for _, it := range rows {
-			sk := strings.TrimSpace(it.SiteKey)
-			vid := strings.TrimSpace(it.VideoID)
-			if sk == "" || vid == "" {
-				continue
-			}
-			blocked[sk+"::"+vid] = struct{}{}
-		}
-	}
 
 	// Search across sites concurrently; Emby smart-play should not block on the slowest site.
 	type task struct {
@@ -438,7 +506,7 @@ func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle st
 				if strings.TrimSpace(it.ID) == "" || name == "" {
 					continue
 				}
-				if _, ok := blocked[tt.Site.Key+"::"+strings.TrimSpace(it.ID)]; ok {
+				if entry := matchBlockIndex[tt.Site.Key+"::"+strings.TrimSpace(it.ID)]; entry != nil && entry.BlockAll {
 					continue
 				}
 				key := embyAggKeyWithRules(name, aggregateRules)
@@ -1806,6 +1874,8 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 
 	seasonsForMapping, hasMulti, preferSeasonNo, requireSeasoned := recomputeMeta(tmdbSeasons)
 	aggregateRules := embyLoadAggregateCleanRules(database)
+	matchBlockKeyword := smartMatchBlockKeyword(searchTitle, aggregateRules)
+	matchBlockIndex := smartLoadMatchBlockIndex(database, matchBlockKeyword)
 	needDouban := strings.TrimSpace(req.Kind) == "tv" && strings.TrimSpace(req.SubKind) == "episode" && len(tmdbSeasons) < 2 && strings.TrimSpace(searchTitle) != ""
 	if needDouban {
 		if over, ok := doubanProbeSeasons(database, req.TMDBID, searchTitle, want); ok && len(over) >= 2 {
@@ -1815,6 +1885,27 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 				embyDebugPrintf("[smart][douban] override tmdbId=%d want=%d -> mapped=S%02dE%03d", req.TMDBID, want, mapped.Season, mapped.Episode)
 			}
 		}
+	}
+
+	matchBlockEntryOf := func(siteKey, videoID string) *smartMatchBlockEntry {
+		sk := strings.TrimSpace(siteKey)
+		vid := strings.TrimSpace(videoID)
+		if sk == "" || vid == "" {
+			return nil
+		}
+		return matchBlockIndex[sk+"::"+vid]
+	}
+
+	isPanBlocked := func(entry *smartMatchBlockEntry, label string) bool {
+		if entry == nil || len(entry.PanFlags) == 0 {
+			return false
+		}
+		key := strings.TrimSpace(label)
+		if key == "" {
+			return false
+		}
+		_, ok := entry.PanFlags[key]
+		return ok
 	}
 
 	tryHistoryFastPath := func() *smartPickResult {
@@ -1841,10 +1932,14 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 		if siteKey == "" || videoID == "" {
 			return nil
 		}
+		if entry := matchBlockEntryOf(siteKey, videoID); entry != nil && entry.BlockAll {
+			return nil
+		}
 		spiderAPI := strings.TrimSpace(embyResolveSpiderAPIBySiteKey(database, siteKey))
 		if spiderAPI == "" {
 			return nil
 		}
+		blockedEntry := matchBlockEntryOf(siteKey, videoID)
 		src := smartSource{SiteKey: siteKey, SiteName: strings.TrimSpace(row.SiteName), SpiderAPI: spiderAPI, VideoID: videoID, Score: 1000, Seq: 0, NoNoise: true}
 		panProviderOfLabel := func(label string) string {
 			raw := strings.TrimSpace(label)
@@ -1915,7 +2010,7 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 		}
 
 		// 1) History playFlag fast path: only for pan_mock-like flags.
-		if strings.Contains(playFlag, "-") {
+		if strings.Contains(playFlag, "-") && !isPanBlocked(blockedEntry, playFlag) {
 			pid := smartPanMockProviderID(database, playFlag)
 			if pid != "" {
 				accessByShareID := map[string]string{}
@@ -1962,6 +2057,9 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 		playFrom, playURL := catpawrunner.ExtractDetailPlayFromURL(detailRaw)
 		pans := catpawrunner.ParsePlaySources(playFrom, playURL)
 		chosen := []catpawrunner.Pan{}
+		if len(pans) > 0 && blockedEntry != nil {
+			pans = smartFilterPansByBlockedFlags(pans, blockedEntry.PanFlags)
+		}
 		if panLabel != "" {
 			for _, p := range pans {
 				if strings.TrimSpace(p.Label) == panLabel {
@@ -1980,8 +2078,14 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 		}
 		accessByShareID := map[string]string{}
 		if smartIsPanMockEnabled(detailRaw) {
+			if blockedEntry != nil {
+				chosen = smartFilterPansByBlockedFlags(chosen, blockedEntry.PanFlags)
+			}
 			resolved, access := embyResolvePanMockDetailPansIncremental(database, src.SiteKey, src.SiteName, want, seasonsForMapping, hasMulti, rawCleanRules, rawEpisodeRules, chosen, nil)
 			chosen = resolved
+			if blockedEntry != nil {
+				chosen = smartFilterPansByBlockedFlags(chosen, blockedEntry.PanFlags)
+			}
 			accessByShareID = access
 		}
 		if len(chosen) == 0 {
@@ -2019,17 +2123,6 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 	}()
 
 	qKey := embyAggKeyWithRules(searchTitle, aggregateRules)
-	blocked := map[string]struct{}{}
-	if rows, _ := database.ListSmartMatchBlockItems(searchTitle); len(rows) > 0 {
-		for _, it := range rows {
-			sk := strings.TrimSpace(it.SiteKey)
-			vid := strings.TrimSpace(it.VideoID)
-			if sk == "" || vid == "" {
-				continue
-			}
-			blocked[sk+"::"+vid] = struct{}{}
-		}
-	}
 
 	rawSites, _ := database.ListVideoSourceSites()
 	sitesList := make([]site, 0, len(rawSites))
@@ -2131,7 +2224,7 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 			if id == "" || name == "" {
 				continue
 			}
-			if _, ok := blocked[t.Site.Key+"::"+id]; ok {
+			if entry := matchBlockEntryOf(t.Site.Key, id); entry != nil && entry.BlockAll {
 				continue
 			}
 			key := embyAggKeyWithRules(name, aggregateRules)
@@ -2181,6 +2274,10 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 				return
 			default:
 			}
+			blockedEntry := matchBlockEntryOf(src.SiteKey, src.VideoID)
+			if blockedEntry != nil && blockedEntry.BlockAll {
+				continue
+			}
 			detailRaw, err := cache.RequestSpiderDetailCachedWithTimeout(apiBase, src.SpiderAPI, src.VideoID, 8*time.Second)
 			if err != nil || detailRaw == nil {
 				continue
@@ -2190,8 +2287,14 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 			if pans == nil {
 				pans = []catpawrunner.Pan{}
 			}
+			if blockedEntry != nil && len(pans) > 0 {
+				pans = smartFilterPansByBlockedFlags(pans, blockedEntry.PanFlags)
+			}
 			accessByShareID := map[string]string{}
 			if smartIsPanMockEnabled(detailRaw) {
+				if blockedEntry != nil && len(pans) > 0 {
+					pans = smartFilterPansByBlockedFlags(pans, blockedEntry.PanFlags)
+				}
 				resolved, access := embyResolvePanMockDetailPansIncremental(
 					database,
 					src.SiteKey,
@@ -2205,6 +2308,9 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 					nil,
 				)
 				pans = resolved
+				if blockedEntry != nil && len(pans) > 0 {
+					pans = smartFilterPansByBlockedFlags(pans, blockedEntry.PanFlags)
+				}
 				accessByShareID = access
 			}
 
