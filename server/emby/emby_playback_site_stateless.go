@@ -59,7 +59,7 @@ func embyResolveStatelessSiteEpisodePlayback(database *db.DB, u *embyUser, siteV
 	urlPicked := ""
 	headers := map[string]string{}
 	providerForProxy := ""
-	if pid := smartPanMockProviderID(database, strings.TrimSpace(epFlag)); pid != "" {
+	if pid := embyPanMockProviderFromLabel(strings.TrimSpace(epFlag)); pid != "" {
 		providerForProxy = pid
 		switch pid {
 		case "189":
