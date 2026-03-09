@@ -1,7 +1,6 @@
 package emby
 
 import (
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -78,78 +77,12 @@ func embyPanMock189AccessGet(shareID string) (string, bool) {
 	return ac, true
 }
 
-func embyIsPanMockEnabled(detailRaw map[string]any) bool {
-	if detailRaw == nil {
-		return false
-	}
-	v, ok := detailRaw["pan_mock"]
-	if !ok || v == nil {
-		return false
-	}
-	switch x := v.(type) {
-	case bool:
-		return x
-	case string:
-		s := strings.TrimSpace(x)
-		return s == "1" || strings.EqualFold(s, "true")
-	case float64:
-		return int(x) == 1
-	default:
-		return false
-	}
-}
-
 func embyExtractMockPasscodeFromEpisodeURL(episodeURL string) string {
-	names := smartExtractRawNamesFromEpisodeURL(episodeURL)
-	if len(names) == 0 {
-		return ""
-	}
-	raw := strings.TrimSpace(names[0])
-	if raw == "" {
-		return ""
-	}
-	if !strings.HasSuffix(strings.ToLower(raw), ".mp4") {
-		// Only placeholder filenames encode passcodes as "<pass>.mp4".
-		return ""
-	}
-	out := raw
-	if strings.HasSuffix(strings.ToLower(out), ".mp4") {
-		out = strings.TrimSpace(out[:len(out)-4])
-	}
-	if strings.EqualFold(out, "nopass") {
-		return ""
-	}
-	return strings.TrimSpace(out)
+	return smartExtractMockPasscodeFromEpisodeURL(episodeURL)
 }
 
 func embyExtractTianyiMockMeta(panLabel string, episodeURL string) (shareCode string, accessCode string) {
-	label := strings.TrimSpace(panLabel)
-	url := strings.TrimSpace(episodeURL)
-
-	// Fallback: shareCode might already be embedded in the label like "天意-XXXX" / "天翼-XXXX".
-	if m := regexp.MustCompile(`(?:天意|天翼)-([A-Za-z0-9]{6,64})`).FindStringSubmatch(label); len(m) == 2 {
-		shareCode = strings.TrimSpace(m[1])
-	}
-
-	pass := strings.TrimSpace(embyExtractMockPasscodeFromEpisodeURL(url))
-	if pass == "" {
-		return shareCode, ""
-	}
-	if strings.Contains(pass, "-") {
-		seg := strings.SplitN(pass, "-", 2)
-		if shareCode == "" && strings.TrimSpace(seg[0]) != "" {
-			shareCode = strings.TrimSpace(seg[0])
-		}
-		if len(seg) == 2 {
-			accessCode = strings.TrimSpace(seg[1])
-		}
-	} else {
-		accessCode = pass
-	}
-	if strings.EqualFold(accessCode, "nopass") {
-		accessCode = ""
-	}
-	return shareCode, accessCode
+	return smartExtractTianyiMockMetaFromEpisodeURL(panLabel, episodeURL)
 }
 
 func embyResolvePanMockDetailPans(

@@ -31,7 +31,7 @@ func embyFetchSiteDetailPans(database *db.DB, u *embyUser, spiderAPI string, vid
 	if pans == nil {
 		pans = []catpawrunner.Pan{}
 	}
-	if embyIsPanMockEnabled(detailRaw) {
+	if smartIsPanMockEnabled(detailRaw) {
 		for i := range pans {
 			pans[i].PanMockEnabled = true
 		}

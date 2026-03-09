@@ -6,7 +6,6 @@ import (
 	"errors"
 	"hash/fnv"
 	"math"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,11 +29,6 @@ type smartPlaybackRequest struct {
 	SubKind string // "movie" | "episode"
 }
 
-type smartPriorityMatch struct {
-	Count   int
-	Indices []int
-}
-
 var smartPlayTrySeq uint64
 var smartPlayFlowSeq uint64
 
@@ -44,11 +38,6 @@ const (
 )
 
 
-
-type smartSeasonEpisode struct {
-	Season  int
-	Episode int
-}
 
 func smartPickBestMatchIgnorePanOrder(list []smartCandidate, tmdbHasMultiSeason bool, preferSeasonNo int, settings smartPlaybackSettings) *smartCandidate {
 	items := make([]smartCandidate, 0, len(list))
@@ -67,32 +56,6 @@ func smartPickBestMatchIgnorePanOrder(list []smartCandidate, tmdbHasMultiSeason 
 	return &best
 }
 
-func smartParseVodPlayURLToEpisodes(vodPlayURL string) []catpawrunner.Episode {
-	raw := strings.TrimSpace(vodPlayURL)
-	if raw == "" {
-		return nil
-	}
-	chunks := strings.Split(raw, "#")
-	out := make([]catpawrunner.Episode, 0, len(chunks))
-	for _, chunk := range chunks {
-		s := strings.TrimSpace(chunk)
-		if s == "" {
-			continue
-		}
-		name := s
-		url := ""
-		if idx := strings.Index(s, "$"); idx >= 0 {
-			name = strings.TrimSpace(s[:idx])
-			url = strings.TrimSpace(s[idx+1:])
-		}
-		if strings.TrimSpace(url) == "" {
-			continue
-		}
-		out = append(out, catpawrunner.Episode{Name: name, URL: url})
-	}
-	return out
-}
-
 type smartPanMatchEntry struct {
 	TokenLower string
 	PanLower   string
@@ -103,57 +66,6 @@ var smartPanMatchEntriesCache = struct {
 	expireAt time.Time
 	entries  []smartPanMatchEntry
 }{}
-
-func smartPanToProviderID(panLower string) string {
-	s := strings.ToLower(strings.TrimSpace(panLower))
-	if s == "" {
-		return ""
-	}
-	// Canonical pan token -> provider mapping.
-	switch {
-	case strings.Contains(s, "百度"), strings.Contains(s, "baidu"):
-		return "baidu"
-	case strings.Contains(s, "夸克"), strings.Contains(s, "quark"):
-		return "quark"
-	case strings.Contains(s, "uc"):
-		return "uc"
-	case strings.Contains(s, "天翼"):
-		return "189"
-	case strings.Contains(s, "移动"):
-		return "139"
-	default:
-		return ""
-	}
-}
-
-func smartPlayFlagProviderID(flagLabel string) string {
-	s := strings.TrimSpace(flagLabel)
-	if s == "" {
-		return ""
-	}
-	if !strings.Contains(s, "-") {
-		return ""
-	}
-	head := strings.TrimSpace(strings.SplitN(s, "-", 2)[0])
-	if head == "" {
-		return ""
-	}
-	// playFlag routing must be strict and fixed (legacy emitted flags).
-	switch {
-	case strings.Contains(head, "百度"):
-		return "baidu"
-	case strings.Contains(head, "夸父"):
-		return "quark"
-	case strings.Contains(head, "优夕"):
-		return "uc"
-	case strings.Contains(head, "天意"):
-		return "189"
-	case strings.Contains(head, "逸动"):
-		return "139"
-	default:
-		return ""
-	}
-}
 
 func smartLoadPanMatchEntries(database *db.DB) []smartPanMatchEntry {
 	now := time.Now()
@@ -243,78 +155,6 @@ func smartLoadPanMatchEntries(database *db.DB) []smartPanMatchEntry {
 	return entries
 }
 
-func smartPanMockProviderID(database *db.DB, panLabel string) string {
-	_ = database
-	raw := strings.TrimSpace(panLabel)
-	if raw == "" || !strings.Contains(raw, "-") {
-		// Current pan_mock only supports strict "<flag>-..." formats.
-		// Labels without '-' are treated as non-pan_mock for now.
-		return ""
-	}
-	s := smartPanMatchLabelText(raw)
-	if s == "" {
-		return ""
-	}
-	return smartPlayFlagProviderID(s)
-}
-
-func smartExtractMockPasscodeFromCandidate(c smartCandidate) string {
-	names := smartExtractRawNamesFromEpisodeURL(c.Ep.URL)
-	if len(names) == 0 {
-		return ""
-	}
-	raw := strings.TrimSpace(names[0])
-	if raw == "" {
-		return ""
-	}
-	if !strings.HasSuffix(strings.ToLower(raw), ".mp4") {
-		// Only placeholder filenames encode passcodes as "<pass>.mp4".
-		return ""
-	}
-	out := raw
-	if strings.HasSuffix(strings.ToLower(out), ".mp4") {
-		out = strings.TrimSpace(out[:len(out)-4])
-	}
-	if strings.EqualFold(out, "nopass") {
-		return ""
-	}
-	return strings.TrimSpace(out)
-}
-
-func smartExtractTianyiMockMetaFromCandidate(c smartCandidate) (shareCode string, accessCode string) {
-	label := strings.TrimSpace(c.PanLabel)
-	if m := regexp.MustCompile(`(?:天意|天翼)-([A-Za-z0-9]{6,64})`).FindStringSubmatch(label); len(m) == 2 {
-		shareCode = strings.TrimSpace(m[1])
-	}
-	pass := strings.TrimSpace(smartExtractMockPasscodeFromCandidate(c))
-	if pass == "" {
-		return shareCode, ""
-	}
-	if strings.Contains(pass, "-") {
-		seg := strings.SplitN(pass, "-", 2)
-		if shareCode == "" && strings.TrimSpace(seg[0]) != "" {
-			shareCode = strings.TrimSpace(seg[0])
-		}
-		if len(seg) == 2 {
-			accessCode = strings.TrimSpace(seg[1])
-		}
-	} else {
-		accessCode = pass
-	}
-	if strings.EqualFold(accessCode, "nopass") {
-		accessCode = ""
-	}
-	return shareCode, accessCode
-}
-
-type smartPlaybackSettings struct {
-	Mode               string   // "无" | "网盘" | "关键字"
-	KeywordTokensLower []string // smart_source_priority_tokens
-	PanTokenOrderLower []string // smart_pan_match_tokens
-	OrderKeys          []string // order preference keys
-	ExplicitKeys       []string // explicit big conditions
-}
-
 func smartLoadPlaybackSettings(database *db.DB) smartPlaybackSettings {
 	cfg, _ := database.ReadAppConfig()
 	mode := config.NormalizeSourceExtractPriority(cfg.SmartSourceExtractPriority)
@@ -394,35 +234,6 @@ func smartLoadPlaybackSettings(database *db.DB) smartPlaybackSettings {
 	}
 }
 
-func smartPanMatchLabelText(label string) string {
-	s := strings.ToLower(strings.TrimSpace(label))
-	if s == "" {
-		return ""
-	}
-	if strings.Contains(s, "-") {
-		parts := strings.SplitN(s, "-", 2)
-		return strings.TrimSpace(parts[0])
-	}
-	return s
-}
-
-func smartLabelTokenIdx(label string, panTokenOrderLower []string) int {
-	s := smartPanMatchLabelText(label)
-	if s == "" {
-		return -1
-	}
-	for i := 0; i < len(panTokenOrderLower); i++ {
-		t := strings.TrimSpace(panTokenOrderLower[i])
-		if t == "" {
-			continue
-		}
-		if strings.Contains(s, t) {
-			return i
-		}
-	}
-	return -1
-}
-
 const (
 	smartDetailFailCooldownBase = 30 * time.Second
 	smartDetailFailCooldownMax  = 5 * time.Minute
@@ -439,70 +250,7 @@ type smartSource struct {
 	NoNoise     bool
 }
 
-func smartBuildSourceKey(src smartSource) string {
-	return strings.TrimSpace(src.SiteKey) + "::" + strings.TrimSpace(src.SpiderAPI) + "::" + strings.TrimSpace(src.VideoID)
-}
 
-func smartExtractSeasonHintFromSource(src smartSource) int {
-	text := src.SiteName + " " + src.VideoRemark
-	t := strings.TrimSpace(text)
-	if t == "" {
-		return 0
-	}
-	if m := regexp.MustCompile(`(?i)\bS(\d{1,2})\b`).FindStringSubmatch(t); len(m) >= 2 && m[1] != "" {
-		n := intFromDigits(m[1])
-		if n >= 0 && n <= 99 {
-			return n
-		}
-	}
-	if m := regexp.MustCompile(`(?i)\bseason\s*(\d{1,2})\b`).FindStringSubmatch(t); len(m) >= 2 && m[1] != "" {
-		n := intFromDigits(m[1])
-		if n >= 0 && n <= 99 {
-			return n
-		}
-	}
-	if m := regexp.MustCompile(`第\s*(\d{1,2})\s*季`).FindStringSubmatch(t); len(m) >= 2 && m[1] != "" {
-		n := intFromDigits(m[1])
-		if n >= 0 && n <= 99 {
-			return n
-		}
-	}
-	return 0
-}
-
-func smartHasExplicitSeasonMarkerInSource(src smartSource) bool {
-	t := strings.TrimSpace(src.SiteName + " " + src.VideoRemark)
-	if t == "" {
-		return false
-	}
-	return regexp.MustCompile(`(?i)(?:\bS\d{1,2}\b|第\s*\d{1,2}\s*季|season\s*\d{1,2})`).MatchString(t)
-}
-
-type smartCandidate struct {
-	SiteKey          string
-	SiteName         string
-	SpiderAPI        string
-	VideoID          string
-	SrcRemarkLower   string
-	PanLabel         string
-	PanTokenIdx      int
-	Ep               catpawrunner.Episode
-	RawLower         string
-	MatchSeason      int
-	HasSeasonMarker  bool
-	SearchSeasonHint int
-	MatchKeyword     smartPriorityMatch
-}
-
-type smartCandidateFeatures struct {
-	HayLower     string
-	Quality      string
-	QualityRank  int
-	Fps60        bool
-	HasHdr       bool
-	TierRank     int
-	EnhanceMatch smartPriorityMatch
-}
 type smartDetailCacheEntry struct {
 	OK                        bool
 	FailCount                 int
@@ -744,8 +492,8 @@ func smartBuildCandidates(aggregated []smartSource, orderMap map[string]int, tmd
 		b := cands[j]
 
 		if tmdbHasMultiSeason && preferSeasonNo > 0 {
-			as := smartExtractSeasonHintFromSource(a)
-			bs := smartExtractSeasonHintFromSource(b)
+			as := smartExtractSeasonHintFromSource(a.SiteName, a.VideoRemark)
+			bs := smartExtractSeasonHintFromSource(b.SiteName, b.VideoRemark)
 			am := as == preferSeasonNo
 			bm := bs == preferSeasonNo
 			if am != bm {
@@ -756,8 +504,8 @@ func smartBuildCandidates(aggregated []smartSource, orderMap map[string]int, tmd
 			if aWrong != bWrong {
 				return !aWrong
 			}
-			aHas := smartHasExplicitSeasonMarkerInSource(a) || as > 0
-			bHas := smartHasExplicitSeasonMarkerInSource(b) || bs > 0
+			aHas := smartHasExplicitSeasonMarkerInSource(a.SiteName, a.VideoRemark) || as > 0
+			bHas := smartHasExplicitSeasonMarkerInSource(b.SiteName, b.VideoRemark) || bs > 0
 			if aHas != bHas {
 				return aHas
 			}
@@ -799,7 +547,7 @@ func smartBuildCandidates(aggregated []smartSource, orderMap map[string]int, tmd
 	seen := map[string]bool{}
 	unique := make([]smartSource, 0, len(cands))
 	for _, s := range cands {
-		k := smartBuildSourceKey(s)
+		k := smartBuildSourceKey(s.SiteKey, s.SpiderAPI, s.VideoID)
 		if k == "" || seen[k] {
 			continue
 		}
@@ -813,7 +561,7 @@ func smartBuildCandidates(aggregated []smartSource, orderMap map[string]int, tmd
 	retryable := []smartSource{}
 	cooldownFailed := []smartSource{}
 	for _, s := range unique {
-		key := smartBuildSourceKey(s)
+		key := smartBuildSourceKey(s.SiteKey, s.SpiderAPI, s.VideoID)
 		rank := 1
 		smartDetailCache.Lock()
 		hit := smartDetailCache.M[key]
@@ -842,28 +590,6 @@ func smartBuildCandidates(aggregated []smartSource, orderMap map[string]int, tmd
 	out = append(out, retryable...)
 	out = append(out, cooldownFailed...)
 	return out
-}
-
-func smartTMDBSeasonEpisodeOfGlobal(seasons []embyTMDBSeason, global int) smartSeasonEpisode {
-	g := global
-	if g <= 0 {
-		return smartSeasonEpisode{Season: 0, Episode: 0}
-	}
-	left := g
-	for _, it := range seasons {
-		sn := it.Season
-		cnt := it.EpisodeCount
-		if sn <= 0 || cnt <= 0 {
-			continue
-		}
-		if left > cnt {
-			left -= cnt
-			continue
-		}
-		return smartSeasonEpisode{Season: sn, Episode: left}
-	}
-	smartMaybeLogDoubanMapFallback(g, seasons)
-	return smartSeasonEpisode{Season: 0, Episode: g}
 }
 
 var smartDoubanMapFallbackLogGate struct {
@@ -918,7 +644,7 @@ func smartMaybeLogDoubanMapFallback(global int, seasons []embyTMDBSeason) {
 }
 
 func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSource, tmdbSeasons []embyTMDBSeason, tmdbHasMultiSeason bool, settings smartPlaybackSettings, rawCleanRules []string, rawEpisodeRules []string) *smartDetailCacheEntry {
-	key := smartBuildSourceKey(src)
+	key := smartBuildSourceKey(src.SiteKey, src.SpiderAPI, src.VideoID)
 	if key == "" {
 		return nil
 	}
@@ -1112,12 +838,6 @@ func smartPickBestMatch(list []smartCandidate, tmdbHasMultiSeason bool, preferSe
 		}
 	}
 	return &best
-}
-
-type smartPickResult struct {
-	Cand    smartCandidate
-	PlayURL string
-	Headers map[string]string
 }
 
 type smartDetailState struct {
@@ -1338,7 +1058,7 @@ func smartCandidatesForWant(
 	settings smartPlaybackSettings,
 	requireSeasoned bool,
 ) []smartCandidate {
-	searchSeasonHint := smartExtractSeasonHintFromSource(src)
+	searchSeasonHint := smartExtractSeasonHintFromSource(src.SiteName, src.VideoRemark)
 	wantedInSeason := smartSeasonEpisode{Season: 0, Episode: want}
 	if tmdbHasMultiSeason {
 		wantedInSeason = smartTMDBSeasonEpisodeOfGlobal(tmdbSeasons, want)
@@ -1648,7 +1368,7 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 	if siteKey == "" || spiderApi == "" || videoId == "" || want <= 0 {
 		return nil
 	}
-	searchSeasonHint := smartExtractSeasonHintFromSource(src)
+	searchSeasonHint := smartExtractSeasonHintFromSource(src.SiteName, src.VideoRemark)
 
 	cache := smartLoadOrBuildDetailCache(database, apiBase, src, tmdbSeasons, tmdbHasMultiSeason, settings, rawCleanRules, rawEpisodeRules)
 	if cache == nil || !cache.OK {
@@ -1734,7 +1454,7 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 				rawEpisodeRules,
 				database,
 				tvUser,
-				cache,
+				cache.PanMock189AccessByShareID,
 			)
 		}
 
@@ -2259,7 +1979,7 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 			chosen = append(chosen, pans...)
 		}
 		accessByShareID := map[string]string{}
-		if embyIsPanMockEnabled(detailRaw) {
+		if smartIsPanMockEnabled(detailRaw) {
 			resolved, access := embyResolvePanMockDetailPansIncremental(database, src.SiteKey, src.SiteName, want, seasonsForMapping, hasMulti, rawCleanRules, rawEpisodeRules, chosen, nil)
 			chosen = resolved
 			accessByShareID = access
@@ -2471,7 +2191,7 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 				pans = []catpawrunner.Pan{}
 			}
 			accessByShareID := map[string]string{}
-			if embyIsPanMockEnabled(detailRaw) {
+			if smartIsPanMockEnabled(detailRaw) {
 				resolved, access := embyResolvePanMockDetailPansIncremental(
 					database,
 					src.SiteKey,
@@ -2780,71 +2500,4 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 			return strings.TrimSpace(res.PlayURL), res.Headers, buildPicked(res.Cand, feat), nil
 		}
 	}
-}
-
-func smartFirstRawNameFromURL(u string) string {
-	rawNames := smartExtractRawNamesFromEpisodeURL(u)
-	if len(rawNames) == 0 {
-		return ""
-	}
-	return strings.TrimSpace(rawNames[0])
-}
-
-func containsInt(list []int, v int) bool {
-	for _, x := range list {
-		if x == v {
-			return true
-		}
-	}
-	return false
-}
-
-func intFromDigits(s string) int {
-	n := 0
-	for _, ch := range strings.TrimSpace(s) {
-		if ch < '0' || ch > '9' {
-			return 0
-		}
-		n = n*10 + int(ch-'0')
-	}
-	return n
-}
-
-func smartMinInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func smartMaxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func smartShortURLForLog(raw string) string {
-	s := strings.TrimSpace(raw)
-	if s == "" {
-		return ""
-	}
-	// Drop query/fragment (often contains large tokens).
-	if i := strings.IndexAny(s, "?#"); i >= 0 {
-		s = strings.TrimSpace(s[:i])
-	}
-	const maxLen = 180
-	if len(s) <= maxLen {
-		return s
-	}
-	head := 110
-	tail := 50
-	if head+tail+3 > maxLen {
-		head = 90
-		tail = 50
-	}
-	if head+tail+3 > len(s) {
-		return s[:maxLen]
-	}
-	return s[:head] + "..." + s[len(s)-tail:]
 }

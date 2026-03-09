@@ -69,12 +69,6 @@ type embyTMDBTVDetail struct {
 	Seasons       []embyTMDBSeason
 }
 
-type embyTMDBSeason struct {
-	Season       int
-	EpisodeCount int
-	Poster       string
-}
-
 type embyTMDBSeasonEpisode struct {
 	Episode  int
 	Name     string
