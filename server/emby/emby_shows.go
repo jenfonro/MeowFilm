@@ -331,6 +331,25 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 					seasonName = "第" + intToCN(seasonNo) + "季"
 				}
 
+				allRawSame := true
+				firstRawName := ""
+				for _, ep := range pan.Episodes {
+					epURL := strings.TrimSpace(ep.URL)
+					if epURL == "" {
+						continue
+					}
+					rawName := ""
+					if rawNames := smartExtractRawNamesFromEpisodeURL(epURL); len(rawNames) > 0 {
+						rawName = strings.TrimSpace(rawNames[0])
+					}
+					if firstRawName == "" {
+						firstRawName = rawName
+					} else if rawName != firstRawName {
+						allRawSame = false
+						break
+					}
+				}
+
 				out := make([]map[string]any, 0, len(pan.Episodes))
 				for i, ep := range pan.Episodes {
 					epURL := strings.TrimSpace(ep.URL)
@@ -339,10 +358,17 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 					}
 					epIndex := i + 1
 					epName := strings.TrimSpace(ep.Name)
-					if smartPanMockProviderID(database, strings.TrimSpace(ep.Flag)) != "" {
-						if rawNames := smartExtractRawNamesFromEpisodeURL(epURL); len(rawNames) > 0 && strings.TrimSpace(rawNames[0]) != "" {
-							epName = strings.TrimSpace(rawNames[0])
+					rawName := ""
+					if rawNames := smartExtractRawNamesFromEpisodeURL(epURL); len(rawNames) > 0 {
+						rawName = strings.TrimSpace(rawNames[0])
+					}
+					if !allRawSame {
+						pid := embyPanMockProviderFromLabel(strings.TrimSpace(ep.Flag))
+						if pid == "" {
+							pid = embyPanMockProviderFromLabel(strings.TrimSpace(pan.Label))
 						}
+						preferFile := pan.PanMockEnabled && pid != ""
+						epName = embyPickEpisodeDisplayName(epName, rawName, strings.ToLower(seriesName), preferFile)
 					}
 					if epName == "" {
 						epName = "第" + intToCN(epIndex) + "集"
