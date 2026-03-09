@@ -1,4 +1,4 @@
-package emby
+package smart
 
 import (
 	"strings"
@@ -177,7 +177,7 @@ func smartTryPanMockGroup(
 	rawEpisodeRules []string,
 	database *db.DB,
 	tvUser string,
-	cache *smartDetailCacheEntry,
+	accessByShareID map[string]string,
 ) *smartPickResult {
 	switch at.Provider {
 	case "189":
@@ -190,12 +190,12 @@ func smartTryPanMockGroup(
 				ac = strings.TrimSpace(ac2)
 			}
 		}
-		if strings.TrimSpace(ac) == "" && cache != nil && len(cache.PanMock189AccessByShareID) > 0 {
+		if strings.TrimSpace(ac) == "" && len(accessByShareID) > 0 {
 			parts := strings.Split(strings.TrimSpace(base.Ep.URL), "*")
 			if len(parts) >= 2 {
 				shareID := strings.TrimSpace(parts[1])
 				if shareID != "" {
-					if v, ok := cache.PanMock189AccessByShareID[shareID]; ok {
+					if v, ok := accessByShareID[shareID]; ok {
 						ac = strings.TrimSpace(v)
 					}
 				}
@@ -216,12 +216,12 @@ func smartTryPanMockGroup(
 		if picked == nil || strings.TrimSpace(picked.Ep.URL) == "" {
 			return nil
 		}
-		if strings.TrimSpace(ac) == "" && cache != nil && len(cache.PanMock189AccessByShareID) > 0 {
+		if strings.TrimSpace(ac) == "" && len(accessByShareID) > 0 {
 			parts := strings.Split(strings.TrimSpace(picked.Ep.URL), "*")
 			if len(parts) >= 2 {
 				shareID := strings.TrimSpace(parts[1])
 				if shareID != "" {
-					if v, ok := cache.PanMock189AccessByShareID[shareID]; ok {
+					if v, ok := accessByShareID[shareID]; ok {
 						ac = strings.TrimSpace(v)
 					}
 				}
@@ -342,4 +342,3 @@ func smartTryPanMockGroup(
 		return nil
 	}
 }
-

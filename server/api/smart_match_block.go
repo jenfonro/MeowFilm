@@ -43,6 +43,8 @@ func handleAPISmartMatchBlockItems(w http.ResponseWriter, r *http.Request, datab
 			"spiderApi": it.SpiderAPI,
 			"videoId": it.VideoID,
 			"poster": it.Poster,
+			"panFlag": it.PanFlag,
+			"source": it.Source,
 		})
 	}
 	writeJSON(w, 200, map[string]any{"success": true, "items": out})
@@ -63,13 +65,47 @@ func handleAPISmartMatchBlockAdd(w http.ResponseWriter, r *http.Request, databas
 	spiderAPI := strings.TrimSpace(readStrJSONBody(body, "spiderApi"))
 	videoID := strings.TrimSpace(readStrJSONBody(body, "videoId"))
 	poster := strings.TrimSpace(readStrJSONBody(body, "poster"))
+	source := strings.TrimSpace(readStrJSONBody(body, "source"))
+	panFlagRaw := body["panFlag"]
 	if keyword == "" || siteKey == "" || videoID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数无效"})
 		return
 	}
-	if err := database.UpsertSmartMatchBlockItem(keyword, siteKey, spiderAPI, videoID, poster); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"success": false, "message": err.Error()})
-		return
+	panFlags := []string{}
+	switch v := panFlagRaw.(type) {
+	case []any:
+		for _, it := range v {
+			if it == nil {
+				continue
+			}
+			s := strings.TrimSpace(readStrJSONBody(map[string]any{"_": it}, "_"))
+			if s == "" {
+				continue
+			}
+			panFlags = append(panFlags, s)
+		}
+	default:
+		s := strings.TrimSpace(readStrJSONBody(body, "panFlag"))
+		if s != "" {
+			panFlags = append(panFlags, s)
+		}
+	}
+	if len(panFlags) == 0 {
+		panFlags = []string{""}
+	}
+	if source == "search" && len(panFlags) == 1 && panFlags[0] == "" {
+		// Search blocks override any prior play-specific blocks for the same detail.
+		_ = database.DeleteSmartMatchBlockItem(keyword, siteKey, videoID, "", "")
+	}
+	if source == "play" {
+		// Keep only one play-origin record per site/video.
+		_ = database.DeleteSmartMatchBlockItem(keyword, siteKey, videoID, "", "play")
+	}
+	for _, pf := range panFlags {
+		if err := database.UpsertSmartMatchBlockItem(keyword, siteKey, spiderAPI, videoID, poster, pf, source); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"success": false, "message": err.Error()})
+			return
+		}
 	}
 	writeJSON(w, 200, map[string]any{"success": true})
 }
@@ -87,11 +123,13 @@ func handleAPISmartMatchBlockDelete(w http.ResponseWriter, r *http.Request, data
 	keyword := strings.TrimSpace(readStrJSONBody(body, "keyword"))
 	siteKey := strings.TrimSpace(readStrJSONBody(body, "siteKey"))
 	videoID := strings.TrimSpace(readStrJSONBody(body, "videoId"))
+	panFlag := strings.TrimSpace(readStrJSONBody(body, "panFlag"))
+	source := strings.TrimSpace(readStrJSONBody(body, "source"))
 	if keyword == "" || siteKey == "" || videoID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数无效"})
 		return
 	}
-	if err := database.DeleteSmartMatchBlockItem(keyword, siteKey, videoID); err != nil {
+	if err := database.DeleteSmartMatchBlockItem(keyword, siteKey, videoID, panFlag, source); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"success": false, "message": err.Error()})
 		return
 	}
