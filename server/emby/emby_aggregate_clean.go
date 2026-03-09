@@ -1,33 +1,14 @@
 package emby
 
 import (
-	"strings"
-
 	"github.com/jenfonro/meowfilm/internal/db"
-	"github.com/jenfonro/meowfilm/server/magic"
+	"github.com/jenfonro/meowfilm/server/smart"
 )
 
 func embyLoadAggregateCleanRules(database *db.DB) []string {
-	if database == nil {
-		return nil
-	}
-	raw, _ := database.ListMagicAggregateRegexRules()
-	if len(raw) == 0 {
-		return nil
-	}
-	return raw
+	return smart.LoadAggregateCleanRules(database)
 }
 
 func embyAggKeyWithRules(text string, rawRules []string) string {
-	in := strings.TrimSpace(text)
-	if in == "" {
-		return ""
-	}
-	cleaned := in
-	if len(rawRules) > 0 {
-		if out, err := magic.MagicAggregateNormalize(in, rawRules); err == nil {
-			cleaned = strings.TrimSpace(out)
-		}
-	}
-	return embyNormalizeAggKey(cleaned)
+	return smart.AggKeyWithRules(text, rawRules)
 }

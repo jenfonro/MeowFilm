@@ -19,10 +19,12 @@ type SmartMatchBlockItem struct {
 	SpiderAPI string
 	VideoID   string
 	Poster    string
+	PanFlag   string
+	Source    string
 	UpdatedAt int64
 }
 
-func (d *DB) UpsertSmartMatchBlockItem(keyword string, siteKey string, spiderAPI string, videoID string, poster string) error {
+func (d *DB) UpsertSmartMatchBlockItem(keyword string, siteKey string, spiderAPI string, videoID string, poster string, panFlag string, source string) error {
 	if d == nil || d.db == nil {
 		return nil
 	}
@@ -31,6 +33,11 @@ func (d *DB) UpsertSmartMatchBlockItem(keyword string, siteKey string, spiderAPI
 	sapi := strings.TrimSpace(spiderAPI)
 	vid := strings.TrimSpace(videoID)
 	p := strings.TrimSpace(poster)
+	pf := strings.TrimSpace(panFlag)
+	src := strings.TrimSpace(source)
+	if src == "" {
+		src = "search"
+	}
 	if k == "" || sk == "" || vid == "" {
 		return errors.New("invalid params")
 	}
@@ -56,26 +63,28 @@ func (d *DB) UpsertSmartMatchBlockItem(keyword string, siteKey string, spiderAPI
 	}
 
 	if _, err := tx.Exec(`
-		INSERT INTO smart_match_block_item(keyword_id, site_key, spider_api, video_id, poster, created_at, updated_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(keyword_id, site_key, video_id) DO UPDATE SET
+		INSERT INTO smart_match_block_item(keyword_id, site_key, spider_api, video_id, poster, pan_flag, source, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(keyword_id, site_key, video_id, pan_flag, source) DO UPDATE SET
 		  spider_api=excluded.spider_api,
 		  poster=excluded.poster,
 		  updated_at=excluded.updated_at
-	`, keywordID, sk, sapi, vid, p, now, now); err != nil {
+	`, keywordID, sk, sapi, vid, p, pf, src, now, now); err != nil {
 		return err
 	}
 
 	return tx.Commit()
 }
 
-func (d *DB) DeleteSmartMatchBlockItem(keyword string, siteKey string, videoID string) error {
+func (d *DB) DeleteSmartMatchBlockItem(keyword string, siteKey string, videoID string, panFlag string, source string) error {
 	if d == nil || d.db == nil {
 		return nil
 	}
 	k := strings.TrimSpace(keyword)
 	sk := strings.TrimSpace(siteKey)
 	vid := strings.TrimSpace(videoID)
+	pf := strings.TrimSpace(panFlag)
+	src := strings.TrimSpace(source)
 	if k == "" || sk == "" || vid == "" {
 		return errors.New("invalid params")
 	}
@@ -93,7 +102,17 @@ func (d *DB) DeleteSmartMatchBlockItem(keyword string, siteKey string, videoID s
 		}
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM smart_match_block_item WHERE keyword_id=? AND site_key=? AND video_id=?`, keywordID, sk, vid); err != nil {
+	query := `DELETE FROM smart_match_block_item WHERE keyword_id=? AND site_key=? AND video_id=?`
+	args := []any{keywordID, sk, vid}
+	if pf != "" {
+		query += ` AND pan_flag=?`
+		args = append(args, pf)
+	}
+	if src != "" {
+		query += ` AND source=?`
+		args = append(args, src)
+	}
+	if _, err := tx.Exec(query, args...); err != nil {
 		return err
 	}
 	_, _ = tx.Exec(`DELETE FROM smart_match_block_keyword WHERE id=? AND NOT EXISTS(SELECT 1 FROM smart_match_block_item WHERE keyword_id=?)`, keywordID, keywordID)
@@ -153,7 +172,7 @@ func (d *DB) ListSmartMatchBlockItems(keyword string) ([]SmartMatchBlockItem, er
 		return []SmartMatchBlockItem{}, nil
 	}
 	rows, err := d.db.Query(`
-		SELECT k.keyword, i.site_key, i.spider_api, i.video_id, i.poster, i.updated_at
+		SELECT k.keyword, i.site_key, i.spider_api, i.video_id, i.poster, i.pan_flag, i.source, i.updated_at
 		FROM smart_match_block_item i
 		INNER JOIN smart_match_block_keyword k ON k.id = i.keyword_id
 		WHERE k.keyword = ?
@@ -166,12 +185,14 @@ func (d *DB) ListSmartMatchBlockItems(keyword string) ([]SmartMatchBlockItem, er
 	out := []SmartMatchBlockItem{}
 	for rows.Next() {
 		var it SmartMatchBlockItem
-		_ = rows.Scan(&it.Keyword, &it.SiteKey, &it.SpiderAPI, &it.VideoID, &it.Poster, &it.UpdatedAt)
+		_ = rows.Scan(&it.Keyword, &it.SiteKey, &it.SpiderAPI, &it.VideoID, &it.Poster, &it.PanFlag, &it.Source, &it.UpdatedAt)
 		it.Keyword = strings.TrimSpace(it.Keyword)
 		it.SiteKey = strings.TrimSpace(it.SiteKey)
 		it.SpiderAPI = strings.TrimSpace(it.SpiderAPI)
 		it.VideoID = strings.TrimSpace(it.VideoID)
 		it.Poster = strings.TrimSpace(it.Poster)
+		it.PanFlag = strings.TrimSpace(it.PanFlag)
+		it.Source = strings.TrimSpace(it.Source)
 		if it.Keyword == "" || it.SiteKey == "" || it.VideoID == "" {
 			continue
 		}

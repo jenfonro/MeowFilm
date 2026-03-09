@@ -78,6 +78,8 @@ func handleDashboardSmartMatchBlockItems(w http.ResponseWriter, r *http.Request,
 			"spiderApi": sapi,
 			"videoId":   vid,
 			"poster":    poster,
+			"panFlag":   it.PanFlag,
+			"source":    it.Source,
 			"updatedAt": it.UpdatedAt,
 		})
 	}
@@ -97,11 +99,13 @@ func handleDashboardSmartMatchBlockDelete(w http.ResponseWriter, r *http.Request
 	keyword := readStrJSONBody(body, "keyword")
 	siteKey := readStrJSONBody(body, "siteKey")
 	videoID := readStrJSONBody(body, "videoId")
+	panFlag := readStrJSONBody(body, "panFlag")
+	source := readStrJSONBody(body, "source")
 	if keyword == "" || siteKey == "" || videoID == "" {
 		writeJSON(w, 400, map[string]any{"success": false, "message": "invalid params"})
 		return
 	}
-	if err := database.DeleteSmartMatchBlockItem(keyword, siteKey, videoID); err != nil {
+	if err := database.DeleteSmartMatchBlockItem(keyword, siteKey, videoID, panFlag, source); err != nil {
 		writeJSON(w, 500, map[string]any{"success": false, "message": err.Error()})
 		return
 	}

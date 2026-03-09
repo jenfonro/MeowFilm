@@ -415,12 +415,14 @@ func (d *DB) ensureSchema() error {
 				  spider_api TEXT NOT NULL DEFAULT '',
 				  video_id TEXT NOT NULL,
 				  poster TEXT NOT NULL DEFAULT '',
+				  pan_flag TEXT NOT NULL DEFAULT '',
+				  source TEXT NOT NULL DEFAULT 'search',
 				  created_at INTEGER NOT NULL,
 				  updated_at INTEGER NOT NULL,
-				  UNIQUE(keyword_id, site_key, video_id),
+				  UNIQUE(keyword_id, site_key, video_id, pan_flag, source),
 				  FOREIGN KEY(keyword_id) REFERENCES smart_match_block_keyword(id) ON DELETE CASCADE
 				);
-				CREATE INDEX IF NOT EXISTS idx_smart_match_block_item_keyword_site_video ON smart_match_block_item(keyword_id, site_key, video_id);
+				CREATE INDEX IF NOT EXISTS idx_smart_match_block_item_keyword_site_video ON smart_match_block_item(keyword_id, site_key, video_id, pan_flag, source);
 				CREATE INDEX IF NOT EXISTS idx_smart_match_block_item_keyword_updated_at ON smart_match_block_item(keyword_id, updated_at DESC);
 				CREATE TABLE IF NOT EXISTS pan_login_setting (
 				  provider TEXT NOT NULL,
@@ -635,7 +637,78 @@ func (d *DB) ensureSchema() error {
 	if _, err := tx.Exec(schemaSQL); err != nil {
 		return err
 	}
+	if err := ensureSmartMatchBlockItemSchema(tx); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+func ensureSmartMatchBlockItemSchema(tx *sql.Tx) error {
+	if tx == nil {
+		return nil
+	}
+	rows, err := tx.Query(`PRAGMA table_info(smart_match_block_item)`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			typ        string
+			notnull    int
+			dfltValue  any
+			primaryKey int
+		)
+		_ = rows.Scan(&cid, &name, &typ, &notnull, &dfltValue, &primaryKey)
+		if name != "" {
+			cols[name] = true
+		}
+	}
+	if cols["pan_flag"] && cols["source"] {
+		return nil
+	}
+
+	if _, err := tx.Exec(`ALTER TABLE smart_match_block_item RENAME TO smart_match_block_item_old`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+		CREATE TABLE IF NOT EXISTS smart_match_block_item (
+		  id INTEGER PRIMARY KEY AUTOINCREMENT,
+		  keyword_id INTEGER NOT NULL,
+		  site_key TEXT NOT NULL,
+		  spider_api TEXT NOT NULL DEFAULT '',
+		  video_id TEXT NOT NULL,
+		  poster TEXT NOT NULL DEFAULT '',
+		  pan_flag TEXT NOT NULL DEFAULT '',
+		  source TEXT NOT NULL DEFAULT 'search',
+		  created_at INTEGER NOT NULL,
+		  updated_at INTEGER NOT NULL,
+		  UNIQUE(keyword_id, site_key, video_id, pan_flag, source),
+		  FOREIGN KEY(keyword_id) REFERENCES smart_match_block_keyword(id) ON DELETE CASCADE
+		)
+	`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO smart_match_block_item(keyword_id, site_key, spider_api, video_id, poster, pan_flag, source, created_at, updated_at)
+		SELECT keyword_id, site_key, spider_api, video_id, poster, '', 'search', created_at, updated_at
+		FROM smart_match_block_item_old
+	`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DROP TABLE smart_match_block_item_old`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_smart_match_block_item_keyword_site_video ON smart_match_block_item(keyword_id, site_key, video_id, pan_flag, source)`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_smart_match_block_item_keyword_updated_at ON smart_match_block_item(keyword_id, updated_at DESC)`); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (d *DB) ensureDefaultAdmin() error {

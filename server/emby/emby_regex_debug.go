@@ -180,10 +180,11 @@ func RegexListDebugHandler(database *db.DB) http.Handler {
 			aggregateRegexRules = append(aggregateRegexRules, decodePlain(row))
 		}
 
+		seasonSuffixPatterns := smartSeasonSuffixRegexPatterns()
 		embySeasonSuffix := []ruleInfo{
-			{Raw: "embyReCNSeasonSuffix", Pattern: embyReCNSeasonSuffix.String()},
-			{Raw: "embyReENSeasonSuffix", Pattern: embyReENSeasonSuffix.String()},
-			{Raw: "embyReSSeasonSuffix", Pattern: embyReSSeasonSuffix.String()},
+			{Raw: "smartReCNSeasonSuffix", Pattern: seasonSuffixPatterns[0]},
+			{Raw: "smartReENSeasonSuffix", Pattern: seasonSuffixPatterns[1]},
+			{Raw: "smartReSSeasonSuffix", Pattern: seasonSuffixPatterns[2]},
 		}
 
 		resp := map[string]any{
