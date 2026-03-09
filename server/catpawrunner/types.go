@@ -20,6 +20,7 @@ type Episode struct {
 }
 
 type Pan struct {
-	Label    string
-	Episodes []Episode
+	Label           string
+	Episodes        []Episode
+	PanMockEnabled  bool
 }

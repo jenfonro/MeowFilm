@@ -178,7 +178,7 @@ func embyResolvePanMockDetailPans(
 	for idx := range out {
 		i := idx
 		label := strings.TrimSpace(out[i].Label)
-		pid := smartPanMockProviderID(database, label)
+		pid := embyPanMockProviderFromLabel(label)
 		if pid == "" {
 			continue
 		}
@@ -409,7 +409,7 @@ func embyResolvePanMockDetailPansIncremental(
 	for idx := range out {
 		i := idx
 		label := strings.TrimSpace(out[i].Label)
-		pid := smartPanMockProviderID(database, label)
+		pid := embyPanMockProviderFromLabel(label)
 		if pid == "" {
 			continue
 		}
