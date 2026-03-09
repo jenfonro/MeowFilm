@@ -1,15 +1,11 @@
 package emby
 
-import "github.com/jenfonro/meowfilm/server/sites"
+import "github.com/jenfonro/meowfilm/server/smart"
 
-type site = sites.Site
-
-func parseJSONBoolMap(text string) map[string]bool { return sites.ParseJSONBoolMap(text) }
-
-func normalizeSitesFromJSON(text string) []site { return sites.ParseSitesFromJSON(text) }
+type site = smart.Site
 
 func applySiteOrder(sitesList []site, order []string) []site {
-	return sites.ApplySiteOrder(sitesList, order)
+	return smart.ApplySiteOrder(sitesList, order)
 }
 
-func isConfigCenterSite(s site) bool { return sites.IsConfigCenterSite(s) }
+func isConfigCenterSite(s site) bool { return smart.IsConfigCenterSite(s) }
