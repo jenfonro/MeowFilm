@@ -13,6 +13,18 @@ type Candidate = smartCandidate
 type CandidateFeatures = smartCandidateFeatures
 type PickResult = smartPickResult
 type PanMockGroupAttempt = smartPanMockGroupAttempt
+type PlaybackRequest = smartPlaybackRequest
+type PlaybackPickedMeta = smartPlaybackPickedMeta
+type User = SmartUser
+type TMDBTVDetail = embyTMDBTVDetail
+type TMDBMovieDetail = embyTMDBMovieDetail
+type TMDBSearchItem = embyTMDBSearchItem
+type TMDBCredits = embyTMDBCredits
+type TMDBCast = embyTMDBCast
+type TMDBCrew = embyTMDBCrew
+type TMDBTVSeasonDetail = embyTMDBTVSeasonDetail
+type DoubanHotItem = embyDoubanHotItem
+type DoubanTMDBMap = smartDoubanTMDBMap
 
 // Exported wrappers (matching previous emby helpers)
 func ComputePriorityMatch(textLower string, tokensLower []string) PriorityMatch {
@@ -197,6 +209,159 @@ func PanMatchLabelText(label string) string {
 
 func PanToProviderID(panLower string) string {
 	return smartPanToProviderID(panLower)
+}
+
+func ResolvePlaybackFromTMDB(database *db.DB, u *SmartUser, req PlaybackRequest) (finalURL string, finalHeaders map[string]string, picked *PlaybackPickedMeta, err error) {
+	return smartResolvePlaybackFromTMDB(database, u, req)
+}
+
+func ResolveCatApiBaseForUser(database *db.DB, u *SmartUser) string {
+	return smartResolveCatApiBaseForUser(database, u)
+}
+
+func ResolveSpiderAPIBySiteKey(database *db.DB, siteKey string) string {
+	return smartResolveSpiderAPIBySiteKey(database, siteKey)
+}
+
+func AnyToString(v any) string {
+	return smartAnyToString(v)
+}
+
+func PanMock189AccessGet(shareID string) (string, bool) {
+	return smartPanMock189AccessGet(shareID)
+}
+
+func PanMock189AccessPut(shareID string, accessCode string) {
+	smartPanMock189AccessPut(shareID, accessCode)
+}
+
+func PanMockProviderFromLabel(label string) string {
+	return smartPanMockProviderFromLabel(label)
+}
+
+func ResolvePanMockDetailPans(
+	database *db.DB,
+	siteKey string,
+	siteName string,
+	want int,
+	tmdbSeasons []TMDBSeason,
+	tmdbHasMultiSeason bool,
+	rawCleanRules []string,
+	rawEpisodeRules []string,
+	pans []catpawrunner.Pan,
+) ([]catpawrunner.Pan, map[string]string) {
+	return smartResolvePanMockDetailPans(database, siteKey, siteName, want, tmdbSeasons, tmdbHasMultiSeason, rawCleanRules, rawEpisodeRules, pans)
+}
+
+func ResolvePanMockDetailPansIncremental(
+	database *db.DB,
+	siteKey string,
+	siteName string,
+	want int,
+	tmdbSeasons []TMDBSeason,
+	tmdbHasMultiSeason bool,
+	rawCleanRules []string,
+	rawEpisodeRules []string,
+	pans []catpawrunner.Pan,
+	onPanResolved func(panIndex int, episodes []catpawrunner.Episode, accessDelta map[string]string),
+) ([]catpawrunner.Pan, map[string]string) {
+	return smartResolvePanMockDetailPansIncremental(database, siteKey, siteName, want, tmdbSeasons, tmdbHasMultiSeason, rawCleanRules, rawEpisodeRules, pans, onPanResolved)
+}
+
+func LoadAggregateCleanRules(database *db.DB) []string {
+	return embyLoadAggregateCleanRules(database)
+}
+
+func AggKeyWithRules(text string, rawRules []string) string {
+	return embyAggKeyWithRules(text, rawRules)
+}
+
+func ScoreEpisodeDisplayName(name string, titleLower string) int {
+	return embyScoreEpisodeDisplayName(name, titleLower)
+}
+
+func PickEpisodeDisplayName(displayName string, fileName string, titleLower string, preferFile bool) string {
+	return embyPickEpisodeDisplayName(displayName, fileName, titleLower, preferFile)
+}
+
+func TMDBGetTVDetail(database *db.DB, tmdbID int) (*TMDBTVDetail, error) {
+	return embyTMDBGetTVDetail(database, tmdbID)
+}
+
+func TMDBGetMovieDetail(database *db.DB, tmdbID int) (*TMDBMovieDetail, error) {
+	return embyTMDBGetMovieDetail(database, tmdbID)
+}
+
+func TMDBSearchMulti(database *db.DB, query string) ([]TMDBSearchItem, error) {
+	return embyTMDBSearchMulti(database, query)
+}
+
+func TMDBGetCredits(database *db.DB, mediaType string, tmdbID int) (*TMDBCredits, error) {
+	return embyTMDBGetCredits(database, mediaType, tmdbID)
+}
+
+func TMDBGetPersonProfile(database *db.DB, personID int) (string, error) {
+	return embyTMDBGetPersonProfile(database, personID)
+}
+
+func RememberPersonProfile(personID int, profilePath string) {
+	embyRememberPersonProfile(personID, profilePath)
+}
+
+func LoadSiteOrder(database *db.DB, u *SmartUser) []string {
+	return smartLoadSiteOrder(database, u)
+}
+
+func TMDBGetTVSeasonDetail(database *db.DB, tmdbID int, season int) (*embyTMDBTVSeasonDetail, error) {
+	return embyTMDBGetTVSeasonDetail(database, tmdbID, season)
+}
+
+func TMDBGetTVSeasonDetailAtLeast(database *db.DB, tmdbID int, season int, minEpisodes int) (*embyTMDBTVSeasonDetail, error) {
+	return embyTMDBGetTVSeasonDetailAtLeast(database, tmdbID, season, minEpisodes)
+}
+
+func TMDBGetTVSeasonEpisodes(database *db.DB, tmdbID int, season int) ([]TMDBSeasonEpisode, error) {
+	return embyTMDBGetTVSeasonEpisodes(database, tmdbID, season)
+}
+
+func TMDBGetTVSeasonEpisodesAtLeast(database *db.DB, tmdbID int, season int, minEpisodes int) ([]TMDBSeasonEpisode, error) {
+	return embyTMDBGetTVSeasonEpisodesAtLeast(database, tmdbID, season, minEpisodes)
+}
+
+func DoubanFetchRecentHot(database *db.DB, kind string, category string, hotType string, start int, limit int) ([]DoubanHotItem, error) {
+	return embyDoubanFetchRecentHot(database, kind, category, hotType, start, limit)
+}
+
+func GetDoubanTMDBMap(database *db.DB, kind string, doubanID string) (*DoubanTMDBMap, error) {
+	return smartGetDoubanTMDBMap(database, kind, doubanID)
+}
+
+func UpsertDoubanTMDBMap(database *db.DB, m DoubanTMDBMap) error {
+	return smartUpsertDoubanTMDBMap(database, m)
+}
+
+func ResolveTMDBForDouban(database *db.DB, kind string, doubanID string, title string, year int) (int, error) {
+	return smartResolveTMDBForDouban(database, kind, doubanID, title, year)
+}
+
+func DoubanProbeSeasons(database *db.DB, tmdbID int, keyword string, wantGlobal int) ([]TMDBSeason, bool) {
+	return smartDoubanProbeSeasons(database, tmdbID, keyword, wantGlobal)
+}
+
+func DoubanAPIBase(database *db.DB) (base string, proxyBase string) {
+	return smartDoubanAPIBase(database)
+}
+
+func DoubanToProxiedURL(targetURL string, proxyBase string) string {
+	return smartDoubanToProxiedURL(targetURL, proxyBase)
+}
+
+func TMDBImageURL(database *db.DB, path string, size string) string {
+	return embyTMDBImageURL(database, path, size)
+}
+
+func TMDBDiscover(database *db.DB, mediaType string, yearStart int, yearEnd int, sortBy string, page int) (items []TMDBSearchItem, total int, err error) {
+	return embyTMDBDiscover(database, mediaType, yearStart, yearEnd, sortBy, page)
 }
 
 func PlayFlagProviderID(flagLabel string) string {

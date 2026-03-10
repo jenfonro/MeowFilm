@@ -53,6 +53,14 @@ type smartPickResult struct {
 	Headers map[string]string
 }
 
+// User context for smart playback (consumer-specific).
+type SmartUser struct {
+	ID       string
+	Username string
+	Role     string
+	Status   string
+}
+
 // TMDB season model shared by smart matching.
 type TMDBSeason struct {
 	Season       int
@@ -62,4 +70,3 @@ type TMDBSeason struct {
 
 // Keep legacy name inside smart package so existing code can stay untouched.
 type embyTMDBSeason = TMDBSeason
-

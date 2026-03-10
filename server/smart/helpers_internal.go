@@ -6,6 +6,7 @@ import (
 
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/catpawrunner"
+	mfnet "github.com/jenfonro/meowfilm/server/net"
 )
 
 func smartParseVodPlayURLToEpisodes(vodPlayURL string) []catpawrunner.Episode {
@@ -32,6 +33,10 @@ func smartParseVodPlayURLToEpisodes(vodPlayURL string) []catpawrunner.Episode {
 		out = append(out, catpawrunner.Episode{Name: name, URL: url})
 	}
 	return out
+}
+
+func defaultString(v, def string) string {
+	return mfnet.DefaultString(v, def)
 }
 
 func smartPanToProviderID(panLower string) string {
@@ -390,4 +395,22 @@ func smartShortURLForLog(raw string) string {
 		return s[:maxLen]
 	}
 	return s[:head] + "..." + s[len(s)-tail:]
+}
+
+func smartLogSiteName(siteKey string, siteName string) string {
+	name := strings.TrimSpace(siteName)
+	if strings.EqualFold(name, "nodejs_wuming") {
+		name = ""
+	}
+	if name == "" {
+		key := strings.TrimSpace(siteKey)
+		if strings.EqualFold(key, "nodejs_wuming") {
+			key = ""
+		}
+		name = key
+	}
+	if name == "" {
+		name = "unknown"
+	}
+	return name
 }
