@@ -7,6 +7,42 @@ import (
 	"github.com/jenfonro/meowfilm/internal/db"
 )
 
+func CanonicalDataProxyMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "server-proxy", "server", "server_proxy", "serverproxy":
+		return "server-proxy"
+	case "cdn-tx", "cmliussss-cdn-tencent":
+		return "cdn-tx"
+	case "cdn-ali", "cmliussss-cdn-ali":
+		return "cdn-ali"
+	case "cors", "cors-proxy-zwei", "ciao-cors":
+		return "cors"
+	case "cors-anywhere":
+		return "cors-anywhere"
+	case "custom":
+		return "custom"
+	default:
+		return "server-proxy"
+	}
+}
+
+func CanonicalImageProxyMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "server-proxy", "direct-browser":
+		return "server-proxy"
+	case "douban-cdn-ali", "img3":
+		return "douban-cdn-ali"
+	case "cdn-tx", "cmliussss-cdn-tencent":
+		return "cdn-tx"
+	case "cdn-ali", "cmliussss-cdn-ali":
+		return "cdn-ali"
+	case "custom":
+		return "custom"
+	default:
+		return "server-proxy"
+	}
+}
+
 // APIBase returns Douban base URL and an optional proxyBase for CORS/relay modes.
 // Behavior matches legacy MeowFilm logic used by Emby and API.
 func APIBase(database *db.DB) (base string, proxyBase string) {
@@ -17,16 +53,16 @@ func APIBase(database *db.DB) (base string, proxyBase string) {
 	if err != nil {
 		return "https://m.douban.com", ""
 	}
-	mode := strings.TrimSpace(cfg.DoubanDataProxy)
+	mode := CanonicalDataProxyMode(cfg.DoubanDataProxy)
 	custom := strings.TrimSpace(cfg.DoubanDataCustom)
 	switch mode {
 	case "server-proxy":
 		return "https://m.douban.com", ""
-	case "cdn-tx", "cmliussss-cdn-tencent":
+	case "cdn-tx":
 		return "https://m.douban.cmliussss.net", ""
-	case "cdn-ali", "cmliussss-cdn-ali":
+	case "cdn-ali":
 		return "https://m.douban.cmliussss.com", ""
-	case "cors", "cors-proxy-zwei", "ciao-cors":
+	case "cors":
 		return "https://m.douban.com", "https://ciao-cors.is-an.org/"
 	case "cors-anywhere":
 		return "https://m.douban.com", "https://cors-anywhere.com/"

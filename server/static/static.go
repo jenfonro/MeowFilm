@@ -80,8 +80,10 @@ func Handler(authMw *auth.Auth) http.Handler {
 
 	indexHTML := mustReadFile("index.html")
 	dashboardHTML := mustReadFile("dashboard.html")
+	dashboardOldHTML := mustReadFile("dashboard-old.html")
 	indexHTML = patchUiVersionPlaceholders(indexHTML)
 	dashboardHTML = patchUiVersionPlaceholders(dashboardHTML)
+	dashboardOldHTML = patchUiVersionPlaceholders(dashboardOldHTML)
 	indexHTML = strings.ReplaceAll(indexHTML, "__ASSET_VERSION__", assetVersion)
 	indexHTML = strings.ReplaceAll(indexHTML, "__UI_VERSION__", uiVersion)
 	indexHTML = strings.ReplaceAll(indexHTML, "__BACKEND_COMMIT__", backendCommit)
@@ -90,6 +92,10 @@ func Handler(authMw *auth.Auth) http.Handler {
 	dashboardHTML = strings.ReplaceAll(dashboardHTML, "__UI_VERSION__", uiVersion)
 	dashboardHTML = strings.ReplaceAll(dashboardHTML, "__BACKEND_COMMIT__", backendCommit)
 	dashboardHTML = strings.ReplaceAll(dashboardHTML, "__FRONTEND_COMMIT__", frontendCommit)
+	dashboardOldHTML = strings.ReplaceAll(dashboardOldHTML, "__ASSET_VERSION__", assetVersion)
+	dashboardOldHTML = strings.ReplaceAll(dashboardOldHTML, "__UI_VERSION__", uiVersion)
+	dashboardOldHTML = strings.ReplaceAll(dashboardOldHTML, "__BACKEND_COMMIT__", backendCommit)
+	dashboardOldHTML = strings.ReplaceAll(dashboardOldHTML, "__FRONTEND_COMMIT__", frontendCommit)
 
 	fsHandler := http.FileServer(http.FS(dist))
 
@@ -110,6 +116,13 @@ func Handler(authMw *auth.Auth) http.Handler {
 				w.Header().Set("Cache-Control", "no-store")
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				_, _ = io.WriteString(w, dashboardHTML)
+			})).ServeHTTP(w, r)
+			return
+		case "/dashboard-old", "/dashboard-old/":
+			auth.RequireLoginPage(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Cache-Control", "no-store")
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				_, _ = io.WriteString(w, dashboardOldHTML)
 			})).ServeHTTP(w, r)
 			return
 		case "/logout":

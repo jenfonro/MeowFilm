@@ -710,6 +710,69 @@ func smartTMDBGlobalEpisodeNoOf(seasons []embyTMDBSeason, season int, episode in
 	return sum + episode
 }
 
+func smartPositiveSeasonCount(seasons []embyTMDBSeason) int {
+	out := 0
+	for _, s := range seasons {
+		if s.Season > 0 && s.EpisodeCount > 0 {
+			out++
+		}
+	}
+	return out
+}
+
+func smartStrictSeasonEpisodeGlobal(seasons []embyTMDBSeason, season int, episode int) int {
+	if season <= 0 || episode <= 0 {
+		return 0
+	}
+	seasonCount := 0
+	for _, s := range seasons {
+		if s.Season == season && s.EpisodeCount > 0 {
+			seasonCount = s.EpisodeCount
+			break
+		}
+	}
+	if seasonCount <= 0 || episode > seasonCount {
+		return 0
+	}
+	return smartTMDBGlobalEpisodeNoOf(seasons, season, episode)
+}
+
+func smartResolveEpisodeMappingForPlayback(seasons []embyTMDBSeason, se smartSeasonEpisode) (match smartSeasonEpisode, global int, ok bool, loose bool) {
+	episode := se.Episode
+	season := se.Season
+	if episode <= 0 {
+		return smartSeasonEpisode{}, 0, false, false
+	}
+	positiveCount := smartPositiveSeasonCount(seasons)
+
+	if season > 0 {
+		if g := smartStrictSeasonEpisodeGlobal(seasons, season, episode); g > 0 {
+			return smartSeasonEpisode{Season: season, Episode: episode}, g, true, false
+		}
+		if positiveCount == 1 {
+			mapped := smartTMDBSeasonEpisodeOfGlobal(seasons, episode)
+			if mapped.Season == 1 && mapped.Episode == episode {
+				return mapped, episode, true, false
+			}
+		}
+		return smartSeasonEpisode{}, 0, false, false
+	}
+
+	if positiveCount == 1 {
+		mapped := smartTMDBSeasonEpisodeOfGlobal(seasons, episode)
+		if mapped.Season == 1 && mapped.Episode == episode {
+			return mapped, episode, true, false
+		}
+		return smartSeasonEpisode{}, 0, false, false
+	}
+
+	if positiveCount >= 2 {
+		return smartSeasonEpisode{Season: 0, Episode: episode}, episode, true, true
+	}
+
+	return smartSeasonEpisode{}, 0, false, false
+}
+
 func smartNormalizeMaybeGlobalSeasonEpisode(seasons []embyTMDBSeason, se smartSeasonEpisode) smartSeasonEpisode {
 	s := se.Season
 	e := se.Episode
@@ -720,26 +783,24 @@ func smartNormalizeMaybeGlobalSeasonEpisode(seasons []embyTMDBSeason, se smartSe
 		return smartSeasonEpisode{Season: 0, Episode: e}
 	}
 	seasonCount := 0
+	positiveCount := 0
+	lastPositiveSeason := 0
 	for _, it := range seasons {
+		if it.Season > 0 && it.EpisodeCount > 0 {
+			positiveCount++
+			lastPositiveSeason = it.Season
+		}
 		if it.Season == s {
 			if it.EpisodeCount > 0 {
 				seasonCount = it.EpisodeCount
 			}
-			break
 		}
 	}
 	if seasonCount == 0 || e <= seasonCount {
 		return smartSeasonEpisode{Season: s, Episode: e}
 	}
-	mapped := smartTMDBSeasonEpisodeOfGlobal(seasons, e)
-	if mapped.Episode <= 0 {
-		return smartSeasonEpisode{Season: s, Episode: e}
+	if positiveCount == 1 && lastPositiveSeason > 0 {
+		return smartSeasonEpisode{Season: lastPositiveSeason, Episode: e}
 	}
-	if mapped.Season != 0 && mapped.Season != s {
-		return smartSeasonEpisode{Season: s, Episode: e}
-	}
-	if mapped.Episode > seasonCount {
-		return smartSeasonEpisode{Season: s, Episode: e}
-	}
-	return smartSeasonEpisode{Season: s, Episode: mapped.Episode}
+	return smartSeasonEpisode{Season: s, Episode: e}
 }

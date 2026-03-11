@@ -16,6 +16,7 @@ import (
 	"github.com/jenfonro/meowfilm/internal/limit"
 	"github.com/jenfonro/meowfilm/server/catpawrunner"
 	"github.com/jenfonro/meowfilm/server/config"
+	"github.com/jenfonro/meowfilm/server/metadata/douban"
 	"github.com/jenfonro/meowfilm/server/netdisk"
 )
 
@@ -527,9 +528,9 @@ func handleDashboardBackup(w http.ResponseWriter, r *http.Request, database *db.
 			"smartPanAliasMappings":      smartPanAliasOut,
 		},
 		"metadata": map[string]any{
-			"doubanDataProxy":    defaultString(cfg.DoubanDataProxy, "server-proxy"),
+			"doubanDataProxy":    douban.CanonicalDataProxyMode(cfg.DoubanDataProxy),
 			"doubanDataCustom":   cfg.DoubanDataCustom,
-			"doubanImgProxy":     defaultString(cfg.DoubanImgProxy, "server-proxy"),
+			"doubanImgProxy":     douban.CanonicalImageProxyMode(cfg.DoubanImgProxy),
 			"doubanImgCustom":    cfg.DoubanImgCustom,
 			"tmdbApiToken":       strings.TrimSpace(cfg.TMDBAPIToken),
 			"tmdbDataProxyBase":  strings.TrimSpace(cfg.TMDBAPIBase),
@@ -634,13 +635,13 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 				c.NetdiskProxyURL = s
 			}
 			if s, ok := readStr("DoubanDataProxy", "doubanDataProxy"); ok && s != "" {
-				c.DoubanDataProxy = s
+				c.DoubanDataProxy = douban.CanonicalDataProxyMode(s)
 			}
 			if s, ok := readStr("DoubanDataCustom", "doubanDataCustom"); ok {
 				c.DoubanDataCustom = s
 			}
 			if s, ok := readStr("DoubanImgProxy", "doubanImgProxy"); ok && s != "" {
-				c.DoubanImgProxy = s
+				c.DoubanImgProxy = douban.CanonicalImageProxyMode(s)
 			}
 			if s, ok := readStr("DoubanImgCustom", "doubanImgCustom"); ok {
 				c.DoubanImgCustom = s
@@ -914,7 +915,7 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 		_ = database.UpdateAppConfig(func(c *db.AppConfig) {
 			if v, ok := meta["doubanDataProxy"]; ok {
 				if s, _ := v.(string); strings.TrimSpace(s) != "" {
-					c.DoubanDataProxy = strings.TrimSpace(s)
+					c.DoubanDataProxy = douban.CanonicalDataProxyMode(s)
 				}
 			}
 			if v, ok := meta["doubanDataCustom"]; ok {
@@ -924,7 +925,7 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 			}
 			if v, ok := meta["doubanImgProxy"]; ok {
 				if s, _ := v.(string); strings.TrimSpace(s) != "" {
-					c.DoubanImgProxy = strings.TrimSpace(s)
+					c.DoubanImgProxy = douban.CanonicalImageProxyMode(s)
 				}
 			}
 			if v, ok := meta["doubanImgCustom"]; ok {
@@ -992,9 +993,9 @@ func handleDashboardMetadataSettings(w http.ResponseWriter, r *http.Request, dat
 		cfg, _ := database.ReadAppConfig()
 		writeJSON(w, 200, map[string]any{
 			"success":            true,
-			"doubanDataProxy":    defaultString(cfg.DoubanDataProxy, "server-proxy"),
+			"doubanDataProxy":    douban.CanonicalDataProxyMode(cfg.DoubanDataProxy),
 			"doubanDataCustom":   cfg.DoubanDataCustom,
-			"doubanImgProxy":     defaultString(cfg.DoubanImgProxy, "server-proxy"),
+			"doubanImgProxy":     douban.CanonicalImageProxyMode(cfg.DoubanImgProxy),
 			"doubanImgCustom":    cfg.DoubanImgCustom,
 			"tmdbApiToken":       strings.TrimSpace(cfg.TMDBAPIToken),
 			"tmdbDataProxyBase":  strings.TrimSpace(cfg.TMDBAPIBase),
@@ -1013,9 +1014,9 @@ func handleDashboardMetadataSettings(w http.ResponseWriter, r *http.Request, dat
 		_ = readJSONLoose(r, &body)
 
 		_ = database.UpdateAppConfig(func(c *db.AppConfig) {
-			c.DoubanDataProxy = readStrJSONBody(body, "doubanDataProxy")
+			c.DoubanDataProxy = douban.CanonicalDataProxyMode(readStrJSONBody(body, "doubanDataProxy"))
 			c.DoubanDataCustom = readStrJSONBody(body, "doubanDataCustom")
-			c.DoubanImgProxy = readStrJSONBody(body, "doubanImgProxy")
+			c.DoubanImgProxy = douban.CanonicalImageProxyMode(readStrJSONBody(body, "doubanImgProxy"))
 			c.DoubanImgCustom = readStrJSONBody(body, "doubanImgCustom")
 
 			c.TMDBAPIToken = readStrJSONBody(body, "tmdbApiToken")

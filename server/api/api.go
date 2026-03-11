@@ -284,12 +284,19 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 
 			// Index page includes Douban browse sections.
 			if page == "index" {
-				settings["doubanImgProxy"] = defaultString(cfg.DoubanImgProxy, "direct-browser")
+				settings["doubanDataProxy"] = douban.CanonicalDataProxyMode(cfg.DoubanDataProxy)
+				settings["doubanDataCustom"] = cfg.DoubanDataCustom
+				settings["doubanImgProxy"] = douban.CanonicalImageProxyMode(cfg.DoubanImgProxy)
 				settings["doubanImgCustom"] = cfg.DoubanImgCustom
 			}
 
 			// Search / playback: settings used by front-end to talk to catpawrunner and to normalize titles.
 			if page == "search" || page == "play" || page == "site" {
+				settings["doubanDataProxy"] = douban.CanonicalDataProxyMode(cfg.DoubanDataProxy)
+				settings["doubanDataCustom"] = cfg.DoubanDataCustom
+				settings["doubanImgProxy"] = douban.CanonicalImageProxyMode(cfg.DoubanImgProxy)
+				settings["doubanImgCustom"] = cfg.DoubanImgCustom
+
 				if v, _ := database.ListMagicAggregateRegexRules(); v != nil {
 					settings["magicAggregateRegexRules"] = v
 				} else {
@@ -393,7 +400,7 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 		}
 	}
 
-	if page == "play" || page == "site" {
+	if page == "index" || page == "play" || page == "site" {
 		settings["homeSites"] = fetchHomeSites(database)
 	}
 
@@ -426,7 +433,7 @@ func handleAPIHome(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	favoritesLimit := parseIntQuery(q.Get("favoritesLimit"), 50, 1, 200)
 
 	cfg, _ := database.ReadAppConfig()
-	doubanImgProxy := defaultString(cfg.DoubanImgProxy, "direct-browser")
+	doubanImgProxy := douban.CanonicalImageProxyMode(cfg.DoubanImgProxy)
 	doubanImgCustom := cfg.DoubanImgCustom
 
 	out := map[string]any{"success": true}
@@ -663,7 +670,7 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 		contentKey = normalizeContentKey(videoTitle)
 	}
 	cfg, _ := database.ReadAppConfig()
-	doubanImgProxy := defaultString(cfg.DoubanImgProxy, "direct-browser")
+	doubanImgProxy := douban.CanonicalImageProxyMode(cfg.DoubanImgProxy)
 	doubanImgCustom := cfg.DoubanImgCustom
 	tmdbSeason := row.TMDBSeason
 	tmdbEpisode := row.TMDBEpisode
@@ -703,7 +710,7 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 	switch r.Method {
 	case http.MethodGet:
 		cfg, _ := database.ReadAppConfig()
-		doubanImgProxy := defaultString(cfg.DoubanImgProxy, "direct-browser")
+		doubanImgProxy := douban.CanonicalImageProxyMode(cfg.DoubanImgProxy)
 		doubanImgCustom := cfg.DoubanImgCustom
 		limit := parseIntQuery(r.URL.Query().Get("limit"), 20, 1, 50)
 		sourceLimit := minInt(500, maxInt(50, limit*10))
@@ -951,7 +958,7 @@ func handleAPIFavorites(w http.ResponseWriter, r *http.Request, database *db.DB)
 	}
 	u := auth.CurrentUser(r)
 	cfg, _ := database.ReadAppConfig()
-	doubanImgProxy := defaultString(cfg.DoubanImgProxy, "direct-browser")
+	doubanImgProxy := douban.CanonicalImageProxyMode(cfg.DoubanImgProxy)
 	doubanImgCustom := cfg.DoubanImgCustom
 	limit := parseIntQuery(strings.TrimSpace(r.URL.Query().Get("limit")), 200, 1, 200)
 	rows, err := database.ListFavorites(u.ID, limit)

@@ -823,10 +823,11 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 					smartDetailCache.Unlock()
 					return
 				}
-				match := smartNormalizeMaybeGlobalSeasonEpisode(tmdbSeasons, smartSeasonEpisode{Season: jsMatch.Season, Episode: jsMatch.Episode})
+				rawSeason := jsMatch.Season
+				match, keyNo, ok, loose := smartResolveEpisodeMappingForPlayback(tmdbSeasons, smartSeasonEpisode{Season: jsMatch.Season, Episode: jsMatch.Episode})
 				seasonNo := match.Season
 				epNo := match.Episode
-				if epNo <= 0 {
+				if !ok || epNo <= 0 {
 					continue
 				}
 
@@ -841,21 +842,14 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 					Ep:               ep,
 					RawLower:         rawLower,
 					MatchSeason:      seasonNo,
-					HasSeasonMarker:  seasonNo > 0,
+					HasSeasonMarker:  rawSeason > 0,
 					SearchSeasonHint: 0,
 					MatchKeyword:     smartComputePriorityMatch(rawLower, settings.KeywordTokensLower),
 				}
 
-				if tmdbHasMultiSeason && seasonNo <= 0 {
+				if loose && tmdbHasMultiSeason {
 					entry.EpisodeMapLoose[epNo] = append(entry.EpisodeMapLoose[epNo], cand)
 					continue
-				}
-
-				keyNo := epNo
-				if seasonNo > 0 {
-					if g := smartTMDBGlobalEpisodeNoOf(tmdbSeasons, seasonNo, epNo); g > 0 {
-						keyNo = g
-					}
 				}
 				entry.EpisodeMap[keyNo] = append(entry.EpisodeMap[keyNo], cand)
 			}
@@ -973,10 +967,11 @@ func smartBuildEpisodeMapsFromPans(
 			if err != nil {
 				continue
 			}
-			match := smartNormalizeMaybeGlobalSeasonEpisode(tmdbSeasons, smartSeasonEpisode{Season: jsMatch.Season, Episode: jsMatch.Episode})
+			rawSeason := jsMatch.Season
+			match, keyNo, ok, loose := smartResolveEpisodeMappingForPlayback(tmdbSeasons, smartSeasonEpisode{Season: jsMatch.Season, Episode: jsMatch.Episode})
 			seasonNo := match.Season
 			epNo := match.Episode
-			if epNo <= 0 {
+			if !ok || epNo <= 0 {
 				continue
 			}
 
@@ -991,22 +986,15 @@ func smartBuildEpisodeMapsFromPans(
 				Ep:              ep,
 				RawLower:        rawLower,
 				MatchSeason:     seasonNo,
-				HasSeasonMarker: seasonNo > 0,
+				HasSeasonMarker: rawSeason > 0,
 				MatchKeyword:    smartComputePriorityMatch(rawLower, settings.KeywordTokensLower),
 			}
 
-			if tmdbHasMultiSeason && seasonNo <= 0 {
+			if loose && tmdbHasMultiSeason {
 				list := episodeMapLoose[epNo]
 				list = append(list, cand)
 				episodeMapLoose[epNo] = list
 				continue
-			}
-
-			keyNo := epNo
-			if seasonNo > 0 {
-				if g := smartTMDBGlobalEpisodeNoOf(tmdbSeasons, seasonNo, epNo); g > 0 {
-					keyNo = g
-				}
 			}
 			list := episodeMap[keyNo]
 			list = append(list, cand)
