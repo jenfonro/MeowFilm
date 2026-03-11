@@ -146,21 +146,14 @@ func smartResolvePanMockDetailPans(
 							if e2 != nil {
 								continue
 							}
-							match := smartNormalizeMaybeGlobalSeasonEpisode(tmdbSeasons, smartSeasonEpisode{Season: jsMatch.Season, Episode: jsMatch.Episode})
-							seasonNo := match.Season
+							match, keyNo, ok, loose := smartResolveEpisodeMappingForPlayback(tmdbSeasons, smartSeasonEpisode{Season: jsMatch.Season, Episode: jsMatch.Episode})
 							epNo := match.Episode
-							if epNo <= 0 {
+							if !ok || epNo <= 0 {
 								continue
 							}
-							if tmdbHasMultiSeason && seasonNo <= 0 {
+							if loose && tmdbHasMultiSeason {
 								// Multi-season mapping requires a season marker; don't guess.
 								continue
-							}
-							keyNo := epNo
-							if seasonNo > 0 {
-								if g := smartTMDBGlobalEpisodeNoOf(tmdbSeasons, seasonNo, epNo); g > 0 {
-									keyNo = g
-								}
 							}
 							if keyNo != want {
 								continue
@@ -374,20 +367,13 @@ func smartResolvePanMockDetailPansIncremental(
 								if e2 != nil {
 									continue
 								}
-								match := smartNormalizeMaybeGlobalSeasonEpisode(tmdbSeasons, smartSeasonEpisode{Season: jsMatch.Season, Episode: jsMatch.Episode})
-								seasonNo := match.Season
+								match, keyNo, ok, loose := smartResolveEpisodeMappingForPlayback(tmdbSeasons, smartSeasonEpisode{Season: jsMatch.Season, Episode: jsMatch.Episode})
 								epNo := match.Episode
-								if epNo <= 0 {
+								if !ok || epNo <= 0 {
 									continue
 								}
-								if tmdbHasMultiSeason && seasonNo <= 0 {
+								if loose && tmdbHasMultiSeason {
 									continue
-								}
-								keyNo := epNo
-								if seasonNo > 0 {
-									if g := smartTMDBGlobalEpisodeNoOf(tmdbSeasons, seasonNo, epNo); g > 0 {
-										keyNo = g
-									}
 								}
 								if keyNo != want {
 									continue

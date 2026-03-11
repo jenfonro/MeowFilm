@@ -36,10 +36,7 @@ func RewriteVideoPosterURL(value string, doubanImgProxy string, doubanImgCustom 
 		return original
 	}
 
-	mode := NormalizeProxyMode(doubanImgProxy)
-	if mode == "" {
-		mode = "server-proxy"
-	}
+	mode := CanonicalImageProxyMode(doubanImgProxy)
 	switch mode {
 	case "server-proxy":
 		return "/api/douban/image?url=" + url.QueryEscape(original)
@@ -49,15 +46,15 @@ func RewriteVideoPosterURL(value string, doubanImgProxy string, doubanImgCustom 
 			return original
 		}
 		return base + url.QueryEscape(original)
-	case "douban-cdn-ali", "img3":
+	case "douban-cdn-ali":
 		parsed.Scheme = "https"
 		parsed.Host = "img3.doubanio.com"
 		return parsed.String()
-	case "cdn-tx", "cmliussss-cdn-tencent":
+	case "cdn-tx":
 		parsed.Scheme = "https"
 		parsed.Host = "img.doubanio.cmliussss.net"
 		return parsed.String()
-	case "cdn-ali", "cmliussss-cdn-ali":
+	case "cdn-ali":
 		parsed.Scheme = "https"
 		parsed.Host = "img.doubanio.cmliussss.com"
 		return parsed.String()

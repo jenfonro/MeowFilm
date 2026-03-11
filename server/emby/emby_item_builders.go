@@ -77,9 +77,10 @@ func embyBuildBaseItemFromSearch(it embyTMDBSearchItem) map[string]any {
 	if it.ID <= 0 || title == "" {
 		return nil
 	}
+	const tmdbRegionLabel = "智能播放"
 	switch it.MediaType {
 	case "tv":
-		return map[string]any{
+		out := map[string]any{
 			"Id":                embyBuildSeriesID(it.ID),
 			"Name":              title,
 			"Type":              "Series",
@@ -89,8 +90,10 @@ func embyBuildBaseItemFromSearch(it embyTMDBSearchItem) map[string]any {
 			"BackdropImageTags": []string{"tmdb"},
 			"ProviderIds":       map[string]any{"Tmdb": strconv.Itoa(it.ID)},
 		}
+		out["ProductionLocations"] = []string{tmdbRegionLabel}
+		return out
 	case "movie":
-		return map[string]any{
+		out := map[string]any{
 			"Id":                embyBuildMovieID(it.ID),
 			"Name":              title,
 			"Type":              "Movie",
@@ -100,6 +103,8 @@ func embyBuildBaseItemFromSearch(it embyTMDBSearchItem) map[string]any {
 			"BackdropImageTags": []string{"tmdb"},
 			"ProviderIds":       map[string]any{"Tmdb": strconv.Itoa(it.ID)},
 		}
+		out["ProductionLocations"] = []string{tmdbRegionLabel}
+		return out
 	default:
 		return nil
 	}

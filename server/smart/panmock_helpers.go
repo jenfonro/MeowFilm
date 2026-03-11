@@ -132,17 +132,12 @@ func smartResolvePanMockCandidateFromVod(
 		if err != nil {
 			continue
 		}
-		match := smartNormalizeMaybeGlobalSeasonEpisode(tmdbSeasons, smartSeasonEpisode{Season: jsMatch.Season, Episode: jsMatch.Episode})
+		rawSeason := jsMatch.Season
+		match, keyNo, ok, _ := smartResolveEpisodeMappingForPlayback(tmdbSeasons, smartSeasonEpisode{Season: jsMatch.Season, Episode: jsMatch.Episode})
 		seasonNo := match.Season
 		epNo := match.Episode
-		if epNo <= 0 {
+		if !ok || epNo <= 0 {
 			continue
-		}
-		keyNo := epNo
-		if seasonNo > 0 {
-			if g := smartTMDBGlobalEpisodeNoOf(tmdbSeasons, seasonNo, epNo); g > 0 {
-				keyNo = g
-			}
 		}
 		if keyNo != want {
 			continue
@@ -155,7 +150,7 @@ func smartResolvePanMockCandidateFromVod(
 		cand.Ep = ep
 		cand.RawLower = rawLower
 		cand.MatchSeason = seasonNo
-		cand.HasSeasonMarker = seasonNo > 0
+		cand.HasSeasonMarker = rawSeason > 0
 		cand.MatchKeyword = smartComputePriorityMatch(rawLower, settings.KeywordTokensLower)
 		matches = append(matches, cand)
 	}
