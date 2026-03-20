@@ -459,6 +459,16 @@ func (d *DB) ensureSchema() error {
 					  updated_at INTEGER NOT NULL,
 					  FOREIGN KEY(media_id) REFERENCES douban_media(id) ON DELETE CASCADE
 					);
+					CREATE TABLE IF NOT EXISTS douban_detail_cache (
+					  kind TEXT NOT NULL,
+					  douban_id TEXT NOT NULL,
+					  payload_json TEXT NOT NULL DEFAULT '',
+					  last_access_at INTEGER NOT NULL DEFAULT 0,
+					  last_refresh_at INTEGER NOT NULL DEFAULT 0,
+					  updated_at INTEGER NOT NULL,
+					  PRIMARY KEY(kind, douban_id)
+					);
+					CREATE INDEX IF NOT EXISTS idx_douban_detail_cache_access ON douban_detail_cache(last_access_at DESC);
 					CREATE TABLE IF NOT EXISTS douban_tmdb_link (
 					  douban_media_id INTEGER NOT NULL,
 					  tmdb_media_id INTEGER NOT NULL,

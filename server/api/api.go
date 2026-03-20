@@ -147,7 +147,7 @@ func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
 			})).ServeHTTP(w, r)
 		case "/tmdb/detail":
 			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				tmdb.HandleDetail(w, r, database)
+				handleAPITMDBDetail(w, r, database)
 			})).ServeHTTP(w, r)
 		case "/smart/matchblock/items":
 			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

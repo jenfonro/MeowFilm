@@ -3,13 +3,10 @@ package smart
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/metadata/douban"
@@ -45,40 +42,17 @@ func embyDoubanFetchRecentHot(database *db.DB, kind string, category string, hot
 		limit = 60
 	}
 
-	base, proxyBase := smartDoubanAPIBase(database)
+	base, _ := smartDoubanAPIBase(database)
 	u, _ := url.Parse(strings.TrimRight(base, "/") + "/rexxar/api/v2/subject/recent_hot/" + k)
 	q := u.Query()
 	q.Set("start", strconv.Itoa(start))
 	q.Set("limit", strconv.Itoa(limit))
 	q.Set("category", strings.TrimSpace(category))
 	q.Set("type", strings.TrimSpace(hotType))
-	u.RawQuery = q.Encode()
 
-	target := u.String()
-	if proxyBase != "" {
-		target = smartDoubanToProxiedURL(target, proxyBase)
-	}
-
-	client := &http.Client{Timeout: 12 * time.Second}
-	req, _ := http.NewRequest(http.MethodGet, target, nil)
-	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; MeowFilm/1.0; +https://github.com/jenfonro/meowfilm)")
-	req.Header.Set("Referer", "https://m.douban.com/")
-	req.Header.Set("Origin", "https://m.douban.com")
-	resp, err := client.Do(req)
+	body, err := douban.FetchRexxarJSON(database, u.Path, q)
 	if err != nil {
 		smartDebugPrintf("[emby][douban] recent_hot %s %s %s -> request error: %v", k, category, hotType, err)
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		smartDebugPrintf("[emby][douban] recent_hot %s %s %s -> http %d", k, category, hotType, resp.StatusCode)
-		return nil, fmt.Errorf("douban http %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		smartDebugPrintf("[emby][douban] recent_hot %s %s %s -> read error: %v", k, category, hotType, err)
 		return nil, err
 	}
 
@@ -101,8 +75,7 @@ func embyDoubanFetchRecentHot(database *db.DB, kind string, category string, hot
 		if len(snippet) > 200 {
 			snippet = snippet[:200]
 		}
-		ct := strings.TrimSpace(resp.Header.Get("Content-Type"))
-		smartDebugPrintf("[emby][douban] recent_hot %s %s %s -> empty items (ct=%q) url=%q body=%q", k, category, hotType, ct, target, snippet)
+		smartDebugPrintf("[emby][douban] recent_hot %s %s %s -> empty items body=%q", k, category, hotType, snippet)
 	}
 
 	out := make([]embyDoubanHotItem, 0, len(raw.Items))
