@@ -85,23 +85,14 @@ type tmdbMovieDetailsResponse struct {
 
 type MovieDetailsResponse = tmdbMovieDetailsResponse
 
-type tmdbDetailCacheEntry struct {
-	At       int64
-	ExpireAt int64
-	Data     map[string]any
-}
-
-var tmdbDetailCache = struct {
-	sync.Mutex
-	M map[string]tmdbDetailCacheEntry
-}{
-	M: map[string]tmdbDetailCacheEntry{},
-}
-
-const tmdbDetailCacheTTL = 10 * time.Minute
-const tmdbDetailCacheTTLEnded = 24 * time.Hour
-const tmdbDetailCacheMaxEntries = 2000
 const tmdbSoonAirDays = 0 // only include episodes scheduled for "today" (local CN date)
+
+var tmdbDetailRefreshInFlight = struct {
+	sync.Mutex
+	M map[string]bool
+}{
+	M: map[string]bool{},
+}
 
 func tmdbCNLocation() *time.Location {
 	loc, err := time.LoadLocation("Asia/Shanghai")
@@ -239,6 +230,41 @@ func fetchTMDBTVSeasonDetail(database *db.DB, tmdbID int, season int, language s
 		return nil, err
 	}
 	return &raw, nil
+}
+
+func fetchAndStoreTMDBTVSeasonDetail(database *db.DB, tmdbID int, season int, language string) error {
+	if database == nil || tmdbID <= 0 || season < 0 {
+		return fmt.Errorf("invalid args")
+	}
+	raw, err := fetchTMDBTVSeasonDetail(database, tmdbID, season, language)
+	if err != nil {
+		return err
+	}
+	if raw == nil {
+		return nil
+	}
+	episodes := make([]db.TMDBEpisode, 0, len(raw.Episodes))
+	for _, e := range raw.Episodes {
+		if e.EpisodeNumber <= 0 {
+			continue
+		}
+		episodes = append(episodes, db.TMDBEpisode{
+			SeasonNumber:  season,
+			EpisodeNumber: e.EpisodeNumber,
+			AirDate:       strings.TrimSpace(e.AirDate),
+			Runtime:       e.Runtime,
+			StillPath:     strings.TrimSpace(e.StillPath),
+			Name:          strings.TrimSpace(e.Name),
+			Overview:      strings.TrimSpace(e.Overview),
+		})
+	}
+	_ = database.UpsertTMDBEpisodes(tmdbID, defaultString(language, "zh-CN"), episodes)
+	_ = database.UpsertTMDBSeasons("tv", tmdbID, defaultString(language, "zh-CN"), []db.TMDBSeason{{
+		SeasonNumber: season,
+		PosterPath:   strings.TrimSpace(raw.PosterPath),
+		Name:         strings.TrimSpace(raw.Name),
+	}})
+	return nil
 }
 
 func probeLatestAiredEpisodeFromSeasons(database *db.DB, tmdbID int, seasons []tmdbTVSeason, language string, now time.Time) (int, int) {
@@ -396,66 +422,6 @@ func ResolveImageBase(database *db.DB) string { return resolveTMDBImageBase(data
 
 func JoinImage(base, path string) string { return joinTMDBImage(base, path) }
 
-func tmdbDetailCacheGet(cacheKey string, now int64) (map[string]any, bool) {
-	cacheKey = strings.TrimSpace(cacheKey)
-	if cacheKey == "" {
-		return nil, false
-	}
-	tmdbDetailCache.Lock()
-	defer tmdbDetailCache.Unlock()
-	if tmdbDetailCache.M == nil {
-		tmdbDetailCache.M = map[string]tmdbDetailCacheEntry{}
-		return nil, false
-	}
-	hit, ok := tmdbDetailCache.M[cacheKey]
-	if !ok || hit.Data == nil || hit.ExpireAt <= 0 {
-		return nil, false
-	}
-	if now >= hit.ExpireAt {
-		delete(tmdbDetailCache.M, cacheKey)
-		return nil, false
-	}
-	return hit.Data, true
-}
-
-func tmdbDetailCacheSet(cacheKey string, out map[string]any, ttl time.Duration, now int64) {
-	cacheKey = strings.TrimSpace(cacheKey)
-	if cacheKey == "" || out == nil {
-		return
-	}
-	if ttl <= 0 {
-		ttl = tmdbDetailCacheTTL
-	}
-	exp := now + int64(ttl.Seconds())
-	tmdbDetailCache.Lock()
-	if tmdbDetailCache.M == nil {
-		tmdbDetailCache.M = map[string]tmdbDetailCacheEntry{}
-	}
-	tmdbDetailCache.M[cacheKey] = tmdbDetailCacheEntry{At: now, ExpireAt: exp, Data: out}
-	if len(tmdbDetailCache.M) > tmdbDetailCacheMaxEntries {
-		cut := len(tmdbDetailCache.M) - tmdbDetailCacheMaxEntries
-		if cut < 1 {
-			cut = 1
-		}
-		for k, v := range tmdbDetailCache.M {
-			if cut <= 0 {
-				break
-			}
-			if v.ExpireAt > 0 && now >= v.ExpireAt {
-				delete(tmdbDetailCache.M, k)
-				cut -= 1
-			}
-		}
-		for k := range tmdbDetailCache.M {
-			if len(tmdbDetailCache.M) <= tmdbDetailCacheMaxEntries {
-				break
-			}
-			delete(tmdbDetailCache.M, k)
-		}
-	}
-	tmdbDetailCache.Unlock()
-}
-
 func HandleSearch(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
@@ -607,22 +573,6 @@ func HandleDetail(w http.ResponseWriter, r *http.Request, database *db.DB) {
 		return
 	}
 
-	token, tokenKind := resolveTMDBToken(database)
-	if token == "" || tokenKind == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error": "TMDB 未配置",
-			"code":  "TMDB_TOKEN_INVALID",
-		})
-		return
-	}
-
-	now := time.Now().Unix()
-	cacheKey := t + ":" + strconv.Itoa(id)
-	if hit, ok := tmdbDetailCacheGet(cacheKey, now); ok {
-		writeJSON(w, 200, hit)
-		return
-	}
-
 	data, fetchErr := fetchTMDBDetailForAPI(database, t, id)
 	if data == nil {
 		payload := map[string]any{
@@ -646,11 +596,6 @@ func HandleDetail(w http.ResponseWriter, r *http.Request, database *db.DB) {
 		return
 	}
 
-	ttl := tmdbDetailCacheTTL
-	if s, ok := data["status"].(string); ok && strings.EqualFold(strings.TrimSpace(s), "Ended") {
-		ttl = tmdbDetailCacheTTLEnded
-	}
-	tmdbDetailCacheSet(cacheKey, data, ttl, now)
 	writeJSON(w, 200, data)
 }
 
@@ -684,127 +629,232 @@ func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) (map[s
 		return nil, fmt.Errorf("invalid tmdbID/db")
 	}
 
+	language := tmdbDetailLanguage(database)
+	if cached, err := database.ReadTMDBDetailForAPI(mediaType, tmdbID, language); err == nil && cached != nil && strings.TrimSpace(cached.TMDBType) == mediaType {
+		_ = database.TouchTMDBMediaAccess(mediaType, tmdbID, time.Now().Unix())
+		out := buildTMDBDetailPayloadFromCache(database, cached)
+		if mediaType == "tv" && shouldRefreshCachedTMDBTVDetail(database, cached, language, time.Now()) {
+			launchTMDBDetailRefresh(database, mediaType, tmdbID)
+		}
+		return out, nil
+	}
+
+	return fetchTMDBDetailForAPIUpstream(database, mediaType, tmdbID)
+}
+
+func GetDetailForBackend(database *db.DB, mediaType string, tmdbID int) (*db.TMDBDetailForAPI, error) {
+	if mediaType != "tv" && mediaType != "movie" {
+		return nil, fmt.Errorf("invalid mediaType")
+	}
+	if database == nil || tmdbID <= 0 {
+		return nil, fmt.Errorf("invalid tmdbID/db")
+	}
+	language := tmdbDetailLanguage(database)
+	if cached, err := database.ReadTMDBDetailForAPI(mediaType, tmdbID, language); err == nil && cached != nil && strings.TrimSpace(cached.TMDBType) == mediaType {
+		_ = database.TouchTMDBMediaAccess(mediaType, tmdbID, time.Now().Unix())
+		if mediaType == "tv" && shouldRefreshCachedTMDBTVDetail(database, cached, language, time.Now()) {
+			launchTMDBDetailRefresh(database, mediaType, tmdbID)
+		}
+		return cached, nil
+	}
+	if _, err := fetchTMDBDetailForAPIUpstream(database, mediaType, tmdbID); err != nil {
+		return nil, err
+	}
+	return database.ReadTMDBDetailForAPI(mediaType, tmdbID, language)
+}
+
+func GetTVSeasonDetailForBackend(database *db.DB, tmdbID int, season int, minEpisodes int) (*db.TMDBSeasonDetailForAPI, error) {
+	if database == nil || tmdbID <= 0 || season < 0 {
+		return nil, fmt.Errorf("invalid args")
+	}
+	language := tmdbDetailLanguage(database)
+	if cached, err := database.ReadTMDBSeasonDetailForAPI(tmdbID, season, language); err == nil && cached != nil {
+		if minEpisodes <= 0 || len(cached.Episodes) >= minEpisodes {
+			_ = database.TouchTMDBMediaAccess("tv", tmdbID, time.Now().Unix())
+			if detail, err := database.ReadTMDBDetailForAPI("tv", tmdbID, language); err == nil && detail != nil && shouldRefreshCachedTMDBTVDetail(database, detail, language, time.Now()) {
+				if detail.LatestSeason <= 0 || detail.LatestSeason == season {
+					launchTMDBDetailRefresh(database, "tv", tmdbID)
+				}
+			}
+			return cached, nil
+		}
+	}
+	if err := fetchAndStoreTMDBTVSeasonDetail(database, tmdbID, season, language); err != nil {
+		return nil, err
+	}
+	return database.ReadTMDBSeasonDetailForAPI(tmdbID, season, language)
+}
+
+func tmdbDetailLanguage(database *db.DB) string {
+	if database != nil {
+		if cfg, err := database.ReadAppConfig(); err == nil {
+			if language := strings.TrimSpace(cfg.TMDBLanguage); language != "" {
+				return language
+			}
+		}
+	}
+	return "zh-CN"
+}
+
+func buildTMDBDetailPayloadFromCache(database *db.DB, d *db.TMDBDetailForAPI) map[string]any {
+	if d == nil {
+		return nil
+	}
+	imgBase := resolveTMDBImageBase(database)
+	if strings.TrimSpace(d.TMDBType) == "movie" {
+		pic := strings.TrimSpace(d.PosterPath)
+		if pic != "" && !strings.HasPrefix(pic, "http://") && !strings.HasPrefix(pic, "https://") {
+			pic = joinTMDBImage(imgBase, "t/p/w500"+pic)
+		}
+		return map[string]any{
+			"success":  true,
+			"id":       d.TMDBID,
+			"type":     "movie",
+			"title":    strings.TrimSpace(d.Title),
+			"year":     parseYearFromDate(d.Release),
+			"poster":   pic,
+			"overview": strings.TrimSpace(d.Overview),
+			"badge":    "",
+			"status":   strings.TrimSpace(d.Status),
+		}
+	}
+
+	pic := strings.TrimSpace(d.PosterPath)
+	if pic != "" && !strings.HasPrefix(pic, "http://") && !strings.HasPrefix(pic, "https://") {
+		pic = joinTMDBImage(imgBase, "t/p/w500"+pic)
+	}
+	backdrop := strings.TrimSpace(d.Backdrop)
+	if backdrop != "" && !strings.HasPrefix(backdrop, "http://") && !strings.HasPrefix(backdrop, "https://") {
+		backdrop = joinTMDBImage(imgBase, "t/p/w780"+backdrop)
+	}
+	seasons := make([]map[string]any, 0, len(d.Seasons))
+	seasonCount := 0
+	for _, s := range d.Seasons {
+		p := strings.TrimSpace(s.PosterPath)
+		if p != "" && !strings.HasPrefix(p, "http://") && !strings.HasPrefix(p, "https://") {
+			p = joinTMDBImage(imgBase, "t/p/w500"+p)
+		}
+		if s.SeasonNumber > 0 {
+			seasonCount++
+		}
+		seasons = append(seasons, map[string]any{
+			"season":   s.SeasonNumber,
+			"episodes": s.EpisodeCount,
+			"airDate":  strings.TrimSpace(s.AirDate),
+			"poster":   p,
+		})
+	}
+	status := strings.TrimSpace(d.Status)
+	ended := strings.EqualFold(status, "Ended")
+	badge := ""
+	if d.LatestSeason > 0 && d.LatestEpisode > 0 {
+		badge = "更新至 S" + strconv.Itoa(d.LatestSeason) + "E" + strconv.Itoa(d.LatestEpisode)
+	} else if ended && d.EpisodeCount > 0 {
+		badge = "共" + strconv.Itoa(d.EpisodeCount) + "集"
+	}
+	return map[string]any{
+		"success":       true,
+		"id":            d.TMDBID,
+		"type":          "tv",
+		"title":         strings.TrimSpace(d.Title),
+		"year":          parseYearFromDate(d.FirstAir),
+		"poster":        pic,
+		"backdrop":      backdrop,
+		"overview":      strings.TrimSpace(d.Overview),
+		"badge":         badge,
+		"status":        status,
+		"latestSeason":  d.LatestSeason,
+		"latestEpisode": d.LatestEpisode,
+		"latestGlobal":  cachedTMDBLatestGlobal(d),
+		"episodeCount":  d.EpisodeCount,
+		"seasons":       seasons,
+		"seasonCount":   seasonCount,
+	}
+}
+
+func cachedTMDBLatestGlobal(d *db.TMDBDetailForAPI) int {
+	if d == nil {
+		return 0
+	}
+	if d.LatestSeason > 0 && d.LatestEpisode > 0 {
+		sum := 0
+		for _, s := range d.Seasons {
+			if s.SeasonNumber <= 0 || s.EpisodeCount <= 0 {
+				continue
+			}
+			if s.SeasonNumber < d.LatestSeason {
+				sum += s.EpisodeCount
+				continue
+			}
+			if s.SeasonNumber == d.LatestSeason {
+				sum += d.LatestEpisode
+				return sum
+			}
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(d.Status), "Ended") && d.EpisodeCount > 0 {
+		return d.EpisodeCount
+	}
+	return 0
+}
+
+func shouldRefreshCachedTMDBTVDetail(database *db.DB, d *db.TMDBDetailForAPI, language string, now time.Time) bool {
+	if database == nil || d == nil || d.TMDBID <= 0 || strings.TrimSpace(d.TMDBType) != "tv" {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(d.Status), "Ended") {
+		return false
+	}
+	if d.LatestSeason <= 0 || d.LatestEpisode <= 0 {
+		return true
+	}
+	ok, err := database.HasTMDBEpisodeRealOverview(d.TMDBID, d.LatestSeason, d.LatestEpisode, language)
+	if err != nil {
+		return true
+	}
+	return !ok
+}
+
+func launchTMDBDetailRefresh(database *db.DB, mediaType string, tmdbID int) {
+	if database == nil || tmdbID <= 0 {
+		return
+	}
+	cacheKey := strings.TrimSpace(mediaType) + ":" + strconv.Itoa(tmdbID)
+	tmdbDetailRefreshInFlight.Lock()
+	if tmdbDetailRefreshInFlight.M == nil {
+		tmdbDetailRefreshInFlight.M = map[string]bool{}
+	}
+	if tmdbDetailRefreshInFlight.M[cacheKey] {
+		tmdbDetailRefreshInFlight.Unlock()
+		return
+	}
+	tmdbDetailRefreshInFlight.M[cacheKey] = true
+	tmdbDetailRefreshInFlight.Unlock()
+
+	go func() {
+		defer func() {
+			tmdbDetailRefreshInFlight.Lock()
+			delete(tmdbDetailRefreshInFlight.M, cacheKey)
+			tmdbDetailRefreshInFlight.Unlock()
+		}()
+		_, _ = fetchTMDBDetailForAPIUpstream(database, mediaType, tmdbID)
+	}()
+}
+
+func fetchTMDBDetailForAPIUpstream(database *db.DB, mediaType string, tmdbID int) (map[string]any, error) {
+	if mediaType != "tv" && mediaType != "movie" {
+		return nil, fmt.Errorf("invalid mediaType")
+	}
+	if tmdbID <= 0 || database == nil {
+		return nil, fmt.Errorf("invalid tmdbID/db")
+	}
+
 	token, tokenKind := resolveTMDBToken(database)
 	if token == "" || tokenKind == "" {
 		return nil, fmt.Errorf("tmdb not configured")
 	}
 
-	cfg, _ := database.ReadAppConfig()
-	language := strings.TrimSpace(cfg.TMDBLanguage)
-	if language == "" {
-		language = "zh-CN"
-	}
-
-	// Persistent normalized cache (SQLite)
-	if d, err := database.ReadTMDBDetailForAPI(mediaType, tmdbID, language); err == nil && d != nil {
-		imgBase := resolveTMDBImageBase(database)
-		if mediaType == "tv" {
-			// For TV requests, never return a movie-shaped payload.
-			// If the cached row is incomplete (no latest episode and not ended), force a re-fetch.
-			if d.TMDBType != "tv" {
-				return nil, fmt.Errorf("tmdb cache type mismatch (want tv, got %s)", d.TMDBType)
-			}
-			pic := strings.TrimSpace(d.PosterPath)
-			if pic != "" && !strings.HasPrefix(pic, "http://") && !strings.HasPrefix(pic, "https://") {
-				pic = joinTMDBImage(imgBase, "t/p/w500"+pic)
-			}
-			backdrop := strings.TrimSpace(d.Backdrop)
-			if backdrop != "" && !strings.HasPrefix(backdrop, "http://") && !strings.HasPrefix(backdrop, "https://") {
-				backdrop = joinTMDBImage(imgBase, "t/p/w780"+backdrop)
-			}
-			year := parseYearFromDate(d.FirstAir)
-			seasons := make([]map[string]any, 0, len(d.Seasons))
-			seasonCount := 0
-			for _, s := range d.Seasons {
-				p := strings.TrimSpace(s.PosterPath)
-				if p != "" && !strings.HasPrefix(p, "http://") && !strings.HasPrefix(p, "https://") {
-					p = joinTMDBImage(imgBase, "t/p/w500"+p)
-				}
-				if s.SeasonNumber > 0 {
-					seasonCount++
-				}
-				seasons = append(seasons, map[string]any{
-					"season":   s.SeasonNumber,
-					"episodes": s.EpisodeCount,
-					"airDate":  strings.TrimSpace(s.AirDate),
-					"poster":   p,
-				})
-			}
-			status := strings.TrimSpace(d.Status)
-			ended := strings.EqualFold(status, "Ended")
-			badge := ""
-			if d.LatestSeason > 0 && d.LatestEpisode > 0 {
-				badge = "更新至 S" + strconv.Itoa(d.LatestSeason) + "E" + strconv.Itoa(d.LatestEpisode)
-			} else if ended && d.EpisodeCount > 0 {
-				badge = "共" + strconv.Itoa(d.EpisodeCount) + "集"
-			}
-			latestGlobalEpisode := 0
-			if d.LatestSeason > 0 && d.LatestEpisode > 0 {
-				sum := 0
-				for _, s := range d.Seasons {
-					if s.SeasonNumber <= 0 || s.EpisodeCount <= 0 {
-						continue
-					}
-					if s.SeasonNumber < d.LatestSeason {
-						sum += s.EpisodeCount
-					} else if s.SeasonNumber == d.LatestSeason {
-						sum += d.LatestEpisode
-						break
-					}
-				}
-				if sum > 0 {
-					latestGlobalEpisode = sum
-				}
-			} else if ended && d.EpisodeCount > 0 {
-				latestGlobalEpisode = d.EpisodeCount
-			}
-			out := map[string]any{
-				"success":       true,
-				"id":            tmdbID,
-				"type":          "tv",
-				"title":         strings.TrimSpace(d.Title),
-				"year":          year,
-				"poster":        pic,
-				"backdrop":      backdrop,
-				"overview":      strings.TrimSpace(d.Overview),
-				"badge":         badge,
-				"status":        status,
-				"latestSeason":  d.LatestSeason,
-				"latestEpisode": d.LatestEpisode,
-				"latestGlobal":  latestGlobalEpisode,
-				"episodeCount":  d.EpisodeCount,
-				"seasons":       seasons,
-				"seasonCount":   seasonCount,
-			}
-			if ended {
-				return out, nil
-			}
-			// For ongoing TV, do not short-circuit on persistent cache latest values.
-			// TMDB last_episode_to_air can lag for newly aired episodes; continue to upstream fetch/probe.
-		}
-		if mediaType == "movie" {
-			if d.TMDBType != "movie" {
-				return nil, fmt.Errorf("tmdb cache type mismatch (want movie, got %s)", d.TMDBType)
-			}
-			pic := strings.TrimSpace(d.PosterPath)
-			if pic != "" && !strings.HasPrefix(pic, "http://") && !strings.HasPrefix(pic, "https://") {
-				pic = joinTMDBImage(imgBase, "t/p/w500"+pic)
-			}
-			year := parseYearFromDate(d.Release)
-			out := map[string]any{
-				"success":  true,
-				"id":       tmdbID,
-				"type":     "movie",
-				"title":    strings.TrimSpace(d.Title),
-				"year":     year,
-				"poster":   pic,
-				"overview": strings.TrimSpace(d.Overview),
-				"badge":    "",
-				"status":   strings.TrimSpace(d.Status),
-			}
-			return out, nil
-		}
-	}
+	language := tmdbDetailLanguage(database)
 
 	apiBase := resolveTMDBAPIBase(database)
 	u, _ := url.Parse(joinTMDBAPI(apiBase, mediaType+"/"+strconv.Itoa(tmdbID)))
