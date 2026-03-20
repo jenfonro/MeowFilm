@@ -247,6 +247,23 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 				"UserData":                map[string]any{"Played": false},
 			})
 		}
+		seasons = append(seasons, map[string]any{
+			"Id":                      embyBuildTMDBSettingsSeasonID(parsed.TMDBID),
+			"Name":                    "设置",
+			"SeriesName":              seriesName,
+			"Type":                    "Season",
+			"IsFolder":                true,
+			"LocationType":            "Remote",
+			"SeriesId":                seriesID,
+			"ParentId":                seriesID,
+			"ParentBackdropItemId":    seriesID,
+			"ParentBackdropImageTags": []string{"tmdb"},
+			"IndexNumber":             embyTMDBSettingsSeasonIndex,
+			"ProductionYear":          d.Year,
+			"ChildCount":              len(embyTMDBSettingsItems),
+			"ImageTags":               map[string]any{"Primary": "tmdb", "Thumb": "tmdb"},
+			"UserData":                map[string]any{"Played": false},
+		})
 		sort.Slice(seasons, func(i, j int) bool {
 			return intVal(seasons[i]["IndexNumber"]) < intVal(seasons[j]["IndexNumber"])
 		})
@@ -477,7 +494,78 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		seasonNo := 1
 		if seasonID != "" {
 			sParsed, ok := embyParseItemID(seasonID)
-			if !ok || sParsed == nil || sParsed.Kind != "tv" || sParsed.SubKind != "season" || sParsed.TMDBID != parsed.TMDBID {
+			if !ok || sParsed == nil || sParsed.Kind != "tv" || sParsed.TMDBID != parsed.TMDBID {
+				embyNotFound(w)
+				return
+			}
+			if sParsed.SubKind == "settings-season" {
+				out := make([]map[string]any, 0, len(embyTMDBSettingsItems))
+				for i, name := range embyTMDBSettingsItems {
+					itemIndex := i + 1
+					epID := embyBuildTMDBSettingsItemID(parsed.TMDBID, itemIndex)
+					mediaPath := embyBuildMediaPath(epID, "mp4")
+					mediaSourceID := embyStableHex32(epID)
+					out = append(out, map[string]any{
+						"Id":                      epID,
+						"Name":                    name,
+						"SeriesName":              seriesName,
+						"SeasonName":              "设置",
+						"Overview":                "",
+						"Type":                    "Episode",
+						"MediaType":               "Video",
+						"IsFolder":                false,
+						"LocationType":            "Remote",
+						"Path":                    mediaPath,
+						"Container":               "mp4,m4v",
+						"PremiereDate":            "",
+						"CanDownload":             false,
+						"RunTimeTicks":            0,
+						"Chapters":                []any{},
+						"People":                  []any{},
+						"Size":                    0,
+						"SeriesId":                seriesID,
+						"SeasonId":                seasonID,
+						"ParentId":                seasonID,
+						"ParentBackdropItemId":    seriesID,
+						"ParentBackdropImageTags": []string{"tmdb"},
+						"IndexNumber":             itemIndex,
+						"ParentIndexNumber":       embyTMDBSettingsSeasonIndex,
+						"ImageTags":               map[string]any{"Primary": "tmdb", "Thumb": "tmdb"},
+						"UserData":                map[string]any{"Played": false},
+						"MediaSources": []map[string]any{
+							{
+								"Id":                   mediaSourceID,
+								"MediaSourceId":        mediaSourceID,
+								"Protocol":             "File",
+								"IsRemote":             false,
+								"Path":                 mediaPath,
+								"Container":            "mp4",
+								"RequiredHttpHeaders":  map[string]string{},
+								"SupportsDirectPlay":   true,
+								"SupportsDirectStream": true,
+								"SupportsTranscoding":  true,
+								"SupportsProbing":      true,
+								"Type":                 "Default",
+							},
+						},
+						"AlternateMediaSources": []any{},
+					})
+				}
+				for _, it := range out {
+					embyEnsureShowsItemFields(it, fieldsParam)
+					if id, ok := it["Id"].(string); ok && strings.TrimSpace(id) != "" {
+						if _, ok := it["Etag"]; !ok {
+							it["Etag"] = embyStableEtag(strings.TrimSpace(id))
+						}
+					}
+					if _, ok := it["ServerId"]; !ok && strings.TrimSpace(serverID) != "" {
+						it["ServerId"] = serverID
+					}
+				}
+				writeJSON(w, 200, embyPagedItems(out, 0, len(out)))
+				return
+			}
+			if sParsed.SubKind != "season" {
 				embyNotFound(w)
 				return
 			}

@@ -77,6 +77,24 @@ func embyParseItemID(id string) (*embyItemID, bool) {
 		rest := strings.TrimPrefix(raw, "tmdb_tv_")
 		// series only: tmdb_tv_<id>
 		if !strings.Contains(rest, "_s") {
+			if strings.HasSuffix(rest, "_cfg") {
+				n, err := strconv.Atoi(strings.TrimSuffix(rest, "_cfg"))
+				if err != nil || n <= 0 {
+					return nil, false
+				}
+				return &embyItemID{Source: "tmdb", Kind: "tv", TMDBID: n, Season: embyTMDBSettingsSeasonIndex, SubKind: "settings-season"}, true
+			}
+			if idx := strings.Index(rest, "_cfg_i"); idx > 0 {
+				n, err := strconv.Atoi(rest[:idx])
+				if err != nil || n <= 0 {
+					return nil, false
+				}
+				en, err := strconv.Atoi(strings.TrimPrefix(rest[idx:], "_cfg_i"))
+				if err != nil || en <= 0 {
+					return nil, false
+				}
+				return &embyItemID{Source: "tmdb", Kind: "tv", TMDBID: n, Season: embyTMDBSettingsSeasonIndex, Episode: en, SubKind: "settings-item"}, true
+			}
 			n, err := strconv.Atoi(rest)
 			if err != nil || n <= 0 {
 				return nil, false
