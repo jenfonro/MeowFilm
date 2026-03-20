@@ -185,7 +185,7 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 		} else {
 			return nil
 		}
-	} else if parsed.SubKind == "series" || parsed.SubKind == "season" {
+	} else if parsed.SubKind == "series" || parsed.SubKind == "season" || parsed.SubKind == "settings-season" || parsed.SubKind == "settings-item" {
 		return nil
 	}
 

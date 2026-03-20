@@ -229,6 +229,15 @@ func embyResolveItemImagePath(database *db.DB, parsed *embyItemID, kind string, 
 				return d.Poster
 			}
 			return d.Poster
+		case "settings-season", "settings-item":
+			d, err := embyTMDBGetTVDetail(database, parsed.TMDBID)
+			if err != nil || d == nil {
+				return ""
+			}
+			if kind == "backdrop" && strings.TrimSpace(d.Backdrop) != "" {
+				return d.Backdrop
+			}
+			return d.Poster
 		default:
 			return ""
 		}

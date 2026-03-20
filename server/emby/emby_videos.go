@@ -116,7 +116,7 @@ func handleEmbyVideoStream(w http.ResponseWriter, r *http.Request, database *db.
 		embyNotFound(w)
 		return
 	}
-	if parsed.SubKind == "series" || parsed.SubKind == "season" {
+	if parsed.SubKind == "series" || parsed.SubKind == "season" || parsed.SubKind == "settings-season" || parsed.SubKind == "settings-item" {
 		embyWriteError(w, 400, "该条目不可播放")
 		return
 	}
