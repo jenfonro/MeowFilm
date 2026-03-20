@@ -23,6 +23,18 @@ func embyIsAiredDate(airDate string, now time.Time) bool {
 	return tmdb.IsAirDateAiredOrToday(s, now)
 }
 
+func smartParseYearFromDate(v string) int {
+	s := strings.TrimSpace(v)
+	if len(s) < 4 {
+		return 0
+	}
+	y, err := strconv.Atoi(s[:4])
+	if err != nil || y <= 0 {
+		return 0
+	}
+	return y
+}
+
 type embyTMDBSearchItem struct {
 	ID         int
 	MediaType  string // "tv" | "movie"
@@ -596,6 +608,21 @@ func embyTMDBGetTVDetail(database *db.DB, tmdbID int) (*embyTMDBTVDetail, error)
 	if id <= 0 {
 		return nil, errors.New("invalid tmdb id")
 	}
+	if database != nil {
+		if cached, err := tmdb.GetDetailForBackend(database, "tv", id); err == nil && cached != nil {
+			return smartBuildTVDetailFromCache(cached), nil
+		} else if err != nil {
+			return nil, err
+		}
+	}
+	return embyTMDBGetTVDetailUpstream(database, tmdbID)
+}
+
+func embyTMDBGetTVDetailUpstream(database *db.DB, tmdbID int) (*embyTMDBTVDetail, error) {
+	id := tmdbID
+	if id <= 0 {
+		return nil, errors.New("invalid tmdb id")
+	}
 	client, v4, v3, lang, _, _ := embyTMDBClient(database)
 	if v4 == "" && v3 == "" {
 		return nil, errors.New("TMDB not configured")
@@ -697,19 +724,19 @@ func embyTMDBGetTVDetail(database *db.DB, tmdbID int) (*embyTMDBTVDetail, error)
 			latestSeason = s.SeasonNumber
 		}
 	}
-		// 2) Find latest aired episode within that season by episode air_date.
-		if latestSeason > 0 {
-			seasonCount := 0
-			for _, s := range data.Seasons {
-				if s.SeasonNumber == latestSeason && s.EpisodeCount > 0 {
-					seasonCount = s.EpisodeCount
-					break
-				}
+	// 2) Find latest aired episode within that season by episode air_date.
+	if latestSeason > 0 {
+		seasonCount := 0
+		for _, s := range data.Seasons {
+			if s.SeasonNumber == latestSeason && s.EpisodeCount > 0 {
+				seasonCount = s.EpisodeCount
+				break
 			}
-			if seasonCount > 0 {
-				maxAired := 0
-				if eps, err := embyTMDBGetTVSeasonEpisodesAtLeast(database, id, latestSeason, seasonCount); err == nil && len(eps) > 0 {
-					for _, e := range eps {
+		}
+		if seasonCount > 0 {
+			maxAired := 0
+			if eps, err := embyTMDBGetTVSeasonEpisodesAtLeast(database, id, latestSeason, seasonCount); err == nil && len(eps) > 0 {
+				for _, e := range eps {
 					if e.Episode <= 0 {
 						continue
 					}
@@ -733,30 +760,30 @@ func embyTMDBGetTVDetail(database *db.DB, tmdbID int) (*embyTMDBTVDetail, error)
 			if ended && maxAired <= 0 {
 				maxAired = seasonCount
 			}
-				latestEpisode = maxAired
-			}
+			latestEpisode = maxAired
 		}
-		// 2.5) Reconcile with TMDB last_episode_to_air when it is newer than our season-detail view.
-		// This avoids off-by-one issues when TMDB's season episode_count or cached season detail lags,
-		// while still respecting air_date (CN day).
-		if data.LastEpisodeToAir != nil && data.LastEpisodeToAir.EpisodeNumber > 0 {
-			ad := strings.TrimSpace(data.LastEpisodeToAir.AirDate)
-			if ad == "" || embyIsAiredDate(ad, now0) {
-				if latestSeason <= 0 && data.LastEpisodeToAir.SeasonNumber > 0 {
-					latestSeason = data.LastEpisodeToAir.SeasonNumber
-				}
-				if data.LastEpisodeToAir.SeasonNumber > 0 && data.LastEpisodeToAir.SeasonNumber == latestSeason {
-					if data.LastEpisodeToAir.EpisodeNumber > latestEpisode {
-						latestEpisode = data.LastEpisodeToAir.EpisodeNumber
-					}
-				}
-			}
-		}
-		// 3) Fallback: if we couldn't determine it, use last_episode_to_air as a last resort.
-		if (latestSeason <= 0 || latestEpisode <= 0) && data.LastEpisodeToAir != nil && data.LastEpisodeToAir.EpisodeNumber > 0 {
+	}
+	// 2.5) Reconcile with TMDB last_episode_to_air when it is newer than our season-detail view.
+	// This avoids off-by-one issues when TMDB's season episode_count or cached season detail lags,
+	// while still respecting air_date (CN day).
+	if data.LastEpisodeToAir != nil && data.LastEpisodeToAir.EpisodeNumber > 0 {
+		ad := strings.TrimSpace(data.LastEpisodeToAir.AirDate)
+		if ad == "" || embyIsAiredDate(ad, now0) {
 			if latestSeason <= 0 && data.LastEpisodeToAir.SeasonNumber > 0 {
 				latestSeason = data.LastEpisodeToAir.SeasonNumber
 			}
+			if data.LastEpisodeToAir.SeasonNumber > 0 && data.LastEpisodeToAir.SeasonNumber == latestSeason {
+				if data.LastEpisodeToAir.EpisodeNumber > latestEpisode {
+					latestEpisode = data.LastEpisodeToAir.EpisodeNumber
+				}
+			}
+		}
+	}
+	// 3) Fallback: if we couldn't determine it, use last_episode_to_air as a last resort.
+	if (latestSeason <= 0 || latestEpisode <= 0) && data.LastEpisodeToAir != nil && data.LastEpisodeToAir.EpisodeNumber > 0 {
+		if latestSeason <= 0 && data.LastEpisodeToAir.SeasonNumber > 0 {
+			latestSeason = data.LastEpisodeToAir.SeasonNumber
+		}
 		if latestEpisode <= 0 {
 			latestEpisode = data.LastEpisodeToAir.EpisodeNumber
 		}
@@ -832,6 +859,35 @@ func embyTMDBGetTVSeasonDetailAtLeast(database *db.DB, tmdbID int, season int, m
 	}
 	embySeasonDetailCache.Unlock()
 
+	if database != nil {
+		if cached, err := tmdb.GetTVSeasonDetailForBackend(database, tmdbID, season, minEpisodes); err == nil && cached != nil {
+			outDetail := smartBuildSeasonDetailFromCache(cached)
+			embySeasonDetailCache.Lock()
+			if embySeasonDetailCache.M == nil {
+				embySeasonDetailCache.M = map[string]embySeasonDetailCacheEntry{}
+			}
+			embySeasonDetailCache.M[cacheKey] = embySeasonDetailCacheEntry{
+				At:     now,
+				Expire: now.Add(embySeasonDetailCacheTTL),
+				Data:   outDetail,
+			}
+			embySeasonDetailCache.Unlock()
+			return outDetail, nil
+		} else if err != nil {
+			return nil, err
+		}
+	}
+
+	return embyTMDBGetTVSeasonDetailAtLeastUpstream(database, tmdbID, season, minEpisodes)
+}
+
+func embyTMDBGetTVSeasonDetailAtLeastUpstream(database *db.DB, tmdbID int, season int, minEpisodes int) (*embyTMDBTVSeasonDetail, error) {
+	if tmdbID <= 0 || season < 0 {
+		return nil, errors.New("invalid args")
+	}
+
+	cacheKey := fmt.Sprintf("tv:%d:s:%d", tmdbID, season)
+	now := time.Now()
 	client, v4, v3, lang, _, _ := embyTMDBClient(database)
 	if v4 == "" && v3 == "" {
 		return nil, errors.New("TMDB not configured")
@@ -957,6 +1013,27 @@ func embyTMDBGetMovieDetail(database *db.DB, tmdbID int) (*embyTMDBMovieDetail, 
 	if id <= 0 {
 		return nil, errors.New("invalid tmdb id")
 	}
+	if database != nil {
+		if cached, err := tmdb.GetDetailForBackend(database, "movie", id); err == nil && cached != nil {
+			return &embyTMDBMovieDetail{
+				ID:       id,
+				Title:    strings.TrimSpace(cached.Title),
+				Overview: strings.TrimSpace(cached.Overview),
+				Year:     smartParseYearFromDate(strings.TrimSpace(cached.Release)),
+				Poster:   strings.TrimSpace(cached.PosterPath),
+			}, nil
+		} else if err != nil {
+			return nil, err
+		}
+	}
+	return embyTMDBGetMovieDetailUpstream(database, tmdbID)
+}
+
+func embyTMDBGetMovieDetailUpstream(database *db.DB, tmdbID int) (*embyTMDBMovieDetail, error) {
+	id := tmdbID
+	if id <= 0 {
+		return nil, errors.New("invalid tmdb id")
+	}
 	client, v4, v3, lang, _, _ := embyTMDBClient(database)
 	if v4 == "" && v3 == "" {
 		return nil, errors.New("TMDB not configured")
@@ -1019,6 +1096,62 @@ func embyTMDBGetMovieDetail(database *db.DB, tmdbID int) (*embyTMDBMovieDetail, 
 		Year:     year,
 		Poster:   strings.TrimSpace(data.PosterPath),
 	}, nil
+}
+
+func smartBuildTVDetailFromCache(cached *db.TMDBDetailForAPI) *embyTMDBTVDetail {
+	if cached == nil {
+		return nil
+	}
+	seasons := make([]TMDBSeason, 0, len(cached.Seasons))
+	for _, s := range cached.Seasons {
+		if s.SeasonNumber < 0 || s.EpisodeCount <= 0 {
+			continue
+		}
+		seasons = append(seasons, TMDBSeason{
+			Season:       s.SeasonNumber,
+			EpisodeCount: s.EpisodeCount,
+			Poster:       strings.TrimSpace(s.PosterPath),
+		})
+	}
+	return &embyTMDBTVDetail{
+		ID:            cached.TMDBID,
+		Title:         strings.TrimSpace(cached.Title),
+		Overview:      strings.TrimSpace(cached.Overview),
+		Year:          smartParseYearFromDate(strings.TrimSpace(cached.FirstAir)),
+		Poster:        strings.TrimSpace(cached.PosterPath),
+		Backdrop:      strings.TrimSpace(cached.Backdrop),
+		Status:        strings.TrimSpace(cached.Status),
+		EpisodeCount:  cached.EpisodeCount,
+		LatestSeason:  cached.LatestSeason,
+		LatestEpisode: cached.LatestEpisode,
+		Seasons:       seasons,
+	}
+}
+
+func smartBuildSeasonDetailFromCache(cached *db.TMDBSeasonDetailForAPI) *embyTMDBTVSeasonDetail {
+	if cached == nil {
+		return nil
+	}
+	episodes := make([]TMDBSeasonEpisode, 0, len(cached.Episodes))
+	for _, e := range cached.Episodes {
+		if e.EpisodeNumber <= 0 {
+			continue
+		}
+		episodes = append(episodes, TMDBSeasonEpisode{
+			Episode:  e.EpisodeNumber,
+			Name:     strings.TrimSpace(e.Name),
+			Overview: strings.TrimSpace(e.Overview),
+			Still:    strings.TrimSpace(e.StillPath),
+			AirDate:  strings.TrimSpace(e.AirDate),
+		})
+	}
+	return &embyTMDBTVSeasonDetail{
+		ID:       cached.TMDBID,
+		Season:   cached.Season,
+		Name:     strings.TrimSpace(cached.Name),
+		Poster:   strings.TrimSpace(cached.Poster),
+		Episodes: episodes,
+	}
 }
 
 type embyCreditsCacheEntry struct {
