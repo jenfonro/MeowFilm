@@ -353,8 +353,8 @@ func embyBuildItem(database *db.DB, embyID string) (map[string]any, error) {
 				"ParentId":     embyViewTMDBTV,
 
 				"ProductionYear":     d.Year,
-				"ChildCount":         childCount,
-				"RecursiveItemCount": recursiveCount,
+				"ChildCount":         childCount + 1,
+				"RecursiveItemCount": recursiveCount + len(embyTMDBSettingsItems),
 				"ImageTags":          map[string]any{"Primary": "tmdb"},
 				"BackdropImageTags":  []string{"tmdb"},
 				"ProviderIds":        map[string]any{"Tmdb": strconv.Itoa(parsed.TMDBID)},
@@ -379,6 +379,19 @@ func embyBuildItem(database *db.DB, embyID string) (map[string]any, error) {
 				"SeriesId":    seriesID,
 				"ParentId":    seriesID,
 				"IndexNumber": parsed.Season,
+				"ImageTags":   map[string]any{"Primary": "tmdb"},
+			}, nil
+		case "settings-season":
+			seriesID := embyBuildSeriesID(parsed.TMDBID)
+			return map[string]any{
+				"Id":          embyBuildTMDBSettingsSeasonID(parsed.TMDBID),
+				"Name":        "设置",
+				"Type":        "Season",
+				"IsFolder":    true,
+				"SeriesId":    seriesID,
+				"ParentId":    seriesID,
+				"IndexNumber": embyTMDBSettingsSeasonIndex,
+				"ChildCount":  len(embyTMDBSettingsItems),
 				"ImageTags":   map[string]any{"Primary": "tmdb"},
 			}, nil
 		case "episode":
@@ -443,6 +456,64 @@ func embyBuildItem(database *db.DB, embyID string) (map[string]any, error) {
 				"Container":               "mp4,m4v",
 				"VideoType":               "VideoFile",
 				"PremiereDate":            premiereISO,
+				"RunTimeTicks":            int64(0),
+				"ImageTags":               map[string]any{"Primary": "tmdb"},
+				"ProviderIds":             map[string]any{"Tmdb": strconv.Itoa(parsed.TMDBID)},
+				"UserData":                map[string]any{"Played": false},
+				"MediaSources": []map[string]any{
+					{
+						"Id":                   mediaSourceID,
+						"MediaSourceId":        mediaSourceID,
+						"Protocol":             "File",
+						"IsRemote":             false,
+						"Path":                 mediaPath,
+						"Container":            "mp4",
+						"RequiredHttpHeaders":  map[string]string{},
+						"SupportsDirectPlay":   true,
+						"SupportsDirectStream": true,
+						"SupportsTranscoding":  true,
+						"SupportsProbing":      true,
+						"Type":                 "Default",
+					},
+				},
+				"AlternateMediaSources": []any{},
+			}
+			embyEnsureStandardItem(out, "")
+			return out, nil
+		case "settings-item":
+			seriesID := embyBuildSeriesID(parsed.TMDBID)
+			seasonID := embyBuildTMDBSettingsSeasonID(parsed.TMDBID)
+			seriesName := ""
+			if tv, err := embyTMDBGetTVDetail(database, parsed.TMDBID); err == nil && tv != nil {
+				seriesName = strings.TrimSpace(tv.Title)
+			}
+			epName := embyTMDBSettingsItemName(parsed.Episode)
+			if epName == "" {
+				epName = "设置项"
+			}
+			episodeID := embyBuildTMDBSettingsItemID(parsed.TMDBID, parsed.Episode)
+			mediaSourceID := embyStableHex32(episodeID)
+			mediaPath := embyBuildMediaPath(episodeID, "mp4")
+			out := map[string]any{
+				"Id":                      episodeID,
+				"Name":                    epName,
+				"SeriesName":              seriesName,
+				"SeasonName":              "设置",
+				"Overview":                "",
+				"Type":                    "Episode",
+				"MediaType":               "Video",
+				"IsFolder":                false,
+				"SeriesId":                seriesID,
+				"SeasonId":                seasonID,
+				"ParentId":                seasonID,
+				"ParentBackdropItemId":    seriesID,
+				"ParentBackdropImageTags": []string{"tmdb"},
+				"IndexNumber":             parsed.Episode,
+				"ParentIndexNumber":       embyTMDBSettingsSeasonIndex,
+				"LocationType":            "Remote",
+				"Path":                    mediaPath,
+				"Container":               "mp4,m4v",
+				"VideoType":               "VideoFile",
 				"RunTimeTicks":            int64(0),
 				"ImageTags":               map[string]any{"Primary": "tmdb"},
 				"ProviderIds":             map[string]any{"Tmdb": strconv.Itoa(parsed.TMDBID)},
