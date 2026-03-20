@@ -2,8 +2,6 @@ package smart
 
 import (
 	"encoding/json"
-	"io"
-	"net/http"
 	"net/url"
 	"regexp"
 	"sort"
@@ -13,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/metadata/douban"
 )
 
 type doubanSeasonMetaCacheEntry struct {
@@ -378,43 +377,22 @@ func doubanProbeSeasons(database *db.DB, tmdbID int, keyword string, wantGlobal 
 		}
 	}
 
-	base, proxyBase := smartDoubanAPIBase(database)
+	base, _ := smartDoubanAPIBase(database)
 	u, _ := url.Parse(strings.TrimRight(base, "/") + "/rexxar/api/v2/search")
 	params := u.Query()
 	params.Set("q", q)
 	params.Set("type", "tv")
 	params.Set("start", "0")
 	params.Set("count", "20")
-	u.RawQuery = params.Encode()
-	target := u.String()
-	if proxyBase != "" {
-		target = smartDoubanToProxiedURL(target, proxyBase)
-	}
-
-	client := &http.Client{Timeout: 12 * time.Second}
-	req, _ := http.NewRequest(http.MethodGet, target, nil)
-	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; MeowFilm/1.0; +https://github.com/jenfonro/meowfilm)")
-	req.Header.Set("Referer", "https://m.douban.com/")
-	req.Header.Set("Origin", "https://m.douban.com")
-	resp, err := client.Do(req)
-	if err != nil || resp == nil {
+	body, err := douban.FetchRexxarJSON(database, u.Path, params)
+	if err != nil {
 		if inFlightEntry != nil {
 			doubanProbeFinish(id, inFlightEntry, nil, false)
 			finished = true
 		}
 		return nil, false
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if inFlightEntry != nil {
-			doubanProbeFinish(id, inFlightEntry, nil, false)
-			finished = true
-		}
-		return nil, false
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil || len(body) == 0 {
+	if len(body) == 0 {
 		if inFlightEntry != nil {
 			doubanProbeFinish(id, inFlightEntry, nil, false)
 			finished = true
@@ -697,29 +675,11 @@ func doubanProbeSeasons(database *db.DB, tmdbID int, keyword string, wantGlobal 
 		go func() {
 			defer wg.Done()
 
-			detailURL := strings.TrimRight(base, "/") + "/rexxar/api/v2/tv/" + url.PathEscape(it.ID)
-			if proxyBase != "" {
-				detailURL = smartDoubanToProxiedURL(detailURL, proxyBase)
-			}
-			dreq, _ := http.NewRequest(http.MethodGet, detailURL, nil)
-			dreq.Header.Set("Accept", "application/json, text/plain, */*")
-			dreq.Header.Set("User-Agent", "Mozilla/5.0 (compatible; MeowFilm/1.0; +https://github.com/jenfonro/meowfilm)")
-			dreq.Header.Set("Referer", "https://m.douban.com/")
-			dreq.Header.Set("Origin", "https://m.douban.com")
-
-			dresp, err := client.Do(dreq)
-			if err != nil || dresp == nil {
+			b, err := douban.FetchRexxarJSON(database, "/rexxar/api/v2/tv/"+url.PathEscape(it.ID), nil)
+			if err != nil {
 				return
 			}
-			defer dresp.Body.Close()
-			if dresp.StatusCode < 200 || dresp.StatusCode >= 300 {
-				if smartDebugLogEnabled() {
-					smartDebugPrintf("[smart][douban_probe] tmdbId=%d season=%d doubanId=%s detail=http_%d", id, it.Season, it.ID, dresp.StatusCode)
-				}
-				return
-			}
-			b, err := io.ReadAll(io.LimitReader(dresp.Body, 1<<20))
-			if err != nil || len(b) == 0 {
+			if len(b) == 0 {
 				if smartDebugLogEnabled() {
 					smartDebugPrintf("[smart][douban_probe] tmdbId=%d season=%d doubanId=%s detail=empty_body", id, it.Season, it.ID)
 				}
