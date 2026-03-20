@@ -548,64 +548,13 @@ func HandleSearch(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	writeJSON(w, 200, map[string]any{"success": true, "list": list})
 }
 
-func HandleDetail(w http.ResponseWriter, r *http.Request, database *db.DB) {
-	if r.Method != http.MethodGet {
-		methodNotAllowed(w)
-		return
-	}
-
-	t := strings.TrimSpace(r.URL.Query().Get("type"))
-	if t == "" {
-		t = strings.TrimSpace(r.URL.Query().Get("mediaType"))
-	}
-	if t != "tv" && t != "movie" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "参数无效"})
-		return
-	}
-
-	idStr := strings.TrimSpace(r.URL.Query().Get("id"))
-	if idStr == "" {
-		idStr = strings.TrimSpace(r.URL.Query().Get("tmdbId"))
-	}
-	id, _ := strconv.Atoi(idStr)
-	if id <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "参数无效"})
-		return
-	}
-
-	data, fetchErr := fetchTMDBDetailForAPI(database, t, id)
-	if data == nil {
-		payload := map[string]any{
-			"error": "TMDB 请求失败",
-			"code":  "TMDB_REQUEST_FAILED",
-		}
-		if fetchErr != nil {
-			payload["raw"] = fetchErr.Error()
-			if ue, ok := fetchErr.(*tmdbUpstreamError); ok && ue != nil {
-				if ue.StatusCode > 0 {
-					payload["upstreamStatus"] = ue.StatusCode
-				}
-				if ue.Body != "" {
-					payload["upstreamBody"] = ue.Body
-				}
-			}
-		} else {
-			payload["raw"] = "tmdb detail fetch returned empty result"
-		}
-		writeJSON(w, http.StatusBadGateway, payload)
-		return
-	}
-
-	writeJSON(w, 200, data)
-}
-
-type tmdbUpstreamError struct {
+type UpstreamError struct {
 	StatusCode int
 	Body       string
 	Message    string
 }
 
-func (e *tmdbUpstreamError) Error() string {
+func (e *UpstreamError) Error() string {
 	if e == nil {
 		return ""
 	}
@@ -621,7 +570,7 @@ func (e *tmdbUpstreamError) Error() string {
 	return "tmdb upstream error"
 }
 
-func fetchTMDBDetailForAPI(database *db.DB, mediaType string, tmdbID int) (map[string]any, error) {
+func GetDetailPayload(database *db.DB, mediaType string, tmdbID int) (map[string]any, error) {
 	if mediaType != "tv" && mediaType != "movie" {
 		return nil, fmt.Errorf("invalid mediaType")
 	}
@@ -884,7 +833,7 @@ func fetchTMDBDetailForAPIUpstream(database *db.DB, mediaType string, tmdbID int
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, &tmdbUpstreamError{
+		return nil, &UpstreamError{
 			StatusCode: resp.StatusCode,
 			Body:       strings.TrimSpace(string(body)),
 			Message:    "tmdb request failed",
