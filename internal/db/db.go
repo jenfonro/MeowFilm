@@ -176,6 +176,8 @@ func (d *DB) ensureSchema() error {
 					  first_air_date TEXT NOT NULL DEFAULT '',
 					  release_date TEXT NOT NULL DEFAULT '',
 					  runtime INTEGER NOT NULL DEFAULT 0,
+					  last_access_at INTEGER NOT NULL DEFAULT 0,
+					  last_refresh_at INTEGER NOT NULL DEFAULT 0,
 					  updated_at INTEGER NOT NULL,
 					  UNIQUE(tmdb_type, tmdb_id)
 					);
@@ -640,7 +642,61 @@ func (d *DB) ensureSchema() error {
 	if err := ensureSmartMatchBlockItemSchema(tx); err != nil {
 		return err
 	}
+	if err := ensureTMDBMediaCacheSchema(tx); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+func ensureTMDBMediaCacheSchema(tx *sql.Tx) error {
+	if tx == nil {
+		return nil
+	}
+	rows, err := tx.Query(`PRAGMA table_info(tmdb_media)`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	cols := map[string]bool{}
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			typ        string
+			notnull    int
+			dfltValue  any
+			primaryKey int
+		)
+		_ = rows.Scan(&cid, &name, &typ, &notnull, &dfltValue, &primaryKey)
+		if name != "" {
+			cols[name] = true
+		}
+	}
+	if !cols["last_access_at"] {
+		if _, err := tx.Exec(`ALTER TABLE tmdb_media ADD COLUMN last_access_at INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	if !cols["last_refresh_at"] {
+		if _, err := tx.Exec(`ALTER TABLE tmdb_media ADD COLUMN last_refresh_at INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`
+		UPDATE tmdb_media
+		SET last_access_at = CASE
+			WHEN last_access_at <= 0 THEN updated_at
+			ELSE last_access_at
+		END,
+		last_refresh_at = CASE
+			WHEN last_refresh_at <= 0 THEN updated_at
+			ELSE last_refresh_at
+		END
+	`); err != nil {
+		return err
+	}
+	return nil
 }
 
 func ensureSmartMatchBlockItemSchema(tx *sql.Tx) error {

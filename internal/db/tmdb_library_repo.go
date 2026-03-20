@@ -71,8 +71,8 @@ func (d *DB) UpsertTMDBMedia(m TMDBUpsertMedia) (mediaRowID int64, err error) {
 	defer func() { _ = tx.Rollback() }()
 
 	_, _ = tx.Exec(`
-		INSERT INTO tmdb_media(tmdb_type, tmdb_id, poster_path, backdrop_path, status, first_air_date, release_date, runtime, updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?)
+		INSERT INTO tmdb_media(tmdb_type, tmdb_id, poster_path, backdrop_path, status, first_air_date, release_date, runtime, last_access_at, last_refresh_at, updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(tmdb_type, tmdb_id) DO UPDATE SET
 		  poster_path = CASE WHEN excluded.poster_path <> '' THEN excluded.poster_path ELSE tmdb_media.poster_path END,
 		  backdrop_path = CASE WHEN excluded.backdrop_path <> '' THEN excluded.backdrop_path ELSE tmdb_media.backdrop_path END,
@@ -80,9 +80,11 @@ func (d *DB) UpsertTMDBMedia(m TMDBUpsertMedia) (mediaRowID int64, err error) {
 		  first_air_date = CASE WHEN excluded.first_air_date <> '' THEN excluded.first_air_date ELSE tmdb_media.first_air_date END,
 		  release_date = CASE WHEN excluded.release_date <> '' THEN excluded.release_date ELSE tmdb_media.release_date END,
 		  runtime = CASE WHEN excluded.runtime > 0 THEN excluded.runtime ELSE tmdb_media.runtime END,
+		  last_access_at = excluded.last_access_at,
+		  last_refresh_at = excluded.last_refresh_at,
 		  updated_at = excluded.updated_at
 	`, typ, m.ID, strings.TrimSpace(m.PosterPath), strings.TrimSpace(m.BackdropPath), strings.TrimSpace(m.Status),
-		strings.TrimSpace(m.FirstAirDate), strings.TrimSpace(m.ReleaseDate), m.Runtime, now,
+		strings.TrimSpace(m.FirstAirDate), strings.TrimSpace(m.ReleaseDate), m.Runtime, now, now, now,
 	)
 
 	if err := tx.QueryRow(`SELECT id FROM tmdb_media WHERE tmdb_type=? AND tmdb_id=? LIMIT 1`, typ, m.ID).Scan(&mediaRowID); err != nil {
@@ -244,6 +246,26 @@ type TMDBDetailForAPI struct {
 	EpisodeCount  int
 	LatestSeason  int
 	LatestEpisode int
+	LastAccessAt  int64
+	LastRefreshAt int64
+}
+
+type TMDBSeasonEpisodeForAPI struct {
+	SeasonNumber  int
+	EpisodeNumber int
+	AirDate       string
+	Runtime       int
+	StillPath     string
+	Name          string
+	Overview      string
+}
+
+type TMDBSeasonDetailForAPI struct {
+	TMDBID   int
+	Season   int
+	Name     string
+	Poster   string
+	Episodes []TMDBSeasonEpisodeForAPI
 }
 
 func (d *DB) ReadTMDBDetailForAPI(tmdbType string, tmdbID int, lang string) (*TMDBDetailForAPI, error) {
@@ -259,24 +281,27 @@ func (d *DB) ReadTMDBDetailForAPI(tmdbType string, tmdbID int, lang string) (*TM
 		l = "zh-CN"
 	}
 	var (
-		mediaRowID   int64
-		posterPath   string
-		backdropPath string
-		status       string
-		firstAir     string
-		releaseDate  string
-		runtime      int
-		title        string
-		overview     string
+		mediaRowID    int64
+		posterPath    string
+		backdropPath  string
+		status        string
+		firstAir      string
+		releaseDate   string
+		runtime       int
+		title         string
+		overview      string
+		lastAccessAt  int64
+		lastRefreshAt int64
 	)
 	err := d.db.QueryRow(`
 		SELECT m.id, m.poster_path, m.backdrop_path, m.status, m.first_air_date, m.release_date, m.runtime,
+		       m.last_access_at, m.last_refresh_at,
 		       COALESCE(i.title,''), COALESCE(i.overview,'')
 		FROM tmdb_media m
 		LEFT JOIN tmdb_media_i18n i ON i.media_id = m.id AND i.lang = ?
 		WHERE m.tmdb_type = ? AND m.tmdb_id = ?
 		LIMIT 1
-	`, l, typ, tmdbID).Scan(&mediaRowID, &posterPath, &backdropPath, &status, &firstAir, &releaseDate, &runtime, &title, &overview)
+	`, l, typ, tmdbID).Scan(&mediaRowID, &posterPath, &backdropPath, &status, &firstAir, &releaseDate, &runtime, &lastAccessAt, &lastRefreshAt, &title, &overview)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -284,15 +309,17 @@ func (d *DB) ReadTMDBDetailForAPI(tmdbType string, tmdbID int, lang string) (*TM
 		return nil, err
 	}
 	out := &TMDBDetailForAPI{
-		TMDBID:     tmdbID,
-		TMDBType:   typ,
-		Title:      strings.TrimSpace(title),
-		Overview:   strings.TrimSpace(overview),
-		Status:     strings.TrimSpace(status),
-		PosterPath: strings.TrimSpace(posterPath),
-		Backdrop:   strings.TrimSpace(backdropPath),
-		FirstAir:   strings.TrimSpace(firstAir),
-		Release:    strings.TrimSpace(releaseDate),
+		TMDBID:        tmdbID,
+		TMDBType:      typ,
+		Title:         strings.TrimSpace(title),
+		Overview:      strings.TrimSpace(overview),
+		Status:        strings.TrimSpace(status),
+		PosterPath:    strings.TrimSpace(posterPath),
+		Backdrop:      strings.TrimSpace(backdropPath),
+		FirstAir:      strings.TrimSpace(firstAir),
+		Release:       strings.TrimSpace(releaseDate),
+		LastAccessAt:  lastAccessAt,
+		LastRefreshAt: lastRefreshAt,
 	}
 	if typ == "movie" {
 		out.EpisodeCount = runtime
@@ -411,4 +438,134 @@ func (d *DB) ReadTMDBDetailForAPI(tmdbType string, tmdbID int, lang string) (*TM
 	out.LatestSeason = latestSeason
 	out.LatestEpisode = latestEpisode
 	return out, nil
+}
+
+func (d *DB) TouchTMDBMediaAccess(tmdbType string, tmdbID int, touchedAt int64) error {
+	if d == nil || d.db == nil {
+		return errors.New("db nil")
+	}
+	typ := strings.TrimSpace(tmdbType)
+	if (typ != "tv" && typ != "movie") || tmdbID <= 0 {
+		return errors.New("invalid args")
+	}
+	now := touchedAt
+	if now <= 0 {
+		now = time.Now().Unix()
+	}
+	_, err := d.db.Exec(`
+		UPDATE tmdb_media
+		SET last_access_at = ?, updated_at = ?
+		WHERE tmdb_type = ? AND tmdb_id = ?
+	`, now, now, typ, tmdbID)
+	return err
+}
+
+func (d *DB) ReadTMDBSeasonDetailForAPI(tmdbID int, season int, lang string) (*TMDBSeasonDetailForAPI, error) {
+	if d == nil || d.db == nil {
+		return nil, errors.New("db nil")
+	}
+	if tmdbID <= 0 || season < 0 {
+		return nil, errors.New("invalid args")
+	}
+	l := strings.TrimSpace(lang)
+	if l == "" {
+		l = "zh-CN"
+	}
+
+	var (
+		mediaRowID int64
+		seasonID   int64
+		name       string
+		poster     string
+	)
+	err := d.db.QueryRow(`
+		SELECT m.id, s.id, COALESCE(si.name, ''), s.poster_path
+		FROM tmdb_media m
+		JOIN tmdb_season s ON s.media_id = m.id
+		LEFT JOIN tmdb_season_i18n si ON si.season_id = s.id AND si.lang = ?
+		WHERE m.tmdb_type = 'tv' AND m.tmdb_id = ? AND s.season_number = ?
+		LIMIT 1
+	`, l, tmdbID, season).Scan(&mediaRowID, &seasonID, &name, &poster)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	out := &TMDBSeasonDetailForAPI{
+		TMDBID: tmdbID,
+		Season: season,
+		Name:   strings.TrimSpace(name),
+		Poster: strings.TrimSpace(poster),
+	}
+	rows, err := d.db.Query(`
+		SELECT e.season_number, e.episode_number, e.air_date, e.runtime, e.still_path,
+		       COALESCE(i.name, ''), COALESCE(i.overview, '')
+		FROM tmdb_episode e
+		LEFT JOIN tmdb_episode_i18n i ON i.episode_id = e.id AND i.lang = ?
+		WHERE e.media_id = ? AND e.season_number = ?
+		ORDER BY e.episode_number ASC
+	`, l, mediaRowID, season)
+	if err != nil {
+		return out, nil
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ep TMDBSeasonEpisodeForAPI
+		_ = rows.Scan(&ep.SeasonNumber, &ep.EpisodeNumber, &ep.AirDate, &ep.Runtime, &ep.StillPath, &ep.Name, &ep.Overview)
+		if ep.EpisodeNumber <= 0 {
+			continue
+		}
+		out.Episodes = append(out.Episodes, ep)
+	}
+	return out, nil
+}
+
+func (d *DB) HasTMDBEpisodeRealOverview(tmdbID int, season int, episode int, lang string) (bool, error) {
+	if d == nil || d.db == nil {
+		return false, errors.New("db nil")
+	}
+	if tmdbID <= 0 || season < 0 || episode <= 0 {
+		return false, errors.New("invalid args")
+	}
+	l := strings.TrimSpace(lang)
+	if l == "" {
+		l = "zh-CN"
+	}
+	var overview string
+	err := d.db.QueryRow(`
+		SELECT COALESCE(i.overview, '')
+		FROM tmdb_media m
+		JOIN tmdb_episode e ON e.media_id = m.id
+		LEFT JOIN tmdb_episode_i18n i ON i.episode_id = e.id AND i.lang = ?
+		WHERE m.tmdb_type = 'tv'
+		  AND m.tmdb_id = ?
+		  AND e.season_number = ?
+		  AND e.episode_number = ?
+		LIMIT 1
+	`, l, tmdbID, season, episode).Scan(&overview)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return isRealTMDBEpisodeOverview(overview), nil
+}
+
+func isRealTMDBEpisodeOverview(v string) bool {
+	s := strings.TrimSpace(v)
+	if s == "" {
+		return false
+	}
+	normalized := strings.ToLower(strings.TrimSpace(s))
+	switch normalized {
+	case "no overview found.", "overview unavailable.", "tbd":
+		return false
+	}
+	if strings.Contains(s, "请添加内容帮助我们完善数据库") {
+		return false
+	}
+	return true
 }
