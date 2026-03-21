@@ -2,6 +2,7 @@ package smart
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"regexp"
 	"sort"
@@ -156,6 +157,24 @@ func doubanAnyIDToString(v any) string {
 	default:
 		return ""
 	}
+}
+
+func readMapString(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprintf("%v", m[key]))
+}
+
+func readNestedMapString(m map[string]any, key string, subKey string) string {
+	if m == nil {
+		return ""
+	}
+	sub, _ := m[key].(map[string]any)
+	if sub == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprintf("%v", sub[subKey]))
 }
 
 func doubanParseChineseSeasonNo(raw string) int {
@@ -377,77 +396,6 @@ func doubanProbeSeasons(database *db.DB, tmdbID int, keyword string, wantGlobal 
 		}
 	}
 
-	base, _ := smartDoubanAPIBase(database)
-	u, _ := url.Parse(strings.TrimRight(base, "/") + "/rexxar/api/v2/search")
-	params := u.Query()
-	params.Set("q", q)
-	params.Set("type", "tv")
-	params.Set("start", "0")
-	params.Set("count", "20")
-	body, err := douban.FetchRexxarJSON(database, u.Path, params)
-	if err != nil {
-		if inFlightEntry != nil {
-			doubanProbeFinish(id, inFlightEntry, nil, false)
-			finished = true
-		}
-		return nil, false
-	}
-	if len(body) == 0 {
-		if inFlightEntry != nil {
-			doubanProbeFinish(id, inFlightEntry, nil, false)
-			finished = true
-		}
-		return nil, false
-	}
-
-	var raw struct {
-		Subjects struct {
-			Items []struct {
-				TargetType string `json:"target_type"`
-				TargetID   any    `json:"target_id"`
-				Target     struct {
-					ID               any      `json:"id"`
-					Title            string   `json:"title"`
-					Year             any      `json:"year"`
-					CardSubtitle     string   `json:"card_subtitle"`
-					CardSubTitle     string   `json:"cardSubTitle"`
-					Subtitle         string   `json:"subtitle"`
-					SubTitle         string   `json:"sub_title"`
-					NullRatingReason string   `json:"null_rating_reason"`
-					IsReleased       *bool    `json:"is_released"`
-					CanRate          *bool    `json:"can_rate"`
-					VendorCount      any      `json:"vendor_count"`
-					Pubdate          []string `json:"pubdate"`
-				} `json:"target"`
-			} `json:"items"`
-		} `json:"subjects"`
-		SmartBox []struct {
-			TargetType string `json:"target_type"`
-			TargetID   any    `json:"target_id"`
-			Target     struct {
-				ID               any      `json:"id"`
-				Title            string   `json:"title"`
-				Year             any      `json:"year"`
-				CardSubtitle     string   `json:"card_subtitle"`
-				CardSubTitle     string   `json:"cardSubTitle"`
-				Subtitle         string   `json:"subtitle"`
-				SubTitle         string   `json:"sub_title"`
-				NullRatingReason string   `json:"null_rating_reason"`
-				IsReleased       *bool    `json:"is_released"`
-				CanRate          *bool    `json:"can_rate"`
-				VendorCount      any      `json:"vendor_count"`
-				Pubdate          []string `json:"pubdate"`
-			} `json:"target"`
-		} `json:"smart_box"`
-	}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		if inFlightEntry != nil {
-			doubanProbeFinish(id, inFlightEntry, nil, false)
-			finished = true
-		}
-		return nil, false
-	}
-
 	type cand struct {
 		Season int
 		ID     string
@@ -585,31 +533,135 @@ func doubanProbeSeasons(database *db.DB, tmdbID int, keyword string, wantGlobal 
 		}
 		items = append(items, cand{ID: did, Title: t, Year: doubanAnyIDToString(year), Sub: strings.TrimSpace(sub)})
 	}
-	for _, it := range raw.Subjects.Items {
-		sub := strings.TrimSpace(it.Target.CardSubtitle)
-		if sub == "" {
-			sub = strings.TrimSpace(it.Target.CardSubTitle)
+
+	if douban.SearchCookieConfigured(database) {
+		searchPayload, _, err := douban.FetchSearchPayload(database, q)
+		if err != nil {
+			if inFlightEntry != nil {
+				doubanProbeFinish(id, inFlightEntry, nil, false)
+				finished = true
+			}
+			return nil, false
 		}
-		if sub == "" {
-			sub = strings.TrimSpace(it.Target.Subtitle)
+		subjects, _ := searchPayload["subjects"].(map[string]any)
+		rows, _ := subjects["items"].([]any)
+		for _, row := range rows {
+			item, _ := row.(map[string]any)
+			target, _ := item["target"].(map[string]any)
+			if item == nil || target == nil {
+				continue
+			}
+			push(
+				readMapString(item, "target_type"),
+				target["id"],
+				item["target_id"],
+				readMapString(target, "title"),
+				target["year"],
+				readMapString(target, "card_subtitle"),
+				readMapString(target, "null_rating_reason"),
+				nil,
+				nil,
+				nil,
+				nil,
+			)
 		}
-		if sub == "" {
-			sub = strings.TrimSpace(it.Target.SubTitle)
+	} else {
+		base, _ := smartDoubanAPIBase(database)
+		u, _ := url.Parse(strings.TrimRight(base, "/") + "/rexxar/api/v2/search")
+		params := u.Query()
+		params.Set("q", q)
+		params.Set("type", "tv")
+		params.Set("start", "0")
+		params.Set("count", "20")
+		body, err := douban.FetchRexxarJSON(database, u.Path, params)
+		if err != nil {
+			if inFlightEntry != nil {
+				doubanProbeFinish(id, inFlightEntry, nil, false)
+				finished = true
+			}
+			return nil, false
 		}
-		push(it.TargetType, it.Target.ID, it.TargetID, it.Target.Title, it.Target.Year, sub, it.Target.NullRatingReason, it.Target.IsReleased, it.Target.CanRate, it.Target.VendorCount, it.Target.Pubdate)
-	}
-	for _, it := range raw.SmartBox {
-		sub := strings.TrimSpace(it.Target.CardSubtitle)
-		if sub == "" {
-			sub = strings.TrimSpace(it.Target.CardSubTitle)
+		if len(body) == 0 {
+			if inFlightEntry != nil {
+				doubanProbeFinish(id, inFlightEntry, nil, false)
+				finished = true
+			}
+			return nil, false
 		}
-		if sub == "" {
-			sub = strings.TrimSpace(it.Target.Subtitle)
+
+		var raw struct {
+			Subjects struct {
+				Items []struct {
+					TargetType string `json:"target_type"`
+					TargetID   any    `json:"target_id"`
+					Target     struct {
+						ID               any      `json:"id"`
+						Title            string   `json:"title"`
+						Year             any      `json:"year"`
+						CardSubtitle     string   `json:"card_subtitle"`
+						CardSubTitle     string   `json:"cardSubTitle"`
+						Subtitle         string   `json:"subtitle"`
+						SubTitle         string   `json:"sub_title"`
+						NullRatingReason string   `json:"null_rating_reason"`
+						IsReleased       *bool    `json:"is_released"`
+						CanRate          *bool    `json:"can_rate"`
+						VendorCount      any      `json:"vendor_count"`
+						Pubdate          []string `json:"pubdate"`
+					} `json:"target"`
+				} `json:"items"`
+			} `json:"subjects"`
+			SmartBox []struct {
+				TargetType string `json:"target_type"`
+				TargetID   any    `json:"target_id"`
+				Target     struct {
+					ID               any      `json:"id"`
+					Title            string   `json:"title"`
+					Year             any      `json:"year"`
+					CardSubtitle     string   `json:"card_subtitle"`
+					CardSubTitle     string   `json:"cardSubTitle"`
+					Subtitle         string   `json:"subtitle"`
+					SubTitle         string   `json:"sub_title"`
+					NullRatingReason string   `json:"null_rating_reason"`
+					IsReleased       *bool    `json:"is_released"`
+					CanRate          *bool    `json:"can_rate"`
+					VendorCount      any      `json:"vendor_count"`
+					Pubdate          []string `json:"pubdate"`
+				} `json:"target"`
+			} `json:"smart_box"`
 		}
-		if sub == "" {
-			sub = strings.TrimSpace(it.Target.SubTitle)
+		if err := json.Unmarshal(body, &raw); err != nil {
+			if inFlightEntry != nil {
+				doubanProbeFinish(id, inFlightEntry, nil, false)
+				finished = true
+			}
+			return nil, false
 		}
-		push(it.TargetType, it.Target.ID, it.TargetID, it.Target.Title, it.Target.Year, sub, it.Target.NullRatingReason, it.Target.IsReleased, it.Target.CanRate, it.Target.VendorCount, it.Target.Pubdate)
+		for _, it := range raw.Subjects.Items {
+			sub := strings.TrimSpace(it.Target.CardSubtitle)
+			if sub == "" {
+				sub = strings.TrimSpace(it.Target.CardSubTitle)
+			}
+			if sub == "" {
+				sub = strings.TrimSpace(it.Target.Subtitle)
+			}
+			if sub == "" {
+				sub = strings.TrimSpace(it.Target.SubTitle)
+			}
+			push(it.TargetType, it.Target.ID, it.TargetID, it.Target.Title, it.Target.Year, sub, it.Target.NullRatingReason, it.Target.IsReleased, it.Target.CanRate, it.Target.VendorCount, it.Target.Pubdate)
+		}
+		for _, it := range raw.SmartBox {
+			sub := strings.TrimSpace(it.Target.CardSubtitle)
+			if sub == "" {
+				sub = strings.TrimSpace(it.Target.CardSubTitle)
+			}
+			if sub == "" {
+				sub = strings.TrimSpace(it.Target.Subtitle)
+			}
+			if sub == "" {
+				sub = strings.TrimSpace(it.Target.SubTitle)
+			}
+			push(it.TargetType, it.Target.ID, it.TargetID, it.Target.Title, it.Target.Year, sub, it.Target.NullRatingReason, it.Target.IsReleased, it.Target.CanRate, it.Target.VendorCount, it.Target.Pubdate)
+		}
 	}
 	if len(items) == 0 {
 		if smartDebugLogEnabled() {
