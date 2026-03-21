@@ -28,6 +28,10 @@ func handleAPIDoubanRexxarProxy(w http.ResponseWriter, r *http.Request, database
 
 	payload, statusCode, err := douban.FetchRexxarJSONWithStatus(database, upstreamPath, r.URL.Query())
 	if err != nil {
+		if rawErr, ok := err.(*douban.UpstreamRawError); ok && rawErr != nil && len(rawErr.Body) > 0 {
+			douban.WriteRawBody(w, rawErr.StatusCode, rawErr.ContentType, rawErr.Body)
+			return
+		}
 		writeJSON(w, statusCode, map[string]any{"success": false, "message": err.Error()})
 		return
 	}
