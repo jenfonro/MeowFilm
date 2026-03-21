@@ -532,6 +532,7 @@ func handleDashboardBackup(w http.ResponseWriter, r *http.Request, database *db.
 			"doubanDataCustom":   cfg.DoubanDataCustom,
 			"doubanImgProxy":     douban.CanonicalImageProxyMode(cfg.DoubanImgProxy),
 			"doubanImgCustom":    cfg.DoubanImgCustom,
+			"doubanSearchCookie": strings.TrimSpace(cfg.DoubanSearchCookie),
 			"tmdbApiToken":       strings.TrimSpace(cfg.TMDBAPIToken),
 			"tmdbDataProxyBase":  strings.TrimSpace(cfg.TMDBAPIBase),
 			"tmdbImageProxyBase": strings.TrimSpace(cfg.TMDBImgBase),
@@ -645,6 +646,9 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 			}
 			if s, ok := readStr("DoubanImgCustom", "doubanImgCustom"); ok {
 				c.DoubanImgCustom = s
+			}
+			if s, ok := readStr("DoubanSearchCookie", "doubanSearchCookie"); ok {
+				c.DoubanSearchCookie = s
 			}
 			if s, ok := readStr("TMDBAPIToken", "tmdbApiToken"); ok {
 				c.TMDBAPIToken = s
@@ -997,6 +1001,7 @@ func handleDashboardMetadataSettings(w http.ResponseWriter, r *http.Request, dat
 			"doubanDataCustom":   cfg.DoubanDataCustom,
 			"doubanImgProxy":     douban.CanonicalImageProxyMode(cfg.DoubanImgProxy),
 			"doubanImgCustom":    cfg.DoubanImgCustom,
+			"doubanSearchCookie": strings.TrimSpace(cfg.DoubanSearchCookie),
 			"tmdbApiToken":       strings.TrimSpace(cfg.TMDBAPIToken),
 			"tmdbDataProxyBase":  strings.TrimSpace(cfg.TMDBAPIBase),
 			"tmdbImageProxyBase": strings.TrimSpace(cfg.TMDBImgBase),
@@ -1018,6 +1023,7 @@ func handleDashboardMetadataSettings(w http.ResponseWriter, r *http.Request, dat
 			c.DoubanDataCustom = readStrJSONBody(body, "doubanDataCustom")
 			c.DoubanImgProxy = douban.CanonicalImageProxyMode(readStrJSONBody(body, "doubanImgProxy"))
 			c.DoubanImgCustom = readStrJSONBody(body, "doubanImgCustom")
+			c.DoubanSearchCookie = readStrJSONBody(body, "doubanSearchCookie")
 
 			c.TMDBAPIToken = readStrJSONBody(body, "tmdbApiToken")
 			c.TMDBAPIBase = normalizeHTTPBase(readStrJSONBody(body, "tmdbDataProxyBase"))

@@ -583,6 +583,7 @@ func (d *DB) ensureSchema() error {
 					  data_custom TEXT NOT NULL DEFAULT '',
 					  img_proxy TEXT NOT NULL DEFAULT 'server-proxy',
 					  img_custom TEXT NOT NULL DEFAULT '',
+					  search_cookie TEXT NOT NULL DEFAULT '',
 					  updated_at INTEGER NOT NULL
 					);
 					CREATE TABLE IF NOT EXISTS app_tmdb (

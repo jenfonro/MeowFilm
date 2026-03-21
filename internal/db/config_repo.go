@@ -16,6 +16,7 @@ type AppConfig struct {
 	DoubanDataCustom           string
 	DoubanImgProxy             string
 	DoubanImgCustom            string
+	DoubanSearchCookie         string
 	VideoSourceAPIBase         string
 	VideoSourceSearchCoverSite string
 	SearchDisplayMode          string
@@ -47,6 +48,7 @@ func (d *DB) ReadAppConfig() (AppConfig, error) {
 	var (
 		siteName                                       sql.NullString
 		dDataProxy, dDataCustom, dImgProxy, dImgCustom sql.NullString
+		dSearchCookie                                  sql.NullString
 		vsAPIBase, vsCover                             sql.NullString
 		sDisplay                                       sql.NullString
 		smartPriority                                  sql.NullString
@@ -60,7 +62,7 @@ func (d *DB) ReadAppConfig() (AppConfig, error) {
 	)
 
 	_ = d.db.QueryRow(`SELECT site_name FROM app_site WHERE id=1 LIMIT 1`).Scan(&siteName)
-	_ = d.db.QueryRow(`SELECT data_proxy, data_custom, img_proxy, img_custom FROM app_douban WHERE id=1 LIMIT 1`).Scan(&dDataProxy, &dDataCustom, &dImgProxy, &dImgCustom)
+	_ = d.db.QueryRow(`SELECT data_proxy, data_custom, img_proxy, img_custom, search_cookie FROM app_douban WHERE id=1 LIMIT 1`).Scan(&dDataProxy, &dDataCustom, &dImgProxy, &dImgCustom, &dSearchCookie)
 	_ = d.db.QueryRow(`SELECT api_base, search_cover_site FROM app_video_source WHERE id=1 LIMIT 1`).Scan(&vsAPIBase, &vsCover)
 	_ = d.db.QueryRow(`SELECT display_mode FROM app_search WHERE id=1 LIMIT 1`).Scan(&sDisplay)
 	_ = d.db.QueryRow(`SELECT source_extract_priority, site_clean_keywords FROM app_smart WHERE id=1 LIMIT 1`).Scan(&smartPriority, &smartSiteClean)
@@ -75,6 +77,7 @@ func (d *DB) ReadAppConfig() (AppConfig, error) {
 		DoubanDataCustom:           dDataCustom.String,
 		DoubanImgProxy:             defaultIfEmpty(dImgProxy.String, "server-proxy"),
 		DoubanImgCustom:            dImgCustom.String,
+		DoubanSearchCookie:         strings.TrimSpace(dSearchCookie.String),
 		VideoSourceAPIBase:         vsAPIBase.String,
 		VideoSourceSearchCoverSite: vsCover.String,
 		SearchDisplayMode:          defaultIfEmpty(sDisplay.String, "sites"),
@@ -119,16 +122,17 @@ func (d *DB) UpdateAppConfig(update func(*AppConfig)) error {
 	`, strings.TrimSpace(cfg.SiteName), now)
 
 	_, _ = tx.Exec(`
-		INSERT INTO app_douban(id, data_proxy, data_custom, img_proxy, img_custom, updated_at)
-		VALUES(1, ?, ?, ?, ?, ?)
+		INSERT INTO app_douban(id, data_proxy, data_custom, img_proxy, img_custom, search_cookie, updated_at)
+		VALUES(1, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		  data_proxy=excluded.data_proxy,
 		  data_custom=excluded.data_custom,
 		  img_proxy=excluded.img_proxy,
 		  img_custom=excluded.img_custom,
+		  search_cookie=excluded.search_cookie,
 		  updated_at=excluded.updated_at
 	`, strings.TrimSpace(cfg.DoubanDataProxy), strings.TrimSpace(cfg.DoubanDataCustom),
-		strings.TrimSpace(cfg.DoubanImgProxy), strings.TrimSpace(cfg.DoubanImgCustom), now)
+		strings.TrimSpace(cfg.DoubanImgProxy), strings.TrimSpace(cfg.DoubanImgCustom), strings.TrimSpace(cfg.DoubanSearchCookie), now)
 
 	_, _ = tx.Exec(`
 		INSERT INTO app_video_source(id, api_base, search_cover_site, updated_at)

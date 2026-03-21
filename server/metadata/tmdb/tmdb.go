@@ -582,13 +582,20 @@ func GetDetailPayload(database *db.DB, mediaType string, tmdbID int) (map[string
 	if cached, err := database.ReadTMDBDetailForAPI(mediaType, tmdbID, language); err == nil && cached != nil && strings.TrimSpace(cached.TMDBType) == mediaType {
 		_ = database.TouchTMDBMediaAccess(mediaType, tmdbID, time.Now().Unix())
 		out := buildTMDBDetailPayloadFromCache(database, cached)
+		out["cache_status"] = true
 		if mediaType == "tv" && shouldRefreshCachedTMDBTVDetail(database, cached, language, time.Now()) {
-			launchTMDBDetailRefresh(database, mediaType, tmdbID)
+			if launchTMDBDetailRefresh(database, mediaType, tmdbID) {
+				out["cache_status"] = "renew"
+			}
 		}
 		return out, nil
 	}
 
-	return fetchTMDBDetailForAPIUpstream(database, mediaType, tmdbID)
+	out, err := fetchTMDBDetailForAPIUpstream(database, mediaType, tmdbID)
+	if out != nil {
+		out["cache_status"] = false
+	}
+	return out, err
 }
 
 func GetDetailForBackend(database *db.DB, mediaType string, tmdbID int) (*db.TMDBDetailForAPI, error) {
@@ -764,9 +771,9 @@ func shouldRefreshCachedTMDBTVDetail(database *db.DB, d *db.TMDBDetailForAPI, la
 	return !ok
 }
 
-func launchTMDBDetailRefresh(database *db.DB, mediaType string, tmdbID int) {
+func launchTMDBDetailRefresh(database *db.DB, mediaType string, tmdbID int) bool {
 	if database == nil || tmdbID <= 0 {
-		return
+		return false
 	}
 	cacheKey := strings.TrimSpace(mediaType) + ":" + strconv.Itoa(tmdbID)
 	tmdbDetailRefreshInFlight.Lock()
@@ -775,7 +782,7 @@ func launchTMDBDetailRefresh(database *db.DB, mediaType string, tmdbID int) {
 	}
 	if tmdbDetailRefreshInFlight.M[cacheKey] {
 		tmdbDetailRefreshInFlight.Unlock()
-		return
+		return false
 	}
 	tmdbDetailRefreshInFlight.M[cacheKey] = true
 	tmdbDetailRefreshInFlight.Unlock()
@@ -788,6 +795,7 @@ func launchTMDBDetailRefresh(database *db.DB, mediaType string, tmdbID int) {
 		}()
 		_, _ = fetchTMDBDetailForAPIUpstream(database, mediaType, tmdbID)
 	}()
+	return true
 }
 
 func fetchTMDBDetailForAPIUpstream(database *db.DB, mediaType string, tmdbID int) (map[string]any, error) {
