@@ -92,18 +92,18 @@ func fetchRexxarDetail(database *db.DB, detailKind string, detailID string, fina
 	}
 	if cached, err := database.ReadDoubanDetailCache(detailKind, detailID); err == nil && cached != nil && strings.TrimSpace(cached.PayloadJSON) != "" {
 		_ = database.TouchDoubanDetailCacheAccess(detailKind, detailID, time.Now().Unix())
-		return []byte(cached.PayloadJSON), http.StatusOK, nil
+		return withCacheStatusJSON([]byte(cached.PayloadJSON), true), http.StatusOK, nil
 	}
 	payload, statusCode, err := fetchRexxarProxyJSON(finalURL)
 	if err != nil {
 		return nil, statusCode, err
 	}
 	_ = database.UpsertDoubanDetailCache(detailKind, detailID, string(payload), time.Now().Unix())
-	return payload, http.StatusOK, nil
+	return withCacheStatusJSON(payload, false), http.StatusOK, nil
 }
 
 func fetchRexxarSearch(finalURL string) ([]byte, int, error) {
-	val, _, err := rexxarSearchCache.Do(finalURL, func() (rexxarJSONCacheValue, error) {
+	val, fromCache, err := rexxarSearchCache.Do(finalURL, func() (rexxarJSONCacheValue, error) {
 		payload, _, fetchErr := fetchRexxarProxyJSON(finalURL)
 		if fetchErr != nil {
 			return rexxarJSONCacheValue{}, fetchErr
@@ -113,11 +113,11 @@ func fetchRexxarSearch(finalURL string) ([]byte, int, error) {
 	if err != nil {
 		return nil, http.StatusBadGateway, err
 	}
-	return val.JSON, http.StatusOK, nil
+	return withCacheStatusJSON(val.JSON, fromCache), http.StatusOK, nil
 }
 
 func fetchRexxarRecentHot(finalURL string) ([]byte, int, error) {
-	val, _, err := rexxarRecentHotCache.Do(finalURL, func() (rexxarJSONCacheValue, error) {
+	val, fromCache, err := rexxarRecentHotCache.Do(finalURL, func() (rexxarJSONCacheValue, error) {
 		payload, _, fetchErr := fetchRexxarProxyJSON(finalURL)
 		if fetchErr != nil {
 			return rexxarJSONCacheValue{}, fetchErr
@@ -127,7 +127,7 @@ func fetchRexxarRecentHot(finalURL string) ([]byte, int, error) {
 	if err != nil {
 		return nil, http.StatusBadGateway, err
 	}
-	return val.JSON, http.StatusOK, nil
+	return withCacheStatusJSON(val.JSON, fromCache), http.StatusOK, nil
 }
 
 func fetchRexxarProxyJSON(finalURL string) ([]byte, int, error) {
@@ -297,6 +297,22 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func withCacheStatusJSON(body []byte, status any) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil || payload == nil {
+		return body
+	}
+	payload["cache_status"] = status
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 func isRexxarSearchPath(upstreamPath string) bool {

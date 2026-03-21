@@ -141,6 +141,10 @@ func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
 			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleAPIDoubanImage(w, r)
 			})).ServeHTTP(w, r)
+		case "/douban/search":
+			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleAPIDoubanSearch(w, r, database)
+			})).ServeHTTP(w, r)
 		case "/tmdb/search":
 			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				tmdb.HandleSearch(w, r, database)
@@ -296,6 +300,7 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 				settings["doubanDataCustom"] = cfg.DoubanDataCustom
 				settings["doubanImgProxy"] = douban.CanonicalImageProxyMode(cfg.DoubanImgProxy)
 				settings["doubanImgCustom"] = cfg.DoubanImgCustom
+				settings["doubanSearchCookieConfigured"] = strings.TrimSpace(cfg.DoubanSearchCookie) != ""
 
 				if v, _ := database.ListMagicAggregateRegexRules(); v != nil {
 					settings["magicAggregateRegexRules"] = v

@@ -161,7 +161,10 @@ func (d *DB) ensureDefaults(_ bool) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	return d.runOneTimePanMatchTokenUpgrade()
+	if err := d.runOneTimePanMatchTokenUpgrade(); err != nil {
+		return err
+	}
+	return d.runOneTimeAppDoubanSearchCookieMigration()
 }
 
 func (d *DB) runOneTimePanMatchTokenUpgrade() error {
@@ -238,6 +241,62 @@ func (d *DB) runOneTimePanMatchTokenUpgrade() error {
 		}
 	}
 
+	if _, err := tx.Exec(`INSERT INTO app_migration_flag(name, updated_at) VALUES(?, ?)`, migrationName, time.Now().Unix()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *DB) runOneTimeAppDoubanSearchCookieMigration() error {
+	if d == nil || d.db == nil {
+		return nil
+	}
+	const migrationName = "app_douban_add_search_cookie_v1"
+
+	var done int
+	if err := d.db.QueryRow(`SELECT COUNT(1) FROM app_migration_flag WHERE name=?`, migrationName).Scan(&done); err != nil {
+		return err
+	}
+	if done > 0 {
+		return nil
+	}
+
+	rows, err := d.db.Query(`PRAGMA table_info(app_douban)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	hasSearchCookie := false
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			ctype   string
+			notnull int
+			dflt    sql.NullString
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if strings.EqualFold(strings.TrimSpace(name), "search_cookie") {
+			hasSearchCookie = true
+			break
+		}
+	}
+
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if !hasSearchCookie {
+		if _, err := tx.Exec(`ALTER TABLE app_douban ADD COLUMN search_cookie TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.Exec(`INSERT INTO app_migration_flag(name, updated_at) VALUES(?, ?)`, migrationName, time.Now().Unix()); err != nil {
 		return err
 	}
