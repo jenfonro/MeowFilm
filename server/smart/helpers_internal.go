@@ -106,11 +106,7 @@ func smartPanMockProviderID(database *db.DB, panLabel string) string {
 	if raw == "" || !strings.Contains(raw, "-") {
 		return ""
 	}
-	s := smartPanMatchLabelText(raw)
-	if s == "" {
-		return ""
-	}
-	return smartPlayFlagProviderID(s)
+	return smartPlayFlagProviderID(raw)
 }
 
 func smartExtractMockPasscodeFromCandidate(c smartCandidate) string {

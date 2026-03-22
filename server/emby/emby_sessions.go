@@ -460,9 +460,7 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 				if strings.TrimSpace(videoPoster) == "" {
 					videoPoster = strings.TrimSpace(prev.VideoPoster)
 				}
-				if strings.TrimSpace(videoRemark) == "" {
-					videoRemark = strings.TrimSpace(prev.VideoRemark)
-				}
+				videoRemark = strings.TrimSpace(prev.VideoRemark)
 				if strings.TrimSpace(panLabel) == "" {
 					panLabel = strings.TrimSpace(prev.PanLabel)
 				}
