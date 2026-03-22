@@ -767,10 +767,44 @@ func smartResolveEpisodeMappingForPlayback(seasons []embyTMDBSeason, se smartSea
 	}
 
 	if positiveCount >= 2 {
-		return smartSeasonEpisode{Season: 0, Episode: episode}, episode, true, true
+		return smartSeasonEpisode{}, 0, false, false
 	}
 
 	return smartSeasonEpisode{}, 0, false, false
+}
+
+func smartResolveEpisodeMappingForPlaybackWithSingleBaseline(
+	seasons []embyTMDBSeason,
+	se smartSeasonEpisode,
+	singleBaselineSeasons []embyTMDBSeason,
+	primaryFirstSeasonCount int,
+	sourceHasBeyondFirstSeason bool,
+) (match smartSeasonEpisode, global int, ok bool, loose bool) {
+	if match, global, ok, loose = smartResolveEpisodeMappingForPlayback(seasons, se); ok {
+		return match, global, ok, loose
+	}
+	episode := se.Episode
+	if episode <= 0 {
+		return smartSeasonEpisode{}, 0, false, false
+	}
+	if smartPositiveSeasonCount(seasons) < 2 || smartPositiveSeasonCount(singleBaselineSeasons) != 1 {
+		return smartSeasonEpisode{}, 0, false, false
+	}
+	// Frontend-compatible single-baseline fallback:
+	// when one side is single-season and the current mapping side is multi-season,
+	// fall back to the extracted episode number as a global index only if the
+	// single-season side can absorb it.
+	mapped := smartTMDBSeasonEpisodeOfGlobal(singleBaselineSeasons, episode)
+	if mapped.Season != 1 || mapped.Episode != episode {
+		return smartSeasonEpisode{}, 0, false, false
+	}
+	if se.Season > 0 {
+		return mapped, episode, true, false
+	}
+	if primaryFirstSeasonCount > 0 && episode <= primaryFirstSeasonCount && !sourceHasBeyondFirstSeason {
+		return smartSeasonEpisode{}, 0, false, false
+	}
+	return mapped, episode, true, true
 }
 
 func smartNormalizeMaybeGlobalSeasonEpisode(seasons []embyTMDBSeason, se smartSeasonEpisode) smartSeasonEpisode {
