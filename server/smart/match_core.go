@@ -737,52 +737,43 @@ func smartStrictSeasonEpisodeGlobal(seasons []embyTMDBSeason, season int, episod
 	return smartTMDBGlobalEpisodeNoOf(seasons, season, episode)
 }
 
-func smartResolveEpisodeMappingForPlayback(seasons []embyTMDBSeason, se smartSeasonEpisode) (match smartSeasonEpisode, global int, ok bool, loose bool) {
+func smartResolveEpisodeMappingStrict(seasons []embyTMDBSeason, se smartSeasonEpisode) (match smartSeasonEpisode, global int, ok bool) {
 	episode := se.Episode
 	season := se.Season
 	if episode <= 0 {
-		return smartSeasonEpisode{}, 0, false, false
+		return smartSeasonEpisode{}, 0, false
 	}
 	positiveCount := smartPositiveSeasonCount(seasons)
 
 	if season > 0 {
 		if g := smartStrictSeasonEpisodeGlobal(seasons, season, episode); g > 0 {
-			return smartSeasonEpisode{Season: season, Episode: episode}, g, true, false
+			return smartSeasonEpisode{Season: season, Episode: episode}, g, true
 		}
-		if positiveCount == 1 {
-			mapped := smartTMDBSeasonEpisodeOfGlobal(seasons, episode)
-			if mapped.Season == 1 && mapped.Episode == episode {
-				return mapped, episode, true, false
-			}
-		}
-		return smartSeasonEpisode{}, 0, false, false
+		return smartSeasonEpisode{}, 0, false
 	}
 
 	if positiveCount == 1 {
 		mapped := smartTMDBSeasonEpisodeOfGlobal(seasons, episode)
 		if mapped.Season == 1 && mapped.Episode == episode {
-			return mapped, episode, true, false
+			return mapped, episode, true
 		}
-		return smartSeasonEpisode{}, 0, false, false
+		return smartSeasonEpisode{}, 0, false
 	}
 
 	if positiveCount >= 2 {
-		return smartSeasonEpisode{}, 0, false, false
+		return smartSeasonEpisode{}, 0, false
 	}
 
-	return smartSeasonEpisode{}, 0, false, false
+	return smartSeasonEpisode{}, 0, false
 }
 
-func smartResolveEpisodeMappingForPlaybackWithSingleBaseline(
+func smartResolveEpisodeMappingSingleBaseline(
 	seasons []embyTMDBSeason,
 	se smartSeasonEpisode,
 	singleBaselineSeasons []embyTMDBSeason,
 	primaryFirstSeasonCount int,
 	sourceHasBeyondFirstSeason bool,
 ) (match smartSeasonEpisode, global int, ok bool, loose bool) {
-	if match, global, ok, loose = smartResolveEpisodeMappingForPlayback(seasons, se); ok {
-		return match, global, ok, loose
-	}
 	episode := se.Episode
 	if episode <= 0 {
 		return smartSeasonEpisode{}, 0, false, false
@@ -798,13 +789,50 @@ func smartResolveEpisodeMappingForPlaybackWithSingleBaseline(
 	if mapped.Season != 1 || mapped.Episode != episode {
 		return smartSeasonEpisode{}, 0, false, false
 	}
-	if se.Season > 0 {
-		return mapped, episode, true, false
-	}
 	if primaryFirstSeasonCount > 0 && episode <= primaryFirstSeasonCount && !sourceHasBeyondFirstSeason {
 		return smartSeasonEpisode{}, 0, false, false
 	}
+	if se.Season > 0 {
+		return mapped, episode, true, false
+	}
 	return mapped, episode, true, true
+}
+
+func smartResolveEpisodeMappingForPlaybackWithMode(
+	seasons []embyTMDBSeason,
+	se smartSeasonEpisode,
+	singleBaselineSeasons []embyTMDBSeason,
+	primaryFirstSeasonCount int,
+	sourceHasBeyondFirstSeason bool,
+	allowSingleBaseline bool,
+	primaryKind string,
+) (match smartSeasonEpisode, global int, ok bool, loose bool, resolutionMode string, degradedReason string) {
+	if match, global, ok = smartResolveEpisodeMappingStrict(seasons, se); ok {
+		label := "strict-tmdb"
+		if strings.EqualFold(strings.TrimSpace(primaryKind), "douban") {
+			label = "strict-douban"
+		}
+		return match, global, true, false, label, ""
+	}
+	if !allowSingleBaseline {
+		return smartSeasonEpisode{}, 0, false, false, "", ""
+	}
+	match, global, ok, loose = smartResolveEpisodeMappingSingleBaseline(
+		seasons,
+		se,
+		singleBaselineSeasons,
+		primaryFirstSeasonCount,
+		sourceHasBeyondFirstSeason,
+	)
+	if !ok {
+		return smartSeasonEpisode{}, 0, false, false, "", ""
+	}
+	reason := "episode-only-fallback"
+	if se.Season > 0 {
+		reason = "season-marked-fallback"
+		loose = false
+	}
+	return match, global, true, loose, "degraded-single-baseline", reason
 }
 
 func smartNormalizeMaybeGlobalSeasonEpisode(seasons []embyTMDBSeason, se smartSeasonEpisode) smartSeasonEpisode {

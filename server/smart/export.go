@@ -111,12 +111,27 @@ func TMDBGlobalEpisodeNoOf(seasons []TMDBSeason, season int, episode int) int {
 	return smartTMDBGlobalEpisodeNoOf(seasons, season, episode)
 }
 
+func PositiveSeasonCount(seasons []TMDBSeason) int {
+	return smartPositiveSeasonCount(seasons)
+}
+
 func NormalizeMaybeGlobalSeasonEpisode(seasons []TMDBSeason, se SeasonEpisode) SeasonEpisode {
 	return smartNormalizeMaybeGlobalSeasonEpisode(seasons, se)
 }
 
 func TMDBSeasonEpisodeOfGlobal(seasons []TMDBSeason, global int) SeasonEpisode {
 	return smartTMDBSeasonEpisodeOfGlobal(seasons, global)
+}
+
+func ResolveExtractedSeasonEpisodeToGlobal(primarySeasons []TMDBSeason, baselineSeasons []TMDBSeason, se SeasonEpisode, allowSingleBaseline bool, primaryKind string, sourceHasBeyondFirstSeason bool) (match SeasonEpisode, global int, ok bool, loose bool, resolutionMode string, degradedReason string) {
+	primaryFirstSeasonCount := 0
+	for _, s := range primarySeasons {
+		if s.Season == 1 && s.EpisodeCount > 0 {
+			primaryFirstSeasonCount = s.EpisodeCount
+			break
+		}
+	}
+	return smartResolveEpisodeMappingForPlaybackWithMode(primarySeasons, se, baselineSeasons, primaryFirstSeasonCount, sourceHasBeyondFirstSeason, allowSingleBaseline, primaryKind)
 }
 
 func ParseVodPlayURLToEpisodes(vodPlayURL string) []catpawrunner.Episode {
@@ -398,29 +413,35 @@ func ResolvePanMockCandidateFromVod(
 	base Candidate,
 	vodPlayURL string,
 	want int,
-	tmdbSeasons []TMDBSeason,
+	primarySeasons []TMDBSeason,
+	singleBaselineSeasons []TMDBSeason,
 	tmdbHasMultiSeason bool,
 	preferSeasonNo int,
 	settings PlaybackSettings,
 	rawCleanRules []string,
 	rawEpisodeRules []string,
+	allowSingleBaseline bool,
+	primaryKind string,
 ) *Candidate {
-	return smartResolvePanMockCandidateFromVod(base, vodPlayURL, want, tmdbSeasons, tmdbHasMultiSeason, preferSeasonNo, settings, rawCleanRules, rawEpisodeRules)
+	return smartResolvePanMockCandidateFromVod(base, vodPlayURL, want, primarySeasons, singleBaselineSeasons, tmdbHasMultiSeason, preferSeasonNo, settings, rawCleanRules, rawEpisodeRules, allowSingleBaseline, primaryKind)
 }
 
 func TryPanMockGroup(
 	at PanMockGroupAttempt,
 	base Candidate,
 	want int,
-	tmdbSeasons []TMDBSeason,
+	primarySeasons []TMDBSeason,
+	singleBaselineSeasons []TMDBSeason,
 	tmdbHasMultiSeason bool,
 	preferSeasonNo int,
 	settings PlaybackSettings,
 	rawCleanRules []string,
 	rawEpisodeRules []string,
+	allowSingleBaseline bool,
+	primaryKind string,
 	database *db.DB,
 	tvUser string,
 	accessByShareID map[string]string,
 ) *PickResult {
-	return smartTryPanMockGroup(at, base, want, tmdbSeasons, tmdbHasMultiSeason, preferSeasonNo, settings, rawCleanRules, rawEpisodeRules, database, tvUser, accessByShareID)
+	return smartTryPanMockGroup(at, base, want, primarySeasons, singleBaselineSeasons, tmdbHasMultiSeason, preferSeasonNo, settings, rawCleanRules, rawEpisodeRules, allowSingleBaseline, primaryKind, database, tvUser, accessByShareID)
 }

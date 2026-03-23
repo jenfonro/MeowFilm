@@ -35,6 +35,11 @@ type smartCandidate struct {
 	HasSeasonMarker  bool
 	SearchSeasonHint int
 	MatchKeyword     smartPriorityMatch
+	ResolutionMode   string
+	LockedGlobal     int
+	DegradedReason   string
+	StrictMatched    bool
+	DegradedMatched  bool
 }
 
 type smartCandidateFeatures struct {

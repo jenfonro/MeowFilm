@@ -223,31 +223,37 @@ func smartResolvePanMockCandidateFromVod(
 	base smartCandidate,
 	vodPlayURL string,
 	want int,
-	tmdbSeasons []embyTMDBSeason,
+	primarySeasons []embyTMDBSeason,
+	singleBaselineSeasons []embyTMDBSeason,
 	tmdbHasMultiSeason bool,
 	preferSeasonNo int,
 	settings smartPlaybackSettings,
 	rawCleanRules []string,
 	rawEpisodeRules []string,
+	allowSingleBaseline bool,
+	primaryKind string,
 ) *smartCandidate {
-	return smart.ResolvePanMockCandidateFromVod(base, vodPlayURL, want, tmdbSeasons, tmdbHasMultiSeason, preferSeasonNo, settings, rawCleanRules, rawEpisodeRules)
+	return smart.ResolvePanMockCandidateFromVod(base, vodPlayURL, want, primarySeasons, singleBaselineSeasons, tmdbHasMultiSeason, preferSeasonNo, settings, rawCleanRules, rawEpisodeRules, allowSingleBaseline, primaryKind)
 }
 
 func smartTryPanMockGroup(
 	at smartPanMockGroupAttempt,
 	base smartCandidate,
 	want int,
-	tmdbSeasons []embyTMDBSeason,
+	primarySeasons []embyTMDBSeason,
+	singleBaselineSeasons []embyTMDBSeason,
 	tmdbHasMultiSeason bool,
 	preferSeasonNo int,
 	settings smartPlaybackSettings,
 	rawCleanRules []string,
 	rawEpisodeRules []string,
+	allowSingleBaseline bool,
+	primaryKind string,
 	database *db.DB,
 	tvUser string,
 	accessByShareID map[string]string,
 ) *smartPickResult {
-	return smart.TryPanMockGroup(at, base, want, tmdbSeasons, tmdbHasMultiSeason, preferSeasonNo, settings, rawCleanRules, rawEpisodeRules, database, tvUser, accessByShareID)
+	return smart.TryPanMockGroup(at, base, want, primarySeasons, singleBaselineSeasons, tmdbHasMultiSeason, preferSeasonNo, settings, rawCleanRules, rawEpisodeRules, allowSingleBaseline, primaryKind, database, tvUser, accessByShareID)
 }
 
 func containsInt(list []int, v int) bool {
