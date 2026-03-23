@@ -13,6 +13,7 @@ import (
 
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/magic"
+	"github.com/jenfonro/meowfilm/server/smart"
 )
 
 func handleEmbySessions(w http.ResponseWriter, r *http.Request, database *db.DB, serverID string, parts []string) {
@@ -370,14 +371,70 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 					}
 				}
 				if bestID > 0 && bestScore >= 75 {
-					season := se.Season
-					if season <= 0 {
-						season = 1
-					}
 					ep := se.Episode
-
-					tmdbEpisodeID := embyBuildEpisodeID(bestID, season, ep)
-
+					resolvedSeason := 0
+					resolvedEpisode := 0
+					detail, detailErr := embyTMDBGetTVDetail(database, bestID)
+					if detailErr == nil && detail != nil {
+						tmdbSeasons := append([]embyTMDBSeason{}, detail.Seasons...)
+						match, _, ok, _, _, _ := smart.ResolveExtractedSeasonEpisodeToGlobal(
+							tmdbSeasons,
+							nil,
+							smart.SeasonEpisode{Season: se.Season, Episode: se.Episode},
+							false,
+							"tmdb",
+							false,
+						)
+						if ok {
+							resolvedSeason = match.Season
+							resolvedEpisode = match.Episode
+						} else if over, overOK := doubanProbeSeasons(database, bestID, strings.TrimSpace(videoTitle), se.Episode); overOK && len(over) > 0 {
+							tmdbMulti := smart.PositiveSeasonCount(tmdbSeasons)
+							doubanMulti := smart.PositiveSeasonCount(over)
+							switch {
+							case tmdbMulti < 2 && doubanMulti >= 2:
+								match, _, ok, _, _, _ = smart.ResolveExtractedSeasonEpisodeToGlobal(
+									over,
+									tmdbSeasons,
+									smart.SeasonEpisode{Season: se.Season, Episode: se.Episode},
+									true,
+									"douban",
+									false,
+								)
+								if ok {
+									mapped := smart.TMDBSeasonEpisodeOfGlobal(tmdbSeasons, smart.TMDBGlobalEpisodeNoOf(over, match.Season, match.Episode))
+									resolvedSeason = mapped.Season
+									resolvedEpisode = mapped.Episode
+								}
+							case tmdbMulti >= 2 && doubanMulti < 2:
+								match, _, ok, _, _, _ = smart.ResolveExtractedSeasonEpisodeToGlobal(
+									tmdbSeasons,
+									over,
+									smart.SeasonEpisode{Season: se.Season, Episode: se.Episode},
+									true,
+									"tmdb",
+									false,
+								)
+								if ok {
+									resolvedSeason = match.Season
+									resolvedEpisode = match.Episode
+								}
+							}
+						}
+					}
+					if resolvedSeason <= 0 || resolvedEpisode <= 0 {
+						resolvedSeason = se.Season
+						resolvedEpisode = 0
+						if se.Season <= 0 {
+							// Keep site history only when we cannot reliably normalize.
+							bestID = 0
+						}
+					}
+					if bestID <= 0 || resolvedSeason <= 0 || resolvedEpisode <= 0 {
+						goto skipTMDBPromote
+					}
+					ep = resolvedEpisode
+					tmdbEpisodeID := embyBuildEpisodeID(bestID, resolvedSeason, ep)
 					tmdbTitle := ""
 					tmdbPoster := ""
 					metaKey := "tv:" + strconv.Itoa(bestID)
@@ -408,7 +465,7 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 					tmdbType = "tv"
 					contentKey = strings.ToLower(strings.TrimSpace(fmt.Sprintf("tmdb:tv:%d", bestID)))
 					episodeIndex = ep
-					episodeName = fmt.Sprintf("S%02dE%03d", season, ep)
+					episodeName = fmt.Sprintf("S%02dE%03d", resolvedSeason, ep)
 					itemID = tmdbEpisodeID
 					if tmdbTitle != "" {
 						videoTitle = tmdbTitle
@@ -417,6 +474,7 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 						videoPoster = tmdbPoster
 					}
 				}
+			skipTMDBPromote:
 			}
 		}
 	} else {
