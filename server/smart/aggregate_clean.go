@@ -1,11 +1,35 @@
 package smart
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/magic"
 )
+
+var (
+	smartRePlainCNSeasonSuffix = regexp.MustCompile(`(?i)\s*[（(\[]?\s*(?:\d+|[一二三四五六七八九十百零〇两]+)\s*季\s*[）)\]]?\s*$`)
+	smartReYearBangSuffix      = regexp.MustCompile(`(?i)\s*[（(\[]?\s*年番\s*(?:\d+|[一二三四五六七八九十百零〇两]+)\s*[）)\]]?\s*$`)
+)
+
+func smartCanonicalAggregateTitle(text string) string {
+	s := strings.TrimSpace(text)
+	if s == "" {
+		return ""
+	}
+	orig := s
+	s = smartReCNSeasonSuffix.ReplaceAllString(s, "")
+	s = smartRePlainCNSeasonSuffix.ReplaceAllString(s, "")
+	s = smartReENSeasonSuffix.ReplaceAllString(s, "")
+	s = smartReSSeasonSuffix.ReplaceAllString(s, "")
+	s = smartReYearBangSuffix.ReplaceAllString(s, "")
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return strings.TrimSpace(orig)
+	}
+	return s
+}
 
 func embyLoadAggregateCleanRules(database *db.DB) []string {
 	if database == nil {
@@ -29,6 +53,7 @@ func embyAggKeyWithRules(text string, rawRules []string) string {
 			cleaned = strings.TrimSpace(out)
 		}
 	}
+	cleaned = smartCanonicalAggregateTitle(cleaned)
 	return smartNormalizeAggKey(cleaned)
 }
 
