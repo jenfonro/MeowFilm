@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/catpawrunner"
 	"github.com/jenfonro/meowfilm/server/magic"
 	"github.com/jenfonro/meowfilm/server/netdisk"
 )
@@ -108,17 +109,33 @@ func smartResolvePanMockCandidateFromVod(
 	base smartCandidate,
 	vodPlayURL string,
 	want int,
-	tmdbSeasons []embyTMDBSeason,
+	primarySeasons []embyTMDBSeason,
+	singleBaselineSeasons []embyTMDBSeason,
 	tmdbHasMultiSeason bool,
 	preferSeasonNo int,
 	settings smartPlaybackSettings,
 	rawCleanRules []string,
 	rawEpisodeRules []string,
+	allowSingleBaseline bool,
+	primaryKind string,
 ) *smartCandidate {
 	eps := smartParseVodPlayURLToEpisodes(vodPlayURL)
 	if len(eps) == 0 {
 		return nil
 	}
+	primaryFirstSeasonCount := 0
+	for _, s := range primarySeasons {
+		if s.Season == 1 && s.EpisodeCount > 0 {
+			primaryFirstSeasonCount = s.EpisodeCount
+			break
+		}
+	}
+	sourceHasBeyondFirstSeason := smartSourceHasEpisodeBeyondFirstSeason(
+		[]catpawrunner.Pan{{Label: strings.TrimSpace(base.PanLabel), Episodes: eps}},
+		rawCleanRules,
+		rawEpisodeRules,
+		primaryFirstSeasonCount,
+	)
 	matches := []smartCandidate{}
 	for _, ep := range eps {
 		if strings.TrimSpace(ep.URL) == "" {
@@ -133,7 +150,15 @@ func smartResolvePanMockCandidateFromVod(
 			continue
 		}
 		rawSeason := jsMatch.Season
-		match, keyNo, ok, _ := smartResolveEpisodeMappingForPlayback(tmdbSeasons, smartSeasonEpisode{Season: jsMatch.Season, Episode: jsMatch.Episode})
+		match, keyNo, ok, _, resolutionMode, degradedReason := smartResolveEpisodeMappingForPlaybackWithMode(
+			primarySeasons,
+			smartSeasonEpisode{Season: jsMatch.Season, Episode: jsMatch.Episode},
+			singleBaselineSeasons,
+			primaryFirstSeasonCount,
+			sourceHasBeyondFirstSeason,
+			allowSingleBaseline,
+			primaryKind,
+		)
 		seasonNo := match.Season
 		epNo := match.Episode
 		if !ok || epNo <= 0 {
@@ -152,6 +177,11 @@ func smartResolvePanMockCandidateFromVod(
 		cand.MatchSeason = seasonNo
 		cand.HasSeasonMarker = rawSeason > 0
 		cand.MatchKeyword = smartComputePriorityMatch(rawLower, settings.KeywordTokensLower)
+		cand.ResolutionMode = resolutionMode
+		cand.LockedGlobal = keyNo
+		cand.DegradedReason = degradedReason
+		cand.StrictMatched = resolutionMode == "strict-tmdb" || resolutionMode == "strict-douban"
+		cand.DegradedMatched = resolutionMode == "degraded-single-baseline"
 		matches = append(matches, cand)
 	}
 	if len(matches) == 0 {
@@ -164,12 +194,15 @@ func smartTryPanMockGroup(
 	at smartPanMockGroupAttempt,
 	base smartCandidate,
 	want int,
-	tmdbSeasons []embyTMDBSeason,
+	primarySeasons []embyTMDBSeason,
+	singleBaselineSeasons []embyTMDBSeason,
 	tmdbHasMultiSeason bool,
 	preferSeasonNo int,
 	settings smartPlaybackSettings,
 	rawCleanRules []string,
 	rawEpisodeRules []string,
+	allowSingleBaseline bool,
+	primaryKind string,
 	database *db.DB,
 	tvUser string,
 	accessByShareID map[string]string,
@@ -207,7 +240,7 @@ func smartTryPanMockGroup(
 		if err != nil {
 			return nil
 		}
-		picked := smartResolvePanMockCandidateFromVod(base, vod, want, tmdbSeasons, tmdbHasMultiSeason, preferSeasonNo, settings, rawCleanRules, rawEpisodeRules)
+		picked := smartResolvePanMockCandidateFromVod(base, vod, want, primarySeasons, singleBaselineSeasons, tmdbHasMultiSeason, preferSeasonNo, settings, rawCleanRules, rawEpisodeRules, allowSingleBaseline, primaryKind)
 		if picked == nil || strings.TrimSpace(picked.Ep.URL) == "" {
 			return nil
 		}
@@ -241,7 +274,7 @@ func smartTryPanMockGroup(
 		if err != nil {
 			return nil
 		}
-		picked := smartResolvePanMockCandidateFromVod(base, vod, want, tmdbSeasons, tmdbHasMultiSeason, preferSeasonNo, settings, rawCleanRules, rawEpisodeRules)
+		picked := smartResolvePanMockCandidateFromVod(base, vod, want, primarySeasons, singleBaselineSeasons, tmdbHasMultiSeason, preferSeasonNo, settings, rawCleanRules, rawEpisodeRules, allowSingleBaseline, primaryKind)
 		if picked == nil || strings.TrimSpace(picked.Ep.URL) == "" {
 			return nil
 		}
@@ -267,7 +300,7 @@ func smartTryPanMockGroup(
 		if err != nil {
 			return nil
 		}
-		picked := smartResolvePanMockCandidateFromVod(base, vod, want, tmdbSeasons, tmdbHasMultiSeason, preferSeasonNo, settings, rawCleanRules, rawEpisodeRules)
+		picked := smartResolvePanMockCandidateFromVod(base, vod, want, primarySeasons, singleBaselineSeasons, tmdbHasMultiSeason, preferSeasonNo, settings, rawCleanRules, rawEpisodeRules, allowSingleBaseline, primaryKind)
 		if picked == nil || strings.TrimSpace(picked.Ep.URL) == "" {
 			return nil
 		}
@@ -294,7 +327,7 @@ func smartTryPanMockGroup(
 		if err != nil {
 			return nil
 		}
-		picked := smartResolvePanMockCandidateFromVod(base, vod, want, tmdbSeasons, tmdbHasMultiSeason, preferSeasonNo, settings, rawCleanRules, rawEpisodeRules)
+		picked := smartResolvePanMockCandidateFromVod(base, vod, want, primarySeasons, singleBaselineSeasons, tmdbHasMultiSeason, preferSeasonNo, settings, rawCleanRules, rawEpisodeRules, allowSingleBaseline, primaryKind)
 		if picked == nil || strings.TrimSpace(picked.Ep.URL) == "" {
 			return nil
 		}
@@ -321,7 +354,7 @@ func smartTryPanMockGroup(
 		if err != nil {
 			return nil
 		}
-		picked := smartResolvePanMockCandidateFromVod(base, vod, want, tmdbSeasons, tmdbHasMultiSeason, preferSeasonNo, settings, rawCleanRules, rawEpisodeRules)
+		picked := smartResolvePanMockCandidateFromVod(base, vod, want, primarySeasons, singleBaselineSeasons, tmdbHasMultiSeason, preferSeasonNo, settings, rawCleanRules, rawEpisodeRules, allowSingleBaseline, primaryKind)
 		if picked == nil || strings.TrimSpace(picked.Ep.URL) == "" {
 			return nil
 		}
