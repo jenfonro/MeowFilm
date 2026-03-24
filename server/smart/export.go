@@ -3,6 +3,7 @@ package smart
 import (
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/catpawrunner"
+	"github.com/jenfonro/meowfilm/server/netdisk"
 )
 
 // Exported aliases
@@ -230,6 +231,18 @@ func ResolvePlaybackFromTMDB(database *db.DB, u *SmartUser, req PlaybackRequest)
 	return smartResolvePlaybackFromTMDB(database, u, req)
 }
 
+func ResolvePlaybackPayloadFromTMDB(database *db.DB, u *SmartUser, req PlaybackRequest) (payload map[string]any, picked *PlaybackPickedMeta, err error) {
+	finalURL, finalHeaders, picked, err := smartResolvePlaybackFromTMDB(database, u, req)
+	if err != nil {
+		return nil, nil, err
+	}
+	return netdisk.BuildPlayPayload(finalURL, finalHeaders), picked, nil
+}
+
+func BuildCatpawPlayPayload(playRaw map[string]any, apiBase string, tvUser string) map[string]any {
+	return smartBuildCatpawPlayPayload(playRaw, apiBase, tvUser)
+}
+
 func ResolveCatApiBaseForUser(database *db.DB, u *SmartUser) string {
 	return smartResolveCatApiBaseForUser(database, u)
 }
@@ -252,6 +265,18 @@ func PanMock189AccessPut(shareID string, accessCode string) {
 
 func PanMockProviderFromLabel(label string) string {
 	return smartPanMockProviderFromLabel(label)
+}
+
+func ResolvePanProviderPlayback(database *db.DB, u *SmartUser, provider string, panFlag string, episodeURL string, accessByShareID map[string]string, dirPath string) (finalURL string, finalHeaders map[string]string, err error) {
+	return smartResolvePanProviderPlayback(database, u, provider, panFlag, episodeURL, accessByShareID, dirPath)
+}
+
+func ResolvePanProviderPlaybackPayload(database *db.DB, u *SmartUser, provider string, panFlag string, episodeURL string, accessByShareID map[string]string, dirPath string) (payload map[string]any, err error) {
+	finalURL, finalHeaders, err := smartResolvePanProviderPlayback(database, u, provider, panFlag, episodeURL, accessByShareID, dirPath)
+	if err != nil {
+		return nil, err
+	}
+	return netdisk.BuildPlayPayload(finalURL, finalHeaders), nil
 }
 
 func ResolvePanMockDetailPans(

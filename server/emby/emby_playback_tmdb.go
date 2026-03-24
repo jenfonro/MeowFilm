@@ -5,11 +5,12 @@ import (
 	"strings"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/smart"
 )
 
-func embyResolvePlaybackFromTMDB(database *db.DB, u *embyUser, parsed *embyItemID) (finalURL string, finalHeaders map[string]string, picked *smartPlaybackPickedMeta, err error) {
+func embyResolvePlaybackPayloadFromTMDB(database *db.DB, u *embyUser, parsed *embyItemID) (payload map[string]any, picked *smartPlaybackPickedMeta, err error) {
 	if parsed == nil {
-		return "", nil, nil, errors.New("invalid item")
+		return nil, nil, errors.New("invalid item")
 	}
 	req := smartPlaybackRequest{
 		Kind:    strings.TrimSpace(parsed.Kind),
@@ -18,5 +19,5 @@ func embyResolvePlaybackFromTMDB(database *db.DB, u *embyUser, parsed *embyItemI
 		Episode: parsed.Episode,
 		SubKind: strings.TrimSpace(parsed.SubKind),
 	}
-	return smartResolvePlaybackFromTMDB(database, u, req)
+	return smart.ResolvePlaybackPayloadFromTMDB(database, smartUserFromEmby(u), req)
 }

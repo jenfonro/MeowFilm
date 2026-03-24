@@ -21,6 +21,7 @@ func (d *DB) ensureDefaults(_ bool) error {
 	_, _ = d.db.Exec(`INSERT INTO app_search(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
 	_, _ = d.db.Exec(`INSERT INTO app_smart(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
 	_, _ = d.db.Exec(`INSERT INTO app_goproxy(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
+	_, _ = d.db.Exec(`INSERT INTO app_relay(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
 	_, _ = d.db.Exec(`INSERT INTO app_netdisk_proxy(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
 	_, _ = d.db.Exec(`INSERT INTO app_catpawrunner(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
 	_, _ = d.db.Exec(`INSERT INTO app_emby(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
@@ -164,7 +165,10 @@ func (d *DB) ensureDefaults(_ bool) error {
 	if err := d.runOneTimePanMatchTokenUpgrade(); err != nil {
 		return err
 	}
-	return d.runOneTimeAppDoubanSearchCookieMigration()
+	if err := d.runOneTimeAppDoubanSearchCookieMigration(); err != nil {
+		return err
+	}
+	return d.runOneTimeAppRelayGoProxyThresholdMigration()
 }
 
 func (d *DB) runOneTimePanMatchTokenUpgrade() error {
@@ -294,6 +298,62 @@ func (d *DB) runOneTimeAppDoubanSearchCookieMigration() error {
 
 	if !hasSearchCookie {
 		if _, err := tx.Exec(`ALTER TABLE app_douban ADD COLUMN search_cookie TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO app_migration_flag(name, updated_at) VALUES(?, ?)`, migrationName, time.Now().Unix()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *DB) runOneTimeAppRelayGoProxyThresholdMigration() error {
+	if d == nil || d.db == nil {
+		return nil
+	}
+	const migrationName = "app_relay_add_goproxy_threshold_gb_v1"
+
+	var done int
+	if err := d.db.QueryRow(`SELECT COUNT(1) FROM app_migration_flag WHERE name=?`, migrationName).Scan(&done); err != nil {
+		return err
+	}
+	if done > 0 {
+		return nil
+	}
+
+	rows, err := d.db.Query(`PRAGMA table_info(app_relay)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	hasThreshold := false
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			ctype   string
+			notnull int
+			dflt    sql.NullString
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if strings.EqualFold(strings.TrimSpace(name), "goproxy_threshold_gb") {
+			hasThreshold = true
+			break
+		}
+	}
+
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if !hasThreshold {
+		if _, err := tx.Exec(`ALTER TABLE app_relay ADD COLUMN goproxy_threshold_gb INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return err
 		}
 	}

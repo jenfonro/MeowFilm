@@ -77,13 +77,11 @@ func handleEmbyVideoStream(w http.ResponseWriter, r *http.Request, database *db.
 		// Stateless site episodes: resolve on demand and cache the resulting 302 mapping.
 		if siteVideoID, pan, epIndex, ok := embyParseSiteEpisodeIDV2(itemID); ok {
 			finalURL, err := embyResolveStreamOnce(resolveKey, func() (string, error) {
-				playURL, headers, err := embyResolveStatelessSiteEpisodePlayback(database, u, siteVideoID, pan, epIndex)
+				payload, provider, err := embyResolveStatelessSiteEpisodePlaybackPayload(database, u, siteVideoID, pan, epIndex)
 				if err != nil {
 					return "", err
 				}
-				u0 := strings.TrimSpace(playURL)
-				h0 := headers
-				u0, h0 = embyProxyIfNeeded(database, u, "", u0, h0)
+				u0, h0 := embyProxyIfNeeded(database, u, r, provider, payload)
 				if len(h0) != 0 {
 					return "", fmt.Errorf("该源需要自定义请求头，暂不支持")
 				}
@@ -129,48 +127,34 @@ func handleEmbyVideoStream(w http.ResponseWriter, r *http.Request, database *db.
 
 	var pickedMeta *smartPlaybackPickedMeta
 	finalURL, err := embyResolveStreamOnce(resolveKey, func() (string, error) {
-		playURL, headers, picked, err := embyResolvePlaybackFromTMDB(database, u, &p)
+		payload, picked, err := embyResolvePlaybackPayloadFromTMDB(database, u, &p)
 		if err != nil {
 			return "", err
 		}
-			pickedMeta = picked
-			u0 := strings.TrimSpace(playURL)
-			h0 := headers
-			rawURL := u0
-			rawHeaderCount := 0
-			if h0 != nil {
-				rawHeaderCount = len(h0)
-			}
-			provider := ""
+		pickedMeta = picked
+		provider := ""
+		if picked != nil {
+			provider = strings.TrimSpace(picked.Provider)
+		}
+		u0, h0 := embyProxyIfNeeded(database, u, r, provider, payload)
+		if embyDebugLogEnabled() {
+			siteName := ""
+			panFlag := ""
 			if picked != nil {
-				provider = strings.TrimSpace(picked.Provider)
+				siteName = strings.TrimSpace(picked.SiteName)
+				panFlag = strings.TrimSpace(picked.PanFlag)
 			}
-			u0, h0 = embyProxyIfNeeded(database, u, provider, u0, h0)
-			if embyDebugLogEnabled() {
-				siteName := ""
-				panFlag := ""
-				if picked != nil {
-					siteName = strings.TrimSpace(picked.SiteName)
-					panFlag = strings.TrimSpace(picked.PanFlag)
-				}
-				finalHeaderCount := 0
-				if h0 != nil {
-					finalHeaderCount = len(h0)
-				}
-				embyDebugPrintf(
-					"[smart][play_try_return] site=(%s) panFlag=%s provider=%s rawHeaders=%d finalHeaders=%d rawURL=%s finalURL=%s",
-					siteName,
-					panFlag,
-					provider,
-					rawHeaderCount,
-					finalHeaderCount,
-					rawURL,
-					strings.TrimSpace(u0),
-				)
-			}
-			if len(h0) != 0 {
-				return "", fmt.Errorf("该源需要自定义请求头，暂不支持")
-			}
+			embyDebugPrintf(
+				"[smart][play_try_return] site=(%s) panFlag=%s provider=%s finalURL=%s",
+				siteName,
+				panFlag,
+				provider,
+				strings.TrimSpace(u0),
+			)
+		}
+		if len(h0) != 0 {
+			return "", fmt.Errorf("该源需要自定义请求头，暂不支持")
+		}
 		if u0 == "" {
 			return "", fmt.Errorf("无可用播放地址")
 		}

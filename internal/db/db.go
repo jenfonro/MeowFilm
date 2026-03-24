@@ -349,6 +349,17 @@ func (d *DB) ensureSchema() error {
 				  updated_at INTEGER NOT NULL
 				);
 				CREATE INDEX IF NOT EXISTS idx_goproxy_server_order ON goproxy_server(order_index);
+				CREATE TABLE IF NOT EXISTS relay_server (
+				  name TEXT PRIMARY KEY,
+				  display_name TEXT NOT NULL DEFAULT '',
+				  base TEXT NOT NULL,
+				  secret TEXT NOT NULL DEFAULT '',
+				  pans_baidu INTEGER NOT NULL DEFAULT 0,
+				  pans_quark INTEGER NOT NULL DEFAULT 0,
+				  order_index INTEGER NOT NULL DEFAULT 0,
+				  updated_at INTEGER NOT NULL
+				);
+				CREATE INDEX IF NOT EXISTS idx_relay_server_order ON relay_server(order_index);
 				CREATE TABLE IF NOT EXISTS video_source_site (
 				  key TEXT PRIMARY KEY,
 				  name TEXT NOT NULL DEFAULT '',
@@ -617,6 +628,13 @@ func (d *DB) ensureSchema() error {
 					  id INTEGER PRIMARY KEY CHECK (id = 1),
 					  enabled INTEGER NOT NULL DEFAULT 0,
 					  auto_select INTEGER NOT NULL DEFAULT 0,
+					  updated_at INTEGER NOT NULL
+					);
+					CREATE TABLE IF NOT EXISTS app_relay (
+					  id INTEGER PRIMARY KEY CHECK (id = 1),
+					  enabled INTEGER NOT NULL DEFAULT 0,
+					  relay_token TEXT NOT NULL DEFAULT '',
+					  goproxy_threshold_gb INTEGER NOT NULL DEFAULT 0,
 					  updated_at INTEGER NOT NULL
 					);
 					CREATE TABLE IF NOT EXISTS app_netdisk_proxy (

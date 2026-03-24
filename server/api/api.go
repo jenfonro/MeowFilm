@@ -221,6 +221,10 @@ func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
 			} else {
 				authMw.RequireAuthAPI(h).ServeHTTP(w, r)
 			}
+		case "/pan/relay/resolve":
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				netdisk.HandleAPIRelayResolve(w, r, database)
+			}).ServeHTTP(w, r)
 		case "/pan/uc/list":
 			h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { netdisk.HandleAPIUCList(w, r, database) })
 			if panAPINoAuthAllowed(r) {
@@ -319,6 +323,7 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 			if page == "play" || page == "site" {
 				settings["goProxyEnabled"] = cfg.GoProxyEnabled
 				settings["goProxyAutoSelect"] = cfg.GoProxyAutoSelect
+				settings["relayGoProxyThresholdGB"] = cfg.RelayGoProxyThresholdGB
 				rawGoProxy, _ := database.ListGoProxyServers()
 				goProxyServers := make([]goProxyServer, 0, len(rawGoProxy))
 				for _, s := range rawGoProxy {
@@ -330,6 +335,9 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 					})
 				}
 				settings["goProxyServers"] = goProxyServers
+				settings["relayEnabled"] = cfg.RelayEnabled
+				rawRelay, _ := database.ListRelayServers()
+				settings["relayServers"] = normalizeRelayServers(rawRelay)
 
 				if v, _ := database.ListMagicEpisodeRules(); v != nil {
 					settings["magicEpisodeRules"] = v
