@@ -1943,7 +1943,7 @@ func HandleAPIUCPlay(w http.ResponseWriter, r *http.Request, database *db.DB) {
 		if len(header) > 0 {
 			resp["header"] = header
 		}
-		writeJSON(w, 200, resp)
+		writeJSON(w, 200, attachRelayToken(r, resp))
 		return
 	}
 
@@ -1959,7 +1959,7 @@ func HandleAPIUCPlay(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if strings.TrimSpace(u) != "" {
 		setPlayCache(cacheKey, u, header)
 	}
-	writeJSON(w, 200, resp)
+	writeJSON(w, 200, attachRelayToken(r, resp))
 }
 
 func HandleAPIUCTVRefresh(w http.ResponseWriter, r *http.Request, database *db.DB) {

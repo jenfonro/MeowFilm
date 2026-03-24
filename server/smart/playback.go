@@ -1429,24 +1429,10 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 			if err != nil {
 				return playResult{status: "err", err: err}
 			}
-			urlPicked := strings.TrimSpace(catpawrunner.PickFirstPlayableURL(playRaw))
+			payloadOut := smartBuildCatpawPlayPayload(playRaw, apiBase, tvUser)
+			urlPicked, headers := netdisk.PlayPayloadURLHeaders(payloadOut)
 			if urlPicked == "" {
 				return playResult{status: "empty"}
-			}
-			urlPicked = catpawrunner.RewriteProxyURLToBase(urlPicked, apiBase, tvUser)
-			headers := map[string]string{}
-			if h, ok := playRaw["header"].(map[string]any); ok {
-				for k, v := range h {
-					kk := strings.TrimSpace(k)
-					if kk == "" {
-						continue
-					}
-					sv := strings.TrimSpace(smartAnyToString(v))
-					if sv == "" {
-						continue
-					}
-					headers[kk] = sv
-				}
 			}
 			return playResult{status: "ok", playURL: urlPicked, headers: headers}
 		}
@@ -1619,24 +1605,10 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 			if err != nil {
 				return nil
 			}
-			urlPicked := strings.TrimSpace(catpawrunner.PickFirstPlayableURL(playRaw))
+			payloadOut := smartBuildCatpawPlayPayload(playRaw, apiBase, tvUser)
+			urlPicked, headers := netdisk.PlayPayloadURLHeaders(payloadOut)
 			if urlPicked == "" {
 				return nil
-			}
-			urlPicked = catpawrunner.RewriteProxyURLToBase(urlPicked, apiBase, tvUser)
-			headers := map[string]string{}
-			if h, ok := playRaw["header"].(map[string]any); ok {
-				for k, v := range h {
-					kk := strings.TrimSpace(k)
-					if kk == "" {
-						continue
-					}
-					sv := strings.TrimSpace(smartAnyToString(v))
-					if sv == "" {
-						continue
-					}
-					headers[kk] = sv
-				}
 			}
 			return &smartPickResult{Cand: *best, PlayURL: urlPicked, Headers: headers}
 		}
@@ -1679,24 +1651,10 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 	if err != nil {
 		return nil
 	}
-	urlPicked := catpawrunner.PickFirstPlayableURL(playRaw)
+	payloadOut := smartBuildCatpawPlayPayload(playRaw, apiBase, tvUser)
+	urlPicked, headers := netdisk.PlayPayloadURLHeaders(payloadOut)
 	if strings.TrimSpace(urlPicked) == "" {
 		return nil
-	}
-	urlPicked = catpawrunner.RewriteProxyURLToBase(urlPicked, apiBase, tvUser)
-	headers := map[string]string{}
-	if h, ok := playRaw["header"].(map[string]any); ok {
-		for k, v := range h {
-			kk := strings.TrimSpace(k)
-			if kk == "" {
-				continue
-			}
-			sv := strings.TrimSpace(smartAnyToString(v))
-			if sv == "" {
-				continue
-			}
-			headers[kk] = sv
-		}
 	}
 	return &smartPickResult{Cand: *best, PlayURL: urlPicked, Headers: headers}
 }
@@ -2661,7 +2619,7 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 			if smartDebugLogEnabled() {
 				raw0 := smartFirstRawNameFromURL(res.Cand.Ep.URL)
 				smartDebugPrintf(
-					"[smart][playback_ok] flow=%d ms=%d site=(%s) panFlag=%s provider=%s matchShowName=%s matchRawName=%s quality=%s url=%s",
+					"[smart][playback_ok] flow=%d ms=%d site=(%s) panFlag=%s provider=%s matchShowName=%s matchRawName=%s quality=%s",
 					flowID,
 					time.Since(flowStart).Milliseconds(),
 					smartLogSiteName(res.Cand.SiteKey, res.Cand.SiteName),
@@ -2670,7 +2628,6 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 					strings.TrimSpace(res.Cand.Ep.Name),
 					strings.TrimSpace(raw0),
 					strings.TrimSpace(feat.Quality),
-					smartShortURLForLog(res.PlayURL),
 				)
 			}
 			upsertSmartPlayHistoryBestEffort(res.Cand)

@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/jenfonro/meowfilm/internal/db"
 	mfnet "github.com/jenfonro/meowfilm/server/net"
 )
 
@@ -19,6 +20,14 @@ type goProxyPans struct {
 	Quark bool `json:"quark"`
 }
 
+type relayServer struct {
+	Name        string      `json:"name"`
+	DisplayName string      `json:"displayName"`
+	Base        string      `json:"base"`
+	Secret      string      `json:"secret"`
+	Pans        goProxyPans `json:"pans"`
+}
+
 func normalizeGoProxyServers(value string) []goProxyServer {
 	servers := mfnet.NormalizeGoProxyServers(value)
 	out := make([]goProxyServer, 0, len(servers))
@@ -28,6 +37,20 @@ func normalizeGoProxyServers(value string) []goProxyServer {
 			DisplayName: s.DisplayName,
 			Base:        s.Base,
 			Pans:        goProxyPans{Baidu: s.Pans.Baidu, Quark: s.Pans.Quark},
+		})
+	}
+	return out
+}
+
+func normalizeRelayServers(value []db.RelayServer) []relayServer {
+	out := make([]relayServer, 0, len(value))
+	for _, s := range value {
+		out = append(out, relayServer{
+			Name:        s.Name,
+			DisplayName: s.DisplayName,
+			Base:        s.Base,
+			Secret:      s.Secret,
+			Pans:        goProxyPans{Baidu: s.PansBaidu, Quark: s.PansQuark},
 		})
 	}
 	return out

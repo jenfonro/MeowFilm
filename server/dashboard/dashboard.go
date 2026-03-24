@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -63,6 +64,10 @@ func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
 		case "/goproxy/save":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardGoProxySave(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/relay/save":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardRelaySave(w, r, database)
 			})).ServeHTTP(w, r)
 		case "/pan/settings":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -604,6 +609,21 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 			}
 			return false, false
 		}
+		readInt := func(keys ...string) (int, bool) {
+			for _, k := range keys {
+				v, ok := cfgObj[k]
+				if !ok || v == nil {
+					continue
+				}
+				switch n := v.(type) {
+				case float64:
+					return maxInt(0, int(n)), true
+				case int:
+					return maxInt(0, n), true
+				}
+			}
+			return 0, false
+		}
 		_ = database.UpdateAppConfig(func(c *db.AppConfig) {
 			if s, ok := readStr("SiteName", "siteName"); ok && s != "" {
 				c.SiteName = s
@@ -628,6 +648,9 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 			}
 			if b, ok := readBool("GoProxyAutoSelect", "goProxyAutoSelect"); ok {
 				c.GoProxyAutoSelect = b
+			}
+			if n, ok := readInt("RelayGoProxyThresholdGB", "relayGoProxyThresholdGB", "goProxyThresholdGB"); ok {
+				c.RelayGoProxyThresholdGB = n
 			}
 			if b, ok := readBool("NetdiskProxyEnabled", "netdiskProxyEnabled"); ok {
 				c.NetdiskProxyEnabled = b
@@ -1245,17 +1268,33 @@ func handleDashboardSiteSettings(w http.ResponseWriter, r *http.Request, databas
 		})
 	}
 	goProxyJSON, _ := json.Marshal(goProxyForUI)
+	rawRelay, _ := database.ListRelayServers()
+	relayForUI := make([]map[string]any, 0, len(rawRelay))
+	for _, s := range rawRelay {
+		relayForUI = append(relayForUI, map[string]any{
+			"name":        s.Name,
+			"displayName": s.DisplayName,
+			"base":        s.Base,
+			"secret":      s.Secret,
+			"pans":        map[string]any{"baidu": s.PansBaidu, "quark": s.PansQuark},
+		})
+	}
+	relayJSON, _ := json.Marshal(relayForUI)
 	writeJSON(w, 200, map[string]any{
-		"success":             true,
-		"siteName":            cfg.SiteName,
-		"searchDisplayMode":   mode,
-		"netdiskProxyEnabled": cfg.NetdiskProxyEnabled,
-		"netdiskProxyUrl":     strings.TrimSpace(cfg.NetdiskProxyURL),
-		"catpawrunnerServers": servers,
-		"CatpawrunnerActive":  active,
-		"goProxyEnabled":      cfg.GoProxyEnabled,
-		"goProxyAutoSelect":   cfg.GoProxyAutoSelect,
-		"goProxyServersJson":  defaultString(string(goProxyJSON), "[]"),
+		"success":                 true,
+		"siteName":                cfg.SiteName,
+		"searchDisplayMode":       mode,
+		"netdiskProxyEnabled":     cfg.NetdiskProxyEnabled,
+		"netdiskProxyUrl":         strings.TrimSpace(cfg.NetdiskProxyURL),
+		"catpawrunnerServers":     servers,
+		"CatpawrunnerActive":      active,
+		"goProxyEnabled":          cfg.GoProxyEnabled,
+		"goProxyAutoSelect":       cfg.GoProxyAutoSelect,
+		"goProxyServersJson":      defaultString(string(goProxyJSON), "[]"),
+		"relayEnabled":            cfg.RelayEnabled,
+		"auth":                    cfg.RelayAuthToken,
+		"relayGoProxyThresholdGB": maxInt(0, cfg.RelayGoProxyThresholdGB),
+		"relayServersJson":        defaultString(string(relayJSON), "[]"),
 	})
 }
 
@@ -1269,10 +1308,13 @@ func handleDashboardGoProxySave(w http.ResponseWriter, r *http.Request, database
 	autoSelect := boolFromForm(r.FormValue("goProxyAutoSelect"))
 	serversJSON := r.FormValue("goProxyServersJson")
 	servers := normalizeGoProxyServers(serversJSON)
-	_ = database.UpdateAppConfig(func(c *db.AppConfig) {
+	if err := database.UpdateAppConfig(func(c *db.AppConfig) {
 		c.GoProxyEnabled = enabled
 		c.GoProxyAutoSelect = autoSelect
-	})
+	}); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": err.Error()})
+		return
+	}
 	out := make([]db.GoProxyServer, 0, len(servers))
 	for _, s := range servers {
 		out = append(out, db.GoProxyServer{
@@ -1283,8 +1325,63 @@ func handleDashboardGoProxySave(w http.ResponseWriter, r *http.Request, database
 			PansQuark:   s.Pans.Quark,
 		})
 	}
-	_ = database.ReplaceGoProxyServers(out)
+	if err := database.ReplaceGoProxyServers(out); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": err.Error()})
+		return
+	}
 	writeJSON(w, 200, map[string]any{"success": true, "goProxySync": map[string]any{"ok": nil, "skipped": true}})
+}
+
+func handleDashboardRelaySave(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	parseForm(r)
+	enabled := boolFromForm(r.FormValue("relayEnabled"))
+	relayAuthToken := strings.TrimSpace(r.FormValue("auth"))
+	relayGoProxyThresholdGB := parseNonNegativeInt(r.FormValue("relayGoProxyThresholdGB"))
+	serversJSON := r.FormValue("relayServersJson")
+	servers := normalizeRelayServers(serversJSON)
+	if err := database.UpdateAppConfig(func(c *db.AppConfig) {
+		c.RelayEnabled = enabled
+		c.RelayAuthToken = relayAuthToken
+		c.RelayGoProxyThresholdGB = relayGoProxyThresholdGB
+	}); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": err.Error()})
+		return
+	}
+	out := make([]db.RelayServer, 0, len(servers))
+	for _, s := range servers {
+		out = append(out, db.RelayServer{
+			Name:        s.Name,
+			DisplayName: s.DisplayName,
+			Base:        s.Base,
+			Secret:      s.Secret,
+			PansBaidu:   s.Pans.Baidu,
+			PansQuark:   s.Pans.Quark,
+		})
+	}
+	if err := database.ReplaceRelayServers(out); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"success": true})
+}
+
+func parseNonNegativeInt(raw string) int {
+	v, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || v < 0 {
+		return 0
+	}
+	return v
+}
+
+func maxInt(minimum, value int) int {
+	if value < minimum {
+		return minimum
+	}
+	return value
 }
 
 func handleDashboardVideoPansList(w http.ResponseWriter, r *http.Request, database *db.DB) {
