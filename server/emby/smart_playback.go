@@ -8,10 +8,6 @@ import (
 type smartPlaybackRequest = smart.PlaybackRequest
 type smartPlaybackPickedMeta = smart.PlaybackPickedMeta
 
-func smartResolvePlaybackFromTMDB(database *db.DB, u *embyUser, req smartPlaybackRequest) (finalURL string, finalHeaders map[string]string, picked *smartPlaybackPickedMeta, err error) {
-	return smart.ResolvePlaybackFromTMDB(database, smartUserFromEmby(u), req)
-}
-
 func smartUserFromEmby(u *embyUser) *smart.User {
 	if u == nil {
 		return nil

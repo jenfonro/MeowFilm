@@ -10,10 +10,6 @@ func embyPanMock189AccessPut(shareID string, accessCode string) {
 	smart.PanMock189AccessPut(shareID, accessCode)
 }
 
-func embyPanMock189AccessGet(shareID string) (string, bool) {
-	return smart.PanMock189AccessGet(shareID)
-}
-
 func embyResolvePanMockDetailPans(
 	database *db.DB,
 	siteKey string,

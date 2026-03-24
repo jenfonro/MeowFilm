@@ -2367,7 +2367,7 @@ func HandleAPIQuarkPlay(w http.ResponseWriter, r *http.Request, database *db.DB)
 		if len(header) > 0 {
 			resp["header"] = header
 		}
-		writeJSON(w, 200, resp)
+		writeJSON(w, 200, attachRelayToken(r, resp))
 		return
 	}
 	u, header, err := quarkPlayImpl(database, id, want, tvUser)
@@ -2382,7 +2382,7 @@ func HandleAPIQuarkPlay(w http.ResponseWriter, r *http.Request, database *db.DB)
 	if strings.TrimSpace(u) != "" {
 		setPlayCache(cacheKey, u, header)
 	}
-	writeJSON(w, 200, resp)
+	writeJSON(w, 200, attachRelayToken(r, resp))
 }
 
 func buildQuarkHeaders(extra map[string]string) map[string]string {

@@ -39,7 +39,7 @@ func handleEmbyPlaybackInfo(w http.ResponseWriter, r *http.Request, database *db
 	if !ok || parsed == nil {
 		// Stateless site episodes: resolve via MeowFilm netdisk play (pan_mock) or catpawrunner play API.
 		if siteVideoID, pan, epIndex, ok := embyParseSiteEpisodeIDV2(embyID); ok {
-			urlPicked, headers, err := embyResolveStatelessSiteEpisodePlayback(database, u, siteVideoID, pan, epIndex)
+			payload, provider, err := embyResolveStatelessSiteEpisodePlaybackPayload(database, u, siteVideoID, pan, epIndex)
 			if err != nil {
 				if embyDebugLogEnabled() {
 					embyDebugPrintf("[emby][playback] fail item=%s err=%q cost=%s", embyID, err.Error(), time.Since(startAt).String())
@@ -47,6 +47,7 @@ func handleEmbyPlaybackInfo(w http.ResponseWriter, r *http.Request, database *db
 				embyBadGateway(w, err)
 				return
 			}
+			urlPicked, headers := embyProxyIfNeeded(database, u, r, provider, payload)
 
 			container, containerList := embyDetectContainerFromURL(urlPicked)
 			if embyDebugLogEnabled() {

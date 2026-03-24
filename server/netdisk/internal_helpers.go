@@ -1,9 +1,10 @@
 package netdisk
 
 import (
-	"fmt"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -118,6 +119,43 @@ func prefixRootDirDisplay(dirDisplay string, rootPrefix string) string {
 		return "/" + root + d
 	}
 	return "/" + root + "/" + strings.TrimLeft(d, "/")
+}
+
+func requestPublicBase(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	scheme := "http"
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https") {
+		scheme = "https"
+	} else if r.TLS != nil {
+		scheme = "https"
+	}
+	host := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	if host == "" {
+		host = strings.TrimSpace(r.Host)
+	}
+	if host == "" {
+		return ""
+	}
+	return scheme + "://" + host
+}
+
+func buildRelayResolveURL(r *http.Request, token string) string {
+	base := requestPublicBase(r)
+	t := strings.TrimSpace(token)
+	if base == "" || t == "" {
+		return ""
+	}
+	u, err := url.Parse(base)
+	if err != nil {
+		return ""
+	}
+	u.Path = "/api/pan/relay/resolve"
+	q := u.Query()
+	q.Set("token", t)
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 func isSupportedVideoFilename(name string) bool {

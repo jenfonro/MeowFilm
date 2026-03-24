@@ -935,7 +935,7 @@ func HandleAPIBaiduPlay(w http.ResponseWriter, r *http.Request, database *db.DB)
 		if len(header) > 0 {
 			resp["header"] = header
 		}
-		writeJSON(w, 200, resp)
+		writeJSON(w, 200, attachRelayToken(r, resp))
 		return
 	}
 
@@ -952,11 +952,12 @@ func HandleAPIBaiduPlay(w http.ResponseWriter, r *http.Request, database *db.DB)
 	if strings.TrimSpace(u) != "" {
 		setPlayCache(cacheKey, u, headers)
 	}
-	writeJSON(w, 200, map[string]any{
+	resp := map[string]any{
 		"ok":     true,
 		"url":    u,
 		"header": headers,
-	})
+	}
+	writeJSON(w, 200, attachRelayToken(r, resp))
 }
 
 func formatCookieHeader(cookies []*http.Cookie) string {

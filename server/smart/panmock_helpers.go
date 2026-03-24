@@ -9,6 +9,76 @@ import (
 	"github.com/jenfonro/meowfilm/server/netdisk"
 )
 
+func smartResolvePanProviderPlayback(database *db.DB, u *SmartUser, provider string, panFlag string, episodeURL string, accessByShareID map[string]string, dirPath string) (finalURL string, finalHeaders map[string]string, err error) {
+	pid := strings.TrimSpace(provider)
+	tvUser := ""
+	if u != nil {
+		tvUser = strings.TrimSpace(u.Username)
+	}
+	switch pid {
+	case "189":
+		ac := ""
+		parts := strings.Split(strings.TrimSpace(episodeURL), "*")
+		if len(parts) >= 2 {
+			shareID := strings.TrimSpace(parts[1])
+			if shareID != "" {
+				if v, ok := accessByShareID[shareID]; ok {
+					ac = strings.TrimSpace(v)
+				}
+				if ac == "" {
+					if v, ok := smartPanMock189AccessGet(shareID); ok {
+						ac = strings.TrimSpace(v)
+					}
+				}
+			}
+		}
+		u2, _, _, _, e := netdisk.Tianyi189Play(database, strings.TrimSpace(episodeURL), ac)
+		if e != nil {
+			return "", nil, e
+		}
+		return strings.TrimSpace(u2), map[string]string{}, nil
+	case "quark":
+		u2, header, e := netdisk.QuarkPlayWithTVUser(database, strings.TrimSpace(episodeURL), "", tvUser)
+		if e != nil {
+			return "", nil, e
+		}
+		if header == nil {
+			header = map[string]string{}
+		}
+		return strings.TrimSpace(u2), header, nil
+	case "uc":
+		u2, header, e := netdisk.UCPlayWithTVUser(database, strings.TrimSpace(episodeURL), "", tvUser)
+		if e != nil {
+			return "", nil, e
+		}
+		if header == nil {
+			header = map[string]string{}
+		}
+		return strings.TrimSpace(u2), header, nil
+	case "139":
+		downloadURL, playURL, e := netdisk.Yun139Play(database, strings.TrimSpace(panFlag), strings.TrimSpace(episodeURL))
+		u2 := strings.TrimSpace(downloadURL)
+		if u2 == "" {
+			u2 = strings.TrimSpace(playURL)
+		}
+		if e != nil {
+			return "", nil, e
+		}
+		return strings.TrimSpace(u2), map[string]string{}, nil
+	case "baidu":
+		u2, header, e := netdisk.BaiduPlay(database, strings.TrimSpace(panFlag), strings.TrimSpace(episodeURL), dirPath)
+		if e != nil {
+			return "", nil, e
+		}
+		if header == nil {
+			header = map[string]string{}
+		}
+		return strings.TrimSpace(u2), header, nil
+	default:
+		return "", nil, nil
+	}
+}
+
 type smartPanMockGroupAttempt struct {
 	Key      string
 	Allowed  bool
