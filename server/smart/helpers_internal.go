@@ -100,9 +100,9 @@ func smartPanMatchLabelText(label string) string {
 	return s
 }
 
-func smartPanMockProviderID(database *db.DB, panLabel string) string {
+func smartPanMockProviderID(database *db.DB, panFlag string) string {
 	_ = database
-	raw := strings.TrimSpace(panLabel)
+	raw := strings.TrimSpace(panFlag)
 	if raw == "" || !strings.Contains(raw, "-") {
 		return ""
 	}
@@ -132,7 +132,7 @@ func smartExtractMockPasscodeFromCandidate(c smartCandidate) string {
 }
 
 func smartExtractTianyiMockMetaFromCandidate(c smartCandidate) (shareCode string, accessCode string) {
-	label := strings.TrimSpace(c.PanLabel)
+	label := strings.TrimSpace(c.PanFlag)
 	if m := regexp.MustCompile(`(?:天意|天翼)-([A-Za-z0-9]{6,64})`).FindStringSubmatch(label); len(m) == 2 {
 		shareCode = strings.TrimSpace(m[1])
 	}
@@ -246,8 +246,8 @@ func smartExtractMockPasscodeFromEpisodeURL(episodeURL string) string {
 	return strings.TrimSpace(out)
 }
 
-func smartExtractTianyiMockMetaFromEpisodeURL(panLabel string, episodeURL string) (shareCode string, accessCode string) {
-	label := strings.TrimSpace(panLabel)
+func smartExtractTianyiMockMetaFromEpisodeURL(panFlag string, episodeURL string) (shareCode string, accessCode string) {
+	label := strings.TrimSpace(panFlag)
 	url := strings.TrimSpace(episodeURL)
 
 	// Fallback: shareCode might already be embedded in the label like "天意-XXXX" / "天翼-XXXX".
@@ -276,12 +276,12 @@ func smartExtractTianyiMockMetaFromEpisodeURL(panLabel string, episodeURL string
 	return shareCode, accessCode
 }
 
-func smartBuildSourceKey(siteKey string, spiderAPI string, videoID string) string {
-	return strings.TrimSpace(siteKey) + "::" + strings.TrimSpace(spiderAPI) + "::" + strings.TrimSpace(videoID)
+func smartBuildSourceKey(siteKey string, spiderAPI string, siteDetail string) string {
+	return strings.TrimSpace(siteKey) + "::" + strings.TrimSpace(spiderAPI) + "::" + strings.TrimSpace(siteDetail)
 }
 
-func smartExtractSeasonHintFromSource(siteName string, videoRemark string) int {
-	text := siteName + " " + videoRemark
+func smartExtractSeasonHintFromSource(siteName string, remark string) int {
+	text := siteName + " " + remark
 	t := strings.TrimSpace(text)
 	if t == "" {
 		return 0
@@ -307,8 +307,8 @@ func smartExtractSeasonHintFromSource(siteName string, videoRemark string) int {
 	return 0
 }
 
-func smartHasExplicitSeasonMarkerInSource(siteName string, videoRemark string) bool {
-	t := strings.TrimSpace(siteName + " " + videoRemark)
+func smartHasExplicitSeasonMarkerInSource(siteName string, remark string) bool {
+	t := strings.TrimSpace(siteName + " " + remark)
 	if t == "" {
 		return false
 	}

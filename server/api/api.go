@@ -452,10 +452,9 @@ func handleAPIHome(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	out := map[string]any{"success": true}
 
 	if includePlayHistory {
-		limit := minInt(500, maxInt(50, playHistoryLimit*10))
-		rows, err := database.ListPlayHistory(u.ID, limit)
+		rows, err := database.ListPlayHistory(u.ID, playHistoryLimit)
 		if err == nil {
-			out["playHistory"] = buildNormalizedPlayHistoryList(rows, playHistoryLimit, doubanImgProxy, doubanImgCustom)
+			out["playHistory"] = buildNormalizedPlayHistoryList(rows, playHistoryLimit)
 		}
 	}
 
@@ -465,14 +464,14 @@ func handleAPIHome(w http.ResponseWriter, r *http.Request, database *db.DB) {
 			list := []map[string]any{}
 			for _, row := range rows {
 				list = append(list, map[string]any{
-					"siteKey":     row.SiteKey,
-					"siteName":    row.SiteName,
-					"spiderApi":   row.SpiderAPI,
-					"videoId":     row.VideoID,
-					"videoTitle":  row.VideoTitle,
-					"videoPoster": douban.RewriteVideoPosterURL(row.VideoPoster, doubanImgProxy, doubanImgCustom),
-					"videoRemark": row.VideoRemark,
-					"updatedAt":   row.UpdatedAt,
+					"siteKey":    row.SiteKey,
+					"siteName":   row.SiteName,
+					"spiderApi":  row.SpiderAPI,
+					"siteDetail": row.SiteDetail,
+					"contentKey": row.ContentKey,
+					"Poster":     douban.RewriteVideoPosterURL(row.Poster, doubanImgProxy, doubanImgCustom),
+					"Remark":     row.Remark,
+					"updatedAt":  row.UpdatedAt,
 				})
 			}
 			out["favorites"] = list
@@ -513,19 +512,40 @@ func handleAPIVideoSites(w http.ResponseWriter, r *http.Request, database *db.DB
 	writeJSON(w, 200, map[string]any{"success": true, "sites": out})
 }
 
-func isNetDiskHistoryItem(videoID string, playFlag string) bool {
-	id := strings.ToLower(strings.TrimSpace(videoID))
+func isNetDiskHistoryItem(siteDetail string, playFlag string) bool {
+	id := strings.ToLower(strings.TrimSpace(siteDetail))
 	if strings.HasSuffix(id, "######wodepan") {
 		return true
 	}
 	return false
 }
 
-func buildNormalizedPlayHistoryList(rows []db.PlayHistoryRow, limit int, doubanImgProxy string, doubanImgCustom string) []map[string]any {
+func normalizeRawHistoryPoster(poster string) string {
+	raw := strings.TrimSpace(poster)
+	if raw == "" {
+		return ""
+	}
+	normalized := strings.ReplaceAll(raw, "\\", "/")
+	const marker = "/pan/tmdb-img/"
+	if idx := strings.Index(strings.ToLower(normalized), marker); idx >= 0 {
+		path := strings.TrimSpace(normalized[idx+len(marker):])
+		if path != "" {
+			return "https://image.tmdb.org/" + strings.TrimLeft(path, "/")
+		}
+	}
+	if strings.HasPrefix(strings.ToLower(normalized), "/tmdb-img/") {
+		path := strings.TrimSpace(normalized[len("/tmdb-img/"):])
+		if path != "" {
+			return "https://image.tmdb.org/" + strings.TrimLeft(path, "/")
+		}
+	}
+	return raw
+}
+
+func buildNormalizedPlayHistoryList(rows []db.PlayHistoryRow, limit int) []map[string]any {
 	if limit <= 0 {
 		limit = 20
 	}
-	seen := map[string]struct{}{}
 	out := make([]map[string]any, 0, minInt(limit, len(rows)))
 
 	for i := range rows {
@@ -533,30 +553,16 @@ func buildNormalizedPlayHistoryList(rows []db.PlayHistoryRow, limit int, doubanI
 			break
 		}
 		row := rows[i]
-		contentKey := strings.ToLower(strings.TrimSpace(row.ContentKey))
+		contentKey := strings.TrimSpace(row.ContentKey)
 		tmdbType := strings.ToLower(strings.TrimSpace(row.TMDBType))
 		tmdbID := row.TMDBID
 		tmdbOK := tmdbID > 0 && (tmdbType == "tv" || tmdbType == "movie")
-		if tmdbOK {
-			contentKey = strings.ToLower("tmdb:" + tmdbType + ":" + strconv.Itoa(tmdbID))
-		}
-		if contentKey == "" {
-			contentKey = normalizeContentKey(row.VideoTitle)
-		}
-		if contentKey == "" {
-			contentKey = strings.TrimSpace(row.SiteKey) + "::" + strings.TrimSpace(row.VideoID)
-		}
 		if contentKey == "" {
 			continue
 		}
-		if _, ok := seen[contentKey]; ok {
-			continue
-		}
-		seen[contentKey] = struct{}{}
 
-		title := strings.TrimSpace(row.VideoTitle)
-		poster := strings.TrimSpace(row.VideoPoster)
-		remark := strings.TrimSpace(row.VideoRemark)
+		poster := strings.TrimSpace(row.Poster)
+		remark := strings.TrimSpace(row.Remark)
 		playbackItemID := strings.TrimSpace(row.PlaybackItemID)
 		tmdbSeason := row.TMDBSeason
 		tmdbEpisode := row.TMDBEpisode
@@ -569,14 +575,14 @@ func buildNormalizedPlayHistoryList(rows []db.PlayHistoryRow, limit int, doubanI
 
 		siteKey := strings.TrimSpace(row.SiteKey)
 		spiderAPI := strings.TrimSpace(row.SpiderAPI)
-		videoID := strings.TrimSpace(row.VideoID)
+		siteDetail := strings.TrimSpace(row.SiteDetail)
 		siteName := strings.TrimSpace(row.SiteName)
 
 		// If this record isn't directly playable via web (no spider api / emby-only), emit a TMDB-only card.
-		if tmdbOK && (spiderAPI == "" || strings.EqualFold(siteKey, "emby") || videoID == "") {
+		if tmdbOK && (spiderAPI == "" || strings.EqualFold(siteKey, "emby") || siteDetail == "") {
 			siteKey = ""
 			spiderAPI = ""
-			videoID = ""
+			siteDetail = ""
 			siteName = ""
 		}
 
@@ -585,19 +591,16 @@ func buildNormalizedPlayHistoryList(rows []db.PlayHistoryRow, limit int, doubanI
 			"siteKey":               siteKey,
 			"siteName":              siteName,
 			"spiderApi":             spiderAPI,
-			"videoId":               videoID,
-			"videoTitle":            title,
-			"videoPoster":           douban.RewriteVideoPosterURL(poster, doubanImgProxy, doubanImgCustom),
-			"videoRemark":           remark,
+			"siteDetail":            siteDetail,
+			"Poster":                poster,
+			"Remark":                remark,
 			"tmdbId":                tmdbID,
 			"tmdbType":              tmdbType,
-			"tmdbSeasons":           "",
 			"tmdbSeason":            tmdbSeason,
 			"tmdbEpisode":           tmdbEpisode,
-			"panLabel":              strings.TrimSpace(row.PanLabel),
 			"playFlag":              strings.TrimSpace(row.PlayFlag),
-			"episodeIndex":          row.EpisodeIndex,
-			"episodeName":           strings.TrimSpace(row.EpisodeName),
+			"siteEpisodeIndex":      row.SiteEpisodeIndex,
+			"siteEpisodeFile":       strings.TrimSpace(row.SiteEpisodeFile),
 			"playbackItemId":        playbackItemID,
 			"playbackPositionTicks": row.PlaybackPositionTicks,
 			"playbackRuntimeTicks":  row.PlaybackRuntimeTicks,
@@ -638,27 +641,25 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 	}
 	u := auth.CurrentUser(r)
 	siteKey := strings.TrimSpace(r.URL.Query().Get("siteKey"))
-	videoID := strings.TrimSpace(r.URL.Query().Get("videoId"))
-	if siteKey == "" || videoID == "" {
+	siteDetail := strings.TrimSpace(r.URL.Query().Get("siteDetail"))
+	if siteKey == "" || siteDetail == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Invalid params"})
 		return
 	}
 	var (
-		contentKey   string
-		siteName     string
-		spiderAPI    string
-		videoTitle   string
-		videoPoster  string
-		videoRemark  string
-		tmdbID       int
-		tmdbType     string
-		panLabel     string
-		playFlag     string
-		episodeIndex int
-		episodeName  string
-		updatedAt    int64
+		contentKey       string
+		siteName         string
+		spiderAPI        string
+		poster           string
+		remark           string
+		tmdbID           int
+		tmdbType         string
+		playFlag         string
+		siteEpisodeIndex int
+		siteEpisodeFile  string
+		updatedAt        int64
 	)
-	row, err := database.GetPlayHistoryLatestBySiteVideo(u.ID, siteKey, videoID)
+	row, err := database.GetPlayHistoryLatestBySiteVideo(u.ID, siteKey, siteDetail)
 	if err != nil || row == nil {
 		writeJSON(w, 200, nil)
 		return
@@ -666,25 +667,15 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 	contentKey = row.ContentKey
 	siteName = row.SiteName
 	spiderAPI = row.SpiderAPI
-	videoTitle = row.VideoTitle
-	videoPoster = row.VideoPoster
-	videoRemark = row.VideoRemark
+	poster = row.Poster
+	remark = row.Remark
 	tmdbID = row.TMDBID
 	tmdbType = row.TMDBType
-	panLabel = row.PanLabel
 	playFlag = row.PlayFlag
-	episodeIndex = row.EpisodeIndex
-	episodeName = row.EpisodeName
+	siteEpisodeIndex = row.SiteEpisodeIndex
+	siteEpisodeFile = row.SiteEpisodeFile
 	updatedAt = row.UpdatedAt
-	tmdbType = strings.TrimSpace(tmdbType)
-	if tmdbID > 0 && (tmdbType == "tv" || tmdbType == "movie") {
-		contentKey = strings.ToLower("tmdb:" + tmdbType + ":" + strconv.Itoa(tmdbID))
-	} else if strings.TrimSpace(contentKey) == "" {
-		contentKey = normalizeContentKey(videoTitle)
-	}
-	cfg, _ := database.ReadAppConfig()
-	doubanImgProxy := douban.CanonicalImageProxyMode(cfg.DoubanImgProxy)
-	doubanImgCustom := cfg.DoubanImgCustom
+	tmdbType = strings.TrimSpace(strings.ToLower(tmdbType))
 	tmdbSeason := row.TMDBSeason
 	tmdbEpisode := row.TMDBEpisode
 	if tmdbSeason <= 0 || tmdbEpisode <= 0 {
@@ -698,19 +689,16 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 		"siteKey":               siteKey,
 		"siteName":              siteName,
 		"spiderApi":             spiderAPI,
-		"videoId":               videoID,
-		"videoTitle":            videoTitle,
-		"videoPoster":           douban.RewriteVideoPosterURL(videoPoster, doubanImgProxy, doubanImgCustom),
-		"videoRemark":           videoRemark,
+		"siteDetail":            siteDetail,
+		"Poster":                poster,
+		"Remark":                remark,
 		"tmdbId":                tmdbID,
 		"tmdbType":              tmdbType,
-		"tmdbSeasons":           "",
 		"tmdbSeason":            tmdbSeason,
 		"tmdbEpisode":           tmdbEpisode,
-		"panLabel":              panLabel,
 		"playFlag":              playFlag,
-		"episodeIndex":          episodeIndex,
-		"episodeName":           episodeName,
+		"siteEpisodeIndex":      siteEpisodeIndex,
+		"siteEpisodeFile":       siteEpisodeFile,
 		"playbackItemId":        row.PlaybackItemID,
 		"playbackPositionTicks": row.PlaybackPositionTicks,
 		"playbackRuntimeTicks":  row.PlaybackRuntimeTicks,
@@ -722,17 +710,13 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 	u := auth.CurrentUser(r)
 	switch r.Method {
 	case http.MethodGet:
-		cfg, _ := database.ReadAppConfig()
-		doubanImgProxy := douban.CanonicalImageProxyMode(cfg.DoubanImgProxy)
-		doubanImgCustom := cfg.DoubanImgCustom
 		limit := parseIntQuery(r.URL.Query().Get("limit"), 20, 1, 50)
-		sourceLimit := minInt(500, maxInt(50, limit*10))
-		rows, err := database.ListPlayHistory(u.ID, sourceLimit)
+		rows, err := database.ListPlayHistory(u.ID, limit)
 		if err != nil {
 			writeJSON(w, 200, []any{})
 			return
 		}
-		writeJSON(w, 200, buildNormalizedPlayHistoryList(rows, limit, doubanImgProxy, doubanImgCustom))
+		writeJSON(w, 200, buildNormalizedPlayHistoryList(rows, limit))
 	case http.MethodPost:
 		var body map[string]any
 		_ = readJSONLoose(r, &body)
@@ -776,36 +760,30 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		}
 		siteKey := getS("siteKey")
 		spiderAPI := getS("spiderApi")
-		videoID := getS("videoId")
-		videoTitle := getS("videoTitle")
-		if siteKey == "" || spiderAPI == "" || videoID == "" || videoTitle == "" {
+		siteDetail := getS("siteDetail")
+		contentKey := getS("contentKey")
+		if siteKey == "" || spiderAPI == "" || siteDetail == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数不完整"})
 			return
 		}
 		siteName := getS("siteName")
-		videoPoster := getS("videoPoster")
-		videoRemark := getS("videoRemark")
+		poster := getS("Poster")
+		remark := getS("Remark")
 		tmdbID := getI("tmdbId")
 		tmdbType := getS("tmdbType")
-		tmdbSeasons := ""
 		if tmdbType != "tv" && tmdbType != "movie" {
 			tmdbType = ""
 			tmdbID = 0
 		}
-		_ = tmdbSeasons
-		panLabel := getS("panLabel")
 		playFlag := getS("playFlag")
-		episodeIndex := getI("episodeIndex")
-		if episodeIndex < 0 {
-			episodeIndex = 0
+		siteEpisodeIndex := getI("siteEpisodeIndex")
+		if siteEpisodeIndex < 0 {
+			siteEpisodeIndex = 0
 		}
-		episodeName := getS("episodeName")
+		siteEpisodeFile := getS("siteEpisodeFile")
 
 		// Playback ticks (Emby/Emby use 10,000,000 ticks per second).
 		positionTicks := getI64("playbackPositionTicks")
-		if positionTicks <= 0 {
-			positionTicks = getI64("PlaybackPositionTicks")
-		}
 		if positionTicks <= 0 {
 			// seconds -> ticks
 			sec := getI64("playbackPositionSeconds")
@@ -818,9 +796,6 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		}
 		runtimeTicks := getI64("playbackRuntimeTicks")
 		if runtimeTicks <= 0 {
-			runtimeTicks = getI64("RunTimeTicks")
-		}
-		if runtimeTicks <= 0 {
 			sec := getI64("playbackDurationSeconds")
 			if sec > 0 {
 				runtimeTicks = sec * 10_000_000
@@ -831,20 +806,10 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		}
 
 		playbackItemID := strings.TrimSpace(getS("playbackItemId"))
-		if playbackItemID == "" {
-			playbackItemID = strings.TrimSpace(getS("playback_item_id"))
-		}
 		tmdbSeason := getI("tmdbSeason")
 		tmdbEpisode := getI("tmdbEpisode")
-		if tmdbSeason <= 0 {
-			tmdbSeason = getI("season")
-		}
-		if tmdbEpisode <= 0 {
-			tmdbEpisode = getI("episode")
-		}
 
 		// If client doesn't send tmdbId/tmdbType (or sends partial), derive them from playbackItemId.
-		// This keeps history stable & cross-device without requiring redundant fields in client payloads.
 		if typ, id, s, e, ok := parseTMDBFromPlaybackItemID(playbackItemID); ok {
 			if tmdbID <= 0 || tmdbType == "" {
 				tmdbType = typ
@@ -858,32 +823,19 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 			}
 		}
 
-		if isNetDiskHistoryItem(videoID, playFlag) {
+		if isNetDiskHistoryItem(siteDetail, playFlag) {
 			// still persist (netdisk items are valid history entries for quick start)
 		}
 
-		forcePosterUpdate := false
-		if v, ok := body["forcePosterUpdate"]; ok && v != nil {
-			forcePosterUpdate = parseAnyBool(v, false)
+		contentKey = strings.TrimSpace(contentKey)
+		if len(contentKey) > 200 {
+			contentKey = contentKey[:200]
 		}
-
-		// Canonical contentKey:
-		// - Prefer TMDB id when available.
-		// - Otherwise use server-computed keyword key (aggregate clean rules + normalize) so cross-site plays collapse.
-		// - Never rely on a client-provided contentKey to avoid divergent keys across clients.
-		contentKey := ""
-		if tmdbID > 0 && (tmdbType == "tv" || tmdbType == "movie") {
-			contentKey = strings.ToLower("tmdb:" + tmdbType + ":" + strconv.Itoa(tmdbID))
-		} else {
-			contentKey = strings.ToLower(strings.TrimSpace(database.ComputePlayHistoryKeywordKey(videoTitle)))
-			if len(contentKey) > 200 {
-				contentKey = contentKey[:200]
-			}
-		}
-		// Prefer a stable TMDB-based contentKey to sync across devices/clients.
 		if contentKey == "" {
-			contentKey = siteKey + "::" + videoID
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "contentKey不能为空"})
+			return
 		}
+		poster = normalizeRawHistoryPoster(poster)
 
 		// Derive a Emby item id for resume syncing when possible.
 		if playbackItemID == "" && tmdbID > 0 {
@@ -893,8 +845,8 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 				seasonNo := tmdbSeason
 				epNo := tmdbEpisode
 				if seasonNo <= 0 || epNo <= 0 {
-					// Try to parse from episodeName / playFlag (e.g. "S01E04")
-					hay := episodeName
+					// Try to parse from siteEpisodeFile / playFlag (e.g. "S01E04")
+					hay := siteEpisodeFile
 					if hay == "" {
 						hay = playFlag
 					}
@@ -910,15 +862,6 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 			}
 		}
 
-		lockedPoster, _ := database.GetPlayHistoryLatestPosterByContentKey(u.ID, contentKey)
-
-		finalPoster := videoPoster
-		if !forcePosterUpdate || strings.TrimSpace(videoPoster) == "" {
-			if lockedPoster != "" {
-				finalPoster = lockedPoster
-			}
-		}
-
 		now := time.Now().Unix()
 		_ = database.UpsertPlayHistory(db.PlayHistoryUpsert{
 			UserID:                u.ID,
@@ -926,16 +869,14 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 			SiteKey:               siteKey,
 			SiteName:              siteName,
 			SpiderAPI:             spiderAPI,
-			VideoID:               videoID,
-			VideoTitle:            videoTitle,
-			VideoPoster:           finalPoster,
-			VideoRemark:           videoRemark,
+			SiteDetail:            siteDetail,
+			Poster:                poster,
+			Remark:                remark,
 			TMDBID:                tmdbID,
 			TMDBType:              tmdbType,
-			PanLabel:              panLabel,
 			PlayFlag:              playFlag,
-			EpisodeIndex:          episodeIndex,
-			EpisodeName:           episodeName,
+			SiteEpisodeIndex:      siteEpisodeIndex,
+			SiteEpisodeFile:       siteEpisodeFile,
 			TMDBSeason:            tmdbSeason,
 			TMDBEpisode:           tmdbEpisode,
 			UpdatedAt:             now,
@@ -947,8 +888,8 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 	case http.MethodDelete:
 		contentKey := strings.TrimSpace(r.URL.Query().Get("contentKey"))
 		siteKey := strings.TrimSpace(r.URL.Query().Get("siteKey"))
-		videoID := strings.TrimSpace(r.URL.Query().Get("videoId"))
-		if contentKey == "" && (siteKey == "" || videoID == "") {
+		siteDetail := strings.TrimSpace(r.URL.Query().Get("siteDetail"))
+		if contentKey == "" && (siteKey == "" || siteDetail == "") {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数不完整"})
 			return
 		}
@@ -956,7 +897,7 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		if contentKey != "" {
 			deleted, _ = database.DeletePlayHistoryByContentKey(u.ID, contentKey)
 		} else {
-			deleted, _ = database.DeletePlayHistoryBySiteVideo(u.ID, siteKey, videoID)
+			deleted, _ = database.DeletePlayHistoryBySiteVideo(u.ID, siteKey, siteDetail)
 		}
 		writeJSON(w, 200, map[string]any{"success": true, "deleted": deleted})
 	default:
@@ -982,14 +923,14 @@ func handleAPIFavorites(w http.ResponseWriter, r *http.Request, database *db.DB)
 	list := []map[string]any{}
 	for _, row := range rows {
 		list = append(list, map[string]any{
-			"siteKey":     row.SiteKey,
-			"siteName":    row.SiteName,
-			"spiderApi":   row.SpiderAPI,
-			"videoId":     row.VideoID,
-			"videoTitle":  row.VideoTitle,
-			"videoPoster": douban.RewriteVideoPosterURL(row.VideoPoster, doubanImgProxy, doubanImgCustom),
-			"videoRemark": row.VideoRemark,
-			"updatedAt":   row.UpdatedAt,
+			"siteKey":    row.SiteKey,
+			"siteName":   row.SiteName,
+			"spiderApi":  row.SpiderAPI,
+			"siteDetail": row.SiteDetail,
+			"contentKey": row.ContentKey,
+			"Poster":     douban.RewriteVideoPosterURL(row.Poster, doubanImgProxy, doubanImgCustom),
+			"Remark":     row.Remark,
+			"updatedAt":  row.UpdatedAt,
 		})
 	}
 	writeJSON(w, 200, list)
@@ -1002,12 +943,12 @@ func handleAPIFavoritesStatus(w http.ResponseWriter, r *http.Request, database *
 	}
 	u := auth.CurrentUser(r)
 	siteKey := strings.TrimSpace(r.URL.Query().Get("siteKey"))
-	videoID := strings.TrimSpace(r.URL.Query().Get("videoId"))
-	if siteKey == "" || videoID == "" {
+	siteDetail := strings.TrimSpace(r.URL.Query().Get("siteDetail"))
+	if siteKey == "" || siteDetail == "" {
 		writeJSON(w, 200, map[string]any{"favorited": false})
 		return
 	}
-	ok, _ := database.IsFavorited(u.ID, siteKey, videoID)
+	ok, _ := database.IsFavorited(u.ID, siteKey, siteDetail)
 	writeJSON(w, 200, map[string]any{"favorited": ok})
 }
 
@@ -1029,32 +970,32 @@ func handleAPIFavoritesToggle(w http.ResponseWriter, r *http.Request, database *
 	}
 	siteKey := getS("siteKey")
 	spiderAPI := getS("spiderApi")
-	videoID := getS("videoId")
-	videoTitle := getS("videoTitle")
-	if siteKey == "" || spiderAPI == "" || videoID == "" || videoTitle == "" {
+	siteDetail := getS("siteDetail")
+	contentKey := getS("contentKey")
+	if siteKey == "" || spiderAPI == "" || siteDetail == "" || contentKey == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数无效"})
 		return
 	}
-	exists, _ := database.IsFavorited(u.ID, siteKey, videoID)
+	exists, _ := database.IsFavorited(u.ID, siteKey, siteDetail)
 	if exists {
-		_, _ = database.DeleteFavorite(u.ID, siteKey, videoID)
+		_, _ = database.DeleteFavorite(u.ID, siteKey, siteDetail)
 		writeJSON(w, 200, map[string]any{"success": true, "favorited": false})
 		return
 	}
 	now := time.Now().Unix()
 	siteName := getS("siteName")
-	videoPoster := getS("videoPoster")
-	videoRemark := getS("videoRemark")
+	poster := getS("Poster")
+	remark := getS("Remark")
 	_ = database.UpsertFavorite(db.FavoriteUpsert{
-		UserID:      u.ID,
-		SiteKey:     siteKey,
-		SiteName:    siteName,
-		SpiderAPI:   spiderAPI,
-		VideoID:     videoID,
-		VideoTitle:  videoTitle,
-		VideoPoster: videoPoster,
-		VideoRemark: videoRemark,
-		UpdatedAt:   now,
+		UserID:     u.ID,
+		SiteKey:    siteKey,
+		SiteName:   siteName,
+		SpiderAPI:  spiderAPI,
+		SiteDetail: siteDetail,
+		ContentKey: contentKey,
+		Poster:     poster,
+		Remark:     remark,
+		UpdatedAt:  now,
 	})
 	writeJSON(w, 200, map[string]any{"success": true, "favorited": true})
 }

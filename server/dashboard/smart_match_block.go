@@ -63,7 +63,7 @@ func handleDashboardSmartMatchBlockItems(w http.ResponseWriter, r *http.Request,
 	for _, it := range rows {
 		sk := strings.TrimSpace(it.SiteKey)
 		sapi := strings.TrimSpace(it.SpiderAPI)
-		vid := strings.TrimSpace(it.VideoID)
+		vid := strings.TrimSpace(it.SiteDetail)
 		poster := strings.TrimSpace(it.Poster)
 		if sk == "" || vid == "" {
 			continue
@@ -72,15 +72,15 @@ func handleDashboardSmartMatchBlockItems(w http.ResponseWriter, r *http.Request,
 			sapi = siteAPIMap[sk]
 		}
 		out = append(out, map[string]any{
-			"keyword":   keyword,
-			"siteKey":   sk,
-			"siteName":  siteNameMap[sk],
-			"spiderApi": sapi,
-			"videoId":   vid,
-			"poster":    poster,
-			"panFlag":   it.PanFlag,
-			"source":    it.Source,
-			"updatedAt": it.UpdatedAt,
+			"keyword":    keyword,
+			"siteKey":    sk,
+			"siteName":   siteNameMap[sk],
+			"spiderApi":  sapi,
+			"siteDetail": vid,
+			"poster":     poster,
+			"panFlag":    it.PanFlag,
+			"source":     it.Source,
+			"updatedAt":  it.UpdatedAt,
 		})
 	}
 	writeJSON(w, 200, map[string]any{"success": true, "keyword": keyword, "items": out})
@@ -98,14 +98,14 @@ func handleDashboardSmartMatchBlockDelete(w http.ResponseWriter, r *http.Request
 	}
 	keyword := readStrJSONBody(body, "keyword")
 	siteKey := readStrJSONBody(body, "siteKey")
-	videoID := readStrJSONBody(body, "videoId")
+	siteDetail := readStrJSONBody(body, "siteDetail")
 	panFlag := readStrJSONBody(body, "panFlag")
 	source := readStrJSONBody(body, "source")
-	if keyword == "" || siteKey == "" || videoID == "" {
+	if keyword == "" || siteKey == "" || siteDetail == "" {
 		writeJSON(w, 400, map[string]any{"success": false, "message": "invalid params"})
 		return
 	}
-	if err := database.DeleteSmartMatchBlockItem(keyword, siteKey, videoID, panFlag, source); err != nil {
+	if err := database.DeleteSmartMatchBlockItem(keyword, siteKey, siteDetail, panFlag, source); err != nil {
 		writeJSON(w, 500, map[string]any{"success": false, "message": err.Error()})
 		return
 	}

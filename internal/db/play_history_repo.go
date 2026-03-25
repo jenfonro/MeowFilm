@@ -155,16 +155,14 @@ type PlayHistoryRow struct {
 	SiteKey               string
 	SiteName              string
 	SpiderAPI             string
-	VideoID               string
-	VideoTitle            string
-	VideoPoster           string
-	VideoRemark           string
+	SiteDetail            string
+	Poster                string
+	Remark                string
 	TMDBID                int
 	TMDBType              string
-	PanLabel              string
 	PlayFlag              string
-	EpisodeIndex          int
-	EpisodeName           string
+	SiteEpisodeIndex      int
+	SiteEpisodeFile       string
 	TMDBSeason            int
 	TMDBEpisode           int
 	UpdatedAt             int64
@@ -179,16 +177,14 @@ type PlayHistoryUpsert struct {
 	SiteKey               string
 	SiteName              string // ignored (derived); kept for API compatibility
 	SpiderAPI             string // ignored (derived); kept for API compatibility
-	VideoID               string
-	VideoTitle            string
-	VideoPoster           string
-	VideoRemark           string
+	SiteDetail            string
+	Poster                string
+	Remark                string
 	TMDBID                int
 	TMDBType              string
-	PanLabel              string
 	PlayFlag              string
-	EpisodeIndex          int
-	EpisodeName           string
+	SiteEpisodeIndex      int
+	SiteEpisodeFile       string
 	TMDBSeason            int
 	TMDBEpisode           int
 	UpdatedAt             int64
@@ -219,9 +215,9 @@ func (d *DB) ensureContent(tx *sql.Tx, contentKey string, tmdbID int, tmdbType s
 		INSERT INTO content(content_key, created_at, updated_at)
 		VALUES(?,?,?)
 		ON CONFLICT(content_key) DO UPDATE SET updated_at = excluded.updated_at
-	`, strings.ToLower(key), now, now)
+	`, key, now, now)
 
-	if err := tx.QueryRow(`SELECT id FROM content WHERE content_key = ? LIMIT 1`, strings.ToLower(key)).Scan(&contentID); err != nil {
+	if err := tx.QueryRow(`SELECT id FROM content WHERE content_key = ? LIMIT 1`, key).Scan(&contentID); err != nil {
 		return 0, err
 	}
 	typ := strings.TrimSpace(tmdbType)
@@ -242,7 +238,7 @@ func (d *DB) GetPlayHistoryLatestPosterByContentKey(userID int64, contentKey str
 	if d == nil || d.db == nil || userID <= 0 {
 		return "", nil
 	}
-	key := strings.ToLower(strings.TrimSpace(contentKey))
+	key := strings.TrimSpace(contentKey)
 	if key == "" {
 		return "", nil
 	}
@@ -259,37 +255,6 @@ func (d *DB) GetPlayHistoryLatestPosterByContentKey(userID int64, contentKey str
 	return strings.TrimSpace(poster.String), nil
 }
 
-func (d *DB) DeletePlayHistoryDedupByContent(userID int64, contentKey string, tmdbID int, tmdbType string) (int64, error) {
-	if d == nil || d.db == nil || userID <= 0 {
-		return 0, nil
-	}
-	key := strings.ToLower(strings.TrimSpace(contentKey))
-	if key == "" {
-		return 0, nil
-	}
-	var cid int64
-	if err := d.db.QueryRow(`SELECT id FROM content WHERE content_key=? LIMIT 1`, key).Scan(&cid); err != nil {
-		return 0, nil
-	}
-	typ := strings.TrimSpace(tmdbType)
-	var res sql.Result
-	var err error
-	if tmdbID > 0 && (typ == "tv" || typ == "movie") {
-		res, err = d.db.Exec(`
-			DELETE FROM user_play_history
-			WHERE user_id = ?
-			  AND (content_id = ? OR content_id IN (SELECT content_id FROM content_tmdb WHERE tmdb_id = ? AND tmdb_type = ?))
-		`, userID, cid, tmdbID, typ)
-	} else {
-		res, err = d.db.Exec(`DELETE FROM user_play_history WHERE user_id=? AND content_id=?`, userID, cid)
-	}
-	if err != nil || res == nil {
-		return 0, err
-	}
-	n, _ := res.RowsAffected()
-	return n, nil
-}
-
 func (d *DB) UpsertPlayHistory(row PlayHistoryUpsert) error {
 	if d == nil || d.db == nil {
 		return errors.New("db nil")
@@ -297,11 +262,10 @@ func (d *DB) UpsertPlayHistory(row PlayHistoryUpsert) error {
 	if row.UserID <= 0 {
 		return errors.New("invalid user id")
 	}
-	contentKey := strings.ToLower(strings.TrimSpace(row.ContentKey))
+	contentKey := strings.TrimSpace(row.ContentKey)
 	siteKey := strings.TrimSpace(row.SiteKey)
-	videoID := strings.TrimSpace(row.VideoID)
-	videoTitle := strings.TrimSpace(row.VideoTitle)
-	if contentKey == "" || siteKey == "" || videoID == "" || videoTitle == "" {
+	siteDetail := strings.TrimSpace(row.SiteDetail)
+	if contentKey == "" || siteKey == "" || siteDetail == "" {
 		return errors.New("invalid args")
 	}
 	now := row.UpdatedAt
@@ -321,43 +285,28 @@ func (d *DB) UpsertPlayHistory(row PlayHistoryUpsert) error {
 	if err != nil {
 		return err
 	}
-	siteVideoID, err := d.upsertSiteVideo(tx, siteKind, ownerID, siteKey, videoID, videoTitle, row.VideoPoster, row.VideoRemark, now)
+	siteVideoID, err := d.upsertSiteVideo(tx, siteKind, ownerID, siteKey, siteDetail, contentKey, row.Poster, row.Remark, now)
 	if err != nil {
 		return err
-	}
-
-	// Promote keyword-based history to TMDB-based key when TMDB id becomes available.
-	// This avoids having both "keyword key" and "tmdb:*" rows for the same content after a later Emby/TMDB visit.
-	typ := strings.TrimSpace(row.TMDBType)
-	if row.TMDBID > 0 && (typ == "tv" || typ == "movie") {
-		patterns, _ := listMagicAggregateRegexRulesTx(tx)
-		kw := computePlayHistoryKeywordKeyFromTitle(videoTitle, cachedAggregateRegexps(patterns))
-		if kw != "" && kw != contentKey && strings.HasPrefix(contentKey, "tmdb:") {
-			var oldCID int64
-			if e := tx.QueryRow(`SELECT id FROM content WHERE content_key=? LIMIT 1`, kw).Scan(&oldCID); e == nil && oldCID > 0 {
-				_, _ = tx.Exec(`DELETE FROM user_play_history WHERE user_id=? AND content_id=?`, row.UserID, oldCID)
-			}
-		}
 	}
 
 	// Enforce: keep only one canonical play-history row per (user, contentKey) in the DB.
 	_, _ = tx.Exec(`DELETE FROM user_play_history WHERE user_id=? AND content_id=? AND site_video_id <> ?`, row.UserID, contentID, siteVideoID)
 
-		_, err = tx.Exec(`
+	_, err = tx.Exec(`
 			INSERT INTO user_play_history(
 			  user_id, content_id, site_video_id,
-			  pan_label, play_flag, episode_index, episode_name,
+			  play_flag, site_episode_index, site_episode_file,
 			  tmdb_season, tmdb_episode,
 			  playback_position_ticks, playback_runtime_ticks, playback_item_id,
 			  updated_at
 			)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(user_id, site_video_id) DO UPDATE SET
 			  content_id = excluded.content_id,
-			  pan_label = excluded.pan_label,
 			  play_flag = excluded.play_flag,
-			  episode_index = excluded.episode_index,
-			  episode_name = excluded.episode_name,
+			  site_episode_index = excluded.site_episode_index,
+			  site_episode_file = excluded.site_episode_file,
 			  tmdb_season = CASE WHEN excluded.tmdb_season > 0 THEN excluded.tmdb_season ELSE user_play_history.tmdb_season END,
 			  tmdb_episode = CASE WHEN excluded.tmdb_episode > 0 THEN excluded.tmdb_episode ELSE user_play_history.tmdb_episode END,
 			  playback_position_ticks = CASE WHEN excluded.playback_position_ticks > 0 THEN excluded.playback_position_ticks ELSE user_play_history.playback_position_ticks END,
@@ -365,20 +314,19 @@ func (d *DB) UpsertPlayHistory(row PlayHistoryUpsert) error {
 			  playback_item_id = CASE WHEN excluded.playback_item_id <> '' THEN excluded.playback_item_id ELSE user_play_history.playback_item_id END,
 			  updated_at = excluded.updated_at
 		`,
-			row.UserID,
-			contentID,
-			siteVideoID,
-			strings.TrimSpace(row.PanLabel),
-			strings.TrimSpace(row.PlayFlag),
-			row.EpisodeIndex,
-			strings.TrimSpace(row.EpisodeName),
-			row.TMDBSeason,
-			row.TMDBEpisode,
-			row.PlaybackPositionTicks,
-			row.PlaybackRuntimeTicks,
-			strings.TrimSpace(row.PlaybackItemID),
-			now,
-		)
+		row.UserID,
+		contentID,
+		siteVideoID,
+		strings.TrimSpace(row.PlayFlag),
+		row.SiteEpisodeIndex,
+		strings.TrimSpace(row.SiteEpisodeFile),
+		row.TMDBSeason,
+		row.TMDBEpisode,
+		row.PlaybackPositionTicks,
+		row.PlaybackRuntimeTicks,
+		strings.TrimSpace(row.PlaybackItemID),
+		now,
+	)
 	if err != nil {
 		return err
 	}
@@ -401,16 +349,14 @@ func (d *DB) ListPlayHistory(userID int64, limit int) ([]PlayHistoryRow, error) 
 			  sv.site_key,
 			  COALESCE(gs.name, CASE WHEN sv.site_kind='emby' THEN 'Emby' ELSE '' END) AS site_name,
 			  COALESCE(gs.api, CASE WHEN sv.site_kind='emby' THEN 'emby' ELSE '' END) AS spider_api,
-			  sv.video_id,
-			  sv.title,
+			  sv.site_detail,
 			  sv.poster,
 			  sv.remark,
 			  COALESCE(tm.tmdb_id, 0) AS tmdb_id,
 			  COALESCE(tm.tmdb_type, '') AS tmdb_type,
-			  h.pan_label,
 			  h.play_flag,
-			  h.episode_index,
-			  h.episode_name,
+			  h.site_episode_index,
+			  h.site_episode_file,
 			  h.tmdb_season,
 			  h.tmdb_episode,
 			  h.updated_at,
@@ -438,16 +384,14 @@ func (d *DB) ListPlayHistory(userID int64, limit int) ([]PlayHistoryRow, error) 
 			&r.SiteKey,
 			&r.SiteName,
 			&r.SpiderAPI,
-			&r.VideoID,
-			&r.VideoTitle,
-			&r.VideoPoster,
-			&r.VideoRemark,
+			&r.SiteDetail,
+			&r.Poster,
+			&r.Remark,
 			&r.TMDBID,
 			&r.TMDBType,
-			&r.PanLabel,
 			&r.PlayFlag,
-			&r.EpisodeIndex,
-			&r.EpisodeName,
+			&r.SiteEpisodeIndex,
+			&r.SiteEpisodeFile,
 			&r.TMDBSeason,
 			&r.TMDBEpisode,
 			&r.UpdatedAt,
@@ -460,34 +404,32 @@ func (d *DB) ListPlayHistory(userID int64, limit int) ([]PlayHistoryRow, error) 
 	return out, nil
 }
 
-func (d *DB) GetPlayHistoryLatestBySiteVideo(userID int64, siteKey string, videoID string) (*PlayHistoryRow, error) {
+func (d *DB) GetPlayHistoryLatestBySiteVideo(userID int64, siteKey string, siteDetail string) (*PlayHistoryRow, error) {
 	if d == nil || d.db == nil || userID <= 0 {
 		return nil, nil
 	}
 	sk := strings.TrimSpace(siteKey)
-	vid := strings.TrimSpace(videoID)
+	vid := strings.TrimSpace(siteDetail)
 	if sk == "" || vid == "" {
 		return nil, nil
 	}
 	siteKind, ownerID := d.resolveSiteKindAndOwner(userID, sk)
 
 	var r PlayHistoryRow
-		err := d.db.QueryRow(`
+	err := d.db.QueryRow(`
 			SELECT
 			  c.content_key,
 			  sv.site_key,
 			  COALESCE(gs.name, CASE WHEN sv.site_kind='emby' THEN 'Emby' ELSE '' END) AS site_name,
 			  COALESCE(gs.api, CASE WHEN sv.site_kind='emby' THEN 'emby' ELSE '' END) AS spider_api,
-			  sv.video_id,
-			  sv.title,
+			  sv.site_detail,
 			  sv.poster,
 			  sv.remark,
 			  COALESCE(tm.tmdb_id, 0) AS tmdb_id,
 			  COALESCE(tm.tmdb_type, '') AS tmdb_type,
-			  h.pan_label,
 			  h.play_flag,
-			  h.episode_index,
-			  h.episode_name,
+			  h.site_episode_index,
+			  h.site_episode_file,
 			  h.tmdb_season,
 			  h.tmdb_episode,
 			  h.updated_at,
@@ -503,7 +445,7 @@ func (d *DB) GetPlayHistoryLatestBySiteVideo(userID int64, siteKey string, video
 		  AND sv.site_kind = ?
 		  AND sv.owner_user_id = ?
 		  AND sv.site_key = ?
-		  AND sv.video_id = ?
+		  AND sv.site_detail = ?
 		ORDER BY h.updated_at DESC
 		LIMIT 1
 	`, userID, siteKind, ownerID, sk, vid).Scan(
@@ -511,23 +453,21 @@ func (d *DB) GetPlayHistoryLatestBySiteVideo(userID int64, siteKey string, video
 		&r.SiteKey,
 		&r.SiteName,
 		&r.SpiderAPI,
-		&r.VideoID,
-		&r.VideoTitle,
-		&r.VideoPoster,
-		&r.VideoRemark,
+		&r.SiteDetail,
+		&r.Poster,
+		&r.Remark,
 		&r.TMDBID,
 		&r.TMDBType,
-		&r.PanLabel,
-			&r.PlayFlag,
-			&r.EpisodeIndex,
-			&r.EpisodeName,
-			&r.TMDBSeason,
-			&r.TMDBEpisode,
-			&r.UpdatedAt,
-			&r.PlaybackPositionTicks,
-			&r.PlaybackRuntimeTicks,
-			&r.PlaybackItemID,
-		)
+		&r.PlayFlag,
+		&r.SiteEpisodeIndex,
+		&r.SiteEpisodeFile,
+		&r.TMDBSeason,
+		&r.TMDBEpisode,
+		&r.UpdatedAt,
+		&r.PlaybackPositionTicks,
+		&r.PlaybackRuntimeTicks,
+		&r.PlaybackItemID,
+	)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -541,27 +481,25 @@ func (d *DB) GetPlayHistoryLatestByContentKey(userID int64, contentKey string) (
 	if d == nil || d.db == nil || userID <= 0 {
 		return nil, nil
 	}
-	key := strings.ToLower(strings.TrimSpace(contentKey))
+	key := strings.TrimSpace(contentKey)
 	if key == "" {
 		return nil, nil
 	}
 	var r PlayHistoryRow
-		err := d.db.QueryRow(`
+	err := d.db.QueryRow(`
 			SELECT
 			  c.content_key,
 			  sv.site_key,
 			  COALESCE(gs.name, CASE WHEN sv.site_kind='emby' THEN 'Emby' ELSE '' END) AS site_name,
 			  COALESCE(gs.api, CASE WHEN sv.site_kind='emby' THEN 'emby' ELSE '' END) AS spider_api,
-			  sv.video_id,
-			  sv.title,
+			  sv.site_detail,
 			  sv.poster,
 			  sv.remark,
 			  COALESCE(tm.tmdb_id, 0) AS tmdb_id,
 			  COALESCE(tm.tmdb_type, '') AS tmdb_type,
-			  h.pan_label,
 			  h.play_flag,
-			  h.episode_index,
-			  h.episode_name,
+			  h.site_episode_index,
+			  h.site_episode_file,
 			  h.tmdb_season,
 			  h.tmdb_episode,
 			  h.updated_at,
@@ -581,23 +519,21 @@ func (d *DB) GetPlayHistoryLatestByContentKey(userID int64, contentKey string) (
 		&r.SiteKey,
 		&r.SiteName,
 		&r.SpiderAPI,
-		&r.VideoID,
-		&r.VideoTitle,
-		&r.VideoPoster,
-		&r.VideoRemark,
+		&r.SiteDetail,
+		&r.Poster,
+		&r.Remark,
 		&r.TMDBID,
 		&r.TMDBType,
-		&r.PanLabel,
-			&r.PlayFlag,
-			&r.EpisodeIndex,
-			&r.EpisodeName,
-			&r.TMDBSeason,
-			&r.TMDBEpisode,
-			&r.UpdatedAt,
-			&r.PlaybackPositionTicks,
-			&r.PlaybackRuntimeTicks,
-			&r.PlaybackItemID,
-		)
+		&r.PlayFlag,
+		&r.SiteEpisodeIndex,
+		&r.SiteEpisodeFile,
+		&r.TMDBSeason,
+		&r.TMDBEpisode,
+		&r.UpdatedAt,
+		&r.PlaybackPositionTicks,
+		&r.PlaybackRuntimeTicks,
+		&r.PlaybackItemID,
+	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -608,14 +544,89 @@ func (d *DB) GetPlayHistoryLatestByContentKey(userID int64, contentKey string) (
 	r.SiteKey = strings.TrimSpace(r.SiteKey)
 	r.SiteName = strings.TrimSpace(r.SiteName)
 	r.SpiderAPI = strings.TrimSpace(r.SpiderAPI)
-	r.VideoID = strings.TrimSpace(r.VideoID)
-	r.VideoTitle = strings.TrimSpace(r.VideoTitle)
-	r.VideoPoster = strings.TrimSpace(r.VideoPoster)
-	r.VideoRemark = strings.TrimSpace(r.VideoRemark)
+	r.SiteDetail = strings.TrimSpace(r.SiteDetail)
+	r.Poster = strings.TrimSpace(r.Poster)
+	r.Remark = strings.TrimSpace(r.Remark)
 	r.TMDBType = strings.TrimSpace(r.TMDBType)
-	r.PanLabel = strings.TrimSpace(r.PanLabel)
 	r.PlayFlag = strings.TrimSpace(r.PlayFlag)
-	r.EpisodeName = strings.TrimSpace(r.EpisodeName)
+	r.SiteEpisodeFile = strings.TrimSpace(r.SiteEpisodeFile)
+	r.PlaybackItemID = strings.TrimSpace(r.PlaybackItemID)
+	return &r, nil
+}
+
+func (d *DB) GetPlayHistoryLatestByTMDB(userID int64, tmdbType string, tmdbID int) (*PlayHistoryRow, error) {
+	if d == nil || d.db == nil || userID <= 0 || tmdbID <= 0 {
+		return nil, nil
+	}
+	typ := strings.TrimSpace(strings.ToLower(tmdbType))
+	if typ != "tv" && typ != "movie" {
+		return nil, nil
+	}
+	var r PlayHistoryRow
+	err := d.db.QueryRow(`
+			SELECT
+			  c.content_key,
+			  sv.site_key,
+			  COALESCE(gs.name, CASE WHEN sv.site_kind='emby' THEN 'Emby' ELSE '' END) AS site_name,
+			  COALESCE(gs.api, CASE WHEN sv.site_kind='emby' THEN 'emby' ELSE '' END) AS spider_api,
+			  sv.site_detail,
+			  sv.poster,
+			  sv.remark,
+			  COALESCE(tm.tmdb_id, 0) AS tmdb_id,
+			  COALESCE(tm.tmdb_type, '') AS tmdb_type,
+			  h.play_flag,
+			  h.site_episode_index,
+			  h.site_episode_file,
+			  h.tmdb_season,
+			  h.tmdb_episode,
+			  h.updated_at,
+			  h.playback_position_ticks,
+			  h.playback_runtime_ticks,
+			  h.playback_item_id
+			FROM user_play_history h
+			JOIN content c ON c.id = h.content_id
+			JOIN site_video sv ON sv.id = h.site_video_id
+			JOIN content_tmdb tm ON tm.content_id = c.id
+			LEFT JOIN video_source_site gs ON sv.site_kind='global' AND gs.key = sv.site_key
+			WHERE h.user_id = ? AND tm.tmdb_type = ? AND tm.tmdb_id = ?
+			ORDER BY h.updated_at DESC
+			LIMIT 1
+	`, userID, typ, tmdbID).Scan(
+		&r.ContentKey,
+		&r.SiteKey,
+		&r.SiteName,
+		&r.SpiderAPI,
+		&r.SiteDetail,
+		&r.Poster,
+		&r.Remark,
+		&r.TMDBID,
+		&r.TMDBType,
+		&r.PlayFlag,
+		&r.SiteEpisodeIndex,
+		&r.SiteEpisodeFile,
+		&r.TMDBSeason,
+		&r.TMDBEpisode,
+		&r.UpdatedAt,
+		&r.PlaybackPositionTicks,
+		&r.PlaybackRuntimeTicks,
+		&r.PlaybackItemID,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	r.ContentKey = strings.TrimSpace(r.ContentKey)
+	r.SiteKey = strings.TrimSpace(r.SiteKey)
+	r.SiteName = strings.TrimSpace(r.SiteName)
+	r.SpiderAPI = strings.TrimSpace(r.SpiderAPI)
+	r.SiteDetail = strings.TrimSpace(r.SiteDetail)
+	r.Poster = strings.TrimSpace(r.Poster)
+	r.Remark = strings.TrimSpace(r.Remark)
+	r.TMDBType = strings.TrimSpace(r.TMDBType)
+	r.PlayFlag = strings.TrimSpace(r.PlayFlag)
+	r.SiteEpisodeFile = strings.TrimSpace(r.SiteEpisodeFile)
 	r.PlaybackItemID = strings.TrimSpace(r.PlaybackItemID)
 	return &r, nil
 }
@@ -624,7 +635,7 @@ func (d *DB) DeletePlayHistoryByContentKey(userID int64, contentKey string) (int
 	if d == nil || d.db == nil || userID <= 0 {
 		return 0, nil
 	}
-	key := strings.ToLower(strings.TrimSpace(contentKey))
+	key := strings.TrimSpace(contentKey)
 	if key == "" {
 		return 0, nil
 	}
@@ -640,19 +651,19 @@ func (d *DB) DeletePlayHistoryByContentKey(userID int64, contentKey string) (int
 	return n, nil
 }
 
-func (d *DB) DeletePlayHistoryBySiteVideo(userID int64, siteKey string, videoID string) (int64, error) {
+func (d *DB) DeletePlayHistoryBySiteVideo(userID int64, siteKey string, siteDetail string) (int64, error) {
 	if d == nil || d.db == nil || userID <= 0 {
 		return 0, nil
 	}
 	sk := strings.TrimSpace(siteKey)
-	vid := strings.TrimSpace(videoID)
+	vid := strings.TrimSpace(siteDetail)
 	if sk == "" || vid == "" {
 		return 0, nil
 	}
 	siteKind, ownerID := d.resolveSiteKindAndOwner(userID, sk)
 	var siteVideoID int64
 	if err := d.db.QueryRow(`
-		SELECT id FROM site_video WHERE site_kind=? AND owner_user_id=? AND site_key=? AND video_id=? LIMIT 1
+		SELECT id FROM site_video WHERE site_kind=? AND owner_user_id=? AND site_key=? AND site_detail=? LIMIT 1
 	`, siteKind, ownerID, sk, vid).Scan(&siteVideoID); err != nil {
 		return 0, nil
 	}
@@ -664,12 +675,12 @@ func (d *DB) DeletePlayHistoryBySiteVideo(userID int64, siteKey string, videoID 
 	return n, nil
 }
 
-func (d *DB) GetPlayHistorySnapshotBySiteVideo(userID int64, siteKey string, videoID string) (PlayHistorySnapshot, bool) {
+func (d *DB) GetPlayHistorySnapshotBySiteVideo(userID int64, siteKey string, siteDetail string) (PlayHistorySnapshot, bool) {
 	if d == nil || d.db == nil || userID <= 0 {
 		return PlayHistorySnapshot{}, false
 	}
 	sk := strings.TrimSpace(siteKey)
-	vid := strings.TrimSpace(videoID)
+	vid := strings.TrimSpace(siteDetail)
 	if sk == "" || vid == "" {
 		return PlayHistorySnapshot{}, false
 	}
@@ -683,7 +694,7 @@ func (d *DB) GetPlayHistorySnapshotBySiteVideo(userID int64, siteKey string, vid
 		  AND sv.site_kind = ?
 		  AND sv.owner_user_id = ?
 		  AND sv.site_key = ?
-		  AND sv.video_id = ?
+		  AND sv.site_detail = ?
 		ORDER BY h.updated_at DESC
 		LIMIT 1
 	`, userID, siteKind, ownerID, sk, vid).Scan(&snap.Pos, &snap.Runtime, &snap.Updated)

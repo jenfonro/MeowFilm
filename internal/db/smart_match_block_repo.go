@@ -14,24 +14,24 @@ type SmartMatchBlockKeyword struct {
 }
 
 type SmartMatchBlockItem struct {
-	Keyword   string
-	SiteKey   string
-	SpiderAPI string
-	VideoID   string
-	Poster    string
-	PanFlag   string
-	Source    string
-	UpdatedAt int64
+	Keyword    string
+	SiteKey    string
+	SpiderAPI  string
+	SiteDetail string
+	Poster     string
+	PanFlag    string
+	Source     string
+	UpdatedAt  int64
 }
 
-func (d *DB) UpsertSmartMatchBlockItem(keyword string, siteKey string, spiderAPI string, videoID string, poster string, panFlag string, source string) error {
+func (d *DB) UpsertSmartMatchBlockItem(keyword string, siteKey string, spiderAPI string, siteDetail string, poster string, panFlag string, source string) error {
 	if d == nil || d.db == nil {
 		return nil
 	}
 	k := strings.TrimSpace(keyword)
 	sk := strings.TrimSpace(siteKey)
 	sapi := strings.TrimSpace(spiderAPI)
-	vid := strings.TrimSpace(videoID)
+	vid := strings.TrimSpace(siteDetail)
 	p := strings.TrimSpace(poster)
 	pf := strings.TrimSpace(panFlag)
 	src := strings.TrimSpace(source)
@@ -63,9 +63,9 @@ func (d *DB) UpsertSmartMatchBlockItem(keyword string, siteKey string, spiderAPI
 	}
 
 	if _, err := tx.Exec(`
-		INSERT INTO smart_match_block_item(keyword_id, site_key, spider_api, video_id, poster, pan_flag, source, created_at, updated_at)
+		INSERT INTO smart_match_block_item(keyword_id, site_key, spider_api, site_detail, poster, pan_flag, source, created_at, updated_at)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(keyword_id, site_key, video_id, pan_flag, source) DO UPDATE SET
+		ON CONFLICT(keyword_id, site_key, site_detail, pan_flag, source) DO UPDATE SET
 		  spider_api=excluded.spider_api,
 		  poster=excluded.poster,
 		  updated_at=excluded.updated_at
@@ -76,13 +76,13 @@ func (d *DB) UpsertSmartMatchBlockItem(keyword string, siteKey string, spiderAPI
 	return tx.Commit()
 }
 
-func (d *DB) DeleteSmartMatchBlockItem(keyword string, siteKey string, videoID string, panFlag string, source string) error {
+func (d *DB) DeleteSmartMatchBlockItem(keyword string, siteKey string, siteDetail string, panFlag string, source string) error {
 	if d == nil || d.db == nil {
 		return nil
 	}
 	k := strings.TrimSpace(keyword)
 	sk := strings.TrimSpace(siteKey)
-	vid := strings.TrimSpace(videoID)
+	vid := strings.TrimSpace(siteDetail)
 	pf := strings.TrimSpace(panFlag)
 	src := strings.TrimSpace(source)
 	if k == "" || sk == "" || vid == "" {
@@ -102,7 +102,7 @@ func (d *DB) DeleteSmartMatchBlockItem(keyword string, siteKey string, videoID s
 		}
 		return err
 	}
-	query := `DELETE FROM smart_match_block_item WHERE keyword_id=? AND site_key=? AND video_id=?`
+	query := `DELETE FROM smart_match_block_item WHERE keyword_id=? AND site_key=? AND site_detail=?`
 	args := []any{keywordID, sk, vid}
 	if pf != "" {
 		query += ` AND pan_flag=?`
@@ -149,8 +149,8 @@ func (d *DB) ListSmartMatchBlockKeywords() ([]SmartMatchBlockKeyword, error) {
 	out := []SmartMatchBlockKeyword{}
 	for rows.Next() {
 		var (
-			kw string
-			cnt int
+			kw      string
+			cnt     int
 			updated int64
 		)
 		_ = rows.Scan(&kw, &cnt, &updated)
@@ -172,11 +172,11 @@ func (d *DB) ListSmartMatchBlockItems(keyword string) ([]SmartMatchBlockItem, er
 		return []SmartMatchBlockItem{}, nil
 	}
 	rows, err := d.db.Query(`
-		SELECT k.keyword, i.site_key, i.spider_api, i.video_id, i.poster, i.pan_flag, i.source, i.updated_at
+		SELECT k.keyword, i.site_key, i.spider_api, i.site_detail, i.poster, i.pan_flag, i.source, i.updated_at
 		FROM smart_match_block_item i
 		INNER JOIN smart_match_block_keyword k ON k.id = i.keyword_id
 		WHERE k.keyword = ?
-		ORDER BY i.updated_at DESC, i.site_key ASC, i.video_id ASC
+		ORDER BY i.updated_at DESC, i.site_key ASC, i.site_detail ASC
 	`, k)
 	if err != nil {
 		return nil, err
@@ -185,15 +185,15 @@ func (d *DB) ListSmartMatchBlockItems(keyword string) ([]SmartMatchBlockItem, er
 	out := []SmartMatchBlockItem{}
 	for rows.Next() {
 		var it SmartMatchBlockItem
-		_ = rows.Scan(&it.Keyword, &it.SiteKey, &it.SpiderAPI, &it.VideoID, &it.Poster, &it.PanFlag, &it.Source, &it.UpdatedAt)
+		_ = rows.Scan(&it.Keyword, &it.SiteKey, &it.SpiderAPI, &it.SiteDetail, &it.Poster, &it.PanFlag, &it.Source, &it.UpdatedAt)
 		it.Keyword = strings.TrimSpace(it.Keyword)
 		it.SiteKey = strings.TrimSpace(it.SiteKey)
 		it.SpiderAPI = strings.TrimSpace(it.SpiderAPI)
-		it.VideoID = strings.TrimSpace(it.VideoID)
+		it.SiteDetail = strings.TrimSpace(it.SiteDetail)
 		it.Poster = strings.TrimSpace(it.Poster)
 		it.PanFlag = strings.TrimSpace(it.PanFlag)
 		it.Source = strings.TrimSpace(it.Source)
-		if it.Keyword == "" || it.SiteKey == "" || it.VideoID == "" {
+		if it.Keyword == "" || it.SiteKey == "" || it.SiteDetail == "" {
 			continue
 		}
 		out = append(out, it)
@@ -201,13 +201,13 @@ func (d *DB) ListSmartMatchBlockItems(keyword string) ([]SmartMatchBlockItem, er
 	return out, nil
 }
 
-func (d *DB) HasSmartMatchBlockItem(keyword string, siteKey string, videoID string) bool {
+func (d *DB) HasSmartMatchBlockItem(keyword string, siteKey string, siteDetail string) bool {
 	if d == nil || d.db == nil {
 		return false
 	}
 	k := strings.TrimSpace(keyword)
 	sk := strings.TrimSpace(siteKey)
-	vid := strings.TrimSpace(videoID)
+	vid := strings.TrimSpace(siteDetail)
 	if k == "" || sk == "" || vid == "" {
 		return false
 	}
@@ -216,7 +216,7 @@ func (d *DB) HasSmartMatchBlockItem(keyword string, siteKey string, videoID stri
 		SELECT COUNT(1)
 		FROM smart_match_block_item i
 		INNER JOIN smart_match_block_keyword k ON k.id = i.keyword_id
-		WHERE k.keyword=? AND i.site_key=? AND i.video_id=?
+		WHERE k.keyword=? AND i.site_key=? AND i.site_detail=?
 		LIMIT 1
 	`, k, sk, vid).Scan(&n)
 	return n > 0
