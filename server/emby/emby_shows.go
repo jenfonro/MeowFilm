@@ -187,24 +187,25 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			return
 		}
 
-		// Prefer TMDB contentKey for canonical series ids so web-generated history drives NextUp.
+		// Prefer TMDB metadata lookup so web-generated history drives NextUp even after
+		// contentKey is normalized to a stable title key.
 		var row *db.PlayHistoryRow
 		var err error
 		if parsed, ok := embyParseItemID(seriesID); ok && parsed != nil && parsed.Source == "tmdb" && parsed.Kind == "tv" && parsed.SubKind == "series" && parsed.TMDBID > 0 {
-			row, err = database.GetPlayHistoryLatestByContentKey(uid, "tmdb:tv:"+strconv.Itoa(parsed.TMDBID))
+			row, err = database.GetPlayHistoryLatestByTMDB(uid, "tv", parsed.TMDBID)
 		} else {
 			siteKey := "emby"
-			videoID := strings.TrimSpace(seriesID)
+			siteDetail := strings.TrimSpace(seriesID)
 			if siteSeriesVideoID > 0 {
 				// sitev_<id>: query by real site key + spider video id.
 				if sv, e := database.GetSiteVideoByID(siteSeriesVideoID); e == nil && sv != nil {
-					if strings.TrimSpace(sv.SiteKey) != "" && strings.TrimSpace(sv.VideoID) != "" {
+					if strings.TrimSpace(sv.SiteKey) != "" && strings.TrimSpace(sv.SiteDetail) != "" {
 						siteKey = strings.TrimSpace(sv.SiteKey)
-						videoID = strings.TrimSpace(sv.VideoID)
+						siteDetail = strings.TrimSpace(sv.SiteDetail)
 					}
 				}
 			}
-			row, err = database.GetPlayHistoryLatestBySiteVideo(uid, siteKey, videoID)
+			row, err = database.GetPlayHistoryLatestBySiteVideo(uid, siteKey, siteDetail)
 		}
 		if err != nil || row == nil || strings.TrimSpace(row.PlaybackItemID) == "" {
 			writeJSON(w, 200, embyPagedEmpty(startIndex))
@@ -273,7 +274,7 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 					writeJSON(w, 200, embyPagedItems([]map[string]any{}, 0, 0))
 					return
 				}
-				pans, err := embyFetchSiteDetailPansDedup(database, u, strings.TrimSpace(spiderAPI), strings.TrimSpace(sv.VideoID))
+				pans, err := embyFetchSiteDetailPansDedup(database, u, strings.TrimSpace(spiderAPI), strings.TrimSpace(sv.SiteDetail))
 				if err != nil {
 					writeJSON(w, 200, embyPagedItems([]map[string]any{}, 0, 0))
 					return
@@ -429,7 +430,7 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 					writeJSON(w, 200, embyPagedItems([]map[string]any{}, 0, 0))
 					return
 				}
-				pans, err := embyFetchSiteDetailPansDedup(database, u, strings.TrimSpace(spiderAPI), strings.TrimSpace(sv.VideoID))
+				pans, err := embyFetchSiteDetailPansDedup(database, u, strings.TrimSpace(spiderAPI), strings.TrimSpace(sv.SiteDetail))
 				if err != nil {
 					writeJSON(w, 200, embyPagedItems([]map[string]any{}, 0, 0))
 					return

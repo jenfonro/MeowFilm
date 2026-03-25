@@ -25,9 +25,9 @@ type smartCandidate struct {
 	SiteKey          string
 	SiteName         string
 	SpiderAPI        string
-	VideoID          string
+	SiteDetail       string
 	SrcRemarkLower   string
-	PanLabel         string
+	PanFlag          string
 	PanTokenIdx      int
 	Ep               catpawrunner.Episode
 	RawLower         string

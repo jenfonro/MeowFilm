@@ -74,7 +74,7 @@ func smartLoadMatchBlockIndex(database *db.DB, keyword string) map[string]*smart
 	rows, _ := database.ListSmartMatchBlockItems(kw)
 	for _, it := range rows {
 		sk := strings.TrimSpace(it.SiteKey)
-		vid := strings.TrimSpace(it.VideoID)
+		vid := strings.TrimSpace(it.SiteDetail)
 		if sk == "" || vid == "" {
 			continue
 		}
@@ -298,14 +298,14 @@ const (
 )
 
 type smartSource struct {
-	SiteKey     string
-	SiteName    string
-	SpiderAPI   string
-	VideoID     string
-	VideoRemark string
-	Score       int
-	Seq         int
-	NoNoise     bool
+	SiteKey    string
+	SiteName   string
+	SpiderAPI  string
+	SiteDetail string
+	Remark     string
+	Score      int
+	Seq        int
+	NoNoise    bool
 }
 
 type smartDetailCacheEntry struct {
@@ -333,7 +333,7 @@ func smartBuildSeasonSignature(seasons []embyTMDBSeason) string {
 }
 
 func smartBuildDetailCacheKey(src smartSource, primarySeasons []embyTMDBSeason, baselineSeasons []embyTMDBSeason, allowSingleBaseline bool, primaryKind string) string {
-	base := smartBuildSourceKey(src.SiteKey, src.SpiderAPI, src.VideoID)
+	base := smartBuildSourceKey(src.SiteKey, src.SpiderAPI, src.SiteDetail)
 	if base == "" {
 		return ""
 	}
@@ -544,14 +544,14 @@ func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle st
 				}
 				localSeq++
 				local = append(local, smartSource{
-					SiteKey:     tt.Site.Key,
-					SiteName:    tt.Site.Name,
-					SpiderAPI:   tt.Site.API,
-					VideoID:     strings.TrimSpace(it.ID),
-					VideoRemark: strings.TrimSpace(it.Remark),
-					Score:       score,
-					Seq:         (tt.Idx+1)*1000 + localSeq, // deterministic tie-break
-					NoNoise:     key == qKey,
+					SiteKey:    tt.Site.Key,
+					SiteName:   tt.Site.Name,
+					SpiderAPI:  tt.Site.API,
+					SiteDetail: strings.TrimSpace(it.ID),
+					Remark:     strings.TrimSpace(it.Remark),
+					Score:      score,
+					Seq:        (tt.Idx+1)*1000 + localSeq, // deterministic tie-break
+					NoNoise:    key == qKey,
 				})
 				if len(local) >= 200 {
 					break
@@ -585,8 +585,8 @@ func smartBuildCandidates(aggregated []smartSource, orderMap map[string]int, tmd
 		b := cands[j]
 
 		if tmdbHasMultiSeason && preferSeasonNo > 0 {
-			as := smartExtractSeasonHintFromSource(a.SiteName, a.VideoRemark)
-			bs := smartExtractSeasonHintFromSource(b.SiteName, b.VideoRemark)
+			as := smartExtractSeasonHintFromSource(a.SiteName, a.Remark)
+			bs := smartExtractSeasonHintFromSource(b.SiteName, b.Remark)
 			am := as == preferSeasonNo
 			bm := bs == preferSeasonNo
 			if am != bm {
@@ -597,15 +597,15 @@ func smartBuildCandidates(aggregated []smartSource, orderMap map[string]int, tmd
 			if aWrong != bWrong {
 				return !aWrong
 			}
-			aHas := smartHasExplicitSeasonMarkerInSource(a.SiteName, a.VideoRemark) || as > 0
-			bHas := smartHasExplicitSeasonMarkerInSource(b.SiteName, b.VideoRemark) || bs > 0
+			aHas := smartHasExplicitSeasonMarkerInSource(a.SiteName, a.Remark) || as > 0
+			bHas := smartHasExplicitSeasonMarkerInSource(b.SiteName, b.Remark) || bs > 0
 			if aHas != bHas {
 				return aHas
 			}
 		}
 
-		ap := smartExtractMaxEpisodeFromBadgeText(a.VideoRemark)
-		bp := smartExtractMaxEpisodeFromBadgeText(b.VideoRemark)
+		ap := smartExtractMaxEpisodeFromBadgeText(a.Remark)
+		bp := smartExtractMaxEpisodeFromBadgeText(b.Remark)
 		aPrefer := ap >= want
 		bPrefer := bp >= want
 		if aPrefer != bPrefer {
@@ -640,7 +640,7 @@ func smartBuildCandidates(aggregated []smartSource, orderMap map[string]int, tmd
 	seen := map[string]bool{}
 	unique := make([]smartSource, 0, len(cands))
 	for _, s := range cands {
-		k := smartBuildSourceKey(s.SiteKey, s.SpiderAPI, s.VideoID)
+		k := smartBuildSourceKey(s.SiteKey, s.SpiderAPI, s.SiteDetail)
 		if k == "" || seen[k] {
 			continue
 		}
@@ -654,7 +654,7 @@ func smartBuildCandidates(aggregated []smartSource, orderMap map[string]int, tmd
 	retryable := []smartSource{}
 	cooldownFailed := []smartSource{}
 	for _, s := range unique {
-		key := smartBuildSourceKey(s.SiteKey, s.SpiderAPI, s.VideoID)
+		key := smartBuildSourceKey(s.SiteKey, s.SpiderAPI, s.SiteDetail)
 		rank := 1
 		smartDetailCache.Lock()
 		hit := smartDetailCache.M[key]
@@ -787,7 +787,7 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 			PanMock189AccessByShareID: map[string]string{},
 		}
 
-		detailRaw, err := cache.RequestSpiderDetailCached(apiBase, src.SpiderAPI, src.VideoID)
+		detailRaw, err := cache.RequestSpiderDetailCached(apiBase, src.SpiderAPI, src.SiteDetail)
 		if err != nil {
 			smartDetailCache.Lock()
 			prev := smartDetailCache.M[key]
@@ -833,10 +833,10 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 		}
 		sourceHasBeyondFirstSeason := smartSourceHasEpisodeBeyondFirstSeason(pans, rawCleanRules, rawEpisodeRules, primaryFirstSeasonCount)
 
-		srcRemarkLower := strings.ToLower(strings.TrimSpace(src.VideoRemark))
+		srcRemarkLower := strings.ToLower(strings.TrimSpace(src.Remark))
 		for _, pan := range pans {
-			panLabel := strings.TrimSpace(pan.Label)
-			panTokenIdx := smartLabelTokenIdx(panLabel, settings.PanTokenOrderLower)
+			panFlag := strings.TrimSpace(pan.Label)
+			panTokenIdx := smartLabelTokenIdx(panFlag, settings.PanTokenOrderLower)
 			for _, ep := range pan.Episodes {
 				if strings.TrimSpace(ep.URL) == "" {
 					continue
@@ -893,9 +893,9 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 					SiteKey:          src.SiteKey,
 					SiteName:         src.SiteName,
 					SpiderAPI:        src.SpiderAPI,
-					VideoID:          src.VideoID,
+					SiteDetail:       src.SiteDetail,
 					SrcRemarkLower:   srcRemarkLower,
-					PanLabel:         panLabel,
+					PanFlag:          panFlag,
 					PanTokenIdx:      panTokenIdx,
 					Ep:               ep,
 					RawLower:         rawLower,
@@ -1015,10 +1015,10 @@ func smartBuildEpisodeMapsFromPans(
 	}
 	sourceHasBeyondFirstSeason := smartSourceHasEpisodeBeyondFirstSeason(pans, rawCleanRules, rawEpisodeRules, primaryFirstSeasonCount)
 
-	srcRemarkLower := strings.ToLower(strings.TrimSpace(src.VideoRemark))
+	srcRemarkLower := strings.ToLower(strings.TrimSpace(src.Remark))
 	for _, pan := range pans {
-		panLabel := strings.TrimSpace(pan.Label)
-		panTokenIdx := smartLabelTokenIdx(panLabel, settings.PanTokenOrderLower)
+		panFlag := strings.TrimSpace(pan.Label)
+		panTokenIdx := smartLabelTokenIdx(panFlag, settings.PanTokenOrderLower)
 		for _, ep := range pan.Episodes {
 			if strings.TrimSpace(ep.URL) == "" {
 				continue
@@ -1061,9 +1061,9 @@ func smartBuildEpisodeMapsFromPans(
 				SiteKey:         src.SiteKey,
 				SiteName:        src.SiteName,
 				SpiderAPI:       src.SpiderAPI,
-				VideoID:         src.VideoID,
+				SiteDetail:      src.SiteDetail,
 				SrcRemarkLower:  srcRemarkLower,
-				PanLabel:        panLabel,
+				PanFlag:         panFlag,
 				PanTokenIdx:     panTokenIdx,
 				Ep:              ep,
 				RawLower:        rawLower,
@@ -1102,10 +1102,10 @@ func smartBuildMovieCandidatesFromPans(
 		return nil
 	}
 	out := make([]smartCandidate, 0, 16)
-	srcRemarkLower := strings.ToLower(strings.TrimSpace(src.VideoRemark))
+	srcRemarkLower := strings.ToLower(strings.TrimSpace(src.Remark))
 	for _, pan := range pans {
-		panLabel := strings.TrimSpace(pan.Label)
-		panTokenIdx := smartLabelTokenIdx(panLabel, settings.PanTokenOrderLower)
+		panFlag := strings.TrimSpace(pan.Label)
+		panTokenIdx := smartLabelTokenIdx(panFlag, settings.PanTokenOrderLower)
 		for _, ep := range pan.Episodes {
 			if strings.TrimSpace(ep.URL) == "" {
 				continue
@@ -1135,9 +1135,9 @@ func smartBuildMovieCandidatesFromPans(
 				SiteKey:        src.SiteKey,
 				SiteName:       src.SiteName,
 				SpiderAPI:      src.SpiderAPI,
-				VideoID:        src.VideoID,
+				SiteDetail:     src.SiteDetail,
 				SrcRemarkLower: srcRemarkLower,
-				PanLabel:       panLabel,
+				PanFlag:        panFlag,
 				PanTokenIdx:    panTokenIdx,
 				Ep:             ep,
 				RawLower:       rawLower,
@@ -1166,7 +1166,7 @@ func smartCandidatesForWant(
 	requireSeasoned bool,
 	allowResolutionModes []string,
 ) []smartCandidate {
-	searchSeasonHint := smartExtractSeasonHintFromSource(src.SiteName, src.VideoRemark)
+	searchSeasonHint := smartExtractSeasonHintFromSource(src.SiteName, src.Remark)
 	wantedInSeason := smartSeasonEpisode{Season: 0, Episode: want}
 	if tmdbHasMultiSeason {
 		wantedInSeason = smartTMDBSeasonEpisodeOfGlobal(tmdbSeasons, want)
@@ -1294,20 +1294,20 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 			hc = len(headers)
 		}
 		smartDebugPrintf(
-			"[smart][play_try_status] flow=%d id=%d ms=%d site=(%s) panFlag=%s provider=%s status=%s reason=%s headers=%d url=%s err=%s spider=%s videoId=%s",
+			"[smart][play_try_status] flow=%d id=%d ms=%d site=(%s) panFlag=%s provider=%s status=%s reason=%s headers=%d url=%s err=%s spider=%s siteDetail=%s",
 			flowID,
 			tryID,
 			time.Since(tryStart).Milliseconds(),
 			smartLogSiteName(cand.SiteKey, cand.SiteName),
-			strings.TrimSpace(cand.PanLabel),
-			smartPanMockProviderID(database, strings.TrimSpace(cand.PanLabel)),
+			strings.TrimSpace(cand.PanFlag),
+			smartPanMockProviderID(database, strings.TrimSpace(cand.PanFlag)),
 			strings.TrimSpace(status),
 			strings.TrimSpace(reason),
 			hc,
 			u,
 			errMsg,
 			strings.TrimSpace(cand.SpiderAPI),
-			strings.TrimSpace(cand.VideoID),
+			strings.TrimSpace(cand.SiteDetail),
 		)
 	}
 	if smartDebugLogEnabled() {
@@ -1317,16 +1317,16 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 			raw0 = strings.TrimSpace(rawNames[0])
 		}
 		smartDebugPrintf(
-			"[smart][play_try] flow=%d id=%d site=(%s) panFlag=%s provider=%s matchShowName=%s matchRawName=%s spider=%s videoId=%s",
+			"[smart][play_try] flow=%d id=%d site=(%s) panFlag=%s provider=%s matchShowName=%s matchRawName=%s spider=%s siteDetail=%s",
 			flowID,
 			tryID,
 			smartLogSiteName(cand.SiteKey, cand.SiteName),
-			strings.TrimSpace(cand.PanLabel),
-			smartPanMockProviderID(database, strings.TrimSpace(cand.PanLabel)),
+			strings.TrimSpace(cand.PanFlag),
+			smartPanMockProviderID(database, strings.TrimSpace(cand.PanFlag)),
 			strings.TrimSpace(cand.Ep.Name),
 			raw0,
 			strings.TrimSpace(cand.SpiderAPI),
-			strings.TrimSpace(cand.VideoID),
+			strings.TrimSpace(cand.SiteDetail),
 		)
 	}
 
@@ -1338,7 +1338,7 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 	}
 
 	doPlay := func() playResult {
-		pid := smartPanMockProviderID(database, strings.TrimSpace(cand.PanLabel))
+		pid := smartPanMockProviderID(database, strings.TrimSpace(cand.PanFlag))
 		switch pid {
 		case "189":
 			ac := ""
@@ -1389,7 +1389,7 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 			}
 			return playResult{status: "ok", playURL: strings.TrimSpace(u), headers: header}
 		case "139":
-			downloadURL, playURL, err := netdisk.Yun139Play(database, strings.TrimSpace(cand.PanLabel), strings.TrimSpace(cand.Ep.URL))
+			downloadURL, playURL, err := netdisk.Yun139Play(database, strings.TrimSpace(cand.PanFlag), strings.TrimSpace(cand.Ep.URL))
 			u := strings.TrimSpace(downloadURL)
 			if u == "" {
 				u = strings.TrimSpace(playURL)
@@ -1402,7 +1402,7 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 			}
 			return playResult{status: "ok", playURL: u, headers: map[string]string{}}
 		case "baidu":
-			u, header, err := netdisk.BaiduPlay(database, strings.TrimSpace(cand.PanLabel), strings.TrimSpace(cand.Ep.URL), "/MeowFilm")
+			u, header, err := netdisk.BaiduPlay(database, strings.TrimSpace(cand.PanFlag), strings.TrimSpace(cand.Ep.URL), "/MeowFilm")
 			if err != nil || strings.TrimSpace(u) == "" {
 				if err != nil {
 					return playResult{status: "err", err: err}
@@ -1464,11 +1464,11 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser string, src smartSource, tmdbSeasons []embyTMDBSeason, singleBaselineSeasons []embyTMDBSeason, tmdbHasMultiSeason bool, preferSeasonNo int, want int, settings smartPlaybackSettings, rawCleanRules []string, rawEpisodeRules []string, requireSeasoned bool, allowSingleBaseline bool, primaryKind string, allowResolutionModes []string) *smartPickResult {
 	siteKey := strings.TrimSpace(src.SiteKey)
 	spiderApi := strings.TrimSpace(src.SpiderAPI)
-	videoId := strings.TrimSpace(src.VideoID)
-	if siteKey == "" || spiderApi == "" || videoId == "" || want <= 0 {
+	siteDetail := strings.TrimSpace(src.SiteDetail)
+	if siteKey == "" || spiderApi == "" || siteDetail == "" || want <= 0 {
 		return nil
 	}
-	searchSeasonHint := smartExtractSeasonHintFromSource(src.SiteName, src.VideoRemark)
+	searchSeasonHint := smartExtractSeasonHintFromSource(src.SiteName, src.Remark)
 
 	cache := smartLoadOrBuildDetailCache(database, apiBase, src, tmdbSeasons, singleBaselineSeasons, tmdbHasMultiSeason, settings, rawCleanRules, rawEpisodeRules, allowSingleBaseline, primaryKind)
 	if cache == nil || !cache.OK {
@@ -1660,14 +1660,14 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 }
 
 type smartPlaybackPickedMeta struct {
-	SiteKey  string
-	SiteName string
-	VideoID  string
-	PanFlag  string
-	Provider string
-	ShowName string
-	RawName  string
-	Quality  string
+	SiteKey    string
+	SiteName   string
+	SiteDetail string
+	PanFlag    string
+	Provider   string
+	ShowName   string
+	RawName    string
+	Quality    string
 }
 
 func smartSourceHasEpisodeBeyondFirstSeason(
@@ -1877,9 +1877,9 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 		h := fnv.New64a()
 		_, _ = h.Write([]byte(strings.TrimSpace(c.SiteKey)))
 		_, _ = h.Write([]byte{0})
-		_, _ = h.Write([]byte(strings.TrimSpace(c.VideoID)))
+		_, _ = h.Write([]byte(strings.TrimSpace(c.SiteDetail)))
 		_, _ = h.Write([]byte{0})
-		_, _ = h.Write([]byte(strings.TrimSpace(c.PanLabel)))
+		_, _ = h.Write([]byte(strings.TrimSpace(c.PanFlag)))
 		_, _ = h.Write([]byte{0})
 		_, _ = h.Write([]byte(strings.TrimSpace(c.Ep.Flag)))
 		_, _ = h.Write([]byte{0})
@@ -1894,20 +1894,20 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 			raw0 = strings.TrimSpace(rawNames[0])
 		}
 		return &smartPlaybackPickedMeta{
-			SiteKey:  strings.TrimSpace(c.SiteKey),
-			SiteName: strings.TrimSpace(c.SiteName),
-			VideoID:  strings.TrimSpace(c.VideoID),
-			PanFlag:  strings.TrimSpace(c.PanLabel),
-			Provider: smartPanMockProviderID(database, strings.TrimSpace(c.PanLabel)),
-			ShowName: strings.TrimSpace(c.Ep.Name),
-			RawName:  raw0,
-			Quality:  strings.TrimSpace(feat.Quality),
+			SiteKey:    strings.TrimSpace(c.SiteKey),
+			SiteName:   strings.TrimSpace(c.SiteName),
+			SiteDetail: strings.TrimSpace(c.SiteDetail),
+			PanFlag:    strings.TrimSpace(c.PanFlag),
+			Provider:   smartPanMockProviderID(database, strings.TrimSpace(c.PanFlag)),
+			ShowName:   strings.TrimSpace(c.Ep.Name),
+			RawName:    raw0,
+			Quality:    strings.TrimSpace(feat.Quality),
 		}
 	}
 
 	upsertSmartPlayHistoryBestEffort := func(c smartCandidate) {
 		// Intentionally disabled: persist history only on Emby session reports.
-		// The stream resolver stores the picked site binding in-memory (mediaSourceId -> siteKey/videoId/pan),
+		// The stream resolver stores the picked site binding in-memory (mediaSourceId -> siteKey/siteDetail/pan),
 		// which the session reporter can then use to write a single canonical history row.
 		_ = c
 		return
@@ -1947,231 +1947,13 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 	aggregateRules := smartLoadAggregateCleanRules(database)
 	matchBlockKeyword := smartMatchBlockKeyword(searchTitle, aggregateRules)
 	matchBlockIndex := smartLoadMatchBlockIndex(database, matchBlockKeyword)
-	matchBlockEntryOf := func(siteKey, videoID string) *smartMatchBlockEntry {
+	matchBlockEntryOf := func(siteKey, siteDetail string) *smartMatchBlockEntry {
 		sk := strings.TrimSpace(siteKey)
-		vid := strings.TrimSpace(videoID)
+		vid := strings.TrimSpace(siteDetail)
 		if sk == "" || vid == "" {
 			return nil
 		}
 		return matchBlockIndex[sk+"::"+vid]
-	}
-
-	isPanBlocked := func(entry *smartMatchBlockEntry, label string) bool {
-		if entry == nil || len(entry.PanFlags) == 0 {
-			return false
-		}
-		key := strings.TrimSpace(label)
-		if key == "" {
-			return false
-		}
-		_, ok := entry.PanFlags[key]
-		return ok
-	}
-
-	tryHistoryFastPathOffers := func() []smartCandidateOffer {
-		if database == nil || u == nil {
-			return nil
-		}
-		uid, _ := strconv.ParseInt(strings.TrimSpace(u.ID), 10, 64)
-		if uid <= 0 {
-			return nil
-		}
-		kind := strings.TrimSpace(req.Kind)
-		if kind != "tv" && kind != "movie" {
-			return nil
-		}
-		contentKey := strings.ToLower(strings.TrimSpace("tmdb:" + kind + ":" + strconv.Itoa(req.TMDBID)))
-		row, e := database.GetPlayHistoryLatestByContentKey(uid, contentKey)
-		if e != nil || row == nil {
-			return nil
-		}
-		siteKey := strings.TrimSpace(row.SiteKey)
-		videoID := strings.TrimSpace(row.VideoID)
-		panLabel := strings.TrimSpace(row.PanLabel)
-		playFlag := strings.TrimSpace(row.PlayFlag)
-		if siteKey == "" || videoID == "" {
-			return nil
-		}
-		if entry := matchBlockEntryOf(siteKey, videoID); entry != nil && entry.BlockAll {
-			return nil
-		}
-		spiderAPI := strings.TrimSpace(smartResolveSpiderAPIBySiteKey(database, siteKey))
-		if spiderAPI == "" {
-			return nil
-		}
-		blockedEntry := matchBlockEntryOf(siteKey, videoID)
-		src := smartSource{SiteKey: siteKey, SiteName: strings.TrimSpace(row.SiteName), SpiderAPI: spiderAPI, VideoID: videoID, Score: 1000, Seq: 0, NoNoise: true}
-		panProviderOfLabel := func(label string) string {
-			raw := strings.TrimSpace(label)
-			if raw == "" {
-				return ""
-			}
-			key := smartPanMatchLabelText(raw)
-			if key == "" {
-				return ""
-			}
-			entries := smartLoadPanMatchEntries(database)
-			for _, it := range entries {
-				t := strings.TrimSpace(it.TokenLower)
-				if t == "" || !strings.Contains(key, t) {
-					continue
-				}
-				if pid := smartPanToProviderID(it.PanLower); pid != "" {
-					return pid
-				}
-			}
-			return ""
-		}
-		buildOffersFromPans := func(pans []catpawrunner.Pan, accessByShareID map[string]string, ignorePanOrder bool) []smartCandidateOffer {
-			if len(pans) == 0 {
-				return nil
-			}
-			cands := []smartCandidate{}
-			if isMovieMode {
-				cands = smartBuildMovieCandidatesFromPans(src, pans, settings, rawCleanRules, rawMovieRules)
-			} else {
-				epMap, epLoose := smartBuildEpisodeMapsFromPans(src, pans, seasonsForMapping, singleBaselineSeasons, hasMulti, settings, rawCleanRules, rawEpisodeRules, allowSingleBaseline, primaryKind)
-				cands = smartCandidatesForWant(epMap, epLoose, src, seasonsForMapping, hasMulti, preferSeasonNo, want, settings, requireSeasoned, allowResolutionModes)
-			}
-			if len(cands) == 0 {
-				return nil
-			}
-			out := make([]smartCandidateOffer, 0, smartMinInt(3, len(cands)))
-			if ignorePanOrder {
-				if best := smartPickBestMatchIgnorePanOrder(cands, hasMulti, preferSeasonNo, settings); best != nil {
-					out = append(out, smartCandidateOffer{Cand: *best, AccessByShare: accessByShareID})
-				}
-				return out
-			}
-			limit := 3
-			if len(cands) < limit {
-				limit = len(cands)
-			}
-			for i := 0; i < limit; i++ {
-				out = append(out, smartCandidateOffer{Cand: cands[i], AccessByShare: accessByShareID})
-			}
-			return out
-		}
-
-		buildOffersFromVod := func(vod string, label string, accessByShareID map[string]string) []smartCandidateOffer {
-			episodes := smartParseVodPlayURLToEpisodes(vod)
-			if len(episodes) == 0 {
-				return nil
-			}
-			chooseLabel := strings.TrimSpace(label)
-			if chooseLabel == "" {
-				chooseLabel = "历史"
-			}
-			pans := []catpawrunner.Pan{{Label: chooseLabel, Episodes: episodes}}
-			return buildOffersFromPans(pans, accessByShareID, true)
-		}
-
-		// 1) History playFlag fast path: only for pan_mock-like flags.
-		if strings.Contains(playFlag, "-") && !isPanBlocked(blockedEntry, playFlag) {
-			pid := smartPanMockProviderID(database, playFlag)
-			if pid != "" {
-				accessByShareID := map[string]string{}
-				switch pid {
-				case "quark":
-					if vod, _, err := netdisk.QuarkList(database, playFlag, ""); err == nil && strings.TrimSpace(vod) != "" {
-						if offers := buildOffersFromVod(vod, playFlag, accessByShareID); len(offers) > 0 {
-							return offers
-						}
-					}
-				case "uc":
-					if vod, _, err := netdisk.UCList(database, playFlag, ""); err == nil && strings.TrimSpace(vod) != "" {
-						if offers := buildOffersFromVod(vod, playFlag, accessByShareID); len(offers) > 0 {
-							return offers
-						}
-					}
-				case "139":
-					if vod, _, err := netdisk.Yun139List(database, playFlag, ""); err == nil && strings.TrimSpace(vod) != "" {
-						if offers := buildOffersFromVod(vod, playFlag, accessByShareID); len(offers) > 0 {
-							return offers
-						}
-					}
-				case "baidu":
-					if vod, _, err := netdisk.BaiduList(database, playFlag, ""); err == nil && strings.TrimSpace(vod) != "" {
-						if offers := buildOffersFromVod(vod, playFlag, accessByShareID); len(offers) > 0 {
-							return offers
-						}
-					}
-				case "189":
-					if vod, _, _, err := netdisk.Tianyi189List(database, playFlag, ""); err == nil && strings.TrimSpace(vod) != "" {
-						if offers := buildOffersFromVod(vod, playFlag, accessByShareID); len(offers) > 0 {
-							return offers
-						}
-					}
-				}
-			}
-		}
-
-		// 2) Fallback to history site detail; prefer previous pan label, but allow new pans too.
-		detailRaw, e2 := cache.RequestSpiderDetailCached(apiBase, spiderAPI, videoID)
-		if e2 != nil || detailRaw == nil {
-			return nil
-		}
-		playFrom, playURL := catpawrunner.ExtractDetailPlayFromURL(detailRaw)
-		pans := catpawrunner.ParsePlaySources(playFrom, playURL)
-		chosen := []catpawrunner.Pan{}
-		if len(pans) > 0 && blockedEntry != nil {
-			pans = smartFilterPansByBlockedFlags(pans, blockedEntry.PanFlags)
-		}
-		if panLabel != "" {
-			for _, p := range pans {
-				if strings.TrimSpace(p.Label) == panLabel {
-					chosen = append(chosen, p)
-					break
-				}
-			}
-			for _, p := range pans {
-				if strings.TrimSpace(p.Label) == panLabel {
-					continue
-				}
-				chosen = append(chosen, p)
-			}
-		} else {
-			chosen = append(chosen, pans...)
-		}
-		accessByShareID := map[string]string{}
-		if smartIsPanMockEnabled(detailRaw) {
-			if blockedEntry != nil {
-				chosen = smartFilterPansByBlockedFlags(chosen, blockedEntry.PanFlags)
-			}
-			resolved, access := smartResolvePanMockDetailPansIncremental(database, src.SiteKey, src.SiteName, want, seasonsForMapping, hasMulti, rawCleanRules, rawEpisodeRules, chosen, nil)
-			chosen = resolved
-			if blockedEntry != nil {
-				chosen = smartFilterPansByBlockedFlags(chosen, blockedEntry.PanFlags)
-			}
-			accessByShareID = access
-		}
-		if len(chosen) == 0 {
-			return nil
-		}
-
-		// Round 1: when list fails, prefer history playFlag mapped pan provider first.
-		// Round 2: fallback to generic smart matching rules over all pans.
-		historyProvider := panProviderOfLabel(playFlag)
-		if historyProvider == "" {
-			historyProvider = panProviderOfLabel(panLabel)
-		}
-		if historyProvider != "" {
-			preferred := make([]catpawrunner.Pan, 0, len(chosen))
-			for _, p := range chosen {
-				if panProviderOfLabel(strings.TrimSpace(p.Label)) == historyProvider {
-					preferred = append(preferred, p)
-				}
-			}
-			if len(preferred) > 0 {
-				if offers := buildOffersFromPans(preferred, accessByShareID, false); len(offers) > 0 {
-					return offers
-				}
-			}
-		}
-		if offers := buildOffersFromPans(chosen, accessByShareID, false); len(offers) > 0 {
-			return offers
-		}
-		return nil
 	}
 
 	qKey := smartAggKeyWithRules(searchTitle, aggregateRules)
@@ -2255,20 +2037,6 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 	var offersDroppedFull int64
 	attempts := 0
 
-	if database != nil && u != nil {
-		workersWG.Add(1)
-		go func() {
-			defer workersWG.Done()
-			for _, off := range tryHistoryFastPathOffers() {
-				select {
-				case <-ctx.Done():
-					return
-				case offerCh <- off:
-				}
-			}
-		}()
-	}
-
 	siteWorker := func(t task) {
 		defer workersWG.Done()
 		select {
@@ -2303,14 +2071,14 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 			}
 			localSeq++
 			local = append(local, smartSource{
-				SiteKey:     t.Site.Key,
-				SiteName:    t.Site.Name,
-				SpiderAPI:   t.Site.API,
-				VideoID:     id,
-				VideoRemark: strings.TrimSpace(it.Remark),
-				Score:       score,
-				Seq:         (t.Idx+1)*1000 + localSeq,
-				NoNoise:     key == qKey,
+				SiteKey:    t.Site.Key,
+				SiteName:   t.Site.Name,
+				SpiderAPI:  t.Site.API,
+				SiteDetail: id,
+				Remark:     strings.TrimSpace(it.Remark),
+				Score:      score,
+				Seq:        (t.Idx+1)*1000 + localSeq,
+				NoNoise:    key == qKey,
 			})
 			if len(local) >= 80 {
 				break
@@ -2340,11 +2108,11 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 				return
 			default:
 			}
-			blockedEntry := matchBlockEntryOf(src.SiteKey, src.VideoID)
+			blockedEntry := matchBlockEntryOf(src.SiteKey, src.SiteDetail)
 			if blockedEntry != nil && blockedEntry.BlockAll {
 				continue
 			}
-			detailRaw, err := cache.RequestSpiderDetailCachedWithTimeout(apiBase, src.SpiderAPI, src.VideoID, 8*time.Second)
+			detailRaw, err := cache.RequestSpiderDetailCachedWithTimeout(apiBase, src.SpiderAPI, src.SiteDetail, 8*time.Second)
 			if err != nil || detailRaw == nil {
 				continue
 			}
@@ -2607,8 +2375,8 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 				flowID,
 				tier,
 				smartLogSiteName(at.Cand.SiteKey, at.Cand.SiteName),
-				strings.TrimSpace(at.Cand.PanLabel),
-				smartPanMockProviderID(database, strings.TrimSpace(at.Cand.PanLabel)),
+				strings.TrimSpace(at.Cand.PanFlag),
+				smartPanMockProviderID(database, strings.TrimSpace(at.Cand.PanFlag)),
 				strings.TrimSpace(at.Cand.Ep.Name),
 				strings.TrimSpace(smartFirstRawNameFromURL(at.Cand.Ep.URL)),
 				strings.TrimSpace(feat.Quality),
@@ -2623,8 +2391,8 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 					flowID,
 					time.Since(flowStart).Milliseconds(),
 					smartLogSiteName(res.Cand.SiteKey, res.Cand.SiteName),
-					strings.TrimSpace(res.Cand.PanLabel),
-					smartPanMockProviderID(database, strings.TrimSpace(res.Cand.PanLabel)),
+					strings.TrimSpace(res.Cand.PanFlag),
+					smartPanMockProviderID(database, strings.TrimSpace(res.Cand.PanFlag)),
 					strings.TrimSpace(res.Cand.Ep.Name),
 					strings.TrimSpace(raw0),
 					strings.TrimSpace(feat.Quality),

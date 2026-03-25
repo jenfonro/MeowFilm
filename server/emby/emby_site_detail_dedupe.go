@@ -23,13 +23,13 @@ var embySiteDetailDedup struct {
 
 const embySiteDetailDedupTTL = 12 * time.Second
 
-func embyFetchSiteDetailPansDedup(database *db.DB, u *embyUser, spiderAPI string, videoID string) ([]catpawrunner.Pan, error) {
+func embyFetchSiteDetailPansDedup(database *db.DB, u *embyUser, spiderAPI string, siteDetail string) ([]catpawrunner.Pan, error) {
 	if database == nil {
 		return nil, nil
 	}
 	apiBase := strings.TrimSpace(embyResolveCatApiBaseForUser(database, u))
 	// apiBase is user-dependent, so include it in the key to avoid cross-user pollution.
-	key := strings.TrimSpace(apiBase) + "|" + strings.TrimSpace(spiderAPI) + "|" + strings.TrimSpace(videoID)
+	key := strings.TrimSpace(apiBase) + "|" + strings.TrimSpace(spiderAPI) + "|" + strings.TrimSpace(siteDetail)
 	if key == "||" {
 		return nil, nil
 	}
@@ -98,7 +98,7 @@ func embyFetchSiteDetailPansDedup(database *db.DB, u *embyUser, spiderAPI string
 		close(ch)
 	}()
 
-	pans, err = embyFetchSiteDetailPans(database, u, spiderAPI, videoID)
+	pans, err = embyFetchSiteDetailPans(database, u, spiderAPI, siteDetail)
 	return pans, err
 }
 

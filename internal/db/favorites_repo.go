@@ -8,26 +8,26 @@ import (
 )
 
 type FavoriteRow struct {
-	SiteKey     string
-	SiteName    string
-	SpiderAPI   string
-	VideoID     string
-	VideoTitle  string
-	VideoPoster string
-	VideoRemark string
-	UpdatedAt   int64
+	SiteKey    string
+	SiteName   string
+	SpiderAPI  string
+	SiteDetail string
+	ContentKey string
+	Poster     string
+	Remark     string
+	UpdatedAt  int64
 }
 
 type FavoriteUpsert struct {
-	UserID      int64
-	SiteKey     string
-	SiteName    string // ignored (derived); kept for API compatibility
-	SpiderAPI   string // ignored (derived); kept for API compatibility
-	VideoID     string
-	VideoTitle  string
-	VideoPoster string
-	VideoRemark string
-	UpdatedAt   int64
+	UserID     int64
+	SiteKey    string
+	SiteName   string // ignored (derived); kept for API compatibility
+	SpiderAPI  string // ignored (derived); kept for API compatibility
+	SiteDetail string
+	ContentKey string
+	Poster     string
+	Remark     string
+	UpdatedAt  int64
 }
 
 func (d *DB) ListFavorites(userID int64, limit int) ([]FavoriteRow, error) {
@@ -45,7 +45,7 @@ func (d *DB) ListFavorites(userID int64, limit int) ([]FavoriteRow, error) {
 		  sv.site_key,
 		  COALESCE(gs.name, CASE WHEN sv.site_kind='emby' THEN 'Emby' ELSE '' END) AS site_name,
 		  COALESCE(gs.api, CASE WHEN sv.site_kind='emby' THEN 'emby' ELSE '' END) AS spider_api,
-		  sv.video_id,
+		  sv.site_detail,
 		  sv.title,
 		  sv.poster,
 		  sv.remark,
@@ -64,25 +64,25 @@ func (d *DB) ListFavorites(userID int64, limit int) ([]FavoriteRow, error) {
 	out := []FavoriteRow{}
 	for rows.Next() {
 		var r FavoriteRow
-		_ = rows.Scan(&r.SiteKey, &r.SiteName, &r.SpiderAPI, &r.VideoID, &r.VideoTitle, &r.VideoPoster, &r.VideoRemark, &r.UpdatedAt)
+		_ = rows.Scan(&r.SiteKey, &r.SiteName, &r.SpiderAPI, &r.SiteDetail, &r.ContentKey, &r.Poster, &r.Remark, &r.UpdatedAt)
 		out = append(out, r)
 	}
 	return out, nil
 }
 
-func (d *DB) IsFavorited(userID int64, siteKey string, videoID string) (bool, error) {
+func (d *DB) IsFavorited(userID int64, siteKey string, siteDetail string) (bool, error) {
 	if d == nil || d.db == nil || userID <= 0 {
 		return false, nil
 	}
 	sk := strings.TrimSpace(siteKey)
-	vid := strings.TrimSpace(videoID)
+	vid := strings.TrimSpace(siteDetail)
 	if sk == "" || vid == "" {
 		return false, nil
 	}
 	siteKind, ownerID := d.resolveSiteKindAndOwner(userID, sk)
 	var siteVideoID int64
 	if err := d.db.QueryRow(`
-		SELECT id FROM site_video WHERE site_kind=? AND owner_user_id=? AND site_key=? AND video_id=? LIMIT 1
+		SELECT id FROM site_video WHERE site_kind=? AND owner_user_id=? AND site_key=? AND site_detail=? LIMIT 1
 	`, siteKind, ownerID, sk, vid).Scan(&siteVideoID); err != nil {
 		if err == sql.ErrNoRows {
 			return false, nil
@@ -100,19 +100,19 @@ func (d *DB) IsFavorited(userID int64, siteKey string, videoID string) (bool, er
 	return true, nil
 }
 
-func (d *DB) DeleteFavorite(userID int64, siteKey string, videoID string) (int64, error) {
+func (d *DB) DeleteFavorite(userID int64, siteKey string, siteDetail string) (int64, error) {
 	if d == nil || d.db == nil || userID <= 0 {
 		return 0, nil
 	}
 	sk := strings.TrimSpace(siteKey)
-	vid := strings.TrimSpace(videoID)
+	vid := strings.TrimSpace(siteDetail)
 	if sk == "" || vid == "" {
 		return 0, nil
 	}
 	siteKind, ownerID := d.resolveSiteKindAndOwner(userID, sk)
 	var siteVideoID int64
 	if err := d.db.QueryRow(`
-		SELECT id FROM site_video WHERE site_kind=? AND owner_user_id=? AND site_key=? AND video_id=? LIMIT 1
+		SELECT id FROM site_video WHERE site_kind=? AND owner_user_id=? AND site_key=? AND site_detail=? LIMIT 1
 	`, siteKind, ownerID, sk, vid).Scan(&siteVideoID); err != nil {
 		return 0, nil
 	}
@@ -132,9 +132,9 @@ func (d *DB) UpsertFavorite(row FavoriteUpsert) error {
 		return errors.New("invalid user id")
 	}
 	sk := strings.TrimSpace(row.SiteKey)
-	vid := strings.TrimSpace(row.VideoID)
-	title := strings.TrimSpace(row.VideoTitle)
-	if sk == "" || vid == "" || title == "" {
+	vid := strings.TrimSpace(row.SiteDetail)
+	contentKey := strings.TrimSpace(row.ContentKey)
+	if sk == "" || vid == "" || contentKey == "" {
 		return errors.New("invalid args")
 	}
 	now := row.UpdatedAt
@@ -149,7 +149,7 @@ func (d *DB) UpsertFavorite(row FavoriteUpsert) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	svid, err := d.upsertSiteVideo(tx, siteKind, ownerID, sk, vid, title, row.VideoPoster, row.VideoRemark, now)
+	svid, err := d.upsertSiteVideo(tx, siteKind, ownerID, sk, vid, contentKey, row.Poster, row.Remark, now)
 	if err != nil {
 		return err
 	}

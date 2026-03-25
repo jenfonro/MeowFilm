@@ -14,23 +14,22 @@ type embyPlayHistorySnapshot struct {
 	Updated int64
 }
 
-func embyQueryPlayHistoryByVideoID(database *db.DB, userID string, videoID string) (embyPlayHistorySnapshot, bool) {
+func embyQueryPlayHistoryByItemID(database *db.DB, userID string, itemID string) (embyPlayHistorySnapshot, bool) {
 	if database == nil {
 		return embyPlayHistorySnapshot{}, false
 	}
 	uidRaw := strings.TrimSpace(userID)
 	uid, _ := strconv.ParseInt(uidRaw, 10, 64)
-	vid := strings.TrimSpace(videoID)
-	if uid <= 0 || vid == "" {
+	targetItemID := strings.TrimSpace(itemID)
+	if uid <= 0 || targetItemID == "" {
 		return embyPlayHistorySnapshot{}, false
 	}
 
-	// Prefer contentKey-based lookup for TMDB series/movie ids so play history created by the web UI
-	// (siteKey != "emby") can still drive Emby "resume/next up" behaviors.
-	if parsed, ok := embyParseItemID(vid); ok && parsed != nil && parsed.Source == "tmdb" && parsed.TMDBID > 0 {
+	// Prefer TMDB-based lookup so web-created history can still drive Emby resume/next-up
+	// when contentKey is a normalized title key.
+	if parsed, ok := embyParseItemID(targetItemID); ok && parsed != nil && parsed.Source == "tmdb" && parsed.TMDBID > 0 {
 		if parsed.Kind == "tv" && parsed.SubKind == "series" {
-			key := "tmdb:tv:" + strconv.Itoa(parsed.TMDBID)
-			if row, err := database.GetPlayHistoryLatestByContentKey(uid, key); err == nil && row != nil {
+			if row, err := database.GetPlayHistoryLatestByTMDB(uid, "tv", parsed.TMDBID); err == nil && row != nil {
 				return embyPlayHistorySnapshot{
 					Pos:     row.PlaybackPositionTicks,
 					Runtime: row.PlaybackRuntimeTicks,
@@ -39,8 +38,7 @@ func embyQueryPlayHistoryByVideoID(database *db.DB, userID string, videoID strin
 			}
 		}
 		if parsed.Kind == "movie" && parsed.SubKind == "movie" {
-			key := "tmdb:movie:" + strconv.Itoa(parsed.TMDBID)
-			if row, err := database.GetPlayHistoryLatestByContentKey(uid, key); err == nil && row != nil {
+			if row, err := database.GetPlayHistoryLatestByTMDB(uid, "movie", parsed.TMDBID); err == nil && row != nil {
 				return embyPlayHistorySnapshot{
 					Pos:     row.PlaybackPositionTicks,
 					Runtime: row.PlaybackRuntimeTicks,
@@ -50,8 +48,8 @@ func embyQueryPlayHistoryByVideoID(database *db.DB, userID string, videoID strin
 		}
 	}
 
-	// Fallback for legacy Emby-only rows keyed by a synthetic site_video (siteKey="emby", videoID=itemID).
-	snap, ok := database.GetPlayHistorySnapshotBySiteVideo(uid, "emby", vid)
+	// Fallback for legacy Emby-only rows keyed by a synthetic site_video (siteKey="emby", siteDetail=itemID).
+	snap, ok := database.GetPlayHistorySnapshotBySiteVideo(uid, "emby", targetItemID)
 	if !ok {
 		return embyPlayHistorySnapshot{}, false
 	}
