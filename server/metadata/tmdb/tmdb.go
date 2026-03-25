@@ -526,9 +526,6 @@ func HandleSearch(w http.ResponseWriter, r *http.Request, database *db.DB) {
 			continue
 		}
 		poster := strings.TrimSpace(it.PosterPath)
-		if poster != "" && !strings.HasPrefix(poster, "http://") && !strings.HasPrefix(poster, "https://") {
-			poster = joinTMDBImage(resolveTMDBImageBase(database), "t/p/w500"+poster)
-		}
 		release := strings.TrimSpace(it.ReleaseDate)
 		if release == "" {
 			release = strings.TrimSpace(it.FirstAir)
@@ -672,12 +669,8 @@ func buildTMDBDetailPayloadFromCache(database *db.DB, d *db.TMDBDetailForAPI) ma
 	if d == nil {
 		return nil
 	}
-	imgBase := resolveTMDBImageBase(database)
 	if strings.TrimSpace(d.TMDBType) == "movie" {
 		pic := strings.TrimSpace(d.PosterPath)
-		if pic != "" && !strings.HasPrefix(pic, "http://") && !strings.HasPrefix(pic, "https://") {
-			pic = joinTMDBImage(imgBase, "t/p/w500"+pic)
-		}
 		return map[string]any{
 			"success":  true,
 			"id":       d.TMDBID,
@@ -692,20 +685,11 @@ func buildTMDBDetailPayloadFromCache(database *db.DB, d *db.TMDBDetailForAPI) ma
 	}
 
 	pic := strings.TrimSpace(d.PosterPath)
-	if pic != "" && !strings.HasPrefix(pic, "http://") && !strings.HasPrefix(pic, "https://") {
-		pic = joinTMDBImage(imgBase, "t/p/w500"+pic)
-	}
 	backdrop := strings.TrimSpace(d.Backdrop)
-	if backdrop != "" && !strings.HasPrefix(backdrop, "http://") && !strings.HasPrefix(backdrop, "https://") {
-		backdrop = joinTMDBImage(imgBase, "t/p/w780"+backdrop)
-	}
 	seasons := make([]map[string]any, 0, len(d.Seasons))
 	seasonCount := 0
 	for _, s := range d.Seasons {
 		p := strings.TrimSpace(s.PosterPath)
-		if p != "" && !strings.HasPrefix(p, "http://") && !strings.HasPrefix(p, "https://") {
-			p = joinTMDBImage(imgBase, "t/p/w500"+p)
-		}
 		if s.SeasonNumber > 0 {
 			seasonCount++
 		}
@@ -897,13 +881,7 @@ func fetchTMDBDetailForAPIUpstream(database *db.DB, mediaType string, tmdbID int
 		_ = database.UpsertTMDBSeasons("tv", tmdbID, language, seasonRows)
 
 		pic := strings.TrimSpace(detail.PosterPath)
-		if pic != "" && !strings.HasPrefix(pic, "http://") && !strings.HasPrefix(pic, "https://") {
-			pic = joinTMDBImage(resolveTMDBImageBase(database), "t/p/w500"+pic)
-		}
 		backdrop := strings.TrimSpace(detail.BackdropPath)
-		if backdrop != "" && !strings.HasPrefix(backdrop, "http://") && !strings.HasPrefix(backdrop, "https://") {
-			backdrop = joinTMDBImage(resolveTMDBImageBase(database), "t/p/w780"+backdrop)
-		}
 		year := parseYearFromDate(detail.FirstAir)
 		latestSeason := 0
 		latestEpisode := 0
@@ -957,9 +935,6 @@ func fetchTMDBDetailForAPIUpstream(database *db.DB, mediaType string, tmdbID int
 				seasonCount++
 			}
 			p := strings.TrimSpace(s.PosterPath)
-			if p != "" && !strings.HasPrefix(p, "http://") && !strings.HasPrefix(p, "https://") {
-				p = joinTMDBImage(resolveTMDBImageBase(database), "t/p/w500"+p)
-			}
 			seasons = append(seasons, map[string]any{
 				"season":   s.SeasonNumber,
 				"episodes": s.EpisodeCount,
@@ -1008,9 +983,6 @@ func fetchTMDBDetailForAPIUpstream(database *db.DB, mediaType string, tmdbID int
 		Runtime:      detail.Runtime,
 	})
 	pic := strings.TrimSpace(detail.PosterPath)
-	if pic != "" && !strings.HasPrefix(pic, "http://") && !strings.HasPrefix(pic, "https://") {
-		pic = joinTMDBImage(resolveTMDBImageBase(database), "t/p/w500"+pic)
-	}
 	year := parseYearFromDate(detail.ReleaseDate)
 	out := map[string]any{
 		"success":  true,
