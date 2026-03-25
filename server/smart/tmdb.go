@@ -848,7 +848,7 @@ func embyTMDBGetTVSeasonDetailAtLeast(database *db.DB, tmdbID int, season int, m
 	embySeasonDetailCache.Lock()
 	if embySeasonDetailCache.M != nil {
 		if hit, ok := embySeasonDetailCache.M[cacheKey]; ok && hit.Data != nil && hit.Expire.After(now) {
-			if minEpisodes > 0 && len(hit.Data.Episodes) < minEpisodes {
+			if len(hit.Data.Episodes) == 0 || (minEpisodes > 0 && len(hit.Data.Episodes) < minEpisodes) {
 				embySeasonDetailCache.Unlock()
 			} else {
 				d := hit.Data
