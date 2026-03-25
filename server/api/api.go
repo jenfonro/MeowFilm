@@ -565,6 +565,7 @@ func buildNormalizedPlayHistoryList(rows []db.PlayHistoryRow, limit int) []map[s
 
 		poster := strings.TrimSpace(row.Poster)
 		remark := strings.TrimSpace(row.Remark)
+		tmdbYear := strings.TrimSpace(row.TMDBYear)
 		playbackItemID := strings.TrimSpace(row.PlaybackItemID)
 		tmdbSeason := row.TMDBSeason
 		tmdbEpisode := row.TMDBEpisode
@@ -596,6 +597,7 @@ func buildNormalizedPlayHistoryList(rows []db.PlayHistoryRow, limit int) []map[s
 			"siteDetail":            siteDetail,
 			"Poster":                poster,
 			"Remark":                remark,
+			"tmdbYear":              tmdbYear,
 			"tmdbId":                tmdbID,
 			"tmdbType":              tmdbType,
 			"tmdbSeason":            tmdbSeason,
@@ -654,6 +656,7 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 		spiderAPI        string
 		poster           string
 		remark           string
+		tmdbYear         string
 		tmdbID           int
 		tmdbType         string
 		playFlag         string
@@ -671,6 +674,7 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 	spiderAPI = row.SpiderAPI
 	poster = row.Poster
 	remark = row.Remark
+	tmdbYear = row.TMDBYear
 	tmdbID = row.TMDBID
 	tmdbType = row.TMDBType
 	playFlag = row.PlayFlag
@@ -694,6 +698,7 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 		"siteDetail":            siteDetail,
 		"Poster":                poster,
 		"Remark":                remark,
+		"tmdbYear":              tmdbYear,
 		"tmdbId":                tmdbID,
 		"tmdbType":              tmdbType,
 		"tmdbSeason":            tmdbSeason,
@@ -715,7 +720,10 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		limit := parseIntQuery(r.URL.Query().Get("limit"), 20, 1, 50)
 		rows, err := database.ListPlayHistory(u.ID, limit)
 		if err != nil {
-			writeJSON(w, 200, []any{})
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"success": false,
+				"message": err.Error(),
+			})
 			return
 		}
 		writeJSON(w, 200, buildNormalizedPlayHistoryList(rows, limit))
@@ -771,6 +779,7 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		siteName := getS("siteName")
 		poster := getS("Poster")
 		remark := getS("Remark")
+		tmdbYear := getS("tmdbYear")
 		tmdbID := getI("tmdbId")
 		tmdbType := getS("tmdbType")
 		if tmdbType != "tv" && tmdbType != "movie" {
@@ -874,6 +883,7 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 			SiteDetail:            siteDetail,
 			Poster:                poster,
 			Remark:                remark,
+			TMDBYear:              tmdbYear,
 			TMDBID:                tmdbID,
 			TMDBType:              tmdbType,
 			PlayFlag:              playFlag,

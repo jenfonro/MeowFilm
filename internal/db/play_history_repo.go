@@ -158,6 +158,7 @@ type PlayHistoryRow struct {
 	SiteDetail            string
 	Poster                string
 	Remark                string
+	TMDBYear              string
 	TMDBID                int
 	TMDBType              string
 	PlayFlag              string
@@ -180,6 +181,7 @@ type PlayHistoryUpsert struct {
 	SiteDetail            string
 	Poster                string
 	Remark                string
+	TMDBYear              string
 	TMDBID                int
 	TMDBType              string
 	PlayFlag              string
@@ -296,17 +298,18 @@ func (d *DB) UpsertPlayHistory(row PlayHistoryUpsert) error {
 	_, err = tx.Exec(`
 			INSERT INTO user_play_history(
 			  user_id, content_id, site_video_id,
-			  play_flag, site_episode_index, site_episode_file,
+			  play_flag, site_episode_index, site_episode_file, tmdb_year,
 			  tmdb_season, tmdb_episode,
 			  playback_position_ticks, playback_runtime_ticks, playback_item_id,
 			  updated_at
 			)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(user_id, site_video_id) DO UPDATE SET
 			  content_id = excluded.content_id,
 			  play_flag = excluded.play_flag,
 			  site_episode_index = excluded.site_episode_index,
 			  site_episode_file = excluded.site_episode_file,
+			  tmdb_year = CASE WHEN excluded.tmdb_year <> '' THEN excluded.tmdb_year ELSE user_play_history.tmdb_year END,
 			  tmdb_season = CASE WHEN excluded.tmdb_season > 0 THEN excluded.tmdb_season ELSE user_play_history.tmdb_season END,
 			  tmdb_episode = CASE WHEN excluded.tmdb_episode > 0 THEN excluded.tmdb_episode ELSE user_play_history.tmdb_episode END,
 			  playback_position_ticks = CASE WHEN excluded.playback_position_ticks > 0 THEN excluded.playback_position_ticks ELSE user_play_history.playback_position_ticks END,
@@ -320,6 +323,7 @@ func (d *DB) UpsertPlayHistory(row PlayHistoryUpsert) error {
 		strings.TrimSpace(row.PlayFlag),
 		row.SiteEpisodeIndex,
 		strings.TrimSpace(row.SiteEpisodeFile),
+		strings.TrimSpace(row.TMDBYear),
 		row.TMDBSeason,
 		row.TMDBEpisode,
 		row.PlaybackPositionTicks,
@@ -352,6 +356,7 @@ func (d *DB) ListPlayHistory(userID int64, limit int) ([]PlayHistoryRow, error) 
 			  sv.site_detail,
 			  sv.poster,
 			  sv.remark,
+			  h.tmdb_year,
 			  COALESCE(tm.tmdb_id, 0) AS tmdb_id,
 			  COALESCE(tm.tmdb_type, '') AS tmdb_type,
 			  h.play_flag,
@@ -387,6 +392,7 @@ func (d *DB) ListPlayHistory(userID int64, limit int) ([]PlayHistoryRow, error) 
 			&r.SiteDetail,
 			&r.Poster,
 			&r.Remark,
+			&r.TMDBYear,
 			&r.TMDBID,
 			&r.TMDBType,
 			&r.PlayFlag,
@@ -425,6 +431,7 @@ func (d *DB) GetPlayHistoryLatestBySiteVideo(userID int64, siteKey string, siteD
 			  sv.site_detail,
 			  sv.poster,
 			  sv.remark,
+			  h.tmdb_year,
 			  COALESCE(tm.tmdb_id, 0) AS tmdb_id,
 			  COALESCE(tm.tmdb_type, '') AS tmdb_type,
 			  h.play_flag,
@@ -456,6 +463,7 @@ func (d *DB) GetPlayHistoryLatestBySiteVideo(userID int64, siteKey string, siteD
 		&r.SiteDetail,
 		&r.Poster,
 		&r.Remark,
+		&r.TMDBYear,
 		&r.TMDBID,
 		&r.TMDBType,
 		&r.PlayFlag,
@@ -495,6 +503,7 @@ func (d *DB) GetPlayHistoryLatestByContentKey(userID int64, contentKey string) (
 			  sv.site_detail,
 			  sv.poster,
 			  sv.remark,
+			  h.tmdb_year,
 			  COALESCE(tm.tmdb_id, 0) AS tmdb_id,
 			  COALESCE(tm.tmdb_type, '') AS tmdb_type,
 			  h.play_flag,
@@ -522,6 +531,7 @@ func (d *DB) GetPlayHistoryLatestByContentKey(userID int64, contentKey string) (
 		&r.SiteDetail,
 		&r.Poster,
 		&r.Remark,
+		&r.TMDBYear,
 		&r.TMDBID,
 		&r.TMDBType,
 		&r.PlayFlag,
@@ -547,6 +557,7 @@ func (d *DB) GetPlayHistoryLatestByContentKey(userID int64, contentKey string) (
 	r.SiteDetail = strings.TrimSpace(r.SiteDetail)
 	r.Poster = strings.TrimSpace(r.Poster)
 	r.Remark = strings.TrimSpace(r.Remark)
+	r.TMDBYear = strings.TrimSpace(r.TMDBYear)
 	r.TMDBType = strings.TrimSpace(r.TMDBType)
 	r.PlayFlag = strings.TrimSpace(r.PlayFlag)
 	r.SiteEpisodeFile = strings.TrimSpace(r.SiteEpisodeFile)
@@ -572,6 +583,7 @@ func (d *DB) GetPlayHistoryLatestByTMDB(userID int64, tmdbType string, tmdbID in
 			  sv.site_detail,
 			  sv.poster,
 			  sv.remark,
+			  h.tmdb_year,
 			  COALESCE(tm.tmdb_id, 0) AS tmdb_id,
 			  COALESCE(tm.tmdb_type, '') AS tmdb_type,
 			  h.play_flag,
@@ -599,6 +611,7 @@ func (d *DB) GetPlayHistoryLatestByTMDB(userID int64, tmdbType string, tmdbID in
 		&r.SiteDetail,
 		&r.Poster,
 		&r.Remark,
+		&r.TMDBYear,
 		&r.TMDBID,
 		&r.TMDBType,
 		&r.PlayFlag,
@@ -624,6 +637,7 @@ func (d *DB) GetPlayHistoryLatestByTMDB(userID int64, tmdbType string, tmdbID in
 	r.SiteDetail = strings.TrimSpace(r.SiteDetail)
 	r.Poster = strings.TrimSpace(r.Poster)
 	r.Remark = strings.TrimSpace(r.Remark)
+	r.TMDBYear = strings.TrimSpace(r.TMDBYear)
 	r.TMDBType = strings.TrimSpace(r.TMDBType)
 	r.PlayFlag = strings.TrimSpace(r.PlayFlag)
 	r.SiteEpisodeFile = strings.TrimSpace(r.SiteEpisodeFile)
