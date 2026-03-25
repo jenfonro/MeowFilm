@@ -624,8 +624,24 @@ func GetTVSeasonDetailForBackend(database *db.DB, tmdbID int, season int, minEpi
 		return nil, fmt.Errorf("invalid args")
 	}
 	language := tmdbDetailLanguage(database)
+	expectedEpisodes := 0
+	if detail, err := database.ReadTMDBDetailForAPI("tv", tmdbID, language); err == nil && detail != nil {
+		for _, s := range detail.Seasons {
+			if s.SeasonNumber == season {
+				expectedEpisodes = s.EpisodeCount
+				break
+			}
+		}
+	}
 	if cached, err := database.ReadTMDBSeasonDetailForAPI(tmdbID, season, language); err == nil && cached != nil {
-		if minEpisodes <= 0 || len(cached.Episodes) >= minEpisodes {
+		cacheComplete := true
+		if expectedEpisodes > 0 && len(cached.Episodes) == 0 {
+			cacheComplete = false
+		}
+		if minEpisodes > 0 && len(cached.Episodes) < minEpisodes {
+			cacheComplete = false
+		}
+		if cacheComplete {
 			_ = database.TouchTMDBMediaAccess("tv", tmdbID, time.Now().Unix())
 			if detail, err := database.ReadTMDBDetailForAPI("tv", tmdbID, language); err == nil && detail != nil && shouldRefreshCachedTMDBTVDetail(database, detail, language, time.Now()) {
 				if detail.LatestSeason <= 0 || detail.LatestSeason == season {
