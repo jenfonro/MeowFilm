@@ -38,15 +38,7 @@ func embyBuildHistorySectionItems(database *db.DB, u *embyUser, startIndex int, 
 		return []map[string]any{}
 	}
 
-	// Use full play history rows so we can normalize/merge entries (TMDB + site title dedupe).
-	fetchLimit := limit * 8
-	if fetchLimit < 64 {
-		fetchLimit = 64
-	}
-	if fetchLimit > 400 {
-		fetchLimit = 400
-	}
-	hist, err := database.ListPlayHistory(uid, fetchLimit)
+	hist, err := database.ListPlayHistory(uid, limit)
 	if err != nil || len(hist) == 0 {
 		return []map[string]any{}
 	}
@@ -54,29 +46,12 @@ func embyBuildHistorySectionItems(database *db.DB, u *embyUser, startIndex int, 
 	type histRow struct {
 		groupID string
 	}
-	seen := map[string]struct{}{}
 	rows := make([]histRow, 0, len(hist))
 	for _, h := range hist {
 		itemID := strings.TrimSpace(h.PlaybackItemID)
 		if itemID == "" {
 			continue
 		}
-		// Dedupe key priority:
-		// 1) TMDB id (collapses per-episode/per-item rows into one series/movie card)
-		// 2) normalized title (keyword-based collapse when no TMDB id)
-		// 3) group id / item id fallback
-		dedupeKey := ""
-		typ := strings.TrimSpace(h.TMDBType)
-		if h.TMDBID > 0 && (typ == "tv" || typ == "movie") {
-			dedupeKey = "tmdb:" + typ + ":" + fmt.Sprintf("%d", h.TMDBID)
-		} else {
-			title := strings.TrimSpace(h.VideoTitle)
-			titleKey := strings.ToLower(strings.TrimSpace(embyNormalizeAggKey(title)))
-			if titleKey != "" {
-				dedupeKey = "kw:" + titleKey
-			}
-		}
-
 		groupID := ""
 		if strings.TrimSpace(h.TMDBType) == "tv" && h.TMDBID > 0 {
 			groupID = embyBuildSeriesID(h.TMDBID)
@@ -84,8 +59,8 @@ func embyBuildHistorySectionItems(database *db.DB, u *embyUser, startIndex int, 
 			groupID = embyBuildMovieID(h.TMDBID)
 		} else if siteVideoID, _, _, ok := embyParseSiteEpisodeIDV2(itemID); ok && siteVideoID > 0 {
 			groupID = embyBuildSiteSeriesIDV2(siteVideoID)
-		} else if strings.TrimSpace(h.VideoID) != "" {
-			groupID = strings.TrimSpace(h.VideoID)
+		} else if strings.TrimSpace(h.SiteDetail) != "" {
+			groupID = strings.TrimSpace(h.SiteDetail)
 		} else {
 			groupID = itemID
 		}
@@ -93,15 +68,6 @@ func embyBuildHistorySectionItems(database *db.DB, u *embyUser, startIndex int, 
 		if groupID == "" {
 			continue
 		}
-
-		if strings.TrimSpace(dedupeKey) == "" {
-			dedupeKey = "gid:" + groupID
-		}
-		// Dedupe: ensure history contains only one card per keyword/TMDB id.
-		if _, ok := seen[dedupeKey]; ok {
-			continue
-		}
-		seen[dedupeKey] = struct{}{}
 
 		rows = append(rows, histRow{groupID: groupID})
 		if len(rows) >= limit {

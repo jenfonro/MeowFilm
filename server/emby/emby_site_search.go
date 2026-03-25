@@ -12,13 +12,13 @@ import (
 )
 
 type embySiteSearchHit struct {
-	SiteKey   string
-	SiteName  string
-	SpiderAPI string
-	VideoID   string
-	Name      string
-	Pic       string
-	Remark    string
+	SiteKey    string
+	SiteName   string
+	SpiderAPI  string
+	SiteDetail string
+	Name       string
+	Pic        string
+	Remark     string
 
 	Score     int
 	TitleLen  int
@@ -167,17 +167,17 @@ func embySearchSitesHits(database *db.DB, u *embyUser, query string, maxWait tim
 			seq++
 			so := siteOrder[s.Key]
 			out = append(out, embySiteSearchHit{
-				SiteKey:   s.Key,
-				SiteName:  s.Name,
-				SpiderAPI: s.API,
-				VideoID:   vid,
-				Name:      name,
-				Pic:       strings.TrimSpace(it.Pic),
-				Remark:    strings.TrimSpace(it.Remark),
-				Score:     score,
-				TitleLen:  embyTitleLenForSort(name),
-				SiteOrder: so,
-				Seq:       seq,
+				SiteKey:    s.Key,
+				SiteName:   s.Name,
+				SpiderAPI:  s.API,
+				SiteDetail: vid,
+				Name:       name,
+				Pic:        strings.TrimSpace(it.Pic),
+				Remark:     strings.TrimSpace(it.Remark),
+				Score:      score,
+				TitleLen:   embyTitleLenForSort(name),
+				SiteOrder:  so,
+				Seq:        seq,
 			})
 		}
 	}
@@ -214,8 +214,8 @@ done:
 		if a.SiteKey != b.SiteKey {
 			return a.SiteKey < b.SiteKey
 		}
-		if a.VideoID != b.VideoID {
-			return a.VideoID < b.VideoID
+		if a.SiteDetail != b.SiteDetail {
+			return a.SiteDetail < b.SiteDetail
 		}
 		return a.Seq < b.Seq
 	})

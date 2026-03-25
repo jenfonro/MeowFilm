@@ -151,20 +151,20 @@ func ExtractMockPasscodeFromEpisodeURL(episodeURL string) string {
 	return smartExtractMockPasscodeFromEpisodeURL(episodeURL)
 }
 
-func ExtractTianyiMockMetaFromEpisodeURL(panLabel string, episodeURL string) (shareCode string, accessCode string) {
-	return smartExtractTianyiMockMetaFromEpisodeURL(panLabel, episodeURL)
+func ExtractTianyiMockMetaFromEpisodeURL(panFlag string, episodeURL string) (shareCode string, accessCode string) {
+	return smartExtractTianyiMockMetaFromEpisodeURL(panFlag, episodeURL)
 }
 
-func BuildSourceKey(siteKey string, spiderAPI string, videoID string) string {
-	return smartBuildSourceKey(siteKey, spiderAPI, videoID)
+func BuildSourceKey(siteKey string, spiderAPI string, siteDetail string) string {
+	return smartBuildSourceKey(siteKey, spiderAPI, siteDetail)
 }
 
-func ExtractSeasonHintFromSource(siteName string, videoRemark string) int {
-	return smartExtractSeasonHintFromSource(siteName, videoRemark)
+func ExtractSeasonHintFromSource(siteName string, remark string) int {
+	return smartExtractSeasonHintFromSource(siteName, remark)
 }
 
-func HasExplicitSeasonMarkerInSource(siteName string, videoRemark string) bool {
-	return smartHasExplicitSeasonMarkerInSource(siteName, videoRemark)
+func HasExplicitSeasonMarkerInSource(siteName string, remark string) bool {
+	return smartHasExplicitSeasonMarkerInSource(siteName, remark)
 }
 
 func IsPanMockEnabled(detailRaw map[string]any) bool {
@@ -408,8 +408,8 @@ func PlayFlagProviderID(flagLabel string) string {
 	return smartPlayFlagProviderID(flagLabel)
 }
 
-func PanMockProviderID(database *db.DB, panLabel string) string {
-	return smartPanMockProviderID(database, panLabel)
+func PanMockProviderID(database *db.DB, panFlag string) string {
+	return smartPanMockProviderID(database, panFlag)
 }
 
 func ContainsInt(list []int, v int) bool {

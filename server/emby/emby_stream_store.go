@@ -13,10 +13,10 @@ type embyStreamSession struct {
 }
 
 type embyStreamMeta struct {
-	SiteKey  string
-	VideoID  string
-	PanLabel string
-	Provider string
+	SiteKey    string
+	SiteDetail string
+	PanFlag    string
+	Provider   string
 }
 
 type embyStreamStore struct {
@@ -84,7 +84,7 @@ func (s *embyStreamStore) GetMeta(id string) (embyStreamMeta, bool) {
 	if !ok || strings.TrimSpace(sess.URL) == "" || sess.Expire.Before(now) {
 		return embyStreamMeta{}, false
 	}
-	if strings.TrimSpace(sess.Meta.SiteKey) == "" || strings.TrimSpace(sess.Meta.VideoID) == "" {
+	if strings.TrimSpace(sess.Meta.SiteKey) == "" || strings.TrimSpace(sess.Meta.SiteDetail) == "" {
 		return embyStreamMeta{}, false
 	}
 	return sess.Meta, true

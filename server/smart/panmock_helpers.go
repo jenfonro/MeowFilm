@@ -117,8 +117,8 @@ func smartBuildPanMockGroupAttempts(
 	normalAllowed = []smartCandidate{}
 	normalFallback = []smartCandidate{}
 	for _, c := range candidatesForNo {
-		pid := smartPanMockProviderID(database, c.PanLabel)
-		allowed := isAllowedLabel(c.PanLabel)
+		pid := smartPanMockProviderID(database, c.PanFlag)
+		allowed := isAllowedLabel(c.PanFlag)
 		if pid == "" {
 			if allowed {
 				normalAllowed = append(normalAllowed, c)
@@ -131,7 +131,7 @@ func smartBuildPanMockGroupAttempts(
 		// always allow them, and let whichever provider resolves fastest win.
 		allowed = true
 
-		shareKey := strings.TrimSpace(c.PanLabel)
+		shareKey := strings.TrimSpace(c.PanFlag)
 		metaA := ""
 		metaB := ""
 		if pid == "189" {
@@ -201,7 +201,7 @@ func smartResolvePanMockCandidateFromVod(
 		}
 	}
 	sourceHasBeyondFirstSeason := smartSourceHasEpisodeBeyondFirstSeason(
-		[]catpawrunner.Pan{{Label: strings.TrimSpace(base.PanLabel), Episodes: eps}},
+		[]catpawrunner.Pan{{Label: strings.TrimSpace(base.PanFlag), Episodes: eps}},
 		rawCleanRules,
 		rawEpisodeRules,
 		primaryFirstSeasonCount,
@@ -340,7 +340,7 @@ func smartTryPanMockGroup(
 				return &smartPickResult{Cand: base, PlayURL: strings.TrimSpace(u), Headers: header}
 			}
 		}
-		vod, _, err := netdisk.QuarkList(database, strings.TrimSpace(base.PanLabel), strings.TrimSpace(at.MetaA))
+		vod, _, err := netdisk.QuarkList(database, strings.TrimSpace(base.PanFlag), strings.TrimSpace(at.MetaA))
 		if err != nil {
 			return nil
 		}
@@ -366,7 +366,7 @@ func smartTryPanMockGroup(
 				return &smartPickResult{Cand: base, PlayURL: strings.TrimSpace(u), Headers: header}
 			}
 		}
-		vod, _, err := netdisk.UCList(database, strings.TrimSpace(base.PanLabel), strings.TrimSpace(at.MetaA))
+		vod, _, err := netdisk.UCList(database, strings.TrimSpace(base.PanFlag), strings.TrimSpace(at.MetaA))
 		if err != nil {
 			return nil
 		}
@@ -384,7 +384,7 @@ func smartTryPanMockGroup(
 		return &smartPickResult{Cand: *picked, PlayURL: u, Headers: header}
 	case "139":
 		{
-			downloadURL, playURL, err := netdisk.Yun139Play(database, strings.TrimSpace(base.PanLabel), strings.TrimSpace(base.Ep.URL))
+			downloadURL, playURL, err := netdisk.Yun139Play(database, strings.TrimSpace(base.PanFlag), strings.TrimSpace(base.Ep.URL))
 			u := strings.TrimSpace(downloadURL)
 			if u == "" {
 				u = strings.TrimSpace(playURL)
@@ -393,7 +393,7 @@ func smartTryPanMockGroup(
 				return &smartPickResult{Cand: base, PlayURL: u, Headers: map[string]string{}}
 			}
 		}
-		vod, _, err := netdisk.Yun139List(database, strings.TrimSpace(base.PanLabel), "")
+		vod, _, err := netdisk.Yun139List(database, strings.TrimSpace(base.PanFlag), "")
 		if err != nil {
 			return nil
 		}
@@ -401,7 +401,7 @@ func smartTryPanMockGroup(
 		if picked == nil || strings.TrimSpace(picked.Ep.URL) == "" {
 			return nil
 		}
-		downloadURL, playURL, err := netdisk.Yun139Play(database, strings.TrimSpace(base.PanLabel), picked.Ep.URL)
+		downloadURL, playURL, err := netdisk.Yun139Play(database, strings.TrimSpace(base.PanFlag), picked.Ep.URL)
 		u := strings.TrimSpace(downloadURL)
 		if u == "" {
 			u = strings.TrimSpace(playURL)
@@ -412,7 +412,7 @@ func smartTryPanMockGroup(
 		return &smartPickResult{Cand: *picked, PlayURL: u, Headers: map[string]string{}}
 	case "baidu":
 		if strings.TrimSpace(at.MetaA) == "" {
-			u, header, err := netdisk.BaiduPlay(database, strings.TrimSpace(base.PanLabel), strings.TrimSpace(base.Ep.URL), "/MeowFilm")
+			u, header, err := netdisk.BaiduPlay(database, strings.TrimSpace(base.PanFlag), strings.TrimSpace(base.Ep.URL), "/MeowFilm")
 			if err == nil && strings.TrimSpace(u) != "" {
 				if header == nil {
 					header = map[string]string{}
@@ -420,7 +420,7 @@ func smartTryPanMockGroup(
 				return &smartPickResult{Cand: base, PlayURL: strings.TrimSpace(u), Headers: header}
 			}
 		}
-		vod, _, err := netdisk.BaiduList(database, strings.TrimSpace(base.PanLabel), strings.TrimSpace(at.MetaA))
+		vod, _, err := netdisk.BaiduList(database, strings.TrimSpace(base.PanFlag), strings.TrimSpace(at.MetaA))
 		if err != nil {
 			return nil
 		}
@@ -428,7 +428,7 @@ func smartTryPanMockGroup(
 		if picked == nil || strings.TrimSpace(picked.Ep.URL) == "" {
 			return nil
 		}
-		u, header, err := netdisk.BaiduPlay(database, strings.TrimSpace(base.PanLabel), picked.Ep.URL, "/MeowFilm")
+		u, header, err := netdisk.BaiduPlay(database, strings.TrimSpace(base.PanFlag), picked.Ep.URL, "/MeowFilm")
 		if err != nil || strings.TrimSpace(u) == "" {
 			return nil
 		}

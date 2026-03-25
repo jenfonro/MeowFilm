@@ -396,7 +396,7 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			obj["UserData"] = map[string]any{"Played": false}
 		}
 		if parsed, ok := embyParseItemID(itemID); ok && parsed != nil && parsed.Kind == "tv" && parsed.SubKind == "series" {
-			if snap, ok := embyQueryPlayHistoryByVideoID(database, u.ID, itemID); ok {
+			if snap, ok := embyQueryPlayHistoryByItemID(database, u.ID, itemID); ok {
 				embyApplyPlayHistoryToItemUserData(u.ID, itemID, obj, snap)
 			}
 		} else if hit := embyQueryPlayHistoryByItemIDs(database, u.ID, []string{itemID}); len(hit) > 0 {
@@ -927,7 +927,7 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 				// Persist poster/remark for short site ids (images resolved via DB).
 				siteVideoID := int64(0)
 				if database != nil {
-					id, _ := database.UpsertSiteVideo(strings.TrimSpace(h.SiteKey), strings.TrimSpace(h.VideoID), strings.TrimSpace(h.Name), strings.TrimSpace(h.Pic), strings.TrimSpace(h.Remark), time.Now().Unix())
+					id, _ := database.UpsertSiteVideo(strings.TrimSpace(h.SiteKey), strings.TrimSpace(h.SiteDetail), strings.TrimSpace(h.Name), strings.TrimSpace(h.Pic), strings.TrimSpace(h.Remark), time.Now().Unix())
 					siteVideoID = id
 				}
 

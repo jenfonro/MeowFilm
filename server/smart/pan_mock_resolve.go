@@ -81,8 +81,8 @@ func embyExtractMockPasscodeFromEpisodeURL(episodeURL string) string {
 	return smartExtractMockPasscodeFromEpisodeURL(episodeURL)
 }
 
-func embyExtractTianyiMockMeta(panLabel string, episodeURL string) (shareCode string, accessCode string) {
-	return smartExtractTianyiMockMetaFromEpisodeURL(panLabel, episodeURL)
+func embyExtractTianyiMockMeta(panFlag string, episodeURL string) (shareCode string, accessCode string) {
+	return smartExtractTianyiMockMetaFromEpisodeURL(panFlag, episodeURL)
 }
 
 func smartResolvePanMockDetailPans(

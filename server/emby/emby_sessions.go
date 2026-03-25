@@ -16,6 +16,30 @@ import (
 	"github.com/jenfonro/meowfilm/server/smart"
 )
 
+func embyBuildPlayHistoryContentKey(database *db.DB, contentTitle string, tmdbType string, tmdbID int) string {
+	if database == nil {
+		return ""
+	}
+	typ := strings.TrimSpace(strings.ToLower(tmdbType))
+	if tmdbID > 0 {
+		switch typ {
+		case "tv":
+			if d, err := embyTMDBGetTVDetail(database, tmdbID); err == nil && d != nil {
+				if key := strings.TrimSpace(database.ComputePlayHistoryKeywordKey(strings.TrimSpace(d.Title))); key != "" {
+					return key
+				}
+			}
+		case "movie":
+			if d, err := embyTMDBGetMovieDetail(database, tmdbID); err == nil && d != nil {
+				if key := strings.TrimSpace(database.ComputePlayHistoryKeywordKey(strings.TrimSpace(d.Title))); key != "" {
+					return key
+				}
+			}
+		}
+	}
+	return strings.TrimSpace(database.ComputePlayHistoryKeywordKey(strings.TrimSpace(contentTitle)))
+}
+
 func handleEmbySessions(w http.ResponseWriter, r *http.Request, database *db.DB, serverID string, parts []string) {
 	u, ok := embyRequireUser(w, r, database)
 	if !ok {
@@ -206,49 +230,49 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 		}
 	}
 
-	videoID := strings.TrimSpace(itemID)
-	episodeIndex := 0
-	episodeName := ""
-	videoTitle := ""
-	videoPoster := ""
-	videoRemark := ""
+	siteDetail := strings.TrimSpace(itemID)
+	siteEpisodeIndex := 0
+	siteEpisodeFile := ""
+	contentTitle := ""
+	poster := ""
+	remark := ""
 
 	// Prefer data already present in session payload.
 	if dto.NowPlaying != nil {
 		if tmdbType == "tv" && strings.TrimSpace(dto.NowPlaying.SeriesName) != "" {
-			videoTitle = strings.TrimSpace(dto.NowPlaying.SeriesName)
+			contentTitle = strings.TrimSpace(dto.NowPlaying.SeriesName)
 		}
-		if videoTitle == "" && strings.TrimSpace(dto.NowPlaying.Name) != "" {
-			videoTitle = strings.TrimSpace(dto.NowPlaying.Name)
+		if contentTitle == "" && strings.TrimSpace(dto.NowPlaying.Name) != "" {
+			contentTitle = strings.TrimSpace(dto.NowPlaying.Name)
 		}
 		if dto.NowPlaying.ProductionYear > 0 {
-			videoRemark = strconv.Itoa(dto.NowPlaying.ProductionYear)
+			remark = strconv.Itoa(dto.NowPlaying.ProductionYear)
 		}
 	}
 
 	if !isSiteEpisode && parsed != nil && parsed.Kind == "tv" && parsed.SubKind == "episode" {
-		videoID = embyBuildSeriesID(parsed.TMDBID)
-		episodeIndex = parsed.Episode
+		siteDetail = embyBuildSeriesID(parsed.TMDBID)
+		siteEpisodeIndex = parsed.Episode
 		if dto.NowPlaying != nil && strings.TrimSpace(dto.NowPlaying.Name) != "" {
-			episodeName = strings.TrimSpace(dto.NowPlaying.Name)
+			siteEpisodeFile = strings.TrimSpace(dto.NowPlaying.Name)
 		}
-		if episodeName == "" && parsed.Episode > 0 {
-			episodeName = fmt.Sprintf("S%02dE%02d", parsed.Season, parsed.Episode)
+		if siteEpisodeFile == "" && parsed.Episode > 0 {
+			siteEpisodeFile = fmt.Sprintf("S%02dE%02d", parsed.Season, parsed.Episode)
 		}
 	}
 
 	// Fill missing title/poster from TMDB (cached).
 	metaKey := tmdbType + ":" + strconv.Itoa(tmdbID)
-	if !isSiteEpisode && (videoTitle == "" || videoPoster == "" || videoRemark == "") && tmdbID > 0 && tmdbType != "" {
+	if !isSiteEpisode && (contentTitle == "" || poster == "" || remark == "") && tmdbID > 0 && tmdbType != "" {
 		if hit, ok := embyCachedBasicMeta(metaKey); ok {
-			if videoTitle == "" {
-				videoTitle = hit.Title
+			if contentTitle == "" {
+				contentTitle = hit.Title
 			}
-			if videoPoster == "" {
-				videoPoster = hit.Poster
+			if poster == "" {
+				poster = hit.Poster
 			}
-			if videoRemark == "" && hit.Year > 0 {
-				videoRemark = strconv.Itoa(hit.Year)
+			if remark == "" && hit.Year > 0 {
+				remark = strconv.Itoa(hit.Year)
 			}
 		} else {
 			title := ""
@@ -275,52 +299,50 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 				Poster: poster,
 				Year:   year,
 			})
-			if videoTitle == "" {
-				videoTitle = title
+			if contentTitle == "" {
+				contentTitle = title
 			}
-			if videoPoster == "" {
-				videoPoster = poster
+			if poster == "" {
+				poster = poster
 			}
-			if videoRemark == "" && year > 0 {
-				videoRemark = strconv.Itoa(year)
+			if remark == "" && year > 0 {
+				remark = strconv.Itoa(year)
 			}
 		}
 	}
 
-	if videoTitle == "" {
-		videoTitle = itemID
+	if contentTitle == "" {
+		contentTitle = itemID
 	}
-	if !isSiteEpisode && videoPoster != "" {
-		videoPoster = embyTMDBImageURL(database, videoPoster, "w500")
+	if !isSiteEpisode && poster != "" {
+		poster = embyTMDBImageURL(database, poster, "w500")
 	}
 
 	contentKey := ""
 	siteKey := "emby"
 	playFlag := "emby"
-	panLabel := ""
 	if isSiteEpisode {
 		sv, err := database.GetSiteVideoByID(siteVideoID)
 		if err != nil || sv == nil {
 			return nil
 		}
 		siteKey = strings.TrimSpace(sv.SiteKey)
-		videoID = strings.TrimSpace(sv.VideoID)
-		videoTitle = strings.TrimSpace(sv.Title)
-		videoRemark = strings.TrimSpace(sv.Remark)
-		videoPoster = embyNormalizeRedirectImageURL(strings.TrimSpace(sv.Poster))
-		episodeIndex = siteEp
+		siteDetail = strings.TrimSpace(sv.SiteDetail)
+		contentTitle = strings.TrimSpace(sv.Title)
+		remark = strings.TrimSpace(sv.Remark)
+		poster = embyNormalizeRedirectImageURL(strings.TrimSpace(sv.Poster))
+		siteEpisodeIndex = siteEp
 		if dto.NowPlaying != nil && strings.TrimSpace(dto.NowPlaying.Name) != "" {
-			episodeName = strings.TrimSpace(dto.NowPlaying.Name)
+			siteEpisodeFile = strings.TrimSpace(dto.NowPlaying.Name)
 		}
-		if episodeName == "" {
-			episodeName = fmt.Sprintf("P%dE%02d", sitePan, siteEp)
+		if siteEpisodeFile == "" {
+			siteEpisodeFile = fmt.Sprintf("P%dE%02d", sitePan, siteEp)
 		}
 		playFlag = "emby_site"
-		// Canonicalize site playback as keyword key so cross-site plays collapse into one history entry.
-		// If we later discover TMDB id for the same title, DB layer will promote keyword-key rows to tmdb:*.
-		contentKey = strings.ToLower(strings.TrimSpace(database.ComputePlayHistoryKeywordKey(videoTitle)))
+		// Canonicalize site playback as a stable title key so cross-site plays collapse into one history entry.
+		contentKey = embyBuildPlayHistoryContentKey(database, contentTitle, "", 0)
 		if contentKey == "" {
-			contentKey = strings.ToLower(strings.TrimSpace(fmt.Sprintf("site:%s:%s", siteKey, videoID)))
+			contentKey = strings.ToLower(strings.TrimSpace(fmt.Sprintf("site:%s:%s", siteKey, siteDetail)))
 		}
 
 		// Normalize: try to map site playback to TMDB play history using magic episode rules.
@@ -336,11 +358,11 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 					cands = append(cands, strings.TrimSpace(dto.NowPlaying.SeriesName))
 				}
 			}
-			if strings.TrimSpace(episodeName) != "" {
-				cands = append(cands, strings.TrimSpace(episodeName))
+			if strings.TrimSpace(siteEpisodeFile) != "" {
+				cands = append(cands, strings.TrimSpace(siteEpisodeFile))
 			}
-			if strings.TrimSpace(videoTitle) != "" {
-				cands = append(cands, strings.TrimSpace(videoTitle))
+			if strings.TrimSpace(contentTitle) != "" {
+				cands = append(cands, strings.TrimSpace(contentTitle))
 			}
 			if siteEp > 0 {
 				cands = append(cands, fmt.Sprintf("第%d集", siteEp))
@@ -350,10 +372,10 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 			cleanRules, _ := database.ListMagicEpisodeCleanRegexRules()
 			episodeRules, _ := database.ListMagicEpisodeRules()
 			se, err := magic.MagicEpisodeExtractFromCandidates(cands, cleanRules, episodeRules)
-			if err == nil && se.Episode > 0 && strings.TrimSpace(videoTitle) != "" {
+			if err == nil && se.Episode > 0 && strings.TrimSpace(contentTitle) != "" {
 				bestID := 0
 				bestScore := 0
-				results, err := embyTMDBSearchMulti(database, strings.TrimSpace(videoTitle))
+				results, err := embyTMDBSearchMulti(database, strings.TrimSpace(contentTitle))
 				if err == nil && len(results) > 0 {
 					for _, it := range results {
 						if strings.ToLower(strings.TrimSpace(it.MediaType)) != "tv" {
@@ -363,7 +385,7 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 						if t == "" {
 							continue
 						}
-						score := embyComputeMatchScore(strings.TrimSpace(videoTitle), t)
+						score := embyComputeMatchScore(strings.TrimSpace(contentTitle), t)
 						if score > bestScore {
 							bestScore = score
 							bestID = it.ID
@@ -388,7 +410,7 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 						if ok {
 							resolvedSeason = match.Season
 							resolvedEpisode = match.Episode
-						} else if over, overOK := doubanProbeSeasons(database, bestID, strings.TrimSpace(videoTitle), se.Episode); overOK && len(over) > 0 {
+						} else if over, overOK := doubanProbeSeasons(database, bestID, strings.TrimSpace(contentTitle), se.Episode); overOK && len(over) > 0 {
 							tmdbMulti := smart.PositiveSeasonCount(tmdbSeasons)
 							doubanMulti := smart.PositiveSeasonCount(over)
 							switch {
@@ -454,47 +476,45 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 						}
 					}
 					if tmdbTitle == "" {
-						tmdbTitle = strings.TrimSpace(videoTitle)
+						tmdbTitle = strings.TrimSpace(contentTitle)
 					}
 					if tmdbPoster != "" {
 						tmdbPoster = embyTMDBImageURL(database, tmdbPoster, "w500")
 					}
 
-					// Promote the canonical record to TMDB id to avoid duplicated keyword+TMDB rows.
+					// Promote the canonical record to a TMDB-backed title key to avoid duplicated
+					// keyword/TMDB rows while keeping contentKey stable and human-readable.
 					tmdbID = bestID
 					tmdbType = "tv"
-					contentKey = strings.ToLower(strings.TrimSpace(fmt.Sprintf("tmdb:tv:%d", bestID)))
-					episodeIndex = ep
-					episodeName = fmt.Sprintf("S%02dE%03d", resolvedSeason, ep)
+					contentKey = embyBuildPlayHistoryContentKey(database, tmdbTitle, "tv", bestID)
+					siteEpisodeIndex = ep
+					siteEpisodeFile = fmt.Sprintf("S%02dE%03d", resolvedSeason, ep)
 					itemID = tmdbEpisodeID
 					if tmdbTitle != "" {
-						videoTitle = tmdbTitle
+						contentTitle = tmdbTitle
 					}
 					if tmdbPoster != "" {
-						videoPoster = tmdbPoster
+						poster = tmdbPoster
 					}
 				}
 			skipTMDBPromote:
 			}
 		}
 	} else {
-		contentKey = strings.TrimSpace(strings.ToLower(fmt.Sprintf("tmdb:%s:%d", tmdbType, tmdbID)))
-		if contentKey == "tmdb::0" || contentKey == "tmdb:0:0" || tmdbID <= 0 || tmdbType == "" {
-			contentKey = "emby::" + strings.ToLower(videoID)
+		contentKey = embyBuildPlayHistoryContentKey(database, contentTitle, tmdbType, tmdbID)
+		if contentKey == "" || tmdbID <= 0 || tmdbType == "" {
+			contentKey = "emby::" + strings.ToLower(siteDetail)
 		}
 	}
 
 	// Prefer the site source picked during the actual stream resolution window (report-time only).
 	// This lets web and emby share the same canonical history row for quick-start.
-	if !isSiteEpisode && strings.HasPrefix(strings.ToLower(contentKey), "tmdb:") {
+	if !isSiteEpisode && tmdbID > 0 && (tmdbType == "tv" || tmdbType == "movie") {
 		if msid := embyComputeMediaSourceIDForItem(u.ID, deviceID, itemID); msid != "" {
 			if meta, ok := embyStreams.GetMeta(msid); ok {
-				if sk := strings.TrimSpace(meta.SiteKey); sk != "" && !strings.EqualFold(sk, "emby") && strings.TrimSpace(meta.VideoID) != "" {
+				if sk := strings.TrimSpace(meta.SiteKey); sk != "" && !strings.EqualFold(sk, "emby") && strings.TrimSpace(meta.SiteDetail) != "" {
 					siteKey = strings.TrimSpace(meta.SiteKey)
-					videoID = strings.TrimSpace(meta.VideoID)
-					if strings.TrimSpace(panLabel) == "" {
-						panLabel = strings.TrimSpace(meta.PanLabel)
-					}
+					siteDetail = strings.TrimSpace(meta.SiteDetail)
 					if playFlag == "emby" {
 						playFlag = "emby_smart"
 					}
@@ -506,22 +526,16 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 	// If this is a TMDB item played from Emby, try to bind the canonical history row to a real site source
 	// (last picked smart-play site) so both Emby and Web can "quick start" from the same record.
 	// This is best-effort: if no site source exists yet, we fall back to siteKey="emby".
-	if !isSiteEpisode && strings.HasPrefix(strings.ToLower(contentKey), "tmdb:") && strings.EqualFold(strings.TrimSpace(siteKey), "emby") {
-		if prev, err := database.GetPlayHistoryLatestByContentKey(userID, contentKey); err == nil && prev != nil {
+	if !isSiteEpisode && tmdbID > 0 && (tmdbType == "tv" || tmdbType == "movie") && strings.EqualFold(strings.TrimSpace(siteKey), "emby") {
+		if prev, err := database.GetPlayHistoryLatestByTMDB(userID, tmdbType, tmdbID); err == nil && prev != nil {
 			if sk := strings.TrimSpace(prev.SiteKey); sk != "" && !strings.EqualFold(sk, "emby") &&
-				strings.TrimSpace(prev.SpiderAPI) != "" && strings.TrimSpace(prev.VideoID) != "" {
+				strings.TrimSpace(prev.SpiderAPI) != "" && strings.TrimSpace(prev.SiteDetail) != "" {
 				siteKey = strings.TrimSpace(prev.SiteKey)
-				videoID = strings.TrimSpace(prev.VideoID)
-				if strings.TrimSpace(videoTitle) == "" {
-					videoTitle = strings.TrimSpace(prev.VideoTitle)
+				siteDetail = strings.TrimSpace(prev.SiteDetail)
+				if strings.TrimSpace(poster) == "" {
+					poster = strings.TrimSpace(prev.Poster)
 				}
-				if strings.TrimSpace(videoPoster) == "" {
-					videoPoster = strings.TrimSpace(prev.VideoPoster)
-				}
-				videoRemark = strings.TrimSpace(prev.VideoRemark)
-				if strings.TrimSpace(panLabel) == "" {
-					panLabel = strings.TrimSpace(prev.PanLabel)
-				}
+				remark = strings.TrimSpace(prev.Remark)
 			}
 		}
 	}
@@ -543,16 +557,14 @@ func embyRecordPlayHistoryFromSession(r *http.Request, database *db.DB, u *embyU
 		SiteKey:               siteKey,
 		SiteName:              "",
 		SpiderAPI:             "",
-		VideoID:               videoID,
-		VideoTitle:            videoTitle,
-		VideoPoster:           videoPoster,
-		VideoRemark:           videoRemark,
+		SiteDetail:            siteDetail,
+		Poster:                poster,
+		Remark:                remark,
 		TMDBID:                tmdbID,
 		TMDBType:              tmdbType,
-		PanLabel:              panLabel,
 		PlayFlag:              playFlag,
-		EpisodeIndex:          episodeIndex,
-		EpisodeName:           episodeName,
+		SiteEpisodeIndex:      siteEpisodeIndex,
+		SiteEpisodeFile:       siteEpisodeFile,
 		TMDBSeason:            tmdbSeason,
 		TMDBEpisode:           tmdbEpisode,
 		UpdatedAt:             now,

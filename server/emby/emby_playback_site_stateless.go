@@ -19,7 +19,7 @@ func embyResolveStatelessSiteEpisodePlaybackPayload(database *db.DB, u *embyUser
 	if e != nil {
 		return nil, "", e
 	}
-	if sv == nil || strings.TrimSpace(sv.SiteKey) == "" || strings.TrimSpace(sv.VideoID) == "" {
+	if sv == nil || strings.TrimSpace(sv.SiteKey) == "" || strings.TrimSpace(sv.SiteDetail) == "" {
 		return nil, "", errorString("invalid site video")
 	}
 
@@ -28,7 +28,7 @@ func embyResolveStatelessSiteEpisodePlaybackPayload(database *db.DB, u *embyUser
 		return nil, "", errorString("unknown spider api")
 	}
 
-	pans, e := embyFetchSiteDetailPansDedup(database, u, strings.TrimSpace(spiderAPI), strings.TrimSpace(sv.VideoID))
+	pans, e := embyFetchSiteDetailPansDedup(database, u, strings.TrimSpace(spiderAPI), strings.TrimSpace(sv.SiteDetail))
 	if e != nil {
 		return nil, "", e
 	}

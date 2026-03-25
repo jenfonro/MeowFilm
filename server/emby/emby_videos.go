@@ -169,21 +169,21 @@ func handleEmbyVideoStream(w http.ResponseWriter, r *http.Request, database *db.
 	meta := embyStreamMeta{}
 	if pickedMeta != nil {
 		meta = embyStreamMeta{
-			SiteKey:  strings.TrimSpace(pickedMeta.SiteKey),
-			VideoID:  strings.TrimSpace(pickedMeta.VideoID),
-			PanLabel: strings.TrimSpace(pickedMeta.PanFlag),
-			Provider: strings.TrimSpace(pickedMeta.Provider),
+			SiteKey:    strings.TrimSpace(pickedMeta.SiteKey),
+			SiteDetail: strings.TrimSpace(pickedMeta.SiteDetail),
+			PanFlag:    strings.TrimSpace(pickedMeta.PanFlag),
+			Provider:   strings.TrimSpace(pickedMeta.Provider),
 		}
 	}
 	if mediaSourceID != "" {
-		if strings.TrimSpace(meta.SiteKey) != "" && strings.TrimSpace(meta.VideoID) != "" {
+		if strings.TrimSpace(meta.SiteKey) != "" && strings.TrimSpace(meta.SiteDetail) != "" {
 			embyStreams.SetMeta(mediaSourceID, strings.TrimSpace(finalURL), 60*time.Second, meta)
 		} else {
 			embyStreams.Set(mediaSourceID, strings.TrimSpace(finalURL), 60*time.Second)
 		}
 	}
 	if computedMediaSourceID != "" && computedMediaSourceID != mediaSourceID {
-		if strings.TrimSpace(meta.SiteKey) != "" && strings.TrimSpace(meta.VideoID) != "" {
+		if strings.TrimSpace(meta.SiteKey) != "" && strings.TrimSpace(meta.SiteDetail) != "" {
 			embyStreams.SetMeta(computedMediaSourceID, strings.TrimSpace(finalURL), 60*time.Second, meta)
 		} else {
 			embyStreams.Set(computedMediaSourceID, strings.TrimSpace(finalURL), 60*time.Second)

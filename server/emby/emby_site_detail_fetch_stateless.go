@@ -9,20 +9,20 @@ import (
 	"github.com/jenfonro/meowfilm/server/catpawrunner"
 )
 
-func embyFetchSiteDetailPans(database *db.DB, u *embyUser, spiderAPI string, videoID string) ([]catpawrunner.Pan, error) {
+func embyFetchSiteDetailPans(database *db.DB, u *embyUser, spiderAPI string, siteDetail string) ([]catpawrunner.Pan, error) {
 	if database == nil {
 		return nil, errors.New("invalid database")
 	}
 	sp := strings.TrimSpace(spiderAPI)
-	vid := strings.TrimSpace(videoID)
-	if sp == "" || vid == "" {
+	detail := strings.TrimSpace(siteDetail)
+	if sp == "" || detail == "" {
 		return nil, errors.New("invalid args")
 	}
 	apiBase := strings.TrimSpace(embyResolveCatApiBaseForUser(database, u))
 	if apiBase == "" {
 		return nil, errors.New("catpawrunner 接口地址未设置")
 	}
-	detailRaw, err := cache.RequestSpiderDetailCached(apiBase, sp, vid)
+	detailRaw, err := cache.RequestSpiderDetailCached(apiBase, sp, detail)
 	if err != nil {
 		return nil, err
 	}
