@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/sites"
 )
 
 func resolveSearchCoverSite(sites []map[string]any, preferredRaw string) string {
@@ -50,9 +51,9 @@ func mergeVideoSourceSites(database *db.DB) []map[string]any {
 	}
 	states, _ := database.ReadVideoSourceSiteStates()
 
-	sites := make([]site, 0, len(rawSites))
+	sitesList := make([]sites.Site, 0, len(rawSites))
 	for _, s := range rawSites {
-		sites = append(sites, site{Key: s.Key, Name: s.Name, API: s.API, Type: s.Type})
+		sitesList = append(sitesList, sites.Site{Key: s.Key, Name: s.Name, API: s.API, Type: s.Type})
 	}
 
 	statusMap := map[string]bool{}
@@ -66,8 +67,8 @@ func mergeVideoSourceSites(database *db.DB) []map[string]any {
 		o int
 		i int
 	}
-	ds := make([]decorated, 0, len(sites))
-	for i, s := range sites {
+	ds := make([]decorated, 0, len(sitesList))
+	for i, s := range sitesList {
 		st, ok := states[s.Key]
 		if ok {
 			statusMap[s.Key] = st.Enabled
@@ -82,7 +83,7 @@ func mergeVideoSourceSites(database *db.DB) []map[string]any {
 			ds = append(ds, decorated{k: s.Key, o: st.OrderIndex, i: i})
 		} else {
 			statusMap[s.Key] = true
-			homeMap[s.Key] = defaultHomeForSite(s)
+			homeMap[s.Key] = sites.DefaultHomeForSite(s)
 			searchMap[s.Key] = false
 			ds = append(ds, decorated{k: s.Key, o: 1_000_000_000, i: i})
 		}
@@ -98,5 +99,5 @@ func mergeVideoSourceSites(database *db.DB) []map[string]any {
 		order = append(order, d.k)
 	}
 
-	return mergeSitesWithState(sites, statusMap, homeMap, order, availabilityAny, searchMap, errorMap)
+	return sites.MergeSitesWithState(sitesList, statusMap, homeMap, order, availabilityAny, searchMap, errorMap)
 }

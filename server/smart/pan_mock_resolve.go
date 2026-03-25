@@ -77,11 +77,11 @@ func smartPanMock189AccessGet(shareID string) (string, bool) {
 	return ac, true
 }
 
-func embyExtractMockPasscodeFromEpisodeURL(episodeURL string) string {
+func extractMockPasscodeFromEpisodeURL(episodeURL string) string {
 	return smartExtractMockPasscodeFromEpisodeURL(episodeURL)
 }
 
-func embyExtractTianyiMockMeta(panFlag string, episodeURL string) (shareCode string, accessCode string) {
+func extractTianyiMockMeta(panFlag string, episodeURL string) (shareCode string, accessCode string) {
 	return smartExtractTianyiMockMetaFromEpisodeURL(panFlag, episodeURL)
 }
 
@@ -183,7 +183,7 @@ func smartResolvePanMockDetailPans(
 
 			switch pid {
 			case "189":
-				sc, ac := embyExtractTianyiMockMeta(label, firstURL)
+				sc, ac := extractTianyiMockMeta(label, firstURL)
 				if sc == "" {
 					logDone("skip", nil, nil, false)
 					return
@@ -213,7 +213,7 @@ func smartResolvePanMockDetailPans(
 				mu.Unlock()
 				logDone("ok", eps, nil, hit)
 			case "quark":
-				pass := embyExtractMockPasscodeFromEpisodeURL(firstURL)
+				pass := extractMockPasscodeFromEpisodeURL(firstURL)
 				vod, _, hit, err := netdisk.QuarkListWithCacheHit(database, label, pass)
 				if err != nil {
 					logDone("err", nil, err, hit)
@@ -232,7 +232,7 @@ func smartResolvePanMockDetailPans(
 				mu.Unlock()
 				logDone("ok", eps, nil, hit)
 			case "uc":
-				pass := embyExtractMockPasscodeFromEpisodeURL(firstURL)
+				pass := extractMockPasscodeFromEpisodeURL(firstURL)
 				vod, _, hit, err := netdisk.UCListWithCacheHit(database, label, pass)
 				if err != nil {
 					logDone("err", nil, err, hit)
@@ -251,7 +251,7 @@ func smartResolvePanMockDetailPans(
 				mu.Unlock()
 				logDone("ok", eps, nil, hit)
 			case "139":
-				pass := embyExtractMockPasscodeFromEpisodeURL(firstURL)
+				pass := extractMockPasscodeFromEpisodeURL(firstURL)
 				vod, _, hit, err := netdisk.Yun139ListWithCacheHit(database, label, pass)
 				if err != nil {
 					logDone("err", nil, err, hit)
@@ -270,7 +270,7 @@ func smartResolvePanMockDetailPans(
 				mu.Unlock()
 				logDone("ok", eps, nil, hit)
 			case "baidu":
-				pass := embyExtractMockPasscodeFromEpisodeURL(firstURL)
+				pass := extractMockPasscodeFromEpisodeURL(firstURL)
 				vod, _, hit, err := netdisk.BaiduListWithCacheHit(database, label, pass)
 				if err != nil {
 					logDone("err", nil, err, hit)
@@ -397,7 +397,7 @@ func smartResolvePanMockDetailPansIncremental(
 
 			switch pid {
 			case "189":
-				sc, ac := embyExtractTianyiMockMeta(label, firstURL)
+				sc, ac := extractTianyiMockMeta(label, firstURL)
 				if sc == "" {
 					emit("skip", nil, nil, nil, false)
 					return
@@ -429,7 +429,7 @@ func smartResolvePanMockDetailPansIncremental(
 				mu.Unlock()
 				emit("ok", eps, nil, delta, hit)
 			case "quark":
-				pass := embyExtractMockPasscodeFromEpisodeURL(firstURL)
+				pass := extractMockPasscodeFromEpisodeURL(firstURL)
 				vod, _, hit, err := netdisk.QuarkListWithCacheHit(database, label, pass)
 				if err != nil {
 					emit("err", nil, err, nil, hit)
@@ -448,7 +448,7 @@ func smartResolvePanMockDetailPansIncremental(
 				mu.Unlock()
 				emit("ok", eps, nil, nil, hit)
 			case "uc":
-				pass := embyExtractMockPasscodeFromEpisodeURL(firstURL)
+				pass := extractMockPasscodeFromEpisodeURL(firstURL)
 				vod, _, hit, err := netdisk.UCListWithCacheHit(database, label, pass)
 				if err != nil {
 					emit("err", nil, err, nil, hit)
@@ -467,7 +467,7 @@ func smartResolvePanMockDetailPansIncremental(
 				mu.Unlock()
 				emit("ok", eps, nil, nil, hit)
 			case "139":
-				pass := embyExtractMockPasscodeFromEpisodeURL(firstURL)
+				pass := extractMockPasscodeFromEpisodeURL(firstURL)
 				vod, _, hit, err := netdisk.Yun139ListWithCacheHit(database, label, pass)
 				if err != nil {
 					emit("err", nil, err, nil, hit)
@@ -486,7 +486,7 @@ func smartResolvePanMockDetailPansIncremental(
 				mu.Unlock()
 				emit("ok", eps, nil, nil, hit)
 			case "baidu":
-				pass := embyExtractMockPasscodeFromEpisodeURL(firstURL)
+				pass := extractMockPasscodeFromEpisodeURL(firstURL)
 				vod, _, hit, err := netdisk.BaiduListWithCacheHit(database, label, pass)
 				if err != nil {
 					emit("err", nil, err, nil, hit)

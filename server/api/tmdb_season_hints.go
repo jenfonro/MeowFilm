@@ -1,12 +1,13 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/jenfonro/meowfilm/internal/db"
-	"github.com/jenfonro/meowfilm/server/emby"
+	"github.com/jenfonro/meowfilm/server/metadata/tvmeta"
 )
 
 func handleAPITMDBSeasonHints(w http.ResponseWriter, r *http.Request, database *db.DB) {
@@ -43,20 +44,14 @@ func handleAPITMDBSeasonHints(w http.ResponseWriter, r *http.Request, database *
 		return
 	}
 
-	keyword := strings.TrimSpace(r.URL.Query().Get("keyword"))
-
-	hints, _ := database.ListTMDBSeasonHints("tv", id, source)
-	probed := false
-	if len(hints) < 2 && keyword != "" {
-		_, ok := emby.ProbeDoubanTMDBSeasonHints(database, id, keyword)
-		if ok {
-			probed = true
-			hints, _ = database.ListTMDBSeasonHints("tv", id, source)
-		}
+	meta, err := tvmeta.GetTVMeta(database, id)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"success": false, "message": err.Error()})
+		return
 	}
 
-	seasons := make([]map[string]any, 0, len(hints))
-	for _, h := range hints {
+	seasons := make([]map[string]any, 0, len(meta.DoubanSeasons))
+	for _, h := range meta.DoubanSeasons {
 		if h.SeasonNumber <= 0 || h.EpisodeCount <= 0 {
 			continue
 		}
@@ -71,8 +66,15 @@ func handleAPITMDBSeasonHints(w http.ResponseWriter, r *http.Request, database *
 		"tmdbId":  id,
 		"type":    "tv",
 		"source":  source,
-		"probed":  probed,
+		"probed":  len(meta.DoubanSeasons) > 0,
 		"seasons": seasons,
 	})
 }
 
+func buildPlaybackMovieID(tmdbID int) string {
+	return fmt.Sprintf("tmdb_movie_%d", tmdbID)
+}
+
+func buildPlaybackEpisodeID(tmdbID int, season int, episode int) string {
+	return fmt.Sprintf("tmdb_tv_%d_s%02d_e%03d", tmdbID, season, episode)
+}

@@ -851,7 +851,7 @@ func tianyiListShareDir(shareID string, fileID string, shareMode string, pageNum
 }
 
 func tianyiGetFileDownloadURL(shareID string, fileID string, dt string, accessCode string, cookie string) (tianyiGetDownloadURLResp, error) {
-	// NOTE: This legacy API may fail for large files (FileTooLarge) depending on dt/provider.
+	// NOTE: This API may fail for large files (FileTooLarge) depending on dt/provider.
 	// Keep the implementation for reference / future use, but current MeowFilm play flow prefers VLC portal API.
 	dt0 := strings.TrimSpace(dt)
 	candidates := []string{dt0}

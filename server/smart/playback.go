@@ -1,7 +1,6 @@
 package smart
 
 import (
-	"container/heap"
 	"context"
 	"errors"
 	"hash/fnv"
@@ -18,7 +17,10 @@ import (
 	"github.com/jenfonro/meowfilm/server/catpawrunner"
 	"github.com/jenfonro/meowfilm/server/config"
 	"github.com/jenfonro/meowfilm/server/magic"
+	metadata_tmdb "github.com/jenfonro/meowfilm/server/metadata/tmdb"
+	"github.com/jenfonro/meowfilm/server/metadata/tvmeta"
 	"github.com/jenfonro/meowfilm/server/netdisk"
+	"github.com/jenfonro/meowfilm/server/sites"
 )
 
 type smartPlaybackRequest struct {
@@ -321,7 +323,7 @@ type smartDetailCacheEntry struct {
 	EpisodeMapLoose           map[int][]smartCandidate
 }
 
-func smartBuildSeasonSignature(seasons []embyTMDBSeason) string {
+func smartBuildSeasonSignature(seasons []smartTMDBSeason) string {
 	if len(seasons) == 0 {
 		return "-"
 	}
@@ -332,7 +334,7 @@ func smartBuildSeasonSignature(seasons []embyTMDBSeason) string {
 	return strings.Join(parts, ",")
 }
 
-func smartBuildDetailCacheKey(src smartSource, primarySeasons []embyTMDBSeason, baselineSeasons []embyTMDBSeason, allowSingleBaseline bool, primaryKind string) string {
+func smartBuildDetailCacheKey(src smartSource, primarySeasons []smartTMDBSeason, baselineSeasons []smartTMDBSeason, allowSingleBaseline bool, primaryKind string) string {
 	base := smartBuildSourceKey(src.SiteKey, src.SpiderAPI, src.SiteDetail)
 	if base == "" {
 		return ""
@@ -389,7 +391,7 @@ func smartGetSearchThreadCount(database *db.DB, u *SmartUser) int {
 		if key == "" || api == "" {
 			continue
 		}
-		if isConfigCenterSite(site{Key: key, API: api, Name: s.Name, Type: s.Type}) {
+		if sites.IsConfigCenterSite(sites.Site{Key: key, API: api, Name: s.Name, Type: s.Type}) {
 			continue
 		}
 		st, ok := states[key]
@@ -450,9 +452,9 @@ func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle st
 	matchBlockKeyword := smartMatchBlockKeyword(searchTitle, aggregateRules)
 	matchBlockIndex := smartLoadMatchBlockIndex(database, matchBlockKeyword)
 	rawSites, _ := database.ListVideoSourceSites()
-	sites := make([]site, 0, len(rawSites))
+	sitesList := make([]sites.Site, 0, len(rawSites))
 	for _, s := range rawSites {
-		sites = append(sites, site{Key: s.Key, Name: s.Name, API: s.API, Type: s.Type})
+		sitesList = append(sitesList, sites.Site{Key: s.Key, Name: s.Name, API: s.API, Type: s.Type})
 	}
 	states, _ := database.ReadVideoSourceSiteStates()
 	statusMap := map[string]bool{}
@@ -464,7 +466,7 @@ func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle st
 		statusMap[k] = st.Enabled
 		searchMap[k] = st.Search
 	}
-	ordered := applySiteOrder(sites, smartLoadSiteOrder(database, u))
+	ordered := sites.ApplySiteOrder(sitesList, smartLoadSiteOrder(database, u))
 
 	orderMap := map[string]int{}
 	for i, s := range ordered {
@@ -476,9 +478,9 @@ func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle st
 
 	qKey := smartAggKeyWithRules(searchTitle, aggregateRules)
 
-	// Search across sites concurrently; Emby smart-play should not block on the slowest site.
+	// Search across sites concurrently; smart playback should not block on the slowest site.
 	type task struct {
-		Site site
+		Site sites.Site
 		Idx  int // stable order index
 	}
 	tasks := make([]task, 0, len(ordered))
@@ -486,7 +488,7 @@ func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle st
 		if s.Key == "" || s.API == "" {
 			continue
 		}
-		if isConfigCenterSite(s) {
+		if sites.IsConfigCenterSite(s) {
 			continue
 		}
 		if enabled, ok := statusMap[s.Key]; ok && !enabled {
@@ -519,7 +521,7 @@ func smartBuildAggregatedSources(database *db.DB, apiBase string, searchTitle st
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			raw, err := cache.RequestSpiderSearchCached(apiBase, tt.Site.API, searchTitle, 1)
+			raw, err := cache.RequestSpiderSearchDirect(apiBase, tt.Site.API, searchTitle, 1)
 			if err != nil {
 				return
 			}
@@ -690,7 +692,7 @@ var smartDoubanMapFallbackLogGate struct {
 	last map[int]int64 // key: global episode no
 }
 
-func smartMaybeLogDoubanMapFallback(global int, seasons []embyTMDBSeason) {
+func smartMaybeLogDoubanMapFallback(global int, seasons []smartTMDBSeason) {
 	if !smartDebugLogEnabled() {
 		return
 	}
@@ -736,7 +738,7 @@ func smartMaybeLogDoubanMapFallback(global int, seasons []embyTMDBSeason) {
 	)
 }
 
-func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSource, primarySeasons []embyTMDBSeason, singleBaselineSeasons []embyTMDBSeason, tmdbHasMultiSeason bool, settings smartPlaybackSettings, rawCleanRules []string, rawEpisodeRules []string, allowSingleBaseline bool, primaryKind string) *smartDetailCacheEntry {
+func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSource, primarySeasons []smartTMDBSeason, singleBaselineSeasons []smartTMDBSeason, tmdbHasMultiSeason bool, settings smartPlaybackSettings, rawCleanRules []string, rawEpisodeRules []string, allowSingleBaseline bool, primaryKind string) *smartDetailCacheEntry {
 	key := smartBuildDetailCacheKey(src, primarySeasons, singleBaselineSeasons, allowSingleBaseline, primaryKind)
 	if key == "" {
 		return nil
@@ -787,7 +789,7 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 			PanMock189AccessByShareID: map[string]string{},
 		}
 
-		detailRaw, err := cache.RequestSpiderDetailCached(apiBase, src.SpiderAPI, src.SiteDetail)
+		detailRaw, err := cache.RequestSpiderDetailDirect(apiBase, src.SpiderAPI, src.SiteDetail)
 		if err != nil {
 			smartDetailCache.Lock()
 			prev := smartDetailCache.M[key]
@@ -995,8 +997,8 @@ func (s *smartDetailState) snapshot() (ok bool, panMockEnabled bool, pans []catp
 func smartBuildEpisodeMapsFromPans(
 	src smartSource,
 	pans []catpawrunner.Pan,
-	primarySeasons []embyTMDBSeason,
-	singleBaselineSeasons []embyTMDBSeason,
+	primarySeasons []smartTMDBSeason,
+	singleBaselineSeasons []smartTMDBSeason,
 	tmdbHasMultiSeason bool,
 	settings smartPlaybackSettings,
 	rawCleanRules []string,
@@ -1158,7 +1160,7 @@ func smartCandidatesForWant(
 	episodeMap map[int][]smartCandidate,
 	episodeMapLoose map[int][]smartCandidate,
 	src smartSource,
-	tmdbSeasons []embyTMDBSeason,
+	tmdbSeasons []smartTMDBSeason,
 	tmdbHasMultiSeason bool,
 	preferSeasonNo int,
 	want int,
@@ -1461,7 +1463,7 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 	}
 }
 
-func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser string, src smartSource, tmdbSeasons []embyTMDBSeason, singleBaselineSeasons []embyTMDBSeason, tmdbHasMultiSeason bool, preferSeasonNo int, want int, settings smartPlaybackSettings, rawCleanRules []string, rawEpisodeRules []string, requireSeasoned bool, allowSingleBaseline bool, primaryKind string, allowResolutionModes []string) *smartPickResult {
+func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser string, src smartSource, tmdbSeasons []smartTMDBSeason, singleBaselineSeasons []smartTMDBSeason, tmdbHasMultiSeason bool, preferSeasonNo int, want int, settings smartPlaybackSettings, rawCleanRules []string, rawEpisodeRules []string, requireSeasoned bool, allowSingleBaseline bool, primaryKind string, allowResolutionModes []string) *smartPickResult {
 	siteKey := strings.TrimSpace(src.SiteKey)
 	spiderApi := strings.TrimSpace(src.SpiderAPI)
 	siteDetail := strings.TrimSpace(src.SiteDetail)
@@ -1697,110 +1699,100 @@ func smartSourceHasEpisodeBeyondFirstSeason(
 	return false
 }
 
-func smartResolvePlaybackFromTMDB(database *db.DB, u *SmartUser, req smartPlaybackRequest) (finalURL string, finalHeaders map[string]string, picked *smartPlaybackPickedMeta, err error) {
+func smartCollectPlaybackOffersFromTMDB(database *db.DB, u *SmartUser, req smartPlaybackRequest, shouldStop func() bool) ([]smartCandidateOffer, error) {
 	if database == nil {
-		return "", nil, nil, errors.New("invalid database")
+		return nil, errors.New("invalid database")
 	}
 	if req.TMDBID <= 0 {
-		return "", nil, nil, errors.New("invalid tmdb id")
+		return nil, errors.New("invalid tmdb id")
 	}
-
 	apiBase := smartResolveCatApiBaseForUser(database, u)
 	if apiBase == "" {
-		return "", nil, nil, errors.New("catpawrunner 接口地址未设置")
+		return nil, errors.New("catpawrunner 接口地址未设置")
 	}
-	tvUser := ""
-	if u != nil {
-		tvUser = u.Username
-	}
-
-	// Resolve TMDB title and want episode (global index for tv).
 	searchTitle := ""
 	want := 1
-	tmdbSeasons := []embyTMDBSeason{}
+	tmdbSeasons := []smartTMDBSeason{}
+	doubanSeasons := []smartTMDBSeason{}
 	if strings.TrimSpace(req.Kind) == "movie" {
-		md, err := smartTMDBGetMovieDetail(database, req.TMDBID)
+		md, err := metadata_tmdb.GetMovieDetails(database, req.TMDBID)
 		if err != nil || md == nil || strings.TrimSpace(md.Title) == "" {
-			return "", nil, nil, errors.New("TMDB 请求失败")
+			return nil, errors.New("TMDB 请求失败")
 		}
 		searchTitle = strings.TrimSpace(md.Title)
-		want = 1
 	} else if strings.TrimSpace(req.Kind) == "tv" {
-		td, err := smartTMDBGetTVDetail(database, req.TMDBID)
-		if err != nil || td == nil || strings.TrimSpace(td.Title) == "" {
-			return "", nil, nil, errors.New("TMDB 请求失败")
+		title, err := metadata_tmdb.GetTVTitle(database, req.TMDBID)
+		if err != nil || strings.TrimSpace(title) == "" {
+			return nil, errors.New("TMDB 请求失败")
 		}
-		searchTitle = strings.TrimSpace(td.Title)
-		for _, s := range td.Seasons {
-			if s.Season > 0 && s.EpisodeCount > 0 {
-				tmdbSeasons = append(tmdbSeasons, s)
-			}
+		searchTitle = strings.TrimSpace(title)
+		if meta, err := tvmeta.GetTVMeta(database, req.TMDBID); err == nil && meta != nil {
+			tmdbSeasons = smartTMDBSeasonsFromTVMeta(meta.TMDBSeasons)
+			doubanSeasons = smartTMDBSeasonsFromTVMeta(meta.DoubanSeasons)
 		}
 		if strings.TrimSpace(req.SubKind) == "episode" {
 			want = smartTMDBGlobalEpisodeNoOf(tmdbSeasons, req.Season, req.Episode)
 			if want <= 0 {
 				want = 1
 			}
-		} else {
-			want = 1
 		}
 	} else {
-		return "", nil, nil, errors.New("unsupported kind")
+		return nil, errors.New("unsupported kind")
 	}
 	if strings.TrimSpace(searchTitle) == "" {
-		return "", nil, nil, errors.New("missing title")
+		return nil, errors.New("missing title")
 	}
-
 	settings := smartLoadPlaybackSettings(database)
 	rawEpisodeRules, _ := database.ListMagicEpisodeRules()
 	rawCleanRules, _ := database.ListMagicEpisodeCleanRegexRules()
 	rawMovieRules, _ := database.ListMagicMovieRules()
 	if strings.TrimSpace(req.Kind) != "movie" && (len(rawEpisodeRules) == 0 || len(rawCleanRules) == 0) {
-		return "", nil, nil, errors.New("magic regex rules 未设置")
+		return nil, errors.New("magic regex rules 未设置")
 	}
 
-	// Search sources and resolve playback in a streaming (search->detail->list) pipeline,
-	// aligned with the front-end smart-play strategy:
-	// - search across sites concurrently
-	// - per-site detail requests are sequential
-	// - pan_mock list resolving does not block fetching next details
-	resolvedURL, resolvedHeaders, picked, resolveErr := smartResolvePlaybackFromTMDBAlignedCoordinator(database, u, req, apiBase, tvUser, searchTitle, want, tmdbSeasons, nil, settings, rawCleanRules, rawEpisodeRules, rawMovieRules, true, false, "tmdb")
-	if resolveErr == nil && strings.TrimSpace(resolvedURL) != "" {
-		return resolvedURL, resolvedHeaders, picked, nil
+	offers, err := smartCollectPlaybackOffersFromTMDBAligned(database, u, req, apiBase, searchTitle, want, tmdbSeasons, nil, settings, rawCleanRules, rawEpisodeRules, rawMovieRules, true, false, "tmdb", shouldStop)
+	if err == nil && len(offers) > 0 {
+		return offers, nil
 	}
 
-	// Align with frontend order: TMDB -> Douban assist -> fallback.
-	// Only when the TMDB-based pass does not find a playable result do we try
-	// a second pass with Douban multi-season metadata as the mapping basis.
 	needDoubanAssist := strings.TrimSpace(req.Kind) == "tv" && strings.TrimSpace(req.SubKind) == "episode" && strings.TrimSpace(searchTitle) != ""
-	if needDoubanAssist {
-		if over, ok := smartDoubanProbeSeasons(database, req.TMDBID, searchTitle, want); ok && len(over) > 0 {
-			tmdbMulti := smartPositiveSeasonCount(tmdbSeasons) >= 2
-			doubanMulti := smartPositiveSeasonCount(over) >= 2
-			runAssist := func(primary []embyTMDBSeason, baseline []embyTMDBSeason, label string, primaryKind string) (string, map[string]string, *smartPlaybackPickedMeta, error) {
-				if smartDebugLogEnabled() {
-					mapped := smartTMDBSeasonEpisodeOfGlobal(primary, want)
-					smartDebugPrintf("[smart][douban] assist mode=%s tmdbId=%d want=%d -> mapped=S%02dE%03d", label, req.TMDBID, want, mapped.Season, mapped.Episode)
-				}
-				return smartResolvePlaybackFromTMDBAlignedCoordinator(database, u, req, apiBase, tvUser, searchTitle, want, primary, baseline, settings, rawCleanRules, rawEpisodeRules, rawMovieRules, false, true, primaryKind)
+	if needDoubanAssist && (len(doubanSeasons) > 0 || len(tmdbSeasons) > 0) {
+		tmdbMulti := smartPositiveSeasonCount(tmdbSeasons) >= 2
+		doubanMulti := smartPositiveSeasonCount(doubanSeasons) >= 2
+		switch {
+		case !tmdbMulti && doubanMulti:
+			offers2, err2 := smartCollectPlaybackOffersFromTMDBAligned(database, u, req, apiBase, searchTitle, want, doubanSeasons, tmdbSeasons, settings, rawCleanRules, rawEpisodeRules, rawMovieRules, false, true, "douban", shouldStop)
+			if err2 == nil && len(offers2) > 0 {
+				return offers2, nil
 			}
-			switch {
-			case !tmdbMulti && doubanMulti:
-				if resolvedURL2, resolvedHeaders2, picked2, resolveErr2 := runAssist(over, tmdbSeasons, "douban_primary", "douban"); resolveErr2 == nil && strings.TrimSpace(resolvedURL2) != "" {
-					return resolvedURL2, resolvedHeaders2, picked2, nil
-				}
-			case tmdbMulti && !doubanMulti:
-				if resolvedURL2, resolvedHeaders2, picked2, resolveErr2 := runAssist(tmdbSeasons, over, "tmdb_primary", "tmdb"); resolveErr2 == nil && strings.TrimSpace(resolvedURL2) != "" {
-					return resolvedURL2, resolvedHeaders2, picked2, nil
-				}
+		case tmdbMulti && !doubanMulti:
+			offers2, err2 := smartCollectPlaybackOffersFromTMDBAligned(database, u, req, apiBase, searchTitle, want, tmdbSeasons, doubanSeasons, settings, rawCleanRules, rawEpisodeRules, rawMovieRules, false, true, "tmdb", shouldStop)
+			if err2 == nil && len(offers2) > 0 {
+				return offers2, nil
 			}
 		}
 	}
-
-	if resolveErr != nil {
-		return "", nil, nil, resolveErr
+	if err != nil {
+		return nil, err
 	}
-	return "", nil, nil, errors.New("无可用播放地址")
+	return nil, errors.New("无可用播放地址")
+}
+
+func smartTMDBSeasonsFromTVMeta(rows []tvmeta.SeasonCount) []smartTMDBSeason {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]smartTMDBSeason, 0, len(rows))
+	for _, row := range rows {
+		if row.SeasonNumber <= 0 || row.EpisodeCount <= 0 {
+			continue
+		}
+		out = append(out, smartTMDBSeason{
+			Season:       row.SeasonNumber,
+			EpisodeCount: row.EpisodeCount,
+		})
+	}
+	return out
 }
 
 type smartCandidateOffer struct {
@@ -1830,16 +1822,15 @@ func (pq *smartCandidateOfferPQ) Pop() any {
 	return x
 }
 
-func smartResolvePlaybackFromTMDBAlignedCoordinator(
+func smartCollectPlaybackOffersFromTMDBAligned(
 	database *db.DB,
 	u *SmartUser,
 	req smartPlaybackRequest,
 	apiBase string,
-	tvUser string,
 	searchTitle string,
 	want int,
-	tmdbSeasons []embyTMDBSeason,
-	singleBaselineSeasons []embyTMDBSeason,
+	tmdbSeasons []smartTMDBSeason,
+	singleBaselineSeasons []smartTMDBSeason,
 	settings smartPlaybackSettings,
 	rawCleanRules []string,
 	rawEpisodeRules []string,
@@ -1847,15 +1838,16 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 	strictOnly bool,
 	allowSingleBaseline bool,
 	primaryKind string,
-) (finalURL string, finalHeaders map[string]string, picked *smartPlaybackPickedMeta, err error) {
+	shouldStop func() bool,
+) ([]smartCandidateOffer, error) {
 	if database == nil {
-		return "", nil, nil, errors.New("invalid database")
+		return nil, errors.New("invalid database")
 	}
 	if strings.TrimSpace(apiBase) == "" {
-		return "", nil, nil, errors.New("catpawrunner 接口地址未设置")
+		return nil, errors.New("catpawrunner 接口地址未设置")
 	}
 	if strings.TrimSpace(searchTitle) == "" || want <= 0 {
-		return "", nil, nil, errors.New("missing title")
+		return nil, errors.New("missing title")
 	}
 	isMovieMode := strings.TrimSpace(req.Kind) == "movie" || strings.TrimSpace(req.SubKind) == "movie"
 	allowResolutionModes := []string{"strict-tmdb", "strict-douban", "degraded-single-baseline"}
@@ -1863,57 +1855,10 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 		allowResolutionModes = []string{"strict-tmdb"}
 	}
 
-	flowStart := time.Now()
-	flowID := atomic.AddUint64(&smartPlayFlowSeq, 1)
-
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(18*time.Second))
 	defer cancel()
 
-	tierGate2At := flowStart.Add(10 * time.Second)
-	tierGate3At := flowStart.Add(15 * time.Second)
-
-	attemptKey := func(c smartCandidate) uint64 {
-		raw0 := smartFirstRawNameFromURL(strings.TrimSpace(c.Ep.URL))
-		h := fnv.New64a()
-		_, _ = h.Write([]byte(strings.TrimSpace(c.SiteKey)))
-		_, _ = h.Write([]byte{0})
-		_, _ = h.Write([]byte(strings.TrimSpace(c.SiteDetail)))
-		_, _ = h.Write([]byte{0})
-		_, _ = h.Write([]byte(strings.TrimSpace(c.PanFlag)))
-		_, _ = h.Write([]byte{0})
-		_, _ = h.Write([]byte(strings.TrimSpace(c.Ep.Flag)))
-		_, _ = h.Write([]byte{0})
-		_, _ = h.Write([]byte(strings.TrimSpace(raw0)))
-		return h.Sum64()
-	}
-
-	buildPicked := func(c smartCandidate, feat smartCandidateFeatures) *smartPlaybackPickedMeta {
-		rawNames := smartExtractRawNamesFromEpisodeURL(c.Ep.URL)
-		raw0 := ""
-		if len(rawNames) > 0 {
-			raw0 = strings.TrimSpace(rawNames[0])
-		}
-		return &smartPlaybackPickedMeta{
-			SiteKey:    strings.TrimSpace(c.SiteKey),
-			SiteName:   strings.TrimSpace(c.SiteName),
-			SiteDetail: strings.TrimSpace(c.SiteDetail),
-			PanFlag:    strings.TrimSpace(c.PanFlag),
-			Provider:   smartPanMockProviderID(database, strings.TrimSpace(c.PanFlag)),
-			ShowName:   strings.TrimSpace(c.Ep.Name),
-			RawName:    raw0,
-			Quality:    strings.TrimSpace(feat.Quality),
-		}
-	}
-
-	upsertSmartPlayHistoryBestEffort := func(c smartCandidate) {
-		// Intentionally disabled: persist history only on Emby session reports.
-		// The stream resolver stores the picked site binding in-memory (mediaSourceId -> siteKey/siteDetail/pan),
-		// which the session reporter can then use to write a single canonical history row.
-		_ = c
-		return
-	}
-
-	recomputeMeta := func(seasons []embyTMDBSeason) (out []embyTMDBSeason, hasMulti bool, prefer int, require bool) {
+	recomputeMeta := func(seasons []smartTMDBSeason) (out []smartTMDBSeason, hasMulti bool, prefer int, require bool) {
 		positiveSeasons := 0
 		hasLongSeason := false
 		for _, s := range seasons {
@@ -1934,15 +1879,10 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 				prefer = req.Season
 			}
 		}
-		// For long-running / continuous shows (e.g. 国漫、长篇动画), TMDB sometimes splits them into seasons
-		// while most site sources keep global episode numbers without season markers. In that case, requiring
-		// season signals will drop all candidates (offers=0). Relax the season requirement when any season is long.
 		require = hasMulti && prefer >= 2 && !hasLongSeason
-		out = make([]embyTMDBSeason, 0, len(seasons))
 		out = append(out, seasons...)
 		return out, hasMulti, prefer, require
 	}
-
 	seasonsForMapping, hasMulti, preferSeasonNo, requireSeasoned := recomputeMeta(tmdbSeasons)
 	aggregateRules := smartLoadAggregateCleanRules(database)
 	matchBlockKeyword := smartMatchBlockKeyword(searchTitle, aggregateRules)
@@ -1955,13 +1895,12 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 		}
 		return matchBlockIndex[sk+"::"+vid]
 	}
-
 	qKey := smartAggKeyWithRules(searchTitle, aggregateRules)
 
 	rawSites, _ := database.ListVideoSourceSites()
-	sitesList := make([]site, 0, len(rawSites))
+	sitesList := make([]sites.Site, 0, len(rawSites))
 	for _, s := range rawSites {
-		sitesList = append(sitesList, site{Key: s.Key, Name: s.Name, API: s.API, Type: s.Type})
+		sitesList = append(sitesList, sites.Site{Key: s.Key, Name: s.Name, API: s.API, Type: s.Type})
 	}
 	states, _ := database.ReadVideoSourceSiteStates()
 	statusMap := map[string]bool{}
@@ -1973,9 +1912,9 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 		statusMap[k] = st.Enabled
 		searchMap[k] = st.Search
 	}
-	ordered := applySiteOrder(sitesList, smartLoadSiteOrder(database, u))
+	ordered := sites.ApplySiteOrder(sitesList, smartLoadSiteOrder(database, u))
 	type task struct {
-		Site site
+		Site sites.Site
 		Idx  int
 	}
 	tasks := make([]task, 0, len(ordered))
@@ -1983,7 +1922,7 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 		if s.Key == "" || s.API == "" {
 			continue
 		}
-		if isConfigCenterSite(s) {
+		if sites.IsConfigCenterSite(s) {
 			continue
 		}
 		if enabled, ok := statusMap[s.Key]; ok && !enabled {
@@ -1998,45 +1937,11 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 		tasks = append(tasks, task{Site: s, Idx: i})
 	}
 	if len(tasks) == 0 {
-		return "", nil, nil, errors.New("未找到可用资源")
-	}
-
-	panRuleEnabled := len(settings.PanTokenOrderLower) > 0
-	classifyTier := func(c smartCandidate) int {
-		feat := smartComputeCandidateFeatures(c)
-		// Tier 1: 4K + pan match rule (token list) if configured.
-		if feat.QualityRank == 3 {
-			if !panRuleEnabled || c.PanTokenIdx >= 0 {
-				return 1
-			}
-			// Tier 2: 4K but pan not in allow list.
-			return 2
-		}
-
-		// Tier 3: fallback candidates. For TV multi-season, require season signal.
-		kind := strings.TrimSpace(req.Kind)
-		sub := strings.TrimSpace(req.SubKind)
-		if kind == "movie" || sub == "movie" {
-			return 3
-		}
-		if kind == "tv" && sub == "episode" && hasMulti && preferSeasonNo > 0 {
-			if c.MatchSeason == preferSeasonNo || c.SearchSeasonHint == preferSeasonNo {
-				return 3
-			}
-			return 0
-		}
-		return 3
+		return nil, errors.New("未找到可用资源")
 	}
 
 	offerCh := make(chan smartCandidateOffer, 1024)
 	var workersWG sync.WaitGroup
-
-	var offersSeen int64
-	var offersDeduped int64
-	var offersQueued int64
-	var offersDroppedFull int64
-	attempts := 0
-
 	siteWorker := func(t task) {
 		defer workersWG.Done()
 		select {
@@ -2044,8 +1949,10 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 			return
 		default:
 		}
-
-		raw, err := cache.RequestSpiderSearchCachedWithTimeout(apiBase, t.Site.API, searchTitle, 1, 6*time.Second)
+		if shouldStop != nil && shouldStop() {
+			return
+		}
+		raw, err := cache.RequestSpiderSearchWithTimeout(apiBase, t.Site.API, searchTitle, 1, 6*time.Second)
 		if err != nil {
 			return
 		}
@@ -2101,18 +2008,20 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 		if len(local) > 20 {
 			local = local[:20]
 		}
-
 		for _, src := range local {
 			select {
 			case <-ctx.Done():
 				return
 			default:
 			}
+			if shouldStop != nil && shouldStop() {
+				return
+			}
 			blockedEntry := matchBlockEntryOf(src.SiteKey, src.SiteDetail)
 			if blockedEntry != nil && blockedEntry.BlockAll {
 				continue
 			}
-			detailRaw, err := cache.RequestSpiderDetailCachedWithTimeout(apiBase, src.SpiderAPI, src.SiteDetail, 8*time.Second)
+			detailRaw, err := cache.RequestSpiderDetailWithTimeout(apiBase, src.SpiderAPI, src.SiteDetail, 8*time.Second)
 			if err != nil || detailRaw == nil {
 				continue
 			}
@@ -2129,72 +2038,29 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 				if blockedEntry != nil && len(pans) > 0 {
 					pans = smartFilterPansByBlockedFlags(pans, blockedEntry.PanFlags)
 				}
-				resolved, access := smartResolvePanMockDetailPansIncremental(
-					database,
-					src.SiteKey,
-					src.SiteName,
-					want,
-					seasonsForMapping,
-					hasMulti,
-					rawCleanRules,
-					rawEpisodeRules,
-					pans,
-					nil,
-				)
+				resolved, access := smartResolvePanMockDetailPansIncremental(database, src.SiteKey, src.SiteName, want, seasonsForMapping, hasMulti, rawCleanRules, rawEpisodeRules, pans, nil)
 				pans = resolved
 				if blockedEntry != nil && len(pans) > 0 {
 					pans = smartFilterPansByBlockedFlags(pans, blockedEntry.PanFlags)
 				}
 				accessByShareID = access
 			}
-
 			cands := []smartCandidate{}
-			scanned := 0
 			if isMovieMode {
-				for _, p := range pans {
-					scanned += len(p.Episodes)
-				}
 				cands = smartBuildMovieCandidatesFromPans(src, pans, settings, rawCleanRules, rawMovieRules)
 			} else {
 				epMap, epLoose := smartBuildEpisodeMapsFromPans(src, pans, seasonsForMapping, singleBaselineSeasons, hasMulti, settings, rawCleanRules, rawEpisodeRules, allowSingleBaseline, primaryKind)
 				cands = smartCandidatesForWant(epMap, epLoose, src, seasonsForMapping, hasMulti, preferSeasonNo, want, settings, requireSeasoned, allowResolutionModes)
 			}
-			if isMovieMode && smartDebugLogEnabled() {
-				smartDebugPrintf(
-					"[smart][movie_rules_eval] site=(%s) scanned=%d hit=%d",
-					smartLogSiteName(src.SiteKey, src.SiteName),
-					scanned,
-					len(cands),
-				)
-			}
-			if len(cands) == 0 {
-				continue
-			}
-
-			queued4K := 0
-			queuedAny := 0
 			for _, c := range cands {
-				feat := smartComputeCandidateFeatures(c)
-				if feat.QualityRank == 3 {
-					queued4K++
-				}
-				queuedAny++
-				offer := smartCandidateOffer{
-					Cand:          c,
-					AccessByShare: accessByShareID,
-				}
 				select {
 				case <-ctx.Done():
 					return
-				case offerCh <- offer:
-				}
-				if queued4K >= 2 && queuedAny >= 4 {
-					break
+				case offerCh <- smartCandidateOffer{Cand: c, AccessByShare: accessByShareID}:
 				}
 			}
 		}
 	}
-
 	for _, t := range tasks {
 		workersWG.Add(1)
 		go siteWorker(t)
@@ -2204,215 +2070,134 @@ func smartResolvePlaybackFromTMDBAlignedCoordinator(
 		close(offerCh)
 	}()
 
-	pendingSet := map[uint64]struct{}{}
-	attempted := map[uint64]struct{}{}
-	pq1 := &smartCandidateOfferPQ{hasMulti: hasMulti, preferSeason: preferSeasonNo, matchSettings: settings}
-	pq2 := &smartCandidateOfferPQ{hasMulti: hasMulti, preferSeason: preferSeasonNo, matchSettings: settings}
-	pq3 := &smartCandidateOfferPQ{hasMulti: hasMulti, preferSeason: preferSeasonNo, matchSettings: settings}
-	heap.Init(pq1)
-	heap.Init(pq2)
-	heap.Init(pq3)
-
-	var mu sync.Mutex
-	var offersClosed bool
-	wakeCh := make(chan struct{}, 1)
-
-	go func() {
-		for off := range offerCh {
-			atomic.AddInt64(&offersSeen, 1)
-			k := attemptKey(off.Cand)
-			mu.Lock()
-			if _, ok := attempted[k]; ok {
-				atomic.AddInt64(&offersDeduped, 1)
-				mu.Unlock()
-				continue
-			}
-			if _, ok := pendingSet[k]; ok {
-				atomic.AddInt64(&offersDeduped, 1)
-				mu.Unlock()
-				continue
-			}
-			if pq1.Len()+pq2.Len()+pq3.Len() >= smartPlayMaxPendingOffers {
-				atomic.AddInt64(&offersDroppedFull, 1)
-				mu.Unlock()
-				continue
-			}
-			tier := classifyTier(off.Cand)
-			if tier == 0 {
-				atomic.AddInt64(&offersDeduped, 1)
-				mu.Unlock()
-				continue
-			}
-			pendingSet[k] = struct{}{}
-			switch tier {
-			case 1:
-				heap.Push(pq1, off)
-			case 2:
-				heap.Push(pq2, off)
-			default:
-				heap.Push(pq3, off)
-			}
-			atomic.AddInt64(&offersQueued, 1)
-			mu.Unlock()
-			select {
-			case wakeCh <- struct{}{}:
-			default:
-			}
-		}
-		mu.Lock()
-		offersClosed = true
-		mu.Unlock()
-		select {
-		case wakeCh <- struct{}{}:
-		default:
-		}
-	}()
-
-	pickNext := func(now time.Time) (smartCandidateOffer, int, bool) {
-		allow2 := !now.Before(tierGate2At)
-		allow3 := !now.Before(tierGate3At)
-		if pq1.Len() > 0 {
-			return heap.Pop(pq1).(smartCandidateOffer), 1, true
-		}
-		if allow2 && pq2.Len() > 0 {
-			return heap.Pop(pq2).(smartCandidateOffer), 2, true
-		}
-		if allow3 && pq3.Len() > 0 {
-			return heap.Pop(pq3).(smartCandidateOffer), 3, true
-		}
-		return smartCandidateOffer{}, 0, false
+	type keyedOffer struct {
+		offer smartCandidateOffer
+		tier  int
 	}
-
-	waitUntilOrWake := func(deadline time.Time) {
-		d := time.Until(deadline)
-		if d <= 0 {
-			return
-		}
-		timer := time.NewTimer(d)
-		defer timer.Stop()
-		select {
-		case <-ctx.Done():
-		case <-wakeCh:
-		case <-timer.C:
-		}
+	offersByKey := map[uint64]keyedOffer{}
+	attemptKey := func(c smartCandidate) uint64 {
+		raw0 := smartFirstRawNameFromURL(strings.TrimSpace(c.Ep.URL))
+		h := fnv.New64a()
+		_, _ = h.Write([]byte(strings.TrimSpace(c.SiteKey)))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(strings.TrimSpace(c.SiteDetail)))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(strings.TrimSpace(c.PanFlag)))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(strings.TrimSpace(c.Ep.Flag)))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(strings.TrimSpace(raw0)))
+		return h.Sum64()
 	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			if smartDebugLogEnabled() {
-				smartDebugPrintf(
-					"[smart][flow_done] flow=%d ms=%d status=deadline offers=%d queued=%d dedup=%d dropped=%d attempts=%d",
-					flowID,
-					time.Since(flowStart).Milliseconds(),
-					atomic.LoadInt64(&offersSeen),
-					atomic.LoadInt64(&offersQueued),
-					atomic.LoadInt64(&offersDeduped),
-					atomic.LoadInt64(&offersDroppedFull),
-					attempts,
-				)
+	panRuleEnabled := len(settings.PanTokenOrderLower) > 0
+	classifyTier := func(c smartCandidate) int {
+		feat := smartComputeCandidateFeatures(c)
+		if feat.QualityRank == 3 {
+			if !panRuleEnabled || c.PanTokenIdx >= 0 {
+				return 1
 			}
-			return "", nil, nil, errors.New("无可用播放地址")
-		default:
+			return 2
 		}
-
-		mu.Lock()
-		now := time.Now()
-		at, tier, ok := pickNext(now)
-		p1 := pq1.Len()
-		p2 := pq2.Len()
-		p3 := pq3.Len()
-		if !ok {
-			closed := offersClosed
-			mu.Unlock()
-			if closed {
-				// Do not end early when only gated tiers are pending.
-				// Example: queued tier2/tier3 offers, workers finished quickly,
-				// but gate time has not arrived yet.
-				if p1 == 0 && p2 > 0 && now.Before(tierGate2At) {
-					waitUntilOrWake(tierGate2At)
-					continue
-				}
-				if p1 == 0 && p2 == 0 && p3 > 0 && now.Before(tierGate3At) {
-					waitUntilOrWake(tierGate3At)
-					continue
-				}
-				if smartDebugLogEnabled() {
-					smartDebugPrintf(
-						"[smart][flow_done] flow=%d ms=%d status=exhausted offers=%d queued=%d dedup=%d dropped=%d attempts=%d",
-						flowID,
-						time.Since(flowStart).Milliseconds(),
-						atomic.LoadInt64(&offersSeen),
-						atomic.LoadInt64(&offersQueued),
-						atomic.LoadInt64(&offersDeduped),
-						atomic.LoadInt64(&offersDroppedFull),
-						attempts,
-					)
-				}
-				return "", nil, nil, errors.New("无可用播放地址")
+		kind := strings.TrimSpace(req.Kind)
+		sub := strings.TrimSpace(req.SubKind)
+		if kind == "movie" || sub == "movie" {
+			return 3
+		}
+		if kind == "tv" && sub == "episode" && hasMulti && preferSeasonNo > 0 {
+			if c.MatchSeason == preferSeasonNo || c.SearchSeasonHint == preferSeasonNo {
+				return 3
 			}
-			// Wait for offers or tier gates.
-			if now.Before(tierGate2At) {
-				waitUntilOrWake(tierGate2At)
-			} else if now.Before(tierGate3At) {
-				waitUntilOrWake(tierGate3At)
-			} else {
-				waitUntilOrWake(now.Add(2 * time.Second))
+			return 0
+		}
+		return 3
+	}
+	for off := range offerCh {
+		k := attemptKey(off.Cand)
+		tier := classifyTier(off.Cand)
+		if tier == 0 {
+			continue
+		}
+		if prev, ok := offersByKey[k]; ok {
+			if tier < prev.tier || (tier == prev.tier && smartCompareSmartMatch(off.Cand, prev.offer.Cand, hasMulti, preferSeasonNo, settings) > 0) {
+				offersByKey[k] = keyedOffer{offer: off, tier: tier}
 			}
 			continue
 		}
-
-		k := attemptKey(at.Cand)
-		delete(pendingSet, k)
-		attempted[k] = struct{}{}
-		mu.Unlock()
-
-		attempts++
-		if smartDebugLogEnabled() {
-			feat := smartComputeCandidateFeatures(at.Cand)
-			smartDebugPrintf(
-				"[smart][pick] flow=%d tier=%d site=(%s) panFlag=%s provider=%s matchShowName=%s matchRawName=%s quality=%s",
-				flowID,
-				tier,
-				smartLogSiteName(at.Cand.SiteKey, at.Cand.SiteName),
-				strings.TrimSpace(at.Cand.PanFlag),
-				smartPanMockProviderID(database, strings.TrimSpace(at.Cand.PanFlag)),
-				strings.TrimSpace(at.Cand.Ep.Name),
-				strings.TrimSpace(smartFirstRawNameFromURL(at.Cand.Ep.URL)),
-				strings.TrimSpace(feat.Quality),
-			)
+		offersByKey[k] = keyedOffer{offer: off, tier: tier}
+	}
+	flat := make([]keyedOffer, 0, len(offersByKey))
+	for _, off := range offersByKey {
+		flat = append(flat, off)
+	}
+	sort.SliceStable(flat, func(i, j int) bool {
+		if flat[i].tier != flat[j].tier {
+			return flat[i].tier < flat[j].tier
 		}
-		if res := smartTryPlayPickedCandidate(flowID, database, apiBase, tvUser, at.Cand, at.AccessByShare); res != nil && strings.TrimSpace(res.PlayURL) != "" {
-			feat := smartComputeCandidateFeatures(res.Cand)
-			if smartDebugLogEnabled() {
-				raw0 := smartFirstRawNameFromURL(res.Cand.Ep.URL)
-				smartDebugPrintf(
-					"[smart][playback_ok] flow=%d ms=%d site=(%s) panFlag=%s provider=%s matchShowName=%s matchRawName=%s quality=%s",
-					flowID,
-					time.Since(flowStart).Milliseconds(),
-					smartLogSiteName(res.Cand.SiteKey, res.Cand.SiteName),
-					strings.TrimSpace(res.Cand.PanFlag),
-					smartPanMockProviderID(database, strings.TrimSpace(res.Cand.PanFlag)),
-					strings.TrimSpace(res.Cand.Ep.Name),
-					strings.TrimSpace(raw0),
-					strings.TrimSpace(feat.Quality),
-				)
-			}
-			upsertSmartPlayHistoryBestEffort(res.Cand)
-			cancel()
-			if smartDebugLogEnabled() {
-				smartDebugPrintf(
-					"[smart][flow_done] flow=%d ms=%d status=ok offers=%d queued=%d dedup=%d dropped=%d attempts=%d",
-					flowID,
-					time.Since(flowStart).Milliseconds(),
-					atomic.LoadInt64(&offersSeen),
-					atomic.LoadInt64(&offersQueued),
-					atomic.LoadInt64(&offersDeduped),
-					atomic.LoadInt64(&offersDroppedFull),
-					attempts,
-				)
-			}
-			return strings.TrimSpace(res.PlayURL), res.Headers, buildPicked(res.Cand, feat), nil
+		return smartCompareSmartMatch(flat[i].offer.Cand, flat[j].offer.Cand, hasMulti, preferSeasonNo, settings) > 0
+	})
+	out := make([]smartCandidateOffer, 0, len(flat))
+	for _, off := range flat {
+		out = append(out, off.offer)
+	}
+	return out, nil
+}
+
+func smartTryPlaybackOffersInternal(database *db.DB, u *SmartUser, offers []smartCandidateOffer) (finalURL string, finalHeaders map[string]string, picked *smartPlaybackPickedMeta, err error) {
+	if database == nil {
+		return "", nil, nil, errors.New("invalid database")
+	}
+	if u == nil {
+		return "", nil, nil, errors.New("invalid user")
+	}
+	if len(offers) == 0 {
+		return "", nil, nil, errors.New("no offers")
+	}
+	apiBase := smartResolveCatApiBaseForUser(database, u)
+	if strings.TrimSpace(apiBase) == "" {
+		return "", nil, nil, errors.New("catpawrunner 接口地址未设置")
+	}
+	tvUser := strings.TrimSpace(u.Username)
+	flowID := atomic.AddUint64(&smartPlayFlowSeq, 1)
+	flowStart := time.Now()
+	buildPicked := func(c smartCandidate, feat smartCandidateFeatures) *smartPlaybackPickedMeta {
+		rawNames := smartExtractRawNamesFromEpisodeURL(c.Ep.URL)
+		raw0 := ""
+		if len(rawNames) > 0 {
+			raw0 = strings.TrimSpace(rawNames[0])
+		}
+		return &smartPlaybackPickedMeta{
+			SiteKey:    strings.TrimSpace(c.SiteKey),
+			SiteName:   strings.TrimSpace(c.SiteName),
+			SiteDetail: strings.TrimSpace(c.SiteDetail),
+			PanFlag:    strings.TrimSpace(c.PanFlag),
+			Provider:   smartPanMockProviderID(database, strings.TrimSpace(c.PanFlag)),
+			ShowName:   strings.TrimSpace(c.Ep.Name),
+			RawName:    raw0,
+			Quality:    strings.TrimSpace(feat.Quality),
 		}
 	}
+	for _, off := range offers {
+		res := smartTryPlayPickedCandidate(flowID, database, apiBase, tvUser, off.Cand, off.AccessByShare)
+		if res == nil || strings.TrimSpace(res.PlayURL) == "" {
+			continue
+		}
+		feat := smartComputeCandidateFeatures(res.Cand)
+		if smartDebugLogEnabled() {
+			raw0 := smartFirstRawNameFromURL(res.Cand.Ep.URL)
+			smartDebugPrintf(
+				"[smart][playback_ok] flow=%d ms=%d site=(%s) panFlag=%s provider=%s matchShowName=%s matchRawName=%s quality=%s url=%s",
+				flowID,
+				time.Since(flowStart).Milliseconds(),
+				smartLogSiteName(res.Cand.SiteKey, res.Cand.SiteName),
+				strings.TrimSpace(res.Cand.PanFlag),
+				smartPanMockProviderID(database, strings.TrimSpace(res.Cand.PanFlag)),
+				strings.TrimSpace(res.Cand.Ep.Name),
+				strings.TrimSpace(raw0),
+				strings.TrimSpace(feat.Quality),
+				smartShortURLForLog(strings.TrimSpace(res.PlayURL)),
+			)
+		}
+		return strings.TrimSpace(res.PlayURL), res.Headers, buildPicked(res.Cand, feat), nil
+	}
+	return "", nil, nil, errors.New("无可用播放地址")
 }

@@ -2,7 +2,6 @@ package db
 
 import (
 	"database/sql"
-	"strings"
 	"time"
 )
 
@@ -24,7 +23,8 @@ func (d *DB) ensureDefaults(_ bool) error {
 	_, _ = d.db.Exec(`INSERT INTO app_relay(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
 	_, _ = d.db.Exec(`INSERT INTO app_netdisk_proxy(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
 	_, _ = d.db.Exec(`INSERT INTO app_catpawrunner(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
-	_, _ = d.db.Exec(`INSERT INTO app_emby(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
+	_, _ = d.db.Exec(`INSERT INTO app_identity(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
+	_, _ = d.db.Exec(`INSERT INTO app_third_party_client(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
 
 	type seedTable struct {
 		Table string
@@ -34,7 +34,7 @@ func (d *DB) ensureDefaults(_ bool) error {
 		{
 			Table: "magic_episode_rule",
 			Seed: func(tx *sql.Tx) error {
-				// Keep the legacy front-end compatible payload shape: a JSON array of JSON-string rules.
+				// Keep the frontend payload shape: a JSON array of JSON-string rules.
 				// Defaults aligned with MeowFilm-Frontend "restore defaults".
 				rules := []string{
 					`{"pattern":".*?([Ss]\\\\d{1,2})?(?:第\\\\s*(\\\\d{1,4})\\\\s*(?:集|话)|[Ee][Pp]?\\\\s*(\\\\d{1,4})(?:$|\\\\D)).*?.*","replace":"$1E$2$3","flags":"i"}`,
@@ -162,203 +162,6 @@ func (d *DB) ensureDefaults(_ bool) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	if err := d.runOneTimePanMatchTokenUpgrade(); err != nil {
-		return err
-	}
-	if err := d.runOneTimeAppDoubanSearchCookieMigration(); err != nil {
-		return err
-	}
-	return d.runOneTimeAppRelayGoProxyThresholdMigration()
-}
-
-func (d *DB) runOneTimePanMatchTokenUpgrade() error {
-	if d == nil || d.db == nil {
-		return nil
-	}
-	const migrationName = "smart_pan_match_token_standardize_v1"
-
-	var done int
-	if err := d.db.QueryRow(`SELECT COUNT(1) FROM app_migration_flag WHERE name=?`, migrationName).Scan(&done); err != nil {
-		return err
-	}
-	if done > 0 {
-		return nil
-	}
-
-	rows, err := d.db.Query(`SELECT token FROM smart_pan_match_token ORDER BY pos ASC`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	tokens := make([]string, 0)
-	for rows.Next() {
-		var token sql.NullString
-		_ = rows.Scan(&token)
-		t := strings.TrimSpace(token.String)
-		if t != "" {
-			tokens = append(tokens, t)
-		}
-	}
-
-	legacyToStandard := map[string]string{
-		"逸动": "移动",
-		"天意": "天翼",
-		"夸父": "夸克",
-		"优夕": "uc",
-	}
-
-	converted := make([]string, 0, len(tokens))
-	seen := map[string]bool{}
-	changed := false
-	for _, t := range tokens {
-		nv, ok := legacyToStandard[t]
-		next := t
-		if ok {
-			next = nv
-			if next != t {
-				changed = true
-			}
-		}
-		key := strings.ToLower(strings.TrimSpace(next))
-		if key == "" || seen[key] {
-			continue
-		}
-		seen[key] = true
-		converted = append(converted, next)
-	}
-
-	tx, err := d.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if changed {
-		if _, err := tx.Exec(`DELETE FROM smart_pan_match_token`); err != nil {
-			return err
-		}
-		for i, t := range converted {
-			if _, err := tx.Exec(`INSERT INTO smart_pan_match_token(pos, token) VALUES(?, ?)`, i, t); err != nil {
-				return err
-			}
-		}
-	}
-
-	if _, err := tx.Exec(`INSERT INTO app_migration_flag(name, updated_at) VALUES(?, ?)`, migrationName, time.Now().Unix()); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-func (d *DB) runOneTimeAppDoubanSearchCookieMigration() error {
-	if d == nil || d.db == nil {
-		return nil
-	}
-	const migrationName = "app_douban_add_search_cookie_v1"
-
-	var done int
-	if err := d.db.QueryRow(`SELECT COUNT(1) FROM app_migration_flag WHERE name=?`, migrationName).Scan(&done); err != nil {
-		return err
-	}
-	if done > 0 {
-		return nil
-	}
-
-	rows, err := d.db.Query(`PRAGMA table_info(app_douban)`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	hasSearchCookie := false
-	for rows.Next() {
-		var (
-			cid     int
-			name    string
-			ctype   string
-			notnull int
-			dflt    sql.NullString
-			pk      int
-		)
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			return err
-		}
-		if strings.EqualFold(strings.TrimSpace(name), "search_cookie") {
-			hasSearchCookie = true
-			break
-		}
-	}
-
-	tx, err := d.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if !hasSearchCookie {
-		if _, err := tx.Exec(`ALTER TABLE app_douban ADD COLUMN search_cookie TEXT NOT NULL DEFAULT ''`); err != nil {
-			return err
-		}
-	}
-	if _, err := tx.Exec(`INSERT INTO app_migration_flag(name, updated_at) VALUES(?, ?)`, migrationName, time.Now().Unix()); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-func (d *DB) runOneTimeAppRelayGoProxyThresholdMigration() error {
-	if d == nil || d.db == nil {
-		return nil
-	}
-	const migrationName = "app_relay_add_goproxy_threshold_gb_v1"
-
-	var done int
-	if err := d.db.QueryRow(`SELECT COUNT(1) FROM app_migration_flag WHERE name=?`, migrationName).Scan(&done); err != nil {
-		return err
-	}
-	if done > 0 {
-		return nil
-	}
-
-	rows, err := d.db.Query(`PRAGMA table_info(app_relay)`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	hasThreshold := false
-	for rows.Next() {
-		var (
-			cid     int
-			name    string
-			ctype   string
-			notnull int
-			dflt    sql.NullString
-			pk      int
-		)
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			return err
-		}
-		if strings.EqualFold(strings.TrimSpace(name), "goproxy_threshold_gb") {
-			hasThreshold = true
-			break
-		}
-	}
-
-	tx, err := d.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if !hasThreshold {
-		if _, err := tx.Exec(`ALTER TABLE app_relay ADD COLUMN goproxy_threshold_gb INTEGER NOT NULL DEFAULT 0`); err != nil {
-			return err
-		}
-	}
-	if _, err := tx.Exec(`INSERT INTO app_migration_flag(name, updated_at) VALUES(?, ?)`, migrationName, time.Now().Unix()); err != nil {
-		return err
-	}
-	return tx.Commit()
+	_, err = d.EnsureServerIdentity()
+	return err
 }

@@ -23,4 +23,3 @@ func smartResolveSpiderAPIBySiteKey(database *db.DB, siteKey string) string {
 	}
 	return ""
 }
-

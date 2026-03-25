@@ -19,6 +19,7 @@ import (
 	"github.com/jenfonro/meowfilm/server/config"
 	"github.com/jenfonro/meowfilm/server/metadata/douban"
 	"github.com/jenfonro/meowfilm/server/netdisk"
+	"github.com/jenfonro/meowfilm/server/sites"
 )
 
 func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
@@ -496,7 +497,7 @@ func handleDashboardBackup(w http.ResponseWriter, r *http.Request, database *db.
 	magicEpisodeCleanRegexRules, _ := database.ListMagicEpisodeCleanRegexRules()
 	magicMovieRules, _ := database.ListMagicMovieRules()
 	magicAggregateRegexRules, _ := database.ListMagicAggregateRegexRules()
-	embyHomeSections, _ := database.ReadEmbyHomeSections()
+	thirdPartyClientHomeSections, _ := database.ReadThirdPartyClientHomeSections()
 
 	smartSourcePriorityTokens, _ := database.ListSmartSourcePriorityTokens()
 	smartPanMatchTokens, _ := database.ListSmartPanMatchTokens()
@@ -572,7 +573,7 @@ func handleDashboardBackup(w http.ResponseWriter, r *http.Request, database *db.
 			"includeAdult":       cfg.TMDBIncludeAdult,
 		},
 		"thirdParty": map[string]any{
-			"embyHomeSections": embyHomeSections,
+			"thirdPartyClientHomeSections": thirdPartyClientHomeSections,
 		},
 	})
 }
@@ -990,12 +991,12 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 			}
 			if v, ok := meta["tmdbDataProxyBase"]; ok {
 				if s, _ := v.(string); true {
-					c.TMDBAPIBase = normalizeHTTPBase(strings.TrimSpace(s))
+					c.TMDBAPIBase = catpawrunner.NormalizeHTTPBase(strings.TrimSpace(s))
 				}
 			}
 			if v, ok := meta["tmdbImageProxyBase"]; ok {
 				if s, _ := v.(string); true {
-					c.TMDBImgBase = normalizeHTTPBase(strings.TrimSpace(s))
+					c.TMDBImgBase = catpawrunner.NormalizeHTTPBase(strings.TrimSpace(s))
 				}
 			}
 			if v, ok := meta["language"]; ok {
@@ -1022,11 +1023,12 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 		thirdPartyObj = readObj(body, "thirdparty")
 	}
 	if thirdPartyObj != nil {
-		if arr := readArr(thirdPartyObj, "embyHomeSections"); arr != nil {
+		arr := readArr(thirdPartyObj, "thirdPartyClientHomeSections")
+		if arr != nil {
 			raw, _ := json.Marshal(arr)
-			var sections []db.EmbyHomeSection
+			var sections []db.ThirdPartyClientHomeSection
 			if err := json.Unmarshal(raw, &sections); err == nil {
-				_ = database.ReplaceEmbyHomeSections(sections)
+				_ = database.ReplaceThirdPartyClientHomeSections(sections)
 			}
 		}
 		applied["thirdParty"] = true
@@ -1072,8 +1074,8 @@ func handleDashboardMetadataSettings(w http.ResponseWriter, r *http.Request, dat
 			c.DoubanSearchCookie = readStrJSONBody(body, "doubanSearchCookie")
 
 			c.TMDBAPIToken = readStrJSONBody(body, "tmdbApiToken")
-			c.TMDBAPIBase = normalizeHTTPBase(readStrJSONBody(body, "tmdbDataProxyBase"))
-			c.TMDBImgBase = normalizeHTTPBase(readStrJSONBody(body, "tmdbImageProxyBase"))
+			c.TMDBAPIBase = catpawrunner.NormalizeHTTPBase(readStrJSONBody(body, "tmdbDataProxyBase"))
+			c.TMDBImgBase = catpawrunner.NormalizeHTTPBase(readStrJSONBody(body, "tmdbImageProxyBase"))
 			c.TMDBLanguage = readStrJSONBody(body, "language")
 			c.TMDBRegion = readStrJSONBody(body, "region")
 			c.TMDBIncludeAdult = readBoolJSONBody(body, "includeAdult")
@@ -1642,7 +1644,7 @@ func handleDashboardVideoSourceSitesCheck(w http.ResponseWriter, r *http.Request
 			continue
 		}
 		s, _ := v.(string)
-		results[key] = normalizeAvailability(s)
+		results[key] = sites.NormalizeAvailability(s)
 	}
 	if len(results) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "results 参数无效"})
@@ -1674,7 +1676,7 @@ func handleDashboardVideoSourceSitesCheck(w http.ResponseWriter, r *http.Request
 		if key == "" {
 			continue
 		}
-		avail := normalizeAvailability(v)
+		avail := sites.NormalizeAvailability(v)
 		msg := strings.TrimSpace(errorInput[key])
 		_ = database.UpsertVideoSourceSiteState(key, func(s *db.VideoSourceSiteState) {
 			s.Availability = avail
@@ -1717,12 +1719,12 @@ func handleDashboardVideoSourceSitesImport(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "sites 参数无效"})
 		return
 	}
-	var input []site
+	var input []sites.Site
 	if err := json.Unmarshal([]byte(raw), &input); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "sites 参数无效"})
 		return
 	}
-	normalized := normalizeSitesSlice(input)
+	normalized := sites.NormalizeSitesSlice(input)
 	if len(normalized) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "sites 参数无效"})
 		return
@@ -1759,10 +1761,10 @@ func handleDashboardVideoSourceSitesImport(w http.ResponseWriter, r *http.Reques
 			prevOrder = append(prevOrder, k)
 		}
 	}
-	reconciled := reconcileSites(normalized, prevStatus, prevHome, prevSearch, prevOrder, prevAvailability)
+	reconciled := sites.ReconcileSites(normalized, prevStatus, prevHome, prevSearch, prevOrder, prevAvailability)
 
 	for _, s := range reconciled.Sites {
-		if isConfigCenterSite(s) {
+		if sites.IsConfigCenterSite(s) {
 			reconciled.Search[s.Key] = false
 		}
 	}
@@ -2221,9 +2223,9 @@ func mergeVideoSourceSites(database *db.DB) []map[string]any {
 	}
 	states, _ := database.ReadVideoSourceSiteStates()
 
-	sites := make([]site, 0, len(rawSites))
+	sitesList := make([]sites.Site, 0, len(rawSites))
 	for _, s := range rawSites {
-		sites = append(sites, site{Key: s.Key, Name: s.Name, API: s.API, Type: s.Type})
+		sitesList = append(sitesList, sites.Site{Key: s.Key, Name: s.Name, API: s.API, Type: s.Type})
 	}
 
 	statusMap := map[string]bool{}
@@ -2237,8 +2239,8 @@ func mergeVideoSourceSites(database *db.DB) []map[string]any {
 		o int
 		i int
 	}
-	ds := make([]decorated, 0, len(sites))
-	for i, s := range sites {
+	ds := make([]decorated, 0, len(sitesList))
+	for i, s := range sitesList {
 		st, ok := states[s.Key]
 		if ok {
 			statusMap[s.Key] = st.Enabled
@@ -2253,7 +2255,7 @@ func mergeVideoSourceSites(database *db.DB) []map[string]any {
 			ds = append(ds, decorated{k: s.Key, o: st.OrderIndex, i: i})
 		} else {
 			statusMap[s.Key] = true
-			homeMap[s.Key] = defaultHomeForSite(s)
+			homeMap[s.Key] = sites.DefaultHomeForSite(s)
 			searchMap[s.Key] = false
 			ds = append(ds, decorated{k: s.Key, o: 1_000_000_000, i: i})
 		}
@@ -2269,5 +2271,5 @@ func mergeVideoSourceSites(database *db.DB) []map[string]any {
 		order = append(order, d.k)
 	}
 
-	return mergeSitesWithState(sites, statusMap, homeMap, order, availabilityAny, searchMap, errorMap)
+	return sites.MergeSitesWithState(sitesList, statusMap, homeMap, order, availabilityAny, searchMap, errorMap)
 }

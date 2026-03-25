@@ -6,8 +6,8 @@ import (
 )
 
 var (
-	embyEpisodeMarkerRe = regexp.MustCompile(`(?i)(?:ep|episode|e)\s*\d{1,5}|第\s*\d+\s*集`)
-	embySeasonMarkerRe  = regexp.MustCompile(`(?i)s\s*\d{1,2}|第\s*\d+\s*季`)
+	episodeMarkerRe = regexp.MustCompile(`(?i)(?:ep|episode|e)\s*\d{1,5}|第\s*\d+\s*集`)
+	seasonMarkerRe  = regexp.MustCompile(`(?i)s\s*\d{1,2}|第\s*\d+\s*季`)
 )
 
 // Align with frontend: pan_mock provider lookup only depends on label/flag.
@@ -40,17 +40,17 @@ func isAlphaNumOnly(s string) bool {
 	return true
 }
 
-func embyScoreEpisodeDisplayName(name string, titleLower string) int {
+func scoreEpisodeDisplayName(name string, titleLower string) int {
 	text := strings.TrimSpace(name)
 	if text == "" {
 		return -999
 	}
 	lower := strings.ToLower(text)
 	score := 0
-	if embyEpisodeMarkerRe.MatchString(text) {
+	if episodeMarkerRe.MatchString(text) {
 		score += 5
 	}
-	if embySeasonMarkerRe.MatchString(text) {
+	if seasonMarkerRe.MatchString(text) {
 		score += 4
 	}
 	if strings.Contains(lower, "2160p") || strings.Contains(lower, "4k") || strings.Contains(lower, "1080p") || strings.Contains(lower, "720p") {
@@ -80,7 +80,7 @@ func embyScoreEpisodeDisplayName(name string, titleLower string) int {
 	return score
 }
 
-func embyPickEpisodeDisplayName(displayName string, fileName string, titleLower string, preferFile bool) string {
+func pickEpisodeDisplayName(displayName string, fileName string, titleLower string, preferFile bool) string {
 	name := strings.TrimSpace(displayName)
 	file := strings.TrimSpace(fileName)
 	if preferFile && file != "" {
@@ -92,8 +92,8 @@ func embyPickEpisodeDisplayName(displayName string, fileName string, titleLower 
 	if file == "" {
 		return name
 	}
-	scoreName := embyScoreEpisodeDisplayName(name, titleLower)
-	scoreFile := embyScoreEpisodeDisplayName(file, titleLower)
+	scoreName := scoreEpisodeDisplayName(name, titleLower)
+	scoreFile := scoreEpisodeDisplayName(file, titleLower)
 	if scoreName >= scoreFile {
 		return name
 	}

@@ -21,8 +21,6 @@ type FavoriteRow struct {
 type FavoriteUpsert struct {
 	UserID     int64
 	SiteKey    string
-	SiteName   string // ignored (derived); kept for API compatibility
-	SpiderAPI  string // ignored (derived); kept for API compatibility
 	SiteDetail string
 	ContentKey string
 	Poster     string

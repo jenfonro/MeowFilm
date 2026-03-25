@@ -51,13 +51,19 @@ func New(cfg Config) (*Server, error) {
 
 	mux := http.NewServeMux()
 
+	embyHandler := emby.EmbyHandler(database)
 	mux.Handle("/api/", api.Handler(database, authMw))
-	// Debug endpoints (enabled only when MEOWFILM_DEBUG=1).
-	mux.Handle("/listdebug", emby.RegexListDebugHandler(database))
-	mux.Handle("/searchdebug", emby.RegexSearchDebugHandler(database))
-	embyAPI := emby.EmbyHandler(database)
-	// Emby is the canonical API surface.
-	mux.Handle("/emby/", embyAPI)
+	mux.Handle("/emby/", embyHandler)
+	mux.Handle("/Users/", embyHandler)
+	mux.Handle("/Items/", embyHandler)
+	mux.Handle("/Shows/", embyHandler)
+	mux.Handle("/Videos/", embyHandler)
+	mux.Handle("/videos/", embyHandler)
+	mux.Handle("/Sessions/", embyHandler)
+	mux.Handle("/System/", embyHandler)
+	mux.Handle("/DisplayPreferences/", embyHandler)
+	mux.Handle("/Library/", embyHandler)
+	mux.Handle("/Genres", embyHandler)
 	dashboardAPI := dashboard.Handler(database, authMw)
 	staticHandler := static.Handler(authMw)
 	mux.Handle("/dashboard/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
