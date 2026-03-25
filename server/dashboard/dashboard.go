@@ -216,6 +216,10 @@ func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardMetadataSettings(w, r, database)
 			})).ServeHTTP(w, r)
+		case "/metadata/cache/clear":
+			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleDashboardMetadataCacheClear(w, r, database)
+			})).ServeHTTP(w, r)
 		case "/thirdparty/settings":
 			authMw.RequireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleDashboardThirdPartySettings(w, r, database)
@@ -1060,6 +1064,45 @@ func handleDashboardMetadataSettings(w http.ResponseWriter, r *http.Request, dat
 	default:
 		methodNotAllowed(w)
 	}
+}
+
+func handleDashboardMetadataCacheClear(w http.ResponseWriter, r *http.Request, database *db.DB) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var body map[string]any
+	_ = readJSONLoose(r, &body)
+	scope := strings.ToLower(strings.TrimSpace(readStrJSONBody(body, "scope")))
+	if scope != "douban" && scope != "tmdb" && scope != "all" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "缓存清理类型无效"})
+		return
+	}
+
+	var err error
+	switch scope {
+	case "douban":
+		err = database.ClearDoubanMetadataCache()
+	case "tmdb":
+		err = database.ClearTMDBMetadataCache()
+	case "all":
+		err = database.ClearAllMetadataCache()
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": err.Error()})
+		return
+	}
+
+	message := "缓存已清理"
+	switch scope {
+	case "douban":
+		message = "豆瓣缓存已清理"
+	case "tmdb":
+		message = "TMDB缓存已清理"
+	case "all":
+		message = "所有缓存已清理"
+	}
+	writeJSON(w, 200, map[string]any{"success": true, "scope": scope, "message": message})
 }
 
 func handleDashboardSiteSave(w http.ResponseWriter, r *http.Request, database *db.DB) {
