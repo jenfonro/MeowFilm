@@ -13,6 +13,8 @@ type UserAuthRow struct {
 	PasswordHash string
 	Role         string
 	Status       string
+	CreatedAt    int64
+	UpdatedAt    int64
 }
 
 type UserListRow struct {
@@ -30,8 +32,21 @@ func (d *DB) GetUserAuthByUsername(username string) (UserAuthRow, error) {
 		return UserAuthRow{}, sql.ErrNoRows
 	}
 	var row UserAuthRow
-	err := d.db.QueryRow(`SELECT id, username, password, role, status FROM users WHERE username=? LIMIT 1`, u).
-		Scan(&row.ID, &row.Username, &row.PasswordHash, &row.Role, &row.Status)
+	err := d.db.QueryRow(`SELECT id, username, password, role, status, created_at, updated_at FROM users WHERE username=? LIMIT 1`, u).
+		Scan(&row.ID, &row.Username, &row.PasswordHash, &row.Role, &row.Status, &row.CreatedAt, &row.UpdatedAt)
+	return row, err
+}
+
+func (d *DB) GetUserAuthByID(userID int64) (UserAuthRow, error) {
+	if d == nil || d.db == nil {
+		return UserAuthRow{}, errors.New("db nil")
+	}
+	if userID <= 0 {
+		return UserAuthRow{}, sql.ErrNoRows
+	}
+	var row UserAuthRow
+	err := d.db.QueryRow(`SELECT id, username, password, role, status, created_at, updated_at FROM users WHERE id=? LIMIT 1`, userID).
+		Scan(&row.ID, &row.Username, &row.PasswordHash, &row.Role, &row.Status, &row.CreatedAt, &row.UpdatedAt)
 	return row, err
 }
 

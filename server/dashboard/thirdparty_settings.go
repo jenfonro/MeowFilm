@@ -15,10 +15,10 @@ func handleDashboardThirdPartySettings(w http.ResponseWriter, r *http.Request, d
 		methodNotAllowed(w)
 		return
 	}
-	sections, _ := database.ReadEmbyHomeSections()
+	sections, _ := database.ReadThirdPartyClientHomeSections()
 	writeJSON(w, 200, map[string]any{
-		"success":          true,
-		"embyHomeSections": sections,
+		"success":                      true,
+		"thirdPartyClientHomeSections": sections,
 	})
 }
 
@@ -28,18 +28,18 @@ func handleDashboardThirdPartySave(w http.ResponseWriter, r *http.Request, datab
 		return
 	}
 	parseForm(r)
-	raw := strings.TrimSpace(r.FormValue("embyHomeSectionsJson"))
+	raw := strings.TrimSpace(r.FormValue("thirdPartyClientHomeSectionsJson"))
 	if raw == "" {
-		_ = database.ReplaceEmbyHomeSections(db.DefaultEmbyHomeSections())
+		_ = database.ReplaceThirdPartyClientHomeSections(db.DefaultThirdPartyClientHomeSections())
 		writeJSON(w, 200, map[string]any{"success": true})
 		return
 	}
-	var sections []db.EmbyHomeSection
+	var sections []db.ThirdPartyClientHomeSection
 	if err := json.Unmarshal([]byte(raw), &sections); err != nil {
 		writeJSON(w, 200, map[string]any{"success": false, "message": "JSON 格式错误"})
 		return
 	}
-	_ = database.ReplaceEmbyHomeSections(sections)
+	_ = database.ReplaceThirdPartyClientHomeSections(sections)
 	writeJSON(w, 200, map[string]any{"success": true})
 }
 

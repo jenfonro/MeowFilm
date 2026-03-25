@@ -40,10 +40,6 @@ func defaultString(v, def string) string {
 	return mfnet.DefaultString(v, def)
 }
 
-func normalizeHTTPBase(value string) string {
-	return mfnet.NormalizeHTTPBase(value)
-}
-
 func normalizeNetdiskProxyURL(input string) (string, error) {
 	raw := strings.TrimSpace(input)
 	if raw == "" {
@@ -141,7 +137,7 @@ func normalizeRelayServers(value string) []relayServer {
 		base, _ := row["base"].(string)
 		secret, _ := row["secret"].(string)
 		pans, _ := row["pans"].(map[string]any)
-		base = normalizeHTTPBase(base)
+		base = catpawrunner.NormalizeHTTPBase(base)
 		name = strings.TrimSpace(name)
 		displayName = strings.TrimSpace(displayName)
 		secret = strings.TrimSpace(secret)

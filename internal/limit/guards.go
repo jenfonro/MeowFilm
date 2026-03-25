@@ -165,18 +165,18 @@ func GuardLogin(database *db.DB) (exceeded bool, err error) {
 		tnBytes[i] ^= 0x5A
 	}
 	tn := string(tnBytes)
-	// Accept both legacy and current trigger message forms:
-	// legacy: char(69,49,55)
+	// Accept both trigger message forms:
+	// encoded: char(69,49,55)
 	// current: 'E17'
-	legacyBytes := []byte{0x39, 0x32, 0x3b, 0x28, 0x72, 0x6c, 0x63, 0x76, 0x6e, 0x63, 0x76, 0x6f, 0x6f, 0x73} // xor 0x5A
-	for i := range legacyBytes {
-		legacyBytes[i] ^= 0x5A
+	encodedBytes := []byte{0x39, 0x32, 0x3b, 0x28, 0x72, 0x6c, 0x63, 0x76, 0x6e, 0x63, 0x76, 0x6f, 0x6f, 0x73} // xor 0x5A
+	for i := range encodedBytes {
+		encodedBytes[i] ^= 0x5A
 	}
 	currentBytes := []byte{0x7d, 0x1f, 0x6b, 0x6d, 0x7d} // xor 0x5A -> "'E17'"
 	for i := range currentBytes {
 		currentBytes[i] ^= 0x5A
 	}
-	wantLegacy := strings.ToLower(string(legacyBytes))
+	wantLegacy := strings.ToLower(string(encodedBytes))
 	wantCurrent := strings.ToLower(string(currentBytes))
 
 	var sqlText sql.NullString

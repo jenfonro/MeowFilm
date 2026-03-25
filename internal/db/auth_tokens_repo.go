@@ -70,4 +70,3 @@ func (d *DB) DeleteToken(token string) error {
 	_, err := d.db.Exec(`DELETE FROM auth_tokens WHERE token = ?`, tok)
 	return err
 }
-

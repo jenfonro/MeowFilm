@@ -19,7 +19,6 @@ import (
 	"github.com/jenfonro/meowfilm/internal/limit"
 	"github.com/jenfonro/meowfilm/server/catpawrunner"
 	"github.com/jenfonro/meowfilm/server/config"
-	"github.com/jenfonro/meowfilm/server/emby"
 	"github.com/jenfonro/meowfilm/server/metadata/douban"
 	"github.com/jenfonro/meowfilm/server/metadata/tmdb"
 	mfnet "github.com/jenfonro/meowfilm/server/net"
@@ -149,9 +148,21 @@ func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
 			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				tmdb.HandleSearch(w, r, database)
 			})).ServeHTTP(w, r)
+		case "/tmdb/resolve":
+			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleAPITMDBResolve(w, r, database)
+			})).ServeHTTP(w, r)
 		case "/tmdb/detail":
 			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handleAPITMDBDetail(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/tmdb/season":
+			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleAPITMDBSeason(w, r, database)
+			})).ServeHTTP(w, r)
+		case "/tv/meta":
+			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handleAPITVMeta(w, r, database)
 			})).ServeHTTP(w, r)
 		case "/smart/matchblock/items":
 			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -565,16 +576,8 @@ func buildNormalizedPlayHistoryList(rows []db.PlayHistoryRow, limit int) []map[s
 
 		poster := strings.TrimSpace(row.Poster)
 		remark := strings.TrimSpace(row.Remark)
-		tmdbYear := strings.TrimSpace(row.TMDBYear)
-		playbackItemID := strings.TrimSpace(row.PlaybackItemID)
 		tmdbSeason := row.TMDBSeason
 		tmdbEpisode := row.TMDBEpisode
-		if tmdbSeason <= 0 || tmdbEpisode <= 0 {
-			if typ, tid, s, e, ok := parseTMDBFromPlaybackItemID(playbackItemID); ok && typ == "tv" && tid > 0 {
-				tmdbSeason = s
-				tmdbEpisode = e
-			}
-		}
 
 		siteKey := strings.TrimSpace(row.SiteKey)
 		spiderAPI := strings.TrimSpace(row.SpiderAPI)
@@ -597,7 +600,6 @@ func buildNormalizedPlayHistoryList(rows []db.PlayHistoryRow, limit int) []map[s
 			"siteDetail":            siteDetail,
 			"Poster":                poster,
 			"Remark":                remark,
-			"tmdbYear":              tmdbYear,
 			"tmdbId":                tmdbID,
 			"tmdbType":              tmdbType,
 			"tmdbSeason":            tmdbSeason,
@@ -605,37 +607,13 @@ func buildNormalizedPlayHistoryList(rows []db.PlayHistoryRow, limit int) []map[s
 			"playFlag":              strings.TrimSpace(row.PlayFlag),
 			"siteEpisodeIndex":      row.SiteEpisodeIndex,
 			"siteEpisodeFile":       strings.TrimSpace(row.SiteEpisodeFile),
-			"playbackItemId":        playbackItemID,
+			"playbackItemId":        strings.TrimSpace(row.PlaybackItemID),
 			"playbackPositionTicks": row.PlaybackPositionTicks,
 			"playbackRuntimeTicks":  row.PlaybackRuntimeTicks,
 			"updatedAt":             row.UpdatedAt,
 		})
 	}
 	return out
-}
-
-func parseTMDBFromPlaybackItemID(playbackItemID string) (tmdbType string, tmdbID int, season int, episode int, ok bool) {
-	id := strings.TrimSpace(playbackItemID)
-	if id == "" {
-		return "", 0, 0, 0, false
-	}
-	// tmdb_movie_{id}
-	if m := regexp.MustCompile(`^tmdb_movie_(\d+)$`).FindStringSubmatch(id); len(m) == 2 {
-		n, _ := strconv.Atoi(m[1])
-		if n > 0 {
-			return "movie", n, 0, 0, true
-		}
-	}
-	// tmdb_tv_{id}_s{ss}_e{eee}
-	if m := regexp.MustCompile(`^tmdb_tv_(\d+)_s(\d{2})_e(\d{3})$`).FindStringSubmatch(id); len(m) == 4 {
-		tid, _ := strconv.Atoi(m[1])
-		s, _ := strconv.Atoi(m[2])
-		e, _ := strconv.Atoi(m[3])
-		if tid > 0 && s > 0 && e > 0 {
-			return "tv", tid, s, e, true
-		}
-	}
-	return "", 0, 0, 0, false
 }
 
 func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *db.DB) {
@@ -656,7 +634,6 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 		spiderAPI        string
 		poster           string
 		remark           string
-		tmdbYear         string
 		tmdbID           int
 		tmdbType         string
 		playFlag         string
@@ -674,7 +651,6 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 	spiderAPI = row.SpiderAPI
 	poster = row.Poster
 	remark = row.Remark
-	tmdbYear = row.TMDBYear
 	tmdbID = row.TMDBID
 	tmdbType = row.TMDBType
 	playFlag = row.PlayFlag
@@ -684,12 +660,6 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 	tmdbType = strings.TrimSpace(strings.ToLower(tmdbType))
 	tmdbSeason := row.TMDBSeason
 	tmdbEpisode := row.TMDBEpisode
-	if tmdbSeason <= 0 || tmdbEpisode <= 0 {
-		if typ, tid, s, e, ok := parseTMDBFromPlaybackItemID(strings.TrimSpace(row.PlaybackItemID)); ok && typ == "tv" && tid > 0 {
-			tmdbSeason = s
-			tmdbEpisode = e
-		}
-	}
 	writeJSON(w, 200, map[string]any{
 		"contentKey":            contentKey,
 		"siteKey":               siteKey,
@@ -698,7 +668,6 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 		"siteDetail":            siteDetail,
 		"Poster":                poster,
 		"Remark":                remark,
-		"tmdbYear":              tmdbYear,
 		"tmdbId":                tmdbID,
 		"tmdbType":              tmdbType,
 		"tmdbSeason":            tmdbSeason,
@@ -776,10 +745,8 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数不完整"})
 			return
 		}
-		siteName := getS("siteName")
 		poster := getS("Poster")
 		remark := getS("Remark")
-		tmdbYear := getS("tmdbYear")
 		tmdbID := getI("tmdbId")
 		tmdbType := getS("tmdbType")
 		if tmdbType != "tv" && tmdbType != "movie" {
@@ -820,20 +787,6 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		tmdbSeason := getI("tmdbSeason")
 		tmdbEpisode := getI("tmdbEpisode")
 
-		// If client doesn't send tmdbId/tmdbType (or sends partial), derive them from playbackItemId.
-		if typ, id, s, e, ok := parseTMDBFromPlaybackItemID(playbackItemID); ok {
-			if tmdbID <= 0 || tmdbType == "" {
-				tmdbType = typ
-				tmdbID = id
-			}
-			if tmdbSeason <= 0 {
-				tmdbSeason = s
-			}
-			if tmdbEpisode <= 0 {
-				tmdbEpisode = e
-			}
-		}
-
 		if isNetDiskHistoryItem(siteDetail, playFlag) {
 			// still persist (netdisk items are valid history entries for quick start)
 		}
@@ -848,42 +801,14 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		}
 		poster = normalizeRawHistoryPoster(poster)
 
-		// Derive a Emby item id for resume syncing when possible.
-		if playbackItemID == "" && tmdbID > 0 {
-			if tmdbType == "movie" {
-				playbackItemID = emby.BuildMovieID(tmdbID)
-			} else if tmdbType == "tv" {
-				seasonNo := tmdbSeason
-				epNo := tmdbEpisode
-				if seasonNo <= 0 || epNo <= 0 {
-					// Try to parse from siteEpisodeFile / playFlag (e.g. "S01E04")
-					hay := siteEpisodeFile
-					if hay == "" {
-						hay = playFlag
-					}
-					m := regexp.MustCompile(`(?i)\bS(\d{1,2})E(\d{1,3})\b`).FindStringSubmatch(hay)
-					if len(m) == 3 {
-						seasonNo, _ = strconv.Atoi(m[1])
-						epNo, _ = strconv.Atoi(m[2])
-					}
-				}
-				if seasonNo > 0 && epNo > 0 {
-					playbackItemID = emby.BuildEpisodeID(tmdbID, seasonNo, epNo)
-				}
-			}
-		}
-
 		now := time.Now().Unix()
 		_ = database.UpsertPlayHistory(db.PlayHistoryUpsert{
 			UserID:                u.ID,
 			ContentKey:            contentKey,
 			SiteKey:               siteKey,
-			SiteName:              siteName,
-			SpiderAPI:             spiderAPI,
 			SiteDetail:            siteDetail,
 			Poster:                poster,
 			Remark:                remark,
-			TMDBYear:              tmdbYear,
 			TMDBID:                tmdbID,
 			TMDBType:              tmdbType,
 			PlayFlag:              playFlag,
@@ -995,14 +920,11 @@ func handleAPIFavoritesToggle(w http.ResponseWriter, r *http.Request, database *
 		return
 	}
 	now := time.Now().Unix()
-	siteName := getS("siteName")
 	poster := getS("Poster")
 	remark := getS("Remark")
 	_ = database.UpsertFavorite(db.FavoriteUpsert{
 		UserID:     u.ID,
 		SiteKey:    siteKey,
-		SiteName:   siteName,
-		SpiderAPI:  spiderAPI,
 		SiteDetail: siteDetail,
 		ContentKey: contentKey,
 		Poster:     poster,

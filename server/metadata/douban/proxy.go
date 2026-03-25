@@ -44,7 +44,7 @@ func CanonicalImageProxyMode(value string) string {
 }
 
 // APIBase returns Douban base URL and an optional proxyBase for CORS/relay modes.
-// Behavior matches legacy MeowFilm logic used by Emby and API.
+// Behavior matches the shared MeowFilm logic used by Emby and API.
 func APIBase(database *db.DB) (base string, proxyBase string) {
 	if database == nil {
 		return "https://m.douban.com", ""

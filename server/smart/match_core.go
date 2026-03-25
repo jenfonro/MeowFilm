@@ -691,7 +691,7 @@ func smartExtractMaxEpisodeFromBadgeText(text string) int {
 	return 0
 }
 
-func smartTMDBGlobalEpisodeNoOf(seasons []embyTMDBSeason, season int, episode int) int {
+func smartTMDBGlobalEpisodeNoOf(seasons []smartTMDBSeason, season int, episode int) int {
 	if episode <= 0 {
 		return 0
 	}
@@ -710,7 +710,7 @@ func smartTMDBGlobalEpisodeNoOf(seasons []embyTMDBSeason, season int, episode in
 	return sum + episode
 }
 
-func smartPositiveSeasonCount(seasons []embyTMDBSeason) int {
+func smartPositiveSeasonCount(seasons []smartTMDBSeason) int {
 	out := 0
 	for _, s := range seasons {
 		if s.Season > 0 && s.EpisodeCount > 0 {
@@ -720,7 +720,7 @@ func smartPositiveSeasonCount(seasons []embyTMDBSeason) int {
 	return out
 }
 
-func smartStrictSeasonEpisodeGlobal(seasons []embyTMDBSeason, season int, episode int) int {
+func smartStrictSeasonEpisodeGlobal(seasons []smartTMDBSeason, season int, episode int) int {
 	if season <= 0 || episode <= 0 {
 		return 0
 	}
@@ -737,7 +737,7 @@ func smartStrictSeasonEpisodeGlobal(seasons []embyTMDBSeason, season int, episod
 	return smartTMDBGlobalEpisodeNoOf(seasons, season, episode)
 }
 
-func smartResolveEpisodeMappingStrict(seasons []embyTMDBSeason, se smartSeasonEpisode) (match smartSeasonEpisode, global int, ok bool) {
+func smartResolveEpisodeMappingStrict(seasons []smartTMDBSeason, se smartSeasonEpisode) (match smartSeasonEpisode, global int, ok bool) {
 	episode := se.Episode
 	season := se.Season
 	if episode <= 0 {
@@ -768,9 +768,9 @@ func smartResolveEpisodeMappingStrict(seasons []embyTMDBSeason, se smartSeasonEp
 }
 
 func smartResolveEpisodeMappingSingleBaseline(
-	seasons []embyTMDBSeason,
+	seasons []smartTMDBSeason,
 	se smartSeasonEpisode,
-	singleBaselineSeasons []embyTMDBSeason,
+	singleBaselineSeasons []smartTMDBSeason,
 	primaryFirstSeasonCount int,
 	sourceHasBeyondFirstSeason bool,
 ) (match smartSeasonEpisode, global int, ok bool, loose bool) {
@@ -781,7 +781,7 @@ func smartResolveEpisodeMappingSingleBaseline(
 	if smartPositiveSeasonCount(seasons) < 2 || smartPositiveSeasonCount(singleBaselineSeasons) != 1 {
 		return smartSeasonEpisode{}, 0, false, false
 	}
-	// Frontend-compatible single-baseline fallback:
+	// Frontend-aligned single-baseline path:
 	// when one side is single-season and the current mapping side is multi-season,
 	// fall back to the extracted episode number as a global index only if the
 	// single-season side can absorb it.
@@ -799,9 +799,9 @@ func smartResolveEpisodeMappingSingleBaseline(
 }
 
 func smartResolveEpisodeMappingForPlaybackWithMode(
-	seasons []embyTMDBSeason,
+	seasons []smartTMDBSeason,
 	se smartSeasonEpisode,
-	singleBaselineSeasons []embyTMDBSeason,
+	singleBaselineSeasons []smartTMDBSeason,
 	primaryFirstSeasonCount int,
 	sourceHasBeyondFirstSeason bool,
 	allowSingleBaseline bool,
@@ -835,7 +835,7 @@ func smartResolveEpisodeMappingForPlaybackWithMode(
 	return match, global, true, loose, "degraded-single-baseline", reason
 }
 
-func smartNormalizeMaybeGlobalSeasonEpisode(seasons []embyTMDBSeason, se smartSeasonEpisode) smartSeasonEpisode {
+func smartNormalizeMaybeGlobalSeasonEpisode(seasons []smartTMDBSeason, se smartSeasonEpisode) smartSeasonEpisode {
 	s := se.Season
 	e := se.Episode
 	if e <= 0 {

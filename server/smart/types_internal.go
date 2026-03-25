@@ -73,5 +73,4 @@ type TMDBSeason struct {
 	Poster       string
 }
 
-// Keep legacy name inside smart package so existing code can stay untouched.
-type embyTMDBSeason = TMDBSeason
+type smartTMDBSeason = TMDBSeason

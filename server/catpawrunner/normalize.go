@@ -3,6 +3,8 @@ package catpawrunner
 import (
 	"net/url"
 	"strings"
+
+	mfnet "github.com/jenfonro/meowfilm/server/net"
 )
 
 // NormalizeAPIBase normalizes user input into a catpawrunner base URL that ends with "/".
@@ -60,6 +62,10 @@ func NormalizeAPIBase(inputURL string) string {
 	u.RawQuery = ""
 	u.Fragment = ""
 	return u.String()
+}
+
+func NormalizeHTTPBase(value string) string {
+	return mfnet.NormalizeHTTPBase(value)
 }
 
 func isRuntimeIDPath(path string) bool {
