@@ -127,7 +127,7 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		if !ok {
 			return
 		}
-		writeJSON(w, 200, embyUsersViewsResponse(database, serverID))
+		writeJSON(w, 200, embyUsersViewsResponse(database, serverID, embyIsInfuseClient(r)))
 		return
 	}
 
@@ -447,7 +447,7 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		if parent == "" && searchTerm == "" && strings.TrimSpace(includeItemTypes) == "" && strings.TrimSpace(excludeItemTypes) != "" {
 			startIndex := embyQueryIntClamped(r, "StartIndex", 0, 0, 1<<30)
 			limit := embyQueryIntClamped(r, "Limit", 24, 1, 100)
-			all := embyViewFolders(database, serverID)
+			all := embyViewFolders(database, serverID, embyIsInfuseClient(r))
 			total := len(all)
 			page := []map[string]any{}
 			if startIndex < total {
@@ -477,7 +477,7 @@ func handleEmbyUsers(w http.ResponseWriter, r *http.Request, database *db.DB, se
 		if parent == "" && searchTerm == "" && strings.TrimSpace(includeItemTypes) != "" && !embyIsInfuseClient(r) {
 			startIndex := embyQueryIntClamped(r, "StartIndex", 0, 0, 1<<30)
 			limit := embyQueryIntClamped(r, "Limit", 24, 1, 100)
-			all := embyViewFolders(database, serverID)
+			all := embyViewFolders(database, serverID, embyIsInfuseClient(r))
 			total := len(all)
 			page := []map[string]any{}
 			if startIndex < total {
@@ -1123,7 +1123,6 @@ func embyBuildDoubanHotListItems(database *db.DB, kind string, category string, 
 	wg.Wait()
 
 	out := make([]map[string]any, 0, len(res))
-	nowISO := time.Now().UTC().Format(time.RFC3339)
 	parent := strings.TrimSpace(parentID)
 	for _, rr := range res {
 		it := rr.item
@@ -1149,33 +1148,17 @@ func embyBuildDoubanHotListItems(database *db.DB, kind string, category string, 
 				provider["Tmdb"] = strconv.Itoa(tid)
 				imgTags["Primary"] = "tmdb"
 			}
-			out = append(out, map[string]any{
-				"Id":                      id,
-				"Name":                    name,
-				"SortName":                name,
-				"Type":                    "Movie",
-				"MediaType":               "Video",
-				"LocationType":            "Remote",
-				"IsFolder":                false,
-				"ProductionYear":          year,
-				"DateCreated":             nowISO,
-				"Etag":                    embyStableEtag(id),
-				"Genres":                  []string{},
-				"Overview":                "",
-				"ParentId":                parent,
-				"Path":                    "meowfilm://" + id,
-				"RecursiveItemCount":      0,
-				"ChildCount":              0,
-				"MediaSources":            []any{},
-				"AlternateMediaSources":   []any{},
-				"CommunityRating":         rating,
-				"ProviderIds":             provider,
-				"ImageTags":               imgTags,
-				"BackdropImageTags":       []string{"tmdb"},
-				"ServerId":                serverID,
-				"UserData":                map[string]any{"Played": false},
-				"PrimaryImageAspectRatio": 0.6666667,
-			})
+			out = append(out, embyBuildMovieListCard(embyListCardInput{
+				ID:              id,
+				Name:            name,
+				ProductionYear:  year,
+				CommunityRating: rating,
+				ProviderIDs:     provider,
+				ImageTags:       imgTags,
+				BackdropTags:    []string{"tmdb"},
+				ParentID:        parent,
+				ServerID:        serverID,
+			}))
 		} else {
 			id := embyBuildDoubanSeriesID(it.DoubanID)
 			provider := map[string]any{"Douban": it.DoubanID}
@@ -1185,33 +1168,17 @@ func embyBuildDoubanHotListItems(database *db.DB, kind string, category string, 
 				provider["Tmdb"] = strconv.Itoa(tid)
 				imgTags["Primary"] = "tmdb"
 			}
-			out = append(out, map[string]any{
-				"Id":                      id,
-				"Name":                    name,
-				"SortName":                name,
-				"Type":                    "Series",
-				"MediaType":               "Video",
-				"LocationType":            "Remote",
-				"IsFolder":                true,
-				"ProductionYear":          year,
-				"DateCreated":             nowISO,
-				"Etag":                    embyStableEtag(id),
-				"Genres":                  []string{},
-				"Overview":                "",
-				"ParentId":                parent,
-				"Path":                    "meowfilm://" + id,
-				"RecursiveItemCount":      0,
-				"ChildCount":              0,
-				"MediaSources":            []any{},
-				"AlternateMediaSources":   []any{},
-				"CommunityRating":         rating,
-				"ProviderIds":             provider,
-				"ImageTags":               imgTags,
-				"BackdropImageTags":       []string{"tmdb"},
-				"ServerId":                serverID,
-				"UserData":                map[string]any{"Played": false},
-				"PrimaryImageAspectRatio": 0.6666667,
-			})
+			out = append(out, embyBuildSeriesListCard(embyListCardInput{
+				ID:              id,
+				Name:            name,
+				ProductionYear:  year,
+				CommunityRating: rating,
+				ProviderIDs:     provider,
+				ImageTags:       imgTags,
+				BackdropTags:    []string{"tmdb"},
+				ParentID:        parent,
+				ServerID:        serverID,
+			}))
 		}
 	}
 	return out
@@ -1248,6 +1215,10 @@ func embyFilterItemsByExcludeLocationTypes(items []map[string]any, excludeLocati
 		out = append(out, it)
 	}
 	return out
+}
+
+func embyNowISO() string {
+	return time.Now().UTC().Format(time.RFC3339)
 }
 
 func embyStableEtag(id string) string {

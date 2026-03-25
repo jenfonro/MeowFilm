@@ -21,6 +21,131 @@ func embyIsAiredDate(airDate string, now time.Time) bool {
 	return tmdb.IsAirDateAiredOrToday(s, now)
 }
 
+func embyBuildTMDBEpisodeItem(
+	seriesID string,
+	seriesName string,
+	seasonID string,
+	seasonName string,
+	parentBackdropTags []string,
+	seasonNo int,
+	episodeNo int,
+	name string,
+	overview string,
+	premiereISO string,
+) map[string]any {
+	epID := ""
+	if parsed, ok := embyParseItemID(seriesID); ok && parsed != nil && parsed.TMDBID > 0 {
+		epID = embyBuildEpisodeID(parsed.TMDBID, seasonNo, episodeNo)
+	}
+	mediaPath := embyBuildMediaPath(epID, "mp4")
+	mediaSourceID := embyStableHex32(epID)
+	return map[string]any{
+		"Id":                      epID,
+		"Name":                    name,
+		"SeriesName":              seriesName,
+		"SeasonName":              seasonName,
+		"Overview":                overview,
+		"Type":                    "Episode",
+		"MediaType":               "Video",
+		"IsFolder":                false,
+		"LocationType":            "Remote",
+		"Path":                    mediaPath,
+		"Container":               "mp4,m4v",
+		"PremiereDate":            premiereISO,
+		"CanDownload":             true,
+		"RunTimeTicks":            0,
+		"Chapters":                []any{},
+		"People":                  []any{},
+		"Size":                    0,
+		"SeriesId":                seriesID,
+		"SeasonId":                seasonID,
+		"ParentId":                seasonID,
+		"ParentBackdropItemId":    seriesID,
+		"ParentBackdropImageTags": parentBackdropTags,
+		"IndexNumber":             episodeNo,
+		"ParentIndexNumber":       seasonNo,
+		"ImageTags":               map[string]any{"Primary": "tmdb", "Thumb": "tmdb"},
+		"UserData":                map[string]any{"Played": false},
+		"MediaSources": []map[string]any{
+			{
+				"Id":                   mediaSourceID,
+				"MediaSourceId":        mediaSourceID,
+				"Protocol":             "File",
+				"IsRemote":             false,
+				"Path":                 mediaPath,
+				"Container":            "mp4",
+				"RequiredHttpHeaders":  map[string]string{},
+				"SupportsDirectPlay":   true,
+				"SupportsDirectStream": true,
+				"SupportsTranscoding":  true,
+				"SupportsProbing":      true,
+				"Type":                 "Default",
+			},
+		},
+		"AlternateMediaSources": []any{},
+	}
+}
+
+func embyBuildSiteEpisodeItem(
+	siteVideoID int64,
+	seriesID string,
+	seriesName string,
+	seasonID string,
+	seasonName string,
+	seasonNo int,
+	episodeNo int,
+	name string,
+) map[string]any {
+	epID := embyBuildSiteEpisodeIDV2(siteVideoID, seasonNo, episodeNo)
+	mediaPath := embyBuildMediaPath(epID, "mp4")
+	mediaSourceID := embyStableHex32(epID)
+	return map[string]any{
+		"Id":                      epID,
+		"Name":                    name,
+		"SeriesName":              seriesName,
+		"SeasonName":              seasonName,
+		"Overview":                "",
+		"Type":                    "Episode",
+		"MediaType":               "Video",
+		"IsFolder":                false,
+		"LocationType":            "Remote",
+		"Path":                    mediaPath,
+		"Container":               "mp4,m4v",
+		"PremiereDate":            "",
+		"CanDownload":             true,
+		"RunTimeTicks":            0,
+		"Chapters":                []any{},
+		"People":                  []any{},
+		"Size":                    0,
+		"SeriesId":                seriesID,
+		"SeasonId":                seasonID,
+		"ParentId":                seasonID,
+		"ParentBackdropItemId":    seriesID,
+		"ParentBackdropImageTags": []string{"site"},
+		"IndexNumber":             episodeNo,
+		"ParentIndexNumber":       seasonNo,
+		"ImageTags":               map[string]any{"Primary": "site", "Thumb": "site"},
+		"UserData":                map[string]any{"Played": false},
+		"MediaSources": []map[string]any{
+			{
+				"Id":                   mediaSourceID,
+				"MediaSourceId":        mediaSourceID,
+				"Protocol":             "File",
+				"IsRemote":             false,
+				"Path":                 mediaPath,
+				"Container":            "mp4",
+				"RequiredHttpHeaders":  map[string]string{},
+				"SupportsDirectPlay":   true,
+				"SupportsDirectStream": true,
+				"SupportsTranscoding":  true,
+				"SupportsProbing":      true,
+				"Type":                 "Default",
+			},
+		},
+		"AlternateMediaSources": []any{},
+	}
+}
+
 func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, serverID string, parts []string) {
 	// GET /Shows/NextUp?UserId=...
 	if len(parts) >= 1 && strings.EqualFold(parts[0], "NextUp") && r.Method == http.MethodGet {
@@ -322,12 +447,111 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 					}
 				}
 				if strings.TrimSpace(seasonID) == "" {
-					// Default to first pan.
-					if len(pans) > 0 {
-						seasonNo = 1
-						label = embyNormalizePanDisplayLabel(pans[0].Label)
+					out := make([]map[string]any, 0, 64)
+					for panIdx, pan := range pans {
+						curSeasonNo := panIdx + 1
+						curSeasonID := embyBuildSiteSeasonIDV2(siteVideoID, curSeasonNo)
+						if curSeasonID == "" {
+							continue
+						}
+						curSeasonName := embyNormalizePanDisplayLabel(pan.Label)
+						if curSeasonName == "" {
+							curSeasonName = "第" + intToCN(curSeasonNo) + "季"
+						}
+						allRawSame := true
+						firstRawName := ""
+						for _, ep := range pan.Episodes {
+							epURL := strings.TrimSpace(ep.URL)
+							if epURL == "" {
+								continue
+							}
+							rawName := ""
+							if rawNames := smartExtractRawNamesFromEpisodeURL(epURL); len(rawNames) > 0 {
+								rawName = strings.TrimSpace(rawNames[0])
+							}
+							if firstRawName == "" {
+								firstRawName = rawName
+							} else if rawName != firstRawName {
+								allRawSame = false
+								break
+							}
+						}
+						for i, ep := range pan.Episodes {
+							epURL := strings.TrimSpace(ep.URL)
+							if epURL == "" {
+								continue
+							}
+							epIndex := i + 1
+							epName := strings.TrimSpace(ep.Name)
+							rawName := ""
+							if rawNames := smartExtractRawNamesFromEpisodeURL(epURL); len(rawNames) > 0 {
+								rawName = strings.TrimSpace(rawNames[0])
+							}
+							if !allRawSame {
+								pid := embyPanMockProviderFromLabel(strings.TrimSpace(ep.Flag))
+								if pid == "" {
+									pid = embyPanMockProviderFromLabel(strings.TrimSpace(pan.Label))
+								}
+								preferFile := pan.PanMockEnabled && pid != ""
+								epName = embyPickEpisodeDisplayName(epName, rawName, strings.ToLower(seriesName), preferFile)
+							}
+							if epName == "" {
+								epName = "第" + intToCN(epIndex) + "集"
+							}
+							out = append(out, embyBuildSiteEpisodeItem(
+								siteVideoID,
+								seriesID,
+								seriesName,
+								curSeasonID,
+								curSeasonName,
+								curSeasonNo,
+								epIndex,
+								epName,
+							))
+						}
 					}
-					seasonID = embyBuildSiteSeasonIDV2(siteVideoID, seasonNo)
+					{
+						ids := make([]string, 0, len(out))
+						for _, it := range out {
+							if id, ok := it["Id"].(string); ok && strings.TrimSpace(id) != "" {
+								ids = append(ids, strings.TrimSpace(id))
+							}
+						}
+						hit := embyQueryPlayHistoryByItemIDs(database, u.ID, ids)
+						if len(hit) > 0 {
+							for _, it := range out {
+								id, _ := it["Id"].(string)
+								id = strings.TrimSpace(id)
+								if id == "" {
+									continue
+								}
+								if snap, ok := hit[id]; ok {
+									embyApplyPlayHistoryToItemUserData(u.ID, id, it, snap)
+								}
+							}
+						}
+					}
+					sort.Slice(out, func(i, j int) bool {
+						aSeason := intVal(out[i]["ParentIndexNumber"])
+						bSeason := intVal(out[j]["ParentIndexNumber"])
+						if aSeason != bSeason {
+							return aSeason < bSeason
+						}
+						return intVal(out[i]["IndexNumber"]) < intVal(out[j]["IndexNumber"])
+					})
+					for _, it := range out {
+						embyEnsureShowsItemFields(it, fieldsParam)
+						if id, ok := it["Id"].(string); ok && strings.TrimSpace(id) != "" {
+							if _, ok := it["Etag"]; !ok {
+								it["Etag"] = embyStableEtag(strings.TrimSpace(id))
+							}
+						}
+						if _, ok := it["ServerId"]; !ok && strings.TrimSpace(serverID) != "" {
+							it["ServerId"] = serverID
+						}
+					}
+					writeJSON(w, 200, embyPagedItems(out, 0, len(out)))
+					return
 				}
 				if seasonNo <= 0 {
 					seasonNo = 1
@@ -390,57 +614,16 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 					if epName == "" {
 						epName = "第" + intToCN(epIndex) + "集"
 					}
-					epID := embyBuildSiteEpisodeIDV2(siteVideoID, seasonNo, epIndex)
-					if epID == "" {
-						continue
-					}
-					mediaPath := embyBuildMediaPath(epID, "mp4")
-					mediaSourceID := embyStableHex32(epID)
-					out = append(out, map[string]any{
-						"Id":                      epID,
-						"Name":                    epName,
-						"SeriesName":              seriesName,
-						"SeasonName":              seasonName,
-						"Overview":                "",
-						"Type":                    "Episode",
-						"MediaType":               "Video",
-						"IsFolder":                false,
-						"LocationType":            "Remote",
-						"Path":                    mediaPath,
-						"Container":               "mp4,m4v",
-						"PremiereDate":            "",
-						"CanDownload":             true,
-						"RunTimeTicks":            0,
-						"Chapters":                []any{},
-						"People":                  []any{},
-						"Size":                    0,
-						"SeriesId":                seriesID,
-						"SeasonId":                seasonID,
-						"ParentId":                seasonID,
-						"ParentBackdropItemId":    seriesID,
-						"ParentBackdropImageTags": []string{"site"},
-						"IndexNumber":             epIndex,
-						"ParentIndexNumber":       seasonNo,
-						"ImageTags":               map[string]any{"Primary": "site", "Thumb": "site"},
-						"UserData":                map[string]any{"Played": false},
-						"MediaSources": []map[string]any{
-							{
-								"Id":                   mediaSourceID,
-								"MediaSourceId":        mediaSourceID,
-								"Protocol":             "File",
-								"IsRemote":             false,
-								"Path":                 mediaPath,
-								"Container":            "mp4",
-								"RequiredHttpHeaders":  map[string]string{},
-								"SupportsDirectPlay":   true,
-								"SupportsDirectStream": true,
-								"SupportsTranscoding":  true,
-								"SupportsProbing":      true,
-								"Type":                 "Default",
-							},
-						},
-						"AlternateMediaSources": []any{},
-					})
+					out = append(out, embyBuildSiteEpisodeItem(
+						siteVideoID,
+						seriesID,
+						seriesName,
+						seasonID,
+						seasonName,
+						seasonNo,
+						epIndex,
+						epName,
+					))
 				}
 				// Populate per-episode playback position from play_history so clients can render resume/progress.
 				{
@@ -571,18 +754,106 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			}
 			seasonNo = sParsed.Season
 		} else {
-			// Emby typically allows omitting SeasonId to list episodes; default to S01 when present.
-			seasonNo = 0
+			// Without SeasonId, return all aired episodes across all seasons.
+			out := make([]map[string]any, 0, 64)
+			now := time.Now()
 			for _, s := range d.Seasons {
-				if s.Season >= 1 {
-					seasonNo = s.Season
-					break
+				if s.Season < 0 || s.EpisodeCount <= 0 {
+					continue
+				}
+				if d.LatestSeason > 0 && s.Season > d.LatestSeason {
+					continue
+				}
+				maxEpisodeAllowed := 0
+				if d.LatestSeason > 0 && s.Season == d.LatestSeason && d.LatestEpisode > 0 {
+					maxEpisodeAllowed = d.LatestEpisode
+				}
+				episodes, err := embyTMDBGetTVSeasonEpisodes(database, parsed.TMDBID, s.Season)
+				if err != nil {
+					embyWriteError(w, 502, "TMDB 请求失败")
+					return
+				}
+				curSeasonID := embyBuildSeasonID(parsed.TMDBID, s.Season)
+				curSeasonName := "第" + intToCN(s.Season) + "季"
+				if s.Season == 0 {
+					curSeasonName = "特别篇"
+				}
+				for _, e := range episodes {
+					if e.Episode <= 0 {
+						continue
+					}
+					if maxEpisodeAllowed > 0 && e.Episode > maxEpisodeAllowed {
+						continue
+					}
+					if !embyIsAiredDate(e.AirDate, now) {
+						continue
+					}
+					name := strings.TrimSpace(e.Name)
+					if name == "" {
+						name = "第" + intToCN(e.Episode) + "集"
+					}
+					premiereISO := ""
+					if airDate := strings.TrimSpace(e.AirDate); airDate != "" {
+						if t, ok := tmdb.ParseAirDateCNMidnight(airDate); ok {
+							premiereISO = t.UTC().Format(time.RFC3339)
+						}
+					}
+					out = append(out, embyBuildTMDBEpisodeItem(
+						seriesID,
+						seriesName,
+						curSeasonID,
+						curSeasonName,
+						[]string{"tmdb"},
+						s.Season,
+						e.Episode,
+						name,
+						e.Overview,
+						premiereISO,
+					))
 				}
 			}
-			if seasonNo == 0 {
-				seasonNo = 1
+			{
+				ids := make([]string, 0, len(out))
+				for _, it := range out {
+					if id, ok := it["Id"].(string); ok && strings.TrimSpace(id) != "" {
+						ids = append(ids, strings.TrimSpace(id))
+					}
+				}
+				hit := embyQueryPlayHistoryByItemIDs(database, u.ID, ids)
+				if len(hit) > 0 {
+					for _, it := range out {
+						id, _ := it["Id"].(string)
+						id = strings.TrimSpace(id)
+						if id == "" {
+							continue
+						}
+						if snap, ok := hit[id]; ok {
+							embyApplyPlayHistoryToItemUserData(u.ID, id, it, snap)
+						}
+					}
+				}
 			}
-			seasonID = embyBuildSeasonID(parsed.TMDBID, seasonNo)
+			sort.Slice(out, func(i, j int) bool {
+				aSeason := intVal(out[i]["ParentIndexNumber"])
+				bSeason := intVal(out[j]["ParentIndexNumber"])
+				if aSeason != bSeason {
+					return aSeason < bSeason
+				}
+				return intVal(out[i]["IndexNumber"]) < intVal(out[j]["IndexNumber"])
+			})
+			for _, it := range out {
+				embyEnsureShowsItemFields(it, fieldsParam)
+				if id, ok := it["Id"].(string); ok && strings.TrimSpace(id) != "" {
+					if _, ok := it["Etag"]; !ok {
+						it["Etag"] = embyStableEtag(strings.TrimSpace(id))
+					}
+				}
+				if _, ok := it["ServerId"]; !ok && strings.TrimSpace(serverID) != "" {
+					it["ServerId"] = serverID
+				}
+			}
+			writeJSON(w, 200, embyPagedItems(out, 0, len(out)))
+			return
 		}
 		seasonName := "第" + intToCN(seasonNo) + "季"
 		if seasonNo == 0 {
@@ -619,9 +890,6 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 			if name == "" {
 				name = "第" + intToCN(e.Episode) + "集"
 			}
-			epID := embyBuildEpisodeID(parsed.TMDBID, seasonNo, e.Episode)
-			mediaPath := embyBuildMediaPath(epID, "mp4")
-			mediaSourceID := embyStableHex32(epID)
 			premiere := strings.TrimSpace(e.AirDate)
 			premiereISO := ""
 			if premiere != "" {
@@ -629,51 +897,18 @@ func handleEmbyShows(w http.ResponseWriter, r *http.Request, database *db.DB, se
 					premiereISO = t.UTC().Format(time.RFC3339)
 				}
 			}
-			out = append(out, map[string]any{
-				"Id":                      epID,
-				"Name":                    name,
-				"SeriesName":              seriesName,
-				"SeasonName":              seasonName,
-				"Overview":                e.Overview,
-				"Type":                    "Episode",
-				"MediaType":               "Video",
-				"IsFolder":                false,
-				"LocationType":            "Remote",
-				"Path":                    mediaPath,
-				"Container":               "mp4,m4v",
-				"PremiereDate":            premiereISO,
-				"CanDownload":             true,
-				"RunTimeTicks":            0,
-				"Chapters":                []any{},
-				"People":                  []any{},
-				"Size":                    0,
-				"SeriesId":                seriesID,
-				"SeasonId":                seasonID,
-				"ParentId":                seasonID,
-				"ParentBackdropItemId":    seriesID,
-				"ParentBackdropImageTags": []string{"tmdb"},
-				"IndexNumber":             e.Episode,
-				"ParentIndexNumber":       seasonNo,
-				"ImageTags":               map[string]any{"Primary": "tmdb", "Thumb": "tmdb"},
-				"UserData":                map[string]any{"Played": false},
-				"MediaSources": []map[string]any{
-					{
-						"Id":                   mediaSourceID,
-						"MediaSourceId":        mediaSourceID,
-						"Protocol":             "File",
-						"IsRemote":             false,
-						"Path":                 mediaPath,
-						"Container":            "mp4",
-						"RequiredHttpHeaders":  map[string]string{},
-						"SupportsDirectPlay":   true,
-						"SupportsDirectStream": true,
-						"SupportsTranscoding":  true,
-						"SupportsProbing":      true,
-						"Type":                 "Default",
-					},
-				},
-				"AlternateMediaSources": []any{},
-			})
+			out = append(out, embyBuildTMDBEpisodeItem(
+				seriesID,
+				seriesName,
+				seasonID,
+				seasonName,
+				[]string{"tmdb"},
+				seasonNo,
+				e.Episode,
+				name,
+				e.Overview,
+				premiereISO,
+			))
 		}
 		// Populate per-episode playback position from play_history so clients can render resume/progress.
 		{

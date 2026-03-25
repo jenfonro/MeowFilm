@@ -30,11 +30,11 @@ func embyGroupingOptions(database *db.DB) []map[string]any {
 	return out
 }
 
-func embyViewFolders(database *db.DB, serverID string) []map[string]any {
+func embyViewFolders(database *db.DB, serverID string, infuse bool) []map[string]any {
 	secs := embyHomeSections(database)
 	out := make([]map[string]any, 0, len(secs))
 	for i, s := range secs {
-		ct := embyCollectionTypeForHomeSection(s)
+		ct := embyCollectionTypeForHomeSection(s, infuse)
 		it := embyBuildViewFolderItem(
 			serverID,
 			strings.TrimSpace(s.ID),
@@ -55,7 +55,7 @@ func embyViewFolderItemByID(database *db.DB, serverID string, id string) (map[st
 	}
 	for i, s := range embyHomeSections(database) {
 		if strings.TrimSpace(s.ID) == want {
-			ct := embyCollectionTypeForHomeSection(s)
+			ct := embyCollectionTypeForHomeSection(s, false)
 			it := embyBuildViewFolderItem(serverID, want, strings.TrimSpace(s.Name), ct)
 			it["SortName"] = fmt.Sprintf("%06d", i)
 			return it, true
@@ -64,9 +64,11 @@ func embyViewFolderItemByID(database *db.DB, serverID string, id string) (map[st
 	return nil, false
 }
 
-func embyCollectionTypeForHomeSection(s db.EmbyHomeSection) string {
-	// History is naturally mixed (movie + tv); don't force a single CollectionType.
+func embyCollectionTypeForHomeSection(s db.EmbyHomeSection, infuse bool) string {
 	if strings.EqualFold(strings.TrimSpace(s.Module), "history") {
+		if infuse {
+			return "homevideos"
+		}
 		return ""
 	}
 	if strings.EqualFold(strings.TrimSpace(s.MediaType), "movie") {
@@ -75,16 +77,16 @@ func embyCollectionTypeForHomeSection(s db.EmbyHomeSection) string {
 	return "tvshows"
 }
 
-func embyUsersViewsResponse(database *db.DB, serverID string) map[string]any {
-	items := embyViewFolders(database, serverID)
+func embyUsersViewsResponse(database *db.DB, serverID string, infuse bool) map[string]any {
+	items := embyViewFolders(database, serverID, infuse)
 	return map[string]any{
 		"Items":            items,
 		"TotalRecordCount": len(items),
 	}
 }
 
-func embyUserViewsResponse(database *db.DB, serverID string) map[string]any {
-	items := embyViewFolders(database, serverID)
+func embyUserViewsResponse(database *db.DB, serverID string, infuse bool) map[string]any {
+	items := embyViewFolders(database, serverID, infuse)
 	return embyPagedItems(items, 0, len(items))
 }
 
