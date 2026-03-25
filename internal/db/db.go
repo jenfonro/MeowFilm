@@ -290,6 +290,7 @@ func (d *DB) ensureSchema() error {
 						  play_flag TEXT NOT NULL DEFAULT '',
 						  site_episode_index INTEGER NOT NULL DEFAULT 0,
 						  site_episode_file TEXT NOT NULL DEFAULT '',
+						  tmdb_year TEXT NOT NULL DEFAULT '',
 						  tmdb_season INTEGER NOT NULL DEFAULT 0,
 						  tmdb_episode INTEGER NOT NULL DEFAULT 0,
 						  playback_position_ticks INTEGER NOT NULL DEFAULT 0,
@@ -755,6 +756,20 @@ func markTxMigrationFlag(tx *sql.Tx, name string) error {
 	return err
 }
 
+func hasTxTable(tx *sql.Tx, name string) (bool, error) {
+	if tx == nil || strings.TrimSpace(name) == "" {
+		return false, nil
+	}
+	var count int
+	if err := tx.QueryRow(
+		`SELECT COUNT(1) FROM sqlite_master WHERE type='table' AND name=?`,
+		strings.TrimSpace(name),
+	).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 func ensureSmartMatchBlockItemSchema(tx *sql.Tx) error {
 	const migrationName = "schema_reset_smart_match_block_item_v1"
 	if tx == nil {
@@ -860,38 +875,41 @@ func ensureCacheSitePanSchema(tx *sql.Tx) error {
 }
 
 func ensureUserPlayHistorySchema(tx *sql.Tx) error {
-	const migrationName = "schema_reset_user_play_history_v1"
+	const createMigrationName = "schema_user_play_history_v1_create"
+	const addTMDBYearMigrationName = "schema_user_play_history_v2_add_tmdb_year"
+	const legacyResetMigrationName = "schema_reset_user_play_history_v1"
 	if tx == nil {
 		return nil
 	}
-	if done, err := hasTxMigrationFlag(tx, migrationName); err == nil && done {
-		return nil
-	}
-	if _, err := tx.Exec(`DROP TABLE IF EXISTS user_play_history`); err != nil {
+	exists, err := hasTxTable(tx, "user_play_history")
+	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`
-		CREATE TABLE user_play_history (
-		  id INTEGER PRIMARY KEY AUTOINCREMENT,
-		  user_id INTEGER NOT NULL,
-		  content_id INTEGER NOT NULL,
-		  site_video_id INTEGER NOT NULL,
-		  play_flag TEXT NOT NULL DEFAULT '',
-		  site_episode_index INTEGER NOT NULL DEFAULT 0,
-		  site_episode_file TEXT NOT NULL DEFAULT '',
-		  tmdb_season INTEGER NOT NULL DEFAULT 0,
-		  tmdb_episode INTEGER NOT NULL DEFAULT 0,
-		  playback_position_ticks INTEGER NOT NULL DEFAULT 0,
-		  playback_runtime_ticks INTEGER NOT NULL DEFAULT 0,
-		  playback_item_id TEXT NOT NULL DEFAULT '',
-		  updated_at INTEGER NOT NULL,
-		  UNIQUE(user_id, site_video_id),
-		  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
-		  FOREIGN KEY(content_id) REFERENCES content(id) ON DELETE CASCADE,
-		  FOREIGN KEY(site_video_id) REFERENCES site_video(id) ON DELETE CASCADE
-		)
-	`); err != nil {
-		return err
+	if !exists {
+		if _, err := tx.Exec(`
+			CREATE TABLE user_play_history (
+			  id INTEGER PRIMARY KEY AUTOINCREMENT,
+			  user_id INTEGER NOT NULL,
+			  content_id INTEGER NOT NULL,
+			  site_video_id INTEGER NOT NULL,
+			  play_flag TEXT NOT NULL DEFAULT '',
+			  site_episode_index INTEGER NOT NULL DEFAULT 0,
+			  site_episode_file TEXT NOT NULL DEFAULT '',
+			  tmdb_year TEXT NOT NULL DEFAULT '',
+			  tmdb_season INTEGER NOT NULL DEFAULT 0,
+			  tmdb_episode INTEGER NOT NULL DEFAULT 0,
+			  playback_position_ticks INTEGER NOT NULL DEFAULT 0,
+			  playback_runtime_ticks INTEGER NOT NULL DEFAULT 0,
+			  playback_item_id TEXT NOT NULL DEFAULT '',
+			  updated_at INTEGER NOT NULL,
+			  UNIQUE(user_id, site_video_id),
+			  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+			  FOREIGN KEY(content_id) REFERENCES content(id) ON DELETE CASCADE,
+			  FOREIGN KEY(site_video_id) REFERENCES site_video(id) ON DELETE CASCADE
+			)
+		`); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_user_play_history_user_updated_at ON user_play_history(user_id, updated_at DESC)`); err != nil {
 		return err
@@ -902,7 +920,49 @@ func ensureUserPlayHistorySchema(tx *sql.Tx) error {
 	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_user_play_history_user_playback_item ON user_play_history(user_id, playback_item_id)`); err != nil {
 		return err
 	}
-	return markTxMigrationFlag(tx, migrationName)
+
+	if done, err := hasTxMigrationFlag(tx, createMigrationName); err == nil && !done {
+		if err := markTxMigrationFlag(tx, createMigrationName); err != nil {
+			return err
+		}
+	}
+	if done, err := hasTxMigrationFlag(tx, legacyResetMigrationName); err == nil && !done {
+		if err := markTxMigrationFlag(tx, legacyResetMigrationName); err != nil {
+			return err
+		}
+	}
+
+	rows, err := tx.Query(`PRAGMA table_info(user_play_history)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			typ        string
+			notnull    int
+			dfltValue  any
+			primaryKey int
+		)
+		_ = rows.Scan(&cid, &name, &typ, &notnull, &dfltValue, &primaryKey)
+		if name != "" {
+			cols[name] = true
+		}
+	}
+	if !cols["tmdb_year"] {
+		if _, err := tx.Exec(`ALTER TABLE user_play_history ADD COLUMN tmdb_year TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	if done, err := hasTxMigrationFlag(tx, addTMDBYearMigrationName); err == nil && !done {
+		if err := markTxMigrationFlag(tx, addTMDBYearMigrationName); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (d *DB) ensureDefaultAdmin() error {
