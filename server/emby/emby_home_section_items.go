@@ -52,10 +52,7 @@ func embyBuildHistorySectionItems(database *db.DB, u *embyUser, startIndex int, 
 	}
 
 	type histRow struct {
-		itemID    string
-		groupID   string
-		dedupeKey string
-		snap      db.PlayHistorySnapshot
+		groupID string
 	}
 	seen := map[string]struct{}{}
 	rows := make([]histRow, 0, len(hist))
@@ -106,12 +103,7 @@ func embyBuildHistorySectionItems(database *db.DB, u *embyUser, startIndex int, 
 		}
 		seen[dedupeKey] = struct{}{}
 
-		rows = append(rows, histRow{
-			itemID:    itemID,
-			groupID:   groupID,
-			dedupeKey: dedupeKey,
-			snap:      db.PlayHistorySnapshot{Pos: h.PlaybackPositionTicks, Runtime: h.PlaybackRuntimeTicks, Updated: h.UpdatedAt},
-		})
+		rows = append(rows, histRow{groupID: groupID})
 		if len(rows) >= limit {
 			break
 		}
@@ -120,39 +112,17 @@ func embyBuildHistorySectionItems(database *db.DB, u *embyUser, startIndex int, 
 	items := make([]map[string]any, 0, len(rows))
 	parent := strings.TrimSpace(parentID)
 	for _, row := range rows {
-		jid := strings.TrimSpace(row.groupID)
-		obj, err := embyBuildItem(database, jid)
-		if err != nil || obj == nil {
+		obj := embyBuildListCardFromID(database, row.groupID, parent, serverID)
+		if obj == nil {
 			continue
 		}
-		if _, ok := obj["UserData"]; !ok {
-			obj["UserData"] = map[string]any{"Played": false}
+		typ := strings.ToLower(strings.TrimSpace(embyAnyToString(obj["Type"])))
+		switch typ {
+		case "movie":
+			items = append(items, obj)
+		case "series":
+			items = append(items, obj)
 		}
-
-		snap := row.snap
-		ud, _ := obj["UserData"].(map[string]any)
-		if ud == nil {
-			ud = map[string]any{}
-		}
-		pos := snap.Pos
-		if pos < 0 {
-			pos = 0
-		}
-		// Use last episode/movie progress as a hint on the series card.
-		if snap.Runtime > 0 && pos > 0 {
-			ud["PlayedPercentage"] = (float64(pos) / float64(snap.Runtime)) * 100.0
-		}
-		if snap.Updated > 0 {
-			ud["LastPlayedDate"] = time.Unix(snap.Updated, 0).UTC().Format(time.RFC3339Nano)
-		}
-		if _, ok := ud["Key"]; !ok {
-			ud["Key"] = embyStableKeyDigits(u.ID + ":" + row.itemID)
-		}
-		obj["UserData"] = ud
-		obj["ParentId"] = parent
-		embyEnsureInfuseItemFields(obj, jid, fieldsParam, serverID)
-		embyEnsureStandardItem(obj, serverID)
-		items = append(items, obj)
 	}
 	return items
 }

@@ -32,7 +32,7 @@ func handleEmbyUserViews(w http.ResponseWriter, r *http.Request, database *db.DB
 		if !embyAllowEmptyOrRequireSameUserOrNotFound(w, u.ID, userID) {
 			return
 		}
-		writeJSON(w, 200, embyUserViewsResponse(database, serverID))
+		writeJSON(w, 200, embyUserViewsResponse(database, serverID, embyIsInfuseClient(r)))
 		return
 	}
 
