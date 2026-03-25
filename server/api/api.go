@@ -296,6 +296,7 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 				settings["doubanDataCustom"] = cfg.DoubanDataCustom
 				settings["doubanImgProxy"] = douban.CanonicalImageProxyMode(cfg.DoubanImgProxy)
 				settings["doubanImgCustom"] = cfg.DoubanImgCustom
+				settings["tmdbImageProxyBase"] = strings.TrimSpace(cfg.TMDBImgBase)
 			}
 
 			// Search / playback: settings used by front-end to talk to catpawrunner and to normalize titles.
@@ -304,6 +305,7 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 				settings["doubanDataCustom"] = cfg.DoubanDataCustom
 				settings["doubanImgProxy"] = douban.CanonicalImageProxyMode(cfg.DoubanImgProxy)
 				settings["doubanImgCustom"] = cfg.DoubanImgCustom
+				settings["tmdbImageProxyBase"] = strings.TrimSpace(cfg.TMDBImgBase)
 				settings["doubanSearchCookieConfigured"] = strings.TrimSpace(cfg.DoubanSearchCookie) != ""
 
 				if v, _ := database.ListMagicAggregateRegexRules(); v != nil {
