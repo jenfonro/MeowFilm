@@ -447,6 +447,17 @@ func handleDashboardBackup(w http.ResponseWriter, r *http.Request, database *db.
 			"pans":        map[string]any{"baidu": s.PansBaidu, "quark": s.PansQuark},
 		})
 	}
+	relayServersRaw, _ := database.ListRelayServers()
+	relayServers := make([]map[string]any, 0, len(relayServersRaw))
+	for _, s := range relayServersRaw {
+		relayServers = append(relayServers, map[string]any{
+			"name":        s.Name,
+			"displayName": s.DisplayName,
+			"base":        s.Base,
+			"secret":      s.Secret,
+			"pans":        map[string]any{"baidu": s.PansBaidu, "quark": s.PansQuark},
+		})
+	}
 
 	panLogin, _ := database.ReadPanLoginSettings()
 
@@ -500,9 +511,15 @@ func handleDashboardBackup(w http.ResponseWriter, r *http.Request, database *db.
 
 	writeJSON(w, 200, map[string]any{
 		"success":    true,
+		"format":     "meowfilm-dashboard-settings",
 		"version":    1,
 		"exportedAt": time.Now().Unix(),
-		"appConfig":  cfg,
+		"site": map[string]any{
+			"siteName":            strings.TrimSpace(cfg.SiteName),
+			"searchDisplayMode":   defaultString(strings.TrimSpace(cfg.SearchDisplayMode), "sites"),
+			"netdiskProxyEnabled": cfg.NetdiskProxyEnabled,
+			"netdiskProxyUrl":     strings.TrimSpace(cfg.NetdiskProxyURL),
+		},
 		"catpawrunner": map[string]any{
 			"active":  strings.TrimSpace(cfg.CatpawrunnerActive),
 			"servers": catServers,
@@ -513,11 +530,16 @@ func handleDashboardBackup(w http.ResponseWriter, r *http.Request, database *db.
 			"autoSelect": cfg.GoProxyAutoSelect,
 			"servers":    goProxyServers,
 		},
+		"relay": map[string]any{
+			"enabled":            cfg.RelayEnabled,
+			"auth":               strings.TrimSpace(cfg.RelayAuthToken),
+			"goProxyThresholdGB": maxInt(0, cfg.RelayGoProxyThresholdGB),
+			"servers":            relayServers,
+		},
 		"pan": map[string]any{
 			"loginSettings": panLogin,
 		},
 		"videoSource": map[string]any{
-			"apiBase":         strings.TrimSpace(cfg.VideoSourceAPIBase),
 			"searchCoverSite": strings.TrimSpace(cfg.VideoSourceSearchCoverSite),
 			"sites":           videoSites,
 			"states":          videoStates,
@@ -585,121 +607,70 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 		a, _ := v.([]any)
 		return a
 	}
+	readTrimmedString := func(m map[string]any, key string) (string, bool) {
+		if m == nil || key == "" {
+			return "", false
+		}
+		v, ok := m[key]
+		if !ok || v == nil {
+			return "", false
+		}
+		s, _ := v.(string)
+		return strings.TrimSpace(s), true
+	}
+	readBool := func(m map[string]any, key string) (bool, bool) {
+		if m == nil || key == "" {
+			return false, false
+		}
+		v, ok := m[key]
+		if !ok || v == nil {
+			return false, false
+		}
+		b, ok := v.(bool)
+		return b, ok
+	}
+	readInt := func(m map[string]any, key string) (int, bool) {
+		if m == nil || key == "" {
+			return 0, false
+		}
+		v, ok := m[key]
+		if !ok || v == nil {
+			return 0, false
+		}
+		switch n := v.(type) {
+		case float64:
+			return maxInt(0, int(n)), true
+		case int:
+			return maxInt(0, n), true
+		default:
+			return 0, false
+		}
+	}
 
 	applied := map[string]any{}
 
-	if cfgObj := readObj(body, "appConfig"); cfgObj != nil {
-		readStr := func(keys ...string) (string, bool) {
-			for _, k := range keys {
-				v, ok := cfgObj[k]
-				if !ok || v == nil {
-					continue
-				}
-				s, _ := v.(string)
-				return strings.TrimSpace(s), true
-			}
-			return "", false
-		}
-		readBool := func(keys ...string) (bool, bool) {
-			for _, k := range keys {
-				v, ok := cfgObj[k]
-				if !ok || v == nil {
-					continue
-				}
-				b, ok := v.(bool)
-				if ok {
-					return b, true
-				}
-			}
-			return false, false
-		}
-		readInt := func(keys ...string) (int, bool) {
-			for _, k := range keys {
-				v, ok := cfgObj[k]
-				if !ok || v == nil {
-					continue
-				}
-				switch n := v.(type) {
-				case float64:
-					return maxInt(0, int(n)), true
-				case int:
-					return maxInt(0, n), true
-				}
-			}
-			return 0, false
-		}
+	if siteObj := readObj(body, "site"); siteObj != nil {
 		_ = database.UpdateAppConfig(func(c *db.AppConfig) {
-			if s, ok := readStr("SiteName", "siteName"); ok && s != "" {
+			if s, ok := readTrimmedString(siteObj, "siteName"); ok && s != "" {
 				c.SiteName = s
 			}
-			if s, ok := readStr("SearchDisplayMode", "searchDisplayMode"); ok && s != "" {
-				c.SearchDisplayMode = s
+			if s, ok := readTrimmedString(siteObj, "searchDisplayMode"); ok {
+				switch s {
+				case "", "sites", "tmdb", "both":
+					if s == "" {
+						s = "sites"
+					}
+					c.SearchDisplayMode = s
+				}
 			}
-			if s, ok := readStr("VideoSourceAPIBase", "videoSourceApiBase"); ok {
-				c.VideoSourceAPIBase = s
-			}
-			if s, ok := readStr("VideoSourceSearchCoverSite", "videoSourceSearchCoverSite"); ok {
-				c.VideoSourceSearchCoverSite = s
-			}
-			if s, ok := readStr("SmartSourceExtractPriority", "smartSourceExtractPriority"); ok && s != "" {
-				c.SmartSourceExtractPriority = s
-			}
-			if s, ok := readStr("SmartSiteCleanKeywords", "smartSiteCleanKeywords", "siteCleanKeywords"); ok {
-				c.SmartSiteCleanKeywords = s
-			}
-			if b, ok := readBool("GoProxyEnabled", "goProxyEnabled"); ok {
-				c.GoProxyEnabled = b
-			}
-			if b, ok := readBool("GoProxyAutoSelect", "goProxyAutoSelect"); ok {
-				c.GoProxyAutoSelect = b
-			}
-			if n, ok := readInt("RelayGoProxyThresholdGB", "relayGoProxyThresholdGB", "goProxyThresholdGB"); ok {
-				c.RelayGoProxyThresholdGB = n
-			}
-			if b, ok := readBool("NetdiskProxyEnabled", "netdiskProxyEnabled"); ok {
+			if b, ok := readBool(siteObj, "netdiskProxyEnabled"); ok {
 				c.NetdiskProxyEnabled = b
 			}
-			if s, ok := readStr("NetdiskProxyURL", "netdiskProxyUrl", "netdiskProxyURL"); ok {
+			if s, ok := readTrimmedString(siteObj, "netdiskProxyUrl"); ok {
 				c.NetdiskProxyURL = s
 			}
-			if s, ok := readStr("DoubanDataProxy", "doubanDataProxy"); ok && s != "" {
-				c.DoubanDataProxy = douban.CanonicalDataProxyMode(s)
-			}
-			if s, ok := readStr("DoubanDataCustom", "doubanDataCustom"); ok {
-				c.DoubanDataCustom = s
-			}
-			if s, ok := readStr("DoubanImgProxy", "doubanImgProxy"); ok && s != "" {
-				c.DoubanImgProxy = douban.CanonicalImageProxyMode(s)
-			}
-			if s, ok := readStr("DoubanImgCustom", "doubanImgCustom"); ok {
-				c.DoubanImgCustom = s
-			}
-			if s, ok := readStr("DoubanSearchCookie", "doubanSearchCookie"); ok {
-				c.DoubanSearchCookie = s
-			}
-			if s, ok := readStr("TMDBAPIToken", "tmdbApiToken"); ok {
-				c.TMDBAPIToken = s
-			}
-			if s, ok := readStr("TMDBAPIBase", "tmdbDataProxyBase"); ok {
-				c.TMDBAPIBase = normalizeHTTPBase(s)
-			}
-			if s, ok := readStr("TMDBImgBase", "tmdbImageProxyBase"); ok {
-				c.TMDBImgBase = normalizeHTTPBase(s)
-			}
-			if s, ok := readStr("TMDBLanguage", "language"); ok && s != "" {
-				c.TMDBLanguage = s
-			}
-			if s, ok := readStr("TMDBRegion", "region"); ok && s != "" {
-				c.TMDBRegion = s
-			}
-			if b, ok := readBool("TMDBIncludeAdult", "includeAdult"); ok {
-				c.TMDBIncludeAdult = b
-			}
-			if s, ok := readStr("CatpawrunnerActive", "CatpawrunnerActive"); ok {
-				c.CatpawrunnerActive = s
-			}
 		})
-		applied["appConfig"] = true
+		applied["site"] = true
 	}
 
 	if cat := readObj(body, "catpawrunner"); cat != nil {
@@ -748,15 +719,11 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 	}
 
 	if goProxy := readObj(body, "goProxy"); goProxy != nil {
-		if v, ok := goProxy["enabled"]; ok {
-			if b, _ := v.(bool); true {
-				_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.GoProxyEnabled = b })
-			}
+		if enabled, ok := readBool(goProxy, "enabled"); ok {
+			_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.GoProxyEnabled = enabled })
 		}
-		if v, ok := goProxy["autoSelect"]; ok {
-			if b, _ := v.(bool); true {
-				_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.GoProxyAutoSelect = b })
-			}
+		if autoSelect, ok := readBool(goProxy, "autoSelect"); ok {
+			_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.GoProxyAutoSelect = autoSelect })
 		}
 		if arr := readArr(goProxy, "servers"); arr != nil {
 			list := []db.GoProxyServer{}
@@ -789,6 +756,53 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 			_ = database.ReplaceGoProxyServers(list)
 		}
 		applied["goProxy"] = true
+	}
+
+	if relay := readObj(body, "relay"); relay != nil {
+		_ = database.UpdateAppConfig(func(c *db.AppConfig) {
+			if enabled, ok := readBool(relay, "enabled"); ok {
+				c.RelayEnabled = enabled
+			}
+			if authToken, ok := readTrimmedString(relay, "auth"); ok {
+				c.RelayAuthToken = authToken
+			}
+			if threshold, ok := readInt(relay, "goProxyThresholdGB"); ok {
+				c.RelayGoProxyThresholdGB = threshold
+			}
+		})
+		if arr := readArr(relay, "servers"); arr != nil {
+			list := []db.RelayServer{}
+			for _, it := range arr {
+				row, _ := it.(map[string]any)
+				if row == nil {
+					continue
+				}
+				name, _ := row["name"].(string)
+				displayName, _ := row["displayName"].(string)
+				base, _ := row["base"].(string)
+				secret, _ := row["secret"].(string)
+				pans, _ := row["pans"].(map[string]any)
+				if strings.TrimSpace(name) == "" || strings.TrimSpace(base) == "" {
+					continue
+				}
+				bd := false
+				qk := false
+				if pans != nil {
+					bd, _ = pans["baidu"].(bool)
+					qk, _ = pans["quark"].(bool)
+				}
+				list = append(list, db.RelayServer{
+					Name:        strings.TrimSpace(name),
+					DisplayName: strings.TrimSpace(displayName),
+					Base:        strings.TrimSpace(base),
+					Secret:      strings.TrimSpace(secret),
+					PansBaidu:   bd,
+					PansQuark:   qk,
+				})
+			}
+			_ = database.ReplaceRelayServers(list)
+		}
+		applied["relay"] = true
 	}
 
 	if pan := readObj(body, "pan"); pan != nil {
@@ -962,6 +976,11 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 			if v, ok := meta["doubanImgCustom"]; ok {
 				if s, _ := v.(string); true {
 					c.DoubanImgCustom = strings.TrimSpace(s)
+				}
+			}
+			if v, ok := meta["doubanSearchCookie"]; ok {
+				if s, _ := v.(string); true {
+					c.DoubanSearchCookie = strings.TrimSpace(s)
 				}
 			}
 			if v, ok := meta["tmdbApiToken"]; ok {
