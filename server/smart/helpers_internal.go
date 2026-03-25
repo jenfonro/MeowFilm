@@ -155,7 +155,7 @@ func smartExtractTianyiMockMetaFromCandidate(c smartCandidate) (shareCode string
 	return shareCode, accessCode
 }
 
-func smartTMDBSeasonEpisodeOfGlobal(seasons []embyTMDBSeason, global int) smartSeasonEpisode {
+func smartTMDBSeasonEpisodeOfGlobal(seasons []smartTMDBSeason, global int) smartSeasonEpisode {
 	if global <= 0 {
 		return smartSeasonEpisode{Season: 0, Episode: 0}
 	}

@@ -99,4 +99,3 @@ func (d *DB) ClearSearchHistory(userID int64) error {
 	_, err := d.db.Exec(`DELETE FROM user_search_history WHERE user_id=?`, userID)
 	return err
 }
-

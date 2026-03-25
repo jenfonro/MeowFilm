@@ -23,6 +23,19 @@ type SearchHTMLResult struct {
 	Body []byte
 }
 
+type SearchSubject struct {
+	TargetType       string
+	TargetID         string
+	Title            string
+	Year             string
+	CardSubtitle     string
+	NullRatingReason string
+	IsReleased       any
+	CanRate          any
+	VendorCount      any
+	Pubdate          any
+}
+
 var (
 	challengeInputPattern = regexp.MustCompile(`(?is)<input[^>]+id="(tok|cha|red)"[^>]+value="([^"]*)"`)
 	searchDataPattern     = regexp.MustCompile(`(?s)window\.__DATA__\s*=\s*(\{.*?\})\s*;\s*window\.__USER__`)
@@ -125,6 +138,42 @@ func FetchSearchPayload(database *db.DB, keyword string) (map[string]any, bool, 
 		return nil, false, err
 	}
 	return result, fromCache, nil
+}
+
+func FetchSearchSubjects(database *db.DB, keyword string) ([]SearchSubject, bool, error) {
+	payload, fromCache, err := FetchSearchPayload(database, keyword)
+	if err != nil {
+		return nil, false, err
+	}
+	subjects, _ := payload["subjects"].(map[string]any)
+	rows, _ := subjects["items"].([]map[string]any)
+	out := make([]SearchSubject, 0, len(rows))
+	for _, item := range rows {
+		target, _ := item["target"].(map[string]any)
+		if item == nil || target == nil {
+			continue
+		}
+		cardSubtitle := strings.TrimSpace(asString(target["card_subtitle"]))
+		if cardSubtitle == "" {
+			cardSubtitle = strings.TrimSpace(asString(target["subtitle"]))
+		}
+		if cardSubtitle == "" {
+			cardSubtitle = strings.TrimSpace(asString(target["sub_title"]))
+		}
+		out = append(out, SearchSubject{
+			TargetType:       strings.TrimSpace(asString(item["target_type"])),
+			TargetID:         firstNonEmpty(strings.TrimSpace(asString(target["id"])), strings.TrimSpace(asString(item["target_id"]))),
+			Title:            strings.TrimSpace(asString(target["title"])),
+			Year:             strings.TrimSpace(asString(target["year"])),
+			CardSubtitle:     cardSubtitle,
+			NullRatingReason: strings.TrimSpace(asString(target["null_rating_reason"])),
+			IsReleased:       target["is_released"],
+			CanRate:          target["can_rate"],
+			VendorCount:      target["vendor_count"],
+			Pubdate:          target["pubdate"],
+		})
+	}
+	return out, fromCache, nil
 }
 
 func SearchCookieConfigured(database *db.DB) bool {

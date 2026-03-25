@@ -31,7 +31,7 @@ func smartCanonicalAggregateTitle(text string) string {
 	return s
 }
 
-func embyLoadAggregateCleanRules(database *db.DB) []string {
+func loadAggregateCleanRules(database *db.DB) []string {
 	if database == nil {
 		return nil
 	}
@@ -42,7 +42,7 @@ func embyLoadAggregateCleanRules(database *db.DB) []string {
 	return raw
 }
 
-func embyAggKeyWithRules(text string, rawRules []string) string {
+func aggregateKeyWithRules(text string, rawRules []string) string {
 	in := strings.TrimSpace(text)
 	if in == "" {
 		return ""
@@ -58,9 +58,9 @@ func embyAggKeyWithRules(text string, rawRules []string) string {
 }
 
 func smartLoadAggregateCleanRules(database *db.DB) []string {
-	return embyLoadAggregateCleanRules(database)
+	return loadAggregateCleanRules(database)
 }
 
 func smartAggKeyWithRules(text string, rawRules []string) string {
-	return embyAggKeyWithRules(text, rawRules)
+	return aggregateKeyWithRules(text, rawRules)
 }

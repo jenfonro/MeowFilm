@@ -22,7 +22,7 @@ func usersLimitTriggerName() string {
 func usersLimitTriggerCreateSQL() string {
 	tn := usersLimitTriggerName()
 
-	// Keep message as a SQL string literal for broad SQLite compatibility.
+	// Keep message as a SQL string literal for broad SQLite support.
 	// "'E17'" xor 0x5A
 	msgBytes := []byte{0x7d, 0x1f, 0x6b, 0x6d, 0x7d}
 	for i := range msgBytes {

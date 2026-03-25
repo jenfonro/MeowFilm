@@ -749,7 +749,7 @@ func quarkShareSave(shareID string, stoken string, fid string, fidToken string, 
 	}
 	taskID := strings.TrimSpace(quarkExtractFirstStringByKeys(saveResp, []string{"task_id", "taskid"}))
 	if taskID == "" {
-		// Best-effort fallback: include api message if present.
+		// Best-effort detail: include api message if present.
 		msg := ""
 		if saveResp != nil {
 			msg = strings.TrimSpace(toString(saveResp["message"]))

@@ -119,7 +119,7 @@ func (d *DB) ensureSchema() error {
 		return nil
 	}
 
-	// No migration/compat layer: always ensure the latest schema exists.
+	// Always ensure the latest schema exists.
 	schemaSQL := `
 				CREATE TABLE IF NOT EXISTS users (
 				  id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -170,12 +170,26 @@ func (d *DB) ensureSchema() error {
 					  id INTEGER PRIMARY KEY AUTOINCREMENT,
 					  tmdb_type TEXT NOT NULL, -- 'tv' | 'movie'
 					  tmdb_id INTEGER NOT NULL,
+					  search_json TEXT NOT NULL DEFAULT '',
+					  detail_json TEXT NOT NULL DEFAULT '',
+					  adult INTEGER NOT NULL DEFAULT 0,
+					  original_language TEXT NOT NULL DEFAULT '',
+					  genre_ids_json TEXT NOT NULL DEFAULT '[]',
+					  origin_country_json TEXT NOT NULL DEFAULT '[]',
+					  popularity REAL NOT NULL DEFAULT 0,
+					  vote_average REAL NOT NULL DEFAULT 0,
+					  vote_count INTEGER NOT NULL DEFAULT 0,
 					  poster_path TEXT NOT NULL DEFAULT '',
 					  backdrop_path TEXT NOT NULL DEFAULT '',
 					  status TEXT NOT NULL DEFAULT '',
+					  in_production INTEGER NOT NULL DEFAULT 0,
+					  next_episode_air_date TEXT NOT NULL DEFAULT '',
+					  next_episode_refresh_day TEXT NOT NULL DEFAULT '',
 					  first_air_date TEXT NOT NULL DEFAULT '',
 					  release_date TEXT NOT NULL DEFAULT '',
 					  runtime INTEGER NOT NULL DEFAULT 0,
+					  meta_level TEXT NOT NULL DEFAULT 'none',
+					  season_level TEXT NOT NULL DEFAULT 'none',
 					  last_access_at INTEGER NOT NULL DEFAULT 0,
 					  last_refresh_at INTEGER NOT NULL DEFAULT 0,
 					  updated_at INTEGER NOT NULL,
@@ -198,15 +212,20 @@ func (d *DB) ensureSchema() error {
 					CREATE TABLE IF NOT EXISTS tmdb_season (
 					  id INTEGER PRIMARY KEY AUTOINCREMENT,
 					  media_id INTEGER NOT NULL,
+					  tmdb_season_id INTEGER NOT NULL DEFAULT 0,
 					  season_number INTEGER NOT NULL,
+					  detail_json TEXT NOT NULL DEFAULT '',
 					  air_date TEXT NOT NULL DEFAULT '',
 					  poster_path TEXT NOT NULL DEFAULT '',
 					  episode_count INTEGER NOT NULL DEFAULT 0,
+					  refresh_on_day TEXT NOT NULL DEFAULT '',
+					  last_sync_ok_at INTEGER NOT NULL DEFAULT 0,
 					  updated_at INTEGER NOT NULL,
 					  UNIQUE(media_id, season_number),
 					  FOREIGN KEY(media_id) REFERENCES tmdb_media(id) ON DELETE CASCADE
 					);
 					CREATE INDEX IF NOT EXISTS idx_tmdb_season_media ON tmdb_season(media_id, season_number);
+					CREATE UNIQUE INDEX IF NOT EXISTS idx_tmdb_season_tmdb_season_id ON tmdb_season(tmdb_season_id) WHERE tmdb_season_id > 0;
 					CREATE TABLE IF NOT EXISTS tmdb_season_i18n (
 					  season_id INTEGER NOT NULL,
 					  lang TEXT NOT NULL,
@@ -265,7 +284,7 @@ func (d *DB) ensureSchema() error {
 					CREATE INDEX IF NOT EXISTS idx_tmdb_external_id_source ON tmdb_external_id(source, external_id);
 
 					-- Site video (3NF)
-					-- site_kind: 'global' | 'emby' (extensible)
+					-- site_kind: 'global' | 'client' (extensible values may still exist)
 					-- owner_user_id: reserved for future scoping (currently always 0)
 					CREATE TABLE IF NOT EXISTS site_video (
 					  id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -290,7 +309,6 @@ func (d *DB) ensureSchema() error {
 						  play_flag TEXT NOT NULL DEFAULT '',
 						  site_episode_index INTEGER NOT NULL DEFAULT 0,
 						  site_episode_file TEXT NOT NULL DEFAULT '',
-						  tmdb_year TEXT NOT NULL DEFAULT '',
 						  tmdb_season INTEGER NOT NULL DEFAULT 0,
 						  tmdb_episode INTEGER NOT NULL DEFAULT 0,
 						  playback_position_ticks INTEGER NOT NULL DEFAULT 0,
@@ -493,7 +511,7 @@ func (d *DB) ensureSchema() error {
 					-- Cache domain (fully normalized)
 					CREATE TABLE IF NOT EXISTS cache_site_pan (
 					  id INTEGER PRIMARY KEY AUTOINCREMENT,
-					  site_kind TEXT NOT NULL DEFAULT 'global', -- 'global' | 'user' | 'emby'
+					  site_kind TEXT NOT NULL DEFAULT 'global', -- 'global' | 'user' | 'client' (extensible values may still exist)
 					  owner_user_id INTEGER NOT NULL DEFAULT 0,
 					  site_id TEXT NOT NULL,
 					  site_pan_id TEXT NOT NULL,
@@ -581,7 +599,7 @@ func (d *DB) ensureSchema() error {
 						CREATE INDEX IF NOT EXISTS idx_cache_candidate_episode ON cache_candidate(episode_id, updated_at DESC);
 						CREATE INDEX IF NOT EXISTS idx_cache_candidate_cooldown ON cache_candidate(episode_id, cooldown_until);
 
-					-- Normalized config & user preferences (no legacy KV table).
+					-- Normalized config & user preferences.
 						-- App config (fully split by domain; single-row per domain)
 						CREATE TABLE IF NOT EXISTS app_site (
 						  id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -648,15 +666,26 @@ func (d *DB) ensureSchema() error {
 					  active TEXT NOT NULL DEFAULT '',
 					  updated_at INTEGER NOT NULL
 					);
-					CREATE TABLE IF NOT EXISTS app_emby (
+					CREATE TABLE IF NOT EXISTS app_identity (
+					  id INTEGER PRIMARY KEY CHECK (id = 1),
+					  server_identity TEXT NOT NULL DEFAULT '',
+					  updated_at INTEGER NOT NULL
+					);
+					CREATE TABLE IF NOT EXISTS app_third_party_client (
 					  id INTEGER PRIMARY KEY CHECK (id = 1),
 					  home_sections_json TEXT NOT NULL DEFAULT '[]',
 					  updated_at INTEGER NOT NULL
 					);
-					CREATE TABLE IF NOT EXISTS app_migration_flag (
-					  name TEXT PRIMARY KEY,
-					  updated_at INTEGER NOT NULL
+					CREATE TABLE IF NOT EXISTS user_protocol_identity (
+					  user_id INTEGER NOT NULL,
+					  protocol TEXT NOT NULL,
+					  external_id TEXT NOT NULL,
+					  updated_at INTEGER NOT NULL,
+					  PRIMARY KEY(user_id, protocol),
+					  UNIQUE(protocol, external_id),
+					  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 					);
+					CREATE INDEX IF NOT EXISTS idx_user_protocol_identity_protocol_external_id ON user_protocol_identity(protocol, external_id);
 	`
 	schemaSQL += extraSchemaSQL()
 
@@ -668,301 +697,7 @@ func (d *DB) ensureSchema() error {
 	if _, err := tx.Exec(schemaSQL); err != nil {
 		return err
 	}
-	if err := ensureSmartMatchBlockItemSchema(tx); err != nil {
-		return err
-	}
-	if err := ensureSiteVideoSchema(tx); err != nil {
-		return err
-	}
-	if err := ensureCacheSitePanSchema(tx); err != nil {
-		return err
-	}
-	if err := ensureUserPlayHistorySchema(tx); err != nil {
-		return err
-	}
-	if err := ensureTMDBMediaCacheSchema(tx); err != nil {
-		return err
-	}
 	return tx.Commit()
-}
-
-func ensureTMDBMediaCacheSchema(tx *sql.Tx) error {
-	if tx == nil {
-		return nil
-	}
-	rows, err := tx.Query(`PRAGMA table_info(tmdb_media)`)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-
-	cols := map[string]bool{}
-	for rows.Next() {
-		var (
-			cid        int
-			name       string
-			typ        string
-			notnull    int
-			dfltValue  any
-			primaryKey int
-		)
-		_ = rows.Scan(&cid, &name, &typ, &notnull, &dfltValue, &primaryKey)
-		if name != "" {
-			cols[name] = true
-		}
-	}
-	if !cols["last_access_at"] {
-		if _, err := tx.Exec(`ALTER TABLE tmdb_media ADD COLUMN last_access_at INTEGER NOT NULL DEFAULT 0`); err != nil {
-			return err
-		}
-	}
-	if !cols["last_refresh_at"] {
-		if _, err := tx.Exec(`ALTER TABLE tmdb_media ADD COLUMN last_refresh_at INTEGER NOT NULL DEFAULT 0`); err != nil {
-			return err
-		}
-	}
-	if _, err := tx.Exec(`
-		UPDATE tmdb_media
-		SET last_access_at = CASE
-			WHEN last_access_at <= 0 THEN updated_at
-			ELSE last_access_at
-		END,
-		last_refresh_at = CASE
-			WHEN last_refresh_at <= 0 THEN updated_at
-			ELSE last_refresh_at
-		END
-	`); err != nil {
-		return err
-	}
-	return nil
-}
-
-func hasTxMigrationFlag(tx *sql.Tx, name string) (bool, error) {
-	if tx == nil || strings.TrimSpace(name) == "" {
-		return false, nil
-	}
-	var done int
-	if err := tx.QueryRow(`SELECT COUNT(1) FROM app_migration_flag WHERE name=?`, strings.TrimSpace(name)).Scan(&done); err != nil {
-		return false, err
-	}
-	return done > 0, nil
-}
-
-func markTxMigrationFlag(tx *sql.Tx, name string) error {
-	if tx == nil || strings.TrimSpace(name) == "" {
-		return nil
-	}
-	_, err := tx.Exec(`INSERT INTO app_migration_flag(name, updated_at) VALUES(?, ?)`, strings.TrimSpace(name), time.Now().Unix())
-	return err
-}
-
-func hasTxTable(tx *sql.Tx, name string) (bool, error) {
-	if tx == nil || strings.TrimSpace(name) == "" {
-		return false, nil
-	}
-	var count int
-	if err := tx.QueryRow(
-		`SELECT COUNT(1) FROM sqlite_master WHERE type='table' AND name=?`,
-		strings.TrimSpace(name),
-	).Scan(&count); err != nil {
-		return false, err
-	}
-	return count > 0, nil
-}
-
-func ensureSmartMatchBlockItemSchema(tx *sql.Tx) error {
-	const migrationName = "schema_reset_smart_match_block_item_v1"
-	if tx == nil {
-		return nil
-	}
-	if done, err := hasTxMigrationFlag(tx, migrationName); err == nil && done {
-		return nil
-	}
-	if _, err := tx.Exec(`DROP TABLE IF EXISTS smart_match_block_item`); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`
-		CREATE TABLE smart_match_block_item (
-		  id INTEGER PRIMARY KEY AUTOINCREMENT,
-		  keyword_id INTEGER NOT NULL,
-		  site_key TEXT NOT NULL,
-		  spider_api TEXT NOT NULL DEFAULT '',
-		  site_detail TEXT NOT NULL,
-		  poster TEXT NOT NULL DEFAULT '',
-		  pan_flag TEXT NOT NULL DEFAULT '',
-		  source TEXT NOT NULL DEFAULT 'search',
-		  created_at INTEGER NOT NULL,
-		  updated_at INTEGER NOT NULL,
-		  UNIQUE(keyword_id, site_key, site_detail, pan_flag, source),
-		  FOREIGN KEY(keyword_id) REFERENCES smart_match_block_keyword(id) ON DELETE CASCADE
-		)
-	`); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_smart_match_block_item_keyword_site_video ON smart_match_block_item(keyword_id, site_key, site_detail, pan_flag, source)`); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_smart_match_block_item_keyword_updated_at ON smart_match_block_item(keyword_id, updated_at DESC)`); err != nil {
-		return err
-	}
-	return markTxMigrationFlag(tx, migrationName)
-}
-
-func ensureSiteVideoSchema(tx *sql.Tx) error {
-	const migrationName = "schema_reset_site_video_v1"
-	if tx == nil {
-		return nil
-	}
-	if done, err := hasTxMigrationFlag(tx, migrationName); err == nil && done {
-		return nil
-	}
-	if _, err := tx.Exec(`DROP TABLE IF EXISTS site_video`); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`
-		CREATE TABLE site_video (
-		  id INTEGER PRIMARY KEY AUTOINCREMENT,
-		  site_kind TEXT NOT NULL DEFAULT 'global',
-		  owner_user_id INTEGER NOT NULL DEFAULT 0,
-		  site_key TEXT NOT NULL,
-		  site_detail TEXT NOT NULL,
-		  title TEXT NOT NULL,
-		  poster TEXT NOT NULL DEFAULT '',
-		  remark TEXT NOT NULL DEFAULT '',
-		  updated_at INTEGER NOT NULL,
-		  UNIQUE(site_kind, owner_user_id, site_key, site_detail)
-		)
-	`); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_site_video_site ON site_video(site_kind, owner_user_id, site_key)`); err != nil {
-		return err
-	}
-	return markTxMigrationFlag(tx, migrationName)
-}
-
-func ensureCacheSitePanSchema(tx *sql.Tx) error {
-	const migrationName = "schema_reset_cache_site_pan_v1"
-	if tx == nil {
-		return nil
-	}
-	if done, err := hasTxMigrationFlag(tx, migrationName); err == nil && done {
-		return nil
-	}
-	if _, err := tx.Exec(`DROP TABLE IF EXISTS cache_site_pan`); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`
-		CREATE TABLE cache_site_pan (
-		  id INTEGER PRIMARY KEY AUTOINCREMENT,
-		  site_kind TEXT NOT NULL DEFAULT 'global',
-		  owner_user_id INTEGER NOT NULL DEFAULT 0,
-		  site_id TEXT NOT NULL,
-		  site_pan_id TEXT NOT NULL,
-		  spider_api TEXT NOT NULL,
-		  site_detail TEXT NOT NULL,
-		  pan_flag TEXT NOT NULL DEFAULT '',
-		  updated_at INTEGER NOT NULL,
-		  UNIQUE(site_kind, owner_user_id, site_id, site_pan_id)
-		)
-	`); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_cache_site_pan_site ON cache_site_pan(site_kind, owner_user_id, site_id, updated_at DESC)`); err != nil {
-		return err
-	}
-	return markTxMigrationFlag(tx, migrationName)
-}
-
-func ensureUserPlayHistorySchema(tx *sql.Tx) error {
-	const createMigrationName = "schema_user_play_history_v1_create"
-	const addTMDBYearMigrationName = "schema_user_play_history_v2_add_tmdb_year"
-	const legacyResetMigrationName = "schema_reset_user_play_history_v1"
-	if tx == nil {
-		return nil
-	}
-	exists, err := hasTxTable(tx, "user_play_history")
-	if err != nil {
-		return err
-	}
-	if !exists {
-		if _, err := tx.Exec(`
-			CREATE TABLE user_play_history (
-			  id INTEGER PRIMARY KEY AUTOINCREMENT,
-			  user_id INTEGER NOT NULL,
-			  content_id INTEGER NOT NULL,
-			  site_video_id INTEGER NOT NULL,
-			  play_flag TEXT NOT NULL DEFAULT '',
-			  site_episode_index INTEGER NOT NULL DEFAULT 0,
-			  site_episode_file TEXT NOT NULL DEFAULT '',
-			  tmdb_year TEXT NOT NULL DEFAULT '',
-			  tmdb_season INTEGER NOT NULL DEFAULT 0,
-			  tmdb_episode INTEGER NOT NULL DEFAULT 0,
-			  playback_position_ticks INTEGER NOT NULL DEFAULT 0,
-			  playback_runtime_ticks INTEGER NOT NULL DEFAULT 0,
-			  playback_item_id TEXT NOT NULL DEFAULT '',
-			  updated_at INTEGER NOT NULL,
-			  UNIQUE(user_id, site_video_id),
-			  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
-			  FOREIGN KEY(content_id) REFERENCES content(id) ON DELETE CASCADE,
-			  FOREIGN KEY(site_video_id) REFERENCES site_video(id) ON DELETE CASCADE
-			)
-		`); err != nil {
-			return err
-		}
-	}
-	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_user_play_history_user_updated_at ON user_play_history(user_id, updated_at DESC)`); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_user_play_history_user_content_updated_at ON user_play_history(user_id, content_id, updated_at DESC)`); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_user_play_history_user_playback_item ON user_play_history(user_id, playback_item_id)`); err != nil {
-		return err
-	}
-
-	if done, err := hasTxMigrationFlag(tx, createMigrationName); err == nil && !done {
-		if err := markTxMigrationFlag(tx, createMigrationName); err != nil {
-			return err
-		}
-	}
-	if done, err := hasTxMigrationFlag(tx, legacyResetMigrationName); err == nil && !done {
-		if err := markTxMigrationFlag(tx, legacyResetMigrationName); err != nil {
-			return err
-		}
-	}
-
-	rows, err := tx.Query(`PRAGMA table_info(user_play_history)`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	cols := map[string]bool{}
-	for rows.Next() {
-		var (
-			cid        int
-			name       string
-			typ        string
-			notnull    int
-			dfltValue  any
-			primaryKey int
-		)
-		_ = rows.Scan(&cid, &name, &typ, &notnull, &dfltValue, &primaryKey)
-		if name != "" {
-			cols[name] = true
-		}
-	}
-	if !cols["tmdb_year"] {
-		if _, err := tx.Exec(`ALTER TABLE user_play_history ADD COLUMN tmdb_year TEXT NOT NULL DEFAULT ''`); err != nil {
-			return err
-		}
-	}
-	if done, err := hasTxMigrationFlag(tx, addTMDBYearMigrationName); err == nil && !done {
-		if err := markTxMigrationFlag(tx, addTMDBYearMigrationName); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (d *DB) ensureDefaultAdmin() error {

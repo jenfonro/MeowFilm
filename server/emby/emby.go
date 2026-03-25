@@ -1,133 +1,237 @@
 package emby
 
 import (
-	"crypto/sha1"
-	"encoding/hex"
+	"encoding/json"
+	"log"
 	"net/http"
+	"os"
+	"path"
 	"strings"
 	"time"
 
-	"github.com/jenfonro/meowfilm/internal/buildinfo"
 	"github.com/jenfonro/meowfilm/internal/db"
-	"github.com/jenfonro/meowfilm/internal/limit"
 )
 
-// EmbyHandler implements a minimal subset of the Emby API surface (compatible with Emby clients).
-//
-// Notes:
-// - This is not a full Emby server implementation.
-// - Only routes needed by supported clients are exposed; add more incrementally as clients request them.
 func EmbyHandler(database *db.DB) http.Handler {
-	cfg, _ := database.ReadAppConfig()
-	serverID := embyStableServerID(defaultString(cfg.SiteName, "MeowFilm"))
-	type routeHandler func(w http.ResponseWriter, r *http.Request, tail []string)
-	routes := map[string]routeHandler{
-		"branding": func(w http.ResponseWriter, r *http.Request, tail []string) {
-			handleEmbyBranding(w, r, database, serverID, tail)
-		},
-		"media": func(w http.ResponseWriter, r *http.Request, tail []string) {
-			handleEmbyMediaFiles(w, r, database, serverID, tail)
-		},
-		"persons": func(w http.ResponseWriter, r *http.Request, tail []string) {
-			handleEmbyPersons(w, r, database, serverID, tail)
-		},
-		"search": func(w http.ResponseWriter, r *http.Request, tail []string) {
-			handleEmbySearch(w, r, database, serverID, tail)
-		},
-		"system": func(w http.ResponseWriter, r *http.Request, tail []string) {
-			handleEmbySystem(w, r, database, serverID, tail)
-		},
-		"userviews": func(w http.ResponseWriter, r *http.Request, tail []string) {
-			handleEmbyUserViews(w, r, database, serverID, tail)
-		},
-		"mediasegments": func(w http.ResponseWriter, r *http.Request, tail []string) {
-			handleEmbyMediaSegments(w, r, database, serverID, tail)
-		},
-		"displaypreferences": func(w http.ResponseWriter, r *http.Request, tail []string) {
-			handleEmbyDisplayPreferences(w, r, database, serverID, tail)
-		},
-		"genres": func(w http.ResponseWriter, r *http.Request, tail []string) {
-			handleEmbyGenres(w, r, database, serverID, tail)
-		},
-		"library": func(w http.ResponseWriter, r *http.Request, tail []string) {
-			handleEmbyLibrary(w, r, database, serverID, tail)
-		},
-		"users": func(w http.ResponseWriter, r *http.Request, tail []string) {
-			handleEmbyUsers(w, r, database, serverID, tail)
-		},
-		"items": func(w http.ResponseWriter, r *http.Request, tail []string) {
-			handleEmbyItems(w, r, database, serverID, tail)
-		},
-		"shows": func(w http.ResponseWriter, r *http.Request, tail []string) {
-			handleEmbyShows(w, r, database, serverID, tail)
-		},
-		"sessions": func(w http.ResponseWriter, r *http.Request, tail []string) {
-			handleEmbySessions(w, r, database, serverID, tail)
-		},
-		"videos": func(w http.ResponseWriter, r *http.Request, tail []string) {
-			handleEmbyVideos(w, r, database, serverID, tail)
-		},
-	}
-
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		startAt := time.Now()
-		debugLog := embyDebugLogEnabled()
-		lw := &embyLogWriter{ResponseWriter: w, status: 0}
-
-		skipLogDone := false
+		start := time.Now()
+		rec := &responseRecorder{ResponseWriter: w}
 		defer func() {
-			if debugLog && !skipLogDone {
-				embyLogDone(r, lw, time.Since(startAt))
+			if embyDebugEnabled() && !embyShouldSkipDebugLog(r) {
+				log.Printf("[emby] %s %s -> %d (%d bytes) cost=%s", r.Method, embyURL(r), rec.Status(), rec.bytes, time.Since(start))
 			}
 		}()
 
-		path := embyTrimAPIPrefix(r.URL.Path)
-
-		// Basic CORS for LAN usage / clients.
-		embyWriteCORSHeaders(lw.Header())
+		writeEmbyCommonHeaders(rec.Header())
 		if r.Method == http.MethodOptions {
-			lw.WriteHeader(http.StatusNoContent)
-			if debugLog {
-				skipLogDone = true
-				embyDebugPrintf("[emby] %s %s -> %d (preflight)", r.Method, embyDebugURL(r, true), lw.Status())
+			rec.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		tail := strings.Trim(embyRouteTail(r), "/")
+		if r.Method == http.MethodPost && strings.EqualFold(tail, "Users/AuthenticateByName") {
+			handleAuthenticateByName(rec, r, database)
+			return
+		}
+		if r.Method == http.MethodGet && strings.EqualFold(tail, "System/Configuration") {
+			handleSystemConfiguration(rec, r, database)
+			return
+		}
+		if r.Method == http.MethodGet && strings.EqualFold(tail, "System/Info/Public") {
+			handleSystemInfoPublic(rec, r, database)
+			return
+		}
+		if r.Method == http.MethodGet && strings.EqualFold(tail, "System/Ping") {
+			handleSystemPing(rec, r, database)
+			return
+		}
+		if r.Method == http.MethodGet && strings.EqualFold(tail, "DisplayPreferences/usersettings") {
+			handleDisplayPreferencesUserSettings(rec, r, database)
+			return
+		}
+		if r.Method == http.MethodGet && strings.EqualFold(tail, "Library/VirtualFolders") {
+			handleLibraryVirtualFolders(rec, r, database)
+			return
+		}
+		if r.Method == http.MethodGet && strings.EqualFold(tail, "Genres") {
+			handleGenres(rec, r, database)
+			return
+		}
+		if r.Method == http.MethodGet && strings.EqualFold(tail, "Items/Counts") {
+			handleItemsCounts(rec, r, database)
+			return
+		}
+		parts := splitEmbyPath(tail)
+		if r.Method == http.MethodGet && len(parts) == 3 && strings.EqualFold(parts[0], "Users") && strings.EqualFold(parts[2], "Views") {
+			handleUserViews(rec, r, database, parts[1])
+			return
+		}
+		if r.Method == http.MethodPost && len(parts) == 5 && strings.EqualFold(parts[0], "Users") && strings.EqualFold(parts[2], "Items") && strings.EqualFold(parts[4], "HideFromResume") {
+			handleHideFromResume(rec, r, database, parts[1], parts[3])
+			return
+		}
+		if r.Method == http.MethodGet && len(parts) == 4 && strings.EqualFold(parts[0], "Users") && strings.EqualFold(parts[2], "Items") && strings.EqualFold(parts[3], "Resume") {
+			handleUserItemsResume(rec, r, database, parts[1])
+			return
+		}
+		if r.Method == http.MethodGet && len(parts) == 2 && strings.EqualFold(parts[0], "Shows") && strings.EqualFold(parts[1], "NextUp") {
+			handleShowNextUp(rec, r, database)
+			return
+		}
+		if r.Method == http.MethodGet && len(parts) == 3 && strings.EqualFold(parts[0], "Shows") && strings.EqualFold(parts[2], "Seasons") {
+			handleShowSeasons(rec, r, database, parts[1])
+			return
+		}
+		if r.Method == http.MethodGet && len(parts) == 3 && strings.EqualFold(parts[0], "Shows") && strings.EqualFold(parts[2], "Episodes") {
+			handleShowEpisodes(rec, r, database, parts[1])
+			return
+		}
+		if r.Method == http.MethodGet && len(parts) == 3 && strings.EqualFold(parts[0], "Items") && strings.EqualFold(parts[2], "Similar") {
+			handleItemSimilar(rec, r, database, parts[1])
+			return
+		}
+		if (r.Method == http.MethodPost || r.Method == http.MethodGet) && len(parts) == 3 && strings.EqualFold(parts[0], "Items") && strings.EqualFold(parts[2], "PlaybackInfo") {
+			handleItemPlaybackInfo(rec, r, database, parts[1])
+			return
+		}
+		if r.Method == http.MethodPost && len(parts) >= 2 && strings.EqualFold(parts[0], "Sessions") && strings.EqualFold(parts[1], "Playing") {
+			tailPart := ""
+			if len(parts) >= 3 {
+				tailPart = parts[2]
 			}
+			handleSessionsPlaying(rec, r, database, tailPart)
+			return
+		}
+		if r.Method == http.MethodGet && len(parts) == 2 && strings.EqualFold(parts[0], "Items") {
+			handleItemDetail(rec, r, database, parts[1])
+			return
+		}
+		if r.Method == http.MethodGet && len(parts) == 4 && strings.EqualFold(parts[0], "Items") && strings.EqualFold(parts[2], "Images") && strings.EqualFold(parts[3], "Primary") {
+			handleItemPrimaryImage(rec, r, database, parts[1])
+			return
+		}
+		if r.Method == http.MethodGet && len(parts) == 4 && strings.EqualFold(parts[0], "Items") && strings.EqualFold(parts[2], "Images") && strings.EqualFold(parts[3], "Logo") {
+			handleItemLogoImage(rec, r, database, parts[1])
+			return
+		}
+		if r.Method == http.MethodGet && len(parts) == 4 && strings.EqualFold(parts[0], "Items") && strings.EqualFold(parts[2], "Images") && strings.EqualFold(parts[3], "Backdrop") {
+			handleItemBackdropImage(rec, r, database, parts[1])
+			return
+		}
+		if r.Method == http.MethodGet && len(parts) == 3 && strings.EqualFold(parts[0], "Videos") && strings.EqualFold(parts[2], "stream") {
+			handleVideoStream(rec, r, database, parts[1])
+			return
+		}
+		if r.Method == http.MethodGet && len(parts) == 3 && strings.EqualFold(parts[0], "Videos") && strings.EqualFold(parts[2], "stream.m3u8") {
+			handleVideoStreamM3U8(rec, r, database, parts[1])
+			return
+		}
+		if r.Method == http.MethodGet && len(parts) == 3 && strings.EqualFold(parts[0], "videos") && strings.HasPrefix(strings.ToLower(parts[2]), "original.") {
+			handleVideoOriginal(rec, r, database, parts[1])
+			return
+		}
+		if r.Method == http.MethodGet && len(parts) == 4 && strings.EqualFold(parts[0], "Users") && strings.EqualFold(parts[2], "Items") && strings.EqualFold(parts[3], "Latest") {
+			handleUserItemsLatest(rec, r, database, parts[1])
+			return
+		}
+		if r.Method == http.MethodGet && len(parts) == 4 && strings.EqualFold(parts[0], "Users") && strings.EqualFold(parts[2], "Items") {
+			handleUserItemDetail(rec, r, database, parts[1], parts[3])
+			return
+		}
+		if r.Method == http.MethodGet && len(parts) == 3 && strings.EqualFold(parts[0], "Users") && strings.EqualFold(parts[2], "Items") {
+			handleUserItems(rec, r, database, parts[1])
+			return
+		}
+		if r.Method == http.MethodGet && len(parts) == 2 && strings.EqualFold(parts[0], "Users") {
+			handleUserProfile(rec, r, database, parts[1])
 			return
 		}
 
-		if exceeded, err := limit.GuardEmby(database); err == nil && exceeded {
-			lw.Header().Set(limit.HeaderErrKey(), limit.Code())
-			if wm := buildinfo.WatermarkTrim(); wm != "" {
-				lw.Header().Set(limit.HeaderWatermarkKey(), wm)
-			}
-			embyWriteError(lw, http.StatusServiceUnavailable, limit.PublicCode())
-			return
-		}
-
-		parts := embySplitPathParts(path)
-
-		if len(parts) == 0 {
-			embyNotFound(lw)
-			return
-		}
-
-		head, tail := embyHeadTail(parts)
-		if head == "" {
-			embyNotFound(lw)
-			return
-		}
-		h, ok := routes[head]
-		if !ok {
-			embyNotFound(lw)
-			return
-		}
-		h(lw, r, tail)
+		writeJSON(rec, http.StatusNotFound, map[string]any{
+			"error":  "emby route not implemented yet",
+			"path":   r.URL.Path,
+			"method": r.Method,
+		})
 	})
 }
 
-func embyStableServerID(seed string) string {
-	if strings.TrimSpace(seed) == "" {
-		seed = "MeowFilm"
+func embyDebugEnabled() bool {
+	return strings.TrimSpace(os.Getenv("MEOWFILM_DEBUG")) == "1"
+}
+
+func embyShouldSkipDebugLog(r *http.Request) bool {
+	tail := strings.Trim(embyRouteTail(r), "/")
+	parts := splitEmbyPath(tail)
+	return len(parts) == 4 && strings.EqualFold(parts[0], "Items") && strings.EqualFold(parts[2], "Images")
+}
+
+func embyURL(r *http.Request) string {
+	if r == nil || r.URL == nil {
+		return ""
 	}
-	h := sha1.Sum([]byte(seed))
-	return hex.EncodeToString(h[:])
+	if strings.TrimSpace(r.URL.RawQuery) == "" {
+		return r.URL.Path
+	}
+	return r.URL.Path + "?" + r.URL.RawQuery
+}
+
+func embyEscapedPath(r *http.Request) string {
+	if r == nil || r.URL == nil {
+		return ""
+	}
+	if strings.TrimSpace(r.URL.RawPath) != "" {
+		return r.URL.RawPath
+	}
+	return r.URL.EscapedPath()
+}
+
+func embyRouteTail(r *http.Request) string {
+	raw := embyEscapedPath(r)
+	if strings.HasPrefix(raw, "/emby/") {
+		return strings.TrimPrefix(raw, "/emby/")
+	}
+	return strings.TrimPrefix(raw, "/")
+}
+
+func splitEmbyPath(tail string) []string {
+	clean := strings.Trim(path.Clean("/"+tail), "/")
+	if clean == "" || clean == "." {
+		return nil
+	}
+	return strings.Split(clean, "/")
+}
+
+func writeJSON(w http.ResponseWriter, status int, payload any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+type responseRecorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (w *responseRecorder) WriteHeader(statusCode int) {
+	if w.status == 0 {
+		w.status = statusCode
+	}
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *responseRecorder) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	n, err := w.ResponseWriter.Write(p)
+	w.bytes += n
+	return n, err
+}
+
+func (w *responseRecorder) Status() int {
+	if w.status == 0 {
+		return http.StatusOK
+	}
+	return w.status
 }

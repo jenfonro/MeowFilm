@@ -74,7 +74,3 @@ func normalizeContentKey(s string) string {
 func defaultString(v, def string) string {
 	return mfnet.DefaultString(v, def)
 }
-
-func normalizeHTTPBase(value string) string {
-	return mfnet.NormalizeHTTPBase(value)
-}

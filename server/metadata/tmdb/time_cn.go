@@ -33,6 +33,9 @@ func ParseAirDateCNMidnight(dateText string) (time.Time, bool) {
 // IsAirDateAiredOrToday returns true when the given air_date (YYYY-MM-DD) is not after "today"
 // in Beijing time (Asia/Shanghai), regardless of the server timezone.
 func IsAirDateAiredOrToday(dateText string, now time.Time) bool {
-	return isTMDBAirDateAiredOrToday(dateText, now)
+	airDay, ok := ParseAirDateCNMidnight(dateText)
+	if !ok {
+		return false
+	}
+	return !airDay.After(CNDayStart(now))
 }
-
