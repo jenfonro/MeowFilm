@@ -1293,6 +1293,58 @@ func ucClearDir(pdirFid string, cookie *string) error {
 	return ucDeleteFiles(fids, cookie)
 }
 
+func ucFindFolderFid(name string, cookie *string, parentFid string) (string, bool, error) {
+	folderName := strings.TrimSpace(name)
+	if folderName == "" {
+		return "", false, errors.New("missing folder name")
+	}
+	parent := strings.TrimSpace(parentFid)
+	if parent == "" {
+		parent = "0"
+	}
+	sortResp, err := ucListDir(parent, cookie, 500)
+	if err != nil {
+		return "", false, err
+	}
+	for _, it := range sortResp.Data.List {
+		if it == nil {
+			continue
+		}
+		isDir := false
+		if v, ok := it["dir"].(bool); ok && v {
+			isDir = true
+		}
+		if ft, ok := it["file_type"].(float64); ok && int(ft) == 0 {
+			isDir = true
+		}
+		kind := strings.ToLower(strings.TrimSpace(toString(it["type"])))
+		if kind == "folder" || kind == "dir" || kind == "directory" {
+			isDir = true
+		}
+		if !isDir {
+			continue
+		}
+		nm := strings.TrimSpace(toString(it["file_name"]))
+		if nm == "" {
+			nm = strings.TrimSpace(toString(it["name"]))
+		}
+		if nm != folderName {
+			continue
+		}
+		fid := strings.TrimSpace(toString(it["fid"]))
+		if fid == "" {
+			fid = strings.TrimSpace(toString(it["file_id"]))
+		}
+		if fid == "" {
+			fid = strings.TrimSpace(toString(it["id"]))
+		}
+		if fid != "" {
+			return fid, true, nil
+		}
+	}
+	return "", false, nil
+}
+
 func ucEnsureFolderFid(name string, cookie *string, parentFid string) (string, error) {
 	folderName := strings.TrimSpace(name)
 	if folderName == "" {
@@ -1302,44 +1354,8 @@ func ucEnsureFolderFid(name string, cookie *string, parentFid string) (string, e
 	if parent == "" {
 		parent = "0"
 	}
-	sortResp, err := ucListDir(parent, cookie, 500)
-	if err == nil {
-		for _, it := range sortResp.Data.List {
-			if it == nil {
-				continue
-			}
-			isDir := false
-			if v, ok := it["dir"].(bool); ok && v {
-				isDir = true
-			}
-			if ft, ok := it["file_type"].(float64); ok && int(ft) == 0 {
-				isDir = true
-			}
-			kind := strings.ToLower(strings.TrimSpace(toString(it["type"])))
-			if kind == "folder" || kind == "dir" || kind == "directory" {
-				isDir = true
-			}
-			if !isDir {
-				continue
-			}
-			nm := strings.TrimSpace(toString(it["file_name"]))
-			if nm == "" {
-				nm = strings.TrimSpace(toString(it["name"]))
-			}
-			if nm != folderName {
-				continue
-			}
-			fid := strings.TrimSpace(toString(it["fid"]))
-			if fid == "" {
-				fid = strings.TrimSpace(toString(it["file_id"]))
-			}
-			if fid == "" {
-				fid = strings.TrimSpace(toString(it["id"]))
-			}
-			if fid != "" {
-				return fid, nil
-			}
-		}
+	if fid, found, err := ucFindFolderFid(folderName, cookie, parent); err == nil && found {
+		return fid, nil
 	}
 	createURL := ucShareAPIBase + "/file?pr=UCBrowser&fr=pc"
 	body := map[string]any{
@@ -1455,6 +1471,11 @@ func ucShareSave(shareID string, stoken string, fid string, fidToken string, toP
 	if err := ucShareDoJSONWithCookie(http.MethodPost, saveURL, cookie, buildUCShareHeaders(""), b, &saveResp); err != nil {
 		return "", err
 	}
+	if syncFlag, ok := saveResp["task_sync"].(bool); ok && syncFlag {
+		if fid := extractPanSaveTopFid(saveResp); fid != "" {
+			return fid, nil
+		}
+	}
 	data, _ := saveResp["data"].(map[string]any)
 	taskID := ""
 	if data != nil {
@@ -1469,7 +1490,6 @@ func ucShareSave(shareID string, stoken string, fid string, fidToken string, toP
 	if taskID == "" {
 		return "", errors.New("uc save: task_id not found")
 	}
-
 	deadline := time.Now().Add(30 * time.Second)
 	var lastTask map[string]any
 	for time.Now().Before(deadline) {
@@ -1505,17 +1525,7 @@ func ucShareSave(shareID string, stoken string, fid string, fidToken string, toP
 		time.Sleep(300 * time.Millisecond)
 	}
 	if lastTask != nil {
-		if td, _ := lastTask["data"].(map[string]any); td != nil {
-			if sa, _ := td["save_as"].(map[string]any); sa != nil {
-				if arr, ok := sa["save_as_top_fids"].([]any); ok && len(arr) > 0 {
-					savedFid = strings.TrimSpace(toString(arr[0]))
-				} else if arr, ok := sa["save_as_top_fid"].([]any); ok && len(arr) > 0 {
-					savedFid = strings.TrimSpace(toString(arr[0]))
-				} else if v := strings.TrimSpace(toString(sa["save_as_top_fid"])); v != "" {
-					savedFid = v
-				}
-			}
-		}
+		savedFid = extractPanSaveTopFid(lastTask)
 	}
 	if savedFid == "" {
 		return "", errors.New("uc save: saved fid not found")
@@ -1554,7 +1564,7 @@ func ucEnsureDestDirFid(cookie *string, tvUser string, toPdirFid string, toPdirP
 		return fidIn, nil
 	}
 	segs := ucParseSubPathSegments(toPdirPath)
-	rootFid, err := ucEnsureFolderFid("MeowFilm", cookie, "0")
+	rootFid, err := ucEnsureFolderFid(panRootFolderName, cookie, "0")
 	if err != nil {
 		return "", err
 	}
@@ -1702,8 +1712,10 @@ func ucPlayImpl(database *db.DB, flag string, id string, want string, tvUser str
 	cacheKey := strings.TrimSpace(id) + "|" + wantMode
 	if u, h, ok := getUCPlayCache(cacheKey); ok && u != "" {
 		if len(h) == 0 {
+			markPanPlayActivity("uc", time.Now(), panPlayActiveTTL)
 			return u, nil, nil
 		}
+		markPanPlayActivity("uc", time.Now(), panPlayActiveTTL)
 		return u, h, nil
 	}
 
@@ -1718,8 +1730,6 @@ func ucPlayImpl(database *db.DB, flag string, id string, want string, tvUser str
 	if err != nil {
 		return "", nil, err
 	}
-	_ = ucClearDir(destFid, &cookie)
-
 	savedFid, err := ucShareSave(shareID, stoken, fid, fidToken, destFid, &cookie)
 	if err != nil {
 		return "", nil, err
@@ -1814,9 +1824,11 @@ func ucPlayImpl(database *db.DB, flag string, id string, want string, tvUser str
 
 	if chosenSource == "cookie" && len(chosenHeader) > 0 {
 		setUCPlayCache(cacheKey, chosenUrl, chosenHeader)
+		markPanPlayActivity("uc", time.Now(), panPlayActiveTTL)
 		return chosenUrl, chosenHeader, nil
 	}
 	setUCPlayCache(cacheKey, chosenUrl, map[string]string{})
+	markPanPlayActivity("uc", time.Now(), panPlayActiveTTL)
 	return chosenUrl, nil, nil
 }
 
