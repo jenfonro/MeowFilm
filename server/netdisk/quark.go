@@ -626,6 +626,58 @@ func quarkClearDir(pdirFid string, cookie string) error {
 	return quarkDeleteFiles(fids, cookie)
 }
 
+func quarkFindFolderFid(name string, cookie string, parentFid string) (string, bool, error) {
+	folderName := strings.TrimSpace(name)
+	if folderName == "" {
+		return "", false, errors.New("missing folder name")
+	}
+	parent := strings.TrimSpace(parentFid)
+	if parent == "" {
+		parent = "0"
+	}
+	sortResp, err := quarkListDir(parent, cookie, 500)
+	if err != nil {
+		return "", false, err
+	}
+	for _, it := range sortResp.Data.List {
+		if it == nil {
+			continue
+		}
+		isDir := false
+		if v, ok := it["dir"].(bool); ok && v {
+			isDir = true
+		}
+		if ft, ok := it["file_type"].(float64); ok && int(ft) == 0 {
+			isDir = true
+		}
+		kind := strings.ToLower(strings.TrimSpace(toString(it["type"])))
+		if kind == "folder" || kind == "dir" || kind == "directory" {
+			isDir = true
+		}
+		if !isDir {
+			continue
+		}
+		nm := strings.TrimSpace(toString(it["file_name"]))
+		if nm == "" {
+			nm = strings.TrimSpace(toString(it["name"]))
+		}
+		if nm != folderName {
+			continue
+		}
+		fid := strings.TrimSpace(toString(it["fid"]))
+		if fid == "" {
+			fid = strings.TrimSpace(toString(it["file_id"]))
+		}
+		if fid == "" {
+			fid = strings.TrimSpace(toString(it["id"]))
+		}
+		if fid != "" {
+			return fid, true, nil
+		}
+	}
+	return "", false, nil
+}
+
 func quarkEnsureFolderFid(name string, cookie string, parentFid string) (string, error) {
 	folderName := strings.TrimSpace(name)
 	if folderName == "" {
@@ -635,44 +687,8 @@ func quarkEnsureFolderFid(name string, cookie string, parentFid string) (string,
 	if parent == "" {
 		parent = "0"
 	}
-	sortResp, err := quarkListDir(parent, cookie, 500)
-	if err == nil {
-		for _, it := range sortResp.Data.List {
-			if it == nil {
-				continue
-			}
-			isDir := false
-			if v, ok := it["dir"].(bool); ok && v {
-				isDir = true
-			}
-			if ft, ok := it["file_type"].(float64); ok && int(ft) == 0 {
-				isDir = true
-			}
-			kind := strings.ToLower(strings.TrimSpace(toString(it["type"])))
-			if kind == "folder" || kind == "dir" || kind == "directory" {
-				isDir = true
-			}
-			if !isDir {
-				continue
-			}
-			nm := strings.TrimSpace(toString(it["file_name"]))
-			if nm == "" {
-				nm = strings.TrimSpace(toString(it["name"]))
-			}
-			if nm != folderName {
-				continue
-			}
-			fid := strings.TrimSpace(toString(it["fid"]))
-			if fid == "" {
-				fid = strings.TrimSpace(toString(it["file_id"]))
-			}
-			if fid == "" {
-				fid = strings.TrimSpace(toString(it["id"]))
-			}
-			if fid != "" {
-				return fid, nil
-			}
-		}
+	if fid, found, err := quarkFindFolderFid(folderName, cookie, parent); err == nil && found {
+		return fid, nil
 	}
 	createURL := quarkShareAPIBase + "/1/clouddrive/file?pr=ucpro&fr=pc"
 	body := map[string]any{
@@ -747,6 +763,11 @@ func quarkShareSave(shareID string, stoken string, fid string, fidToken string, 
 			return "", errors.New(msg + " (code=" + code + ")")
 		}
 	}
+	if syncFlag, ok := saveResp["task_sync"].(bool); ok && syncFlag {
+		if fid := extractPanSaveTopFid(saveResp); fid != "" {
+			return fid, nil
+		}
+	}
 	taskID := strings.TrimSpace(quarkExtractFirstStringByKeys(saveResp, []string{"task_id", "taskid"}))
 	if taskID == "" {
 		// Best-effort detail: include api message if present.
@@ -762,7 +783,6 @@ func quarkShareSave(shareID string, stoken string, fid string, fidToken string, 
 		}
 		return "", errors.New("quark save: task_id not found")
 	}
-
 	deadline := time.Now().Add(30 * time.Second)
 	var lastTask map[string]any
 	for time.Now().Before(deadline) {
@@ -811,17 +831,7 @@ func quarkShareSave(shareID string, stoken string, fid string, fidToken string, 
 		time.Sleep(300 * time.Millisecond)
 	}
 	if lastTask != nil {
-		if td, _ := lastTask["data"].(map[string]any); td != nil {
-			if sa, _ := td["save_as"].(map[string]any); sa != nil {
-				if arr, ok := sa["save_as_top_fids"].([]any); ok && len(arr) > 0 {
-					savedFid = strings.TrimSpace(toString(arr[0]))
-				} else if arr, ok := sa["save_as_top_fid"].([]any); ok && len(arr) > 0 {
-					savedFid = strings.TrimSpace(toString(arr[0]))
-				} else if v := strings.TrimSpace(toString(sa["save_as_top_fid"])); v != "" {
-					savedFid = v
-				}
-			}
-		}
+		savedFid = extractPanSaveTopFid(lastTask)
 	}
 	if savedFid == "" {
 		return "", errors.New("quark save: saved fid not found")
@@ -1559,7 +1569,7 @@ func refreshQuarkTVAccessToken(database *db.DB, tvKey string, refreshToken strin
 }
 
 func quarkEnsurePlayDirFid(cookie string, tvUser string) (string, error) {
-	rootFid, err := quarkEnsureFolderFid("MeowFilm", cookie, "0")
+	rootFid, err := quarkEnsureFolderFid(panRootFolderName, cookie, "0")
 	if err != nil {
 		return "", err
 	}
@@ -1741,7 +1751,7 @@ func (rt *quarkRuntime) ensureFolderFid(name string, parentFid string) (string, 
 }
 
 func (rt *quarkRuntime) ensurePlayDirFid(tvUser string) (string, error) {
-	rootFid, err := rt.ensureFolderFid("MeowFilm", "0")
+	rootFid, err := rt.ensureFolderFid(panRootFolderName, "0")
 	if err != nil {
 		return "", err
 	}
@@ -1795,6 +1805,11 @@ func (rt *quarkRuntime) shareSave(shareID string, stoken string, fid string, fid
 			return "", errors.New(msg + " (code=" + code + ")")
 		}
 	}
+	if syncFlag, ok := saveResp["task_sync"].(bool); ok && syncFlag {
+		if fid := extractPanSaveTopFid(saveResp); fid != "" {
+			return fid, nil
+		}
+	}
 	taskID := strings.TrimSpace(quarkExtractFirstStringByKeys(saveResp, []string{"task_id", "taskid"}))
 	if taskID == "" {
 		msg := ""
@@ -1809,7 +1824,6 @@ func (rt *quarkRuntime) shareSave(shareID string, stoken string, fid string, fid
 		}
 		return "", errors.New("quark save: task_id not found")
 	}
-
 	deadline := time.Now().Add(30 * time.Second)
 	var lastTask map[string]any
 	for time.Now().Before(deadline) {
@@ -1858,17 +1872,7 @@ func (rt *quarkRuntime) shareSave(shareID string, stoken string, fid string, fid
 		time.Sleep(300 * time.Millisecond)
 	}
 	if lastTask != nil {
-		if td, _ := lastTask["data"].(map[string]any); td != nil {
-			if sa, _ := td["save_as"].(map[string]any); sa != nil {
-				if arr, ok := sa["save_as_top_fids"].([]any); ok && len(arr) > 0 {
-					savedFid = strings.TrimSpace(toString(arr[0]))
-				} else if arr, ok := sa["save_as_top_fid"].([]any); ok && len(arr) > 0 {
-					savedFid = strings.TrimSpace(toString(arr[0]))
-				} else if v := strings.TrimSpace(toString(sa["save_as_top_fid"])); v != "" {
-					savedFid = v
-				}
-			}
-		}
+		savedFid = extractPanSaveTopFid(lastTask)
 	}
 	if savedFid == "" {
 		return "", errors.New("quark save: saved fid not found")
@@ -2116,15 +2120,12 @@ func quarkPlayImpl(database *db.DB, id string, want string, tvUser string) (stri
 				h = map[string]string{}
 			}
 		}
+		markPanPlayActivity("quark", time.Now(), panPlayActiveTTL)
 		return u, h, nil
 	}
 
 	toPdir, err := rt.ensurePlayDirFid(user)
 	if err != nil {
-		return "", nil, err
-	}
-
-	if err := rt.clearDir(toPdir); err != nil {
 		return "", nil, err
 	}
 
@@ -2236,6 +2237,7 @@ func quarkPlayImpl(database *db.DB, id string, want string, tvUser string) (stri
 		selectedHeaders = map[string]string{}
 	}
 	setQuarkPlayCache(cacheKey, selectedURL, selectedHeaders)
+	markPanPlayActivity("quark", time.Now(), panPlayActiveTTL)
 	return selectedURL, selectedHeaders, nil
 }
 
