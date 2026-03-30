@@ -410,10 +410,6 @@ func (d *DB) ensureSchema() error {
 				  pos INTEGER PRIMARY KEY,
 				  rule_text TEXT NOT NULL
 				);
-				CREATE TABLE IF NOT EXISTS magic_aggregate_rule (
-				  pos INTEGER PRIMARY KEY,
-				  rule_text TEXT NOT NULL
-				);
 				CREATE TABLE IF NOT EXISTS magic_aggregate_regex_rule (
 				  pos INTEGER PRIMARY KEY,
 				  pattern TEXT NOT NULL
@@ -473,21 +469,6 @@ func (d *DB) ensureSchema() error {
 					  UNIQUE(kind, douban_id)
 					);
 					CREATE INDEX IF NOT EXISTS idx_douban_media_kind_updated_at ON douban_media(kind, updated_at DESC);
-					CREATE TABLE IF NOT EXISTS douban_media_i18n (
-					  media_id INTEGER NOT NULL,
-					  lang TEXT NOT NULL, -- e.g. 'zh-CN'
-					  title TEXT NOT NULL DEFAULT '',
-					  updated_at INTEGER NOT NULL,
-					  PRIMARY KEY(media_id, lang),
-					  FOREIGN KEY(media_id) REFERENCES douban_media(id) ON DELETE CASCADE
-					);
-					CREATE TABLE IF NOT EXISTS douban_media_state (
-					  media_id INTEGER PRIMARY KEY,
-					  last_try_at INTEGER NOT NULL DEFAULT 0,
-					  last_try_key TEXT NOT NULL DEFAULT '',
-					  updated_at INTEGER NOT NULL,
-					  FOREIGN KEY(media_id) REFERENCES douban_media(id) ON DELETE CASCADE
-					);
 					CREATE TABLE IF NOT EXISTS douban_detail_cache (
 					  kind TEXT NOT NULL,
 					  douban_id TEXT NOT NULL,
@@ -507,97 +488,6 @@ func (d *DB) ensureSchema() error {
 					  FOREIGN KEY(tmdb_media_id) REFERENCES tmdb_media(id) ON DELETE CASCADE
 					);
 					CREATE INDEX IF NOT EXISTS idx_douban_tmdb_link_tmdb_media ON douban_tmdb_link(tmdb_media_id);
-
-					-- Cache domain (fully normalized)
-					CREATE TABLE IF NOT EXISTS cache_site_pan (
-					  id INTEGER PRIMARY KEY AUTOINCREMENT,
-					  site_kind TEXT NOT NULL DEFAULT 'global', -- 'global' | 'user' | 'client' (extensible values may still exist)
-					  owner_user_id INTEGER NOT NULL DEFAULT 0,
-					  site_id TEXT NOT NULL,
-					  site_pan_id TEXT NOT NULL,
-					  spider_api TEXT NOT NULL,
-					  site_detail TEXT NOT NULL,
-					  pan_flag TEXT NOT NULL DEFAULT '',
-					  updated_at INTEGER NOT NULL,
-					  UNIQUE(site_kind, owner_user_id, site_id, site_pan_id)
-					);
-					CREATE INDEX IF NOT EXISTS idx_cache_site_pan_site ON cache_site_pan(site_kind, owner_user_id, site_id, updated_at DESC);
-					CREATE TABLE IF NOT EXISTS cache_site_pan_state (
-					  site_pan_id INTEGER PRIMARY KEY,
-					  status TEXT NOT NULL DEFAULT 'active',
-					  fail_count INTEGER NOT NULL DEFAULT 0,
-					  cooldown_until INTEGER NOT NULL DEFAULT 0,
-					  last_refresh_at INTEGER NOT NULL DEFAULT 0,
-					  updated_at INTEGER NOT NULL,
-					  FOREIGN KEY(site_pan_id) REFERENCES cache_site_pan(id) ON DELETE CASCADE
-					);
-
-					CREATE TABLE IF NOT EXISTS cache_pan (
-					  id INTEGER PRIMARY KEY AUTOINCREMENT,
-					  provider TEXT NOT NULL,
-					  pan_id TEXT NOT NULL,
-					  updated_at INTEGER NOT NULL,
-					  UNIQUE(provider, pan_id)
-					);
-					CREATE INDEX IF NOT EXISTS idx_cache_pan_provider ON cache_pan(provider, updated_at DESC);
-					CREATE TABLE IF NOT EXISTS cache_pan_state (
-					  pan_id INTEGER PRIMARY KEY,
-					  status TEXT NOT NULL DEFAULT 'active',
-					  fail_count INTEGER NOT NULL DEFAULT 0,
-					  cooldown_until INTEGER NOT NULL DEFAULT 0,
-					  last_verified_at INTEGER NOT NULL DEFAULT 0,
-					  updated_at INTEGER NOT NULL,
-					  FOREIGN KEY(pan_id) REFERENCES cache_pan(id) ON DELETE CASCADE
-					);
-					CREATE TABLE IF NOT EXISTS cache_pan_play_hint (
-					  pan_id INTEGER PRIMARY KEY,
-					  play_flag TEXT NOT NULL DEFAULT '',
-					  play_share_url TEXT NOT NULL DEFAULT '',
-					  play_filename TEXT NOT NULL DEFAULT '',
-					  updated_at INTEGER NOT NULL,
-					  FOREIGN KEY(pan_id) REFERENCES cache_pan(id) ON DELETE CASCADE
-					);
-
-					CREATE TABLE IF NOT EXISTS cache_episode (
-					  id INTEGER PRIMARY KEY AUTOINCREMENT,
-					  tmdb_media_id INTEGER NOT NULL,
-					  season INTEGER NOT NULL DEFAULT 0,
-					  episode INTEGER NOT NULL DEFAULT 0,
-					  updated_at INTEGER NOT NULL,
-					  UNIQUE(tmdb_media_id, season, episode),
-					  FOREIGN KEY(tmdb_media_id) REFERENCES tmdb_media(id) ON DELETE CASCADE
-					);
-					CREATE INDEX IF NOT EXISTS idx_cache_episode_lookup ON cache_episode(tmdb_media_id, season, episode);
-
-					CREATE TABLE IF NOT EXISTS cache_quality (
-					  id INTEGER PRIMARY KEY AUTOINCREMENT,
-					  resolution TEXT NOT NULL DEFAULT '',
-					  codec TEXT NOT NULL DEFAULT '',
-					  hdr INTEGER NOT NULL DEFAULT 0,
-					  fps INTEGER NOT NULL DEFAULT 0,
-					  updated_at INTEGER NOT NULL,
-					  UNIQUE(resolution, codec, hdr, fps)
-					);
-					CREATE TABLE IF NOT EXISTS cache_candidate (
-					  id INTEGER PRIMARY KEY AUTOINCREMENT,
-					  episode_id INTEGER NOT NULL,
-					  quality_id INTEGER NOT NULL,
-					  site_pan_id INTEGER NOT NULL,
-					  pan_id INTEGER NOT NULL,
-					  rank INTEGER NOT NULL DEFAULT 0,
-					  status TEXT NOT NULL DEFAULT 'active',
-					  fail_count INTEGER NOT NULL DEFAULT 0,
-					  cooldown_until INTEGER NOT NULL DEFAULT 0,
-					  last_ok_at INTEGER NOT NULL DEFAULT 0,
-					  updated_at INTEGER NOT NULL,
-					  UNIQUE(episode_id, quality_id, site_pan_id, pan_id),
-					  FOREIGN KEY(episode_id) REFERENCES cache_episode(id) ON DELETE CASCADE,
-					  FOREIGN KEY(quality_id) REFERENCES cache_quality(id) ON DELETE CASCADE,
-					  FOREIGN KEY(site_pan_id) REFERENCES cache_site_pan(id) ON DELETE CASCADE,
-					  FOREIGN KEY(pan_id) REFERENCES cache_pan(id) ON DELETE CASCADE
-						);
-						CREATE INDEX IF NOT EXISTS idx_cache_candidate_episode ON cache_candidate(episode_id, updated_at DESC);
-						CREATE INDEX IF NOT EXISTS idx_cache_candidate_cooldown ON cache_candidate(episode_id, cooldown_until);
 
 					-- Normalized config & user preferences.
 						-- App config (fully split by domain; single-row per domain)
