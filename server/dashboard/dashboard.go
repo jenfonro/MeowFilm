@@ -456,7 +456,6 @@ func handleDashboardBackup(w http.ResponseWriter, r *http.Request, database *db.
 			"displayName": s.DisplayName,
 			"base":        s.Base,
 			"secret":      s.Secret,
-			"pans":        map[string]any{"baidu": s.PansBaidu, "quark": s.PansQuark},
 		})
 	}
 
@@ -532,10 +531,9 @@ func handleDashboardBackup(w http.ResponseWriter, r *http.Request, database *db.
 			"servers":    goProxyServers,
 		},
 		"relay": map[string]any{
-			"enabled":            cfg.RelayEnabled,
-			"auth":               strings.TrimSpace(cfg.RelayAuthToken),
-			"goProxyThresholdGB": maxInt(0, cfg.RelayGoProxyThresholdGB),
-			"servers":            relayServers,
+			"enabled": cfg.RelayEnabled,
+			"auth":    strings.TrimSpace(cfg.RelayAuthToken),
+			"servers": relayServers,
 		},
 		"pan": map[string]any{
 			"loginSettings": panLogin,
@@ -630,24 +628,6 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 		b, ok := v.(bool)
 		return b, ok
 	}
-	readInt := func(m map[string]any, key string) (int, bool) {
-		if m == nil || key == "" {
-			return 0, false
-		}
-		v, ok := m[key]
-		if !ok || v == nil {
-			return 0, false
-		}
-		switch n := v.(type) {
-		case float64:
-			return maxInt(0, int(n)), true
-		case int:
-			return maxInt(0, n), true
-		default:
-			return 0, false
-		}
-	}
-
 	applied := map[string]any{}
 
 	if siteObj := readObj(body, "site"); siteObj != nil {
@@ -767,9 +747,6 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 			if authToken, ok := readTrimmedString(relay, "auth"); ok {
 				c.RelayAuthToken = authToken
 			}
-			if threshold, ok := readInt(relay, "goProxyThresholdGB"); ok {
-				c.RelayGoProxyThresholdGB = threshold
-			}
 		})
 		if arr := readArr(relay, "servers"); arr != nil {
 			list := []db.RelayServer{}
@@ -782,23 +759,14 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 				displayName, _ := row["displayName"].(string)
 				base, _ := row["base"].(string)
 				secret, _ := row["secret"].(string)
-				pans, _ := row["pans"].(map[string]any)
 				if strings.TrimSpace(name) == "" || strings.TrimSpace(base) == "" {
 					continue
-				}
-				bd := false
-				qk := false
-				if pans != nil {
-					bd, _ = pans["baidu"].(bool)
-					qk, _ = pans["quark"].(bool)
 				}
 				list = append(list, db.RelayServer{
 					Name:        strings.TrimSpace(name),
 					DisplayName: strings.TrimSpace(displayName),
 					Base:        strings.TrimSpace(base),
 					Secret:      strings.TrimSpace(secret),
-					PansBaidu:   bd,
-					PansQuark:   qk,
 				})
 			}
 			_ = database.ReplaceRelayServers(list)
@@ -1340,25 +1308,23 @@ func handleDashboardSiteSettings(w http.ResponseWriter, r *http.Request, databas
 			"displayName": s.DisplayName,
 			"base":        s.Base,
 			"secret":      s.Secret,
-			"pans":        map[string]any{"baidu": s.PansBaidu, "quark": s.PansQuark},
 		})
 	}
 	relayJSON, _ := json.Marshal(relayForUI)
 	writeJSON(w, 200, map[string]any{
-		"success":                 true,
-		"siteName":                cfg.SiteName,
-		"searchDisplayMode":       mode,
-		"netdiskProxyEnabled":     cfg.NetdiskProxyEnabled,
-		"netdiskProxyUrl":         strings.TrimSpace(cfg.NetdiskProxyURL),
-		"catpawrunnerServers":     servers,
-		"CatpawrunnerActive":      active,
-		"goProxyEnabled":          cfg.GoProxyEnabled,
-		"goProxyAutoSelect":       cfg.GoProxyAutoSelect,
-		"goProxyServersJson":      defaultString(string(goProxyJSON), "[]"),
-		"relayEnabled":            cfg.RelayEnabled,
-		"auth":                    cfg.RelayAuthToken,
-		"relayGoProxyThresholdGB": maxInt(0, cfg.RelayGoProxyThresholdGB),
-		"relayServersJson":        defaultString(string(relayJSON), "[]"),
+		"success":             true,
+		"siteName":            cfg.SiteName,
+		"searchDisplayMode":   mode,
+		"netdiskProxyEnabled": cfg.NetdiskProxyEnabled,
+		"netdiskProxyUrl":     strings.TrimSpace(cfg.NetdiskProxyURL),
+		"catpawrunnerServers": servers,
+		"CatpawrunnerActive":  active,
+		"goProxyEnabled":      cfg.GoProxyEnabled,
+		"goProxyAutoSelect":   cfg.GoProxyAutoSelect,
+		"goProxyServersJson":  defaultString(string(goProxyJSON), "[]"),
+		"relayEnabled":        cfg.RelayEnabled,
+		"auth":                cfg.RelayAuthToken,
+		"relayServersJson":    defaultString(string(relayJSON), "[]"),
 	})
 }
 
@@ -1404,13 +1370,11 @@ func handleDashboardRelaySave(w http.ResponseWriter, r *http.Request, database *
 	parseForm(r)
 	enabled := boolFromForm(r.FormValue("relayEnabled"))
 	relayAuthToken := strings.TrimSpace(r.FormValue("auth"))
-	relayGoProxyThresholdGB := parseNonNegativeInt(r.FormValue("relayGoProxyThresholdGB"))
 	serversJSON := r.FormValue("relayServersJson")
 	servers := normalizeRelayServers(serversJSON)
 	if err := database.UpdateAppConfig(func(c *db.AppConfig) {
 		c.RelayEnabled = enabled
 		c.RelayAuthToken = relayAuthToken
-		c.RelayGoProxyThresholdGB = relayGoProxyThresholdGB
 	}); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": err.Error()})
 		return
@@ -1422,8 +1386,6 @@ func handleDashboardRelaySave(w http.ResponseWriter, r *http.Request, database *
 			DisplayName: s.DisplayName,
 			Base:        s.Base,
 			Secret:      s.Secret,
-			PansBaidu:   s.Pans.Baidu,
-			PansQuark:   s.Pans.Quark,
 		})
 	}
 	if err := database.ReplaceRelayServers(out); err != nil {

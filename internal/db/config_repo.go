@@ -26,7 +26,6 @@ type AppConfig struct {
 	GoProxyAutoSelect          bool
 	RelayEnabled               bool
 	RelayAuthToken             string
-	RelayGoProxyThresholdGB    int
 	NetdiskProxyEnabled        bool
 	NetdiskProxyURL            string
 	TMDBAPIToken               string
@@ -56,7 +55,7 @@ func (d *DB) ReadAppConfig() (AppConfig, error) {
 		sDisplay                                       sql.NullString
 		smartPriority                                  sql.NullString
 		smartSiteClean                                 sql.NullString
-		gEnabled, gAuto, eEnabled, eGoProxyThreshold   sql.NullInt64
+		gEnabled, gAuto, eEnabled                      sql.NullInt64
 		eRelayToken                                    sql.NullString
 		ndEnabled                                      sql.NullInt64
 		ndProxy                                        sql.NullString
@@ -71,7 +70,7 @@ func (d *DB) ReadAppConfig() (AppConfig, error) {
 	_ = d.db.QueryRow(`SELECT display_mode FROM app_search WHERE id=1 LIMIT 1`).Scan(&sDisplay)
 	_ = d.db.QueryRow(`SELECT source_extract_priority, site_clean_keywords FROM app_smart WHERE id=1 LIMIT 1`).Scan(&smartPriority, &smartSiteClean)
 	_ = d.db.QueryRow(`SELECT enabled, auto_select FROM app_goproxy WHERE id=1 LIMIT 1`).Scan(&gEnabled, &gAuto)
-	_ = d.db.QueryRow(`SELECT enabled, relay_token, goproxy_threshold_gb FROM app_relay WHERE id=1 LIMIT 1`).Scan(&eEnabled, &eRelayToken, &eGoProxyThreshold)
+	_ = d.db.QueryRow(`SELECT enabled, relay_token FROM app_relay WHERE id=1 LIMIT 1`).Scan(&eEnabled, &eRelayToken)
 	_ = d.db.QueryRow(`SELECT enabled, proxy_url FROM app_netdisk_proxy WHERE id=1 LIMIT 1`).Scan(&ndEnabled, &ndProxy)
 	_ = d.db.QueryRow(`SELECT api_token, api_base, img_base, language, region, include_adult FROM app_tmdb WHERE id=1 LIMIT 1`).Scan(&tToken, &tAPIBase, &tImgBase, &tLang, &tRegion, &tAdult)
 	_ = d.db.QueryRow(`SELECT active FROM app_catpawrunner WHERE id=1 LIMIT 1`).Scan(&cActive)
@@ -92,7 +91,6 @@ func (d *DB) ReadAppConfig() (AppConfig, error) {
 		GoProxyAutoSelect:          gAuto.Int64 != 0,
 		RelayEnabled:               eEnabled.Int64 != 0,
 		RelayAuthToken:             strings.TrimSpace(eRelayToken.String),
-		RelayGoProxyThresholdGB:    maxInt64AsInt(0, eGoProxyThreshold.Int64),
 		NetdiskProxyEnabled:        ndEnabled.Int64 != 0,
 		NetdiskProxyURL:            strings.TrimSpace(ndProxy.String),
 		TMDBAPIToken:               tToken.String,
@@ -170,14 +168,13 @@ func (d *DB) UpdateAppConfig(update func(*AppConfig)) error {
 	`, bool01Int(cfg.GoProxyEnabled), bool01Int(cfg.GoProxyAutoSelect), now)
 
 	_, _ = tx.Exec(`
-		INSERT INTO app_relay(id, enabled, relay_token, goproxy_threshold_gb, updated_at)
-		VALUES(1, ?, ?, ?, ?)
+		INSERT INTO app_relay(id, enabled, relay_token, updated_at)
+		VALUES(1, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		  enabled=excluded.enabled,
 		  relay_token=excluded.relay_token,
-		  goproxy_threshold_gb=excluded.goproxy_threshold_gb,
 		  updated_at=excluded.updated_at
-	`, bool01Int(cfg.RelayEnabled), strings.TrimSpace(cfg.RelayAuthToken), maxInt(0, cfg.RelayGoProxyThresholdGB), now)
+	`, bool01Int(cfg.RelayEnabled), strings.TrimSpace(cfg.RelayAuthToken), now)
 
 	_, _ = tx.Exec(`
 		INSERT INTO app_netdisk_proxy(id, enabled, proxy_url, updated_at)
@@ -359,8 +356,6 @@ type RelayServer struct {
 	DisplayName string
 	Base        string
 	Secret      string
-	PansBaidu   bool
-	PansQuark   bool
 }
 
 func (d *DB) ListGoProxyServers() ([]GoProxyServer, error) {
@@ -432,7 +427,7 @@ func (d *DB) ReplaceGoProxyServers(servers []GoProxyServer) error {
 }
 
 func (d *DB) ListRelayServers() ([]RelayServer, error) {
-	rows, err := d.db.Query(`SELECT name, display_name, base, secret, pans_baidu, pans_quark FROM relay_server ORDER BY order_index ASC, name ASC`)
+	rows, err := d.db.Query(`SELECT name, display_name, base, secret FROM relay_server ORDER BY order_index ASC, name ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -444,10 +439,8 @@ func (d *DB) ListRelayServers() ([]RelayServer, error) {
 			displayName string
 			base        string
 			secret      string
-			bd          int
-			qk          int
 		)
-		_ = rows.Scan(&name, &displayName, &base, &secret, &bd, &qk)
+		_ = rows.Scan(&name, &displayName, &base, &secret)
 		name = strings.TrimSpace(name)
 		base = strings.TrimSpace(base)
 		if name == "" || base == "" {
@@ -458,8 +451,6 @@ func (d *DB) ListRelayServers() ([]RelayServer, error) {
 			DisplayName: displayName,
 			Base:        base,
 			Secret:      strings.TrimSpace(secret),
-			PansBaidu:   bd != 0,
-			PansQuark:   qk != 0,
 		})
 	}
 	return out, nil
@@ -491,16 +482,8 @@ func (d *DB) ReplaceRelayServers(servers []RelayServer) error {
 		return err
 	}
 	for i, it := range list {
-		bd := 0
-		qk := 0
-		if it.PansBaidu {
-			bd = 1
-		}
-		if it.PansQuark {
-			qk = 1
-		}
-		if _, err := tx.Exec(`INSERT INTO relay_server(name, display_name, base, secret, pans_baidu, pans_quark, order_index, updated_at) VALUES(?,?,?,?,?,?,?,?)`,
-			it.Name, it.DisplayName, it.Base, it.Secret, bd, qk, i, now,
+		if _, err := tx.Exec(`INSERT INTO relay_server(name, display_name, base, secret, order_index, updated_at) VALUES(?,?,?,?,?,?)`,
+			it.Name, it.DisplayName, it.Base, it.Secret, i, now,
 		); err != nil {
 			return err
 		}

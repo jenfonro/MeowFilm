@@ -372,8 +372,6 @@ func (d *DB) ensureSchema() error {
 				  display_name TEXT NOT NULL DEFAULT '',
 				  base TEXT NOT NULL,
 				  secret TEXT NOT NULL DEFAULT '',
-				  pans_baidu INTEGER NOT NULL DEFAULT 0,
-				  pans_quark INTEGER NOT NULL DEFAULT 0,
 				  order_index INTEGER NOT NULL DEFAULT 0,
 				  updated_at INTEGER NOT NULL
 				);
@@ -542,7 +540,6 @@ func (d *DB) ensureSchema() error {
 					  id INTEGER PRIMARY KEY CHECK (id = 1),
 					  enabled INTEGER NOT NULL DEFAULT 0,
 					  relay_token TEXT NOT NULL DEFAULT '',
-					  goproxy_threshold_gb INTEGER NOT NULL DEFAULT 0,
 					  updated_at INTEGER NOT NULL
 					);
 					CREATE TABLE IF NOT EXISTS app_netdisk_proxy (

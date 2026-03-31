@@ -336,7 +336,6 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 			if page == "play" || page == "site" {
 				settings["goProxyEnabled"] = cfg.GoProxyEnabled
 				settings["goProxyAutoSelect"] = cfg.GoProxyAutoSelect
-				settings["relayGoProxyThresholdGB"] = cfg.RelayGoProxyThresholdGB
 				rawGoProxy, _ := database.ListGoProxyServers()
 				goProxyServers := make([]goProxyServer, 0, len(rawGoProxy))
 				for _, s := range rawGoProxy {
