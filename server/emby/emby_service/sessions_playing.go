@@ -36,6 +36,9 @@ func ResolveTMDBHistoryKeyFromPlaybackItem(itemID string) (tmdbType string, tmdb
 }
 
 func HandleSessionPlaying(database *db.DB, userID int64, payload SessionPlaybackPayload) error {
+	if strings.TrimSpace(payload.MediaSourceID) != "" {
+		_ = ExtendPlaybackStreamTTL(strings.TrimSpace(payload.MediaSourceID), 60*time.Second, 15*time.Minute)
+	}
 	typ, tmdbID, season, episode, ok := ResolveTMDBHistoryKeyFromPlaybackItem(payload.ItemID)
 	if !ok || database == nil || userID <= 0 {
 		return nil
@@ -87,6 +90,9 @@ func HandleSessionPlaying(database *db.DB, userID int64, payload SessionPlayback
 }
 
 func HandleSessionProgress(database *db.DB, userID int64, payload SessionPlaybackPayload) error {
+	if strings.TrimSpace(payload.MediaSourceID) != "" {
+		_ = ExtendPlaybackStreamTTL(strings.TrimSpace(payload.MediaSourceID), 60*time.Second, 15*time.Minute)
+	}
 	return upsertSessionProgress(database, userID, payload)
 }
 
