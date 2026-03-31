@@ -225,8 +225,8 @@ func PanToProviderID(panLower string) string {
 	return smartPanToProviderID(panLower)
 }
 
-func CollectPlaybackOffersFromTMDB(database *db.DB, u *SmartUser, req PlaybackRequest, shouldStop func() bool) ([]PlaybackOffer, error) {
-	return smartCollectPlaybackOffersFromTMDB(database, u, req, shouldStop)
+func CollectPlaybackOffersFromTMDB(database *db.DB, u *SmartUser, req PlaybackRequest, shouldStop func() bool, emit func(PlaybackOffer, int)) error {
+	return smartCollectPlaybackOffersFromTMDB(database, u, req, shouldStop, emit)
 }
 
 func TryPlaybackOffers(database *db.DB, u *SmartUser, offers []PlaybackOffer) (finalURL string, finalHeaders map[string]string, picked *PlaybackPickedMeta, err error) {
@@ -292,6 +292,10 @@ func ResolvePanMockDetailPansIncremental(
 	onPanResolved func(panIndex int, episodes []catpawrunner.Episode, accessDelta map[string]string),
 ) ([]catpawrunner.Pan, map[string]string) {
 	return smartResolvePanMockDetailPansIncremental(database, siteKey, siteName, want, tmdbSeasons, tmdbHasMultiSeason, rawCleanRules, rawEpisodeRules, pans, onPanResolved)
+}
+
+func ResolveSinglePanMockPan(database *db.DB, pan catpawrunner.Pan) (catpawrunner.Pan, map[string]string, bool, string, error) {
+	return smartResolveSinglePanMockPan(database, pan)
 }
 
 func LoadAggregateCleanRules(database *db.DB) []string {

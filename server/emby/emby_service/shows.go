@@ -642,6 +642,16 @@ func buildSiteShowEpisodeSources(database *db.DB, userID int64, serverID string,
 		epNo := idx + 1
 		itemID := buildSiteEpisodeID(seriesRef.SiteKey, seriesRef.SiteDetail, seasonRef.Pan, epNo)
 		name := siteEpisodeDisplayName(ep, pan.RawLabel, pan.PanMock, seriesName, epNo)
+		rawFileName := siteEpisodeFileName(ep, name, epNo)
+		container := siteEpisodeContainerFromName(rawFileName)
+		fileName := siteEpisodePlayableFileName(rawFileName, container)
+		path := VirtualEpisodePath(seriesName, meta.Year, seasonRef.Pan, fileName)
+		chapters := EmptyDetailChapters()
+		mediaSources := detailMediaSources(itemID, path, fileName, 0, container, chapters)
+		mediaStreams := EmptyAnySlice()
+		if len(mediaSources) > 0 && mediaSources[0].MediaStreams != nil {
+			mediaStreams = mediaSources[0].MediaStreams
+		}
 		items = append(items, episodeListSource{
 			Name:                    name,
 			ServerID:                strings.TrimSpace(serverID),
@@ -650,12 +660,12 @@ func buildSiteShowEpisodeSources(database *db.DB, userID int64, serverID string,
 			DateCreated:             ProtocolCreatedDate(0),
 			CanDownload:             state.CanDownload,
 			SupportsSync:            state.SupportsSync,
-			Container:               "mp4",
+			Container:               container,
 			SortName:                SortNameOrName(name),
 			PremiereDate:            "",
-			MediaSources:            EmptyDetailMediaSources(),
+			MediaSources:            mediaSources,
 			AlternateMediaSources:   EmptyAnySlice(),
-			Path:                    "",
+			Path:                    path,
 			Overview:                "",
 			Genres:                  EmptyStrings(),
 			CommunityRating:         0,
@@ -682,15 +692,38 @@ func buildSiteShowEpisodeSources(database *db.DB, userID int64, serverID string,
 			SeasonID:                seasonID,
 			SeriesPrimaryImageTag:   SeriesPrimaryImageTag(seriesID),
 			SeasonName:              seasonName,
-			MediaStreams:            EmptyAnySlice(),
+			MediaStreams:            mediaStreams,
 			ImageTags:               ImageTagsForItem(itemID, false),
 			BackdropImageTags:       EmptyStrings(),
 			ParentLogoImageTag:      ParentLogoImageTag(seriesID),
-			Chapters:                EmptyDetailChapters(),
+			Chapters:                chapters,
 			MediaType:               MediaTypeVideo,
 		})
 	}
 	return items, true, nil
+}
+
+func siteEpisodeContainerFromName(name string) string {
+	ext := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(filepath.Ext(strings.TrimSpace(name)))), ".")
+	if ext == "" {
+		return "mp4"
+	}
+	return ext
+}
+
+func siteEpisodePlayableFileName(name string, container string) string {
+	base := strings.TrimSpace(filepath.Base(strings.TrimSpace(name)))
+	if base == "." || base == "/" || base == "" {
+		base = "video"
+	}
+	if filepath.Ext(base) != "" {
+		return base
+	}
+	ct := strings.TrimSpace(container)
+	if ct == "" {
+		ct = "mp4"
+	}
+	return base + "." + ct
 }
 
 func renderSeasonGenresItems(items []seasonListSource) []SeasonListItemDTO {
@@ -1044,10 +1077,6 @@ func fetchRawSiteDetailPans(database *db.DB, userID int64, siteKey string, siteD
 		for i := range pans {
 			pans[i].PanMockEnabled = true
 		}
-		resolved, _ := smart.ResolvePanMockDetailPans(database, siteKey, "", 0, nil, false, nil, nil, pans)
-		if resolved != nil {
-			pans = resolved
-		}
 	}
 	return pans, nil
 }
@@ -1057,7 +1086,11 @@ func fetchResolvedSiteDetailPans(database *db.DB, userID int64, siteKey string, 
 	if err != nil {
 		return nil, err
 	}
-	return buildResolvedSitePans(database, rawPans), nil
+	resolvedPans, err := resolveSiteDetailPansForBrowse(database, rawPans)
+	if err != nil {
+		return nil, err
+	}
+	return buildResolvedSitePans(database, resolvedPans), nil
 }
 
 func buildResolvedSitePans(database *db.DB, pans []catpawrunner.Pan) []resolvedSitePan {

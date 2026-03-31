@@ -28,10 +28,6 @@ func handlePlaybackRelay(w http.ResponseWriter, r *http.Request, database *db.DB
 	if built && target != nil {
 		log.Printf("[emby][playback_cache_hit] item=%s source=session finalized=%t", strings.TrimSpace(itemID), strings.TrimSpace(target.FinalURL) != "")
 	}
-	if built && target != nil && strings.TrimSpace(target.FinalURL) == "" {
-		log.Printf("[emby][playback_finalize] item=%s offers=%d", strings.TrimSpace(itemID), len(target.Offers))
-		target, built, _ = embysvc.FinalizePlaybackStreamTarget(database, current.Row.ID, *target, "", r)
-	}
 	if !built || target == nil || strings.TrimSpace(target.FinalURL) == "" {
 		writeEmbyError(w, http.StatusNotFound, "Not Found")
 		return
@@ -46,9 +42,6 @@ func handleVideoStreamM3U8(w http.ResponseWriter, r *http.Request, database *db.
 	}
 	mediaSourceID := strings.TrimSpace(r.URL.Query().Get("MediaSourceId"))
 	target, built := embysvc.LoadPlaybackStreamTarget(current.Row.ID, itemID, mediaSourceID, strings.TrimSpace(r.URL.Query().Get("PlaySessionId")))
-	if built && target != nil && strings.TrimSpace(target.FinalURL) == "" {
-		target, built, _ = embysvc.FinalizePlaybackStreamTarget(database, current.Row.ID, *target, "", r)
-	}
 	if !built || target == nil || strings.TrimSpace(target.FinalURL) == "" {
 		writeEmbyError(w, http.StatusNotFound, "Not Found")
 		return
