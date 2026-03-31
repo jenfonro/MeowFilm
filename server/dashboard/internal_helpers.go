@@ -99,11 +99,10 @@ type goProxyPans struct {
 }
 
 type relayServer struct {
-	Name        string      `json:"name"`
-	DisplayName string      `json:"displayName"`
-	Base        string      `json:"base"`
-	Secret      string      `json:"secret"`
-	Pans        goProxyPans `json:"pans"`
+	Name        string `json:"name"`
+	DisplayName string `json:"displayName"`
+	Base        string `json:"base"`
+	Secret      string `json:"secret"`
 }
 
 func normalizeGoProxyServers(value string) []goProxyServer {
@@ -136,7 +135,6 @@ func normalizeRelayServers(value string) []relayServer {
 		displayName, _ := row["displayName"].(string)
 		base, _ := row["base"].(string)
 		secret, _ := row["secret"].(string)
-		pans, _ := row["pans"].(map[string]any)
 		base = catpawrunner.NormalizeHTTPBase(base)
 		name = strings.TrimSpace(name)
 		displayName = strings.TrimSpace(displayName)
@@ -164,22 +162,11 @@ func normalizeRelayServers(value string) []relayServer {
 		if displayName == "" {
 			displayName = name
 		}
-		baidu := true
-		quark := true
-		if pans != nil {
-			if v, ok := pans["baidu"]; ok {
-				baidu = parseAnyBool(v, true)
-			}
-			if v, ok := pans["quark"]; ok {
-				quark = parseAnyBool(v, true)
-			}
-		}
 		out = append(out, relayServer{
 			Name:        name,
 			DisplayName: displayName,
 			Base:        base,
 			Secret:      secret,
-			Pans:        goProxyPans{Baidu: baidu, Quark: quark},
 		})
 	}
 	return out
