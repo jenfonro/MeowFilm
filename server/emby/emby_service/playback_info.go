@@ -88,7 +88,7 @@ type PlaybackStreamTarget struct {
 
 var embyPlaybackSessions = newPlaybackCacheStore()
 
-const playbackSessionTTL = 90 * time.Minute
+const playbackSessionTTL = 15 * time.Minute
 
 func EmptyPlaybackInfoResponse() PlaybackInfoResponseDTO {
 	return PlaybackInfoResponseDTO{MediaSources: []PlaybackInfoMediaSourceDTO{}, PlaySessionID: ""}
@@ -101,6 +101,10 @@ func BuildPlaybackInfoPayload(database *db.DB, userID int64, apiToken string, se
 	deviceID := strings.TrimSpace(clientmeta.ClientDeviceID(r))
 	userText := strconv.FormatInt(userID, 10)
 	cacheKey := ResolvePlaybackCacheKey(userText, deviceID, itemID)
+	if replayTarget, replayOK := embyPlaybackSessions.GetByReplayKey(cacheKey); replayOK {
+		log.Printf("[emby][playback_cache_hit] item=%s source=replay finalized=true", strings.TrimSpace(itemID))
+		return buildPlaybackInfoResponse(replayTarget, apiToken, r), true, nil
+	}
 	target, ok, err := ResolvePlaybackOnce(cacheKey, func() (*PlaybackStreamTarget, bool, error) {
 		mediaSourceID := randomPlaybackSessionID()
 		playSessionID := randomPlaybackSessionID()
@@ -111,15 +115,25 @@ func BuildPlaybackInfoPayload(database *db.DB, userID int64, apiToken string, se
 		resolved.UserID = userID
 		resolved.DeviceID = deviceID
 		resolved.ItemID = strings.TrimSpace(itemID)
-		if strings.TrimSpace(resolved.MediaSourceID) == "" {
-			resolved.MediaSourceID = mediaSourceID
+		finalTarget := resolved
+		if strings.TrimSpace(finalTarget.FinalURL) == "" {
+			finalized, finalizedOK, finalizeErr := ConsumePlaybackOffersAndBuildTarget(database, userID, *resolved, cacheKey, r)
+			if finalizeErr != nil || !finalizedOK || finalized == nil {
+				return finalized, finalizedOK, finalizeErr
+			}
+			finalTarget = finalized
 		}
-		if strings.TrimSpace(resolved.PlaySessionID) == "" {
-			resolved.PlaySessionID = playSessionID
+		finalTarget.UserID = userID
+		finalTarget.DeviceID = deviceID
+		finalTarget.ItemID = strings.TrimSpace(itemID)
+		if strings.TrimSpace(finalTarget.MediaSourceID) == "" {
+			finalTarget.MediaSourceID = mediaSourceID
 		}
-		embyPlaybackSessions.Set(*resolved, playbackSessionTTL)
-		RegisterPlaybackControl(*resolved, cacheKey)
-		return resolved, true, nil
+		if strings.TrimSpace(finalTarget.PlaySessionID) == "" {
+			finalTarget.PlaySessionID = playSessionID
+		}
+		embyPlaybackSessions.SetWithReplayKey(*finalTarget, cacheKey, playbackSessionTTL)
+		return finalTarget, true, nil
 	})
 	if err != nil {
 		return EmptyPlaybackInfoResponse(), true, err
@@ -238,64 +252,58 @@ func resolveTMDBPlaybackStreamTarget(database *db.DB, userID int64, ref *itemRef
 	producerWG.Add(2)
 	go func() {
 		defer producerWG.Done()
-		offers, _ := collectTMDBHistoryPlaybackOffers(database, userID, user, ref, *req, stopCh)
-		for _, offer := range offers {
-			EnqueuePlaybackOffer(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey, offer)
+		hist, histErr := database.GetPlayHistoryLatestByTMDB(userID, req.Kind, ref.NumericID)
+		if histErr == nil && hist != nil {
+			collectTMDBHistoryPlaybackFromListCandidates(database, user, ref, *req, *hist, stopCh, func(offer smart.PlaybackOffer) {
+				if EnqueueHistoryListOffer(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey, offer) {
+					log.Printf("[emby][history_offer_enqueue] item=%s tmdb=%s:%d stage=history_list panFlag=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, strings.TrimSpace(offer.Cand.PanFlag))
+				}
+			})
 		}
+		CloseHistoryListOffers(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey)
+		if histErr == nil && hist != nil {
+			collectTMDBHistoryPlaybackFromDetailCandidates(database, userID, user, ref, *req, *hist, stopCh, func(offer smart.PlaybackOffer) {
+				if EnqueueHistoryDetailOffer(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey, offer) {
+					log.Printf("[emby][history_offer_enqueue] item=%s tmdb=%s:%d stage=history_detail panFlag=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, strings.TrimSpace(offer.Cand.PanFlag))
+				}
+			})
+		}
+		CloseHistoryDetailOffers(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey)
 	}()
 	go func() {
 		defer producerWG.Done()
-		offers, _ := smart.CollectPlaybackOffersFromTMDB(database, user, *req, func() bool {
+		_ = smart.CollectPlaybackOffersFromTMDB(database, user, *req, func() bool {
 			return IsPlaybackResolveStopped(stopCh)
+		}, func(offer smart.PlaybackOffer, tier int) {
+			EnqueueFullOffer(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey, tier, offer)
 		})
-		for _, offer := range offers {
-			EnqueuePlaybackOffer(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey, offer)
-		}
+		CloseFullOffers(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey)
 	}()
 	go func() {
 		producerWG.Wait()
-		ClosePlaybackOffers(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey)
 	}()
 	return buildTMDBPlaybackOfferTarget(ref, *display, nil, mediaSourceID, playSessionID), true, nil
 }
 
-func collectTMDBHistoryPlaybackOffers(database *db.DB, userID int64, user *smart.User, ref *itemRef, req smart.PlaybackRequest, stopCh <-chan struct{}) ([]smart.PlaybackOffer, bool) {
-	if database == nil || user == nil || ref == nil {
-		return nil, false
-	}
-	hist, err := database.GetPlayHistoryLatestByTMDB(userID, req.Kind, ref.NumericID)
-	if err != nil || hist == nil {
-		return nil, false
-	}
-	offers := make([]smart.PlaybackOffer, 0, 4)
-	if listCandidates, ok := collectTMDBHistoryPlaybackFromListCandidates(database, user, ref, req, *hist, stopCh); ok && len(listCandidates) > 0 {
-		offers = append(offers, listCandidates...)
-	}
-	if detailCandidates, ok := collectTMDBHistoryPlaybackFromDetailCandidates(database, userID, user, ref, req, *hist, stopCh); ok && len(detailCandidates) > 0 {
-		offers = append(offers, detailCandidates...)
-	}
-	return offers, len(offers) > 0
-}
-
-func collectTMDBHistoryPlaybackFromListCandidates(database *db.DB, user *smart.User, ref *itemRef, req smart.PlaybackRequest, hist db.PlayHistoryRow, stopCh <-chan struct{}) ([]smart.PlaybackOffer, bool) {
+func collectTMDBHistoryPlaybackFromListCandidates(database *db.DB, user *smart.User, ref *itemRef, req smart.PlaybackRequest, hist db.PlayHistoryRow, stopCh <-chan struct{}, emit func(smart.PlaybackOffer)) bool {
 	panFlag := strings.TrimSpace(hist.PlayFlag)
 	provider := historyListProvider(panFlag)
 	if provider == "" || database == nil || user == nil {
-		return nil, false
+		return false
 	}
 	if IsPlaybackResolveStopped(stopCh) {
-		return nil, false
+		return false
 	}
 	log.Printf("[emby][history_list] item=%s tmdb=%s:%d panFlag=%s provider=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, panFlag, provider)
 	episodes, ok := listHistoryPlayFlagEpisodes(database, provider, panFlag)
 	if !ok || len(episodes) == 0 {
 		log.Printf("[emby][history_list_error] item=%s tmdb=%s:%d panFlag=%s provider=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, panFlag, provider)
-		return nil, false
+		return false
 	}
 	ep, ok := pickHistoryEpisodeCandidate(database, ref.NumericID, req, episodes)
 	if !ok {
 		log.Printf("[emby][history_list_error] item=%s tmdb=%s:%d panFlag=%s provider=%s reason=no_episode_match", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, panFlag, provider)
-		return nil, false
+		return false
 	}
 	log.Printf(
 		"[emby][history_list_ok] item=%s tmdb=%s:%d panFlag=%s provider=%s episodes=%d matchShowName=%s matchRawName=%s err=",
@@ -308,7 +316,7 @@ func collectTMDBHistoryPlaybackFromListCandidates(database *db.DB, user *smart.U
 		strings.TrimSpace(ep.Name),
 		strings.TrimSpace(smart.FirstRawNameFromURL(ep.URL)),
 	)
-	return []smart.PlaybackOffer{{
+	offer := smart.PlaybackOffer{
 		Cand: smart.Candidate{
 			SiteKey:    strings.TrimSpace(hist.SiteKey),
 			SiteName:   strings.TrimSpace(hist.SiteName),
@@ -316,26 +324,30 @@ func collectTMDBHistoryPlaybackFromListCandidates(database *db.DB, user *smart.U
 			PanFlag:    firstNonEmptyString(strings.TrimSpace(ep.Flag), panFlag),
 			Ep:         ep,
 		},
-	}}, true
+	}
+	if emit != nil {
+		emit(offer)
+	}
+	return true
 }
 
-func collectTMDBHistoryPlaybackFromDetailCandidates(database *db.DB, userID int64, user *smart.User, ref *itemRef, req smart.PlaybackRequest, hist db.PlayHistoryRow, stopCh <-chan struct{}) ([]smart.PlaybackOffer, bool) {
+func collectTMDBHistoryPlaybackFromDetailCandidates(database *db.DB, userID int64, user *smart.User, ref *itemRef, req smart.PlaybackRequest, hist db.PlayHistoryRow, stopCh <-chan struct{}, emit func(smart.PlaybackOffer)) bool {
 	siteKey := strings.TrimSpace(hist.SiteKey)
 	spiderAPI := strings.TrimSpace(hist.SpiderAPI)
 	siteDetail := strings.TrimSpace(hist.SiteDetail)
 	if database == nil || user == nil || spiderAPI == "" || siteDetail == "" {
-		return nil, false
+		return false
 	}
 	if IsPlaybackResolveStopped(stopCh) {
-		return nil, false
+		return false
 	}
 	log.Printf("[emby][history_detail] item=%s tmdb=%s:%d site=(%s|%s) spider=%s siteDetail=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, siteKey, strings.TrimSpace(hist.SiteName), spiderAPI, siteDetail)
 	pans, ok := fetchResolvedSiteDetailPansWithSpiderAPI(database, userID, siteKey, strings.TrimSpace(hist.SiteName), spiderAPI, siteDetail, ref.NumericID, req)
 	if !ok || len(pans) == 0 {
 		log.Printf("[emby][history_detail_error] item=%s tmdb=%s:%d site=(%s|%s) spider=%s siteDetail=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, siteKey, strings.TrimSpace(hist.SiteName), spiderAPI, siteDetail)
-		return nil, false
+		return false
 	}
-	candidates := make([]smart.PlaybackOffer, 0, len(pans))
+	found := false
 	for _, pan := range reorderHistoryPans(pans, strings.TrimSpace(hist.PlayFlag)) {
 		ep, matchOK := pickHistoryEpisodeCandidate(database, ref.NumericID, req, pan.Episodes)
 		if !matchOK {
@@ -343,7 +355,7 @@ func collectTMDBHistoryPlaybackFromDetailCandidates(database *db.DB, userID int6
 		}
 		rawPanLabel := strings.TrimSpace(pan.RawLabel)
 		ep.Flag = firstNonEmptyString(strings.TrimSpace(ep.Flag), rawPanLabel, strings.TrimSpace(hist.PlayFlag))
-		candidates = append(candidates, smart.PlaybackOffer{
+		offer := smart.PlaybackOffer{
 			Cand: smart.Candidate{
 				SiteKey:    siteKey,
 				SiteName:   strings.TrimSpace(hist.SiteName),
@@ -352,16 +364,18 @@ func collectTMDBHistoryPlaybackFromDetailCandidates(database *db.DB, userID int6
 				PanFlag:    firstNonEmptyString(strings.TrimSpace(ep.Flag), rawPanLabel, strings.TrimSpace(hist.PlayFlag)),
 				Ep:         ep,
 			},
-		})
-	}
-	if len(candidates) > 0 {
-		for _, cand := range candidates {
-			log.Printf("[emby][history_detail_ok] item=%s tmdb=%s:%d site=(%s|%s) siteDetail=%s panFlag=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, cand.Cand.SiteKey, cand.Cand.SiteName, siteDetail, cand.Cand.PanFlag)
 		}
-		return candidates, true
+		found = true
+		if emit != nil {
+			emit(offer)
+		}
+		log.Printf("[emby][history_detail_ok] item=%s tmdb=%s:%d site=(%s|%s) siteDetail=%s panFlag=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, offer.Cand.SiteKey, offer.Cand.SiteName, siteDetail, offer.Cand.PanFlag)
+	}
+	if found {
+		return true
 	}
 	log.Printf("[emby][history_detail_error] item=%s tmdb=%s:%d site=(%s|%s) spider=%s siteDetail=%s reason=no_episode_match", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, siteKey, strings.TrimSpace(hist.SiteName), spiderAPI, siteDetail)
-	return nil, false
+	return false
 }
 
 func buildTMDBPlaybackOfferTarget(ref *itemRef, display playbackDisplayMeta, offers []smart.PlaybackOffer, mediaSourceID string, playSessionID string) *PlaybackStreamTarget {
@@ -388,16 +402,19 @@ func buildTMDBPlaybackStreamTarget(database *db.DB, user *smart.User, ref *itemR
 	if strings.TrimSpace(adaptedURL) != "" {
 		finalURL = adaptedURL
 	}
-	log.Printf("[emby][playback_target] item=%s mode=%s headers=%d url=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(adaptMode), len(copyStringMap(finalHeaders)), smart.ShortURLForLog(finalURL))
+	targetURL := strings.TrimSpace(finalURL)
+	log.Printf("[emby][playback_target] item=%s mode=%s headers=%d url=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(adaptMode), len(copyStringMap(finalHeaders)), targetURL)
 	container := strings.TrimSpace(display.Container)
 	if container == "" {
-		container = detectContainerFromPlaybackURL(finalURL)
+		container = detectContainerFromPlaybackURL(targetURL)
 	}
 	if container == "" {
 		container = "mp4"
 	}
+	mediaSourceID := stablePlaybackIdentityFromPicked("media", strings.TrimSpace(ref.RawID), picked)
+	playSessionID := stablePlaybackIdentityFromPicked("play", strings.TrimSpace(ref.RawID), picked)
 	return &PlaybackStreamTarget{
-		FinalURL:         strings.TrimSpace(finalURL),
+		FinalURL:         targetURL,
 		FinalHeaders:     copyStringMap(finalHeaders),
 		Path:             display.Path,
 		Container:        container,
@@ -413,7 +430,8 @@ func buildTMDBPlaybackStreamTarget(database *db.DB, user *smart.User, ref *itemR
 		SpiderAPI:        strings.TrimSpace(smart.ResolveSpiderAPIBySiteKey(database, strings.TrimSpace(picked.SiteKey))),
 		SiteEpisodeIndex: maxInt(0, ref.Episode),
 		SiteEpisodeFile:  strings.TrimSpace(picked.RawName),
-		PlaySessionID:    randomPlaybackSessionID(),
+		MediaSourceID:    mediaSourceID,
+		PlaySessionID:    playSessionID,
 	}
 }
 
@@ -439,38 +457,11 @@ func resolveSiteEpisodePlaybackStreamTarget(database *db.DB, userID int64, ref *
 		return nil, false, nil
 	}
 	flag := firstNonEmptyString(strings.TrimSpace(ep.Flag), strings.TrimSpace(pan.RawLabel))
-	offers := []smart.PlaybackOffer{{
-		Cand: smart.Candidate{
-			SiteKey:    strings.TrimSpace(ref.SiteKey),
-			SiteName:   resolveSiteSeriesName(database, ref.SiteKey, ref.SiteDetail, siteDetailMeta{}),
-			SpiderAPI:  strings.TrimSpace(smart.ResolveSpiderAPIBySiteKey(database, ref.SiteKey)),
-			SiteDetail: strings.TrimSpace(ref.SiteDetail),
-			PanFlag:    flag,
-			Ep:         ep,
-		},
-	}}
-	return buildSiteEpisodePlaybackOfferTarget(ref, pan, ep, offers, randomPlaybackSessionID(), randomPlaybackSessionID()), true, nil
-}
-
-func buildSiteEpisodePlaybackOfferTarget(ref *itemRef, pan resolvedSitePan, ep catpawrunner.Episode, offers []smart.PlaybackOffer, mediaSourceID string, playSessionID string) *PlaybackStreamTarget {
-	seriesName := resolveSiteSeriesName(nil, ref.SiteKey, ref.SiteDetail, siteDetailMeta{})
-	displayName := siteEpisodeDisplayName(ep, pan.RawLabel, pan.PanMock, seriesName, ref.Episode)
-	if displayName == "" {
-		displayName = siteEpisodeFileName(ep, "", ref.Episode)
+	finalURL, finalHeaders, picked, err := resolveSiteEpisodeDirectPlayback(database, user, ref, ep, flag)
+	if err != nil || strings.TrimSpace(finalURL) == "" || picked == nil {
+		return nil, false, err
 	}
-	fileName := siteEpisodeFileName(ep, displayName, ref.Episode) + ".mp4"
-	return &PlaybackStreamTarget{
-		Offers:        clonePlaybackOffers(offers),
-		Path:          VirtualEpisodePath(seriesName, 0, ref.Pan, fileName),
-		Container:     "mp4",
-		Name:          displayName,
-		Runtime:       0,
-		Size:          0,
-		Bitrate:       0,
-		ItemID:        strings.TrimSpace(ref.RawID),
-		MediaSourceID: strings.TrimSpace(mediaSourceID),
-		PlaySessionID: strings.TrimSpace(playSessionID),
-	}
+	return buildSiteEpisodePlaybackStreamTarget(database, user, ref, pan, ep, picked, finalURL, finalHeaders, r), true, nil
 }
 
 func buildSiteEpisodePlaybackStreamTarget(database *db.DB, user *smart.User, ref *itemRef, pan resolvedSitePan, ep catpawrunner.Episode, picked *smart.PlaybackPickedMeta, finalURL string, finalHeaders map[string]string, r *http.Request) *PlaybackStreamTarget {
@@ -478,18 +469,21 @@ func buildSiteEpisodePlaybackStreamTarget(database *db.DB, user *smart.User, ref
 	if strings.TrimSpace(adaptedURL) != "" {
 		finalURL = adaptedURL
 	}
-	log.Printf("[emby][playback_target] item=%s mode=%s headers=%d url=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(adaptMode), len(copyStringMap(finalHeaders)), smart.ShortURLForLog(finalURL))
+	targetURL := strings.TrimSpace(finalURL)
+	log.Printf("[emby][playback_target] item=%s mode=%s headers=%d url=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(adaptMode), len(copyStringMap(finalHeaders)), targetURL)
 	seriesName := resolveSiteSeriesName(database, ref.SiteKey, ref.SiteDetail, siteDetailMeta{})
 	displayName := siteEpisodeDisplayName(ep, pan.RawLabel, pan.PanMock, seriesName, ref.Episode)
 	if displayName == "" {
 		displayName = siteEpisodeFileName(ep, "", ref.Episode)
 	}
 	fileName := siteEpisodeFileName(ep, displayName, ref.Episode) + ".mp4"
+	mediaSourceID := stablePlaybackIdentityFromPicked("media", strings.TrimSpace(ref.RawID), picked)
+	playSessionID := stablePlaybackIdentityFromPicked("play", strings.TrimSpace(ref.RawID), picked)
 	return &PlaybackStreamTarget{
-		FinalURL:         strings.TrimSpace(finalURL),
+		FinalURL:         targetURL,
 		FinalHeaders:     copyStringMap(finalHeaders),
 		Path:             VirtualEpisodePath(seriesName, 0, ref.Pan, fileName),
-		Container:        firstNonEmptyString(detectContainerFromPlaybackURL(finalURL), "mp4"),
+		Container:        firstNonEmptyString(detectContainerFromPlaybackURL(targetURL), "mp4"),
 		Name:             displayName,
 		Runtime:          0,
 		Size:             0,
@@ -502,11 +496,63 @@ func buildSiteEpisodePlaybackStreamTarget(database *db.DB, user *smart.User, ref
 		SpiderAPI:        strings.TrimSpace(smart.ResolveSpiderAPIBySiteKey(database, strings.TrimSpace(picked.SiteKey))),
 		SiteEpisodeIndex: maxInt(0, ref.Episode),
 		SiteEpisodeFile:  strings.TrimSpace(picked.RawName),
-		PlaySessionID:    randomPlaybackSessionID(),
+		MediaSourceID:    mediaSourceID,
+		PlaySessionID:    playSessionID,
 	}
 }
 
-func FinalizePlaybackStreamTarget(database *db.DB, userID int64, target PlaybackStreamTarget, cacheKey string, r *http.Request) (*PlaybackStreamTarget, bool, error) {
+func resolveSiteEpisodeDirectPlayback(database *db.DB, user *smart.User, ref *itemRef, ep catpawrunner.Episode, flag string) (finalURL string, finalHeaders map[string]string, picked *smart.PlaybackPickedMeta, err error) {
+	if database == nil || user == nil || ref == nil {
+		return "", nil, nil, nil
+	}
+	rawURL := strings.TrimSpace(ep.URL)
+	if rawURL == "" {
+		return "", nil, nil, nil
+	}
+	panFlag := strings.TrimSpace(flag)
+	provider := strings.TrimSpace(smart.PlayFlagProviderID(panFlag))
+	if provider != "" {
+		finalURL, finalHeaders, err = smart.ResolvePanProviderPlayback(database, user, provider, panFlag, rawURL, nil, "/MeowFilm")
+	} else {
+		apiBase := strings.TrimSpace(smart.ResolveCatApiBaseForUser(database, user))
+		if apiBase == "" {
+			return "", nil, nil, nil
+		}
+		spiderAPI := strings.TrimSpace(smart.ResolveSpiderAPIBySiteKey(database, ref.SiteKey))
+		playPayload := map[string]any{
+			"flag":    strings.TrimSpace(ep.Flag),
+			"id":      rawURL,
+			"siteApi": spiderAPI,
+		}
+		if siteID := strings.TrimSpace(catpawrunner.ExtractSiteIDFromSpiderAPI(spiderAPI)); siteID != "" {
+			playPayload["siteId"] = siteID
+		}
+		playRaw, playErr := catpawrunner.RequestPlayWithTimeout(apiBase, strings.TrimSpace(user.Username), playPayload, 8*time.Second)
+		if playErr != nil {
+			return "", nil, nil, playErr
+		}
+		payloadOut := smart.BuildCatpawPlayPayload(playRaw, apiBase, strings.TrimSpace(user.Username))
+		finalURL, finalHeaders = netdisk.PlayPayloadURLHeaders(payloadOut)
+	}
+	if strings.TrimSpace(finalURL) == "" {
+		return "", nil, nil, err
+	}
+	rawName := strings.TrimSpace(smart.FirstRawNameFromURL(rawURL))
+	if rawName == "" {
+		rawName = strings.TrimSpace(siteEpisodeFileName(ep, "", maxInt(1, ref.Episode)))
+	}
+	return strings.TrimSpace(finalURL), copyStringMap(finalHeaders), &smart.PlaybackPickedMeta{
+		SiteKey:    strings.TrimSpace(ref.SiteKey),
+		SiteName:   resolveSiteSeriesName(database, ref.SiteKey, ref.SiteDetail, siteDetailMeta{}),
+		SiteDetail: strings.TrimSpace(ref.SiteDetail),
+		PanFlag:    panFlag,
+		Provider:   provider,
+		ShowName:   strings.TrimSpace(ep.Name),
+		RawName:    rawName,
+	}, nil
+}
+
+func ConsumePlaybackOffersAndBuildTarget(database *db.DB, userID int64, target PlaybackStreamTarget, cacheKey string, r *http.Request) (*PlaybackStreamTarget, bool, error) {
 	if database == nil || userID <= 0 {
 		return nil, false, nil
 	}
@@ -520,63 +566,71 @@ func FinalizePlaybackStreamTarget(database *db.DB, userID int64, target Playback
 	}
 	resolveKey := "play:" + firstNonEmptyString(strings.TrimSpace(target.MediaSourceID), strings.TrimSpace(cacheKey), strings.TrimSpace(target.ItemID))
 	resolved, ok, err := ResolvePlaybackOnce(resolveKey, func() (*PlaybackStreamTarget, bool, error) {
-		var offerCh <-chan smart.PlaybackOffer
 		if len(target.Offers) > 0 {
-			ch := make(chan smart.PlaybackOffer, len(target.Offers))
 			for _, offer := range target.Offers {
-				ch <- clonePlaybackOffer(offer)
-			}
-			close(ch)
-			offerCh = ch
-		} else {
-			var ok bool
-			offerCh, ok = LoadPlaybackOffers(strings.TrimSpace(target.PlaySessionID), strings.TrimSpace(target.MediaSourceID), strings.TrimSpace(cacheKey))
-			if !ok {
-				return nil, false, nil
-			}
-		}
-		for offer := range offerCh {
-			finalURL, finalHeaders, picked, playErr := smart.TryPlaybackOffers(database, user, []smart.PlaybackOffer{offer})
-			if playErr != nil {
-				continue
-			}
-			if strings.TrimSpace(finalURL) == "" || picked == nil {
-				continue
-			}
-			ref := parseItemRefAny(strings.TrimSpace(target.ItemID))
-			if ref == nil {
-				return nil, false, nil
-			}
-			var built *PlaybackStreamTarget
-			if ref.Source == "site" && ref.SubKind == "episode" {
-				pans, _ := fetchResolvedSiteDetailPans(database, userID, ref.SiteKey, ref.SiteDetail)
-				if ref.Pan > 0 && ref.Pan <= len(pans) && ref.Episode > 0 && ref.Episode <= len(pans[ref.Pan-1].Episodes) {
-					built = buildSiteEpisodePlaybackStreamTarget(database, user, ref, pans[ref.Pan-1], pans[ref.Pan-1].Episodes[ref.Episode-1], picked, finalURL, finalHeaders, r)
+				built, ok, buildErr := tryBuildPlaybackTargetFromOffer(database, userID, user, target, cacheKey, r, offer)
+				if buildErr != nil {
+					return nil, false, buildErr
 				}
-			} else {
-				display, ok := buildTMDBPlaybackDisplayMeta(database, userID, ref)
-				if ok {
-					built = buildTMDBPlaybackStreamTarget(database, user, ref, display, picked, finalURL, finalHeaders, r)
+				if ok && built != nil {
+					return built, true, nil
 				}
 			}
-			if built == nil {
+			return nil, false, nil
+		}
+		stage := ""
+		for {
+			nextStage := CurrentPlaybackOfferStage(strings.TrimSpace(target.PlaySessionID), strings.TrimSpace(target.MediaSourceID), strings.TrimSpace(cacheKey))
+			if nextStage != "" && nextStage != stage {
+				stage = nextStage
+				log.Printf("[emby][play_stage] item=%s stage=%s", strings.TrimSpace(target.ItemID), stage)
+			}
+			offer, nextOK := NextPlaybackOffer(strings.TrimSpace(target.PlaySessionID), strings.TrimSpace(target.MediaSourceID), strings.TrimSpace(cacheKey))
+			if !nextOK {
 				return nil, false, nil
 			}
-			built.UserID = target.UserID
-			built.DeviceID = target.DeviceID
-			built.ItemID = target.ItemID
-			built.MediaSourceID = target.MediaSourceID
-			built.PlaySessionID = target.PlaySessionID
-			built.Offers = clonePlaybackOffers(target.Offers)
-			embyPlaybackSessions.Set(*built, playbackSessionTTL)
-			return built, true, nil
+			built, ok, buildErr := tryBuildPlaybackTargetFromOffer(database, userID, user, target, cacheKey, r, offer)
+			if buildErr != nil {
+				return nil, false, buildErr
+			}
+			if ok && built != nil {
+				MarkPlaybackDone(strings.TrimSpace(target.PlaySessionID), strings.TrimSpace(target.MediaSourceID), strings.TrimSpace(cacheKey))
+				return built, true, nil
+			}
 		}
-		return nil, false, nil
 	})
 	if !ok || resolved == nil {
 		return nil, ok, err
 	}
 	return resolved, true, err
+}
+
+func tryBuildPlaybackTargetFromOffer(database *db.DB, userID int64, user *smart.User, target PlaybackStreamTarget, cacheKey string, r *http.Request, offer smart.PlaybackOffer) (*PlaybackStreamTarget, bool, error) {
+	finalURL, finalHeaders, picked, playErr := smart.TryPlaybackOffers(database, user, []smart.PlaybackOffer{offer})
+	if playErr != nil || strings.TrimSpace(finalURL) == "" || picked == nil {
+		return nil, false, playErr
+	}
+	ref := parseItemRefAny(strings.TrimSpace(target.ItemID))
+	if ref == nil {
+		return nil, false, nil
+	}
+	var built *PlaybackStreamTarget
+	if !(ref.Source == "site" && ref.SubKind == "episode") {
+		display, ok := buildTMDBPlaybackDisplayMeta(database, userID, ref)
+		if ok {
+			built = buildTMDBPlaybackStreamTarget(database, user, ref, display, picked, finalURL, finalHeaders, r)
+		}
+	}
+	if built == nil {
+		return nil, false, nil
+	}
+	built.UserID = target.UserID
+	built.DeviceID = target.DeviceID
+	built.ItemID = target.ItemID
+	built.Offers = clonePlaybackOffers(target.Offers)
+	RebindPlaybackControlIdentity(target.PlaySessionID, target.MediaSourceID, cacheKey, built.PlaySessionID, built.MediaSourceID)
+	embyPlaybackSessions.SetWithReplayKey(*built, cacheKey, playbackSessionTTL)
+	return built, true, nil
 }
 
 func listHistoryPlayFlagEpisodes(database *db.DB, provider string, playFlag string) ([]catpawrunner.Episode, bool) {
@@ -1025,6 +1079,70 @@ func randomPlaybackSessionID() string {
 		return StableMD5Hex(strconv.FormatInt(time.Now().UnixNano(), 10))
 	}
 	return hex.EncodeToString(b[:])
+}
+
+func stablePlaybackIdentityFromPicked(kind string, itemID string, picked *smart.PlaybackPickedMeta) string {
+	if picked == nil {
+		return StableMD5Hex(strings.TrimSpace(kind) + "|" + strings.TrimSpace(itemID))
+	}
+	provider := strings.TrimSpace(smart.PlayFlagProviderID(strings.TrimSpace(picked.PanFlag)))
+	fileIdentity := normalizePlaybackFileIdentity(strings.TrimSpace(picked.RawName))
+	var key string
+	if provider != "" {
+		key = stablePlaybackIdentityForListFlag(kind, itemID, provider, strings.TrimSpace(picked.PanFlag), fileIdentity)
+	} else {
+		key = stablePlaybackIdentityForSiteBound(kind, itemID, strings.TrimSpace(picked.SiteKey), strings.TrimSpace(picked.SiteDetail), strings.TrimSpace(picked.PanFlag), fileIdentity)
+	}
+	if strings.TrimSpace(key) == "" {
+		return StableMD5Hex(strings.TrimSpace(kind) + "|" + strings.TrimSpace(itemID))
+	}
+	return StableMD5Hex(key)
+}
+
+func stablePlaybackIdentityForListFlag(kind string, itemID string, provider string, panFlag string, fileIdentity string) string {
+	if strings.TrimSpace(fileIdentity) == "" {
+		return strings.Join([]string{
+			strings.TrimSpace(kind),
+			strings.TrimSpace(itemID),
+			strings.TrimSpace(provider),
+			strings.TrimSpace(panFlag),
+		}, "|")
+	}
+	return strings.Join([]string{
+		strings.TrimSpace(kind),
+		strings.TrimSpace(itemID),
+		strings.TrimSpace(provider),
+		strings.TrimSpace(panFlag),
+		strings.TrimSpace(fileIdentity),
+	}, "|")
+}
+
+func stablePlaybackIdentityForSiteBound(kind string, itemID string, siteKey string, siteDetail string, panFlag string, fileIdentity string) string {
+	parts := []string{
+		strings.TrimSpace(kind),
+		strings.TrimSpace(itemID),
+		strings.TrimSpace(siteKey),
+		strings.TrimSpace(siteDetail),
+		strings.TrimSpace(panFlag),
+	}
+	if strings.TrimSpace(fileIdentity) != "" {
+		parts = append(parts, strings.TrimSpace(fileIdentity))
+	}
+	return strings.Join(parts, "|")
+}
+
+func normalizePlaybackFileIdentity(rawName string) string {
+	s := strings.TrimSpace(rawName)
+	if s == "" {
+		return ""
+	}
+	s = strings.ReplaceAll(s, "\\", "/")
+	s = path.Base(s)
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "." || s == "/" {
+		return ""
+	}
+	return strings.Join(strings.Fields(s), " ")
 }
 
 func playbackInfoSupportsTranscoding(r *http.Request) bool {
