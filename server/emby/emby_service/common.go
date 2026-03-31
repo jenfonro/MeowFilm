@@ -80,6 +80,14 @@ func VirtualEpisodePath(seriesTitle string, year int, season int, fileName strin
 	return VirtualSeriesPath(seriesTitle, year) + "/" + VirtualSeasonDirName(season) + "/" + base
 }
 
+func VirtualSettingsEpisodePath(seriesTitle string, year int, fileName string) string {
+	base := strings.TrimSpace(fileName)
+	if base == "" {
+		base = "noop.mp4"
+	}
+	return VirtualSeriesPath(seriesTitle, year) + "/设置/" + base
+}
+
 func VirtualMediaDirName(title string, year int) string {
 	name := strings.TrimSpace(title)
 	if name == "" {

@@ -30,6 +30,7 @@ type smartCandidate struct {
 	PanFlag          string
 	PanTokenIdx      int
 	Ep               catpawrunner.Episode
+	RawName          string
 	RawLower         string
 	MatchSeason      int
 	HasSeasonMarker  bool

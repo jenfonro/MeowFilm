@@ -2,6 +2,7 @@ package emby_service
 
 import (
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +39,9 @@ func ResolveTMDBHistoryKeyFromPlaybackItem(itemID string) (tmdbType string, tmdb
 func HandleSessionPlaying(database *db.DB, userID int64, payload SessionPlaybackPayload) error {
 	if strings.TrimSpace(payload.MediaSourceID) != "" {
 		_ = ExtendPlaybackStreamTTL(strings.TrimSpace(payload.MediaSourceID), 60*time.Second, 15*time.Minute)
+	}
+	if handlePlaybackSwitchSessionAction(database, userID, payload, "playing") {
+		return nil
 	}
 	typ, tmdbID, season, episode, ok := ResolveTMDBHistoryKeyFromPlaybackItem(payload.ItemID)
 	if !ok || database == nil || userID <= 0 {
@@ -93,11 +97,32 @@ func HandleSessionProgress(database *db.DB, userID int64, payload SessionPlaybac
 	if strings.TrimSpace(payload.MediaSourceID) != "" {
 		_ = ExtendPlaybackStreamTTL(strings.TrimSpace(payload.MediaSourceID), 60*time.Second, 15*time.Minute)
 	}
+	if handlePlaybackSwitchSessionAction(database, userID, payload, "progress") {
+		return nil
+	}
 	return upsertSessionProgress(database, userID, payload)
 }
 
 func HandleSessionStopped(database *db.DB, userID int64, payload SessionPlaybackPayload) error {
+	if handlePlaybackSwitchSessionAction(database, userID, payload, "stopped") {
+		return nil
+	}
 	return upsertSessionProgress(database, userID, payload)
+}
+
+func handlePlaybackSwitchSessionAction(database *db.DB, userID int64, payload SessionPlaybackPayload, trigger string) bool {
+	itemID := strings.TrimSpace(payload.ItemID)
+	_ = extendPlaybackSwitchSessionByItem(userID, itemID, playbackSwitchSessionTTL)
+	handled, action, applied, status := triggerPlaybackSwitchAction(database, userID, payload)
+	if !handled {
+		return false
+	}
+	if status == "expired" || status == "done" || status == "running" {
+		log.Printf("[emby][switch_action_skip] item=%s action=%s trigger=%s reason=%s", itemID, strings.TrimSpace(action), strings.TrimSpace(trigger), strings.TrimSpace(status))
+		return true
+	}
+	log.Printf("[emby][switch_action] item=%s action=%s applied=%t trigger=%s status=%s", itemID, strings.TrimSpace(action), applied, strings.TrimSpace(trigger), strings.TrimSpace(status))
+	return true
 }
 
 func upsertSessionProgress(database *db.DB, userID int64, payload SessionPlaybackPayload) error {

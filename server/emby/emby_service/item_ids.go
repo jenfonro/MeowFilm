@@ -18,6 +18,7 @@ type itemRef struct {
 	SubKind    string
 	MediaType  string
 	Source     string
+	Variant    string
 	RawID      string
 	NumericID  int
 	SiteKey    string
@@ -54,6 +55,20 @@ func buildEpisodeID(tmdbID int, season int, episode int) string {
 		return ""
 	}
 	return fmt.Sprintf("tmdb_tv_%d_s%02d_e%03d", tmdbID, season, episode)
+}
+
+func buildTMDBSettingsSeasonID(tmdbID int) string {
+	if tmdbID <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("tmdb_tv_%d_settings", tmdbID)
+}
+
+func buildTMDBSettingsEpisodeID(tmdbID int, episode int) string {
+	if tmdbID <= 0 || episode <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("tmdb_tv_%d_settings_e%03d", tmdbID, episode)
 }
 
 func buildSiteSeriesID(siteKey string, siteDetail string) string {
@@ -109,6 +124,23 @@ func parseItemRef(raw string) *itemRef {
 			return nil
 		}
 		ref := &itemRef{Kind: "item", SubKind: "series", MediaType: "tv", Source: "tmdb", RawID: id, NumericID: n}
+		if len(parts) >= 2 && strings.EqualFold(strings.TrimSpace(parts[1]), "settings") {
+			ref.SubKind = "season"
+			ref.Variant = "settings"
+			if len(parts) == 2 {
+				return ref
+			}
+			if len(parts) == 3 && strings.HasPrefix(strings.ToLower(strings.TrimSpace(parts[2])), "e") {
+				episode, err := strconv.Atoi(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(parts[2])), "e"))
+				if err != nil || episode <= 0 {
+					return nil
+				}
+				ref.SubKind = "episode"
+				ref.Episode = episode
+				return ref
+			}
+			return nil
+		}
 		if len(parts) >= 2 && strings.HasPrefix(strings.ToLower(strings.TrimSpace(parts[1])), "s") {
 			season, err := strconv.Atoi(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(parts[1])), "s"))
 			if err != nil || season < 0 {
