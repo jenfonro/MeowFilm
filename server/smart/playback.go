@@ -897,6 +897,7 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 				if !ok || epNo <= 0 {
 					continue
 				}
+				rawName := smartStableRawNameFromEpisodeURL(ep.URL)
 
 				cand := smartCandidate{
 					SiteKey:          src.SiteKey,
@@ -907,6 +908,7 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 					PanFlag:          panFlag,
 					PanTokenIdx:      panTokenIdx,
 					Ep:               ep,
+					RawName:          rawName,
 					RawLower:         rawLower,
 					MatchSeason:      seasonNo,
 					HasSeasonMarker:  rawSeason > 0,
@@ -1065,6 +1067,7 @@ func smartBuildEpisodeMapsFromPans(
 			if !ok || epNo <= 0 {
 				continue
 			}
+			rawName := smartStableRawNameFromEpisodeURL(ep.URL)
 
 			cand := smartCandidate{
 				SiteKey:         src.SiteKey,
@@ -1075,6 +1078,7 @@ func smartBuildEpisodeMapsFromPans(
 				PanFlag:         panFlag,
 				PanTokenIdx:     panTokenIdx,
 				Ep:              ep,
+				RawName:         rawName,
 				RawLower:        rawLower,
 				MatchSeason:     seasonNo,
 				HasSeasonMarker: rawSeason > 0,
@@ -1149,6 +1153,7 @@ func smartBuildMovieCandidatesFromPans(
 				PanFlag:        panFlag,
 				PanTokenIdx:    panTokenIdx,
 				Ep:             ep,
+				RawName:        rawName,
 				RawLower:       rawLower,
 				MatchKeyword:   smartComputePriorityMatch(rawLower, settings.KeywordTokensLower),
 			})
@@ -2264,10 +2269,9 @@ func smartTryPlaybackOffersInternal(database *db.DB, u *SmartUser, offers []smar
 	flowID := atomic.AddUint64(&smartPlayFlowSeq, 1)
 	flowStart := time.Now()
 	buildPicked := func(c smartCandidate, feat smartCandidateFeatures) *smartPlaybackPickedMeta {
-		rawNames := smartExtractRawNamesFromEpisodeURL(c.Ep.URL)
-		raw0 := ""
-		if len(rawNames) > 0 {
-			raw0 = strings.TrimSpace(rawNames[0])
+		raw0 := strings.TrimSpace(c.RawName)
+		if raw0 == "" {
+			raw0 = smartStableRawNameFromEpisodeURL(c.Ep.URL)
 		}
 		return &smartPlaybackPickedMeta{
 			SiteKey:    strings.TrimSpace(c.SiteKey),

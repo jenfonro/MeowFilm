@@ -361,6 +361,19 @@ func smartFirstRawNameFromURL(u string) string {
 	return strings.TrimSpace(rawNames[0])
 }
 
+func smartStableRawNameFromEpisodeURL(u string) string {
+	rawNames := smartExtractRawNamesFromEpisodeURL(u)
+	if len(rawNames) == 0 {
+		return ""
+	}
+	for i := len(rawNames) - 1; i >= 0; i-- {
+		if s := strings.TrimSpace(rawNames[i]); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
 func smartMaxInt(a, b int) int {
 	if a > b {
 		return a

@@ -388,7 +388,7 @@ func buildSeriesDetailPayload(database *db.DB, userID int64, serverID string, re
 	if row != nil && row.PlaybackRuntimeTicks > 0 {
 		runtime = row.PlaybackRuntimeTicks
 	}
-	childCount := len(detail.Seasons)
+	childCount := len(detail.Seasons) + 1
 	userData := BuildSeriesUserData(row)
 	if nextUp, err := loadTVNextUpView(database, ref.NumericID, row, 1); err == nil && nextUp != nil && len(nextUp.Candidates) > 0 {
 		userData.UnplayedItemCount = len(nextUp.Candidates)
@@ -449,7 +449,7 @@ func buildSeriesDetailPayload(database *db.DB, userID int64, serverID string, re
 }
 
 func buildEpisodeDetailPayload(database *db.DB, userID int64, serverID string, ref *itemRef) (any, bool, error) {
-	if ref == nil || ref.NumericID <= 0 || ref.Pan <= 0 || ref.Episode <= 0 {
+	if ref == nil || ref.NumericID <= 0 || ref.Pan < 0 || ref.Episode <= 0 {
 		return nil, false, nil
 	}
 	seriesRef := &itemRef{
@@ -460,7 +460,16 @@ func buildEpisodeDetailPayload(database *db.DB, userID int64, serverID string, r
 		RawID:     buildSeriesID(ref.NumericID),
 		NumericID: ref.NumericID,
 	}
-	items, ok, err := buildTMDBSeasonEpisodeSources(database, userID, serverID, seriesRef, ref.Pan)
+	var (
+		items []episodeListSource
+		ok    bool
+		err   error
+	)
+	if strings.TrimSpace(ref.Variant) == "settings" {
+		items, ok, err = buildTMDBSettingsEpisodeSources(database, userID, serverID, seriesRef)
+	} else {
+		items, ok, err = buildTMDBSeasonEpisodeSources(database, userID, serverID, seriesRef, ref.Pan)
+	}
 	if err != nil || !ok {
 		return nil, ok, err
 	}

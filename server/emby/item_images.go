@@ -35,6 +35,10 @@ func writeResolvedItemImage(w http.ResponseWriter, r *http.Request, target strin
 		writeEmbyError(w, http.StatusNotFound, "Not Found")
 		return
 	}
+	if strings.HasPrefix(strings.TrimSpace(target), "/") {
+		http.Redirect(w, r, target, http.StatusFound)
+		return
+	}
 	if shouldProxyImageForClient(r) {
 		proxyResolvedItemImage(w, r, target)
 		return

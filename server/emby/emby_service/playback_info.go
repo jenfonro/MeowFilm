@@ -101,9 +101,14 @@ func BuildPlaybackInfoPayload(database *db.DB, userID int64, apiToken string, se
 	deviceID := strings.TrimSpace(clientmeta.ClientDeviceID(r))
 	userText := strconv.FormatInt(userID, 10)
 	cacheKey := ResolvePlaybackCacheKey(userText, deviceID, itemID)
-	if replayTarget, replayOK := embyPlaybackSessions.GetByReplayKey(cacheKey); replayOK {
-		log.Printf("[emby][playback_cache_hit] item=%s source=replay finalized=true", strings.TrimSpace(itemID))
-		return buildPlaybackInfoResponse(replayTarget, apiToken, r), true, nil
+	ref := parseItemRefAny(strings.TrimSpace(itemID))
+	isSettingsAction := ref != nil && ref.Source == "tmdb" && ref.SubKind == "episode" && strings.TrimSpace(ref.Variant) == "settings"
+	if !isSettingsAction {
+		if replayTarget, replayOK := embyPlaybackSessions.GetByReplayKey(cacheKey); replayOK {
+			log.Printf("[emby][playback_cache_hit] item=%s source=replay finalized=true", strings.TrimSpace(itemID))
+			rememberPlaybackSwitchCurrentSource(userID, itemID, replayTarget, playbackSwitchSessionTTL)
+			return buildPlaybackInfoResponse(replayTarget, apiToken, r), true, nil
+		}
 	}
 	target, ok, err := ResolvePlaybackOnce(cacheKey, func() (*PlaybackStreamTarget, bool, error) {
 		mediaSourceID := randomPlaybackSessionID()
@@ -141,6 +146,7 @@ func BuildPlaybackInfoPayload(database *db.DB, userID int64, apiToken string, se
 	if !ok || target == nil || strings.TrimSpace(target.Path) == "" {
 		return EmptyPlaybackInfoResponse(), false, nil
 	}
+	rememberPlaybackSwitchCurrentSource(userID, itemID, *target, playbackSwitchSessionTTL)
 	return buildPlaybackInfoResponse(*target, apiToken, r), true, nil
 }
 
@@ -188,6 +194,9 @@ func ResolvePlaybackStreamTarget(database *db.DB, userID int64, itemID string, m
 	}
 	switch ref.Source {
 	case "tmdb":
+		if ref.SubKind == "episode" && strings.TrimSpace(ref.Variant) == "settings" {
+			return resolveTMDBSettingsPlaybackStreamTarget(database, userID, ref, r)
+		}
 		return resolveTMDBPlaybackStreamTarget(database, userID, ref, mediaSourceID, playSessionID, cacheKey, r)
 	case "site":
 		if ref.SubKind == "episode" {
@@ -197,6 +206,49 @@ func ResolvePlaybackStreamTarget(database *db.DB, userID int64, itemID string, m
 	default:
 		return nil, false, nil
 	}
+}
+
+func resolveTMDBSettingsPlaybackStreamTarget(database *db.DB, userID int64, ref *itemRef, r *http.Request) (*PlaybackStreamTarget, bool, error) {
+	if database == nil || ref == nil || ref.Source != "tmdb" || ref.MediaType != "tv" || ref.SubKind != "episode" || strings.TrimSpace(ref.Variant) != "settings" {
+		return nil, false, nil
+	}
+	seriesRef := &itemRef{
+		Kind:      "item",
+		SubKind:   "series",
+		MediaType: "tv",
+		Source:    "tmdb",
+		RawID:     buildSeriesID(ref.NumericID),
+		NumericID: ref.NumericID,
+	}
+	items, ok, err := buildTMDBSettingsEpisodeSources(database, userID, "", seriesRef)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	for _, item := range items {
+		if item.IndexNumber != ref.Episode {
+			continue
+		}
+		container := strings.TrimSpace(item.Container)
+		if container == "" {
+			container = "mp4"
+		}
+		target := &PlaybackStreamTarget{
+			FinalURL:      buildPlaybackActionStaticVideoPath(strings.TrimSpace(ref.RawID)),
+			FinalHeaders:  EmptyRequiredHTTPHeaders(),
+			Path:          strings.TrimSpace(item.Path),
+			Container:     container,
+			Name:          strings.TrimSpace(item.Name),
+			Runtime:       item.RunTimeTicks,
+			Size:          item.Size,
+			Bitrate:       item.Bitrate,
+			ItemID:        strings.TrimSpace(ref.RawID),
+			MediaSourceID: randomPlaybackSessionID(),
+			PlaySessionID: randomPlaybackSessionID(),
+		}
+		initPlaybackSwitchAction(userID, strings.TrimSpace(ref.RawID), strings.TrimSpace(target.PlaySessionID))
+		return target, true, nil
+	}
+	return nil, false, nil
 }
 
 func LoadPlaybackStreamTarget(userID int64, itemID string, mediaSourceID string, playSessionID string) (*PlaybackStreamTarget, bool) {
@@ -243,6 +295,12 @@ func resolveTMDBPlaybackStreamTarget(database *db.DB, userID int64, ref *itemRef
 	if err != nil || user == nil {
 		return nil, false, err
 	}
+	switchSession, created := loadOrInitPlaybackSwitchSession(userID, ref, playbackSwitchSessionTTL)
+	if created {
+		log.Printf("[emby][switch_session_init] tmdb=%s:%d", strings.TrimSpace(req.Kind), ref.NumericID)
+	} else {
+		log.Printf("[emby][switch_session_hit] tmdb=%s:%d skip=%d", strings.TrimSpace(req.Kind), ref.NumericID, len(switchSession.SkipItems))
+	}
 	entry := ensurePlaybackControlEntry(userID, strings.TrimSpace(clientmeta.ClientDeviceID(r)), strings.TrimSpace(ref.RawID), strings.TrimSpace(mediaSourceID), strings.TrimSpace(playSessionID), strings.TrimSpace(cacheKey))
 	if entry == nil {
 		return nil, false, nil
@@ -255,6 +313,11 @@ func resolveTMDBPlaybackStreamTarget(database *db.DB, userID int64, ref *itemRef
 		hist, histErr := database.GetPlayHistoryLatestByTMDB(userID, req.Kind, ref.NumericID)
 		if histErr == nil && hist != nil {
 			collectTMDBHistoryPlaybackFromListCandidates(database, user, ref, *req, *hist, stopCh, func(offer smart.PlaybackOffer) {
+				episodeFile := strings.TrimSpace(offer.Cand.RawName)
+				if playbackSwitchShouldSkip(switchSession, offer.Cand.SiteKey, offer.Cand.PanFlag, episodeFile) {
+					log.Printf("[emby][history_list_skip] item=%s tmdb=%s:%d site=(%s|%s) reason=session_panflag_skip panFlag=%s episodeFile=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, strings.TrimSpace(offer.Cand.SiteKey), strings.TrimSpace(offer.Cand.SiteName), strings.TrimSpace(offer.Cand.PanFlag), strings.TrimSpace(episodeFile))
+					return
+				}
 				if EnqueueHistoryListOffer(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey, offer) {
 					log.Printf("[emby][history_offer_enqueue] item=%s tmdb=%s:%d stage=history_list panFlag=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, strings.TrimSpace(offer.Cand.PanFlag))
 				}
@@ -263,6 +326,11 @@ func resolveTMDBPlaybackStreamTarget(database *db.DB, userID int64, ref *itemRef
 		CloseHistoryListOffers(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey)
 		if histErr == nil && hist != nil {
 			collectTMDBHistoryPlaybackFromDetailCandidates(database, userID, user, ref, *req, *hist, stopCh, func(offer smart.PlaybackOffer) {
+				episodeFile := strings.TrimSpace(offer.Cand.RawName)
+				if playbackSwitchShouldSkip(switchSession, offer.Cand.SiteKey, offer.Cand.PanFlag, episodeFile) {
+					log.Printf("[emby][history_detail_skip] item=%s tmdb=%s:%d site=(%s|%s) reason=session_panflag_skip panFlag=%s episodeFile=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, strings.TrimSpace(offer.Cand.SiteKey), strings.TrimSpace(offer.Cand.SiteName), strings.TrimSpace(offer.Cand.PanFlag), strings.TrimSpace(episodeFile))
+					return
+				}
 				if EnqueueHistoryDetailOffer(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey, offer) {
 					log.Printf("[emby][history_offer_enqueue] item=%s tmdb=%s:%d stage=history_detail panFlag=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, strings.TrimSpace(offer.Cand.PanFlag))
 				}
@@ -275,6 +343,11 @@ func resolveTMDBPlaybackStreamTarget(database *db.DB, userID int64, ref *itemRef
 		_ = smart.CollectPlaybackOffersFromTMDB(database, user, *req, func() bool {
 			return IsPlaybackResolveStopped(stopCh)
 		}, func(offer smart.PlaybackOffer, tier int) {
+			episodeFile := firstNonEmptyString(strings.TrimSpace(offer.Cand.RawName), strings.TrimSpace(smart.FirstRawNameFromURL(offer.Cand.Ep.URL)))
+			if playbackSwitchShouldSkip(switchSession, offer.Cand.SiteKey, offer.Cand.PanFlag, episodeFile) {
+				log.Printf("[emby][full_offer_skip] item=%s tmdb=%s:%d tier=%d reason=session_panflag_skip site=(%s|%s) panFlag=%s episodeFile=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, tier, strings.TrimSpace(offer.Cand.SiteKey), strings.TrimSpace(offer.Cand.SiteName), strings.TrimSpace(offer.Cand.PanFlag), strings.TrimSpace(episodeFile))
+				return
+			}
 			EnqueueFullOffer(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey, tier, offer)
 		})
 		CloseFullOffers(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey)
@@ -314,7 +387,7 @@ func collectTMDBHistoryPlaybackFromListCandidates(database *db.DB, user *smart.U
 		provider,
 		len(episodes),
 		strings.TrimSpace(ep.Name),
-		strings.TrimSpace(smart.FirstRawNameFromURL(ep.URL)),
+		strings.TrimSpace(hist.SiteEpisodeFile),
 	)
 	offer := smart.PlaybackOffer{
 		Cand: smart.Candidate{
@@ -323,6 +396,7 @@ func collectTMDBHistoryPlaybackFromListCandidates(database *db.DB, user *smart.U
 			SiteDetail: strings.TrimSpace(hist.SiteDetail),
 			PanFlag:    firstNonEmptyString(strings.TrimSpace(ep.Flag), panFlag),
 			Ep:         ep,
+			RawName:    strings.TrimSpace(hist.SiteEpisodeFile),
 		},
 	}
 	if emit != nil {
@@ -363,6 +437,7 @@ func collectTMDBHistoryPlaybackFromDetailCandidates(database *db.DB, userID int6
 				SiteDetail: siteDetail,
 				PanFlag:    firstNonEmptyString(strings.TrimSpace(ep.Flag), rawPanLabel, strings.TrimSpace(hist.PlayFlag)),
 				Ep:         ep,
+				RawName:    firstNonEmptyString(strings.TrimSpace(hist.SiteEpisodeFile), strings.TrimSpace(smart.FirstRawNameFromURL(ep.URL))),
 			},
 		}
 		found = true
@@ -1029,6 +1104,18 @@ func buildPlaybackDirectPath(itemID string, container string, apiToken string, m
 		directPath += "?" + strings.Join(q, "&")
 	}
 	return directPath
+}
+
+func buildPlaybackActionStaticVideoPath(itemID string) string {
+	id := strings.TrimSpace(itemID)
+	if id == "" {
+		return ""
+	}
+	name := strings.TrimSpace(resolveTMDBSettingsStaticBaseName(id))
+	if name == "" {
+		return ""
+	}
+	return "/emby/static/settings/videos/" + neturl.PathEscape(name) + ".mp4"
 }
 
 func resolveSmartUser(database *db.DB, userID int64) (*smart.User, error) {

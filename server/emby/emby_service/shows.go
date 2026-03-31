@@ -8,6 +8,7 @@ import (
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/cache"
 	"github.com/jenfonro/meowfilm/server/catpawrunner"
+	metadata_tmdb "github.com/jenfonro/meowfilm/server/metadata/tmdb"
 	"github.com/jenfonro/meowfilm/server/smart"
 )
 
@@ -88,6 +89,22 @@ type episodeListSource struct {
 	ParentLogoImageTag      string
 	Chapters                []DetailChapterDTO
 	MediaType               string
+}
+
+const tmdbSettingsSeasonName = "设置"
+
+type tmdbSettingsEpisodeDef struct {
+	EpisodeNo int
+	Name      string
+	Overview  string
+}
+
+func tmdbSettingsEpisodes() []tmdbSettingsEpisodeDef {
+	return []tmdbSettingsEpisodeDef{
+		{EpisodeNo: 1, Name: "换源", Overview: "手动切换当前剧集片源。"},
+		{EpisodeNo: 2, Name: "片源错误", Overview: "标记当前剧集片源存在问题。"},
+		{EpisodeNo: 3, Name: "重置换源", Overview: "清空当前剧集的临时换源列表。"},
+	}
 }
 
 func BuildShowNextUpPayload(database *db.DB, userID int64, serverID string, seriesID string, limit int) (NextUpResponseDTO, bool, error) {
@@ -366,6 +383,7 @@ func buildShowSeasonSources(database *db.DB, userID int64, serverID string, seri
 			ParentLogoImageTag:      ParentLogoImageTag(parentLogoItemID),
 		})
 	}
+	items = append(items, buildTMDBSettingsSeasonSource(serverID, ref.NumericID, seriesName, parentLogoItemID, parentBackdropTags, len(items)+1)...)
 	return items, true, nil
 }
 
@@ -420,6 +438,9 @@ func buildShowEpisodeSources(database *db.DB, userID int64, serverID string, ser
 	}
 	if seasonRef == nil {
 		return buildTMDBAllEpisodeSources(database, userID, serverID, seriesRef)
+	}
+	if seasonRef.Source == "tmdb" && seasonRef.MediaType == "tv" && seasonRef.SubKind == "season" && seasonRef.NumericID == seriesRef.NumericID && seasonRef.Variant == "settings" {
+		return buildTMDBSettingsEpisodeSources(database, userID, serverID, seriesRef)
 	}
 	if seasonRef.Source != "tmdb" || seasonRef.MediaType != "tv" || seasonRef.SubKind != "season" || seasonRef.NumericID != seriesRef.NumericID {
 		return []episodeListSource{}, false, nil
@@ -559,6 +580,122 @@ func buildTMDBSeasonEpisodeSources(database *db.DB, userID int64, serverID strin
 			MediaStreams:            mediaStreams,
 			ImageTags:               ImageTagsForItem(itemID, false),
 			BackdropImageTags:       episodeBackdropTags,
+			ParentLogoImageTag:      ParentLogoImageTag(seriesItemID),
+			Chapters:                chapters,
+			MediaType:               MediaTypeVideo,
+		})
+	}
+	return items, true, nil
+}
+
+func buildTMDBSettingsSeasonSource(serverID string, tmdbID int, seriesName string, parentLogoItemID string, parentBackdropTags []string, indexNumber int) []seasonListSource {
+	if tmdbID <= 0 {
+		return []seasonListSource{}
+	}
+	seasonID := buildTMDBSettingsSeasonID(tmdbID)
+	state := SeasonItemState()
+	return []seasonListSource{{
+		Name:                    tmdbSettingsSeasonName,
+		ServerID:                strings.TrimSpace(serverID),
+		ID:                      seasonID,
+		SupportsSync:            true,
+		PremiereDate:            "",
+		Overview:                "片源设置与反馈。",
+		CommunityRating:         0,
+		ProductionYear:          0,
+		EndDate:                 "",
+		Container:               "",
+		Genres:                  EmptyStrings(),
+		IndexNumber:             maxInt(1, indexNumber),
+		IsFolder:                state.IsFolder,
+		ParentID:                parentLogoItemID,
+		Type:                    state.Type,
+		GenreItems:              EmptyNamedIDs(),
+		People:                  EmptyPeople(),
+		ParentLogoItemID:        parentLogoItemID,
+		ParentBackdropItemID:    parentLogoItemID,
+		ParentBackdropImageTags: BackdropTagsOrEmpty(parentBackdropTags),
+		UserData:                TVLatestUserDataDTO{UnplayedItemCount: len(tmdbSettingsEpisodes())},
+		ChildCount:              len(tmdbSettingsEpisodes()),
+		SeriesName:              strings.TrimSpace(seriesName),
+		SeriesID:                parentLogoItemID,
+		SeriesPrimaryImageTag:   SeriesPrimaryImageTag(parentLogoItemID),
+		ImageTags:               ImageTagsForItem(seasonID, false),
+		BackdropImageTags:       BackdropTagsOrEmpty(parentBackdropTags),
+		ParentLogoImageTag:      ParentLogoImageTag(parentLogoItemID),
+	}}
+}
+
+func buildTMDBSettingsEpisodeSources(database *db.DB, userID int64, serverID string, seriesRef *itemRef) ([]episodeListSource, bool, error) {
+	if seriesRef == nil || seriesRef.NumericID <= 0 {
+		return []episodeListSource{}, false, nil
+	}
+	detail, err := metadata_tmdb.GetDetailForBackend(database, "tv", seriesRef.NumericID)
+	if err != nil || detail == nil {
+		return []episodeListSource{}, false, err
+	}
+	seriesName := strings.TrimSpace(detail.Title)
+	seriesYear := parseTMDBCachedYear(detail)
+	settingsSeasonIndex := len(detail.Seasons) + 1
+	seriesItemID := buildSeriesID(seriesRef.NumericID)
+	seasonItemID := buildTMDBSettingsSeasonID(seriesRef.NumericID)
+	parentBackdropTags := backdropTagsFromAsset(detail.Backdrop)
+	genres, genreItems := GenresAndItemsFromDetail(detail, "tv")
+	state := EpisodeItemState(false, true)
+	items := make([]episodeListSource, 0, len(tmdbSettingsEpisodes()))
+	for _, ep := range tmdbSettingsEpisodes() {
+		itemID := buildTMDBSettingsEpisodeID(seriesRef.NumericID, ep.EpisodeNo)
+		fileName := strings.TrimSpace(ep.Name) + ".mp4"
+		path := VirtualSettingsEpisodePath(seriesName, seriesYear, fileName)
+		chapters := EmptyDetailChapters()
+		mediaSources := detailMediaSources(itemID, path, fileName, 0, "mp4", chapters)
+		mediaStreams := EmptyAnySlice()
+		if len(mediaSources) > 0 && mediaSources[0].MediaStreams != nil {
+			mediaStreams = mediaSources[0].MediaStreams
+		}
+		items = append(items, episodeListSource{
+			Name:                    strings.TrimSpace(ep.Name),
+			ServerID:                strings.TrimSpace(serverID),
+			ID:                      itemID,
+			Etag:                    StableItemEtag(itemID),
+			DateCreated:             ProtocolCreatedDate(0),
+			CanDownload:             state.CanDownload,
+			SupportsSync:            state.SupportsSync,
+			Container:               "mp4",
+			SortName:                SortNameOrName(strings.TrimSpace(ep.Name)),
+			PremiereDate:            "",
+			MediaSources:            mediaSources,
+			AlternateMediaSources:   EmptyAnySlice(),
+			Path:                    path,
+			Overview:                strings.TrimSpace(ep.Overview),
+			Genres:                  genres,
+			CommunityRating:         0,
+			OfficialRating:          "",
+			RunTimeTicks:            0,
+			Size:                    0,
+			Bitrate:                 0,
+			ProductionYear:          seriesYear,
+			IndexNumber:             ep.EpisodeNo,
+			ParentIndexNumber:       maxInt(1, settingsSeasonIndex),
+			ProviderIDs:             ProviderIDsFromTMDBAny(seriesRef.NumericID),
+			IsFolder:                state.IsFolder,
+			ParentID:                seasonItemID,
+			Type:                    state.Type,
+			People:                  EmptyPeople(),
+			Studios:                 EmptyNamedIDs(),
+			GenreItems:              genreItems,
+			ParentLogoItemID:        seriesItemID,
+			ParentBackdropItemID:    seriesItemID,
+			ParentBackdropImageTags: BackdropTagsOrEmpty(parentBackdropTags),
+			UserData:                EmptySimpleUserData(),
+			SeriesName:              seriesName,
+			SeriesID:                seriesItemID,
+			SeasonID:                seasonItemID,
+			SeriesPrimaryImageTag:   SeriesPrimaryImageTag(seriesItemID),
+			SeasonName:              tmdbSettingsSeasonName,
+			MediaStreams:            mediaStreams,
+			ImageTags:               ImageTagsForItem(itemID, false),
+			BackdropImageTags:       BackdropTagsOrEmpty(parentBackdropTags),
 			ParentLogoImageTag:      ParentLogoImageTag(seriesItemID),
 			Chapters:                chapters,
 			MediaType:               MediaTypeVideo,

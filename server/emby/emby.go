@@ -130,6 +130,14 @@ func EmbyHandler(database *db.DB) http.Handler {
 			handleVideoOriginal(rec, r, database, parts[1])
 			return
 		}
+		if r.Method == http.MethodGet && len(parts) == 3 && strings.EqualFold(parts[0], "videos-action") && strings.EqualFold(parts[2], "noop.mp4") {
+			handleVideoActionNoop(rec, r, database, parts[1])
+			return
+		}
+		if r.Method == http.MethodGet && len(parts) == 4 && strings.EqualFold(parts[0], "static") && strings.EqualFold(parts[1], "settings") {
+			handleSettingsStatic(rec, r, database, parts[2], parts[3])
+			return
+		}
 		if r.Method == http.MethodGet && len(parts) == 4 && strings.EqualFold(parts[0], "Users") && strings.EqualFold(parts[2], "Items") && strings.EqualFold(parts[3], "Latest") {
 			handleUserItemsLatest(rec, r, database, parts[1])
 			return
