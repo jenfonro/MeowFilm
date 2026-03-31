@@ -763,9 +763,9 @@ func adaptPlaybackTargetURL(database *db.DB, user *smart.User, picked *smart.Pla
 		payload := netdisk.BuildPlayPayload(rawURL, headers)
 		resolveURL := strings.TrimSpace(netdisk.IssueRelayResolveURLFromPayload(r, payload))
 		relayServers, _ := database.ListRelayServers()
-		relayEligible := relay.EligibleServers(relayServers, provider)
+		relayEligible := relay.EligibleServers(relayServers)
 		if resolveURL != "" && len(relayEligible) > 0 {
-			if out := strings.TrimSpace(relay.BuildPlaybackURL(relayEligible[0].Base, resolveURL, relayEligible[0].Secret, false)); out != "" {
+			if out := strings.TrimSpace(relay.BuildPlaybackURL(relayEligible[0].Base, resolveURL, relayEligible[0].Secret)); out != "" {
 				log.Printf("[emby][playback_target_pick] mode=function provider=%s url=%s", strings.TrimSpace(provider), smart.ShortURLForLog(out))
 				return out, "function"
 			}
@@ -778,7 +778,7 @@ func adaptPlaybackTargetURL(database *db.DB, user *smart.User, picked *smart.Pla
 	}
 
 	if cfg.GoProxyEnabled {
-		if proxiedURL, ok, err := goproxy.ProxyIfNeeded(database, relay.NormalizeProvider(provider), rawURL, headers); err == nil && ok && strings.TrimSpace(proxiedURL) != "" {
+		if proxiedURL, ok, err := goproxy.ProxyIfNeeded(database, normalizePlaybackPanProvider(provider), rawURL, headers); err == nil && ok && strings.TrimSpace(proxiedURL) != "" {
 			log.Printf("[emby][playback_target_pick] mode=goproxy provider=%s url=%s", strings.TrimSpace(provider), smart.ShortURLForLog(proxiedURL))
 			return strings.TrimSpace(proxiedURL), "goproxy"
 		}
@@ -788,6 +788,17 @@ func adaptPlaybackTargetURL(database *db.DB, user *smart.User, picked *smart.Pla
 	}
 
 	return rawURL, "raw"
+}
+
+func normalizePlaybackPanProvider(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "bd", "baidu":
+		return "baidu"
+	case "quark":
+		return "quark"
+	default:
+		return ""
+	}
 }
 
 type playbackDisplayMeta struct {

@@ -21,11 +21,10 @@ type goProxyPans struct {
 }
 
 type relayServer struct {
-	Name        string      `json:"name"`
-	DisplayName string      `json:"displayName"`
-	Base        string      `json:"base"`
-	Secret      string      `json:"secret"`
-	Pans        goProxyPans `json:"pans"`
+	Name        string `json:"name"`
+	DisplayName string `json:"displayName"`
+	Base        string `json:"base"`
+	Secret      string `json:"secret"`
 }
 
 func normalizeGoProxyServers(value string) []goProxyServer {
@@ -50,7 +49,6 @@ func normalizeRelayServers(value []db.RelayServer) []relayServer {
 			DisplayName: s.DisplayName,
 			Base:        s.Base,
 			Secret:      s.Secret,
-			Pans:        goProxyPans{Baidu: s.PansBaidu, Quark: s.PansQuark},
 		})
 	}
 	return out
