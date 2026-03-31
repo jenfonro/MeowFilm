@@ -9,19 +9,13 @@ FRONTEND_REPO_URL="${FRONTEND_REPO_URL:-}"
 FRONTEND_DIR="${FRONTEND_DIR:-../MeowFilm-Frontend}"
 
 if [[ ! -d "${FRONTEND_DIR}" ]]; then
-  echo "missing frontend dir: ${FRONTEND_DIR}" >&2
-  if [[ -n "${FRONTEND_REPO_URL}" ]] && command -v git >/dev/null 2>&1; then
-    echo "frontend not found, cloning: ${FRONTEND_REPO_URL} -> ${FRONTEND_DIR}" >&2
-    git clone --depth 1 "${FRONTEND_REPO_URL}" "${FRONTEND_DIR}"
-  else
-    echo "set FRONTEND_DIR to your frontend folder (and optional FRONTEND_REPO_URL for auto-clone)" >&2
-    exit 1
-  fi
+  echo "missing frontend dir: ${FRONTEND_DIR}; skip frontend build and build backend only" >&2
+  exec "${SCRIPT_DIR}/build.sh"
 fi
 
 if ! command -v npm >/dev/null 2>&1; then
-  echo "npm not found; cannot build frontend" >&2
-  exit 1
+  echo "npm not found; skip frontend build and build backend only" >&2
+  exec "${SCRIPT_DIR}/build.sh"
 fi
 
 (cd "${FRONTEND_DIR}" && npm ci && npm run build)

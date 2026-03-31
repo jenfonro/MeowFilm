@@ -17,12 +17,14 @@ type playbackCacheStore struct {
 	mu        sync.Mutex
 	byMedia   map[string]playbackCacheEntry
 	bySession map[string]string
+	byReplay  map[string]string
 }
 
 func newPlaybackCacheStore() *playbackCacheStore {
 	return &playbackCacheStore{
 		byMedia:   map[string]playbackCacheEntry{},
 		bySession: map[string]string{},
+		byReplay:  map[string]string{},
 	}
 }
 
@@ -41,9 +43,19 @@ func (s *playbackCacheStore) cleanupLocked(now time.Time) {
 			delete(s.bySession, sessionKey)
 		}
 	}
+	for replayKey, mediaSourceID := range s.byReplay {
+		entry, ok := s.byMedia[mediaSourceID]
+		if !ok || entry.ExpireAt.Before(now) {
+			delete(s.byReplay, replayKey)
+		}
+	}
 }
 
 func (s *playbackCacheStore) Set(target PlaybackStreamTarget, ttl time.Duration) {
+	s.SetWithReplayKey(target, "", ttl)
+}
+
+func (s *playbackCacheStore) SetWithReplayKey(target PlaybackStreamTarget, replayKey string, ttl time.Duration) {
 	if s == nil {
 		return
 	}
@@ -64,6 +76,9 @@ func (s *playbackCacheStore) Set(target PlaybackStreamTarget, ttl time.Duration)
 	s.byMedia[target.MediaSourceID] = entry
 	if sessionKey != "" {
 		s.bySession[sessionKey] = target.MediaSourceID
+	}
+	if rk := strings.TrimSpace(replayKey); rk != "" {
+		s.byReplay[rk] = target.MediaSourceID
 	}
 	s.cleanupLocked(now)
 	s.mu.Unlock()
@@ -109,6 +124,33 @@ func (s *playbackCacheStore) GetBySession(itemID string, mediaSourceID string, p
 		return PlaybackStreamTarget{}, false
 	}
 	return clonePlaybackTarget(entry.Target), true
+}
+
+func (s *playbackCacheStore) GetByReplayKey(replayKey string) (PlaybackStreamTarget, bool) {
+	if s == nil {
+		return PlaybackStreamTarget{}, false
+	}
+	key := strings.TrimSpace(replayKey)
+	if key == "" {
+		return PlaybackStreamTarget{}, false
+	}
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	mediaKey, ok := s.byReplay[key]
+	s.cleanupLocked(now)
+	if !ok {
+		return PlaybackStreamTarget{}, false
+	}
+	entry, ok := s.byMedia[mediaKey]
+	if !ok || entry.ExpireAt.Before(now) {
+		return PlaybackStreamTarget{}, false
+	}
+	target := clonePlaybackTarget(entry.Target)
+	if strings.TrimSpace(target.FinalURL) == "" || strings.TrimSpace(target.MediaSourceID) == "" || strings.TrimSpace(target.PlaySessionID) == "" {
+		return PlaybackStreamTarget{}, false
+	}
+	return target, true
 }
 
 func (s *playbackCacheStore) ExtendIfLow(mediaSourceID string, add time.Duration, capRemaining time.Duration) bool {

@@ -22,6 +22,8 @@ func BuildUserItemDetailPayload(database *db.DB, userID int64, serverID string, 
 		switch ref.SubKind {
 		case "series":
 			return buildSiteSeriesDetailPayload(database, userID, serverID, ref)
+		case "episode":
+			return buildSiteEpisodeDetailPayload(database, userID, serverID, ref)
 		default:
 			return nil, false, nil
 		}
@@ -111,6 +113,113 @@ func buildSiteSeriesDetailPayload(database *db.DB, userID int64, serverID string
 		LockedFields:            EmptyLockedFields(),
 		LockData:                false,
 	}, true, nil
+}
+
+func buildSiteEpisodeDetailPayload(database *db.DB, userID int64, serverID string, ref *itemRef) (any, bool, error) {
+	if database == nil || ref == nil || strings.TrimSpace(ref.SiteKey) == "" || strings.TrimSpace(ref.SiteDetail) == "" || ref.Pan <= 0 || ref.Episode <= 0 {
+		return nil, false, nil
+	}
+	seriesRef := &itemRef{
+		Kind:       "item",
+		SubKind:    "series",
+		MediaType:  "tv",
+		Source:     "site",
+		RawID:      buildSiteSeriesID(ref.SiteKey, ref.SiteDetail),
+		SiteKey:    ref.SiteKey,
+		SiteDetail: ref.SiteDetail,
+	}
+	seasonRef := &itemRef{
+		Kind:       "item",
+		SubKind:    "season",
+		MediaType:  "tv",
+		Source:     "site",
+		RawID:      buildSiteSeasonID(ref.SiteKey, ref.SiteDetail, ref.Pan),
+		SiteKey:    ref.SiteKey,
+		SiteDetail: ref.SiteDetail,
+		Pan:        ref.Pan,
+	}
+	items, ok, err := buildSiteShowEpisodeSources(database, userID, serverID, seriesRef, seasonRef)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	for _, item := range items {
+		if item.IndexNumber != ref.Episode {
+			continue
+		}
+		row, _ := database.GetPlayHistoryLatestByPlaybackItemID(userID, item.ID)
+		dateModified := item.DateCreated
+		if dateModified == "" {
+			dateModified = EmbyZeroTimeString()
+		}
+		fileName := filepath.Base(strings.TrimSpace(item.Path))
+		if fileName == "." || fileName == "/" || fileName == "" {
+			fileName = strings.TrimSpace(item.Name)
+		}
+		return EpisodeDetailItemDTO{
+			Name:                    item.Name,
+			ServerID:                item.ServerID,
+			ID:                      item.ID,
+			Etag:                    item.Etag,
+			DateCreated:             item.DateCreated,
+			DateModified:            dateModified,
+			CanDelete:               true,
+			CanDownload:             item.CanDownload,
+			PresentationUniqueKey:   StablePresentationUniqueKey(item.ID),
+			SupportsSync:            item.SupportsSync,
+			Container:               item.Container,
+			SortName:                item.SortName,
+			ForcedSortName:          item.SortName,
+			PremiereDate:            item.PremiereDate,
+			ExternalURLs:            EmptyExternalURLs(),
+			MediaSources:            item.MediaSources,
+			AlternateMediaSources:   item.AlternateMediaSources,
+			Path:                    item.Path,
+			Overview:                item.Overview,
+			Taglines:                EmptyStrings(),
+			Genres:                  item.Genres,
+			CommunityRating:         item.CommunityRating,
+			OfficialRating:          item.OfficialRating,
+			RunTimeTicks:            item.RunTimeTicks,
+			Size:                    item.Size,
+			FileName:                fileName,
+			Bitrate:                 item.Bitrate,
+			ProductionYear:          item.ProductionYear,
+			IndexNumber:             item.IndexNumber,
+			ParentIndexNumber:       item.ParentIndexNumber,
+			RemoteTrailers:          EmptyRemoteTrailers(),
+			ProviderIDs:             item.ProviderIDs,
+			IsFolder:                item.IsFolder,
+			ParentID:                item.ParentID,
+			Type:                    item.Type,
+			People:                  item.People,
+			Studios:                 item.Studios,
+			GenreItems:              item.GenreItems,
+			TagItems:                EmptyNamedIDs(),
+			ParentLogoItemID:        item.ParentLogoItemID,
+			ParentBackdropItemID:    item.ParentBackdropItemID,
+			ParentBackdropImageTags: item.ParentBackdropImageTags,
+			LocalTrailerCount:       0,
+			UserData:                BuildMovieDetailUserData(row),
+			SeriesName:              item.SeriesName,
+			SeriesID:                item.SeriesID,
+			SeasonID:                item.SeasonID,
+			DisplayPreferencesID:    StableDisplayPreferencesID(item.ID),
+			PrimaryImageAspectRatio: nextUpPrimaryAspectRatio,
+			SeriesPrimaryImageTag:   item.SeriesPrimaryImageTag,
+			SeasonName:              item.SeasonName,
+			MediaStreams:            item.MediaStreams,
+			ImageTags:               item.ImageTags,
+			BackdropImageTags:       item.BackdropImageTags,
+			ParentLogoImageTag:      item.ParentLogoImageTag,
+			Chapters:                item.Chapters,
+			MediaType:               item.MediaType,
+			LockedFields:            EmptyLockedFields(),
+			LockData:                false,
+			Width:                   0,
+			Height:                  0,
+		}, true, nil
+	}
+	return nil, false, nil
 }
 
 func fetchSiteDetailMeta(database *db.DB, userID int64, siteKey string, siteDetail string) (siteDetailMeta, error) {
