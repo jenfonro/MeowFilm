@@ -77,6 +77,11 @@ func ResolveLogoImageTarget(database *db.DB, itemID string, maxWidth string) (st
 }
 
 func resolveTMDBPrimaryImageTarget(database *db.DB, userID int64, ref *itemRef) string {
+	if strings.TrimSpace(ref.Variant) == "settings" {
+		if target := resolveTMDBSettingsPrimaryImageTarget(ref); strings.TrimSpace(target) != "" {
+			return target
+		}
+	}
 	if ref.MediaType == "tv" {
 		if target := resolveTMDBTVPrimaryImageTarget(database, ref); strings.TrimSpace(target) != "" {
 			return target
@@ -96,6 +101,17 @@ func resolveTMDBPrimaryImageTarget(database *db.DB, userID int64, ref *itemRef) 
 		}
 	}
 	return ""
+}
+
+func resolveTMDBSettingsPrimaryImageTarget(ref *itemRef) string {
+	if ref == nil || ref.Source != "tmdb" || strings.TrimSpace(ref.Variant) != "settings" {
+		return ""
+	}
+	base := strings.TrimSpace(resolveTMDBSettingsStaticBaseName(strings.TrimSpace(ref.RawID)))
+	if base == "" {
+		return ""
+	}
+	return "/emby/static/settings/images/" + base + ".png"
 }
 
 func resolveTMDBLogoImageTarget(database *db.DB, ref *itemRef, maxWidth string) string {
@@ -194,8 +210,11 @@ func resolveTMDBTVSeriesBackdrop(database *db.DB, tmdbID int) string {
 }
 
 func resolveTMDBTVSeasonPoster(database *db.DB, tmdbID int, season int) string {
-	if database == nil || tmdbID <= 0 || season <= 0 {
+	if database == nil || tmdbID <= 0 {
 		return ""
+	}
+	if season <= 0 {
+		return resolveTMDBTVSeriesPoster(database, tmdbID)
 	}
 	if target := resolveTMDBTVSeasonPosterOnly(database, tmdbID, season); strings.TrimSpace(target) != "" {
 		return target
@@ -217,8 +236,11 @@ func resolveTMDBTVSeasonPosterOnly(database *db.DB, tmdbID int, season int) stri
 }
 
 func resolveTMDBTVEpisodeImage(database *db.DB, tmdbID int, season int, episode int) string {
-	if database == nil || tmdbID <= 0 || season <= 0 || episode <= 0 {
+	if database == nil || tmdbID <= 0 || episode <= 0 {
 		return ""
+	}
+	if season <= 0 {
+		return resolveTMDBTVSeriesPoster(database, tmdbID)
 	}
 	detail, err := metadata_tmdb.GetTVSeasonDetails(database, tmdbID, season)
 	if err == nil && detail != nil {
@@ -262,8 +284,14 @@ func resolveTMDBTVPrimaryImageTarget(database *db.DB, ref *itemRef) string {
 	}
 	switch ref.SubKind {
 	case "episode":
+		if strings.TrimSpace(ref.Variant) == "settings" {
+			return resolveTMDBTVSeriesPoster(database, ref.NumericID)
+		}
 		return resolveTMDBTVEpisodeImage(database, ref.NumericID, ref.Pan, ref.Episode)
 	case "season":
+		if strings.TrimSpace(ref.Variant) == "settings" {
+			return resolveTMDBTVSeriesPoster(database, ref.NumericID)
+		}
 		return resolveTMDBTVSeasonPoster(database, ref.NumericID, ref.Pan)
 	case "series", "":
 		return resolveTMDBTVSeriesPoster(database, ref.NumericID)

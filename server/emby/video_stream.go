@@ -1,12 +1,16 @@
 package emby
 
 import (
+	"bytes"
+	"io/fs"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
 	embysvc "github.com/jenfonro/meowfilm/server/emby/emby_service"
+	staticassets "github.com/jenfonro/meowfilm/static"
 )
 
 func handleVideoStream(w http.ResponseWriter, r *http.Request, database *db.DB, itemID string) {
@@ -49,4 +53,36 @@ func handleVideoStreamM3U8(w http.ResponseWriter, r *http.Request, database *db.
 	w.Header().Set("Content-Type", "application/x-mpegURL")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:3600\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:3600.0,\n" + strings.TrimSpace(target.FinalURL) + "\n#EXT-X-ENDLIST\n"))
+}
+
+func handleVideoActionNoop(w http.ResponseWriter, r *http.Request, database *db.DB, itemID string) {
+	_ = database
+	w.Header().Set("Content-Type", "video/mp4")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func handleSettingsStatic(w http.ResponseWriter, r *http.Request, database *db.DB, category string, name string) {
+	_ = database
+	cat := strings.ToLower(strings.TrimSpace(category))
+	fileName := strings.TrimSpace(name)
+	if fileName == "" {
+		writeEmbyError(w, http.StatusNotFound, "Not Found")
+		return
+	}
+	var assetPath string
+	switch cat {
+	case "images":
+		assetPath = "settings/images/" + fileName
+	case "videos":
+		assetPath = "settings/videos/" + fileName
+	default:
+		writeEmbyError(w, http.StatusNotFound, "Not Found")
+		return
+	}
+	content, err := fs.ReadFile(staticassets.SettingsFS, assetPath)
+	if err != nil || len(content) == 0 {
+		writeEmbyError(w, http.StatusNotFound, "Not Found")
+		return
+	}
+	http.ServeContent(w, r, fileName, time.Time{}, bytes.NewReader(content))
 }
