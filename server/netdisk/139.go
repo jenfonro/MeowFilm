@@ -476,16 +476,18 @@ type pan139DirItem struct {
 }
 
 type pan139FileItem struct {
-	Name string
-	CoID string
-	Size int64
+	Name       string
+	CoID       string
+	Size       int64
+	PresentURL string
 }
 
 type pan139ShareFile struct {
-	Name    string
-	CoID    string
-	Size    int64
-	DirPath string
+	Name       string
+	CoID       string
+	Size       int64
+	DirPath    string
+	PresentURL string
 }
 
 type pan139Outlink0119CacheEntry struct {
@@ -762,10 +764,14 @@ func getShareUrl_0119(linkID string, pCaID string, passcode string) ([]pan139Fil
 			name := strings.TrimSpace(toString(m["coName"]))
 			coID := strings.TrimSpace(toString(m["coID"]))
 			size := toInt64(m["coSize"])
+			presentURL := strings.TrimSpace(toString(m["presentURL"]))
+			if presentURL == "" {
+				presentURL = strings.TrimSpace(toString(m["presentUrl"]))
+			}
 			if name == "" || coID == "" {
 				continue
 			}
-			out = append(out, pan139FileItem{Name: name, CoID: coID, Size: size})
+			out = append(out, pan139FileItem{Name: name, CoID: coID, Size: size, PresentURL: presentURL})
 		}
 		return out, nil
 	}
@@ -870,10 +876,14 @@ func outlinkPickCoFiles(data map[string]any) []pan139FileItem {
 		name := strings.TrimSpace(toString(m["coName"]))
 		coID := strings.TrimSpace(toString(m["coID"]))
 		size := toInt64(m["coSize"])
+		presentURL := strings.TrimSpace(toString(m["presentURL"]))
+		if presentURL == "" {
+			presentURL = strings.TrimSpace(toString(m["presentUrl"]))
+		}
 		if name == "" || coID == "" {
 			continue
 		}
-		out = append(out, pan139FileItem{Name: name, CoID: coID, Size: size})
+		out = append(out, pan139FileItem{Name: name, CoID: coID, Size: size, PresentURL: presentURL})
 	}
 	return out
 }
@@ -1037,10 +1047,11 @@ func collectShareFilesRecursive(linkID string, pCaID string, dirParts []string, 
 			continue
 		}
 		out = append(out, pan139ShareFile{
-			Name:    it.Name,
-			CoID:    it.CoID,
-			Size:    it.Size,
-			DirPath: dirPath,
+			Name:       it.Name,
+			CoID:       it.CoID,
+			Size:       it.Size,
+			DirPath:    dirPath,
+			PresentURL: it.PresentURL,
 		})
 	}
 
@@ -1105,16 +1116,48 @@ func yun139ListUncached(_ *db.DB, flag string, passcode string) (string, string,
 		return "", linkID, err
 	}
 
+	type pan139DisplayResult struct {
+		Display string
+		ID      string
+	}
 	parts := make([]string, 0, len(files))
-	for _, f := range files {
-		if strings.TrimSpace(f.Name) == "" || strings.TrimSpace(f.CoID) == "" {
+	results := make([]pan139DisplayResult, len(files))
+	sem := make(chan struct{}, 4)
+	var wg sync.WaitGroup
+	for idx, f := range files {
+		i := idx
+		file := f
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if strings.TrimSpace(file.Name) == "" || strings.TrimSpace(file.CoID) == "" {
+				return
+			}
+			dirPath := strings.TrimSpace(file.DirPath)
+			if dirPath == "" {
+				dirPath = "/"
+			}
+			baseDisplay := prefixRootDirDisplay(dirPath, rootPrefix)
+			finalDisplay := baseDisplay
+			quality := inferPanQualityLabelFromFilename(file.Name)
+			if quality == "" && strings.TrimSpace(file.PresentURL) != "" {
+				sem <- struct{}{}
+				probedQuality, _ := detectPanQualityFromM3U8(file.PresentURL)
+				<-sem
+				finalDisplay = buildPanDisplayNameWithQuality(baseDisplay, probedQuality)
+			}
+			results[i] = pan139DisplayResult{
+				Display: finalDisplay,
+				ID:      file.CoID + "*" + linkID + "***" + strings.TrimSpace(file.Name),
+			}
+		}()
+	}
+	wg.Wait()
+	for _, r := range results {
+		if strings.TrimSpace(r.ID) == "" {
 			continue
 		}
-		dirPath := strings.TrimSpace(f.DirPath)
-		if dirPath == "" {
-			dirPath = "/"
-		}
-		parts = append(parts, prefixRootDirDisplay(dirPath, rootPrefix)+"$"+f.CoID+"*"+linkID+"***"+strings.TrimSpace(f.Name))
+		parts = append(parts, r.Display+"$"+r.ID)
 	}
 	return strings.Join(parts, "#"), linkID, nil
 }
