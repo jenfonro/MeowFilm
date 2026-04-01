@@ -2,12 +2,11 @@ package netdisk
 
 import (
 	"encoding/json"
-	"regexp"
 	"strconv"
 	"strings"
-)
 
-var panQualityTokenRe = regexp.MustCompile(`(?i)(?:^|[\s\[\]\(\){}【】._-])(4k|2160p|1080p|720p)(?=$|[\s\[\]\(\){}【】._-])`)
+	"github.com/jenfonro/meowfilm/server/magic"
+)
 
 func inferPanQualityLabel(item map[string]any) string {
 	if item == nil {
@@ -65,11 +64,11 @@ func buildPanDisplayNameWithQuality(basePath string, quality string) string {
 }
 
 func inferPanQualityLabelFromFilename(name string) string {
-	m := panQualityTokenRe.FindStringSubmatch(strings.TrimSpace(name))
-	if len(m) < 2 {
+	matched, err := magic.RegexExtractFirstGroupFromCandidates([]string{strings.TrimSpace(name)}, `{"pattern":"(?:^|[\\s\\[\\]\\(\\){}【】._-])(4k|2160p|1080p|720p)(?=$|[\\s\\[\\]\\(\\){}【】._-])","flags":"i"}`)
+	if err != nil {
 		return ""
 	}
-	switch strings.ToLower(strings.TrimSpace(m[1])) {
+	switch strings.ToLower(strings.TrimSpace(matched)) {
 	case "4k", "2160p":
 		return "4K"
 	case "1080p":
