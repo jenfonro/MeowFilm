@@ -16,7 +16,6 @@ import (
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/internal/limit"
 	"github.com/jenfonro/meowfilm/server/catpawrunner"
-	"github.com/jenfonro/meowfilm/server/config"
 	"github.com/jenfonro/meowfilm/server/metadata/douban"
 	"github.com/jenfonro/meowfilm/server/netdisk"
 	"github.com/jenfonro/meowfilm/server/sites"
@@ -302,20 +301,13 @@ func readSmartSourceRuleRowsJSONBody(body map[string]any, key string) []db.Smart
 			continue
 		}
 		keyValue, _ := m["key"].(string)
-		enabled := true
-		if raw, ok := m["enabled"]; ok && raw != nil {
-			if b, ok := raw.(bool); ok {
-				enabled = b
-			}
-		}
 		order := len(rows) + 1
 		if f, ok := m["order"].(float64); ok {
 			order = int(f)
 		}
 		rows = append(rows, db.SmartSourceRuleRow{
-			Key:     strings.TrimSpace(keyValue),
-			Enabled: enabled,
-			Order:   order,
+			Key:   strings.TrimSpace(keyValue),
+			Order: order,
 		})
 	}
 	return db.NormalizeSmartSourceRuleRows(rows)
@@ -342,13 +334,12 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 			})
 		}
 		writeJSON(w, 200, map[string]any{
-			"success":                    true,
-			"smartSourceExtractPriority": config.NormalizeSourceExtractPriority(cfg.SmartSourceExtractPriority),
-			"smartSourceRuleRows":        cfg.SmartSourceRuleRows,
-			"siteCleanKeywords":          strings.TrimSpace(cfg.SmartSiteCleanKeywords),
-			"smartSourcePriorityTokens":  defaultStringArray(sourceTokens),
-			"smartPanMatchTokens":        defaultStringArray(panTokens),
-			"smartPanAliasMappings":      panAliasOut,
+			"success":                   true,
+			"smartSourceRuleRows":       cfg.SmartSourceRuleRows,
+			"siteCleanKeywords":         strings.TrimSpace(cfg.SmartSiteCleanKeywords),
+			"smartSourcePriorityTokens": defaultStringArray(sourceTokens),
+			"smartPanMatchTokens":       defaultStringArray(panTokens),
+			"smartPanAliasMappings":     panAliasOut,
 		})
 	}
 
@@ -363,15 +354,6 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 		if len(rows) > 0 {
 			_ = database.UpdateAppConfig(func(c *db.AppConfig) {
 				c.SmartSourceRuleRows = rows
-			})
-		}
-		if _, ok := body["smartSourceExtractPriority"]; ok {
-			priority := config.NormalizeSourceExtractPriority(readStrJSONBody(body, "smartSourceExtractPriority"))
-			_ = database.UpdateAppConfig(func(c *db.AppConfig) {
-				c.SmartSourceExtractPriority = priority
-				if len(rows) == 0 {
-					c.SmartSourceRuleRows = db.BuildSmartSourceRuleRowsFromLegacyMode(priority)
-				}
 			})
 		}
 		if _, ok := body["siteCleanKeywords"]; ok {
@@ -599,12 +581,11 @@ func handleDashboardBackup(w http.ResponseWriter, r *http.Request, database *db.
 			"aggregateRegexRules":    defaultStringArray(magicAggregateRegexRules),
 		},
 		"smart": map[string]any{
-			"smartSourceExtractPriority": config.NormalizeSourceExtractPriority(strings.TrimSpace(cfg.SmartSourceExtractPriority)),
-			"smartSourceRuleRows":        cfg.SmartSourceRuleRows,
-			"siteCleanKeywords":          strings.TrimSpace(cfg.SmartSiteCleanKeywords),
-			"smartSourcePriorityTokens":  defaultStringArray(smartSourcePriorityTokens),
-			"smartPanMatchTokens":        defaultStringArray(smartPanMatchTokens),
-			"smartPanAliasMappings":      smartPanAliasOut,
+			"smartSourceRuleRows":       cfg.SmartSourceRuleRows,
+			"siteCleanKeywords":         strings.TrimSpace(cfg.SmartSiteCleanKeywords),
+			"smartSourcePriorityTokens": defaultStringArray(smartSourcePriorityTokens),
+			"smartPanMatchTokens":       defaultStringArray(smartPanMatchTokens),
+			"smartPanAliasMappings":     smartPanAliasOut,
 		},
 		"metadata": map[string]any{
 			"doubanDataProxy":    douban.CanonicalDataProxyMode(cfg.DoubanDataProxy),
@@ -941,17 +922,6 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 		rows := readSmartSourceRuleRowsJSONBody(smart, "smartSourceRuleRows")
 		if len(rows) > 0 {
 			_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.SmartSourceRuleRows = rows })
-		}
-		if v, ok := smart["smartSourceExtractPriority"]; ok && v != nil {
-			if s, _ := v.(string); true {
-				priority := config.NormalizeSourceExtractPriority(strings.TrimSpace(s))
-				_ = database.UpdateAppConfig(func(c *db.AppConfig) {
-					c.SmartSourceExtractPriority = priority
-					if len(rows) == 0 {
-						c.SmartSourceRuleRows = db.BuildSmartSourceRuleRowsFromLegacyMode(priority)
-					}
-				})
-			}
 		}
 		if v, ok := smart["siteCleanKeywords"]; ok && v != nil {
 			if s, _ := v.(string); true {
@@ -1842,7 +1812,6 @@ func handleDashboardVideoSourceSitesImport(w http.ResponseWriter, r *http.Reques
 func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	switch r.Method {
 	case http.MethodGet:
-		cfg, _ := database.ReadAppConfig()
 		cleanRules, _ := database.ListMagicEpisodeCleanRegexRules()
 		episodeCleanRegex := ""
 		if len(cleanRules) > 0 {
@@ -1858,22 +1827,20 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 				"aliases": strings.TrimSpace(it.Aliases),
 			})
 		}
-		smartSourceExtractPriority := config.NormalizeSourceExtractPriority(strings.TrimSpace(cfg.SmartSourceExtractPriority))
 		episodeRules, _ := database.ListMagicEpisodeRules()
 		movieRules, _ := database.ListMagicMovieRules()
 		aggregateRegexRules, _ := database.ListMagicAggregateRegexRules()
 		writeJSON(w, 200, map[string]any{
-			"success":                    true,
-			"episodeCleanRegex":          episodeCleanRegex,
-			"episodeCleanRegexRules":     defaultStringArray(cleanRules),
-			"episodeRules":               defaultStringArray(episodeRules),
-			"movieRules":                 defaultStringArray(movieRules),
-			"aggregateRules":             []string{},
-			"aggregateRegexRules":        defaultStringArray(aggregateRegexRules),
-			"smartSourcePriorityTokens":  defaultStringArray(smartSourcePriorityTokens),
-			"smartPanMatchTokens":        defaultStringArray(smartPanMatchTokens),
-			"smartPanAliasMappings":      smartPanAliasOut,
-			"smartSourceExtractPriority": smartSourceExtractPriority,
+			"success":                   true,
+			"episodeCleanRegex":         episodeCleanRegex,
+			"episodeCleanRegexRules":    defaultStringArray(cleanRules),
+			"episodeRules":              defaultStringArray(episodeRules),
+			"movieRules":                defaultStringArray(movieRules),
+			"aggregateRules":            []string{},
+			"aggregateRegexRules":       defaultStringArray(aggregateRegexRules),
+			"smartSourcePriorityTokens": defaultStringArray(smartSourcePriorityTokens),
+			"smartPanMatchTokens":       defaultStringArray(smartPanMatchTokens),
+			"smartPanAliasMappings":     smartPanAliasOut,
 		})
 	case http.MethodPost:
 		var body map[string]any
@@ -1974,17 +1941,11 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 			}
 		}
 
-		priorityRaw, _ := body["smartSourceExtractPriority"].(string)
-		_ = database.UpdateAppConfig(func(c *db.AppConfig) {
-			c.SmartSourceExtractPriority = config.NormalizeSourceExtractPriority(priorityRaw)
-		})
-
 		outClean, _ := database.ListMagicEpisodeCleanRegexRules()
 		outEpisodeClean := ""
 		if len(outClean) > 0 {
 			outEpisodeClean = outClean[0]
 		}
-		cfg, _ := database.ReadAppConfig()
 		smartSourcePriorityTokens, _ := database.ListSmartSourcePriorityTokens()
 		smartPanMatchTokens, _ := database.ListSmartPanMatchTokens()
 		smartPanAliasMappings, _ := database.ListSmartPanAliasMappings()
@@ -1995,22 +1956,20 @@ func handleDashboardMagicSettings(w http.ResponseWriter, r *http.Request, databa
 				"aliases": strings.TrimSpace(it.Aliases),
 			})
 		}
-		smartSourceExtractPriority := config.NormalizeSourceExtractPriority(strings.TrimSpace(cfg.SmartSourceExtractPriority))
 		episodeRules, _ := database.ListMagicEpisodeRules()
 		movieRules, _ := database.ListMagicMovieRules()
 		aggregateRegexRules, _ := database.ListMagicAggregateRegexRules()
 		writeJSON(w, 200, map[string]any{
-			"success":                    true,
-			"episodeCleanRegex":          outEpisodeClean,
-			"episodeCleanRegexRules":     defaultStringArray(outClean),
-			"episodeRules":               defaultStringArray(episodeRules),
-			"movieRules":                 defaultStringArray(movieRules),
-			"aggregateRules":             []string{},
-			"aggregateRegexRules":        defaultStringArray(aggregateRegexRules),
-			"smartSourcePriorityTokens":  defaultStringArray(smartSourcePriorityTokens),
-			"smartPanMatchTokens":        defaultStringArray(smartPanMatchTokens),
-			"smartPanAliasMappings":      smartPanAliasOut,
-			"smartSourceExtractPriority": smartSourceExtractPriority,
+			"success":                   true,
+			"episodeCleanRegex":         outEpisodeClean,
+			"episodeCleanRegexRules":    defaultStringArray(outClean),
+			"episodeRules":              defaultStringArray(episodeRules),
+			"movieRules":                defaultStringArray(movieRules),
+			"aggregateRules":            []string{},
+			"aggregateRegexRules":       defaultStringArray(aggregateRegexRules),
+			"smartSourcePriorityTokens": defaultStringArray(smartSourcePriorityTokens),
+			"smartPanMatchTokens":       defaultStringArray(smartPanMatchTokens),
+			"smartPanAliasMappings":     smartPanAliasOut,
 		})
 	default:
 		methodNotAllowed(w)

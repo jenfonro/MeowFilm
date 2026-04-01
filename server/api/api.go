@@ -18,7 +18,6 @@ import (
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/internal/limit"
 	"github.com/jenfonro/meowfilm/server/catpawrunner"
-	"github.com/jenfonro/meowfilm/server/config"
 	"github.com/jenfonro/meowfilm/server/metadata/douban"
 	"github.com/jenfonro/meowfilm/server/metadata/tmdb"
 	mfnet "github.com/jenfonro/meowfilm/server/net"
@@ -388,7 +387,6 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 				} else {
 					settings["smartPanAliasMappings"] = []map[string]string{}
 				}
-				settings["smartSourceExtractPriority"] = config.NormalizeSourceExtractPriority(cfg.SmartSourceExtractPriority)
 			}
 
 			// User search configuration: used by search/play pages only.
@@ -609,6 +607,7 @@ func buildNormalizedPlayHistoryList(rows []db.PlayHistoryRow, limit int) []map[s
 			"playbackItemId":        strings.TrimSpace(row.PlaybackItemID),
 			"playbackPositionTicks": row.PlaybackPositionTicks,
 			"playbackRuntimeTicks":  row.PlaybackRuntimeTicks,
+			"preOrder":              row.PreOrder,
 			"updatedAt":             row.UpdatedAt,
 		})
 	}
@@ -638,6 +637,7 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 		playFlag         string
 		siteEpisodeIndex int
 		siteEpisodeFile  string
+		preOrder         bool
 		updatedAt        int64
 	)
 	row, err := database.GetPlayHistoryLatestBySiteVideo(u.ID, siteKey, siteDetail)
@@ -655,6 +655,7 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 	playFlag = row.PlayFlag
 	siteEpisodeIndex = row.SiteEpisodeIndex
 	siteEpisodeFile = row.SiteEpisodeFile
+	preOrder = row.PreOrder
 	updatedAt = row.UpdatedAt
 	tmdbType = strings.TrimSpace(strings.ToLower(tmdbType))
 	tmdbSeason := row.TMDBSeason
@@ -677,6 +678,7 @@ func handleAPIPlayHistoryOne(w http.ResponseWriter, r *http.Request, database *d
 		"playbackItemId":        row.PlaybackItemID,
 		"playbackPositionTicks": row.PlaybackPositionTicks,
 		"playbackRuntimeTicks":  row.PlaybackRuntimeTicks,
+		"preOrder":              preOrder,
 		"updatedAt":             updatedAt,
 	})
 }
@@ -736,14 +738,31 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 				return 0
 			}
 		}
+		getB := func(k string) (bool, bool) {
+			v, ok := body[k]
+			if !ok || v == nil {
+				return false, false
+			}
+			switch vv := v.(type) {
+			case bool:
+				return vv, true
+			case float64:
+				return vv != 0, true
+			case string:
+				s := strings.TrimSpace(strings.ToLower(vv))
+				switch s {
+				case "1", "true", "yes", "on":
+					return true, true
+				case "0", "false", "no", "off", "":
+					return false, true
+				}
+			}
+			return false, true
+		}
 		siteKey := getS("siteKey")
 		spiderAPI := getS("spiderApi")
 		siteDetail := getS("siteDetail")
 		contentKey := getS("contentKey")
-		if siteKey == "" || spiderAPI == "" || siteDetail == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数不完整"})
-			return
-		}
 		poster := getS("Poster")
 		remark := getS("Remark")
 		tmdbID := getI("tmdbId")
@@ -785,6 +804,7 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		playbackItemID := strings.TrimSpace(getS("playbackItemId"))
 		tmdbSeason := getI("tmdbSeason")
 		tmdbEpisode := getI("tmdbEpisode")
+		preOrderValue, preOrderProvided := getB("preOrder")
 
 		if isNetDiskHistoryItem(siteDetail, playFlag) {
 			// still persist (netdisk items are valid history entries for quick start)
@@ -801,24 +821,85 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		poster = normalizeRawHistoryPoster(poster)
 
 		now := time.Now().Unix()
-		_ = database.UpsertPlayHistory(db.PlayHistoryUpsert{
-			UserID:                u.ID,
-			ContentKey:            contentKey,
-			SiteKey:               siteKey,
-			SiteDetail:            siteDetail,
-			Poster:                poster,
-			Remark:                remark,
-			TMDBID:                tmdbID,
-			TMDBType:              tmdbType,
-			PlayFlag:              playFlag,
-			SiteEpisodeIndex:      siteEpisodeIndex,
-			SiteEpisodeFile:       siteEpisodeFile,
-			TMDBSeason:            tmdbSeason,
-			TMDBEpisode:           tmdbEpisode,
-			UpdatedAt:             now,
-			PlaybackPositionTicks: positionTicks,
-			PlaybackRuntimeTicks:  runtimeTicks,
-			PlaybackItemID:        playbackItemID,
+		if siteKey != "" && spiderAPI != "" && siteDetail != "" {
+			_ = database.UpsertPlayHistory(db.PlayHistoryUpsert{
+				UserID:                u.ID,
+				ContentKey:            contentKey,
+				SiteKey:               siteKey,
+				SiteDetail:            siteDetail,
+				Poster:                poster,
+				Remark:                remark,
+				TMDBID:                tmdbID,
+				TMDBType:              tmdbType,
+				PlayFlag:              playFlag,
+				PreOrder:              func() *bool {
+					if !preOrderProvided {
+						return nil
+					}
+					v := preOrderValue
+					return &v
+				}(),
+				SiteEpisodeIndex:      siteEpisodeIndex,
+				SiteEpisodeFile:       siteEpisodeFile,
+				TMDBSeason:            tmdbSeason,
+				TMDBEpisode:           tmdbEpisode,
+				UpdatedAt:             now,
+				PlaybackPositionTicks: positionTicks,
+				PlaybackRuntimeTicks:  runtimeTicks,
+				PlaybackItemID:        playbackItemID,
+			})
+			writeJSON(w, 200, map[string]any{"success": true})
+			return
+		}
+		if contentKey == "" || tmdbID <= 0 || tmdbType != "tv" || !preOrderProvided {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "参数不完整"})
+			return
+		}
+		title := strings.TrimSpace(getS("title"))
+		if title == "" {
+			title = contentKey
+		}
+		if (title == "" || remark == "" || poster == "" || tmdbSeason <= 0) && tmdbID > 0 && tmdbType == "tv" {
+			if detail, err := tmdb.GetDetailForBackend(database, tmdbType, tmdbID); err == nil && detail != nil {
+				if contentKey == "" {
+					contentKey = strings.TrimSpace(detail.Title)
+				}
+				if title == "" {
+					title = strings.TrimSpace(detail.Title)
+				}
+				if poster == "" {
+					poster = normalizeRawHistoryPoster(strings.TrimSpace(detail.PosterPath))
+				}
+				if remark == "" {
+					remark = strings.TrimSpace(detail.Overview)
+				}
+				if tmdbSeason <= 0 {
+					if detail.LatestSeason > 0 {
+						tmdbSeason = detail.LatestSeason
+					} else if len(detail.Seasons) > 0 {
+						tmdbSeason = detail.Seasons[0].SeasonNumber
+					}
+				}
+			}
+		}
+		if title == "" {
+			title = contentKey
+		}
+		_ = database.UpsertTMDBPlayHistoryMeta(db.TMDBPlayHistoryUpsert{
+			UserID:           u.ID,
+			TMDBID:           tmdbID,
+			TMDBType:         tmdbType,
+			TMDBSeason:       tmdbSeason,
+			TMDBEpisode:      tmdbEpisode,
+			ContentKey:       contentKey,
+			Title:            title,
+			Poster:           poster,
+			Remark:           remark,
+			PreOrder: func() *bool {
+				v := preOrderValue
+				return &v
+			}(),
+			UpdatedAt:        now,
 		})
 		writeJSON(w, 200, map[string]any{"success": true})
 	case http.MethodDelete:

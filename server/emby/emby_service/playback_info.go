@@ -8,6 +8,7 @@ import (
 	"net/http"
 	neturl "net/url"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -301,7 +302,9 @@ func resolveTMDBPlaybackStreamTarget(database *db.DB, userID int64, ref *itemRef
 	} else {
 		log.Printf("[emby][switch_session_hit] tmdb=%s:%d skip=%d", strings.TrimSpace(req.Kind), ref.NumericID, len(switchSession.SkipItems))
 	}
-	entry := ensurePlaybackControlEntry(userID, strings.TrimSpace(clientmeta.ClientDeviceID(r)), strings.TrimSpace(ref.RawID), strings.TrimSpace(mediaSourceID), strings.TrimSpace(playSessionID), strings.TrimSpace(cacheKey))
+	matchSettings := smart.LoadPlaybackSettings(database)
+	tmdbHasMultiSeason := strings.TrimSpace(req.Kind) == "tv" && strings.TrimSpace(req.SubKind) == "episode" && req.Season > 0
+	entry := ensurePlaybackControlEntry(userID, strings.TrimSpace(clientmeta.ClientDeviceID(r)), strings.TrimSpace(ref.RawID), strings.TrimSpace(mediaSourceID), strings.TrimSpace(playSessionID), strings.TrimSpace(cacheKey), strings.TrimSpace(req.Kind), strings.TrimSpace(req.SubKind), req.Season, tmdbHasMultiSeason, matchSettings)
 	if entry == nil {
 		return nil, false, nil
 	}
@@ -311,8 +314,9 @@ func resolveTMDBPlaybackStreamTarget(database *db.DB, userID int64, ref *itemRef
 	go func() {
 		defer producerWG.Done()
 		hist, histErr := database.GetPlayHistoryLatestByTMDB(userID, req.Kind, ref.NumericID)
+		historyListHit := false
 		if histErr == nil && hist != nil {
-			collectTMDBHistoryPlaybackFromListCandidates(database, user, ref, *req, *hist, stopCh, func(offer smart.PlaybackOffer) {
+			historyListHit = collectTMDBHistoryPlaybackFromListCandidates(database, user, ref, *req, *hist, stopCh, func(offer smart.PlaybackOffer) {
 				episodeFile := strings.TrimSpace(offer.Cand.RawName)
 				if playbackSwitchShouldSkip(switchSession, offer.Cand.SiteKey, offer.Cand.PanFlag, episodeFile) {
 					log.Printf("[emby][history_list_skip] item=%s tmdb=%s:%d site=(%s|%s) reason=session_panflag_skip panFlag=%s episodeFile=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, strings.TrimSpace(offer.Cand.SiteKey), strings.TrimSpace(offer.Cand.SiteName), strings.TrimSpace(offer.Cand.PanFlag), strings.TrimSpace(episodeFile))
@@ -324,6 +328,10 @@ func resolveTMDBPlaybackStreamTarget(database *db.DB, userID int64, ref *itemRef
 			})
 		}
 		CloseHistoryListOffers(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey)
+		if historyListHit {
+			CloseHistoryDetailOffers(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey)
+			return
+		}
 		if histErr == nil && hist != nil {
 			collectTMDBHistoryPlaybackFromDetailCandidates(database, userID, user, ref, *req, *hist, stopCh, func(offer smart.PlaybackOffer) {
 				episodeFile := strings.TrimSpace(offer.Cand.RawName)
@@ -342,13 +350,13 @@ func resolveTMDBPlaybackStreamTarget(database *db.DB, userID int64, ref *itemRef
 		defer producerWG.Done()
 		_ = smart.CollectPlaybackOffersFromTMDB(database, user, *req, func() bool {
 			return IsPlaybackResolveStopped(stopCh)
-		}, func(offer smart.PlaybackOffer, tier int) {
+		}, func(offer smart.PlaybackOffer, _ int) {
 			episodeFile := firstNonEmptyString(strings.TrimSpace(offer.Cand.RawName), strings.TrimSpace(smart.FirstRawNameFromURL(offer.Cand.Ep.URL)))
 			if playbackSwitchShouldSkip(switchSession, offer.Cand.SiteKey, offer.Cand.PanFlag, episodeFile) {
-				log.Printf("[emby][full_offer_skip] item=%s tmdb=%s:%d tier=%d reason=session_panflag_skip site=(%s|%s) panFlag=%s episodeFile=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, tier, strings.TrimSpace(offer.Cand.SiteKey), strings.TrimSpace(offer.Cand.SiteName), strings.TrimSpace(offer.Cand.PanFlag), strings.TrimSpace(episodeFile))
+				log.Printf("[emby][full_offer_skip] item=%s tmdb=%s:%d reason=session_panflag_skip site=(%s|%s) panFlag=%s episodeFile=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, strings.TrimSpace(offer.Cand.SiteKey), strings.TrimSpace(offer.Cand.SiteName), strings.TrimSpace(offer.Cand.PanFlag), strings.TrimSpace(episodeFile))
 				return
 			}
-			EnqueueFullOffer(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey, tier, offer)
+			EnqueueFullOffer(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey, offer)
 		})
 		CloseFullOffers(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey)
 	}()
@@ -391,6 +399,7 @@ func collectTMDBHistoryPlaybackFromListCandidates(database *db.DB, user *smart.U
 	)
 	offer := smart.PlaybackOffer{
 		Cand: smart.Candidate{
+			Stage:      "history_list",
 			SiteKey:    strings.TrimSpace(hist.SiteKey),
 			SiteName:   strings.TrimSpace(hist.SiteName),
 			SiteDetail: strings.TrimSpace(hist.SiteDetail),
@@ -416,35 +425,77 @@ func collectTMDBHistoryPlaybackFromDetailCandidates(database *db.DB, userID int6
 		return false
 	}
 	log.Printf("[emby][history_detail] item=%s tmdb=%s:%d site=(%s|%s) spider=%s siteDetail=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, siteKey, strings.TrimSpace(hist.SiteName), spiderAPI, siteDetail)
-	pans, ok := fetchResolvedSiteDetailPansWithSpiderAPI(database, userID, siteKey, strings.TrimSpace(hist.SiteName), spiderAPI, siteDetail, ref.NumericID, req)
-	if !ok || len(pans) == 0 {
+	rawPans, ok := fetchRawSiteDetailPansWithSpiderAPI(database, userID, siteKey, strings.TrimSpace(hist.SiteName), spiderAPI, siteDetail)
+	if !ok || len(rawPans) == 0 {
 		log.Printf("[emby][history_detail_error] item=%s tmdb=%s:%d site=(%s|%s) spider=%s siteDetail=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, siteKey, strings.TrimSpace(hist.SiteName), spiderAPI, siteDetail)
 		return false
 	}
 	found := false
-	for _, pan := range reorderHistoryPans(pans, strings.TrimSpace(hist.PlayFlag)) {
-		ep, matchOK := pickHistoryEpisodeCandidate(database, ref.NumericID, req, pan.Episodes)
-		if !matchOK {
-			continue
+	var foundMu sync.Mutex
+	settings := smart.LoadPlaybackSettings(database)
+	tmdbHasMultiSeason := strings.TrimSpace(req.Kind) == "tv" && strings.TrimSpace(req.SubKind) == "episode" && req.Season > 0
+	emitSorted := func(offers []smart.PlaybackOffer) {
+		if len(offers) == 0 || emit == nil {
+			return
 		}
-		rawPanLabel := strings.TrimSpace(pan.RawLabel)
-		ep.Flag = firstNonEmptyString(strings.TrimSpace(ep.Flag), rawPanLabel, strings.TrimSpace(hist.PlayFlag))
-		offer := smart.PlaybackOffer{
-			Cand: smart.Candidate{
-				SiteKey:    siteKey,
-				SiteName:   strings.TrimSpace(hist.SiteName),
-				SpiderAPI:  spiderAPI,
-				SiteDetail: siteDetail,
-				PanFlag:    firstNonEmptyString(strings.TrimSpace(ep.Flag), rawPanLabel, strings.TrimSpace(hist.PlayFlag)),
-				Ep:         ep,
-				RawName:    firstNonEmptyString(strings.TrimSpace(hist.SiteEpisodeFile), strings.TrimSpace(smart.FirstRawNameFromURL(ep.URL))),
-			},
-		}
-		found = true
-		if emit != nil {
+		sort.SliceStable(offers, func(i, j int) bool {
+			return smart.CompareSmartMatch(offers[i].Cand, offers[j].Cand, tmdbHasMultiSeason, req.Season, settings) < 0
+		})
+		for _, offer := range offers {
 			emit(offer)
 		}
-		log.Printf("[emby][history_detail_ok] item=%s tmdb=%s:%d site=(%s|%s) siteDetail=%s panFlag=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, offer.Cand.SiteKey, offer.Cand.SiteName, siteDetail, offer.Cand.PanFlag)
+	}
+
+	directOffers := make([]smart.PlaybackOffer, 0, len(rawPans))
+	listPans := make([]catpawrunner.Pan, 0, len(rawPans))
+	for _, pan := range rawPans {
+		if smart.PanMockProviderFromLabel(strings.TrimSpace(pan.Label)) != "" {
+			listPans = append(listPans, pan)
+			continue
+		}
+		resolved := buildResolvedSitePans(database, []catpawrunner.Pan{pan})
+		for _, panResolved := range reorderHistoryPans(resolved, strings.TrimSpace(hist.PlayFlag)) {
+			offer, ok := buildHistoryDetailOfferFromResolvedPan(database, ref, req, hist, siteKey, spiderAPI, siteDetail, panResolved)
+			if !ok {
+				continue
+			}
+			found = true
+			directOffers = append(directOffers, offer)
+			log.Printf("[emby][history_detail_ok] item=%s tmdb=%s:%d site=(%s|%s) siteDetail=%s panFlag=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, offer.Cand.SiteKey, offer.Cand.SiteName, siteDetail, offer.Cand.PanFlag)
+		}
+	}
+	emitSorted(directOffers)
+
+	if len(listPans) > 0 {
+		tmdbSeasons := loadPlaybackTMDBSeasons(database, ref.NumericID)
+		rawEpisodeRules, _ := database.ListMagicEpisodeRules()
+		rawCleanRules, _ := database.ListMagicEpisodeCleanRegexRules()
+		want := 0
+		if req.Kind == "tv" && req.Season > 0 && req.Episode > 0 {
+			want = smart.TMDBGlobalEpisodeNoOf(tmdbSeasons, req.Season, req.Episode)
+		}
+		hasMulti := smart.PositiveSeasonCount(tmdbSeasons) > 1
+		_, _ = smart.ResolvePanMockDetailPansIncremental(database, siteKey, strings.TrimSpace(hist.SiteName), want, tmdbSeasons, hasMulti, rawCleanRules, rawEpisodeRules, listPans, func(panIndex int, episodes []catpawrunner.Episode, accessDelta map[string]string, emitAllowed bool) {
+			if !emitAllowed || IsPlaybackResolveStopped(stopCh) || panIndex < 0 || panIndex >= len(listPans) {
+				return
+			}
+			pan := listPans[panIndex]
+			pan.Episodes = episodes
+			resolved := buildResolvedSitePans(database, []catpawrunner.Pan{pan})
+			listOffers := make([]smart.PlaybackOffer, 0, len(resolved))
+			for _, panResolved := range reorderHistoryPans(resolved, strings.TrimSpace(hist.PlayFlag)) {
+				offer, ok := buildHistoryDetailOfferFromResolvedPan(database, ref, req, hist, siteKey, spiderAPI, siteDetail, panResolved)
+				if !ok {
+					continue
+				}
+				foundMu.Lock()
+				found = true
+				foundMu.Unlock()
+				listOffers = append(listOffers, offer)
+				log.Printf("[emby][history_detail_ok] item=%s tmdb=%s:%d site=(%s|%s) siteDetail=%s panFlag=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, offer.Cand.SiteKey, offer.Cand.SiteName, siteDetail, offer.Cand.PanFlag)
+			}
+			emitSorted(listOffers)
+		})
 	}
 	if found {
 		return true
@@ -470,6 +521,27 @@ func buildTMDBPlaybackOfferTarget(ref *itemRef, display playbackDisplayMeta, off
 		MediaSourceID: strings.TrimSpace(mediaSourceID),
 		PlaySessionID: strings.TrimSpace(playSessionID),
 	}
+}
+
+func buildHistoryDetailOfferFromResolvedPan(database *db.DB, ref *itemRef, req smart.PlaybackRequest, hist db.PlayHistoryRow, siteKey string, spiderAPI string, siteDetail string, pan resolvedSitePan) (smart.PlaybackOffer, bool) {
+	ep, matchOK := pickHistoryEpisodeCandidate(database, ref.NumericID, req, pan.Episodes)
+	if !matchOK {
+		return smart.PlaybackOffer{}, false
+	}
+	rawPanLabel := strings.TrimSpace(pan.RawLabel)
+	ep.Flag = firstNonEmptyString(strings.TrimSpace(ep.Flag), rawPanLabel, strings.TrimSpace(hist.PlayFlag))
+	return smart.PlaybackOffer{
+		Cand: smart.Candidate{
+			Stage:      "history_detail",
+			SiteKey:    siteKey,
+			SiteName:   strings.TrimSpace(hist.SiteName),
+			SpiderAPI:  spiderAPI,
+			SiteDetail: siteDetail,
+			PanFlag:    firstNonEmptyString(strings.TrimSpace(ep.Flag), rawPanLabel, strings.TrimSpace(hist.PlayFlag)),
+			Ep:         ep,
+			RawName:    firstNonEmptyString(strings.TrimSpace(hist.SiteEpisodeFile), strings.TrimSpace(smart.FirstRawNameFromURL(ep.URL))),
+		},
+	}, true
 }
 
 func buildTMDBPlaybackStreamTarget(database *db.DB, user *smart.User, ref *itemRef, display playbackDisplayMeta, picked *smart.PlaybackPickedMeta, finalURL string, finalHeaders map[string]string, r *http.Request) *PlaybackStreamTarget {
@@ -627,6 +699,31 @@ func resolveSiteEpisodeDirectPlayback(database *db.DB, user *smart.User, ref *it
 	}, nil
 }
 
+func fetchRawSiteDetailPansWithSpiderAPI(database *db.DB, userID int64, siteKey string, siteName string, spiderAPI string, siteDetail string) ([]catpawrunner.Pan, bool) {
+	if database == nil || spiderAPI == "" || siteDetail == "" {
+		return nil, false
+	}
+	apiBase := strings.TrimSpace(smart.ResolveCatApiBaseForUser(database, &smart.User{ID: strconv.FormatInt(userID, 10)}))
+	if apiBase == "" {
+		return nil, false
+	}
+	raw, err := cache.RequestSpiderDetailDirect(apiBase, strings.TrimSpace(spiderAPI), strings.TrimSpace(siteDetail))
+	if err != nil || raw == nil {
+		return nil, false
+	}
+	playFrom, playURL := catpawrunner.ExtractDetailPlayFromURL(raw)
+	pans := catpawrunner.ParsePlaySources(playFrom, playURL)
+	if pans == nil {
+		pans = []catpawrunner.Pan{}
+	}
+	if smart.IsPanMockEnabled(raw) {
+		for i := range pans {
+			pans[i].PanMockEnabled = true
+		}
+	}
+	return pans, len(pans) > 0
+}
+
 func ConsumePlaybackOffersAndBuildTarget(database *db.DB, userID int64, target PlaybackStreamTarget, cacheKey string, r *http.Request) (*PlaybackStreamTarget, bool, error) {
 	if database == nil || userID <= 0 {
 		return nil, false, nil
@@ -672,6 +769,7 @@ func ConsumePlaybackOffersAndBuildTarget(database *db.DB, userID int64, target P
 				MarkPlaybackDone(strings.TrimSpace(target.PlaySessionID), strings.TrimSpace(target.MediaSourceID), strings.TrimSpace(cacheKey))
 				return built, true, nil
 			}
+			MarkPlaybackOfferFailed(strings.TrimSpace(target.PlaySessionID), strings.TrimSpace(target.MediaSourceID), strings.TrimSpace(cacheKey), offer)
 		}
 	})
 	if !ok || resolved == nil {
@@ -713,28 +811,13 @@ func listHistoryPlayFlagEpisodes(database *db.DB, provider string, playFlag stri
 	if database == nil || flag == "" {
 		return nil, false
 	}
-	var (
-		vod string
-		err error
-	)
-	switch strings.TrimSpace(provider) {
-	case "baidu":
-		vod, _, _, err = netdisk.BaiduListWithCacheHit(database, flag, "")
-	case "quark":
-		vod, _, _, err = netdisk.QuarkListWithCacheHit(database, flag, "")
-	case "uc":
-		vod, _, _, err = netdisk.UCListWithCacheHit(database, flag, "")
-	case "189":
-		vod, _, _, _, err = netdisk.Tianyi189ListWithCacheHit(database, flag, "")
-	case "139":
-		vod, _, _, err = netdisk.Yun139ListWithCacheHit(database, flag, "")
-	default:
+	if strings.TrimSpace(provider) == "" {
 		return nil, false
 	}
-	if err != nil || strings.TrimSpace(vod) == "" {
+	eps, _, _, status, _, err := smart.ResolveSharedPanFlagEpisodes(database, flag, "")
+	if err != nil || status != "ok" || len(eps) == 0 {
 		return nil, false
 	}
-	eps := smart.ParseVodPlayURLToEpisodes(vod)
 	for i := range eps {
 		eps[i].Flag = flag
 	}
@@ -743,41 +826,6 @@ func listHistoryPlayFlagEpisodes(database *db.DB, provider string, playFlag stri
 
 func historyListProvider(playFlag string) string {
 	return strings.TrimSpace(smart.PlayFlagProviderID(strings.TrimSpace(playFlag)))
-}
-
-func fetchResolvedSiteDetailPansWithSpiderAPI(database *db.DB, userID int64, siteKey string, siteName string, spiderAPI string, siteDetail string, tmdbID int, req smart.PlaybackRequest) ([]resolvedSitePan, bool) {
-	if database == nil || spiderAPI == "" || siteDetail == "" {
-		return nil, false
-	}
-	apiBase := strings.TrimSpace(smart.ResolveCatApiBaseForUser(database, &smart.User{ID: strconv.FormatInt(userID, 10)}))
-	if apiBase == "" {
-		return nil, false
-	}
-	raw, err := cache.RequestSpiderDetailDirect(apiBase, strings.TrimSpace(spiderAPI), strings.TrimSpace(siteDetail))
-	if err != nil || raw == nil {
-		return nil, false
-	}
-	playFrom, playURL := catpawrunner.ExtractDetailPlayFromURL(raw)
-	pans := catpawrunner.ParsePlaySources(playFrom, playURL)
-	if pans == nil {
-		pans = []catpawrunner.Pan{}
-	}
-	if smart.IsPanMockEnabled(raw) {
-		tmdbSeasons := loadPlaybackTMDBSeasons(database, tmdbID)
-		rawEpisodeRules, _ := database.ListMagicEpisodeRules()
-		rawCleanRules, _ := database.ListMagicEpisodeCleanRegexRules()
-		want := 0
-		if req.Kind == "tv" && req.Season > 0 && req.Episode > 0 {
-			want = smart.TMDBGlobalEpisodeNoOf(tmdbSeasons, req.Season, req.Episode)
-		}
-		hasMulti := smart.PositiveSeasonCount(tmdbSeasons) > 1
-		resolved, _ := smart.ResolvePanMockDetailPans(database, siteKey, siteName, want, tmdbSeasons, hasMulti, rawCleanRules, rawEpisodeRules, pans)
-		if resolved != nil {
-			pans = resolved
-		}
-	}
-	out := buildResolvedSitePans(database, pans)
-	return out, len(out) > 0
 }
 
 func reorderHistoryPans(pans []resolvedSitePan, playFlag string) []resolvedSitePan {
@@ -957,7 +1005,7 @@ func buildTMDBPlaybackRequest(database *db.DB, userID int64, ref *itemRef) (*sma
 		candidate := view.Candidates[0]
 		return buildTMDBEpisodePlaybackRequest(database, userID, ref.NumericID, candidate.Season, candidate.Episode.EpisodeNumber, ref.RawID)
 	case ref.MediaType == "tv" && ref.SubKind == "season":
-		view, err := loadTVSeasonEpisodesView(database, ref.NumericID, ref.Pan)
+		view, err := loadTVSeasonEpisodesView(database, ref.NumericID, ref.Pan, false)
 		if err != nil || view == nil || view.Season == nil || len(view.Season.Episodes) == 0 {
 			return nil, nil, false
 		}

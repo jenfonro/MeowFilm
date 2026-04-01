@@ -35,19 +35,11 @@ func HandleSearch(w http.ResponseWriter, r *http.Request, database *db.DB) {
 		return
 	}
 
-	rawBody, err := fetchMultiSearchRaw(database, q)
+	rawBody, raw, err := fetchTMDBSearchResponse(database, q)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"error": "TMDB 请求失败",
 			"code":  "TMDB_REQUEST_FAILED",
-		})
-		return
-	}
-	var raw tmdbMultiSearchResponse
-	if err := json.Unmarshal(rawBody, &raw); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{
-			"error": "TMDB 解析失败",
-			"code":  "TMDB_DECODE_FAILED",
 		})
 		return
 	}
@@ -61,6 +53,22 @@ func HandleSearch(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(rawBody)
+}
+
+func fetchTMDBSearchResponse(database *db.DB, query string) ([]byte, tmdbMultiSearchResponse, error) {
+	return fetchTMDBSearchResponseOnce(database, query)
+}
+
+func fetchTMDBSearchResponseOnce(database *db.DB, query string) ([]byte, tmdbMultiSearchResponse, error) {
+	rawBody, err := fetchMultiSearchRaw(database, query)
+	if err != nil {
+		return nil, tmdbMultiSearchResponse{}, err
+	}
+	var raw tmdbMultiSearchResponse
+	if err := json.Unmarshal(rawBody, &raw); err != nil {
+		return nil, tmdbMultiSearchResponse{}, err
+	}
+	return rawBody, raw, nil
 }
 
 func boolToStr(v bool) string {

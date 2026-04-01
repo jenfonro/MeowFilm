@@ -83,8 +83,8 @@ func migrate_1_1_0_to_1_1_1(tx *sql.Tx) error {
 		}
 	}
 
-	var priority, rulesRaw sql.NullString
-	err = tx.QueryRow(`SELECT source_extract_priority, source_priority_rules_json FROM app_smart WHERE id=1 LIMIT 1`).Scan(&priority, &rulesRaw)
+	var rulesRaw sql.NullString
+	err = tx.QueryRow(`SELECT source_priority_rules_json FROM app_smart WHERE id=1 LIMIT 1`).Scan(&rulesRaw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -94,7 +94,7 @@ func migrate_1_1_0_to_1_1_1(tx *sql.Tx) error {
 	if len(parseSmartSourceRuleRowsJSON(rulesRaw.String)) > 0 {
 		return nil
 	}
-	rules := buildSmartSourceRuleRowsFromLegacyMode(priority.String)
+	rules := buildDefaultSmartSourceRuleRows()
 	_, err = tx.Exec(`UPDATE app_smart SET source_priority_rules_json=? WHERE id=1`, marshalSmartSourceRuleRowsJSON(rules))
 	return err
 }

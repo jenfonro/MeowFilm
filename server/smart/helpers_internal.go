@@ -353,6 +353,34 @@ func smartLabelTokenIdx(label string, panTokenOrderLower []string) int {
 	return -1
 }
 
+func smartLabelRuleIdx(label string, panTokenOrderLower []string, entries []smartPanMatchEntry) int {
+	s := smartPanMatchLabelText(label)
+	if s == "" {
+		return -1
+	}
+	matchedPan := ""
+	for i := 0; i < len(entries); i++ {
+		token := strings.TrimSpace(entries[i].TokenLower)
+		pan := strings.TrimSpace(entries[i].PanLower)
+		if token == "" || pan == "" {
+			continue
+		}
+		if strings.Contains(s, token) {
+			matchedPan = pan
+			break
+		}
+	}
+	if matchedPan == "" {
+		return -1
+	}
+	for i := 0; i < len(panTokenOrderLower); i++ {
+		if strings.TrimSpace(panTokenOrderLower[i]) == matchedPan {
+			return i
+		}
+	}
+	return -1
+}
+
 func smartFirstRawNameFromURL(u string) string {
 	rawNames := smartExtractRawNamesFromEpisodeURL(u)
 	if len(rawNames) == 0 {

@@ -1,6 +1,7 @@
 package smart
 
 import (
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -16,9 +17,32 @@ type smartPanMock189AccessEntry struct {
 	ExpireAt   time.Time
 }
 
+type smartSharedPanListState string
+
+const (
+	smartSharedPanListResolving smartSharedPanListState = "resolving"
+	smartSharedPanListResolved  smartSharedPanListState = "resolved"
+)
+
+type smartSharedPanListResult struct {
+	State       smartSharedPanListState
+	Status      string
+	Episodes    []catpawrunner.Episode
+	AccessDelta map[string]string
+	ErrText     string
+	FromCache   bool
+	ResolvedAt  time.Time
+	WaitCh      chan struct{}
+}
+
 var smartPanMock189Access struct {
 	mu sync.Mutex
 	m  map[string]smartPanMock189AccessEntry // key: shareID
+}
+
+var smartSharedPanList struct {
+	mu sync.Mutex
+	m  map[string]smartSharedPanListResult // key: panFlag
 }
 
 const smartPanMock189AccessTTL = 30 * time.Minute
@@ -86,16 +110,21 @@ func extractTianyiMockMeta(panFlag string, episodeURL string) (shareCode string,
 }
 
 func smartResolveSinglePanMockPan(database *db.DB, pan catpawrunner.Pan) (catpawrunner.Pan, map[string]string, bool, string, error) {
+	out, accessByShareID, fromCache, status, _, err := smartResolveSinglePanMockPanShared(database, pan)
+	return out, accessByShareID, fromCache, status, err
+}
+
+func smartResolveSinglePanMockPanShared(database *db.DB, pan catpawrunner.Pan) (catpawrunner.Pan, map[string]string, bool, string, bool, error) {
 	out := pan
 	accessByShareID := map[string]string{}
 	if database == nil || !out.PanMockEnabled {
-		return out, accessByShareID, false, "skip", nil
+		return out, accessByShareID, false, "skip", false, nil
 	}
 
 	label := strings.TrimSpace(out.Label)
 	pid := smartPanMockProviderFromLabel(label)
 	if pid == "" {
-		return out, accessByShareID, false, "skip", nil
+		return out, accessByShareID, false, "skip", false, nil
 	}
 
 	firstURL := ""
@@ -104,7 +133,8 @@ func smartResolveSinglePanMockPan(database *db.DB, pan catpawrunner.Pan) (catpaw
 		firstURL = strings.TrimSpace(out.Episodes[0].URL)
 		firstName = strings.TrimSpace(out.Episodes[0].Name)
 	}
-	if smartDebugLogEnabled() {
+	eps, accessDelta, fromCache, status, emitAllowed, err := smartResolveSharedPanFlagEpisodes(database, label, firstURL)
+	if smartDebugLogEnabled() && emitAllowed {
 		smartDebugPrintf(
 			"[smart][pan_list_input] panFlag=%s provider=%s panMock=%t rawEpisodes=%d firstName=%s",
 			label,
@@ -114,27 +144,86 @@ func smartResolveSinglePanMockPan(database *db.DB, pan catpawrunner.Pan) (catpaw
 			firstName,
 		)
 	}
+	if err != nil {
+		return out, accessByShareID, fromCache, status, emitAllowed, err
+	}
+	if status != "ok" {
+		return out, accessByShareID, fromCache, status, emitAllowed, nil
+	}
+	for k := range eps {
+		eps[k].Flag = label
+	}
+	for sid, acc := range accessDelta {
+		accessByShareID[sid] = acc
+	}
+	out.Episodes = eps
+	return out, accessByShareID, fromCache, "ok", emitAllowed, nil
+}
 
+func smartResolveSharedPanFlagEpisodes(database *db.DB, panFlag string, episodeURL string) ([]catpawrunner.Episode, map[string]string, bool, string, bool, error) {
+	label := strings.TrimSpace(panFlag)
+	if database == nil || label == "" {
+		return nil, map[string]string{}, false, "skip", false, nil
+	}
+	waitCh, status, _, found := smartSharedPanListLookup(label)
+	if found {
+		if status == smartSharedPanListResolving {
+			if smartDebugLogEnabled() {
+				smartDebugPrintf("[smart][pan_list_skip] panFlag=%s provider=%s reason=shared_resolving", label, smartPanMockProviderFromLabel(label))
+			}
+			<-waitCh
+		} else if smartDebugLogEnabled() {
+			smartDebugPrintf("[smart][pan_list_skip] panFlag=%s provider=%s reason=shared_resolved", label, smartPanMockProviderFromLabel(label))
+		}
+		shared := smartSharedPanListGetResolved(label)
+		return cloneEpisodeList(shared.Episodes), cloneStringMap(shared.AccessDelta), shared.FromCache, strings.TrimSpace(shared.Status), false, smartSharedPanListErr(shared)
+	}
+
+	waitCh = make(chan struct{})
+	smartSharedPanListSetResolving(label, waitCh)
+
+	eps, accessDelta, fromCache, finalStatus, err := smartResolvePanFlagEpisodesRaw(database, label, episodeURL)
+	smartSharedPanListSetResolved(label, smartSharedPanListResult{
+		State:       smartSharedPanListResolved,
+		Status:      strings.TrimSpace(finalStatus),
+		Episodes:    cloneEpisodeList(eps),
+		AccessDelta: cloneStringMap(accessDelta),
+		ErrText:     smartSharedPanListErrText(err),
+		FromCache:   fromCache,
+		ResolvedAt:  time.Now(),
+		WaitCh:      waitCh,
+	})
+	close(waitCh)
+	return cloneEpisodeList(eps), cloneStringMap(accessDelta), fromCache, strings.TrimSpace(finalStatus), true, err
+}
+
+func smartResolvePanFlagEpisodesRaw(database *db.DB, panFlag string, episodeURL string) ([]catpawrunner.Episode, map[string]string, bool, string, error) {
+	label := strings.TrimSpace(panFlag)
+	accessByShareID := map[string]string{}
+	pid := smartPanMockProviderFromLabel(label)
+	if database == nil || pid == "" {
+		return nil, accessByShareID, false, "skip", nil
+	}
+	firstURL := strings.TrimSpace(episodeURL)
 	var (
 		vod       string
 		fromCache bool
 		err       error
 	)
-
 	switch pid {
 	case "189":
 		sc, ac := extractTianyiMockMeta(label, firstURL)
 		if sc == "" {
-			return out, accessByShareID, false, "skip", nil
+			return nil, accessByShareID, false, "skip", nil
 		}
 		flag := "天意-" + sc
 		var shareID string
 		vod, shareID, _, fromCache, err = netdisk.Tianyi189ListWithCacheHit(database, flag, ac)
 		if err != nil {
-			return out, accessByShareID, fromCache, "err", err
+			return nil, accessByShareID, fromCache, "err", err
 		}
 		if strings.TrimSpace(vod) == "" {
-			return out, accessByShareID, fromCache, "empty", nil
+			return nil, accessByShareID, fromCache, "empty", nil
 		}
 		if strings.TrimSpace(shareID) != "" && strings.TrimSpace(ac) != "" {
 			sid := strings.TrimSpace(shareID)
@@ -146,48 +235,133 @@ func smartResolveSinglePanMockPan(database *db.DB, pan catpawrunner.Pan) (catpaw
 		pass := extractMockPasscodeFromEpisodeURL(firstURL)
 		vod, _, fromCache, err = netdisk.QuarkListWithCacheHit(database, label, pass)
 		if err != nil {
-			return out, accessByShareID, fromCache, "err", err
+			return nil, accessByShareID, fromCache, "err", err
 		}
 		if strings.TrimSpace(vod) == "" {
-			return out, accessByShareID, fromCache, "empty", nil
+			return nil, accessByShareID, fromCache, "empty", nil
 		}
 	case "uc":
 		pass := extractMockPasscodeFromEpisodeURL(firstURL)
 		vod, _, fromCache, err = netdisk.UCListWithCacheHit(database, label, pass)
 		if err != nil {
-			return out, accessByShareID, fromCache, "err", err
+			return nil, accessByShareID, fromCache, "err", err
 		}
 		if strings.TrimSpace(vod) == "" {
-			return out, accessByShareID, fromCache, "empty", nil
+			return nil, accessByShareID, fromCache, "empty", nil
 		}
 	case "139":
 		pass := extractMockPasscodeFromEpisodeURL(firstURL)
 		vod, _, fromCache, err = netdisk.Yun139ListWithCacheHit(database, label, pass)
 		if err != nil {
-			return out, accessByShareID, fromCache, "err", err
+			return nil, accessByShareID, fromCache, "err", err
 		}
 		if strings.TrimSpace(vod) == "" {
-			return out, accessByShareID, fromCache, "empty", nil
+			return nil, accessByShareID, fromCache, "empty", nil
 		}
 	case "baidu":
 		pass := extractMockPasscodeFromEpisodeURL(firstURL)
 		vod, _, fromCache, err = netdisk.BaiduListWithCacheHit(database, label, pass)
 		if err != nil {
-			return out, accessByShareID, fromCache, "err", err
+			return nil, accessByShareID, fromCache, "err", err
 		}
 		if strings.TrimSpace(vod) == "" {
-			return out, accessByShareID, fromCache, "empty", nil
+			return nil, accessByShareID, fromCache, "empty", nil
 		}
 	default:
-		return out, accessByShareID, false, "skip", nil
+		return nil, accessByShareID, false, "skip", nil
 	}
-
 	eps := smartParseVodPlayURLToEpisodes(vod)
-	for k := range eps {
-		eps[k].Flag = label
+	return eps, accessByShareID, fromCache, "ok", nil
+}
+
+func smartSharedPanListLookup(panFlag string) (chan struct{}, smartSharedPanListState, smartSharedPanListResult, bool) {
+	label := strings.TrimSpace(panFlag)
+	if label == "" {
+		return nil, "", smartSharedPanListResult{}, false
 	}
-	out.Episodes = eps
-	return out, accessByShareID, fromCache, "ok", nil
+	smartSharedPanList.mu.Lock()
+	defer smartSharedPanList.mu.Unlock()
+	if smartSharedPanList.m == nil {
+		smartSharedPanList.m = map[string]smartSharedPanListResult{}
+	}
+	out, ok := smartSharedPanList.m[label]
+	if !ok {
+		return nil, "", smartSharedPanListResult{}, false
+	}
+	return out.WaitCh, out.State, out, true
+}
+
+func smartSharedPanListSetResolving(panFlag string, waitCh chan struct{}) {
+	label := strings.TrimSpace(panFlag)
+	if label == "" {
+		return
+	}
+	smartSharedPanList.mu.Lock()
+	defer smartSharedPanList.mu.Unlock()
+	if smartSharedPanList.m == nil {
+		smartSharedPanList.m = map[string]smartSharedPanListResult{}
+	}
+	smartSharedPanList.m[label] = smartSharedPanListResult{
+		State:  smartSharedPanListResolving,
+		WaitCh: waitCh,
+	}
+}
+
+func smartSharedPanListSetResolved(panFlag string, result smartSharedPanListResult) {
+	label := strings.TrimSpace(panFlag)
+	if label == "" {
+		return
+	}
+	smartSharedPanList.mu.Lock()
+	defer smartSharedPanList.mu.Unlock()
+	if smartSharedPanList.m == nil {
+		smartSharedPanList.m = map[string]smartSharedPanListResult{}
+	}
+	smartSharedPanList.m[label] = result
+}
+
+func smartSharedPanListGetResolved(panFlag string) smartSharedPanListResult {
+	label := strings.TrimSpace(panFlag)
+	smartSharedPanList.mu.Lock()
+	defer smartSharedPanList.mu.Unlock()
+	if smartSharedPanList.m == nil {
+		return smartSharedPanListResult{}
+	}
+	return smartSharedPanList.m[label]
+}
+
+func smartSharedPanListErrText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return strings.TrimSpace(err.Error())
+}
+
+func smartSharedPanListErr(result smartSharedPanListResult) error {
+	if strings.TrimSpace(result.ErrText) == "" {
+		return nil
+	}
+	return errors.New(strings.TrimSpace(result.ErrText))
+}
+
+func cloneEpisodeList(in []catpawrunner.Episode) []catpawrunner.Episode {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]catpawrunner.Episode, len(in))
+	copy(out, in)
+	return out
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[strings.TrimSpace(k)] = strings.TrimSpace(v)
+	}
+	return out
 }
 
 func smartResolvePanMockDetailPans(
@@ -283,7 +457,7 @@ func smartResolvePanMockDetailPans(
 				)
 			}
 
-			resolvedPan, accessDelta, hit, status, err := smartResolveSinglePanMockPan(database, out[i])
+			resolvedPan, accessDelta, hit, status, emitAllowed, err := smartResolveSinglePanMockPanShared(database, out[i])
 			eps := resolvedPan.Episodes
 			if status == "ok" {
 				mu.Lock()
@@ -293,7 +467,9 @@ func smartResolvePanMockDetailPans(
 				}
 				mu.Unlock()
 			}
-			logDone(status, eps, err, hit)
+			if emitAllowed {
+				logDone(status, eps, err, hit)
+			}
 		}()
 	}
 
@@ -316,7 +492,7 @@ func smartResolvePanMockDetailPansIncremental(
 	rawCleanRules []string,
 	rawEpisodeRules []string,
 	pans []catpawrunner.Pan,
-	onPanResolved func(panIndex int, episodes []catpawrunner.Episode, accessDelta map[string]string),
+	onPanResolved func(panIndex int, episodes []catpawrunner.Episode, accessDelta map[string]string, emitAllowed bool),
 ) ([]catpawrunner.Pan, map[string]string) {
 	out := make([]catpawrunner.Pan, 0, len(pans))
 	for _, p := range pans {
@@ -343,8 +519,8 @@ func smartResolvePanMockDetailPansIncremental(
 			defer wg.Done()
 			start := time.Now()
 
-			emit := func(status string, eps []catpawrunner.Episode, err error, accessDelta map[string]string, fromCache bool) {
-				if smartDebugLogEnabled() {
+			emit := func(status string, eps []catpawrunner.Episode, err error, accessDelta map[string]string, fromCache bool, emitAllowed bool) {
+				if smartDebugLogEnabled() && emitAllowed {
 					ms := time.Since(start).Milliseconds()
 					epCount := 0
 					matchShowName := ""
@@ -390,11 +566,11 @@ func smartResolvePanMockDetailPansIncremental(
 					smartDebugPrintf(pat, status, smartLogSiteName(siteKey, siteName), label, pid, ms, epCount, matchShowName, matchRawName, errMsg)
 				}
 				if onPanResolved != nil {
-					onPanResolved(i, eps, accessDelta)
+					onPanResolved(i, eps, accessDelta, emitAllowed)
 				}
 			}
 
-			resolvedPan, accessDelta, hit, status, err := smartResolveSinglePanMockPan(database, out[i])
+			resolvedPan, accessDelta, hit, status, emitAllowed, err := smartResolveSinglePanMockPanShared(database, out[i])
 			eps := resolvedPan.Episodes
 			if status == "ok" {
 				mu.Lock()
@@ -404,7 +580,7 @@ func smartResolvePanMockDetailPansIncremental(
 				}
 				mu.Unlock()
 			}
-			emit(status, eps, err, accessDelta, hit)
+			emit(status, eps, err, accessDelta, hit, emitAllowed)
 		}()
 	}
 

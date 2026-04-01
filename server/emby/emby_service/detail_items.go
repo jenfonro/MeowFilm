@@ -468,7 +468,7 @@ func buildEpisodeDetailPayload(database *db.DB, userID int64, serverID string, r
 	if strings.TrimSpace(ref.Variant) == "settings" {
 		items, ok, err = buildTMDBSettingsEpisodeSources(database, userID, serverID, seriesRef)
 	} else {
-		items, ok, err = buildTMDBSeasonEpisodeSources(database, userID, serverID, seriesRef, ref.Pan)
+		items, ok, err = buildTMDBSeasonEpisodeSources(database, userID, serverID, seriesRef, ref.Pan, false)
 	}
 	if err != nil || !ok {
 		return nil, ok, err

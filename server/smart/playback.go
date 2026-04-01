@@ -15,7 +15,6 @@ import (
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/cache"
 	"github.com/jenfonro/meowfilm/server/catpawrunner"
-	"github.com/jenfonro/meowfilm/server/config"
 	"github.com/jenfonro/meowfilm/server/magic"
 	metadata_tmdb "github.com/jenfonro/meowfilm/server/metadata/tmdb"
 	"github.com/jenfonro/meowfilm/server/metadata/tvmeta"
@@ -217,18 +216,9 @@ func smartLoadPanMatchEntries(database *db.DB) []smartPanMatchEntry {
 
 func smartLoadPlaybackSettings(database *db.DB) smartPlaybackSettings {
 	cfg, _ := database.ReadAppConfig()
-	mode := config.NormalizeSourceExtractPriority(cfg.SmartSourceExtractPriority)
-	if mode == "" {
-		mode = "无"
-	}
-	explicit := []string{}
-	orderKeys := []string{"网盘"}
-	if mode == "网盘" {
-		explicit = []string{"网盘"}
-		orderKeys = []string{"网盘"}
-	} else if mode == "关键字" {
-		explicit = []string{"关键字"}
-		orderKeys = []string{"关键字", "网盘"}
+	rows := db.NormalizeSmartSourceRuleRows(cfg.SmartSourceRuleRows)
+	if len(rows) == 0 {
+		rows = db.BuildDefaultSmartSourceRuleRows()
 	}
 
 	rawKeyword, _ := database.ListSmartSourcePriorityTokens()
@@ -244,53 +234,39 @@ func smartLoadPlaybackSettings(database *db.DB) smartPlaybackSettings {
 	}
 
 	rawPan, _ := database.ListSmartPanMatchTokens()
-	rawPanAliasMap, _ := database.ListSmartPanAliasMappings()
-	panAliasMap := map[string][]string{}
-	for _, row := range rawPanAliasMap {
-		panKey := strings.ToLower(strings.TrimSpace(row.Pan))
-		if panKey == "" {
-			continue
-		}
-		parts := strings.Split(strings.ReplaceAll(strings.TrimSpace(row.Aliases), "，", ","), ",")
-		aliases := make([]string, 0, len(parts))
-		seenAlias := map[string]bool{}
-		for _, p := range parts {
-			a := strings.ToLower(strings.TrimSpace(p))
-			if a == "" || seenAlias[a] {
-				continue
-			}
-			seenAlias[a] = true
-			aliases = append(aliases, a)
-		}
-		panAliasMap[panKey] = aliases
-	}
 	pan := make([]string, 0, len(rawPan))
 	seen2 := map[string]bool{}
 	for _, t := range rawPan {
 		s := strings.ToLower(strings.TrimSpace(t))
-		if s == "" {
+		if s == "" || seen2[s] {
 			continue
 		}
-		tokens := []string{s}
-		if aliases, ok := panAliasMap[s]; ok && len(aliases) > 0 {
-			tokens = append(tokens, aliases...)
+		seen2[s] = true
+		pan = append(pan, s)
+	}
+
+	orderedRules := make([]smartPlaybackRuleKey, 0, len(rows))
+	seenRule := map[smartPlaybackRuleKey]bool{}
+	for _, row := range rows {
+		key := smartPlaybackRuleKey(strings.ToLower(strings.TrimSpace(row.Key)))
+		switch key {
+		case smartPlaybackRuleQuality, smartPlaybackRulePan, smartPlaybackRuleKeyword:
+		default:
+			continue
 		}
-		for _, tk := range tokens {
-			k := strings.ToLower(strings.TrimSpace(tk))
-			if k == "" || seen2[k] {
-				continue
-			}
-			seen2[k] = true
-			pan = append(pan, k)
+		if seenRule[key] {
+			continue
 		}
+		seenRule[key] = true
+		orderedRules = append(orderedRules, key)
 	}
 
 	return smartPlaybackSettings{
-		Mode:               mode,
 		KeywordTokensLower: kw,
 		PanTokenOrderLower: pan,
-		OrderKeys:          orderKeys,
-		ExplicitKeys:       explicit,
+		PanMatchEntries:    smartLoadPanMatchEntries(database),
+		Rules:              []smartPlaybackRuleKey{smartPlaybackRuleQuality, smartPlaybackRulePan, smartPlaybackRuleKeyword},
+		OrderedRules:       orderedRules,
 	}
 }
 
@@ -845,7 +821,7 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 		srcRemarkLower := strings.ToLower(strings.TrimSpace(src.Remark))
 		for _, pan := range resolvedPans {
 			panFlag := strings.TrimSpace(pan.Label)
-			panTokenIdx := smartLabelTokenIdx(panFlag, settings.PanTokenOrderLower)
+			panTokenIdx := smartLabelRuleIdx(panFlag, settings.PanTokenOrderLower, settings.PanMatchEntries)
 			for _, ep := range pan.Episodes {
 				if strings.TrimSpace(ep.URL) == "" {
 					continue
@@ -900,6 +876,7 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 				rawName := smartStableRawNameFromEpisodeURL(ep.URL)
 
 				cand := smartCandidate{
+					Stage:            smartCandidateStageFull,
 					SiteKey:          src.SiteKey,
 					SiteName:         src.SiteName,
 					SpiderAPI:        src.SpiderAPI,
@@ -1029,7 +1006,7 @@ func smartBuildEpisodeMapsFromPans(
 	srcRemarkLower := strings.ToLower(strings.TrimSpace(src.Remark))
 	for _, pan := range pans {
 		panFlag := strings.TrimSpace(pan.Label)
-		panTokenIdx := smartLabelTokenIdx(panFlag, settings.PanTokenOrderLower)
+		panTokenIdx := smartLabelRuleIdx(panFlag, settings.PanTokenOrderLower, settings.PanMatchEntries)
 		for _, ep := range pan.Episodes {
 			if strings.TrimSpace(ep.URL) == "" {
 				continue
@@ -1070,6 +1047,7 @@ func smartBuildEpisodeMapsFromPans(
 			rawName := smartStableRawNameFromEpisodeURL(ep.URL)
 
 			cand := smartCandidate{
+				Stage:           smartCandidateStageFull,
 				SiteKey:         src.SiteKey,
 				SiteName:        src.SiteName,
 				SpiderAPI:       src.SpiderAPI,
@@ -1118,7 +1096,7 @@ func smartBuildMovieCandidatesFromPans(
 	srcRemarkLower := strings.ToLower(strings.TrimSpace(src.Remark))
 	for _, pan := range pans {
 		panFlag := strings.TrimSpace(pan.Label)
-		panTokenIdx := smartLabelTokenIdx(panFlag, settings.PanTokenOrderLower)
+		panTokenIdx := smartLabelRuleIdx(panFlag, settings.PanTokenOrderLower, settings.PanMatchEntries)
 		for _, ep := range pan.Episodes {
 			if strings.TrimSpace(ep.URL) == "" {
 				continue
@@ -1145,6 +1123,7 @@ func smartBuildMovieCandidatesFromPans(
 			}
 			rawLower = strings.TrimSpace(rawLower + " " + srcRemarkLower)
 			out = append(out, smartCandidate{
+				Stage:          smartCandidateStageFull,
 				SiteKey:        src.SiteKey,
 				SiteName:       src.SiteName,
 				SpiderAPI:      src.SpiderAPI,
@@ -1826,9 +1805,7 @@ type smartCandidateOffer struct {
 type smartStreamingOfferScheduler struct {
 	mu            sync.Mutex
 	seen          map[uint64]struct{}
-	tier1         []smartCandidateOffer
-	tier2         []smartCandidateOffer
-	tier3         []smartCandidateOffer
+	items         []smartCandidateOffer
 	req           smartPlaybackRequest
 	hasMulti      bool
 	preferSeason  int
@@ -1862,35 +1839,8 @@ func smartPlaybackAttemptKey(c smartCandidate) uint64 {
 	return h.Sum64()
 }
 
-func smartPlaybackOfferTier(req smartPlaybackRequest, c smartCandidate, hasMulti bool, preferSeasonNo int, settings smartPlaybackSettings) int {
-	feat := smartComputeCandidateFeatures(c)
-	panRuleEnabled := len(settings.PanTokenOrderLower) > 0
-	if feat.QualityRank == 3 {
-		if !panRuleEnabled || c.PanTokenIdx >= 0 {
-			return 1
-		}
-		return 2
-	}
-	kind := strings.TrimSpace(req.Kind)
-	sub := strings.TrimSpace(req.SubKind)
-	if kind == "movie" || sub == "movie" {
-		return 3
-	}
-	if kind == "tv" && sub == "episode" && hasMulti && preferSeasonNo > 0 {
-		if c.MatchSeason == preferSeasonNo || c.SearchSeasonHint == preferSeasonNo {
-			return 3
-		}
-		return 0
-	}
-	return 3
-}
-
 func (s *smartStreamingOfferScheduler) Push(off smartCandidateOffer) {
 	if s == nil {
-		return
-	}
-	tier := smartPlaybackOfferTier(s.req, off.Cand, s.hasMulti, s.preferSeason, s.matchSettings)
-	if tier == 0 {
 		return
 	}
 	key := smartPlaybackAttemptKey(off.Cand)
@@ -1900,21 +1850,8 @@ func (s *smartStreamingOfferScheduler) Push(off smartCandidateOffer) {
 		return
 	}
 	s.seen[key] = struct{}{}
-	switch tier {
-	case 1:
-		s.tier1 = append(s.tier1, off)
-	case 2:
-		s.tier2 = append(s.tier2, off)
-	default:
-		s.tier3 = append(s.tier3, off)
-	}
-	ready := s.drainLocked()
+	s.items = append(s.items, off)
 	s.mu.Unlock()
-	for _, item := range ready {
-		if s.emit != nil {
-			s.emit(item.offer, item.tier)
-		}
-	}
 }
 
 func (s *smartStreamingOfferScheduler) drainLocked() []struct {
@@ -1924,29 +1861,32 @@ func (s *smartStreamingOfferScheduler) drainLocked() []struct {
 	out := make([]struct {
 		offer smartCandidateOffer
 		tier  int
-	}, 0, len(s.tier1)+len(s.tier2)+len(s.tier3))
-	for len(s.tier1) > 0 {
+	}, 0, len(s.items))
+	sort.SliceStable(s.items, func(i, j int) bool {
+		return smartCompareSmartMatch(s.items[i].Cand, s.items[j].Cand, s.hasMulti, s.preferSeason, s.matchSettings) < 0
+	})
+	for len(s.items) > 0 {
 		out = append(out, struct {
 			offer smartCandidateOffer
 			tier  int
-		}{offer: s.tier1[0], tier: 1})
-		s.tier1 = s.tier1[1:]
-	}
-	for len(s.tier2) > 0 {
-		out = append(out, struct {
-			offer smartCandidateOffer
-			tier  int
-		}{offer: s.tier2[0], tier: 2})
-		s.tier2 = s.tier2[1:]
-	}
-	for len(s.tier3) > 0 {
-		out = append(out, struct {
-			offer smartCandidateOffer
-			tier  int
-		}{offer: s.tier3[0], tier: 3})
-		s.tier3 = s.tier3[1:]
+		}{offer: s.items[0], tier: 0})
+		s.items = s.items[1:]
 	}
 	return out
+}
+
+func (s *smartStreamingOfferScheduler) Flush() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	ready := s.drainLocked()
+	s.mu.Unlock()
+	for _, item := range ready {
+		if s.emit != nil {
+			s.emit(item.offer, item.tier)
+		}
+	}
 }
 
 type smartCandidateOfferPQ struct {
@@ -2091,12 +2031,22 @@ func smartCollectPlaybackOffersFromTMDBAligned(
 	}
 	scheduler := newSmartStreamingOfferScheduler(req, hasMulti, preferSeasonNo, settings, func(off smartCandidateOffer, tier int) {
 		if smartDebugLogEnabled() {
+			scoreFeat := smartComputeCandidateFeatures(off.Cand)
+			score := smartBuildCandidateScore(off.Cand, scoreFeat, settings)
+			ordered := make([]string, 0, len(settings.OrderedRules))
+			for _, key := range settings.OrderedRules {
+				ordered = append(ordered, string(key))
+			}
 			smartDebugPrintf(
-				"[smart][offer_enqueue] tier=%d site=(%s) panFlag=%s provider=%s matchShowName=%s matchRawName=%s",
-				tier,
+				"[smart][offer_enqueue] stage=%s site=(%s) panFlag=%s provider=%s quality=%d pan=%d keyword=%d order=%s matchShowName=%s matchRawName=%s",
+				strings.TrimSpace(string(off.Cand.Stage)),
 				smartLogSiteName(off.Cand.SiteKey, off.Cand.SiteName),
 				strings.TrimSpace(off.Cand.PanFlag),
 				smartPanMockProviderID(database, strings.TrimSpace(off.Cand.PanFlag)),
+				score.QualityScore,
+				score.PanScore,
+				score.KeywordScore,
+				strings.Join(ordered, ","),
 				strings.TrimSpace(off.Cand.Ep.Name),
 				strings.TrimSpace(smartFirstRawNameFromURL(off.Cand.Ep.URL)),
 			)
@@ -2207,19 +2157,32 @@ func smartCollectPlaybackOffersFromTMDBAligned(
 					resolvedPans = smartFilterPansByBlockedFlags(resolvedPans, blockedEntry.PanFlags)
 				}
 				var pansMu sync.Mutex
-				resolved, access := smartResolvePanMockDetailPansIncremental(database, src.SiteKey, src.SiteName, want, seasonsForMapping, hasMulti, rawCleanRules, rawEpisodeRules, resolvedPans, func(panIndex int, episodes []catpawrunner.Episode, accessDelta map[string]string) {
+				panEmitAllowed := make([]bool, len(resolvedPans))
+				resolved, access := smartResolvePanMockDetailPansIncremental(database, src.SiteKey, src.SiteName, want, seasonsForMapping, hasMulti, rawCleanRules, rawEpisodeRules, resolvedPans, func(panIndex int, episodes []catpawrunner.Episode, accessDelta map[string]string, emitAllowed bool) {
 					pansMu.Lock()
 					defer pansMu.Unlock()
 					if panIndex >= 0 && panIndex < len(resolvedPans) {
 						nextPan := resolvedPans[panIndex]
 						nextPan.Episodes = episodes
 						resolvedPans[panIndex] = nextPan
+						panEmitAllowed[panIndex] = emitAllowed
 					}
 					for sid, acc := range accessDelta {
 						accessByShareID[sid] = acc
 					}
 				})
 				resolvedPans = resolved
+				for idx := range resolvedPans {
+					if !resolvedPans[idx].PanMockEnabled {
+						continue
+					}
+					if smartPanMockProviderFromLabel(strings.TrimSpace(resolvedPans[idx].Label)) == "" {
+						continue
+					}
+					if idx >= 0 && idx < len(panEmitAllowed) && !panEmitAllowed[idx] {
+						resolvedPans[idx].Episodes = nil
+					}
+				}
 				if blockedEntry != nil && len(resolvedPans) > 0 {
 					resolvedPans = smartFilterPansByBlockedFlags(resolvedPans, blockedEntry.PanFlags)
 				}
@@ -2248,6 +2211,7 @@ func smartCollectPlaybackOffersFromTMDBAligned(
 		go siteWorker(t)
 	}
 	workersWG.Wait()
+	scheduler.Flush()
 	return nil
 }
 

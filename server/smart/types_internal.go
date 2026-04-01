@@ -13,15 +13,32 @@ type smartSeasonEpisode struct {
 	Episode int
 }
 
+type smartPlaybackRuleKey string
+
+const (
+	smartPlaybackRuleQuality smartPlaybackRuleKey = "quality"
+	smartPlaybackRulePan     smartPlaybackRuleKey = "pan"
+	smartPlaybackRuleKeyword smartPlaybackRuleKey = "keyword"
+)
+
+type smartCandidateStage string
+
+const (
+	smartCandidateStageHistoryList   smartCandidateStage = "history_list"
+	smartCandidateStageHistoryDetail smartCandidateStage = "history_detail"
+	smartCandidateStageFull          smartCandidateStage = "full"
+)
+
 type smartPlaybackSettings struct {
-	Mode               string   // "无" | "网盘" | "关键字"
 	KeywordTokensLower []string // smart_source_priority_tokens
-	PanTokenOrderLower []string // smart_pan_match_tokens
-	OrderKeys          []string // order preference keys
-	ExplicitKeys       []string // explicit big conditions
+	PanTokenOrderLower []string // smart_pan_match_tokens ordered by provider preference
+	PanMatchEntries    []smartPanMatchEntry
+	Rules              []smartPlaybackRuleKey
+	OrderedRules       []smartPlaybackRuleKey
 }
 
 type smartCandidate struct {
+	Stage            smartCandidateStage
 	SiteKey          string
 	SiteName         string
 	SpiderAPI        string
@@ -43,13 +60,21 @@ type smartCandidate struct {
 	DegradedMatched  bool
 }
 
+type smartCandidateScore struct {
+	Stage        smartCandidateStage
+	StageScore   int
+	QualityScore int
+	PanScore     int
+	KeywordScore int
+}
+
 type smartCandidateFeatures struct {
 	HayLower     string
 	Quality      string
 	QualityRank  int
 	Fps60        bool
 	HasHdr       bool
-	TierRank     int
+	HasDDP       bool
 	EnhanceMatch smartPriorityMatch
 }
 
