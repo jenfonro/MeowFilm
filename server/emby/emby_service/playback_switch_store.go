@@ -388,6 +388,8 @@ func resolvePlaybackSwitchActionName(itemID string) string {
 		return "source_error"
 	case 3:
 		return "reset_source"
+	case 4:
+		return "pre_order"
 	default:
 		return ""
 	}
@@ -472,6 +474,61 @@ func triggerPlaybackSwitchAction(database *db.DB, userID int64, payload SessionP
 		}
 		applied = embyPlaybackSwitchSessions.ClearSkipItems(userID, tmdbType, tmdbID, playbackSwitchSessionTTL)
 		return true, action, applied, string(record.State)
+	case "pre_order":
+		tmdbType, tmdbID, ok := "", 0, false
+		if ref := parseItemRefAny(strings.TrimSpace(itemID)); ref != nil {
+			tmdbType, tmdbID, ok = resolvePlaybackSwitchTMDBScope(ref)
+		}
+		if !ok || tmdbType != "tv" || tmdbID <= 0 {
+			return true, action, false, "no_scope"
+		}
+		hist, _ := database.GetPlayHistoryLatestByTMDB(userID, tmdbType, tmdbID)
+		nextEnable := true
+		contentKey := ""
+		title := ""
+		poster := ""
+		remark := ""
+		if hist != nil {
+			nextEnable = !hist.PreOrder
+			contentKey = strings.TrimSpace(hist.ContentKey)
+			title = firstNonEmptyString(strings.TrimSpace(hist.Title), contentKey)
+			poster = strings.TrimSpace(hist.Poster)
+			remark = strings.TrimSpace(hist.Remark)
+		}
+		if detail, err := metadata_tmdb.GetDetailForBackend(database, tmdbType, tmdbID); err == nil && detail != nil {
+			if contentKey == "" {
+				contentKey = strings.TrimSpace(detail.Title)
+			}
+			if title == "" {
+				title = firstNonEmptyString(strings.TrimSpace(detail.Title), contentKey)
+			}
+			if poster == "" {
+				poster = strings.TrimSpace(detail.PosterPath)
+			}
+		}
+		contentKey = strings.TrimSpace(contentKey)
+		if contentKey == "" {
+			contentKey = itemID
+		}
+		if title == "" {
+			title = contentKey
+		}
+		err := database.UpsertTMDBPlayHistoryMeta(db.TMDBPlayHistoryUpsert{
+			UserID:           userID,
+			TMDBID:           tmdbID,
+			TMDBType:         tmdbType,
+			ContentKey:       contentKey,
+			Title:            title,
+			Poster:           poster,
+			Remark:           remark,
+			PreOrder:         &nextEnable,
+			UpdatedAt:        time.Now().Unix(),
+		})
+		if err != nil {
+			log.Printf("[emby][switch_action_error] item=%s action=%s err=%v", itemID, action, err)
+			return true, action, false, "db_error"
+		}
+		return true, action, true, string(record.State)
 	default:
 		return true, action, false, string(record.State)
 	}
@@ -565,6 +622,8 @@ func resolveTMDBSettingsStaticBaseName(itemID string) string {
 		return "source_error"
 	case 3:
 		return "reset_source"
+	case 4:
+		return "pre_order"
 	default:
 		return ""
 	}

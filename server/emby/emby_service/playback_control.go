@@ -17,34 +17,43 @@ const (
 )
 
 type playbackQueuedOffer struct {
-	Offer smart.PlaybackOffer
-	Stage playbackOfferStage
-	Tier  int
+	Offer     smart.PlaybackOffer
+	Stage     playbackOfferStage
+	ArrivedAt time.Time
 }
 
 type playbackControlEntry struct {
-	UserID              int64
-	DeviceID            string
-	ItemID              string
-	MediaSourceID       string
-	PlaySessionID       string
-	CacheKey            string
-	Started             bool
-	Stopped             bool
-	UpdatedAt           time.Time
-	mu                  sync.Mutex
-	cond                *sync.Cond
-	historyListQ        []playbackQueuedOffer
-	historyDetailQ      []playbackQueuedOffer
-	fullTier1Q          []playbackQueuedOffer
-	fullTier2Q          []playbackQueuedOffer
-	fullTier3Q          []playbackQueuedOffer
-	historyListClosed   bool
-	historyDetailClosed bool
-	fullClosed          bool
-	playbackDone        bool
-	stopCh              chan struct{}
-	stopOnce            sync.Once
+	UserID        int64
+	DeviceID      string
+	ItemID        string
+	MediaSourceID string
+	PlaySessionID string
+	CacheKey      string
+
+	Kind           string
+	SubKind        string
+	PreferSeasonNo int
+	HasMultiSeason bool
+	MatchSettings  smart.PlaybackSettings
+
+	Started      bool
+	Stopped      bool
+	UpdatedAt    time.Time
+	playbackDone bool
+
+	offers      []playbackQueuedOffer
+	offerSeen   map[string]struct{}
+	triedFailed map[uint64]struct{}
+
+	historyListDone   bool
+	historyDetailDone bool
+	historyDone       bool
+	fullDone          bool
+
+	mu       sync.Mutex
+	cond     *sync.Cond
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 var playbackControl = struct {
@@ -58,7 +67,7 @@ var playbackControl = struct {
 	byCache:   map[string]string{},
 }
 
-func ensurePlaybackControlEntry(userID int64, deviceID string, itemID string, mediaSourceID string, playSessionID string, cacheKey string) *playbackControlEntry {
+func ensurePlaybackControlEntry(userID int64, deviceID string, itemID string, mediaSourceID string, playSessionID string, cacheKey string, kind string, subKind string, preferSeasonNo int, hasMultiSeason bool, matchSettings smart.PlaybackSettings) *playbackControlEntry {
 	sessionID := strings.TrimSpace(playSessionID)
 	if sessionID == "" {
 		return nil
@@ -66,6 +75,7 @@ func ensurePlaybackControlEntry(userID int64, deviceID string, itemID string, me
 	playbackControl.mu.Lock()
 	defer playbackControl.mu.Unlock()
 	if existing, ok := playbackControl.bySession[sessionID]; ok && existing != nil {
+		playbackControlApplyContext(existing, kind, subKind, preferSeasonNo, hasMultiSeason, matchSettings)
 		return existing
 	}
 	entry := &playbackControlEntry{
@@ -77,7 +87,10 @@ func ensurePlaybackControlEntry(userID int64, deviceID string, itemID string, me
 		CacheKey:      strings.TrimSpace(cacheKey),
 		UpdatedAt:     time.Now(),
 		stopCh:        make(chan struct{}),
+		offerSeen:     map[string]struct{}{},
+		triedFailed:   map[uint64]struct{}{},
 	}
+	playbackControlApplyContext(entry, kind, subKind, preferSeasonNo, hasMultiSeason, matchSettings)
 	entry.cond = sync.NewCond(&entry.mu)
 	playbackControl.bySession[sessionID] = entry
 	if entry.MediaSourceID != "" {
@@ -89,8 +102,29 @@ func ensurePlaybackControlEntry(userID int64, deviceID string, itemID string, me
 	return entry
 }
 
+func playbackControlApplyContext(entry *playbackControlEntry, kind string, subKind string, preferSeasonNo int, hasMultiSeason bool, matchSettings smart.PlaybackSettings) {
+	if entry == nil {
+		return
+	}
+	if strings.TrimSpace(kind) != "" {
+		entry.Kind = strings.TrimSpace(kind)
+	}
+	if strings.TrimSpace(subKind) != "" {
+		entry.SubKind = strings.TrimSpace(subKind)
+	}
+	if preferSeasonNo > 0 {
+		entry.PreferSeasonNo = preferSeasonNo
+	}
+	if hasMultiSeason {
+		entry.HasMultiSeason = true
+	}
+	if len(matchSettings.OrderedRules) > 0 || len(matchSettings.KeywordTokensLower) > 0 || len(matchSettings.PanMatchEntries) > 0 {
+		entry.MatchSettings = matchSettings
+	}
+}
+
 func EnsurePlaybackControl(userID int64, deviceID string, itemID string, mediaSourceID string, playSessionID string, cacheKey string) <-chan struct{} {
-	entry := ensurePlaybackControlEntry(userID, deviceID, itemID, mediaSourceID, playSessionID, cacheKey)
+	entry := ensurePlaybackControlEntry(userID, deviceID, itemID, mediaSourceID, playSessionID, cacheKey, "", "", 0, false, smart.PlaybackSettings{})
 	if entry == nil {
 		return nil
 	}
@@ -200,64 +234,40 @@ func RebindPlaybackControlIdentity(playSessionID string, mediaSourceID string, c
 }
 
 func EnqueueHistoryListOffer(playSessionID string, mediaSourceID string, cacheKey string, offer smart.PlaybackOffer) bool {
-	entry := loadPlaybackControlEntry(playSessionID, mediaSourceID, cacheKey)
-	if entry == nil {
-		return false
-	}
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
-	if entry.playbackDone || entry.historyListClosed {
-		return false
-	}
-	entry.historyListQ = append(entry.historyListQ, playbackQueuedOffer{
-		Offer: clonePlaybackOffer(offer),
-		Stage: playbackOfferStageHistoryList,
-	})
-	entry.cond.Broadcast()
-	return true
+	return enqueuePlaybackOffer(playSessionID, mediaSourceID, cacheKey, playbackOfferStageHistoryList, offer)
 }
 
 func EnqueueHistoryDetailOffer(playSessionID string, mediaSourceID string, cacheKey string, offer smart.PlaybackOffer) bool {
-	entry := loadPlaybackControlEntry(playSessionID, mediaSourceID, cacheKey)
-	if entry == nil {
-		return false
-	}
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
-	if entry.playbackDone || entry.historyDetailClosed {
-		return false
-	}
-	entry.historyDetailQ = append(entry.historyDetailQ, playbackQueuedOffer{
-		Offer: clonePlaybackOffer(offer),
-		Stage: playbackOfferStageHistoryDetail,
-	})
-	entry.cond.Broadcast()
-	return true
+	return enqueuePlaybackOffer(playSessionID, mediaSourceID, cacheKey, playbackOfferStageHistoryDetail, offer)
 }
 
-func EnqueueFullOffer(playSessionID string, mediaSourceID string, cacheKey string, tier int, offer smart.PlaybackOffer) bool {
+func EnqueueFullOffer(playSessionID string, mediaSourceID string, cacheKey string, offer smart.PlaybackOffer) bool {
+	return enqueuePlaybackOffer(playSessionID, mediaSourceID, cacheKey, playbackOfferStageFull, offer)
+}
+
+func enqueuePlaybackOffer(playSessionID string, mediaSourceID string, cacheKey string, stage playbackOfferStage, offer smart.PlaybackOffer) bool {
 	entry := loadPlaybackControlEntry(playSessionID, mediaSourceID, cacheKey)
 	if entry == nil {
-		return false
-	}
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
-	if entry.playbackDone || entry.fullClosed {
 		return false
 	}
 	item := playbackQueuedOffer{
-		Offer: clonePlaybackOffer(offer),
-		Stage: playbackOfferStageFull,
-		Tier:  tier,
+		Offer:     clonePlaybackOffer(offer),
+		Stage:     stage,
+		ArrivedAt: time.Now(),
 	}
-	switch tier {
-	case 1:
-		entry.fullTier1Q = append(entry.fullTier1Q, item)
-	case 2:
-		entry.fullTier2Q = append(entry.fullTier2Q, item)
-	default:
-		entry.fullTier3Q = append(entry.fullTier3Q, item)
+	key := playbackOfferCandidateKey(item.Offer)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.playbackDone {
+		return false
 	}
+	if key != "" {
+		if _, ok := entry.offerSeen[key]; ok {
+			return false
+		}
+		entry.offerSeen[key] = struct{}{}
+	}
+	entry.offers = append(entry.offers, item)
 	entry.cond.Broadcast()
 	return true
 }
@@ -268,7 +278,8 @@ func CloseHistoryListOffers(playSessionID string, mediaSourceID string, cacheKey
 		return
 	}
 	entry.mu.Lock()
-	entry.historyListClosed = true
+	entry.historyListDone = true
+	entry.historyDone = entry.historyListDone && entry.historyDetailDone
 	entry.mu.Unlock()
 	entry.cond.Broadcast()
 }
@@ -279,7 +290,8 @@ func CloseHistoryDetailOffers(playSessionID string, mediaSourceID string, cacheK
 		return
 	}
 	entry.mu.Lock()
-	entry.historyDetailClosed = true
+	entry.historyDetailDone = true
+	entry.historyDone = entry.historyListDone && entry.historyDetailDone
 	entry.mu.Unlock()
 	entry.cond.Broadcast()
 }
@@ -290,7 +302,7 @@ func CloseFullOffers(playSessionID string, mediaSourceID string, cacheKey string
 		return
 	}
 	entry.mu.Lock()
-	entry.fullClosed = true
+	entry.fullDone = true
 	entry.mu.Unlock()
 	entry.cond.Broadcast()
 }
@@ -306,6 +318,18 @@ func MarkPlaybackDone(playSessionID string, mediaSourceID string, cacheKey strin
 	entry.cond.Broadcast()
 }
 
+func MarkPlaybackOfferFailed(playSessionID string, mediaSourceID string, cacheKey string, offer smart.PlaybackOffer) {
+	entry := loadPlaybackControlEntry(playSessionID, mediaSourceID, cacheKey)
+	if entry == nil {
+		return
+	}
+	key := smart.PlaybackAttemptKey(offer.Cand)
+	entry.mu.Lock()
+	entry.triedFailed[key] = struct{}{}
+	entry.mu.Unlock()
+	entry.cond.Broadcast()
+}
+
 func CurrentPlaybackOfferStage(playSessionID string, mediaSourceID string, cacheKey string) string {
 	entry := loadPlaybackControlEntry(playSessionID, mediaSourceID, cacheKey)
 	if entry == nil {
@@ -313,14 +337,11 @@ func CurrentPlaybackOfferStage(playSessionID string, mediaSourceID string, cache
 	}
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
-	if !entry.historyListClosed {
-		return string(playbackOfferStageHistoryList)
+	if !entry.historyDone {
+		return "history_only"
 	}
-	if !entry.historyDetailClosed {
-		return string(playbackOfferStageHistoryDetail)
-	}
-	if !entry.fullClosed || len(entry.fullTier1Q) > 0 || len(entry.fullTier2Q) > 0 || len(entry.fullTier3Q) > 0 {
-		return string(playbackOfferStageFull)
+	if !entry.fullDone || len(entry.offers) > 0 {
+		return "all_open"
 	}
 	return ""
 }
@@ -336,44 +357,65 @@ func NextPlaybackOffer(playSessionID string, mediaSourceID string, cacheKey stri
 		if entry.playbackDone {
 			return smart.PlaybackOffer{}, false
 		}
-		if len(entry.historyListQ) > 0 {
-			item := entry.historyListQ[0]
-			entry.historyListQ = entry.historyListQ[1:]
+		bestIdx := playbackPickBestOfferIndexLocked(entry)
+		if bestIdx >= 0 {
+			item := entry.offers[bestIdx]
+			entry.offers = append(entry.offers[:bestIdx], entry.offers[bestIdx+1:]...)
 			return clonePlaybackOffer(item.Offer), true
 		}
-		if !entry.historyListClosed {
-			entry.cond.Wait()
-			continue
-		}
-		if len(entry.historyDetailQ) > 0 {
-			item := entry.historyDetailQ[0]
-			entry.historyDetailQ = entry.historyDetailQ[1:]
-			return clonePlaybackOffer(item.Offer), true
-		}
-		if !entry.historyDetailClosed {
-			entry.cond.Wait()
-			continue
-		}
-		if len(entry.fullTier1Q) > 0 {
-			item := entry.fullTier1Q[0]
-			entry.fullTier1Q = entry.fullTier1Q[1:]
-			return clonePlaybackOffer(item.Offer), true
-		}
-		if len(entry.fullTier2Q) > 0 {
-			item := entry.fullTier2Q[0]
-			entry.fullTier2Q = entry.fullTier2Q[1:]
-			return clonePlaybackOffer(item.Offer), true
-		}
-		if len(entry.fullTier3Q) > 0 {
-			item := entry.fullTier3Q[0]
-			entry.fullTier3Q = entry.fullTier3Q[1:]
-			return clonePlaybackOffer(item.Offer), true
-		}
-		if entry.fullClosed {
+		if entry.historyDone && entry.fullDone {
 			return smart.PlaybackOffer{}, false
 		}
 		entry.cond.Wait()
 	}
+}
+
+func playbackPickBestOfferIndexLocked(entry *playbackControlEntry) int {
+	bestIdx := -1
+	for idx, item := range entry.offers {
+		if !playbackOfferVisible(entry, item) {
+			continue
+		}
+		if _, failed := entry.triedFailed[smart.PlaybackAttemptKey(item.Offer.Cand)]; failed {
+			continue
+		}
+		if bestIdx < 0 {
+			bestIdx = idx
+			continue
+		}
+		if playbackOfferBetter(entry, item, entry.offers[bestIdx]) {
+			bestIdx = idx
+		}
+	}
+	return bestIdx
+}
+
+func playbackOfferVisible(entry *playbackControlEntry, item playbackQueuedOffer) bool {
+	if entry == nil {
+		return false
+	}
+	if !entry.historyDone {
+		return item.Stage == playbackOfferStageHistoryList || item.Stage == playbackOfferStageHistoryDetail
+	}
+	return true
+}
+
+func playbackOfferBetter(entry *playbackControlEntry, a playbackQueuedOffer, b playbackQueuedOffer) bool {
+	if smart.CompareSmartMatch(a.Offer.Cand, b.Offer.Cand, entry.HasMultiSeason, entry.PreferSeasonNo, entry.MatchSettings) < 0 {
+		return true
+	}
+	if smart.CompareSmartMatch(a.Offer.Cand, b.Offer.Cand, entry.HasMultiSeason, entry.PreferSeasonNo, entry.MatchSettings) > 0 {
+		return false
+	}
+	if a.ArrivedAt.Equal(b.ArrivedAt) {
+		return false
+	}
+	return a.ArrivedAt.Before(b.ArrivedAt)
+}
+
+func playbackOfferCandidateKey(offer smart.PlaybackOffer) string {
+	rawName := firstNonEmptyString(strings.TrimSpace(offer.Cand.RawName), strings.TrimSpace(smart.FirstRawNameFromURL(offer.Cand.Ep.URL)))
+	return strings.TrimSpace(offer.Cand.SiteKey) + "|" + strings.TrimSpace(offer.Cand.SiteDetail) + "|" + strings.TrimSpace(offer.Cand.PanFlag) + "|" + rawName
 }
 
 func IsPlaybackResolveStopped(stopCh <-chan struct{}) bool {

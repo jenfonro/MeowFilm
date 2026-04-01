@@ -396,13 +396,43 @@ func smartExtractEpisodeCandidateTexts(ep catpawrunner.Episode) []string {
 }
 
 var smartEnhanceTokens = []string{"60fps", "60帧", "hdr", "ddp", "臻彩"}
+var smartDisplayMetaTokenRe = regexp.MustCompile(`^@([^@/\\\\]+)`)
+
+func smartParseDisplayMeta(displayName string) (quality string, fps60 bool) {
+	rest := strings.TrimSpace(displayName)
+	for strings.HasPrefix(rest, "@") {
+		m := smartDisplayMetaTokenRe.FindStringSubmatch(rest)
+		if len(m) < 2 {
+			break
+		}
+		token := strings.ToUpper(strings.TrimSpace(m[1]))
+		switch token {
+		case "8K":
+			quality = "8K"
+		case "4K", "2160P":
+			quality = "4K"
+		case "1080P":
+			quality = "1080P"
+		case "720P":
+			quality = "720P"
+		case "60FPS", "120FPS", "60帧", "120帧":
+			fps60 = true
+		}
+		rest = strings.TrimSpace(strings.TrimPrefix(rest, m[0]))
+	}
+	return quality, fps60
+}
 
 func smartGuessQuality(hayRaw string) string {
 	hay := strings.ToUpper(hayRaw)
+	has8k := regexp.MustCompile(`(4320P|4320|7680|8K)`).MatchString(hay)
 	has4k := regexp.MustCompile(`(2160P|2160|4K)`).MatchString(hay)
 	has1080 := regexp.MustCompile(`(1080P|1080)`).MatchString(hay)
 	has720 := regexp.MustCompile(`(720P|720)`).MatchString(hay)
 	hitCount := 0
+	if has8k {
+		hitCount++
+	}
 	if has4k {
 		hitCount++
 	}
@@ -414,6 +444,9 @@ func smartGuessQuality(hayRaw string) string {
 	}
 	if hitCount >= 2 {
 		return ""
+	}
+	if has8k {
+		return "8K"
 	}
 	if has4k {
 		return "4K"
@@ -434,6 +467,9 @@ func smartGuessFps60(hayRaw string) bool {
 
 func smartQualityRankOf(q string) int {
 	s := strings.ToUpper(strings.TrimSpace(q))
+	if s == "8K" {
+		return 4
+	}
 	if s == "4K" {
 		return 3
 	}
@@ -448,13 +484,17 @@ func smartQualityRankOf(q string) int {
 
 func smartBuildHayLower(c smartCandidate) string {
 	fileName, currentDir, parentDir := smartEpisodePathLayers(c.Ep)
+	displayName := strings.TrimSpace(c.Ep.Name)
 	_ = parentDir
-	parts := make([]string, 0, 4)
+	parts := make([]string, 0, 6)
 	if fileName != "" {
 		parts = append(parts, strings.ToLower(fileName))
 	}
 	if currentDir != "" {
 		parts = append(parts, strings.ToLower(currentDir))
+	}
+	if displayName != "" {
+		parts = append(parts, strings.ToLower(displayName))
 	}
 	if q, _ := smartGuessQualityByLayers(fileName, currentDir, parentDir); q != "" {
 		parts = append(parts, strings.ToLower(q))
@@ -469,30 +509,210 @@ func smartComputeCandidateFeatures(c smartCandidate) smartCandidateFeatures {
 	hayLower := smartBuildHayLower(c)
 	fileName, currentDir, parentDir := smartEpisodePathLayers(c.Ep)
 	quality, _ := smartGuessQualityByLayers(fileName, currentDir, parentDir)
+	displayQuality, displayFPS60 := smartParseDisplayMeta(c.Ep.Name)
+	if quality == "" && displayQuality != "" {
+		quality = displayQuality
+	}
 	qualityRank := smartQualityRankOf(quality)
 	enhance := smartComputePriorityMatch(hayLower, smartEnhanceTokens)
 	idx := enhance.Indices
 	hasHdr := containsInt(idx, 2)
-	fps60 := smartGuessFps60(hayLower) || containsInt(idx, 0) || containsInt(idx, 1)
-	// Speed-first strategy: only treat 4K/2160p as the primary goal.
-	// HDR/DDP/60FPS are bonus signals (manual switch / display), not stricter ranking requirements.
-	tierRank := 10
-	if qualityRank == 3 {
-		tierRank = 50
-	} else if qualityRank == 2 {
-		tierRank = 40
-	} else if qualityRank == 1 {
-		tierRank = 30
-	}
+	hasDDP := containsInt(idx, 3)
+	fps60 := displayFPS60 || smartGuessFps60(hayLower) || containsInt(idx, 0) || containsInt(idx, 1)
 	return smartCandidateFeatures{
 		HayLower:     hayLower,
 		Quality:      quality,
 		QualityRank:  qualityRank,
 		Fps60:        fps60,
 		HasHdr:       hasHdr,
-		TierRank:     tierRank,
+		HasDDP:       hasDDP,
 		EnhanceMatch: enhance,
 	}
+}
+
+func smartStageScore(stage smartCandidateStage) int {
+	switch stage {
+	case smartCandidateStageHistoryList:
+		return 300
+	case smartCandidateStageHistoryDetail:
+		return 200
+	default:
+		return 100
+	}
+}
+
+func smartQualityScore(c smartCandidate, feat smartCandidateFeatures) int {
+	text := strings.ToUpper(strings.TrimSpace(strings.Join([]string{
+		feat.HayLower,
+		c.Ep.Name,
+		c.RawLower,
+		c.RawName,
+		c.SrcRemarkLower,
+	}, " ")))
+	if text == "" {
+		return 0
+	}
+	base := 0
+	if regexp.MustCompile(`(?:4320P|4320|7680|8K)`).MatchString(text) {
+		base = 50
+	} else if regexp.MustCompile(`(?:2160P|2160|4K|UHD)`).MatchString(text) {
+		base = 40
+	} else if regexp.MustCompile(`(?:1080P|1080)`).MatchString(text) {
+		base = 20
+	} else if regexp.MustCompile(`(?:720P|720)`).MatchString(text) {
+		base = 10
+	} else if regexp.MustCompile(`(?i)(BDRIP|BLURAY|REMUX|WEB[- ]?DL|WEBRIP|HDR|DV|DOLBY|原盘|蓝光|高码|超清|高清|臻彩|杜比|DDP|DD\\+|E-?AC-?3|EAC3)`).MatchString(text) {
+		base = 30
+	}
+	if base == 0 {
+		return 0
+	}
+	bonus := 0
+	switch {
+	case feat.HasHdr && feat.HasDDP:
+		bonus = 6
+	case feat.HasHdr:
+		bonus = 4
+	case feat.HasDDP:
+		bonus = 2
+	}
+	score := base + bonus
+	switch base {
+	case 40:
+		if score >= 50 {
+			score = 49
+		}
+	case 30:
+		if score >= 40 {
+			score = 39
+		}
+	case 20:
+		if score >= 30 {
+			score = 29
+		}
+	case 10:
+		if score >= 20 {
+			score = 19
+		}
+	}
+	return score
+}
+
+func smartPanScore(c smartCandidate, settings smartPlaybackSettings) int {
+	if c.PanTokenIdx < 0 {
+		return 0
+	}
+	n := len(settings.PanTokenOrderLower)
+	if n <= 0 || c.PanTokenIdx >= n {
+		return 0
+	}
+	return (n - c.PanTokenIdx) * 10
+}
+
+func smartKeywordScore(c smartCandidate, settings smartPlaybackSettings) int {
+	if len(settings.KeywordTokensLower) == 0 || c.MatchKeyword.Count <= 0 || len(c.MatchKeyword.Indices) == 0 {
+		return 0
+	}
+	best := c.MatchKeyword.Indices[0]
+	if best < 0 || best >= len(settings.KeywordTokensLower) {
+		return 0
+	}
+	return (len(settings.KeywordTokensLower) - best) * 10
+}
+
+func smartBuildCandidateScore(c smartCandidate, feat smartCandidateFeatures, settings smartPlaybackSettings) smartCandidateScore {
+	return smartCandidateScore{
+		Stage:        c.Stage,
+		StageScore:   smartStageScore(c.Stage),
+		QualityScore: smartQualityScore(c, feat),
+		PanScore:     smartPanScore(c, settings),
+		KeywordScore: smartKeywordScore(c, settings),
+	}
+}
+
+func smartScoreByRuleKey(score smartCandidateScore, key smartPlaybackRuleKey) int {
+	switch key {
+	case smartPlaybackRuleQuality:
+		return score.QualityScore
+	case smartPlaybackRulePan:
+		return score.PanScore
+	case smartPlaybackRuleKeyword:
+		return score.KeywordScore
+	default:
+		return 0
+	}
+}
+
+func smartCompareSeasonRank(a smartCandidate, b smartCandidate, tmdbHasMultiSeason bool, preferSeasonNo int) int {
+	if !(tmdbHasMultiSeason && preferSeasonNo > 0) {
+		return 0
+	}
+	seasonRank := func(m smartCandidate) int {
+		matchSeason := m.MatchSeason
+		if matchSeason == preferSeasonNo {
+			return 4
+		}
+		hint := m.SearchSeasonHint
+		if hint == preferSeasonNo {
+			return 3
+		}
+		hasSeason := m.HasSeasonMarker || hint > 0
+		if hasSeason {
+			return 1
+		}
+		return 0
+	}
+	ar := seasonRank(a)
+	br := seasonRank(b)
+	if ar != br {
+		return br - ar
+	}
+	return 0
+}
+
+func smartCompareCandidateCore(a smartCandidate, b smartCandidate, tmdbHasMultiSeason bool, preferSeasonNo int, settings smartPlaybackSettings, ignorePan bool) int {
+	af := smartComputeCandidateFeatures(a)
+	bf := smartComputeCandidateFeatures(b)
+	as := smartBuildCandidateScore(a, af, settings)
+	bs := smartBuildCandidateScore(b, bf, settings)
+
+	if as.StageScore != bs.StageScore {
+		return bs.StageScore - as.StageScore
+	}
+	if q := smartCompareSeasonRank(a, b, tmdbHasMultiSeason, preferSeasonNo); q != 0 {
+		return q
+	}
+	for _, key := range settings.OrderedRules {
+		if ignorePan && key == smartPlaybackRulePan {
+			continue
+		}
+		av := smartScoreByRuleKey(as, key)
+		bv := smartScoreByRuleKey(bs, key)
+		if av != bv {
+			return bv - av
+		}
+	}
+	if a.StrictMatched != b.StrictMatched {
+		if a.StrictMatched {
+			return -1
+		}
+		return 1
+	}
+	if a.DegradedMatched != b.DegradedMatched {
+		if a.DegradedMatched {
+			return 1
+		}
+		return -1
+	}
+	ex := smartComparePriorityMatch(af.EnhanceMatch, bf.EnhanceMatch)
+	if ex != 0 {
+		return ex
+	}
+	q := smartComparePanTokenIdx(a.PanTokenIdx, b.PanTokenIdx)
+	if q != 0 {
+		return q
+	}
+	return 0
 }
 
 func smartComputeBigHitCount(c smartCandidate, feat smartCandidateFeatures, explicit []string) int {
@@ -521,70 +741,7 @@ func smartComputeBigHitCount(c smartCandidate, feat smartCandidateFeatures, expl
 }
 
 func smartCompareSmartMatchIgnorePanOrder(a smartCandidate, b smartCandidate, tmdbHasMultiSeason bool, preferSeasonNo int, settings smartPlaybackSettings) int {
-	af := smartComputeCandidateFeatures(a)
-	bf := smartComputeCandidateFeatures(b)
-	if af.TierRank != bf.TierRank {
-		return bf.TierRank - af.TierRank
-	}
-
-	if tmdbHasMultiSeason && preferSeasonNo > 0 {
-		seasonRank := func(m smartCandidate) int {
-			matchSeason := m.MatchSeason
-			if matchSeason == preferSeasonNo {
-				return 4
-			}
-			hint := m.SearchSeasonHint
-			if hint == preferSeasonNo {
-				return 3
-			}
-			hasSeason := m.HasSeasonMarker || hint > 0
-			if hasSeason {
-				return 1
-			}
-			return 0
-		}
-		ar := seasonRank(a)
-		br := seasonRank(b)
-		if ar != br {
-			return br - ar
-		}
-	}
-
-	ah := smartComputeBigHitCount(a, af, settings.ExplicitKeys)
-	bh := smartComputeBigHitCount(b, bf, settings.ExplicitKeys)
-	if ah != bh {
-		return bh - ah
-	}
-
-	ok := settings.OrderKeys
-	for _, key := range ok {
-		if key == "网盘" {
-			continue
-		}
-		q := 0
-		if key == "画质" {
-			q = bf.QualityRank - af.QualityRank
-		} else if key == "帧率" {
-			if bf.Fps60 != af.Fps60 {
-				if bf.Fps60 {
-					q = 1
-				} else {
-					q = -1
-				}
-			}
-		} else if key == "关键字" {
-			q = smartComparePriorityMatch(a.MatchKeyword, b.MatchKeyword)
-		}
-		if q != 0 {
-			return q
-		}
-	}
-
-	ex := smartComparePriorityMatch(af.EnhanceMatch, bf.EnhanceMatch)
-	if ex != 0 {
-		return ex
-	}
-	return 0
+	return smartCompareCandidateCore(a, b, tmdbHasMultiSeason, preferSeasonNo, settings, true)
 }
 
 func smartComparePanTokenIdx(a int, b int) int {
@@ -603,77 +760,7 @@ func smartComparePanTokenIdx(a int, b int) int {
 }
 
 func smartCompareSmartMatch(a smartCandidate, b smartCandidate, tmdbHasMultiSeason bool, preferSeasonNo int, settings smartPlaybackSettings) int {
-	af := smartComputeCandidateFeatures(a)
-	bf := smartComputeCandidateFeatures(b)
-	if af.TierRank != bf.TierRank {
-		return bf.TierRank - af.TierRank
-	}
-
-	if tmdbHasMultiSeason && preferSeasonNo > 0 {
-		seasonRank := func(m smartCandidate) int {
-			matchSeason := m.MatchSeason
-			if matchSeason == preferSeasonNo {
-				return 4
-			}
-			hint := m.SearchSeasonHint
-			if hint == preferSeasonNo {
-				return 3
-			}
-			hasSeason := m.HasSeasonMarker || hint > 0
-			if hasSeason {
-				return 1
-			}
-			return 0
-		}
-		ar := seasonRank(a)
-		br := seasonRank(b)
-		if ar != br {
-			return br - ar
-		}
-	}
-
-	ah := smartComputeBigHitCount(a, af, settings.ExplicitKeys)
-	bh := smartComputeBigHitCount(b, bf, settings.ExplicitKeys)
-	if ah != bh {
-		return bh - ah
-	}
-
-	ok := settings.OrderKeys
-	if len(ok) == 0 {
-		ok = []string{"网盘"}
-	}
-	for _, key := range ok {
-		if key == "网盘" {
-			q := smartComparePanTokenIdx(a.PanTokenIdx, b.PanTokenIdx)
-			if q != 0 {
-				return q
-			}
-			continue
-		}
-		q := 0
-		if key == "画质" {
-			q = bf.QualityRank - af.QualityRank
-		} else if key == "帧率" {
-			if bf.Fps60 != af.Fps60 {
-				if bf.Fps60 {
-					q = 1
-				} else {
-					q = -1
-				}
-			}
-		} else if key == "关键字" {
-			q = smartComparePriorityMatch(a.MatchKeyword, b.MatchKeyword)
-		}
-		if q != 0 {
-			return q
-		}
-	}
-
-	ex := smartComparePriorityMatch(af.EnhanceMatch, bf.EnhanceMatch)
-	if ex != 0 {
-		return ex
-	}
-	return 0
+	return smartCompareCandidateCore(a, b, tmdbHasMultiSeason, preferSeasonNo, settings, false)
 }
 
 func smartExtractMaxEpisodeFromBadgeText(text string) int {

@@ -104,6 +104,7 @@ func tmdbSettingsEpisodes() []tmdbSettingsEpisodeDef {
 		{EpisodeNo: 1, Name: "换源", Overview: "手动切换当前剧集片源。"},
 		{EpisodeNo: 2, Name: "片源错误", Overview: "标记当前剧集片源存在问题。"},
 		{EpisodeNo: 3, Name: "重置换源", Overview: "清空当前剧集的临时换源列表。"},
+		{EpisodeNo: 4, Name: "开启点映", Overview: "开启当前剧集的未播集显示。"},
 	}
 }
 
@@ -322,7 +323,7 @@ func buildShowSeasonSources(database *db.DB, userID int64, serverID string, seri
 	if ref == nil || ref.Source != "tmdb" || ref.MediaType != "tv" || ref.SubKind != "series" {
 		return []seasonListSource{}, false, nil
 	}
-	view, err := loadTVSeasonListView(database, ref.NumericID)
+	view, err := loadTVSeasonListView(database, ref.NumericID, false)
 	if err != nil || view == nil || view.Series == nil {
 		return []seasonListSource{}, false, err
 	}
@@ -436,8 +437,10 @@ func buildShowEpisodeSources(database *db.DB, userID int64, serverID string, ser
 	if seriesRef == nil || seriesRef.Source != "tmdb" || seriesRef.MediaType != "tv" || seriesRef.SubKind != "series" {
 		return []episodeListSource{}, false, nil
 	}
+	hist, _ := database.GetPlayHistoryLatestByTMDB(userID, "tv", seriesRef.NumericID)
+	includeUnaired := hist != nil && hist.PreOrder
 	if seasonRef == nil {
-		return buildTMDBAllEpisodeSources(database, userID, serverID, seriesRef)
+		return buildTMDBAllEpisodeSources(database, userID, serverID, seriesRef, includeUnaired)
 	}
 	if seasonRef.Source == "tmdb" && seasonRef.MediaType == "tv" && seasonRef.SubKind == "season" && seasonRef.NumericID == seriesRef.NumericID && seasonRef.Variant == "settings" {
 		return buildTMDBSettingsEpisodeSources(database, userID, serverID, seriesRef)
@@ -445,14 +448,14 @@ func buildShowEpisodeSources(database *db.DB, userID int64, serverID string, ser
 	if seasonRef.Source != "tmdb" || seasonRef.MediaType != "tv" || seasonRef.SubKind != "season" || seasonRef.NumericID != seriesRef.NumericID {
 		return []episodeListSource{}, false, nil
 	}
-	return buildTMDBSeasonEpisodeSources(database, userID, serverID, seriesRef, seasonRef.Pan)
+	return buildTMDBSeasonEpisodeSources(database, userID, serverID, seriesRef, seasonRef.Pan, includeUnaired)
 }
 
-func buildTMDBAllEpisodeSources(database *db.DB, userID int64, serverID string, seriesRef *itemRef) ([]episodeListSource, bool, error) {
+func buildTMDBAllEpisodeSources(database *db.DB, userID int64, serverID string, seriesRef *itemRef, includeUnaired bool) ([]episodeListSource, bool, error) {
 	if seriesRef == nil || seriesRef.NumericID <= 0 {
 		return []episodeListSource{}, false, nil
 	}
-	seriesView, err := loadTVSeasonListView(database, seriesRef.NumericID)
+	seriesView, err := loadTVSeasonListView(database, seriesRef.NumericID, includeUnaired)
 	if err != nil || seriesView == nil || seriesView.Series == nil {
 		return []episodeListSource{}, false, err
 	}
@@ -461,7 +464,7 @@ func buildTMDBAllEpisodeSources(database *db.DB, userID int64, serverID string, 
 		if season.SeasonNumber <= 0 {
 			continue
 		}
-		seasonItems, ok, err := buildTMDBSeasonEpisodeSources(database, userID, serverID, seriesRef, season.SeasonNumber)
+		seasonItems, ok, err := buildTMDBSeasonEpisodeSources(database, userID, serverID, seriesRef, season.SeasonNumber, includeUnaired)
 		if err != nil {
 			return []episodeListSource{}, false, err
 		}
@@ -473,11 +476,11 @@ func buildTMDBAllEpisodeSources(database *db.DB, userID int64, serverID string, 
 	return items, true, nil
 }
 
-func buildTMDBSeasonEpisodeSources(database *db.DB, userID int64, serverID string, seriesRef *itemRef, seasonNo int) ([]episodeListSource, bool, error) {
+func buildTMDBSeasonEpisodeSources(database *db.DB, userID int64, serverID string, seriesRef *itemRef, seasonNo int, includeUnaired bool) ([]episodeListSource, bool, error) {
 	if seriesRef == nil || seriesRef.NumericID <= 0 || seasonNo <= 0 {
 		return []episodeListSource{}, false, nil
 	}
-	view, err := loadTVSeasonEpisodesView(database, seriesRef.NumericID, seasonNo)
+	view, err := loadTVSeasonEpisodesView(database, seriesRef.NumericID, seasonNo, includeUnaired)
 	if err != nil || view == nil || view.Series == nil || view.Season == nil {
 		return []episodeListSource{}, false, err
 	}
@@ -642,8 +645,19 @@ func buildTMDBSettingsEpisodeSources(database *db.DB, userID int64, serverID str
 	parentBackdropTags := backdropTagsFromAsset(detail.Backdrop)
 	genres, genreItems := GenresAndItemsFromDetail(detail, "tv")
 	state := EpisodeItemState(false, true)
-	items := make([]episodeListSource, 0, len(tmdbSettingsEpisodes()))
-	for _, ep := range tmdbSettingsEpisodes() {
+	episodes := tmdbSettingsEpisodes()
+	if hist, _ := database.GetPlayHistoryLatestByTMDB(userID, "tv", seriesRef.NumericID); hist != nil && hist.PreOrder {
+		for i := range episodes {
+			if episodes[i].EpisodeNo != 4 {
+				continue
+			}
+			episodes[i].Name = "关闭点映"
+			episodes[i].Overview = "关闭当前剧集的未播集显示。"
+			break
+		}
+	}
+	items := make([]episodeListSource, 0, len(episodes))
+	for _, ep := range episodes {
 		itemID := buildTMDBSettingsEpisodeID(seriesRef.NumericID, ep.EpisodeNo)
 		fileName := strings.TrimSpace(ep.Name) + ".mp4"
 		path := VirtualSettingsEpisodePath(seriesName, seriesYear, fileName)
