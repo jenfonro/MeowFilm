@@ -803,8 +803,9 @@ func ucListUncached(database *db.DB, flag string, passcode string) (string, stri
 					dirPath = "/" + strings.Join(cur.pathSegs, "/")
 				}
 				dirPath = prefixRootDirDisplay(dirPath, rootPrefix)
+				finalDisplay := buildPanDisplayName(dirPath, it)
 				id := shareID + "*" + stoken + "*" + fid + "*" + fidToken + "***" + name
-				parts = append(parts, dirPath+"$"+id)
+				parts = append(parts, finalDisplay+"$"+id)
 				newCount++
 			}
 

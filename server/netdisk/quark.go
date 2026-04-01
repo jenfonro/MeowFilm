@@ -1064,11 +1064,13 @@ func quarkListUncached(database *db.DB, flag string, passcode string) (string, s
 				display = "/" + strings.Join(pathSegs, "/")
 			}
 			display = prefixRootDirDisplay(display, rootPrefix)
+			baseDisplay := sanitizeVodPlayName(display)
+			finalDisplay := buildPanDisplayName(baseDisplay, it)
 			id := shareID + "*" + stoken + "*" + fid + "*" + fidToken
 			if strings.TrimSpace(name) != "" {
 				id = id + "***" + strings.TrimSpace(name)
 			}
-			parts = append(parts, sanitizeVodPlayName(display)+"$"+id)
+			parts = append(parts, finalDisplay+"$"+id)
 			if len(parts) >= maxItems {
 				break
 			}
