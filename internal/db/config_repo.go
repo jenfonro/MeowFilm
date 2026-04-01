@@ -21,6 +21,7 @@ type AppConfig struct {
 	VideoSourceSearchCoverSite string
 	SearchDisplayMode          string
 	SmartSourceExtractPriority string
+	SmartSourceRuleRows        []SmartSourceRuleRow
 	SmartSiteCleanKeywords     string
 	GoProxyEnabled             bool
 	GoProxyAutoSelect          bool
@@ -35,6 +36,12 @@ type AppConfig struct {
 	TMDBRegion                 string
 	TMDBIncludeAdult           bool
 	CatpawrunnerActive         string
+}
+
+type SmartSourceRuleRow struct {
+	Key     string `json:"key"`
+	Enabled bool   `json:"enabled"`
+	Order   int    `json:"order"`
 }
 
 type SmartPanAliasMapping struct {
@@ -54,6 +61,7 @@ func (d *DB) ReadAppConfig() (AppConfig, error) {
 		vsAPIBase, vsCover                             sql.NullString
 		sDisplay                                       sql.NullString
 		smartPriority                                  sql.NullString
+		smartPriorityRules                             sql.NullString
 		smartSiteClean                                 sql.NullString
 		gEnabled, gAuto, eEnabled                      sql.NullInt64
 		eRelayToken                                    sql.NullString
@@ -68,12 +76,17 @@ func (d *DB) ReadAppConfig() (AppConfig, error) {
 	_ = d.db.QueryRow(`SELECT data_proxy, data_custom, img_proxy, img_custom, search_cookie FROM app_douban WHERE id=1 LIMIT 1`).Scan(&dDataProxy, &dDataCustom, &dImgProxy, &dImgCustom, &dSearchCookie)
 	_ = d.db.QueryRow(`SELECT api_base, search_cover_site FROM app_video_source WHERE id=1 LIMIT 1`).Scan(&vsAPIBase, &vsCover)
 	_ = d.db.QueryRow(`SELECT display_mode FROM app_search WHERE id=1 LIMIT 1`).Scan(&sDisplay)
-	_ = d.db.QueryRow(`SELECT source_extract_priority, site_clean_keywords FROM app_smart WHERE id=1 LIMIT 1`).Scan(&smartPriority, &smartSiteClean)
+	_ = d.db.QueryRow(`SELECT source_extract_priority, source_priority_rules_json, site_clean_keywords FROM app_smart WHERE id=1 LIMIT 1`).Scan(&smartPriority, &smartPriorityRules, &smartSiteClean)
 	_ = d.db.QueryRow(`SELECT enabled, auto_select FROM app_goproxy WHERE id=1 LIMIT 1`).Scan(&gEnabled, &gAuto)
 	_ = d.db.QueryRow(`SELECT enabled, relay_token FROM app_relay WHERE id=1 LIMIT 1`).Scan(&eEnabled, &eRelayToken)
 	_ = d.db.QueryRow(`SELECT enabled, proxy_url FROM app_netdisk_proxy WHERE id=1 LIMIT 1`).Scan(&ndEnabled, &ndProxy)
 	_ = d.db.QueryRow(`SELECT api_token, api_base, img_base, language, region, include_adult FROM app_tmdb WHERE id=1 LIMIT 1`).Scan(&tToken, &tAPIBase, &tImgBase, &tLang, &tRegion, &tAdult)
 	_ = d.db.QueryRow(`SELECT active FROM app_catpawrunner WHERE id=1 LIMIT 1`).Scan(&cActive)
+
+	sourceRuleRows := parseSmartSourceRuleRowsJSON(smartPriorityRules.String)
+	if len(sourceRuleRows) == 0 {
+		sourceRuleRows = buildSmartSourceRuleRowsFromLegacyMode(smartPriority.String)
+	}
 
 	cfg := AppConfig{
 		SiteName:                   defaultIfEmpty(siteName.String, "MeowFilm"),
@@ -86,6 +99,7 @@ func (d *DB) ReadAppConfig() (AppConfig, error) {
 		VideoSourceSearchCoverSite: vsCover.String,
 		SearchDisplayMode:          defaultIfEmpty(sDisplay.String, "sites"),
 		SmartSourceExtractPriority: defaultIfEmpty(smartPriority.String, "无"),
+		SmartSourceRuleRows:        sourceRuleRows,
 		SmartSiteCleanKeywords:     strings.TrimSpace(smartSiteClean.String),
 		GoProxyEnabled:             gEnabled.Int64 != 0,
 		GoProxyAutoSelect:          gAuto.Int64 != 0,
@@ -113,6 +127,10 @@ func (d *DB) UpdateAppConfig(update func(*AppConfig)) error {
 		return err
 	}
 	update(&cfg)
+	cfg.SmartSourceRuleRows = normalizeSmartSourceRuleRows(cfg.SmartSourceRuleRows)
+	if len(cfg.SmartSourceRuleRows) == 0 {
+		cfg.SmartSourceRuleRows = buildSmartSourceRuleRowsFromLegacyMode(cfg.SmartSourceExtractPriority)
+	}
 
 	now := time.Now().Unix()
 	tx, err := d.db.Begin()
@@ -153,13 +171,14 @@ func (d *DB) UpdateAppConfig(update func(*AppConfig)) error {
 	`, strings.TrimSpace(cfg.SearchDisplayMode), now)
 
 	_, _ = tx.Exec(`
-		INSERT INTO app_smart(id, source_extract_priority, site_clean_keywords, updated_at)
-		VALUES(1, ?, ?, ?)
+		INSERT INTO app_smart(id, source_extract_priority, source_priority_rules_json, site_clean_keywords, updated_at)
+		VALUES(1, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		  source_extract_priority=excluded.source_extract_priority,
+		  source_priority_rules_json=excluded.source_priority_rules_json,
 		  site_clean_keywords=excluded.site_clean_keywords,
 		  updated_at=excluded.updated_at
-	`, strings.TrimSpace(cfg.SmartSourceExtractPriority), strings.TrimSpace(cfg.SmartSiteCleanKeywords), now)
+	`, strings.TrimSpace(cfg.SmartSourceExtractPriority), marshalSmartSourceRuleRowsJSON(cfg.SmartSourceRuleRows), strings.TrimSpace(cfg.SmartSiteCleanKeywords), now)
 
 	_, _ = tx.Exec(`
 		INSERT INTO app_goproxy(id, enabled, auto_select, updated_at)
@@ -1002,6 +1021,109 @@ func (d *DB) ReplaceSmartPanAliasMappings(list []SmartPanAliasMapping) error {
 		pos++
 	}
 	return tx.Commit()
+}
+
+func buildDefaultSmartSourceRuleRows() []SmartSourceRuleRow {
+	return []SmartSourceRuleRow{
+		{Key: "quality", Enabled: true, Order: 1},
+		{Key: "keyword", Enabled: true, Order: 2},
+		{Key: "pan", Enabled: true, Order: 3},
+	}
+}
+
+func buildSmartSourceRuleRowsFromLegacyMode(mode string) []SmartSourceRuleRow {
+	rows := buildDefaultSmartSourceRuleRows()
+	switch strings.TrimSpace(mode) {
+	case "关键字":
+		rows = []SmartSourceRuleRow{rows[1], rows[0], rows[2]}
+	case "网盘":
+		rows = []SmartSourceRuleRow{rows[2], rows[0], rows[1]}
+	}
+	return normalizeSmartSourceRuleRows(rows)
+}
+
+func BuildSmartSourceRuleRowsFromLegacyMode(mode string) []SmartSourceRuleRow {
+	return buildSmartSourceRuleRowsFromLegacyMode(mode)
+}
+
+func normalizeSmartSourceRuleRows(rows []SmartSourceRuleRow) []SmartSourceRuleRow {
+	defaults := map[string]SmartSourceRuleRow{
+		"quality": {Key: "quality", Enabled: true},
+		"keyword": {Key: "keyword", Enabled: true},
+		"pan":     {Key: "pan", Enabled: true},
+	}
+	order := make([]string, 0, 3)
+	seen := map[string]bool{}
+	enabledByKey := map[string]bool{}
+	for _, row := range rows {
+		key := strings.ToLower(strings.TrimSpace(row.Key))
+		if _, ok := defaults[key]; !ok || seen[key] {
+			continue
+		}
+		seen[key] = true
+		order = append(order, key)
+		enabledByKey[key] = row.Enabled
+	}
+	for _, key := range []string{"quality", "keyword", "pan"} {
+		if !seen[key] {
+			order = append(order, key)
+			enabledByKey[key] = true
+		}
+	}
+	out := make([]SmartSourceRuleRow, 0, len(order))
+	for idx, key := range order {
+		base := defaults[key]
+		base.Enabled = enabledByKey[key]
+		base.Order = idx + 1
+		out = append(out, base)
+	}
+	return out
+}
+
+func NormalizeSmartSourceRuleRows(rows []SmartSourceRuleRow) []SmartSourceRuleRow {
+	return normalizeSmartSourceRuleRows(rows)
+}
+
+type smartSourceRuleRowJSON struct {
+	Key     string `json:"key"`
+	Enabled *bool  `json:"enabled,omitempty"`
+	Order   int    `json:"order,omitempty"`
+}
+
+func parseSmartSourceRuleRowsJSON(raw string) []SmartSourceRuleRow {
+	text := strings.TrimSpace(raw)
+	if text == "" || text == "[]" {
+		return nil
+	}
+	var payload []smartSourceRuleRowJSON
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+		return nil
+	}
+	rows := make([]SmartSourceRuleRow, 0, len(payload))
+	for _, row := range payload {
+		enabled := true
+		if row.Enabled != nil {
+			enabled = *row.Enabled
+		}
+		rows = append(rows, SmartSourceRuleRow{
+			Key:     row.Key,
+			Enabled: enabled,
+			Order:   row.Order,
+		})
+	}
+	return normalizeSmartSourceRuleRows(rows)
+}
+
+func marshalSmartSourceRuleRowsJSON(rows []SmartSourceRuleRow) string {
+	rows = normalizeSmartSourceRuleRows(rows)
+	if len(rows) == 0 {
+		rows = buildDefaultSmartSourceRuleRows()
+	}
+	data, err := json.Marshal(rows)
+	if err != nil {
+		return "[]"
+	}
+	return string(data)
 }
 
 func bool01Int(b bool) int {
