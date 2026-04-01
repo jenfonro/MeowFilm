@@ -283,6 +283,44 @@ func readStrJSONBody(body map[string]any, key string) string {
 	return strings.TrimSpace(s)
 }
 
+func readSmartSourceRuleRowsJSONBody(body map[string]any, key string) []db.SmartSourceRuleRow {
+	if body == nil || key == "" {
+		return nil
+	}
+	v, ok := body[key]
+	if !ok || v == nil {
+		return nil
+	}
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	rows := make([]db.SmartSourceRuleRow, 0, len(arr))
+	for _, it := range arr {
+		m, ok := it.(map[string]any)
+		if !ok || m == nil {
+			continue
+		}
+		keyValue, _ := m["key"].(string)
+		enabled := true
+		if raw, ok := m["enabled"]; ok && raw != nil {
+			if b, ok := raw.(bool); ok {
+				enabled = b
+			}
+		}
+		order := len(rows) + 1
+		if f, ok := m["order"].(float64); ok {
+			order = int(f)
+		}
+		rows = append(rows, db.SmartSourceRuleRow{
+			Key:     strings.TrimSpace(keyValue),
+			Enabled: enabled,
+			Order:   order,
+		})
+	}
+	return db.NormalizeSmartSourceRuleRows(rows)
+}
+
 func bool01(b bool) string {
 	if b {
 		return "1"
@@ -306,6 +344,7 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 		writeJSON(w, 200, map[string]any{
 			"success":                    true,
 			"smartSourceExtractPriority": config.NormalizeSourceExtractPriority(cfg.SmartSourceExtractPriority),
+			"smartSourceRuleRows":        cfg.SmartSourceRuleRows,
 			"siteCleanKeywords":          strings.TrimSpace(cfg.SmartSiteCleanKeywords),
 			"smartSourcePriorityTokens":  defaultStringArray(sourceTokens),
 			"smartPanMatchTokens":        defaultStringArray(panTokens),
@@ -320,10 +359,19 @@ func handleDashboardSmartSettings(w http.ResponseWriter, r *http.Request, databa
 		var body map[string]any
 		_ = readJSONLoose(r, &body)
 
+		rows := readSmartSourceRuleRowsJSONBody(body, "smartSourceRuleRows")
+		if len(rows) > 0 {
+			_ = database.UpdateAppConfig(func(c *db.AppConfig) {
+				c.SmartSourceRuleRows = rows
+			})
+		}
 		if _, ok := body["smartSourceExtractPriority"]; ok {
 			priority := config.NormalizeSourceExtractPriority(readStrJSONBody(body, "smartSourceExtractPriority"))
 			_ = database.UpdateAppConfig(func(c *db.AppConfig) {
 				c.SmartSourceExtractPriority = priority
+				if len(rows) == 0 {
+					c.SmartSourceRuleRows = db.BuildSmartSourceRuleRowsFromLegacyMode(priority)
+				}
 			})
 		}
 		if _, ok := body["siteCleanKeywords"]; ok {
@@ -552,6 +600,7 @@ func handleDashboardBackup(w http.ResponseWriter, r *http.Request, database *db.
 		},
 		"smart": map[string]any{
 			"smartSourceExtractPriority": config.NormalizeSourceExtractPriority(strings.TrimSpace(cfg.SmartSourceExtractPriority)),
+			"smartSourceRuleRows":        cfg.SmartSourceRuleRows,
 			"siteCleanKeywords":          strings.TrimSpace(cfg.SmartSiteCleanKeywords),
 			"smartSourcePriorityTokens":  defaultStringArray(smartSourcePriorityTokens),
 			"smartPanMatchTokens":        defaultStringArray(smartPanMatchTokens),
@@ -889,10 +938,19 @@ func handleDashboardRestore(w http.ResponseWriter, r *http.Request, database *db
 	}
 
 	if smart := readObj(body, "smart"); smart != nil {
+		rows := readSmartSourceRuleRowsJSONBody(smart, "smartSourceRuleRows")
+		if len(rows) > 0 {
+			_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.SmartSourceRuleRows = rows })
+		}
 		if v, ok := smart["smartSourceExtractPriority"]; ok && v != nil {
 			if s, _ := v.(string); true {
 				priority := config.NormalizeSourceExtractPriority(strings.TrimSpace(s))
-				_ = database.UpdateAppConfig(func(c *db.AppConfig) { c.SmartSourceExtractPriority = priority })
+				_ = database.UpdateAppConfig(func(c *db.AppConfig) {
+					c.SmartSourceExtractPriority = priority
+					if len(rows) == 0 {
+						c.SmartSourceRuleRows = db.BuildSmartSourceRuleRowsFromLegacyMode(priority)
+					}
+				})
 			}
 		}
 		if v, ok := smart["siteCleanKeywords"]; ok && v != nil {

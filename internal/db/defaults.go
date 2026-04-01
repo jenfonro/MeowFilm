@@ -18,7 +18,7 @@ func (d *DB) ensureDefaults(_ bool) error {
 	_, _ = d.db.Exec(`INSERT INTO app_tmdb(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
 	_, _ = d.db.Exec(`INSERT INTO app_video_source(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
 	_, _ = d.db.Exec(`INSERT INTO app_search(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
-	_, _ = d.db.Exec(`INSERT INTO app_smart(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
+	_, _ = d.db.Exec(`INSERT INTO app_smart(id, source_priority_rules_json, updated_at) VALUES(1, ?, ?) ON CONFLICT(id) DO NOTHING`, marshalSmartSourceRuleRowsJSON(buildDefaultSmartSourceRuleRows()), now)
 	_, _ = d.db.Exec(`INSERT INTO app_goproxy(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
 	_, _ = d.db.Exec(`INSERT INTO app_relay(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)
 	_, _ = d.db.Exec(`INSERT INTO app_netdisk_proxy(id, updated_at) VALUES(1, ?) ON CONFLICT(id) DO NOTHING`, now)

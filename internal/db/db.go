@@ -106,6 +106,9 @@ func (d *DB) initSchema(fresh bool) error {
 	if err := d.ensureSchema(); err != nil {
 		return err
 	}
+	if err := d.runMigrations(fresh); err != nil {
+		return err
+	}
 	// Seed defaults if this is a fresh DB, or if the normalized config row is missing.
 	if err := d.ensureDefaults(fresh); err != nil {
 		return err
@@ -524,9 +527,14 @@ func (d *DB) ensureSchema() error {
 					  display_mode TEXT NOT NULL DEFAULT 'sites',
 					  updated_at INTEGER NOT NULL
 					);
+					CREATE TABLE IF NOT EXISTS db_meta (
+					  key TEXT PRIMARY KEY,
+					  value TEXT NOT NULL
+					);
 					CREATE TABLE IF NOT EXISTS app_smart (
 					  id INTEGER PRIMARY KEY CHECK (id = 1),
 					  source_extract_priority TEXT NOT NULL DEFAULT '无',
+					  source_priority_rules_json TEXT NOT NULL DEFAULT '[]',
 					  site_clean_keywords TEXT NOT NULL DEFAULT '直播,体育,短剧,听书,舞曲,哔哩',
 					  updated_at INTEGER NOT NULL
 					);
@@ -585,6 +593,45 @@ func (d *DB) ensureSchema() error {
 		return err
 	}
 	return tx.Commit()
+}
+
+func (d *DB) runMigrations(fresh bool) error {
+	currentVersion, found, err := d.getSchemaVersion()
+	if err != nil {
+		return err
+	}
+	if !found {
+		if fresh {
+			return d.setSchemaVersion(CurrentDBVersion)
+		}
+		currentVersion = LegacyDBVersion
+	}
+	if currentVersion == CurrentDBVersion {
+		return nil
+	}
+	for currentVersion != CurrentDBVersion {
+		migration, ok := findMigrationFrom(currentVersion)
+		if !ok {
+			return errors.New("db migration path not found from version " + currentVersion + " to " + CurrentDBVersion)
+		}
+		tx, err := d.db.Begin()
+		if err != nil {
+			return err
+		}
+		if err := migration.Apply(tx); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if err := d.setSchemaVersionTx(tx, migration.To); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		currentVersion = migration.To
+	}
+	return nil
 }
 
 func (d *DB) ensureDefaultAdmin() error {
