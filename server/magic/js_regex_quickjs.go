@@ -463,6 +463,54 @@ func MagicAggregateNormalize(text string, aggregateRaw []string) (string, error)
 	return strings.TrimSpace(val.String()), nil
 }
 
+func RegexExtractFirstGroupFromCandidates(candidates []string, rawRule string) (string, error) {
+	if len(candidates) == 0 {
+		return "", nil
+	}
+	pattern, _, flags := DecodeEpisodeRule(rawRule)
+	pattern = strings.TrimSpace(pattern)
+	flags = strings.TrimSpace(flags)
+	if pattern == "" {
+		return "", nil
+	}
+	if flags == "" {
+		flags = "i"
+	}
+
+	rt := quickjs.NewRuntime()
+	defer rt.Close()
+	ctx := rt.NewContext()
+	defer ctx.Close()
+
+	if err := jsEvalVoid(ctx, `
+		globalThis.__mf_extract_first_group = function(cands, pattern, flags) {
+			let re;
+			try {
+				re = new RegExp(String(pattern || ""), String(flags || ""));
+			} catch (e) {
+				throw e;
+			}
+			for (let i = 0; i < cands.length; i++) {
+				const text = String(cands[i] || "");
+				const m = re.exec(text);
+				if (!m) continue;
+				if (m.length >= 2 && m[1] != null) return String(m[1]);
+				if (m.length >= 1 && m[0] != null) return String(m[0]);
+			}
+			return "";
+		};
+	`); err != nil {
+		return "", err
+	}
+
+	val, err := jsEval(ctx, fmt.Sprintf(`__mf_extract_first_group(%s,%s,%s)`, marshalJSON(candidates), marshalJSON(pattern), marshalJSON(flags)))
+	if err != nil {
+		return "", err
+	}
+	defer val.Free()
+	return strings.TrimSpace(val.String()), nil
+}
+
 func CompileRulesDebug(database *db.DB) (any, error) {
 	if database == nil {
 		return nil, errors.New("db nil")
