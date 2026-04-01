@@ -26,6 +26,10 @@ type TMDBCast = smartTMDBCast
 type TMDBCrew = smartTMDBCrew
 
 // Exported wrappers (matching previous playback helpers)
+func LoadPlaybackSettings(database *db.DB) PlaybackSettings {
+	return smartLoadPlaybackSettings(database)
+}
+
 func ComputePriorityMatch(textLower string, tokensLower []string) PriorityMatch {
 	return smartComputePriorityMatch(textLower, tokensLower)
 }
@@ -100,6 +104,10 @@ func ComparePanTokenIdx(a int, b int) int {
 
 func CompareSmartMatch(a Candidate, b Candidate, tmdbHasMultiSeason bool, preferSeasonNo int, settings PlaybackSettings) int {
 	return smartCompareSmartMatch(a, b, tmdbHasMultiSeason, preferSeasonNo, settings)
+}
+
+func PlaybackAttemptKey(c Candidate) uint64 {
+	return smartPlaybackAttemptKey(c)
 }
 
 func ExtractMaxEpisodeFromBadgeText(text string) int {
@@ -289,13 +297,17 @@ func ResolvePanMockDetailPansIncremental(
 	rawCleanRules []string,
 	rawEpisodeRules []string,
 	pans []catpawrunner.Pan,
-	onPanResolved func(panIndex int, episodes []catpawrunner.Episode, accessDelta map[string]string),
+	onPanResolved func(panIndex int, episodes []catpawrunner.Episode, accessDelta map[string]string, emitAllowed bool),
 ) ([]catpawrunner.Pan, map[string]string) {
 	return smartResolvePanMockDetailPansIncremental(database, siteKey, siteName, want, tmdbSeasons, tmdbHasMultiSeason, rawCleanRules, rawEpisodeRules, pans, onPanResolved)
 }
 
 func ResolveSinglePanMockPan(database *db.DB, pan catpawrunner.Pan) (catpawrunner.Pan, map[string]string, bool, string, error) {
 	return smartResolveSinglePanMockPan(database, pan)
+}
+
+func ResolveSharedPanFlagEpisodes(database *db.DB, panFlag string, episodeURL string) ([]catpawrunner.Episode, map[string]string, bool, string, bool, error) {
+	return smartResolveSharedPanFlagEpisodes(database, panFlag, episodeURL)
 }
 
 func LoadAggregateCleanRules(database *db.DB) []string {

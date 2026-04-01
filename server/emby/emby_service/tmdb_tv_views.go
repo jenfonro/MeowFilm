@@ -44,7 +44,7 @@ func loadTVSeriesDetailView(database *db.DB, tmdbID int) (*db.TMDBCachedDetail, 
 	return metadata_tmdb.GetDetailForBackend(database, "tv", tmdbID)
 }
 
-func loadTVSeasonListView(database *db.DB, tmdbID int) (*TVSeasonListView, error) {
+func loadTVSeasonListView(database *db.DB, tmdbID int, includeUnaired bool) (*TVSeasonListView, error) {
 	series, err := loadTVSeriesDetailView(database, tmdbID)
 	if err != nil || series == nil {
 		return nil, err
@@ -64,13 +64,17 @@ func loadTVSeasonListView(database *db.DB, tmdbID int) (*TVSeasonListView, error
 			continue
 		}
 		detailCopy := *detail
-		detailCopy.Episodes = filterAiredSeasonEpisodes(detail.Episodes, now)
+		if includeUnaired {
+			detailCopy.Episodes = detail.Episodes
+		} else {
+			detailCopy.Episodes = filterAiredSeasonEpisodes(detail.Episodes, now)
+		}
 		out.SeasonDetails[season.SeasonNumber] = &detailCopy
 	}
 	return out, nil
 }
 
-func loadTVSeasonEpisodesView(database *db.DB, tmdbID int, seasonNo int) (*TVSeasonEpisodesView, error) {
+func loadTVSeasonEpisodesView(database *db.DB, tmdbID int, seasonNo int, includeUnaired bool) (*TVSeasonEpisodesView, error) {
 	if seasonNo <= 0 {
 		return nil, nil
 	}
@@ -83,7 +87,11 @@ func loadTVSeasonEpisodesView(database *db.DB, tmdbID int, seasonNo int) (*TVSea
 		return nil, err
 	}
 	seasonCopy := *season
-	seasonCopy.Episodes = filterAiredSeasonEpisodes(season.Episodes, time.Now())
+	if includeUnaired {
+		seasonCopy.Episodes = season.Episodes
+	} else {
+		seasonCopy.Episodes = filterAiredSeasonEpisodes(season.Episodes, time.Now())
+	}
 	return &TVSeasonEpisodesView{Series: series, Season: &seasonCopy}, nil
 }
 
@@ -103,7 +111,7 @@ func loadTVResumeEpisodeView(database *db.DB, tmdbID int, seasonNo int, episodeN
 	if seasonNo <= 0 || episodeNo <= 0 {
 		return nil, nil
 	}
-	view, err := loadTVSeasonEpisodesView(database, tmdbID, seasonNo)
+	view, err := loadTVSeasonEpisodesView(database, tmdbID, seasonNo, false)
 	if err != nil || view == nil {
 		return nil, err
 	}

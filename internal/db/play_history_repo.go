@@ -162,6 +162,7 @@ type PlayHistoryRow struct {
 	TMDBID                int
 	TMDBType              string
 	PlayFlag              string
+	PreOrder              bool
 	SiteEpisodeIndex      int
 	SiteEpisodeFile       string
 	TMDBSeason            int
@@ -182,6 +183,7 @@ type PlayHistoryUpsert struct {
 	TMDBID                int
 	TMDBType              string
 	PlayFlag              string
+	PreOrder              *bool
 	SiteEpisodeIndex      int
 	SiteEpisodeFile       string
 	TMDBSeason            int
@@ -205,6 +207,7 @@ type TMDBPlayHistoryUpsert struct {
 	Poster                string
 	Remark                string
 	PlayFlag              string
+	PreOrder              *bool
 	SiteEpisodeIndex      int
 	SiteEpisodeFile       string
 	PlaybackPositionTicks int64
@@ -313,18 +316,28 @@ func (d *DB) UpsertPlayHistory(row PlayHistoryUpsert) error {
 	// Enforce: keep only one canonical play-history row per (user, contentKey) in the DB.
 	_, _ = tx.Exec(`DELETE FROM user_play_history WHERE user_id=? AND content_id=? AND site_video_id <> ?`, row.UserID, contentID, siteVideoID)
 
+	preOrder := 0
+	preOrderPatch := -1
+	if row.PreOrder != nil {
+		if *row.PreOrder {
+			preOrder = 1
+		}
+		preOrderPatch = preOrder
+	}
+
 	_, err = tx.Exec(`
 			INSERT INTO user_play_history(
 			  user_id, content_id, site_video_id,
-			  play_flag, site_episode_index, site_episode_file,
+			  play_flag, pre_order, site_episode_index, site_episode_file,
 			  tmdb_season, tmdb_episode,
 			  playback_position_ticks, playback_runtime_ticks, playback_item_id,
 			  updated_at
 			)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(user_id, site_video_id) DO UPDATE SET
 			  content_id = excluded.content_id,
 			  play_flag = excluded.play_flag,
+			  pre_order = CASE WHEN ? >= 0 THEN excluded.pre_order ELSE user_play_history.pre_order END,
 			  site_episode_index = excluded.site_episode_index,
 			  site_episode_file = excluded.site_episode_file,
 			  tmdb_season = CASE WHEN excluded.tmdb_season > 0 THEN excluded.tmdb_season ELSE user_play_history.tmdb_season END,
@@ -338,6 +351,7 @@ func (d *DB) UpsertPlayHistory(row PlayHistoryUpsert) error {
 		contentID,
 		siteVideoID,
 		strings.TrimSpace(row.PlayFlag),
+		preOrder,
 		row.SiteEpisodeIndex,
 		strings.TrimSpace(row.SiteEpisodeFile),
 		row.TMDBSeason,
@@ -346,6 +360,7 @@ func (d *DB) UpsertPlayHistory(row PlayHistoryUpsert) error {
 		row.PlaybackRuntimeTicks,
 		strings.TrimSpace(row.PlaybackItemID),
 		now,
+		preOrderPatch,
 	)
 	if err != nil {
 		return err
@@ -418,18 +433,28 @@ func (d *DB) UpsertTMDBPlayHistory(row TMDBPlayHistoryUpsert) error {
 		  AND site_video_id <> ?
 	`, row.UserID, typ, row.TMDBID, siteVideoID)
 
+	preOrder := 0
+	preOrderPatch := -1
+	if row.PreOrder != nil {
+		if *row.PreOrder {
+			preOrder = 1
+		}
+		preOrderPatch = preOrder
+	}
+
 	_, err = tx.Exec(`
 		INSERT INTO user_play_history(
 		  user_id, content_id, site_video_id,
-		  play_flag, site_episode_index, site_episode_file,
+		  play_flag, pre_order, site_episode_index, site_episode_file,
 		  tmdb_season, tmdb_episode,
 		  playback_position_ticks, playback_runtime_ticks, playback_item_id,
 		  updated_at
 		)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(user_id, site_video_id) DO UPDATE SET
 		  content_id = excluded.content_id,
 		  play_flag = CASE WHEN excluded.play_flag <> '' THEN excluded.play_flag ELSE user_play_history.play_flag END,
+		  pre_order = CASE WHEN ? >= 0 THEN excluded.pre_order ELSE user_play_history.pre_order END,
 		  site_episode_index = CASE WHEN excluded.site_episode_index > 0 THEN excluded.site_episode_index ELSE user_play_history.site_episode_index END,
 		  site_episode_file = CASE WHEN excluded.site_episode_file <> '' THEN excluded.site_episode_file ELSE user_play_history.site_episode_file END,
 		  tmdb_season = CASE WHEN excluded.tmdb_season > 0 THEN excluded.tmdb_season ELSE user_play_history.tmdb_season END,
@@ -443,6 +468,7 @@ func (d *DB) UpsertTMDBPlayHistory(row TMDBPlayHistoryUpsert) error {
 		contentID,
 		siteVideoID,
 		strings.TrimSpace(row.PlayFlag),
+		preOrder,
 		row.SiteEpisodeIndex,
 		strings.TrimSpace(row.SiteEpisodeFile),
 		row.TMDBSeason,
@@ -451,11 +477,48 @@ func (d *DB) UpsertTMDBPlayHistory(row TMDBPlayHistoryUpsert) error {
 		row.PlaybackRuntimeTicks,
 		strings.TrimSpace(row.PlaybackItemID),
 		now,
+		preOrderPatch,
 	)
 	if err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+func (d *DB) UpsertTMDBPlayHistoryMeta(row TMDBPlayHistoryUpsert) error {
+	if d == nil || d.db == nil {
+		return errors.New("db nil")
+	}
+	if row.UserID <= 0 || row.TMDBID <= 0 {
+		return errors.New("invalid args")
+	}
+	typ := strings.TrimSpace(strings.ToLower(row.TMDBType))
+	if typ != "tv" && typ != "movie" {
+		return errors.New("invalid tmdb type")
+	}
+	contentKey := strings.TrimSpace(row.ContentKey)
+	if contentKey == "" {
+		return errors.New("empty content key")
+	}
+	title := strings.TrimSpace(row.Title)
+	if title == "" {
+		title = contentKey
+	}
+	return d.UpsertTMDBPlayHistory(TMDBPlayHistoryUpsert{
+		UserID:           row.UserID,
+		TMDBID:           row.TMDBID,
+		TMDBType:         typ,
+		TMDBSeason:       row.TMDBSeason,
+		TMDBEpisode:      row.TMDBEpisode,
+		ContentKey:       contentKey,
+		Title:            title,
+		SiteKey:          "emby",
+		SiteDetail:       contentKey,
+		Poster:           row.Poster,
+		Remark:           row.Remark,
+		PreOrder:         row.PreOrder,
+		UpdatedAt:        row.UpdatedAt,
+	})
 }
 
 func (d *DB) UpdateTMDBPlayHistoryProgress(userID int64, tmdbType string, tmdbID int, playbackItemID string, positionTicks int64, runtimeTicks int64, updatedAt int64) error {
@@ -519,6 +582,7 @@ func (d *DB) ListPlayHistory(userID int64, limit int) ([]PlayHistoryRow, error) 
 			  COALESCE(tm.tmdb_id, 0) AS tmdb_id,
 			  COALESCE(tm.tmdb_type, '') AS tmdb_type,
 			  h.play_flag,
+			  h.pre_order,
 			  h.site_episode_index,
 			  h.site_episode_file,
 			  h.tmdb_season,
@@ -554,6 +618,7 @@ func (d *DB) ListPlayHistory(userID int64, limit int) ([]PlayHistoryRow, error) 
 			&r.TMDBID,
 			&r.TMDBType,
 			&r.PlayFlag,
+			&r.PreOrder,
 			&r.SiteEpisodeIndex,
 			&r.SiteEpisodeFile,
 			&r.TMDBSeason,
@@ -593,6 +658,7 @@ func (d *DB) GetPlayHistoryLatestBySiteVideo(userID int64, siteKey string, siteD
 			  COALESCE(tm.tmdb_id, 0) AS tmdb_id,
 			  COALESCE(tm.tmdb_type, '') AS tmdb_type,
 			  h.play_flag,
+			  h.pre_order,
 			  h.site_episode_index,
 			  h.site_episode_file,
 			  h.tmdb_season,
@@ -624,6 +690,7 @@ func (d *DB) GetPlayHistoryLatestBySiteVideo(userID int64, siteKey string, siteD
 		&r.TMDBID,
 		&r.TMDBType,
 		&r.PlayFlag,
+		&r.PreOrder,
 		&r.SiteEpisodeIndex,
 		&r.SiteEpisodeFile,
 		&r.TMDBSeason,
@@ -663,6 +730,7 @@ func (d *DB) GetPlayHistoryLatestByContentKey(userID int64, contentKey string) (
 			  COALESCE(tm.tmdb_id, 0) AS tmdb_id,
 			  COALESCE(tm.tmdb_type, '') AS tmdb_type,
 			  h.play_flag,
+			  h.pre_order,
 			  h.site_episode_index,
 			  h.site_episode_file,
 			  h.tmdb_season,
@@ -690,6 +758,7 @@ func (d *DB) GetPlayHistoryLatestByContentKey(userID int64, contentKey string) (
 		&r.TMDBID,
 		&r.TMDBType,
 		&r.PlayFlag,
+		&r.PreOrder,
 		&r.SiteEpisodeIndex,
 		&r.SiteEpisodeFile,
 		&r.TMDBSeason,
@@ -741,6 +810,7 @@ func (d *DB) GetPlayHistoryLatestByTMDB(userID int64, tmdbType string, tmdbID in
 			  COALESCE(tm.tmdb_id, 0) AS tmdb_id,
 			  COALESCE(tm.tmdb_type, '') AS tmdb_type,
 			  h.play_flag,
+			  h.pre_order,
 			  h.site_episode_index,
 			  h.site_episode_file,
 			  h.tmdb_season,
@@ -769,6 +839,7 @@ func (d *DB) GetPlayHistoryLatestByTMDB(userID int64, tmdbType string, tmdbID in
 		&r.TMDBID,
 		&r.TMDBType,
 		&r.PlayFlag,
+		&r.PreOrder,
 		&r.SiteEpisodeIndex,
 		&r.SiteEpisodeFile,
 		&r.TMDBSeason,
@@ -820,6 +891,7 @@ func (d *DB) GetPlayHistoryLatestByPlaybackItemID(userID int64, playbackItemID s
 			  COALESCE(tm.tmdb_id, 0) AS tmdb_id,
 			  COALESCE(tm.tmdb_type, '') AS tmdb_type,
 			  h.play_flag,
+			  h.pre_order,
 			  h.site_episode_index,
 			  h.site_episode_file,
 			  h.tmdb_season,
@@ -847,6 +919,7 @@ func (d *DB) GetPlayHistoryLatestByPlaybackItemID(userID int64, playbackItemID s
 		&r.TMDBID,
 		&r.TMDBType,
 		&r.PlayFlag,
+		&r.PreOrder,
 		&r.SiteEpisodeIndex,
 		&r.SiteEpisodeFile,
 		&r.TMDBSeason,

@@ -310,6 +310,7 @@ func (d *DB) ensureSchema() error {
 						  content_id INTEGER NOT NULL,
 						  site_video_id INTEGER NOT NULL,
 						  play_flag TEXT NOT NULL DEFAULT '',
+						  pre_order INTEGER NOT NULL DEFAULT 0,
 						  site_episode_index INTEGER NOT NULL DEFAULT 0,
 						  site_episode_file TEXT NOT NULL DEFAULT '',
 						  tmdb_season INTEGER NOT NULL DEFAULT 0,
@@ -533,7 +534,6 @@ func (d *DB) ensureSchema() error {
 					);
 					CREATE TABLE IF NOT EXISTS app_smart (
 					  id INTEGER PRIMARY KEY CHECK (id = 1),
-					  source_extract_priority TEXT NOT NULL DEFAULT '无',
 					  source_priority_rules_json TEXT NOT NULL DEFAULT '[]',
 					  site_clean_keywords TEXT NOT NULL DEFAULT '直播,体育,短剧,听书,舞曲,哔哩',
 					  updated_at INTEGER NOT NULL
@@ -591,6 +591,15 @@ func (d *DB) ensureSchema() error {
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.Exec(schemaSQL); err != nil {
 		return err
+	}
+	hasPreOrderColumn, err := hasColumnTx(tx, "user_play_history", "pre_order")
+	if err != nil {
+		return err
+	}
+	if !hasPreOrderColumn {
+		if _, err := tx.Exec(`ALTER TABLE user_play_history ADD COLUMN pre_order INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
