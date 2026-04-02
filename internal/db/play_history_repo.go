@@ -422,6 +422,11 @@ func (d *DB) UpsertTMDBPlayHistory(row TMDBPlayHistoryUpsert) error {
 		return err
 	}
 
+	preOrderValue, err := d.resolveTMDBPreOrderForWriteTx(tx, row.UserID, typ, row.TMDBID, row.PreOrder)
+	if err != nil {
+		return err
+	}
+
 	_, _ = tx.Exec(`
 		DELETE FROM user_play_history
 		WHERE user_id = ?
@@ -433,14 +438,7 @@ func (d *DB) UpsertTMDBPlayHistory(row TMDBPlayHistoryUpsert) error {
 		  AND site_video_id <> ?
 	`, row.UserID, typ, row.TMDBID, siteVideoID)
 
-	preOrder := 0
-	preOrderPatch := -1
-	if row.PreOrder != nil {
-		if *row.PreOrder {
-			preOrder = 1
-		}
-		preOrderPatch = preOrder
-	}
+	preOrder := boolToInt(preOrderValue)
 
 	_, err = tx.Exec(`
 		INSERT INTO user_play_history(
@@ -454,7 +452,7 @@ func (d *DB) UpsertTMDBPlayHistory(row TMDBPlayHistoryUpsert) error {
 		ON CONFLICT(user_id, site_video_id) DO UPDATE SET
 		  content_id = excluded.content_id,
 		  play_flag = CASE WHEN excluded.play_flag <> '' THEN excluded.play_flag ELSE user_play_history.play_flag END,
-		  pre_order = CASE WHEN ? >= 0 THEN excluded.pre_order ELSE user_play_history.pre_order END,
+		  pre_order = excluded.pre_order,
 		  site_episode_index = CASE WHEN excluded.site_episode_index > 0 THEN excluded.site_episode_index ELSE user_play_history.site_episode_index END,
 		  site_episode_file = CASE WHEN excluded.site_episode_file <> '' THEN excluded.site_episode_file ELSE user_play_history.site_episode_file END,
 		  tmdb_season = CASE WHEN excluded.tmdb_season > 0 THEN excluded.tmdb_season ELSE user_play_history.tmdb_season END,
@@ -477,7 +475,6 @@ func (d *DB) UpsertTMDBPlayHistory(row TMDBPlayHistoryUpsert) error {
 		row.PlaybackRuntimeTicks,
 		strings.TrimSpace(row.PlaybackItemID),
 		now,
-		preOrderPatch,
 	)
 	if err != nil {
 		return err
@@ -485,7 +482,35 @@ func (d *DB) UpsertTMDBPlayHistory(row TMDBPlayHistoryUpsert) error {
 	return tx.Commit()
 }
 
-func (d *DB) UpsertTMDBPlayHistoryMeta(row TMDBPlayHistoryUpsert) error {
+func (d *DB) UpdateTMDBPlayHistoryPreOrder(userID int64, tmdbType string, tmdbID int, preOrder bool, updatedAt int64) error {
+	if d == nil || d.db == nil {
+		return errors.New("db nil")
+	}
+	if userID <= 0 || tmdbID <= 0 {
+		return errors.New("invalid args")
+	}
+	typ := strings.TrimSpace(strings.ToLower(tmdbType))
+	if typ != "tv" && typ != "movie" {
+		return errors.New("invalid tmdb type")
+	}
+	now := updatedAt
+	if now <= 0 {
+		now = time.Now().Unix()
+	}
+	_, err := d.db.Exec(`
+		UPDATE user_play_history
+		SET pre_order = ?, updated_at = ?
+		WHERE user_id = ?
+		  AND content_id IN (
+		    SELECT content_id
+		    FROM content_tmdb
+		    WHERE tmdb_type = ? AND tmdb_id = ?
+		  )
+	`, boolToInt(preOrder), now, userID, typ, tmdbID)
+	return err
+}
+
+func (d *DB) EnsureTMDBPlayHistoryMeta(row TMDBPlayHistoryUpsert) error {
 	if d == nil || d.db == nil {
 		return errors.New("db nil")
 	}
@@ -504,21 +529,159 @@ func (d *DB) UpsertTMDBPlayHistoryMeta(row TMDBPlayHistoryUpsert) error {
 	if title == "" {
 		title = contentKey
 	}
-	return d.UpsertTMDBPlayHistory(TMDBPlayHistoryUpsert{
-		UserID:           row.UserID,
-		TMDBID:           row.TMDBID,
-		TMDBType:         typ,
-		TMDBSeason:       row.TMDBSeason,
-		TMDBEpisode:      row.TMDBEpisode,
-		ContentKey:       contentKey,
-		Title:            title,
-		SiteKey:          "emby",
-		SiteDetail:       contentKey,
-		Poster:           row.Poster,
-		Remark:           row.Remark,
-		PreOrder:         row.PreOrder,
-		UpdatedAt:        row.UpdatedAt,
-	})
+	now := row.UpdatedAt
+	if now <= 0 {
+		now = time.Now().Unix()
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	hasHistory, err := d.hasTMDBPlayHistoryTx(tx, row.UserID, typ, row.TMDBID)
+	if err != nil {
+		return err
+	}
+	if hasHistory {
+		if row.PreOrder != nil {
+			if err := d.updateTMDBPlayHistoryPreOrderTx(tx, row.UserID, typ, row.TMDBID, *row.PreOrder, now); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	}
+
+	contentID, err := d.ensureContent(tx, contentKey, row.TMDBID, typ, now)
+	if err != nil {
+		return err
+	}
+	siteVideoID, err := d.upsertSiteVideo(tx, "emby", 0, "emby", contentKey, title, row.Poster, row.Remark, now)
+	if err != nil {
+		return err
+	}
+	preOrder := 0
+	preOrderPatch := -1
+	if row.PreOrder != nil {
+		if *row.PreOrder {
+			preOrder = 1
+		}
+		preOrderPatch = preOrder
+	}
+	_, err = tx.Exec(`
+		INSERT INTO user_play_history(
+		  user_id, content_id, site_video_id,
+		  play_flag, pre_order, site_episode_index, site_episode_file,
+		  tmdb_season, tmdb_episode,
+		  playback_position_ticks, playback_runtime_ticks, playback_item_id,
+		  updated_at
+		)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(user_id, site_video_id) DO UPDATE SET
+		  content_id = excluded.content_id,
+		  pre_order = CASE WHEN ? >= 0 THEN excluded.pre_order ELSE user_play_history.pre_order END,
+		  updated_at = excluded.updated_at
+	`,
+		row.UserID,
+		contentID,
+		siteVideoID,
+		"",
+		preOrder,
+		0,
+		"",
+		0,
+		0,
+		0,
+		0,
+		"",
+		now,
+		preOrderPatch,
+	)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *DB) UpsertTMDBPlayHistoryMeta(row TMDBPlayHistoryUpsert) error {
+	return d.EnsureTMDBPlayHistoryMeta(row)
+}
+
+func (d *DB) hasTMDBPlayHistoryTx(tx *sql.Tx, userID int64, tmdbType string, tmdbID int) (bool, error) {
+	if tx == nil {
+		return false, errors.New("tx nil")
+	}
+	var count int
+	err := tx.QueryRow(`
+		SELECT COUNT(1)
+		FROM user_play_history
+		WHERE user_id = ?
+		  AND content_id IN (
+		    SELECT content_id
+		    FROM content_tmdb
+		    WHERE tmdb_type = ? AND tmdb_id = ?
+		  )
+	`, userID, strings.TrimSpace(tmdbType), tmdbID).Scan(&count)
+	return count > 0, err
+}
+
+func (d *DB) latestTMDBPreOrderTx(tx *sql.Tx, userID int64, tmdbType string, tmdbID int) (bool, bool, error) {
+	if tx == nil {
+		return false, false, errors.New("tx nil")
+	}
+	var value sql.NullInt64
+	err := tx.QueryRow(`
+		SELECT h.pre_order
+		FROM user_play_history h
+		WHERE h.user_id = ?
+		  AND h.content_id IN (
+		    SELECT content_id
+		    FROM content_tmdb
+		    WHERE tmdb_type = ? AND tmdb_id = ?
+		  )
+		ORDER BY h.updated_at DESC, h.id DESC
+		LIMIT 1
+	`, userID, strings.TrimSpace(tmdbType), tmdbID).Scan(&value)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, false, nil
+		}
+		return false, false, err
+	}
+	return value.Int64 != 0, true, nil
+}
+
+func (d *DB) resolveTMDBPreOrderForWriteTx(tx *sql.Tx, userID int64, tmdbType string, tmdbID int, incoming *bool) (bool, error) {
+	if incoming != nil {
+		return *incoming, nil
+	}
+	if inherited, ok, err := d.latestTMDBPreOrderTx(tx, userID, tmdbType, tmdbID); err != nil {
+		return false, err
+	} else if ok {
+		return inherited, nil
+	}
+	return false, nil
+}
+
+func (d *DB) updateTMDBPlayHistoryPreOrderTx(tx *sql.Tx, userID int64, tmdbType string, tmdbID int, preOrder bool, updatedAt int64) error {
+	if tx == nil {
+		return errors.New("tx nil")
+	}
+	now := updatedAt
+	if now <= 0 {
+		now = time.Now().Unix()
+	}
+	_, err := tx.Exec(`
+		UPDATE user_play_history
+		SET pre_order = ?, updated_at = ?
+		WHERE user_id = ?
+		  AND content_id IN (
+		    SELECT content_id
+		    FROM content_tmdb
+		    WHERE tmdb_type = ? AND tmdb_id = ?
+		  )
+	`, boolToInt(preOrder), now, userID, strings.TrimSpace(tmdbType), tmdbID)
+	return err
 }
 
 func (d *DB) UpdateTMDBPlayHistoryProgress(userID int64, tmdbType string, tmdbID int, playbackItemID string, positionTicks int64, runtimeTicks int64, updatedAt int64) error {
