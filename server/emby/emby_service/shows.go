@@ -195,7 +195,14 @@ func buildSiteShowNextUpPayload(database *db.DB, userID int64, serverID string, 
 		seasonName := strings.TrimSpace(pan.DisplayLabel)
 		for j, ep := range pan.Episodes {
 			epNo := j + 1
-			itemID := buildSiteEpisodeID(ref.SiteKey, ref.SiteDetail, seasonNo, epNo)
+			title := strings.TrimSpace(resolveSiteSeriesName(database, ref.SiteKey, ref.SiteDetail, meta))
+			if title == "" {
+				title = strings.TrimSpace(meta.Name)
+			}
+			itemID := buildSiteEpisodeID(ref.SiteKey, ref.SiteDetail, seasonNo, epNo, title, firstNonEmptyString(strings.TrimSpace(ep.Flag), strings.TrimSpace(pan.RawLabel)), strings.TrimSpace(ep.URL))
+			if itemID == "" {
+				continue
+			}
 			all = append(all, siteEpisodeCursor{
 				Season:     seasonNo,
 				SeasonName: seasonName,
@@ -791,7 +798,14 @@ func buildSiteShowEpisodeSources(database *db.DB, userID int64, serverID string,
 	state := EpisodeItemState(false, true)
 	for idx, ep := range pan.Episodes {
 		epNo := idx + 1
-		itemID := buildSiteEpisodeID(seriesRef.SiteKey, seriesRef.SiteDetail, seasonRef.Pan, epNo)
+		title := strings.TrimSpace(seriesName)
+		if title == "" {
+			title = strings.TrimSpace(meta.Name)
+		}
+		itemID := buildSiteEpisodeID(seriesRef.SiteKey, seriesRef.SiteDetail, seasonRef.Pan, epNo, title, firstNonEmptyString(strings.TrimSpace(ep.Flag), strings.TrimSpace(pan.RawLabel)), strings.TrimSpace(ep.URL))
+		if itemID == "" {
+			continue
+		}
 		name := siteEpisodeDisplayName(ep, pan.RawLabel, pan.PanMock, seriesName, epNo)
 		rawFileName := siteEpisodeFileName(ep, name, epNo)
 		container := siteEpisodeContainerFromName(rawFileName)

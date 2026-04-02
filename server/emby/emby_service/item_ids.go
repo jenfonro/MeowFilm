@@ -14,17 +14,20 @@ const (
 )
 
 type itemRef struct {
-	Kind       string
-	SubKind    string
-	MediaType  string
-	Source     string
-	Variant    string
-	RawID      string
-	NumericID  int
-	SiteKey    string
-	SiteDetail string
-	Pan        int
-	Episode    int
+	Kind           string
+	SubKind        string
+	MediaType      string
+	Source         string
+	Variant        string
+	RawID          string
+	NumericID      int
+	SiteKey        string
+	SiteDetail     string
+	SiteTitle      string
+	SitePlayFlag   string
+	SiteEpisodeURL string
+	Pan            int
+	Episode        int
 }
 
 type PlaybackItemRef = itemRef
@@ -89,13 +92,16 @@ func buildSiteSeasonID(siteKey string, siteDetail string, pan int) string {
 	return siteSeasonPrefix + encodeSiteIDPart(sk) + "." + encodeSiteIDPart(sd) + "." + strconv.Itoa(pan)
 }
 
-func buildSiteEpisodeID(siteKey string, siteDetail string, pan int, ep int) string {
+func buildSiteEpisodeID(siteKey string, siteDetail string, pan int, ep int, title string, flag string, episodeURL string) string {
 	sk := strings.TrimSpace(siteKey)
 	sd := strings.TrimSpace(siteDetail)
-	if sk == "" || sd == "" || pan <= 0 || ep <= 0 {
+	tt := strings.TrimSpace(title)
+	fg := strings.TrimSpace(flag)
+	eu := strings.TrimSpace(episodeURL)
+	if sk == "" || sd == "" || tt == "" || eu == "" || pan <= 0 || ep <= 0 {
 		return ""
 	}
-	return siteEpisodePrefix + encodeSiteIDPart(sk) + "." + encodeSiteIDPart(sd) + "." + strconv.Itoa(pan) + "." + strconv.Itoa(ep)
+	return siteEpisodePrefix + encodeSiteIDPart(sk) + "." + encodeSiteIDPart(sd) + "." + strconv.Itoa(pan) + "." + strconv.Itoa(ep) + "." + encodeSiteIDPart(tt) + "." + encodeSiteIDPart(fg) + "." + encodeSiteIDPart(eu)
 }
 
 func parseItemRef(raw string) *itemRef {
@@ -174,8 +180,8 @@ func parseItemRefAny(raw string) *itemRef {
 	if siteKey, siteDetail, pan, ok := parseSiteSeasonID(raw); ok {
 		return &itemRef{Kind: "item", SubKind: "season", MediaType: "tv", Source: "site", RawID: strings.TrimSpace(raw), SiteKey: siteKey, SiteDetail: siteDetail, Pan: pan}
 	}
-	if siteKey, siteDetail, pan, ep, ok := parseSiteEpisodeID(raw); ok {
-		return &itemRef{Kind: "item", SubKind: "episode", MediaType: "tv", Source: "site", RawID: strings.TrimSpace(raw), SiteKey: siteKey, SiteDetail: siteDetail, Pan: pan, Episode: ep}
+	if siteKey, siteDetail, pan, ep, title, flag, episodeURL, ok := parseSiteEpisodeID(raw); ok {
+		return &itemRef{Kind: "item", SubKind: "episode", MediaType: "tv", Source: "site", RawID: strings.TrimSpace(raw), SiteKey: siteKey, SiteDetail: siteDetail, SiteTitle: title, SitePlayFlag: flag, SiteEpisodeURL: episodeURL, Pan: pan, Episode: ep}
 	}
 	return nil
 }
@@ -223,30 +229,33 @@ func parseSiteSeasonID(id string) (siteKey string, siteDetail string, pan int, o
 	return strings.TrimSpace(sk), strings.TrimSpace(sd), p, true
 }
 
-func parseSiteEpisodeID(id string) (siteKey string, siteDetail string, pan int, ep int, ok bool) {
+func parseSiteEpisodeID(id string) (siteKey string, siteDetail string, pan int, ep int, title string, flag string, episodeURL string, ok bool) {
 	raw := strings.TrimSpace(id)
 	if !strings.HasPrefix(raw, siteEpisodePrefix) {
-		return "", "", 0, 0, false
+		return "", "", 0, 0, "", "", "", false
 	}
 	rest := strings.TrimSpace(strings.TrimPrefix(raw, siteEpisodePrefix))
 	parts := strings.Split(rest, ".")
-	if len(parts) != 4 {
-		return "", "", 0, 0, false
+	if len(parts) != 7 {
+		return "", "", 0, 0, "", "", "", false
 	}
 	panNo, err1 := strconv.Atoi(strings.TrimSpace(parts[2]))
 	epNo, err2 := strconv.Atoi(strings.TrimSpace(parts[3]))
 	if err1 != nil || err2 != nil || panNo <= 0 || epNo <= 0 {
-		return "", "", 0, 0, false
+		return "", "", 0, 0, "", "", "", false
 	}
 	sk, ok1 := decodeSiteIDPart(parts[0])
 	sd, ok2 := decodeSiteIDPart(parts[1])
-	if !ok1 || !ok2 {
-		return "", "", 0, 0, false
+	tt, ok3 := decodeSiteIDPart(parts[4])
+	fg, ok4 := decodeSiteIDPartAllowEmpty(parts[5])
+	eu, ok5 := decodeSiteIDPart(parts[6])
+	if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 {
+		return "", "", 0, 0, "", "", "", false
 	}
-	if strings.TrimSpace(sk) == "" || strings.TrimSpace(sd) == "" {
-		return "", "", 0, 0, false
+	if strings.TrimSpace(sk) == "" || strings.TrimSpace(sd) == "" || strings.TrimSpace(tt) == "" || strings.TrimSpace(eu) == "" {
+		return "", "", 0, 0, "", "", "", false
 	}
-	return strings.TrimSpace(sk), strings.TrimSpace(sd), panNo, epNo, true
+	return strings.TrimSpace(sk), strings.TrimSpace(sd), panNo, epNo, strings.TrimSpace(tt), strings.TrimSpace(fg), strings.TrimSpace(eu), true
 }
 
 func encodeSiteIDPart(raw string) string {
@@ -263,4 +272,12 @@ func decodeSiteIDPart(raw string) (string, bool) {
 		return "", false
 	}
 	return out, true
+}
+
+func decodeSiteIDPartAllowEmpty(raw string) (string, bool) {
+	bs, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(raw))
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(bs)), true
 }

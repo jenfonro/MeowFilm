@@ -590,20 +590,23 @@ func resolveSiteEpisodePlaybackStreamTarget(database *db.DB, userID int64, ref *
 	if err != nil || user == nil {
 		return nil, false, err
 	}
-	pans, err := fetchResolvedSiteDetailPans(database, userID, ref.SiteKey, ref.SiteDetail)
-	if err != nil || ref.Pan <= 0 || ref.Episode <= 0 || ref.Pan > len(pans) {
-		return nil, false, err
-	}
-	pan := pans[ref.Pan-1]
-	if ref.Episode > len(pan.Episodes) {
+	if strings.TrimSpace(ref.SiteKey) == "" || strings.TrimSpace(ref.SiteDetail) == "" || strings.TrimSpace(ref.SiteTitle) == "" || strings.TrimSpace(ref.SiteEpisodeURL) == "" || ref.Pan <= 0 || ref.Episode <= 0 {
 		return nil, false, nil
 	}
-	ep := pan.Episodes[ref.Episode-1]
+	pan := resolvedSitePan{
+		RawLabel:     strings.TrimSpace(ref.SitePlayFlag),
+		DisplayLabel: "",
+		PanMock:      strings.TrimSpace(smart.PanMockProviderFromLabel(strings.TrimSpace(ref.SitePlayFlag))) != "",
+	}
+	ep := catpawrunner.Episode{
+		URL:  strings.TrimSpace(ref.SiteEpisodeURL),
+		Flag: strings.TrimSpace(ref.SitePlayFlag),
+	}
 	rawURL := strings.TrimSpace(ep.URL)
 	if rawURL == "" {
 		return nil, false, nil
 	}
-	flag := firstNonEmptyString(strings.TrimSpace(ep.Flag), strings.TrimSpace(pan.RawLabel))
+	flag := firstNonEmptyString(strings.TrimSpace(ref.SitePlayFlag), strings.TrimSpace(ep.Flag))
 	finalURL, finalHeaders, picked, err := resolveSiteEpisodeDirectPlayback(database, user, ref, ep, flag)
 	if err != nil || strings.TrimSpace(finalURL) == "" || picked == nil {
 		return nil, false, err
@@ -619,6 +622,9 @@ func buildSiteEpisodePlaybackStreamTarget(database *db.DB, user *smart.User, ref
 	targetURL := strings.TrimSpace(finalURL)
 	log.Printf("[emby][playback_target] item=%s mode=%s headers=%d url=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(adaptMode), len(copyStringMap(finalHeaders)), targetURL)
 	seriesName := resolveSiteSeriesName(database, ref.SiteKey, ref.SiteDetail, siteDetailMeta{})
+	if seriesName == "" {
+		seriesName = strings.TrimSpace(ref.SiteTitle)
+	}
 	displayName := siteEpisodeDisplayName(ep, pan.RawLabel, pan.PanMock, seriesName, ref.Episode)
 	if displayName == "" {
 		displayName = siteEpisodeFileName(ep, "", ref.Episode)
@@ -660,6 +666,9 @@ func resolveSiteEpisodeDirectPlayback(database *db.DB, user *smart.User, ref *it
 	provider := strings.TrimSpace(smart.PlayFlagProviderID(panFlag))
 	if provider != "" {
 		finalURL, finalHeaders, err = smart.ResolvePanProviderPlayback(database, user, provider, panFlag, rawURL, nil, "/MeowFilm")
+		if err != nil {
+			log.Printf("[emby][site_playback_error] item=%s provider=%s panFlag=%s url=%s err=%v", strings.TrimSpace(ref.RawID), provider, panFlag, smart.ShortURLForLog(rawURL), err)
+		}
 	} else {
 		apiBase := strings.TrimSpace(smart.ResolveCatApiBaseForUser(database, user))
 		if apiBase == "" {
@@ -676,6 +685,7 @@ func resolveSiteEpisodeDirectPlayback(database *db.DB, user *smart.User, ref *it
 		}
 		playRaw, playErr := catpawrunner.RequestPlayWithTimeout(apiBase, strings.TrimSpace(user.Username), playPayload, 8*time.Second)
 		if playErr != nil {
+			log.Printf("[emby][site_playback_error] item=%s provider=site panFlag=%s url=%s err=%v", strings.TrimSpace(ref.RawID), panFlag, smart.ShortURLForLog(rawURL), playErr)
 			return "", nil, nil, playErr
 		}
 		payloadOut := smart.BuildCatpawPlayPayload(playRaw, apiBase, strings.TrimSpace(user.Username))
@@ -688,9 +698,13 @@ func resolveSiteEpisodeDirectPlayback(database *db.DB, user *smart.User, ref *it
 	if rawName == "" {
 		rawName = strings.TrimSpace(siteEpisodeFileName(ep, "", maxInt(1, ref.Episode)))
 	}
+	siteName := resolveSiteSeriesName(database, ref.SiteKey, ref.SiteDetail, siteDetailMeta{})
+	if siteName == "" {
+		siteName = strings.TrimSpace(ref.SiteTitle)
+	}
 	return strings.TrimSpace(finalURL), copyStringMap(finalHeaders), &smart.PlaybackPickedMeta{
 		SiteKey:    strings.TrimSpace(ref.SiteKey),
-		SiteName:   resolveSiteSeriesName(database, ref.SiteKey, ref.SiteDetail, siteDetailMeta{}),
+		SiteName:   siteName,
 		SiteDetail: strings.TrimSpace(ref.SiteDetail),
 		PanFlag:    panFlag,
 		Provider:   provider,

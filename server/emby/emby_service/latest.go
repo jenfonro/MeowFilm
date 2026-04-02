@@ -466,7 +466,7 @@ func historyRef(database *db.DB, row db.PlayHistoryRow) historyGroupRef {
 	}
 	pid := strings.TrimSpace(row.PlaybackItemID)
 	if pid != "" {
-		if siteKey, siteDetail, _, _, ok := parseSiteEpisodeID(pid); ok {
+		if siteKey, siteDetail, _, _, _, _, _, ok := parseSiteEpisodeID(pid); ok {
 			return historyGroupRef{Kind: "site", GroupID: buildSiteSeriesID(siteKey, siteDetail)}
 		}
 		if siteKey, siteDetail, _, ok := parseSiteSeasonID(pid); ok {
