@@ -1,6 +1,7 @@
 package smart
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -450,4 +451,17 @@ func smartLogSiteName(siteKey string, siteName string) string {
 		name = "unknown"
 	}
 	return name
+}
+
+func smartAppendLogMatchSuffix(base string, matchShowName string, matchRawName string) string {
+	msg := strings.TrimSpace(base)
+	show := strings.TrimSpace(matchShowName)
+	raw := strings.TrimSpace(matchRawName)
+	if show != "" {
+		msg += fmt.Sprintf(" matchShowName=%s", show)
+	}
+	if raw != "" {
+		msg += fmt.Sprintf(" matchRawName=%s", raw)
+	}
+	return msg
 }
