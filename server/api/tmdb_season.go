@@ -28,7 +28,7 @@ func handleAPITMDBSeason(w http.ResponseWriter, r *http.Request, database *db.DB
 		return
 	}
 
-	data, err := tmdb.GetRawTVSeasonPayload(database, tmdbID, seasonNo)
+	data, fromCache, err := tmdb.GetRawTVSeasonPayloadWithCache(database, tmdbID, seasonNo)
 	if data == nil {
 		payload := map[string]any{
 			"error": "TMDB 请求失败",
@@ -51,6 +51,7 @@ func handleAPITMDBSeason(w http.ResponseWriter, r *http.Request, database *db.DB
 		writeJSON(w, http.StatusBadGateway, payload)
 		return
 	}
+	data["cache"] = fromCache
 
 	writeJSON(w, http.StatusOK, data)
 }

@@ -256,6 +256,39 @@ func GetRawDetailPayload(database *db.DB, mediaType string, tmdbID int) (map[str
 	return out, nil
 }
 
+func GetRawDetailPayloadWithCache(database *db.DB, mediaType string, tmdbID int) (map[string]any, bool, error) {
+	if mediaType != "tv" && mediaType != "movie" {
+		return nil, false, fmt.Errorf("invalid mediaType")
+	}
+	if tmdbID <= 0 || database == nil {
+		return nil, false, fmt.Errorf("invalid tmdbID/db")
+	}
+	var (
+		err      error
+		refreshed bool
+	)
+	if mediaType == "movie" {
+		_, refreshed, err = ensureMovieDetailFresh(database, tmdbID)
+	} else {
+		_, refreshed, err = ensureTVDetailFresh(database, tmdbID)
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	raw, err := database.ReadTMDBRawDetailJSON(mediaType, tmdbID)
+	if err != nil {
+		return nil, false, err
+	}
+	if strings.TrimSpace(raw) == "" {
+		return nil, !refreshed, nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, false, err
+	}
+	return out, !refreshed, nil
+}
+
 func GetRawDetailJSON(database *db.DB, mediaType string, tmdbID int) ([]byte, error) {
 	if mediaType != "tv" && mediaType != "movie" {
 		return nil, fmt.Errorf("invalid mediaType")
@@ -371,6 +404,28 @@ func GetRawTVSeasonPayload(database *db.DB, tmdbID int, season int) (map[string]
 		return nil, err
 	}
 	return out, nil
+}
+
+func GetRawTVSeasonPayloadWithCache(database *db.DB, tmdbID int, season int) (map[string]any, bool, error) {
+	if database == nil || tmdbID <= 0 || season < 0 {
+		return nil, false, fmt.Errorf("invalid args")
+	}
+	_, refreshed, err := ensureTVSeasonFresh(database, tmdbID, season)
+	if err != nil {
+		return nil, false, err
+	}
+	raw, err := database.ReadTMDBRawSeasonDetailJSON(tmdbID, season)
+	if err != nil {
+		return nil, false, err
+	}
+	if strings.TrimSpace(raw) == "" {
+		return nil, !refreshed, nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, false, err
+	}
+	return out, !refreshed, nil
 }
 
 func GetRawTVSeasonJSON(database *db.DB, tmdbID int, season int) ([]byte, error) {
