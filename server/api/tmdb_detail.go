@@ -35,7 +35,7 @@ func handleAPITMDBDetail(w http.ResponseWriter, r *http.Request, database *db.DB
 		return
 	}
 
-	data, err := tmdb.GetRawDetailPayload(database, mediaType, id)
+	data, fromCache, err := tmdb.GetRawDetailPayloadWithCache(database, mediaType, id)
 	if data == nil {
 		payload := map[string]any{
 			"error": "TMDB 请求失败",
@@ -58,6 +58,7 @@ func handleAPITMDBDetail(w http.ResponseWriter, r *http.Request, database *db.DB
 		writeJSON(w, http.StatusBadGateway, payload)
 		return
 	}
+	data["cache"] = fromCache
 
 	writeJSON(w, http.StatusOK, data)
 }

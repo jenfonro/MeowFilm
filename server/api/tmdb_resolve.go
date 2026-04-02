@@ -51,5 +51,6 @@ func handleAPITMDBResolve(w http.ResponseWriter, r *http.Request, database *db.D
 		"type":  mediaType,
 		"title": title,
 		"year":  year,
+		"cache": true,
 	})
 }

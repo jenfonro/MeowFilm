@@ -43,7 +43,7 @@ const tmdbSearchRawCacheTTL = 6 * time.Hour
 var tmdbSearchRawCache = cache.NewTTLInflightCache[[]byte](tmdbSearchRawCacheTTL, 1024)
 
 func SearchMulti(database *db.DB, query string) ([]SearchItem, error) {
-	rawBody, err := fetchMultiSearchRaw(database, query)
+	rawBody, _, err := fetchMultiSearchRaw(database, query)
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +55,7 @@ func SearchMulti(database *db.DB, query string) ([]SearchItem, error) {
 }
 
 func SearchMultiRaw(database *db.DB, query string) ([]byte, error) {
-	rawBody, err := fetchMultiSearchRaw(database, query)
+	rawBody, _, err := fetchMultiSearchRaw(database, query)
 	if err != nil {
 		return nil, err
 	}
@@ -69,14 +69,14 @@ func SearchMultiRaw(database *db.DB, query string) ([]byte, error) {
 	return rawBody, nil
 }
 
-func fetchMultiSearchRaw(database *db.DB, query string) ([]byte, error) {
+func fetchMultiSearchRaw(database *db.DB, query string) ([]byte, bool, error) {
 	q := strings.TrimSpace(query)
 	if q == "" {
-		return nil, errors.New("empty query")
+		return nil, false, errors.New("empty query")
 	}
 	token, tokenKind := resolveTMDBToken(database)
 	if token == "" || tokenKind == "" {
-		return nil, errors.New("tmdb not configured")
+		return nil, false, errors.New("tmdb not configured")
 	}
 	u, _ := url.Parse(joinTMDBAPI(resolveTMDBAPIBase(database), "search/multi"))
 	params := u.Query()
@@ -95,7 +95,7 @@ func fetchMultiSearchRaw(database *db.DB, query string) ([]byte, error) {
 	u.RawQuery = params.Encode()
 
 	cacheKey := buildTMDBSearchCacheKey(q, tmdbIncludeAdult(database), tmdbDetailLanguage(database), tmdbRegion(database))
-	body, _, err := tmdbSearchRawCache.Do(cacheKey, func() ([]byte, error) {
+	body, fromCache, err := tmdbSearchRawCache.Do(cacheKey, func() ([]byte, error) {
 		req, err := http.NewRequest(http.MethodGet, u.String(), nil)
 		if err != nil {
 			return nil, err
@@ -116,9 +116,9 @@ func fetchMultiSearchRaw(database *db.DB, query string) ([]byte, error) {
 		return io.ReadAll(resp.Body)
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return body, nil
+	return body, fromCache, nil
 }
 
 func rememberMultiSearchResults(database *db.DB, raw *tmdbMultiSearchResponse) ([]SearchItem, error) {
