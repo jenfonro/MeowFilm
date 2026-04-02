@@ -9,6 +9,7 @@ import (
 
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/cache"
+	"github.com/jenfonro/meowfilm/server/catpawrunner"
 	metadata_tmdb "github.com/jenfonro/meowfilm/server/metadata/tmdb"
 	"github.com/jenfonro/meowfilm/server/smart"
 )
@@ -116,110 +117,119 @@ func buildSiteSeriesDetailPayload(database *db.DB, userID int64, serverID string
 }
 
 func buildSiteEpisodeDetailPayload(database *db.DB, userID int64, serverID string, ref *itemRef) (any, bool, error) {
-	if database == nil || ref == nil || strings.TrimSpace(ref.SiteKey) == "" || strings.TrimSpace(ref.SiteDetail) == "" || ref.Pan <= 0 || ref.Episode <= 0 {
+	if database == nil || ref == nil || strings.TrimSpace(ref.SiteKey) == "" || strings.TrimSpace(ref.SiteDetail) == "" || strings.TrimSpace(ref.SiteTitle) == "" || ref.Pan <= 0 || ref.Episode <= 0 {
 		return nil, false, nil
 	}
-	seriesRef := &itemRef{
-		Kind:       "item",
-		SubKind:    "series",
-		MediaType:  "tv",
-		Source:     "site",
-		RawID:      buildSiteSeriesID(ref.SiteKey, ref.SiteDetail),
-		SiteKey:    ref.SiteKey,
-		SiteDetail: ref.SiteDetail,
+	meta, err := fetchSiteDetailMeta(database, userID, ref.SiteKey, ref.SiteDetail)
+	if err != nil {
+		return nil, false, err
 	}
-	seasonRef := &itemRef{
-		Kind:       "item",
-		SubKind:    "season",
-		MediaType:  "tv",
-		Source:     "site",
-		RawID:      buildSiteSeasonID(ref.SiteKey, ref.SiteDetail, ref.Pan),
-		SiteKey:    ref.SiteKey,
-		SiteDetail: ref.SiteDetail,
-		Pan:        ref.Pan,
+	seriesName := strings.TrimSpace(ref.SiteTitle)
+	if seriesName == "" {
+		seriesName = resolveSiteSeriesName(database, ref.SiteKey, ref.SiteDetail, meta)
 	}
-	items, ok, err := buildSiteShowEpisodeSources(database, userID, serverID, seriesRef, seasonRef)
-	if err != nil || !ok {
-		return nil, ok, err
+	if seriesName == "" {
+		seriesName = strings.TrimSpace(meta.Name)
 	}
-	for _, item := range items {
-		if item.IndexNumber != ref.Episode {
-			continue
-		}
-		row, _ := database.GetPlayHistoryLatestByPlaybackItemID(userID, item.ID)
-		dateModified := item.DateCreated
-		if dateModified == "" {
-			dateModified = EmbyZeroTimeString()
-		}
-		fileName := filepath.Base(strings.TrimSpace(item.Path))
-		if fileName == "." || fileName == "/" || fileName == "" {
-			fileName = strings.TrimSpace(item.Name)
-		}
-		return EpisodeDetailItemDTO{
-			Name:                    item.Name,
-			ServerID:                item.ServerID,
-			ID:                      item.ID,
-			Etag:                    item.Etag,
-			DateCreated:             item.DateCreated,
-			DateModified:            dateModified,
-			CanDelete:               true,
-			CanDownload:             item.CanDownload,
-			PresentationUniqueKey:   StablePresentationUniqueKey(item.ID),
-			SupportsSync:            item.SupportsSync,
-			Container:               item.Container,
-			SortName:                item.SortName,
-			ForcedSortName:          item.SortName,
-			PremiereDate:            item.PremiereDate,
-			ExternalURLs:            EmptyExternalURLs(),
-			MediaSources:            item.MediaSources,
-			AlternateMediaSources:   item.AlternateMediaSources,
-			Path:                    item.Path,
-			Overview:                item.Overview,
-			Taglines:                EmptyStrings(),
-			Genres:                  item.Genres,
-			CommunityRating:         item.CommunityRating,
-			OfficialRating:          item.OfficialRating,
-			RunTimeTicks:            item.RunTimeTicks,
-			Size:                    item.Size,
-			FileName:                fileName,
-			Bitrate:                 item.Bitrate,
-			ProductionYear:          item.ProductionYear,
-			IndexNumber:             item.IndexNumber,
-			ParentIndexNumber:       item.ParentIndexNumber,
-			RemoteTrailers:          EmptyRemoteTrailers(),
-			ProviderIDs:             item.ProviderIDs,
-			IsFolder:                item.IsFolder,
-			ParentID:                item.ParentID,
-			Type:                    item.Type,
-			People:                  item.People,
-			Studios:                 item.Studios,
-			GenreItems:              item.GenreItems,
-			TagItems:                EmptyNamedIDs(),
-			ParentLogoItemID:        item.ParentLogoItemID,
-			ParentBackdropItemID:    item.ParentBackdropItemID,
-			ParentBackdropImageTags: item.ParentBackdropImageTags,
-			LocalTrailerCount:       0,
-			UserData:                BuildMovieDetailUserData(row),
-			SeriesName:              item.SeriesName,
-			SeriesID:                item.SeriesID,
-			SeasonID:                item.SeasonID,
-			DisplayPreferencesID:    StableDisplayPreferencesID(item.ID),
-			PrimaryImageAspectRatio: nextUpPrimaryAspectRatio,
-			SeriesPrimaryImageTag:   item.SeriesPrimaryImageTag,
-			SeasonName:              item.SeasonName,
-			MediaStreams:            item.MediaStreams,
-			ImageTags:               item.ImageTags,
-			BackdropImageTags:       item.BackdropImageTags,
-			ParentLogoImageTag:      item.ParentLogoImageTag,
-			Chapters:                item.Chapters,
-			MediaType:               item.MediaType,
-			LockedFields:            EmptyLockedFields(),
-			LockData:                false,
-			Width:                   0,
-			Height:                  0,
-		}, true, nil
+	if seriesName == "" {
+		return nil, false, nil
 	}
-	return nil, false, nil
+	ep := catpawrunner.Episode{
+		Name: "",
+		URL:  strings.TrimSpace(ref.SiteEpisodeURL),
+		Flag: strings.TrimSpace(ref.SitePlayFlag),
+	}
+	panMock := strings.TrimSpace(smart.PanMockProviderFromLabel(strings.TrimSpace(ref.SitePlayFlag))) != ""
+	name := siteEpisodeDisplayName(ep, strings.TrimSpace(ref.SitePlayFlag), panMock, seriesName, ref.Episode)
+	if name == "" {
+		name = siteEpisodeFileName(ep, "", ref.Episode)
+	}
+	rawFileName := siteEpisodeFileName(ep, name, ref.Episode)
+	container := siteEpisodeContainerFromName(rawFileName)
+	fileName := siteEpisodePlayableFileName(rawFileName, container)
+	path := VirtualEpisodePath(seriesName, meta.Year, ref.Pan, fileName)
+	itemID := strings.TrimSpace(ref.RawID)
+	row, _ := database.GetPlayHistoryLatestByPlaybackItemID(userID, itemID)
+	seriesID := buildSiteSeriesID(ref.SiteKey, ref.SiteDetail)
+	seasonID := buildSiteSeasonID(ref.SiteKey, ref.SiteDetail, ref.Pan)
+	dateCreated := ProtocolCreatedDate(0)
+	dateModified := dateCreated
+	if dateModified == "" {
+		dateModified = EmbyZeroTimeString()
+	}
+	chapters := EmptyDetailChapters()
+	mediaSources := detailMediaSources(itemID, path, fileName, 0, firstNonEmptyString(container, "mp4"), chapters)
+	mediaStreams := EmptyAnySlice()
+	if len(mediaSources) > 0 && mediaSources[0].MediaStreams != nil {
+		mediaStreams = mediaSources[0].MediaStreams
+	}
+	fileBase := filepath.Base(strings.TrimSpace(path))
+	if fileBase == "." || fileBase == "/" || fileBase == "" {
+		fileBase = strings.TrimSpace(name)
+	}
+	return EpisodeDetailItemDTO{
+		Name:                    name,
+		ServerID:                strings.TrimSpace(serverID),
+		ID:                      itemID,
+		Etag:                    StableItemEtag(itemID),
+		DateCreated:             dateCreated,
+		DateModified:            dateModified,
+		CanDelete:               true,
+		CanDownload:             true,
+		PresentationUniqueKey:   StablePresentationUniqueKey(itemID),
+		SupportsSync:            true,
+		Container:               firstNonEmptyString(container, "mp4"),
+		SortName:                SortNameOrName(name),
+		ForcedSortName:          SortNameOrName(name),
+		PremiereDate:            "",
+		ExternalURLs:            EmptyExternalURLs(),
+		MediaSources:            mediaSources,
+		AlternateMediaSources:   EmptyAnySlice(),
+		Path:                    path,
+		Overview:                "",
+		Taglines:                EmptyStrings(),
+		Genres:                  EmptyStrings(),
+		CommunityRating:         0,
+		OfficialRating:          "",
+		RunTimeTicks:            0,
+		Size:                    0,
+		FileName:                fileBase,
+		Bitrate:                 0,
+		ProductionYear:          meta.Year,
+		IndexNumber:             ref.Episode,
+		ParentIndexNumber:       ref.Pan,
+		RemoteTrailers:          EmptyRemoteTrailers(),
+		ProviderIDs:             EmptyAnyMap(),
+		IsFolder:                false,
+		ParentID:                seasonID,
+		Type:                    "Episode",
+		People:                  EmptyPeople(),
+		Studios:                 EmptyNamedIDs(),
+		GenreItems:              EmptyNamedIDs(),
+		TagItems:                EmptyNamedIDs(),
+		ParentLogoItemID:        seriesID,
+		ParentBackdropItemID:    seriesID,
+		ParentBackdropImageTags: EmptyStrings(),
+		LocalTrailerCount:       0,
+		UserData:                BuildMovieDetailUserData(row),
+		SeriesName:              seriesName,
+		SeriesID:                seriesID,
+		SeasonID:                seasonID,
+		DisplayPreferencesID:    StableDisplayPreferencesID(itemID),
+		PrimaryImageAspectRatio: nextUpPrimaryAspectRatio,
+		SeriesPrimaryImageTag:   SeriesPrimaryImageTag(seriesID),
+		SeasonName:              fmt.Sprintf("Season %d", ref.Pan),
+		MediaStreams:            mediaStreams,
+		ImageTags:               ImageTagsForItem(itemID, true),
+		BackdropImageTags:       EmptyStrings(),
+		ParentLogoImageTag:      ParentLogoImageTag(seriesID),
+		Chapters:                chapters,
+		MediaType:               "Video",
+		LockedFields:            EmptyLockedFields(),
+		LockData:                false,
+		Width:                   0,
+		Height:                  0,
+	}, true, nil
 }
 
 func fetchSiteDetailMeta(database *db.DB, userID int64, siteKey string, siteDetail string) (siteDetailMeta, error) {
