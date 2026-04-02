@@ -2,6 +2,7 @@ package emby_service
 
 import (
 	"encoding/json"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -582,6 +583,14 @@ func searchTMDBItems(database *db.DB, query string, typesSet map[string]struct{}
 	if err != nil {
 		return nil, err
 	}
+	if len(results) == 0 {
+		if fallback := stripTrailingSearchDigits(query); fallback != "" && fallback != query {
+			results, err = metadata_tmdb.SearchMulti(database, fallback)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
 	type row struct {
 		Item     metadata_tmdb.SearchItem
 		Score    int
@@ -623,6 +632,24 @@ func searchTMDBItems(database *db.DB, query string, typesSet map[string]struct{}
 		out = append(out, row.Item)
 	}
 	return out, nil
+}
+
+var searchTrailingDigitsRe = regexp.MustCompile(`^(.*?)(\d{1,2})\s*$`)
+
+func stripTrailingSearchDigits(term string) string {
+	raw := strings.TrimSpace(term)
+	if raw == "" {
+		return ""
+	}
+	match := searchTrailingDigitsRe.FindStringSubmatch(raw)
+	if len(match) < 3 {
+		return ""
+	}
+	base := strings.TrimSpace(match[1])
+	if base == "" {
+		return ""
+	}
+	return base
 }
 
 func searchSiteItems(database *db.DB, userID int64, query string, maxWait time.Duration) []searchSiteHit {
