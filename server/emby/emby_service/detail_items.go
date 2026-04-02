@@ -465,10 +465,12 @@ func buildEpisodeDetailPayload(database *db.DB, userID int64, serverID string, r
 		ok    bool
 		err   error
 	)
+	row, _ := database.GetPlayHistoryLatestByTMDB(userID, "tv", ref.NumericID)
+	includeUnaired := row != nil && row.PreOrder
 	if strings.TrimSpace(ref.Variant) == "settings" {
 		items, ok, err = buildTMDBSettingsEpisodeSources(database, userID, serverID, seriesRef)
 	} else {
-		items, ok, err = buildTMDBSeasonEpisodeSources(database, userID, serverID, seriesRef, ref.Pan, false)
+		items, ok, err = buildTMDBSeasonEpisodeSources(database, userID, serverID, seriesRef, ref.Pan, includeUnaired)
 	}
 	if err != nil || !ok {
 		return nil, ok, err
@@ -477,7 +479,6 @@ func buildEpisodeDetailPayload(database *db.DB, userID int64, serverID string, r
 		if item.IndexNumber != ref.Episode {
 			continue
 		}
-		row, _ := database.GetPlayHistoryLatestByTMDB(userID, "tv", ref.NumericID)
 		if !playHistoryMatchesTMDBEpisode(row, ref.NumericID, ref.Pan, ref.Episode) {
 			row = nil
 		}
