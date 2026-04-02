@@ -741,11 +741,11 @@ func ConsumePlaybackOffersAndBuildTarget(database *db.DB, userID int64, target P
 		if len(target.Offers) > 0 {
 			for _, offer := range target.Offers {
 				built, ok, buildErr := tryBuildPlaybackTargetFromOffer(database, userID, user, target, cacheKey, r, offer)
-				if buildErr != nil {
-					return nil, false, buildErr
-				}
 				if ok && built != nil {
 					return built, true, nil
+				}
+				if buildErr != nil {
+					continue
 				}
 			}
 			return nil, false, nil
@@ -762,14 +762,14 @@ func ConsumePlaybackOffersAndBuildTarget(database *db.DB, userID int64, target P
 				return nil, false, nil
 			}
 			built, ok, buildErr := tryBuildPlaybackTargetFromOffer(database, userID, user, target, cacheKey, r, offer)
-			if buildErr != nil {
-				return nil, false, buildErr
-			}
 			if ok && built != nil {
 				MarkPlaybackDone(strings.TrimSpace(target.PlaySessionID), strings.TrimSpace(target.MediaSourceID), strings.TrimSpace(cacheKey))
 				return built, true, nil
 			}
 			MarkPlaybackOfferFailed(strings.TrimSpace(target.PlaySessionID), strings.TrimSpace(target.MediaSourceID), strings.TrimSpace(cacheKey), offer)
+			if buildErr != nil {
+				continue
+			}
 		}
 	})
 	if !ok || resolved == nil {

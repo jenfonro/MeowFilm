@@ -798,7 +798,7 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 		if rawPans == nil {
 			rawPans = []catpawrunner.Pan{}
 		}
-		smartLogDetailOK(src.SiteKey, src.SiteName, src.SiteDetail, rawPans)
+		smartLogDetailSummary(src.SiteKey, src.SiteName, src.SiteDetail, rawPans)
 		resolvedPans := rawPans
 		if entry.PanMockEnabled && resolvedPans != nil {
 			resolved, accessMap := smartResolvePanMockDetailPans(database, src.SiteKey, src.SiteName, 0, primarySeasons, tmdbHasMultiSeason, rawCleanRules, rawEpisodeRules, resolvedPans)
@@ -806,7 +806,6 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 			if len(accessMap) > 0 {
 				entry.PanMock189AccessByShareID = accessMap
 			}
-			smartLogDetailPanMock(src.SiteKey, src.SiteName, src.SiteDetail, resolvedPans)
 		}
 		entry.Pans = resolvedPans
 		primaryFirstSeasonCount := 0
@@ -1286,22 +1285,23 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 		if headers != nil {
 			hc = len(headers)
 		}
-		smartDebugPrintf(
-			"[smart][play_try_status] flow=%d id=%d ms=%d site=(%s) panFlag=%s provider=%s status=%s reason=%s headers=%d url=%s err=%s spider=%s siteDetail=%s",
-			flowID,
-			tryID,
-			time.Since(tryStart).Milliseconds(),
-			smartLogSiteName(cand.SiteKey, cand.SiteName),
-			strings.TrimSpace(cand.PanFlag),
-			smartPanMockProviderID(database, strings.TrimSpace(cand.PanFlag)),
-			strings.TrimSpace(status),
-			strings.TrimSpace(reason),
-			hc,
-			u,
-			errMsg,
-			strings.TrimSpace(cand.SpiderAPI),
-			strings.TrimSpace(cand.SiteDetail),
-		)
+		msg := "[smart][play_try_status] flow=" + strconv.FormatUint(flowID, 10) +
+			" id=" + strconv.FormatUint(tryID, 10) +
+			" ms=" + strconv.FormatInt(time.Since(tryStart).Milliseconds(), 10) +
+			" site=(" + smartLogSiteName(cand.SiteKey, cand.SiteName) + ")" +
+			" panFlag=" + strings.TrimSpace(cand.PanFlag) +
+			" status=" + strings.TrimSpace(status) +
+			" reason=" + strings.TrimSpace(reason) +
+			" headers=" + strconv.Itoa(hc) +
+			" spider=" + strings.TrimSpace(cand.SpiderAPI) +
+			" siteDetail=" + strings.TrimSpace(cand.SiteDetail)
+		if u != "" {
+			msg += " url=" + u
+		}
+		if errMsg != "" {
+			msg += " err=" + errMsg
+		}
+		smartDebugPrintf("%s", msg)
 	}
 	if smartDebugLogEnabled() {
 		rawNames := smartExtractRawNamesFromEpisodeURL(cand.Ep.URL)
@@ -1309,18 +1309,14 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 		if len(rawNames) > 0 {
 			raw0 = strings.TrimSpace(rawNames[0])
 		}
-		smartDebugPrintf(
-			"[smart][play_try] flow=%d id=%d site=(%s) panFlag=%s provider=%s matchShowName=%s matchRawName=%s spider=%s siteDetail=%s",
-			flowID,
-			tryID,
-			smartLogSiteName(cand.SiteKey, cand.SiteName),
-			strings.TrimSpace(cand.PanFlag),
-			smartPanMockProviderID(database, strings.TrimSpace(cand.PanFlag)),
-			strings.TrimSpace(cand.Ep.Name),
-			raw0,
-			strings.TrimSpace(cand.SpiderAPI),
-			strings.TrimSpace(cand.SiteDetail),
-		)
+		msg := "[smart][play_try] flow=" + strconv.FormatUint(flowID, 10) +
+			" id=" + strconv.FormatUint(tryID, 10) +
+			" site=(" + smartLogSiteName(cand.SiteKey, cand.SiteName) + ")" +
+			" panFlag=" + strings.TrimSpace(cand.PanFlag) +
+			" spider=" + strings.TrimSpace(cand.SpiderAPI) +
+			" siteDetail=" + strings.TrimSpace(cand.SiteDetail)
+		msg = smartAppendLogMatchSuffix(msg, strings.TrimSpace(cand.Ep.Name), raw0)
+		smartDebugPrintf("%s", msg)
 	}
 
 	type playResult struct {
@@ -1851,7 +1847,13 @@ func (s *smartStreamingOfferScheduler) Push(off smartCandidateOffer) {
 	}
 	s.seen[key] = struct{}{}
 	s.items = append(s.items, off)
+	ready := s.drainLocked()
 	s.mu.Unlock()
+	for _, item := range ready {
+		if s.emit != nil {
+			s.emit(item.offer, item.tier)
+		}
+	}
 }
 
 func (s *smartStreamingOfferScheduler) drainLocked() []struct {
@@ -2037,19 +2039,15 @@ func smartCollectPlaybackOffersFromTMDBAligned(
 			for _, key := range settings.OrderedRules {
 				ordered = append(ordered, string(key))
 			}
-			smartDebugPrintf(
-				"[smart][offer_enqueue] stage=%s site=(%s) panFlag=%s provider=%s quality=%d pan=%d keyword=%d order=%s matchShowName=%s matchRawName=%s",
-				strings.TrimSpace(string(off.Cand.Stage)),
-				smartLogSiteName(off.Cand.SiteKey, off.Cand.SiteName),
-				strings.TrimSpace(off.Cand.PanFlag),
-				smartPanMockProviderID(database, strings.TrimSpace(off.Cand.PanFlag)),
-				score.QualityScore,
-				score.PanScore,
-				score.KeywordScore,
-				strings.Join(ordered, ","),
-				strings.TrimSpace(off.Cand.Ep.Name),
-				strings.TrimSpace(smartFirstRawNameFromURL(off.Cand.Ep.URL)),
-			)
+			msg := "[smart][offer_enqueue] stage=" + strings.TrimSpace(string(off.Cand.Stage)) +
+				" site=(" + smartLogSiteName(off.Cand.SiteKey, off.Cand.SiteName) + ")" +
+				" panFlag=" + strings.TrimSpace(off.Cand.PanFlag) +
+				" quality=" + strconv.Itoa(score.QualityScore) +
+				" pan=" + strconv.Itoa(score.PanScore) +
+				" keyword=" + strconv.Itoa(score.KeywordScore) +
+				" order=" + strings.Join(ordered, ",")
+			msg = smartAppendLogMatchSuffix(msg, strings.TrimSpace(off.Cand.Ep.Name), strings.TrimSpace(smartFirstRawNameFromURL(off.Cand.Ep.URL)))
+			smartDebugPrintf("%s", msg)
 		}
 		if emit != nil {
 			emit(off, tier)
@@ -2148,61 +2146,69 @@ func smartCollectPlaybackOffersFromTMDBAligned(
 			if blockedEntry != nil && len(rawPans) > 0 {
 				rawPans = smartFilterPansByBlockedFlags(rawPans, blockedEntry.PanFlags)
 			}
-			smartLogDetailOK(src.SiteKey, src.SiteName, src.SiteDetail, rawPans)
+			smartLogDetailSummary(src.SiteKey, src.SiteName, src.SiteDetail, rawPans)
 			resolvedPans := make([]catpawrunner.Pan, len(rawPans))
 			copy(resolvedPans, rawPans)
 			accessByShareID := map[string]string{}
+			emitCandidatesFromPans := func(pans []catpawrunner.Pan, access map[string]string) {
+				if len(pans) == 0 {
+					return
+				}
+				cands := []smartCandidate{}
+				if isMovieMode {
+					cands = smartBuildMovieCandidatesFromPans(src, pans, settings, rawCleanRules, rawMovieRules)
+				} else {
+					epMap, epLoose := smartBuildEpisodeMapsFromPans(src, pans, seasonsForMapping, singleBaselineSeasons, hasMulti, settings, rawCleanRules, rawEpisodeRules, allowSingleBaseline, primaryKind)
+					cands = smartCandidatesForWant(epMap, epLoose, src, seasonsForMapping, hasMulti, preferSeasonNo, want, settings, requireSeasoned, allowResolutionModes)
+				}
+				for _, c := range cands {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+					scheduler.Push(smartCandidateOffer{Cand: c, AccessByShare: access})
+				}
+			}
 			if smartIsPanMockEnabled(detailRaw) {
 				if blockedEntry != nil && len(resolvedPans) > 0 {
 					resolvedPans = smartFilterPansByBlockedFlags(resolvedPans, blockedEntry.PanFlags)
 				}
+				detailReadyPans := make([]catpawrunner.Pan, 0, len(resolvedPans))
+				for _, pan := range resolvedPans {
+					if smartPanMockProviderFromLabel(strings.TrimSpace(pan.Label)) != "" {
+						continue
+					}
+					detailReadyPans = append(detailReadyPans, pan)
+				}
+				emitCandidatesFromPans(detailReadyPans, nil)
 				var pansMu sync.Mutex
-				panEmitAllowed := make([]bool, len(resolvedPans))
 				resolved, access := smartResolvePanMockDetailPansIncremental(database, src.SiteKey, src.SiteName, want, seasonsForMapping, hasMulti, rawCleanRules, rawEpisodeRules, resolvedPans, func(panIndex int, episodes []catpawrunner.Episode, accessDelta map[string]string, emitAllowed bool) {
 					pansMu.Lock()
-					defer pansMu.Unlock()
+					var nextPan catpawrunner.Pan
+					shouldEmit := false
 					if panIndex >= 0 && panIndex < len(resolvedPans) {
-						nextPan := resolvedPans[panIndex]
+						nextPan = resolvedPans[panIndex]
 						nextPan.Episodes = episodes
 						resolvedPans[panIndex] = nextPan
-						panEmitAllowed[panIndex] = emitAllowed
+						shouldEmit = smartPanMockProviderFromLabel(strings.TrimSpace(nextPan.Label)) != ""
 					}
 					for sid, acc := range accessDelta {
 						accessByShareID[sid] = acc
 					}
+					pansMu.Unlock()
+					if shouldEmit {
+						emitCandidatesFromPans([]catpawrunner.Pan{nextPan}, accessDelta)
+					}
+					_ = emitAllowed
 				})
 				resolvedPans = resolved
-				for idx := range resolvedPans {
-					if !resolvedPans[idx].PanMockEnabled {
-						continue
-					}
-					if smartPanMockProviderFromLabel(strings.TrimSpace(resolvedPans[idx].Label)) == "" {
-						continue
-					}
-					if idx >= 0 && idx < len(panEmitAllowed) && !panEmitAllowed[idx] {
-						resolvedPans[idx].Episodes = nil
-					}
-				}
 				if blockedEntry != nil && len(resolvedPans) > 0 {
 					resolvedPans = smartFilterPansByBlockedFlags(resolvedPans, blockedEntry.PanFlags)
 				}
 				accessByShareID = access
-				smartLogDetailPanMock(src.SiteKey, src.SiteName, src.SiteDetail, resolvedPans)
-			}
-			cands := []smartCandidate{}
-			if isMovieMode {
-				cands = smartBuildMovieCandidatesFromPans(src, resolvedPans, settings, rawCleanRules, rawMovieRules)
 			} else {
-				epMap, epLoose := smartBuildEpisodeMapsFromPans(src, resolvedPans, seasonsForMapping, singleBaselineSeasons, hasMulti, settings, rawCleanRules, rawEpisodeRules, allowSingleBaseline, primaryKind)
-				cands = smartCandidatesForWant(epMap, epLoose, src, seasonsForMapping, hasMulti, preferSeasonNo, want, settings, requireSeasoned, allowResolutionModes)
-			}
-			for _, c := range cands {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-				}
-				scheduler.Push(smartCandidateOffer{Cand: c, AccessByShare: accessByShareID})
+				emitCandidatesFromPans(resolvedPans, accessByShareID)
 			}
 		}
 	}
@@ -2211,7 +2217,6 @@ func smartCollectPlaybackOffersFromTMDBAligned(
 		go siteWorker(t)
 	}
 	workersWG.Wait()
-	scheduler.Flush()
 	return nil
 }
 
@@ -2260,18 +2265,14 @@ func smartTryPlaybackOffersInternal(database *db.DB, u *SmartUser, offers []smar
 		feat := smartComputeCandidateFeatures(res.Cand)
 		if smartDebugLogEnabled() {
 			raw0 := smartFirstRawNameFromURL(res.Cand.Ep.URL)
-			smartDebugPrintf(
-				"[smart][playback_ok] flow=%d ms=%d site=(%s) panFlag=%s provider=%s matchShowName=%s matchRawName=%s quality=%s url=%s",
-				flowID,
-				time.Since(flowStart).Milliseconds(),
-				smartLogSiteName(res.Cand.SiteKey, res.Cand.SiteName),
-				strings.TrimSpace(res.Cand.PanFlag),
-				smartPanMockProviderID(database, strings.TrimSpace(res.Cand.PanFlag)),
-				strings.TrimSpace(res.Cand.Ep.Name),
-				strings.TrimSpace(raw0),
-				strings.TrimSpace(feat.Quality),
-				playURL,
-			)
+			msg := "[smart][playback_ok] flow=" + strconv.FormatUint(flowID, 10) +
+				" ms=" + strconv.FormatInt(time.Since(flowStart).Milliseconds(), 10) +
+				" site=(" + smartLogSiteName(res.Cand.SiteKey, res.Cand.SiteName) + ")" +
+				" panFlag=" + strings.TrimSpace(res.Cand.PanFlag) +
+				" quality=" + strings.TrimSpace(feat.Quality) +
+				" url=" + playURL
+			msg = smartAppendLogMatchSuffix(msg, strings.TrimSpace(res.Cand.Ep.Name), strings.TrimSpace(raw0))
+			smartDebugPrintf("%s", msg)
 		}
 		return playURL, res.Headers, buildPicked(res.Cand, feat), nil
 	}
@@ -2286,16 +2287,38 @@ func smartPanEpisodeCount(pans []catpawrunner.Pan) int {
 	return total
 }
 
-func smartLogDetailOK(siteKey string, siteName string, siteDetail string, pans []catpawrunner.Pan) {
+func smartCountMockPanFlags(pans []catpawrunner.Pan) int {
+	total := 0
+	for _, pan := range pans {
+		if smartPanMockProviderFromLabel(strings.TrimSpace(pan.Label)) != "" {
+			total++
+		}
+	}
+	return total
+}
+
+func smartCountDirectEpisodes(pans []catpawrunner.Pan) int {
+	total := 0
+	for _, pan := range pans {
+		if smartPanMockProviderFromLabel(strings.TrimSpace(pan.Label)) != "" {
+			continue
+		}
+		total += len(pan.Episodes)
+	}
+	return total
+}
+
+func smartLogDetailSummary(siteKey string, siteName string, siteDetail string, pans []catpawrunner.Pan) {
 	if !smartDebugLogEnabled() {
 		return
 	}
 	smartDebugPrintf(
-		"[smart][detail_ok] site=(%s) siteDetail=%s panFlags=%d episodes=%d matchShowName= matchRawName= err=",
+		"[smart][detail] site=(%s) siteDetail=%s panFlags=%d mockPanFlags=%d episodes=%d",
 		smartLogSiteName(siteKey, siteName),
 		strings.TrimSpace(siteDetail),
 		len(pans),
-		smartPanEpisodeCount(pans),
+		smartCountMockPanFlags(pans),
+		smartCountDirectEpisodes(pans),
 	)
 }
 
@@ -2312,18 +2335,5 @@ func smartLogDetailError(siteKey string, siteName string, siteDetail string, err
 		smartLogSiteName(siteKey, siteName),
 		strings.TrimSpace(siteDetail),
 		errMsg,
-	)
-}
-
-func smartLogDetailPanMock(siteKey string, siteName string, siteDetail string, pans []catpawrunner.Pan) {
-	if !smartDebugLogEnabled() {
-		return
-	}
-	smartDebugPrintf(
-		"[smart][detail_panmock] site=(%s) siteDetail=%s panFlags=%d episodes=%d matchShowName= matchRawName= err=",
-		smartLogSiteName(siteKey, siteName),
-		strings.TrimSpace(siteDetail),
-		len(pans),
-		smartPanEpisodeCount(pans),
 	)
 }

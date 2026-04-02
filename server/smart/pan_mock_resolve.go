@@ -2,6 +2,7 @@ package smart
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -11,6 +12,47 @@ import (
 	"github.com/jenfonro/meowfilm/server/magic"
 	"github.com/jenfonro/meowfilm/server/netdisk"
 )
+
+func smartFindPanListLogMatch(
+	want int,
+	tmdbSeasons []TMDBSeason,
+	rawCleanRules []string,
+	rawEpisodeRules []string,
+	eps []catpawrunner.Episode,
+) (matchShowName string, matchRawName string) {
+	if len(eps) == 0 || len(rawCleanRules) == 0 || len(rawEpisodeRules) == 0 {
+		return "", ""
+	}
+	for _, ep := range eps {
+		if strings.TrimSpace(ep.URL) == "" {
+			continue
+		}
+		texts := smartExtractEpisodeCandidateTexts(ep)
+		jsMatch, err := magic.MagicEpisodeExtractFromCandidates(texts, rawCleanRules, rawEpisodeRules)
+		if err != nil {
+			continue
+		}
+		match, keyNo, ok, _, _, _ := smartResolveEpisodeMappingForPlaybackWithMode(
+			tmdbSeasons,
+			smartSeasonEpisode{Season: jsMatch.Season, Episode: jsMatch.Episode},
+			nil,
+			0,
+			false,
+			false,
+			"tmdb",
+		)
+		if !ok || match.Episode <= 0 || (want > 0 && keyNo != want) {
+			continue
+		}
+		rawNames := smartExtractRawNamesFromEpisodeURL(strings.TrimSpace(ep.URL))
+		rawName := ""
+		if len(rawNames) > 0 {
+			rawName = strings.TrimSpace(rawNames[0])
+		}
+		return strings.TrimSpace(ep.Name), rawName
+	}
+	return "", ""
+}
 
 type smartPanMock189AccessEntry struct {
 	AccessCode string
@@ -135,14 +177,7 @@ func smartResolveSinglePanMockPanShared(database *db.DB, pan catpawrunner.Pan) (
 	}
 	eps, accessDelta, fromCache, status, emitAllowed, err := smartResolveSharedPanFlagEpisodes(database, label, firstURL)
 	if smartDebugLogEnabled() && emitAllowed {
-		smartDebugPrintf(
-			"[smart][pan_list_input] panFlag=%s provider=%s panMock=%t rawEpisodes=%d firstName=%s",
-			label,
-			pid,
-			out.PanMockEnabled,
-			len(out.Episodes),
-			firstName,
-		)
+		smartDebugPrintf("[smart][pan_list_input] panFlag=%s accesscode=%s", label, firstName)
 	}
 	if err != nil {
 		return out, accessByShareID, fromCache, status, emitAllowed, err
@@ -410,51 +445,21 @@ func smartResolvePanMockDetailPans(
 				matchRawName := ""
 				if eps != nil {
 					epCount = len(eps)
-					// Try to find the episode that matches `want` using the same magic rules as smart playback.
-					// If no match can be extracted (naming does not follow rules), keep empty to avoid confusion.
-					if want > 0 && len(rawCleanRules) > 0 && len(rawEpisodeRules) > 0 {
-						for _, ep := range eps {
-							if strings.TrimSpace(ep.URL) == "" {
-								continue
-							}
-							texts := smartExtractEpisodeCandidateTexts(ep)
-							jsMatch, e2 := magic.MagicEpisodeExtractFromCandidates(texts, rawCleanRules, rawEpisodeRules)
-							if e2 != nil {
-								continue
-							}
-							match, keyNo, ok := smartResolveEpisodeMappingStrict(tmdbSeasons, smartSeasonEpisode{Season: jsMatch.Season, Episode: jsMatch.Episode})
-							epNo := match.Episode
-							if !ok || epNo <= 0 {
-								continue
-							}
-							if keyNo != want {
-								continue
-							}
-							matchShowName = strings.TrimSpace(ep.Name)
-							rawNames := smartExtractRawNamesFromEpisodeURL(strings.TrimSpace(ep.URL))
-							if len(rawNames) > 0 {
-								matchRawName = strings.TrimSpace(rawNames[0])
-							}
-							break
-						}
-					}
+					matchShowName, matchRawName = smartFindPanListLogMatch(want, tmdbSeasons, rawCleanRules, rawEpisodeRules, eps)
 				}
 				errMsg := ""
 				if err != nil {
 					errMsg = strings.TrimSpace(err.Error())
 				}
-				smartDebugPrintf(
-					"[smart][pan_list_%s] site=(%s) panFlag=%s provider=%s ms=%d episodes=%d matchShowName=%s matchRawName=%s err=%s",
-					status,
-					smartLogSiteName(siteKey, siteName),
-					label,
-					pid,
-					ms,
-					epCount,
+				msg := smartAppendLogMatchSuffix(
+					"[smart][pan_list_"+status+"] site=("+smartLogSiteName(siteKey, siteName)+") panFlag="+label+" ms="+strconv.FormatInt(ms, 10)+" episodes="+strconv.Itoa(epCount),
 					matchShowName,
 					matchRawName,
-					errMsg,
 				)
+				if errMsg != "" {
+					msg += " err=" + errMsg
+				}
+				smartDebugPrintf("%s", msg)
 			}
 
 			resolvedPan, accessDelta, hit, status, emitAllowed, err := smartResolveSinglePanMockPanShared(database, out[i])
@@ -521,49 +526,31 @@ func smartResolvePanMockDetailPansIncremental(
 
 			emit := func(status string, eps []catpawrunner.Episode, err error, accessDelta map[string]string, fromCache bool, emitAllowed bool) {
 				if smartDebugLogEnabled() && emitAllowed {
-					ms := time.Since(start).Milliseconds()
-					epCount := 0
-					matchShowName := ""
-					matchRawName := ""
-					if eps != nil {
-						epCount = len(eps)
-						// Best-effort: show the matched episode for the current `want`.
-						if want > 0 && len(rawCleanRules) > 0 && len(rawEpisodeRules) > 0 {
-							for _, ep := range eps {
-								if strings.TrimSpace(ep.URL) == "" {
-									continue
-								}
-								texts := smartExtractEpisodeCandidateTexts(ep)
-								jsMatch, e2 := magic.MagicEpisodeExtractFromCandidates(texts, rawCleanRules, rawEpisodeRules)
-								if e2 != nil {
-									continue
-								}
-								match, keyNo, ok := smartResolveEpisodeMappingStrict(tmdbSeasons, smartSeasonEpisode{Season: jsMatch.Season, Episode: jsMatch.Episode})
-								epNo := match.Episode
-								if !ok || epNo <= 0 {
-									continue
-								}
-								if keyNo != want {
-									continue
-								}
-								matchShowName = strings.TrimSpace(ep.Name)
-								rawNames := smartExtractRawNamesFromEpisodeURL(strings.TrimSpace(ep.URL))
-								if len(rawNames) > 0 {
-									matchRawName = strings.TrimSpace(rawNames[0])
-								}
-								break
-							}
-						}
-					}
+				ms := time.Since(start).Milliseconds()
+				epCount := 0
+				matchShowName := ""
+				matchRawName := ""
+				if eps != nil {
+					epCount = len(eps)
+					matchShowName, matchRawName = smartFindPanListLogMatch(want, tmdbSeasons, rawCleanRules, rawEpisodeRules, eps)
+				}
 					errMsg := ""
 					if err != nil {
 						errMsg = strings.TrimSpace(err.Error())
 					}
-					pat := "[smart][pan_list_%s] site=(%s) panFlag=%s provider=%s ms=%d episodes=%d matchShowName=%s matchRawName=%s err=%s"
+					prefix := "[smart][pan_list_" + status + "]"
 					if fromCache {
-						pat = "[smart][cache][pan_list_%s] site=(%s) panFlag=%s provider=%s ms=%d episodes=%d matchShowName=%s matchRawName=%s err=%s"
+						prefix = "[smart][cache][pan_list_" + status + "]"
 					}
-					smartDebugPrintf(pat, status, smartLogSiteName(siteKey, siteName), label, pid, ms, epCount, matchShowName, matchRawName, errMsg)
+					msg := smartAppendLogMatchSuffix(
+						prefix+" site=("+smartLogSiteName(siteKey, siteName)+") panFlag="+label+" ms="+strconv.FormatInt(ms, 10)+" episodes="+strconv.Itoa(epCount),
+						matchShowName,
+						matchRawName,
+					)
+					if errMsg != "" {
+						msg += " err=" + errMsg
+					}
+					smartDebugPrintf("%s", msg)
 				}
 				if onPanResolved != nil {
 					onPanResolved(i, eps, accessDelta, emitAllowed)
