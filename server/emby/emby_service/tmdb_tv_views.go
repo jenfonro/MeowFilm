@@ -100,7 +100,7 @@ func loadTVNextUpView(database *db.DB, tmdbID int, hist *db.PlayHistoryRow, limi
 	if err != nil || series == nil {
 		return nil, err
 	}
-	candidates, err := collectTVNextUpEpisodes(database, tmdbID, hist, limit)
+	candidates, err := collectTVNextUpEpisodes(database, series, hist, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -151,13 +151,121 @@ func filterAiredSeasonEpisodes(in []db.TMDBCachedSeasonEpisode, now time.Time) [
 	return out
 }
 
-func collectTVNextUpEpisodes(database *db.DB, tmdbID int, hist *db.PlayHistoryRow, limit int) ([]nextUpEpisodeCandidate, error) {
+func filterSeasonEpisodesForNextUp(in []db.TMDBCachedSeasonEpisode, includeUnaired bool, now time.Time) []db.TMDBCachedSeasonEpisode {
+	if includeUnaired {
+		out := make([]db.TMDBCachedSeasonEpisode, 0, len(in))
+		for _, ep := range in {
+			if ep.EpisodeNumber <= 0 {
+				continue
+			}
+			out = append(out, ep)
+		}
+		return out
+	}
+	return filterAiredSeasonEpisodes(in, now)
+}
+
+func listedPositiveSeasonNumbers(series *db.TMDBCachedDetail) []int {
+	if series == nil || len(series.Seasons) == 0 {
+		return nil
+	}
+	seen := map[int]struct{}{}
+	out := make([]int, 0, len(series.Seasons))
+	for _, season := range series.Seasons {
+		if season.SeasonNumber <= 0 {
+			continue
+		}
+		if _, ok := seen[season.SeasonNumber]; ok {
+			continue
+		}
+		seen[season.SeasonNumber] = struct{}{}
+		out = append(out, season.SeasonNumber)
+	}
+	sort.Ints(out)
+	return out
+}
+
+func findSeasonStartIndex(list []int, seasonNo int) int {
+	if len(list) == 0 || seasonNo <= 0 {
+		return -1
+	}
+	for i, season := range list {
+		if season == seasonNo {
+			return i
+		}
+	}
+	return -1
+}
+
+func minInt(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func nextUpStartEpisode(curSeason int, curEpisode int, resumeCurrent bool, season int) int {
+	if season != curSeason {
+		return 1
+	}
+	startEpisode := curEpisode
+	if !resumeCurrent {
+		startEpisode++
+	}
+	if startEpisode <= 0 {
+		return 1
+	}
+	return startEpisode
+}
+
+func buildNextUpCandidatesFromSeason(
+	seasonNo int,
+	seasonName string,
+	episodes []db.TMDBCachedSeasonEpisode,
+	curSeason int,
+	curEpisode int,
+	resumeCurrent bool,
+	hist *db.PlayHistoryRow,
+	limit int,
+) []nextUpEpisodeCandidate {
+	if len(episodes) == 0 || limit <= 0 {
+		return nil
+	}
+	sort.Slice(episodes, func(i, j int) bool { return episodes[i].EpisodeNumber < episodes[j].EpisodeNumber })
+	startEpisode := nextUpStartEpisode(curSeason, curEpisode, resumeCurrent, seasonNo)
+	out := make([]nextUpEpisodeCandidate, 0, minInt(limit, len(episodes)))
+	for _, ep := range episodes {
+		if ep.EpisodeNumber < startEpisode {
+			continue
+		}
+		row := hist
+		if row != nil && (seasonNo != curSeason || ep.EpisodeNumber != curEpisode) {
+			row = nil
+		}
+		out = append(out, nextUpEpisodeCandidate{
+			Season:     seasonNo,
+			SeasonName: strings.TrimSpace(seasonName),
+			Episode:    ep,
+			History:    row,
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func collectTVNextUpEpisodes(database *db.DB, series *db.TMDBCachedDetail, hist *db.PlayHistoryRow, limit int) ([]nextUpEpisodeCandidate, error) {
 	type cursor struct {
 		season  int
 		episode int
 		resume  bool
 	}
 	cur := cursor{}
+	tmdbID := 0
+	if series != nil {
+		tmdbID = series.TMDBID
+	}
 	if hist != nil {
 		if ref := parseItemRef(hist.PlaybackItemID); ref != nil && ref.Source == "tmdb" && ref.MediaType == "tv" && ref.NumericID == tmdbID && ref.SubKind == "episode" {
 			cur.season = ref.Pan
@@ -175,59 +283,42 @@ func collectTVNextUpEpisodes(database *db.DB, tmdbID int, hist *db.PlayHistoryRo
 		cur.episode = 0
 		cur.resume = false
 	}
+	if limit <= 0 {
+		limit = 1
+	}
+	seasonNumbers := listedPositiveSeasonNumbers(series)
+	startIndex := findSeasonStartIndex(seasonNumbers, cur.season)
+	if startIndex < 0 {
+		return []nextUpEpisodeCandidate{}, nil
+	}
+	includeUnaired := hist != nil && hist.PreOrder
 
 	out := make([]nextUpEpisodeCandidate, 0, limit)
-	startSeason := maxInt(cur.season, 1)
 	now := time.Now()
-	for season := startSeason; len(out) < limit; season++ {
-		seasonDetail, err := metadata_tmdb.GetTVSeasonDetailForBackend(database, tmdbID, season)
+	for i := startIndex; i < len(seasonNumbers) && len(out) < limit; i++ {
+		seasonNo := seasonNumbers[i]
+		seasonDetail, err := metadata_tmdb.GetTVSeasonDetailForBackend(database, tmdbID, seasonNo)
 		if err != nil {
 			return nil, err
 		}
 		if seasonDetail == nil {
-			if season > startSeason+20 {
-				break
-			}
 			continue
 		}
-		episodes := filterAiredSeasonEpisodes(seasonDetail.Episodes, now)
-		if len(episodes) == 0 {
-			if season > startSeason+20 {
-				break
-			}
+		episodes := filterSeasonEpisodesForNextUp(seasonDetail.Episodes, includeUnaired, now)
+		candidates := buildNextUpCandidatesFromSeason(
+			seasonNo,
+			seasonDetail.Name,
+			episodes,
+			cur.season,
+			cur.episode,
+			cur.resume,
+			hist,
+			limit-len(out),
+		)
+		if len(candidates) == 0 {
 			continue
 		}
-		sort.Slice(episodes, func(i, j int) bool { return episodes[i].EpisodeNumber < episodes[j].EpisodeNumber })
-		startEpisode := 1
-		if season == cur.season {
-			startEpisode = cur.episode
-			if !cur.resume {
-				startEpisode++
-			}
-		}
-		for _, ep := range episodes {
-			if ep.EpisodeNumber <= 0 || ep.EpisodeNumber < startEpisode {
-				continue
-			}
-			row := hist
-			if row != nil && (season != cur.season || ep.EpisodeNumber != cur.episode) {
-				row = nil
-			}
-			out = append(out, nextUpEpisodeCandidate{
-				Season:     season,
-				SeasonName: strings.TrimSpace(seasonDetail.Name),
-				Episode:    ep,
-				History:    row,
-			})
-			if len(out) >= limit {
-				break
-			}
-		}
-		cur.resume = false
-		cur.episode = 0
-		if season > startSeason+20 {
-			break
-		}
+		out = append(out, candidates...)
 	}
 	return out, nil
 }

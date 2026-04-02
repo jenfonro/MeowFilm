@@ -513,17 +513,23 @@ func triggerPlaybackSwitchAction(database *db.DB, userID int64, payload SessionP
 		if title == "" {
 			title = contentKey
 		}
-		err := database.UpsertTMDBPlayHistoryMeta(db.TMDBPlayHistoryUpsert{
-			UserID:           userID,
-			TMDBID:           tmdbID,
-			TMDBType:         tmdbType,
-			ContentKey:       contentKey,
-			Title:            title,
-			Poster:           poster,
-			Remark:           remark,
-			PreOrder:         &nextEnable,
-			UpdatedAt:        time.Now().Unix(),
-		})
+		now := time.Now().Unix()
+		var err error
+		if hist != nil {
+			err = database.UpdateTMDBPlayHistoryPreOrder(userID, tmdbType, tmdbID, nextEnable, now)
+		} else {
+			err = database.EnsureTMDBPlayHistoryMeta(db.TMDBPlayHistoryUpsert{
+				UserID:           userID,
+				TMDBID:           tmdbID,
+				TMDBType:         tmdbType,
+				ContentKey:       contentKey,
+				Title:            title,
+				Poster:           poster,
+				Remark:           remark,
+				PreOrder:         &nextEnable,
+				UpdatedAt:        now,
+			})
+		}
 		if err != nil {
 			log.Printf("[emby][switch_action_error] item=%s action=%s err=%v", itemID, action, err)
 			return true, action, false, "db_error"
