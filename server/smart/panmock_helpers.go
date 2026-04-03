@@ -4,7 +4,6 @@ import (
 	"strings"
 
 	"github.com/jenfonro/meowfilm/internal/db"
-	"github.com/jenfonro/meowfilm/server/catpawrunner"
 	"github.com/jenfonro/meowfilm/server/magic"
 	"github.com/jenfonro/meowfilm/server/netdisk"
 )
@@ -200,8 +199,13 @@ func smartResolvePanMockCandidateFromVod(
 			break
 		}
 	}
-	sourceHasBeyondFirstSeason := smartSourceHasEpisodeBeyondFirstSeason(
-		[]catpawrunner.Pan{{Label: strings.TrimSpace(base.PanFlag), Episodes: eps}},
+	sourceHasBeyondFirstSeason := smartSourceHasEpisodeBeyondFirstSeasonRecords(
+		[]smartDetailSourceRecord{{
+			Label:    strings.TrimSpace(base.PanFlag),
+			PanFlag:  strings.TrimSpace(base.PanFlag),
+			Status:   smartDetailSourceResolved,
+			Episodes: cloneEpisodeList(eps),
+		}},
 		rawCleanRules,
 		rawEpisodeRules,
 		primaryFirstSeasonCount,

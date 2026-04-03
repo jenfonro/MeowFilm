@@ -151,87 +151,6 @@ func extractPanMock189Credentials(panFlag string, sourceValue string) (shareCode
 	return smartPanMock189CredentialsFromSourceValue(panFlag, sourceValue)
 }
 
-func smartResolveSinglePanMockPan(database *db.DB, pan catpawrunner.Pan) (catpawrunner.Pan, map[string]string, bool, string, error) {
-	out, accessByShareID, fromCache, status, _, err := smartResolveSinglePanMockPanShared(database, pan)
-	return out, accessByShareID, fromCache, status, err
-}
-
-func smartResolveSinglePanMockPanShared(database *db.DB, pan catpawrunner.Pan) (catpawrunner.Pan, map[string]string, bool, string, bool, error) {
-	out := pan
-	accessByShareID := map[string]string{}
-	if database == nil || !out.PanMockEnabled {
-		return out, accessByShareID, false, "skip", false, nil
-	}
-
-	label := strings.TrimSpace(out.Label)
-	pid := smartPanMockProviderFromLabel(label)
-	if pid == "" {
-		return out, accessByShareID, false, "skip", false, nil
-	}
-
-	firstURL := ""
-	firstName := ""
-	if len(out.Episodes) > 0 {
-		firstURL = strings.TrimSpace(out.Episodes[0].URL)
-		firstName = strings.TrimSpace(out.Episodes[0].Name)
-	}
-	eps, accessDelta, fromCache, status, emitAllowed, err := smartResolveSharedPanFlagEpisodes(database, label, firstURL)
-	if smartDebugLogEnabled() && emitAllowed {
-		smartDebugPrintf("[smart][pan_list_input] panFlag=%s accesscode=%s", label, firstName)
-	}
-	if err != nil {
-		return out, accessByShareID, fromCache, status, emitAllowed, err
-	}
-	if status != "ok" {
-		return out, accessByShareID, fromCache, status, emitAllowed, nil
-	}
-	for k := range eps {
-		eps[k].Flag = label
-	}
-	for sid, acc := range accessDelta {
-		accessByShareID[sid] = acc
-	}
-	out.Episodes = eps
-	return out, accessByShareID, fromCache, "ok", emitAllowed, nil
-}
-
-func smartResolveSharedPanFlagEpisodes(database *db.DB, panFlag string, episodeURL string) ([]catpawrunner.Episode, map[string]string, bool, string, bool, error) {
-	label := strings.TrimSpace(panFlag)
-	if database == nil || label == "" {
-		return nil, map[string]string{}, false, "skip", false, nil
-	}
-	waitCh, status, _, found := smartSharedPanListLookup(label)
-	if found {
-		if status == smartSharedPanListResolving {
-			if smartDebugLogEnabled() {
-				smartDebugPrintf("[smart][pan_list_skip] panFlag=%s provider=%s reason=shared_resolving", label, smartPanMockProviderFromLabel(label))
-			}
-			<-waitCh
-		} else if smartDebugLogEnabled() {
-			smartDebugPrintf("[smart][pan_list_skip] panFlag=%s provider=%s reason=shared_resolved", label, smartPanMockProviderFromLabel(label))
-		}
-		shared := smartSharedPanListGetResolved(label)
-		return cloneEpisodeList(shared.Episodes), cloneStringMap(shared.AccessDelta), shared.FromCache, strings.TrimSpace(shared.Status), false, smartSharedPanListErr(shared)
-	}
-
-	waitCh = make(chan struct{})
-	smartSharedPanListSetResolving(label, waitCh)
-
-	eps, accessDelta, fromCache, finalStatus, err := smartResolvePanFlagEpisodesRaw(database, label, episodeURL)
-	smartSharedPanListSetResolved(label, smartSharedPanListResult{
-		State:       smartSharedPanListResolved,
-		Status:      strings.TrimSpace(finalStatus),
-		Episodes:    cloneEpisodeList(eps),
-		AccessDelta: cloneStringMap(accessDelta),
-		ErrText:     smartSharedPanListErrText(err),
-		FromCache:   fromCache,
-		ResolvedAt:  time.Now(),
-		WaitCh:      waitCh,
-	})
-	close(waitCh)
-	return cloneEpisodeList(eps), cloneStringMap(accessDelta), fromCache, strings.TrimSpace(finalStatus), true, err
-}
-
 func smartResolvePanFlagEpisodesRaw(database *db.DB, panFlag string, episodeURL string) ([]catpawrunner.Episode, map[string]string, bool, string, error) {
 	label := strings.TrimSpace(panFlag)
 	accessByShareID := map[string]string{}
@@ -399,7 +318,48 @@ func cloneStringMap(in map[string]string) map[string]string {
 	return out
 }
 
-func smartResolvePanMockDetailPans(
+func smartResolveSharedPanGroupEpisodes(database *db.DB, record smartDetailSourceRecord) ([]catpawrunner.Episode, map[string]string, bool, string, bool, error) {
+	label := strings.TrimSpace(record.PanFlag)
+	groupKey := strings.TrimSpace(record.GroupKey)
+	if groupKey == "" {
+		groupKey = smartBuildPanMockResolveGroupKey(record)
+	}
+	if database == nil || label == "" || groupKey == "" {
+		return nil, map[string]string{}, false, "skip", false, nil
+	}
+	waitCh, status, _, found := smartSharedPanListLookup(groupKey)
+	if found {
+		if status == smartSharedPanListResolving {
+			if smartDebugLogEnabled() {
+				smartDebugPrintf("[smart][pan_list_skip] panFlag=%s provider=%s reason=shared_resolving", label, smartPanMockProviderFromLabel(label))
+			}
+			<-waitCh
+		} else if smartDebugLogEnabled() {
+			smartDebugPrintf("[smart][pan_list_skip] panFlag=%s provider=%s reason=shared_resolved", label, smartPanMockProviderFromLabel(label))
+		}
+		shared := smartSharedPanListGetResolved(groupKey)
+		return cloneEpisodeList(shared.Episodes), cloneStringMap(shared.AccessDelta), shared.FromCache, strings.TrimSpace(shared.Status), false, smartSharedPanListErr(shared)
+	}
+
+	waitCh = make(chan struct{})
+	smartSharedPanListSetResolving(groupKey, waitCh)
+
+	eps, accessDelta, fromCache, finalStatus, err := smartResolvePanFlagEpisodesRaw(database, label, strings.TrimSpace(record.SourceValue))
+	smartSharedPanListSetResolved(groupKey, smartSharedPanListResult{
+		State:       smartSharedPanListResolved,
+		Status:      strings.TrimSpace(finalStatus),
+		Episodes:    cloneEpisodeList(eps),
+		AccessDelta: cloneStringMap(accessDelta),
+		ErrText:     smartSharedPanListErrText(err),
+		FromCache:   fromCache,
+		ResolvedAt:  time.Now(),
+		WaitCh:      waitCh,
+	})
+	close(waitCh)
+	return cloneEpisodeList(eps), cloneStringMap(accessDelta), fromCache, strings.TrimSpace(finalStatus), true, err
+}
+
+func smartResolvePanMockSourceRecords(
 	database *db.DB,
 	siteKey string,
 	siteName string,
@@ -408,43 +368,49 @@ func smartResolvePanMockDetailPans(
 	tmdbHasMultiSeason bool,
 	rawCleanRules []string,
 	rawEpisodeRules []string,
-	pans []catpawrunner.Pan,
-) ([]catpawrunner.Pan, map[string]string) {
-	out := make([]catpawrunner.Pan, 0, len(pans))
-	for _, p := range pans {
-		p.PanMockEnabled = true
-		out = append(out, p)
-	}
+	records []smartDetailSourceRecord,
+) ([]smartDetailSourceRecord, map[string]string) {
+	out := make([]smartDetailSourceRecord, len(records))
+	copy(out, records)
 	accessByShareID := map[string]string{}
 	if database == nil || len(out) == 0 {
 		return out, accessByShareID
 	}
 
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-
+	groups := map[string][]int{}
 	for idx := range out {
-		i := idx
-		label := strings.TrimSpace(out[i].Label)
-		pid := smartPanMockProviderFromLabel(label)
-		if pid == "" {
+		if !(out[idx].PanMock && out[idx].Supported) {
 			continue
 		}
+		key := strings.TrimSpace(out[idx].GroupKey)
+		if key == "" {
+			key = smartBuildPanMockResolveGroupKey(out[idx])
+			out[idx].GroupKey = key
+		}
+		if key == "" {
+			out[idx].Status = smartDetailSourceSkipped
+			continue
+		}
+		out[idx].Status = smartDetailSourceRunning
+		groups[key] = append(groups[key], idx)
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for key, idxs := range groups {
+		groupKey := key
+		indexes := append([]int(nil), idxs...)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			head := out[indexes[0]]
 			start := time.Now()
-
-			logDone := func(status string, eps []catpawrunner.Episode, err error, fromCache bool) {
-				if !smartDebugLogEnabled() {
-					return
-				}
-				ms := time.Since(start).Milliseconds()
-				epCount := 0
+			eps, accessDelta, hit, status, emitAllowed, err := smartResolveSharedPanGroupEpisodes(database, head)
+			if emitAllowed && smartDebugLogEnabled() {
+				epCount := len(eps)
 				matchShowName := ""
 				matchRawName := ""
 				if eps != nil {
-					epCount = len(eps)
 					matchShowName, matchRawName = smartFindPanListLogMatch(want, tmdbSeasons, rawCleanRules, rawEpisodeRules, eps)
 				}
 				errMsg := ""
@@ -452,7 +418,114 @@ func smartResolvePanMockDetailPans(
 					errMsg = strings.TrimSpace(err.Error())
 				}
 				msg := smartAppendLogMatchSuffix(
-					"[smart][pan_list_"+status+"] site=("+smartLogSiteName(siteKey, siteName)+") panFlag="+label+" ms="+strconv.FormatInt(ms, 10)+" episodes="+strconv.Itoa(epCount),
+					"[smart][pan_list_"+status+"] site=("+smartLogSiteName(siteKey, siteName)+") panFlag="+strings.TrimSpace(head.PanFlag)+" ms="+strconv.FormatInt(time.Since(start).Milliseconds(), 10)+" episodes="+strconv.Itoa(epCount),
+					matchShowName,
+					matchRawName,
+				)
+				if errMsg != "" {
+					msg += " err=" + errMsg
+				}
+				smartDebugPrintf("%s", msg)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			for _, idx := range indexes {
+				out[idx].GroupKey = groupKey
+				out[idx].AccessDelta = cloneStringMap(accessDelta)
+				out[idx].ErrText = ""
+				switch status {
+				case "ok":
+					out[idx].Episodes = cloneEpisodeList(eps)
+					out[idx].Status = smartDetailSourceResolved
+				case "empty":
+					out[idx].Episodes = nil
+					out[idx].Status = smartDetailSourceEmpty
+				case "err":
+					out[idx].Episodes = nil
+					out[idx].Status = smartDetailSourceError
+					if err != nil {
+						out[idx].ErrText = strings.TrimSpace(err.Error())
+					}
+				default:
+					out[idx].Episodes = nil
+					out[idx].Status = smartDetailSourceSkipped
+				}
+			}
+			_ = hit
+			for sid, acc := range accessDelta {
+				accessByShareID[sid] = acc
+			}
+		}()
+	}
+	wg.Wait()
+	return out, accessByShareID
+}
+
+func smartResolvePanMockSourceRecordsIncremental(
+	database *db.DB,
+	siteKey string,
+	siteName string,
+	want int,
+	tmdbSeasons []TMDBSeason,
+	tmdbHasMultiSeason bool,
+	rawCleanRules []string,
+	rawEpisodeRules []string,
+	records []smartDetailSourceRecord,
+	onGroupResolved func(resolved []smartDetailSourceRecord, accessDelta map[string]string, emitAllowed bool),
+) ([]smartDetailSourceRecord, map[string]string) {
+	out := make([]smartDetailSourceRecord, len(records))
+	copy(out, records)
+	accessByShareID := map[string]string{}
+	if database == nil || len(out) == 0 {
+		return out, accessByShareID
+	}
+
+	groups := map[string][]int{}
+	for idx := range out {
+		if !(out[idx].PanMock && out[idx].Supported) {
+			continue
+		}
+		key := strings.TrimSpace(out[idx].GroupKey)
+		if key == "" {
+			key = smartBuildPanMockResolveGroupKey(out[idx])
+			out[idx].GroupKey = key
+		}
+		if key == "" {
+			out[idx].Status = smartDetailSourceSkipped
+			continue
+		}
+		out[idx].Status = smartDetailSourceRunning
+		groups[key] = append(groups[key], idx)
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for key, idxs := range groups {
+		groupKey := key
+		indexes := append([]int(nil), idxs...)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			head := out[indexes[0]]
+			start := time.Now()
+			eps, accessDelta, hit, status, emitAllowed, err := smartResolveSharedPanGroupEpisodes(database, head)
+			if emitAllowed && smartDebugLogEnabled() {
+				epCount := len(eps)
+				matchShowName := ""
+				matchRawName := ""
+				if eps != nil {
+					matchShowName, matchRawName = smartFindPanListLogMatch(want, tmdbSeasons, rawCleanRules, rawEpisodeRules, eps)
+				}
+				errMsg := ""
+				if err != nil {
+					errMsg = strings.TrimSpace(err.Error())
+				}
+				prefix := "[smart][pan_list_" + status + "]"
+				if hit {
+					prefix = "[smart][cache][pan_list_" + status + "]"
+				}
+				msg := smartAppendLogMatchSuffix(
+					prefix+" site=("+smartLogSiteName(siteKey, siteName)+") panFlag="+strings.TrimSpace(head.PanFlag)+" ms="+strconv.FormatInt(time.Since(start).Milliseconds(), 10)+" episodes="+strconv.Itoa(epCount),
 					matchShowName,
 					matchRawName,
 				)
@@ -462,115 +535,40 @@ func smartResolvePanMockDetailPans(
 				smartDebugPrintf("%s", msg)
 			}
 
-			resolvedPan, accessDelta, hit, status, emitAllowed, err := smartResolveSinglePanMockPanShared(database, out[i])
-			eps := resolvedPan.Episodes
-			if status == "ok" {
-				mu.Lock()
-				out[i] = resolvedPan
-				for sid, acc := range accessDelta {
-					accessByShareID[sid] = acc
-				}
-				mu.Unlock()
-			}
-			if emitAllowed {
-				logDone(status, eps, err, hit)
-			}
-		}()
-	}
-
-	wg.Wait()
-	return out, accessByShareID
-}
-
-// smartResolvePanMockDetailPansIncremental resolves pan_mock list sources concurrently and calls `onPanResolved`
-// each time a single pan is resolved (ok/empty/err/skip). This enables smart playback to attempt matching/play
-// as soon as any list returns, without waiting for all list requests to finish.
-//
-// The returned `out` slice contains all resolved episodes when the function returns.
-func smartResolvePanMockDetailPansIncremental(
-	database *db.DB,
-	siteKey string,
-	siteName string,
-	want int,
-	tmdbSeasons []TMDBSeason,
-	tmdbHasMultiSeason bool,
-	rawCleanRules []string,
-	rawEpisodeRules []string,
-	pans []catpawrunner.Pan,
-	onPanResolved func(panIndex int, episodes []catpawrunner.Episode, accessDelta map[string]string, emitAllowed bool),
-) ([]catpawrunner.Pan, map[string]string) {
-	out := make([]catpawrunner.Pan, 0, len(pans))
-	for _, p := range pans {
-		p.PanMockEnabled = true
-		out = append(out, p)
-	}
-	accessByShareID := map[string]string{}
-	if database == nil || len(out) == 0 {
-		return out, accessByShareID
-	}
-
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-
-	for idx := range out {
-		i := idx
-		label := strings.TrimSpace(out[i].Label)
-		pid := smartPanMockProviderFromLabel(label)
-		if pid == "" {
-			continue
-		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			start := time.Now()
-
-			emit := func(status string, eps []catpawrunner.Episode, err error, accessDelta map[string]string, fromCache bool, emitAllowed bool) {
-				if smartDebugLogEnabled() && emitAllowed {
-				ms := time.Since(start).Milliseconds()
-				epCount := 0
-				matchShowName := ""
-				matchRawName := ""
-				if eps != nil {
-					epCount = len(eps)
-					matchShowName, matchRawName = smartFindPanListLogMatch(want, tmdbSeasons, rawCleanRules, rawEpisodeRules, eps)
-				}
-					errMsg := ""
+			resolvedGroup := make([]smartDetailSourceRecord, 0, len(indexes))
+			mu.Lock()
+			for _, idx := range indexes {
+				out[idx].GroupKey = groupKey
+				out[idx].AccessDelta = cloneStringMap(accessDelta)
+				out[idx].ErrText = ""
+				switch status {
+				case "ok":
+					out[idx].Episodes = cloneEpisodeList(eps)
+					out[idx].Status = smartDetailSourceResolved
+				case "empty":
+					out[idx].Episodes = nil
+					out[idx].Status = smartDetailSourceEmpty
+				case "err":
+					out[idx].Episodes = nil
+					out[idx].Status = smartDetailSourceError
 					if err != nil {
-						errMsg = strings.TrimSpace(err.Error())
+						out[idx].ErrText = strings.TrimSpace(err.Error())
 					}
-					prefix := "[smart][pan_list_" + status + "]"
-					if fromCache {
-						prefix = "[smart][cache][pan_list_" + status + "]"
-					}
-					msg := smartAppendLogMatchSuffix(
-						prefix+" site=("+smartLogSiteName(siteKey, siteName)+") panFlag="+label+" ms="+strconv.FormatInt(ms, 10)+" episodes="+strconv.Itoa(epCount),
-						matchShowName,
-						matchRawName,
-					)
-					if errMsg != "" {
-						msg += " err=" + errMsg
-					}
-					smartDebugPrintf("%s", msg)
+				default:
+					out[idx].Episodes = nil
+					out[idx].Status = smartDetailSourceSkipped
 				}
-				if onPanResolved != nil {
-					onPanResolved(i, eps, accessDelta, emitAllowed)
-				}
+				resolvedGroup = append(resolvedGroup, out[idx])
 			}
-
-			resolvedPan, accessDelta, hit, status, emitAllowed, err := smartResolveSinglePanMockPanShared(database, out[i])
-			eps := resolvedPan.Episodes
-			if status == "ok" {
-				mu.Lock()
-				out[i] = resolvedPan
-				for sid, acc := range accessDelta {
-					accessByShareID[sid] = acc
-				}
-				mu.Unlock()
+			for sid, acc := range accessDelta {
+				accessByShareID[sid] = acc
 			}
-			emit(status, eps, err, accessDelta, hit, emitAllowed)
+			mu.Unlock()
+			if onGroupResolved != nil {
+				onGroupResolved(resolvedGroup, cloneStringMap(accessDelta), emitAllowed)
+			}
 		}()
 	}
-
 	wg.Wait()
 	return out, accessByShareID
 }

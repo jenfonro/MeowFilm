@@ -191,9 +191,9 @@ func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
 				netdisk.HandleAPIQuarkPlay(w, r, database)
 			})).ServeHTTP(w, r)
 		case "/pan/relay/resolve":
-			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				netdisk.HandleAPIRelayResolve(w, r, database)
-			})).ServeHTTP(w, r)
+			}).ServeHTTP(w, r)
 		case "/pan/uc/list":
 			authMw.RequireAuthAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				netdisk.HandleAPIUCList(w, r, database)

@@ -122,10 +122,6 @@ func IsSupportedPanMockFlag(label string) bool {
 }
 
 func ParsePlaySources(fromStr string, urlStr string) []Pan {
-	return ParsePlaySourcesForDetail(fromStr, urlStr, false)
-}
-
-func ParsePlaySourcesForDetail(fromStr string, urlStr string, panMock bool) []Pan {
 	fromStr = strings.TrimSpace(fromStr)
 	urlStr = strings.TrimSpace(urlStr)
 	if fromStr == "" && urlStr == "" {
@@ -149,21 +145,6 @@ func ParsePlaySourcesForDetail(fromStr string, urlStr string, panMock bool) []Pa
 		u := ""
 		if i < len(urlParts) {
 			u = strings.TrimSpace(urlParts[i])
-		}
-		if panMock && IsSupportedPanMockFlag(label) {
-			normalized := NormalizePanMockFlag(label)
-			if normalized == "" {
-				normalized = label
-			}
-			out = append(out, Pan{
-				Label: normalized,
-				Episodes: []Episode{{
-					Name: strings.TrimSpace(u),
-					URL:  strings.TrimSpace(u),
-					Flag: normalized,
-				}},
-			})
-			continue
 		}
 		if u == "" {
 			continue

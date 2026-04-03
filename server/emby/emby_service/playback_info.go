@@ -425,8 +425,8 @@ func collectTMDBHistoryPlaybackFromDetailCandidates(database *db.DB, userID int6
 		return false
 	}
 	log.Printf("[emby][history_detail] item=%s tmdb=%s:%d site=(%s|%s) spider=%s siteDetail=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, siteKey, strings.TrimSpace(hist.SiteName), spiderAPI, siteDetail)
-	rawPans, ok := fetchRawSiteDetailPansWithSpiderAPI(database, userID, siteKey, strings.TrimSpace(hist.SiteName), spiderAPI, siteDetail)
-	if !ok || len(rawPans) == 0 {
+	rawRecords, ok := fetchRawSiteDetailSourceRecordsWithSpiderAPI(database, userID, siteKey, strings.TrimSpace(hist.SiteName), spiderAPI, siteDetail)
+	if !ok || len(rawRecords) == 0 {
 		log.Printf("[emby][history_detail_error] item=%s tmdb=%s:%d site=(%s|%s) spider=%s siteDetail=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, siteKey, strings.TrimSpace(hist.SiteName), spiderAPI, siteDetail)
 		return false
 	}
@@ -446,14 +446,16 @@ func collectTMDBHistoryPlaybackFromDetailCandidates(database *db.DB, userID int6
 		}
 	}
 
-	directOffers := make([]smart.PlaybackOffer, 0, len(rawPans))
-	listPans := make([]catpawrunner.Pan, 0, len(rawPans))
-	for _, pan := range rawPans {
-		if smart.PanMockProviderFromLabel(strings.TrimSpace(pan.Label)) != "" {
-			listPans = append(listPans, pan)
+	directOffers := make([]smart.PlaybackOffer, 0, len(rawRecords))
+	panMockRecords := make([]smart.DetailSourceRecord, 0, len(rawRecords))
+	for _, record := range rawRecords {
+		if record.PanMock && record.Supported {
+			panMockRecords = append(panMockRecords, record)
 			continue
 		}
-		resolved := buildResolvedSitePans(database, []catpawrunner.Pan{pan})
+		// Non-panmock detail branches consume a single resolved record directly;
+		// any Pan conversion here is edge assembly only for existing browse/playback helpers.
+		resolved := buildResolvedSitePans(database, smart.ResolvedRecordsToPans([]smart.DetailSourceRecord{record}))
 		for _, panResolved := range reorderHistoryPans(resolved, strings.TrimSpace(hist.PlayFlag)) {
 			offer, ok := buildHistoryDetailOfferFromResolvedPan(database, ref, req, hist, siteKey, spiderAPI, siteDetail, panResolved)
 			if !ok {
@@ -466,7 +468,7 @@ func collectTMDBHistoryPlaybackFromDetailCandidates(database *db.DB, userID int6
 	}
 	emitSorted(directOffers)
 
-	if len(listPans) > 0 {
+	if len(panMockRecords) > 0 {
 		tmdbSeasons := loadPlaybackTMDBSeasons(database, ref.NumericID)
 		rawEpisodeRules, _ := database.ListMagicEpisodeRules()
 		rawCleanRules, _ := database.ListMagicEpisodeCleanRegexRules()
@@ -475,15 +477,16 @@ func collectTMDBHistoryPlaybackFromDetailCandidates(database *db.DB, userID int6
 			want = smart.TMDBGlobalEpisodeNoOf(tmdbSeasons, req.Season, req.Episode)
 		}
 		hasMulti := smart.PositiveSeasonCount(tmdbSeasons) > 1
-		_, _ = smart.ResolvePanMockDetailPansIncremental(database, siteKey, strings.TrimSpace(hist.SiteName), want, tmdbSeasons, hasMulti, rawCleanRules, rawEpisodeRules, listPans, func(panIndex int, episodes []catpawrunner.Episode, accessDelta map[string]string, emitAllowed bool) {
-			if !emitAllowed || IsPlaybackResolveStopped(stopCh) || panIndex < 0 || panIndex >= len(listPans) {
+		_, _ = smart.ResolvePanMockSourceRecordsIncremental(database, siteKey, strings.TrimSpace(hist.SiteName), want, tmdbSeasons, hasMulti, rawCleanRules, rawEpisodeRules, panMockRecords, func(resolved []smart.DetailSourceRecord, accessDelta map[string]string, emitAllowed bool) {
+			if !emitAllowed || IsPlaybackResolveStopped(stopCh) {
 				return
 			}
-			pan := listPans[panIndex]
-			pan.Episodes = episodes
-			resolved := buildResolvedSitePans(database, []catpawrunner.Pan{pan})
-			listOffers := make([]smart.PlaybackOffer, 0, len(resolved))
-			for _, panResolved := range reorderHistoryPans(resolved, strings.TrimSpace(hist.PlayFlag)) {
+			// Pan conversion here is a terminal edge adapter into existing
+			// resolvedSitePan presentation helpers; the resolve flow itself stays record-first.
+			resolvedPans := smart.ResolvedRecordsToPans(resolved)
+			resolvedSitePans := buildResolvedSitePans(database, resolvedPans)
+			listOffers := make([]smart.PlaybackOffer, 0, len(resolvedSitePans))
+			for _, panResolved := range reorderHistoryPans(resolvedSitePans, strings.TrimSpace(hist.PlayFlag)) {
 				offer, ok := buildHistoryDetailOfferFromResolvedPan(database, ref, req, hist, siteKey, spiderAPI, siteDetail, panResolved)
 				if !ok {
 					continue
@@ -713,7 +716,7 @@ func resolveSiteEpisodeDirectPlayback(database *db.DB, user *smart.User, ref *it
 	}, nil
 }
 
-func fetchRawSiteDetailPansWithSpiderAPI(database *db.DB, userID int64, siteKey string, siteName string, spiderAPI string, siteDetail string) ([]catpawrunner.Pan, bool) {
+func fetchRawSiteDetailSourceRecordsWithSpiderAPI(database *db.DB, userID int64, siteKey string, siteName string, spiderAPI string, siteDetail string) ([]smart.DetailSourceRecord, bool) {
 	if database == nil || spiderAPI == "" || siteDetail == "" {
 		return nil, false
 	}
@@ -726,16 +729,11 @@ func fetchRawSiteDetailPansWithSpiderAPI(database *db.DB, userID int64, siteKey 
 		return nil, false
 	}
 	playFrom, playURL := catpawrunner.ExtractDetailPlayFromURL(raw)
-	pans := catpawrunner.ParsePlaySourcesForDetail(playFrom, playURL, smart.IsPanMockEnabled(raw))
-	if pans == nil {
-		pans = []catpawrunner.Pan{}
+	records := smart.BuildDetailSourceRecords(playFrom, playURL, smart.IsPanMockEnabled(raw), siteKey, siteName, spiderAPI, siteDetail, "")
+	if records == nil {
+		records = []smart.DetailSourceRecord{}
 	}
-	if smart.IsPanMockEnabled(raw) {
-		for i := range pans {
-			pans[i].PanMockEnabled = true
-		}
-	}
-	return pans, len(pans) > 0
+	return records, len(records) > 0
 }
 
 func ConsumePlaybackOffersAndBuildTarget(database *db.DB, userID int64, target PlaybackStreamTarget, cacheKey string, r *http.Request) (*PlaybackStreamTarget, bool, error) {
@@ -828,7 +826,7 @@ func listHistoryPlayFlagEpisodes(database *db.DB, provider string, playFlag stri
 	if strings.TrimSpace(provider) == "" {
 		return nil, false
 	}
-	eps, _, _, status, _, err := smart.ResolveSharedPanFlagEpisodes(database, flag, "")
+	eps, _, _, status, _, err := smart.ResolvePanMockEpisodesBySourceValue(database, flag, "")
 	if err != nil || status != "ok" || len(eps) == 0 {
 		return nil, false
 	}

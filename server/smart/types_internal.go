@@ -60,6 +60,34 @@ type smartCandidate struct {
 	DegradedMatched  bool
 }
 
+type smartDetailSourceStatus string
+
+const (
+	smartDetailSourcePending  smartDetailSourceStatus = "pending"
+	smartDetailSourceRunning  smartDetailSourceStatus = "running"
+	smartDetailSourceResolved smartDetailSourceStatus = "resolved"
+	smartDetailSourceEmpty    smartDetailSourceStatus = "empty"
+	smartDetailSourceError    smartDetailSourceStatus = "error"
+	smartDetailSourceSkipped  smartDetailSourceStatus = "skipped"
+)
+
+type smartDetailSourceRecord struct {
+	SourceKey   string
+	SiteKey     string
+	SiteDetail  string
+	Label       string
+	Provider    string
+	PanMock     bool
+	Supported   bool
+	PanFlag     string
+	SourceValue string
+	GroupKey    string
+	Status      smartDetailSourceStatus
+	ErrText     string
+	Episodes    []catpawrunner.Episode
+	AccessDelta map[string]string
+}
+
 type smartCandidateScore struct {
 	Stage        smartCandidateStage
 	StageScore   int
