@@ -86,7 +86,6 @@ MEOWFILM_ADDR=":8080" ./build/meowfilm
 | `MEOWFILM_DB_FILE` | 指定 DB 文件路径 | 空 |
 | `MEOWFILM_DATA_DIR` | 指定数据目录（DB 默认写入 `data.db`） | 空 |
 | `MEOWFILM_DEBUG` | 启用调试接口（如 `/listdebug`、`/searchdebug`） | `0` |
-| `MEOWFILM_PAN_API_NOAUTH` | 允许回环地址免登录访问部分网盘 API（仅 `127.0.0.1`/`::1` 生效） | `0` |
 | `ASSET_VERSION` | 静态资源版本号（用于前端资源刷新；未设置时 UI 显示 `beta`，资源使用时间戳） | 空 |
 
 ## 相关项目
