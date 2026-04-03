@@ -253,6 +253,9 @@ func resolveTMDBTVEpisodeImage(database *db.DB, tmdbID int, season int, episode 
 			}
 		}
 	}
+	if target := resolveTMDBTVSeriesBackdrop(database, tmdbID); strings.TrimSpace(target) != "" {
+		return target
+	}
 	if target := resolveTMDBTVSeasonPosterOnly(database, tmdbID, season); strings.TrimSpace(target) != "" {
 		return target
 	}
