@@ -31,7 +31,7 @@ const (
 )
 
 var (
-	re189Flag = regexp.MustCompile(`^(?:天翼|天意)-([A-Za-z0-9]{6,64})$`)
+	re189Flag = regexp.MustCompile(`^天意-([A-Za-z0-9]{6,64})$`)
 
 	pan189LoginMu sync.Mutex
 )
@@ -1165,7 +1165,7 @@ func parse189PlayID(id string) (fileID string, shareID string, fileName string) 
 func tianyi189ListUncached(database *db.DB, flag string, accessCode string) (vodPlayURL string, shareID string, shareCode string, err error) {
 	sc := parse189ShareCodeLike(flag)
 	if sc == "" {
-		return "", "", "", errors.New("missing/invalid flag/shareCode (expected: 天翼-<shareCode> or https://cloud.189.cn/t/<shareCode>)")
+		return "", "", "", errors.New("missing/invalid flag/shareCode (expected: 天意-<shareCode> or https://cloud.189.cn/t/<shareCode>)")
 	}
 	ac := strings.TrimSpace(accessCode)
 	cookie, _, err := ensure189Cookie(database, false)

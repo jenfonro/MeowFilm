@@ -1234,7 +1234,7 @@ func fetchRawSiteDetailPans(database *db.DB, userID int64, siteKey string, siteD
 		return nil, err
 	}
 	playFrom, playURL := catpawrunner.ExtractDetailPlayFromURL(raw)
-	pans := catpawrunner.ParsePlaySources(playFrom, playURL)
+	pans := catpawrunner.ParsePlaySourcesForDetail(playFrom, playURL, smart.IsPanMockEnabled(raw))
 	if pans == nil {
 		pans = []catpawrunner.Pan{}
 	}

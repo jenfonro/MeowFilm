@@ -794,7 +794,7 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 			}
 		}
 		playFrom, playURL := catpawrunner.ExtractDetailPlayFromURL(detailRaw)
-		rawPans := catpawrunner.ParsePlaySources(playFrom, playURL)
+		rawPans := catpawrunner.ParsePlaySourcesForDetail(playFrom, playURL, entry.PanMockEnabled)
 		if rawPans == nil {
 			rawPans = []catpawrunner.Pan{}
 		}
@@ -2139,7 +2139,7 @@ func smartCollectPlaybackOffersFromTMDBAligned(
 				continue
 			}
 			playFrom, playURL := catpawrunner.ExtractDetailPlayFromURL(detailRaw)
-			rawPans := catpawrunner.ParsePlaySources(playFrom, playURL)
+			rawPans := catpawrunner.ParsePlaySourcesForDetail(playFrom, playURL, smartIsPanMockEnabled(detailRaw))
 			if rawPans == nil {
 				rawPans = []catpawrunner.Pan{}
 			}

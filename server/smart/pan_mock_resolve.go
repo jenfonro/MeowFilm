@@ -143,12 +143,12 @@ func smartPanMock189AccessGet(shareID string) (string, bool) {
 	return ac, true
 }
 
-func extractMockPasscodeFromEpisodeURL(episodeURL string) string {
-	return smartExtractMockPasscodeFromEpisodeURL(episodeURL)
+func extractPanMockPasscodeFromSourceValue(sourceValue string) string {
+	return smartPanMockPasscodeFromSourceValue(sourceValue)
 }
 
-func extractTianyiMockMeta(panFlag string, episodeURL string) (shareCode string, accessCode string) {
-	return smartExtractTianyiMockMetaFromEpisodeURL(panFlag, episodeURL)
+func extractPanMock189Credentials(panFlag string, sourceValue string) (shareCode string, accessCode string) {
+	return smartPanMock189CredentialsFromSourceValue(panFlag, sourceValue)
 }
 
 func smartResolveSinglePanMockPan(database *db.DB, pan catpawrunner.Pan) (catpawrunner.Pan, map[string]string, bool, string, error) {
@@ -247,7 +247,7 @@ func smartResolvePanFlagEpisodesRaw(database *db.DB, panFlag string, episodeURL 
 	)
 	switch pid {
 	case "189":
-		sc, ac := extractTianyiMockMeta(label, firstURL)
+		sc, ac := extractPanMock189Credentials(label, firstURL)
 		if sc == "" {
 			return nil, accessByShareID, false, "skip", nil
 		}
@@ -267,7 +267,7 @@ func smartResolvePanFlagEpisodesRaw(database *db.DB, panFlag string, episodeURL 
 			smartPanMock189AccessPut(sid, acc)
 		}
 	case "quark":
-		pass := extractMockPasscodeFromEpisodeURL(firstURL)
+		pass := extractPanMockPasscodeFromSourceValue(firstURL)
 		vod, _, fromCache, err = netdisk.QuarkListWithCacheHit(database, label, pass)
 		if err != nil {
 			return nil, accessByShareID, fromCache, "err", err
@@ -276,7 +276,7 @@ func smartResolvePanFlagEpisodesRaw(database *db.DB, panFlag string, episodeURL 
 			return nil, accessByShareID, fromCache, "empty", nil
 		}
 	case "uc":
-		pass := extractMockPasscodeFromEpisodeURL(firstURL)
+		pass := extractPanMockPasscodeFromSourceValue(firstURL)
 		vod, _, fromCache, err = netdisk.UCListWithCacheHit(database, label, pass)
 		if err != nil {
 			return nil, accessByShareID, fromCache, "err", err
@@ -285,7 +285,7 @@ func smartResolvePanFlagEpisodesRaw(database *db.DB, panFlag string, episodeURL 
 			return nil, accessByShareID, fromCache, "empty", nil
 		}
 	case "139":
-		pass := extractMockPasscodeFromEpisodeURL(firstURL)
+		pass := extractPanMockPasscodeFromSourceValue(firstURL)
 		vod, _, fromCache, err = netdisk.Yun139ListWithCacheHit(database, label, pass)
 		if err != nil {
 			return nil, accessByShareID, fromCache, "err", err
@@ -294,7 +294,7 @@ func smartResolvePanFlagEpisodesRaw(database *db.DB, panFlag string, episodeURL 
 			return nil, accessByShareID, fromCache, "empty", nil
 		}
 	case "baidu":
-		pass := extractMockPasscodeFromEpisodeURL(firstURL)
+		pass := extractPanMockPasscodeFromSourceValue(firstURL)
 		vod, _, fromCache, err = netdisk.BaiduListWithCacheHit(database, label, pass)
 		if err != nil {
 			return nil, accessByShareID, fromCache, "err", err

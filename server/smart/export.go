@@ -145,20 +145,20 @@ func ParseVodPlayURLToEpisodes(vodPlayURL string) []catpawrunner.Episode {
 	return smartParseVodPlayURLToEpisodes(vodPlayURL)
 }
 
-func ExtractMockPasscodeFromCandidate(c Candidate) string {
-	return smartExtractMockPasscodeFromCandidate(c)
+func ExtractPanMockPasscodeFromCandidate(c Candidate) string {
+	return smartPanMockPasscodeFromCandidate(c)
 }
 
-func ExtractTianyiMockMetaFromCandidate(c Candidate) (shareCode string, accessCode string) {
-	return smartExtractTianyiMockMetaFromCandidate(c)
+func ExtractPanMock189CredentialsFromCandidate(c Candidate) (shareCode string, accessCode string) {
+	return smartPanMock189CredentialsFromCandidate(c)
 }
 
-func ExtractMockPasscodeFromEpisodeURL(episodeURL string) string {
-	return smartExtractMockPasscodeFromEpisodeURL(episodeURL)
+func ExtractPanMockPasscodeFromSourceValue(sourceValue string) string {
+	return smartPanMockPasscodeFromSourceValue(sourceValue)
 }
 
-func ExtractTianyiMockMetaFromEpisodeURL(panFlag string, episodeURL string) (shareCode string, accessCode string) {
-	return smartExtractTianyiMockMetaFromEpisodeURL(panFlag, episodeURL)
+func ExtractPanMock189CredentialsFromSourceValue(panFlag string, sourceValue string) (shareCode string, accessCode string) {
+	return smartPanMock189CredentialsFromSourceValue(panFlag, sourceValue)
 }
 
 func BuildSourceKey(siteKey string, spiderAPI string, siteDetail string) string {
