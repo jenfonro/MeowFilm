@@ -1217,47 +1217,51 @@ type panAliasRule struct {
 	Aliases []string
 }
 
-func fetchRawSiteDetailPans(database *db.DB, userID int64, siteKey string, siteDetail string) ([]catpawrunner.Pan, error) {
+// fetchRawSiteDetailSourceRecords is the internal browse/detail entrypoint.
+// It returns source records directly from detail payloads and keeps records as
+// the only internal intermediate model for smart/panmock processing.
+func fetchRawSiteDetailSourceRecords(database *db.DB, userID int64, siteKey string, siteDetail string) ([]smart.DetailSourceRecord, error) {
 	if database == nil || strings.TrimSpace(siteKey) == "" || strings.TrimSpace(siteDetail) == "" {
-		return []catpawrunner.Pan{}, nil
+		return []smart.DetailSourceRecord{}, nil
 	}
 	spiderAPI := strings.TrimSpace(smart.ResolveSpiderAPIBySiteKey(database, siteKey))
 	if spiderAPI == "" {
-		return []catpawrunner.Pan{}, nil
+		return []smart.DetailSourceRecord{}, nil
 	}
 	apiBase := strings.TrimSpace(smart.ResolveCatApiBaseForUser(database, &smart.User{ID: fmt.Sprintf("%d", userID)}))
 	if apiBase == "" {
-		return []catpawrunner.Pan{}, nil
+		return []smart.DetailSourceRecord{}, nil
 	}
 	raw, err := cache.RequestSpiderDetailDirect(apiBase, spiderAPI, strings.TrimSpace(siteDetail))
 	if err != nil || raw == nil {
 		return nil, err
 	}
 	playFrom, playURL := catpawrunner.ExtractDetailPlayFromURL(raw)
-	pans := catpawrunner.ParsePlaySourcesForDetail(playFrom, playURL, smart.IsPanMockEnabled(raw))
-	if pans == nil {
-		pans = []catpawrunner.Pan{}
+	records := smart.BuildDetailSourceRecords(playFrom, playURL, smart.IsPanMockEnabled(raw), siteKey, "", spiderAPI, siteDetail, "")
+	if records == nil {
+		records = []smart.DetailSourceRecord{}
 	}
-	if smart.IsPanMockEnabled(raw) {
-		for i := range pans {
-			pans[i].PanMockEnabled = true
-		}
-	}
-	return pans, nil
+	return records, nil
 }
 
+// fetchResolvedSiteDetailPans is a browse-facing edge adapter. Records remain
+// the internal truth; resolvedSitePan is only assembled for UI-facing browse
+// consumption after records have been resolved.
 func fetchResolvedSiteDetailPans(database *db.DB, userID int64, siteKey string, siteDetail string) ([]resolvedSitePan, error) {
-	rawPans, err := fetchRawSiteDetailPans(database, userID, siteKey, siteDetail)
+	rawRecords, err := fetchRawSiteDetailSourceRecords(database, userID, siteKey, siteDetail)
 	if err != nil {
 		return nil, err
 	}
-	resolvedPans, err := resolveSiteDetailPansForBrowse(database, rawPans)
+	resolvedPans, err := resolveSiteDetailRecordsForBrowse(database, rawRecords)
 	if err != nil {
 		return nil, err
 	}
 	return buildResolvedSitePans(database, resolvedPans), nil
 }
 
+// buildResolvedSitePans is a display adapter from edge Pans to browse-facing
+// resolvedSitePan values. It must not be used to reintroduce Pan as an
+// internal processing model.
 func buildResolvedSitePans(database *db.DB, pans []catpawrunner.Pan) []resolvedSitePan {
 	out := make([]resolvedSitePan, 0, len(pans))
 	for _, pan := range pans {

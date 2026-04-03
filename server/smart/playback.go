@@ -292,7 +292,7 @@ type smartDetailCacheEntry struct {
 	NextRetryAt               time.Time
 	LastError                 string
 	Source                    smartSource
-	Pans                      []catpawrunner.Pan
+	SourceRecords             []smartDetailSourceRecord
 	PanMockEnabled            bool
 	PanMock189AccessByShareID map[string]string
 	EpisodeMap                map[int][]smartCandidate
@@ -644,7 +644,7 @@ func smartBuildCandidates(aggregated []smartSource, orderMap map[string]int, tmd
 				} else {
 					rank = 1
 				}
-			} else if hit.EpisodeMap != nil && hit.EpisodeMapLoose != nil && hit.Pans != nil {
+			} else if hit.EpisodeMap != nil && hit.EpisodeMapLoose != nil && hit.SourceRecords != nil {
 				rank = 0
 			}
 		}
@@ -728,7 +728,7 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 				smartDetailCache.Unlock()
 				return hit
 			}
-		} else if hit.EpisodeMap != nil && hit.EpisodeMapLoose != nil && hit.Pans != nil {
+		} else if hit.EpisodeMap != nil && hit.EpisodeMapLoose != nil && hit.SourceRecords != nil {
 			smartDetailCache.Unlock()
 			return hit
 		}
@@ -759,7 +759,7 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 			NextRetryAt:               time.Time{},
 			LastError:                 "",
 			Source:                    src,
-			Pans:                      []catpawrunner.Pan{},
+			SourceRecords:             []smartDetailSourceRecord{},
 			EpisodeMap:                map[int][]smartCandidate{},
 			EpisodeMapLoose:           map[int][]smartCandidate{},
 			PanMock189AccessByShareID: map[string]string{},
@@ -794,116 +794,45 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 			}
 		}
 		playFrom, playURL := catpawrunner.ExtractDetailPlayFromURL(detailRaw)
-		rawPans := catpawrunner.ParsePlaySourcesForDetail(playFrom, playURL, entry.PanMockEnabled)
-		if rawPans == nil {
-			rawPans = []catpawrunner.Pan{}
-		}
-		smartLogDetailSummary(src.SiteKey, src.SiteName, src.SiteDetail, rawPans)
-		resolvedPans := rawPans
-		if entry.PanMockEnabled && resolvedPans != nil {
-			resolved, accessMap := smartResolvePanMockDetailPans(database, src.SiteKey, src.SiteName, 0, primarySeasons, tmdbHasMultiSeason, rawCleanRules, rawEpisodeRules, resolvedPans)
-			resolvedPans = resolved
+		sourceRecords := smartBuildDetailSourceRecords(playFrom, playURL, entry.PanMockEnabled, src)
+		entry.SourceRecords = sourceRecords
+		// Detail logs derive Pans only for human-readable summaries. Records stay
+		// the internal truth for resolve, caching, and candidate construction.
+		smartLogDetailSummary(src.SiteKey, src.SiteName, src.SiteDetail, smartResolvedRecordsToPans(sourceRecords))
+		resolvedRecords := sourceRecords
+		if entry.PanMockEnabled && len(resolvedRecords) > 0 {
+			resolved, accessMap := smartResolvePanMockSourceRecords(database, src.SiteKey, src.SiteName, 0, primarySeasons, tmdbHasMultiSeason, rawCleanRules, rawEpisodeRules, resolvedRecords)
+			resolvedRecords = resolved
+			entry.SourceRecords = resolvedRecords
 			if len(accessMap) > 0 {
 				entry.PanMock189AccessByShareID = accessMap
 			}
 		}
-		entry.Pans = resolvedPans
-		primaryFirstSeasonCount := 0
-		for _, s := range primarySeasons {
-			if s.Season == 1 && s.EpisodeCount > 0 {
-				primaryFirstSeasonCount = s.EpisodeCount
-				break
-			}
+		if len(rawCleanRules) == 0 || len(rawEpisodeRules) == 0 {
+			entry.FailCount++
+			entry.LastError = "missing magic regex rules"
+			entry.NextRetryAt = time.Now().Add(10 * time.Minute)
+			smartDetailCache.Lock()
+			smartDetailCache.M[key] = entry
+			smartDetailCache.Unlock()
+			return
 		}
-		sourceHasBeyondFirstSeason := smartSourceHasEpisodeBeyondFirstSeason(resolvedPans, rawCleanRules, rawEpisodeRules, primaryFirstSeasonCount)
-
-		srcRemarkLower := strings.ToLower(strings.TrimSpace(src.Remark))
-		for _, pan := range resolvedPans {
-			panFlag := strings.TrimSpace(pan.Label)
-			panTokenIdx := smartLabelRuleIdx(panFlag, settings.PanTokenOrderLower, settings.PanMatchEntries)
-			for _, ep := range pan.Episodes {
-				if strings.TrimSpace(ep.URL) == "" {
-					continue
-				}
-				texts := smartExtractEpisodeCandidateTexts(ep)
-				primary := ""
-				if len(texts) > 0 {
-					primary = texts[0]
-				}
-				if primary == "" {
-					primary = ep.Name
-				}
-				rawLower := smartBuildCandidateLowerText(texts)
-				if rawLower == "" {
-					rawLower = strings.ToLower(strings.TrimSpace(primary))
-				}
-
-				if len(rawCleanRules) == 0 || len(rawEpisodeRules) == 0 {
-					entry.FailCount++
-					entry.LastError = "missing magic regex rules"
-					entry.NextRetryAt = time.Now().Add(10 * time.Minute)
-					smartDetailCache.Lock()
-					smartDetailCache.M[key] = entry
-					smartDetailCache.Unlock()
-					return
-				}
-				jsMatch, err := magic.MagicEpisodeExtractFromCandidates(texts, rawCleanRules, rawEpisodeRules)
-				if err != nil {
-					entry.FailCount++
-					entry.LastError = "js regex error"
-					entry.NextRetryAt = time.Now().Add(10 * time.Minute)
-					smartDetailCache.Lock()
-					smartDetailCache.M[key] = entry
-					smartDetailCache.Unlock()
-					return
-				}
-				rawSeason := jsMatch.Season
-				match, keyNo, ok, loose, resolutionMode, degradedReason := smartResolveEpisodeMappingForPlaybackWithMode(
-					primarySeasons,
-					smartSeasonEpisode{Season: jsMatch.Season, Episode: jsMatch.Episode},
-					singleBaselineSeasons,
-					primaryFirstSeasonCount,
-					sourceHasBeyondFirstSeason,
-					allowSingleBaseline,
-					primaryKind,
-				)
-				seasonNo := match.Season
-				epNo := match.Episode
-				if !ok || epNo <= 0 {
-					continue
-				}
-				rawName := smartStableRawNameFromEpisodeURL(ep.URL)
-
-				cand := smartCandidate{
-					Stage:            smartCandidateStageFull,
-					SiteKey:          src.SiteKey,
-					SiteName:         src.SiteName,
-					SpiderAPI:        src.SpiderAPI,
-					SiteDetail:       src.SiteDetail,
-					SrcRemarkLower:   srcRemarkLower,
-					PanFlag:          panFlag,
-					PanTokenIdx:      panTokenIdx,
-					Ep:               ep,
-					RawName:          rawName,
-					RawLower:         rawLower,
-					MatchSeason:      seasonNo,
-					HasSeasonMarker:  rawSeason > 0,
-					SearchSeasonHint: 0,
-					MatchKeyword:     smartComputePriorityMatch(rawLower, settings.KeywordTokensLower),
-					ResolutionMode:   resolutionMode,
-					LockedGlobal:     keyNo,
-					DegradedReason:   degradedReason,
-					StrictMatched:    resolutionMode == "strict-tmdb" || resolutionMode == "strict-douban",
-					DegradedMatched:  resolutionMode == "degraded-single-baseline",
-				}
-
-				if loose && tmdbHasMultiSeason {
-					entry.EpisodeMapLoose[epNo] = append(entry.EpisodeMapLoose[epNo], cand)
-					continue
-				}
-				entry.EpisodeMap[keyNo] = append(entry.EpisodeMap[keyNo], cand)
-			}
-		}
+		epMap, epLoose, _ := smartBuildCandidatesFromResolvedRecords(
+			src,
+			resolvedRecords,
+			false,
+			primarySeasons,
+			singleBaselineSeasons,
+			tmdbHasMultiSeason,
+			settings,
+			rawCleanRules,
+			rawEpisodeRules,
+			nil,
+			allowSingleBaseline,
+			primaryKind,
+		)
+		entry.EpisodeMap = epMap
+		entry.EpisodeMapLoose = epLoose
 
 		entry.OK = true
 		smartDetailCache.Lock()
@@ -933,217 +862,6 @@ func smartPickBestMatch(list []smartCandidate, tmdbHasMultiSeason bool, preferSe
 		}
 	}
 	return &best
-}
-
-type smartDetailState struct {
-	Source         smartSource
-	OK             bool
-	PanMockEnabled bool
-	PanMockDone    chan struct{}
-
-	// Updated when pan_mock list resolves (or immediately for non-pan_mock).
-	Pans                      []catpawrunner.Pan
-	PanMock189AccessByShareID map[string]string
-	EpisodeMap                map[int][]smartCandidate
-	EpisodeMapLoose           map[int][]smartCandidate
-
-	mu sync.Mutex
-}
-
-func (s *smartDetailState) snapshot() (ok bool, panMockEnabled bool, pans []catpawrunner.Pan, access map[string]string, epMap map[int][]smartCandidate, epLoose map[int][]smartCandidate) {
-	if s == nil {
-		return false, false, nil, nil, nil, nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	outPans := make([]catpawrunner.Pan, 0, len(s.Pans))
-	for _, p := range s.Pans {
-		outPans = append(outPans, p)
-	}
-	outAccess := map[string]string{}
-	for k, v := range s.PanMock189AccessByShareID {
-		outAccess[k] = v
-	}
-	outMap := map[int][]smartCandidate{}
-	for k, v := range s.EpisodeMap {
-		cp := make([]smartCandidate, 0, len(v))
-		cp = append(cp, v...)
-		outMap[k] = cp
-	}
-	outLoose := map[int][]smartCandidate{}
-	for k, v := range s.EpisodeMapLoose {
-		cp := make([]smartCandidate, 0, len(v))
-		cp = append(cp, v...)
-		outLoose[k] = cp
-	}
-	return s.OK, s.PanMockEnabled, outPans, outAccess, outMap, outLoose
-}
-
-func smartBuildEpisodeMapsFromPans(
-	src smartSource,
-	pans []catpawrunner.Pan,
-	primarySeasons []smartTMDBSeason,
-	singleBaselineSeasons []smartTMDBSeason,
-	tmdbHasMultiSeason bool,
-	settings smartPlaybackSettings,
-	rawCleanRules []string,
-	rawEpisodeRules []string,
-	allowSingleBaseline bool,
-	primaryKind string,
-) (map[int][]smartCandidate, map[int][]smartCandidate) {
-	episodeMap := map[int][]smartCandidate{}
-	episodeMapLoose := map[int][]smartCandidate{}
-	primaryFirstSeasonCount := 0
-	for _, s := range primarySeasons {
-		if s.Season == 1 && s.EpisodeCount > 0 {
-			primaryFirstSeasonCount = s.EpisodeCount
-			break
-		}
-	}
-	sourceHasBeyondFirstSeason := smartSourceHasEpisodeBeyondFirstSeason(pans, rawCleanRules, rawEpisodeRules, primaryFirstSeasonCount)
-
-	srcRemarkLower := strings.ToLower(strings.TrimSpace(src.Remark))
-	for _, pan := range pans {
-		panFlag := strings.TrimSpace(pan.Label)
-		panTokenIdx := smartLabelRuleIdx(panFlag, settings.PanTokenOrderLower, settings.PanMatchEntries)
-		for _, ep := range pan.Episodes {
-			if strings.TrimSpace(ep.URL) == "" {
-				continue
-			}
-			texts := smartExtractEpisodeCandidateTexts(ep)
-			primary := ""
-			if len(texts) > 0 {
-				primary = texts[0]
-			}
-			if primary == "" {
-				primary = ep.Name
-			}
-			rawLower := smartBuildCandidateLowerText(texts)
-			if rawLower == "" {
-				rawLower = strings.ToLower(strings.TrimSpace(primary))
-			}
-			rawLower = strings.TrimSpace(rawLower + " " + srcRemarkLower)
-
-			jsMatch, err := magic.MagicEpisodeExtractFromCandidates(texts, rawCleanRules, rawEpisodeRules)
-			if err != nil {
-				continue
-			}
-			rawSeason := jsMatch.Season
-			match, keyNo, ok, loose, resolutionMode, degradedReason := smartResolveEpisodeMappingForPlaybackWithMode(
-				primarySeasons,
-				smartSeasonEpisode{Season: jsMatch.Season, Episode: jsMatch.Episode},
-				singleBaselineSeasons,
-				primaryFirstSeasonCount,
-				sourceHasBeyondFirstSeason,
-				allowSingleBaseline,
-				primaryKind,
-			)
-			seasonNo := match.Season
-			epNo := match.Episode
-			if !ok || epNo <= 0 {
-				continue
-			}
-			rawName := smartStableRawNameFromEpisodeURL(ep.URL)
-
-			cand := smartCandidate{
-				Stage:           smartCandidateStageFull,
-				SiteKey:         src.SiteKey,
-				SiteName:        src.SiteName,
-				SpiderAPI:       src.SpiderAPI,
-				SiteDetail:      src.SiteDetail,
-				SrcRemarkLower:  srcRemarkLower,
-				PanFlag:         panFlag,
-				PanTokenIdx:     panTokenIdx,
-				Ep:              ep,
-				RawName:         rawName,
-				RawLower:        rawLower,
-				MatchSeason:     seasonNo,
-				HasSeasonMarker: rawSeason > 0,
-				MatchKeyword:    smartComputePriorityMatch(rawLower, settings.KeywordTokensLower),
-				ResolutionMode:  resolutionMode,
-				LockedGlobal:    keyNo,
-				DegradedReason:  degradedReason,
-				StrictMatched:   resolutionMode == "strict-tmdb" || resolutionMode == "strict-douban",
-				DegradedMatched: resolutionMode == "degraded-single-baseline",
-			}
-
-			if loose && tmdbHasMultiSeason {
-				list := episodeMapLoose[epNo]
-				list = append(list, cand)
-				episodeMapLoose[epNo] = list
-				continue
-			}
-			list := episodeMap[keyNo]
-			list = append(list, cand)
-			episodeMap[keyNo] = list
-		}
-	}
-	return episodeMap, episodeMapLoose
-}
-
-func smartBuildMovieCandidatesFromPans(
-	src smartSource,
-	pans []catpawrunner.Pan,
-	settings smartPlaybackSettings,
-	rawCleanRules []string,
-	rawMovieRules []string,
-) []smartCandidate {
-	if len(rawMovieRules) == 0 || len(pans) == 0 {
-		return nil
-	}
-	out := make([]smartCandidate, 0, 16)
-	srcRemarkLower := strings.ToLower(strings.TrimSpace(src.Remark))
-	for _, pan := range pans {
-		panFlag := strings.TrimSpace(pan.Label)
-		panTokenIdx := smartLabelRuleIdx(panFlag, settings.PanTokenOrderLower, settings.PanMatchEntries)
-		for _, ep := range pan.Episodes {
-			if strings.TrimSpace(ep.URL) == "" {
-				continue
-			}
-			rawNames := smartExtractRawNamesFromEpisodeURL(ep.URL)
-			rawName := ""
-			for i := len(rawNames) - 1; i >= 0; i-- {
-				if strings.TrimSpace(rawNames[i]) != "" {
-					rawName = strings.TrimSpace(rawNames[i])
-					break
-				}
-			}
-			if rawName == "" {
-				continue
-			}
-			texts := []string{rawName}
-			hit, err := magic.MagicMovieMatchFromCandidates(texts, rawCleanRules, rawMovieRules)
-			if err != nil || !hit {
-				continue
-			}
-			rawLower := smartBuildCandidateLowerText(texts)
-			if rawLower == "" {
-				rawLower = strings.ToLower(rawName)
-			}
-			rawLower = strings.TrimSpace(rawLower + " " + srcRemarkLower)
-			out = append(out, smartCandidate{
-				Stage:          smartCandidateStageFull,
-				SiteKey:        src.SiteKey,
-				SiteName:       src.SiteName,
-				SpiderAPI:      src.SpiderAPI,
-				SiteDetail:     src.SiteDetail,
-				SrcRemarkLower: srcRemarkLower,
-				PanFlag:        panFlag,
-				PanTokenIdx:    panTokenIdx,
-				Ep:             ep,
-				RawName:        rawName,
-				RawLower:       rawLower,
-				MatchKeyword:   smartComputePriorityMatch(rawLower, settings.KeywordTokensLower),
-			})
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	sort.SliceStable(out, func(i, j int) bool {
-		return smartCompareSmartMatchIgnorePanOrder(out[i], out[j], false, 0, settings) < 0
-	})
-	return out
 }
 
 func smartCandidatesForWant(
@@ -1659,33 +1377,6 @@ type smartPlaybackPickedMeta struct {
 	Quality    string
 }
 
-func smartSourceHasEpisodeBeyondFirstSeason(
-	pans []catpawrunner.Pan,
-	rawCleanRules []string,
-	rawEpisodeRules []string,
-	firstSeasonCount int,
-) bool {
-	if firstSeasonCount <= 0 || len(pans) == 0 || len(rawCleanRules) == 0 || len(rawEpisodeRules) == 0 {
-		return false
-	}
-	for _, pan := range pans {
-		for _, ep := range pan.Episodes {
-			if strings.TrimSpace(ep.URL) == "" {
-				continue
-			}
-			texts := smartExtractEpisodeCandidateTexts(ep)
-			jsMatch, err := magic.MagicEpisodeExtractFromCandidates(texts, rawCleanRules, rawEpisodeRules)
-			if err != nil {
-				continue
-			}
-			if jsMatch.Episode > firstSeasonCount {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func smartCollectPlaybackOffersFromTMDB(database *db.DB, u *SmartUser, req smartPlaybackRequest, shouldStop func() bool, emit func(smartCandidateOffer, int)) error {
 	if database == nil {
 		return errors.New("invalid database")
@@ -2139,26 +1830,33 @@ func smartCollectPlaybackOffersFromTMDBAligned(
 				continue
 			}
 			playFrom, playURL := catpawrunner.ExtractDetailPlayFromURL(detailRaw)
-			rawPans := catpawrunner.ParsePlaySourcesForDetail(playFrom, playURL, smartIsPanMockEnabled(detailRaw))
-			if rawPans == nil {
-				rawPans = []catpawrunner.Pan{}
+			sourceRecords := smartBuildDetailSourceRecords(playFrom, playURL, smartIsPanMockEnabled(detailRaw), src)
+			if blockedEntry != nil && len(sourceRecords) > 0 {
+				sourceRecords = smartFilterSourceRecordsByBlockedFlags(sourceRecords, blockedEntry.PanFlags)
 			}
-			if blockedEntry != nil && len(rawPans) > 0 {
-				rawPans = smartFilterPansByBlockedFlags(rawPans, blockedEntry.PanFlags)
-			}
-			smartLogDetailSummary(src.SiteKey, src.SiteName, src.SiteDetail, rawPans)
-			resolvedPans := make([]catpawrunner.Pan, len(rawPans))
-			copy(resolvedPans, rawPans)
+			// Log-only Pan derivation; the actual incremental flow remains record-first.
+			smartLogDetailSummary(src.SiteKey, src.SiteName, src.SiteDetail, smartResolvedRecordsToPans(sourceRecords))
 			accessByShareID := map[string]string{}
-			emitCandidatesFromPans := func(pans []catpawrunner.Pan, access map[string]string) {
-				if len(pans) == 0 {
+			emitCandidatesFromRecords := func(records []smartDetailSourceRecord, access map[string]string) {
+				if len(records) == 0 {
 					return
 				}
-				cands := []smartCandidate{}
-				if isMovieMode {
-					cands = smartBuildMovieCandidatesFromPans(src, pans, settings, rawCleanRules, rawMovieRules)
-				} else {
-					epMap, epLoose := smartBuildEpisodeMapsFromPans(src, pans, seasonsForMapping, singleBaselineSeasons, hasMulti, settings, rawCleanRules, rawEpisodeRules, allowSingleBaseline, primaryKind)
+				epMap, epLoose, movieCands := smartBuildCandidatesFromResolvedRecords(
+					src,
+					records,
+					isMovieMode,
+					seasonsForMapping,
+					singleBaselineSeasons,
+					hasMulti,
+					settings,
+					rawCleanRules,
+					rawEpisodeRules,
+					rawMovieRules,
+					allowSingleBaseline,
+					primaryKind,
+				)
+				cands := movieCands
+				if !isMovieMode {
 					cands = smartCandidatesForWant(epMap, epLoose, src, seasonsForMapping, hasMulti, preferSeasonNo, want, settings, requireSeasoned, allowResolutionModes)
 				}
 				for _, c := range cands {
@@ -2171,44 +1869,28 @@ func smartCollectPlaybackOffersFromTMDBAligned(
 				}
 			}
 			if smartIsPanMockEnabled(detailRaw) {
-				if blockedEntry != nil && len(resolvedPans) > 0 {
-					resolvedPans = smartFilterPansByBlockedFlags(resolvedPans, blockedEntry.PanFlags)
-				}
-				detailReadyPans := make([]catpawrunner.Pan, 0, len(resolvedPans))
-				for _, pan := range resolvedPans {
-					if smartPanMockProviderFromLabel(strings.TrimSpace(pan.Label)) != "" {
+				detailReadyRecords := make([]smartDetailSourceRecord, 0, len(sourceRecords))
+				panMockRecords := make([]smartDetailSourceRecord, 0, len(sourceRecords))
+				for _, record := range sourceRecords {
+					if record.PanMock && record.Supported {
+						panMockRecords = append(panMockRecords, record)
 						continue
 					}
-					detailReadyPans = append(detailReadyPans, pan)
+					detailReadyRecords = append(detailReadyRecords, record)
 				}
-				emitCandidatesFromPans(detailReadyPans, nil)
-				var pansMu sync.Mutex
-				resolved, access := smartResolvePanMockDetailPansIncremental(database, src.SiteKey, src.SiteName, want, seasonsForMapping, hasMulti, rawCleanRules, rawEpisodeRules, resolvedPans, func(panIndex int, episodes []catpawrunner.Episode, accessDelta map[string]string, emitAllowed bool) {
-					pansMu.Lock()
-					var nextPan catpawrunner.Pan
-					shouldEmit := false
-					if panIndex >= 0 && panIndex < len(resolvedPans) {
-						nextPan = resolvedPans[panIndex]
-						nextPan.Episodes = episodes
-						resolvedPans[panIndex] = nextPan
-						shouldEmit = smartPanMockProviderFromLabel(strings.TrimSpace(nextPan.Label)) != ""
-					}
+				emitCandidatesFromRecords(detailReadyRecords, nil)
+				resolved, access := smartResolvePanMockSourceRecordsIncremental(database, src.SiteKey, src.SiteName, want, seasonsForMapping, hasMulti, rawCleanRules, rawEpisodeRules, panMockRecords, func(resolvedGroup []smartDetailSourceRecord, accessDelta map[string]string, emitAllowed bool) {
 					for sid, acc := range accessDelta {
 						accessByShareID[sid] = acc
 					}
-					pansMu.Unlock()
-					if shouldEmit {
-						emitCandidatesFromPans([]catpawrunner.Pan{nextPan}, accessDelta)
+					if emitAllowed {
+						emitCandidatesFromRecords(resolvedGroup, accessDelta)
 					}
-					_ = emitAllowed
 				})
-				resolvedPans = resolved
-				if blockedEntry != nil && len(resolvedPans) > 0 {
-					resolvedPans = smartFilterPansByBlockedFlags(resolvedPans, blockedEntry.PanFlags)
-				}
+				_ = resolved
 				accessByShareID = access
 			} else {
-				emitCandidatesFromPans(resolvedPans, accessByShareID)
+				emitCandidatesFromRecords(sourceRecords, accessByShareID)
 			}
 		}
 	}

@@ -24,6 +24,8 @@ type User = SmartUser
 type TMDBCredits = smartTMDBCredits
 type TMDBCast = smartTMDBCast
 type TMDBCrew = smartTMDBCrew
+type DetailSourceRecord = smartDetailSourceRecord
+type DetailSourceStatus = smartDetailSourceStatus
 
 // Exported wrappers (matching previous playback helpers)
 func LoadPlaybackSettings(database *db.DB) PlaybackSettings {
@@ -161,6 +163,70 @@ func ExtractPanMock189CredentialsFromSourceValue(panFlag string, sourceValue str
 	return smartPanMock189CredentialsFromSourceValue(panFlag, sourceValue)
 }
 
+func BuildDetailSourceRecords(playFrom string, playURL string, panMock bool, siteKey string, siteName string, spiderAPI string, siteDetail string, remark string) []DetailSourceRecord {
+	return smartBuildDetailSourceRecords(playFrom, playURL, panMock, smartSource{
+		SiteKey:    strings.TrimSpace(siteKey),
+		SiteName:   strings.TrimSpace(siteName),
+		SpiderAPI:  strings.TrimSpace(spiderAPI),
+		SiteDetail: strings.TrimSpace(siteDetail),
+		Remark:     strings.TrimSpace(remark),
+	})
+}
+
+func ResolvePanMockSourceRecords(
+	database *db.DB,
+	siteKey string,
+	siteName string,
+	want int,
+	tmdbSeasons []TMDBSeason,
+	tmdbHasMultiSeason bool,
+	rawCleanRules []string,
+	rawEpisodeRules []string,
+	records []DetailSourceRecord,
+) ([]DetailSourceRecord, map[string]string) {
+	return smartResolvePanMockSourceRecords(database, siteKey, siteName, want, tmdbSeasons, tmdbHasMultiSeason, rawCleanRules, rawEpisodeRules, records)
+}
+
+func ResolvePanMockSourceRecordsIncremental(
+	database *db.DB,
+	siteKey string,
+	siteName string,
+	want int,
+	tmdbSeasons []TMDBSeason,
+	tmdbHasMultiSeason bool,
+	rawCleanRules []string,
+	rawEpisodeRules []string,
+	records []DetailSourceRecord,
+	onGroupResolved func(resolved []DetailSourceRecord, accessDelta map[string]string, emitAllowed bool),
+) ([]DetailSourceRecord, map[string]string) {
+	return smartResolvePanMockSourceRecordsIncremental(database, siteKey, siteName, want, tmdbSeasons, tmdbHasMultiSeason, rawCleanRules, rawEpisodeRules, records, onGroupResolved)
+}
+
+func ResolvePanMockEpisodesBySourceValue(database *db.DB, panFlag string, sourceValue string) ([]catpawrunner.Episode, map[string]string, bool, string, bool, error) {
+	record := smartDetailSourceRecord{
+		Label:       strings.TrimSpace(panFlag),
+		PanMock:     true,
+		Provider:    strings.TrimSpace(smartPanMockProviderFromLabel(panFlag)),
+		Supported:   strings.TrimSpace(smartPanMockProviderFromLabel(panFlag)) != "",
+		PanFlag:     strings.TrimSpace(panFlag),
+		SourceValue: strings.TrimSpace(sourceValue),
+		AccessDelta: map[string]string{},
+		Status:      smartDetailSourcePending,
+	}
+	record.GroupKey = smartBuildPanMockResolveGroupKey(record)
+	if !record.Supported || strings.TrimSpace(record.GroupKey) == "" {
+		return nil, map[string]string{}, false, "skip", false, nil
+	}
+	return smartResolveSharedPanGroupEpisodes(database, record)
+}
+
+// ResolvedRecordsToPans is an edge-only adapter for browse/debug/output assembly.
+// Resolved records remain the sole internal intermediate model and must not be
+// converted back into Pans for re-entry into smart resolve/candidate flows.
+func ResolvedRecordsToPans(records []DetailSourceRecord) []catpawrunner.Pan {
+	return smartResolvedRecordsToPans(records)
+}
+
 func BuildSourceKey(siteKey string, spiderAPI string, siteDetail string) string {
 	return smartBuildSourceKey(siteKey, spiderAPI, siteDetail)
 }
@@ -271,43 +337,6 @@ func PanMockProviderFromLabel(label string) string {
 
 func ResolvePanProviderPlayback(database *db.DB, u *SmartUser, provider string, panFlag string, episodeURL string, accessByShareID map[string]string, dirPath string) (finalURL string, finalHeaders map[string]string, err error) {
 	return smartResolvePanProviderPlayback(database, u, provider, panFlag, episodeURL, accessByShareID, dirPath)
-}
-
-func ResolvePanMockDetailPans(
-	database *db.DB,
-	siteKey string,
-	siteName string,
-	want int,
-	tmdbSeasons []TMDBSeason,
-	tmdbHasMultiSeason bool,
-	rawCleanRules []string,
-	rawEpisodeRules []string,
-	pans []catpawrunner.Pan,
-) ([]catpawrunner.Pan, map[string]string) {
-	return smartResolvePanMockDetailPans(database, siteKey, siteName, want, tmdbSeasons, tmdbHasMultiSeason, rawCleanRules, rawEpisodeRules, pans)
-}
-
-func ResolvePanMockDetailPansIncremental(
-	database *db.DB,
-	siteKey string,
-	siteName string,
-	want int,
-	tmdbSeasons []TMDBSeason,
-	tmdbHasMultiSeason bool,
-	rawCleanRules []string,
-	rawEpisodeRules []string,
-	pans []catpawrunner.Pan,
-	onPanResolved func(panIndex int, episodes []catpawrunner.Episode, accessDelta map[string]string, emitAllowed bool),
-) ([]catpawrunner.Pan, map[string]string) {
-	return smartResolvePanMockDetailPansIncremental(database, siteKey, siteName, want, tmdbSeasons, tmdbHasMultiSeason, rawCleanRules, rawEpisodeRules, pans, onPanResolved)
-}
-
-func ResolveSinglePanMockPan(database *db.DB, pan catpawrunner.Pan) (catpawrunner.Pan, map[string]string, bool, string, error) {
-	return smartResolveSinglePanMockPan(database, pan)
-}
-
-func ResolveSharedPanFlagEpisodes(database *db.DB, panFlag string, episodeURL string) ([]catpawrunner.Episode, map[string]string, bool, string, bool, error) {
-	return smartResolveSharedPanFlagEpisodes(database, panFlag, episodeURL)
 }
 
 func LoadAggregateCleanRules(database *db.DB) []string {
