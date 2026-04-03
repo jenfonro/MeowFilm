@@ -556,6 +556,12 @@ func buildHistoryTVLatestItem(database *db.DB, userID int64, serverID string, ro
 		return TVLatestItemDTO{}, false
 	}
 	progress := parseHistoryTVRemark(strings.TrimSpace(row.Remark), name)
+	badgeCount := progress.unplayedCount
+	if hist != nil {
+		if count, err := countTVSeriesFollowingEpisodes(database, tmdbID, hist); err == nil {
+			badgeCount = count
+		}
+	}
 	posterURL := rewriteRedirectImageURL(database, row.Poster)
 	premiereDate := ""
 	productionYear := 0
@@ -594,7 +600,7 @@ func buildHistoryTVLatestItem(database *db.DB, userID int64, serverID string, ro
 		RecursiveCount:  progress.unplayedCount,
 		ChildCount:      progress.childCount,
 		Status:          progress.status,
-		UnplayedCount:   progress.unplayedCount,
+		UnplayedCount:   badgeCount,
 		PosterURL:       posterURL,
 	})
 	if hist != nil {

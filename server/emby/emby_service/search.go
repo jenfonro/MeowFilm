@@ -402,9 +402,9 @@ func buildSearchSeriesItemDTO(database *db.DB, userID int64, serverID string, it
 			recursiveCount = detail.EpisodeCount
 		}
 		childCount = len(detail.Seasons)
-		if userData.UnplayedItemCount == 0 && hist != nil {
-			if nextUp, err := loadTVNextUpView(database, item.ID, hist, 512); err == nil && nextUp != nil {
-				userData.UnplayedItemCount = len(nextUp.Candidates)
+		if hist != nil {
+			if count, err := countTVSeriesFollowingEpisodes(database, item.ID, hist); err == nil {
+				userData.UnplayedItemCount = count
 			}
 		}
 	}
