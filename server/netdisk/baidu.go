@@ -7,7 +7,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -390,20 +392,65 @@ func baiduErrnoOk(obj any) error {
 	return baiduErrnoOkAllow(obj, nil)
 }
 
-func baiduErrnoOkAllow(obj any, allow map[string]struct{}) error {
+func baiduErrnoInfo(obj any) (string, string) {
+	m, _ := obj.(map[string]any)
+	if m == nil {
+		return "", ""
+	}
+	errno := strings.TrimSpace(toString(m["errno"]))
+	msgKeys := []string{"errmsg", "error_msg", "msg", "message", "error"}
+	for _, key := range msgKeys {
+		msg := strings.TrimSpace(toString(m[key]))
+		if msg != "" {
+			return errno, msg
+		}
+	}
+	return errno, ""
+}
+
+func baiduCompactJSONForLog(obj any) string {
+	if obj == nil {
+		return ""
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	err := enc.Encode(obj)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(buf.String())
+}
+
+func baiduErrnoWrap(api string, obj any, allow map[string]struct{}) error {
 	m, _ := obj.(map[string]any)
 	if m == nil {
 		return nil
 	}
-	if errno, ok := m["errno"]; ok && toString(errno) != "" && toString(errno) != "0" {
-		if allow != nil {
-			if _, ok := allow[toString(errno)]; ok {
-				return nil
-			}
-		}
-		return errors.New("baidu errno " + toString(errno))
+	errno := strings.TrimSpace(toString(m["errno"]))
+	if errno == "" || errno == "0" {
+		return nil
 	}
-	return nil
+	if allow != nil {
+		if _, ok := allow[errno]; ok {
+			return nil
+		}
+	}
+	msg := ""
+	for _, key := range []string{"errmsg", "error_msg", "msg", "message", "error"} {
+		msg = strings.TrimSpace(toString(m[key]))
+		if msg != "" {
+			break
+		}
+	}
+	if msg != "" {
+		return fmt.Errorf("baidu %s errno=%s msg=%s", api, errno, msg)
+	}
+	return fmt.Errorf("baidu %s errno=%s", api, errno)
+}
+
+func baiduErrnoOkAllow(obj any, allow map[string]struct{}) error {
+	return baiduErrnoWrap("api", obj, allow)
 }
 
 func baiduVerifySharePwd(surl string, pwd string, cookie *string) error {
@@ -1287,7 +1334,7 @@ func baiduCreateDir(cookie string, dirPath string, bdstoken string) (map[string]
 		cookie = mergeCookieFromSetCookie(cookie, setCookie)
 	}
 	allow := map[string]struct{}{"31066": {}, "-8": {}}
-	if err := baiduErrnoOkAllow(objAny, allow); err != nil {
+	if err := baiduErrnoWrap("api/create", objAny, allow); err != nil {
 		return nil, cookie, err
 	}
 	root, _ := objAny.(map[string]any)
@@ -1350,7 +1397,7 @@ func baiduShareTransferToDir(cookie string, shareID string, uk string, surl stri
 	if setCookie != nil && len(setCookie) > 0 {
 		cookie = mergeCookieFromSetCookie(cookie, setCookie)
 	}
-	if err := baiduErrnoOk(objAny); err != nil {
+	if err := baiduErrnoWrap("share/transfer", objAny, nil); err != nil {
 		return cookie, err
 	}
 	return cookie, nil
@@ -1381,9 +1428,6 @@ func baiduMediaInfo(cookie string, path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := baiduErrnoOk(objAny); err != nil {
-		return "", err
-	}
 	root, _ := objAny.(map[string]any)
 	info, _ := root["info"].(map[string]any)
 	dlink := ""
@@ -1391,7 +1435,15 @@ func baiduMediaInfo(cookie string, path string) (string, error) {
 		dlink = strings.TrimSpace(toString(info["dlink"]))
 	}
 	if dlink == "" {
+		if err := baiduErrnoWrap("api/mediainfo", objAny, nil); err != nil {
+			errno, msg := baiduErrnoInfo(objAny)
+			log.Printf("[baidu][mediainfo_error] path=%s errno=%s msg=%s response=%s", p, errno, msg, baiduCompactJSONForLog(objAny))
+			return "", err
+		}
 		return "", errors.New("baidu mediainfo missing dlink")
+	}
+	if errno, msg := baiduErrnoInfo(objAny); errno != "" && errno != "0" {
+		log.Printf("[baidu][mediainfo_warn] path=%s errno=%s msg=%s dlink=%s", p, errno, msg, dlink)
 	}
 	return dlink, nil
 }
@@ -1489,10 +1541,12 @@ func BaiduPlay(database *db.DB, flag string, id string, dirPath string) (string,
 
 	ensuredPath, cookie2, err := baiduEnsureDir(cookie, dirPath)
 	if err != nil {
+		log.Printf("[baidu][play_step_error] step=ensure_dir dir=%s err=%v", strings.TrimSpace(dirPath), err)
 		return "", nil, err
 	}
 	cookie3, err := baiduShareTransferToDir(cookie2, shareID, uk, surl, pwd, fsid, ensuredPath)
 	if err != nil {
+		log.Printf("[baidu][play_step_error] step=share_transfer shareid=%s uk=%s surl=%s fsid=%s dest=%s err=%v", shareID, uk, surl, fsid, ensuredPath, err)
 		return "", nil, err
 	}
 	safeName := path.Base(strings.ReplaceAll(fileName, "\\", "/"))
@@ -1500,10 +1554,12 @@ func BaiduPlay(database *db.DB, flag string, id string, dirPath string) (string,
 	fullPath := strings.ReplaceAll(strings.TrimRight(ensuredPath, "/")+"/"+safeName, "//", "/")
 	dlink, err := baiduMediaInfo(cookie3, fullPath)
 	if err != nil {
+		log.Printf("[baidu][play_step_error] step=mediainfo path=%s err=%v", fullPath, err)
 		return "", nil, err
 	}
 	finalURL, err := baiduResolveFinalURLFromDlink(dlink)
 	if err != nil {
+		log.Printf("[baidu][play_step_error] step=resolve_dlink path=%s err=%v", fullPath, err)
 		return "", nil, err
 	}
 	headers := map[string]string{"User-Agent": baiduPlayUA}
