@@ -110,50 +110,16 @@ func smartPanMockProviderID(database *db.DB, panFlag string) string {
 	return smartPlayFlagProviderID(raw)
 }
 
-func smartExtractMockPasscodeFromCandidate(c smartCandidate) string {
-	names := smartExtractRawNamesFromEpisodeURL(c.Ep.URL)
-	if len(names) == 0 {
-		return ""
-	}
-	raw := strings.TrimSpace(names[0])
-	if raw == "" {
-		return ""
-	}
-	if !strings.HasSuffix(strings.ToLower(raw), ".mp4") {
-		return ""
-	}
-	out := raw
-	if strings.HasSuffix(strings.ToLower(out), ".mp4") {
-		out = strings.TrimSpace(out[:len(out)-4])
-	}
-	if strings.EqualFold(out, "nopass") {
-		return ""
-	}
-	return strings.TrimSpace(out)
+func smartPanMockPasscodeFromCandidate(c smartCandidate) string {
+	return strings.TrimSpace(c.Ep.URL)
 }
 
-func smartExtractTianyiMockMetaFromCandidate(c smartCandidate) (shareCode string, accessCode string) {
+func smartPanMock189CredentialsFromCandidate(c smartCandidate) (shareCode string, accessCode string) {
 	label := strings.TrimSpace(c.PanFlag)
-	if m := regexp.MustCompile(`(?:天意|天翼)-([A-Za-z0-9]{6,64})`).FindStringSubmatch(label); len(m) == 2 {
+	if m := regexp.MustCompile(`天意-([A-Za-z0-9]{6,64})`).FindStringSubmatch(label); len(m) == 2 {
 		shareCode = strings.TrimSpace(m[1])
 	}
-	pass := strings.TrimSpace(smartExtractMockPasscodeFromCandidate(c))
-	if pass == "" {
-		return shareCode, ""
-	}
-	if strings.Contains(pass, "-") {
-		seg := strings.SplitN(pass, "-", 2)
-		if shareCode == "" {
-			shareCode = strings.TrimSpace(seg[0])
-		}
-		accessCode = strings.TrimSpace(seg[1])
-	} else {
-		accessCode = pass
-	}
-	if strings.EqualFold(accessCode, "nopass") {
-		accessCode = ""
-	}
-	return shareCode, accessCode
+	return shareCode, strings.TrimSpace(c.Ep.URL)
 }
 
 func smartTMDBSeasonEpisodeOfGlobal(seasons []smartTMDBSeason, global int) smartSeasonEpisode {
@@ -224,57 +190,16 @@ func smartPickBestMatchIgnorePanOrder(list []smartCandidate, tmdbHasMultiSeason 
 	return &best
 }
 
-func smartExtractMockPasscodeFromEpisodeURL(episodeURL string) string {
-	names := smartExtractRawNamesFromEpisodeURL(episodeURL)
-	if len(names) == 0 {
-		return ""
-	}
-	raw := strings.TrimSpace(names[0])
-	if raw == "" {
-		return ""
-	}
-	if !strings.HasSuffix(strings.ToLower(raw), ".mp4") {
-		// Only placeholder filenames encode passcodes as "<pass>.mp4".
-		return ""
-	}
-	out := raw
-	if strings.HasSuffix(strings.ToLower(out), ".mp4") {
-		out = strings.TrimSpace(out[:len(out)-4])
-	}
-	if strings.EqualFold(out, "nopass") {
-		return ""
-	}
-	return strings.TrimSpace(out)
+func smartPanMockPasscodeFromSourceValue(sourceValue string) string {
+	return strings.TrimSpace(sourceValue)
 }
 
-func smartExtractTianyiMockMetaFromEpisodeURL(panFlag string, episodeURL string) (shareCode string, accessCode string) {
+func smartPanMock189CredentialsFromSourceValue(panFlag string, sourceValue string) (shareCode string, accessCode string) {
 	label := strings.TrimSpace(panFlag)
-	url := strings.TrimSpace(episodeURL)
-
-	// Fallback: shareCode might already be embedded in the label like "天意-XXXX" / "天翼-XXXX".
-	if m := regexp.MustCompile(`(?:天意|天翼)-([A-Za-z0-9]{6,64})`).FindStringSubmatch(label); len(m) == 2 {
+	if m := regexp.MustCompile(`天意-([A-Za-z0-9]{6,64})`).FindStringSubmatch(label); len(m) == 2 {
 		shareCode = strings.TrimSpace(m[1])
 	}
-
-	pass := strings.TrimSpace(smartExtractMockPasscodeFromEpisodeURL(url))
-	if pass == "" {
-		return shareCode, ""
-	}
-	if strings.Contains(pass, "-") {
-		seg := strings.SplitN(pass, "-", 2)
-		if shareCode == "" && strings.TrimSpace(seg[0]) != "" {
-			shareCode = strings.TrimSpace(seg[0])
-		}
-		if len(seg) == 2 {
-			accessCode = strings.TrimSpace(seg[1])
-		}
-	} else {
-		accessCode = pass
-	}
-	if strings.EqualFold(accessCode, "nopass") {
-		accessCode = ""
-	}
-	return shareCode, accessCode
+	return shareCode, strings.TrimSpace(sourceValue)
 }
 
 func smartBuildSourceKey(siteKey string, spiderAPI string, siteDetail string) string {

@@ -135,14 +135,14 @@ func smartBuildPanMockGroupAttempts(
 		metaA := ""
 		metaB := ""
 		if pid == "189" {
-			sc, ac := smartExtractTianyiMockMetaFromCandidate(c)
+			sc, ac := smartPanMock189CredentialsFromCandidate(c)
 			metaA = sc
 			metaB = ac
 			if sc != "" {
 				shareKey = sc
 			}
 		} else {
-			metaA = smartExtractMockPasscodeFromCandidate(c)
+			metaA = smartPanMockPasscodeFromCandidate(c)
 		}
 		key := pid + "|" + shareKey
 		if prev, ok := groups[key]; ok {
@@ -282,7 +282,7 @@ func smartTryPanMockGroup(
 		sc := strings.TrimSpace(at.MetaA)
 		ac := strings.TrimSpace(at.MetaB)
 		if sc == "" {
-			sc2, ac2 := smartExtractTianyiMockMetaFromCandidate(base)
+			sc2, ac2 := smartPanMock189CredentialsFromCandidate(base)
 			sc = strings.TrimSpace(sc2)
 			if ac == "" {
 				ac = strings.TrimSpace(ac2)

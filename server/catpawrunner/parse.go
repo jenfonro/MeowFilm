@@ -84,7 +84,48 @@ func ExtractDetailPlayFromURL(data map[string]any) (playFrom string, playURL str
 	return "", ""
 }
 
+func NormalizePanMockFlag(label string) string {
+	raw := strings.TrimSpace(label)
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "百度原画-") && strings.Contains(raw, "#") {
+		raw = strings.TrimSpace(strings.SplitN(raw, "#", 2)[0])
+	}
+	return raw
+}
+
+func PanMockProviderFromFlag(label string) string {
+	raw := NormalizePanMockFlag(label)
+	if raw == "" || !strings.Contains(raw, "-") {
+		return ""
+	}
+	head := strings.TrimSpace(strings.SplitN(raw, "-", 2)[0])
+	switch {
+	case strings.Contains(head, "百度原画"):
+		return "baidu"
+	case strings.Contains(head, "夸父"):
+		return "quark"
+	case strings.Contains(head, "优夕"):
+		return "uc"
+	case strings.Contains(head, "天意"):
+		return "189"
+	case strings.Contains(head, "逸动"):
+		return "139"
+	default:
+		return ""
+	}
+}
+
+func IsSupportedPanMockFlag(label string) bool {
+	return strings.TrimSpace(PanMockProviderFromFlag(label)) != ""
+}
+
 func ParsePlaySources(fromStr string, urlStr string) []Pan {
+	return ParsePlaySourcesForDetail(fromStr, urlStr, false)
+}
+
+func ParsePlaySourcesForDetail(fromStr string, urlStr string, panMock bool) []Pan {
 	fromStr = strings.TrimSpace(fromStr)
 	urlStr = strings.TrimSpace(urlStr)
 	if fromStr == "" && urlStr == "" {
@@ -108,6 +149,21 @@ func ParsePlaySources(fromStr string, urlStr string) []Pan {
 		u := ""
 		if i < len(urlParts) {
 			u = strings.TrimSpace(urlParts[i])
+		}
+		if panMock && IsSupportedPanMockFlag(label) {
+			normalized := NormalizePanMockFlag(label)
+			if normalized == "" {
+				normalized = label
+			}
+			out = append(out, Pan{
+				Label: normalized,
+				Episodes: []Episode{{
+					Name: strings.TrimSpace(u),
+					URL:  strings.TrimSpace(u),
+					Flag: normalized,
+				}},
+			})
+			continue
 		}
 		if u == "" {
 			continue
