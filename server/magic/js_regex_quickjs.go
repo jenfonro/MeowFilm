@@ -75,6 +75,92 @@ var jsAggregateEnginePool = sync.Pool{
 	New: func() any { return &jsAggregateEngine{} },
 }
 
+const jsEpisodeMarkerNormalizeHelpers = `
+	globalThis.__mf_normalize_marker_token = function (raw) {
+		let s = String(raw || "").trim();
+		if (!s) return "";
+		s = s.replace(/[０-９]/g, function (ch) {
+			return String(ch.charCodeAt(0) - 65296);
+		});
+		s = s.replace(/\s+/g, "");
+		s = s.replace(/两/g, "二");
+		s = s.replace(/〇/g, "零");
+		return s;
+	};
+
+	globalThis.__mf_parse_chinese_int = function (raw) {
+		const token = __mf_normalize_marker_token(raw);
+		if (!token) return 0;
+		if (/^\d+$/.test(token)) {
+			const n = parseInt(token, 10);
+			return Number.isNaN(n) ? 0 : n;
+		}
+		const digit = function (ch) {
+			switch (ch) {
+				case "零": return 0;
+				case "一": return 1;
+				case "二": return 2;
+				case "三": return 3;
+				case "四": return 4;
+				case "五": return 5;
+				case "六": return 6;
+				case "七": return 7;
+				case "八": return 8;
+				case "九": return 9;
+				default: return -1;
+			}
+		};
+		const parseSection = function (section) {
+			let total = 0;
+			let num = 0;
+			for (let i = 0; i < section.length; i++) {
+				const ch = section[i];
+				const d = digit(ch);
+				if (d >= 0) {
+					num = d;
+					continue;
+				}
+				const unit = ch === "十" ? 10 : ch === "百" ? 100 : ch === "千" ? 1000 : 0;
+				if (!unit) continue;
+				if (!num) num = 1;
+				total += num * unit;
+				num = 0;
+			}
+			return total + num;
+		};
+		if (token.indexOf("万") >= 0) {
+			const parts = token.split("万");
+			const left = parseSection(parts[0] || "");
+			const right = parseSection(parts[1] || "");
+			return left * 10000 + right;
+		}
+		return parseSection(token);
+	};
+
+	globalThis.__mf_parse_marker_number = function (raw) {
+		const token = __mf_normalize_marker_token(raw);
+		if (!token) return 0;
+		if (/^\d+$/.test(token)) {
+			const n = parseInt(token, 10);
+			return Number.isNaN(n) ? 0 : n;
+		}
+		return __mf_parse_chinese_int(token);
+	};
+
+	globalThis.__mf_normalize_episode_markers = function (text) {
+		const raw = String(text || "");
+		if (!raw.trim()) return "";
+		return raw.replace(
+			/第\s*([0-9０-９]{1,5}|[一二三四五六七八九十百千万两零〇]{1,20})\s*([季集话])/g,
+			function (full, token, unit) {
+				const value = __mf_parse_marker_number(token);
+				if (!value || value <= 0) return full;
+				return "第" + String(value) + String(unit || "");
+			}
+		);
+	};
+`
+
 func jsRulesKey(cleanRaw []string, episodeRaw []string) string {
 	h := sha1.New()
 	for _, s := range cleanRaw {
@@ -188,7 +274,7 @@ func (e *jsMagicEngine) ensureRules(cleanRaw []string, episodeRaw []string) erro
 		episodeRules = append(episodeRules, r)
 	}
 
-	if err := jsEvalVoid(e.ctx, `
+	if err := jsEvalVoid(e.ctx, jsEpisodeMarkerNormalizeHelpers+`
 			globalThis.__mf_set_rules = function(cleanRules, episodeRules) {
 				globalThis.__mf_clean = [];
 				for (let i=0;i<cleanRules.length;i++) {
@@ -207,11 +293,12 @@ func (e *jsMagicEngine) ensureRules(cleanRaw []string, episodeRaw []string) erro
 		};
 
 		globalThis.__mf_clean_text = function(text) {
-			let out = String(text || "");
+			let out = __mf_normalize_episode_markers(text);
 			for (let i=0;i<__mf_clean.length;i++) {
 				const r = __mf_clean[i];
 				out = out.replace(r.re, r.replace);
 			}
+			out = __mf_normalize_episode_markers(out);
 			return out.replace(/\s+/g, " ").trim();
 		};
 
@@ -223,6 +310,7 @@ func (e *jsMagicEngine) ensureRules(cleanRaw []string, episodeRaw []string) erro
 				if (!m) continue;
 				let normalized = cleaned;
 				if (r.replace) normalized = normalized.replace(r.re, r.replace);
+				normalized = __mf_normalize_episode_markers(normalized);
 				const mm = /(?:S(\d{1,2}))?\s*E(\d{1,5})/i.exec(normalized);
 				if (mm && mm[2]) {
 					const season = mm[1] ? parseInt(mm[1], 10) : 0;
@@ -662,9 +750,9 @@ func MagicEpisodeDebug(q string, cleanRaw []string, episodeRaw []string) (any, e
 	defer ctx.Close()
 
 	// Core helpers.
-	if err := jsEvalVoid(ctx, `
+	if err := jsEvalVoid(ctx, jsEpisodeMarkerNormalizeHelpers+`
 			globalThis.__mf_apply_clean = function (text, rules) {
-				let out = String(text || "");
+				let out = __mf_normalize_episode_markers(text);
 				const steps = [];
 				for (let i = 0; i < rules.length; i++) {
 				const r = rules[i] || {};
@@ -679,6 +767,7 @@ func MagicEpisodeDebug(q string, cleanRaw []string, episodeRaw []string) (any, e
 					steps.push({ index: i, pattern: String(r.pattern || ""), flags, replace: String(r.replace || ""), before, after: before, error: String(e) });
 				}
 			}
+			out = __mf_normalize_episode_markers(out);
 			out = out.replace(/\s+/g, " ").trim();
 			return { cleaned: out, steps };
 		};
@@ -721,6 +810,7 @@ func MagicEpisodeDebug(q string, cleanRaw []string, episodeRaw []string) (any, e
 					if (!m) continue;
 					let normalized = String(cleaned || "");
 					if (replace) normalized = normalized.replace(re, replace);
+					normalized = __mf_normalize_episode_markers(normalized);
 					const mm = /(?:S(\d{1,2}))?\s*E(\d{1,5})/i.exec(normalized);
 					if (mm && mm[2]) {
 						const season = mm[1] ? parseInt(mm[1], 10) : 0;
