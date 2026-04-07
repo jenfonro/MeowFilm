@@ -317,10 +317,26 @@ func resolveTMDBBackdropImageTarget(database *db.DB, ref *itemRef, maxWidth stri
 }
 
 func resolveSitePrimaryImageURL(database *db.DB, userID int64, siteKey string, siteDetail string) string {
-	_ = database
-	_ = userID
-	_ = siteKey
-	_ = siteDetail
+	if database == nil {
+		return ""
+	}
+	sk := strings.TrimSpace(siteKey)
+	sd := strings.TrimSpace(siteDetail)
+	if sk == "" || sd == "" {
+		return ""
+	}
+	if userID > 0 {
+		if hist, err := database.GetPlayHistoryLatestBySiteVideo(userID, sk, sd); err == nil && hist != nil {
+			if target := rewriteRedirectImageURL(database, strings.TrimSpace(hist.Poster)); strings.TrimSpace(target) != "" {
+				return target
+			}
+		}
+	}
+	if meta, err := fetchSiteDetailMeta(database, userID, sk, sd); err == nil {
+		if target := rewriteRedirectImageURL(database, strings.TrimSpace(meta.Pic)); strings.TrimSpace(target) != "" {
+			return target
+		}
+	}
 	return ""
 }
 

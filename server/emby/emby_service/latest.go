@@ -643,7 +643,7 @@ func buildHistorySiteLatestItem(database *db.DB, serverID string, row db.PlayHis
 		ParentID:       strings.TrimSpace(row.PlaybackItemID),
 		GenreItems:     EmptyNamedIDs(),
 		AspectRatio:    0.6666667,
-		PrimaryTag:     StableMD5Hex(id + "|primary"),
+		PrimaryTag:     SearchSitePrimaryTag(strings.TrimSpace(row.Poster)),
 		LogoTag:        StableMD5Hex(id + "|logo"),
 		BackdropTags:   EmptyStrings(),
 		RecursiveCount: 0,

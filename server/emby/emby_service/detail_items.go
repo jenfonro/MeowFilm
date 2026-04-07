@@ -149,7 +149,7 @@ func buildSiteEpisodeDetailPayload(database *db.DB, userID int64, serverID strin
 	fileName := siteEpisodePlayableFileName(rawFileName, container)
 	path := VirtualEpisodePath(seriesName, meta.Year, ref.Pan, fileName)
 	itemID := strings.TrimSpace(ref.RawID)
-	row, _ := database.GetPlayHistoryLatestByPlaybackItemID(userID, itemID)
+	row := resolveSiteEpisodeHistoryRowForDetail(database, userID, ref, ep)
 	seriesID := buildSiteSeriesID(ref.SiteKey, ref.SiteDetail)
 	seasonID := buildSiteSeasonID(ref.SiteKey, ref.SiteDetail, ref.Pan)
 	dateCreated := ProtocolCreatedDate(0)
@@ -158,7 +158,14 @@ func buildSiteEpisodeDetailPayload(database *db.DB, userID int64, serverID strin
 		dateModified = EmbyZeroTimeString()
 	}
 	chapters := EmptyDetailChapters()
-	mediaSources := detailMediaSources(itemID, path, fileName, 0, firstNonEmptyString(container, "mp4"), chapters)
+	runtime := int64(0)
+	if row != nil {
+		runtime = maxInt64(0, row.PlaybackRuntimeTicks)
+		if runtime <= 0 && row.PlaybackPositionTicks > 0 {
+			runtime = row.PlaybackPositionTicks + int64(60*10_000_000)
+		}
+	}
+	mediaSources := detailMediaSources(itemID, path, fileName, runtime, firstNonEmptyString(container, "mp4"), chapters)
 	mediaStreams := EmptyAnySlice()
 	if len(mediaSources) > 0 && mediaSources[0].MediaStreams != nil {
 		mediaStreams = mediaSources[0].MediaStreams
@@ -191,7 +198,7 @@ func buildSiteEpisodeDetailPayload(database *db.DB, userID int64, serverID strin
 		Genres:                  EmptyStrings(),
 		CommunityRating:         0,
 		OfficialRating:          "",
-		RunTimeTicks:            0,
+		RunTimeTicks:            runtime,
 		Size:                    0,
 		FileName:                fileBase,
 		Bitrate:                 0,
@@ -230,6 +237,47 @@ func buildSiteEpisodeDetailPayload(database *db.DB, userID int64, serverID strin
 		Width:                   0,
 		Height:                  0,
 	}, true, nil
+}
+
+func resolveSiteEpisodeHistoryRowForDetail(database *db.DB, userID int64, ref *itemRef, ep catpawrunner.Episode) *db.PlayHistoryRow {
+	if database == nil || ref == nil || userID <= 0 {
+		return nil
+	}
+	itemID := strings.TrimSpace(ref.RawID)
+	if itemID != "" {
+		if row, _ := database.GetPlayHistoryLatestByPlaybackItemID(userID, itemID); row != nil {
+			return row
+		}
+	}
+	hist, _ := database.GetPlayHistoryLatestBySiteVideo(userID, ref.SiteKey, ref.SiteDetail)
+	if !siteHistoryMatchesEpisodeRef(hist, ref, ep) {
+		return nil
+	}
+	return hist
+}
+
+func siteHistoryMatchesEpisodeRef(hist *db.PlayHistoryRow, ref *itemRef, ep catpawrunner.Episode) bool {
+	if hist == nil || ref == nil {
+		return false
+	}
+	if strings.TrimSpace(hist.PlaybackItemID) != "" {
+		if current := parseItemRefAny(strings.TrimSpace(hist.PlaybackItemID)); current != nil &&
+			current.Source == "site" &&
+			current.SubKind == "episode" &&
+			strings.TrimSpace(current.SiteKey) == strings.TrimSpace(ref.SiteKey) &&
+			strings.TrimSpace(current.SiteDetail) == strings.TrimSpace(ref.SiteDetail) &&
+			current.Pan == ref.Pan &&
+			current.Episode == ref.Episode {
+			return true
+		}
+	}
+	if strings.TrimSpace(hist.SiteEpisodeFile) != "" && siteHistoryEpisodeFileMatches(strings.TrimSpace(hist.SiteEpisodeFile), ep, ref.Episode) {
+		return true
+	}
+	if hist.SiteEpisodeIndex > 0 && hist.SiteEpisodeIndex == ref.Episode {
+		return true
+	}
+	return false
 }
 
 func fetchSiteDetailMeta(database *db.DB, userID int64, siteKey string, siteDetail string) (siteDetailMeta, error) {
