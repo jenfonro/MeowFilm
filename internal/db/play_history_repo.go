@@ -257,6 +257,43 @@ func (d *DB) ensureContent(tx *sql.Tx, contentKey string, tmdbID int, tmdbType s
 	return contentID, nil
 }
 
+func normalizeHistoryTMDBBinding(tmdbID int, tmdbType string) (int, string) {
+	id := tmdbID
+	if id < 0 {
+		id = 0
+	}
+	typ := strings.TrimSpace(strings.ToLower(tmdbType))
+	if id <= 0 || (typ != "tv" && typ != "movie") {
+		return 0, ""
+	}
+	return id, typ
+}
+
+func (d *DB) hasProtectedTMDBHistoryForContentKeyTx(tx *sql.Tx, userID int64, contentKey string) (bool, error) {
+	if tx == nil {
+		return false, errors.New("tx nil")
+	}
+	key := strings.TrimSpace(contentKey)
+	if userID <= 0 || key == "" {
+		return false, nil
+	}
+	var count int
+	err := tx.QueryRow(`
+		SELECT COUNT(1)
+		FROM user_play_history h
+		JOIN content c ON c.id = h.content_id
+		JOIN content_tmdb tm ON tm.content_id = c.id
+		WHERE h.user_id = ?
+		  AND c.content_key = ?
+		  AND tm.tmdb_id > 0
+		  AND lower(tm.tmdb_type) IN ('tv', 'movie')
+	`, userID, key).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 func (d *DB) GetPlayHistoryLatestPosterByContentKey(userID int64, contentKey string) (string, error) {
 	if d == nil || d.db == nil || userID <= 0 {
 		return "", nil
@@ -291,6 +328,20 @@ func (d *DB) UpsertPlayHistory(row PlayHistoryUpsert) error {
 	if contentKey == "" || siteKey == "" || siteDetail == "" {
 		return errors.New("invalid args")
 	}
+	normalizedTMDBID, normalizedTMDBType := normalizeHistoryTMDBBinding(row.TMDBID, row.TMDBType)
+	tmdbSeason := row.TMDBSeason
+	tmdbEpisode := row.TMDBEpisode
+	if normalizedTMDBType != "tv" {
+		tmdbSeason = 0
+		tmdbEpisode = 0
+	} else {
+		if tmdbSeason < 0 {
+			tmdbSeason = 0
+		}
+		if tmdbEpisode < 0 {
+			tmdbEpisode = 0
+		}
+	}
 	now := row.UpdatedAt
 	if now <= 0 {
 		now = time.Now().Unix()
@@ -304,7 +355,17 @@ func (d *DB) UpsertPlayHistory(row PlayHistoryUpsert) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	contentID, err := d.ensureContent(tx, contentKey, row.TMDBID, row.TMDBType, now)
+	if normalizedTMDBID <= 0 {
+		protected, checkErr := d.hasProtectedTMDBHistoryForContentKeyTx(tx, row.UserID, contentKey)
+		if checkErr != nil {
+			return checkErr
+		}
+		if protected {
+			return nil
+		}
+	}
+
+	contentID, err := d.ensureContent(tx, contentKey, normalizedTMDBID, normalizedTMDBType, now)
 	if err != nil {
 		return err
 	}
@@ -326,27 +387,63 @@ func (d *DB) UpsertPlayHistory(row PlayHistoryUpsert) error {
 	}
 
 	_, err = tx.Exec(`
-			INSERT INTO user_play_history(
-			  user_id, content_id, site_video_id,
-			  play_flag, pre_order, site_episode_index, site_episode_file,
-			  tmdb_season, tmdb_episode,
+				INSERT INTO user_play_history(
+				  user_id, content_id, site_video_id,
+				  play_flag, pre_order, site_episode_index, site_episode_file,
+				  tmdb_season, tmdb_episode,
 			  playback_position_ticks, playback_runtime_ticks, playback_item_id,
 			  updated_at
 			)
 			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-			ON CONFLICT(user_id, site_video_id) DO UPDATE SET
-			  content_id = excluded.content_id,
-			  play_flag = excluded.play_flag,
-			  pre_order = CASE WHEN ? >= 0 THEN excluded.pre_order ELSE user_play_history.pre_order END,
-			  site_episode_index = excluded.site_episode_index,
-			  site_episode_file = excluded.site_episode_file,
-			  tmdb_season = CASE WHEN excluded.tmdb_season > 0 THEN excluded.tmdb_season ELSE user_play_history.tmdb_season END,
-			  tmdb_episode = CASE WHEN excluded.tmdb_episode > 0 THEN excluded.tmdb_episode ELSE user_play_history.tmdb_episode END,
-			  playback_position_ticks = CASE WHEN excluded.playback_position_ticks > 0 THEN excluded.playback_position_ticks ELSE user_play_history.playback_position_ticks END,
-			  playback_runtime_ticks = CASE WHEN excluded.playback_runtime_ticks > 0 THEN excluded.playback_runtime_ticks ELSE user_play_history.playback_runtime_ticks END,
-			  playback_item_id = CASE WHEN excluded.playback_item_id <> '' THEN excluded.playback_item_id ELSE user_play_history.playback_item_id END,
-			  updated_at = excluded.updated_at
-		`,
+				ON CONFLICT(user_id, site_video_id) DO UPDATE SET
+				  content_id = excluded.content_id,
+				  play_flag = excluded.play_flag,
+				  pre_order = CASE WHEN ? >= 0 THEN excluded.pre_order ELSE user_play_history.pre_order END,
+				  site_episode_index = excluded.site_episode_index,
+				  site_episode_file = excluded.site_episode_file,
+				  tmdb_season = CASE WHEN excluded.tmdb_season > 0 THEN excluded.tmdb_season ELSE user_play_history.tmdb_season END,
+				  tmdb_episode = CASE WHEN excluded.tmdb_episode > 0 THEN excluded.tmdb_episode ELSE user_play_history.tmdb_episode END,
+				  playback_position_ticks = CASE
+				    WHEN excluded.playback_position_ticks > 0 THEN excluded.playback_position_ticks
+				    WHEN (
+				      (excluded.playback_item_id <> '' AND user_play_history.playback_item_id <> '' AND excluded.playback_item_id <> user_play_history.playback_item_id)
+				      OR (excluded.tmdb_season > 0 AND excluded.tmdb_episode > 0 AND user_play_history.tmdb_season > 0 AND user_play_history.tmdb_episode > 0
+				        AND (excluded.tmdb_season <> user_play_history.tmdb_season OR excluded.tmdb_episode <> user_play_history.tmdb_episode))
+				      OR (excluded.site_episode_index > 0 AND user_play_history.site_episode_index > 0
+				        AND excluded.site_episode_index <> user_play_history.site_episode_index)
+				      OR (excluded.site_episode_file <> '' AND user_play_history.site_episode_file <> ''
+				        AND lower(excluded.site_episode_file) <> lower(user_play_history.site_episode_file))
+				    ) THEN 0
+				    ELSE user_play_history.playback_position_ticks
+				  END,
+				  playback_runtime_ticks = CASE
+				    WHEN excluded.playback_runtime_ticks > 0 THEN excluded.playback_runtime_ticks
+				    WHEN (
+				      (excluded.playback_item_id <> '' AND user_play_history.playback_item_id <> '' AND excluded.playback_item_id <> user_play_history.playback_item_id)
+				      OR (excluded.tmdb_season > 0 AND excluded.tmdb_episode > 0 AND user_play_history.tmdb_season > 0 AND user_play_history.tmdb_episode > 0
+				        AND (excluded.tmdb_season <> user_play_history.tmdb_season OR excluded.tmdb_episode <> user_play_history.tmdb_episode))
+				      OR (excluded.site_episode_index > 0 AND user_play_history.site_episode_index > 0
+				        AND excluded.site_episode_index <> user_play_history.site_episode_index)
+				      OR (excluded.site_episode_file <> '' AND user_play_history.site_episode_file <> ''
+				        AND lower(excluded.site_episode_file) <> lower(user_play_history.site_episode_file))
+				    ) THEN 0
+				    ELSE user_play_history.playback_runtime_ticks
+				  END,
+				  playback_item_id = CASE
+				    WHEN excluded.playback_item_id <> '' THEN excluded.playback_item_id
+				    WHEN (
+				      (excluded.playback_item_id <> '' AND user_play_history.playback_item_id <> '' AND excluded.playback_item_id <> user_play_history.playback_item_id)
+				      OR (excluded.tmdb_season > 0 AND excluded.tmdb_episode > 0 AND user_play_history.tmdb_season > 0 AND user_play_history.tmdb_episode > 0
+				        AND (excluded.tmdb_season <> user_play_history.tmdb_season OR excluded.tmdb_episode <> user_play_history.tmdb_episode))
+				      OR (excluded.site_episode_index > 0 AND user_play_history.site_episode_index > 0
+				        AND excluded.site_episode_index <> user_play_history.site_episode_index)
+				      OR (excluded.site_episode_file <> '' AND user_play_history.site_episode_file <> ''
+				        AND lower(excluded.site_episode_file) <> lower(user_play_history.site_episode_file))
+				    ) THEN ''
+				    ELSE user_play_history.playback_item_id
+				  END,
+				  updated_at = excluded.updated_at
+			`,
 		row.UserID,
 		contentID,
 		siteVideoID,
@@ -354,8 +451,8 @@ func (d *DB) UpsertPlayHistory(row PlayHistoryUpsert) error {
 		preOrder,
 		row.SiteEpisodeIndex,
 		strings.TrimSpace(row.SiteEpisodeFile),
-		row.TMDBSeason,
-		row.TMDBEpisode,
+		tmdbSeason,
+		tmdbEpisode,
 		row.PlaybackPositionTicks,
 		row.PlaybackRuntimeTicks,
 		strings.TrimSpace(row.PlaybackItemID),
@@ -441,27 +538,63 @@ func (d *DB) UpsertTMDBPlayHistory(row TMDBPlayHistoryUpsert) error {
 	preOrder := boolToInt(preOrderValue)
 
 	_, err = tx.Exec(`
-		INSERT INTO user_play_history(
-		  user_id, content_id, site_video_id,
-		  play_flag, pre_order, site_episode_index, site_episode_file,
+			INSERT INTO user_play_history(
+			  user_id, content_id, site_video_id,
+			  play_flag, pre_order, site_episode_index, site_episode_file,
 		  tmdb_season, tmdb_episode,
 		  playback_position_ticks, playback_runtime_ticks, playback_item_id,
 		  updated_at
 		)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(user_id, site_video_id) DO UPDATE SET
-		  content_id = excluded.content_id,
-		  play_flag = CASE WHEN excluded.play_flag <> '' THEN excluded.play_flag ELSE user_play_history.play_flag END,
-		  pre_order = excluded.pre_order,
-		  site_episode_index = CASE WHEN excluded.site_episode_index > 0 THEN excluded.site_episode_index ELSE user_play_history.site_episode_index END,
-		  site_episode_file = CASE WHEN excluded.site_episode_file <> '' THEN excluded.site_episode_file ELSE user_play_history.site_episode_file END,
-		  tmdb_season = CASE WHEN excluded.tmdb_season > 0 THEN excluded.tmdb_season ELSE user_play_history.tmdb_season END,
-		  tmdb_episode = CASE WHEN excluded.tmdb_episode > 0 THEN excluded.tmdb_episode ELSE user_play_history.tmdb_episode END,
-		  playback_position_ticks = CASE WHEN excluded.playback_position_ticks > 0 THEN excluded.playback_position_ticks ELSE user_play_history.playback_position_ticks END,
-		  playback_runtime_ticks = CASE WHEN excluded.playback_runtime_ticks > 0 THEN excluded.playback_runtime_ticks ELSE user_play_history.playback_runtime_ticks END,
-		  playback_item_id = CASE WHEN excluded.playback_item_id <> '' THEN excluded.playback_item_id ELSE user_play_history.playback_item_id END,
-		  updated_at = excluded.updated_at
-	`,
+			ON CONFLICT(user_id, site_video_id) DO UPDATE SET
+			  content_id = excluded.content_id,
+			  play_flag = CASE WHEN excluded.play_flag <> '' THEN excluded.play_flag ELSE user_play_history.play_flag END,
+			  pre_order = excluded.pre_order,
+			  site_episode_index = CASE WHEN excluded.site_episode_index > 0 THEN excluded.site_episode_index ELSE user_play_history.site_episode_index END,
+			  site_episode_file = CASE WHEN excluded.site_episode_file <> '' THEN excluded.site_episode_file ELSE user_play_history.site_episode_file END,
+			  tmdb_season = CASE WHEN excluded.tmdb_season > 0 THEN excluded.tmdb_season ELSE user_play_history.tmdb_season END,
+			  tmdb_episode = CASE WHEN excluded.tmdb_episode > 0 THEN excluded.tmdb_episode ELSE user_play_history.tmdb_episode END,
+			  playback_position_ticks = CASE
+			    WHEN excluded.playback_position_ticks > 0 THEN excluded.playback_position_ticks
+			    WHEN (
+			      (excluded.playback_item_id <> '' AND user_play_history.playback_item_id <> '' AND excluded.playback_item_id <> user_play_history.playback_item_id)
+			      OR (excluded.tmdb_season > 0 AND excluded.tmdb_episode > 0 AND user_play_history.tmdb_season > 0 AND user_play_history.tmdb_episode > 0
+			        AND (excluded.tmdb_season <> user_play_history.tmdb_season OR excluded.tmdb_episode <> user_play_history.tmdb_episode))
+			      OR (excluded.site_episode_index > 0 AND user_play_history.site_episode_index > 0
+			        AND excluded.site_episode_index <> user_play_history.site_episode_index)
+			      OR (excluded.site_episode_file <> '' AND user_play_history.site_episode_file <> ''
+			        AND lower(excluded.site_episode_file) <> lower(user_play_history.site_episode_file))
+			    ) THEN 0
+			    ELSE user_play_history.playback_position_ticks
+			  END,
+			  playback_runtime_ticks = CASE
+			    WHEN excluded.playback_runtime_ticks > 0 THEN excluded.playback_runtime_ticks
+			    WHEN (
+			      (excluded.playback_item_id <> '' AND user_play_history.playback_item_id <> '' AND excluded.playback_item_id <> user_play_history.playback_item_id)
+			      OR (excluded.tmdb_season > 0 AND excluded.tmdb_episode > 0 AND user_play_history.tmdb_season > 0 AND user_play_history.tmdb_episode > 0
+			        AND (excluded.tmdb_season <> user_play_history.tmdb_season OR excluded.tmdb_episode <> user_play_history.tmdb_episode))
+			      OR (excluded.site_episode_index > 0 AND user_play_history.site_episode_index > 0
+			        AND excluded.site_episode_index <> user_play_history.site_episode_index)
+			      OR (excluded.site_episode_file <> '' AND user_play_history.site_episode_file <> ''
+			        AND lower(excluded.site_episode_file) <> lower(user_play_history.site_episode_file))
+			    ) THEN 0
+			    ELSE user_play_history.playback_runtime_ticks
+			  END,
+			  playback_item_id = CASE
+			    WHEN excluded.playback_item_id <> '' THEN excluded.playback_item_id
+			    WHEN (
+			      (excluded.playback_item_id <> '' AND user_play_history.playback_item_id <> '' AND excluded.playback_item_id <> user_play_history.playback_item_id)
+			      OR (excluded.tmdb_season > 0 AND excluded.tmdb_episode > 0 AND user_play_history.tmdb_season > 0 AND user_play_history.tmdb_episode > 0
+			        AND (excluded.tmdb_season <> user_play_history.tmdb_season OR excluded.tmdb_episode <> user_play_history.tmdb_episode))
+			      OR (excluded.site_episode_index > 0 AND user_play_history.site_episode_index > 0
+			        AND excluded.site_episode_index <> user_play_history.site_episode_index)
+			      OR (excluded.site_episode_file <> '' AND user_play_history.site_episode_file <> ''
+			        AND lower(excluded.site_episode_file) <> lower(user_play_history.site_episode_file))
+			    ) THEN ''
+			    ELSE user_play_history.playback_item_id
+			  END,
+			  updated_at = excluded.updated_at
+		`,
 		row.UserID,
 		contentID,
 		siteVideoID,
@@ -723,6 +856,56 @@ func (d *DB) UpdateTMDBPlayHistoryProgress(userID int64, tmdbType string, tmdbID
 	return err
 }
 
+func (d *DB) UpdateSitePlayHistoryProgress(userID int64, siteKey string, siteDetail string, playbackItemID string, positionTicks int64, runtimeTicks int64, updatedAt int64) (int64, error) {
+	if d == nil || d.db == nil {
+		return 0, errors.New("db nil")
+	}
+	if userID <= 0 {
+		return 0, errors.New("invalid args")
+	}
+	sk := strings.TrimSpace(siteKey)
+	sd := strings.TrimSpace(siteDetail)
+	if sk == "" || sd == "" {
+		return 0, errors.New("invalid args")
+	}
+	siteKind, ownerID := d.resolveSiteKindAndOwner(userID, sk)
+	now := updatedAt
+	if now <= 0 {
+		now = time.Now().Unix()
+	}
+	res, err := d.db.Exec(`
+		UPDATE user_play_history
+		SET playback_item_id = CASE WHEN ? <> '' THEN ? ELSE playback_item_id END,
+		    playback_position_ticks = CASE WHEN ? > 0 THEN ? ELSE playback_position_ticks END,
+		    playback_runtime_ticks = CASE WHEN ? > 0 THEN ? ELSE playback_runtime_ticks END,
+		    updated_at = ?
+		WHERE user_id = ?
+		  AND site_video_id IN (
+		    SELECT id
+		    FROM site_video
+		    WHERE site_kind = ?
+		      AND owner_user_id = ?
+		      AND site_key = ?
+		      AND site_detail = ?
+		  )
+	`,
+		strings.TrimSpace(playbackItemID), strings.TrimSpace(playbackItemID),
+		positionTicks, positionTicks,
+		runtimeTicks, runtimeTicks,
+		now,
+		userID,
+		siteKind,
+		ownerID,
+		sk,
+		sd,
+	)
+	if err != nil {
+		return 0, err
+	}
+	affected, _ := res.RowsAffected()
+	return affected, nil
+}
+
 func (d *DB) ListPlayHistory(userID int64, limit int) ([]PlayHistoryRow, error) {
 	if d == nil || d.db == nil || userID <= 0 {
 		return []PlayHistoryRow{}, nil
@@ -844,6 +1027,7 @@ func (d *DB) GetPlayHistoryLatestBySiteVideo(userID int64, siteKey string, siteD
 		LIMIT 1
 	`, userID, siteKind, ownerID, sk, vid).Scan(
 		&r.ContentKey,
+		&r.Title,
 		&r.SiteKey,
 		&r.SiteName,
 		&r.SpiderAPI,

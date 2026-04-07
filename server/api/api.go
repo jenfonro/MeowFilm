@@ -496,6 +496,20 @@ func normalizeRawHistoryPoster(poster string) string {
 	return raw
 }
 
+func normalizeSiteHistoryTMDBFields(tmdbID int, tmdbType string, tmdbSeason int, tmdbEpisode int) (int, string, int, int) {
+	id := maxInt(0, tmdbID)
+	typ := strings.TrimSpace(strings.ToLower(tmdbType))
+	season := maxInt(0, tmdbSeason)
+	episode := maxInt(0, tmdbEpisode)
+	if id <= 0 || (typ != "tv" && typ != "movie") {
+		return 0, "", 0, 0
+	}
+	if typ == "movie" {
+		return id, "movie", 0, 0
+	}
+	return id, "tv", season, episode
+}
+
 func buildNormalizedPlayHistoryList(rows []db.PlayHistoryRow, limit int) []map[string]any {
 	if limit <= 0 {
 		limit = 20
@@ -704,7 +718,6 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 			return false, true
 		}
 		siteKey := getS("siteKey")
-		spiderAPI := getS("spiderApi")
 		siteDetail := getS("siteDetail")
 		contentKey := getS("contentKey")
 		poster := getS("Poster")
@@ -765,18 +778,24 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 		poster = normalizeRawHistoryPoster(poster)
 
 		now := time.Now().Unix()
-		if siteKey != "" && spiderAPI != "" && siteDetail != "" {
+		if siteKey != "" && siteDetail != "" {
+			normalizedTMDBID, normalizedTMDBType, normalizedTMDBSeason, normalizedTMDBEpisode := normalizeSiteHistoryTMDBFields(
+				tmdbID,
+				tmdbType,
+				tmdbSeason,
+				tmdbEpisode,
+			)
 			_ = database.UpsertPlayHistory(db.PlayHistoryUpsert{
-				UserID:                u.ID,
-				ContentKey:            contentKey,
-				SiteKey:               siteKey,
-				SiteDetail:            siteDetail,
-				Poster:                poster,
-				Remark:                remark,
-				TMDBID:                tmdbID,
-				TMDBType:              tmdbType,
-				PlayFlag:              playFlag,
-				PreOrder:              func() *bool {
+				UserID:     u.ID,
+				ContentKey: contentKey,
+				SiteKey:    siteKey,
+				SiteDetail: siteDetail,
+				Poster:     poster,
+				Remark:     remark,
+				TMDBID:     normalizedTMDBID,
+				TMDBType:   normalizedTMDBType,
+				PlayFlag:   playFlag,
+				PreOrder: func() *bool {
 					if !preOrderProvided {
 						return nil
 					}
@@ -785,8 +804,8 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 				}(),
 				SiteEpisodeIndex:      siteEpisodeIndex,
 				SiteEpisodeFile:       siteEpisodeFile,
-				TMDBSeason:            tmdbSeason,
-				TMDBEpisode:           tmdbEpisode,
+				TMDBSeason:            normalizedTMDBSeason,
+				TMDBEpisode:           normalizedTMDBEpisode,
 				UpdatedAt:             now,
 				PlaybackPositionTicks: positionTicks,
 				PlaybackRuntimeTicks:  runtimeTicks,
@@ -830,20 +849,20 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 			title = contentKey
 		}
 		_ = database.UpsertTMDBPlayHistoryMeta(db.TMDBPlayHistoryUpsert{
-			UserID:           u.ID,
-			TMDBID:           tmdbID,
-			TMDBType:         tmdbType,
-			TMDBSeason:       tmdbSeason,
-			TMDBEpisode:      tmdbEpisode,
-			ContentKey:       contentKey,
-			Title:            title,
-			Poster:           poster,
-			Remark:           remark,
+			UserID:      u.ID,
+			TMDBID:      tmdbID,
+			TMDBType:    tmdbType,
+			TMDBSeason:  tmdbSeason,
+			TMDBEpisode: tmdbEpisode,
+			ContentKey:  contentKey,
+			Title:       title,
+			Poster:      poster,
+			Remark:      remark,
 			PreOrder: func() *bool {
 				v := preOrderValue
 				return &v
 			}(),
-			UpdatedAt:        now,
+			UpdatedAt: now,
 		})
 		writeJSON(w, 200, map[string]any{"success": true})
 	case http.MethodDelete:

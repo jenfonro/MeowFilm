@@ -400,7 +400,7 @@ func collectTVNextUpEpisodes(database *db.DB, series *db.TMDBCachedDetail, hist 
 			cur.season = hist.TMDBSeason
 			cur.episode = hist.TMDBEpisode
 		}
-		if hist.PlaybackPositionTicks > 0 {
+		if cur.season > 0 && cur.episode > 0 {
 			cur.resume = true
 		}
 	}

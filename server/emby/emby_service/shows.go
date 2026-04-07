@@ -233,6 +233,45 @@ func buildSiteShowNextUpPayload(database *db.DB, userID int64, serverID string, 
 		}
 	}
 	if latest == nil {
+		if hist, _ := database.GetPlayHistoryLatestBySiteVideo(userID, ref.SiteKey, ref.SiteDetail); hist != nil {
+			matchedIdx := -1
+			playbackItemID := strings.TrimSpace(hist.PlaybackItemID)
+			if playbackItemID != "" {
+				for i := range all {
+					if all[i].ItemID == playbackItemID {
+						matchedIdx = i
+						break
+					}
+				}
+			}
+			if matchedIdx < 0 && strings.TrimSpace(hist.SiteEpisodeFile) != "" {
+				for i := range all {
+					if siteHistoryEpisodeFileMatches(strings.TrimSpace(hist.SiteEpisodeFile), all[i].Episode, all[i].EpisodeNo) {
+						matchedIdx = i
+						break
+					}
+				}
+			}
+			if matchedIdx < 0 && hist.SiteEpisodeIndex > 0 {
+				idx := hist.SiteEpisodeIndex - 1
+				if idx >= 0 && idx < len(all) {
+					matchedIdx = idx
+				}
+			}
+			if matchedIdx >= 0 {
+				latest = &all[matchedIdx]
+				latestSnap = db.PlayHistorySnapshot{
+					Pos:     maxInt64(0, hist.PlaybackPositionTicks),
+					Runtime: maxInt64(0, hist.PlaybackRuntimeTicks),
+					Updated: hist.UpdatedAt,
+				}
+				if snap, ok := snaps[latest.ItemID]; ok && snap.Updated > 0 {
+					latestSnap = snap
+				}
+			}
+		}
+	}
+	if latest == nil {
 		return NextUpResponseDTO{Items: []NextUpItemDTO{}, TotalRecordCount: 0}, true, nil
 	}
 	startIdx := 0
@@ -241,9 +280,6 @@ func buildSiteShowNextUpPayload(database *db.DB, userID int64, serverID string, 
 			continue
 		}
 		startIdx = i
-		if siteSnapshotShouldAdvance(latestSnap) && i+1 < len(all) {
-			startIdx = i + 1
-		}
 		break
 	}
 	seriesItemID := buildSiteSeriesID(ref.SiteKey, ref.SiteDetail)
@@ -254,6 +290,10 @@ func buildSiteShowNextUpPayload(database *db.DB, userID int64, serverID string, 
 	for i := startIdx; i < len(all) && len(items) < limit; i++ {
 		cursor := all[i]
 		snap := snaps[cursor.ItemID]
+		if snap.Updated <= 0 && latest != nil && cursor.ItemID == latest.ItemID && latestSnap.Updated > 0 {
+			snap = latestSnap
+		}
+		runtime := ResumeRuntime(snap)
 		name := siteEpisodeDisplayName(cursor.Episode, pans[cursor.Season-1].RawLabel, pans[cursor.Season-1].PanMock, seriesName, cursor.EpisodeNo)
 		items = append(items, NextUpItemDTO{
 			Name:                    name,
@@ -262,7 +302,7 @@ func buildSiteShowNextUpPayload(database *db.DB, userID int64, serverID string, 
 			CanDelete:               state.CanDelete,
 			SupportsSync:            state.SupportsSync,
 			PremiereDate:            "",
-			RunTimeTicks:            maxInt64(0, snap.Runtime),
+			RunTimeTicks:            runtime,
 			IndexNumber:             cursor.EpisodeNo,
 			ParentIndexNumber:       cursor.Season,
 			IsFolder:                state.IsFolder,
@@ -795,6 +835,7 @@ func buildSiteShowEpisodeSources(database *db.DB, userID int64, serverID string,
 	seriesName := resolveSiteSeriesName(database, seriesRef.SiteKey, seriesRef.SiteDetail, meta)
 	seasonName := strings.TrimSpace(pan.DisplayLabel)
 	items := make([]episodeListSource, 0, len(pan.Episodes))
+	itemIDs := make([]string, 0, len(pan.Episodes))
 	state := EpisodeItemState(false, true)
 	for idx, ep := range pan.Episodes {
 		epNo := idx + 1
@@ -864,6 +905,25 @@ func buildSiteShowEpisodeSources(database *db.DB, userID int64, serverID string,
 			Chapters:                chapters,
 			MediaType:               MediaTypeVideo,
 		})
+		itemIDs = append(itemIDs, itemID)
+	}
+	if len(itemIDs) > 0 {
+		if snaps, err := database.GetPlayHistorySnapshotsByPlaybackItemIDs(userID, itemIDs); err == nil && len(snaps) > 0 {
+			for i := range items {
+				snap, ok := snaps[items[i].ID]
+				if !ok || snap.Updated <= 0 {
+					continue
+				}
+				items[i].UserData = BuildEpisodeSimpleUserDataFromSnapshot(snap)
+				runtime := ResumeRuntime(snap)
+				if runtime > items[i].RunTimeTicks {
+					items[i].RunTimeTicks = runtime
+					if len(items[i].MediaSources) > 0 {
+						items[i].MediaSources[0].RunTimeTicks = runtime
+					}
+				}
+			}
+		}
 	}
 	return items, true, nil
 }
@@ -1441,6 +1501,42 @@ func siteEpisodeFileName(ep catpawrunner.Episode, displayName string, epNo int) 
 	return fmt.Sprintf("E%02d", epNo)
 }
 
+func normalizeSiteHistoryEpisodeFile(raw string) (full string, stem string) {
+	base := strings.TrimSpace(filepath.Base(strings.TrimSpace(raw)))
+	if base == "" || base == "." || base == "/" {
+		return "", ""
+	}
+	full = strings.ToLower(base)
+	ext := strings.TrimSpace(filepath.Ext(full))
+	stem = strings.TrimSpace(strings.TrimSuffix(full, ext))
+	return full, stem
+}
+
+func siteHistoryEpisodeFileMatches(historyFile string, ep catpawrunner.Episode, epNo int) bool {
+	historyFull, historyStem := normalizeSiteHistoryEpisodeFile(historyFile)
+	if historyFull == "" {
+		return false
+	}
+	candidates := []string{
+		siteEpisodeFileName(ep, "", epNo),
+		strings.TrimSpace(smart.FirstRawNameFromURL(strings.TrimSpace(ep.URL))),
+		strings.TrimSpace(ep.Name),
+	}
+	for _, candidate := range candidates {
+		full, stem := normalizeSiteHistoryEpisodeFile(candidate)
+		if full == "" {
+			continue
+		}
+		if full == historyFull {
+			return true
+		}
+		if historyStem != "" && stem != "" && stem == historyStem {
+			return true
+		}
+	}
+	return false
+}
+
 func seasonDetailEpisodes(detail *db.TMDBCachedSeasonDetail) []db.TMDBCachedSeasonEpisode {
 	if detail == nil {
 		return nil
@@ -1457,23 +1553,4 @@ func episodeName(ep db.TMDBCachedSeasonEpisode) string {
 
 func episodeFileName(ep db.TMDBCachedSeasonEpisode, season int) string {
 	return fmt.Sprintf("S%02dE%02d", season, ep.EpisodeNumber)
-}
-
-func siteSnapshotShouldAdvance(snap db.PlayHistorySnapshot) bool {
-	if snap.Pos <= 0 {
-		return true
-	}
-	if snap.Runtime <= 0 {
-		return false
-	}
-	if snap.Pos >= snap.Runtime {
-		return true
-	}
-	if snap.Runtime-snap.Pos <= 30*10_000_000 {
-		return true
-	}
-	if float64(snap.Pos)*100/float64(snap.Runtime) >= 90 {
-		return true
-	}
-	return false
 }

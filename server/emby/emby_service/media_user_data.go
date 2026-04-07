@@ -59,8 +59,12 @@ func BuildMovieDetailUserData(row *db.PlayHistoryRow) MovieDetailUserDataDTO {
 	if row.UpdatedAt > 0 {
 		out.LastPlayedDate = embyTimeString(time.Unix(row.UpdatedAt, 0))
 	}
-	if row.PlaybackRuntimeTicks > 0 && row.PlaybackPositionTicks > 0 {
-		p := float64(row.PlaybackPositionTicks) * 100 / float64(row.PlaybackRuntimeTicks)
+	runtime := maxInt64(0, row.PlaybackRuntimeTicks)
+	if runtime <= 0 && row.PlaybackPositionTicks > 0 {
+		runtime = row.PlaybackPositionTicks + int64(60*10_000_000)
+	}
+	if runtime > 0 && row.PlaybackPositionTicks > 0 {
+		p := float64(row.PlaybackPositionTicks) * 100 / float64(runtime)
 		out.PlayedPercentage = &p
 	}
 	return out
@@ -102,8 +106,15 @@ func BuildNextUpUserData(row *db.PlayHistoryRow) NextUpUserDataDTO {
 		return out
 	}
 	out.PlaybackPositionTicks = maxInt64(0, row.PlaybackPositionTicks)
-	if row.PlaybackRuntimeTicks > 0 && row.PlaybackPositionTicks > 0 {
-		out.PlayedPercentage = float64(row.PlaybackPositionTicks) * 100 / float64(row.PlaybackRuntimeTicks)
+	if out.PlaybackPositionTicks > 0 {
+		out.PlayCount = 1
+	}
+	runtime := maxInt64(0, row.PlaybackRuntimeTicks)
+	if runtime <= 0 && row.PlaybackPositionTicks > 0 {
+		runtime = row.PlaybackPositionTicks + int64(60*10_000_000)
+	}
+	if runtime > 0 && row.PlaybackPositionTicks > 0 {
+		out.PlayedPercentage = float64(row.PlaybackPositionTicks) * 100 / float64(runtime)
 	}
 	return out
 }
@@ -116,8 +127,21 @@ func BuildNextUpUserDataFromSnapshot(snap db.PlayHistorySnapshot) NextUpUserData
 		IsFavorite:            false,
 		Played:                false,
 	}
-	if snap.Runtime > 0 && snap.Pos > 0 {
-		out.PlayedPercentage = float64(snap.Pos) * 100 / float64(snap.Runtime)
+	if out.PlaybackPositionTicks > 0 {
+		out.PlayCount = 1
+	}
+	runtime := ResumeRuntime(snap)
+	if runtime > 0 && snap.Pos > 0 {
+		out.PlayedPercentage = float64(snap.Pos) * 100 / float64(runtime)
+	}
+	return out
+}
+
+func BuildEpisodeSimpleUserDataFromSnapshot(snap db.PlayHistorySnapshot) SimpleUserDataDTO {
+	out := EmptySimpleUserData()
+	out.PlaybackPositionTicks = maxInt64(0, snap.Pos)
+	if out.PlaybackPositionTicks > 0 {
+		out.PlayCount = 1
 	}
 	return out
 }
