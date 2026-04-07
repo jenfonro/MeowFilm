@@ -294,9 +294,9 @@ func buildSiteShowNextUpPayload(database *db.DB, userID int64, serverID string, 
 			snap = latestSnap
 		}
 		runtime := ResumeRuntime(snap)
-		name := siteEpisodeDisplayName(cursor.Episode, pans[cursor.Season-1].RawLabel, pans[cursor.Season-1].PanMock, seriesName, cursor.EpisodeNo)
 		items = append(items, NextUpItemDTO{
-			Name:                    name,
+			// Keep header text as "<SeriesName> · 第X集" for site NextUp entries.
+			Name:                    "",
 			ServerID:                strings.TrimSpace(serverID),
 			ID:                      cursor.ItemID,
 			CanDelete:               state.CanDelete,

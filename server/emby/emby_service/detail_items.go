@@ -60,6 +60,13 @@ func buildSiteSeriesDetailPayload(database *db.DB, userID int64, serverID string
 	if err != nil {
 		return nil, false, err
 	}
+	seriesName := resolveSiteSeriesName(database, ref.SiteKey, ref.SiteDetail, meta)
+	if seriesName == "" {
+		seriesName = strings.TrimSpace(meta.Name)
+	}
+	if seriesName == "" {
+		seriesName = strings.TrimSpace(ref.SiteTitle)
+	}
 	overview := strings.TrimSpace(meta.Overview)
 	itemID := buildSiteSeriesID(strings.TrimSpace(ref.SiteKey), strings.TrimSpace(ref.SiteDetail))
 	childCount := 0
@@ -71,7 +78,7 @@ func buildSiteSeriesDetailPayload(database *db.DB, userID int64, serverID string
 	dateCreated, dateModified := ProtocolDatePairFromUnix(updatedAt)
 	state := SeriesItemState(true, false)
 	return SeriesDetailItemDTO{
-		Name:                    "",
+		Name:                    seriesName,
 		ServerID:                strings.TrimSpace(serverID),
 		ID:                      itemID,
 		Etag:                    StableItemEtag(itemID),
@@ -81,8 +88,8 @@ func buildSiteSeriesDetailPayload(database *db.DB, userID int64, serverID string
 		CanDownload:             state.CanDownload,
 		PresentationUniqueKey:   StablePresentationUniqueKey(itemID),
 		SupportsSync:            state.SupportsSync,
-		SortName:                SortNameOrName(""),
-		ForcedSortName:          "",
+		SortName:                SortNameOrName(seriesName),
+		ForcedSortName:          SortNameOrName(seriesName),
 		PremiereDate:            yearDateString(meta.Year),
 		ExternalURLs:            EmptyExternalURLs(),
 		Path:                    "",
@@ -117,19 +124,19 @@ func buildSiteSeriesDetailPayload(database *db.DB, userID int64, serverID string
 }
 
 func buildSiteEpisodeDetailPayload(database *db.DB, userID int64, serverID string, ref *itemRef) (any, bool, error) {
-	if database == nil || ref == nil || strings.TrimSpace(ref.SiteKey) == "" || strings.TrimSpace(ref.SiteDetail) == "" || strings.TrimSpace(ref.SiteTitle) == "" || ref.Pan <= 0 || ref.Episode <= 0 {
+	if database == nil || ref == nil || strings.TrimSpace(ref.SiteKey) == "" || strings.TrimSpace(ref.SiteDetail) == "" || ref.Pan <= 0 || ref.Episode <= 0 {
 		return nil, false, nil
 	}
 	meta, err := fetchSiteDetailMeta(database, userID, ref.SiteKey, ref.SiteDetail)
 	if err != nil {
 		return nil, false, err
 	}
-	seriesName := strings.TrimSpace(ref.SiteTitle)
-	if seriesName == "" {
-		seriesName = resolveSiteSeriesName(database, ref.SiteKey, ref.SiteDetail, meta)
-	}
+	seriesName := resolveSiteSeriesName(database, ref.SiteKey, ref.SiteDetail, meta)
 	if seriesName == "" {
 		seriesName = strings.TrimSpace(meta.Name)
+	}
+	if seriesName == "" {
+		seriesName = strings.TrimSpace(ref.SiteTitle)
 	}
 	if seriesName == "" {
 		return nil, false, nil
@@ -140,11 +147,11 @@ func buildSiteEpisodeDetailPayload(database *db.DB, userID int64, serverID strin
 		Flag: strings.TrimSpace(ref.SitePlayFlag),
 	}
 	panMock := strings.TrimSpace(smart.PanMockProviderFromLabel(strings.TrimSpace(ref.SitePlayFlag))) != ""
-	name := siteEpisodeDisplayName(ep, strings.TrimSpace(ref.SitePlayFlag), panMock, seriesName, ref.Episode)
-	if name == "" {
-		name = siteEpisodeFileName(ep, "", ref.Episode)
+	displayName := siteEpisodeDisplayName(ep, strings.TrimSpace(ref.SitePlayFlag), panMock, seriesName, ref.Episode)
+	if displayName == "" {
+		displayName = siteEpisodeFileName(ep, "", ref.Episode)
 	}
-	rawFileName := siteEpisodeFileName(ep, name, ref.Episode)
+	rawFileName := siteEpisodeFileName(ep, displayName, ref.Episode)
 	container := siteEpisodeContainerFromName(rawFileName)
 	fileName := siteEpisodePlayableFileName(rawFileName, container)
 	path := VirtualEpisodePath(seriesName, meta.Year, ref.Pan, fileName)
@@ -172,10 +179,15 @@ func buildSiteEpisodeDetailPayload(database *db.DB, userID int64, serverID strin
 	}
 	fileBase := filepath.Base(strings.TrimSpace(path))
 	if fileBase == "." || fileBase == "/" || fileBase == "" {
-		fileBase = strings.TrimSpace(name)
+		fileBase = strings.TrimSpace(displayName)
+	}
+	sortName := SortNameOrName(displayName)
+	if strings.TrimSpace(sortName) == "" {
+		sortName = fmt.Sprintf("E%04d", maxInt(1, ref.Episode))
 	}
 	return EpisodeDetailItemDTO{
-		Name:                    name,
+		// Keep detail header as "<SeriesName> · 第X集"; do not append a second episode title segment.
+		Name:                    "",
 		ServerID:                strings.TrimSpace(serverID),
 		ID:                      itemID,
 		Etag:                    StableItemEtag(itemID),
@@ -186,8 +198,8 @@ func buildSiteEpisodeDetailPayload(database *db.DB, userID int64, serverID strin
 		PresentationUniqueKey:   StablePresentationUniqueKey(itemID),
 		SupportsSync:            true,
 		Container:               firstNonEmptyString(container, "mp4"),
-		SortName:                SortNameOrName(name),
-		ForcedSortName:          SortNameOrName(name),
+		SortName:                sortName,
+		ForcedSortName:          sortName,
 		PremiereDate:            "",
 		ExternalURLs:            EmptyExternalURLs(),
 		MediaSources:            mediaSources,
@@ -304,10 +316,7 @@ func extractSiteDetailMeta(raw map[string]any) siteDetailMeta {
 		if m == nil {
 			return siteDetailMeta{}
 		}
-		name := strings.TrimSpace(anyString(m["vod_name"]))
-		if name == "" {
-			name = strings.TrimSpace(anyString(m["name"]))
-		}
+		name := pickPreferredSiteDetailTitle(m)
 		pic := strings.TrimSpace(anyString(m["vod_pic"]))
 		if pic == "" {
 			pic = strings.TrimSpace(anyString(m["pic"]))
@@ -339,6 +348,55 @@ func extractSiteDetailMeta(raw map[string]any) siteDetailMeta {
 		return pick(m)
 	}
 	return siteDetailMeta{}
+}
+
+func pickPreferredSiteDetailTitle(m map[string]any) string {
+	if m == nil {
+		return ""
+	}
+	vodName := strings.TrimSpace(anyString(m["vod_name"]))
+	name := strings.TrimSpace(anyString(m["name"]))
+	title := strings.TrimSpace(anyString(m["title"]))
+	vodTitle := strings.TrimSpace(anyString(m["vod_title"]))
+	if s := firstNonPromoTitle(vodName, name, title, vodTitle); s != "" {
+		return s
+	}
+	return firstNonEmptyString(vodName, name, title, vodTitle)
+}
+
+func firstNonPromoTitle(values ...string) string {
+	for _, value := range values {
+		s := strings.TrimSpace(value)
+		if s == "" || looksLikePromoTitle(s) {
+			continue
+		}
+		return s
+	}
+	return ""
+}
+
+func looksLikePromoTitle(raw string) bool {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if s == "" {
+		return false
+	}
+	promoTokens := []string{
+		"关注公众号",
+		"公众号",
+		"添加微信",
+		"加微信",
+		"联系客服",
+		"客服",
+		"看片",
+		"vx",
+		"wx",
+	}
+	for _, token := range promoTokens {
+		if strings.Contains(s, token) {
+			return true
+		}
+	}
+	return false
 }
 
 func anyString(v any) string {
