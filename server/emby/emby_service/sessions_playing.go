@@ -331,16 +331,21 @@ func resolveTMDBHistoryInitMeta(database *db.DB, tmdbType string, tmdbID int, se
 		nextEpisodeNumber := 0
 		totalEpisodes := 0
 		seasonCount := 0
+		lastSeasonNumber := 0
+		lastSeasonEpisodeCount := 0
 		if detail, err := metadata_tmdb.GetTVDetails(database, tmdbID); err == nil && detail != nil {
 			seriesTitle = firstNonEmptyString(strings.TrimSpace(detail.Name), strings.TrimSpace(detail.OriginalName))
 			status = strings.TrimSpace(detail.Status)
 			meta.Poster = strings.TrimSpace(detail.PosterPath)
 			for _, s := range detail.Seasons {
-				if s.SeasonNumber > 0 {
-					seasonCount++
-					if s.EpisodeCount > 0 {
-						totalEpisodes += s.EpisodeCount
-					}
+				if s.SeasonNumber <= 0 || s.EpisodeCount <= 0 {
+					continue
+				}
+				seasonCount++
+				totalEpisodes += s.EpisodeCount
+				if s.SeasonNumber > lastSeasonNumber {
+					lastSeasonNumber = s.SeasonNumber
+					lastSeasonEpisodeCount = s.EpisodeCount
 				}
 			}
 			if detail.NextEpisodeToAir != nil {
@@ -349,7 +354,15 @@ func resolveTMDBHistoryInitMeta(database *db.DB, tmdbType string, tmdbID int, se
 			}
 		}
 		meta.Title = seriesTitle
-		meta.Remark = tvHistoryRemark(status, seasonCount, totalEpisodes, nextSeasonNumber, nextEpisodeNumber)
+		meta.Remark = tvHistoryRemark(
+			status,
+			seasonCount,
+			totalEpisodes,
+			nextSeasonNumber,
+			nextEpisodeNumber,
+			lastSeasonNumber,
+			lastSeasonEpisodeCount,
+		)
 	default:
 		return meta
 	}
@@ -363,7 +376,15 @@ func resolveTMDBHistoryInitMeta(database *db.DB, tmdbType string, tmdbID int, se
 	return meta
 }
 
-func tvHistoryRemark(status string, seasonCount int, totalEpisodes int, nextSeasonNumber int, nextEpisodeNumber int) string {
+func tvHistoryRemark(
+	status string,
+	seasonCount int,
+	totalEpisodes int,
+	nextSeasonNumber int,
+	nextEpisodeNumber int,
+	lastSeasonNumber int,
+	lastSeasonEpisodeCount int,
+) string {
 	state := strings.TrimSpace(status)
 	multi := seasonCount > 1
 	currentEpisodeNumber := maxInt(0, nextEpisodeNumber-1)
@@ -382,6 +403,12 @@ func tvHistoryRemark(status string, seasonCount int, totalEpisodes int, nextSeas
 				return fmt.Sprintf("更新至第%d季第%d集", nextSeasonNumber, currentEpisodeNumber)
 			}
 			return fmt.Sprintf("更新至第%d集", currentEpisodeNumber)
+		}
+		if lastSeasonEpisodeCount > 0 {
+			if multi && lastSeasonNumber > 1 {
+				return fmt.Sprintf("更新至第%d季第%d集", lastSeasonNumber, lastSeasonEpisodeCount)
+			}
+			return fmt.Sprintf("更新至第%d集", maxInt(totalEpisodes, lastSeasonEpisodeCount))
 		}
 		return ""
 	default:
