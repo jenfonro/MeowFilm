@@ -133,11 +133,12 @@ func ProbeTVSeasonHints(database *db.DB, tmdbID int, keyword string, wantGlobal 
 		if tail == "" {
 			return true
 		}
-		if regexp.MustCompile(`^第(?:[0-9]{1,3}|[一二三四五六七八九十百千两零〇]{1,10})季$`).MatchString(tail) {
-			return true
+		// Accept aliases after season markers, e.g. "第一季呪術廻戦".
+		if regexp.MustCompile(`^第(?:[0-9]{1,3}|[一二三四五六七八九十百千两零〇]{1,10})季`).MatchString(tail) {
+			return parseSeasonNoFromTitle(t, false) > 0
 		}
-		if regexp.MustCompile(`^年番(?:[0-9]{1,3}|[一二三四五六七八九十百千两零〇]{1,10})$`).MatchString(tail) {
-			return true
+		if regexp.MustCompile(`^年番(?:[0-9]{1,3}|[一二三四五六七八九十百千两零〇]{1,10})`).MatchString(tail) {
+			return parseSeasonNoFromTitle(t, false) > 0
 		}
 		return false
 	}
