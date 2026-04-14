@@ -652,9 +652,6 @@ func (d *DB) ensureDefaultAdmin() error {
 		return nil
 	}
 
-	if err := d.EnforceUsersLimitBeforeInsert(); err != nil {
-		return err
-	}
 	hashed, err := bcrypt.GenerateFromPassword([]byte("admin"), 10)
 	if err != nil {
 		return err

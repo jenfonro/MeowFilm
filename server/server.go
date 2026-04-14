@@ -9,9 +9,7 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/auth"
-	"github.com/jenfonro/meowfilm/internal/buildinfo"
 	"github.com/jenfonro/meowfilm/internal/db"
-	"github.com/jenfonro/meowfilm/internal/limit"
 	"github.com/jenfonro/meowfilm/server/api"
 	"github.com/jenfonro/meowfilm/server/dashboard"
 	"github.com/jenfonro/meowfilm/server/emby"
@@ -76,17 +74,9 @@ func New(cfg Config) (*Server, error) {
 	mux.Handle("/", static.Handler(authMw))
 
 	root := authMw.Middleware(mux)
-	if wm := buildinfo.WatermarkTrim(); wm != "" {
-		next := root
-		root = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set(limit.HeaderWatermarkKey(), wm)
-			next.ServeHTTP(w, r)
-		})
-	}
 	handler := static.NoStoreForHTMLCSSJS(root)
 
 	srv := &Server{addr: cfg.Addr, db: database, mux: mux, h: handler, stop: make(chan struct{})}
-	srv.startSelfCheck()
 	srv.startPanDailyCleanup()
 	return srv, nil
 }
@@ -104,35 +94,6 @@ func (s *Server) Close() error {
 		}
 	})
 	return s.db.Close()
-}
-
-func (s *Server) startSelfCheck() {
-	if s == nil || s.db == nil || s.stop == nil {
-		return
-	}
-	if !limit.Enabled() {
-		return
-	}
-	go func() {
-		t := time.NewTicker(30 * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-s.stop:
-				return
-			case <-t.C:
-				ok, err := s.db.VerifyUsersTableShape()
-				if err == nil && !ok {
-					limit.Audit("ts", "u_shape")
-				}
-				ok2, err2 := s.db.VerifyUsersLimitTrigger()
-				if err2 == nil && !ok2 {
-					_ = s.db.RepairUsersLimitTrigger()
-					limit.Audit("ts", "u_trg")
-				}
-			}
-		}
-	}()
 }
 
 func (s *Server) startPanDailyCleanup() {

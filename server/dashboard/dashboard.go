@@ -12,9 +12,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/jenfonro/meowfilm/internal/auth"
-	"github.com/jenfonro/meowfilm/internal/buildinfo"
 	"github.com/jenfonro/meowfilm/internal/db"
-	"github.com/jenfonro/meowfilm/internal/limit"
 	"github.com/jenfonro/meowfilm/server/catpawrunner"
 	"github.com/jenfonro/meowfilm/server/metadata/douban"
 	"github.com/jenfonro/meowfilm/server/netdisk"
@@ -23,18 +21,6 @@ import (
 
 func Handler(database *db.DB, authMw *auth.Auth) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if exceeded, err := limit.GuardDashboard(database); err == nil && exceeded {
-			w.Header().Set(limit.HeaderErrKey(), limit.Code())
-			if wm := buildinfo.WatermarkTrim(); wm != "" {
-				w.Header().Set(limit.HeaderWatermarkKey(), wm)
-			}
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-				"success": false,
-				"code":    limit.PublicCode(),
-			})
-			return
-		}
-
 		path := strings.TrimPrefix(r.URL.Path, "/dashboard")
 		switch path {
 		case "/backup":

@@ -14,7 +14,6 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/jenfonro/meowfilm/internal/db"
-	"github.com/jenfonro/meowfilm/internal/limit"
 )
 
 const CookieName = "meowfilm_auth"
@@ -130,9 +129,6 @@ func (a *Auth) RequireAuthAPI(next http.Handler) http.Handler {
 }
 
 func (a *Auth) Login(w http.ResponseWriter, username, password string) (status int, msg string) {
-	if exceeded, err := limit.GuardLogin(a.db); err == nil && exceeded {
-		return http.StatusServiceUnavailable, limit.PublicCode()
-	}
 	u := strings.TrimSpace(username)
 	p := password
 	if u == "" || p == "" {
