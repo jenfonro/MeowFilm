@@ -692,8 +692,19 @@ func buildTMDBSettingsEpisodeSources(database *db.DB, userID int64, serverID str
 	parentBackdropTags := backdropTagsFromAsset(detail.Backdrop)
 	genres, genreItems := GenresAndItemsFromDetail(detail, "tv")
 	state := EpisodeItemState(false, true)
+	showPreOrderToggle := tmdbHasUnairedEpisodesFromCachedDetail(detail)
 	episodes := tmdbSettingsEpisodes()
-	if hist, _ := database.GetPlayHistoryLatestByTMDB(userID, "tv", seriesRef.NumericID); hist != nil && hist.PreOrder {
+	if !showPreOrderToggle {
+		filtered := make([]tmdbSettingsEpisodeDef, 0, len(episodes))
+		for _, ep := range episodes {
+			if ep.EpisodeNo == 4 {
+				continue
+			}
+			filtered = append(filtered, ep)
+		}
+		episodes = filtered
+	}
+	if hist, _ := database.GetPlayHistoryLatestByTMDB(userID, "tv", seriesRef.NumericID); hist != nil && hist.PreOrder && showPreOrderToggle {
 		for i := range episodes {
 			if episodes[i].EpisodeNo != 4 {
 				continue
