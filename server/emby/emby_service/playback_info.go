@@ -314,9 +314,8 @@ func resolveTMDBPlaybackStreamTarget(database *db.DB, userID int64, ref *itemRef
 	go func() {
 		defer producerWG.Done()
 		hist, histErr := database.GetPlayHistoryLatestByTMDB(userID, req.Kind, ref.NumericID)
-		historyListHit := false
 		if histErr == nil && hist != nil {
-			historyListHit = collectTMDBHistoryPlaybackFromListCandidates(database, user, ref, *req, *hist, stopCh, func(offer smart.PlaybackOffer) {
+			collectTMDBHistoryPlaybackFromListCandidates(database, user, ref, *req, *hist, stopCh, func(offer smart.PlaybackOffer) {
 				episodeFile := strings.TrimSpace(offer.Cand.RawName)
 				if playbackSwitchShouldSkip(switchSession, offer.Cand.SiteKey, offer.Cand.PanFlag, episodeFile) {
 					log.Printf("[emby][history_list_skip] item=%s tmdb=%s:%d site=(%s|%s) reason=session_panflag_skip panFlag=%s episodeFile=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, strings.TrimSpace(offer.Cand.SiteKey), strings.TrimSpace(offer.Cand.SiteName), strings.TrimSpace(offer.Cand.PanFlag), strings.TrimSpace(episodeFile))
@@ -328,10 +327,6 @@ func resolveTMDBPlaybackStreamTarget(database *db.DB, userID int64, ref *itemRef
 			})
 		}
 		CloseHistoryListOffers(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey)
-		if historyListHit {
-			CloseHistoryDetailOffers(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey)
-			return
-		}
 		if histErr == nil && hist != nil {
 			collectTMDBHistoryPlaybackFromDetailCandidates(database, userID, user, ref, *req, *hist, stopCh, func(offer smart.PlaybackOffer) {
 				episodeFile := strings.TrimSpace(offer.Cand.RawName)
@@ -875,11 +870,7 @@ func pickHistoryEpisodeCandidate(database *db.DB, tmdbID int, req smart.Playback
 	rawCleanRules, _ := database.ListMagicEpisodeCleanRegexRules()
 	wantGlobal := smart.TMDBGlobalEpisodeNoOf(tmdbSeasons, req.Season, req.Episode)
 	for _, ep := range episodes {
-		texts := []string{}
-		if name := strings.TrimSpace(ep.Name); name != "" {
-			texts = append(texts, name)
-		}
-		texts = append(texts, smart.ExtractRawNamesFromEpisodeURL(strings.TrimSpace(ep.URL))...)
+		texts := smart.ExtractEpisodeCandidateTexts(ep)
 		if len(texts) == 0 {
 			continue
 		}
