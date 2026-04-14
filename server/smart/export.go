@@ -64,8 +64,8 @@ func ExtractSeasonMarkerText(text string) string {
 	return smartExtractSeasonMarkerText(text)
 }
 
-func GuessQualityByLayers(fileName string, currentDir string, parentDir string) (quality string, currentDirIs4K bool) {
-	return smartGuessQualityByLayers(fileName, currentDir, parentDir)
+func GuessQualityByLayers(fileName string, displayName string, currentDir string, parentDir string) (quality string, currentDirIsQuality bool) {
+	return smartGuessQualityByLayers(fileName, displayName, currentDir, parentDir)
 }
 
 func ExtractEpisodeCandidateTexts(ep catpawrunner.Episode) []string {

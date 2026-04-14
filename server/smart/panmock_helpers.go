@@ -199,7 +199,7 @@ func smartResolvePanMockCandidateFromVod(
 			break
 		}
 	}
-	sourceHasBeyondFirstSeason := smartSourceHasEpisodeBeyondFirstSeasonRecords(
+	sourceMaxEpisodeByDir := smartSourceMaxEpisodeByDirRecords(
 		[]smartDetailSourceRecord{{
 			Label:    strings.TrimSpace(base.PanFlag),
 			PanFlag:  strings.TrimSpace(base.PanFlag),
@@ -208,7 +208,6 @@ func smartResolvePanMockCandidateFromVod(
 		}},
 		rawCleanRules,
 		rawEpisodeRules,
-		primaryFirstSeasonCount,
 	)
 	matches := []smartCandidate{}
 	for _, ep := range eps {
@@ -224,6 +223,12 @@ func smartResolvePanMockCandidateFromVod(
 			continue
 		}
 		rawSeason := jsMatch.Season
+		dirKey := strings.TrimSpace(smartEpisodeDirectoryKey(ep))
+		dirMaxEpisode := 0
+		if dirKey != "" {
+			dirMaxEpisode = sourceMaxEpisodeByDir[dirKey]
+		}
+		sourceHasBeyondFirstSeason := primaryFirstSeasonCount > 0 && dirMaxEpisode > primaryFirstSeasonCount
 		match, keyNo, ok, _, resolutionMode, degradedReason := smartResolveEpisodeMappingForPlaybackWithMode(
 			primarySeasons,
 			smartSeasonEpisode{Season: jsMatch.Season, Episode: jsMatch.Episode},
