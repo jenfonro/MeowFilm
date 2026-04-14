@@ -24,16 +24,16 @@ type playbackSwitchSkipItem struct {
 }
 
 type playbackSwitchSession struct {
-	UserID            int64
-	TMDBType          string
-	TMDBID            int
-	CurrentSite       string
-	CurrentSiteDetail string
-	CurrentSpiderAPI  string
-	CurrentPanFlag    string
+	UserID             int64
+	TMDBType           string
+	TMDBID             int
+	CurrentSite        string
+	CurrentSiteDetail  string
+	CurrentSpiderAPI   string
+	CurrentPanFlag     string
 	CurrentEpisodeFile string
-	SkipItems         []playbackSwitchSkipItem
-	ExpireAt          time.Time
+	SkipItems          []playbackSwitchSkipItem
+	ExpireAt           time.Time
 }
 
 type playbackSwitchActionState string
@@ -122,11 +122,11 @@ func (s *playbackSwitchStore) Ensure(userID int64, tmdbType string, tmdbID int, 
 		return clonePlaybackSwitchSession(session), false
 	}
 	session := playbackSwitchSession{
-		UserID:   userID,
-		TMDBType: strings.TrimSpace(tmdbType),
-		TMDBID:   tmdbID,
+		UserID:    userID,
+		TMDBType:  strings.TrimSpace(tmdbType),
+		TMDBID:    tmdbID,
 		SkipItems: []playbackSwitchSkipItem{},
-		ExpireAt: now.Add(ttl),
+		ExpireAt:  now.Add(ttl),
 	}
 	s.data[key] = session
 	return clonePlaybackSwitchSession(session), true
@@ -482,6 +482,10 @@ func triggerPlaybackSwitchAction(database *db.DB, userID int64, payload SessionP
 		if !ok || tmdbType != "tv" || tmdbID <= 0 {
 			return true, action, false, "no_scope"
 		}
+		detailTV, tvErr := metadata_tmdb.GetTVDetails(database, tmdbID)
+		if tvErr != nil || detailTV == nil || !tmdbHasUnairedEpisodes(detailTV) {
+			return true, action, false, "no_unaired"
+		}
 		hist, _ := database.GetPlayHistoryLatestByTMDB(userID, tmdbType, tmdbID)
 		nextEnable := true
 		contentKey := ""
@@ -519,15 +523,15 @@ func triggerPlaybackSwitchAction(database *db.DB, userID int64, payload SessionP
 			err = database.UpdateTMDBPlayHistoryPreOrder(userID, tmdbType, tmdbID, nextEnable, now)
 		} else {
 			err = database.EnsureTMDBPlayHistoryMeta(db.TMDBPlayHistoryUpsert{
-				UserID:           userID,
-				TMDBID:           tmdbID,
-				TMDBType:         tmdbType,
-				ContentKey:       contentKey,
-				Title:            title,
-				Poster:           poster,
-				Remark:           remark,
-				PreOrder:         &nextEnable,
-				UpdatedAt:        now,
+				UserID:     userID,
+				TMDBID:     tmdbID,
+				TMDBType:   tmdbType,
+				ContentKey: contentKey,
+				Title:      title,
+				Poster:     poster,
+				Remark:     remark,
+				PreOrder:   &nextEnable,
+				UpdatedAt:  now,
 			})
 		}
 		if err != nil {
