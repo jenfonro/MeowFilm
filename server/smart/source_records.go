@@ -200,14 +200,14 @@ func smartBuildCandidatesFromResolvedRecords(
 	return epMap, epLoose, nil
 }
 
-func smartSourceHasEpisodeBeyondFirstSeasonRecords(
+func smartSourceMaxEpisodeByDirRecords(
 	records []smartDetailSourceRecord,
 	rawCleanRules []string,
 	rawEpisodeRules []string,
-	firstSeasonCount int,
-) bool {
-	if firstSeasonCount <= 0 || len(records) == 0 || len(rawCleanRules) == 0 || len(rawEpisodeRules) == 0 {
-		return false
+) map[string]int {
+	out := map[string]int{}
+	if len(records) == 0 || len(rawCleanRules) == 0 || len(rawEpisodeRules) == 0 {
+		return out
 	}
 	for _, record := range records {
 		if record.Status != smartDetailSourceResolved {
@@ -219,12 +219,34 @@ func smartSourceHasEpisodeBeyondFirstSeasonRecords(
 			}
 			texts := smartExtractEpisodeCandidateTexts(ep)
 			jsMatch, err := magic.MagicEpisodeExtractFromCandidates(texts, rawCleanRules, rawEpisodeRules)
-			if err != nil {
+			if err != nil || jsMatch.Episode <= 0 {
 				continue
 			}
-			if jsMatch.Episode > firstSeasonCount {
-				return true
+			dirKey := strings.TrimSpace(smartEpisodeDirectoryKey(ep))
+			if dirKey == "" {
+				continue
 			}
+			if jsMatch.Episode > out[dirKey] {
+				out[dirKey] = jsMatch.Episode
+			}
+		}
+	}
+	return out
+}
+
+func smartSourceHasEpisodeBeyondFirstSeasonRecords(
+	records []smartDetailSourceRecord,
+	rawCleanRules []string,
+	rawEpisodeRules []string,
+	firstSeasonCount int,
+) bool {
+	if firstSeasonCount <= 0 {
+		return false
+	}
+	byDir := smartSourceMaxEpisodeByDirRecords(records, rawCleanRules, rawEpisodeRules)
+	for _, maxEp := range byDir {
+		if maxEp > firstSeasonCount {
+			return true
 		}
 	}
 	return false
@@ -251,7 +273,7 @@ func smartBuildEpisodeMapsFromResolvedRecords(
 			break
 		}
 	}
-	sourceHasBeyondFirstSeason := smartSourceHasEpisodeBeyondFirstSeasonRecords(records, rawCleanRules, rawEpisodeRules, primaryFirstSeasonCount)
+	sourceMaxEpisodeByDir := smartSourceMaxEpisodeByDirRecords(records, rawCleanRules, rawEpisodeRules)
 
 	srcRemarkLower := strings.ToLower(strings.TrimSpace(src.Remark))
 	for _, record := range records {
@@ -286,6 +308,12 @@ func smartBuildEpisodeMapsFromResolvedRecords(
 				continue
 			}
 			rawSeason := jsMatch.Season
+			dirKey := strings.TrimSpace(smartEpisodeDirectoryKey(ep))
+			dirMaxEpisode := 0
+			if dirKey != "" {
+				dirMaxEpisode = sourceMaxEpisodeByDir[dirKey]
+			}
+			sourceHasBeyondFirstSeason := primaryFirstSeasonCount > 0 && dirMaxEpisode > primaryFirstSeasonCount
 			match, keyNo, ok, loose, resolutionMode, degradedReason := smartResolveEpisodeMappingForPlaybackWithMode(
 				primarySeasons,
 				smartSeasonEpisode{Season: jsMatch.Season, Episode: jsMatch.Episode},

@@ -2,6 +2,7 @@ package smart
 
 import (
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -277,8 +278,11 @@ func smartEpisodePathLayers(ep catpawrunner.Episode) (fileName string, currentDi
 		if t == "" {
 			continue
 		}
-		fileName = t
-		break
+		parts := strings.Split(strings.ReplaceAll(t, "\\", "/"), "/")
+		fileName = strings.TrimSpace(parts[len(parts)-1])
+		if fileName != "" {
+			break
+		}
 	}
 	segs := smartSplitDisplayPathSegments(ep.Name)
 	if len(segs) > 0 {
@@ -288,6 +292,29 @@ func smartEpisodePathLayers(ep catpawrunner.Episode) (fileName string, currentDi
 		parentDir = segs[len(segs)-2]
 	}
 	return strings.TrimSpace(fileName), strings.TrimSpace(currentDir), strings.TrimSpace(parentDir)
+}
+
+func smartEpisodeDirectoryKey(ep catpawrunner.Episode) string {
+	rawNames := smartExtractRawNamesFromEpisodeURL(ep.URL)
+	for _, n := range rawNames {
+		raw := strings.ReplaceAll(strings.TrimSpace(n), "\\", "/")
+		raw = strings.Trim(raw, "/")
+		if raw == "" {
+			continue
+		}
+		parts := strings.Split(raw, "/")
+		if len(parts) >= 2 {
+			dir := strings.TrimSpace(strings.Join(parts[:len(parts)-1], "/"))
+			if dir != "" {
+				return dir
+			}
+		}
+	}
+	segs := smartSplitDisplayPathSegments(ep.Name)
+	if len(segs) >= 2 {
+		return strings.TrimSpace(strings.Join(segs[:len(segs)-1], "/"))
+	}
+	return ""
 }
 
 func smartExtractSeasonMarkerText(text string) string {
@@ -330,21 +357,28 @@ func smartExtractSeasonMarkerText(text string) string {
 	return ""
 }
 
-func smartGuessQualityByLayers(fileName string, currentDir string, parentDir string) (quality string, currentDirIs4K bool) {
+func smartGuessQualityByLayers(fileName string, displayName string, currentDir string, parentDir string) (quality string, currentDirIsQuality bool) {
 	f := strings.TrimSpace(fileName)
+	d := strings.TrimSpace(displayName)
 	c := strings.TrimSpace(currentDir)
 	p := strings.TrimSpace(parentDir)
 	if q := smartGuessQuality(f); q != "" {
 		return q, false
 	}
+	if qDisplay, _ := smartParseDisplayMeta(d); qDisplay != "" {
+		return qDisplay, false
+	}
 	qCurr := smartGuessQuality(c)
 	if qCurr != "" {
-		return qCurr, strings.EqualFold(qCurr, "4K")
+		return qCurr, true
 	}
 	if smartExtractSeasonMarkerText(c) != "" {
 		if qParent := smartGuessQuality(p); qParent != "" {
 			return qParent, false
 		}
+	}
+	if q := smartGuessQuality(d); q != "" {
+		return q, false
 	}
 	return "", false
 }
@@ -352,7 +386,8 @@ func smartGuessQualityByLayers(fileName string, currentDir string, parentDir str
 func smartExtractEpisodeCandidateTexts(ep catpawrunner.Episode) []string {
 	rawNames := smartExtractRawNamesFromEpisodeURL(ep.URL)
 	fileName, currentDir, parentDir := smartEpisodePathLayers(ep)
-	out := make([]string, 0, 6)
+	displayName := strings.TrimSpace(ep.Name)
+	out := make([]string, 0, 8)
 	push := func(s string) {
 		v := strings.TrimSpace(s)
 		if v == "" {
@@ -365,15 +400,21 @@ func smartExtractEpisodeCandidateTexts(ep catpawrunner.Episode) []string {
 		}
 		out = append(out, v)
 	}
-	fileHasSeason := false
-	if marker := smartExtractSeasonMarkerText(fileName); marker != "" {
-		fileHasSeason = true
-	}
+
+	// 提取优先级：文件名 -> 展示名 -> raw
 	if fileName != "" {
 		push(fileName)
 	}
+	if displayName != "" && displayName != fileName {
+		push(displayName)
+	}
 	for _, n := range rawNames {
 		push(n)
+	}
+
+	fileHasSeason := false
+	if marker := smartExtractSeasonMarkerText(fileName); marker != "" {
+		fileHasSeason = true
 	}
 	if !fileHasSeason {
 		if currentDir != "" {
@@ -496,7 +537,7 @@ func smartBuildHayLower(c smartCandidate) string {
 	if displayName != "" {
 		parts = append(parts, strings.ToLower(displayName))
 	}
-	if q, _ := smartGuessQualityByLayers(fileName, currentDir, parentDir); q != "" {
+	if q, _ := smartGuessQualityByLayers(fileName, displayName, currentDir, parentDir); q != "" {
 		parts = append(parts, strings.ToLower(q))
 	}
 	if len(parts) == 0 {
@@ -508,7 +549,7 @@ func smartBuildHayLower(c smartCandidate) string {
 func smartComputeCandidateFeatures(c smartCandidate) smartCandidateFeatures {
 	hayLower := smartBuildHayLower(c)
 	fileName, currentDir, parentDir := smartEpisodePathLayers(c.Ep)
-	quality, _ := smartGuessQualityByLayers(fileName, currentDir, parentDir)
+	quality, _ := smartGuessQualityByLayers(fileName, strings.TrimSpace(c.Ep.Name), currentDir, parentDir)
 	displayQuality, displayFPS60 := smartParseDisplayMeta(c.Ep.Name)
 	if quality == "" && displayQuality != "" {
 		quality = displayQuality
@@ -824,6 +865,47 @@ func smartStrictSeasonEpisodeGlobal(seasons []smartTMDBSeason, season int, episo
 	return smartTMDBGlobalEpisodeNoOf(seasons, season, episode)
 }
 
+func smartSeasonCountOf(seasons []smartTMDBSeason, season int) int {
+	for _, s := range seasons {
+		if s.Season == season && s.EpisodeCount > 0 {
+			return s.EpisodeCount
+		}
+	}
+	return 0
+}
+
+func smartSumEpisodesBeforeLastSeason(seasons []smartTMDBSeason) int {
+	rows := make([]smartTMDBSeason, 0, len(seasons))
+	for _, s := range seasons {
+		if s.Season > 0 && s.EpisodeCount > 0 {
+			rows = append(rows, s)
+		}
+	}
+	if len(rows) <= 1 {
+		return 0
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Season < rows[j].Season })
+	sum := 0
+	for i := 0; i < len(rows)-1; i++ {
+		sum += rows[i].EpisodeCount
+	}
+	return sum
+}
+
+func smartDegradedFallbackBoundary(primary []smartTMDBSeason, baseline []smartTMDBSeason) int {
+	primaryMulti := smartPositiveSeasonCount(primary) >= 2
+	baselineSingle := smartPositiveSeasonCount(baseline) == 1
+	if primaryMulti && baselineSingle {
+		if n := smartSumEpisodesBeforeLastSeason(primary); n > 0 {
+			return n
+		}
+	}
+	if n := smartSeasonCountOf(primary, 1); n > 0 {
+		return n
+	}
+	return 0
+}
+
 func smartResolveEpisodeMappingStrict(seasons []smartTMDBSeason, se smartSeasonEpisode) (match smartSeasonEpisode, global int, ok bool) {
 	episode := se.Episode
 	season := se.Season
@@ -858,7 +940,7 @@ func smartResolveEpisodeMappingSingleBaseline(
 	seasons []smartTMDBSeason,
 	se smartSeasonEpisode,
 	singleBaselineSeasons []smartTMDBSeason,
-	primaryFirstSeasonCount int,
+	primaryFallbackBoundary int,
 	sourceHasBeyondFirstSeason bool,
 ) (match smartSeasonEpisode, global int, ok bool, loose bool) {
 	episode := se.Episode
@@ -876,7 +958,7 @@ func smartResolveEpisodeMappingSingleBaseline(
 	if mapped.Season != 1 || mapped.Episode != episode {
 		return smartSeasonEpisode{}, 0, false, false
 	}
-	if primaryFirstSeasonCount > 0 && episode <= primaryFirstSeasonCount && !sourceHasBeyondFirstSeason {
+	if !sourceHasBeyondFirstSeason {
 		return smartSeasonEpisode{}, 0, false, false
 	}
 	if se.Season > 0 {
@@ -889,7 +971,7 @@ func smartResolveEpisodeMappingForPlaybackWithMode(
 	seasons []smartTMDBSeason,
 	se smartSeasonEpisode,
 	singleBaselineSeasons []smartTMDBSeason,
-	primaryFirstSeasonCount int,
+	primaryFallbackBoundary int,
 	sourceHasBeyondFirstSeason bool,
 	allowSingleBaseline bool,
 	primaryKind string,
@@ -904,11 +986,15 @@ func smartResolveEpisodeMappingForPlaybackWithMode(
 	if !allowSingleBaseline {
 		return smartSeasonEpisode{}, 0, false, false, "", ""
 	}
+	fallbackBoundary := primaryFallbackBoundary
+	if fallbackBoundary <= 0 {
+		fallbackBoundary = smartDegradedFallbackBoundary(seasons, singleBaselineSeasons)
+	}
 	match, global, ok, loose = smartResolveEpisodeMappingSingleBaseline(
 		seasons,
 		se,
 		singleBaselineSeasons,
-		primaryFirstSeasonCount,
+		fallbackBoundary,
 		sourceHasBeyondFirstSeason,
 	)
 	if !ok {
