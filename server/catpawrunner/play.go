@@ -37,6 +37,30 @@ func PickFirstPlayableURL(playRaw map[string]any) string {
 	if !ok || len(arrAny) == 0 {
 		return ""
 	}
+
+	pickFromEntry := func(v any) string {
+		s := strings.TrimSpace(anyToString(v))
+		if strings.HasPrefix(strings.ToLower(s), "http") {
+			return s
+		}
+		m, ok := v.(map[string]any)
+		if !ok || m == nil {
+			return ""
+		}
+		if u := strings.TrimSpace(anyToString(m["url"])); strings.HasPrefix(strings.ToLower(u), "http") {
+			return u
+		}
+		if u := strings.TrimSpace(anyToString(m["URL"])); strings.HasPrefix(strings.ToLower(u), "http") {
+			return u
+		}
+		return ""
+	}
+
+	// Support yt-bridge ordered object-array output: first item is highest quality.
+	if first := pickFromEntry(arrAny[0]); first != "" {
+		return first
+	}
+
 	if len(arrAny) >= 2 {
 		s0 := strings.TrimSpace(anyToString(arrAny[0]))
 		s1 := strings.TrimSpace(anyToString(arrAny[1]))
@@ -45,8 +69,7 @@ func PickFirstPlayableURL(playRaw map[string]any) string {
 		}
 	}
 	for _, it := range arrAny {
-		s := strings.TrimSpace(anyToString(it))
-		if strings.HasPrefix(strings.ToLower(s), "http") {
+		if s := pickFromEntry(it); s != "" {
 			return s
 		}
 	}
