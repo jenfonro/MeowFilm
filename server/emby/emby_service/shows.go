@@ -786,6 +786,44 @@ func buildSiteShowSeasonSources(database *db.DB, userID int64, serverID string, 
 	}
 	seriesID := buildSiteSeriesID(ref.SiteKey, ref.SiteDetail)
 	items := make([]seasonListSource, 0, len(pans))
+	if isYouTubeSiteKey(ref.SiteKey) {
+		if _, ok := pickYouTubePrimaryPan(pans); !ok {
+			return []seasonListSource{}, true, nil
+		}
+		seasonID := buildSiteSeasonID(ref.SiteKey, ref.SiteDetail, 1)
+		genres, genreItems := EmptyGenresAndItems()
+		state := SeasonItemState()
+		items = append(items, seasonListSource{
+			Name:                    "youtube",
+			ServerID:                strings.TrimSpace(serverID),
+			ID:                      seasonID,
+			SupportsSync:            true,
+			PremiereDate:            "",
+			Overview:                "",
+			CommunityRating:         0,
+			ProductionYear:          0,
+			EndDate:                 "",
+			Container:               "",
+			Genres:                  genres,
+			IndexNumber:             1,
+			IsFolder:                state.IsFolder,
+			ParentID:                seriesID,
+			Type:                    state.Type,
+			GenreItems:              genreItems,
+			People:                  EmptyPeople(),
+			ParentLogoItemID:        seriesID,
+			ParentBackdropItemID:    seriesID,
+			ParentBackdropImageTags: EmptyStrings(),
+			UserData:                EmptyTVLatestUserData(),
+			SeriesName:              "",
+			SeriesID:                seriesID,
+			SeriesPrimaryImageTag:   SeriesPrimaryImageTag(seriesID),
+			ImageTags:               ImageTagsForItem(seasonID, false),
+			BackdropImageTags:       EmptyStrings(),
+			ParentLogoImageTag:      ParentLogoImageTag(seriesID),
+		})
+		return items, true, nil
+	}
 	for i, pan := range pans {
 		seasonNo := i + 1
 		seasonID := buildSiteSeasonID(ref.SiteKey, ref.SiteDetail, seasonNo)
@@ -837,14 +875,32 @@ func buildSiteShowEpisodeSources(database *db.DB, userID int64, serverID string,
 	if err != nil {
 		return []episodeListSource{}, false, err
 	}
-	if seasonRef.Pan <= 0 || seasonRef.Pan > len(pans) {
+	if seasonRef.Pan <= 0 {
 		return []episodeListSource{}, true, nil
 	}
-	pan := pans[seasonRef.Pan-1]
+	pan := resolvedSitePan{}
+	if isYouTubeSiteKey(seriesRef.SiteKey) {
+		if seasonRef.Pan != 1 {
+			return []episodeListSource{}, true, nil
+		}
+		picked, ok := pickYouTubePrimaryPan(pans)
+		if !ok {
+			return []episodeListSource{}, true, nil
+		}
+		pan = picked
+	} else {
+		if seasonRef.Pan > len(pans) {
+			return []episodeListSource{}, true, nil
+		}
+		pan = pans[seasonRef.Pan-1]
+	}
 	seriesID := buildSiteSeriesID(seriesRef.SiteKey, seriesRef.SiteDetail)
 	seasonID := buildSiteSeasonID(seriesRef.SiteKey, seriesRef.SiteDetail, seasonRef.Pan)
 	seriesName := resolveSiteSeriesName(database, seriesRef.SiteKey, seriesRef.SiteDetail, meta)
 	seasonName := strings.TrimSpace(pan.DisplayLabel)
+	if isYouTubeSiteKey(seriesRef.SiteKey) {
+		seasonName = "youtube"
+	}
 	items := make([]episodeListSource, 0, len(pan.Episodes))
 	itemIDs := make([]string, 0, len(pan.Episodes))
 	state := EpisodeItemState(false, true)
@@ -869,6 +925,15 @@ func buildSiteShowEpisodeSources(database *db.DB, userID int64, serverID string,
 		if len(mediaSources) > 0 && mediaSources[0].MediaStreams != nil {
 			mediaStreams = mediaSources[0].MediaStreams
 		}
+		overview := ""
+		imageTags := ImageTagsForItem(itemID, false)
+		if isYouTubeSiteKey(seriesRef.SiteKey) {
+			pic, author, _ := parseYouTubeEpisodeMeta(strings.TrimSpace(ep.URL))
+			overview = strings.TrimSpace(author)
+			if tag := SearchSitePrimaryTag(strings.TrimSpace(pic)); strings.TrimSpace(tag) != "" {
+				imageTags = ImageTagsDTO{Primary: strings.TrimSpace(tag)}
+			}
+		}
 		items = append(items, episodeListSource{
 			Name:                    name,
 			ServerID:                strings.TrimSpace(serverID),
@@ -883,7 +948,7 @@ func buildSiteShowEpisodeSources(database *db.DB, userID int64, serverID string,
 			MediaSources:            mediaSources,
 			AlternateMediaSources:   EmptyAnySlice(),
 			Path:                    path,
-			Overview:                "",
+			Overview:                overview,
 			Genres:                  EmptyStrings(),
 			CommunityRating:         0,
 			OfficialRating:          "",
@@ -910,7 +975,7 @@ func buildSiteShowEpisodeSources(database *db.DB, userID int64, serverID string,
 			SeriesPrimaryImageTag:   SeriesPrimaryImageTag(seriesID),
 			SeasonName:              seasonName,
 			MediaStreams:            mediaStreams,
-			ImageTags:               ImageTagsForItem(itemID, false),
+			ImageTags:               imageTags,
 			BackdropImageTags:       EmptyStrings(),
 			ParentLogoImageTag:      ParentLogoImageTag(seriesID),
 			Chapters:                chapters,
@@ -1473,6 +1538,60 @@ func resolveSiteSeriesName(database *db.DB, siteKey string, siteDetail string, m
 		return name
 	}
 	return ""
+}
+
+func isYouTubeSiteKey(siteKey string) bool {
+	return strings.EqualFold(strings.TrimSpace(siteKey), "youtube")
+}
+
+func pickYouTubePrimaryPan(pans []resolvedSitePan) (resolvedSitePan, bool) {
+	if len(pans) == 0 {
+		return resolvedSitePan{}, false
+	}
+	for _, pan := range pans {
+		if strings.EqualFold(strings.TrimSpace(pan.RawLabel), "youtube") {
+			return pan, true
+		}
+	}
+	for _, pan := range pans {
+		if strings.EqualFold(strings.TrimSpace(pan.RawLabel), "youtube-recommend") {
+			return pan, true
+		}
+	}
+	for _, pan := range pans {
+		if strings.EqualFold(strings.TrimSpace(pan.DisplayLabel), "youtube") {
+			return pan, true
+		}
+	}
+	for _, pan := range pans {
+		if strings.EqualFold(strings.TrimSpace(pan.DisplayLabel), "相关推荐") {
+			return pan, true
+		}
+	}
+	return pans[0], true
+}
+
+func parseYouTubeEpisodeMeta(episodeURL string) (pic string, author string, duration string) {
+	raw := strings.TrimSpace(episodeURL)
+	if raw == "" {
+		return "", "", ""
+	}
+	parts := strings.Split(raw, "*")
+	decode := func(v string) string {
+		s := strings.TrimSpace(v)
+		s = strings.ReplaceAll(s, "%2A", "*")
+		return strings.TrimSpace(s)
+	}
+	if len(parts) >= 1 {
+		pic = decode(parts[0])
+	}
+	if len(parts) >= 2 {
+		author = decode(parts[1])
+	}
+	if len(parts) >= 3 {
+		duration = decode(parts[2])
+	}
+	return strings.TrimSpace(pic), strings.TrimSpace(author), strings.TrimSpace(duration)
 }
 
 func siteEpisodeDisplayName(ep catpawrunner.Episode, rawPanLabel string, panMock bool, seriesName string, epNo int) string {
