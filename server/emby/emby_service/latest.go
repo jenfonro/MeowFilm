@@ -1,12 +1,14 @@
 package emby_service
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/catpawrunner"
 	"github.com/jenfonro/meowfilm/server/metadata/douban"
 )
 
@@ -67,6 +69,14 @@ type historyGroupRef struct {
 	Kind    string
 	TMDBID  int
 	GroupID string
+}
+
+type siteCategoryLatestItem struct {
+	ID     string
+	Title  string
+	Pic    string
+	Remark string
+	Year   int
 }
 
 func BuildLatestPayload(database *db.DB, userID int64, serverID string, section db.ThirdPartyClientHomeSection, limit int) (any, error) {
@@ -146,8 +156,11 @@ func loadMovieLatest(database *db.DB, section db.ThirdPartyClientHomeSection, li
 }
 
 func loadMovieLatestRange(database *db.DB, section db.ThirdPartyClientHomeSection, start int, limit int) ([]movieLatestSource, error) {
-	if LatestSectionKind(section) != "movie" || strings.EqualFold(strings.TrimSpace(section.Module), "site_data") {
+	if LatestSectionKind(section) != "movie" {
 		return []movieLatestSource{}, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(section.Module), "site_data") {
+		return loadSiteMovieLatestRange(database, section, start, limit)
 	}
 	hot, err := douban.FetchRecentHot(database, "movie", "热门", "全部", start, limit)
 	if err != nil {
@@ -225,8 +238,11 @@ func loadTVLatest(database *db.DB, section db.ThirdPartyClientHomeSection, limit
 }
 
 func loadTVLatestRange(database *db.DB, section db.ThirdPartyClientHomeSection, start int, limit int) ([]tvLatestSource, error) {
-	if LatestSectionKind(section) != "tv" || strings.EqualFold(strings.TrimSpace(section.Module), "site_data") {
+	if LatestSectionKind(section) != "tv" {
 		return []tvLatestSource{}, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(section.Module), "site_data") {
+		return loadSiteTVLatestRange(database, section, start, limit)
 	}
 	category, hotType := "tv", "tv"
 	switch strings.ToLower(strings.TrimSpace(section.Module)) {
@@ -309,6 +325,389 @@ func loadTVLatestRange(database *db.DB, section db.ThirdPartyClientHomeSection, 
 		}
 	}
 	return out, nil
+}
+
+func loadSiteMovieLatestRange(database *db.DB, section db.ThirdPartyClientHomeSection, start int, limit int) ([]movieLatestSource, error) {
+	rows, err := loadSiteCategoryLatest(database, section, start, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]movieLatestSource, 0, len(rows))
+	siteCard := strings.EqualFold(strings.TrimSpace(section.CardStyle), "site")
+	for _, row := range rows {
+		if siteCard {
+			id := buildSiteSeriesID(strings.TrimSpace(section.SiteKey), row.ID)
+			if id == "" {
+				continue
+			}
+			out = append(out, NormalizeMovieLatestSource(movieLatestSource{
+				ID:              id,
+				Name:            row.Title,
+				DateCreated:     EmbyZeroTimeString(),
+				Container:       "",
+				SortName:        SortNameOrName(row.Title),
+				PremiereDate:    embyYearDate(row.Year),
+				MediaSources:    EmptyResumeMediaSources(),
+				Path:            "",
+				OfficialRating:  "",
+				Overview:        strings.TrimSpace(row.Remark),
+				Genres:          EmptyStrings(),
+				CommunityRating: 0,
+				RunTimeTicks:    0,
+				Size:            0,
+				Bitrate:         0,
+				ProductionYear:  row.Year,
+				ProviderIDs:     EmptyLatestProviderIDs(),
+				ParentID:        strings.TrimSpace(section.ID),
+				GenreItems:      EmptyNamedIDs(),
+				AspectRatio:     0.6666667,
+				PrimaryTag:      SearchSitePrimaryTag(strings.TrimSpace(row.Pic)),
+				LogoTag:         StableMD5Hex(id + "|logo"),
+				BackdropTags:    EmptyStrings(),
+				PosterURL:       rewriteRedirectImageURL(database, strings.TrimSpace(row.Pic)),
+			}))
+			continue
+		}
+
+		tmdbID, _, _ := ResolveLatestMovieTMDB(database, row.Title, row.Year)
+		if tmdbID <= 0 {
+			continue
+		}
+		playbackID := buildMovieID(tmdbID)
+		premiereDate := embyYearDate(row.Year)
+		productionYear := row.Year
+		dateCreated := EmbyZeroTimeString()
+		overview := ""
+		genres := EmptyStrings()
+		genreItems := EmptyNamedIDs()
+		providerIDs := EmptyLatestProviderIDs()
+		communityRating := 0.0
+		posterURL := rewriteRedirectImageURL(database, strings.TrimSpace(row.Pic))
+		meta := LatestMovieMetadataFromTMDB(database, tmdbID, strings.TrimSpace(row.Pic))
+		dateCreated = meta.DateCreated
+		if strings.TrimSpace(meta.PremiereDate) != "" {
+			premiereDate = meta.PremiereDate
+		}
+		if meta.ProductionYear > 0 {
+			productionYear = meta.ProductionYear
+		}
+		if strings.TrimSpace(meta.Overview) != "" {
+			overview = meta.Overview
+		}
+		genres = meta.Genres
+		genreItems = meta.GenreItems
+		providerIDs = meta.ProviderIDs
+		posterURL = meta.PosterURL
+		if meta.CommunityRating > 0 {
+			communityRating = meta.CommunityRating
+		}
+		out = append(out, NormalizeMovieLatestSource(movieLatestSource{
+			ID:              playbackID,
+			Name:            row.Title,
+			DateCreated:     dateCreated,
+			Container:       "",
+			SortName:        SortNameOrName(row.Title),
+			PremiereDate:    premiereDate,
+			MediaSources:    EmptyResumeMediaSources(),
+			Path:            "",
+			OfficialRating:  "",
+			Overview:        overview,
+			Genres:          genres,
+			CommunityRating: communityRating,
+			RunTimeTicks:    0,
+			Size:            0,
+			Bitrate:         0,
+			ProductionYear:  productionYear,
+			ProviderIDs:     providerIDs,
+			ParentID:        strings.TrimSpace(section.ID),
+			GenreItems:      genreItems,
+			AspectRatio:     0.6666667,
+			PrimaryTag:      StableMD5Hex(playbackID + "|primary"),
+			LogoTag:         StableMD5Hex(playbackID + "|logo"),
+			BackdropTags:    EmptyStrings(),
+			PosterURL:       posterURL,
+		}))
+	}
+	return out, nil
+}
+
+func loadSiteTVLatestRange(database *db.DB, section db.ThirdPartyClientHomeSection, start int, limit int) ([]tvLatestSource, error) {
+	rows, err := loadSiteCategoryLatest(database, section, start, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tvLatestSource, 0, len(rows))
+	siteCard := strings.EqualFold(strings.TrimSpace(section.CardStyle), "site")
+	for _, row := range rows {
+		if siteCard {
+			id := buildSiteSeriesID(strings.TrimSpace(section.SiteKey), row.ID)
+			if id == "" {
+				continue
+			}
+			out = append(out, NormalizeTVLatestSource(tvLatestSource{
+				ID:              id,
+				Name:            row.Title,
+				DateCreated:     EmbyZeroTimeString(),
+				SortName:        SortNameOrName(row.Title),
+				PremiereDate:    embyYearDate(row.Year),
+				Path:            "",
+				Overview:        strings.TrimSpace(row.Remark),
+				Genres:          EmptyStrings(),
+				RunTimeTicks:    0,
+				ProductionYear:  row.Year,
+				ProviderIDs:     EmptyLatestProviderIDs(),
+				ParentID:        strings.TrimSpace(section.ID),
+				GenreItems:      EmptyNamedIDs(),
+				AspectRatio:     PosterAspectRatio(row.Pic),
+				PrimaryTag:      SearchSitePrimaryTag(strings.TrimSpace(row.Pic)),
+				LogoTag:         StableMD5Hex(id + "|logo"),
+				BackdropTags:    EmptyStrings(),
+				CommunityRating: 0,
+				RecursiveCount:  0,
+				ChildCount:      0,
+				Status:          "",
+				UnplayedCount:   0,
+				PosterURL:       rewriteRedirectImageURL(database, strings.TrimSpace(row.Pic)),
+			}))
+			continue
+		}
+
+		tmdbID, _, _ := ResolveLatestTVTMDB(database, row.Title, row.Year)
+		if tmdbID <= 0 {
+			continue
+		}
+		playbackID := buildSeriesID(tmdbID)
+		premiereDate := embyYearDate(row.Year)
+		productionYear := row.Year
+		dateCreated := EmbyZeroTimeString()
+		status := ""
+		overview := ""
+		genres := EmptyStrings()
+		genreItems := EmptyNamedIDs()
+		providerIDs := EmptyLatestProviderIDs()
+		recursiveCount := 0
+		communityRating := 0.0
+		posterURL := rewriteRedirectImageURL(database, strings.TrimSpace(row.Pic))
+		backdropTags := EmptyStrings()
+		meta := LatestTVMetadataFromTMDB(database, tmdbID, strings.TrimSpace(row.Pic))
+		dateCreated = meta.DateCreated
+		if strings.TrimSpace(meta.PremiereDate) != "" {
+			premiereDate = meta.PremiereDate
+		}
+		if meta.ProductionYear > 0 {
+			productionYear = meta.ProductionYear
+		}
+		if strings.TrimSpace(meta.Status) != "" {
+			status = meta.Status
+		}
+		if strings.TrimSpace(meta.Overview) != "" {
+			overview = meta.Overview
+		}
+		genres = meta.Genres
+		genreItems = meta.GenreItems
+		providerIDs = meta.ProviderIDs
+		recursiveCount = meta.RecursiveCount
+		communityRating = meta.CommunityRating
+		posterURL = meta.PosterURL
+		backdropTags = meta.BackdropTags
+		out = append(out, NormalizeTVLatestSource(tvLatestSource{
+			ID:              playbackID,
+			Name:            row.Title,
+			DateCreated:     dateCreated,
+			SortName:        SortNameOrName(row.Title),
+			PremiereDate:    premiereDate,
+			Path:            "",
+			Overview:        overview,
+			Genres:          genres,
+			RunTimeTicks:    0,
+			ProductionYear:  productionYear,
+			ProviderIDs:     providerIDs,
+			ParentID:        strings.TrimSpace(section.ID),
+			GenreItems:      genreItems,
+			AspectRatio:     PosterAspectRatio(row.Pic),
+			PrimaryTag:      StableMD5Hex(playbackID + "|primary"),
+			LogoTag:         StableMD5Hex(playbackID + "|logo"),
+			BackdropTags:    backdropTags,
+			CommunityRating: communityRating,
+			RecursiveCount:  recursiveCount,
+			ChildCount:      0,
+			Status:          status,
+			UnplayedCount:   0,
+			PosterURL:       posterURL,
+		}))
+	}
+	return out, nil
+}
+
+func loadSiteCategoryLatest(database *db.DB, section db.ThirdPartyClientHomeSection, start int, limit int) ([]siteCategoryLatestItem, error) {
+	if database == nil || start < 0 || limit <= 0 {
+		return []siteCategoryLatestItem{}, nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(section.Module), "site_data") {
+		return []siteCategoryLatestItem{}, nil
+	}
+	siteKey := strings.TrimSpace(section.SiteKey)
+	categoryID := strings.TrimSpace(section.CategoryID)
+	if siteKey == "" || categoryID == "" {
+		return []siteCategoryLatestItem{}, nil
+	}
+	spiderAPI := strings.TrimSpace(resolveSiteCategorySpiderAPI(database, siteKey))
+	if spiderAPI == "" {
+		return []siteCategoryLatestItem{}, nil
+	}
+	apiBase := strings.TrimSpace(resolveSiteCategoryCatAPIBase(database))
+	if apiBase == "" {
+		return []siteCategoryLatestItem{}, nil
+	}
+
+	page := start/limit + 1
+	raw, err := catpawrunner.RequestSpider(apiBase, spiderAPI, "category", map[string]any{
+		"id":      categoryID,
+		"page":    page,
+		"filter":  true,
+		"filters": map[string]any{},
+	})
+	if err != nil {
+		return nil, err
+	}
+	list := extractSiteCategoryLatestList(raw)
+	if len(list) == 0 {
+		return []siteCategoryLatestItem{}, nil
+	}
+	if len(list) > limit {
+		return list[:limit], nil
+	}
+	return list, nil
+}
+
+func extractSiteCategoryLatestList(raw map[string]any) []siteCategoryLatestItem {
+	listAny, _ := raw["list"].([]any)
+	if len(listAny) == 0 {
+		return []siteCategoryLatestItem{}
+	}
+	out := make([]siteCategoryLatestItem, 0, len(listAny))
+	for _, it := range listAny {
+		m, ok := it.(map[string]any)
+		if !ok || m == nil {
+			continue
+		}
+		id := strings.TrimSpace(siteCategoryAnyString(m["vod_id"]))
+		if id == "" {
+			id = strings.TrimSpace(siteCategoryAnyString(m["id"]))
+		}
+		title := strings.TrimSpace(siteCategoryAnyString(m["vod_name"]))
+		if title == "" {
+			title = strings.TrimSpace(siteCategoryAnyString(m["name"]))
+		}
+		if title == "" {
+			continue
+		}
+		pic := strings.TrimSpace(siteCategoryAnyString(m["vod_pic"]))
+		if pic == "" {
+			pic = strings.TrimSpace(siteCategoryAnyString(m["pic"]))
+		}
+		remark := strings.TrimSpace(siteCategoryAnyString(m["vod_remarks"]))
+		if remark == "" {
+			remark = strings.TrimSpace(siteCategoryAnyString(m["remark"]))
+		}
+		year := siteCategoryAnyInt(m["vod_year"])
+		if year <= 0 {
+			year = siteCategoryAnyInt(m["year"])
+		}
+		out = append(out, siteCategoryLatestItem{
+			ID:     id,
+			Title:  title,
+			Pic:    pic,
+			Remark: remark,
+			Year:   year,
+		})
+	}
+	return out
+}
+
+func siteCategoryAnyString(v any) string {
+	switch vv := v.(type) {
+	case string:
+		return vv
+	case json.Number:
+		return vv.String()
+	case float64:
+		if vv == float64(int64(vv)) {
+			return strconv.FormatInt(int64(vv), 10)
+		}
+		return strconv.FormatFloat(vv, 'f', -1, 64)
+	case int:
+		return strconv.Itoa(vv)
+	case int64:
+		return strconv.FormatInt(vv, 10)
+	default:
+		return ""
+	}
+}
+
+func siteCategoryAnyInt(v any) int {
+	switch vv := v.(type) {
+	case int:
+		return vv
+	case int64:
+		return int(vv)
+	case float64:
+		return int(vv)
+	case json.Number:
+		if n, err := vv.Int64(); err == nil {
+			return int(n)
+		}
+		if f, err := vv.Float64(); err == nil {
+			return int(f)
+		}
+		return 0
+	case string:
+		return parsePositiveInt(strings.TrimSpace(vv))
+	default:
+		return 0
+	}
+}
+
+func resolveSiteCategorySpiderAPI(database *db.DB, siteKey string) string {
+	if database == nil {
+		return ""
+	}
+	want := strings.TrimSpace(siteKey)
+	if want == "" {
+		return ""
+	}
+	sites, err := database.ListVideoSourceSites()
+	if err != nil {
+		return ""
+	}
+	for _, site := range sites {
+		if strings.TrimSpace(site.Key) == want {
+			return strings.TrimSpace(site.API)
+		}
+	}
+	return ""
+}
+
+func resolveSiteCategoryCatAPIBase(database *db.DB) string {
+	if database == nil {
+		return ""
+	}
+	cfg, err := database.ReadAppConfig()
+	if err != nil {
+		return ""
+	}
+	rawServers, err := database.ListcatpawrunnerServers()
+	if err != nil {
+		return ""
+	}
+	servers := make([]catpawrunner.Server, 0, len(rawServers))
+	for _, server := range rawServers {
+		servers = append(servers, catpawrunner.Server{
+			Name:    strings.TrimSpace(server.Name),
+			APIBase: strings.TrimSpace(server.APIBase),
+		})
+	}
+	return strings.TrimSpace(catpawrunner.ResolveActiveBase(servers, strings.TrimSpace(cfg.CatpawrunnerActive)))
 }
 
 func buildMovieLatestItemDTO(serverID string, row movieLatestSource) MovieLatestItemDTO {
