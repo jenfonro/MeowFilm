@@ -48,6 +48,18 @@ type SmartPanAliasMapping struct {
 }
 
 func (d *DB) ReadAppConfig() (AppConfig, error) {
+	if cfg, ok := d.readAppConfigCache(); ok {
+		return cfg, nil
+	}
+	cfg, err := d.loadAppConfigFromDB()
+	if err != nil {
+		return AppConfig{}, err
+	}
+	d.setAppConfigCache(cfg)
+	return cfg, nil
+}
+
+func (d *DB) loadAppConfigFromDB() (AppConfig, error) {
 	if d == nil || d.db == nil {
 		return AppConfig{}, nil
 	}
@@ -216,7 +228,10 @@ func (d *DB) UpdateAppConfig(update func(*AppConfig)) error {
 		ON CONFLICT(id) DO UPDATE SET active=excluded.active, updated_at=excluded.updated_at
 	`, strings.TrimSpace(cfg.CatpawrunnerActive), now)
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return d.refreshAppConfigCache()
 }
 
 type CatpawrunnerServer struct {
@@ -225,6 +240,21 @@ type CatpawrunnerServer struct {
 }
 
 func (d *DB) ListcatpawrunnerServers() ([]CatpawrunnerServer, error) {
+	if rows, ok := d.readCatpawrunnerServersCache(); ok {
+		return rows, nil
+	}
+	rows, err := d.loadCatpawrunnerServersFromDB()
+	if err != nil {
+		return nil, err
+	}
+	d.setCatpawrunnerServersCache(rows)
+	return rows, nil
+}
+
+func (d *DB) loadCatpawrunnerServersFromDB() ([]CatpawrunnerServer, error) {
+	if d == nil || d.db == nil {
+		return []CatpawrunnerServer{}, nil
+	}
 	rows, err := d.db.Query(`SELECT name, api_base FROM catpawrunner_server ORDER BY order_index ASC, name ASC`)
 	if err != nil {
 		return nil, err
@@ -276,7 +306,10 @@ func (d *DB) ReplacecatpawrunnerServers(servers []CatpawrunnerServer) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return d.refreshCatpawrunnerServersCache()
 }
 
 func maxInt(minimum, value int) int {
@@ -523,6 +556,21 @@ type VideoSourceSiteState struct {
 }
 
 func (d *DB) ListVideoSourceSites() ([]VideoSourceSite, error) {
+	if rows, ok := d.readVideoSourceSitesCache(); ok {
+		return rows, nil
+	}
+	rows, err := d.loadVideoSourceSitesFromDB()
+	if err != nil {
+		return nil, err
+	}
+	d.setVideoSourceSitesCache(rows)
+	return rows, nil
+}
+
+func (d *DB) loadVideoSourceSitesFromDB() ([]VideoSourceSite, error) {
+	if d == nil || d.db == nil {
+		return []VideoSourceSite{}, nil
+	}
 	rows, err := d.db.Query(`SELECT key, name, api, type FROM video_source_site ORDER BY key ASC`)
 	if err != nil {
 		return nil, err
@@ -587,7 +635,7 @@ func (d *DB) ReplaceVideoSourceSites(sites []VideoSourceSite) error {
 		return err
 	}
 	_ = d.RecomputeSmartSkipSites()
-	return nil
+	return d.refreshVideoSourceSitesCache()
 }
 
 func (d *DB) ReadVideoSourceSiteStates() (map[string]VideoSourceSiteState, error) {
@@ -715,12 +763,12 @@ func (d *DB) RecomputeSmartSkipSites() error {
 	if d == nil || d.db == nil {
 		return nil
 	}
-	cfg, err := d.ReadAppConfig()
+	cfg, err := d.loadAppConfigFromDB()
 	if err != nil {
 		return err
 	}
 	keywords := normalizeSmartSiteCleanKeywords(cfg.SmartSiteCleanKeywords)
-	rawSites, err := d.ListVideoSourceSites()
+	rawSites, err := d.loadVideoSourceSitesFromDB()
 	if err != nil {
 		return err
 	}

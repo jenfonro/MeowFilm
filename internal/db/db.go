@@ -15,8 +15,15 @@ import (
 )
 
 type DB struct {
-	mu sync.Mutex
+	mu sync.RWMutex
 	db *sql.DB
+
+	appConfigCached           bool
+	appConfigCache            AppConfig
+	catpawrunnerServersCached bool
+	catpawrunnerServersCache  []CatpawrunnerServer
+	videoSourceSitesCached    bool
+	videoSourceSitesCache     []VideoSourceSite
 }
 
 func Open() (*DB, error) {
@@ -37,6 +44,10 @@ func Open() (*DB, error) {
 	}
 	d := &DB{db: raw}
 	if err := d.initSchema(fresh); err != nil {
+		_ = raw.Close()
+		return nil, err
+	}
+	if err := d.WarmRuntimeConfigSnapshot(); err != nil {
 		_ = raw.Close()
 		return nil, err
 	}
