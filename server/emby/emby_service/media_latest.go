@@ -172,40 +172,21 @@ func LatestPathAndMediaSources(itemID string, row *db.PlayHistoryRow) (container
 }
 
 func ResolveLatestTVTMDB(database *db.DB, title string, year int) (int, string, error) {
-	candidates := metadata_tmdb.NormalizeTitleCandidates("tv", title)
-	tmdbID, matched, err := metadata_tmdb.ResolveByTitlesFromCache(database, "tv", candidates, year, "zh-CN")
-	if err != nil || tmdbID > 0 {
-		return tmdbID, matched, err
-	}
-	if year > 0 {
-		tmdbID, matched, err = metadata_tmdb.ResolveByTitlesFromCache(database, "tv", candidates, 0, "zh-CN")
-		if err != nil || tmdbID > 0 {
-			return tmdbID, matched, err
-		}
-	}
-	for _, candidate := range candidates {
-		if _, err := metadata_tmdb.SearchMulti(database, candidate); err != nil {
-			return 0, candidate, err
-		}
-	}
-	tmdbID, matched, err = metadata_tmdb.ResolveByTitlesFromCache(database, "tv", candidates, year, "zh-CN")
-	if err != nil || tmdbID > 0 {
-		return tmdbID, matched, err
-	}
-	if year > 0 {
-		return metadata_tmdb.ResolveByTitlesFromCache(database, "tv", candidates, 0, "zh-CN")
-	}
-	return 0, "", nil
+	return resolveLatestTMDB(database, "tv", title, year)
 }
 
 func ResolveLatestMovieTMDB(database *db.DB, title string, year int) (int, string, error) {
-	candidates := metadata_tmdb.NormalizeTitleCandidates("movie", title)
-	tmdbID, matched, err := metadata_tmdb.ResolveByTitlesFromCache(database, "movie", candidates, year, "zh-CN")
+	return resolveLatestTMDB(database, "movie", title, year)
+}
+
+func resolveLatestTMDB(database *db.DB, mediaType string, title string, year int) (int, string, error) {
+	candidates := metadata_tmdb.NormalizeTitleCandidates(mediaType, title)
+	tmdbID, matched, err := metadata_tmdb.ResolveByTitlesFromCache(database, mediaType, candidates, year, "zh-CN")
 	if err != nil || tmdbID > 0 {
 		return tmdbID, matched, err
 	}
 	if year > 0 {
-		tmdbID, matched, err = metadata_tmdb.ResolveByTitlesFromCache(database, "movie", candidates, 0, "zh-CN")
+		tmdbID, matched, err = metadata_tmdb.ResolveByTitlesFromCache(database, mediaType, candidates, 0, "zh-CN")
 		if err != nil || tmdbID > 0 {
 			return tmdbID, matched, err
 		}
@@ -215,12 +196,12 @@ func ResolveLatestMovieTMDB(database *db.DB, title string, year int) (int, strin
 			return 0, candidate, err
 		}
 	}
-	tmdbID, matched, err = metadata_tmdb.ResolveByTitlesFromCache(database, "movie", candidates, year, "zh-CN")
+	tmdbID, matched, err = metadata_tmdb.ResolveByTitlesFromCache(database, mediaType, candidates, year, "zh-CN")
 	if err != nil || tmdbID > 0 {
 		return tmdbID, matched, err
 	}
 	if year > 0 {
-		return metadata_tmdb.ResolveByTitlesFromCache(database, "movie", candidates, 0, "zh-CN")
+		return metadata_tmdb.ResolveByTitlesFromCache(database, mediaType, candidates, 0, "zh-CN")
 	}
 	return 0, "", nil
 }

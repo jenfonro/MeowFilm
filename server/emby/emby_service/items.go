@@ -171,7 +171,7 @@ func buildSectionSeriesItemDTO(serverID string, row tvLatestSource) SectionSerie
 		AirDays:                 EmptyStrings(),
 		PrimaryImageAspectRatio: NormalizeAspectRatio(row.AspectRatio),
 		ImageTags:               ImageTagsDTO{Primary: row.PrimaryTag, Logo: row.LogoTag},
-		BackdropImageTags:       BackdropTagsOrEmpty(defaultBackdropTags(row.BackdropTags, row.ID)),
+		BackdropImageTags:       BackdropTagsOrEmpty(defaultBackdropTags(row.BackdropTags)),
 	}
 }
 

@@ -750,7 +750,7 @@ func buildMovieLatestItemDTO(serverID string, row movieLatestSource) MovieLatest
 		UserData:                userData,
 		PrimaryImageAspectRatio: NormalizeAspectRatio(row.AspectRatio),
 		ImageTags:               ImageTagsDTO{Primary: row.PrimaryTag, Logo: row.LogoTag},
-		BackdropImageTags:       BackdropTagsOrEmpty(defaultBackdropTags(row.BackdropTags, row.ID)),
+		BackdropImageTags:       BackdropTagsOrEmpty(defaultBackdropTags(row.BackdropTags)),
 		MediaType:               MediaTypeVideo,
 	}
 }
@@ -785,7 +785,7 @@ func buildTVLatestItemDTO(serverID string, row tvLatestSource) TVLatestItemDTO {
 		AirDays:                 EmptyStrings(),
 		PrimaryImageAspectRatio: NormalizeAspectRatio(row.AspectRatio),
 		ImageTags:               ImageTagsDTO{Primary: row.PrimaryTag, Logo: row.LogoTag},
-		BackdropImageTags:       BackdropTagsOrEmpty(defaultBackdropTags(row.BackdropTags, row.ID)),
+		BackdropImageTags:       BackdropTagsOrEmpty(defaultBackdropTags(row.BackdropTags)),
 	}
 }
 
@@ -841,7 +841,7 @@ func inferTVUnplayedCountFromDouban(subtitle string) int {
 	return 0
 }
 
-func defaultBackdropTags(tags []string, id string) []string {
+func defaultBackdropTags(tags []string) []string {
 	if len(tags) > 0 {
 		return tags
 	}

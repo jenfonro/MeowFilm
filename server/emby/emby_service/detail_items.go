@@ -90,7 +90,7 @@ func buildSiteSeriesDetailPayload(database *db.DB, userID int64, serverID string
 		SupportsSync:            state.SupportsSync,
 		SortName:                SortNameOrName(seriesName),
 		ForcedSortName:          SortNameOrName(seriesName),
-		PremiereDate:            yearDateString(meta.Year),
+		PremiereDate:            embyYearDate(meta.Year),
 		ExternalURLs:            EmptyExternalURLs(),
 		Path:                    "",
 		Overview:                overview,
@@ -775,13 +775,6 @@ func buildDetailMediaSource(itemID string, path string, name string, runtime int
 	}
 }
 
-func yearDateString(year int) string {
-	if year <= 0 {
-		return ""
-	}
-	return fmt.Sprintf("%04d-01-01T00:00:00.0000000Z", year)
-}
-
 func preciseDateString(raw string) string {
 	s := strings.TrimSpace(raw)
 	if s == "" {
@@ -798,7 +791,7 @@ func preciseDateString(raw string) string {
 			year = y
 		}
 	}
-	return yearDateString(year)
+	return embyYearDate(year)
 }
 
 func detailTime(row *db.PlayHistoryRow) time.Time {
