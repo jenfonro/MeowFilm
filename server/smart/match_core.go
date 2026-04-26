@@ -573,6 +573,10 @@ func smartComputeCandidateFeatures(c smartCandidate) smartCandidateFeatures {
 
 func smartStageScore(stage smartCandidateStage) int {
 	switch stage {
+	case smartCandidateStageManualList:
+		return 500
+	case smartCandidateStageManualDetail:
+		return 400
 	case smartCandidateStageHistoryList:
 		return 300
 	case smartCandidateStageHistoryDetail:

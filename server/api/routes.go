@@ -89,6 +89,22 @@ func handleAPIMainRoutes(path string, w http.ResponseWriter, r *http.Request, da
 		serveProtected(handleAPISmartMatchBlockAdd)
 	case "/smart/matchblock/delete":
 		serveProtected(handleAPISmartMatchBlockDelete)
+	case "/smart/manual/tmdb/get-list":
+		serveProtected(handleAPIManualTMDBManualList)
+	case "/smart/manual/tmdb/add":
+		serveProtected(handleAPIManualTMDBAdd)
+	case "/smart/manual/tmdb/delete":
+		serveProtected(handleAPIManualTMDBDelete)
+	case "/smart/manual/item/get-data":
+		serveProtected(handleAPIManualItemManualList)
+	case "/smart/manual/item/add":
+		serveProtected(handleAPIManualItemAdd)
+	case "/smart/manual/item/update":
+		serveProtected(handleAPIManualItemUpdate)
+	case "/smart/manual/item/delete":
+		serveProtected(handleAPIManualItemDelete)
+	case "/smart/manual/item/report-result":
+		serveProtected(handleAPIManualItemReportResult)
 	default:
 		return false
 	}

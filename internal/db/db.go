@@ -464,6 +464,32 @@ func (d *DB) ensureSchema() error {
 				);
 				CREATE INDEX IF NOT EXISTS idx_smart_match_block_item_keyword_site_video ON smart_match_block_item(keyword_id, site_key, site_detail, pan_flag, source);
 				CREATE INDEX IF NOT EXISTS idx_smart_match_block_item_keyword_updated_at ON smart_match_block_item(keyword_id, updated_at DESC);
+				CREATE TABLE IF NOT EXISTS smart_manual_tmdb (
+				  tmdb_type TEXT NOT NULL CHECK (tmdb_type IN ('tv','movie')),
+				  tmdb_id INTEGER NOT NULL,
+				  title TEXT NOT NULL DEFAULT '',
+				  created_at INTEGER NOT NULL,
+				  updated_at INTEGER NOT NULL,
+				  PRIMARY KEY(tmdb_type, tmdb_id)
+				);
+				CREATE INDEX IF NOT EXISTS idx_smart_manual_tmdb_updated_at ON smart_manual_tmdb(updated_at DESC, tmdb_type, tmdb_id);
+				CREATE TABLE IF NOT EXISTS smart_manual_item (
+				  id INTEGER PRIMARY KEY AUTOINCREMENT,
+				  tmdb_type TEXT NOT NULL CHECK (tmdb_type IN ('tv','movie')),
+				  tmdb_id INTEGER NOT NULL,
+				  site_key TEXT NOT NULL DEFAULT '',
+				  spider_api TEXT NOT NULL DEFAULT '',
+				  site_detail TEXT NOT NULL DEFAULT '',
+				  pan_flag TEXT NOT NULL DEFAULT '',
+				  season_hint TEXT NOT NULL DEFAULT '',
+				  error_count INTEGER NOT NULL DEFAULT 0,
+				  auto_disable INTEGER NOT NULL DEFAULT 1,
+				  enabled INTEGER NOT NULL DEFAULT 1,
+				  created_at INTEGER NOT NULL,
+				  updated_at INTEGER NOT NULL,
+				  FOREIGN KEY(tmdb_type, tmdb_id) REFERENCES smart_manual_tmdb(tmdb_type, tmdb_id) ON DELETE CASCADE
+				);
+				CREATE INDEX IF NOT EXISTS idx_smart_manual_item_tmdb ON smart_manual_item(tmdb_type, tmdb_id, updated_at DESC);
 				CREATE TABLE IF NOT EXISTS pan_login_setting (
 				  provider TEXT NOT NULL,
 				  field TEXT NOT NULL,

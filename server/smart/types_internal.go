@@ -24,6 +24,8 @@ const (
 type smartCandidateStage string
 
 const (
+	smartCandidateStageManualList    smartCandidateStage = "manual_list"
+	smartCandidateStageManualDetail  smartCandidateStage = "manual_detail"
 	smartCandidateStageHistoryList   smartCandidateStage = "history_list"
 	smartCandidateStageHistoryDetail smartCandidateStage = "history_detail"
 	smartCandidateStageFull          smartCandidateStage = "full"

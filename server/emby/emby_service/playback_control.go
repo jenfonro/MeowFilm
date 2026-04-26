@@ -11,6 +11,8 @@ import (
 type playbackOfferStage string
 
 const (
+	playbackOfferStageManualList    playbackOfferStage = "manual_list"
+	playbackOfferStageManualDetail  playbackOfferStage = "manual_detail"
 	playbackOfferStageHistoryList   playbackOfferStage = "history_list"
 	playbackOfferStageHistoryDetail playbackOfferStage = "history_detail"
 	playbackOfferStageFull          playbackOfferStage = "full"
@@ -45,6 +47,9 @@ type playbackControlEntry struct {
 	offerSeen   map[string]struct{}
 	triedFailed map[uint64]struct{}
 
+	manualListDone    bool
+	manualDetailDone  bool
+	manualDone        bool
 	historyListDone   bool
 	historyDetailDone bool
 	historyDone       bool
@@ -237,6 +242,14 @@ func EnqueueHistoryListOffer(playSessionID string, mediaSourceID string, cacheKe
 	return enqueuePlaybackOffer(playSessionID, mediaSourceID, cacheKey, playbackOfferStageHistoryList, offer)
 }
 
+func EnqueueManualListOffer(playSessionID string, mediaSourceID string, cacheKey string, offer smart.PlaybackOffer) bool {
+	return enqueuePlaybackOffer(playSessionID, mediaSourceID, cacheKey, playbackOfferStageManualList, offer)
+}
+
+func EnqueueManualDetailOffer(playSessionID string, mediaSourceID string, cacheKey string, offer smart.PlaybackOffer) bool {
+	return enqueuePlaybackOffer(playSessionID, mediaSourceID, cacheKey, playbackOfferStageManualDetail, offer)
+}
+
 func EnqueueHistoryDetailOffer(playSessionID string, mediaSourceID string, cacheKey string, offer smart.PlaybackOffer) bool {
 	return enqueuePlaybackOffer(playSessionID, mediaSourceID, cacheKey, playbackOfferStageHistoryDetail, offer)
 }
@@ -284,6 +297,30 @@ func CloseHistoryListOffers(playSessionID string, mediaSourceID string, cacheKey
 	entry.cond.Broadcast()
 }
 
+func CloseManualListOffers(playSessionID string, mediaSourceID string, cacheKey string) {
+	entry := loadPlaybackControlEntry(playSessionID, mediaSourceID, cacheKey)
+	if entry == nil {
+		return
+	}
+	entry.mu.Lock()
+	entry.manualListDone = true
+	entry.manualDone = entry.manualListDone && entry.manualDetailDone
+	entry.mu.Unlock()
+	entry.cond.Broadcast()
+}
+
+func CloseManualDetailOffers(playSessionID string, mediaSourceID string, cacheKey string) {
+	entry := loadPlaybackControlEntry(playSessionID, mediaSourceID, cacheKey)
+	if entry == nil {
+		return
+	}
+	entry.mu.Lock()
+	entry.manualDetailDone = true
+	entry.manualDone = entry.manualListDone && entry.manualDetailDone
+	entry.mu.Unlock()
+	entry.cond.Broadcast()
+}
+
 func CloseHistoryDetailOffers(playSessionID string, mediaSourceID string, cacheKey string) {
 	entry := loadPlaybackControlEntry(playSessionID, mediaSourceID, cacheKey)
 	if entry == nil {
@@ -314,6 +351,7 @@ func MarkPlaybackDone(playSessionID string, mediaSourceID string, cacheKey strin
 	}
 	entry.mu.Lock()
 	entry.playbackDone = true
+	entry.stopOnce.Do(func() { close(entry.stopCh) })
 	entry.mu.Unlock()
 	entry.cond.Broadcast()
 }
@@ -337,6 +375,9 @@ func CurrentPlaybackOfferStage(playSessionID string, mediaSourceID string, cache
 	}
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
+	if !entry.manualDone {
+		return "manual_only"
+	}
 	if !entry.historyDone {
 		return "history_only"
 	}
@@ -363,7 +404,7 @@ func NextPlaybackOffer(playSessionID string, mediaSourceID string, cacheKey stri
 			entry.offers = append(entry.offers[:bestIdx], entry.offers[bestIdx+1:]...)
 			return clonePlaybackOffer(item.Offer), true
 		}
-		if entry.historyDone && entry.fullDone {
+		if entry.manualDone && entry.historyDone && entry.fullDone {
 			return smart.PlaybackOffer{}, false
 		}
 		entry.cond.Wait()
@@ -393,6 +434,9 @@ func playbackPickBestOfferIndexLocked(entry *playbackControlEntry) int {
 func playbackOfferVisible(entry *playbackControlEntry, item playbackQueuedOffer) bool {
 	if entry == nil {
 		return false
+	}
+	if !entry.manualDone {
+		return item.Stage == playbackOfferStageManualList || item.Stage == playbackOfferStageManualDetail
 	}
 	if !entry.historyDone {
 		return item.Stage == playbackOfferStageHistoryList || item.Stage == playbackOfferStageHistoryDetail

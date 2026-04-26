@@ -27,13 +27,13 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 	}
 	cfg, _ := database.ReadAppConfig()
 	siteName := cfg.SiteName
+	page := strings.TrimSpace(r.URL.Query().Get("page"))
 	u := auth.CurrentUser(r)
 	if u == nil || u.Status != "active" {
 		writeJSON(w, 200, map[string]any{"authenticated": false, "siteName": siteName})
 		return
 	}
 
-	page := strings.TrimSpace(r.URL.Query().Get("page"))
 	settings := map[string]any{}
 	if page == "index" || page == "search" || page == "play" || page == "site" || page == "dashboard" {
 		if page != "dashboard" {
@@ -135,6 +135,7 @@ func handleAPIBootstrap(w http.ResponseWriter, r *http.Request, database *db.DB)
 
 			// User search configuration: used by search/play pages only.
 			if page == "search" || page == "play" || page == "site" {
+				settings["siteCleanKeywords"] = strings.TrimSpace(cfg.SmartSiteCleanKeywords)
 				sites := mergeVideoSourceSites(database)
 				keys := make([]string, 0, len(sites))
 				for _, s := range sites {
@@ -244,26 +245,49 @@ func handleAPIHome(w http.ResponseWriter, r *http.Request, database *db.DB) {
 }
 
 func handleAPIVideoSites(w http.ResponseWriter, r *http.Request, database *db.DB) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		merged := mergeVideoSourceSites(database)
+		out := make([]map[string]any, 0, len(merged))
+		for _, s := range merged {
+			row := map[string]any{
+				"key":     s["key"],
+				"name":    s["name"],
+				"api":     s["api"],
+				"enabled": s["enabled"],
+				"home":    s["home"],
+			}
+			if v, ok := s["type"]; ok && v != nil {
+				row["type"] = v
+			}
+			out = append(out, row)
+		}
+		writeJSON(w, 200, map[string]any{"success": true, "sites": out})
+	case http.MethodPost:
+		var body struct {
+			SiteKey string `json:"siteKey"`
+			Error   string `json:"error"`
+		}
+		if err := readJSONLoose(r, &body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "invalid json"})
+			return
+		}
+		siteKey := strings.TrimSpace(body.SiteKey)
+		if siteKey == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "invalid params"})
+			return
+		}
+		errMsg := strings.TrimSpace(body.Error)
+		if err := database.UpsertVideoSourceSiteState(siteKey, func(s *db.VideoSourceSiteState) {
+			s.Error = errMsg
+		}); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"success": true})
+	default:
 		methodNotAllowed(w)
-		return
 	}
-	merged := mergeVideoSourceSites(database)
-	out := make([]map[string]any, 0, len(merged))
-	for _, s := range merged {
-		row := map[string]any{
-			"key":     s["key"],
-			"name":    s["name"],
-			"api":     s["api"],
-			"enabled": s["enabled"],
-			"home":    s["home"],
-		}
-		if v, ok := s["type"]; ok && v != nil {
-			row["type"] = v
-		}
-		out = append(out, row)
-	}
-	writeJSON(w, 200, map[string]any{"success": true, "sites": out})
 }
 
 func isNetDiskHistoryItem(siteDetail string, playFlag string) bool {

@@ -4,29 +4,12 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/jenfonro/meowfilm/internal/auth"
 	"github.com/jenfonro/meowfilm/internal/db"
 )
-
-func requireAdminUser(w http.ResponseWriter, r *http.Request) *auth.User {
-	u := auth.CurrentUser(r)
-	if u == nil || u.Status != "active" {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"success": false, "message": "未登录"})
-		return nil
-	}
-	if u.Role != "admin" {
-		writeJSON(w, http.StatusForbidden, map[string]any{"success": false, "message": "无权限"})
-		return nil
-	}
-	return u
-}
 
 func handleAPISmartMatchBlockItems(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
-		return
-	}
-	if requireAdminUser(w, r) == nil {
 		return
 	}
 	keyword := strings.TrimSpace(r.URL.Query().Get("keyword"))
@@ -53,9 +36,6 @@ func handleAPISmartMatchBlockItems(w http.ResponseWriter, r *http.Request, datab
 func handleAPISmartMatchBlockAdd(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
-		return
-	}
-	if requireAdminUser(w, r) == nil {
 		return
 	}
 	var body map[string]any
@@ -113,9 +93,6 @@ func handleAPISmartMatchBlockAdd(w http.ResponseWriter, r *http.Request, databas
 func handleAPISmartMatchBlockDelete(w http.ResponseWriter, r *http.Request, database *db.DB) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
-		return
-	}
-	if requireAdminUser(w, r) == nil {
 		return
 	}
 	var body map[string]any
