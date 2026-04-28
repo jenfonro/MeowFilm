@@ -375,11 +375,11 @@ func CurrentPlaybackOfferStage(playSessionID string, mediaSourceID string, cache
 	}
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
-	if !entry.manualDone {
-		return "manual_only"
-	}
 	if !entry.historyDone {
 		return "history_only"
+	}
+	if !entry.manualDone {
+		return "manual_only"
 	}
 	if !entry.fullDone || len(entry.offers) > 0 {
 		return "all_open"
@@ -435,11 +435,11 @@ func playbackOfferVisible(entry *playbackControlEntry, item playbackQueuedOffer)
 	if entry == nil {
 		return false
 	}
-	if !entry.manualDone {
-		return item.Stage == playbackOfferStageManualList || item.Stage == playbackOfferStageManualDetail
-	}
 	if !entry.historyDone {
 		return item.Stage == playbackOfferStageHistoryList || item.Stage == playbackOfferStageHistoryDetail
+	}
+	if !entry.manualDone {
+		return item.Stage == playbackOfferStageManualList || item.Stage == playbackOfferStageManualDetail
 	}
 	return true
 }

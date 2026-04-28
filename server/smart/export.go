@@ -3,6 +3,7 @@ package smart
 import (
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/catpawrunner"
@@ -202,7 +203,27 @@ func ResolvePanMockSourceRecordsIncremental(
 	return smartResolvePanMockSourceRecordsIncremental(database, siteKey, siteName, want, tmdbSeasons, tmdbHasMultiSeason, rawCleanRules, rawEpisodeRules, records, onGroupResolved)
 }
 
+func ResolvePanMockSourceRecordsIncrementalWithTimeout(
+	database *db.DB,
+	siteKey string,
+	siteName string,
+	want int,
+	tmdbSeasons []TMDBSeason,
+	tmdbHasMultiSeason bool,
+	rawCleanRules []string,
+	rawEpisodeRules []string,
+	records []DetailSourceRecord,
+	timeout time.Duration,
+	onGroupResolved func(resolved []DetailSourceRecord, accessDelta map[string]string, emitAllowed bool),
+) ([]DetailSourceRecord, map[string]string) {
+	return smartResolvePanMockSourceRecordsIncrementalWithTimeout(database, siteKey, siteName, want, tmdbSeasons, tmdbHasMultiSeason, rawCleanRules, rawEpisodeRules, records, timeout, onGroupResolved)
+}
+
 func ResolvePanMockEpisodesBySourceValue(database *db.DB, panFlag string, sourceValue string) ([]catpawrunner.Episode, map[string]string, bool, string, bool, error) {
+	return ResolvePanMockEpisodesBySourceValueWithTimeout(database, panFlag, sourceValue, 0)
+}
+
+func ResolvePanMockEpisodesBySourceValueWithTimeout(database *db.DB, panFlag string, sourceValue string, timeout time.Duration) ([]catpawrunner.Episode, map[string]string, bool, string, bool, error) {
 	record := smartDetailSourceRecord{
 		Label:       strings.TrimSpace(panFlag),
 		PanMock:     true,
@@ -217,7 +238,7 @@ func ResolvePanMockEpisodesBySourceValue(database *db.DB, panFlag string, source
 	if !record.Supported || strings.TrimSpace(record.GroupKey) == "" {
 		return nil, map[string]string{}, false, "skip", false, nil
 	}
-	return smartResolveSharedPanGroupEpisodes(database, record)
+	return smartResolveSharedPanGroupEpisodesWithTimeout(database, record, timeout)
 }
 
 // ResolvedRecordsToPans is an edge-only adapter for browse/debug/output assembly.

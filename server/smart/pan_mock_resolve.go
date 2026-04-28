@@ -1,6 +1,7 @@
 package smart
 
 import (
+	"context"
 	"errors"
 	"strconv"
 	"strings"
@@ -152,80 +153,115 @@ func extractPanMock189Credentials(panFlag string, sourceValue string) (shareCode
 }
 
 func smartResolvePanFlagEpisodesRaw(database *db.DB, panFlag string, episodeURL string) ([]catpawrunner.Episode, map[string]string, bool, string, error) {
-	label := strings.TrimSpace(panFlag)
-	accessByShareID := map[string]string{}
-	pid := smartPanMockProviderFromLabel(label)
-	if database == nil || pid == "" {
-		return nil, accessByShareID, false, "skip", nil
-	}
-	firstURL := strings.TrimSpace(episodeURL)
-	var (
-		vod       string
-		fromCache bool
-		err       error
-	)
-	switch pid {
-	case "189":
-		sc, ac := extractPanMock189Credentials(label, firstURL)
-		if sc == "" {
+	return smartResolvePanFlagEpisodesRawWithTimeout(database, panFlag, episodeURL, 0)
+}
+
+func smartResolvePanFlagEpisodesRawWithTimeout(database *db.DB, panFlag string, episodeURL string, timeout time.Duration) ([]catpawrunner.Episode, map[string]string, bool, string, error) {
+	resolve := func() ([]catpawrunner.Episode, map[string]string, bool, string, error) {
+		label := strings.TrimSpace(panFlag)
+		accessByShareID := map[string]string{}
+		pid := smartPanMockProviderFromLabel(label)
+		if database == nil || pid == "" {
 			return nil, accessByShareID, false, "skip", nil
 		}
-		flag := "天意-" + sc
-		var shareID string
-		vod, shareID, _, fromCache, err = netdisk.Tianyi189ListWithCacheHit(database, flag, ac)
-		if err != nil {
-			return nil, accessByShareID, fromCache, "err", err
+		firstURL := strings.TrimSpace(episodeURL)
+		var (
+			vod       string
+			fromCache bool
+			err       error
+		)
+		switch pid {
+		case "189":
+			sc, ac := extractPanMock189Credentials(label, firstURL)
+			if sc == "" {
+				return nil, accessByShareID, false, "skip", nil
+			}
+			flag := "天意-" + sc
+			var shareID string
+			vod, shareID, _, fromCache, err = netdisk.Tianyi189ListWithCacheHit(database, flag, ac)
+			if err != nil {
+				return nil, accessByShareID, fromCache, "err", err
+			}
+			if strings.TrimSpace(vod) == "" {
+				return nil, accessByShareID, fromCache, "empty", nil
+			}
+			if strings.TrimSpace(shareID) != "" && strings.TrimSpace(ac) != "" {
+				sid := strings.TrimSpace(shareID)
+				acc := strings.TrimSpace(ac)
+				accessByShareID[sid] = acc
+				smartPanMock189AccessPut(sid, acc)
+			}
+		case "quark":
+			pass := extractPanMockPasscodeFromSourceValue(firstURL)
+			vod, _, fromCache, err = netdisk.QuarkListWithCacheHit(database, label, pass)
+			if err != nil {
+				return nil, accessByShareID, fromCache, "err", err
+			}
+			if strings.TrimSpace(vod) == "" {
+				return nil, accessByShareID, fromCache, "empty", nil
+			}
+		case "uc":
+			pass := extractPanMockPasscodeFromSourceValue(firstURL)
+			vod, _, fromCache, err = netdisk.UCListWithCacheHit(database, label, pass)
+			if err != nil {
+				return nil, accessByShareID, fromCache, "err", err
+			}
+			if strings.TrimSpace(vod) == "" {
+				return nil, accessByShareID, fromCache, "empty", nil
+			}
+		case "139":
+			pass := extractPanMockPasscodeFromSourceValue(firstURL)
+			vod, _, fromCache, err = netdisk.Yun139ListWithCacheHit(database, label, pass)
+			if err != nil {
+				return nil, accessByShareID, fromCache, "err", err
+			}
+			if strings.TrimSpace(vod) == "" {
+				return nil, accessByShareID, fromCache, "empty", nil
+			}
+		case "baidu":
+			pass := extractPanMockPasscodeFromSourceValue(firstURL)
+			vod, _, fromCache, err = netdisk.BaiduListWithCacheHit(database, label, pass)
+			if err != nil {
+				return nil, accessByShareID, fromCache, "err", err
+			}
+			if strings.TrimSpace(vod) == "" {
+				return nil, accessByShareID, fromCache, "empty", nil
+			}
+		default:
+			return nil, accessByShareID, false, "skip", nil
 		}
-		if strings.TrimSpace(vod) == "" {
-			return nil, accessByShareID, fromCache, "empty", nil
-		}
-		if strings.TrimSpace(shareID) != "" && strings.TrimSpace(ac) != "" {
-			sid := strings.TrimSpace(shareID)
-			acc := strings.TrimSpace(ac)
-			accessByShareID[sid] = acc
-			smartPanMock189AccessPut(sid, acc)
-		}
-	case "quark":
-		pass := extractPanMockPasscodeFromSourceValue(firstURL)
-		vod, _, fromCache, err = netdisk.QuarkListWithCacheHit(database, label, pass)
-		if err != nil {
-			return nil, accessByShareID, fromCache, "err", err
-		}
-		if strings.TrimSpace(vod) == "" {
-			return nil, accessByShareID, fromCache, "empty", nil
-		}
-	case "uc":
-		pass := extractPanMockPasscodeFromSourceValue(firstURL)
-		vod, _, fromCache, err = netdisk.UCListWithCacheHit(database, label, pass)
-		if err != nil {
-			return nil, accessByShareID, fromCache, "err", err
-		}
-		if strings.TrimSpace(vod) == "" {
-			return nil, accessByShareID, fromCache, "empty", nil
-		}
-	case "139":
-		pass := extractPanMockPasscodeFromSourceValue(firstURL)
-		vod, _, fromCache, err = netdisk.Yun139ListWithCacheHit(database, label, pass)
-		if err != nil {
-			return nil, accessByShareID, fromCache, "err", err
-		}
-		if strings.TrimSpace(vod) == "" {
-			return nil, accessByShareID, fromCache, "empty", nil
-		}
-	case "baidu":
-		pass := extractPanMockPasscodeFromSourceValue(firstURL)
-		vod, _, fromCache, err = netdisk.BaiduListWithCacheHit(database, label, pass)
-		if err != nil {
-			return nil, accessByShareID, fromCache, "err", err
-		}
-		if strings.TrimSpace(vod) == "" {
-			return nil, accessByShareID, fromCache, "empty", nil
-		}
-	default:
-		return nil, accessByShareID, false, "skip", nil
+		eps := smartParseVodPlayURLToEpisodes(vod)
+		return eps, accessByShareID, fromCache, "ok", nil
 	}
-	eps := smartParseVodPlayURLToEpisodes(vod)
-	return eps, accessByShareID, fromCache, "ok", nil
+	if timeout <= 0 {
+		return resolve()
+	}
+	type result struct {
+		episodes      []catpawrunner.Episode
+		accessByShare map[string]string
+		fromCache     bool
+		status        string
+		err           error
+	}
+	done := make(chan result, 1)
+	go func() {
+		eps, accessByShare, fromCache, status, err := resolve()
+		done <- result{
+			episodes:      eps,
+			accessByShare: accessByShare,
+			fromCache:     fromCache,
+			status:        status,
+			err:           err,
+		}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case out := <-done:
+		return out.episodes, out.accessByShare, out.fromCache, out.status, out.err
+	case <-timer.C:
+		return nil, map[string]string{}, false, "err", context.DeadlineExceeded
+	}
 }
 
 func smartSharedPanListLookup(panFlag string) (chan struct{}, smartSharedPanListState, smartSharedPanListResult, bool) {
@@ -319,6 +355,10 @@ func cloneStringMap(in map[string]string) map[string]string {
 }
 
 func smartResolveSharedPanGroupEpisodes(database *db.DB, record smartDetailSourceRecord) ([]catpawrunner.Episode, map[string]string, bool, string, bool, error) {
+	return smartResolveSharedPanGroupEpisodesWithTimeout(database, record, 0)
+}
+
+func smartResolveSharedPanGroupEpisodesWithTimeout(database *db.DB, record smartDetailSourceRecord, timeout time.Duration) ([]catpawrunner.Episode, map[string]string, bool, string, bool, error) {
 	label := strings.TrimSpace(record.PanFlag)
 	groupKey := strings.TrimSpace(record.GroupKey)
 	if groupKey == "" {
@@ -333,7 +373,18 @@ func smartResolveSharedPanGroupEpisodes(database *db.DB, record smartDetailSourc
 			if smartDebugLogEnabled() {
 				smartDebugPrintf("[smart][pan_list_skip] panFlag=%s provider=%s reason=shared_resolving", label, smartPanMockProviderFromLabel(label))
 			}
-			<-waitCh
+			if timeout > 0 {
+				timer := time.NewTimer(timeout)
+				select {
+				case <-waitCh:
+				case <-timer.C:
+					timer.Stop()
+					return nil, map[string]string{}, false, "err", false, context.DeadlineExceeded
+				}
+				timer.Stop()
+			} else {
+				<-waitCh
+			}
 		} else if smartDebugLogEnabled() {
 			smartDebugPrintf("[smart][pan_list_skip] panFlag=%s provider=%s reason=shared_resolved", label, smartPanMockProviderFromLabel(label))
 		}
@@ -344,7 +395,7 @@ func smartResolveSharedPanGroupEpisodes(database *db.DB, record smartDetailSourc
 	waitCh = make(chan struct{})
 	smartSharedPanListSetResolving(groupKey, waitCh)
 
-	eps, accessDelta, fromCache, finalStatus, err := smartResolvePanFlagEpisodesRaw(database, label, strings.TrimSpace(record.SourceValue))
+	eps, accessDelta, fromCache, finalStatus, err := smartResolvePanFlagEpisodesRawWithTimeout(database, label, strings.TrimSpace(record.SourceValue), timeout)
 	smartSharedPanListSetResolved(groupKey, smartSharedPanListResult{
 		State:       smartSharedPanListResolved,
 		Status:      strings.TrimSpace(finalStatus),
@@ -369,6 +420,21 @@ func smartResolvePanMockSourceRecords(
 	rawCleanRules []string,
 	rawEpisodeRules []string,
 	records []smartDetailSourceRecord,
+) ([]smartDetailSourceRecord, map[string]string) {
+	return smartResolvePanMockSourceRecordsWithTimeout(database, siteKey, siteName, want, tmdbSeasons, tmdbHasMultiSeason, rawCleanRules, rawEpisodeRules, records, 0)
+}
+
+func smartResolvePanMockSourceRecordsWithTimeout(
+	database *db.DB,
+	siteKey string,
+	siteName string,
+	want int,
+	tmdbSeasons []TMDBSeason,
+	tmdbHasMultiSeason bool,
+	rawCleanRules []string,
+	rawEpisodeRules []string,
+	records []smartDetailSourceRecord,
+	timeout time.Duration,
 ) ([]smartDetailSourceRecord, map[string]string) {
 	out := make([]smartDetailSourceRecord, len(records))
 	copy(out, records)
@@ -405,7 +471,7 @@ func smartResolvePanMockSourceRecords(
 			defer wg.Done()
 			head := out[indexes[0]]
 			start := time.Now()
-			eps, accessDelta, hit, status, emitAllowed, err := smartResolveSharedPanGroupEpisodes(database, head)
+			eps, accessDelta, hit, status, emitAllowed, err := smartResolveSharedPanGroupEpisodesWithTimeout(database, head, timeout)
 			if emitAllowed && smartDebugLogEnabled() {
 				epCount := len(eps)
 				matchShowName := ""
@@ -473,6 +539,22 @@ func smartResolvePanMockSourceRecordsIncremental(
 	records []smartDetailSourceRecord,
 	onGroupResolved func(resolved []smartDetailSourceRecord, accessDelta map[string]string, emitAllowed bool),
 ) ([]smartDetailSourceRecord, map[string]string) {
+	return smartResolvePanMockSourceRecordsIncrementalWithTimeout(database, siteKey, siteName, want, tmdbSeasons, tmdbHasMultiSeason, rawCleanRules, rawEpisodeRules, records, 0, onGroupResolved)
+}
+
+func smartResolvePanMockSourceRecordsIncrementalWithTimeout(
+	database *db.DB,
+	siteKey string,
+	siteName string,
+	want int,
+	tmdbSeasons []TMDBSeason,
+	tmdbHasMultiSeason bool,
+	rawCleanRules []string,
+	rawEpisodeRules []string,
+	records []smartDetailSourceRecord,
+	timeout time.Duration,
+	onGroupResolved func(resolved []smartDetailSourceRecord, accessDelta map[string]string, emitAllowed bool),
+) ([]smartDetailSourceRecord, map[string]string) {
 	out := make([]smartDetailSourceRecord, len(records))
 	copy(out, records)
 	accessByShareID := map[string]string{}
@@ -508,7 +590,7 @@ func smartResolvePanMockSourceRecordsIncremental(
 			defer wg.Done()
 			head := out[indexes[0]]
 			start := time.Now()
-			eps, accessDelta, hit, status, emitAllowed, err := smartResolveSharedPanGroupEpisodes(database, head)
+			eps, accessDelta, hit, status, emitAllowed, err := smartResolveSharedPanGroupEpisodesWithTimeout(database, head, timeout)
 			if emitAllowed && smartDebugLogEnabled() {
 				epCount := len(eps)
 				matchShowName := ""

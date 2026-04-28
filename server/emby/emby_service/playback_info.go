@@ -90,6 +90,8 @@ type PlaybackStreamTarget struct {
 var embyPlaybackSessions = newPlaybackCacheStore()
 
 const playbackSessionTTL = 15 * time.Minute
+const playbackListRequestTimeout = 5 * time.Second
+const playbackDetailRequestTimeout = 5 * time.Second
 
 func EmptyPlaybackInfoResponse() PlaybackInfoResponseDTO {
 	return PlaybackInfoResponseDTO{MediaSources: []PlaybackInfoMediaSourceDTO{}, PlaySessionID: ""}
@@ -358,8 +360,16 @@ func resolveTMDBPlaybackStreamTarget(database *db.DB, userID int64, ref *itemRef
 	}()
 	go func() {
 		hist, histErr := database.GetPlayHistoryLatestByTMDB(userID, req.Kind, ref.NumericID)
-		if histErr == nil && hist != nil {
-			collectTMDBHistoryPlaybackFromListCandidates(database, user, ref, *req, *hist, stopCh, func(offer smart.PlaybackOffer) {
+		if histErr != nil || hist == nil {
+			CloseHistoryListOffers(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey)
+			CloseHistoryDetailOffers(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey)
+			return
+		}
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func(row db.PlayHistoryRow) {
+			defer wg.Done()
+			collectTMDBHistoryPlaybackFromListCandidates(database, user, ref, *req, row, stopCh, func(offer smart.PlaybackOffer) {
 				episodeFile := strings.TrimSpace(offer.Cand.RawName)
 				if playbackSwitchShouldSkip(switchSession, offer.Cand.SiteKey, offer.Cand.PanFlag, episodeFile) {
 					log.Printf("[emby][history_list_skip] item=%s tmdb=%s:%d site=(%s|%s) reason=session_panflag_skip panFlag=%s episodeFile=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, strings.TrimSpace(offer.Cand.SiteKey), strings.TrimSpace(offer.Cand.SiteName), strings.TrimSpace(offer.Cand.PanFlag), strings.TrimSpace(episodeFile))
@@ -369,10 +379,11 @@ func resolveTMDBPlaybackStreamTarget(database *db.DB, userID int64, ref *itemRef
 					log.Printf("[emby][history_offer_enqueue] item=%s tmdb=%s:%d stage=history_list panFlag=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, strings.TrimSpace(offer.Cand.PanFlag))
 				}
 			})
-		}
-		CloseHistoryListOffers(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey)
-		if histErr == nil && hist != nil {
-			collectTMDBHistoryPlaybackFromDetailCandidates(database, userID, user, ref, *req, *hist, stopCh, func(offer smart.PlaybackOffer) {
+			CloseHistoryListOffers(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey)
+		}(*hist)
+		go func(row db.PlayHistoryRow) {
+			defer wg.Done()
+			collectTMDBHistoryPlaybackFromDetailCandidates(database, userID, user, ref, *req, row, stopCh, func(offer smart.PlaybackOffer) {
 				episodeFile := strings.TrimSpace(offer.Cand.RawName)
 				if playbackSwitchShouldSkip(switchSession, offer.Cand.SiteKey, offer.Cand.PanFlag, episodeFile) {
 					log.Printf("[emby][history_detail_skip] item=%s tmdb=%s:%d site=(%s|%s) reason=session_panflag_skip panFlag=%s episodeFile=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, strings.TrimSpace(offer.Cand.SiteKey), strings.TrimSpace(offer.Cand.SiteName), strings.TrimSpace(offer.Cand.PanFlag), strings.TrimSpace(episodeFile))
@@ -382,8 +393,9 @@ func resolveTMDBPlaybackStreamTarget(database *db.DB, userID int64, ref *itemRef
 					log.Printf("[emby][history_offer_enqueue] item=%s tmdb=%s:%d stage=history_detail panFlag=%s", strings.TrimSpace(ref.RawID), strings.TrimSpace(req.Kind), ref.NumericID, strings.TrimSpace(offer.Cand.PanFlag))
 				}
 			})
-		}
-		CloseHistoryDetailOffers(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey)
+			CloseHistoryDetailOffers(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey)
+		}(*hist)
+		wg.Wait()
 	}()
 	go func() {
 		_ = smart.CollectPlaybackOffersFromTMDB(database, user, *req, func() bool {
@@ -514,7 +526,7 @@ func collectTMDBManualPlaybackFromDetailCandidates(database *db.DB, userID int64
 			want = smart.TMDBGlobalEpisodeNoOf(tmdbSeasons, req.Season, req.Episode)
 		}
 		hasMulti := smart.PositiveSeasonCount(tmdbSeasons) > 1
-		_, _ = smart.ResolvePanMockSourceRecordsIncremental(database, siteKey, siteName, want, tmdbSeasons, hasMulti, rawCleanRules, rawEpisodeRules, panMockRecords, func(resolved []smart.DetailSourceRecord, accessDelta map[string]string, emitAllowed bool) {
+		_, _ = smart.ResolvePanMockSourceRecordsIncrementalWithTimeout(database, siteKey, siteName, want, tmdbSeasons, hasMulti, rawCleanRules, rawEpisodeRules, panMockRecords, playbackListRequestTimeout, func(resolved []smart.DetailSourceRecord, accessDelta map[string]string, emitAllowed bool) {
 			if !emitAllowed {
 				return
 			}
@@ -679,7 +691,7 @@ func collectTMDBHistoryPlaybackFromDetailCandidates(database *db.DB, userID int6
 			want = smart.TMDBGlobalEpisodeNoOf(tmdbSeasons, req.Season, req.Episode)
 		}
 		hasMulti := smart.PositiveSeasonCount(tmdbSeasons) > 1
-		_, _ = smart.ResolvePanMockSourceRecordsIncremental(database, siteKey, strings.TrimSpace(hist.SiteName), want, tmdbSeasons, hasMulti, rawCleanRules, rawEpisodeRules, panMockRecords, func(resolved []smart.DetailSourceRecord, accessDelta map[string]string, emitAllowed bool) {
+		_, _ = smart.ResolvePanMockSourceRecordsIncrementalWithTimeout(database, siteKey, strings.TrimSpace(hist.SiteName), want, tmdbSeasons, hasMulti, rawCleanRules, rawEpisodeRules, panMockRecords, playbackListRequestTimeout, func(resolved []smart.DetailSourceRecord, accessDelta map[string]string, emitAllowed bool) {
 			if !emitAllowed || IsPlaybackResolveStopped(stopCh) {
 				return
 			}
@@ -926,7 +938,7 @@ func fetchRawSiteDetailSourceRecordsWithSpiderAPIState(database *db.DB, userID i
 	if apiBase == "" {
 		return nil, false, false
 	}
-	raw, err := cache.RequestSpiderDetailDirect(apiBase, strings.TrimSpace(spiderAPI), strings.TrimSpace(siteDetail))
+	raw, err := cache.RequestSpiderDetailWithTimeout(apiBase, strings.TrimSpace(spiderAPI), strings.TrimSpace(siteDetail), playbackDetailRequestTimeout)
 	if err != nil || raw == nil {
 		return nil, false, false
 	}
@@ -1036,7 +1048,7 @@ func listHistoryPlayFlagEpisodes(database *db.DB, provider string, playFlag stri
 	if strings.TrimSpace(provider) == "" {
 		return nil, false
 	}
-	eps, _, _, status, _, err := smart.ResolvePanMockEpisodesBySourceValue(database, flag, "")
+	eps, _, _, status, _, err := smart.ResolvePanMockEpisodesBySourceValueWithTimeout(database, flag, "", playbackListRequestTimeout)
 	if err != nil || status != "ok" || len(eps) == 0 {
 		return nil, false
 	}
