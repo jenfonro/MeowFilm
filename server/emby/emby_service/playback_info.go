@@ -106,9 +106,13 @@ func BuildPlaybackInfoPayload(database *db.DB, userID int64, apiToken string, se
 	isSettingsAction := ref != nil && ref.Source == "tmdb" && ref.SubKind == "episode" && strings.TrimSpace(ref.Variant) == "settings"
 	if !isSettingsAction {
 		if replayTarget, replayOK := embyPlaybackSessions.GetByReplayKey(cacheKey); replayOK {
-			log.Printf("[emby][playback_cache_hit] item=%s source=replay finalized=true", strings.TrimSpace(itemID))
-			rememberPlaybackSwitchCurrentSource(userID, itemID, replayTarget, playbackSwitchSessionTTL)
-			return buildPlaybackInfoResponse(replayTarget, apiToken, r), true, nil
+			if playbackReplayTargetIsSkippedBySwitchSession(userID, ref, replayTarget) {
+				log.Printf("[emby][playback_cache_skip] item=%s source=replay reason=session_source_skipped", strings.TrimSpace(itemID))
+			} else {
+				log.Printf("[emby][playback_cache_hit] item=%s source=replay finalized=true", strings.TrimSpace(itemID))
+				rememberPlaybackSwitchCurrentSource(userID, itemID, replayTarget, playbackSwitchSessionTTL)
+				return buildPlaybackInfoResponse(replayTarget, apiToken, r), true, nil
+			}
 		}
 	}
 	target, ok, err := ResolvePlaybackOnce(cacheKey, func() (*PlaybackStreamTarget, bool, error) {
@@ -1264,6 +1268,23 @@ func playbackPositiveSeasonRows(seasons []smart.TMDBSeason) []smart.TMDBSeason {
 	}
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Season < rows[j].Season })
 	return rows
+}
+
+func playbackReplayTargetIsSkippedBySwitchSession(userID int64, ref *itemRef, target PlaybackStreamTarget) bool {
+	tmdbType, tmdbID, ok := resolvePlaybackSwitchTMDBScope(ref)
+	if !ok {
+		return false
+	}
+	session, found := embyPlaybackSwitchSessions.Get(userID, tmdbType, tmdbID)
+	if !found {
+		return false
+	}
+	return playbackSwitchShouldSkip(
+		session,
+		strings.TrimSpace(target.SiteKey),
+		strings.TrimSpace(target.PanFlag),
+		strings.TrimSpace(target.SiteEpisodeFile),
+	)
 }
 
 func adaptPlaybackTargetURL(database *db.DB, user *smart.User, picked *smart.PlaybackPickedMeta, finalURL string, finalHeaders map[string]string, r *http.Request) (string, string) {
