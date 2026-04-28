@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"io"
 	"net/http"
@@ -29,12 +30,22 @@ const (
 	// Matches config/0119.js anonymous OutLink list request header.
 	pan139DeviceInfo0119 = "||3|12.27.0|chrome|131.0.0.0|5c7c68368f048245e1ce47f1c0f8f2d0||windows 10|1536X695|zh-CN|||"
 	pan139KeyStr         = "PVGDwmcvfs1uV3d1"
+	pan139RefreshURL     = "https://aas.caiyun.feixin.10086.cn:443/tellin/authTokenRefresh.do"
+	pan139RefreshPeriod  = 12 * time.Hour
 )
 
 var pan139SkipDirRe = regexp.MustCompile(`App|活动中心|免费|1T空间|免流`)
 var pan139LinkIDByPrefixRe = regexp.MustCompile(`(?i)(?:逸动|yidong)[-_ ]*([a-zA-Z0-9]+)`)
 var pan139LinkIDByURLRe = regexp.MustCompile(`(?i)(?:/w/i/|[?&]linkID=|/m/i[?]|/m/i/?|/shareweb/#.*?/w/i/)([A-Za-z0-9]+)`)
 var pan139LinkIDByCaiyunMobileRe = regexp.MustCompile(`(?i)https://caiyun\\.139\\.com/m/i[?]([^&]+)`)
+var pan139RefreshMu sync.Mutex
+
+type pan139RefreshTokenResp struct {
+	XMLName xml.Name `xml:"root"`
+	Return  string   `xml:"return"`
+	Token   string   `xml:"token"`
+	Desc    string   `xml:"desc"`
+}
 
 func parse139LinkIDFromFlag(flag string) string {
 	s := strings.TrimSpace(flag)
@@ -113,6 +124,118 @@ func decodeAccountFromAuthorization(auth string) string {
 		}
 	}
 	return parseDecoded(raw)
+}
+
+func decode139AuthorizationParts(auth string) (prefix string, account string, token string, err error) {
+	raw := stripBasicPrefix(auth)
+	if raw == "" {
+		return "", "", "", errors.New("authorization empty")
+	}
+	tryParse := func(v string) (string, string, string) {
+		parts := strings.SplitN(v, ":", 3)
+		if len(parts) < 3 {
+			return "", "", ""
+		}
+		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), strings.TrimSpace(parts[2])
+	}
+	if b, e := base64.StdEncoding.DecodeString(normalizeBase64(raw)); e == nil {
+		p, a, t := tryParse(string(b))
+		if p != "" && a != "" && t != "" {
+			return p, a, t, nil
+		}
+	}
+	p, a, t := tryParse(raw)
+	if p == "" || a == "" || t == "" {
+		return "", "", "", errors.New("authorization invalid")
+	}
+	return p, a, t, nil
+}
+
+func refresh139Token(account string, token string) (string, error) {
+	acc := strings.TrimSpace(account)
+	tk := strings.TrimSpace(token)
+	if acc == "" || tk == "" {
+		return "", errors.New("missing account/token")
+	}
+	reqBody := "<root><token>" + tk + "</token><account>" + acc + "</account><clienttype>656</clienttype></root>"
+	client := &http.Client{Timeout: 18 * time.Second, Transport: netdiskHTTPTransport}
+	req, err := http.NewRequest(http.MethodPost, pan139RefreshURL, strings.NewReader(reqBody))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/xml")
+	req.Header.Set("Accept", "application/xml")
+	req.Header.Set("User-Agent", pan139UA)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", errors.New("refresh http " + strconv.Itoa(resp.StatusCode))
+	}
+	body, _ := io.ReadAll(resp.Body)
+	var parsed pan139RefreshTokenResp
+	if err := xml.Unmarshal(body, &parsed); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(parsed.Return) != "0" {
+		msg := strings.TrimSpace(parsed.Desc)
+		if msg == "" {
+			msg = "refresh failed"
+		}
+		return "", errors.New(msg)
+	}
+	newToken := strings.TrimSpace(parsed.Token)
+	if newToken == "" {
+		return "", errors.New("refresh empty token")
+	}
+	return newToken, nil
+}
+
+func ensure139Authorization(database *db.DB) (auth string, account string, err error) {
+	store := readPanLoginSettings(database)
+	auth = getPanField(store, "139", "authorization")
+	if auth == "" {
+		return "", "", errors.New("missing 139 authorization (pan_login_settings[\"139\"].authorization)")
+	}
+	prefix, account, token, err := decode139AuthorizationParts(auth)
+	if err != nil {
+		return "", "", err
+	}
+	lastRefreshedRaw := getPanField(store, "139", "authorization_refreshed_at")
+	lastRefreshedAt, _ := strconv.ParseInt(strings.TrimSpace(lastRefreshedRaw), 10, 64)
+	if lastRefreshedAt > 0 && time.Since(time.UnixMilli(lastRefreshedAt)) < pan139RefreshPeriod {
+		return auth, account, nil
+	}
+
+	pan139RefreshMu.Lock()
+	defer pan139RefreshMu.Unlock()
+
+	store = readPanLoginSettings(database)
+	auth = getPanField(store, "139", "authorization")
+	if auth == "" {
+		return "", "", errors.New("missing 139 authorization (pan_login_settings[\"139\"].authorization)")
+	}
+	prefix, account, token, err = decode139AuthorizationParts(auth)
+	if err != nil {
+		return "", "", err
+	}
+	lastRefreshedRaw = getPanField(store, "139", "authorization_refreshed_at")
+	lastRefreshedAt, _ = strconv.ParseInt(strings.TrimSpace(lastRefreshedRaw), 10, 64)
+	if lastRefreshedAt > 0 && time.Since(time.UnixMilli(lastRefreshedAt)) < pan139RefreshPeriod {
+		return auth, account, nil
+	}
+
+	newToken, refreshErr := refresh139Token(account, token)
+	if refreshErr != nil {
+		return auth, account, nil
+	}
+	newAuth := base64.StdEncoding.EncodeToString([]byte(prefix + ":" + account + ":" + newToken))
+	setPanField(store, "139", "authorization", newAuth)
+	setPanField(store, "139", "authorization_refreshed_at", strconv.FormatInt(time.Now().UnixMilli(), 10))
+	_ = writePanLoginSettings(database, store)
+	return newAuth, account, nil
 }
 
 func toInt64(v any) int64 {
@@ -1268,14 +1391,9 @@ func yun139DownloadURL(database *db.DB, flag string, id string) (string, error) 
 	if contentID == "" && coID == "" {
 		return "", errors.New("missing contentId/coID (from id)")
 	}
-	store := readPanLoginSettings(database)
-	auth := getPanField(store, "139", "authorization")
-	if auth == "" {
-		return "", errors.New("missing 139 authorization (pan_login_settings[\"139\"].authorization)")
-	}
-	account := decodeAccountFromAuthorization(auth)
-	if account == "" {
-		return "", errors.New("authorization invalid (missing account)")
+	auth, account, err := ensure139Authorization(database)
+	if err != nil {
+		return "", err
 	}
 	tryOnce := func(useCo bool) (string, map[string]any, error) {
 		var payload map[string]any
