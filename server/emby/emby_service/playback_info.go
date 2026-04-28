@@ -556,23 +556,10 @@ func buildManualDetailOfferFromResolvedPan(database *db.DB, ref *itemRef, req sm
 	}, true
 }
 
-func pickManualEpisodeCandidate(database *db.DB, tmdbID int, req smart.PlaybackRequest, episodes []catpawrunner.Episode, seasonHint string) (catpawrunner.Episode, bool) {
+func pickManualEpisodeCandidate(database *db.DB, tmdbID int, req smart.PlaybackRequest, episodes []catpawrunner.Episode, _ string) (catpawrunner.Episode, bool) {
 	ep, ok := pickHistoryEpisodeCandidate(database, tmdbID, req, episodes)
 	if ok {
 		return ep, true
-	}
-	if req.Kind != "tv" || req.Season <= 0 || req.Episode <= 0 {
-		return catpawrunner.Episode{}, false
-	}
-	hintedSeason := smart.ExtractSeasonHintFromSource("", seasonHint)
-	if hintedSeason <= 0 || hintedSeason != req.Season {
-		return catpawrunner.Episode{}, false
-	}
-	if req.Episode <= len(episodes) {
-		picked := episodes[req.Episode-1]
-		if strings.TrimSpace(picked.URL) != "" {
-			return picked, true
-		}
 	}
 	return catpawrunner.Episode{}, false
 }
@@ -1090,9 +1077,26 @@ func pickHistoryEpisodeCandidate(database *db.DB, tmdbID int, req smart.Playback
 		return catpawrunner.Episode{}, false
 	}
 	tmdbSeasons := loadPlaybackTMDBSeasons(database, tmdbID)
+	doubanSeasons := loadPlaybackDoubanSeasons(database, tmdbID)
 	rawEpisodeRules, _ := database.ListMagicEpisodeRules()
 	rawCleanRules, _ := database.ListMagicEpisodeCleanRegexRules()
 	wantGlobal := smart.TMDBGlobalEpisodeNoOf(tmdbSeasons, req.Season, req.Episode)
+	sourceMaxEpisode := playbackSourceMaxExtractedEpisode(episodes, rawCleanRules, rawEpisodeRules)
+	tmdbSeasonCount := smart.PositiveSeasonCount(tmdbSeasons)
+	doubanSeasonCount := smart.PositiveSeasonCount(doubanSeasons)
+	allowTMDBSingleBaseline := tmdbSeasonCount >= 2 && doubanSeasonCount == 1
+	allowDoubanSingleBaseline := tmdbSeasonCount == 1 && doubanSeasonCount >= 2
+	tmdbSourceHasBeyondFallbackBoundary := playbackSourceHasEpisodeBeyondFallbackBoundary(tmdbSeasons, doubanSeasons, sourceMaxEpisode)
+	doubanSourceHasBeyondFallbackBoundary := playbackSourceHasEpisodeBeyondFallbackBoundary(doubanSeasons, tmdbSeasons, sourceMaxEpisode)
+	matchWanted := func(match smart.SeasonEpisode, global int, ok bool) bool {
+		if !ok {
+			return false
+		}
+		if match.Season == req.Season && match.Episode == req.Episode {
+			return true
+		}
+		return wantGlobal > 0 && global == wantGlobal
+	}
 	for _, ep := range episodes {
 		texts := smart.ExtractEpisodeCandidateTexts(ep)
 		if len(texts) == 0 {
@@ -1102,29 +1106,55 @@ func pickHistoryEpisodeCandidate(database *db.DB, tmdbID int, req smart.Playback
 		if err != nil {
 			continue
 		}
+		extracted := smart.SeasonEpisode{Season: jsMatch.Season, Episode: jsMatch.Episode}
 		match, global, ok, _, _, _ := smart.ResolveExtractedSeasonEpisodeToGlobal(
 			tmdbSeasons,
 			nil,
-			smart.SeasonEpisode{Season: jsMatch.Season, Episode: jsMatch.Episode},
+			extracted,
 			false,
 			"tmdb",
 			false,
 		)
-		if !ok {
-			continue
-		}
-		if match.Season == req.Season && match.Episode == req.Episode {
+		if matchWanted(match, global, ok) {
 			return ep, true
 		}
-		if wantGlobal > 0 && global == wantGlobal {
+		match, global, ok, _, _, _ = smart.ResolveExtractedSeasonEpisodeToGlobal(
+			doubanSeasons,
+			nil,
+			extracted,
+			false,
+			"douban",
+			false,
+		)
+		if matchWanted(match, global, ok) {
 			return ep, true
 		}
-	}
-	if wantGlobal > 0 && wantGlobal <= len(episodes) {
-		return episodes[wantGlobal-1], true
-	}
-	if smart.PositiveSeasonCount(tmdbSeasons) <= 1 && req.Episode <= len(episodes) {
-		return episodes[req.Episode-1], true
+		if allowTMDBSingleBaseline {
+			match, global, ok, _, _, _ = smart.ResolveExtractedSeasonEpisodeToGlobal(
+				tmdbSeasons,
+				doubanSeasons,
+				extracted,
+				true,
+				"tmdb",
+				tmdbSourceHasBeyondFallbackBoundary,
+			)
+			if matchWanted(match, global, ok) {
+				return ep, true
+			}
+		}
+		if allowDoubanSingleBaseline {
+			match, global, ok, _, _, _ = smart.ResolveExtractedSeasonEpisodeToGlobal(
+				doubanSeasons,
+				tmdbSeasons,
+				extracted,
+				true,
+				"douban",
+				doubanSourceHasBeyondFallbackBoundary,
+			)
+			if matchWanted(match, global, ok) {
+				return ep, true
+			}
+		}
 	}
 	return catpawrunner.Episode{}, false
 }
@@ -1149,6 +1179,91 @@ func loadPlaybackTMDBSeasons(database *db.DB, tmdbID int) []smart.TMDBSeason {
 		})
 	}
 	return out
+}
+
+func loadPlaybackDoubanSeasons(database *db.DB, tmdbID int) []smart.TMDBSeason {
+	if database == nil || tmdbID <= 0 {
+		return nil
+	}
+	hints, err := database.ListTMDBSeasonHints("tv", tmdbID, "douban")
+	if err != nil || len(hints) == 0 {
+		return nil
+	}
+	out := make([]smart.TMDBSeason, 0, len(hints))
+	for _, hint := range hints {
+		if hint.SeasonNumber <= 0 || hint.EpisodeCount <= 0 {
+			continue
+		}
+		out = append(out, smart.TMDBSeason{
+			Season:       hint.SeasonNumber,
+			EpisodeCount: hint.EpisodeCount,
+		})
+	}
+	return out
+}
+
+func playbackSourceMaxExtractedEpisode(episodes []catpawrunner.Episode, rawCleanRules []string, rawEpisodeRules []string) int {
+	if len(episodes) == 0 {
+		return 0
+	}
+	maxEpisode := 0
+	for _, ep := range episodes {
+		texts := smart.ExtractEpisodeCandidateTexts(ep)
+		if len(texts) == 0 {
+			continue
+		}
+		jsMatch, err := magic.MagicEpisodeExtractFromCandidates(texts, rawCleanRules, rawEpisodeRules)
+		if err != nil {
+			continue
+		}
+		if jsMatch.Episode > maxEpisode {
+			maxEpisode = jsMatch.Episode
+		}
+	}
+	return maxEpisode
+}
+
+func playbackSourceHasEpisodeBeyondFallbackBoundary(primarySeasons []smart.TMDBSeason, singleBaselineSeasons []smart.TMDBSeason, sourceMaxEpisode int) bool {
+	if sourceMaxEpisode <= 0 {
+		return false
+	}
+	boundary := playbackSingleBaselineFallbackBoundary(primarySeasons, singleBaselineSeasons)
+	return boundary > 0 && sourceMaxEpisode > boundary
+}
+
+func playbackSingleBaselineFallbackBoundary(primarySeasons []smart.TMDBSeason, singleBaselineSeasons []smart.TMDBSeason) int {
+	primaryRows := playbackPositiveSeasonRows(primarySeasons)
+	primaryMultiSeason := smart.PositiveSeasonCount(primaryRows) >= 2
+	baselineSingleSeason := smart.PositiveSeasonCount(singleBaselineSeasons) == 1
+	if primaryMultiSeason && baselineSingleSeason && len(primaryRows) > 1 {
+		sum := 0
+		for i := 0; i < len(primaryRows)-1; i++ {
+			sum += primaryRows[i].EpisodeCount
+		}
+		if sum > 0 {
+			return sum
+		}
+	}
+	firstSeasonCount := 0
+	for _, season := range primaryRows {
+		if season.Season == 1 && season.EpisodeCount > 0 {
+			firstSeasonCount = season.EpisodeCount
+			break
+		}
+	}
+	return firstSeasonCount
+}
+
+func playbackPositiveSeasonRows(seasons []smart.TMDBSeason) []smart.TMDBSeason {
+	rows := make([]smart.TMDBSeason, 0, len(seasons))
+	for _, season := range seasons {
+		if season.Season <= 0 || season.EpisodeCount <= 0 {
+			continue
+		}
+		rows = append(rows, season)
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Season < rows[j].Season })
+	return rows
 }
 
 func adaptPlaybackTargetURL(database *db.DB, user *smart.User, picked *smart.PlaybackPickedMeta, finalURL string, finalHeaders map[string]string, r *http.Request) (string, string) {
