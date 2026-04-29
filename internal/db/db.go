@@ -117,7 +117,7 @@ func (d *DB) initSchema(fresh bool) error {
 	if err := d.ensureSchema(); err != nil {
 		return err
 	}
-	if err := d.runMigrations(fresh); err != nil {
+	if err := d.runMigrations(); err != nil {
 		return err
 	}
 	// Seed defaults if this is a fresh DB, or if the normalized config row is missing.
@@ -641,43 +641,18 @@ func (d *DB) ensureSchema() error {
 	return tx.Commit()
 }
 
-func (d *DB) runMigrations(fresh bool) error {
+func (d *DB) runMigrations() error {
 	currentVersion, found, err := d.getSchemaVersion()
 	if err != nil {
 		return err
 	}
 	if !found {
-		if fresh {
-			return d.setSchemaVersion(CurrentDBVersion)
-		}
-		currentVersion = LegacyDBVersion
+		return d.setSchemaVersion(CurrentDBVersion)
 	}
 	if currentVersion == CurrentDBVersion {
 		return nil
 	}
-	for currentVersion != CurrentDBVersion {
-		migration, ok := findMigrationFrom(currentVersion)
-		if !ok {
-			return errors.New("db migration path not found from version " + currentVersion + " to " + CurrentDBVersion)
-		}
-		tx, err := d.db.Begin()
-		if err != nil {
-			return err
-		}
-		if err := migration.Apply(tx); err != nil {
-			_ = tx.Rollback()
-			return err
-		}
-		if err := d.setSchemaVersionTx(tx, migration.To); err != nil {
-			_ = tx.Rollback()
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-		currentVersion = migration.To
-	}
-	return nil
+	return d.setSchemaVersion(CurrentDBVersion)
 }
 
 func (d *DB) ensureDefaultAdmin() error {

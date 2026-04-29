@@ -6,30 +6,6 @@ import (
 	"strings"
 )
 
-type DBMigration struct {
-	From  string
-	To    string
-	Apply func(tx *sql.Tx) error
-}
-
-var dbMigrations = []DBMigration{
-	{
-		From:  "1.1.0",
-		To:    "1.1.1",
-		Apply: migrate_1_1_0_to_1_1_1,
-	},
-}
-
-func findMigrationFrom(version string) (DBMigration, bool) {
-	current := strings.TrimSpace(version)
-	for _, migration := range dbMigrations {
-		if strings.TrimSpace(migration.From) == current {
-			return migration, true
-		}
-	}
-	return DBMigration{}, false
-}
-
 func (d *DB) getSchemaVersion() (string, bool, error) {
 	if d == nil || d.db == nil {
 		return "", false, nil
@@ -69,33 +45,6 @@ func (d *DB) setSchemaVersionTx(tx *sql.Tx, version string) error {
 		VALUES('schema_version', ?)
 		ON CONFLICT(key) DO UPDATE SET value=excluded.value
 	`, strings.TrimSpace(version))
-	return err
-}
-
-func migrate_1_1_0_to_1_1_1(tx *sql.Tx) error {
-	hasRulesColumn, err := hasColumnTx(tx, "app_smart", "source_priority_rules_json")
-	if err != nil {
-		return err
-	}
-	if !hasRulesColumn {
-		if _, err := tx.Exec(`ALTER TABLE app_smart ADD COLUMN source_priority_rules_json TEXT NOT NULL DEFAULT '[]'`); err != nil {
-			return err
-		}
-	}
-
-	var rulesRaw sql.NullString
-	err = tx.QueryRow(`SELECT source_priority_rules_json FROM app_smart WHERE id=1 LIMIT 1`).Scan(&rulesRaw)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if len(parseSmartSourceRuleRowsJSON(rulesRaw.String)) > 0 {
-		return nil
-	}
-	rules := buildDefaultSmartSourceRuleRows()
-	_, err = tx.Exec(`UPDATE app_smart SET source_priority_rules_json=? WHERE id=1`, marshalSmartSourceRuleRowsJSON(rules))
 	return err
 }
 
