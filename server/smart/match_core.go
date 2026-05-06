@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/jenfonro/meowfilm/server/catpawrunner"
 )
@@ -271,6 +272,50 @@ func smartSplitDisplayPathSegments(display string) []string {
 	return out
 }
 
+func smartStripDisplayMetaPrefix(display string) string {
+	rest := strings.TrimSpace(display)
+	for strings.HasPrefix(rest, "@") {
+		m := regexp.MustCompile(`^@([^@/\\]+)`).FindString(rest)
+		if strings.TrimSpace(m) == "" {
+			break
+		}
+		rest = strings.TrimSpace(strings.TrimPrefix(rest, m))
+	}
+	return rest
+}
+
+func smartEpisodeListProviderID(ep catpawrunner.Episode) string {
+	provider := strings.TrimSpace(catpawrunner.PanMockProviderFromFlag(strings.TrimSpace(ep.Flag)))
+	if provider == "" {
+		provider = strings.TrimSpace(smartPlayFlagProviderID(strings.TrimSpace(ep.Flag)))
+	}
+	switch provider {
+	case "baidu", "quark", "uc", "139", "189":
+		return provider
+	default:
+		return ""
+	}
+}
+
+func smartEpisodeWithPanFlag(ep catpawrunner.Episode, panFlag string) catpawrunner.Episode {
+	if strings.TrimSpace(ep.Flag) == "" {
+		ep.Flag = strings.TrimSpace(panFlag)
+	}
+	return ep
+}
+
+func smartEpisodeDisplayNameLooksLikeListDir(ep catpawrunner.Episode) bool {
+	if smartEpisodeListProviderID(ep) == "" {
+		return false
+	}
+	url := strings.TrimSpace(ep.URL)
+	if !strings.Contains(url, "|||") && !strings.Contains(url, "***") {
+		return false
+	}
+	display := smartStripDisplayMetaPrefix(ep.Name)
+	return strings.HasPrefix(display, "/") || strings.Contains(display, "/") || strings.Contains(display, "\\")
+}
+
 func smartEpisodePathLayers(ep catpawrunner.Episode) (fileName string, currentDir string, parentDir string) {
 	rawNames := smartExtractRawNamesFromEpisodeURL(ep.URL)
 	for _, n := range rawNames {
@@ -284,7 +329,7 @@ func smartEpisodePathLayers(ep catpawrunner.Episode) (fileName string, currentDi
 			break
 		}
 	}
-	segs := smartSplitDisplayPathSegments(ep.Name)
+	segs := smartSplitDisplayPathSegments(smartStripDisplayMetaPrefix(ep.Name))
 	if len(segs) > 0 {
 		currentDir = segs[len(segs)-1]
 	}
@@ -310,17 +355,50 @@ func smartEpisodeDirectoryKey(ep catpawrunner.Episode) string {
 			}
 		}
 	}
-	segs := smartSplitDisplayPathSegments(ep.Name)
+	segs := smartSplitDisplayPathSegments(smartStripDisplayMetaPrefix(ep.Name))
+	if len(segs) >= 1 && smartEpisodeDisplayNameLooksLikeListDir(ep) {
+		return strings.TrimSpace(strings.Join(segs, "/"))
+	}
 	if len(segs) >= 2 {
 		return strings.TrimSpace(strings.Join(segs[:len(segs)-1], "/"))
 	}
 	return ""
 }
 
-func smartExtractSeasonMarkerText(text string) string {
-	t := strings.TrimSpace(text)
-	if t == "" {
+func smartNormalizeSeasonHintText(text string) string {
+	raw := strings.TrimSpace(text)
+	if raw == "" {
 		return ""
+	}
+	var b strings.Builder
+	for _, r := range raw {
+		if unicode.IsSpace(r) {
+			continue
+		}
+		if r >= '０' && r <= '９' {
+			b.WriteRune('0' + (r - '０'))
+			continue
+		}
+		b.WriteRune(unicode.ToLower(r))
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func smartParseSeasonHintNumber(text string) int {
+	raw := smartNormalizeSeasonHintText(text)
+	if raw == "" {
+		return 0
+	}
+	if regexp.MustCompile(`^\d+$`).MatchString(raw) {
+		return intFromDigits(raw)
+	}
+	return smartParseChineseNumeralToInt(raw)
+}
+
+func smartExtractSeasonHintNumberFromText(text string) int {
+	t := smartNormalizeSeasonHintText(text)
+	if t == "" {
+		return 0
 	}
 	found := map[int]struct{}{}
 	push := func(n int) {
@@ -328,33 +406,57 @@ func smartExtractSeasonMarkerText(text string) string {
 			found[n] = struct{}{}
 		}
 	}
-	for _, m := range regexp.MustCompile(`(?i)\bS\s*(\d{1,2})\b`).FindAllStringSubmatch(t, -1) {
+	for _, m := range regexp.MustCompile(`(?:^|[^a-z0-9])season0*(\d{1,3})(?:$|[^a-z0-9])`).FindAllStringSubmatch(t, -1) {
 		if len(m) >= 2 {
 			push(intFromDigits(m[1]))
 		}
 	}
-	for _, m := range regexp.MustCompile(`(?i)\bseason\s*(\d{1,2})\b`).FindAllStringSubmatch(t, -1) {
+	for _, m := range regexp.MustCompile(`(?:^|[^a-z0-9])s0*(\d{1,3})(?:e\d{1,5})?(?:$|[^a-z0-9])`).FindAllStringSubmatch(t, -1) {
 		if len(m) >= 2 {
 			push(intFromDigits(m[1]))
 		}
 	}
-	for _, m := range regexp.MustCompile(`第\s*([0-9一二三四五六七八九十百千两〇零]{1,16})\s*季`).FindAllStringSubmatch(t, -1) {
+	for _, m := range regexp.MustCompile(`第([0-9一二三四五六七八九十百千两〇零]{1,16})(?:季|部|篇)`).FindAllStringSubmatch(t, -1) {
 		if len(m) < 2 {
 			continue
 		}
-		n := intFromDigits(m[1])
-		if n <= 0 {
-			n = smartParseChineseNumeralToInt(m[1])
-		}
-		push(n)
+		push(smartParseSeasonHintNumber(m[1]))
 	}
 	if len(found) != 1 {
-		return ""
+		return 0
 	}
 	for n := range found {
-		return "第" + strconv.Itoa(n) + "季"
+		return n
 	}
-	return ""
+	return 0
+}
+
+func smartExtractSeasonMarkerText(text string) string {
+	n := smartExtractSeasonHintNumberFromText(text)
+	if n <= 0 {
+		return ""
+	}
+	return "第" + strconv.Itoa(n) + "季"
+}
+
+func smartEpisodePathSeasonHint(ep catpawrunner.Episode) int {
+	if smartEpisodeListProviderID(ep) == "" {
+		return 0
+	}
+	fileName, currentDir, parentDir := smartEpisodePathLayers(ep)
+	if n := smartExtractSeasonHintNumberFromText(fileName); n > 0 {
+		return n
+	}
+	currentSeason := smartExtractSeasonHintNumberFromText(currentDir)
+	if currentSeason > 0 {
+		return currentSeason
+	}
+	if smartGuessQuality(currentDir) != "" {
+		if parentSeason := smartExtractSeasonHintNumberFromText(parentDir); parentSeason > 0 {
+			return parentSeason
+		}
+	}
+	return 0
 }
 
 func smartGuessQualityByLayers(fileName string, displayName string, currentDir string, parentDir string) (quality string, currentDirIsQuality bool) {

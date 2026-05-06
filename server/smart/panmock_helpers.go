@@ -210,7 +210,8 @@ func smartResolvePanMockCandidateFromVod(
 		rawEpisodeRules,
 	)
 	matches := []smartCandidate{}
-	for _, ep := range eps {
+	for _, rawEp := range eps {
+		ep := smartEpisodeWithPanFlag(rawEp, base.PanFlag)
 		if strings.TrimSpace(ep.URL) == "" {
 			continue
 		}
@@ -221,6 +222,9 @@ func smartResolvePanMockCandidateFromVod(
 		jsMatch, err := magic.MagicEpisodeExtractFromCandidates(texts, rawCleanRules, rawEpisodeRules)
 		if err != nil {
 			continue
+		}
+		if jsMatch.Season <= 0 {
+			jsMatch.Season = smartEpisodePathSeasonHint(ep)
 		}
 		rawSeason := jsMatch.Season
 		dirKey := strings.TrimSpace(smartEpisodeDirectoryKey(ep))

@@ -213,7 +213,12 @@ func smartSourceMaxEpisodeByDirRecords(
 		if record.Status != smartDetailSourceResolved {
 			continue
 		}
-		for _, ep := range record.Episodes {
+		panFlag := strings.TrimSpace(record.Label)
+		if strings.TrimSpace(record.PanFlag) != "" {
+			panFlag = strings.TrimSpace(record.PanFlag)
+		}
+		for _, rawEp := range record.Episodes {
+			ep := smartEpisodeWithPanFlag(rawEp, panFlag)
 			if strings.TrimSpace(ep.URL) == "" {
 				continue
 			}
@@ -221,6 +226,9 @@ func smartSourceMaxEpisodeByDirRecords(
 			jsMatch, err := magic.MagicEpisodeExtractFromCandidates(texts, rawCleanRules, rawEpisodeRules)
 			if err != nil || jsMatch.Episode <= 0 {
 				continue
+			}
+			if jsMatch.Season <= 0 {
+				jsMatch.Season = smartEpisodePathSeasonHint(ep)
 			}
 			dirKey := strings.TrimSpace(smartEpisodeDirectoryKey(ep))
 			if dirKey == "" {
@@ -285,7 +293,8 @@ func smartBuildEpisodeMapsFromResolvedRecords(
 			panFlag = strings.TrimSpace(record.PanFlag)
 		}
 		panTokenIdx := smartLabelRuleIdx(panFlag, settings.PanTokenOrderLower, settings.PanMatchEntries)
-		for _, ep := range record.Episodes {
+		for _, rawEp := range record.Episodes {
+			ep := smartEpisodeWithPanFlag(rawEp, panFlag)
 			if strings.TrimSpace(ep.URL) == "" {
 				continue
 			}
@@ -306,6 +315,9 @@ func smartBuildEpisodeMapsFromResolvedRecords(
 			jsMatch, err := magic.MagicEpisodeExtractFromCandidates(texts, rawCleanRules, rawEpisodeRules)
 			if err != nil {
 				continue
+			}
+			if jsMatch.Season <= 0 {
+				jsMatch.Season = smartEpisodePathSeasonHint(ep)
 			}
 			rawSeason := jsMatch.Season
 			dirKey := strings.TrimSpace(smartEpisodeDirectoryKey(ep))
