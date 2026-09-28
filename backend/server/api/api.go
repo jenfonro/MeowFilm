@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -635,7 +636,20 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 				PlaybackRuntimeTicks:  runtimeTicks,
 				PlaybackItemID:        playbackItemID,
 			})
-			writeJSON(w, 200, map[string]any{"success": true})
+			response := map[string]any{"success": true}
+			if raw, ok := body["watchReport"].(map[string]any); ok && (positionTicks > 0 || getS("playbackEvent") == "started") {
+				var report catpawrunner.WatchReport
+				encoded, _ := json.Marshal(raw)
+				if err := json.Unmarshal(encoded, &report); err == nil {
+					err = catpawrunner.ReportWatchOnce(u.ID, &report)
+					result := map[string]any{"ok": err == nil}
+					if err != nil {
+						result["message"] = err.Error()
+					}
+					response["watchReport"] = result
+				}
+			}
+			writeJSON(w, 200, response)
 			return
 		}
 		if contentKey == "" || tmdbID <= 0 || tmdbType != "tv" || !preOrderProvided {

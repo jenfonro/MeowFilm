@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
+	"github.com/jenfonro/meowfilm/server/catpawrunner"
 	metadata_tmdb "github.com/jenfonro/meowfilm/server/metadata/tmdb"
 	"github.com/jenfonro/meowfilm/server/smart"
 )
@@ -115,6 +116,7 @@ func HandleSessionProgress(database *db.DB, userID int64, payload SessionPlaybac
 	if handlePlaybackSwitchSessionAction(database, userID, payload, "progress") {
 		return nil
 	}
+	reportSessionWatch(userID, payload)
 	return upsertSessionProgress(database, userID, payload)
 }
 
@@ -122,7 +124,23 @@ func HandleSessionStopped(database *db.DB, userID int64, payload SessionPlayback
 	if handlePlaybackSwitchSessionAction(database, userID, payload, "stopped") {
 		return nil
 	}
+	reportSessionWatch(userID, payload)
 	return upsertSessionProgress(database, userID, payload)
+}
+
+// Progress/stopped events with a positive position confirm playback; resolving
+// PlaybackInfo or reporting a zero-position start must never notify a site.
+func reportSessionWatch(userID int64, payload SessionPlaybackPayload) {
+	if payload.PositionTicks <= 0 {
+		return
+	}
+	target := resolveSessionPlaybackTarget(userID, payload)
+	if target == nil || target.WatchReport == nil || target.UserID != userID {
+		return
+	}
+	if err := catpawrunner.ReportWatchOnce(userID, target.WatchReport); err != nil {
+		log.Printf("[emby][watch_report] item=%s error=%v", payload.ItemID, err)
+	}
 }
 
 func handlePlaybackSwitchSessionAction(database *db.DB, userID int64, payload SessionPlaybackPayload, trigger string) bool {

@@ -52,6 +52,8 @@ const buildHistoryCommitKey = (context) => {
     String(Math.max(0, normalizeInt(target.siteEpisodeIndex))),
     normalizeString(target.playbackItemId),
     normalizeString(target.identity),
+    normalizeString(target.watchReportState && target.watchReportState.binding.sessionId),
+    target.watchReportState && target.watchReportReady ? 'started' : '',
   ].join('::');
 };
 
@@ -390,6 +392,9 @@ export const preparePlayHistoryContext = async (payload = {}) => {
 
   const nextContext = {
     identity: '',
+    watchReportState: null,
+    watchReportReady: false,
+    previousWatchReportState: current.watchReportState || null,
     reportEnabled: !!raw.reportEnabled,
     contentKey: normalizeString(raw.contentKey),
     siteKey: normalizeString(raw.siteKey),
@@ -444,6 +449,41 @@ export const preparePlayHistoryContext = async (payload = {}) => {
   return nextContext;
 };
 
+// The site opts in via /play. Keep the original request bound to this playback;
+// a resolved CDN URL or a detail-page ID is not the source's episode identity.
+export const bindPlayHistoryWatchReport = (binding) => {
+  const context = playHistorySessionState.activeContext;
+  if (!context) return;
+  const previous = context.previousWatchReportState;
+  context.previousWatchReportState = null;
+  if (!binding) {
+    context.watchReportState = null;
+    return;
+  }
+  const sameTarget = previous && ['apiBase', 'spiderApi', 'id', 'flag']
+    .every((key) => previous.binding[key] === binding[key]);
+  context.watchReportState = sameTarget ? previous : {
+    binding: {
+      ...binding,
+      sessionId: globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function'
+        ? globalThis.crypto.randomUUID()
+        : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+    },
+    done: false,
+  };
+};
+
+const watchReportPayload = (context) => {
+  const state = context && context.watchReportState;
+  return context.watchReportReady && state && !state.done ? { watchReport: state.binding, playbackEvent: 'started' } : {};
+};
+
+const acknowledgeWatchReport = (context, response) => {
+  if (context.watchReportState && response && response.watchReport && response.watchReport.ok === true) {
+    context.watchReportState.done = true;
+  }
+};
+
 export const clearActivePlayHistoryContext = () => {
   playHistorySessionState.activeContext = {
     identity: '',
@@ -492,11 +532,13 @@ const commitHistoryBaseIfNeeded = async (reason = '') => {
   if (!context || !context.reportEnabled) return;
   const key = buildHistoryCommitKey(context);
   if (!key) return;
-  if (historyCommitState.key === key || historyCommitState.inFlight) return;
+  if (historyCommitState.inFlight) await historyCommitState.inFlight;
+  if (context !== playHistorySessionState.activeContext || historyCommitState.key === key) return;
   historyCommitState.key = key;
   historyCommitState.inFlight = (async () => {
     try {
-      await apiPostJson('/api/playhistory', {
+      const response = await apiPostJson('/api/playhistory', {
+        ...watchReportPayload(context),
         contentKey: context.contentKey,
         siteKey: context.siteKey,
         siteName: context.siteName,
@@ -514,6 +556,7 @@ const commitHistoryBaseIfNeeded = async (reason = '') => {
         preOrder: !!context.preOrder,
         playbackItemId: context.playbackItemId,
       }, { dedupe: false });
+      acknowledgeWatchReport(context, response);
       await refreshPlayHistoryListFromServer();
     } catch (_error) {
       // ignore
@@ -568,6 +611,7 @@ export const confirmPlayerHistoryPlaybackReady = async (reason = '') => {
     started: true,
     ready: true,
   };
+  context.watchReportReady = true;
   historyProgressState.at = Date.now();
   await commitHistoryBaseIfNeeded(reason);
 };
@@ -595,7 +639,8 @@ export const syncHistoryProgressIfPossible = async ({ force = false } = {}) => {
   historyProgressState.inFlight = (async () => {
     try {
       await commitHistoryBaseIfNeeded('timeupdate');
-      await apiPostJson('/api/playhistory', {
+      const response = await apiPostJson('/api/playhistory', {
+        ...watchReportPayload(context),
         contentKey: context.contentKey,
         siteKey: context.siteKey,
         siteName: context.siteName,
@@ -615,6 +660,7 @@ export const syncHistoryProgressIfPossible = async ({ force = false } = {}) => {
         playbackPositionTicks: positionTicks,
         playbackRuntimeTicks: runtimeTicks,
       }, { dedupe: false });
+      acknowledgeWatchReport(context, response);
       await refreshPlayHistoryListFromServer();
     } catch (_error) {
       // ignore

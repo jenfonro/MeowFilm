@@ -63,6 +63,7 @@ type PlaybackInfoResponseDTO struct {
 }
 
 type PlaybackStreamTarget struct {
+	WatchReport      *catpawrunner.WatchReport
 	FinalURL         string
 	FinalHeaders     map[string]string
 	Offers           []smart.PlaybackOffer
@@ -787,6 +788,7 @@ func buildTMDBPlaybackStreamTarget(database *db.DB, user *smart.User, ref *itemR
 		Size:             display.Size,
 		Bitrate:          display.Bitrate,
 		ItemID:           strings.TrimSpace(ref.RawID),
+		WatchReport:      picked.WatchReport,
 		SiteKey:          strings.TrimSpace(picked.SiteKey),
 		SiteDetail:       strings.TrimSpace(picked.SiteDetail),
 		PanFlag:          strings.TrimSpace(picked.PanFlag),
@@ -859,6 +861,7 @@ func buildSiteEpisodePlaybackStreamTarget(database *db.DB, user *smart.User, ref
 		Size:             0,
 		Bitrate:          0,
 		ItemID:           strings.TrimSpace(ref.RawID),
+		WatchReport:      picked.WatchReport,
 		SiteKey:          strings.TrimSpace(picked.SiteKey),
 		SiteDetail:       strings.TrimSpace(picked.SiteDetail),
 		PanFlag:          strings.TrimSpace(picked.PanFlag),
@@ -879,6 +882,7 @@ func resolveSiteEpisodeDirectPlayback(database *db.DB, user *smart.User, ref *it
 	if rawURL == "" {
 		return "", nil, nil, nil
 	}
+	var watchReport *catpawrunner.WatchReport
 	panFlag := strings.TrimSpace(flag)
 	provider := strings.TrimSpace(smart.PlayFlagProviderID(panFlag))
 	if provider != "" {
@@ -905,6 +909,7 @@ func resolveSiteEpisodeDirectPlayback(database *db.DB, user *smart.User, ref *it
 			log.Printf("[emby][site_playback_error] item=%s provider=site panFlag=%s url=%s err=%v", strings.TrimSpace(ref.RawID), panFlag, smart.ShortURLForLog(rawURL), playErr)
 			return "", nil, nil, playErr
 		}
+		watchReport = catpawrunner.WatchReportFromPlay(playRaw, apiBase, spiderAPI, rawURL, ep.Flag)
 		payloadOut := smart.BuildCatpawPlayPayload(playRaw, apiBase, strings.TrimSpace(user.Username))
 		finalURL, finalHeaders = netdisk.PlayPayloadURLHeaders(payloadOut)
 	}
@@ -920,13 +925,14 @@ func resolveSiteEpisodeDirectPlayback(database *db.DB, user *smart.User, ref *it
 		siteName = strings.TrimSpace(ref.SiteTitle)
 	}
 	return strings.TrimSpace(finalURL), copyStringMap(finalHeaders), &smart.PlaybackPickedMeta{
-		SiteKey:    strings.TrimSpace(ref.SiteKey),
-		SiteName:   siteName,
-		SiteDetail: strings.TrimSpace(ref.SiteDetail),
-		PanFlag:    panFlag,
-		Provider:   provider,
-		ShowName:   strings.TrimSpace(ep.Name),
-		RawName:    rawName,
+		WatchReport: watchReport,
+		SiteKey:     strings.TrimSpace(ref.SiteKey),
+		SiteName:    siteName,
+		SiteDetail:  strings.TrimSpace(ref.SiteDetail),
+		PanFlag:     panFlag,
+		Provider:    provider,
+		ShowName:    strings.TrimSpace(ep.Name),
+		RawName:     rawName,
 	}, nil
 }
 

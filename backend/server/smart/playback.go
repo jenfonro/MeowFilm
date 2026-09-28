@@ -1038,10 +1038,11 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 	}
 
 	type playResult struct {
-		status  string // ok|empty|err
-		playURL string
-		headers map[string]string
-		err     error
+		watchReport *catpawrunner.WatchReport
+		status      string // ok|empty|err
+		playURL     string
+		headers     map[string]string
+		err         error
 	}
 
 	doPlay := func() playResult {
@@ -1141,7 +1142,7 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 			if urlPicked == "" {
 				return playResult{status: "empty"}
 			}
-			return playResult{status: "ok", playURL: urlPicked, headers: headers}
+			return playResult{status: "ok", playURL: urlPicked, headers: headers, watchReport: catpawrunner.WatchReportFromPlay(playRaw, apiBase, spiderApi, cand.Ep.URL, cand.Ep.Flag)}
 		}
 	}
 
@@ -1157,7 +1158,7 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 		switch strings.TrimSpace(res.status) {
 		case "ok":
 			logStatus("ok", res.playURL, res.headers, nil)
-			return &smartPickResult{Cand: cand, PlayURL: strings.TrimSpace(res.playURL), Headers: res.headers}
+			return &smartPickResult{Cand: cand, PlayURL: strings.TrimSpace(res.playURL), Headers: res.headers, WatchReport: res.watchReport}
 		case "err":
 			logStatus("err", "", nil, res.err)
 			return nil
@@ -1317,7 +1318,7 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 			if urlPicked == "" {
 				return nil
 			}
-			return &smartPickResult{Cand: *best, PlayURL: urlPicked, Headers: headers}
+			return &smartPickResult{Cand: *best, PlayURL: urlPicked, Headers: headers, WatchReport: catpawrunner.WatchReportFromPlay(playRaw, apiBase, spiderApi, best.Ep.URL, best.Ep.Flag)}
 		}
 
 		if len(normalAllowed) > 0 {
@@ -1363,18 +1364,19 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 	if strings.TrimSpace(urlPicked) == "" {
 		return nil
 	}
-	return &smartPickResult{Cand: *best, PlayURL: urlPicked, Headers: headers}
+	return &smartPickResult{Cand: *best, PlayURL: urlPicked, Headers: headers, WatchReport: catpawrunner.WatchReportFromPlay(playRaw, apiBase, spiderApi, best.Ep.URL, best.Ep.Flag)}
 }
 
 type smartPlaybackPickedMeta struct {
-	SiteKey    string
-	SiteName   string
-	SiteDetail string
-	PanFlag    string
-	Provider   string
-	ShowName   string
-	RawName    string
-	Quality    string
+	WatchReport *catpawrunner.WatchReport
+	SiteKey     string
+	SiteName    string
+	SiteDetail  string
+	PanFlag     string
+	Provider    string
+	ShowName    string
+	RawName     string
+	Quality     string
 }
 
 func smartCollectPlaybackOffersFromTMDB(database *db.DB, u *SmartUser, req smartPlaybackRequest, shouldStop func() bool, emit func(smartCandidateOffer, int)) error {
@@ -1956,7 +1958,9 @@ func smartTryPlaybackOffersInternal(database *db.DB, u *SmartUser, offers []smar
 			msg = smartAppendLogMatchSuffix(msg, strings.TrimSpace(res.Cand.Ep.Name), strings.TrimSpace(raw0))
 			smartDebugPrintf("%s", msg)
 		}
-		return playURL, res.Headers, buildPicked(res.Cand, feat), nil
+		picked := buildPicked(res.Cand, feat)
+		picked.WatchReport = res.WatchReport
+		return playURL, res.Headers, picked, nil
 	}
 	return "", nil, nil, errors.New("无可用播放地址")
 }

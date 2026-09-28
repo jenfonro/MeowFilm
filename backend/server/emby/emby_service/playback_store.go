@@ -190,6 +190,10 @@ func (s *playbackCacheStore) ExtendIfLow(mediaSourceID string, add time.Duration
 
 func clonePlaybackTarget(in PlaybackStreamTarget) PlaybackStreamTarget {
 	out := in
+	if in.WatchReport != nil {
+		report := *in.WatchReport
+		out.WatchReport = &report
+	}
 	out.FinalHeaders = copyStringMap(in.FinalHeaders)
 	out.Offers = clonePlaybackOffers(in.Offers)
 	return out

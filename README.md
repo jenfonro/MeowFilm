@@ -102,3 +102,26 @@ MEOWFILM_ADDR=":8080" ./build/meowfilm
 - [HLS.js](https://github.com/video-dev/hls.js)
 - [flv.js](https://github.com/bilibili/flv.js)
 - [Shaka Player](https://github.com/shaka-project/shaka-player)
+
+## 站源观看记录同步
+
+站源通过 `/play` 响应中的 `"watchReport": true` 自行开启。未返回或不为布尔 `true` 时不触发，MeowFilm 不判断站名。
+
+实际播放后，MeowFilm 向该次播放使用的 Runner、runtime 和站源路径发送：
+
+```http
+POST /<runtimeId>/spider/<site>/<type>/report
+Content-Type: application/json
+
+{"id":"原始 /play 的 id","flag":"原始 /play 的 flag"}
+```
+
+站源完成同步后返回 `{"ok":true}`。`id` 是实际选中集的原始播放 ID，不是详情页 ID 或媒体直链；脚本可以直接使用，不必另外维护映射。
+
+- 网页：首帧后随既有 `/api/playhistory` 请求携带绑定，后端调用站源。
+- Emby：绑定保留在播放缓存；正数 `PositionTicks` 的 Progress/Stopped 事件触发。仅获取 PlaybackInfo 或零进度不触发。
+- 成功后当前绑定不再上报；失败不阻断播放或本地历史，后续既有进度事件重试。去重状态仅在内存中，服务重启后会重新上报。
+- 站源脚本自行选择上游账号（例如它连接的 bridge Cookie）。本协议不为 MeowFilm 用户分别管理上游账号，也不持续同步完整观看时长。
+- CatPawRunner 现有通用路由即可转发 `/report`，无需修改核心。
+
+测试：`cd frontend && node --test tests/*.test.cjs`；后端在构建前端资源后执行 `cd backend && go test ./...`。

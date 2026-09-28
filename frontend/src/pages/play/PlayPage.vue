@@ -504,6 +504,7 @@ import {
   findPlayHistoryRowForContext,
   ensurePlayHistoryRowForContext,
   buildPlayHistoryPayload,
+  bindPlayHistoryWatchReport,
   clearActivePlayHistoryContext,
   flushHistoryProgressBestEffort,
   confirmPlayerHistoryPlaybackReady,
@@ -4764,6 +4765,7 @@ export default {
           selectedGoProxyBase: normalizeString(selectedGoProxyBase),
         });
         if (seq !== this.playRequestSeq) return false;
+        bindPlayHistoryWatchReport(result && result.watchReport);
         this.lastGoProxyCandidate = result && result.lastGoProxyCandidate ? result.lastGoProxyCandidate : null;
         this.lastM3U8RelayCandidate = result && result.lastM3U8RelayCandidate ? result.lastM3U8RelayCandidate : null;
         this.goProxyInUseBase = normalizeString(result && result.goProxyBase);

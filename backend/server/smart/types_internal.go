@@ -109,9 +109,10 @@ type smartCandidateFeatures struct {
 }
 
 type smartPickResult struct {
-	Cand    smartCandidate
-	PlayURL string
-	Headers map[string]string
+	WatchReport *catpawrunner.WatchReport
+	Cand        smartCandidate
+	PlayURL     string
+	Headers     map[string]string
 }
 
 // User context for smart playback (consumer-specific).

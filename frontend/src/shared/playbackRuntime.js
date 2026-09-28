@@ -1258,6 +1258,12 @@ export const executeResolvedSitePlayback = async ({
     }
     : null;
   return {
+    watchReport: payload.watchReport === true ? {
+      apiBase: resolvedApiBase,
+      spiderApi,
+      id: targetSegment.episodeUrl,
+      flag,
+    } : null,
     playerUrl: finalUrl,
     playerHeaders: finalHeaders,
     goProxyBase: '',
