@@ -267,6 +267,18 @@
         </div>
       </div>
       <div v-else class="m-bar" @click.stop @mousedown.stop @touchstart.stop>
+        <button
+          class="yt-btn m-pip"
+          type="button"
+          :aria-label="isPip ? '退出画中画' : '画中画'"
+          :data-active="isPip ? 'true' : 'false'"
+          @click.stop="togglePip"
+        >
+          <svg viewBox="0 0 24 24" class="yt-ico" aria-hidden="true">
+            <path fill="currentColor" d="M19 5H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 12H5V7h14v10z" opacity="0.55" />
+            <path fill="currentColor" :d="isPip ? 'M10 10h4v4h-4z' : 'M13 11h6v4h-6z'" />
+          </svg>
+        </button>
         <div class="yt-setting m-setting" ref="settingEl">
           <button class="yt-btn" type="button" aria-label="设置" @click.stop="toggleSettingsMenu">
             <svg viewBox="0 0 24 24" class="yt-ico">
@@ -434,6 +446,7 @@ const teleportTarget = ref(null);
 
 let art = null;
 let cleanupPipListeners = null;
+let cleanupMediaSession = null;
 let cleanupFsListeners = null;
 let cleanupNativeVideoListeners = null;
 let cleanupPlayerElListeners = null;
@@ -1046,6 +1059,8 @@ const isUiControlTarget = (target) => {
 	};
 
 const destroyNow = () => {
+  if (cleanupMediaSession) cleanupMediaSession();
+  cleanupMediaSession = null;
   try {
     settingsOpen.value = false;
   } catch (_e) {}
@@ -1074,6 +1089,8 @@ const destroyNow = () => {
     const videoEl = art && art.video ? art.video : null;
     if (videoEl && typeof document !== 'undefined' && document.pictureInPictureElement === videoEl) {
       document.exitPictureInPicture().catch(() => {});
+    } else if (videoEl && videoEl.webkitPresentationMode === 'picture-in-picture') {
+      videoEl.webkitSetPresentationMode('inline');
     }
   } catch (_e) {}
 
@@ -1151,6 +1168,17 @@ const destroyNow = () => {
 
 		const createCustomPlayer = {
 				  async hls(videoEl, url, headers) {
+            // Native HLS lets iOS own media loading while the page is in the background.
+            // Do not bypass request headers required by authenticated sources.
+            if (
+              isIos.value &&
+              videoEl.canPlayType('application/vnd.apple.mpegurl') &&
+              !Object.values(headers || {}).some((value) => value != null)
+            ) {
+              videoEl.src = url;
+              videoEl.load();
+              return { direct: true };
+            }
 				    const Hls = await loadHls();
 				    const canUseHlsJs =
 				      !!Hls &&
@@ -1783,13 +1811,16 @@ const destroyNow = () => {
     }
   } catch (_e) {}
 
-  // Browser Picture-in-Picture state (desktop floating window).
+  bindMediaSession(art.video);
+
+  // Standard PiP and Safari's native presentation mode.
   try {
     const videoEl = art.video;
     if (videoEl && typeof videoEl.addEventListener === 'function') {
       const sync = () => {
         try {
-          isPip.value = document.pictureInPictureElement === videoEl;
+          isPip.value = document.pictureInPictureElement === videoEl ||
+            videoEl.webkitPresentationMode === 'picture-in-picture';
         } catch (_) {
           isPip.value = false;
         }
@@ -1798,11 +1829,13 @@ const destroyNow = () => {
       const onLeave = () => sync();
       videoEl.addEventListener('enterpictureinpicture', onEnter);
       videoEl.addEventListener('leavepictureinpicture', onLeave);
+      videoEl.addEventListener('webkitpresentationmodechanged', sync);
       sync();
       cleanupPipListeners = () => {
         try {
           videoEl.removeEventListener('enterpictureinpicture', onEnter);
           videoEl.removeEventListener('leavepictureinpicture', onLeave);
+          videoEl.removeEventListener('webkitpresentationmodechanged', sync);
         } catch (_) {}
       };
     }
@@ -1935,18 +1968,102 @@ const setRatio = (r) => {
   aspectRatio.value = r;
 };
 
-const togglePip = () => {
+const togglePip = async () => {
   try {
     const videoEl = art && art.video ? art.video : null;
     if (!videoEl) return;
     if (document.pictureInPictureElement) {
-      document.exitPictureInPicture();
+      await document.exitPictureInPicture();
+    } else if (videoEl.webkitPresentationMode === 'picture-in-picture') {
+      videoEl.webkitSetPresentationMode('inline');
+    } else if (
+      typeof videoEl.webkitSupportsPresentationMode === 'function' &&
+      videoEl.webkitSupportsPresentationMode('picture-in-picture') &&
+      typeof videoEl.webkitSetPresentationMode === 'function'
+    ) {
+      videoEl.webkitSetPresentationMode('picture-in-picture');
     } else if (typeof videoEl.requestPictureInPicture === 'function') {
-      videoEl.requestPictureInPicture();
+      await videoEl.requestPictureInPicture();
+    } else {
+      art.notice.show = '当前浏览器或视频不支持画中画，请尝试使用 Safari';
     }
     showUiTemporarily();
-  } catch (_) {}
+  } catch (_) {
+    if (art) art.notice.show = '无法开启画中画，请先播放视频后重试';
+  }
 };
+
+const syncMediaMetadata = () => {
+  if (!art || !('mediaSession' in navigator) || typeof MediaMetadata === 'undefined') return;
+  const artwork = [];
+  if (props.poster) {
+    try {
+      artwork.push({ src: new URL(props.poster, window.location.href).href });
+    } catch (_) {}
+  }
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: props.title || 'MeowFilm',
+    artwork,
+  });
+};
+
+const bindMediaSession = (video) => {
+  if (!video || !('mediaSession' in navigator)) return;
+  const session = navigator.mediaSession;
+  const sync = () => {
+    session.playbackState = video.ended ? 'none' : video.paused ? 'paused' : 'playing';
+    if (typeof session.setPositionState !== 'function') return;
+    try {
+      if (Number.isFinite(video.duration) && video.duration > 0 && video.playbackRate > 0) {
+        session.setPositionState({
+          duration: video.duration,
+          playbackRate: video.playbackRate,
+          position: Math.max(0, Math.min(video.currentTime, video.duration)),
+        });
+      } else {
+        session.setPositionState();
+      }
+    } catch (_) {}
+  };
+  const seek = (time) => {
+    if (!Number.isFinite(time) || !Number.isFinite(video.duration)) return;
+    video.currentTime = Math.max(0, Math.min(time, video.duration));
+    sync();
+  };
+  const actions = {
+    play: () => {
+      video.play().catch(() => {
+        if (art) art.notice.show = '请返回播放页点击播放';
+      });
+    },
+    pause: () => video.pause(),
+    seekbackward: (details) => seek(video.currentTime - (details.seekOffset ?? 10)),
+    seekforward: (details) => seek(video.currentTime + (details.seekOffset ?? 10)),
+    seekto: (details) => seek(details.seekTime),
+  };
+  const registered = [];
+  for (const [action, handler] of Object.entries(actions)) {
+    try {
+      session.setActionHandler(action, handler);
+      registered.push(action);
+    } catch (_) {} // Safari versions expose different subsets of media actions.
+  }
+  const events = ['play', 'pause', 'ended', 'timeupdate', 'durationchange', 'ratechange'];
+  events.forEach((event) => video.addEventListener(event, sync));
+  syncMediaMetadata();
+  sync();
+  cleanupMediaSession = () => {
+    events.forEach((event) => video.removeEventListener(event, sync));
+    registered.forEach((action) => session.setActionHandler(action, null));
+    session.metadata = null;
+    session.playbackState = 'none';
+    try {
+      session.setPositionState?.();
+    } catch (_) {}
+  };
+};
+
+watch(() => [props.title, props.poster], syncMediaMetadata);
 
 const toggleFullscreen = async () => {
   try {
@@ -2954,6 +3071,12 @@ const play = async () => {
   position: absolute;
   top: 10px;
   right: 10px;
+}
+
+.tv-artplayer.tv-artplayer--mobile .m-pip {
+  position: absolute;
+  top: 10px;
+  right: calc(20px + var(--yt-btn-size));
 }
 
 .tv-artplayer.tv-artplayer--mobile .m-setting .yt-setting__menu {
