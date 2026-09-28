@@ -6379,6 +6379,7 @@ export default {
 
 .play-grid {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   align-items: start;
 }
