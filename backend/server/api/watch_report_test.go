@@ -29,6 +29,7 @@ func TestPlayHistoryWatchReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := 0
+	var reports []map[string]any
 	runner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		if r.URL.Path != "/prefix/0123456789/spider/site/3/report" {
@@ -36,6 +37,7 @@ func TestPlayHistoryWatchReport(t *testing.T) {
 		}
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		reports = append(reports, body)
 		if body["id"] != "original-episode" {
 			t.Errorf("wrong episode: %v", body)
 		}
@@ -77,18 +79,32 @@ func TestPlayHistoryWatchReport(t *testing.T) {
 		t.Fatal("callback failure not returned separately")
 	}
 	delete(body, "playbackEvent")
-	body["playbackPositionTicks"] = 10000000
+	body["playbackPositionTicks"] = 123450000
+	body["playbackRuntimeTicks"] = 6000000000
 	result = send()
 	if result["watchReport"].(map[string]any)["ok"] != true || calls != 2 {
 		t.Fatal("retry not acknowledged")
 	}
+	body["playbackPositionTicks"] = 240000000
 	send()
-	if calls != 2 {
-		t.Fatal("duplicate callback")
+	if calls != 3 {
+		t.Fatal("successful start suppressed later progress")
 	}
+	body["playbackPositionTicks"] = 250000000
+	body["playbackEvent"] = "stopped"
+	send()
+	if reports[1]["positionSeconds"] != 12.345 || reports[2]["positionSeconds"] != float64(24) || reports[3]["positionSeconds"] != float64(25) || reports[3]["event"] != "stopped" || reports[3]["durationSeconds"] != float64(600) {
+		t.Fatalf("wrong progress payloads: %v", reports)
+	}
+	for _, r := range reports {
+		if r["sessionId"] != report.SessionID {
+			t.Fatal("session identity changed")
+		}
+	}
+
 	delete(body, "watchReport")
 	send()
-	if calls != 2 {
+	if calls != 4 {
 		t.Fatal("ordinary site callback")
 	}
 	rows, err := database.ListPlayHistory(userID, 20)

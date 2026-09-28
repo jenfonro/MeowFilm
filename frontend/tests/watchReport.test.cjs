@@ -21,29 +21,43 @@ async function prepare(r, b = binding) {
 async function frame(r) { await r.onPlayerHistoryPlaybackStart(); await r.confirmPlayerHistoryPlaybackReady('first-frame'); }
 async function progress(r) { r.onPlayerHistoryTimeUpdate({ currentTime: 13, duration: 60, playing: true }); await r.syncHistoryProgressIfPossible({ force: true }); }
 
-test('resolution/start do not report; first frame reports original binding once', async () => {
+test('first frame and every existing progress event carry the same binding and actual position', async () => {
   const r = runtime(); await prepare(r); assert.equal(r.posts.length, 0);
   await r.onPlayerHistoryPlaybackStart(); assert.equal(r.posts.length, 0);
-  await r.confirmPlayerHistoryPlaybackReady('first-frame'); assert.equal(r.posts.length, 1);
+  r.onPlayerHistoryTimeUpdate({currentTime:0.25,duration:60,playing:true});
+  await r.confirmPlayerHistoryPlaybackReady('first-frame');
+  assert.equal(r.posts[0].playbackPositionTicks, 2500000);
+  assert.equal(r.posts[0].playbackRuntimeTicks, 600000000);
   for (const key of Object.keys(binding)) assert.equal(r.posts[0].watchReport[key], binding[key]);
-  assert.ok(r.posts[0].watchReport.sessionId); assert.equal(r.posts[0].playbackEvent, 'started');
-  await progress(r); assert.equal(r.posts.filter(x => x.watchReport).length, 1);
+  assert.equal(r.posts[0].playbackEvent, 'started');
+  for (const pos of [12.5,24,8]) {
+    r.onPlayerHistoryTimeUpdate({currentTime:pos,duration:60,playing:true});
+    await r.syncHistoryProgressIfPossible({force:true});
+    const sent=r.posts.at(-1);
+    assert.equal(sent.playbackPositionTicks,pos*10000000);
+    assert.equal(sent.playbackEvent,'progress');
+    assert.equal(sent.watchReport.sessionId,r.posts[0].watchReport.sessionId);
+  }
+  assert.equal(r.posts.filter(x => x.watchReport).length, 4);
 });
 test('history commits before first frame cannot report', async () => {
   const r = runtime(); await prepare(r); await r.commitPlayHistoryContextNow('pre_order_toggle');
   assert.equal(r.posts[0].watchReport, undefined); await frame(r); await progress(r);
-  assert.equal(r.posts.filter(x => x.watchReport).length, 1);
+  assert.equal(r.posts.filter(x => x.watchReport).length, 2);
 });
-test('failure retries with the same session on progress', async () => {
+test('failure retries on progress and success never suppresses subsequent progress', async () => {
   let attempt = 0;
   const r = runtime(() => ({ success: true, watchReport: { ok: ++attempt > 1 } }));
   await prepare(r); await frame(r); await progress(r); await progress(r);
   const reports = r.posts.filter(x => x.watchReport);
-  assert.equal(reports.length, 2); assert.equal(reports[0].watchReport.sessionId, reports[1].watchReport.sessionId);
+  assert.equal(reports.length, 3);
+  assert.equal(new Set(reports.map(x => x.watchReport.sessionId)).size, 1);
 });
-test('resume does not repeat; runtime/runner/episode changes isolate callbacks; ordinary site opts out', async () => {
-  const r = runtime(); await prepare(r); await frame(r); await prepare(r); await frame(r); await progress(r);
-  assert.equal(r.posts.filter(x => x.watchReport).length, 1);
+test('same target retains session; changing runtime/runner/episode isolates callbacks; ordinary source opts out', async () => {
+  const r = runtime(); await prepare(r); await frame(r);
+  const first=r.posts[0].watchReport.sessionId;
+  await prepare(r); await frame(r); await progress(r);
+  assert.equal(r.posts.at(-1).watchReport.sessionId,first);
   for (const b of [{...binding, spiderApi: '/abcdef0123/spider/site/3'}, {...binding, id: 'another-episode'}, {...binding, apiBase: 'http://another-runner/'}]) {
     await prepare(r, b); await frame(r);
     const sent = r.posts.at(-1).watchReport;
@@ -52,12 +66,42 @@ test('resume does not repeat; runtime/runner/episode changes isolate callbacks; 
   assert.equal(new Set(r.posts.filter(x => x.watchReport).map(x => x.watchReport.sessionId)).size, 4);
   await prepare(r, null); await frame(r); await progress(r); assert.equal(r.posts.at(-1).watchReport, undefined);
 });
-test('late acknowledgement cannot acknowledge a new video', async () => {
-  let resolve; const r = runtime(() => new Promise(r => { resolve = r; }));
+test('a late old request does not lose or rebind the new video first-frame report', async () => {
+  let resolve;let calls=0;
+  const r = runtime(() => ++calls===1 ? new Promise(r => { resolve = r; }) : {success:true,watchReport:{ok:true}});
   await prepare(r); const first = frame(r); while (!resolve) await Promise.resolve();
-  const oldState = r.playHistorySessionState.activeContext.watchReportState;
-  await prepare(r, {...binding, id: 'new'}); resolve({success: true, watchReport: {ok: true}}); await first;
-  assert.equal(oldState.done, true); assert.equal(r.playHistorySessionState.activeContext.watchReportState.done, false);
+  const oldID=r.posts[0].watchReport.sessionId;
+  await prepare(r, {...binding, id: 'new'});
+  const next=frame(r);
+  resolve({success: true, watchReport: {ok: true}}); await first;await next;
+  assert.equal(r.posts.at(-1).watchReport.id,'new');
+  assert.notEqual(r.posts.at(-1).watchReport.sessionId,oldID);
+});
+test('pause and stop forward the final position even when the player is not playing', async () => {
+  const r=runtime();await prepare(r);await frame(r);
+  for(const [pos,event] of [[27.5,'paused'],[60,'stopped']]) {
+    r.onPlayerHistoryTimeUpdate({currentTime:pos,duration:60,playing:false});
+    await r.syncHistoryProgressIfPossible({force:true,event});
+    assert.equal(r.posts.at(-1).playbackPositionTicks,pos*10000000);
+    assert.equal(r.posts.at(-1).playbackEvent,event);
+    assert.ok(r.posts.at(-1).watchReport);
+  }
+});
+test('final progress waits for an in-flight progress request instead of being dropped', async () => {
+  let resolve;let calls=0;
+  const r=runtime(()=>++calls===2 ? new Promise(r=>{resolve=r;}) : {success:true,watchReport:{ok:true}});
+  await prepare(r);await frame(r);
+  const pending=progress(r);while(!resolve)await Promise.resolve();
+  r.onPlayerHistoryTimeUpdate({currentTime:31,duration:60,playing:false});
+  const stop=r.syncHistoryProgressIfPossible({force:true,event:'stopped'});
+  resolve({success:true,watchReport:{ok:true}});await pending;await stop;
+  assert.equal(r.posts.at(-1).playbackPositionTicks,310000000);
+  assert.equal(r.posts.at(-1).playbackEvent,'stopped');
+});
+test('switching videos clears the previous player time before the new first frame', async()=>{
+ const r=runtime();await prepare(r);await frame(r);await progress(r);
+ await prepare(r,{...binding,id:'new-video'});await frame(r);
+ assert.equal(r.posts.at(-1).playbackPositionTicks,0);
 });
 test('play result opts in only with boolean true', async () => {
   const playback = fs.readFileSync('src/shared/playbackRuntime.js', 'utf8');

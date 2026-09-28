@@ -417,6 +417,7 @@ export const preparePlayHistoryContext = async (payload = {}) => {
   };
   nextContext.identity = buildHistoryIdentity(nextContext);
   playHistorySessionState.activeContext = nextContext;
+  playHistorySessionState.playerTime = { currentTime: 0, duration: 0, at: 0, playing: false };
   playHistorySessionState.playbackState = {
     started: false,
     ready: false,
@@ -469,19 +470,12 @@ export const bindPlayHistoryWatchReport = (binding) => {
         ? globalThis.crypto.randomUUID()
         : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
     },
-    done: false,
   };
 };
 
-const watchReportPayload = (context) => {
+const watchReportPayload = (context, event) => {
   const state = context && context.watchReportState;
-  return context.watchReportReady && state && !state.done ? { watchReport: state.binding, playbackEvent: 'started' } : {};
-};
-
-const acknowledgeWatchReport = (context, response) => {
-  if (context.watchReportState && response && response.watchReport && response.watchReport.ok === true) {
-    context.watchReportState.done = true;
-  }
+  return context.watchReportReady && state ? { watchReport: state.binding, playbackEvent: event } : {};
 };
 
 export const clearActivePlayHistoryContext = () => {
@@ -537,8 +531,8 @@ const commitHistoryBaseIfNeeded = async (reason = '') => {
   historyCommitState.key = key;
   historyCommitState.inFlight = (async () => {
     try {
-      const response = await apiPostJson('/api/playhistory', {
-        ...watchReportPayload(context),
+      await apiPostJson('/api/playhistory', {
+        ...watchReportPayload(context, 'started'),
         contentKey: context.contentKey,
         siteKey: context.siteKey,
         siteName: context.siteName,
@@ -555,8 +549,9 @@ const commitHistoryBaseIfNeeded = async (reason = '') => {
         siteEpisodeFile: context.siteEpisodeFile,
         preOrder: !!context.preOrder,
         playbackItemId: context.playbackItemId,
+        playbackPositionTicks: toTicks(playHistorySessionState.playerTime.currentTime),
+        playbackRuntimeTicks: toTicks(playHistorySessionState.playerTime.duration),
       }, { dedupe: false });
-      acknowledgeWatchReport(context, response);
       await refreshPlayHistoryListFromServer();
     } catch (_error) {
       // ignore
@@ -616,7 +611,7 @@ export const confirmPlayerHistoryPlaybackReady = async (reason = '') => {
   await commitHistoryBaseIfNeeded(reason);
 };
 
-export const syncHistoryProgressIfPossible = async ({ force = false } = {}) => {
+export const syncHistoryProgressIfPossible = async ({ force = false, event = 'progress' } = {}) => {
   const context = playHistorySessionState.activeContext && typeof playHistorySessionState.activeContext === 'object'
     ? playHistorySessionState.activeContext
     : null;
@@ -628,19 +623,22 @@ export const syncHistoryProgressIfPossible = async ({ force = false } = {}) => {
   const playerTime = playHistorySessionState.playerTime && typeof playHistorySessionState.playerTime === 'object'
     ? playHistorySessionState.playerTime
     : null;
-  if (!playerTime || !playerTime.playing) return;
+  if (!playerTime || (!force && !playerTime.playing)) return;
   const positionTicks = toTicks(playerTime.currentTime);
   const runtimeTicks = toTicks(playerTime.duration);
   if (positionTicks <= 0) return;
   const now = Date.now();
   if (!force && now - historyProgressState.at < 12_000) return;
-  if (historyProgressState.inFlight) return;
+  if (historyProgressState.inFlight) {
+    if (!force) return;
+    await historyProgressState.inFlight;
+  }
   historyProgressState.at = now;
   historyProgressState.inFlight = (async () => {
     try {
       await commitHistoryBaseIfNeeded('timeupdate');
-      const response = await apiPostJson('/api/playhistory', {
-        ...watchReportPayload(context),
+      await apiPostJson('/api/playhistory', {
+        ...watchReportPayload(context, event),
         contentKey: context.contentKey,
         siteKey: context.siteKey,
         siteName: context.siteName,
@@ -660,7 +658,6 @@ export const syncHistoryProgressIfPossible = async ({ force = false } = {}) => {
         playbackPositionTicks: positionTicks,
         playbackRuntimeTicks: runtimeTicks,
       }, { dedupe: false });
-      acknowledgeWatchReport(context, response);
       await refreshPlayHistoryListFromServer();
     } catch (_error) {
       // ignore
@@ -674,7 +671,7 @@ export const syncHistoryProgressIfPossible = async ({ force = false } = {}) => {
 };
 
 export const flushHistoryProgressBestEffort = () => {
-  void syncHistoryProgressIfPossible({ force: true });
+  void syncHistoryProgressIfPossible({ force: true, event: 'stopped' });
 };
 
 export const buildPlayHistoryPayload = ({

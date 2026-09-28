@@ -5573,7 +5573,7 @@ export default {
     },
     onPlayerTimeUpdate(info) {
       onPlayerHistoryTimeUpdate(info);
-      void syncHistoryProgressIfPossible();
+      void syncHistoryProgressIfPossible({ force: info && info.event === 'paused', event: info && info.event || 'progress' });
     },
     async onPlayerEpisodeDelta(deltaRaw) {
       if (this.autoNextInFlight || normalizeInt(this.smartPlaybackPendingRunSeq) > 0) return;
@@ -5582,17 +5582,19 @@ export default {
     onPlayerPlaying() {
       this.finalizePlayerReadyState();
     },
-    async onPlayerFirstFrame() {
+    async onPlayerFirstFrame(info) {
+      onPlayerHistoryTimeUpdate(info);
       this.finalizePlayerReadyState({ markFirstFrame: true });
       await this.applyPlayHistoryResume('firstframe');
       this.confirmSmartPlaybackClosedLoop(this.smartPlaybackPendingRunSeq);
     },
-    onPlayerEnded() {
+    onPlayerEnded(info) {
+      onPlayerHistoryTimeUpdate(info);
       if (this.autoNextInFlight || this.playLoading || normalizeInt(this.smartPlaybackPendingRunSeq) > 0) return;
       this.autoNextInFlight = true;
       void (async () => {
         try {
-          await syncHistoryProgressIfPossible({ force: true });
+          await syncHistoryProgressIfPossible({ force: true, event: 'stopped' });
         } catch (_error) {}
         try {
           await this.switchEpisodeByDelta(1, { showBoundaryToast: false });

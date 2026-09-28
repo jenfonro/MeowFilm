@@ -5,8 +5,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"strings"
-	"sync"
-	"time"
 )
 
 // WatchReport binds a callback to the original play request, not its resolved URL.
@@ -33,25 +31,16 @@ func WatchReportFromPlay(raw map[string]any, apiBase, spiderAPI, id, flag string
 	}
 }
 
-type watchReportKey struct {
-	UserID int64
-	WatchReport
+// WatchProgress comes from the existing player history events, in seconds.
+type WatchProgress struct {
+	PositionSeconds float64 `json:"positionSeconds"`
+	DurationSeconds float64 `json:"durationSeconds"`
+	Event           string  `json:"event"`
 }
 
-type watchReportResult struct {
-	done    chan struct{}
-	err     error
-	expires time.Time
-}
-
-var watchReports = struct {
-	sync.Mutex
-	entries map[watchReportKey]*watchReportResult
-}{entries: make(map[watchReportKey]*watchReportResult)}
-
-// ReportWatchOnce coalesces concurrent notifications and only remembers success.
-// A failed callback can be retried by the next existing playback progress event.
-func ReportWatchOnce(userID int64, report *WatchReport) error {
+// ReportWatchProgress forwards every existing player progress event. A successful
+// start must not suppress later progress or stop reports.
+func ReportWatchProgress(userID int64, report *WatchReport, progress WatchProgress) error {
 	if report == nil {
 		return nil
 	}
@@ -61,39 +50,14 @@ func ReportWatchOnce(userID int64, report *WatchReport) error {
 	if userID <= 0 || binding.SessionID == "" || binding.APIBase == "" || binding.SpiderAPI == "" || binding.ID == "" {
 		return errors.New("incomplete watch report binding")
 	}
-	key := watchReportKey{UserID: userID, WatchReport: binding}
-	now := time.Now()
-	watchReports.Lock()
-	for k, entry := range watchReports.entries {
-		if !entry.expires.IsZero() && now.After(entry.expires) {
-			delete(watchReports.entries, k)
-		}
-	}
-	if entry := watchReports.entries[key]; entry != nil {
-		watchReports.Unlock()
-		<-entry.done
-		return entry.err
-	}
-	entry := &watchReportResult{done: make(chan struct{})}
-	watchReports.entries[key] = entry
-	watchReports.Unlock()
-
 	out, err := RequestSpider(binding.APIBase, binding.SpiderAPI, "report", map[string]any{
-		"id": binding.ID, "flag": binding.Flag,
+		"id": binding.ID, "flag": binding.Flag, "sessionId": binding.SessionID,
+		"positionSeconds": progress.PositionSeconds, "durationSeconds": progress.DurationSeconds, "event": progress.Event,
 	})
 	if err == nil {
 		if ok, _ := out["ok"].(bool); !ok {
 			err = errors.New("site did not acknowledge watch report")
 		}
 	}
-	watchReports.Lock()
-	entry.err = err
-	if err != nil {
-		delete(watchReports.entries, key)
-	} else {
-		entry.expires = time.Now().Add(24 * time.Hour)
-	}
-	close(entry.done)
-	watchReports.Unlock()
 	return err
 }

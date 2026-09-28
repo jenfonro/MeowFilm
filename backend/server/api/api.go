@@ -641,7 +641,11 @@ func handleAPIPlayHistory(w http.ResponseWriter, r *http.Request, database *db.D
 				var report catpawrunner.WatchReport
 				encoded, _ := json.Marshal(raw)
 				if err := json.Unmarshal(encoded, &report); err == nil {
-					err = catpawrunner.ReportWatchOnce(u.ID, &report)
+					event := getS("playbackEvent")
+					if event == "" {
+						event = "progress"
+					}
+					err = catpawrunner.ReportWatchProgress(u.ID, &report, catpawrunner.WatchProgress{PositionSeconds: float64(positionTicks) / 10_000_000, DurationSeconds: float64(runtimeTicks) / 10_000_000, Event: event})
 					result := map[string]any{"ok": err == nil}
 					if err != nil {
 						result["message"] = err.Error()

@@ -1359,7 +1359,7 @@ const destroyNow = () => {
     if (firstFrameEmitted) return;
     firstFrameEmitted = true;
     try {
-      emit('firstframe');
+      emit('firstframe', { currentTime: art.currentTime || 0, duration: duration.value || 0, playing: !!playing.value });
     } catch (_e) {}
   };
 
@@ -1617,7 +1617,7 @@ const destroyNow = () => {
 		          uiVisible.value = true;
 		        } catch (_e) {}
 		        try {
-		          emit('ended');
+		          emit('ended', { currentTime: art.currentTime || 0, duration: duration.value || 0, playing: false });
 		        } catch (_e) {}
 		      };
 	      const onDurationChange = () => {
@@ -1727,6 +1727,7 @@ const destroyNow = () => {
 	  });
 	  art.on('video:pause', () => {
 	    playing.value = false;
+	    emit('timeupdate', { currentTime: art.currentTime || 0, duration: duration.value || 0, playing: false, event: 'paused' });
 	    setBuffering(false);
 	    uiVisible.value = true;
 	  });
@@ -1735,7 +1736,7 @@ const destroyNow = () => {
 	    setBuffering(false);
 	    uiVisible.value = true;
 	    try {
-	      emit('ended');
+	      emit('ended', { currentTime: art.currentTime || 0, duration: duration.value || 0, playing: false });
 	    } catch (_e) {}
 	  });
 	  art.on('video:waiting', () => {

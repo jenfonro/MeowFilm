@@ -116,7 +116,7 @@ func HandleSessionProgress(database *db.DB, userID int64, payload SessionPlaybac
 	if handlePlaybackSwitchSessionAction(database, userID, payload, "progress") {
 		return nil
 	}
-	reportSessionWatch(userID, payload)
+	reportSessionWatch(userID, payload, "progress")
 	return upsertSessionProgress(database, userID, payload)
 }
 
@@ -124,13 +124,13 @@ func HandleSessionStopped(database *db.DB, userID int64, payload SessionPlayback
 	if handlePlaybackSwitchSessionAction(database, userID, payload, "stopped") {
 		return nil
 	}
-	reportSessionWatch(userID, payload)
+	reportSessionWatch(userID, payload, "stopped")
 	return upsertSessionProgress(database, userID, payload)
 }
 
 // Progress/stopped events with a positive position confirm playback; resolving
 // PlaybackInfo or reporting a zero-position start must never notify a site.
-func reportSessionWatch(userID int64, payload SessionPlaybackPayload) {
+func reportSessionWatch(userID int64, payload SessionPlaybackPayload, event string) {
 	if payload.PositionTicks <= 0 {
 		return
 	}
@@ -138,7 +138,7 @@ func reportSessionWatch(userID int64, payload SessionPlaybackPayload) {
 	if target == nil || target.WatchReport == nil || target.UserID != userID {
 		return
 	}
-	if err := catpawrunner.ReportWatchOnce(userID, target.WatchReport); err != nil {
+	if err := catpawrunner.ReportWatchProgress(userID, target.WatchReport, catpawrunner.WatchProgress{PositionSeconds: float64(payload.PositionTicks) / 10_000_000, DurationSeconds: float64(payload.RunTimeTicks) / 10_000_000, Event: event}); err != nil {
 		log.Printf("[emby][watch_report] item=%s error=%v", payload.ItemID, err)
 	}
 }

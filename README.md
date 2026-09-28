@@ -107,21 +107,21 @@ MEOWFILM_ADDR=":8080" ./build/meowfilm
 
 站源通过 `/play` 响应中的 `"watchReport": true` 自行开启。未返回或不为布尔 `true` 时不触发，MeowFilm 不判断站名。
 
-实际播放后，MeowFilm 向该次播放使用的 Runner、runtime 和站源路径发送：
+MeowFilm 将已有的播放开始、进度、暂停/停止事件发送给该次播放使用的 Runner、runtime 和站源：
 
 ```http
 POST /<runtimeId>/spider/<site>/<type>/report
 Content-Type: application/json
 
-{"id":"原始 /play 的 id","flag":"原始 /play 的 flag"}
+{"id":"原始 /play 的 id","flag":"原始 /play 的 flag","sessionId":"当前播放会话","positionSeconds":123.5,"durationSeconds":600,"event":"progress"}
 ```
 
-站源完成同步后返回 `{"ok":true}`。`id` 是实际选中集的原始播放 ID，不是详情页 ID 或媒体直链；脚本可以直接使用，不必另外维护映射。
+站源完成同步后返回 `{"ok":true}`。`id` 是实际选中集的原始播放 ID，不是详情页 ID 或媒体直链；脚本可以直接透传，不必维护映射。`event` 为 `started`、`progress`、`paused` 或 `stopped`；位置和时长单位均为秒。
 
-- 网页：首帧后随既有 `/api/playhistory` 请求携带绑定，后端调用站源。
-- Emby：绑定保留在播放缓存；正数 `PositionTicks` 的 Progress/Stopped 事件触发。仅获取 PlaybackInfo 或零进度不触发。
-- 成功后当前绑定不再上报；失败不阻断播放或本地历史，后续既有进度事件重试。去重状态仅在内存中，服务重启后会重新上报。
-- 站源脚本自行选择上游账号（例如它连接的 bridge Cookie）。本协议不为 MeowFilm 用户分别管理上游账号，也不持续同步完整观看时长。
+- 网页：首帧以及既有 `/api/playhistory` 进度上报都携带绑定与真实位置；暂停/结束发送最后位置。复用原有 12 秒上报周期，不新开计时器。
+- Emby：绑定保留在播放缓存，Progress/Stopped 的 PositionTicks/RunTimeTicks 换算为秒后同步。仅获取 PlaybackInfo 或零进度不触发。
+- **开始上报成功后，后续进度仍继续上报**。回退/拖动后的真实位置也继续传递；同一播放保持 sessionId，不把位置替换成整部影片时长。
+- 失败不阻断播放或本地历史，后续既有进度事件继续发送。站源自行选择上游账号，例如其 bridge 所用 Cookie。
 - CatPawRunner 现有通用路由即可转发 `/report`，无需修改核心。
 
 测试：`cd frontend && node --test tests/*.test.cjs`；后端在构建前端资源后执行 `cd backend && go test ./...`。

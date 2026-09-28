@@ -21,7 +21,7 @@ func TestWatchReportOptIn(t *testing.T) {
 	}
 }
 
-func TestWatchReportOnceAndSourceIsolation(t *testing.T) {
+func TestWatchReportProgressAndSourceIsolation(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -30,7 +30,7 @@ func TestWatchReportOnceAndSourceIsolation(t *testing.T) {
 		}
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		if body["id"] != "original-episode" || body["flag"] != "line" {
+		if body["id"] != "original-episode" || body["flag"] != "line" || body["sessionId"] == "" || body["durationSeconds"] != float64(600) || body["event"] != "progress" {
 			t.Errorf("bad payload: %v", body)
 		}
 		_, _ = w.Write([]byte(`{"ok":true}`))
@@ -42,21 +42,21 @@ func TestWatchReportOnceAndSourceIsolation(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := ReportWatchOnce(1, report); err != nil {
+			if err := ReportWatchProgress(1, report, WatchProgress{PositionSeconds: 12.5, DurationSeconds: 600, Event: "progress"}); err != nil {
 				t.Error(err)
 			}
 		}()
 	}
 	wg.Wait()
-	if calls.Load() != 1 {
+	if calls.Load() != 20 {
 		t.Fatalf("calls=%d", calls.Load())
 	}
 	other := *report
 	other.SpiderAPI = "/abcdef0123/spider/site/3"
-	if err := ReportWatchOnce(1, &other); err != nil {
+	if err := ReportWatchProgress(1, &other, WatchProgress{PositionSeconds: 24, DurationSeconds: 600, Event: "progress"}); err != nil {
 		t.Fatal(err)
 	}
-	if calls.Load() != 2 {
+	if calls.Load() != 21 {
 		t.Fatalf("source not isolated: %d", calls.Load())
 	}
 }
@@ -73,16 +73,16 @@ func TestWatchReportRetriesFailure(t *testing.T) {
 	}))
 	defer server.Close()
 	report := WatchReportFromPlay(map[string]any{"watchReport": true}, server.URL, "/spider/site/3", "ep", "line")
-	if ReportWatchOnce(1, report) == nil {
+	if ReportWatchProgress(1, report, WatchProgress{PositionSeconds: 12.5, DurationSeconds: 600, Event: "progress"}) == nil {
 		t.Fatal("failure acknowledged")
 	}
-	if err := ReportWatchOnce(1, report); err != nil {
+	if err := ReportWatchProgress(1, report, WatchProgress{PositionSeconds: 12.5, DurationSeconds: 600, Event: "progress"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ReportWatchOnce(1, report); err != nil {
+	if err := ReportWatchProgress(1, report, WatchProgress{PositionSeconds: 12.5, DurationSeconds: 600, Event: "progress"}); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 2 {
+	if calls != 3 {
 		t.Fatalf("calls=%d", calls)
 	}
 }
