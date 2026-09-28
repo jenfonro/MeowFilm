@@ -1,0 +1,11 @@
+# Dependencies / build outputs (do not commit)
+/node_modules
+/dist
+/.vite
+
+# Logs / temp
+*.log
+*.tmp
+*.temp
+*.swp
+.DS_Store

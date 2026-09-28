@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       skip_frontend:
-        description: "Skip frontend checkout/build (true/false)"
+        description: "Skip frontend build; compile backend only (true/false)"
         required: false
         default: "false"
 
@@ -46,7 +46,8 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
 
       - name: Install base toolchain
         shell: bash
@@ -54,14 +55,6 @@ jobs:
           set -euo pipefail
           apt-get update
           apt-get install -y build-essential ca-certificates curl git
-
-      - name: Checkout frontend
-        if: ${{ inputs.skip_frontend != 'true' }}
-        uses: actions/checkout@v4
-        with:
-          repository: jenfonro/MeowFilm-Frontend
-          path: MeowFilm-Frontend
-          token: ${{ secrets.FRONTEND_TOKEN }}
 
       - name: Compute backend metadata
         shell: bash
@@ -75,14 +68,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "FRONTEND_COMMIT=$(git -C MeowFilm-Frontend rev-parse --short=6 HEAD)" >> "${GITHUB_ENV}"
+          echo "FRONTEND_COMMIT=$(git rev-parse --short=6 HEAD)" >> "${GITHUB_ENV}"
 
       - name: Build frontend
         if: ${{ inputs.skip_frontend != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
-          cd MeowFilm-Frontend
+          cd frontend
           if [[ -f package-lock.json ]]; then
             npm ci
           else
@@ -95,9 +88,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf public/dist
-          mkdir -p public/dist
-          cp -a MeowFilm-Frontend/dist/. public/dist/
+          rm -rf backend/public/dist
+          mkdir -p backend/public/dist
+          cp -a frontend/dist/. backend/public/dist/
+
+      - name: Prepare embed placeholder for backend-only compile check
+        if: ${{ inputs.skip_frontend == 'true' }}
+        shell: bash
+        run: |
+          mkdir -p backend/public/dist
+          printf '%s\n' '<!doctype html><title>Compile check</title>' > backend/public/dist/index.html
+          cp backend/public/dist/index.html backend/public/dist/dashboard.html
 
       - name: Test
         shell: bash
@@ -105,7 +106,7 @@ jobs:
           CGO_ENABLED: "1"
         run: |
           set -euo pipefail
-          go test ./...
+          (cd backend && go test ./...)
 
       - name: Build (compile check only)
         shell: bash
@@ -119,9 +120,9 @@ jobs:
           ext=""
           if [[ "${GOOS}" == "windows" ]]; then ext=".exe"; fi
           out="/tmp/meowfilm_${GOOS}_${GOARCH}${ext}"
-          go build -trimpath -ldflags="-s -w \
+          (cd backend && go build -trimpath -ldflags="-s -w \
             -X github.com/jenfonro/meowfilm/server/static.BuildAssetVersion=${{ env.TEST_BUILD_VERSION }} \
             -X github.com/jenfonro/meowfilm/server/static.BuildBackendCommit=${{ env.BACKEND_COMMIT }} \
-            -X github.com/jenfonro/meowfilm/server/static.BuildFrontendCommit=${{ env.FRONTEND_COMMIT }}" -o "${out}" .
+            -X github.com/jenfonro/meowfilm/server/static.BuildFrontendCommit=${{ env.FRONTEND_COMMIT }}" -o "${out}" .)
           rm -f "${out}"
           echo "compile ok: ${GOOS}/${GOARCH}"

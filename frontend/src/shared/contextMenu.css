@@ -1,0 +1,41 @@
+.search-matchblock-menu {
+  position: fixed;
+  z-index: 80;
+  min-width: 220px;
+  border: 1px solid rgba(229, 231, 235, 1);
+  border-radius: 16px;
+  background: #fff;
+  overflow: hidden;
+  box-shadow: 0 20px 45px rgba(15, 23, 42, 0.16);
+}
+
+.search-matchblock-menu__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  padding: 12px 16px;
+  text-align: left;
+  font-size: 14px;
+  color: #1f2937;
+  cursor: pointer;
+}
+
+.search-matchblock-menu__action:hover:not(:disabled) {
+  background: #f9fafb;
+}
+
+.search-matchblock-menu__action--danger {
+  color: #dc2626;
+}
+
+.search-matchblock-menu__action--danger:hover:not(:disabled) {
+  background: #fef2f2;
+}
+
+.search-matchblock-menu__action:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

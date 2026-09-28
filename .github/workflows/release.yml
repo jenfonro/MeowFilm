@@ -83,6 +83,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25.x"
+          cache-dependency-path: backend/go.sum
 
       - name: Install toolchains
         shell: bash
@@ -137,26 +138,18 @@ jobs:
           echo "CC=/tmp/cc.sh" >> "${GITHUB_ENV}"
           echo "CXX=/tmp/cxx.sh" >> "${GITHUB_ENV}"
 
-      - name: Checkout frontend
-        uses: actions/checkout@v4
-        with:
-          repository: jenfonro/MeowFilm-Frontend
-          path: MeowFilm-Frontend
-          fetch-depth: 0
-          token: ${{ secrets.FRONTEND_TOKEN }}
-
       - name: Compute commit metadata
         shell: bash
         run: |
           set -euo pipefail
           echo "BACKEND_COMMIT=$(git rev-parse --short=7 HEAD)" >> "${GITHUB_ENV}"
-          echo "FRONTEND_COMMIT=$(git -C MeowFilm-Frontend rev-parse --short=7 HEAD)" >> "${GITHUB_ENV}"
+          echo "FRONTEND_COMMIT=$(git rev-parse --short=7 HEAD)" >> "${GITHUB_ENV}"
 
       - name: Build frontend
         shell: bash
         run: |
           set -euo pipefail
-          cd MeowFilm-Frontend
+          cd frontend
           if [[ -f package-lock.json ]]; then
             npm ci
           else
@@ -168,9 +161,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf public/dist
-          mkdir -p public/dist
-          cp -a MeowFilm-Frontend/dist/. public/dist/
+          rm -rf backend/public/dist
+          mkdir -p backend/public/dist
+          cp -a frontend/dist/. backend/public/dist/
 
       - name: Test
         shell: bash
@@ -180,7 +173,7 @@ jobs:
           CXX: g++
         run: |
           set -euo pipefail
-          go test ./...
+          (cd backend && go test ./...)
 
       - name: Build
         shell: bash
@@ -224,7 +217,7 @@ jobs:
             name_suffix="linux_${GOARCH}"
           fi
           out="dist/meowfilm_${name_suffix}${ext}"
-          go build -trimpath -ldflags "${ldflags}" -o "${out}" .
+          (cd backend && go build -trimpath -ldflags "${ldflags}" -o "${GITHUB_WORKSPACE}/${out}" .)
           echo "built: ${out}"
           echo "ASSET_PATH=${out}" >> "${GITHUB_ENV}"
 
@@ -244,15 +237,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Checkout frontend (for release notes)
-        uses: actions/checkout@v4
-        with:
-          repository: jenfonro/MeowFilm-Frontend
-          path: MeowFilm-Frontend
-          fetch-depth: 0
-          token: ${{ secrets.FRONTEND_TOKEN }}
-
-      - name: Generate release notes (backend + frontend)
+      - name: Generate release notes
         shell: bash
         run: |
           set -euo pipefail
@@ -270,35 +255,22 @@ jobs:
           {
             echo "## Build"
             echo "- version: ${current_tag}"
-            echo "- backend: $(git rev-parse --short=7 HEAD) ($(git rev-parse HEAD))"
-            echo "- frontend: $(git -C MeowFilm-Frontend rev-parse --short=7 HEAD) ($(git -C MeowFilm-Frontend rev-parse HEAD))"
+            echo "- commit: $(git rev-parse --short=7 HEAD) ($(git rev-parse HEAD))"
             echo
 
             if [[ -n "${base_tag}" ]]; then
               base_sha="$(git rev-parse "${base_tag}")"
-              base_date="$(git log -1 --format=%cI "${base_tag}")"
 
-              echo "## Backend changes"
+              echo "## Changes"
               echo "- base: ${base_tag} (${base_sha})"
               echo "- commits: $(git rev-list --count "${base_tag}..HEAD")"
               echo
               git log --oneline "${base_tag}..HEAD" || true
-              echo
-
-              echo "## Frontend changes"
-              echo "- since: ${base_tag} (${base_date})"
-              echo
-              git -C MeowFilm-Frontend log --oneline --since="${base_date}" || true
             else
-              echo "## Backend changes"
+              echo "## Changes"
               echo "(no stable v* tag found on this branch)"
               echo
               git log --oneline -n 50 || true
-              echo
-
-              echo "## Frontend changes"
-              echo
-              git -C MeowFilm-Frontend log --oneline -n 50 || true
             fi
           } > notes.md
 

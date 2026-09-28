@@ -1,6 +1,6 @@
 # MeowFilm
 <p align="center">
-<img src="https://raw.githubusercontent.com/jenfonro/MeowFilm-Frontend/refs/heads/main/public/favicon.svg" alt="MeowFilm" width="120" />
+<img src="frontend/public/favicon.svg" alt="MeowFilm" width="120" />
 </p>
 > MeowFilm 是一个基于 Go + Vue 的影视聚合 Web 应用，提供 UI、账号与配置管理、聚合与播放等核心能力；解析能力由自定义脚本通过 catpawrunner 提供。
 
@@ -54,7 +54,9 @@
 
 ### 方式一：本地运行（推荐脚本）
 
-在后端目录执行（默认前端目录为 `../MeowFilm-Frontend`；可用 `FRONTEND_DIR` 覆盖）：
+前后端在同一个仓库中：`backend/` 为 Go 后端，`frontend/` 为 Vue 前端。
+
+在仓库根目录执行：
 
 ```bash
 bash build-all.sh
@@ -68,8 +70,8 @@ MEOWFILM_ADDR=":8080" ./build/meowfilm
 
 说明：
 
-- `build-all.sh` 会构建前端并同步到后端内嵌目录 `public/dist`，再构建后端二进制。
-- 如果你只想构建后端（二进制），可以先保证 `public/dist/index.html` 存在，然后执行 `./build.sh`。
+- `build-all.sh` 会构建前端并同步到后端内嵌目录 `backend/public/dist`，再构建后端二进制。
+- 如果你只想构建后端（二进制），可以先保证 `backend/public/dist/index.html` 存在，然后执行 `./build.sh`。
 - 也可以用 `./start.sh` 一键 `build-all.sh` + 启动（默认 `MEOWFILM_DEBUG=1` 且 `MEOWFILM_DATA_DIR=./build/`）。
 
 ## 默认账号

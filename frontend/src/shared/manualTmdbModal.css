@@ -1,0 +1,113 @@
+.manual-tmdb-modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  padding: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.manual-tmdb-modal {
+  width: min(1120px, 100%);
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(203, 213, 225, 0.9);
+  background: #ffffff;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.25);
+}
+
+.manual-tmdb-modal__toolbar {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.manual-tmdb-modal__close {
+  white-space: nowrap;
+}
+
+.manual-tmdb-modal__searchInput {
+  width: 100%;
+}
+
+.manual-tmdb-modal__content {
+  flex: 1 1 auto;
+  min-height: 380px;
+  overflow: auto;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid #e5e7eb;
+  background: #f8fafc;
+}
+
+.manual-tmdb-modal__placeholder {
+  min-height: 340px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #6b7280;
+  font-size: 14px;
+}
+
+.manual-tmdb-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(136px, 1fr));
+  gap: 14px;
+}
+
+.manual-tmdb-card {
+  border-radius: 12px;
+  border: 1px solid transparent;
+  padding: 4px;
+  background: transparent;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.manual-tmdb-card.is-selected {
+  border-color: rgba(34, 197, 94, 0.72);
+  background: rgba(34, 197, 94, 0.08);
+}
+
+.manual-tmdb-modal__footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.manual-tmdb-modal__footerLeft {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.manual-tmdb-modal__footerRight {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.manual-tmdb-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #374151;
+}
+
+.manual-tmdb-option__input {
+  width: 100px;
+}
+
+.manual-tmdb-option--check {
+  gap: 6px;
+  cursor: pointer;
+}

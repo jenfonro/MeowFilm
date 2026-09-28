@@ -3,9 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="${SCRIPT_DIR}"
-cd "${ROOT_DIR}"
+cd "${ROOT_DIR}/backend"
 
-FRONTEND_DIR="${FRONTEND_DIR:-../MeowFilm-Frontend}"
 DST_DIST="public/dist"
 
 # This script only builds the backend binary. It does not build/copy the frontend.
@@ -48,7 +47,7 @@ fi
 LDFLAGS=""
 if [[ "${EMBED_COMMITS}" == "1" ]] && command -v git >/dev/null 2>&1; then
   BACKEND_COMMIT="$(git -C "${ROOT_DIR}" rev-parse --short HEAD 2>/dev/null || true)"
-  FRONTEND_COMMIT="$(git -C "${FRONTEND_DIR}" rev-parse --short HEAD 2>/dev/null || true)"
+  FRONTEND_COMMIT="${BACKEND_COMMIT}"
   if [[ -n "${BACKEND_COMMIT}" ]]; then
     LDFLAGS+=" -X github.com/jenfonro/meowfilm/server/static.BuildBackendCommit=${BACKEND_COMMIT}"
   fi

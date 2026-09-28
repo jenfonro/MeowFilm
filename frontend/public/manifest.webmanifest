@@ -1,0 +1,14 @@
+{
+  "name": "MeowFilm",
+  "short_name": "MeowFilm",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b1220",
+  "theme_color": "#0EA5E9",
+  "icons": [
+    { "src": "/icons/icon-192x192.png", "type": "image/png", "sizes": "192x192" },
+    { "src": "/icons/icon-256x256.png", "type": "image/png", "sizes": "256x256" },
+    { "src": "/icons/icon-384x384.png", "type": "image/png", "sizes": "384x384" },
+    { "src": "/icons/icon-512x512.png", "type": "image/png", "sizes": "512x512" }
+  ]
+}

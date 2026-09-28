@@ -1,0 +1,42 @@
+.btn-green {
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: #22c55e;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+  cursor: pointer;
+}
+
+.btn-green:hover {
+  background: #16a34a;
+}
+
+.btn-ghost-blue {
+  padding: 8px 12px;
+  border-radius: 10px;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: 1px solid rgba(96, 165, 250, 0.55);
+  color: #60a5fa;
+  font-size: 14px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+  cursor: pointer;
+}
+
+.btn-ghost-blue:hover {
+  background: rgba(96, 165, 250, 0.1);
+  border-color: rgba(96, 165, 250, 0.75);
+}
+
+.btn-green:disabled,
+.btn-ghost-blue:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}

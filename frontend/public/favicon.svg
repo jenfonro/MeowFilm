@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">MeowFilm</title>
+  <desc id="desc">MeowFilm favicon: modern TV with cat paw play mark.</desc>
+  <defs>
+    <linearGradient id="bg" x1="140" y1="120" x2="920" y2="940" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0EA5E9"/>
+      <stop offset="0.48" stop-color="#22C55E"/>
+      <stop offset="1" stop-color="#6366F1"/>
+    </linearGradient>
+    <radialGradient id="vignette" cx="42%" cy="22%" r="86%">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.28"/>
+      <stop offset="0.55" stop-color="#FFFFFF" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.14"/>
+    </radialGradient>
+    <linearGradient id="screen" x1="330" y1="350" x2="740" y2="710" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1E293B"/>
+      <stop offset="1" stop-color="#334155"/>
+    </linearGradient>
+    <radialGradient id="screenShine" cx="30%" cy="22%" r="75%">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.14"/>
+      <stop offset="0.45" stop-color="#FFFFFF" stop-opacity="0.04"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="paw" x1="360" y1="380" x2="720" y2="720" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#00ADD8"/>
+      <stop offset="0.55" stop-color="#42B883"/>
+      <stop offset="1" stop-color="#646CFF"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="30" stdDeviation="28" flood-color="#0B1220" flood-opacity="0.28"/>
+    </filter>
+    <filter id="lift" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="14" stdDeviation="14" flood-color="#0B1220" flood-opacity="0.22"/>
+    </filter>
+  </defs>
+
+  <rect x="64" y="64" width="896" height="896" rx="228" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="228" fill="url(#vignette)"/>
+
+  <g filter="url(#shadow)">
+    <rect x="184" y="262" width="656" height="468" rx="164" fill="#FFFFFF" fill-opacity="0.26"/>
+    <rect x="204" y="282" width="616" height="428" rx="152" fill="#FFFFFF" fill-opacity="0.14"/>
+    <rect x="244" y="322" width="536" height="348" rx="132" fill="url(#screen)"/>
+    <rect x="244" y="322" width="536" height="348" rx="132" fill="url(#screenShine)"/>
+    <rect x="252" y="330" width="520" height="332" rx="124" fill="none" stroke="#FFFFFF" stroke-opacity="0.07" stroke-width="10"/>
+
+    <path d="M440 746 C468 792 556 792 584 746" fill="none" stroke="#FFFFFF" stroke-width="34" stroke-linecap="round" opacity="0.55"/>
+    <path d="M372 810 H652" fill="none" stroke="#FFFFFF" stroke-width="34" stroke-linecap="round" opacity="0.30"/>
+  </g>
+
+  <g filter="url(#lift)">
+    <circle cx="410" cy="452" r="32" fill="url(#paw)"/>
+    <circle cx="476" cy="418" r="36" fill="url(#paw)"/>
+    <circle cx="548" cy="418" r="36" fill="url(#paw)"/>
+    <circle cx="614" cy="452" r="32" fill="url(#paw)"/>
+    <path d="M512 476 C448 476 396 526 396 596 C396 670 456 724 512 724 C568 724 628 670 628 596 C628 526 576 476 512 476 Z" fill="url(#paw)"/>
+    <path d="M491 576 L491 658 L571 617 Z" fill="#FFFFFF" opacity="0.95"/>
+  </g>
+
+  <path d="M170 290 C212 188 328 128 448 134" fill="none" stroke="#FFFFFF" stroke-width="26" stroke-linecap="round" opacity="0.14"/>
+</svg>

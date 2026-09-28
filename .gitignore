@@ -1,9 +1,11 @@
 # Build outputs / runtime data (do not commit)
 /build
 /out_build
-/public/dist
+/backend/public/dist
 
 # Go tooling
+/.gomodcache
+/.gopath
 /.gocache
 /.cache
 /.tools
