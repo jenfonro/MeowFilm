@@ -1,7 +1,19 @@
 <template>
-  <div class="app-shell adm-flex adm-min-h-screen">
+  <div class="app-shell dashboard-shell adm-flex adm-min-h-screen" @keydown.esc="closeMobileNav">
+    <div
+      class="dashboard-nav-backdrop"
+      :class="{ 'is-open': mobileNavOpen }"
+      aria-hidden="true"
+      @click="closeMobileNav"
+      @touchmove.prevent
+      @wheel.prevent
+    ></div>
     <aside
+      id="dashboardSidebar"
+      ref="sidebarRef"
       class="sidebar dashboard-sidebar adm-flex-shrink-0 adm-bg-white-40 adm-backdrop-blur-xl adm-transition-all adm-duration-300 adm-border-r adm-border-gray-200-50 adm-shadow-lg adm-w-64 adm-p-4 adm-pt-6"
+      :class="{ 'is-open': mobileNavOpen }"
+      :inert="isMobileLayout && !mobileNavOpen"
       style="backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px)"
     >
       <div class="adm-text-xl adm-font-bold adm-text-green-600 adm-mb-6 adm-flex adm-items-center adm-gap-2">
@@ -22,9 +34,14 @@
           <path d="M9 21V9"></path>
         </svg>
         管理后台
+        <button class="dashboard-nav-close" type="button" aria-label="关闭设置导航" @click="closeMobileNav">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="m6 6 12 12M6 18 18 6"></path>
+          </svg>
+        </button>
       </div>
 
-      <nav class="adm-space-y-1">
+      <nav class="adm-space-y-1" aria-label="设置页面">
         <a
           href="/"
           class="nav-item group adm-flex adm-items-center adm-rounded-lg adm-px-3 adm-py-2 adm-pl-4 adm-text-gray-700 adm-hover-bg-gray-100-30 adm-hover-text-green-600 adm-gap-3 adm-justify-start adm-transition-colors adm-duration-200 adm-min-h-40"
@@ -55,7 +72,7 @@
             :data-active="activeNavKey === item.key"
             class="dashboard-nav nav-item group adm-flex adm-items-center adm-rounded-lg adm-px-3 adm-py-2 adm-pl-4 adm-text-gray-700 adm-hover-bg-gray-100-30 adm-hover-text-green-600 adm-data-active-bg-green-500-20 adm-data-active-text-green-700 adm-gap-3 adm-justify-start adm-transition-colors adm-duration-200 adm-min-h-40"
             href="#"
-            @click.prevent="activeNavKey = item.key"
+            @click.prevent="selectDashboardPanel(item.key)"
           >
             <component :is="item.icon" class="lucide adm-h-5 adm-w-5 adm-text-gray-500 adm-group-hover-text-green-600" />
             <span class="nav-label">{{ item.label }}</span>
@@ -64,8 +81,24 @@
       </nav>
     </aside>
 
-    <div class="adm-flex-1 adm-min-w-0 adm-flex adm-flex-col">
-      <div class="adm-flex-1 adm-min-w-0 adm-overflow-y-auto adm-p-6 adm-space-y-6">
+    <div class="dashboard-main adm-flex-1 adm-min-w-0 adm-flex adm-flex-col" :inert="isMobileLayout && mobileNavOpen">
+      <header class="dashboard-mobile-header">
+        <button
+          ref="mobileNavTriggerRef"
+          class="dashboard-mobile-title"
+          type="button"
+          aria-controls="dashboardSidebar"
+          :aria-expanded="mobileNavOpen"
+          :aria-label="`${activeNavTitle}，打开设置导航`"
+          @click="openMobileNav"
+        >
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M4 6h16M4 12h16M4 18h16"></path>
+          </svg>
+          <span>{{ activeNavTitle }}</span>
+        </button>
+      </header>
+      <div class="dashboard-content adm-flex-1 adm-min-w-0 adm-overflow-y-auto adm-p-6 adm-space-y-6">
         <section
           v-if="isAdmin && activeNavKey === 'site'"
           id="dashboardSite"
@@ -2494,7 +2527,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
   addDashboardUser,
   applyDashboardVideoSourceAutoResults,
@@ -2667,6 +2700,34 @@ const DEFAULT_AGGREGATE_REGEX_RULES = [
 
 const isAdmin = computed(() => props.bootstrap && props.bootstrap.user && props.bootstrap.user.role === 'admin');
 const activeNavKey = ref('site');
+const activeNavTitle = computed(() => adminNavItems.find((item) => item.key === activeNavKey.value)?.label || '管理后台');
+const mobileLayoutQuery = window.matchMedia('(max-width: 767.98px)');
+const isMobileLayout = ref(mobileLayoutQuery.matches);
+const mobileNavOpen = ref(false);
+const sidebarRef = ref(null);
+const mobileNavTriggerRef = ref(null);
+
+function openMobileNav() {
+  mobileNavOpen.value = true;
+  nextTick(() => sidebarRef.value?.querySelector('.dashboard-nav[data-active="true"], a')?.focus());
+}
+
+function closeMobileNav() {
+  if (!mobileNavOpen.value) return;
+  mobileNavOpen.value = false;
+  if (isMobileLayout.value) nextTick(() => mobileNavTriggerRef.value?.focus());
+}
+
+function selectDashboardPanel(key) {
+  activeNavKey.value = key;
+  closeMobileNav();
+}
+
+function syncMobileLayout(event) {
+  isMobileLayout.value = event.matches;
+  if (!event.matches) mobileNavOpen.value = false;
+}
+
 const DASHBOARD_ACTIVE_NAV_STORAGE_KEY = 'meowfilm_dashboard_active_nav';
 const siteLoading = ref(false);
 const userLoading = ref(false);
@@ -6910,6 +6971,7 @@ async function removeUser(user) {
 }
 
 onMounted(() => {
+  mobileLayoutQuery.addEventListener('change', syncMobileLayout);
   activeNavKey.value = resolvePersistedDashboardNavKey();
   loadDashboardPanelByKey(activeNavKey.value);
   document.addEventListener('click', onDocumentClick);
@@ -6917,6 +6979,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  mobileLayoutQuery.removeEventListener('change', syncMobileLayout);
   document.removeEventListener('click', onDocumentClick);
   window.removeEventListener('tv:smart-matchblock-updated', handleSmartMatchBlockUpdated);
   stopAllQrPolling();
@@ -7062,6 +7125,119 @@ watch([showCatSyncFromServerRow, catSyncFromServerOptions], ([visible, options])
   max-height: 100vh;
   align-self: flex-start;
   overflow-y: auto;
+}
+
+.dashboard-nav-backdrop,
+.dashboard-mobile-header,
+.dashboard-nav-close {
+  display: none;
+}
+
+@media (max-width: 767.98px) {
+  .dashboard-shell {
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .dashboard-main {
+    width: 100%;
+    min-height: 0;
+  }
+
+  .dashboard-content {
+    min-height: 0;
+    padding: 12px max(12px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+    overscroll-behavior-y: contain;
+  }
+
+  .dashboard-mobile-header {
+    display: block;
+    flex-shrink: 0;
+    padding: env(safe-area-inset-top) 12px 0;
+    background: rgba(255, 255, 255, 0.95);
+    border-bottom: 1px solid #e5e7eb;
+  }
+
+  .dashboard-mobile-title,
+  .dashboard-nav-close {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    min-height: 48px;
+    border: 0;
+    background: transparent;
+    color: #15803d;
+    font: inherit;
+    font-weight: 600;
+  }
+
+  .dashboard-mobile-title {
+    width: 100%;
+  }
+
+  .dashboard-nav-close {
+    min-width: 44px;
+    margin-left: auto;
+  }
+
+  .dashboard-sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 101;
+    width: min(280px, 85vw);
+    height: 100dvh;
+    max-height: 100dvh;
+    padding-top: max(16px, env(safe-area-inset-top));
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
+    background: rgba(255, 255, 255, 0.98);
+    visibility: hidden;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease-out, visibility 0.2s;
+    overscroll-behavior: contain;
+  }
+
+  .dashboard-sidebar.is-open {
+    visibility: visible;
+    transform: translateX(0);
+  }
+
+  .dashboard-nav-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    background: rgba(15, 23, 42, 0.35);
+    visibility: hidden;
+    opacity: 0;
+    transition: opacity 0.2s ease-out, visibility 0.2s;
+    touch-action: none;
+  }
+
+  .dashboard-nav-backdrop.is-open {
+    visibility: visible;
+    opacity: 1;
+  }
+
+  .dashboard-panel {
+    min-height: 0;
+  }
+
+  .dashboard-panel > .adm-text-base.adm-font-semibold:first-child {
+    display: none;
+  }
+
+  .dashboard-panel > :nth-child(2) {
+    margin-top: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dashboard-sidebar,
+  .dashboard-nav-backdrop {
+    transition: none;
+  }
 }
 
 .nav-item {
