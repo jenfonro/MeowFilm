@@ -283,6 +283,10 @@ export const extractCatDetailFields = (raw) => {
 export const extractRawNamesFromEpisodeUrl = (episodeUrl) => {
   const raw = normalizeString(episodeUrl);
   if (!raw) return [];
+  // Seven-field media metadata starts with a cover URL, not a pan share/file ID.
+  // Its final field is a playback locator, not a filename (even if it contains E05).
+  const fields = raw.split('*');
+  if (fields.length === 7 && /^https?:\/\//i.test(fields[0].trim())) return [];
   const stripMeta = (value) => {
     let out = normalizeString(value);
     if (!out) return '';

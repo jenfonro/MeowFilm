@@ -151,6 +151,15 @@ func smartExtractRawNamesFromEpisodeURL(episodeURL string) []string {
 	if strings.TrimSpace(raw) == "" {
 		return nil
 	}
+	// Seven-field media metadata starts with a cover URL, not a pan share/file ID.
+	// Its final field is a playback locator, not a filename (even if it contains E05).
+	fields := strings.Split(raw, "*")
+	if len(fields) == 7 {
+		first := strings.ToLower(strings.TrimSpace(fields[0]))
+		if strings.HasPrefix(first, "http://") || strings.HasPrefix(first, "https://") {
+			return nil
+		}
+	}
 	stripMeta := func(s string) string {
 		out := strings.TrimSpace(s)
 		if out == "" {
