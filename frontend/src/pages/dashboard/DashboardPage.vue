@@ -708,6 +708,14 @@
                                 >
                                   {{ catConfigUpdateBusyKey === buildCatConfigActionKey(item, index) ? '更新中' : '更新' }}
                                 </button>
+                                <button
+                                  type="button"
+                                  class="action-btn blue"
+                                  :disabled="!!catConfigRestartBusyKey || !item.id || catRemoteLoading || catSaving"
+                                  @click="triggerCatConfigRestart(item, index)"
+                                >
+                                  {{ catConfigRestartBusyKey === buildCatConfigActionKey(item, index) ? '提交中' : '重启' }}
+                                </button>
                                 <button type="button" class="action-btn blue" @click="openCatConfigEditorForEdit(index)">修改</button>
                                 <button type="button" class="action-btn red" @click="removeCatConfig(index)">删除</button>
                               </div>
@@ -2566,6 +2574,7 @@ import {
   restoreDashboardBackup,
   saveCatpawrunnerAdminSettings,
   updateCatpawrunnerOnlineConfig,
+  restartCatpawrunnerOnlineConfig,
   saveCatpawrunnerWebsitePans,
   saveDashboardCatpawrunnerServer,
   saveDashboardRelaySettings,
@@ -2779,6 +2788,7 @@ const catConfigEditorOpen = ref(false);
 const catConfigEditorMode = ref('create');
 const catConfigEditorIndex = ref(-1);
 const catConfigUpdateBusyKey = ref('');
+const catConfigRestartBusyKey = ref('');
 const catConfigEditorForm = ref({
   name: '',
   url: ''
@@ -4672,6 +4682,30 @@ async function triggerCatConfigUpdate(item, index) {
     notifyError((err && err.message) || '更新失败');
   } finally {
     catConfigUpdateBusyKey.value = '';
+  }
+}
+
+async function triggerCatConfigRestart(item, index) {
+  if (catRemoteLoading.value || catSaving.value || catConfigRestartBusyKey.value) return;
+  const id = item && typeof item.id === 'string' ? item.id.trim() : '';
+  if (!id) return;
+  const apiBase = normalizedCatApiBase.value;
+  catConfigRestartBusyKey.value = buildCatConfigActionKey(item, index);
+  try {
+    const data = await restartCatpawrunnerOnlineConfig(apiBase, id);
+    if (apiBase !== normalizedCatApiBase.value) return;
+    // Refresh only this row's runtime state; do not overwrite unsaved settings.
+    const state = Array.isArray(data.onlineConfigs) ? data.onlineConfigs.find((row) => row.id === id) : null;
+    if (state) {
+      catOnlineConfigs.value = catOnlineConfigs.value.map((row) => row.id === id
+        ? { ...row, status: state.status }
+        : row);
+    }
+    notifySuccess(data.skipped ? '该配置正在重启' : '重启任务已提交');
+  } catch (err) {
+    if (apiBase === normalizedCatApiBase.value) notifyError((err && err.message) || '重启失败');
+  } finally {
+    catConfigRestartBusyKey.value = '';
   }
 }
 
