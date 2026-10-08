@@ -1098,7 +1098,7 @@
             <div class="adm-flex adm-justify-start">
               <div class="adm-flex adm-flex-col adm-gap-2">
                 <div class="adm-flex adm-items-center adm-gap-2">
-                  <button type="button" class="btn-green" :disabled="videoImporting" @click="importVideoSourcesFromCatpawrunner">
+                  <button type="button" class="btn-green" :disabled="videoImporting || !!videoSourceDeletingKey" @click="importVideoSourcesFromCatpawrunner">
                     {{ videoImporting ? '导入中' : '从 CatPawRunner 导入站源' }}
                   </button>
                 </div>
@@ -1117,7 +1117,7 @@
             </button>
             <div v-if="videoSitesExpanded" class="tv-us-acc-body">
               <div class="adm-flex adm-items-center adm-gap-2 adm-mb-2">
-                <button type="button" class="btn-ghost-blue" @click="pickVideoSourceImportFile">导入站点</button>
+                <button type="button" class="btn-ghost-blue" :disabled="videoImporting || !!videoSourceDeletingKey" @click="pickVideoSourceImportFile">导入站点</button>
                 <button type="button" class="btn-ghost-blue" @click="exportVideoSourcesToJson">导出站点</button>
                 <input
                   ref="videoSourceImportFileRef"
@@ -1138,7 +1138,7 @@
                 </div>
               </div>
               <div class="adm-max-h-60vh adm-overflow-y-auto tv-panel">
-                <div class="video-source-header tv-row adm-sticky adm-top-0 adm-z-2 adm-mb-2">
+                <div class="video-source-header tv-row adm-sticky adm-top-0 adm-z-2 adm-mb-2" :style="videoSourceRowStyle">
                   <input
                     type="checkbox"
                     class="video-source-checkbox"
@@ -1154,10 +1154,11 @@
                   <span class="adm-text-sm adm-font-medium adm-text-gray-600" :style="videoSourceFixed96CellStyle">聚合图片显示</span>
                   <span class="adm-text-sm adm-font-medium adm-text-gray-600" :style="videoSourceFixed72CellStyle">排序</span>
                   <span class="adm-text-sm adm-font-medium adm-text-gray-600" :style="videoSourceErrorCellStyle">错误信息</span>
+                  <span class="adm-text-sm adm-font-medium adm-text-gray-600" :style="videoSourceFixed72CellStyle">操作</span>
                 </div>
                 <ul class="pan-list adm-space-y-2 adm-text-sm adm-text-gray-700">
                   <li v-if="!videoSourceSites.length" class="adm-text-gray-500">暂无站源，解析完成后会在这里展示。</li>
-                  <li v-for="(site, index) in videoSourceSites" :key="site.key || index" class="tv-row">
+                  <li v-for="(site, index) in videoSourceSites" :key="site.key || index" class="tv-row" :style="videoSourceRowStyle">
                     <input
                       type="checkbox"
                       class="video-source-checkbox"
@@ -1210,6 +1211,17 @@
                       </span>
                     </span>
                     <span class="adm-text-xs adm-text-gray-500" :style="videoSourceErrorCellStyle">{{ site.error || '' }}</span>
+                    <span :style="videoSourceFixed72CellStyle">
+                      <button
+                        type="button"
+                        class="btn-ghost-red"
+                        :aria-label="`删除站点：${site.name || site.key}`"
+                        :disabled="videoImporting || videoLoading || !!videoSourceDeletingKey"
+                        @click="deleteVideoSourceSite(site)"
+                      >
+                        {{ videoSourceDeletingKey === site.key ? '删除中' : '删除' }}
+                      </button>
+                    </span>
                   </li>
                 </ul>
               </div>
@@ -2544,6 +2556,7 @@ import {
   deleteSmartMatchBlockItem,
   deleteSmartMatchBlockKeyword,
   deleteDashboardCatpawrunnerServer,
+  deleteDashboardVideoSourceSite,
   fetchPanSettings,
   fetchCatpawrunnerAdminSettings,
   fetchCatpawrunnerFullConfig,
@@ -2841,6 +2854,7 @@ const relayEditorForm = ref({
 });
 const videoLoading = ref(false);
 const videoImporting = ref(false);
+const videoSourceDeletingKey = ref('');
 const videoSitesExpanded = ref(false);
 const videoSourceImportFileRef = ref(null);
 const videoSourceSites = ref([]);
@@ -4380,6 +4394,15 @@ const videoSourceErrorCellStyle = {
   wordBreak: 'break-word'
 };
 
+const videoSourceRowStyle = computed(() => {
+  // Keep every row's background and border behind all columns when scrolling.
+  // Fixed cells + border; the checkbox, ten gaps and padding total 10rem.
+  const fixedWidth = 5 * 72 + 2 * 96 + 240 + 2;
+  return {
+    minWidth: `calc(${videoSourceNameWidthPx.value + videoSourceApiWidthPx.value + fixedWidth}px + 10rem)`
+  };
+});
+
 const allVideoSourceSelected = computed(() => {
   const sites = Array.isArray(videoSourceSites.value) ? videoSourceSites.value : [];
   if (!sites.length) return false;
@@ -5141,6 +5164,29 @@ function applyVideoSourceSites(sites, coverSite = '') {
   selectedVideoSourceKeys.value = selectedVideoSourceKeys.value.filter((key) => validKeys.has(key));
 }
 
+async function deleteVideoSourceSite(site) {
+  const key = String(site && site.key || '').trim();
+  if (!key || videoLoading.value || videoImporting.value || videoSourceDeletingKey.value) return;
+  const name = String(site && (site.name || site.key) || key).trim() || key;
+  if (!window.confirm(`确定删除站点「${name}」？\n仅从 MeowFilm 移除，不修改 CatPawRunner 脚本；重新导入站源后可恢复。`)) return;
+  videoSourceDeletingKey.value = key;
+  try {
+    const data = await deleteDashboardVideoSourceSite(key);
+    const sites = Array.isArray(data && data.sites)
+      ? data.sites
+      : videoSourceSites.value.filter((item) => item.key !== key);
+    const coverSite = data && typeof data.coverSite === 'string'
+      ? data.coverSite
+      : (videoSourceCoverSite.value === key ? '' : videoSourceCoverSite.value);
+    applyVideoSourceSites(sites, coverSite);
+    notifySuccess('站点已删除');
+  } catch (err) {
+    notifyError((err && err.message) || '删除失败');
+  } finally {
+    videoSourceDeletingKey.value = '';
+  }
+}
+
 async function persistVideoSourceToggle(site, field, checked, updater) {
   const key = String(site && site.key || '').trim();
   if (!key) return;
@@ -5227,7 +5273,7 @@ async function resolveVideoCatApiBase() {
 }
 
 async function loadVideoPanel() {
-  if (!isAdmin.value || videoLoading.value) return;
+  if (!isAdmin.value || videoLoading.value || videoSourceDeletingKey.value) return;
   videoLoading.value = true;
   try {
     const data = await fetchDashboardVideoSourceSites();
@@ -5981,14 +6027,14 @@ function runMagicAggregateRuleTest() {
 }
 
 async function importVideoSourcesFromCatpawrunner() {
-  if (videoImporting.value) return;
-  const apiBase = await resolveVideoCatApiBase();
-  if (!apiBase) {
-    notifyError('CatPawRunner 接口地址未设置');
-    return;
-  }
+  if (videoImporting.value || videoSourceDeletingKey.value) return;
   videoImporting.value = true;
   try {
+    const apiBase = await resolveVideoCatApiBase();
+    if (!apiBase) {
+      notifyError('CatPawRunner 接口地址未设置');
+      return;
+    }
     const fullConfig = await fetchCatpawrunnerFullConfig(apiBase, props.bootstrap?.user?.username || '');
     const list = fullConfig && fullConfig.video && Array.isArray(fullConfig.video.sites) ? fullConfig.video.sites : [];
     const sitesPayload = list
@@ -6044,6 +6090,7 @@ function exportVideoSourcesToJson() {
 }
 
 function pickVideoSourceImportFile() {
+  if (videoImporting.value || videoSourceDeletingKey.value) return;
   if (videoSourceImportFileRef.value) {
     try {
       videoSourceImportFileRef.value.value = '';
@@ -6056,6 +6103,11 @@ async function importVideoSourcesFromJson(event) {
   const input = event && event.target ? event.target : null;
   const file = input && input.files && input.files[0] ? input.files[0] : null;
   if (!file) return;
+  if (videoImporting.value || videoSourceDeletingKey.value) {
+    try { input.value = ''; } catch (_e) {}
+    return;
+  }
+  videoImporting.value = true;
   try {
     const text = await file.text();
     const parsed = JSON.parse(text);
@@ -6121,6 +6173,7 @@ async function importVideoSourcesFromJson(event) {
   } catch (err) {
     notifyError((err && err.message) || '导入失败');
   } finally {
+    videoImporting.value = false;
     if (input) {
       try { input.value = ''; } catch (_e) {}
     }

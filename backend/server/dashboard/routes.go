@@ -52,6 +52,8 @@ func handleDashboardMainRoutes(path string, w http.ResponseWriter, r *http.Reque
 		serveAdminDB(handleDashboardVideoSourceSettings)
 	case "/video/source/sites":
 		serveAdminDB(handleDashboardVideoSourceSites)
+	case "/video/source/sites/delete":
+		serveAdminDB(handleDashboardVideoSourceSiteDelete)
 	case "/video/source/sites/status":
 		serveAdminDB(handleDashboardVideoSourceSiteStatus)
 	case "/video/source/sites/home":

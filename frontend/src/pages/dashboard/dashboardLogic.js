@@ -370,6 +370,12 @@ export async function importDashboardVideoSourceSites(list) {
   });
 }
 
+export async function deleteDashboardVideoSourceSite(key) {
+  const target = typeof key === 'string' ? key.trim() : '';
+  if (!target) throw new Error('站点 key 不能为空');
+  return postForm('/dashboard/video/source/sites/delete', { key: target });
+}
+
 export async function updateDashboardVideoSourceStatus(key, enabled) {
   return postForm('/dashboard/video/source/sites/status', {
     key,

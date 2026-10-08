@@ -638,6 +638,53 @@ func (d *DB) ReplaceVideoSourceSites(sites []VideoSourceSite) error {
 	return d.refreshVideoSourceSitesCache()
 }
 
+func (d *DB) DeleteVideoSourceSite(key string) (bool, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return false, errors.New("site key empty")
+	}
+	if d == nil || d.db == nil {
+		return false, errors.New("database unavailable")
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.Exec(`DELETE FROM video_source_site WHERE key = ?`, key)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if count == 0 {
+		return false, nil
+	}
+	// Also clean up legacy databases without the state table's cascading FK.
+	if _, err := tx.Exec(`DELETE FROM video_source_site_state WHERE site_key = ?`, key); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(`
+		UPDATE app_video_source SET search_cover_site = '', updated_at = ?
+		WHERE id = 1 AND search_cover_site = ?
+	`, time.Now().Unix(), key); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	// Invalidate only after commit. Reload both snapshots on the next read so
+	// the removed site and a cleared cover preference cannot remain cached.
+	d.mu.Lock()
+	d.videoSourceSitesCached = false
+	d.videoSourceSitesCache = nil
+	d.appConfigCached = false
+	d.mu.Unlock()
+	return true, nil
+}
+
 func (d *DB) ReadVideoSourceSiteStates() (map[string]VideoSourceSiteState, error) {
 	rows, err := d.db.Query(`SELECT site_key, enabled, home, search, smart_skip, availability, error, order_index FROM video_source_site_state`)
 	if err != nil {
