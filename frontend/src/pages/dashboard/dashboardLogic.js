@@ -636,7 +636,7 @@ function readPanMockFlag(resp) {
   return false;
 }
 
-function parsePlayCandidates(fromStr, urlStr) {
+function parsePlayCandidates(fromStr, urlStr, allowPanMockFlagOnly = false) {
   const fromRaw = typeof fromStr === 'string' ? fromStr : '';
   const urlRaw = typeof urlStr === 'string' ? urlStr : '';
   const splitTop = (s) => (s ? s.split('$$$') : []);
@@ -648,7 +648,7 @@ function parsePlayCandidates(fromStr, urlStr) {
   for (let i = 0; i < len; i += 1) {
     const baseLabel = String(fromParts[i] || '').trim() || `源${i + 1}`;
     const baseURL = String(urlParts[i] || '').trim();
-    if (!baseURL) continue;
+    if (!baseURL && !allowPanMockFlagOnly) continue;
     const fromSubs = baseLabel.includes('|||')
       ? baseLabel.split('|||').map((x) => String(x || '').trim())
       : [baseLabel];
@@ -659,14 +659,18 @@ function parsePlayCandidates(fromStr, urlStr) {
     for (let j = 0; j < subLen; j += 1) {
       const flag = String(fromSubs[j] || '').trim() || baseLabel;
       const urlBlock = String(urlSubs[j] || '').trim();
-      if (!urlBlock) continue;
+      if (!urlBlock && !allowPanMockFlagOnly) continue;
       const firstLine = String(urlBlock.split('#')[0] || '').trim();
-      if (!firstLine) continue;
       const idx = firstLine.indexOf('$');
       const id = String(idx >= 0 ? firstLine.slice(idx + 1) : firstLine).trim();
       const siteEpisodeFile = String(idx >= 0 ? firstLine.slice(0, idx) : '').trim();
       const passcode = derivePanMockPasscode(siteEpisodeFile, id);
-      if (!flag || !id) continue;
+      const separator = flag.indexOf('-');
+      // A mocked detail may contain only provider-shareId flags; list resolves
+      // the real playback ID later. Do not relax ordinary/native playback.
+      const canResolvePanList = allowPanMockFlagOnly && panMockProviderFromFlag(flag)
+        && separator > 0 && flag.slice(separator + 1).trim();
+      if (!flag || (!id && !canResolvePanList)) continue;
       const uniqKey = `${flag}@@${id}`;
       if (seen.has(uniqKey)) continue;
       seen.add(uniqKey);
@@ -676,7 +680,7 @@ function parsePlayCandidates(fromStr, urlStr) {
   return out;
 }
 
-function extractPlayCandidatesFromVod(vod) {
+function extractPlayCandidatesFromVod(vod, allowPanMockFlagOnly = false) {
   if (!vod || typeof vod !== 'object') return [];
   const from =
     (typeof vod.vod_play_from === 'string' ? vod.vod_play_from : '') ||
@@ -686,7 +690,7 @@ function extractPlayCandidatesFromVod(vod) {
     (typeof vod.vod_play_url === 'string' ? vod.vod_play_url : '') ||
     (typeof vod.play_url === 'string' ? vod.play_url : '') ||
     (typeof vod.playUrl === 'string' ? vod.playUrl : '');
-  return parsePlayCandidates(from, url);
+  return parsePlayCandidates(from, url, allowPanMockFlagOnly);
 }
 
 function extractVodId(vod) {
@@ -727,12 +731,6 @@ function parseFirstPanEpisodeID(vodPlayURL) {
   return String(firstLine.slice(idx + 1) || '').trim();
 }
 
-async function fetchJsonSafe(url, options = {}) {
-  const resp = await fetch(url, options);
-  const data = await readJson(resp);
-  return { resp, data };
-}
-
 async function callPanPlayResolver(provider, { flag = '', id = '', passcode = '' } = {}, tvUser = '') {
   const p = String(provider || '').trim();
   const panFlag = String(flag || '').trim();
@@ -754,7 +752,7 @@ async function callPanPlayResolver(provider, { flag = '', id = '', passcode = ''
   const body = p === '189'
     ? (panPasscode ? { id: panID, accessCode: panPasscode } : { id: panID })
     : { flag: panFlag, id: panID };
-  const { resp, data } = await fetchJsonSafe(target, {
+  const { resp, data } = await requestJsonResponse(target, {
     method: 'POST',
     credentials: 'include',
     headers,
@@ -800,15 +798,18 @@ async function callPanListResolver(provider, { flag = '', passcode = '' } = {}, 
     if (p === '139' || p === 'quark' || p === 'uc') listBody.passcode = panPasscode;
     if (p === 'baidu') listBody.pwd = panPasscode;
   }
-  const { resp, data } = await fetchJsonSafe(target, {
+  const { resp, data } = await requestJsonResponse(target, {
     method: 'POST',
     credentials: 'include',
     headers,
     body: JSON.stringify(listBody)
   });
-  if (!resp.ok || !data || data.ok === false) {
-    const msg = data && data.message ? String(data.message) : `HTTP ${resp.status}`;
-    const err = new Error(msg);
+  const message = data && data.message ? String(data.message) : `HTTP ${resp.status}`;
+  const shareExpired = p === 'baidu' && (
+    Number(data && data.errno) === -9 || /\berrno\s*[=:]\s*-9(?![\d.])/i.test(message)
+  );
+  if (!resp.ok || !data || data.ok === false || shareExpired) {
+    const err = new Error(shareExpired ? '分享链接已失效（百度 errno=-9）' : message);
     try { err.status = resp.status; } catch (_e) {}
     throw err;
   }
@@ -832,7 +833,7 @@ async function tryPlayCandidatesForVideoSource({ apiBase, spiderPath, items, tvU
   const candidates = (Array.isArray(items) ? items : []).filter((v) => v && typeof v === 'object').slice(0, 3);
   for (let j = 0; j < candidates.length; j += 1) {
     const vod = candidates[j];
-    let playCandidates = extractPlayCandidatesFromVod(vod);
+    let playCandidates = extractPlayCandidatesFromVod(vod, panMockFlow);
     try {
       let detailFetched = false;
       let detailOK = false;
@@ -857,7 +858,7 @@ async function tryPlayCandidatesForVideoSource({ apiBase, spiderPath, items, tvU
         }
         const detailList = extractList(detailResp);
         const first = Array.isArray(detailList) && detailList.length ? detailList[0] : null;
-        detailCandidates = extractPlayCandidatesFromVod(first);
+        detailCandidates = extractPlayCandidatesFromVod(first, panMockFlow);
         detailOK = true;
         return true;
       };
@@ -885,10 +886,10 @@ async function tryPlayCandidatesForVideoSource({ apiBase, spiderPath, items, tvU
       const orderedCandidates = playCandidates.slice();
       for (let k = 0; k < orderedCandidates.length; k += 1) {
         const playCandidate = orderedCandidates[k];
-        if (!playCandidate || !playCandidate.flag || !playCandidate.id) continue;
+        if (!playCandidate || !playCandidate.flag) continue;
         const panProvider = panMockProviderFromFlag(playCandidate.flag);
-        if (panMockFlow && panProvider) {
-          try {
+        try {
+          if (panMockFlow && panProvider) {
             const panPasscode = panProvider === '189'
               ? deriveTianyiMockMeta(playCandidate.flag, playCandidate.passcode).accessCode
               : playCandidate.passcode;
@@ -907,29 +908,31 @@ async function tryPlayCandidatesForVideoSource({ apiBase, spiderPath, items, tvU
             }, tvUser);
             if (panURL) return { ok: true, playErr: '' };
             playErr = '未提取到地址';
-          } catch (err) {
-            playErr = formatHttpError(err);
-            if (isFatalHttpProbeError(err)) break;
+            continue;
           }
-          continue;
-        }
 
-        const playResp = await requestCatpawrunnerAdminJson({
-          apiBase,
-          path: 'play',
-          method: 'POST',
-          body: {
-            flag: playCandidate.flag,
-            id: playCandidate.id,
-            siteApi: `/${spiderPath}`.replace(/\/{2,}/g, '/')
-          },
-          tvUser
-        });
-        const psc = normalizeStatusCode(playResp);
-        if (psc >= 400) continue;
-        const url = extractPlayUrl(playResp);
-        if (url) return { ok: true, playErr: '' };
-        playErr = '未提取到地址';
+          if (!playCandidate.id) continue;
+          const playResp = await requestCatpawrunnerAdminJson({
+            apiBase,
+            path: 'play',
+            method: 'POST',
+            body: {
+              flag: playCandidate.flag,
+              id: playCandidate.id,
+              siteApi: `/${spiderPath}`.replace(/\/{2,}/g, '/')
+            },
+            tvUser
+          });
+          const psc = normalizeStatusCode(playResp);
+          if (psc >= 400) continue;
+          const url = extractPlayUrl(playResp);
+          if (url) return { ok: true, playErr: '' };
+          playErr = '未提取到地址';
+        } catch (err) {
+          // A failing share/provider/route does not invalidate the other pans
+          // in this detail, even when its own list/play API returns 403/404.
+          playErr = formatHttpError(err);
+        }
       }
     } catch (err) {
       playErr = formatHttpError(err);

@@ -2,7 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const source = fs.readFileSync('src/shared/playHistoryRuntime.js', 'utf8').replace(/^import .*;\n/gm, '').replace(/export /g, '');
+const source = fs.readFileSync('src/shared/playHistoryRuntime.js', 'utf8').replace(/^import .*;\r?\n/gm, '').replace(/export /g, '');
 const binding = { apiBase: 'http://runner/prefix/', spiderApi: '/0123456789/spider/site/3', id: 'pic*author*duration****watch?v=episode', flag: 'line' };
 function runtime(respond = body => ({ success: true, ...(body.watchReport ? { watchReport: { ok: true } } : {}) })) {
   const posts = [];
