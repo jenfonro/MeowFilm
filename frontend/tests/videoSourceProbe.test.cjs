@@ -10,6 +10,7 @@ const source = stripModuleSyntax(readFileSync('src/pages/dashboard/dashboardLogi
 const requestSource = stripModuleSyntax(readFileSync('src/shared/requestJson.js', 'utf8'));
 const normalizeSource = stripModuleSyntax(readFileSync('src/shared/normalize.js', 'utf8'));
 const urlSource = stripModuleSyntax(readFileSync('src/shared/urlText.js', 'utf8'));
+const matchSource = stripModuleSyntax(readFileSync('src/utils/matchCore.js', 'utf8'));
 const site = { key: 'probe', name: '检测测试源', api: '/aaaaaaaaaa/spider/test/3' };
 const response = (data, status = 200) => ({ status, ok: status >= 200 && status < 300, json: async () => data });
 const listing = (id) => response({ ok: true, vod_play_url: `第一集$${id}` });
@@ -58,6 +59,7 @@ function makeProbe({ details, items, lists = {}, plays = {}, nativePlays = {}, p
   vm.runInContext(`
     const requestJsonResponse = (() => { ${requestSource}; return requestJsonResponse; })();
     const sharedNormalizeHttpBase = (() => { ${normalizeSource}; ${urlSource}; return normalizeHttpBase; })();
+    const { getPanShareInput, panMockProviderFromFlag } = (() => { ${matchSource}; return { getPanShareInput, panMockProviderFromFlag }; })();
     ${source}
   `, context);
   return {
@@ -81,7 +83,7 @@ const resolutionCalls = (calls) => calls
 
 test('source probing parses list/play JSON through the shared request helper', async () => {
   const probe = makeProbe({
-    details: { first: detail('夸父-share-one', 'nopass.mp4$placeholder') },
+    details: { first: detail('夸父-share-one', '') },
     lists: { '夸父-share-one': listing('quark-file') },
     plays: { 'quark-file': playable() },
   });
@@ -129,8 +131,8 @@ test('Baidu errno -9 means an expired share, not a JSON parser or playback error
     { ok: false, errno: '-9' },
   ]) {
     const probe = makeProbe({
-      details: { first: detail('百度-expired', 'nopass.mp4$placeholder') },
-      lists: { '百度-expired': response(data) },
+      details: { first: detail('百度-expired', 'https://pan.baidu.com/s/1expired?pwd=expired') },
+      lists: { 'https://pan.baidu.com/s/1expired?pwd=expired': response(data) },
     });
     const saved = await probe.run();
     assert.equal(saved.results.probe, 'invalid');
@@ -142,8 +144,8 @@ test('Baidu errno -9 means an expired share, not a JSON parser or playback error
 
 test('Baidu errors other than -9 are not mislabeled as expired shares', async () => {
   const probe = makeProbe({
-    details: { first: detail('百度-other-error', 'nopass.mp4$placeholder') },
-    lists: { '百度-other-error': response({ ok: false, message: 'baidu api errno=-90' }) },
+    details: { first: detail('百度-other-error', 'https://pan.baidu.com/s/1other-error?pwd=other-error') },
+    lists: { 'https://pan.baidu.com/s/1other-error?pwd=other-error': response({ ok: false, message: 'baidu api errno=-90' }) },
   });
   const saved = await probe.run();
   assert.equal(saved.results.probe, 'invalid');
@@ -153,9 +155,9 @@ test('Baidu errors other than -9 are not mislabeled as expired shares', async ()
 
 test('a provider-specific 403 does not skip the remaining pans in the same detail', async () => {
   const probe = makeProbe({
-    details: { first: detail('百度-denied$$$优夕-working', 'nopass.mp4$one$$$nopass.mp4$two') },
+    details: { first: detail('百度-denied$$$优夕-working', 'https://pan.baidu.com/s/1denied?pwd=denied$$$') },
     lists: {
-      '百度-denied': response({ ok: false, message: 'share denied' }, 403),
+      'https://pan.baidu.com/s/1denied?pwd=denied': response({ ok: false, message: 'share denied' }, 403),
       '优夕-working': listing('uc-file'),
     },
     plays: { 'uc-file': playable() },
@@ -163,7 +165,7 @@ test('a provider-specific 403 does not skip the remaining pans in the same detai
   const saved = await probe.run();
   assert.equal(saved.results.probe, 'valid');
   assert.deepEqual(resolutionCalls(probe.calls), [
-    'detail:first', 'list:百度-denied', 'list:优夕-working', 'play:优夕-working',
+    'detail:first', 'list:https://pan.baidu.com/s/1denied?pwd=denied', 'list:优夕-working', 'play:优夕-working',
   ]);
 });
 
@@ -171,11 +173,11 @@ test('all pan lists in one detail are attempted before advancing to the next det
   const probe = makeProbe({
     items: [{ vod_id: 'first' }, { vod_id: 'second' }],
     details: {
-      first: detail('百度-expired$$$夸父-empty'),
+      first: detail('百度-expired$$$夸父-empty', 'https://pan.baidu.com/s/1expired?pwd=expired$$$'),
       second: detail('优夕-working'),
     },
     lists: {
-      '百度-expired': response({ ok: false, message: 'baidu api errno=-9' }, 404),
+      'https://pan.baidu.com/s/1expired?pwd=expired': response({ ok: false, message: 'baidu api errno=-9' }, 404),
       '夸父-empty': response({ ok: true, vod_play_url: '' }),
       '优夕-working': listing('uc-file'),
     },
@@ -184,7 +186,7 @@ test('all pan lists in one detail are attempted before advancing to the next det
   const saved = await probe.run();
   assert.equal(saved.results.probe, 'valid');
   assert.deepEqual(resolutionCalls(probe.calls), [
-    'detail:first', 'list:百度-expired', 'list:夸父-empty', 'detail:second', 'list:优夕-working', 'play:优夕-working',
+    'detail:first', 'list:https://pan.baidu.com/s/1expired?pwd=expired', 'list:夸父-empty', 'detail:second', 'list:优夕-working', 'play:优夕-working',
   ]);
 });
 

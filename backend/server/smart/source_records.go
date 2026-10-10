@@ -10,20 +10,11 @@ import (
 )
 
 func smartBuildPanMockResolveGroupKey(r smartDetailSourceRecord) string {
-	provider := strings.TrimSpace(r.Provider)
-	panFlag := strings.TrimSpace(r.PanFlag)
-	sourceValue := strings.TrimSpace(r.SourceValue)
-	if provider == "" || panFlag == "" {
+	share, ok := catpawrunner.ParsePanShareInput(r.PanFlag, r.SourceValue)
+	if !ok || share.Provider != strings.TrimSpace(r.Provider) {
 		return ""
 	}
-	if provider == "189" {
-		shareCode, accessCode := smartPanMock189CredentialsFromSourceValue(panFlag, sourceValue)
-		if strings.TrimSpace(shareCode) == "" {
-			return ""
-		}
-		return provider + "|" + strings.TrimSpace(shareCode) + "|" + strings.TrimSpace(accessCode)
-	}
-	return provider + "|" + strings.TrimSpace(catpawrunner.NormalizePanMockFlag(panFlag))
+	return share.Key() + "|" + share.Passcode
 }
 
 func smartBuildDetailSourceRecords(playFrom string, playURL string, panMock bool, src smartSource) []smartDetailSourceRecord {
@@ -61,8 +52,9 @@ func smartBuildDetailSourceRecords(playFrom string, playURL string, panMock bool
 			Status:      smartDetailSourceSkipped,
 			AccessDelta: map[string]string{},
 		}
-		if panMock && catpawrunner.IsSupportedPanMockFlag(label) {
-			record.Provider = strings.TrimSpace(catpawrunner.PanMockProviderFromFlag(label))
+		share, hasShare := catpawrunner.ParsePanShareInput(label, sourceValue)
+		if panMock && hasShare {
+			record.Provider = share.Provider
 			record.PanFlag = strings.TrimSpace(catpawrunner.NormalizePanMockFlag(label))
 			record.Supported = record.Provider != "" && record.PanFlag != ""
 			if record.Supported {
@@ -293,6 +285,10 @@ func smartBuildEpisodeMapsFromResolvedRecords(
 			panFlag = strings.TrimSpace(record.PanFlag)
 		}
 		panTokenIdx := smartLabelRuleIdx(panFlag, settings.PanTokenOrderLower, settings.PanMatchEntries)
+		detailLocalProvider := ""
+		if record.PanMock && record.Supported {
+			detailLocalProvider = record.Provider
+		}
 		for _, rawEp := range record.Episodes {
 			ep := smartEpisodeWithPanFlag(rawEp, panFlag)
 			if strings.TrimSpace(ep.URL) == "" {
@@ -349,6 +345,7 @@ func smartBuildEpisodeMapsFromResolvedRecords(
 				SiteDetail:      src.SiteDetail,
 				SrcRemarkLower:  srcRemarkLower,
 				PanFlag:         panFlag,
+				detailProvider:  &detailLocalProvider,
 				PanTokenIdx:     panTokenIdx,
 				Ep:              ep,
 				RawName:         rawName,
@@ -394,6 +391,10 @@ func smartBuildMovieCandidatesFromResolvedRecords(
 			panFlag = strings.TrimSpace(record.PanFlag)
 		}
 		panTokenIdx := smartLabelRuleIdx(panFlag, settings.PanTokenOrderLower, settings.PanMatchEntries)
+		detailLocalProvider := ""
+		if record.PanMock && record.Supported {
+			detailLocalProvider = record.Provider
+		}
 		for _, ep := range record.Episodes {
 			if strings.TrimSpace(ep.URL) == "" {
 				continue
@@ -427,6 +428,7 @@ func smartBuildMovieCandidatesFromResolvedRecords(
 				SiteDetail:     src.SiteDetail,
 				SrcRemarkLower: srcRemarkLower,
 				PanFlag:        panFlag,
+				detailProvider: &detailLocalProvider,
 				PanTokenIdx:    panTokenIdx,
 				Ep:             ep,
 				RawName:        rawName,

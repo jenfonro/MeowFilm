@@ -97,24 +97,38 @@ func NormalizePanMockFlag(label string) string {
 
 func PanMockProviderFromFlag(label string) string {
 	raw := NormalizePanMockFlag(label)
-	if raw == "" || !strings.Contains(raw, "-") {
+	if raw == "" {
 		return ""
 	}
 	head := strings.TrimSpace(strings.SplitN(raw, "-", 2)[0])
 	switch {
-	case strings.Contains(head, "百度原画"):
+	case head == "百度":
 		return "baidu"
-	case strings.Contains(head, "夸父"):
+	case head == "夸克":
 		return "quark"
-	case strings.Contains(head, "优夕"):
+	case strings.EqualFold(head, "UC"):
 		return "uc"
-	case strings.Contains(head, "天意"):
+	case head == "天翼":
 		return "189"
-	case strings.Contains(head, "逸动"):
+	case head == "移动":
 		return "139"
-	default:
-		return ""
 	}
+	// Retain legacy history/Emby name recognition, including decorated flags.
+	if strings.Contains(raw, "-") {
+		switch {
+		case strings.Contains(head, "百度"):
+			return "baidu"
+		case strings.Contains(head, "夸父"):
+			return "quark"
+		case strings.Contains(head, "优夕"):
+			return "uc"
+		case strings.Contains(head, "天意"):
+			return "189"
+		case strings.Contains(head, "逸动"):
+			return "139"
+		}
+	}
+	return ""
 }
 
 func IsSupportedPanMockFlag(label string) bool {

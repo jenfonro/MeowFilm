@@ -1,5 +1,6 @@
 import { requestJsonResponse } from '../../shared/requestJson';
 import { normalizeHttpBase as sharedNormalizeHttpBase } from '../../shared/urlText';
+import { getPanShareInput, panMockProviderFromFlag } from '../../utils/matchCore';
 
 const jsonHeaders = {
   Accept: 'application/json'
@@ -483,20 +484,6 @@ function normalizePanMockPasscode(raw) {
   return firstToken || '';
 }
 
-function panMockProviderFromFlag(flag) {
-  const value = typeof flag === 'string' ? flag.trim() : '';
-  if (!value) return '';
-  const headSeg = (value.split('-')[0] || '').trim();
-  if (!headSeg) return '';
-  const head2 = Array.from(headSeg).slice(0, 2).join('');
-  if (head2 === '天意') return '189';
-  if (head2 === '逸动') return '139';
-  if (head2 === '夸父') return 'quark';
-  if (head2 === '优夕') return 'uc';
-  if (head2 === '百度') return 'baidu';
-  return '';
-}
-
 function extractTianyiShareCodeLike(flagOrURL) {
   const value = typeof flagOrURL === 'string' ? flagOrURL.trim() : '';
   if (!value) return '';
@@ -671,16 +658,13 @@ function parsePlayCandidates(fromStr, urlStr, allowPanMockFlagOnly = false) {
       const id = String(idx >= 0 ? firstLine.slice(idx + 1) : firstLine).trim();
       const siteEpisodeFile = String(idx >= 0 ? firstLine.slice(0, idx) : '').trim();
       const passcode = derivePanMockPasscode(siteEpisodeFile, id);
-      const separator = flag.indexOf('-');
-      // A mocked detail may contain only provider-shareId flags; list resolves
-      // the real playback ID later. Do not relax ordinary/native playback.
-      const canResolvePanList = allowPanMockFlagOnly && panMockProviderFromFlag(flag)
-        && separator > 0 && flag.slice(separator + 1).trim();
+      const share = allowPanMockFlagOnly ? getPanShareInput(flag, urlBlock) : null;
+      const canResolvePanList = !!share;
       if (!flag || (!id && !canResolvePanList)) continue;
       const uniqKey = `${flag}@@${id}`;
       if (seen.has(uniqKey)) continue;
       seen.add(uniqKey);
-      out.push({ flag, id, passcode });
+      out.push({ flag, id, passcode: share ? share.passcode : passcode, shareUrl: share ? share.url : '', localPan: !!share });
     }
   }
   return out;
@@ -774,11 +758,14 @@ async function callPanPlayResolver(provider, { flag = '', id = '', passcode = ''
   return pick(data.url) || pick(data.playUrl) || (data.data && (pick(data.data.url) || pick(data.data.playUrl))) || '';
 }
 
-async function callPanListResolver(provider, { flag = '', passcode = '' } = {}, tvUser = '') {
+async function callPanListResolver(provider, { flag = '', passcode = '', shareUrl = '' } = {}, tvUser = '') {
   const p = String(provider || '').trim();
   const panFlag = String(flag || '').trim();
   const rawPasscode = String(passcode || '').trim();
-  const tianyiMeta = p === '189' ? deriveTianyiMockMeta(panFlag, rawPasscode) : null;
+  const share = getPanShareInput(panFlag, shareUrl);
+  const tianyiMeta = p === '189'
+    ? share ? { shareCode: share.shareId, accessCode: rawPasscode || share.passcode } : deriveTianyiMockMeta(panFlag, rawPasscode)
+    : null;
   const panPasscode = p === '189' ? String((tianyiMeta && tianyiMeta.accessCode) || '').trim() : rawPasscode;
   if (!p || !panFlag) return '';
   const pathByProvider = {
@@ -793,7 +780,7 @@ async function callPanListResolver(provider, { flag = '', passcode = '' } = {}, 
   const headers = { 'Content-Type': 'application/json' };
   const normalizedTvUser = normalizeTvUser(tvUser);
   if (normalizedTvUser) headers['X-TV-User'] = normalizedTvUser;
-  const listBody = { flag: panFlag };
+  const listBody = { flag: (share && share.url) || panFlag };
   if (p === '189' && tianyiMeta && tianyiMeta.shareCode) {
     const sc = String(tianyiMeta.shareCode || '').trim();
     listBody.shareCode = sc;
@@ -858,13 +845,12 @@ async function tryPlayCandidatesForVideoSource({ apiBase, spiderPath, items, tvU
         });
         const dsc = normalizeStatusCode(detailResp);
         if (dsc >= 400) return false;
-        if (state && readPanMockFlag(detailResp)) {
-          state.panMock = true;
-          panMockFlow = true;
-        }
+        panMockFlow = readPanMockFlag(detailResp);
+        if (state) state.panMock = panMockFlow;
         const detailList = extractList(detailResp);
         const first = Array.isArray(detailList) && detailList.length ? detailList[0] : null;
         detailCandidates = extractPlayCandidatesFromVod(first, panMockFlow);
+        if (!detailCandidates.length && normalizeMessage(detailResp)) playErr = normalizeMessage(detailResp);
         detailOK = true;
         return true;
       };
@@ -895,13 +881,14 @@ async function tryPlayCandidatesForVideoSource({ apiBase, spiderPath, items, tvU
         if (!playCandidate || !playCandidate.flag) continue;
         const panProvider = panMockProviderFromFlag(playCandidate.flag);
         try {
-          if (panMockFlow && panProvider) {
-            const panPasscode = panProvider === '189'
+          if (panMockFlow && panProvider && playCandidate.localPan) {
+            const panPasscode = panProvider === '189' && !playCandidate.shareUrl
               ? deriveTianyiMockMeta(playCandidate.flag, playCandidate.passcode).accessCode
               : playCandidate.passcode;
             const resolvedID = await callPanListResolver(panProvider, {
               flag: playCandidate.flag,
-              passcode: playCandidate.passcode
+              passcode: playCandidate.passcode,
+              shareUrl: playCandidate.shareUrl
             }, tvUser);
             if (!resolvedID) {
               if (!playErr) playErr = '网盘列表为空';

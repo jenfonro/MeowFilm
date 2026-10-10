@@ -160,11 +160,13 @@ func smartResolvePanFlagEpisodesRawWithTimeout(database *db.DB, panFlag string, 
 	resolve := func() ([]catpawrunner.Episode, map[string]string, bool, string, error) {
 		label := strings.TrimSpace(panFlag)
 		accessByShareID := map[string]string{}
-		pid := smartPanMockProviderFromLabel(label)
-		if database == nil || pid == "" {
+		share, hasShare := catpawrunner.ParsePanShareInput(label, episodeURL)
+		pid := share.Provider
+		if database == nil || !hasShare {
 			return nil, accessByShareID, false, "skip", nil
 		}
 		firstURL := strings.TrimSpace(episodeURL)
+		listFlag := share.URL
 		var (
 			vod       string
 			fromCache bool
@@ -193,7 +195,7 @@ func smartResolvePanFlagEpisodesRawWithTimeout(database *db.DB, panFlag string, 
 			}
 		case "quark":
 			pass := extractPanMockPasscodeFromSourceValue(firstURL)
-			vod, _, fromCache, err = netdisk.QuarkListWithCacheHit(database, label, pass)
+			vod, _, fromCache, err = netdisk.QuarkListWithCacheHit(database, listFlag, pass)
 			if err != nil {
 				return nil, accessByShareID, fromCache, "err", err
 			}
@@ -202,7 +204,7 @@ func smartResolvePanFlagEpisodesRawWithTimeout(database *db.DB, panFlag string, 
 			}
 		case "uc":
 			pass := extractPanMockPasscodeFromSourceValue(firstURL)
-			vod, _, fromCache, err = netdisk.UCListWithCacheHit(database, label, pass)
+			vod, _, fromCache, err = netdisk.UCListWithCacheHit(database, listFlag, pass)
 			if err != nil {
 				return nil, accessByShareID, fromCache, "err", err
 			}
@@ -211,7 +213,7 @@ func smartResolvePanFlagEpisodesRawWithTimeout(database *db.DB, panFlag string, 
 			}
 		case "139":
 			pass := extractPanMockPasscodeFromSourceValue(firstURL)
-			vod, _, fromCache, err = netdisk.Yun139ListWithCacheHit(database, label, pass)
+			vod, _, fromCache, err = netdisk.Yun139ListWithCacheHit(database, listFlag, pass)
 			if err != nil {
 				return nil, accessByShareID, fromCache, "err", err
 			}
@@ -220,7 +222,7 @@ func smartResolvePanFlagEpisodesRawWithTimeout(database *db.DB, panFlag string, 
 			}
 		case "baidu":
 			pass := extractPanMockPasscodeFromSourceValue(firstURL)
-			vod, _, fromCache, err = netdisk.BaiduListWithCacheHit(database, label, pass)
+			vod, _, fromCache, err = netdisk.BaiduListWithCacheHit(database, listFlag, pass)
 			if err != nil {
 				return nil, accessByShareID, fromCache, "err", err
 			}

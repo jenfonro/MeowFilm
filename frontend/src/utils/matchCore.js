@@ -18,23 +18,78 @@ export const normalizePanMockFlag = (flag) => {
 export const panMockProviderFromFlag = (flag) => {
   const s = normalizePanMockFlag(flag);
   if (!s) return '';
-  // pan_mock routing must use fixed flag recognition and must NOT depend on user-config aliases.
-  if (!s.includes('-')) return '';
+  // Runner emits canonical names. Legacy names remain readable for saved data;
+  // name recognition alone does not establish list/play ownership.
   const head = String((s.split('-')[0] || '')).trim();
-  if (!head) return '';
-  if (head.includes('百度')) return 'baidu';
-  if (head.includes('夸父')) return 'quark';
-  if (head.includes('优夕')) return 'uc';
-  if (head.includes('天意')) return '189';
-  if (head.includes('逸动')) return '139';
+  if (head === '百度') return 'baidu';
+  if (head === '夸克') return 'quark';
+  if (head.toUpperCase() === 'UC') return 'uc';
+  if (head === '天翼') return '189';
+  if (head === '移动') return '139';
+  // Preserve the old name checks used by saved history and Emby callers.
+  if (s.includes('-')) {
+    if (head.includes('百度')) return 'baidu';
+    if (head.includes('夸父')) return 'quark';
+    if (head.includes('优夕')) return 'uc';
+    if (head.includes('天意')) return '189';
+    if (head.includes('逸动')) return '139';
+  }
   return '';
+};
+
+export const getPanShareInput = (flag, value = '') => {
+  const label = normalizePanMockFlag(flag);
+  const raw = String(value || '').trim();
+  const valid = (id) => /^[A-Za-z0-9_-]{4,256}$/.test(id) && !/^(?:root\d*|nopass|share)$/i.test(id);
+  for (const input of [raw, label]) {
+    try {
+      const url = new URL(input);
+      if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) continue;
+      const host = url.hostname.toLowerCase();
+      const q = url.searchParams;
+      const match = /^\/s\/([A-Za-z0-9_-]+)\/?$/.exec(url.pathname);
+      let provider = '';
+      let shareId = '';
+      if (host === 'pan.baidu.com') {
+        provider = 'baidu';
+        shareId = match ? match[1].replace(/^1/, '') : q.get('surl') || '';
+      } else if (host === 'pan.quark.cn') {
+        provider = 'quark';
+        shareId = match ? match[1] : '';
+      } else if (host === 'drive.uc.cn' || host === 'fast.uc.cn') {
+        provider = 'uc';
+        shareId = match ? match[1] : '';
+      } else if (host === 'cloud.189.cn' || host === 'h5.cloud.189.cn') {
+        provider = '189';
+        shareId = (/^\/t\/([A-Za-z0-9_-]+)\/?$/.exec(url.pathname) || [])[1] || q.get('code') || q.get('shareCode') || '';
+      } else if (host === 'caiyun.139.com' || host === 'yun.139.com') {
+        provider = '139';
+        shareId = (/(?:^|#)\/(?:w\/i|m\/i)\/([A-Za-z0-9_-]+)(?:[/?]|$)/.exec(url.pathname + url.hash) || [])[1] ||
+          q.get('linkID') || q.get('linkId') ||
+          (/^\/m\/i\/?$/.test(url.pathname) ? url.search.slice(1).split('&')[0] : '');
+      }
+      if (!provider || !valid(shareId)) continue;
+      const hashQuery = new URLSearchParams(url.hash.includes('?') ? url.hash.slice(url.hash.indexOf('?') + 1) : '');
+      const passcode = q.get('pwd') || q.get('passcode') || q.get('accessCode') || q.get('password') || q.get('passwd') ||
+        hashQuery.get('pwd') || hashQuery.get('passwd') || '';
+      return { provider, shareId, passcode, url: input, key: `${provider}:${shareId}` };
+    } catch (_error) {}
+  }
+  // Old mocked responses carry share identity in the flag and a password-only
+  // value. Canonical suffixes are passwords and must never be used as share IDs.
+  const legacy = /^(夸父|优夕|逸动|天意|百度原画)-([A-Za-z0-9_-]+)$/.exec(label);
+  if (!legacy || !valid(legacy[2]) || /[$*:/]/.test(raw)) return null;
+  const provider = panMockProviderFromFlag(label);
+  const shareId = provider === 'baidu' ? legacy[2].replace(/^1/, '') : legacy[2];
+  if (!valid(shareId)) return null;
+  return { provider, shareId, passcode: /^nopass$/i.test(raw) ? '' : raw, url: '', key: `${provider}:${shareId}` };
 };
 
 export const guessPreferredPanFromFlag = (flag) => {
   const raw = typeof flag === 'string' ? flag.trim() : '';
   if (!raw) return '';
   if (raw.includes('百度')) return 'baidu';
-  if (raw.includes('夸父')) return 'quark';
+  if (raw.includes('夸父') || raw.includes('夸克')) return 'quark';
   return '';
 };
 
@@ -56,6 +111,10 @@ export const parseMockPasscodeFromRawName = (rawName) => {
 
 export const extractTianyiShareCodeAndAccessCode = (flag, rawName) => {
   const label = normalizePanMockFlag(flag);
+  const canonical = /^天翼(?:-(.*))?$/.exec(label);
+  if (canonical) return { shareCode: '', accessCode: canonical[1] || '' };
+  const share = getPanShareInput(label);
+  if (share && share.provider === '189' && share.url) return { shareCode: share.shareId, accessCode: share.passcode };
   const pass = typeof rawName === 'string' ? rawName.trim() : '';
   let shareCode = '';
   if (label) {

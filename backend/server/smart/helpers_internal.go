@@ -62,31 +62,7 @@ func smartPanToProviderID(panLower string) string {
 }
 
 func smartPlayFlagProviderID(flagLabel string) string {
-	s := strings.TrimSpace(flagLabel)
-	if s == "" {
-		return ""
-	}
-	if !strings.Contains(s, "-") {
-		return ""
-	}
-	head := strings.TrimSpace(strings.SplitN(s, "-", 2)[0])
-	if head == "" {
-		return ""
-	}
-	switch {
-	case strings.Contains(head, "百度"):
-		return "baidu"
-	case strings.Contains(head, "夸父"):
-		return "quark"
-	case strings.Contains(head, "优夕"):
-		return "uc"
-	case strings.Contains(head, "天意"):
-		return "189"
-	case strings.Contains(head, "逸动"):
-		return "139"
-	default:
-		return ""
-	}
+	return catpawrunner.PanMockProviderFromFlag(flagLabel)
 }
 
 func smartPanMatchLabelText(label string) string {
@@ -103,23 +79,24 @@ func smartPanMatchLabelText(label string) string {
 
 func smartPanMockProviderID(database *db.DB, panFlag string) string {
 	_ = database
-	raw := strings.TrimSpace(panFlag)
-	if raw == "" || !strings.Contains(raw, "-") {
-		return ""
+	return smartPlayFlagProviderID(panFlag)
+}
+
+func smartCandidateLocalPanProvider(database *db.DB, c smartCandidate) string {
+	// A complete Runner/native detail list must return to that Runner for play,
+	// even when its display name is a recognized provider.
+	if c.detailProvider != nil {
+		return *c.detailProvider
 	}
-	return smartPlayFlagProviderID(raw)
+	return smartPanMockProviderID(database, c.PanFlag)
 }
 
 func smartPanMockPasscodeFromCandidate(c smartCandidate) string {
-	return strings.TrimSpace(c.Ep.URL)
+	return smartPanMockPasscodeFromSourceValue(c.Ep.URL)
 }
 
 func smartPanMock189CredentialsFromCandidate(c smartCandidate) (shareCode string, accessCode string) {
-	label := strings.TrimSpace(c.PanFlag)
-	if m := regexp.MustCompile(`天意-([A-Za-z0-9]{6,64})`).FindStringSubmatch(label); len(m) == 2 {
-		shareCode = strings.TrimSpace(m[1])
-	}
-	return shareCode, strings.TrimSpace(c.Ep.URL)
+	return smartPanMock189CredentialsFromSourceValue(c.PanFlag, c.Ep.URL)
 }
 
 func smartTMDBSeasonEpisodeOfGlobal(seasons []smartTMDBSeason, global int) smartSeasonEpisode {
@@ -191,15 +168,24 @@ func smartPickBestMatchIgnorePanOrder(list []smartCandidate, tmdbHasMultiSeason 
 }
 
 func smartPanMockPasscodeFromSourceValue(sourceValue string) string {
+	if share, ok := catpawrunner.ParsePanShareInput("", sourceValue); ok {
+		return share.Passcode
+	}
 	return strings.TrimSpace(sourceValue)
 }
 
 func smartPanMock189CredentialsFromSourceValue(panFlag string, sourceValue string) (shareCode string, accessCode string) {
+	if share, ok := catpawrunner.ParsePanShareInput(panFlag, sourceValue); ok && share.Provider == "189" {
+		return share.ShareID, share.Passcode
+	}
 	label := strings.TrimSpace(panFlag)
 	if m := regexp.MustCompile(`天意-([A-Za-z0-9]{6,64})`).FindStringSubmatch(label); len(m) == 2 {
-		shareCode = strings.TrimSpace(m[1])
+		return strings.TrimSpace(m[1]), strings.TrimSpace(sourceValue)
 	}
-	return shareCode, strings.TrimSpace(sourceValue)
+	if label == "天翼" || strings.HasPrefix(label, "天翼-") {
+		return "", strings.TrimPrefix(strings.TrimPrefix(label, "天翼"), "-")
+	}
+	return "", strings.TrimSpace(sourceValue)
 }
 
 func smartBuildSourceKey(siteKey string, spiderAPI string, siteDetail string) string {

@@ -60,6 +60,11 @@ type smartCandidate struct {
 	DegradedReason   string
 	StrictMatched    bool
 	DegradedMatched  bool
+
+	// Set only for candidates built from normal detail records: empty means
+	// Runner/native play, otherwise the provider actually resolved locally.
+	// Nil preserves name-based history/Emby replay; never serialized.
+	detailProvider *string
 }
 
 type smartDetailSourceStatus string

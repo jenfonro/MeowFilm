@@ -792,23 +792,14 @@
                   <div class="adm-text-xs adm-text-gray-500 adm-mt-1">用于 CatPawRunner 请求时的全局代理（留空关闭）。</div>
                 </div>
               <div v-if="showCatSettingsExtras" class="adm-space-y-1 adm-pt-1">
-                <div class="adm-text-sm adm-font-medium adm-text-gray-700">使用内置网盘解析</div>
+                <div class="adm-text-sm adm-font-medium adm-text-gray-700">由 MeowFilm 解析网盘</div>
                 <div>
-                  <label class="enable-switch" title="使用内置网盘解析">
-                    <input v-model="catForm.panBuiltinResolverEnabled" type="checkbox" />
-                    <span class="enable-slider"></span>
-                  </label>
-                </div>
-              </div>
-              <div v-if="showCatSettingsExtras" class="adm-space-y-1 adm-pt-1">
-                <div class="adm-text-sm adm-font-medium adm-text-gray-700">加速详情获取</div>
-                <div>
-                  <label class="enable-switch" title="加速详情获取（pan_mock）">
+                  <label class="enable-switch" title="由 MeowFilm 解析网盘（pan_mock）">
                     <input v-model="catForm.panMockEnabled" type="checkbox" />
                     <span class="enable-slider"></span>
                   </label>
                 </div>
-                <div class="adm-text-xs adm-text-gray-500">开启后由 MeowFilm 处理网盘数据。</div>
+                <div class="adm-text-xs adm-text-gray-500">开启：由 MeowFilm 获取网盘列表和播放地址；关闭：由 CatPawRunner 获取。不支持的网盘和普通线路仍由脚本处理。</div>
               </div>
               <div v-if="showCatSettingsExtras" class="adm-space-y-1 adm-pt-1">
                 <div class="adm-text-sm adm-font-medium adm-text-gray-700">禁用代理透传</div>
@@ -2547,6 +2538,7 @@
 </template>
 
 <script setup>
+import { clearCatDetailCache } from "../../shared/catpawrunner";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
   addDashboardUser,
@@ -2815,7 +2807,6 @@ const catForm = ref({
   name: '',
   apiBase: '',
   proxy: '',
-  panBuiltinResolverEnabled: true,
   panMockEnabled: false,
   disableProxy: false,
   goProxyApi: ''
@@ -4613,7 +4604,6 @@ function resetCatForm() {
     name: '',
     apiBase: '',
     proxy: '',
-    panBuiltinResolverEnabled: true,
     panMockEnabled: false,
     disableProxy: false,
     goProxyApi: ''
@@ -4634,6 +4624,7 @@ async function persistSelectedCatRemoteSettings(apiBase = normalizedCatApiBase.v
   const targetApiBase = normalizeHttpBase(apiBase);
   if (!targetApiBase) return;
   await saveCatpawrunnerAdminSettings(targetApiBase, buildCatRemoteSettingsPayload());
+  clearCatDetailCache();
 }
 
 function resetCatConfigEditorForm() {
@@ -4738,7 +4729,6 @@ function buildCatRemoteSettingsSnapshot(data) {
   const onlineConfigs = Array.isArray(root.onlineConfigs) ? root.onlineConfigs : [];
   return {
     proxy: typeof settings.proxy === 'string' ? settings.proxy : '',
-    panBuiltinResolverEnabled: settings.panBuiltinResolverEnabled !== false,
     pan_mock: !!settings.pan_mock,
     disable_proxy: !!settings.disable_proxy,
     goProxyApi: typeof settings.goProxyApi === 'string' ? settings.goProxyApi : '',
@@ -4749,7 +4739,6 @@ function buildCatRemoteSettingsSnapshot(data) {
 function applyCatRemoteSettingsSnapshot(snapshot) {
   const next = snapshot && typeof snapshot === 'object' ? snapshot : {};
   catForm.value.proxy = typeof next.proxy === 'string' ? next.proxy : '';
-  catForm.value.panBuiltinResolverEnabled = next.panBuiltinResolverEnabled !== false;
   catForm.value.panMockEnabled = !!next.pan_mock;
   catForm.value.disableProxy = !!next.disable_proxy;
   catForm.value.goProxyApi = typeof next.goProxyApi === 'string' ? next.goProxyApi : '';
@@ -4765,7 +4754,6 @@ function applyCatRemoteSettings(data) {
 function buildCatRemoteSettingsPayload() {
   return {
     proxy: catForm.value.proxy.trim(),
-    panBuiltinResolverEnabled: !!catForm.value.panBuiltinResolverEnabled,
     pan_mock: !!catForm.value.panMockEnabled,
     disable_proxy: !!catForm.value.disableProxy,
     goProxyApi: catForm.value.goProxyApi.trim(),
@@ -4833,7 +4821,6 @@ async function hydrateSelectedCatServer({ silent = false } = {}) {
   catForm.value.name = current.name || '';
   catForm.value.apiBase = current.apiBase || '';
   catForm.value.proxy = '';
-  catForm.value.panBuiltinResolverEnabled = true;
   catForm.value.panMockEnabled = false;
   catForm.value.disableProxy = false;
   catForm.value.goProxyApi = '';
@@ -4857,7 +4844,6 @@ async function fetchCatRemoteSettingsSnapshot(apiBase) {
 async function applyCatRemoteSettingsSnapshotToTarget(targetApiBase, snapshot) {
   const payload = {
     proxy: typeof snapshot.proxy === 'string' ? snapshot.proxy.trim() : '',
-    panBuiltinResolverEnabled: snapshot.panBuiltinResolverEnabled !== false,
     pan_mock: !!snapshot.pan_mock,
     disable_proxy: !!snapshot.disable_proxy,
     goProxyApi: typeof snapshot.goProxyApi === 'string' ? snapshot.goProxyApi.trim() : '',
@@ -4868,7 +4854,9 @@ async function applyCatRemoteSettingsSnapshotToTarget(targetApiBase, snapshot) {
         })
       : []
   };
-  return await saveCatpawrunnerAdminSettings(targetApiBase, payload);
+  const result = await saveCatpawrunnerAdminSettings(targetApiBase, payload);
+  clearCatDetailCache();
+  return result;
 }
 
 async function syncCatSettingsBetweenServers({ sourceApiBase, targetApiBase }) {

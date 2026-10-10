@@ -1,4 +1,4 @@
-import { extractTianyiShareCodeAndAccessCode, normalizePanMockFlag, panMockProviderFromFlag } from '../utils/matchCore';
+import { getPanShareInput, normalizePanMockFlag } from '../utils/matchCore';
 import { normalizeString } from './normalize';
 
 export function normalizecatpawrunnerApiBase(inputUrl) {
@@ -239,6 +239,7 @@ const detailCache = new Map();
 const resolvedDetailCache = new Map();
 const panListCache = new Map();
 const panListResultByProviderFlag = new Map();
+let detailCacheGeneration = 0;
 
 const notifyResolvedDetailListeners = (cacheKey, data) => {
   const cached = resolvedDetailCache.get(cacheKey);
@@ -352,64 +353,54 @@ const callPanList = async (provider, body, { signal } = {}) => {
   return data && typeof data === 'object' ? data : null;
 };
 
-export const getPanListCachedByProviderFlag = ({ provider, playFlag, passcode = '' } = {}) => {
+const panListIdentity = ({ provider, playFlag, passcode = '', shareUrl = '' } = {}) => {
+  const share = getPanShareInput(playFlag, shareUrl);
   const key = normalizeString(provider).toLowerCase();
-  const flag = normalizePanMockFlag(playFlag);
-  const pass = normalizeString(passcode);
-  if (!key || !flag) return null;
-  const cacheKey = `${key}::${flag}::${pass}`;
-  const data = panListResultByProviderFlag.get(cacheKey);
-  return data && typeof data === 'object' ? data : null;
+  if (!share || share.provider !== key) return null;
+  const pass = normalizeString(passcode) || share.passcode;
+  return { share, pass, key: key + '::' + share.key + '::' + pass };
 };
 
-export const setPanListCachedByProviderFlag = ({ provider, playFlag, passcode = '', data } = {}) => {
-  const key = normalizeString(provider).toLowerCase();
-  const flag = normalizePanMockFlag(playFlag);
-  const pass = normalizeString(passcode);
-  if (!key || !flag) return;
-  const payload = data && typeof data === 'object' ? data : null;
-  if (!payload) return;
-  const cacheKey = `${key}::${flag}::${pass}`;
-  panListResultByProviderFlag.set(cacheKey, payload);
+export const getPanListCachedByProviderFlag = (input = {}) => {
+  const identity = panListIdentity(input);
+  return identity ? panListResultByProviderFlag.get(identity.key) || null : null;
 };
 
-export const requestPanListByProviderFlag = async ({ provider, playFlag, passcode = '', signal } = {}) => {
+export const setPanListCachedByProviderFlag = (input = {}) => {
+  const identity = panListIdentity(input);
+  if (identity && input.data && typeof input.data === 'object') panListResultByProviderFlag.set(identity.key, input.data);
+};
+
+export const requestPanListByProviderFlag = async ({ provider, playFlag, passcode = '', shareUrl = '', signal } = {}) => {
+  const generation = detailCacheGeneration;
   const key = normalizeString(provider).toLowerCase();
   const flag = normalizePanMockFlag(playFlag);
-  const pass = normalizeString(passcode);
-  if (!key || !flag) return null;
-  const body = (() => {
-    if (key === 'quark') return { flag, passcode: pass };
-    if (key === 'uc') return { flag, passcode: pass };
-    if (key === 'baidu') return { flag, pwd: pass };
-    if (key === '139') return { flag, passcode: pass };
-    if (key === '189') {
-      const { shareCode, accessCode } = extractTianyiShareCodeAndAccessCode(flag, pass);
-      if (!shareCode) return null;
-      return { flag: `天意-${shareCode}`, shareCode, accessCode: accessCode || '' };
-    }
-    return null;
-  })();
-  if (!body) return null;
-
-  const cacheKey = `${key}::${normalizeString(body && body.flag)}::${normalizeString(body && body.passcode)}::${normalizeString(body && body.pwd)}::${normalizeString(body && body.shareCode)}::${normalizeString(body && body.accessCode)}`;
+  const identity = panListIdentity({ provider: key, playFlag: flag, passcode, shareUrl });
+  if (!identity) return null;
+  const { share, pass, key: cacheKey } = identity;
+  const body = { flag: share.url || flag };
+  if (key === 'baidu') body.pwd = pass;
+  else if (key === '189') { body.shareCode = share.shareId; body.accessCode = pass; }
+  else body.passcode = pass;
   if (cacheKey && panListCache.has(cacheKey)) {
     const cached = panListCache.get(cacheKey);
     if (cached && cached.status === 'resolved') return cached.data;
     if (cached && cached.status === 'pending') return cached.promise;
   }
-  const stickyCached = getPanListCachedByProviderFlag({ provider: key, playFlag: flag, passcode: pass });
+  const stickyCached = getPanListCachedByProviderFlag({ provider: key, playFlag: flag, passcode: pass, shareUrl: share.url });
   if (stickyCached) {
     panListCache.set(cacheKey, { status: 'resolved', data: stickyCached });
     return stickyCached;
   }
 
   const promise = callPanList(key, body, { signal: null }).then((data) => {
-    panListCache.set(cacheKey, { status: 'resolved', data });
-    setPanListCachedByProviderFlag({ provider: key, playFlag: flag, passcode: pass, data });
+    if (generation === detailCacheGeneration) {
+      panListCache.set(cacheKey, { status: 'resolved', data });
+      setPanListCachedByProviderFlag({ provider: key, playFlag: flag, passcode: pass, shareUrl: share.url, data });
+    }
     return data;
   }).catch((error) => {
-    panListCache.delete(cacheKey);
+    if (generation === detailCacheGeneration) panListCache.delete(cacheKey);
     throw error;
   });
 
@@ -516,43 +507,23 @@ const resolvePanMockPlaySources = async (raw, playFrom, playUrl, { onUpdate, sig
       const label = normalizePanMockFlag(normalizeString(fromSubs[j]) || baseLabel);
       const urlSeg = normalizeString(urlSubs[j]);
       if (!label) continue;
-      const provider = panMockProviderFromFlag(label);
-      const episodeSegments = provider ? [] : splitEpisodeSegments(urlSeg);
+      const share = panMock ? getPanShareInput(label, urlSeg) : null;
+      // This existing field selects local list/play. A Runner-provided complete
+      // list stays on the existing remote path; its label still identifies pan.
+      const provider = share ? share.provider : '';
+      const localList = !!share;
+      const requestKey = share ? share.key + '::' + share.passcode : '';
       sourceEntries.push({
-        key: `${i}:${j}:${label}`,
-        label,
-        provider,
-        sourceKind: provider ? 'panmock' : 'normal',
+        key: i + ':' + j + ':' + (share ? share.key : label),
+        label, provider,
+        sourceKind: localList ? 'panmock' : 'normal',
         sourceValue: urlSeg,
-        episodeSegments,
-        error: '',
-        loading: !!provider,
-        groupIndex: i,
+        episodeSegments: localList ? [] : splitEpisodeSegments(urlSeg),
+        error: '', loading: localList, groupIndex: i, requestKey,
       });
-      if (!provider) continue;
-      let requestBody = null;
-      let requestFlag = label;
-      let requestPasscode = urlSeg || '';
-      if (provider === '189') {
-        const { shareCode, accessCode } = extractTianyiShareCodeAndAccessCode(label, urlSeg);
-        if (!shareCode) continue;
-        requestFlag = `天意-${shareCode}`;
-        requestPasscode = accessCode || '';
-        requestBody = { flag: requestFlag, shareCode, accessCode: requestPasscode };
-      } else if (provider === 'baidu') {
-        requestBody = { flag: label, pwd: requestPasscode };
-      } else if (provider === '139') {
-        requestBody = { flag: label, passcode: requestPasscode };
-      } else {
-        requestBody = { flag: label, passcode: requestPasscode };
-      }
-      reqMap.set(`${provider}::${label}`, {
-        provider,
-        label,
-        playFlag: requestFlag,
-        passcode: requestPasscode,
-        requestBody,
-      });
+      if (!localList) continue;
+      reqMap.set(requestKey, { provider, label, playFlag: label, shareUrl: share.url,
+        passcode: share.passcode, shareId: share.shareId, resolveKey: requestKey });
     }
   }
 
@@ -561,32 +532,26 @@ const resolvePanMockPlaySources = async (raw, playFrom, playUrl, { onUpdate, sig
   emitUpdate(false);
 
   await Promise.allSettled(
-    Array.from(reqMap.values()).map(async ({ provider, label, playFlag, passcode, requestBody }) => {
-      const resolveKey = `${provider}::${label}`;
+    Array.from(reqMap.values()).map(async ({ provider, playFlag, passcode, shareUrl, shareId, resolveKey }) => {
       try {
-        const data = await requestPanListByProviderFlag({ provider, playFlag, passcode, signal });
+        const data = await requestPanListByProviderFlag({ provider, playFlag, passcode, shareUrl, signal });
         const vod = extractPanListVodPlayUrl(data);
         if (vod) {
           sourceEntries.forEach((item) => {
-            if (`${item.provider}::${item.label}` !== resolveKey) return;
+            if (item.requestKey !== resolveKey) return;
             item.episodeSegments = splitEpisodeSegments(vod);
             item.error = '';
             item.loading = false;
           });
-          if (provider === '189') {
-            const flag = normalizeString(requestBody && requestBody.flag);
-            const accessCode = normalizeString(passcode);
-            const match = /^天意-([A-Za-z0-9]{6,64})$/.exec(flag);
-            const shareId = match && match[1] ? normalizeString(match[1]) : '';
-            if (shareId && accessCode) {
-              tianyiAccessByShareId.set(shareId, accessCode);
-            }
+          if (provider === '189' && passcode) {
+            tianyiAccessByShareId.set(shareId, passcode);
+            if (data.shareId) tianyiAccessByShareId.set(String(data.shareId), passcode);
           }
           emitUpdate(false);
           return;
         }
         sourceEntries.forEach((item) => {
-          if (`${item.provider}::${item.label}` !== resolveKey) return;
+          if (item.requestKey !== resolveKey) return;
           item.episodeSegments = [];
           item.error = '暂无数据';
           item.loading = false;
@@ -594,7 +559,7 @@ const resolvePanMockPlaySources = async (raw, playFrom, playUrl, { onUpdate, sig
         emitUpdate(false);
       } catch (error) {
         sourceEntries.forEach((item) => {
-          if (`${item.provider}::${item.label}` !== resolveKey) return;
+          if (item.requestKey !== resolveKey) return;
           item.episodeSegments = [];
           item.error = error && error.message ? String(error.message) : '请求失败';
           item.loading = false;
@@ -611,6 +576,7 @@ const buildDetailCacheKey = ({ apiBase, spiderApi, siteDetail }) =>
   `${normalizecatpawrunnerApiBase(apiBase)}::${normalizeString(spiderApi)}::${normalizeString(siteDetail)}`;
 
 export const fetchCatDetailCached = async ({ apiBase, spiderApi, siteDetail, timeoutMs = 15000, signal } = {}) => {
+  const generation = detailCacheGeneration;
   const cacheKey = buildDetailCacheKey({ apiBase, spiderApi, siteDetail });
   if (!cacheKey.includes('::') || !normalizeString(siteDetail) || !normalizeString(spiderApi)) {
     throw new Error('站点详情参数无效');
@@ -627,10 +593,10 @@ export const fetchCatDetailCached = async ({ apiBase, spiderApi, siteDetail, tim
     timeoutMs,
     signal,
   }).then((raw) => {
-    detailCache.set(cacheKey, { status: 'resolved', data: raw });
+    if (generation === detailCacheGeneration) detailCache.set(cacheKey, { status: 'resolved', data: raw });
     return raw;
   }).catch((error) => {
-    detailCache.delete(cacheKey);
+    if (generation === detailCacheGeneration) detailCache.delete(cacheKey);
     throw error;
   });
 
@@ -639,6 +605,7 @@ export const fetchCatDetailCached = async ({ apiBase, spiderApi, siteDetail, tim
 };
 
 export const fetchCatResolvedDetailCached = async ({ apiBase, spiderApi, siteDetail, timeoutMs = 15000, onUpdate, signal } = {}) => {
+  const generation = detailCacheGeneration;
   const cacheKey = buildDetailCacheKey({ apiBase, spiderApi, siteDetail });
   if (!cacheKey.includes('::') || !normalizeString(siteDetail) || !normalizeString(spiderApi)) {
     throw new Error('站点详情参数无效');
@@ -678,6 +645,7 @@ export const fetchCatResolvedDetailCached = async ({ apiBase, spiderApi, siteDet
       resolutionComplete: !detail.panMock,
     };
     const emitPartial = (partial) => {
+      if (generation !== detailCacheGeneration) return;
       const current = resolvedDetailCache.get(cacheKey);
       const nextData = {
         ...(current && current.data && typeof current.data === 'object' ? current.data : baseData),
@@ -699,11 +667,13 @@ export const fetchCatResolvedDetailCached = async ({ apiBase, spiderApi, siteDet
           : {},
       resolutionComplete: true,
     };
-    resolvedDetailCache.set(cacheKey, { status: 'resolved', data, listeners: new Set() });
-    notifyResolvedDetailListeners(cacheKey, data);
+    if (generation === detailCacheGeneration) {
+      notifyResolvedDetailListeners(cacheKey, data);
+      resolvedDetailCache.set(cacheKey, { status: 'resolved', data, listeners: new Set() });
+    }
     return data;
   })().catch((error) => {
-    resolvedDetailCache.delete(cacheKey);
+    if (generation === detailCacheGeneration) resolvedDetailCache.delete(cacheKey);
     throw error;
   });
 
@@ -712,7 +682,9 @@ export const fetchCatResolvedDetailCached = async ({ apiBase, spiderApi, siteDet
 };
 
 export const clearCatDetailCache = () => {
+  detailCacheGeneration += 1;
   detailCache.clear();
   resolvedDetailCache.clear();
   panListCache.clear();
+  panListResultByProviderFlag.clear();
 };

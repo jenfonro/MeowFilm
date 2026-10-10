@@ -116,9 +116,15 @@ func smartBuildPanMockGroupAttempts(
 	normalAllowed = []smartCandidate{}
 	normalFallback = []smartCandidate{}
 	for _, c := range candidatesForNo {
-		pid := smartPanMockProviderID(database, c.PanFlag)
+		pid := smartCandidateLocalPanProvider(database, c)
 		allowed := isAllowedLabel(c.PanFlag)
-		if pid == "" {
+		if c.detailProvider != nil || pid == "" {
+			// Detail candidates already contain file lists, either from Runner
+			// or from the local list resolver. Do not treat their complete file
+			// IDs as share passwords and list them again (or merge by name).
+			if c.detailProvider != nil && pid != "" {
+				allowed = true
+			}
 			if allowed {
 				normalAllowed = append(normalAllowed, c)
 			} else {

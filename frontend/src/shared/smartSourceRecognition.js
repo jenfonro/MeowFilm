@@ -8,6 +8,7 @@ import {
 import { normalizeSeasonEpisodeMarkers, parseChineseNumeralToInt } from './episodeMarkerNormalize';
 import { normalizeInt, normalizeString } from './normalize';
 import { getRawFileName, splitRawPathSegments } from './pathText';
+import { panMockProviderFromFlag } from '../utils/matchCore';
 
 const normalizePatternInput = (value) => {
   const raw = normalizeString(value);
@@ -215,7 +216,8 @@ const stripDisplayMetaPrefix = (value) => {
 const PAN_LIST_PROVIDER_KEYS = new Set(['baidu', 'quark', 'uc', '139', '189']);
 
 const isPanListEntry = (entry) =>
-  PAN_LIST_PROVIDER_KEYS.has(normalizeString(entry && entry.provider).toLowerCase());
+  PAN_LIST_PROVIDER_KEYS.has(normalizeString(entry && entry.provider).toLowerCase()) ||
+  !!panMockProviderFromFlag(entry && entry.label);
 
 const matchesAnyMagicRule = (text, rules) => {
   const normalizeForMagic = (input) => {

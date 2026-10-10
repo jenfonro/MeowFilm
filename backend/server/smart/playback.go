@@ -1046,7 +1046,7 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 	}
 
 	doPlay := func() playResult {
-		pid := smartPanMockProviderID(database, strings.TrimSpace(cand.PanFlag))
+		pid := smartCandidateLocalPanProvider(database, cand)
 		switch pid {
 		case "189":
 			ac := ""
@@ -1300,6 +1300,9 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 			if best == nil || strings.TrimSpace(best.Ep.URL) == "" {
 				return nil
 			}
+			if best.detailProvider != nil && *best.detailProvider != "" {
+				return smartTryPlayPickedCandidate(0, database, apiBase, tvUser, *best, cache.PanMock189AccessByShareID)
+			}
 			siteID := catpawrunner.ExtractSiteIDFromSpiderAPI(spiderApi)
 			playPayload := map[string]any{
 				"flag":    strings.TrimSpace(best.Ep.Flag),
@@ -1343,6 +1346,9 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 	best := smartPickBestMatch(candidatesForNo, tmdbHasMultiSeason, preferSeasonNo, settings)
 	if best == nil || strings.TrimSpace(best.Ep.URL) == "" {
 		return nil
+	}
+	if best.detailProvider != nil && *best.detailProvider != "" {
+		return smartTryPlayPickedCandidate(0, database, apiBase, tvUser, *best, cache.PanMock189AccessByShareID)
 	}
 
 	// Verify by calling play and ensure we have a playable url.
