@@ -1443,6 +1443,8 @@ func Tianyi189List(database *db.DB, flag string, accessCode string) (vodPlayURL 
 func Tianyi189ListWithCacheHit(database *db.DB, flag string, accessCode string) (vodPlayURL string, shareID string, shareCode string, fromCache bool, err error) {
 	key := listCacheKey("189_list", flag, listCacheCredentialPart(accessCode))
 	got, hit, e := t189ListCacheTwoTier.Do(key, func() (listCache3, error) {
+		release := acquireProviderList(database, "189")
+		defer release()
 		vod, sid, sc, err2 := tianyi189ListUncached(database, flag, accessCode)
 		if err2 != nil {
 			return listCache3{}, err2

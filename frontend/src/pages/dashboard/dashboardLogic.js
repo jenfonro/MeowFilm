@@ -1,6 +1,7 @@
 import { requestJsonResponse } from '../../shared/requestJson';
 import { normalizeHttpBase as sharedNormalizeHttpBase } from '../../shared/urlText';
 import { getPanShareInput, panMockProviderFromFlag } from '../../utils/matchCore';
+import { hasDetailNavigation, walkDetailNavigation } from '../../shared/detailNavigation';
 
 const jsonHeaders = {
   Accept: 'application/json'
@@ -847,9 +848,30 @@ async function tryPlayCandidatesForVideoSource({ apiBase, spiderPath, items, tvU
         if (dsc >= 400) return false;
         panMockFlow = readPanMockFlag(detailResp);
         if (state) state.panMock = panMockFlow;
-        const detailList = extractList(detailResp);
-        const first = Array.isArray(detailList) && detailList.length ? detailList[0] : null;
-        detailCandidates = extractPlayCandidatesFromVod(first, panMockFlow);
+        if (hasDetailNavigation(detailResp)) {
+          await walkDetailNavigation(detailResp, {
+            ownerKey: apiBase,
+            shareIdentity: nav => {
+              const share = getPanShareInput(nav.share_flag, nav.share_url);
+              return share ? share.key : nav.share_url;
+            },
+            request: async (action, body) => {
+              const child = await requestCatpawrunnerAdminJson({
+                apiBase, path: `${spiderPath}/${encodeURIComponent(action)}`, method: 'POST', body, tvUser
+              });
+              if (normalizeStatusCode(child) >= 400) throw new Error(normalizeMessage(child) || '导航请求失败');
+              return child;
+            },
+            visit: async leaf => {
+              detailCandidates.push(...extractPlayCandidatesFromVod(leaf.list[0], readPanMockFlag(leaf)));
+            },
+            onError: error => { playErr = error.message; }
+          });
+        } else {
+          const detailList = extractList(detailResp);
+          const first = Array.isArray(detailList) && detailList.length ? detailList[0] : null;
+          detailCandidates = extractPlayCandidatesFromVod(first, panMockFlow);
+        }
         if (!detailCandidates.length && normalizeMessage(detailResp)) playErr = normalizeMessage(detailResp);
         detailOK = true;
         return true;

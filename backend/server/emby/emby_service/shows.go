@@ -2,8 +2,10 @@ package emby_service
 
 import (
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/cache"
@@ -1372,7 +1374,14 @@ func fetchRawSiteDetailSourceRecords(database *db.DB, userID int64, siteKey stri
 	if err != nil || raw == nil {
 		return nil, err
 	}
+	raw, navigationErr := catpawrunner.ResolveDetailNavigation(apiBase, spiderAPI, raw, 12*time.Second)
 	playFrom, playURL := catpawrunner.ExtractDetailPlayFromURL(raw)
+	if navigationErr != nil {
+		log.Printf("[emby][detail_navigation] site=%s error=%v", siteKey, navigationErr)
+		if playFrom == "" && playURL == "" {
+			return nil, navigationErr
+		}
+	}
 	records := smart.BuildDetailSourceRecords(playFrom, playURL, smart.IsPanMockEnabled(raw), siteKey, "", spiderAPI, siteDetail, "")
 	if records == nil {
 		records = []smart.DetailSourceRecord{}

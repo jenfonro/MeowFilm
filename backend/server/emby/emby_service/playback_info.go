@@ -408,7 +408,7 @@ func resolveTMDBPlaybackStreamTarget(database *db.DB, userID int64, ref *itemRef
 				return
 			}
 			EnqueueFullOffer(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey, offer)
-		})
+		}, navigationOfferWaiter(entry))
 		CloseFullOffers(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey)
 	}()
 	return buildTMDBPlaybackOfferTarget(ref, *display, nil, mediaSourceID, playSessionID), true, nil
@@ -947,6 +947,10 @@ func fetchRawSiteDetailSourceRecordsWithSpiderAPIState(database *db.DB, userID i
 	raw, err := cache.RequestSpiderDetailWithTimeout(apiBase, strings.TrimSpace(spiderAPI), strings.TrimSpace(siteDetail), playbackDetailRequestTimeout)
 	if err != nil || raw == nil {
 		return nil, false, false
+	}
+	raw, navigationErr := catpawrunner.ResolveDetailNavigation(apiBase, strings.TrimSpace(spiderAPI), raw, playbackDetailRequestTimeout)
+	if navigationErr != nil {
+		log.Printf("[emby][navigation] site=%s err=%v", siteKey, navigationErr)
 	}
 	playFrom, playURL := catpawrunner.ExtractDetailPlayFromURL(raw)
 	records := smart.BuildDetailSourceRecords(playFrom, playURL, smart.IsPanMockEnabled(raw), siteKey, siteName, spiderAPI, siteDetail, strings.TrimSpace(remark))

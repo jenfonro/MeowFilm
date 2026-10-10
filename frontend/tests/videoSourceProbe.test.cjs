@@ -11,12 +11,13 @@ const requestSource = stripModuleSyntax(readFileSync('src/shared/requestJson.js'
 const normalizeSource = stripModuleSyntax(readFileSync('src/shared/normalize.js', 'utf8'));
 const urlSource = stripModuleSyntax(readFileSync('src/shared/urlText.js', 'utf8'));
 const matchSource = stripModuleSyntax(readFileSync('src/utils/matchCore.js', 'utf8'));
+const navigationSource = stripModuleSyntax(readFileSync('src/shared/detailNavigation.js', 'utf8'));
 const site = { key: 'probe', name: '检测测试源', api: '/aaaaaaaaaa/spider/test/3' };
 const response = (data, status = 200) => ({ status, ok: status >= 200 && status < 300, json: async () => data });
 const listing = (id) => response({ ok: true, vod_play_url: `第一集$${id}` });
 const playable = () => response({ ok: true, url: 'https://media.example/video.mp4' });
 
-function makeProbe({ details, items, lists = {}, plays = {}, nativePlays = {}, panMock = true }) {
+function makeProbe({ details, items, lists = {}, plays = {}, nativePlays = {}, panMock = true, navigation = {} }) {
   const calls = [];
   let saved;
   const context = vm.createContext({
@@ -32,12 +33,15 @@ function makeProbe({ details, items, lists = {}, plays = {}, nativePlays = {}, p
         saved = { results: JSON.parse(body.results), errors: JSON.parse(body.errors) };
         return response({ success: true, sites: [site], results: saved.results });
       }
+      const child = navigation[`${pathname.split('/').pop()}:${body.id}`];
+      if (child) return response({ pan_mock: panMock, ...child });
       if (pathname.endsWith('/home')) return response({ class: [{ type_id: 'movies' }] });
       if (pathname.endsWith('/category')) return response({ list: items || [{ vod_id: 'first' }] });
       if (pathname.endsWith('/search')) return response({ list: [] });
       if (pathname.endsWith('/detail')) {
         assert.ok(details[body.id], `unexpected detail: ${body.id}`);
-        return response({ pan_mock: panMock, list: [details[body.id]] });
+        return response({ pan_mock: panMock, ...(Array.isArray(details[body.id].list)
+          ? details[body.id] : { list: [details[body.id]] }) });
       }
       if (pathname.startsWith('/api/pan/') && pathname.endsWith('/list')) {
         assert.ok(lists[body.flag], `unexpected list: ${body.flag}`);
@@ -60,6 +64,7 @@ function makeProbe({ details, items, lists = {}, plays = {}, nativePlays = {}, p
     const requestJsonResponse = (() => { ${requestSource}; return requestJsonResponse; })();
     const sharedNormalizeHttpBase = (() => { ${normalizeSource}; ${urlSource}; return normalizeHttpBase; })();
     const { getPanShareInput, panMockProviderFromFlag } = (() => { ${matchSource}; return { getPanShareInput, panMockProviderFromFlag }; })();
+    const { hasDetailNavigation, walkDetailNavigation } = (() => { ${navigationSource}; return { hasDetailNavigation, walkDetailNavigation }; })();
     ${source}
   `, context);
   return {
@@ -233,4 +238,58 @@ test('native playback also tries all routes in one detail after a route fails', 
   const saved = await probe.run();
   assert.equal(saved.results.probe, 'valid');
   assert.deepEqual(resolutionCalls(probe.calls), ['detail:first', 'play:线路一', 'play:线路二']);
+});
+
+const navigationCard = (id, action, extra = {}) => ({
+  vod_id: id, vod_name: id, vod_navigation: { action, payload: { id }, ...extra },
+});
+const shareCard = id => navigationCard('opaque-' + id, 'detail', {
+  provider: 'quark', share_flag: '夸克-' + id, share_url: 'https://pan.quark.cn/s/' + id,
+});
+
+test('source probing follows navigation action then locally lists shares without script-private detail', async () => {
+  const probe = makeProbe({
+    details: { first: { list: [navigationCard('pan-group', 'category')] } },
+    navigation: { 'category:pan-group': { list: [shareCard('expiredShare'), shareCard('workingShare')] } },
+    lists: {
+      'https://pan.quark.cn/s/expiredShare': response({ ok: false, message: 'share expired' }),
+      'https://pan.quark.cn/s/workingShare': listing('navigation-file'),
+    },
+    plays: { 'navigation-file': playable() },
+  });
+  const saved = await probe.run();
+  assert.equal(saved.results.probe, 'valid');
+  assert.ok(probe.calls.some(c => c.pathname.endsWith('/category') && c.body.id === 'pan-group'));
+  assert.deepEqual(resolutionCalls(probe.calls), [
+    'detail:first', 'list:https://pan.quark.cn/s/expiredShare',
+    'list:https://pan.quark.cn/s/workingShare', 'play:夸克-workingShare',
+  ]);
+});
+
+test('source probing with pan_mock off follows custom operation and uses Runner complete file ID', async () => {
+  const probe = makeProbe({
+    panMock: false,
+    details: { first: { list: [navigationCard('pan-group', 'resources', { payload: { id: 'pan-group', cursor: 'original' } })] } },
+    navigation: {
+      'resources:pan-group': { list: [shareCard('workingShare')] },
+      'detail:opaque-workingShare': { list: [detail('夸克-workingShare', 'File$original*token*fid*ftoken***Movie.mkv')] },
+    },
+    nativePlays: { 'original*token*fid*ftoken***Movie.mkv': playable() },
+  });
+  const saved = await probe.run();
+  assert.equal(saved.results.probe, 'valid');
+  assert.equal(probe.calls.find(c => c.pathname.endsWith('/resources')).body.cursor, 'original');
+  assert.deepEqual(resolutionCalls(probe.calls), ['detail:first', 'detail:opaque-workingShare', 'play:夸克-workingShare']);
+  assert.equal(probe.calls.some(c => c.pathname.startsWith('/api/pan/')), false);
+});
+
+test('source probing reports unknown navigation data instead of inventing a play request', async () => {
+  const probe = makeProbe({ panMock: false,
+    details: { first: { list: [navigationCard('group', 'category')] } },
+    navigation: { 'category:group': { list: [null, { vod_id: 'unknown', custom: 'upstream' }] } },
+  });
+  const saved = await probe.run();
+  assert.equal(saved.results.probe, 'invalid');
+  assert.match(saved.errors.probe, /未支持的详情/);
+  assert.equal(probe.calls.some(c => c.pathname.endsWith('/play')), false);
 });

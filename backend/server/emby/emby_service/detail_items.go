@@ -332,6 +332,11 @@ func extractSiteDetailMeta(raw map[string]any) siteDetailMeta {
 		year, _ := strconv.Atoi(strings.TrimSpace(anyString(m["vod_year"])))
 		return siteDetailMeta{Name: name, Pic: pic, Remark: remark, Overview: overview, Year: year}
 	}
+	if catpawrunner.HasDetailNavigation(raw) {
+		if m, ok := raw["vod"].(map[string]any); ok {
+			return pick(m)
+		}
+	}
 	if v, ok := raw["list"].([]any); ok && len(v) > 0 {
 		if m, ok := v[0].(map[string]any); ok {
 			return pick(m)

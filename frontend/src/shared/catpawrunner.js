@@ -1,5 +1,6 @@
 import { getPanShareInput, normalizePanMockFlag } from '../utils/matchCore';
 import { normalizeString } from './normalize';
+import { hasDetailNavigation, navigationRequestKey, runProviderListTask, walkDetailNavigation } from './detailNavigation';
 
 export function normalizecatpawrunnerApiBase(inputUrl) {
   const raw = typeof inputUrl === 'string' ? inputUrl.trim() : '';
@@ -258,6 +259,7 @@ const readPanMockEnabledFromRaw = (raw) => {
 
 const extractDetailVodObject = (raw) => {
   const root = raw && typeof raw === 'object' ? raw : {};
+  if (hasDetailNavigation(root) && root.vod && typeof root.vod === 'object') return root.vod;
   const first = Array.isArray(root.list) && root.list[0] && typeof root.list[0] === 'object'
     ? root.list[0]
     : {};
@@ -372,6 +374,7 @@ export const setPanListCachedByProviderFlag = (input = {}) => {
 };
 
 export const requestPanListByProviderFlag = async ({ provider, playFlag, passcode = '', shareUrl = '', signal } = {}) => {
+  if (signal && signal.aborted) return null;
   const generation = detailCacheGeneration;
   const key = normalizeString(provider).toLowerCase();
   const flag = normalizePanMockFlag(playFlag);
@@ -385,7 +388,10 @@ export const requestPanListByProviderFlag = async ({ provider, playFlag, passcod
   if (cacheKey && panListCache.has(cacheKey)) {
     const cached = panListCache.get(cacheKey);
     if (cached && cached.status === 'resolved') return cached.data;
-    if (cached && cached.status === 'pending') return cached.promise;
+    if (cached && cached.status === 'pending') {
+      if (cached.consumers) cached.consumers.push(signal || null);
+      return cached.promise;
+    }
   }
   const stickyCached = getPanListCachedByProviderFlag({ provider: key, playFlag: flag, passcode: pass, shareUrl: share.url });
   if (stickyCached) {
@@ -393,7 +399,13 @@ export const requestPanListByProviderFlag = async ({ provider, playFlag, passcod
     return stickyCached;
   }
 
-  const promise = callPanList(key, body, { signal: null }).then((data) => {
+  const consumers = [signal || null];
+  const promise = runProviderListTask(`local:${key}`, () => {
+    // Do not start a queued request nobody still needs. An active shared
+    // request is not aborted merely because one of its consumers leaves.
+    if (consumers.every(consumer => consumer && consumer.aborted)) throw new Error('请求已取消');
+    return callPanList(key, body, { signal: null });
+  }).then((data) => {
     if (generation === detailCacheGeneration) {
       panListCache.set(cacheKey, { status: 'resolved', data });
       setPanListCachedByProviderFlag({ provider: key, playFlag: flag, passcode: pass, shareUrl: share.url, data });
@@ -404,7 +416,7 @@ export const requestPanListByProviderFlag = async ({ provider, playFlag, passcod
     throw error;
   });
 
-  panListCache.set(cacheKey, { status: 'pending', promise });
+  panListCache.set(cacheKey, { status: 'pending', promise, consumers });
   if (!signal || typeof signal.addEventListener !== 'function') return promise;
   if (signal.aborted) return null;
   return new Promise((resolve) => {
@@ -572,13 +584,13 @@ const resolvePanMockPlaySources = async (raw, playFrom, playUrl, { onUpdate, sig
   return buildResolvedOutput(true);
 };
 
-const buildDetailCacheKey = ({ apiBase, spiderApi, siteDetail }) =>
-  `${normalizecatpawrunnerApiBase(apiBase)}::${normalizeString(spiderApi)}::${normalizeString(siteDetail)}`;
+const buildDetailCacheKey = ({ apiBase, spiderApi, siteDetail, action = 'detail', payload }) =>
+  `${normalizecatpawrunnerApiBase(apiBase)}::${normalizeString(spiderApi)}::${navigationRequestKey(action, payload || { id: siteDetail })}`;
 
-export const fetchCatDetailCached = async ({ apiBase, spiderApi, siteDetail, timeoutMs = 15000, signal } = {}) => {
+export const fetchCatDetailCached = async ({ apiBase, spiderApi, siteDetail, action = 'detail', payload, timeoutMs = 15000, signal } = {}) => {
   const generation = detailCacheGeneration;
-  const cacheKey = buildDetailCacheKey({ apiBase, spiderApi, siteDetail });
-  if (!cacheKey.includes('::') || !normalizeString(siteDetail) || !normalizeString(spiderApi)) {
+  const cacheKey = buildDetailCacheKey({ apiBase, spiderApi, siteDetail, action, payload });
+  if (!cacheKey.includes('::') || (!payload && !normalizeString(siteDetail)) || !normalizeString(spiderApi)) {
     throw new Error('站点详情参数无效');
   }
   const cached = detailCache.get(cacheKey);
@@ -587,12 +599,13 @@ export const fetchCatDetailCached = async ({ apiBase, spiderApi, siteDetail, tim
 
   const promise = requestCatSpider({
     apiBase,
-    action: 'detail',
+    action,
     spiderApi,
-    payload: { id: siteDetail },
+    payload: payload || { id: siteDetail },
     timeoutMs,
     signal,
   }).then((raw) => {
+    if (raw && raw.ok === false) throw new Error(raw.message || raw.msg || '详情请求失败');
     if (generation === detailCacheGeneration) detailCache.set(cacheKey, { status: 'resolved', data: raw });
     return raw;
   }).catch((error) => {
@@ -642,7 +655,7 @@ export const fetchCatResolvedDetailCached = async ({ apiBase, spiderApi, siteDet
       ...detail,
       sources: [],
       panMock189AccessByShareId: {},
-      resolutionComplete: !detail.panMock,
+      resolutionComplete: !detail.panMock && !hasDetailNavigation(raw),
     };
     const emitPartial = (partial) => {
       if (generation !== detailCacheGeneration) return;
@@ -655,7 +668,48 @@ export const fetchCatResolvedDetailCached = async ({ apiBase, spiderApi, siteDet
       if (nextEntry) nextEntry.data = nextData;
       notifyResolvedDetailListeners(cacheKey, nextData);
     };
-    const resolved = await resolvePanMockPlaySources(raw, detail.playFrom, detail.playUrl, { onUpdate: emitPartial, signal });
+    let resolved;
+    const navigationErrors = [];
+    if (hasDetailNavigation(raw)) {
+      const leaves = new Map();
+      let seq = 0;
+      const snapshot = (complete) => {
+        const sources = [];
+        const access = {};
+        leaves.forEach((value, key) => {
+          Object.assign(access, value.panMock189AccessByShareId || {});
+          (value.sources || []).forEach(source => sources.push({
+            ...source, key: `${key}:${source.key}`, groupIndex: sources.length,
+          }));
+        });
+        navigationErrors.forEach((error, index) => sources.push({
+          key: `navigation-error:${index}`, label: normalizeString(error.item && error.item.vod_name) || '详情导航',
+          sourceKind: 'normal', provider: '', sourceValue: '', episodeSegments: [],
+          error: error.message, loading: false, groupIndex: sources.length,
+        }));
+        return { sources, panMock189AccessByShareId: access, resolutionComplete: complete, navigationErrors: navigationErrors.slice() };
+      };
+      emitPartial(snapshot(false));
+      await walkDetailNavigation(raw, {
+        signal, ownerKey: normalizecatpawrunnerApiBase(apiBase),
+        shareIdentity: nav => {
+          const share = getPanShareInput(nav.share_flag, nav.share_url);
+          return share ? share.key : nav.share_url;
+        },
+        request: (action, payload) => fetchCatDetailCached({ apiBase, spiderApi, action, payload, timeoutMs, signal }),
+        visit: async leaf => {
+          const key = seq++;
+          const fields = extractCatDetailFields(leaf);
+          const update = value => { leaves.set(key, value); emitPartial(snapshot(false)); };
+          const value = await resolvePanMockPlaySources(leaf, fields.playFrom, fields.playUrl, { onUpdate: update, signal });
+          update(value);
+        },
+        onError: error => { navigationErrors.push(error); emitPartial(snapshot(false)); },
+      });
+      resolved = snapshot(!(signal && signal.aborted));
+    } else {
+      resolved = await resolvePanMockPlaySources(raw, detail.playFrom, detail.playUrl, { onUpdate: emitPartial, signal });
+    }
     const data = {
       ...baseData,
       // playFrom/playUrl stay as input-compatibility fields; sources is the only
@@ -665,11 +719,13 @@ export const fetchCatResolvedDetailCached = async ({ apiBase, spiderApi, siteDet
         resolved && resolved.panMock189AccessByShareId && typeof resolved.panMock189AccessByShareId === 'object'
           ? resolved.panMock189AccessByShareId
           : {},
-      resolutionComplete: true,
+      navigationErrors,
+      resolutionComplete: resolved.resolutionComplete !== false,
     };
     if (generation === detailCacheGeneration) {
       notifyResolvedDetailListeners(cacheKey, data);
-      resolvedDetailCache.set(cacheKey, { status: 'resolved', data, listeners: new Set() });
+      if (data.resolutionComplete) resolvedDetailCache.set(cacheKey, { status: 'resolved', data, listeners: new Set() });
+      else resolvedDetailCache.delete(cacheKey);
     }
     return data;
   })().catch((error) => {

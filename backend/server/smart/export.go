@@ -320,8 +320,8 @@ func PanToProviderID(panLower string) string {
 	return smartPanToProviderID(panLower)
 }
 
-func CollectPlaybackOffersFromTMDB(database *db.DB, u *SmartUser, req PlaybackRequest, shouldStop func() bool, emit func(PlaybackOffer, int)) error {
-	return smartCollectPlaybackOffersFromTMDB(database, u, req, shouldStop, emit)
+func CollectPlaybackOffersFromTMDB(database *db.DB, u *SmartUser, req PlaybackRequest, shouldStop func() bool, emit func(PlaybackOffer, int), navigationWait ...NavigationOfferWait) error {
+	return smartCollectPlaybackOffersFromTMDB(database, u, req, shouldStop, emit, navigationWait...)
 }
 
 func TryPlaybackOffers(database *db.DB, u *SmartUser, offers []PlaybackOffer) (finalURL string, finalHeaders map[string]string, picked *PlaybackPickedMeta, err error) {

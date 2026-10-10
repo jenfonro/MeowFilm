@@ -297,6 +297,9 @@ type smartDetailCacheEntry struct {
 	PanMock189AccessByShareID map[string]string
 	EpisodeMap                map[int][]smartCandidate
 	EpisodeMapLoose           map[int][]smartCandidate
+	// A navigation root is cached as a navigation, never as a completed empty
+	// episode map. Its leaves are requested by the playback consumer on demand.
+	NavigationRaw map[string]any
 }
 
 func smartBuildSeasonSignature(seasons []smartTMDBSeason) string {
@@ -793,6 +796,14 @@ func smartLoadOrBuildDetailCache(database *db.DB, apiBase string, src smartSourc
 				entry.PanMockEnabled = int(x) == 1
 			}
 		}
+		if catpawrunner.HasDetailNavigation(detailRaw) {
+			entry.OK = true
+			entry.NavigationRaw = detailRaw
+			smartDetailCache.Lock()
+			smartDetailCache.M[key] = entry
+			smartDetailCache.Unlock()
+			return
+		}
 		playFrom, playURL := catpawrunner.ExtractDetailPlayFromURL(detailRaw)
 		sourceRecords := smartBuildDetailSourceRecords(playFrom, playURL, entry.PanMockEnabled, src)
 		entry.SourceRecords = sourceRecords
@@ -1170,6 +1181,31 @@ func smartTryPlayPickedCandidate(flowID uint64, database *db.DB, apiBase string,
 }
 
 func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser string, src smartSource, tmdbSeasons []smartTMDBSeason, singleBaselineSeasons []smartTMDBSeason, tmdbHasMultiSeason bool, preferSeasonNo int, want int, settings smartPlaybackSettings, rawCleanRules []string, rawEpisodeRules []string, requireSeasoned bool, allowSingleBaseline bool, primaryKind string, allowResolutionModes []string) *smartPickResult {
+	if strings.TrimSpace(src.SiteKey) == "" || strings.TrimSpace(src.SpiderAPI) == "" || strings.TrimSpace(src.SiteDetail) == "" || want <= 0 {
+		return nil
+	}
+	cache := smartLoadOrBuildDetailCache(database, apiBase, src, tmdbSeasons, singleBaselineSeasons, tmdbHasMultiSeason, settings, rawCleanRules, rawEpisodeRules, allowSingleBaseline, primaryKind)
+	if cache == nil || !cache.OK {
+		return nil
+	}
+	if cache.NavigationRaw == nil {
+		return smartPickAndPlayDetailEntry(database, apiBase, tvUser, src, tmdbSeasons, singleBaselineSeasons, tmdbHasMultiSeason, preferSeasonNo, want, settings, rawCleanRules, rawEpisodeRules, requireSeasoned, allowSingleBaseline, primaryKind, allowResolutionModes, cache)
+	}
+	var picked *smartPickResult
+	err := catpawrunner.WalkDetailNavigation(cache.NavigationRaw, func(action string, payload map[string]any) (map[string]any, error) {
+		return catpawrunner.RequestSpider(apiBase, src.SpiderAPI, action, payload)
+	}, func(leaf map[string]any) bool {
+		entry := smartNavigationLeafEntry(database, src, leaf, tmdbSeasons, singleBaselineSeasons, tmdbHasMultiSeason, settings, rawCleanRules, rawEpisodeRules, allowSingleBaseline, primaryKind)
+		picked = smartPickAndPlayDetailEntry(database, apiBase, tvUser, src, tmdbSeasons, singleBaselineSeasons, tmdbHasMultiSeason, preferSeasonNo, want, settings, rawCleanRules, rawEpisodeRules, requireSeasoned, allowSingleBaseline, primaryKind, allowResolutionModes, entry)
+		return smartNavigationHasPlayableResult(picked)
+	}, smartNavigationOptions(settings, nil))
+	if err != nil {
+		smartLogDetailError(src.SiteKey, src.SiteName, src.SiteDetail, err)
+	}
+	return picked
+}
+
+func smartPickAndPlayDetailEntry(database *db.DB, apiBase string, tvUser string, src smartSource, tmdbSeasons []smartTMDBSeason, singleBaselineSeasons []smartTMDBSeason, tmdbHasMultiSeason bool, preferSeasonNo int, want int, settings smartPlaybackSettings, rawCleanRules []string, rawEpisodeRules []string, requireSeasoned bool, allowSingleBaseline bool, primaryKind string, allowResolutionModes []string, cache *smartDetailCacheEntry) *smartPickResult {
 	siteKey := strings.TrimSpace(src.SiteKey)
 	spiderApi := strings.TrimSpace(src.SpiderAPI)
 	siteDetail := strings.TrimSpace(src.SiteDetail)
@@ -1178,7 +1214,6 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 	}
 	searchSeasonHint := smartExtractSeasonHintFromSource(src.SiteName, src.Remark)
 
-	cache := smartLoadOrBuildDetailCache(database, apiBase, src, tmdbSeasons, singleBaselineSeasons, tmdbHasMultiSeason, settings, rawCleanRules, rawEpisodeRules, allowSingleBaseline, primaryKind)
 	if cache == nil || !cache.OK {
 		return nil
 	}
@@ -1385,7 +1420,7 @@ type smartPlaybackPickedMeta struct {
 	Quality     string
 }
 
-func smartCollectPlaybackOffersFromTMDB(database *db.DB, u *SmartUser, req smartPlaybackRequest, shouldStop func() bool, emit func(smartCandidateOffer, int)) error {
+func smartCollectPlaybackOffersFromTMDB(database *db.DB, u *SmartUser, req smartPlaybackRequest, shouldStop func() bool, emit func(smartCandidateOffer, int), navigationWait ...NavigationOfferWait) error {
 	if database == nil {
 		return errors.New("invalid database")
 	}
@@ -1444,7 +1479,7 @@ func smartCollectPlaybackOffersFromTMDB(database *db.DB, u *SmartUser, req smart
 		}
 	}
 
-	err := smartCollectPlaybackOffersFromTMDBAligned(database, u, req, apiBase, searchTitle, want, tmdbSeasons, nil, settings, rawCleanRules, rawEpisodeRules, rawMovieRules, true, false, "tmdb", shouldStop, emitWrapped)
+	err := smartCollectPlaybackOffersFromTMDBAligned(database, u, req, apiBase, searchTitle, want, tmdbSeasons, nil, settings, rawCleanRules, rawEpisodeRules, rawMovieRules, true, false, "tmdb", shouldStop, emitWrapped, navigationWait...)
 	if err == nil && emitted {
 		return nil
 	}
@@ -1455,12 +1490,12 @@ func smartCollectPlaybackOffersFromTMDB(database *db.DB, u *SmartUser, req smart
 		doubanMulti := smartPositiveSeasonCount(doubanSeasons) >= 2
 		switch {
 		case !tmdbMulti && doubanMulti:
-			err2 := smartCollectPlaybackOffersFromTMDBAligned(database, u, req, apiBase, searchTitle, want, doubanSeasons, tmdbSeasons, settings, rawCleanRules, rawEpisodeRules, rawMovieRules, false, true, "douban", shouldStop, emitWrapped)
+			err2 := smartCollectPlaybackOffersFromTMDBAligned(database, u, req, apiBase, searchTitle, want, doubanSeasons, tmdbSeasons, settings, rawCleanRules, rawEpisodeRules, rawMovieRules, false, true, "douban", shouldStop, emitWrapped, navigationWait...)
 			if err2 == nil && emitted {
 				return nil
 			}
 		case tmdbMulti && !doubanMulti:
-			err2 := smartCollectPlaybackOffersFromTMDBAligned(database, u, req, apiBase, searchTitle, want, tmdbSeasons, doubanSeasons, settings, rawCleanRules, rawEpisodeRules, rawMovieRules, false, true, "tmdb", shouldStop, emitWrapped)
+			err2 := smartCollectPlaybackOffersFromTMDBAligned(database, u, req, apiBase, searchTitle, want, tmdbSeasons, doubanSeasons, settings, rawCleanRules, rawEpisodeRules, rawMovieRules, false, true, "tmdb", shouldStop, emitWrapped, navigationWait...)
 			if err2 == nil && emitted {
 				return nil
 			}
@@ -1630,6 +1665,7 @@ func smartCollectPlaybackOffersFromTMDBAligned(
 	primaryKind string,
 	shouldStop func() bool,
 	emit func(smartCandidateOffer, int),
+	navigationWait ...NavigationOfferWait,
 ) error {
 	if database == nil {
 		return errors.New("invalid database")
@@ -1837,68 +1873,88 @@ func smartCollectPlaybackOffersFromTMDBAligned(
 				smartLogDetailError(src.SiteKey, src.SiteName, src.SiteDetail, err)
 				continue
 			}
-			playFrom, playURL := catpawrunner.ExtractDetailPlayFromURL(detailRaw)
-			sourceRecords := smartBuildDetailSourceRecords(playFrom, playURL, smartIsPanMockEnabled(detailRaw), src)
-			if blockedEntry != nil && len(sourceRecords) > 0 {
-				sourceRecords = smartFilterSourceRecordsByBlockedFlags(sourceRecords, blockedEntry.PanFlags)
-			}
-			// Log-only Pan derivation; the actual incremental flow remains record-first.
-			smartLogDetailSummary(src.SiteKey, src.SiteName, src.SiteDetail, smartResolvedRecordsToPans(sourceRecords))
-			accessByShareID := map[string]string{}
-			emitCandidatesFromRecords := func(records []smartDetailSourceRecord, access map[string]string) {
-				if len(records) == 0 {
-					return
+			consumeDetail := func(detailRaw map[string]any, onOffer func(smartCandidateOffer)) {
+				playFrom, playURL := catpawrunner.ExtractDetailPlayFromURL(detailRaw)
+				sourceRecords := smartBuildDetailSourceRecords(playFrom, playURL, smartIsPanMockEnabled(detailRaw), src)
+				if blockedEntry != nil && len(sourceRecords) > 0 {
+					sourceRecords = smartFilterSourceRecordsByBlockedFlags(sourceRecords, blockedEntry.PanFlags)
 				}
-				epMap, epLoose, movieCands := smartBuildCandidatesFromResolvedRecords(
-					src,
-					records,
-					isMovieMode,
-					seasonsForMapping,
-					singleBaselineSeasons,
-					hasMulti,
-					settings,
-					rawCleanRules,
-					rawEpisodeRules,
-					rawMovieRules,
-					allowSingleBaseline,
-					primaryKind,
-				)
-				cands := movieCands
-				if !isMovieMode {
-					cands = smartCandidatesForWant(epMap, epLoose, src, seasonsForMapping, hasMulti, preferSeasonNo, want, settings, requireSeasoned, allowResolutionModes)
-				}
-				for _, c := range cands {
-					select {
-					case <-ctx.Done():
+				// Log-only Pan derivation; the actual incremental flow remains record-first.
+				smartLogDetailSummary(src.SiteKey, src.SiteName, src.SiteDetail, smartResolvedRecordsToPans(sourceRecords))
+				accessByShareID := map[string]string{}
+				emitCandidatesFromRecords := func(records []smartDetailSourceRecord, access map[string]string) {
+					if len(records) == 0 {
 						return
-					default:
 					}
-					scheduler.Push(smartCandidateOffer{Cand: c, AccessByShare: access})
+					epMap, epLoose, movieCands := smartBuildCandidatesFromResolvedRecords(
+						src,
+						records,
+						isMovieMode,
+						seasonsForMapping,
+						singleBaselineSeasons,
+						hasMulti,
+						settings,
+						rawCleanRules,
+						rawEpisodeRules,
+						rawMovieRules,
+						allowSingleBaseline,
+						primaryKind,
+					)
+					cands := movieCands
+					if !isMovieMode {
+						cands = smartCandidatesForWant(epMap, epLoose, src, seasonsForMapping, hasMulti, preferSeasonNo, want, settings, requireSeasoned, allowResolutionModes)
+					}
+					for _, c := range cands {
+						select {
+						case <-ctx.Done():
+							return
+						default:
+						}
+						offer := smartCandidateOffer{Cand: c, AccessByShare: access}
+						scheduler.Push(offer)
+						if onOffer != nil {
+							onOffer(offer)
+						}
+					}
+				}
+				if smartIsPanMockEnabled(detailRaw) {
+					detailReadyRecords := make([]smartDetailSourceRecord, 0, len(sourceRecords))
+					panMockRecords := make([]smartDetailSourceRecord, 0, len(sourceRecords))
+					for _, record := range sourceRecords {
+						if record.PanMock && record.Supported {
+							panMockRecords = append(panMockRecords, record)
+							continue
+						}
+						detailReadyRecords = append(detailReadyRecords, record)
+					}
+					emitCandidatesFromRecords(detailReadyRecords, nil)
+					resolved, access := smartResolvePanMockSourceRecordsIncremental(database, src.SiteKey, src.SiteName, want, seasonsForMapping, hasMulti, rawCleanRules, rawEpisodeRules, panMockRecords, func(resolvedGroup []smartDetailSourceRecord, accessDelta map[string]string, emitAllowed bool) {
+						for sid, acc := range accessDelta {
+							accessByShareID[sid] = acc
+						}
+						if emitAllowed {
+							emitCandidatesFromRecords(resolvedGroup, accessDelta)
+						}
+					})
+					_ = resolved
+					accessByShareID = access
+				} else {
+					emitCandidatesFromRecords(sourceRecords, accessByShareID)
 				}
 			}
-			if smartIsPanMockEnabled(detailRaw) {
-				detailReadyRecords := make([]smartDetailSourceRecord, 0, len(sourceRecords))
-				panMockRecords := make([]smartDetailSourceRecord, 0, len(sourceRecords))
-				for _, record := range sourceRecords {
-					if record.PanMock && record.Supported {
-						panMockRecords = append(panMockRecords, record)
-						continue
-					}
-					detailReadyRecords = append(detailReadyRecords, record)
+			if catpawrunner.HasDetailNavigation(detailRaw) {
+				var wait NavigationOfferWait
+				if len(navigationWait) > 0 {
+					wait = navigationWait[0]
 				}
-				emitCandidatesFromRecords(detailReadyRecords, nil)
-				resolved, access := smartResolvePanMockSourceRecordsIncremental(database, src.SiteKey, src.SiteName, want, seasonsForMapping, hasMulti, rawCleanRules, rawEpisodeRules, panMockRecords, func(resolvedGroup []smartDetailSourceRecord, accessDelta map[string]string, emitAllowed bool) {
-					for sid, acc := range accessDelta {
-						accessByShareID[sid] = acc
-					}
-					if emitAllowed {
-						emitCandidatesFromRecords(resolvedGroup, accessDelta)
-					}
-				})
-				_ = resolved
-				accessByShareID = access
+				err := smartWalkNavigationOffers(ctx, detailRaw, settings, shouldStop, func(action string, payload map[string]any) (map[string]any, error) {
+					return catpawrunner.RequestSpiderWithTimeout(apiBase, src.SpiderAPI, action, payload, 8*time.Second)
+				}, consumeDetail, wait)
+				if err != nil {
+					smartLogDetailError(src.SiteKey, src.SiteName, src.SiteDetail, err)
+				}
 			} else {
-				emitCandidatesFromRecords(sourceRecords, accessByShareID)
+				consumeDetail(detailRaw, nil)
 			}
 		}
 	}

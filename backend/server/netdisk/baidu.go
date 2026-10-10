@@ -892,6 +892,8 @@ func BaiduList(database *db.DB, flag string, pwd string) (string, string, error)
 func BaiduListWithCacheHit(database *db.DB, flag string, pwd string) (vod string, surl string, fromCache bool, err error) {
 	key := listCacheKey("baidu_list", flag, listCacheCredentialPart(pwd))
 	got, hit, err := baiduListCacheTwoTier.Do(key, func() (listCache2, error) {
+		release := acquireProviderList(database, "baidu")
+		defer release()
 		vod, surl, e := baiduListUncached(database, flag, pwd)
 		if e != nil {
 			return listCache2{}, e
