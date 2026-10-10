@@ -4,6 +4,15 @@ import "testing"
 
 func TestPanShareInputStandardAndLegacy(t *testing.T) {
 	tests := []struct{ flag, value, provider, id, password string }{
+		{"百度-shareA-1234", "https://pan.baidu.com/s/1shareA?pwd=1234", "baidu", "shareA", "1234"},
+		{"百度-1share-A_b-abcd", "https://pan.baidu.com/s/11share-A_b-abcd", "baidu", "1share-A_b-abcd", ""},
+		{"百度-1share-A_b-abcd-1234", "https://pan.baidu.com/s/11share-A_b-abcd", "baidu", "1share-A_b-abcd", "1234"},
+		{"百度-otherShare-1234", "https://pan.baidu.com/s/11share-A_b-abcd", "baidu", "1share-A_b-abcd", ""},
+		{"百度-shareA-1234", "https://pan.baidu.com/s/1shareA?pwd=abcd", "baidu", "shareA", "abcd"},
+		{"夸克-shareA", "https://pan.quark.cn/s/shareA", "quark", "shareA", ""},
+		{"UC-shareA-abcd", "https://drive.uc.cn/s/shareA", "uc", "shareA", "abcd"},
+		{"天翼-shareA-abcd", "https://cloud.189.cn/t/shareA", "189", "shareA", "abcd"},
+		{"移动-shareA", "https://caiyun.139.com/m/i?shareA", "139", "shareA", ""},
 		{"百度-1234", "https://pan.baidu.com/s/1shareA?pwd=1234", "baidu", "shareA", "1234"},
 		{"百度", "https://pan.baidu.com/share/init?surl=shareA", "baidu", "shareA", ""},
 		{"夸克", "https://pan.quark.cn/s/shareA", "quark", "shareA", ""},
@@ -29,9 +38,10 @@ func TestPanShareInputStandardAndLegacy(t *testing.T) {
 	}
 }
 
-func TestPanShareInputDoesNotGuessFromCanonicalPassword(t *testing.T) {
+func TestPanShareInputDoesNotGuessOwnershipFromFlag(t *testing.T) {
 	for _, tc := range [][2]string{
 		{"百度-1234", ""}, {"夸克", ""}, {"光鸭", "File$private"},
+		{"百度-shareA-abcd", "File$private-id"},
 		{"天翼-1234", "File$123*456*name"},
 		{"夸父-shareA", "File$shareA*token*fid"},
 		{"夸克", "https://pan.quark.cn.evil.test/s/shareA"},
@@ -47,6 +57,8 @@ func TestPanShareInputDoesNotGuessFromCanonicalPassword(t *testing.T) {
 
 func TestPanNamesKeepHistoryCompatibility(t *testing.T) {
 	for flag, want := range map[string]string{
+		"百度-1share-A_b-abcd": "baidu", "夸克-shareA-abcd": "quark", "UC-shareA": "uc",
+		"天翼-shareA-abcd": "189", "移动-shareA": "139",
 		"百度": "baidu", "百度-1234": "baidu", "百度原画(无限)-shareA": "baidu",
 		"夸克": "quark", "夸父-shareA": "quark",
 		"UC": "uc", "uc-abcd": "uc", "优夕-shareA": "uc",

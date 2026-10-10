@@ -6,7 +6,7 @@ const compiled = buildSync({
   stdin: {
     contents: `
       export * from './src/shared/catpawrunner.js';
-      export { getPanShareInput, panMockProviderFromFlag } from './src/utils/matchCore.js';
+      export { getPanShareInput, panMockProviderFromFlag, extractTianyiShareCodeAndAccessCode } from './src/utils/matchCore.js';
       export { buildSourceSegmentItems } from './src/shared/smartSourceRecognition.js';
       export { executeResolvedSitePlayback } from './src/shared/playbackRuntime.js';
     `,
@@ -35,11 +35,11 @@ const installFetch = (t, fn) => {
 
 test('canonical names and saved legacy names are recognized without inventing share IDs', () => {
   for (const [provider, labels] of Object.entries({
-    baidu: ['百度', '百度-1234', '百度原画-shareA', '百度原画(无限)-shareA'],
-    quark: ['夸克', '夸克-1234', '夸父-shareA'],
-    uc: ['UC', 'uc-1234', '优夕-shareA'],
-    '189': ['天翼', '天翼-1234', '天意-shareA'],
-    '139': ['移动', '移动-1234', '逸动-shareA'],
+    baidu: ['百度-shareA', '百度-1share-A_b-1234', '百度', '百度-1234', '百度原画-shareA', '百度原画(无限)-shareA'],
+    quark: ['夸克-shareA', '夸克-shareA-1234', '夸克', '夸克-1234', '夸父-shareA'],
+    uc: ['UC-shareA', 'UC-shareA-1234', 'UC', 'uc-1234', '优夕-shareA'],
+    '189': ['天翼-shareA', '天翼-shareA-1234', '天翼', '天翼-1234', '天意-shareA'],
+    '139': ['移动-shareA', '移动-shareA-1234', '移动', '移动-1234', '逸动-shareA'],
   })) for (const label of labels) assert.equal(api.panMockProviderFromFlag(label), provider);
   for (const label of ['百度-1234', '夸克', '光鸭', '蓝光HDR']) assert.equal(api.getPanShareInput(label), null);
   assert.equal(api.normalizeSourceEntry({ label: 'saved', provider: 'quark' }).sourceKind, 'panmock');
@@ -47,11 +47,15 @@ test('canonical names and saved legacy names are recognized without inventing sh
 
 test('share URLs retain identity and actual passwords, including mobile hash routes', () => {
   for (const [flag, url, provider, id, passcode] of [
-    ['百度-1234', 'https://pan.baidu.com/s/1shareA?pwd=1234', 'baidu', 'shareA', '1234'],
-    ['夸克', 'https://pan.quark.cn/s/shareA', 'quark', 'shareA', ''],
-    ['UC', 'https://drive.uc.cn/s/shareA', 'uc', 'shareA', ''],
-    ['天翼-1234', 'https://cloud.189.cn/t/shareA?accessCode=1234', '189', 'shareA', '1234'],
-    ['移动-1234', 'https://yun.139.com/shareweb/#/w/i/shareA?pwd=1234', '139', 'shareA', '1234'],
+    ['百度-shareA-1234', 'https://pan.baidu.com/s/1shareA?pwd=1234', 'baidu', 'shareA', '1234'],
+    ['夸克-shareA', 'https://pan.quark.cn/s/shareA', 'quark', 'shareA', ''],
+    ['UC-shareA', 'https://drive.uc.cn/s/shareA', 'uc', 'shareA', ''],
+    ['天翼-shareA-1234', 'https://cloud.189.cn/t/shareA?accessCode=1234', '189', 'shareA', '1234'],
+    ['移动-shareA-1234', 'https://yun.139.com/shareweb/#/w/i/shareA?pwd=1234', '139', 'shareA', '1234'],
+    ['百度-1share-A_b-abcd', 'https://pan.baidu.com/s/11share-A_b-abcd', 'baidu', '1share-A_b-abcd', ''],
+    ['百度-1share-A_b-abcd-1234', 'https://pan.baidu.com/s/11share-A_b-abcd', 'baidu', '1share-A_b-abcd', '1234'],
+    ['百度-otherShare-1234', 'https://pan.baidu.com/s/11share-A_b-abcd', 'baidu', '1share-A_b-abcd', ''],
+    ['百度-shareA-1234', 'https://pan.baidu.com/s/1shareA?pwd=abcd', 'baidu', 'shareA', 'abcd'],
   ]) {
     const share = api.getPanShareInput(flag, url);
     assert.deepEqual([share.provider, share.shareId, share.passcode], [provider, id, passcode]);
@@ -61,12 +65,12 @@ test('share URLs retain identity and actual passwords, including mobile hash rou
   }
 });
 
-test('same-name shares resolve separately through the original list flag parameter', async (t) => {
+test('same-provider shares resolve separately through the original list flag parameter', async (t) => {
   const a = 'https://pan.quark.cn/s/shareA', b = 'https://pan.quark.cn/s/shareB';
   const native = 'https://image.example/cover*Author*1:20****opaque-E65';
   const listCalls = [], updates = [];
   installFetch(t, (url, body) => {
-    if (url.pathname.endsWith('/detail')) return response(detail(true, ['夸克', '夸克', '蓝光HDR'], [a, b, `第一集$${native}`]));
+    if (url.pathname.endsWith('/detail')) return response(detail(true, ['夸克-shareA', '夸克-shareB', '蓝光HDR'], [a, b, `第一集$${native}`]));
     assert.equal(url.pathname, '/api/pan/quark/list');
     listCalls.push(body);
     assert.equal(body.url, undefined, 'no new list protocol');
@@ -92,7 +96,7 @@ test('Runner mode keeps full IDs and enters existing remote play without changin
   const calls = [];
   installFetch(t, (url, body) => {
     calls.push({ url, body });
-    if (url.pathname.endsWith('/detail')) return response(detail(false, ['夸克'], [`第2季$${id}`]));
+    if (url.pathname.endsWith('/detail')) return response(detail(false, ['夸克-shareA'], [`第2季$${id}`]));
     assert.equal(url.origin, 'https://cat.example');
     assert.equal(url.pathname, '/play');
     return response({ url: 'https://media.example/video.mp4' });
@@ -110,14 +114,14 @@ test('Runner mode keeps full IDs and enters existing remote play without changin
   });
   assert.equal(calls.length, 2);
   assert.equal(calls[1].body.id, id);
-  assert.equal(calls[1].body.flag, '夸克');
+  assert.equal(calls[1].body.flag, '夸克-shareA');
   assert.equal(calls[1].body.siteApi, options.spiderApi);
 });
 
 test('a complete source with no usable share stays native even when pan_mock is on', async (t) => {
   installFetch(t, url => {
     assert.ok(url.pathname.endsWith('/detail'), 'native source must not call local list');
-    return response(detail(true, ['百度', '光鸭原画'], ['File$opaque-private-id', 'File$duck-native-id']));
+    return response(detail(true, ['百度-shareA-abcd', '光鸭原画'], ['File$opaque-private-id', 'File$duck-native-id']));
   });
   const out = await api.fetchCatResolvedDetailCached(options);
   assert.deepEqual(out.sources.map(s => s.provider), ['', '']);
@@ -131,8 +135,8 @@ test('clearing detail caches prevents an old in-flight list from overwriting the
     if (url.pathname.endsWith('/detail')) {
       detailCalls += 1;
       return response(mode
-        ? detail(true, ['夸克'], ['https://pan.quark.cn/s/shareA'])
-        : detail(false, ['夸克'], ['File$shareA*newToken*fid*token***S01E01.mkv']));
+        ? detail(true, ['夸克-shareA'], ['https://pan.quark.cn/s/shareA'])
+        : detail(false, ['夸克-shareA'], ['File$shareA*newToken*fid*token***S01E01.mkv']));
     }
     started.resolve();
     return oldList.promise;
@@ -149,4 +153,15 @@ test('clearing detail caches prevents an old in-flight list from overwriting the
   assert.equal(cached.panMock, false);
   assert.match(cached.sources[0].episodeSegments[0], /newToken/);
   assert.equal(detailCalls, 2);
+});
+
+test('Tianyi playback reads the final password suffix and keeps saved old flag compatibility', () => {
+  for (const [flag, value, shareCode, accessCode] of [
+    ['天翼-shareA-abcd', 'S01E01.mkv', 'shareA', 'abcd'],
+    ['天翼-shareA', 'S01E01.mkv', 'shareA', ''],
+    ['天翼-shareA-abcd', 'https://cloud.189.cn/t/shareA', 'shareA', 'abcd'],
+    ['天翼-shareA-abcd', 'https://cloud.189.cn/t/shareA?accessCode=1234', 'shareA', '1234'],
+    ['天翼-abcd', 'S01E01.mkv', '', 'abcd'],
+    ['天意-shareA', 'abcd', 'shareA', 'abcd'],
+  ]) assert.deepEqual(api.extractTianyiShareCodeAndAccessCode(flag, value), { shareCode, accessCode });
 });

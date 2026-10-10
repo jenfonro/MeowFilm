@@ -179,6 +179,9 @@ func smartPanMock189CredentialsFromSourceValue(panFlag string, sourceValue strin
 		return share.ShareID, share.Passcode
 	}
 	label := strings.TrimSpace(panFlag)
+	if m := regexp.MustCompile(`^天翼-([A-Za-z0-9]{6,64})(?:-(.*))?$`).FindStringSubmatch(label); len(m) == 3 {
+		return m[1], m[2]
+	}
 	if m := regexp.MustCompile(`天意-([A-Za-z0-9]{6,64})`).FindStringSubmatch(label); len(m) == 2 {
 		return strings.TrimSpace(m[1]), strings.TrimSpace(sourceValue)
 	}

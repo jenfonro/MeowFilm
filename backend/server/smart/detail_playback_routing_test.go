@@ -18,11 +18,11 @@ func TestNormalDetailCandidatesKeepResolvedMode(t *testing.T) {
 	for _, provider := range []struct {
 		flag, share, id string
 	}{
-		{"百度-1234", "https://pan.baidu.com/s/1shareA?pwd=1234", "baidu"},
-		{"夸克", "https://pan.quark.cn/s/shareA", "quark"},
-		{"UC", "https://drive.uc.cn/s/shareA", "uc"},
-		{"天翼-abcd", "https://cloud.189.cn/t/shareA?accessCode=abcd", "189"},
-		{"移动", "https://yun.139.com/shareweb/#/w/i/shareA", "139"},
+		{"百度-shareA-1234", "https://pan.baidu.com/s/1shareA?pwd=1234", "baidu"},
+		{"夸克-shareA", "https://pan.quark.cn/s/shareA", "quark"},
+		{"UC-shareA", "https://drive.uc.cn/s/shareA", "uc"},
+		{"天翼-shareA-abcd", "https://cloud.189.cn/t/shareA?accessCode=abcd", "189"},
+		{"移动-shareA", "https://yun.139.com/shareweb/#/w/i/shareA", "139"},
 		{"未命名来源", "https://pan.quark.cn/s/shareA", "quark"},
 	} {
 		for _, panMock := range []bool{false, true} {
@@ -78,9 +78,9 @@ func TestNormalDetailCandidatesKeepResolvedMode(t *testing.T) {
 func TestNormalDetailDoesNotRelistOrCollapseResolvedFiles(t *testing.T) {
 	local, runner := "quark", ""
 	candidates := []smartCandidate{
-		{PanFlag: "夸克-1234", detailProvider: &local, Ep: catpawrunner.Episode{URL: "shareA*token*fid*fileToken***S01E01.mkv"}},
-		{PanFlag: "夸克-1234", detailProvider: &local, Ep: catpawrunner.Episode{URL: "shareB*token*fid*fileToken***S01E01.mkv"}},
-		{PanFlag: "夸克", detailProvider: &runner, Ep: catpawrunner.Episode{URL: "complete-runner-id"}},
+		{PanFlag: "夸克-shareA-1234", detailProvider: &local, Ep: catpawrunner.Episode{URL: "shareA*token*fid*fileToken***S01E01.mkv"}},
+		{PanFlag: "夸克-shareB-1234", detailProvider: &local, Ep: catpawrunner.Episode{URL: "shareB*token*fid*fileToken***S01E01.mkv"}},
+		{PanFlag: "夸克-shareA", detailProvider: &runner, Ep: catpawrunner.Episode{URL: "complete-runner-id"}},
 		{PanFlag: "蓝光HDR", detailProvider: &runner, Ep: catpawrunner.Episode{URL: "private-native-id"}},
 	}
 	settings := smartPlaybackSettings{PanTokenOrderLower: []string{"百度"}}
@@ -102,6 +102,8 @@ func TestNormalDetailDoesNotRelistOrCollapseResolvedFiles(t *testing.T) {
 
 func TestReplayCandidatesKeepNameBasedResolution(t *testing.T) {
 	for _, sample := range []struct{ flag, provider string }{
+		{"百度-shareA-1234", "baidu"}, {"夸克-shareA-1234", "quark"}, {"UC-shareA", "uc"},
+		{"天翼-shareA-abcd", "189"}, {"移动-shareA", "139"},
 		{"百度-1234", "baidu"}, {"百度原画(无限)-share", "baidu"},
 		{"夸克", "quark"}, {"夸父-share", "quark"},
 		{"UC", "uc"}, {"优夕-share", "uc"},
@@ -122,7 +124,7 @@ func TestReplayCandidatesKeepNameBasedResolution(t *testing.T) {
 }
 
 func TestDetailCandidateRoutingIsInternal(t *testing.T) {
-	candidate := smartCandidate{PanFlag: "夸克", Ep: catpawrunner.Episode{URL: "complete-id"}}
+	candidate := smartCandidate{PanFlag: "夸克-shareA", Ep: catpawrunner.Episode{URL: "complete-id"}}
 	before, err := json.Marshal(candidate)
 	if err != nil {
 		t.Fatal(err)
@@ -137,7 +139,7 @@ func TestDetailCandidateRoutingIsInternal(t *testing.T) {
 }
 
 func TestRunnerDetailCandidatePlaysViaRunner(t *testing.T) {
-	for _, flag := range []string{"百度-1234", "夸克", "UC", "天翼-abcd", "移动", "光鸭原画", "蓝光HDR"} {
+	for _, flag := range []string{"百度-shareA-1234", "夸克-shareA", "UC-shareA", "天翼-shareA-abcd", "移动-shareA", "光鸭原画", "蓝光HDR"} {
 		for _, panMock := range []bool{false, true} {
 			t.Run(flag+"/"+map[bool]string{false: "runner", true: "mock-with-complete-list"}[panMock], func(t *testing.T) {
 				spiderAPI := "/0123456789/spider/test/4"
@@ -214,9 +216,9 @@ func TestResolvedLocalDetailDoesNotReturnToRunner(t *testing.T) {
 	}))
 	defer server.Close()
 	src := smartSource{SiteKey: t.Name(), SiteDetail: "film", SpiderAPI: "/0123456789/spider/test/4"}
-	records := smartBuildDetailSourceRecords("夸克", "https://pan.quark.cn/s/shareA", true, src)
+	records := smartBuildDetailSourceRecords("夸克-shareA", "https://pan.quark.cn/s/shareA", true, src)
 	records[0].Status = smartDetailSourceResolved
-	records[0].Episodes = []catpawrunner.Episode{{Name: "/", URL: "shareA*token*fid*fileToken***Film.S01E01.mkv", Flag: "夸克"}}
+	records[0].Episodes = []catpawrunner.Episode{{Name: "/", URL: "shareA*token*fid*fileToken***Film.S01E01.mkv", Flag: "夸克-shareA"}}
 	seasons := []smartTMDBSeason{{Season: 1, EpisodeCount: 1}}
 	settings := smartPlaybackSettings{}
 	episodes, loose := smartBuildEpisodeMapsFromResolvedRecords(src, records, seasons, nil, false, settings, nil, episodeNameRules, false, "tmdb")

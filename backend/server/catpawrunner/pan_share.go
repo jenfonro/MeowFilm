@@ -98,6 +98,15 @@ func ParsePanShareInput(flag, value string) (PanShareInput, bool) {
 				}
 			}
 		}
+		if pass == "" {
+			names := map[string]string{"baidu": "百度", "quark": "夸克", "uc": "UC", "189": "天翼", "139": "移动"}
+			// The URL confirms the whole share ID, including any "-" it contains.
+			// Only a suffix following that exact identity can be a password.
+			prefix := names[provider] + "-" + id + "-"
+			if strings.HasPrefix(label, prefix) {
+				pass = strings.TrimPrefix(label, prefix)
+			}
+		}
 		return makePanShareInput(provider, id, pass), true
 	}
 	legacy := panLegacyFlagPattern.FindStringSubmatch(label)

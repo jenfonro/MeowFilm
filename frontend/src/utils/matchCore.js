@@ -70,13 +70,19 @@ export const getPanShareInput = (flag, value = '') => {
       }
       if (!provider || !valid(shareId)) continue;
       const hashQuery = new URLSearchParams(url.hash.includes('?') ? url.hash.slice(url.hash.indexOf('?') + 1) : '');
+      // Match the complete, URL-confirmed identity before reading the suffix:
+      // Baidu share codes can themselves contain one or more "-".
+      const names = { baidu: '百度', quark: '夸克', uc: 'UC', '189': '天翼', '139': '移动' };
+      const flagPrefix = `${names[provider]}-${shareId}-`;
+      const flagPasscode = label.startsWith(flagPrefix) ? label.slice(flagPrefix.length) : '';
       const passcode = q.get('pwd') || q.get('passcode') || q.get('accessCode') || q.get('password') || q.get('passwd') ||
-        hashQuery.get('pwd') || hashQuery.get('passwd') || '';
+        hashQuery.get('pwd') || hashQuery.get('passwd') || flagPasscode;
       return { provider, shareId, passcode, url: input, key: `${provider}:${shareId}` };
     } catch (_error) {}
   }
   // Old mocked responses carry share identity in the flag and a password-only
-  // value. Canonical suffixes are passwords and must never be used as share IDs.
+  // value. For canonical labels, retain URL-based ownership/identity checks;
+  // a descriptive label alone must not turn a complete native list into a share.
   const legacy = /^(夸父|优夕|逸动|天意|百度原画)-([A-Za-z0-9_-]+)$/.exec(label);
   if (!legacy || !valid(legacy[2]) || /[$*:/]/.test(raw)) return null;
   const provider = panMockProviderFromFlag(label);
@@ -111,10 +117,13 @@ export const parseMockPasscodeFromRawName = (rawName) => {
 
 export const extractTianyiShareCodeAndAccessCode = (flag, rawName) => {
   const label = normalizePanMockFlag(flag);
-  const canonical = /^天翼(?:-(.*))?$/.exec(label);
-  if (canonical) return { shareCode: '', accessCode: canonical[1] || '' };
-  const share = getPanShareInput(label);
+  const share = getPanShareInput(label, rawName);
   if (share && share.provider === '189' && share.url) return { shareCode: share.shareId, accessCode: share.passcode };
+  const canonical = /^天翼-([A-Za-z0-9]{6,64})(?:-(.*))?$/.exec(label);
+  if (canonical) return { shareCode: canonical[1], accessCode: canonical[2] || '' };
+  // Saved details from the previous short-lived format only carried a password.
+  const oldCanonical = /^天翼(?:-(.*))?$/.exec(label);
+  if (oldCanonical) return { shareCode: '', accessCode: oldCanonical[1] || '' };
   const pass = typeof rawName === 'string' ? rawName.trim() : '';
   let shareCode = '';
   if (label) {
