@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-func TestNavigationUsesExistingMatchAndPlayBeforeRequestingNextShare(t *testing.T) {
+func TestNavigationResolvesGroupSharesConcurrentlyAndUsesExistingMatchAndPlay(t *testing.T) {
 	spider := "/0123456789/spider/navigation/3"
 	node := func(id, action string, share bool) map[string]any {
 		desc := map[string]any{"action": action, "payload": map[string]any{"id": id}, "provider": "quark"}
@@ -23,6 +23,8 @@ func TestNavigationUsesExistingMatchAndPlayBeforeRequestingNextShare(t *testing.
 	}
 	var mu sync.Mutex
 	var requested, played []string
+	var shareRequests atomic.Int32
+	allShares := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		var body map[string]any
@@ -48,7 +50,7 @@ func TestNavigationUsesExistingMatchAndPlayBeforeRequestingNextShare(t *testing.
 		var list []any
 		switch id {
 		case "movie":
-			list = []any{node("group", "resources", false)}
+			list = []any{node("group", "resources", false), node("nextGroup", "category", false)}
 		case "group":
 			if r.URL.Path != spider+"/resources" {
 				t.Error("script navigation action was changed to detail")
@@ -56,6 +58,18 @@ func TestNavigationUsesExistingMatchAndPlayBeforeRequestingNextShare(t *testing.
 			list = []any{node("otherEpisode", "detail", true), node("badShare", "detail", true),
 				node("goodShare", "detail", true), node("unneededShare", "detail", true)}
 		default:
+			if id == "nextGroup" {
+				t.Error("requested the next category after successful playback")
+				break
+			}
+			if shareRequests.Add(1) == 4 {
+				close(allShares)
+			}
+			select {
+			case <-allShares:
+			case <-time.After(2 * time.Second):
+				t.Error("same-group share details were serialized")
+			}
 			episode := "01"
 			if id == "otherEpisode" {
 				episode = "02"
@@ -82,11 +96,18 @@ func TestNavigationUsesExistingMatchAndPlayBeforeRequestingNextShare(t *testing.
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if strings.Join(requested, ",") != "movie,group,otherEpisode,badShare,goodShare" {
-		t.Fatalf("navigation was eagerly expanded or a failed share aborted the detail: %v", requested)
+	if len(requested) != 6 || requested[0] != "movie" || requested[1] != "group" {
+		t.Fatalf("did not resolve all shares in the selected category: %v", requested)
 	}
-	if len(played) != 2 || !strings.HasPrefix(played[0], "badShare*") || !strings.HasPrefix(played[1], "goodShare*") {
-		t.Fatalf("a nonmatching episode was played or play failure was treated as success: %v", played)
+	good := false
+	for _, id := range played {
+		if strings.HasPrefix(id, "otherEpisode*") {
+			t.Fatalf("original episode matching was bypassed: %v", played)
+		}
+		good = good || strings.HasPrefix(id, "goodShare*")
+	}
+	if !good {
+		t.Fatalf("no matching playable share was selected: %v", played)
 	}
 	if result.Cand.SiteDetail != "movie" {
 		t.Fatal("navigation replaced the original movie identity")
@@ -115,69 +136,43 @@ func TestNavigationWrapperRetainsPreRequestArgumentChecks(t *testing.T) {
 	}
 }
 
-func TestStreamingNavigationWaitsForExistingOfferFeedback(t *testing.T) {
+func TestStreamingNavigationDoesNotWaitForPlaybackFeedback(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	var stopped atomic.Bool
 	var mu sync.Mutex
 	var requested []string
 	var items []any
-	for _, id := range []string{"noMatch", "badShare", "goodShare", "unneededShare"} {
-		items = append(items, map[string]any{"vod_id": id, "vod_navigation": map[string]any{"action": "detail", "payload": map[string]any{"id": id}}})
+	for _, id := range []string{"groupA", "groupB"} {
+		items = append(items, map[string]any{"vod_id": id, "vod_navigation": map[string]any{"action": "category", "payload": map[string]any{"id": id}}})
 	}
-	ready := make(chan string, 2)
-	feedback := make(chan bool)
+	offers := make(chan string, 2)
 	done := make(chan error, 1)
 	go func() {
-		done <- smartWalkNavigationOffers(ctx, map[string]any{"pan_mock": false, "list": items}, smartPlaybackSettings{}, stopped.Load,
+		done <- smartWalkNavigationOffers(ctx, map[string]any{"pan_mock": false, "list": items}, smartPlaybackSettings{}, nil,
 			func(_ string, payload map[string]any) (map[string]any, error) {
 				id := payload["id"].(string)
 				mu.Lock()
 				requested = append(requested, id)
 				mu.Unlock()
 				return map[string]any{"list": []any{map[string]any{"vod_play_from": "蓝光HDR", "vod_play_url": id}}}, nil
-			}, func(leaf map[string]any, emit func(smartCandidateOffer)) {
+			}, func(leaf map[string]any) {
 				id := leaf["list"].([]any)[0].(map[string]any)["vod_play_url"].(string)
-				if id != "noMatch" {
-					emit(smartCandidateOffer{Cand: smartCandidate{RawName: id}})
-				}
-			}, func(ctx context.Context, offers []PlaybackOffer) {
-				ready <- offers[0].Cand.RawName
-				select {
-				case success := <-feedback:
-					stopped.Store(success)
-				case <-ctx.Done():
-				}
+				// Like the original scheduler, accepting an offer does not wait
+				// for the separate playback consumer to finish.
+				offers <- id
 			})
 	}()
-	for i, id := range []string{"badShare", "goodShare"} {
-		select {
-		case got := <-ready:
-			if got != id {
-				t.Fatalf("got %s want %s", got, id)
-			}
-		case <-ctx.Done():
-			t.Fatal("navigation did not reach feedback")
-		}
-		mu.Lock()
-		count := len(requested)
-		mu.Unlock()
-		if count != i+2 {
-			t.Fatalf("next share dispatched before feedback: %d", count)
-		}
-		feedback <- i == 1
-	}
 	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatal(err)
 		}
 	case <-ctx.Done():
-		t.Fatal("navigation did not stop after playback succeeded")
+		t.Fatal("navigation added a playback feedback wait")
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if strings.Join(requested, ",") != "noMatch,badShare,goodShare" {
-		t.Fatalf("unneeded navigation: %v", requested)
+	if strings.Join(requested, ",") != "groupA,groupB" || len(offers) != 2 {
+		t.Fatalf("navigation did not return to the existing offer flow: %v", requested)
 	}
 }

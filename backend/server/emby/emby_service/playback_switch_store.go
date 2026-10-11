@@ -552,7 +552,8 @@ func playbackSwitchSkipMatches(item playbackSwitchSkipItem, site string, panFlag
 	if skipPanFlag == "" || candPanFlag == "" || skipEpisodeFile == "" || candEpisodeFile == "" {
 		return false
 	}
-	if strings.TrimSpace(smart.PlayFlagProviderID(candPanFlag)) != "" {
+	// A bare provider name can enable replay, but cannot identify a shared file across sites.
+	if strings.Contains(candPanFlag, "-") && strings.TrimSpace(smart.PlayFlagProviderID(candPanFlag)) != "" {
 		return skipPanFlag == candPanFlag && skipEpisodeFile == candEpisodeFile
 	}
 	return skipPanFlag == candPanFlag && strings.TrimSpace(item.Site) == strings.TrimSpace(site) && skipEpisodeFile == candEpisodeFile

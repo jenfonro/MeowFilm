@@ -362,6 +362,7 @@ export const runSmartPlaybackController = async ({
             .then(() => (typeof ensureSiteResultDetailCached === 'function'
               ? ensureSiteResultDetailCached(siteItem, {
                 signal: null,
+                waitForNavigationDispatch: waitDispatchReady,
                 onUpdate: (nextDetail) => {
                   const payload = nextDetail && typeof nextDetail === 'object' ? nextDetail : null;
                   if (!payload || shouldBlockNewDetailRequests()) return;

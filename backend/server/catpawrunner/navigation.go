@@ -72,8 +72,9 @@ func navigationKey(action string, payload map[string]any) string {
 }
 
 type NavigationOptions struct {
-	// Browsing can fetch independent branches together. Smart playback can
-	// request the next branch only after its existing matching/play callback.
+	// Smart advances source-discovery navigation (normally category) one group
+	// at a time. Known shares within that group still resolve concurrently.
+	// Browsing may also fetch independent navigation groups together.
 	Sequential bool
 	ShouldStop func() bool
 	Order      func([]any) []any
@@ -96,6 +97,20 @@ func WalkDetailNavigation(raw map[string]any,
 	var failures []error
 	var done atomic.Bool
 	stopped := func() bool { return done.Load() || (options.ShouldStop != nil && options.ShouldStop()) }
+	// This gate belongs only to this navigation traversal, not to a provider or
+	// the shared list API. A share detail is parsing work, not group discovery.
+	var navigationRequestMu sync.Mutex
+	load := func(nav Navigation) (map[string]any, error) {
+		_, share := ParsePanShareInput(nav.ShareFlag, nav.ShareURL)
+		if options.Sequential && !share {
+			navigationRequestMu.Lock()
+			defer navigationRequestMu.Unlock()
+		}
+		if stopped() {
+			return nil, nil
+		}
+		return request(nav.Action, nav.Payload)
+	}
 	report := func(item any, message string) {
 		name := ""
 		if m, ok := item.(map[string]any); ok {
@@ -191,6 +206,11 @@ func WalkDetailNavigation(raw map[string]any,
 				return
 			}
 			key := navigationKey(nav.Action, nav.Payload)
+			share, supported := ParsePanShareInput(nav.ShareFlag, nav.ShareURL)
+			shareKey := share.Key() + "|" + share.Passcode
+			if supported {
+				key += "\n" + shareKey
+			}
 			if ancestors[key] {
 				report(item, "详情导航循环引用")
 				return
@@ -203,8 +223,8 @@ func WalkDetailNavigation(raw map[string]any,
 				lineage[k] = v
 			}
 			lineage[key] = true
-			if share, supported := ParsePanShareInput(nav.ShareFlag, nav.ShareURL); supported {
-				if !claim(shares, share.Key()) {
+			if supported {
+				if !claim(shares, shareKey) {
 					return
 				}
 				if mode {
@@ -224,28 +244,31 @@ func WalkDetailNavigation(raw map[string]any,
 			if stopped() {
 				return
 			}
-			child, err := request(nav.Action, nav.Payload)
+			child, err := load(nav)
 			if err != nil {
 				report(item, err.Error())
 				return
 			}
 			walk(child, lineage, mode, &navigationWalkContext{Navigation: nav, PageLists: map[[32]byte]bool{}})
 		}
-		if options.Sequential {
-			for _, item := range list {
-				handle(item)
-				if stopped() {
-					break
-				}
+		var wg sync.WaitGroup
+		for _, item := range list {
+			if stopped() {
+				break
 			}
-		} else {
-			var wg sync.WaitGroup
-			for _, item := range list {
+			value, _ := item.(map[string]any)
+			nav, navigation := DetailNavigation(value)
+			_, share := ParsePanShareInput(nav.ShareFlag, nav.ShareURL)
+			ready := share || (!navigation && (anyToString(value["vod_play_from"]) != "" || anyToString(value["vod_play_url"]) != ""))
+			if !options.Sequential || ready {
 				wg.Add(1)
 				go func(value any) { defer wg.Done(); handle(value) }(item)
+			} else {
+				wg.Wait()
+				handle(item)
 			}
-			wg.Wait()
 		}
+		wg.Wait()
 		// Page sequentially, preserving the script operation and parameters.
 		// Never fan out a possibly sentinel-sized pagecount into goroutines.
 		if context != nil && !stopped() && len(list) > 0 && page > 0 && count > page {
@@ -265,7 +288,7 @@ func WalkDetailNavigation(raw map[string]any,
 			}
 			key := navigationKey(next.Action, next.Payload)
 			if claim(seen, key) {
-				child, err := request(next.Action, next.Payload)
+				child, err := load(next.Navigation)
 				if err != nil {
 					report(doc, err.Error())
 				} else {

@@ -1,6 +1,6 @@
-import { getPanShareInput, normalizePanMockFlag } from '../utils/matchCore';
+import { getPanListInput, getPanShareInput, normalizePanMockFlag } from '../utils/matchCore';
 import { normalizeString } from './normalize';
-import { hasDetailNavigation, navigationRequestKey, runProviderListTask, walkDetailNavigation } from './detailNavigation';
+import { createNavigationDispatchGuard, hasDetailNavigation, navigationRequestKey, walkDetailNavigation } from './detailNavigation';
 
 export function normalizecatpawrunnerApiBase(inputUrl) {
   const raw = typeof inputUrl === 'string' ? inputUrl.trim() : '';
@@ -356,7 +356,7 @@ const callPanList = async (provider, body, { signal } = {}) => {
 };
 
 const panListIdentity = ({ provider, playFlag, passcode = '', shareUrl = '' } = {}) => {
-  const share = getPanShareInput(playFlag, shareUrl);
+  const share = getPanListInput(playFlag, shareUrl);
   const key = normalizeString(provider).toLowerCase();
   if (!share || share.provider !== key) return null;
   const pass = normalizeString(passcode) || share.passcode;
@@ -374,7 +374,6 @@ export const setPanListCachedByProviderFlag = (input = {}) => {
 };
 
 export const requestPanListByProviderFlag = async ({ provider, playFlag, passcode = '', shareUrl = '', signal } = {}) => {
-  if (signal && signal.aborted) return null;
   const generation = detailCacheGeneration;
   const key = normalizeString(provider).toLowerCase();
   const flag = normalizePanMockFlag(playFlag);
@@ -388,10 +387,7 @@ export const requestPanListByProviderFlag = async ({ provider, playFlag, passcod
   if (cacheKey && panListCache.has(cacheKey)) {
     const cached = panListCache.get(cacheKey);
     if (cached && cached.status === 'resolved') return cached.data;
-    if (cached && cached.status === 'pending') {
-      if (cached.consumers) cached.consumers.push(signal || null);
-      return cached.promise;
-    }
+    if (cached && cached.status === 'pending') return cached.promise;
   }
   const stickyCached = getPanListCachedByProviderFlag({ provider: key, playFlag: flag, passcode: pass, shareUrl: share.url });
   if (stickyCached) {
@@ -399,13 +395,7 @@ export const requestPanListByProviderFlag = async ({ provider, playFlag, passcod
     return stickyCached;
   }
 
-  const consumers = [signal || null];
-  const promise = runProviderListTask(`local:${key}`, () => {
-    // Do not start a queued request nobody still needs. An active shared
-    // request is not aborted merely because one of its consumers leaves.
-    if (consumers.every(consumer => consumer && consumer.aborted)) throw new Error('请求已取消');
-    return callPanList(key, body, { signal: null });
-  }).then((data) => {
+  const promise = callPanList(key, body, { signal: null }).then((data) => {
     if (generation === detailCacheGeneration) {
       panListCache.set(cacheKey, { status: 'resolved', data });
       setPanListCachedByProviderFlag({ provider: key, playFlag: flag, passcode: pass, shareUrl: share.url, data });
@@ -416,7 +406,7 @@ export const requestPanListByProviderFlag = async ({ provider, playFlag, passcod
     throw error;
   });
 
-  panListCache.set(cacheKey, { status: 'pending', promise, consumers });
+  panListCache.set(cacheKey, { status: 'pending', promise });
   if (!signal || typeof signal.addEventListener !== 'function') return promise;
   if (signal.aborted) return null;
   return new Promise((resolve) => {
@@ -617,7 +607,7 @@ export const fetchCatDetailCached = async ({ apiBase, spiderApi, siteDetail, act
   return promise;
 };
 
-export const fetchCatResolvedDetailCached = async ({ apiBase, spiderApi, siteDetail, timeoutMs = 15000, onUpdate, signal } = {}) => {
+export const fetchCatResolvedDetailCached = async ({ apiBase, spiderApi, siteDetail, timeoutMs = 15000, onUpdate, signal, sequentialNavigation = false, waitForNavigationDispatch } = {}) => {
   const generation = detailCacheGeneration;
   const cacheKey = buildDetailCacheKey({ apiBase, spiderApi, siteDetail });
   if (!cacheKey.includes('::') || !normalizeString(siteDetail) || !normalizeString(spiderApi)) {
@@ -633,6 +623,7 @@ export const fetchCatResolvedDetailCached = async ({ apiBase, spiderApi, siteDet
     return cached.data;
   }
   if (cached && cached.status === 'pending') {
+    cached.navigationDispatchGuard.share(waitForNavigationDispatch);
     if (typeof onUpdate === 'function') {
       cached.listeners.add(onUpdate);
       if (cached.data) {
@@ -646,6 +637,7 @@ export const fetchCatResolvedDetailCached = async ({ apiBase, spiderApi, siteDet
 
   const listeners = new Set();
   if (typeof onUpdate === 'function') listeners.add(onUpdate);
+  const navigationDispatchGuard = createNavigationDispatchGuard(waitForNavigationDispatch);
 
   const promise = (async () => {
     const raw = await fetchCatDetailCached({ apiBase, spiderApi, siteDetail, timeoutMs, signal });
@@ -690,11 +682,12 @@ export const fetchCatResolvedDetailCached = async ({ apiBase, spiderApi, siteDet
         return { sources, panMock189AccessByShareId: access, resolutionComplete: complete, navigationErrors: navigationErrors.slice() };
       };
       emitPartial(snapshot(false));
-      await walkDetailNavigation(raw, {
-        signal, ownerKey: normalizecatpawrunnerApiBase(apiBase),
+      const complete = await walkDetailNavigation(raw, {
+        signal, sequentialNavigation,
+        waitForNavigationDispatch: navigationDispatchGuard.wait,
         shareIdentity: nav => {
           const share = getPanShareInput(nav.share_flag, nav.share_url);
-          return share ? share.key : nav.share_url;
+          return share ? share.key + '::' + share.passcode : nav.share_url;
         },
         request: (action, payload) => fetchCatDetailCached({ apiBase, spiderApi, action, payload, timeoutMs, signal }),
         visit: async leaf => {
@@ -706,7 +699,7 @@ export const fetchCatResolvedDetailCached = async ({ apiBase, spiderApi, siteDet
         },
         onError: error => { navigationErrors.push(error); emitPartial(snapshot(false)); },
       });
-      resolved = snapshot(!(signal && signal.aborted));
+      resolved = snapshot(complete);
     } else {
       resolved = await resolvePanMockPlaySources(raw, detail.playFrom, detail.playUrl, { onUpdate: emitPartial, signal });
     }
@@ -733,7 +726,7 @@ export const fetchCatResolvedDetailCached = async ({ apiBase, spiderApi, siteDet
     throw error;
   });
 
-  resolvedDetailCache.set(cacheKey, { status: 'pending', promise, data: null, listeners });
+  resolvedDetailCache.set(cacheKey, { status: 'pending', promise, data: null, listeners, navigationDispatchGuard });
   return promise;
 };
 

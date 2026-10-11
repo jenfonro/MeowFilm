@@ -56,7 +56,45 @@ test('normal detail follows each script action and emits partial leaves without 
   assert.equal(requested.length, 2);
 });
 
-test('pan_mock local list is serial per provider, but another provider progresses and share leaves skip script', async t => {
+for (const panMock of [false, true]) {
+  test(`unclaimed navigation share hints keep their script action and do not deduplicate (${panMock})`, async t => {
+    const calls = [], lists = [];
+    mockFetch(t, (url, body) => {
+      if (body.id === 'movie') return response({ pan_mock: panMock, list: [nav('custom', 'resources')] });
+      if (url.pathname.endsWith('/resources')) {
+        // Custom script operations pass through Runner without normalizing
+        // their descriptors. Hints alone cannot establish supported ownership.
+        return response({ list: [
+          ...['unknown-a', 'unknown-b'].map(id => nav(id, 'detail', {
+            provider: 'xunlei', share_flag: '迅雷-shareA', share_url: 'https://pan.xunlei.com/s/shareA',
+          })),
+          ...['lookalike-a', 'lookalike-b'].map(id => nav(id, 'detail', {
+            provider: 'quark', share_flag: '夸克-shareA', share_url: 'https://pan.quark.cn.example/s/shareA',
+          })),
+          share('knownShare'),
+        ] });
+      }
+      if (url.pathname === '/api/pan/quark/list') {
+        lists.push(body.flag);
+        return response({ ok: true, vod_play_url: 'E1$knownShare*token*fid*ftoken***Movie.mkv' });
+      }
+      calls.push(body.id);
+      return response({ list: [leaf(`native-${body.id}`)] });
+    });
+    const result = await api.fetchCatResolvedDetailCached({ ...opts, sequentialNavigation: true });
+    assert.deepEqual(calls.sort(), [
+      'unknown-a', 'unknown-b', 'lookalike-a', 'lookalike-b',
+      ...(panMock ? [] : ['opaque-knownShare']),
+    ].sort());
+    assert.equal(lists.length, panMock ? 1 : 0);
+    assert.equal(result.sources.length, 5);
+    for (const id of ['unknown-a', 'unknown-b', 'lookalike-a', 'lookalike-b']) {
+      assert.ok(result.sources.some(source => source.provider === '' && source.episodeSegments.includes(`E1$native-${id}`)));
+    }
+  });
+}
+
+test('pan_mock local lists run concurrently even for the same provider and share leaves skip script', async t => {
   const held = deferred(), started = deferred();
   const calls = [], updates = [];
   mockFetch(t, async (url, body) => {
@@ -69,18 +107,104 @@ test('pan_mock local list is serial per provider, but another provider progresse
     return response({ ok: true, vod_play_url: `E1$${body.flag}*complete*file*id` });
   });
   const work = api.fetchCatResolvedDetailCached({ ...opts, onUpdate: v => updates.push(v) });
-  await started.promise;
-  await tick();
-  assert.equal(calls.some(x => x.endsWith('shareC')), true);
-  assert.equal(calls.some(x => x.endsWith('shareB')), false);
-  assert.equal(updates.some(x => x.sources.some(s => s.label === '百度-shareC' && s.episodeSegments.length) && !x.resolutionComplete), true);
-  held.resolve();
-  const result = await work;
+  let result;
+  try {
+    await started.promise;
+    await tick();
+    assert.equal(calls.some(x => x.endsWith('shareC')), true);
+    assert.equal(calls.some(x => x.endsWith('shareB')), true);
+    assert.equal(updates.some(x => x.sources.some(s => s.label === '百度-shareC' && s.episodeSegments.length) && !x.resolutionComplete), true);
+  } finally {
+    held.resolve();
+    result = await work;
+  }
   assert.equal(calls.length, 3);
   assert.equal(result.sources.length, 4);
   assert.equal(result.sources.filter(x => x.sourceKind === 'panmock').length, 3);
   assert.equal(new Set(result.sources.map(x => x.key)).size, 4);
 });
+
+test('ordinary details retain concurrent share resolution within and across sites', async t => {
+  const held = deferred(), started = deferred(), calls = [];
+  const updates = [];
+  mockFetch(t, async (url, body) => {
+    if (url.pathname.endsWith('/detail')) {
+      const ids = body.id === 'movie-a' ? ['shareA', 'shareB'] : ['shareC'];
+      return response({ pan_mock: true, list: [{
+        vod_id: body.id, vod_play_from: ids.map(id => `夸克-${id}`).join('$$$'),
+        vod_play_url: ids.map(id => `https://pan.quark.cn/s/${id}`).join('$$$'),
+      }] });
+    }
+    calls.push(body.flag);
+    if (body.flag.endsWith('shareA')) { started.resolve(); await held.promise; }
+    return response({ ok: true, vod_play_url: `E1$${body.flag}*complete*file*id` });
+  });
+  const a = api.fetchCatResolvedDetailCached({
+    ...opts, siteDetail: 'movie-a', onUpdate: value => updates.push(value),
+  });
+  const b = api.fetchCatResolvedDetailCached({
+    ...opts, spiderApi: '/bbbbbbbbbb/spider/another-site/3', siteDetail: 'movie-b',
+  });
+  try {
+    await started.promise;
+    await tick();
+    assert.ok(calls.some(flag => flag.endsWith('shareB')), 'same-detail lists were serialized');
+    assert.ok(calls.some(flag => flag.endsWith('shareC')), 'another site shared a provider queue');
+    assert.ok(updates.some(value => !value.resolutionComplete &&
+      value.sources.some(source => source.label === '夸克-shareB' && source.episodeSegments.length)),
+    'a fast ordinary share stopped producing incremental candidates');
+  } finally {
+    held.resolve();
+    await Promise.all([a, b]);
+  }
+  assert.equal(calls.length, 3);
+});
+
+for (const panMock of [false, true]) {
+  test(`smart navigation serializes categories, not share parsing (pan_mock=${panMock})`, async t => {
+    const categoryGate = deferred(), categoryStarted = deferred();
+    const shareGate = deferred(), shareStarted = deferred();
+    const calls = [], updates = [];
+    mockFetch(t, async (url, body) => {
+      if (body.id === 'movie') return response({ pan_mock: panMock,
+        list: [nav('groupA', 'category'), nav('groupB', 'category')] });
+      if (url.pathname.endsWith('/category')) {
+        calls.push(body.id);
+        if (body.id === 'groupA') {
+          categoryStarted.resolve();
+          await categoryGate.promise;
+          return response({ pan_mock: panMock, list: [share('shareA'), share('shareB')] });
+        }
+        return response({ pan_mock: panMock, list: [leaf('native')] });
+      }
+      const id = panMock ? body.flag.split('/').pop() : body.id.slice(7);
+      calls.push(id);
+      if (id === 'shareA') { shareStarted.resolve(); await shareGate.promise; }
+      if (panMock) return response({ ok: true, vod_play_url: `E1$${id}*complete*file*id` });
+      return response({ pan_mock: false, list: [leaf(`${id}*complete*file*id`, `夸克-${id}`)] });
+    });
+    const work = api.fetchCatResolvedDetailCached({
+      ...opts, sequentialNavigation: true, onUpdate: value => updates.push(value),
+    });
+    try {
+      await categoryStarted.promise;
+      await tick();
+      assert.equal(calls.includes('groupB'), false, 'a second category ran before the first finished');
+      categoryGate.resolve();
+      await shareStarted.promise;
+      await tick();
+      assert.equal(calls.includes('shareB'), true, 'same-provider parsing was serialized');
+      assert.equal(calls.includes('groupB'), false, 'the site advanced before this group finished');
+      assert.ok(updates.some(value => value.sources.some(source => source.episodeSegments.some(segment => segment.includes('shareB')))),
+        'a completed share must be available without waiting for the slow share');
+    } finally {
+      categoryGate.resolve();
+      shareGate.resolve();
+      await work;
+    }
+    assert.deepEqual(calls, ['groupA', 'shareA', 'shareB', 'groupB']);
+  });
+}
 
 test('pan_mock false requests selected share through script and preserves Runner file IDs', async t => {
   const calls = [];
@@ -124,7 +248,7 @@ test('category pagination preserves operation and original parameters', async ()
   assert.deepEqual(got, ['E1$page-1', 'E1$page-2', 'E1$page-3']);
 });
 
-test('aborting all consumers prevents a queued list from being dispatched', async t => {
+test('cancelling navigation does not turn an incomplete parallel result into a complete cache entry', async t => {
   const held = deferred(), started = deferred(), controller = new AbortController(), calls = [];
   mockFetch(t, async (url, body) => {
     if (url.pathname.endsWith('/detail')) return response({ pan_mock: true, list: [share('shareA'), share('shareB')] });
@@ -139,11 +263,11 @@ test('aborting all consumers prevents a queued list from being dispatched', asyn
   held.resolve();
   const result = await work;
   await tick();
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2, 'independent shares had already started concurrently');
   assert.equal(result.resolutionComplete, false);
 });
 
-test('one cancelled consumer cannot cancel another caller sharing the same queued list', async t => {
+test('one cancelled consumer cannot cancel another caller sharing the same in-flight list', async t => {
   const held = deferred(), started = deferred(), controller = new AbortController(), calls = [];
   mockFetch(t, async (_url, body) => {
     calls.push(body.flag);
@@ -199,7 +323,7 @@ test('a changed pan_mock mode is reported rather than mixing incompatible source
   assert.match(errors[0].message, /模式已变更.*刷新/);
 });
 
-test('a selected share releases its provider slot before following nested navigation', async () => {
+test('a selected share can return further navigation without any provider queue', async () => {
   const calls = [];
   await api.walkDetailNavigation({ pan_mock: false, list: [share('shareA')] }, {
     request: async (_action, payload) => {
@@ -209,4 +333,48 @@ test('a selected share releases its provider slot before following nested naviga
     visit: async doc => assert.equal(doc.list[0].vod_play_url, 'E1$complete'),
   });
   assert.deepEqual(calls, ['opaque-shareA', 'opaque-shareB']);
+});
+
+for (const panMock of [true, false]) {
+  test(`later navigation credentials are usable and identical credentials still deduplicate (${panMock})`, async t => {
+    const requests = [];
+    const card = (id, pass) => nav(id, 'detail', {
+      provider: 'quark', share_flag: '夸克-protectedShare' + (pass ? '-' + pass : ''),
+      share_url: 'https://pan.quark.cn/s/protectedShare' + (pass ? '?pwd=' + pass : ''),
+    });
+    mockFetch(t, (_url, body) => {
+      if (body.id === 'movie') return response({ pan_mock: panMock,
+        list: [nav('groupA', 'category'), nav('groupB', 'category'), nav('groupC', 'category')] });
+      if (body.id === 'groupA') return response({ pan_mock: panMock, list: [card('without-pass', '')] });
+      if (body.id === 'groupB') return response({ pan_mock: panMock, list: [card('with-pass', '1234')] });
+      if (body.id === 'groupC') return response({ pan_mock: panMock, list: [card('duplicate-pass', '1234')] });
+      const valid = panMock ? body.passcode === '1234' : body.id !== 'without-pass';
+      requests.push(panMock ? body.passcode : body.id);
+      if (!valid) return response({ ok: false, message: 'password required', pan_mock: panMock });
+      return response(panMock ? { ok: true, vod_play_url: 'E1$complete*file*id*token' }
+        : { pan_mock: false, list: [leaf('complete*file*id*token', '夸克-protectedShare-1234')] });
+    });
+    const result = await api.fetchCatResolvedDetailCached({ ...opts, sequentialNavigation: true });
+    assert.ok(result.sources.some(source => source.episodeSegments.length), 'the later valid card was dropped');
+    assert.deepEqual(requests, panMock ? ['', '1234'] : ['without-pass', 'with-pass']);
+  });
+}
+
+test('an unchanged navigation ID does not hide enriched local share credentials', async t => {
+  const passwords = [];
+  mockFetch(t, (_url, body) => {
+    if (body.id === 'movie') return response({ pan_mock: true, list: [nav('a', 'category'), nav('b', 'category')] });
+    if (body.id) {
+      const pass = body.id === 'b' ? '1234' : '';
+      return response({ pan_mock: true, list: [nav('same-card-id', 'detail', {
+        provider: 'quark', share_flag: '夸克-protectedShare' + (pass ? '-' + pass : ''),
+        share_url: 'https://pan.quark.cn/s/protectedShare' + (pass ? '?pwd=' + pass : ''),
+      })] });
+    }
+    passwords.push(body.passcode);
+    return response(body.passcode ? { ok: true, vod_play_url: 'E1$complete' } : { ok: false, message: 'password required' });
+  });
+  const result = await api.fetchCatResolvedDetailCached({ ...opts, sequentialNavigation: true });
+  assert.deepEqual(passwords, ['', '1234']);
+  assert.ok(result.sources.some(source => source.episodeSegments.length));
 });

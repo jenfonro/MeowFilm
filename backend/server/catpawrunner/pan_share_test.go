@@ -70,3 +70,25 @@ func TestPanNamesKeepHistoryCompatibility(t *testing.T) {
 		}
 	}
 }
+
+func TestExplicitListInputKeepsURLAuthorityAndBaiduIdentity(t *testing.T) {
+	for _, tc := range []struct{ flag, value, id, password string }{
+		{"百度-1share-A_b-abcd", "", "1share-A_b-abcd", ""},
+		{"百度-1Abcdefghij-klmn_opqrs", "", "1Abcdefghij-klmn_opqrs", ""},
+		{"百度-1Abcdefghij-klmn_opqrs-a1b2", "", "1Abcdefghij-klmn_opqrs", "a1b2"},
+		{"百度-shareA-abcd", "https://pan.baidu.com/s/1otherShare?pwd=4321", "otherShare", "4321"},
+		{"百度原画(无限)-1historyShareA", "", "historyShareA", ""},
+		{"百度原画HDR-1historyShareA", "abcd", "historyShareA", "abcd"},
+		{"百度原画(极速)-1historyShareA#旧后缀", "", "historyShareA", ""},
+	} {
+		share, ok := ParsePanListInput(tc.flag, tc.value)
+		if !ok || share.ShareID != tc.id || share.Passcode != tc.password {
+			t.Fatalf("%s: %+v (ok=%v)", tc.flag, share, ok)
+		}
+	}
+	for _, tc := range [][2]string{{"百度-1234", ""}, {"夸克", ""}, {"光鸭-shareA", ""}, {"夸克-shareA-abcd", "private-id"}} {
+		if share, ok := ParsePanListInput(tc[0], tc[1]); ok {
+			t.Fatalf("invalid standalone share was invented: %+v", share)
+		}
+	}
+}

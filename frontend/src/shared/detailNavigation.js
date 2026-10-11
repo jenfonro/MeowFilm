@@ -1,3 +1,5 @@
+import { getPanShareInput } from '../utils/matchCore';
+
 const text = value => typeof value === 'string' ? value.trim() : '';
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const pageNumber = value => {
@@ -24,32 +26,60 @@ export function navigationRequestKey(action, payload) {
   return action + ':' + JSON.stringify(stable(payload));
 }
 
-const listTails = new Map();
-export async function runProviderListTask(key, task, signal) {
-  const previous = listTails.get(key) || Promise.resolve();
+// A smart-only request can stop discovery; once another caller shares it, keep
+// the existing shared-detail lifecycle. Joining must also release a smart wait.
+export function createNavigationDispatchGuard(waitForDispatch) {
+  let shared = typeof waitForDispatch !== 'function';
   let release;
-  const done = new Promise(resolve => { release = resolve; });
-  listTails.set(key, done);
-  await previous;
-  try {
-    if (signal && signal.aborted) return;
-    return await task();
-  } finally {
-    release();
-    if (listTails.get(key) === done) listTails.delete(key);
-  }
+  const joined = new Promise(resolve => { release = resolve; });
+  return {
+    share(otherWait) {
+      if (typeof waitForDispatch === 'function' && otherWait === waitForDispatch) return;
+      shared = true;
+      release(true);
+    },
+    wait() {
+      return shared ? true : Promise.race([
+        Promise.resolve().then(waitForDispatch),
+        joined,
+      ]);
+    },
+  };
 }
 
 // Traversal only: leaves enter the caller's existing source/matching logic.
 // No script-private ID decoding, play selection, or second detail cache.
 export async function walkDetailNavigation(raw, {
-  request, visit, onError = () => {}, signal, ownerKey = '', shouldStop = () => false,
+  request, visit, onError = () => {}, signal, sequentialNavigation = false, shouldStop = () => false,
+  waitForNavigationDispatch = () => true,
   shareIdentity = nav => nav.share_url,
 } = {}) {
   const seen = new Set();
   const shares = new Set();
-  const stopped = () => (signal && signal.aborted) || shouldStop();
+  let dispatchStopped = false;
+  const stopped = () => dispatchStopped || (signal && signal.aborted) || shouldStop();
   const report = (item, message) => onError({ item, message });
+  // Custom operations may return unnormalized hints for unsupported providers.
+  // Only a recognized share may skip the script request or enter share deduplication.
+  const isShare = nav => !!(nav && nav.share_url && nav.share_flag && nav.provider &&
+    getPanShareInput(nav.share_flag, nav.share_url));
+  // A per-traversal navigation lane, not a shared provider/list queue. Known
+  // share details perform parsing and must not occupy this discovery lane.
+  let navigationTail = Promise.resolve();
+  const load = (action, payload, share = false) => {
+    const run = async () => {
+      if (stopped()) return null;
+      if (!share && !await waitForNavigationDispatch()) {
+        dispatchStopped = true;
+        return null;
+      }
+      return stopped() ? null : request(action, payload);
+    };
+    if (!sequentialNavigation || share) return run();
+    const pending = navigationTail.then(run);
+    navigationTail = pending.catch(() => {});
+    return pending;
+  };
   const walk = async (doc, ancestors = new Set(), inheritedMode = false, context = null) => {
     if (stopped()) return;
     if (!object(doc)) { report(doc, '未支持的详情结构'); return; }
@@ -67,7 +97,7 @@ export async function walkDetailNavigation(raw, {
         context.pageLists.add(key);
       }
     }
-    await Promise.all(doc.list.map(async item => {
+    const handle = async item => {
       if (stopped()) return;
       if (!object(item)) { report(item, '未支持的详情项'); return; }
       const nav = navigationOf(item);
@@ -77,14 +107,14 @@ export async function walkDetailNavigation(raw, {
         } else report(item, text(doc.message) || text(doc.msg) || '未支持的详情结构');
         return;
       }
-      const key = navigationRequestKey(nav.action, nav.payload);
+      const supportedShare = isShare(nav);
+      const shareKey = supportedShare ? nav.provider + ':' + shareIdentity(nav) : '';
+      const key = navigationRequestKey(nav.action, nav.payload) + (supportedShare ? '\n' + shareKey : '');
       if (ancestors.has(key)) { report(item, '详情导航循环引用'); return; }
       if (seen.has(key)) return;
       seen.add(key);
       const lineage = new Set(ancestors).add(key);
-      const supportedShare = nav.share_url && nav.share_flag && nav.provider;
       if (supportedShare) {
-        const shareKey = nav.provider + ':' + shareIdentity(nav);
         if (shares.has(shareKey)) return;
         shares.add(shareKey);
         if (mode) {
@@ -97,17 +127,24 @@ export async function walkDetailNavigation(raw, {
       }
       if (stopped()) return;
       try {
-        // Only the selected share request owns a provider slot. Release it
-        // before handling its response, which may itself contain navigation.
-        const load = () => stopped() ? null : request(nav.action, nav.payload);
-        const child = supportedShare
-          ? await runProviderListTask(ownerKey + ':' + nav.provider, load, signal)
-          : await load();
+        const child = await load(nav.action, nav.payload, supportedShare);
         if (!stopped()) await walk(child, lineage, mode, {
-          action: nav.action, payload: nav.payload, previousPage: 0, pageLists: new Set(),
+          action: nav.action, payload: nav.payload, share: supportedShare, previousPage: 0, pageLists: new Set(),
         });
       } catch (error) { report(item, error && error.message ? error.message : '导航请求失败'); }
-    }));
+    };
+    const pending = [];
+    for (const item of doc.list) {
+      if (stopped()) break;
+      const nav = navigationOf(item);
+      const ready = isShare(nav) || (!nav && object(item) && (text(item.vod_play_from) || text(item.vod_play_url)));
+      if (!sequentialNavigation || ready) pending.push(handle(item));
+      else {
+        await Promise.all(pending.splice(0));
+        await handle(item);
+      }
+    }
+    await Promise.all(pending);
     // Advance one page at a time, keeping the script's operation and page key.
     // Repeated data/page numbers report a protocol error, not an arbitrary cap.
     if (context && !stopped() && doc.list.length && page && pageCount > page) {
@@ -118,10 +155,11 @@ export async function walkDetailNavigation(raw, {
       if (seen.has(key)) return;
       seen.add(key);
       try {
-        await walk(await request(context.action, payload), new Set(ancestors).add(key), mode,
+        await walk(await load(context.action, payload, context.share), new Set(ancestors).add(key), mode,
           { ...context, payload, previousPage: page });
       } catch (error) { report(doc, error && error.message ? error.message : '导航分页请求失败'); }
     }
   };
   await walk(raw);
+  return !stopped();
 }

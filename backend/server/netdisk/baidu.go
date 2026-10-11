@@ -274,10 +274,26 @@ func baiduQRFinalize(client *http.Client, bduss string) (string, error) {
 
 var reBaiduSurl = regexp.MustCompile(`百度[^-]*-([^#]+)`)
 var reBaiduSurlKey = regexp.MustCompile(`^1[0-9a-zA-Z_-]+$`)
+var reBaiduShareURLKey = regexp.MustCompile(`^[0-9a-zA-Z_-]+$`)
 
 func parseBaiduSurlFromFlag(flag string) string {
 	raw := strings.TrimSpace(flag)
 	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToLower(raw), "http://") || strings.HasPrefix(strings.ToLower(raw), "https://") {
+		u, err := url.Parse(raw)
+		if err != nil || u.User != nil || !strings.EqualFold(u.Hostname(), "pan.baidu.com") {
+			return ""
+		}
+		id := u.Query().Get("surl")
+		parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+		if len(parts) == 2 && parts[0] == "s" {
+			id = strings.TrimPrefix(parts[1], "1")
+		}
+		if reBaiduShareURLKey.MatchString(id) {
+			return id
+		}
 		return ""
 	}
 	if m := reBaiduSurl.FindStringSubmatch(raw); len(m) == 2 {
@@ -892,8 +908,6 @@ func BaiduList(database *db.DB, flag string, pwd string) (string, string, error)
 func BaiduListWithCacheHit(database *db.DB, flag string, pwd string) (vod string, surl string, fromCache bool, err error) {
 	key := listCacheKey("baidu_list", flag, listCacheCredentialPart(pwd))
 	got, hit, err := baiduListCacheTwoTier.Do(key, func() (listCache2, error) {
-		release := acquireProviderList(database, "baidu")
-		defer release()
 		vod, surl, e := baiduListUncached(database, flag, pwd)
 		if e != nil {
 			return listCache2{}, e

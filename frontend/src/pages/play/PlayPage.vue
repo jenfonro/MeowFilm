@@ -479,6 +479,7 @@
 import ArtPlayer from '../../shared/ArtPlayer.vue';
 import { fetchBootstrap } from '../../shared/bootstrap';
 import { extractRawNamesFromEpisodeUrl, fetchCatResolvedDetailCached, requestCatPlay } from '../../shared/catpawrunner';
+import { createNavigationDispatchGuard } from '../../shared/detailNavigation';
 import {
   playbackSessionState,
   buildPlayerControlUiState,
@@ -4503,7 +4504,7 @@ export default {
         });
       }
     },
-    async ensureSiteResultDetailCached(item, { onUpdate, signal } = {}) {
+    async ensureSiteResultDetailCached(item, { onUpdate, signal, sequentialNavigation = false, waitForNavigationDispatch } = {}) {
       const target = item && typeof item === 'object' ? item : null;
       if (!target) return null;
       const cached = this.getCachedSiteResultDetail(target);
@@ -4521,6 +4522,7 @@ export default {
 
       const existing = dedupeKey ? inFlightMap[dedupeKey] : null;
       if (existing && typeof existing === 'object' && existing.promise) {
+        existing.navigationDispatchGuard.share(waitForNavigationDispatch);
         if (listener) {
           if (!(existing.listeners instanceof Set)) existing.listeners = new Set();
           existing.listeners.add(listener);
@@ -4536,6 +4538,7 @@ export default {
       const created = {
         listeners: new Set(listener ? [listener] : []),
         promise: null,
+        navigationDispatchGuard: createNavigationDispatchGuard(waitForNavigationDispatch),
       };
       const run = ensureSiteResultDetailCachedRuntime({
         item: target,
@@ -4543,6 +4546,8 @@ export default {
         runtimeSettings: settings,
         timeoutMs: 15000,
         signal: null,
+        sequentialNavigation,
+        waitForNavigationDispatch: created.navigationDispatchGuard.wait,
         onUpdate: (nextDetail) => {
           const payload = nextDetail && typeof nextDetail === 'object' ? nextDetail : null;
           if (!payload) return;
@@ -4918,6 +4923,8 @@ export default {
         getCachedSiteResultDetail: (siteItem) => this.getCachedSiteResultDetail(siteItem),
         ensureSiteResultDetailCached: (siteItem, options) =>
           this.ensureSiteResultDetailCached(siteItem, {
+            sequentialNavigation: true,
+            waitForNavigationDispatch: options && options.waitForNavigationDispatch,
             onUpdate: (nextDetail) => {
               const payload = nextDetail && typeof nextDetail === 'object' ? nextDetail : null;
               if (!payload) return;

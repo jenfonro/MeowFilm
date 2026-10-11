@@ -298,6 +298,14 @@ func smartEpisodeListProviderID(ep catpawrunner.Episode) string {
 	if provider == "" {
 		provider = strings.TrimSpace(smartPlayFlagProviderID(strings.TrimSpace(ep.Flag)))
 	}
+	flag := strings.TrimSpace(ep.Flag)
+	head := strings.TrimSpace(strings.SplitN(flag, "-", 2)[0])
+	// Preserve all old-name matching. Newly recognized canonical names only
+	// gain list metadata semantics when the ID is an existing built-in file.
+	addedName := !strings.Contains(flag, "-") || head == "夸克" || strings.EqualFold(head, "UC") || head == "天翼" || head == "移动"
+	if addedName && !catpawrunner.IsBuiltinPanPlayID(provider, ep.URL) {
+		return ""
+	}
 	switch provider {
 	case "baidu", "quark", "uc", "139", "189":
 		return provider

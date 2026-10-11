@@ -174,6 +174,17 @@ func BuildDetailSourceRecords(playFrom string, playURL string, panMock bool, sit
 	})
 }
 
+// WithDetailPanMock preserves the existing resolved source's playback owner at
+// the Emby detail edge. Independent history/manual list candidates do not use it.
+func WithDetailPanMock(c Candidate, panMock bool) Candidate {
+	provider := ""
+	if panMock {
+		provider = smartPlayFlagProviderID(c.PanFlag)
+	}
+	c.detailProvider = &provider
+	return c
+}
+
 func ResolvePanMockSourceRecords(
 	database *db.DB,
 	siteKey string,
@@ -224,6 +235,11 @@ func ResolvePanMockEpisodesBySourceValue(database *db.DB, panFlag string, source
 }
 
 func ResolvePanMockEpisodesBySourceValueWithTimeout(database *db.DB, panFlag string, sourceValue string, timeout time.Duration) ([]catpawrunner.Episode, map[string]string, bool, string, bool, error) {
+	// History/Emby explicitly ask to list a saved flag. Keep this adaptation
+	// here; normal detail ownership still requires its actual share evidence.
+	if share, ok := catpawrunner.ParsePanListInput(panFlag, sourceValue); ok {
+		sourceValue = share.URL
+	}
 	record := smartDetailSourceRecord{
 		Label:       strings.TrimSpace(panFlag),
 		PanMock:     true,
@@ -320,8 +336,8 @@ func PanToProviderID(panLower string) string {
 	return smartPanToProviderID(panLower)
 }
 
-func CollectPlaybackOffersFromTMDB(database *db.DB, u *SmartUser, req PlaybackRequest, shouldStop func() bool, emit func(PlaybackOffer, int), navigationWait ...NavigationOfferWait) error {
-	return smartCollectPlaybackOffersFromTMDB(database, u, req, shouldStop, emit, navigationWait...)
+func CollectPlaybackOffersFromTMDB(database *db.DB, u *SmartUser, req PlaybackRequest, shouldStop func() bool, emit func(PlaybackOffer, int)) error {
+	return smartCollectPlaybackOffersFromTMDB(database, u, req, shouldStop, emit)
 }
 
 func TryPlaybackOffers(database *db.DB, u *SmartUser, offers []PlaybackOffer) (finalURL string, finalHeaders map[string]string, picked *PlaybackPickedMeta, err error) {

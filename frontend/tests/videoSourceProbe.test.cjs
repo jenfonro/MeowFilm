@@ -21,7 +21,7 @@ function makeProbe({ details, items, lists = {}, plays = {}, nativePlays = {}, p
   const calls = [];
   let saved;
   const context = vm.createContext({
-    URL, URLSearchParams, AbortController, setTimeout, clearTimeout,
+    URL, URLSearchParams, AbortController, setTimeout, clearTimeout, atob,
     fetch: async (url, options = {}) => {
       const pathname = new URL(String(url), 'https://movie.example').pathname;
       const isSave = pathname === '/dashboard/video/source/sites/check';
@@ -63,7 +63,7 @@ function makeProbe({ details, items, lists = {}, plays = {}, nativePlays = {}, p
   vm.runInContext(`
     const requestJsonResponse = (() => { ${requestSource}; return requestJsonResponse; })();
     const sharedNormalizeHttpBase = (() => { ${normalizeSource}; ${urlSource}; return normalizeHttpBase; })();
-    const { getPanShareInput, panMockProviderFromFlag } = (() => { ${matchSource}; return { getPanShareInput, panMockProviderFromFlag }; })();
+    const { getPanShareInput, isBuiltinPanPlayId, panMockProviderFromFlag } = (() => { ${matchSource}; return { getPanShareInput, isBuiltinPanPlayId, panMockProviderFromFlag }; })();
     const { hasDetailNavigation, walkDetailNavigation } = (() => { ${navigationSource}; return { hasDetailNavigation, walkDetailNavigation }; })();
     ${source}
   `, context);
@@ -238,6 +238,34 @@ test('native playback also tries all routes in one detail after a route fails', 
   const saved = await probe.run();
   assert.equal(saved.results.probe, 'valid');
   assert.deepEqual(resolutionCalls(probe.calls), ['detail:first', 'play:线路一', 'play:线路二']);
+});
+
+test('new name recognition does not force an extra detail for already-playable native category items', async () => {
+  for (const flag of ['夸克', '夸克-shareA', 'UC-shareA', '天翼-shareA', '移动-shareA']) {
+    const probe = makeProbe({
+      panMock: false,
+      items: [{ vod_id: 'first', ...detail(flag, '第一集$opaque-native-id') }],
+      details: {},
+      nativePlays: { 'opaque-native-id': playable() },
+    });
+    const saved = await probe.run();
+    assert.equal(saved.results.probe, 'valid', flag);
+    assert.deepEqual(resolutionCalls(probe.calls), [`play:${flag}`]);
+  }
+});
+
+test('the original probe legacy-name detail refresh is preserved, including names without a hyphen', async () => {
+  for (const flag of ['百度', '夸父', '优夕极速', '天意', '逸动-shareA']) {
+    const probe = makeProbe({
+      panMock: false,
+      items: [{ vod_id: 'first', ...detail(flag, '第一集$old-id') }],
+      details: { first: detail(flag, '第一集$fresh-native-id') },
+      nativePlays: { 'fresh-native-id': playable() },
+    });
+    const saved = await probe.run();
+    assert.equal(saved.results.probe, 'valid', flag);
+    assert.deepEqual(resolutionCalls(probe.calls), ['detail:first', `play:${flag}`]);
+  }
 });
 
 const navigationCard = (id, action, extra = {}) => ({

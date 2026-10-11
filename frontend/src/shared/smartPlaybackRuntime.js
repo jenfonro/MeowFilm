@@ -807,6 +807,8 @@ export const ensureSiteResultDetailCached = async ({
   timeoutMs = 15000,
   onUpdate,
   signal,
+  sequentialNavigation = false,
+  waitForNavigationDispatch,
 } = {}) => {
   const target = item && typeof item === 'object' ? item : null;
   if (!target) return null;
@@ -826,6 +828,8 @@ export const ensureSiteResultDetailCached = async ({
     siteDetail,
     timeoutMs,
     signal,
+    sequentialNavigation,
+    waitForNavigationDispatch,
     onUpdate: (nextDetail) => {
       const payload = nextDetail && typeof nextDetail === 'object' ? nextDetail : null;
       if (!payload) return;

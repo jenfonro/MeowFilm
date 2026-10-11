@@ -91,6 +91,64 @@ export const getPanShareInput = (flag, value = '') => {
   return { provider, shareId, passcode: /^nopass$/i.test(raw) ? '' : raw, url: '', key: `${provider}:${shareId}` };
 };
 
+// Explicit history/manual list calls already selected a provider. Unlike normal
+// detail ownership checks, they may use the saved canonical flag alone.
+export const getPanListInput = (flag, value = '') => {
+  const share = getPanShareInput(flag, value);
+  if (share) return share;
+  const label = normalizePanMockFlag(flag);
+  // The existing Baidu list parser accepts decorated saved flags as well.
+  // Restore that input only here, not in normal-detail ownership detection.
+  const legacyBaidu = /^[^-]*百度[^-]*-([A-Za-z0-9_-]+)(?:#.*)?$/.exec(label);
+  if (legacyBaidu && label.split('-')[0].trim() !== '百度') {
+    return getPanShareInput(`百度原画-${legacyBaidu[1]}`, value);
+  }
+  if (String(value || '').trim()) return null;
+  const match = /^(百度|夸克|UC|天翼|移动)-([A-Za-z0-9_-]{6,256})$/i.exec(label);
+  if (!match) return null;
+  const provider = panMockProviderFromFlag(label);
+  let id = match[2], password = '';
+  if (provider === 'baidu') {
+    // Baidu's current short code is 22 characters and may contain "-".
+    // Do not blindly split its last hyphen or strip an actual leading "1".
+    const coded = /^([A-Za-z0-9_-]{22})-([A-Za-z0-9]{4})$/.exec(id);
+    if (coded) [, id, password] = coded;
+  } else {
+    const coded = /^([A-Za-z0-9_]{6,256})(?:-([A-Za-z0-9]{1,16}))?$/.exec(id);
+    if (!coded) return null;
+    id = coded[1];
+    password = coded[2] || '';
+  }
+  const bases = {
+    baidu: 'https://pan.baidu.com/s/1', quark: 'https://pan.quark.cn/s/',
+    uc: 'https://drive.uc.cn/s/', '189': 'https://cloud.189.cn/t/', '139': 'https://caiyun.139.com/m/i?',
+  };
+  const url = bases[provider] + id + (password
+    ? `${provider === '139' ? '&' : '?'}${provider === '189' ? 'accessCode' : 'pwd'}=${encodeURIComponent(password)}` : '');
+  return getPanShareInput(label, url);
+};
+
+// Recognize the existing built-in list file formats. A canonical display name
+// alone is not evidence that a script's opaque ID uses list-directory metadata.
+export const isBuiltinPanPlayId = (provider, value) => {
+  const id = String(value || '').trim();
+  if (provider === 'baidu') {
+    try {
+      const encoded = decodeURIComponent(id.split(/\|\|\||\*\*\*/)[0]).replace(/-/g, '+').replace(/_/g, '/');
+      const data = JSON.parse(atob(encoded));
+      return !!(data && data.surl && data.shareid && data.uk && data.fs_id && !data.providerId);
+    } catch (_error) { return false; }
+  }
+  const parts = id.split('*');
+  const token = value => /^[A-Za-z0-9_-]+$/.test(value || '');
+  if (provider === 'quark' || provider === 'uc') {
+    return parts.length >= 4 && token(parts[0]) && !!parts[1] && token(parts[2]) && !!parts[3];
+  }
+  if (provider === '139') return parts.length >= 3 && token(parts[0]) && token(parts[1]);
+  if (provider === '189') return parts.length >= 3 && /^\d+$/.test(parts[0]) && /^\d+$/.test(parts[1]);
+  return false;
+};
+
 export const guessPreferredPanFromFlag = (flag) => {
   const raw = typeof flag === 'string' ? flag.trim() : '';
   if (!raw) return '';

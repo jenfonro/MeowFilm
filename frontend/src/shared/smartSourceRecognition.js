@@ -8,7 +8,7 @@ import {
 import { normalizeSeasonEpisodeMarkers, parseChineseNumeralToInt } from './episodeMarkerNormalize';
 import { normalizeInt, normalizeString } from './normalize';
 import { getRawFileName, splitRawPathSegments } from './pathText';
-import { panMockProviderFromFlag } from '../utils/matchCore';
+import { isBuiltinPanPlayId, normalizePanMockFlag, panMockProviderFromFlag } from '../utils/matchCore';
 
 const normalizePatternInput = (value) => {
   const raw = normalizeString(value);
@@ -215,9 +215,12 @@ const stripDisplayMetaPrefix = (value) => {
 
 const PAN_LIST_PROVIDER_KEYS = new Set(['baidu', 'quark', 'uc', '139', '189']);
 
-const isPanListEntry = (entry) =>
+const isPanListEntry = (entry, episodeUrl) =>
   PAN_LIST_PROVIDER_KEYS.has(normalizeString(entry && entry.provider).toLowerCase()) ||
-  !!panMockProviderFromFlag(entry && entry.label);
+  // Only complete built-in IDs add Runner-mode list semantics. Native sources
+  // keep their old matching inputs even when their names look canonical.
+  (/^(?:百度|夸克|UC|天翼|移动)(?:-|$)/i.test(normalizePanMockFlag(entry && entry.label)) &&
+    isBuiltinPanPlayId(panMockProviderFromFlag(entry && entry.label), episodeUrl));
 
 const matchesAnyMagicRule = (text, rules) => {
   const normalizeForMagic = (input) => {
@@ -390,7 +393,7 @@ const buildSegmentItems = (entry) => {
       const rawName = extractRawNamesFromEpisodeUrl(episodeUrl)[0] || '';
       const fileName = getRawFileName(rawName);
       const rawDirs = splitRawPathSegments(rawName).slice(0, -1);
-      const useListPathSemantics = isPanListEntry(entry) && !!fileName;
+      const useListPathSemantics = isPanListEntry(entry, episodeUrl) && !!fileName;
       const displayParts = splitRawPathSegments(useListPathSemantics ? stripDisplayMetaPrefix(displayName) : displayName);
       const displayDirs = useListPathSemantics
         ? displayParts

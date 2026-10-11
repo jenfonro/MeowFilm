@@ -2,6 +2,7 @@ package smart
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,44 @@ import (
 
 	"github.com/jenfonro/meowfilm/server/catpawrunner"
 )
+
+func TestCanonicalNativeNamesDoNotAddNewDirectoryHints(t *testing.T) {
+	for _, flag := range []string{"百度", "夸克", "夸克-shareA", "UC-shareA", "天翼-shareA", "移动-shareA", "蓝光HDR"} {
+		ep := catpawrunner.Episode{Flag: flag, Name: "Series/第2季", URL: "private-id***E01.mkv"}
+		if got := smartEpisodeListProviderID(ep); got != "" {
+			t.Errorf("%s: an unclaimed private ID gained list semantics: %q", flag, got)
+		}
+		if got := smartEpisodePathSeasonHint(ep); got != 0 {
+			t.Errorf("%s: native directory gained a new season hint: %d", flag, got)
+		}
+		if got := smartEpisodeDirectoryKey(ep); got != "Series" {
+			t.Errorf("%s: original native directory changed: %q", flag, got)
+		}
+	}
+	// Existing legacy-name behavior is not a new-data adaptation and stays as-is.
+	for _, flag := range []string{"百度-shareA", "百度原画(无限)-shareA", "夸父-shareA", "优夕-shareA", "天意-shareA", "逸动-shareA"} {
+		ep := catpawrunner.Episode{Flag: flag, Name: "Series/第2季", URL: "private-id***E01.mkv"}
+		if got := smartEpisodePathSeasonHint(ep); got != 2 {
+			t.Errorf("%s: pre-existing legacy matching changed: %d", flag, got)
+		}
+	}
+}
+
+func TestCanonicalRunnerFileListsKeepExistingDirectoryHints(t *testing.T) {
+	baiduID := base64.StdEncoding.EncodeToString([]byte(`{"surl":"shareA","shareid":"123","uk":"456","fs_id":"789"}`))
+	for _, tc := range []struct{ flag, id string }{
+		{"百度-shareA", baiduID + "|||E01.mkv"},
+		{"夸克-shareA", "shareA*token*fid*fileToken***E01.mkv"},
+		{"UC-shareA", "shareA*token*fid*fileToken***E01.mkv"},
+		{"天翼-shareA", "123*456*E01.mkv"},
+		{"移动-shareA", "fileId*shareA***E01.mkv"},
+	} {
+		ep := catpawrunner.Episode{Flag: tc.flag, Name: "Series/第2季", URL: tc.id}
+		if got := smartEpisodePathSeasonHint(ep); got != 2 {
+			t.Errorf("%s: existing full file ID lost list hints: %d", tc.flag, got)
+		}
+	}
+}
 
 func TestNormalDetailCandidatesKeepResolvedMode(t *testing.T) {
 	seasons := []smartTMDBSeason{{Season: 1, EpisodeCount: 1}}
@@ -100,7 +139,9 @@ func TestNormalDetailDoesNotRelistOrCollapseResolvedFiles(t *testing.T) {
 	}
 }
 
-func TestReplayCandidatesKeepNameBasedResolution(t *testing.T) {
+func TestReplayCandidatesWithoutDetailOwnershipKeepNameBasedResolution(t *testing.T) {
+	// Compatibility for saved/independently constructed candidates. Actual
+	// Emby detail builders now preserve their resolved PanMock ownership.
 	for _, sample := range []struct{ flag, provider string }{
 		{"百度-shareA-1234", "baidu"}, {"夸克-shareA-1234", "quark"}, {"UC-shareA", "uc"},
 		{"天翼-shareA-abcd", "189"}, {"移动-shareA", "139"},
@@ -134,6 +175,20 @@ func TestDetailCandidateRoutingIsInternal(t *testing.T) {
 		after, err := json.Marshal(candidate)
 		if err != nil || !bytes.Equal(before, after) {
 			t.Fatal("internal detail routing must not introduce an external playback field")
+		}
+	}
+	for _, panMock := range []bool{false, true} {
+		result := WithDetailPanMock(candidate, panMock)
+		after, err := json.Marshal(result)
+		if err != nil || !bytes.Equal(before, after) {
+			t.Fatal("the Emby detail edge added an external playback field")
+		}
+		want := ""
+		if panMock {
+			want = "quark"
+		}
+		if got := smartCandidateLocalPanProvider(nil, result); got != want {
+			t.Fatalf("detail edge provider = %q, want %q", got, want)
 		}
 	}
 }

@@ -1192,10 +1192,18 @@ func smartFetchDetailAndPickAndPlay(database *db.DB, apiBase string, tvUser stri
 		return smartPickAndPlayDetailEntry(database, apiBase, tvUser, src, tmdbSeasons, singleBaselineSeasons, tmdbHasMultiSeason, preferSeasonNo, want, settings, rawCleanRules, rawEpisodeRules, requireSeasoned, allowSingleBaseline, primaryKind, allowResolutionModes, cache)
 	}
 	var picked *smartPickResult
+	var pickMu sync.Mutex
 	err := catpawrunner.WalkDetailNavigation(cache.NavigationRaw, func(action string, payload map[string]any) (map[string]any, error) {
 		return catpawrunner.RequestSpider(apiBase, src.SpiderAPI, action, payload)
 	}, func(leaf map[string]any) bool {
 		entry := smartNavigationLeafEntry(database, src, leaf, tmdbSeasons, singleBaselineSeasons, tmdbHasMultiSeason, settings, rawCleanRules, rawEpisodeRules, allowSingleBaseline, primaryKind)
+		// List resolution is concurrent. Preserve the existing picker/play
+		// operation rather than starting a new parallel playback policy.
+		pickMu.Lock()
+		defer pickMu.Unlock()
+		if smartNavigationHasPlayableResult(picked) {
+			return true
+		}
 		picked = smartPickAndPlayDetailEntry(database, apiBase, tvUser, src, tmdbSeasons, singleBaselineSeasons, tmdbHasMultiSeason, preferSeasonNo, want, settings, rawCleanRules, rawEpisodeRules, requireSeasoned, allowSingleBaseline, primaryKind, allowResolutionModes, entry)
 		return smartNavigationHasPlayableResult(picked)
 	}, smartNavigationOptions(settings, nil))
@@ -1420,7 +1428,7 @@ type smartPlaybackPickedMeta struct {
 	Quality     string
 }
 
-func smartCollectPlaybackOffersFromTMDB(database *db.DB, u *SmartUser, req smartPlaybackRequest, shouldStop func() bool, emit func(smartCandidateOffer, int), navigationWait ...NavigationOfferWait) error {
+func smartCollectPlaybackOffersFromTMDB(database *db.DB, u *SmartUser, req smartPlaybackRequest, shouldStop func() bool, emit func(smartCandidateOffer, int)) error {
 	if database == nil {
 		return errors.New("invalid database")
 	}
@@ -1479,7 +1487,7 @@ func smartCollectPlaybackOffersFromTMDB(database *db.DB, u *SmartUser, req smart
 		}
 	}
 
-	err := smartCollectPlaybackOffersFromTMDBAligned(database, u, req, apiBase, searchTitle, want, tmdbSeasons, nil, settings, rawCleanRules, rawEpisodeRules, rawMovieRules, true, false, "tmdb", shouldStop, emitWrapped, navigationWait...)
+	err := smartCollectPlaybackOffersFromTMDBAligned(database, u, req, apiBase, searchTitle, want, tmdbSeasons, nil, settings, rawCleanRules, rawEpisodeRules, rawMovieRules, true, false, "tmdb", shouldStop, emitWrapped)
 	if err == nil && emitted {
 		return nil
 	}
@@ -1490,12 +1498,12 @@ func smartCollectPlaybackOffersFromTMDB(database *db.DB, u *SmartUser, req smart
 		doubanMulti := smartPositiveSeasonCount(doubanSeasons) >= 2
 		switch {
 		case !tmdbMulti && doubanMulti:
-			err2 := smartCollectPlaybackOffersFromTMDBAligned(database, u, req, apiBase, searchTitle, want, doubanSeasons, tmdbSeasons, settings, rawCleanRules, rawEpisodeRules, rawMovieRules, false, true, "douban", shouldStop, emitWrapped, navigationWait...)
+			err2 := smartCollectPlaybackOffersFromTMDBAligned(database, u, req, apiBase, searchTitle, want, doubanSeasons, tmdbSeasons, settings, rawCleanRules, rawEpisodeRules, rawMovieRules, false, true, "douban", shouldStop, emitWrapped)
 			if err2 == nil && emitted {
 				return nil
 			}
 		case tmdbMulti && !doubanMulti:
-			err2 := smartCollectPlaybackOffersFromTMDBAligned(database, u, req, apiBase, searchTitle, want, tmdbSeasons, doubanSeasons, settings, rawCleanRules, rawEpisodeRules, rawMovieRules, false, true, "tmdb", shouldStop, emitWrapped, navigationWait...)
+			err2 := smartCollectPlaybackOffersFromTMDBAligned(database, u, req, apiBase, searchTitle, want, tmdbSeasons, doubanSeasons, settings, rawCleanRules, rawEpisodeRules, rawMovieRules, false, true, "tmdb", shouldStop, emitWrapped)
 			if err2 == nil && emitted {
 				return nil
 			}
@@ -1665,7 +1673,6 @@ func smartCollectPlaybackOffersFromTMDBAligned(
 	primaryKind string,
 	shouldStop func() bool,
 	emit func(smartCandidateOffer, int),
-	navigationWait ...NavigationOfferWait,
 ) error {
 	if database == nil {
 		return errors.New("invalid database")
@@ -1873,7 +1880,7 @@ func smartCollectPlaybackOffersFromTMDBAligned(
 				smartLogDetailError(src.SiteKey, src.SiteName, src.SiteDetail, err)
 				continue
 			}
-			consumeDetail := func(detailRaw map[string]any, onOffer func(smartCandidateOffer)) {
+			consumeDetail := func(detailRaw map[string]any) {
 				playFrom, playURL := catpawrunner.ExtractDetailPlayFromURL(detailRaw)
 				sourceRecords := smartBuildDetailSourceRecords(playFrom, playURL, smartIsPanMockEnabled(detailRaw), src)
 				if blockedEntry != nil && len(sourceRecords) > 0 {
@@ -1910,11 +1917,7 @@ func smartCollectPlaybackOffersFromTMDBAligned(
 							return
 						default:
 						}
-						offer := smartCandidateOffer{Cand: c, AccessByShare: access}
-						scheduler.Push(offer)
-						if onOffer != nil {
-							onOffer(offer)
-						}
+						scheduler.Push(smartCandidateOffer{Cand: c, AccessByShare: access})
 					}
 				}
 				if smartIsPanMockEnabled(detailRaw) {
@@ -1943,18 +1946,14 @@ func smartCollectPlaybackOffersFromTMDBAligned(
 				}
 			}
 			if catpawrunner.HasDetailNavigation(detailRaw) {
-				var wait NavigationOfferWait
-				if len(navigationWait) > 0 {
-					wait = navigationWait[0]
-				}
 				err := smartWalkNavigationOffers(ctx, detailRaw, settings, shouldStop, func(action string, payload map[string]any) (map[string]any, error) {
 					return catpawrunner.RequestSpiderWithTimeout(apiBase, src.SpiderAPI, action, payload, 8*time.Second)
-				}, consumeDetail, wait)
+				}, consumeDetail)
 				if err != nil {
 					smartLogDetailError(src.SiteKey, src.SiteName, src.SiteDetail, err)
 				}
 			} else {
-				consumeDetail(detailRaw, nil)
+				consumeDetail(detailRaw)
 			}
 		}
 	}

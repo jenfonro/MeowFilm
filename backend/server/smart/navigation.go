@@ -4,7 +4,6 @@ import (
 	"context"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/jenfonro/meowfilm/internal/db"
 	"github.com/jenfonro/meowfilm/server/catpawrunner"
@@ -66,27 +65,13 @@ func smartNavigationHasPlayableResult(result *smartPickResult) bool {
 	return result != nil && strings.TrimSpace(result.PlayURL) != ""
 }
 
-// NavigationOfferWait provides backpressure only for new navigation leaves.
-// Existing playback consumers report their normal success/failure; the walker
-// neither changes candidate ranking nor treats enqueueing as playable success.
-type NavigationOfferWait func(context.Context, []PlaybackOffer)
-
 func smartWalkNavigationOffers(ctx context.Context, raw map[string]any, settings smartPlaybackSettings,
 	shouldStop func() bool, request func(string, map[string]any) (map[string]any, error),
-	consume func(map[string]any, func(smartCandidateOffer)), wait NavigationOfferWait,
+	consume func(map[string]any),
 ) error {
 	stopped := func() bool { return ctx.Err() != nil || (shouldStop != nil && shouldStop()) }
 	return catpawrunner.WalkDetailNavigation(raw, request, func(leaf map[string]any) bool {
-		var mu sync.Mutex
-		var offers []smartCandidateOffer
-		consume(leaf, func(offer smartCandidateOffer) {
-			mu.Lock()
-			offers = append(offers, offer)
-			mu.Unlock()
-		})
-		if wait != nil && len(offers) > 0 && !stopped() {
-			wait(ctx, offers)
-		}
+		consume(leaf)
 		return stopped()
 	}, smartNavigationOptions(settings, stopped))
 }

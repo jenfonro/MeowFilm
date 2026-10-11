@@ -1,6 +1,6 @@
 import { requestJsonResponse } from '../../shared/requestJson';
 import { normalizeHttpBase as sharedNormalizeHttpBase } from '../../shared/urlText';
-import { getPanShareInput, panMockProviderFromFlag } from '../../utils/matchCore';
+import { getPanShareInput, isBuiltinPanPlayId, panMockProviderFromFlag } from '../../utils/matchCore';
 import { hasDetailNavigation, walkDetailNavigation } from '../../shared/detailNavigation';
 
 const jsonHeaders = {
@@ -850,10 +850,9 @@ async function tryPlayCandidatesForVideoSource({ apiBase, spiderPath, items, tvU
         if (state) state.panMock = panMockFlow;
         if (hasDetailNavigation(detailResp)) {
           await walkDetailNavigation(detailResp, {
-            ownerKey: apiBase,
             shareIdentity: nav => {
               const share = getPanShareInput(nav.share_flag, nav.share_url);
-              return share ? share.key : nav.share_url;
+              return share ? share.key + '::' + share.passcode : nav.share_url;
             },
             request: async (action, body) => {
               const child = await requestCatpawrunnerAdminJson({
@@ -884,7 +883,16 @@ async function tryPlayCandidatesForVideoSource({ apiBase, spiderPath, items, tvU
       }
 
       if (!panMockFlow) {
-        const hasPanProvider = playCandidates.some((candidate) => !!panMockProviderFromFlag(candidate && candidate.flag));
+        const hasPanProvider = playCandidates.some((candidate) => {
+          const flag = String(candidate && candidate.flag || '').trim();
+          // Keep the probe's original legacy-name behavior. New canonical
+          // names must not make an already-playable native item fetch detail.
+          const head = Array.from(flag.split('-')[0].trim()).slice(0, 2).join('');
+          if (['百度', '夸父', '优夕', '天意', '逸动'].includes(head)) return true;
+          const provider = panMockProviderFromFlag(flag);
+          return !!provider && (isBuiltinPanPlayId(provider, candidate.id) ||
+            !!getPanShareInput(flag, candidate.shareUrl || candidate.id));
+        });
         if (hasPanProvider) {
           const ok = await loadDetailOnce();
           if (ok && detailCandidates.length) playCandidates = detailCandidates;

@@ -408,7 +408,7 @@ func resolveTMDBPlaybackStreamTarget(database *db.DB, userID int64, ref *itemRef
 				return
 			}
 			EnqueueFullOffer(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey, offer)
-		}, navigationOfferWaiter(entry))
+		})
 		CloseFullOffers(entry.PlaySessionID, entry.MediaSourceID, entry.CacheKey)
 	}()
 	return buildTMDBPlaybackOfferTarget(ref, *display, nil, mediaSourceID, playSessionID), true, nil
@@ -560,7 +560,7 @@ func buildManualDetailOfferFromResolvedPan(database *db.DB, ref *itemRef, req sm
 	rawPanLabel := strings.TrimSpace(pan.RawLabel)
 	ep.Flag = firstNonEmptyString(strings.TrimSpace(ep.Flag), rawPanLabel, strings.TrimSpace(item.PanFlag))
 	return smart.PlaybackOffer{
-		Cand: smart.Candidate{
+		Cand: smart.WithDetailPanMock(smart.Candidate{
 			Stage:      "manual_detail",
 			SiteKey:    strings.TrimSpace(siteKey),
 			SiteName:   strings.TrimSpace(siteName),
@@ -569,7 +569,7 @@ func buildManualDetailOfferFromResolvedPan(database *db.DB, ref *itemRef, req sm
 			PanFlag:    firstNonEmptyString(strings.TrimSpace(ep.Flag), rawPanLabel, strings.TrimSpace(item.PanFlag)),
 			Ep:         ep,
 			RawName:    strings.TrimSpace(smart.FirstRawNameFromURL(ep.URL)),
-		},
+		}, pan.PanMock),
 	}, true
 }
 
@@ -749,7 +749,7 @@ func buildHistoryDetailOfferFromResolvedPan(database *db.DB, ref *itemRef, req s
 	rawPanLabel := strings.TrimSpace(pan.RawLabel)
 	ep.Flag = firstNonEmptyString(strings.TrimSpace(ep.Flag), rawPanLabel, strings.TrimSpace(hist.PlayFlag))
 	return smart.PlaybackOffer{
-		Cand: smart.Candidate{
+		Cand: smart.WithDetailPanMock(smart.Candidate{
 			Stage:      "history_detail",
 			SiteKey:    siteKey,
 			SiteName:   strings.TrimSpace(hist.SiteName),
@@ -758,7 +758,7 @@ func buildHistoryDetailOfferFromResolvedPan(database *db.DB, ref *itemRef, req s
 			PanFlag:    firstNonEmptyString(strings.TrimSpace(ep.Flag), rawPanLabel, strings.TrimSpace(hist.PlayFlag)),
 			Ep:         ep,
 			RawName:    firstNonEmptyString(strings.TrimSpace(hist.SiteEpisodeFile), strings.TrimSpace(smart.FirstRawNameFromURL(ep.URL))),
-		},
+		}, pan.PanMock),
 	}, true
 }
 
@@ -885,6 +885,13 @@ func resolveSiteEpisodeDirectPlayback(database *db.DB, user *smart.User, ref *it
 	var watchReport *catpawrunner.WatchReport
 	panFlag := strings.TrimSpace(flag)
 	provider := strings.TrimSpace(smart.PlayFlagProviderID(panFlag))
+	head := strings.TrimSpace(strings.SplitN(panFlag, "-", 2)[0])
+	// Keep standalone Emby name-based replay. Newly recognized names must not
+	// redirect a script's opaque ID into an incompatible built-in play parser.
+	addedName := !strings.Contains(panFlag, "-") || head == "夸克" || strings.EqualFold(head, "UC") || head == "天翼" || head == "移动"
+	if addedName && !catpawrunner.IsBuiltinPanPlayID(provider, rawURL) {
+		provider = ""
+	}
 	if provider != "" {
 		finalURL, finalHeaders, err = smart.ResolvePanProviderPlayback(database, user, provider, panFlag, rawURL, nil, "/MeowFilm")
 		if err != nil {
@@ -1608,7 +1615,8 @@ func stablePlaybackIdentityFromPicked(kind string, itemID string, picked *smart.
 	provider := strings.TrimSpace(smart.PlayFlagProviderID(strings.TrimSpace(picked.PanFlag)))
 	fileIdentity := normalizePlaybackFileIdentity(strings.TrimSpace(picked.RawName))
 	var key string
-	if provider != "" {
+	// Preserve site-bound identities when the newly recognized name has no share suffix.
+	if provider != "" && strings.Contains(picked.PanFlag, "-") {
 		key = stablePlaybackIdentityForListFlag(kind, itemID, provider, strings.TrimSpace(picked.PanFlag), fileIdentity)
 	} else {
 		key = stablePlaybackIdentityForSiteBound(kind, itemID, strings.TrimSpace(picked.SiteKey), strings.TrimSpace(picked.SiteDetail), strings.TrimSpace(picked.PanFlag), fileIdentity)

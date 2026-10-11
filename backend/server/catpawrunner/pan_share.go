@@ -1,6 +1,8 @@
 package catpawrunner
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"net/url"
 	"regexp"
 	"strings"
@@ -126,6 +128,89 @@ func ParsePanShareInput(flag, value string) (PanShareInput, bool) {
 		pass = ""
 	}
 	return makePanShareInput(provider, id, pass), provider != ""
+}
+
+var panCanonicalListFlagPattern = regexp.MustCompile(`(?i)^(百度|夸克|UC|天翼|移动)-([A-Za-z0-9_-]{6,256})$`)
+var panBaiduListPasswordPattern = regexp.MustCompile(`^([A-Za-z0-9_-]{22})-([A-Za-z0-9]{4})$`)
+var panCanonicalListPasswordPattern = regexp.MustCompile(`^([A-Za-z0-9_]{6,256})(?:-([A-Za-z0-9]{1,16}))?$`)
+var panLegacyBaiduListFlagPattern = regexp.MustCompile(`^[^-]*百度[^-]*-([A-Za-z0-9_-]+)(?:#.*)?$`)
+
+// ParsePanListInput is for an explicit history/manual list request, not for
+// deciding whether an ordinary detail source has been handed over to us.
+func ParsePanListInput(flag, value string) (PanShareInput, bool) {
+	if share, ok := ParsePanShareInput(flag, value); ok {
+		return share, true
+	}
+	label := NormalizePanMockFlag(flag)
+	// Preserve decorated saved flags accepted by the existing Baidu list API,
+	// without widening ordinary-detail ownership checks.
+	if legacy := panLegacyBaiduListFlagPattern.FindStringSubmatch(label); len(legacy) == 2 &&
+		strings.TrimSpace(strings.SplitN(label, "-", 2)[0]) != "百度" {
+		return ParsePanShareInput("百度原画-"+legacy[1], value)
+	}
+	if strings.TrimSpace(value) != "" {
+		return PanShareInput{}, false
+	}
+	match := panCanonicalListFlagPattern.FindStringSubmatch(label)
+	if len(match) != 3 {
+		return PanShareInput{}, false
+	}
+	provider := PanMockProviderFromFlag(flag)
+	id, pass := match[2], ""
+	if provider == "baidu" {
+		// Only the current 22-character short-code + four-character password
+		// shape has a known boundary. Other hyphens remain part of the ID.
+		if coded := panBaiduListPasswordPattern.FindStringSubmatch(id); len(coded) == 3 {
+			id, pass = coded[1], coded[2]
+		}
+	} else {
+		coded := panCanonicalListPasswordPattern.FindStringSubmatch(id)
+		if len(coded) != 3 {
+			return PanShareInput{}, false
+		}
+		id, pass = coded[1], coded[2]
+	}
+	if provider == "" || !validPanShareID(id) {
+		return PanShareInput{}, false
+	}
+	return makePanShareInput(provider, id, pass), true
+}
+
+var panFileTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+var panFileNumberPattern = regexp.MustCompile(`^\d+$`)
+
+// IsBuiltinPanPlayID recognizes the existing list file formats, not arbitrary
+// script IDs. It does not infer ownership from a provider's display name.
+func IsBuiltinPanPlayID(provider, value string) bool {
+	id := strings.TrimSpace(value)
+	if provider == "baidu" {
+		encoded := strings.SplitN(strings.SplitN(id, "|||", 2)[0], "***", 2)[0]
+		if decoded, err := url.PathUnescape(encoded); err == nil {
+			encoded = decoded
+		}
+		encoded = strings.TrimRight(strings.NewReplacer("-", "+", "_", "/").Replace(encoded), "=")
+		raw, err := base64.RawStdEncoding.DecodeString(encoded)
+		if err != nil {
+			return false
+		}
+		var data map[string]any
+		if json.Unmarshal(raw, &data) != nil {
+			return false
+		}
+		return anyToString(data["surl"]) != "" && anyToString(data["shareid"]) != "" &&
+			anyToString(data["uk"]) != "" && anyToString(data["fs_id"]) != "" && anyToString(data["providerId"]) == ""
+	}
+	parts := strings.Split(id, "*")
+	switch provider {
+	case "quark", "uc":
+		return len(parts) >= 4 && panFileTokenPattern.MatchString(parts[0]) && parts[1] != "" &&
+			panFileTokenPattern.MatchString(parts[2]) && parts[3] != ""
+	case "139":
+		return len(parts) >= 3 && panFileTokenPattern.MatchString(parts[0]) && panFileTokenPattern.MatchString(parts[1])
+	case "189":
+		return len(parts) >= 3 && panFileNumberPattern.MatchString(parts[0]) && panFileNumberPattern.MatchString(parts[1])
+	}
+	return false
 }
 
 func makePanShareInput(provider, id, pass string) PanShareInput {
