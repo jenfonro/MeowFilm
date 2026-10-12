@@ -617,10 +617,19 @@ function normalizeStatusCode(resp) {
 }
 
 function normalizeMessage(resp) {
-  if (resp && typeof resp.message === 'string') return resp.message;
-  if (resp && typeof resp.msg === 'string') return resp.msg;
-  if (resp && resp.data && typeof resp.data.message === 'string') return resp.data.message;
+  for (const value of [resp, resp && resp.data]) {
+    for (const key of ['message', 'msg', 'error']) {
+      if (value && typeof value[key] === 'string' && value[key].trim()) return value[key];
+    }
+  }
   return '';
+}
+
+function hasExplicitResponseError(resp) {
+  // Empty lists and site-specific codes/messages are not evidence of a
+  // Runner error. Only honor failure information the script actually returned.
+  return [resp, resp && resp.data].some(value => value && typeof value === 'object' &&
+    (value.ok === false || value.success === false || (typeof value.error === 'string' && value.error.trim())));
 }
 
 function readPanMockFlag(resp) {
@@ -845,7 +854,12 @@ async function tryPlayCandidatesForVideoSource({ apiBase, spiderPath, items, tvU
           tvUser
         });
         const dsc = normalizeStatusCode(detailResp);
-        if (dsc >= 400) return false;
+        // Script-returned errors on empty details must still reach the original
+        // missing-playback/search fallback below; retain their text there.
+        if (dsc >= 400) {
+          playErr = normalizeMessage(detailResp) || '详情请求失败';
+          return false;
+        }
         panMockFlow = readPanMockFlag(detailResp);
         if (state) state.panMock = panMockFlow;
         if (hasDetailNavigation(detailResp)) {
@@ -858,7 +872,7 @@ async function tryPlayCandidatesForVideoSource({ apiBase, spiderPath, items, tvU
               const child = await requestCatpawrunnerAdminJson({
                 apiBase, path: `${spiderPath}/${encodeURIComponent(action)}`, method: 'POST', body, tvUser
               });
-              if (normalizeStatusCode(child) >= 400) throw new Error(normalizeMessage(child) || '导航请求失败');
+              if (normalizeStatusCode(child) >= 400 || hasExplicitResponseError(child)) throw new Error(normalizeMessage(child) || '导航请求失败');
               return child;
             },
             visit: async leaf => {
@@ -947,10 +961,13 @@ async function tryPlayCandidatesForVideoSource({ apiBase, spiderPath, items, tvU
             tvUser
           });
           const psc = normalizeStatusCode(playResp);
-          if (psc >= 400) continue;
+          if (psc >= 400 || hasExplicitResponseError(playResp)) {
+            playErr = normalizeMessage(playResp) || '播放请求失败';
+            continue;
+          }
           const url = extractPlayUrl(playResp);
           if (url) return { ok: true, playErr: '' };
-          playErr = '未提取到地址';
+          playErr = normalizeMessage(playResp) || '未提取到地址';
         } catch (err) {
           // A failing share/provider/route does not invalidate the other pans
           // in this detail, even when its own list/play API returns 403/404.
@@ -975,11 +992,11 @@ async function probeDashboardVideoSourceHome({ apiBase, spiderPath, tvUser }) {
       tvUser
     });
     const statusCode = normalizeStatusCode(homeResp);
-    if (statusCode >= 400) {
+    if (statusCode >= 400 || hasExplicitResponseError(homeResp)) {
       const message = normalizeMessage(homeResp) || '请求失败';
       return {
         ok: false,
-        error: message.startsWith('HTTP') ? message : `HTTP ${statusCode}：${message}`,
+        error: statusCode < 400 || message.startsWith('HTTP') ? message : `HTTP ${statusCode}：${message}`,
         classes: []
       };
     }
@@ -1012,11 +1029,11 @@ async function probeDashboardVideoSourceCategory({ apiBase, spiderPath, classes,
       tvUser
     });
     const statusCode = normalizeStatusCode(categoryResp);
-    if (statusCode >= 400) {
+    if (statusCode >= 400 || hasExplicitResponseError(categoryResp)) {
       const message = normalizeMessage(categoryResp) || '请求失败';
       return {
         ok: false,
-        error: message.startsWith('HTTP') ? message : `HTTP ${statusCode}：${message}`,
+        error: statusCode < 400 || message.startsWith('HTTP') ? message : `HTTP ${statusCode}：${message}`,
         items: [],
         empty: false,
         panMock: false
@@ -1051,11 +1068,11 @@ async function probeDashboardVideoSourceSearch({ apiBase, spiderPath, tvUser }) 
       tvUser
     });
     const statusCode = normalizeStatusCode(searchResp);
-    if (statusCode >= 400) {
+    if (statusCode >= 400 || hasExplicitResponseError(searchResp)) {
       const message = normalizeMessage(searchResp) || '请求失败';
       return {
         ok: false,
-        error: message.startsWith('HTTP') ? message : `HTTP ${statusCode}：${message}`,
+        error: statusCode < 400 || message.startsWith('HTTP') ? message : `HTTP ${statusCode}：${message}`,
         items: [],
         panMock: false
       };
@@ -1278,7 +1295,7 @@ export async function requestCatpawrunnerAdminJson({ apiBase, path, method = 'GE
   const controller = ms > 0 && typeof AbortController !== 'undefined' ? new AbortController() : null;
   const timer = controller ? setTimeout(() => controller.abort(), ms) : null;
   try {
-    const { resp, data } = await requestJson(target.toString(), {
+    const resp = await fetch(target.toString(), {
       method,
       headers,
       body: body != null ? JSON.stringify(body) : undefined,
@@ -1287,9 +1304,12 @@ export async function requestCatpawrunnerAdminJson({ apiBase, path, method = 'GE
     });
     const status = resp && typeof resp.status === 'number' ? resp.status : 0;
     if (!resp || !resp.ok) {
-      throw new Error((data && (data.message || data.error)) || `HTTP ${status}`);
+      const raw = resp ? await resp.text().catch(() => '') : '';
+      let data = null;
+      try { data = JSON.parse(raw); } catch (_e) {}
+      throw new Error(normalizeMessage(data) || raw.trim() || `HTTP ${status}`);
     }
-    return data;
+    return await resp.json().catch(() => null);
   } finally {
     if (timer) clearTimeout(timer);
   }

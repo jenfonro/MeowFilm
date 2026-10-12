@@ -13,11 +13,14 @@ const urlSource = stripModuleSyntax(readFileSync('src/shared/urlText.js', 'utf8'
 const matchSource = stripModuleSyntax(readFileSync('src/utils/matchCore.js', 'utf8'));
 const navigationSource = stripModuleSyntax(readFileSync('src/shared/detailNavigation.js', 'utf8'));
 const site = { key: 'probe', name: '检测测试源', api: '/aaaaaaaaaa/spider/test/3' };
-const response = (data, status = 200) => ({ status, ok: status >= 200 && status < 300, json: async () => data });
+const response = (data, status = 200) => ({
+  status, ok: status >= 200 && status < 300,
+  json: async () => data, text: async () => JSON.stringify(data),
+});
 const listing = (id) => response({ ok: true, vod_play_url: `第一集$${id}` });
 const playable = () => response({ ok: true, url: 'https://media.example/video.mp4' });
 
-function makeProbe({ details, items, lists = {}, plays = {}, nativePlays = {}, panMock = true, navigation = {} }) {
+function makeProbe({ details = {}, items, lists = {}, plays = {}, nativePlays = {}, panMock = true, navigation = {}, responses = {} }) {
   const calls = [];
   let saved;
   const context = vm.createContext({
@@ -33,6 +36,8 @@ function makeProbe({ details, items, lists = {}, plays = {}, nativePlays = {}, p
         saved = { results: JSON.parse(body.results), errors: JSON.parse(body.errors) };
         return response({ success: true, sites: [site], results: saved.results });
       }
+      const action = pathname.split('/').pop();
+      if (responses[action]) return responses[action];
       const child = navigation[`${pathname.split('/').pop()}:${body.id}`];
       if (child) return response({ pan_mock: panMock, ...child });
       if (pathname.endsWith('/home')) return response({ class: [{ type_id: 'movies' }] });
@@ -320,4 +325,151 @@ test('source probing reports unknown navigation data instead of inventing a play
   assert.equal(saved.results.probe, 'invalid');
   assert.match(saved.errors.probe, /未支持的详情/);
   assert.equal(probe.calls.some(c => c.pathname.endsWith('/play')), false);
+});
+
+test('source probing preserves explicitly returned script errors at home/category/search/detail', async () => {
+  for (const action of ['home', 'category', 'search', 'detail']) {
+    for (const doc of [
+      { list: [], error: '解密失败: 加密字符串不能为空' },
+      { list: [], ok: false, msg: '原脚本明确返回的错误' },
+      { list: [], success: false, message: '原脚本失败信息' },
+      { data: { list: [], error: '内层脚本明确返回的错误' } },
+    ]) {
+      const probe = makeProbe({
+        items: action === 'search' ? [] : undefined,
+        responses: { [action]: response(doc) },
+      });
+      const saved = await probe.run();
+      assert.equal(saved.results.probe, 'invalid', action);
+      assert.ok(saved.errors.probe.includes(doc.error || doc.msg || doc.message || doc.data.error), action);
+      assert.doesNotMatch(saved.errors.probe, /Runner.*丢失|未知上游|缺少播放信息/);
+    }
+  }
+});
+
+test('script HTTP errors keep message/msg/error or non-JSON text instead of just the HTTP code', async () => {
+  for (const result of [
+    response({ message: "Cannot read properties of undefined (reading 'children')" }, 500),
+    response({ msg: '原脚本 msg 错误' }, 500),
+    response({ error: '原脚本 error 错误' }, 500),
+    { ok: false, status: 500, json: async () => { throw new Error('not JSON'); }, text: async () => '1040 Too many connections' },
+  ]) {
+    const probe = makeProbe({ responses: { category: result } });
+    const saved = await probe.run();
+    assert.match(saved.errors.probe, /children|原脚本 (?:msg|error) 错误|1040 Too many connections/);
+  }
+});
+
+test('a script-swallowed error stays an empty result; arbitrary business codes and informational messages are not guessed', async () => {
+  for (const doc of [
+    { list: [] },
+    { list: [], code: 101801001105, msg: '未知业务含义' },
+    { list: [], message: 'ok' },
+  ]) {
+    const probe = makeProbe({ responses: { category: response(doc), search: response(doc) } });
+    const saved = await probe.run();
+    assert.equal(saved.results.probe, 'invalid');
+    assert.deepEqual(saved.errors, {}, 'no error may be reconstructed from an empty list');
+    assert.equal(probe.calls.some(c => c.pathname.endsWith('/detail') || c.pathname.endsWith('/play')), false);
+  }
+});
+
+test('native play errors retain their text without skipping subsequent candidates', async () => {
+  const failed = { ok: false, msg: '解析器原始错误', url: '' };
+  const probe = makeProbe({
+    panMock: false,
+    details: { first: detail('线路一$$$线路二', '第一集$bad-id$$$第一集$good-id') },
+    nativePlays: { 'bad-id': response(failed), 'good-id': playable() },
+  });
+  assert.equal((await probe.run()).results.probe, 'valid');
+  assert.deepEqual(resolutionCalls(probe.calls), ['detail:first', 'play:线路一', 'play:线路二']);
+  const onlyFailure = makeProbe({
+    panMock: false,
+    details: { first: detail('线路一', '第一集$bad-id') },
+    nativePlays: { 'bad-id': response(failed) },
+  });
+  assert.match((await onlyFailure.run()).errors.probe, /解析器原始错误/);
+});
+
+test('a navigation child exposes its returned error without inventing another request', async () => {
+  const probe = makeProbe({
+    details: { first: { list: [navigationCard('pan-group', 'category')] } },
+    navigation: { 'category:pan-group': { list: [], error: '导航接口原始错误' } },
+  });
+  const saved = await probe.run();
+  assert.match(saved.errors.probe, /导航接口原始错误/);
+  assert.equal(probe.calls.some(c => c.pathname.endsWith('/play')), false);
+});
+
+test('informational messages and unknown codes keep usable data; category never selects advertised filters', async () => {
+  const probe = makeProbe({
+    panMock: false,
+    responses: {
+      home: response({
+        class: [{ type_id: 'movies' }], code: 90001, message: '首页提示',
+        filters: { movies: [{ key: 'year', value: [{ n: '2026', v: '2026' }] }] },
+      }),
+      category: response({ list: [{ vod_id: 'first' }], code: 90002, msg: '分类提示' }),
+      detail: response({
+        list: [detail('蓝光HDR', '第一集$native-id')], code: 90003,
+        message: '部分线路提示，其他线路可用', error: '', pan_mock: false,
+      }),
+    },
+    nativePlays: { 'native-id': response({ url: 'https://media.example/video.mp4', code: 90004, msg: '播放提示' }) },
+  });
+  const saved = await probe.run();
+  assert.equal(saved.results.probe, 'valid');
+  assert.deepEqual(saved.errors, {});
+  assert.deepEqual(probe.calls.find(c => c.pathname.endsWith('/category')).body, {
+    id: 'movies', page: 1, filter: true, filters: {},
+  });
+  assert.deepEqual(resolutionCalls(probe.calls), ['detail:first', 'play:蓝光HDR']);
+});
+
+test('an explicitly failed detail still permits the next original detail candidate', async () => {
+  const probe = makeProbe({
+    panMock: false,
+    items: [{ vod_id: 'first' }, { vod_id: 'second' }],
+    details: {
+      first: { list: [], error: '第一详情原始错误' },
+      second: detail('原生线路', '第一集$working-id'),
+    },
+    nativePlays: { 'working-id': playable() },
+  });
+  assert.equal((await probe.run()).results.probe, 'valid');
+  assert.deepEqual(resolutionCalls(probe.calls), ['detail:first', 'detail:second', 'play:原生线路']);
+});
+
+test('a returned error in an empty detail preserves the existing search fallback', async () => {
+  const probe = makeProbe({
+    panMock: false,
+    details: {
+      first: { list: [], error: '分类详情原始错误' },
+      searched: detail('搜索线路', '第一集$working-id'),
+    },
+    responses: { search: response({ list: [{ vod_id: 'searched' }] }) },
+    nativePlays: { 'working-id': playable() },
+  });
+  const saved = await probe.run();
+  assert.equal(saved.results.probe, 'valid');
+  assert.deepEqual(saved.errors, {});
+  assert.deepEqual(probe.calls.filter(c => !c.pathname.startsWith('/dashboard/')).map(c => c.pathname.split('/').pop()), [
+    'home', 'category', 'detail', 'search', 'detail', 'play',
+  ]);
+  assert.deepEqual(resolutionCalls(probe.calls), ['detail:first', 'detail:searched', 'play:搜索线路']);
+});
+
+test('an explicitly failed navigation branch does not suppress its working sibling', async () => {
+  const probe = makeProbe({
+    panMock: false,
+    details: { first: { list: [navigationCard('bad', 'category'), navigationCard('good', 'category')] } },
+    navigation: {
+      'category:bad': { list: [], error: '第一导航原始错误' },
+      'category:good': { list: [detail('原生线路', '第一集$working-id')] },
+    },
+    nativePlays: { 'working-id': playable() },
+  });
+  assert.equal((await probe.run()).results.probe, 'valid');
+  assert.deepEqual(probe.calls.filter(c => c.pathname.endsWith('/category')).map(c => c.body.id), ['movies', 'bad', 'good']);
+  assert.deepEqual(resolutionCalls(probe.calls), ['detail:first', 'play:原生线路']);
 });
