@@ -1,7 +1,7 @@
 <template>
   <div
     class="tv-artplayer"
-    :class="{ 'tv-artplayer--fullscreen': isFullscreen, 'tv-artplayer--mobile': isMobile }"
+    :class="{ 'tv-artplayer--fullscreen': isFullscreen, 'tv-artplayer--mobile': isMobile, 'tv-artplayer--short-drama': shortDramaMode }"
     ref="shell"
   >
     <div ref="container" class="artplayer-root" />
@@ -13,7 +13,80 @@
       <div v-show="showBufferRing" class="m-buffer-mask" aria-hidden="true"></div>
       <div v-show="showBufferRing" class="m-buffer-ring" aria-hidden="true"></div>
 
-      <div class="yt-ui" :class="{ 'yt-ui--show': overlayVisible }">
+      <div v-if="shortDramaMode" class="sd-touch-surface" aria-hidden="true"></div>
+      <div v-if="shortDramaMode" class="sd-ui">
+        <div class="yt-top" @click.stop @mousedown.stop @touchstart.stop>
+          <button class="yt-top__back" type="button" aria-label="退出短剧模式" title="退出短剧模式" @click.stop="emit('exit-short-drama')">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+          <div class="yt-top__title">{{ portraitTopText }}</div>
+        </div>
+        <button
+          v-if="!playing && url && !episodeSwitching && !showBufferRing"
+          class="yt-btn sd-resume"
+          type="button"
+          aria-label="继续播放"
+          @click.stop="togglePlay"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7L8 5z" /></svg>
+          <span>{{ autoplayBlocked ? '点击继续播放' : '点击播放' }}</span>
+        </button>
+        <div class="sd-bottom">
+          <div class="sd-bottom__row">
+            <span class="sd-hint">{{ episodeSwitching ? '正在切集…' : '上滑下一集 · 下滑上一集' }}</span>
+            <div class="yt-setting sd-rate" ref="settingEl">
+              <button
+                class="yt-btn sd-rate__trigger"
+                type="button"
+                :aria-label="`播放速度：${playbackRate}倍`"
+                aria-haspopup="true"
+                :aria-expanded="shortDramaRateOpen"
+                @click.stop="shortDramaRateOpen = !shortDramaRateOpen"
+              >{{ playbackRate }}×</button>
+              <div v-if="shortDramaRateOpen" class="yt-setting__menu yt-setting__menu--open">
+                <div class="yt-setting__title">播放速度</div>
+                <div class="yt-setting__grid">
+                  <button
+                    v-for="r in rates"
+                    :key="r"
+                    type="button"
+                    class="yt-setting__item"
+                    :data-active="Math.abs(playbackRate - r) < 0.001 ? 'true' : 'false'"
+                    @click.stop="setRate(r)"
+                  >{{ r }}×</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="yt-progress" :style="{ '--yt-progress-p': progressFrac, '--yt-buffer-p': bufferedFrac }">
+            <div class="yt-progress__track" aria-hidden="true">
+              <div class="yt-progress__buffer" />
+              <div class="yt-progress__fill" />
+            </div>
+            <input
+              class="yt-progress__range"
+              type="range"
+              aria-label="播放进度"
+              min="0"
+              :max="Math.max(duration, 0)"
+              step="0.1"
+              :value="Math.min(displayTime, duration)"
+              :disabled="!duration || episodeSwitching || !url"
+              @mousedown.stop="onSeekPointerDown"
+              @touchstart.stop="onSeekPointerDown"
+              @click.stop
+              @input="onSeekPreview"
+              @change="onSeekCommit"
+              @mouseup.stop="onSeekPointerUp"
+              @touchend.stop="onSeekPointerUp"
+              @blur="onSeekCancel"
+            />
+          </div>
+        </div>
+      </div>
+      <div v-else class="yt-ui" :class="{ 'yt-ui--show': overlayVisible }">
         <div v-if="portraitMode" class="yt-top" @click.stop @mousedown.stop @touchstart.stop>
           <button class="yt-top__back" type="button" aria-label="退出竖屏" title="退出竖屏" @click.stop="emitExitPortrait">
             <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -410,6 +483,7 @@
 		'extramenuselect',
 		'extraaction',
     'exit-portrait',
+    'exit-short-drama',
     'episodedelta',
 	]);
 
@@ -429,6 +503,8 @@
 		toastText: { type: String, default: '' },
 		toastSticky: { type: Boolean, default: false },
     portraitMode: { type: Boolean, default: false },
+    shortDramaMode: { type: Boolean, default: false },
+    episodeSwitching: { type: Boolean, default: false },
     portraitTopText: { type: String, default: '' },
 	});
 
@@ -474,6 +550,11 @@ const volume = ref(0.7);
 const muted = ref(false);
 const buffering = ref(false);
 const playbackRate = ref(1);
+const shortDramaRateOpen = ref(false);
+const autoplayBlocked = ref(false);
+let shortDramaPlaybackRate = 1;
+let retainedShortDramaVideo = null;
+let currentVideoReusable = false;
 const aspectRatio = ref('default');
 	const settingsOpen = ref(false);
 	const goProxyMenuOpen = ref(false);
@@ -486,6 +567,7 @@ const isPip = ref(false);
 const isMobile = ref(false);
 const isIos = ref(false);
 const portraitMode = computed(() => !!props.portraitMode);
+const shortDramaMode = computed(() => !!props.shortDramaMode);
 const portraitTopText = computed(() => String(props.portraitTopText || '').trim());
 const overlayVisible = computed(() => {
 	  const hasExtraMenu = !!extraMenuOpenKey.value;
@@ -950,6 +1032,8 @@ const scheduleBufferedSync = () => {
 
 const isUiControlTarget = (target) => {
   if (!target || typeof target.closest !== 'function') return false;
+  // The central play hint is part of the gesture surface, even while paused.
+  if (props.shortDramaMode && target.closest('.sd-resume')) return false;
   return !!target.closest(
     [
       '.yt-top',
@@ -1058,7 +1142,10 @@ const isUiControlTarget = (target) => {
 	  return await shakaModulePromise;
 	};
 
-const destroyNow = () => {
+const destroyNow = ({ preserveShortDramaVideo = false } = {}) => {
+  retainedShortDramaVideo = preserveShortDramaVideo && currentVideoReusable && art ? art.video : null;
+  currentVideoReusable = false;
+  if (art) art.__tvCustomToken = null;
   if (cleanupMediaSession) cleanupMediaSession();
   cleanupMediaSession = null;
   try {
@@ -1300,10 +1387,21 @@ const destroyNow = () => {
 	  const url = (props.url || '').trim();
 	  if (!container.value || !url) return;
 
-  if (art) destroyNow();
+  if (art) destroyNow({ preserveShortDramaVideo: props.shortDramaMode });
   isPip.value = false;
+  autoplayBlocked.value = false;
 
 	  const format = detectVideoFormat(url);
+  const retainedVideo = retainedShortDramaVideo;
+  retainedShortDramaVideo = null;
+  // Keep the user-activated media element for iPhone native HLS/MP4.
+  // Custom engines get a fresh element so an old async loader cannot attach to the next episode.
+  const reuseVideo = props.shortDramaMode && retainedVideo && (
+    format === 'native' || (
+      format === 'hls' && isIos.value && retainedVideo.canPlayType('application/vnd.apple.mpegurl')
+      && !Object.values(props.headers || {}).some((value) => value != null)
+    )
+  ) ? retainedVideo : null;
 	  const playUrlForArt = url;
 	  const isCrossOriginUrl = (u) => {
 	    const raw = typeof u === 'string' ? u.trim() : '';
@@ -1346,6 +1444,7 @@ const destroyNow = () => {
   const emitMetaOnce = () => {
     if (metaEmitted) return;
     metaEmitted = true;
+    restoreShortDramaRate();
     try {
       const v = art && art.video ? art.video : null;
       const d = (art && typeof art.duration === 'number' ? art.duration : null) ?? (v ? v.duration : 0);
@@ -1365,6 +1464,7 @@ const destroyNow = () => {
 
 		  art = new Artplayer({
 		    container: container.value,
+    proxy: reuseVideo ? () => reuseVideo : undefined,
 		    url: playUrlForArt,
     poster: props.poster || '',
     autoplay: !!props.autoplay,
@@ -1394,6 +1494,7 @@ const destroyNow = () => {
 			    format !== 'native'
 			      ? {
 			          [artType]: function (videoEl, playUrl, artInstance) {
+			            if (artInstance.isDestroy) return;
 			            const headers = props.headers || {};
 			            const token = `${Date.now()}-${Math.random()}`;
 			            artInstance.__tvCustomToken = token;
@@ -1429,7 +1530,9 @@ const destroyNow = () => {
 			              }
 
 			              try {
-			                if (props.autoplay && videoEl && typeof videoEl.play === 'function') videoEl.play().catch(() => {});
+			                if (props.autoplay && videoEl && typeof videoEl.play === 'function') {
+			                  videoEl.play().catch((error) => handlePlayRejection(error, artInstance));
+			                }
 			              } catch (_e) {}
 
 			              return custom;
@@ -1438,11 +1541,17 @@ const destroyNow = () => {
 			        }
 			      : {},
   });
+  currentVideoReusable = format === 'native' || (
+    format === 'hls' && isIos.value && art.video.canPlayType('application/vnd.apple.mpegurl')
+    && !Object.values(props.headers || {}).some((value) => value != null)
+  );
+  restoreShortDramaRate();
   try {
     if (props.autoplay && art && typeof art.play === 'function') {
+      const player = art;
       Promise.resolve()
-        .then(() => art && art.play && art.play())
-        .catch(() => {});
+        .then(() => !player.isDestroy && player.play())
+        .catch((error) => handlePlayRejection(error, player));
     }
   } catch (_e) {}
 
@@ -1720,6 +1829,7 @@ const destroyNow = () => {
     playbackRate.value = art.playbackRate || 1;
   });
 	  art.on('video:play', () => {
+    autoplayBlocked.value = false;
 	    playing.value = true;
 	    setBuffering(false);
 	    showUiTemporarily();
@@ -1770,6 +1880,8 @@ const destroyNow = () => {
 	    scheduleBufferedSync();
 	  });
   art.on('video:error', () => {
+    // ArtPlayer's delayed error reconnect can outlive destroy(); never share that element.
+    currentVideoReusable = false;
     setBuffering(false);
     uiVisible.value = true;
     try {
@@ -1843,15 +1955,30 @@ const destroyNow = () => {
   } catch (_) {}
 };
 
+const restoreShortDramaRate = () => {
+  if (!props.shortDramaMode || !art) return;
+  art.video.defaultPlaybackRate = shortDramaPlaybackRate;
+  art.video.playbackRate = shortDramaPlaybackRate;
+  playbackRate.value = shortDramaPlaybackRate;
+};
+
+const handlePlayRejection = (error, player) => {
+  if (!props.shortDramaMode || player !== art || !error || error.name !== 'NotAllowedError') return;
+  autoplayBlocked.value = true;
+  setBuffering(false);
+};
+
 const togglePlay = () => {
   if (!art) return;
+  if (props.shortDramaMode && (props.episodeSwitching || !props.url)) return;
   // During buffering/waiting, `art.playing` can be out of sync with the underlying media element.
   // Toggle based on the real <video> paused state so pause works even when stalled.
   try {
     const v = art && art.video ? art.video : null;
     if (v && typeof v.pause === 'function' && typeof v.play === 'function') {
       if (v.paused) {
-        v.play().catch(() => {});
+        const player = art;
+        v.play().catch((error) => handlePlayRejection(error, player));
       } else {
         v.pause();
       }
@@ -1873,10 +2000,80 @@ const seekBySeconds = (deltaSeconds) => {
 };
 
 const emitEpisodeDelta = (delta) => {
+  if (props.shortDramaMode && props.episodeSwitching) return;
   const normalized = Number(delta) > 0 ? 1 : (Number(delta) < 0 ? -1 : 0);
   if (!normalized) return;
   emit('episodedelta', normalized);
 };
+
+let shortDramaPointer = null;
+let shortDramaSuppressClickUntil = 0;
+
+const onShortDramaPointerDown = (event) => {
+  if (!props.shortDramaMode) return;
+  if (!event.isPrimary) {
+    shortDramaPointer = null;
+    shortDramaSuppressClickUntil = Date.now() + 500;
+    return;
+  }
+  if (event.button !== 0 || isUiControlTarget(event.target)) return;
+  shortDramaSuppressClickUntil = 0;
+  if (props.episodeSwitching || !props.url) return;
+  shortDramaPointer = { id: event.pointerId, x: event.clientX, y: event.clientY, moved: false };
+  shell.value.setPointerCapture(event.pointerId);
+};
+
+const onShortDramaPointerMove = (event) => {
+  const start = shortDramaPointer;
+  if (!start || start.id !== event.pointerId) return;
+  if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > 12) start.moved = true;
+};
+
+const onShortDramaPointerUp = (event) => {
+  const start = shortDramaPointer;
+  if (!start || start.id !== event.pointerId) return;
+  shortDramaPointer = null;
+  const dx = event.clientX - start.x;
+  const dy = event.clientY - start.y;
+  if (!start.moved && Math.hypot(dx, dy) <= 12) return;
+  shortDramaSuppressClickUntil = Date.now() + 500;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  if (!props.shortDramaMode || props.episodeSwitching || shortDramaRateOpen.value || !props.url) return;
+  if (Math.abs(dy) >= 64 && Math.abs(dy) > Math.abs(dx) * 1.5) {
+    emitEpisodeDelta(dy < 0 ? 1 : -1);
+  }
+};
+
+const onShortDramaPointerCancel = () => {
+  if (!shortDramaPointer) return;
+  shortDramaPointer = null;
+  shortDramaSuppressClickUntil = Date.now() + 500;
+};
+
+const onShortDramaClick = (event) => {
+  if (isUiControlTarget(event.target)) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  if (Date.now() < shortDramaSuppressClickUntil) return;
+  if (shortDramaRateOpen.value) {
+    shortDramaRateOpen.value = false;
+    return;
+  }
+  togglePlay();
+};
+
+watch(() => props.shortDramaMode, (enabled) => {
+  shortDramaPointer = null;
+  shortDramaSuppressClickUntil = 0;
+  shortDramaRateOpen.value = false;
+  if (enabled) {
+    shortDramaPlaybackRate = playbackRate.value;
+    restoreShortDramaRate();
+  } else {
+    retainedShortDramaVideo = null;
+  }
+});
 
 const toggleMute = () => {
   if (!art) return;
@@ -1958,6 +2155,13 @@ const onSeekCancel = () => {
 };
 
 const setRate = (r) => {
+  if (props.shortDramaMode) {
+    shortDramaPlaybackRate = r;
+    playbackRate.value = r;
+    shortDramaRateOpen.value = false;
+    restoreShortDramaRate();
+    return;
+  }
   if (!art) return;
   art.playbackRate = r;
   playbackRate.value = r;
@@ -2067,6 +2271,7 @@ const bindMediaSession = (video) => {
 watch(() => [props.title, props.poster], syncMediaMetadata);
 
 const toggleFullscreen = async () => {
+  if (props.shortDramaMode) return;
   try {
     const el = shell.value;
     if (!el || !art) return;
@@ -2244,11 +2449,19 @@ onMounted(() => {
     if (el) {
       const onTouchMove = () => showUiTemporarily();
       el.addEventListener('touchmove', onTouchMove, { passive: true });
+      el.addEventListener('pointerdown', onShortDramaPointerDown, true);
+      el.addEventListener('pointermove', onShortDramaPointerMove, true);
+      el.addEventListener('pointerup', onShortDramaPointerUp, true);
+      el.addEventListener('pointercancel', onShortDramaPointerCancel, true);
 
       // iOS Safari (and some WebViews) may not reliably deliver pointerdown/touchstart here due to the video element.
       // Use click capture as the reliable "tap" signal for mobile UI toggle.
       const onBlankClickCapture = (evt) => {
         if (!evt || !evt.target || !el.contains(evt.target)) return;
+        if (props.shortDramaMode) {
+          onShortDramaClick(evt);
+          return;
+        }
         if (!isMobile.value) return;
         if (isUiControlTarget(evt.target)) return;
         if (!uiVisible.value) {
@@ -2322,6 +2535,10 @@ onMounted(() => {
 
       el.__tvCleanupPlayerUi = () => {
         el.removeEventListener('touchmove', onTouchMove);
+        el.removeEventListener('pointerdown', onShortDramaPointerDown, true);
+        el.removeEventListener('pointermove', onShortDramaPointerMove, true);
+        el.removeEventListener('pointerup', onShortDramaPointerUp, true);
+        el.removeEventListener('pointercancel', onShortDramaPointerCancel, true);
         el.removeEventListener('click', onBlankClickCapture, true);
         try {
           window.removeEventListener('keydown', onKeyDown, true);
@@ -2340,7 +2557,14 @@ watch(
     const a = (next || '').trim();
     const b = (prev || '').trim();
     if (a && a !== b) init();
-    if (!a && art) destroyNow();
+    if (!a && art) {
+      destroyNow({ preserveShortDramaVideo: props.shortDramaMode });
+      if (props.shortDramaMode) {
+        currentTime.value = 0;
+        duration.value = 0;
+        autoplayBlocked.value = false;
+      }
+    }
   }
 );
 
@@ -2385,7 +2609,6 @@ onBeforeUnmount(() => {
     const el = shell.value;
     if (el && el.__tvCleanupPlayerUi) el.__tvCleanupPlayerUi();
   } catch (_) {}
-  if (!art) return;
   destroyNow();
 });
 
@@ -2401,11 +2624,14 @@ const pause = () => {
 };
 
 const play = async () => {
+  const player = art;
   try {
     if (art && typeof art.play === 'function') return await art.play();
     const v = art && art.video ? art.video : null;
     if (v && typeof v.play === 'function') return await v.play();
-  } catch (_e) {}
+  } catch (error) {
+    handlePlayRejection(error, player);
+  }
 };
 
 	const tryAutoplay = async () => {
@@ -3039,6 +3265,117 @@ const play = async () => {
   border-color: rgba(34, 197, 94, 0.55);
   background: rgba(34, 197, 94, 0.18);
   color: rgba(74, 222, 128, 1);
+}
+
+/* Short drama stays inline: native iOS fullscreen cannot host these gestures/controls. */
+.tv-artplayer--short-drama,
+.sd-touch-surface {
+  touch-action: none;
+  overscroll-behavior: none;
+}
+
+.tv-artplayer--short-drama :deep(.art-state),
+.tv-artplayer--short-drama :deep(.art-notice) {
+  display: none !important;
+}
+
+.sd-touch-surface,
+.sd-ui {
+  position: absolute;
+  inset: 0;
+}
+
+.sd-touch-surface {
+  z-index: 100;
+}
+
+.sd-ui {
+  z-index: 110;
+  color: #fff;
+  font-family: var(--yt-font-family);
+  pointer-events: none;
+}
+
+.sd-ui .yt-top {
+  padding-left: max(12px, env(safe-area-inset-left));
+  padding-right: max(12px, env(safe-area-inset-right));
+}
+
+.sd-ui .yt-top__back {
+  width: 44px;
+  height: 44px;
+}
+
+.sd-ui .yt-top__title {
+  line-height: 44px;
+}
+
+.sd-resume {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 132px;
+  height: 104px;
+  flex-direction: column;
+  gap: 8px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 16px;
+  font-size: 13px;
+  pointer-events: auto;
+}
+
+.sd-resume svg {
+  width: 48px;
+  height: 48px;
+}
+
+.sd-bottom {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 24px max(16px, env(safe-area-inset-right)) max(10px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.65));
+}
+
+.sd-bottom__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sd-hint {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.sd-rate {
+  pointer-events: auto;
+}
+
+.sd-rate__trigger {
+  width: 60px;
+  height: 44px;
+  font-size: 15px;
+  font-weight: 600;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.sd-rate .yt-setting__item {
+  height: 44px;
+}
+
+.sd-bottom .yt-progress {
+  height: 32px;
+  margin: 0;
+  --yt-progress-track-h: 4px;
+  --yt-progress-thumb-h: 12px;
+}
+
+.sd-bottom .yt-progress__track {
+  top: calc(50% - 2px);
 }
 
 /* -------------------- Mobile controls -------------------- */

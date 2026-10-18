@@ -2,7 +2,7 @@
   <main
     id="playPage"
     class="play-page play-page-root"
-    :class="{ 'play-page--portrait': isPortraitMode }"
+    :class="{ 'play-page--portrait': isPortraitMode, 'play-page--short-drama': shortDramaMode }"
   >
     <div class="play-page__content">
       <div class="play-header ui-page-header">
@@ -30,8 +30,18 @@
       <div class="play-page__main">
         <div class="play-episode-toggle-wrap">
           <button
-            id="playPortraitToggle"
+            id="playShortDramaToggle"
             class="play-episode-toggle"
+            type="button"
+            title="进入短剧模式"
+            aria-label="进入短剧模式"
+            @click="enterShortDramaMode"
+          >
+            <span class="play-episode-toggle__label">短剧模式</span>
+          </button>
+          <button
+            id="playPortraitToggle"
+            class="play-episode-toggle play-episode-toggle--desktop"
             type="button"
             :title="portraitModeToggleTitleText"
             :aria-label="portraitModeToggleTitleText"
@@ -45,7 +55,7 @@
           </button>
           <button
             id="episodePanelToggle"
-            class="play-episode-toggle"
+            class="play-episode-toggle play-episode-toggle--desktop"
             type="button"
             :title="episodePanelToggleTitleText"
             :aria-label="episodePanelToggleTitleText"
@@ -78,6 +88,8 @@
                     :headers="playerHeaders"
                     :title="displayTitle"
                     :portrait-mode="isPortraitMode"
+                    :short-drama-mode="shortDramaMode"
+                    :episode-switching="shortDramaEpisodeSwitching"
                     :portrait-top-text="portraitTopTitleEpisodeText"
                     :stats-extra="playerStatsExtra"
                     :extra-menus="playerExtraMenus"
@@ -101,6 +113,7 @@
                     @extraaction="onPlayerExtraAction"
                     @episodedelta="onPlayerEpisodeDelta"
                     @exit-portrait="togglePortraitMode"
+                    @exit-short-drama="exitShortDramaMode"
                   />
                   <div
                     v-show="showPlayerStatusOverlay"
@@ -1203,6 +1216,14 @@ export default {
     },
     isPortraitMode() {
       return !!this.portraitMode;
+    },
+    shortDramaEpisodeSwitching() {
+      return this.shortDramaMode && (
+        this.shortDramaEpisodeSwitchInFlight
+        || this.playLoading
+        || this.autoNextInFlight
+        || normalizeInt(this.smartPlaybackPendingRunSeq) > 0
+      );
     },
     portraitModeToggleLabelText() {
       return this.isPortraitMode ? '退出竖屏' : '竖屏';
@@ -2406,6 +2427,9 @@ export default {
       selectedSiteSource: '',
       selectedPanSource: '',
       portraitMode: false,
+      shortDramaMode: false,
+      shortDramaEpisodeSwitchInFlight: false,
+      shortDramaScrollState: null,
       episodePanelHidden: false,
       episodePanelHiddenBeforePortrait: false,
       siteSourceResizeObserver: null,
@@ -2519,6 +2543,7 @@ export default {
     this.loadPlayRuntimeAndDetail();
   },
   beforeUnmount() {
+    this.restoreShortDramaScroll();
     this.resetSwitchSkipState();
     this.cancelActivePlaybackFlow({ stopStream: true, invalidateDetail: true, clearPlayerState: true });
     this.selectedSearchResultId = '';
@@ -5583,8 +5608,15 @@ export default {
       void syncHistoryProgressIfPossible({ force: info && info.event === 'paused', event: info && info.event || 'progress' });
     },
     async onPlayerEpisodeDelta(deltaRaw) {
+      const shortDramaMode = this.shortDramaMode;
+      if (shortDramaMode && this.shortDramaEpisodeSwitching) return;
       if (this.autoNextInFlight || normalizeInt(this.smartPlaybackPendingRunSeq) > 0) return;
-      await this.switchEpisodeByDelta(deltaRaw, { showBoundaryToast: true });
+      if (shortDramaMode) this.shortDramaEpisodeSwitchInFlight = true;
+      try {
+        await this.switchEpisodeByDelta(deltaRaw, { showBoundaryToast: true });
+      } finally {
+        if (shortDramaMode) this.shortDramaEpisodeSwitchInFlight = false;
+      }
     },
     onPlayerPlaying() {
       this.finalizePlayerReadyState();
@@ -5596,6 +5628,7 @@ export default {
       this.confirmSmartPlaybackClosedLoop(this.smartPlaybackPendingRunSeq);
     },
     onPlayerEnded(info) {
+      if (this.shortDramaMode && this.shortDramaEpisodeSwitching) return;
       onPlayerHistoryTimeUpdate(info);
       if (this.autoNextInFlight || this.playLoading || normalizeInt(this.smartPlaybackPendingRunSeq) > 0) return;
       this.autoNextInFlight = true;
@@ -5652,7 +5685,64 @@ export default {
       this.cacheRecognitionForCurrentSiteResult();
       this.syncHistoryDisplayContextIfReady();
     },
+    enterShortDramaMode() {
+      if (this.shortDramaMode) return;
+      if (this.isPortraitMode) this.togglePortraitMode();
+      if (!this.shortDramaScrollState) {
+        const state = {
+          x: window.scrollX,
+          y: window.scrollY,
+          elements: [document.documentElement, document.body].map((el) => ({
+            el,
+            style: el.getAttribute('style'),
+            left: el.scrollLeft,
+            top: el.scrollTop,
+          })),
+        };
+        this.shortDramaScrollState = state;
+        document.documentElement.style.setProperty('overflow', 'hidden', 'important');
+        const bodyStyle = document.body.style;
+        bodyStyle.setProperty('position', 'fixed', 'important');
+        bodyStyle.setProperty('top', `${-state.y}px`, 'important');
+        bodyStyle.setProperty('left', `${-state.x}px`, 'important');
+        bodyStyle.setProperty('width', '100%', 'important');
+        bodyStyle.setProperty('overflow', 'hidden', 'important');
+      }
+      this.shortDramaMode = true;
+      this.siteSourceOpen = false;
+      this.panSourceOpen = false;
+      this.$nextTick(() => this.syncPlayerLayoutMetrics());
+    },
+    exitShortDramaMode() {
+      if (!this.shortDramaMode) return;
+      this.shortDramaMode = false;
+      this.$nextTick(() => {
+        if (this.shortDramaMode) return;
+        this.restoreShortDramaScroll();
+        this.syncPlayerLayoutMetrics();
+      });
+    },
+    restoreShortDramaScroll() {
+      const state = this.shortDramaScrollState;
+      if (!state) return;
+      this.shortDramaScrollState = null;
+      state.elements.forEach(({ el, style }) => {
+        if (style === null) el.removeAttribute('style');
+        else el.setAttribute('style', style);
+      });
+      const restorePosition = () => {
+        if (this.shortDramaScrollState) return;
+        state.elements.forEach(({ el, left, top }) => {
+          el.scrollTo({ left, top, behavior: 'instant' });
+        });
+        window.scrollTo({ left: state.x, top: state.y, behavior: 'instant' });
+      };
+      restorePosition();
+      // 卸载时也要等 fixed 播放页移除、文档高度恢复后再还原滚动位置。
+      this.$nextTick(restorePosition);
+    },
     togglePortraitMode() {
+      if (this.shortDramaMode) this.exitShortDramaMode();
       const entering = !this.isPortraitMode;
       if (entering) {
         this.seedPortraitPlayerAreaWidth();
@@ -6303,16 +6393,75 @@ export default {
   overflow: hidden;
 }
 
-.play-episode-toggle-wrap {
+.play-page.play-page--short-drama {
+  --play-player-radius: 0px;
+  position: fixed;
+  inset: 0;
+  z-index: 20001;
+  width: 100%;
+  height: 100vh;
+  height: 100svh;
+  height: 100dvh;
+  min-height: 0;
+  margin: 0;
+  /* 安全区由 ArtPlayer 的短剧 UI 处理，视频容器不重复留白。 */
+  padding: 0;
+  box-sizing: border-box;
+  background: #000;
+  color: #fff;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+.play-page--short-drama .play-page__content,
+.play-page--short-drama .play-page__main,
+.play-page--short-drama .play-grid,
+.play-page--short-drama .play-player-area,
+.play-page--short-drama .play-player-stack,
+.play-page--short-drama .play-video-ratio {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  gap: 0;
+}
+
+.play-page--short-drama .play-grid {
+  display: block;
+}
+
+.play-page--short-drama .play-player-area {
+  border-width: 0;
+}
+
+.play-page--short-drama .play-header,
+.play-page--short-drama .play-detail,
+.play-page--short-drama .play-thirdparty-bar,
+.play-page--short-drama .play-episode-panel,
+.play-page--short-drama .play-episode-toggle-wrap,
+.play-page--short-drama .play-video-ratio::before {
   display: none;
+}
+
+.play-page--short-drama video {
+  object-fit: contain !important;
+}
+
+.play-episode-toggle-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
   gap: 8px;
 }
 
+.play-episode-toggle-wrap .play-episode-toggle--desktop {
+  display: none;
+}
+
 @media (min-width: 1024px) {
-  .play-episode-toggle-wrap {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
+  .play-episode-toggle-wrap .play-episode-toggle--desktop {
+    display: inline-flex;
   }
 }
 
