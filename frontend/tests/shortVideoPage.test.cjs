@@ -47,6 +47,8 @@ function fixture({ rootStyle = null, bodyStyle = null } = {}) {
   };
   const context = vm.createContext({
     ArtPlayer: {}, window,
+    markRaw: value => value,
+    SHORT_VIDEO_PREFETCH_TTL_MS: 3 * 60 * 1000,
     document: { documentElement: root, body, removeEventListener() {} },
     normalizeInt: value => Math.trunc(Number(value) || 0),
     normalizeString: value => String(value ?? '').trim(),
@@ -73,6 +75,7 @@ function fixture({ rootStyle = null, bodyStyle = null } = {}) {
     $refs: { artPlayerRef: player },
     $nextTick(fn) { if (fn) ticks.push(fn); },
     syncPlayerLayoutMetrics() {},
+    prefetchShortVideoNeighbors() {},
     resetSwitchSkipState() {},
     cancelActivePlaybackFlow() {},
     unbindPlaySearchQuerySubscription() {},
@@ -82,42 +85,73 @@ function fixture({ rootStyle = null, bodyStyle = null } = {}) {
   return { page, component, context, root, body, window, player, flushTicks, timers, history };
 }
 
-test('short drama is independent, defaults off, and uses the existing player and title contract', () => {
+test('short video defaults off and uses the existing player and title contract', () => {
   const { page } = fixture();
-  assert.equal(page.shortDramaMode, false);
-  assert.equal(page.shortDramaEpisodeSwitching, false);
-  assert.equal(page.isPortraitMode, false);
+  assert.equal(page.shortVideoMode, false);
+  assert.equal(page.shortVideoEpisodeSwitching, false);
   const playerTags = source.match(/<ArtPlayer\b[\s\S]*?\/>/g);
   assert.equal(playerTags.length, 1);
-  assert.match(playerTags[0], /:short-drama-mode="shortDramaMode"/);
-  assert.match(playerTags[0], /:episode-switching="shortDramaEpisodeSwitching"/);
-  assert.match(playerTags[0], /:portrait-top-text="portraitTopTitleEpisodeText"/);
-  assert.match(playerTags[0], /@exit-short-drama="exitShortDramaMode"/);
+  assert.match(playerTags[0], /:short-video-mode="shortVideoMode"/);
+  assert.match(playerTags[0], /:episode-switching="shortVideoEpisodeSwitching"/);
+  assert.match(playerTags[0], /:short-video-title="shortVideoTitleText"/);
+  assert.match(playerTags[0], /:short-video-prev="shortVideoPrevTitleText"/);
+  assert.match(playerTags[0], /:short-video-next="shortVideoNextTitleText"/);
+  assert.match(playerTags[0], /@exit-short-video="exitShortVideoMode"/);
   assert.doesNotMatch(playerTags[0], /(?:v-if|:key)=/);
-  const modeMethods = source.slice(source.indexOf('    enterShortDramaMode()'), source.indexOf('    toggleEpisodePanel()'));
+  const modeMethods = source.slice(source.indexOf('    enterShortVideoMode()'), source.indexOf('    buildShortVideoTitle('));
   assert.doesNotMatch(modeMethods, /requestFullscreen|webkitEnterFullscreen|playerUrl\s*=|\.destroy\(|\.seekTo\(/);
 });
 
-test('short-drama layout fills the viewport, keeps desktop-only controls gated and status overlays noninteractive', () => {
+test('short-video entry is the first desktop toolbar button, shown only from 1024px', () => {
+  const entry = source.match(/<div class="play-episode-toggle-wrap">\s*(<button\b[^>]*>)[\s\S]*?<\/button>\s*<button\s+id="episodePanelToggle"/)[1];
+  assert.match(entry, /id="playShortVideoToggle"/);
+  assert.match(entry, /@click="enterShortVideoMode"/);
+  assert.doesNotMatch(entry, /\bv-(?:if|show)=/);
   const css = source.slice(source.indexOf('<style>'));
-  const rootRule = css.match(/\.play-page\.play-page--short-drama \{([^}]+)\}/)[1];
+  assert.match(css, /^\.play-episode-toggle-wrap \{\s*display: none;/m);
+  const toolbarRule = css.match(/@media \(min-width: 1024px\) \{\s*\.play-episode-toggle-wrap \{([^}]+)\}/)[1];
+  assert.match(toolbarRule, /display: flex;/);
+});
+
+test('mobile short-video entry stays at the third-party bar first-row left edge through 1023px', () => {
+  const entry = source.match(/<div class="play-thirdparty-bar">\s*<div class="play-thirdparty-bar__inner">\s*(<button\b[^>]*>)[\s\S]*?<\/button>\s*<button\s+v-for="player in thirdPartyVisiblePlayers"/)[1];
+  assert.match(entry, /class="play-thirdparty-short-video"/);
+  assert.match(entry, /@click="enterShortVideoMode"/);
+  assert.doesNotMatch(entry, /\bv-(?:if|show|for)=/);
+  const css = source.slice(source.indexOf('<style>'));
+  assert.match(css, /^\.play-thirdparty-short-video \{\s*display: none;/m);
+  const barRule = css.match(/^\.play-thirdparty-bar__inner \{([^}]+)\}/m)[1];
+  assert.match(barRule, /flex-wrap: wrap;/);
+  assert.match(barRule, /padding: 8px;/);
+  const mobileRules = css.match(/@media \(max-width: 1023px\) \{\s*\.play-thirdparty-bar__inner \{([^}]+)\}\s*\.play-thirdparty-short-video \{([^}]+)\}/);
+  assert.match(mobileRules[1], /position: relative;/);
+  assert.match(mobileRules[1], /padding-left: 120px;/);
+  assert.match(mobileRules[2], /position: absolute;/);
+  assert.match(mobileRules[2], /left: 8px;/);
+  assert.match(mobileRules[2], /top: 8px;/);
+  assert.match(mobileRules[2], /width: 104px;/);
+  assert.match(mobileRules[2], /height: 40px;/);
+  assert.match(mobileRules[2], /display: inline-flex;/);
+  assert.doesNotMatch(mobileRules[2], /top:\s*50%|translateY\(-50%\)/);
+});
+
+test('short-video layout fills the viewport and keeps status overlays noninteractive', () => {
+  const css = source.slice(source.indexOf('<style>'));
+  const rootRule = css.match(/\.play-page\.play-page--short-video \{([^}]+)\}/)[1];
   assert.match(rootRule, /height: 100vh;[\s\S]*height: 100svh;[\s\S]*height: 100dvh;/);
   assert.match(rootRule, /position: fixed/);
   assert.match(rootRule, /background: #000/);
   assert.ok(Number(rootRule.match(/z-index: (\d+)/)[1]) > 20000, 'cover the index shell toolbar');
   assert.match(rootRule, /padding: 0;/);
   assert.doesNotMatch(rootRule, /safe-area-inset-/, 'ArtPlayer alone handles control safe areas');
-  assert.match(css, /\.play-page--short-drama video \{\s*object-fit: contain !important;/);
-  const hiddenRule = css.match(/(\.play-page--short-drama \.play-header,[^{]+)\{\s*display: none;/)[1];
+  assert.match(css, /\.play-page--short-video video \{\s*object-fit: contain !important;/);
+  const hiddenRule = css.match(/(\.play-page--short-video \.play-header,[^{]+)\{\s*display: none;/)[1];
   for (const part of ['play-header', 'play-detail', 'play-thirdparty-bar', 'play-episode-panel', 'play-episode-toggle-wrap']) {
     assert.ok(hiddenRule.includes(`.${part}`));
   }
-  assert.match(css, /\.play-episode-toggle-wrap \{\s*display: flex;/);
-  assert.match(css, /\.play-episode-toggle-wrap \.play-episode-toggle--desktop \{\s*display: none;/);
-  assert.match(css, /@media \(min-width: 1024px\) \{\s*\.play-episode-toggle-wrap \.play-episode-toggle--desktop \{\s*display: inline-flex;/);
   const overlayRule = css.match(/\.play-player-overlay \{([^}]+)\}/)[1];
   assert.match(overlayRule, /pointer-events: none;/);
-  assert.ok(Number(overlayRule.match(/z-index: (\d+)/)[1]) < 100, 'below sd-touch-surface (100) and sd-ui (110)');
+  assert.ok(Number(overlayRule.match(/z-index: (\d+)/)[1]) < 100, 'below sv-touch-surface (100) and sv-ui (110)');
   assert.doesNotMatch(css, /\.play-player-overlay[^{]*\{[^}]*pointer-events:\s*auto/);
 });
 
@@ -128,31 +162,29 @@ for (const style of [null, '', 'overflow: auto !important; position: relative; c
     page.playerUrl = 'https://example.test/episode.m3u8';
     const headers = page.playerHeaders = { Authorization: 'fixture' };
     page.siteSourceOpen = page.panSourceOpen = true;
-    page.enterShortDramaMode();
-    const snapshot = page.shortDramaScrollState;
-    assert.equal(page.shortDramaMode, true);
-    assert.equal(page.isPortraitMode, false);
-    assert.equal(page.portraitPlayerAreaStyle, null);
+    page.enterShortVideoMode();
+    const snapshot = page.shortVideoScrollState;
+    assert.equal(page.shortVideoMode, true);
     assert.equal(page.siteSourceOpen || page.panSourceOpen, false);
     assert.match(root.getAttribute('style'), /overflow:hidden !important/);
     assert.match(body.getAttribute('style'), /position:fixed !important/);
     assert.match(body.getAttribute('style'), /top:-150px !important/);
-    page.enterShortDramaMode();
-    assert.equal(page.shortDramaScrollState, snapshot);
+    page.enterShortVideoMode();
+    assert.equal(page.shortVideoScrollState, snapshot);
     root.scrollTop = body.scrollTop = window.scrollY = 0;
     root.scrollLeft = body.scrollLeft = window.scrollX = 0;
-    page.exitShortDramaMode();
+    page.exitShortVideoMode();
     flushTicks();
     assert.equal(root.getAttribute('style'), style);
     assert.equal(body.getAttribute('style'), style);
     assert.deepEqual([root.scrollLeft, root.scrollTop, body.scrollLeft, body.scrollTop], [12, 150, 8, 375]);
     assert.deepEqual([window.scrollX, window.scrollY], [12, 150]);
-    assert.equal(page.shortDramaScrollState, null);
+    assert.equal(page.shortVideoScrollState, null);
     assert.equal(page.playerUrl, 'https://example.test/episode.m3u8');
     assert.equal(page.playerHeaders, headers);
     assert.equal(page.$refs.artPlayerRef, player);
     assert.equal(player.currentTime, 42);
-    page.exitShortDramaMode();
+    page.exitShortVideoMode();
     flushTicks();
     assert.equal(body.getAttribute('style'), style);
   });
@@ -160,15 +192,15 @@ for (const style of [null, '', 'overflow: auto !important; position: relative; c
 
 test('rapid exit/reentry keeps the original scroll snapshot and the background locked', () => {
   const { page, body, window, flushTicks } = fixture();
-  page.enterShortDramaMode();
-  const snapshot = page.shortDramaScrollState;
+  page.enterShortVideoMode();
+  const snapshot = page.shortVideoScrollState;
   window.scrollY = 0;
-  page.exitShortDramaMode();
-  page.enterShortDramaMode();
+  page.exitShortVideoMode();
+  page.enterShortVideoMode();
   flushTicks();
-  assert.equal(page.shortDramaScrollState, snapshot);
+  assert.equal(page.shortVideoScrollState, snapshot);
   assert.match(body.getAttribute('style'), /position:fixed/);
-  page.exitShortDramaMode();
+  page.exitShortVideoMode();
   flushTicks();
   assert.equal(window.scrollY, 150);
   assert.equal(body.scrollTop, 375);
@@ -177,7 +209,7 @@ test('rapid exit/reentry keeps the original scroll snapshot and the background l
 
 test('unmount restores styles immediately and scroll again after document layout is restored', () => {
   const { page, component, root, body, window, flushTicks } = fixture({ bodyStyle: 'color: red;' });
-  page.enterShortDramaMode();
+  page.enterShortVideoMode();
   flushTicks();
   component.beforeUnmount.call(page);
   assert.equal(root.getAttribute('style'), null);
@@ -185,57 +217,53 @@ test('unmount restores styles immediately and scroll again after document layout
   root.scrollTop = body.scrollTop = window.scrollY = 0;
   flushTicks();
   assert.deepEqual([root.scrollTop, body.scrollTop, window.scrollY], [150, 375, 150]);
-  assert.equal(page.shortDramaScrollState, null);
+  assert.equal(page.shortVideoScrollState, null);
 });
 
-test('portrait and short drama are mutually exclusive without losing the episode panel preference', () => {
+test('entering and exiting short video leaves the episode panel preference unchanged', () => {
   for (const hidden of [false, true]) {
     const { page, flushTicks } = fixture();
     page.episodePanelHidden = hidden;
-    page.togglePortraitMode();
-    assert.equal(page.isPortraitMode, true);
-    page.enterShortDramaMode();
-    flushTicks();
-    assert.equal(page.isPortraitMode, false);
-    assert.equal(page.shortDramaMode, true);
+    page.enterShortVideoMode();
     assert.equal(page.episodePanelHidden, hidden);
-    assert.equal(page.portraitPlayerAreaStyle, null);
-    page.togglePortraitMode();
     flushTicks();
-    assert.equal(page.shortDramaMode, false);
-    assert.equal(page.isPortraitMode, true);
-    assert.equal(page.shortDramaScrollState, null);
-    page.togglePortraitMode();
+    assert.equal(page.shortVideoMode, true);
+    assert.equal(page.episodePanelHidden, hidden);
+    page.exitShortVideoMode();
+    assert.equal(page.episodePanelHidden, hidden);
+    flushTicks();
+    assert.equal(page.shortVideoMode, false);
+    assert.equal(page.shortVideoScrollState, null);
     assert.equal(page.episodePanelHidden, hidden);
   }
 });
 
-test('short-drama deltas lock before the first await and ignore overlapping gestures and ended', async () => {
+test('short-video deltas lock before the first await and ignore overlapping gestures and ended', async () => {
   const { page, history } = fixture();
   const held = deferred(), calls = [];
-  page.shortDramaMode = true;
+  page.shortVideoMode = true;
   page.switchEpisodeByDelta = (delta, options) => { calls.push([delta, options.showBoundaryToast]); return held.promise; };
   const first = page.onPlayerEpisodeDelta(1);
-  assert.equal(page.shortDramaEpisodeSwitching, true);
+  assert.equal(page.shortVideoEpisodeSwitching, true);
   await Promise.all([page.onPlayerEpisodeDelta(1), page.onPlayerEpisodeDelta(-1)]);
   page.onPlayerEnded({ currentTime: 60 });
   assert.deepEqual(calls, [[1, true]]);
   assert.equal(history.length, 0);
   held.resolve(true);
   await first;
-  assert.equal(page.shortDramaEpisodeSwitching, false);
+  assert.equal(page.shortVideoEpisodeSwitching, false);
   await page.onPlayerEpisodeDelta(-1);
   assert.deepEqual(calls, [[1, true], [-1, true]]);
 });
 
-test('short drama respects loading, auto-next and smart pending, even after its own await finishes', async () => {
+test('short video respects loading, auto-next and smart pending, even after its own await finishes', async () => {
   const { page, history } = fixture();
-  page.shortDramaMode = true;
+  page.shortVideoMode = true;
   for (const [key, value] of [['playLoading', true], ['autoNextInFlight', true], ['smartPlaybackPendingRunSeq', 7]]) {
     page.switchEpisodeByDelta = async () => { page[key] = value; };
     await page.onPlayerEpisodeDelta(1);
-    assert.equal(page.shortDramaEpisodeSwitchInFlight, false);
-    assert.equal(page.shortDramaEpisodeSwitching, true);
+    assert.equal(page.shortVideoEpisodeSwitchInFlight, false);
+    assert.equal(page.shortVideoEpisodeSwitching, true);
     page.switchEpisodeByDelta = () => assert.fail(`ignored ${key}`);
     await page.onPlayerEpisodeDelta(-1);
     page.onPlayerEnded({});
@@ -246,12 +274,12 @@ test('short drama respects loading, auto-next and smart pending, even after its 
 
 test('failed or boundary switches release the lock without swallowing errors or boundary feedback', async () => {
   const { page } = fixture();
-  page.shortDramaMode = true;
+  page.shortVideoMode = true;
   const originalSwitch = page.switchEpisodeByDelta;
   for (const fail of [() => { throw new Error('sync'); }, async () => { throw new Error('async'); }]) {
     page.switchEpisodeByDelta = fail;
     await assert.rejects(page.onPlayerEpisodeDelta(1), /sync/);
-    assert.equal(page.shortDramaEpisodeSwitching, false);
+    assert.equal(page.shortVideoEpisodeSwitching, false);
   }
   const toasts = [];
   page.switchEpisodeByDelta = originalSwitch;
@@ -260,7 +288,7 @@ test('failed or boundary switches release the lock without swallowing errors or 
   await page.onPlayerEpisodeDelta(1);
   await page.onPlayerEpisodeDelta(-1);
   assert.deepEqual(toasts, ['已经是最后一集', '已经是第一集']);
-  assert.equal(page.shortDramaEpisodeSwitching, false);
+  assert.equal(page.shortVideoEpisodeSwitching, false);
 });
 
 test('exiting and reentering during a switch cannot release its in-flight lock early', async () => {
@@ -268,27 +296,27 @@ test('exiting and reentering during a switch cannot release its in-flight lock e
   const held = deferred();
   let calls = 0;
   page.switchEpisodeByDelta = () => { calls += 1; return held.promise; };
-  page.enterShortDramaMode();
+  page.enterShortVideoMode();
   const first = page.onPlayerEpisodeDelta(1);
-  page.exitShortDramaMode();
+  page.exitShortVideoMode();
   flushTicks();
-  assert.equal(page.shortDramaEpisodeSwitchInFlight, true);
-  page.enterShortDramaMode();
+  assert.equal(page.shortVideoEpisodeSwitchInFlight, true);
+  page.enterShortVideoMode();
   await page.onPlayerEpisodeDelta(-1);
   assert.equal(calls, 1);
   held.resolve();
   await first;
-  assert.equal(page.shortDramaEpisodeSwitching, false);
+  assert.equal(page.shortVideoEpisodeSwitching, false);
 });
 
 test('ended owns auto-next during history flush, switching and the existing cooldown', async () => {
   const { page, context, timers } = fixture();
   const history = deferred(), switching = deferred(), calls = [];
-  page.shortDramaMode = true;
+  page.shortVideoMode = true;
   context.syncHistoryProgressIfPossible = () => history.promise;
   page.switchEpisodeByDelta = (delta, options) => { calls.push([delta, options.showBoundaryToast]); return switching.promise; };
   page.onPlayerEnded({});
-  assert.equal(page.shortDramaEpisodeSwitching, true);
+  assert.equal(page.shortVideoEpisodeSwitching, true);
   await page.onPlayerEpisodeDelta(-1);
   page.onPlayerEnded({});
   assert.equal(calls.length, 0);
@@ -298,35 +326,32 @@ test('ended owns auto-next during history flush, switching and the existing cool
   await page.onPlayerEpisodeDelta(1);
   switching.resolve();
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(page.shortDramaEpisodeSwitching, true);
+  assert.equal(page.shortVideoEpisodeSwitching, true);
   assert.equal(timers.length, 1);
   assert.equal(timers[0].delay, 800);
   timers[0].fn();
-  assert.equal(page.shortDramaEpisodeSwitching, false);
+  assert.equal(page.shortVideoEpisodeSwitching, false);
 });
 
-test('ordinary and portrait deltas keep their original loading/concurrency behavior and guards', async () => {
-  for (const portraitMode of [false, true]) {
-    const { page, history } = fixture();
-    const held = deferred();
-    let calls = 0;
-    page.portraitMode = portraitMode;
-    page.playLoading = true;
-    page.switchEpisodeByDelta = () => { calls += 1; return held.promise; };
-    const first = page.onPlayerEpisodeDelta(1), second = page.onPlayerEpisodeDelta(-1);
-    assert.equal(calls, 2);
-    assert.equal(page.shortDramaEpisodeSwitchInFlight, false);
-    assert.equal(page.shortDramaEpisodeSwitching, false);
-    page.onPlayerEnded({});
-    assert.equal(history.length, 1);
-    assert.equal(calls, 2);
-    page.autoNextInFlight = true;
-    await page.onPlayerEpisodeDelta(1);
-    page.autoNextInFlight = false;
-    page.smartPlaybackPendingRunSeq = 3;
-    await page.onPlayerEpisodeDelta(1);
-    assert.equal(calls, 2);
-    held.resolve();
-    await Promise.all([first, second]);
-  }
+test('ordinary deltas keep their original loading/concurrency behavior and guards', async () => {
+  const { page, history } = fixture();
+  const held = deferred();
+  let calls = 0;
+  page.playLoading = true;
+  page.switchEpisodeByDelta = () => { calls += 1; return held.promise; };
+  const first = page.onPlayerEpisodeDelta(1), second = page.onPlayerEpisodeDelta(-1);
+  assert.equal(calls, 2);
+  assert.equal(page.shortVideoEpisodeSwitchInFlight, false);
+  assert.equal(page.shortVideoEpisodeSwitching, false);
+  page.onPlayerEnded({});
+  assert.equal(history.length, 1);
+  assert.equal(calls, 2);
+  page.autoNextInFlight = true;
+  await page.onPlayerEpisodeDelta(1);
+  page.autoNextInFlight = false;
+  page.smartPlaybackPendingRunSeq = 3;
+  await page.onPlayerEpisodeDelta(1);
+  assert.equal(calls, 2);
+  held.resolve();
+  await Promise.all([first, second]);
 });

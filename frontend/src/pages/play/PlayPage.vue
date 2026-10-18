@@ -2,7 +2,7 @@
   <main
     id="playPage"
     class="play-page play-page-root"
-    :class="{ 'play-page--portrait': isPortraitMode, 'play-page--short-drama': shortDramaMode }"
+    :class="{ 'play-page--short-video': shortVideoMode }"
   >
     <div class="play-page__content">
       <div class="play-header ui-page-header">
@@ -30,32 +30,22 @@
       <div class="play-page__main">
         <div class="play-episode-toggle-wrap">
           <button
-            id="playShortDramaToggle"
+            id="playShortVideoToggle"
             class="play-episode-toggle"
             type="button"
-            title="进入短剧模式"
-            aria-label="进入短剧模式"
-            @click="enterShortDramaMode"
-          >
-            <span class="play-episode-toggle__label">短剧模式</span>
-          </button>
-          <button
-            id="playPortraitToggle"
-            class="play-episode-toggle play-episode-toggle--desktop"
-            type="button"
-            :title="portraitModeToggleTitleText"
-            :aria-label="portraitModeToggleTitleText"
-            @click="togglePortraitMode"
+            title="进入短视频模式"
+            aria-label="进入短视频模式"
+            @click="enterShortVideoMode"
           >
             <svg class="play-episode-toggle__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
               <rect x="7.5" y="3.5" width="9" height="17" rx="2"></rect>
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6h4"></path>
             </svg>
-            <span class="play-episode-toggle__label">{{ portraitModeToggleLabelText }}</span>
+            <span class="play-episode-toggle__label">短视频模式</span>
           </button>
           <button
             id="episodePanelToggle"
-            class="play-episode-toggle play-episode-toggle--desktop"
+            class="play-episode-toggle"
             type="button"
             :title="episodePanelToggleTitleText"
             :aria-label="episodePanelToggleTitleText"
@@ -77,7 +67,7 @@
         </div>
 
 	        <div id="playGrid" ref="playGridEl" class="play-grid" :class="{ 'play-grid--panel-hidden': isEpisodePanelCollapsed }">
-	          <div id="playerArea" ref="playerAreaEl" class="play-player-area" :style="portraitPlayerAreaStyle">
+	          <div id="playerArea" ref="playerAreaEl" class="play-player-area">
 	            <div ref="playerAreaContentEl" class="play-player-stack">
               <div class="play-video-ratio">
                 <div class="play-video-ratio__inner">
@@ -87,17 +77,19 @@
                     :poster="''"
                     :headers="playerHeaders"
                     :title="displayTitle"
-                    :portrait-mode="isPortraitMode"
-                    :short-drama-mode="shortDramaMode"
-                    :episode-switching="shortDramaEpisodeSwitching"
-                    :portrait-top-text="portraitTopTitleEpisodeText"
+                    :short-video-mode="shortVideoMode"
+                    :episode-switching="shortVideoEpisodeSwitching"
+                    :short-video-title="shortVideoTitleText"
+                    :short-video-prev="shortVideoPrevTitleText"
+                    :short-video-next="shortVideoNextTitleText"
+                    :short-video-poster="detailPosterDisplay"
                     :stats-extra="playerStatsExtra"
                     :extra-menus="playerExtraMenus"
                     :extra-actions="playerExtraActions"
                     :go-proxy-options="goProxyUiOptions"
                     :go-proxy-selected-base="goProxyManualBase"
                     :go-proxy-label="goProxyUiLabel"
-                    :show-buffer-ring="playerPhase === 'buffering'"
+                    :show-buffer-ring="playerPhase === 'buffering' || (shortVideoMode && playerPhaseLoading)"
                     :toast-text="playerToastText"
                     :toast-sticky="playerToastSticky"
                     @error="onPlayerError"
@@ -112,8 +104,7 @@
                     @extramenuselect="onPlayerExtraMenuSelect"
                     @extraaction="onPlayerExtraAction"
                     @episodedelta="onPlayerEpisodeDelta"
-                    @exit-portrait="togglePortraitMode"
-                    @exit-short-drama="exitShortDramaMode"
+                    @exit-short-video="exitShortVideoMode"
                   />
                   <div
                     v-show="showPlayerStatusOverlay"
@@ -146,6 +137,19 @@
 
               <div class="play-thirdparty-bar">
                 <div class="play-thirdparty-bar__inner">
+                  <button
+                    type="button"
+                    class="play-thirdparty-short-video"
+                    title="进入短视频模式"
+                    aria-label="进入短视频模式"
+                    @click="enterShortVideoMode"
+                  >
+                    <svg class="play-thirdparty-short-video__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                      <rect x="7.5" y="3.5" width="9" height="17" rx="2"></rect>
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6h4"></path>
+                    </svg>
+                    <span>短视频模式</span>
+                  </button>
                   <button
                     v-for="player in thirdPartyVisiblePlayers"
                     :key="player.icon"
@@ -489,6 +493,7 @@
 </template>
 
 <script>
+import { markRaw } from 'vue';
 import ArtPlayer from '../../shared/ArtPlayer.vue';
 import { fetchBootstrap } from '../../shared/bootstrap';
 import { extractRawNamesFromEpisodeUrl, fetchCatResolvedDetailCached, requestCatPlay } from '../../shared/catpawrunner';
@@ -603,6 +608,8 @@ const THIRD_PARTY_PLAYERS = [
   { icon: 'mpv', name: 'mpv', scheme: 'mpv://$edurl' },
 ];
 const PLAY_SEARCH_SCOPE = 'play-site-only';
+// Signed play URLs are short lived. Keep only the immediate neighbors in memory.
+const SHORT_VIDEO_PREFETCH_TTL_MS = 60 * 1000;
 const TMDB_MOVIE_RECOGNITION_SIGNATURE = 'tmdb-movie';
 
 const CIRCLED_DIGITS = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩', '⑪', '⑫', '⑬', '⑭', '⑮', '⑯', '⑰', '⑱', '⑲', '⑳'];
@@ -1214,25 +1221,16 @@ export default {
       if (!this.siteSourceSelectWidth) return null;
       return { width: `${this.siteSourceSelectWidth}px` };
     },
-    isPortraitMode() {
-      return !!this.portraitMode;
-    },
-    shortDramaEpisodeSwitching() {
-      return this.shortDramaMode && (
-        this.shortDramaEpisodeSwitchInFlight
+    shortVideoEpisodeSwitching() {
+      return this.shortVideoMode && (
+        this.shortVideoEpisodeSwitchInFlight
         || this.playLoading
+        || (!this.playerUrl && !!this.playRequestStage)
         || this.autoNextInFlight
         || normalizeInt(this.smartPlaybackPendingRunSeq) > 0
       );
     },
-    portraitModeToggleLabelText() {
-      return this.isPortraitMode ? '退出竖屏' : '竖屏';
-    },
-    portraitModeToggleTitleText() {
-      return this.isPortraitMode ? '退出竖屏播放模式' : '进入竖屏播放模式';
-    },
     isEpisodePanelCollapsed() {
-      if (this.isPortraitMode) return true;
       return this.episodePanelHidden && this.viewportWidth >= 1024;
     },
     episodePanelToggleLabelText() {
@@ -1244,12 +1242,6 @@ export default {
     episodePanelStyle() {
       if (this.playerAreaHeight <= 0 || this.viewportWidth < 768) return null;
       return { height: `${this.playerAreaHeight}px` };
-    },
-    portraitPlayerAreaStyle() {
-      if (!this.isPortraitMode) return null;
-      const width = Math.max(0, normalizeInt(this.portraitPlayerAreaWidth));
-      if (width <= 0) return null;
-      return { width: `${width}px` };
     },
     thirdPartyCollapsedPlayers() {
       return THIRD_PARTY_PLAYERS.slice(0, 3);
@@ -2083,6 +2075,8 @@ export default {
     showPlayerStatusOverlay() {
       // During action-mode search toast, never show fullscreen status overlay.
       if (this.playerTransientToastSticky) return false;
+      // Short video loads behind the player's own loading ring; only errors need text.
+      if (this.shortVideoMode && this.playerPhase !== 'error') return false;
       return this.playerUiTransitionMode !== 'switch' && this.playerPhase !== 'ready' && this.playerPhase !== 'buffering';
     },
     playerPhase() {
@@ -2265,7 +2259,7 @@ export default {
       }
       return null;
     },
-    portraitTopEpisodeTarget() {
+    shortVideoEpisodeTarget() {
       if (this.selectedSiteResultItem) {
         const projected = this.projectedSiteEpisodeItems.find((item) => this.isCurrentProjectedPlaybackSelection(item)) || null;
         if (projected) {
@@ -2278,19 +2272,14 @@ export default {
       }
       return this.currentPrimaryPlaybackEpisodeTarget;
     },
-    portraitEpisodeText() {
-      const target = this.portraitTopEpisodeTarget;
-      const episodeNo = normalizeInt(target && target.episode);
-      if (episodeNo <= 0) return '';
-      const seasonNo = Math.max(1, normalizeInt(target && target.season) || 1);
-      if (this.episodeSeasonRows.length > 1) return `第${seasonNo}季第${episodeNo}集`;
-      return `第${episodeNo}集`;
+    shortVideoTitleText() {
+      return this.buildShortVideoTitle(this.shortVideoEpisodeTarget);
     },
-    portraitTopTitleEpisodeText() {
-      const title = normalizeString(this.displayTitle);
-      const episodeText = normalizeString(this.portraitEpisodeText);
-      if (title && episodeText) return `${title}·${episodeText}`;
-      return title || episodeText;
+    shortVideoPrevTitleText() {
+      return this.shortVideoMode ? this.buildShortVideoNeighborTitle(-1) : '';
+    },
+    shortVideoNextTitleText() {
+      return this.shortVideoMode ? this.buildShortVideoNeighborTitle(1) : '';
     },
     goProxyUiEligible() {
       const settings = this.runtimeSettings && typeof this.runtimeSettings === 'object' ? this.runtimeSettings : null;
@@ -2426,15 +2415,17 @@ export default {
       siteSourceOptions: [],
       selectedSiteSource: '',
       selectedPanSource: '',
-      portraitMode: false,
-      shortDramaMode: false,
-      shortDramaEpisodeSwitchInFlight: false,
-      shortDramaScrollState: null,
+      shortVideoMode: false,
+      shortVideoEpisodeSwitchInFlight: false,
+      shortVideoScrollState: null,
+      // Prefetched play URLs for the neighbor episodes: key -> { at, promise }.
+      shortVideoPrefetch: markRaw(new Map()),
+      shortVideoPrefetchAt: 0,
+      shortVideoPrefetchedPlayback: null,
+      shortVideoRefreshInFlightSeq: 0,
       episodePanelHidden: false,
-      episodePanelHiddenBeforePortrait: false,
       siteSourceResizeObserver: null,
       viewportWidth: typeof window === 'undefined' ? 0 : Math.max(0, normalizeInt(window.innerWidth)),
-      portraitPlayerAreaWidth: 0,
       playerAreaHeight: 0,
       playerAreaResizeObserver: null,
       thirdPartyExpanded: false,
@@ -2543,7 +2534,8 @@ export default {
     this.loadPlayRuntimeAndDetail();
   },
   beforeUnmount() {
-    this.restoreShortDramaScroll();
+    this.shortVideoPrefetch.clear();
+    this.restoreShortVideoScroll();
     this.resetSwitchSkipState();
     this.cancelActivePlaybackFlow({ stopStream: true, invalidateDetail: true, clearPlayerState: true });
     this.selectedSearchResultId = '';
@@ -2570,6 +2562,9 @@ export default {
   },
   methods: {
     cancelActivePlaybackFlow({ stopStream = true, invalidateDetail = false, clearPlayerState = false } = {}) {
+      this.shortVideoPrefetch.clear();
+      this.shortVideoPrefetchedPlayback = null;
+      this.shortVideoRefreshInFlightSeq = 0;
       this.resetSmartPlaybackRuntimeState({ stopStream });
       this.playRequestSeq += 1;
       if (invalidateDetail) this.detailFetchSeq += 1;
@@ -2900,6 +2895,10 @@ export default {
       this.playerBuffering = false;
     },
     beginExplicitPlaybackTransition(stage = 'play_url') {
+      // Invalidate a URL refresh/prefetch consumption before changing the episode.
+      this.playRequestSeq += 1;
+      this.shortVideoPrefetchedPlayback = null;
+      this.shortVideoRefreshInFlightSeq = 0;
       this.playerUiTransitionMode = '';
       this.clearPlayerActionToast();
       this.playerUrl = '';
@@ -3108,6 +3107,7 @@ export default {
     },
     selectSiteSourceResult(item) {
       if (!item || !item.id) return;
+      this.shortVideoPrefetch.clear();
       this.selectedSearchResultId = String(item.id);
       this.selectedProjectionSource = 'TMDB';
       this.selectedPanSource = '';
@@ -3122,6 +3122,7 @@ export default {
       this.$nextTick(() => this.syncPlaybackDisplayFocus());
     },
     selectPanSource(option) {
+      this.shortVideoPrefetch.clear();
       this.selectedPanSource = option;
       this.panSourceOpen = false;
       if (this.selectedSiteResultItem) {
@@ -4229,31 +4230,30 @@ export default {
       await this.playPrimaryEpisodeItem(targetPrimary);
       return true;
     },
-    playSiteListByDelta(deltaRaw) {
-      const delta = Number(deltaRaw) > 0 ? 1 : (Number(deltaRaw) < 0 ? -1 : 0);
-      if (!delta) return Promise.resolve(false);
-      const currentIndex = normalizeInt(this.currentPlaybackContext && this.currentPlaybackContext.itemIndex);
-      const targetIndex = currentIndex + delta;
-      return this.playSiteListItemByIndex(targetIndex, this.getCurrentPanSegmentGlobalEpisode(targetIndex));
+    // Site-list neighbor of the current playback; null when there is none or
+    // when TMDB primary episodes go through smart playback instead.
+    siteEpisodeTargetByDelta(delta) {
+      if (!this.selectedSiteResultItem && this.isTmdbMode) return null;
+      if (this.selectedSiteResultItem && !this.rawListMode) {
+        const projectedTarget = this.findProjectedSiteEpisodeItemByDelta(delta);
+        if (!projectedTarget) return null;
+        return {
+          itemIndex: normalizeInt(projectedTarget.itemIndex),
+          globalEpisode: normalizeInt(projectedTarget.global),
+        };
+      }
+      const itemIndex = normalizeInt(this.currentPlaybackContext && this.currentPlaybackContext.itemIndex) + delta;
+      return { itemIndex, globalEpisode: this.getCurrentPanSegmentGlobalEpisode(itemIndex) };
     },
     async playFromCurrentContextByDelta(deltaRaw) {
       const delta = Number(deltaRaw) > 0 ? 1 : (Number(deltaRaw) < 0 ? -1 : 0);
       if (!delta) return false;
-      if (this.selectedSiteResultItem) {
-        if (!this.rawListMode) {
-          const projectedTarget = this.findProjectedSiteEpisodeItemByDelta(delta);
-          if (!projectedTarget) return false;
-          return this.playSiteListItemByIndex(
-            normalizeInt(projectedTarget.itemIndex),
-            normalizeInt(projectedTarget.global),
-          );
-        }
-        return this.playSiteListByDelta(delta);
-      }
-      if (this.isTmdbMode) {
+      if (!this.selectedSiteResultItem && this.isTmdbMode) {
         return this.playPrimaryEpisodeByDelta(delta);
       }
-      return this.playSiteListByDelta(delta);
+      const target = this.siteEpisodeTargetByDelta(delta);
+      if (!target) return false;
+      return this.playSiteListItemByIndex(target.itemIndex, target.globalEpisode);
     },
     async playPreviousFromCurrentContext() {
       return this.playFromCurrentContextByDelta(-1);
@@ -4281,6 +4281,7 @@ export default {
       includeSelectedContext = true,
       includeBrowseContext = true,
       includeStoreScan = true,
+      ensureRecognition = true,
     } = {}) {
       const unifiedAllowed = this.buildSmartPlaybackActionAllowed(actionConstraint, isCandidateAllowed);
       const signature = normalizeString(mappingSignature)
@@ -4308,12 +4309,12 @@ export default {
         isCandidateAllowed: unifiedAllowed,
         compareCandidates: this.buildSmartPlaybackCompareCandidates(actionConstraint),
         includeStoreScan,
-        ensureRecognitionForSiteItem: (siteItem, detail) => {
+        ensureRecognitionForSiteItem: ensureRecognition ? (siteItem, detail) => {
           this.cacheRecognitionForSiteResult(siteItem, detail, {
             mapping,
             mappingSignature: signature,
           });
-        },
+        } : null,
       });
     },
     async tryHistorySmartBootstrap(globalEpisode, wantEpisodeInSeason = 0, {
@@ -4713,6 +4714,9 @@ export default {
       selectedGoProxyBase = '',
     }) {
       if (!siteItem || !panEntry || !segment || !normalizeString(segment.episodeUrl)) return false;
+      const seq = ++this.playRequestSeq;
+      this.shortVideoPrefetchedPlayback = null;
+      this.shortVideoRefreshInFlightSeq = 0;
       const resolvedSourceKind = this.resolvePlaybackSourceKind({
         sourceKind,
         fromHistoryPlayFlag,
@@ -4741,6 +4745,7 @@ export default {
         fromHistoryDetail,
       });
       const siteResolvedMeta = await this.ensureSiteHistoryResolvedMeta();
+      if (seq !== this.playRequestSeq) return false;
       const siteTMDBBinding = this.buildSiteModeTMDBBindingForSegment({
         segment,
         resolvedMeta: siteResolvedMeta,
@@ -4758,8 +4763,7 @@ export default {
           resolvedMeta: siteResolvedMeta,
         }),
       );
-      const seq = this.playRequestSeq + 1;
-      this.playRequestSeq = seq;
+      if (seq !== this.playRequestSeq) return false;
       this.playLoading = true;
       this.playRequestStage = 'play_url';
       this.playError = '';
@@ -4770,39 +4774,25 @@ export default {
       this.playerFirstFrameReady = false;
       this.playerPlaybackStarted = false;
       this.playerBuffering = false;
+      this.proxyRetryInFlight = false;
       this.m3u8RelayRetryInFlight = false;
       this.goProxyInUseBase = '';
       this.lastGoProxyCandidate = null;
       this.lastM3U8RelayCandidate = null;
       this.syncPlayerStatsForResolvedSegment({ siteResultItem: siteItem, pan: panEntry, segment, candidate });
       try {
-        const settings = await this.ensurePlayRuntimeSettings();
-        const resolvedDetail = this.getCachedSiteResultDetail(siteItem);
-        const playbackSiteItem = {
-          ...siteItem,
-          detailData: resolvedDetail && typeof resolvedDetail === 'object'
-            ? resolvedDetail
-            : null,
-        };
-        const result = await executeResolvedSitePlayback({
-          runtimeSettings: settings,
-          bootstrapUser: this.bootstrap && this.bootstrap.user && this.bootstrap.user.username,
-          siteItem: playbackSiteItem,
-          panEntry,
-          segment,
-          selectionKey,
-          apiBase: normalizeString(settings && settings.catpawrunnerApiBase),
-          selectedGoProxyBase: normalizeString(selectedGoProxyBase),
-        });
+        const params = { siteItem, panEntry, segment, selectionKey, selectedGoProxyBase };
+        const resolve = () => this.resolveSitePlaybackUrl(params);
+        const prefetched = this.shortVideoMode
+          ? this.takeShortVideoPrefetch(this.buildShortVideoPrefetchKey(siteItem, panEntry, segment, selectedGoProxyBase))
+          : null;
+        const result = prefetched ? await prefetched.catch(() => null) : null;
         if (seq !== this.playRequestSeq) return false;
-        bindPlayHistoryWatchReport(result && result.watchReport);
-        this.lastGoProxyCandidate = result && result.lastGoProxyCandidate ? result.lastGoProxyCandidate : null;
-        this.lastM3U8RelayCandidate = result && result.lastM3U8RelayCandidate ? result.lastM3U8RelayCandidate : null;
-        this.goProxyInUseBase = normalizeString(result && result.goProxyBase);
-        this.playerUrl = normalizeString(result && result.playerUrl);
-        this.playerHeaders = result && result.playerHeaders && typeof result.playerHeaders === 'object'
-          ? result.playerHeaders
-          : {};
+        const playback = result || await resolve();
+        if (seq !== this.playRequestSeq) return false;
+        if (result) this.shortVideoPrefetchedPlayback = { seq, params };
+        bindPlayHistoryWatchReport(playback && playback.watchReport);
+        this.applyResolvedPlaybackUrl(playback);
         if (this.activePlayerControlAction === 'switch') {
           this.recordResolvedPayloadIntoSwitchSkipBucket({
             siteItem,
@@ -4814,12 +4804,14 @@ export default {
         this.playError = '';
         this.playerRuntimeError = '';
         await this.$nextTick();
+        if (seq !== this.playRequestSeq) return false;
         const art = this.$refs.artPlayerRef;
         if (art && typeof art.tryAutoplay === 'function') {
           try {
             await art.tryAutoplay();
           } catch (_error) {}
         }
+        if (seq !== this.playRequestSeq) return false;
         if (normalizeString(this.smartPlaybackStage)) {
           this.smartPlaybackResolvedStage = normalizeString(this.smartPlaybackStage);
         }
@@ -5490,6 +5482,15 @@ export default {
       });
     },
     onPlayerError(event) {
+      if (this.shortVideoRefreshInFlightSeq && this.shortVideoRefreshInFlightSeq === this.playRequestSeq) return;
+      const prefetched = this.shortVideoPrefetchedPlayback;
+      if (prefetched && prefetched.seq === this.playRequestSeq) {
+        // Signed URLs may expire even within the cache TTL. Refresh once, then
+        // let the existing proxy/relay/smart-source fallback handle any error.
+        this.shortVideoPrefetchedPlayback = null;
+        void this.refreshShortVideoPlayback(prefetched, event);
+        return;
+      }
       this.playerRuntimeError = event && event.message ? String(event.message) : '播放失败';
       this.playLoading = false;
       this.playRequestStage = '';
@@ -5511,7 +5512,8 @@ export default {
         && hasNonEmptyHeaders(candidate.headers)
         && normalizeString(candidate.url);
       if (canRetryWithProxy) {
-        this.autoProxyRetriedSeq = normalizeInt(this.playRequestSeq);
+        const retrySeq = normalizeInt(this.playRequestSeq);
+        this.autoProxyRetriedSeq = retrySeq;
         this.proxyRetryInFlight = true;
         this.playerUrl = '';
         this.playerHeaders = {};
@@ -5524,6 +5526,7 @@ export default {
               runtimeSettings: this.runtimeSettings,
               selectedGoProxyBase: this.goProxyManualBase,
             });
+            if (retrySeq !== normalizeInt(this.playRequestSeq)) return;
             if (!out || !out.ok || !normalizeString(out.playerUrl)) return;
             this.playerUrl = normalizeString(out.playerUrl);
             this.playerHeaders = out.playerHeaders && typeof out.playerHeaders === 'object'
@@ -5533,9 +5536,11 @@ export default {
             this.playError = '';
             this.playerRuntimeError = '';
           } finally {
-            this.playLoading = false;
-            this.playRequestStage = '';
-            this.proxyRetryInFlight = false;
+            if (retrySeq === normalizeInt(this.playRequestSeq)) {
+              this.playLoading = false;
+              this.playRequestStage = '';
+              this.proxyRetryInFlight = false;
+            }
           }
         });
         return;
@@ -5606,16 +5611,20 @@ export default {
     onPlayerTimeUpdate(info) {
       onPlayerHistoryTimeUpdate(info);
       void syncHistoryProgressIfPossible({ force: info && info.event === 'paused', event: info && info.event || 'progress' });
+      // Keep the neighbors' URLs fresh while a long episode is still playing.
+      if (this.shortVideoMode && info && info.playing && Date.now() - this.shortVideoPrefetchAt >= SHORT_VIDEO_PREFETCH_TTL_MS) {
+        this.prefetchShortVideoNeighbors();
+      }
     },
     async onPlayerEpisodeDelta(deltaRaw) {
-      const shortDramaMode = this.shortDramaMode;
-      if (shortDramaMode && this.shortDramaEpisodeSwitching) return;
+      const shortVideoMode = this.shortVideoMode;
+      if (shortVideoMode && this.shortVideoEpisodeSwitching) return;
       if (this.autoNextInFlight || normalizeInt(this.smartPlaybackPendingRunSeq) > 0) return;
-      if (shortDramaMode) this.shortDramaEpisodeSwitchInFlight = true;
+      if (shortVideoMode) this.shortVideoEpisodeSwitchInFlight = true;
       try {
         await this.switchEpisodeByDelta(deltaRaw, { showBoundaryToast: true });
       } finally {
-        if (shortDramaMode) this.shortDramaEpisodeSwitchInFlight = false;
+        if (shortVideoMode) this.shortVideoEpisodeSwitchInFlight = false;
       }
     },
     onPlayerPlaying() {
@@ -5626,9 +5635,10 @@ export default {
       this.finalizePlayerReadyState({ markFirstFrame: true });
       await this.applyPlayHistoryResume('firstframe');
       this.confirmSmartPlaybackClosedLoop(this.smartPlaybackPendingRunSeq);
+      if (this.shortVideoMode) this.prefetchShortVideoNeighbors();
     },
     onPlayerEnded(info) {
-      if (this.shortDramaMode && this.shortDramaEpisodeSwitching) return;
+      if (this.shortVideoMode && this.shortVideoEpisodeSwitching) return;
       onPlayerHistoryTimeUpdate(info);
       if (this.autoNextInFlight || this.playLoading || normalizeInt(this.smartPlaybackPendingRunSeq) > 0) return;
       this.autoNextInFlight = true;
@@ -5685,10 +5695,9 @@ export default {
       this.cacheRecognitionForCurrentSiteResult();
       this.syncHistoryDisplayContextIfReady();
     },
-    enterShortDramaMode() {
-      if (this.shortDramaMode) return;
-      if (this.isPortraitMode) this.togglePortraitMode();
-      if (!this.shortDramaScrollState) {
+    enterShortVideoMode() {
+      if (this.shortVideoMode) return;
+      if (!this.shortVideoScrollState) {
         const state = {
           x: window.scrollX,
           y: window.scrollY,
@@ -5699,7 +5708,7 @@ export default {
             top: el.scrollTop,
           })),
         };
-        this.shortDramaScrollState = state;
+        this.shortVideoScrollState = state;
         document.documentElement.style.setProperty('overflow', 'hidden', 'important');
         const bodyStyle = document.body.style;
         bodyStyle.setProperty('position', 'fixed', 'important');
@@ -5708,30 +5717,32 @@ export default {
         bodyStyle.setProperty('width', '100%', 'important');
         bodyStyle.setProperty('overflow', 'hidden', 'important');
       }
-      this.shortDramaMode = true;
+      this.shortVideoMode = true;
       this.siteSourceOpen = false;
       this.panSourceOpen = false;
       this.$nextTick(() => this.syncPlayerLayoutMetrics());
+      this.prefetchShortVideoNeighbors();
     },
-    exitShortDramaMode() {
-      if (!this.shortDramaMode) return;
-      this.shortDramaMode = false;
+    exitShortVideoMode() {
+      if (!this.shortVideoMode) return;
+      this.shortVideoMode = false;
+      this.shortVideoPrefetch.clear();
       this.$nextTick(() => {
-        if (this.shortDramaMode) return;
-        this.restoreShortDramaScroll();
+        if (this.shortVideoMode) return;
+        this.restoreShortVideoScroll();
         this.syncPlayerLayoutMetrics();
       });
     },
-    restoreShortDramaScroll() {
-      const state = this.shortDramaScrollState;
+    restoreShortVideoScroll() {
+      const state = this.shortVideoScrollState;
       if (!state) return;
-      this.shortDramaScrollState = null;
+      this.shortVideoScrollState = null;
       state.elements.forEach(({ el, style }) => {
         if (style === null) el.removeAttribute('style');
         else el.setAttribute('style', style);
       });
       const restorePosition = () => {
-        if (this.shortDramaScrollState) return;
+        if (this.shortVideoScrollState) return;
         state.elements.forEach(({ el, left, top }) => {
           el.scrollTo({ left, top, behavior: 'instant' });
         });
@@ -5741,20 +5752,169 @@ export default {
       // 卸载时也要等 fixed 播放页移除、文档高度恢复后再还原滚动位置。
       this.$nextTick(restorePosition);
     },
-    togglePortraitMode() {
-      if (this.shortDramaMode) this.exitShortDramaMode();
-      const entering = !this.isPortraitMode;
-      if (entering) {
-        this.seedPortraitPlayerAreaWidth();
-        this.episodePanelHiddenBeforePortrait = this.episodePanelHidden;
-        this.episodePanelHidden = true;
-      } else if (this.viewportWidth >= 1024) {
-        this.episodePanelHidden = !!this.episodePanelHiddenBeforePortrait;
+    buildShortVideoTitle(target, fallbackEpisodeText = '') {
+      const title = normalizeString(this.displayTitle);
+      const episodeNo = normalizeInt(target && target.episode);
+      const seasonNo = Math.max(1, normalizeInt(target && target.season) || 1);
+      let episodeText = fallbackEpisodeText;
+      if (episodeNo > 0) {
+        episodeText = this.episodeSeasonRows.length > 1 ? `第${seasonNo}季第${episodeNo}集` : `第${episodeNo}集`;
       }
-      this.portraitMode = entering;
-      this.siteSourceOpen = false;
-      this.panSourceOpen = false;
-      this.$nextTick(() => this.syncPlayerLayoutMetrics());
+      if (title && episodeText) return `${title}·${episodeText}`;
+      return title || episodeText;
+    },
+    // Empty when switching by this delta has no episode to play (same rules as
+    // playFromCurrentContextByDelta), so the player cannot page into nothing.
+    buildShortVideoNeighborTitle(delta) {
+      const fallback = delta > 0 ? '下一集' : '上一集';
+      if (!this.selectedSiteResultItem && this.isTmdbMode) {
+        // Same numbering as currentPrimaryPlaybackEpisodeTarget; out of range maps to season 0.
+        const currentGlobal = Math.max(0, normalizeInt(this.currentPlaybackContext && this.currentPlaybackContext.globalEpisode));
+        const globalEpisode = currentGlobal + delta;
+        let target = null;
+        if (currentGlobal > 0 && globalEpisode > 0 && this.isTMDBEpisodeSource) {
+          target = tmdbSeasonEpisodeOfGlobal(this.detailTMDBData, globalEpisode);
+        } else if (currentGlobal > 0 && globalEpisode > 0 && this.isDoubanEpisodeSource) {
+          target = doubanSeasonEpisodeOfGlobal(this.detailDoubanData, globalEpisode);
+        }
+        if (normalizeInt(target && target.season) <= 0 || normalizeInt(target && target.episode) <= 0) return '';
+        return this.buildShortVideoTitle(target, fallback);
+      }
+      const siteTarget = this.siteEpisodeTargetByDelta(delta);
+      const segment = siteTarget && this.buildCurrentPanSegment(siteTarget.itemIndex);
+      if (!segment || !normalizeString(segment.episodeUrl)) return '';
+      const items = this.selectedSiteResultItem ? this.projectedSiteEpisodeItems : this.directSiteEpisodeItems;
+      const item = items.find((entry) => normalizeInt(entry && entry.itemIndex) === siteTarget.itemIndex) || null;
+      return this.buildShortVideoTitle(item && { season: item.season, episode: item.no }, fallback);
+    },
+    buildShortVideoPrefetchKey(siteItem, panEntry, segment, selectedGoProxyBase = '') {
+      return JSON.stringify([
+        normalizeString(this.runtimeSettings && this.runtimeSettings.catpawrunnerApiBase),
+        normalizeString(this.bootstrap && this.bootstrap.user && this.bootstrap.user.username),
+        normalizeString(siteItem && siteItem.id),
+        normalizeString(siteItem && siteItem.spiderApi),
+        normalizeString(siteItem && siteItem.siteDetail),
+        normalizeString(panEntry && panEntry.key),
+        normalizeString(panEntry && panEntry.label),
+        normalizeString(panEntry && panEntry.provider),
+        normalizeInt(segment && segment.index),
+        normalizeString(segment && segment.episodeUrl),
+        normalizeString(segment && segment.rawName),
+        normalizeString(selectedGoProxyBase),
+        !!(this.runtimeSettings && this.runtimeSettings.relayEnabled),
+        this.runtimeSettings && this.runtimeSettings.relayServers,
+      ]);
+    },
+    applyResolvedPlaybackUrl(result) {
+      this.lastGoProxyCandidate = result && result.lastGoProxyCandidate ? result.lastGoProxyCandidate : null;
+      this.lastM3U8RelayCandidate = result && result.lastM3U8RelayCandidate ? result.lastM3U8RelayCandidate : null;
+      this.goProxyInUseBase = normalizeString(result && result.goProxyBase);
+      this.playerHeaders = result && result.playerHeaders && typeof result.playerHeaders === 'object'
+        ? result.playerHeaders
+        : {};
+      this.playerUrl = normalizeString(result && result.playerUrl);
+    },
+    async refreshShortVideoPlayback({ seq, params }, event) {
+      this.shortVideoRefreshInFlightSeq = seq;
+      this.playerUrl = '';
+      this.playerHeaders = {};
+      this.resetPlayerReadyState();
+      this.playLoading = true;
+      this.playRequestStage = 'play_url';
+      let refreshed = false;
+      try {
+        const result = await this.resolveSitePlaybackUrl(params);
+        if (seq !== this.playRequestSeq) return;
+        this.applyResolvedPlaybackUrl(result);
+        this.playRequestStage = 'play_info';
+        refreshed = true;
+      } catch (_error) {
+        // Preserve the original candidate descriptors for normal proxy fallback.
+      } finally {
+        if (seq === this.playRequestSeq) {
+          this.shortVideoRefreshInFlightSeq = 0;
+          this.playLoading = false;
+          if (!refreshed) this.onPlayerError(event);
+        }
+      }
+    },
+    async resolveSitePlaybackUrl({ siteItem, panEntry, segment, selectionKey, selectedGoProxyBase = '' }) {
+      const settings = await this.ensurePlayRuntimeSettings();
+      const resolvedDetail = this.getCachedSiteResultDetail(siteItem);
+      return executeResolvedSitePlayback({
+        runtimeSettings: settings,
+        bootstrapUser: this.bootstrap && this.bootstrap.user && this.bootstrap.user.username,
+        siteItem: {
+          ...siteItem,
+          detailData: resolvedDetail && typeof resolvedDetail === 'object'
+            ? resolvedDetail
+            : null,
+        },
+        panEntry,
+        segment,
+        selectionKey,
+        apiBase: normalizeString(settings && settings.catpawrunnerApiBase),
+        selectedGoProxyBase: normalizeString(selectedGoProxyBase),
+      });
+    },
+    // Only the play URL is fetched ahead, through the normal resolver: the
+    // switch itself still runs playResolvedSiteSegment (history, proxy/relay
+    // retry candidates, watch report) exactly as without a prefetch.
+    prefetchShortVideoNeighbors() {
+      if (!this.shortVideoMode || !this.playerUrl || !this.playerFirstFrameReady || this.playError || this.playerRuntimeError) return;
+      const cache = this.shortVideoPrefetch;
+      const now = Date.now();
+      const keep = new Set();
+      this.shortVideoPrefetchAt = now;
+      [1, -1].forEach((delta) => {
+        const target = this.resolveShortVideoPrefetchTarget(delta);
+        if (!target) return;
+        const { siteItem, panEntry, segment } = target;
+        const key = this.buildShortVideoPrefetchKey(siteItem, panEntry, segment);
+        keep.add(key);
+        const entry = cache.get(key);
+        if (entry && (entry.pending || now - entry.at < SHORT_VIDEO_PREFETCH_TTL_MS)) return;
+        const next = { at: now, pending: true, promise: null };
+        next.promise = this.resolveSitePlaybackUrl(target).finally(() => { next.pending = false; });
+        // Failed speculation is silent. Actual playback retries the normal resolver.
+        next.promise.catch(() => {});
+        cache.set(key, next);
+      });
+      Array.from(cache.keys()).forEach((key) => {
+        if (!keep.has(key)) cache.delete(key);
+      });
+    },
+    takeShortVideoPrefetch(key) {
+      const entry = this.shortVideoPrefetch.get(key);
+      this.shortVideoPrefetch.delete(key);
+      return entry && (entry.pending || Date.now() - entry.at < SHORT_VIDEO_PREFETCH_TTL_MS) ? entry.promise : null;
+    },
+    resolveShortVideoPrefetchTarget(delta) {
+      if (!this.selectedSiteResultItem && this.isTmdbMode) {
+        const current = normalizeInt(this.currentPlaybackContext && this.currentPlaybackContext.globalEpisode);
+        const globalEpisode = current + delta;
+        if (current <= 0 || globalEpisode <= 0 || !this.buildShortVideoNeighborTitle(delta)) return null;
+        const target = tmdbSeasonEpisodeOfGlobal(this.detailTMDBData, globalEpisode);
+        const key = this.buildSwitchEpisodeKeyByGlobal(globalEpisode);
+        const skipped = this.buildSwitchSkipIndexForEpisode(key);
+        // Match exactly the primary-episode policy, but only use already-known
+        // candidates: never start smart search, recognition or mutate selection.
+        return this.resolveCachedPlaybackTarget(globalEpisode, normalizeInt(target && target.episode), {
+          matchOptions: this.buildSmartMatchOptions({ trigger: 'primary' }),
+          actionConstraint: this.buildPrimaryEpisodeActionConstraint(globalEpisode),
+          isCandidateAllowed: (wrapper) => !this.shouldSkipSwitchCandidate(key, wrapper, skipped),
+          ensureRecognition: false,
+        });
+      }
+      const siteItem = this.activeSitePlaybackItem;
+      const panEntry = this.currentPanSourceEntry;
+      const current = this.currentPlaybackContext;
+      if (!siteItem || !panEntry || !current || !current.selectionKey
+        || current.itemId !== normalizeString(siteItem.id) || current.panKey !== normalizeString(panEntry.key)) return null;
+      const target = this.siteEpisodeTargetByDelta(delta);
+      const segment = target && this.buildCurrentPanSegment(target.itemIndex);
+      if (!segment || !normalizeString(segment.episodeUrl)) return null;
+      return { siteItem, panEntry, segment, selectionKey: buildSiteEpisodeSelectionKey(panEntry.key, segment.index) };
     },
     toggleEpisodePanel() {
       if (this.viewportWidth < 1024) return;
@@ -6045,7 +6205,6 @@ export default {
     },
     syncPlayerLayoutMetrics() {
       this.syncViewportWidth();
-      this.syncPortraitPlayerAreaWidth();
       this.syncPlayerAreaHeight();
     },
     handleViewportResize() {
@@ -6057,39 +6216,6 @@ export default {
         ? Math.round(el.getBoundingClientRect().height)
         : 0;
       this.playerAreaHeight = height > 0 ? height : 0;
-    },
-    syncPortraitPlayerAreaWidth() {
-      if (!this.isPortraitMode) {
-        this.portraitPlayerAreaWidth = 0;
-        return;
-      }
-      const stageEl = this.$refs.playGridEl;
-      const stageRect = stageEl && typeof stageEl.getBoundingClientRect === 'function'
-        ? stageEl.getBoundingClientRect()
-        : null;
-      const stageWidth = stageRect ? Math.max(0, Math.floor(stageRect.width)) : 0;
-      const stageHeight = stageRect ? Math.max(0, Math.floor(stageRect.height)) : 0;
-      if (stageWidth <= 0 || stageHeight <= 0) {
-        this.portraitPlayerAreaWidth = 0;
-        return;
-      }
-      const PORTRAIT_ASPECT = 9 / 16;
-      const widthByHeight = stageHeight * PORTRAIT_ASPECT;
-      const nextWidth = Math.max(0, Math.floor(Math.min(stageWidth, widthByHeight)));
-      this.portraitPlayerAreaWidth = nextWidth > 0 ? nextWidth : 0;
-    },
-    seedPortraitPlayerAreaWidth() {
-      if (typeof window === 'undefined') return;
-      const viewportWidth = Math.max(0, normalizeInt(window.innerWidth));
-      const viewportHeight = Math.max(0, normalizeInt(window.innerHeight));
-      if (viewportWidth <= 0 || viewportHeight <= 0) return;
-      const PORTRAIT_ASPECT = 9 / 16;
-      const portraitStageGapTop = 10;
-      const portraitStageGapBottom = 10;
-      const usableHeight = Math.max(0, viewportHeight - portraitStageGapTop - portraitStageGapBottom);
-      const widthByHeight = usableHeight * PORTRAIT_ASPECT;
-      const nextWidth = Math.max(0, Math.floor(Math.min(viewportWidth, widthByHeight)));
-      if (nextWidth > 0) this.portraitPlayerAreaWidth = nextWidth;
     },
     bindPlayerAreaHeight() {
       this.$nextTick(() => {
@@ -6348,52 +6474,7 @@ export default {
   padding-right: var(--play-main-inset);
 }
 
-.play-page--portrait {
-  --portrait-stage-gap-top: 10px;
-  --portrait-stage-gap-bottom: 10px;
-  --play-player-radius: 18px;
-  --play-video-ratio-padding-top: 177.7777778%;
-  position: fixed;
-  inset: 0;
-  z-index: 80;
-  width: 100vw;
-  height: 100svh;
-  min-height: 100svh;
-  padding-top: 0 !important;
-  padding-bottom: 0 !important;
-  overflow: hidden;
-}
-
-@media (min-width: 768px) {
-  .play-page--portrait {
-    z-index: 1;
-  }
-}
-
-.play-page--portrait .play-page__content {
-  --play-main-inset: 0px;
-  height: 100%;
-  min-height: 100%;
-  overflow: hidden;
-}
-
-.play-page--portrait .play-header {
-  display: none;
-}
-
-.play-page--portrait .play-page__main {
-  flex: 1 1 auto;
-  min-height: 0;
-  gap: 0;
-  padding-top: var(--portrait-stage-gap-top);
-  padding-bottom: var(--portrait-stage-gap-bottom);
-  padding-left: 0;
-  padding-right: 0;
-  box-sizing: border-box;
-  overflow: hidden;
-}
-
-.play-page.play-page--short-drama {
+.play-page.play-page--short-video {
   --play-player-radius: 0px;
   position: fixed;
   inset: 0;
@@ -6404,7 +6485,7 @@ export default {
   height: 100dvh;
   min-height: 0;
   margin: 0;
-  /* 安全区由 ArtPlayer 的短剧 UI 处理，视频容器不重复留白。 */
+  /* 安全区由 ArtPlayer 的短视频 UI 处理，视频容器不重复留白。 */
   padding: 0;
   box-sizing: border-box;
   background: #000;
@@ -6413,12 +6494,12 @@ export default {
   overscroll-behavior: none;
 }
 
-.play-page--short-drama .play-page__content,
-.play-page--short-drama .play-page__main,
-.play-page--short-drama .play-grid,
-.play-page--short-drama .play-player-area,
-.play-page--short-drama .play-player-stack,
-.play-page--short-drama .play-video-ratio {
+.play-page--short-video .play-page__content,
+.play-page--short-video .play-page__main,
+.play-page--short-video .play-grid,
+.play-page--short-video .play-player-area,
+.play-page--short-video .play-player-stack,
+.play-page--short-video .play-video-ratio {
   width: 100%;
   height: 100%;
   min-height: 0;
@@ -6427,46 +6508,38 @@ export default {
   gap: 0;
 }
 
-.play-page--short-drama .play-grid {
+.play-page--short-video .play-grid {
   display: block;
 }
 
-.play-page--short-drama .play-player-area {
+.play-page--short-video .play-player-area {
   border-width: 0;
 }
 
-.play-page--short-drama .play-header,
-.play-page--short-drama .play-detail,
-.play-page--short-drama .play-thirdparty-bar,
-.play-page--short-drama .play-episode-panel,
-.play-page--short-drama .play-episode-toggle-wrap,
-.play-page--short-drama .play-video-ratio::before {
+.play-page--short-video .play-header,
+.play-page--short-video .play-detail,
+.play-page--short-video .play-thirdparty-bar,
+.play-page--short-video .play-episode-panel,
+.play-page--short-video .play-episode-toggle-wrap,
+.play-page--short-video .play-video-ratio::before {
   display: none;
 }
 
-.play-page--short-drama video {
+.play-page--short-video video {
   object-fit: contain !important;
 }
 
 .play-episode-toggle-wrap {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
+  display: none;
   gap: 8px;
 }
 
-.play-episode-toggle-wrap .play-episode-toggle--desktop {
-  display: none;
-}
-
 @media (min-width: 1024px) {
-  .play-episode-toggle-wrap .play-episode-toggle--desktop {
-    display: inline-flex;
+  .play-episode-toggle-wrap {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
   }
-}
-
-.play-page--portrait .play-episode-toggle-wrap {
-  display: none !important;
 }
 
 .play-episode-toggle {
@@ -6542,29 +6615,10 @@ export default {
   align-items: start;
 }
 
-.play-page--portrait .play-grid {
-  gap: 0;
-  flex: 1 1 auto;
-  min-width: 0;
-  min-height: 0;
-  grid-template-columns: minmax(0, 1fr) !important;
-  place-items: center;
-  overflow: hidden;
-}
-
 .play-player-area {
   border-radius: var(--play-player-radius);
   border: 1px solid transparent;
   overflow: hidden;
-}
-
-.play-page--portrait .play-player-area {
-  width: 100%;
-  max-width: 100%;
-  margin-left: auto;
-  margin-right: auto;
-  min-height: 0;
-  border-width: 0;
 }
 
 .dark .play-player-area {
@@ -6679,10 +6733,6 @@ export default {
   padding: 18px;
   background: radial-gradient(circle at 50% 45%, rgba(2, 6, 23, 0.78) 0%, rgba(2, 6, 23, 0.35) 55%, rgba(2, 6, 23, 0) 100%);
   backdrop-filter: none;
-}
-
-.play-page--portrait .play-player-overlay {
-  background: transparent;
 }
 
 .play-player-overlay__panel {
@@ -7195,10 +7245,6 @@ export default {
     grid-column: 1 / -1 !important;
   }
 
-  .play-page--portrait #playerArea {
-    grid-column: 1 / -1 !important;
-  }
-
   #playerArea {
     grid-column: 1 / 2 !important;
   }
@@ -7240,10 +7286,6 @@ export default {
   display: flex;
   flex-direction: column;
   gap: 8px;
-}
-
-.play-page--portrait .play-thirdparty-bar {
-  display: none;
 }
 
 .play-thirdparty-btn,
@@ -7322,6 +7364,58 @@ export default {
   }
 }
 
+.play-thirdparty-short-video {
+  display: none;
+}
+
+/* Below the desktop toolbar breakpoint the entry lives in this bar, pinned to
+   the first row's left edge so expanding the players never moves it. */
+@media (max-width: 1023px) {
+  .play-thirdparty-bar__inner {
+    position: relative;
+    padding-left: 120px;
+  }
+
+  .play-thirdparty-short-video {
+    position: absolute;
+    left: 8px;
+    top: 8px;
+    width: 104px;
+    height: 40px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 0;
+    border-radius: 12px;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    background: rgba(255, 255, 255, 0.6);
+    color: rgba(55, 65, 81, 1);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+    user-select: none;
+  }
+
+  .play-thirdparty-short-video:active {
+    transform: translateY(1px);
+  }
+
+  .dark .play-thirdparty-short-video {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: rgba(255, 255, 255, 0.07);
+    color: rgba(229, 231, 235, 1);
+    box-shadow: none;
+  }
+}
+
+.play-thirdparty-short-video__icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
 .episode-resizer {
   display: none;
 }
@@ -7395,10 +7489,6 @@ export default {
   padding: 16px;
   border: 1px solid rgba(229, 231, 235, 0.3);
   backdrop-filter: blur(8px);
-}
-
-.play-page--portrait .play-detail {
-  display: none;
 }
 
 @media (min-width: 640px) {
