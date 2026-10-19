@@ -6,7 +6,7 @@
   >
     <div ref="pageTrack" class="artplayer-page-track">
     <div ref="container" class="artplayer-root" />
-    <!-- Only metadata/posters are previewed; neighbors never load media here. -->
+    <!-- Paging previews use posters; the separate buffer host warms neighboring media. -->
     <template v-if="shortVideoMode">
       <div
         v-for="peer in shortVideoPeers"
@@ -28,6 +28,10 @@
     </template>
 
     <teleport :to="teleportTarget || 'body'" :disabled="!teleportTarget">
+      <div v-if="shortVideoMode && shortVideoSeekPreview !== null" class="sv-seek-preview" role="status" aria-live="polite">
+        <div>{{ shortVideoSeekDragging ? '松手跳转' : '已跳转' }}</div>
+        <strong>{{ formatTime(shortVideoSeekPreview) }} <span>/ {{ formatTime(duration) }}</span></strong>
+      </div>
       <div v-if="toastVisible && toastText" class="yt-toast" :class="{ 'yt-toast--sticky': toastSticky }" aria-live="polite">
         {{ toastText }}
       </div>
@@ -45,7 +49,7 @@
           <div class="yt-top__title">{{ shortVideoTitle }}</div>
         </div>
         <button
-          v-if="!playing && url && !episodeSwitching && (autoplayBlocked || !showBufferRing)"
+          v-if="!playing && url && !episodeSwitching && shortVideoSeekPreview === null && (autoplayBlocked || !showBufferRing)"
           class="yt-btn sv-resume"
           type="button"
           aria-label="继续播放"
@@ -476,6 +480,7 @@
       </div>
     </teleport>
     </div>
+    <div ref="bufferHost" class="sv-buffer-host" aria-hidden="true" inert></div>
   </div>
 </template>
 
@@ -483,6 +488,7 @@
 	import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 	import Artplayer from 'artplayer';
 	import { createSwipeTracker, shouldCommitSwipe, swipeSettleDuration } from './swipePhysics';
+	import { createShortVideoBuffer } from './shortVideoBuffer';
 
 	const emit = defineEmits([
 		'loadedmetadata',
@@ -522,11 +528,14 @@
     shortVideoPrev: { type: String, default: '' },
     shortVideoNext: { type: String, default: '' },
     shortVideoPoster: { type: String, default: '' },
+    shortVideoBufferCandidates: { type: Array, default: () => [] },
 	});
 
 const container = ref(null);
 const shell = ref(null);
 const pageTrack = ref(null);
+const bufferHost = ref(null);
+let shortVideoBuffer = null;
 const settingEl = ref(null);
 const goProxyEl = ref(null);
 const desktopRowEl = ref(null);
@@ -568,6 +577,8 @@ const muted = ref(false);
 const buffering = ref(false);
 const playbackRate = ref(1);
 const shortVideoRateOpen = ref(false);
+const shortVideoSeekPreview = ref(null);
+const shortVideoSeekDragging = ref(false);
 const autoplayBlocked = ref(false);
 let shortVideoPlaybackRate = 1;
 let retainedShortVideoVideo = null;
@@ -1156,6 +1167,15 @@ const isUiControlTarget = (target) => {
 	  return await shakaModulePromise;
 	};
 
+const syncShortVideoBuffer = () => {
+  if (!shortVideoBuffer) return;
+  if (!props.shortVideoMode || document.hidden) {
+    shortVideoBuffer.clear();
+    return;
+  }
+  shortVideoBuffer.sync(props.shortVideoBufferCandidates.filter((entry) => entry.url !== props.url));
+};
+
 const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
   retainedShortVideoVideo = preserveShortVideoVideo && currentVideoReusable && art ? art.video : null;
   currentVideoReusable = false;
@@ -1315,7 +1335,8 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
 		      levelLoadingMaxRetry: 2,
 		      fragLoadingMaxRetry: 2,
 	      keyLoadingMaxRetry: 2,
-      xhrSetup(xhr) {
+      xhrSetup(xhr, requestUrl) {
+        if (!xhr.readyState) xhr.open('GET', requestUrl, true);
         xhr.withCredentials = withCredentials;
         if (!headers || typeof headers !== 'object') return;
         Object.keys(headers).forEach((k) => {
@@ -1406,11 +1427,13 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
   autoplayBlocked.value = false;
 
 	  const format = detectVideoFormat(url);
+  const warmed = props.shortVideoMode && shortVideoBuffer ? shortVideoBuffer.take(url, props.headers) : null;
+  let warmedAttached = false;
   const retainedVideo = retainedShortVideoVideo;
   retainedShortVideoVideo = null;
-  // Keep the user-activated media element for iPhone native HLS/MP4.
-  // Custom engines get a fresh element so an old async loader cannot attach to the next episode.
-  const reuseVideo = props.shortVideoMode && retainedVideo && (
+  // Adopt a warmed video/engine intact. Otherwise keep the user-activated
+  // native element; custom engines get a fresh one to isolate async loaders.
+  const reuseVideo = warmed ? warmed.video : props.shortVideoMode && retainedVideo && (
     format === 'native' || (
       format === 'hls' && isIos.value && retainedVideo.canPlayType('application/vnd.apple.mpegurl')
       && !Object.values(props.headers || {}).some((value) => value != null)
@@ -1435,7 +1458,7 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
         ? 'flv'
         : format === 'dash'
           ? 'mpd'
-          : '';
+          : warmed ? 'buffered-native' : '';
 
   let metaEmitted = false;
   let firstFrameEmitted = false;
@@ -1482,6 +1505,7 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
 		    url: playUrlForArt,
     poster: props.poster || '',
     autoplay: !!props.autoplay,
+    moreVideoAttr: warmed ? { muted: false, preload: 'auto', controls: false } : {},
     muted: false,
     volume: 0.7,
     pip: true,
@@ -1505,10 +1529,23 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
     fullscreenWeb: false,
     hotkey: false,
 			  customType:
-			    format !== 'native'
+			    format !== 'native' || warmed
 			      ? {
 			          [artType]: function (videoEl, playUrl, artInstance) {
 			            if (artInstance.isDestroy) return;
+                  if (warmed && !warmedAttached && playUrl === url) {
+                    warmedAttached = true;
+                    artInstance.customPlayer = warmed.customPlayer;
+                    warmed.resume((error) => {
+                      if (art === artInstance && !artInstance.isDestroy) emit('error', { code: 2, message: error });
+                    });
+                    return;
+                  }
+                  if (format === 'native') {
+                    videoEl.src = playUrl;
+                    videoEl.load();
+                    return;
+                  }
 			            const headers = props.headers || {};
 			            const token = `${Date.now()}-${Math.random()}`;
 			            artInstance.__tvCustomToken = token;
@@ -1555,6 +1592,11 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
 			        }
 			      : {},
   });
+  if (warmed) {
+    art.customPlayer = warmed.customPlayer;
+    art.video.muted = false;
+    art.video.defaultMuted = false;
+  }
   currentVideoReusable = format === 'native' || (
     format === 'hls' && isIos.value && art.video.canPlayType('application/vnd.apple.mpegurl')
     && !Object.values(props.headers || {}).some((value) => value != null)
@@ -1724,7 +1766,7 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
 	        v.preload = 'auto';
 	      } catch (_e) {}
       try {
-        v.load();
+        if (!warmed) v.load();
       } catch (_e) {}
 
 		      const onLoadedMetadata = () => emitMetaOnce();
@@ -1967,6 +2009,13 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
       };
     }
   } catch (_) {}
+  if (warmed && art.video.readyState >= 1) {
+    // These events may already have fired during warming. Rehydrate the new
+    // player/UI without calling load() or resetting src (which discards buffer).
+    art.emit('video:loadedmetadata');
+    if (art.video.readyState >= 3) art.emit('video:canplay');
+  }
+  syncShortVideoBuffer();
 };
 
 const restoreShortVideoRate = () => {
@@ -2027,6 +2076,14 @@ let shortVideoFrame = 0;
 let shortVideoPainted = 0;
 let shortVideoSettle = null;
 let shortVideoCommitting = false;
+let shortVideoSeekTimer = 0;
+
+const clearShortVideoSeek = () => {
+  if (shortVideoSeekTimer) window.clearTimeout(shortVideoSeekTimer);
+  shortVideoSeekTimer = 0;
+  shortVideoSeekPreview.value = null;
+  shortVideoSeekDragging.value = false;
+};
 
 const shortVideoEventTime = (event) => (Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now());
 
@@ -2095,6 +2152,7 @@ const cancelShortVideoGesture = () => {
   const gesture = shortVideoGesture;
   if (!gesture) return;
   shortVideoGesture = null;
+  clearShortVideoSeek();
   if (shortVideoFrame) window.cancelAnimationFrame(shortVideoFrame);
   shortVideoFrame = 0;
   shortVideoSuppressClick = true;
@@ -2106,6 +2164,7 @@ const cancelShortVideoGesture = () => {
 const interruptShortVideoPage = () => {
   const gesture = shortVideoGesture;
   shortVideoGesture = null;
+  clearShortVideoSeek();
   if (gesture || shortVideoSettle) shortVideoSuppressClick = true;
   releaseShortVideoPointer(gesture);
   resetShortVideoPage();
@@ -2130,15 +2189,22 @@ const onShortVideoPointerDown = (event) => {
     return;
   }
   shortVideoSuppressClick = false;
+  clearShortVideoSeek();
   const el = shell.value;
+  const video = art && art.video;
   shortVideoPeerSnapshot.value = shortVideoPeers.value.map((peer) => ({ ...peer }));
   shortVideoGesture = {
     id: event.pointerId,
     x: event.clientX,
     y: event.clientY,
     height: el.clientHeight,
+    width: el.clientWidth,
+    duration: video && Number.isFinite(video.duration) ? video.duration : 0,
+    time: video ? video.currentTime : 0,
+    video,
     moved: false,
     paging: false,
+    seeking: false,
     offset: 0,
     // An open speed menu owns this touch; it can only be dismissed.
     locked: shortVideoRateOpen.value,
@@ -2158,6 +2224,16 @@ const onShortVideoPointerMove = (event) => {
     if (Math.hypot(dx, dy) < 9) return;
     gesture.moved = true;
     gesture.paging = !gesture.locked && Math.abs(dy) > Math.abs(dx) * 1.15;
+    gesture.seeking = !gesture.locked && Math.abs(dx) > Math.abs(dy) * 1.15
+      && gesture.duration > 0 && gesture.width > 0;
+  }
+  if (gesture.seeking) {
+    if (event.cancelable) event.preventDefault();
+    // One screen travels up to two minutes; short clips use their full duration.
+    shortVideoSeekPreview.value = Math.max(0, Math.min(gesture.duration,
+      gesture.time + dx / gesture.width * Math.min(120, gesture.duration)));
+    shortVideoSeekDragging.value = true;
+    return;
   }
   if (!gesture.paging) return;
   if (event.cancelable) event.preventDefault();
@@ -2182,6 +2258,25 @@ const onShortVideoPointerUp = (event) => {
   shortVideoSuppressClick = true;
   event.preventDefault();
   event.stopImmediatePropagation();
+  if (gesture.seeking) {
+    shortVideoPeerSnapshot.value = null;
+    if (!props.shortVideoMode || props.episodeSwitching || !art || art.video !== gesture.video) {
+      clearShortVideoSeek();
+      return;
+    }
+    const target = shortVideoSeekPreview.value;
+    try {
+      // Seek once on release, preserving pause/play intent and using the exact target.
+      gesture.video.currentTime = target;
+      currentTime.value = target;
+      scheduleBufferedSync();
+      shortVideoSeekDragging.value = false;
+      shortVideoSeekTimer = window.setTimeout(clearShortVideoSeek, 800);
+    } catch (_error) {
+      clearShortVideoSeek();
+    }
+    return;
+  }
   if (!gesture.paging) {
     shortVideoPeerSnapshot.value = null;
     return;
@@ -2582,7 +2677,15 @@ onMounted(() => {
   // Ensure device flags are computed before initializing ArtPlayer,
   // otherwise desktop/mobile behaviors can be swapped after mount.
   updateIsMobile();
+  shortVideoBuffer = createShortVideoBuffer({
+    loadHls,
+    detectFormat: detectVideoFormat,
+    preferNativeHls: isIos.value,
+    host: bufferHost.value,
+  });
   init();
+  syncShortVideoBuffer();
+  document.addEventListener('visibilitychange', syncShortVideoBuffer);
 
   try {
     if (typeof window !== 'undefined') window.addEventListener('resize', updateIsMobile, { passive: true });
@@ -2743,6 +2846,8 @@ watch(
   }
 );
 
+watch(() => [props.shortVideoMode, props.shortVideoBufferCandidates], syncShortVideoBuffer, { flush: 'post' });
+
 	watch(
 	  () => {
 	    const extra = props.statsExtra && typeof props.statsExtra === 'object' ? props.statsExtra : {};
@@ -2753,6 +2858,9 @@ watch(
 	);
 
 onBeforeUnmount(() => {
+  document.removeEventListener('visibilitychange', syncShortVideoBuffer);
+  if (shortVideoBuffer) shortVideoBuffer.clear();
+  shortVideoBuffer = null;
   if (rightFitRaf) {
     try {
       if (typeof window.cancelAnimationFrame === 'function') window.cancelAnimationFrame(rightFitRaf);
@@ -2884,6 +2992,44 @@ const play = async () => {
   position: relative;
   width: 100%;
   height: 100%;
+}
+
+.sv-buffer-host {
+  position: fixed;
+  left: -10000px;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.sv-seek-preview {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 10002;
+  padding: 16px 22px;
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.78);
+  color: #fff;
+  text-align: center;
+  white-space: nowrap;
+  pointer-events: none;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sv-seek-preview strong {
+  display: block;
+  margin-top: 8px;
+  font-size: 22px;
+}
+
+.sv-seek-preview strong span {
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 16px;
 }
 
 .yt-toast {

@@ -304,14 +304,53 @@ for (const action of ['exit', 'site', 'pan', 'cancel']) {
     if (action === 'cancel') f.page.cancelActivePlaybackFlow({ clearPlayerState: true });
     await flush();
     assert.equal(f.page.shortVideoPrefetch.size, 0);
+    assert.equal(f.page.shortVideoBufferCandidates.length, 0);
     const after = playbackState(f);
     f.calls.play[0].resolve(playback('late'));
     f.calls.play[1].reject(new Error('late failure'));
     await flush();
     assert.equal(f.page.shortVideoPrefetch.size, 0);
+    assert.equal(f.page.shortVideoBufferCandidates.length, 0);
     assert.equal(playbackState(f), after);
   });
 }
+
+test('successful URL resolution exposes only neighboring URLs and exact headers for prebuffering', async () => {
+  const f = fixture();
+  const before = playbackState(f);
+  f.page.prefetchShortVideoNeighbors();
+  assert.equal(f.page.shortVideoBufferCandidates.length, 0);
+  await flush();
+  const result = playback('neighbor');
+  f.calls.play[0].resolve(result);
+  f.calls.play[1].reject(new Error('neighbor unavailable'));
+  await flush();
+  assert.equal(f.page.shortVideoBufferCandidates.length, 1);
+  assert.equal(f.page.shortVideoBufferCandidates[0].url, result.playerUrl);
+  assert.equal(f.page.shortVideoBufferCandidates[0].headers, result.playerHeaders);
+  assert.equal(playbackState(f), before, 'warming must not bind history/proxy candidates or change playback');
+});
+
+test('replaced or expired URL candidates are removed from the media prebuffer list', async () => {
+  const f = fixture();
+  await warmNeighbors(f);
+  assert.equal(f.page.shortVideoBufferCandidates.length, 2);
+  f.clock.now += 60000;
+  f.page.prefetchShortVideoNeighbors();
+  assert.equal(f.page.shortVideoBufferCandidates.length, 0);
+});
+
+test('a consumed URL remains available to the player during the empty-URL switch tick', async () => {
+  const f = fixture();
+  await warmNeighbors(f);
+  const target = f.target(3);
+  const key = f.page.buildShortVideoPrefetchKey(target.siteItem, target.panEntry, target.segment);
+  const result = await f.page.takeShortVideoPrefetch(key);
+  assert.ok(f.page.shortVideoBufferCandidates.some((entry) => entry.url === result.playerUrl));
+  f.page.playerUrl = '';
+  f.page.prefetchShortVideoNeighbors();
+  assert.ok(f.page.shortVideoBufferCandidates.some((entry) => entry.url === result.playerUrl));
+});
 
 for (const [name, change] of [
   ['API', f => { f.page.runtimeSettings.catpawrunnerApiBase = 'https://other.test'; }],

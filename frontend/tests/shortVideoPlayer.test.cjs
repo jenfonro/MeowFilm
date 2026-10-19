@@ -31,16 +31,28 @@ function eventTarget() {
   };
 }
 
-function gestures(props = {}) {
+function gestures(props = {}, { time = 30, duration = 240, paused = false, width = 400 } = {}) {
   let now = 1000;
   let nextFrame = 0;
+  let nextTimer = 0;
   const frames = new Map();
+  const timers = new Map();
   const writes = [];
+  const seeks = [];
+  const playbackCalls = [];
+  const video = {
+    duration, paused,
+    get currentTime() { return time; },
+    set currentTime(value) { seeks.push(value); time = value; },
+    play() { playbackCalls.push('play'); this.paused = false; return Promise.resolve(); },
+    pause() { playbackCalls.push('pause'); this.paused = true; },
+  };
   const computedTransforms = [];
   const transitions = [];
   const captures = new Set();
   const input = Object.assign(eventTarget(), {
     clientHeight: 600,
+    clientWidth: width,
     style: {},
     setPointerCapture(id) { captures.add(id); },
     hasPointerCapture(id) { return captures.has(id); },
@@ -76,6 +88,11 @@ function gestures(props = {}) {
   const window = Object.assign(eventTarget(), {
     requestAnimationFrame(callback) { frames.set(++nextFrame, callback); return nextFrame; },
     cancelAnimationFrame(id) { frames.delete(id); },
+    setTimeout(callback, delay) {
+      timers.set(++nextTimer, { callback, at: now + delay });
+      return nextTimer;
+    },
+    clearTimeout(id) { timers.delete(id); },
     getComputedStyle(element) {
       assert.equal(element, track);
       computedTransforms.push(element.style.transform);
@@ -91,18 +108,32 @@ function gestures(props = {}) {
       shortVideoPrev: 'Episode 1', shortVideoNext: 'Episode 3', ...props,
     },
     shortVideoRateOpen: { value: false },
+    shortVideoSeekPreview: { value: null }, shortVideoSeekDragging: { value: false },
+    art: { video }, currentTime: { value: time },
+    seeks, playbackCalls, timers, bufferedSyncs: 0,
+    scheduleBufferedSync() { context.bufferedSyncs++; },
     shell: { value: input }, pageTrack: { value: track },
     ref: value => ({ value }),
     computed: getter => ({ get value() { return getter(); } }),
+    watch(_getter, callback) { context.sourceChanged = callback; },
     window, document, Date: { now: () => now }, performance: { now: () => now },
-    isUiControlTarget: target => !!target.control,
     deltas: [],
     taps: 0,
     emit(name, delta) { if (name === 'episodedelta') context.deltas.push(delta); },
     togglePlay() { context.taps++; },
     track, frames, writes, computedTransforms, transitions,
     now: () => now,
-    advance(ms) { now += ms; },
+    advance(ms) {
+      now += ms;
+      for (const [id, timer] of [...timers]) {
+        if (timer.at <= now && timers.delete(id)) timer.callback();
+      }
+    },
+    advanceVideo(seconds) { time += seconds; },
+    changeUrl(url) {
+      context.props.url = url;
+      context.sourceChanged();
+    },
     frame() {
       // Frames scheduled by a callback belong to the next presentation frame.
       for (const [id, callback] of [...frames]) {
@@ -127,8 +158,10 @@ function gestures(props = {}) {
     },
   });
   vm.runInContext(
+    section('const isUiControlTarget =', 'const detectVideoFormat =') +
     section('const shortVideoPeerSnapshot =', 'const overlayVisible =') +
     section('const emitEpisodeDelta =', 'watch(() => props.shortVideoMode') +
+    section('watch(() => [props.url,', 'const toggleMute =') +
     '\nObject.assign(this, { cancel: cancelShortVideoGesture, click: onShortVideoClick, ' +
     'peers: shortVideoPeers, snapshot: shortVideoPeerSnapshot });' +
     '\n{ const el = shell.value;\n' +
@@ -230,6 +263,256 @@ test('short video: short, horizontal and diagonal drags neither switch episodes 
   }
 });
 
+test('short video: horizontal drags only preview, then seek once on release without changing playback', async t => {
+  for (const paused of [false, true]) {
+    await t.test(paused ? 'paused, starting on the central play hint' : 'playing', () => {
+      const context = gestures({}, { time: 30.25, paused });
+      const target = paused
+        ? { closest: selector => selector.includes('.sv-resume') || selector.includes('.yt-btn') }
+        : {};
+      context.currentTime.value = 5; // A stale UI time must not be the seek origin.
+      context.down(event(100, 300, { target }));
+      assert.equal(context.shell.value.hasPointerCapture(1), true);
+      if (!paused) context.advanceVideo(1);
+      for (const dx of [40, 80, -20]) {
+        const move = event(100 + dx, 305, { target });
+        context.move(move);
+        context.frame();
+        assert.equal(move.prevented, true);
+        assert.equal(context.shortVideoSeekPreview.value, 30.25 + dx / 400 * 120);
+        assert.equal(context.shortVideoSeekDragging.value, true);
+        assert.deepEqual(context.seeks, []);
+        assert.equal(context.art.video.currentTime, paused ? 30.25 : 31.25);
+        assert.equal(context.currentTime.value, 5);
+        assert.equal(context.bufferedSyncs, 0);
+        assert.equal(context.timers.size, 0);
+      }
+      context.advance(1000);
+      assert.equal(context.shortVideoSeekPreview.value, 24.25, 'a held preview must not expire');
+      assert.deepEqual(context.seeks, []);
+      // Release at a new position: commit its exact fractional target, not the last move.
+      const up = event(237.5, 305, { target });
+      context.up(up);
+      assert.equal(up.prevented, true);
+      assert.equal(up.stopped, true);
+      assert.deepEqual(context.seeks, [71.5]);
+      assert.equal(context.art.video.currentTime, 71.5);
+      assert.equal(context.currentTime.value, 71.5);
+      assert.equal(context.bufferedSyncs, 1);
+      assert.equal(context.shortVideoSeekPreview.value, 71.5);
+      assert.equal(context.shortVideoSeekDragging.value, false);
+      assert.equal(context.shell.value.hasPointerCapture(1), false);
+      assert.equal(context.snapshot.value, null);
+      assert.equal(context.timers.size, 1);
+      context.up(up);
+      context.click(event(237.5, 305, { target }));
+      context.advance(799);
+      assert.equal(context.shortVideoSeekPreview.value, 71.5);
+      context.advance(1);
+      assert.equal(context.shortVideoSeekPreview.value, null);
+      assert.equal(context.shortVideoSeekDragging.value, false);
+      assert.equal(context.timers.size, 0);
+      context.click(event(237.5, 305, { target }));
+      assert.deepEqual(context.seeks, [71.5]);
+      assert.equal(context.bufferedSyncs, 1);
+      assert.equal(context.art.video.paused, paused);
+      assert.deepEqual(context.playbackCalls, []);
+      assert.deepEqual(context.deltas, []);
+      assert.equal(context.taps, 0);
+      assert.deepEqual(context.writes, []);
+      assert.equal(context.frames.size, 0);
+      assert.equal(context.transitions.length, 0);
+    });
+  }
+});
+
+test('short video: horizontal seek scales by width and duration, with exact clamped targets', async t => {
+  for (const [name, time, duration, width, dx, expected] of [
+    ['forward', 60, 240, 400, 100, 90],
+    ['backward', 60, 240, 400, -100, 30],
+    ['clamp at zero', 10, 240, 400, -400, 0],
+    ['clamp at duration', 230, 240, 400, 400, 240],
+    ['short clip forward', 5, 20, 400, 200, 15],
+    ['short clip backward', 15, 20, 400, -200, 5],
+    ['short clip clamp', 5, 20, 400, 400, 20],
+    ['fractional duration', 0.25, 1.5, 400, 100, 0.625],
+    ['120 second duration', 0, 120, 400, 200, 60],
+    ['120 second screen cap', 100, 600, 400, 400, 220],
+    ['wider input surface', 60, 240, 800, 100, 75],
+  ]) {
+    await t.test(name, () => {
+      const context = gestures({}, { time, duration, width });
+      context.down(event());
+      context.move(event(100 + dx, 300));
+      assert.equal(context.shortVideoSeekPreview.value, expected);
+      assert.equal(context.shortVideoSeekDragging.value, true);
+      assert.deepEqual(context.seeks, []);
+      context.up(event(100 + dx, 300));
+      context.click(event());
+      assert.deepEqual(context.seeks, [expected]);
+      assert.equal(context.art.video.currentTime, expected);
+      assert.equal(context.currentTime.value, expected);
+      assert.equal(context.bufferedSyncs, 1);
+      assert.deepEqual(context.deltas, []);
+      assert.equal(context.taps, 0);
+    });
+  }
+});
+
+test('short video: horizontal seeking requires 9px of movement and a strict 1.15 axis ratio', () => {
+  for (const [dx, dy, seeking] of [
+    [8.5, 0, false], [9, 0, true], [-9, 0, true],
+    [22.5, 20, false], [23, 20, false], [23.5, -20, true], [-23.5, 20, true],
+  ]) {
+    const context = gestures();
+    context.down(event());
+    context.move(event(100 + dx, 300 + dy));
+    assert.equal(context.shortVideoSeekDragging.value, seeking, `movement ${dx}, ${dy}`);
+    assert.equal(context.shortVideoSeekPreview.value !== null, seeking);
+    assert.deepEqual(context.seeks, []);
+    context.up(event(100 + dx, 300 + dy));
+    assert.equal(context.seeks.length, seeking ? 1 : 0);
+    assert.deepEqual(context.deltas, []);
+    assert.deepEqual(context.writes, []);
+  }
+});
+
+test('short video: horizontal seeking needs a finite positive duration and a positive width', () => {
+  for (const [duration, width] of [
+    [NaN, 400], [Infinity, 400], [-Infinity, 400], [0, 400], [-1, 400],
+    [240, 0], [240, -1],
+  ]) {
+    const context = gestures({}, { duration, width });
+    context.down(event());
+    context.move(event(200, 300));
+    assert.equal(context.shortVideoSeekPreview.value, null);
+    assert.equal(context.shortVideoSeekDragging.value, false);
+    context.up(event(200, 300));
+    context.click(event());
+    assert.deepEqual(context.seeks, []);
+    assert.equal(context.bufferedSyncs, 0);
+    assert.equal(context.timers.size, 0);
+    assert.deepEqual(context.deltas, []);
+    assert.equal(context.taps, 0);
+    assert.deepEqual(context.writes, []);
+  }
+});
+
+test('short video: a horizontal axis lock survives large vertical movements in either direction', () => {
+  const context = gestures();
+  context.down(event());
+  context.move(event(108, 300));
+  assert.equal(context.shortVideoSeekPreview.value, null);
+  context.move(event(110, 300));
+  assert.equal(context.shortVideoSeekPreview.value, 33);
+  for (const y of [0, 900]) {
+    context.move(event(180, y));
+    context.frame();
+    assert.equal(context.shortVideoSeekPreview.value, 54);
+    assert.equal(context.shortVideoSeekDragging.value, true);
+    assert.deepEqual(context.seeks, []);
+    assert.deepEqual(context.writes, []);
+  }
+  context.up(event(180, 900));
+  context.click(event());
+  assert.deepEqual(context.seeks, [54]);
+  assert.deepEqual(context.deltas, []);
+  assert.equal(context.taps, 0);
+  assert.equal(context.frames.size, 0);
+  assert.equal(context.transitions.length, 0);
+});
+
+test('short video: cancelling a horizontal gesture clears its HUD and never seeks, even on a later release', async t => {
+  for (const [name, cancel] of [
+    ['pointercancel', context => context.shell.value.dispatch('pointercancel', event())],
+    ['lost capture', context => context.shell.value.releasePointerCapture(1)],
+    ['second pointer', context => context.down(event(120, 300, { pointerId: 2, isPrimary: false }))],
+    ['document second pointer', context => context.document.dispatch('pointerdown', event(120, 300, { pointerId: 2, isPrimary: false }))],
+    ['multitouch', context => context.document.dispatch('touchstart', { touches: [{}, {}] })],
+    ['blur', context => context.window.dispatch('blur')],
+    ['resize', context => context.window.dispatch('resize')],
+    ['hidden document', context => { context.document.hidden = true; context.document.dispatch('visibilitychange'); }],
+    ['URL switch', context => context.changeUrl('next.mp4')],
+  ]) {
+    await t.test(name, () => {
+      for (const moved of [false, true]) {
+        const context = gestures();
+        context.down(event());
+        if (moved) context.move(event(200, 300));
+        assert.equal(context.shortVideoSeekPreview.value, moved ? 60 : null);
+        assert.equal(context.shortVideoSeekDragging.value, moved);
+        cancel(context);
+        assert.equal(context.shortVideoSeekPreview.value, null);
+        assert.equal(context.shortVideoSeekDragging.value, false);
+        assert.equal(context.shell.value.hasPointerCapture(1), false);
+        context.move(event(250, 300));
+        context.up(event(250, 300));
+        context.click(event());
+        context.advance(1000);
+        context.frame();
+        assert.deepEqual(context.seeks, []);
+        assert.equal(context.art.video.currentTime, 30);
+        assert.equal(context.currentTime.value, 30);
+        assert.equal(context.bufferedSyncs, 0);
+        assert.equal(context.timers.size, 0);
+        assert.deepEqual(context.playbackCalls, []);
+        assert.deepEqual(context.deltas, []);
+        assert.equal(context.taps, 0);
+        assert.equal(context.shortVideoSeekPreview.value, null);
+        assert.equal(context.shortVideoSeekDragging.value, false);
+        assert.equal(context.snapshot.value, null);
+        assert.equal(context.track.style.transform, '');
+        assert.equal(context.frames.size, 0);
+        assert.equal(context.transitions.length, 0);
+      }
+    });
+  }
+});
+
+test('short video: blur, resize and URL changes also clear a committed seek HUD and its timer', () => {
+  for (const interrupt of [
+    context => context.window.dispatch('blur'),
+    context => context.window.dispatch('resize'),
+    context => context.changeUrl('next.mp4'),
+  ]) {
+    const context = gestures();
+    swipe(context, 100, 0);
+    assert.equal(context.shortVideoSeekPreview.value, 60);
+    assert.equal(context.timers.size, 1);
+    interrupt(context);
+    assert.equal(context.shortVideoSeekPreview.value, null);
+    assert.equal(context.shortVideoSeekDragging.value, false);
+    assert.equal(context.timers.size, 0);
+    context.advance(1000);
+    assert.deepEqual(context.seeks, [60]);
+    assert.equal(context.bufferedSyncs, 1);
+  }
+});
+
+test('short video: a new gesture cancels the previous HUD timer without clearing its own preview', () => {
+  const context = gestures();
+  swipe(context, 100, 0);
+  context.advance(400);
+  context.down(event());
+  assert.equal(context.shortVideoSeekPreview.value, null);
+  assert.equal(context.shortVideoSeekDragging.value, false);
+  assert.equal(context.timers.size, 0);
+  context.move(event(200, 300));
+  context.advance(400);
+  assert.equal(context.shortVideoSeekPreview.value, 90);
+  assert.equal(context.shortVideoSeekDragging.value, true);
+  assert.deepEqual(context.seeks, [60]);
+  context.up(event(200, 300));
+  context.advance(799);
+  assert.equal(context.shortVideoSeekPreview.value, 90);
+  context.advance(1);
+  assert.equal(context.shortVideoSeekPreview.value, null);
+  assert.equal(context.shortVideoSeekDragging.value, false);
+  assert.deepEqual(context.seeks, [60, 90]);
+  assert.equal(context.bufferedSyncs, 2);
+  assert.equal(context.timers.size, 0);
+});
+
 test('short video: moving away then back is a drag, not a tap', async () => {
   const context = gestures();
   context.down(event());
@@ -274,17 +557,34 @@ test('short video: cancellation and multitouch do not trigger playback or episod
 });
 
 test('short video: progress, speed and exit controls are not captured as gestures or taps', () => {
-  const context = gestures();
-  const controlEvent = event(100, 300, { target: { control: true } });
-  context.down(controlEvent);
-  context.up(event(100, 100));
-  context.click(controlEvent);
-  assert.deepEqual(context.deltas, []);
-  assert.equal(context.taps, 0);
-  assert.equal(controlEvent.prevented, false);
-  assert.equal(controlEvent.stopped, false);
-  assert.equal(context.shell.value.hasPointerCapture(1), false);
-  assert.deepEqual(context.writes, []);
+  for (const control of [
+    '.yt-progress', '.yt-progress__range', '.yt-btn', '.yt-setting',
+    '.yt-setting__menu', '.yt-setting__item', '.yt-top__back', '.art-contextmenu',
+  ]) {
+    for (const [dx, dy] of [[0, -200], [160, 0]]) {
+      const context = gestures();
+      const target = { closest: selector => selector.split(',').includes(control) };
+      const controlEvent = event(100, 300, { target });
+      context.down(controlEvent);
+      assert.equal(context.shell.value.hasPointerCapture(1), false, control);
+      const move = event(100 + dx, 300 + dy, { target });
+      context.move(move);
+      context.up(event(100 + dx, 300 + dy, { target }));
+      context.click(controlEvent);
+      assert.deepEqual(context.deltas, []);
+      assert.equal(context.taps, 0);
+      assert.equal(controlEvent.prevented, false);
+      assert.equal(controlEvent.stopped, false);
+      assert.equal(move.prevented, false);
+      assert.equal(context.shell.value.hasPointerCapture(1), false);
+      assert.deepEqual(context.writes, []);
+      assert.deepEqual(context.seeks, []);
+      assert.equal(context.shortVideoSeekPreview.value, null);
+      assert.equal(context.shortVideoSeekDragging.value, false);
+      assert.equal(context.bufferedSyncs, 0);
+      assert.equal(context.timers.size, 0);
+    }
+  }
 });
 
 test('the central paused-play hint remains swipeable, unlike the other controls', () => {
@@ -302,20 +602,27 @@ test('the central paused-play hint remains swipeable, unlike the other controls'
 });
 
 test('short video: an open speed menu blocks swipes; tapping outside only closes the menu', () => {
-  const context = gestures();
-  context.shortVideoRateOpen.value = true;
-  swipe(context, 0, -100);
-  context.click(event());
-  assert.equal(context.shortVideoRateOpen.value, true);
-  assert.deepEqual(context.writes, []);
-  assert.equal(context.frames.size, 0);
-  assert.equal(context.transitions.length, 0);
-  context.down(event());
-  context.up(event());
-  context.click(event());
-  assert.equal(context.shortVideoRateOpen.value, false);
-  assert.deepEqual(context.deltas, []);
-  assert.equal(context.taps, 0);
+  for (const [dx, dy] of [[0, -100], [100, 0]]) {
+    const context = gestures();
+    context.shortVideoRateOpen.value = true;
+    swipe(context, dx, dy);
+    context.click(event());
+    assert.equal(context.shortVideoRateOpen.value, true);
+    assert.deepEqual(context.writes, []);
+    assert.equal(context.frames.size, 0);
+    assert.equal(context.transitions.length, 0);
+    assert.equal(context.shortVideoSeekPreview.value, null);
+    assert.equal(context.shortVideoSeekDragging.value, false);
+    assert.deepEqual(context.seeks, []);
+    assert.equal(context.bufferedSyncs, 0);
+    assert.equal(context.timers.size, 0);
+    context.down(event());
+    context.up(event());
+    context.click(event());
+    assert.equal(context.shortVideoRateOpen.value, false);
+    assert.deepEqual(context.deltas, []);
+    assert.equal(context.taps, 0);
+  }
 });
 
 test('short video: switching and normal mode do not respond to swipes', () => {
@@ -704,7 +1011,7 @@ test('only native MP4/iOS HLS reuse the retained media element; custom engines d
   ]) {
     const context = vm.createContext({
       format, isIos: { value: ios }, props: { shortVideoMode: enabled, headers },
-      retainedShortVideoVideo: video,
+      retainedShortVideoVideo: video, warmed: null,
     });
     assert.equal(vm.runInContext(code + '\nreuseVideo;', context), expected);
     assert.equal(context.retainedShortVideoVideo, null);
@@ -758,7 +1065,7 @@ test('media errors disable reuse so an old ArtPlayer reconnect cannot overwrite 
 
 test('a custom loader scheduled by a destroyed player cannot touch a reused native HLS element', () => {
   const code = section('function (videoEl, playUrl, artInstance) {', 'const headers = props.headers');
-  const loader = vm.runInNewContext(`(${code} throw new Error('active loader'); })`);
+  const loader = vm.runInNewContext(`(${code} throw new Error('active loader'); })`, { warmed: null, format: 'hls' });
   assert.doesNotThrow(() => loader({}, 'old.m3u8', { isDestroy: true }));
   assert.throws(() => loader({}, 'current.m3u8', { isDestroy: false }), /active loader/);
 });

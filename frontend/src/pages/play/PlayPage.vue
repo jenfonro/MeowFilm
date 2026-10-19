@@ -83,6 +83,7 @@
                     :short-video-prev="shortVideoPrevTitleText"
                     :short-video-next="shortVideoNextTitleText"
                     :short-video-poster="detailPosterDisplay"
+                    :short-video-buffer-candidates="shortVideoBufferCandidates"
                     :stats-extra="playerStatsExtra"
                     :extra-menus="playerExtraMenus"
                     :extra-actions="playerExtraActions"
@@ -2421,6 +2422,7 @@ export default {
       // Prefetched play URLs for the neighbor episodes: key -> { at, promise }.
       shortVideoPrefetch: markRaw(new Map()),
       shortVideoPrefetchAt: 0,
+      shortVideoBufferCandidates: [],
       shortVideoPrefetchedPlayback: null,
       shortVideoRefreshInFlightSeq: 0,
       episodePanelHidden: false,
@@ -2535,6 +2537,7 @@ export default {
   },
   beforeUnmount() {
     this.shortVideoPrefetch.clear();
+    this.shortVideoBufferCandidates = [];
     this.restoreShortVideoScroll();
     this.resetSwitchSkipState();
     this.cancelActivePlaybackFlow({ stopStream: true, invalidateDetail: true, clearPlayerState: true });
@@ -2563,6 +2566,7 @@ export default {
   methods: {
     cancelActivePlaybackFlow({ stopStream = true, invalidateDetail = false, clearPlayerState = false } = {}) {
       this.shortVideoPrefetch.clear();
+      this.shortVideoBufferCandidates = [];
       this.shortVideoPrefetchedPlayback = null;
       this.shortVideoRefreshInFlightSeq = 0;
       this.resetSmartPlaybackRuntimeState({ stopStream });
@@ -3108,6 +3112,7 @@ export default {
     selectSiteSourceResult(item) {
       if (!item || !item.id) return;
       this.shortVideoPrefetch.clear();
+      this.shortVideoBufferCandidates = [];
       this.selectedSearchResultId = String(item.id);
       this.selectedProjectionSource = 'TMDB';
       this.selectedPanSource = '';
@@ -3123,6 +3128,7 @@ export default {
     },
     selectPanSource(option) {
       this.shortVideoPrefetch.clear();
+      this.shortVideoBufferCandidates = [];
       this.selectedPanSource = option;
       this.panSourceOpen = false;
       if (this.selectedSiteResultItem) {
@@ -5727,6 +5733,7 @@ export default {
       if (!this.shortVideoMode) return;
       this.shortVideoMode = false;
       this.shortVideoPrefetch.clear();
+      this.shortVideoBufferCandidates = [];
       this.$nextTick(() => {
         if (this.shortVideoMode) return;
         this.restoreShortVideoScroll();
@@ -5857,9 +5864,8 @@ export default {
         selectedGoProxyBase: normalizeString(selectedGoProxyBase),
       });
     },
-    // Only the play URL is fetched ahead, through the normal resolver: the
-    // switch itself still runs playResolvedSiteSegment (history, proxy/relay
-    // retry candidates, watch report) exactly as without a prefetch.
+    // Resolve through the normal policy; the player can warm the returned URLs.
+    // Only the actual switch binds history and proxy/relay retry candidates.
     prefetchShortVideoNeighbors() {
       if (!this.shortVideoMode || !this.playerUrl || !this.playerFirstFrameReady || this.playError || this.playerRuntimeError) return;
       const cache = this.shortVideoPrefetch;
@@ -5874,8 +5880,14 @@ export default {
         keep.add(key);
         const entry = cache.get(key);
         if (entry && (entry.pending || now - entry.at < SHORT_VIDEO_PREFETCH_TTL_MS)) return;
-        const next = { at: now, pending: true, promise: null };
-        next.promise = this.resolveSitePlaybackUrl(target).finally(() => { next.pending = false; });
+        const next = { at: now, pending: true, promise: null, result: null };
+        next.promise = this.resolveSitePlaybackUrl(target).then((result) => {
+          if (this.shortVideoMode && cache.get(key) === next) {
+            next.result = result;
+            this.syncShortVideoBufferCandidates();
+          }
+          return result;
+        }).finally(() => { next.pending = false; });
         // Failed speculation is silent. Actual playback retries the normal resolver.
         next.promise.catch(() => {});
         cache.set(key, next);
@@ -5883,6 +5895,14 @@ export default {
       Array.from(cache.keys()).forEach((key) => {
         if (!keep.has(key)) cache.delete(key);
       });
+      this.syncShortVideoBufferCandidates();
+    },
+    syncShortVideoBufferCandidates() {
+      this.shortVideoBufferCandidates = this.shortVideoMode
+        ? Array.from(this.shortVideoPrefetch.values())
+          .filter((entry) => entry.result && Date.now() - entry.at < SHORT_VIDEO_PREFETCH_TTL_MS)
+          .map(({ result }) => ({ url: result.playerUrl, headers: result.playerHeaders }))
+        : [];
     },
     takeShortVideoPrefetch(key) {
       const entry = this.shortVideoPrefetch.get(key);

@@ -113,3 +113,37 @@ test('iPhone native HLS preference does not bypass custom headers', async () => 
   context.isIos.value = false;
   assert.equal((await context.hls(video, 'stream.m3u8', {})).fallback, true);
 });
+
+test('HLS opens requests before applying authentication headers, including after prebuffer fallback', async () => {
+  const start = source.indexOf('async hls(videoEl, url, headers) {');
+  const end = source.indexOf('async flv(videoEl, url, headers) {', start);
+  let config;
+  class Hls {
+    static isSupported() { return true; }
+    constructor(options) { config = options; }
+    loadSource() {}
+    attachMedia() {}
+  }
+  const context = vm.createContext({
+    isIos: { value: false }, isMobile: { value: true }, loadHls: async () => Hls,
+  });
+  vm.runInContext(`this.hls = ({ ${source.slice(start, end)} }).hls;`, context);
+  await context.hls({}, 'https://video.example/stream.m3u8', { Authorization: 'Bearer test', Referer: 'https://video.example/' });
+  const received = {};
+  const xhr = {
+    readyState: 0,
+    open(method, url, async) {
+      assert.equal(method, 'GET');
+      assert.equal(url, 'https://video.example/part.ts');
+      assert.equal(async, true);
+      this.readyState = 1;
+    },
+    setRequestHeader(name, value) {
+      assert.equal(this.readyState, 1);
+      received[name] = value;
+    },
+  };
+  config.xhrSetup(xhr, 'https://video.example/part.ts');
+  assert.deepEqual(received, { Authorization: 'Bearer test', Referer: 'https://video.example/' });
+  assert.equal(xhr.withCredentials, false);
+});
