@@ -529,6 +529,9 @@
     shortVideoNext: { type: String, default: '' },
     shortVideoPoster: { type: String, default: '' },
     shortVideoBufferCandidates: { type: Array, default: () => [] },
+    shortVideoCacheEnabled: { type: Boolean, default: false },
+    shortVideoCacheKey: { type: String, default: '' },
+    shortVideoCacheKeys: { type: Array, default: () => [] },
 	});
 
 const container = ref(null);
@@ -583,6 +586,11 @@ const autoplayBlocked = ref(false);
 let shortVideoPlaybackRate = 1;
 let retainedShortVideoVideo = null;
 let currentVideoReusable = false;
+let currentCacheKey = '';
+let currentPlaybackUrl = '';
+let currentPlaybackHeaders = {};
+let currentMediaInvalid = false;
+let currentMediaEnded = false;
 const aspectRatio = ref('default');
 	const settingsOpen = ref(false);
 	const goProxyMenuOpen = ref(false);
@@ -1169,11 +1177,34 @@ const isUiControlTarget = (target) => {
 
 const syncShortVideoBuffer = () => {
   if (!shortVideoBuffer) return;
-  if (!props.shortVideoMode || document.hidden) {
+  if (!props.shortVideoCacheEnabled) {
     shortVideoBuffer.clear();
     return;
   }
-  shortVideoBuffer.sync(props.shortVideoBufferCandidates.filter((entry) => entry.url !== props.url));
+  shortVideoBuffer.sync(props.shortVideoBufferCandidates, props.shortVideoCacheKeys);
+  shortVideoBuffer.setVisible(!document.hidden);
+};
+
+const registerShortVideoPlayback = () => {
+  if (!shortVideoBuffer || !props.shortVideoCacheEnabled || !art || !currentCacheKey) return;
+  const player = art;
+  if (player.customPlayer && player.customPlayer.__tvCleanupError) {
+    player.customPlayer.__tvCleanupError();
+  }
+  shortVideoBuffer.adopt({
+    key: currentCacheKey,
+    url: currentPlaybackUrl,
+    headers: currentPlaybackHeaders,
+    video: player.video,
+    customPlayer: player.customPlayer,
+    activated: !player.video.paused && !player.video.muted,
+    onError: (message) => {
+      if (art !== player || player.isDestroy) return;
+      currentMediaInvalid = true;
+      currentVideoReusable = false;
+      emit('error', { code: 2, message });
+    },
+  });
 };
 
 const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
@@ -1245,9 +1276,11 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
 	  } catch (_e) {}
 	  cleanupPlayerElListeners = null;
 
+  const parked = !!(preserveShortVideoVideo && props.shortVideoCacheEnabled && shortVideoBuffer && currentCacheKey &&
+    shortVideoBuffer.park(currentCacheKey, { ended: currentMediaEnded, invalid: currentMediaInvalid }));
   try {
     const v = art && art.video ? art.video : null;
-    if (v) {
+    if (v && !parked) {
       try {
         v.pause();
       } catch (_e) {}
@@ -1264,10 +1297,13 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
   } catch (_e) {}
 
   try {
-    destroyCustomPlayer(art && art.customPlayer ? art.customPlayer : null);
+    if (!parked) destroyCustomPlayer(art && art.customPlayer ? art.customPlayer : null);
   } catch (_e) {}
 
+  const removeSrc = Artplayer.REMOVE_SRC_WHEN_DESTROY;
   try {
+    // Only discard ArtPlayer's UI/listeners. The cached media/engine stays alive.
+    if (parked) Artplayer.REMOVE_SRC_WHEN_DESTROY = false;
     if (art && typeof art.destroy === 'function') {
       // Use "remove" mode to detach DOM and stop playback aggressively.
       art.destroy(true);
@@ -1276,8 +1312,15 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
     try {
       if (art && typeof art.destroy === 'function') art.destroy(false);
     } catch (__e) {}
+  } finally {
+    Artplayer.REMOVE_SRC_WHEN_DESTROY = removeSrc;
   }
   art = null;
+  currentCacheKey = '';
+  currentPlaybackUrl = '';
+  currentPlaybackHeaders = {};
+  currentMediaEnded = false;
+  currentMediaInvalid = false;
   teleportTarget.value = null;
   isPip.value = false;
   playing.value = false;
@@ -1348,20 +1391,24 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
         });
       },
     });
-    if (Hls.Events && Hls.Events.ERROR && typeof hls.on === 'function') {
-      hls.on(Hls.Events.ERROR, (_event, data) => {
+    const onHlsError = (_event, data) => {
         if (!data || !data.fatal) return;
+        if (!art || art.video !== videoEl) return;
+        currentMediaInvalid = true;
+        currentVideoReusable = false;
         const detail = data.details ? String(data.details) : '';
         const type = data.type ? String(data.type) : '';
         const message = detail || type || 'HLS 播放失败';
         try {
           emit('error', { code: 2, message });
         } catch (_e) {}
-      });
+      };
+    if (Hls.Events && Hls.Events.ERROR && typeof hls.on === 'function') {
+      hls.on(Hls.Events.ERROR, onHlsError);
     }
 	    hls.loadSource(url);
 	    hls.attachMedia(videoEl);
-	    return { hls };
+	    return { hls, __tvCleanupError: () => hls.off(Hls.Events.ERROR, onHlsError) };
 	  },
 		  async flv(videoEl, url, headers) {
 		    const flvjs = await loadFlv();
@@ -1422,16 +1469,20 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
 	  const url = (props.url || '').trim();
 	  if (!container.value || !url) return;
 
-  if (art) destroyNow({ preserveShortVideoVideo: props.shortVideoMode });
+  if (art) destroyNow({ preserveShortVideoVideo: props.shortVideoCacheEnabled || props.shortVideoMode });
   isPip.value = false;
   autoplayBlocked.value = false;
 
 	  const format = detectVideoFormat(url);
-  let warmed = props.shortVideoMode && shortVideoBuffer ? shortVideoBuffer.take(url, props.headers) : null;
+  const cached = props.shortVideoCacheEnabled && shortVideoBuffer
+    ? shortVideoBuffer.take(url, props.headers, props.shortVideoCacheKey) : null;
+  let warmed = cached && cached.video ? cached : null;
+  const cacheRestored = !!(cached && cached.restored);
+  let positionRestored = false;
   let warmedAttached = false;
   const retainedVideo = retainedShortVideoVideo;
   retainedShortVideoVideo = null;
-  const canReuseNativeVideo = props.shortVideoMode && retainedVideo && (
+  const canReuseNativeVideo = (props.shortVideoCacheEnabled || props.shortVideoMode) && retainedVideo && (
     format === 'native' || (
       format === 'hls' && isIos.value && retainedVideo.canPlayType('application/vnd.apple.mpegurl')
       && !Object.values(props.headers || {}).some((value) => value != null)
@@ -1446,6 +1497,10 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
   // Adopt an authorized warmed video/engine intact. Otherwise retain native
   // playback; custom engines remain isolated from old asynchronous loaders.
   const reuseVideo = warmed ? warmed.video : canReuseNativeVideo ? retainedVideo : null;
+  if (!warmed && reuseVideo && shortVideoBuffer) shortVideoBuffer.detach(reuseVideo);
+  currentCacheKey = props.shortVideoCacheKey;
+  currentPlaybackUrl = url;
+  currentPlaybackHeaders = { ...props.headers };
 	  const playUrlForArt = url;
 	  const isCrossOriginUrl = (u) => {
 	    const raw = typeof u === 'string' ? u.trim() : '';
@@ -1469,6 +1524,7 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
 
   let metaEmitted = false;
   let firstFrameEmitted = false;
+  let instance = null;
   const readVideoResolution = () => {
     try {
       const v = art && art.video ? art.video : null;
@@ -1480,12 +1536,14 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
     }
   };
   const emitVideoInfo = () => {
+    if (!instance || instance !== art || instance.isDestroy) return;
     try {
       const { width, height } = readVideoResolution();
       emit('videoinfo', { width, height });
     } catch (_e) {}
   };
   const emitMetaOnce = () => {
+    if (!instance || instance !== art || instance.isDestroy) return;
     if (metaEmitted) return;
     metaEmitted = true;
     restoreShortVideoRate();
@@ -1493,16 +1551,26 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
       const v = art && art.video ? art.video : null;
       const d = (art && typeof art.duration === 'number' ? art.duration : null) ?? (v ? v.duration : 0);
       duration.value = Number.isFinite(d) ? d : 0;
+      if (cacheRestored && !positionRestored && v) {
+        positionRestored = true;
+        // Retained media already owns its exact position (including ended=0).
+        if (!warmed) {
+          const position = Math.max(0, Number(cached.position) || 0);
+          v.currentTime = duration.value > 0 ? Math.min(position, Math.max(0, duration.value - 0.05)) : position;
+        }
+        currentTime.value = v.currentTime;
+      }
       const { width, height } = readVideoResolution();
       emit('loadedmetadata', { duration: duration.value, width, height });
     } catch (_e) {}
   };
 
   const emitFirstFrameOnce = () => {
+    if (!instance || instance !== art || instance.isDestroy) return;
     if (firstFrameEmitted) return;
     firstFrameEmitted = true;
     try {
-      emit('firstframe', { currentTime: art.currentTime || 0, duration: duration.value || 0, playing: !!playing.value });
+      emit('firstframe', { currentTime: art.currentTime || 0, duration: duration.value || 0, playing: !!playing.value, cacheRestored });
     } catch (_e) {}
   };
 
@@ -1544,7 +1612,11 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
                     warmedAttached = true;
                     artInstance.customPlayer = warmed.customPlayer;
                     warmed.resume((error) => {
-                      if (art === artInstance && !artInstance.isDestroy) emit('error', { code: 2, message: error });
+                      if (art === artInstance && !artInstance.isDestroy) {
+                        currentMediaInvalid = true;
+                        currentVideoReusable = false;
+                        emit('error', { code: 2, message: error });
+                      }
                     });
                     return;
                   }
@@ -1577,6 +1649,7 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
 
 			              if (custom) {
 			                artInstance.customPlayer = custom;
+                      if (art === artInstance) registerShortVideoPlayback();
 			              } else {
 			                // As a last-resort fallback, set src so we still issue a request and show errors.
 			                try {
@@ -1599,6 +1672,7 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
 			        }
 			      : {},
   });
+  instance = art;
   if (warmed) {
     art.customPlayer = warmed.customPlayer;
     art.video.muted = false;
@@ -1608,6 +1682,7 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
     format === 'hls' && isIos.value && art.video.canPlayType('application/vnd.apple.mpegurl')
     && !Object.values(props.headers || {}).some((value) => value != null)
   );
+  registerShortVideoPlayback();
   restoreShortVideoRate();
   try {
     if (props.autoplay && art && typeof art.play === 'function') {
@@ -1779,6 +1854,7 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
 		      const onLoadedMetadata = () => emitMetaOnce();
 		      const onResize = () => emitVideoInfo();
 		      const onEnded = () => {
+            currentMediaEnded = true;
 		        try {
 		          playing.value = false;
 		        } catch (_e) {}
@@ -1800,6 +1876,8 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
         if (typeof v.readyState === 'number' && v.readyState >= 1) emitMetaOnce();
       };
 	      const onError = () => {
+          currentMediaInvalid = true;
+          currentVideoReusable = false;
 	        try {
 	          const err = v && v.error ? v.error : null;
 	          const code = err && typeof err.code === 'number' ? err.code : 0;
@@ -1892,7 +1970,9 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
     playbackRate.value = art.playbackRate || 1;
   });
 	  art.on('video:play', () => {
+    currentMediaEnded = false;
     autoplayBlocked.value = false;
+    registerShortVideoPlayback();
 	    playing.value = true;
 	    setBuffering(false);
 	    showUiTemporarily();
@@ -1905,6 +1985,7 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
 	    uiVisible.value = true;
 	  });
 	  art.on('video:ended', () => {
+    currentMediaEnded = true;
 	    playing.value = false;
 	    setBuffering(false);
 	    uiVisible.value = true;
@@ -1945,6 +2026,7 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
   art.on('video:error', () => {
     // ArtPlayer's delayed error reconnect can outlive destroy(); never share that element.
     currentVideoReusable = false;
+    currentMediaInvalid = true;
     setBuffering(false);
     uiVisible.value = true;
     try {
@@ -2026,7 +2108,7 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
 };
 
 const restoreShortVideoRate = () => {
-  if (!props.shortVideoMode || !art) return;
+  if ((!props.shortVideoCacheEnabled && !props.shortVideoMode) || !art) return;
   art.video.defaultPlaybackRate = shortVideoPlaybackRate;
   art.video.playbackRate = shortVideoPlaybackRate;
   playbackRate.value = shortVideoPlaybackRate;
@@ -2047,6 +2129,7 @@ const togglePlay = () => {
     const v = art && art.video ? art.video : null;
     if (v && typeof v.pause === 'function' && typeof v.play === 'function') {
       if (v.paused) {
+        if (props.shortVideoCacheEnabled && shortVideoBuffer) shortVideoBuffer.activate();
         const player = art;
         v.play().catch((error) => handlePlayRejection(error, player));
       } else {
@@ -2421,7 +2504,7 @@ const onSeekCancel = () => {
 };
 
 const setRate = (r) => {
-  if (props.shortVideoMode) {
+  if (props.shortVideoCacheEnabled || props.shortVideoMode) {
     shortVideoPlaybackRate = r;
     playbackRate.value = r;
     shortVideoRateOpen.value = false;
@@ -2838,14 +2921,19 @@ onMounted(() => {
   scheduleSyncDesktopRightControlsFit();
 });
 watch(
-  () => props.url,
-  (next, prev) => {
+  () => [props.url, props.shortVideoCacheKey, props.headers],
+  ([next, key, headers], [prev, previousKey, previousHeaders]) => {
     const a = (next || '').trim();
     const b = (prev || '').trim();
-    if (a && a !== b) init();
+    if (a && a === b && key && !previousKey && art &&
+      JSON.stringify(headers) === JSON.stringify(previousHeaders)) {
+      // Enabling the cache adopts the already-playing element, not a new load.
+      currentCacheKey = key;
+      registerShortVideoPlayback();
+    } else if (a && (a !== b || key !== previousKey || JSON.stringify(headers) !== JSON.stringify(previousHeaders))) init();
     if (!a && art) {
-      destroyNow({ preserveShortVideoVideo: props.shortVideoMode });
-      if (props.shortVideoMode) {
+      destroyNow({ preserveShortVideoVideo: props.shortVideoCacheEnabled || props.shortVideoMode });
+      if (props.shortVideoCacheEnabled || props.shortVideoMode) {
         currentTime.value = 0;
         duration.value = 0;
         autoplayBlocked.value = false;
@@ -2854,7 +2942,13 @@ watch(
   }
 );
 
-watch(() => [props.shortVideoMode, props.shortVideoBufferCandidates], syncShortVideoBuffer, { flush: 'post' });
+watch(() => props.shortVideoCacheEnabled, (enabled) => {
+  if (enabled && art && currentPlaybackUrl === props.url) {
+    currentCacheKey = props.shortVideoCacheKey;
+    registerShortVideoPlayback();
+  }
+});
+watch(() => [props.shortVideoCacheEnabled, props.shortVideoBufferCandidates, props.shortVideoCacheKeys], syncShortVideoBuffer, { flush: 'post' });
 
 	watch(
 	  () => {
@@ -2918,6 +3012,9 @@ const pause = () => {
 const play = async () => {
   const player = art;
   try {
+    // WebKit can keep a redundant play() promise pending on retained media
+    // even while frames advance; do not let that lock episode navigation.
+    if (props.shortVideoCacheEnabled && player && !player.video.paused && player.video.readyState >= 2) return;
     if (art && typeof art.play === 'function') return await art.play();
     const v = art && art.video ? art.video : null;
     if (v && typeof v.play === 'function') return await v.play();

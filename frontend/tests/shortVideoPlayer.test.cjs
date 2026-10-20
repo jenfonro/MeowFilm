@@ -25,6 +25,9 @@ function eventTarget() {
       if (!listeners.has(type)) listeners.set(type, []);
       listeners.get(type).push(listener);
     },
+    removeEventListener(type, listener) {
+      listeners.set(type, (listeners.get(type) || []).filter(item => item !== listener));
+    },
     dispatch(type, event = {}) {
       for (const listener of listeners.get(type) || []) listener(event);
     },
@@ -104,7 +107,7 @@ function gestures(props = {}, { time = 30, duration = 240, paused = false, width
   const context = vm.createContext({
     ...physics,
     props: {
-      shortVideoMode: true, episodeSwitching: false, url: 'episode.mp4',
+      shortVideoMode: true, shortVideoCacheEnabled: true, episodeSwitching: false, url: 'episode.mp4',
       shortVideoPrev: 'Episode 1', shortVideoNext: 'Episode 3', ...props,
     },
     shortVideoRateOpen: { value: false },
@@ -926,7 +929,8 @@ function playback() {
   };
   const context = vm.createContext({
     art: { video, playbackRate: 1 },
-    props: { shortVideoMode: true, episodeSwitching: false, url: 'episode.mp4' },
+    props: { shortVideoMode: true, shortVideoCacheEnabled: false, episodeSwitching: false, url: 'episode.mp4' },
+    shortVideoBuffer: { activate() {} },
     playbackRate: { value: 1 }, shortVideoPlaybackRate: 1,
     shortVideoRateOpen: { value: true }, autoplayBlocked: { value: false },
     setBuffering(value) { context.buffering = value; },
@@ -969,6 +973,20 @@ test('normal playback keeps the existing speed setter and is not forced to the s
   assert.equal(context.shortVideoPlaybackRate, 1);
   context.restore();
   assert.equal(context.art.video.playbackRate, 1);
+});
+
+test('sticky short video cache keeps the selected speed after leaving the short video UI', () => {
+  const context = playback();
+  context.props.shortVideoCacheEnabled = true;
+  context.setRate(1.5);
+  context.props.shortVideoMode = false;
+  context.art = null;
+  context.setRate(2);
+  context.art = { video: { playbackRate: 1, defaultPlaybackRate: 1 } };
+  context.restore();
+  assert.equal(context.art.video.playbackRate, 2);
+  assert.equal(context.art.video.defaultPlaybackRate, 2);
+  assert.equal(context.playbackRate.value, 2);
 });
 
 test('short video: tap pauses/plays the underlying video, but not while changing episodes', async () => {
@@ -1032,21 +1050,429 @@ test('taps, seeking, cancelled swipes and episode boundaries do not activate nei
   assert.deepEqual(context.activations, []);
 });
 
+function mediaVideo({ time = 12, duration = 90, readyState = 0 } = {}) {
+  let src = 'episode.mp4';
+  const video = Object.assign(eventTarget(), {
+    duration, readyState, paused: true, muted: false,
+    playbackRate: 1, defaultPlaybackRate: 1, videoWidth: 720, videoHeight: 1280,
+    sourceChanges: [], seeks: [], firstChild: null,
+    canPlayType: () => 'maybe',
+    setAttribute(name, value) { if (name === 'src') this.src = value; },
+    removeAttribute(name) {
+      if (name === 'src') { this.sourceChanges.push(['removeAttribute', name]); src = ''; }
+    },
+    removeChild(child) { this.sourceChanges.push(['removeChild', child]); this.firstChild = null; },
+    load() { this.sourceChanges.push(['load']); },
+    play() { this.paused = false; return Promise.resolve(); },
+    pause() { this.paused = true; },
+  });
+  return Object.defineProperties(video, {
+    src: {
+      get: () => src,
+      set(value) { this.sourceChanges.push(['src', value]); src = value; },
+    },
+    currentTime: {
+      get: () => time,
+      set(value) { this.seeks.push(value); time = value; },
+    },
+  });
+}
+
+function playerContext({ props = {}, video = mediaVideo(), cached = null, keptMedia = false } = {}) {
+  const cacheCalls = [];
+  const destroys = [];
+  const frames = [];
+  class Artplayer {
+    static REMOVE_SRC_WHEN_DESTROY = true;
+    constructor(option) {
+      this.video = option.proxy ? option.proxy() : video;
+      this.events = new Map();
+      this.isDestroy = false;
+      this.destroyFailures = 0;
+      this.template = { $player: null };
+      const type = option.type || option.url.split('?')[0].split('.').pop();
+      const loader = option.customType[type];
+      // ArtPlayer defers custom loaders but assigns native src immediately.
+      this.loadSource = () => loader && loader(this.video, option.url, this);
+      if (!loader) this.video.src = option.url;
+    }
+    get currentTime() { return this.video.currentTime; }
+    set currentTime(value) { this.video.currentTime = value; }
+    get duration() { return this.video.duration; }
+    get playing() { return !this.video.paused; }
+    get playbackRate() { return this.video.playbackRate; }
+    on(name, callback) {
+      if (!this.events.has(name)) this.events.set(name, []);
+      this.events.get(name).push(callback);
+    }
+    emit(name) { for (const callback of this.events.get(name) || []) callback(); }
+    destroy(remove) {
+      destroys.push([remove, Artplayer.REMOVE_SRC_WHEN_DESTROY]);
+      if (Artplayer.REMOVE_SRC_WHEN_DESTROY) this.video.removeAttribute('src');
+      if (this.destroyFailures-- > 0) throw new Error('destroy failed');
+      this.isDestroy = true;
+      this.events.clear();
+    }
+  }
+  const context = vm.createContext({
+    props: {
+      url: 'episode.mp4', headers: {}, autoplay: false, shortVideoMode: true,
+      shortVideoCacheEnabled: true, shortVideoCacheKey: 'episode-2',
+      shortVideoCacheKeys: ['episode-1', 'episode-2', 'episode-3'],
+      shortVideoBufferCandidates: [{ key: 'episode-3', url: 'next.mp4', headers: {} }],
+      ...props,
+    },
+    art: null, Artplayer, cached, keptMedia, cacheCalls, destroys, emitted: [], watchers: [],
+    shortVideoBuffer: {
+      sync(candidates, keys) { cacheCalls.push(['sync', candidates, keys]); },
+      adopt(entry) { cacheCalls.push(['adopt', entry]); },
+      park(key, options) { cacheCalls.push(['park', key, options]); return context.keptMedia; },
+      take(url, headers, key) { cacheCalls.push(['take', url, headers, key]); return context.cached; },
+      detach(video) { cacheCalls.push(['detach', video]); },
+      setVisible(visible) { cacheCalls.push(['setVisible', visible]); },
+      activate() { cacheCalls.push(['activate']); },
+      clear() { cacheCalls.push(['clear']); },
+    },
+    currentVideoReusable: false, retainedShortVideoVideo: null,
+    currentCacheKey: '', currentPlaybackUrl: '', currentPlaybackHeaders: {},
+    currentMediaInvalid: false, currentMediaEnded: false, shortVideoPlaybackRate: 1,
+    shortVideoSuppressClick: false, container: { value: {} }, shell: { value: null },
+    ...Object.fromEntries([
+      'isPip', 'isFullscreen', 'isMobile', 'isIos', 'autoplayBlocked', 'playing', 'buffering',
+      'currentTime', 'duration', 'volume', 'muted', 'playbackRate', 'aspectRatio', 'uiVisible',
+      'desktopControlsVisible', 'settingsOpen', 'teleportTarget', 'bufferedEnd',
+      'scrubbing', 'pointerScrubbing', 'scrubTime', 'shortVideoRateOpen',
+    ].map(key => [key, { value: 0 }])),
+    ...Object.fromEntries([
+      'cleanupMediaSession', 'cleanupPipListeners', 'cleanupFsListeners', 'cleanupNoCorsEnforcer',
+      'cleanupNativeVideoListeners', 'cleanupPlayerElListeners', 'cleanupInfoExtraObserver',
+      'cleanupDesktopLayoutObserver', 'mediaQuery',
+    ].map(key => [key, null])),
+    ...Object.fromEntries([
+      'timeUpdateRaf', 'timeUpdatePending', 'timeUpdateEmitAt', 'bufferUpdateRaf',
+      'bufferUpdatePending', 'hideTimer', 'desktopHideTimer', 'rightFitRaf',
+    ].map(key => [key, 0])),
+    window: {
+      location: { href: 'https://example.com/play', origin: 'https://example.com' },
+      clearTimeout() {}, cancelAnimationFrame() {}, removeEventListener() {},
+      requestAnimationFrame(callback) { frames.push(callback); return frames.length; },
+    },
+    document: Object.assign(eventTarget(), { hidden: false }), URL,
+    frame() { for (const callback of frames.splice(0)) callback(); },
+    emit(name, data) { context.emitted.push([name, data]); },
+    setBuffering(value) { context.buffering.value = value; },
+    showUiTemporarily() {}, scheduleBufferedSync() {}, syncInfoExtraIntoArtInfoPanel() {},
+    bindMediaSession() {}, interruptShortVideoPage() {}, onDocDown() {}, updateIsMobile() {},
+    watch(getter, callback) { context.watchers.push({ getter, callback }); },
+    onBeforeUnmount(callback) { context.unmount = callback; },
+    createCustomPlayer: { hls: async () => null },
+  });
+  vm.runInContext(
+    section('const detectVideoFormat =', 'let hlsModulePromise =') +
+    section('const syncShortVideoBuffer =', 'const createCustomPlayer =') +
+    section('const init =', 'const seekBySeconds =') +
+    section('watch(() => props.shortVideoMode,', 'watch(() => [props.url,') +
+    section('watch(() => props.shortVideoCacheEnabled,', '\n\twatch(') +
+    section('onBeforeUnmount(() =>', 'const pause =') +
+    section('const play = async () =>', '\n\tconst seekTo =') +
+    '\nObject.assign(this, { init, destroy: destroyNow, sync: syncShortVideoBuffer, ' +
+    'register: registerShortVideoPlayback, togglePlay, tryAutoplay });',
+    context,
+  );
+  return context;
+}
+
+test('autoplay does not await a second native play promise when cached frames are already playing', async () => {
+  for (const [enabled, paused, readyState, expectedCalls] of [
+    [true, false, 2, 0], [true, true, 4, 1], [true, false, 0, 1], [false, false, 2, 1],
+  ]) {
+    const context = playerContext({ props: { shortVideoCacheEnabled: enabled } });
+    context.init();
+    Object.assign(context.art.video, { paused, readyState });
+    let calls = 0;
+    context.art.play = () => {
+      calls++;
+      return expectedCalls ? Promise.resolve() : new Promise(() => {});
+    };
+    const result = await Promise.race([
+      context.tryAutoplay(),
+      new Promise(resolve => setImmediate(() => resolve('pending'))),
+    ]);
+    assert.equal(result, undefined, 'episode switching must not remain locked behind redundant play()');
+    assert.equal(calls, expectedCalls);
+  }
+});
+
+test('cache sync, adoption and parking follow the sticky flag, not the short video UI mode', () => {
+  for (const mode of [false, true]) {
+    for (const enabled of [false, true]) {
+      const context = playerContext({
+        props: { shortVideoMode: mode, shortVideoCacheEnabled: enabled }, keptMedia: true,
+      });
+      context.init();
+      const { props, cacheCalls } = context;
+      if (enabled) {
+        assert.deepEqual(cacheCalls.find(call => call[0] === 'take'),
+          ['take', props.url, props.headers, props.shortVideoCacheKey]);
+        const adopted = cacheCalls.find(call => call[0] === 'adopt')[1];
+        assert.equal(adopted.key, props.shortVideoCacheKey);
+        assert.equal(adopted.url, props.url);
+        assert.equal(adopted.video, context.art.video);
+        assert.deepEqual({ ...adopted.headers }, props.headers);
+        assert.deepEqual(cacheCalls.find(call => call[0] === 'sync'),
+          ['sync', props.shortVideoBufferCandidates, props.shortVideoCacheKeys]);
+        assert.deepEqual(cacheCalls.find(call => call[0] === 'setVisible'), ['setVisible', true]);
+      } else {
+        assert.deepEqual(cacheCalls, [['clear']]);
+      }
+      cacheCalls.length = 0;
+      props.shortVideoMode = !mode;
+      assert.equal(context.watchers[0].getter(), !mode);
+      context.watchers[0].callback(!mode);
+      assert.equal(props.shortVideoCacheEnabled, enabled);
+      assert.deepEqual(cacheCalls, [], 'switching UI mode must not clear or replace the cache');
+      context.document.hidden = true;
+      context.sync();
+      assert.deepEqual(cacheCalls, enabled ? [
+        ['sync', props.shortVideoBufferCandidates, props.shortVideoCacheKeys], ['setVisible', false],
+      ] : [['clear']]);
+      assert.deepEqual(Array.from(context.watchers[2].getter()),
+        [enabled, props.shortVideoBufferCandidates, props.shortVideoCacheKeys]);
+      context.togglePlay();
+      assert.equal(cacheCalls.some(call => call[0] === 'activate'), enabled);
+      context.destroy({ preserveShortVideoVideo: true });
+      assert.equal(cacheCalls.some(call => call[0] === 'park'), enabled);
+    }
+  }
+});
+
+test('enabling caching adopts the current playback without recreating it or using pending props', () => {
+  const context = playerContext({ props: { shortVideoMode: false, shortVideoCacheEnabled: false } });
+  context.init();
+  const player = context.art;
+  context.cacheCalls.length = 0;
+  assert.equal(context.watchers[1].getter(), false);
+  context.props.shortVideoCacheEnabled = true;
+  assert.equal(context.watchers[1].getter(), true);
+  context.watchers[1].callback(true);
+  assert.equal(context.art, player);
+  assert.deepEqual(context.cacheCalls.map(call => call[0]), ['adopt']);
+  context.props.url = 'next.mp4';
+  context.props.headers = { Authorization: 'next-token' };
+  context.props.shortVideoCacheKey = 'episode-3';
+  context.watchers[1].callback(true);
+  assert.equal(context.cacheCalls.length, 1, 'a pending URL must not be adopted as the playing episode');
+  context.register();
+  const adopted = context.cacheCalls.at(-1)[1];
+  assert.equal(adopted.key, 'episode-2');
+  assert.equal(adopted.url, 'episode.mp4');
+  assert.deepEqual({ ...adopted.headers }, {});
+});
+
+test('cached native and HLS media keep their source and engine when ArtPlayer is recreated', async t => {
+  for (const [name, url, ios, customPlayer] of [
+    ['MP4', 'episode.mp4', false, null],
+    ['iOS HLS', 'episode.m3u8', true, { direct: true }],
+    ['hls.js', 'episode.m3u8', false, { hls: {} }],
+  ]) {
+    for (const position of [null, 0, 24]) {
+      const restored = position !== null;
+      await t.test(`${name}, ${restored ? `returning cache at ${position}s` : 'prefetched neighbor'}`, async () => {
+        const video = mediaVideo({ readyState: 3, time: restored ? position : 12 });
+        let resumed = 0;
+        let created = 0;
+        const cached = {
+          video, customPlayer, activated: true, restored, position,
+          resume() { resumed++; }, destroy() { assert.fail('cached media must not be discarded'); },
+        };
+        const headers = name === 'hls.js' ? { Authorization: 'token' } : {};
+        const context = playerContext({ props: { url, headers, shortVideoMode: false }, cached });
+        context.isIos.value = ios;
+        context.createCustomPlayer.hls = async () => { created++; return null; };
+        context.init();
+        await context.art.loadSource();
+        assert.equal(context.art.video, video);
+        assert.equal(context.art.customPlayer, customPlayer);
+        assert.deepEqual(context.cacheCalls.find(call => call[0] === 'take'),
+          ['take', url, headers, 'episode-2']);
+        assert.equal(resumed, 1);
+        assert.equal(created, 0);
+        assert.deepEqual(video.sourceChanges, [], 'neither ArtPlayer nor the component may reset the cached source');
+        assert.deepEqual(video.seeks, [], 'retained media resumes without a redundant seek');
+        assert.equal(context.cacheCalls.some(call => call[0] === 'detach'), false);
+        const firstFrames = context.emitted.filter(([name]) => name === 'firstframe');
+        assert.equal(firstFrames.length, 1, 'already-loaded cached media must rehydrate the new UI');
+        assert.equal(firstFrames[0][1].cacheRestored, restored);
+        assert.equal(firstFrames[0][1].currentTime, restored ? position : 12);
+        video.dispatch('loadedmetadata');
+        context.art.emit('video:loadedmetadata');
+        context.art.emit('video:canplay');
+        assert.equal(context.emitted.filter(([name]) => name === 'loadedmetadata').length, 1);
+        assert.equal(context.emitted.filter(([name]) => name === 'firstframe').length, 1);
+      });
+    }
+  }
+});
+
+test('position-only cache returns restore even zero on loadedmetadata, once, and mark firstframe', async t => {
+  for (const position of [0, 37.5]) {
+    for (const nativeEvent of [false, true]) {
+      await t.test(`${position}s via ${nativeEvent ? 'native' : 'ArtPlayer'} metadata`, async () => {
+        const context = playerContext({
+          props: { shortVideoMode: false, url: nativeEvent ? 'episode.mp4' : 'episode.m3u8' },
+          cached: { video: null, restored: true, position },
+        });
+        const customPlayer = { hls: {} };
+        context.createCustomPlayer.hls = async () => customPlayer;
+        context.init();
+        await context.art.loadSource();
+        if (!nativeEvent) {
+          assert.equal(context.art.customPlayer, customPlayer);
+          assert.equal(context.cacheCalls.filter(call => call[0] === 'adopt').at(-1)[1].customPlayer, customPlayer);
+        }
+        const video = context.art.video;
+        assert.deepEqual(video.seeks, [], 'a position-only return must wait for metadata on the new video');
+        video.readyState = 1;
+        if (nativeEvent) video.dispatch('loadedmetadata');
+        else context.art.emit('video:loadedmetadata');
+        assert.deepEqual(video.seeks, [position]);
+        assert.equal(context.currentTime.value, position);
+        context.art.emit('video:canplay');
+        const firstFrame = context.emitted.find(([name]) => name === 'firstframe')[1];
+        assert.equal(firstFrame.cacheRestored, true);
+        assert.equal(firstFrame.currentTime, position);
+        video.currentTime = 55;
+        video.dispatch('loadedmetadata');
+        context.art.emit('video:loadedmetadata');
+        context.art.emit('video:canplay');
+        assert.deepEqual(video.seeks, [position, 55], 'duplicate metadata must not rewind playback again');
+        assert.equal(context.emitted.filter(([name]) => name === 'firstframe').length, 1);
+      });
+    }
+  }
+  const cold = playerContext();
+  cold.init();
+  cold.art.emit('video:loadedmetadata');
+  cold.art.emit('video:canplay');
+  assert.deepEqual(cold.art.video.seeks, []);
+  assert.equal(cold.emitted.find(([name]) => name === 'firstframe')[1].cacheRestored, false);
+});
+
+test('a retained native video is detached from the helper before reuse for another source', () => {
+  const retained = mediaVideo();
+  const context = playerContext({ props: { shortVideoMode: false, url: 'next.mp4' } });
+  context.retainedShortVideoVideo = retained;
+  context.init();
+  assert.equal(context.art.video, retained);
+  assert.deepEqual(context.cacheCalls.find(call => call[0] === 'detach'), ['detach', retained]);
+});
+
+test('parking media destroys only ArtPlayer UI and restores REMOVE_SRC_WHEN_DESTROY in finally', async t => {
+  for (const removeSrc of [false, true]) {
+    for (const failures of [0, 1, 2]) {
+      await t.test(`original flag ${removeSrc}, ${failures} destroy failures`, () => {
+        const context = playerContext({ props: { shortVideoMode: false }, keptMedia: true });
+        context.init();
+        const player = context.art;
+        const video = player.video;
+        let engineDestroyed = 0;
+        player.customPlayer = { hls: { destroy() { engineDestroyed++; } } };
+        player.__tvCustomToken = 'old-loader';
+        player.destroyFailures = failures;
+        video.sourceChanges.length = 0;
+        const child = video.firstChild = {};
+        context.Artplayer.REMOVE_SRC_WHEN_DESTROY = removeSrc;
+        context.destroy({ preserveShortVideoVideo: true });
+        assert.deepEqual(context.destroys, failures ? [[true, false], [false, false]] : [[true, false]]);
+        assert.equal(context.Artplayer.REMOVE_SRC_WHEN_DESTROY, removeSrc);
+        assert.deepEqual(video.sourceChanges, []);
+        assert.equal(video.firstChild, child);
+        assert.equal(engineDestroyed, 0);
+        assert.equal(player.__tvCustomToken, null);
+        assert.equal(context.art, null);
+        const [, key, options] = context.cacheCalls.find(call => call[0] === 'park');
+        assert.equal(key, 'episode-2');
+        assert.deepEqual({ ...options }, { ended: false, invalid: false });
+      });
+    }
+  }
+});
+
+test('a long-video park(false), disabled cache and unmount keep the original destructive teardown', async t => {
+  for (const name of ['long video', 'cache disabled', 'unmount']) {
+    await t.test(name, () => {
+      const context = playerContext({
+        props: { shortVideoCacheEnabled: name !== 'cache disabled' },
+        keptMedia: name !== 'long video',
+      });
+      context.init();
+      const video = context.art.video;
+      let engineDestroyed = 0;
+      context.art.customPlayer = { hls: { destroy() { engineDestroyed++; } } };
+      video.sourceChanges.length = 0;
+      video.firstChild = {};
+      context.cacheCalls.length = 0;
+      if (name === 'unmount') context.unmount();
+      else context.destroy({ preserveShortVideoVideo: true });
+      assert.equal(context.cacheCalls.some(call => call[0] === 'park'), name === 'long video');
+      if (name === 'unmount') {
+        assert.deepEqual(context.cacheCalls, [['clear']]);
+        assert.equal(context.shortVideoBuffer, null);
+        assert.equal(context.retainedShortVideoVideo, null);
+      }
+      assert.equal(video.src, '');
+      assert.ok(video.sourceChanges.some(([name]) => name === 'load'));
+      assert.equal(video.firstChild, null);
+      assert.equal(engineDestroyed, 1);
+      assert.deepEqual(context.destroys, [[true, true]]);
+      assert.equal(context.Artplayer.REMOVE_SRC_WHEN_DESTROY, true);
+    });
+  }
+});
+
+test('native and ArtPlayer ended events mark the cache without resetting reported history time', () => {
+  for (const nativeEvent of [false, true]) {
+    for (const replay of [false, true]) {
+      const video = mediaVideo({ time: 90, duration: 90 });
+      const context = playerContext({ video, keptMedia: true });
+      context.init();
+      if (nativeEvent) video.dispatch('ended');
+      else context.art.emit('video:ended');
+      assert.equal(context.currentMediaEnded, true);
+      assert.equal(video.currentTime, 90);
+      assert.equal(context.currentTime.value, 90);
+      assert.deepEqual(video.seeks, []);
+      assert.equal(context.emitted.find(([name]) => name === 'ended')[1].currentTime, 90);
+      context.art.emit('video:pause');
+      assert.equal(context.emitted.find(([name]) => name === 'timeupdate')[1].currentTime, 90);
+      context.art.emit('video:timeupdate');
+      context.frame();
+      assert.ok(context.emitted.filter(([name]) => name === 'timeupdate').every(([, data]) => data.currentTime === 90));
+      if (replay) context.art.emit('video:play');
+      context.destroy({ preserveShortVideoVideo: true });
+      assert.equal(context.cacheCalls.find(call => call[0] === 'park')[2].ended, !replay);
+    }
+  }
+});
+
 test('only native MP4/iOS HLS reuse the retained media element; custom engines do not', () => {
   const video = { canPlayType: () => 'maybe' };
   const code = section('  const retainedVideo = retainedShortVideoVideo;', 'const playUrlForArt =');
-  for (const [format, ios, headers, enabled, expected] of [
-    ['native', true, {}, true, video],
-    ['hls', true, {}, true, video],
-    ['hls', true, { Authorization: 'token' }, true, null],
-    ['hls', false, {}, true, null],
-    ['dash', true, {}, true, null],
-    ['flv', true, {}, true, null],
-    ['native', true, {}, false, null],
+  for (const [format, ios, headers, mode, cache, expected] of [
+    ['native', true, {}, true, false, video],
+    ['hls', true, {}, true, false, video],
+    ['hls', true, { Authorization: 'token' }, true, false, null],
+    ['hls', false, {}, true, false, null],
+    ['dash', true, {}, true, false, null],
+    ['flv', true, {}, true, false, null],
+    ['native', true, {}, false, false, null],
+    ['native', true, {}, false, true, video],
+    ['hls', true, {}, false, true, video],
   ]) {
     const context = vm.createContext({
-      format, isIos: { value: ios }, props: { shortVideoMode: enabled, headers },
-      retainedShortVideoVideo: video, warmed: null,
+      format, isIos: { value: ios }, props: { shortVideoMode: mode, shortVideoCacheEnabled: cache, headers },
+      retainedShortVideoVideo: video, warmed: null, shortVideoBuffer: null,
+      url: 'episode.mp4',
     });
     assert.equal(vm.runInContext(code + '\nreuseVideo;', context), expected);
     assert.equal(context.retainedShortVideoVideo, null);
@@ -1068,7 +1494,7 @@ test('iOS retains authorized native playback unless the warmed element was gestu
     const warmVideo = {};
     const context = vm.createContext({
       format, isIos: { value: ios }, props: { shortVideoMode: true, headers },
-      retainedShortVideoVideo: video,
+      retainedShortVideoVideo: video, shortVideoBuffer: null, url: 'episode.mp4',
       warmed: { video: warmVideo, activated, destroy() { destroyed = true; } },
     });
     assert.equal(vm.runInContext(code + '\nreuseVideo;', context), useWarm ? warmVideo : video);
@@ -1077,48 +1503,66 @@ test('iOS retains authorized native playback unless the warmed element was gestu
 });
 
 test('teardown retains at most one eligible video for a short video transition, not for unmount', () => {
-  const video = { pause() {}, removeAttribute() {}, load() {} };
-  const context = vm.createContext({
-    art: { video, destroy() {}, __tvCustomToken: 'old-loader' },
-    currentVideoReusable: true, retainedShortVideoVideo: null,
-    cleanupMediaSession: null, setBuffering() {}, destroyCustomPlayer() {},
-    window: { clearTimeout() {}, cancelAnimationFrame() {} }, document: {},
-    shell: { value: null },
-    ...Object.fromEntries([
-      'settingsOpen', 'teleportTarget', 'isPip', 'playing', 'bufferedEnd',
-      'scrubbing', 'pointerScrubbing', 'scrubTime',
-    ].map(key => [key, { value: false }])),
-  });
+  const context = playerContext({ props: { shortVideoCacheEnabled: false } });
+  context.init();
+  const video = context.art.video;
   const oldPlayer = context.art;
-  vm.runInContext(
-    section('const destroyNow =', 'const createCustomPlayer =') + '\nthis.destroy = destroyNow;',
-    context,
-  );
+  oldPlayer.__tvCustomToken = 'old-loader';
   context.destroy({ preserveShortVideoVideo: true });
   assert.equal(context.retainedShortVideoVideo, video);
   assert.equal(context.art, null);
   assert.equal(oldPlayer.__tvCustomToken, null);
   context.destroy();
   assert.equal(context.retainedShortVideoVideo, null);
-  context.art = { video, destroy() {} };
+  context.init();
   context.currentVideoReusable = false;
   context.destroy({ preserveShortVideoVideo: true });
   assert.equal(context.retainedShortVideoVideo, null);
 });
 
-test('media errors disable reuse so an old ArtPlayer reconnect cannot overwrite the next episode', () => {
-  let onError;
-  const context = vm.createContext({
-    art: {
-      video: { error: { code: 2 } },
-      on(name, handler) { assert.equal(name, 'video:error'); onError = handler; },
-    },
-    currentVideoReusable: true, uiVisible: { value: false },
-    setBuffering() {}, emit() {},
-  });
-  vm.runInContext(section("  art.on('video:error',", '  // iOS native fullscreen'), context);
-  onError();
-  assert.equal(context.currentVideoReusable, false);
+test('media errors invalidate cache parking and disable reuse by delayed ArtPlayer reconnects', async t => {
+  for (const route of ['native', 'ArtPlayer', 'adopt', 'resume']) {
+    await t.test(route, async () => {
+      const video = mediaVideo();
+      video.error = { code: 2 };
+      let resumeError;
+      let engineDestroyed = 0;
+      let oldErrorCleanup = 0;
+      const cached = {
+        video, activated: true, restored: true, position: 12,
+        customPlayer: {
+          hls: { destroy() { engineDestroyed++; } },
+          __tvCleanupError() { oldErrorCleanup++; },
+        },
+        resume(onError) { resumeError = onError; },
+      };
+      // The helper rejects invalid media; verify the component passes the invalid flag.
+      const context = playerContext({ cached, keptMedia: false });
+      context.init();
+      await context.art.loadSource();
+      const adopted = context.cacheCalls.find(call => call[0] === 'adopt')[1];
+      assert.equal(oldErrorCleanup, 1);
+      if (route === 'native') video.dispatch('error');
+      if (route === 'ArtPlayer') context.art.emit('video:error');
+      if (route === 'adopt') adopted.onError('fatal HLS error');
+      if (route === 'resume') resumeError('fatal HLS error');
+      assert.equal(context.currentMediaInvalid, true);
+      assert.equal(context.currentVideoReusable, false);
+      assert.equal(context.emitted.filter(([name]) => name === 'error').length, 1);
+      context.destroy({ preserveShortVideoVideo: true });
+      assert.equal(context.cacheCalls.find(call => call[0] === 'park')[2].invalid, true);
+      assert.equal(context.retainedShortVideoVideo, null);
+      assert.equal(video.src, '');
+      assert.equal(engineDestroyed, 1);
+      assert.deepEqual(context.destroys, [[true, true]]);
+      const emitted = context.emitted.length;
+      adopted.onError('stale error');
+      resumeError('stale error');
+      video.dispatch('error');
+      assert.equal(context.emitted.length, emitted);
+      assert.equal(context.currentMediaInvalid, false);
+    });
+  }
 });
 
 test('a custom loader scheduled by a destroyed player cannot touch a reused native HLS element', () => {

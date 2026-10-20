@@ -1,9 +1,10 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
+const { join } = require('node:path');
 const vm = require('node:vm');
 
-const source = readFileSync('src/shared/ArtPlayer.vue', 'utf8');
+const source = readFileSync(join(__dirname, '../src/shared/ArtPlayer.vue'), 'utf8');
 const pipCode = source.slice(source.indexOf('const togglePip ='), source.indexOf('const syncMediaMetadata ='));
 const mediaCode = source.slice(source.indexOf('const syncMediaMetadata ='), source.indexOf('watch(() => [props.title'));
 
@@ -146,4 +147,50 @@ test('HLS opens requests before applying authentication headers, including after
   config.xhrSetup(xhr, 'https://video.example/part.ts');
   assert.deepEqual(received, { Authorization: 'Bearer test', Referer: 'https://video.example/' });
   assert.equal(xhr.withCredentials, false);
+});
+
+test('fatal HLS errors invalidate only the active media and release their listener when the cache adopts it', async () => {
+  const start = source.indexOf('async hls(videoEl, url, headers) {');
+  const end = source.indexOf('async flv(videoEl, url, headers) {', start);
+  const handlers = new Map();
+  class Hls {
+    static Events = { ERROR: 'hlsError' };
+    static isSupported() { return true; }
+    on(name, callback) { handlers.set(name, callback); }
+    off(name, callback) {
+      assert.equal(handlers.get(name), callback);
+      handlers.delete(name);
+    }
+    loadSource() {}
+    attachMedia() {}
+  }
+  const video = {};
+  const errors = [];
+  const context = vm.createContext({
+    isIos: { value: false }, isMobile: { value: true }, loadHls: async () => Hls,
+    art: { video }, currentMediaInvalid: false, currentVideoReusable: true,
+    emit(name, data) { errors.push([name, data]); },
+  });
+  vm.runInContext(`this.hls = ({ ${source.slice(start, end)} }).hls;`, context);
+  const custom = await context.hls(video, 'private.m3u8', { Authorization: 'token' });
+  const onError = handlers.get(Hls.Events.ERROR);
+  assert.equal(typeof onError, 'function');
+  onError(null, { fatal: false, details: 'recoverable' });
+  assert.equal(context.currentMediaInvalid, false);
+  assert.equal(context.currentVideoReusable, true);
+  assert.deepEqual(errors, []);
+  context.art = { video: {} };
+  onError(null, { fatal: true, details: 'stale error' });
+  assert.equal(context.currentMediaInvalid, false);
+  assert.equal(context.currentVideoReusable, true);
+  assert.deepEqual(errors, []);
+  context.art = { video };
+  onError(null, { fatal: true, details: 'manifestLoadError' });
+  assert.equal(context.currentMediaInvalid, true);
+  assert.equal(context.currentVideoReusable, false);
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0][0], 'error');
+  assert.deepEqual({ ...errors[0][1] }, { code: 2, message: 'manifestLoadError' });
+  custom.__tvCleanupError();
+  assert.equal(handlers.size, 0, 'adoption must not leave duplicate engine error listeners');
 });

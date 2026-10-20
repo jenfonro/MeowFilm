@@ -5,14 +5,16 @@ const { join } = require('node:path');
 const vm = require('node:vm');
 
 const source = readFileSync(join(__dirname, '../src/shared/shortVideoBuffer.js'), 'utf8');
-const BUFFER_BYTES = 4 * 1024 * 1024;
+const MiB = 1024 * 1024;
+const CACHE_BYTES = 512 * MiB;
+const NORMAL_BUFFER = { maxBufferLength: 60, maxMaxBufferLength: 120, backBufferLength: 75, maxBufferSize: 200e6 };
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const deferred = () => {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 };
-const candidate = (name, headers) => ({ url: `https://media.test/${name}`, headers });
+const candidate = (name, headers, key = name) => ({ key, url: `https://media.test/${name}`, headers });
 
 class Events {
   listeners = new Map();
@@ -36,9 +38,11 @@ class Video extends Events {
   srcWrites = [];
   loadCalls = 0;
   playCalls = 0;
+  pauseCalls = 0;
+  paused = true;
   readyState = 0;
   currentTime = 0;
-  duration = 60;
+  duration = NaN;
   ranges = [];
   autoplay = true;
   controls = true;
@@ -72,6 +76,7 @@ class Video extends Events {
     }
   }
   play() { this.playCalls++; assert.fail('prebuffering must never play media'); }
+  pause() { this.pauseCalls++; this.paused = true; }
   remove() {
     if (!this.parentNode) return;
     const parent = this.parentNode;
@@ -123,12 +128,16 @@ function fixture({ preferNativeHls = false, nativeHls = '', supported = true, lo
   };
   class Hls extends Events {
     static Events = Object.fromEntries([
-      'ERROR', 'MANIFEST_LOADED', 'LEVEL_LOADED', 'FRAG_LOADED', 'FRAG_BUFFERED',
+      'ERROR', 'MANIFEST_LOADED', 'MANIFEST_PARSED', 'LEVEL_LOADED', 'FRAG_LOADED', 'FRAG_BUFFERED',
     ].map(name => [name, name]));
     static isSupported() { return supported; }
     stopCalls = 0;
     destroyCalls = 0;
     starts = [];
+    pauseBufferCalls = 0;
+    resumeBufferCalls = 0;
+    bufferingEnabled = true;
+    loadingEnabled = false;
     constructor(config) {
       super();
       if (Hls.failure === 'constructor') throw new Error('constructor failed');
@@ -146,11 +155,13 @@ function fixture({ preferNativeHls = false, nativeHls = '', supported = true, lo
     }
     attachMedia(video) {
       if (Hls.failure === 'attachMedia') throw new Error('attach failed');
-      this.video = video;
+      this.video = this.media = video;
       video.src = 'blob:mock-media-source';
     }
     stopLoad() { this.stopCalls++; }
-    startLoad(position) { this.starts.push(position); }
+    startLoad(position) { this.starts.push(position); this.loadingEnabled = this.bufferingEnabled = true; }
+    pauseBuffering() { this.pauseBufferCalls++; this.bufferingEnabled = false; }
+    resumeBuffering() { this.resumeBufferCalls++; this.bufferingEnabled = true; }
     destroy() {
       this.destroyCalls++;
       this.listeners.clear();
@@ -186,6 +197,7 @@ function fixture({ preferNativeHls = false, nativeHls = '', supported = true, lo
   });
   return {
     pool, videos, engines, Hls, host, timers,
+    newVideo() { return host.ownerDocument.createElement('video'); },
     get loadHlsCalls() { return loadHlsCalls; },
     advance(ms) {
       now += ms;
@@ -198,12 +210,31 @@ function fixture({ preferNativeHls = false, nativeHls = '', supported = true, lo
   };
 }
 
-test('native prefetch mounts a tiny muted inline video and only requests metadata', () => {
-  const { pool, videos, host } = fixture();
-  const { url } = candidate('a.mp4?token=A#exact');
-  pool.sync([{ url }]);
-  const video = videos[0];
-  assert.equal(host.children[0], video);
+const sync = (f, candidates, keys = candidates.map(item => item.key)) => f.pool.sync(candidates, keys);
+const take = (f, item) => f.pool.take(item.url, item.headers, item.key);
+const metadata = (video, duration) => {
+  video.duration = duration;
+  video.dispatch('loadedmetadata');
+};
+const manifest = (hls, duration, live = false) => hls.emit('MANIFEST_PARSED', {
+  levels: [{ details: { totalduration: duration, live } }],
+});
+const fragment = (hls, bytes) => hls.emit('FRAG_LOADED', { frag: { stats: { loaded: bytes } } });
+const external = (f, item, duration = 120, customPlayer, onError) => {
+  const video = f.newVideo();
+  video.src = item.url;
+  video.duration = duration;
+  video.paused = false;
+  f.pool.adopt({ ...item, video, customPlayer, onError });
+  return video;
+};
+
+// Native media has no byte estimate: all seven short episode slots are allowed.
+test('native next is metadata-gated, then requests auto preload without playing or reloading', () => {
+  const f = fixture(), item = candidate('a.mp4?token=A#exact');
+  sync(f, [item]);
+  const video = f.videos[0];
+  assert.equal(f.host.children[0], video);
   assert.equal(video.width, 2);
   assert.equal(video.height, 2);
   assert.equal(video.autoplay, false);
@@ -215,45 +246,420 @@ test('native prefetch mounts a tiny muted inline video and only requests metadat
   assert.equal(video.attributes.get('referrerpolicy'), 'no-referrer');
   assert.equal(video.attributes.has('crossorigin'), false);
   assert.equal(Object.hasOwn(video, 'crossOrigin'), false);
-  assert.equal(video.src, url);
+  metadata(video, 359.99);
+  assert.equal(video.preload, 'auto');
+  assert.equal(video.src, item.url);
   assert.equal(video.loadCalls, 1);
-  video.ranges = [[0, 120]];
-  video.dispatch('progress');
-  assert.equal(video.preload, 'metadata', 'native buffering remains browser-controlled');
+  f.advance(60000);
+  assert.equal(video.src, item.url, 'no old eight-second deadline truncates full-episode buffering');
   assert.equal(video.playCalls, 0);
-  pool.clear();
+  f.pool.clear();
   assert.equal(video.src, '');
   assert.equal(video.loadCalls, 2);
-  assert.equal(host.children.length, 0);
   assert.equal(video.listenerCount, 0);
+  assert.equal(f.host.children.length, 0);
 });
 
-test('sync deduplicates, caps the pool at two, and evicts before allocating replacements', () => {
-  const { pool, videos, host, timers } = fixture();
-  const a = candidate('a.mp4'), b = candidate('b.mp4'), c = candidate('c.mp4');
-  pool.sync([a, a, b, c]);
-  assert.equal(videos.length, 2);
-  assert.equal(pool.take(c.url), null);
-  pool.sync([b, a]);
-  assert.equal(videos.length, 2, 'reordering does not reload retained candidates');
-  pool.sync([b, c]);
-  assert.equal(videos.length, 3);
-  assert.equal(videos[0].src, '');
-  assert.equal(videos[1].loadCalls, 1);
-  assert.equal(host.children.length, 2);
-  assert.equal(host.peak, 2);
-  pool.sync([]);
-  pool.clear();
-  assert.equal(host.children.length, 0);
-  assert.equal(timers.size, 0);
-  assert.ok(videos.every(video => video.loadCalls === 2 && video.playCalls === 0));
+test('only next candidates download; keys alone never download unvisited previous episodes', () => {
+  const f = fixture(), a = candidate('a.mp4'), b = candidate('b.mp4');
+  const keys = ['prev-5', 'prev-4', 'prev-3', 'prev-2', 'prev-1', a.key, b.key];
+  sync(f, [b, b], keys);
+  assert.equal(f.videos.length, 1);
+  assert.equal(take(f, a), null);
+  sync(f, [b], keys);
+  assert.equal(f.videos.length, 1);
+  sync(f, [], keys);
+  assert.equal(f.videos[0].src, b.url, 'already warmed media inside the window survives next changing');
+  assert.equal(f.videos[0].preload, 'none', 'non-next media stops prefetching without losing its source');
+  sync(f, [b], keys);
+  assert.equal(f.videos.length, 1);
+  sync(f, [candidate('outside.mp4')], keys);
+  assert.equal(f.videos.length, 1, 'candidates outside the seven-key window are not requested');
+  f.pool.clear();
 });
 
-test('exact URLs and sorted header key/value pairs isolate entries and snapshot request headers', async () => {
+test('a new window/next may sync before old current parks and warmed current is taken', async () => {
+  for (const extension of ['mp4', 'm3u8']) {
+    const f = fixture();
+    const items = [10, 11, 12].map(id => candidate(`${id}.${extension}`, undefined, String(id)));
+    sync(f, [items[0], items[1]], ['5', '6', '7', '8', '9', '10', '11']);
+    await flush();
+    if (extension === 'm3u8') f.engines.forEach(hls => manifest(hls, 240));
+    else f.videos.forEach(video => metadata(video, 240));
+    const old = take(f, items[0]), warmedVideo = f.videos[1], warmedHls = f.engines[1];
+    old.video.currentTime = 48;
+    const loads = warmedVideo.loadCalls, sources = [...warmedVideo.srcWrites];
+    // PlayPage has switched to 11 and resolved 12; ArtPlayer still owns 10.
+    sync(f, [items[2]], ['6', '7', '8', '9', '10', '11', '12']);
+    await flush();
+    assert.notEqual(warmedVideo.src, '');
+    if (warmedHls) {
+      assert.equal(warmedHls.destroyCalls, 0);
+      assert.equal(warmedHls.bufferingEnabled, false);
+    } else assert.equal(warmedVideo.preload, 'none');
+    assert.equal(f.pool.park(items[0].key), true);
+    const current = take(f, items[1]);
+    assert.equal(current.video, warmedVideo, '11 keeps its prewarmed node, so 10 need not be repurposed');
+    assert.equal(current.restored, false);
+    current.resume();
+    assert.equal(warmedVideo.loadCalls, loads);
+    assert.deepEqual(warmedVideo.srcWrites, sources);
+    assert.equal(f.pool.park(items[1].key), true);
+    const restored = take(f, items[0]);
+    assert.equal(restored.video, old.video);
+    assert.equal(restored.position, 48);
+    assert.equal(restored.restored, true);
+    restored.destroy();
+    f.pool.clear();
+  }
+});
+
+test('seven native slots retain visited nodes; moving the window prunes the oldest, not active', () => {
   const f = fixture();
-  const a = candidate('a.m3u8?token=A', { Authorization: 'A', Z: 3 });
-  const b = candidate('a.m3u8?token=A', { Authorization: 'B', Z: 3 });
-  f.pool.sync([a, b]);
+  const items = Array.from({ length: 8 }, (_, i) => candidate(`${10 + i}.mp4`));
+  const keys = items.slice(0, 7).map(item => item.key);
+  for (let i = 0; i < 6; i++) {
+    const video = external(f, items[i]);
+    video.currentTime = i + 1;
+    sync(f, [], keys);
+    assert.equal(f.pool.park(items[i].key), true);
+  }
+  sync(f, [items[6]], keys);
+  assert.equal(f.host.children.length, 7, 'native nodes are not charged fictitious 64MiB fees');
+  assert.ok(f.videos.every(video => video.src && video.loadCalls === 0 || video.loadCalls === 1));
+  const restored = take(f, items[0]);
+  assert.equal(restored.video, f.videos[0]);
+  assert.equal(restored.position, 1);
+  sync(f, [items[7]], items.slice(1).map(item => item.key));
+  assert.notEqual(f.videos[0].src, '', 'active is never pruned, even outside keys');
+  assert.equal(f.pool.park(items[0].key), true);
+  sync(f, [items[7]], items.slice(1).map(item => item.key));
+  assert.equal(f.videos[0].src, '');
+  assert.equal(take(f, items[0]), null, 'pruning drops position metadata as well');
+  f.pool.clear();
+  assert.equal(f.host.children.length, 0);
+});
+
+test('manual park/take preserves the same node, engine, buffer and position; ended rewinds to zero', async () => {
+  const f = fixture(), item = candidate('a.m3u8');
+  sync(f, [item]);
+  await flush();
+  const video = f.videos[0], hls = f.engines[0];
+  manifest(hls, 240);
+  video.ranges = [[0, 240]];
+  const first = take(f, item);
+  assert.equal(first.restored, false);
+  first.resume();
+  video.currentTime = 78.5;
+  video.remove();
+  sync(f, [], [item.key]);
+  const loads = video.loadCalls, writes = [...video.srcWrites];
+  assert.equal(f.pool.park(item.key), true);
+  assert.equal(video.paused, true);
+  assert.equal(f.host.children[0], video);
+  assert.equal(hls.bufferingEnabled, false, 'parked previous is paused without aborting its source');
+  const restored = take(f, item);
+  assert.equal(restored.video, video);
+  assert.equal(restored.customPlayer.hls, hls);
+  assert.equal(restored.position, 78.5);
+  assert.equal(restored.restored, true);
+  restored.resume();
+  assert.equal(hls.bufferingEnabled, true);
+  assert.equal(hls.stopCalls, 0);
+  assert.equal(hls.destroyCalls, 0);
+  assert.deepEqual(video.ranges, [[0, 240]]);
+  assert.equal(video.loadCalls, loads);
+  assert.deepEqual(video.srcWrites, writes);
+  video.currentTime = 240;
+  assert.equal(f.pool.park(item.key, { ended: true }), true);
+  const ended = take(f, item);
+  assert.equal(ended.position, 0);
+  assert.equal(ended.video.currentTime, 0);
+  ended.destroy();
+  ended.destroy();
+  assert.equal(hls.destroyCalls, 1);
+});
+
+test('long, unknown, live, invalid, FLV and DASH park only position and leave destruction to the caller', () => {
+  for (const [name, duration, invalid] of [
+    ['a.mp4', 360], ['a.mp4', 1000], ['a.mp4', NaN], ['a.mp4', 0],
+    ['a.m3u8', Infinity], ['a.flv', 120], ['a.mpd', 120], ['a.mp4', 120, true],
+  ]) {
+    const f = fixture({ preferNativeHls: true, nativeHls: 'maybe' });
+    const item = candidate(name);
+    let destroys = 0;
+    const customPlayer = name.endsWith('.flv') ? { flv: { destroy() { destroys++; } } }
+      : name.endsWith('.mpd') ? { dash: { destroy() { destroys++; } } } : null;
+    const video = external(f, item, duration, customPlayer);
+    video.currentTime = 42.5;
+    const src = video.src, loads = video.loadCalls;
+    assert.equal(f.pool.park(item.key, { invalid }), false, name);
+    assert.equal(video.paused, true);
+    assert.equal(video.src, src, 'park(false) must not clear the source');
+    assert.equal(video.loadCalls, loads);
+    assert.equal(video.listenerCount, 0);
+    const restored = take(f, item);
+    assert.equal(restored.video, null);
+    assert.equal(restored.customPlayer, null);
+    assert.equal(restored.restored, true);
+    assert.equal(restored.position, 42.5);
+    restored.resume(() => assert.fail('position-only entries cannot emit errors'));
+    restored.destroy();
+    f.pool.clear();
+    assert.equal(video.src, src);
+    assert.equal(destroys, 0, 'only the caller owns external FLV/DASH destruction');
+  }
+});
+
+test('ended park resets position even when no media can be retained', () => {
+  const f = fixture(), item = candidate('long.mp4');
+  const video = external(f, item, 720);
+  video.currentTime = 720;
+  assert.equal(f.pool.park(item.key, { ended: true }), false);
+  assert.equal(take(f, item).position, 0);
+  assert.equal(f.pool.park(item.key, { ended: true }), false);
+  assert.equal(take(f, item).position, 0);
+  f.pool.clear();
+});
+
+test('adopt updates the same prewarmed node and late engine without resetting progress or gesture permission', async () => {
+  const f = fixture(), item = candidate('a.m3u8');
+  const video = external(f, item);
+  video.currentTime = 21;
+  const hls = new f.Hls({ ...NORMAL_BUFFER });
+  hls.attachMedia(video);
+  f.pool.adopt({ ...item, video, customPlayer: { hls }, activated: true });
+  const listeners = hls.listenerCount;
+  f.pool.adopt({ ...item, video, customPlayer: { hls }, activated: false });
+  assert.equal(hls.listenerCount, listeners);
+  assert.equal(hls.config.backBufferLength, Infinity);
+  assert.equal(f.pool.park(item.key), true);
+  const result = take(f, item);
+  assert.equal(result.position, 21);
+  assert.equal(result.video, video);
+  assert.equal(result.activated, true);
+  assert.equal(result.customPlayer.hls, hls);
+  assert.equal(f.videos.length, 1);
+  assert.equal(f.loadHlsCalls, 0);
+  assert.equal(video.loadCalls, 0);
+  result.destroy();
+});
+
+test('a late native HLS fallback can be adopted without replacing its video', () => {
+  const f = fixture(), item = candidate('a.m3u8');
+  const video = external(f, item);
+  video.currentTime = 16;
+  f.pool.adopt({ ...item, video, customPlayer: { direct: true } });
+  assert.equal(f.pool.park(item.key), true);
+  const restored = take(f, item);
+  assert.equal(restored.video, video);
+  assert.equal(restored.position, 16);
+  assert.equal(video.loadCalls, 0);
+  restored.destroy();
+});
+
+test('HLS next waits for playlist duration; full 24-fragment short episodes are not stopped at three seconds', async () => {
+  const f = fixture(), item = candidate('next.m3u8');
+  sync(f, [item]);
+  await flush();
+  const hls = f.engines[0], video = f.videos[0];
+  assert.equal(hls.config.autoStartLoad, false);
+  hls.emit('MANIFEST_PARSED', { levels: [{}] });
+  assert.deepEqual(hls.starts, [-1], 'master playlist can fetch its selected media playlist');
+  assert.equal(hls.bufferingEnabled, false, 'unknown duration never opens segment loading for next');
+  hls.emit('LEVEL_LOADED', { details: { live: false, totalduration: 240 } });
+  assert.equal(hls.bufferingEnabled, true);
+  assert.equal(hls.config.maxBufferLength, 240);
+  assert.equal(hls.config.maxMaxBufferLength, 240);
+  assert.equal(hls.config.maxBufferSize, CACHE_BYTES);
+  assert.equal(hls.config.backBufferLength, Infinity);
+  for (let i = 1; i <= 24; i++) {
+    fragment(hls, 4 * MiB);
+    video.ranges = [[0, i * 10]];
+    hls.emit('FRAG_BUFFERED');
+    assert.equal(hls.bufferingEnabled, true);
+    assert.equal(hls.stopCalls, 0);
+    assert.equal(hls.destroyCalls, 0);
+  }
+  assert.equal(video.playCalls, 0);
+  assert.equal(take(f, item).video, video, '96MiB short clips are not subject to a 64MiB per-clip cap');
+  f.pool.park(item.key);
+  f.pool.clear();
+});
+
+test('long/live next playlists are discarded before enabling fragments; zero/unknown stay gated', async () => {
+  for (const [duration, live, discarded] of [[360, false, true], [900, false, true], [120, true, true], [0, false, false], [NaN, false, false]]) {
+    const f = fixture(), item = candidate('a.m3u8');
+    sync(f, [item]);
+    await flush();
+    const hls = f.engines[0];
+    hls.emit('MANIFEST_PARSED', { levels: [{}] });
+    assert.equal(hls.bufferingEnabled, false);
+    hls.emit('LEVEL_LOADED', { details: { live, totalduration: duration } });
+    assert.equal(hls.destroyCalls, discarded ? 1 : 0);
+    assert.equal(hls.resumeBufferCalls, 0, 'next never resumes fragment buffering for non-short duration');
+    if (discarded) assert.equal(take(f, item), null);
+    f.pool.clear();
+  }
+});
+
+test('native next duration boundaries discard long/live and do not full-preload unknown duration', () => {
+  for (const duration of [0, NaN, 360, Infinity]) {
+    const f = fixture(), item = candidate('a.mp4');
+    sync(f, [item]);
+    const video = f.videos[0];
+    metadata(video, duration);
+    if (duration >= 360) assert.equal(video.src, '');
+    else assert.equal(video.preload, 'metadata');
+    f.pool.clear();
+  }
+});
+
+test('active long/unknown/live retains original rolling config and is never stopped by duration classification', () => {
+  for (const duration of [NaN, 0, 360, 900, Infinity]) {
+    const f = fixture(), item = candidate('current.m3u8');
+    const normal = { maxBufferLength: 120, maxMaxBufferLength: 240, backBufferLength: 180, maxBufferSize: 800e6 };
+    const hls = new f.Hls({ ...normal });
+    const video = external(f, item, duration, { hls });
+    if (duration === Infinity) manifest(hls, 120, true);
+    else manifest(hls, duration);
+    for (const [key, value] of Object.entries(normal)) assert.equal(hls.config[key], value);
+    assert.equal(hls.stopCalls, 0);
+    assert.equal(hls.pauseBufferCalls, 0);
+    assert.equal(hls.destroyCalls, 0);
+    video.currentTime = 38;
+    assert.equal(f.pool.park(item.key), false);
+    assert.equal(take(f, item).position, 38);
+    assert.equal(video.loadCalls, 0);
+    f.pool.clear();
+  }
+});
+
+test('duration changes enable full buffering for active short clips and restore rolling config when long', () => {
+  const f = fixture(), item = candidate('a.m3u8');
+  const hls = new f.Hls({ ...NORMAL_BUFFER });
+  const video = external(f, item, NaN, { hls });
+  metadata(video, 100);
+  assert.equal(hls.config.backBufferLength, Infinity);
+  assert.equal(hls.config.maxBufferLength, 100);
+  metadata(video, 360);
+  assert.equal(hls.config.backBufferLength, NORMAL_BUFFER.backBufferLength);
+  assert.equal(hls.stopCalls, 0);
+  assert.equal(f.pool.park(item.key), false);
+  assert.equal(hls.destroyCalls, 0);
+});
+
+test('take transfers attached native/HLS synchronously even before readiness or gesture authorization', async () => {
+  for (const name of ['a.mp4', 'a.m3u8']) {
+    const f = fixture(), item = candidate(name);
+    sync(f, [item]);
+    await flush();
+    const video = f.videos[0];
+    assert.equal(video.readyState, 0);
+    const result = take(f, item);
+    assert.equal(result.video, video);
+    assert.equal(result.activated, false);
+    assert.equal(result.then, undefined);
+    result.resume();
+    if (f.engines[0]) {
+      const hls = f.engines[0];
+      assert.equal(hls.stopCalls, 0, 'taking a pending manifest must not abort it');
+      assert.equal(hls.destroyCalls, 0);
+      manifest(hls, 240);
+      assert.deepEqual(hls.starts, [-1]);
+      assert.equal(hls.bufferingEnabled, true);
+    } else assert.equal(video.preload, 'auto');
+    result.destroy();
+  }
+});
+
+test('HLS budget includes current, deduplicates XHR/fragment bytes, and evicts farthest parked first', async () => {
+  const f = fixture();
+  const items = ['old', 'near', 'current', 'next'].map(name => candidate(`${name}.m3u8`));
+  const keys = items.map(item => item.key), handles = [];
+  for (let i = 0; i < 3; i++) {
+    sync(f, [items[i]], keys);
+    await flush();
+    manifest(f.engines[i], 240);
+    const handle = take(f, items[i]);
+    handles.push(handle);
+    handle.video.currentTime = i + 10;
+    fragment(f.engines[i], 128 * MiB);
+    if (i < 2) assert.equal(f.pool.park(items[i].key), true);
+  }
+  sync(f, [items[3]], keys);
+  await flush();
+  const hls = f.engines[3];
+  manifest(hls, 240);
+  const xhr = new Xhr();
+  hls.config.xhrSetup(xhr, 'https://media.test/frag.ts');
+  xhr.progress(128 * MiB);
+  fragment(hls, 128 * MiB);
+  assert.ok(f.engines.every(engine => engine.destroyCalls === 0), 'exactly 512MiB is allowed; no double-counting');
+  xhr.progress(129 * MiB);
+  assert.equal(f.engines[0].destroyCalls, 1, 'farthest parked episode is evicted before near/next/current');
+  assert.equal(f.engines[1].destroyCalls, 0);
+  assert.equal(f.engines[2].destroyCalls, 0);
+  assert.equal(hls.destroyCalls, 0);
+  assert.equal(f.engines[2].stopCalls, 0);
+  const restored = take(f, items[0]);
+  assert.equal(restored.video, null);
+  assert.equal(restored.restored, true);
+  assert.equal(restored.position, 10);
+  // The previously current video was relinquished, not destroyed by take.
+  assert.equal(f.engines[2].destroyCalls, 0);
+  f.pool.clear();
+});
+
+test('when only current+next exceed the unified budget, next falls back without stopping current', async () => {
+  const f = fixture(), current = candidate('current.m3u8'), next = candidate('next.m3u8');
+  sync(f, [current], [current.key, next.key]);
+  await flush();
+  manifest(f.engines[0], 300);
+  take(f, current);
+  fragment(f.engines[0], 400 * MiB);
+  sync(f, [next], [current.key, next.key]);
+  await flush();
+  manifest(f.engines[1], 300);
+  fragment(f.engines[1], 113 * MiB);
+  assert.equal(f.engines[1].destroyCalls, 1);
+  assert.equal(f.engines[0].destroyCalls, 0);
+  assert.equal(f.engines[0].stopCalls, 0);
+  assert.equal(f.engines[0].pauseBufferCalls, 1, 'only its original unclassified prewarm was paused');
+  assert.equal(take(f, next), null);
+  sync(f, [next], [current.key, next.key]);
+  await flush();
+  assert.equal(f.engines.length, 2, 'budget evictions are deduplicated');
+  f.pool.clear();
+});
+
+test('an oversized active clip falls back to rolling buffers and park(false), never interruption', async () => {
+  const f = fixture(), item = candidate('current.m3u8');
+  const hls = new f.Hls({ ...NORMAL_BUFFER });
+  const video = external(f, item, 300, { hls });
+  const xhr = new Xhr();
+  hls.config.xhrSetup(xhr, 'https://media.test/current.ts');
+  xhr.progress(CACHE_BYTES + 1);
+  assert.equal(hls.config.backBufferLength, 75);
+  metadata(video, 300);
+  assert.equal(hls.config.backBufferLength, 75, 'duration events cannot re-enable an over-budget cache');
+  assert.equal(hls.stopCalls, 0);
+  assert.equal(hls.pauseBufferCalls, 0);
+  assert.equal(hls.destroyCalls, 0);
+  assert.equal(video.pauseCalls, 0);
+  video.currentTime = 123;
+  assert.equal(f.pool.park(item.key), false);
+  assert.equal(hls.destroyCalls, 0, 'caller owns the only destruction after park(false)');
+  assert.equal(xhr.listenerCount, 0);
+  assert.equal(take(f, item).position, 123);
+  f.pool.clear();
+});
+
+test('headers and exact URLs are preserved, sorted for identity, and never bypassed via native fallback', async () => {
+  const f = fixture();
+  const a = candidate('a.m3u8?token=A', { Authorization: 'A', Z: 3 }, 'a');
+  const b = candidate('a.m3u8?token=A', { Authorization: 'B', Z: 3 }, 'b');
+  sync(f, [a, b]);
   a.headers.Authorization = 'mutated';
   await flush();
   assert.equal(f.engines.length, 2);
@@ -261,662 +667,386 @@ test('exact URLs and sorted header key/value pairs isolate entries and snapshot 
   f.engines[0].config.xhrSetup(xhr, a.url);
   assert.deepEqual(xhr.headers, { Authorization: 'A', Z: '3' });
   assert.equal(xhr.withCredentials, false);
-  f.pool.sync([
-    { url: a.url, headers: { Z: 3, Authorization: 'A' } },
-    { url: b.url, headers: { Z: 3, Authorization: 'B' } },
-  ]);
+  sync(f, [{ ...a, headers: { Z: 3, Authorization: 'A' } }, b]);
   assert.equal(f.loadHlsCalls, 2);
-  assert.equal(f.pool.take(a.url.toLowerCase(), { Z: 3, Authorization: 'A' }), null);
-  assert.equal(f.pool.take(a.url, { Z: 3, authorization: 'A' }), null);
-  assert.equal(f.pool.take(a.url, { Z: 3, Authorization: 'C' }), null);
-  assert.equal(f.engines[0].destroyCalls, 0);
-  f.videos[0].readyState = 2;
-  const adopted = f.pool.take(a.url, { Z: 3, Authorization: 'A' });
-  assert.equal(adopted.customPlayer.hls, f.engines[0]);
-  assert.equal(f.pool.take(a.url, { Authorization: 'A', Z: 3 }), null);
-  assert.equal(xhr.listenerCount, 0);
+  assert.equal(f.pool.take(a.url.toLowerCase(), { Z: 3, Authorization: 'A' }, a.key), null);
+  assert.equal(f.pool.take(a.url, { Z: 3, authorization: 'A' }, a.key), null);
+  assert.equal(f.pool.take(a.url, { Z: 3, Authorization: 'C' }, a.key), null);
+  const result = f.pool.take(a.url, { Z: 3, Authorization: 'A' }, a.key);
+  assert.equal(result.customPlayer.hls, f.engines[0]);
+  xhr.dispatch('load', { loaded: MiB });
+  assert.equal(xhr.listenerCount, 0, 'completed XHR listeners do not accumulate over full episodes');
   f.pool.clear();
-  assert.equal(f.engines[0].destroyCalls, 0);
+  assert.equal(f.engines[0].destroyCalls, 0, 'clear relinquishes active');
   assert.equal(f.engines[1].destroyCalls, 1);
-  adopted.destroy();
+  assert.equal(f.engines[0].listenerCount, 0);
 });
 
-test('native custom headers and FLV/DASH are skipped without media requests', () => {
-  for (const entry of [
-    candidate('a.mp4', { Authorization: 'secret' }),
-    candidate('a.mp4', { 'X-Empty': '' }),
-    candidate('a.flv'),
-    candidate('a.mpd'),
-  ]) {
+test('native custom headers and FLV/DASH next do not issue media requests', () => {
+  for (const item of [candidate('a.mp4', { Authorization: 'secret' }), candidate('a.mp4', { Empty: '' }), candidate('a.flv'), candidate('a.mpd')]) {
     const f = fixture();
-    f.pool.sync([entry]);
+    sync(f, [item]);
     assert.equal(f.videos.length, 0);
     assert.equal(f.loadHlsCalls, 0);
-    assert.equal(f.pool.take(entry.url, entry.headers), null);
-    assert.equal(f.timers.size, 0);
+    assert.equal(take(f, item), null);
   }
 });
 
-test('native HLS requires preference, capability, and no custom headers', async t => {
+test('native HLS requires preference, capability, and no custom headers', async () => {
   for (const [preferNativeHls, nativeHls, headers, native] of [
-    [true, 'maybe', {}, true],
-    [true, 'probably', { ignored: null }, true],
-    [true, '', {}, false],
-    [false, 'probably', {}, false],
-    [true, 'probably', { Authorization: 'secret' }, false],
+    [true, 'maybe', {}, true], [true, 'probably', { ignored: null }, true],
+    [true, '', {}, false], [false, 'probably', {}, false], [true, 'probably', { Authorization: 'secret' }, false],
   ]) {
-    await t.test(JSON.stringify([preferNativeHls, nativeHls, headers]), async () => {
-      const f = fixture({ preferNativeHls, nativeHls });
-      const entry = candidate('a.m3u8', headers);
-      f.pool.sync([entry]);
-      await flush();
-      assert.equal(f.engines.length, native ? 0 : 1);
-      assert.equal(f.videos[0].src, native ? entry.url : 'blob:mock-media-source');
-      if (native) assert.equal(f.videos[0].attributes.get('referrerpolicy'), 'no-referrer');
-      assert.equal(f.videos[0].attributes.has('crossorigin'), false);
-      assert.equal(Object.hasOwn(f.videos[0], 'crossOrigin'), false);
-      assert.equal(f.videos[0].playCalls, 0);
-      f.pool.clear();
-    });
+    const f = fixture({ preferNativeHls, nativeHls }), item = candidate('a.m3u8', headers);
+    sync(f, [item]);
+    await flush();
+    assert.equal(f.engines.length, native ? 0 : 1);
+    assert.equal(f.videos[0].src, native ? item.url : 'blob:mock-media-source');
+    assert.equal(f.videos[0].attributes.has('crossorigin'), false);
+    f.pool.clear();
   }
-});
-
-test('unsupported HLS never falls back to an unauthenticated native request', async () => {
   const f = fixture({ preferNativeHls: true, nativeHls: 'probably', supported: false });
-  const entry = candidate('a.m3u8', { Authorization: 'secret' });
-  f.pool.sync([entry]);
+  sync(f, [candidate('a.m3u8', { Authorization: 'secret' })]);
   await flush();
   assert.equal(f.engines.length, 0);
   assert.deepEqual(f.videos[0].srcWrites, []);
   assert.equal(f.host.children.length, 0);
-  assert.equal(f.pool.take(entry.url, entry.headers), null);
 });
 
-test('take is synchronous and requires a first frame or positive buffered duration', () => {
-  for (const [readyState, ranges, loadeddata, usable] of [
-    [0, [], false, false],
-    [1, [], false, false],
-    [1, [[0, 0]], false, false],
-    [2, [], false, true],
-    [1, [[0.1, 0.2]], false, true],
-    [1, [], true, true],
-  ]) {
-    const f = fixture();
-    const entry = candidate('a.mp4');
-    f.pool.sync([entry]);
-    const video = f.videos[0];
-    video.readyState = readyState;
-    video.ranges = ranges;
-    if (loadeddata) video.dispatch('loadeddata');
-    const adopted = f.pool.take(entry.url);
-    assert.equal(!!adopted, usable);
-    assert.equal(f.timers.size, 0);
-    assert.equal(video.listenerCount, 0);
-    if (usable) {
-      assert.equal(adopted.video, video);
-      assert.equal(adopted.then, undefined);
-      assert.equal(adopted.customPlayer, null);
-      assert.equal(video.loadCalls, 1);
-      adopted.destroy();
-    } else {
-      assert.equal(adopted, null);
-      assert.equal(video.src, '');
-      assert.equal(f.host.children.length, 0);
-    }
-  }
+test('external xhrSetup survives observation and is restored on relinquishment', () => {
+  const f = fixture(), item = candidate('a.m3u8');
+  const original = function (xhr, url) {
+    assert.equal(this, hls.config);
+    xhr.open('GET', url, true);
+    xhr.setRequestHeader('Authorization', 'external');
+    return 'result';
+  };
+  const hls = new f.Hls({ ...NORMAL_BUFFER, xhrSetup: original });
+  const video = external(f, item, 120, { hls });
+  const xhr = new Xhr();
+  assert.equal(hls.config.xhrSetup(xhr, item.url), 'result');
+  assert.equal(xhr.headers.Authorization, 'external');
+  f.pool.detach(video);
+  assert.equal(hls.config.xhrSetup, original);
+  assert.equal(xhr.listenerCount, 0);
+  assert.equal(hls.listenerCount, 0);
+  assert.equal(hls.destroyCalls, 0);
+  assert.equal(video.loadCalls, 0);
+  assert.equal(take(f, item).video, null);
 });
 
-test('gesture activation plays then immediately pauses each neighbor without clearing its buffer', async () => {
-  const f = fixture();
-  f.pool.sync([candidate('a.mp4'), candidate('b.m3u8')]);
-  await flush();
-  const calls = [];
-  for (const [index, video] of f.videos.entries()) {
-    video.readyState = 3;
-    video.ranges = [[0, 3]];
-    video.play = () => {
-      calls.push([index, 'play', video.muted]);
-      return Promise.reject({ name: 'AbortError' });
-    };
-    video.pause = () => calls.push([index, 'pause']);
-  }
-  const loads = f.videos.map(video => video.loadCalls);
-  const sources = f.videos.map(video => video.src);
-  f.pool.activate();
-  assert.deepEqual(calls, [[0, 'play', false], [0, 'pause'], [1, 'play', false], [1, 'pause']]);
-  assert.ok(f.videos.every(video => video.muted && video.currentTime === 0));
-  assert.deepEqual(f.videos.map(video => video.loadCalls), loads);
-  assert.deepEqual(f.videos.map(video => video.src), sources);
-  await flush();
-  f.pool.activate();
-  assert.equal(calls.length, 4, 'already activated neighbors need no more play/pause cycles');
-  const adopted = f.pool.take(candidate('a.mp4').url);
-  assert.equal(adopted.activated, true, 'pause-induced AbortError does not revoke gesture authorization');
-  assert.deepEqual(adopted.video.ranges, [[0, 3]]);
+test('stable episode keys restore progress across refreshed URLs/headers without reusing stale media', () => {
+  const f = fixture(), old = candidate('a.mp4?expired', {}, 'episode');
+  const video = external(f, old);
+  video.currentTime = 45;
+  f.pool.park(old.key);
+  const fresh = { ...old, url: 'https://media.test/a.mp4?fresh', headers: { Authorization: 'fresh' } };
+  const restored = take(f, fresh);
+  assert.equal(restored.restored, true);
+  assert.equal(restored.position, 45);
+  assert.equal(restored.video, null);
+  assert.equal(video.src, '');
   f.pool.clear();
-  f.pool.activate();
-  assert.equal(calls.length, 4, 'taken and destroyed entries are no longer activated');
 });
 
-test('failed gesture activation remains silent and can retry on the next gesture', async () => {
+test('activate synchronously plays/pauses only attached nonactive videos without source/load changes', async () => {
+  const pending = deferred(), f = fixture({ loadHls: () => pending.promise });
+  const current = candidate('current.mp4'), a = candidate('a.mp4'), b = candidate('b.m3u8');
+  const activeVideo = external(f, current);
+  sync(f, [a, b], [current.key, a.key, b.key]);
+  const video = f.videos[1];
+  const calls = [];
+  video.play = () => { calls.push(['play', video.muted]); return Promise.reject({ name: 'AbortError' }); };
+  video.pause = () => calls.push(['pause']);
+  const loads = video.loadCalls, sources = [...video.srcWrites];
+  f.pool.activate();
+  assert.deepEqual(calls, [['play', false], ['pause']]);
+  assert.equal(activeVideo.pauseCalls, 0);
+  assert.equal(f.videos[2].playCalls, 0, 'pending imports have no source to authorize');
+  assert.equal(video.muted, true);
+  assert.equal(video.loadCalls, loads);
+  assert.deepEqual(video.srcWrites, sources);
+  await flush();
+  f.pool.activate();
+  assert.equal(calls.length, 2);
+  assert.equal(take(f, a).activated, true);
+  f.pool.clear();
+  pending.resolve(f.Hls);
+  await flush();
+  assert.equal(f.engines.length, 0);
+});
+
+test('failed activation is silent, reports false after take, and can retry after parking', async () => {
   for (const failure of ['NotAllowedError', 'NotSupportedError', 'throw']) {
-    const f = fixture();
-    const item = candidate('a.mp4');
-    f.pool.sync([item]);
+    const f = fixture(), item = candidate('a.mp4');
+    sync(f, [item]);
     const video = f.videos[0];
-    video.readyState = 3;
-    let plays = 0, pauses = 0;
+    metadata(video, 120);
     video.play = () => {
-      plays++;
       if (failure === 'throw') throw new Error('play failed');
       return Promise.reject({ name: failure });
     };
-    video.pause = () => { pauses++; };
+    f.pool.activate();
+    const result = take(f, item);
+    await flush();
+    assert.equal(result.activated, false, 'late permission rejection updates the handed-off handle');
+    assert.equal(f.pool.park(item.key), true);
+    video.play = () => Promise.resolve();
     f.pool.activate();
     await flush();
-    assert.equal(video.muted, true);
-    assert.equal(pauses, 1);
-    video.play = () => { plays++; return Promise.resolve(); };
-    f.pool.activate();
-    await flush();
-    assert.equal(plays, 2);
-    assert.equal(pauses, 2);
-    assert.equal(f.pool.take(item.url).activated, true);
-  }
-});
-
-test('an unactivated or policy-blocked buffer is not reported as authorized', async () => {
-  for (const activate of [false, true]) {
-    const f = fixture();
-    const item = candidate('a.mp4');
-    f.pool.sync([item]);
-    const video = f.videos[0];
-    video.readyState = 3;
-    video.play = () => Promise.reject({ name: 'NotAllowedError' });
-    video.pause = () => {};
-    if (activate) f.pool.activate();
-    await flush();
-    assert.equal(f.pool.take(item.url).activated, false);
-  }
-});
-
-test('an activated in-progress native/HLS buffer keeps its element even before the first frame', async () => {
-  for (const name of ['a.mp4', 'a.m3u8']) {
-    const f = fixture();
-    const item = candidate(name);
-    f.pool.sync([item]);
-    await flush();
-    const video = f.videos[0];
-    video.play = () => Promise.reject({ name: 'AbortError' });
-    video.pause = () => {};
-    f.pool.activate();
-    await flush();
-    assert.equal(video.readyState, 0);
-    const adopted = f.pool.take(item.url);
-    assert.equal(adopted.video, video);
-    assert.equal(adopted.activated, true);
-    adopted.resume();
-    if (name.endsWith('.m3u8')) {
-      assert.equal(f.engines[0].stopCalls, 0, 'do not abort an in-progress manifest');
-      assert.deepEqual(f.engines[0].starts, [-1]);
-    }
-    else assert.equal(video.preload, 'auto');
-  }
-});
-
-test('activation cannot adopt an HLS buffer whose asynchronous engine has not been attached', async () => {
-  const pending = deferred();
-  const f = fixture({ loadHls: () => pending.promise });
-  const item = candidate('a.m3u8');
-  f.pool.sync([item]);
-  const video = f.videos[0];
-  video.play = () => Promise.reject({ name: 'AbortError' });
-  video.pause = () => {};
-  f.pool.activate();
-  await flush();
-  assert.equal(f.pool.take(item.url), null);
-  pending.resolve(f.Hls);
-  await flush();
-  assert.equal(f.engines.length, 0, 'a discarded pending loader must not attach later');
-});
-
-test('native adoption preserves media, resume only changes preload, and clear cannot destroy it', () => {
-  const f = fixture();
-  const entry = candidate('a.mp4');
-  f.pool.sync([entry]);
-  const video = f.videos[0];
-  video.ranges = [[0, 5]];
-  video.currentTime = 1.25;
-  const adopted = f.pool.take(entry.url);
-  assert.equal(video.src, entry.url);
-  assert.equal(video.loadCalls, 1);
-  assert.equal(video.currentTime, 1.25);
-  assert.deepEqual(video.ranges, [[0, 5]]);
-  video.dispatch('error');
-  f.pool.sync([candidate('b.mp4')]);
-  f.pool.clear();
-  f.advance(8000);
-  assert.equal(video.src, entry.url);
-  adopted.resume();
-  assert.equal(video.preload, 'auto');
-  assert.equal(video.muted, true);
-  assert.equal(video.defaultMuted, true);
-  assert.equal(video.playCalls, 0);
-  assert.deepEqual(video.srcWrites, [entry.url]);
-  assert.equal(video.loadCalls, 1);
-  adopted.destroy();
-  adopted.destroy();
-  adopted.resume();
-  assert.equal(video.src, '');
-  assert.equal(video.loadCalls, 2);
-  assert.equal(video.parentNode, null);
-});
-
-test('destroying an adopted same-key entry cannot evict its new pooled replacement', () => {
-  const f = fixture();
-  const entry = candidate('a.mp4');
-  f.pool.sync([entry]);
-  f.videos[0].readyState = 2;
-  const old = f.pool.take(entry.url);
-  f.pool.sync([entry]);
-  old.destroy();
-  f.videos[1].readyState = 2;
-  const replacement = f.pool.take(entry.url);
-  assert.equal(replacement.video, f.videos[1]);
-  replacement.destroy();
-});
-
-test('HLS uses bounded config and stops at three buffered seconds, not a range end timestamp', async () => {
-  const f = fixture();
-  const entry = candidate('a.m3u8');
-  f.pool.sync([entry]);
-  await flush();
-  const hls = f.engines[0], video = f.videos[0];
-  for (const [key, value] of Object.entries({
-    enableWorker: true, startPosition: 0, maxBufferLength: 3,
-    maxMaxBufferLength: 3, maxBufferSize: BUFFER_BYTES, backBufferLength: 0,
-  })) assert.equal(hls.config[key], value, key);
-  assert.equal(hls.url, entry.url);
-  assert.equal(hls.video, video);
-  video.ranges = [[10, 12.999]];
-  hls.emit('FRAG_BUFFERED');
-  assert.equal(hls.stopCalls, 0);
-  video.ranges = [[10, 13]];
-  hls.emit('FRAG_BUFFERED');
-  assert.equal(hls.stopCalls, 1);
-  hls.emit('FRAG_BUFFERED');
-  f.advance(8000);
-  assert.equal(hls.stopCalls, 1);
-  assert.equal(hls.destroyCalls, 0);
-  const adopted = f.pool.take(entry.url);
-  assert.equal(adopted.video, video);
-  adopted.destroy();
-});
-
-test('a long first HLS fragment is retained but stops subsequent loading', async () => {
-  const f = fixture();
-  const entry = candidate('a.m3u8');
-  f.pool.sync([entry]);
-  await flush();
-  f.videos[0].ranges = [[0, 6]];
-  f.engines[0].emit('FRAG_BUFFERED');
-  assert.equal(f.engines[0].stopCalls, 1);
-  const adopted = f.pool.take(entry.url);
-  assert.deepEqual(adopted.video.ranges, [[0, 6]]);
-  adopted.destroy();
-});
-
-test('XHR byte budget is cumulative, deduplicates progress/load, and stops mid-fragment at 4MiB', async () => {
-  const f = fixture();
-  const entry = candidate('a.m3u8', { Authorization: 'secret' });
-  f.pool.sync([entry]);
-  await flush();
-  const hls = f.engines[0];
-  const first = new Xhr(), second = new Xhr();
-  hls.config.xhrSetup(first, 'https://media.test/first.ts');
-  hls.config.xhrSetup(second, 'https://media.test/second.ts');
-  assert.equal(first.withCredentials, false);
-  assert.equal(second.headers.Authorization, 'secret');
-  first.progress(BUFFER_BYTES / 4);
-  first.progress(BUFFER_BYTES / 2);
-  first.dispatch('load', { loaded: BUFFER_BYTES / 2 });
-  hls.emit('FRAG_LOADED', { frag: { stats: { loaded: BUFFER_BYTES / 2 } } });
-  assert.equal(hls.stopCalls, 0, 'FRAG_LOADED must not double-count XHR bytes');
-  second.progress(BUFFER_BYTES / 2 - 1);
-  assert.equal(hls.stopCalls, 0);
-  second.progress(BUFFER_BYTES / 2);
-  assert.equal(hls.stopCalls, 1);
-  second.progress(BUFFER_BYTES);
-  assert.equal(hls.stopCalls, 1);
-  f.advance(8000);
-  assert.equal(hls.destroyCalls, 1, 'a stopped entry without usable buffer must fall back');
-  assert.equal(f.pool.take(entry.url, entry.headers), null);
-  assert.equal(first.listenerCount + second.listenerCount, 0);
-});
-
-test('fragment loaded byte stats also enforce the budget and retain existing media', async () => {
-  const f = fixture();
-  const entry = candidate('a.m3u8');
-  f.pool.sync([entry]);
-  await flush();
-  const hls = f.engines[0];
-  f.videos[0].ranges = [[0, 1]];
-  hls.emit('FRAG_LOADED', { frag: { stats: { loaded: BUFFER_BYTES / 2 } } });
-  hls.emit('FRAG_LOADED', { part: { stats: { loaded: BUFFER_BYTES / 2 - 1 } } });
-  assert.equal(hls.stopCalls, 0);
-  hls.emit('FRAG_LOADED', { stats: { loaded: 1 } });
-  assert.equal(hls.stopCalls, 1);
-  f.advance(8000);
-  assert.equal(hls.destroyCalls, 0);
-  f.pool.take(entry.url).destroy();
-});
-
-test('eight-second timeout stops HLS, retaining usable media and destroying empty entries', async t => {
-  for (const usable of [false, true]) {
-    await t.test(`usable=${usable}`, async () => {
-      const f = fixture();
-      const entry = candidate('a.m3u8');
-      f.pool.sync([entry]);
-      await flush();
-      const hls = f.engines[0];
-      if (usable) f.videos[0].readyState = 2;
-      f.advance(7999);
-      assert.equal(hls.stopCalls, 0);
-      f.pool.sync([entry]);
-      f.advance(1);
-      assert.equal(hls.stopCalls, 1, 'sync must not extend the original deadline');
-      assert.equal(hls.destroyCalls, usable ? 0 : 1);
-      const adopted = f.pool.take(entry.url);
-      assert.equal(!!adopted, usable);
-      if (adopted) adopted.destroy();
-      assert.equal(f.timers.size, 0);
-    });
-  }
-});
-
-test('native timeout discards metadata-only media but preserves browser-provided buffer', () => {
-  for (const usable of [false, true]) {
-    const f = fixture();
-    const entry = candidate('a.mp4');
-    f.pool.sync([entry]);
-    f.videos[0].readyState = 1;
-    if (usable) f.videos[0].ranges = [[0, 1]];
-    f.advance(8000);
-    assert.equal(f.videos[0].src, usable ? entry.url : '');
-    const adopted = f.pool.take(entry.url);
-    assert.equal(!!adopted, usable);
-    if (adopted) adopted.destroy();
-  }
-});
-
-test('live HLS manifests/levels are destroyed; VOD remains eligible', async () => {
-  for (const [event, data] of [
-    ['LEVEL_LOADED', { details: { live: true } }],
-    ['MANIFEST_LOADED', { levels: [{ details: { live: true } }] }],
-  ]) {
-    const f = fixture();
-    const entry = candidate('a.m3u8');
-    f.pool.sync([entry]);
-    await flush();
-    const hls = f.engines[0];
-    hls.emit('LEVEL_LOADED', { details: { live: false } });
-    assert.equal(hls.destroyCalls, 0);
-    f.videos[0].readyState = 2;
-    hls.emit(event, data);
-    assert.equal(hls.destroyCalls, 1);
-    assert.equal(hls.listenerCount, 0);
-    assert.equal(f.host.children.length, 0);
-    assert.equal(f.pool.take(entry.url), null);
-  }
-});
-
-test('native HLS cleans up when metadata or duration changes reveal a live stream', () => {
-  for (const event of ['loadedmetadata', 'durationchange']) {
-    const f = fixture({ preferNativeHls: true, nativeHls: 'maybe' });
-    const entry = candidate('a.m3u8');
-    f.pool.sync([entry]);
-    const video = f.videos[0];
-    video.dispatch('loadedmetadata');
-    assert.equal(video.src, entry.url);
-    video.duration = Infinity;
-    video.dispatch(event);
-    assert.equal(video.src, '');
-    assert.equal(f.pool.take(entry.url), null);
-  }
-});
-
-test('media and HLS errors silently destroy only the affected pooled entry', async () => {
-  for (const error of ['media', 'fatal', 'nonfatal']) {
-    const f = fixture();
-    const a = candidate('a.m3u8'), b = candidate('b.m3u8');
-    f.pool.sync([a, b]);
-    await flush();
-    if (error === 'media') f.videos[0].dispatch('error');
-    else f.engines[0].emit('ERROR', { fatal: error === 'fatal', details: 'network failure' });
-    assert.equal(f.engines[0].destroyCalls, 1);
-    assert.equal(f.engines[1].destroyCalls, 0);
-    assert.equal(f.pool.take(a.url), null);
-    assert.equal(f.host.children.length, 1);
+    assert.equal(take(f, item).activated, true);
     f.pool.clear();
   }
 });
 
-test('loadHls rejection and synchronous engine failures are silent and fully cleaned up', async () => {
-  for (const failure of ['loadHls', 'constructor', 'loadSource', 'attachMedia']) {
-    const f = fixture({
-      loadHls: failure === 'loadHls' ? () => Promise.reject(new Error('chunk failed')) : undefined,
-    });
-    f.Hls.failure = failure;
-    const entry = candidate('a.m3u8');
-    f.pool.sync([entry]);
-    await flush();
-    assert.equal(f.pool.take(entry.url), null);
-    assert.equal(f.host.children.length, 0);
-    assert.equal(f.timers.size, 0);
-    assert.ok(f.engines.every(hls => hls.destroyCalls === 1));
-    if (failure === 'loadSource') assert.equal(f.engines[0].video, undefined);
-  }
+test('adopt(false) preserves authorization but cannot hide a still-pending activation rejection', async () => {
+  const f = fixture(), item = candidate('a.mp4'), playing = deferred();
+  sync(f, [item]);
+  const video = f.videos[0];
+  video.play = () => playing.promise;
+  f.pool.activate();
+  const result = take(f, item);
+  f.pool.adopt({ ...item, video, activated: false });
+  assert.equal(result.activated, true);
+  playing.reject({ name: 'NotAllowedError' });
+  await flush();
+  assert.equal(result.activated, false);
+  result.destroy();
 });
 
-test('late loadHls cannot create an engine after clear, eviction, timeout, or unready take', async () => {
-  for (const cancel of ['clear', 'sync', 'timeout', 'take']) {
-    const pending = deferred();
-    const f = fixture({ loadHls: () => pending.promise });
-    const entry = candidate('a.m3u8');
-    f.pool.sync([entry]);
+test('fatal errors dynamically report only active callbacks; parked/background errors evict silently', async () => {
+  const f = fixture(), a = candidate('a.m3u8'), b = candidate('b.m3u8');
+  sync(f, [a, b]);
+  await flush();
+  f.engines.forEach(hls => manifest(hls, 120));
+  const errors = [], result = take(f, a);
+  result.resume(message => errors.push(`old:${message}`));
+  f.pool.adopt({ ...a, video: result.video, customPlayer: result.customPlayer, onError: message => errors.push(`new:${message}`) });
+  result.resume();
+  f.engines[0].emit('ERROR', { fatal: false, details: 'fragLoadError' });
+  assert.deepEqual(errors, []);
+  f.engines[0].emit('ERROR', { fatal: true, details: 'fragLoadError' });
+  assert.deepEqual(errors, ['new:fragLoadError']);
+  assert.equal(f.engines[0].destroyCalls, 0);
+  assert.equal(f.pool.park(a.key), false, 'fatal current cannot be reused');
+  f.engines[0].emit('ERROR', { fatal: true, details: 'stale' });
+  const second = take(f, b);
+  second.resume(message => errors.push(message));
+  assert.equal(f.pool.park(b.key), true);
+  f.engines[1].emit('ERROR', { fatal: true, details: 'background failure' });
+  assert.deepEqual(errors, ['new:fragLoadError']);
+  assert.equal(f.engines[1].destroyCalls, 1);
+  assert.equal(take(f, b).video, null);
+  f.pool.clear();
+});
+
+test('native active media errors invalidate reuse, while background errors are silent', () => {
+  const f = fixture(), a = candidate('a.mp4'), b = candidate('b.mp4'), errors = [];
+  const video = external(f, a, 120, null, message => errors.push(message));
+  video.currentTime = 32;
+  sync(f, [b], [a.key, b.key]);
+  f.videos[1].dispatch('error');
+  assert.equal(f.videos[1].src, '');
+  assert.equal(errors.length, 0);
+  video.dispatch('error');
+  assert.equal(errors.length, 1);
+  assert.equal(f.pool.park(a.key), false);
+  assert.equal(video.src, a.url);
+  assert.equal(take(f, a).position, 32);
+});
+
+test('fatal quota releases old media, degrades current to rolling config and keeps progress', async () => {
+  const f = fixture(), a = candidate('old.m3u8'), b = candidate('current.m3u8');
+  sync(f, [a, b]);
+  await flush();
+  f.engines.forEach(hls => manifest(hls, 120));
+  const old = take(f, a);
+  old.video.currentTime = 17;
+  f.pool.park(a.key);
+  const current = take(f, b), errors = [];
+  current.resume(message => errors.push(message));
+  f.engines[1].emit('ERROR', { fatal: true, details: 'bufferFullError', error: { name: 'QuotaExceededError' } });
+  assert.equal(f.engines[0].destroyCalls, 1);
+  assert.equal(f.engines[1].destroyCalls, 0);
+  assert.equal(f.engines[1].stopCalls, 0);
+  assert.equal(f.engines[1].config.backBufferLength, 75);
+  assert.deepEqual(errors, ['bufferFullError']);
+  assert.equal(f.pool.park(b.key), false);
+  assert.equal(take(f, a).position, 17);
+  f.pool.clear();
+});
+
+test('visibility pauses next, leaves active background playback alone, and preserves cached media', async () => {
+  const f = fixture(), current = candidate('current.m3u8'), next = candidate('next.m3u8');
+  sync(f, [current, next]);
+  await flush();
+  f.engines.forEach(hls => manifest(hls, 120));
+  take(f, current);
+  const pauses = f.engines[0].pauseBufferCalls;
+  const loads = f.videos.map(video => video.loadCalls), sources = f.videos.map(video => video.src);
+  f.pool.setVisible(false);
+  assert.equal(f.engines[0].pauseBufferCalls, pauses);
+  assert.equal(f.engines[1].bufferingEnabled, false);
+  assert.equal(f.videos[0].pauseCalls, 0);
+  assert.ok(f.engines.every(hls => hls.destroyCalls === 0 && hls.stopCalls === 0));
+  f.pool.setVisible(true);
+  assert.equal(f.engines[1].bufferingEnabled, true);
+  assert.deepEqual(f.videos.map(video => video.loadCalls), loads);
+  assert.deepEqual(f.videos.map(video => video.src), sources);
+  f.pool.clear();
+});
+
+test('hidden sync delays new prefetch and keeps existing native cache without source/load resets', () => {
+  const f = fixture(), a = candidate('a.mp4'), b = candidate('b.mp4');
+  sync(f, [a], [a.key, b.key]);
+  metadata(f.videos[0], 120);
+  f.pool.setVisible(false);
+  assert.equal(f.videos[0].preload, 'none');
+  assert.equal(f.videos[0].src, a.url);
+  sync(f, [a, b], [a.key, b.key]);
+  assert.equal(f.videos.length, 1);
+  f.pool.setVisible(true);
+  assert.equal(f.videos[0].preload, 'auto');
+  assert.equal(f.videos[0].loadCalls, 1);
+  assert.equal(f.videos.length, 2);
+  f.pool.clear();
+});
+
+test('clear destroys only nonactive media, removes all observers/maps, and resets failed identities', async () => {
+  const f = fixture(), a = candidate('a.m3u8'), b = candidate('b.m3u8');
+  sync(f, [a, b]);
+  await flush();
+  f.engines.forEach(hls => manifest(hls, 120));
+  const active = take(f, a), hls = f.engines[0], video = f.videos[0], xhr = new Xhr();
+  active.resume(() => assert.fail('clear must remove the old error callback'));
+  hls.config.xhrSetup(xhr, a.url);
+  const loads = video.loadCalls;
+  f.pool.clear();
+  f.pool.clear();
+  assert.equal(hls.destroyCalls, 0);
+  assert.equal(f.engines[1].destroyCalls, 1);
+  assert.equal(hls.listenerCount + video.listenerCount + xhr.listenerCount, 0);
+  assert.equal(video.loadCalls, loads);
+  assert.equal(video.src, 'blob:mock-media-source');
+  assert.equal(take(f, a), null);
+  active.destroy();
+  active.resume();
+  hls.emit('ERROR', { fatal: true });
+  assert.equal(hls.destroyCalls, 0, 'stale handles cannot destroy relinquished externally owned media');
+  sync(f, [a]);
+  await flush();
+  assert.equal(f.engines.length, 3);
+  f.pool.clear();
+});
+
+test('late HLS imports cannot attach after clear, pruning, unready take, or replacing with an external node', async () => {
+  for (const cancel of ['clear', 'sync', 'take', 'adopt']) {
+    const pending = deferred(), f = fixture({ loadHls: () => pending.promise });
+    const item = candidate('a.m3u8');
+    sync(f, [item]);
     if (cancel === 'clear') f.pool.clear();
-    if (cancel === 'sync') f.pool.sync([]);
-    if (cancel === 'timeout') f.advance(8000);
-    if (cancel === 'take') assert.equal(f.pool.take(entry.url), null);
+    if (cancel === 'sync') sync(f, [], []);
+    if (cancel === 'take') assert.equal(take(f, item), null);
+    if (cancel === 'adopt') external(f, item);
     pending.resolve(f.Hls);
     await flush();
-    assert.equal(f.engines.length, 0);
-    assert.equal(f.host.children.length, 0);
-    assert.equal(f.timers.size, 0);
+    assert.equal(f.engines.length, 0, cancel);
+    assert.equal(f.videos[0].listenerCount, 0);
+    assert.equal(f.videos[0].src, '');
+    f.pool.clear();
   }
 });
 
-test('same-key replacements use strict identity for late resolution and late rejection', async () => {
+test('adopt of the same pending node prevents a late helper loader from replacing the external engine', async () => {
+  const pending = deferred(), f = fixture({ loadHls: () => pending.promise });
+  const item = candidate('a.m3u8');
+  sync(f, [item]);
+  const video = f.videos[0], hls = new f.Hls({ ...NORMAL_BUFFER });
+  hls.attachMedia(video);
+  f.pool.adopt({ ...item, video, customPlayer: { hls } });
+  pending.resolve(f.Hls);
+  await flush();
+  assert.equal(f.engines.length, 1);
+  assert.equal(take(f, item).customPlayer.hls, hls);
+  f.pool.clear();
+});
+
+test('same-key replacements use object identity against late resolution and rejection', async () => {
   for (const staleResult of ['resolve-first', 'resolve-last', 'reject']) {
     const old = deferred(), next = deferred();
     let calls = 0;
     const f = fixture({ loadHls: () => (++calls === 1 ? old.promise : next.promise) });
-    const entry = candidate('a.m3u8');
-    f.pool.sync([entry]);
+    const item = candidate('a.m3u8');
+    sync(f, [item]);
     f.pool.clear();
-    f.pool.sync([entry]);
-    if (staleResult === 'resolve-first') {
-      old.resolve(f.Hls);
-      await flush();
-      assert.equal(f.engines.length, 0);
-    }
+    sync(f, [item]);
+    if (staleResult === 'resolve-first') { old.resolve(f.Hls); await flush(); assert.equal(f.engines.length, 0); }
     next.resolve(f.Hls);
     await flush();
     if (staleResult === 'resolve-last') old.resolve(f.Hls);
-    if (staleResult === 'reject') old.reject(new Error('stale chunk failed'));
+    if (staleResult === 'reject') old.reject(new Error('stale import'));
     await flush();
     assert.equal(f.engines.length, 1);
     assert.equal(f.engines[0].video, f.videos[1]);
     assert.equal(f.engines[0].destroyCalls, 0);
-    assert.equal(f.host.children.length, 1);
     f.pool.clear();
   }
 });
 
-test('HLS adoption cancels budgets, resumes normal config, and only forwards active fatal errors', async () => {
-  const f = fixture();
-  const entry = candidate('a.m3u8', { Authorization: 'secret' });
-  f.pool.sync([entry]);
-  await flush();
-  const hls = f.engines[0], video = f.videos[0], xhr = new Xhr();
-  hls.config.xhrSetup(xhr, 'https://media.test/first.ts');
-  video.ranges = [[0, 1]];
-  const writes = [...video.srcWrites], loads = video.loadCalls;
-  const adopted = f.pool.take(entry.url, entry.headers);
-  assert.equal(adopted.customPlayer.hls, hls);
-  assert.equal(hls.stopCalls, 1);
-  assert.equal(hls.listenerCount + video.listenerCount + xhr.listenerCount, 0);
-  assert.equal(f.timers.size, 0);
-  const errors = [];
-  adopted.resume(error => errors.push(error));
-  for (const [key, value] of Object.entries({
-    maxBufferLength: 60, maxMaxBufferLength: 120, backBufferLength: 75, maxBufferSize: 200e6,
-  })) assert.equal(hls.config[key], value, key);
-  assert.deepEqual(hls.starts, [-1]);
-  assert.equal(video.muted, true);
-  assert.equal(video.defaultMuted, true);
-  assert.equal(video.playCalls, 0);
-  assert.deepEqual(video.srcWrites, writes);
-  assert.equal(video.loadCalls, loads);
-  const activeXhr = new Xhr();
-  hls.config.xhrSetup(activeXhr, 'https://media.test/active.ts');
-  assert.deepEqual(activeXhr.headers, { Authorization: 'secret' });
-  assert.equal(activeXhr.withCredentials, false);
-  assert.equal(activeXhr.listenerCount, 0);
-  xhr.progress(BUFFER_BYTES * 2);
-  hls.emit('FRAG_LOADED', { stats: { loaded: BUFFER_BYTES * 2 } });
-  video.ranges = [[0, 100]];
-  hls.emit('FRAG_BUFFERED');
-  hls.emit('LEVEL_LOADED', { details: { live: true } });
-  video.dispatch('error');
-  f.pool.sync([candidate('b.mp4')]);
-  f.pool.clear();
-  f.advance(8000);
-  assert.equal(hls.stopCalls, 1);
-  assert.equal(hls.destroyCalls, 0);
-  hls.emit('ERROR', { fatal: false });
-  assert.equal(errors.length, 0);
-  hls.emit('ERROR', { fatal: true, details: 'fragLoadError' });
-  assert.equal(errors.length, 1);
-  assert.equal(errors[0], 'fragLoadError');
-  const replacementErrors = [];
-  adopted.resume(error => replacementErrors.push(error));
-  assert.equal(hls.listenerCount, 1, 'resume replaces rather than duplicates the error callback');
-  hls.emit('ERROR', { fatal: true, type: 'mediaError' });
-  assert.equal(errors.length, 1);
-  assert.equal(replacementErrors[0], 'mediaError');
-  adopted.destroy();
-  adopted.destroy();
-  adopted.resume(() => assert.fail('destroyed entries cannot resume'));
-  hls.emit('ERROR', { fatal: true });
-  assert.equal(hls.destroyCalls, 1);
-  assert.equal(hls.listenerCount, 0);
-  assert.equal(video.src, '');
-  assert.equal(video.loadCalls, loads + 1);
-  assert.equal(video.parentNode, null);
-});
-
-test('failed candidates are not rebuilt by repeated sync until they leave or clear resets the pool', async () => {
-  for (const failure of ['media', 'hls', 'live', 'timeout', 'take', 'loadHls']) {
-    const f = fixture({
-      loadHls: failure === 'loadHls' ? () => Promise.reject(new Error('chunk failed')) : undefined,
-    });
-    const a = candidate('a.m3u8'), b = candidate('b.mp4');
-    f.pool.sync([a, b]);
+test('failed candidates are deduplicated by key+source until pruned, refreshed, or cleared', async () => {
+  for (const failure of ['media', 'fatal', 'live', 'loadHls', 'constructor', 'loadSource', 'attachMedia']) {
+    const f = fixture({ loadHls: failure === 'loadHls' ? () => Promise.reject(new Error('chunk failed')) : undefined });
+    f.Hls.failure = failure;
+    const item = candidate('a.m3u8', { Authorization: 'expired' });
+    sync(f, [item]);
     await flush();
     if (failure === 'media') f.videos[0].dispatch('error');
-    if (failure === 'hls') f.engines[0].emit('ERROR', { fatal: true });
-    if (failure === 'live') f.engines[0].emit('LEVEL_LOADED', { details: { live: true } });
-    if (failure === 'timeout') {
-      f.videos[1].readyState = 2;
-      f.advance(8000);
-    }
-    if (failure === 'take') assert.equal(f.pool.take(a.url), null);
-    for (let i = 0; i < 3; i++) {
-      f.pool.sync([b, a]);
-      f.pool.sync([a, b]);
-    }
+    if (failure === 'fatal') f.engines[0].emit('ERROR', { fatal: true });
+    if (failure === 'live') manifest(f.engines[0], 120, true);
+    for (let i = 0; i < 3; i++) sync(f, [item]);
     await flush();
     assert.equal(f.loadHlsCalls, 1, failure);
-    assert.equal(f.videos.length, 2, failure);
-    assert.equal(f.pool.take(a.url), null);
-    f.pool.sync([b]);
-    f.pool.sync([a, b]);
+    assert.equal(take(f, item), null, failure);
+    assert.equal(f.host.children.length, 0);
+    assert.ok(f.engines.every(hls => hls.destroyCalls === 1));
+    if (failure === 'loadSource') assert.equal(f.engines[0].video, undefined);
+    sync(f, [{ ...item, headers: { Authorization: 'fresh' } }]);
     await flush();
-    assert.equal(f.loadHlsCalls, 2, 'leaving the candidates allows another attempt');
+    assert.equal(f.loadHlsCalls, 2);
+    sync(f, [], []);
+    sync(f, [item]);
+    await flush();
+    assert.equal(f.loadHlsCalls, 3);
     f.pool.clear();
-    f.pool.sync([a]);
+    sync(f, [item]);
     await flush();
-    assert.equal(f.loadHlsCalls, 3, 'clear allows a fresh mode/session');
+    assert.equal(f.loadHlsCalls, 4);
     f.pool.clear();
   }
 });
 
-test('changing headers retries a failed URL without reviving the old identity', async () => {
-  const f = fixture();
-  const old = candidate('a.m3u8', { Authorization: 'expired' });
-  const next = candidate('a.m3u8', { Authorization: 'fresh' });
-  f.pool.sync([old]);
+test('nonfatal HLS errors do not discard playable buffers', async () => {
+  const f = fixture(), item = candidate('a.m3u8');
+  sync(f, [item]);
   await flush();
-  f.engines[0].emit('ERROR', { fatal: true });
-  f.pool.sync([old]);
-  f.pool.sync([next]);
-  await flush();
-  assert.equal(f.engines.length, 2);
-  const xhr = new Xhr();
-  f.engines[1].config.xhrSetup(xhr, next.url);
-  assert.equal(xhr.headers.Authorization, 'fresh');
+  f.engines[0].emit('ERROR', { fatal: false, details: 'fragLoadError' });
+  assert.equal(f.engines[0].destroyCalls, 0);
+  assert.equal(take(f, item).video, f.videos[0]);
   f.pool.clear();
 });
 
-test('pending and loaded HLS candidates never exceed two even during replacement', async () => {
-  const pending = deferred();
-  const f = fixture({ loadHls: () => pending.promise });
-  const a = candidate('a.m3u8'), b = candidate('b.m3u8');
-  const c = candidate('c.m3u8'), d = candidate('d.m3u8');
-  f.pool.sync([a, b, c]);
-  assert.equal(f.videos.length, 2);
-  f.pool.sync([b, c]);
-  assert.equal(f.host.children.length, 2);
-  assert.equal(f.timers.size, 2);
-  pending.resolve(f.Hls);
-  await flush();
-  assert.deepEqual(f.engines.map(hls => hls.url), [b.url, c.url]);
-  f.pool.sync([c, d]);
-  assert.equal(f.engines[0].destroyCalls, 1, 'old engine is destroyed before the replacement loads');
-  await flush();
-  assert.equal(f.engines.filter(hls => !hls.destroyCalls).length, 2);
-  assert.equal(f.host.peak, 2);
+test('detach relinquishes a parked native node so later pruning cannot wipe its new source', () => {
+  const f = fixture(), a = candidate('a.mp4'), b = candidate('b.mp4');
+  const video = external(f, a);
+  video.currentTime = 24;
+  f.pool.park(a.key);
+  f.pool.detach(video);
+  video.src = b.url;
+  f.pool.adopt({ ...b, video });
+  sync(f, [], [b.key]);
+  assert.equal(video.src, b.url);
+  assert.equal(video.loadCalls, 0);
+  assert.equal(take(f, a), null);
   f.pool.clear();
-  assert.ok(f.engines.every(hls => hls.destroyCalls === 1));
-  assert.ok(f.videos.every(video => video.playCalls === 0));
-  assert.equal(f.timers.size, 0);
-});
-
-test('unready take destroys an already loading HLS engine immediately, without waiting', async () => {
-  const f = fixture();
-  const entry = candidate('a.m3u8');
-  f.pool.sync([entry]);
-  await flush();
-  const hls = f.engines[0], xhr = new Xhr();
-  hls.config.xhrSetup(xhr, 'https://media.test/slow-fragment.ts');
-  f.videos[0].readyState = 1;
-  const result = f.pool.take(entry.url);
-  assert.equal(result, null);
-  assert.equal(hls.destroyCalls, 1);
-  assert.equal(hls.listenerCount + xhr.listenerCount + f.videos[0].listenerCount, 0);
-  assert.equal(f.timers.size, 0);
-  assert.equal(f.host.children.length, 0);
-  f.pool.sync([entry]);
-  assert.equal(f.loadHlsCalls, 1);
+  assert.equal(video.src, b.url);
 });

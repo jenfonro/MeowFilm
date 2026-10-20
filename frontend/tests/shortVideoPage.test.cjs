@@ -4,8 +4,10 @@ const { readFileSync } = require('node:fs');
 const vm = require('node:vm');
 
 const source = readFileSync('src/pages/play/PlayPage.vue', 'utf8');
-const componentCode = source.slice(source.indexOf('export default {'), source.indexOf('</script>'))
+const componentCode = source.slice(source.indexOf('const THIRD_PARTY_PLAYERS ='), source.indexOf('</script>'))
   .replace('export default', 'this.component =');
+const historySource = readFileSync('src/shared/playHistoryRuntime.js', 'utf8')
+  .replace(/^import .*;\r?\n/gm, '').replace(/export /g, '');
 const deferred = () => {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -32,6 +34,25 @@ function element(initialStyle, left, top) {
   };
 }
 
+function historyRuntime() {
+  const posts = [];
+  const context = vm.createContext({
+    reactive: value => value,
+    normalizeInt: value => Math.trunc(Number(value) || 0),
+    normalizeString: value => String(value ?? '').trim(),
+    apiPostJson: async (_url, body) => { posts.push(body); return { success: true }; },
+    apiGetJson: async () => ({ items: [] }), apiInvalidateCache() {}, buildQuery: () => '',
+  });
+  vm.runInContext(historySource + `
+    this.api = {
+      preparePlayHistoryContext, bindPlayHistoryWatchReport, onPlayerHistoryPlaybackStart,
+      confirmPlayerHistoryPlaybackReady, onPlayerHistoryTimeUpdate,
+      syncHistoryProgressIfPossible, playHistorySessionState,
+    };
+  `, context);
+  return { ...context.api, posts };
+}
+
 function fixture({ rootStyle = null, bodyStyle = null } = {}) {
   const root = element(rootStyle, 12, 150), body = element(bodyStyle, 8, 375);
   const ticks = [], timers = [], history = [];
@@ -48,7 +69,6 @@ function fixture({ rootStyle = null, bodyStyle = null } = {}) {
   const context = vm.createContext({
     ArtPlayer: {}, window,
     markRaw: value => value,
-    SHORT_VIDEO_PREFETCH_TTL_MS: 3 * 60 * 1000,
     document: { documentElement: root, body, removeEventListener() {} },
     normalizeInt: value => Math.trunc(Number(value) || 0),
     normalizeString: value => String(value ?? '').trim(),
@@ -88,10 +108,17 @@ function fixture({ rootStyle = null, bodyStyle = null } = {}) {
 test('short video defaults off and uses the existing player and title contract', () => {
   const { page } = fixture();
   assert.equal(page.shortVideoMode, false);
+  assert.equal(page.shortVideoCacheEnabled, false);
+  assert.equal(page.shortVideoCacheKey, '');
+  assert.equal(page.shortVideoCacheKeys.length, 0);
   assert.equal(page.shortVideoEpisodeSwitching, false);
   const playerTags = source.match(/<ArtPlayer\b[\s\S]*?\/>/g);
   assert.equal(playerTags.length, 1);
   assert.match(playerTags[0], /:short-video-mode="shortVideoMode"/);
+  assert.match(playerTags[0], /:short-video-cache-enabled="shortVideoCacheEnabled"/);
+  assert.match(playerTags[0], /:short-video-cache-key="shortVideoCacheKey"/);
+  assert.match(playerTags[0], /:short-video-cache-keys="shortVideoCacheKeys"/);
+  assert.match(playerTags[0], /:short-video-buffer-candidates="shortVideoBufferCandidates"/);
   assert.match(playerTags[0], /:episode-switching="shortVideoEpisodeSwitching"/);
   assert.match(playerTags[0], /:short-video-title="shortVideoTitleText"/);
   assert.match(playerTags[0], /:short-video-prev="shortVideoPrevTitleText"/);
@@ -165,6 +192,7 @@ for (const style of [null, '', 'overflow: auto !important; position: relative; c
     page.enterShortVideoMode();
     const snapshot = page.shortVideoScrollState;
     assert.equal(page.shortVideoMode, true);
+    assert.equal(page.shortVideoCacheEnabled, true);
     assert.equal(page.siteSourceOpen || page.panSourceOpen, false);
     assert.match(root.getAttribute('style'), /overflow:hidden !important/);
     assert.match(body.getAttribute('style'), /position:fixed !important/);
@@ -175,6 +203,7 @@ for (const style of [null, '', 'overflow: auto !important; position: relative; c
     root.scrollLeft = body.scrollLeft = window.scrollX = 0;
     page.exitShortVideoMode();
     flushTicks();
+    assert.equal(page.shortVideoCacheEnabled, true);
     assert.equal(root.getAttribute('style'), style);
     assert.equal(body.getAttribute('style'), style);
     assert.deepEqual([root.scrollLeft, root.scrollTop, body.scrollLeft, body.scrollTop], [12, 150, 8, 375]);
@@ -197,6 +226,9 @@ test('rapid exit/reentry keeps the original scroll snapshot and the background l
   window.scrollY = 0;
   page.exitShortVideoMode();
   page.enterShortVideoMode();
+  page.shortVideoCacheKeys = ['old-key'];
+  page.shortVideoPrefetch.set('old-key', { result: {} });
+  page.shortVideoBufferCandidates = [{ key: 'next', url: 'https://media.test/next' }];
   flushTicks();
   assert.equal(page.shortVideoScrollState, snapshot);
   assert.match(body.getAttribute('style'), /position:fixed/);
@@ -218,6 +250,96 @@ test('unmount restores styles immediately and scroll again after document layout
   flushTicks();
   assert.deepEqual([root.scrollTop, body.scrollTop, window.scrollY], [150, 375, 150]);
   assert.equal(page.shortVideoScrollState, null);
+  assert.equal(page.shortVideoCacheKeys.length, 0);
+  assert.equal(page.shortVideoPrefetch.size, 0);
+  assert.equal(page.shortVideoBufferCandidates.length, 0);
+  assert.equal(fixture().page.shortVideoCacheEnabled, false, 'a new page starts a new session');
+});
+
+for (const shortVideoMode of [true, false]) {
+  for (const localPosition of [0, 37.5]) {
+    test(`cacheRestored consumes historical resume without seeking at ${localPosition}s (UI=${shortVideoMode})`, async () => {
+      const f = fixture(), runtime = historyRuntime();
+      const { page, player, context } = f;
+      await runtime.preparePlayHistoryContext({
+        contentKey: 'Fixture', reportEnabled: true, siteKey: 'site',
+        spiderApi: '/aaaaaaaaaa/spider/test/3', siteDetail: 'detail', playFlag: 'line', selectionKey: 'episode-2',
+      });
+      runtime.bindPlayHistoryWatchReport({
+        apiBase: 'https://runner.test', spiderApi: '/aaaaaaaaaa/spider/test/3', id: 'episode-2', flag: 'line',
+      });
+      const state = runtime.playHistorySessionState;
+      state.resumePlan = {
+        identity: state.activeContext.identity, seconds: 120, applied: false, frozen: false, tryKey: '', tryAt: 0,
+      };
+      Object.assign(context, runtime);
+      page.shortVideoMode = shortVideoMode;
+      page.shortVideoCacheEnabled = true;
+      player.currentTime = localPosition;
+      const frame = { currentTime: localPosition, duration: 180, playing: true, cacheRestored: true };
+      await page.onPlayerFirstFrame(frame);
+      assert.equal(player.currentTime, localPosition);
+      assert.equal(state.resumePlan.applied, true);
+      assert.equal(state.resumePlan.frozen, true);
+      assert.equal(state.playbackState.ready, true, 'restored playback still confirms history/watch-report readiness');
+      assert.equal(state.activeContext.watchReportReady, true);
+      assert.equal(runtime.posts.length, 1);
+      assert.equal(runtime.posts[0].playbackPositionTicks, localPosition * 10000000);
+      assert.equal(runtime.posts[0].playbackEvent, 'started');
+      assert.equal(runtime.posts[0].watchReport.id, 'episode-2');
+      assert.equal(page.playerFirstFrameReady, true);
+      await page.onPlayerFirstFrame({ ...frame, cacheRestored: false });
+      assert.equal(player.currentTime, localPosition, 'a later firstframe cannot replay the consumed historical seek over local zero');
+    });
+  }
+}
+
+test('non-restored firstframe retains the ordinary historical seek and ready confirmation', async () => {
+  const { page, player, context } = fixture(), calls = [];
+  context.onPlayerHistoryPlaybackStart = async reason => { calls.push(['resume', reason]); return 75; };
+  context.confirmPlayerHistoryPlaybackReady = async reason => { calls.push(['ready', reason]); };
+  player.seekTo = seconds => { player.currentTime = seconds; calls.push(['seek', seconds]); };
+  await page.onPlayerFirstFrame({ currentTime: 0, duration: 180, playing: true, cacheRestored: false });
+  assert.equal(player.currentTime, 75);
+  assert.deepEqual(calls, [['resume', 'firstframe'], ['seek', 75], ['ready', 'firstframe']]);
+});
+
+test('sticky cache refresh scheduling continues outside the short-video UI without affecting progress events', () => {
+  const { page, history } = fixture();
+  let prefetched = 0;
+  page.prefetchShortVideoNeighbors = () => { prefetched++; };
+  const info = { currentTime: 130, duration: 180, playing: true };
+  page.onPlayerTimeUpdate(info);
+  assert.equal(prefetched, 0, 'never-enabled ordinary pages must not prefetch');
+  page.shortVideoCacheEnabled = true;
+  page.onPlayerTimeUpdate(info);
+  assert.equal(prefetched, 1);
+  assert.equal(page.shortVideoMode, false);
+  assert.deepEqual(history, [info, info]);
+});
+
+test('ended reports the original final position before switching and leaves local zero handling to ArtPlayer', async () => {
+  const { page, player, context } = fixture(), runtime = historyRuntime(), calls = [];
+  await runtime.preparePlayHistoryContext({
+    reportEnabled: true, siteKey: 'site', siteDetail: 'detail', selectionKey: 'episode-2',
+  });
+  runtime.bindPlayHistoryWatchReport({
+    apiBase: 'https://runner.test', spiderApi: '/aaaaaaaaaa/spider/test/3', id: 'episode-2', flag: 'line',
+  });
+  Object.assign(context, runtime);
+  await page.onPlayerFirstFrame({ currentTime: 0, duration: 130.5, playing: true, cacheRestored: true });
+  page.shortVideoMode = page.shortVideoCacheEnabled = true;
+  player.currentTime = 130.5;
+  page.switchEpisodeByDelta = async (delta, options) => {
+    calls.push([delta, options.showBoundaryToast]);
+    assert.equal(runtime.posts.at(-1).playbackEvent, 'stopped');
+    assert.equal(runtime.posts.at(-1).playbackPositionTicks, 1305000000);
+    assert.equal(player.currentTime, 130.5);
+  };
+  page.onPlayerEnded({ currentTime: 130.5, duration: 130.5, playing: false });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, [[1, false]]);
+  assert.equal(runtime.playHistorySessionState.playerTime.currentTime, 130.5);
 });
 
 test('entering and exiting short video leaves the episode panel preference unchanged', () => {

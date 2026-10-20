@@ -78,6 +78,9 @@
                     :headers="playerHeaders"
                     :title="displayTitle"
                     :short-video-mode="shortVideoMode"
+                    :short-video-cache-enabled="shortVideoCacheEnabled"
+                    :short-video-cache-key="shortVideoCacheKey"
+                    :short-video-cache-keys="shortVideoCacheKeys"
                     :episode-switching="shortVideoEpisodeSwitching"
                     :short-video-title="shortVideoTitleText"
                     :short-video-prev="shortVideoPrevTitleText"
@@ -609,7 +612,7 @@ const THIRD_PARTY_PLAYERS = [
   { icon: 'mpv', name: 'mpv', scheme: 'mpv://$edurl' },
 ];
 const PLAY_SEARCH_SCOPE = 'play-site-only';
-// Signed play URLs are short lived. Keep only the immediate neighbors in memory.
+// Address-only speculation expires; retained/current-next media reuse URLs until a playback error.
 const SHORT_VIDEO_PREFETCH_TTL_MS = 60 * 1000;
 const TMDB_MOVIE_RECOGNITION_SIGNATURE = 'tmdb-movie';
 
@@ -2273,6 +2276,11 @@ export default {
       }
       return this.currentPrimaryPlaybackEpisodeTarget;
     },
+    shortVideoCacheKey() {
+      const playback = this.shortVideoPlayback;
+      return this.shortVideoCacheEnabled && playback && this.playerUrl
+        && this.playerUrl === playback.entry.result.playerUrl ? playback.key : '';
+    },
     shortVideoTitleText() {
       return this.buildShortVideoTitle(this.shortVideoEpisodeTarget);
     },
@@ -2417,9 +2425,14 @@ export default {
       selectedSiteSource: '',
       selectedPanSource: '',
       shortVideoMode: false,
+      shortVideoCacheEnabled: false,
+      shortVideoCacheKeys: [],
+      shortVideoCacheNextKey: '',
+      shortVideoCacheContext: '',
+      shortVideoPlayback: null,
       shortVideoEpisodeSwitchInFlight: false,
       shortVideoScrollState: null,
-      // Prefetched play URLs for the neighbor episodes: key -> { at, promise }.
+      // Address-only session slots: previous five, current and next.
       shortVideoPrefetch: markRaw(new Map()),
       shortVideoPrefetchAt: 0,
       shortVideoBufferCandidates: [],
@@ -2536,8 +2549,7 @@ export default {
     this.loadPlayRuntimeAndDetail();
   },
   beforeUnmount() {
-    this.shortVideoPrefetch.clear();
-    this.shortVideoBufferCandidates = [];
+    this.clearShortVideoCache();
     this.restoreShortVideoScroll();
     this.resetSwitchSkipState();
     this.cancelActivePlaybackFlow({ stopStream: true, invalidateDetail: true, clearPlayerState: true });
@@ -2565,9 +2577,7 @@ export default {
   },
   methods: {
     cancelActivePlaybackFlow({ stopStream = true, invalidateDetail = false, clearPlayerState = false } = {}) {
-      this.shortVideoPrefetch.clear();
-      this.shortVideoBufferCandidates = [];
-      this.shortVideoPrefetchedPlayback = null;
+      this.clearShortVideoCache();
       this.shortVideoRefreshInFlightSeq = 0;
       this.resetSmartPlaybackRuntimeState({ stopStream });
       this.playRequestSeq += 1;
@@ -3048,6 +3058,7 @@ export default {
         this.siteSourceOpen = false;
         return;
       }
+      this.clearShortVideoCache();
       if (this.selectedSiteResultItem && this.currentPanSourceEntry) {
         patchLastBrowsePlaybackContext({
           itemId: normalizeString(this.selectedSiteResultItem.id),
@@ -3111,8 +3122,7 @@ export default {
     },
     selectSiteSourceResult(item) {
       if (!item || !item.id) return;
-      this.shortVideoPrefetch.clear();
-      this.shortVideoBufferCandidates = [];
+      this.clearShortVideoCache();
       this.selectedSearchResultId = String(item.id);
       this.selectedProjectionSource = 'TMDB';
       this.selectedPanSource = '';
@@ -3127,8 +3137,7 @@ export default {
       this.$nextTick(() => this.syncPlaybackDisplayFocus());
     },
     selectPanSource(option) {
-      this.shortVideoPrefetch.clear();
-      this.shortVideoBufferCandidates = [];
+      this.clearShortVideoCache();
       this.selectedPanSource = option;
       this.panSourceOpen = false;
       if (this.selectedSiteResultItem) {
@@ -4001,9 +4010,9 @@ export default {
         preOrder: this.preOrderActive,
       });
     },
-    async applyPlayHistoryResume(reason = '') {
+    async applyPlayHistoryResume(reason = '', cacheRestored = false) {
       const seconds = await onPlayerHistoryPlaybackStart(reason);
-      if (seconds > 0) {
+      if (!cacheRestored && seconds > 0) {
         await this.$nextTick();
         const art = this.$refs.artPlayerRef;
         if (art && typeof art.seekTo === 'function') {
@@ -4191,21 +4200,29 @@ export default {
       return this.focusPrimaryEpisodeByGlobal(currentGlobal - 1);
     },
     findProjectedSiteEpisodeItemByDelta(deltaRaw) {
-      const delta = Number(deltaRaw) > 0 ? 1 : (Number(deltaRaw) < 0 ? -1 : 0);
+      const delta = normalizeInt(deltaRaw);
       if (!delta) return null;
       const list = Array.isArray(this.projectedSiteEpisodeItems) ? this.projectedSiteEpisodeItems : [];
       if (!list.length) return null;
-      const currentGlobal = Math.max(0, normalizeInt(this.currentPlaybackContext && this.currentPlaybackContext.globalEpisode));
-      if (currentGlobal > 0 && currentGlobal + delta > 0) {
-        const exact = list.find((item) => normalizeInt(item && item.global) === currentGlobal + delta) || null;
-        if (exact) return exact;
+      let currentGlobal = Math.max(0, normalizeInt(this.currentPlaybackContext && this.currentPlaybackContext.globalEpisode));
+      let currentItemIndex = normalizeInt(this.currentPlaybackContext && this.currentPlaybackContext.itemIndex);
+      let target = null;
+      const step = Math.sign(delta);
+      // Repeated single-step navigation also handles gaps in projected numbering.
+      for (let offset = 0; offset < Math.abs(delta); offset += 1) {
+        target = currentGlobal > 0 && currentGlobal + step > 0
+          ? list.find((item) => normalizeInt(item && item.global) === currentGlobal + step) || null
+          : null;
+        if (!target) {
+          const index = list.findIndex((item) => normalizeInt(item && item.itemIndex) === currentItemIndex);
+          if (index < 0) return null;
+          target = list[index + step] || null;
+        }
+        if (!target) return null;
+        currentGlobal = normalizeInt(target.global);
+        currentItemIndex = normalizeInt(target.itemIndex);
       }
-      const currentItemIndex = normalizeInt(this.currentPlaybackContext && this.currentPlaybackContext.itemIndex);
-      const currentIndex = list.findIndex((item) => normalizeInt(item && item.itemIndex) === currentItemIndex);
-      if (currentIndex < 0) return null;
-      const targetIndex = currentIndex + delta;
-      if (targetIndex < 0 || targetIndex >= list.length) return null;
-      return list[targetIndex] || null;
+      return target;
     },
     findNextProjectedSiteEpisodeItem() {
       return this.findProjectedSiteEpisodeItemByDelta(1);
@@ -4717,7 +4734,9 @@ export default {
       sourceKind = '',
       fromHistoryPlayFlag = false,
       fromHistoryDetail = false,
-      selectedGoProxyBase = '',
+      selectedGoProxyBase = this.shortVideoCacheEnabled && this.shortVideoPlayback
+        ? this.shortVideoPlayback.params.selectedGoProxyBase
+        : '',
     }) {
       if (!siteItem || !panEntry || !segment || !normalizeString(segment.episodeUrl)) return false;
       const seq = ++this.playRequestSeq;
@@ -4750,6 +4769,17 @@ export default {
         fromHistoryPlayFlag,
         fromHistoryDetail,
       });
+      const params = { siteItem, panEntry, segment, selectionKey, selectedGoProxyBase };
+      const cacheContext = this.buildShortVideoCacheContext(params);
+      if (cacheContext !== this.shortVideoCacheContext) this.clearShortVideoCache();
+      this.shortVideoCacheContext = cacheContext;
+      const key = this.buildShortVideoPrefetchKey(siteItem, panEntry, segment, selectedGoProxyBase);
+      const prefetched = this.shortVideoCacheEnabled ? this.takeShortVideoPrefetch(key) : null;
+      // Resolve current and neighbors together, before history preparation or firstframe.
+      const resolving = this.shortVideoCacheEnabled && !prefetched
+        ? this.requestShortVideoPrefetch(params, key).promise
+        : null;
+      this.prefetchShortVideoNeighbors(params);
       const siteResolvedMeta = await this.ensureSiteHistoryResolvedMeta();
       if (seq !== this.playRequestSeq) return false;
       const siteTMDBBinding = this.buildSiteModeTMDBBindingForSegment({
@@ -4787,18 +4817,17 @@ export default {
       this.lastM3U8RelayCandidate = null;
       this.syncPlayerStatsForResolvedSegment({ siteResultItem: siteItem, pan: panEntry, segment, candidate });
       try {
-        const params = { siteItem, panEntry, segment, selectionKey, selectedGoProxyBase };
-        const resolve = () => this.resolveSitePlaybackUrl(params);
-        const prefetched = this.shortVideoMode
-          ? this.takeShortVideoPrefetch(this.buildShortVideoPrefetchKey(siteItem, panEntry, segment, selectedGoProxyBase))
-          : null;
         const result = prefetched ? await prefetched.catch(() => null) : null;
         if (seq !== this.playRequestSeq) return false;
-        const playback = result || await resolve();
+        const playback = result || await (resolving || this.resolveSitePlaybackUrl(params));
         if (seq !== this.playRequestSeq) return false;
-        if (result) this.shortVideoPrefetchedPlayback = { seq, params };
         bindPlayHistoryWatchReport(playback && playback.watchReport);
         this.applyResolvedPlaybackUrl(playback);
+        if (cacheContext === this.shortVideoCacheContext) {
+          if (result) this.shortVideoPrefetchedPlayback = { seq, params };
+          this.cacheShortVideoPlayback(params, playback, this.shortVideoPrefetch.get(key));
+          this.prefetchShortVideoNeighbors();
+        }
         if (this.activePlayerControlAction === 'switch') {
           this.recordResolvedPayloadIntoSwitchSkipBucket({
             siteItem,
@@ -5449,6 +5478,7 @@ export default {
         this.goProxyInUseBase = normalizeString(out.goProxyBase);
         this.playError = '';
         this.playerRuntimeError = '';
+        this.updateShortVideoPlaybackUrl(nextBase);
       } finally {
         this.playLoading = false;
         this.playRequestStage = '';
@@ -5541,6 +5571,7 @@ export default {
             this.goProxyInUseBase = normalizeString(out.goProxyBase);
             this.playError = '';
             this.playerRuntimeError = '';
+            this.updateShortVideoPlaybackUrl();
           } finally {
             if (retrySeq === normalizeInt(this.playRequestSeq)) {
               this.playLoading = false;
@@ -5582,6 +5613,7 @@ export default {
               : {};
             this.playError = '';
             this.playerRuntimeError = '';
+            this.updateShortVideoPlaybackUrl();
           } finally {
             if (retrySeq === normalizeInt(this.playRequestSeq)) {
               this.playLoading = false;
@@ -5617,8 +5649,8 @@ export default {
     onPlayerTimeUpdate(info) {
       onPlayerHistoryTimeUpdate(info);
       void syncHistoryProgressIfPossible({ force: info && info.event === 'paused', event: info && info.event || 'progress' });
-      // Keep the neighbors' URLs fresh while a long episode is still playing.
-      if (this.shortVideoMode && info && info.playing && Date.now() - this.shortVideoPrefetchAt >= SHORT_VIDEO_PREFETCH_TTL_MS) {
+      // Refresh address-only neighbors without replacing the next media buffer.
+      if (this.shortVideoCacheEnabled && info && info.playing && Date.now() - this.shortVideoPrefetchAt >= SHORT_VIDEO_PREFETCH_TTL_MS) {
         this.prefetchShortVideoNeighbors();
       }
     },
@@ -5639,9 +5671,9 @@ export default {
     async onPlayerFirstFrame(info) {
       onPlayerHistoryTimeUpdate(info);
       this.finalizePlayerReadyState({ markFirstFrame: true });
-      await this.applyPlayHistoryResume('firstframe');
+      await this.applyPlayHistoryResume('firstframe', !!(info && info.cacheRestored));
       this.confirmSmartPlaybackClosedLoop(this.smartPlaybackPendingRunSeq);
-      if (this.shortVideoMode) this.prefetchShortVideoNeighbors();
+      if (this.shortVideoCacheEnabled) this.prefetchShortVideoNeighbors();
     },
     onPlayerEnded(info) {
       if (this.shortVideoMode && this.shortVideoEpisodeSwitching) return;
@@ -5724,6 +5756,7 @@ export default {
         bodyStyle.setProperty('overflow', 'hidden', 'important');
       }
       this.shortVideoMode = true;
+      this.shortVideoCacheEnabled = true;
       this.siteSourceOpen = false;
       this.panSourceOpen = false;
       this.$nextTick(() => this.syncPlayerLayoutMetrics());
@@ -5732,8 +5765,6 @@ export default {
     exitShortVideoMode() {
       if (!this.shortVideoMode) return;
       this.shortVideoMode = false;
-      this.shortVideoPrefetch.clear();
-      this.shortVideoBufferCandidates = [];
       this.$nextTick(() => {
         if (this.shortVideoMode) return;
         this.restoreShortVideoScroll();
@@ -5808,9 +5839,56 @@ export default {
         normalizeString(segment && segment.episodeUrl),
         normalizeString(segment && segment.rawName),
         normalizeString(selectedGoProxyBase),
+        !!(this.runtimeSettings && this.runtimeSettings.goProxyEnabled),
+        this.runtimeSettings && this.runtimeSettings.goProxyServers,
         !!(this.runtimeSettings && this.runtimeSettings.relayEnabled),
         this.runtimeSettings && this.runtimeSettings.relayServers,
       ]);
+    },
+    buildShortVideoCacheContext({ siteItem, panEntry, selectedGoProxyBase = '' }) {
+      return JSON.stringify([
+        this.playContentPreferenceKey,
+        this.buildShortVideoPrefetchKey(siteItem, panEntry, null, selectedGoProxyBase),
+      ]);
+    },
+    clearShortVideoCache() {
+      this.shortVideoPrefetch.clear();
+      this.shortVideoCacheKeys = [];
+      this.shortVideoCacheNextKey = '';
+      this.shortVideoCacheContext = '';
+      this.shortVideoPlayback = null;
+      this.shortVideoPrefetchedPlayback = null;
+      this.shortVideoBufferCandidates = [];
+    },
+    cacheShortVideoPlayback(params, result, entry = null) {
+      const { siteItem, panEntry, segment, selectedGoProxyBase } = params;
+      const key = this.buildShortVideoPrefetchKey(siteItem, panEntry, segment, selectedGoProxyBase);
+      const cached = entry && entry.result === result
+        ? entry
+        : { at: Date.now(), pending: false, promise: Promise.resolve(result), result };
+      cached.visited = true;
+      // Snapshot the identity with the URL, never with the early context update.
+      this.shortVideoPlayback = markRaw({ key, params, entry: cached, seq: this.playRequestSeq });
+      if (this.shortVideoCacheEnabled && this.shortVideoCacheKeys.includes(key)) {
+        this.shortVideoPrefetch.set(key, cached);
+      }
+    },
+    updateShortVideoPlaybackUrl(selectedGoProxyBase) {
+      const playback = this.shortVideoPlayback;
+      if (!playback || playback.seq !== this.playRequestSeq) return;
+      const params = selectedGoProxyBase === undefined
+        ? playback.params
+        : { ...playback.params, selectedGoProxyBase };
+      const context = this.buildShortVideoCacheContext(params);
+      if (context !== this.shortVideoCacheContext) this.clearShortVideoCache();
+      this.shortVideoCacheContext = context;
+      this.cacheShortVideoPlayback(params, {
+        ...playback.entry.result,
+        playerUrl: this.playerUrl,
+        playerHeaders: this.playerHeaders,
+        goProxyBase: this.goProxyInUseBase,
+      });
+      this.prefetchShortVideoNeighbors();
     },
     applyResolvedPlaybackUrl(result) {
       this.lastGoProxyCandidate = result && result.lastGoProxyCandidate ? result.lastGoProxyCandidate : null;
@@ -5822,6 +5900,9 @@ export default {
       this.playerUrl = normalizeString(result && result.playerUrl);
     },
     async refreshShortVideoPlayback({ seq, params }, event) {
+      const cacheContext = this.shortVideoCacheContext;
+      const key = this.buildShortVideoPrefetchKey(params.siteItem, params.panEntry, params.segment, params.selectedGoProxyBase);
+      this.shortVideoPrefetch.delete(key);
       this.shortVideoRefreshInFlightSeq = seq;
       this.playerUrl = '';
       this.playerHeaders = {};
@@ -5833,6 +5914,7 @@ export default {
         const result = await this.resolveSitePlaybackUrl(params);
         if (seq !== this.playRequestSeq) return;
         this.applyResolvedPlaybackUrl(result);
+        if (cacheContext === this.shortVideoCacheContext) this.cacheShortVideoPlayback(params, result);
         this.playRequestStage = 'play_info';
         refreshed = true;
       } catch (_error) {
@@ -5866,48 +5948,71 @@ export default {
     },
     // Resolve through the normal policy; the player can warm the returned URLs.
     // Only the actual switch binds history and proxy/relay retry candidates.
-    prefetchShortVideoNeighbors() {
-      if (!this.shortVideoMode || !this.playerUrl || !this.playerFirstFrameReady || this.playError || this.playerRuntimeError) return;
+    prefetchShortVideoNeighbors(currentTarget = null) {
+      if (!this.shortVideoCacheEnabled) return;
+      const playback = this.shortVideoPlayback;
+      if (!currentTarget && (!playback || playback.seq !== this.playRequestSeq
+        || !this.playerUrl || this.playError || this.playerRuntimeError)) return;
+      const current = currentTarget || playback.params;
+      if (this.buildShortVideoCacheContext(current) !== this.shortVideoCacheContext) {
+        this.clearShortVideoCache();
+        return;
+      }
       const cache = this.shortVideoPrefetch;
-      const now = Date.now();
       const keep = new Set();
-      this.shortVideoPrefetchAt = now;
-      [1, -1].forEach((delta) => {
-        const target = this.resolveShortVideoPrefetchTarget(delta);
-        if (!target) return;
-        const { siteItem, panEntry, segment } = target;
-        const key = this.buildShortVideoPrefetchKey(siteItem, panEntry, segment);
+      const neighbors = new Map();
+      this.shortVideoCacheNextKey = '';
+      this.shortVideoPrefetchAt = Date.now();
+      for (let delta = -5; delta <= 1; delta += 1) {
+        const resolved = delta === 0 ? current : this.resolveShortVideoPrefetchTarget(delta);
+        if (!resolved) continue;
+        const target = { ...resolved, selectedGoProxyBase: current.selectedGoProxyBase };
+        const { siteItem, panEntry, segment, selectedGoProxyBase } = target;
+        const key = this.buildShortVideoPrefetchKey(siteItem, panEntry, segment, selectedGoProxyBase);
         keep.add(key);
-        const entry = cache.get(key);
-        if (entry && (entry.pending || now - entry.at < SHORT_VIDEO_PREFETCH_TTL_MS)) return;
-        const next = { at: now, pending: true, promise: null, result: null };
-        next.promise = this.resolveSitePlaybackUrl(target).then((result) => {
-          if (this.shortVideoMode && cache.get(key) === next) {
-            next.result = result;
-            this.syncShortVideoBufferCandidates();
-          }
-          return result;
-        }).finally(() => { next.pending = false; });
-        // Failed speculation is silent. Actual playback retries the normal resolver.
-        next.promise.catch(() => {});
-        cache.set(key, next);
-      });
+        if (delta === 1) this.shortVideoCacheNextKey = key;
+        if (delta === 1 || delta === -1) neighbors.set(delta, { target, key });
+        if (delta === 0 && playback && playback.key === key && !cache.has(key)) cache.set(key, playback.entry);
+      }
+      this.shortVideoCacheKeys = Array.from(keep);
       Array.from(cache.keys()).forEach((key) => {
         if (!keep.has(key)) cache.delete(key);
       });
+      [1, -1].forEach((delta) => {
+        const neighbor = neighbors.get(delta);
+        if (neighbor) this.requestShortVideoPrefetch(neighbor.target, neighbor.key);
+      });
       this.syncShortVideoBufferCandidates();
     },
+    requestShortVideoPrefetch(target, key) {
+      const cache = this.shortVideoPrefetch;
+      if (this.takeShortVideoPrefetch(key)) return cache.get(key);
+      const next = { at: Date.now(), pending: true, promise: null, result: null };
+      next.promise = this.resolveSitePlaybackUrl(target).then((result) => {
+        if (cache.get(key) === next) {
+          next.result = result;
+          this.syncShortVideoBufferCandidates();
+        }
+        return result;
+      }).finally(() => { next.pending = false; });
+      // Failed speculation is silent. Actual playback retries the normal resolver.
+      next.promise.catch(() => {});
+      cache.set(key, next);
+      return next;
+    },
     syncShortVideoBufferCandidates() {
-      this.shortVideoBufferCandidates = this.shortVideoMode
-        ? Array.from(this.shortVideoPrefetch.values())
-          .filter((entry) => entry.result && Date.now() - entry.at < SHORT_VIDEO_PREFETCH_TTL_MS)
-          .map(({ result }) => ({ url: result.playerUrl, headers: result.playerHeaders }))
+      const key = this.shortVideoCacheNextKey;
+      const entry = this.shortVideoPrefetch.get(key);
+      this.shortVideoBufferCandidates = this.shortVideoCacheEnabled && entry && entry.result
+        ? [{ key, url: entry.result.playerUrl, headers: entry.result.playerHeaders }]
         : [];
     },
     takeShortVideoPrefetch(key) {
       const entry = this.shortVideoPrefetch.get(key);
-      this.shortVideoPrefetch.delete(key);
-      return entry && (entry.pending || Date.now() - entry.at < SHORT_VIDEO_PREFETCH_TTL_MS) ? entry.promise : null;
+      // An address TTL must not discard the next episode's full media buffer.
+      const retained = entry && (entry.visited || (entry.result && key === this.shortVideoCacheNextKey));
+      return entry && (entry.pending || (retained && this.shortVideoCacheKeys.includes(key))
+        || Date.now() - entry.at < SHORT_VIDEO_PREFETCH_TTL_MS) ? entry.promise : null;
     },
     resolveShortVideoPrefetchTarget(delta) {
       if (!this.selectedSiteResultItem && this.isTmdbMode) {
@@ -5915,6 +6020,11 @@ export default {
         const globalEpisode = current + delta;
         if (current <= 0 || globalEpisode <= 0 || !this.buildShortVideoNeighborTitle(delta)) return null;
         const target = tmdbSeasonEpisodeOfGlobal(this.detailTMDBData, globalEpisode);
+        const displayed = this.isDoubanEpisodeSource
+          ? doubanSeasonEpisodeOfGlobal(this.detailDoubanData, globalEpisode)
+          : target;
+        if (!this.episodeSeasonRows.some((row) => normalizeInt(row.season) === normalizeInt(displayed && displayed.season)
+          && normalizeInt(displayed && displayed.episode) <= normalizeInt(row.episodes))) return null;
         const key = this.buildSwitchEpisodeKeyByGlobal(globalEpisode);
         const skipped = this.buildSwitchSkipIndexForEpisode(key);
         // Match exactly the primary-episode policy, but only use already-known
