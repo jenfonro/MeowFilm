@@ -366,6 +366,120 @@ test('take is synchronous and requires a first frame or positive buffered durati
   }
 });
 
+test('gesture activation plays then immediately pauses each neighbor without clearing its buffer', async () => {
+  const f = fixture();
+  f.pool.sync([candidate('a.mp4'), candidate('b.m3u8')]);
+  await flush();
+  const calls = [];
+  for (const [index, video] of f.videos.entries()) {
+    video.readyState = 3;
+    video.ranges = [[0, 3]];
+    video.play = () => {
+      calls.push([index, 'play', video.muted]);
+      return Promise.reject({ name: 'AbortError' });
+    };
+    video.pause = () => calls.push([index, 'pause']);
+  }
+  const loads = f.videos.map(video => video.loadCalls);
+  const sources = f.videos.map(video => video.src);
+  f.pool.activate();
+  assert.deepEqual(calls, [[0, 'play', false], [0, 'pause'], [1, 'play', false], [1, 'pause']]);
+  assert.ok(f.videos.every(video => video.muted && video.currentTime === 0));
+  assert.deepEqual(f.videos.map(video => video.loadCalls), loads);
+  assert.deepEqual(f.videos.map(video => video.src), sources);
+  await flush();
+  f.pool.activate();
+  assert.equal(calls.length, 4, 'already activated neighbors need no more play/pause cycles');
+  const adopted = f.pool.take(candidate('a.mp4').url);
+  assert.equal(adopted.activated, true, 'pause-induced AbortError does not revoke gesture authorization');
+  assert.deepEqual(adopted.video.ranges, [[0, 3]]);
+  f.pool.clear();
+  f.pool.activate();
+  assert.equal(calls.length, 4, 'taken and destroyed entries are no longer activated');
+});
+
+test('failed gesture activation remains silent and can retry on the next gesture', async () => {
+  for (const failure of ['NotAllowedError', 'NotSupportedError', 'throw']) {
+    const f = fixture();
+    const item = candidate('a.mp4');
+    f.pool.sync([item]);
+    const video = f.videos[0];
+    video.readyState = 3;
+    let plays = 0, pauses = 0;
+    video.play = () => {
+      plays++;
+      if (failure === 'throw') throw new Error('play failed');
+      return Promise.reject({ name: failure });
+    };
+    video.pause = () => { pauses++; };
+    f.pool.activate();
+    await flush();
+    assert.equal(video.muted, true);
+    assert.equal(pauses, 1);
+    video.play = () => { plays++; return Promise.resolve(); };
+    f.pool.activate();
+    await flush();
+    assert.equal(plays, 2);
+    assert.equal(pauses, 2);
+    assert.equal(f.pool.take(item.url).activated, true);
+  }
+});
+
+test('an unactivated or policy-blocked buffer is not reported as authorized', async () => {
+  for (const activate of [false, true]) {
+    const f = fixture();
+    const item = candidate('a.mp4');
+    f.pool.sync([item]);
+    const video = f.videos[0];
+    video.readyState = 3;
+    video.play = () => Promise.reject({ name: 'NotAllowedError' });
+    video.pause = () => {};
+    if (activate) f.pool.activate();
+    await flush();
+    assert.equal(f.pool.take(item.url).activated, false);
+  }
+});
+
+test('an activated in-progress native/HLS buffer keeps its element even before the first frame', async () => {
+  for (const name of ['a.mp4', 'a.m3u8']) {
+    const f = fixture();
+    const item = candidate(name);
+    f.pool.sync([item]);
+    await flush();
+    const video = f.videos[0];
+    video.play = () => Promise.reject({ name: 'AbortError' });
+    video.pause = () => {};
+    f.pool.activate();
+    await flush();
+    assert.equal(video.readyState, 0);
+    const adopted = f.pool.take(item.url);
+    assert.equal(adopted.video, video);
+    assert.equal(adopted.activated, true);
+    adopted.resume();
+    if (name.endsWith('.m3u8')) {
+      assert.equal(f.engines[0].stopCalls, 0, 'do not abort an in-progress manifest');
+      assert.deepEqual(f.engines[0].starts, [-1]);
+    }
+    else assert.equal(video.preload, 'auto');
+  }
+});
+
+test('activation cannot adopt an HLS buffer whose asynchronous engine has not been attached', async () => {
+  const pending = deferred();
+  const f = fixture({ loadHls: () => pending.promise });
+  const item = candidate('a.m3u8');
+  f.pool.sync([item]);
+  const video = f.videos[0];
+  video.play = () => Promise.reject({ name: 'AbortError' });
+  video.pause = () => {};
+  f.pool.activate();
+  await flush();
+  assert.equal(f.pool.take(item.url), null);
+  pending.resolve(f.Hls);
+  await flush();
+  assert.equal(f.engines.length, 0, 'a discarded pending loader must not attach later');
+});
+
 test('native adoption preserves media, resume only changes preload, and clear cannot destroy it', () => {
   const f = fixture();
   const entry = candidate('a.mp4');

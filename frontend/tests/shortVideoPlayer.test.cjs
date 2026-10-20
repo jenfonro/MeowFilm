@@ -110,6 +110,8 @@ function gestures(props = {}, { time = 30, duration = 240, paused = false, width
     shortVideoRateOpen: { value: false },
     shortVideoSeekPreview: { value: null }, shortVideoSeekDragging: { value: false },
     art: { video }, currentTime: { value: time },
+    shortVideoBuffer: { activate() { context.activations.push(context.transitions.length); } },
+    activations: [],
     seeks, playbackCalls, timers, bufferedSyncs: 0,
     scheduleBufferedSync() { context.bufferedSyncs++; },
     shell: { value: input }, pageTrack: { value: track },
@@ -997,6 +999,39 @@ test('autoplay rejection feedback is limited to the current short video player',
   assert.equal(context.autoplayBlocked.value, false);
 });
 
+test('committed swipes activate buffered elements synchronously before the settling animation', async () => {
+  for (const dy of [-100, 100]) {
+    const context = gestures();
+    swipe(context, 0, dy);
+    assert.deepEqual(context.activations, [0]);
+    assert.deepEqual(context.deltas, [], 'activation precedes the asynchronous episode change');
+    await context.finishTransition();
+    assert.deepEqual(context.activations, [0]);
+    assert.deepEqual(context.deltas, [dy < 0 ? 1 : -1]);
+  }
+});
+
+test('taps, seeking, cancelled swipes and episode boundaries do not activate neighbors', () => {
+  for (const [props, dx, dy] of [
+    [{}, 2, 2],
+    [{}, 100, 0],
+    [{ shortVideoNext: '' }, 0, -100],
+    [{ shortVideoPrev: '' }, 0, 100],
+    [{ episodeSwitching: true }, 0, -100],
+    [{ shortVideoMode: false }, 0, -100],
+  ]) {
+    const context = gestures(props);
+    swipe(context, dx, dy);
+    assert.deepEqual(context.activations, []);
+  }
+  const context = gestures();
+  context.down(event());
+  context.move(event(100, 100));
+  context.cancel();
+  context.up(event(100, 100));
+  assert.deepEqual(context.activations, []);
+});
+
 test('only native MP4/iOS HLS reuse the retained media element; custom engines do not', () => {
   const video = { canPlayType: () => 'maybe' };
   const code = section('  const retainedVideo = retainedShortVideoVideo;', 'const playUrlForArt =');
@@ -1015,6 +1050,29 @@ test('only native MP4/iOS HLS reuse the retained media element; custom engines d
     });
     assert.equal(vm.runInContext(code + '\nreuseVideo;', context), expected);
     assert.equal(context.retainedShortVideoVideo, null);
+  }
+});
+
+test('iOS retains authorized native playback unless the warmed element was gesture-activated', () => {
+  const video = { canPlayType: () => 'maybe' };
+  const code = section('  const retainedVideo = retainedShortVideoVideo;', 'const playUrlForArt =');
+  for (const [format, ios, headers, activated, useWarm] of [
+    ['native', true, {}, false, false],
+    ['hls', true, {}, false, false],
+    ['native', true, {}, true, true],
+    ['hls', true, {}, true, true],
+    ['native', false, {}, false, true],
+    ['hls', true, { Authorization: 'token' }, true, true],
+  ]) {
+    let destroyed = false;
+    const warmVideo = {};
+    const context = vm.createContext({
+      format, isIos: { value: ios }, props: { shortVideoMode: true, headers },
+      retainedShortVideoVideo: video,
+      warmed: { video: warmVideo, activated, destroy() { destroyed = true; } },
+    });
+    assert.equal(vm.runInContext(code + '\nreuseVideo;', context), useWarm ? warmVideo : video);
+    assert.equal(destroyed, !useWarm);
   }
 });
 

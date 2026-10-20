@@ -66,6 +66,21 @@ textarea {
   color: inherit;
 }
 
+@media (hover: none) and (pointer: coarse) {
+  /* Keep one-finger scrolling, but disable pinch and double-tap page zoom. */
+  html,
+  body {
+    touch-action: pan-x pan-y;
+  }
+
+  /* Override component field sizes to prevent iOS focus zoom. */
+  input:not([type="range"]):not([type="checkbox"]):not([type="radio"]),
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+}
+
 button {
   cursor: pointer;
 }

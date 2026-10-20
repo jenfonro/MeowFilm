@@ -1427,18 +1427,25 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
   autoplayBlocked.value = false;
 
 	  const format = detectVideoFormat(url);
-  const warmed = props.shortVideoMode && shortVideoBuffer ? shortVideoBuffer.take(url, props.headers) : null;
+  let warmed = props.shortVideoMode && shortVideoBuffer ? shortVideoBuffer.take(url, props.headers) : null;
   let warmedAttached = false;
   const retainedVideo = retainedShortVideoVideo;
   retainedShortVideoVideo = null;
-  // Adopt a warmed video/engine intact. Otherwise keep the user-activated
-  // native element; custom engines get a fresh one to isolate async loaders.
-  const reuseVideo = warmed ? warmed.video : props.shortVideoMode && retainedVideo && (
+  const canReuseNativeVideo = props.shortVideoMode && retainedVideo && (
     format === 'native' || (
       format === 'hls' && isIos.value && retainedVideo.canPlayType('application/vnd.apple.mpegurl')
       && !Object.values(props.headers || {}).some((value) => value != null)
     )
-  ) ? retainedVideo : null;
+  );
+  // Auto-next (or an unsuccessful gesture activation) must not replace iOS's
+  // already-authorized native element with an unauthorized prebuffer element.
+  if (warmed && isIos.value && canReuseNativeVideo && !warmed.activated) {
+    warmed.destroy();
+    warmed = null;
+  }
+  // Adopt an authorized warmed video/engine intact. Otherwise retain native
+  // playback; custom engines remain isolated from old asynchronous loaders.
+  const reuseVideo = warmed ? warmed.video : canReuseNativeVideo ? retainedVideo : null;
 	  const playUrlForArt = url;
 	  const isCrossOriginUrl = (u) => {
 	    const raw = typeof u === 'string' ? u.trim() : '';
@@ -2289,6 +2296,7 @@ const onShortVideoPointerUp = (event) => {
     settleShortVideoPage(0, resetShortVideoPage);
     return;
   }
+  if (shortVideoBuffer) shortVideoBuffer.activate();
   settleShortVideoPage(-direction * gesture.height, () => {
     shortVideoCommitting = true;
     emitEpisodeDelta(direction);

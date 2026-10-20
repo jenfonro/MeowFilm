@@ -105,7 +105,7 @@ export const createShortVideoBuffer = ({ loadHls, detectFormat, preferNativeHls,
       });
       hls.startLoad(-1);
     };
-    const entry = { video, customPlayer: null, ready, cleanupPrefetch, stop, resume, destroy, discard };
+    const entry = { video, native, customPlayer: null, activated: false, ready, cleanupPrefetch, stop, resume, destroy, discard };
     pool.set(key, entry);
     host.appendChild(video);
     listen(video, 'error', discard);
@@ -209,20 +209,49 @@ export const createShortVideoBuffer = ({ loadHls, detectFormat, preferNativeHls,
       if (!pool.has(key) && !failed.has(key)) createEntry(key, url, headers);
     }
   };
+  // Called synchronously from the committed swipe, before animation/URL awaits
+  // lose the gesture. iOS grants audible playback permission per media element.
+  const activate = () => {
+    for (const entry of pool.values()) {
+      if (entry.activated) continue;
+      const { video } = entry;
+      const muted = video.muted;
+      try {
+        video.muted = false;
+        const playing = video.play();
+        entry.activated = true;
+        Promise.resolve(playing).catch((error) => {
+          // The immediate pause intentionally aborts a pending play.
+          if (!error || error.name !== 'AbortError') entry.activated = false;
+        });
+      } catch (_) {
+        entry.activated = false;
+      } finally {
+        // Pause in this same task: neighbors must not advance or leak audio.
+        video.pause();
+        video.muted = muted;
+      }
+    }
+  };
   const take = (url, headers) => {
     const key = entryKey(url, headers);
     const entry = pool.get(key);
     if (!entry) return null;
-    if (!entry.ready()) {
+    const ready = entry.ready();
+    // A gesture-authorized element may still be buffering. Keep its permission
+    // as long as its native source or custom engine is already attached.
+    if (!ready && !(entry.activated && (entry.native || entry.customPlayer))) {
       entry.discard();
       return null;
     }
     pool.delete(key);
     entry.cleanupPrefetch();
-    entry.stop();
+    // Do not abort a pending manifest: HLS startLoad() cannot re-request it.
+    if (ready) entry.stop();
     return {
       video: entry.video,
       customPlayer: entry.customPlayer,
+      activated: entry.activated,
       resume: entry.resume,
       destroy: entry.destroy,
     };
@@ -231,5 +260,5 @@ export const createShortVideoBuffer = ({ loadHls, detectFormat, preferNativeHls,
     for (const entry of pool.values()) entry.destroy();
     failed.clear();
   };
-  return { sync, take, clear };
+  return { sync, activate, take, clear };
 };
