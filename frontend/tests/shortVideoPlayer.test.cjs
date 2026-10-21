@@ -592,6 +592,15 @@ test('short video: progress, speed and exit controls are not captured as gesture
   }
 });
 
+test('the short-video resume button keeps its icon and accessible action without visible text', () => {
+  const button = source.match(/<button\b[^>]*class="yt-btn sv-resume"[^>]*>([\s\S]*?)<\/button>/);
+  assert.ok(button);
+  assert.match(button[0], /aria-label="继续播放"/);
+  assert.match(button[0], /@click\.stop="togglePlay"/);
+  assert.match(button[1], /<svg\b[^>]*aria-hidden="true"[^>]*>/);
+  assert.equal(button[1].replace(/<svg\b[\s\S]*?<\/svg>/, '').trim(), '');
+});
+
 test('the central paused-play hint remains swipeable, unlike the other controls', () => {
   const context = vm.createContext({ props: { shortVideoMode: true } });
   vm.runInContext(

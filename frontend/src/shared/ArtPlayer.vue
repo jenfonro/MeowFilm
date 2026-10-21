@@ -56,7 +56,6 @@
           @click.stop="togglePlay"
         >
           <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7L8 5z" /></svg>
-          <span>{{ autoplayBlocked ? '点击继续播放' : '点击播放' }}</span>
         </button>
         <div class="sv-bottom">
           <div class="sv-bottom__row">
