@@ -1574,6 +1574,30 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
     } catch (_e) {}
   };
 
+  let lastMediaErrorEvent = null;
+  const onMediaError = (event) => {
+    if (!instance || instance !== art || instance.isDestroy) return;
+    // ArtPlayer forwards the same native event; report it only once.
+    if (event && event === lastMediaErrorEvent) return;
+    lastMediaErrorEvent = event;
+    // ArtPlayer's delayed error reconnect can outlive destroy(); never share that element.
+    currentVideoReusable = false;
+    currentMediaInvalid = true;
+    setBuffering(false);
+    uiVisible.value = true;
+    const err = instance.video.error;
+    const code = err && typeof err.code === 'number' ? err.code : 0;
+    const originalMessage = err && typeof err.message === 'string' ? err.message : '';
+    const detail = originalMessage.trim();
+    const summary = {
+      1: '播放已中止',
+      2: '播放失败：网络错误',
+      3: '播放失败：媒体解码错误',
+      4: '播放失败：媒体源不可用或格式不受支持',
+    }[code] || '播放失败';
+    emit('error', { code, message: detail ? `${summary}：${detail}` : summary, originalMessage });
+  };
+
 		  art = new Artplayer({
 		    container: container.value,
     proxy: reuseVideo ? () => reuseVideo : undefined,
@@ -1875,23 +1899,6 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
         } catch (_e) {}
         if (typeof v.readyState === 'number' && v.readyState >= 1) emitMetaOnce();
       };
-	      const onError = () => {
-          currentMediaInvalid = true;
-          currentVideoReusable = false;
-	        try {
-	          const err = v && v.error ? v.error : null;
-	          const code = err && typeof err.code === 'number' ? err.code : 0;
-	          let msg = '播放失败';
-          if (code === 2) msg = '播放失败：网络错误';
-          else if (code === 3) msg = '播放失败：解码错误（可能不支持该编码/清晰度）';
-          else if (code === 4) msg = '播放失败：媒体不可播放（可能不支持该编码/清晰度）';
-          emit('error', { code, message: msg });
-        } catch (_e) {
-          try {
-            emit('error', { code: 0, message: '播放失败' });
-          } catch (_ignored) {}
-	        }
-	      };
 	      const onProgress = () => scheduleBufferedSync();
 	      v.addEventListener('loadedmetadata', onLoadedMetadata);
 	      v.addEventListener('resize', onResize);
@@ -1899,7 +1906,7 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
 		      v.addEventListener('progress', onProgress);
 		      v.addEventListener('seeking', onProgress);
 		      v.addEventListener('seeked', onProgress);
-		      v.addEventListener('error', onError);
+		      v.addEventListener('error', onMediaError);
 		      v.addEventListener('ended', onEnded);
 		      cleanupNativeVideoListeners = () => {
 		        try {
@@ -1909,7 +1916,7 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
 		          v.removeEventListener('progress', onProgress);
 		          v.removeEventListener('seeking', onProgress);
 		          v.removeEventListener('seeked', onProgress);
-		          v.removeEventListener('error', onError);
+		          v.removeEventListener('error', onMediaError);
 		          v.removeEventListener('ended', onEnded);
 		        } catch (_e) {}
 		      };
@@ -2023,28 +2030,7 @@ const destroyNow = ({ preserveShortVideoVideo = false } = {}) => {
 	    emitFirstFrameOnce();
 	    scheduleBufferedSync();
 	  });
-  art.on('video:error', () => {
-    // ArtPlayer's delayed error reconnect can outlive destroy(); never share that element.
-    currentVideoReusable = false;
-    currentMediaInvalid = true;
-    setBuffering(false);
-    uiVisible.value = true;
-    try {
-      const v = art && art.video ? art.video : null;
-      const err = v && v.error ? v.error : null;
-      const code = err && typeof err.code === 'number' ? err.code : 0;
-      // 1: aborted, 2: network, 3: decode, 4: src not supported
-      let msg = '播放失败';
-      if (code === 2) msg = '播放失败：网络错误';
-      else if (code === 3) msg = '播放失败：解码错误（可能不支持该编码/清晰度）';
-      else if (code === 4) msg = '播放失败：媒体不可播放（可能不支持该编码/清晰度）';
-      emit('error', { code, message: msg });
-    } catch (_) {
-      try {
-        emit('error', { code: 0, message: '播放失败' });
-      } catch (_e) {}
-    }
-  });
+  art.on('video:error', onMediaError);
 
   // iOS native fullscreen (video element) does not trigger document fullscreenchange.
   try {

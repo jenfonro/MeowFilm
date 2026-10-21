@@ -162,7 +162,7 @@ test('mobile short-video entry stays at the third-party bar first-row left edge 
   assert.doesNotMatch(mobileRules[2], /top:\s*50%|translateY\(-50%\)/);
 });
 
-test('short-video layout fills the viewport and keeps status overlays noninteractive', () => {
+test('short-video layout fills the viewport and keeps loading overlays noninteractive', () => {
   const css = source.slice(source.indexOf('<style>'));
   const rootRule = css.match(/\.play-page\.play-page--short-video \{([^}]+)\}/)[1];
   assert.match(rootRule, /height: 100vh;[\s\S]*height: 100svh;[\s\S]*height: 100dvh;/);
@@ -179,7 +179,8 @@ test('short-video layout fills the viewport and keeps status overlays noninterac
   const overlayRule = css.match(/\.play-player-overlay \{([^}]+)\}/)[1];
   assert.match(overlayRule, /pointer-events: none;/);
   assert.ok(Number(overlayRule.match(/z-index: (\d+)/)[1]) < 100, 'below sv-touch-surface (100) and sv-ui (110)');
-  assert.doesNotMatch(css, /\.play-player-overlay[^{]*\{[^}]*pointer-events:\s*auto/);
+  const loadingCss = css.replace(/\.play-player-overlay--error[^{]*\{[^}]*\}/g, '');
+  assert.doesNotMatch(loadingCss, /\.play-player-overlay[^{]*\{[^}]*pointer-events:\s*auto/);
 });
 
 for (const style of [null, '', 'overflow: auto !important; position: relative; color: red;']) {

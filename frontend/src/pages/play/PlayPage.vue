@@ -6901,6 +6901,19 @@ export default {
   color: rgba(254, 226, 226, 0.98);
 }
 
+.play-player-overlay--error .play-player-overlay__panel {
+  min-height: 0;
+  max-height: 100%;
+  justify-content: flex-start;
+  overflow: auto;
+  pointer-events: auto;
+}
+
+.play-player-overlay--error .play-player-overlay__statusText {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .play-player-overlay__statusText {
   font-size: 26px;
   font-weight: 900;
