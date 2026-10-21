@@ -88,8 +88,9 @@ export const createShortVideoBuffer = ({ loadHls, detectFormat, preferNativeHls,
     let total = [...entries.values()].reduce((sum, entry) => sum + bytes(entry), 0);
     if (total <= CACHE_BYTES) return;
     const background = [...entries.values()].filter(entry => entry !== active && bytes(entry) > 0);
-    // Reclaim farthest watched episodes before sacrificing the next episode.
-    background.sort((a, b) => Number(b.visited) - Number(a.visited) || farthestFirst(a, b));
+    // Consider next episodes last, even when already visited.
+    background.sort((a, b) => Number(next.has(a.key)) - Number(next.has(b.key))
+      || Number(b.visited) - Number(a.visited) || farthestFirst(a, b));
     for (const entry of background) {
       total -= bytes(entry);
       discard(entry);
@@ -477,7 +478,9 @@ export const createShortVideoBuffer = ({ loadHls, detectFormat, preferNativeHls,
         media.activated = false;
       } finally {
         try { video.pause(); } catch (_) {}
-        video.muted = muted;
+        // Re-muting native WebKit media can discard its preloaded bytes.
+        // Keep it unmuted but paused until the player takes over.
+        if (!media.native) video.muted = muted;
       }
     }
   };

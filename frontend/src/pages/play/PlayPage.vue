@@ -5961,6 +5961,8 @@ export default {
       const cache = this.shortVideoPrefetch;
       const keep = new Set();
       const neighbors = new Map();
+      const previousNextKey = this.shortVideoCacheNextKey;
+      let incomingKey = '';
       this.shortVideoCacheNextKey = '';
       this.shortVideoPrefetchAt = Date.now();
       for (let delta = -5; delta <= 1; delta += 1) {
@@ -5971,6 +5973,7 @@ export default {
         const key = this.buildShortVideoPrefetchKey(siteItem, panEntry, segment, selectedGoProxyBase);
         keep.add(key);
         if (delta === 1) this.shortVideoCacheNextKey = key;
+        if (delta === 0 && currentTarget && key === previousNextKey && cache.get(key)?.result) incomingKey = key;
         if (delta === 1 || delta === -1) neighbors.set(delta, { target, key });
         if (delta === 0 && playback && playback.key === key && !cache.has(key)) cache.set(key, playback.entry);
       }
@@ -5978,6 +5981,9 @@ export default {
       Array.from(cache.keys()).forEach((key) => {
         if (!keep.has(key)) cache.delete(key);
       });
+      // Do not suspend the incoming episode's buffer while its successor URL
+      // resolves. The normal post-handoff call moves the media target forward.
+      if (incomingKey) this.shortVideoCacheNextKey = incomingKey;
       [1, -1].forEach((delta) => {
         const neighbor = neighbors.get(delta);
         if (neighbor) this.requestShortVideoPrefetch(neighbor.target, neighbor.key);

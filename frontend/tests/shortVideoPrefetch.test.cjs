@@ -433,6 +433,31 @@ test('cold current and next resolve before history preparation and without a URL
   assert.equal(f.calls.play.length, 3);
 });
 
+test('an incoming next episode stays the media candidate until handoff, even when its successor URL resolves', async () => {
+  const f = fixture(), metadata = deferred();
+  await warmNeighbors(f);
+  const incoming = f.page.shortVideoBufferCandidates[0];
+  f.page.ensureSiteHistoryResolvedMeta = () => metadata.promise;
+  const playing = f.page.playResolvedSiteSegment(f.target(3));
+  await flush();
+  const successor = playback('successor');
+  latestRequest(f, 4).resolve(successor);
+  await flush();
+  try {
+    assert.equal(f.page.shortVideoCacheNextKey, incoming.key);
+    assert.equal(f.page.shortVideoBufferCandidates.length, 1);
+    assert.equal(f.page.shortVideoBufferCandidates[0].key, incoming.key);
+    assert.equal(f.page.shortVideoBufferCandidates[0].url, incoming.url);
+    assert.equal(f.page.shortVideoPrefetch.get(keyFor(f, 4)).result, successor, 'the successor address still resolves in parallel');
+  } finally {
+    metadata.resolve({ contentKey: 'Fixture' });
+    await playing;
+  }
+  assert.equal(f.page.shortVideoCacheKey, incoming.key);
+  assert.equal(f.page.shortVideoCacheNextKey, keyFor(f, 4));
+  assert.equal(f.page.shortVideoBufferCandidates[0].url, successor.playerUrl);
+});
+
 test('never-enabled ordinary playback is unchanged, then entry seeds its existing current result', async () => {
   const f = fixture(), metadata = deferred();
   f.page.clearShortVideoCache();

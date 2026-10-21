@@ -611,6 +611,39 @@ test('HLS budget includes current, deduplicates XHR/fragment bytes, and evicts f
   f.pool.clear();
 });
 
+test('HLS budget preserves visited next before an unvisited non-next cache', async () => {
+  const f = fixture();
+  const [old, current, next] = ['old', 'current', 'next'].map(name => candidate(`${name}.m3u8`));
+  const keys = [old.key, current.key, next.key];
+  // Skip the old prewarm, visit next, then return to current.
+  for (const item of [old, next, current]) {
+    sync(f, [item], keys);
+    await flush();
+    const hls = f.engines[f.engines.length - 1];
+    manifest(hls, 240);
+    fragment(hls, 128 * MiB);
+    if (item !== old) take(f, item);
+    if (item === next) assert.equal(f.pool.park(item.key), true);
+  }
+  const [oldHls, nextHls, currentHls] = f.engines;
+  sync(f, [next], keys);
+  currentHls.video.paused = false;
+  fragment(currentHls, 129 * MiB);
+  assert.equal(oldHls.destroyCalls, 1, 'non-next cache must yield even when next was already visited');
+  assert.equal(nextHls.destroyCalls, 0);
+  assert.equal(currentHls.destroyCalls, 0);
+  assert.equal(currentHls.stopCalls, 0);
+  assert.equal(currentHls.video.pauseCalls, 0);
+  assert.equal(currentHls.video.paused, false);
+  assert.equal(f.pool.park(current.key), true);
+  const restored = take(f, next);
+  assert.equal(restored.restored, true);
+  assert.equal(restored.video, nextHls.video);
+  assert.equal(restored.customPlayer.hls, nextHls);
+  restored.destroy();
+  f.pool.clear();
+});
+
 test('when only current+next exceed the unified budget, next falls back without stopping current', async () => {
   const f = fixture(), current = candidate('current.m3u8'), next = candidate('next.m3u8');
   sync(f, [current], [current.key, next.key]);
@@ -756,14 +789,15 @@ test('activate synchronously plays/pauses only attached nonactive videos without
   sync(f, [a, b], [current.key, a.key, b.key]);
   const video = f.videos[1];
   const calls = [];
-  video.play = () => { calls.push(['play', video.muted]); return Promise.reject({ name: 'AbortError' }); };
-  video.pause = () => calls.push(['pause']);
+  video.play = () => { calls.push(['play', video.muted]); video.paused = false; return Promise.reject({ name: 'AbortError' }); };
+  video.pause = () => { calls.push(['pause']); video.paused = true; };
   const loads = video.loadCalls, sources = [...video.srcWrites];
   f.pool.activate();
   assert.deepEqual(calls, [['play', false], ['pause']]);
   assert.equal(activeVideo.pauseCalls, 0);
   assert.equal(f.videos[2].playCalls, 0, 'pending imports have no source to authorize');
-  assert.equal(video.muted, true);
+  assert.equal(video.muted, false, 're-muting a primed native video can discard its preloaded bytes in WebKit');
+  assert.equal(video.paused, true, 'authorization must not leave background audio playing');
   assert.equal(video.loadCalls, loads);
   assert.deepEqual(video.srcWrites, sources);
   await flush();
@@ -774,6 +808,29 @@ test('activate synchronously plays/pauses only attached nonactive videos without
   pending.resolve(f.Hls);
   await flush();
   assert.equal(f.engines.length, 0);
+});
+
+test('native HLS avoids re-muting after activation while custom HLS retains its original mute state', async () => {
+  for (const preferNativeHls of [true, false]) {
+    const f = fixture({ preferNativeHls, nativeHls: 'probably' }), item = candidate('next.m3u8');
+    sync(f, [item]);
+    await flush();
+    const video = f.videos[0];
+    video.play = () => {
+      assert.equal(video.muted, false, 'activation must still request audible playback');
+      video.paused = false;
+      return Promise.resolve();
+    };
+    const loads = video.loadCalls, sources = [...video.srcWrites];
+    f.pool.activate();
+    await flush();
+    assert.equal(video.paused, true);
+    assert.equal(video.muted, !preferNativeHls);
+    assert.equal(video.loadCalls, loads);
+    assert.deepEqual(video.srcWrites, sources);
+    assert.equal(take(f, item).activated, true);
+    f.pool.clear();
+  }
 });
 
 test('failed activation is silent, reports false after take, and can retry after parking', async () => {
@@ -881,34 +938,123 @@ test('visibility pauses next, leaves active background playback alone, and prese
   sync(f, [current, next]);
   await flush();
   f.engines.forEach(hls => manifest(hls, 120));
-  take(f, current);
+  const active = take(f, current);
+  active.video.paused = false;
+  active.video.currentTime = 42;
+  f.videos[0].ranges = [[0, 120]];
+  f.videos[1].ranges = [[0, 30]];
   const pauses = f.engines[0].pauseBufferCalls;
   const loads = f.videos.map(video => video.loadCalls), sources = f.videos.map(video => video.src);
+  const writes = f.videos.map(video => [...video.srcWrites]);
   f.pool.setVisible(false);
   assert.equal(f.engines[0].pauseBufferCalls, pauses);
   assert.equal(f.engines[1].bufferingEnabled, false);
   assert.equal(f.videos[0].pauseCalls, 0);
   assert.ok(f.engines.every(hls => hls.destroyCalls === 0 && hls.stopCalls === 0));
+  assert.deepEqual(f.videos.map(video => video.ranges), [[[0, 120]], [[0, 30]]]);
   f.pool.setVisible(true);
   assert.equal(f.engines[1].bufferingEnabled, true);
+  assert.equal(active.video.paused, false);
+  assert.equal(active.video.currentTime, 42);
+  assert.deepEqual(f.videos.map(video => video.ranges), [[[0, 120]], [[0, 30]]]);
   assert.deepEqual(f.videos.map(video => video.loadCalls), loads);
   assert.deepEqual(f.videos.map(video => video.src), sources);
+  assert.deepEqual(f.videos.map(video => video.srcWrites), writes);
+  assert.equal(f.pool.park(current.key), true);
+  const warmed = take(f, next);
+  assert.equal(warmed.video, f.videos[1]);
+  assert.equal(warmed.customPlayer.hls, f.engines[1]);
+  warmed.destroy();
+  f.pool.clear();
+});
+
+test('visibility round trips preserve a pending HLS manifest and defer hidden completion until visible', async () => {
+  const f = fixture(), item = candidate('next.m3u8');
+  sync(f, [item]);
+  await flush();
+  const video = f.videos[0], hls = f.engines[0];
+  for (const visible of [false, true, false]) {
+    f.pool.setVisible(visible);
+    assert.equal(hls.stopCalls, 0, 'stopLoad would abort the unresolved manifest');
+    assert.equal(hls.destroyCalls, 0);
+    assert.deepEqual(hls.starts, [], 'no segment loading before the manifest response');
+  }
+  manifest(hls, 120);
+  assert.deepEqual(hls.starts, [], 'a manifest received while hidden must wait for visibility');
+  assert.equal(hls.bufferingEnabled, false);
+  f.pool.setVisible(true);
+  assert.deepEqual(hls.starts, [-1]);
+  assert.equal(hls.bufferingEnabled, true);
+  assert.equal(hls.stopCalls, 0);
+  assert.equal(hls.destroyCalls, 0);
+  assert.equal(f.loadHlsCalls, 1);
+  assert.equal(f.engines.length, 1);
+  assert.equal(f.videos.length, 1);
+  assert.deepEqual(video.srcWrites, ['blob:mock-media-source']);
+  assert.equal(video.loadCalls, 0);
+  const warmed = take(f, item);
+  assert.equal(warmed.video, video);
+  assert.equal(warmed.customPlayer.hls, hls);
+  warmed.destroy();
   f.pool.clear();
 });
 
 test('hidden sync delays new prefetch and keeps existing native cache without source/load resets', () => {
-  const f = fixture(), a = candidate('a.mp4'), b = candidate('b.mp4');
-  sync(f, [a], [a.key, b.key]);
-  metadata(f.videos[0], 120);
+  for (const extension of ['mp4', 'm3u8']) {
+    const f = fixture({ preferNativeHls: true, nativeHls: 'probably' });
+    const current = candidate(`current.${extension}`), a = candidate(`a.${extension}`), b = candidate(`b.${extension}`);
+    const active = external(f, current);
+    active.currentTime = 42;
+    active.ranges = [[0, 120]];
+    sync(f, [a], [current.key, a.key, b.key]);
+    const warmed = f.videos[1];
+    metadata(warmed, 120);
+    warmed.ranges = [[0, 30]];
+    f.pool.setVisible(false);
+    assert.equal(warmed.preload, 'none');
+    assert.equal(warmed.src, a.url);
+    assert.equal(active.preload, 'auto');
+    assert.equal(active.pauseCalls, 0);
+    sync(f, [a, b], [current.key, a.key, b.key]);
+    assert.equal(f.videos.length, 2);
+    f.pool.setVisible(true);
+    assert.equal(warmed.preload, 'auto');
+    assert.equal(warmed.loadCalls, 1);
+    assert.deepEqual(warmed.srcWrites, [a.url]);
+    assert.deepEqual(warmed.ranges, [[0, 30]]);
+    assert.equal(active.currentTime, 42);
+    assert.equal(active.paused, false);
+    assert.equal(active.loadCalls, 0);
+    assert.deepEqual(active.srcWrites, [current.url]);
+    assert.deepEqual(active.ranges, [[0, 120]]);
+    assert.equal(f.videos.length, 3);
+    assert.equal(f.videos[2].src, b.url);
+    assert.equal(f.videos[2].preload, 'metadata');
+    assert.equal(f.videos[2].loadCalls, 1);
+    assert.equal(f.loadHlsCalls, 0, 'Safari native HLS does not import hls.js');
+    f.pool.clear();
+  }
+});
+
+test('initial hidden sync creates no native/HLS preload until visible, without needing another sync', async () => {
+  const f = fixture(), native = candidate('next.mp4'), hls = candidate('next.m3u8');
   f.pool.setVisible(false);
-  assert.equal(f.videos[0].preload, 'none');
-  assert.equal(f.videos[0].src, a.url);
-  sync(f, [a, b], [a.key, b.key]);
-  assert.equal(f.videos.length, 1);
+  sync(f, [native, hls]);
+  await flush();
+  assert.equal(f.videos.length, 0, 'initial hidden state must precede the first sync');
+  assert.equal(f.loadHlsCalls, 0);
   f.pool.setVisible(true);
-  assert.equal(f.videos[0].preload, 'auto');
+  f.pool.setVisible(true);
+  await flush();
+  assert.equal(f.videos.length, 2, 'repeated visibility must not duplicate pending preloads');
+  assert.equal(f.videos[0].src, native.url);
+  assert.equal(f.videos[0].preload, 'metadata');
   assert.equal(f.videos[0].loadCalls, 1);
-  assert.equal(f.videos.length, 2);
+  assert.equal(f.loadHlsCalls, 1);
+  assert.equal(f.engines.length, 1);
+  assert.equal(f.engines[0].url, hls.url);
+  assert.equal(f.engines[0].video, f.videos[1]);
+  assert.ok(f.videos.every(video => video.playCalls === 0));
   f.pool.clear();
 });
 

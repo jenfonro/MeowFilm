@@ -1161,11 +1161,11 @@ function playerContext({ props = {}, video = mediaVideo(), cached = null, keptMe
       'timeUpdateRaf', 'timeUpdatePending', 'timeUpdateEmitAt', 'bufferUpdateRaf',
       'bufferUpdatePending', 'hideTimer', 'desktopHideTimer', 'rightFitRaf',
     ].map(key => [key, 0])),
-    window: {
+    window: Object.assign(eventTarget(), {
       location: { href: 'https://example.com/play', origin: 'https://example.com' },
-      clearTimeout() {}, cancelAnimationFrame() {}, removeEventListener() {},
+      clearTimeout() {}, cancelAnimationFrame() {},
       requestAnimationFrame(callback) { frames.push(callback); return frames.length; },
-    },
+    }),
     document: Object.assign(eventTarget(), { hidden: false }), URL,
     frame() { for (const callback of frames.splice(0)) callback(); },
     emit(name, data) { context.emitted.push([name, data]); },
@@ -1243,7 +1243,7 @@ test('cache sync, adoption and parking follow the sticky flag, not the short vid
       context.document.hidden = true;
       context.sync();
       assert.deepEqual(cacheCalls, enabled ? [
-        ['sync', props.shortVideoBufferCandidates, props.shortVideoCacheKeys], ['setVisible', false],
+        ['setVisible', false], ['sync', props.shortVideoBufferCandidates, props.shortVideoCacheKeys],
       ] : [['clear']]);
       assert.deepEqual(Array.from(context.watchers[2].getter()),
         [enabled, props.shortVideoBufferCandidates, props.shortVideoCacheKeys]);
@@ -1253,6 +1253,31 @@ test('cache sync, adoption and parking follow the sticky flag, not the short vid
       assert.equal(cacheCalls.some(call => call[0] === 'park'), enabled);
     }
   }
+});
+
+test('PWA pageshow restores preload visibility without recreating media or changing pause intent', () => {
+  const context = playerContext();
+  context.document.hidden = true;
+  context.init();
+  const player = context.art;
+  assert.deepEqual(context.cacheCalls.filter(call => ['sync', 'setVisible'].includes(call[0])), [
+    ['setVisible', false], ['sync', context.props.shortVideoBufferCandidates, context.props.shortVideoCacheKeys],
+  ]);
+  vm.runInContext(section("  document.addEventListener('visibilitychange', syncShortVideoBuffer);", '\n\n  try {'), context);
+  context.cacheCalls.length = 0;
+  context.document.hidden = false;
+  context.window.dispatch('pageshow', { persisted: true });
+  assert.deepEqual(context.cacheCalls, [
+    ['setVisible', true], ['sync', context.props.shortVideoBufferCandidates, context.props.shortVideoCacheKeys],
+  ]);
+  assert.equal(context.art, player);
+  assert.equal(player.video.currentTime, 12);
+  assert.equal(player.video.paused, true);
+  const removed = [];
+  const remove = context.window.removeEventListener;
+  context.window.removeEventListener = (name, listener) => { removed.push(name); remove(name, listener); };
+  context.unmount();
+  assert.ok(removed.includes('pageshow'));
 });
 
 test('enabling caching adopts the current playback without recreating it or using pending props', () => {

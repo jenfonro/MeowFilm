@@ -1180,8 +1180,8 @@ const syncShortVideoBuffer = () => {
     shortVideoBuffer.clear();
     return;
   }
-  shortVideoBuffer.sync(props.shortVideoBufferCandidates, props.shortVideoCacheKeys);
   shortVideoBuffer.setVisible(!document.hidden);
+  shortVideoBuffer.sync(props.shortVideoBufferCandidates, props.shortVideoCacheKeys);
 };
 
 const registerShortVideoPlayback = () => {
@@ -2762,6 +2762,7 @@ onMounted(() => {
   init();
   syncShortVideoBuffer();
   document.addEventListener('visibilitychange', syncShortVideoBuffer);
+  window.addEventListener('pageshow', syncShortVideoBuffer);
 
   try {
     if (typeof window !== 'undefined') window.addEventListener('resize', updateIsMobile, { passive: true });
@@ -2946,6 +2947,7 @@ watch(() => [props.shortVideoCacheEnabled, props.shortVideoBufferCandidates, pro
 
 onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', syncShortVideoBuffer);
+  window.removeEventListener('pageshow', syncShortVideoBuffer);
   if (shortVideoBuffer) shortVideoBuffer.clear();
   shortVideoBuffer = null;
   if (rightFitRaf) {
