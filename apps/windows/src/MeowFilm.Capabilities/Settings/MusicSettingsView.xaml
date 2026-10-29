@@ -10,26 +10,70 @@
     <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/>
    </ResourceDictionary.MergedDictionaries>
    <Style TargetType="TabItem">
-    <Setter Property="Padding" Value="2,12"/>
-    <Setter Property="Margin" Value="0,0,28,0"/>
+    <Setter Property="Padding" Value="0,6,0,4"/>
+    <Setter Property="Background" Value="Transparent"/>
     <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
     <Setter Property="FontSize" Value="15"/>
+    <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+    <Setter Property="HeaderTemplate">
+     <Setter.Value>
+      <DataTemplate>
+       <TextBlock Text="{Binding}"
+                  Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType={x:Type TabItem}}}"/>
+      </DataTemplate>
+     </Setter.Value>
+    </Setter>
     <Setter Property="Template">
      <Setter.Value>
       <ControlTemplate TargetType="TabItem">
-       <Border x:Name="Underline" BorderBrush="Transparent" BorderThickness="0,0,0,2"
-               Padding="{TemplateBinding Padding}">
-        <ContentPresenter ContentSource="Header"/>
-       </Border>
+       <Grid Margin="0,0,20,0" HorizontalAlignment="Left">
+        <Border x:Name="Underline" BorderBrush="Transparent" BorderThickness="0,0,0,2"
+                Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}">
+         <ContentPresenter ContentSource="Header" RecognizesAccessKey="True"/>
+        </Border>
+        <Border x:Name="KeyboardFocus" BorderBrush="Transparent" BorderThickness="0,2,0,0"
+                IsHitTestVisible="False"/>
+       </Grid>
        <ControlTemplate.Triggers>
         <Trigger Property="IsSelected" Value="True">
          <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
-         <Setter Property="FontWeight" Value="SemiBold"/>
          <Setter TargetName="Underline" Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}"/>
         </Trigger>
-        <Trigger Property="IsKeyboardFocusWithin" Value="True">
-         <Setter TargetName="Underline" Property="Background" Value="{DynamicResource MeowFilm.Brush.Hover}"/>
+        <Trigger Property="IsMouseOver" Value="True">
+         <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
+         <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Hover}"/>
         </Trigger>
+        <Trigger Property="IsKeyboardFocused" Value="True">
+         <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.AccentSoft}"/>
+         <Setter TargetName="KeyboardFocus" Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Focus}"/>
+        </Trigger>
+        <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
+         <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+         <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+        </Trigger>
+        <MultiTrigger><MultiTrigger.Conditions>
+         <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/>
+         <Condition Property="IsSelected" Value="True"/>
+        </MultiTrigger.Conditions>
+         <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+         <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+         <Setter TargetName="Underline" Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+        </MultiTrigger>
+        <MultiTrigger><MultiTrigger.Conditions>
+         <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/>
+         <Condition Property="IsMouseOver" Value="True"/>
+        </MultiTrigger.Conditions>
+         <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+         <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+        </MultiTrigger>
+        <MultiTrigger><MultiTrigger.Conditions>
+         <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/>
+         <Condition Property="IsKeyboardFocused" Value="True"/>
+        </MultiTrigger.Conditions>
+         <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+         <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+         <Setter TargetName="KeyboardFocus" Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+        </MultiTrigger>
        </ControlTemplate.Triggers>
       </ControlTemplate>
      </Setter.Value>
@@ -76,7 +120,7 @@
   </ResourceDictionary>
  </UserControl.Resources>
  <TabControl Margin="30,0,26,20" Background="Transparent" BorderThickness="0"
-             AutomationProperties.Name="设置分类">
+             FocusVisualStyle="{x:Null}" AutomationProperties.Name="设置分类">
   <TabItem Header="平台">
    <ScrollViewer Style="{StaticResource Capability.OverlayScrollViewer}"
                  VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">

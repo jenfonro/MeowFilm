@@ -23,46 +23,54 @@ public sealed partial class MusicAccountProtocol
                 _ => throw new MusicAccountException("INVALID_REQUEST")
             };
             AccountRules.Require(profile.UserId == account.UserId, "IDENTITY_MISMATCH");
-            long fetched = clock.GetUtcNow().ToUnixTimeMilliseconds();
-            MusicAccountEntitlements rights;
-            try
-            {
-                if (platform == "wy")
-                {
-                    var data = (await ctx.Send(MusicPlatformRequests.WyWithCookie(
-                        "/api/music-vip-membership/client/vip/info", new() { ["userId"] = account.UserId },
-                        account.Cookie, weapi: true)).ConfigureAwait(false)).Body;
-                    WyStatus(data);
-                    AccountRules.Require(data["data"] is JsonObject, "INVALID_RESPONSE");
-                    rights = AccountDetailsSnapshot.Wy(data["data"]!.AsObject(), account.UserId, clock.GetUtcNow().ToUnixTimeMilliseconds());
-                }
-                else if (platform == "tx")
-                {
-                    var data = await QqRead(ctx, account.Cookie, "VipLogin.VipLoginInter", "vip_login_base", new()).ConfigureAwait(false);
-                    rights = AccountDetailsSnapshot.Qq(data, clock.GetUtcNow().ToUnixTimeMilliseconds());
-                }
-                else
-                {
-                    var request = MusicPlatformRequests.KgWithCookie("/v1/get_union_vip",
-                        new() { ["busi_type"] = "concept" }, account.Cookie, parts["KUGOU_API_MID"]);
-                    // The pinned module explicitly supplies this HTTPS baseURL.
-                    // The Android signature covers query/body, not an invented proxy.
-                    request.RequestUri = new UriBuilder(request.RequestUri!) { Host = "kugouvip.kugou.com" }.Uri;
-                    var data = (await ctx.Send(request).ConfigureAwait(false)).Body;
-                    try { PlatformProtocols.KgSuccess(data, "/v1/get_union_vip"); }
-                    catch (MusicPlatformException e) { throw new MusicAccountException(e.Code == "AUTH_REQUIRED" ? "AUTH_EXPIRED" : e.Code); }
-                    AccountRules.Require(data["data"] is JsonObject, "INVALID_RESPONSE");
-                    rights = AccountDetailsSnapshot.Kg(data["data"]!.AsObject(), account.UserId, clock.GetUtcNow().ToUnixTimeMilliseconds());
-                }
-            }
-            catch (MusicAccountException error) when (error.Code is "NETWORK_ERROR" or "UPSTREAM_ERROR" or
-                "INVALID_RESPONSE" or "RATE_LIMITED")
-            {
-                ctx.Guard();
-                rights = AccountDetailsSnapshot.Unknown(clock.GetUtcNow().ToUnixTimeMilliseconds(), error.Code, platform == "kg");
-            }
-            ctx.Guard();
-            return new MusicAccountDetailsObservation(profile, fetched, AccountDetailsSnapshot.Validate(rights, platform));
+            return await ObserveAccountDetails(ctx, profile, account.Cookie).ConfigureAwait(false);
         }, detailsRead: true);
+    }
+    private async Task<MusicAccountDetailsObservation> ObserveAccountDetails(
+        Context ctx, MusicAccountProfile profile, string cookie)
+    {
+        string platform = ctx.Platform;
+        long fetched = clock.GetUtcNow().ToUnixTimeMilliseconds();
+        MusicAccountEntitlements rights;
+        try
+        {
+            if (platform == "wy")
+            {
+                var data = (await ctx.Send(MusicPlatformRequests.WyWithCookie(
+                    "/api/music-vip-membership/client/vip/info", new() { ["userId"] = profile.UserId },
+                    cookie, weapi: true), accountDetails: true).ConfigureAwait(false)).Body;
+                WyStatus(data);
+                AccountRules.Require(data["data"] is JsonObject, "INVALID_RESPONSE");
+                rights = AccountDetailsSnapshot.Wy(data["data"]!.AsObject(), profile.UserId, clock.GetUtcNow().ToUnixTimeMilliseconds());
+            }
+            else if (platform == "tx")
+            {
+                var data = await QqRead(ctx, cookie, "VipLogin.VipLoginInter", "vip_login_base", new(),
+                    accountDetails: true).ConfigureAwait(false);
+                rights = AccountDetailsSnapshot.Qq(data, clock.GetUtcNow().ToUnixTimeMilliseconds());
+            }
+            else
+            {
+                var parts = AccountRules.Cookies(cookie);
+                var request = MusicPlatformRequests.KgWithCookie("/v1/get_union_vip",
+                    new() { ["busi_type"] = "concept" }, cookie, parts["KUGOU_API_MID"]);
+                // The pinned module explicitly supplies this HTTPS baseURL.
+                // The Android signature covers query/body, not an invented proxy.
+                request.RequestUri = new UriBuilder(request.RequestUri!) { Host = "kugouvip.kugou.com" }.Uri;
+                var data = (await ctx.Send(request, accountDetails: true).ConfigureAwait(false)).Body;
+                try { PlatformProtocols.KgSuccess(data, "/v1/get_union_vip"); }
+                catch (MusicPlatformException e) { throw new MusicAccountException(e.Code == "AUTH_REQUIRED" ? "AUTH_EXPIRED" : e.Code); }
+                AccountRules.Require(data["data"] is JsonObject, "INVALID_RESPONSE");
+                rights = AccountDetailsSnapshot.Kg(data["data"]!.AsObject(), profile.UserId, clock.GetUtcNow().ToUnixTimeMilliseconds());
+            }
+        }
+        catch (MusicAccountException error) when (error.Code is "NETWORK_ERROR" or "UPSTREAM_ERROR" or
+            "INVALID_RESPONSE" or "RATE_LIMITED")
+        {
+            ctx.Guard();
+            rights = AccountDetailsSnapshot.Unknown(clock.GetUtcNow().ToUnixTimeMilliseconds(), error.Code, platform == "kg");
+        }
+        ctx.Guard();
+        return new(profile, fetched, AccountDetailsSnapshot.Validate(rights, platform));
     }
 }

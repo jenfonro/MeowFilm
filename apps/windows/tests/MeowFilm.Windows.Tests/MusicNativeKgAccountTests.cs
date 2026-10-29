@@ -82,7 +82,11 @@ public static class MusicNativeKgAccountTests
                 !begin.GetRawText().Contains("SYNTHETIC_DFID") && !begin.GetRawText().Contains(f.Transport.Seed!));
             seed = f.Transport.Seed!;
             Check(Id(begin) != KgAccountHandler.QrKey);
-            Check(Ok(await Poll(f.Owner, Id(begin))) && f.Store.Writes == 3 && f.Transport.Calls == 4);
+            Check(Ok(await Poll(f.Owner, Id(begin))) && f.Store.Writes == 3 && f.Transport.Calls == 5);
+            var details = await f.Owner.ReadDetailsAsync("kg");
+            Check(details.Generation == 1 && details.Membership.Vip == false &&
+                details.MembershipFreshness == MusicAccountDetailsFreshness.Fresh &&
+                f.Transport.Steps.SequenceEqual(["register", "key", "poll", "profile", "rights"]));
             var lease = await f.Owner.AcquireAsync("kg");
             Check(lease is not null && f.Owner.IsCurrent(lease) && lease.UserId == "42" &&
                 lease.Cookie.Contains("token=SYNTHETIC_KG_TOKEN") && lease.Cookie.Contains("t1=SYNTHETIC_T1"));
@@ -97,6 +101,7 @@ public static class MusicNativeKgAccountTests
         }
         await using var reopen = new KgAccountFixture(path);
         Check(Row(await reopen.Owner.CallAsync("music.accounts.list")).GetProperty("state").GetString() == "saved");
+        Check((await reopen.Owner.ReadDetailsAsync("kg")).Membership.Vip == false && reopen.Transport.Calls == 0);
         Check(StateOf(await reopen.Owner.CallAsync("music.accounts.validate", new { platform = "kg" })) == "verified");
         var device = await KgAccountFixture.ReadDevice(reopen.Store);
         var lease2 = await reopen.Owner.AcquireAsync("kg");
@@ -176,7 +181,7 @@ public static class MusicNativeKgAccountTests
         var result = await Login(f);
         Check(!Ok(result) && Code(result) == (write == 3 ? "HANDOFF_UNCONFIRMED" : "STORAGE_CONFLICT"));
         Check(await f.Owner.AcquireAsync("kg") is null);
-        Check(f.Transport.Calls == (write == 1 ? 0 : write == 2 ? 1 : 4));
+        Check(f.Transport.Calls == (write == 1 ? 0 : write == 2 ? 1 : 5));
         Check((await KgAccountFixture.ReadRoot(f.Store))["entries"]!.AsArray()
             .Any(n => n!["key"]!.GetValue<string>() == KgAccountFixture.ConcurrentAccountKey));
     }
@@ -485,7 +490,8 @@ internal sealed class KgAccountHandler : HttpMessageHandler
         Interlocked.Increment(ref Calls);
         var uri = request.RequestUri!;
         string step = uri.AbsolutePath switch { "/risk/v2/r_register_dev" => "register",
-            "/v2/qrcode" => "key", "/v2/get_userinfo_qrcode" => "poll", "/v3/get_my_info" => "profile", _ => "unknown" };
+            "/v2/qrcode" => "key", "/v2/get_userinfo_qrcode" => "poll", "/v3/get_my_info" => "profile",
+            "/v1/get_union_vip" => "rights", _ => "unknown" };
         lock (Steps) Steps.Add(step);
         MusicNativeKgAccountTests.Check(step != "unknown" && uri.Scheme == "https" && uri.IsDefaultPort &&
             !request.Headers.Contains("Cookie") && !request.Headers.Contains("X-Forwarded-For"));
@@ -499,6 +505,13 @@ internal sealed class KgAccountHandler : HttpMessageHandler
         if (Fault == step + "-403") return new(HttpStatusCode.Forbidden);
         var q = Query(uri);
         string body = request.Content is null ? "" : await request.Content.ReadAsStringAsync();
+        if (step == "rights")
+        {
+            MusicNativeKgAccountTests.Check(uri.Host == "kugouvip.kugou.com" && request.Method == HttpMethod.Get &&
+                q["userid"] == "42" && q["token"] == "SYNTHETIC_KG_TOKEN" && q["busi_type"] == "concept" &&
+                !request.Headers.Contains("x-router"));
+            return Json(new { status = 1, data = new { userid = "42", is_vip = 0 } });
+        }
         string salt = step is "key" or "poll" ? "NVPh5oo715z5DIWAeQlhMDsWXXQV4hwt" : "OIlwieks28dk2k092lksi2UIkp";
         MusicNativeKgAccountTests.Check(q["signature"] == Md5(salt + string.Concat(q.Where(p => p.Key != "signature")
             .OrderBy(p => p.Key, StringComparer.Ordinal).Select(p => p.Key + "=" + p.Value)) + body + salt));

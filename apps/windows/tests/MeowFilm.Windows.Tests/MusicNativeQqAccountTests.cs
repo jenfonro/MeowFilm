@@ -63,12 +63,13 @@ public static class MusicNativeQqAccountTests
         {
             handoffs++; Check(value.Profile.UserId == "42" && value.Profile.DisplayName == "合成账号" &&
                 value.Cookie.Contains("musickey=SYNTHETIC_MUSICKEY") && !value.Cookie.Contains("QRSIG") &&
-                !value.Cookie.Contains("PSKEY") && JsonSerializer.Serialize(value) == "{}");
+                !value.Cookie.Contains("PSKEY") && JsonSerializer.Serialize(value) == "{}" &&
+                value.Details.Entitlements.Membership.Vip == true && value.Details.Entitlements.Membership.Tier == "svip");
             return Task.FromResult(true);
         });
-        Check(poll.Status == "authenticated" && handoffs == 1 && handler.Calls == 7);
+        Check(poll.Status == "authenticated" && handoffs == 1 && handler.Calls == 8);
         Check((await protocol.PollAsync("tx", challenge.ChallengeId, (_, _) => Task.FromResult(true))).Status == "expired");
-        Check(handler.Calls == 7);
+        Check(handler.Calls == 8);
     }
     private static async Task State(int state, string expected)
     {
@@ -86,7 +87,7 @@ public static class MusicNativeQqAccountTests
         await using var protocol = new MusicAccountProtocol(http);
         var qr = await protocol.BeginAsync("tx");
         Check((await protocol.PollAsync("tx", qr.ChallengeId, (_, _) => Task.FromResult(true))).Status == "authenticated");
-        Check(handler.Calls == 7);
+        Check(handler.Calls == 8);
     }
     private static async Task Reject(string fault)
     {
@@ -204,6 +205,9 @@ public static class MusicNativeQqAccountTests
         await using (var owner = new MusicAccountOwner(store, new MusicAccountProtocol(http)))
         {
             var result = await Login(owner); Check(Ok(result) && AccountState(result) == "verified");
+            var details = await owner.ReadDetailsAsync("tx");
+            Check(details.Generation == 1 && details.Membership.Vip == true && details.Membership.Tier == "svip" &&
+                details.MembershipFreshness == MusicAccountDetailsFreshness.Fresh);
             var session = await owner.AcquireAsync("tx"); Check(session is not null && owner.IsCurrent(session));
             Check(owner.Revoke(session!) && !owner.IsCurrent(session!));
         }
@@ -211,6 +215,7 @@ public static class MusicNativeQqAccountTests
             Check(!Encoding.UTF8.GetString(await File.ReadAllBytesAsync(file)).Contains("SYNTHETIC_MUSICKEY"));
         await using var reopened = new MusicAccountOwner(store, new MusicAccountProtocol(http));
         Check(RowState(await reopened.CallAsync("music.accounts.list")) == "saved");
+        Check((await reopened.ReadDetailsAsync("tx")).Membership.Vip == true);
         Check(AccountState(await reopened.CallAsync("music.accounts.validate", new { platform = "tx" })) == "verified");
         Check(AccountState(await reopened.CallAsync("music.accounts.logout", new { platform = "tx" })) == "none");
         Check(await reopened.AcquireAsync("tx") is null);
@@ -450,6 +455,8 @@ internal sealed class QqAccountFixtureHandler : HttpMessageHandler
         if (step == "GetHomepageHeader") return Json(new { code = 0, req_0 = new { code = 0, data = new { Info = new { BaseInfo = new {
             EncryptedUin = Fault == "profile-identity" ? "WRONG_EUIN" : "SYNTHETIC_EUIN",
             Name = Fault == "profile-ticket" ? "SYNTHETIC_QRSIG" : "合成账号" } } } } });
+        if (step == "vip_login_base") return Json(new { code = 0, req_0 = new { code = 0,
+            data = new { svip = 1, userinfo = new { expire = DateTimeOffset.UtcNow.AddDays(30).ToUnixTimeMilliseconds() } } } });
         throw new InvalidOperationException("Unexpected synthetic QQ step");
     }
     protected override void Dispose(bool disposing) { if (disposing) Disposals++; base.Dispose(disposing); }

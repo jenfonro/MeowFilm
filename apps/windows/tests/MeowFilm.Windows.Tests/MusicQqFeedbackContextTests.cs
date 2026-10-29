@@ -115,7 +115,11 @@ public static class MusicQqFeedbackContextTests
             var document = await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace);
             var raw = JsonNode.Parse(document.Data!)!.AsObject(); CryptographicOperations.ZeroMemory(document.Data!);
             var entries = raw["entries"]!.AsArray();
-            Check(entries.Count == 2 && entries.Single(e => e!["key"]!.GetValue<string>() == AccountDocument.Key("tx"))!["value"]!.AsObject().Count == 6);
+            Check(entries.Count == 3 && entries.Single(e => e!["key"]!.GetValue<string>() == AccountDocument.Key("tx"))!["value"]!.AsObject().Count == 6);
+            var accounts = AccountDocument.Decode(await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace));
+            var details = accounts.GetDetails("tx");
+            Check(details is not null && details.BelongsTo(accounts.Get("tx")) &&
+                details.Rights.Membership.Vip == false, "Login rights remain bound alongside the feedback device");
             foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
             {
                 byte[] bytes = await File.ReadAllBytesAsync(file);
@@ -691,7 +695,7 @@ public static class MusicQqFeedbackContextTests
             Directory.CreateDirectory(Root);
             Store = new(new DpapiDocumentStore(Root, [MusicAccountOwner.DocumentNamespace]));
             Handler = new(this); Http = MusicPlatformHttp.CreateWithHandler(Handler);
-            Owner = new(Store, new MusicAccountProtocol(Http, clock: Clock));
+            Owner = new(Store, new MusicAccountProtocol(Http, clock: Clock), clock: Clock);
         }
         internal async Task<MusicPlatformSession> Login()
         {
@@ -774,9 +778,17 @@ public static class MusicQqFeedbackContextTests
             string method = body["req_0"]?["method"]?.GetValue<string>() ?? "";
             string step = request.RequestUri!.Host == "api.tencentmusic.com" ? "qimei" : method switch {
                 "GetLoginUserInfo" => "auth", "GetHomepageHeader" => "profile", "GetSession" => "session",
+                "vip_login_base" => "rights",
                 "CgiGetTrackInfo" => "track", "UrlGetVkey" => "vkey", _ => throw new InvalidOperationException("Unexpected synthetic route") };
             lock (Steps) Steps.Add(step);
             if (step == Hold) { Hold = ""; Arrived.TrySetResult(); await Release.Task; }
+            if (step == "rights")
+            {
+                Check(body["req_0"]!["module"]!.GetValue<string>() == "VipLogin.VipLoginInter" &&
+                    body["comm"]!["qq"]!.GetValue<string>() == UserId &&
+                    body["comm"]!["authst"]!.GetValue<string>() == "SYNTHETIC_QQ_CONTEXT_KEY");
+                return Envelope(new JsonObject { ["svip"] = 0, ["identity"] = new JsonObject { ["vip"] = 0 } });
+            }
             if (step is "auth" or "profile")
             {
                 Check(body["comm"]!["qq"]!.GetValue<string>() == UserId &&

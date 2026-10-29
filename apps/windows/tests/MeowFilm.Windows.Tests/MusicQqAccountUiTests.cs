@@ -60,7 +60,7 @@ public static class MusicQqAccountUiTests
             f.Module.SelectedAccount.UserId == "42" && f.Module.AccountStatus == "会话验证成功");
         await f.Module.ReadAccountsAsync();
         Check(f.Module.SelectedAccount!.State == "verified");
-        await f.Module.LogoutAccountAsync();
+        await f.Module.LogoutAccountAsync(f.Module.SelectedAccount!, confirmed: true);
         Check(f.Module.SelectedAccount.State == "none" && f.Runtime.Calls == 0);
     }
     private static Task Image()

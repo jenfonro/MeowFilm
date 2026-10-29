@@ -9,6 +9,21 @@
    <ResourceDictionary.MergedDictionaries>
     <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/>
    </ResourceDictionary.MergedDictionaries>
+   <Style x:Key="Account.Action" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
+    <Setter Property="MinHeight" Value="32"/>
+    <Setter Property="Padding" Value="10,6"/>
+    <Setter Property="Margin" Value="0"/>
+    <Setter Property="FontSize" Value="12"/>
+   </Style>
+   <Style x:Key="Account.CardAction" TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}">
+    <Setter Property="MinHeight" Value="32"/>
+    <Setter Property="Padding" Value="10,6"/>
+    <Setter Property="Margin" Value="0"/>
+    <Setter Property="FontSize" Value="12"/>
+   </Style>
+   <Style x:Key="Account.LogoutAction" TargetType="Button" BasedOn="{StaticResource Account.CardAction}">
+    <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Error}"/>
+   </Style>
    <Style x:Key="Login.Segment" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
     <Setter Property="Height" Value="34"/>
     <Setter Property="Padding" Value="18,4"/>
@@ -33,39 +48,44 @@
          <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
         <Grid Width="50" Height="50" VerticalAlignment="Center">
-         <Ellipse Fill="{Binding Accent}"/>
-         <TextBlock Text="{Binding AvatarFallback}" Foreground="White" FontWeight="SemiBold"
-                    FontSize="16" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-         <Border CornerRadius="25" ClipToBounds="True">
-          <art:ArtworkImage Address="{Binding Avatar}" Stretch="UniformToFill"
-                            AutomationProperties.Name="{Binding Name,StringFormat={}{0}头像}"/>
-         </Border>
+         <Grid.Clip><EllipseGeometry Center="25,25" RadiusX="25" RadiusY="25"/></Grid.Clip>
+         <Image Stretch="Uniform"
+                Visibility="{Binding ShowPlatformLogo,Converter={StaticResource MeowFilm.BoolToVisibility},FallbackValue=Collapsed}"
+                AutomationProperties.Name="{Binding Name,StringFormat={}{0}标志}">
+          <Image.Style>
+           <Style TargetType="Image">
+            <Setter Property="Source" Value="/MeowFilm.Capabilities;component/Accounts/Presentation/Assets/netease-music.png"/>
+            <Style.Triggers>
+             <DataTrigger Binding="{Binding Platform}" Value="tx">
+              <Setter Property="Source" Value="/MeowFilm.Capabilities;component/Accounts/Presentation/Assets/qq-music.png"/>
+             </DataTrigger>
+             <DataTrigger Binding="{Binding Platform}" Value="kg">
+              <Setter Property="Source" Value="/MeowFilm.Capabilities;component/Accounts/Presentation/Assets/kugou-music.png"/>
+             </DataTrigger>
+            </Style.Triggers>
+           </Style>
+          </Image.Style>
+         </Image>
+         <art:ArtworkImage Address="{Binding Avatar}" Stretch="UniformToFill"
+                           Visibility="{Binding IsLoggedIn,Converter={StaticResource MeowFilm.BoolToVisibility},FallbackValue=Collapsed}"
+                           AutomationProperties.Name="{Binding Name,StringFormat={}{0}头像}"/>
         </Grid>
         <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="14,0,24,0">
          <TextBlock Text="{Binding DisplayName}" FontSize="15" FontWeight="SemiBold"
-                    TextTrimming="CharacterEllipsis"/>
-         <TextBlock Text="{Binding Membership}" Margin="0,5,0,0" FontSize="12"
-                    Foreground="{DynamicResource MeowFilm.Brush.Muted}">
-          <TextBlock.Style>
-           <Style TargetType="TextBlock">
-            <Setter Property="Visibility" Value="Visible"/>
-            <Style.Triggers>
-             <Trigger Property="Text" Value=""><Setter Property="Visibility" Value="Collapsed"/></Trigger>
-            </Style.Triggers>
-           </Style>
-          </TextBlock.Style>
-         </TextBlock>
+                    Foreground="{DynamicResource MeowFilm.Brush.Text}" TextTrimming="CharacterEllipsis"/>
+         <TextBlock Text="{Binding Subtitle}" Margin="0,5,0,0" FontSize="12"
+                    Foreground="{DynamicResource MeowFilm.Brush.Muted}" TextTrimming="CharacterEllipsis"/>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center"
                     Visibility="{Binding IsLoggedIn,Converter={StaticResource MeowFilm.BoolToVisibility}}">
-         <StackPanel Margin="0,0,22,0">
+         <StackPanel Margin="0,0,14,0">
           <TextBlock Text="播放上报" FontSize="12" HorizontalAlignment="Center" Margin="0,0,0,7"/>
           <CheckBox Style="{StaticResource Capability.Switch}" IsChecked="{Binding FeedbackEnabled,Mode=OneWay}"
                     Tag="{Binding}" Click="Feedback_Click"
                     IsEnabled="{Binding DataContext.CanEditFeedback,RelativeSource={RelativeSource AncestorType=local:MusicAccountsView}}"
                     AutomationProperties.Name="{Binding Name,StringFormat={}{0}播放上报}"/>
          </StackPanel>
-         <StackPanel Margin="0,0,22,0">
+         <StackPanel Margin="0,0,14,0">
           <TextBlock Text="收藏同步" FontSize="12" HorizontalAlignment="Center" Margin="0,0,0,7"/>
           <CheckBox Style="{StaticResource Capability.Switch}" IsChecked="{Binding FavoritesSyncEnabled,Mode=OneWay}"
                     Tag="{Binding}" Click="FavoritesSync_Click"
@@ -80,6 +100,16 @@
                     AutomationProperties.Name="{Binding Name,StringFormat={}{0}歌单同步}"/>
          </StackPanel>
         </StackPanel>
+        <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center" Margin="16,0,0,0"
+                    Visibility="{Binding IsLoggedIn,Converter={StaticResource MeowFilm.BoolToVisibility}}">
+         <Button Content="{Binding RefreshText}" Tag="{Binding}" Click="RefreshDetails_Click"
+                 Style="{StaticResource Account.CardAction}" MinWidth="80" IsEnabled="{Binding CanRefresh}"
+                 AutomationProperties.Name="{Binding Name,StringFormat={}{0}刷新资料}"/>
+         <Button Content="退出" Tag="{Binding}" Click="Logout_Click" MinWidth="64" Margin="8,0,0,0"
+                 Style="{StaticResource Account.LogoutAction}" IsEnabled="{Binding CanLogout}"
+                 AutomationProperties.Name="{Binding Name,StringFormat={}{0}退出账号}"/>
+        </StackPanel>
+        <desktop:NoticeOutlet Message="{Binding DetailsStatus}"/>
         <Button Grid.Column="3" Content="登录" Tag="{Binding}" Click="Login_Click"
                 MinWidth="76" Margin="24,0,0,0"
                 VerticalAlignment="Center"
@@ -107,6 +137,30 @@
    <desktop:NoticeOutlet Message="{Binding FeedbackStatus}"/>
    <desktop:NoticeOutlet Message="{Binding LibrarySync.Status}"/>
   </StackPanel>
+
+  <Popup x:Name="LogoutPopup" Placement="Custom" StaysOpen="False" AllowsTransparency="True"
+         Opened="LogoutPopup_Opened" Closed="LogoutPopup_Closed">
+   <Grid Width="216" KeyboardNavigation.TabNavigation="Cycle" PreviewKeyDown="LogoutPopup_KeyDown"
+         AutomationProperties.Name="退出账号确认">
+    <Grid.RowDefinitions><RowDefinition Height="8"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+    <Path Data="M 0,8 L 7,0 L 14,8" Width="14" Height="8" HorizontalAlignment="Right" Margin="0,0,25,-1"
+          Fill="{DynamicResource MeowFilm.Brush.Surface}" Stroke="{DynamicResource MeowFilm.Brush.Border}"
+          StrokeThickness="1" Panel.ZIndex="1"/>
+    <Border Grid.Row="1" CornerRadius="12" Padding="16" Background="{DynamicResource MeowFilm.Brush.Surface}"
+            BorderBrush="{DynamicResource MeowFilm.Brush.Border}" BorderThickness="1">
+     <Border.Effect><DropShadowEffect BlurRadius="16" ShadowDepth="4" Opacity=".18"/></Border.Effect>
+     <StackPanel>
+      <TextBlock Text="退出此账号？" FontSize="14" Margin="0,0,0,14"/>
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+       <Button x:Name="CancelLogoutButton" Content="取消" Click="CancelLogout_Click" MinWidth="64"
+               Style="{StaticResource Account.Action}" AutomationProperties.Name="取消退出账号"/>
+       <Button Content="确定" Click="ConfirmLogout_Click" MinWidth="64" Margin="8,0,0,0"
+               Style="{StaticResource MeowFilm.PrimaryButton}" AutomationProperties.Name="确定退出账号"/>
+      </StackPanel>
+     </StackPanel>
+    </Border>
+   </Grid>
+  </Popup>
 
   <Popup x:Name="LoginPopup" PlacementTarget="{Binding ElementName=Root}" Placement="Center"
          StaysOpen="False" AllowsTransparency="True" Closed="LoginPopup_Closed" DataContext="{Binding}">

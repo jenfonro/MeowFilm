@@ -97,9 +97,11 @@ public sealed partial class MusicAccountProtocol
         if (code == 2001) throw new MusicAccountException("RATE_LIMITED");
         AccountRules.Require(code == 0, "UPSTREAM_ERROR");
     }
-    private static async Task<JsonObject> QqRead(Context ctx, string cookie, string module, string method, JsonObject param)
+    private static async Task<JsonObject> QqRead(Context ctx, string cookie, string module, string method, JsonObject param,
+        bool accountDetails = false)
     {
-        var result = (await ctx.Send(MusicPlatformRequests.TxWithCookie(module, method, param, cookie)).ConfigureAwait(false)).Body;
+        var result = (await ctx.Send(MusicPlatformRequests.TxWithCookie(module, method, param, cookie), accountDetails)
+            .ConfigureAwait(false)).Body;
         QqStatus(result["code"]);
         AccountRules.Require(result["req_0"] is JsonObject, "INVALID_RESPONSE");
         var request = result["req_0"]!.AsObject();

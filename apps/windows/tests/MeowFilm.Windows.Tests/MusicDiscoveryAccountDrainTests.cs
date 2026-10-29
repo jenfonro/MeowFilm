@@ -180,8 +180,8 @@ public static class MusicDiscoveryAccountDrainTests
             NetworkCalls++;
             return Task.FromException(new InvalidOperationException(operation + " is outside this read-only fixture"));
         }
-        public Task<MusicAccountProfile> ValidateAsync(string platform, string cookie, CancellationToken cancellationToken = default)
-            => Reject<MusicAccountProfile>("Authentication");
+        public Task<MusicAccountDetailsObservation> ValidateAsync(string platform, string cookie, CancellationToken cancellationToken = default)
+            => Reject<MusicAccountDetailsObservation>("Authentication");
         public Task<MusicAccountChallenge> BeginAsync(string platform, CancellationToken cancellationToken = default)
             => Reject<MusicAccountChallenge>("QR login");
         public Task<MusicAccountPoll> PollAsync(string platform, string challengeId, MusicAccountSessionHandoff handoff, CancellationToken cancellationToken = default)

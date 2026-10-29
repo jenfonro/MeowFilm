@@ -64,7 +64,7 @@ public static class MusicKgAccountUiTests
         await f.Module.CheckAccountQrAsync();
         Check(!f.Module.HasAccountQr && f.Module.SelectedAccount!.State == "verified" &&
             f.Module.SelectedAccount.UserId == "42" && f.Module.AccountStatus == "会话验证成功");
-        await f.Module.LogoutAccountAsync();
+        await f.Module.LogoutAccountAsync(f.Module.SelectedAccount!, confirmed: true);
         Check(f.Module.SelectedAccount!.State == "none" && f.Transport.Registrations == 0 && f.Runtime.Calls == 0);
         Check((await KgAccountFixture.ReadDevice(f.Store))["seed"]!.GetValue<string>() == KgAccountFixture.Seed);
     }

@@ -48,6 +48,8 @@ public static partial class MusicNativeAccountDetailsTests
         yield return Case("corrupt-new-row-not-overwritten-no-HTTP", Corrupt);
         yield return Case("safe-DTO-no-credential-device-or-upstream-error", SafeDto);
         foreach (var test in HttpCases()) yield return test;
+        foreach (var test in TtlCases()) yield return test;
+        foreach (var test in LoginCases()) yield return test;
     }
     private static TestCase Case(string name, Func<Task> action) => new("music.accountDetails." + name, action);
     private static void Check(bool value, string reason = "Account details invariant")
@@ -240,7 +242,8 @@ public static partial class MusicNativeAccountDetailsTests
         var unknown = AccountDetailsSnapshot.Kg(new() { ["vip_type"] = 9, ["level"] = 10 }, UserId, now);
         Check(unknown.Membership.Vip is null && unknown.RecheckAt == 0 && unknown.RetryAt == now + 60000);
         var noExpiry = AccountDetailsSnapshot.Kg(new() { ["is_vip"] = 1 }, UserId, now);
-        Check(noExpiry.Membership.Vip == true && noExpiry.RecheckAt == now + 60000 && noExpiry.Membership.ExpiresAt is null);
+        Check(noExpiry.Membership.Vip == true && noExpiry.RecheckAt == now + 86400000 &&
+            noExpiry.Membership.ExpiresAt is null && !noExpiry.VerificationDeferred && noExpiry.RetryAt == 0);
         var expired = AccountDetailsSnapshot.Kg(new() { ["is_vip"] = 1, ["vip_end_time"] = now - 1000 }, UserId, now);
         Check(expired.Membership.Vip == false && expired.Membership.ExpiresAt == now - 1000);
     }

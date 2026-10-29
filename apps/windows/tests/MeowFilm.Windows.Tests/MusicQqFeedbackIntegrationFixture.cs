@@ -278,6 +278,7 @@ internal sealed class MusicQqFeedbackIntegrationFixture : IAsyncDisposable
                         {
                             ("music.UserInfo.userInfoServer", "GetLoginUserInfo") => "auth",
                             ("music.UnifiedHomepage.UnifiedHomepageSrv", "GetHomepageHeader") => "profile",
+                            ("VipLogin.VipLoginInter", "vip_login_base") => "rights",
                             ("music.getSession.session", "GetSession") => "session",
                             ("music.trackInfo.UniformRuleCtrl", "CgiGetTrackInfo") => "track",
                             ("music.vkey.GetVkey", "UrlGetVkey") => "vkey",
@@ -305,6 +306,7 @@ internal sealed class MusicQqFeedbackIntegrationFixture : IAsyncDisposable
                 if (step == "profile") return Envelope(new JsonObject { ["Info"] = new JsonObject { ["BaseInfo"] = new JsonObject {
                     ["EncryptedUin"] = Fault == "profile" ? "SYNTHETIC_WRONG_EUIN" : Euin,
                     ["Name"] = "合成账号", ["Avatar"] = "https://y.qq.com/synthetic.png" } } });
+                if (step == "rights") return Envelope(new JsonObject { ["svip"] = 0, ["identity"] = new JsonObject { ["vip"] = 0 } });
                 if (step == "session") return Envelope(new JsonObject { ["session"] = new JsonObject { ["uid"] = DeviceUid, ["sid"] = DeviceSid } });
                 if (step == "track") return Envelope(new JsonObject { ["tracks"] = new JsonArray(new JsonObject {
                     ["mid"] = Fault == "track" ? "OTHERRECORDING" : Mid, ["id"] = 4321, ["interval"] = 240,
@@ -322,7 +324,7 @@ internal sealed class MusicQqFeedbackIntegrationFixture : IAsyncDisposable
         private static string Filename => "M500" + Mid + Mid + ".mp3";
         private async Task ValidateWire(string step, HttpRequestMessage request, JsonObject? body, byte[] bytes)
         {
-            if (step is "auth" or "profile" or "track" or "vkey")
+            if (step is "auth" or "profile" or "rights" or "track" or "vkey")
                 Check(body!["comm"]!["qq"]!.GetValue<string>() == UserId &&
                     body["comm"]!["authst"]!.GetValue<string>() is Key or OtherKey, "Exact account wire scope");
             if (step == "profile") Check(body!["req_0"]!["param"]!["uin"]!.GetValue<string>() == Euin, "Exact homepage identity");

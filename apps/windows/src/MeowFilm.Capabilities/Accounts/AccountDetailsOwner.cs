@@ -175,6 +175,18 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
             finally { Leave(); }
         }
     }
+    private MusicAccountDetailsObservation ValidateDetailsObservation(
+        MusicAccountDetailsObservation observed, string platform, string cookie)
+    {
+        AccountRules.Require(observed is not null, "INVALID_RESPONSE");
+        var profile = AccountRules.Profile(observed!.Profile, platform, cookie);
+        long now = clock.GetUtcNow().ToUnixTimeMilliseconds();
+        AccountRules.Require(observed.ProfileFetchedAt > 0 && observed.ProfileFetchedAt <= now &&
+            now - observed.ProfileFetchedAt <= 60000, "INVALID_RESPONSE");
+        var rights = AccountDetailsSnapshot.Validate(observed.Entitlements, platform);
+        AccountRules.Require(rights.CheckedAt <= now && now - rights.CheckedAt <= 60000, "INVALID_RESPONSE");
+        return observed with { Profile = profile, Entitlements = rights };
+    }
     private async Task RunDetailsFlight(DetailsFlight flight)
     {
         MusicAccountDetails? result = null; Exception? failure = null;
@@ -182,16 +194,12 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
         try
         {
             DetailsGuard(flight);
-            var observed = await protocol.ReadAccountDetailsAsync(flight.Session, flight.Deadline.Token)
-                .ConfigureAwait(false);
+            var observed = ValidateDetailsObservation(await protocol.ReadAccountDetailsAsync(flight.Session, flight.Deadline.Token)
+                .ConfigureAwait(false), platform, flight.Session.Cookie);
             DetailsGuard(flight);
-            var profile = AccountRules.Profile(observed.Profile, platform, flight.Session.Cookie);
+            var profile = observed.Profile;
             AccountRules.Require(profile.UserId == flight.Session.UserId, "IDENTITY_MISMATCH");
-            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            AccountRules.Require(observed.ProfileFetchedAt > 0 && observed.ProfileFetchedAt <= now &&
-                now - observed.ProfileFetchedAt <= 60000, "INVALID_RESPONSE");
-            var rights = AccountDetailsSnapshot.Validate(observed.Entitlements, platform);
-            AccountRules.Require(rights.CheckedAt <= now && now - rights.CheckedAt <= 60000, "INVALID_RESPONSE");
+            var rights = observed.Entitlements;
             // WY/QQ keep a prior known cache on unknown/outage. The current
             // refresh still returns unknown, never the old active rights as new proof.
             var persistRights = rights.Membership.Vip is null && platform is "wy" or "tx" &&
@@ -294,7 +302,7 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
         var profile = cache?.Profile ?? account.Profile;
         long fetched = cache?.ProfileFetchedAt ?? account.ValidatedAt ?? 0;
         long expires = fetched > 0 ? fetched + AccountDetailsSnapshot.ProfileTtl : 0;
-        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        long now = clock.GetUtcNow().ToUnixTimeMilliseconds();
         var rights = observed ?? cache?.Rights;
         bool fresh = rights is not null && rights.CheckedAt <= now && rights.RecheckAt > now;
         var membership = fresh || observed is not null ? rights!.Membership : new MusicAccountMembership(null, "unknown", rights?.Membership.ExpiresAt);

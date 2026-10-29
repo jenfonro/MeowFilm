@@ -113,11 +113,13 @@ public sealed partial class MusicAccountProtocol
                         .Any(s => s.Contains(secret, StringComparison.Ordinal) ||
                             s.Contains(Uri.EscapeDataString(secret), StringComparison.Ordinal)), "INVALID_RESPONSE");
                 ctx.Guard();
-                await ctx.Accept(acceptSession!, new("wy", attemptId, cookie, verified)).ConfigureAwait(false);
+                var details = await ObserveAccountDetails(ctx, verified, cookie).ConfigureAwait(false);
+                ctx.Guard();
+                await ctx.Accept(acceptSession!, new("wy", attemptId, cookie, details)).ConfigureAwait(false);
                 return true;
             }
             finally { ReleaseSms(limit); }
-        }, requestLimit: 2).ConfigureAwait(false);
+        }, requestLimit: 3).ConfigureAwait(false);
     }
     private static MusicAccountProfile WySmsProfile(JsonObject data, string cookie)
     {

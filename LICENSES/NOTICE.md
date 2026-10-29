@@ -163,3 +163,25 @@ The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
 ## QR Code generator — MIT
 
 Copyright (c) 2018 Manuel Bleichenbacher. License: `qr-code-generator-LICENSE.txt`.
+## Music platform brand marks
+
+The Windows account cards identify NetEase Cloud Music, QQ Music and KuGou Music
+with marks obtained from image URLs referenced by their official homepages on
+2026-10-29. These marks and trademarks remain the property of their respective
+owners; they are not covered by the application's GPL license or the API-code
+licenses above. Their presence does not imply endorsement or a verified grant
+of redistribution rights.
+
+Assets are embedded under
+`apps/windows/src/MeowFilm.Capabilities/Accounts/Presentation/Assets/` and loaded
+locally, without contacting the platform when the account cards are rendered.
+No brand shape was redrawn.
+
+| Asset | Official source | Local transformation | Source SHA-256 |
+| --- | --- | --- | --- |
+| `netease-music.png` | [NetEase Cloud Music homepage image metadata](https://p3.music.126.net/9z9CeujRSPOPm7Rq2DFw_g==/6674035581283071.jpg?param=200y200) | JPEG to PNG, original 200 × 200 pixels | `186e4684e688681c8b564bcd4b956c9b946d5e960d7ad788199b1b27c56fa19d` |
+| `qq-music.png` | [QQ Music homepage logo](https://y.qq.com/mediastyle/yqq/img/logo.png?max_age=2592000) | Cropped the 46 × 46 left-hand mark, excluding the wordmark | `57ee90c7d8d67e9012c7882ce23871af2a654296e8ad567dfb2dc1e0e9d0116f` |
+| `kugou-music.png` | [KuGou Music homepage logo](https://www.kugou.com/common/images/icon_logo_v20.png) | Cropped the 76 × 76 left-hand mark and composited its transparent portions over the official favicon blue `#1E84E4` | `1ba3beeb8060dfd9047c27021d63ba5a0d25ccc990ea7f48abe1e7fa62df2d1a` |
+
+KuGou color reference: [official favicon](https://www.kugou.com/root/favicon.ico),
+SHA-256 `78339bbc8393aea26d56c4285488b17a16d60ddc4a698e6b2cfc5d753c91ef24`.

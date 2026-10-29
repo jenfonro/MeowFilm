@@ -13,13 +13,11 @@ public sealed class MusicPlatformSettingsRow : INotifyPropertyChanged, IAsyncDis
     private readonly MusicLibrarySyncPlatformRow sync;
 
     internal MusicPlatformSettingsRow(MusicCapability owner, string platform, string name,
-        string fallback, string accent, IMusicAccountDetailsSource source)
+        IMusicAccountDetailsSource source)
     {
         this.owner = owner;
         Platform = platform;
         Name = name;
-        AvatarFallback = fallback;
-        Accent = accent;
         feedback = owner.FeedbackPlatforms.Single(row => row.Platform == platform);
         sync = owner.LibrarySync.Platforms.Single(row => row.Platform == platform);
         feedback.PropertyChanged += ChildChanged;
@@ -33,16 +31,20 @@ public sealed class MusicPlatformSettingsRow : INotifyPropertyChanged, IAsyncDis
 
     public string Platform { get; }
     public string Name { get; }
-    public string AvatarFallback { get; }
-    public string Accent { get; }
-    private MusicPlatformAccount Account => owner.Accounts.Single(row => row.Platform == Platform);
+    internal MusicPlatformAccount Account => owner.Accounts.Single(row => row.Platform == Platform);
     public bool IsLoggedIn => Account.State is "saved" or "verified";
-    public bool ShowLogin => !IsLoggedIn;
-    public string DisplayName => !IsLoggedIn ? "未登录" :
+    public bool ShowPlatformLogo => Account.State == "none";
+    public bool ShowLogin => Account.State is "none" or "revoked";
+    public string DisplayName => !IsLoggedIn ? Account.StateText :
         details.DisplayName is { Length: > 0 } detailName ? detailName :
         Account.DisplayName.Length > 0 ? Account.DisplayName : Name;
     public string Membership => IsLoggedIn ? details.MembershipSummary : "";
+    public string Subtitle => IsLoggedIn ? Membership : Name;
     public string Avatar => IsLoggedIn ? details.Avatar : "";
+    public bool CanRefresh => IsLoggedIn && owner.CanEdit && !owner.AccountBusy && details.CanRefresh;
+    public bool CanLogout => owner.CanEdit && owner.CanLogoutAccount(Account);
+    public string RefreshText => details.IsBusy ? "刷新中" : "刷新资料";
+    public string DetailsStatus => details.Status;
     public bool FeedbackEnabled => feedback.Enabled;
     public bool FavoritesSyncEnabled => sync.Favorites;
     public bool PlaylistsSyncEnabled => sync.Playlists;
@@ -54,8 +56,9 @@ public sealed class MusicPlatformSettingsRow : INotifyPropertyChanged, IAsyncDis
         details.SelectAccount(owner.AccountDetailsSelection(Platform));
         foreach (var property in new[]
         {
-            nameof(IsLoggedIn), nameof(ShowLogin), nameof(DisplayName), nameof(Membership),
-            nameof(Avatar), nameof(FeedbackEnabled), nameof(FavoritesSyncEnabled),
+            nameof(IsLoggedIn), nameof(ShowPlatformLogo), nameof(ShowLogin), nameof(DisplayName), nameof(Membership), nameof(Subtitle),
+            nameof(Avatar), nameof(CanRefresh), nameof(CanLogout), nameof(RefreshText), nameof(DetailsStatus),
+            nameof(FeedbackEnabled), nameof(FavoritesSyncEnabled),
             nameof(PlaylistsSyncEnabled)
         })
             Changed(property);
@@ -68,7 +71,7 @@ public sealed class MusicPlatformSettingsRow : INotifyPropertyChanged, IAsyncDis
     }
 
     internal Task DeactivateAsync() => details.DeactivateAsync();
-    internal Task RefreshDetailsAsync() => details.CanRefresh ? details.RefreshAsync() : Task.CompletedTask;
+    internal Task RefreshDetailsAsync() => CanRefresh ? details.RefreshAsync() : Task.CompletedTask;
     internal void InvalidateDetails() => details.Invalidate(Platform);
 
     private void ChildChanged(object? sender, PropertyChangedEventArgs e) => Refresh();
@@ -93,16 +96,16 @@ public sealed partial class MusicCapability
 
     private void InitializePlatformSettings()
     {
-        PlatformSettings.Add(new(this, "wy", "网易云音乐", "云", "#FF4A55", application));
-        PlatformSettings.Add(new(this, "tx", "QQ 音乐", "Q", "#31C27C", application));
-        PlatformSettings.Add(new(this, "kg", "酷狗音乐", "酷", "#31A8FF", application));
+        PlatformSettings.Add(new(this, "wy", "网易云音乐", application));
+        PlatformSettings.Add(new(this, "tx", "QQ 音乐", application));
+        PlatformSettings.Add(new(this, "kg", "酷狗音乐", application));
         application.AccountDetailsInvalidated += AccountDetailsInvalidated;
     }
 
     internal MusicPlatformAccount? AccountDetailsSelection(string platform)
     {
         if (stopping || disposed || accountSaveUncertain ||
-            AccountBusy && selectedAccount?.Platform == platform) return null;
+            AccountBusy && accountOperationPlatform == platform) return null;
         var account = Accounts.FirstOrDefault(row => row.Platform == platform);
         return account?.State is "saved" or "verified" ? account : null;
     }
@@ -110,7 +113,7 @@ public sealed partial class MusicCapability
     internal void AccountDetailsObserved(MusicAccountDetails details)
     {
         if (stopping || disposed || accountSaveUncertain ||
-            AccountBusy && selectedAccount?.Platform == details.Platform) return;
+            AccountBusy && accountOperationPlatform == details.Platform) return;
         var account = Accounts.FirstOrDefault(row => row.Platform == details.Platform);
         if (account is null || account.Generation > details.Generation) return;
         UpdateAccount(new(account.Platform, account.Name, details.State,
@@ -187,10 +190,6 @@ public sealed partial class MusicCapability
     {
         await Task.WhenAll(PlatformSettings.Select(row => row.DeactivateAsync()));
     }
-
-    internal Task RefreshPlatformDetailsAsync(string platform) =>
-        PlatformSettings.FirstOrDefault(row => row.Platform == platform)?.RefreshDetailsAsync() ??
-        Task.CompletedTask;
 
     private async ValueTask DisposeAccountDetailsAsync()
     {

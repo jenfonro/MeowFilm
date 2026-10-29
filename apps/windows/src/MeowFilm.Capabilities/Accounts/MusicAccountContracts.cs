@@ -11,7 +11,7 @@ namespace MeowFilm.Capabilities.Accounts;
 internal interface IMusicAccountProtocol : IAsyncDisposable, IMusicAccountSmsProtocol,
     IMusicAccountDetailsProtocol, IMusicKgDeviceProtocol, IMusicQqFeedbackDeviceProtocol
 {
-    Task<MusicAccountProfile> ValidateAsync(string platform, string cookie, CancellationToken cancellationToken = default);
+    Task<MusicAccountDetailsObservation> ValidateAsync(string platform, string cookie, CancellationToken cancellationToken = default);
     Task<MusicAccountChallenge> BeginAsync(string platform, CancellationToken cancellationToken = default);
     Task<MusicAccountPoll> PollAsync(string platform, string challengeId,
         MusicAccountSessionHandoff acceptSession, CancellationToken cancellationToken = default);
@@ -40,12 +40,13 @@ public sealed class MusicAccountChallenge(string platform, string challengeId, s
 public delegate Task<bool> MusicAccountSessionHandoff(MusicAccountHandoff handoff, CancellationToken cancellationToken);
 
 [DebuggerDisplay("MusicAccountHandoff (redacted)")]
-public sealed class MusicAccountHandoff(string platform, string challengeId, string cookie, MusicAccountProfile profile)
+public sealed class MusicAccountHandoff(string platform, string challengeId, string cookie, MusicAccountDetailsObservation details)
 {
     [JsonIgnore] public string Platform { get; } = platform;
     [JsonIgnore] public string ChallengeId { get; } = challengeId;
     [JsonIgnore, DebuggerBrowsable(DebuggerBrowsableState.Never)] public string Cookie { get; } = cookie;
-    [JsonIgnore] public MusicAccountProfile Profile { get; } = profile;
+    [JsonIgnore] public MusicAccountDetailsObservation Details { get; } = details;
+    [JsonIgnore] public MusicAccountProfile Profile => Details.Profile;
     public override string ToString() => "MusicAccountHandoff (redacted)";
 }
 

@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Input;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
@@ -15,13 +16,16 @@ public partial class MusicAccountsView : UserControl
     private Task? polling;
     private DispatcherTimer? smsCountdown;
     private long seenSmsInputEpoch = -1;
-    private bool Visible => IsLoaded && IsVisible && LoginPopup.IsOpen &&
-        window?.WindowState != WindowState.Minimized;
+    private (MusicCapability Owner, MusicPlatformAccount Account)? logoutConfirmation;
+    private bool SurfaceVisible => IsLoaded && IsVisible && window?.WindowState != WindowState.Minimized;
+    private bool Visible => SurfaceVisible && LoginPopup.IsOpen;
     private MusicCapability? Owner => DataContext as MusicCapability;
 
     public MusicAccountsView()
     {
         InitializeComponent();
+        LogoutPopup.CustomPopupPlacementCallback = (popup, target, _) =>
+            [new(new Point(target.Width - popup.Width, target.Height + 8), PopupPrimaryAxis.Horizontal)];
         Loaded += (_, _) => Attach();
         Unloaded += (_, _) => Detach();
         IsVisibleChanged += (_, _) => VisibilityChanged();
@@ -53,6 +57,7 @@ public partial class MusicAccountsView : UserControl
         window = null;
         StopPolling();
         StopSmsCountdown();
+        LogoutPopup.IsOpen = false;
         LoginPopup.IsOpen = false;
         ClearSmsInputs();
         if (old is not null) _ = Leave(old);
@@ -72,6 +77,9 @@ public partial class MusicAccountsView : UserControl
 
     private void OwnerChanged(object? sender, PropertyChangedEventArgs e)
     {
+        if (logoutConfirmation is { } confirmation &&
+            (!ReferenceEquals(observed, confirmation.Owner) || !confirmation.Owner.CanLogoutAccount(confirmation.Account)))
+            LogoutPopup.IsOpen = false;
         if (e.PropertyName == nameof(MusicCapability.AccountSmsInputEpoch)) ClearSmsInputsIfChanged();
         if (e.PropertyName == nameof(MusicCapability.AccountSmsRetrySeconds)) RefreshSmsCountdown();
         if (e.PropertyName is nameof(MusicCapability.HasAccountQr) or nameof(MusicCapability.CanCheckAccountQr) or
@@ -90,6 +98,49 @@ public partial class MusicAccountsView : UserControl
         LoginPopup.IsOpen = true;
         await owner.OpenPlatformLoginAsync(row);
         VisibilityChanged();
+    }
+
+    private async void RefreshDetails_Click(object sender, RoutedEventArgs e)
+    {
+        if (SurfaceVisible && Owner is { } owner && sender is Button { Tag: MusicPlatformSettingsRow row } &&
+            owner.PlatformSettings.Contains(row))
+            await row.RefreshDetailsAsync();
+    }
+
+    private void Logout_Click(object sender, RoutedEventArgs e)
+    {
+        if (!SurfaceVisible || Owner is not { } owner ||
+            sender is not Button { Tag: MusicPlatformSettingsRow row } button ||
+            !owner.PlatformSettings.Contains(row) || !row.CanLogout) return;
+        LogoutPopup.IsOpen = false;
+        logoutConfirmation = (owner, row.Account);
+        LogoutPopup.PlacementTarget = button;
+        LogoutPopup.IsOpen = true;
+    }
+
+    private void LogoutPopup_Opened(object? sender, EventArgs e) => CancelLogoutButton.Focus();
+    private void LogoutPopup_Closed(object? sender, EventArgs e)
+    {
+        var target = LogoutPopup.PlacementTarget as Button;
+        logoutConfirmation = null;
+        LogoutPopup.PlacementTarget = null;
+        if (SurfaceVisible && target is { IsVisible: true, IsEnabled: true }) target.Focus();
+    }
+
+    private void CancelLogout_Click(object sender, RoutedEventArgs e) => LogoutPopup.IsOpen = false;
+    private void LogoutPopup_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Escape) return;
+        e.Handled = true;
+        LogoutPopup.IsOpen = false;
+    }
+
+    private async void ConfirmLogout_Click(object sender, RoutedEventArgs e)
+    {
+        var confirmation = logoutConfirmation;
+        LogoutPopup.IsOpen = false;
+        if (SurfaceVisible && confirmation is { } captured && ReferenceEquals(Owner, captured.Owner))
+            await captured.Owner.LogoutAccountAsync(captured.Account, confirmed: true);
     }
 
     private async void Feedback_Click(object sender, RoutedEventArgs e)
@@ -163,6 +214,7 @@ public partial class MusicAccountsView : UserControl
 
     private void VisibilityChanged()
     {
+        if (!SurfaceVisible) LogoutPopup.IsOpen = false;
         if (!Visible)
         {
             StopPolling();

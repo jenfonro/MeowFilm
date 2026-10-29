@@ -201,18 +201,21 @@ public sealed partial class MusicCapability
         string? platform = selectedAccount?.Platform;
         return platform is null ? Task.CompletedTask : ChangeAccountAsync(platform, "validate", new { platform });
     }
-    public Task LogoutAccountAsync()
+    private bool IsCurrentAccount(MusicPlatformAccount account) =>
+        Accounts.Any(current => current.Platform == account.Platform && current.Generation == account.Generation &&
+            current.UserId == account.UserId && current.State is "saved" or "verified");
+    internal bool CanLogoutAccount(MusicPlatformAccount account) =>
+        !stopping && !disposed && !accountSaveUncertain && !AccountBusy && IsCurrentAccount(account);
+
+    public Task LogoutAccountAsync(MusicPlatformAccount account, bool confirmed)
     {
-        string? platform = selectedAccount?.Platform;
-        if (stopping || platform is null || !dialogs.Confirm("退出此平台账号？", "退出账号"))
-            return Task.CompletedTask;
-        accountCancellation?.Cancel();
-        return ChangeAccountAsync(platform, "logout", new { platform });
+        if (!confirmed || !CanLogoutAccount(account)) return Task.CompletedTask;
+        return ChangeAccountAsync(account.Platform, "logout", new { platform = account.Platform }, account);
     }
-    private async Task ChangeAccountAsync(string platform, string operation, object parameters)
+    private async Task ChangeAccountAsync(string platform, string operation, object parameters,
+        MusicPlatformAccount? expectedAccount = null)
     {
         var epoch = ++accountEpoch;
-        bool refreshDetails = false;
         accountCancellation?.Cancel();
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         // Admission is visible even while the shared command queue has not dispatched it.
@@ -228,6 +231,11 @@ public sealed partial class MusicCapability
         try { await RunAsync(async () =>
         {
             if (stopping || epoch != accountEpoch) return;
+            if (expectedAccount is not null && !IsCurrentAccount(expectedAccount))
+            {
+                accountStatus = "账号会话已变更";
+                return;
+            }
             try
             {
                 var reply = accountSmsOperation
@@ -245,7 +253,6 @@ public sealed partial class MusicCapability
                 var row = AccountRow(reply.GetProperty("account"));
                 MusicDto.Require(row.Platform == platform);
                 UpdateAccount(row);
-                refreshDetails = operation != "logout";
                 if (operation == "sms.login") ClearAccountSms();
                 accountSaveUncertain = false;
                 accountStatus = operation == "logout" ? "已退出" : "会话验证成功";
@@ -273,8 +280,6 @@ public sealed partial class MusicCapability
             }
             AccountBindings();
         }
-        if (refreshDetails && !stopping && epoch == accountEpoch)
-            await RefreshPlatformDetailsAsync(platform);
     }
     public Task CancelAccountAsync()
     {
