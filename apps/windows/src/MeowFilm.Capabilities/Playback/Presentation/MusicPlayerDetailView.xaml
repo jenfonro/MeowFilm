@@ -1,0 +1,230 @@
+<UserControl x:Class="MeowFilm.Capabilities.MusicPlayerDetailView"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:local="clr-namespace:MeowFilm.Capabilities"
+ xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
+ FontFamily="{DynamicResource MeowFilm.Font.Body}"
+ TextOptions.TextFormattingMode="Ideal" TextOptions.TextRenderingMode="ClearType"
+ Background="{Binding PlayerBackground}">
+ <UserControl.Resources>
+  <ResourceDictionary>
+   <ResourceDictionary.MergedDictionaries>
+    <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/>
+   </ResourceDictionary.MergedDictionaries>
+   <Style TargetType="TextBlock">
+    <Setter Property="Foreground" Value="#EBEAED"/>
+    <Style.Triggers>
+     <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
+      <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+     </Trigger>
+    </Style.Triggers>
+   </Style>
+   <Style x:Key="Player.OptionalText" TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
+    <Setter Property="FontSize" Value="14"/><Setter Property="Margin" Value="0,5,0,0"/>
+    <Style.Triggers>
+     <Trigger Property="Text" Value=""><Setter Property="Visibility" Value="Collapsed"/></Trigger>
+     <Trigger Property="Text" Value="{x:Null}"><Setter Property="Visibility" Value="Collapsed"/></Trigger>
+    </Style.Triggers>
+   </Style>
+   <Style x:Key="Player.LyricButton" TargetType="Button">
+    <Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="#EEEDEF"/>
+    <Setter Property="Padding" Value="0,11,12,11"/><Setter Property="Margin" Value="0"/>
+    <Setter Property="MinHeight" Value="47"/><Setter Property="HorizontalContentAlignment" Value="Left"/>
+    <Setter Property="VerticalContentAlignment" Value="Center"/>
+    <Setter Property="FocusVisualStyle" Value="{StaticResource MeowFilm.FocusVisual}"/>
+    <Setter Property="Template">
+     <Setter.Value><ControlTemplate TargetType="Button">
+      <Border Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}" CornerRadius="6">
+       <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                         VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+      </Border>
+     </ControlTemplate></Setter.Value>
+    </Setter>
+   </Style>
+   <Style x:Key="Player.DetailTab" TargetType="RadioButton">
+    <Setter Property="Foreground" Value="#9B969B"/><Setter Property="Padding" Value="12,6"/>
+    <Setter Property="Margin" Value="0"/><Setter Property="GroupName" Value="PlayerDetail"/>
+    <Setter Property="Template">
+     <Setter.Value><ControlTemplate TargetType="RadioButton">
+      <Border x:Name="TabSurface" Background="Transparent" CornerRadius="14" Padding="{TemplateBinding Padding}">
+       <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+      </Border>
+      <ControlTemplate.Triggers>
+       <Trigger Property="IsChecked" Value="True">
+        <Setter TargetName="TabSurface" Property="Background" Value="#18FFFFFF"/>
+        <Setter Property="Foreground" Value="#F3F1F4"/><Setter Property="FontWeight" Value="SemiBold"/>
+       </Trigger>
+       <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="TabSurface" Property="Background" Value="#10FFFFFF"/></Trigger>
+      </ControlTemplate.Triggers>
+     </ControlTemplate></Setter.Value>
+    </Setter>
+   </Style>
+  </ResourceDictionary>
+ </UserControl.Resources>
+ <Grid>
+  <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+ <Grid MaxWidth="1240" Margin="0,52,0,0">
+  <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+  <Viewbox Margin="40,0,0,0" MaxWidth="520" MaxHeight="600" Stretch="Uniform" VerticalAlignment="Center">
+   <Canvas Width="520" Height="600">
+    <Ellipse Canvas.Left="53" Canvas.Top="103" Width="414" Height="414" Fill="#0AFFFFFF" Stroke="#20FFFFFF" StrokeThickness="1"/>
+    <local:MusicRecordView x:Name="DetailRecord" Canvas.Left="66" Canvas.Top="116" Width="388" Height="388"
+     Address="{Binding CurrentArtwork}" Playing="{Binding IsPlaying}" SwipeEnabled="{Binding CanPlay}"
+     SwipeIdentity="{Binding PlaybackPresentationKey}" SwipeCommitted="DetailRecord_SwipeCommitted"
+     AutomationProperties.Name="唱片切歌"/>
+    <Canvas Canvas.Left="244" Canvas.Top="8" Width="220" Height="130" IsHitTestVisible="False">
+     <Canvas.RenderTransform><RotateTransform x:Name="NeedleRotation" CenterX="17" CenterY="17"/></Canvas.RenderTransform>
+     <Ellipse Width="34" Height="34" Fill="#20606060"/>
+     <Path Data="M17,17 C38,39 77,76 99,86 C125,94 152,96 190,101" Stroke="#F4F4F5"
+           StrokeThickness="7" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+     <Ellipse Canvas.Left="7" Canvas.Top="7" Width="20" Height="20" Fill="#EEEEF0" Stroke="#99FFFFFF" StrokeThickness="1"/>
+     <Ellipse Canvas.Left="13" Canvas.Top="13" Width="8" Height="8" Fill="#B3B3B8"/>
+     <Path Data="M153,92 L180,95 179,107 152,104 Z" Fill="#F8F8FA"/>
+     <Border Canvas.Left="179" Canvas.Top="92" Width="18" Height="20" Background="#FDFDFE" CornerRadius="3"
+             RenderTransformOrigin=".5,.5">
+      <Border.RenderTransform><RotateTransform Angle="7"/></Border.RenderTransform>
+      <Border Margin="4" BorderBrush="#DDDDE2" BorderThickness="0,1,0,1"/>
+     </Border>
+    </Canvas>
+   </Canvas>
+  </Viewbox>
+  <Grid Grid.Column="1" Margin="16,18,68,20">
+   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+   <StackPanel>
+    <TextBlock Text="{Binding CurrentTitle}" FontSize="26" FontWeight="SemiBold"
+               TextTrimming="CharacterEllipsis" Margin="0,0,0,10" ToolTip="{Binding CurrentTitle}"/>
+    <WrapPanel Opacity=".68" Margin="0,0,0,18">
+     <StackPanel Orientation="Horizontal" Margin="0,0,18,0">
+      <StackPanel.Style><Style TargetType="StackPanel"><Style.Triggers>
+       <DataTrigger Binding="{Binding CurrentAlbum}" Value=""><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
+       <DataTrigger Binding="{Binding CurrentAlbum}" Value="{x:Null}"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
+      </Style.Triggers></Style></StackPanel.Style>
+      <TextBlock Text="专辑：" FontSize="14"/><TextBlock Text="{Binding CurrentAlbum}" FontSize="14" MaxWidth="150" TextTrimming="CharacterEllipsis"/>
+     </StackPanel>
+     <StackPanel Orientation="Horizontal" Margin="0,0,18,0">
+      <StackPanel.Style><Style TargetType="StackPanel"><Style.Triggers>
+       <DataTrigger Binding="{Binding CurrentArtist}" Value=""><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
+       <DataTrigger Binding="{Binding CurrentArtist}" Value="{x:Null}"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
+      </Style.Triggers></Style></StackPanel.Style>
+      <TextBlock Text="歌手：" FontSize="14"/><TextBlock Text="{Binding CurrentArtist}" FontSize="14" MaxWidth="150" TextTrimming="CharacterEllipsis"/>
+     </StackPanel>
+     <StackPanel Orientation="Horizontal">
+      <StackPanel.Style><Style TargetType="StackPanel"><Style.Triggers>
+       <DataTrigger Binding="{Binding CurrentSource}" Value=""><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
+      </Style.Triggers></Style></StackPanel.Style>
+      <TextBlock Text="来源：" FontSize="14"/><TextBlock Text="{Binding CurrentSource}" FontSize="14" MaxWidth="150" TextTrimming="CharacterEllipsis"/>
+     </StackPanel>
+    </WrapPanel>
+   </StackPanel>
+   <DockPanel Grid.Row="1" Margin="0,0,0,8">
+    <Button x:Name="LyricOptionsButton" DockPanel.Dock="Right" Content="&#xE713;"
+            Style="{StaticResource MeowFilm.IconButton}" Foreground="#C5C3C8"
+            Click="LyricOptions_Click" AutomationProperties.Name="歌词设置" ToolTip="歌词设置"/>
+    <Border Background="#0DFFFFFF" CornerRadius="16" HorizontalAlignment="Left">
+     <StackPanel Orientation="Horizontal">
+      <RadioButton Content="歌词" Style="{StaticResource Player.DetailTab}" IsChecked="True"/>
+      <RadioButton Content="百科" Style="{StaticResource Player.DetailTab}" IsHitTestVisible="False"/>
+      <RadioButton Content="相似推荐" Style="{StaticResource Player.DetailTab}" IsHitTestVisible="False"/>
+     </StackPanel>
+    </Border>
+   </DockPanel>
+   <Popup x:Name="LyricOptionsPopup" PlacementTarget="{Binding ElementName=LyricOptionsButton}"
+          Placement="Bottom" StaysOpen="False" AllowsTransparency="True">
+    <Border Background="{DynamicResource MeowFilm.Brush.Surface}" Padding="12" CornerRadius="8" Margin="0,6,0,0">
+     <StackPanel>
+      <WrapPanel><Button Content="刷新歌词" Click="Lyrics_Click" IsEnabled="{Binding CanEdit}"/>
+       <ComboBox ItemsSource="{Binding LyricSources}" SelectedItem="{Binding SelectedLyricSource}"
+                 DisplayMemberPath="Label" MinWidth="120" MaxWidth="240" Margin="0,0,8,8"
+                 AutomationProperties.Name="歌词来源"/>
+       <Button Content="取消" Click="CancelLyrics_Click" IsEnabled="{Binding CanCancelLyrics}"/></WrapPanel>
+      <WrapPanel><Button Content="导入歌词" Click="ImportLyrics_Click" IsEnabled="{Binding CanImportLocalLyrics}"/>
+       <Button Content="移除本地歌词" Click="RemoveLocalLyrics_Click" IsEnabled="{Binding CanRemoveLocalLyrics}"/></WrapPanel>
+     </StackPanel>
+    </Border>
+   </Popup>
+   <Grid Grid.Row="2">
+    <ListBox Background="Transparent" BorderThickness="0" Padding="0"
+     ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto"
+     ScrollViewer.CanContentScroll="True" VirtualizingPanel.IsVirtualizing="True"
+     VirtualizingPanel.VirtualizationMode="Recycling" VirtualizingPanel.ScrollUnit="Pixel"
+     VirtualizingPanel.CacheLength="1,1" VirtualizingPanel.CacheLengthUnit="Page"
+     x:Name="LyricList" ItemsSource="{Binding Lyrics}" SelectedIndex="{Binding LyricDisplayIndex,Mode=OneWay}"
+     AutomationProperties.Name="歌词">
+     <ListBox.Resources><Style TargetType="ScrollViewer" BasedOn="{StaticResource Capability.OverlayScrollViewer}"/></ListBox.Resources>
+     <ListBox.Template><ControlTemplate TargetType="ListBox">
+      <ScrollViewer Focusable="False" CanContentScroll="True" VerticalScrollBarVisibility="Hidden"
+                    HorizontalScrollBarVisibility="Disabled" Style="{StaticResource Capability.OverlayScrollViewer}">
+       <ItemsPresenter Margin="0,140,0,160"/>
+      </ScrollViewer>
+     </ControlTemplate></ListBox.Template>
+     <ListBox.OpacityMask>
+      <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+       <GradientStop Color="Transparent" Offset="0"/><GradientStop Color="Black" Offset=".12"/>
+       <GradientStop Color="Black" Offset=".84"/><GradientStop Color="Transparent" Offset="1"/>
+      </LinearGradientBrush>
+     </ListBox.OpacityMask>
+     <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem">
+      <Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/>
+      <Setter Property="Margin" Value="0"/><Setter Property="Opacity" Value=".40"/>
+      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem">
+       <ContentPresenter/>
+      </ControlTemplate></Setter.Value></Setter>
+      <Style.Triggers>
+       <Trigger Property="IsMouseOver" Value="True"><Setter Property="Opacity" Value=".76"/></Trigger>
+       <Trigger Property="IsSelected" Value="True"><Setter Property="Opacity" Value="1"/><Setter Property="FontWeight" Value="SemiBold"/></Trigger>
+       <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Opacity" Value="1"/></Trigger>
+      </Style.Triggers>
+     </Style></ListBox.ItemContainerStyle>
+     <ListBox.ItemTemplate><DataTemplate>
+      <Grid Background="Transparent"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="36"/></Grid.ColumnDefinitions>
+       <Button Tag="{Binding}" Click="LyricPreview_Click" Style="{StaticResource Player.LyricButton}"
+               IsEnabled="{Binding DataContext.CanEdit,RelativeSource={RelativeSource AncestorType=local:MusicPlayerDetailView}}">
+        <StackPanel>
+         <TextBlock Text="{Binding Text}" FontSize="20" TextWrapping="Wrap">
+          <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
+           <Setter Property="Visibility" Value="Collapsed"/>
+           <Style.Triggers><DataTrigger Binding="{Binding Words.Count}" Value="0"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
+            <DataTrigger Binding="{Binding Words}" Value="{x:Null}"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers>
+          </Style></TextBlock.Style>
+         </TextBlock>
+         <ItemsControl ItemsSource="{Binding Words}" AutomationProperties.Name="逐字歌词">
+          <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+          <ItemsControl.ItemTemplate><DataTemplate>
+           <local:MusicLyricWordView Word="{Binding}" FontSize="20" Foreground="#8B898C" Highlight="#F4F3F6"
+                                     Position="{Binding DataContext.PositionSeconds,RelativeSource={RelativeSource AncestorType=local:MusicPlayerDetailView}}"/>
+          </DataTemplate></ItemsControl.ItemTemplate>
+         </ItemsControl>
+         <TextBlock Text="{Binding Translation}" Style="{StaticResource Player.OptionalText}" TextWrapping="Wrap"/>
+         <TextBlock Text="{Binding Romanization}" Style="{StaticResource Player.OptionalText}" TextWrapping="Wrap"/>
+        </StackPanel>
+       </Button>
+       <Button Grid.Column="1" Tag="{Binding}" Click="PlayLyric_Click" Content="&#xE768;" Width="30" Height="30"
+               IsEnabled="{Binding DataContext.CanSeek,RelativeSource={RelativeSource AncestorType=local:MusicPlayerDetailView}}"
+               AutomationProperties.Name="播放此处" ToolTip="播放此处">
+        <Button.Style><Style TargetType="Button" BasedOn="{StaticResource MeowFilm.IconButton}">
+         <Setter Property="Foreground" Value="#EEEEF0"/><Setter Property="Opacity" Value="0"/>
+         <Style.Triggers>
+          <DataTrigger Binding="{Binding IsMouseOver,RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True"><Setter Property="Opacity" Value="1"/></DataTrigger>
+          <DataTrigger Binding="{Binding IsKeyboardFocusWithin,RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True"><Setter Property="Opacity" Value="1"/></DataTrigger>
+         </Style.Triggers>
+        </Style></Button.Style>
+       </Button>
+      </Grid>
+     </DataTemplate></ListBox.ItemTemplate>
+    </ListBox>
+    <Grid VerticalAlignment="Center" IsHitTestVisible="False"
+          Visibility="{Binding HasLyricPreview,Converter={StaticResource MeowFilm.BoolToVisibility}}">
+     <Border Height="1" Background="#48FFFFFF" Margin="0,0,0,0"/>
+     <Border HorizontalAlignment="Left" Background="#D926272C" BorderBrush="#54FFFFFF" BorderThickness="1"
+             CornerRadius="12" Padding="9,4" Margin="0,-30,0,0">
+      <TextBlock Text="{Binding LyricPreviewText}" FontSize="12" Foreground="#F1EFF3"/>
+     </Border>
+    </Grid>
+    <desktop:NoticeOutlet Message="{Binding LyricStatus}" VerticalAlignment="Top"/>
+   </Grid>
+  </Grid>
+ </Grid>
+  <ContentControl x:Name="DetailPlayerHost" Grid.Row="1" HorizontalContentAlignment="Stretch"
+                  VerticalContentAlignment="Stretch" Focusable="False" IsTabStop="False"/>
+ </Grid>
+</UserControl>

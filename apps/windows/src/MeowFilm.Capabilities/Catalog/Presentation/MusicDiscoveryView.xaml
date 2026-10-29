@@ -1,0 +1,77 @@
+<UserControl xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop" x:Class="MeowFilm.Capabilities.MusicDiscoveryView"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:local="clr-namespace:MeowFilm.Capabilities"
+ xmlns:art="clr-namespace:MeowFilm.Desktop.Artwork;assembly=MeowFilm.Desktop">
+ <UserControl.Resources><ResourceDictionary>
+  <ResourceDictionary.MergedDictionaries><ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/></ResourceDictionary.MergedDictionaries>
+  <BooleanToVisibilityConverter x:Key="DiscoveryVisible"/>
+ </ResourceDictionary></UserControl.Resources>
+ <DockPanel>
+  <StackPanel DockPanel.Dock="Top">
+   <WrapPanel><Button Content="换一组" Click="Rotate_Click" IsEnabled="{Binding CanRotateDiscovery}"/>
+    <Button Content="取消" Click="Cancel_Click" IsEnabled="{Binding CanCancelDiscovery}"/></WrapPanel>
+   <desktop:NoticeOutlet Message="{Binding DiscoveryStatus}"/>
+   <ItemsControl ItemsSource="{Binding DiscoveryFailures}">
+    <ItemsControl.ItemTemplate><DataTemplate><desktop:NoticeOutlet Message="{Binding Text}"/></DataTemplate></ItemsControl.ItemTemplate>
+   </ItemsControl>
+  </StackPanel>
+  <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+   <StackPanel>
+    <TextBlock Text="推荐搜索" Style="{StaticResource MeowFilm.SectionHeading}" Margin="0,12"/>
+    <ItemsControl ItemsSource="{Binding DiscoveryRecommended}">
+     <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+     <ItemsControl.ItemTemplate><DataTemplate>
+      <Button Content="{Binding Text}" Tag="{Binding}" Click="Keyword_Click" Margin="0,0,8,8" MaxWidth="280"
+       IsEnabled="{Binding DataContext.CanUseDiscovery,RelativeSource={RelativeSource AncestorType=local:MusicDiscoveryView}}"/>
+     </DataTemplate></ItemsControl.ItemTemplate>
+    </ItemsControl>
+    <TextBlock Text="热搜" Style="{StaticResource MeowFilm.SectionHeading}" Margin="0,12"/>
+    <ItemsControl ItemsSource="{Binding DiscoveryHot}">
+     <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+     <ItemsControl.ItemTemplate><DataTemplate>
+      <Button Content="{Binding Text}" Tag="{Binding}" Click="Keyword_Click" Margin="0,0,8,8" MaxWidth="280"
+       IsEnabled="{Binding DataContext.CanUseDiscovery,RelativeSource={RelativeSource AncestorType=local:MusicDiscoveryView}}"/>
+     </DataTemplate></ItemsControl.ItemTemplate>
+    </ItemsControl>
+    <Button Content="清空搜索历史" Click="ClearHistory_Click" HorizontalAlignment="Left" Margin="0,12,0,4"
+      IsEnabled="{Binding CanEdit}" Visibility="{Binding HasSearchHistory,Converter={StaticResource DiscoveryVisible}}"/>
+    <ItemsControl ItemsSource="{Binding DiscoveryCharts}">
+     <ItemsControl.ItemTemplate><DataTemplate>
+      <Border Style="{StaticResource MeowFilm.Surface}" Padding="16" Margin="0,12,0,4">
+       <StackPanel>
+        <DockPanel Margin="0,0,0,12">
+         <Button DockPanel.Dock="Right" Content="打开歌单" Tag="{Binding}" Click="Chart_Click"
+          IsEnabled="{Binding DataContext.CanUseDiscovery,RelativeSource={RelativeSource AncestorType=local:MusicDiscoveryView}}"/>
+         <Border DockPanel.Dock="Left" Width="56" Height="56" Margin="0,0,12,0">
+          <Border.Style><Style TargetType="Border"><Style.Triggers>
+           <DataTrigger Binding="{Binding Cover}" Value=""><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
+          </Style.Triggers></Style></Border.Style>
+          <art:ArtworkImage Address="{Binding Cover}" Stretch="UniformToFill" AutomationProperties.Name="{Binding Name}"/>
+         </Border>
+         <StackPanel><TextBlock Text="{Binding Name}" Style="{StaticResource MeowFilm.SectionHeading}"/>
+          <TextBlock Text="{Binding Creator}" Style="{StaticResource Capability.Muted}" Margin="0,4,0,0"/>
+          <TextBlock Text="{Binding CountText}" Style="{StaticResource Capability.Muted}" Margin="0,6,0,0"/></StackPanel>
+        </DockPanel>
+        <ItemsControl ItemsSource="{Binding Songs}">
+         <ItemsControl.ItemTemplate><DataTemplate>
+          <DockPanel Margin="0,4">
+           <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+            <Button Content="播放" Tag="{Binding}" Click="Play_Click"
+             IsEnabled="{Binding DataContext.CanUseDiscovery,RelativeSource={RelativeSource AncestorType=local:MusicDiscoveryView}}"/>
+            <Button Content="下一首播放" Tag="{Binding}" Click="Queue_Click"
+             IsEnabled="{Binding DataContext.CanUseDiscovery,RelativeSource={RelativeSource AncestorType=local:MusicDiscoveryView}}"/>
+           </StackPanel>
+           <StackPanel VerticalAlignment="Center"><TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis"/>
+            <TextBlock Text="{Binding Artist}" Style="{StaticResource Capability.Muted}" TextTrimming="CharacterEllipsis" Margin="0,4,0,0"/></StackPanel>
+          </DockPanel>
+         </DataTemplate></ItemsControl.ItemTemplate>
+        </ItemsControl>
+       </StackPanel>
+      </Border>
+     </DataTemplate></ItemsControl.ItemTemplate>
+    </ItemsControl>
+   </StackPanel>
+  </ScrollViewer>
+ </DockPanel>
+</UserControl>

@@ -1,0 +1,125 @@
+using System.Text.Json;
+
+namespace MeowFilm.Capabilities;
+
+public sealed partial class MusicCapability
+{
+    private long officialAccountEpoch;
+    public string CurrentQualityLabel => musicRecovery?.Media?.Receipt is { } receipt &&
+        receipt.TryGetProperty("qualityVerified", out var verified) && verified.ValueKind == JsonValueKind.True
+        ? MusicDto.Text(receipt, "actualQuality") switch {
+            "128k" => "标准", "192k" or "320k" => "高音质", "flac" => "无损", "flac24bit" => "Hi-Res",
+            "master" => "母带", "dolby" => "杜比", "sky" => "环绕声", "vivid" => "臻音", "jyeffect" => "增强", _ => "音质"
+        } : "音质";
+    private object OfficialInput(SongRow song, MusicOnlineTarget target, bool initial, bool refresh) =>
+        new {
+            platform = target.Platform, song = target.RecordingSong ?? song.Raw, sourceKey = target.SourceKey,
+            quality = initial ? target.PolicyRequest : target.Quality,
+            qualityPolicySignature = target.QualityPolicySignature,
+            scope = target.AccountScope, generation = target.Generation, refresh
+        };
+
+    private async Task<ResolvedMusic> ResolveOfficialTarget(SongRow song, MusicOnlineTarget target, CancellationToken token, bool initial,
+        bool useCache = true, bool cacheOnly = false)
+    {
+        if (initial && useCache && audioFileCache is not null)
+        {
+            // Current local account identity + protected offline license, not a copied display snapshot.
+            // No URL or membership renewal is required while this complete-file license is still valid.
+            var authority = await QualityCall("music.official.cacheContext", OfficialInput(song, target, true, false), token);
+            string scope = MusicDto.Text(authority, "scope"), signature = MusicDto.Text(authority, "qualityCacheSignature");
+            if (!cacheOnly && preparedAudio is { } pending && (preparedEntry != song.EntryId || !pending.Matches(scope, song.Id, signature)))
+                CancelPreparedAudio();
+            var info = preparedAudio is { } prepared && preparedEntry == song.EntryId &&
+                prepared.Matches(scope, song.Id, signature) && prepared.Ready.Task.IsCompletedSuccessfully &&
+                prepared.Ready.Task.Result is not null
+                ? System.Text.Json.Nodes.JsonNode.Parse(prepared.VerifiedReceipt.GetRawText())!.AsObject()
+                : await audioFileCache.ReadInfoAsync(scope, song.Id, signature, token);
+            if (info is not null)
+            {
+                long? license = info["licenseExpiresAt"]?.GetValue<long>();
+                if (info["full"]?.GetValue<bool>() != true)
+                {
+                    if (cacheOnly) throw new MusicOperationException("CACHE_MISS");
+                    CancelPreparedAudio();
+                    return await ResolveOfficialTarget(song, target, token, initial: true, useCache: false);
+                }
+                bool offlineAllowed = info["offlineAllowed"]?.GetValue<bool>() == true;
+                if (offlineAllowed &&
+                    (license is null || license <= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()))
+                {
+                    if (cacheOnly) throw new MusicOperationException("CACHE_MISS");
+                    return await ResolveOfficialTarget(song, target, token, initial: true, useCache: false);
+                }
+                var cachedTarget = target with { AccountScope = scope, Generation = MusicDto.Integer(authority, "generation"),
+                    SourceKey = MusicDto.Text(authority, "sourceKey"), QualityCacheSignature = signature,
+                    Quality = info["quality"]!.GetValue<string>() };
+                var policy = await QualityCall("music.quality.settings.get", null, token);
+                if (MusicDto.Text(policy, "signature") != target.QualityPolicySignature)
+                    throw new MusicOperationException("QUALITY_POLICY_CHANGED");
+                return new(null, new Dictionary<string, string>(), cachedTarget, Receipt: JsonSerializer.SerializeToElement(info));
+            }
+        }
+        if (cacheOnly) throw new MusicOperationException("CACHE_MISS");
+        var response = await QualityCall("music.official.resolve", OfficialInput(song, target, initial, !initial), token);
+        token.ThrowIfCancellationRequested();
+        MusicDto.Require(MusicDto.Text(response, "kind") == "official" &&
+            MusicDto.Text(response, "platform") == target.Platform && MusicDto.Text(response, "songId") == song.Id &&
+            (target.SourceKey is null || MusicDto.Text(response, "sourceKey") == target.SourceKey) &&
+            (initial || MusicDto.Integer(response, "generation") == target.Generation &&
+                MusicDto.Text(response, "scope") == target.AccountScope) &&
+            MusicDto.Text(response, "qualityPolicySignature") == target.QualityPolicySignature &&
+            response.GetProperty("playbackVerified").ValueKind == JsonValueKind.False);
+        string request = MusicDto.Text(response, "quality");
+        MusicDto.Require(initial || request == target.Quality);
+        var uri = new Uri(MusicDto.Text(response, "url"), UriKind.Absolute);
+        MusicDto.Require(uri.Scheme is "http" or "https" && uri.UserInfo.Length == 0);
+        long? expiry = response.GetProperty("expiresAt").ValueKind == JsonValueKind.Number
+            ? response.GetProperty("expiresAt").GetInt64() : null;
+        MusicDto.Require(expiry is null || expiry > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        return new(uri, new Dictionary<string, string>(), target with {
+            Generation = MusicDto.Integer(response, "generation"), SourceKey = MusicDto.Text(response, "sourceKey"),
+            AccountScope = MusicDto.Text(response, "scope"), Quality = request,
+            QualityCacheSignature = MusicDto.Text(response, "qualityCacheSignature")
+        }, expiry, response);
+    }
+
+    private void ConfirmOfficialPlayback()
+    {
+        if (musicRecovery is not { Media.Target.Official: true } state || !CurrentRecovery(state)) return;
+        TrackMusicRecovery(Confirm());
+        async Task Confirm()
+        {
+            try { await QualityCall("music.official.confirm", OfficialInput(state.Song, state.Media!.Target!, false, false), state.Token); }
+            catch { /* Cache history is optional, never turn a successful native playing event into a playback failure. */ }
+        }
+    }
+    private void OfficialAccountChanged(string platform)
+    {
+        // Automatic preload may currently be planning any official platform,
+        // not only the active recording. Retire the whole speculative owner at
+        // invalidation time so no stale plan can start a transfer afterward.
+        CancelMusicPreload();
+        var state = musicRecovery;
+        if (state?.Pending?.Media.Target is { Official: true } pending && pending.Platform == platform)
+            CancelPendingMedia(state, "AUTH_REQUIRED");
+        if (state?.Media is null || state.Media.Target is { Official: true } active && active.Platform == platform)
+            Interlocked.Increment(ref officialAccountEpoch);
+        if (state?.Media?.Target is not { Official: true } target || target.Platform != platform) return;
+        // Fence at notification time, before dispatching UI cleanup.
+        try { state.Access.Cancel(); } catch (ObjectDisposedException) { }
+        if (!page.Dispatcher.HasShutdownStarted)
+            _ = page.Dispatcher.InvokeAsync(() =>
+            {
+                if (!ReferenceEquals(musicRecovery, state)) return;
+                TrackMusicRecovery(StopRevoked());
+                async Task StopRevoked()
+                {
+                    var epoch = state.Epoch;
+                    await RetireMusicRecovery();
+                    if (epoch == playbackEpoch && playback.OwnerId == Id && playback.Identity == state.Song.EntryId)
+                        await playback.StopAsync();
+                }
+            });
+    }
+}

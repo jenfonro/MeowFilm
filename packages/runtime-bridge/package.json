@@ -1,0 +1,13 @@
+{
+  "name": "@meowfilm/runtime-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "exports": {
+    ".": "./src/index.js",
+    "./descriptor": "./src/descriptor.js"
+  },
+  "scripts": { "test": "node --test test/*.test.js" }
+}

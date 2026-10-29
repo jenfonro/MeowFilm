@@ -1,0 +1,238 @@
+using System.Security.Cryptography;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using MeowFilm.Platform.Storage;
+
+namespace MeowFilm.Capabilities.Library;
+
+/// <summary>Native authority for local music state. Never install beside a writing Node owner of the same namespace.</summary>
+public sealed partial class MusicLibraryOwner : IAsyncDisposable
+{
+    public const string ContractVersion = "0.6.0";
+    public const string DocumentNamespace = "music.library.v1";
+    private readonly IProtectedDocumentStore store;
+    private readonly string scope;
+    private readonly SemaphoreSlim gate = new(1, 1);
+    private JsonObject? document;
+    private DocumentFingerprint fingerprint = DocumentFingerprint.Missing;
+    private Pending? pending;
+    private bool preparing, closed;
+    private long queueVersion, serial;
+    private List<string> shuffleHistory = [];
+    private enum PendingOwner
+    {
+        Appearance,
+        DeviceSettings,
+        History,
+        Library,
+        LocalLyrics,
+        LyricDisplay,
+        Metadata,
+        OnlineSettings,
+        Quality,
+        Queue,
+        Recommendation,
+        ScriptData,
+        SearchHistory,
+        SearchPolicy,
+        SourceMetadata,
+        Sync
+    }
+    private sealed record Pending(JsonObject Candidate, DocumentFingerprint Before, DocumentFingerprint After, string Code,
+        PendingOwner Owner, RecommendationCommit? Recommendation = null);
+
+    public MusicLibraryOwner(IProtectedDocumentStore store) : this(store, "local") { }
+    public MusicLibraryOwner(IProtectedDocumentStore store, string scope)
+    { ArgumentNullException.ThrowIfNull(store); LJ.Require(LJ.Id(scope)); this.store = store; this.scope = scope; }
+
+    public Task<JsonElement> ExecuteAsync(string method, object? parameters = null, CancellationToken cancellationToken = default) =>
+        ExecuteCoreAsync(method, parameters, cancellationToken, method == "music.queue.recommendation.enter");
+    public Task<JsonElement> CreatePlaylistAsync(string name, IReadOnlyList<JsonElement> songs, CancellationToken cancellationToken = default) =>
+        ExecuteCoreAsync("music.library.create", new { name, songs }, cancellationToken, true);
+    public Task<JsonElement> ReplaceQueueAsync(IReadOnlyList<JsonElement> songs, int index, JsonElement? context,
+        long expectedVersion, CancellationToken cancellationToken = default) =>
+        ExecuteCoreAsync("music.queue.replace", new { songs, index, context, expectedVersion }, cancellationToken, true);
+    private string Key(string area) => LJ.Stringify(new JsonArray("meowfilm", "music", 1, scope, area));
+    private JsonNode? Value(JsonObject doc, string area) =>
+        LJ.Array(doc["entries"]).OfType<JsonObject>().FirstOrDefault(e => LJ.S(e["key"]) == Key(area))?["value"];
+    private bool HasValue(JsonObject doc, string area) =>
+        LJ.Array(doc["entries"]).OfType<JsonObject>().Any(e => LJ.S(e["key"]) == Key(area));
+    private void Set(JsonObject doc, string area, JsonNode value)
+    {
+        var entries = LJ.Array(doc["entries"]);
+        var entry = entries.OfType<JsonObject>().FirstOrDefault(e => LJ.S(e["key"]) == Key(area));
+        if (entry is null) { LJ.Require(entries.Count < 1024, "LIMIT"); entries.Add(LJ.Obj(("key", Key(area)), ("value", value))); }
+        else entry["value"] = value.DeepClone();
+    }
+    private async Task EnterAsync(CancellationToken token) =>
+        LJ.Require(await gate.WaitAsync(TimeSpan.FromSeconds(10), token).ConfigureAwait(false), "TIMEOUT");
+    private async Task LoadAsync(CancellationToken token, bool force = false)
+    {
+        if (document is not null && !force) return;
+        var saved = await store.ReadAsync(DocumentNamespace, token).ConfigureAwait(false);
+        try
+        {
+            JsonObject candidate;
+            if (saved.Data is null) { LJ.Require(saved.Fingerprint == DocumentFingerprint.Missing, "CORRUPT_STORAGE"); candidate = LJ.Obj(("version", 1), ("entries", new JsonArray())); }
+            else
+            {
+                LJ.Require(DocumentFingerprint.FromBytes(saved.Data) == saved.Fingerprint, "CORRUPT_STORAGE");
+                candidate = LJ.PersistedDocument(saved.Data);
+            }
+            ValidateDocument(candidate);
+            if (Value(candidate, "queue") is JsonObject q) RestoreRuntime(q, false);
+            else if (force) RestoreRuntime(Queue(candidate), false);
+            document = candidate; fingerprint = saved.Fingerprint;
+        }
+        finally { if (saved.Data is not null) CryptographicOperations.ZeroMemory(saved.Data); }
+    }
+    private static PendingOwner CommandOwner(string method)
+    {
+        if (method.StartsWith("music.queue.recommendation.", StringComparison.Ordinal)) return PendingOwner.Recommendation;
+        if (method.StartsWith("music.library.", StringComparison.Ordinal)) return PendingOwner.Library;
+        if (method.StartsWith("music.queue.", StringComparison.Ordinal)) return PendingOwner.Queue;
+        if (method.StartsWith("music.history.", StringComparison.Ordinal)) return PendingOwner.History;
+        if (method is "music.settings.save") return PendingOwner.OnlineSettings;
+        if (method is "music.quality.settings.save") return PendingOwner.Quality;
+        if (method is "music.metadata.settings.save") return PendingOwner.Metadata;
+        if (method is "music.appearance.save") return PendingOwner.Appearance;
+        if (method is "music.device.settings.save") return PendingOwner.DeviceSettings;
+        if (method is "music.search.settings.save") return PendingOwner.SearchPolicy;
+        if (method is "music.search.history.record" or "music.search.history.clear") return PendingOwner.SearchHistory;
+        if (method is "music.lyrics.local.save" or "music.lyrics.local.remove") return PendingOwner.LocalLyrics;
+        if (method is "music.lyrics.display.save") return PendingOwner.LyricDisplay;
+        throw new MusicLibraryException("INVALID_REQUEST");
+    }
+    private static bool IsAuthoritativeRead(string method, PendingOwner owner) => owner switch
+    {
+        PendingOwner.Appearance => method == "music.appearance.get",
+        PendingOwner.Metadata => method == "music.metadata.settings.get",
+        PendingOwner.Quality => method == "music.quality.settings.get",
+        PendingOwner.Queue => method == "music.queue.get",
+        PendingOwner.SearchPolicy => method == "music.search.settings.get",
+        _ => false
+    };
+    private async Task AdmitCommandLockedAsync(string method, CancellationToken token)
+    {
+        var attempt = pending ?? recommendationUnknown;
+        if (attempt is null) return;
+        if (method == "music.queue.recommendation.reconcile" && recommendationUnknown is not null) return;
+        if (attempt.Code == "STORAGE_CONFLICT") throw new MusicLibraryException("STORAGE_CONFLICT");
+        if (recommendationUnknown is null && IsAuthoritativeRead(method, attempt.Owner))
+        {
+            await ReconcileLockedAsync(token).ConfigureAwait(false);
+            return;
+        }
+        throw new MusicLibraryException("PENDING_WRITE");
+    }
+    private async Task CommitAsync(JsonObject candidate, PendingOwner owner, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        LJ.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
+        ValidateDocument(candidate);
+        byte[] bytes = LJ.Bytes(candidate);
+        LJ.Require(bytes.Length <= 8 * 1024 * 1024, "LIMIT");
+        var expected = DocumentFingerprint.FromBytes(bytes);
+        try
+        {
+            // CAS admission is final. Cancellation cannot mean the write was rolled back.
+            var result = await store.WriteAsync(DocumentNamespace, bytes, fingerprint, CancellationToken.None).ConfigureAwait(false);
+            LJ.Require(result == expected, "COMMIT_UNKNOWN");
+            document = candidate; fingerprint = result;
+        }
+        catch (Exception error)
+        {
+            string code = error is ProtectedDocumentException { Error: DocumentStoreError.Conflict } ? "STORAGE_CONFLICT" : "COMMIT_UNKNOWN";
+            pending = new(candidate, fingerprint, expected, code, owner, recommendationStage);
+            if (recommendationStage is not null) recommendationUnknown = pending;
+            throw new MusicLibraryException(code);
+        }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
+    }
+    private async Task ReconcileLockedAsync(CancellationToken token)
+    {
+        var previous = document; var previousFingerprint = fingerprint;
+        long previousVersion = queueVersion; var previousHistory = shuffleHistory.ToList(); var failures = failedEntries.ToArray();
+        try
+        {
+            var attempt = pending ?? recommendationUnknown;
+            await LoadAsync(token, true).ConfigureAwait(false);
+            if (attempt is { } p)
+                LJ.Require(fingerprint == p.Before || fingerprint == p.After, "STORAGE_CONFLICT");
+            SettleRecommendation(attempt);
+            pending = null;
+        }
+        catch
+        {
+            document = previous; fingerprint = previousFingerprint; queueVersion = previousVersion; shuffleHistory = previousHistory;
+            failedEntries.Clear(); failedEntries.UnionWith(failures); throw;
+        }
+    }
+    public async Task ReconcileAsync(CancellationToken cancellationToken = default)
+    {
+        await EnterAsync(cancellationToken).ConfigureAwait(false);
+        try { LJ.Require(!closed, "CLOSED"); await ReconcileLockedAsync(cancellationToken).ConfigureAwait(false); }
+        finally { gate.Release(); }
+    }
+    private async Task<JsonElement> ExecuteCoreAsync(string method, object? parameters, CancellationToken token, bool full)
+    {
+        bool entered = false, captured = false, success = false; long previousVersion = 0; List<string>? previousHistory = null; string[] previousFailures = [];
+        try
+        {
+            var p = LJ.Parameters(parameters, full ? 16 * 1024 * 1024 : 512 * 1024);
+            await EnterAsync(token).ConfigureAwait(false); entered = true;
+            recommendationStage = null;
+            LJ.Require(!closed && !preparing, "CLOSED");
+            token.ThrowIfCancellationRequested();
+            if (method == "music.lyrics.parse")
+            {
+                LJ.Fields(p, "text translation duration", "text translation duration");
+                return MusicLyricTiming.Parse(LJ.S(p["text"]), LJ.S(p["translation"]), LJ.N(p["duration"]));
+            }
+            await LoadAsync(token).ConfigureAwait(false);
+            await AdmitCommandLockedAsync(method, token).ConfigureAwait(false);
+            captured = true; previousVersion = queueVersion; previousHistory = shuffleHistory.ToList(); previousFailures = failedEntries.ToArray();
+            var candidate = (JsonObject)document!.DeepClone();
+            var outcome = await DispatchAsync(method, p, candidate, token, full).ConfigureAwait(false);
+            var response = LJ.Merge(LJ.Obj(("ok", true)), outcome.Result);
+            LJ.Require(LJ.Bytes(response).Length <= 512 * 1024, "LIMIT");
+            if (outcome.Mutate) await CommitAsync(candidate, CommandOwner(method), token).ConfigureAwait(false);
+            if (outcome.Mutate && recommendationStage is { } recommendation)
+                AcceptRecommendation(recommendation, true);
+            // Do not turn a known successful durable mutation into an ambiguous cancellation.
+            if (!outcome.Mutate) token.ThrowIfCancellationRequested();
+            success = true;
+            return LJ.Element(response);
+        }
+        catch (OperationCanceledException) { return LJ.Element(LJ.Obj(("ok", false), ("code", "CANCELLED"))); }
+        catch (MusicLibraryException error) { return LJ.Element(LJ.Obj(("ok", false), ("code", error.Code))); }
+        catch (ProtectedDocumentException error) { return LJ.Element(LJ.Obj(("ok", false), ("code", error.Error == DocumentStoreError.Unavailable ? "STORAGE_UNAVAILABLE" : "STORAGE"))); }
+        catch { return LJ.Element(LJ.Obj(("ok", false), ("code", "INVALID_REQUEST"))); }
+        finally
+        {
+            // A rejected command cannot change shuffle navigation/version. An admitted
+            // unknown CAS deliberately retains its candidate until explicit reconciliation.
+            if (captured && !success && pending is null && previousHistory is not null)
+            { queueVersion = previousVersion; shuffleHistory = previousHistory; failedEntries.Clear(); failedEntries.UnionWith(previousFailures); }
+            if (entered) { recommendationStage = null; gate.Release(); }
+        }
+    }
+    public async Task PrepareShutdownAsync(CancellationToken cancellationToken = default)
+    {
+        await EnterAsync(cancellationToken).ConfigureAwait(false);
+        try { LJ.Require(!closed, "CLOSED"); LJ.Require(pending is null && recommendationUnknown is null, pending?.Code ?? "PENDING_WRITE"); preparing = true; ClearRecommendations(); }
+        finally { gate.Release(); }
+    }
+    public async Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default)
+    {
+        await EnterAsync(cancellationToken).ConfigureAwait(false);
+        try { LJ.Require(!closed, "CLOSED"); preparing = false; } finally { gate.Release(); }
+    }
+    public async Task AbortAsync(CancellationToken cancellationToken = default)
+    {
+        await EnterAsync(cancellationToken).ConfigureAwait(false);
+        try { closed = true; ClearRecommendations(); } finally { gate.Release(); }
+    }
+    public async ValueTask DisposeAsync()
+    { if (closed) return; await PrepareShutdownAsync().ConfigureAwait(false); await AbortAsync().ConfigureAwait(false); }
+}

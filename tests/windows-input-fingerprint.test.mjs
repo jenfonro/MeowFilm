@@ -1,0 +1,50 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
+import { fingerprintInputs, isWindowsBuildInput } from '../scripts/windows/input-fingerprint.mjs';
+import { temporaryRoot, assertOwnedPath } from '../scripts/windows/working-paths.mjs';
+
+test('Windows input inventory covers shared packaging, locked configuration and shipped assets', () => {
+  for (const path of [
+    'scripts/package-runtime.mjs', 'scripts/test-root.mjs', 'scripts/windows/test.ps1',
+    'apps/windows/NuGet.Config', 'apps/windows/global.json',
+    'LICENSES/node-LICENSE.txt',
+    'LICENSES/NOTICE.md',
+    'LICENSES/Apache-2.0.txt',
+    'apps/windows/src/MeowFilm.Desktop/Theme.xaml', 'apps/windows/app/app.manifest',
+    'apps/windows/app/packages.lock.json', 'apps/windows/assets/logo.ico',
+    'tests/windows-runtime.test.mjs', 'packages/script-host/src/index.js',
+    'package-lock.json', '.gitignore', '.gitattributes', 'build-windows.ps1'
+  ]) assert.equal(isWindowsBuildInput(path), true, path);
+  for (const path of [
+    'docs/windows/music-implementation.md', 'apps/windows/README.md',
+    'apps/windows/src/MeowFilm.Media/IMPLEMENTATION.md',
+    'apps/ios/MeowFilm/App.swift', '.local/test-results/native.log',
+    'build/meowfilm.exe', 'tmp/test-results/native.log', 'tmp/working/项目工作记录.md'
+  ]) assert.equal(isWindowsBuildInput(path), false, path);
+});
+
+test('Windows fingerprint binds bytes and paths; inventory order and duplicates are irrelevant', () => {
+  const root = mkdtempSync(join(temporaryRoot, 'meowfilm-inputs-'));
+  try {
+    const files = ['build-windows.ps1', 'scripts/package-runtime.mjs', 'apps/windows/NuGet.Config'];
+    for (const path of files) {
+      mkdirSync(dirname(join(root, path)), { recursive: true });
+      writeFileSync(join(root, path), 'first');
+    }
+    const original = fingerprintInputs(root, files);
+    assert.equal(fingerprintInputs(root, [...files.toReversed(), files[0], 'docs/README.md']), original);
+    writeFileSync(join(root, files[0]), 'second');
+    assert.notEqual(fingerprintInputs(root, files), original);
+    writeFileSync(join(root, files[0]), 'first');
+    assert.notEqual(fingerprintInputs(root, [files[0]]), original);
+    assert.throws(() => fingerprintInputs(root, [...files, 'scripts/missing.mjs']), /ENOENT/);
+    assert.throws(() => fingerprintInputs(root, ['README.md']), /No Windows code inputs/);
+  } finally {
+    assert.equal(dirname(resolve(root)), resolve(temporaryRoot));
+    assertOwnedPath(temporaryRoot, root);
+    assert.ok(basename(root).startsWith('meowfilm-inputs-'));
+    rmSync(root, { recursive: true, force: true });
+  }
+});

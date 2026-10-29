@@ -1,0 +1,50 @@
+iWebPlus is derived from iWebPlayer by birdstudy-nj and contributors.
+Source snapshot: songloft-org/songloft-plugin-iwebplayer at 731b2517ad71fde1ba7250b24ffb9798cf01128e.
+Original source: https://github.com/songloft-org/songloft-plugin-iwebplayer
+Modifications: Copyright 2026 jenfonro and iWebPlus contributors.
+Licensed under Apache License 2.0; see LICENSE.
+
+NeteaseCloudMusicApiEnhanced/api-enhanced is used as an independently downloaded,
+unmodified official Release executable. It is not included in this plugin ZIP.
+Project: https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced
+Licensed under the MIT License; see licenses/api-enhanced-MIT.txt.
+Copyright (c) 2013-2022 Binaryify.
+
+QQMusicApi is used as an independently downloaded executable from CI-built
+Releases of the jenfonro/QQMusicApi fork. The Apache-2.0 plugin communicates
+with it only over loopback HTTP; QQMusicApi is not relicensed under Apache-2.0.
+Upstream project: https://github.com/L-1124/QQMusicApi
+Fork source and build: https://github.com/jenfonro/QQMusicApi
+Releases: https://github.com/jenfonro/QQMusicApi/releases
+Upstream base: main, version 0.8.2, commit 27861e51432ea6b6e88dc35c4e8c8e239c0339e8.
+Fork main adds Cookie compatibility, account-scoped radar, and play_duration
+patches. Release versions use 0.8.2-iwebplus.N; availability is determined by
+published Releases, not by this version pattern.
+This is a fork build, not an official upstream binary.
+QQMusicApi and the fork launcher/build helpers are GPL-3.0-or-later.
+The same fork Release must provide the executable, manifest, complete
+corresponding source (including launcher, patches, build materials and dependency
+sources), full GPL text, upstream notices, and Python and dependency licenses.
+The source archive basename and SHA-256 match the manifest's sourceArchive
+and sourceSha256 fields. Each component retains its own license and attribution.
+The plugin ZIP includes no Python runtime, QQ executable or manifest, QQ
+corresponding source or component licenses. QQ build sources are maintained only
+in the fork; this plugin does not duplicate the GPL build scripts.
+
+MakcRe/KuGouMusicApi is used as an independently downloaded API executable.
+New installations use the jenfonro/KuGouMusicApi fork Release with explicit
+playback-context parameters; these are not official upstream Releases.
+Fork: https://github.com/jenfonro/KuGouMusicApi
+Existing official Releases and the checksum-pinned cscc2 source build of commit
+514f870db7e60ca37bc5535be5da36d32b571c6f remain supported for recovery.
+The legacy source-build patch is retained under modules/kugou.
+Executables are not included in this plugin ZIP. Release/source-build bundles
+include their Node, dependency and build-tool notices.
+Project: https://github.com/MakcRe/KuGouMusicApi
+Licensed under the MIT License; see licenses/KuGouMusicApi-MIT.txt.
+Copyright (c) 2023 MakcRe.
+
+The loading indicator uses Lucide's loader-circle SVG (0.468.0), styled locally.
+Project: https://github.com/lucide-icons/lucide
+Licensed under the ISC License; see licenses/lucide-ISC.txt.
+Copyright Lucide Icons and Contributors.

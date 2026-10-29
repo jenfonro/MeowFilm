@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Net.Codecrete.QrCodeGenerator" Version="[3.2.1]" />
+    <ProjectReference Include="../MeowFilm.Desktop/MeowFilm.Desktop.csproj" />
+    <ProjectReference Include="../MeowFilm.Platform/MeowFilm.Platform.csproj" />
+    <ProjectReference Include="../MeowFilm.Media/MeowFilm.Media.csproj" />
+  </ItemGroup>
+</Project>

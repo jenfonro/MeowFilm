@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net10.0-windows7.0": {
+      "Net.Codecrete.QrCodeGenerator": {
+        "type": "Direct",
+        "requested": "[3.2.1, 3.2.1]",
+        "resolved": "3.2.1",
+        "contentHash": "MLseDo4x2T8+7gbXDt5vLjC4b6v4SavtrwoM+adKjlicnTHAqII4zAWy8VL5D94oB3VA8qz7bvMyOxfVLJnARg=="
+      },
+      "LibVLCSharp": {
+        "type": "Transitive",
+        "resolved": "3.10.2",
+        "contentHash": "WNLHBIK5QcOH0kNGBGupKC9Ds3hksPthHyp6ueE8zG5Hy/6EBwAU0BbMqukBCdLatCOY+V9DYHDwSVSXSmPGSA=="
+      },
+      "LibVLCSharp.WPF": {
+        "type": "Transitive",
+        "resolved": "3.10.2",
+        "contentHash": "jV7ThQIwaQxuLPLNWb1z7+qOGh6ctg/lBF5hVPfu+s+xI5HvtFEvCiYb8a88rEEd/g5WI/Llhy7ipeicAL5gsw==",
+        "dependencies": {
+          "LibVLCSharp": "3.10.2"
+        }
+      },
+      "VideoLAN.LibVLC.Windows": {
+        "type": "Transitive",
+        "resolved": "3.0.24",
+        "contentHash": "U8SHuJr8eAC3x4+gEtOJD2heReo0tTWP3v21NunYNTzjmHpVp7qELs8phohqazxHMkaSIN8LufdIpAhldiLL/A=="
+      },
+      "meowfilm.core": {
+        "type": "Project"
+      },
+      "meowfilm.desktop": {
+        "type": "Project",
+        "dependencies": {
+          "MeowFilm.Core": "[1.0.0, )"
+        }
+      },
+      "meowfilm.downloads": {
+        "type": "Project",
+        "dependencies": {
+          "MeowFilm.Platform": "[1.0.0, )"
+        }
+      },
+      "meowfilm.media": {
+        "type": "Project",
+        "dependencies": {
+          "LibVLCSharp": "[3.10.2, 3.10.2]",
+          "LibVLCSharp.WPF": "[3.10.2, 3.10.2]",
+          "VideoLAN.LibVLC.Windows": "[3.0.24, 3.0.24]"
+        }
+      },
+      "meowfilm.platform": {
+        "type": "Project",
+        "dependencies": {
+          "MeowFilm.Core": "[1.0.0, )"
+        }
+      }
+    },
+    "net10.0-windows7.0/win-x64": {}
+  }
+}

@@ -1,0 +1,350 @@
+using System.Text.Json;
+using MeowFilm.Capabilities.Recommendations;
+
+namespace MeowFilm.Capabilities;
+
+public sealed partial class MusicCapability
+{
+    private IMusicRecommendationSource RecommendationSource => application;
+    private IDisposable? recommendationBinding;
+    private readonly HashSet<Task> recommendationWork = [];
+    private CancellationTokenSource recommendationLifetime = new();
+    private JsonElement? recommendationSnapshot;
+    private long recommendationRevision = -1, recommendationViewEpoch, recommendationCommandEpoch;
+    private string recommendationError = "";
+    private MusicRecommendationPlaybackState? recommendationObservation;
+    private string? recommendationRetryObservation;
+    private Task recommendationPreparation = Task.CompletedTask;
+    private long recommendationDisplayedVersion = -1, recommendationDesiredVersion = -1;
+    private bool recommendationDisplayRunning;
+
+    public bool HasRecommendationSession => recommendationSnapshot is { } value &&
+        (RecText(value, "id").Length > 0 || RecIds(value).Length > 0);
+    public bool HasActiveRecommendation => recommendationSnapshot is { } value && RecBool(value, "active");
+    public bool RecommendationLoading => recommendationSnapshot is { } value && RecBool(value, "loading");
+    public string RecommendationTitle => recommendationSnapshot is not { } value ? "" :
+        RecText(value, "kind") switch { "fm" => "私人 FM", "similar" => "相似推荐", "heartbeat" => "心动模式", _ => "推荐" };
+    public string RecommendationStatus
+    {
+        get
+        {
+            if (recommendationError.Length > 0) return recommendationError;
+            if (recommendationSnapshot is not { } value) return "";
+            if (RecBool(value, "requiresReconcile") || RecIds(value).Length > 0) return "保存结果待核对";
+            if (RecBool(value, "waiting")) return "正在等待推荐";
+            if (RecBool(value, "loading")) return "正在加载推荐";
+            if (RecText(value, "error") is { Length: > 0 } code) return ErrorText(new MusicOperationException(code));
+            return RecText(value, "status") switch
+            {
+                "returned" => "已恢复原队列", "cancelled" => "已结束推荐",
+                "queue-replaced" or "queue-empty" => "推荐已结束",
+                "account-invalidated" or "AUTH_EXPIRED" or "AUTH_REQUIRED" => "账号已失效",
+                "empty" => "暂无推荐", "remote" => "已停止本机推荐", _ => ""
+            };
+        }
+    }
+    public bool RecommendationContinue => recommendationSnapshot is { } value && RecBool(value, "continue");
+    public bool CanChangeRecommendationContinue => !stopping && HasActiveRecommendation &&
+        RecText(recommendationSnapshot!.Value, "kind") != "fm";
+    public bool CanRetryRecommendation => !stopping && recommendationSnapshot is { } value && RecBool(value, "canRetry");
+    public bool CanReturnRecommendation => !stopping && recommendationSnapshot is { } value && RecBool(value, "canReturn");
+    public bool CanCancelRecommendation => !stopping && HasActiveRecommendation;
+    public bool CanReconcileRecommendation => !stopping && recommendationSnapshot is { } value &&
+        (RecBool(value, "requiresReconcile") || RecIds(value).Length > 0);
+
+    private static string RecText(JsonElement value, string name) =>
+        value.TryGetProperty(name, out var item) && item.ValueKind == JsonValueKind.String ? item.GetString()! : "";
+    private static bool RecBool(JsonElement value, string name) =>
+        value.TryGetProperty(name, out var item) && item.ValueKind == JsonValueKind.True;
+    private static string[] RecIds(JsonElement value) =>
+        value.TryGetProperty("reconcileIds", out var ids) && ids.ValueKind == JsonValueKind.Array
+            ? ids.EnumerateArray().Where(v => v.ValueKind == JsonValueKind.String).Select(v => v.GetString()!).ToArray() : [];
+
+    private void InitializeRecommendations()
+    {
+        recommendationBinding = RecommendationSource.BindSelection(SelectRecommendationAsync);
+        RecommendationSource.Changed += RecommendationChanged;
+    }
+    private void RecommendationBindings()
+    {
+        foreach (var name in new[] { nameof(HasRecommendationSession), nameof(HasActiveRecommendation),
+            nameof(RecommendationTitle), nameof(RecommendationStatus), nameof(RecommendationLoading),
+            nameof(RecommendationContinue), nameof(CanChangeRecommendationContinue), nameof(CanRetryRecommendation),
+            nameof(CanReturnRecommendation), nameof(CanCancelRecommendation), nameof(CanReconcileRecommendation) })
+            Changed(name);
+    }
+    private void RecommendationChanged(JsonElement snapshot)
+    {
+        var copy = snapshot.Clone();
+        if (page.Dispatcher.HasShutdownStarted || page.Dispatcher.HasShutdownFinished) return;
+        _ = page.Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (stopping || disposed) return;
+            PublishRecommendation(copy);
+        }));
+    }
+    private void PublishRecommendation(JsonElement value)
+    {
+        if (value.ValueKind != JsonValueKind.Object || !RecBool(value, "ok") ||
+            !value.TryGetProperty("revision", out var number) || !number.TryGetInt64(out long revision) ||
+            revision < recommendationRevision) return;
+        recommendationRevision = revision;
+        recommendationSnapshot = value.Clone();
+        recommendationError = "";
+        RecommendationBindings();
+        if (!RecBool(value, "loading") && value.TryGetProperty("queueVersion", out var queueVersion) &&
+            queueVersion.TryGetInt64(out long version) && version > recommendationDesiredVersion)
+        {
+            recommendationDesiredVersion = version;
+            if (!recommendationDisplayRunning) TrackRecommendation(RefreshRecommendationDisplay());
+        }
+    }
+    private async Task RefreshRecommendationDisplay()
+    {
+        recommendationDisplayRunning = true;
+        try
+        {
+            await Task.Yield();
+            while (!stopping && recommendationDisplayedVersion < recommendationDesiredVersion)
+            {
+                long wanted = recommendationDesiredVersion;
+                await RefreshRecommendationQueue(recommendationLifetime.Token);
+                recommendationDisplayedVersion = wanted;
+            }
+        }
+        finally { recommendationDisplayRunning = false; }
+    }
+
+    private Task TrackRecommendation(Task task)
+    {
+        recommendationWork.Add(task);
+        _ = Observe();
+        return task;
+        async Task Observe()
+        {
+            try { await task; }
+            catch (OperationCanceledException) { }
+            catch (Exception error)
+            {
+                if (!stopping && !disposed) { recommendationError = ErrorText(error); RecommendationBindings(); }
+            }
+            finally { recommendationWork.Remove(task); }
+        }
+    }
+
+    // These controls must not wait behind commandTail: a start/next command may
+    // itself be waiting for the batch that Cancel/Return has to retire.
+    private Task RecommendationCommand(string method, object parameters) =>
+        TrackRecommendation(ExecuteRecommendationCommand(method, parameters));
+    private async Task ExecuteRecommendationCommand(string method, object parameters)
+    {
+        if (stopping) return;
+        var token = recommendationLifetime.Token;
+        long command = ++recommendationCommandEpoch;
+        try
+        {
+            var response = await application.ExecuteAsync(method, parameters, token);
+            token.ThrowIfCancellationRequested();
+            if (!RecBool(response, "ok")) throw new MusicOperationException(RecText(response, "code"));
+            // Command replies may describe a retired session. Only the actual
+            // current snapshot may replace the shared playback controls.
+            var actual = method == "music.recommendations.get" ? response :
+                await application.ExecuteAsync("music.recommendations.get", new { }, token);
+            token.ThrowIfCancellationRequested();
+            if (!stopping) PublishRecommendation(actual);
+            // Until the sole queue owner has reconciled an uncertain commit, its
+            // projection is not authoritative and must not replace the explicit
+            // recommendation reconciliation state with a generic read failure.
+            if (!RecBool(actual, "requiresReconcile") && RecIds(actual).Length == 0)
+                await RefreshRecommendationQueue(token);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            if (!stopping && command == recommendationCommandEpoch)
+            { recommendationError = ErrorText(error); RecommendationBindings(); }
+        }
+    }
+    public Task CancelRecommendationAsync() => CanCancelRecommendation
+        ? RecommendationCommand("music.recommendations.cancel", new { id = RecText(recommendationSnapshot!.Value, "id") })
+        : Task.CompletedTask;
+    public Task ReturnRecommendationAsync() => CanReturnRecommendation
+        ? RecommendationCommand("music.recommendations.return", new { id = RecText(recommendationSnapshot!.Value, "id") })
+        : Task.CompletedTask;
+    public Task RetryRecommendationAsync() => CanRetryRecommendation
+        ? RecommendationCommand("music.recommendations.retry", new { id = RecText(recommendationSnapshot!.Value, "id") })
+        : Task.CompletedTask;
+    public Task ChangeRecommendationContinueAsync(bool enabled) => CanChangeRecommendationContinue
+        ? RecommendationCommand("music.recommendations.continue", new { id = RecText(recommendationSnapshot!.Value, "id"), enabled })
+        : Task.CompletedTask;
+    public Task ReconcileRecommendationAsync()
+    {
+        if (!CanReconcileRecommendation) return Task.CompletedTask;
+        string[] ids = RecIds(recommendationSnapshot!.Value);
+        if (ids.Length == 0) ids = [RecText(recommendationSnapshot.Value, "id")];
+        return TrackRecommendation(Reconcile());
+        async Task Reconcile()
+        {
+            foreach (string id in ids)
+            {
+                if (stopping) break;
+                await ExecuteRecommendationCommand("music.recommendations.reconcile", new { id });
+            }
+            // A reply for an old unresolved id is not the current session.
+            if (!stopping) await ExecuteRecommendationCommand("music.recommendations.get", new { });
+        }
+    }
+
+    private Task StartRecommendation(CatalogTarget target)
+    {
+        if (stopping) return Task.CompletedTask;
+        InvalidateCatalogAction();
+        var input = target.Parameters.EnumerateObject().ToDictionary(p => p.Name, p => (object?)p.Value.Clone());
+        input["kind"] = target.Operation; input["platform"] = target.Platform; input["local"] = true; input["play"] = true;
+        // Session identity and native recording IDs, never a synthesized title.
+        if (target.Operation != "fm") input["continue"] = false;
+        return RecommendationCommand("music.recommendations.start", input);
+    }
+
+    private async Task RefreshRecommendationQueue(CancellationToken token)
+    {
+        if (stopping) return;
+        long epoch = ++recommendationViewEpoch;
+        await ReadQueue(token);
+        if (stopping || token.IsCancellationRequested || epoch != recommendationViewEpoch) return;
+        InvalidateQueueSurface();
+        ObserveRecommendationPlayback();
+    }
+
+    private Task<bool> SelectRecommendationAsync(MusicRecommendationSelection selection, CancellationToken token)
+    {
+        if (page.Dispatcher.HasShutdownStarted || page.Dispatcher.HasShutdownFinished) return Task.FromResult(false);
+        // Do not enqueue RunAsync here: the invoking recommendation command may
+        // already be inside that lane and must await this exact media callback.
+        return page.Dispatcher.InvokeAsync(() => SelectRecommendationOnUI(selection, token)).Task.Unwrap();
+    }
+    private async Task<bool> SelectRecommendationOnUI(MusicRecommendationSelection selection, CancellationToken token)
+    {
+        bool Current() => !stopping && !disposed && !token.IsCancellationRequested && selection.IsCurrent();
+        if (!Current()) return false;
+        if (selection.Action == MusicRecommendationPlaybackAction.Stop)
+        {
+            if (playback.OwnerId == Id && playback.Identity == selection.EntryId)
+                return await StopOwnedPlayback(Current) && Current();
+            return Current();
+        }
+        long epoch = -1;
+        try
+        {
+            var response = await application.ExecuteAsync("music.queue.get", new { offset = 0, limit = 1 }, token);
+            if (!Current() || !RecBool(response, "ok") ||
+                MusicDto.Integer(response, "version") != selection.QueueVersion) return false;
+            var state = ParseQueue(response);
+            if (state.Current?.EntryId != selection.EntryId || !state.Saved) return false;
+            ++queueEpoch; ++queueRead; ++recommendationViewEpoch;
+            if (selection.RestoreOnly || !selection.Play)
+            {
+                if (!await StopOwnedPlayback(Current) || !Current()) return false;
+                ApplyQueue(state);
+            }
+            else
+            {
+                bool sameMedia = openedEntry == selection.EntryId && playback.OwnerId == Id &&
+                    playback.Identity == selection.EntryId && playback.HasMedia;
+                ApplyQueue(state);
+                if (!Current()) return false;
+                if (sameMedia)
+                {
+                    epoch = playbackEpoch;
+                    if (!playback.IsPlaying) await playback.ResumeAsync();
+                }
+                else await StartCurrent(token, selection.Automatic, Current, value => epoch = value, selection.Feedback);
+            }
+            if (!Current())
+            {
+                if (playback.OwnerId == Id && playback.Identity == selection.EntryId && epoch == playbackEpoch)
+                    await StopOwnedPlayback(() => playback.OwnerId == Id &&
+                        playback.Identity == selection.EntryId && epoch == playbackEpoch);
+                return false;
+            }
+            ObserveRecommendationPlayback();
+            return true;
+        }
+        catch (Exception error)
+        {
+            // Never stop a newer user's selection while retiring a stale resolver.
+            if (current?.EntryId == selection.EntryId && playback.OwnerId == Id &&
+                playback.Identity == selection.EntryId && epoch == playbackEpoch)
+                await StopOwnedPlayback(() => current?.EntryId == selection.EntryId &&
+                    playback.OwnerId == Id && playback.Identity == selection.EntryId && epoch == playbackEpoch);
+            if (Current()) { recommendationError = ErrorText(error); RecommendationBindings(); }
+            return false;
+        }
+    }
+
+    private void ObserveRecommendationPlayback()
+    {
+        if (stopping || current?.EntryId is not { } id) return;
+        // Opening an input publishes "not playing" before its first frame. That
+        // is not a user Pause and must not invalidate this very selection.
+        if (!recorded || openedEntry != id) return;
+        bool owns = playback.OwnerId == Id && playback.Identity == id;
+        var state = new MusicRecommendationPlaybackState(id, owns && playback.IsPlaying,
+            owns && recorded && openedEntry == id, owns && playback.HasMedia, IsLocal: true);
+        string? retry = null;
+        if (state is { IsPlaying: true, HasStarted: true, MediaReady: true } &&
+            recommendationSnapshot is { } snapshot && RecBool(snapshot, "active") &&
+            RecText(snapshot, "kind") == "fm" && RecBool(snapshot, "continue") &&
+            !RecBool(snapshot, "loading") && !RecBool(snapshot, "requiresReconcile") &&
+            RecText(snapshot, "error").Length > 0 &&
+            snapshot.TryGetProperty("failures", out var failures) && failures.TryGetInt32(out int count) && count == 1 &&
+            snapshot.TryGetProperty("retryAt", out var due) && due.TryGetInt64(out long at) &&
+            at > 0 && at <= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
+            retry = RecText(snapshot, "id") + ":" + at;
+        bool retryDue = retry is not null && retry != recommendationRetryObservation;
+        if (recommendationObservation == state && !retryDue) return;
+        // Native position events already arrive while playing. Forward one
+        // observation when this backoff expires, without adding a polling loop.
+        if (retryDue) recommendationRetryObservation = retry;
+        recommendationObservation = state;
+        TrackRecommendation(RecommendationSource.OnPlaybackAsync(state, recommendationLifetime.Token));
+    }
+    private void ObserveExplicitRecommendationPause()
+    {
+        if (stopping || current?.EntryId is not { } id) return;
+        var state = new MusicRecommendationPlaybackState(id, false, recorded && openedEntry == id,
+            playback.OwnerId == Id && playback.Identity == id && playback.HasMedia);
+        recommendationObservation = state;
+        TrackRecommendation(RecommendationSource.OnPlaybackAsync(state, recommendationLifetime.Token));
+    }
+    private Task<bool> AdvanceRecommendation(bool naturalEnd) => current?.EntryId is { } id
+        ? RecommendationSource.TryAdvanceAsync(id, naturalEnd, true, recommendationLifetime.Token)
+        : Task.FromResult(false);
+
+    private void SealRecommendations()
+    {
+        ++recommendationViewEpoch;
+        recommendationLifetime.Cancel();
+        recommendationPreparation = RecommendationSource.PrepareRecommendationsAsync();
+        RecommendationBindings();
+    }
+    private async Task DrainRecommendations()
+    {
+        await recommendationPreparation;
+        await Task.WhenAll(recommendationWork.ToArray());
+    }
+    private void ResumeRecommendations()
+    {
+        recommendationLifetime.Dispose(); recommendationLifetime = new();
+        recommendationSnapshot = null; recommendationError = ""; recommendationObservation = null;
+        recommendationRetryObservation = null;
+        recommendationDisplayedVersion = recommendationDesiredVersion = -1;
+        RecommendationBindings();
+    }
+    private void ReleaseRecommendations()
+    {
+        RecommendationSource.Changed -= RecommendationChanged;
+        recommendationBinding?.Dispose(); recommendationBinding = null;
+        recommendationLifetime.Cancel(); recommendationLifetime.Dispose();
+    }
+}

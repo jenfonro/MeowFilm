@@ -1,0 +1,18 @@
+{
+  "name": "meowfilm-windows",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/runtime-bridge",
+    "packages/script-host"
+  ],
+  "engines": {
+    "node": "^24.0.0"
+  },
+  "scripts": {
+    "test": "node scripts/verify-dependency-lock.mjs && node scripts/test-packages.mjs && node scripts/test-root.mjs && node scripts/verify-boundaries.mjs",
+    "test:packages": "node scripts/test-packages.mjs",
+    "verify:boundaries": "node scripts/verify-boundaries.mjs"
+  }
+}

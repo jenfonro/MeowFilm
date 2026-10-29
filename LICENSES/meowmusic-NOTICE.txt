@@ -1,0 +1,31 @@
+MeowMusic is a standalone Go music application.
+New and combined application code is distributed under GPL-3.0-only.
+This does not relicense third-party components or grant rights to platform content.
+
+Frontend and application strategies are derived from iWebPlus (2026 jenfonro and
+contributors), itself derived from birdstudy-nj's iWebPlayer at
+731b2517ad71fde1ba7250b24ffb9798cf01128e. Those original portions remain Apache-2.0.
+Source: https://github.com/songloft-org/songloft-plugin-iwebplayer
+Modifications include standalone identity, platform adapters, storage and runtime.
+See licenses/iwebplus-Apache-2.0.txt.
+
+Platform protocol reference code:
+NeteaseCloudMusicApiEnhanced/api-enhanced 4.41.1, MIT, Binaryify and contributors.
+QQMusicApi and jenfonro fork, GPL-3.0-or-later, L-1124 and contributors;
+separately licensed GPL-3.0-only lyric algorithms retain that restriction.
+KuGouMusicApi and jenfonro fork, MIT, MakcRe and contributors.
+Kuwo/Migu metadata, lyrics and playlist protocols reference LX Music Desktop
+ad95d5091c9ed689fa72b5e5c849df65f5a679ce, Apache-2.0, lyswhut and contributors.
+Their licenses and original notices must accompany any translated portions.
+No former Node/Python executables are part of the production runtime.
+
+QuickJS and quickjs-go are MIT licensed; Lucide icons are ISC licensed.
+go-sqlite3 is MIT licensed; its embedded SQLite core is in the public domain.
+Go and golang.org/x/crypto are BSD-3-Clause; Gorilla WebSocket retains its BSD
+license. The vendored go-qrcode MIT notice is kept beside its source under
+backend/internal/qrcode/LICENSE.
+Optional FFmpeg is executed only as a device audio converter, not bundled or
+linked by this repository; its installed build retains its own license.
+See licenses/ for accompanying license texts. Source distributions must include
+the exact dependencies, notices and build materials needed for the distributed
+binary; local development is not evidence that a release has passed that audit.

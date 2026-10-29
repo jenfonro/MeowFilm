@@ -1,0 +1,931 @@
+using System.Collections.Specialized;
+using System.ComponentModel;
+using System.Windows;
+using System.Windows.Automation;
+using System.Windows.Automation.Peers;
+using System.Windows.Controls;
+using System.Windows.Data;
+using System.Windows.Input;
+using System.Windows.Threading;
+
+namespace MeowFilm.Desktop;
+
+public sealed partial class ShellWindow : Window
+{
+    private static readonly TimeSpan OperationTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan ShutdownTimeout = TimeSpan.FromSeconds(5);
+    private const int HistoryLimit = 64;
+
+    private readonly ShellState _state = new();
+    private readonly List<ModuleSession> _sessions;
+    private readonly Func<Task> _shutdown;
+    private readonly TimeProvider _timeProvider;
+    private readonly HashSet<ShellRequest> _requests = [];
+    private readonly List<(IDesktopNavigationSource Source, EventHandler<DesktopNavigationRequestEventArgs> Handler)> _navigationSubscriptions = [];
+    private TaskCompletionSource _shutdownCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private ModuleSession? _current, _playerSession;
+    private ShellRequest? _activeRequest;
+    private RequestPlan? _retryPlan;
+    private NativeCaption? _nativeCaption;
+    private bool _suppressSelection;
+    private bool _suppressSearch;
+    private ModuleSession? _searchSession;
+    private string? _searchPresentationKey;
+    private bool _loaded;
+    private bool _isClosing;
+    private bool _allowClose;
+    private bool _isClosed;
+    private bool _shutdownWaitInProgress;
+    private bool _closeQueued;
+    private Task? _shutdownTask;
+    private int _shutdownStarted;
+    private long _presentationGeneration;
+
+    /// <summary>
+    /// The first supplied module is the default. No runtime, account, storage, or player is created here.
+    /// shutdown must return promptly with its asynchronous Task; it owns module/runtime disposal.
+    /// </summary>
+    public ShellWindow(IReadOnlyList<IDesktopModule> modules, Func<Task> shutdown)
+        : this(modules, shutdown, TimeProvider.System)
+    {
+    }
+
+    // Deterministic code tests can advance the existing production deadlines without sleeping.
+    // No public timeout override or App configuration is introduced.
+    internal ShellWindow(IReadOnlyList<IDesktopModule> modules, Func<Task> shutdown, TimeProvider timeProvider)
+        : this(modules, [], shutdown, null, null, timeProvider) { }
+
+    public ShellWindow(IReadOnlyList<IDesktopModule> modules, IReadOnlyList<IDesktopPage> pages,
+        Func<Task> shutdown, Func<Task> forceShutdown, Func<Task>? cancelShutdown = null)
+        : this(modules, pages, shutdown, forceShutdown, cancelShutdown, TimeProvider.System) { }
+
+    internal ShellWindow(IReadOnlyList<IDesktopModule> modules, IReadOnlyList<IDesktopPage> pages,
+        Func<Task> shutdown, Func<Task>? forceShutdown, Func<Task>? cancelShutdown, TimeProvider timeProvider)
+    {
+        ArgumentNullException.ThrowIfNull(timeProvider);
+        _timeProvider = timeProvider;
+        ArgumentNullException.ThrowIfNull(modules);
+        ArgumentNullException.ThrowIfNull(shutdown);
+        if (modules.Count == 0) throw new ArgumentException("At least one module is required.", nameof(modules));
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        _sessions = new(modules.Count);
+        foreach (var module in modules)
+        {
+            if (module is null || string.IsNullOrWhiteSpace(module.Id) || !ids.Add(module.Id))
+                throw new ArgumentException("Modules must have distinct, non-empty identities.", nameof(modules));
+            _sessions.Add(new(module));
+        }
+        ArgumentNullException.ThrowIfNull(pages);
+        if (pages.Any(page => page is null || string.IsNullOrWhiteSpace(page.Id) || !ids.Add(page.Id)))
+            throw new ArgumentException("Pages must have distinct, non-empty identities.", nameof(pages));
+        _pages = pages.Select(page => new PageSession(page)).ToArray();
+        _forceShutdown = forceShutdown;
+        _cancelShutdown = cancelShutdown;
+        _shutdown = shutdown;
+        InitializeComponent();
+        AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, e) =>
+        {
+            Notices.Show(e.Outlet, e.Message);
+            e.Handled = true;
+        }));
+        InitializePresentationMotion();
+        DataContext = _state;
+        DesktopTheme.SetIsHighContrast(this, SystemParameters.HighContrast);
+        SystemParameters.StaticPropertyChanged += OnSystemSettingChanged;
+        foreach (var session in _sessions)
+        {
+            session.Module.PropertyChanged += OnModulePropertyChanged;
+            SubscribeGlobalSurfaces(session);
+            if (session.Module is IDesktopNavigationSource source)
+            {
+                // Capture the subscribed module, not the caller-supplied sender argument.
+                EventHandler<DesktopNavigationRequestEventArgs> handler = (_, args) => OnNavigationRequested(session, args);
+                source.NavigationRequested += handler;
+                _navigationSubscriptions.Add((source, handler));
+            }
+        }
+        _suppressSelection = true;
+        InitializeUnifiedNavigation();
+        InitializeHeaderPresentation();
+        PublicNavigationList.ItemsSource = pages.Where(page => page.ShowInSidebar).ToArray();
+        PublicNavigationList.Visibility = !pages.Any(page => page.ShowInSidebar) ? Visibility.Collapsed : Visibility.Visible;
+        _suppressSelection = false;
+        UpdateCaption();
+    }
+
+    private void UpdatePlayerDetailChrome()
+    {
+        var maximized = WindowState == WindowState.Maximized;
+        PlayerDetailMaximizeGlyph.Text = maximized ? "\uE923" : "\uE922";
+        var label = maximized ? "还原" : "最大化";
+        AutomationProperties.SetName(PlayerDetailMaximizeButton, label);
+    }
+
+    /// <summary>
+    /// Completes after the initial shutdown wait succeeds, fails, or reaches five seconds.
+    /// Completion is not permission to exit: on failure/timeout the shell requires an explicit decision.
+    /// </summary>
+    public Task ShutdownCompletion => _shutdownCompletion.Task;
+
+    /// <summary>True only after an active wait observes actual successful cleanup, never merely a timeout or forced exit.</summary>
+    public bool ShutdownSucceeded { get; private set; }
+    public bool CleanupCompleted { get; private set; }
+
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        // Install before WindowChrome's SourceInitialized handler so the custom maximize button
+        // can retain the native HTMAXBUTTON/Snap Layout hit target.
+        _nativeCaption = new(this, MaximizeButton, ToggleMaximize);
+        base.OnSourceInitialized(e);
+        _nativeCaption.SetImmersiveBorder(false);
+    }
+
+    protected override void OnStateChanged(EventArgs e)
+    {
+        base.OnStateChanged(e);
+        if (MaximizeGlyph is not null) UpdateCaption();
+        if (PlayerDetailMaximizeGlyph is not null) UpdatePlayerDetailChrome();
+    }
+
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        if (_loaded || _isClosing) return;
+        _loaded = true;
+        RunUiAction(() => ActivateAsync(_current ?? _sessions[0]));
+    }
+
+    /// <summary>
+    /// Synchronously mounts the default/current supplied views for an STA offscreen layout/render test.
+    /// Does not show the window, raise Loaded, initialize modules, or call any business operation.
+    /// Repeated calls retain the same view instances. Normal Loaded performs async initialization later.
+    /// </summary>
+    public void PrepareForRender()
+    {
+        Dispatcher.VerifyAccess();
+        if (_isClosing) throw new InvalidOperationException("The shell is closing.");
+        PreparePresentation(_current ?? _sessions[0]);
+    }
+
+    private async Task ActivateAsync(ModuleSession session)
+    {
+        if (_isClosing) return;
+        PreparePresentation(session);
+        await RunRequestAsync(new(session));
+    }
+
+    private void PreparePresentation(ModuleSession session)
+    {
+        LeavePublicPage();
+        if (!ReferenceEquals(_current, session))
+        {
+            CancelActive();
+            RetireHeaderPresentation();
+            Volatile.Write(ref _current, session);
+            Interlocked.Increment(ref _presentationGeneration);
+            _retryPlan = null;
+            SetStatus();
+        }
+        // Retire inactive capability visuals before touching newly supplied views. Owners retain
+        // their view instances and state; the shell retains only the current visual tree.
+        ApplyPresentation();
+        _suppressSelection = true;
+        try { NavigationList.SelectedItem = null; }
+        finally { _suppressSelection = false; }
+        Mount(session);
+        BindNavigation(session);
+        ApplySearchDraft(session);
+        ApplyPresentation();
+    }
+
+    private void Mount(ModuleSession session)
+    {
+        if (session.Mounted) return;
+        RefreshSuppliedViews(session);
+        session.Surface.Children.Add(session.MainHost);
+        session.Surface.Children.Add(session.SettingsHost);
+        ContentDeck.Children.Add(session.Surface);
+        session.Mounted = true;
+    }
+
+    private void Unmount(ModuleSession session)
+    {
+        if (!session.Mounted) return;
+        session.Surface.Visibility = Visibility.Collapsed;
+        session.MainHost.Content = null;
+        session.SettingsHost.Content = null;
+        session.Surface.Children.Remove(session.MainHost);
+        session.Surface.Children.Remove(session.SettingsHost);
+        ContentDeck.Children.Remove(session.Surface);
+        session.Mounted = false;
+    }
+
+    private static void RefreshSuppliedViews(ModuleSession session)
+    {
+        var main = session.Module.View ?? throw new InvalidOperationException();
+        var settings = session.Module.SettingsView ?? throw new InvalidOperationException();
+        var player = session.Module.PlayerView;
+        if (ReferenceEquals(main, settings) || ReferenceEquals(main, player) || ReferenceEquals(settings, player))
+            throw new InvalidOperationException();
+        ValidateView(main, session.MainHost);
+        ValidateView(settings, session.SettingsHost);
+        if (session.IsSettingsOpen)
+        {
+            session.MainHost.Content = null;
+            if (!ReferenceEquals(session.SettingsHost.Content, settings)) session.SettingsHost.Content = settings;
+        }
+        else
+        {
+            session.SettingsHost.Content = null;
+            if (!ReferenceEquals(session.MainHost.Content, main)) session.MainHost.Content = main;
+        }
+    }
+
+    private static void ValidateView(FrameworkElement view, ContentControl host)
+    {
+        if (!view.Dispatcher.CheckAccess()) throw new InvalidOperationException();
+        if (!ReferenceEquals(host.Content, view) &&
+            (LogicalTreeHelper.GetParent(view) is not null || System.Windows.Media.VisualTreeHelper.GetParent(view) is not null))
+            throw new InvalidOperationException();
+    }
+
+    private void BindNavigation(ModuleSession session)
+    {
+        var navigation = session.Module.Navigation ?? throw new InvalidOperationException();
+        if (!ReferenceEquals(session.Navigation, navigation))
+        {
+            if (session.Navigation is not null) session.Navigation.CollectionChanged -= OnNavigationChanged;
+            session.Navigation = navigation;
+            navigation.CollectionChanged += OnNavigationChanged;
+        }
+        RebuildSidebar();
+    }
+
+    private void ApplyPresentation()
+    {
+        if (_current is not { } current) return;
+        foreach (var inactive in _sessions.Where(session => session.Mounted && !ReferenceEquals(session, current)).ToArray())
+            Unmount(inactive);
+        if (current.Mounted) RefreshSuppliedViews(current);
+        foreach (var session in _sessions.Where(session => session.Mounted))
+        {
+            var selected = ReferenceEquals(session, current);
+            session.Surface.Visibility = selected && _currentPage is null ? Visibility.Visible : Visibility.Collapsed;
+            session.MainHost.Visibility = session.IsSettingsOpen ? Visibility.Collapsed : Visibility.Visible;
+            session.SettingsHost.Visibility = session.IsSettingsOpen ? Visibility.Visible : Visibility.Collapsed;
+        }
+        ApplyPlayerPresentation(current);
+        ApplyModuleAccent(current);
+        ApplyHeaderPresentation(current);
+        ApplyGlobalSurfacePresentation(current);
+        _state.CanGoBack = _queueOpen || _playerDetailOpen || _currentPage is not null ||
+            current.IsSettingsOpen || _history.Count > 1;
+        ApplySearchDraft(current, _activeRequest is { } request && ReferenceEquals(request.Plan.Session, current)
+            ? request.Plan.Destination : current.Current);
+        foreach (var page in _pages) page.Host.Visibility = ReferenceEquals(page, _currentPage) ? Visibility.Visible : Visibility.Collapsed;
+        AutomationProperties.SetName(SettingsButton, "设置");
+        AutomationProperties.SetName(NavigationList, "内容导航");
+        RestoreNavigationSelection();
+    }
+
+    private void ApplyPlayerPresentation(ModuleSession current)
+    {
+        if (!ReferenceEquals(_playerSession, current))
+        {
+            PlayerHost.Content = null;
+            Volatile.Write(ref _playerSession, null);
+        }
+        var player = current.Module.PlayerView;
+        if (!ReferenceEquals(PlayerHost.Content, player))
+        {
+            PlayerHost.Content = null;
+            if (player is not null) ValidateView(player, PlayerHost);
+            PlayerHost.Content = player;
+        }
+        Volatile.Write(ref _playerSession, player is null ? null : current);
+        PlayerFrame.Visibility = player is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private static string SearchKey(Destination? destination) => destination switch
+    {
+        { IsSearch: true } => "search",
+        { Value.Length: > 0 } value => "route/" + value.Value,
+        _ => "default"
+    };
+
+    private void ApplySearchDraft(ModuleSession session, Destination? destination = null, bool force = false)
+    {
+        var key = SearchKey(destination ?? session.Current);
+        if (!force && ReferenceEquals(_searchSession, session) &&
+            string.Equals(_searchPresentationKey, key, StringComparison.Ordinal)) return;
+        _searchSession = session;
+        _searchPresentationKey = key;
+        session.ActiveSearchKey = key;
+        _suppressSearch = true;
+        try { SearchBox.Text = session.SearchDrafts.GetValueOrDefault(key) ?? ""; }
+        finally { _suppressSearch = false; }
+    }
+
+    private void ApplyModuleAccent(ModuleSession current)
+    {
+        // Only explicit resources on the supplied main view opt into shell accent overrides.
+        // Never identify a capability by Id or copy its business resources into another owner.
+        string[] keys = ["MeowFilm.Brush.Accent", "MeowFilm.Brush.AccentHover", "MeowFilm.Brush.OnAccent", "MeowFilm.Brush.AccentSoft"];
+        var resources = (current.MainHost.Content as FrameworkElement ?? current.Module.View)?.Resources;
+        foreach (var key in keys)
+        {
+            if (resources?.Contains(key) == true && resources[key] is System.Windows.Media.Brush brush)
+            {
+                if (!RootLayout.Resources.Contains(key) || !ReferenceEquals(RootLayout.Resources[key], brush))
+                    RootLayout.Resources[key] = brush;
+            }
+            else RootLayout.Resources.Remove(key);
+        }
+    }
+    private void RestoreNavigationSelection()
+    {
+        if (_current is not { } current) return;
+        var route = _currentPage is null && !current.IsSettingsOpen && current.Current is { IsSearch: false } destination ? destination.Value : null;
+        _suppressSelection = true;
+        try
+        {
+            var selected = _sidebar.FirstOrDefault(item => ReferenceEquals(item.Owner, current) && string.Equals(item.Route, route, StringComparison.Ordinal));
+            NavigationList.SelectedItem = selected?.Group is null ? selected : null;
+            CollectionNavigationList.SelectedItem = selected?.Group is not null ? selected : null;
+        }
+        finally { _suppressSelection = false; }
+    }
+
+    private void OnNavigationSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressSelection || _isClosing || (!ReferenceEquals(e.Source, NavigationList) && !ReferenceEquals(e.Source, CollectionNavigationList)) || _current is not { } current) return;
+        if (sender is not ListBox { SelectedItem: ShellNavigationEntry item }) return;
+        RunUiAction(() => NavigateFromUiAsync(item.Owner, item.Route));
+    }
+
+    private void OnNavigationRequested(ModuleSession session, DesktopNavigationRequestEventArgs args)
+    {
+        if (args is null || string.IsNullOrWhiteSpace(args.Route)) return;
+        var generation = Interlocked.Read(ref _presentationGeneration);
+        if (!MayNavigate(session, args.FromPlayer)) return;
+        var route = args.Route;
+        if (args.FromPlayer && !session.Module.Navigation.Any(item => item.Route == route)) return;
+        var inFlight = Volatile.Read(ref _activeRequest);
+        if (inFlight is not null && ReferenceEquals(inFlight.Plan.Session, session) &&
+            inFlight.Plan.Destination is { IsSearch: false } destination && string.Equals(destination.Value, route, StringComparison.Ordinal))
+            return;
+        QueueUi(() =>
+        {
+            // A queued request from an old presentation must not navigate after switching away/back.
+            if (!MayNavigate(session, args.FromPlayer) || generation != Interlocked.Read(ref _presentationGeneration)) return;
+            RunUiAction(() => NavigateFromUiAsync(session, route));
+        });
+    }
+
+    private bool MayNavigate(ModuleSession session, bool fromPlayer) => fromPlayer
+        ? Volatile.Read(ref _currentPage) is null && ReferenceEquals(Volatile.Read(ref _current), session) &&
+            ReferenceEquals(Volatile.Read(ref _playerSession), session)
+        : Volatile.Read(ref _currentPage) is null && ReferenceEquals(Volatile.Read(ref _current), session);
+
+    private Task NavigateFromUiAsync(ModuleSession session, string route)
+    {
+        if (_isClosing) return Task.CompletedTask;
+        _settingsReturn = null;
+        if (_current is { } previous) previous.IsSettingsOpen = false;
+        PreparePresentation(session);
+        LeavePublicPage();
+        // Avoid a same-route feedback loop if an adapter mistakenly re-emits an in-flight request.
+        if (_activeRequest is { } active && ReferenceEquals(active.Plan.Session, session) &&
+            active.Plan.Destination is { IsSearch: false } pending && string.Equals(pending.Value, route, StringComparison.Ordinal))
+            return Task.CompletedTask;
+        session.IsSettingsOpen = false;
+        return RunRequestAsync(new(session, new(route)));
+    }
+
+    private void OnNavigationChanged(object? sender, NotifyCollectionChangedEventArgs e) => QueueUi(() =>
+    {
+        RebuildSidebar();
+    });
+
+    private void OnModulePropertyChanged(object? sender, PropertyChangedEventArgs e) => QueueUi(() =>
+    {
+        var session = _sessions.FirstOrDefault(item => ReferenceEquals(item.Module, sender));
+        if (session is null) return;
+        var all = string.IsNullOrEmpty(e.PropertyName);
+        if (all || e.PropertyName == nameof(IDesktopModule.Navigation)) BindNavigation(session);
+        if (all || e.PropertyName is nameof(IDesktopModule.View) or nameof(IDesktopModule.SettingsView))
+            { if (session.Mounted) RefreshSuppliedViews(session); }
+        if (ReferenceEquals(session, _current)) ApplyPresentation();
+    });
+
+    private void OnSettingsClick(object sender, RoutedEventArgs e) => RunUiAction(async () =>
+    {
+        if (_current is not { } current) return;
+        if (_playerDetailOpen) await ClosePlayerDetailAsync();
+        if (current.IsSettingsOpen && _currentPage is null) { ApplyPresentation(); return; }
+        var leftPublicPage = _currentPage is not null;
+        LeavePublicPage();
+        CancelActive();
+        if (!leftPublicPage) RetireHeaderPresentation();
+        if (current.MainHost.IsKeyboardFocusWithin) current.ContentFocus = Keyboard.FocusedElement;
+        _settingsReturn = current;
+        current.IsSettingsOpen = true;
+        _retryPlan = null;
+        SetStatus();
+        ApplyPresentation();
+        QueueUi(() =>
+        {
+            if (ReferenceEquals(_current, current) && current.IsSettingsOpen)
+                current.SettingsHost.MoveFocus(new(FocusNavigationDirection.First));
+        });
+        if (!current.Initialized) await RunRequestAsync(new(current));
+    });
+
+    private void OnBackClick(object sender, RoutedEventArgs e) => RunUiAction(GoBackAsync);
+
+    private async Task GoBackAsync()
+    {
+        if (_queueOpen) { await CloseQueueAsync(); return; }
+        if (_playerDetailOpen) { await ClosePlayerDetailAsync(); return; }
+        if (_current is not { } current) return;
+        if (_currentPage is not null)
+        {
+            LeavePublicPage();
+            SetStatus();
+            ApplyPresentation();
+            return; // Retain capability state/history/player; no navigation replay.
+        }
+        if (current.IsSettingsOpen)
+        {
+            CancelActive();
+            RetireHeaderPresentation();
+            current.IsSettingsOpen = false;
+            var restore = _settingsReturn ?? current;
+            _settingsReturn = null;
+            PreparePresentation(restore);
+            _retryPlan = null;
+            SetStatus();
+            ApplyPresentation();
+            QueueUi(() =>
+            {
+                if (!ReferenceEquals(_current, restore) || restore.IsSettingsOpen) return;
+                if (restore.ContentFocus is UIElement { IsVisible: true, IsEnabled: true, Focusable: true } focus)
+                    Keyboard.Focus(focus);
+                else restore.MainHost.MoveFocus(new(FocusNavigationDirection.First));
+            });
+            // No navigation replay: returning from settings reveals the same view and scroll state.
+            if (!restore.Initialized) await RunRequestAsync(new(restore));
+            return;
+        }
+        if (_history.Count > 1)
+        {
+            var previous = _history[^2];
+            PreparePresentation(previous.Session);
+            await RunRequestAsync(new(previous.Session, previous.Destination, IsBack: true));
+        }
+    }
+
+    protected override void OnGotKeyboardFocus(KeyboardFocusChangedEventArgs e)
+    {
+        base.OnGotKeyboardFocus(e);
+        if (_current is { } current && current.MainHost.IsKeyboardFocusWithin)
+            current.ContentFocus = e.NewFocus;
+    }
+    private void OnSearchTextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (!_suppressSearch && _current is { } current)
+            current.SearchDrafts[current.ActiveSearchKey] = SearchBox.Text;
+    }
+
+    private void OnSearchKeyDown(object sender, KeyEventArgs e)
+    {
+        // Key.ImeProcessed is intentionally not interpreted as Enter while composing text.
+        if (_isClosing || e.Key != Key.Enter || e.KeyboardDevice.Modifiers != ModifierKeys.None) return;
+        e.Handled = true;
+        RunUiAction(SearchAsync);
+    }
+
+    private void OnSearchClick(object sender, RoutedEventArgs e) => RunUiAction(SearchAsync);
+
+    private Task SearchAsync()
+    {
+        if (_currentPage is not null || _current is not { } current || !SearchBox.IsEnabled ||
+            string.IsNullOrWhiteSpace(SearchBox.Text)) return Task.CompletedTask;
+        current.SearchDrafts[current.ActiveSearchKey] = SearchBox.Text;
+        current.IsSettingsOpen = false;
+        return RunRequestAsync(new(current, new(SearchBox.Text.Trim(), IsSearch: true)));
+    }
+
+    private void OnPreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (_isClosing) return;
+        // Let a native range editor cancel its own gesture before Escape closes
+        // the full player. The shell must not depend on a music-specific type.
+        if (e.Key == Key.Escape && (Mouse.Captured is Slider || Keyboard.FocusedElement is Slider)) return;
+        if (e.Key == Key.F && e.KeyboardDevice.Modifiers == ModifierKeys.Control &&
+            SearchInput.Visibility == Visibility.Visible && SearchBox.IsEnabled)
+        {
+            e.Handled = true;
+            SearchBox.Focus();
+            SearchBox.SelectAll();
+        }
+        else if ((e.Key == Key.Left || e.SystemKey == Key.Left) && e.KeyboardDevice.Modifiers == ModifierKeys.Alt)
+        {
+            e.Handled = true;
+            RunUiAction(GoBackAsync);
+        }
+        else if (e.Key == Key.Escape && e.KeyboardDevice.Modifiers == ModifierKeys.None && _state.CanCancel)
+        {
+            e.Handled = true;
+            OnCancelClick(this, e);
+        }
+        else if (e.Key == Key.Escape && e.KeyboardDevice.Modifiers == ModifierKeys.None &&
+            (_queueOpen || _playerDetailOpen))
+        {
+            e.Handled = true;
+            RunUiAction(GoBackAsync);
+        }
+    }
+
+    private async Task RunRequestAsync(RequestPlan plan, CancellationToken cancellationToken = default, bool reportOutcome = false)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_isClosing || _currentPage is not null || !ReferenceEquals(_current, plan.Session))
+        {
+            if (reportOutcome) throw new OperationCanceledException("SHELL_NAVIGATION_STALE");
+            return;
+        }
+        CancelActive();
+        RetireHeaderPresentation();
+        if (plan.Destination is { } target)
+        {
+            if (target.IsSearch) plan.Session.SearchDrafts[SearchKey(target)] = target.Value;
+            ApplySearchDraft(plan.Session, target, force: true);
+        }
+        var request = new ShellRequest(plan);
+        var token = request.GetToken();
+        _requests.Add(request);
+        _activeRequest = request;
+        using var cancellation = cancellationToken.Register(request.Cancel);
+        _retryPlan = null;
+        ApplyPresentation();
+        SetStatus(plan.Destination?.IsSearch == true ? "正在搜索…" : plan.Session.Initialized ? "正在打开…" : "正在加载…", busy: true);
+        var work = ExecuteModuleRequestAsync(plan, token);
+        _ = ReapRequestAsync(request, work);
+        try
+        {
+            var destination = await work.WaitAsync(OperationTimeout, _timeProvider, token);
+            token.ThrowIfCancellationRequested();
+            if (!IsCurrent(request))
+            {
+                if (reportOutcome) throw new OperationCanceledException("SHELL_NAVIGATION_STALE");
+                return;
+            }
+            if (destination is not null)
+            {
+                CommitDestination(plan, destination);
+                if (destination.IsSearch)
+                {
+                    plan.Session.ActiveSearchKey = SearchKey(destination);
+                    plan.Session.SearchDrafts[plan.Session.ActiveSearchKey] = destination.Value;
+                    _suppressSearch = true;
+                    try { SearchBox.Text = destination.Value; }
+                    finally { _suppressSearch = false; }
+                }
+            }
+            RefreshSuppliedViews(plan.Session);
+            BindNavigation(plan.Session);
+            SetStatus();
+        }
+        catch (OperationCanceledException)
+        {
+            if (IsCurrent(request)) SetStatus("已取消");
+            if (reportOutcome) throw;
+        }
+        catch (TimeoutException)
+        {
+            request.Cancel();
+            if (IsCurrent(request))
+            {
+                _retryPlan = plan;
+                SetStatus("操作超时", error: true, retry: true);
+            }
+            if (reportOutcome) throw;
+        }
+        catch (Exception error)
+        {
+            if (IsCurrent(request))
+            {
+                _retryPlan = plan;
+                SetStatus(plan.Session.Module.OperationErrorText(error), error: true, retry: true);
+            }
+            if (reportOutcome) throw new InvalidOperationException("SHELL_NAVIGATION_FAILED");
+        }
+        finally
+        {
+            if (IsCurrent(request))
+            {
+                _activeRequest = null;
+                ApplyPresentation();
+            }
+        }
+    }
+
+    private static async Task<Destination?> ExecuteModuleRequestAsync(RequestPlan plan, CancellationToken token)
+    {
+        var session = plan.Session;
+        // The lease follows the actual module task, not the shell's timeout. A non-cooperative old
+        // request can delay this module but can never overlap a replacement operation on it.
+        await session.Gate.WaitAsync(token);
+        try
+        {
+            token.ThrowIfCancellationRequested();
+            if (!session.Initialized)
+            {
+                await session.Module.InitializeAsync(token);
+                session.Initialized = true;
+            }
+            token.ThrowIfCancellationRequested();
+            var destination = plan.Destination;
+            if (destination is null && session.Current is null && !session.IsSettingsOpen && session.Module.Navigation.Count > 0)
+                destination = new(session.Module.Navigation[0].Route);
+            if (destination is null) return null;
+            if (destination.IsSearch) await session.Module.SearchAsync(destination.Value, token);
+            else await session.Module.NavigateAsync(destination.Value, token);
+            token.ThrowIfCancellationRequested();
+            return destination;
+        }
+        finally { session.Gate.Release(); }
+    }
+
+    private void CommitDestination(RequestPlan plan, Destination destination)
+    {
+        var target = (plan.Session, destination);
+        if (plan.IsBack && _history.Count > 1 && _history[^2] == target) _history.RemoveAt(_history.Count - 1);
+        else if (_history.Count == 0 || _history[^1] != target)
+        {
+            _history.Add(target);
+            if (_history.Count > HistoryLimit) _history.RemoveAt(0);
+        }
+        plan.Session.Current = destination;
+    }
+
+    private async Task ReapRequestAsync(ShellRequest request, Task work)
+    {
+        await ShellRequest.ObserveAsync(work);
+        await ShellRequest.ObserveAsync(request.Cancellation);
+        _requests.Remove(request);
+        request.Dispose();
+    }
+
+    private bool IsCurrent(ShellRequest request) => !_isClosing && _currentPage is null && ReferenceEquals(_activeRequest, request) &&
+        ReferenceEquals(_current, request.Plan.Session);
+
+    private void CancelActive()
+    {
+        var request = _activeRequest;
+        _activeRequest = null; // Retire UI ownership before invoking arbitrary cancellation registrations.
+        request?.Cancel();
+    }
+
+    private void OnCancelClick(object sender, RoutedEventArgs e)
+    {
+        if (_isClosing) return;
+        CancelPageActivation();
+        CancelActive();
+        if (_currentPage is not null) _pageNavigation = new CancellationTokenSource();
+        _retryPlan = null;
+        if (_current is { } current) ApplySearchDraft(current, current.Current, force: true);
+        SetStatus("已取消");
+        RestoreNavigationSelection();
+    }
+
+    private void OnRetryClick(object sender, RoutedEventArgs e)
+    {
+        if (_retryPage is { } page) { RunUiAction(() => ActivatePageAsync(page)); return; }
+        if (_retryPlan is { } plan) RunUiAction(() => RunRequestAsync(plan));
+    }
+
+    private void OnDismissStatusClick(object sender, RoutedEventArgs e)
+    {
+        if (_isClosing) return;
+        _retryPlan = null;
+        SetStatus();
+    }
+
+    private void SetStatus(string message = "", bool busy = false, bool error = false, bool retry = false)
+    {
+        _state.SetStatus(message, busy, error, retry);
+        if (StatusText.IsLoaded && AutomationPeer.ListenerExists(AutomationEvents.LiveRegionChanged))
+            UIElementAutomationPeer.FromElement(StatusText)?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
+    }
+
+    private void RunUiAction(Func<Task> action)
+    {
+        if (!_isClosing) _ = RunUiActionCoreAsync(action);
+    }
+
+    private async Task RunUiActionCoreAsync(Func<Task> action)
+    {
+        try { await action(); }
+        catch (OperationCanceledException) { if (!_isClosing) SetStatus("已取消"); }
+        catch (Exception) { if (!_isClosing) SetStatus("暂时无法完成操作", error: true); }
+    }
+
+    private void QueueUi(Action action)
+    {
+        if (_isClosing || Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
+        try
+        {
+            _ = Dispatcher.InvokeAsync(() =>
+            {
+                if (_isClosing) return;
+                try { action(); }
+                catch (Exception) { SetStatus("暂时无法完成操作", error: true); }
+            }, DispatcherPriority.DataBind);
+        }
+        catch (InvalidOperationException) { /* The dispatcher is already closing. */ }
+    }
+
+    private void OnSystemSettingChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (string.IsNullOrEmpty(e.PropertyName) || e.PropertyName is nameof(SystemParameters.HighContrast) or nameof(SystemParameters.ClientAreaAnimation))
+            QueueUi(() =>
+            {
+                DesktopTheme.SetIsHighContrast(this, SystemParameters.HighContrast);
+                ApplyPresentation();
+            });
+    }
+
+    private void UpdateCaption()
+    {
+        var maximized = WindowState == WindowState.Maximized;
+        MaximizeGlyph.Text = maximized ? "\uE923" : "\uE922";
+        var label = maximized ? "还原" : "最大化";
+        AutomationProperties.SetName(MaximizeButton, label);
+        MaximizeButton.ToolTip = label;
+        UpdatePlayerDetailChrome();
+    }
+
+    private void ToggleMaximize()
+    {
+        if (WindowState == WindowState.Maximized) SystemCommands.RestoreWindow(this);
+        else SystemCommands.MaximizeWindow(this);
+    }
+
+    private void OnMinimizeClick(object sender, RoutedEventArgs e) => SystemCommands.MinimizeWindow(this);
+    private void OnMaximizeClick(object sender, RoutedEventArgs e) => ToggleMaximize();
+    private void OnCloseClick(object sender, RoutedEventArgs e) => Close();
+
+    protected override void OnClosing(CancelEventArgs e)
+    {
+        base.OnClosing(e);
+        if (_allowClose || e.Cancel) return;
+        e.Cancel = true;
+        if (_isClosing) return;
+        _isClosing = true;
+        _state.IsInteractive = false;
+        _retryPlan = null;
+        RetireHeaderPresentation();
+        SetStatus("正在关闭…");
+        CancelActive();
+        CancelPageActivation();
+        foreach (var request in _requests.ToArray()) request.Cancel();
+        _ = EnsureShutdownAsync();
+    }
+
+    private async Task RequestFinalCloseAsync()
+    {
+        if (_closeQueued || _isClosed || Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
+        _closeQueued = true;
+        _state.SetShutdownConfirmation(_state.IsShutdownConfirmationOpen);
+        try
+        {
+            // Even a synchronously completed callback must not re-enter Close from inside OnClosing.
+            await Dispatcher.Yield(DispatcherPriority.Background);
+            if (_isClosed || Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
+            _allowClose = true;
+            Close();
+            if (!_isClosed)
+            {
+                // A caller can still veto the final Closing event; never restart disposal.
+                _allowClose = false;
+                _state.SetShutdownConfirmation(true, canWait: true, canForce: _forceShutdown is not null);
+            }
+        }
+        catch (OperationCanceledException) { /* Dispatcher teardown can cancel the deferred close. */ }
+        catch (InvalidOperationException) { /* A forced application shutdown may already have closed the window. */ }
+        finally { _closeQueued = false; }
+    }
+
+    private Task EnsureShutdownAsync()
+    {
+        if (Interlocked.Exchange(ref _shutdownStarted, 1) == 0)
+        {
+            try
+            {
+                // UI-affine disposal begins on this dispatcher. The callback must return promptly;
+                // no in-process deadline can safely preempt synchronous dispatcher blocking.
+                _shutdownTask = _shutdown() ?? Task.FromException(new InvalidOperationException());
+            }
+            catch (Exception) { _shutdownTask = Task.FromException(new InvalidOperationException()); }
+            _ = ShellRequest.ObserveAsync(_shutdownTask);
+            _ = CompleteShutdownAsync(initialAttempt: true);
+        }
+        return _shutdownCompletion.Task;
+    }
+
+    private async Task CompleteShutdownAsync(bool initialAttempt)
+    {
+        if (_shutdownWaitInProgress || _shutdownTask is null) return;
+        _shutdownWaitInProgress = true;
+        var succeeded = false;
+        var timedOut = false;
+        try
+        {
+            // Keep the bounded completion signal independent of dispatcher teardown on forced Closed.
+            await _shutdownTask.WaitAsync(ShutdownTimeout, _timeProvider).ConfigureAwait(false);
+            succeeded = true;
+        }
+        catch (TimeoutException)
+        {
+            // Distinguish the wait deadline from a callback that itself throws TimeoutException.
+            // A successful completion racing the deadline still requires an explicit new wait.
+            timedOut = !_shutdownTask.IsFaulted && !_shutdownTask.IsCanceled;
+        }
+        catch (Exception) { /* A fault/cancellation is not proof of saved data or released resources. */ }
+        finally
+        {
+            if (initialAttempt) _shutdownCompletion.TrySetResult();
+        }
+        if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
+        try
+        {
+            if (Dispatcher.CheckAccess()) ApplyShutdownOutcome(succeeded, timedOut);
+            else await Dispatcher.InvokeAsync(() => ApplyShutdownOutcome(succeeded, timedOut),
+                DispatcherPriority.Normal).Task.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { /* Dispatcher teardown can reject the UI-only result. */ }
+        catch (InvalidOperationException) { /* An externally forced shutdown already owns exit. */ }
+    }
+
+    private void ApplyShutdownOutcome(bool succeeded, bool timedOut)
+    {
+        _shutdownWaitInProgress = false;
+        // Forced exit fences every late result, including a successful callback after the decision.
+        if (_isClosed || _allowClose || _closeQueued || _forceStarted) return;
+        if (succeeded)
+        {
+            ShutdownSucceeded = true;
+            CleanupCompleted = true;
+            _ = RequestFinalCloseAsync();
+            return;
+        }
+        SetStatus(timedOut ? "关闭超时" : "关闭失败", error: true);
+        _state.SetShutdownConfirmation(true, canWait: timedOut, canForce: _forceShutdown is not null,
+            canCancel: !timedOut && _cancelShutdown is not null && !_forceStarted);
+        if (timedOut) WaitForShutdownButton.Focus();
+        else ShutdownConfirmation.Focus(); // Enter must never implicitly choose destructive exit.
+    }
+
+    private void OnWaitForShutdownClick(object sender, RoutedEventArgs e)
+    {
+        if (!_isClosing || _isClosed || _closeQueued || !_state.CanWaitForShutdown || _shutdownWaitInProgress) return;
+        _state.SetShutdownConfirmation(true, canForce: _forceShutdown is not null);
+        SetStatus("正在等待关闭…", busy: true);
+        // A new bounded wait on the same task, not a second shutdown callback. No automatic retries.
+        _ = CompleteShutdownAsync(initialAttempt: false);
+    }
+
+    private void OnForceExitClick(object sender, RoutedEventArgs e)
+    {
+        if (!_isClosing || _isClosed || _closeQueued || !_state.CanForceExit || _forceShutdown is null) return;
+        _ = ForceShutdownAsync();
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        DisposePresentationMotion();
+        _isClosed = true;
+        _isClosing = true;
+        CancelActive();
+        CancelPageActivation();
+        foreach (var request in _requests.ToArray()) request.Cancel();
+        SystemParameters.StaticPropertyChanged -= OnSystemSettingChanged;
+        foreach (var session in _sessions)
+        {
+            session.Module.PropertyChanged -= OnModulePropertyChanged;
+            if (session.Navigation is not null) session.Navigation.CollectionChanged -= OnNavigationChanged;
+        }
+        foreach (var (source, handler) in _navigationSubscriptions) source.NavigationRequested -= handler;
+        _navigationSubscriptions.Clear();
+        if (_headerSource is not null && _headerChanged is not null) _headerSource.HeaderChanged -= _headerChanged;
+        _headerSource = null; _headerChanged = null;
+        RetireHeaderPresentation();
+        DisposeGlobalSurfaces();
+        _nativeCaption?.Dispose();
+        _nativeCaption = null;
+        // Covers forced closure as well; it shares the once-only attempt used by normal Closing.
+        _ = EnsureShutdownAsync();
+        base.OnClosed(e);
+    }
+}

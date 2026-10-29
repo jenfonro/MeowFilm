@@ -1,0 +1,792 @@
+import Foundation
+import Combine
+
+public enum MusicPublicBrowseRequest: Sendable, Hashable {
+    case playlists(MusicPublicBrowsePlatform, query: String)
+    case detail(MusicPublicBrowseCollection)
+    case discovery(MusicPublicBrowseDestination)
+    case homeAction(MusicHomeAction, title: String)
+    case accountRecommendation(MusicAccountPlatform, kind: String, title: String)
+}
+public struct MusicPublicBrowseActionIntent: Sendable {
+    fileprivate let id: UUID
+    fileprivate let page: UUID
+    fileprivate let access: UUID
+}
+
+/// Owns page tasks only, not a library, account session, source selection or player.
+@MainActor public final class MusicPublicBrowseViewModel: ObservableObject {
+    @Published public private(set) var sections: [MusicPublicBrowseSection] = []
+    @Published public private(set) var filters: [MusicPublicBrowseFilter] = []
+    @Published public private(set) var selectedFilter = ""
+    @Published public private(set) var collection: MusicPublicBrowseCollection?
+    @Published public private(set) var total: Int?
+    @Published public private(set) var isLoading = false
+    @Published public private(set) var isActing = false
+    @Published public private(set) var error: MusicServiceError?
+    @Published public private(set) var errorDiagnosticID: String?
+    @Published public private(set) var sectionDiagnosticIDs: [String: String] = [:]
+    @Published public private(set) var notice: String?
+    @Published public private(set) var actionError: MusicServiceError?
+    @Published public private(set) var actionDiagnosticID: String?
+    @Published public private(set) var actionOperation = "歌单操作"
+    @Published public private(set) var requiresExplicitNext = false
+    @Published public private(set) var usesPageNavigation = false
+    @Published public private(set) var loaded = false
+    @Published public private(set) var contentIsCurrent = false
+    @Published public private(set) var pageNumber = 1
+    @Published public private(set) var nextCursor: String?
+    @Published public private(set) var remoteSource: MusicRemoteQueueSource?
+    @Published public private(set) var dailyStyle: MusicDailyStyleSelection?
+    /// Offset of the first displayed song in the source snapshot. Account
+    /// pages are not necessarily 30 rows; never infer this from pageNumber.
+    public private(set) var trackOffset = 0
+    public var canPrevious: Bool { !back.isEmpty && !isLoading }
+    public var queueRequest: MusicPublicBrowseQueueRequest? {
+        guard let collection, let snapshot, loaded, contentIsCurrent, !isLoading else { return nil }
+        return .init(collection: collection, snapshot: snapshot)
+    }
+    public var tracks: [MusicRemoteTrack] {
+        sections.flatMap(\.items).compactMap { if case .track(let value) = $0.content { return value }; return nil }
+    }
+    public var canSaveCollection: Bool { remoteSource != nil || queueRequest != nil }
+    public var errorContext: String {
+        switch request {
+        case .detail(let collection): return collection.platform.title + " · 歌单读取"
+        case .playlists(let platform, _): return platform.title + " · 歌单搜索"
+        case .accountRecommendation(let platform, _, _): return platform.title + " · 推荐读取"
+        case .discovery(.daily(let platform)): return platform.title + " · 推荐读取"
+        default: return "网易云 · 音乐内容读取"
+        }
+    }
+    private let service: any MusicPublicBrowsing
+    @Published public private(set) var request: MusicPublicBrowseRequest
+    private var generation = UUID(), pageEpoch = UUID(), actionEpoch = UUID()
+    /// Module-local identity for page-owned presentations, never queue authority.
+    var actionPageID: UUID { pageEpoch }
+    private var available = false, visible = false
+    private var snapshot: String?
+    private var currentCursor: String?
+    private var cursorOffsets: [String: Int] = ["": 0]
+    private struct PageOccurrence {
+        let cursor: String
+        let index: Int
+    }
+    private var trackPageOccurrences: [MusicReference: PageOccurrence] = [:]
+    private var paginationLimit: Int {
+        if case .detail = request { return 667 }
+        return 200
+    }
+    private var requestPlatform: MusicPublicBrowsePlatform? {
+        switch request {
+        case .detail(let collection): return collection.platform
+        case .playlists(let platform, _): return platform
+        case .accountRecommendation(let platform, _, _): return .init(accountPlatform: platform)
+        case .discovery(.daily(let platform)): return .init(accountPlatform: platform)
+        default: return .netease
+        }
+    }
+    private var failedPage: (cursor: String?, direction: Int)?
+    private var failedRequest: MusicPublicBrowseRequest?
+    private var back: [String?] = []
+    private var task: Task<Loaded, Error>?
+    private var loadingCursor: String?
+    private var actionTask: Task<Void, Error>?
+    private var dailyStyleTask: Task<MusicDailyStyleSave, Error>?
+    private var revocationTask: Task<Void, Never>?
+    private var issuedIntent: UUID?
+    private let queuePage: (@MainActor (MusicRemoteQueueSource, String?) async throws -> MusicBrowsePage)?
+    private let releaseSource: @MainActor (MusicRemoteQueueSource) -> Void
+    private struct Loaded: Sendable {
+        let page: MusicPublicBrowsePage
+        var collection: MusicPublicBrowseCollection?
+        var total: Int?
+        var snapshot: String?
+        var source: MusicRemoteQueueSource?
+        var dailyStyle: MusicDailyStyleSelection?
+        var consumed: Int?
+    }
+    public init(service: any MusicPublicBrowsing, request: MusicPublicBrowseRequest,
+                queuePage: (@MainActor (MusicRemoteQueueSource, String?) async throws -> MusicBrowsePage)? = nil,
+                releaseSource: (@MainActor (MusicRemoteQueueSource) -> Void)? = nil) {
+        self.service = service; self.request = request
+        self.queuePage = queuePage; self.releaseSource = releaseSource ?? Self.releaseDefaultSource
+    }
+    // Keep asynchronous cleanup out of a nested default-argument closure.
+    // Revocation is synchronous; the task owns only the source, never the page.
+    private nonisolated static func releaseDefaultSource(_ source: MusicRemoteQueueSource) {
+        source.revoke()
+        Task { [source] in await source.close() }
+    }
+    public func setAccess(available: Bool, generation: UUID) {
+        guard self.available != available || self.generation != generation else { return }
+        self.available = available; self.generation = generation
+        invalidate(clear: true)
+    }
+    public func appear() { visible = true }
+    /// The view owns this structured observation task. It can remain subscribed
+    /// while an inactive home tab retains its display, but never polls.
+    public func observeHomeChanges() async {
+        switch request {
+        case .discovery(.home), .discovery(.featured), .discovery(.channel): break
+        default: return
+        }
+        guard let home = service as? any MusicHomeBrowsing else { return }
+        let access = generation
+        let stream = await home.homeChanges()
+        for await _ in stream {
+            guard !Task.isCancelled, generation == access else { return }
+            let scoped: Bool
+            switch request {
+            case .discovery(.home), .discovery(.featured): scoped = true
+            case .discovery(.channel(let channel, _)):
+                scoped = [.featured, .artistActivity, .vip].contains(channel.kind)
+            default: scoped = false
+            }
+            guard scoped else { continue }
+            invalidate(clear: true)
+            if available && visible { await refresh() }
+        }
+    }
+    public func restoreHomeIfNeeded() async {
+        guard available, visible, !loaded, !isLoading, case .discovery(.home) = request,
+              let home = service as? any MusicHomeBrowsing else { return }
+        let own = pageEpoch, access = generation
+        do {
+            let value = try await home.restoredHome()
+            guard !Task.isCancelled, available, visible, !loaded, !isLoading,
+                  pageEpoch == own, generation == access, let value else { return }
+            // Restored handles are freshly issued by the native owner; persisted
+            // continuations are forbidden even if a faulty adapter returns one.
+            guard value.cursor == nil, value.sections.count <= 60,
+                  value.sections.reduce(0, { $0 + $1.items.count }) <= 600 else { return }
+            sections = value.sections; notice = value.notice; loaded = true; contentIsCurrent = true
+        } catch {
+            // A disposable snapshot must not prevent the actual home request.
+        }
+    }
+    public func disappear(preservingContent: Bool = false) {
+        visible = false
+        // Only a read-only discovery page may retain its visual snapshot.
+        // Account/queue-bearing pages still revoke their authority on exit.
+        let mayRetain: Bool
+        switch request {
+        case .discovery(.home), .discovery(.featured), .discovery(.channels), .discovery(.channel):
+            mayRetain = preservingContent
+        default: mayRetain = false
+        }
+        invalidate(clear: !mayRetain)
+    }
+    private func invalidate(clear: Bool) {
+        pageEpoch = UUID(); actionEpoch = UUID()
+        issuedIntent = nil
+        task?.cancel(); task = nil; actionTask?.cancel(); actionTask = nil
+        dailyStyleTask?.cancel(); dailyStyleTask = nil
+        revocationTask?.cancel(); revocationTask = nil
+        isLoading = false; isActing = false; error = nil; actionError = nil; notice = nil
+        errorDiagnosticID = nil; actionDiagnosticID = nil
+        sectionDiagnosticIDs = [:]
+        failedPage = nil; failedRequest = nil
+        if clear {
+            if let remoteSource { releaseSource(remoteSource) }; remoteSource = nil
+            sections = []; filters = []; selectedFilter = ""; collection = nil; total = nil; snapshot = nil
+            nextCursor = nil; currentCursor = nil; back = []; loaded = false; pageNumber = 1
+            cursorOffsets = ["": 0]; trackOffset = 0
+            trackPageOccurrences = [:]; requiresExplicitNext = false; usesPageNavigation = false
+            dailyStyle = nil
+            contentIsCurrent = false
+        }
+    }
+    public func selectFilter(_ id: String) async {
+        guard available, visible, !isActing, selectedFilter != id,
+              filters.contains(where: { $0.id == id }), case .discovery(.channel(let channel, _)) = request else { return }
+        request = .discovery(.channel(channel, tag: id))
+        // Keep the directory and previous pixels while revoking all old actions.
+        // Only the completed new response can make its content actionable.
+        invalidate(clear: false)
+        contentIsCurrent = false
+        selectedFilter = id
+        nextCursor = nil; currentCursor = nil; back = []; cursorOffsets = ["": 0]
+        await load(cursor: nil, direction: 0, refresh: true)
+    }
+    /// Explicit section-scoped selection, validated against the still-visible
+    /// response. A failed feed read must not erase the channel's other content.
+    public func selectSectionFilter(_ id: String, sectionID: String, intent: MusicPublicBrowseActionIntent) async {
+        guard available, visible, !isLoading, !isActing,
+              issuedIntent == intent.id, pageEpoch == intent.page, generation == intent.access,
+              let section = sections.first(where: { $0.id == sectionID }),
+              section.filters.contains(where: { $0.id == id }), section.selectedFilter != id,
+              case .discovery(.channel(let channel, _)) = request else { return }
+        let candidate = MusicPublicBrowseRequest.discovery(.channel(channel, tag: id))
+        invalidate(clear: false)
+        // Publish the new target only with a successful feed. Failure or
+        // cancellation must never attach an old cursor to a new algorithm.
+        await load(cursor: nil, direction: 0, refresh: true, requestOverride: candidate)
+    }
+    /// A recommendModule tab selects already returned content, not a new
+    /// channel/algorithm request. It neither mutates playback nor persists.
+    public func selectSectionTab(_ id: String, sectionID: String, intent: MusicPublicBrowseActionIntent) {
+        guard available, visible, !isLoading, !isActing,
+              issuedIntent == intent.id, pageEpoch == intent.page, generation == intent.access,
+              let index = sections.firstIndex(where: { $0.id == sectionID }),
+              let tab = sections[index].tabs.first(where: { $0.id == id }),
+              sections[index].selectedTab != id else { return }
+        let old = sections[index]
+        issuedIntent = nil; pageEpoch = UUID()
+        sections[index] = .init(id: old.id, title: old.title, items: tab.items, layout: old.layout,
+            avatars: old.avatars, channel: old.channel, filters: old.filters,
+            selectedFilter: old.selectedFilter, error: old.error, tabs: old.tabs, selectedTab: id)
+    }
+    public func selectDailyBranch(_ branch: MusicHomeAction.DailyBranch) async {
+        let title = branch == .style ? "风格推荐" : "每日推荐"
+        switch request {
+        case .homeAction(.daily, _), .discovery(.daily(.netease)): break
+        default: return
+        }
+        request = .homeAction(.daily(branch: branch), title: title)
+        await refresh()
+    }
+    public func saveDailyStyle(_ selection: MusicDailyStyleSelection) async throws -> MusicDailyStyleSave {
+        guard available, visible, !isLoading, !isActing, let source = remoteSource,
+              source.dailyStyle != nil else { throw MusicServiceError.staleResult }
+        let own = pageEpoch, access = generation
+        let action = UUID(); actionEpoch = action
+        isActing = true
+        defer { if actionEpoch == action { isActing = false; dailyStyleTask = nil } }
+        let work = Task { try await source.saveDailyStyle(selection) }
+        dailyStyleTask = work
+        let result: MusicDailyStyleSave
+        do {
+            result = try await withTaskCancellationHandler { try await work.value } onCancel: { work.cancel() }
+        } catch {
+            if available, visible, generation == access, pageEpoch == own, remoteSource?.id == source.id {
+                // The remote write may have happened. Old handles/cursors must
+                // not remain actionable while the sheet reports a failed read.
+                sections = []; nextCursor = nil; currentCursor = nil; snapshot = nil
+                cursorOffsets = ["": 0]; back = []; pageNumber = 1; trackOffset = 0; dailyStyle = nil
+                loaded = false; failedPage = (cursor: nil, direction: 0)
+                self.error = Task.isCancelled ? .commitUnconfirmed : MusicServiceError.sanitized(error)
+            }
+            throw error
+        }
+        try Task.checkCancellation()
+        guard available, visible, generation == access, pageEpoch == own, remoteSource?.id == source.id else {
+            throw MusicServiceError.staleResult
+        }
+        // Re-render through the same source and normal display-handle path.
+        // Its first page is the exact readback already returned by save, not
+        // another recommendation request or a second account mutation.
+        cursorOffsets = ["": 0]; back = []; currentCursor = nil; snapshot = nil
+        await load(cursor: nil, direction: 0)
+        guard available, visible, generation == access, remoteSource?.id == source.id else {
+            throw MusicServiceError.staleResult
+        }
+        isActing = false
+        if let error { throw error }
+        return result
+    }
+    public func selectChannel(_ channel: MusicPublicBrowseChannel) async {
+        switch request {
+        case .discovery(.channel), .discovery(.channels): break
+        default: return
+        }
+        request = .discovery(.channel(channel, tag: ""))
+        invalidate(clear: true)
+        await load(cursor: nil, direction: 0, refresh: true)
+    }
+    /// One structured task owns the visible channel. Re-entering while its
+    /// cancelled predecessor is unwinding must replace that unfinished read,
+    /// not mistake isLoading for work that can still publish.
+    func activateChannel(_ channel: MusicPublicBrowseChannel?, active: Bool,
+                         available: Bool, generation: UUID) async {
+        setAccess(available: available, generation: generation)
+        guard active, available, let channel else {
+            disappear(preservingContent: true); return
+        }
+        appear()
+        if case .discovery(.channel(let shown, _)) = request, shown == channel {
+            if isLoading, task?.isCancelled == true {
+                invalidate(clear: false)
+                contentIsCurrent = false
+            }
+            if loaded && contentIsCurrent { return }
+            await load(cursor: nil, direction: 0, refresh: true)
+            return
+        }
+        await selectChannel(channel)
+    }
+    public func refresh() async {
+        let isHome = request == .discovery(.home)
+        if isHome, isLoading, loadingCursor == nil {
+            // Match the reference's single homeTask; repeated pull/activation
+            // must not cancel and restart the same first-page request.
+            if let task { _ = try? await task.value }
+            return
+        }
+        let retain: Bool
+        if case .discovery(.channel) = request { retain = true } else { retain = isHome }
+        invalidate(clear: !retain)
+        if case .detail(let collection) = request,
+           let refreshing = service as? any MusicPublicBrowseRefreshing {
+            let own = pageEpoch
+            await refreshing.refreshPublicCollection(collection)
+            guard own == pageEpoch, available, visible, !Task.isCancelled else { return }
+        }
+        await load(cursor: nil, direction: 0, refresh: true)
+    }
+    public func loadIfNeeded() async {
+        guard !loaded, !isLoading else { return }
+        await load(cursor: nil, direction: 0)
+    }
+    /// Public detail reads do not load the complete queue. Only an explicit
+    /// play/save action opens it, and resolves the selected stable recording.
+    public func playbackSource(for track: MusicRemoteTrack? = nil) async throws -> (MusicRemoteQueueSource, Int) {
+        guard available, visible, loaded, contentIsCurrent, !isLoading else { throw MusicServiceError.staleResult }
+        let own = pageEpoch, access = generation
+        let source: MusicRemoteQueueSource
+        if let remoteSource { source = remoteSource }
+        else {
+            guard let request = queueRequest, let provider = service as? any MusicPublicBrowseQueueLoading else {
+                throw MusicServiceError.unsupported
+            }
+            let opened = try await provider.openPublicQueue(request)
+            guard available, visible, pageEpoch == own, generation == access, !Task.isCancelled else {
+                releaseSource(opened); throw MusicServiceError.cancelled
+            }
+            remoteSource = opened; source = opened; watchSource()
+        }
+        if let availabilityNotice = source.context.availabilityNotice { notice = availabilityNotice }
+        guard let track else { return (source, 0) }
+        guard let queuePage else { throw MusicServiceError.unsupported }
+        // Only WY playlists omit inaccessible rows while retaining a raw-ID
+        // cursor; their IDs are proven unique by the provider. Every other
+        // source uses complete occurrence offsets, including repeated songs.
+        let expectedIndex: Int?
+        if case .detail(let collection) = request, collection.platform == .netease, collection.kind == .playlist {
+            expectedIndex = nil
+        } else {
+            guard let index = queueIndex(of: track) else { throw MusicServiceError.staleResult }
+            expectedIndex = index
+        }
+        var cursor: String?, count = 0, seen = Set<String>()
+        repeat {
+            let page = try await queuePage(source, cursor)
+            try Task.checkCancellation(); try source.authorization.check()
+            guard available, visible, pageEpoch == own, generation == access else { throw MusicServiceError.staleResult }
+            if let index = page.items.indices.first(where: {
+                (expectedIndex == nil || count + $0 == expectedIndex) && Self.sameActionIdentity(page.items[$0], track)
+            }) {
+                return (source, count + index)
+            }
+            count += page.items.count
+            guard count <= 2000 else { throw MusicServiceError.limit }
+            cursor = page.cursor
+            if let cursor { guard seen.insert(cursor).inserted else { throw MusicServiceError.staleResult } }
+        } while cursor != nil
+        throw MusicServiceError.notFound
+    }
+    /// Count matches in the full source prefix, not in the currently displayed
+    /// (possibly paginated) rows. Duplicates keep their occurrence position.
+    public func filteredQueueIndex(source: MusicRemoteQueueSource, index: Int,
+                                   track: MusicRemoteTrack, query: String) async throws -> Int {
+        guard let queuePage, remoteSource?.id == source.id, (0..<2000).contains(index) else {
+            throw MusicServiceError.staleResult
+        }
+        let own = pageEpoch, access = generation
+        var cursor: String?, seen = Set<String>(), offset = 0, matches = 0
+        repeat {
+            let page = try await queuePage(source, cursor)
+            try Task.checkCancellation(); try source.authorization.check()
+            guard available, visible, pageEpoch == own, generation == access else { throw MusicServiceError.staleResult }
+            for row in page.items {
+                let included = MusicRemoteCollectionFilter.matches(row, query: query)
+                if offset == index {
+                    guard included, Self.sameActionIdentity(row, track) else { throw MusicServiceError.targetChanged }
+                    return matches
+                }
+                if included { matches += 1 }
+                offset += 1
+            }
+            guard offset <= 2000 else { throw MusicServiceError.limit }
+            cursor = page.cursor
+            if let cursor { guard seen.insert(cursor).inserted else { throw MusicServiceError.staleResult } }
+        } while cursor != nil
+        throw MusicServiceError.notFound
+    }
+    public func retry() async {
+        guard !isActing else { return }
+        if let failedPage { await load(cursor: failedPage.cursor, direction: failedPage.direction, requestOverride: failedRequest) }
+        else if !loaded { await refresh() }
+        else { await load(cursor: currentCursor, direction: 0) }
+    }
+    public func next() async {
+        guard let nextCursor, !isLoading, back.count < paginationLimit else {
+            if back.count >= paginationLimit { error = .limit }; return
+        }
+        await load(cursor: nextCursor, direction: 1)
+    }
+    public func appendNext() async {
+        guard let cursor = nextCursor, !isLoading, sections.allSatisfy({ $0.error == nil }), back.count < paginationLimit else { return }
+        if usesPageNavigation { await next(); return }
+        await load(cursor: cursor, direction: 2)
+    }
+    public func queueIndex(of track: MusicRemoteTrack) -> Int? {
+        tracks.firstIndex(where: { $0.ref == track.ref }).map { trackOffset + $0 }
+    }
+    /// Visible rows may outlive the bounded native
+    /// handle cache. Reissue only the selected occurrence's original page; do
+    /// not replace display rows, alter pagination, or extend handle lifetimes.
+    public func refreshedActionTrack(_ track: MusicRemoteTrack) async throws -> MusicRemoteTrack {
+        try Task.checkCancellation()
+        guard available, visible, loaded, contentIsCurrent, !isLoading, let index = queueIndex(of: track),
+              let displayed = tracks.first(where: { $0.ref == track.ref }),
+              Self.sameActionIdentity(displayed, track) else { throw MusicServiceError.staleResult }
+        // Public-page cursors and queue cursors are different contracts, even
+        // after an explicit action has opened a queue for this collection.
+        if case .detail(let collection) = request, let occurrence = trackPageOccurrences[track.ref] {
+            let own = pageEpoch, access = generation
+            let source = remoteSource
+            try source?.authorization.check()
+            let result = try await service.publicDetail(collection, cursor: occurrence.cursor.isEmpty ? nil : occurrence.cursor)
+            try Task.checkCancellation()
+            // The observer is asynchronous; a revoked queue must fence this
+            // result even before its observation task invalidates the page.
+            try source?.authorization.check()
+            guard available, visible, pageEpoch == own, generation == access, result.snapshot == snapshot else {
+                throw MusicServiceError.staleResult
+            }
+            let renewed: MusicRemoteTrack
+            if collection.platform == .netease, collection.kind == .playlist {
+                // WY's provider proves unique raw IDs; inaccessible rows may
+                // disappear between reads without changing the raw snapshot.
+                guard let row = result.tracks.first(where: { Self.sameActionIdentity($0, track) }) else {
+                    throw MusicServiceError.notFound
+                }
+                renewed = row
+            } else {
+                // Repeated recordings in QQ/KG/album pages are occurrences,
+                // not an instruction to silently select the first matching ID.
+                guard result.tracks.indices.contains(occurrence.index) else { throw MusicServiceError.targetChanged }
+                renewed = result.tracks[occurrence.index]
+                guard Self.sameActionIdentity(renewed, track) else { throw MusicServiceError.targetChanged }
+            }
+            return renewed
+        }
+        guard let source = remoteSource else { return displayed }
+        guard let queuePage else { throw MusicServiceError.unsupported }
+        try source.authorization.check()
+        let own = pageEpoch, access = generation
+        guard let page = cursorOffsets.filter({ $0.value <= index }).max(by: { $0.value < $1.value }) else {
+            throw MusicServiceError.staleResult
+        }
+        let result = try await queuePage(source, page.key.isEmpty ? nil : page.key)
+        try Task.checkCancellation()
+        guard available, visible, loaded, !isLoading, generation == access, pageEpoch == own,
+              remoteSource?.id == source.id, queueIndex(of: track) == index else { throw MusicServiceError.staleResult }
+        try source.authorization.check()
+        let localIndex = index - page.value
+        guard result.items.count <= 300, result.items.indices.contains(localIndex) else {
+            throw MusicServiceError.invalidResponse
+        }
+        let renewed = result.items[localIndex]
+        guard Self.sameActionIdentity(track, renewed) else { throw MusicServiceError.targetChanged }
+        return renewed
+    }
+    private static func sameActionIdentity(_ lhs: MusicRemoteTrack, _ rhs: MusicRemoteTrack) -> Bool {
+        lhs.songId.utf8.elementsEqual(rhs.songId.utf8) && lhs.sources.count == rhs.sources.count &&
+            zip(lhs.sources, rhs.sources).allSatisfy {
+                $0.0.sourceKey.utf8.elementsEqual($0.1.sourceKey.utf8) &&
+                $0.0.platform.utf8.elementsEqual($0.1.platform.utf8) &&
+                $0.0.nativeId.utf8.elementsEqual($0.1.nativeId.utf8)
+            }
+    }
+    public func previous() async {
+        guard !back.isEmpty, !isLoading else { return }
+        await load(cursor: back[back.count - 1], direction: -1)
+    }
+    private func load(cursor: String?, direction: Int, refresh: Bool = false,
+                      requestOverride: MusicPublicBrowseRequest? = nil) async {
+        guard available, visible, !isLoading else { return }
+        guard let offset = cursorOffsets[cursor ?? ""] else { error = .staleResult; return }
+        let own = UUID(), access = generation, request = requestOverride ?? request, service = service
+        let savedSource = remoteSource
+        let queuePage = queuePage, releaseSource = releaseSource
+        let trace = MusicRequestTrace(.browse, platform: requestPlatform)
+        trace.record(.started)
+        pageEpoch = own; isLoading = true; loadingCursor = cursor; error = nil; errorDiagnosticID = nil
+        let newTask = Task<Loaded, Error> {
+            try await MusicRequestTrace.$current.withValue(trace) {
+            switch request {
+            case .accountRecommendation(let platform, let kind, let title):
+                guard let provider = service as? any MusicRemoteQueueServing, let queuePage else {
+                    throw MusicServiceError.unsupported
+                }
+                let source: MusicRemoteQueueSource
+                if let savedSource { source = savedSource }
+                else { source = try await provider.openAccountQueue(platform: platform,
+                    kind: .recommendation(kind: kind), title: title) }
+                do {
+                    let result = try await queuePage(source, cursor)
+                    try Task.checkCancellation()
+                    let items = result.items.enumerated().map { index, track in
+                        MusicPublicBrowseItem(id: "\(offset + index):\(track.songId)", title: track.title,
+                            subtitle: track.artist, artwork: track.artwork, content: .track(track))
+                    }
+                    return .init(page: .init(sections: [.init(id: source.context.id, title: title, items: items)],
+                        cursor: result.cursor), snapshot: source.id.uuidString, source: source)
+                } catch {
+                    if savedSource == nil { releaseSource(source) }; throw error
+                }
+            case .homeAction(let action, let title):
+                guard let provider = service as? any MusicHomeActionQueueServing, let queuePage else {
+                    throw MusicServiceError.unsupported
+                }
+                let source: MusicRemoteQueueSource
+                if let savedSource { source = savedSource }
+                else { source = try await provider.openHomeActionQueue(action, title: title) }
+                do {
+                    let result = try await queuePage(source, cursor)
+                    try Task.checkCancellation()
+                    let items = result.items.enumerated().map { index, track in
+                        MusicPublicBrowseItem(id: "\(offset + index):\(track.songId)", title: track.title,
+                            subtitle: track.artist, artwork: track.artwork, content: .track(track))
+                    }
+                    return .init(page: .init(sections: [.init(id: source.context.id, title: title, items: items)],
+                                            cursor: result.cursor), snapshot: source.id.uuidString, source: source,
+                                 dailyStyle: result.dailyStyle)
+                } catch {
+                    if savedSource == nil { releaseSource(source) }; throw error
+                }
+            case .playlists(let platform, let query):
+                let result = try await service.publicPlaylists(platform: platform, query: query, cursor: cursor)
+                guard result.items.count <= 30, result.total >= result.items.count,
+                      result.items.allSatisfy({ $0.platform == platform && $0.kind == .playlist }),
+                      Set(result.items.map(\.id)).count == result.items.count else { throw MusicServiceError.invalidResponse }
+                let items = result.items.map { value in
+                    MusicPublicBrowseItem(id: value.id, title: value.title, subtitle: value.creator, artwork: value.artwork, content: .collection(value))
+                }
+                return .init(page: .init(sections: [.init(id: "playlists", title: platform.title, items: items)], cursor: result.cursor), total: result.total)
+            case .detail(let collection):
+                let result = try await service.publicDetail(collection, cursor: cursor)
+                guard result.collection.id == collection.id, result.tracks.count <= 30, result.total >= result.tracks.count,
+                      (result.tracks.count...30).contains(result.consumed), !result.snapshot.isEmpty,
+                      result.cursor == nil || result.consumed > 0 else { throw MusicServiceError.invalidResponse }
+                let items = result.tracks.enumerated().map { index, track in
+                    MusicPublicBrowseItem(id: "\(offset + index):\(track.songId)", title: track.title,
+                        subtitle: track.artist, artwork: track.artwork, content: .track(track))
+                }
+                return .init(page: .init(sections: [.init(id: collection.id, title: result.collection.title, items: items)],
+                             cursor: result.cursor, notice: result.notice),
+                             collection: result.collection, total: result.total, snapshot: result.snapshot, source: savedSource,
+                             consumed: result.consumed)
+            case .discovery(let destination):
+                if destination == .home, let home = service as? any MusicHomeBrowsing {
+                    return .init(page: try await home.homePage(cursor: cursor, refresh: refresh))
+                }
+                if case .daily(let platform) = destination, let queuePage,
+                   let provider = service as? any MusicRemoteQueueServing {
+                    let source: MusicRemoteQueueSource
+                    if let savedSource { source = savedSource }
+                    else { source = try await provider.openAccountQueue(platform: platform, kind: .recommendation(kind: "daily"), title: "每日推荐") }
+                    do {
+                        let result = try await queuePage(source, cursor)
+                        try Task.checkCancellation()
+                        let items = result.items.enumerated().map { index, track in
+                            MusicPublicBrowseItem(id: "\(offset + index):\(track.songId)", title: track.title,
+                                subtitle: track.artist, artwork: track.artwork, content: .track(track))
+                        }
+                        return .init(page: .init(sections: [.init(id: "daily", title: "每日推荐", items: items)], cursor: result.cursor),
+                                     snapshot: source.id.uuidString, source: source)
+                    } catch {
+                        if savedSource == nil { releaseSource(source) }; throw error
+                    }
+                }
+                return .init(page: try await service.publicDiscovery(destination, cursor: cursor))
+            }
+            }
+        }
+        task = newTask
+        var unpublished: MusicRemoteQueueSource?
+        defer {
+            if let unpublished, unpublished.id != remoteSource?.id { releaseSource(unpublished) }
+            if own == pageEpoch { task = nil; isLoading = false }
+        }
+        do {
+            let result = try await withTaskCancellationHandler { try await newTask.value } onCancel: { newTask.cancel() }
+            unpublished = result.source
+            try Task.checkCancellation()
+            guard available, visible, generation == access, pageEpoch == own else {
+                return
+            }
+            let count = result.page.sections.reduce(0) { $0 + $1.items.count }
+            guard count <= (request == .discovery(.home) ? 600 : 300), result.page.filters.count <= 300,
+                  result.page.sections.reduce(0, { count, section in
+                      count + (section.tabs.isEmpty ? section.items.count : section.tabs.reduce(0) { $0 + $1.items.count })
+                  }) <= 600,
+                  Set(result.page.sections.map(\.id)).count == result.page.sections.count,
+                  result.page.sections.allSatisfy({ section in
+                      Set(section.items.map(\.id)).count == section.items.count && section.filters.count <= 201 &&
+                          Set(section.filters.map(\.id)).count == section.filters.count &&
+                          section.tabs.count <= 30 && Set(section.tabs.map(\.id)).count == section.tabs.count &&
+                          section.tabs.reduce(0, { $0 + $1.items.count }) <= 600 &&
+                          section.tabs.allSatisfy { Set($0.items.map(\.id)).count == $0.items.count } &&
+                          (section.tabs.isEmpty || section.tabs.first(where: { $0.id == section.selectedTab })?.items.map(\.id) == section.items.map(\.id))
+                  }),
+                  result.page.cursor == nil || result.page.cursor != cursor && (result.consumed ?? count) > 0 else {
+                throw MusicServiceError.invalidResponse
+            }
+            if direction > 0, let next = result.page.cursor,
+               next == currentCursor || back.contains(where: { $0 == next }) {
+                throw MusicServiceError.invalidResponse
+            }
+            if direction != 0, let old = snapshot, old != result.snapshot { throw MusicServiceError.staleResult }
+            sectionDiagnosticIDs = Dictionary(uniqueKeysWithValues: result.page.sections.compactMap { section in
+                guard let error = section.error else { return nil }
+                trace.record(.failed, failure: error)
+                return (section.id, trace.logicalID)
+            })
+            var merged = result.page.sections
+            if direction == 0, cursor == nil, result.page.sections.contains(where: { $0.error != nil }) {
+                // Preserve the displayed feed and its committed selection on
+                // a refresh/filter failure. The explicit retry owns the failed
+                // candidate; automatic pagination remains stopped.
+                merged = result.page.sections.map { section in
+                    guard let failure = section.error,
+                          let old = sections.first(where: { $0.id == section.id && $0.layout == section.layout }) else { return section }
+                    return .init(id: old.id, title: old.title, items: old.items, layout: old.layout,
+                                 avatars: old.avatars, channel: old.channel, filters: old.filters,
+                                 selectedFilter: old.selectedFilter, error: failure,
+                                 tabs: old.tabs, selectedTab: old.selectedTab)
+                }
+                sections = merged; filters = result.page.filters; selectedFilter = result.page.selectedFilter
+                notice = result.page.notice; loaded = true
+                // A failed tag read must not authorize retained pixels as the
+                // new selection. Section-local retries keep their old target.
+                if requestOverride == nil { contentIsCurrent = false }
+                failedPage = (nil, 0); failedRequest = requestOverride
+                return
+            }
+            if direction == 2 {
+                guard sections.reduce(0, { $0 + $1.items.count }) + count <= 2000 else { throw MusicServiceError.limit }
+                merged = sections
+                for section in result.page.sections {
+                    if let index = merged.firstIndex(where: { $0.id == section.id && $0.layout == section.layout }) {
+                        var ids = Set(merged[index].items.map(\.id))
+                        let items = merged[index].items + section.items.filter { ids.insert($0.id).inserted }
+                        merged[index] = .init(id: section.id, title: section.title, items: items, layout: section.layout,
+                                              avatars: section.avatars, channel: section.channel,
+                                              filters: section.filters, selectedFilter: section.selectedFilter, error: section.error,
+                                              tabs: section.tabs, selectedTab: section.selectedTab)
+                    } else { merged.append(section) }
+                }
+                if result.page.cursor != nil, result.consumed == nil,
+                   merged.reduce(0, { $0 + $1.items.count }) == sections.reduce(0, { $0 + $1.items.count }) {
+                    throw MusicServiceError.invalidResponse
+                }
+            }
+            let songCount = result.page.sections.flatMap(\.items).filter {
+                if case .track = $0.content { return true }; return false
+            }.count
+            let consumed = result.consumed ?? songCount
+            if requestOverride == nil, let next = result.page.cursor, let saved = cursorOffsets[next],
+               saved != offset + consumed { throw MusicServiceError.staleResult }
+            // Validate the complete next state before publishing any cursor,
+            // back-stack, or rows. A rejected append must remain retryable.
+            if direction == 0 && cursor == nil { back = []; pageNumber = 1; cursorOffsets = ["": 0] }
+            if direction > 0 { back.append(currentCursor); pageNumber += 1 }
+            if direction == -1 { back.removeLast(); pageNumber -= 1 }
+            if direction != 2 { trackOffset = offset }
+            if let next = result.page.cursor { cursorOffsets[next] = offset + consumed }
+            if direction != 2 { trackPageOccurrences = [:] }
+            for (index, track) in result.page.sections.flatMap(\.items).compactMap({ item -> MusicRemoteTrack? in
+                if case .track(let track) = item.content { return track }; return nil
+            }).enumerated() {
+                trackPageOccurrences[track.ref] = .init(cursor: cursor ?? "", index: index)
+            }
+            currentCursor = cursor; nextCursor = result.page.cursor; sections = merged
+            self.request = request
+            notice = result.page.notice
+            filters = result.page.filters; selectedFilter = result.page.selectedFilter
+            collection = result.collection; total = result.total; snapshot = result.snapshot; remoteSource = result.source; loaded = true
+            contentIsCurrent = true
+            requiresExplicitNext = count == 0 && result.page.cursor != nil
+            if result.consumed != nil, merged.reduce(0, { $0 + $1.items.count }) > 1970 {
+                usesPageNavigation = true
+            }
+            if cursor == nil || result.dailyStyle != nil { dailyStyle = result.dailyStyle }
+            failedPage = nil; failedRequest = nil
+            watchSource()
+            trace.record(.completed)
+        } catch {
+            trace.failed(error)
+            guard available, visible, generation == access, pageEpoch == own, !Task.isCancelled else { return }
+            let safe = MusicServiceError.sanitized(error)
+            if safe != .cancelled {
+                self.error = safe; errorDiagnosticID = trace.logicalID
+                failedPage = (cursor, direction); failedRequest = requestOverride
+            }
+            if safe.isAuthenticationFailure || [.accessUnavailable, .staleAccess, .staleResult, .notFound, .handleExpired].contains(safe) {
+                if let remoteSource { releaseSource(remoteSource) }; remoteSource = nil
+                sections = []; notice = nil; nextCursor = nil; snapshot = nil; loaded = false
+                collection = nil; total = nil; currentCursor = nil; back = []; pageNumber = 1; failedPage = nil; failedRequest = nil
+                cursorOffsets = ["": 0]; trackOffset = 0
+                trackPageOccurrences = [:]; contentIsCurrent = false
+            }
+        }
+    }
+    private func watchSource() {
+        revocationTask?.cancel()
+        guard let source = remoteSource else { return }
+        revocationTask = Task { [weak self] in
+            for await _ in source.authorization.revocations() {
+                guard !Task.isCancelled, let self, self.remoteSource?.id == source.id else { return }
+                self.invalidate(clear: true); self.error = .staleAccess
+                return
+            }
+        }
+    }
+    /// Callback is explicit user intent. The existing queue/player owner must
+    /// additionally fence its own transaction and playback after suspension.
+    public func makeActionIntent() -> MusicPublicBrowseActionIntent? {
+        guard available, visible, contentIsCurrent, !isActing, !isLoading else { return nil }
+        let id = UUID(); issuedIntent = id
+        return .init(id: id, page: pageEpoch, access: generation)
+    }
+    public func perform(intent: MusicPublicBrowseActionIntent, operation: String = "歌单操作",
+                        kind: MusicRequestTrace.Operation = .library,
+                        _ body: @escaping @MainActor () async throws -> Void) async {
+        guard available, visible, contentIsCurrent, !isActing, !isLoading, issuedIntent == intent.id,
+              pageEpoch == intent.page, generation == intent.access else { return }
+        issuedIntent = nil
+        let own = UUID(), access = generation
+        let trace = MusicRequestTrace(kind, platform: requestPlatform)
+        trace.record(.started)
+        actionEpoch = own; isActing = true; actionError = nil; actionDiagnosticID = nil; actionOperation = operation
+        let newTask = Task { @MainActor in
+            try await MusicRequestTrace.$current.withValue(trace) {
+            try Task.checkCancellation()
+            guard self.available, self.visible, self.generation == access, self.actionEpoch == own else { throw MusicServiceError.staleAccess }
+            try self.remoteSource?.authorization.check()
+            try await body()
+            }
+        }
+        actionTask = newTask
+        defer { if actionEpoch == own { isActing = false; actionTask = nil } }
+        do {
+            try await withTaskCancellationHandler { try await newTask.value } onCancel: { newTask.cancel() }
+            trace.record(.completed)
+        } catch {
+            trace.failed(error)
+            if available, visible, generation == access, actionEpoch == own, !Task.isCancelled {
+                let safe = MusicServiceError.sanitized(error)
+                if safe != .cancelled { actionError = safe; actionDiagnosticID = trace.logicalID }
+            }
+        }
+    }
+}
+
+@MainActor public extension MusicViewModel {
+    /// Same NativeMusicService instance exposed through an existing public port;
+    /// no new service/account/writer and no visibility change to private state.
+    var publicBrowser: (any MusicPublicBrowsing)? { accountBrowser as? any MusicPublicBrowsing }
+}

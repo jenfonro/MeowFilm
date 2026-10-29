@@ -1,0 +1,22 @@
+<UserControl xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop" x:Class="MeowFilm.Capabilities.MusicRecommendationView"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+ <UserControl.Resources><BooleanToVisibilityConverter x:Key="Visible"/></UserControl.Resources>
+ <Border Style="{DynamicResource MeowFilm.Surface}" Padding="10" Margin="0,0,0,10"
+  Visibility="{Binding HasRecommendationSession,Converter={StaticResource Visible}}">
+  <StackPanel>
+   <DockPanel>
+    <TextBlock Text="{Binding RecommendationTitle}" FontWeight="SemiBold" Margin="0,0,12,0"/>
+    <desktop:NoticeOutlet Message="{Binding RecommendationStatus}"/>
+   </DockPanel>
+   <WrapPanel Margin="0,8,0,0">
+    <CheckBox Content="持续推荐" IsChecked="{Binding RecommendationContinue,Mode=OneWay}"
+     IsEnabled="{Binding CanChangeRecommendationContinue}" Click="Continue_Click" Margin="0,4,12,4" AutomationProperties.Name="持续推荐"/>
+    <Button Content="重试推荐" Click="Retry_Click" IsEnabled="{Binding CanRetryRecommendation}"/>
+    <Button Content="返回原队列" Click="Return_Click" IsEnabled="{Binding CanReturnRecommendation}"/>
+    <Button Content="结束推荐" Click="Cancel_Click" IsEnabled="{Binding CanCancelRecommendation}"/>
+    <Button Content="核对保存结果" Click="Reconcile_Click" Visibility="{Binding CanReconcileRecommendation,Converter={StaticResource Visible}}"/>
+   </WrapPanel>
+  </StackPanel>
+ </Border>
+</UserControl>

@@ -1,0 +1,186 @@
+<UserControl x:Class="MeowFilm.Capabilities.MusicAccountsView"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:local="clr-namespace:MeowFilm.Capabilities"
+ xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
+ xmlns:art="clr-namespace:MeowFilm.Desktop.Artwork;assembly=MeowFilm.Desktop">
+ <UserControl.Resources>
+  <ResourceDictionary>
+   <ResourceDictionary.MergedDictionaries>
+    <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/>
+   </ResourceDictionary.MergedDictionaries>
+   <Style x:Key="Login.Segment" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
+    <Setter Property="Height" Value="34"/>
+    <Setter Property="Padding" Value="18,4"/>
+    <Setter Property="Margin" Value="0"/>
+    <Setter Property="BorderThickness" Value="0"/>
+   </Style>
+  </ResourceDictionary>
+ </UserControl.Resources>
+ <Grid x:Name="Root">
+  <StackPanel>
+   <ItemsControl x:Name="PlatformSettingsList" ItemsSource="{Binding PlatformSettings}">
+    <ItemsControl.ItemTemplate>
+     <DataTemplate>
+      <Border Background="{DynamicResource MeowFilm.Brush.Surface}"
+              BorderBrush="{DynamicResource MeowFilm.Brush.Border}"
+              BorderThickness="1" CornerRadius="24" Padding="20,17" Margin="0,0,0,14">
+       <Grid>
+        <Grid.ColumnDefinitions>
+         <ColumnDefinition Width="58"/>
+         <ColumnDefinition Width="*"/>
+         <ColumnDefinition Width="Auto"/>
+         <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <Grid Width="50" Height="50" VerticalAlignment="Center">
+         <Ellipse Fill="{Binding Accent}"/>
+         <TextBlock Text="{Binding AvatarFallback}" Foreground="White" FontWeight="SemiBold"
+                    FontSize="16" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+         <Border CornerRadius="25" ClipToBounds="True">
+          <art:ArtworkImage Address="{Binding Avatar}" Stretch="UniformToFill"
+                            AutomationProperties.Name="{Binding Name,StringFormat={}{0}头像}"/>
+         </Border>
+        </Grid>
+        <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="14,0,24,0">
+         <TextBlock Text="{Binding DisplayName}" FontSize="15" FontWeight="SemiBold"
+                    TextTrimming="CharacterEllipsis"/>
+         <TextBlock Text="{Binding Membership}" Margin="0,5,0,0" FontSize="12"
+                    Foreground="{DynamicResource MeowFilm.Brush.Muted}">
+          <TextBlock.Style>
+           <Style TargetType="TextBlock">
+            <Setter Property="Visibility" Value="Visible"/>
+            <Style.Triggers>
+             <Trigger Property="Text" Value=""><Setter Property="Visibility" Value="Collapsed"/></Trigger>
+            </Style.Triggers>
+           </Style>
+          </TextBlock.Style>
+         </TextBlock>
+        </StackPanel>
+        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center"
+                    Visibility="{Binding IsLoggedIn,Converter={StaticResource MeowFilm.BoolToVisibility}}">
+         <StackPanel Margin="0,0,22,0">
+          <TextBlock Text="播放上报" FontSize="12" HorizontalAlignment="Center" Margin="0,0,0,7"/>
+          <CheckBox Style="{StaticResource Capability.Switch}" IsChecked="{Binding FeedbackEnabled,Mode=OneWay}"
+                    Tag="{Binding}" Click="Feedback_Click"
+                    IsEnabled="{Binding DataContext.CanEditFeedback,RelativeSource={RelativeSource AncestorType=local:MusicAccountsView}}"
+                    AutomationProperties.Name="{Binding Name,StringFormat={}{0}播放上报}"/>
+         </StackPanel>
+         <StackPanel Margin="0,0,22,0">
+          <TextBlock Text="收藏同步" FontSize="12" HorizontalAlignment="Center" Margin="0,0,0,7"/>
+          <CheckBox Style="{StaticResource Capability.Switch}" IsChecked="{Binding FavoritesSyncEnabled,Mode=OneWay}"
+                    Tag="{Binding}" Click="FavoritesSync_Click"
+                    IsEnabled="{Binding DataContext.LibrarySync.CanEdit,RelativeSource={RelativeSource AncestorType=local:MusicAccountsView}}"
+                    AutomationProperties.Name="{Binding Name,StringFormat={}{0}收藏歌曲同步}"/>
+         </StackPanel>
+         <StackPanel>
+          <TextBlock Text="歌单同步" FontSize="12" HorizontalAlignment="Center" Margin="0,0,0,7"/>
+          <CheckBox Style="{StaticResource Capability.Switch}" IsChecked="{Binding PlaylistsSyncEnabled,Mode=OneWay}"
+                    Tag="{Binding}" Click="PlaylistsSync_Click"
+                    IsEnabled="{Binding DataContext.LibrarySync.CanEdit,RelativeSource={RelativeSource AncestorType=local:MusicAccountsView}}"
+                    AutomationProperties.Name="{Binding Name,StringFormat={}{0}歌单同步}"/>
+         </StackPanel>
+        </StackPanel>
+        <Button Grid.Column="3" Content="登录" Tag="{Binding}" Click="Login_Click"
+                MinWidth="76" Margin="24,0,0,0"
+                VerticalAlignment="Center"
+                IsEnabled="{Binding DataContext.CanEdit,RelativeSource={RelativeSource AncestorType=local:MusicAccountsView}}">
+         <Button.Style>
+          <Style TargetType="Button" BasedOn="{StaticResource MeowFilm.PrimaryButton}">
+           <Setter Property="Visibility" Value="Collapsed"/>
+           <Style.Triggers>
+            <DataTrigger Binding="{Binding ShowLogin}" Value="True">
+             <Setter Property="Visibility" Value="Visible"/>
+            </DataTrigger>
+           </Style.Triggers>
+          </Style>
+         </Button.Style>
+        </Button>
+       </Grid>
+      </Border>
+     </DataTemplate>
+    </ItemsControl.ItemTemplate>
+   </ItemsControl>
+   <Button Content="确认同步变更" Click="ConfirmSync_Click" HorizontalAlignment="Left"
+           Visibility="{Binding LibrarySync.HasConfirmation,Converter={StaticResource MeowFilm.BoolToVisibility}}"
+           IsEnabled="{Binding LibrarySync.CanEdit}"/>
+   <desktop:NoticeOutlet Message="{Binding AccountStatus}"/>
+   <desktop:NoticeOutlet Message="{Binding FeedbackStatus}"/>
+   <desktop:NoticeOutlet Message="{Binding LibrarySync.Status}"/>
+  </StackPanel>
+
+  <Popup x:Name="LoginPopup" PlacementTarget="{Binding ElementName=Root}" Placement="Center"
+         StaysOpen="False" AllowsTransparency="True" Closed="LoginPopup_Closed" DataContext="{Binding}">
+   <Border Width="420" MinHeight="500" Padding="24" CornerRadius="22"
+           Background="{DynamicResource MeowFilm.Brush.Surface}"
+           BorderBrush="{DynamicResource MeowFilm.Brush.Border}" BorderThickness="1">
+    <Border.Effect><DropShadowEffect BlurRadius="30" ShadowDepth="8" Opacity=".25"/></Border.Effect>
+    <Grid>
+     <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+     </Grid.RowDefinitions>
+     <DockPanel>
+      <Button DockPanel.Dock="Right" Content="&#xE711;" Click="CloseLogin_Click"
+              Style="{StaticResource MeowFilm.IconButton}" AutomationProperties.Name="关闭登录"/>
+      <TextBlock x:Name="LoginTitle" FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center"/>
+     </DockPanel>
+     <Border Grid.Row="1" Background="#F0F1F4" CornerRadius="17" Margin="0,22,0,20" Padding="2">
+      <UniformGrid Columns="2">
+       <Button x:Name="QrModeButton" Content="二维码登录" Click="QrMode_Click"
+               Style="{StaticResource Login.Segment}"/>
+       <Button x:Name="SmsModeButton" Content="验证码登录" Click="SmsMode_Click"
+               Style="{StaticResource Login.Segment}" IsEnabled="{Binding ShowAccountSms}"/>
+      </UniformGrid>
+     </Border>
+     <Grid Grid.Row="2">
+      <StackPanel x:Name="QrPanel" HorizontalAlignment="Center">
+       <Border Width="230" Height="230" CornerRadius="12" BorderBrush="#F0C9CF"
+               BorderThickness="1" Padding="14">
+        <Image x:Name="AccountQrImage" Source="{Binding AccountQrImage}" Stretch="Uniform"
+               RenderOptions.BitmapScalingMode="NearestNeighbor"
+               AutomationProperties.Name="{Binding AccountQrAccessibleName}"/>
+       </Border>
+       <Button Content="刷新二维码" Click="RefreshQr_Click" HorizontalAlignment="Center" Margin="0,14,0,0"
+               IsEnabled="{Binding CanBeginAccountQr}"/>
+       <TextBlock Text="{Binding AccountStatus}" HorizontalAlignment="Center" Margin="0,8,0,0"
+                  Foreground="{DynamicResource MeowFilm.Brush.Muted}"/>
+       <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,14,0,0">
+        <Button x:Name="SaveQrButton" Content="保存二维码" Click="SaveQr_Click" IsEnabled="{Binding CanSaveAccountQr}"/>
+        <Button Content="分享" Click="ShareQr_Click" IsEnabled="{Binding CanSaveAccountQr}"/>
+       </StackPanel>
+      </StackPanel>
+      <StackPanel x:Name="SmsPanel" Visibility="Collapsed" VerticalAlignment="Center">
+       <Border CornerRadius="22" BorderBrush="{DynamicResource MeowFilm.Brush.Border}"
+               BorderThickness="1" Height="46" Margin="0,0,0,14">
+        <Grid>
+         <Grid.ColumnDefinitions><ColumnDefinition Width="82"/><ColumnDefinition Width="1"/><ColumnDefinition/></Grid.ColumnDefinitions>
+         <TextBlock Text="+86" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+         <Border Grid.Column="1" Background="{DynamicResource MeowFilm.Brush.Border}" Margin="0,10"/>
+         <TextBox x:Name="SmsPhoneInput" Grid.Column="2" BorderThickness="0" Background="Transparent"
+                  MaxLength="15" AutomationProperties.Name="手机号"/>
+        </Grid>
+       </Border>
+       <Border CornerRadius="22" BorderBrush="{DynamicResource MeowFilm.Brush.Border}"
+               BorderThickness="1" Height="46" Margin="0,0,0,22">
+        <Grid>
+         <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="1"/><ColumnDefinition Width="112"/></Grid.ColumnDefinitions>
+         <PasswordBox x:Name="SmsCodeInput" BorderThickness="0" Background="Transparent"
+                      Padding="15,8" MaxLength="8" VerticalContentAlignment="Center"
+                      AutomationProperties.Name="验证码"/>
+         <Border Grid.Column="1" Background="{DynamicResource MeowFilm.Brush.Border}" Margin="0,10"/>
+         <Button x:Name="SmsSendButton" Grid.Column="2" Content="{Binding AccountSmsSendText}" Click="SmsSend_Click"
+                 Style="{StaticResource MeowFilm.QuietButton}" Margin="0" IsEnabled="{Binding CanSendAccountSms}"/>
+        </Grid>
+       </Border>
+       <Button x:Name="SmsLoginButton" Content="登录" Click="SmsLogin_Click" Height="44" Margin="0"
+               Style="{StaticResource MeowFilm.PrimaryButton}" IsEnabled="{Binding CanLoginAccountSms}"/>
+       <TextBlock Text="{Binding AccountStatus}" HorizontalAlignment="Center" Margin="0,12,0,0"
+                  Foreground="{DynamicResource MeowFilm.Brush.Muted}"/>
+      </StackPanel>
+     </Grid>
+    </Grid>
+   </Border>
+  </Popup>
+ </Grid>
+</UserControl>

@@ -1,0 +1,208 @@
+using System.Security.Cryptography;
+using System.Text.Json.Nodes;
+
+namespace MeowFilm.Capabilities.Library;
+
+public sealed partial class MusicLibraryOwner
+{
+    // Native, owner-local capabilities. They are never serialized into the library
+    // document or restored as a live recommendation/account session.
+    private sealed record RecommendationCheckpoint(JsonObject Queue, string[] History, string[] Failed, int Bytes);
+    private sealed record RecommendationReceipt(string Hash, JsonObject Result);
+    private sealed record RecommendationCommit(string Nonce, string Hash, string Checkpoint,
+        RecommendationCheckpoint? Capture, bool Consume, JsonObject Result,
+        string[] BeforeHistory, string[] BeforeFailed, string[] AfterHistory, string[] AfterFailed);
+    private readonly Dictionary<string, RecommendationCheckpoint> recommendationCheckpoints = [];
+    private readonly Dictionary<string, RecommendationReceipt> recommendationReceipts = [];
+    private RecommendationCommit? recommendationStage;
+    private Pending? recommendationUnknown;
+    private int recommendationReceiptBytes;
+    private const int RecommendationMemoryLimit = 8 * 1024 * 1024;
+
+    private static string RecommendationNonce(JsonObject p)
+    {
+        string value = LJ.Text(p["nonce"], 36);
+        LJ.Require(Guid.TryParseExact(value, "D", out var id) && id != Guid.Empty &&
+            value == id.ToString("D"), "INVALID_NONCE");
+        return value;
+    }
+    private static string RecommendationHash(string method, JsonObject p) =>
+        Convert.ToHexString(SHA256.HashData(LJ.Bytes(LJ.Obj(("method", method), ("parameters", p)))));
+    private bool RecommendationReplay(string nonce, string hash, out JsonObject result)
+    {
+        if (recommendationReceipts.TryGetValue(nonce, out var receipt))
+        {
+            LJ.Require(receipt.Hash == hash, "INVALID_NONCE");
+            result = (JsonObject)receipt.Result.DeepClone();
+            return true;
+        }
+        LJ.Require(recommendationReceipts.Count < 4096, "LIMIT");
+        result = new();
+        return false;
+    }
+    private RecommendationCheckpoint CaptureRecommendation(JsonObject doc)
+    {
+        var q = (JsonObject)Queue(doc).DeepClone();
+        int bytes = LJ.Bytes(q).Length;
+        LJ.Require(recommendationCheckpoints.Count < 4 &&
+            recommendationCheckpoints.Values.Sum(c => c.Bytes) + bytes <= RecommendationMemoryLimit, "LIMIT");
+        return new(q, shuffleHistory.ToArray(), failedEntries.ToArray(), bytes);
+    }
+    private static JsonObject RecommendationResult(JsonObject result, string nonce, bool applied = true) =>
+        LJ.Merge(result, LJ.Obj(("nonce", nonce), ("applied", applied)));
+    private void CheckRecommendationReceipt(JsonObject result) =>
+        LJ.Require(recommendationReceiptBytes + LJ.Bytes(result).Length + 128 <= 4 * 1024 * 1024, "LIMIT");
+    private void AcceptRecommendation(RecommendationCommit commit, bool applied)
+    {
+        // Force-loading a durable envelope deliberately clears runtime navigation.
+        // Reconciliation must reinstate the runtime belonging to the observed side,
+        // not the speculative side of an unacknowledged CAS.
+        shuffleHistory = (applied ? commit.AfterHistory : commit.BeforeHistory).ToList();
+        failedEntries.Clear();
+        failedEntries.UnionWith(applied ? commit.AfterFailed : commit.BeforeFailed);
+        if (applied)
+        {
+            if (commit.Capture is { } capture) recommendationCheckpoints.Add(commit.Checkpoint, capture);
+            if (commit.Consume) recommendationCheckpoints.Remove(commit.Checkpoint);
+        }
+        var result = applied ? (JsonObject)commit.Result.DeepClone() :
+            LJ.Obj(("ok", true), ("nonce", commit.Nonce), ("applied", false), ("state", "not-applied"));
+        if (applied)
+        {
+            result["version"] = queueVersion;
+            result["currentId"] = Queue(document!)["currentId"]?.DeepClone();
+        }
+        recommendationReceipts[commit.Nonce] = new(commit.Hash, result);
+        recommendationReceiptBytes += LJ.Bytes(result).Length;
+    }
+    private void SettleRecommendation(Pending? attempt)
+    {
+        if (attempt?.Recommendation is not { } change) return;
+        LJ.Require(fingerprint == attempt.Before || fingerprint == attempt.After, "STORAGE_CONFLICT");
+        if (!recommendationReceipts.ContainsKey(change.Nonce))
+            AcceptRecommendation(change, fingerprint == attempt.After);
+        if (ReferenceEquals(recommendationUnknown, attempt)) recommendationUnknown = null;
+    }
+    private void ClearRecommendations()
+    {
+        recommendationCheckpoints.Clear();
+        recommendationReceipts.Clear();
+        recommendationReceiptBytes = 0;
+        recommendationStage = null;
+        recommendationUnknown = null;
+    }
+    private async Task<(JsonObject Result, bool Mutate)> RecommendationCommandAsync(
+        string method, JsonObject p, JsonObject doc, CancellationToken token)
+    {
+        const string prefix = "music.queue.recommendation.";
+        string action = method[prefix.Length..];
+        if (action == "reconcile")
+        {
+            LJ.Fields(p, "nonce", "nonce"); string nonce = RecommendationNonce(p);
+            if (recommendationReceipts.TryGetValue(nonce, out var receipt))
+                return ((JsonObject)receipt.Result.DeepClone(), false);
+            var unknown = recommendationUnknown;
+            LJ.Require(unknown?.Recommendation?.Nonce == nonce, "OPERATION_NOT_FOUND");
+            await ReconcileLockedAsync(token).ConfigureAwait(false);
+            SettleRecommendation(unknown);
+            return ((JsonObject)recommendationReceipts[nonce].Result.DeepClone(), false);
+        }
+        LJ.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
+        if (action == "discard")
+        {
+            LJ.Fields(p, "checkpoint", "checkpoint");
+            return (LJ.Obj(("discarded", recommendationCheckpoints.Remove(LJ.Text(p["checkpoint"], 36)))), false);
+        }
+        if (action == "capture")
+        {
+            LJ.Fields(p, "nonce expectedVersion", "nonce expectedVersion");
+            string nonce = RecommendationNonce(p), hash = RecommendationHash(method, p);
+            if (RecommendationReplay(nonce, hash, out var previous)) return (previous, false);
+            LJ.Require(LJ.I(p["expectedVersion"]) == queueVersion, "REVISION_CONFLICT");
+            var capture = CaptureRecommendation(doc); string key = Guid.NewGuid().ToString("D");
+            var result = RecommendationResult(LJ.Merge(Position(Queue(doc), doc), LJ.Obj(("checkpoint", key))), nonce);
+            CheckRecommendationReceipt(result);
+            recommendationCheckpoints.Add(key, capture);
+            recommendationReceipts.Add(nonce, new(hash, (JsonObject)result.DeepClone()));
+            recommendationReceiptBytes += LJ.Bytes(result).Length;
+            return (result, false);
+        }
+        LJ.Require(action is "enter" or "append" or "select" or "restore", "INVALID_REQUEST");
+        LJ.Fields(p, action switch
+        {
+            "enter" => "nonce expectedVersion checkpoint seedEntryId songs context",
+            "append" => "nonce expectedVersion songs context selectFirst",
+            "select" => "nonce expectedVersion id",
+            _ => "nonce expectedVersion checkpoint"
+        }, action is "enter" or "append" ? "nonce expectedVersion songs" :
+            action == "select" ? "nonce expectedVersion id" : "nonce expectedVersion checkpoint");
+        string operation = RecommendationNonce(p), signature = RecommendationHash(method, p);
+        if (RecommendationReplay(operation, signature, out var replay)) return (replay, false);
+        LJ.Require(LJ.I(p["expectedVersion"]) == queueVersion, "REVISION_CONFLICT");
+        string checkpoint = p["checkpoint"] is null ? "" : LJ.Text(p["checkpoint"], 36);
+        RecommendationCheckpoint? captured = null;
+        var beforeHistory = shuffleHistory.ToArray(); var beforeFailed = failedEntries.ToArray();
+        JsonObject response;
+        if (action == "select")
+        {
+            response = RecommendationResult(QueueCommand("music.queue.select", LJ.Obj(("id", p["id"])), doc, false).Result, operation);
+        }
+        else if (action == "append")
+        {
+            // The existing queue algorithm remains the only append implementation.
+            // The nonce only makes an ACK-lost append explicitly reconcilable.
+            var arguments = LJ.Obj(("songs", p["songs"]), ("context", p["context"]));
+            response = RecommendationResult(QueueCommand("music.queue.append", arguments, doc, false).Result, operation);
+            LJ.Require(p["selectFirst"] is null || LJ.IsBool(p["selectFirst"]));
+            if (LJ.B(p["selectFirst"]))
+            {
+                var selected = QueueCommand("music.queue.select", LJ.Obj(("id", LJ.Array(response["entryIds"])[0])), doc, false);
+                response = LJ.Merge(response, selected.Result);
+            }
+        }
+        else if (action == "enter")
+        {
+            var songs = Songs(p, false, true);
+            LJ.Require(songs.Length <= 1000, "LIMIT");
+            var context = Context(p["context"]); var old = Queue(doc);
+            string seed = p["seedEntryId"] is null ? "" : LJ.Text(p["seedEntryId"]);
+            var retained = seed.Length == 0 ? null : LJ.Array(old["entries"]).OfType<JsonObject>()
+                .SingleOrDefault(e => LJ.S(e["id"]) == seed && LJ.S(old["currentId"]) == seed);
+            LJ.Require(seed.Length == 0 || retained is not null, "STALE_QUEUE");
+            if (checkpoint.Length == 0)
+            {
+                captured = CaptureRecommendation(doc);
+                checkpoint = Guid.NewGuid().ToString("D");
+            }
+            else LJ.Require(recommendationCheckpoints.ContainsKey(checkpoint), "CHECKPOINT_NOT_FOUND");
+            Archive(old, doc);
+            var added = songs.Select(s => MakeEntry(s, context)).ToArray();
+            var entries = new JsonArray();
+            if (retained is not null) entries.Add(retained.DeepClone());
+            foreach (var entry in added) entries.Add(entry.DeepClone());
+            var q = LJ.Obj(("schema", 1), ("entries", entries), ("currentId", retained?["id"] ?? added[0]["id"]),
+                ("priority", new JsonArray()), ("source", context["queueSource"]));
+            Set(doc, "queue", q);
+            shuffleHistory.Clear(); failedEntries.Clear(); queueVersion++;
+            response = RecommendationResult(LJ.Merge(Position(q, doc),
+                LJ.Obj(("checkpoint", checkpoint), ("entryIds", LJ.Arr(added.Select(e => LJ.S(e["id"])))))),
+                operation);
+        }
+        else
+        {
+            LJ.Require(recommendationCheckpoints.TryGetValue(checkpoint, out var saved), "CHECKPOINT_NOT_FOUND");
+            var restored = (JsonObject)saved!.Queue.DeepClone();
+            ValidateQueue(restored, true);
+            Archive(Queue(doc), doc);
+            Set(doc, "queue", restored);
+            shuffleHistory = saved.History.ToList(); failedEntries.Clear(); failedEntries.UnionWith(saved.Failed);
+            queueVersion++;
+            response = RecommendationResult(LJ.Merge(Position(restored, doc),
+                LJ.Obj(("checkpoint", checkpoint), ("restored", true))), operation);
+        }
+        CheckRecommendationReceipt(response);
+        recommendationStage = new(operation, signature, checkpoint, captured, action == "restore", response,
+            beforeHistory, beforeFailed, shuffleHistory.ToArray(), failedEntries.ToArray());
+        return (response, true);
+    }
+}

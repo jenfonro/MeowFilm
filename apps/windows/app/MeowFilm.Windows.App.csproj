@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <WindowsSdkPackageVersion>10.0.19041.57</WindowsSdkPackageVersion>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>meowfilm</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../src/MeowFilm.AppHost/MeowFilm.AppHost.csproj" />
+    <ProjectReference Include="../src/MeowFilm.Capabilities/MeowFilm.Capabilities.csproj" />
+    <ProjectReference Include="../src/MeowFilm.SystemMedia/MeowFilm.SystemMedia.csproj" />
+  </ItemGroup>
+</Project>
