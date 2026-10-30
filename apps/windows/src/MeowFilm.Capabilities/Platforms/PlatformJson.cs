@@ -133,6 +133,36 @@ internal static class PJ
         if (s.Length is 0 or > 4096 || !Uri.TryCreate(s, UriKind.Absolute, out var u) ||
             u.Scheme is not ("http" or "https") || u.UserInfo.Length > 0 ||
             u.IsLoopback || u.HostNameType is UriHostNameType.IPv4 or UriHostNameType.IPv6) return "";
+        if (u.Scheme == "http" && u.IsDefaultPort && Regex.IsMatch(u.Host,
+            @"(?:^|\.)music\.(?:126|163)\.net$", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase))
+            u = new UriBuilder(u) { Scheme = "https", Port = -1 }.Uri;
+        if (u.Query.Length > 0 && u.Fragment.Length == 0 && u.IsDefaultPort &&
+            Regex.IsMatch(u.Host, @"^p[1-4]\.music\.(?:126|163)\.net$",
+            RegexOptions.CultureInvariant | RegexOptions.IgnoreCase))
+        {
+            var keys = new HashSet<string>(StringComparer.Ordinal);
+            var recognized = true;
+            foreach (var part in u.Query[1..].Split('&'))
+            {
+                var pair = part.Split('=', 2);
+                var key = pair[0];
+                var content = pair.Length == 2 ? pair[1] : "";
+                if (!keys.Add(key) || !(key switch
+                {
+                    "imageView" => content is "" or "1",
+                    "type" => content is "webp" or "jpg" or "jpeg" or "png",
+                    "thumbnail" => Regex.IsMatch(content,
+                        @"^[1-9][0-9]{0,3}y[1-9][0-9]{0,3}$", RegexOptions.CultureInvariant),
+                    _ => false
+                }))
+                {
+                    recognized = false;
+                    break;
+                }
+            }
+            if (recognized && keys.Contains("imageView"))
+                u = new Uri(u.GetLeftPart(UriPartial.Path), UriKind.Absolute);
+        }
         return u.AbsoluteUri;
     }
     internal static void PageInput(int page, int size) => Require(page is >= 1 and <= 100 && size is >= 1 and <= 100);

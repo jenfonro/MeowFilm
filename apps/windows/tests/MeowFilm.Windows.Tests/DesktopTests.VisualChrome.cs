@@ -52,6 +52,32 @@ public static partial class DesktopTests
                 "the embedded search action receives pointer hits");
             True(Hits(search, new Point((search.Padding.Left + search.ActualWidth - search.Padding.Right) / 2, search.ActualHeight / 2)),
                 "the text area keeps independent pointer hits");
+            double TextOrigin(TextBox box)
+            {
+                box.ApplyTemplate(); box.UpdateLayout();
+                var textView = VisualDescendants<FrameworkElement>(box)
+                    .Single(element => element.GetType().Name == "TextBoxView");
+                return textView.TranslatePoint(new Point(), box).X;
+            }
+            search.Text = "搜索内容"; root.UpdateLayout(); await DrainAsync();
+            var searchTextOrigin = TextOrigin(search);
+            var textChromeInset = searchTextOrigin - search.Padding.Left;
+            True(textChromeInset is >= 0 and <= 4,
+                $"search padding is applied once before the native text chrome ({searchTextOrigin:0.##} vs {search.Padding.Left:0.##})");
+            True(searchTextOrigin - (origin.X + action.ActualWidth) is >= 2 and <= 8,
+                "the search glyph and input text have only their intentional gap");
+            var layout = (Grid)root.Child;
+            var ordinary = new TextBox
+            {
+                Width = 220, Height = 38, Text = "普通输入", HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Top
+            };
+            Panel.SetZIndex(ordinary, 100);
+            layout.Children.Add(ordinary); root.UpdateLayout(); await DrainAsync();
+            True(Math.Abs((TextOrigin(ordinary) - ordinary.Padding.Left) - textChromeInset) <= 1 &&
+                Math.Abs(ordinary.Padding.Left - 12) < .01,
+                "the shared text-box template preserves one ordinary padding application");
+            layout.Children.Remove(ordinary);
             True(search.Background is SolidColorBrush { Color.A: 255 }, "search has an opaque flat background");
             DesktopTheme.SetIsHighContrast(root, true); root.UpdateLayout(); await DrainAsync();
             Equal(SystemColors.WindowColor, ((SolidColorBrush)search.Background).Color, "system search background");
@@ -258,5 +284,14 @@ public static partial class DesktopTests
         root.Background = shell.Background; TextElement.SetForeground(root, shell.Foreground);
         TextElement.SetFontFamily(root, shell.FontFamily); TextElement.SetFontSize(root, shell.FontSize);
         return root;
+    }
+    private static IEnumerable<T> VisualDescendants<T>(DependencyObject root) where T : DependencyObject
+    {
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is T match) yield return match;
+            foreach (var descendant in VisualDescendants<T>(child)) yield return descendant;
+        }
     }
 }

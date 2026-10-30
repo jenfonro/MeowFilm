@@ -16,11 +16,14 @@ namespace MeowFilm.Windows.Tests;
 public static class MusicEntryCardPresentationTests
 {
     private const string CoverAddress = "https://art.example.test/entry-cover.png";
+    private const string DecorationAddress = "https://art.example.test/entry-decoration.png";
     private static readonly Color BrightCover = Color.FromRgb(250, 248, 245);
 
     public static IEnumerable<TestCase> Cases()
     {
-        yield return Case("resting bright covers paint readable titles and a continuous footer fade", BrightCoverContrast);
+        yield return Case("resting covers keep readable titles without blending into the footer", BrightCoverContrast);
+        yield return Case("entry subtitles use one natural line and at most two wrapped lines", SubtitleWrapping);
+        yield return Case("official decoration drives the title palette and failed decoration falls back to the cover", DecorationPalette);
         yield return Case("decorative fades preserve open and explicit play hit regions", HitAndPlayIntent);
         yield return Case("daily calendar days render valid single and double digit dates", CalendarDays);
         yield return Case("daily captions switch between collapsed and expanded text with only three embedded songs", DailyPreview);
@@ -43,29 +46,23 @@ public static class MusicEntryCardPresentationTests
                 "contrast is present without pointer hover or keyboard focus");
             var title = f.Text(model.Title);
             var titleBounds = f.Bounds(title);
-            var cover = f.Bounds(f.Artwork);
+            var cover = f.Bounds(f.Cover);
             double sampleX = f.ContrastProbeX;
             foreach (double scale in new[] { 1d, 1.5d, 2d })
             {
                 var frame = Capture(f.Entry, scale);
-                var behindTitle = frame.At(new Point(sampleX, titleBounds.Top + titleBounds.Height / 2));
                 var middle = BrightestCoverSample(frame, cover, sampleX);
-                Check(Contrast(behindTitle, middle) > 1.5,
-                    $"{model.Presentation} at {scale}x: the resting title backdrop darkens the bright cover");
                 Check(Luminance(middle) > Luminance(BrightCover) * .8,
                     "the center of the cover is preserved instead of applying a flat dark fill");
-                Check(PaintContrast(frame, titleBounds, sampleX) > 2,
+                Check(PaintContrast(frame, titleBounds, sampleX) > 3,
                     $"{model.Presentation} at {scale}x: actual title glyph pixels contrast with their backdrop");
 
-                var blend = frame.At(new Point(sampleX, cover.Top + cover.Height * .87));
                 var lastCover = frame.At(new Point(sampleX, cover.Bottom - 2));
                 var firstFooter = frame.At(new Point(sampleX, cover.Bottom + 2));
-                double middleLight = Luminance(middle), blendLight = Luminance(blend);
-                double footerLight = Luminance(firstFooter);
-                Check(middleLight > blendLight && blendLight > footerLight,
-                    "cover pixels progressively blend into the footer");
-                Check(Math.Abs(Luminance(lastCover) - footerLight) < Math.Abs(middleLight - footerLight) * .3,
-                    "the cover/footer seam is smaller than the full cover-to-footer contrast");
+                Check(Math.Abs(Luminance(lastCover) - Luminance(middle)) < .04,
+                    "the resting cover remains intact through its bottom edge");
+                Check(Contrast(lastCover, firstFooter) > 1.2,
+                    "the cover and footer retain a clear boundary instead of a permanent fade");
             }
             Check(f.Loader.Addresses.Count == 1 && f.Previews == 0 && f.Opens == 0 && f.Plays == 0,
                 "rendering all DPI variants uses one acquired cover and no business intent");
@@ -79,6 +76,73 @@ public static class MusicEntryCardPresentationTests
         if (saveVisuals) SaveVisuals(snapshots);
     }
 
+    private static async Task SubtitleWrapping()
+    {
+        var oneLine = DailyCard() with
+        {
+            Subtitle = "符合你口味的新鲜好歌",
+            PreviewSubtitle = "从今天的推荐听起"
+        };
+        using var f = new Fixture(oneLine, 168);
+        await f.Load();
+        var caption = f.CaptionText;
+        Check(caption.ActualHeight <= 18.5 && caption.DesiredSize.Height <= 18.5,
+            "a short caption does not reserve an empty second line");
+
+        var twoLines = oneLine with
+        {
+            Subtitle = "根据最近常听与收藏，为你推荐今天值得听的歌曲",
+            PreviewSubtitle = "每日推荐，从最近喜欢的旋律与歌手开始播放"
+        };
+        await f.Bind(twoLines);
+        caption = f.CaptionText;
+        Check(caption.ActualHeight > 18.5 && caption.ActualHeight <= 36.5,
+            "a longer resting caption wraps naturally and remains bounded to two lines");
+        await f.Expand(true);
+        Check(caption.ActualHeight > 18.5 && caption.ActualHeight <= 36.5,
+            "the expanded caption follows the same two-line bound");
+        Check(f.Previews == 0 && f.Opens == 0 && f.Plays == 0 && f.Loader.Addresses.Count == 1,
+            "caption measurement does not trigger a business or artwork reread");
+    }
+
+    private static async Task DecorationPalette()
+    {
+        var model = DailyCard() with { Decoration = DecorationAddress };
+        var dark = Color.FromRgb(28, 22, 20);
+        using (var decorated = new Fixture(model, coverColor: dark))
+        {
+            await decorated.Load();
+            Check(decorated.Decoration.HasTopPalette &&
+                decorated.Loader.Addresses.OrderBy(value => value, StringComparer.Ordinal)
+                    .SequenceEqual(new[] { CoverAddress, DecorationAddress }.OrderBy(value => value, StringComparer.Ordinal)),
+                "the declared cover and official decoration are each acquired once");
+            var foreground = (SolidColorBrush)decorated.TitleShade.Tag;
+            Check(foreground.Color == Color.FromRgb(35, 39, 48),
+                "a visible light decoration selects a dark title foreground");
+            var shade = (LinearGradientBrush)decorated.TitleShade.Background;
+            Check(shade.GradientStops[0].Color.R == 255 && shade.GradientStops[0].Color.A <= 60,
+                "the official decoration remains visible beneath only a light contrast guard");
+            var frame = Capture(decorated.Entry, 1);
+            var cover = decorated.Bounds(decorated.Cover);
+            Check(Luminance(frame.At(new Point(cover.Left + cover.Width / 2, cover.Top + cover.Height * .7))) < .08,
+                "an opaque decoration is clipped to the title region instead of replacing the real cover");
+            Check(decorated.Previews == 0 && decorated.Opens == 0 && decorated.Plays == 0,
+                "decoration presentation emits no business intent");
+        }
+        using (var fallback = new Fixture(model, coverColor: dark, failDecoration: true))
+        {
+            await fallback.Load();
+            Check(!fallback.Decoration.HasTopPalette &&
+                ((Button)fallback.Decoration.Children[1]).Visibility == Visibility.Collapsed,
+                "failed decoration remains non-interactive and exposes no duplicate retry");
+            Check(((SolidColorBrush)fallback.TitleShade.Tag).Color == Colors.White,
+                "failed decoration falls back to the dark cover palette");
+            var shade = (LinearGradientBrush)fallback.TitleShade.Background;
+            Check(shade.GradientStops[0].Color.R == 0 && shade.GradientStops[0].Color.A == 154,
+                "the cover fallback receives the ordinary dark-title protection");
+        }
+    }
+
     private static async Task HitAndPlayIntent()
     {
         foreach (var model in Cards())
@@ -86,7 +150,7 @@ public static class MusicEntryCardPresentationTests
             using var f = new Fixture(model);
             await f.Load();
             Check(AutomationProperties.GetName(f.Open) == model.Title, "the title remains the accessible open name");
-            var cover = f.Bounds(f.Artwork);
+            var cover = f.Bounds(f.Cover);
             var title = f.Bounds(f.Text(model.Title));
             var points = new[]
             {
@@ -507,17 +571,22 @@ public static class MusicEntryCardPresentationTests
         internal readonly Grid Root = new() { Background = Brushes.Transparent, Focusable = true };
         internal readonly EntryCard Entry;
         internal readonly Window Window;
-        internal readonly ArtworkLoader Loader = new();
+        internal readonly ArtworkLoader Loader;
         internal int Previews, Opens, Plays, UnhandledClicks;
         internal MusicCatalogCard? LastIntent;
         internal Grid Surface => (Grid)Entry.FindName("Surface");
         internal Button Open => (Button)Entry.FindName("OpenButton");
         internal Button Play => (Button)Entry.FindName("PlayButton");
-        internal ArtworkImage Artwork => Visuals(Entry).OfType<ArtworkImage>().Single();
+        internal ArtworkImage Cover => (ArtworkImage)Entry.FindName("Cover");
+        internal ArtworkImage Decoration => (ArtworkImage)Entry.FindName("DecorationLayer");
+        internal Border TitleShade => (Border)Entry.FindName("TitleShade");
+        internal TextBlock CaptionText => Visuals((StackPanel)Entry.FindName("Caption")).OfType<TextBlock>().First();
         internal double ContrastProbeX => Entry.ActualWidth - ((RectangleGeometry)Surface.Clip).RadiusX - 1;
 
-        internal Fixture(MusicCatalogCard model, double width = 168)
+        internal Fixture(MusicCatalogCard model, double width = 168, Color? coverColor = null,
+            bool failDecoration = false)
         {
+            Loader = new ArtworkLoader(coverColor ?? BrightCover, failDecoration);
             ArtworkScope.SetLoader(Root, Loader);
             Entry = new EntryCard { Width = width, VerticalAlignment = VerticalAlignment.Top,
                 HorizontalAlignment = HorizontalAlignment.Left, DataContext = model };
@@ -537,8 +606,10 @@ public static class MusicEntryCardPresentationTests
         internal async Task Load()
         {
             Window.Show(); Window.UpdateLayout(); Root.Focus();
-            await Until(() => Visuals(Artwork).OfType<Image>().Any(image => image.Source is not null) &&
-                CardMotion.GetProgress(Surface) <= .001, "the real WPF card loads one bright cover at rest");
+            var expectedReads = ((MusicCatalogCard)Entry.DataContext).Decoration.Length > 0 ? 2 : 1;
+            await Until(() => Visuals(Cover).OfType<Image>().Any(image => image.Source is not null) &&
+                Loader.Addresses.Count == expectedReads && CardMotion.GetProgress(Surface) <= .001,
+                "the real WPF card loads its declared artwork at rest");
             Window.UpdateLayout();
         }
 
@@ -569,18 +640,33 @@ public static class MusicEntryCardPresentationTests
     {
         internal readonly List<string> Addresses = [];
         internal readonly List<ArtworkLease> Leases = [];
-        private readonly BitmapSource image;
-        internal ArtworkLoader()
+        private readonly BitmapSource cover;
+        private readonly BitmapSource decoration;
+        private readonly bool failDecoration;
+        internal ArtworkLoader(Color coverColor, bool failDecoration)
         {
-            image = BitmapSource.Create(1, 1, 96, 96, PixelFormats.Bgra32, null,
-                new byte[] { BrightCover.B, BrightCover.G, BrightCover.R, 255 }, 4);
-            image.Freeze();
+            this.failDecoration = failDecoration;
+            cover = BitmapSource.Create(1, 1, 96, 96, PixelFormats.Bgra32, null,
+                new byte[] { coverColor.B, coverColor.G, coverColor.R, 255 }, 4);
+            cover.Freeze();
+            var decorationPixels = Enumerable.Range(0, 8)
+                .SelectMany(_ => new byte[] { 255, 255, 255, 255 }).ToArray();
+            decoration = BitmapSource.Create(1, 8, 96, 96, PixelFormats.Bgra32, null,
+                decorationPixels, 4);
+            decoration.Freeze();
         }
         public Task<IArtworkLease> AcquireAsync(string address, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
             Addresses.Add(address);
-            Check(address == CoverAddress, "presentation never acquires an undeclared artwork address");
+            if (address == DecorationAddress && failDecoration)
+                return Task.FromException<IArtworkLease>(new ArtworkException("ARTWORK_NETWORK"));
+            var image = address switch
+            {
+                CoverAddress => cover,
+                DecorationAddress => decoration,
+                _ => throw new InvalidOperationException("presentation acquired an undeclared artwork address")
+            };
             var lease = new ArtworkLease(image);
             Leases.Add(lease);
             return Task.FromResult<IArtworkLease>(lease);
