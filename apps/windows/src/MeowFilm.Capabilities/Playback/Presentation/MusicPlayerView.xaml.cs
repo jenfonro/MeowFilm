@@ -12,9 +12,11 @@ public partial class MusicPlayerView : UserControl
 {
     private readonly MusicCapability module;
     private string? scrubKey;
-    public MusicPlayerView(MusicCapability module)
+    public MusicPlayerView(MusicCapability module, bool showArtwork = true)
     {
-        InitializeComponent(); this.module = module; DataContext = module;
+        InitializeComponent();
+        if (!showArtwork) { MetadataPanel.Children.Remove(ArtworkButton); ArtworkButton.Content = null; }
+        this.module = module; DataContext = module;
         Progress.ScrubStarted += (_, _) => BeginProgress();
         Progress.ScrubCancelled += (_, _) => RestoreProgress();
         Progress.ScrubCommitted += async (_, _) =>

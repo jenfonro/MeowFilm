@@ -58,6 +58,8 @@ public static partial class DesktopTests
             Rect Bounds(FrameworkElement element) => new(element.TranslatePoint(new Point(), root), element.RenderSize);
             Layout();
             var ordinaryPlayer = f.Element<ContentControl>("PlayerHost").Content;
+            True(f.Element<Border>("SidebarBackground").Background is null && f.Element<Border>("PlayerFrame").Background is null,
+                "window background is the only ordinary page backdrop");
             var ordinaryPlayerBounds = Bounds(f.Element<Border>("PlayerFrame"));
             var ordinaryContentBounds = Bounds(f.Element<Grid>("ContentRegion"));
             module.Request(DesktopGlobalSurface.PlayerDetail);
@@ -126,9 +128,13 @@ public static partial class DesktopTests
             module.Request(DesktopGlobalSurface.PlayerDetail);
             await UntilAsync(() => f.Element<Grid>("PlayerDetailSurface").Visibility == Visibility.Visible,
                 "same retained detail opens from the restored app");
-            Click(f.Element<Button>("PlayerDetailSettingsButton")); await DrainAsync();
+            Click(f.Element<Button>("PlayerDetailBackButton"));
             await UntilAsync(() => playerSurface.Visibility == Visibility.Collapsed &&
-                Host(module.SettingsView).Visibility == Visibility.Visible, "player settings leaves the player page");
+                Host(module.View).Visibility == Visibility.Visible, "collapse restores the same app surface");
+            Same(ordinaryPlayer, f.Element<ContentControl>("PlayerHost").Content, "same ordinary footer restored after collapse");
+            Click(f.Element<Button>("SettingsButton")); await DrainAsync();
+            await UntilAsync(() => playerSurface.Visibility == Visibility.Collapsed &&
+                Host(module.SettingsView).Visibility == Visibility.Visible, "ordinary settings opens after collapsing the player page");
             Equal(1, module.InitializeCount, "presentation never creates another module");
         });
     }
@@ -137,12 +143,19 @@ public static partial class DesktopTests
         private readonly Border detail = new() { Background = Brushes.DarkSlateGray };
         private readonly Border queue = new() { Background = Brushes.White };
         public int Deactivations { get; private set; }
+        public Task? PlayerReady { get; set; }
+        public List<CancellationToken> PlayerActivations { get; } = [];
         public event EventHandler<DesktopGlobalSurfaceRequestEventArgs>? GlobalSurfaceRequested;
         public FrameworkElement GetGlobalSurface(DesktopGlobalSurface surface) =>
             surface == DesktopGlobalSurface.PlayerDetail ? detail : queue;
         public Task ActivateGlobalSurfaceAsync(DesktopGlobalSurface surface, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (surface == DesktopGlobalSurface.PlayerDetail)
+            {
+                PlayerActivations.Add(cancellationToken);
+                return PlayerReady ?? Task.CompletedTask;
+            }
             return Task.CompletedTask;
         }
         public void DeactivateGlobalSurface(DesktopGlobalSurface surface) => Deactivations++;

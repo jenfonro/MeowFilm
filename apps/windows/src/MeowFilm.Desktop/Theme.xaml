@@ -3,7 +3,6 @@
                     xmlns:local="clr-namespace:MeowFilm.Desktop">
     <!-- Semantic tokens are deliberately dynamic: a module can override them in its view resources. -->
     <SolidColorBrush x:Key="MeowFilm.Brush.Window" Color="#F7F9FC" />
-    <SolidColorBrush x:Key="MeowFilm.Brush.Sidebar" Color="#F0F3F6" />
     <SolidColorBrush x:Key="MeowFilm.Brush.Surface" Color="#FFFFFF" />
     <SolidColorBrush x:Key="MeowFilm.Brush.Text" Color="#252835" />
     <SolidColorBrush x:Key="MeowFilm.Brush.Muted" Color="#616573" />

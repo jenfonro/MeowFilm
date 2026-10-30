@@ -91,7 +91,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
     public System.Windows.Media.Brush PlayerProgressBrush => page.PlayerProgress;
     internal void RefreshPlayerBackground()
     { Changed(nameof(PlayerBackground)); Changed(nameof(PlayerProgressBrush)); }
-    internal void RefreshPlayerAppearance(System.Windows.Media.Brush sampled) => page.RefreshAppearance(sampled);
+    internal void RefreshPlayerAppearance(System.Windows.Media.Brush sampled, bool animate = true) => page.RefreshAppearance(sampled, animate);
     public string Heading => heading;
     public string Status => status;
     public bool Busy => commands > 0 || loadCancellation is not null;

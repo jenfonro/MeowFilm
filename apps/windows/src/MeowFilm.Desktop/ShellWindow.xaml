@@ -67,11 +67,9 @@
             <Border x:Name="SidebarBackground" Grid.RowSpan="2" BorderThickness="0,0,1,0">
                 <Border.Style>
                     <Style TargetType="Border">
-                        <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Sidebar}" />
                         <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Border}" />
                         <Style.Triggers>
                             <Trigger Property="local:DesktopTheme.IsHighContrast" Value="True">
-                                <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}" />
                                 <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}" />
                             </Trigger>
                         </Style.Triggers>
@@ -267,9 +265,6 @@
                     </Button>
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top"
                                 Margin="0,16,12,0" shell:WindowChrome.IsHitTestVisibleInChrome="True">
-                        <Button x:Name="PlayerDetailSettingsButton" Style="{StaticResource MeowFilm.CaptionButton}"
-                                FontSize="17" Content="&#xE713;" Foreground="#ECECEE"
-                                Click="OnSettingsClick" AutomationProperties.Name="设置" ToolTip="设置" />
                         <Button Style="{StaticResource MeowFilm.CaptionButton}" Content="&#xE921;" Foreground="#ECECEE"
                                 Click="OnMinimizeClick" AutomationProperties.Name="最小化" ToolTip="最小化" />
                         <Button x:Name="PlayerDetailMaximizeButton" Style="{StaticResource MeowFilm.CaptionButton}" Foreground="#ECECEE"
@@ -300,13 +295,6 @@
 
             <!-- Auto-sized layout row, never an overlay on scrolling content. No player is created by the shell. -->
             <Border x:Name="PlayerFrame" Grid.Row="2" Grid.ColumnSpan="2" Visibility="Collapsed">
-                <Border.Style>
-                    <Style TargetType="Border" BasedOn="{StaticResource MeowFilm.Surface}">
-                        <Setter Property="BorderThickness" Value="0" />
-                        <Setter Property="CornerRadius" Value="0" />
-                        <Setter Property="Padding" Value="0" />
-                    </Style>
-                </Border.Style>
                 <ContentControl x:Name="PlayerHost" IsEnabled="{Binding IsInteractive}"
                                 HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"
                                 Focusable="False" IsTabStop="False" />

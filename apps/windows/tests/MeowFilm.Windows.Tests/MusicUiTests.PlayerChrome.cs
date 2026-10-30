@@ -19,6 +19,124 @@ public static partial class MusicUiTests
 {
     private static IEnumerable<TestCase> PlayerChromeCases()
     {
+        yield return Case("player first visible frame has prepared artwork and no secondary footer disc", async () =>
+        {
+            await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
+            var text = string.Join('\n', Enumerable.Range(0, 16).Select(i => $"[{i * 5 / 60:00}:{i * 5 % 60:00}]Prepared lyric {i}"));
+            await f.Rpc("music.lyrics.local.save", new { song = f.Module.Songs[0].Raw, text });
+            await f.Playback.SeekAsync(40);
+            var shell = new ShellWindow([f.Module], () => Task.CompletedTask);
+            try
+            {
+                shell.PrepareForRender();
+                var root = (Border)shell.Content; shell.Content = null;
+                root.Resources.MergedDictionaries.Add(shell.Resources); root.DataContext = shell.DataContext;
+                var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
+                var record = (MusicRecordView)detail.FindName("DetailRecord");
+                var cover = (ArtworkImage)record.FindName("Cover");
+                var loader = new HeldPlayerArtwork(); ArtworkScope.SetLoader(record, loader);
+                record.Address = "fixture://prepared-cover";
+                using var source = new HwndSource(new HwndSourceParameters("player-prepared-frame-fixture")
+                {
+                    WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x80,
+                    PositionX = -32000, PositionY = -32000, Width = 1110, Height = 800
+                });
+                source.RootVisual = root;
+                Render(root, 1110, 800); await Drain();
+                var playerSurface = (Grid)shell.FindName("PlayerDetailSurface");
+                var footer = (MusicPlayerView)((ContentControl)detail.FindName("DetailPlayerHost")).Content;
+                var readyOnReveal = false;
+                playerSurface.IsVisibleChanged += (_, args) =>
+                {
+                    if (args.NewValue is true)
+                    {
+                        var lyrics = (ListBox)detail.FindName("LyricList");
+                        var scroll = Visuals(lyrics).OfType<ScrollViewer>().First();
+                        var row = lyrics.ItemContainerGenerator.ContainerFromIndex(8) as FrameworkElement;
+                        readyOnReveal = ((Image)cover.Children[0]).Source is not null &&
+                            ((GradientBrush)f.Module.PlayerBackground).GradientStops.All(stop => !stop.HasAnimatedProperties) &&
+                            f.Module.Lyrics.Count == 16 && row is not null &&
+                            Math.Abs(row.TranslatePoint(new Point(0, row.ActualHeight / 2), scroll).Y - scroll.ActualHeight * .35) < 2;
+                    }
+                };
+                await f.Module.ShowLyricsAsync();
+                await Until(() => loader.Calls.Count == 1);
+                Equal(Visibility.Hidden, playerSurface.Visibility);
+                True(((Image)cover.Children[0]).Source is null, "pending cover is not exposed by the entrance");
+                var lease = await new PlayerArtworkFixture().AcquireAsync("fixture://prepared-cover");
+                loader.Calls[0].Completion.SetResult(lease);
+                await Until(() => playerSurface.Visibility == Visibility.Visible);
+                Render(root, 1110, 800); await Drain();
+                True(readyOnReveal, "cover pixels and final background exist at the first visible frame");
+                True(ReferenceEquals(lease.Image, ((Image)cover.Children[0]).Source), "preparation's decoded image is used without refetching");
+                Equal(1, loader.Calls.Count);
+                Equal(0, Visuals(footer).OfType<MusicRecordView>().Count());
+                Equal(1, Visuals(f.Module.PlayerView).OfType<MusicRecordView>().Count());
+                var metadata = (StackPanel)footer.FindName("MetadataText");
+                var panel = (Grid)footer.FindName("MetadataPanel");
+                True(Math.Abs(metadata.TranslatePoint(new Point(), panel).X) < .5, "removed disc leaves no reserved column");
+                await f.Module.OpenPlayerDetailAsync();
+                await Until(() => playerSurface.Visibility == Visibility.Collapsed);
+                True(((PlayerArtworkLease)lease).Disposed, "closing releases the prepared image on actual unmount");
+                source.RootVisual = null;
+            }
+            finally { shell.Close(); await shell.ShutdownCompletion; }
+        });
+        yield return Case("player preparation rechecks the cover replaced while lyrics are pending", async () =>
+        {
+            await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
+            var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
+            detail.Visibility = Visibility.Hidden;
+            var record = (MusicRecordView)detail.FindName("DetailRecord");
+            var cover = (ArtworkImage)record.FindName("Cover");
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var completed = new TaskCompletionSource<IArtworkLease>(TaskCreationOptions.RunContinuationsAsynchronously);
+            ArtworkScope.SetLoader(record, new CallbackArtworkLoader((address, token) =>
+            {
+                if (address == "fixture://first") return new PlayerArtworkFixture().AcquireAsync(address, token);
+                Equal("fixture://second", address); entered.TrySetResult(); return completed.Task;
+            }));
+            record.Address = "fixture://first";
+            using var source = new HwndSource(new HwndSourceParameters("player-changing-readiness-fixture")
+            {
+                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x80,
+                PositionX = -32000, PositionY = -32000, Width = 1110, Height = 800
+            });
+            source.RootVisual = detail;
+            detail.Measure(new(1110, 800)); detail.Arrange(new(0, 0, 1110, 800)); detail.UpdateLayout();
+            var lyrics = f.Calls.HoldNext("music.lyrics.local.get");
+            var preparing = f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, default);
+            await lyrics.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            record.Address = "fixture://second";
+            lyrics.Release();
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); await Drain();
+            True(!preparing.IsCompleted, "lyrics completion cannot report readiness while the current cover is pending");
+            var image = await new PlayerArtworkFixture().AcquireAsync("fixture://second");
+            completed.SetResult(image); await preparing;
+            True(ReferenceEquals(image.Image, ((Image)cover.Children[0]).Source), "prepared state uses the current cover");
+            f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail); source.RootVisual = null;
+            True(((PlayerArtworkLease)image).Disposed, "retirement releases the current prepared cover");
+        });
+        yield return Case("ordinary player footer reveals changes to its host backdrop", async () =>
+        {
+            await using var f = await Fixture.Create();
+            var host = new Border { Child = f.Module.PlayerView };
+            DesktopTheme.SetIsHighContrast(host, false);
+            foreach (var backdrop in new[] { Brushes.DarkSlateGray, Brushes.Linen })
+            {
+                host.Background = backdrop;
+                Render(host, 1110, 80);
+                var bitmap = new RenderTargetBitmap(1110, 80, 96, 96, PixelFormats.Pbgra32);
+                bitmap.Render(host);
+                foreach (var x in new[] { 1, 1108 })
+                {
+                    var pixel = new byte[4];
+                    bitmap.CopyPixels(new Int32Rect(x, 40, 1, 1), pixel, 4, 0);
+                    True(pixel.SequenceEqual(new[] { backdrop.Color.B, backdrop.Color.G, backdrop.Color.R, backdrop.Color.A }),
+                        "footer blank areas expose the current host color");
+                }
+            }
+        });
         yield return Case("footer rail touches top edge without a second rule", async () =>
         {
             await using var f = await Fixture.Create();
@@ -158,13 +276,15 @@ public static partial class MusicUiTests
             await f.Module.PlaySelectionAsync();
             await f.Module.ToggleCurrentFavoriteAsync();
             var footer = f.Module.PlayerView;
-            Render(footer, 1110, 80);
+            // The footer is transparent; reference pixels are composited on the window backdrop it sits on.
+            var host = new Border { Background = (Brush)footer.FindResource("MeowFilm.Brush.Window"), Child = footer };
+            Render(host, 1110, 80);
             var button = (Button)footer.FindName("FavoriteButton");
             Equal(32d, button.ActualWidth);
             var badge = (TextBlock)button.Template.FindName("FavoriteBadge", button);
             Equal("", badge.Text);
             badge.Text = "10w+";
-            Render(footer, 1110, 80);
+            Render(host, 1110, 80);
             Equal(43d, button.ActualWidth); Equal(32d, button.ActualHeight);
             var surface = (Border)button.Template.FindName("FavoriteSurface", button);
             Equal(new CornerRadius(16), surface.CornerRadius);
@@ -173,8 +293,8 @@ public static partial class MusicUiTests
             Equal(Color.FromRgb(0xFC, 0x3D, 0x49), ((SolidColorBrush)badge.Foreground).Color);
 
             var bitmap = new RenderTargetBitmap(1110, 80, 96, 96, PixelFormats.Pbgra32);
-            bitmap.Render(footer);
-            var origin = button.TranslatePoint(new Point(), footer);
+            bitmap.Render(host);
+            var origin = button.TranslatePoint(new Point(), host);
             var crop = new CroppedBitmap(bitmap, new Int32Rect(
                 (int)Math.Round(origin.X), (int)Math.Round(origin.Y), 43, 32));
 
@@ -308,11 +428,30 @@ public static partial class MusicUiTests
                 root.Measure(new(1243, 848)); root.Arrange(new Rect(0, 0, 1243, 848)); root.UpdateLayout();
                 var ordinaryFooter = f.Module.PlayerView;
                 var ordinaryFooterHeight = ordinaryFooter.ActualHeight;
+
                 await f.Module.ShowLyricsAsync();
                 await Until(() => f.Module.IsLyrics);
                 var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
                 var footer = (MusicPlayerView)((ContentControl)detail.FindName("DetailPlayerHost")).Content;
                 True(!ReferenceEquals(ordinaryFooter, footer), "complete player page has its own footer");
+                void AssertDetailBackdrop(Size size)
+                {
+                    var width = (int)size.Width; var height = (int)size.Height;
+                    var actual = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
+                    actual.Render(detail);
+                    var canvas = new Border { Background = detail.Background };
+                    canvas.Measure(size); canvas.Arrange(new Rect(size)); canvas.UpdateLayout();
+                    var expected = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
+                    expected.Render(canvas);
+                    var y = (int)footer.TranslatePoint(new Point(0, footer.ActualHeight / 2), detail).Y;
+                    foreach (var x in new[] { 1, width - 2 })
+                    {
+                        var area = new Int32Rect(x, y, 1, 1);
+                        var pixel = new byte[4]; var backgroundPixel = new byte[4];
+                        actual.CopyPixels(area, pixel, 4, 0); expected.CopyPixels(area, backgroundPixel, 4, 0);
+                        True(pixel.SequenceEqual(backgroundPixel), "detail footer exposes the same full-page backdrop");
+                    }
+                }
                 var record = (MusicRecordView)detail.FindName("DetailRecord");
                 var cover = (ArtworkImage)record.FindName("Cover");
                 ArtworkScope.SetLoader(record, new PlayerArtworkFixture());
@@ -350,8 +489,22 @@ public static partial class MusicUiTests
                     Render(root, (int)size.Width, (int)size.Height);
                     DesktopTheme.SetIsHighContrast(grid, false); root.UpdateLayout();
                     Equal(Color.FromRgb(252, 59, 90), ((SolidColorBrush)play.Background).Color);
+                    True(ReferenceEquals(f.Module.PlayerBackground, detail.Background), "player page root owns the cover backdrop");
+                    True(footer.Background is null, "page footer paints no backdrop of its own");
+                    TextBlock Title(FrameworkElement owner) => Visuals(owner).OfType<TextBlock>().First(block => block.Text == f.Module.CurrentTitle);
+                    True(((SolidColorBrush)Title(footer).Foreground).Color != ((SolidColorBrush)Title(ordinaryFooter).Foreground).Color,
+                        "page footer adapts its controls to the page backdrop");
+                    foreach (var playerView in new[] { ordinaryFooter, footer })
+                    {
+                        var quality = (Button)playerView.FindName("QualityButton");
+                        var label = Visuals(quality).OfType<TextBlock>().Single();
+                        True(ReferenceEquals(quality.Foreground, label.Foreground), "quality label follows the control palette");
+                    }
+                    AssertDetailBackdrop(size);
                     True(f.Module.IsLyrics, "page footer consumes the existing active player state");
                     DesktopTheme.SetIsHighContrast(grid, true); root.UpdateLayout();
+                    True(((SolidColorBrush)detail.Background).Color == SystemColors.WindowColor, "high contrast replaces the page backdrop");
+                    AssertDetailBackdrop(size);
                 }
                 True(record.PaletteBrush != Brushes.DimGray, "cover is loaded through public loader and sampled");
                 Equal(opens, f.Playback.Opens.Count);
@@ -363,7 +516,7 @@ public static partial class MusicUiTests
                 var row = lyricList.ItemContainerGenerator.ContainerFromIndex(8) as FrameworkElement;
                 if (row is null) throw new InvalidOperationException("active lyric row is not realized after automatic centering");
                 var rowCenter = row.TranslatePoint(new Point(0, row.ActualHeight / 2), lyricScroll).Y;
-                var readingBand = lyricScroll.ViewportHeight * .35;
+                var readingBand = lyricScroll.ActualHeight * .35;
                 True(Math.Abs(rowCenter - readingBand) < 2,
                     $"active line reaches reference reading band: actual={rowCenter}, target={readingBand}, offset={centered}, " +
                     $"scrollable={lyricScroll.ScrollableHeight}, extent={lyricScroll.ExtentHeight}, viewport={lyricScroll.ViewportHeight}, row={row.ActualHeight}");
@@ -381,11 +534,11 @@ public static partial class MusicUiTests
                     recoveredRow = lyricList.ItemContainerGenerator.ContainerFromIndex(9) as FrameworkElement;
                     return recoveredRow is not null &&
                         Math.Abs(recoveredRow.TranslatePoint(new Point(0, recoveredRow.ActualHeight / 2), lyricScroll).Y -
-                            lyricScroll.ViewportHeight * .35) < 2;
+                            lyricScroll.ActualHeight * .35) < 2;
                 });
                 row = recoveredRow ?? throw new InvalidOperationException(
                     "active lyric row is not realized after manual-scroll recovery");
-                True(Math.Abs(row.TranslatePoint(new Point(0, row.ActualHeight / 2), lyricScroll).Y - lyricScroll.ViewportHeight * .35) < 2,
+                True(Math.Abs(row.TranslatePoint(new Point(0, row.ActualHeight / 2), lyricScroll).Y - lyricScroll.ActualHeight * .35) < 2,
                     "idle timeout resumes lyric following without a new media tick");
                 f.Module.PreviewLyric(f.Module.Lyrics[2]); await Drain();
                 True(f.Module.HasLyricPreview, "preview remains available"); f.Module.CancelLyricPreview();
@@ -400,6 +553,20 @@ public static partial class MusicUiTests
             }
             finally { shell.Close(); await shell.ShutdownCompletion; }
         });
+    }
+    private sealed class CallbackArtworkLoader(Func<string, CancellationToken, Task<IArtworkLease>> acquire) : IArtworkLoader
+    {
+        public Task<IArtworkLease> AcquireAsync(string address, CancellationToken cancellationToken = default) =>
+            acquire(address, cancellationToken);
+    }
+    private sealed class HeldPlayerArtwork : IArtworkLoader
+    {
+        internal readonly List<(TaskCompletionSource<IArtworkLease> Completion, CancellationToken Token)> Calls = [];
+        public Task<IArtworkLease> AcquireAsync(string address, CancellationToken cancellationToken = default)
+        {
+            var completion = new TaskCompletionSource<IArtworkLease>(TaskCreationOptions.RunContinuationsAsynchronously);
+            Calls.Add((completion, cancellationToken)); return completion.Task;
+        }
     }
     // Explicit deterministic artwork fixture, never packaged into the product or fetched from a platform.
     private sealed class PlayerArtworkFixture : IArtworkLoader
@@ -421,6 +588,7 @@ public static partial class MusicUiTests
     private sealed class PlayerArtworkLease(BitmapSource image) : IArtworkLease
     {
         public BitmapSource Image => image;
-        public void Dispose() { }
+        internal bool Disposed;
+        public void Dispose() => Disposed = true;
     }
 }

@@ -4,13 +4,30 @@
  xmlns:local="clr-namespace:MeowFilm.Capabilities"
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
  FontFamily="{DynamicResource MeowFilm.Font.Body}"
- TextOptions.TextFormattingMode="Ideal" TextOptions.TextRenderingMode="ClearType"
- Background="{Binding PlayerBackground}">
+ TextOptions.TextFormattingMode="Ideal" TextOptions.TextRenderingMode="ClearType">
+ <UserControl.Style>
+  <Style TargetType="UserControl">
+   <!-- The page's only backdrop; detail content and footer stay transparent over it. -->
+   <Setter Property="Background" Value="{Binding PlayerBackground}"/>
+   <Style.Triggers>
+    <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
+     <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+    </Trigger>
+   </Style.Triggers>
+  </Style>
+ </UserControl.Style>
  <UserControl.Resources>
   <ResourceDictionary>
    <ResourceDictionary.MergedDictionaries>
     <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/>
    </ResourceDictionary.MergedDictionaries>
+   <ResourceDictionary x:Key="Player.FooterPalette">
+    <SolidColorBrush x:Key="Capability.Player.Foreground" Color="#C5C3C8"/>
+    <SolidColorBrush x:Key="Capability.Player.Text" Color="#EBEAED"/>
+    <SolidColorBrush x:Key="Capability.Player.Hover" Color="#14FFFFFF"/>
+    <SolidColorBrush x:Key="Capability.Player.Pressed" Color="#22FFFFFF"/>
+    <SolidColorBrush x:Key="Capability.Player.Rail" Color="#26FFFFFF"/>
+   </ResourceDictionary>
    <Style TargetType="TextBlock">
     <Setter Property="Foreground" Value="#EBEAED"/>
     <Style.Triggers>
@@ -116,32 +133,12 @@
      </StackPanel>
     </WrapPanel>
    </StackPanel>
-   <DockPanel Grid.Row="1" Margin="0,0,0,8">
-    <Button x:Name="LyricOptionsButton" DockPanel.Dock="Right" Content="&#xE713;"
-            Style="{StaticResource MeowFilm.IconButton}" Foreground="#C5C3C8"
-            Click="LyricOptions_Click" AutomationProperties.Name="歌词设置" ToolTip="歌词设置"/>
-    <Border Background="#0DFFFFFF" CornerRadius="16" HorizontalAlignment="Left">
+    <Border Grid.Row="1" Margin="0,0,0,8" Background="#0DFFFFFF" CornerRadius="16" HorizontalAlignment="Left">
      <StackPanel Orientation="Horizontal">
       <RadioButton Content="歌词" Style="{StaticResource Player.DetailTab}" IsChecked="True"/>
-      <RadioButton Content="百科" Style="{StaticResource Player.DetailTab}" IsHitTestVisible="False"/>
       <RadioButton Content="相似推荐" Style="{StaticResource Player.DetailTab}" IsHitTestVisible="False"/>
      </StackPanel>
     </Border>
-   </DockPanel>
-   <Popup x:Name="LyricOptionsPopup" PlacementTarget="{Binding ElementName=LyricOptionsButton}"
-          Placement="Bottom" StaysOpen="False" AllowsTransparency="True">
-    <Border Background="{DynamicResource MeowFilm.Brush.Surface}" Padding="12" CornerRadius="8" Margin="0,6,0,0">
-     <StackPanel>
-      <WrapPanel><Button Content="刷新歌词" Click="Lyrics_Click" IsEnabled="{Binding CanEdit}"/>
-       <ComboBox ItemsSource="{Binding LyricSources}" SelectedItem="{Binding SelectedLyricSource}"
-                 DisplayMemberPath="Label" MinWidth="120" MaxWidth="240" Margin="0,0,8,8"
-                 AutomationProperties.Name="歌词来源"/>
-       <Button Content="取消" Click="CancelLyrics_Click" IsEnabled="{Binding CanCancelLyrics}"/></WrapPanel>
-      <WrapPanel><Button Content="导入歌词" Click="ImportLyrics_Click" IsEnabled="{Binding CanImportLocalLyrics}"/>
-       <Button Content="移除本地歌词" Click="RemoveLocalLyrics_Click" IsEnabled="{Binding CanRemoveLocalLyrics}"/></WrapPanel>
-     </StackPanel>
-    </Border>
-   </Popup>
    <Grid Grid.Row="2">
     <ListBox Background="Transparent" BorderThickness="0" Padding="0"
      ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto"

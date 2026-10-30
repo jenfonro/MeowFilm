@@ -77,6 +77,9 @@ public partial class MusicRecordView : UserControl
                 CancelSwipe();
         };
     }
+    internal Task<IDisposable> PrepareArtworkAsync(CancellationToken cancellationToken) =>
+        Cover.PrepareForPresentationAsync(cancellationToken);
+
     private static void Changed(DependencyObject value, DependencyPropertyChangedEventArgs args)
     {
         var record = (MusicRecordView)value;
