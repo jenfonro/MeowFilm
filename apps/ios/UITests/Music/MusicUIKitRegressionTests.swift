@@ -239,6 +239,80 @@ final class MusicUIKitRegressionTests: XCTestCase {
         XCTAssertEqual(played, ["a"]); XCTAssertEqual(oldCalls, 0)
     }
 
+    func testBrowseCardColorGradientAppearsOnlyWhenTextOverlaysArtwork() throws {
+        let cell = MusicBrowseCell(frame: CGRect(x: 0, y: 0, width: 180, height: 232))
+        let gradient = try XCTUnwrap(cell.contentView.layer.sublayers?.compactMap { $0 as? CAGradientLayer }
+            .first { $0.name == "music.browse.text-gradient" })
+        let artwork = try XCTUnwrap(cell.contentView.subviews.compactMap { $0 as? MusicArtworkView }.first)
+        let collection = MusicPublicBrowseCollection(platform: .netease, nativeID: "1",
+            title: "标题")
+        let overlay = MusicPublicBrowseItem(id: "overlay", title: "标题", subtitle: "副标题",
+                                            content: .collection(collection))
+
+        cell.configure(item: overlay, layout: .featureRail, theme: PageTheme(), onPlay: {})
+        let provider = try XCTUnwrap(CGDataProvider(data: Data([250, 200, 100, 255]) as CFData))
+        let colorSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB))
+        let source = try XCTUnwrap(CGImage(width: 1, height: 1, bitsPerComponent: 8, bitsPerPixel: 32,
+                                           bytesPerRow: 4, space: colorSpace,
+                                           bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+                                           provider: provider, decode: nil, shouldInterpolate: true,
+                                           intent: .defaultIntent))
+        artwork.onImage?(UIImage(cgImage: source), nil)
+        cell.layoutIfNeeded()
+        XCTAssertFalse(gradient.isHidden)
+        XCTAssertEqual(artwork.frame.height, cell.bounds.width)
+        XCTAssertEqual(gradient.frame, artwork.frame)
+        XCTAssertEqual(gradient.locations?.map(\.doubleValue), [0.62, 0.82, 1])
+        let colors = try XCTUnwrap(gradient.colors as? [CGColor])
+        let bottom = UIColor(cgColor: try XCTUnwrap(colors.last))
+        XCTAssertEqual(cell.contentView.backgroundColor, bottom)
+        let title = try XCTUnwrap(cell.contentView.subviews.compactMap { $0 as? UILabel }
+            .first { $0.text == "标题" })
+        XCTAssertGreaterThanOrEqual(title.frame.minY, artwork.frame.maxY)
+        var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+        XCTAssertTrue(bottom.getRed(&red, green: &green, blue: &blue, alpha: &alpha))
+        XCTAssertEqual(0.2126 * red + 0.7152 * green + 0.0722 * blue, 170.0 / 255.0, accuracy: 0.01)
+        XCTAssertEqual(colors[1].alpha, 112.0 / 255.0, accuracy: 0.001)
+
+        let standard = MusicPublicBrowseItem(id: "standard", title: "普通入口",
+                                             content: .unavailable)
+        cell.configure(item: standard, layout: .featureRail, theme: PageTheme(), onPlay: {})
+        artwork.onImage?(UIImage(cgImage: source), nil)
+        let standardBottom = UIColor(cgColor: try XCTUnwrap((gradient.colors as? [CGColor])?.last))
+        XCTAssertTrue(standardBottom.getRed(&red, green: &green, blue: &blue, alpha: &alpha))
+        XCTAssertEqual(0.2126 * red + 0.7152 * green + 0.0722 * blue, 96.0 / 255.0, accuracy: 0.01)
+        XCTAssertEqual(cell.contentView.backgroundColor, standardBottom)
+
+        cell.configure(item: overlay, layout: .playlistRail, theme: PageTheme(), onPlay: {})
+        cell.layoutIfNeeded()
+        XCTAssertTrue(gradient.isHidden)
+        XCTAssertEqual(gradient.frame, .zero)
+        XCTAssertEqual(cell.contentView.backgroundColor, .clear)
+        let subtitle = try XCTUnwrap(cell.contentView.subviews.compactMap { $0 as? UILabel }
+            .first { $0.text == "副标题" })
+        let play = try XCTUnwrap(cell.contentView.subviews.compactMap { $0 as? UIButton }
+            .first { $0.accessibilityIdentifier == "music.browse.play.overlay" })
+        XCTAssertTrue(subtitle.isHidden)
+        XCTAssertEqual(subtitle.frame, .zero)
+        XCTAssertTrue(artwork.frame.contains(play.frame))
+        XCTAssertEqual(artwork.frame.maxX - play.frame.maxX, 6, accuracy: 0.5)
+        XCTAssertEqual(artwork.frame.maxY - play.frame.maxY, 6, accuracy: 0.5)
+
+        cell.configure(item: overlay, layout: .banner, theme: PageTheme(), onPlay: {})
+        cell.layoutIfNeeded()
+        XCTAssertFalse(gradient.isHidden)
+        XCTAssertEqual(gradient.frame, artwork.frame)
+        XCTAssertEqual(gradient.locations?.map(\.doubleValue), [0, 0.52, 1])
+        XCTAssertEqual(try XCTUnwrap((gradient.colors as? [CGColor])?.last).alpha,
+                       160.0 / 255.0, accuracy: 0.001)
+
+        let empty = MusicPublicBrowseItem(id: "empty", title: "", content: .unavailable)
+        cell.configure(item: empty, layout: .banner, theme: PageTheme(), onPlay: {})
+        cell.layoutIfNeeded()
+        XCTAssertTrue(gradient.isHidden)
+        XCTAssertEqual(gradient.frame, .zero)
+    }
+
     func testLeadingCardsAndUntitledHomeSongsKeepContentGapAndRowPlaybackTouchable() async throws {
         let page = MusicPublicBrowsePage(sections: [
             .init(id: "cards", title: "", items: [card("cover", previews: [])], layout: .featureRail),
@@ -343,6 +417,8 @@ final class MusicUIKitRegressionTests: XCTestCase {
         }, evaluatedWith: collection)
         await fulfillment(of: [ready], timeout: 2)
         let header = try XCTUnwrap(collection.supplementaryView(forElementKind: kind, at: IndexPath(item: 0, section: 0)))
+        let cell = try XCTUnwrap(collection.cellForItem(at: IndexPath(item: 0, section: 0)))
+        XCTAssertEqual(cell.bounds.height - cell.bounds.width, 42, accuracy: 0.5)
         let entry = try XCTUnwrap(header.hitTest(CGPoint(x: header.bounds.width - 2, y: 22), with: nil) as? UIButton)
         entry.sendActions(for: .touchUpInside)
         XCTAssertEqual(selected, [channel]); XCTAssertTrue(opened.isEmpty)

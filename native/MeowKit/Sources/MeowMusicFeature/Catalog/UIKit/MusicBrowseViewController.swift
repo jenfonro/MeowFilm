@@ -858,7 +858,7 @@ public final class MusicBrowseViewController: MusicPageViewController,
             case .grid:
                 let count = width < 359 ? 2 : 3
                 group = .horizontal(layoutSize: .init(widthDimension: .fractionalWidth(1),
-                    heightDimension: .absolute((width - 32 - CGFloat(count - 1) * 12) / CGFloat(count) + 58)),
+                    heightDimension: .absolute((width - 32 - CGFloat(count - 1) * 12) / CGFloat(count) + 42)),
                     subitem: item, count: count)
                 group.interItemSpacing = .fixed(12)
             case .rankingStack:
@@ -871,11 +871,16 @@ public final class MusicBrowseViewController: MusicPageViewController,
             case .list where trackList:
                 group = .vertical(layoutSize: .init(widthDimension: .fractionalWidth(1),
                     heightDimension: .absolute(64)), subitems: [item])
-            case .list, .playlistRail, .rankingSmall:
+            case .list:
+                let card = min(216, max(112, width * 0.36))
+                group = .horizontal(layoutSize: .init(widthDimension: .absolute(card),
+                    heightDimension: .absolute(card + 58)), subitems: [item])
+                scrolling = .continuous
+            case .playlistRail, .rankingSmall:
                 let card = section.layout == .rankingSmall ? max(1, (width - 32) * 0.24) :
                     min(216, max(112, width * 0.36))
                 group = .horizontal(layoutSize: .init(widthDimension: .absolute(card),
-                    heightDimension: .absolute(card + 58)), subitems: [item])
+                    heightDimension: .absolute(card + 42)), subitems: [item])
                 scrolling = .continuous
             }
             let result = NSCollectionLayoutSection(group: group)
