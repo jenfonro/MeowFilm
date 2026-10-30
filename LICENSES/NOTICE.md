@@ -229,3 +229,24 @@ Kuwo and Migu provenance, retrieved on 2026-10-30:
 | --- | --- |
 | `kuwo-music.png` | `488d72ecf0709df33580ae81b5224eecc464419022a506bef8e84405920e7582` |
 | `migu-music.png` | `f519240351d82cf337fffa6534c759dfa2921dad3923c33b4cd3f6a50d8825d4` |
+
+## Music platform brand assets — iOS only
+
+The assets below identify music platforms on the iOS account settings page.
+Their names, marks and artwork remain the property of their respective rights
+holders; use here does not imply affiliation or endorsement. They are not
+licensed under this application's GPL source license. Public availability is
+not a redistribution license; no open-source or redistribution permission has
+been established, and rights must be confirmed before distributing these assets.
+
+- NetEase Cloud Music: `apps/ios/Assets.xcassets/MusicPlatformNetease.imageset/netease.png`,
+  unmodified 200×200 PNG from the logo declared by `https://music.163.com/`:
+  `https://p3.music.126.net/9z9CeujRSPOPm7Rq2DFw_g==/6674035581283071.jpg?param=200y200`.
+- QQ Music: `apps/ios/Assets.xcassets/MusicPlatformQQ.imageset/qq.svg`,
+  unmodified SVG referenced by `https://i2.y.qq.com/n3/other/pages/myqq/index.html`:
+  `https://y.qq.com/mediastyle/mod/mobile/img/logo.svg?max_age=2592000`.
+- Kugou Music: `apps/ios/Assets.xcassets/MusicPlatformKugou.imageset/kugou.png`,
+  the original 160×160 icon cropped from the 600×160 official logo referenced
+  by `https://m.kugou.com/`:
+  `https://m.kugou.com/v3/static/images/img/icon_kugou2.png`.
+  No resizing, recolouring or redrawing was applied.

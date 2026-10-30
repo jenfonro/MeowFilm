@@ -7,6 +7,8 @@ import Combine
 @MainActor
 open class PageViewController: UIViewController {
     public let themeProvider: any PageThemeProviding
+    /// Requests a system Back button without its shared background on iOS 26 and later.
+    open var prefersPlainBackButton: Bool { false }
     /// Retained pager content uses its root lifetime, not temporary containment.
     /// The cache must explicitly invalidate content when releasing it.
     public weak var lifetimeOwner: PageViewController?

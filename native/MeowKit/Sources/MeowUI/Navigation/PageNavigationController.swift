@@ -10,6 +10,13 @@ public final class PageNavigationController: UINavigationController, UINavigatio
     public var didShowPage: ((UIViewController) -> Void)?
     private let themeProvider: any PageThemeProviding
     private var observation: AnyCancellable?
+    private struct PlainBackButtonState {
+        weak var source: UINavigationItem?
+        let originalItem: UIBarButtonItem?
+        let item: UIBarButtonItem
+        let originalHidesSharedBackground: Bool
+    }
+    private var plainBackButtonState: PlainBackButtonState?
     private struct CanvasKey: Equatable {
         let theme: PageTheme
         let width, height, originY, windowHeight, safeTop: CGFloat
@@ -40,12 +47,14 @@ public final class PageNavigationController: UINavigationController, UINavigatio
     public func navigationController(_ navigationController: UINavigationController,
                                      willShow viewController: UIViewController, animated: Bool) {
         viewController.navigationItem.backButtonDisplayMode = .minimal
+        updatePlainBackButton(for: viewController, in: navigationController)
         willShowPage?(viewController, animated)
     }
 
     public func navigationController(_ navigationController: UINavigationController,
                                      didShow viewController: UIViewController, animated: Bool) {
         let transition = navigationController.transitionCoordinator
+        updatePlainBackButton(for: viewController, in: navigationController)
         didShowPage?(viewController)
         PageViewController.finishAppearance(in: viewController, transition: transition)
     }
@@ -53,6 +62,43 @@ public final class PageNavigationController: UINavigationController, UINavigatio
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         applyTheme()
+    }
+
+    private func updatePlainBackButton(
+        for viewController: UIViewController, in navigationController: UINavigationController
+    ) {
+        guard #available(iOS 26.0, *) else { return }
+        guard (viewController as? PageViewController)?.prefersPlainBackButton == true,
+              let index = navigationController.viewControllers.firstIndex(where: { $0 === viewController }),
+              index > 0 else {
+            restorePlainBackButton()
+            return
+        }
+        // UIKit derives Back from the preceding item, not the displayed page.
+        let source = navigationController.viewControllers[index - 1].navigationItem
+        if let state = plainBackButtonState, state.source === source,
+           source.backBarButtonItem === state.item, state.item.hidesSharedBackground { return }
+        restorePlainBackButton()
+        let original = source.backBarButtonItem
+        let item = original ?? UIBarButtonItem(title: nil, style: .plain, target: nil, action: nil)
+        plainBackButtonState = PlainBackButtonState(
+            source: source, originalItem: original, item: item,
+            originalHidesSharedBackground: item.hidesSharedBackground
+        )
+        item.hidesSharedBackground = true
+        if original == nil { source.backBarButtonItem = item }
+    }
+
+    private func restorePlainBackButton() {
+        guard #available(iOS 26.0, *), let state = plainBackButtonState else { return }
+        plainBackButtonState = nil
+        if state.item.hidesSharedBackground {
+            state.item.hidesSharedBackground = state.originalHidesSharedBackground
+        }
+        // Restore only our assignment; a consumer's replacement remains theirs.
+        if state.originalItem == nil, state.source?.backBarButtonItem === state.item {
+            state.source?.backBarButtonItem = nil
+        }
     }
 
     private func applyTheme() {
@@ -102,6 +148,11 @@ public final class PageNavigationController: UINavigationController, UINavigatio
     private func windowFrame() -> CGRect {
         guard let window = view.window else { return navigationBar.frame }
         return navigationBar.convert(navigationBar.bounds, to: window)
+    }
+
+    // Match PageViewController: UIKit releases navigation owners on MainActor.
+    nonisolated deinit {
+        MainActor.assumeIsolated { restorePlainBackButton() }
     }
 }
 #endif
