@@ -4,17 +4,18 @@
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
  xmlns:art="clr-namespace:MeowFilm.Desktop.Artwork;assembly=MeowFilm.Desktop"
  FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="14"
- TextOptions.TextFormattingMode="Display" UseLayoutRounding="True">
+ TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Grayscale"
+ UseLayoutRounding="True" SnapsToDevicePixels="True">
  <UserControl.Resources><ResourceDictionary>
   <ResourceDictionary.MergedDictionaries><ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/></ResourceDictionary.MergedDictionaries>
   <BooleanToVisibilityConverter x:Key="Visible"/>
   <local:MusicCatalogPaletteConverter x:Key="Catalog.CoverFooterPalette" Role="CoverFooter"/>
-  <SolidColorBrush x:Key="MeowFilm.Brush.Text" Color="#30394D"/>
-  <SolidColorBrush x:Key="MeowFilm.Brush.Muted" Color="#858B9C"/>
+  <SolidColorBrush x:Key="MeowFilm.Brush.Text" Color="#343845"/>
+  <SolidColorBrush x:Key="MeowFilm.Brush.Muted" Color="#6C7280"/>
   <Style x:Key="Catalog.SectionTitle" TargetType="TextBlock" BasedOn="{StaticResource Capability.Text}">
    <Setter Property="FontFamily" Value="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"/>
    <Setter Property="FontSize" Value="18"/><Setter Property="FontWeight" Value="SemiBold"/>
-   <Setter Property="Foreground" Value="#303644"/>
+   <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
    <Setter Property="LineHeight" Value="24"/><Setter Property="LineStackingStrategy" Value="BlockLineHeight"/>
   </Style>
   <Style x:Key="Catalog.SongTitle" TargetType="TextBlock" BasedOn="{StaticResource Capability.Text}">
@@ -146,7 +147,7 @@
   <DataTemplate x:Key="Catalog.PlaylistCard">
    <Button x:Name="PlaylistHost" local:CardMotion.Enabled="True" Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.Flat}" Margin="0,0,16,0" IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}">
     <StackPanel>
-     <Grid Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" Background="#E7EAF0" local:CardClip.Radius="4">
+     <Grid Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" Background="#E7EAF0" local:CardClip.Radius="8">
       <art:ArtworkImage Address="{Binding Cover}"/>
       <Button Click="CardPlay_Click" Style="{StaticResource Catalog.CoverPlay}" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=PlaylistHost}"/>
      </Grid>
@@ -183,7 +184,7 @@
   <DataTemplate x:Key="Catalog.CoverCard">
    <Grid x:Name="CoverHost" Margin="0,0,16,0" local:CardMotion.Enabled="True" ToolTip="{Binding ErrorText}" ToolTipService.ShowOnDisabled="True">
     <Button Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.Flat}" IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}">
-     <StackPanel local:CardClip.Radius="4">
+     <StackPanel local:CardClip.Radius="8">
       <Grid x:Name="CoverFrame" Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" Background="#E7EAF0">
        <art:ArtworkImage x:Name="CardCover" Address="{Binding Cover}" AutomationProperties.Name="{Binding Title}"/>
        <Border VerticalAlignment="Bottom" Padding="10,26,10,10"><Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#00000000"/><GradientStop Color="#A0000000" Offset="1"/></LinearGradientBrush></Border.Background>
@@ -191,7 +192,7 @@
        </Border>
        <Button Click="CardPlay_Click" Style="{StaticResource Catalog.CoverPlay}" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=CoverHost}"/>
       </Grid>
-       <Border Padding="10,6" Height="48" CornerRadius="0,0,4,4">
+       <Border Padding="10,6" Height="48" CornerRadius="0,0,8,8">
         <Border.Background><MultiBinding Converter="{StaticResource Catalog.CoverFooterPalette}">
          <Binding Path="RawPaletteBrush" ElementName="CardCover"/>
         </MultiBinding></Border.Background>
@@ -233,7 +234,7 @@
     </Border>
     <Button Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.SongButton}" IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}" Padding="8">
      <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="60"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-      <Grid Width="50" Height="50" HorizontalAlignment="Left" local:CardClip.Radius="4">
+      <Grid Width="50" Height="50" HorizontalAlignment="Left" local:CardClip.Radius="8">
        <art:ArtworkImage Address="{Binding Cover}"/>
        <Border Background="#40000000" IsHitTestVisible="False" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=SongRow}">
         <Path Data="M 0,0 L 0,22 L 18,11 Z" Fill="White" Width="18" Height="22" Stretch="Fill" HorizontalAlignment="Center" VerticalAlignment="Center"/>
@@ -454,8 +455,14 @@
     </DataTemplate></ItemsControl.ItemTemplate>
   </ItemsControl>
   <ScrollViewer x:Name="CatalogScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" ScrollChanged="CatalogScroll_Changed" PreviewMouseWheel="CatalogScroll_Wheel" PreviewKeyDown="CatalogScroll_Key">
-   <ScrollViewer.Style><Style TargetType="ScrollViewer" BasedOn="{StaticResource Capability.OverlayScrollViewer}"><Style.Triggers><DataTrigger Binding="{Binding IsChannelDirectory}" Value="True"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></ScrollViewer.Style>
-   <StackPanel>
+   <ScrollViewer.Style><Style TargetType="ScrollViewer" BasedOn="{StaticResource Capability.OverlayScrollViewer}">
+    <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Window}"/>
+    <Style.Triggers>
+     <DataTrigger Binding="{Binding IsChannelDirectory}" Value="True"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
+     <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/></Trigger>
+    </Style.Triggers>
+   </Style></ScrollViewer.Style>
+   <StackPanel Background="{Binding Background,ElementName=CatalogScroll}">
      <Grid x:Name="VipCardRow" Width="960" Height="184" Margin="40,0,40,32"
            HorizontalAlignment="Left"
            Visibility="{Binding VipPage.HasCards,Converter={StaticResource Visible}}">
