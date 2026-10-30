@@ -1,6 +1,7 @@
 #if os(iOS) || os(macOS)
 import Foundation
 import XCTest
+import Combine
 import MeowContracts
 import MeowPlayback
 import MeowStorage
@@ -44,7 +45,7 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
     var releasedImports: [String] = []
     func blockImport(_ gate: MusicCollectionGate) { importGate = gate }
     func blockImportCommit(_ gate: MusicCollectionGate) { importCommitGate = gate }
-    func importReleaseCount() -> Int { releasedImports.count }
+    func releasedImportIDs() -> [String] { releasedImports }
     func enableRemoteAuthorization() -> MusicQueueAuthorization {
         let value = MusicQueueAuthorization(); remoteAuthorization = value; return value
     }
@@ -263,8 +264,8 @@ final class MusicViewModelTests: XCTestCase {
         XCTAssertNil(model.importPreview)
         XCTAssertFalse(model.showingImport)
         XCTAssertNil(model.error)
-        let released = await service.importReleaseCount()
-        XCTAssertEqual(released, 1)
+        let released = await service.releasedImportIDs()
+        XCTAssertEqual(released, ["synthetic-import"])
 
         await model.importFile(file)
         model.importOwner = "synthetic-owner"
@@ -279,16 +280,19 @@ final class MusicViewModelTests: XCTestCase {
         let commit = Task { await model.confirmImport() }
         await fulfillment(of: [committing], timeout: 2)
         let cleanup = model.cancelImportPresentation()
-        await cleanup?.value
+        XCTAssertTrue(model.isImporting, "A dispatched commit retains its physical operation slot")
         await commitGate.release()
+        await cleanup?.value
         await commit.value
         XCTAssertFalse(commit.isCancelled)
         XCTAssertNil(model.importPreview)
         XCTAssertFalse(model.showingImport)
         XCTAssertFalse(model.isImporting)
-        XCTAssertNil(model.error)
-        let finalReleases = await service.importReleaseCount()
-        XCTAssertEqual(finalReleases, 2)
+        let reported = try XCTUnwrap(model.error)
+        XCTAssertTrue(reported.hasPrefix(MusicServiceError.unsupported.message(operation: "导入曲库")),
+                      "Dismissal must not hide the actual dispatched commit failure")
+        let finalReleases = await service.releasedImportIDs()
+        XCTAssertEqual(finalReleases, ["synthetic-import", "synthetic-import"])
         XCTAssertEqual(try Data(contentsOf: file), bytes)
         await model.close()
     }
@@ -493,6 +497,35 @@ final class MusicViewModelTests: XCTestCase {
         await model.close()
     }
 
+    @MainActor func testProgressDoesNotInvalidateLibrarySettingsOrQueueContent() async {
+        let (_, _, model) = setup()
+        var library = 0, settings = 0, queue = 0
+        let observers = [model.libraryChanges.sink { library += 1 },
+                         model.settingsChanges.sink { settings += 1 },
+                         model.queueChanges.sink { queue += 1 }]
+        model.clock.position = 12
+        model.playbackState.state = MusicPlaybackState(revision: 1, position: 12)
+        XCTAssertEqual(library, 0)
+        XCTAssertEqual(settings, 0)
+        XCTAssertEqual(queue, 0)
+        withExtendedLifetime(observers) { }
+        await model.close()
+    }
+
+    @MainActor func testLibraryMutationDoesNotInvalidatePlayerOrSettings() async {
+        let (_, _, model) = setup()
+        var library = 0, player = 0, settings = 0
+        let observers = [model.libraryChanges.sink { library += 1 },
+                         model.playbackChanges.sink { player += 1 },
+                         model.settingsChanges.sink { settings += 1 }]
+        model.libraryState.collections = [.init(id: "local", title: "本地歌单")]
+        XCTAssertEqual(library, 1)
+        XCTAssertEqual(player, 0)
+        XCTAssertEqual(settings, 0)
+        withExtendedLifetime(observers) { }
+        await model.close()
+    }
+
     @MainActor private func setup() -> (MusicModelService, MusicModelPlayer, MusicViewModel) {
         let service = MusicModelService(), player = MusicModelPlayer()
         return (service, player, MusicViewModel(service: service, player: player))
@@ -513,8 +546,11 @@ final class MusicViewModelTests: XCTestCase {
     }
 
     @MainActor func testOptionsNeverAutomaticallyPickFirstScriptAndActualPlayingAloneRecordsStart() async throws {
-        let (service, player, model) = setup(); await model.load(); await model.prepareCurrent()
-        XCTAssertTrue(model.showingSources); XCTAssertTrue(player.resources.isEmpty)
+        let (service, player, model) = setup()
+        var requests: [MusicPlaybackDestination] = []
+        model.onRequestPresentation = { requests.append($0) }
+        await model.load(); await model.prepareCurrent()
+        XCTAssertEqual(requests, [.sources]); XCTAssertTrue(player.resources.isEmpty)
         await model.choose(musicSelection)
         XCTAssertEqual(player.resources.count, 1)
         let before = await service.recordedFacts(); XCTAssertTrue(before.isEmpty)

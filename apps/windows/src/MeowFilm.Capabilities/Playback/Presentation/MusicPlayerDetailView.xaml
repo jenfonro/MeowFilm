@@ -3,14 +3,15 @@
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:local="clr-namespace:MeowFilm.Capabilities"
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
- FontFamily="{DynamicResource MeowFilm.Font.Body}"
- TextOptions.TextFormattingMode="Ideal" TextOptions.TextRenderingMode="ClearType"
+ FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"
+ TextOptions.TextFormattingMode="Ideal" TextOptions.TextRenderingMode="Grayscale"
  Background="{Binding PlayerBackground}">
  <UserControl.Resources>
   <ResourceDictionary>
    <ResourceDictionary.MergedDictionaries>
     <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/>
    </ResourceDictionary.MergedDictionaries>
+   <local:MusicLyricRowMarginConverter x:Key="Player.LyricRowMargin"/>
    <Style TargetType="TextBlock">
     <Setter Property="Foreground" Value="#EBEAED"/>
     <Style.Triggers>
@@ -154,7 +155,7 @@
      <ListBox.Template><ControlTemplate TargetType="ListBox">
       <ScrollViewer Focusable="False" CanContentScroll="True" VerticalScrollBarVisibility="Hidden"
                     HorizontalScrollBarVisibility="Disabled" Style="{StaticResource Capability.OverlayScrollViewer}">
-       <ItemsPresenter Margin="0,140,0,160"/>
+       <ItemsPresenter/>
       </ScrollViewer>
      </ControlTemplate></ListBox.Template>
      <ListBox.OpacityMask>
@@ -165,7 +166,14 @@
      </ListBox.OpacityMask>
      <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem">
       <Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/>
-      <Setter Property="Margin" Value="0"/><Setter Property="Opacity" Value=".40"/>
+      <Setter Property="Margin"><Setter.Value><MultiBinding Converter="{StaticResource Player.LyricRowMargin}">
+       <Binding Path="DataContext" RelativeSource="{RelativeSource Self}"/>
+       <Binding Path="DataContext.FirstLyric" RelativeSource="{RelativeSource AncestorType=local:MusicPlayerDetailView}"/>
+       <Binding Path="DataContext.LastLyric" RelativeSource="{RelativeSource AncestorType=local:MusicPlayerDetailView}"/>
+       <Binding Path="ActualHeight" RelativeSource="{RelativeSource AncestorType=ListBox}"/>
+       <Binding Path="DataContext.IsPlaying" RelativeSource="{RelativeSource AncestorType=local:MusicPlayerDetailView}"/>
+      </MultiBinding></Setter.Value></Setter>
+      <Setter Property="Opacity" Value=".40"/>
       <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem">
        <ContentPresenter/>
       </ControlTemplate></Setter.Value></Setter>

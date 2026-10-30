@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import XCTest
 import MeowContracts
 @testable import MeowPlayback
@@ -12,23 +13,58 @@ private actor FeedbackFeatureSink: MusicPlaybackFeedbackConsuming {
     func recorded() -> [MusicPlaybackFeedbackSample] { samples }
 }
 
+private actor FeedbackSettingsGate {
+    private var began = false, released = false
+    private var starts: [CheckedContinuation<Void, Never>] = []
+    private var waits: [CheckedContinuation<Void, Never>] = []
+    func wait() async {
+        began = true; starts.forEach { $0.resume() }; starts.removeAll()
+        if !released { await withCheckedContinuation { waits.append($0) } }
+    }
+    func started() async {
+        if !began { await withCheckedContinuation { starts.append($0) } }
+    }
+    func release() {
+        released = true; waits.forEach { $0.resume() }; waits.removeAll()
+    }
+}
+
 private actor FeedbackSettingsStore: MusicPlaybackFeedbackSettingsServing {
     private var value = MusicPlaybackFeedbackSettings(revision: 0, platforms: [:])
-    private var writes = 0
+    private var reads = 0, writes = 0
     private var failure: MusicServiceError?
+    private var writeGate: FeedbackSettingsGate?
+    private var readGate: FeedbackSettingsGate?
+    private var cancelledReturns = 0
     func fail(_ error: MusicServiceError?) { failure = error }
-    func playbackFeedbackSettings() -> MusicPlaybackFeedbackSettings { value }
+    func blockWrite(_ gate: FeedbackSettingsGate) { writeGate = gate }
+    func blockRead(_ gate: FeedbackSettingsGate) { readGate = gate }
+    func replace(_ value: MusicPlaybackFeedbackSettings) { self.value = value }
+    func playbackFeedbackSettings() async -> MusicPlaybackFeedbackSettings {
+        reads += 1
+        let result = value, gate = readGate
+        readGate = nil
+        if let gate { await gate.wait() }
+        if Task.isCancelled { cancelledReturns += 1 }
+        return result
+    }
     func setPlaybackFeedback(platform: MusicAccountPlatform, enabled: Bool,
-                             expectedRevision: Int) throws -> MusicPlaybackFeedbackSettings {
+                             expectedRevision: Int) async throws -> MusicPlaybackFeedbackSettings {
         writes += 1
-        if let failure { throw failure }
+        if let failure, failure != .commitUnconfirmed { throw failure }
         guard expectedRevision == value.revision else { throw MusicServiceError.staleRevision }
         var platforms = value.platforms
         platforms[platform] = .init(enabled: enabled, generation: (platforms[platform]?.generation ?? 0) + 1)
         value = .init(revision: value.revision + 1, platforms: platforms)
-        return value
+        let result = value
+        if let writeGate { await writeGate.wait() }
+        if Task.isCancelled { cancelledReturns += 1 }
+        if let failure { throw failure }
+        return result
     }
     func count() -> Int { writes }
+    func readCount() -> Int { reads }
+    func cancelledCount() -> Int { cancelledReturns }
 }
 
 @MainActor final class MusicPlaybackFeedbackTests: XCTestCase {
@@ -135,12 +171,91 @@ private actor FeedbackSettingsStore: MusicPlaybackFeedbackSettingsServing {
             await store.fail(failure)
             model.update(.kugou, true); let ticket = try XCTUnwrap(model.confirmation)
             model.confirm(ticket); await model.flush()
-            XCTAssertNil(model.value); XCTAssertNil(model.confirmation); XCTAssertNotNil(model.error)
+            XCTAssertEqual(model.value?.revision, failure == .commitUnconfirmed ? 1 : 0)
+            XCTAssertNil(model.confirmation); XCTAssertEqual(model.error, failure.localizedDescription)
+            let reads = await store.readCount(); XCTAssertEqual(reads, 2)
             await store.fail(nil); await model.load()
             model.confirm(ticket); await model.flush()
             let writes = await store.count(); XCTAssertEqual(writes, 1)
-            XCTAssertNotEqual(model.value?.platforms[.kugou]?.enabled, true)
+            XCTAssertEqual(model.value?.platforms[.kugou]?.enabled == true, failure == .commitUnconfirmed)
         }
+    }
+
+    func testCompletedWriteReconcilesOwnerAfterPresentationCancellationButNotNewAccess() async {
+        for changedAccess in [false, true] {
+            let store = FeedbackSettingsStore(), gate = FeedbackSettingsGate(), generation = UUID()
+            var reconciliations: [UUID?] = []
+            let model = MusicPlaybackFeedbackSettingsModel(service: store, onChanged: {
+                reconciliations.append($0)
+            })
+            model.setAccess(available: true, generation: generation); await model.load()
+            reconciliations = []
+            await store.blockWrite(gate)
+            await store.fail(.commitUnconfirmed)
+            model.update(.qq, true); await gate.started()
+            if changedAccess { model.setAccess(available: false, generation: UUID()) }
+            else { model.cancel() }
+            await gate.release(); await model.flush()
+            XCTAssertEqual(reconciliations, changedAccess ? [] : [generation])
+            XCTAssertNil(model.value); XCTAssertNil(model.error); XCTAssertFalse(model.busy)
+            let writes = await store.count(); XCTAssertEqual(writes, 1)
+            let reads = await store.readCount(); XCTAssertEqual(reads, changedAccess ? 1 : 2)
+        }
+    }
+
+    func testSharedSettingsChangesCoalesceBehindLoadAndCommitWithoutCancellingOrReplaying() async {
+        for reading in [true, false] {
+            let store = FeedbackSettingsStore(), gate = FeedbackSettingsGate()
+            let model = MusicPlaybackFeedbackSettingsModel(service: store)
+            model.setAccess(available: true, generation: UUID()); await model.load()
+            var published: [Int] = []
+            let observation = model.$value.compactMap { $0?.revision }.sink { published.append($0) }
+            defer { observation.cancel() }
+            var load: Task<Void, Never>?
+            if reading {
+                await store.blockRead(gate)
+                load = Task { await model.load() }
+            } else {
+                await store.blockWrite(gate)
+                model.update(.qq, true)
+            }
+            await gate.started()
+            let latest = MusicPlaybackFeedbackSettings(revision: 2, platforms: [
+                .qq: .init(enabled: true, generation: 1), .kugou: .init(enabled: true, generation: 1),
+            ])
+            await store.replace(latest)
+            model.settingsChanged(revision: 1)
+            model.settingsChanged(revision: 2)
+            XCTAssertTrue(model.busy)
+            let duringReads = await store.readCount(); XCTAssertEqual(duringReads, reading ? 2 : 1)
+            let duringWrites = await store.count(); XCTAssertEqual(duringWrites, reading ? 0 : 1)
+            await gate.release(); await load?.value; await model.flush()
+            XCTAssertEqual(model.value, latest)
+            XCTAssertEqual(published, [0, 2])
+            XCTAssertFalse(model.busy); XCTAssertNil(model.error)
+            model.settingsChanged(revision: 2); await model.flush()
+            let reads = await store.readCount(); XCTAssertEqual(reads, reading ? 3 : 2)
+            let writes = await store.count(); XCTAssertEqual(writes, reading ? 0 : 1)
+            let cancelled = await store.cancelledCount(); XCTAssertEqual(cancelled, 0)
+        }
+    }
+
+    func testInsufficientSharedRevisionStopsReadingUntilExplicitRetry() async {
+        let store = FeedbackSettingsStore(), model = MusicPlaybackFeedbackSettingsModel(service: store)
+        model.setAccess(available: true, generation: UUID()); await model.load()
+        model.settingsChanged(revision: 2); await model.flush()
+        XCTAssertNil(model.value)
+        XCTAssertEqual(model.error, MusicServiceError.staleRevision.localizedDescription)
+        XCTAssertFalse(model.busy)
+        let stopped = await store.readCount(); XCTAssertEqual(stopped, 2)
+        model.settingsChanged(revision: 2); model.settingsChanged(revision: 1)
+        await model.flush()
+        let unchanged = await store.readCount(); XCTAssertEqual(unchanged, stopped)
+        let latest = MusicPlaybackFeedbackSettings(revision: 2, platforms: [:])
+        await store.replace(latest); await model.load(); await model.flush()
+        XCTAssertEqual(model.value, latest); XCTAssertNil(model.error)
+        XCTAssertFalse(model.busy)
+        let retried = await store.readCount(); XCTAssertEqual(retried, stopped + 1)
     }
 
     func testAuthorizationKeepsPhysicalCancellationSlotAndHandlesEarlyCompletion() throws {

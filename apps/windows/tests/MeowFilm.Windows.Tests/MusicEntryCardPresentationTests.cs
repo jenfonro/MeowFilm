@@ -44,7 +44,7 @@ public static class MusicEntryCardPresentationTests
             var title = f.Text(model.Title);
             var titleBounds = f.Bounds(title);
             var cover = f.Bounds(f.Artwork);
-            double sampleX = cover.Right - 5;
+            double sampleX = f.ContrastProbeX;
             foreach (double scale in new[] { 1d, 1.5d, 2d })
             {
                 var frame = Capture(f.Entry, scale);
@@ -144,7 +144,7 @@ public static class MusicEntryCardPresentationTests
             Check(IsPainted(date, f.Entry), "the calendar date is effectively visible, not merely bound in a hidden parent");
             var bounds = f.Bounds(date);
             Check(bounds.Right <= f.Bounds(f.Text(model.Title)).Left, "the calendar date and daily title do not overlap");
-            Check(PaintContrast(Capture(f.Entry), bounds, f.Entry.ActualWidth - 5) > 2,
+            Check(PaintContrast(Capture(f.Entry), bounds, f.ContrastProbeX) > 2,
                 "the calendar date paints contrasting glyph pixels on a bright cover");
         }
         foreach (var model in new[] { ReadDaily(null), ReadDaily(null, includeDay: false) })
@@ -188,7 +188,7 @@ public static class MusicEntryCardPresentationTests
             {
                 var row = f.Text(text);
                 Check(IsPainted(row, f.Entry) &&
-                    PaintContrast(expanded, f.Bounds(row), f.Entry.ActualWidth - 5) > 1.5,
+                    PaintContrast(expanded, f.Bounds(row), f.ContrastProbeX) > 1.5,
                     "each of the first three preview songs paints visible glyph pixels");
                 CheckWholeGlyph(f, row, expanded);
             }
@@ -429,7 +429,7 @@ public static class MusicEntryCardPresentationTests
             $"actual glyph bottom {ink.Bottom:F2}, visible card bottom {viewport.Bottom:F2}; complete glyphs must fit");
         var lastInk = new Rect(ink.Left, Math.Max(ink.Top, ink.Bottom - 2 / scale), ink.Width,
             Math.Min(ink.Height, 2 / scale));
-        Check(PaintContrast(frame, lastInk, f.Entry.ActualWidth - 5) > 1.1,
+        Check(PaintContrast(frame, lastInk, f.ContrastProbeX) > 1.1,
             $"{row.Text} at {scale}x: the bottom raster ink is actually painted, not clipped by an ancestor");
         if (Environment.GetEnvironmentVariable("MEOWFILM_TEST_ENTRY_CARD_VISUALS") == "1")
             Console.WriteLine($"ENTRY-INK {row.Text}; DPI {scale}x; layout-bottom {f.Bounds(row).Bottom:F2}; " +
@@ -514,6 +514,7 @@ public static class MusicEntryCardPresentationTests
         internal Button Open => (Button)Entry.FindName("OpenButton");
         internal Button Play => (Button)Entry.FindName("PlayButton");
         internal ArtworkImage Artwork => Visuals(Entry).OfType<ArtworkImage>().Single();
+        internal double ContrastProbeX => Entry.ActualWidth - ((RectangleGeometry)Surface.Clip).RadiusX - 1;
 
         internal Fixture(MusicCatalogCard model, double width = 168)
         {

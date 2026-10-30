@@ -10,9 +10,13 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Automation;
+using System.Windows.Automation.Peers;
+using System.Windows.Automation.Provider;
 using System.Windows.Input;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Documents;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
 using MeowFilm.Core.Runtime;
@@ -20,6 +24,7 @@ using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Platform.Storage;
+using MeowFilm.Desktop;
 using MeowFilm.Desktop.Artwork;
 using System.Windows.Media.Imaging;
 
@@ -75,9 +80,9 @@ public static class MusicCatalogTests
                 Equal(0, entry.PreviewTitles.Count);
                 CardMotion.Transition(surface, true, false); await Drain();
                 var caption = Descendants<StackPanel>(entry).Single(p => p.RenderTransform is TranslateTransform);
-                Equal(surface.ActualWidth, ((TranslateTransform)caption.RenderTransform).Y);
+                Equal(0d, ((TranslateTransform)caption.RenderTransform).Y);
                 CardMotion.Transition(surface, false, false); await Drain();
-                Equal(surface.ActualWidth, ((TranslateTransform)caption.RenderTransform).Y);
+                Equal(0d, ((TranslateTransform)caption.RenderTransform).Y);
                 Equal(Visibility.Collapsed, ((Button)entry.FindName("PlayButton")).Visibility);
             }
             finally { window.Close(); }
@@ -115,11 +120,15 @@ public static class MusicCatalogTests
             await using var f = await Fixture.Create();
             await f.Module.NavigateAsync("catalog-home", default);
             var view = new MusicCatalogView { DataContext = f.Module };
-            var window = new Window { Content = view, Width = 900, Height = 700, Left = -10000, Top = -10000,
-                ShowActivated = false, ShowInTaskbar = false };
+            using var source = new HwndSource(new HwndSourceParameters("catalog-system-typography-fixture")
+            {
+                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+                PositionX = -32000, PositionY = -32000, Width = 900, Height = 700
+            });
             try
             {
-                window.Show(); window.UpdateLayout(); await Drain();
+                source.RootVisual = view;
+                view.Measure(new(900, 700)); view.Arrange(new Rect(0, 0, 900, 700)); view.UpdateLayout(); await Drain();
                 var buttons = Descendants<Button>(view).Where(b => b.IsVisible).ToArray();
                 var channelMore = (System.Windows.Controls.Primitives.Popup)view.FindName("ChannelMorePopup");
                 Equal(System.Windows.Controls.Primitives.PopupAnimation.None, channelMore.PopupAnimation);
@@ -138,15 +147,291 @@ public static class MusicCatalogTests
                     True(canvas.TranslatePoint(new Point(), refresh).Y >= 0 && canvas.ActualHeight <= refresh.ActualHeight,
                         "complete icon fits within actual button bounds");
                 }
-                var title = new TextBlock { Style = (Style)view.FindResource("Catalog.SectionTitle") };
-                Equal(SystemFonts.MessageFontFamily, title.FontFamily); Equal(18d, title.FontSize);
+                var body = SystemFonts.MessageFontFamily;
+                var title = Descendants<TextBlock>(view).First(text => text.IsVisible &&
+                    !string.IsNullOrWhiteSpace(text.Text) && text.Style == view.FindResource("Catalog.SectionTitle"));
+                Equal(body, title.FontFamily); Equal(18d, title.FontSize);
                 Equal(FontWeights.SemiBold, title.FontWeight);
-                var playlist = new TextBlock { Style = (Style)view.FindResource("Catalog.PlaylistTitle") };
-                Equal(SystemFonts.MessageFontFamily, playlist.FontFamily); Equal(13d, playlist.FontSize);
+                var playlist = Descendants<TextBlock>(view).First(text => text.IsVisible &&
+                    !string.IsNullOrWhiteSpace(text.Text) && text.Style == view.FindResource("Catalog.PlaylistTitle"));
+                Equal(body, playlist.FontFamily); Equal(13d, playlist.FontSize);
                 Equal(FontWeights.Normal, playlist.FontWeight); Equal(20d, playlist.LineHeight);
                 Equal(Color.FromRgb(75,79,88), ((SolidColorBrush)playlist.Foreground).Color);
+                var catalogText = Descendants<TextBlock>(view).ToArray();
+                AssertGrayscaleText(catalogText, "actual catalog headings and captions");
+                foreach (var text in new[] { title, playlist })
+                foreach (var mode in new[] { TextRenderingMode.ClearType, TextRenderingMode.Aliased })
+                {
+                    var originalMode = TextOptions.GetTextRenderingMode(text);
+                    text.SetCurrentValue(TextOptions.TextRenderingModeProperty, mode);
+                    try
+                    {
+                        Equal(mode, TextOptions.GetTextRenderingMode(text));
+                        Equal(TextRenderingMode.Grayscale, TextOptions.GetTextRenderingMode(view));
+                        var rejected = false;
+                        try { AssertGrayscaleText(catalogText, "actual catalog headings and captions"); }
+                        catch (InvalidOperationException) { rejected = true; }
+                        True(rejected, $"the text-node contract must reject {mode} on '{text.Text}' even with a grayscale parent");
+                    }
+                    finally { text.SetCurrentValue(TextOptions.TextRenderingModeProperty, originalMode); }
+                    AssertGrayscaleText(catalogText, "actual catalog headings and captions");
+                }
             }
-            finally { window.Close(); }
+            finally { source.RootVisual = null; await Drain(); }
+        });
+        yield return Case("home text follows the system font and entry captions stay pixel aligned after resize", async () =>
+        {
+            var card = new MusicCatalogCard("500", "每日推荐", "推荐歌曲", "", "playlist", "wy", ActionId: "500",
+                Presentation: MusicCatalogEntryPresentation.Preview);
+            var view = new MusicCatalogView();
+            var entry = new EntryCard { DataContext = card, PreviewTitles = ["第一首", "第二首", "第三首"] };
+            view.Content = entry;
+            using var source = new HwndSource(new HwndSourceParameters("entry-system-typography-fixture")
+            {
+                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+                PositionX = -32000, PositionY = -32000, Width = 240, Height = 300
+            });
+            void Layout()
+            { view.Measure(new(240, 300)); view.Arrange(new Rect(0, 0, 240, 300)); view.UpdateLayout(); }
+            try
+            {
+                source.RootVisual = view; Layout(); await Drain();
+                Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(view));
+                Equal(TextRenderingMode.Grayscale, TextOptions.GetTextRenderingMode(entry));
+                Equal(SystemFonts.MessageFontFamily, view.FontFamily);
+                Equal(SystemFonts.MessageFontFamily, entry.FontFamily);
+                True(view.UseLayoutRounding && entry.UseLayoutRounding && entry.SnapsToDevicePixels,
+                    "text and cover layout align to the current display pixels");
+                var alternate = new FontFamily("Arial");
+                view.Resources[SystemFonts.MessageFontFamilyKey] = alternate;
+                await Drain();
+                Equal(alternate, view.FontFamily); Equal(alternate, entry.FontFamily);
+                var surface = (Grid)entry.FindName("Surface");
+                var caption = (StackPanel)entry.FindName("Caption");
+                var subtitle = Descendants<TextBlock>(caption).First();
+                Equal(alternate, subtitle.FontFamily);
+                var entryText = Descendants<TextBlock>(entry).ToArray();
+                Equal(3, entry.PreviewTitles.Count);
+                True(entry.PreviewTitles.All(preview => entryText.Any(text => text.Text == preview)),
+                    "entry typography covers the actual generated preview text");
+                True(((Button)entry.FindName("OpenButton")).FocusVisualStyle is not null,
+                    "entry actions keep the shared rounded keyboard focus");
+                foreach (var width in new[] { 152.4, 180.8, 200.6 })
+                {
+                    entry.Width = width;
+                    Layout(); await Drain();
+                    CardMotion.Transition(surface, false, false);
+                    await Drain();
+                    AssertGrayscaleText(Descendants<TextBlock>(entry), "resting entry title caption and preview");
+                    Equal(0d, ((TranslateTransform)caption.RenderTransform).Y);
+                    var y = caption.TranslatePoint(new Point(), surface).Y;
+                    var pixelY = y * VisualTreeHelper.GetDpi(surface).DpiScaleY;
+                    True(Math.Abs(pixelY - Math.Round(pixelY)) < .01, "caption baseline starts on a display pixel");
+                    var cover = Descendants<ArtworkImage>(surface).Single();
+                    True(y >= cover.ActualHeight && y + subtitle.ActualHeight <= surface.ActualHeight,
+                        "the resting caption fits in its footer after resize");
+                    var clip = (RectangleGeometry)surface.Clip;
+                    True(clip.RadiusX > 0 && clip.RadiusY > 0, "the complete entry has rounded corners");
+                    Equal(surface.RenderSize, clip.Rect.Size);
+                    CardMotion.Transition(surface, true, false);
+                    await Drain();
+                    AssertGrayscaleText(Descendants<TextBlock>(entry), "raised entry title caption and preview");
+                    True(((TranslateTransform)caption.RenderTransform).Y < 0, "preview rises over its artwork");
+                    var raisedY = caption.TranslatePoint(new Point(), surface).Y * VisualTreeHelper.GetDpi(surface).DpiScaleY;
+                    True(Math.Abs(raisedY - Math.Round(raisedY)) < .01, "settled preview also starts on a display pixel");
+                    var layoutClip = LayoutInformation.GetLayoutClip(caption);
+                    True(layoutClip is null || layoutClip.Bounds.Height >= caption.DesiredSize.Height,
+                        "all preview rows remain outside the footer's layout constraint");
+                }
+            }
+            finally { source.RootVisual = null; await Drain(); }
+        });
+        yield return Case("catalog system typography uses effective grayscale text and paints neutral glyphs at bitmap DPI", () =>
+        {
+            var view = new MusicCatalogView();
+            var host = new Grid { Background = Brushes.White };
+            var text = new TextBlock { Text = "二次元赛高", Foreground = Brushes.Black,
+                HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(12, 0, 0, 0) };
+            host.Children.Add(text); view.Content = host;
+            Equal(SystemFonts.MessageFontFamily, view.FontFamily);
+            Equal(TextRenderingMode.Grayscale, TextOptions.GetTextRenderingMode(view));
+            foreach (var role in new[] { "Catalog.SectionTitle", "Catalog.SongTitle", "Catalog.PlaylistTitle" })
+            {
+                text.Style = (Style)view.FindResource(role);
+                view.Measure(new(200, 52)); view.Arrange(new Rect(0, 0, 200, 52)); view.UpdateLayout();
+                Equal(SystemFonts.MessageFontFamily, text.FontFamily);
+                AssertGrayscaleText([text], role);
+                // RenderTargetBitmap has no HWND: scaled neutral pixels prove glyph drawing,
+                // not OS subpixel rendering at a monitor's DPI.
+                foreach (var scale in new[] { 1d, 1.25, 1.5, 2 })
+                {
+                    var bitmap = new RenderTargetBitmap((int)(200 * scale), (int)(52 * scale),
+                        96 * scale, 96 * scale, PixelFormats.Pbgra32);
+                    bitmap.Render(view);
+                    var bytes = new byte[bitmap.PixelWidth * bitmap.PixelHeight * 4];
+                    bitmap.CopyPixels(bytes, bitmap.PixelWidth * 4, 0);
+                    var ink = 0;
+                    for (var index = 0; index < bytes.Length; index += 4)
+                    {
+                        True(Math.Abs(bytes[index] - bytes[index + 1]) <= 1 &&
+                            Math.Abs(bytes[index + 1] - bytes[index + 2]) <= 1,
+                            "offscreen neutral glyph pixels keep matching RGB channels");
+                        if (bytes[index + 3] > 240 && bytes[index] < 200) ink++;
+                    }
+                    True(ink > 50, "offscreen drawing evidence covers actual painted glyphs, not empty output");
+                }
+            }
+            return Task.CompletedTask;
+        });
+        yield return Case("home controls execute through automation patterns on a hidden nonactivating source", async () =>
+        {
+            await using var f = await Fixture.Create();
+            await f.Configure(new { detailLimit = 3, total = 3, homePages = 2 });
+            await f.SetupSource();
+            await f.SearchPolicy("wy", playlists: true);
+            f.Module.CatalogSearchKind = "歌单";
+            var shell = new ShellWindow([f.Module], () => Task.CompletedTask);
+            shell.PrepareForRender();
+            var root = (Border)shell.Content; shell.Content = null;
+            root.Resources.MergedDictionaries.Add(shell.Resources);
+            root.DataContext = shell.DataContext;
+            root.SetBinding(Border.BackgroundProperty, new System.Windows.Data.Binding(nameof(Window.Background)) { Source = shell });
+            TextElement.SetFontFamily(root, shell.FontFamily); TextElement.SetFontSize(root, shell.FontSize);
+            TextElement.SetForeground(root, shell.Foreground);
+            TextOptions.SetTextFormattingMode(root, TextOptions.GetTextFormattingMode(shell));
+            TextOptions.SetTextRenderingMode(root, TextOptions.GetTextRenderingMode(shell));
+            root.UseLayoutRounding = true; root.SnapsToDevicePixels = true;
+            var parameters = new HwndSourceParameters("catalog-headless-control-fixture")
+            {
+                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+                PositionX = -32000, PositionY = -32000, Width = 1110, Height = 800
+            };
+            using var source = new HwndSource(parameters);
+            void Layout()
+            { root.Measure(new(1110, 800)); root.Arrange(new Rect(0, 0, 1110, 800)); root.UpdateLayout(); }
+            void Invoke(Button button)
+            {
+                True(button.IsEnabled, "headless automation invokes only enabled controls");
+                var peer = UIElementAutomationPeer.CreatePeerForElement(button)
+                    ?? throw new InvalidOperationException("Missing button automation peer");
+                ((IInvokeProvider)peer.GetPattern(PatternInterface.Invoke)).Invoke();
+            }
+            try
+            {
+                source.RootVisual = root; Layout();
+                Equal(SystemFonts.MessageFontFamily, shell.FontFamily);
+                Equal(SystemFonts.MessageFontFamily, ((Control)f.Module.SettingsView).FontFamily);
+                Equal(SystemFonts.MessageFontFamily, ((Control)f.Module.PlayerView).FontFamily);
+                Equal(TextRenderingMode.Grayscale, TextOptions.GetTextRenderingMode(f.Module.SettingsView));
+                Equal(TextRenderingMode.Grayscale, TextOptions.GetTextRenderingMode(f.Module.PlayerView));
+                var detail = f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
+                var queue = f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayQueue);
+                Equal(SystemFonts.MessageFontFamily, ((Control)detail).FontFamily);
+                Equal(SystemFonts.MessageFontFamily, ((Control)queue).FontFamily);
+                Equal(TextRenderingMode.Grayscale, TextOptions.GetTextRenderingMode(detail));
+                Equal(TextRenderingMode.Grayscale, TextOptions.GetTextRenderingMode(queue));
+                shell.RaiseEvent(new RoutedEventArgs(FrameworkElement.LoadedEvent));
+                await Until(() => f.Module.IsCatalogHome && f.Client.Count("music.catalog.home") == 1 &&
+                    !f.Module.Busy && ((ListBox)shell.FindName("NavigationList")).SelectedItem is
+                        ShellNavigationEntry { Route: "catalog-home" }, "headless home startup did not settle");
+                Layout(); await Drain();
+                Equal(IntPtr.Zero, new WindowInteropHelper(shell).Handle);
+                True((parameters.WindowStyle & 0x10000000) == 0 && (parameters.ExtendedWindowStyle & 0x08000000) != 0,
+                    "the isolated presentation source is neither visible nor activatable");
+                var catalog = (MusicCatalogView)f.Module.View.FindName("CatalogView");
+                var search = (TextBox)shell.FindName("SearchBox");
+                var searchPeer = UIElementAutomationPeer.CreatePeerForElement(search)!;
+                var value = (IValueProvider)searchPeer.GetPattern(PatternInterface.Value);
+                var searchButton = (Button)shell.FindName("SearchButton");
+                var back = (Button)shell.FindName("BackButton");
+                var player = f.Module.PlayerView;
+                value.SetValue("   "); Invoke(searchButton); await Drain();
+                Equal(0, f.Client.Count("music.search.start"));
+                var refresh = Descendants<Button>(catalog).First(button =>
+                    button.IsVisible && AutomationProperties.GetName(button) == "刷新推荐");
+                Invoke(refresh);
+                await Until(() => f.Client.Count("music.catalog.home") == 2 && !f.Module.Busy,
+                    "headless refresh did not settle");
+                Layout(); await Drain();
+                var entry = Descendants<EntryCard>(catalog).First(control =>
+                    control.DataContext is MusicCatalogCard { CanRequestPreview: true });
+                var surface = (Grid)entry.FindName("Surface");
+                entry.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseEnterEvent });
+                await Until(() => entry.PreviewTitles.Count == 3, "headless preview did not settle");
+                CardMotion.Transition(surface, true, false); await Drain();
+                Equal(1, f.Client.Count("music.catalog.playlist"));
+                True(Descendants<TextBlock>(entry).Any(text => text.Text.StartsWith("1 合成曲", StringComparison.Ordinal)),
+                    "preview controls publish the actual native preview receipt");
+                Invoke((Button)entry.FindName("PlayButton"));
+                await Until(() => f.Playback.Opens.Count == 1 && !f.Module.Busy, "headless play did not settle");
+                Layout(); await Drain();
+                var playingTitle = Descendants<TextBlock>(player).Single(text => text.Text == f.Module.CurrentTitle);
+                var playingArtist = Descendants<TextBlock>(player).Single(text => text.Text == f.Module.CurrentArtist);
+                AssertGrayscaleText([playingTitle, playingArtist], "actual playing title and artist");
+                Equal(1, f.Client.Count("music.catalog.playlist.prepare"));
+                Equal(1, f.Client.Count("music.catalog.playlist.commit"));
+                True(f.Module.IsCatalogHome, "the entry play action does not navigate");
+                entry.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseLeaveEvent });
+                CardMotion.Transition(surface, false, false);
+                value.SetValue("  云歌单  "); Invoke(searchButton);
+                await Until(() => f.Client.Count("music.search.start") == 1 && f.Module.IsAggregateSearch,
+                    "headless search did not settle");
+                await WaitForSearch(f.Module); Layout();
+                Equal("云歌单", f.Client.Last("music.search.start").GetProperty("keyword").GetString());
+                Equal("playlists", f.Client.Last("music.search.start").GetProperty("kind").GetString());
+                True(f.Module.CatalogSections.SelectMany(section => section.Items).Any(card => card.CanOpen),
+                    "the real search handler publishes actionable native results");
+                Invoke(back);
+                await Until(() => f.Module.IsCatalogHome && !f.Module.Busy, "headless search back did not settle");
+                Layout(); await Drain();
+                True(ReferenceEquals(player, ((ContentControl)shell.FindName("PlayerHost")).Content),
+                    "search and back retain the same player controls");
+                entry = Descendants<EntryCard>(catalog).First(control =>
+                    control.DataContext is MusicCatalogCard { CanRequestPreview: true });
+                Invoke((Button)entry.FindName("OpenButton"));
+                await Until(() => f.Module.IsCatalogPlaylist && f.Module.Songs.Count == 3 && !f.Module.Busy,
+                    "headless entry open did not settle");
+                Equal(1, f.Playback.Opens.Count);
+                Invoke(back);
+                await Until(() => f.Module.IsCatalogHome && !f.Module.Busy, "headless detail back did not settle");
+                Layout(); await Drain();
+                var scroll = (ScrollViewer)catalog.FindName("CatalogScroll");
+                var pages = f.Client.Count("music.catalog.home");
+                scroll.ScrollToEnd(); Layout(); await Drain();
+                Equal(pages, f.Client.Count("music.catalog.home"));
+                scroll.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, Key.PageDown)
+                    { RoutedEvent = Keyboard.PreviewKeyDownEvent });
+                await Until(() => f.Client.Count("music.catalog.home") == pages + 1 && !f.Module.Busy,
+                    "headless page intent did not settle");
+                True(!f.Module.CanCatalogNext, "the direct page intent stops at the native continuation boundary");
+                foreach (var size in new[] { new Size(860, 600), new Size(1110, 800), new Size(1440, 900) })
+                {
+                    root.Measure(size); root.Arrange(new Rect(size)); root.UpdateLayout();
+                    var content = (Grid)shell.FindName("ContentRegion");
+                    var footer = (Border)shell.FindName("PlayerFrame");
+                    True(content.TranslatePoint(new Point(0, content.ActualHeight), root).Y <=
+                        footer.TranslatePoint(new Point(), root).Y + .5, "the footer does not cover the content");
+                    var hit = root.InputHitTest(searchButton.TranslatePoint(new Point(16, 16), root));
+                    True(hit is DependencyObject target && Descendants<DependencyObject>(searchButton).Contains(target),
+                        "the search icon occupies its actual input hit target");
+                    var bitmap = new RenderTargetBitmap((int)size.Width, (int)size.Height, 96, 96, PixelFormats.Pbgra32);
+                    bitmap.Render(root);
+                    var pixels = new byte[(int)size.Width * (int)size.Height * 4];
+                    bitmap.CopyPixels(pixels, (int)size.Width * 4, 0);
+                    True(pixels.Where((_, index) => index % 4 == 3).Count(alpha => alpha > 240) >
+                        size.Width * size.Height * .8, "the hidden source paints real opaque app content");
+                }
+                True(Mouse.Captured is null, "the headless interaction sequence never captures the pointer");
+                Equal(IntPtr.Zero, new WindowInteropHelper(shell).Handle);
+                Console.WriteLine("Headless home evidence: hidden NOACTIVATE source; Value/Invoke providers; " +
+                    "refresh, preview, play, search, back, open and paging; no product Window.Show or native input.");
+            }
+            finally
+            {
+                source.RootVisual = null;
+                shell.Close(); await shell.ShutdownCompletion.WaitAsync(TimeSpan.FromSeconds(8)); await Drain();
+            }
         });
         yield return Case("each catalog section selects exactly one presenter", async () =>
         {
@@ -674,12 +959,12 @@ public static class MusicCatalogTests
             CardMotion.Transition(surface, true, false); await Drain();
             Equal(1d, CardMotion.GetProgress(surface)); Equal(200d, entry.ActualHeight);
             var shift = Descendants<StackPanel>(entry).Single(p => p.RenderTransform is TranslateTransform);
-            Equal(80d, ((TranslateTransform)shift.RenderTransform).Y);
+            Equal(86d, shift.TranslatePoint(new Point(), surface).Y);
             entry.DataContext = overlay; CardMotion.Transition(surface, true, false); await Drain();
-            Equal(152d, ((TranslateTransform)shift.RenderTransform).Y);
+            Equal(158d, shift.TranslatePoint(new Point(), surface).Y);
             Equal(58d, ((Button)entry.FindName("PlayButton")).Margin.Bottom);
             entry.DataContext = fm; CardMotion.Transition(surface, true, false); await Drain();
-            Equal(152d, ((TranslateTransform)shift.RenderTransform).Y);
+            Equal(158d, shift.TranslatePoint(new Point(), surface).Y);
             Equal(58d, ((Button)entry.FindName("PlayButton")).Margin.Bottom);
             entry.DataContext = staticCard; CardMotion.Transition(surface, true, false); await Drain();
             Equal(Visibility.Collapsed, ((Button)entry.FindName("PlayButton")).Visibility);
@@ -1549,6 +1834,7 @@ public static class MusicCatalogTests
                 True(Descendants<Image>(image).Single().Source is not null, "real artwork control displays acquired pixels");
                 var title = Descendants<TextBlock>(view).Single(t => t.Text == row.Title);
                 var artist = Descendants<TextBlock>(view).Single(t => t.Text == row.Subtitle);
+                AssertGrayscaleText([title, artist], "actual catalog song title and artist");
                 Equal(SystemFonts.MessageFontFamily, title.FontFamily);
                 Equal(14d, title.FontSize); Equal(20d, title.LineHeight);
                 Equal(12d, artist.FontSize); Equal(18d, artist.LineHeight); Equal(2d, artist.Margin.Top);
@@ -1601,6 +1887,17 @@ public static class MusicCatalogTests
     private static void Equal<T>(T expected, T actual, [System.Runtime.CompilerServices.CallerLineNumber] int line = 0)
     { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new InvalidOperationException($"Catalog assertion line {line}: expected {expected}, actual {actual}"); }
     private static void True(bool condition, string label) { if (!condition) throw new InvalidOperationException(label); }
+    private static void AssertGrayscaleText(IEnumerable<TextBlock> nodes, string label)
+    {
+        var text = nodes.Where(node => !string.IsNullOrWhiteSpace(node.Text)).ToArray();
+        True(text.Length > 0, label + " must include actual text nodes");
+        foreach (var node in text)
+        {
+            var mode = TextOptions.GetTextRenderingMode(node);
+            True(mode == TextRenderingMode.Grayscale,
+                $"{label}: '{node.Text}' must have effective Grayscale TextRenderingMode, actual {mode}");
+        }
+    }
     private static async Task Until(Func<bool> predicate, string failure = "Catalog UI condition did not settle")
     {
         var watch = Stopwatch.StartNew();

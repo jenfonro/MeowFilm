@@ -18,6 +18,7 @@ public partial class MusicPlayerDetailView : UserControl
     private bool centerQueued;
     private bool realizingLyric;
     private bool? needlePlaying;
+    private Thickness lyricEdgeSpace;
 
     public MusicPlayerDetailView(MusicCapability module)
     {
@@ -105,16 +106,14 @@ public partial class MusicPlayerDetailView : UserControl
 
     private void UpdateLyricViewport()
     {
-        if (Descendant<ItemsPresenter>(LyricList) is not { } presenter || LyricList.ActualHeight <= 0) return;
-        var anchor = module.IsPlaying ? .24 : .35;
-        var margin = new Thickness(0, Math.Max(24, LyricList.ActualHeight * anchor - 22),
-            0, Math.Max(24, LyricList.ActualHeight * (1 - anchor) - 22));
-        if (presenter.Margin != margin)
+        if (LyricList.ActualHeight <= 0) return;
+        var space = MusicLyricRowMarginConverter.EdgeSpace(LyricList.ActualHeight, module.IsPlaying);
+        if (lyricEdgeSpace != space)
         {
             lyricMotionEpoch++;
             centeredLyric = centeringLyric = -1;
             if (Descendant<ScrollViewer>(LyricList) is { } scroll) MusicLyricScroll.Stop(scroll);
-            presenter.Margin = margin;
+            lyricEdgeSpace = space;
         }
         if (!lyricResumeTimer.IsEnabled) QueueCenterLyric();
     }
@@ -179,7 +178,7 @@ public partial class MusicPlayerDetailView : UserControl
             MusicLyricScroll.Settle(scroll, originalOffset);
         var epoch = ++lyricMotionEpoch;
         centeringLyric = index;
-        var anchor = module.IsPlaying ? .24 : .35;
+        var anchor = MusicLyricRowMarginConverter.ReadingAnchor(module.IsPlaying);
         MusicLyricScroll.Move(scroll, absoluteCenter - scroll.ViewportHeight * anchor,
             settled: () => SettleCenteredLyric(index, scroll, epoch, anchor));
     }

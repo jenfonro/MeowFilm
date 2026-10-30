@@ -1,28 +1,36 @@
 import UIKit
-import Combine
 import MeowUI
 import MeowMusicFeature
 
-/// Product chrome only. Music supplies one persistent player surface; the
-/// viewport, not a pushed page, owns its space and keyboard avoidance.
+/// Product chrome only; the music content owner survives either player view.
 @MainActor
 final class MeowfilmDockView: UIView {
     let surfaceHost = UIView()
     var onSelectPage: ((MeowfilmPrimaryPage) -> Void)?
-    private let themeProvider: any PageThemeProviding
     private let surface: MusicPlayerSurface
     private let navigation = UIStackView()
+    private let navigationBackground = UIView()
     private var buttons: [MeowfilmPrimaryPage: UIButton] = [:]
     private var selected = MeowfilmPrimaryPage.recommend
     private var surfaceHeight: NSLayoutConstraint!
     private var navigationHeight: NSLayoutConstraint!
-    private var observation: AnyCancellable?
+    private var stackBottom: NSLayoutConstraint!
 
-    init(surface: MusicPlayerSurface, themeProvider: any PageThemeProviding) {
+    private enum NavigationColors {
+        static let background = UIColor.white
+        static let selected = UIColor.black
+        static let unselected = UIColor.darkGray
+    }
+
+    init(surface: MusicPlayerSurface) {
         self.surface = surface
-        self.themeProvider = themeProvider
         super.init(frame: .zero)
         backgroundColor = .clear
+        navigationBackground.backgroundColor = NavigationColors.background
+        navigationBackground.isOpaque = true
+        navigationBackground.isUserInteractionEnabled = false
+        addSubview(navigationBackground)
+        navigationBackground.translatesAutoresizingMaskIntoConstraints = false
         navigation.axis = .horizontal
         navigation.distribution = .fillEqually
         for page in MeowfilmPrimaryPage.allCases {
@@ -44,12 +52,21 @@ final class MeowfilmDockView: UIView {
         }
         let stack = UIStackView(arrangedSubviews: [surfaceHost, navigation])
         stack.axis = .vertical
-        stack.spacing = 0
         addSubview(stack)
-        stack.pinEdges(to: self, insets: UIEdgeInsets(top: 8, left: 14, bottom: 0, right: 14))
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stackBottom = stack.bottomAnchor.constraint(equalTo: bottomAnchor)
         surfaceHeight = surfaceHost.heightAnchor.constraint(equalToConstant: surface.dockHeight)
         navigationHeight = navigation.heightAnchor.constraint(equalToConstant: PageLayoutMetrics.navigation)
-        NSLayoutConstraint.activate([surfaceHeight, navigationHeight])
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: PageLayoutMetrics.dockTop),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            stackBottom, surfaceHeight, navigationHeight,
+            navigationBackground.leadingAnchor.constraint(equalTo: leadingAnchor),
+            navigationBackground.trailingAnchor.constraint(equalTo: trailingAnchor),
+            navigationBackground.topAnchor.constraint(equalTo: navigation.topAnchor),
+            navigationBackground.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
         surfaceHost.addSubview(surface)
         surface.frame = surfaceHost.bounds
         surface.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -59,35 +76,34 @@ final class MeowfilmDockView: UIView {
             self.superview?.setNeedsLayout()
             self.superview?.layoutIfNeeded()
         }
-        observation = themeProvider.pageThemeChanges.receive(on: RunLoop.main)
-            .sink { [weak self] in self?.applyTheme() }
-        registerForTraitChanges([UITraitUserInterfaceStyle.self]) {
-            (dock: MeowfilmDockView, _: UITraitCollection) in dock.applyTheme()
-        }
-        applyTheme()
+        renderNavigation()
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    override func safeAreaInsetsDidChange() {
+        super.safeAreaInsetsDidChange()
+        stackBottom?.constant = -safeAreaInsets.bottom
+    }
+
     func select(_ page: MeowfilmPrimaryPage) {
         selected = page
-        applyTheme()
+        renderNavigation()
     }
 
     func setNavigationVisible(_ visible: Bool) {
         navigation.isHidden = !visible
+        navigationBackground.isHidden = !visible
         navigationHeight.constant = visible ? PageLayoutMetrics.navigation : 0
         surfaceHeight.constant = surface.dockHeight
     }
 
-    private func applyTheme() {
-        let theme = PageTheme(palette: themeProvider.pageColorway,
-                              dark: traitCollection.userInterfaceStyle == .dark)
+    private func renderNavigation() {
         for (page, button) in buttons {
             let kind: PageIcon.Kind = page == .recommend ? .home : page == .channels ? .channels : .person
             button.configuration?.image = PageIcon.image(kind, filled: selected == page)
-            button.configuration?.baseForegroundColor = UIColor(selected == page ? theme.ink : theme.muted)
+            button.configuration?.baseForegroundColor = selected == page ? NavigationColors.selected : NavigationColors.unselected
             button.accessibilityTraits = selected == page ? [.button, .selected] : .button
         }
     }

@@ -20,3 +20,7 @@ Desktop 只拥有原生 WPF 壳、导航/历史、设置展示、窗口及界面
 资源为 `/MeowFilm.Desktop;component/Theme.xaml`。样式覆盖焦点、键盘、悬停、按下、取消、禁用、卸载、高对比、减少动画与缩放。能力可覆盖明确语义色，不复制未知资源或按领域名分支。通知经 NoticeOutlet/NoticeStack，不添加解释性文字。
 
 `MeowFilm.OverlayScrollViewer` 复用 `OverlayScrollChrome.Enabled/Active`，不承载业务分派。普通模式只有滚轮、滚动键、纵向平移或所属纵向滚动条操作实际改变位移时才激活；模板内 viewer 的输入准入由其 `TemplatedParent` 接收。页面悬停、普通焦点、程序恢复位移、内容／视口变化和嵌套滚动不激活。空闲 900ms 后在 160ms 内淡出，重新滚动撤销旧淡出；所属 thumb 捕获鼠标期间保留可见与拖动，释放后重新计时。高对比始终显示系统文字色 thumb，减少动画时直接隐藏；卸载或停用撤销输入准入、计时、动画及所属 thumb 捕获，重新加载只恢复订阅、不恢复旧活动。
+
+壳与正文直接动态引用 `SystemFonts.MessageFontFamilyKey`，跟随 Windows 当前界面字体，不写死字体名称或打包字体文件；图标保留专用符号字体。壳使用 Display 文本排版、Grayscale 抗锯齿和布局／设备像素对齐，不强制 ClearType，也不通过透明文字或整体缩放模拟字体样式。侧栏只让导航项接收键盘焦点，项级焦点轮廓保留；搜索输入与真实搜索按钮共享圆角字段，`Ctrl+F`、Enter 与按钮提交仍走同一壳入口。普通色彩使用平面背景和轻量分隔，高对比模式恢复系统前景、背景及侧栏边线，窗口外轮廓仍只由 DWM／WindowChrome 持有。
+
+首页操作验证优先在独立 STA 中对真实控件使用 `IValueProvider`／`IInvokeProvider` 和路由事件。需要 Loaded／可视源时使用不带 `WS_VISIBLE`、带 `WS_EX_NOACTIVATE` 的测试 `HwndSource`；不显示或激活产品窗口，不使用 `SendInput`、系统键盘／鼠标注入或鼠标捕获。样式示意的合成内容不能作为可交互产品窗口交付；真实上游、桌面交互和离屏组件验证分别记录。

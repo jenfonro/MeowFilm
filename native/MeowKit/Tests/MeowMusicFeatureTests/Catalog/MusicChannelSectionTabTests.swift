@@ -43,9 +43,10 @@ private actor SectionTabBrowser: MusicPublicBrowsing {
                 model.selectSectionTab("one", sectionID: "section", intent: intent)
                 XCTAssertEqual(model.sections[0].selectedTab, "two")
             } else if transition == 1 {
-                model.disappear(preservingContent: true); model.appear()
+                model.disappear(); model.appear()
                 model.selectSectionTab("two", sectionID: "section", intent: intent)
-                XCTAssertEqual(model.sections[0].selectedTab, "one")
+                XCTAssertTrue(model.sections.isEmpty)
+                XCTAssertFalse(model.loaded)
             } else {
                 model.setAccess(available: false, generation: UUID())
                 model.selectSectionTab("two", sectionID: "section", intent: intent)

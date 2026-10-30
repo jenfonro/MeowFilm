@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
 using System.Text.Json;
 using MeowFilm.Platform.Files;
 
@@ -22,6 +23,8 @@ public sealed partial class MusicCapability
     public bool CanImportLocalLyrics => CanEdit && current is not null;
     public bool CanRemoveLocalLyrics => CanImportLocalLyrics && hasLocalLyrics;
     public bool HasLyricPreview => lyricPreview is not null;
+    public MusicLyricRow? FirstLyric => Lyrics.Count > 0 ? Lyrics[0] : null;
+    public MusicLyricRow? LastLyric => Lyrics.Count > 0 ? Lyrics[^1] : null;
     public bool CanConfirmLyricPreview => HasLyricPreview && CanSeek;
     public string LyricPreviewText => lyricPreview is { } row ? Clock(row.Time) + " · " + row.Text : "";
     public int LyricDisplayIndex => lyricPreview is null ? ActiveLyricIndex : Lyrics.IndexOf(lyricPreview);
@@ -29,6 +32,16 @@ public sealed partial class MusicCapability
         ? Lyrics[index].Words ?? [] : [];
     public string LyricTimingLabel => ActiveLyricIndex is var index && index >= 0 && index < Lyrics.Count &&
         Lyrics[index].Timing == "estimated" ? "估算逐字" : "";
+    private void OnLyricRowsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (e.Action == NotifyCollectionChangedAction.Reset || e.NewStartingIndex == 0 || e.OldStartingIndex == 0)
+            Changed(nameof(FirstLyric));
+        var newTail = e.NewStartingIndex >= 0 && e.NewStartingIndex + (e.NewItems?.Count ?? 0) == Lyrics.Count;
+        var removedTail = e.Action == NotifyCollectionChangedAction.Remove && e.OldStartingIndex == Lyrics.Count;
+        var movedTail = e.Action == NotifyCollectionChangedAction.Move && e.OldStartingIndex == Lyrics.Count - 1;
+        if (e.Action == NotifyCollectionChangedAction.Reset || newTail || removedTail || movedTail)
+            Changed(nameof(LastLyric));
+    }
     private void LyricTimingBindings()
     {
         Changed(nameof(CurrentLyricWords)); Changed(nameof(LyricTimingLabel));
