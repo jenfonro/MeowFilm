@@ -35,12 +35,6 @@ struct MusicReferenceQueueMetrics: Equatable, Sendable {
         pageWidth.isFinite ? max(0, pageWidth - 32) : 0
     }
 
-    /// Only a non-active recommendation preview has candidate rows and this
-    /// 40% cap. There are no batch headings in that state.
-    static func previewQueueHeight(count: Int, availableHeight: Double) -> Double {
-        guard availableHeight.isFinite, availableHeight > 0 else { return 0 }
-        return min(availableHeight, max(64, min(Double(max(0, count)) * 64, availableHeight * 0.4)))
-    }
 }
 
 /// Display identity is separate from the selected card and its action token.

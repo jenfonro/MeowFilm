@@ -1,6 +1,7 @@
 #if os(iOS)
 import SwiftUI
 import UIKit
+import Combine
 import MeowUI
 
 @MainActor
@@ -9,6 +10,7 @@ final class MusicAccountsViewController: MusicSettingsPageViewController<MusicAc
     private let state: MusicAccountsSettingsState
     private weak var router: (any MusicUIRouting)?
     private weak var accessAlert: UIAlertController?
+    private weak var detail: MusicAccountDetailViewController?
     private var dialogAccess: UUID?
     private var dialogPlatform: MusicAccountPlatform?
 
@@ -19,7 +21,7 @@ final class MusicAccountsViewController: MusicSettingsPageViewController<MusicAc
         super.init(appearance: appearance, content: MusicAccountsSettingsContent(
             state: state, theme: PageTheme(palette: appearance.pageColorway)
         ))
-        title = "平台聚合设置"
+        title = "平台账号"
     }
 
     override func viewDidLoad() {
@@ -30,12 +32,16 @@ final class MusicAccountsViewController: MusicSettingsPageViewController<MusicAc
             state.reconcileAccess()
             if !owner.isAvailable || owner.isClosed || dialogAccess != owner.accountAccessGeneration {
                 accessAlert?.dismiss(animated: false)
+                closeDetail(animated: false)
             }
         }
         observe(owner.accountChanges) { [weak self] platform in
             guard let self else { return }
             state.accountSessionChanged(platform)
             if dialogPlatform == platform { accessAlert?.dismiss(animated: false) }
+        }
+        observe(state.$rows.map { _ -> Void in }.eraseToAnyPublisher()) { [weak self] in
+            self?.closeDetailIfSignedOut()
         }
         observe(state.errorChanges) { [weak self] in self?.showFailure() }
     }
@@ -58,57 +64,87 @@ final class MusicAccountsViewController: MusicSettingsPageViewController<MusicAc
     }
 
     private func openAccount(_ row: MusicAccountStatus) {
-        guard let context = state.context(for: row), let accounts = state.accounts else { return }
-        let alert = UIAlertController(title: row.platform.title, message: row.phase.title, preferredStyle: .actionSheet)
-        func add(_ title: String, _ action: MusicAccountSettingsAction, style: UIAlertAction.Style = .default) {
-            alert.addAction(UIAlertAction(title: title, style: style) { [weak self] _ in
-                self?.perform(action, context: context)
-            })
+        guard let context = state.context(for: row), presentedViewController == nil else { return }
+        switch row.phase {
+        case .signedIn, .requiresValidation:
+            openDetail(row.platform, context: context)
+        default:
+            if row.canLogin { openLogin(row, context: context) }
         }
-        if row.phase == .signedIn || row.phase == .requiresValidation {
-            add("验证登录会话", .validate)
-            if accounts.canRefreshSession(row.platform) { add("刷新登录会话", .refreshSession) }
-            if accounts.supportsProfileRefresh { add("刷新资料", .refreshProfile) }
-            add("退出登录", .logout, style: .destructive)
-        } else if row.canLogin {
-            alert.addAction(UIAlertAction(title: "登录", style: .default) { [weak self] _ in
-                guard let self, state.isCurrent(context), let service = owner.accounts else { return }
-                navigationController?.pushViewController(
-                    MusicAccountLoginViewController(
-                        owner: owner, service: service, platform: row.platform, appearance: appearance
-                    ),
-                    animated: true
-                )
-            })
+    }
+
+    private func openDetail(_ platform: MusicAccountPlatform, context: MusicAccountSettingsContext) {
+        let controller = MusicAccountDetailViewController(
+            state: state, platform: platform, appearance: appearance,
+            actions: .init(
+                perform: { [weak self] in self?.performCurrent($0, platform: platform) },
+                logout: { [weak self] in self?.confirmLogout(platform) },
+                recommend: { [weak self] kind, title in self?.recommend(platform, kind: kind, title: title) },
+                close: { [weak self] in self?.closeDetail(animated: true) }
+            )
+        )
+        detail = controller
+        dialogAccess = context.accessGeneration
+        present(controller, animated: true)
+    }
+
+    private func closeDetail(animated: Bool, completion: (() -> Void)? = nil) {
+        guard let detail, detail.presentingViewController != nil, !detail.isBeingDismissed else {
+            completion?()
+            return
         }
-        if row.phase == .signedIn, let sync = state.sync {
-            let value = sync.selection(row.platform)
-            if sync.supportsAutomatic, sync.automaticRevision != nil {
-                add((value.favorites ? "关闭" : "开启") + "收藏歌曲自动同步", .favorites(!value.favorites))
-                add((value.playlists ? "关闭" : "开启") + "歌单自动同步", .playlists(!value.playlists))
-            }
-            if state.canSync { add("立即同步", .synchronize) }
-        }
-        if let setting = state.feedback?.value?.platforms[row.platform],
-           row.platform == .netease || row.playbackFeedbackAvailable {
-            add((setting.enabled ? "关闭" : "开启") + "播放上报", .feedback(!setting.enabled))
-        }
-        if row.phase == .signedIn, row.platform != .netease {
-            let choices = row.platform == .qq
-                ? [("guess", "猜你喜欢"), ("radar", "雷达推荐")]
-                : [("daily", "每日推荐"), ("fm", "红心 Radio · 本次推荐")]
-            for choice in choices {
-                alert.addAction(UIAlertAction(title: choice.1, style: .default) { [weak self] _ in
-                    guard let self, state.isCurrent(context) else { return }
-                    router?.showPublicBrowse(
-                        .accountRecommendation(row.platform, kind: choice.0, title: choice.1), title: choice.1
-                    )
-                })
-            }
-        }
+        detail.dismiss(animated: animated, completion: completion)
+    }
+
+    private func closeDetailIfSignedOut() {
+        guard let platform = detail?.platform, !state.pendingAccounts.contains(platform) else { return }
+        let phase = state.rows.first { $0.id == platform }?.account.phase
+        if phase != .signedIn, phase != .requiresValidation { closeDetail(animated: true) }
+    }
+
+    /// Detail actions always rebuild their context from the current row, never from the opening snapshot.
+    private func performCurrent(_ action: MusicAccountSettingsAction, platform: MusicAccountPlatform) {
+        guard let row = state.accounts?.rows.first(where: { $0.platform == platform }),
+              let context = state.context(for: row) else { return }
+        perform(action, context: context)
+    }
+
+    private func confirmLogout(_ platform: MusicAccountPlatform) {
+        guard let host = detail, host.presentedViewController == nil,
+              let row = state.accounts?.rows.first(where: { $0.platform == platform }),
+              let context = state.context(for: row) else { return }
+        let name = MusicAccountSettingsSummary(account: row).detail(at: Date()).name
+        let alert = UIAlertController(
+            title: "退出登录？", message: [platform.title, name].compactMap { $0 }.joined(separator: " · "),
+            preferredStyle: .alert
+        )
         alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        dialogAccess = context.accessGeneration; dialogPlatform = row.platform; accessAlert = alert
-        present(alert, animated: true)
+        alert.addAction(UIAlertAction(title: "退出登录", style: .destructive) { [weak self] _ in
+            guard let self, state.isCurrent(context) else { return }
+            perform(.logout, context: context)
+        })
+        dialogAccess = context.accessGeneration; dialogPlatform = platform; accessAlert = alert
+        host.present(alert, animated: true)
+    }
+
+    private func recommend(_ platform: MusicAccountPlatform, kind: String, title: String) {
+        guard let row = state.accounts?.rows.first(where: { $0.platform == platform }),
+              row.phase == .signedIn, let context = state.context(for: row) else { return }
+        closeDetail(animated: true) { [weak self] in
+            guard let self, state.isCurrent(context) else { return }
+            router?.showPublicBrowse(.accountRecommendation(platform, kind: kind, title: title), title: title)
+        }
+    }
+
+    private func openLogin(_ row: MusicAccountStatus, context: MusicAccountSettingsContext) {
+        guard row.canLogin, state.isCurrent(context), let service = owner.accounts,
+              presentedViewController == nil else { return }
+        present(
+            MusicAccountLoginViewController(
+                owner: owner, service: service, platform: row.platform, appearance: appearance
+            ),
+            animated: true
+        )
     }
 
     private func perform(_ action: MusicAccountSettingsAction, context: MusicAccountSettingsContext) {
@@ -122,12 +158,13 @@ final class MusicAccountsViewController: MusicSettingsPageViewController<MusicAc
         )
         alert.addAction(UIAlertAction(title: "取消", style: .cancel) { _ in feedback.dismissConfirmation() })
         alert.addAction(UIAlertAction(title: "允许", style: .default) { _ in feedback.confirm(ticket) })
+        let host: UIViewController = detail ?? self
         let show = { [weak self] in
             guard let self, isPageVisible, state.isCurrent(context), feedback.confirmation == ticket else { return }
             dialogAccess = context.accessGeneration; dialogPlatform = context.platform; accessAlert = alert
-            present(alert, animated: true)
+            host.present(alert, animated: true)
         }
-        if let previous = presentedViewController as? UIAlertController {
+        if let previous = host.presentedViewController as? UIAlertController {
             previous.dismiss(animated: true, completion: show)
         } else {
             show()
@@ -135,6 +172,8 @@ final class MusicAccountsViewController: MusicSettingsPageViewController<MusicAc
     }
 
     private func showFailure() {
+        // The floating detail reports the same state errors while it covers this page.
+        guard detail == nil else { return }
         let access = owner.accountAccessGeneration
         reportError(state.error, retry: { [weak state] in state?.retry(generation: access) })
     }
@@ -166,46 +205,114 @@ struct MusicAccountsSettingsContent: View {
 
     var body: some View {
         List {
-            Section {
+            Section("音乐平台") {
                 if state.accounts == nil {
                     Text("账号服务不可用")
                         .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+                        .modifier(MusicSettingsRowStyle(theme: theme))
                 }
-                ForEach(state.rows) { summary in
-                    Button { openAccount(summary.account) } label: {
-                        MusicSettingsLinkRow(theme: theme) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(summary.account.platform.title)
-                                if state.pendingAccounts.contains(summary.id) {
-                                    ProgressView().accessibilityLabel("读取账号")
-                                } else {
-                                    Text(summary.detail)
-                                        .font(.subheadline)
-                                        .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
-                                }
-                            }
-                        }
+                ForEach(MusicAccountPlatform.allCases) { platform in
+                    let summary = state.rows.first { $0.id == platform }
+                    Button {
+                        if let summary { openAccount(summary.account) }
+                    } label: {
+                        MusicPlatformAccountRow(
+                            platform: platform, summary: summary, theme: theme,
+                            loading: state.pendingAccounts.contains(platform) || summary == nil && state.busy
+                        )
                     }
-                    .disabled(!state.available || state.pendingAccounts.contains(summary.id))
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("music.accounts." + platform.rawValue)
+                    .disabled(summary == nil || !state.available || state.pendingAccounts.contains(platform))
+                    .modifier(MusicSettingsRowStyle(theme: theme))
                 }
             }
-            .listRowBackground(Color(uiColor: UIColor(theme.surface)).opacity(0.58))
+            .headerProminence(.increased)
             Section("导入") {
                 if state.hasCredentialsImport {
                     Button(action: openCredentials) {
                         MusicSettingsLinkRow(theme: theme) { Text("导入账号凭据") }
                     }
                     .accessibilityIdentifier("music.credentials.import")
+                    .modifier(MusicSettingsRowStyle(theme: theme))
                 }
                 Button(action: openLibrary) {
                     MusicSettingsLinkRow(theme: theme) { Text("导入曲库") }
                 }
                 .accessibilityIdentifier("music.library.import")
+                .modifier(MusicSettingsRowStyle(theme: theme))
             }
+            .headerProminence(.increased)
             .disabled(!state.available)
-            .listRowBackground(Color(uiColor: UIColor(theme.surface)).opacity(0.58))
         }
         .modifier(MusicSettingsListStyle(theme: theme))
+    }
+}
+
+private struct MusicPlatformAccountRow: View {
+    let platform: MusicAccountPlatform
+    let summary: MusicAccountSettingsSummary?
+    let theme: PageTheme
+    let loading: Bool
+
+    var body: some View {
+        let detail = summary?.detail(at: Date()) ?? .init(status: "不可用")
+        HStack(spacing: 12) {
+            MusicPlatformLogo(assetName: platform.settingsLogoName, size: 36, theme: theme)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(platform.title)
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(Color(uiColor: UIColor(theme.ink)))
+                if loading {
+                    ProgressView().accessibilityLabel("读取账号")
+                } else {
+                    accountDetail(detail)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if let account = summary?.account {
+                if account.phase == .signedOut, account.canLogin {
+                    Text("登录")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Color(uiColor: UIColor(theme.accent)))
+                        .frame(minWidth: 44, minHeight: 44)
+                        .fixedSize(horizontal: true, vertical: false)
+                } else if account.phase != .unavailable {
+                    Image(systemName: "chevron.right")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+                        .frame(width: 16)
+                        .accessibilityHidden(true)
+                }
+            }
+        }
+        .frame(minHeight: 56)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    private func accountDetail(_ detail: MusicAccountSettingsDetail) -> some View {
+        let status = Text(detail.status)
+            .foregroundColor(detail.isNonVIP ? theme.settingsDanger : Color(uiColor: UIColor(theme.muted)))
+        Group {
+            if let name = detail.name {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 4) {
+                        Text(name)
+                        Text("·").accessibilityHidden(true)
+                        status
+                    }
+                    .lineLimit(1)
+                    Text("\(name) · \(status)")
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else {
+                status
+            }
+        }
+        .font(.subheadline)
+        .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
     }
 }
 #endif

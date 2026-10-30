@@ -275,6 +275,10 @@
     </Grid>
    </Border>
   </DataTemplate>
+   <DataTemplate x:Key="Catalog.SongColumn">
+    <ItemsControl Height="252" VerticalAlignment="Top"
+                  ItemsSource="{Binding Items}" ItemTemplate="{StaticResource Catalog.SongRow}"/>
+   </DataTemplate>
    <DataTemplate x:Key="Catalog.ArtistCard">
     <Button Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.Flat}" IsEnabled="{Binding CanOpen}"
             Width="184" Margin="0,0,0,48" HorizontalAlignment="Center"
@@ -337,6 +341,10 @@
      </ItemsPanelTemplate></ItemsControl.ItemsPanel>
     </ItemsControl>
    </DataTemplate>
+   <DataTemplate x:Key="Catalog.Section.SongShelf">
+    <local:Shelf ItemsSource="{Binding SongColumns}" CardTemplate="{StaticResource Catalog.SongColumn}"
+                 MinimumCardWidth="400"/>
+   </DataTemplate>
    <DataTemplate x:Key="Catalog.Section.Songs">
     <ItemsControl ItemsSource="{Binding Items}" ItemTemplate="{StaticResource Catalog.SongRow}">
      <ItemsControl.ItemsPanel><ItemsPanelTemplate>
@@ -369,6 +377,9 @@
      </DataTrigger>
      <DataTrigger Binding="{Binding DataContext.IsAggregatePlaylists,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView}}" Value="True">
       <Setter Property="ContentTemplate" Value="{StaticResource Catalog.Section.PlaylistGrid}"/>
+     </DataTrigger>
+     <DataTrigger Binding="{Binding IsSongShelfSection}" Value="True">
+      <Setter Property="ContentTemplate" Value="{StaticResource Catalog.Section.SongShelf}"/>
      </DataTrigger>
       <DataTrigger Binding="{Binding IsArtistSection}" Value="True">
        <Setter Property="ContentTemplate" Value="{StaticResource Catalog.Section.Artists}"/>

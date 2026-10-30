@@ -13,8 +13,10 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
 {
     private readonly MusicCapability module;
     private readonly MeowFilm.Desktop.DesktopHeaderAction refreshAction;
-    private readonly MeowFilm.Desktop.DesktopHeaderAction createPlaylistAction, renamePlaylistAction, deletePlaylistAction;
+    private readonly MeowFilm.Desktop.DesktopHeaderAction renamePlaylistAction, deletePlaylistAction;
     private bool syncingDate;
+    private bool playlistDialogOpen, playlistDialogSubmitting;
+    private IInputElement? playlistDialogReturnFocus;
     private Point songDragStart;
     private SongRow? songDragItem;
     private AdornerLayer? songDragLayer;
@@ -28,20 +30,21 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
     private Brush playerSample = Brushes.DimGray;
     public Brush PlayerBackground { get; private set; } = MusicPlayerArtwork.Backdrop(Brushes.DimGray);
     public Brush PlayerProgress { get; private set; } = MusicPlayerArtwork.Progress(Brushes.DimGray);
+    internal MeowFilm.Desktop.DesktopNavigationGroupAction CreatePlaylistAction { get; }
     public MusicView(MusicCapability module)
     {
         this.module = module;
         songScrollIntent = new(Dispatcher);
+        CreatePlaylistAction = new("创建歌单", OpenCreatePlaylistDialog,
+            () => module.CanEdit && !playlistDialogOpen);
         refreshAction = new("music.refresh", "刷新", async token =>
         {
             token.ThrowIfCancellationRequested();
             await module.RefreshAsync();
             token.ThrowIfCancellationRequested();
         }, () => module.CanEdit, automationName: "刷新音乐内容");
-        createPlaylistAction = new("music.playlist.create", "新建歌单",
-            token => EditPlaylistNameAsync(false, token), () => module.CanEdit);
         renamePlaylistAction = new("music.playlist.rename", "重命名",
-            token => EditPlaylistNameAsync(true, token), () => module.CanEdit && module.CanDeleteCollection);
+            RenamePlaylistNameAsync, () => module.CanEdit && module.CanDeleteCollection);
         deletePlaylistAction = new("music.playlist.delete", "删除",
             token => { token.ThrowIfCancellationRequested(); return module.DeletePlaylistAsync(); },
             () => module.CanEdit && module.CanDeleteCollection);
@@ -54,6 +57,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         };
         Unloaded += async (_, _) =>
         {
+            CloseCreatePlaylistDialog(restoreFocus: false);
             songScrollIntent.Clear();
             EndSongDrag();
             try
@@ -68,7 +72,15 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         {
             if (e.PropertyName == nameof(MusicCapability.CanReorderPlaylist) && !module.CanReorderPlaylist)
                 EndSongDrag();
-            if (e.PropertyName is nameof(MusicCapability.HistoryDate) or nameof(MusicCapability.CanEdit)) SyncDate();
+            if (e.PropertyName is nameof(MusicCapability.HistoryDate) or nameof(MusicCapability.CanEdit))
+            {
+                SyncDate();
+                CreatePlaylistAction.Refresh();
+                UpdateCreatePlaylistDialog();
+            }
+            if (playlistDialogOpen && !playlistDialogSubmitting &&
+                e.PropertyName is nameof(MusicCapability.Heading) or nameof(MusicCapability.IsCollectionPage))
+                CloseCreatePlaylistDialog();
             if (string.IsNullOrEmpty(e.PropertyName) || e.PropertyName == nameof(MusicCapability.IsVipChannel))
             {
                 try { await module.UpdateVipPageAsync(IsLoaded); }
@@ -84,17 +96,17 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
     public MeowFilm.Desktop.DesktopHeaderContribution Header => new("", "",
         SearchVisible: true, SearchEnabled: true,
         Actions: module.IsCollectionPage && module.CanDeleteCollection
-            ? [createPlaylistAction, renamePlaylistAction, deletePlaylistAction, refreshAction] :
-            module.IsCollectionPage ? [createPlaylistAction, refreshAction] :
+            ? [renamePlaylistAction, deletePlaylistAction] :
+            module.IsCollectionPage ? [] :
             module.IsLocalLibraryPage ? [refreshAction] : []);
     public event EventHandler? HeaderChanged;
-    private async Task EditPlaylistNameAsync(bool rename, CancellationToken token)
+    private async Task RenamePlaylistNameAsync(CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        var input = new TextBox { Text = rename ? module.Heading : "", MaxLength = 200, Margin = new(0, 0, 0, 16) };
+        var input = new TextBox { Text = module.Heading, MaxLength = 200, Margin = new(0, 0, 0, 16) };
         input.SetResourceReference(StyleProperty, "MeowFilm.TextBox");
         System.Windows.Automation.AutomationProperties.SetName(input, "歌单名称");
-        var confirm = new Button { Content = rename ? "重命名" : "新建歌单", IsDefault = true };
+        var confirm = new Button { Content = "重命名", IsDefault = true };
         confirm.SetResourceReference(StyleProperty, "MeowFilm.PrimaryButton");
         var cancel = new Button { Content = "取消", IsCancel = true, Margin = new(8, 0, 0, 0) };
         cancel.SetResourceReference(StyleProperty, "MeowFilm.Button");
@@ -104,7 +116,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         content.Children.Add(input); content.Children.Add(actions);
         var dialog = new Window
         {
-            Owner = Window.GetWindow(this), Title = rename ? "重命名歌单" : "新建歌单",
+            Owner = Window.GetWindow(this), Title = "重命名歌单",
             Width = 400, SizeToContent = SizeToContent.Height, ResizeMode = ResizeMode.NoResize,
             WindowStartupLocation = WindowStartupLocation.CenterOwner, ShowInTaskbar = false, Content = content
         };
@@ -123,8 +135,90 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         token.ThrowIfCancellationRequested();
         if (dialog.ShowDialog() != true) return;
         token.ThrowIfCancellationRequested();
-        if (rename) await module.RenamePlaylistAsync(input.Text);
-        else await module.CreatePlaylistAsync(input.Text);
+        await module.RenamePlaylistAsync(input.Text);
+    }
+    private void OpenCreatePlaylistDialog()
+    {
+        if (playlistDialogOpen || !module.CanEdit) return;
+        playlistDialogOpen = true;
+        playlistDialogSubmitting = false;
+        playlistDialogReturnFocus = Keyboard.FocusedElement;
+        PlaylistNameInput.Text = "";
+        PageContent.IsHitTestVisible = false;
+        PlaylistDialogOverlay.Visibility = Visibility.Visible;
+        CreatePlaylistAction.Refresh();
+        UpdateCreatePlaylistDialog();
+        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Input, new Action(() =>
+        {
+            if (!playlistDialogOpen) return;
+            PlaylistNameInput.Focus();
+            Keyboard.Focus(PlaylistNameInput);
+        }));
+    }
+    private void CloseCreatePlaylistDialog(bool restoreFocus = true)
+    {
+        if (!playlistDialogOpen) return;
+        playlistDialogOpen = false;
+        playlistDialogSubmitting = false;
+        PlaylistDialogOverlay.Visibility = Visibility.Collapsed;
+        PageContent.IsHitTestVisible = true;
+        PlaylistNameInput.IsEnabled = true;
+        ClosePlaylistDialogButton.IsEnabled = true;
+        PlaylistNameInput.Text = "";
+        CreatePlaylistAction.Refresh();
+        var target = playlistDialogReturnFocus;
+        playlistDialogReturnFocus = null;
+        if (!restoreFocus || target is null) return;
+        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Input, new Action(() =>
+        {
+            if (target is UIElement element && element.IsVisible && element.IsEnabled)
+                element.Focus();
+        }));
+    }
+    private void UpdateCreatePlaylistDialog()
+    {
+        if (PlaylistNameInput is null || PlaylistNamePlaceholder is null ||
+            PlaylistNameCount is null || CreatePlaylistButton is null) return;
+        var hasName = PlaylistNameInput.Text.Trim().Length > 0;
+        PlaylistNamePlaceholder.Visibility = PlaylistNameInput.Text.Length == 0
+            ? Visibility.Visible : Visibility.Collapsed;
+        PlaylistNameCount.Text = $"{PlaylistNameInput.Text.Length} / {PlaylistNameInput.MaxLength}";
+        CreatePlaylistButton.IsEnabled = playlistDialogOpen && !playlistDialogSubmitting &&
+            module.CanEdit && hasName;
+    }
+    private void PlaylistName_Changed(object sender, TextChangedEventArgs e) => UpdateCreatePlaylistDialog();
+    private void ClosePlaylistDialog_Click(object sender, RoutedEventArgs e)
+    {
+        if (!playlistDialogSubmitting) CloseCreatePlaylistDialog();
+    }
+    private void PlaylistDialog_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Escape || e.KeyboardDevice.Modifiers != ModifierKeys.None ||
+            playlistDialogSubmitting) return;
+        e.Handled = true;
+        CloseCreatePlaylistDialog();
+    }
+    private async void CreatePlaylist_Click(object sender, RoutedEventArgs e)
+    {
+        if (!playlistDialogOpen || playlistDialogSubmitting ||
+            PlaylistNameInput.Text.Trim().Length == 0 || !module.CanEdit) return;
+        playlistDialogSubmitting = true;
+        PlaylistNameInput.IsEnabled = false;
+        ClosePlaylistDialogButton.IsEnabled = false;
+        UpdateCreatePlaylistDialog();
+        var created = await module.TryCreatePlaylistAsync(PlaylistNameInput.Text);
+        if (!playlistDialogOpen) return;
+        if (created)
+        {
+            CloseCreatePlaylistDialog();
+            return;
+        }
+        playlistDialogSubmitting = false;
+        PlaylistNameInput.IsEnabled = true;
+        ClosePlaylistDialogButton.IsEnabled = true;
+        UpdateCreatePlaylistDialog();
+        PlaylistNameInput.Focus();
+        PlaylistNameInput.SelectAll();
     }
     internal void RefreshAppearance(Brush sampled, bool animate = true)
     {

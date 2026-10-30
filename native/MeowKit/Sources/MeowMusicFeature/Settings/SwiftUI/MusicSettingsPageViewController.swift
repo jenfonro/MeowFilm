@@ -5,6 +5,7 @@ import MeowUI
 
 @MainActor
 class MusicSettingsPageViewController<Content: View>: HostingPageViewController<Content> {
+    override var prefersPlainBackButton: Bool { true }
     let appearance: MusicAppearancePreferencesStore
     private var lastError: String?
     private weak var errorAlert: UIAlertController?

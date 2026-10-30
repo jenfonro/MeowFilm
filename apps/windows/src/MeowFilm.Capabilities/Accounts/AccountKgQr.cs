@@ -109,8 +109,10 @@ public sealed partial class MusicAccountProtocol
             catch { throw new MusicAccountException("INVALID_RESPONSE"); }
             var profile = await ValidateKg(ctx, cookie, parts, requireIdentity: true).ConfigureAwait(false);
             GuardQr();
-            await ctx.Accept(accept, new("kg", id, cookie, profile)).ConfigureAwait(false);
+            var details = await ObserveAccountDetails(ctx, profile, cookie).ConfigureAwait(false);
+            GuardQr();
+            await ctx.Accept(accept, new("kg", id, cookie, details)).ConfigureAwait(false);
             return new("kg", id, "authenticated");
-        }, replace: false, requestLimit: 2);
+        }, replace: false, requestLimit: 3);
     }
 }

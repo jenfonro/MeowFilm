@@ -7,6 +7,8 @@ import Combine
 @MainActor
 open class PageViewController: UIViewController {
     public let themeProvider: any PageThemeProviding
+    /// Requests a system Back button without its shared background on iOS 26 and later.
+    open var prefersPlainBackButton: Bool { false }
     /// Retained pager content uses its root lifetime, not temporary containment.
     /// The cache must explicitly invalidate content when releasing it.
     public weak var lifetimeOwner: PageViewController?
@@ -272,12 +274,16 @@ open class PageViewController: UIViewController {
         if wasActive { pageDidBecomeInactive() }
     }
 
-    isolated deinit {
-        for child in children { Self.invalidatePages(in: child) }
-        for observer in observers { NotificationCenter.default.removeObserver(observer) }
-        themeObservation?.cancel()
-        for subscription in subscriptions { subscription.cancel() }
-        for task in tasks.values { task.cancel() }
+    // UIKit owners release pages on MainActor. Verify that synchronously rather
+    // than entering the isolated-deinit task-local teardown on older runtimes.
+    nonisolated deinit {
+        MainActor.assumeIsolated {
+            for child in children { Self.invalidatePages(in: child) }
+            for observer in observers { NotificationCenter.default.removeObserver(observer) }
+            themeObservation?.cancel()
+            for subscription in subscriptions { subscription.cancel() }
+            for task in tasks.values { task.cancel() }
+        }
     }
 }
 #endif

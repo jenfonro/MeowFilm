@@ -227,7 +227,7 @@ public static class MusicCatalogTests
                     var y = caption.TranslatePoint(new Point(), surface).Y;
                     var pixelY = y * VisualTreeHelper.GetDpi(surface).DpiScaleY;
                     True(Math.Abs(pixelY - Math.Round(pixelY)) < .01, "caption baseline starts on a display pixel");
-                    var cover = Descendants<ArtworkImage>(surface).Single();
+                    var cover = (ArtworkImage)entry.FindName("Cover");
                     True(y >= cover.ActualHeight && y + subtitle.ActualHeight <= surface.ActualHeight,
                         "the resting caption fits in its footer after resize");
                     var clip = (RectangleGeometry)surface.Clip;
@@ -455,6 +455,8 @@ public static class MusicCatalogTests
                 (new MusicCatalogSection("会员榜", [playlist], Type: "rankings", Layout: "vip-ranked-songs"), "Catalog.Section.Rankings", MusicCatalogSectionPresentation.RankingPreviews),
                 (new MusicCatalogSection("官方榜数据", [ranking], Type: "rankings"), "Catalog.Section.Rankings", MusicCatalogSectionPresentation.RankingPreviews),
                 (new MusicCatalogSection("歌曲", [new MusicCatalogCard("s", "歌曲", "歌手", "", "song", "wy", song)]), "Catalog.Section.Songs", MusicCatalogSectionPresentation.Songs),
+                (new MusicCatalogSection("歌曲摘要", [new MusicCatalogCard("s", "歌曲", "歌手", "", "song", "wy", song)],
+                    Type: "songs", Layout: "rail"), "Catalog.Section.SongShelf", MusicCatalogSectionPresentation.Songs),
                 (new MusicCatalogSection("", [artist], Type: "artists", Layout: "artist-grid"), "Catalog.Section.Artists", MusicCatalogSectionPresentation.Artists)
             };
             foreach (var (section, resource, presentation) in cases)
@@ -473,6 +475,45 @@ public static class MusicCatalogTests
                 }
                 finally { window.Close(); }
             }
+        });
+        yield return Case("summary song shelves keep source order in fixed three-row horizontal columns", async () =>
+        {
+            var cards = Enumerable.Range(1, 7).Select(index =>
+            {
+                var song = SongRow.Read(MusicSongFixture.Element(
+                    MusicSongFixture.Online("wy", index.ToString(), "歌曲" + index, "歌手", "专辑", 180)));
+                return new MusicCatalogCard(index.ToString(), song.Title, song.Artist, song.Cover,
+                    "song", "wy", song, ActionId: index.ToString());
+            }).ToArray();
+            var section = new MusicCatalogSection("歌曲", cards, Type: "songs", Layout: "rail");
+            Equal("1,2,3|4,5,6|7", string.Join("|",
+                section.SongColumns.Select(column => string.Join(",", column.Items.Select(item => item.Id)))));
+
+            var view = new MusicCatalogView();
+            var singleColumn = (FrameworkElement)((DataTemplate)view.FindResource("Catalog.SongColumn")).LoadContent();
+            singleColumn.DataContext = new MusicCatalogSongColumn(cards.Take(1).ToArray());
+            singleColumn.Measure(new Size(420, double.PositiveInfinity));
+            Equal(252d, singleColumn.DesiredSize.Height);
+            var presenter = new ContentControl
+            {
+                DataContext = section,
+                Content = section,
+                Style = (Style)view.FindResource("Catalog.SectionPresenter")
+            };
+            var window = new Window
+            {
+                Content = presenter, Width = 900, Height = 320, WindowStyle = WindowStyle.None,
+                Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false
+            };
+            try
+            {
+                window.Show(); window.UpdateLayout(); await Drain();
+                var shelf = Descendants<Shelf>(presenter).Single();
+                Equal(3, shelf.ItemsSource!.Cast<MusicCatalogSongColumn>().Count());
+                Equal(Visibility.Collapsed, ((Button)shelf.FindName("Previous")).Visibility);
+                Equal(Visibility.Visible, ((Button)shelf.FindName("Next")).Visibility);
+            }
+            finally { window.Close(); }
         });
         yield return Case("channel chrome owns direct tabs filters and no duplicate platform selector", async () =>
         {
@@ -835,7 +876,7 @@ public static class MusicCatalogTests
                 var rail = shelf.ScrollHost ?? throw new InvalidOperationException("shelf scroll host");
                 var previous = (Button)shelf.FindName("Previous"); var next = (Button)shelf.FindName("Next");
                 True(rail.ScrollableWidth > 0 && next.IsEnabled && !previous.IsEnabled, "overflow right, left boundary disabled");
-                Equal(Visibility.Visible, previous.Visibility); Equal(Visibility.Visible, next.Visibility);
+                Equal(Visibility.Collapsed, previous.Visibility); Equal(Visibility.Visible, next.Visibility);
                 Equal(0d, next.Opacity); True(!next.IsHitTestVisible, "hidden controls do not intercept pointer");
                 True(previous.TranslatePoint(new Point(previous.ActualWidth,0), rail).X <= 0, "left arrow outside card viewport");
                 True(next.TranslatePoint(new Point(),rail).X >= rail.ActualWidth, "right arrow outside card viewport");
@@ -850,7 +891,7 @@ public static class MusicCatalogTests
                 { RoutedEvent = Keyboard.PreviewKeyDownEvent };
                 shelf.RaiseEvent(end);
                 True(end.Handled, "End is handled by the shelf");
-                await Until(() => Math.Abs(rail.HorizontalOffset - rail.ScrollableWidth) < .5);
+                await Until(() => Math.Abs(rail.HorizontalOffset - shelf.MaximumOffset) < .5);
                 var home = new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, Key.Home)
                 { RoutedEvent = Keyboard.PreviewKeyDownEvent };
                 shelf.RaiseEvent(home);
@@ -910,7 +951,7 @@ public static class MusicCatalogTests
 
                 rail.ScrollToHorizontalOffset(saved + shelf.CardWidth * .37); window.UpdateLayout();
                 var inBetween = rail.HorizontalOffset;
-                var settled = Math.Clamp(Math.Round(inBetween / shelf.CardWidth) * shelf.CardWidth, 0, rail.ScrollableWidth);
+                var settled = Math.Clamp(Math.Round(inBetween / shelf.CardWidth) * shelf.CardWidth, 0, shelf.MaximumOffset);
                 shelf.DataContext = second; window.UpdateLayout();
                 await Until(() => Math.Abs(first.HorizontalOffset - settled) < .5 && rail.HorizontalOffset < .5);
                 True(Math.Abs(first.HorizontalOffset - inBetween) > 1,
@@ -930,7 +971,7 @@ public static class MusicCatalogTests
                 window.UpdateLayout();
                 var pendingUnloadOffset = rail.HorizontalOffset;
                 var pendingUnloadTarget = Math.Clamp(
-                    Math.Round(pendingUnloadOffset / shelf.CardWidth) * shelf.CardWidth, 0, rail.ScrollableWidth);
+                    Math.Round(pendingUnloadOffset / shelf.CardWidth) * shelf.CardWidth, 0, shelf.MaximumOffset);
                 view.Content = null; await Drain();
                 True(Math.Abs(first.HorizontalOffset - pendingUnloadTarget) < .5,
                     "unload commits the settled target before discarding the timer");
@@ -1798,19 +1839,27 @@ public static class MusicCatalogTests
         });
         yield return Case("anonymous home hides login-only cards but keeps real public content", async () =>
         {
+            const string publicCover = "https://art.example.test/public-playlist.jpg";
+            const string privateCover = "https://art.example.test/private-daily.jpg";
             await using var f = await Fixture.Create();
             await f.Module.NavigateAsync("catalog-home", default);
             var view = new MusicCatalogView { DataContext = f.Module };
+            var loader = new CatalogArtworkLoader();
+            ArtworkScope.SetLoader(view, loader);
             var window = new Window { Content = view, Width = 900, Height = 650, Left = -10000, Top = -10000,
                 ShowActivated = false, ShowInTaskbar = false };
             try
             {
-            window.Show(); window.UpdateLayout(); await Drain();
-            var buttons = Descendants<Button>(view).ToArray();
-            True(!buttons.Any(b => b.Tag is MusicCatalogCard { Kind: "daily" }), "login-only entry not rendered");
-            True(!Descendants<TextBlock>(view).Any(t => t.Text == "当前内容需要平台登录"), "no login warning tiles");
-            True(f.Module.CatalogSections.SelectMany(s => s.Items).Any(c => c.Kind == "daily" && !c.CanOpen), "capability and action denial remain intact");
-            True(buttons.Any(b => b.Tag is MusicCatalogCard { Song: not null } && b.IsEnabled), "nested song actual WPF card enabled");
+                window.Show(); window.UpdateLayout();
+                await Until(() => loader.Addresses.Contains(publicCover), "public home artwork was not requested");
+                var buttons = Descendants<Button>(view).ToArray();
+                True(!buttons.Any(b => b.Tag is MusicCatalogCard { Kind: "daily" }), "login-only entry not rendered");
+                True(!Descendants<TextBlock>(view).Any(t => t.Text == "当前内容需要平台登录"), "no login warning tiles");
+                True(f.Module.CatalogSections.SelectMany(s => s.Items).Any(c =>
+                    c.Kind == "daily" && c.Cover == privateCover && !c.CanOpen), "capability and action denial remain intact");
+                True(buttons.Any(b => b.Tag is MusicCatalogCard { Song: not null } && b.IsEnabled), "nested song actual WPF card enabled");
+                True(!loader.Addresses.Contains(privateCover), "hidden account artwork is never requested");
+                Equal(0, f.Client.Count("music.catalog.playlist"));
             }
             finally { window.Close(); }
         });
@@ -1861,9 +1910,38 @@ public static class MusicCatalogTests
                 shelf.Measure(new Size(826, 300)); shelf.Arrange(new Rect(0, 0, 826, 300)); shelf.UpdateLayout();
                 True(Math.Abs(shelf.CardWidth - expected) < .01, type + " reference pitch");
             }
-            var anonymous = new MusicCatalogSection("", [row, row with { Id = "private", Available = false, ErrorCode = "AUTH_REQUIRED" }]);
-            Equal(1, anonymous.WithoutLoginOnlyCards().Items.Count);
-            Equal(2, (anonymous with { Items = [row, row with { Id = "private", Available = true }] }).WithoutLoginOnlyCards().Items.Count);
+            var hidden = row with
+            {
+                Id = "private", Available = false, ErrorCode = "AUTH_REQUIRED",
+                RequiresAccount = true, Display = false
+            };
+            var anonymous = new MusicCatalogSection("", [row, hidden], Action: hidden);
+            var display = anonymous.DisplayableCards();
+            Equal(1, display.Items.Count);
+            True(display.Action is null, "a hidden account action is removed from the display projection");
+            Equal(2, (anonymous with
+            {
+                Items = [row, hidden with { Available = true, ErrorCode = "", Display = true }]
+            }).DisplayableCards().Items.Count);
+
+            var reply = JsonSerializer.SerializeToElement(new
+            {
+                platform = "wy",
+                sections = new[]
+                {
+                    new
+                    {
+                        id = "private-section", title = "账号栏目", type = "playlists",
+                        available = false, errorCode = "AUTH_REQUIRED",
+                        requiresAccount = true, display = false,
+                        action = new { type = "daily" },
+                        items = new[] { new { id = "1", name = "公开歌单", kind = "playlist" } }
+                    }
+                }
+            });
+            var action = MusicCatalogDto.Read(reply, "wy", "home", "").Single().Action!;
+            True(action.RequiresAccount && !action.Display && !action.Available &&
+                action.ErrorCode == "AUTH_REQUIRED", "section action display and account admission survive DTO projection");
             return Task.CompletedTask;
         });
     }
@@ -2313,12 +2391,14 @@ public static class MusicCatalogTests
                 var entries = new List<object>();
                 if (Number("detailLimit") > 0)
                     entries.Add(new { resourceType = "playlist", resourceId = (600 + cursor).ToString(), name = "入口歌单" });
-                entries.Add(new { resourceType = "dailysongs", name = "每日推荐" });
+                entries.Add(new { resourceType = "dailysongs", name = "每日推荐",
+                    coverImg = "https://art.example.test/private-daily.jpg" });
                 entries.Add(new { resourceType = "song", resourceExtInfo = new { songData = Wy(1001 + cursor) }, name = "嵌套歌曲" });
                 return Json(new { code = 200, data = new { cursor = (cursor + 1).ToString(), hasMore = cursor < Number("homePages", 2) - 1,
                     blockCodeOrderList = "[\"PLAYLIST\"]", blocks = new object[] {
                         new { positionCode = "PLAYLIST", uiElement = new { subTitle = new { title = "推荐歌单" } },
-                            creatives = new[] { new { resources = new[] { new { resourceType = "playlist", resourceId = (500 + cursor).ToString(), name = "合成歌单" } } } } },
+                            creatives = new[] { new { resources = new[] { new { resourceType = "playlist", resourceId = (500 + cursor).ToString(),
+                                name = "合成歌单", coverImg = "https://art.example.test/public-playlist.jpg" } } } } },
                         new { positionCode = "ENTRANCE", creatives = new[] { new { resources = entries.ToArray() } } } } } });
             }
             throw new InvalidOperationException("Unexpected synthetic catalog request");

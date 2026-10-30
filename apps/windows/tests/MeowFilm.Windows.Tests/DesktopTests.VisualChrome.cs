@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
@@ -51,6 +52,32 @@ public static partial class DesktopTests
                 "the embedded search action receives pointer hits");
             True(Hits(search, new Point((search.Padding.Left + search.ActualWidth - search.Padding.Right) / 2, search.ActualHeight / 2)),
                 "the text area keeps independent pointer hits");
+            double TextOrigin(TextBox box)
+            {
+                box.ApplyTemplate(); box.UpdateLayout();
+                var textView = VisualDescendants<FrameworkElement>(box)
+                    .Single(element => element.GetType().Name == "TextBoxView");
+                return textView.TranslatePoint(new Point(), box).X;
+            }
+            search.Text = "搜索内容"; root.UpdateLayout(); await DrainAsync();
+            var searchTextOrigin = TextOrigin(search);
+            var textChromeInset = searchTextOrigin - search.Padding.Left;
+            True(textChromeInset is >= 0 and <= 4,
+                $"search padding is applied once before the native text chrome ({searchTextOrigin:0.##} vs {search.Padding.Left:0.##})");
+            True(searchTextOrigin - (origin.X + action.ActualWidth) is >= 2 and <= 8,
+                "the search glyph and input text have only their intentional gap");
+            var layout = (Grid)root.Child;
+            var ordinary = new TextBox
+            {
+                Width = 220, Height = 38, Text = "普通输入", HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Top
+            };
+            Panel.SetZIndex(ordinary, 100);
+            layout.Children.Add(ordinary); root.UpdateLayout(); await DrainAsync();
+            True(Math.Abs((TextOrigin(ordinary) - ordinary.Padding.Left) - textChromeInset) <= 1 &&
+                Math.Abs(ordinary.Padding.Left - 12) < .01,
+                "the shared text-box template preserves one ordinary padding application");
+            layout.Children.Remove(ordinary);
             True(search.Background is SolidColorBrush { Color.A: 255 }, "search has an opaque flat background");
             DesktopTheme.SetIsHighContrast(root, true); root.UpdateLayout(); await DrainAsync();
             Equal(SystemColors.WindowColor, ((SolidColorBrush)search.Background).Color, "system search background");
@@ -66,6 +93,34 @@ public static partial class DesktopTests
             f.Shell.Resources.Remove(SystemFonts.MessageFontFamilyKey); await DrainAsync();
             Equal(SystemFonts.MessageFontFamily, search.FontFamily, "system font restored without changing Windows settings");
             source.RootVisual = null;
+        });
+        yield return Case("sidebar collection group exposes one accessible action", async () =>
+        {
+            var enabled = true;
+            var executions = 0;
+            var action = new DesktopNavigationGroupAction("创建歌单", () => executions++, () => enabled);
+            var module = new ProbeModule("collections");
+            module.ReplaceNavigation(new ObservableCollection<NavigationItem>(
+            new NavigationItem[]
+            {
+                new("one", "首页", ""),
+                new("favorites", "我的收藏", "", "我的", GroupAction: action),
+                new("playlist/1", "本地歌单", "", "我的")
+            }));
+            await using var f = new Fixture([module]);
+            await f.LoadAsync();
+            var root = DetachChrome(f.Shell);
+            root.Measure(new(860, 600)); root.Arrange(new Rect(0, 0, 860, 600)); root.UpdateLayout();
+            await DrainAsync();
+
+            var button = ChromeVisuals(root).OfType<Button>().Single(item =>
+                AutomationProperties.GetName(item) == "创建歌单");
+            True(button.IsEnabled && button.Command is not null, "group action is keyboard-command enabled");
+            Equal("\uE710", button.Content as string, "visible add glyph");
+            button.Command!.Execute(button.CommandParameter);
+            Equal(1, executions, "bound action executes once");
+            enabled = false; action.Refresh(); await DrainAsync();
+            False(button.IsEnabled, "group action observes current admission");
         });
         yield return Case("sidebar overlay scroll hides at rest and scrolls over collection items", async () =>
         {
@@ -216,6 +271,12 @@ public static partial class DesktopTests
         public void Request(DesktopGlobalSurface surface) =>
             GlobalSurfaceRequested?.Invoke(this, new(surface));
     }
+    private static IEnumerable<DependencyObject> ChromeVisuals(DependencyObject current)
+    {
+        yield return current;
+        for (var index = 0; index < VisualTreeHelper.GetChildrenCount(current); index++)
+            foreach (var child in ChromeVisuals(VisualTreeHelper.GetChild(current, index))) yield return child;
+    }
     private static Border DetachChrome(ShellWindow shell)
     {
         var root = (Border)shell.Content; shell.Content = null;
@@ -223,5 +284,14 @@ public static partial class DesktopTests
         root.Background = shell.Background; TextElement.SetForeground(root, shell.Foreground);
         TextElement.SetFontFamily(root, shell.FontFamily); TextElement.SetFontSize(root, shell.FontSize);
         return root;
+    }
+    private static IEnumerable<T> VisualDescendants<T>(DependencyObject root) where T : DependencyObject
+    {
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is T match) yield return match;
+            foreach (var descendant in VisualDescendants<T>(child)) yield return descendant;
+        }
     }
 }

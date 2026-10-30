@@ -9,6 +9,48 @@ final class MusicNativeHomePresentationTests: XCTestCase {
         try MJ.parse(Data(text.utf8), mode: .upstream)
     }
 
+    func testHeaderActionsUseDirectoryChannelIdentityAndPreserveCardDestinations() throws {
+        let root = try json(#"""
+        {"data":{"blocks":[
+          {"positionCode":"lists","dslData":{"header":{"title":"推荐歌单",
+            "action":"orpheus://rnpage?component=rn-playlistsquare"},"items":[
+            {"resourceType":"playlist","id":"41","title":"歌单"}]}},
+          {"positionCode":"ranks","dslData":{"title":"排行榜",
+            "action":"orpheus://nm/mainTab/select?tab=music&musicTabCode=chart","items":[
+            {"resourceType":"toplist","id":"42","title":"榜单"}]}}
+        ]}}
+        """#)
+        let page = try MusicNativePublicBrowseParser.blocks(root, previous: .obj())
+        let catalogue = try MusicNativePublicBrowseParser.channels(json(#"""
+        {"data":{"channels":[{"code":"playlist","title":"歌单"},{"code":"chart","title":"排行榜"}]}}
+        """#))
+        XCTAssertEqual(page.sections.compactMap { $0.channel?.identity }, catalogue.map(\.identity))
+        XCTAssertEqual(page.sections.compactMap { $0.channel?.kind }, [.playlists, .rankings])
+        for (section, id) in zip(page.sections, ["41", "42"]) {
+            guard case .collection(let value) = section.items[0].content else { return XCTFail("Card destination required") }
+            XCTAssertEqual(value.nativeID, id)
+            XCTAssertEqual(value.platform, .netease)
+        }
+    }
+
+    func testHeaderFallbackUsesResourceKindInsteadOfTitleAndDoesNotReplaceDeclaredActions() throws {
+        let root = try json(#"""
+        {"data":{"blocks":[
+          {"positionCode":"lists","dslData":{"title":"任意栏目","items":[{"resourceType":"playlist","id":"41","title":"歌单"}]}},
+          {"positionCode":"ranks","dslData":{"title":"另一栏目","items":[{"resourceType":"toplist","id":"42","title":"榜单"}]}},
+          {"positionCode":"songs","dslData":{"title":"推荐歌单","items":[{"resourceType":"song","id":"43"}]}},
+          {"positionCode":"unsupported","dslData":{"title":"排行榜","action":"javascript:invalid",
+            "items":[{"resourceType":"playlist","id":"44","title":"歌单"}]}}
+        ]}}
+        """#)
+        let page = try MusicNativePublicBrowseParser.blocks(root, previous: .obj())
+        XCTAssertEqual(page.sections[0].channel?.id, "playlist")
+        XCTAssertEqual(page.sections[1].channel?.id, "chart")
+        XCTAssertNil(page.sections[2].channel)
+        XCTAssertNil(page.sections[3].channel)
+        XCTAssertEqual(page.sections[3].items.count, 1)
+    }
+
     func testCompactLabelsAndNativeArtworkFieldsFollowReferencePrecedence() throws {
         let rows = try json(#"""
         [

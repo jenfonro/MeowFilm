@@ -168,7 +168,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
     private void Changed([CallerMemberName] string? property = null) => PropertyChanged?.Invoke(this, new(property));
     private void RefreshBindings()
     {
-        foreach (var name in new[] { nameof(Heading), nameof(Status), nameof(Busy), nameof(CanEdit), nameof(CanClearPlaybackCache),
+        foreach (var name in new[] { nameof(Heading), nameof(Status), nameof(Busy), nameof(CanEdit), nameof(CanEditQuality),
+            nameof(CanEditAppearance), nameof(CanClearPlaybackCache),
             nameof(IsHistory), nameof(IsArchives), nameof(IsSongList), nameof(IsCollectionPage), nameof(IsContentDetailPage), nameof(ShowsSongTable),
             nameof(ShowSongPager), nameof(HistoryDate),
             nameof(HasSelection), nameof(CanRemoveSelection), nameof(CanReorderPlaylist), nameof(CanLoadMoreCollection), nameof(HasCollection), nameof(CanDeleteCollection), nameof(CanEditMetadata),
@@ -337,16 +338,21 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         if (!IsSongList || direction > 0 && target.Offset >= total) return Task.CompletedTask;
         return RunAsync(async () => { if (origin == loadGeneration) await LoadAsync(target, lifetime.Token); });
     }
-    public Task CreatePlaylistAsync(string name)
+    public Task CreatePlaylistAsync(string name) => CreatePlaylistCoreAsync(name);
+    internal Task<bool> TryCreatePlaylistAsync(string name) => CreatePlaylistCoreAsync(name);
+    private async Task<bool> CreatePlaylistCoreAsync(string name)
     {
         name = name.Trim(); var origin = loadGeneration;
-        return RunAsync(async () =>
+        var created = false;
+        await RunAsync(async () =>
         {
             if (name.Length == 0) { status = "请输入歌单名称"; return; }
             var reply = await Call("music.library.create", new { name }, lifetime.Token);
+            created = true;
             await RefreshPlaylists(lifetime.Token);
             if (origin == loadGeneration) await RequestNavigationAsync("playlist/" + MusicDto.Text(reply.GetProperty("collection"), "id"));
         });
+        return created;
     }
     public Task DeletePlaylistAsync()
     {

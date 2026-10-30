@@ -177,9 +177,19 @@ final class MusicNativePublicBrowseDiscoveryTests: XCTestCase {
         catch { XCTAssertEqual(error as? MusicServiceError, .authRequired) }
         let calls = await http.calls(); XCTAssertTrue(calls.isEmpty)
     }
-    func testEmptyMorePageIsRejectedByNativeConsumer() throws {
+    func testEmptyMorePageIsRejectedByNativeConsumer() async throws {
         let root = MJ.obj([("data", .obj([("blocks", .array([])), ("hasMore", .bool(true)), ("cursor", .n(0))]))])
         XCTAssertThrowsError(try MusicNativePublicBrowseParser.blocks(root, previous: .obj([("cursor", .string("0"))])))
+        let cases: [(blocks: [MJ], error: MusicServiceError)] = [([], .limit), ([.null], .upstreamInvalid)]
+        for item in cases {
+            let response = MJ.obj([("code", .n(200)), ("data", .obj([
+                ("blocks", .array(item.blocks)), ("hasMore", .bool(true)), ("cursor", .string("1")),
+            ]))])
+            let service = try await NativeMusicFixture.service(http: NativeMusicHTTPFixture([response]))
+            do { _ = try await service.homePage(cursor: nil, refresh: true); XCTFail("Nonterminal page without real progress accepted") }
+            catch { XCTAssertEqual(error as? MusicServiceError, item.error) }
+            await service.close()
+        }
     }
     func testCubeProductionConsumerKeepsNativeRulePointAndAlgorithmIDs() async throws {
         let songList = MJ.obj([("ruleId", .n(3)), ("pointId", .array([.obj([("id", .n(2))])])), ("title", .string("Feed"))])

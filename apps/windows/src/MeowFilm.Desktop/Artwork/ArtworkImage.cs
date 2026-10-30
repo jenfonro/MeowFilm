@@ -22,6 +22,8 @@ public sealed class ArtworkImage : Grid
         typeof(ArtworkImage), new PropertyMetadata("", (value, _) => ((ArtworkImage)value).Restart()));
     public static readonly DependencyProperty StretchProperty = DependencyProperty.Register(nameof(Stretch), typeof(Stretch),
         typeof(ArtworkImage), new PropertyMetadata(Stretch.UniformToFill, (value, args) => ((ArtworkImage)value).image.Stretch = (Stretch)args.NewValue));
+    public static readonly DependencyProperty ShowRetryProperty = DependencyProperty.Register(nameof(ShowRetry), typeof(bool),
+        typeof(ArtworkImage), new PropertyMetadata(true, (value, _) => ((ArtworkImage)value).UpdateRetryVisibility()));
     private static readonly DependencyPropertyKey RawPaletteBrushPropertyKey = DependencyProperty.RegisterReadOnly(nameof(RawPaletteBrush),
         typeof(Brush), typeof(ArtworkImage), new PropertyMetadata(Brushes.DimGray));
     public static readonly DependencyProperty RawPaletteBrushProperty = RawPaletteBrushPropertyKey.DependencyProperty;
@@ -30,6 +32,14 @@ public sealed class ArtworkImage : Grid
         typeof(Brush), typeof(ArtworkImage), new PropertyMetadata(Brushes.DimGray));
     public static readonly DependencyProperty PaletteBrushProperty = PaletteBrushPropertyKey.DependencyProperty;
     public Brush PaletteBrush => (Brush)GetValue(PaletteBrushProperty);
+    private static readonly DependencyPropertyKey TopPaletteBrushPropertyKey = DependencyProperty.RegisterReadOnly(nameof(TopPaletteBrush),
+        typeof(Brush), typeof(ArtworkImage), new PropertyMetadata(Brushes.DimGray));
+    public static readonly DependencyProperty TopPaletteBrushProperty = TopPaletteBrushPropertyKey.DependencyProperty;
+    public Brush TopPaletteBrush => (Brush)GetValue(TopPaletteBrushProperty);
+    private static readonly DependencyPropertyKey HasTopPalettePropertyKey = DependencyProperty.RegisterReadOnly(nameof(HasTopPalette),
+        typeof(bool), typeof(ArtworkImage), new PropertyMetadata(false));
+    public static readonly DependencyProperty HasTopPaletteProperty = HasTopPalettePropertyKey.DependencyProperty;
+    public bool HasTopPalette => (bool)GetValue(HasTopPaletteProperty);
     private readonly Image image = new() { Stretch = Stretch.UniformToFill };
     private readonly Button retry = new() { Content = "重试", ToolTip = "图片加载失败",
         HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
@@ -39,10 +49,11 @@ public sealed class ArtworkImage : Grid
     private Task? requestTask;
     private PresentationLease? presentation;
     private long epoch;
-    private bool loaded, attempted, observingLayout;
+    private bool loaded, attempted, failed, observingLayout;
 
     public string Address { get => (string)GetValue(AddressProperty); set => SetValue(AddressProperty, value); }
     public Stretch Stretch { get => (Stretch)GetValue(StretchProperty); set => SetValue(StretchProperty, value); }
+    public bool ShowRetry { get => (bool)GetValue(ShowRetryProperty); set => SetValue(ShowRetryProperty, value); }
     public ArtworkImage()
     {
         ClipToBounds = true; Children.Add(image); Children.Add(retry);
@@ -108,10 +119,13 @@ public sealed class ArtworkImage : Grid
     private void Retire()
     {
         epoch++;
-        var priorRequest = request; request = null; requestTask = null; attempted = false;
+        var priorRequest = request; request = null; requestTask = null; attempted = failed = false;
         var priorLease = lease; lease = null;
         image.Source = null; SetValue(RawPaletteBrushPropertyKey, Brushes.DimGray);
-        SetValue(PaletteBrushPropertyKey, Brushes.DimGray); retry.Visibility = Visibility.Collapsed;
+        SetValue(PaletteBrushPropertyKey, Brushes.DimGray);
+        SetValue(TopPaletteBrushPropertyKey, Brushes.DimGray);
+        SetValue(HasTopPalettePropertyKey, false);
+        UpdateRetryVisibility();
         priorLease?.Dispose();
         // Cancellation may synchronously resume preparation; publish retirement before invoking it.
         priorRequest?.Cancel();
@@ -119,22 +133,47 @@ public sealed class ArtworkImage : Grid
     // Small raster sample of the already acquired cover: no second fetch or full-image copy.
     internal static (Brush Raw, Brush Palette) SamplePalette(BitmapSource source)
     {
+        var palettes = SamplePalettes(source);
+        return (palettes.Raw, palettes.Palette);
+    }
+    internal static Brush SampleTopPalette(BitmapSource source) => SamplePalettes(source).Top;
+    private static (Brush Raw, Brush Palette, Brush Top, bool HasTopPalette) SamplePalettes(BitmapSource source)
+    {
         var small = new TransformedBitmap(source, new ScaleTransform(8d / source.PixelWidth, 8d / source.PixelHeight));
         var rgba = new FormatConvertedBitmap(small, PixelFormats.Bgra32, null, 0);
         int stride = rgba.PixelWidth * 4;
         var bytes = new byte[stride * rgba.PixelHeight]; rgba.CopyPixels(bytes, stride, 0);
-        long r = 0, g = 0, b = 0, weight = 0;
-        for (int i = 0; i < bytes.Length; i += 4)
-        { int alpha = bytes[i + 3]; b += bytes[i] * alpha; g += bytes[i + 1] * alpha; r += bytes[i + 2] * alpha; weight += alpha; }
-        if (weight == 0) return (Brushes.DimGray, Brushes.DimGray);
-        double red = (double)r / weight, green = (double)g / weight, blue = (double)b / weight;
-        double scale = Math.Min(1, 105 / Math.Max(1, .2126 * red + .7152 * green + .0722 * blue));
-        SolidColorBrush Brush(double factor)
+        static (double Red, double Green, double Blue, long Weight, int Count) Average(
+            byte[] pixels, int pixelWidth, int firstRow, int rowCount)
         {
-            var brush = new SolidColorBrush(Color.FromRgb((byte)(red * factor), (byte)(green * factor), (byte)(blue * factor)));
+            long r = 0, g = 0, b = 0, weight = 0;
+            int first = firstRow * pixelWidth * 4;
+            int last = Math.Min(pixels.Length, (firstRow + rowCount) * pixelWidth * 4);
+            for (int i = first; i < last; i += 4)
+            {
+                int alpha = pixels[i + 3];
+                b += pixels[i] * alpha; g += pixels[i + 1] * alpha;
+                r += pixels[i + 2] * alpha; weight += alpha;
+            }
+            var count = Math.Max(0, (last - first) / 4);
+            return weight == 0 ? (0, 0, 0, 0, count) :
+                ((double)r / weight, (double)g / weight, (double)b / weight, weight, count);
+        }
+        static Brush Brush(double red, double green, double blue, double factor = 1, byte alpha = byte.MaxValue)
+        {
+            var brush = new SolidColorBrush(Color.FromArgb(alpha, (byte)(red * factor),
+                (byte)(green * factor), (byte)(blue * factor)));
             brush.Freeze(); return brush;
         }
-        return (Brush(1), Brush(scale));
+        var all = Average(bytes, rgba.PixelWidth, 0, rgba.PixelHeight);
+        if (all.Weight == 0) return (Brushes.DimGray, Brushes.DimGray, Brushes.DimGray, false);
+        double scale = Math.Min(1, 105 / Math.Max(1, .2126 * all.Red + .7152 * all.Green + .0722 * all.Blue));
+        var top = Average(bytes, rgba.PixelWidth, 0, Math.Max(1, (int)Math.Ceiling(rgba.PixelHeight * .375)));
+        var topAlpha = top.Count == 0 ? (byte)0 : (byte)Math.Clamp(
+            (int)Math.Round((double)top.Weight / top.Count, MidpointRounding.AwayFromZero), 0, 255);
+        return (Brush(all.Red, all.Green, all.Blue), Brush(all.Red, all.Green, all.Blue, scale),
+            top.Weight == 0 ? Brushes.DimGray : Brush(top.Red, top.Green, top.Blue, alpha: topAlpha),
+            top.Weight > 0);
     }
 
     private bool InViewport()
@@ -167,12 +206,21 @@ public sealed class ArtworkImage : Grid
                 acquired = await loader.AcquireAsync(address, current.Token);
                 if (stamp != epoch || current.IsCancellationRequested || !HasDemand()) return;
                 lease = acquired; acquired = null; image.Source = lease.Image;
-                var palette = SamplePalette(lease.Image);
-                SetValue(RawPaletteBrushPropertyKey, palette.Raw);
-                SetValue(PaletteBrushPropertyKey, palette.Palette);
+                var palettes = SamplePalettes(lease.Image);
+                SetValue(RawPaletteBrushPropertyKey, palettes.Raw);
+                SetValue(PaletteBrushPropertyKey, palettes.Palette);
+                SetValue(TopPaletteBrushPropertyKey, palettes.Top);
+                SetValue(HasTopPalettePropertyKey, palettes.HasTopPalette);
             }
             catch (OperationCanceledException) { }
-            catch { if (stamp == epoch && !current.IsCancellationRequested && HasDemand()) retry.Visibility = Visibility.Visible; }
+            catch
+            {
+                if (stamp == epoch && !current.IsCancellationRequested && HasDemand())
+                {
+                    failed = true;
+                    UpdateRetryVisibility();
+                }
+            }
             finally
             {
                 acquired?.Dispose();
@@ -181,4 +229,6 @@ public sealed class ArtworkImage : Grid
             }
         }
     }
+    private void UpdateRetryVisibility() =>
+        retry.Visibility = failed && ShowRetry ? Visibility.Visible : Visibility.Collapsed;
 }

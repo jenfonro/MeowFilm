@@ -9,6 +9,8 @@
  <UserControl.Resources>
   <local:MusicEntryOffsetConverter x:Key="Offset"/>
   <local:MusicCatalogPaletteConverter x:Key="EntryPalette" Role="Entry"/>
+  <local:MusicEntryTitlePaletteConverter x:Key="EntryTitleShade" Role="Shade"/>
+  <local:MusicEntryTitlePaletteConverter x:Key="EntryTitleForeground" Role="Foreground"/>
   <BooleanToVisibilityConverter x:Key="Visible"/>
   <Style x:Key="HitButton" TargetType="Button">
    <Setter Property="Background" Value="Transparent"/><Setter Property="Padding" Value="0"/>
@@ -25,9 +27,13 @@
   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="48"/></Grid.RowDefinitions>
   <Grid x:Name="ArtworkFrame" Height="{Binding ActualWidth,ElementName=Surface}">
    <art:ArtworkImage x:Name="Cover" Address="{Binding Cover}"/>
-   <Border x:Name="FooterShade" Background="{Binding Background,ElementName=Surface}" IsHitTestVisible="False">
-    <Border.OpacityMask><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#00FFFFFF" Offset=".62"/><GradientStop Color="#70FFFFFF" Offset=".82"/><GradientStop Color="White" Offset="1"/></LinearGradientBrush></Border.OpacityMask>
-   </Border>
+   <Grid Height="64" VerticalAlignment="Top" ClipToBounds="True" IsHitTestVisible="False">
+    <Grid.OpacityMask><LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+     <GradientStop Color="White" Offset=".45"/><GradientStop Color="#00FFFFFF" Offset="1"/>
+    </LinearGradientBrush></Grid.OpacityMask>
+    <art:ArtworkImage x:Name="DecorationLayer" Address="{Binding Decoration}" ShowRetry="False"
+     Height="{Binding ActualHeight,ElementName=ArtworkFrame}" VerticalAlignment="Top"/>
+   </Grid>
     <Border Background="#48000000" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=Surface}" IsHitTestVisible="False">
      <Border.Style><Style TargetType="Border"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers>
       <DataTrigger Binding="{Binding IsOverlayEntry}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
@@ -44,24 +50,29 @@
    <Border.OpacityMask><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#00000000"/><GradientStop Color="#BFFFFFFF" Offset=".32"/><GradientStop Color="White" Offset=".6"/></LinearGradientBrush></Border.OpacityMask>
   </Border>
   <Border x:Name="TitleShade" Height="64" VerticalAlignment="Top" IsHitTestVisible="False">
-   <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
-    <GradientStop Color="#90000000"/><GradientStop Color="#90000000" Offset=".5"/><GradientStop Color="#00000000" Offset="1"/>
-   </LinearGradientBrush></Border.Background>
+   <Border.Background><MultiBinding Converter="{StaticResource EntryTitleShade}">
+    <Binding Path="HasTopPalette" ElementName="DecorationLayer"/><Binding Path="TopPaletteBrush" ElementName="DecorationLayer"/>
+    <Binding Path="TopPaletteBrush" ElementName="Cover"/>
+   </MultiBinding></Border.Background>
+   <Border.Tag><MultiBinding Converter="{StaticResource EntryTitleForeground}">
+    <Binding Path="HasTopPalette" ElementName="DecorationLayer"/><Binding Path="TopPaletteBrush" ElementName="DecorationLayer"/>
+    <Binding Path="TopPaletteBrush" ElementName="Cover"/>
+   </MultiBinding></Border.Tag>
   </Border>
   <Button x:Name="OpenButton" Grid.RowSpan="2" Tag="{Binding}" Click="Open_Click" IsEnabled="{Binding CanOpen}" Style="{StaticResource HitButton}" AutomationProperties.Name="{Binding Title}"/>
   <Grid Margin="10,10,10,0" VerticalAlignment="Top" IsHitTestVisible="False">
    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition/></Grid.ColumnDefinitions>
    <Grid Width="17" Height="18" Margin="0,2,6,0" VerticalAlignment="Top" Visibility="{Binding HasCalendarDay,Converter={StaticResource Visible}}">
-    <Border BorderBrush="White" BorderThickness="1" CornerRadius="2" Margin="0,3,0,0"/>
-    <Path Data="M 0,7 L 17,7 M 4,0 L 4,5 M 13,0 L 13,5" Stroke="White" StrokeThickness="1"/>
-    <TextBlock Text="{Binding DayOfMonth}" Foreground="White" FontSize="9" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,1"/>
+    <Border BorderBrush="{Binding Tag,ElementName=TitleShade}" BorderThickness="1" CornerRadius="2" Margin="0,3,0,0"/>
+    <Path Data="M 0,7 L 17,7 M 4,0 L 4,5 M 13,0 L 13,5" Stroke="{Binding Tag,ElementName=TitleShade}" StrokeThickness="1"/>
+    <TextBlock Text="{Binding DayOfMonth}" Foreground="{Binding Tag,ElementName=TitleShade}" FontSize="9" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,1"/>
    </Grid>
-   <TextBlock Grid.Column="1" Text="{Binding Title}" Foreground="White" FontSize="17" FontWeight="SemiBold" LineHeight="24" LineStackingStrategy="BlockLineHeight" TextTrimming="CharacterEllipsis"/>
+   <TextBlock Grid.Column="1" Text="{Binding Title}" Foreground="{Binding Tag,ElementName=TitleShade}" FontSize="17" FontWeight="SemiBold" LineHeight="24" LineStackingStrategy="BlockLineHeight" TextTrimming="CharacterEllipsis"/>
   </Grid>
   <Canvas x:Name="CaptionHost" Grid.Row="1" Margin="10,6,10,0" IsHitTestVisible="False">
    <StackPanel x:Name="Caption" Width="{Binding ActualWidth,ElementName=CaptionHost}">
     <StackPanel.RenderTransform><TranslateTransform><TranslateTransform.Y><MultiBinding Converter="{StaticResource Offset}"><Binding Path="ActualHeight" ElementName="ArtworkFrame"/><Binding Path="(local:CardMotion.Progress)" ElementName="Surface"/><Binding Path="IsPreviewEntry"/></MultiBinding></TranslateTransform.Y></TranslateTransform></StackPanel.RenderTransform>
-    <TextBlock Foreground="White" FontSize="12" LineHeight="18" LineStackingStrategy="BlockLineHeight" Height="36" TextWrapping="Wrap" TextTrimming="CharacterEllipsis">
+    <TextBlock Foreground="White" FontSize="12" LineHeight="18" LineStackingStrategy="BlockLineHeight" MaxHeight="36" TextWrapping="Wrap" TextTrimming="CharacterEllipsis">
      <TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Text" Value="{Binding ExpandedSubtitle}"/><Style.Triggers>
       <DataTrigger Binding="{Binding Path=(local:CardMotion.Progress),ElementName=Surface}" Value="0"><Setter Property="Text" Value="{Binding Subtitle}"/></DataTrigger>
      </Style.Triggers></Style></TextBlock.Style>

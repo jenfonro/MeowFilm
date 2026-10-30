@@ -33,15 +33,15 @@ public static class MusicAccountUiTests
         });
         yield return Test("logout requires confirmation and leaves local song rows unchanged", async () =>
         {
-            var runtime = new Application(); var dialogs = new Dialogs();
-            await using var module = Create(runtime, dialogs);
+            var runtime = new Application();
+            await using var module = Create(runtime);
             module.SelectedAccount = module.Accounts[0];
             await module.ImportAccountAsync("fixture=x");
             await module.NavigateAsync("favorites", default);
             var local = module.Songs.Single();
-            dialogs.Accept = false; await module.LogoutAccountAsync();
+            await module.LogoutAccountAsync(module.SelectedAccount!, confirmed: false);
             Check(runtime.Calls.Count(call => call.Method == "music.accounts.logout") == 0);
-            dialogs.Accept = true; await module.LogoutAccountAsync();
+            await module.LogoutAccountAsync(module.SelectedAccount!, confirmed: true);
             Check(module.SelectedAccount!.State == "none");
             Check(module.Songs.Count == 1 && ReferenceEquals(local, module.Songs[0]));
         });
@@ -101,7 +101,7 @@ public static class MusicAccountUiTests
             view.Measure(new Size(700, 600)); view.Arrange(new Rect(0, 0, 700, 600)); view.UpdateLayout();
             var platforms = (ItemsControl)view.FindName("PlatformSettingsList");
             var code = (PasswordBox)view.FindName("SmsCodeInput");
-            Check(platforms.Items.Count == 3 && code.MaxLength == 8);
+            Check(platforms.Items.Count == 5 && code.MaxLength == 8);
             Check(runtime.Calls.Count == 0);
         });
     }
@@ -149,6 +149,10 @@ public static class MusicAccountUiTests
             if (method == "music.accounts.import" && HoldImport) { Arrived.TrySetResult(); return Reply.Task; }
             if (method == "music.accounts.import" && UnknownImport)
                 return Task.FromResult(BridgeCodec.Value(new { ok = false, code = "COMMIT_UNKNOWN" }));
+            if (method == "music.library.detail")
+                return Task.FromResult(BridgeCodec.Value(new { ok = true, offset = 0, limit = 100, total = 1,
+                    collection = new { id = "favorites", name = "收藏", kind = "favorites", revision = 1, count = 1 },
+                    songs = new[] { MusicSongFixture.Local("local-fixture", "合成曲", "合成歌手", "合成专辑", 180) } }));
             if (method == "music.accounts.list")
                 return Task.FromResult(BridgeCodec.Value(new { ok = true,
                     items = InvalidList ? Array.Empty<object>() : new[] { Account("wy", "none"), Account("tx", "none"), Account("kg", "none") } }));
@@ -173,8 +177,7 @@ public static class MusicAccountUiTests
     }
     private sealed class Dialogs : IMusicDialogs
     {
-        public bool Accept = true;
-        public bool Confirm(string message, string title) => Accept;
+        public bool Confirm(string message, string title) => true;
         public string[]? SelectAudioFiles() => null;
     }
     private sealed class NoPlayback : IMusicPlayback

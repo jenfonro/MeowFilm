@@ -9,6 +9,7 @@ public final class MusicBrowseViewController: MusicPageViewController,
 {
     private let model: MusicViewModel
     private let page: MusicPublicBrowseViewModel?
+    private var showsSectionPlayback: Bool { page?.request != .discovery(.home) }
     private weak var router: (any MusicUIRouting)?
     private let embedded: Bool
     private var sections: [MusicPublicBrowseSection] = []
@@ -107,8 +108,7 @@ public final class MusicBrowseViewController: MusicPageViewController,
         }
         observe(model.accessChanges) { [weak self] in self?.activatePage() }
         observe(model.accountChanges) { [weak self] platform in self?.accountChanged(platform) }
-        observe(model.playbackChanges) { [weak self] in self?.updateFMArtwork() }
-        observe(model.metadataChanges) { [weak self] in self?.updateFMArtwork() }
+        observe(model.fmArtworkChanges) { [weak self] in self?.updateFMArtwork() }
         render()
     }
 
@@ -170,13 +170,7 @@ public final class MusicBrowseViewController: MusicPageViewController,
             return
         }
         guard let cell = cell as? MusicBrowseCell else { return }
-        let fm: MusicHomeAction? = {
-            if case .action(let action) = item.content, action.isPersonalFM { return action }; return nil
-        }()
-        let preview = fmPreviews[item.id]
-        let artwork = fm.flatMap { model.currentFMArtwork($0) } ??
-            (preview?.authorization.isActive == true ? preview?.artwork : nil) ?? item.artwork
-        cell.configure(item: item, layout: section.layout, theme: theme, artworkURL: artwork,
+        cell.configure(item: item, layout: section.layout, theme: theme, artworkURL: artworkURL(for: item),
                        onPreview: { [weak self] track in
             guard let self, let current = self.currentSection(for: item, id: section.id) else { return }
             self.play(item, section: current, startingAt: track)
@@ -200,7 +194,7 @@ public final class MusicBrowseViewController: MusicPageViewController,
     private func configure(_ header: MusicBrowseHeader, section: MusicPublicBrowseSection, first: Bool) {
         header.configure(section: section,
                          collection: first && !embedded ? collectionInfo : nil,
-                         theme: theme, onPlay: { [weak self] in
+                         theme: theme, showsSectionPlayback: showsSectionPlayback, onPlay: { [weak self] in
             guard let self, let current = self.sections.first(where: { $0.id == section.id }),
                   let item = current.items.first else { return }
             self.play(item, section: current)
@@ -242,9 +236,12 @@ public final class MusicBrowseViewController: MusicPageViewController,
         if case .action(let action) = item.content, action.isPersonalFM {
             loadFMPreview(item, action: action)
         }
-        guard let page, indexPath.section == sections.count - 1,
-              indexPath.item >= row.section.items.count - 3,
-              isPageVisible, !automaticPaginationHeld, filter.isEmpty, page.error == nil,
+        guard indexPath.section == sections.count - 1, indexPath.item >= row.section.items.count - 3 else { return }
+        loadAutomaticNextPage()
+    }
+
+    private func loadAutomaticNextPage() {
+        guard let page, isPageVisible, !automaticPaginationHeld, filter.isEmpty, page.error == nil, !page.isLoading,
               !page.requiresExplicitNext, !page.usesPageNavigation, page.nextCursor != nil else { return }
         runPageTask { await page.appendNext() }
     }
@@ -401,8 +398,8 @@ public final class MusicBrowseViewController: MusicPageViewController,
         if previousCollection != collectionInfo || previousSections.count != sections.count ||
             zip(previousSections, sections).contains(where: { pair in
                 pair.0.id != pair.1.id || pair.0.layout != pair.1.layout ||
-                    MusicBrowseHeader.height(for: pair.0, collection: nil) !=
-                    MusicBrowseHeader.height(for: pair.1, collection: nil)
+                    MusicBrowseHeader.height(for: pair.0, collection: nil, showsSectionPlayback: showsSectionPlayback) !=
+                    MusicBrowseHeader.height(for: pair.1, collection: nil, showsSectionPlayback: showsSectionPlayback)
             }) {
             collection.collectionViewLayout.invalidateLayout()
         }
@@ -428,7 +425,8 @@ public final class MusicBrowseViewController: MusicPageViewController,
         guard isViewLoaded, tagsHeight != nil else { return }
         configureTags()
         if sections.isEmpty || sections.allSatisfy({ $0.items.isEmpty }) {
-            setStatus(page?.isLoading == true ? "加载中" : page?.loaded == true ? "暂无内容" : nil)
+            setStatus(page?.isLoading == true ? "加载中" : page?.loaded == true && page?.nextCursor == nil ? "暂无内容" : nil)
+            loadAutomaticNextPage()
         } else {
             collection.backgroundView = nil
         }
@@ -522,10 +520,18 @@ public final class MusicBrowseViewController: MusicPageViewController,
         guard dataSource != nil else { return }
         for path in collection.indexPathsForVisibleItems {
             if let row = row(at: path), case .action(let action) = row.item.content,
-               action.isPersonalFM, let cell = collection.cellForItem(at: path) {
-                configure(cell, section: row.section, item: row.item)
+               action.isPersonalFM, let cell = collection.cellForItem(at: path) as? MusicBrowseCell {
+                cell.updateArtwork(artworkURL(for: row.item))
             }
         }
+    }
+
+    private func artworkURL(for item: MusicPublicBrowseItem) -> URL? {
+        let current: URL?
+        if case .action(let action) = item.content, action.isPersonalFM { current = model.currentFMArtwork(action) }
+        else { current = nil }
+        let preview = fmPreviews[item.id]
+        return current ?? (preview?.authorization.isActive == true ? preview?.artwork : nil) ?? item.artwork
     }
 
     private func showReadErrorIfNeeded() {
@@ -852,7 +858,7 @@ public final class MusicBrowseViewController: MusicPageViewController,
             case .grid:
                 let count = width < 359 ? 2 : 3
                 group = .horizontal(layoutSize: .init(widthDimension: .fractionalWidth(1),
-                    heightDimension: .absolute((width - 32 - CGFloat(count - 1) * 12) / CGFloat(count) + 58)),
+                    heightDimension: .absolute((width - 32 - CGFloat(count - 1) * 12) / CGFloat(count) + 42)),
                     subitem: item, count: count)
                 group.interItemSpacing = .fixed(12)
             case .rankingStack:
@@ -865,16 +871,22 @@ public final class MusicBrowseViewController: MusicPageViewController,
             case .list where trackList:
                 group = .vertical(layoutSize: .init(widthDimension: .fractionalWidth(1),
                     heightDimension: .absolute(64)), subitems: [item])
-            case .list, .playlistRail, .rankingSmall:
+            case .list:
+                let card = min(216, max(112, width * 0.36))
+                group = .horizontal(layoutSize: .init(widthDimension: .absolute(card),
+                    heightDimension: .absolute(card + 58)), subitems: [item])
+                scrolling = .continuous
+            case .playlistRail, .rankingSmall:
                 let card = section.layout == .rankingSmall ? max(1, (width - 32) * 0.24) :
                     min(216, max(112, width * 0.36))
                 group = .horizontal(layoutSize: .init(widthDimension: .absolute(card),
-                    heightDimension: .absolute(card + 58)), subitems: [item])
+                    heightDimension: .absolute(card + 42)), subitems: [item])
                 scrolling = .continuous
             }
             let result = NSCollectionLayoutSection(group: group)
             let headerHeight = MusicBrowseHeader.height(
-                for: section, collection: index == 0 && !self.embedded ? self.collectionInfo : nil)
+                for: section, collection: index == 0 && !self.embedded ? self.collectionInfo : nil,
+                showsSectionPlayback: self.showsSectionPlayback)
             result.contentInsets = .init(top: index == 0 && headerHeight == 0 ? PageLayoutMetrics.contentGap : 4,
                                          leading: 16, bottom: 20, trailing: 16)
             result.interGroupSpacing = 9

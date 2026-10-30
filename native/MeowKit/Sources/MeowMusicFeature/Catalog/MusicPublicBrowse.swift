@@ -50,8 +50,13 @@ public struct MusicPublicBrowseChannel: Sendable, Hashable, Identifiable {
     public let title: String
     public let kind: Kind
     public let pageCode: String
-    public init(id: String, title: String, kind: Kind, pageCode: String = "") {
-        self.id = id; self.title = title; self.kind = kind; self.pageCode = pageCode
+    public let platform: MusicPublicBrowsePlatform
+    /// id is the provider's channel code; retained pages and navigation use
+    /// the source-qualified identity rather than sharing that code across providers.
+    public var identity: String { "\(platform.rawValue):\(id)" }
+    public init(id: String, title: String, kind: Kind, pageCode: String = "",
+                platform: MusicPublicBrowsePlatform = .netease) {
+        self.id = id; self.title = title; self.kind = kind; self.pageCode = pageCode; self.platform = platform
     }
 }
 
@@ -168,10 +173,15 @@ public struct MusicPublicBrowsePage: Sendable {
     public let filters: [MusicPublicBrowseFilter]
     public let selectedFilter: String
     public let notice: String?
+    /// Provider positions examined, including filtered content. A nonterminal
+    /// page with no visible items must still report real continuation progress.
+    public let consumed: Int?
     public init(sections: [MusicPublicBrowseSection], cursor: String? = nil,
-                filters: [MusicPublicBrowseFilter] = [], selectedFilter: String = "", notice: String? = nil) {
+                filters: [MusicPublicBrowseFilter] = [], selectedFilter: String = "", notice: String? = nil,
+                consumed: Int? = nil) {
         self.sections = sections; self.cursor = cursor; self.filters = filters; self.selectedFilter = selectedFilter
         self.notice = notice
+        self.consumed = consumed
     }
 }
 public struct MusicPublicBrowseCollectionPage: Sendable {

@@ -77,31 +77,35 @@ public static class MusicNativeWySmsTests
                 f.Store.Writes == 0 && f.Transport.Steps.SequenceEqual(["send"]));
             var login = await Login(f.Owner);
             Check(Ok(login) && login.GetProperty("account").GetProperty("state").GetString() == "verified" &&
-                f.Store.Writes == 1 && f.Transport.Steps.SequenceEqual(["send", "login", "status"]) && events >= 3);
+                f.Store.Writes == 1 && f.Transport.Steps.SequenceEqual(["send", "login", "status", "rights"]) && events >= 3);
             Check(!login.GetRawText().Contains(WySmsHandler.Phone) && !login.GetRawText().Contains(WySmsHandler.Captcha) &&
                 !login.GetRawText().Contains("SYNTHETIC_WY_SESSION"));
             var lease = await f.Owner.AcquireAsync("wy");
             Check(lease is not null && f.Owner.IsCurrent(lease) && lease.UserId == "42");
+            var details = await f.Owner.ReadDetailsAsync("wy");
+            Check(details.Membership.Vip == true && details.Generation == lease!.Generation &&
+                details.MembershipFreshness == MusicAccountDetailsFreshness.Fresh);
             Check(f.Owner.Revoke(lease!) && !f.Owner.IsCurrent(lease!) && await f.Owner.AcquireAsync("wy") is null);
             var rootDoc = await WySmsStore.ReadRoot(f.Store.Inner);
             string text = rootDoc.ToJsonString();
             Check(!text.Contains(WySmsHandler.Phone) && !text.Contains(WySmsHandler.Captcha) && !text.Contains("retryAfter"));
-            var row = rootDoc["entries"]!.AsArray().Single()!["value"]!.AsObject();
-            Check(row.Count == 6 && rootDoc["version"]!.GetValue<int>() == 1);
+            var row = rootDoc["entries"]!.AsArray().Single(r => r!["key"]!.GetValue<string>() == AccountDocument.Key("wy"))!["value"]!.AsObject();
+            Check(row.Count == 6 && rootDoc["entries"]!.AsArray().Count == 2 && rootDoc["version"]!.GetValue<int>() == 1);
         }
         foreach (string file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
             Check(!Encoding.UTF8.GetString(await File.ReadAllBytesAsync(file)).Contains("SYNTHETIC_WY_SESSION"));
         await using var reopen = new WySmsFixture(root);
         Check((await reopen.Owner.AcquireAsync("wy"))?.UserId == "42" && reopen.Transport.Calls == 0);
+        Check((await reopen.Owner.ReadDetailsAsync("wy")).Membership.Vip == true && reopen.Transport.Calls == 0);
         Check(Ok(await reopen.Owner.CallAsync("music.accounts.validate", new { platform = "wy" })));
         var old = await reopen.Owner.AcquireAsync("wy");
         Check(Ok(await reopen.Owner.CallAsync("music.accounts.logout", new { platform = "wy" })) &&
-            !reopen.Owner.IsCurrent(old!) && await reopen.Owner.AcquireAsync("wy") is null && reopen.Transport.Calls == 1);
+            !reopen.Owner.IsCurrent(old!) && await reopen.Owner.AcquireAsync("wy") is null && reopen.Transport.Calls == 2);
     }
     private static async Task ExistingCode()
     {
         await using var f = new WySmsFixture();
-        Check(Ok(await Login(f.Owner)) && f.Transport.Steps.SequenceEqual(["login", "status"]));
+        Check(Ok(await Login(f.Owner)) && f.Transport.Steps.SequenceEqual(["login", "status", "rights"]));
     }
     private static async Task ExistingSession()
     {
@@ -239,8 +243,8 @@ public static class MusicNativeWySmsTests
         await using var f = new WySmsFixture(); f.Store.LoseReceipt = true;
         Check(Code(await Login(f.Owner)) == "HANDOFF_UNCONFIRMED" && f.Store.Writes == 1);
         Check(await f.Owner.AcquireAsync("wy") is null);
-        Check(Code(await Send(f.Owner)) == "COMMIT_UNKNOWN" && f.Transport.Calls == 2);
-        Check(Ok(await f.Owner.CallAsync("music.accounts.list")) && f.Transport.Calls == 2);
+        Check(Code(await Send(f.Owner)) == "COMMIT_UNKNOWN" && f.Transport.Calls == 3);
+        Check(Ok(await f.Owner.CallAsync("music.accounts.list")) && f.Transport.Calls == 3);
         Check((await f.Owner.AcquireAsync("wy"))?.UserId == "42");
     }
     private static async Task Conflict()
@@ -265,7 +269,7 @@ public static class MusicNativeWySmsTests
         await f.Owner.CallAsync("music.accounts.cancel", new { platform = "wy" });
         Check(Code(await login) == "HANDOFF_UNCONFIRMED");
         var read = f.Owner.CallAsync("music.accounts.list"); await Task.Delay(50); Check(!read.IsCompleted);
-        f.Store.Release.TrySetResult(); Check(Ok(await read) && f.Store.Writes == 1 && f.Transport.Calls == 2);
+        f.Store.Release.TrySetResult(); Check(Ok(await read) && f.Store.Writes == 1 && f.Transport.Calls == 3);
         Check((await f.Owner.AcquireAsync("wy"))?.UserId == "42");
     }
     private static async Task ReadFailure()
@@ -414,14 +418,15 @@ internal sealed class WySmsHandler(IProtectedDocumentStore store) : HttpMessageH
         var uri = request.RequestUri!;
         string step = uri.AbsolutePath switch {
             "/weapi/sms/captcha/sent" => "send", "/weapi/w/login/cellphone" => "login",
-            "/weapi/w/nuser/account/get" => "status", "/eapi/login/qrcode/unikey" => "qr", _ => "unknown" };
+            "/weapi/w/nuser/account/get" => "status", "/eapi/login/qrcode/unikey" => "qr",
+            "/weapi/music-vip-membership/client/vip/info" => "rights", _ => "unknown" };
         lock (Steps) Steps.Add(step);
         MusicNativeWySmsTests.Check(step != "unknown" && uri.Scheme == "https" && uri.IsDefaultPort &&
             uri.Query.Length == 0 && request.Method == HttpMethod.Post);
         if (step == "qr") return Raw("{\"code\":200,\"unikey\":\"SYNTHETIC_WY_QR\"}");
         MusicNativeWySmsTests.Check(uri.Host == "music.163.com");
         var client = MusicClientContextDocument.Decode(await store.ReadAsync(MusicPlatformClientContextOwner.DocumentNamespace)).Wy;
-        MusicClientContextFixture.VerifyLocalWyCookie(request, client, step == "status" ? Cookie : null);
+        MusicClientContextFixture.VerifyLocalWyCookie(request, client, step is "status" or "rights" ? Cookie : null);
         string body = await request.Content!.ReadAsStringAsync();
         var fields = body.Split('&').ToDictionary(p => p.Split('=', 2)[0], p => Uri.UnescapeDataString(p.Split('=', 2)[1]));
         MusicNativeWySmsTests.Check(fields.Count == 2 && fields.ContainsKey("params") && fields["encSecKey"].Length == 256 &&
@@ -441,6 +446,9 @@ internal sealed class WySmsHandler(IProtectedDocumentStore store) : HttpMessageH
         if (step == "send" || BusinessCode != 200) return Raw(JsonSerializer.Serialize(new { code = BusinessCode,
             message = Phone + Captcha + "SYNTHETIC_UPSTREAM_DIAGNOSTIC" }),
             BusinessCode == 429 ? HttpStatusCode.TooManyRequests : HttpStatusCode.OK);
+        if (step == "rights") return Raw(JsonSerializer.Serialize(new { code = 200, data = new {
+            userId = "42", associator = new { expireTime = DateTimeOffset.UtcNow.AddDays(30).ToUnixTimeMilliseconds() },
+            musicPackage = new { expireTime = 0 }, redplus = new { expireTime = 0 } } }));
         string userId = Fault == "status-id" && step == "status" ? "43" : "42";
         string accountId = Fault == step + "-account" || Fault == step + "-id" && step == "login" ? "99" : userId;
         string name = Fault == step + "-secret" ? "SYNTHETIC_WY_SESSION" :

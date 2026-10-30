@@ -10,6 +10,73 @@ import MeowPlayback
 
 @MainActor
 final class MusicUIKitRegressionTests: XCTestCase {
+    func testFMArtworkOnlyUpdatesForEffectiveCoverWithoutReconfiguringCard() async throws {
+        let action = MusicHomeAction.fm(mode: .default, submode: "", entry: nil)
+        let appearance = MusicAppearancePreferencesStore()
+        let service = MusicUIKitRegressionService(browse: .init(sections: [
+            .init(id: "fm", title: "", items: [
+                .init(id: "fm", title: "私人 FM", content: .action(action)),
+            ], layout: .featureRail),
+        ]))
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let controller = MusicBrowseViewController(title: "推荐", model: model, browser: service,
+            request: .discovery(.home), appearance: appearance, router: MusicUIKitRegressionRouter(), embedded: true)
+        let window = mount(controller)
+        defer { release(controller, window: window) }
+        let collection = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? UICollectionView }.first)
+        let loaded = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated { collection.layoutIfNeeded(); return collection.visibleCells.count == 1 }
+        }, evaluatedWith: collection)
+        await fulfillment(of: [loaded], timeout: 2)
+        let cell = try XCTUnwrap(collection.visibleCells.first as? MusicBrowseCell)
+        let title = try XCTUnwrap(descendants(cell).compactMap { $0 as? UILabel }.first { $0.text == "私人 FM" })
+        let image = try XCTUnwrap(descendants(cell).compactMap { $0 as? MusicArtworkView }.first)
+        title.text = "保留已配置内容"
+        var events = 0, covers: [URL] = []
+        let subscription = model.fmArtworkChanges.sink { events += 1 }
+        image.onFailure = { covers.append($0) }
+        let source = MusicRemoteQueueSource(context: .init(kind: .fm, id: "fm", title: "FM", platform: "wy"),
+            loadPage: { _ in XCTFail("Artwork observation must not load a queue"); return .init(items: []) })
+        model.activateFM(source)
+        let first = try XCTUnwrap(URL(string: "synthetic-artwork://first"))
+        model.playbackState.queue = [.init(id: "fm-song", track: .init(ref: .init(kind: .queue, id: "fm-song"),
+            songId: "41", title: "当前歌曲", artwork: first), remoteSessionID: source.id)]
+        model.playbackState.state = .init(currentId: "fm-song", total: 1)
+        model.playbackState.activeHomeFM = action
+        let firstCover = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated { covers == [first] }
+        }, evaluatedWith: image)
+        await fulfillment(of: [firstCover], timeout: 2)
+        XCTAssertEqual(events, 1)
+        XCTAssertTrue(collection.visibleCells.first === cell); XCTAssertEqual(title.text, "保留已配置内容")
+        let unchanged = expectation(description: "unrelated state does not change the cover")
+        unchanged.isInverted = true
+        image.onFailure = { covers.append($0); unchanged.fulfill() }
+        model.playbackState.state = .init(settingsRevision: 1, currentId: "fm-song", total: 1, position: 12)
+        model.playbackState.phase = .playing
+        model.playbackState.canEnterSimilarMode = true
+        model.metadataState.lyricState = "loaded"
+        model.metadataState.artworkData = Data([1, 2, 3])
+        model.metadataState.artworkURL = first
+        model.metadataState.occurrenceID = "fm-song"
+        model.playbackState.queue = model.queue
+        await fulfillment(of: [unchanged], timeout: 0.1)
+        XCTAssertEqual(events, 1); XCTAssertEqual(covers, [first])
+        XCTAssertEqual(title.text, "保留已配置内容")
+        let second = try XCTUnwrap(URL(string: "synthetic-artwork://second"))
+        let nextCover = expectation(description: "new effective metadata cover")
+        image.onFailure = { covers.append($0); nextCover.fulfill() }
+        model.metadataState.artworkURL = second
+        await fulfillment(of: [nextCover], timeout: 2)
+        XCTAssertEqual(events, 2); XCTAssertEqual(covers, [first, second])
+        XCTAssertEqual(model.currentFMArtwork(action), second)
+        XCTAssertTrue(collection.visibleCells.first === cell); XCTAssertEqual(title.text, "保留已配置内容")
+        model.playbackState.phase = .failed
+        XCTAssertEqual(events, 3); XCTAssertNil(model.currentFMArtwork(action))
+        let counts = await service.counts(); XCTAssertEqual(counts.browse, 1)
+        subscription.cancel(); image.onFailure = nil; await model.close()
+    }
+
     func testImportHistoryFailureDuringPushIsShownAndReturningDoesNotReadAgain() async throws {
         let theme = PageLifecycleTestTheme(), root = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
         let navigation = PageNavigationController(themeProvider: theme)
@@ -172,14 +239,88 @@ final class MusicUIKitRegressionTests: XCTestCase {
         XCTAssertEqual(played, ["a"]); XCTAssertEqual(oldCalls, 0)
     }
 
-    func testLeadingCardsUseSharedGapAndUntitledPlaybackHeadingRemainsTouchable() async throws {
+    func testBrowseCardColorGradientAppearsOnlyWhenTextOverlaysArtwork() throws {
+        let cell = MusicBrowseCell(frame: CGRect(x: 0, y: 0, width: 180, height: 232))
+        let gradient = try XCTUnwrap(cell.contentView.layer.sublayers?.compactMap { $0 as? CAGradientLayer }
+            .first { $0.name == "music.browse.text-gradient" })
+        let artwork = try XCTUnwrap(cell.contentView.subviews.compactMap { $0 as? MusicArtworkView }.first)
+        let collection = MusicPublicBrowseCollection(platform: .netease, nativeID: "1",
+            title: "标题")
+        let overlay = MusicPublicBrowseItem(id: "overlay", title: "标题", subtitle: "副标题",
+                                            content: .collection(collection))
+
+        cell.configure(item: overlay, layout: .featureRail, theme: PageTheme(), onPlay: {})
+        let provider = try XCTUnwrap(CGDataProvider(data: Data([250, 200, 100, 255]) as CFData))
+        let colorSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB))
+        let source = try XCTUnwrap(CGImage(width: 1, height: 1, bitsPerComponent: 8, bitsPerPixel: 32,
+                                           bytesPerRow: 4, space: colorSpace,
+                                           bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+                                           provider: provider, decode: nil, shouldInterpolate: true,
+                                           intent: .defaultIntent))
+        artwork.onImage?(UIImage(cgImage: source), nil)
+        cell.layoutIfNeeded()
+        XCTAssertFalse(gradient.isHidden)
+        XCTAssertEqual(artwork.frame.height, cell.bounds.width)
+        XCTAssertEqual(gradient.frame, artwork.frame)
+        XCTAssertEqual(gradient.locations?.map(\.doubleValue), [0.62, 0.82, 1])
+        let colors = try XCTUnwrap(gradient.colors as? [CGColor])
+        let bottom = UIColor(cgColor: try XCTUnwrap(colors.last))
+        XCTAssertEqual(cell.contentView.backgroundColor, bottom)
+        let title = try XCTUnwrap(cell.contentView.subviews.compactMap { $0 as? UILabel }
+            .first { $0.text == "标题" })
+        XCTAssertGreaterThanOrEqual(title.frame.minY, artwork.frame.maxY)
+        var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+        XCTAssertTrue(bottom.getRed(&red, green: &green, blue: &blue, alpha: &alpha))
+        XCTAssertEqual(0.2126 * red + 0.7152 * green + 0.0722 * blue, 170.0 / 255.0, accuracy: 0.01)
+        XCTAssertEqual(colors[1].alpha, 112.0 / 255.0, accuracy: 0.001)
+
+        let standard = MusicPublicBrowseItem(id: "standard", title: "普通入口",
+                                             content: .unavailable)
+        cell.configure(item: standard, layout: .featureRail, theme: PageTheme(), onPlay: {})
+        artwork.onImage?(UIImage(cgImage: source), nil)
+        let standardBottom = UIColor(cgColor: try XCTUnwrap((gradient.colors as? [CGColor])?.last))
+        XCTAssertTrue(standardBottom.getRed(&red, green: &green, blue: &blue, alpha: &alpha))
+        XCTAssertEqual(0.2126 * red + 0.7152 * green + 0.0722 * blue, 96.0 / 255.0, accuracy: 0.01)
+        XCTAssertEqual(cell.contentView.backgroundColor, standardBottom)
+
+        cell.configure(item: overlay, layout: .playlistRail, theme: PageTheme(), onPlay: {})
+        cell.layoutIfNeeded()
+        XCTAssertTrue(gradient.isHidden)
+        XCTAssertEqual(gradient.frame, .zero)
+        XCTAssertEqual(cell.contentView.backgroundColor, .clear)
+        let subtitle = try XCTUnwrap(cell.contentView.subviews.compactMap { $0 as? UILabel }
+            .first { $0.text == "副标题" })
+        let play = try XCTUnwrap(cell.contentView.subviews.compactMap { $0 as? UIButton }
+            .first { $0.accessibilityIdentifier == "music.browse.play.overlay" })
+        XCTAssertTrue(subtitle.isHidden)
+        XCTAssertEqual(subtitle.frame, .zero)
+        XCTAssertTrue(artwork.frame.contains(play.frame))
+        XCTAssertEqual(artwork.frame.maxX - play.frame.maxX, 6, accuracy: 0.5)
+        XCTAssertEqual(artwork.frame.maxY - play.frame.maxY, 6, accuracy: 0.5)
+
+        cell.configure(item: overlay, layout: .banner, theme: PageTheme(), onPlay: {})
+        cell.layoutIfNeeded()
+        XCTAssertFalse(gradient.isHidden)
+        XCTAssertEqual(gradient.frame, artwork.frame)
+        XCTAssertEqual(gradient.locations?.map(\.doubleValue), [0, 0.52, 1])
+        XCTAssertEqual(try XCTUnwrap((gradient.colors as? [CGColor])?.last).alpha,
+                       160.0 / 255.0, accuracy: 0.001)
+
+        let empty = MusicPublicBrowseItem(id: "empty", title: "", content: .unavailable)
+        cell.configure(item: empty, layout: .banner, theme: PageTheme(), onPlay: {})
+        cell.layoutIfNeeded()
+        XCTAssertTrue(gradient.isHidden)
+        XCTAssertEqual(gradient.frame, .zero)
+    }
+
+    func testLeadingCardsAndUntitledHomeSongsKeepContentGapAndRowPlaybackTouchable() async throws {
         let page = MusicPublicBrowsePage(sections: [
             .init(id: "cards", title: "", items: [card("cover", previews: [])], layout: .featureRail),
             .init(id: "songs", title: "", items: [
                 .init(id: "song", title: "歌曲", content: .track(track("song"))),
             ], layout: .list),
         ])
-        let service = MusicUIKitRegressionService(browse: page)
+        let service = MusicUIKitRegressionService(browse: .init(sections: [], cursor: "public", consumed: 1), nextBrowse: page)
         let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
         let controller = MusicBrowseViewController(title: "推荐", model: model, browser: service,
             request: .discovery(.home), appearance: MusicAppearancePreferencesStore(),
@@ -187,23 +328,103 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let window = mount(controller)
         defer { release(controller, window: window) }
         let collection = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? UICollectionView }.first)
-        let kind = UICollectionView.elementKindSectionHeader
         let loaded = expectation(for: NSPredicate { _, _ in
             MainActor.assumeIsolated {
                 collection.layoutIfNeeded()
                 return collection.cellForItem(at: IndexPath(item: 0, section: 0)) != nil &&
-                    collection.supplementaryView(forElementKind: kind, at: IndexPath(item: 0, section: 1)) != nil
+                    collection.cellForItem(at: IndexPath(item: 0, section: 1)) != nil
             }
         }, evaluatedWith: collection)
         await fulfillment(of: [loaded], timeout: 2)
         let first = try XCTUnwrap(collection.cellForItem(at: IndexPath(item: 0, section: 0)))
         XCTAssertEqual(first.convert(first.bounds, to: collection).minY,
                        PageLayoutMetrics.contentGap, accuracy: 0.5)
-        let header = try XCTUnwrap(collection.supplementaryView(
-            forElementKind: kind, at: IndexPath(item: 0, section: 1)))
-        let play = try XCTUnwrap(descendants(header).compactMap { $0 as? UIButton }.first { !$0.isHidden })
+        let row = try XCTUnwrap(collection.cellForItem(at: IndexPath(item: 0, section: 1)))
+        let play = try XCTUnwrap(descendants(row).compactMap { $0 as? UIButton }.first { !$0.isHidden })
         XCTAssertGreaterThan(play.bounds.height, 0)
-        XCTAssertTrue(header.hitTest(play.center, with: nil) === play)
+        XCTAssertTrue(row.hitTest(play.convert(CGPoint(x: play.bounds.midX, y: play.bounds.midY), to: row), with: nil) === play)
+        XCTAssertEqual(MusicBrowseHeader.height(for: page.sections[1], collection: nil, showsSectionPlayback: false), 0)
+        let counts = await service.counts(); XCTAssertEqual(counts.browse, 2)
+        await model.close()
+    }
+
+    func testHomeHeaderUsesTitleWidthAndKeepsFiltersAndDetailPlaybackSeparate() throws {
+        let song = MusicPublicBrowseItem(id: "song", title: "歌曲", content: .track(track("song")))
+        let header = MusicBrowseHeader(frame: CGRect(x: 0, y: 0, width: 360, height: 44))
+        var plays = 0, channelCalls = 0
+        header.configure(section: .init(id: "songs", title: "歌曲栏目", items: [song]), collection: nil,
+            theme: PageTheme(), showsSectionPlayback: false, onPlay: { plays += 1 }, onChannel: {},
+            onChoice: { _ in }, onRetry: {}, error: nil)
+        header.layoutIfNeeded()
+        let title = try XCTUnwrap(descendants(header).compactMap { $0 as? UILabel }.first { $0.text == "歌曲栏目" })
+        XCTAssertEqual(title.frame.width, header.bounds.width, accuracy: 0.5)
+
+        let channel = MusicPublicBrowseChannel(id: "playlist", title: "歌单", kind: .playlists)
+        let filters = [MusicPublicBrowseFilter(id: "all", title: "全部"), .init(id: "other", title: "其他")]
+        header.configure(section: .init(id: "lists", title: "推荐歌单", items: [], channel: channel,
+            filters: filters, selectedFilter: "all"), collection: nil, theme: PageTheme(),
+            showsSectionPlayback: false, onPlay: { plays += 1 }, onChannel: { channelCalls += 1 },
+            onChoice: { _ in }, onRetry: {}, error: nil)
+        header.layoutIfNeeded()
+        let entry = try XCTUnwrap(descendants(header).compactMap { $0 as? UIButton }.first {
+            $0.accessibilityIdentifier == "music.browse.channel.lists"
+        })
+        XCTAssertTrue(header.hitTest(CGPoint(x: 280, y: 22), with: nil) === entry)
+        entry.sendActions(for: .touchUpInside)
+        XCTAssertEqual(channelCalls, 1); XCTAssertEqual(plays, 0)
+        let choices = try XCTUnwrap(descendants(header).compactMap { $0 as? UIButton }.first { $0.menu != nil && !$0.isHidden })
+        XCTAssertEqual(choices.menu?.children.compactMap { ($0 as? UIAction)?.title }, filters.map(\.title))
+        let label = try XCTUnwrap(descendants(header).compactMap { $0 as? UILabel }.first { $0.text == "推荐歌单" })
+        let arrow = try XCTUnwrap(descendants(header).compactMap { $0 as? UIImageView }.first { !$0.isHidden && $0.image != nil })
+        XCTAssertEqual(arrow.frame.minX - label.frame.maxX, 6, accuracy: 0.5)
+
+        header.frame.size.height = 190
+        header.configure(section: .init(id: "detail", title: "歌曲", items: [song]),
+            collection: .init(platform: .netease, nativeID: "41", title: "歌单"), theme: PageTheme(),
+            onPlay: { plays += 1 }, onChannel: {}, onChoice: { _ in }, onRetry: {}, error: nil)
+        header.layoutIfNeeded()
+        let play = try XCTUnwrap(descendants(header).compactMap { $0 as? UIButton }.first {
+            $0.accessibilityLabel == "播放全部" && !$0.isHidden
+        })
+        play.sendActions(for: .touchUpInside)
+        XCTAssertEqual(plays, 1)
+    }
+
+    func testHomeChannelTitleAndCollectionCardUseIndependentNavigationActions() async throws {
+        let channel = MusicPublicBrowseChannel(id: "chart", title: "排行榜", kind: .rankings)
+        let destination = MusicPublicBrowseCollection(platform: .netease, nativeID: "41", title: "榜单")
+        let service = MusicUIKitRegressionService(browse: .init(sections: [
+            .init(id: "rankings", title: "排行榜", items: [
+                .init(id: destination.id, title: destination.title, content: .collection(destination)),
+            ], layout: .playlistRail, channel: channel),
+        ]))
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let router = MusicUIKitRegressionRouter()
+        var selected: [MusicPublicBrowseChannel] = [], opened: [MusicPublicBrowseCollection] = []
+        router.onChannel = { selected.append($0) }; router.onCollection = { opened.append($0) }
+        let controller = MusicBrowseViewController(title: "推荐", model: model, browser: service,
+            request: .discovery(.home), appearance: MusicAppearancePreferencesStore(), router: router, embedded: true)
+        let window = mount(controller)
+        defer { release(controller, window: window) }
+        let collection = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? UICollectionView }.first)
+        let kind = UICollectionView.elementKindSectionHeader
+        let ready = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                collection.layoutIfNeeded()
+                return collection.supplementaryView(forElementKind: kind, at: IndexPath(item: 0, section: 0)) != nil &&
+                    collection.cellForItem(at: IndexPath(item: 0, section: 0)) != nil
+            }
+        }, evaluatedWith: collection)
+        await fulfillment(of: [ready], timeout: 2)
+        let header = try XCTUnwrap(collection.supplementaryView(forElementKind: kind, at: IndexPath(item: 0, section: 0)))
+        let cell = try XCTUnwrap(collection.cellForItem(at: IndexPath(item: 0, section: 0)))
+        XCTAssertEqual(cell.bounds.height - cell.bounds.width, 42, accuracy: 0.5)
+        let entry = try XCTUnwrap(header.hitTest(CGPoint(x: header.bounds.width - 2, y: 22), with: nil) as? UIButton)
+        entry.sendActions(for: .touchUpInside)
+        XCTAssertEqual(selected, [channel]); XCTAssertTrue(opened.isEmpty)
+        controller.collectionView(collection, didSelectItemAt: IndexPath(item: 0, section: 0))
+        XCTAssertEqual(opened, [destination]); XCTAssertEqual(selected, [channel])
+        let counts = await service.counts(); XCTAssertEqual(counts.browse, 1)
         await model.close()
     }
 
@@ -492,6 +713,10 @@ final class MusicPlayerContentModelTests: XCTestCase {
         XCTAssertFalse(cover.frame.intersects(slider.frame))
         XCTAssertFalse(close.frame.intersects(cover.frame))
         XCTAssertTrue(order.allSatisfy { $0.frame.minY > slider.frame.maxY && $0.frame.height >= 44 })
+        XCTAssertFalse(dockViews(surface).contains {
+            $0.accessibilityIdentifier == "music.player.lyricTranslation" ||
+                $0.accessibilityIdentifier == "music.player.lyricBackground"
+        })
         for width in [CGFloat(292), CGFloat(408)] {
             surface.frame.size.width = width
             surface.setNeedsLayout(); surface.layoutIfNeeded()
@@ -557,9 +782,59 @@ final class MusicPlayerContentModelTests: XCTestCase {
         let fullPlay = try XCTUnwrap(dockViews(full.view).compactMap { $0 as? UIButton }.first {
             $0.accessibilityIdentifier == "music.player.play"
         })
+        let fullButtons = dockViews(full.view).compactMap { $0 as? UIButton }
+        func fullButton(_ identifier: String) throws -> UIButton {
+            return try XCTUnwrap(fullButtons.first { $0.accessibilityIdentifier == identifier })
+        }
+        let transport = try ["mode", "previous", "play", "next", "queue"].map {
+            try fullButton("music.player.\($0)")
+        }
+        for pair in zip(transport, transport.dropFirst()) {
+            XCTAssertLessThan(pair.0.frame.midX, pair.1.frame.midX)
+            XCTAssertEqual(pair.0.frame.midY, pair.1.frame.midY, accuracy: 0.5)
+        }
+        let favorite = try fullButton("music.player.favorite")
+        let more = try fullButton("music.player.more")
+        XCTAssertLessThan(favorite.frame.midX, more.frame.midX)
+        XCTAssertEqual(favorite.frame.midY, more.frame.midY, accuracy: 0.5)
+        let lyricToggle = try fullButton("music.player.lyricToggle")
+        let translation = try fullButton("music.player.lyricTranslation")
+        let background = try fullButton("music.player.lyricBackground")
+        let fullControls = try XCTUnwrap(dockViews(full.view).compactMap { $0 as? MusicPlaybackControlsView }.first)
+        XCTAssertTrue(translation.isHidden)
+        XCTAssertTrue(background.isHidden)
+        lyricToggle.sendActions(for: .touchUpInside)
+        full.view.layoutIfNeeded()
+        XCTAssertFalse(translation.isHidden)
+        XCTAssertFalse(background.isHidden)
+        for button in [translation, background] {
+            XCTAssertTrue(button.superview === full.view)
+            XCTAssertTrue(full.view.hitTest(button.center, with: nil) === button)
+        }
         XCTAssertFalse(fullPlay === order[2])
         XCTAssertEqual(fullPlay.layer.sublayers?.first { $0.name == "play.progress.track" }?.opacity, 0)
-        let fullControls = try XCTUnwrap(dockViews(full.view).compactMap { $0 as? MusicPlaybackControlsView }.first)
+        do {
+            let responsiveControls = MusicPlaybackControlsView(content: content, layout: .full)
+            responsiveControls.setFullViewport(viewportHeight: 844, safeHeight: 763)
+            let regularControlsHeight = responsiveControls.fullHeight
+            responsiveControls.setFullViewport(viewportHeight: 650, safeHeight: 620)
+            let shortControlsHeight = responsiveControls.fullHeight
+            responsiveControls.setFullViewport(viewportHeight: 480, safeHeight: 460)
+            let veryShortControlsHeight = responsiveControls.fullHeight
+            XCTAssertLessThan(shortControlsHeight, regularControlsHeight)
+            XCTAssertLessThan(veryShortControlsHeight, shortControlsHeight)
+        }
+        do {
+            let responsivePlayer = MusicFullPlayerView(content: content)
+            responsivePlayer.frame = CGRect(x: 0, y: 0, width: 480, height: 640)
+            responsivePlayer.layoutIfNeeded()
+            let records = dockViews(responsivePlayer).compactMap { $0 as? MusicRecordDiscView }
+            XCTAssertFalse(records.isEmpty)
+            XCTAssertTrue(records.allSatisfy { $0.bounds.width > 0 })
+            responsivePlayer.frame = CGRect(x: 0, y: 0, width: 844, height: 390)
+            responsivePlayer.layoutIfNeeded()
+            XCTAssertTrue(records.allSatisfy { $0.bounds.width == 0 })
+        }
         let fullHeight = fullControls.fullHeight
         full.view.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
         let fullEnlarged = expectation(for: NSPredicate { _, _ in
@@ -707,19 +982,28 @@ final class MusicPlayerContentModelTests: XCTestCase {
 @MainActor
 private final class MusicUIKitRegressionRouter: MusicUIRouting {
     let primaryPlaybackPresentation = MusicMiniPlayerPresentation()
+    var onChannel: ((MusicPublicBrowseChannel) -> Void)?
+    var onCollection: ((MusicPublicBrowseCollection) -> Void)?
     func showSearch() { XCTFail("Unexpected navigation") }
     func showSettings() { XCTFail("Unexpected navigation") }
     func showPublicBrowse(_ request: MusicPublicBrowseRequest, title: String) { XCTFail("Unexpected navigation") }
-    func showPublicCollection(_ collection: MusicPublicBrowseCollection) { XCTFail("Unexpected navigation") }
+    func showPublicCollection(_ collection: MusicPublicBrowseCollection) {
+        guard let onCollection else { XCTFail("Unexpected navigation"); return }
+        onCollection(collection)
+    }
     func showLocalCollection(_ collection: MusicCollection) { XCTFail("Unexpected navigation") }
     func showPlayer(_ destination: MusicPlaybackDestination) { XCTFail("Unexpected navigation") }
-    func selectChannel(_ channel: MusicPublicBrowseChannel) { XCTFail("Unexpected navigation") }
+    func selectChannel(_ channel: MusicPublicBrowseChannel) {
+        guard let onChannel else { XCTFail("Unexpected navigation"); return }
+        onChannel(channel)
+    }
 }
 
 private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, MusicPublicBrowsing,
     MusicSearchDiscoveryProviding, MusicChorusProviding {
     private let discovery: [MusicSearchDiscoverySnapshot]
     private let browse: MusicPublicBrowsePage
+    private let nextBrowse: MusicPublicBrowsePage?
     private let localTracks: [MusicRemoteTrack]
     private let collectionKind: String
     private var discoveryCalls = 0, browseCalls = 0, trackCalls = 0
@@ -727,9 +1011,10 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     private var chorusGate: MusicUIKitChorusGate?
     private var chorusFailure: MusicServiceError?
     init(discovery: [MusicSearchDiscoverySnapshot] = [], browse: MusicPublicBrowsePage = .init(sections: []),
+         nextBrowse: MusicPublicBrowsePage? = nil,
          localTracks: [MusicRemoteTrack] = [], collectionKind: String = "playlist") {
         self.discovery = discovery; self.browse = browse; self.localTracks = localTracks
-        self.collectionKind = collectionKind
+        self.nextBrowse = nextBrowse; self.collectionKind = collectionKind
     }
     func counts() -> (discovery: Int, browse: Int, tracks: Int) { (discoveryCalls, browseCalls, trackCalls) }
     func holdChorus(_ gate: MusicUIKitChorusGate) { chorusGate = gate }
@@ -749,7 +1034,7 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
         return discovery[discoveryCalls]
     }
     func publicDiscovery(_ destination: MusicPublicBrowseDestination, cursor: String?) -> MusicPublicBrowsePage {
-        browseCalls += 1; return browse
+        browseCalls += 1; return cursor == nil ? browse : nextBrowse ?? browse
     }
     func publicPlaylists(platform: MusicPublicBrowsePlatform, query: String, cursor: String?) throws -> MusicPublicBrowseCollectionPage { throw MusicServiceError.unsupported }
     func publicDetail(_ collection: MusicPublicBrowseCollection, cursor: String?) throws -> MusicPublicBrowseDetail { throw MusicServiceError.unsupported }

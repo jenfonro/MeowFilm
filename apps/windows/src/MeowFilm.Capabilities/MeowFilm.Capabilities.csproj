@@ -4,6 +4,9 @@
     <UseWPF>true</UseWPF>
   </PropertyGroup>
   <ItemGroup>
+    <Resource Include="Accounts/Presentation/Assets/*.png" />
+  </ItemGroup>
+  <ItemGroup>
     <PackageReference Include="Net.Codecrete.QrCodeGenerator" Version="[3.2.1]" />
     <ProjectReference Include="../MeowFilm.Desktop/MeowFilm.Desktop.csproj" />
     <ProjectReference Include="../MeowFilm.Platform/MeowFilm.Platform.csproj" />
