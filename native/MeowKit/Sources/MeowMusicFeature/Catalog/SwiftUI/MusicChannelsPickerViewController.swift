@@ -43,14 +43,14 @@ struct MusicChannelsPickerContent: View {
     let select: (MusicPublicBrowseChannel) -> Void
 
     var body: some View {
-        List(channels) { channel in
+        List(channels, id: \.identity) { channel in
             Button {
                 select(channel)
             } label: {
                 HStack {
                     Text(channel.title)
                     Spacer()
-                    if channel.id == selectedID {
+                    if channel.identity == selectedID {
                         Image(systemName: "checkmark").foregroundStyle(Color(UIColor(theme.accent)))
                     }
                 }
@@ -60,8 +60,8 @@ struct MusicChannelsPickerContent: View {
             .buttonStyle(.plain)
             .foregroundStyle(Color(UIColor(theme.ink)))
             .listRowBackground(Color.clear)
-            .accessibilityIdentifier("music.channel.\(channel.id)")
-            .accessibilityAddTraits(channel.id == selectedID ? .isSelected : [])
+            .accessibilityIdentifier("music.channel.\(channel.identity)")
+            .accessibilityAddTraits(channel.identity == selectedID ? .isSelected : [])
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)

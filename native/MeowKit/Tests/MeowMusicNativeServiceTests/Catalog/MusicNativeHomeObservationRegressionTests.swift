@@ -240,6 +240,25 @@ private actor HomeObservationAccount: MusicNativeAccountProviding, MusicNativeHo
         XCTAssertEqual(changes, 1); XCTAssertNil(store.read())
         await value.close()
     }
+    func testAccessRetirementDuringSubscriptionFinishesWithoutReplayingOldEvents() async throws {
+        for closing in [false, true] {
+            let account = HomeObservationAccount(), store = HomeObservationStore(), gate = NativeMusicGate()
+            let value = try await service(account, store)
+            await account.suspendSubscription(gate)
+            let observing = Task { () -> Int in
+                var count = 0
+                for await _ in await value.homeChanges() { count += 1 }
+                return count
+            }
+            await gate.started()
+            if closing { await value.close() }
+            else { try await value.setAccess(available: false, generation: 2) }
+            await gate.release()
+            let changes = await observing.value, observers = await value.homeObservers.count
+            XCTAssertEqual(changes, 0); XCTAssertEqual(observers, 0)
+            await value.close()
+        }
+    }
     func testOldRevisionLateFailureCannotEraseNewSameScopeCacheOrSnapshot() async throws {
         let account = HomeObservationAccount(), store = HomeObservationStore(), gate = NativeMusicGate()
         let value = try await service(account, store)

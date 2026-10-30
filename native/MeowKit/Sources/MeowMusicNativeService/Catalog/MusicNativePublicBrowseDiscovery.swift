@@ -19,6 +19,7 @@ struct MusicNativePublicBrowseItem: Sendable {
     var previewSongs: [MusicNativeTrackData] = []
     var recommendationReason = ""
     var coverLabel = ""
+    var isRanking = false
 }
 struct MusicNativePublicBrowseSectionTab: Sendable {
     let id: String
@@ -44,18 +45,23 @@ struct MusicNativePublicBrowseDiscovery: Sendable {
     var filters: [MusicPublicBrowseFilter] = []
     var selected = ""
     var notice: String? = nil
+    var consumed: Int? = nil
     static func key(_ destination: MusicPublicBrowseDestination) -> String {
         switch destination {
         case .home: return "home"
         case .featured: return "featured"
         case .channels: return "channels"
         case .daily(let platform): return "daily:" + platform.rawValue
-        case .channel(let channel, let tag): return "channel:\(channel.id):\(channel.kind.rawValue):\(channel.pageCode):\(tag)"
+        case .channel(let channel, let tag): return "channel:\(channel.identity):\(channel.kind.rawValue):\(channel.pageCode):\(tag)"
         }
     }
 }
 
 enum MusicNativePublicBrowseParser {
+    static let channelKinds: [String: MusicPublicBrowseChannel.Kind] = [
+        "chart": .rankings, "playlist": .playlists, "feature": .featured,
+        "newsong": .newSongs, "vip": .vip, "artist-activity": .artistActivity,
+    ]
     struct Action: Sendable {
         let kind: String
         let id: String
@@ -160,15 +166,31 @@ enum MusicNativePublicBrowseParser {
         }
         return nil
     }
-    static func resource(_ row: MJ, index: String, modern: Bool = false, channel: Bool = false) throws -> MusicNativePublicBrowseItem? {
+    static func channel(_ link: Action, title: String) -> MusicPublicBrowseChannel? {
+        let kind = link.kind == "channel" ? channelKinds[link.id] : MusicPublicBrowseChannel.Kind(rawValue: link.kind)
+        guard let kind, kind != .unsupported else { return nil }
+        let id = link.kind == "channel" ? link.id :
+            channelKinds.first(where: { $0.value == kind })?.key ?? link.id
+        return .init(id: id, title: title, kind: kind, pageCode: link.page, platform: .netease)
+    }
+    private static func requiresAccount(_ link: Action) -> Bool {
+        if let action = link.homeAction { return action.requiresAccount }
+        guard let channel = channel(link, title: "") else { return false }
+        return [.vip, .artistActivity].contains(channel.kind)
+    }
+    static func resource(_ row: MJ, index: String, modern: Bool = false, channel: Bool = false,
+                         loggedIn: Bool = true) throws -> MusicNativePublicBrowseItem? {
         guard row.isObject else { return nil }
         let kind = text(row["resourceType"], row["targetType"], row["type"], row["creativeType"]).lowercased()
         if ["video", "podcast", "voice", "djradio", "djprogram", "mv"].contains(where: kind.contains) { return nil }
+        if !loggedIn, ["dailysongs", "star", "similarsong", "similarartist"].contains(kind) ||
+            row["lunaItemType"].string == "heartRcmd" { return nil }
         let play = MusicNativeHomePresentation.hasValue(row["playBtnData"]) ? try object(row["playBtnData"]) : .null
         let primary = MusicNativeHomePresentation.primaryAction(row)
         var link = try action(primary)
         if link == nil { link = try action(play["detailUrl"]) }
         if kind == "dragon_ball", link == nil { link = try action(row["uiElement"]["mainTitle"]["action"]) }
+        if !loggedIn, let link, requiresAccount(link) { return nil }
         let rawSong = row["resourceExtInfo"]["songData"] != .null ? row["resourceExtInfo"]["songData"] :
             row["resourceExtInfo"]["song"] != .null ? row["resourceExtInfo"]["song"] :
             row["songInfo"] != .null ? row["songInfo"] : row["songData"]
@@ -232,15 +254,16 @@ enum MusicNativePublicBrowseParser {
             let value = MusicPublicBrowseCollection(platform: .netease, nativeID: id, kind: .album,
                 title: name.isEmpty ? "专辑" : name, creator: row["artistName"].string, artwork: cover)
             content = .collection(value); stable = value.id
-        } else if let link, let channelKind = MusicPublicBrowseChannel.Kind(rawValue: link.kind) {
-            let channel = MusicPublicBrowseChannel(id: link.id, title: name.isEmpty ? "频道" : name, kind: channelKind, pageCode: link.page)
-            content = .channel(channel); stable = "channel:" + channel.id
+        } else if let link, let value = Self.channel(link, title: name.isEmpty ? "频道" : name) {
+            content = .channel(value); stable = "channel:" + value.identity
         } else if link != nil {
             content = .unavailable; stable = index
         } else { return nil }
         return .init(id: stable, title: name, subtitle: sub, artwork: cover, content: content, isEntrance: entrance,
                      ranking: try MusicNativeHomePresentation.ranking(row),
-                     coverLabel: kind == "fm" ? String(row["fmLogoTextContent"].string.prefix(200)) : "")
+                     coverLabel: kind == "fm" ? String(row["fmLogoTextContent"].string.prefix(200)) : "",
+                     isRanking: kind == "toplist" || row["rankId"] != .null ||
+                        row["rankItems"].isArray || row["trackRankList"].isArray)
     }
     static func textID(_ values: MJ...) -> String { values.first { !$0.id.isEmpty }?.id ?? "" }
     static func leaves(_ value: MJ, depth: Int = 0, budget: inout Int) throws -> [MJ] {
@@ -264,13 +287,17 @@ enum MusicNativePublicBrowseParser {
         }
         return roots.isEmpty ? candidates : roots.map { $0["blockResource"].isObject ? $0["blockResource"] : $0 }
     }
-    static func blocks(_ root: MJ, previous: MJ, isHome: Bool = true) throws -> MusicNativePublicBrowseDiscovery {
+    static func blocks(_ root: MJ, previous: MJ, isHome: Bool = true,
+                       loggedIn: Bool = true) throws -> MusicNativePublicBrowseDiscovery {
         let data = root.contains("data") ? root["data"] : root
-        try musicRequire(data["blocks"].isArray && data["blocks"].array.count <= 60, .upstreamInvalid)
+        let blocks = data["blocks"].array
+        try musicRequire(data["blocks"].isArray && blocks.count <= 60 && blocks.allSatisfy(\.isObject), .upstreamInvalid)
         var result = MusicNativePublicBrowseDiscovery(), budget = 6000
+        result.consumed = blocks.count
         var entries: [MusicNativePublicBrowseItem] = []
         var occurrences: [String: Int] = [:]
-        for (index, block) in data["blocks"].array.enumerated() {
+        for (index, block) in blocks.enumerated() {
+            if !loggedIn, block["positionCode"].string == "PAGE_RECOMMEND_MY_SHEET" { continue }
             let base: String
             if isHome {
                 base = try MusicNativeHomePresentation.blockID(block, index: index, previous: previous, occurrences: &occurrences)
@@ -279,6 +306,14 @@ enum MusicNativePublicBrowseParser {
             let roots = dsl != .null ? contentRoots(dsl) : [block]
             var seen = Set<String>()
             for (rootIndex, contentRoot) in roots.enumerated() {
+                let heading = block["hideTitle"] == .bool(true) ? "" : text(
+                    contentRoot["title"], contentRoot["header"]["title"], contentRoot["block"]["title"],
+                    block["uiElement"]["subTitle"]["title"], block["uiElement"]["mainTitle"]["title"])
+                let declared = [contentRoot["action"], contentRoot["header"]["action"], contentRoot["block"]["action"],
+                    block["uiElement"]["button"]["action"]].first(where: MusicNativeHomePresentation.hasValue) ?? .null
+                let link = try action(declared)
+                if !loggedIn, let link, requiresAccount(link) { continue }
+                let headingChannel = link.flatMap { channel($0, title: heading) }
                 let sectionPrefix: String
                 if isHome {
                     sectionPrefix = base + ":" + (try MusicNativeHomePresentation.rootID(contentRoot, index: rootIndex))
@@ -290,12 +325,10 @@ enum MusicNativePublicBrowseParser {
                 }
                 try musicRequire(raw.count <= 300, .limit)
                 let items = try raw.enumerated().compactMap {
-                    try resource($0.element, index: sectionPrefix + ":\($0.offset)", modern: dsl != .null)
+                    try resource($0.element, index: sectionPrefix + ":\($0.offset)", modern: dsl != .null,
+                                 loggedIn: loggedIn)
                 }.filter { seen.insert($0.id).inserted }
                 if !items.isEmpty {
-                    let heading = block["hideTitle"] == .bool(true) ? "" : text(
-                        contentRoot["title"], contentRoot["header"]["title"], contentRoot["block"]["title"],
-                        block["uiElement"]["subTitle"]["title"], block["uiElement"]["mainTitle"]["title"])
                     let isEntrance = items.contains(where: \.isEntrance) ||
                         (dsl["dslShowTitle"] == .bool(false) && !block["showType"].string.hasPrefix("PLAYLIST_SQUARE_"))
                     if isEntrance {
@@ -307,20 +340,33 @@ enum MusicNativePublicBrowseParser {
                         // Match the original normalizer: preserve contiguous song/
                         // collection runs rather than flattening mixed blocks.
                         let grid = block["showType"].string.range(of: "MULTI.*GRID|FLAT|GRID", options: [.regularExpression, .caseInsensitive]) != nil
-                        var runs: [(MusicPublicBrowseSection.Layout, [MusicNativePublicBrowseItem])] = []
+                        var runs: [(MusicPublicBrowseSection.Layout, Bool, [MusicNativePublicBrowseItem])] = []
                         for item in items {
                             let layout: MusicPublicBrowseSection.Layout
-                            switch item.content {
-                            case .song, .songID: layout = .songColumns
-                            default: layout = grid ? .grid : .playlistRail
+                            if headingChannel?.kind == .artistActivity { layout = .artistUpdates }
+                            else {
+                                switch item.content {
+                                case .song, .songID: layout = .songColumns
+                                default: layout = grid ? .grid : .playlistRail
+                                }
                             }
-                            if runs.last?.0 == layout { runs[runs.count - 1].1.append(item) }
-                            else { runs.append((layout, [item])) }
+                            let ranking = layout == .artistUpdates ? false : item.isRanking
+                            if runs.last?.0 == layout && runs.last?.1 == ranking { runs[runs.count - 1].2.append(item) }
+                            else { runs.append((layout, ranking, [item])) }
                         }
                         for (run, value) in runs.enumerated() {
                             let title = isHome && block["positionCode"].string == "PAGE_RECOMMEND_MY_SHEET" &&
                                 value.0 != .songColumns ? "最近常听" : heading
-                            result.sections.append(.init(id: sectionPrefix + ":\(run)", title: title, items: value.1, layout: value.0))
+                            var channel = headingChannel
+                            if channel == nil, declared == .null, isHome,
+                               block["positionCode"].string != "PAGE_RECOMMEND_MY_SHEET",
+                               value.2.allSatisfy({ if case .collection(let row) = $0.content {
+                                   return row.kind == .playlist
+                               }; return false }) {
+                                channel = Self.channel(.init(value.1 ? "rankings" : "playlists"), title: title)
+                            }
+                            result.sections.append(.init(id: sectionPrefix + ":\(run)", title: title,
+                                items: value.2, layout: value.0, channel: title.isEmpty ? nil : channel))
                         }
                     }
                 }
@@ -334,7 +380,7 @@ enum MusicNativePublicBrowseParser {
         if data["hasMore"] == .bool(true) {
             let cursor = data["cursor"].id
             try musicRequire(!cursor.isEmpty && cursor != previous["cursor"].id && cursor.utf8.count <= 24_000, .staleResult)
-            let old = previous["loaded"].strings, fresh = data["blocks"].array.map { $0["positionCode"].string }.filter { !$0.isEmpty }
+            let old = previous["loaded"].strings, fresh = blocks.map { $0["positionCode"].string }.filter { !$0.isEmpty }
             var seen = Set<String>()
             let loaded = (old + fresh).filter { seen.insert($0).inserted }
             try musicRequire(loaded.count <= 300 && loaded.allSatisfy { $0.utf8.count <= 200 }, .limit)
@@ -352,13 +398,12 @@ enum MusicNativePublicBrowseParser {
         return try rows.array.enumerated().map { index, row in
             let link = try action(row["url"] != .null ? row["url"] : row["action"])
             let code = row["code"].string, name = title(row)
-            let special: [String: MusicPublicBrowseChannel.Kind] = ["chart": .rankings, "playlist": .playlists, "feature": .featured,
-                                                                 "newsong": .newSongs, "vip": .vip]
-            let kind = special[code] ?? MusicPublicBrowseChannel.Kind(rawValue: link?.kind ?? "") ?? .unsupported
-            let id = !code.isEmpty ? code : link?.id ?? "channel-\(index)"
+            let destination = link.flatMap { channel($0, title: name) }
+            let kind = channelKinds[code] ?? destination?.kind ?? .unsupported
+            let id = !code.isEmpty ? code : destination?.id ?? "channel-\(index)"
             _ = try musicText(id, maximum: 200); _ = try musicText(name, maximum: 600)
             try musicRequire(seen.insert(id).inserted, .upstreamInvalid)
-            return .init(id: id, title: name, kind: kind, pageCode: link?.page ?? "")
+            return .init(id: id, title: name, kind: kind, pageCode: link?.page ?? "", platform: .netease)
         }
     }
 }
@@ -369,7 +414,12 @@ enum MusicNativeBrowseMetadataRequest: Sendable {
 }
 
 extension MusicNativePlatforms {
-    func browseDiscovery(_ destination: MusicPublicBrowseDestination, remote: MJ, offset: Int) async throws -> MusicNativePublicBrowseDiscovery {
+    func browseDiscovery(_ destination: MusicPublicBrowseDestination, source: MusicPublicBrowsePlatform,
+                         remote: MJ, offset: Int) async throws -> MusicNativePublicBrowseDiscovery {
+        try musicRequire(source == .netease, .unsupported)
+        if case .channel(let channel, _) = destination {
+            try musicRequire(channel.platform == source, .invalidRequest)
+        }
         var result: MusicNativePublicBrowseDiscovery
         switch destination {
         case .home, .featured:
@@ -435,7 +485,7 @@ extension MusicNativePlatforms {
             params["loadedPositionCodes"] = .string(remote["loaded"].json)
         }
         let root = try await wy("/api/link/page/rcmd/resource/show", params)
-        return try MusicNativePublicBrowseParser.blocks(root, previous: remote, isHome: !featured)
+        return try MusicNativePublicBrowseParser.blocks(root, previous: remote, isHome: !featured, loggedIn: false)
     }
     func browseEnrich(_ input: MusicNativePublicBrowseDiscovery,
                      metadata: (@Sendable (MusicNativeBrowseMetadataRequest) async throws -> Data)? = nil) async throws -> MusicNativePublicBrowseDiscovery {

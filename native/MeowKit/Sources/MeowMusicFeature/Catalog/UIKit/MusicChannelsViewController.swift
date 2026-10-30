@@ -22,6 +22,8 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
     private var pages: [String: MusicBrowseViewController] = [:]
     private var channels: [MusicPublicBrowseChannel] = []
     private var pagingAccess: UUID?
+    private var observation: Task<Void, Never>?
+    private var observationAccess: UUID?
     private var pendingChannel: MusicPublicBrowseChannel?
     private var dataSource: UICollectionViewDiffableDataSource<Int, String>!
     private var shownCatalogueError: String?
@@ -42,7 +44,7 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
         grid.alwaysBounceVertical = true
         grid.register(MusicChannelCell.self, forCellWithReuseIdentifier: "channel")
         dataSource = UICollectionViewDiffableDataSource(collectionView: grid) { [weak self] view, path, id in
-            guard let self, let channel = self.channels.first(where: { $0.id == id }) else { return nil }
+            guard let self, let channel = self.channels.first(where: { $0.identity == id }) else { return nil }
             let cell = view.dequeueReusableCell(withReuseIdentifier: "channel", for: path) as! MusicChannelCell
             cell.configure(channel, theme: self.theme)
             return cell
@@ -73,6 +75,7 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
 
     public override func pageDidBecomeActive() { activateCatalogue() }
     public override func pageDidBecomeInactive() {
+        observation?.cancel(); observation = nil; observationAccess = nil
         catalogue?.disappear()
         for page in pages.values { PageViewController.invalidatePages(in: page) }
         pages.removeAll()
@@ -87,7 +90,7 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
         if isViewLoaded, dataSource != nil {
             for path in grid.indexPathsForVisibleItems {
                 guard let id = dataSource.itemIdentifier(for: path),
-                      let channel = channels.first(where: { $0.id == id }),
+                      let channel = channels.first(where: { $0.identity == id }),
                       let cell = grid.cellForItem(at: path) as? MusicChannelCell else { continue }
                 cell.configure(channel, theme: theme)
             }
@@ -97,7 +100,7 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
     public func select(_ channel: MusicPublicBrowseChannel) {
         if pagingAccess != nil { pendingChannel = channel; return }
         selection.selectChannel(channel)
-        if !channels.contains(where: { $0.id == channel.id }) { channels.insert(channel, at: 0) }
+        if !channels.contains(where: { $0.identity == channel.identity }) { channels.insert(channel, at: 0) }
         updateGrid()
         renderSelection()
     }
@@ -105,7 +108,7 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
     public func showPicker() {
         guard canPresentPageAlert, model.isAvailable, !model.isClosed else { return }
         let access = model.accountAccessGeneration
-        let picker = MusicChannelsPickerViewController(channels: channels, selectedID: selection.channel?.id,
+        let picker = MusicChannelsPickerViewController(channels: channels, selectedID: selection.channel?.identity,
                                                        appearance: appearance) {
             [weak self] channel in
             guard let self, self.isPageActive, self.model.accountAccessGeneration == access else { return }
@@ -145,7 +148,7 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
             select(pending)
         } else if completed, access == model.accountAccessGeneration,
                   let shown = pager.viewControllers?.first,
-                  let channel = channels.first(where: { pages[$0.id] === shown }) {
+                  let channel = channels.first(where: { pages[$0.identity] === shown }) {
             selection.selectChannel(channel)
             onChannelChanged?(channel)
         }
@@ -153,7 +156,7 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
 
     public func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         guard let id = dataSource.itemIdentifier(for: indexPath),
-              let channel = channels.first(where: { $0.id == id }) else { return }
+              let channel = channels.first(where: { $0.identity == id }) else { return }
         select(channel)
     }
 
@@ -172,6 +175,10 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
         catalogue.setAccess(available: model.isAvailable && !model.isClosed,
                             generation: model.accountAccessGeneration)
         catalogue.appear()
+        if observationAccess != model.accountAccessGeneration {
+            observation?.cancel(); observationAccess = model.accountAccessGeneration
+            observation = Task { await catalogue.observeHomeChanges() }
+        }
         if !catalogue.loaded, !catalogue.isLoading, catalogue.error == nil {
             runPageTask { await catalogue.loadIfNeeded() }
         }
@@ -185,10 +192,10 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
         channels = items
         selection.restoreChannel(from: channels)
         if catalogue?.loaded == true, let selected = selection.channel,
-           !channels.contains(where: { $0.id == selected.id }) {
+           !channels.contains(where: { $0.identity == selected.identity }) {
             channels.insert(selected, at: 0)
         }
-        channelPicker?.update(channels: channels, selectedID: selection.channel?.id)
+        channelPicker?.update(channels: channels, selectedID: selection.channel?.identity)
         if isViewLoaded { updateGrid(); renderSelection(); renderCatalogueState() }
     }
 
@@ -196,7 +203,7 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
         guard dataSource != nil else { return }
         var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
         snapshot.appendSections([0])
-        snapshot.appendItems(channels.map(\.id))
+        snapshot.appendItems(channels.map(\.identity))
         if dataSource.snapshot().itemIdentifiers != snapshot.itemIdentifiers {
             dataSource.apply(snapshot, animatingDifferences: false)
         }
@@ -243,7 +250,7 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
     }
 
     private func controller(_ channel: MusicPublicBrowseChannel) -> MusicBrowseViewController? {
-        if let existing = pages[channel.id] { return existing }
+        if let existing = pages[channel.identity] { return existing }
         guard let router else { return nil }
         let page = MusicBrowseViewController(
             title: channel.title, model: model, browser: browser,
@@ -251,17 +258,18 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
             router: router, embedded: true
         )
         page.lifetimeOwner = self
-        pages[channel.id] = page
+        pages[channel.identity] = page
         return page
     }
 
     private func neighbor(of viewController: UIViewController, step: Int) -> UIViewController? {
-        guard let index = channels.firstIndex(where: { pages[$0.id] === viewController }),
+        guard let index = channels.firstIndex(where: { pages[$0.identity] === viewController }),
               channels.indices.contains(index + step) else { return nil }
         return controller(channels[index + step])
     }
 
     isolated deinit {
+        observation?.cancel()
         for page in pages.values { PageViewController.invalidatePages(in: page) }
     }
 }
@@ -279,7 +287,7 @@ private final class MusicChannelCell: UICollectionViewCell {
     func configure(_ channel: MusicPublicBrowseChannel, theme: PageTheme) {
         title.text = channel.title; title.textColor = UIColor(theme.ink)
         contentView.backgroundColor = UIColor(theme.chip)
-        accessibilityIdentifier = "music.channel.\(channel.id)"
+        accessibilityIdentifier = "music.channel.\(channel.identity)"
     }
 }
 
