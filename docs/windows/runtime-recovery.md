@@ -2,7 +2,7 @@
 
 ## 契约与影响
 
-- `IRuntimeRecovery` / `IRuntimeRecoveryScope` 是进程内生命周期契约；真实 `NodeRuntime.IsConnected` 报告实际连接。连接使用 `aggregate` 身份及 `music@0.4.0` 握手；恢复仅重建进程和连接。
+- `IRuntimeRecovery` / `IRuntimeRecoveryScope` 是进程内生命周期契约；真实 `NodeRuntime.IsConnected` 报告实际连接。连接使用 `aggregate` 身份及 `music@0.5.0` 握手，业务响应为 `music.script.v2`；恢复仅重建进程和连接，实例执行仍属于公共运行时。
 - 当前只有唯一 App、AppHost/Core 和音乐脚本适配器。普通原生账号、曲库、固定 API 和播放不以连接为前置条件；不向 Node 开放普通文档权限。
 - 首个脚本请求前显式注册 scope，最多 32 个，重复/迟到注册拒绝。无全局事件总线、全局当前源或跨 App 进程共享。
 

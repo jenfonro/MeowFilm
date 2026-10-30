@@ -310,7 +310,7 @@ public static class MusicQualityPolicyTests
             length = bytes.Length, sha256 = Convert.ToHexStringLower(SHA256.HashData(bytes)) })).GetProperty("token").GetString()!;
         await Call("music.transfer.chunk", new { token, offset = 0, data = Convert.ToBase64String(bytes) });
         string id = (await Call("music.sources.install", new { token, name = "unknown quality fixture", version = "1",
-            permissions = new { networkOrigins = Array.Empty<string>(), storage = Array.Empty<string>() } }))
+            permissions = new { storage = Array.Empty<string>() } }))
             .GetProperty("item").GetProperty("installationId").GetString()!;
         await Call("music.sources.enable", new { installationId = id });
         var parameters = new { installationId = id, platform = "wy", quality = "320k", song };
@@ -403,7 +403,7 @@ internal sealed class QualityFixture : IAsyncDisposable
         string token = stage.GetProperty("token").GetString()!;
         await Ok("music.transfer.chunk", new { token, offset = 0, data = Convert.ToBase64String(source) });
         var installed = await Ok("music.sources.install", new { token, name = "合成音源", version = "1",
-            permissions = new { networkOrigins = Array.Empty<string>(), storage = Array.Empty<string>() } });
+            permissions = new { storage = Array.Empty<string>() } });
         string id = installed.GetProperty("item").GetProperty("installationId").GetString()!;
         await Ok("music.sources.enable", new { installationId = id }); return id;
     }
@@ -468,7 +468,7 @@ internal sealed class QualityFixture : IAsyncDisposable
         private readonly Dictionary<string, JsonObject> instances = [];
         private static JsonElement Reply(object value)
         {
-            var o = O(value); o["ok"] = true; o["contract"] = "music.script.v1"; return JsonSerializer.SerializeToElement(o);
+            var o = O(value); o["ok"] = true; o["contract"] = "music.script.v2"; return JsonSerializer.SerializeToElement(o);
         }
         public async Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         {
@@ -479,6 +479,7 @@ internal sealed class QualityFixture : IAsyncDisposable
                 case "music.script.stage.chunk": return Reply(new { next = p["offset"]!.GetValue<int>() + Convert.FromBase64String(p["data"]!.GetValue<string>()).Length });
                 case "music.script.stage.abort": return Reply(new { released = true });
                 case "music.script.load":
+                    Check(p["permissions"]!.AsObject().Select(field => field.Key).SequenceEqual(["storage"]));
                     string id = LJ.S(p["installationId"]);
                     var instance = O(new { installationId = id, revision = LJ.I(p["revision"]), generation = ++generation,
                         grant = LJ.S(p["grant"]), state = "ready",
@@ -493,7 +494,7 @@ internal sealed class QualityFixture : IAsyncDisposable
                         using var registration = cancellationToken.Register(() => Cancelled.TrySetResult());
                         Entered.TrySetResult(); await Release.Task;
                     }
-                    if (Failure is not null) return JsonSerializer.SerializeToElement(new { ok = false, code = Failure, contract = "music.script.v1" });
+                    if (Failure is not null) return JsonSerializer.SerializeToElement(new { ok = false, code = Failure, contract = "music.script.v2" });
                     return Reply(new { value = Misses.Contains(quality) ? null : Value });
                 default: throw new InvalidOperationException("ordinary business entered Node");
             }

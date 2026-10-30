@@ -10,8 +10,11 @@ public sealed record MusicSourceScriptSnapshot(JsonElement Sites, string Sha256)
 
 public sealed partial class MusicLibraryOwner
 {
+    internal const int MaximumScriptSites = 32;
+    internal static bool IsScriptIdentifier(string value) => value.Length is > 0 and <= 128 &&
+        Regex.IsMatch(value, @"\A[A-Za-z0-9][A-Za-z0-9._-]*\z", RegexOptions.CultureInvariant, NativeMusicSong.RegexTimeout);
     private JsonObject SourceState(JsonObject doc) => Value(doc, "lx-installations") as JsonObject ??
-        LJ.Obj(("schema", 2), ("revision", 0), ("installations", new JsonArray()));
+        LJ.Obj(("schema", 3), ("revision", 0), ("installations", new JsonArray()));
     private JsonObject Settings(JsonObject doc) => Value(doc, "online-settings") as JsonObject ??
         LJ.Obj(("schema", 2), ("revision", 0), ("lyrics", true), ("target", null));
     private static string InstallationId(string id)
@@ -22,7 +25,7 @@ public sealed partial class MusicLibraryOwner
     private static void ValidateSources(JsonObject state)
     {
         LJ.Fields(state, "schema revision installations", "schema revision installations");
-        LJ.Require(LJ.I(state["schema"]) == 2, "CORRUPT_STORAGE"); _ = Revision(state);
+        LJ.Require(LJ.I(state["schema"]) == 3, "CORRUPT_STORAGE"); _ = Revision(state);
         var installations = LJ.Array(state["installations"]); LJ.Require(installations.Count <= 32, "LIMIT");
         var ids = new HashSet<string>();
         foreach (var n in installations)
@@ -34,16 +37,8 @@ public sealed partial class MusicLibraryOwner
                 var r = LJ.Object(n); LJ.Fields(r, "source version permissions", "source version permissions");
                 string source = LJ.S(r["source"]); LJ.Require(source.Trim().Length > 0 && System.Text.Encoding.UTF8.GetByteCount(source) <= 512 * 1024, "LIMIT");
                 _ = LJ.Text(r["version"], 128);
-                var permissions = LJ.Object(r["permissions"]); LJ.Fields(permissions, "networkOrigins storage", "networkOrigins storage");
-                var origins = LJ.Array(permissions["networkOrigins"]); LJ.Require(origins.Count <= MusicSourceNetworkPolicy.MaximumOrigins, "LIMIT");
-                var originValues = new List<string>();
-                foreach (var o in origins)
-                {
-                    string text = LJ.Text(o);
-                    LJ.Require(MusicSourceNetworkPolicy.TryCanonical(text, out var origin));
-                    originValues.Add(origin);
-                }
-                LJ.Require(originValues.Distinct(StringComparer.Ordinal).Count() == originValues.Count);
+                var permissions = LJ.Object(r["permissions"]);
+                LJ.Fields(permissions, "storage", "storage");
                 var storage = LJ.Array(permissions["storage"]);
                 var storageValues = storage.Select(value => LJ.S(value)).ToArray();
                 LJ.Require(storage.All(value => value is JsonValue scalar && scalar.TryGetValue<string>(out _)) &&
@@ -165,7 +160,7 @@ public sealed partial class MusicLibraryOwner
     }
     private string ScriptArea(string installationId, string siteId)
     {
-        _ = InstallationId(installationId); LJ.Require(NativeMusicSong.Platforms.Append("local").Contains(siteId));
+        _ = InstallationId(installationId); LJ.Require(IsScriptIdentifier(siteId));
         return LJ.Stringify(new JsonArray("lx-data", installationId, siteId));
     }
     private bool TryScriptAreaKey(string encoded, out string installation) => TryScriptAreaKey(encoded, out installation, out _);
@@ -196,10 +191,10 @@ public sealed partial class MusicLibraryOwner
     }
     private static void ValidateSites(JsonObject sites)
     {
-        LJ.Require(sites.Count <= 6, "LIMIT");
+        LJ.Require(sites.Count <= MaximumScriptSites && LJ.Bytes(sites).Length <= 512 * 1024, "LIMIT");
         foreach (var site in sites)
         {
-            LJ.Require(NativeMusicSong.Platforms.Append("local").Contains(site.Key), "INVALID_REQUEST");
+            LJ.Require(IsScriptIdentifier(site.Key), "INVALID_REQUEST");
             ValidateScriptStorage(LJ.Object(site.Value));
         }
     }

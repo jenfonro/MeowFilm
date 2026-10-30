@@ -1,7 +1,6 @@
 /**
- * Executed only inside our VM, not imported into the shared realm.
- * Buffer's prototype and all SDK objects are per-context. The bridge is still
- * NOT a security sandbox: host callbacks and a shared event loop remain.
+ * Executed inside QuickJS. Host calls exchange JSON; guest callbacks stay in
+ * this heap and are referenced by IDs, never passed as host callable objects.
  */
 export const realmSource = String.raw`
 (() => {
@@ -9,20 +8,56 @@ export const realmSource = String.raw`
   const bridge = globalThis.__meowBridge;
   delete globalThis.__meowBridge;
   const parse = JSON.parse.bind(JSON);
+  const stringify = JSON.stringify.bind(JSON);
+  const setPrototypeOf = Object.setPrototypeOf;
+  const isView = ArrayBuffer.isView;
+  const arrayFrom = Array.from.bind(Array);
   const freeze = Object.freeze;
+  const trustedErrors = new WeakMap();
+  const callbacks = new Map();
+  const promises = new Map();
+  let nextId = 0, handler, realm;
   const error = data => {
-    const e = new Error(data.message || data.code);
+    const e = new Error(data.code);
     e.code = data.code;
     e.name = data.code === 'CANCELLED' ? 'AbortError' : 'Error';
-    bridge('rememberError',[e,e.code]);
+    trustedErrors.set(e, e.code);
     return e;
   };
+  const failureCode = e => trustedErrors.get(e) ||
+    (e && e.name === 'InternalError' && /out of memory|stack overflow/i.test(e.message)
+      ? 'RESOURCE_LIMIT' : 'SCRIPT_EXCEPTION');
+  function diagnose(e, id) {
+    if (trustedErrors.has(e)) return;
+    const text = String(e && e.message || '');
+    const kind = ['Error','TypeError','ReferenceError','SyntaxError','RangeError','InternalError'].includes(e && e.name)
+      ? e.name : 'Error';
+    const reference = kind === 'ReferenceError'
+      ? text.match(/['"]?([A-Za-z_$][\w$]{0,63})['"]? is not defined/) : null;
+    const member = kind === 'TypeError'
+      ? text.match(/(?:['"]|\.)(from|toString|bufToString|readUInt32LE|readUInt32BE|readUInt16LE|readUInt16BE|writeUInt32LE|writeUInt32BE)['"]?\s+(?:is not a function|of undefined)/) : null;
+    const location = String(e && e.stack || '').match(/installed-script\.js:(\d+)(?::(\d+))?/);
+    const reason = reference ? 'reference'
+      : /api.?key|密钥|未配置|无API配置|config.*required|token.*missing/i.test(text) ? 'configuration'
+      : /缺少|missing|参数|信息不完整|undefined|null/i.test(text) ? 'input'
+      : /unsupported|不支持|action not support|unknown (?:action|source)|未知(?:动作|音源)|未实现/i.test(text) ? 'unsupported'
+      : /api|接口|获取|请求|HTTP|找不到|不存在|为空|解析.*失败|所有(?:音源|音质)均失败|无歌词|no.*url|not found|invalid.*response|没有.*可用|response/i.test(text)
+        ? 'upstream' : 'script';
+    try { call('diagnostic',id,{kind,reason,...(reference ? {reference:reference[1]} : {}),
+      ...(member ? {member:member[1]} : {}),
+      ...(location ? {line:Number(location[1]),column:Number(location[2] || 0)} : {})}); } catch (_) {}
+  }
   const call = (op, ...args) => {
-    try { return bridge(op, args); }
-    catch (e) { throw error({code:e.code || 'SCRIPT_EXCEPTION', message:e.message}); }
+    // Control arguments must not inherit a guest toJSON or use its serializer.
+    setPrototypeOf(args, null);
+    const response = parse(bridge(op, stringify(args, (_key, value) =>
+      isView(value) ? arrayFrom(value) : value)));
+    if (!response.ok) throw error({code:response.code});
+    return response.value;
   };
+  const maxBytes = call('maxBytes');
   const size = n => {
-    if (!Number.isSafeInteger(n) || n < 0 || n > call('maxBytes')) throw error({code:'RESOURCE_LIMIT'});
+    if (!Number.isSafeInteger(n) || n < 0 || n > maxBytes) throw error({code:'RESOURCE_LIMIT'});
     return n;
   };
   class ScriptBuffer extends Uint8Array {
@@ -109,7 +144,12 @@ export const realmSource = String.raw`
     EVENT_NAMES:freeze({request:'request',inited:'inited',updateAlert:'updateAlert'}),
     currentScriptInfo:deepFreeze(parse(call('scriptInfo'))),
     on(event, handler) {
-      try { call('on',event,handler); return Promise.resolve(); }
+      try {
+        if (event !== 'request' || typeof handler !== 'function') throw error({code:'SCRIPT_PROTOCOL_ERROR'});
+        registerHandler(handler);
+        call('on',event);
+        return Promise.resolve();
+      }
       catch (e) {
         const rejected = Promise.reject(e); rejected.catch(() => {}); return rejected;
       }
@@ -118,25 +158,49 @@ export const realmSource = String.raw`
     request(url, options, callback) {
       if (typeof options === 'function') { callback = options; options = {}; }
       if (typeof callback !== 'function') throw new TypeError('Callback required');
-      const id = call('request',String(url),options || {},callback);
+      const id = ++nextId;
+      callbacks.set(id, {fn:callback});
+      try { call('request',String(url),options || {},id); }
+      catch (e) { callbacks.delete(id); throw e; }
       return () => { call('abortRequest',id); };
     },
     utils,
   });
-  const storage = freeze(Object.fromEntries(['get','set','delete'].map(op => [
-    op, (key,value) => Promise.resolve().then(() => call('storage',op,key,value))
-      .then(data => parse(JSON.stringify(data === undefined ? null : data)),
-        e => { throw error({code:e.code || 'STORAGE_ERROR'}); }),
-  ])));
+  function registerHandler(fn) { handler = fn; }
+  function scopedStorage(scopeId) {
+    return freeze(Object.fromEntries(['get','set','delete'].map(op => [
+      op, (key,value) => new Promise((resolve,reject) => {
+        const id = ++nextId;
+        promises.set(id,{resolve,reject});
+        try { call('storage',scopeId,op,key,value,id); }
+        catch (e) { promises.delete(id); reject(e); }
+      }),
+    ])));
+  }
   Object.defineProperties(globalThis, {
     lx:{value:lx},
-    meow:{value:freeze({config:deepFreeze(parse(call('config'))),storage})},
+    meow:{value:freeze({config:deepFreeze(parse(call('config'))),storage:scopedStorage(0)})},
     Buffer:{value:ScriptBuffer},
   });
-  globalThis.setTimeout = (fn,delay,...args) => call('timer',fn,delay,false,args);
-  globalThis.setInterval = (fn,delay,...args) => call('timer',fn,delay,true,args);
-  globalThis.clearTimeout = globalThis.clearInterval = id => call('clearTimer',id);
-  globalThis.queueMicrotask = fn => call('microtask',fn);
+  const timer = (fn,delay,repeat,args) => {
+    if (typeof fn !== 'function') throw error({code:'INVALID_ARGUMENT'});
+    const id = ++nextId;
+    callbacks.set(id,{fn,args,repeat});
+    try { call('timer',id,delay || 0,repeat); }
+    catch (e) { callbacks.delete(id); throw e; }
+    return id;
+  };
+  globalThis.setTimeout = (fn,delay,...args) => timer(fn,delay,false,args);
+  globalThis.setInterval = (fn,delay,...args) => timer(fn,delay,true,args);
+  globalThis.clearTimeout = globalThis.clearInterval = id => { call('clearTimer',id); callbacks.delete(id); };
+  globalThis.queueMicrotask = fn => {
+    if (typeof fn !== 'function') throw error({code:'INVALID_ARGUMENT'});
+    const id = ++nextId;
+    callbacks.set(id,{fn,args:[]});
+    try { call('microtask',id); }
+    catch (e) { callbacks.delete(id); throw e; }
+    Promise.resolve().then(() => realm.callback(id,'{}'));
+  };
   globalThis.btoa = str => ScriptBuffer.from(str,'latin1').toString('base64');
   globalThis.atob = str => ScriptBuffer.from(str,'base64').toString('latin1');
   globalThis.TextEncoder = class { encode(str = '') { return ScriptBuffer.from(String(str)); } };
@@ -145,22 +209,66 @@ export const realmSource = String.raw`
     decode(data = []) { return ScriptBuffer.from(data).toString(this.encoding); }
   };
   globalThis.console = freeze(Object.fromEntries(
-    ['log','info','warn','error','debug','trace'].map(key => [key,() => {}]),
+    ['log','info','warn','error','debug','trace','group','groupCollapsed','groupEnd',
+      'clear','table','dir','dirxml','time','timeEnd','timeLog','assert','count',
+      'countReset','profile','profileEnd','timeStamp'].map(key => [key,() => {}]),
   ));
-  return freeze({
+  return realm = freeze({
     parse,
-    httpArguments(code, metaJSON, rawBytes, encoding, forceJSON) {
-      if (code) return [error({code}),null,null];
-      const raw = ScriptBuffer.from(rawBytes);
-      const response = parse(metaJSON);
-      let body = encoding === null ? raw : raw.toString(encoding || 'utf8');
-      if (encoding !== null) {
-        try { body = parse(body); }
-        catch { if (forceJSON) return [error({code:'INVALID_JSON'}),response,null]; }
-      }
-      response.raw = raw; response.body = body;
-      return [null,response,body];
+    errorCode:failureCode,
+    watchStartup(value) {
+      if (value && typeof value.then === 'function') Promise.resolve(value)
+        .catch(e => { diagnose(e,0); call('startupFailure',failureCode(e)); });
     },
+    dispatch(id, payloadJSON) {
+      try {
+        const value = handler(parse(payloadJSON), freeze({storage:scopedStorage(id)}));
+        if (!value || typeof value.then !== 'function') throw error({code:'SCRIPT_PROTOCOL_ERROR'});
+        Promise.resolve(value).then(
+          value => call('invokeResult',id,true,value),
+          e => { diagnose(e,id); call('invokeResult',id,false,failureCode(e)); },
+        ).catch(e => { diagnose(e,id); call('invokeResult',id,false,failureCode(e)); });
+      } catch (e) { diagnose(e,id); call('invokeResult',id,false,failureCode(e)); }
+    },
+    callback(id, payloadJSON) {
+      const item = callbacks.get(id);
+      if (!item) return;
+      if (!item.repeat) callbacks.delete(id);
+      try {
+        const input = parse(payloadJSON);
+        let args = item.args;
+        if (!args) {
+          if (input.code) args = [error({code:input.code}),null,null];
+          else {
+            const raw = ScriptBuffer.from(input.body,'base64');
+            const response = input.response;
+            let body = input.encoding === null ? raw : raw.toString(input.encoding || 'utf8');
+            if (input.encoding !== null) {
+              try { body = parse(body); }
+              catch { if (input.json) args = [error({code:'INVALID_JSON'}),response,null]; }
+            }
+            if (!args) {
+              response.raw = raw; response.body = body;
+              args = [null,response,body];
+            }
+          }
+        }
+        Promise.resolve(item.fn(...args)).then(
+          () => call('callbackDone',id),
+          e => { call('callbackFailure',id,failureCode(e)); call('callbackDone',id); },
+        );
+      } catch (e) { call('callbackFailure',id,failureCode(e)); call('callbackDone',id); }
+    },
+    storageResult(id, payloadJSON) {
+      const item = promises.get(id);
+      if (!item) return;
+      promises.delete(id);
+      const result = parse(payloadJSON);
+      if (result.code) item.reject(error({code:result.code}));
+      else item.resolve(result.value);
+      call('callbackDone',id);
+    },
+    forgetCallback(id) { callbacks.delete(id); promises.delete(id); },
   });
 })()
 `;

@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import { clone, fault, identifier, requireValue, safeError } from './errors.js';
-import { normalizeNetworkOrigin } from './network-origin.js';
 
 const defaults = Object.freeze({
   syncTimeoutMs: 200,
@@ -16,20 +15,16 @@ const defaults = Object.freeze({
   maxInFlight: 32,
   maxInstanceInFlight: 8,
   maxSiteInFlight: 4,
+  maxMemoryBytes: 64 * 1024 * 1024,
+  maxStackBytes: 64 * 1024,
 });
 
 function permissions(raw = {}) {
   requireValue(raw && typeof raw === 'object' && !Array.isArray(raw));
-  requireValue(Object.keys(raw).every(k => ['networkOrigins', 'storage', 'localServices'].includes(k)));
-  const origins = raw.networkOrigins ?? [];
-  requireValue(Array.isArray(origins) && origins.length <= 128);
-  const networkOrigins = [...new Set(origins.map(origin =>
-    normalizeNetworkOrigin(origin)))];
+  requireValue(Object.keys(raw).every(k => k === 'storage'));
   const storage = raw.storage ?? [];
   requireValue(Array.isArray(storage) && storage.every(p => ['read', 'write'].includes(p)));
-  requireValue(raw.localServices === undefined || typeof raw.localServices === 'boolean');
-  requireValue(raw.localServices !== true, 'PERMISSION_DENIED');
-  return { networkOrigins, storage: [...new Set(storage)], localServices: false };
+  return { storage: [...new Set(storage)] };
 }
 
 function revision(spec, base, maxSourceBytes) {
@@ -70,17 +65,19 @@ export class ScriptHost {
   #pending = new Map();
   #cleanupIssues = new Map();
 
-  constructor({ adapters, network, storage, limits = {}, ...unsupported }) {
+  constructor({ adapters, network, storage, onDiagnostic, limits = {}, ...unsupported }) {
     requireValue(Object.keys(unsupported).length === 0);
     requireValue(adapters && typeof adapters === 'object');
     requireValue(network === undefined || typeof network === 'function');
     requireValue(storage === undefined || (storage && typeof storage === 'object'));
+    requireValue(onDiagnostic === undefined || typeof onDiagnostic === 'function');
     requireValue(Object.keys(limits).every(k => Object.hasOwn(defaults, k)));
     this.limits = Object.freeze({ ...defaults, ...limits });
     for (const value of Object.values(this.limits)) requireValue(Number.isSafeInteger(value) && value > 0);
     this.adapters = { ...adapters };
     this.network = network;
     this.storage = storage;
+    this.onDiagnostic = onDiagnostic;
   }
 
   #open() { requireValue(!this.#closed, 'HOST_CLOSED'); }
@@ -122,7 +119,7 @@ export class ScriptHost {
     this.#generations.set(id, generation);
     const session = factory({
       installationId: id, generation, revision: rev,
-      network: this.network, storage: this.storage, limits: this.limits,
+      network: this.network, storage: this.storage, onDiagnostic: this.onDiagnostic, limits: this.limits,
     });
     this.#sessions.add(session);
     try {

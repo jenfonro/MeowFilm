@@ -2,6 +2,13 @@
 
 - [第三方许可](licenses.md)
 
+## 共用脚本运行时
+
+- [公共核心与平台边界](runtime/script-runtime.md)
+- [原始 LX 音源契约 music.script.v2](runtime/music-script-runtime.md)
+- [Runtime bridge](runtime/runtime-bridge.md)
+- [外部音源动态验收](runtime/source-acceptance.md)
+
 ## iOS
 
 - [架构与模块职责](ios/architecture.md)
@@ -46,9 +53,8 @@
 
 ### 脚本运行时
 
-- [脚本传输装配](windows/app-runtime.md)
-- [Runtime bridge](windows/runtime-bridge.md)
-- [原始 JS 音源运行时](windows/music-script-runtime.md)
+- [启动与命名管道](windows/app-runtime.md)
+- [原始 JS 音源接入](windows/music-script-runtime.md)
 - [脚本连接恢复](windows/runtime-recovery.md)
 
 ### 打包

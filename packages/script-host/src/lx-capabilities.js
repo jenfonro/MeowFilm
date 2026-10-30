@@ -1,8 +1,6 @@
-import { fault, requireValue } from './errors.js';
+import { fault, identifier, requireValue } from './errors.js';
 
-// Protocol-specific vocabulary belongs here, not in the installation manager.
-const platforms = ['wy', 'tx', 'kg', 'kw', 'mg', 'local'];
-const qualities = ['128k', '192k', '320k', 'flac', 'flac24bit', 'master'];
+// A declared action is a guest request, not an extra host capability.
 
 export function lxCapabilities(data) {
   const valid = (value) => requireValue(value, 'SCRIPT_PROTOCOL_ERROR');
@@ -10,20 +8,24 @@ export function lxCapabilities(data) {
   valid(data.sources && typeof data.sources === 'object' && !Array.isArray(data.sources));
   valid(Object.keys(data.sources).length > 0 && Object.keys(data.sources).length <= 32);
   const result = Object.create(null);
-  for (const key of platforms) {
-    if (!Object.hasOwn(data.sources, key)) continue;
+  for (const key of Object.keys(data.sources)) {
+    identifier(key);
     const item = data.sources[key];
     valid(item && typeof item === 'object');
     if (item.type !== 'music') continue;
     valid(Array.isArray(item.actions) && item.actions.length <= 32);
     valid(Array.isArray(item.qualitys) && item.qualitys.length <= 32);
     valid(item.name === undefined || (typeof item.name === 'string' && item.name.length <= 256));
-    const allowedActions = key === 'local' ? ['musicUrl', 'lyric', 'pic'] : ['musicUrl'];
+    valid(item.actions.every(action => typeof action === 'string' && identifier(action)));
+    const declaredQualities = item.qualitys.map(quality => typeof quality === 'object' && quality !== null ? quality.type : quality);
+    valid(declaredQualities.every(quality => typeof quality === 'string' && quality.length > 0 &&
+      quality.length <= 64 && !/[\x00-\x1f\x7f]/.test(quality)));
     result[key] = {
+      ...item,
       name: item.name ?? key,
       type: 'music',
-      actions: allowedActions.filter((action) => item.actions.includes(action)),
-      qualitys: key === 'local' ? [] : qualities.filter((q) => item.qualitys.includes(q)),
+      actions: [...new Set(item.actions)],
+      qualitys: [...new Set(declaredQualities)],
     };
   }
   valid(Object.keys(result).length > 0);
@@ -33,11 +35,16 @@ export function lxCapabilities(data) {
 export function lxPayload(capabilities, { siteId, operation, payload = {} }) {
   const capability = capabilities[siteId];
   if (!capability?.actions.includes(operation)) throw fault('CAPABILITY_UNAVAILABLE');
-  if (siteId !== 'local' && operation === 'musicUrl' &&
-      !capability.qualitys.includes(payload.quality)) throw fault('CAPABILITY_UNAVAILABLE');
+  const info = { ...payload };
+  if (operation === 'musicUrl') {
+    info.type = payload.type ?? payload.quality ?? null;
+    delete info.quality;
+    info.musicInfo ??= {};
+    if (siteId !== 'local' && !capability.qualitys.includes(info.type)) throw fault('CAPABILITY_UNAVAILABLE');
+  }
   return {
     source: siteId,
     action: operation,
-    info: { type: payload.quality, musicInfo: payload.musicInfo ?? {} },
+    info,
   };
 }
