@@ -4,6 +4,11 @@ import MeowContracts
 import MeowPlayback
 import MeowStorage
 
+struct MusicFMArtwork: Equatable {
+    let configuration: MusicHomeAction
+    let url: URL?
+}
+
 @MainActor
 extension MusicViewModel {
     public func play(_ track: MusicRemoteTrack) async { await queueAction(.replace([track.ref], index: 0), startPlayback: true) }
@@ -110,10 +115,18 @@ extension MusicViewModel {
     /// Only the current occurrence of this exact live radio session can supply
     /// an entrance cover; an inserted/selected song is not implicitly an FM song.
     func currentFMArtwork(_ action: MusicHomeAction) -> URL? {
-        guard action.isPersonalFM, activeHomeFM?.fmConfiguration == action.fmConfiguration,
-              let fmSource, fmSource.authorization.isActive, current?.remoteSessionID == fmSource.id,
-              !isPreparingRemoteQueue, phase != .failed else { return nil }
-        return displayTrack?.artwork
+        guard let artwork = fmArtwork(configuration: activeHomeFM?.fmConfiguration, current: current,
+            metadataURL: metadataArtworkURL, metadataOccurrence: metadataOccurrenceID,
+            ready: isFMActive && !isPreparingRemoteQueue && phase != .failed),
+              action.isPersonalFM, artwork.configuration == action.fmConfiguration else { return nil }
+        return artwork.url
+    }
+    func fmArtwork(configuration: MusicHomeAction?, current: MusicQueueEntry?,
+                   metadataURL: URL?, metadataOccurrence: String?, ready: Bool) -> MusicFMArtwork? {
+        guard ready, let configuration, let current, let fmSource,
+              fmSource.authorization.isActive, current.remoteSessionID == fmSource.id else { return nil }
+        return .init(configuration: configuration,
+            url: metadataOccurrence == current.id ? metadataURL : current.track.artwork)
     }
     public func remoteQueuePage(_ source: MusicRemoteQueueSource, cursor: String?) async throws -> MusicBrowsePage {
         let epoch = try enter(); defer { pending -= 1 }

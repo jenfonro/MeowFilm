@@ -21,6 +21,7 @@ public final class MusicLibraryState: ObservableObject {
     @Published public internal(set) var isLoaded = false
     @Published public internal(set) var playedSongs: [MusicPlayedSong] = []
     @Published public internal(set) var playedPlaylists: [MusicPlayedPlaylist] = []
+    var songsRead = UUID(), playlistsRead = UUID()
 }
 
 @MainActor
@@ -167,6 +168,24 @@ public extension MusicViewModel {
                distinctChanges(metadataState.$artworkURL),
                distinctChanges(metadataState.$artworkData),
                distinctChanges(metadataState.$occurrenceID))
+    }
+
+    internal var fmArtworkChanges: AnyPublisher<Void, Never> {
+        let current = playbackState.$state.map(\.currentId).removeDuplicates()
+            .combineLatest(playbackState.$queue.removeDuplicates())
+            .map { id, queue in queue.first { $0.id == id } }.removeDuplicates()
+        let metadata = metadataState.$artworkURL.removeDuplicates()
+            .combineLatest(metadataState.$occurrenceID.removeDuplicates())
+        let ready = playbackState.$phase.map { $0 != .failed }.removeDuplicates()
+            .combineLatest(playbackState.$isPreparingRemoteQueue.removeDuplicates(),
+                           playbackState.$isFMActive.removeDuplicates())
+            .map { valid, preparing, active in valid && !preparing && active }.removeDuplicates()
+        return changed(playbackState.$activeHomeFM.map { $0?.fmConfiguration }.removeDuplicates()
+            .combineLatest(current, metadata, ready)
+            .map { [weak self] configuration, current, metadata, ready in
+                self?.fmArtwork(configuration: configuration, current: current,
+                    metadataURL: metadata.0, metadataOccurrence: metadata.1, ready: ready)
+            }.removeDuplicates())
     }
 
     var historyChanges: AnyPublisher<Void, Never> {

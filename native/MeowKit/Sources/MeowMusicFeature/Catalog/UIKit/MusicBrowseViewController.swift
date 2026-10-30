@@ -107,8 +107,7 @@ public final class MusicBrowseViewController: MusicPageViewController,
         }
         observe(model.accessChanges) { [weak self] in self?.activatePage() }
         observe(model.accountChanges) { [weak self] platform in self?.accountChanged(platform) }
-        observe(model.playbackChanges) { [weak self] in self?.updateFMArtwork() }
-        observe(model.metadataChanges) { [weak self] in self?.updateFMArtwork() }
+        observe(model.fmArtworkChanges) { [weak self] in self?.updateFMArtwork() }
         render()
     }
 
@@ -170,13 +169,7 @@ public final class MusicBrowseViewController: MusicPageViewController,
             return
         }
         guard let cell = cell as? MusicBrowseCell else { return }
-        let fm: MusicHomeAction? = {
-            if case .action(let action) = item.content, action.isPersonalFM { return action }; return nil
-        }()
-        let preview = fmPreviews[item.id]
-        let artwork = fm.flatMap { model.currentFMArtwork($0) } ??
-            (preview?.authorization.isActive == true ? preview?.artwork : nil) ?? item.artwork
-        cell.configure(item: item, layout: section.layout, theme: theme, artworkURL: artwork,
+        cell.configure(item: item, layout: section.layout, theme: theme, artworkURL: artworkURL(for: item),
                        onPreview: { [weak self] track in
             guard let self, let current = self.currentSection(for: item, id: section.id) else { return }
             self.play(item, section: current, startingAt: track)
@@ -522,10 +515,18 @@ public final class MusicBrowseViewController: MusicPageViewController,
         guard dataSource != nil else { return }
         for path in collection.indexPathsForVisibleItems {
             if let row = row(at: path), case .action(let action) = row.item.content,
-               action.isPersonalFM, let cell = collection.cellForItem(at: path) {
-                configure(cell, section: row.section, item: row.item)
+               action.isPersonalFM, let cell = collection.cellForItem(at: path) as? MusicBrowseCell {
+                cell.updateArtwork(artworkURL(for: row.item))
             }
         }
+    }
+
+    private func artworkURL(for item: MusicPublicBrowseItem) -> URL? {
+        let current: URL?
+        if case .action(let action) = item.content, action.isPersonalFM { current = model.currentFMArtwork(action) }
+        else { current = nil }
+        let preview = fmPreviews[item.id]
+        return current ?? (preview?.authorization.isActive == true ? preview?.artwork : nil) ?? item.artwork
     }
 
     private func showReadErrorIfNeeded() {

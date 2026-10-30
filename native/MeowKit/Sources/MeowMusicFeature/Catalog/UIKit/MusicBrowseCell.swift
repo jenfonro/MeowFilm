@@ -36,6 +36,8 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    func updateArtwork(_ url: URL?) { artwork.load(url) }
+
     func configure(item: MusicPublicBrowseItem, layout: MusicPublicBrowseSection.Layout,
                    theme: PageTheme, artworkURL: URL? = nil,
                    onPreview: ((MusicRemoteTrack) -> Void)? = nil, onPlay: @escaping () -> Void) {

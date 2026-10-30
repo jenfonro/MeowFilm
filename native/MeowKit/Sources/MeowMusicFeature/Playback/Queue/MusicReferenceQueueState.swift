@@ -32,34 +32,11 @@ struct MusicReferenceHistoryIntent: Equatable, Sendable {
     }
 }
 
-struct MusicReferenceSimilarPresentation {
-    let snapshot: MusicSimilarModeSnapshot
-    var showsSection: Bool { !snapshot.active || snapshot.status != .ready }
-    var title: String { snapshot.active ? "推荐续播" : "根据 \(snapshot.seed.title) 推荐" }
-    var candidates: [MusicSimilarModeCandidate] { snapshot.active ? [] : snapshot.candidates }
-    var status: String? {
-        switch snapshot.status {
-        case .ready: return nil
-        case .loading: return snapshot.active ? "正在获取下一批相似歌曲…" : "正在获取相似歌曲…"
-        case .empty: return snapshot.active ? "暂无新的相似歌曲，已入队歌曲按原循环规则播放" : "暂无有效相似歌曲"
-        case .error: return (snapshot.error?.localizedDescription ?? "相似推荐加载失败") + " · 当前队列未改变"
-        }
-    }
-    var showsRetry: Bool { snapshot.status == .error || snapshot.status == .empty }
-    var canRetry: Bool { showsRetry && snapshot.canRetry }
-}
-
-/// Three category labels share one native strip. Historical cards are ordered
-/// between songs and current; tab entry and swipe entry have distinct rules.
-enum MusicReferenceQueuePage: Int, CaseIterable, Sendable, Identifiable {
+/// Three category labels share one native strip: current, songs, history cards.
+enum MusicReferenceQueuePage: Int, CaseIterable, Sendable {
     case current, songs, playlists
-    var id: Int { rawValue }
     var title: String {
         switch self { case .current: return "当前播放"; case .songs: return "已播歌曲"; case .playlists: return "已播歌单" }
-    }
-    static func historySelection(_ selected: String?, ids: [String]) -> String? {
-        if let selected, ids.contains(selected) { return selected }
-        return ids.first
     }
 }
 

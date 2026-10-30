@@ -113,12 +113,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         }
         if destination == .queue {
             let page = MusicQueueViewController(model: model, appearance: assembly.appearance)
-            let wrapper = PageNavigationController(themeProvider: assembly.appearance)
-            wrapper.setViewControllers([page], animated: false)
-            wrapper.modalPresentationStyle = .pageSheet
-            wrapper.sheetPresentationController?.detents = [.medium(), .large()]
-            wrapper.sheetPresentationController?.prefersGrabberVisible = true
-            presenter().present(wrapper, animated: true)
+            presenter().present(page, animated: true)
             return
         }
         if let player {

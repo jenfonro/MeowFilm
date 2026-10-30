@@ -15,7 +15,7 @@ final class MusicHistoryManagementTests: XCTestCase {
         XCTAssertNil(detail.entries[0].artwork)
     }
 
-    func testAdditivePortCarriesExactDetailAndOptionalRestoreIndex() async throws {
+    func testHistoryActionsCarryExactDetailAndSeparateClearCategories() async throws {
         let fixture = MusicHistoryContractFixture()
         let provider: any MusicHistoryManaging = fixture
         let detail = try await provider.historyDetail(id: "archive")
@@ -24,8 +24,11 @@ final class MusicHistoryManagementTests: XCTestCase {
         let explicit = try await provider.restoreHistory(detail: detail, startIndex: 0, expectedRevision: 4)
         XCTAssertEqual(explicit.currentId, "entry-10")
         try await provider.removeHistory(detail: detail)
+        try await provider.clearHistory(.songs)
+        try await provider.clearHistory(.playlists)
         let actions = await fixture.actions
-        XCTAssertEqual(actions, ["restore:nil:3:opaque-fixture", "restore:0:4:opaque-fixture", "remove:opaque-fixture"])
+        XCTAssertEqual(actions, ["restore:nil:3:opaque-fixture", "restore:0:4:opaque-fixture",
+                                 "remove:opaque-fixture", "clear:songs", "clear:playlists"])
     }
 }
 
@@ -39,6 +42,9 @@ private actor MusicHistoryContractFixture: MusicHistoryManaging {
               }, selectedIndex: 1, sourceLabel: "搜索", actionToken: .init(rawValue: "opaque-fixture"))
     }
     func removeHistory(detail: MusicHistoryDetail) { actions.append("remove:\(detail.actionToken.rawValue)") }
+    func clearHistory(_ category: MusicHistoryCategory) {
+        actions.append(category == .songs ? "clear:songs" : "clear:playlists")
+    }
     func restoreHistory(detail: MusicHistoryDetail, startIndex: Int?, expectedRevision: Int) -> MusicPlaybackState {
         actions.append("restore:\(startIndex.map(String.init) ?? "nil"):\(expectedRevision):\(detail.actionToken.rawValue)")
         return .init(revision: expectedRevision + 1, settingsRevision: 0, mode: .loop,

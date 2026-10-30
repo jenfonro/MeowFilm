@@ -272,12 +272,16 @@ open class PageViewController: UIViewController {
         if wasActive { pageDidBecomeInactive() }
     }
 
-    isolated deinit {
-        for child in children { Self.invalidatePages(in: child) }
-        for observer in observers { NotificationCenter.default.removeObserver(observer) }
-        themeObservation?.cancel()
-        for subscription in subscriptions { subscription.cancel() }
-        for task in tasks.values { task.cancel() }
+    // UIKit owners release pages on MainActor. Verify that synchronously rather
+    // than entering the isolated-deinit task-local teardown on older runtimes.
+    nonisolated deinit {
+        MainActor.assumeIsolated {
+            for child in children { Self.invalidatePages(in: child) }
+            for observer in observers { NotificationCenter.default.removeObserver(observer) }
+            themeObservation?.cancel()
+            for subscription in subscriptions { subscription.cancel() }
+            for task in tasks.values { task.cancel() }
+        }
     }
 }
 #endif
