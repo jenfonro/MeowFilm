@@ -33,6 +33,7 @@ public final class MusicPlayerContentModel {
     private var artworkBytes: Data?
     private var artworkReads: [URL: (id: UUID, task: Task<Void, Never>)] = [:]
     private var playbackTask: Task<Void, Never>?
+    private var autoCollapseTask: Task<Void, Never>?
     private var modeTasks: [UUID: Task<Void, Never>] = [:]
     private struct ChorusRequest: Equatable {
         let playback: MusicMiniPlayerPlaybackIdentity
@@ -140,7 +141,6 @@ public final class MusicPlayerContentModel {
                         self.updateClock()
                     } else {
                         self.artworkAdmission.suspendRendering()
-                        self.mini.suspend()
                     }
                 }
             })
@@ -159,17 +159,8 @@ public final class MusicPlayerContentModel {
         presentation.invalidate()
     }
 
-    @discardableResult
-    func toggleDockExpansion() -> Bool {
-        guard !presentation.isFullPlayerPresented, let current = model.current else { return false }
-        changeMini {
-            if $0.expanded { $0.invalidate() }
-            else { $0.activate(current.id); $0.hold() }
-        }
-        return true
-    }
-
-    func holdDock() { mini.hold() }
+    func holdDock() { changeMini { $0.hold() } }
+    func interactOutsideDock() { changeMini { $0.interactOutside() } }
 
     func togglePlayback() {
         guard playbackTask == nil, isAvailable else { return }
@@ -189,7 +180,6 @@ public final class MusicPlayerContentModel {
 
     func toggleFavorite() {
         guard isAvailable, let track = model.current?.track else { return }
-        holdDock()
         favorites.toggle(track)
     }
 
@@ -226,9 +216,22 @@ public final class MusicPlayerContentModel {
     }
 
     private func changeMini(_ change: (inout MusicMiniPlayerLifecycle) -> Void) {
-        let expanded = mini.expanded
+        let previous = mini
         change(&mini)
-        if expanded != mini.expanded { dockUpdates.send() }
+        if previous.autoCollapseAt != mini.autoCollapseAt {
+            autoCollapseTask?.cancel()
+            autoCollapseTask = nil
+            if let deadline = mini.autoCollapseAt {
+                autoCollapseTask = Task { [weak self] in
+                    do {
+                        try await Task.sleep(for: .seconds(max(0, deadline - ProcessInfo.processInfo.systemUptime)))
+                    } catch { return }
+                    guard !Task.isCancelled, let self, self.mini.autoCollapseAt == deadline else { return }
+                    self.changeMini { $0.expire(at: deadline) }
+                }
+            }
+        }
+        if previous.expanded != mini.expanded { dockUpdates.send() }
     }
 
     private func reconcileAccess() {
@@ -270,7 +273,7 @@ public final class MusicPlayerContentModel {
             if value.playback.occurrenceID == model.current?.id,
                value.playback.nativeAttemptID == model.activeNativeAttemptID,
                value.playback.accessGeneration == model.accountAccessGeneration {
-                changeMini { $0.activate(value.playback.occurrenceID) }
+                changeMini { $0.activate(value.playback.occurrenceID, at: ProcessInfo.processInfo.systemUptime) }
             }
         }
         if lastFullPresentation != full {
@@ -418,14 +421,6 @@ public final class MusicPlayerContentModel {
         let matching = MusicReferencePlayerFence.ownsAttempt(
             active: model.activeNativeAttemptID, observed: playback.currentAttempt?.id, owner: snapshot.owner
         ) && snapshot.resourceID == model.activeResourceID
-        changeMini {
-            $0.sample(.init(occurrenceID: model.current?.id, attemptID: matching ? playback.currentAttempt?.id : nil,
-                            at: ProcessInfo.processInfo.systemUptime, position: snapshot.position,
-                            rate: Double(playback.player.rate),
-                            playing: foreground && matching &&
-                                snapshot.phase == .playing && playback.player.timeControlStatus == .playing,
-                            seeking: snapshot.phase == .buffering || snapshot.phase == .preparing))
-        }
         let ranges = matching ? playback.player.currentItem?.loadedTimeRanges.compactMap { value -> Range<Double>? in
             let range = value.timeRangeValue
             let start = range.start.seconds, end = (range.start + range.duration).seconds
@@ -442,6 +437,7 @@ public final class MusicPlayerContentModel {
 
     deinit {
         playbackTask?.cancel()
+        autoCollapseTask?.cancel()
         for task in modeTasks.values { task.cancel() }
         chorusRead?.task.cancel()
         for read in artworkReads.values { read.task.cancel() }

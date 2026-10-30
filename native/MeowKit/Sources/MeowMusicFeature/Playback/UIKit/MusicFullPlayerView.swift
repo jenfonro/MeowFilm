@@ -113,6 +113,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         ]
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) {
             (view: MusicFullPlayerView, _: UITraitCollection) in
+            view.controls.updateFonts(compatibleWith: view.traitCollection)
             view.refreshVisibleLyrics()
             view.setNeedsLayout()
         }
@@ -134,6 +135,14 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         controls.setRendering(rendering)
         updateLyricClock()
         updateRotation()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil {
+            controls.updateFonts(compatibleWith: traitCollection)
+            setNeedsLayout()
+        }
     }
 
     override func layoutSubviews() {
