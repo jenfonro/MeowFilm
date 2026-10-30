@@ -21,6 +21,10 @@ import Combine
     public var hasChanges: Bool { tracks.map(\.ref) != original.map(\.ref) }
     public var allSelected: Bool { !tracks.isEmpty && tracks.allSatisfy { selected.contains($0.ref) } }
     public var selectedTracks: [MusicRemoteTrack] { tracks.filter { selected.contains($0.ref) } }
+    public var canEdit: Bool {
+        !ticket.revoked && !ticket.consumed &&
+            ticket.binding.owner.map { ticket.binding.matches($0) } == true
+    }
     public func toggle(_ ref: MusicReference) {
         guard !ticket.revoked, !ticket.consumed, tracks.contains(where: { $0.ref == ref }) else { return }
         if !selected.insert(ref).inserted { selected.remove(ref) }
@@ -219,12 +223,6 @@ enum MusicCollectionOwnerChange {
         invalidate(); searchQuery = ""
     }
 
-    /// The detail/editor share one page scope. Backgrounding cancels work
-    /// without discarding the user's unsaved draft or changing storage identity.
-    public func pauseCommands() {
-        for task in reads.values { task.cancel() }
-        action?.task.cancel()
-    }
     private func invalidate() {
         renameConfirmation?.revoked = true; renameConfirmation = nil
         editor?.ticket.revoked = true; editor = nil
@@ -267,12 +265,13 @@ enum MusicCollectionOwnerChange {
                 error = .staleRevision; needsReload = true; isLoading = false
                 return
             }
-            reload()
+            reload(preservingContent: true)
         }
     }
     @discardableResult public func reload(preservingContent: Bool = false) -> Task<Void, Never>? {
         let retained: MusicCollectionPageSnapshot?
-        if preservingContent, visible, isAvailable, !isMissing, editor == nil,
+        if preservingContent, visible, isAvailable, !isMissing,
+           editor == nil || editor?.ticket.consumed == true,
            binding?.matches(model) == true, let collection {
             retained = .init(collection: collection, tracks: tracks)
         } else { retained = nil }
@@ -530,7 +529,7 @@ enum MusicCollectionOwnerChange {
                 // Source mutations normally publish a catalogue and reread.
                 // A batch add/favorite on another collection keeps the open
                 // source editor; catalogue events refresh its favorite state.
-                if mutation, reloadAfterMutation, self.binding === own { self.reload() }
+                if mutation, reloadAfterMutation, self.binding === own { self.reload(preservingContent: true) }
             } catch {
                 guard own.matches(self.model), self.visible, self.binding === own else { return }
                 if Task.isCancelled {

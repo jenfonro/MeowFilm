@@ -239,7 +239,7 @@ extension MusicNativePlatforms {
                 try musicRequire((data["songs"].isArray || data["songs"] == .null) &&
                     data["songs"].array.count <= 30 && (more.isBool || more == .null), .upstreamInvalid)
                 section.items = try data["songs"].array.map { raw -> MusicNativePublicBrowseItem in
-                    .init(id: try MusicPlatformProtocol.numericID(raw["id"]), title: try raw["name"].text(1024), content: .song(try browseWYSong(raw)))
+                    .init(id: try MusicPlatformProtocol.numericID(raw["id"]), title: try raw["name"].text(1024), content: .song(try Self.browseWYSong(raw)))
                 }
                 if more.bool && !section.items.isEmpty {
                     try musicRequire(offset < 5970, .limit)

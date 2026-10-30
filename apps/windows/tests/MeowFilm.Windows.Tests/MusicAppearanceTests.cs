@@ -124,13 +124,14 @@ public static class MusicAppearanceTests
                 .Single(control => AutomationProperties.GetName(control) == "固定配色");
             Check(!palette.IsEnabled && (string?)mode.SelectedValue == "song");
 
+            int writes = f.Store.Writes;
             await module.SetAppearanceAsync("colorMode", "fixed"); await Ready(module);
             await module.SetAppearanceAsync("colorPalette", "mint"); await Ready(module);
             await module.SetAppearanceAsync("playlistView", "list"); await Ready(module);
             settings.UpdateLayout();
             Check(module.AppearanceColorMode == "fixed" && module.AppearanceColorPalette == "mint" &&
                 module.PlaylistListView && palette.IsEnabled && module.AppearanceStatus.Length == 0);
-            Check(f.Store.Writes == 3, "each changed selection is one immediate durable write");
+            Check(f.Store.Writes == writes + 3, "each changed selection is one immediate durable write");
             Check(!Visuals(settings).OfType<Button>().Select(button => button.Content as string).Any(label =>
                 label is "保存设置" or "保存外观设置" or "重新读取设置" or "放弃更改"));
 

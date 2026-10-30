@@ -13,6 +13,17 @@ final class PageThemeTests: XCTestCase {
         XCTAssertEqual(stops[7].color, tokens.bottom)
     }
 
+    func testTextColorsAreSharedAcrossPalettesAndRespectAppearance() {
+        for palette in PageColorway.allCases {
+            let light = PageTheme(palette: palette)
+            XCTAssertEqual(light.ink, .init(rgb: 0x39343e), palette.rawValue)
+            XCTAssertEqual(light.muted, .init(rgb: 0x7f7a7d), palette.rawValue)
+            let dark = PageTheme(palette: palette, dark: true)
+            XCTAssertEqual(dark.ink, .init(rgb: 0xf3f1f8), palette.rawValue)
+            XCTAssertEqual(dark.muted, .init(rgb: 0xb4b2c0), palette.rawValue)
+        }
+    }
+
     func testAllLightAndDarkHeadersHaveReferenceContrast() {
         func luminance(_ color: PageColor) -> Double {
             let components = [color.red, color.green, color.blue].map { value -> Double in

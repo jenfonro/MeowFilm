@@ -1,5 +1,5 @@
 import { startWindowsAppRuntime, reportWindowsRuntimeStartFailure } from '../bootstrap.mjs';
-import { createMusicScriptModule } from '../modules/music-script.mjs';
+import { createMusicScriptModule } from '../../../runtime/modules/music-script.mjs';
 
 // Current wire identity; one App, not a selectable aggregate product.
 await startWindowsAppRuntime({

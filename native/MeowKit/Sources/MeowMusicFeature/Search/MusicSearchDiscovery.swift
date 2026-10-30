@@ -28,7 +28,7 @@ public struct MusicSearchDiscoveryChart: Sendable, Identifiable {
 /// Partial failures retain other successful sections, as the reference's
 /// Promise.allSettled does. Errors are closed diagnostics, never upstream text.
 public struct MusicSearchDiscoveryFailure: Sendable, Identifiable {
-    public enum Component: String, Sendable { case hot, suggestions, charts }
+    public enum Component: String, Sendable { case hot, charts }
     public let component: Component
     public let chartID: String?
     public let error: MusicServiceError
@@ -40,14 +40,13 @@ public struct MusicSearchDiscoveryFailure: Sendable, Identifiable {
 
 public struct MusicSearchDiscoverySnapshot: Sendable {
     public let hot: [MusicSearchHotKeyword]
-    public let suggestions: [String]
     public let charts: [MusicSearchDiscoveryChart]
     public let failures: [MusicSearchDiscoveryFailure]
     /// Bounds page-owned caching to the lifetime of the registered track handles.
     public let validUntil: Date
-    public init(hot: [MusicSearchHotKeyword], suggestions: [String], charts: [MusicSearchDiscoveryChart],
+    public init(hot: [MusicSearchHotKeyword], charts: [MusicSearchDiscoveryChart],
                 failures: [MusicSearchDiscoveryFailure] = [], validUntil: Date) {
-        self.hot = hot; self.suggestions = suggestions; self.charts = charts
+        self.hot = hot; self.charts = charts
         self.failures = failures; self.validUntil = validUntil
     }
 }

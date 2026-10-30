@@ -19,6 +19,8 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
     public const string Version = "1.3.0";
     private readonly IProtectedDocumentStore store;
     private readonly IMusicAccountProtocol protocol;
+    private readonly MusicPlatformClientContextOwner clients;
+    private readonly MusicPlatformClientProtocol clientProtocol;
     private readonly TimeProvider clock;
     private readonly object gate = new();
     private readonly SemaphoreSlim disk = new(1, 1);
@@ -32,11 +34,15 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
     /// <summary>Synchronous invalidation only; subscriber errors cannot change a committed result.</summary>
     public event Action<string>? SessionChanged;
 
-    internal MusicAccountOwner(IProtectedDocumentStore store, IMusicAccountProtocol protocol, TimeProvider? clock = null)
+    internal MusicAccountOwner(IProtectedDocumentStore store, IMusicAccountProtocol protocol,
+        MusicPlatformClientContextOwner clients, MusicPlatformClientProtocol clientProtocol, TimeProvider? clock = null)
     {
         this.store = store ?? throw new ArgumentNullException(nameof(store));
         this.protocol = protocol ?? throw new ArgumentNullException(nameof(protocol));
+        this.clients = clients ?? throw new ArgumentNullException(nameof(clients));
+        this.clientProtocol = clientProtocol ?? throw new ArgumentNullException(nameof(clientProtocol));
         this.clock = clock ?? TimeProvider.System;
+        clients.ContextChanged += ClientContextChanged;
     }
     private sealed class State
     {
@@ -61,7 +67,6 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
         internal CancellationTokenSource Cancellation { get; }
         internal CancellationToken Token { get; }
         internal volatile bool Admitted;
-        internal volatile bool DeviceAdmitted;
         public void Dispose() => Cancellation.Dispose();
         public override string ToString() => "MusicAccountOperation (redacted)";
     }
@@ -72,7 +77,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
         internal long Epoch { get; } = epoch;
         internal bool Consumed;
         internal StoredAccount? Committed;
-        internal StoredKgDevice? KgDevice;
+        internal MusicKgClientContext? KgDevice;
         public override string ToString() => "MusicAccountChallengeState (redacted)";
     }
     private static TaskCompletionSource Completed()
@@ -287,8 +292,6 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
             foreach (var platform in AccountRules.Platforms)
             {
                 var value = snapshot.Get(platform);
-                if (platform == "kg") _ = snapshot.GetKgDevice();
-                if (platform == "tx") _ = ObserveQqDocument(snapshot);
                 lock (gate)
                 {
                     token.ThrowIfCancellationRequested();
@@ -314,7 +317,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
         return result.Output;
     }
     private async Task<StoredAccount> Commit(Operation op, StoredAccount before, string? cookie,
-        MusicAccountDetailsObservation? observation, bool newScope, CancellationToken authority = default, StoredKgDevice? kgDevice = null)
+        MusicAccountDetailsObservation? observation, bool newScope, CancellationToken authority = default, MusicKgClientContext? kgDevice = null)
     {
         Guard(op);
         authority.ThrowIfCancellationRequested();
@@ -340,7 +343,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
             var document = await ReadDocument(writeToken).ConfigureAwait(false);
             Guard(op);
             if (kgDevice is not null)
-                AccountRules.Require(StoredKgDevice.Same(document.GetKgDevice(), kgDevice), "STORAGE_CONFLICT");
+                AccountRules.Require(clients.IsCurrent(kgDevice), "STORAGE_CONFLICT");
             byte[] bytes = document.Replace(op.Platform, before, next, observation);
             try
             {
@@ -375,6 +378,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
                 // A successful disk write is not permission for a stale callback to reauthorize.
                 Guard(op);
                 writeToken.ThrowIfCancellationRequested();
+                if (kgDevice is not null) AccountRules.Require(clients.IsCurrent(kgDevice), "STORAGE_CONFLICT");
                 var state = states[op.Platform];
                 state.Uncertain = false; state.Revoked = false; state.Current = null;
                 state.Verified = cookie is null ? null : committed;
@@ -437,16 +441,9 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
         try
         {
             var before = await Load(platform, op.Token).WaitAsync(op.Token).ConfigureAwait(false);
-            StoredKgDevice? device = null;
-            MusicAccountChallenge value;
-            if (platform == "kg")
-            {
-                value = await protocol.BeginKgAsync(
-                    async ct => device = await AcquireKgDevice(op, before, ct).ConfigureAwait(false),
-                    async (expected, dfid, ct) => device = await SaveKgDevice(op, before, expected, expected.Seed, dfid, ct)
-                        .ConfigureAwait(false), op.Token).ConfigureAwait(false);
-            }
-            else value = await protocol.BeginAsync(platform, op.Token).ConfigureAwait(false);
+            var value = await protocol.BeginAsync(platform, op.Token).ConfigureAwait(false);
+            var device = value.KgClient;
+            if (platform == "kg") AccountRules.Require(device is not null && clients.IsCurrent(device), "DEVICE_CONTEXT_REQUIRED");
             Guard(op); AccountRules.Challenge(value, platform);
             lock (gate) { Guard(op); states[platform].Challenge = new(value, before, op.Epoch) { KgDevice = device }; }
             var display = new JsonObject { ["platform"] = value.Platform,
@@ -454,13 +451,6 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
             if (value.ImageBase64 is { } image) { display["imageBase64"] = image; display["imageMimeType"] = "image/png"; }
             else display["url"] = value.Url;
             return new JsonObject { ["challenge"] = display };
-        }
-        catch
-        {
-            // Protocol cancellation can win its WaitAsync before the device callback
-            // reports its own unknown receipt. Storage admission remains owner truth.
-            if (op.DeviceAdmitted) throw new MusicAccountException("COMMIT_UNKNOWN");
-            throw;
         }
         finally { Finish(op); }
     }
@@ -476,7 +466,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
         {
             AccountRules.Require(challenge.Epoch == op.Epoch, "STALE_SESSION");
             if (challenge.KgDevice is { } device)
-                await CheckKgDevice(op, device).ConfigureAwait(false);
+                AccountRules.Require(clients.IsCurrent(device), "STORAGE_CONFLICT");
             var result = await protocol.PollAsync(platform, challengeId, async (handoff, handoffToken) =>
             {
                 handoffToken.ThrowIfCancellationRequested();
@@ -617,6 +607,8 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
     {
         await PrepareCloseAsync().ConfigureAwait(false);
         await protocol.DisposeAsync().ConfigureAwait(false);
+        clients.ContextChanged -= ClientContextChanged;
+        qqContextSerial.Dispose();
         // The App owns the shared DPAPI store and disposes it only after every owner drained.
     }
 }

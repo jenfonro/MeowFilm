@@ -40,7 +40,7 @@ public static class MusicNativeQqAccountTests
         yield return Case("logout-during-authorization-fences-old-session-and-grant", LogoutDuringPoll);
         yield return Case("single-call-deadline-covers-all-authorization-hops", Deadline);
         yield return Case("shared-http-and-store-not-disposed-by-owner", Borrowed);
-        yield return Case("kg-without-native-device-owner-remains-rejected", Unsupported);
+        yield return Case("unsupported-account-platform-never-dispatches", Unsupported);
     }
     private static TestCase Case(string name, Func<Task> action) => new("music.native.accounts.qq." + name, action);
     internal static void Check(bool value) { if (!value) throw new InvalidOperationException("QQ account assertion"); }
@@ -54,7 +54,8 @@ public static class MusicNativeQqAccountTests
     {
         var handler = new QqAccountFixtureHandler();
         using var http = MusicPlatformHttp.CreateWithHandler(handler);
-        await using var protocol = new MusicAccountProtocol(http);
+        await using var clientContext8 = new MusicClientContextFixture(http);
+        await using var protocol = clientContext8.CreateAccountProtocol();
         var challenge = await protocol.BeginAsync("tx");
         Check(challenge.DisplayKind == "png" && challenge.Url == "" && challenge.ImageBase64 is not null);
         Check(!JsonSerializer.Serialize(challenge).Contains("ImageBase64") && !challenge.ToString().Contains("SYNTHETIC"));
@@ -75,7 +76,8 @@ public static class MusicNativeQqAccountTests
     {
         var handler = new QqAccountFixtureHandler { Status = state };
         using var http = MusicPlatformHttp.CreateWithHandler(handler);
-        await using var protocol = new MusicAccountProtocol(http);
+        await using var clientContext9 = new MusicClientContextFixture(http);
+        await using var protocol = clientContext9.CreateAccountProtocol();
         var qr = await protocol.BeginAsync("tx");
         Check((await protocol.PollAsync("tx", qr.ChallengeId, (_, _) => throw new InvalidOperationException("Unexpected handoff"))).Status == expected);
         Check(handler.Calls == 2);
@@ -84,7 +86,8 @@ public static class MusicNativeQqAccountTests
     {
         var handler = new QqAccountFixtureHandler { ParentCookieDomains = true };
         using var http = MusicPlatformHttp.CreateWithHandler(handler);
-        await using var protocol = new MusicAccountProtocol(http);
+        await using var clientContext10 = new MusicClientContextFixture(http);
+        await using var protocol = clientContext10.CreateAccountProtocol();
         var qr = await protocol.BeginAsync("tx");
         Check((await protocol.PollAsync("tx", qr.ChallengeId, (_, _) => Task.FromResult(true))).Status == "authenticated");
         Check(handler.Calls == 8);
@@ -93,7 +96,8 @@ public static class MusicNativeQqAccountTests
     {
         var handler = new QqAccountFixtureHandler { Fault = fault };
         using var http = MusicPlatformHttp.CreateWithHandler(handler);
-        await using var protocol = new MusicAccountProtocol(http);
+        await using var clientContext11 = new MusicClientContextFixture(http);
+        await using var protocol = clientContext11.CreateAccountProtocol();
         int accepted = 0;
         string expected = fault switch
         {
@@ -140,7 +144,8 @@ public static class MusicNativeQqAccountTests
     {
         var handler = new QqAccountFixtureHandler { Status = 66 }; var clock = new Clock();
         using var http = MusicPlatformHttp.CreateWithHandler(handler);
-        await using var protocol = new MusicAccountProtocol(http, clock: clock);
+        await using var clientContext12 = new MusicClientContextFixture(http, clock: clock);
+        await using var protocol = clientContext12.CreateAccountProtocol(clock: clock);
         var first = await protocol.BeginAsync("tx");
         Check((await protocol.PollAsync("tx", Guid.NewGuid().ToString(), (_, _) => Task.FromResult(true))).Status == "expired");
         clock.Advance(181);
@@ -158,7 +163,8 @@ public static class MusicNativeQqAccountTests
     {
         var handler = new QqAccountFixtureHandler { HoldAt = "QQLogin" };
         using var http = MusicPlatformHttp.CreateWithHandler(handler);
-        await using var protocol = new MusicAccountProtocol(http);
+        await using var clientContext13 = new MusicClientContextFixture(http);
+        await using var protocol = clientContext13.CreateAccountProtocol();
         var qr = await protocol.BeginAsync("tx"); int accepted = 0;
         using var cancel = new CancellationTokenSource();
         var task = protocol.PollAsync("tx", qr.ChallengeId, (_, _) => { accepted++; return Task.FromResult(true); }, cancel.Token);
@@ -171,7 +177,8 @@ public static class MusicNativeQqAccountTests
     {
         var handler = new QqAccountFixtureHandler { HoldAt = "ptqrlogin" }; var clock = new Clock();
         using var http = MusicPlatformHttp.CreateWithHandler(handler);
-        await using var protocol = new MusicAccountProtocol(http, clock: clock);
+        await using var clientContext14 = new MusicClientContextFixture(http, clock: clock);
+        await using var protocol = clientContext14.CreateAccountProtocol(clock: clock);
         var old = await protocol.BeginAsync("tx");
         var pending = protocol.PollAsync("tx", old.ChallengeId, (_, _) => throw new InvalidOperationException());
         await handler.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(3));
@@ -184,7 +191,8 @@ public static class MusicNativeQqAccountTests
         var handler = new QqAccountFixtureHandler { HoldAt = "ptqrshow", HoldEveryImage = true };
         using var http = MusicPlatformHttp.CreateWithHandler(handler);
         var clock = new Clock();
-        await using var protocol = new MusicAccountProtocol(http, timeout: TimeSpan.FromMilliseconds(100), clock: clock);
+        await using var clientContext15 = new MusicClientContextFixture(http, clock: clock);
+        await using var protocol = clientContext15.CreateAccountProtocol(timeout: TimeSpan.FromMilliseconds(100), clock: clock);
         await Error(() => protocol.BeginAsync("tx"), "TIMEOUT");
         clock.Advance(3);
         await Error(() => protocol.BeginAsync("tx"), "TIMEOUT");
@@ -202,7 +210,8 @@ public static class MusicNativeQqAccountTests
         string path = DataPath();
         using var http = MusicPlatformHttp.CreateWithHandler(new QqAccountFixtureHandler());
         await using var store = new DpapiDocumentStore(path, ["music.accounts.v1"]);
-        await using (var owner = new MusicAccountOwner(store, new MusicAccountProtocol(http)))
+        await using var clientContext1 = new MusicClientContextFixture(http);
+        await using (var owner = clientContext1.CreateAccountOwner(store))
         {
             var result = await Login(owner); Check(Ok(result) && AccountState(result) == "verified");
             var details = await owner.ReadDetailsAsync("tx");
@@ -213,7 +222,8 @@ public static class MusicNativeQqAccountTests
         }
         foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
             Check(!Encoding.UTF8.GetString(await File.ReadAllBytesAsync(file)).Contains("SYNTHETIC_MUSICKEY"));
-        await using var reopened = new MusicAccountOwner(store, new MusicAccountProtocol(http));
+        await using var clientContext2 = new MusicClientContextFixture(http);
+        await using var reopened = clientContext2.CreateAccountOwner(store);
         Check(RowState(await reopened.CallAsync("music.accounts.list")) == "saved");
         Check((await reopened.ReadDetailsAsync("tx")).Membership.Vip == true);
         Check(AccountState(await reopened.CallAsync("music.accounts.validate", new { platform = "tx" })) == "verified");
@@ -225,7 +235,8 @@ public static class MusicNativeQqAccountTests
         var handler = new QqAccountFixtureHandler();
         using var http = MusicPlatformHttp.CreateWithHandler(handler);
         await using var store = new QqAccountStore(new DpapiDocumentStore(DataPath(), ["music.accounts.v1"])) { LoseReceipt = true };
-        await using var owner = new MusicAccountOwner(store, new MusicAccountProtocol(http));
+        await using var clientContext3 = new MusicClientContextFixture(http);
+        await using var owner = clientContext3.CreateAccountOwner(store);
         var begin = await owner.CallAsync("music.accounts.qr.begin", new { platform = "tx" });
         string id = begin.GetProperty("challenge").GetProperty("challengeId").GetString()!;
         var result = await owner.CallAsync("music.accounts.qr.poll", new { platform = "tx", challengeId = id });
@@ -240,14 +251,16 @@ public static class MusicNativeQqAccountTests
     {
         using var http = MusicPlatformHttp.CreateWithHandler(new QqAccountFixtureHandler { Fault = "profile-identity" });
         await using var store = new QqAccountStore(new DpapiDocumentStore(DataPath(), ["music.accounts.v1"]));
-        await using var owner = new MusicAccountOwner(store, new MusicAccountProtocol(http));
+        await using var clientContext4 = new MusicClientContextFixture(http);
+        await using var owner = clientContext4.CreateAccountOwner(store);
         Check(!Ok(await Login(owner)) && store.Writes == 0 && await owner.AcquireAsync("tx") is null);
     }
     private static async Task AdmittedCancel()
     {
         using var http = MusicPlatformHttp.CreateWithHandler(new QqAccountFixtureHandler());
         await using var store = new QqAccountStore(new DpapiDocumentStore(DataPath(), ["music.accounts.v1"])) { HoldWrite = true };
-        await using var owner = new MusicAccountOwner(store, new MusicAccountProtocol(http));
+        await using var clientContext5 = new MusicClientContextFixture(http);
+        await using var owner = clientContext5.CreateAccountOwner(store);
         var pending = Login(owner);
         try
         {
@@ -268,7 +281,8 @@ public static class MusicNativeQqAccountTests
         var handler = new QqAccountFixtureHandler(); var clock = new Clock();
         using var http = MusicPlatformHttp.CreateWithHandler(handler);
         await using var store = new QqAccountStore(new DpapiDocumentStore(DataPath(), ["music.accounts.v1"]));
-        await using var owner = new MusicAccountOwner(store, new MusicAccountProtocol(http, clock: clock));
+        await using var clientContext6 = new MusicClientContextFixture(http, clock: clock);
+        await using var owner = clientContext6.CreateAccountOwner(store, clock: clock);
         int changes = 0; owner.SessionChanged += p => { Check(p == "tx"); changes++; };
         Check(Ok(await Login(owner)));
         var previous = await owner.AcquireAsync("tx"); Check(previous is not null);
@@ -290,7 +304,8 @@ public static class MusicNativeQqAccountTests
         var clock = new Clock();
         var handler = new QqAccountFixtureHandler { OnStep = step => { if (step != "ptqrshow") clock.Advance(9); } };
         using var http = MusicPlatformHttp.CreateWithHandler(handler);
-        await using var protocol = new MusicAccountProtocol(http, clock: clock);
+        await using var clientContext16 = new MusicClientContextFixture(http, clock: clock);
+        await using var protocol = clientContext16.CreateAccountProtocol(clock: clock);
         var qr = await protocol.BeginAsync("tx"); int accepted = 0;
         await Error(() => protocol.PollAsync("tx", qr.ChallengeId,
             (_, _) => { accepted++; return Task.FromResult(true); }), "TIMEOUT");
@@ -301,7 +316,8 @@ public static class MusicNativeQqAccountTests
         var handler = new QqAccountFixtureHandler();
         using var http = MusicPlatformHttp.CreateWithHandler(handler);
         await using var store = new QqAccountStore(new DpapiDocumentStore(DataPath(), ["music.accounts.v1"]));
-        var owner = new MusicAccountOwner(store, new MusicAccountProtocol(http));
+        await using var clientContext7 = new MusicClientContextFixture(http);
+        var owner = clientContext7.CreateAccountOwner(store);
         Check(Ok(await Login(owner))); await owner.DisposeAsync();
         Check(handler.Disposals == 0 && store.Disposals == 0);
         Check((await store.ReadAsync("music.accounts.v1")).Fingerprint.Exists);
@@ -310,8 +326,9 @@ public static class MusicNativeQqAccountTests
     {
         var handler = new QqAccountFixtureHandler();
         using var http = MusicPlatformHttp.CreateWithHandler(handler);
-        await using var protocol = new MusicAccountProtocol(http);
-        await Error(() => protocol.BeginAsync("kg"), "DEVICE_CONTEXT_REQUIRED");
+        await using var clientContext17 = new MusicClientContextFixture(http);
+        await using var protocol = clientContext17.CreateAccountProtocol();
+        await Error(() => protocol.BeginAsync("kw"), "INVALID_REQUEST");
         Check(handler.Calls == 0);
     }
     internal static bool Ok(JsonElement value) => value.GetProperty("ok").GetBoolean();
@@ -336,6 +353,7 @@ internal sealed class QqAccountStore(DpapiDocumentStore inner) : IProtectedDocum
     public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken token = default) => inner.ReadAsync(ns, token);
     public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken token = default)
     {
+        if (ns != "music.accounts.v1") return await inner.WriteAsync(ns, data, expected, token);
         Writes++;
         if (HoldWrite)
         {
@@ -343,7 +361,7 @@ internal sealed class QqAccountStore(DpapiDocumentStore inner) : IProtectedDocum
             token = default; // Simulates an already-admitted physical CAS, not a rollback on caller cancellation.
         }
         var result = await inner.WriteAsync(ns, data, expected, token);
-        if (LoseReceipt && ns == "music.accounts.v1") { LoseReceipt = false; throw new ProtectedDocumentException(DocumentStoreError.Storage); }
+        if (LoseReceipt) { LoseReceipt = false; throw new ProtectedDocumentException(DocumentStoreError.Storage); }
         return result;
     }
     public async ValueTask DisposeAsync() { Disposals++; await inner.DisposeAsync(); }

@@ -15,8 +15,16 @@ private actor HomeAccountFixture: MusicNativeAccountProviding, MusicNativeHomeDi
     var gate: NativeMusicGate?
     var bindingFailure: MusicServiceError?
     var bindingCalls = 0
+    var homePayload: Data?
+    var activityPayload: Data?
+    var activityGate: NativeMusicGate?
+    var activityFailure: MusicServiceError?
     init(loggedIn: Bool = true) { binding = .init(scope: loggedIn ? "synthetic-account-a" : "guest", revision: UUID(), loggedIn: loggedIn) }
     func suspend(_ gate: NativeMusicGate) { self.gate = gate }
+    func setHome(_ value: Data) { homePayload = value }
+    func setActivity(_ value: Data) { activityPayload = value }
+    func suspendActivity(_ gate: NativeMusicGate) { activityGate = gate }
+    func failActivity(_ value: MusicServiceError) { activityFailure = value }
     func changeAccount() {
         binding.authorization.revoke()
         binding = .init(scope: "synthetic-account-b", revision: UUID(), loggedIn: true)
@@ -42,11 +50,19 @@ private actor HomeAccountFixture: MusicNativeAccountProviding, MusicNativeHomeDi
     func nativeHomePayload(_ request: MusicNativeHomeRequest, binding: MusicNativeHomeBinding) async throws -> Data {
         calls.append(request); try checkNativeHomeBinding(binding)
         switch request {
-        case .home, .featured:
+        case .home(let continuation), .featured(let continuation):
             if let gate { await gate.wait() }
             try checkNativeHomeBinding(binding)
+            if let homePayload { return homePayload }
+            if continuation != nil {
+                return Data(#"{"code":200,"data":{"blocks":[{"positionCode":"songs","dslData":{"items":[{"resourceType":"song","id":"43"}]}}],"hasMore":false}}"#.utf8)
+            }
             return Data(#"{"code":200,"data":{"blocks":[{"positionCode":"songs","dslData":{"items":[{"resourceType":"song","id":"41"}]}}],"hasMore":true,"cursor":"4"}}"#.utf8)
         case .artistActivity:
+            if let activityGate { await activityGate.wait() }
+            try checkNativeHomeBinding(binding)
+            if let activityFailure { throw activityFailure }
+            if let activityPayload { return activityPayload }
             return Data(#"{"code":200,"data":{"title":"艺人新作","newWorks":[{"info":{"blockType":"mv","songLists":[{"id":8}]}},{"publishTime":1234,"info":{"blockType":"album","albumId":"42","albumSongCount":8,"blockTitle":{"resourceName":"新专辑","artistName":"艺人","resourcePicUrl":"https://p1.music.126.net/album.jpg","imgUrl":"https://p1.music.126.net/avatar.jpg"},"songLists":[{"id":41}]}}]}}"#.utf8)
         case .songMetadata(let ids):
             return MJ.obj([("code", .n(200)), ("songs", .array(ids.map(MusicNativePublicBrowseFixture.song)))]).bytes
@@ -111,17 +127,21 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         } catch { XCTAssertEqual(error as? MusicServiceError, .staleAccess) }
         XCTAssertEqual(document.snapshot().0, before.0)
     }
-    func testSignedInHomeAndArtistMetadataUseSameNativeBindingNotAnonymousHTTP() async throws {
+    func testHomeReadsVisibleContentAndExplicitArtistActivityUsesSameAccountBinding() async throws {
         let account = HomeAccountFixture(), value = try await service(account)
         let page = try await value.homePage(cursor: nil, refresh: true)
-        XCTAssertEqual(page.sections.count, 2)
-        XCTAssertEqual(page.sections.last?.layout, .artistUpdates)
-        XCTAssertEqual(page.sections.last?.title, "艺人新作")
-        XCTAssertEqual(page.sections.last?.avatars.count, 1)
-        XCTAssertEqual(page.sections.last?.channel?.kind, .artistActivity)
+        XCTAssertEqual(page.sections.map(\.layout), [.songColumns, .artistUpdates])
         XCTAssertNotNil(page.cursor)
+        let homeCalls = await account.calls
+        XCTAssertEqual(homeCalls, [.home(), .artistActivity(), .songMetadata(ids: ["41"])])
+        let activity = try await value.publicDiscovery(.channel(
+            .init(id: "artist", title: "艺人新作", kind: .artistActivity), tag: ""), cursor: nil)
+        XCTAssertEqual(activity.sections.last?.layout, .artistUpdates)
+        XCTAssertEqual(activity.sections.last?.title, "艺人新作")
+        XCTAssertEqual(activity.sections.last?.avatars.count, 1)
+        XCTAssertEqual(activity.sections.last?.channel?.kind, .artistActivity)
         let calls = await account.calls
-        XCTAssertEqual(calls.count, 3)
+        XCTAssertEqual(calls.count, 4)
         XCTAssertTrue(calls.contains(.home())); XCTAssertTrue(calls.contains(.artistActivity()))
         XCTAssertTrue(calls.contains(.songMetadata(ids: ["41"])))
     }
@@ -147,7 +167,8 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         let restored = try XCTUnwrap(snapshot)
         XCTAssertNil(restored.cursor)
         XCTAssertEqual(restored.sections.map(\.id), first.sections.map(\.id))
-        XCTAssertEqual(restored.sections.last?.channel?.kind, .artistActivity)
+        XCTAssertEqual(restored.sections.map(\.layout), [.songColumns, .artistUpdates])
+        XCTAssertEqual(restored.sections.flatMap(\.items).map(\.subtitle), first.sections.flatMap(\.items).map(\.subtitle))
         if case .track(let old) = first.sections[0].items[0].content,
            case .track(let new) = restored.sections[0].items[0].content { XCTAssertNotEqual(old.ref, new.ref) }
         else { XCTFail("expected freshly registered native track handles") }
@@ -199,11 +220,181 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         let action = MusicHomeAction.similar(sourceIDs: ["1", "2"], sourceName: "艺人")
         let page = MusicNativePublicBrowseDiscovery(sections: [.init(id: "entries", title: "",
             items: [.init(id: "similar", title: "相似漫游", content: .action(action))], layout: .featureRail)])
-        let data = try MusicNativeHomeSnapshot.encode(page, scope: "synthetic")
-        let restored = try XCTUnwrap(MusicNativeHomeSnapshot.decode(data, scope: "synthetic"))
+        let data = try MusicNativeHomeSnapshot.encode(page, source: .netease, scope: "synthetic")
+        let restored = try XCTUnwrap(MusicNativeHomeSnapshot.decode(data, source: .netease, scope: "synthetic"))
         if case .action(let value) = restored.sections[0].items[0].content { XCTAssertEqual(value, action) }
         else { XCTFail("action was downgraded") }
         var raw = try MJ.parse(data); raw["url"] = .string("https://invalid.example/executable")
-        XCTAssertThrowsError(try MusicNativeHomeSnapshot.decode(raw.bytes, scope: "synthetic"))
+        XCTAssertThrowsError(try MusicNativeHomeSnapshot.decode(raw.bytes, source: .netease, scope: "synthetic"))
+    }
+
+    func testArtistActivityIsOnlySupplementedOnTheFirstHomePageAndEmptyWorksStayAbsent() async throws {
+        let account = HomeAccountFixture(), value = try await service(account)
+        let first = try await value.homePage(cursor: nil, refresh: true)
+        let next = try await value.homePage(cursor: XCTUnwrap(first.cursor), refresh: false)
+        XCTAssertEqual(next.sections.map(\.layout), [.songColumns])
+        let calls = await account.calls
+        XCTAssertEqual(calls.filter { if case .artistActivity = $0 { return true }; return false }.count, 1)
+        await account.setActivity(Data(#"{"code":200,"data":{"newWorks":[],"hasMore":false}}"#.utf8))
+        let empty = try await value.homePage(cursor: nil, refresh: true)
+        XCTAssertEqual(empty.sections.map(\.layout), [.songColumns])
+        await value.close()
+    }
+
+    func testExistingArtistSectionDoesNotTriggerAnotherActivityRead() async throws {
+        let account = HomeAccountFixture(), value = try await service(account)
+        await account.setHome(Data(#"""
+        {"code":200,"data":{"blocks":[{"positionCode":"followed-artists","dslData":{
+          "header":{"title":"关注的新作","action":"orpheus://nm/mainTab/select?tab=music&musicTabCode=artist-activity"},
+          "items":[{"resourceType":"album","id":"42","title":"真实新作"}]}}]}}
+        """#.utf8))
+        let page = try await value.homePage(cursor: nil, refresh: true)
+        XCTAssertEqual(page.sections.map(\.layout), [.artistUpdates])
+        XCTAssertEqual(page.sections.first?.channel?.identity, "wy:artist-activity")
+        let calls = await account.calls
+        XCTAssertEqual(calls, [.home()])
+        await value.close()
+    }
+
+    func testGuestFiltersAccountResourcesBeforeMetadataReadsButKeepsAnonymousFM() async throws {
+        let account = HomeAccountFixture(loggedIn: false)
+        let root = try MJ.parse(Data(#"""
+        {"code":200,"data":{"blocks":[
+          {"positionCode":"entries","dslData":{"items":[
+            {"resourceType":"dailySongs","title":"账号推荐"},
+            {"resourceType":"star","title":"收藏"},
+            {"resourceType":"similarSong","title":"相似推荐","action":"orpheus://nm/play/similarFM?sourceType=song&sourceId=%5B41%5D"},
+            {"resourceType":"dragon_ball","title":"会员","action":"orpheus://rnpage?component=rn-vip-portal"},
+            {"resourceType":"fm","title":"漫游"}
+          ]}},
+          {"positionCode":"PAGE_RECOMMEND_MY_SHEET","dslData":{"items":[{"resourceType":"song","id":"999"}]}},
+          {"positionCode":"restricted","dslData":{"header":{"title":"任意标题",
+            "action":"orpheus://nm/mainTab/select?tab=music&musicTabCode=artist-activity"},
+            "items":[{"resourceType":"song","id":"998"}]}},
+          {"positionCode":"public","dslData":{"title":"公开歌曲","items":[{"resourceType":"song","id":"71"}]}}
+        ]}}
+        """#.utf8))
+        let http = NativeMusicHTTPFixture([root,
+            .obj([("code", .n(200)), ("songs", .array([MusicNativePublicBrowseFixture.song("71")]))])])
+        let value = try await service(account, http: http)
+        let page = try await value.homePage(cursor: nil, refresh: true)
+        XCTAssertEqual(page.sections.map(\.layout), [.featureRail, .songColumns])
+        guard case .action(let action) = page.sections[0].items[0].content else { return XCTFail("anonymous FM required") }
+        XCTAssertEqual(action, .fm(mode: .default, submode: "", entry: nil))
+        XCTAssertEqual(page.sections[1].items.count, 1)
+        let calls = await account.calls
+        XCTAssertTrue(calls.isEmpty, "Guest home must not read account recommendations or artist activity")
+        let reads = await http.calls()
+        XCTAssertEqual(reads.count, 2)
+        XCTAssertEqual(reads[1].url.path, "/weapi/v3/song/detail")
+        await value.close()
+    }
+
+    func testHomeSourceSelectionRejectsUnimplementedProvidersWithoutDiscardingValidCache() async throws {
+        let account = HomeAccountFixture(), store = HomeSnapshotFixture(), value = try await service(account, store: store)
+        let first = try await value.homePage(cursor: nil, refresh: true)
+        let saved = store.read(), before = await account.calls
+        let selection = await value.homeSourceSelection()
+        XCTAssertEqual(selection, .init(selected: .netease, available: [.netease]))
+        try await value.selectHomeSource(.netease)
+        do { try await value.selectHomeSource(.qq); XCTFail("Unimplemented home source accepted") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .unsupported) }
+        let cached = try await value.homePage(cursor: nil, refresh: false)
+        XCTAssertEqual(cached.sections.map(\.id), first.sections.map(\.id))
+        let after = await account.calls
+        XCTAssertEqual(before, after); XCTAssertEqual(store.read(), saved)
+        let data = try XCTUnwrap(saved)
+        XCTAssertNil(try MusicNativeHomeSnapshot.decode(data, source: .qq, scope: "synthetic-account-a"))
+        var root = try MJ.parse(data)
+        var sections = root["sections"].array
+        sections[1]["channel"]["platform"] = .string("tx")
+        root["sections"] = .array(sections)
+        XCTAssertThrowsError(try MusicNativeHomeSnapshot.decode(root.bytes, source: .netease, scope: "synthetic-account-a"))
+        await value.close()
+    }
+
+    func testUnimplementedChannelSourceNeverFallsBackToNetease() async throws {
+        let http = NativeMusicHTTPFixture([]), value = try await service(HomeAccountFixture(), http: http)
+        for kind in [MusicPublicBrowseChannel.Kind.playlists, .rankings, .featured, .artistActivity, .vip] {
+            do {
+                _ = try await value.publicDiscovery(.channel(.init(id: "same-id", title: "频道", kind: kind,
+                    platform: .qq), tag: ""), cursor: nil)
+                XCTFail("Foreign channel routed to NetEase")
+            } catch { XCTAssertEqual(error as? MusicServiceError, .unsupported) }
+        }
+        let calls = await http.calls(); XCTAssertTrue(calls.isEmpty)
+        await value.close()
+    }
+
+    func testActivityFailureKeepsLastSuccessAndLateRevokedActivityCannotPublish() async throws {
+        let account = HomeAccountFixture(), store = HomeSnapshotFixture(), value = try await service(account, store: store)
+        _ = try await value.homePage(cursor: nil, refresh: true)
+        let saved = store.read()
+        await account.failActivity(.networkOffline)
+        do { _ = try await value.homePage(cursor: nil, refresh: true); XCTFail("Activity error hidden as guest success") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .networkOffline) }
+        XCTAssertEqual(store.read(), saved)
+        await value.close()
+
+        let replacement = HomeAccountFixture(), otherStore = HomeSnapshotFixture(), gate = NativeMusicGate()
+        await replacement.suspendActivity(gate)
+        let other = try await service(replacement, store: otherStore)
+        let request = Task { try await other.homePage(cursor: nil, refresh: true) }
+        await gate.started(); await replacement.changeAccount(); await gate.release()
+        do { _ = try await request.value; XCTFail("Revoked activity published") }
+        catch { XCTAssertTrue([MusicServiceError.staleAccess, .staleResult].contains(error as? MusicServiceError ?? .unavailable)) }
+        XCTAssertNil(otherStore.read())
+        let calls = await replacement.calls
+        XCTAssertEqual(calls, [.home(), .artistActivity()])
+        await other.close()
+    }
+
+    func testGuestFilteredBlocksAdvanceWithoutHydratingTheirPrivateContents() async throws {
+        let account = HomeAccountFixture(loggedIn: false)
+        let http = NativeMusicHTTPFixture([
+            try MJ.parse(Data(#"""
+            {"code":200,"data":{"blocks":[{"positionCode":"PAGE_RECOMMEND_MY_SHEET","dslData":"not-public-json"}],
+              "hasMore":true,"cursor":"1"}}
+            """#.utf8)),
+            try MJ.parse(Data(#"""
+            {"code":200,"data":{"blocks":[{"positionCode":"public","dslData":{"title":"歌单",
+              "items":[{"resourceType":"playlist","id":"41","title":"公开歌单"}]}}],"hasMore":false}}
+            """#.utf8)),
+        ])
+        let value = try await service(account, http: http)
+        let first = try await value.homePage(cursor: nil, refresh: true)
+        XCTAssertTrue(first.sections.isEmpty); XCTAssertEqual(first.consumed, 1)
+        let second = try await value.homePage(cursor: XCTUnwrap(first.cursor), refresh: false)
+        XCTAssertEqual(second.sections.first?.items.first?.title, "公开歌单")
+        XCTAssertNil(second.cursor)
+        let calls = await account.calls; XCTAssertTrue(calls.isEmpty)
+        let reads = await http.calls(); XCTAssertEqual(reads.count, 2)
+        await value.close()
+    }
+
+    func testSongColumnSelectionReplacesAllSevenTracksInOneQueueTransaction() async throws {
+        let account = HomeAccountFixture(), document = NativeMusicMemoryDocument(), value = try await service(account, document: document)
+        let ids = (1...7).map(String.init)
+        await account.setHome(MJ.obj([("code", .n(200)), ("data", .obj([("blocks", .array([
+            .obj([("positionCode", .string("songs")), ("dslData", .obj([
+                ("title", .string("完整栏目")), ("items", .array(ids.map {
+                    .obj([("resourceType", .string("song")), ("id", .string($0))])
+                }))
+            ]))])
+        ]))]))]).bytes)
+        let page = try await value.homePage(cursor: nil, refresh: true)
+        let section = try XCTUnwrap(page.sections.first)
+        XCTAssertEqual(section.layout, .songColumns)
+        let tracks = section.items.compactMap { if case .track(let value) = $0.content { return value }; return nil }
+        let reads = await account.calls, writes = document.snapshot().2
+        let state = try await value.replaceDisplayedQueue(tracks, index: 5, origin: .section(title: section.title),
+            expectedRevision: 0, intent: .init())
+        let queue = try await value.queue()
+        XCTAssertEqual(state.total, 7)
+        XCTAssertEqual(queue.entries.map { $0.track.sources[0].nativeId }, ids)
+        XCTAssertEqual(queue.currentId, queue.entries[5].id)
+        XCTAssertEqual(document.snapshot().2, writes + 1)
+        let after = await account.calls; XCTAssertEqual(after, reads)
+        await value.close()
     }
 }

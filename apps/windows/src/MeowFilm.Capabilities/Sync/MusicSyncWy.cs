@@ -6,8 +6,9 @@ using MeowFilm.Capabilities.Platforms;
 namespace MeowFilm.Capabilities.Sync;
 
 internal sealed class MusicSyncWy(MusicPlatformSession session, MusicPlatformHttp http,
-    MusicSyncRequestBudget budget, Func<Task> guard, CancellationToken token)
-    : MusicSyncAdapter(session, http, budget, guard, token)
+    MusicPlatformClientContextOwner clients, MusicPlatformClientContext? client, MusicSyncRequestBudget budget,
+    Func<Task> guard, Action accountGuard, CancellationToken token)
+    : MusicSyncAdapter(session, http, clients, client, budget, guard, accountGuard, token)
 {
     private async Task<List<JsonObject>> Directory()
     {

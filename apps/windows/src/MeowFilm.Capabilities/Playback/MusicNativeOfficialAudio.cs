@@ -106,7 +106,7 @@ public sealed partial class MusicNativeApplication
             var rights = new MusicAccountEntitlements(new(false, "none", null), 0, 0, []);
             if (!(platform == "wy" && (request == "128k" || accounts.IsOfficialGuest(session))))
             {
-                await using var authority = new MusicAccountProtocol(http);
+                await using var authority = new MusicAccountProtocol(http, clients);
                 var observed = await authority.ReadAccountDetailsAsync(session, token).ConfigureAwait(false);
                 Current();
                 rights = observed.Entitlements;
@@ -126,7 +126,7 @@ public sealed partial class MusicNativeApplication
                 // existing locally. Recheck the exact recording with the platform.
                 if (!member)
                     _ = await officialAudio.ResolveAsync(session, recording["source_data"]!.AsObject(),
-                        qualities, rights, token).ConfigureAwait(false);
+                        qualities, rights, token, Current).ConfigureAwait(false);
                 await library.CheckQualityAsync(policy, token).ConfigureAwait(false);
                 Current();
                 lock (gate) officialAccepted[platform] = session;
@@ -143,7 +143,7 @@ public sealed partial class MusicNativeApplication
             {
                 await sourceCache.InvalidateAsync(session.Scope, songId, token).ConfigureAwait(false);
                 var media = await officialAudio.ResolveAsync(session, recording["source_data"]!.AsObject(),
-                    qualities, rights, token).ConfigureAwait(false);
+                    qualities, rights, token, Current).ConfigureAwait(false);
                 Current();
                 double expected = LJ.N(song["duration"]);
                 LJ.Require(expected <= 0 || media.Duration <= 0 ||

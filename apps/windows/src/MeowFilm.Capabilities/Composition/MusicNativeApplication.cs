@@ -52,6 +52,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
     private readonly MusicLibraryOwner library;
     private readonly MusicLibrarySyncService librarySync;
     private readonly MusicAccountOwner accounts;
+    private readonly MusicPlatformClientContextOwner clients;
     private readonly MusicVipPageOwner vipPage;
     private readonly MusicPlatformHttp http;
     private readonly MusicPlatformCatalog catalog;
@@ -93,24 +94,26 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(scriptRuntime);
         http = transportHandler is null ? new MusicPlatformHttp() : MusicPlatformHttp.CreateWithHandler(transportHandler);
+        clients = new(store, token => AccountClientContextImport.ReadAsync(store, token));
+        var clientProtocol = new MusicPlatformClientProtocol(http);
         library = new(store);
-        accounts = new(store, new MusicAccountProtocol(http));
-        vipPage = new(accounts, new MusicVipPageProtocol(http));
-        officialAudio = new(http);
+        accounts = new(store, new MusicAccountProtocol(http, clients, clientProtocol: clientProtocol), clients, clientProtocol);
+        vipPage = new(accounts, new MusicVipPageProtocol(http, clients));
+        officialAudio = new(http, clients);
         sourceCache = new(store);
         sessions = new(accounts);
-        catalog = new(sessions, http);
+        catalog = new(sessions, http, clients);
         nativeCatalog = new(catalog, library);
         recommendationQueue = new(library);
         recommendations = new(catalog, recommendationQueue, SelectRecommendationAsync, readAsync: ReadRecommendationsAsync);
         aggregateSearch = new(catalog, searchAsync: SearchCatalogAsync);
         var discoverySessions = new DiscoverySessions(accounts);
-        discovery = discoveryFactory?.Invoke(discoverySessions, http) ?? new NativeMusicSearchDiscovery(discoverySessions, http);
+        discovery = discoveryFactory?.Invoke(discoverySessions, http) ?? new NativeMusicSearchDiscovery(discoverySessions, http, clients);
         scripts = new(library, scriptRuntime);
-        lyrics = new(library, new NativeMusicLyrics(sessions, http), scripts.ExecuteAsync);
-        librarySync = new(library, accounts, http, http.SendMusicLibrarySyncCloudAsync);
+        lyrics = new(library, new NativeMusicLyrics(sessions, http, clients), scripts.ExecuteAsync);
+        librarySync = new(library, accounts, http, clients, http.SendMusicLibrarySyncCloudAsync);
         Feedback = new(new MusicFeedbackSettingsOwner(store),
-            feedbackFactory?.Invoke(accounts, http) ?? new NativeMusicFeedbackProtocol(accounts, http), accounts);
+            feedbackFactory?.Invoke(accounts, http) ?? new NativeMusicFeedbackProtocol(accounts, http, clients), accounts);
         // Fence recommendation callbacks synchronously before any catalog cleanup.
         accounts.SessionChanged += RecommendationAccountChanged;
         accounts.SessionChanged += nativeCatalog.Invalidate;
@@ -133,11 +136,22 @@ public sealed partial class MusicNativeApplication : IMusicApplication
 
     public Task InitializeAsync(CancellationToken cancellationToken = default)
     {
+        CancellationToken generation;
         lock (gate)
         {
             if (stopping || closed) return Task.FromException(new InvalidOperationException("CLOSED"));
-            return librarySync.StartAsync(cancellationToken);
+            generation = lifetime.Token;
         }
+        return InitializeOwnersAsync(generation, cancellationToken);
+    }
+    private async Task InitializeOwnersAsync(CancellationToken generation, CancellationToken caller)
+    {
+        using var request = CancellationTokenSource.CreateLinkedTokenSource(generation, caller);
+        // Explicit local startup/retry can reconcile a receipt; ordinary request
+        // acquisition never replays or automatically clears an unknown write.
+        if (clients.NeedsReconciliation) await clients.ReloadAsync(request.Token).ConfigureAwait(false);
+        await clients.InitializeAsync(request.Token).ConfigureAwait(false);
+        await librarySync.StartAsync(request.Token).ConfigureAwait(false);
     }
 
     public IReadOnlyDictionary<string, Func<JsonElement, CancellationToken, Task<object?>>> ScriptCapabilities
@@ -184,6 +198,8 @@ public sealed partial class MusicNativeApplication : IMusicApplication
             }
             if (method.StartsWith("music.accounts.", StringComparison.Ordinal))
             {
+                if (method == "music.accounts.list" && clients.NeedsReconciliation)
+                    await clients.ReloadAsync(token).ConfigureAwait(false);
                 long receiptEpoch;
                 lock (gate) receiptEpoch = accountReceiptEpoch;
                 var receipt = await accounts.CallAsync(method, parameters, token).ConfigureAwait(false);
@@ -234,6 +250,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
             return reply;
         }
         catch (OperationCanceledException) { return Failed("CANCELLED"); }
+        catch (MusicPlatformException error) { return Failed(error.Code); }
         finally { lock (gate) if (--pending == 0) drained.TrySetResult(); }
     }
 
@@ -284,6 +301,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         await Attempt(() => Feedback.PrepareShutdownAsync()).ConfigureAwait(false);
         await Attempt(() => scripts.PrepareShutdownAsync()).ConfigureAwait(false);
         await Attempt(() => library.PrepareShutdownAsync()).ConfigureAwait(false);
+        await Attempt(clients.PrepareShutdownAsync).ConfigureAwait(false);
         // The account port may have returned an unknown receipt while its physical
         // CAS is still running. Without an explicit list/reconciliation, preparation
         // must fail rather than authorize the capability to dispose the shared App store.
@@ -325,6 +343,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
                 requiresReconciliation = true;
             }
         }
+        await clients.CancelShutdownPreparationAsync().ConfigureAwait(false);
         await library.CancelShutdownPreparationAsync().ConfigureAwait(false);
         await scripts.CancelShutdownPreparationAsync().ConfigureAwait(false);
         await librarySync.CancelShutdownPreparationAsync().ConfigureAwait(false);
@@ -428,6 +447,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         // it neither retries a commit nor declares an unknown receipt rolled back.
         await Attempt(() => library.AbortAsync()).ConfigureAwait(false);
         try { catalog.Dispose(); } catch (Exception e) { failure ??= e; }
+        await Attempt(() => clients.DisposeAsync().AsTask()).ConfigureAwait(false);
         try { http.Dispose(); } catch (Exception e) { failure ??= e; }
         try { recommendationLifetime.Dispose(); } catch (Exception e) { failure ??= e; }
         try { lifetime.Dispose(); } catch (Exception e) { failure ??= e; }

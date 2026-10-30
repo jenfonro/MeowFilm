@@ -7,6 +7,14 @@ import MeowAccounts
 import MeowMusicFeature
 
 extension KugouMusicAccountAdapter {
+    func newContext(qrID: UUID? = nil, qrNonce: UUID? = nil) throws -> MusicKugouContext {
+        if let clientContexts {
+            let client = try clientContexts.installationDevice(.kugou)
+            return .init(epoch: epoch, device: try MusicKugouDevice(saved: client.fields),
+                         qrID: qrID, qrNonce: qrNonce, clientDevice: client)
+        }
+        return .init(epoch: epoch, device: try MusicKugouDevice(), qrID: qrID, qrNonce: qrNonce)
+    }
     func context(_ credential: AccountCredential) throws -> MusicKugouContext {
         let bytes = credential.dataRepresentation()
         guard bytes.count <= 32_768 else { throw MusicServiceError.limit }
@@ -20,7 +28,10 @@ extension KugouMusicAccountAdapter {
         let rawDevice = try MusicQQWire.object(root["device"])
         // A restored credential must not silently invent a different device.
         guard rawDevice["seed"] != nil, rawDevice["KUGOU_API_MID"] != nil else { throw MusicServiceError.invalidResponse }
-        return .init(epoch: epoch, device: try MusicKugouDevice(saved: rawDevice), auth: auth)
+        let device = try MusicKugouDevice(saved: rawDevice)
+        let client = try clientContexts?.matchingDevice(.kugou, identity: device.seed)
+        return .init(epoch: epoch, device: try client.map { try MusicKugouDevice(saved: $0.fields) } ?? device,
+                     auth: auth, clientDevice: client)
     }
     func credential(_ context: MusicKugouContext) throws -> AccountCredential {
         try check(context)
@@ -60,6 +71,7 @@ extension KugouMusicAccountAdapter {
             let registered = try await register(anonymous)
             try check(context)
             context.device = registered.device
+            context.clientDevice = registered.clientDevice
         }
         return context
     }
@@ -119,7 +131,13 @@ extension KugouMusicAccountAdapter {
         if let rows = root["data"] as? [Any], rows.isEmpty { return context }
         let dfid = try MusicKugouWire.text(MusicQQWire.object(root["data"])["dfid"], maximum: 128)
         guard dfid.range(of: "^[A-Za-z0-9_-]{8,128}$", options: .regularExpression) != nil else { throw MusicServiceError.upstreamInvalid }
-        var next = context; next.device.dfid = dfid; return next
+        var next = context; next.device.dfid = dfid
+        if let client = next.clientDevice, let clientContexts {
+            let fields = try next.device.fields.mapValues { try MusicQQWire.string($0, maximum: 4096) }
+            let saved = try clientContexts.update(client, fields: fields)
+            next.clientDevice = saved; next.device = try MusicKugouDevice(saved: saved.fields)
+        }
+        return next
     }
     static func qrImage(_ key: String) throws -> Data {
         let url = try MusicQQWire.query("https://h5.kugou.com/apps/loginQRCode/html/index.html", ["qrcode": key])
@@ -139,7 +157,7 @@ extension KugouMusicAccountAdapter {
         guard qr[id] == nil else { throw MusicServiceError.busy }
         for old in Array(qr.keys) { cancelQR(old) }
         nextCreate = now().addingTimeInterval(5)
-        let context = MusicKugouContext(epoch: epoch, device: try MusicKugouDevice(), qrID: id, qrNonce: UUID())
+        let context = try newContext(qrID: id, qrNonce: UUID())
         qr[id] = .init(expires: now().addingTimeInterval(180), context: context)
         do {
             let registered = try await register(context)

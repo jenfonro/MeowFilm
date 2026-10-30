@@ -14,6 +14,8 @@ struct MeowfilmResources: Sendable {
     let musicAccountGate: MusicAccountAccessGate?
     let musicAudioCache: NativeMusicAudioFileCache?
     let musicDisplayCache: MusicNativePlaybackDisplayCache
+    let musicPublicQQ: NativeMusicQQPublicService
+    let musicClients: NativeMusicClientService
     // Shared API budget only. Cover art and AVPlayer/media-cache transfers
     // retain their own byte/resource limits and never consume these slots.
     let musicRequests = RequestAdmission()
@@ -46,14 +48,25 @@ struct MeowfilmResources: Sendable {
                 namespace: MusicNativePlaybackDisplayCache.namespace, keyProvider: keys,
                 limits: .init(maximumDocumentBytes: 16 * 1024 * 1024))
         })
+        let clientRoot = root
+        musicClients = NativeMusicClientService(storeFactory: { platform in
+            try Self.documentFactory(root: clientRoot, namespace: NativeMusicClientService.namespace(platform))()
+        })
+        musicPublicQQ = NativeMusicQQPublicService(
+            storeFactory: Self.documentFactory(root: clientRoot, namespace: MusicQQPublicPersistenceDocument.namespace),
+            requestAdmission: musicRequests)
         musicAccountGate = try? MusicAccountAccessGate(
             bundleIdentifier: MeowfilmIdentity.bundleIdentifier, cacheDocumentRoot: musicRoot,
-            audioCache: musicAudioCache, displayCache: musicDisplayCache, requestAdmission: musicRequests
+            audioCache: musicAudioCache, displayCache: musicDisplayCache, requestAdmission: musicRequests,
+            clientContexts: musicClients, qqClient: musicPublicQQ
         )
         musicAccounts = musicAccountGate?.service
     }
 
     func documentFactory(_ namespace: String) -> @Sendable () throws -> EncryptedDocumentStore {
+        Self.documentFactory(root: root, namespace: namespace)
+    }
+    private static func documentFactory(root: URL, namespace: String) -> @Sendable () throws -> EncryptedDocumentStore {
         let base = root.appendingPathComponent("encrypted-documents-v1", isDirectory: true)
         let service = MeowfilmIdentity.bundleIdentifier + "." + namespace
         return {

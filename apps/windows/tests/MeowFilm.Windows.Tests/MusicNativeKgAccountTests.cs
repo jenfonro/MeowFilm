@@ -36,10 +36,10 @@ public static class MusicNativeKgAccountTests
         }
         foreach (string step in new[] { "register", "key", "poll", "profile" })
         { string s = step; yield return Case("cancel-" + s + "-no-late-session", () => Cancel(s)); }
-        yield return Case("device-save-cancel-physical-drain-before-observation", () => CancelWrite(1));
-        yield return Case("dfid-save-cancel-physical-drain-before-observation", () => CancelWrite(2));
+        yield return Case("client-save-account-cancel-client-drain-before-observation", () => CancelWrite(1));
+        yield return Case("dfid-save-account-cancel-client-drain-before-observation", () => CancelWrite(2));
         yield return Case("device-revision-change-rejects-challenge-before-request", DeviceChanged);
-        yield return Case("device-change-during-identity-rejects-final-CAS", DeviceChangedAtIdentity);
+        yield return Case("observed-device-change-during-identity-fences-before-handoff", DeviceChangedAtIdentity);
         yield return Case("other-owner-logout-rejects-old-authorization", OtherOwner);
         yield return Case("cooldown-ttl-cap-and-local-challenge-identity", Lifetime);
         yield return Case("deadline-covers-registration-device-save-and-key", Deadline);
@@ -48,7 +48,7 @@ public static class MusicNativeKgAccountTests
         yield return Case("unknown-entry-rejected-without-network-or-write", UnknownEntry);
         yield return Case("corrupt-device-rejects-whole-document-without-write", CorruptDeviceDocument);
         yield return Case("ordinary-content-lyrics-no-new-origin-authority", Origins);
-        yield return Case("direct-protocol-needs-owner-no-sms-or-token-operation", Direct);
+        yield return Case("direct-protocol-uses-explicit-client-owner-no-sms-or-token-operation", Direct);
         yield return Case("borrowed-http-store-and-finite-errors-no-secrets", Borrowed);
     }
     private static TestCase Case(string name, Func<Task> run) => new("music.native.accounts.kg." + name, run);
@@ -169,6 +169,12 @@ public static class MusicNativeKgAccountTests
         Check(f.Transport.Calls == calls);
         var list = await f.Owner.CallAsync("music.accounts.list");
         Check(Ok(list) && f.Transport.Calls == calls);
+        if (write <= 2)
+        {
+            Check(f.Clients.Owner.NeedsReconciliation);
+            await f.Clients.Owner.ReloadAsync(); // Account readback cannot reconcile a different writer.
+            Check(f.Transport.Calls == calls);
+        }
         string seed = (await KgAccountFixture.ReadDevice(f.Store))["seed"]!.GetValue<string>();
         f.Clock.Advance(5);
         Check(Ok(await Begin(f.Owner)) && (await KgAccountFixture.ReadDevice(f.Store))["seed"]!.GetValue<string>() == seed);
@@ -182,8 +188,11 @@ public static class MusicNativeKgAccountTests
         Check(!Ok(result) && Code(result) == (write == 3 ? "HANDOFF_UNCONFIRMED" : "STORAGE_CONFLICT"));
         Check(await f.Owner.AcquireAsync("kg") is null);
         Check(f.Transport.Calls == (write == 1 ? 0 : write == 2 ? 1 : 5));
-        Check((await KgAccountFixture.ReadRoot(f.Store))["entries"]!.AsArray()
-            .Any(n => n!["key"]!.GetValue<string>() == KgAccountFixture.ConcurrentAccountKey));
+        if (write <= 2)
+            Check((await MusicClientContextFixture.ReadDocument(f.Store))["wy"]!["nmtid"]!.GetValue<string>() == "SYNTHETIC_CONCURRENT");
+        else
+            Check((await KgAccountFixture.ReadRoot(f.Store))["entries"]!.AsArray()
+                .Any(n => n!["key"]!.GetValue<string>() == KgAccountFixture.ConcurrentAccountKey));
     }
     private static async Task Cancel(string step)
     {
@@ -194,9 +203,10 @@ public static class MusicNativeKgAccountTests
         var result = await pending.WaitAsync(TimeSpan.FromSeconds(4));
         Check(!Ok(result) && Code(result) is "CANCELLED" or "SUPERSEDED");
         int calls = f.Transport.Calls;
+        var clientWork = step == "register" ? f.Clients.Owner.EnsureKgAsync(f.Clients.Protocol, default) : null;
         f.Transport.Release.TrySetResult();
         await f.Transport.Settled.Task.WaitAsync(TimeSpan.FromSeconds(4));
-        await Task.Delay(40);
+        if (clientWork is not null) await clientWork.WaitAsync(TimeSpan.FromSeconds(4));
         Check(f.Transport.Calls == calls && f.Store.Writes <= 2 && await f.Owner.AcquireAsync("kg") is null);
     }
     private static async Task CancelWrite(int write)
@@ -206,17 +216,22 @@ public static class MusicNativeKgAccountTests
         await f.Store.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(4));
         await f.Owner.CallAsync("music.accounts.cancel", new { platform = "kg" });
         var result = await pending.WaitAsync(TimeSpan.FromSeconds(4));
-        Check(!Ok(result) && Code(result) == "COMMIT_UNKNOWN" && f.Transport.Calls == write - 1);
+        Check(!Ok(result) && Code(result) is "CANCELLED" or "SUPERSEDED" && f.Transport.Calls == write - 1);
         var read = f.Owner.CallAsync("music.accounts.list");
-        Check(!read.IsCompleted);
+        Check(Ok(await read)); // Account storage does not own this anonymous client write.
+        var drain = f.Clients.Owner.PrepareShutdownAsync();
+        Check(!drain.IsCompleted);
         f.Store.Release.TrySetResult();
-        Check(Ok(await read) && f.Store.Writes == write && f.Transport.Calls == write - 1);
+        await drain.WaitAsync(TimeSpan.FromSeconds(4));
+        await f.Clients.Owner.CancelShutdownPreparationAsync();
+        Check(f.Store.Writes == write && f.Transport.Calls == write - 1 && !f.Clients.Owner.NeedsReconciliation);
         Check((await KgAccountFixture.ReadDevice(f.Store))["seed"]!.GetValue<string>().Length == 32);
     }
     private static async Task DeviceChanged()
     {
         await using var f = new KgAccountFixture(); var b = await Begin(f.Owner);
         await KgAccountFixture.MutateDevice(f.Store.Inner);
+        await f.Clients.Owner.ReloadAsync();
         int calls = f.Transport.Calls;
         var result = await Poll(f.Owner, Id(b));
         Check(!Ok(result) && Code(result) == "STORAGE_CONFLICT" && f.Transport.Calls == calls);
@@ -226,9 +241,10 @@ public static class MusicNativeKgAccountTests
         await using var f = new KgAccountFixture(); var b = await Begin(f.Owner);
         f.Transport.HoldAt = "profile";
         var pending = Poll(f.Owner, Id(b)); await f.Transport.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(4));
-        await KgAccountFixture.MutateDevice(f.Store.Inner); f.Transport.Release.TrySetResult();
+        await KgAccountFixture.MutateDevice(f.Store.Inner); await f.Clients.Owner.ReloadAsync();
+        f.Transport.Release.TrySetResult();
         var result = await pending;
-        Check(!Ok(result) && Code(result) == "HANDOFF_UNCONFIRMED" && await f.Owner.AcquireAsync("kg") is null);
+        Check(!Ok(result) && Code(result) == "STORAGE_CONFLICT" && await f.Owner.AcquireAsync("kg") is null);
     }
     private static async Task OtherOwner()
     {
@@ -236,8 +252,9 @@ public static class MusicNativeKgAccountTests
         f.Transport.HoldAt = "profile";
         var pending = Poll(f.Owner, Id(b)); await f.Transport.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(4));
         using var http = MusicPlatformHttp.CreateWithHandler(new KgAccountHandler());
-        await using var otherStore = new DpapiDocumentStore(f.Path, ["music.accounts.v1"]);
-        await using var other = new MusicAccountOwner(otherStore, new MusicAccountProtocol(http));
+        await using var otherStore = new DpapiDocumentStore(f.Path, ["music.accounts.v1", MusicPlatformClientContextOwner.DocumentNamespace]);
+        await using var clientContext1 = new MusicClientContextFixture(http);
+        await using var other = clientContext1.CreateAccountOwner(otherStore);
         Check(Ok(await other.CallAsync("music.accounts.logout", new { platform = "kg" })));
         f.Transport.Release.TrySetResult();
         Check(!Ok(await pending) && await f.Owner.AcquireAsync("kg") is null);
@@ -333,11 +350,12 @@ public static class MusicNativeKgAccountTests
     private static async Task Direct()
     {
         await using var f = new KgAccountFixture();
-        try { await f.Protocol.BeginAsync("kg"); throw new InvalidOperationException(); }
-        catch (MusicAccountException e) { Check(e.Code == "DEVICE_CONTEXT_REQUIRED"); }
+        var challenge = await f.Protocol.BeginAsync("kg");
+        Check(challenge.Platform == "kg" && challenge.KgClient is not null && f.Clients.Owner.IsCurrent(challenge.KgClient));
+        Check(await f.Owner.AcquireAsync("kg") is null);
         foreach (string method in new[] { "sms.send", "sms.login", "refresh", "device.reset" })
             Check(Code(await f.Owner.CallAsync("music.accounts." + method, new { platform = "kg" })) == "INVALID_REQUEST");
-        Check(f.Transport.Calls == 0 && f.Store.Writes == 0);
+        Check(f.Transport.Calls == 2 && f.Store.Writes == 2);
         var kg = f.Protocol.Describe().GetProperty("platforms").EnumerateArray().Single(v => v.GetProperty("platform").GetString() == "kg");
         Check(kg.GetProperty("qr").GetBoolean() && !kg.GetProperty("sms").GetBoolean() &&
             !kg.GetProperty("credentialRefresh").GetBoolean());
@@ -379,13 +397,14 @@ internal sealed class KgAccountFixture : IAsyncDisposable
     internal readonly MusicPlatformHttp Http;
     internal readonly MusicAccountProtocol Protocol;
     internal readonly MusicAccountOwner Owner;
+    internal readonly MusicClientContextFixture Clients;
     internal KgAccountFixture(string? path = null)
     {
         Path = path ?? MusicNativeKgAccountTests.DataPath();
-        Store = new(new DpapiDocumentStore(Path, ["music.accounts.v1"]));
+        Store = new(new DpapiDocumentStore(Path, ["music.accounts.v1", MusicPlatformClientContextOwner.DocumentNamespace]));
         Http = MusicPlatformHttp.CreateWithHandler(Transport);
-        Protocol = MusicAccountProtocol.CreateWithRegistrationEntropy(Http, () => "test01", clock: Clock);
-        Owner = new(Store, Protocol);
+        Clients = new(Http, Store, importAccounts: true, clock: Clock, registrationEntropy: () => "test01");
+        Protocol = Clients.CreateAccountProtocol(); Owner = Clients.CreateAccountOwner(Store, Protocol);
         Transport.BeforeRegister = async () =>
         {
             var device = await ReadDevice(Store);
@@ -401,7 +420,7 @@ internal sealed class KgAccountFixture : IAsyncDisposable
         finally { if (doc.Data is not null) CryptographicOperations.ZeroMemory(doc.Data); }
     }
     internal static async Task<JsonObject> ReadDevice(IProtectedDocumentStore store) =>
-        (await ReadRoot(store))["entries"]!.AsArray().Single(n => n!["key"]!.GetValue<string>() == DeviceKey)!["value"]!.AsObject();
+        (await MusicClientContextFixture.ReadDocument(store))["kg"]!.AsObject();
     internal static async Task Edit(IProtectedDocumentStore store, Action<JsonObject> action)
     {
         var doc = await store.ReadAsync("music.accounts.v1");
@@ -418,38 +437,44 @@ internal sealed class KgAccountFixture : IAsyncDisposable
     internal static Task SeedDevice(IProtectedDocumentStore store, string? dfid = KgAccountHandler.Dfid) =>
         Edit(store, root => root["entries"]!.AsArray().Add(new JsonObject { ["key"] = DeviceKey,
             ["value"] = new JsonObject { ["version"] = 1, ["generation"] = 1, ["seed"] = Seed, ["dfid"] = dfid } }));
-    internal static Task MutateDevice(IProtectedDocumentStore store) => Edit(store, root =>
+    internal static Task MutateDevice(IProtectedDocumentStore store) => MusicClientContextFixture.MutateDocument(store, root =>
     {
-        var value = root["entries"]!.AsArray().Single(n => n!["key"]!.GetValue<string>() == DeviceKey)!["value"]!;
+        var value = root["kg"]!;
         value["generation"] = value["generation"]!.GetValue<long>() + 1; value["dfid"] = "SYNTHETIC_NEW_DFID";
     });
     public async ValueTask DisposeAsync()
     {
         Transport.Release.TrySetResult(); Store.Release.TrySetResult();
         try { await Owner.DisposeAsync(); }
-        finally { Http.Dispose(); await Store.DisposeAsync(); }
+        finally { await Clients.DisposeAsync(); Http.Dispose(); await Store.DisposeAsync(); }
     }
 }
 
 internal sealed class KgAccountStore(DpapiDocumentStore inner) : IProtectedDocumentStore
 {
     internal DpapiDocumentStore Inner => inner;
-    internal int Writes, Disposals, LoseReceiptAt, ConflictAt, HoldAt;
+    internal int Writes, AccountWrites, Disposals, LoseReceiptAt, ConflictAt, HoldAt;
     internal TaskCompletionSource Arrived = new(TaskCreationOptions.RunContinuationsAsynchronously),
         Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken token = default) => inner.ReadAsync(ns, token);
     public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data,
         DocumentFingerprint expected, CancellationToken token = default)
     {
-        if (ns == "music.accounts.v1")
+        if (ns is "music.accounts.v1" or MusicPlatformClientContextOwner.DocumentNamespace)
         {
             int write = Interlocked.Increment(ref Writes);
+            if (ns == "music.accounts.v1") Interlocked.Increment(ref AccountWrites);
             if (write == HoldAt) { Arrived.TrySetResult(); await Release.Task; token = default; }
             if (write == ConflictAt)
-                await KgAccountFixture.Edit(inner, root => root["entries"]!.AsArray().Add(new JsonObject
-                { ["key"] = KgAccountFixture.ConcurrentAccountKey, ["value"] = new JsonObject {
-                    ["version"] = 1, ["generation"] = 1, ["cookie"] = null, ["profile"] = null,
-                    ["scope"] = null, ["validatedAt"] = null } }));
+            {
+                if (ns == MusicPlatformClientContextOwner.DocumentNamespace)
+                    await MusicClientContextFixture.ConcurrentClientWrite(inner);
+                else
+                    await KgAccountFixture.Edit(inner, root => root["entries"]!.AsArray().Add(new JsonObject
+                    { ["key"] = KgAccountFixture.ConcurrentAccountKey, ["value"] = new JsonObject {
+                        ["version"] = 1, ["generation"] = 1, ["cookie"] = null, ["profile"] = null,
+                        ["scope"] = null, ["validatedAt"] = null } }));
+            }
             var result = await inner.WriteAsync(ns, data, expected, token);
             if (write == LoseReceiptAt) throw new ProtectedDocumentException(DocumentStoreError.Storage);
             return result;

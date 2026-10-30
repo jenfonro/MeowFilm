@@ -7,9 +7,11 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Core.Runtime;
+using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Capabilities.Recommendations;
 using MeowFilm.Platform.Storage;
 
@@ -274,7 +276,7 @@ public static class MusicNativeRecommendationTests
             string parent = Environment.GetEnvironmentVariable("MEOWFILM_NATIVE_RECOMMENDATIONS_DATA") ??
                 throw new InvalidOperationException("Explicit isolated fixture directory required");
             Root = root ?? Path.Combine(parent, Guid.NewGuid().ToString("N")); Directory.CreateDirectory(Root);
-            Store = new(new DpapiDocumentStore(Root, ["music.library.v1", "music.accounts.v1", "music.files.v1", "music.feedback.v1"]));
+            Store = new(new DpapiDocumentStore(Root, AppIdentity.NativeNamespaces));
             App = new(Store, Runtime, Handler);
             Source.Changed += value => Notices.Enqueue(value.Clone());
         }
@@ -490,8 +492,10 @@ public static class MusicNativeRecommendationTests
         var second = f.Start(); cancellation.Cancel();
         await Pending(first); await Pending(second); Check(f.Handler.Paths.IsEmpty);
         hold.Release.TrySetResult(); Error(await first, "CANCELLED"); Check(B(await second, "active") && f.Handler.Paths.Count == 1);
-        Check(f.Store.Reads.GetValueOrDefault(MusicAccountOwner.DocumentNamespace) == 2,
-            "two waiters must share hydration, then the admitted batch reads one exact lease");
+        Check(f.Store.Reads.GetValueOrDefault(MusicAccountOwner.DocumentNamespace) == 3 &&
+            f.Store.Reads.GetValueOrDefault(MusicPlatformClientContextOwner.DocumentNamespace) == 1 &&
+            f.Store.Writes.GetValueOrDefault(MusicPlatformClientContextOwner.DocumentNamespace) == 1,
+            "two waiters share hydration; the admitted batch reads one exact lease and one read-only client import");
     }
     private static async Task HttpDrain()
     {

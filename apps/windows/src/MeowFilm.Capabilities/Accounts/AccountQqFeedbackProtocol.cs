@@ -8,17 +8,13 @@ using MeowFilm.Capabilities.Platforms;
 
 namespace MeowFilm.Capabilities.Accounts;
 
-internal interface IMusicQqFeedbackDeviceProtocol
+internal interface IMusicQqFeedbackAccountProtocol
 {
-    TimeProvider QqFeedbackClock { get; }
     Task<MusicAccountProfile> VerifyQqFeedbackAccountAsync(MusicPlatformSession account, CancellationToken token);
-    Task<StoredQqQimei> RequestQqQimeiAsync(StoredQqFeedbackDevice device, CancellationToken token);
-    Task<StoredQqDeviceSession> RequestQqDeviceSessionAsync(StoredQqFeedbackDevice device, CancellationToken token);
 }
 
 public sealed partial class MusicAccountProtocol
 {
-    TimeProvider IMusicQqFeedbackDeviceProtocol.QqFeedbackClock => clock;
     private async Task<JsonObject> SendQqDevice(MusicQqDeviceHttpStep step, HttpRequestMessage request, CancellationToken token)
     {
         using var owned = request;
@@ -49,7 +45,7 @@ public sealed partial class MusicAccountProtocol
         AccountRules.Require(body["req_0"]!["data"] is JsonObject, "INVALID_RESPONSE");
         return body["req_0"]!["data"]!.AsObject();
     }
-    async Task<MusicAccountProfile> IMusicQqFeedbackDeviceProtocol.VerifyQqFeedbackAccountAsync(MusicPlatformSession account, CancellationToken token)
+    async Task<MusicAccountProfile> IMusicQqFeedbackAccountProtocol.VerifyQqFeedbackAccountAsync(MusicPlatformSession account, CancellationToken token)
     {
         AccountRules.Require(account.Platform == "tx", "INVALID_REQUEST");
         var parts = AccountRules.Cookies(account.Cookie);
@@ -72,48 +68,5 @@ public sealed partial class MusicAccountProtocol
         var profile = home["Info"]!["BaseInfo"]!.AsObject();
         AccountRules.Require(Scalar(profile["EncryptedUin"]) == euin, "IDENTITY_MISMATCH");
         return Summary("tx", id, profile["Name"], profile["Avatar"], account.Cookie);
-    }
-    async Task<StoredQqQimei> IMusicQqFeedbackDeviceProtocol.RequestQqQimeiAsync(StoredQqFeedbackDevice device, CancellationToken token)
-    {
-        var body = await SendQqDevice(MusicQqDeviceHttpStep.Qimei, QqQimeiRecipe.Request(device, clock.GetUtcNow()), token).ConfigureAwait(false);
-        if (body["code"] is { } code) AccountRules.Require(StrictCode(code) == 0, "UPSTREAM_ERROR");
-        string serialized = Text(body["data"]);
-        AccountRules.Require(Encoding.UTF8.GetByteCount(serialized) <= 65536, "LIMIT");
-        JsonObject inner;
-        try { inner = PJ.Parse(Encoding.UTF8.GetBytes(serialized), 65536); }
-        catch (MusicPlatformException e) { throw new MusicAccountException(e.Code); }
-        if (inner["code"] is { } innerCode) AccountRules.Require(StrictCode(innerCode) == 0, "UPSTREAM_ERROR");
-        AccountRules.Require(inner["data"] is JsonObject, "INVALID_RESPONSE");
-        var data = inner["data"]!.AsObject();
-        return new((device.Qimei?.Generation ?? 0) + 1, AccountDocument.QqDeviceText(Text(data["q16"])),
-            AccountDocument.QqDeviceText(Text(data["q36"])), clock.GetUtcNow().ToUnixTimeMilliseconds());
-    }
-    async Task<StoredQqDeviceSession> IMusicQqFeedbackDeviceProtocol.RequestQqDeviceSessionAsync(StoredQqFeedbackDevice device, CancellationToken token)
-    {
-        AccountRules.Require(device.QimeiCurrent(clock.GetUtcNow()), "DEVICE_CONTEXT_REQUIRED");
-        var stale = device.Session;
-        // This comm intentionally has NO qq/authst/tmeLoginType/Cookie/uid/sid.
-        var comm = new JsonObject { ["ct"] = "11", ["cv"] = "20090008", ["v"] = "20090008", ["chid"] = "10003505",
-            ["tmeAppID"] = "qqmusic", ["traceid"] = "10002_" + device.OpenUdid + "_" + clock.GetUtcNow().ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture),
-            ["QIMEI36"] = device.Qimei!.Q36, ["OpenUDID"] = device.OpenUdid, ["udid"] = device.OpenUdid,
-            ["OpenUDID2"] = device.OpenUdid2, ["aid"] = device.AndroidId, ["os_ver"] = "15", ["phonetype"] = "V2408A" };
-        var body = new JsonObject { ["comm"] = comm, ["req_0"] = new JsonObject {
-            ["module"] = "music.getSession.session", ["method"] = "GetSession",
-            ["param"] = new JsonObject { ["uid"] = stale?.Uid ?? "", ["vkey"] = 0, ["caller"] = stale is null ? 2 : 1 } } };
-        var request = new HttpRequestMessage(HttpMethod.Post, "https://u.y.qq.com/cgi-bin/musicu.fcg") {
-            Content = new StringContent(PJ.Encode(body), Encoding.UTF8, "application/json") };
-        request.Headers.TryAddWithoutValidation("User-Agent", "QQMusic 20090008(android 15)");
-        var data = QqDeviceData(await SendQqDevice(MusicQqDeviceHttpStep.Session, request, token).ConfigureAwait(false));
-        AccountRules.Require(data["session"] is JsonObject, "INVALID_RESPONSE");
-        var session = data["session"]!.AsObject();
-        string uid;
-        if (session["uid"] is JsonValue v && v.TryGetValue<string>(out var uidString)) uid = uidString;
-        else
-        {
-            uid = Scalar(session["uid"]);
-            AccountRules.Require(AccountRules.Match(uid, "^-?[0-9]{1,512}$"), "INVALID_RESPONSE");
-        }
-        return new((stale?.Generation ?? 0) + 1, AccountDocument.QqDeviceText(uid), AccountDocument.QqDeviceText(Text(session["sid"])),
-            clock.GetUtcNow().ToUnixTimeMilliseconds(), device.Qimei!.Generation);
     }
 }

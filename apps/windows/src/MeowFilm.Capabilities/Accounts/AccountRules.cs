@@ -24,6 +24,8 @@ internal static class AccountRules
     internal static string Error(Exception error) => error switch
     {
         MusicAccountException known => known.Code,
+        MeowFilm.Capabilities.Platforms.MusicPlatformException known =>
+            SafeCode(known.Code == "AUTH_REQUIRED" ? "AUTH_EXPIRED" : known.Code),
         OperationCanceledException => "CANCELLED",
         ProtectedDocumentException e => e.Error switch
         {

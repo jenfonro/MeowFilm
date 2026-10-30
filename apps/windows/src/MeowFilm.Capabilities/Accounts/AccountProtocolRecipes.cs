@@ -71,23 +71,28 @@ public sealed partial class MusicAccountProtocol
     private static MusicAccountProfile Summary(string platform, string id, JsonNode? name, JsonNode? avatar, string cookie) =>
         AccountRules.Profile(new(platform, AccountRules.Id(id), AccountRules.Text(Text(name), 200, empty: true),
             AccountRules.Avatar(avatar is JsonValue v && v.TryGetValue<string>(out var text) ? text : null)), platform, cookie);
-    private static async Task<MusicAccountProfile> ValidateWy(Context ctx, string cookie, Dictionary<string, string> parts)
+    private static async Task<MusicAccountProfile> ValidateWy(Context ctx, string cookie, Dictionary<string, string> parts,
+        string? expectedUserId = null)
     {
         AccountRules.Require(parts.TryGetValue("MUSIC_U", out var value) && value.Length > 0, "INVALID_CREDENTIALS");
-        var data = (await ctx.Send(MusicPlatformRequests.WyWithCookie("/api/w/nuser/account/get", new(), cookie, weapi: true))
-            .ConfigureAwait(false)).Body;
+        var response = await ctx.Send(ctx.Wy("/api/w/nuser/account/get", new(), cookie, weapi: true))
+            .ConfigureAwait(false);
+        var data = response.Body;
         WyStatus(data);
         if (data.ContainsKey("profile") && data["profile"] is null) throw new MusicAccountException("AUTH_EXPIRED");
         AccountRules.Require(data["profile"] is JsonObject, "INVALID_RESPONSE");
         var profile = data["profile"]!.AsObject();
         string userId = Id(profile["userId"]);
+        AccountRules.Require(expectedUserId is null || userId == expectedUserId, "IDENTITY_MISMATCH");
         if (data["account"] is not null)
         {
             AccountRules.Require(data["account"] is JsonObject, "INVALID_RESPONSE");
             if (data["account"]!["id"] is { } accountId)
                 AccountRules.Require(Id(accountId) == userId, "IDENTITY_MISMATCH");
         }
-        return Summary("wy", userId, profile["nickname"], profile["avatarUrl"], cookie);
+        var summary = Summary("wy", userId, profile["nickname"], profile["avatarUrl"], cookie);
+        await ctx.AcceptWyCookies(response.SetCookieHeaders, cookie).ConfigureAwait(false);
+        return summary;
     }
     private static void QqStatus(JsonNode? value)
     {
@@ -134,20 +139,12 @@ public sealed partial class MusicAccountProtocol
     }
     // MIT KuGouMusicApi public client key. This is NOT private material.
     // Source format: right-zero-padded 128-byte plaintext + RSA_NO_PADDING, not PKCS#1.
-    private const string KgPublicKey = """
-        -----BEGIN PUBLIC KEY-----
-        MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDIAG7QOELSYoIJvTFJhMpe1s/gbjDJX51HBNnEl5HXqTW6lQ7LC8jr9fWZTwusknp+sVGzwd40MwP6U5yDE27M/X1+UR4tvOGOqp94TJtQ1EPnWGWXngpeIW5GxoQGao1rmYWAu6oi1z9XkChrsUdC6DJE5E221wf/4WLFxwAtRQIDAQAB
-        -----END PUBLIC KEY-----
-        """;
     private async Task<MusicAccountProfile> ValidateKg(Context ctx, string cookie, Dictionary<string, string> parts,
         bool requireIdentity = false)
     {
         string userId = AccountRules.Id(parts.GetValueOrDefault("userid"), "INVALID_CREDENTIALS");
         string token = AccountRules.Text(parts.GetValueOrDefault("token"), 4096, "INVALID_CREDENTIALS");
-        string mid = parts.GetValueOrDefault("KUGOU_API_MID", "");
-        AccountRules.Require(AccountRules.Match(mid, "^[A-Za-z0-9_-]{1,128}$"), "DEVICE_CONTEXT_REQUIRED");
-        if (parts.TryGetValue("dfid", out var dfid) && dfid.Length > 0)
-            AccountRules.Require(AccountRules.Match(dfid, "^[A-Za-z0-9_-]{1,128}$"), "INVALID_CREDENTIALS");
+        _ = PlatformProtocols.KgIdentity(parts, ctx.KgClient);
         long time = clock.GetUtcNow().ToUnixTimeSeconds();
         byte[] plain = JsonSerializer.SerializeToUtf8Bytes(new { token, clienttime = time },
             new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
@@ -157,15 +154,15 @@ public sealed partial class MusicAccountProtocol
         {
             AccountRules.Require(plain.Length <= block.Length, "INVALID_CREDENTIALS");
             plain.CopyTo(block, 0);
-            using var rsa = RSA.Create(); rsa.ImportFromPem(KgPublicKey);
+            using var rsa = RSA.Create(); rsa.ImportFromPem(PlatformProtocols.KgPublicKey);
             var key = rsa.ExportParameters(false);
             var p = BigInteger.ModPow(new BigInteger(block, isUnsigned: true, isBigEndian: true),
                 new BigInteger(key.Exponent!, true, true), new BigInteger(key.Modulus!, true, true));
             encrypted = Convert.ToHexString(p.ToByteArray(isUnsigned: true, isBigEndian: true)).PadLeft(256, '0');
         }
         finally { CryptographicOperations.ZeroMemory(plain); CryptographicOperations.ZeroMemory(block); }
-        var data = (await ctx.Send(MusicPlatformRequests.KgWithCookie("/v3/get_my_info", new() { ["plat"] = 1 },
-            cookie, mid, "usercenter.kugou.com", new() { ["visit_time"] = time, ["usertype"] = 1,
+        var data = (await ctx.Send(ctx.Kg("/v3/get_my_info", new() { ["plat"] = 1 },
+            cookie, "usercenter.kugou.com", new() { ["visit_time"] = time, ["usertype"] = 1,
                 ["p"] = encrypted, ["userid"] = JsonNode.Parse(userId) })).ConfigureAwait(false)).Body;
         string[] codes = ["error_code", "errcode", "err_code"];
         var values = codes.Where(k => data[k] is not null).Select(k => Scalar(data[k])).ToArray();
@@ -180,37 +177,6 @@ public sealed partial class MusicAccountProtocol
             AccountRules.Require(Id(returnedId) == userId, "IDENTITY_MISMATCH");
         return Summary("kg", userId, profile["nickname"], profile["pic"], cookie);
     }
-    private static string QrCookie(IReadOnlyList<string> rows, DateTimeOffset now)
-    {
-        AccountRules.Require(rows.Count is > 0 and <= 32, "INVALID_RESPONSE");
-        var parts = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (string row in rows)
-        {
-            AccountRules.Text(row, 8192);
-            string[] fields = row.Split(';');
-            int at = fields[0].IndexOf('=');
-            AccountRules.Require(at > 0, "INVALID_RESPONSE");
-            string key = fields[0][..at].Trim(), value = fields[0][(at + 1)..].Trim();
-            if (key is not ("MUSIC_U" or "__csrf" or "NMTID" or "MUSIC_A")) continue;
-            AccountRules.Require(value.Length > 0 && value.All(c => c is >= '!' and <= '~' && c is not (',' or ';' or '"' or '\\')) &&
-                parts.TryAdd(key, value), "INVALID_RESPONSE");
-            foreach (string field in fields.Skip(1))
-            {
-                int eq = field.IndexOf('=');
-                string name = (eq < 0 ? field : field[..eq]).Trim().ToLowerInvariant();
-                string attribute = eq < 0 ? "" : field[(eq + 1)..].Trim();
-                if (name == "domain")
-                    AccountRules.Require(attribute.ToLowerInvariant() is "music.163.com" or ".music.163.com", "INVALID_RESPONSE");
-                if (name == "max-age")
-                    AccountRules.Require(long.TryParse(attribute, NumberStyles.None, CultureInfo.InvariantCulture, out var age) && age > 0, "AUTH_EXPIRED");
-                if (name == "expires")
-                    AccountRules.Require(DateTimeOffset.TryParse(attribute, CultureInfo.InvariantCulture,
-                        DateTimeStyles.AllowWhiteSpaces | DateTimeStyles.AssumeUniversal, out var expiry) && expiry > now, "AUTH_EXPIRED");
-            }
-        }
-        AccountRules.Require(parts.ContainsKey("MUSIC_U"), "INVALID_RESPONSE");
-        string cookie = string.Join("; ", parts.Select(p => p.Key + "=" + p.Value));
-        _ = AccountRules.Cookies(cookie);
-        return cookie;
-    }
+    private static string QrCookie(IReadOnlyList<string> rows, DateTimeOffset now) =>
+        MusicWyRequestContext.Authorization(rows, now);
 }

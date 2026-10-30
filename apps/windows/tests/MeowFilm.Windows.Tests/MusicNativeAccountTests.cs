@@ -19,7 +19,7 @@ public static class MusicNativeAccountTests
 {
     private const string Wy = "MUSIC_U=SYNTHETIC_WY_SESSION; __csrf=SYNTHETIC_CSRF";
     private const string Tx = "musicid=9007199254740997; musickey=SYNTHETIC_TX_SESSION; encrypt_uin=SYNTHETIC_EUIN";
-    private const string Kg = "userid=9007199254740997; token=SYNTHETIC_KG_TOKEN; KUGOU_API_MID=SYNTHETIC_MID";
+    private const string Kg = "userid=9007199254740997; token=SYNTHETIC_KG_TOKEN; KUGOU_API_MID=123456789";
     private const string LargeId = "9007199254740997";
     private static readonly string Root = Path.GetFullPath(TestWorkspace.DataPath("native-account-fixtures"));
     public static IEnumerable<TestCase> Cases()
@@ -62,7 +62,7 @@ public static class MusicNativeAccountTests
         yield return Case("protocol.timeout-and-real-physical-transport-slots", TransportBudget);
         yield return Case("protocol.no-secret-DTOS-errors-or-ToString", Redaction);
         yield return Case("qr.owner-one-query-per-click-trusted-validate-before-CAS", QrChain);
-        yield return Case("qr.kg-requires-native-device-owner-without-network", UnsupportedQr);
+        yield return Case("qr.unsupported-account-platform-rejects-before-IO", UnsupportedQr);
         yield return Case("qr.unknown-challenge-expiry-cancel-no-network", QrLifetime);
         yield return Case("qr.cookie-body-is-not-Set-Cookie", QrBodyCookie);
         foreach (string row in new[] { "MUSIC_U=SYNTHETIC_QR; Domain=untrusted.invalid", "MUSIC_U=SYNTHETIC_QR; Max-Age=0",
@@ -202,20 +202,9 @@ public static class MusicNativeAccountTests
         public Task<MusicAccountDetailsObservation> ReadAccountDetailsAsync(
             MusicPlatformSession account, CancellationToken token = default) =>
             Task.FromException<MusicAccountDetailsObservation>(new MusicAccountException("UNSUPPORTED"));
-        public Task<MusicAccountChallenge> BeginKgAsync(
-            Func<CancellationToken, Task<StoredKgDevice>> acquire,
-            Func<StoredKgDevice, string, CancellationToken, Task<StoredKgDevice>> save,
-            CancellationToken token) =>
-            Task.FromException<MusicAccountChallenge>(new MusicAccountException("UNSUPPORTED"));
-        public TimeProvider QqFeedbackClock => TimeProvider.System;
         public Task<MusicAccountProfile> VerifyQqFeedbackAccountAsync(
             MusicPlatformSession account, CancellationToken token) =>
             Task.FromException<MusicAccountProfile>(new MusicAccountException("UNSUPPORTED"));
-        public Task<StoredQqQimei> RequestQqQimeiAsync(StoredQqFeedbackDevice device, CancellationToken token) =>
-            Task.FromException<StoredQqQimei>(new MusicAccountException("UNSUPPORTED"));
-        public Task<StoredQqDeviceSession> RequestQqDeviceSessionAsync(
-            StoredQqFeedbackDevice device, CancellationToken token) =>
-            Task.FromException<StoredQqDeviceSession>(new MusicAccountException("UNSUPPORTED"));
         public void Cancel(string platform) { }
         public ValueTask DisposeAsync() { Disposals++; return ValueTask.CompletedTask; }
     }
@@ -226,14 +215,15 @@ public static class MusicNativeAccountTests
         internal MusicPlatformHttp Http { get; }
         internal MusicAccountProtocol Protocol { get; }
         internal MusicAccountOwner Owner { get; }
+        internal MusicClientContextFixture Clients { get; }
         internal Fixture(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>>? send = null,
             MemoryStore? store = null, TimeSpan? timeout = null)
         {
             Store = store ?? new(); Handler = new(send ?? Success);
             Http = MusicPlatformHttp.CreateWithHandler(Handler);
-            Protocol = new(Http, timeout: timeout); Owner = new(Store, Protocol);
+            Clients = new(Http); Protocol = Clients.CreateAccountProtocol(timeout: timeout); Owner = Clients.CreateAccountOwner(Store, Protocol);
         }
-        public async ValueTask DisposeAsync() { await Owner.DisposeAsync(); Http.Dispose(); }
+        public async ValueTask DisposeAsync() { await Owner.DisposeAsync(); await Clients.DisposeAsync(); Http.Dispose(); }
     }
     private static string Key(string platform) => $"[\"meowfilm\",\"music\",1,\"platform-account\",\"{platform}\"]";
     private static string CurrentJson(long generation = 7, string cookie = Wy) => JsonSerializer.Serialize(new
@@ -273,7 +263,8 @@ public static class MusicNativeAccountTests
         using var http = MusicPlatformHttp.CreateWithHandler(new Handler(Success));
         await using (var store = new DpapiDocumentStore(path, [MusicAccountOwner.DocumentNamespace]))
         {
-            await using var owner = new MusicAccountOwner(store, new MusicAccountProtocol(http));
+            await using var clientContext1 = new MusicClientContextFixture(http);
+            await using var owner = clientContext1.CreateAccountOwner(store);
             Ok(await Import(owner));
             foreach (string file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
                 Check(!Encoding.UTF8.GetString(await File.ReadAllBytesAsync(file)).Contains("SYNTHETIC_WY_SESSION", StringComparison.Ordinal));
@@ -282,7 +273,8 @@ public static class MusicNativeAccountTests
         }
         await using (var store = new DpapiDocumentStore(path, [MusicAccountOwner.DocumentNamespace]))
         {
-            await using var owner = new MusicAccountOwner(store, new MusicAccountProtocol(http));
+            await using var clientContext2 = new MusicClientContextFixture(http);
+            await using var owner = clientContext2.CreateAccountOwner(store);
             Check(State(await List(owner)) == "saved");
             Ok(await Command(owner, "logout"));
             Check(State(await List(owner)) == "none");
@@ -308,7 +300,8 @@ public static class MusicNativeAccountTests
         var store = new MemoryStore(); store.Seed(CurrentJson());
         var port = new Port(); var arrived = Signal(); var release = Signal();
         port.Validate = async (p, _, _) => { arrived.SetResult(); await release.Task; return new(p, LargeId, "Fixture user"); };
-        await using var owner = new MusicAccountOwner(store, port);
+        await using var clientContext3 = new MusicClientContextFixture();
+        await using var owner = clientContext3.CreateAccountOwner(store, port);
         var task = Command(owner, "validate"); await Wait(arrived.Task);
         store.Seed(CurrentJson(cookie: "MUSIC_U=SYNTHETIC_OTHER"));
         release.SetResult(); Error(await task, "STORAGE_CONFLICT"); Check(store.Writes == 0);
@@ -324,7 +317,8 @@ public static class MusicNativeAccountTests
     private static async Task LateFailure()
     {
         var store = new MemoryStore(); var port = new Port();
-        await using var owner = new MusicAccountOwner(store, port);
+        await using var clientContext4 = new MusicClientContextFixture();
+        await using var owner = clientContext4.CreateAccountOwner(store, port);
         Ok(await Import(owner));
         var start = Signal(); var release = Signal(); int count = 0;
         port.Validate = async (p, _, _) =>
@@ -343,7 +337,8 @@ public static class MusicNativeAccountTests
     {
         var port = new Port(); var arrived = Signal(); var release = Signal();
         port.Validate = async (p, _, _) => { arrived.SetResult(); await release.Task; return new(p, LargeId, "Fixture user"); };
-        var store = new MemoryStore(); await using var owner = new MusicAccountOwner(store, port);
+        await using var clientContext5 = new MusicClientContextFixture();
+        var store = new MemoryStore(); await using var owner = clientContext5.CreateAccountOwner(store, port);
         using var cancel = new CancellationTokenSource();
         var task = Import(owner, token: cancel.Token); await Wait(arrived.Task);
         cancel.Cancel(); release.SetResult(); Error(await task, "CANCELLED"); Check(store.Writes == 0);
@@ -383,7 +378,8 @@ public static class MusicNativeAccountTests
     private static async Task PrepareClose()
     {
         var store = new MemoryStore(); var port = new Port();
-        await using var owner = new MusicAccountOwner(store, port);
+        await using var clientContext6 = new MusicClientContextFixture();
+        await using var owner = clientContext6.CreateAccountOwner(store, port);
         var arrived = Signal(); var release = Signal();
         store.OnWrite = async (bytes, expected, _) => { arrived.SetResult(); await release.Task; return store.Save(bytes, expected); };
         var save = Import(owner); await Wait(arrived.Task);
@@ -435,7 +431,8 @@ public static class MusicNativeAccountTests
     private static async Task ProfileReflection()
     {
         var port = new Port { Validate = (p, _, _) => Task.FromResult(new MusicAccountProfile(p, LargeId, "SYNTHETIC<SECRET")) };
-        var store = new MemoryStore(); await using var owner = new MusicAccountOwner(store, port);
+        await using var clientContext7 = new MusicClientContextFixture();
+        var store = new MemoryStore(); await using var owner = clientContext7.CreateAccountOwner(store, port);
         Error(await Import(owner, cookie: "MUSIC_U=SYNTHETIC<SECRET"), "INVALID_RESPONSE"); Check(store.Writes == 0);
     }
     private static async Task ObserverFailure()
@@ -537,13 +534,16 @@ public static class MusicNativeAccountTests
     private static async Task WyResponse()
     {
         string body = """{"code":200,"profile":{"userId":18446744073709551615,"nickname":"  ","avatarUrl":"http://127.0.0.1/a"}}""";
+        MusicWyClientContext? client = null;
         await using var f = new Fixture((r, _) =>
         {
             if (r.RequestUri!.AbsolutePath.EndsWith("/vip/info", StringComparison.Ordinal))
                 return Task.FromResult(Json("""{"code":200,"data":{"userId":"18446744073709551615","associator":{"expireTime":0}}}"""));
-            Check(r.RequestUri!.AbsolutePath == "/weapi/w/nuser/account/get" && r.Headers.GetValues("Cookie").Single() == Wy);
+            Check(r.RequestUri!.AbsolutePath == "/weapi/w/nuser/account/get");
+            MusicClientContextFixture.VerifyLocalWyCookie(r, client!, Wy);
             return Task.FromResult(Json(body));
         });
+        client = await f.Clients.Owner.AcquireWyAsync();
         Ok(await Import(f.Owner));
         Check(f.Store.Row()["profile"]!["userId"]!.GetValue<string>() == "18446744073709551615" &&
             f.Store.Row()["profile"]!["displayName"]!.GetValue<string>() == "  " && f.Store.Row()["profile"]!["avatar"] is null);
@@ -585,6 +585,7 @@ public static class MusicNativeAccountTests
     private static async Task KgProtocol()
     {
         string expectedToken = "SYNTHETIC_KG_TOKEN";
+        string expectedMid = "123456789";
         await using var f = new Fixture(async (r, _) =>
         {
             if (r.RequestUri!.Host == "kugouvip.kugou.com")
@@ -598,7 +599,7 @@ public static class MusicNativeAccountTests
             const string salt = "OIlwieks28dk2k092lksi2UIkp";
             string material = salt + string.Concat(query.OrderBy(p => p.Key, StringComparer.Ordinal).Select(p => p.Key + "=" + p.Value)) + bodyText + salt;
             Check(signature == Convert.ToHexStringLower(MD5.HashData(Encoding.UTF8.GetBytes(material))));
-            Check(query["token"] == expectedToken && query["mid"] == "SYNTHETIC_MID");
+            Check(query["token"] == expectedToken && query["mid"] == expectedMid);
             const string key = """
                 -----BEGIN PUBLIC KEY-----
                 MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDIAG7QOELSYoIJvTFJhMpe1s/gbjDJX51HBNnEl5HXqTW6lQ7LC8jr9fWZTwusknp+sVGzwd40MwP6U5yDE27M/X1+UR4tvOGOqp94TJtQ1EPnWGWXngpeIW5GxoQGao1rmYWAu6oi1z9XkChrsUdC6DJE5E221wf/4WLFxwAtRQIDAQAB
@@ -613,9 +614,15 @@ public static class MusicNativeAccountTests
         });
         Ok(await Import(f.Owner, "kg"));
         expectedToken = "SYNTHETIC_KG_<&>'TOKEN";
-        Ok(await Import(f.Owner, "kg", "userid=" + LargeId + "; token=" + expectedToken + "; KUGOU_API_MID=SYNTHETIC_MID"));
-        Error(await Import(f.Owner, "kg", "userid=1; token=SYNTHETIC"), "DEVICE_CONTEXT_REQUIRED");
-        Error(await Import(f.Owner, "kg", "userid=1; token=" + new string('x', 200) + "; KUGOU_API_MID=SYNTHETIC"), "INVALID_CREDENTIALS");
+        Ok(await Import(f.Owner, "kg", "userid=" + LargeId + "; token=" + expectedToken + "; KUGOU_API_MID=123456789"));
+        expectedMid = (await f.Clients.Owner.AcquireKgAsync()).Mid;
+        int calls = f.Handler.Calls;
+        Ok(await Import(f.Owner, "kg", "userid=" + LargeId + "; token=" + expectedToken));
+        Check(f.Handler.Calls == calls + 2, "valid account without legacy MID uses one profile read, one rights read and no registration");
+        calls = f.Handler.Calls;
+        Error(await Import(f.Owner, "kg", "userid=1; token=SYNTHETIC; KUGOU_API_MID=bad"), "DEVICE_CONTEXT_REQUIRED");
+        Error(await Import(f.Owner, "kg", "userid=1; token=" + new string('x', 200) + "; KUGOU_API_MID=123456789"), "INVALID_CREDENTIALS");
+        Check(f.Handler.Calls == calls, "invalid identity and oversized credentials reject before dispatch");
         await using var ssa = new Fixture((_, _) => { var r = Json("""{"status":1,"data":{}}"""); r.Headers.Add("ssa-code", "required"); return Task.FromResult(r); });
         Error(await Import(ssa.Owner, "kg"), "VERIFICATION_REQUIRED");
     }
@@ -645,7 +652,8 @@ public static class MusicNativeAccountTests
         var release = Signal(); var first = Signal();
         var handler = new Handler(async (_, _) => { first.TrySetResult(); await release.Task; return Json(WyProfile()); });
         using var http = MusicPlatformHttp.CreateWithHandler(handler);
-        await using var protocol = new MusicAccountProtocol(http, timeout: TimeSpan.FromMilliseconds(60));
+        await using var clientContext9 = new MusicClientContextFixture(http);
+        await using var protocol = clientContext9.CreateAccountProtocol(timeout: TimeSpan.FromMilliseconds(60));
         await Throws("TIMEOUT", () => protocol.ValidateAsync("wy", Wy)); await Wait(first.Task);
         await Throws("TIMEOUT", () => protocol.ValidateAsync("wy", Wy));
         await Throws("RATE_LIMITED", () => protocol.ValidateAsync("wy", Wy));
@@ -697,7 +705,7 @@ public static class MusicNativeAccountTests
     private static async Task UnsupportedQr()
     {
         await using var f = new Fixture();
-        await Throws("DEVICE_CONTEXT_REQUIRED", () => f.Protocol.BeginAsync("kg"));
+        await Throws("INVALID_REQUEST", () => f.Protocol.BeginAsync("kw"));
         Check(f.Handler.Calls == 0 && f.Store.Reads == 0 && f.Store.Writes == 0);
     }
     private sealed class Clock : TimeProvider
@@ -711,7 +719,8 @@ public static class MusicNativeAccountTests
     private static async Task QrLifetime()
     {
         var handler = new Handler(Success); using var http = MusicPlatformHttp.CreateWithHandler(handler); var clock = new Clock();
-        await using var protocol = new MusicAccountProtocol(http, clock: clock);
+        await using var clientContext10 = new MusicClientContextFixture(http, clock: clock);
+        await using var protocol = clientContext10.CreateAccountProtocol(clock: clock);
         var begin = await protocol.BeginAsync("wy"); Check(handler.Calls == 1);
         Check((await protocol.PollAsync("wy", Guid.NewGuid().ToString(), (_, _) => Task.FromResult(true))).Status == "expired");
         clock.Offset = TimeSpan.FromSeconds(181);
@@ -748,7 +757,8 @@ public static class MusicNativeAccountTests
             Begin = (p, _) => Task.FromResult(new MusicAccountChallenge(p, Guid.NewGuid().ToString(), "https://music.163.com/login?codekey=SYNTHETIC", DateTimeOffset.UtcNow.AddMinutes(3).ToUnixTimeMilliseconds())),
             Poll = (p, id, _, _) => Task.FromResult(new MusicAccountPoll(p, id, "authenticated"))
         };
-        var store = new MemoryStore(); await using var owner = new MusicAccountOwner(store, port);
+        await using var clientContext8 = new MusicClientContextFixture();
+        var store = new MemoryStore(); await using var owner = clientContext8.CreateAccountOwner(store, port);
         Error(await Poll(owner, Challenge(await Command(owner, "qr.begin"))), "HANDOFF_REJECTED");
         Check(store.Writes == 0);
     }
@@ -766,7 +776,8 @@ public static class MusicNativeAccountTests
     private static async Task HandoffBudget()
     {
         var handler = new Handler(Success); using var http = MusicPlatformHttp.CreateWithHandler(handler);
-        await using var protocol = new MusicAccountProtocol(http);
+        await using var clientContext11 = new MusicClientContextFixture(http);
+        await using var protocol = clientContext11.CreateAccountProtocol();
         var arrived = Signal(); var release = Signal();
         Task<bool> Accept(MusicAccountHandoff _, CancellationToken __) => Run();
         async Task<bool> Run() { arrived.TrySetResult(); await release.Task; return true; }

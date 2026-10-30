@@ -7,6 +7,10 @@ import UIKit
 final class MusicProgressSlider: UISlider {
     var buffers: [Range<Double>] = [] { didSet { setNeedsLayout() } }
     var chorus: Double? { didSet { setNeedsLayout() } }
+    var thumbColor = UIColor.white {
+        didSet { if thumbColor != oldValue { setThumb(diameter: thumbDiameter) } }
+    }
+    private var thumbDiameter: CGFloat = 8
     private let buffered = CAShapeLayer()
     private let marker = CALayer()
 
@@ -63,8 +67,9 @@ final class MusicProgressSlider: UISlider {
         setThumb(diameter: 8)
     }
     private func setThumb(diameter: CGFloat) {
+        thumbDiameter = diameter
         let image = UIGraphicsImageRenderer(size: CGSize(width: diameter, height: diameter)).image { _ in
-            UIColor.white.setFill()
+            thumbColor.setFill()
             UIBezierPath(ovalIn: CGRect(x: 0, y: 0, width: diameter, height: diameter)).fill()
         }
         setThumbImage(image, for: .normal)

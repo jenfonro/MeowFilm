@@ -49,7 +49,9 @@ public static class AppCompositionTests
         Check(AppDataPaths.Current.Documents == Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "meowfilm", "aggregate"));
         Check(AppIdentity.ScriptModules.Select(m => m.Id).SequenceEqual(new[] { "music" }));
+        Check(AppIdentity.ScriptModules.Single().Version == "0.5.0");
         Check(AppIdentity.NativeNamespaces.Contains("music.accounts.v1"));
+        Check(AppIdentity.NativeNamespaces.Contains("music.platform-context.v1"));
         return Task.CompletedTask;
     }
     private static async Task Components()
@@ -77,13 +79,11 @@ public static class AppCompositionTests
             RenderComponent(music.View, 1050, 650);
             RenderComponent(music.SettingsView, 860, 650);
             Check(!playback.HasMedia && !runtime.HasStarted, "native browsing does not start playback or Node");
-            Check(!Directory.Exists(Path.Combine(data, "reader-web-profiles")) && !Directory.Exists(Path.Combine(data, "reader-offline")));
-            Check(!methods.Keys.Any(n => n.StartsWith("platform.reader") || n.StartsWith("platform.film")));
-            foreach (string ns in AppIdentity.NativeNamespaces.Concat(new[] { "reader.purchase.v1", "film.pan.accounts.v1" }))
+            foreach (string ns in AppIdentity.NativeNamespaces.Concat(new[] { "unknown.namespace" }))
                 await DeniedDocument(documents, ns);
             var status = await runtime.CallAsync("music.script.status", new { });
             Check(status.GetProperty("ok").GetBoolean() && runtime.HasStarted);
-            foreach (string method in new[] { "music.library.list", "film.sources.list", "reader.sources.list" })
+            foreach (string method in new[] { "music.library.list", "missing.method" })
                 await BridgeTests.Expect("METHOD_UNAVAILABLE", () => runtime.CallAsync(method, new { }));
             await lifecycle.CloseAsync();
         }
@@ -126,6 +126,8 @@ public static class AppCompositionTests
             await using var music = new MusicCapability(application, store, playback);
             var lifecycle = new AppShutdown([music], []);
             var shell = new ShellWindow([music], [], lifecycle.CloseAsync, lifecycle.ForceReleaseAsync);
+            var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            shell.Closed += (_, _) => closed.TrySetResult();
             try
             {
                 CheckRecommendationPage(music);
@@ -172,7 +174,7 @@ public static class AppCompositionTests
             finally
             {
                 shell.Close();
-                await shell.ShutdownCompletion.WaitAsync(TimeSpan.FromSeconds(8));
+                await Task.WhenAll(shell.ShutdownCompletion, closed.Task).WaitAsync(TimeSpan.FromSeconds(8));
                 Check(shell.ShutdownSucceeded, "startup fixture must close through the actual App lifecycle");
                 await Dispatcher.Yield(DispatcherPriority.Background);
             }
@@ -198,6 +200,8 @@ public static class AppCompositionTests
         };
         var lifecycle = new AppShutdown([music], []);
         var shell = new ShellWindow([music], [], lifecycle.CloseAsync, lifecycle.ForceReleaseAsync);
+        var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        shell.Closed += (_, _) => closed.TrySetResult();
         try
         {
             CheckRecommendationPage(music);
@@ -219,7 +223,7 @@ public static class AppCompositionTests
         finally
         {
             shell.Close();
-            await shell.ShutdownCompletion.WaitAsync(TimeSpan.FromSeconds(8));
+            await Task.WhenAll(shell.ShutdownCompletion, closed.Task).WaitAsync(TimeSpan.FromSeconds(8));
             Check(shell.ShutdownSucceeded, "failed startup must still release the actual App");
             await Dispatcher.Yield(DispatcherPriority.Background);
         }

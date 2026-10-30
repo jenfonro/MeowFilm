@@ -8,6 +8,7 @@ final class MeowfilmRootContainerViewController: PageViewController {
     private(set) var dock: MeowfilmDockView?
     var onSelectPage: ((MeowfilmPrimaryPage) -> Void)?
     private var sidebar: MeowfilmSidebarView?
+    private var dockBottom: NSLayoutConstraint?
     var onOpenSettings: (() -> Void)?
 
     init(navigation: PageNavigationController, themeProvider: any PageThemeProviding) {
@@ -25,14 +26,17 @@ final class MeowfilmRootContainerViewController: PageViewController {
 
     func install(surface: MusicPlayerSurface) {
         loadViewIfNeeded()
-        let dock = MeowfilmDockView(surface: surface, themeProvider: themeProvider)
+        surface.observeOutsideInteractions(in: view.window ?? view)
+        let dock = MeowfilmDockView(surface: surface)
         dock.onSelectPage = { [weak self] page in self?.onSelectPage?(page) }
         view.addSubview(dock)
         dock.translatesAutoresizingMaskIntoConstraints = false
+        let bottom = dock.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor)
+        dockBottom = bottom
         NSLayoutConstraint.activate([
             dock.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             dock.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            dock.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
+            bottom,
         ])
         self.dock = dock
         view.setNeedsLayout()
@@ -42,6 +46,9 @@ final class MeowfilmRootContainerViewController: PageViewController {
         super.viewDidLayoutSubviews()
         guard let dock else { return }
         let keyboardTop = view.keyboardLayoutGuide.layoutFrame.minY
+        let keyboardRaised = keyboardTop < view.bounds.maxY - view.safeAreaInsets.bottom - 0.5
+        let bottomInset = keyboardRaised ? 0 : view.safeAreaInsets.bottom
+        if dockBottom?.constant != bottomInset { dockBottom?.constant = bottomInset }
         let occupied = max(0, view.bounds.maxY - dock.frame.minY - view.safeAreaInsets.bottom)
         if abs(navigation.additionalSafeAreaInsets.bottom - occupied) > 0.5 {
             navigation.additionalSafeAreaInsets.bottom = occupied
@@ -52,7 +59,6 @@ final class MeowfilmRootContainerViewController: PageViewController {
 
     func setRootVisible(_ visible: Bool, animated: Bool) {
         dock?.setNavigationVisible(visible)
-        if !visible { dock?.surfaceHost.subviews.compactMap { $0 as? MusicPlayerSurface }.first?.collapse() }
         if animated, let transition = navigation.transitionCoordinator {
             transition.animate(alongsideTransition: { [weak self] _ in self?.view.layoutIfNeeded() })
         } else {

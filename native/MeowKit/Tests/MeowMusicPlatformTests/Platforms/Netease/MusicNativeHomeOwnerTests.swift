@@ -74,7 +74,7 @@ import MeowJSON
         _ = await f.service.close()
     }
 
-    func testOnlyAuthenticationDenialBecomesGuestNotUpstreamOrStorageFailure() async throws {
+    func testExistingAccountAuthenticationDenialNeverBecomesGuestOrHidesOtherFailures() async throws {
         for (code, expected) in [(500, MusicServiceError.upstreamFailed), (429, .rateLimited), (460, .verificationRequired)] {
             let f = try MusicNeteaseNativeFixture(); try await f.enable()
             await f.http.replies("/weapi/w/nuser/account/get", [try MusicNeteaseFixture.response(["code": code])])
@@ -85,8 +85,9 @@ import MeowJSON
         }
         let denied = try MusicNeteaseNativeFixture(); try await denied.enable()
         await denied.http.replies("/weapi/w/nuser/account/get", [try MusicNeteaseFixture.response(["code": 301])])
-        let guest = try await denied.service.nativeHomeBinding()
-        XCTAssertFalse(guest.loggedIn); XCTAssertNil(denied.store.peek(denied.identity))
+        do { _ = try await denied.service.nativeHomeBinding(); XCTFail("Invalid account became guest") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .sessionExpired) }
+        XCTAssertNil(denied.store.peek(denied.identity))
         _ = await denied.service.close()
 
         let locked = try MusicNeteaseNativeFixture(); try await locked.enable()
@@ -235,6 +236,10 @@ import MeowJSON
         catch { XCTAssertEqual(error as? MusicServiceError, .sessionExpired) }
         XCTAssertFalse(original.authorization.isActive)
         XCTAssertThrowsError(try original.authorization.perform { () })
+        do { _ = try await f.service.nativeHomeBinding(); XCTFail("Invalidated account became guest") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .authRequired) }
+        XCTAssertNil(f.store.peek(f.identity))
+        try await f.service.logout(platform: .netease)
         let guest = try await f.service.nativeHomeBinding()
         XCTAssertFalse(guest.loggedIn); XCTAssertNotEqual(guest.scope, original.scope)
         _ = try await f.service.nativeHomePayload(.artistActivity(), binding: guest)

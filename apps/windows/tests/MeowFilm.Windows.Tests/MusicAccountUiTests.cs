@@ -38,11 +38,12 @@ public static class MusicAccountUiTests
             module.SelectedAccount = module.Accounts[0];
             await module.ImportAccountAsync("fixture=x");
             await module.NavigateAsync("favorites", default);
+            var local = module.Songs.Single();
             await module.LogoutAccountAsync(module.SelectedAccount!, confirmed: false);
             Check(runtime.Calls.Count(call => call.Method == "music.accounts.logout") == 0);
             await module.LogoutAccountAsync(module.SelectedAccount!, confirmed: true);
             Check(module.SelectedAccount!.State == "none");
-            Check(module.Songs.Count == 1);
+            Check(module.Songs.Count == 1 && ReferenceEquals(local, module.Songs[0]));
         });
         yield return Test("cancel fences noncooperative validation result and sends explicit platform cancellation", async () =>
         {
@@ -158,6 +159,10 @@ public static class MusicAccountUiTests
             if (method is "music.accounts.import" or "music.accounts.validate" or "music.accounts.logout")
                 return Task.FromResult(BridgeCodec.Value(new { ok = true,
                     account = Account(dto.GetProperty("platform").GetString()!, method.EndsWith("logout", StringComparison.Ordinal) ? "none" : "verified") }));
+            if (method == "music.library.detail")
+                return Task.FromResult(BridgeCodec.Value(new { ok = true, offset = 0, limit = 100, total = 1,
+                    collection = new { id = "favorites", name = "我的收藏", kind = "favorites", revision = 0, count = 1 },
+                    songs = new[] { MusicSongFixture.Local("local-fixture", "合成曲") } }));
             return Task.FromResult(BridgeCodec.Value(new { ok = true }));
         }
     }

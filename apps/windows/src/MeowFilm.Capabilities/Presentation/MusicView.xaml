@@ -44,8 +44,65 @@
    <Setter Property="Padding" Value="8,0"/>
    <Setter Property="BorderThickness" Value="0"/>
   </Style>
+  <Style x:Key="Playlist.PlayAllButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}">
+   <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
+   <Setter Property="Background" Value="Transparent"/>
+   <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}"/>
+   <Setter Property="Padding" Value="16,7"/>
+   <Setter Property="MinHeight" Value="38"/>
+   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+    <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+            BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="10"
+            Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+     <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                       VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+    </Border>
+   </ControlTemplate></Setter.Value></Setter>
+   <Style.Triggers>
+    <Trigger Property="IsMouseOver" Value="True">
+     <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.AccentSoft}"/>
+    </Trigger>
+    <Trigger Property="IsPressed" Value="True">
+     <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Accent}"/>
+     <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.OnAccent}"/>
+    </Trigger>
+    <Trigger Property="IsEnabled" Value="False">
+     <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Disabled}"/>
+     <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Border}"/>
+    </Trigger>
+    <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
+     <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+     <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+     <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+    </Trigger>
+    <MultiTrigger><MultiTrigger.Conditions>
+     <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/>
+     <Condition Property="IsMouseOver" Value="True"/>
+    </MultiTrigger.Conditions>
+     <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+     <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+    </MultiTrigger>
+   </Style.Triggers>
+  </Style>
+  <Style x:Key="Playlist.DialogPrimaryButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.PrimaryButton}">
+   <Setter Property="Width" Value="96"/>
+   <Setter Property="MinHeight" Value="40"/>
+   <Setter Property="Padding" Value="20,8"/>
+   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+    <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+            BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="20"
+            Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+     <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                       VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+    </Border>
+   </ControlTemplate></Setter.Value></Setter>
+  </Style>
+  <Style x:Key="Playlist.DialogTextBox" TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}">
+   <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Window}"/>
+  </Style>
  </ResourceDictionary></UserControl.Resources>
-  <Grid>
+ <Grid>
+  <Grid x:Name="PageContent">
   <Grid.Style><Style TargetType="Grid"><Setter Property="Margin" Value="40,16,24,20"/><Setter Property="MaxWidth" Value="1490"/><Style.Triggers><DataTrigger Binding="{Binding IsCatalogLanding}" Value="True"><Setter Property="Margin" Value="0,12,0,0"/><Setter Property="MaxWidth" Value="{x:Static sys:Double.PositiveInfinity}"/></DataTrigger></Style.Triggers></Style></Grid.Style>
    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
     <RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
@@ -56,8 +113,8 @@
              Background="{DynamicResource MeowFilm.Brush.Surface}"
              BorderBrush="{DynamicResource MeowFilm.Brush.Border}" BorderThickness="1">
       <Border.Style><Style TargetType="Border">
-       <Setter Property="CornerRadius" Value="8"/>
-        <Setter Property="local:CardClip.Radius" Value="8"/>
+       <Setter Property="CornerRadius" Value="18"/>
+        <Setter Property="local:CardClip.Radius" Value="18"/>
        <Style.Triggers><DataTrigger Binding="{Binding IsCatalogArtist}" Value="True">
         <Setter Property="CornerRadius" Value="76"/>
          <Setter Property="local:CardClip.Radius" Value="76"/>
@@ -71,12 +128,13 @@
                          AutomationProperties.Name="{Binding DetailArtworkName}"/>
       </Grid>
      </Border>
-     <StackPanel Grid.Column="1" Margin="22,2,0,0">
+     <Grid Grid.Column="1" Margin="22,2,0,2">
+      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
       <TextBlock Text="{Binding Heading}" FontSize="23" FontWeight="SemiBold"
                  Foreground="{DynamicResource MeowFilm.Brush.Text}" TextTrimming="CharacterEllipsis"/>
-      <StackPanel Orientation="Horizontal" Margin="0,82,0,0">
-       <Button Click="PlayContentDetail_Click" IsEnabled="{Binding CanPlayContentDetail}"
-               Style="{StaticResource MeowFilm.PrimaryButton}" Padding="16,7"
+      <StackPanel Grid.Row="2" Orientation="Horizontal">
+       <Button x:Name="PlayAllButton" Click="PlayContentDetail_Click" IsEnabled="{Binding CanPlayContentDetail}"
+               Style="{StaticResource Playlist.PlayAllButton}"
                AutomationProperties.Name="播放全部">
         <StackPanel Orientation="Horizontal">
          <Path Data="M 0,0 L 0,12 L 10,6 Z" Fill="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"
@@ -85,14 +143,11 @@
         </StackPanel>
        </Button>
       </StackPanel>
-     </StackPanel>
+     </Grid>
     </Grid>
-    <StackPanel Visibility="{Binding IsSongList,Converter={StaticResource Visible}}" HorizontalAlignment="Left">
+    <StackPanel Visibility="{Binding IsHistory,Converter={StaticResource Visible}}" HorizontalAlignment="Left">
      <ComboBox x:Name="HistoryPicker" ItemsSource="{Binding HistoryDates}" SelectionChanged="HistoryDate_Changed" IsEnabled="{Binding CanEdit}"
-      MinWidth="160" Margin="0,0,8,8" Visibility="{Binding IsHistory,Converter={StaticResource Visible}}" AutomationProperties.Name="播放日期"/>
-     <ComboBox ItemsSource="{Binding RecordingCandidates}" DisplayMemberPath="Label" SelectedItem="{Binding SelectedRecording}"
-      MinWidth="160" MaxWidth="280" Margin="0,0,8,8" IsEnabled="{Binding CanEdit}"
-      Visibility="{Binding HasRecordingCandidates,Converter={StaticResource Visible}}" AutomationProperties.Name="指定歌曲录音"/>
+      MinWidth="160" Margin="0,0,8,8" AutomationProperties.Name="播放日期"/>
     </StackPanel>
    </Grid>
    <StackPanel Grid.Row="1">
@@ -185,5 +240,50 @@
      <Button Content="下一页" IsEnabled="{Binding CanNextPage}" Click="NextPage_Click"/>
     </StackPanel>
    </DockPanel>
+ </Grid>
+  <Grid x:Name="PlaylistDialogOverlay" Panel.ZIndex="50" Visibility="Collapsed"
+        Background="#52000000" Focusable="False"
+        KeyboardNavigation.TabNavigation="Cycle"
+        PreviewKeyDown="PlaylistDialog_PreviewKeyDown"
+        AutomationProperties.Name="创建歌单浮层">
+   <Border x:Name="PlaylistDialogPanel" Width="420" MinHeight="252"
+           HorizontalAlignment="Center" VerticalAlignment="Center"
+           Background="{DynamicResource MeowFilm.Brush.Surface}"
+           BorderBrush="{DynamicResource MeowFilm.Brush.Border}" BorderThickness="1"
+           CornerRadius="18" Padding="28">
+    <Border.Effect><DropShadowEffect BlurRadius="24" ShadowDepth="5" Opacity=".2"/></Border.Effect>
+    <Grid KeyboardNavigation.TabNavigation="Cycle">
+     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+     <TextBlock Text="创建歌单" HorizontalAlignment="Center" VerticalAlignment="Center"
+                FontSize="20" FontWeight="SemiBold"/>
+     <Button x:Name="ClosePlaylistDialogButton" Content="&#xE711;"
+             Style="{StaticResource MeowFilm.IconButton}" Width="32" Height="32" MinHeight="32"
+             HorizontalAlignment="Right" VerticalAlignment="Center"
+             Click="ClosePlaylistDialog_Click"
+             AutomationProperties.Name="关闭创建歌单" ToolTip="关闭"/>
+     <Grid Grid.Row="1" Margin="0,24,0,0">
+      <TextBox x:Name="PlaylistNameInput" Height="82" MaxLength="200"
+               Style="{StaticResource Playlist.DialogTextBox}"
+               Padding="14,12,14,28" VerticalContentAlignment="Top"
+               TextChanged="PlaylistName_Changed"
+               AutomationProperties.Name="歌单名称"/>
+      <TextBlock x:Name="PlaylistNamePlaceholder" Text="输入歌单标题"
+                 Margin="15,12,15,0" VerticalAlignment="Top"
+                 Foreground="{DynamicResource MeowFilm.Brush.Muted}"
+                 IsHitTestVisible="False"/>
+      <TextBlock x:Name="PlaylistNameCount" Text="0 / 200"
+                 Margin="15,0,15,10" HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                 FontSize="12" Foreground="{DynamicResource MeowFilm.Brush.Muted}"
+                 IsHitTestVisible="False"/>
+     </Grid>
+     <Button x:Name="CreatePlaylistButton" Grid.Row="2" Content="创建"
+             Style="{StaticResource Playlist.DialogPrimaryButton}"
+             HorizontalAlignment="Center" Margin="0,24,0,0"
+             IsDefault="True" IsEnabled="False"
+             Click="CreatePlaylist_Click"
+             AutomationProperties.Name="创建歌单"/>
+    </Grid>
+   </Border>
+  </Grid>
  </Grid>
 </UserControl>

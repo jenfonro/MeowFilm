@@ -6,9 +6,10 @@ using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
 namespace MeowFilm.Capabilities.Sync;
 
-internal sealed class MusicSyncKg(MusicPlatformSession session, MusicPlatformHttp http, Func<Task> guard, CancellationToken token,
+internal sealed class MusicSyncKg(MusicPlatformSession session, MusicPlatformHttp http,
+    MusicPlatformClientContextOwner clients, MusicPlatformClientContext? client, Func<Task> guard, Action accountGuard, CancellationToken token,
     Func<HttpRequestMessage, CancellationToken, Task<byte[]>>? cloud, MusicSyncRequestBudget budget)
-    : MusicSyncAdapter(session, http, budget, guard, token)
+    : MusicSyncAdapter(session, http, clients, client, budget, guard, accountGuard, token)
 {
     private sealed record Entry(string Id, string ListId, int Type, string Name, string Owner, long Count,
         string? Version, string GlobalId, bool Favorite, bool Special, bool Writable, long Source, long? Sort);
@@ -126,7 +127,7 @@ internal sealed class MusicSyncKg(MusicPlatformSession session, MusicPlatformHtt
     internal override async Task DeleteAsync(SyncRemote remote)
     {
         CheckWriteCapability("delete"); Require(remote.Writable && remote.Kind != "favorites" && !LJ.B(remote.Locator["special"]), "READ_ONLY");
-        await AdmitRequest(); await MusicSyncKgCloud.SendAsync(Session, "/v2/delete_list", O(("listid", JsonNode.Parse(Id(remote.Locator["listId"]))), ("total_ver", 0), ("type", 1)), cloud!, Token); await Guard();
+        await AdmitRequest(); await MusicSyncKgCloud.SendAsync(Session, KgClient, "/v2/delete_list", O(("listid", JsonNode.Parse(Id(remote.Locator["listId"]))), ("total_ver", 0), ("type", 1)), cloud!, Token); await Guard();
     }
     internal override async Task ChangeAsync(SyncRemote remote, bool add, IReadOnlyList<string> ids, IReadOnlyDictionary<string, JsonObject> songs)
     {
@@ -140,9 +141,9 @@ internal sealed class MusicSyncKg(MusicPlatformSession session, MusicPlatformHtt
                 if (PJ.Scalar(source["albumId"] ?? source["album_id"]) is "" or "0" || PJ.Scalar(source["albumAudioId"]) is "" or "0")
                 {
                     // Native catalog detail is read-only and account-bound, never a Node fallback.
-                    using var catalog = new MusicPlatformCatalog(new FixedSession(Session), Http);
+                    using var catalog = new MusicPlatformCatalog(new FixedSession(Session), Http, Clients);
                     await AdmitRequest();
-                    var result = await catalog.SongAsync(new("kg", id, true), Token); await Guard(); source = NativeMusicSong.SourceData(JsonNode.Parse(result.GetRawText())!.AsObject());
+                    var result = await catalog.SongAsync(new("kg", id, true), Token); await AcceptCatalogReadAsync(); source = NativeMusicSong.SourceData(JsonNode.Parse(result.GetRawText())!.AsObject());
                 }
                 string name = LJ.S(source["name"], LJ.S(songs[id]["title"])); Require(LJ.Id(name, 200) && name != "未知歌曲" && !name.Any(c => c is ',' or '|' or '\r' or '\n'), "UNMAPPED_SONG");
                 Require(PlatformSongs.KgHash(source["hash"]) == id, "IDENTITY_MISMATCH");
@@ -165,7 +166,7 @@ internal sealed class MusicSyncKg(MusicPlatformSession session, MusicPlatformHtt
         Require(remote.Locator["version"] is not null, "INCOMPLETE_PAGE");
         var byHash = remote.Members.GroupBy(m => m.Id).ToDictionary(g => g.Key, g => new Queue<string>(g.Select(m => m.Key)));
         var data = new JsonArray(ids.Select((id, index) => (JsonNode)O(("fileid", JsonNode.Parse(byHash[id].Dequeue())), ("sort", index))).ToArray());
-        await AdmitRequest(); await MusicSyncKgCloud.SendAsync(Session, "/v1/modify_song_sort", O(("listid", JsonNode.Parse(Id(remote.Locator["listId"]))),
+        await AdmitRequest(); await MusicSyncKgCloud.SendAsync(Session, KgClient, "/v1/modify_song_sort", O(("listid", JsonNode.Parse(Id(remote.Locator["listId"]))),
             ("list_ver", JsonNode.Parse(Id(remote.Locator["version"]))), ("type", 0), ("data", data)), cloud!, Token); await Guard();
     }
     private sealed class FixedSession(MusicPlatformSession session) : IMusicPlatformSessionSource

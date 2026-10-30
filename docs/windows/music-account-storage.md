@@ -1,20 +1,23 @@
 # 音乐账号存储与生命周期契约
 
+状态归属与受控更新遵循[共同平台上下文](../common/music/platform-client-context.md)。本文件只说明账号文档；独立客户端文档见[Windows 客户端上下文](music-platform-client-context.md)。
+
 ## 唯一 owner 与数据身份
 
 - `MusicAccountOwner` 是 `music.accounts.v1` 的唯一原生 writer；底层使用当前 App 数据身份下的 `IProtectedDocumentStore`。
-- 账号、账号详情、酷狗设备和 QQ feedback 设备共享同一严格文档事务，不能由页面、平台 HTTP 或脚本直接写入。
+- 活动账号和账号详情共享同一严格文档事务，不能由页面、平台 HTTP 或脚本直接写入。
+- 已发布 KG／QQ 旧设备条目仍严格读取并原样保留，只作为新客户端文档首次创建的迁移来源；不再由账号 writer 生成、更新或同步。
 - 缺失文档创建当前空结构。非当前 schema、未知键、未知字段、重复字段、非规范整数、错误指纹或损坏值使整份文档以 `CORRUPT_STORAGE` 失败。
 - 未知 entry 使读取失败，原始字节保持不变。
 
 ## 当前文档成员
 
-文档只允许以下当前成员：
+文档最多允许八个已发布成员：
 
 - 网易云、QQ、酷狗三个账号 entry；
 - 三个平台各自的账号详情 entry；
-- 一个酷狗设备 entry；
-- 一个 QQ feedback 设备 entry。
+- 一个只读迁移用酷狗设备 entry；
+- 一个只读迁移用 QQ feedback 设备 entry。
 
 账号 Cookie、设备密钥及协议材料只存在于受保护文档和有界内存会话中，不进入日志、错误、普通 DTO 或脚本存储。
 
@@ -22,12 +25,12 @@
 
 - 账号命令包括列表、显式凭据导入／验证、退出、取消、二维码开始／轮询以及网易云短信发送／登录。
 - `AcquireAsync`／`AcquireSettledAsync` 返回带平台、用户身份和 generation 的借用会话；消费者必须用同一 owner 的 `IsCurrent` 核对。
-- 登录、退出、账号替换、文档重读和关闭都会推进 generation，撤销旧 lease，并在同步通知完成后允许新状态发布。
+- 登录、退出、账号替换、观察到账号变化和关闭会推进或撤销相应授权资格；同值重读和无关匿名客户端变化不制造账号代次变化。
 - 无账号的标准公开能力只能使用明确的 guest 准入；不能伪造登录、会员或离线权限。
 
 ## 写入与冲突
 
-- 写入在同一 owner 的磁盘串行边界内读取当前文档、核对预期账号／设备／详情、生成唯一当前字节并执行 CAS。
+- 写入在同一 owner 的磁盘串行边界内读取当前文档、核对预期账号／详情、生成唯一当前字节并执行 CAS；KG 授权交接另核对客户端 owner 的实际快照。
 - 登录身份与权益获取完成后，在同一次账号 CAS 中写入账号和绑定其新 generation、scope、userId、value fingerprint 的详情；不会先发布账号成功再等待页面补写权益。当前文档格式不变。
 - 冲突返回 `STORAGE_CONFLICT`；提交回执不可信时返回 `COMMIT_UNKNOWN`。两者都不自动重试、不重放登录或覆盖另一 writer。
 - 重新观察持久状态必须创建或使用新的明确读取操作；失败 owner 不通过“丢弃 pending”恢复为可写状态。

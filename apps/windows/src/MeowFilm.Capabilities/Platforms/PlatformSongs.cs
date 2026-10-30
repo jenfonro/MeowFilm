@@ -62,6 +62,11 @@ internal static partial class PlatformSongs
         }
         return keys.Contains("imageView") ? uri.GetLeftPart(UriPartial.Path) : "";
     }
+    internal static bool HasWyDisplayTitle(JsonNode raw)
+    {
+        var song = PJ.First(PJ.At(raw, "songInfo"), PJ.At(raw, "songData"), PJ.At(raw, "song"), raw);
+        return !string.IsNullOrWhiteSpace(M(PJ.First(PJ.At(song, "name"), PJ.At(song, "title"))));
+    }
     internal static JsonObject Wy(JsonNode raw)
     {
         var s = PJ.First(PJ.At(raw, "songInfo"), PJ.At(raw, "songData"), PJ.At(raw, "song"), raw)!;

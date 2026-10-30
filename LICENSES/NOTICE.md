@@ -4,8 +4,9 @@ The application's own source code is licensed GPL-3.0-only (`GPL-3.0-only.txt`).
 Native C# and Swift adaptations of the projects below are combined GPL-3.0-only code;
 the adapted original portions keep their original licenses and attributions.
 
-No upstream executable, server, account database, Node/Python/Go runtime or
-reference script is bundled or executed. Public protocol keys, request-signing
+No executable, server, account database, Node/Python/Go runtime or reference script
+from the adapted business projects is bundled or executed. Runtime/library dependencies
+are listed separately below. Public protocol keys, request-signing
 constants and device-profile parameters taken from these sources are client
 protocol parameters, not user credentials, and are not an endorsement of their
 cryptographic design. No device-registration bypass, anti-bot simulation,
@@ -51,7 +52,9 @@ Adapted portions:
   `tests/{netease,qq-feedback,kugou-feedback}.test.cjs`.
 - Sync: `MusicSyncAdapter.cs`.
 - iOS: music interface and behavior in `native/MeowKit/Sources/MeowMusicFeature` and
-  `native/MeowKit/Sources/MeowUI`; ported files keep their SPDX and author notices.
+  `native/MeowKit/Sources/MeowUI`; queue appearance and drag admission follow
+  `static/queue-sheet.{js,css}` and `static/list-reorder.js`, with native UIKit
+  movement and presentation. Ported files keep their SPDX and author notices.
 
 ## MeowMusic — GPL-3.0-only
 
@@ -108,14 +111,14 @@ Adapted portions:
   `models/{request,user}.py`, `core/{executor,response,versioning}.py`; QR via
   `qqmusic_api/modules/login.py::{_get_qq_qr,_check_qq_qr,_authorize_qq_qr,_validate_result}`,
   `qqmusic_api/models/{login,request}.py` and `qqmusic_api/utils/common.py::hash33`;
-  feedback device context via `qqmusic_api/utils/{device,qimei,android_session}.py`,
-  `qqmusic_api/core/versioning.py`, `qqmusic_api/models/request.py`,
-  `qqmusic_api/modules/{login,user,song}.py` and `tests/test_qimei.py` vectors;
   profile/entitlement via `qqmusic_api/modules/user.py::get_vip_info` and
   `qqmusic_api/models/user.py::{UserVipInfoResponse,VipIdentity,VipUserInfo}`.
 - Platforms: read-only recipes from `qqmusic_api/modules/{search,song,songlist,user}.py`,
   `models/{base,search,songlist,user}.py` and the response/versioning envelope;
-  `user.get_fav_song`; `song.get_song_urls`.
+  `user.get_fav_song`; `song.get_song_urls`; `ClientContexts/MusicQqClientProtocol.cs`
+  and `ClientContexts/MusicQqQimeiRecipe.cs` adapt `qqmusic_api/utils/{device,qimei,android_session}.py`,
+  `qqmusic_api/core/versioning.py`, `qqmusic_api/models/request.py`,
+  `qqmusic_api/modules/{login,user,song}.py` and `tests/test_qimei.py` vectors.
 - Lyrics: `modules/lyric.py`, `models/lyric.py`, `algorithms/__init__.py` and
   `algorithms/tripledes.py`.
 - Feedback: `FeedbackProtocolQqRequests.cs`, `FeedbackProtocolQqReceipt.cs` and
@@ -130,8 +133,8 @@ Adapted portions:
 
 Adapted portions:
 
-- Accounts: `module/user_detail.js`, `util/{crypto,request}.js`; QR/device via
-  `module/{register_dev,login_qr_key,login_qr_check,login_qr_create}.js`,
+- Accounts: `module/user_detail.js`, `util/{crypto,request}.js`; QR via
+  `module/{login_qr_key,login_qr_check,login_qr_create}.js`,
   `util/crypto.js::{rsaEncrypt2,playlistAesEncrypt,playlistAesDecrypt}`,
   `util/helper.js::{signatureWebParams,signatureAndroidParams}`,
   `util/request.js::createRequest`, `util/util.js::calculateMid`,
@@ -139,7 +142,8 @@ Adapted portions:
   profile/entitlement via `module/user_vip_detail.js`.
 - Platforms: `module/{search,audio,playlist_track_all,playlist_track_all_new,user_playlist}.js`,
   `util/{helper,request}.js`, `util/config.json`; `module/song_url.js`; the `song_climax`
-  chorus recipe.
+  chorus recipe; `ClientContexts/MusicKgClientProtocol.cs` adapts `module/register_dev.js`
+  and its fixed crypto/request helpers with the same retained MIT notice.
 - Lyrics: `module/{search_lyric,lyric}.js` and `util/{request,util}.js`; system ZLibStream
   replaces pako.
 - Feedback: the KG send path was audited but is unavailable; the position-contract patch over
@@ -159,6 +163,23 @@ public song metadata mapper):
 ## Node.js
 
 The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
+
+## QuickJS / quickjs-emscripten — MIT
+
+- Source: `https://github.com/justjake/quickjs-emscripten`, npm release `0.32.0`;
+  registry release gitHead `df4efb9ef2cb25c417ecb57986da462d11b244ed`.
+- Bundled packages: `quickjs-emscripten-core`, `@jitl/quickjs-wasmfile-release-sync`
+  and its/core's shared transitive dependency `@jitl/quickjs-ffi-types`, all `0.32.0`.
+- quickjs-emscripten Copyright (c) 2019-2024 Jake Teton-Landis.
+- QuickJS Copyright (c) 2017-2021 Fabrice Bellard and Charlie Gordon.
+- License: `quickjs-emscripten-LICENSE.txt`, copied byte-for-byte from the
+  release-sync package's combined original LICENSE. Each packaged npm dependency
+  also retains its own original LICENSE.
+
+The unmodified release-sync `dist/emscripten-module.wasm` is the only permitted
+script-engine binary. Its exact package manifest, registry URL/integrity, license,
+length and SHA-256 are pinned in `scripts/quickjs-runtime.json`; no debug/asyncify
+engine variant or upstream reference script is bundled.
 
 ## QR Code generator — MIT
 

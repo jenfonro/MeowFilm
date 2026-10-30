@@ -1,6 +1,7 @@
 using System.IO;
 using System.Text;
 using System.Text.Json.Nodes;
+using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Capabilities.Feedback;
 using static MeowFilm.Windows.Tests.MusicQqFeedbackIntegrationFixture;
 
@@ -13,7 +14,7 @@ public static class MusicQqFeedbackIntegrationTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return Case("default-off-is-passive-and-native", DefaultOff);
-        yield return Case("consent-without-account-cannot-create-device", NoAccount);
+        yield return Case("consent-without-account-cannot-negotiate-or-authorize-feedback", NoAccount);
         yield return Case("default-factory-real-owner-one-settlement", Success);
         yield return Case("no-native-sample-no-listening-credit", NoSample);
         yield return Case("pending-acceptance-and-stall-not-credited", PendingAcceptance);
@@ -23,7 +24,7 @@ public static class MusicQqFeedbackIntegrationTests
         foreach (bool account in new[] { false, true })
         {
             string action = account ? "account-logout" : "settings-revoke";
-            yield return Case(action + "-drains-pending-anonymous-session", () => PendingDevice(account));
+            yield return Case(action + "-fences-feedback-client-close-drains-shared-anonymous-session", () => PendingDevice(account));
             yield return Case(action + "-drains-report-read-and-async-cleanup", () => RevokeResponse(account));
         }
         yield return Case("same-user-replacement-fences-old-track-and-reuses-device", Replacement);
@@ -37,24 +38,33 @@ public static class MusicQqFeedbackIntegrationTests
     private static async Task DefaultOff()
     {
         await using var f = new MusicQqFeedbackIntegrationFixture();
-        await f.App.InitializeAsync(); f.Play(); await f.Drain(); await f.Finish();
-        Check(f.Handler.Steps.Length == 0 && f.Store.Reads(AccountNamespace) == 0 &&
+        await f.App.InitializeAsync();
+        int reads = f.Store.Reads(AccountNamespace);
+        f.Play(); await f.Drain(); await f.Finish();
+        var device = await f.Device();
+        Check(f.Handler.Steps.Length == 0 && f.Store.Reads(AccountNamespace) == reads &&
+            f.Store.Writes(AccountNamespace) == 0 && device["qimei"] is null && device["session"] is null &&
             f.Store.Writes("music.feedback.v1") == 0 && f.Runtime.Calls == 0);
         Check(!(await f.Store.Fingerprint(AccountNamespace)).Exists);
     }
     private static async Task NoAccount()
     {
         await using var f = new MusicQqFeedbackIntegrationFixture();
+        await f.App.InitializeAsync();
         await f.Enable("tx"); f.Play(); await f.Drain(); await f.Finish();
-        Check(f.Handler.Steps.Length == 0 && f.Store.Writes(AccountNamespace) == 0);
+        var device = await f.Device();
+        Check(f.Handler.Steps.Length == 0 && f.Store.Writes(AccountNamespace) == 0 &&
+            device["qimei"] is null && device["session"] is null);
     }
     private static async Task Success()
     {
         await using var f = new MusicQqFeedbackIntegrationFixture();
         await f.Ready(); await f.Accepted();
         Check(f.Handler.Steps.SequenceEqual(["auth", "profile", "qimei", "session", "track"]));
-        Check(f.Store.Writes(AccountNamespace) == 4, "Account plus three acknowledged device CAS writes");
+        Check(f.Store.Writes(AccountNamespace) == 1 && f.Store.Writes(ClientNamespace) == 3,
+            "Account authorization and three client CAS writes have independent owners");
         var before = await f.Store.Fingerprint(AccountNamespace);
+        var clientBefore = await f.Store.Fingerprint(ClientNamespace);
         for (int i = 0; i < 4; i++) f.Feedback.Started("entry-1", 0, 240);
         await f.Drain(); await f.Listen();
         f.Feedback.Finish(); f.Feedback.Finish(); await f.Drain();
@@ -62,7 +72,8 @@ public static class MusicQqFeedbackIntegrationTests
         Check(f.Handler.Count("auth") == 2 && f.Handler.Count("profile") == 2 && f.Handler.Count("track") == 2 &&
             f.Handler.Count("qimei") == 1 && f.Handler.Count("session") == 1 && f.Handler.Count("vkey") == 1 &&
             f.Handler.Count("report") == 1 && f.Handler.Reports.Count == 1 && f.Feedback.LastError is null);
-        Check(before == await f.Store.Fingerprint(AccountNamespace), "Warm Finish cannot churn device/account generations");
+        Check(before == await f.Store.Fingerprint(AccountNamespace) && clientBefore == await f.Store.Fingerprint(ClientNamespace),
+            "Warm Finish cannot churn device/account generations");
         Check(f.Store.Writes("music.feedback.v1") == 1 && f.Store.Writes("music.library.v1") == 0,
             "No durable report/outbox/library side effect");
     }
@@ -117,14 +128,35 @@ public static class MusicQqFeedbackIntegrationTests
     {
         await using var f = new MusicQqFeedbackIntegrationFixture();
         await f.Ready(); var hold = f.Handler.Hold("session"); f.Play(); await hold.Wait();
-        await Revoke(f, account); await hold.Cancelled();
-        var drain = f.Feedback.DrainAsync(); await Pending(drain);
-        Check(f.Handler.Count("track") == 0 && f.Handler.Disposals == 0 && f.Store.Disposals == 0);
-        hold.Release.TrySetResult(); await drain.WaitAsync(TimeSpan.FromSeconds(8)); await f.Finish();
+        try
+        {
+            await Revoke(f, account); await f.Drain(); await f.Finish();
+            Check(!hold.CancelObserved.Task.IsCompleted && f.Handler.Count("track") == 0 &&
+                f.Handler.Disposals == 0 && f.Store.Disposals == 0,
+                "Account or consent revocation retires feedback, not independently owned anonymous registration");
+            if (account) Check(await f.AccountState() == "none");
+            else Check(!(await f.Feedback.ReadSettingsAsync()).Enabled.Contains("tx"));
+            var closing = f.App.PrepareShutdownAsync(); await hold.Cancelled(); await Pending(closing);
+            Check(f.Handler.Disposals == 0 && f.Store.Disposals == 0,
+                "Client shutdown must retain shared resources until anonymous HTTP physically settles");
+            hold.Release.TrySetResult(); await closing.WaitAsync(TimeSpan.FromSeconds(8));
+        }
+        finally { hold.Release.TrySetResult(); }
         var device = await f.Device();
         Check(device["generation"]!.GetValue<long>() == 2 && device["session"] is null &&
-            f.Handler.Count("track") == 0 && f.Handler.Count("report") == 0, "Late anonymous session must not be installed");
-        if (account) Check(await f.AccountState() == "none");
+            f.Handler.Count("track") == 0 && f.Handler.Count("report") == 0,
+            "A session arriving after client shutdown cannot be installed or authorize retired feedback");
+        var closed = await f.App.ExecuteAsync("music.accounts.list");
+        Check(!closed.GetProperty("ok").GetBoolean() && closed.GetProperty("code").GetString() == "CLOSED",
+            "Shutdown preparation must reject new application commands");
+        if (account)
+        {
+            var document = await f.Store.ReadAsync(AccountNamespace);
+            var saved = AccountDocument.Decode(document).Get("tx");
+            Check(document.Fingerprint.Exists && saved.Generation > 0 && saved.Cookie is null &&
+                saved.Profile is null && saved.Scope is null && saved.ValidatedAt is null,
+                "Durable logout remains cleared after independently owned client work settles");
+        }
         else Check(!(await f.Feedback.ReadSettingsAsync()).Enabled.Contains("tx"));
     }
     private static async Task RevokeResponse(bool account)
@@ -234,7 +266,8 @@ public static class MusicQqFeedbackIntegrationTests
         Check(reopened.Handler.Steps.Length == 0, "Cold reopen cannot replay a prior listening instance");
         await reopened.Accepted("cold-new"); await reopened.Listen(); await reopened.Finish();
         Check(reopened.Handler.Steps.SequenceEqual(["auth", "profile", "track", "auth", "profile", "track", "vkey", "report"]) &&
-            reopened.Store.Writes(AccountNamespace) == 0 && JsonNode.DeepEquals(device, await reopened.Device()) &&
+            reopened.Store.Writes(AccountNamespace) == 0 && reopened.Store.Writes(ClientNamespace) == 0 &&
+            JsonNode.DeepEquals(device, await reopened.Device()) &&
             reopened.Feedback.LastError is null, "Reopened warm device still requires live account proof");
     }
     private static async Task BadAck()

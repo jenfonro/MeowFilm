@@ -48,17 +48,17 @@ public static class MusicQqFeedbackContextTests
         yield return Case("other-owner-account-change-observed-and-revoked", OtherOwner);
         yield return Case("other-owner-device-fingerprint-change-observed-and-revoked", OtherDevice);
         yield return Case("device-CAS-conflict-preserves-concurrent-current-entry-no-retry", Conflict);
-        yield return Case("lost-device-receipt-blocks-network-until-explicit-list", Unknown);
-        yield return Case("lost-QIMEI-receipt-never-requests-session-before-readback", () => UnknownStage(2));
-        yield return Case("lost-session-receipt-never-publishes-lease-before-readback", () => UnknownStage(3));
-        yield return Case("account-switch-during-QIMEI-rejects-old-save", () => SwitchStage("qimei"));
-        yield return Case("account-switch-during-GetSession-rejects-old-save", () => SwitchStage("session"));
+        yield return Case("lost-local-client-receipt-blocks-network-until-client-readback", Unknown);
+        yield return Case("lost-QIMEI-receipt-never-requests-session-before-client-readback", () => UnknownStage(1));
+        yield return Case("lost-session-receipt-never-publishes-lease-before-client-readback", () => UnknownStage(2));
+        yield return Case("account-switch-during-QIMEI-retains-anonymous-work-rejects-old-lease", () => SwitchStage("qimei"));
+        yield return Case("account-switch-during-GetSession-retains-anonymous-work-rejects-old-lease", () => SwitchStage("session"));
         yield return Case("corrupt-device-is-not-regenerated-or-overwritten", Corrupt);
-        yield return Case("cancel-admitted-CAS-awaits-settle-unknown-and-explicit-read", CancelWrite);
+        yield return Case("cancel-account-waiter-does-not-own-admitted-client-CAS", CancelWrite);
         foreach (string step in new[] { "auth", "qimei", "session" })
-        { var s = step; yield return Case("cancel-" + s + "-waits-physical-no-late-save", () => CancelHttp(s)); }
+        { var s = step; yield return Case("cancel-" + s + "-physical-work-drains-at-real-owner", () => CancelHttp(s)); }
         yield return Case("one-25second-deadline-covers-chain-and-awaits-handler", Deadline);
-        yield return Case("owner-close-drains-physical-and-borrows-store-http", Close);
+        yield return Case("account-close-fences-lease-client-close-drains-physical-borrowed-dependencies", Close);
         yield return Case("owner-eight-admission-and-cancel-during-physical-hold", Admission);
         yield return Case("lease-budget32-and-dispose-releases-admission", LeaseBudget);
         yield return Case("storage-read-failure-no-HTTP-or-memory-fallback", ReadFailure);
@@ -96,6 +96,13 @@ public static class MusicQqFeedbackContextTests
         catch (OperationCanceledException) { return; }
         throw new InvalidOperationException("Expected cancellation");
     }
+    private static async Task Stopped(Task task)
+    {
+        try { await task.WaitAsync(TimeSpan.FromSeconds(5)); }
+        catch (OperationCanceledException) { return; }
+        catch (MusicPlatformException error) when (error.Code is "CANCELLED" or "CLOSED") { return; }
+        throw new InvalidOperationException("Expected stopped client work");
+    }
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     private static async Task NotDone(Task task)
     { await Task.Delay(30); Check(!task.IsCompleted, "Must retain physical work"); }
@@ -111,11 +118,11 @@ public static class MusicQqFeedbackContextTests
             before = lease.Device;
             Check(ReferenceEquals(account, lease.Account) && lease.IsCurrent);
             Check(f.Handler.Steps.SequenceEqual(["auth", "profile", "qimei", "session"]));
-            Check(f.Store.Writes == 3 && before.DeviceGeneration == 3 && before.SessionGeneration == 1);
+            Check(f.Store.Writes == 2 && before.DeviceGeneration == 3 && before.SessionGeneration == 1);
             var document = await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace);
             var raw = JsonNode.Parse(document.Data!)!.AsObject(); CryptographicOperations.ZeroMemory(document.Data!);
             var entries = raw["entries"]!.AsArray();
-            Check(entries.Count == 3 && entries.Single(e => e!["key"]!.GetValue<string>() == AccountDocument.Key("tx"))!["value"]!.AsObject().Count == 6);
+            Check(entries.Count == 2 && entries.Single(e => e!["key"]!.GetValue<string>() == AccountDocument.Key("tx"))!["value"]!.AsObject().Count == 6);
             var accounts = AccountDocument.Decode(await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace));
             var details = accounts.GetDetails("tx");
             Check(details is not null && details.BelongsTo(accounts.Get("tx")) &&
@@ -150,7 +157,7 @@ public static class MusicQqFeedbackContextTests
     }
     private static async Task QimeiVector()
     {
-        var device = StoredQqFeedbackDevice.Create() with { AndroidId = "47801b8a67701e41" };
+        var device = MusicQqClientContext.Create() with { AndroidId = "47801b8a67701e41" };
         var now = new DateTimeOffset(2026, 10, 23, 2, 0, 0, TimeSpan.Zero);
         const string key = "0123456789abcdef", nonce = "fedcba9876543210";
         using var request = (HttpRequestMessage)typeof(QqQimeiRecipe).GetMethod("RequestCore", BindingFlags.Static | BindingFlags.NonPublic)!
@@ -200,7 +207,7 @@ public static class MusicQqFeedbackContextTests
         var tasks = Enumerable.Range(0, 4).Select(_ => f.Acquire(account)).ToArray();
         var leases = await Task.WhenAll(tasks);
         Check(f.Handler.Steps.Count(s => s == "auth") == 4 && f.Handler.Steps.Count(s => s == "qimei") == 1 &&
-            f.Handler.Steps.Count(s => s == "session") == 1 && f.Store.Writes == 3);
+            f.Handler.Steps.Count(s => s == "session") == 1 && f.Store.Writes == 2);
         foreach (var lease in leases) { Check(lease.IsCurrent && lease.Device.DeviceGeneration == 3); await lease.DisposeAsync(); }
     }
     private static async Task ExactObject()
@@ -312,7 +319,15 @@ public static class MusicQqFeedbackContextTests
     {
         await using var f = new Fixture(); var a = await f.Login();
         await using var old = await f.Acquire(a);
-        await f.Mutate(root => DeviceRow(root)["session"]!["sid"] = "SYNTHETIC_OTHER_SID");
+        await f.MutateClient(root =>
+        {
+            var device = root["tx"]!;
+            device["generation"] = device["generation"]!.GetValue<long>() + 1;
+            device["session"]!["generation"] = device["session"]!["generation"]!.GetValue<long>() + 1;
+            device["session"]!["sid"] = "SYNTHETIC_OTHER_SID";
+        });
+        await f.Clients.Owner.ReloadAsync();
+        Check(f.Owner.IsCurrent(a), "Anonymous client observation cannot revoke an account authorization");
         await using var next = await f.Acquire(a);
         Check(old.Revoked.IsCancellationRequested && !old.IsCurrent && next.Device.Sid == "SYNTHETIC_OTHER_SID");
     }
@@ -321,69 +336,83 @@ public static class MusicQqFeedbackContextTests
         await using var f = new Fixture(); var a = await f.Login();
         f.Store.Conflict = true;
         await Error(async () => await f.Acquire(a), "STORAGE_CONFLICT");
-        Check(f.Store.Writes == 1 && !f.Handler.Steps.Contains("qimei"));
+        Check(f.Store.Writes == 1 && f.Handler.Steps.Contains("qimei") && !f.Handler.Steps.Contains("session"));
+        Check(f.Owner.IsCurrent(a));
         await using var next = await f.Acquire(a);
-        Check(next.IsCurrent && (await f.RootJson())["entries"]!.AsArray()
-            .Any(e => e!["key"]!.GetValue<string>() == AccountDocument.Key("wy")));
+        Check(next.IsCurrent && (await MusicClientContextFixture.ReadDocument(f.Store.Inner))["wy"]!["nmtid"]!.GetValue<string>() == "SYNTHETIC_CONCURRENT");
     }
     private static async Task Unknown()
     {
-        await using var f = new Fixture(); var a = await f.Login();
+        await using var f = new Fixture();
         f.Store.LoseReceipt = true;
-        await Error(async () => await f.Acquire(a), "COMMIT_UNKNOWN");
+        await Error(() => f.Clients.Owner.InitializeAsync(), "COMMIT_UNKNOWN");
         int calls = f.Handler.Steps.Count;
-        await Error(async () => await f.Acquire(a), "COMMIT_UNKNOWN");
-        Check(f.Handler.Steps.Count == calls && !f.Handler.Steps.Contains("qimei"));
+        await Error(() => f.Clients.Owner.InitializeAsync(), "COMMIT_UNKNOWN");
+        Check(f.Handler.Steps.Count == calls && calls == 0 && f.Store.Writes == 1);
         f.Store.LoseReceipt = false;
         var listed = await f.Owner.CallAsync("music.accounts.list"); Check(listed.GetProperty("ok").GetBoolean());
+        Check(f.Clients.Owner.NeedsReconciliation);
+        await f.Clients.Owner.ReloadAsync();
+        var a = await f.Login();
         await using var next = await f.Acquire(a);
-        Check(next.IsCurrent && f.Store.Writes == 3 && next.Device.DeviceGeneration == 3);
+        Check(next.IsCurrent && f.Store.Writes == 2 && next.Device.DeviceGeneration == 3);
     }
     private static async Task UnknownStage(int stage)
     {
         await using var f = new Fixture(); var a = await f.Login();
         f.Store.LoseAt = stage;
         await Error(async () => await f.Acquire(a), "COMMIT_UNKNOWN");
-        Check(f.Store.Writes == stage && (stage != 2 || !f.Handler.Steps.Contains("session")));
+        Check(f.Store.Writes == stage && (stage != 1 || !f.Handler.Steps.Contains("session")));
         int calls = f.Handler.Steps.Count;
         await Error(async () => await f.Acquire(a), "COMMIT_UNKNOWN");
         Check(f.Handler.Steps.Count == calls);
         Check((await f.Owner.CallAsync("music.accounts.list")).GetProperty("ok").GetBoolean());
+        Check(f.Owner.IsCurrent(a) && f.Clients.Owner.NeedsReconciliation);
+        await Error(async () => await f.Acquire(a), "COMMIT_UNKNOWN");
+        Check(f.Handler.Steps.Count == calls);
         f.Store.LoseAt = 0;
+        await f.Clients.Owner.ReloadAsync();
         await using var recovered = await f.Acquire(a);
-        Check(recovered.IsCurrent && f.Store.Writes == 3 && recovered.Device.DeviceGeneration == 3);
+        Check(recovered.IsCurrent && f.Store.Writes == 2 && recovered.Device.DeviceGeneration == 3);
         Check(f.Handler.Steps.Count(s => s == "qimei") == 1 && f.Handler.Steps.Count(s => s == "session") == 1);
     }
     private static async Task SwitchStage(string step)
     {
         await using var f = new Fixture(); var a = await f.Login();
+        var before = await f.Device();
         f.Handler.Hold = step;
         var pending = f.Acquire(a); await f.Handler.Arrived.Task;
         var replacement = await f.Login(); // Login resets write counter, not device state.
         f.Handler.Release.TrySetResult();
         await Error(async () => await pending, "SESSION_CHANGED");
-        Check(f.Owner.IsCurrent(replacement) && f.Store.Writes == 0 && (await f.Device()).Session is null);
-        await using var next = await f.Acquire(replacement); Check(next.IsCurrent);
+        Check(f.Owner.IsCurrent(replacement));
+        await using var next = await f.Acquire(replacement);
+        Check(next.IsCurrent && next.Device.DeviceGeneration == 3 && next.Device.InstallationId == before.InstallationId &&
+            f.Handler.SessionRequests.Count == 1 && f.Store.Writes == (step == "qimei" ? 2 : 1));
     }
     private static async Task Corrupt()
     {
         await using var f = new Fixture(); var a = await f.Login();
         await using var old = await f.Acquire(a); int writes = f.Store.Writes;
-        await f.Mutate(root => DeviceRow(root)["imei"] = "not-an-imei");
+        await f.MutateClient(root => root["tx"]!["imei"] = "not-an-imei");
+        await Error(() => f.Clients.Owner.ReloadAsync(), "CORRUPT_STORAGE");
         await Error(async () => await f.Acquire(a), "CORRUPT_STORAGE");
         Check(old.Revoked.IsCancellationRequested && !old.IsCurrent && f.Store.Writes == writes);
-        Check(!(await f.Owner.CallAsync("music.accounts.list")).GetProperty("ok").GetBoolean());
+        Check((await f.Owner.CallAsync("music.accounts.list")).GetProperty("ok").GetBoolean() && f.Owner.IsCurrent(a));
     }
     private static async Task CancelWrite()
     {
         await using var f = new Fixture(); var a = await f.Login();
         f.Store.Hold = true; using var cancel = new CancellationTokenSource();
         var pending = f.Acquire(a, cancel.Token); await f.Store.Arrived.Task;
-        cancel.Cancel(); await NotDone(pending);
-        var read = f.Owner.CallAsync("music.accounts.list"); await NotDone(read);
+        var shared = f.Clients.Owner.EnsureQqAsync(f.Clients.Protocol, default);
+        cancel.Cancel(); await Cancelled(async () => await pending.WaitAsync(TimeSpan.FromSeconds(5)));
+        await NotDone(shared);
+        var read = f.Owner.CallAsync("music.accounts.list");
+        Check((await read).GetProperty("ok").GetBoolean() && f.Owner.IsCurrent(a));
         f.Store.Release.TrySetResult();
-        await Error(async () => await pending, "COMMIT_UNKNOWN");
-        Check((await read).GetProperty("ok").GetBoolean() && !f.Handler.Steps.Contains("qimei"));
+        await shared.WaitAsync(TimeSpan.FromSeconds(5));
+        Check(f.Store.Writes == 2 && !f.Clients.Owner.NeedsReconciliation && f.Handler.SessionRequests.Count == 1);
         f.Store.Hold = false;
         await using var next = await f.Acquire(a); Check(next.IsCurrent);
     }
@@ -392,8 +421,23 @@ public static class MusicQqFeedbackContextTests
         await using var f = new Fixture(); var a = await f.Login();
         using var cancel = new CancellationTokenSource(); f.Handler.Hold = step;
         var pending = f.Acquire(a, cancel.Token); await f.Handler.Arrived.Task;
-        int writes = f.Store.Writes; cancel.Cancel(); await NotDone(pending);
-        f.Handler.Release.TrySetResult(); await Cancelled(async () => await pending);
+        int writes = f.Store.Writes;
+        Task? drain = null;
+        Task<MusicQqClientContext>? shared = step == "auth" ? null : f.Clients.Owner.EnsureQqAsync(f.Clients.Protocol, default);
+        cancel.Cancel();
+        if (shared is null) await NotDone(pending);
+        else
+        {
+            await Cancelled(async () => await pending.WaitAsync(TimeSpan.FromSeconds(5)));
+            drain = f.Clients.Owner.PrepareShutdownAsync(); await NotDone(drain);
+        }
+        f.Handler.Release.TrySetResult();
+        if (shared is null) await Cancelled(async () => await pending);
+        else
+        {
+            await Stopped(shared); await drain!;
+            await f.Clients.Owner.CancelShutdownPreparationAsync();
+        }
         Check(f.Store.Writes == writes && (await f.Device()).Session is null);
     }
     private static async Task Deadline()
@@ -401,16 +445,25 @@ public static class MusicQqFeedbackContextTests
         await using var f = new Fixture(); var a = await f.Login();
         f.Handler.Hold = "session";
         var pending = f.Acquire(a); await f.Handler.Arrived.Task;
-        f.Clock.Advance(TimeSpan.FromSeconds(25)); await NotDone(pending);
-        f.Handler.Release.TrySetResult(); await Error(async () => await pending, "TIMEOUT");
+        var shared = f.Clients.Owner.EnsureQqAsync(f.Clients.Protocol, default);
+        f.Clock.Advance(TimeSpan.FromSeconds(25));
+        await Error(async () => await pending.WaitAsync(TimeSpan.FromSeconds(5)), "TIMEOUT");
+        await NotDone(shared);
+        f.Handler.Release.TrySetResult();
+        await Error(async () => await shared, "TIMEOUT");
         Check((await f.Device()).Session is null);
     }
     private static async Task Close()
     {
         await using var f = new Fixture(); var a = await f.Login();
         f.Handler.Hold = "qimei"; var pending = f.Acquire(a); await f.Handler.Arrived.Task;
-        var close = f.Owner.PrepareCloseAsync(); await NotDone(pending); await NotDone(close);
-        f.Handler.Release.TrySetResult(); await Error(async () => await pending, "CLOSED"); await close;
+        var shared = f.Clients.Owner.EnsureQqAsync(f.Clients.Protocol, default);
+        var close = f.Owner.PrepareCloseAsync();
+        await Error(async () => await pending.WaitAsync(TimeSpan.FromSeconds(5)), "CLOSED");
+        await close.WaitAsync(TimeSpan.FromSeconds(5));
+        await NotDone(shared);
+        var clientClose = f.Clients.Owner.PrepareShutdownAsync(); await NotDone(clientClose);
+        f.Handler.Release.TrySetResult(); await Stopped(shared); await clientClose;
         await f.Owner.DisposeAsync();
         Check(f.Store.Disposals == 0 && f.Handler.Disposals == 0);
         using var request = FeedbackRequest(); await f.Http.SendQqFeedbackJsonAsync(request, default);
@@ -472,7 +525,7 @@ public static class MusicQqFeedbackContextTests
     private static async Task HttpRoutes()
     {
         var handler = new RawHandler((_, _) => Task.FromResult(Raw("{}"))); using var http = MusicPlatformHttp.CreateWithHandler(handler);
-        _ = await http.SendQqDeviceJsonAsync(MusicQqDeviceHttpStep.Qimei, QqQimeiRecipe.Request(StoredQqFeedbackDevice.Create(), DateTimeOffset.UtcNow), default);
+        _ = await http.SendQqDeviceJsonAsync(MusicQqDeviceHttpStep.Qimei, QqQimeiRecipe.Request(MusicQqClientContext.Create(), DateTimeOffset.UtcNow), default);
         _ = await http.SendQqDeviceJsonAsync(MusicQqDeviceHttpStep.Account,
             MusicPlatformRequests.TxWithCookie("music.UserInfo.userInfoServer", "GetLoginUserInfo", new(), Cookie), default);
         _ = await http.SendQqDeviceJsonAsync(MusicQqDeviceHttpStep.Profile,
@@ -544,14 +597,14 @@ public static class MusicQqFeedbackContextTests
         var handler = new RawHandler((_, _) => Task.FromResult(Raw("{}"))); using var http = MusicPlatformHttp.CreateWithHandler(handler);
         foreach (string field in new[] { "method", "service", "appid" })
         {
-            var request = QqQimeiRecipe.Request(StoredQqFeedbackDevice.Create(), DateTimeOffset.UtcNow);
+            var request = QqQimeiRecipe.Request(MusicQqClientContext.Create(), DateTimeOffset.UtcNow);
             request.Headers.Add(field, "SYNTHETIC_OTHER");
             await Error(async () => await http.SendQqDeviceJsonAsync(MusicQqDeviceHttpStep.Qimei, request, default), "ORIGIN_DENIED");
         }
-        var auth = QqQimeiRecipe.Request(StoredQqFeedbackDevice.Create(), DateTimeOffset.UtcNow);
+        var auth = QqQimeiRecipe.Request(MusicQqClientContext.Create(), DateTimeOffset.UtcNow);
         auth.Headers.Add("Cookie", "SYNTHETIC");
         await Error(async () => await http.SendQqDeviceJsonAsync(MusicQqDeviceHttpStep.Qimei, auth, default), "ORIGIN_DENIED");
-        var extra = QqQimeiRecipe.Request(StoredQqFeedbackDevice.Create(), DateTimeOffset.UtcNow);
+        var extra = QqQimeiRecipe.Request(MusicQqClientContext.Create(), DateTimeOffset.UtcNow);
         var body = JsonNode.Parse(await extra.Content!.ReadAsStringAsync())!.AsObject(); body["extra"] = "SYNTHETIC";
         extra.Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json");
         await Error(async () => await http.SendQqDeviceJsonAsync(MusicQqDeviceHttpStep.Qimei, extra, default), "INVALID_REQUEST");
@@ -678,8 +731,6 @@ public static class MusicQqFeedbackContextTests
         { Arrived.TrySetResult(); await Release.Task; await base.DisposeAsync(); }
     }
 
-    private static JsonObject DeviceRow(JsonObject root) => root["entries"]!.AsArray()
-        .Single(e => e!["key"]!.GetValue<string>() == AccountDocument.QqFeedbackDeviceKey)!["value"]!.AsObject();
     private sealed class Fixture : IAsyncDisposable
     {
         internal readonly string Root;
@@ -688,17 +739,20 @@ public static class MusicQqFeedbackContextTests
         internal readonly TestHandler Handler;
         internal readonly MusicPlatformHttp Http;
         internal readonly MusicAccountOwner Owner;
+        internal readonly MusicClientContextFixture Clients;
         internal Fixture(string? root = null)
         {
             Root = root ?? TestWorkspace.DataPath("qq-context-fixtures", Guid.NewGuid().ToString("N"));
             TestWorkspace.ValidatePath(TestWorkspace.DataRoot, Root);
             Directory.CreateDirectory(Root);
-            Store = new(new DpapiDocumentStore(Root, [MusicAccountOwner.DocumentNamespace]));
+            Store = new(new DpapiDocumentStore(Root, [MusicAccountOwner.DocumentNamespace, MusicPlatformClientContextOwner.DocumentNamespace]));
             Handler = new(this); Http = MusicPlatformHttp.CreateWithHandler(Handler);
-            Owner = new(Store, new MusicAccountProtocol(Http, clock: Clock), clock: Clock);
+            Clients = new(Http, Store, importAccounts: true, clock: Clock);
+            Owner = Clients.CreateAccountOwner(Store);
         }
         internal async Task<MusicPlatformSession> Login()
         {
+            await Clients.Owner.InitializeAsync();
             var result = await Owner.CallAsync("music.accounts.import", new { platform = "tx", cookie = Cookie });
             Check(result.GetProperty("ok").GetBoolean(), "Synthetic import");
             var account = await Owner.AcquireAsync("tx"); Check(account is not null);
@@ -706,30 +760,19 @@ public static class MusicQqFeedbackContextTests
         }
         internal Task<IMusicQqFeedbackContextLease> Acquire(MusicPlatformSession a, CancellationToken token = default) =>
             ((IMusicQqFeedbackContextSource)Owner).AcquireForAccountAsync(a, token).AsTask();
-        internal async Task<StoredQqFeedbackDevice> Device() => AccountDocument.Decode(await Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).GetQqFeedbackDevice();
+        internal async Task<MusicQqClientContext> Device() => await Clients.Owner.AcquireQqAsync();
         internal async Task<JsonObject> RootJson()
         {
             var doc = await Store.Inner.ReadAsync(MusicAccountOwner.DocumentNamespace);
             try { return JsonNode.Parse(doc.Data!)!.AsObject(); }
             finally { CryptographicOperations.ZeroMemory(doc.Data!); }
         }
-        internal async Task Mutate(Action<JsonObject> change)
-        {
-            var doc = await Store.Inner.ReadAsync(MusicAccountOwner.DocumentNamespace);
-            try
-            {
-                var root = JsonNode.Parse(doc.Data!)!.AsObject(); change(root);
-                byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(root);
-                try { await Store.Inner.WriteAsync(MusicAccountOwner.DocumentNamespace, bytes, doc.Fingerprint); }
-                finally { CryptographicOperations.ZeroMemory(bytes); }
-            }
-            finally { CryptographicOperations.ZeroMemory(doc.Data!); }
-        }
+        internal Task MutateClient(Action<JsonObject> change) => MusicClientContextFixture.MutateDocument(Store.Inner, change);
         public async ValueTask DisposeAsync()
         {
             Handler.Release.TrySetResult(); Store.Release.TrySetResult();
             try { await Owner.DisposeAsync(); }
-            finally { Http.Dispose(); await Store.DisposeAsync(); }
+            finally { await Clients.DisposeAsync(); Http.Dispose(); await Store.DisposeAsync(); }
         }
     }
     private sealed class TestStore(DpapiDocumentStore inner) : IProtectedDocumentStore
@@ -746,18 +789,24 @@ public static class MusicQqFeedbackContextTests
             if (Hold) { Arrived.TrySetResult(); await Release.Task; token = default; }
             if (Conflict)
             {
-                Conflict = false; var document = await inner.ReadAsync(ns);
-                try
+                Conflict = false;
+                if (ns == MusicPlatformClientContextOwner.DocumentNamespace)
+                    await MusicClientContextFixture.ConcurrentClientWrite(inner);
+                else
                 {
-                    var root = JsonNode.Parse(document.Data!)!;
-                    root["entries"]!.AsArray().Add(new JsonObject { ["key"] = AccountDocument.Key("wy"),
-                        ["value"] = new JsonObject { ["version"] = 1, ["generation"] = 1, ["cookie"] = null,
-                            ["profile"] = null, ["scope"] = null, ["validatedAt"] = null } });
-                    byte[] other = JsonSerializer.SerializeToUtf8Bytes(root);
-                    try { await inner.WriteAsync(ns, other, document.Fingerprint); }
-                    finally { CryptographicOperations.ZeroMemory(other); }
+                    var document = await inner.ReadAsync(ns);
+                    try
+                    {
+                        var root = JsonNode.Parse(document.Data!)!;
+                        root["entries"]!.AsArray().Add(new JsonObject { ["key"] = AccountDocument.Key("wy"),
+                            ["value"] = new JsonObject { ["version"] = 1, ["generation"] = 1, ["cookie"] = null,
+                                ["profile"] = null, ["scope"] = null, ["validatedAt"] = null } });
+                        byte[] other = JsonSerializer.SerializeToUtf8Bytes(root);
+                        try { await inner.WriteAsync(ns, other, document.Fingerprint); }
+                        finally { CryptographicOperations.ZeroMemory(other); }
+                    }
+                    finally { CryptographicOperations.ZeroMemory(document.Data!); }
                 }
-                finally { CryptographicOperations.ZeroMemory(document.Data!); }
             }
             var receipt = await inner.WriteAsync(ns, bytes, expected, token);
             if (LoseReceipt || LoseAt != 0 && Writes == LoseAt) throw new ProtectedDocumentException(DocumentStoreError.Storage);

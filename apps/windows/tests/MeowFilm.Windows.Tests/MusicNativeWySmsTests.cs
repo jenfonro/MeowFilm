@@ -219,7 +219,7 @@ public static class MusicNativeWySmsTests
         await using var f = new WySmsFixture(timeout: TimeSpan.FromMilliseconds(150)); f.Transport.HoldAt = "send";
         var result = await Send(f.Owner).WaitAsync(TimeSpan.FromSeconds(4));
         Check(Code(result) == "SMS_SEND_UNCONFIRMED" && f.Store.Writes == 0);
-        f.Transport.Release.TrySetResult(); await f.Transport.Settled.Task;
+        f.Transport.Release.TrySetResult(); await f.Transport.Settled.Task.WaitAsync(TimeSpan.FromSeconds(4));
         Check(Code(await Send(f.Owner)) == "RATE_LIMITED" && f.Transport.Calls == 1);
     }
     private static async Task LoginDeadline()
@@ -232,7 +232,7 @@ public static class MusicNativeWySmsTests
     {
         await using var f = new WySmsFixture();
         f.Transport.HoldEverySend = true;
-        var one = Send(f.Owner, "10000000001"); await f.Transport.Arrived.Task;
+        var one = Send(f.Owner, "10000000001"); await f.Transport.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(4));
         var two = Send(f.Owner, "10000000002"); await Until(() => f.Transport.Calls == 2);
         Check(Code(await Send(f.Owner, "10000000003")) == "RATE_LIMITED" && f.Transport.Calls == 2);
         f.Transport.Release.TrySetResult();
@@ -256,8 +256,9 @@ public static class MusicNativeWySmsTests
     private static async Task OtherOwner()
     {
         await using var f = new WySmsFixture();
-        await using var secondHttp = new AsyncHttp(MusicPlatformHttp.CreateWithHandler(new WySmsHandler()));
-        await using var other = new MusicAccountOwner(f.Store, new MusicAccountProtocol(secondHttp.Value));
+        await using var secondHttp = new AsyncHttp(MusicPlatformHttp.CreateWithHandler(new WySmsHandler(f.Store.Inner)));
+        await using var clientContext1 = new MusicClientContextFixture(secondHttp.Value, f.Store.Inner, importAccounts: true);
+        await using var other = clientContext1.CreateAccountOwner(f.Store);
         f.Transport.BeforeStatus = async () => Check(Ok(await other.CallAsync("music.accounts.logout", new { platform = "wy" })));
         Check(Code(await Login(f.Owner)) == "STORAGE_CONFLICT" && await f.Owner.AcquireAsync("wy") is null);
     }
@@ -335,22 +336,25 @@ internal sealed class WySmsClock : TimeProvider
 internal sealed class WySmsFixture : IAsyncDisposable
 {
     internal readonly WySmsStore Store;
-    internal readonly WySmsHandler Transport = new();
+    internal readonly WySmsHandler Transport;
     internal readonly WySmsClock Clock = new();
     internal readonly MusicPlatformHttp Http;
     internal readonly MusicAccountProtocol Protocol;
     internal readonly MusicAccountOwner Owner;
+    internal readonly MusicClientContextFixture Clients;
     internal WySmsFixture(string? root = null, TimeSpan? timeout = null)
     {
-        Store = new(new DpapiDocumentStore(root ?? MusicNativeWySmsTests.Root(), ["music.accounts.v1"]));
+        Store = new(new DpapiDocumentStore(root ?? MusicNativeWySmsTests.Root(), ["music.accounts.v1", MusicPlatformClientContextOwner.DocumentNamespace]));
+        Transport = new(Store.Inner);
         Http = MusicPlatformHttp.CreateWithHandler(Transport);
-        Protocol = new(Http, clock: Clock, timeout: timeout); Owner = new(Store, Protocol);
+        Clients = new(Http, Store.Inner, importAccounts: true, clock: Clock);
+        Protocol = Clients.CreateAccountProtocol(timeout: timeout); Owner = Clients.CreateAccountOwner(Store, Protocol);
     }
     public async ValueTask DisposeAsync()
     {
         Transport.Release.TrySetResult(); Store.Release.TrySetResult();
         try { await Owner.DisposeAsync(); }
-        finally { Http.Dispose(); await Store.DisposeAsync(); }
+        finally { await Clients.DisposeAsync(); Http.Dispose(); await Store.DisposeAsync(); }
     }
 }
 internal sealed class WySmsStore(DpapiDocumentStore inner) : IProtectedDocumentStore
@@ -394,7 +398,7 @@ internal sealed class WySmsStore(DpapiDocumentStore inner) : IProtectedDocumentS
     }
     public async ValueTask DisposeAsync() { Disposals++; await inner.DisposeAsync(); }
 }
-internal sealed class WySmsHandler : HttpMessageHandler
+internal sealed class WySmsHandler(IProtectedDocumentStore store) : HttpMessageHandler
 {
     // Deliberately synthetic, never sent to a network. Every request is intercepted.
     internal const string Phone = "10000000000", Captcha = "864209", Cookie = "MUSIC_U=SYNTHETIC_WY_SESSION";
@@ -420,8 +424,9 @@ internal sealed class WySmsHandler : HttpMessageHandler
         MusicNativeWySmsTests.Check(step != "unknown" && uri.Scheme == "https" && uri.IsDefaultPort &&
             uri.Query.Length == 0 && request.Method == HttpMethod.Post);
         if (step == "qr") return Raw("{\"code\":200,\"unikey\":\"SYNTHETIC_WY_QR\"}");
-        MusicNativeWySmsTests.Check(uri.Host == "music.163.com" && request.Headers.GetValues("Cookie").Single() ==
-            (step is "status" or "rights" ? Cookie : "__remember_me=true"));
+        MusicNativeWySmsTests.Check(uri.Host == "music.163.com");
+        var client = MusicClientContextDocument.Decode(await store.ReadAsync(MusicPlatformClientContextOwner.DocumentNamespace)).Wy;
+        MusicClientContextFixture.VerifyLocalWyCookie(request, client, step is "status" or "rights" ? Cookie : null);
         string body = await request.Content!.ReadAsStringAsync();
         var fields = body.Split('&').ToDictionary(p => p.Split('=', 2)[0], p => Uri.UnescapeDataString(p.Split('=', 2)[1]));
         MusicNativeWySmsTests.Check(fields.Count == 2 && fields.ContainsKey("params") && fields["encSecKey"].Length == 256 &&

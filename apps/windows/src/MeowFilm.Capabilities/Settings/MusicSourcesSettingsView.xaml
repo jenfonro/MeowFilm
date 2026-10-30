@@ -6,7 +6,8 @@
  Loaded="View_Loaded" Unloaded="View_Unloaded" SizeChanged="View_SizeChanged"
  IsVisibleChanged="View_IsVisibleChanged" DataContextChanged="View_DataContextChanged"
  PreviewKeyDown="View_PreviewKeyDown"
- FontFamily="{DynamicResource MeowFilm.Font.Body}" FontSize="14"
+ FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="14"
+ TextOptions.TextRenderingMode="Grayscale"
  Foreground="{DynamicResource Settings.Brush.Text}" ClipToBounds="True">
  <UserControl.Resources>
   <ResourceDictionary>

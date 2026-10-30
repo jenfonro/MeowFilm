@@ -8,6 +8,7 @@ namespace MeowFilm.Capabilities.Search;
 public sealed class NativeMusicSearchDiscovery : IMusicSearchDiscovery
 {
     private readonly IMusicPlatformSessionSource sessions;
+    private readonly MusicPlatformClientContextOwner clients;
     private readonly MusicPlatformSearchDiscovery protocol;
     private readonly TimeProvider clock;
     private readonly SemaphoreSlim changes = new(1);
@@ -15,6 +16,7 @@ public sealed class NativeMusicSearchDiscovery : IMusicSearchDiscovery
     private Flight? active;
     private MusicSearchDiscoverySnapshot? cache;
     private MusicPlatformSession? cachedSession;
+    private MusicWyClientContext? cachedClient;
     private int offset;
     private long generation;
     private bool closed;
@@ -27,6 +29,7 @@ public sealed class NativeMusicSearchDiscovery : IMusicSearchDiscovery
         internal CancellationTokenSource Linked = null!;
         internal Task<MusicSearchDiscoverySnapshot> Task = null!;
         internal MusicPlatformSession? Session;
+        internal MusicWyClientContext? Client;
         internal int Waiters;
         internal string Reason = "";
         internal void Cancel()
@@ -36,10 +39,12 @@ public sealed class NativeMusicSearchDiscovery : IMusicSearchDiscovery
             catch (AggregateException) { }
         }
     }
-    public NativeMusicSearchDiscovery(IMusicPlatformSessionSource sessions, MusicPlatformHttp http, TimeProvider? clock = null)
+    internal NativeMusicSearchDiscovery(IMusicPlatformSessionSource sessions, MusicPlatformHttp http,
+        MusicPlatformClientContextOwner clients, TimeProvider? clock = null)
     {
         ArgumentNullException.ThrowIfNull(sessions); ArgumentNullException.ThrowIfNull(http);
-        this.sessions = sessions; protocol = new(http); this.clock = clock ?? TimeProvider.System;
+        ArgumentNullException.ThrowIfNull(clients);
+        this.sessions = sessions; this.clients = clients; protocol = new(http, clients); this.clock = clock ?? TimeProvider.System;
     }
     public async Task<MusicSearchDiscoverySnapshot> ReadAsync(bool refresh = false, CancellationToken cancellationToken = default)
     {
@@ -55,7 +60,8 @@ public sealed class NativeMusicSearchDiscovery : IMusicSearchDiscovery
                 {
                     if (closed) throw Error("CLOSED");
                     cancellationToken.ThrowIfCancellationRequested();
-                    if (!refresh && cache is not null && Current(cachedSession)) return Copy(cache);
+                    if (!refresh && cache is not null && Current(cachedSession) &&
+                        cachedClient is not null && clients.IsCurrent(cachedClient)) return Copy(cache);
                     previous = active;
                     if (previous is null)
                     {
@@ -87,6 +93,7 @@ public sealed class NativeMusicSearchDiscovery : IMusicSearchDiscovery
             {
                 if (closed) throw Error("CLOSED");
                 if (flight.Generation != generation || !Current(flight.Session)) throw Error("STALE_SESSION");
+                GuardClient(flight.Client);
                 cancellationToken.ThrowIfCancellationRequested(); return Copy(result);
             }
         }
@@ -113,6 +120,7 @@ public sealed class NativeMusicSearchDiscovery : IMusicSearchDiscovery
         {
             Guard(flight); flight.Session = await Acquire(token).ConfigureAwait(false); Guard(flight);
             var data = await protocol.ReadAsync(flight.Session, () => Guard(flight), token).ConfigureAwait(false);
+            flight.Client = data.Client;
             var finalSession = await Acquire(token).ConfigureAwait(false); Guard(flight);
             if (!Same(flight.Session, finalSession)) throw Error("STALE_SESSION");
             var snapshot = new MusicSearchDiscoverySnapshot(flight.Generation, data.Hot, data.Suggestions,
@@ -120,7 +128,7 @@ public sealed class NativeMusicSearchDiscovery : IMusicSearchDiscovery
             if (JsonSerializer.SerializeToUtf8Bytes(snapshot).Length > 512 * 1024) throw Error("LIMIT");
             lock (gate)
             {
-                Guard(flight); cache = snapshot; cachedSession = flight.Session; offset = 0;
+                Guard(flight); cache = snapshot; cachedSession = flight.Session; cachedClient = flight.Client; offset = 0;
                 return snapshot;
             }
         }
@@ -152,6 +160,11 @@ public sealed class NativeMusicSearchDiscovery : IMusicSearchDiscovery
     private static bool Same(MusicPlatformSession? first, MusicPlatformSession? second) =>
         first is null ? second is null : second is not null && first.Platform == second.Platform &&
             first.Scope == second.Scope && first.Generation == second.Generation && first.UserId == second.UserId && first.Cookie == second.Cookie;
+    private void GuardClient(MusicWyClientContext? client)
+    {
+        if (client is not null && !clients.IsCurrent(client))
+            throw Error(clients.NeedsReconciliation ? "COMMIT_UNKNOWN" : "STORAGE_CONFLICT");
+    }
     private void Guard(Flight flight)
     {
         lock (gate)
@@ -160,6 +173,7 @@ public sealed class NativeMusicSearchDiscovery : IMusicSearchDiscovery
             var reason = Volatile.Read(ref flight.Reason);
             if (reason.Length > 0) throw Error(reason);
             if (flight.Generation != generation || !Current(flight.Session)) throw Error("STALE_SESSION");
+            GuardClient(flight.Client);
             if (flight.Deadline.IsCancellationRequested) throw Error("TIMEOUT");
             if (flight.Cancelled.IsCancellationRequested) throw Error("CANCELLED");
         }
@@ -170,6 +184,7 @@ public sealed class NativeMusicSearchDiscovery : IMusicSearchDiscovery
         {
             if (closed) throw Error("CLOSED");
             if (cache is null || cache.Generation != expectedGeneration || !Current(cachedSession)) throw Error("STALE_SESSION");
+            GuardClient(cachedClient);
             var words = cache.Suggestions;
             offset = words.Length == 0 ? 0 : (offset + 6) % words.Length;
             cache = cache with { Recommended = Enumerable.Range(0, Math.Min(6, words.Length)).Select(i => words[(offset + i) % words.Length]).ToArray() };
@@ -183,7 +198,7 @@ public sealed class NativeMusicSearchDiscovery : IMusicSearchDiscovery
         lock (gate)
         {
             if (closed) return;
-            generation++; cache = null; cachedSession = null; offset = 0; old = active;
+            generation++; cache = null; cachedSession = null; cachedClient = null; offset = 0; old = active;
             if (old is not null) Volatile.Write(ref old.Reason, "STALE_SESSION");
         }
         old?.Cancel();
@@ -213,7 +228,7 @@ public sealed class NativeMusicSearchDiscovery : IMusicSearchDiscovery
         lock (gate)
         {
             if (closeTask is not null) return new(closeTask);
-            closed = true; generation++; cache = null; cachedSession = null;
+            closed = true; generation++; cache = null; cachedSession = null; cachedClient = null;
             var old = active; if (old is not null) Volatile.Write(ref old.Reason, "CLOSED");
             // Schedule outside caller lock/callback stacks; still return the actual drain task.
             closeTask = Task.Run(async () => { old?.Cancel(); await CancelAndDrainAsync().ConfigureAwait(false); });

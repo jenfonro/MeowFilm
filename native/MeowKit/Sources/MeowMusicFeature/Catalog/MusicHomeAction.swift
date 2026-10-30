@@ -27,6 +27,15 @@ public enum MusicHomeAction: Codable, Hashable, Sendable {
     public static let maximumSimilarSeeds = 20
     public static let maximumCollectionSongs = 1000
 
+    /// Reading capability, not execution authorization. FM has an anonymous
+    /// provider path; personal recommendations require the account owner.
+    public var requiresAccount: Bool {
+        switch self {
+        case .daily, .heartbeat, .similar: return true
+        case .fm, .ruleFM, .songCollection: return false
+        }
+    }
+
     /// Structural validation only. A syntactically valid submode still needs
     /// the executor's supported-mode check; it must never fall back to DEFAULT.
     public func validate() throws {

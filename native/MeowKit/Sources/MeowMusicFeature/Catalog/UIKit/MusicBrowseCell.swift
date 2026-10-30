@@ -36,6 +36,8 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    func updateArtwork(_ url: URL?) { artwork.load(url) }
+
     func configure(item: MusicPublicBrowseItem, layout: MusicPublicBrowseSection.Layout,
                    theme: PageTheme, artworkURL: URL? = nil,
                    onPreview: ((MusicRemoteTrack) -> Void)? = nil, onPlay: @escaping () -> Void) {
@@ -56,13 +58,24 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         if let frequency = item.ranking?.updateFrequency, !frequency.isEmpty {
             subtitle.text = [item.subtitle, frequency].filter { !$0.isEmpty }.joined(separator: " · ")
         }
-        for child in previews.arrangedSubviews { previews.removeArrangedSubview(child); child.removeFromSuperview() }
         previews.isHidden = !(layout == .rankedSongs || layout == .vipRankedSongs)
-        if !previews.isHidden {
-            for track in item.previewSongs.prefix(3) {
-                let button = MusicBrowsePreviewButton(track: track, theme: theme) { onPreview?(track) }
-                previews.addArrangedSubview(button)
+        var available = previews.arrangedSubviews.compactMap { $0 as? MusicBrowsePreviewButton }
+        let tracks = previews.isHidden ? [] : Array(item.previewSongs.prefix(3))
+        let buttons = tracks.map { track -> MusicBrowsePreviewButton in
+            if let index = available.firstIndex(where: { $0.reference == track.ref }) {
+                let button = available.remove(at: index)
+                button.configure(track: track, theme: theme) { onPreview?(track) }
+                return button
             }
+            return MusicBrowsePreviewButton(track: track, theme: theme) { onPreview?(track) }
+        }
+        for button in available {
+            previews.removeArrangedSubview(button); button.removeFromSuperview()
+        }
+        for (index, button) in buttons.enumerated() {
+            if previews.arrangedSubviews.indices.contains(index), previews.arrangedSubviews[index] === button { continue }
+            previews.removeArrangedSubview(button)
+            previews.insertArrangedSubview(button, at: index)
         }
         let covers = item.ranking?.preview.compactMap(\.artwork) ?? []
         for (index, view) in rankingCovers.enumerated() {
@@ -155,21 +168,30 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
 
 @MainActor
 private final class MusicBrowsePreviewButton: UIButton {
+    private let cover = MusicArtworkView(size: 40)
+    private let title = UILabel(), artist = UILabel()
+    private var action: (() -> Void)?
+    private(set) var reference: MusicReference
+
     init(track: MusicRemoteTrack, theme: PageTheme, action: @escaping () -> Void) {
+        reference = track.ref
         super.init(frame: .zero)
-        let cover = MusicArtworkView(size: 40)
-        cover.load(track.artwork)
-        let title = UILabel(), artist = UILabel()
-        title.text = track.title; title.font = .systemFont(ofSize: 14); title.textColor = UIColor(theme.ink)
-        artist.text = track.artist; artist.font = .systemFont(ofSize: 11); artist.textColor = UIColor(theme.muted)
+        title.font = .systemFont(ofSize: 14); artist.font = .systemFont(ofSize: 11)
         let copy = UIStackView(arrangedSubviews: [title, artist]); copy.axis = .vertical; copy.spacing = 3
         let row = UIStackView(arrangedSubviews: [cover, copy]); row.spacing = 10; row.alignment = .center
         row.isUserInteractionEnabled = false
         addSubview(row); row.pinEdges(to: self, insets: UIEdgeInsets(top: 3, left: 0, bottom: 3, right: 8))
-        accessibilityLabel = "播放" + track.title
-        addAction(UIAction { _ in action() }, for: .touchUpInside)
+        addAction(UIAction { [weak self] _ in self?.action?() }, for: .touchUpInside)
+        configure(track: track, theme: theme, action: action)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    func configure(track: MusicRemoteTrack, theme: PageTheme, action: @escaping () -> Void) {
+        reference = track.ref; self.action = action
+        cover.load(track.artwork)
+        title.text = track.title; title.textColor = UIColor(theme.ink)
+        artist.text = track.artist; artist.textColor = UIColor(theme.muted)
+        accessibilityLabel = "播放" + track.title
+    }
 }
 
 @MainActor
@@ -178,10 +200,29 @@ final class MusicBrowseHeader: UICollectionReusableView {
     private let title = UILabel(), creator = UILabel()
     private let artwork = MusicArtworkView(size: 0)
     private let play = UIButton(type: .system), choices = UIButton(type: .system)
+    private let channelButton = UIButton(type: .system)
+    private let channelArrow = UIImageView(image: UIImage(systemName: "chevron.right",
+        withConfiguration: UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold)))
     private let tabs = UIStackView()
     private let avatars = (0..<3).map { _ in MusicArtworkView(size: 0) }
     private let errorLabel = UILabel(), retry = UIButton(type: .system)
     private var playAction: (() -> Void)?
+    private var channelAction: (() -> Void)?
+    private var headingHeight: CGFloat = 0
+
+    static func height(for section: MusicPublicBrowseSection, collection: MusicPublicBrowseCollection?,
+                       showsSectionPlayback: Bool = true) -> CGFloat {
+        if collection != nil { return 190 }
+        return headingHeight(for: section, showsSectionPlayback: showsSectionPlayback) + (section.tabs.isEmpty ? 0 : 36)
+    }
+
+    private static func headingHeight(for section: MusicPublicBrowseSection, showsSectionPlayback: Bool) -> CGFloat {
+        let hasPlayback = showsSectionPlayback && section.items.contains {
+            if case .track = $0.content { return true }; return false
+        }
+        return !section.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+            hasPlayback || !section.filters.isEmpty || section.channel != nil || !section.avatars.isEmpty ? 44 : 0
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -189,23 +230,29 @@ final class MusicBrowseHeader: UICollectionReusableView {
         creator.font = .systemFont(ofSize: 12)
         title.numberOfLines = 2
         play.setImage(PageIcon.image(.play), for: .normal)
+        play.accessibilityLabel = "播放全部"
         play.addAction(UIAction { [weak self] _ in self?.playAction?() }, for: .touchUpInside)
         choices.setImage(UIImage(systemName: "chevron.down"), for: .normal)
         choices.showsMenuAsPrimaryAction = true
+        choices.accessibilityLabel = "选择栏目"
+        channelButton.addAction(UIAction { [weak self] _ in self?.channelAction?() }, for: .touchUpInside)
+        channelArrow.contentMode = .scaleAspectFit
         tabs.axis = .horizontal; tabs.spacing = 9; tabs.distribution = .fillEqually
         errorLabel.numberOfLines = 0; errorLabel.font = .systemFont(ofSize: 13)
         retry.setTitle("重试", for: .normal)
-        for item in [title, creator, artwork, play, choices, tabs, errorLabel, retry] + avatars { addSubview(item) }
+        for item in [channelButton, title, channelArrow, creator, artwork, play, choices, tabs, errorLabel, retry] + avatars { addSubview(item) }
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func configure(section: MusicPublicBrowseSection, collection: MusicPublicBrowseCollection?,
-                   theme: PageTheme, onPlay: @escaping () -> Void,
+                   theme: PageTheme, showsSectionPlayback: Bool = true, onPlay: @escaping () -> Void,
                    onChannel: @escaping () -> Void, onChoice: @escaping (String) -> Void,
                    onRetry: @escaping () -> Void, error: String?) {
+        headingHeight = Self.headingHeight(for: section, showsSectionPlayback: showsSectionPlayback)
         title.text = collection?.title ?? section.title
+        title.numberOfLines = collection == nil ? 1 : 2
         title.textColor = UIColor(theme.ink)
         creator.textColor = UIColor(theme.muted)
         artwork.isHidden = collection == nil
@@ -216,9 +263,16 @@ final class MusicBrowseHeader: UICollectionReusableView {
                 .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
         }
         playAction = onPlay
-        play.isHidden = collection == nil && !section.items.contains {
+        play.isHidden = collection == nil && (!showsSectionPlayback || !section.items.contains {
             if case .track = $0.content { return true }; return false
-        }
+        })
+        channelAction = onChannel
+        channelButton.isHidden = collection != nil || section.channel == nil
+        channelButton.accessibilityLabel = section.title
+        channelButton.accessibilityIdentifier = "music.browse.channel.\(section.id)"
+        channelArrow.isHidden = channelButton.isHidden
+        channelArrow.tintColor = UIColor(theme.ink)
+        title.isAccessibilityElement = channelButton.isHidden
         for (index, avatar) in avatars.enumerated() {
             avatar.isHidden = index >= section.avatars.count
             if !avatar.isHidden { avatar.load(section.avatars[index]); avatar.layer.cornerRadius = 12.5 }
@@ -228,13 +282,10 @@ final class MusicBrowseHeader: UICollectionReusableView {
         retry.removeAction(identifiedBy: UIAction.Identifier("retry"), for: .touchUpInside)
         retry.addAction(UIAction(identifier: UIAction.Identifier("retry")) { _ in onRetry() }, for: .touchUpInside)
         play.tintColor = UIColor(theme.ink); choices.tintColor = UIColor(theme.ink)
-        var actions: [UIMenuElement] = section.filters.map { filter in
+        let actions: [UIMenuElement] = section.filters.map { filter in
             UIAction(title: filter.title, state: filter.id == section.selectedFilter ? .on : .off) {
                 _ in onChoice(filter.id)
             }
-        }
-        if section.channel != nil {
-            actions.append(UIAction(title: "查看更多") { _ in onChannel() })
         }
         choices.menu = UIMenu(children: actions)
         choices.isHidden = actions.isEmpty
@@ -260,22 +311,36 @@ final class MusicBrowseHeader: UICollectionReusableView {
             creator.frame = CGRect(x: 128, y: 92, width: max(0, bounds.width - 128), height: 30)
             play.frame = CGRect(x: 0, y: 142, width: 44, height: 44)
             choices.frame = CGRect(x: bounds.width - 44, y: 142, width: 44, height: 44)
+            channelButton.frame = .zero; channelArrow.frame = .zero
             tabs.frame = .zero
         } else {
-            title.frame = CGRect(x: 0, y: 2, width: max(0, bounds.width - 88), height: 38)
-            play.frame = CGRect(x: bounds.width - 88, y: 0, width: 44, height: 44)
-            choices.frame = CGRect(x: bounds.width - 44, y: 0, width: 44, height: 44)
-            tabs.frame = CGRect(x: 0, y: 44, width: bounds.width, height: max(0, bounds.height - 44))
+            let choiceWidth: CGFloat = choices.isHidden ? 0 : 44
+            let playWidth: CGFloat = play.isHidden ? 0 : 44
+            let avatarCount = avatars.filter { !$0.isHidden }.count
+            let avatarWidth: CGFloat = avatarCount == 0 ? 0 : 25 + CGFloat(avatarCount - 1) * 18 + 8
+            let titleArea = max(0, bounds.width - choiceWidth - playWidth - avatarWidth)
+            let height = max(0, headingHeight - 6)
+            let maximum = max(0, titleArea - (channelArrow.isHidden ? 0 : 18))
+            let width = channelArrow.isHidden ? maximum :
+                min(maximum, title.sizeThatFits(CGSize(width: maximum, height: height)).width)
+            title.frame = CGRect(x: 0, y: 2, width: width, height: height)
+            channelArrow.frame = channelArrow.isHidden ? .zero :
+                CGRect(x: title.frame.maxX + 6, y: title.frame.midY - 8, width: 12, height: 16)
+            channelButton.frame = CGRect(x: 0, y: 0, width: max(0, bounds.width - choiceWidth - playWidth), height: headingHeight)
+            play.frame = CGRect(x: bounds.width - choiceWidth - playWidth, y: 0, width: playWidth, height: headingHeight)
+            choices.frame = CGRect(x: bounds.width - choiceWidth, y: 0, width: choiceWidth, height: headingHeight)
+            tabs.frame = CGRect(x: 0, y: headingHeight, width: bounds.width,
+                                height: max(0, bounds.height - headingHeight))
+            for (index, avatar) in avatars.enumerated() {
+                avatar.frame = CGRect(x: titleArea + CGFloat(index) * 18 + 8, y: 8, width: 25, height: 25)
+            }
         }
         if errorLabel.text != nil {
             let y = bounds.height - 64
             errorLabel.frame = CGRect(x: 0, y: y, width: max(0, bounds.width - 84), height: 60)
             retry.frame = CGRect(x: bounds.width - 80, y: y + 8, width: 76, height: 44)
-            if !hero { tabs.frame.size.height = max(0, y - 44) }
+            if !hero { tabs.frame.size.height = max(0, y - headingHeight) }
         } else { errorLabel.frame = .zero }
-        for (index, avatar) in avatars.enumerated() {
-            avatar.frame = CGRect(x: bounds.width - 150 + CGFloat(index) * 18, y: 8, width: 25, height: 25)
-        }
     }
 }
 #endif

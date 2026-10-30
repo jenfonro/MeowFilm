@@ -72,7 +72,7 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
         model.setAccess(available: true, generation: UUID()); model.appear()
         return model
     }
-    func testBoundedPaginationReplacesCurrentPageAndPreviousRestoresRequestCursor() async throws {
+    func testBoundedPaginationReusesLoadedPreviousAndNextPagesUntilExplicitRefresh() async throws {
         let service = MusicPublicBrowseFeatureService(), model = model(service)
         await model.refresh()
         XCTAssertEqual(model.pageNumber, 1); XCTAssertEqual(model.sections[0].items[0].id, "wy:playlist:1")
@@ -81,6 +81,11 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
         XCTAssertEqual(model.sections[0].items[0].id, "wy:playlist:2"); XCTAssertNil(model.nextCursor)
         await model.previous()
         XCTAssertEqual(model.pageNumber, 1); XCTAssertEqual(model.sections[0].items[0].id, "wy:playlist:1")
+        await model.next()
+        var cursors = await service.cursors; XCTAssertEqual(cursors, [nil, "next"])
+        await model.refresh()
+        await model.next()
+        cursors = await service.cursors; XCTAssertEqual(cursors, [nil, "next", nil, "next"])
     }
     func testNonCooperativePageCannotPublishAfterDepartureOrProtectionChange() async throws {
         let service = MusicPublicBrowseFeatureService(), gate = MusicPublicBrowseGate()
@@ -103,6 +108,8 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
         await model.refresh(); await service.fail(.authRequired); await model.next()
         XCTAssertTrue(model.sections.isEmpty); XCTAssertNil(model.nextCursor); XCTAssertEqual(model.error, .authRequired)
         XCTAssertEqual(model.request, .playlists(.netease, query: "Synthetic"))
+        await service.fail(nil); await model.refresh(); await model.next()
+        let cursors = await service.cursors; XCTAssertEqual(cursors, [nil, "next", nil, "next"])
     }
     func testExplicitActionIsSingleUseAndBlockedAfterRefreshOrPageDeparture() async throws {
         let service = MusicPublicBrowseFeatureService(), model = model(service)

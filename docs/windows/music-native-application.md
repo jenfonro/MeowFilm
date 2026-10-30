@@ -10,6 +10,7 @@
 MusicLibraryOwner
 MusicLibrarySyncService
 MusicAccountOwner
+MusicPlatformClientContextOwner
 MusicPlatformHttp
 MusicPlatformCatalog
 MusicNativeCatalogOwner
@@ -30,6 +31,8 @@ IRuntimeClient
 ```
 
 `IRuntimeClient` 只用于确有必要的原始 JS 音源执行；普通账号、平台、搜索、曲库、推荐、同步、歌词编排和设置都在 .NET 内完成。
+
+`InitializeAsync` 先初始化独立本地客户端状态，再恢复同步调度；不因启动而登记平台或协商全部动态密钥。账号、客户端、目录及播放按显式依赖接入，具体边界见[客户端上下文](music-platform-client-context.md)。
 
 ## 公开 seam
 
@@ -83,6 +86,7 @@ public interface IMusicApplication : IAsyncDisposable, IScriptPlatformCapabiliti
 - 账号未知写入回执会封闭依赖账号的推荐和关闭成功路径。
 - 只有显式成功读取当前账号文档，且期间没有更新的未知回执，才解除该 fence。
 - 不通过旧 Cookie、其他客户端数据或回退目录恢复账号。
+- 客户端未知回执由客户端 owner 单独封闭；应用显式初始化重试或账号 list 路径可进行权威客户端重读，不重放写入或设备登记。单独账号 owner 的 list 不承担这项协调。
 
 ## 请求准入
 
@@ -100,11 +104,11 @@ public interface IMusicApplication : IAsyncDisposable, IScriptPlatformCapabiliti
 3. 取消发现、聚合搜索和目录临时状态。
 4. 排空曲库同步、反馈和脚本工作。
 5. 排空所有已准入 application 请求。
-6. 最后准备唯一 `MusicLibraryOwner`。
+6. 准备唯一 `MusicLibraryOwner`，再由客户端 owner 取消并排空共享匿名登记及客户端写入。
 
 准备失败不会释放借用的 App store/runtime/playback。取消关闭会恢复原 owners，但不会自动重放写入、登录、远端同步、脚本调用或播放。
 
-最终 dispose/abort 才释放 application 自己拥有的协调器和 HTTP；未知持久写入不会被描述成回滚。
+最终 dispose/abort 才释放 application 自己拥有的协调器；客户端 owner 在共享 HTTP 之前释放，App 的 store 在全部能力排空后释放。取消关闭准备使用新生命周期／客户端快照，不复活旧 lease；未知持久写入不会被描述成回滚。
 
 ## 数据格式
 

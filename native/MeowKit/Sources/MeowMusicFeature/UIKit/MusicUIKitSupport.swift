@@ -14,13 +14,53 @@ public class MusicPageViewController: PageViewController {
 }
 
 @MainActor
-final class MusicArtworkView: UIImageView {
+enum MusicArtworkImages {
+    nonisolated private static let http = MusicArtworkHTTP()
     private static let cache: NSCache<NSURL, UIImage> = {
         let value = NSCache<NSURL, UIImage>()
         value.countLimit = 128
         value.totalCostLimit = 24 * 1_024 * 1_024
         return value
     }()
+
+    static func cached(_ url: URL) -> UIImage? { cache.object(forKey: url as NSURL) }
+
+    static func read(_ url: URL, cachedData: Data? = nil) async throws -> (UIImage, Data?) {
+        if cachedData == nil, let image = cached(url) { return (image, nil) }
+        let (image, data) = try await readBytes(url, cachedData: cachedData)
+        try Task.checkCancellation()
+        let cost = (image.cgImage?.width ?? 0) * (image.cgImage?.height ?? 0) * 4
+        cache.setObject(image, forKey: url as NSURL, cost: cost)
+        return (image, data)
+    }
+
+    /// Cancellation follows the physical read; decoding stays off the UI actor.
+    nonisolated private static func readBytes(_ url: URL, cachedData: Data?) async throws -> (UIImage, Data) {
+        let maximum = MusicArtworkHTTP.maximumBytes
+        if let cachedData, cachedData.count <= maximum, let value = decode(cachedData) {
+            try Task.checkCancellation()
+            return (value, cachedData)
+        }
+        let data = try await http.read(url)
+        try Task.checkCancellation()
+        guard let value = decode(data) else { throw URLError(.cannotDecodeContentData) }
+        return (value, data)
+    }
+
+    nonisolated private static func decode(_ data: Data) -> UIImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: 1_024,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true,
+              ] as CFDictionary) else { return nil }
+        return UIImage(cgImage: image)
+    }
+}
+
+@MainActor
+final class MusicArtworkView: UIImageView {
     var onImage: ((UIImage, Data?) -> Void)?
     var onFailure: ((URL) -> Void)?
     private var task: Task<Void, Never>?
@@ -52,7 +92,7 @@ final class MusicArtworkView: UIImageView {
         completed = false
         image = nil
         guard let url else { completed = true; return }
-        if cachedData == nil, let cached = Self.cache.object(forKey: url as NSURL) {
+        if cachedData == nil, let cached = MusicArtworkImages.cached(url) {
             image = cached
             completed = true
             onImage?(cached, nil)
@@ -60,11 +100,9 @@ final class MusicArtworkView: UIImageView {
         }
         task = Task { [weak self] in
             do {
-                let (value, data) = try await Self.read(url, cachedData: cachedData)
+                let (value, data) = try await MusicArtworkImages.read(url, cachedData: cachedData)
                 try Task.checkCancellation()
                 guard self?.representedURL == url else { return }
-                let cost = (value.cgImage?.width ?? 0) * (value.cgImage?.height ?? 0) * 4
-                Self.cache.setObject(value, forKey: url as NSURL, cost: cost)
                 self?.image = value
                 self?.task = nil
                 self?.completed = true
@@ -78,51 +116,13 @@ final class MusicArtworkView: UIImageView {
         }
     }
 
-    /// Network bytes and thumbnail decoding run on the generic executor, not
-    /// the UI actor. Cancellation follows this one physical read.
-    nonisolated private static func read(_ url: URL, cachedData: Data?) async throws -> (UIImage, Data) {
-        let maximum = 4 * 1_024 * 1_024
-        if let cachedData, cachedData.count <= maximum, let value = decode(cachedData) {
-            try Task.checkCancellation()
-            return (value, cachedData)
-        }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 30
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
-        guard response.expectedContentLength <= maximum else {
-            throw URLError(.dataLengthExceedsMaximum)
-        }
-        if let response = response as? HTTPURLResponse, !(200..<300).contains(response.statusCode) {
-            throw URLError(.badServerResponse)
-        }
-        var data = Data()
-        for try await byte in bytes {
-            try Task.checkCancellation()
-            guard data.count < maximum else { throw URLError(.dataLengthExceedsMaximum) }
-            data.append(byte)
-        }
-        try Task.checkCancellation()
-        guard let value = decode(data) else { throw URLError(.cannotDecodeContentData) }
-        return (value, data)
-    }
-
-    nonisolated private static func decode(_ data: Data) -> UIImage? {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceThumbnailMaxPixelSize: 1_024,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceShouldCacheImmediately: true,
-              ] as CFDictionary) else { return nil }
-        return UIImage(cgImage: image)
-    }
-
     deinit { task?.cancel() }
 }
 
 @MainActor
 final class MusicTrackCell: UITableViewCell {
     static let reuseIdentifier = "MusicTrackCell"
+    private(set) var representedReference: MusicReference?
     private let artwork = MusicArtworkView()
     private let titleLabel = UILabel()
     private let subtitleLabel = UILabel()
@@ -163,6 +163,7 @@ final class MusicTrackCell: UITableViewCell {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func configure(track: MusicRemoteTrack, active: Bool, theme: PageTheme, index: Int? = nil) {
+        representedReference = track.ref
         artwork.load(track.artwork)
         titleLabel.text = index.map { "\($0 + 1). \(track.title)" } ?? track.title
         subtitleLabel.text = [track.artist, track.album].filter { !$0.isEmpty }.joined(separator: " · ")

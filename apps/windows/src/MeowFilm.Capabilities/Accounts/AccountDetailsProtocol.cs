@@ -17,7 +17,7 @@ public sealed partial class MusicAccountProtocol
             // Always authenticate the exact credential before interpreting rights.
             // Public profile/device/cache values are never login proof.
             var profile = platform switch {
-                "wy" => await ValidateWy(ctx, account.Cookie, parts).ConfigureAwait(false),
+                "wy" => await ValidateWy(ctx, account.Cookie, parts, account.UserId).ConfigureAwait(false),
                 "tx" => await ValidateTx(ctx, account.Cookie, parts).ConfigureAwait(false),
                 "kg" => await ValidateKg(ctx, account.Cookie, parts).ConfigureAwait(false),
                 _ => throw new MusicAccountException("INVALID_REQUEST")
@@ -32,16 +32,19 @@ public sealed partial class MusicAccountProtocol
         string platform = ctx.Platform;
         long fetched = clock.GetUtcNow().ToUnixTimeMilliseconds();
         MusicAccountEntitlements rights;
+        IReadOnlyList<string>? wyCookies = null;
         try
         {
             if (platform == "wy")
             {
-                var data = (await ctx.Send(MusicPlatformRequests.WyWithCookie(
+                var response = await ctx.Send(ctx.Wy(
                     "/api/music-vip-membership/client/vip/info", new() { ["userId"] = profile.UserId },
-                    cookie, weapi: true), accountDetails: true).ConfigureAwait(false)).Body;
+                    cookie, weapi: true), accountDetails: true).ConfigureAwait(false);
+                var data = response.Body;
                 WyStatus(data);
                 AccountRules.Require(data["data"] is JsonObject, "INVALID_RESPONSE");
                 rights = AccountDetailsSnapshot.Wy(data["data"]!.AsObject(), profile.UserId, clock.GetUtcNow().ToUnixTimeMilliseconds());
+                wyCookies = response.SetCookieHeaders;
             }
             else if (platform == "tx")
             {
@@ -51,9 +54,8 @@ public sealed partial class MusicAccountProtocol
             }
             else
             {
-                var parts = AccountRules.Cookies(cookie);
-                var request = MusicPlatformRequests.KgWithCookie("/v1/get_union_vip",
-                    new() { ["busi_type"] = "concept" }, cookie, parts["KUGOU_API_MID"]);
+                var request = ctx.Kg("/v1/get_union_vip",
+                    new() { ["busi_type"] = "concept" }, cookie);
                 // The pinned module explicitly supplies this HTTPS baseURL.
                 // The Android signature covers query/body, not an invented proxy.
                 request.RequestUri = new UriBuilder(request.RequestUri!) { Host = "kugouvip.kugou.com" }.Uri;
@@ -71,6 +73,8 @@ public sealed partial class MusicAccountProtocol
             rights = AccountDetailsSnapshot.Unknown(clock.GetUtcNow().ToUnixTimeMilliseconds(), error.Code, platform == "kg");
         }
         ctx.Guard();
-        return new(profile, fetched, AccountDetailsSnapshot.Validate(rights, platform));
+        rights = AccountDetailsSnapshot.Validate(rights, platform);
+        if (wyCookies is not null) await ctx.AcceptWyCookies(wyCookies, cookie).ConfigureAwait(false);
+        return new(profile, fetched, rights);
     }
 }

@@ -122,7 +122,7 @@ extension MusicNativePlatforms {
                     } : artistRows
                 let normalized = MJ.obj([("id", .string(id)), ("name", .string(title)), ("ar", .array(artists)),
                                          ("al", album), ("dt", song["dt"])])
-                let track = try browseWYSong(normalized)
+                let track = try Self.browseWYSong(normalized)
                 item.title = title; item.subtitle = artist
                 item.artwork = MusicNativePublicBrowseSupport.artwork(album["picUrl"]); item.content = .song(track)
             }

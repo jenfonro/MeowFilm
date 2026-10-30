@@ -17,14 +17,32 @@ struct MusicNeteaseCollection: Equatable {
                  "count": count.map { .number(Double($0)) } ?? .null, "owned": .bool(owner == accountID)])
     }
 }
+/// Immutable raw batch; the mutable protocol context is accessed only by its
+/// adapter actor. Neither it nor the display loader leaves the account owner.
+private struct MusicNeteaseCollectionDisplay: @unchecked Sendable {
+    let ids: [String]
+    let songs: [String: [String: Any]]
+    let context: MusicNeteaseContext
+    let epoch: UUID
+}
 extension NeteaseMusicAccountAdapter {
+    private static func hasDisplayFields(_ row: [String: Any]?) -> Bool {
+        guard let row, let name = row["name"] as? String,
+              !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let artists = (row["ar"] ?? row["artists"]) as? [[String: Any]] else { return false }
+        return artists.allSatisfy {
+            ($0["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        }
+    }
     static func song(_ raw: [String: Any]?, id: String) throws -> JSONValue {
         let id = try MusicNeteaseWire.id(id), row = raw ?? [:]
         if let value = row["id"], try MusicNeteaseWire.id(value) != id { throw MusicServiceError.targetChanged }
         let album = row["al"] as? [String: Any] ?? row["album"] as? [String: Any] ?? [:]
         let artists = try MusicNeteaseWire.rows(row["ar"] ?? row["artists"] ?? [], maximum: 64)
-            .map { try MusicQQWire.string($0["name"], maximum: 256) }
+            .map { try MusicQQWire.string($0["name"] ?? "", maximum: 256, empty: true) }
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         let singer = try MusicQQWire.string(artists.joined(separator: "、"), maximum: 1024, empty: true)
+        let name = try MusicQQWire.string(row["name"] ?? "", maximum: 1024, empty: true)
         let duration = try MusicQQWire.integer(row["dt"] ?? row["duration"] ?? 0, maximum: 604_800_000)
         var types: [JSONValue] = []
         for (type, key) in [("128k", "l"), ("192k", "m"), ("320k", "h"), ("flac", "sq"), ("flac24bit", "hr")] {
@@ -36,7 +54,7 @@ extension NeteaseMusicAccountAdapter {
             albumID = try MusicNeteaseWire.id(value)
         } else { albumID = "" }
         return .object(["musicId": .string(id), "songmid": .string(id),
-            "name": .string(try MusicQQWire.string(row["name"] ?? "未知歌曲", maximum: 1024)),
+            "name": .string(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "未知歌曲" : name),
             "singer": .string(singer.isEmpty ? "未知歌手" : singer),
             "album": .string(try MusicQQWire.string(album["name"] ?? "", maximum: 1024, empty: true)),
             "albumId": .string(albumID), "duration": .number(Double(duration) / 1000), "types": .array(types)])
@@ -142,6 +160,13 @@ extension NeteaseMusicAccountAdapter {
         return try MusicNeteaseWire.rows(root["songs"], maximum: 100)
     }
     func tracks(collectionID: String, credential: AccountCredential) async throws -> [JSONValue] {
+        try await readCollectionTracks(collectionID: collectionID, credential: credential, displayOnly: false).rows
+    }
+    func collectionTrackRead(collectionID: String, credential: AccountCredential) async throws -> MusicAccountTrackRead {
+        try await readCollectionTracks(collectionID: collectionID, credential: credential, displayOnly: true)
+    }
+    private func readCollectionTracks(collectionID: String, credential: AccountCredential,
+                                      displayOnly: Bool) async throws -> MusicAccountTrackRead {
         let id = try MusicNeteaseWire.id(collectionID), own = epoch, context = try context(credential)
         _ = try await profile(context)
         let before = try await directory(context)
@@ -161,13 +186,38 @@ extension NeteaseMusicAccountAdapter {
             guard members.contains(id), songs[id] == nil else { throw MusicServiceError.upstreamInvalid }
             songs[id] = raw
         }
-        let missing = ids.filter { songs[$0] == nil }
+        let visible = displayOnly ? Array(ids.prefix(30)) : ids
+        songs = try await displaySongs(visible, existing: songs, context: context, epoch: own)
+        let second = try await detail(id, context: context)
+        guard try Self.collection(second) == firstEntry, try Self.orderedIDs(second) == ids else { throw MusicServiceError.staleResult }
+        let after = try await directory(context)
+        try check(own)
+        guard before == after else { throw MusicServiceError.staleResult }
+        var bytes = 0
+        let rows = try ids.map { id in
+            let value = try Self.song(songs[id], id: id)
+            bytes += try MusicPlatformJSON.bytes(value)
+            guard bytes <= 4 * 1024 * 1024 else { throw MusicServiceError.limit }
+            return value
+        }
+        guard displayOnly else { return .init(rows: rows) }
+        let snapshot = MusicNeteaseCollectionDisplay(ids: ids, songs: songs, context: context, epoch: own)
+        return .init(rows: rows, displayPage: { [self] offset in
+            try await collectionDisplayPage(snapshot, offset: offset)
+        })
+    }
+    private func displaySongs(_ ids: [String], existing: [String: [String: Any]],
+                              context: MusicNeteaseContext, epoch own: UUID) async throws -> [String: [String: Any]] {
+        try check(own)
+        var songs = existing
+        let missing = ids.filter { !Self.hasDisplayFields(songs[$0]) }
         for offset in stride(from: 0, to: missing.count, by: 100) {
             let batch = Array(missing[offset..<min(offset + 100, missing.count)])
             do {
+                var received = Set<String>()
                 for raw in try await metadata(batch, context: context) {
                     let id = try MusicNeteaseWire.id(raw["id"])
-                    guard batch.contains(id), songs[id] == nil else { throw MusicServiceError.upstreamInvalid }
+                    guard batch.contains(id), received.insert(id).inserted else { throw MusicServiceError.upstreamInvalid }
                     songs[id] = raw
                 }
             } catch let error as MusicServiceError where [.unavailable, .timeout, .upstreamFailed].contains(error) {
@@ -176,17 +226,16 @@ extension NeteaseMusicAccountAdapter {
                 try check(own)
             }
         }
-        let second = try await detail(id, context: context)
-        guard try Self.collection(second) == firstEntry, try Self.orderedIDs(second) == ids else { throw MusicServiceError.staleResult }
-        let after = try await directory(context)
         try check(own)
-        guard before == after else { throw MusicServiceError.staleResult }
-        var bytes = 0
+        return songs
+    }
+    private func collectionDisplayPage(_ snapshot: MusicNeteaseCollectionDisplay, offset: Int) async throws -> [JSONValue] {
+        try check(snapshot.epoch)
+        guard offset >= 0, offset <= snapshot.ids.count else { throw MusicServiceError.invalidRequest }
+        let ids = Array(snapshot.ids.dropFirst(offset).prefix(30))
+        let songs = try await displaySongs(ids, existing: snapshot.songs, context: snapshot.context, epoch: snapshot.epoch)
         return try ids.map { id in
-            let value = try Self.song(songs[id], id: id)
-            bytes += try MusicPlatformJSON.bytes(value)
-            guard bytes <= 4 * 1024 * 1024 else { throw MusicServiceError.limit }
-            return value
+            try Self.song(songs[id], id: id)
         }
     }
 }

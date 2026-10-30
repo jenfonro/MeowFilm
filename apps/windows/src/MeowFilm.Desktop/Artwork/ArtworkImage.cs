@@ -36,6 +36,8 @@ public sealed class ArtworkImage : Grid
         Visibility = Visibility.Collapsed, Padding = new Thickness(4), FontSize = 11 };
     private IArtworkLease? lease;
     private CancellationTokenSource? request;
+    private Task? requestTask;
+    private PresentationLease? presentation;
     private long epoch;
     private bool loaded, attempted, observingLayout;
 
@@ -56,17 +58,63 @@ public sealed class ArtworkImage : Grid
         {
             loaded = false;
             if (observingLayout) { LayoutUpdated -= OnLayout; observingLayout = false; }
+            var prior = presentation; presentation = null; prior?.Dispose();
             Retire();
         };
         IsVisibleChanged += (_, _) => UpdateVisibility();
     }
+    /// <summary>Prepare an imminent surface on the UI thread; its owner releases the lease when that presentation retires.</summary>
+    public async Task<IDisposable> PrepareForPresentationAsync(CancellationToken cancellationToken = default)
+    {
+        Dispatcher.VerifyAccess(); cancellationToken.ThrowIfCancellationRequested();
+        var prior = presentation;
+        var current = new PresentationLease(this); presentation = current; prior?.Dispose();
+        try
+        {
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!ReferenceEquals(presentation, current)) throw new OperationCanceledException();
+                var stamp = epoch;
+                UpdateVisibility();
+                var pending = requestTask ?? Task.CompletedTask;
+                if (request is { } reading)
+                {
+                    using var wait = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, reading.Token);
+                    try { await pending.WaitAsync(wait.Token); }
+                    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && stamp != epoch) { }
+                }
+                else await pending.WaitAsync(cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!ReferenceEquals(presentation, current)) throw new OperationCanceledException();
+                if (stamp == epoch) return current;
+            }
+        }
+        catch { current.Dispose(); throw; }
+    }
+    private sealed class PresentationLease(ArtworkImage image) : IDisposable
+    {
+        private ArtworkImage? owner = image;
+        public void Dispose()
+        {
+            var prior = owner; owner = null;
+            if (prior is null || !ReferenceEquals(prior.presentation, this)) return;
+            prior.presentation = null; prior.UpdateVisibility();
+        }
+    }
+    private bool HasDemand() => presentation is not null || InViewport();
     private void OnLayout(object? sender, EventArgs args) => UpdateVisibility();
     internal void Restart() { Retire(); UpdateVisibility(); }
     private void Retire()
     {
-        epoch++; request?.Cancel(); request = null; attempted = false;
+        epoch++;
+        var priorRequest = request; request = null; requestTask = null; attempted = false;
+        var priorLease = lease; lease = null;
         image.Source = null; SetValue(RawPaletteBrushPropertyKey, Brushes.DimGray);
-        SetValue(PaletteBrushPropertyKey, Brushes.DimGray); lease?.Dispose(); lease = null; retry.Visibility = Visibility.Collapsed;
+        SetValue(PaletteBrushPropertyKey, Brushes.DimGray); retry.Visibility = Visibility.Collapsed;
+        priorLease?.Dispose();
+        // Cancellation may synchronously resume preparation; publish retirement before invoking it.
+        priorRequest?.Cancel();
     }
     // Small raster sample of the already acquired cover: no second fetch or full-image copy.
     internal static (Brush Raw, Brush Palette) SamplePalette(BitmapSource source)
@@ -106,25 +154,25 @@ public sealed class ArtworkImage : Grid
     }
     private void UpdateVisibility()
     {
-        if (!InViewport()) { if (attempted || request is not null || lease is not null) Retire(); return; }
+        if (!HasDemand()) { if (attempted || request is not null || lease is not null) Retire(); return; }
         if (attempted || string.IsNullOrWhiteSpace(Address) || ArtworkScope.GetLoader(this) is not { } loader) return;
         attempted = true; var stamp = epoch; string address = Address;
         var current = new CancellationTokenSource(); request = current;
-        _ = ReadAsync();
+        requestTask = ReadAsync();
         async Task ReadAsync()
         {
             IArtworkLease? acquired = null;
             try
             {
                 acquired = await loader.AcquireAsync(address, current.Token);
-                if (stamp != epoch || current.IsCancellationRequested || !InViewport()) return;
+                if (stamp != epoch || current.IsCancellationRequested || !HasDemand()) return;
                 lease = acquired; acquired = null; image.Source = lease.Image;
                 var palette = SamplePalette(lease.Image);
                 SetValue(RawPaletteBrushPropertyKey, palette.Raw);
                 SetValue(PaletteBrushPropertyKey, palette.Palette);
             }
             catch (OperationCanceledException) { }
-            catch { if (stamp == epoch && !current.IsCancellationRequested && loaded) retry.Visibility = Visibility.Visible; }
+            catch { if (stamp == epoch && !current.IsCancellationRequested && HasDemand()) retry.Visibility = Visibility.Visible; }
             finally
             {
                 acquired?.Dispose();

@@ -8,6 +8,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
 using MeowFilm.Core.Runtime;
+using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Platform.Storage;
@@ -168,7 +169,7 @@ public static class MusicAccountIntegrationTests
             var read = f.Application.ExecuteAsync("music.accounts.list");
             Check(!read.IsCompleted);
             f.Store.Release.TrySetResult();
-            Check(AccountState(await read) == "saved" && f.Store.Writes == 1);
+            Check(AccountState(await read) == "saved" && f.Store.AccountWrites == 1);
             Check((await f.Store.ReadAsync("music.accounts.v1")).Fingerprint.Exists);
         });
         yield return Case("lost QR CAS acknowledgement requires explicit reconciliation without replay and survives restart", async () =>
@@ -184,7 +185,7 @@ public static class MusicAccountIntegrationTests
                 var count = f.Transport.Requests;
                 await f.Module.CheckAccountQrAsync(); Check(f.Transport.Requests == count);
                 await f.Module.ReadAccountsAsync();
-                Check(f.Module.SelectedAccount!.State == "saved" && f.Store.Writes == 1);
+                Check(f.Module.SelectedAccount!.State == "saved" && f.Store.AccountWrites == 1);
                 await f.Module.PrepareShutdownAsync();
                 Check(f.Store.DisposeCalls == 0 && f.Transport.DisposeCalls == 0 && !f.Runtime.HasStarted);
             }
@@ -358,7 +359,7 @@ public static class MusicAccountIntegrationTests
             data ??= Path.Combine(Environment.GetEnvironmentVariable("MEOWFILM_TEST_DATA_ROOT")
                 ?? throw new InvalidOperationException("Isolated data required"), "account-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(data);
-            var store = new ControlledStore(new DpapiDocumentStore(data, ["music.library.v1", "music.accounts.v1", "music.files.v1"]));
+            var store = new ControlledStore(new DpapiDocumentStore(data, AppIdentity.NativeNamespaces));
             var result = new Fixture(data, store);
             try
             {
@@ -388,13 +389,14 @@ public static class MusicAccountIntegrationTests
     private sealed class ControlledStore(DpapiDocumentStore inner) : IProtectedDocumentStore
     {
         public string? LoseReceipt;
-        public int Writes, DisposeCalls;
+        public int Writes, AccountWrites, DisposeCalls;
         public TaskCompletionSource? Arrived, Release;
         public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken token = default) => inner.ReadAsync(ns, token);
         public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken token = default)
         {
             token.ThrowIfCancellationRequested();
             Interlocked.Increment(ref Writes);
+            if (ns == "music.accounts.v1") Interlocked.Increment(ref AccountWrites);
             if (ns == "music.accounts.v1" && Release is { } hold)
             {
                 Arrived!.TrySetResult();

@@ -2,76 +2,44 @@
 // Presentation rules from iWebPlus b900c259, mini-player.js / mini-swipe.js.
 import Foundation
 
-/// A media observation, not a timer tick or a requested seek position.
-struct MusicMiniPlayerSample: Equatable, Sendable {
-    let occurrenceID: String?
-    let attemptID: UUID?
-    let at: TimeInterval
-    let position: Double
-    let rate: Double
-    let playing: Bool
-    let seeking: Bool
-}
-
 struct MusicMiniPlayerLifecycle: Equatable, Sendable {
-    private(set) var expanded = false
-    private(set) var held = false
-    private(set) var occurrenceID: String?
-    private(set) var elapsed: TimeInterval = 0
-    private var previous: MusicMiniPlayerSample?
-
-    mutating func invalidate() {
-        expanded = false
-        held = false
-        elapsed = 0
-        previous = nil
+    private enum Display: Equatable, Sendable {
+        case compact, preview(until: TimeInterval), held
     }
+    private var display = Display.compact
+    private(set) var occurrenceID: String?
+    var expanded: Bool { display != .compact }
+    var held: Bool { display == .held }
+    var autoCollapseAt: TimeInterval? {
+        if case .preview(let deadline) = display { return deadline }
+        return nil
+    }
+
+    mutating func invalidate() { display = .compact }
 
     mutating func select(_ next: String?) {
         guard occurrenceID != next else { return }
         occurrenceID = next
-        previous = nil
         // A deliberately held card stays expanded across next/previous.
         if next == nil || !held { invalidate() }
     }
 
-    mutating func activate(_ occurrenceID: String) {
+    mutating func activate(_ occurrenceID: String, at: TimeInterval) {
         guard !occurrenceID.isEmpty else { return }
         self.occurrenceID = occurrenceID
-        expanded = true
-        held = false
-        elapsed = 0
-        previous = nil
+        display = .preview(until: at + 5)
     }
 
     mutating func hold() {
-        guard expanded, !held else { return }
-        held = true
-        previous = nil
+        if expanded { display = .held }
     }
 
-    /// Backgrounding, buffering and cancellation break the sampling interval,
-    /// but do not spend the remaining five seconds or undo a manual hold.
-    mutating func suspend() { previous = nil }
+    mutating func interactOutside() {
+        if held { invalidate() }
+    }
 
-    mutating func sample(_ value: MusicMiniPlayerSample) {
-        select(value.occurrenceID)
-        guard expanded, !held, value.playing, !value.seeking,
-              value.attemptID != nil, value.at.isFinite, value.position.isFinite,
-              value.position >= 0, value.rate.isFinite, value.rate > 0 else {
-            previous = nil
-            return
-        }
-        guard previous?.at != value.at else { return }
-        let last = previous
-        previous = value
-        guard let last, last.attemptID == value.attemptID, last.rate == value.rate else { return }
-        let wall = value.at - last.at, media = value.position - last.position
-        // Reject seeks, clock reversal and stalled media. At 2x, ten media
-        // seconds are five actually played seconds, not ten.
-        guard wall > 0, media >= 0, media <= wall * value.rate + 0.25 else { return }
-        elapsed += min(wall, media / value.rate)
-        if elapsed >= 5 - 0.0001 { invalidate() }
+    mutating func expire(at: TimeInterval) {
+        if let deadline = autoCollapseAt, at >= deadline { invalidate() }
     }
 }
 

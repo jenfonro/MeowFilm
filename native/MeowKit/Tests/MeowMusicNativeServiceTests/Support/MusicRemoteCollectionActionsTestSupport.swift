@@ -21,7 +21,7 @@ enum MusicRemoteCollectionActionsFixture {
                 cursor: end < rows.count ? String(end) : nil)
         }
         return MusicAccountQueuePages(roots: [Array(rows.prefix(30))], pages: pages,
-            rootCursor: rows.count > 30 ? "30" : nil)
+            rootCursor: rows.count > 30 ? "30" : nil, rootTotal: rows.count)
     }
     static func source(_ pages: MusicAccountQueuePages,
                        kind: MusicRemoteQueueContext.Kind = .playlist,

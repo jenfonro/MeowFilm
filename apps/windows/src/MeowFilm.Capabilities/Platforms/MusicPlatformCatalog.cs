@@ -3,7 +3,6 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Http;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -14,33 +13,36 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
 {
     private const int MaxResponse = 4 * 1024 * 1024, MaxResult = 512 * 1024;
     private readonly IMusicPlatformSessionSource sessions;
+    private readonly MusicPlatformClientContextOwner clients;
     private readonly MusicPlatformHttp http;
     private readonly bool ownsHttp;
     private readonly TimeSpan timeout;
     private readonly object gate = new();
     private readonly HashSet<Call> active = [];
     private readonly Dictionary<string, CacheEntry> cache = [];
-    private readonly string guestMid = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
     private int acquiring, cacheBytes;
     private bool closed;
     private sealed record CacheEntry(JsonElement Value, DateTimeOffset Expires, int Bytes, string Platform);
 
-    public MusicPlatformCatalog(IMusicPlatformSessionSource sessions, TimeSpan? timeout = null)
-        : this(sessions, new MusicPlatformHttp(), timeout, leaveOpen: false) { }
+    internal MusicPlatformCatalog(IMusicPlatformSessionSource sessions, MusicPlatformClientContextOwner clients,
+        TimeSpan? timeout = null)
+        : this(sessions, new MusicPlatformHttp(), clients, timeout, leaveOpen: false) { }
 
-    public MusicPlatformCatalog(IMusicPlatformSessionSource sessions, MusicPlatformHttp transport,
-        TimeSpan? timeout = null, bool leaveOpen = true)
+    internal MusicPlatformCatalog(IMusicPlatformSessionSource sessions, MusicPlatformHttp transport,
+        MusicPlatformClientContextOwner clients, TimeSpan? timeout = null, bool leaveOpen = true)
     {
         ArgumentNullException.ThrowIfNull(sessions);
         ArgumentNullException.ThrowIfNull(transport);
         this.sessions = sessions;
+        this.clients = clients ?? throw new ArgumentNullException(nameof(clients));
         this.timeout = timeout ?? TimeSpan.FromSeconds(25);
         PJ.Require(this.timeout.TotalMilliseconds is >= 1 and <= 60000);
         http = transport; ownsHttp = !leaveOpen;
     }
     /// <summary>Trusted composition/test seam only. Origin, redirect/status and streaming budgets remain enforced.</summary>
-    public static MusicPlatformCatalog CreateWithHandler(IMusicPlatformSessionSource sessions,
-        HttpMessageHandler handler, TimeSpan? timeout = null) => new(sessions, MusicPlatformHttp.CreateWithHandler(handler), timeout, leaveOpen: false);
+    internal static MusicPlatformCatalog CreateWithHandler(IMusicPlatformSessionSource sessions,
+        HttpMessageHandler handler, MusicPlatformClientContextOwner clients, TimeSpan? timeout = null) =>
+        new(sessions, MusicPlatformHttp.CreateWithHandler(handler), clients, timeout, leaveOpen: false);
 
     private sealed class Call : IDisposable
     {
@@ -51,6 +53,9 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
         internal readonly CancellationTokenSource Deadline, Cancelled, Linked;
         internal readonly long Started = Stopwatch.GetTimestamp();
         internal MusicPlatformSession? Session;
+        internal MusicPlatformClientContext? Client;
+        internal MusicWyClientContext WyClient => (MusicWyClientContext)Client!;
+        internal MusicKgClientContext KgClient => (MusicKgClientContext)Client!;
         internal string Scope = "", Reason = "";
         internal int RequestCount;
         internal readonly CancellationToken Token;
@@ -77,6 +82,9 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
             if (Caller.IsCancellationRequested) throw new MusicPlatformException("CANCELLED");
             if (Deadline.IsCancellationRequested || Stopwatch.GetElapsedTime(Started) >= Duration)
                 throw new MusicPlatformException("TIMEOUT");
+            if (Client is not null)
+                PJ.Require(Owner.clients.IsCurrent(Client),
+                    Owner.clients.NeedsReconciliation ? "COMMIT_UNKNOWN" : "STORAGE_CONFLICT");
             if (Session is not null)
             {
                 bool current;
@@ -99,21 +107,22 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
             var cookies = PJ.Cookies(Session);
             if (Platform == "wy") PJ.Require(PJ.Cookie(cookies, "MUSIC_U").Length > 0, "AUTH_REQUIRED");
         }
-        internal Task<JsonObject> Wy(string path, JsonObject? parameters = null, bool weapi = false) =>
-            Read(PlatformProtocols.Wy(path, parameters ?? new(), Session, weapi), d => PlatformProtocols.WySuccess(d));
+        internal Task<T> Wy<T>(string path, JsonObject parameters, Func<JsonObject, T> decode, bool weapi = false) =>
+            Read(PlatformProtocols.Wy(path, parameters, Session, WyClient, weapi), d => decode(PlatformProtocols.WySuccess(d)));
         internal Task<JsonObject> Tx(string module, string method, JsonObject parameters) =>
             Read(PlatformProtocols.Tx(module, method, parameters, Session), PlatformProtocols.TxSuccess);
         internal Task<JsonObject> Kg(string path, JsonObject parameters, string? router = null, JsonObject? body = null) =>
-            Read(PlatformProtocols.Kg(path, parameters, Session, Owner.guestMid, router, body), d => PlatformProtocols.KgSuccess(d, path));
-        internal async Task<JsonObject> Xeapi(string path, JsonObject parameters)
+            Read(PlatformProtocols.Kg(path, parameters, Session, KgClient, router, body), d => PlatformProtocols.KgSuccess(d, path));
+        internal async Task<T> Xeapi<T>(string path, JsonObject parameters, Func<JsonObject, T> decode)
         {
             Auth();
-            var bootstrap = PlatformXeapi.KeyRequest(Session!);
-            var body = await Read(bootstrap.Request, PlatformProtocols.WySuccess);
-            var key = PlatformXeapi.ReadKey(body, bootstrap.Nonce);
-            return await Read(PlatformXeapi.Request(path, parameters, Session!, key), PlatformProtocols.WySuccess, xeapi: true);
+            var bootstrap = PlatformXeapi.KeyRequest(WyClient, Session!);
+            var key = await Read(bootstrap.Request,
+                body => PlatformXeapi.ReadKey(PlatformProtocols.WySuccess(body), bootstrap.Nonce));
+            return await Read(PlatformXeapi.Request(path, parameters, Session!, WyClient, key),
+                body => decode(PlatformProtocols.WySuccess(body)), xeapi: true);
         }
-        private async Task<JsonObject> Read(HttpRequestMessage request, Func<JsonObject, JsonObject> business, bool xeapi = false)
+        private async Task<T> Read<T>(HttpRequestMessage request, Func<JsonObject, T> business, bool xeapi = false)
         {
             var dispatched = false;
             try
@@ -125,7 +134,11 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
                     : await Owner.http.SendCatalogAsync(Platform, request, Token, MaxResponse, Owner.timeout);
                 Guard();
                 await CheckSessionAsync();
-                return business(result.Body);
+                var body = business(result.Body);
+                if (Platform == "wy")
+                    Client = await Owner.clients.AcceptWyAsync(WyClient, Session?.Cookie, result.SetCookieHeaders,
+                        Guard, Token).ConfigureAwait(false);
+                Guard(); return body;
             }
             finally { if (!dispatched) request.Dispose(); }
         }
@@ -185,12 +198,19 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
         try
         {
             call.Session = await AcquireAsync(call);
+            if (platform is "wy" or "kg")
+                call.Client = await clients.AcquireAsync(platform, call.Token).ConfigureAwait(false);
             call.Guard();
             if (call.Session is not null) _ = PJ.Cookies(call.Session);
             call.Scope = PJ.Hash(PJ.Node(new object?[] { platform, call.Session?.Scope ?? "anonymous", call.Session?.Generation ?? 0, call.Session?.UserId }));
             var keyInput = JsonSerializer.SerializeToNode(input, PJ.Options)!.AsObject();
             keyInput.Remove("Refresh"); // A successful explicit refresh replaces the ordinary read's cache.
-            var key = PJ.Hash(PJ.Node(new object[] { call.Scope, operation, keyInput }));
+            string CacheKey() => PJ.Hash(PJ.Node(new object[] { call.Scope, operation, keyInput,
+                call.Client switch
+                {
+                    MusicWyClientContext w => w.DeviceId, MusicKgClientContext k => k.Seed, _ => ""
+                }, call.Client?.Generation ?? 0 }));
+            var key = CacheKey();
             JsonElement? cached = null;
             lock (gate)
             {
@@ -227,6 +247,7 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
                 lock (gate)
                 {
                     call.Guard();
+                    key = CacheKey(); // A trusted response may have advanced this call's client context.
                     Erase(key);
                     while (cache.Count >= 64 || cacheBytes + bytes > 2 * 1024 * 1024) Erase(cache.Keys.First());
                     cache[key] = new(result.Clone(), DateTimeOffset.UtcNow + ttl, bytes, platform); cacheBytes += bytes;

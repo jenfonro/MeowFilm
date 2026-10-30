@@ -20,6 +20,7 @@ const SOURCE = 'LICENSES';
 const FILES = [
   'NOTICE.md', 'Apache-2.0.txt', 'GPL-3.0-only.txt', 'api-enhanced-MIT.txt', 'KuGouMusicApi-MIT.txt',
   'iwebplus-NOTICE.txt', 'meowmusic-NOTICE.txt', 'node-LICENSE.txt', 'qr-code-generator-LICENSE.txt',
+  'quickjs-emscripten-LICENSE.txt',
 ];
 const INPUTS = FILES.map(name => ({ sourcePath: `${SOURCE}/${name}`, path: name }));
 

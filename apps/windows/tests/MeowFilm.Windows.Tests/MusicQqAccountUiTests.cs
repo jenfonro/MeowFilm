@@ -7,6 +7,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Threading;
 using MeowFilm.Core.Runtime;
+using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Platform.Storage;
 
@@ -242,7 +243,7 @@ public static class MusicQqAccountUiTests
         internal MusicCapability Module;
         private Fixture()
         {
-            Store = new(new DpapiDocumentStore(MusicNativeQqAccountTests.DataPath(), ["music.library.v1", "music.accounts.v1", "music.files.v1"]));
+            Store = new(new DpapiDocumentStore(MusicNativeQqAccountTests.DataPath(), AppIdentity.NativeNamespaces));
             Application = new(Store, Runtime, Transport);
             Module = new(Application, Store, new Output(), new Dialogs());
         }

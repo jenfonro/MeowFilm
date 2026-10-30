@@ -35,15 +35,15 @@ internal static class PlatformXeapi
         using var aes = Aes.Create(); aes.Key = key;
         return aes.DecryptEcb(encrypted, PaddingMode.PKCS7);
     }
-    private static string Device(MusicPlatformSession session)
+    private static string Device(Dictionary<string, string> cookies)
     {
-        var value = PJ.Cookie(PJ.Cookies(session), "deviceId");
+        var value = cookies["deviceId"];
         PJ.Require(value.Length is > 0 and <= 256, "DEVICE_CONTEXT_REQUIRED");
-        return value; // Only a verified account-owner supplied context; never manufacture a bound device.
+        return value;
     }
-    internal static (HttpRequestMessage Request, string Nonce) KeyRequest(MusicPlatformSession session)
+    internal static (HttpRequestMessage Request, string Nonce) KeyRequest(MusicWyClientContext client, MusicPlatformSession? session)
     {
-        var device = Device(session);
+        var device = Device(MusicWyRequestContext.Cookies(client, session?.Cookie));
         var nonce = string.Concat(Enumerable.Range(0, 16).Select(_ => RandomNumberGenerator.GetInt32(10).ToString(CultureInfo.InvariantCulture)));
         var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture);
         var data = new Dictionary<string, string> {
@@ -55,7 +55,7 @@ internal static class PlatformXeapi
             Content = new StringContent(PlatformProtocols.Form(data), Encoding.UTF8, "application/x-www-form-urlencoded")
         };
         request.Headers.TryAddWithoutValidation("User-Agent", Agent);
-        request.Headers.TryAddWithoutValidation("Cookie", "deviceId=" + Uri.EscapeDataString(device));
+        request.Headers.TryAddWithoutValidation("Cookie", "deviceId=" + device);
         return (request, nonce);
     }
     internal static KeyState ReadKey(JsonObject response, string nonce)
@@ -116,10 +116,11 @@ internal static class PlatformXeapi
             foreach (var bytes in new[] { shared, prk, expanded, key, plain }) CryptographicOperations.ZeroMemory(bytes);
         }
     }
-    internal static HttpRequestMessage Request(string path, JsonObject parameters, MusicPlatformSession session, KeyState state)
+    internal static HttpRequestMessage Request(string path, JsonObject parameters, MusicPlatformSession session,
+        MusicWyClientContext client, KeyState state)
     {
         PJ.Require(path is "/api/v3/discovery/recommend/songs" or "/api/homepage/category/daily/song/list" or "/api/song/enhance/player/url/v1");
-        var cookies = PJ.Cookies(session); var device = Device(session);
+        var cookies = MusicWyRequestContext.Cookies(client, session.Cookie); var device = Device(cookies);
         var version = PJ.Cookie(cookies, "os") == "android" ? PJ.Cookie(cookies, "appver", "9.1.65") : "9.1.65";
         var osver = PJ.Cookie(cookies, "os") == "android" ? PJ.Cookie(cookies, "osver", "16") : "16";
         var build = PJ.Cookie(cookies, "buildver", DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture));

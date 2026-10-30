@@ -12,6 +12,8 @@ final class MusicCandidateViewModelTests: XCTestCase {
     }
     @MainActor func testExplicitPlayDiscoversRefreshesCASAndPlaysResolvedCandidateExactlyOnce() async throws {
         let (service, player, model) = await setup()
+        var requests: [MusicPlaybackDestination] = []
+        model.onRequestPresentation = { requests.append($0) }
         await service.configure(discovery: true)
         XCTAssertTrue(player.resources.isEmpty)
         await model.play(MusicCandidateViewModelService.track("entry-1"))
@@ -21,7 +23,7 @@ final class MusicCandidateViewModelTests: XCTestCase {
         XCTAssertEqual(model.state.revision, 3); XCTAssertEqual(model.queue[0].track.sources.count, 2)
         XCTAssertEqual(model.position, 23); XCTAssertEqual(player.resources.count, 1)
         XCTAssertEqual(player.resources[0].id, model.activeResourceID)
-        XCTAssertEqual(model.activeOccurrenceID, "entry-3"); XCTAssertFalse(model.showingSources)
+        XCTAssertEqual(model.activeOccurrenceID, "entry-3"); XCTAssertTrue(requests.isEmpty)
         XCTAssertTrue(counts.facts.isEmpty)
         let resource = try XCTUnwrap(model.activeResourceID)
         model.onPlayback(.init(attemptId: String(resource.dropFirst(6)), occurrenceId: "entry-3",
@@ -33,9 +35,11 @@ final class MusicCandidateViewModelTests: XCTestCase {
 
     @MainActor func testForcedPickerAndManualFailureNeverStartAutomaticPolicy() async throws {
         let (service, player, model) = await setup()
+        var requests: [MusicPlaybackDestination] = []
+        model.onRequestPresentation = { requests.append($0) }
         await service.configure(manualFailure: .upstreamFailed)
         await model.prepareCurrent(forceSelection: true)
-        XCTAssertTrue(model.showingSources)
+        XCTAssertEqual(requests, [.sources])
         await model.choose(try XCTUnwrap(model.options.first).selection(quality: "128k"))
         let counts = await service.metrics()
         XCTAssertEqual(counts.options, 1); XCTAssertEqual(counts.manual, 1); XCTAssertEqual(counts.begins, 0)
@@ -68,6 +72,8 @@ final class MusicCandidateViewModelTests: XCTestCase {
 
     @MainActor func testForcePickerCancelsInFlightAutomaticResolution() async {
         let (service, player, model) = await setup()
+        var requests: [MusicPlaybackDestination] = []
+        model.onRequestPresentation = { requests.append($0) }
         let began = expectation(description: "automatic entered")
         let gate = MusicCandidateViewModelGate { began.fulfill() }
         await service.configure(resolve: gate)
@@ -75,7 +81,7 @@ final class MusicCandidateViewModelTests: XCTestCase {
         await fulfillment(of: [began], timeout: 2)
         await model.prepareCurrent(forceSelection: true)
         await gate.release(); await task.value
-        XCTAssertTrue(model.showingSources); XCTAssertTrue(player.resources.isEmpty)
+        XCTAssertEqual(requests, [.sources]); XCTAssertTrue(player.resources.isEmpty)
         let counts = await service.metrics(); XCTAssertFalse(counts.cancelled.isEmpty)
         XCTAssertEqual(counts.manual, 0)
         await model.close()

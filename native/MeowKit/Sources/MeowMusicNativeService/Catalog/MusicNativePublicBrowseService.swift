@@ -80,13 +80,14 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicBrowseQueueLoading
         }
         try check(own)
         try musicRequire(revision == publicCollectionRevision, .staleResult)
+        let consumed = result.consumed ?? result.tracks.count
         try musicRequire(result.collection.id == collection.id && result.tracks.count <= 30 &&
-            result.total >= position.offset + result.tracks.count &&
-            (!result.more || (result.consumed ?? result.tracks.count) > 0) &&
+            (result.tracks.count...30).contains(consumed) && result.total >= position.offset + consumed &&
+            (!result.more || consumed > 0) &&
             result.tracks.allSatisfy { $0.platform == collection.platform.rawValue }, .upstreamInvalid)
         let songs = try result.tracks.map(MusicModel.normalize)
         let next = result.more ? try position.encode(key: key, epoch: own,
-            offset: position.offset + (result.consumed ?? songs.count), snapshot: result.snapshot) : nil
+            offset: position.offset + consumed, snapshot: result.snapshot) : nil
         let rows = try songs.map(remember)
         return .init(collection: result.collection, tracks: rows, total: result.total, cursor: next,
                      snapshot: result.snapshot, notice: result.notice, consumed: result.consumed)
@@ -102,7 +103,7 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicBrowseQueueLoading
         let port = publicPlatforms, own = epoch, revision = publicCollectionRevision
         let result = try await work(label: "publicBrowseQueue") {
             let all = try await port.browseComplete(request.collection)
-            try musicRequire(all.snapshot == request.snapshot, .staleResult)
+            try await port.validateCompleteBrowse(all, snapshot: request.snapshot)
             return all
         }
         try check(own)
@@ -124,13 +125,19 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicBrowseQueueLoading
            channel.kind == .artistActivity || channel.kind == .featured || channel.kind == .vip {
             return try await scopedHomePage(destination, cursor: cursor, refresh: false)
         }
+        let source: MusicPublicBrowsePlatform, sourceRevision: UUID?
         switch destination {
-        case .daily(let platform): try requirePlatform(platform.rawValue)
-        // These catalog routes (including channels/cube) currently belong to
-        // NetEase, regardless of the selected foreground search platform.
-        case .home, .featured, .channels, .channel: try requirePlatform(MusicPublicBrowsePlatform.netease.rawValue)
+        case .daily(let platform):
+            source = .init(accountPlatform: platform); sourceRevision = nil
+            try requirePlatform(source.rawValue)
+        case .channel(let channel, _):
+            source = channel.platform; sourceRevision = nil
+            try requireHomeSource(source)
+        case .home, .featured, .channels:
+            source = try currentHomeSource(); sourceRevision = homeSourceRevision
         }
-        let key = MusicNativePublicBrowseDiscovery.key(destination), own = epoch
+        let key = source.rawValue + ":" + MusicNativePublicBrowseDiscovery.key(destination) +
+            (sourceRevision.map { ":" + $0.uuidString } ?? ""), own = epoch
         let position = try MusicNativePublicBrowseCursor.read(cursor, key: key, epoch: own, now: now())
         if case .daily(let platform) = destination {
             guard let accounts else { throw MusicServiceError.authRequired }
@@ -153,9 +160,9 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicBrowseQueueLoading
         }
         let port = publicPlatforms
         let result = try await work(label: "publicBrowse") {
-            try await port.browseDiscovery(destination, remote: position.remote, offset: position.offset)
+            try await port.browseDiscovery(destination, source: source, remote: position.remote, offset: position.offset)
         }
-        try check(own)
+        try checkHomeSource(source, revision: sourceRevision, epoch: own)
         try musicRequire(result.sections.reduce(0) { $0 + $1.items.count } <= 300, .limit)
         let sectionPrefix: String
         if case .channel(let channel, _) = destination, channel.kind == .cube {
@@ -168,17 +175,35 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicBrowseQueueLoading
             try musicRequire(remote != position.remote && position.offset < 199 && !sections.isEmpty, .limit)
             return try position.encode(key: key, epoch: own, offset: position.offset + 1, remote: remote)
         }
-        return .init(sections: sections, cursor: next, filters: result.filters, selectedFilter: result.selected, notice: result.notice)
+        return .init(sections: sections, cursor: next, filters: result.filters, selectedFilter: result.selected,
+                     notice: result.notice, consumed: result.consumed)
     }
 
-    func publicSections(_ result: MusicNativePublicBrowseDiscovery, prefix: String) throws -> [MusicPublicBrowseSection] {
+    func publicSections(_ result: MusicNativePublicBrowseDiscovery, prefix: String,
+                        binding: MusicNativeHomeBinding? = nil) throws -> [MusicPublicBrowseSection] {
         try musicRequire(result.sections.count <= 60 && result.sections.reduce(0, { count, section in
             count + (section.tabs.isEmpty ? section.items.count : section.tabs.reduce(0) { $0 + $1.items.count })
         }) <= 600, .limit)
         return try result.sections.map { section -> MusicPublicBrowseSection in
             let tabs = try section.tabs.map { tab in
-                MusicPublicBrowseSectionTab(id: tab.id, title: tab.title,
-                                           items: try publicItems(tab.items, layout: section.layout))
+                let pending = tab.items.contains { item in
+                    switch item.content {
+                    case .songID: return true
+                    case .collection(let value): return value.title.isEmpty
+                    default: return false
+                    }
+                }
+                if pending {
+                    let own = epoch
+                    return MusicPublicBrowseSectionTab(id: tab.id, title: tab.title, items: [],
+                        loadItems: { [weak self] in
+                            guard let self else { throw MusicServiceError.closed }
+                            return try await self.publicTabItems(tab.items, layout: section.layout,
+                                                                 binding: binding, epoch: own)
+                        })
+                }
+                return MusicPublicBrowseSectionTab(id: tab.id, title: tab.title,
+                                                   items: try publicItems(tab.items, layout: section.layout))
             }
             let items: [MusicPublicBrowseItem]
             if tabs.isEmpty { items = try publicItems(section.items, layout: section.layout) }
@@ -195,13 +220,35 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicBrowseQueueLoading
         }
     }
 
-    // Handle registration must remain on the service actor, including inactive
-    // section tabs. A local function does not inherit this actor's isolation.
+    private func publicTabItems(_ items: [MusicNativePublicBrowseItem], layout: MusicPublicBrowseSection.Layout,
+                                binding: MusicNativeHomeBinding?, epoch own: UUID) async throws -> [MusicPublicBrowseItem] {
+        try check(own)
+        if let binding { try await checkHomeBinding(binding, epoch: own) }
+        let port = publicPlatforms, account = accounts as? any MusicNativeHomeProviding
+        let metadata: (@Sendable (MusicNativeBrowseMetadataRequest) async throws -> Data)?
+        if let binding, binding.loggedIn, let account {
+            metadata = { request in
+                switch request {
+                case .songIDs(let ids): return try await account.nativeHomePayload(.songMetadata(ids: ids), binding: binding)
+                case .playlistIDs(let ids): return try await account.nativeHomePayload(.playlistMetadata(ids: ids), binding: binding)
+                }
+            }
+        } else { metadata = nil }
+        let result = try await work(label: "publicBrowseTab") {
+            try await port.browseEnrich(.init(sections: [.init(id: "tab", title: "", items: items, layout: layout)]),
+                                       metadata: metadata)
+        }
+        if let binding { try await checkHomeBinding(binding, epoch: own) }
+        try check(own)
+        return try publicItems(result.sections.first?.items ?? [], layout: layout)
+    }
+
+    // Handle registration and the final admission check stay on this actor.
     private func publicItems(_ rows: [MusicNativePublicBrowseItem],
                              layout: MusicPublicBrowseSection.Layout) throws -> [MusicPublicBrowseItem] {
         try rows.map { item -> MusicPublicBrowseItem in
             let content: MusicPublicBrowseContent
-            var subtitle = item.subtitle, artwork = item.artwork
+            var title = item.title, subtitle = item.subtitle, artwork = item.artwork
             switch item.content {
             case .collection(let value): content = .collection(value)
             case .channel(let value): content = .channel(value)
@@ -211,6 +258,7 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicBrowseQueueLoading
             case .song(let value):
                 let track = try remember(MusicModel.normalize(value))
                 content = .track(track)
+                if title.isEmpty { title = track.title }
                 if subtitle.isEmpty {
                     subtitle = [track.artist, layout == .vipSongs ? "" : track.album]
                         .filter { !$0.isEmpty }.joined(separator: " · ")
@@ -219,7 +267,7 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicBrowseQueueLoading
             case .songID: throw MusicServiceError.upstreamInvalid
             }
             let preview = try item.previewSongs.prefix(3).map { try remember(MusicModel.normalize($0)) }
-            return .init(id: item.id, title: item.title, subtitle: subtitle, artwork: artwork, content: content,
+            return .init(id: item.id, title: title, subtitle: subtitle, artwork: artwork, content: content,
                          ranking: item.ranking, previewSongs: preview, recommendationReason: item.recommendationReason,
                          coverLabel: item.coverLabel)
         }
@@ -227,8 +275,11 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicBrowseQueueLoading
 }
 
 enum MusicNativePublicBrowseSupport {
+    static func digestData(_ value: Data) -> String {
+        SHA256.hash(data: value).map { String(format: "%02x", $0) }.joined()
+    }
     static func digest(_ value: MJ) -> String {
-        SHA256.hash(data: value.bytes).map { String(format: "%02x", $0) }.joined()
+        digestData(value.bytes)
     }
     static func artwork(_ value: MJ) -> URL? {
         guard value.isString, value.string.utf8.count <= 4096,

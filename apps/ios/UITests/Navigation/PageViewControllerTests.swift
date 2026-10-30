@@ -1,0 +1,696 @@
+#if os(iOS)
+import XCTest
+import UIKit
+import Combine
+@testable import MeowUI
+
+@MainActor
+final class PageViewControllerTests: XCTestCase {
+    func testCoverageAndForegroundOnlyChangeVisibility() async {
+        let page = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
+        page.beginAppearanceTransition(true, animated: false)
+        page.endAppearanceTransition()
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        XCTAssertTrue(page.isPageActive)
+        XCTAssertTrue(page.isPageVisible)
+        XCTAssertEqual(page.activeCount, 1)
+        XCTAssertEqual(page.visibleCount, 1)
+
+        page.beginAppearanceTransition(false, animated: false)
+        page.endAppearanceTransition()
+        NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        XCTAssertTrue(page.isPageActive)
+        XCTAssertFalse(page.isPageVisible)
+        XCTAssertEqual(page.inactiveCount, 0)
+        XCTAssertEqual(page.hiddenCount, 1)
+
+        page.beginAppearanceTransition(true, animated: false)
+        page.endAppearanceTransition()
+        NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
+        NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
+        XCTAssertTrue(page.isPageActive)
+        XCTAssertFalse(page.isPageVisible)
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        XCTAssertTrue(page.isPageVisible)
+        XCTAssertEqual(page.activeCount, 1)
+        XCTAssertEqual(page.visibleCount, 3)
+        XCTAssertEqual(page.hiddenCount, 2)
+        XCTAssertEqual(page.inactiveCount, 0)
+    }
+
+    func testPublisherRemainsSubscribedUntilRemoval() async {
+        let container = UIViewController()
+        let page = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
+        container.addChild(page)
+        container.view.addSubview(page.view)
+        page.didMove(toParent: container)
+        let changes = PassthroughSubject<Void, Never>()
+        var subscriptions = 0, cancellations = 0, updates = 0
+        let updated = expectation(description: "updates while retained")
+        updated.expectedFulfillmentCount = 3
+        page.observe(changes.handleEvents(
+            receiveSubscription: { _ in subscriptions += 1 },
+            receiveCancel: { cancellations += 1 }
+        ).eraseToAnyPublisher()) {
+            updates += 1
+            updated.fulfill()
+        }
+        XCTAssertEqual(subscriptions, 0)
+        page.beginAppearanceTransition(true, animated: false)
+        page.endAppearanceTransition()
+        page.beginAppearanceTransition(false, animated: false)
+        page.endAppearanceTransition()
+        changes.send()
+        NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
+        changes.send()
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        page.beginAppearanceTransition(true, animated: false)
+        page.endAppearanceTransition()
+        changes.send()
+        await fulfillment(of: [updated], timeout: 2)
+        XCTAssertEqual(subscriptions, 1)
+        XCTAssertEqual(cancellations, 0)
+        XCTAssertEqual(updates, 3)
+
+        changes.send()
+        page.willMove(toParent: nil)
+        page.view.removeFromSuperview()
+        page.removeFromParent()
+        changes.send()
+        let drained = expectation(description: "main run loop drained")
+        RunLoop.main.perform { drained.fulfill() }
+        await fulfillment(of: [drained], timeout: 2)
+        XCTAssertFalse(page.isPageActive)
+        XCTAssertFalse(page.isPageVisible)
+        XCTAssertEqual(page.inactiveCount, 1)
+        XCTAssertEqual(cancellations, 1)
+        XCTAssertEqual(updates, 3)
+        page.beginAppearanceTransition(true, animated: false)
+        page.endAppearanceTransition()
+        XCTAssertFalse(page.isPageActive)
+        XCTAssertEqual(page.activeCount, 1)
+        XCTAssertEqual(subscriptions, 1)
+    }
+
+    func testFocusedObjectObservationContinuesWhileHidden() async {
+        let page = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
+        let object = PageLifecycleTestObject()
+        let updated = expectation(description: "focused object update")
+        var observedValue: Int?
+        page.observe(object) {
+            observedValue = object.value
+            updated.fulfill()
+        }
+        page.beginAppearanceTransition(true, animated: false)
+        page.endAppearanceTransition()
+        page.beginAppearanceTransition(false, animated: false)
+        page.endAppearanceTransition()
+        object.value = 7
+        await fulfillment(of: [updated], timeout: 2)
+        XCTAssertEqual(observedValue, 7)
+        XCTAssertTrue(page.isPageActive)
+    }
+
+    func testValuePublisherPreservesPayloadThroughRetainedDetachAndCancelsOnExplicitRelease() async {
+        let owner = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
+        owner.beginAppearanceTransition(true, animated: false)
+        owner.endAppearanceTransition()
+        let wrapper = PageLifecycleTestModalWrapper()
+        let page = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
+        page.lifetimeOwner = owner
+        wrapper.addChild(page)
+        wrapper.view.addSubview(page.view)
+        page.didMove(toParent: wrapper)
+        let changes = PassthroughSubject<Set<String>, Never>()
+        var subscriptions = 0, cancellations = 0
+        var values: [Set<String>] = []
+        let updated = expectation(description: "account platform changes delivered")
+        updated.expectedFulfillmentCount = 3
+        page.observe(changes.handleEvents(
+            receiveSubscription: { _ in subscriptions += 1 },
+            receiveCancel: { cancellations += 1 }
+        ).eraseToAnyPublisher()) { platforms in
+            values.append(platforms)
+            updated.fulfill()
+        }
+        XCTAssertEqual(subscriptions, 0)
+        page.beginAppearanceTransition(true, animated: false)
+        page.endAppearanceTransition()
+        changes.send(["tx"])
+        wrapper.moving = true
+        page.beginAppearanceTransition(false, animated: false)
+        page.endAppearanceTransition()
+        page.willMove(toParent: nil)
+        page.view.removeFromSuperview()
+        page.removeFromParent()
+        NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
+        changes.send(["wy"])
+        XCTAssertTrue(page.isPageActive)
+        XCTAssertFalse(page.isPageVisible)
+        XCTAssertEqual(page.inactiveCount, 0)
+        XCTAssertEqual(cancellations, 0)
+        wrapper.moving = false
+        wrapper.addChild(page)
+        wrapper.view.addSubview(page.view)
+        page.didMove(toParent: wrapper)
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        page.beginAppearanceTransition(true, animated: false)
+        page.endAppearanceTransition()
+        changes.send(["kg", "wy"])
+        await fulfillment(of: [updated], timeout: 2)
+        XCTAssertEqual(values, [Set(["tx"]), Set(["wy"]), Set(["kg", "wy"])])
+        XCTAssertEqual(subscriptions, 1)
+        XCTAssertEqual(page.activeCount, 1)
+        PageViewController.invalidatePages(in: page)
+        page.willMove(toParent: nil)
+        page.view.removeFromSuperview()
+        page.removeFromParent()
+        changes.send(["mg"])
+        let drained = expectation(description: "released publisher drained")
+        RunLoop.main.perform { drained.fulfill() }
+        await fulfillment(of: [drained], timeout: 2)
+        XCTAssertTrue(owner.isPageActive)
+        XCTAssertFalse(page.isPageActive)
+        XCTAssertEqual(page.inactiveCount, 1)
+        XCTAssertEqual(cancellations, 1)
+        XCTAssertEqual(values.count, 3)
+    }
+
+    func testRetainedDetachHidesVisualsButKeepsTaskUntilExplicitRelease() async {
+        let owner = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
+        let wrapper = UIViewController()
+        let page = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
+        page.lifetimeOwner = owner
+        wrapper.addChild(page)
+        wrapper.view.addSubview(page.view)
+        page.didMove(toParent: wrapper)
+        page.beginAppearanceTransition(true, animated: false)
+        page.endAppearanceTransition()
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        let started = expectation(description: "cached task started")
+        let finished = expectation(description: "cached task survived detach")
+        var continuation: CheckedContinuation<Void, Never>?
+        page.runPageTask {
+            await withCheckedContinuation { continuation = $0; started.fulfill() }
+            XCTAssertFalse(Task.isCancelled)
+            finished.fulfill()
+        }
+        await fulfillment(of: [started], timeout: 2)
+        page.willMove(toParent: nil)
+        page.view.removeFromSuperview()
+        page.removeFromParent()
+        XCTAssertFalse(owner.isPageActive, "An owner awaiting first appearance is not closed")
+        XCTAssertTrue(page.isPageActive)
+        XCTAssertFalse(page.isPageVisible)
+        XCTAssertEqual(page.hiddenCount, 1)
+        continuation?.resume()
+        await fulfillment(of: [finished], timeout: 2)
+        let closingStarted = expectation(description: "cached closing task started")
+        let cancelled = expectation(description: "cached closing task cancelled")
+        page.runPageTask {
+            await withCheckedContinuation { continuation = $0; closingStarted.fulfill() }
+            XCTAssertTrue(Task.isCancelled)
+            cancelled.fulfill()
+        }
+        await fulfillment(of: [closingStarted], timeout: 2)
+        PageViewController.invalidatePages(in: page)
+        continuation?.resume()
+        await fulfillment(of: [cancelled], timeout: 2)
+        XCTAssertFalse(page.isPageActive)
+        XCTAssertEqual(page.inactiveCount, 1)
+    }
+
+    func testRetainedContentIgnoresTemporaryWrapperDismissalButClosedOwnerEndsContent() async {
+        let owner = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
+        owner.beginAppearanceTransition(true, animated: false)
+        owner.endAppearanceTransition()
+        let wrapper = PageLifecycleTestModalWrapper()
+        let page = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
+        page.lifetimeOwner = owner
+        wrapper.addChild(page)
+        wrapper.view.addSubview(page.view)
+        page.didMove(toParent: wrapper)
+        page.beginAppearanceTransition(true, animated: false)
+        page.endAppearanceTransition()
+        wrapper.dismissing = true
+        page.beginAppearanceTransition(false, animated: false)
+        page.endAppearanceTransition()
+        XCTAssertTrue(page.isPageActive)
+        XCTAssertEqual(page.inactiveCount, 0)
+        PageViewController.invalidatePages(in: owner)
+        page.beginAppearanceTransition(true, animated: false)
+        page.endAppearanceTransition()
+        page.beginAppearanceTransition(false, animated: false)
+        page.endAppearanceTransition()
+        XCTAssertFalse(page.isPageActive)
+        XCTAssertEqual(page.activeCount, 1)
+        XCTAssertEqual(page.inactiveCount, 1)
+    }
+
+    func testRootRemovalClosesAttachedRetainedContentDespiteExplicitOwner() async {
+        let outer = UIViewController()
+        let owner = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
+        let wrapper = UIViewController()
+        let page = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
+        page.lifetimeOwner = owner
+        outer.addChild(owner)
+        outer.view.addSubview(owner.view)
+        owner.didMove(toParent: outer)
+        owner.addChild(wrapper)
+        owner.view.addSubview(wrapper.view)
+        wrapper.didMove(toParent: owner)
+        wrapper.addChild(page)
+        wrapper.view.addSubview(page.view)
+        page.didMove(toParent: wrapper)
+        owner.beginAppearanceTransition(true, animated: false)
+        owner.endAppearanceTransition()
+        XCTAssertTrue(page.isPageActive)
+        owner.willMove(toParent: nil)
+        owner.view.removeFromSuperview()
+        owner.removeFromParent()
+        XCTAssertFalse(owner.isPageActive)
+        XCTAssertFalse(page.isPageActive)
+        XCTAssertEqual(owner.inactiveCount, 1)
+        XCTAssertEqual(page.inactiveCount, 1)
+    }
+
+    func testLifetimeOwnerIsWeakAndReleasedOwnerDoesNotSuppressRemoval() async {
+        let wrapper = UIViewController()
+        let page = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
+        autoreleasepool {
+            let owner = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
+            page.lifetimeOwner = owner
+            XCTAssertTrue(page.lifetimeOwner === owner)
+        }
+        wrapper.addChild(page)
+        wrapper.view.addSubview(page.view)
+        page.didMove(toParent: wrapper)
+        page.beginAppearanceTransition(true, animated: false)
+        page.endAppearanceTransition()
+        XCTAssertNil(page.lifetimeOwner)
+        page.willMove(toParent: nil)
+        page.view.removeFromSuperview()
+        page.removeFromParent()
+        XCTAssertFalse(page.isPageActive)
+        XCTAssertEqual(page.inactiveCount, 1)
+    }
+
+    func testTasksSurviveCoverageAndBackgroundButCancelOnRemoval() async {
+        let container = UIViewController()
+        let page = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
+        container.addChild(page)
+        container.view.addSubview(page.view)
+        page.didMove(toParent: container)
+        page.beginAppearanceTransition(true, animated: false)
+        page.endAppearanceTransition()
+        let started = expectation(description: "retained task started")
+        let finished = expectation(description: "retained task finished")
+        var continuation: CheckedContinuation<Void, Never>?
+        page.runPageTask {
+            await withCheckedContinuation { continuation = $0; started.fulfill() }
+            XCTAssertFalse(Task.isCancelled)
+            finished.fulfill()
+        }
+        await fulfillment(of: [started], timeout: 2)
+        page.beginAppearanceTransition(false, animated: false)
+        page.endAppearanceTransition()
+        NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
+        XCTAssertTrue(page.isPageActive)
+        continuation?.resume()
+        await fulfillment(of: [finished], timeout: 2)
+
+        let closingStarted = expectation(description: "closing task started")
+        let cancelled = expectation(description: "closing task cancelled")
+        page.runPageTask {
+            await withCheckedContinuation { continuation = $0; closingStarted.fulfill() }
+            XCTAssertTrue(Task.isCancelled)
+            cancelled.fulfill()
+        }
+        await fulfillment(of: [closingStarted], timeout: 2)
+        page.willMove(toParent: nil)
+        page.view.removeFromSuperview()
+        page.removeFromParent()
+        continuation?.resume()
+        await fulfillment(of: [cancelled], timeout: 2)
+        XCTAssertFalse(page.isPageActive)
+        XCTAssertEqual(page.activeCount, 1)
+        XCTAssertEqual(page.inactiveCount, 1)
+    }
+
+    func testModalWrapperDismissalWaitsForCommitAndIgnoresCancellation() async {
+        let wrapper = PageLifecycleTestModalWrapper()
+        let page = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
+        wrapper.addChild(page)
+        wrapper.view.addSubview(page.view)
+        page.didMove(toParent: wrapper)
+        page.beginAppearanceTransition(true, animated: false)
+        page.endAppearanceTransition()
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        let coordinator = PageLifecycleTestCoordinator()
+        wrapper.coordinator = coordinator
+        wrapper.dismissing = true
+        page.beginAppearanceTransition(false, animated: true)
+        page.endAppearanceTransition()
+        XCTAssertTrue(page.isPageActive)
+        coordinator.complete(cancelled: true)
+        wrapper.dismissing = false
+        page.beginAppearanceTransition(true, animated: false)
+        page.endAppearanceTransition()
+        XCTAssertTrue(page.isPageActive)
+        XCTAssertEqual(page.activeCount, 1)
+        XCTAssertEqual(page.inactiveCount, 0)
+
+        wrapper.dismissing = true
+        page.beginAppearanceTransition(false, animated: true)
+        page.endAppearanceTransition()
+        XCTAssertTrue(page.isPageActive)
+        coordinator.complete(cancelled: false)
+        XCTAssertFalse(page.isPageActive)
+        XCTAssertFalse(page.isPageVisible)
+        XCTAssertEqual(page.inactiveCount, 1)
+        XCTAssertEqual(page.visibleCount, page.hiddenCount)
+    }
+
+    func testNonanimatedModalWrapperDismissalClosesChildWithoutRemovingContainment() async {
+        let wrapper = PageLifecycleTestModalWrapper()
+        let page = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
+        wrapper.addChild(page)
+        wrapper.view.addSubview(page.view)
+        page.didMove(toParent: wrapper)
+        page.beginAppearanceTransition(true, animated: false)
+        page.endAppearanceTransition()
+        wrapper.dismissing = true
+        page.beginAppearanceTransition(false, animated: false)
+        page.endAppearanceTransition()
+        XCTAssertTrue(page.parent === wrapper)
+        XCTAssertFalse(page.isPageActive)
+        XCTAssertEqual(page.inactiveCount, 1)
+    }
+
+    func testActualModalNavigationCoverageAndDismissalHaveDifferentLifetimes() async throws {
+        let theme = PageLifecycleTestTheme()
+        let presenter = PageLifecycleTestPresenter()
+        let ready = expectation(description: "presenter appeared")
+        presenter.onDidAppear = { ready.fulfill() }
+        let page = PageLifecycleTestPage(themeProvider: theme)
+        let wrapper = PageNavigationController(themeProvider: theme)
+        wrapper.setViewControllers([page], animated: false)
+        wrapper.modalPresentationStyle = .fullScreen
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = presenter
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        await fulfillment(of: [ready], timeout: 2)
+        let presented = expectation(description: "modal wrapper presented")
+        presenter.present(wrapper, animated: false) { presented.fulfill() }
+        await fulfillment(of: [presented], timeout: 2)
+        window.layoutIfNeeded()
+        wrapper.view.layoutIfNeeded()
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        XCTAssertTrue(page.view.window === window)
+        XCTAssertTrue(page.isPageActive)
+        XCTAssertTrue(page.isPageVisible)
+        wrapper.pushViewController(UIViewController(), animated: false)
+        wrapper.view.layoutIfNeeded()
+        let covered = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated { !page.isPageVisible }
+        }, evaluatedWith: page)
+        await fulfillment(of: [covered], timeout: 2)
+        XCTAssertTrue(page.isPageActive)
+        XCTAssertFalse(page.isPageVisible)
+        XCTAssertEqual(page.inactiveCount, 0)
+        wrapper.popViewController(animated: false)
+        wrapper.view.layoutIfNeeded()
+        let revealed = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated { page.isPageVisible }
+        }, evaluatedWith: page)
+        await fulfillment(of: [revealed], timeout: 2)
+        XCTAssertTrue(page.isPageVisible)
+        XCTAssertEqual(page.activeCount, 1)
+        let dismissed = expectation(description: "modal wrapper dismissed")
+        wrapper.dismiss(animated: false) { dismissed.fulfill() }
+        await fulfillment(of: [dismissed], timeout: 2)
+        XCTAssertTrue(page.parent === wrapper)
+        XCTAssertFalse(page.isPageActive)
+        XCTAssertFalse(page.isPageVisible)
+        XCTAssertEqual(page.inactiveCount, 1)
+    }
+
+    func testAlertAdmissionMatchesShowErrorWithoutChangingPageLifetime() async throws {
+        let page = PageAlertTestPage(themeProvider: PageLifecycleTestTheme())
+        XCTAssertFalse(page.canPresentPageAlert)
+        XCTAssertFalse(page.isViewLoaded)
+        page.beginAppearanceTransition(true, animated: false)
+        page.endAppearanceTransition()
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        XCTAssertTrue(page.isPageVisible)
+        XCTAssertFalse(page.canPresentPageAlert, "A visible page still needs a window")
+        let root = PageLifecycleTestModalWrapper()
+        let parent = PageLifecycleTestModalWrapper()
+        root.addChild(parent)
+        root.view.addSubview(parent.view)
+        parent.didMove(toParent: root)
+        parent.addChild(page)
+        parent.view.addSubview(page.view)
+        page.didMove(toParent: parent)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = root
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        let displayed = expectation(description: "alert page displayed")
+        RunLoop.main.perform { displayed.fulfill() }
+        await fulfillment(of: [displayed], timeout: 2)
+        XCTAssertTrue(page.canPresentPageAlert)
+        XCTAssertFalse(page.showError(nil))
+        XCTAssertFalse(page.showError(""))
+        let assertBlocked = {
+            XCTAssertFalse(page.canPresentPageAlert)
+            XCTAssertFalse(page.showError("failure"))
+            XCTAssertTrue(page.isPageActive)
+            XCTAssertTrue(page.alerts.isEmpty)
+        }
+        page.covering = UIViewController()
+        assertBlocked()
+        page.covering = nil
+        let transition = PageLifecycleTestCoordinator()
+        page.coordinator = transition
+        page.viewWillTransition(to: page.view.bounds.size, with: transition)
+        assertBlocked()
+        transition.complete(cancelled: false)
+        XCTAssertTrue(page.canPresentPageAlert, "A retained coordinator is no longer active after its completion")
+        page.coordinator = PageLifecycleTestCoordinator()
+        assertBlocked()
+        page.coordinator = nil
+        for ancestor in [parent, root] {
+            ancestor.covering = UIViewController()
+            assertBlocked()
+            ancestor.covering = nil
+            ancestor.presenting = true
+            assertBlocked()
+            ancestor.presenting = false
+            ancestor.dismissing = true
+            assertBlocked()
+            ancestor.dismissing = false
+            ancestor.movingTo = true
+            assertBlocked()
+            ancestor.movingTo = false
+            ancestor.moving = true
+            assertBlocked()
+            ancestor.moving = false
+            ancestor.coordinator = PageLifecycleTestCoordinator()
+            assertBlocked()
+            ancestor.coordinator = nil
+        }
+        NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
+        assertBlocked()
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        page.beginAppearanceTransition(false, animated: false)
+        page.endAppearanceTransition()
+        assertBlocked()
+        page.beginAppearanceTransition(true, animated: false)
+        page.endAppearanceTransition()
+        XCTAssertTrue(page.canPresentPageAlert)
+        XCTAssertTrue(page.showError("failure"))
+        let alert = try XCTUnwrap(page.alerts.first as? UIAlertController)
+        XCTAssertEqual(alert.message, "failure")
+        XCTAssertTrue(page.isPageActive)
+    }
+
+    func testDeinitCancelsTasksAndSubscriptions() async {
+        var page: PageLifecycleTestPage? = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
+        let changes = PassthroughSubject<Void, Never>()
+        var cancellations = 0
+        page?.observe(changes.handleEvents(
+            receiveCancel: { cancellations += 1 }
+        ).eraseToAnyPublisher()) {}
+        page?.beginAppearanceTransition(true, animated: false)
+        page?.endAppearanceTransition()
+        let started = expectation(description: "deinit task started")
+        let cancelled = expectation(description: "deinit task cancelled")
+        var continuation: CheckedContinuation<Void, Never>?
+        page?.runPageTask {
+            await withCheckedContinuation { continuation = $0; started.fulfill() }
+            XCTAssertTrue(Task.isCancelled)
+            cancelled.fulfill()
+        }
+        await fulfillment(of: [started], timeout: 2)
+        weak var released = page
+        let synchronousRelease = expectation(description: "synchronous page release in task-local scope")
+        let releaseOnMain = { @MainActor in
+            PageLifecycleTestLocal.$marker.withValue(1) {
+                page = nil
+                XCTAssertNil(released)
+                XCTAssertEqual(cancellations, 1)
+            }
+            XCTAssertEqual(PageLifecycleTestLocal.marker, 0)
+            synchronousRelease.fulfill()
+        }
+        RunLoop.main.perform { MainActor.assumeIsolated { releaseOnMain() } }
+        await fulfillment(of: [synchronousRelease], timeout: 2)
+        continuation?.resume()
+        await fulfillment(of: [cancelled], timeout: 2)
+    }
+}
+
+private enum PageLifecycleTestLocal {
+    @TaskLocal static var marker = 0
+}
+
+@MainActor
+final class PageLifecycleTestTheme: PageThemeProviding {
+    let pageColorway = PageColorway.allCases[0]
+    let animatesPageColorway = false
+    var pageThemeChanges: AnyPublisher<Void, Never> {
+        Empty(completeImmediately: false).eraseToAnyPublisher()
+    }
+}
+
+@MainActor
+final class PageLifecycleTestPage: PageViewController {
+    var activeCount = 0, inactiveCount = 0, visibleCount = 0, hiddenCount = 0
+    var appearanceEvents: [String] = []
+    override func pageDidBecomeActive() { activeCount += 1 }
+    override func pageDidBecomeInactive() { inactiveCount += 1 }
+    override func pageDidBecomeVisible() { visibleCount += 1 }
+    override func pageDidBecomeHidden() { hiddenCount += 1 }
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        appearanceEvents.append("willAppear")
+    }
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        appearanceEvents.append("didAppear")
+    }
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        appearanceEvents.append("willDisappear")
+    }
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        appearanceEvents.append("didDisappear")
+    }
+}
+
+@MainActor
+private final class PageLifecycleTestObject: ObservableObject {
+    @Published var value = 0
+}
+
+@MainActor
+private final class PageLifecycleTestPresenter: UIViewController {
+    var onDidAppear: (() -> Void)?
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        let callback = onDidAppear
+        onDidAppear = nil
+        callback?()
+    }
+}
+
+@MainActor
+private final class PageLifecycleTestModalWrapper: UIViewController {
+    var covering: UIViewController?
+    var presenting = false
+    var dismissing = false
+    var movingTo = false
+    var moving = false
+    var coordinator: PageLifecycleTestCoordinator?
+    override var presentedViewController: UIViewController? { covering ?? super.presentedViewController }
+    override var isBeingPresented: Bool { presenting }
+    override var isBeingDismissed: Bool { dismissing }
+    override var isMovingToParent: Bool { movingTo }
+    override var isMovingFromParent: Bool { moving }
+    override var transitionCoordinator: UIViewControllerTransitionCoordinator? { coordinator }
+}
+
+@MainActor
+private final class PageAlertTestPage: PageViewController {
+    var covering: UIViewController?
+    var coordinator: UIViewControllerTransitionCoordinator?
+    var alerts: [UIViewController] = []
+    override var presentedViewController: UIViewController? { covering ?? super.presentedViewController }
+    override var transitionCoordinator: UIViewControllerTransitionCoordinator? { coordinator ?? super.transitionCoordinator }
+    override func present(_ viewControllerToPresent: UIViewController, animated flag: Bool,
+                          completion: (() -> Void)? = nil) {
+        alerts.append(viewControllerToPresent)
+        completion?()
+    }
+}
+
+@MainActor
+private final class PageLifecycleTestCoordinator: NSObject, UIViewControllerTransitionCoordinator {
+    let isAnimated = true
+    let presentationStyle = UIModalPresentationStyle.fullScreen
+    let initiallyInteractive = true
+    let isInterruptible = true
+    let isInteractive = true
+    private(set) var isCancelled = false
+    let transitionDuration: TimeInterval = 0.22
+    let percentComplete: CGFloat = 0
+    let completionVelocity: CGFloat = 0
+    let completionCurve = UIView.AnimationCurve.easeInOut
+    let containerView = UIView()
+    let targetTransform = CGAffineTransform.identity
+    private var completions: [(UIViewControllerTransitionCoordinatorContext) -> Void] = []
+
+    func complete(cancelled: Bool) {
+        isCancelled = cancelled
+        let callbacks = completions
+        completions.removeAll()
+        for completion in callbacks { completion(self) }
+    }
+
+    func viewController(forKey key: UITransitionContextViewControllerKey) -> UIViewController? { nil }
+    func view(forKey key: UITransitionContextViewKey) -> UIView? { nil }
+
+    func animate(alongsideTransition animation: ((UIViewControllerTransitionCoordinatorContext) -> Void)?,
+                 completion: ((UIViewControllerTransitionCoordinatorContext) -> Void)?) -> Bool {
+        animation?(self)
+        if let completion { completions.append(completion) }
+        return true
+    }
+
+    func animateAlongsideTransition(in view: UIView?,
+                                   animation: ((UIViewControllerTransitionCoordinatorContext) -> Void)?,
+                                   completion: ((UIViewControllerTransitionCoordinatorContext) -> Void)?) -> Bool {
+        animate(alongsideTransition: animation, completion: completion)
+    }
+
+    func notifyWhenInteractionEnds(_ handler: @escaping (UIViewControllerTransitionCoordinatorContext) -> Void) {}
+    func notifyWhenInteractionChanges(_ handler: @escaping (UIViewControllerTransitionCoordinatorContext) -> Void) {}
+}
+#endif

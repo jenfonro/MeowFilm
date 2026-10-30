@@ -23,20 +23,20 @@ import MeowPlayback
     private var binding: MusicSystemMetadataBinding?
     private var publishedAttempt: PlayAttempt?
     private var publishedMetadata: PlaybackNowPlayingMetadata?
-    private var favoritesActive = false
-    private var favoritesNeedReload = true
 
     /// Hold one per music product owner, alongside the same model, shared
     /// playback controller and appearance instance used by mini/player/settings.
     public init(model: MusicViewModel, playback: PlaybackController,
                 appearance: MusicAppearancePreferencesStore) {
         self.model = model; self.playback = playback; self.appearance = appearance
-        favorites = MusicMiniPlayerFavorites(model: model)
+        favorites = model.favorites
         available = model.isAvailable; modelClosed = model.isClosed
 
         // ObservableObject emits BEFORE a setter finishes. Coalesce ordinary
         // updates onto the actor's next turn, then read one coherent snapshot.
-        model.objectWillChange.sink { [weak self] in self?.schedule() }.store(in: &observations)
+        Publishers.MergeMany(model.playbackChanges, model.metadataChanges, model.libraryChanges,
+                             model.noticeChanges).sink { [weak self] in self?.schedule() }
+            .store(in: &observations)
         model.clock.objectWillChange.sink { [weak self] in self?.schedule() }.store(in: &observations)
         appearance.objectWillChange.sink { [weak self] in self?.schedule() }.store(in: &observations)
         favorites.objectWillChange.sink { [weak self] in self?.schedule() }.store(in: &observations)
@@ -44,31 +44,26 @@ import MeowPlayback
 
         // Privacy barriers use the emitted NEW value synchronously, not the
         // old stored property and not a deferred receive(on:)/polling timer.
-        model.$isAvailable.sink { [weak self] value in
+        model.accessState.$isAvailable.sink { [weak self] value in
             guard let self else { return }
             self.available = value
             if !value { self.revoke(); self.suppressCurrentMusicAttempt() }
             self.schedule()
         }.store(in: &observations)
-        model.$isClosed.sink { [weak self] value in
+        model.accessState.$isClosed.sink { [weak self] value in
             guard let self else { return }
             self.modelClosed = value
             if value { self.revoke(); self.suppressCurrentMusicAttempt() }
             self.schedule()
         }.store(in: &observations)
-        model.$state.sink { [weak self] state in
+        model.playbackState.$state.sink { [weak self] state in
             guard let self else { return }
             if let binding = self.binding, state.currentId != binding.occurrenceID { self.revoke() }
         }.store(in: &observations)
-        model.$queue.sink { [weak self] queue in
+        model.playbackState.$queue.sink { [weak self] queue in
             guard let self, let binding = self.binding else { return }
             guard let entry = queue.first(where: { $0.id == binding.occurrenceID }),
                   binding.matches(entry.track) else { self.revoke(); return }
-        }.store(in: &observations)
-        // readCollectionPage republishes its catalogue. Identical snapshots
-        // must not recursively trigger another favorites read.
-        model.$collections.removeDuplicates().sink { [weak self] _ in
-            self?.favoritesNeedReload = true; self?.schedule()
         }.store(in: &observations)
         playback.$currentAttempt.sink { [weak self] next in
             guard let self else { return }
@@ -120,12 +115,6 @@ import MeowPlayback
         if let old = binding, old != next { revoke() }
         binding = next
         appearance.selectSystemArtwork(model.displayTrack ?? entry.track)
-        if !favoritesActive {
-            favoritesActive = true; favoritesNeedReload = false
-            favorites.setActive(true)
-        } else if favoritesNeedReload {
-            favoritesNeedReload = false; favorites.reload()
-        }
 
         let value = Self.metadata(
             track: model.displayTrack ?? entry.track, lines: model.lyricLines, position: model.position,
@@ -156,10 +145,6 @@ import MeowPlayback
     private func revoke() {
         let old = publishedAttempt ?? binding?.attempt
         binding = nil; publishedAttempt = nil; publishedMetadata = nil
-        if favoritesActive {
-            favoritesActive = false; favoritesNeedReload = true
-            favorites.suspend()
-        }
         appearance.setSystemArtworkEnabled(false)
         if let old { _ = playback.clearNowPlayingMetadata(attempt: old) }
     }

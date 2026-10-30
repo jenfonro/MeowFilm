@@ -1,8 +1,10 @@
 # 原生音乐账号契约
 
+客户端与授权的共同职责边界见[平台客户端上下文](../common/music/platform-client-context.md)，Windows 的设备初始化和登记见[客户端实现](music-platform-client-context.md)。本文件只记录账号授权、命令、交接和账号存储。
+
 ## 所有权与装配
 
-- `MusicAccountOwner` 是 `music.accounts.v1` 的唯一 writer，并实现账号会话、资料权益、酷狗设备和 QQ feedback 设备的统一生命周期。
+- `MusicAccountOwner` 是 `music.accounts.v1` 的唯一 writer，拥有账号会话、登录交接、资料权益及账号绑定的 QQ 反馈 lease；不拥有安装标识、QIMEI 或匿名设备登记 writer。
 - 网易云、QQ、酷狗的固定平台请求由 `MeowFilm.Capabilities.Accounts` 与 `MeowFilm.Capabilities.Platforms` 原生实现；账号业务不经 Node、脚本 RPC 或本地服务。
 - `IProtectedDocumentStore` 由 App 持有并借给账号 owner。构造 owner 不读磁盘、不联网、不启动 Node。
 - 账号 owner 与协议默认使用 `TimeProvider.System`；注入确定性时钟时装配须向两者传入同一时钟，资料取得时间校验与缓存新鲜度使用同一时间基准。
@@ -25,17 +27,17 @@
 
 1. `wy`、`tx`、`kg` 三个平台账号；
 2. 三个平台各自的账号资料与权益；
-3. 一个酷狗设备；
-4. 一个 QQ feedback 设备。
+3. 一个只读迁移用酷狗旧设备条目；
+4. 一个只读迁移用 QQ feedback 旧设备条目。
 
-账号 key 为 `["meowfilm","music",1,"platform-account","<platform>"]`。资料和设备使用各自固定的当前 key。根对象、entry、value、字段集合、类型、范围、规范整数、关系和 fingerprint 在任何业务读取前整文档校验。
+账号 key 为 `["meowfilm","music",1,"platform-account","<platform>"]`。资料和旧迁移成员保留已发布 key。根对象、entry、value、字段集合、类型、范围、规范整数、关系和 fingerprint 在任何业务读取前整文档校验；新账号事务不创建或更新旧设备值。
 
 - 文档不存在时创建内存中的当前空结构。
 - 未知 key、额外或缺失字段、重复属性、损坏 value、错误 fingerprint、非规范整数或超过预算均以 `CORRUPT_STORAGE` 失败。
 - 失败不触发网络、写回、清理或局部修复，原字节保持不变。
 - 不兼容数据明确失败并保留；清理或重置需用户明确确认。
 
-完整存储事务规则见 `music-account-storage.md`。
+完整存储事务规则见[账号存储](music-account-storage.md)。
 
 ## 账号命令
 
@@ -64,6 +66,7 @@
 - 登录、退出、账号替换、跨进程文档变化、可信认证失败和关闭都会推进或撤销当前代次；旧请求、旧失败和旧成功均无权覆盖新账号。
 - `Revoke` 只能撤销传入的精确当前会话，不能按平台名撤销后来签发的会话。
 - 无账号时仅允许显式定义的 guest 访问；设备缓存、会员资料和脚本均不能伪造登录。
+- WY／KG 登录在请求边界消费当前本地客户端；QQ 普通授权请求没有 QIMEI／匿名 session 依赖。QQ 反馈每次实时核对账号后组合客户端 owner 的设备状态，独立客户端变化不撤销普通账号授权。
 
 ## 资料与权益
 
@@ -105,6 +108,7 @@ Task<MusicAccountDetails> RefreshDetailsAsync(
 - 调用方取消只撤销尚未进入原子提交点的工作。已准入写入必须等待真实结算，不能把取消解释为回滚。
 - 显式重新观察账号状态只读取权威文档；失败 owner 不通过丢弃 pending、影子状态或额外 writer 恢复。
 - 关闭先停止新调用、撤销首次观察和全部已签发会话，再等待网络、协议、存储和通知真实结算；已发布但尚未进入物理存储计数的首次观察同样属于关闭排空范围。最后才释放协议，共享保护存储由 App 在全部 owner 排空后释放。
+- 共享匿名设备工作不属于账号 owner 的物理预算；账号取消／关闭撤销旧取得资格，应用再由客户端 owner 排空其真实任务。账号 list 本身不重读另一 writer 的未知客户端回执。
 
 ## 安全边界
 

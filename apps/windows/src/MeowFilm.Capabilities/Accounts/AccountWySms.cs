@@ -71,10 +71,11 @@ public sealed partial class MusicAccountProtocol
                 try
                 {
                     ctx.Guard();
-                    var request = MusicPlatformRequests.WySmsSend(input.Phone, input.CountryCode);
+                    var request = MusicPlatformRequests.WySmsSend(input.Phone, input.CountryCode, ctx.WyClient);
                     dispatched = true; // An admitted HTTP attempt cannot be recalled, even on cancellation.
                     var response = await ctx.SendAccount(MusicAccountHttpStep.WySmsSend, request).ConfigureAwait(false);
                     _ = WySmsJson(response);
+                    await ctx.AcceptWyCookies(response.Cookies).ConfigureAwait(false);
                     ctx.Guard();
                     return new MusicAccountSmsSent("wy", true, 60);
                 }
@@ -97,21 +98,21 @@ public sealed partial class MusicAccountProtocol
             try
             {
                 var response = await ctx.SendAccount(MusicAccountHttpStep.WySmsLogin,
-                    MusicPlatformRequests.WySmsLogin(input.Phone, input.CountryCode, input.Captcha!)).ConfigureAwait(false);
+                    MusicPlatformRequests.WySmsLogin(input.Phone, input.CountryCode, input.Captcha!, ctx.WyClient)).ConfigureAwait(false);
                 var data = WySmsJson(response);
                 string cookie = QrCookie(response.Cookies, clock.GetUtcNow());
                 var login = WySmsProfile(data, cookie);
+                GuardSmsProfile(login, input);
+                await ctx.AcceptWyCookies(response.Cookies).ConfigureAwait(false);
                 // The login body is not authority to publish a session. Confirm it
                 // using the returned cookie and compare two explicit identities.
-                var status = await ctx.Send(MusicPlatformRequests.WyWithCookie(
+                var status = await ctx.Send(ctx.Wy(
                     "/api/w/nuser/account/get", new(), cookie, weapi: true)).ConfigureAwait(false);
                 WyStatus(status.Body);
                 var verified = WySmsProfile(status.Body, cookie);
                 AccountRules.Require(login.UserId == verified.UserId, "IDENTITY_MISMATCH");
-                foreach (string secret in new[] { input.Phone, input.Captcha! })
-                    AccountRules.Require(!new[] { verified.UserId, verified.DisplayName, verified.Avatar ?? "" }
-                        .Any(s => s.Contains(secret, StringComparison.Ordinal) ||
-                            s.Contains(Uri.EscapeDataString(secret), StringComparison.Ordinal)), "INVALID_RESPONSE");
+                GuardSmsProfile(verified, input);
+                await ctx.AcceptWyCookies(status.SetCookieHeaders, cookie).ConfigureAwait(false);
                 ctx.Guard();
                 var details = await ObserveAccountDetails(ctx, verified, cookie).ConfigureAwait(false);
                 ctx.Guard();
@@ -120,6 +121,13 @@ public sealed partial class MusicAccountProtocol
             }
             finally { ReleaseSms(limit); }
         }, requestLimit: 3).ConfigureAwait(false);
+    }
+    private static void GuardSmsProfile(MusicAccountProfile profile, MusicAccountSmsInput input)
+    {
+        foreach (string secret in new[] { input.Phone, input.Captcha! })
+            AccountRules.Require(!new[] { profile.UserId, profile.DisplayName, profile.Avatar ?? "" }
+                .Any(s => s.Contains(secret, StringComparison.Ordinal) ||
+                    s.Contains(Uri.EscapeDataString(secret), StringComparison.Ordinal)), "INVALID_RESPONSE");
     }
     private static MusicAccountProfile WySmsProfile(JsonObject data, string cookie)
     {

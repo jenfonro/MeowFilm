@@ -1,11 +1,15 @@
 # 原生音乐平台目录契约
 
+共同规则见[页面数据请求](../common/pages/data-requests.md)和[平台客户端上下文](../common/music/platform-client-context.md)。本文件记录目录 API 和传输；本地身份、平台登记和客户端文档见[Windows 客户端上下文](music-platform-client-context.md)。
+
 ## 所有权与装配
 
 - `MusicPlatformCatalog` 是固定平台内容读取的原生 owner，公开契约为 `IMusicPlatformCatalog`。
 - 网易云、QQ、酷狗从 `IMusicPlatformSessionSource` 借用当前账号会话；酷我和咪咕只使用匿名公共元数据链，绝不借用其他平台账号。
 - Catalog 不持久化账号、不修改云端内容、不启动 Node、不调用本地服务，也不拥有页面状态。
 - 账号 owner 在登录、退出、换号或会话失效时调用 `Invalidate`；消费者不能自行缓存 Cookie 或重建会话。
+- WY／KG 请求显式消费当前客户端快照，客户端字段与可选账号只在 wire 边界组合；QQ 普通目录不使用匿名反馈设备状态。构造目录不初始化或登记客户端。
+- WY 普通／VIP EAPI 的 Cookie 按加密 header 中的字符串原值构造；缺少可选 CSRF 时保留空字符串，不转换为 JSON 字面量。WEAPI、EAPI 和 VIP EAPI 各自保留原有固定包络。
 
 ## 平台能力
 
@@ -47,7 +51,7 @@ Describe
 Invalidate
 ```
 
-共同规则：
+当前原生请求约束：
 
 - 每次调用必须显式给出平台和业务目标；不接受上游 URL、任意 module/method、Cookie 或脚本安装 ID。
 - 搜索和普通分页的页码从 1 开始，页大小最多 100，最多 100 页。
@@ -89,7 +93,7 @@ quarantinedSources
 - 每个账号平台请求在派发前、HTTP 后和发布前重新核对当前会话。
 - 会话源不可用返回 `CREDENTIALS_UNAVAILABLE`，不能降级为匿名请求。
 - 酷我和咪咕的匿名 scope 与账号平台完全分离。即使其他平台已登录，也不会把该会话带入公共请求。
-- 网易云需要账号或设备上下文的能力必须显式返回 `AUTH_REQUIRED` 或 `DEVICE_CONTEXT_REQUIRED`。
+- 网易云每日推荐仍需要真实账号；客户端身份由独立 owner 正常初始化，不因账号 Cookie 缺 deviceId 而禁用曲目读取。真实存储、身份、未知回执或权限失败保持明确错误。
 - 账号改变会同步清除对应缓存、围住活动操作并取消其传输；旧成功和旧失败均无权提交。
 
 ## 网络、缓存与预算
@@ -99,7 +103,7 @@ quarantinedSources
 - 最多八个 Catalog 操作、四个全局物理请求、每平台两个物理请求；单操作最多八次请求。
 - 调用方取消或失效后，不合作的传输仍占用物理预算直到真实结束，不能通过提前完成 Task 制造额外请求。
 - 原始响应最多 4 MiB，公开结果最多 512 KiB；JSON、字段、数组、图片 URL、文本和 ID 另有更窄预算。
-- Catalog 只有有界内存缓存，不写持久文档：最多 64 项、2 MiB。缓存 key 包含平台、账号 scope／generation／userId、操作和完整当前输入。
+- Catalog 不直接写持久文档；客户端受信响应更新交给客户端唯一 writer。目录内存缓存最多 64 项、2 MiB，key 包含平台、账号 scope／generation／userId、操作、完整输入及实际使用的客户端身份／代次；成功响应推进客户端后按最终代次保存缓存。
 - 搜索缓存最长一天，单曲／歌单最长一小时，其他普通目录最长十分钟；每日推荐使用平台返回的到期时间。显式 refresh 成功后替换同一当前 key。
 - 鉴权、权限或会话失效会清除对应平台缓存。缓存命中不绕过当前会话复核，也不授予播放、下载或离线许可。
 

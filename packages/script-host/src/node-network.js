@@ -5,8 +5,9 @@ import { gunzipSync, inflateSync, brotliDecompressSync } from 'node:zlib';
 import { fault, requireValue, safeError } from './errors.js';
 
 const knownOptions = new Set([
-  'method', 'headers', 'body', 'form', 'formData', 'timeout', 'json', 'encoding',
+  'method', 'headers', 'body', 'form', 'formData', 'timeout', 'json', 'encoding', 'follow_max', 'followRedirect', 'retry',
 ]);
+// LX request does not consume retry; accept it without replaying user requests.
 const forbiddenHeaders = new Set([
   'host', 'content-length', 'transfer-encoding', 'upgrade', 'trailer',
   'proxy-authorization', 'proxy-connection', 'te',
@@ -17,6 +18,7 @@ function buffer(value) {
   if (typeof value === 'string') return Buffer.from(value);
   if (ArrayBuffer.isView(value)) return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
   if (value instanceof ArrayBuffer) return Buffer.from(value);
+  if (value?.type === 'Buffer' && Array.isArray(value.data)) return Buffer.from(value.data);
   throw fault('INVALID_ARGUMENT');
 }
 
@@ -40,8 +42,8 @@ function prepare(options, limit) {
   requireValue([options.body, options.form, options.formData].filter(v => v !== undefined).length <= 1);
   let body;
   if (options.body !== undefined) {
-    if (options.json && typeof options.body === 'object' && !ArrayBuffer.isView(options.body) &&
-        !(options.body instanceof ArrayBuffer)) {
+    if (options.body && typeof options.body === 'object' && !ArrayBuffer.isView(options.body) &&
+        !(options.body instanceof ArrayBuffer) && options.body.type !== 'Buffer') {
       body = Buffer.from(JSON.stringify(options.body));
       headers['content-type'] ??= 'application/json';
     } else body = buffer(options.body);
@@ -72,7 +74,7 @@ function prepare(options, limit) {
         data = value.value;
         filename = value.options?.filename ?? 'blob';
         contentType = value.options?.contentType ?? 'application/octet-stream';
-      } else if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) {
+      } else if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer || value?.type === 'Buffer') {
         filename = 'blob'; contentType = 'application/octet-stream';
       }
       append(`--${boundary}\r\nContent-Disposition: form-data; name="${quote(name)}"`);
@@ -92,13 +94,13 @@ function prepare(options, limit) {
   return { method, headers, body };
 }
 
-function requestOnce(url, { method, headers, body }, signal, limit) {
+function requestOnce(url, { method, headers, body }, signal, limit, follow) {
   return new Promise((resolve, reject) => {
     if (signal.aborted) { reject(signal.reason ?? fault('CANCELLED')); return; }
     const transport = url.protocol === 'https:' ? https : http;
     const request = transport.request(url, { method, headers, signal, agent: false }, response => {
-      if (redirects.has(response.statusCode) && response.headers.location) {
-        response.destroy(); // No redirect body buffering before authorization.
+      if (follow && redirects.has(response.statusCode) && response.headers.location) {
+        response.destroy(); // No redirect body buffering before validating the next URL.
         resolve({ statusCode: response.statusCode, headers: response.headers, body: Buffer.alloc(0) });
         return;
       }
@@ -130,22 +132,25 @@ function requestOnce(url, { method, headers, body }, signal, limit) {
 
 /**
  * Optional, explicitly injected adapter for metadata HTTP, not a media relay.
- * Call authorizeURL for every redirect and never forward credentials cross-origin.
+ * Validate HTTP(S) on every redirect and never forward credentials cross-origin.
  */
-export function createNodeNetwork({ maxResponseBytes = 2 * 1024 * 1024, maxRedirects = 3 } = {}) {
+export function createNodeNetwork({ maxResponseBytes = 2 * 1024 * 1024, maxRedirects = 5 } = {}) {
   requireValue(Number.isSafeInteger(maxResponseBytes) && maxResponseBytes > 0);
   requireValue(Number.isSafeInteger(maxRedirects) && maxRedirects >= 0 && maxRedirects <= 10);
-  return async ({ url: input, options = {}, signal, authorizeURL }) => {
-    requireValue(signal && typeof authorizeURL === 'function');
+  return async ({ url: input, options = {}, signal, validateURL }) => {
+    requireValue(signal && typeof validateURL === 'function');
+    requireValue(options.followRedirect === undefined || typeof options.followRedirect === 'boolean');
+    const follow = options.followRedirect === false ? 0 : options.follow_max ?? maxRedirects;
+    requireValue(Number.isSafeInteger(follow) && follow >= 0 && follow <= maxRedirects);
     let request = prepare(options, maxResponseBytes);
-    let url = new URL(authorizeURL(input));
+    let url = new URL(validateURL(input));
     try {
       for (let hop = 0; ; hop++) {
         if (signal.aborted) throw signal.reason ?? fault('CANCELLED');
-        const response = await requestOnce(url, request, signal, maxResponseBytes);
-        if (redirects.has(response.statusCode) && response.headers.location) {
-          requireValue(hop < maxRedirects, 'RESOURCE_LIMIT');
-          const next = new URL(authorizeURL(new URL(response.headers.location, url).href));
+        const response = await requestOnce(url, request, signal, maxResponseBytes, follow > 0);
+        if (follow > 0 && redirects.has(response.statusCode) && response.headers.location) {
+          requireValue(hop < follow, 'RESOURCE_LIMIT');
+          const next = new URL(validateURL(new URL(response.headers.location, url).href));
           if (next.origin !== url.origin) {
             request = { ...request, headers: { ...request.headers } };
             delete request.headers.authorization;

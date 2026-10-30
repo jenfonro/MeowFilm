@@ -88,10 +88,7 @@ final class MeowfilmAssembly: ObservableObject {
     private func install(_ resources: MeowfilmResources) {
         guard !closed, self.resources == nil else { return }
         self.resources = resources
-        let publicQQ = NativeMusicQQPublicService(
-            storeFactory: resources.documentFactory(MusicQQPublicPersistenceDocument.namespace),
-            requestAdmission: resources.musicRequests
-        )
+        let publicQQ = resources.musicPublicQQ
         self.publicQQ = publicQQ
         let service = NativeMusicService(
             document: resources.musicDocument, accounts: resources.musicAccounts, qq: publicQQ,
@@ -99,7 +96,8 @@ final class MeowfilmAssembly: ObservableObject {
             homeSnapshot: MusicNativeHomeSnapshotDocument(
                 storeFactory: resources.documentFactory(MusicNativeHomeSnapshotDocument.namespace)
             ),
-            audioFileCache: resources.musicAudioCache, requestAdmission: resources.musicRequests
+            audioFileCache: resources.musicAudioCache, requestAdmission: resources.musicRequests,
+            clientContexts: resources.musicClients
         )
         self.service = service
         let model = MusicViewModel(service: service, playback: playback, accounts: resources.musicAccounts)
@@ -126,6 +124,7 @@ final class MeowfilmAssembly: ObservableObject {
         if !available {
             service?.revokeAccess(generation: generation)
             publicQQ?.revokeAccess(generation: generation)
+            resources.musicClients.revokeAccess(generation: generation)
         }
         music?.setAvailable(false)
         automaticSync?.stop()
@@ -134,11 +133,17 @@ final class MeowfilmAssembly: ObservableObject {
         let service = service, publicQQ = publicQQ, previous = accessTask
         accessTask = Task { [weak self] in
             await previous?.value
-            await resources.musicAccountGate?.setAvailable(available)
-            do { try await publicQQ?.setAccess(available: available, generation: generation) }
-            catch { publicQQ?.revokeAccess(generation: generation) }
             var admitted = available
-            do { try await service?.setAccess(available: available, generation: generation) }
+            do {
+                try resources.musicClients.setAccess(available: available, generation: generation)
+                try await publicQQ?.setAccess(available: available, generation: generation)
+            } catch {
+                admitted = false
+                resources.musicClients.revokeAccess(generation: generation)
+                publicQQ?.revokeAccess(generation: generation)
+            }
+            await resources.musicAccountGate?.setAvailable(admitted)
+            do { try await service?.setAccess(available: admitted, generation: generation) }
             catch { admitted = false }
             guard let self, !self.closed, self.accessEpoch == epoch, available else { return }
             self.protectedAvailable = admitted
@@ -161,7 +166,7 @@ final class MeowfilmAssembly: ObservableObject {
             model.error = MusicServiceError.unavailable.localizedDescription
             return
         }
-        commandObservation = model.objectWillChange.sink { [weak self] _ in
+        commandObservation = Publishers.Merge(model.playbackChanges, model.accessChanges).sink { [weak self] _ in
             self?.commandRefresh?.cancel()
             self?.commandRefresh = Task { @MainActor [weak self] in
                 guard !Task.isCancelled else { return }
@@ -204,6 +209,7 @@ final class MeowfilmAssembly: ObservableObject {
         startup?.cancel(); loading?.cancel(); commandRefresh?.cancel()
         service?.revokeAccess(generation: accessGeneration)
         publicQQ?.revokeAccess(generation: accessGeneration)
+        resources?.musicClients.close()
         systemMetadata?.close(); systemMetadata = nil
         commandObservation?.cancel()
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
@@ -228,6 +234,7 @@ final class MeowfilmAssembly: ObservableObject {
         let service = service, publicQQ = publicQQ, resources = resources, pendingAccess = accessTask
         service?.revokeAccess(generation: accessGeneration)
         publicQQ?.revokeAccess(generation: accessGeneration)
+        resources?.musicClients.close()
         Task {
             await pendingAccess?.value
             await service?.close()

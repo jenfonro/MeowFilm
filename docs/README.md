@@ -2,6 +2,17 @@
 
 - [第三方许可](licenses.md)
 
+## 共同契约
+
+- [共同契约索引](common/README.md) — 按页面、音乐平台和验证职责维护，端侧 API、存储与实现差异仍在各端文档。
+
+## 共用脚本运行时
+
+- [公共核心与平台边界](runtime/script-runtime.md)
+- [原始 LX 音源契约 music.script.v2](runtime/music-script-runtime.md)
+- [Runtime bridge](runtime/runtime-bridge.md)
+- [外部音源动态验收](runtime/source-acceptance.md)
+
 ## iOS
 
 - [架构与模块职责](ios/architecture.md)
@@ -37,6 +48,7 @@
 - [音乐能力实现](windows/music-implementation.md)
 - [原生音乐应用边界](windows/music-native-application.md)
 - [账号](windows/music-native-accounts.md)、[账号存储](windows/music-account-storage.md)
+- [平台客户端上下文](windows/music-platform-client-context.md)
 - [设置页呈现与音源演示边界](windows/music-settings-presentation.md)
 - [平台目录](windows/music-native-platforms.md)、[目录与频道](windows/music-catalog.md)、[个人目录页面](windows/music-catalog-personal-ui.md)
 - [聚合搜索](windows/music-aggregate-search.md)、[搜索发现](windows/music-search-discovery.md)、[搜索设置与历史](windows/music-search-preferences.md)、[搜索观察者](windows/music-search-observers.md)、[发现账号读取](windows/music-discovery-account-drain.md)
@@ -47,9 +59,8 @@
 
 ### 脚本运行时
 
-- [脚本传输装配](windows/app-runtime.md)
-- [Runtime bridge](windows/runtime-bridge.md)
-- [原始 JS 音源运行时](windows/music-script-runtime.md)
+- [启动与命名管道](windows/app-runtime.md)
+- [原始 JS 音源接入](windows/music-script-runtime.md)
 - [脚本连接恢复](windows/runtime-recovery.md)
 
 ### 打包
