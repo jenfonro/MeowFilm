@@ -241,9 +241,22 @@ final class MusicPlaybackControlsView: UIView {
     }
 
     private func configureTitle() {
-        title.configure(text: layout == .compact ? MusicMiniPlayerText.compactTitle(content.model.displayTrack)
-                            : content.model.displayTrack?.title ?? "暂无播放",
-                        font: titleFont, color: UIColor(content.controlTheme.ink),
+        let track = content.model.displayTrack
+        let text = layout == .compact ? MusicMiniPlayerText.compactTitle(track) : track?.title ?? "暂无播放"
+        let theme = content.controlTheme
+        var colorRanges: [(NSRange, UIColor)] = []
+        if layout == .compact, let track {
+            let artist = track.artist.trimmingCharacters(in: .whitespacesAndNewlines)
+            let suffix = " - " + artist
+            if !artist.isEmpty, artist != "未知", artist != "未知歌手", text.hasSuffix(suffix) {
+                let length = (suffix as NSString).length
+                colorRanges.append((NSRange(location: (text as NSString).length - length, length: length),
+                                    UIColor(theme.muted)))
+            }
+        }
+        title.configure(text: text,
+                        font: titleFont, color: UIColor(theme.ink),
+                        colorRanges: colorRanges,
                         allowsMotion: !UIAccessibility.isReduceMotionEnabled, running: rendering,
                         gap: 28, pointsPerSecond: 24, minimumDuration: 0)
     }
