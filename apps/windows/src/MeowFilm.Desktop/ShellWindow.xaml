@@ -203,6 +203,7 @@
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <Button x:Name="BackButton" Width="28" Margin="0,0,8,0" Content="&#xE76B;"
                             Click="OnBackClick" IsEnabled="{Binding CanGoBack}"
@@ -230,6 +231,11 @@
                             </Style></Button.Style>
                         </Button>
                     </Grid>
+                    <TextBlock x:Name="SettingsHeading" Grid.Column="1" Text="设置" Visibility="Collapsed"
+                               FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center" Margin="8,0,20,0"
+                               AutomationProperties.HeadingLevel="Level1" />
+                    <ContentControl x:Name="SettingsHeaderSlot" Grid.Column="2" Visibility="Collapsed"
+                                    VerticalContentAlignment="Center" Focusable="False" IsTabStop="False" />
                 </Grid>
                 <StackPanel x:Name="PageHeader" Grid.Column="0" Orientation="Horizontal"
                             HorizontalAlignment="Right" VerticalAlignment="Center" Margin="380,0,12,0"

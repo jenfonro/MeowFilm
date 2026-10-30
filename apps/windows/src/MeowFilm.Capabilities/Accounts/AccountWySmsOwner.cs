@@ -41,8 +41,7 @@ public sealed partial class MusicAccountOwner
                         "HANDOFF_REJECTED");
                     consumed = true;
                 }
-                var profile = AccountRules.Profile(handoff.Profile, input.Platform, handoff.Cookie);
-                try { committed = await Commit(op, before, handoff.Cookie, profile, true, authority).ConfigureAwait(false); }
+                try { committed = await Commit(op, before, handoff.Cookie, handoff.Details, true, authority).ConfigureAwait(false); }
                 catch (MusicAccountException error) when (error.Code == "STORAGE_CONFLICT")
                 { knownConflict = true; throw; }
                 return true;

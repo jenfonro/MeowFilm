@@ -21,6 +21,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
     private readonly IMusicAccountProtocol protocol;
     private readonly MusicPlatformClientContextOwner clients;
     private readonly MusicPlatformClientProtocol clientProtocol;
+    private readonly TimeProvider clock;
     private readonly object gate = new();
     private readonly SemaphoreSlim disk = new(1, 1);
     private readonly Dictionary<string, State> states = AccountRules.Platforms.ToDictionary(p => p, _ => new State());
@@ -34,12 +35,13 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
     public event Action<string>? SessionChanged;
 
     internal MusicAccountOwner(IProtectedDocumentStore store, IMusicAccountProtocol protocol,
-        MusicPlatformClientContextOwner clients, MusicPlatformClientProtocol clientProtocol)
+        MusicPlatformClientContextOwner clients, MusicPlatformClientProtocol clientProtocol, TimeProvider? clock = null)
     {
         this.store = store ?? throw new ArgumentNullException(nameof(store));
         this.protocol = protocol ?? throw new ArgumentNullException(nameof(protocol));
         this.clients = clients ?? throw new ArgumentNullException(nameof(clients));
         this.clientProtocol = clientProtocol ?? throw new ArgumentNullException(nameof(clientProtocol));
+        this.clock = clock ?? TimeProvider.System;
         clients.ContextChanged += ClientContextChanged;
     }
     private sealed class State
@@ -315,18 +317,24 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
         return result.Output;
     }
     private async Task<StoredAccount> Commit(Operation op, StoredAccount before, string? cookie,
-        MusicAccountProfile? profile, bool newScope, CancellationToken authority = default, MusicKgClientContext? kgDevice = null)
+        MusicAccountDetailsObservation? observation, bool newScope, CancellationToken authority = default, MusicKgClientContext? kgDevice = null)
     {
         Guard(op);
         authority.ThrowIfCancellationRequested();
+        AccountRules.Require((cookie is null) == (observation is null), "INVALID_RESPONSE");
+        if (observation is not null)
+        {
+            observation = ValidateDetailsObservation(observation, op.Platform, cookie!);
+            if (!newScope) AccountRules.Require(observation.Profile.UserId == before.Profile?.UserId, "IDENTITY_MISMATCH");
+        }
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(op.Token, authority);
         var writeToken = linked.Token;
         AccountRules.Require(before.Generation < AccountRules.MaxInteger, "LIMIT");
         var next = new StoredAccount
         {
-            Generation = before.Generation + 1, Cookie = cookie, Profile = profile,
+            Generation = before.Generation + 1, Cookie = cookie, Profile = observation?.Profile,
             Scope = cookie is null ? null : newScope ? Guid.NewGuid().ToString("D") : before.Scope,
-            ValidatedAt = cookie is null ? null : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+            ValidatedAt = cookie is null ? null : clock.GetUtcNow().ToUnixTimeMilliseconds()
         };
         var task = DiskAsync(async () =>
         {
@@ -336,7 +344,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
             Guard(op);
             if (kgDevice is not null)
                 AccountRules.Require(clients.IsCurrent(kgDevice), "STORAGE_CONFLICT");
-            byte[] bytes = document.Replace(op.Platform, before, next);
+            byte[] bytes = document.Replace(op.Platform, before, next, observation);
             try
             {
                 lock (gate)
@@ -358,7 +366,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
                     throw new MusicAccountException("STORAGE_CONFLICT");
                 }
                 catch { throw new MusicAccountException("COMMIT_UNKNOWN"); }
-                return next;
+                return document.Get(op.Platform);
             }
             finally { CryptographicOperations.ZeroMemory(bytes); }
         }, writeToken);
@@ -395,11 +403,9 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
             if (supplied is null)
                 lock (gate) AccountRules.Require(!states[platform].Revoked && before.Cookie is not null, "AUTH_REQUIRED");
             string cookie = supplied ?? before.Cookie!;
-            var profile = AccountRules.Profile(
-                await protocol.ValidateAsync(platform, cookie, op.Token).ConfigureAwait(false), platform, cookie);
+            var observation = await protocol.ValidateAsync(platform, cookie, op.Token).ConfigureAwait(false);
             Guard(op);
-            if (supplied is null) AccountRules.Require(profile.UserId == before.Profile!.UserId, "IDENTITY_MISMATCH");
-            var value = await Commit(op, before, cookie, profile, supplied is not null).ConfigureAwait(false);
+            var value = await Commit(op, before, cookie, observation, supplied is not null).ConfigureAwait(false);
             return new JsonObject { ["account"] = Status(platform, value) };
         }
         catch (Exception error)
@@ -471,9 +477,8 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
                         handoff.Platform == platform && handoff.ChallengeId == challengeId, "HANDOFF_REJECTED");
                     challenge.Consumed = true;
                 }
-                var profile = AccountRules.Profile(handoff.Profile, platform, handoff.Cookie);
                 // Same admission/CAS as explicit import; the callback cannot invent a baseline.
-                challenge.Committed = await Commit(op, challenge.Before, handoff.Cookie, profile, true, handoffToken,
+                challenge.Committed = await Commit(op, challenge.Before, handoff.Cookie, handoff.Details, true, handoffToken,
                     challenge.KgDevice).ConfigureAwait(false);
                 return true;
             }, op.Token).ConfigureAwait(false);

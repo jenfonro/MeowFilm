@@ -157,9 +157,11 @@ public sealed partial class MusicAccountProtocol
                     .Any(value => value.Contains(secret, StringComparison.Ordinal) ||
                         value.Contains(Uri.EscapeDataString(secret), StringComparison.Ordinal)), "INVALID_RESPONSE");
             GuardQr();
-            await ctx.Accept(accept, new("tx", id, cookie, profile)).ConfigureAwait(false);
+            var details = await ObserveAccountDetails(ctx, profile, cookie).ConfigureAwait(false);
+            GuardQr();
+            await ctx.Accept(accept, new("tx", id, cookie, details)).ConfigureAwait(false);
             return new MusicAccountPoll("tx", id, "authenticated");
-        }, replace: false, requestLimit: 6);
+        }, replace: false, requestLimit: 7);
     }
     private static void QqLoginStatus(JsonNode? node)
     {

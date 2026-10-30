@@ -36,12 +36,12 @@ public static partial class MusicUiTests
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection();
             Render(f.Module.SettingsView, 1080, 680);
-            var tabs = Visuals(f.Module.SettingsView).OfType<TabControl>()
-                .Single(t => AutomationProperties.GetName(t) == "设置分类");
-            Equal(6, tabs.Items.Count);
-            True(tabs.Items.Cast<TabItem>().Select(t => (string)t.Header)
-                .SequenceEqual(new[] { "平台", "搜索", "音质与缓存", "外观", "歌词与封面", "音源" }),
-                "current settings groups");
+            var navigation = (Panel)f.Module.SettingsView.FindName("SettingsNavigation");
+            var anchors = navigation.Children.OfType<RadioButton>().ToArray();
+            Equal(6, anchors.Length);
+            True(anchors.Select(anchor => (string)anchor.Content)
+                .SequenceEqual(new[] { "账号与平台", "搜索", "音质与缓存", "外观", "歌词与封面", "音源" }),
+                "reference settings groups are all present");
             await f.Module.ActivateSettingsAsync();
             await Until(() => !f.Module.Busy && f.Module.Accounts.All(account => account.State == "none"));
             True(f.Module.SelectedAccount is null, "account selection belongs to an explicit login action");
@@ -50,7 +50,7 @@ public static partial class MusicUiTests
                 .SequenceEqual(new[] { "网易云音乐", "QQ 音乐", "酷狗音乐" }), "fixed platform cards");
             True(f.Module.PlatformSettings.All(row => !row.IsLoggedIn && row.ShowLogin),
                 "all platform capsules publish their logged-out state");
-            tabs.SelectedIndex = 5;
+            anchors[^1].IsChecked = true;
             f.Module.SettingsView.UpdateLayout();
             await Until(() => !f.Module.Busy);
             var sources = Visuals(f.Module.SettingsView).OfType<MusicSourcesSettingsView>().Single();
@@ -848,9 +848,8 @@ public static partial class MusicUiTests
                     AssertPlayerBounds(f.Module.PlayerView, f.Module.PlayerView.ActualWidth);
                 }
                 DesktopTheme.SetIsHighContrast(root, true);
-                var settingsTabs = Visuals(f.Module.SettingsView).OfType<TabControl>()
-                    .Single(t => AutomationProperties.GetName(t) == "设置分类");
-                settingsTabs.SelectedIndex = 2;
+                var settingsNavigation = (Panel)f.Module.SettingsView.FindName("SettingsNavigation");
+                settingsNavigation.Children.OfType<RadioButton>().ElementAt(2).IsChecked = true;
                 await Drain();
                 Render(root, 860, 600);
                 var picker = Visuals(f.Module.SettingsView).OfType<ComboBox>()

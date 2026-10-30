@@ -118,9 +118,6 @@ public static class MusicAppearanceTests
             var settings = module.SettingsView;
             settings.Measure(new Size(1100, 1000));
             settings.Arrange(new Rect(0, 0, 1100, 1000)); settings.UpdateLayout();
-            var tabs = Visuals(settings).OfType<TabControl>()
-                .Single(control => AutomationProperties.GetName(control) == "设置分类");
-            tabs.SelectedIndex = 3; settings.UpdateLayout();
             var mode = Visuals(settings).OfType<ComboBox>()
                 .Single(control => AutomationProperties.GetName(control) == "播放器配色");
             var palette = Visuals(settings).OfType<ComboBox>()

@@ -93,9 +93,9 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
         internal HttpRequestMessage Kg(string path, JsonObject parameters, string? cookie,
             string? router = null, JsonObject? body = null) =>
             MusicPlatformRequests.KgWithCookie(path, parameters, cookie, KgClient, router, body);
-        internal async Task<MusicPlatformHttpResult> Send(HttpRequestMessage request)
+        internal async Task<MusicPlatformHttpResult> Send(HttpRequestMessage request, bool accountDetails = false)
         {
-            var result = await SendCore(request, left => detailsRead
+            var result = await SendCore(request, left => detailsRead || accountDetails
                 ? owner.transport.SendAccountDetailsAsync(Platform, request, Token, left)
                 : owner.transport.SendAsync(Platform, request, Token, 1024 * 1024, left)).ConfigureAwait(false);
             Inspect(result.Body); Guard();
@@ -235,14 +235,20 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
                 TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         }
     }
-    public Task<MusicAccountProfile> ValidateAsync(string platform, string cookie, CancellationToken cancellationToken = default)
+    public Task<MusicAccountDetailsObservation> ValidateAsync(string platform, string cookie, CancellationToken cancellationToken = default)
     {
         AccountRules.Platform(platform);
         var parts = AccountRules.Cookies(cookie);
-        return Run(platform, cancellationToken, ctx => platform switch
+        return Run(platform, cancellationToken, async ctx =>
         {
-            "wy" => ValidateWy(ctx, cookie, parts), "tx" => ValidateTx(ctx, cookie, parts),
-            "kg" => ValidateKg(ctx, cookie, parts), _ => throw new MusicAccountException("INVALID_REQUEST")
+            var profile = platform switch
+            {
+                "wy" => await ValidateWy(ctx, cookie, parts).ConfigureAwait(false),
+                "tx" => await ValidateTx(ctx, cookie, parts).ConfigureAwait(false),
+                "kg" => await ValidateKg(ctx, cookie, parts).ConfigureAwait(false),
+                _ => throw new MusicAccountException("INVALID_REQUEST")
+            };
+            return await ObserveAccountDetails(ctx, profile, cookie).ConfigureAwait(false);
         });
     }
     public Task<MusicAccountChallenge> BeginAsync(string platform, CancellationToken cancellationToken = default)
@@ -315,7 +321,9 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
             await ctx.AcceptWyCookies(result.SetCookieHeaders).ConfigureAwait(false);
             var account = await ValidateWy(ctx, cookie, AccountRules.Cookies(cookie)).ConfigureAwait(false);
             GuardQr();
-            await ctx.Accept(acceptSession!, new(platform, challengeId, cookie, account)).ConfigureAwait(false);
+            var details = await ObserveAccountDetails(ctx, account, cookie).ConfigureAwait(false);
+            GuardQr();
+            await ctx.Accept(acceptSession!, new(platform, challengeId, cookie, details)).ConfigureAwait(false);
             return new MusicAccountPoll(platform, challengeId, "authenticated");
         }, replace: false);
     }

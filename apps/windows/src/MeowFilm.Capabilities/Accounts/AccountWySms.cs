@@ -114,11 +114,13 @@ public sealed partial class MusicAccountProtocol
                 GuardSmsProfile(verified, input);
                 await ctx.AcceptWyCookies(status.SetCookieHeaders, cookie).ConfigureAwait(false);
                 ctx.Guard();
-                await ctx.Accept(acceptSession!, new("wy", attemptId, cookie, verified)).ConfigureAwait(false);
+                var details = await ObserveAccountDetails(ctx, verified, cookie).ConfigureAwait(false);
+                ctx.Guard();
+                await ctx.Accept(acceptSession!, new("wy", attemptId, cookie, details)).ConfigureAwait(false);
                 return true;
             }
             finally { ReleaseSms(limit); }
-        }, requestLimit: 2).ConfigureAwait(false);
+        }, requestLimit: 3).ConfigureAwait(false);
     }
     private static void GuardSmsProfile(MusicAccountProfile profile, MusicAccountSmsInput input)
     {

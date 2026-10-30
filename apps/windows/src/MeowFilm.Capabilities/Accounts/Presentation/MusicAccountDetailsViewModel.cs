@@ -58,22 +58,25 @@ public sealed class MusicAccountDetailsViewModel(IMusicAccountDetailsSource sour
     {
         get
         {
-            if (snapshot is null || snapshot.MembershipFreshness != MusicAccountDetailsFreshness.Fresh ||
-                snapshot.MembershipRecheckAt <= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() ||
-                snapshot.Membership.Vip != true) return "";
+            if (snapshot is null) return visible is null ? "" : "权益未确认";
+            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            if (snapshot.Membership.Vip == true && snapshot.Membership.ExpiresAt is { } expired && expired <= now)
+                return "VIP无效";
+            if (snapshot.MembershipFreshness != MusicAccountDetailsFreshness.Fresh ||
+                snapshot.MembershipRecheckAt <= now || snapshot.Membership.Vip is null) return "权益未确认";
+            if (snapshot.Membership.Vip == false) return "VIP无效";
             string tier = snapshot.Membership.Tier switch
             {
                 "svip" or "huge_vip" or "concept:svip" => "SVIP",
                 _ => "VIP"
             };
-            if (snapshot.Membership.ExpiresAt is not { } expiry ||
-                expiry <= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) return "";
+            if (snapshot.Membership.ExpiresAt is not { } expiry) return tier + "有效";
             try
             {
-                return tier + " · " + DateTimeOffset.FromUnixTimeMilliseconds(expiry)
-                    .ToLocalTime().ToString("yyyy.M.d");
+                return tier + "有效 · " + DateTimeOffset.FromUnixTimeMilliseconds(expiry)
+                    .ToLocalTime().ToString("yyyy.MM.dd");
             }
-            catch (ArgumentOutOfRangeException) { return ""; }
+            catch (ArgumentOutOfRangeException) { return "权益未确认"; }
         }
     }
     public string MembershipExpires => FormatTime(snapshot?.Membership.ExpiresAt);

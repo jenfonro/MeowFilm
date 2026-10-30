@@ -168,7 +168,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
     private void Changed([CallerMemberName] string? property = null) => PropertyChanged?.Invoke(this, new(property));
     private void RefreshBindings()
     {
-        foreach (var name in new[] { nameof(Heading), nameof(Status), nameof(Busy), nameof(CanEdit), nameof(CanClearPlaybackCache),
+        foreach (var name in new[] { nameof(Heading), nameof(Status), nameof(Busy), nameof(CanEdit), nameof(CanEditQuality),
+            nameof(CanEditAppearance), nameof(CanClearPlaybackCache),
             nameof(IsHistory), nameof(IsArchives), nameof(IsSongList), nameof(IsCollectionPage), nameof(IsContentDetailPage), nameof(ShowsSongTable),
             nameof(ShowSongPager), nameof(HistoryDate),
             nameof(HasSelection), nameof(CanRemoveSelection), nameof(CanReorderPlaylist), nameof(CanLoadMoreCollection), nameof(HasCollection), nameof(CanDeleteCollection), nameof(CanEditMetadata),

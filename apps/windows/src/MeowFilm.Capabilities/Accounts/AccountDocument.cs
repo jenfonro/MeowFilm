@@ -151,7 +151,8 @@ internal sealed partial class AccountDocument
         return new() { Generation = generation, Cookie = cookie, Profile = profile, Scope = scope,
             ValidatedAt = validatedAt, ValueFingerprint = fingerprint };
     }
-    internal byte[] Replace(string platform, StoredAccount expected, StoredAccount next)
+    internal byte[] Replace(string platform, StoredAccount expected, StoredAccount next,
+        MusicAccountDetailsObservation? observation)
     {
         var current = Get(platform);
         AccountRules.Require(current.Generation == expected.Generation &&
@@ -167,6 +168,16 @@ internal sealed partial class AccountDocument
             entries.Add(new JsonObject { ["key"] = Key(platform), ["value"] = value });
         }
         else existing["value"] = value;
+        if (observation is not null)
+        {
+            var account = Get(platform);
+            var previousDetails = GetDetails(platform);
+            var details = new StoredAccountDetails((previousDetails?.Revision ?? 0) + 1, account.Generation,
+                account.Scope!, account.ValueFingerprint!, observation.Profile.UserId, observation.Profile,
+                observation.ProfileFetchedAt, observation.ProfileFetchedAt + AccountDetailsSnapshot.ProfileTtl,
+                observation.Entitlements);
+            return ReplaceDetails(platform, account, previousDetails, details);
+        }
         byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(root, Encoding);
         if (bytes.Length <= MaximumBytes) return bytes;
         CryptographicOperations.ZeroMemory(bytes);
