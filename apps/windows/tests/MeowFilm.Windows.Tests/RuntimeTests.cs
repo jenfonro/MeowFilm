@@ -24,7 +24,7 @@ public static class RuntimeTests
         return path;
     }
     private const string Identity = "aggregate";
-    private static RuntimeModule[] Modules => [new("music", "0.4.0")];
+    private static RuntimeModule[] Modules => [new("music", "0.5.0")];
     private static string[] Namespaces => ["music.library.v1", "music.accounts.v1"];
 
     public static IEnumerable<TestCase> Cases()
@@ -41,7 +41,7 @@ public static class RuntimeTests
                 pid = runtime.ProcessId;
                 BridgeTests.Equal(true, runtime.IsConnected);
                 var status = await runtime.CallAsync("music.script.status", new { });
-                BridgeTests.Equal("music.script.v1", status.GetProperty("contract").GetString());
+                BridgeTests.Equal("music.script.v2", status.GetProperty("contract").GetString());
                 BridgeTests.Equal(false, status.GetProperty("documentAccess").GetBoolean());
                 BridgeTests.Equal(0, status.GetProperty("instances").GetArrayLength());
                 foreach (var method in new[] { "music.library.list", "music.queue.get", "music.accounts.list",

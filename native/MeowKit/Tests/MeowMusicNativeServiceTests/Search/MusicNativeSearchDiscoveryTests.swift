@@ -6,7 +6,6 @@ import MeowMusicFeature
 final class MusicNativeSearchDiscoveryTests: XCTestCase {
     private let hotPath = "/weapi/hotsearchlist/get"
     private let topsPath = "/eapi/toplist"
-    private let wordPath = "/eapi/search/defaultkeyword/get"
     private let headPath = "/eapi/v6/playlist/detail"
     private let songsPath = "/weapi/v3/song/detail"
 
@@ -14,9 +13,6 @@ final class MusicNativeSearchDiscoveryTests: XCTestCase {
         .obj([("code", .n(200)), ("data", .array(words.map {
             .obj([("searchWord", .string($0)), ("score", .n(42))])
         }))])
-    }
-    private func word(_ value: String?) -> MJ {
-        .obj([("code", .n(200)), ("data", .obj([("realkeyword", value.map(MJ.string) ?? .null)]))])
     }
     private func top(_ id: Int) -> MJ {
         .obj([("id", .n(id)), ("name", .string("Chart \(id)")), ("trackCount", .n(1))])
@@ -36,15 +32,13 @@ final class MusicNativeSearchDiscoveryTests: XCTestCase {
         let ids = ["9007199254740993", "9007199254740995", "9007199254740997"]
         let http = MusicSearchDiscoveryHTTP([
             hotPath: [hot((1...25).map { "Keyword \($0)" })],
-            topsPath: [tops([41, 42, 43, 44])], wordPath: [word("Default")],
+            topsPath: [tops([41, 42, 43, 44])],
             headPath: zip([41, 42, 43], ids).map { head($0.0, song: $0.1) },
             songsPath: ids.map { songs([$0]) }
         ])
         let store = NativeMusicMemoryDocument(), owner = try await NativeMusicFixture.service(store, http: http)
         let result = try await owner.searchDiscovery()
         XCTAssertEqual(result.hot.count, 20)
-        XCTAssertEqual(result.suggestions.first, "Default")
-        XCTAssertEqual(result.suggestions.dropFirst(), result.hot.map(\.keyword)[...])
         XCTAssertEqual(result.charts.map(\.collection.nativeID), ["41", "42", "43"])
         XCTAssertEqual(result.charts.flatMap(\.tracks).compactMap { $0.sources.first?.nativeId }, ids)
         XCTAssertTrue(result.charts.flatMap(\.tracks).allSatisfy { $0.ref.kind == .handle })
@@ -53,7 +47,7 @@ final class MusicNativeSearchDiscoveryTests: XCTestCase {
         XCTAssertTrue(result.failures.isEmpty)
         XCTAssertEqual(store.snapshot().1, 0); XCTAssertEqual(store.snapshot().2, 0)
         let calls = await http.calls()
-        XCTAssertEqual(calls.count, 9)
+        XCTAssertEqual(calls.count, 8)
         XCTAssertEqual(calls.filter { $0.url.path == headPath }.count, 3)
         XCTAssertFalse(calls.contains { $0.url.path.contains("rcmd/resource") })
         for request in calls {
@@ -63,42 +57,39 @@ final class MusicNativeSearchDiscoveryTests: XCTestCase {
         await owner.close()
     }
 
-    func testSuggestionsKeepDefaultFirstAndDeduplicateWithoutFakeKeywords() throws {
+    func testHotKeywordsDeduplicateAndRejectMalformedOrOversizedValues() throws {
         let values = try MusicNativeSearchDiscoveryParser.hot(hot(["Alpha", "Alpha", "Beta"]))
         XCTAssertEqual(values.map(\.keyword), ["Alpha", "Beta"])
-        XCTAssertEqual(MusicNativeSearchDiscoveryParser.suggestions(defaultKeyword: "Beta", hot: values), ["Beta", "Alpha"])
-        XCTAssertEqual(MusicNativeSearchDiscoveryParser.suggestions(defaultKeyword: nil, hot: []), [])
-        XCTAssertNil(try MusicNativeSearchDiscoveryParser.defaultKeyword(word(nil)))
         XCTAssertThrowsError(try MusicNativeSearchDiscoveryParser.hot(.obj([("data", .string("not an array"))])))
         XCTAssertThrowsError(try MusicNativeSearchDiscoveryParser.keyword(.string(String(repeating: "界", count: 201))))
     }
 
-    func testHotAndDefaultFailuresRetainRealChartAndSanitizedFailures() async throws {
+    func testHotFailureRetainsRealChartAndSanitizedFailure() async throws {
         let http = MusicSearchDiscoveryHTTP([
             topsPath: [tops([41])], headPath: [head(41, song: "17")], songsPath: [songs(["17"])]
-        ], statuses: [hotPath: 500, wordPath: 429])
+        ], statuses: [hotPath: 500])
         let owner = try await NativeMusicFixture.service(http: http)
         let result = try await owner.searchDiscovery()
-        XCTAssertTrue(result.hot.isEmpty); XCTAssertTrue(result.suggestions.isEmpty)
+        XCTAssertTrue(result.hot.isEmpty)
         XCTAssertEqual(result.charts.first?.tracks.first?.sources.first?.nativeId, "17")
-        XCTAssertEqual(result.failures.map(\.component), [.hot, .suggestions])
-        XCTAssertEqual(result.failures.map(\.error), [.upstreamFailed, .rateLimited])
+        XCTAssertEqual(result.failures.map(\.component), [.hot])
+        XCTAssertEqual(result.failures.map(\.error), [.upstreamFailed])
         await owner.close()
     }
 
     func testBothPrimaryFailuresDoNotPassAsEmptyDiscovery() async throws {
-        let http = MusicSearchDiscoveryHTTP([wordPath: [word("Default")]], statuses: [hotPath: 500, topsPath: 500])
+        let http = MusicSearchDiscoveryHTTP([:], statuses: [hotPath: 500, topsPath: 500])
         let owner = try await NativeMusicFixture.service(http: http)
-        do { _ = try await owner.searchDiscovery(); XCTFail("default keyword alone is not successful discovery") }
+        do { _ = try await owner.searchDiscovery(); XCTFail("failed discovery was published as empty success") }
         catch { XCTAssertEqual(error as? MusicServiceError, .upstreamFailed) }
         let calls = await http.calls()
-        XCTAssertEqual(calls.count, 3)
+        XCTAssertEqual(calls.count, 2)
         await owner.close()
     }
 
     func testOneFailedChartDoesNotEraseOtherChartOrCreatePlaceholderTrack() async throws {
         let http = MusicSearchDiscoveryHTTP([
-            hotPath: [hot(["Keyword"])], topsPath: [tops([41, 42])], wordPath: [word(nil)],
+            hotPath: [hot(["Keyword"])], topsPath: [tops([41, 42])],
             headPath: [head(99, song: "17"), head(42, song: "18")], songsPath: [songs(["18"])]
         ])
         let owner = try await NativeMusicFixture.service(http: http)
@@ -111,10 +102,10 @@ final class MusicNativeSearchDiscoveryTests: XCTestCase {
     }
 
     func testEmptySuccessfulCatalogIsDifferentFromFailure() async throws {
-        let http = MusicSearchDiscoveryHTTP([hotPath: [hot([])], topsPath: [tops([])], wordPath: [word(nil)]])
+        let http = MusicSearchDiscoveryHTTP([hotPath: [hot([])], topsPath: [tops([])]])
         let owner = try await NativeMusicFixture.service(http: http)
         let result = try await owner.searchDiscovery()
-        XCTAssertTrue(result.hot.isEmpty && result.suggestions.isEmpty && result.charts.isEmpty && result.failures.isEmpty)
+        XCTAssertTrue(result.hot.isEmpty && result.charts.isEmpty && result.failures.isEmpty)
         await owner.close()
     }
 
@@ -132,7 +123,7 @@ final class MusicNativeSearchDiscoveryTests: XCTestCase {
 
     func testCancellationRejectsLateDiscoveryWithoutRegisteringTracks() async throws {
         let gate = NativeMusicGate()
-        let http = MusicSearchDiscoveryHTTP([hotPath: [hot(["Keyword"])], topsPath: [tops([])], wordPath: [word(nil)]],
+        let http = MusicSearchDiscoveryHTTP([hotPath: [hot(["Keyword"])], topsPath: [tops([])]],
                                            gate: gate, blockedPath: topsPath)
         let owner = try await NativeMusicFixture.service(http: http)
         let pending = Task { try await owner.searchDiscovery() }
@@ -148,7 +139,7 @@ final class MusicNativeSearchDiscoveryTests: XCTestCase {
 
     func testAccessRevocationRejectsLateDiscovery() async throws {
         let gate = NativeMusicGate()
-        let http = MusicSearchDiscoveryHTTP([hotPath: [hot(["Keyword"])], topsPath: [tops([])], wordPath: [word(nil)]],
+        let http = MusicSearchDiscoveryHTTP([hotPath: [hot(["Keyword"])], topsPath: [tops([])]],
                                            gate: gate, blockedPath: topsPath)
         let owner = try await NativeMusicFixture.service(http: http)
         let pending = Task { try await owner.searchDiscovery() }
@@ -163,8 +154,7 @@ final class MusicNativeSearchDiscoveryTests: XCTestCase {
     }
 
     func testDiscoveryRoutesRemainExactHTTPSPostAllowlist() {
-        for (host, path) in [("music.163.com", hotPath), ("interfacepc.music.163.com", topsPath),
-                             ("interfacepc.music.163.com", wordPath)] {
+        for (host, path) in [("music.163.com", hotPath), ("interfacepc.music.163.com", topsPath)] {
             let url = URL(string: "https://\(host)\(path)")!
             XCTAssertTrue(MusicNativePublicBrowseRoutes.allows(.init(url: url, method: "POST")))
             XCTAssertFalse(MusicNativePublicBrowseRoutes.allows(.init(url: url)))

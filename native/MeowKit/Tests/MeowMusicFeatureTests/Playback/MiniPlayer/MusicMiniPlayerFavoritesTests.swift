@@ -8,8 +8,8 @@ final class MusicMiniPlayerFavoritesTests: XCTestCase {
         let service = MusicCollectionService(rows: [.init(id: "favorites", kind: "favorites", songs: ["a", "b"])])
         let model = MusicViewModel(service: service, player: MusicCollectionPlayer())
         await model.load()
-        let favorites = MusicMiniPlayerFavorites(model: model)
-        await favorites.setActive(true)?.value
+        let favorites = model.favorites
+        await favorites.flush()
         return (service, model, favorites)
     }
     private func track(_ id: String, title: String? = nil, sources: [MusicNativeSource] = []) -> MusicRemoteTrack {
@@ -32,7 +32,7 @@ final class MusicMiniPlayerFavoritesTests: XCTestCase {
         XCTAssertEqual(counts.writes, 1)
         XCTAssertEqual(counts.queueWrites, 0)
         XCTAssertEqual(counts.edited.first?.kind, "favorites")
-        favorites.suspend(); await model.close()
+        await model.close()
     }
 
     @MainActor func testUnfavoriteRemovesOnlyCapturedIdentity() async throws {
@@ -45,7 +45,7 @@ final class MusicMiniPlayerFavoritesTests: XCTestCase {
         let counts = await service.statistics()
         XCTAssertEqual(counts.writes, 1)
         XCTAssertEqual(counts.queueWrites, 0)
-        favorites.suspend(); await model.close()
+        await model.close()
     }
 
     @MainActor func testCancellationBeforeWriteAdmissionDoesNotWriteOrRetargetAnotherSong() async throws {
@@ -55,7 +55,7 @@ final class MusicMiniPlayerFavoritesTests: XCTestCase {
         await service.blockEdit(before: gate)
         let task = try XCTUnwrap(favorites.toggle(track("c")))
         await fulfillment(of: [entered], timeout: 2)
-        favorites.suspend()
+        model.setAvailable(false)
         XCTAssertFalse(favorites.loaded)
         XCTAssertTrue(favorites.tracks.isEmpty)
         XCTAssertNil(favorites.toggle(track("other")))
@@ -73,15 +73,18 @@ final class MusicMiniPlayerFavoritesTests: XCTestCase {
         await service.blockTracks(gate)
         let old = try XCTUnwrap(favorites.reload())
         await fulfillment(of: [entered], timeout: 2)
-        model.setAvailable(false); favorites.suspend()
+        model.setAvailable(false)
         await service.replace([.init(id: "favorites", revision: 2, kind: "favorites", songs: ["new"])])
         model.setAvailable(true); await model.load()
-        await favorites.setActive(true)?.value
+        let restored = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated { favorites.tracks.map(\.songId) == ["new"] }
+        }, evaluatedWith: favorites)
+        await fulfillment(of: [restored], timeout: 2)
         XCTAssertEqual(favorites.tracks.map(\.songId), ["new"])
         await gate.release(); await old.value
         XCTAssertEqual(favorites.tracks.map(\.songId), ["new"])
         XCTAssertNil(favorites.error)
-        favorites.suspend(); await model.close()
+        await model.close()
     }
 
     @MainActor func testSameTitleDoesNotConflateVersionsButExplicitSourceAliasesMatch() {
@@ -107,7 +110,34 @@ final class MusicMiniPlayerFavoritesTests: XCTestCase {
         XCTAssertEqual(counts.editCalls, 1)
         favorites.clearError()
         XCTAssertNil(favorites.error)
-        favorites.suspend(); await model.close()
+        await model.close()
+    }
+
+    @MainActor func testOneRootOwnsFavoritesAndUnrelatedCatalogueOrPlaybackChangesDoNotReadThem() async {
+        let (service, model, favorites) = await setup()
+        XCTAssertTrue(model.favorites === favorites)
+        let before = await service.statistics()
+        await model.createPlaylist("普通歌单")
+        model.playbackState.state = .init(revision: 1, currentId: "other", total: 1)
+        await favorites.flush()
+        let after = await service.statistics()
+        XCTAssertEqual(after.tracks, before.tracks)
+        XCTAssertEqual(favorites.tracks.map(\.songId), ["a", "b"])
+        XCTAssertTrue(favorites.loaded)
+        await model.close()
+    }
+
+    @MainActor func testExternallyRetainedFavoritesDoNotKeepTheirRootAlive() async {
+        let service = MusicCollectionService(rows: [.init(id: "favorites", kind: "favorites")])
+        var model: MusicViewModel? = MusicViewModel(service: service, player: MusicCollectionPlayer())
+        await model?.load()
+        let favorites = model!.favorites
+        await favorites.flush()
+        weak var root = model
+        model = nil
+        XCTAssertNil(root)
+        XCTAssertFalse(favorites.loaded)
+        XCTAssertTrue(favorites.tracks.isEmpty)
     }
 }
 #endif

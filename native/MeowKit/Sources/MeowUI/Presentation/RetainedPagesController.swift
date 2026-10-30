@@ -1,20 +1,25 @@
 #if os(iOS)
 import UIKit
 
-/// Retain controller identity, not hidden child containment. Only the displayed
-/// child belongs to UIKit's appearance tree; transition(from:to:) forwards the
-/// temporary pair and owns the crossfade. No second activation boolean exists.
+/// Create pages on first selection and keep their containment and content.
+/// Only the selected child receives the container's appearance callbacks.
 @MainActor
 public final class RetainedPagesController: UIViewController {
-    public let pages: [UIViewController]
     public private(set) var selectedIndex: Int
     public var didSelect: ((Int) -> Void)?
+    private let pageFactories: [@MainActor () -> UIViewController]
+    private var pages: [UIViewController?]
+    private enum Appearance { case hidden, appearing, visible, disappearing }
+    private var appearance = Appearance.hidden
+    private var appearingPage: UIViewController?
+    private var switchingPages: (previous: UIViewController, next: UIViewController)?
     private var transitioning = false
-    private var pendingIndex: Int?
+    private var pendingSelection: (index: Int, animated: Bool)?
 
-    public init(pages: [UIViewController], selectedIndex: Int = 0) {
-        precondition(!pages.isEmpty && pages.indices.contains(selectedIndex))
-        self.pages = pages
+    public init(pageFactories: [@MainActor () -> UIViewController], selectedIndex: Int = 0) {
+        precondition(!pageFactories.isEmpty && pageFactories.indices.contains(selectedIndex))
+        self.pageFactories = pageFactories
+        pages = Array(repeating: nil, count: pageFactories.count)
         self.selectedIndex = selectedIndex
         super.init(nibName: nil, bundle: nil)
     }
@@ -25,40 +30,140 @@ public final class RetainedPagesController: UIViewController {
     public override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .clear
-        let selected = pages[selectedIndex]
-        addChild(selected)
-        selected.view.frame = view.bounds
-        selected.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        view.addSubview(selected.view)
-        selected.didMove(toParent: self)
+        loadPage(at: selectedIndex).view.isHidden = false
+    }
+
+    public override var shouldAutomaticallyForwardAppearanceMethods: Bool { false }
+
+    public override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        finishSwitchAppearance()
+        finishContainerAppearance()
+        appearance = .appearing
+        let selected = loadPage(at: selectedIndex)
+        appearingPage = selected
+        selected.beginAppearanceTransition(true, animated: animated)
+    }
+
+    public override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        finishContainerAppearance()
+        appearance = .visible
+        selectPendingPage()
+    }
+
+    public override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        finishSwitchAppearance()
+        finishContainerAppearance()
+        appearance = .disappearing
+        appearingPage = pages[selectedIndex]
+        appearingPage?.beginAppearanceTransition(false, animated: animated)
+    }
+
+    public override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        finishContainerAppearance()
+        appearance = .hidden
+        selectPendingPage()
+    }
+
+    public override func didMove(toParent parent: UIViewController?) {
+        super.didMove(toParent: parent)
+        if parent == nil {
+            finishSwitchAppearance()
+            finishContainerAppearance()
+            pendingSelection = nil
+            appearance = .hidden
+            for page in pages.compactMap({ $0 }) { PageViewController.invalidatePages(in: page) }
+        }
+    }
+
+    public func page(at index: Int) -> UIViewController? {
+        guard pages.indices.contains(index) else { return nil }
+        return pages[index]
     }
 
     public func select(_ index: Int, animated: Bool = true) {
         guard pages.indices.contains(index) else { return }
-        if transitioning { pendingIndex = index; return }
+        if transitioning || appearance == .appearing || appearance == .disappearing {
+            pendingSelection = (index, animated)
+            return
+        }
+        pendingSelection = nil
         guard selectedIndex != index else { return }
-        loadViewIfNeeded()
-        let previous = pages[selectedIndex], next = pages[index]
+        if !isViewLoaded {
+            selectedIndex = index
+            loadViewIfNeeded()
+            didSelect?(index)
+            return
+        }
+        let previous = loadPage(at: selectedIndex), next = loadPage(at: index)
+        let duration = animated && appearance == .visible && view.window != nil &&
+            !UIAccessibility.isReduceMotionEnabled ? 0.22 : 0
         transitioning = true
-        previous.willMove(toParent: nil)
-        addChild(next)
-        next.view.frame = view.bounds
-        next.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         selectedIndex = index
-        transition(from: previous, to: next,
-                   duration: animated && view.window != nil &&
-                       !UIAccessibility.isReduceMotionEnabled ? 0.22 : 0,
-                   options: [.transitionCrossDissolve, .allowAnimatedContent]) { } completion: {
-            [weak self] _ in
-            previous.removeFromParent()
-            next.didMove(toParent: self)
+        if appearance == .visible {
+            switchingPages = (previous, next)
+            previous.beginAppearanceTransition(false, animated: duration > 0)
+            next.beginAppearanceTransition(true, animated: duration > 0)
+        }
+        let complete = { [weak self] in
             guard let self else { return }
+            self.finishSwitchAppearance()
             self.transitioning = false
             self.didSelect?(index)
-            if let pending = self.pendingIndex {
-                self.pendingIndex = nil
-                self.select(pending, animated: animated)
-            }
+            self.selectPendingPage()
+        }
+        if duration == 0 {
+            previous.view.isHidden = true
+            next.view.isHidden = false
+            complete()
+        } else {
+            UIView.transition(from: previous.view, to: next.view, duration: duration,
+                              options: [.transitionCrossDissolve, .showHideTransitionViews,
+                                        .allowAnimatedContent]) { _ in complete() }
+        }
+    }
+
+    private func loadPage(at index: Int) -> UIViewController {
+        if let page = pages[index] { return page }
+        let page = pageFactories[index]()
+        pages[index] = page
+        addChild(page)
+        page.view.frame = view.bounds
+        page.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        page.view.isHidden = true
+        view.addSubview(page.view)
+        page.didMove(toParent: self)
+        return page
+    }
+
+    private func finishSwitchAppearance() {
+        guard let switching = switchingPages else { return }
+        switchingPages = nil
+        switching.previous.endAppearanceTransition()
+        switching.next.endAppearanceTransition()
+    }
+
+    private func finishContainerAppearance() {
+        let page = appearingPage
+        appearingPage = nil
+        page?.endAppearanceTransition()
+    }
+
+    private func selectPendingPage() {
+        guard !transitioning, appearance == .visible || appearance == .hidden,
+              let pending = pendingSelection else { return }
+        pendingSelection = nil
+        select(pending.index, animated: pending.animated)
+    }
+
+    isolated deinit {
+        finishSwitchAppearance()
+        finishContainerAppearance()
+        for page in pages.compactMap({ $0 }) {
+            PageViewController.invalidatePages(in: page)
         }
     }
 }

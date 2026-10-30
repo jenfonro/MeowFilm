@@ -1,4 +1,5 @@
 using System.Text.Json;
+using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities;
 
@@ -12,7 +13,9 @@ public sealed record MusicSourceRow(string InstallationId, string Name, string V
         var id = MusicDto.Text(value, "installationId");
         MusicDto.Require(id.Length >= 8 && id.Length <= 128);
         var capabilities = value.GetProperty("capabilities").EnumerateArray().ToArray();
-        var platforms = capabilities.Select(c => MusicDto.Text(c, "platform")).ToArray();
+        var platforms = capabilities.Where(c => c.GetProperty("actions").EnumerateArray().Any(action => action.GetString() == "musicUrl"))
+            .Select(c => MusicDto.Text(c, "platform"))
+            .Where(platform => NativeMusicSong.Platforms.Append("local").Contains(platform)).ToArray();
         return new(id, MusicDto.Text(value, "name"), MusicDto.Text(value, "version"),
             MusicDto.Text(value, "contentHash"), MusicDto.Integer(value, "generation"),
             value.GetProperty("enabled").GetBoolean(), MusicDto.Text(value, "state"),

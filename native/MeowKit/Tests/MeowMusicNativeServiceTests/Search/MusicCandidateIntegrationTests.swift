@@ -54,6 +54,8 @@ final class MusicCandidateIntegrationTests: XCTestCase {
         let service = try await NativeMusicFixture.service(store, scripts: scripts,
             qq: MusicNativeCandidateDiscoveryQQ(), http: MusicNativeCandidateDiscoveryHTTP())
         let player = MusicCandidateIntegrationPlayer(), model = MusicViewModel(service: service, player: player)
+        var requests: [MusicPlaybackDestination] = []
+        model.onRequestPresentation = { requests.append($0) }
         await model.load(); XCTAssertTrue(player.resources.isEmpty)
         await model.togglePlayback()
         let calls = await scripts.calls(), snapshot = try await service.queue()
@@ -62,7 +64,7 @@ final class MusicCandidateIntegrationTests: XCTestCase {
         XCTAssertEqual(model.state.revision, 2); XCTAssertEqual(model.queue, snapshot.entries)
         XCTAssertEqual(model.position, 0, "Cold restoration does not restore playback time")
         XCTAssertEqual(player.resources.count, 1)
-        XCTAssertFalse(model.showingSources); XCTAssertFalse(model.isResolving)
+        XCTAssertTrue(requests.isEmpty); XCTAssertFalse(model.isResolving)
         XCTAssertEqual(store.snapshot().2, 1)
         let before = try await service.playedSongs(); XCTAssertTrue(before.isEmpty)
         let resource = try XCTUnwrap(model.activeResourceID), occurrence = try XCTUnwrap(model.activeOccurrenceID)
@@ -81,8 +83,10 @@ final class MusicCandidateIntegrationTests: XCTestCase {
         let service = try await NativeMusicFixture.service(scripts: scripts)
         _ = try await MusicAccountQueueFixture.seed(service)
         let player = MusicCandidateIntegrationPlayer(), model = MusicViewModel(service: service, player: player)
+        var requests: [MusicPlaybackDestination] = []
+        model.onRequestPresentation = { requests.append($0) }
         await model.load(); await model.prepareCurrent(forceSelection: true)
-        XCTAssertTrue(model.showingSources)
+        XCTAssertEqual(requests, [.sources])
         // The UI now inspects resolved official sources rather than populating
         // declared script qualities. Exercise the retained explicit script API
         // directly; it must still never fall back after a pinned failure.

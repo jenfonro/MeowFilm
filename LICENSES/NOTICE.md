@@ -4,8 +4,9 @@ The application's own source code is licensed GPL-3.0-only (`GPL-3.0-only.txt`).
 Native C# and Swift adaptations of the projects below are combined GPL-3.0-only code;
 the adapted original portions keep their original licenses and attributions.
 
-No upstream executable, server, account database, Node/Python/Go runtime or
-reference script is bundled or executed. Public protocol keys, request-signing
+No executable, server, account database, Node/Python/Go runtime or reference script
+from the adapted business projects is bundled or executed. Runtime/library dependencies
+are listed separately below. Public protocol keys, request-signing
 constants and device-profile parameters taken from these sources are client
 protocol parameters, not user credentials, and are not an endorsement of their
 cryptographic design. No device-registration bypass, anti-bot simulation,
@@ -159,6 +160,23 @@ public song metadata mapper):
 ## Node.js
 
 The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
+
+## QuickJS / quickjs-emscripten — MIT
+
+- Source: `https://github.com/justjake/quickjs-emscripten`, npm release `0.32.0`;
+  registry release gitHead `df4efb9ef2cb25c417ecb57986da462d11b244ed`.
+- Bundled packages: `quickjs-emscripten-core`, `@jitl/quickjs-wasmfile-release-sync`
+  and its/core's shared transitive dependency `@jitl/quickjs-ffi-types`, all `0.32.0`.
+- quickjs-emscripten Copyright (c) 2019-2024 Jake Teton-Landis.
+- QuickJS Copyright (c) 2017-2021 Fabrice Bellard and Charlie Gordon.
+- License: `quickjs-emscripten-LICENSE.txt`, copied byte-for-byte from the
+  release-sync package's combined original LICENSE. Each packaged npm dependency
+  also retains its own original LICENSE.
+
+The unmodified release-sync `dist/emscripten-module.wasm` is the only permitted
+script-engine binary. Its exact package manifest, registry URL/integrity, license,
+length and SHA-256 are pinned in `scripts/quickjs-runtime.json`; no debug/asyncify
+engine variant or upstream reference script is bundled.
 
 ## QR Code generator — MIT
 

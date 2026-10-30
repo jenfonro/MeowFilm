@@ -161,7 +161,7 @@ final class MeowfilmAssembly: ObservableObject {
             model.error = MusicServiceError.unavailable.localizedDescription
             return
         }
-        commandObservation = model.objectWillChange.sink { [weak self] _ in
+        commandObservation = Publishers.Merge(model.playbackChanges, model.accessChanges).sink { [weak self] _ in
             self?.commandRefresh?.cancel()
             self?.commandRefresh = Task { @MainActor [weak self] in
                 guard !Task.isCancelled else { return }

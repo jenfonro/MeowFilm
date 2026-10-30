@@ -2,11 +2,11 @@
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                     xmlns:local="clr-namespace:MeowFilm.Desktop">
     <!-- Semantic tokens are deliberately dynamic: a module can override them in its view resources. -->
-    <SolidColorBrush x:Key="MeowFilm.Brush.Window" Color="#F7F9FC" />
+    <SolidColorBrush x:Key="MeowFilm.Brush.Window" Color="#F7F8FA" />
     <SolidColorBrush x:Key="MeowFilm.Brush.Surface" Color="#FFFFFF" />
-    <SolidColorBrush x:Key="MeowFilm.Brush.Text" Color="#252835" />
+    <SolidColorBrush x:Key="MeowFilm.Brush.Text" Color="#303443" />
     <SolidColorBrush x:Key="MeowFilm.Brush.Muted" Color="#616573" />
-    <SolidColorBrush x:Key="MeowFilm.Brush.Border" Color="#DADCE2" />
+    <SolidColorBrush x:Key="MeowFilm.Brush.Border" Color="#E3E5E9" />
     <SolidColorBrush x:Key="MeowFilm.Brush.Hover" Color="#E8E9EE" />
     <SolidColorBrush x:Key="MeowFilm.Brush.Pressed" Color="#DDE0E7" />
     <SolidColorBrush x:Key="MeowFilm.Brush.Disabled" Color="#727783" />
@@ -17,7 +17,6 @@
     <SolidColorBrush x:Key="MeowFilm.Brush.Focus" Color="#525ED0" />
     <SolidColorBrush x:Key="MeowFilm.Brush.Error" Color="#B62535" />
     <SolidColorBrush x:Key="MeowFilm.Brush.ErrorSurface" Color="#FFF0F0" />
-    <FontFamily x:Key="MeowFilm.Font.Body">Segoe UI, Microsoft YaHei UI</FontFamily>
     <FontFamily x:Key="MeowFilm.Font.Icons">Segoe Fluent Icons, Segoe MDL2 Assets, Segoe UI Symbol</FontFamily>
     <BooleanToVisibilityConverter x:Key="MeowFilm.BoolToVisibility" />
 
@@ -44,7 +43,7 @@
     </Style>
 
     <Style x:Key="MeowFilm.Button" TargetType="Button">
-        <Setter Property="FontFamily" Value="{DynamicResource MeowFilm.Font.Body}" />
+        <Setter Property="FontFamily" Value="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" />
         <Setter Property="FontSize" Value="14" />
         <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}" />
         <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Surface}" />
@@ -146,6 +145,7 @@
         <Setter Property="Width" Value="42" />
         <Setter Property="Height" Value="36" />
         <Setter Property="FontSize" Value="12" />
+        <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}" />
     </Style>
     <Style x:Key="MeowFilm.CloseButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.CaptionButton}">
         <Style.Triggers>
@@ -173,7 +173,7 @@
     </Style>
 
     <Style x:Key="MeowFilm.TextBox" TargetType="TextBox">
-        <Setter Property="FontFamily" Value="{DynamicResource MeowFilm.Font.Body}" />
+        <Setter Property="FontFamily" Value="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" />
         <Setter Property="FontSize" Value="14" />
         <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}" />
         <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Surface}" />
@@ -224,7 +224,7 @@
     <Style TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}" />
 
     <Style x:Key="MeowFilm.Heading" TargetType="TextBlock">
-        <Setter Property="FontFamily" Value="{DynamicResource MeowFilm.Font.Body}" />
+        <Setter Property="FontFamily" Value="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" />
         <Setter Property="FontSize" Value="26" />
         <Setter Property="FontWeight" Value="SemiBold" />
         <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}" />
@@ -269,6 +269,7 @@
     </Style>
 
     <Style x:Key="MeowFilm.NavigationList" TargetType="ListBox">
+        <Setter Property="Focusable" Value="False" />
         <Setter Property="Background" Value="Transparent" />
         <Setter Property="BorderThickness" Value="0" />
         <Setter Property="Padding" Value="4" />
@@ -292,9 +293,9 @@
         </Setter>
     </Style>
     <Style x:Key="MeowFilm.NavigationItem" TargetType="ListBoxItem">
-        <Setter Property="FontFamily" Value="{DynamicResource MeowFilm.Font.Body}" />
+        <Setter Property="FontFamily" Value="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" />
         <Setter Property="FontSize" Value="14" />
-        <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}" />
+        <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}" />
         <Setter Property="Background" Value="Transparent" />
         <Setter Property="BorderBrush" Value="Transparent" />
         <Setter Property="BorderThickness" Value="1" />

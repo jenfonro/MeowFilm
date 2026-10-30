@@ -91,11 +91,7 @@ public static partial class MusicUiTests
         {
             await using var f = await Fixture.Create(); await SetupOnline(f);
             var before = f.Module.Sources.Single();
-            File.WriteAllText(f.Dialogs.ScriptPath!, TestScript("'https://other.invalid/42'", version: "2"), new UTF8Encoding(false));
             f.Dialogs.Confirmation = false;
-            await f.Module.UpdateSourceAsync();
-            Equal(before.Hash, f.Module.Sources.Single().Hash);
-            f.Dialogs.Confirmation = true;
             File.WriteAllText(f.Dialogs.ScriptPath!, "throw new Error('synthetic failure');", new UTF8Encoding(false));
             await f.Module.UpdateSourceAsync();
             True(f.Module.Status.Length > 0, "trial failure visible");
@@ -105,7 +101,28 @@ public static partial class MusicUiTests
             await f.Module.UpdateSourceAsync();
             True(f.Calls.Count("music.transfer.chunk") >= 5, "multiple owned byte chunks");
             Equal("2", f.Module.Sources.Single().Version);
+            f.Dialogs.Confirmation = true;
             await f.Module.SourceActionAsync("rollback"); Equal(before.Hash, f.Module.Sources.Single().Hash);
+            await f.Module.SourceActionAsync("remove"); Equal(0, f.Module.Sources.Count);
+        });
+        yield return Case("source enable and update are operational while removal still requires confirmation", async () =>
+        {
+            await using var f = await Fixture.Create();
+            var path = Path.Combine(f.Root, "source.js");
+            File.WriteAllText(path, TestScript(), new UTF8Encoding(false));
+            f.Dialogs.ScriptPath = path;
+            f.Dialogs.Confirmation = false;
+            await f.Module.ImportSourceAsync();
+            await f.Module.SourceActionAsync("enable");
+            True(f.Module.Sources.Single().Enabled, "source enable is not a network grant");
+            File.WriteAllText(path, TestScript(version: "2"), new UTF8Encoding(false));
+            await f.Module.UpdateSourceAsync();
+            Equal("2", f.Module.Sources.Single().Version);
+            var permissions = f.Calls.Last("music.sources.update").GetProperty("permissions");
+            True(permissions.EnumerateObject().Select(field => field.Name).SequenceEqual(["storage"]),
+                "the native update contract owns only storage permissions");
+            await f.Module.SourceActionAsync("remove"); Equal(1, f.Module.Sources.Count);
+            f.Dialogs.Confirmation = true;
             await f.Module.SourceActionAsync("remove"); Equal(0, f.Module.Sources.Count);
         });
         yield return Case("multi-file source import reads script metadata and remains Node-free", async () =>
@@ -122,8 +139,9 @@ public static partial class MusicUiTests
                 "multi-file import preserves selection order and header names");
             Equal("2", f.Module.Sources[1].Version);
             Equal("音源 B", f.Module.SelectedSource?.Name);
-            True(f.Module.SourceNetworkOrigins.Contains("https://media.invalid"),
-                "selected imported source exposes reviewed origin");
+            var detail = await f.Rpc("music.sources.detail", new { installationId = f.Module.SelectedSource!.InstallationId });
+            True(detail.GetProperty("permissions").EnumerateObject().Select(field => field.Name).SequenceEqual(["storage"]),
+                "import persists only storage permissions");
             True(!f.Runtime.HasStarted, "import and listing never start Node");
         });
         yield return Case("two-phase source pause unloads LX and explicit resumed play reactivates without replay", async () =>
@@ -321,7 +339,7 @@ internal sealed class NativeMusicScriptTestRuntime : IRuntimeClient, IAsyncDispo
         var pipe = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
             PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
         var bootstrap = new Uri(Path.Combine(root.FullName, "apps/windows/runtime/bootstrap.mjs")).AbsoluteUri;
-        var module = new Uri(Path.Combine(root.FullName, "apps/windows/runtime/modules/music-script.mjs")).AbsoluteUri;
+        var module = new Uri(Path.Combine(root.FullName, "apps/runtime/modules/music-script.mjs")).AbsoluteUri;
         var code = $"import {{startWindowsAppRuntime}} from {JsonSerializer.Serialize(bootstrap)};\n" +
             $"import {{createMusicScriptModule}} from {JsonSerializer.Serialize(module)};\n" +
             "await startWindowsAppRuntime({product:'music',argv:process.argv.slice(1),assemble:({call})=>[createMusicScriptModule({call})]});";

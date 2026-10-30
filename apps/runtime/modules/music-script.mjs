@@ -1,13 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  createScriptHost, createNodeNetwork, normalizeNetworkOrigin, ScriptHostError,
+  createScriptHost, createNodeNetwork, ScriptHostError,
 } from '@meowfilm/script-host';
 
-export const musicScriptContract = 'music.script.v1';
+export const musicScriptContract = 'music.script.v2';
 const sourceBytes = 512 * 1024, controlBytes = 512 * 1024, chunkBytes = 64 * 1024;
 const maxInstances = 32, stageBytes = 1024 * 1024, stageTTL = 300000;
-const operations = new Set(['musicUrl', 'lyric']);
-const sites = new Set(['wy', 'tx', 'kg', 'kw', 'mg', 'local']);
 const codes = new Set(['INVALID_REQUEST', 'CLOSED', 'CANCELLED', 'LIMIT', 'SCRIPT_INTEGRITY',
   'SCRIPT_ENCODING', 'STAGE_NOT_FOUND', 'STALE_SOURCE', 'SOURCE_NOT_FOUND', 'SOURCE_DISABLED',
   'CAPABILITY_UNAVAILABLE', 'PERMISSION_DENIED', 'TIMEOUT', 'SCRIPT_CLEANUP', 'SCRIPT_FAILURE',
@@ -52,25 +50,16 @@ function decode(bytes) {
 function settings(params) {
   text(params.version);
   requireValue(object(params.config)); bounded(params.config, 32 * 1024);
-  fields(params.permissions, ['networkOrigins', 'storage', 'localServices']);
+  fields(params.permissions, ['storage']);
   const permissions = params.permissions;
-  requireValue(permissions.localServices === false, 'CAPABILITY_UNAVAILABLE');
   requireValue(Array.isArray(permissions.storage) && permissions.storage.length <= 2 &&
     new Set(permissions.storage).size === permissions.storage.length &&
     permissions.storage.every(value => ['read', 'write'].includes(value)));
-  requireValue(Array.isArray(permissions.networkOrigins));
-  requireValue(permissions.networkOrigins.length <= 128, 'LIMIT');
-  requireValue(new Set(permissions.networkOrigins).size === permissions.networkOrigins.length);
-  permissions.networkOrigins = permissions.networkOrigins.map(origin => {
-    text(origin, 2048);
-    try { return normalizeNetworkOrigin(origin); }
-    catch { throw new Failure('PERMISSION_DENIED'); }
-  });
   requireValue(typeof params.grant === 'string' &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(params.grant) &&
     params.grant !== '00000000-0000-0000-0000-000000000000', 'PERMISSION_DENIED');
   params.grant = params.grant.toLowerCase();
-  permissions.storage.sort(); permissions.networkOrigins.sort();
+  permissions.storage.sort();
 }
 function errorCode(error) {
   if (error instanceof Failure) return error.code;
@@ -103,7 +92,7 @@ function abortable(promise, signal) {
 /**
  * LX execution only. Native owns metadata and transactional storage overlays.
  * No document bridge, platform API, library, settings or lyrics parser.
- * ScriptHost contexts are cooperative scopes, not a hostile-code sandbox.
+ * ScriptHost executes guest code in isolated QuickJS heaps.
  */
 export function createMusicScriptModule({ call, hostFactory = createScriptHost,
   network = createNodeNetwork(), clock = Date.now } = {}) {
@@ -180,7 +169,9 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
     try {
       requireValue(object(input), 'PERMISSION_DENIED');
       identifier(input.installationId); integer(input.generation, 1);
-      requireValue(sites.has(input.siteId) && typeof input.key === 'string' &&
+      requireValue(typeof input.siteId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(input.siteId),
+        'PERMISSION_DENIED');
+      requireValue(typeof input.key === 'string' &&
         input.key.length > 0 && input.key.length <= 256, 'PERMISSION_DENIED');
       requireValue(!closed && input.signal instanceof AbortSignal && !input.signal.aborted &&
         typeof input.isCurrent === 'function' && input.isCurrent() === true, 'STALE_SOURCE');
@@ -232,8 +223,7 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
   }
   function instance(binding, live = current(binding.installationId)) {
     requireValue(live && live.generation === binding.generation, 'STALE_SOURCE');
-    const capabilities = Object.fromEntries(Object.entries(live.capabilities).map(([site, capability]) =>
-      [site, { ...capability, actions: capability.actions.filter(action => operations.has(action)) }]));
+    const capabilities = live.capabilities;
     return { installationId: binding.installationId, revision: binding.revision,
       generation: binding.generation, state: live.state, capabilities, contentHash: live.contentHash,
       protocol: live.protocol, version: live.version };
@@ -400,7 +390,6 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
         identifier(params.installationId); identifier(params.siteId); identifier(params.operation);
         integer(params.revision, 1); integer(params.generation, 1);
         requireValue(object(params.payload));
-        requireValue(operations.has(params.operation), 'CAPABILITY_UNAVAILABLE');
         const binding = bindings.get(params.installationId), live = current(params.installationId);
         requireValue(binding && live, 'SOURCE_NOT_FOUND');
         requireValue(binding.revision === params.revision && binding.generation === params.generation &&
@@ -420,5 +409,5 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
       try { fields(params, []); return await close(); } catch (error) { return failure(error); }
     },
   };
-  return { id: 'music', version: '0.4.0', methods, close };
+  return { id: 'music', version: '0.5.0', methods, close };
 }

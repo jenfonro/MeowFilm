@@ -11,6 +11,7 @@ import MeowStorage
     @Published public private(set) var error: MusicCredentialImportError?
     @Published public private(set) var isBusy = false
     private let service: any MusicCredentialsImporting
+    private let onSessionChanged: @MainActor (MusicAccountPlatform) -> Void
     private let readFile: @Sendable (URL, Int) async throws -> Data
     private var active = false, available = false
     private var externalGeneration: UUID?, epoch = UUID(), requestID: UUID?
@@ -18,10 +19,11 @@ import MeowStorage
     private var operation: Task<Void, Never>?
 
     public init(service: any MusicCredentialsImporting,
+                onSessionChanged: @escaping @MainActor (MusicAccountPlatform) -> Void = { _ in },
                 readFile: @escaping @Sendable (URL, Int) async throws -> Data = {
                     try await ImportedFileReader.read($0, maximumBytes: $1)
                 }) {
-        self.service = service; self.readFile = readFile
+        self.service = service; self.onSessionChanged = onSessionChanged; self.readFile = readFile
     }
     public var formats: [MusicCredentialImportFormat] {
         platform == .qq ? MusicCredentialImportFormat.allCases : [.iwebPlusSnapshot, .meowMusicRecord]
@@ -118,10 +120,12 @@ import MeowStorage
             guard let self, current(own) else { return }
             do {
                 let status = try await service.commitCredentialImport(id: id, replaceExisting: replaceExisting)
-                guard current(own), requestID == id else { return }
                 guard status.platform == platform, status.phase == .requiresValidation, status.nickname.isEmpty else {
                     throw MusicCredentialImportError.invalidFormat
                 }
+                // Confirmed writes outlive their presentation; only UI publication is fenced below.
+                onSessionChanged(platform)
+                guard current(own), requestID == id else { return }
                 completed = .init(platform: platform, phase: .requiresValidation, canLogin: status.canLogin)
             } catch {
                 guard current(own), requestID == id else { return }

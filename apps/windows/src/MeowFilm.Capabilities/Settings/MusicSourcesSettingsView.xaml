@@ -3,7 +3,8 @@
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
  Loaded="View_Loaded"
- FontFamily="{DynamicResource MeowFilm.Font.Body}" FontSize="14">
+ FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="14"
+ TextOptions.TextRenderingMode="Grayscale">
  <UserControl.Resources>
   <ResourceDictionary>
    <ResourceDictionary.MergedDictionaries>
@@ -174,18 +175,6 @@
        <Button Content="删除" Tag="remove" Click="Action_Click" IsEnabled="{Binding CanEditSource}"/>
       </WrapPanel>
 
-      <Expander Header="{Binding SourceOriginCountText}" AutomationProperties.Name="网络权限">
-       <ScrollViewer MaxHeight="210" VerticalScrollBarVisibility="Auto">
-        <ItemsControl ItemsSource="{Binding SourceNetworkOrigins}" Margin="0,8,0,0">
-         <ItemsControl.ItemTemplate>
-          <DataTemplate>
-           <TextBlock Text="{Binding}" Style="{StaticResource Capability.Muted}"
-                      TextTrimming="CharacterEllipsis" Margin="0,3"/>
-          </DataTemplate>
-         </ItemsControl.ItemTemplate>
-        </ItemsControl>
-       </ScrollViewer>
-      </Expander>
      </StackPanel>
     </ScrollViewer>
    </Border>

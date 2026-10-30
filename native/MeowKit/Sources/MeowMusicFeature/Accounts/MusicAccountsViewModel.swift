@@ -19,12 +19,14 @@ import Combine
     @Published public private(set) var sendingSMS = false
     @Published public private(set) var submittingSMS = false
     @Published public private(set) var resendSeconds = 0
+    @Published private(set) var statusesRevision = UUID()
     private let service: any MusicAccountsServing
     private let sessionRefreshing: (any MusicAccountsRefreshing)?
     private let smsService: (any MusicAccountsSMSServing)?
     private let profileService: (any MusicAccountsProfileServing)?
     private let now: @Sendable () -> Date
     private let sleep: @Sendable (TimeInterval) async throws -> Void
+    private let onSessionChanged: @MainActor (MusicAccountPlatform) -> Void
     private var active = false, available = false
     private var foreground = true
     private var smsAttempt: UUID?
@@ -32,14 +34,17 @@ import Combine
     private var countdown: Task<Void, Never>?, cleanup: Task<Void, Never>?
     private var externalGeneration: UUID?, epoch = UUID(), refreshID = UUID()
     private var operation: Task<Void, Never>?, polling: Task<Void, Never>?
+    private var statusReloadRequested = false
 
     public init(service: any MusicAccountsServing,
+                onSessionChanged: @escaping @MainActor (MusicAccountPlatform) -> Void = { _ in },
                 clock: @escaping @Sendable () -> Date = { Date() },
                 sleep: @escaping @Sendable (TimeInterval) async throws -> Void = {
                     try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000))
                 }) {
         self.service = service
         self.now = clock; self.sleep = sleep
+        self.onSessionChanged = onSessionChanged
         sessionRefreshing = service as? any MusicAccountsRefreshing
         smsService = service as? any MusicAccountsSMSServing
         profileService = service as? any MusicAccountsProfileServing
@@ -75,6 +80,7 @@ import Combine
         resendSeconds = 0
         if !keepingPhone { phone = ""; countryCode = "86" }
         refreshingPlatform = nil; isBusy = false; progress = .waiting; error = nil
+        statusReloadRequested = false
         cleanup = Task {
             await previous?.value
             if let old { await service.cancelLogin(challengeID: old) }
@@ -134,6 +140,8 @@ import Combine
         name: String = "读取账号", platform target: MusicAccountPlatform? = nil,
         refreshing platform: MusicAccountPlatform? = nil,
         reconcileOnFailure: Bool = false,
+        enrich: Bool = true, clearError: Bool = true,
+        sessionChangedPlatform: MusicAccountPlatform? = nil,
         _ body: @escaping @MainActor (UUID) async throws -> Void
     ) {
         guard active, available, !isBusy, !Task.isCancelled else { return }
@@ -143,29 +151,32 @@ import Combine
         trace.record(.started)
         isBusy = true
         guard current(own) else { return }
-        error = nil
+        if clearError { error = nil }
         guard current(own) else { return }
         refreshingPlatform = platform
         guard current(own) else { return }
         operation = Task { [weak self] in
             guard let self, current(own) else { return }
-            await MusicRequestTrace.$current.withValue(trace) {
-            await cleanup?.value
-            guard current(own) else { return }
+            await MusicRequestTrace.$current.withValue(trace) { [self] in
+            await self.cleanup?.value
+            guard self.current(own) else { return }
             var startedStatusRead = false
+            var dispatched = false, readStatuses = false
             do {
+                dispatched = true
                 try await body(own)
-                if current(own) {
+                if self.current(own) {
                     startedStatusRead = true
-                    try await refresh(own)
+                    try await self.refresh(own, enrich: enrich)
+                    readStatuses = true
                 }
                 trace.record(.completed)
             }
             catch {
-                if current(own) {
+                if self.current(own) {
                     trace.failed(error)
                     if let failure = error as? MusicSMSFailure {
-                        if let target = loginPlatform, let date = failure.retryAt { retryDates[target] = date; updateCountdown() }
+                        if let target = self.loginPlatform, let date = failure.retryAt { self.retryDates[target] = date; self.updateCountdown() }
                         self.error = [selected?.title, name].compactMap { $0 }.joined(separator: " · ") +
                             "：" + failure.localizedDescription + "（诊断 \(trace.logicalID)）"
                     } else {
@@ -176,21 +187,35 @@ import Combine
                     }
                     // Renewal can revoke a rejected/uncertain session. Read
                     // only its status; never retry renewal or auto-validate.
-                    if platform != nil || reconcileOnFailure, !startedStatusRead, current(own) {
-                        try? await refresh(own, enrich: false)
+                    if platform != nil || reconcileOnFailure, !startedStatusRead, self.current(own) {
+                        try? await self.refresh(own, enrich: false)
                     }
                 }
             }
-            if current(own) {
-                operation = nil
-                sendingSMS = false; submittingSMS = false
-                refreshingPlatform = nil
-                if current(own) { isBusy = false }
+            let queuedStatuses = self.statusReloadRequested
+            if self.current(own) {
+                self.operation = nil
+                self.sendingSMS = false; self.submittingSMS = false
+                self.refreshingPlatform = nil
+                self.statusReloadRequested = false
+                if self.current(own) {
+                    self.isBusy = false
+                    if !enrich, readStatuses, !queuedStatuses { self.statusesRevision = UUID() }
+                }
+            }
+            if dispatched, let sessionChangedPlatform { self.onSessionChanged(sessionChangedPlatform) }
+            if queuedStatuses, self.current(own), !self.isBusy {
+                self.reloadStatuses()
             }
             }
         }
     }
     public func reload() { perform { _ in } }
+    public func reloadStatuses() {
+        guard active, available, !Task.isCancelled else { return }
+        if isBusy { statusReloadRequested = true; return }
+        perform(enrich: false, clearError: false) { _ in }
+    }
     public func refreshProfile(_ platform: MusicAccountPlatform) {
         guard let profileService, loginPlatform == nil else { return }
         perform(name: "资料刷新", platform: platform, reconcileOnFailure: true) { [profileService] _ in
@@ -198,13 +223,14 @@ import Combine
         }
     }
     public func validate(_ platform: MusicAccountPlatform) {
-        perform(name: "验证登录会话", platform: platform, reconcileOnFailure: true) { [service] _ in
+        perform(name: "验证登录会话", platform: platform, reconcileOnFailure: true,
+                sessionChangedPlatform: platform) { [service] _ in
             _ = try await service.validate(platform: platform)
         }
     }
     public func refreshSession(_ platform: MusicAccountPlatform) {
         guard canRefreshSession(platform), let sessionRefreshing else { return }
-        perform(name: "刷新登录会话", refreshing: platform) { [weak self, sessionRefreshing] own in
+        perform(name: "刷新登录会话", refreshing: platform, sessionChangedPlatform: platform) { [weak self, sessionRefreshing] own in
             guard let self, current(own), showsSessionRefresh(platform), challenge == nil else { return }
             let result = try await sessionRefreshing.refresh(platform: platform)
             guard current(own) else { return }
@@ -281,6 +307,7 @@ import Combine
         submittingSMS = true
         perform(name: "验证码登录", platform: platform, reconcileOnFailure: true) { [weak self, smsService] own in
             let value = try await smsService.submitSMS(platform: platform, countryCode: country, phone: number, code: captcha, attemptID: id)
+            if value.platform == platform, value.phase == .signedIn { self?.onSessionChanged(platform) }
             guard let self, current(own), smsAttempt == id else { await smsService.cancelSMSLogin(attemptID: id); return }
             guard value.platform == platform, value.phase == .signedIn else { throw MusicServiceError.invalidResponse }
             code = ""; phone = ""; smsAttempt = nil; loginPlatform = nil; countdown?.cancel()
@@ -313,7 +340,9 @@ import Combine
         // Explicit logout invalidates any prior validation/reload immediately,
         // rather than letting that callback refill the old account row.
         invalidate()
-        perform(name: "退出登录", platform: platform) { [service] _ in try await service.logout(platform: platform) }
+        perform(name: "退出登录", platform: platform, sessionChangedPlatform: platform) { [service] _ in
+            try await service.logout(platform: platform)
+        }
     }
     private func poll(_ value: MusicLoginChallenge, own: UUID, immediately: Bool = false) {
         polling?.cancel()
@@ -338,6 +367,7 @@ import Combine
                     let result = try await MusicRequestTrace.$current.withValue(trace) {
                         try await service.checkLogin(challengeID: value.id)
                     }
+                    if result == .confirmed { onSessionChanged(value.platform) }
                     guard current(own), foreground, challenge?.id == value.id else { return }
                     progress = result
                     trace.record(.completed)
@@ -366,7 +396,7 @@ import Combine
         }
     }
     // Deterministic lifecycle drain for tests; not a timer or a UI polling loop.
-    func flush() async { await operation?.value }
+    func flush() async { while let pending = operation { await pending.value } }
     var pendingOperation: Task<Void, Never>? { operation }
     var pendingPoll: Task<Void, Never>? { polling }
     deinit { operation?.cancel(); polling?.cancel(); countdown?.cancel() }

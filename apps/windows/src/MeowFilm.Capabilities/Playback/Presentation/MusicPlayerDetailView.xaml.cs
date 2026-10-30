@@ -20,6 +20,7 @@ public partial class MusicPlayerDetailView : UserControl
     private bool? needlePlaying;
     private CancellationTokenSource? activationRequest;
     private IDisposable? artworkPresentation;
+    private Thickness lyricEdgeSpace;
 
     public MusicPlayerDetailView(MusicCapability module)
     {
@@ -137,16 +138,14 @@ public partial class MusicPlayerDetailView : UserControl
 
     private void UpdateLyricViewport()
     {
-        if (module.Lyrics.Count == 0 || Descendant<ItemsPresenter>(LyricList) is not { } presenter || LyricList.ActualHeight <= 0) return;
-        var anchor = module.IsPlaying ? .24 : .35;
-        var margin = new Thickness(0, Math.Max(24, LyricList.ActualHeight * anchor - 22),
-            0, Math.Max(24, LyricList.ActualHeight * (1 - anchor) - 22));
-        if (presenter.Margin != margin)
+        if (LyricList.ActualHeight <= 0) return;
+        var space = MusicLyricRowMarginConverter.EdgeSpace(LyricList.ActualHeight, module.IsPlaying);
+        if (lyricEdgeSpace != space)
         {
             lyricMotionEpoch++;
             centeredLyric = centeringLyric = -1;
             if (Descendant<ScrollViewer>(LyricList) is { } scroll) MusicLyricScroll.Stop(scroll);
-            presenter.Margin = margin;
+            lyricEdgeSpace = space;
         }
         if (!lyricResumeTimer.IsEnabled) QueueCenterLyric();
     }
@@ -210,16 +209,16 @@ public partial class MusicPlayerDetailView : UserControl
         if (Math.Abs(scroll.VerticalOffset - originalOffset) >= .5)
             MusicLyricScroll.Settle(scroll, originalOffset);
         var epoch = ++lyricMotionEpoch;
-        var anchor = module.IsPlaying ? .24 : .35;
+        var anchor = MusicLyricRowMarginConverter.ReadingAnchor(module.IsPlaying);
         if (!animate)
         {
-            MusicLyricScroll.Settle(scroll, absoluteCenter - scroll.ActualHeight * anchor);
+            MusicLyricScroll.Settle(scroll, absoluteCenter - scroll.ViewportHeight * anchor);
             scroll.UpdateLayout();
             SettleCenteredLyric(index, scroll, epoch, anchor, allowHidden: true);
             return;
         }
         centeringLyric = index;
-        MusicLyricScroll.Move(scroll, absoluteCenter - scroll.ActualHeight * anchor,
+        MusicLyricScroll.Move(scroll, absoluteCenter - scroll.ViewportHeight * anchor,
             settled: () => SettleCenteredLyric(index, scroll, epoch, anchor));
     }
 
@@ -235,7 +234,7 @@ public partial class MusicPlayerDetailView : UserControl
             return;
         }
         var rowCenter = row.TranslatePoint(new Point(0, row.ActualHeight / 2), scroll).Y;
-        var correction = rowCenter - scroll.ActualHeight * anchor;
+        var correction = rowCenter - scroll.ViewportHeight * anchor;
         if (Math.Abs(correction) >= .5)
         {
             MusicLyricScroll.Settle(scroll, scroll.VerticalOffset + correction);

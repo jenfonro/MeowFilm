@@ -25,6 +25,7 @@
  <!-- Player controls paint over their host's backdrop; hosts replace these together. -->
  <SolidColorBrush x:Key="Capability.Player.Foreground" Color="#777E90"/>
  <StaticResource x:Key="Capability.Player.Text" ResourceKey="MeowFilm.Brush.Text"/>
+ <StaticResource x:Key="Capability.Player.Muted" ResourceKey="MeowFilm.Brush.Muted"/>
  <SolidColorBrush x:Key="Capability.Player.Hover" Color="#0B000000"/>
  <SolidColorBrush x:Key="Capability.Player.Pressed" Color="#12000000"/>
  <SolidColorBrush x:Key="Capability.Player.Rail" Color="#0D000000"/>

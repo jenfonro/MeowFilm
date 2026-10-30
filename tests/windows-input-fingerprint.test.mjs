@@ -8,10 +8,12 @@ import { temporaryRoot, assertOwnedPath } from '../scripts/windows/working-paths
 test('Windows input inventory covers shared packaging, locked configuration and shipped assets', () => {
   for (const path of [
     'scripts/package-runtime.mjs', 'scripts/test-root.mjs', 'scripts/windows/test.ps1',
+    'scripts/quickjs-runtime.json', 'apps/runtime/modules/music-script.mjs',
     'apps/windows/NuGet.Config', 'apps/windows/global.json',
     'LICENSES/node-LICENSE.txt',
     'LICENSES/NOTICE.md',
     'LICENSES/Apache-2.0.txt',
+    'LICENSES/quickjs-emscripten-LICENSE.txt',
     'apps/windows/src/MeowFilm.Desktop/Theme.xaml', 'apps/windows/app/app.manifest',
     'apps/windows/app/packages.lock.json', 'apps/windows/assets/logo.ico',
     'tests/windows-runtime.test.mjs', 'packages/script-host/src/index.js',

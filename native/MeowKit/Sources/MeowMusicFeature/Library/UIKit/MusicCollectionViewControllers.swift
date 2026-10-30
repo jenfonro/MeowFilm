@@ -5,7 +5,7 @@ import MeowUI
 
 @MainActor
 public final class MusicCollectionViewController: MusicPageViewController,
-    UITableViewDataSource, UITableViewDelegate, UISearchResultsUpdating
+    UITableViewDelegate, UISearchResultsUpdating
 {
     private let model: MusicViewModel
     private let page: MusicCollectionViewModel
@@ -13,6 +13,9 @@ public final class MusicCollectionViewController: MusicPageViewController,
     private let table = UITableView(frame: .zero, style: .plain)
     private let search = UISearchController(searchResultsController: nil)
     private weak var activeEditor: MusicCollectionEditorViewController?
+    private var dataSource: UITableViewDiffableDataSource<Int, MusicReference>!
+    private var rows: [MusicReference: (track: MusicRemoteTrack, index: Int)] = [:]
+    private var shownReadError: String?
 
     public init(
         model: MusicViewModel,
@@ -34,9 +37,15 @@ public final class MusicCollectionViewController: MusicPageViewController,
         super.viewDidLoad()
         table.backgroundColor = .clear
         table.separatorStyle = .none
-        table.dataSource = self
         table.delegate = self
         table.register(MusicTrackCell.self, forCellReuseIdentifier: MusicTrackCell.reuseIdentifier)
+        dataSource = UITableViewDiffableDataSource(tableView: table) { [weak self] view, path, id in
+            guard let self, let row = self.rows[id] else { return nil }
+            let cell = view.dequeueReusableCell(withIdentifier: MusicTrackCell.reuseIdentifier,
+                                                for: path) as! MusicTrackCell
+            self.configure(cell, row: row)
+            return cell
+        }
         table.refreshControl = UIRefreshControl()
         table.refreshControl?.addAction(UIAction { [weak self] _ in
             guard let self else { return }
@@ -64,7 +73,10 @@ public final class MusicCollectionViewController: MusicPageViewController,
             ),
         ]
         observe(page) { [weak self] in self?.render() }
-        observe(model) { [weak self] in self?.render() }
+        observe(model.playbackChanges) { [weak self] in self?.updatePlayback() }
+        observe(model.libraryChanges) { [weak self] in
+            self?.navigationItem.rightBarButtonItems?.first?.menu = self?.actionsMenu()
+        }
         render()
     }
 
@@ -72,12 +84,15 @@ public final class MusicCollectionViewController: MusicPageViewController,
         page.appear()
         render()
     }
+    public override func pageDidBecomeVisible() { renderState() }
+    public override func pageDidFinishAppearing() {
+        if page.isMissing || page.error != nil || page.actionError != nil { renderState() }
+    }
 
     public override func pageDidBecomeInactive() {
         if let editor = activeEditor,
            navigationController?.viewControllers.contains(where: { $0 === editor }) == true {
-            // The editor now owns this same detail/draft scope; only UIKit
-            // subscriptions of the covered detail page have been stopped.
+            // Detail and editor share one admission until both leave the stack.
             return
         }
         page.disappear()
@@ -86,7 +101,7 @@ public final class MusicCollectionViewController: MusicPageViewController,
     public override func applyTheme() {
         super.applyTheme()
         guard isViewLoaded else { return }
-        table.reloadData()
+        updateVisibleCells(force: true)
         search.searchBar.tintColor = UIColor(theme.accent)
     }
 
@@ -94,33 +109,25 @@ public final class MusicCollectionViewController: MusicPageViewController,
         page.searchQuery = searchController.searchBar.text ?? ""
     }
 
-    public func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        page.filteredTracks.count
-    }
-
-    public func tableView(
-        _ tableView: UITableView,
-        cellForRowAt indexPath: IndexPath
-    ) -> UITableViewCell {
-        let track = page.filteredTracks[indexPath.row]
-        let cell = tableView.dequeueReusableCell(
-            withIdentifier: MusicTrackCell.reuseIdentifier,
-            for: indexPath
-        ) as! MusicTrackCell
+    private func configure(_ cell: MusicTrackCell, row: (track: MusicRemoteTrack, index: Int)) {
+        let track = row.track
+        let active = model.current?.track.songId.utf8.elementsEqual(track.songId.utf8) == true
         cell.configure(
             track: track,
-            active: model.current?.track.songId == track.songId,
+            active: active,
             theme: theme,
-            index: indexPath.row
+            index: row.index
         )
+        cell.accessibilityTraits = active ? [.button, .selected] : .button
         cell.accessibilityIdentifier = "music.collection.track.\(track.songId)"
-        return cell
     }
 
     public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
+        guard let track = track(at: indexPath),
+              let index = page.filteredTracks.firstIndex(where: { $0.ref == track.ref }) else { return }
         page.playFiltered(
-            at: indexPath.row,
+            at: index,
             presentationID: page.presentationID,
             filterID: page.filterID
         )
@@ -130,7 +137,7 @@ public final class MusicCollectionViewController: MusicPageViewController,
         _ tableView: UITableView,
         trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath
     ) -> UISwipeActionsConfiguration? {
-        let track = page.filteredTracks[indexPath.row]
+        guard let track = track(at: indexPath) else { return nil }
         let presentationID = page.presentationID
         let favorite = UIContextualAction(
             style: .normal,
@@ -146,7 +153,7 @@ public final class MusicCollectionViewController: MusicPageViewController,
             let remove = UIContextualAction(style: .destructive, title: "移除") {
                 [weak self] _, _, finish in
                 guard let self else { finish(false); return }
-                self.confirmRemoval(track: track, index: original)
+                self.confirmRemoval(track: track, index: original, presentationID: presentationID)
                 finish(true)
             }
             actions.append(remove)
@@ -159,7 +166,7 @@ public final class MusicCollectionViewController: MusicPageViewController,
         contextMenuConfigurationForRowAt indexPath: IndexPath,
         point: CGPoint
     ) -> UIContextMenuConfiguration? {
-        let track = page.filteredTracks[indexPath.row]
+        guard let track = track(at: indexPath) else { return nil }
         let presentationID = page.presentationID
         guard let originalIndex = page.tracks.firstIndex(where: { $0.ref == track.ref }) else { return nil }
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
@@ -200,22 +207,76 @@ public final class MusicCollectionViewController: MusicPageViewController,
     }
 
     private func render() {
+        guard dataSource != nil else { return }
+        let previous = rows
+        let tracks = page.filteredTracks
+        rows = Dictionary(uniqueKeysWithValues: tracks.enumerated().map {
+            ($0.element.ref, (track: $0.element, index: $0.offset))
+        })
+        var snapshot = NSDiffableDataSourceSnapshot<Int, MusicReference>()
+        snapshot.appendSections([0])
+        snapshot.appendItems(tracks.map(\.ref))
+        let changed = tracks.map(\.ref).filter {
+            guard let old = previous[$0], let row = rows[$0] else { return false }
+            return old.track != row.track || old.index != row.index
+        }
+        snapshot.reconfigureItems(changed)
+        if dataSource.snapshot().itemIdentifiers != snapshot.itemIdentifiers || !changed.isEmpty {
+            dataSource.apply(snapshot, animatingDifferences: false)
+        }
+        renderState()
+    }
+
+    private func renderState() {
         guard isViewLoaded else { return }
         title = page.collection?.title ?? ""
-        table.reloadData()
         navigationItem.rightBarButtonItems?.first?.menu = actionsMenu()
         if page.isMissing {
-            navigationController?.popViewController(animated: true)
+            if canPresentPageAlert, navigationController?.topViewController === self {
+                navigationController?.popViewController(animated: true)
+            }
             return
         }
-        if let error = page.error {
-            table.backgroundView = statusLabel(error.localizedDescription)
-        } else if page.collection != nil, page.filteredTracks.isEmpty {
+        if page.isLoading, rows.isEmpty {
+            table.backgroundView = statusLabel("加载中")
+        } else if page.collection != nil, rows.isEmpty {
             table.backgroundView = statusLabel(page.searchQuery.isEmpty ? "暂无歌曲" : "无匹配歌曲")
         } else {
             table.backgroundView = nil
         }
         showError(page.actionError)
+        guard let error = page.error else { shownReadError = nil; return }
+        let message = error.localizedDescription
+        guard canPresentPageAlert, shownReadError != message else { return }
+        let presentation = page.presentationID
+        let alert = UIAlertController(title: "错误", message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.addAction(UIAlertAction(title: "重试", style: .default) { [weak self] _ in
+            guard let self, self.page.presentationID == presentation else { return }
+            self.shownReadError = nil
+            self.page.reload(preservingContent: true)
+        })
+        shownReadError = message
+        present(alert, animated: true)
+    }
+
+    private func track(at path: IndexPath) -> MusicRemoteTrack? {
+        dataSource.itemIdentifier(for: path).flatMap { rows[$0]?.track }
+    }
+
+    private func updateVisibleCells(force: Bool = false) {
+        guard dataSource != nil else { return }
+        for path in table.indexPathsForVisibleRows ?? [] {
+            guard let id = dataSource.itemIdentifier(for: path), let row = rows[id],
+                  let cell = table.cellForRow(at: path) as? MusicTrackCell else { continue }
+            let active = model.current?.track.songId.utf8.elementsEqual(row.track.songId.utf8) == true
+            if force || cell.accessibilityTraits.contains(.selected) != active { configure(cell, row: row) }
+        }
+    }
+
+    private func updatePlayback() {
+        updateVisibleCells()
+        navigationItem.rightBarButtonItems?.first?.menu = actionsMenu()
     }
 
     private func actionsMenu() -> UIMenu {
@@ -286,8 +347,8 @@ public final class MusicCollectionViewController: MusicPageViewController,
         present(alert, animated: true)
     }
 
-    private func confirmRemoval(track: MusicRemoteTrack, index: Int) {
-        let presentationID = page.presentationID
+    private func confirmRemoval(track: MusicRemoteTrack, index: Int, presentationID: UUID) {
+        guard page.presentationID == presentationID else { return }
         let alert = UIAlertController(title: "从歌单移除这首歌？", message: track.title, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "取消", style: .cancel))
         alert.addAction(UIAlertAction(title: "移除", style: .destructive) { [weak self] _ in
@@ -316,7 +377,7 @@ public final class MusicCollectionViewController: MusicPageViewController,
 }
 
 @MainActor
-private final class MusicCollectionEditorViewController: MusicPageViewController,
+final class MusicCollectionEditorViewController: MusicPageViewController,
     UITableViewDataSource, UITableViewDelegate
 {
     private let page: MusicCollectionViewModel
@@ -330,6 +391,8 @@ private final class MusicCollectionEditorViewController: MusicPageViewController
     private let deleteSelected = UIButton(type: .system)
     private var backLease: UIKitEditorBackGestureLease?
     private var closing = false
+    private var displayedTracks: [MusicRemoteTrack] = []
+    private var displayedTrackIndices: [MusicReference: Int] = [:]
 
     public init(
         page: MusicCollectionViewModel,
@@ -350,6 +413,8 @@ private final class MusicCollectionEditorViewController: MusicPageViewController
         super.viewDidLoad()
         table.backgroundColor = .clear
         table.separatorStyle = .none
+        displayedTracks = page.editor === draft ? draft.tracks : []
+        displayedTrackIndices = Dictionary(uniqueKeysWithValues: displayedTracks.enumerated().map { ($0.element.ref, $0.offset) })
         table.dataSource = self
         table.delegate = self
         table.register(MusicTrackCell.self, forCellReuseIdentifier: MusicTrackCell.reuseIdentifier)
@@ -409,16 +474,18 @@ private final class MusicCollectionEditorViewController: MusicPageViewController
             action: #selector(save)
         )
         observe(draft) { [weak self] in
-            self?.table.reloadData()
+            self?.renderTracks()
+            self?.updateSelection()
             self?.renderActions()
         }
         observe(page) { [weak self] in self?.renderActions() }
+        observe(owner.libraryChanges) { [weak self] in self?.renderActions() }
         renderActions()
     }
 
-    public override func pageDidBecomeActive() {
+    public override func pageDidBecomeVisible() {
         if page.editor == nil {
-            navigationController?.popViewController(animated: false)
+            if canPresentPageAlert { navigationController?.popViewController(animated: false) }
             return
         }
         if let navigationController {
@@ -428,25 +495,45 @@ private final class MusicCollectionEditorViewController: MusicPageViewController
         renderActions()
     }
 
+    public override func pageDidFinishAppearing() {
+        if page.editor !== draft || page.error != nil || page.actionError != nil { renderActions() }
+    }
+
     public override func pageDidBecomeInactive() {
         backLease?.invalidate(); backLease = nil
         let stack = navigationController?.viewControllers ?? []
-        if stack.contains(where: { $0 === self }) {
-            page.pauseCommands()
-        } else if !stack.contains(where: { $0 === origin }) {
+        if !stack.contains(where: { $0 === origin }) {
             page.disappear()
         }
     }
 
+    public override func pageDidBecomeHidden() { backLease?.invalidate(); backLease = nil }
+
+    public override func applyTheme() {
+        super.applyTheme()
+        guard isViewLoaded else { return }
+        updateVisibleTracks()
+        for button in [selectAll, enqueue, addToCollection, deleteSelected] { button.tintColor = UIColor(theme.ink) }
+    }
+
+    private func updateVisibleTracks(in range: ClosedRange<Int>? = nil) {
+        for case let cell as MusicTrackCell in table.visibleCells {
+            guard let reference = cell.representedReference,
+                  let index = displayedTrackIndices[reference],
+                  range?.contains(index) != false else { continue }
+            cell.configure(track: displayedTracks[index], active: false, theme: theme, index: index)
+        }
+    }
+
     public func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        draft.tracks.count
+        displayedTracks.count
     }
 
     public func tableView(
         _ tableView: UITableView,
         cellForRowAt indexPath: IndexPath
     ) -> UITableViewCell {
-        let track = draft.tracks[indexPath.row]
+        let track = displayedTracks[indexPath.row]
         let cell = tableView.dequeueReusableCell(
             withIdentifier: MusicTrackCell.reuseIdentifier,
             for: indexPath
@@ -459,22 +546,33 @@ private final class MusicCollectionEditorViewController: MusicPageViewController
     public func tableView(
         _ tableView: UITableView,
         canMoveRowAt indexPath: IndexPath
-    ) -> Bool { true }
+    ) -> Bool { draft.canEdit }
 
     public func tableView(
         _ tableView: UITableView,
         moveRowAt sourceIndexPath: IndexPath,
         to destinationIndexPath: IndexPath
     ) {
+        guard displayedTracks.indices.contains(sourceIndexPath.row),
+              displayedTracks.indices.contains(destinationIndexPath.row) else { return }
+        let moved = displayedTracks.remove(at: sourceIndexPath.row)
+        displayedTracks.insert(moved, at: destinationIndexPath.row)
+        for index in min(sourceIndexPath.row, destinationIndexPath.row)...max(sourceIndexPath.row, destinationIndexPath.row) {
+            displayedTrackIndices[displayedTracks[index].ref] = index
+        }
         draft.move(
             from: IndexSet(integer: sourceIndexPath.row),
             to: destinationIndexPath.row > sourceIndexPath.row ? destinationIndexPath.row + 1 : destinationIndexPath.row
         )
+        renderTracks()
+        updateVisibleTracks(in: min(sourceIndexPath.row, destinationIndexPath.row)...max(sourceIndexPath.row, destinationIndexPath.row))
     }
 
     public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        draft.toggle(draft.tracks[indexPath.row].ref)
-        table.reloadRows(at: [indexPath], with: .none)
+        tableView.deselectRow(at: indexPath, animated: true)
+        guard displayedTracks.indices.contains(indexPath.row) else { return }
+        draft.toggle(displayedTracks[indexPath.row].ref)
+        updateSelection()
     }
 
     public func tableView(
@@ -488,7 +586,10 @@ private final class MusicCollectionEditorViewController: MusicPageViewController
         forRowAt indexPath: IndexPath
     ) {
         guard editingStyle == .delete else { return }
+        guard displayedTracks.indices.contains(indexPath.row), draft.tracks.indices.contains(indexPath.row),
+              displayedTracks[indexPath.row].ref == draft.tracks[indexPath.row].ref else { return }
         draft.remove(at: IndexSet(integer: indexPath.row))
+        renderTracks()
     }
 
     @objc private func requestClose() {
@@ -530,9 +631,22 @@ private final class MusicCollectionEditorViewController: MusicPageViewController
     }
 
     private func renderActions() {
+        if page.editor !== draft {
+            title = nil
+            renderTracks()
+            backLease?.invalidate()
+            if canPresentPageAlert, !closing, navigationController?.topViewController === self {
+                navigationController?.popViewController(animated: true)
+            }
+        }
+        selectAll.isEnabled = draft.canEdit
+        deleteSelected.isEnabled = draft.canEdit && !draft.selected.isEmpty
+        enqueue.isEnabled = page.canAct && !draft.selected.isEmpty
+        addToCollection.isEnabled = enqueue.isEnabled
+        navigationItem.rightBarButtonItem?.isEnabled = page.canAct
         selectAll.configuration?.title = draft.allSelected ? "取消全选" : "全选"
-        if draft.hasChanges {
-            backLease?.activate()
+        if draft.hasChanges, page.editor === draft {
+            if isPageVisible { backLease?.activate() }
             navigationItem.hidesBackButton = true
             navigationItem.leftBarButtonItem = UIBarButtonItem(title: "返回", style: .plain,
                 target: self, action: #selector(requestClose))
@@ -540,6 +654,39 @@ private final class MusicCollectionEditorViewController: MusicPageViewController
             backLease?.invalidate()
             navigationItem.hidesBackButton = false
             navigationItem.leftBarButtonItem = nil
+        }
+        _ = showError(page.actionError ?? page.error?.localizedDescription)
+    }
+
+    private func renderTracks() {
+        let next = page.editor === draft ? draft.tracks : []
+        let difference = next.map(\.ref).difference(from: displayedTracks.map(\.ref)).inferringMoves()
+        displayedTracks = next
+        guard !difference.isEmpty else { return }
+        displayedTrackIndices = Dictionary(uniqueKeysWithValues: displayedTracks.enumerated().map { ($0.element.ref, $0.offset) })
+        UIView.performWithoutAnimation {
+            table.performBatchUpdates {
+                for change in difference {
+                    switch change {
+                    case .remove(let offset, _, let destination):
+                        if let destination {
+                            table.moveRow(at: IndexPath(row: offset, section: 0),
+                                          to: IndexPath(row: destination, section: 0))
+                        } else { table.deleteRows(at: [IndexPath(row: offset, section: 0)], with: .none) }
+                    case .insert(let offset, _, let source):
+                        if source == nil { table.insertRows(at: [IndexPath(row: offset, section: 0)], with: .none) }
+                    }
+                }
+            }
+        }
+        applyTheme()
+        updateSelection()
+    }
+
+    private func updateSelection() {
+        for case let cell as MusicTrackCell in table.visibleCells {
+            guard let reference = cell.representedReference else { continue }
+            cell.accessoryType = draft.selected.contains(reference) ? .checkmark : .none
         }
     }
 

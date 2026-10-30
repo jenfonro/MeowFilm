@@ -65,6 +65,14 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     /// Module-local identity for page-owned presentations, never queue authority.
     var actionPageID: UUID { pageEpoch }
     private var available = false, visible = false
+    private var contentDay: Date?
+    private var isDaily: Bool {
+        switch request {
+        case .discovery(.daily), .homeAction(.daily, _): return true
+        case .accountRecommendation(_, let kind, _): return kind == "daily"
+        default: return false
+        }
+    }
     private var snapshot: String?
     private var currentCursor: String?
     private var cursorOffsets: [String: Int] = ["": 0]
@@ -123,7 +131,31 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         self.available = available; self.generation = generation
         invalidate(clear: true)
     }
+    /// Personal queues use account leases. Public pages remain untouched;
+    /// home/featured/channel account invalidation already has its native stream.
+    @discardableResult public func invalidateAccount(_ platform: MusicAccountPlatform) -> Bool {
+        let dependency: MusicAccountPlatform
+        switch request {
+        case .accountRecommendation(let value, _, _), .discovery(.daily(let value)): dependency = value
+        case .homeAction(.songCollection, _): return false
+        case .homeAction: dependency = .netease
+        default: return false
+        }
+        guard dependency == platform || remoteSource?.context.platform == platform.rawValue else { return false }
+        invalidate(clear: true)
+        return true
+    }
     public func appear() { visible = true }
+    public var needsDateRefresh: Bool {
+        guard isDaily, let contentDay else { return false }
+        return !Calendar.current.isDate(contentDay, inSameDayAs: Date())
+    }
+    /// Visibility only checks date-scoped data; it never suspends page work.
+    public func refreshForDateIfNeeded() async {
+        guard available, visible, needsDateRefresh else { return }
+        invalidate(clear: true)
+        await load(cursor: nil, direction: 0, refresh: true)
+    }
     /// The view owns this structured observation task. It can remain subscribed
     /// while an inactive home tab retains its display, but never polls.
     public func observeHomeChanges() async {
@@ -165,17 +197,9 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             // A disposable snapshot must not prevent the actual home request.
         }
     }
-    public func disappear(preservingContent: Bool = false) {
+    public func disappear() {
         visible = false
-        // Only a read-only discovery page may retain its visual snapshot.
-        // Account/queue-bearing pages still revoke their authority on exit.
-        let mayRetain: Bool
-        switch request {
-        case .discovery(.home), .discovery(.featured), .discovery(.channels), .discovery(.channel):
-            mayRetain = preservingContent
-        default: mayRetain = false
-        }
-        invalidate(clear: !mayRetain)
+        invalidate(clear: true)
     }
     private func invalidate(clear: Bool) {
         pageEpoch = UUID(); actionEpoch = UUID()
@@ -195,6 +219,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             trackPageOccurrences = [:]; requiresExplicitNext = false; usesPageNavigation = false
             dailyStyle = nil
             contentIsCurrent = false
+            contentDay = nil
         }
     }
     public func selectFilter(_ id: String) async {
@@ -285,36 +310,6 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         if let error { throw error }
         return result
     }
-    public func selectChannel(_ channel: MusicPublicBrowseChannel) async {
-        switch request {
-        case .discovery(.channel), .discovery(.channels): break
-        default: return
-        }
-        request = .discovery(.channel(channel, tag: ""))
-        invalidate(clear: true)
-        await load(cursor: nil, direction: 0, refresh: true)
-    }
-    /// One structured task owns the visible channel. Re-entering while its
-    /// cancelled predecessor is unwinding must replace that unfinished read,
-    /// not mistake isLoading for work that can still publish.
-    func activateChannel(_ channel: MusicPublicBrowseChannel?, active: Bool,
-                         available: Bool, generation: UUID) async {
-        setAccess(available: available, generation: generation)
-        guard active, available, let channel else {
-            disappear(preservingContent: true); return
-        }
-        appear()
-        if case .discovery(.channel(let shown, _)) = request, shown == channel {
-            if isLoading, task?.isCancelled == true {
-                invalidate(clear: false)
-                contentIsCurrent = false
-            }
-            if loaded && contentIsCurrent { return }
-            await load(cursor: nil, direction: 0, refresh: true)
-            return
-        }
-        await selectChannel(channel)
-    }
     public func refresh() async {
         let isHome = request == .discovery(.home)
         if isHome, isLoading, loadingCursor == nil {
@@ -323,9 +318,13 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             if let task { _ = try? await task.value }
             return
         }
-        let retain: Bool
-        if case .discovery(.channel) = request { retain = true } else { retain = isHome }
-        invalidate(clear: !retain)
+        // Keep rows and scroll anchors, not an old queue source or admission.
+        invalidate(clear: false)
+        contentIsCurrent = false
+        if let remoteSource { releaseSource(remoteSource) }; remoteSource = nil
+        snapshot = nil; currentCursor = nil; nextCursor = nil; back = []
+        cursorOffsets = ["": 0]; trackOffset = 0; trackPageOccurrences = [:]
+        pageNumber = 1; requiresExplicitNext = false; usesPageNavigation = false
         if case .detail(let collection) = request,
            let refreshing = service as? any MusicPublicBrowseRefreshing {
             let own = pageEpoch
@@ -335,7 +334,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         await load(cursor: nil, direction: 0, refresh: true)
     }
     public func loadIfNeeded() async {
-        guard !loaded, !isLoading else { return }
+        guard !loaded, !isLoading, error == nil else { return }
         await load(cursor: nil, direction: 0)
     }
     /// Public detail reads do not load the complete queue. Only an explicit
@@ -509,6 +508,8 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         guard available, visible, !isLoading else { return }
         guard let offset = cursorOffsets[cursor ?? ""] else { error = .staleResult; return }
         let own = UUID(), access = generation, request = requestOverride ?? request, service = service
+        let day = Calendar.current.startOfDay(for: Date())
+        if isDaily, cursor == nil, remoteSource == nil { contentDay = day }
         let savedSource = remoteSource
         let queuePage = queuePage, releaseSource = releaseSource
         let trace = MusicRequestTrace(.browse, platform: requestPlatform)
@@ -617,6 +618,12 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             try Task.checkCancellation()
             guard available, visible, generation == access, pageEpoch == own else {
                 return
+            }
+            if isDaily {
+                guard Calendar.current.isDate(day, inSameDayAs: Date()),
+                      contentDay.map({ Calendar.current.isDate($0, inSameDayAs: Date()) }) == true else {
+                    throw MusicServiceError.staleResult
+                }
             }
             let count = result.page.sections.reduce(0) { $0 + $1.items.count }
             guard count <= (request == .discovery(.home) ? 600 : 300), result.page.filters.count <= 300,

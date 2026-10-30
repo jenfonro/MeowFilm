@@ -139,6 +139,12 @@ public protocol MusicAccountsServing: Sendable {
     func logout(platform: MusicAccountPlatform) async throws
 }
 
+/// Account ownership changed, not page appearance. The native adapter emits
+/// platform identities only; credentials never enter this observation stream.
+public protocol MusicAccountSessionsObserving: Sendable {
+    func accountSessionChanges() async -> AsyncStream<MusicAccountPlatform>
+}
+
 /// Optional native session renewal. This is explicit user intent, not status
 /// loading, login, validation or an automatic retry. No credentials enter UI.
 /// Providers without this capability remain valid MusicAccountsServing values.

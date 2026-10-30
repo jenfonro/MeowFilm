@@ -5,7 +5,7 @@ import MeowUI
 @MainActor
 final class MusicRecordDiscView: UIView {
     let coverHost = UIView()
-    private let preview = MusicArtworkView(size: 0)
+    private let preview = UIImageView()
     private var colorway = PageColorway.lilac
     private var rotating = false
     private var stars: [CAShapeLayer] = []
@@ -15,6 +15,9 @@ final class MusicRecordDiscView: UIView {
         backgroundColor = .clear
         isUserInteractionEnabled = false
         addSubview(coverHost)
+        preview.contentMode = .scaleAspectFill
+        preview.clipsToBounds = true
+        preview.backgroundColor = UIColor.white.withAlphaComponent(0.18)
         coverHost.addSubview(preview)
         for index in 0..<24 {
             let star = CAShapeLayer()
@@ -51,10 +54,9 @@ final class MusicRecordDiscView: UIView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func configure(theme: PageTheme, artwork: URL?, current: Bool) {
+    func configure(theme: PageTheme, image: UIImage?) {
         if colorway != theme.palette { colorway = theme.palette; setNeedsDisplay() }
-        preview.isHidden = current
-        if !current { preview.load(artwork) }
+        preview.image = image
     }
 
     func setRotating(_ value: Bool) {
