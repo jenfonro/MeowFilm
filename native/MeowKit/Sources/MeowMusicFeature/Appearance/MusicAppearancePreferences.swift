@@ -182,7 +182,7 @@ import Combine
     public var pageColorway: PageColorway { effectivePalette }
     public var animatesPageColorway: Bool { animatesPaletteChanges }
     public var pageThemeChanges: AnyPublisher<Void, Never> {
-        objectWillChange.eraseToAnyPublisher()
+        $effectivePalette.removeDuplicates().dropFirst().map { _ in () }.eraseToAnyPublisher()
     }
     private let defaults: UserDefaults
     private var cache = MusicSongColorCache()

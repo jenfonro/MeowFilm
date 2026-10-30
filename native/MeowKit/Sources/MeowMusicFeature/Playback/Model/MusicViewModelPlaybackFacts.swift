@@ -1,0 +1,209 @@
+#if os(iOS) || os(macOS)
+import Foundation
+import MeowContracts
+import MeowPlayback
+import MeowStorage
+
+@MainActor
+extension MusicViewModel {
+    public func togglePlayback() async {
+        guard isAvailable, !isClosed else { return }
+        if pausePlaybackRecovery() { return }
+        let own = lifecycle, token = selectionID
+        await (service as? any MusicSimilarModeServing)?.pauseSimilarNavigation()
+        guard isAvailable, !isClosed, lifecycle == own, selectionID == token else { return }
+        if let fmSource, !fmSource.authorization.isActive {
+            cancelFMNavigation(); stopFM(); invalidateSelection(stopMedia: true)
+            error = MusicServiceError.staleAccess.localizedDescription; return
+        }
+        if fmAdvanceIntent != nil || (isPreparingRemoteQueue && remoteQueueIsFM) {
+            fmShouldPlay.toggle()
+            if !fmShouldPlay, let nativeAttempt { player?.pause(nativeAttempt) }
+            return
+        }
+        if let nativeAttempt, candidate != nil, terminalAttempt == nil {
+            guard candidate?.fileAuthorization?.isActive != false, candidate?.playbackAuthorization?.isActive != false else {
+                invalidateSelection(stopMedia: true); error = MusicServiceError.staleAccess.localizedDescription; return
+            }
+            if phase == .playing || phase == .buffering { player?.pause(nativeAttempt) }
+            else {
+                player?.resume(nativeAttempt)
+                capturePrimaryPlayback()
+            }
+        } else { await prepareCurrent() }
+    }
+    @discardableResult
+    public func seek(to seconds: Double) -> Bool {
+        guard isAvailable, !isClosed, terminalAttempt == nil, seconds.isFinite, seconds >= 0,
+              let nativeAttempt else { return false }
+        guard candidate?.fileAuthorization?.isActive != false, candidate?.playbackAuthorization?.isActive != false else {
+            invalidateSelection(stopMedia: true); error = MusicServiceError.staleAccess.localizedDescription; return false
+        }
+        guard player?.seek(seconds, attempt: nativeAttempt) == true else { return false }
+        feedbackConsumer.discontinuity()
+        return true
+    }
+
+    public func loadLyrics(occurrenceId: String, sourceKey: String) async {
+        guard isAvailable, !isClosed, current?.id == occurrenceId else { return }
+        beginPlaybackMetadata(fallbackSourceKey: sourceKey)
+        await playbackMetadata.flush()
+    }
+
+    /// Preferred product binding. No View.onChange and no polling.
+    public func onPlaybackEvent(_ event: PlaybackEvent) {
+        guard isAvailable, !isClosed, event.attempt.owner == "music",
+              event.snapshot.owner == "music", event.snapshot.resourceID == event.attempt.resourceID,
+              let candidate, candidate.resourceId == event.attempt.resourceID else { return }
+        if let nativeAttempt, nativeAttempt.id != event.attempt.id { return }
+        if nativeAttempt == nil {
+            // Only adopt an attempt while this exact resource is entering the
+            // injected native play call, including synchronous preflight failure.
+            guard pendingNativeResourceID == event.attempt.resourceID else { return }
+            nativeAttempt = MusicPlayerAttempt(id: event.attempt.id, resourceID: event.attempt.resourceID)
+        }
+        if terminalAttempt == candidate.attemptId {
+            // Ended persistence may still be awaiting acknowledgement. A
+            // replacement must retire its navigation even after the last fact.
+            if [.replaced, .stopped].contains(event.kind) {
+                retirePlaybackNavigation()
+                cancelRemoteQueuePreparation(); cancelFMNavigation()
+                nativeAttempt = nil; pendingNativeResourceID = nil
+            }
+            if [.paused, .stopped, .replaced].contains(event.kind) { pausePlaybackRecovery() }
+            return
+        }
+        switch event.kind {
+        case .paused: fmShouldPlay = false
+        case .replaced, .stopped:
+            retirePlaybackNavigation()
+            cancelRemoteQueuePreparation(); cancelFMNavigation()
+            nativeAttempt = nil; pendingNativeResourceID = nil
+        default: break
+        }
+        guard candidate.fileAuthorization?.isActive != false,
+              candidate.playbackAuthorization?.isActive != false else {
+            invalidateSelection(stopMedia: true); return
+        }
+        // The unique native event has passed resource/native generation and
+        // protected-file admission. Never sample the compatibility snapshot path.
+        feedbackConsumer.consume(event, candidate: candidate, automatic: feedbackAutomatic)
+        let kind: MusicPlaybackFact.Kind?
+        switch event.kind {
+        case .played: kind = .playing
+        case .progress: kind = .progress
+        case .paused: kind = .paused
+        case .ended: kind = .ended
+        case .failed: kind = .failed
+        case .replaced, .stopped: kind = .stopped
+        case .preparing, .prepared: kind = nil
+        }
+        if phase != event.snapshot.phase { playbackState.phase = event.snapshot.phase }
+        if event.kind == .played { completePrimaryPlaybackIfPlaying() }
+        if let kind {
+            onPlayback(MusicPlaybackFact(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId,
+                resourceId: candidate.resourceId, kind: kind, position: event.snapshot.position, duration: event.snapshot.duration))
+        }
+    }
+    public func onPlayback(_ event: PlaybackEvent) { onPlaybackEvent(event) }
+    /// Compatibility for product snapshot observers. Resource IDs are
+    /// per-resolution UUIDs, so repeated same-track attempts cannot alias.
+    public func onPlayback(_ snapshot: PlaybackSnapshot) {
+        guard isAvailable, !isClosed, snapshot.owner == "music", let candidate,
+              snapshot.resourceID == candidate.resourceId else { return }
+        guard candidate.fileAuthorization?.isActive != false,
+              candidate.playbackAuthorization?.isActive != false else {
+            invalidateSelection(stopMedia: true); return
+        }
+        let kind: MusicPlaybackFact.Kind
+        switch snapshot.phase {
+        case .playing: kind = phase == .playing ? .progress : .playing
+        case .paused: kind = .paused
+        case .ended: kind = .ended
+        case .failed: kind = .failed
+        case .idle: kind = .stopped
+        case .buffering, .preparing: playbackState.phase = snapshot.phase; return
+        }
+        if phase != snapshot.phase { playbackState.phase = snapshot.phase }
+        onPlayback(MusicPlaybackFact(attemptId: candidate.attemptId, occurrenceId: candidate.occurrenceId,
+            resourceId: candidate.resourceId, kind: kind, position: snapshot.position, duration: snapshot.duration))
+    }
+    public func onPlayback(_ fact: MusicPlaybackFact) {
+        guard isAvailable, !isClosed, let candidate, fact.attemptId == candidate.attemptId,
+              fact.occurrenceId == candidate.occurrenceId, fact.resourceId == candidate.resourceId,
+              fact.position.isFinite, fact.position >= 0, terminalAttempt != fact.attemptId else { return }
+        guard candidate.fileAuthorization?.isActive != false,
+              candidate.playbackAuthorization?.isActive != false else {
+            invalidateSelection(stopMedia: true); return
+        }
+        position = fact.position
+        if let duration = fact.duration, duration.isFinite, duration >= 0 { self.duration = duration }
+        switch fact.kind {
+        case .playing: playbackState.phase = .playing
+        case .paused: playbackState.phase = .paused; fmShouldPlay = false
+        case .ended: playbackState.phase = .ended
+        case .failed: playbackState.phase = .failed
+        case .stopped: playbackState.phase = .idle
+        case .progress: break
+        }
+        if recoverCachedAudio(fact) { return }
+        if recoverRemoteAudio(fact) { return }
+        // UI gets each clock sample. Persistent progress is coalesced at five
+        // seconds plus pause/end/exit; request targets aren't playback facts.
+        if fact.kind == .progress, let lastProgressWrite, abs(fact.position - lastProgressWrite) < 5 { return }
+        if pendingFacts >= 8 {
+            if fact.kind != .progress { error = MusicServiceError.busy.localizedDescription }
+            return
+        }
+        if [.ended, .failed, .stopped].contains(fact.kind) { terminalAttempt = fact.attemptId }
+        let epoch = lifecycle, token = selectionID, navigation = navigationID, prior = eventTail
+        guard let service else { return }
+        pendingFacts += 1
+        eventTail = Task { [weak self] in
+            await prior?.value
+            guard let self else { return }
+            defer { self.pendingFacts -= 1 }
+            do {
+                try self.check(epoch)
+                guard token == self.selectionID, self.candidate?.attemptId == fact.attemptId else { return }
+                try candidate.fileAuthorization?.check()
+                try candidate.playbackAuthorization?.check()
+                let accepted: Bool
+                if let similar = service as? any MusicSimilarModeServing {
+                    if fact.kind == .paused || fact.kind == .stopped { await similar.pauseSimilarNavigation() }
+                    accepted = try await similar.recordSimilarPlaybackFact(fact)
+                } else { accepted = try await service.record(fact) }
+                try self.check(epoch)
+                guard token == self.selectionID, self.candidate?.attemptId == fact.attemptId else { return }
+                if accepted { self.lastProgressWrite = fact.position }
+                if accepted && fact.kind == .ended && self.navigationID == navigation {
+                    // Schedule after this fact task, rather than awaiting a
+                    // navigation that must itself drain earlier facts.
+                    _ = self.requestNavigation(.next, reason: .ended)
+                } else if fact.kind == .failed {
+                    self.report(MusicServiceError.invalidMediaCandidate, epoch: epoch, operation: "播放音频", kind: .media)
+                    let updated = try await service.state()
+                    try self.check(epoch)
+                    guard token == self.selectionID, self.candidate?.attemptId == fact.attemptId else { return }
+                    playbackState.state = updated
+                }
+            } catch {
+                if self.lifecycle == epoch, self.selectionID == token, self.terminalAttempt == fact.attemptId {
+                    self.terminalAttempt = nil
+                }
+                self.report(error, epoch: epoch)
+            }
+        }
+    }
+    /// Finite logical event drain for lifecycle/tests; no native frame polling.
+    public func flushPlaybackFacts() async {
+        await feedbackConsumer.flush() // Admission only, never awaits network feedback.
+        await eventTail?.value
+        let recoveries = Array(recoveryDrains.values)
+        for task in recoveries { await task.value }
+        await eventTail?.value
+    }
+    public func flushNavigation() async { await navigationTask?.value }
+
+}
+#endif

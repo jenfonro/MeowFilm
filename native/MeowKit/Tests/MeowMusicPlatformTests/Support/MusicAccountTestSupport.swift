@@ -42,10 +42,13 @@ final class MusicAccountTestClock: @unchecked Sendable {
 }
 
 actor MusicAccountTestGate {
+    private let onEnter: @Sendable () -> Void
     private var entered = false, released = false
     private var starts: [CheckedContinuation<Void, Never>] = []
     private var waits: [CheckedContinuation<Void, Never>] = []
+    init(_ onEnter: @escaping @Sendable () -> Void = {}) { self.onEnter = onEnter }
     func wait() async {
+        if !entered { onEnter() }
         entered = true; starts.forEach { $0.resume() }; starts.removeAll()
         if !released { await withCheckedContinuation { waits.append($0) } }
     }

@@ -1,204 +1,147 @@
 #if os(iOS)
 import UIKit
 import MeowUI
-import MeowPlayback
 
-/// Full-player presentation owns dismissal only. The same real player surface
-/// comes from the global dock; neither a second player nor duplicated controls
-/// are constructed for the modal.
+/// A distinct player page. Its content owner is shared with the dock, not its views.
 @MainActor
-public final class MusicPlayerViewController: MusicPageViewController,
-    UIGestureRecognizerDelegate, UIPopoverPresentationControllerDelegate
-{
+public final class MusicPlayerViewController: MusicPageViewController, UIPopoverPresentationControllerDelegate {
     public var onDismiss: (() -> Void)?
-    private let model: MusicViewModel
-    private let playback: PlaybackController
-    private let surface: MusicPlayerSurface
-    private let transition: NativeSurfaceTransition
-    private let edge = UIScreenEdgePanGestureRecognizer()
-    private let down = UIPanGestureRecognizer()
+    public var onPresent: ((MusicPlaybackDestination) -> Void)?
+    private let content: MusicPlayerContentModel
+    private let playerView: MusicFullPlayerView
+    private let transition = BottomPageTransition()
     private var closeQueued = false
-    private var finished = false
     private var sourcesQueued = false
+    private var finished = false
 
-    public init(model: MusicViewModel, playback: PlaybackController,
-                appearance: MusicAppearancePreferencesStore,
-                surface: MusicPlayerSurface, dock: UIView) {
-        self.model = model
-        self.playback = playback
-        self.surface = surface
-        surface.interruptDockMorph()
-        transition = NativeSurfaceTransition(
-            surface: surface, dock: dock,
-            presentLayout: { surface.setForm(.full) },
-            dockLayout: {
-                surface.setForm(.compact)
-                surface.onSizeChanged?()
-            }
-        )
+    public init(content: MusicPlayerContentModel, appearance: MusicAppearancePreferencesStore) {
+        self.content = content
+        playerView = MusicFullPlayerView(content: content)
         super.init(appearance: appearance)
+        overrideUserInterfaceStyle = .light
         modalPresentationStyle = .custom
         transitioningDelegate = transition
         modalPresentationCapturesStatusBarAppearance = true
+        transition.onTransitionEnded = { [weak self] presenting, completed in
+            guard let self else { return }
+            if !presenting && completed || self.presentingViewController == nil { self.finishDismissal() }
+            else { self.drainRequests() }
+        }
     }
 
     public override var prefersStatusBarHidden: Bool { true }
-
-    public override func loadView() {
-        // This bounding host draws nothing. The moving, clipped player surface
-        // itself is opaque and directly owns the one window-coordinate gradient.
-        view = UIView()
-        view.backgroundColor = .clear
-        view.isOpaque = false
-    }
+    public override func loadView() { view = playerView }
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        edge.edges = .left
-        for gesture in [edge as UIPanGestureRecognizer, down] {
-            gesture.delegate = self
-            gesture.addTarget(self, action: #selector(dismissPan))
-            view.addGestureRecognizer(gesture)
-        }
-        surface.onClose = { [weak self] in self?.requestClose() }
-        surface.onMore = { [weak self] in self?.showMore() }
-        surface.onMode = { [weak self] in self?.chooseMode() }
-        surface.onSources = { [weak self] in self?.loadSources() }
-        observe(model) { [weak self] in self?.reconcileAccess() }
+        transition.installEdgeDismissal(on: self)
+        playerView.prioritizeEdgeGesture(transition.edgeGesture)
+        playerView.onClose = { [weak self] in self?.requestClose() }
+        playerView.onPresent = { [weak self] destination in self?.onPresent?(destination) }
+        playerView.onMore = { [weak self] in self?.showMore() }
+        playerView.onMode = { [weak self] in self?.chooseMode() }
+        playerView.onSources = { [weak self] in self?.requestSources() }
+        observe(content.accessChanges) { [weak self] in self?.reconcileAccess() }
     }
 
-    public override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        if surface.superview === view, !transition.isTransitioning {
-            surface.frame = view.bounds
-            surface.setNeedsLayout()
-        }
-    }
-
-    public override func pageDidBecomeActive() {
+    public override func pageDidBecomeActive() { reconcileAccess() }
+    public override func pageDidBecomeVisible() {
+        playerView.setRendering(true)
         reconcileAccess()
+        drainRequests()
     }
+    public override func pageDidBecomeHidden() { playerView.setRendering(false) }
 
     public override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        if closeQueued { closeQueued = false; requestClose() }
-        else if sourcesQueued { sourcesQueued = false; loadSources() }
+        drainRequests()
     }
 
     public override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
-        if isBeingDismissed || presentingViewController == nil { finishDismissal() }
+        if !transition.isTransitioning && (isBeingDismissed || presentingViewController == nil) { finishDismissal() }
     }
 
-    public func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        guard !transition.isTransitioning, model.isAvailable, !model.isClosed else { return false }
-        let gesture = gestureRecognizer as! UIPanGestureRecognizer
-        let velocity = gesture.velocity(in: view)
-        if gesture === edge { return velocity.x > abs(velocity.y) }
-        return velocity.y > abs(velocity.x)
+    public override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        transition.cancelInteractiveDismissal()
+        super.viewWillTransition(to: size, with: coordinator)
     }
 
-    public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
-                                  shouldReceive touch: UITouch) -> Bool {
-        if gestureRecognizer === down,
-           touch.location(in: surface).y > surface.safeAreaInsets.top + 60 { return false }
-        var node = touch.view
-        while let current = node {
-            if current is UIControl || current is UIScrollView { return false }
-            node = current.superview
-        }
-        return true
+    public func requestSources() {
+        guard !finished else { return }
+        if isBeingPresented || transition.isTransitioning || !isPageVisible { sourcesQueued = true }
+        else { loadSources() }
     }
 
     private func reconcileAccess() {
-        if !model.isAvailable || model.isClosed { requestClose() }
+        if !content.isAvailable { requestClose() }
     }
 
     private func requestClose() {
         guard !finished else { return }
         if isBeingPresented || transition.isTransitioning {
             closeQueued = true
+            transition.cancelInteractiveDismissal()
             return
         }
-        dismiss(animated: !UIAccessibility.isReduceMotionEnabled)
+        guard !isBeingDismissed else { return }
+        if let child = presentedViewController {
+            child.dismiss(animated: false) { [weak self] in self?.requestClose() }
+            return
+        }
+        dismiss(animated: !UIAccessibility.isReduceMotionEnabled) { [weak self] in self?.finishDismissal() }
+    }
+
+    private func drainRequests() {
+        guard !finished, !isBeingPresented, !isBeingDismissed, !transition.isTransitioning, isPageVisible else { return }
+        if closeQueued { closeQueued = false; requestClose() }
+        else if sourcesQueued { sourcesQueued = false; loadSources() }
     }
 
     private func finishDismissal() {
         guard !finished else { return }
         finished = true
-        transition.restoreDock()
-        surface.onClose = nil
-        surface.onMore = nil
-        surface.onMode = nil
-        surface.onSources = nil
+        content.presentation.setFullPlayerPresented(false)
         onDismiss?()
     }
 
-    @objc private func dismissPan(_ pan: UIPanGestureRecognizer) {
-        let horizontal = pan === edge
-        let distance = horizontal ? pan.translation(in: view).x : pan.translation(in: view).y
-        let extent = horizontal ? view.bounds.width : view.bounds.height
-        let fraction = min(1, max(0, distance / max(1, extent)))
-        switch pan.state {
-        case .began:
-            if transition.beginInteraction() { dismiss(animated: true) }
-        case .changed:
-            transition.updateInteraction(fraction)
-        case .ended:
-            let velocity = horizontal ? pan.velocity(in: view).x : pan.velocity(in: view).y
-            transition.endInteraction(commit: fraction > 0.35 || velocity > 700)
-        case .cancelled, .failed:
-            transition.endInteraction(commit: false)
-        default:
-            break
-        }
-    }
-
     private func chooseMode() {
+        let model = content.model
         if model.isFMActive { openFMSettings(); return }
         let alert = UIAlertController(title: "播放模式", message: nil, preferredStyle: .actionSheet)
-        let displayed = fence
+        let displayed = content.fence
         let active = model.similarMode?.active == true, snapshot = model.similarMode?.id
         for mode in MusicPlaybackMode.allCases {
             alert.addAction(UIAlertAction(title: mode.title, style: .default) { [weak self] _ in
-                guard let self else { return }
-                self.runPageTask {
-                    guard displayed.admits(self.fence, permitted: self.isPageActive) else { return }
-                    await self.model.setMode(mode)
-                }
+                guard let self, self.isPageVisible else { return }
+                self.content.setMode(mode, expected: displayed)
             })
         }
-        alert.addAction(UIAlertAction(
-            title: model.similarMode?.active == true ? "关闭推荐续播" : "推荐续播",
-            style: .default
-        ) { [weak self] _ in
-            guard let self else { return }
-            self.runPageTask {
-                guard displayed.admits(self.fence, permitted: self.isPageActive),
-                      self.model.similarMode?.id == snapshot else { return }
-                if active { await self.model.exitSimilarMode() }
-                else { await self.model.enterSimilarMode() }
-            }
+        alert.addAction(UIAlertAction(title: active ? "关闭推荐续播" : "推荐续播", style: .default) { [weak self] _ in
+            guard let self, self.isPageVisible else { return }
+            self.content.setSimilarMode(active: active, snapshot: snapshot, expected: displayed)
         })
         alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        presentPopover(alert, anchor: surface.modeAnchor)
+        presentPopover(alert, anchor: playerView.modeAnchor)
     }
 
     private func showMore() {
         let alert = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
-        let attempt = playback.currentAttempt
+        let attempt = content.playback.currentAttempt
         for rate in [0.5, 0.75, 1, 1.25, 1.5, 2] {
             alert.addAction(UIAlertAction(title: "\(rate)x", style: .default) { [weak self] _ in
-                guard let self, let attempt, self.playback.currentAttempt == attempt else { return }
-                _ = self.playback.setPreferredRate(rate, attempt: attempt)
+                guard let self, let attempt, self.content.playback.currentAttempt == attempt else { return }
+                _ = self.content.playback.setPreferredRate(rate, attempt: attempt)
             })
         }
-        alert.addAction(UIAlertAction(title: "选择音源", style: .default) { [weak self] _ in
-            self?.loadSources()
+        alert.addAction(UIAlertAction(title: "选择音源", style: .default) { [weak self, weak alert] _ in
+            guard let alert else { return }
+            self?.dismissMenu(alert) { self?.requestSources() }
         })
-        if model.isFMActive {
-            alert.addAction(UIAlertAction(title: "私人漫游模式", style: .default) { [weak self] _ in
-                self?.openFMSettings()
+        if content.model.isFMActive {
+            alert.addAction(UIAlertAction(title: "私人漫游模式", style: .default) { [weak self, weak alert] _ in
+                guard let alert else { return }
+                self?.dismissMenu(alert) { self?.openFMSettings() }
             })
         }
         alert.addAction(UIAlertAction(title: appearance.preferences.translationActionLabel, style: .default) {
@@ -212,22 +155,20 @@ public final class MusicPlayerViewController: MusicPageViewController,
             self.appearance.set(\.lyricBackground, !self.appearance.preferences.lyricBackground)
         })
         alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        presentPopover(alert, anchor: surface.moreAnchor)
+        presentPopover(alert, anchor: playerView.moreAnchor)
     }
 
-    public func requestSources() {
-        if isBeingPresented || transition.isTransitioning || !isPageActive { sourcesQueued = true }
-        else { loadSources() }
-    }
-
-    private var fence: MusicReferencePlayerFence {
-        .init(occurrence: model.current?.id, attempt: model.activeNativeAttemptID,
-              access: model.accountAccessGeneration, queueRevision: model.state.revision,
-              settingsRevision: model.state.settingsRevision)
+    private func dismissMenu(_ alert: UIAlertController, completion: @escaping () -> Void) {
+        guard alert.presentingViewController != nil else { completion(); return }
+        if alert.isBeingDismissed, let coordinator = alert.transitionCoordinator,
+           coordinator.animate(alongsideTransition: nil, completion: { context in
+               if !context.isCancelled { completion() }
+           }) { return }
+        alert.dismiss(animated: true, completion: completion)
     }
 
     private func presentPopover(_ alert: UIAlertController, anchor: UIView) {
-        guard presentedViewController == nil else { return }
+        guard isPageVisible, presentedViewController == nil else { return }
         alert.modalPresentationStyle = .popover
         alert.popoverPresentationController?.sourceView = anchor
         alert.popoverPresentationController?.sourceRect = anchor.bounds
@@ -235,15 +176,13 @@ public final class MusicPlayerViewController: MusicPageViewController,
         present(alert, animated: true)
     }
 
-    public func adaptivePresentationStyle(for controller: UIPresentationController) -> UIModalPresentationStyle {
-        .none
-    }
+    public func adaptivePresentationStyle(for controller: UIPresentationController) -> UIModalPresentationStyle { .none }
 
     private func loadSources() {
-        guard let current = model.current, isPageActive, presentedViewController == nil else { return }
+        guard let current = content.model.current, isPageVisible, presentedViewController == nil else { return }
         let navigation = PageNavigationController(themeProvider: appearance)
         navigation.setViewControllers([
-            MusicSourcesViewController(model: model, tracks: [current.track], appearance: appearance)
+            MusicSourcesViewController(model: content.model, tracks: [current.track], appearance: appearance)
         ], animated: false)
         navigation.modalPresentationStyle = .pageSheet
         navigation.sheetPresentationController?.detents = [.medium(), .large()]
@@ -252,7 +191,8 @@ public final class MusicPlayerViewController: MusicPageViewController,
     }
 
     private func openFMSettings() {
-        let page = MusicFMSettingsViewController(model: model, appearance: appearance)
+        guard isPageVisible, presentedViewController == nil else { return }
+        let page = MusicFMSettingsViewController(model: content.model, appearance: appearance)
         let navigation = PageNavigationController(themeProvider: appearance)
         navigation.setViewControllers([page], animated: false)
         navigation.modalPresentationStyle = .fullScreen

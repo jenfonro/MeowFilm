@@ -9,6 +9,8 @@ final class MusicLyricCell: UITableViewCell {
     private let translation = UILabel()
     private var line: MusicLyricLine?
     private var theme = PageTheme()
+    private var lyricSelected = false
+    private var active = false
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
@@ -29,9 +31,9 @@ final class MusicLyricCell: UITableViewCell {
     func configure(line: MusicLyricLine, selected: Bool, active: Bool, position: Double,
                    rate: Double, playing: Bool, preferences: MusicAppearancePreferences, theme: PageTheme) {
         self.line = line; self.theme = theme
+        lyricSelected = selected; self.active = active
         lyric.configure(line: line, color: UIColor(theme.ink), muted: UIColor(theme.muted),
-                        font: UIFontMetrics(forTextStyle: .body).scaledFont(
-                            for: .systemFont(ofSize: 20, weight: selected || active ? .semibold : .regular)))
+                        font: lyricFont)
         translation.text = preferences.translation(line.translation, expanded: true)
         translation.isHidden = translation.text == nil
         translation.font = UIFontMetrics(forTextStyle: .footnote).scaledFont(for: .systemFont(ofSize: 13))
@@ -42,7 +44,29 @@ final class MusicLyricCell: UITableViewCell {
     }
 
     func updateTime(_ position: Double, playing: Bool, rate: Double, active: Bool) {
+        _ = updateState(selected: lyricSelected, active: active, position: position, playing: playing, rate: rate)
+    }
+
+    @discardableResult
+    func updateState(selected: Bool, active: Bool, position: Double, playing: Bool, rate: Double) -> Bool {
+        let changed = (lyricSelected || self.active) != (selected || active)
+        lyricSelected = selected; self.active = active
+        if changed, let line {
+            lyric.configure(line: line, color: UIColor(theme.ink), muted: UIColor(theme.muted), font: lyricFont)
+        }
         lyric.update(position: position, active: active, playing: playing, rate: rate)
+        return changed
+    }
+
+    private var lyricFont: UIFont {
+        UIFontMetrics(forTextStyle: .body).scaledFont(
+            for: .systemFont(ofSize: 20, weight: lyricSelected || active ? .semibold : .regular))
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        line = nil; lyricSelected = false; active = false
+        lyric.reset()
     }
 }
 
@@ -57,6 +81,14 @@ private final class MusicTimedLyricView: UIView {
     private var active = false
     private var playing = false
     private var rate: Double = 1
+    private struct WordGeometry {
+        let word: MusicLyricWord
+        let rects: [CGRect]
+        let width: CGFloat
+    }
+    private var wordGeometry: [WordGeometry] = []
+    private var geometrySize: CGSize = .zero
+    private var geometryDirty = true
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -80,6 +112,7 @@ private final class MusicTimedLyricView: UIView {
             self.line = line
             textLabel.text = line.text; highlight.text = line.text
             textLabel.font = font; highlight.font = font
+            geometryDirty = true
             invalidateIntrinsicContentSize()
             setNeedsLayout()
         }
@@ -96,62 +129,55 @@ private final class MusicTimedLyricView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        textLabel.preferredMaxLayoutWidth = bounds.width
-        highlight.preferredMaxLayoutWidth = bounds.width
-        invalidateIntrinsicContentSize()
+        if textLabel.preferredMaxLayoutWidth != bounds.width {
+            textLabel.preferredMaxLayoutWidth = bounds.width
+            highlight.preferredMaxLayoutWidth = bounds.width
+            invalidateIntrinsicContentSize()
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         maskLayer.frame = bounds
+        CATransaction.commit()
         drawMask()
     }
 
     func update(position: Double, active: Bool, playing: Bool, rate: Double) {
+        let needsMask = self.active || active
         self.position = position; self.active = active; self.playing = playing; self.rate = rate
-        drawMask()
+        if needsMask { drawMask() }
+    }
+
+    func reset() {
+        line = nil; active = false; playing = false
+        textLabel.text = nil; highlight.text = nil
+        wordGeometry.removeAll()
+        geometryDirty = true
+        maskLayer.removeAnimation(forKey: "lyric.word")
+        maskLayer.path = nil
     }
 
     private func drawMask() {
         maskLayer.removeAnimation(forKey: "lyric.word")
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
         guard active, let line else { maskLayer.path = nil; return }
         guard !line.words.isEmpty else {
             maskLayer.path = CGPath(rect: bounds, transform: nil)
             return
         }
         guard bounds.width > 0, let font = textLabel.font else { return }
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        paragraph.lineBreakMode = .byWordWrapping
-        let storage = NSTextStorage(string: line.text, attributes: [.font: font, .paragraphStyle: paragraph])
-        let layout = NSLayoutManager()
-        let container = NSTextContainer(size: bounds.size)
-        container.lineFragmentPadding = 0
-        storage.addLayoutManager(layout)
-        layout.addTextContainer(container)
-        layout.ensureLayout(for: container)
-        let used = layout.usedRect(for: container)
-        let offsetY = max(0, (bounds.height - used.height) / 2) - used.minY
-        let text = line.text as NSString
-        var cursor = 0
+        if geometryDirty || geometrySize != bounds.size { measureWords(line: line, font: font) }
         let start = CGMutablePath(), end = CGMutablePath()
         var wordEnd: Double?
-        for word in line.words {
-            guard cursor <= text.length else { break }
-            let range = text.range(of: word.text, options: [],
-                                   range: NSRange(location: cursor, length: text.length - cursor))
-            guard range.location != NSNotFound else { continue }
-            cursor = NSMaxRange(range)
+        for geometry in wordGeometry {
+            let word = geometry.word
             let fraction = word.duration > 0 ? min(1, max(0, (position - word.time) / word.duration))
                 : position >= word.time ? 1 : 0
-            let glyphs = layout.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
-            var rects: [CGRect] = []
-            layout.enumerateEnclosingRects(forGlyphRange: glyphs,
-                                           withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
-                                           in: container) { rect, _ in
-                rects.append(rect.offsetBy(dx: 0, dy: offsetY))
-            }
-            let total = rects.reduce(CGFloat.zero) { $0 + $1.width }
-            var progress = total * CGFloat(fraction)
-            let finishWord = playing && fraction > 0 && fraction < 1
+            var progress = geometry.width * CGFloat(fraction)
+            let finishWord = playing && position >= word.time && word.duration > 0 && fraction < 1
             if finishWord { wordEnd = word.time + word.duration }
-            for rect in rects {
+            for rect in geometry.rects {
                 var visible = rect
                 visible.size.width = min(rect.width, max(0, progress))
                 start.addRect(visible)
@@ -169,6 +195,41 @@ private final class MusicTimedLyricView: UIView {
             animation.fillMode = .forwards
             animation.isRemovedOnCompletion = false
             maskLayer.add(animation, forKey: "lyric.word")
+        }
+    }
+
+    private func measureWords(line: MusicLyricLine, font: UIFont) {
+        geometryDirty = false
+        geometrySize = bounds.size
+        wordGeometry.removeAll(keepingCapacity: true)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineBreakMode = .byWordWrapping
+        let storage = NSTextStorage(string: line.text, attributes: [.font: font, .paragraphStyle: paragraph])
+        let layout = NSLayoutManager()
+        let container = NSTextContainer(size: bounds.size)
+        container.lineFragmentPadding = 0
+        storage.addLayoutManager(layout)
+        layout.addTextContainer(container)
+        layout.ensureLayout(for: container)
+        let used = layout.usedRect(for: container)
+        let offsetY = max(0, (bounds.height - used.height) / 2) - used.minY
+        let text = line.text as NSString
+        var cursor = 0
+        for word in line.words {
+            guard cursor <= text.length else { break }
+            let range = text.range(of: word.text, options: [],
+                                   range: NSRange(location: cursor, length: text.length - cursor))
+            guard range.location != NSNotFound else { continue }
+            cursor = NSMaxRange(range)
+            let glyphs = layout.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            var rects: [CGRect] = []
+            layout.enumerateEnclosingRects(forGlyphRange: glyphs,
+                                           withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0),
+                                           in: container) { rect, _ in
+                rects.append(rect.offsetBy(dx: 0, dy: offsetY))
+            }
+            wordGeometry.append(.init(word: word, rects: rects, width: rects.reduce(0) { $0 + $1.width }))
         }
     }
 }

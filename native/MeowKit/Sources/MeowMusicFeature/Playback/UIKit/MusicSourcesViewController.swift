@@ -6,7 +6,7 @@ import MeowUI
 /// Only a selection may adopt a source through the existing music service.
 @MainActor
 final class MusicSourcesViewController: MusicPageViewController,
-    UITableViewDataSource, UITableViewDelegate
+    UITableViewDelegate
 {
     private let model: MusicViewModel
     private let tracks: [MusicRemoteTrack]
@@ -21,6 +21,10 @@ final class MusicSourcesViewController: MusicPageViewController,
     private var loading = false
     private var selecting = false
     private var inspecting = false
+    private var dataSource: UITableViewDiffableDataSource<Int, String>!
+    private var rows: [String: MusicResolvedSource] = [:]
+    private var readError: String?
+    private var shownReadError: String?
 
     init(model: MusicViewModel, tracks: [MusicRemoteTrack], appearance: MusicAppearancePreferencesStore,
          originIsCurrent: @escaping @MainActor () -> Bool = { true },
@@ -40,9 +44,14 @@ final class MusicSourcesViewController: MusicPageViewController,
         super.viewDidLoad()
         table.backgroundColor = .clear
         table.separatorStyle = .none
-        table.dataSource = self
         table.delegate = self
         table.register(UITableViewCell.self, forCellReuseIdentifier: "Source")
+        dataSource = UITableViewDiffableDataSource(tableView: table) { [weak self] view, path, id in
+            guard let self, let source = self.rows[id] else { return nil }
+            let cell = view.dequeueReusableCell(withIdentifier: "Source", for: path)
+            self.configure(cell, source: source)
+            return cell
+        }
         view.addSubview(table)
         table.pinEdges(to: view)
         more.setTitle("加载更多", for: .normal)
@@ -51,79 +60,117 @@ final class MusicSourcesViewController: MusicPageViewController,
         table.tableFooterView = more
         navigationItem.rightBarButtonItem = UIBarButtonItem(
             barButtonSystemItem: .refresh, target: self, action: #selector(refresh))
-        observe(model) { [weak self] in
-            guard let self else { return }
-            if !self.selecting, !self.admitted { self.dismiss(animated: true) }
-        }
+        observe(model.playbackChanges) { [weak self] in self?.reconcileInspection() }
+        observe(model.accessChanges) { [weak self] in self?.reconcileInspection() }
+        render()
     }
 
     override func pageDidBecomeActive() {
+        if admitted { startInspection() }
+        else { reconcileInspection() }
+    }
+    override func pageDidBecomeVisible() { renderState() }
+    override func pageDidFinishAppearing() {
+        if readError != nil { renderState() }
+    }
+
+    private func startInspection() {
         guard admitted, session == nil, !inspecting else { return }
         let own = UUID()
-        request = own
-        runPageTask { [weak self] in
-            guard let self else { return }
-            guard !Task.isCancelled, self.request == own, self.admitted,
-                  self.session == nil, !self.inspecting else { return }
-            self.inspecting = true
+        request = own; readError = nil; shownReadError = nil; inspecting = true
+        renderState()
+        let model = model, tracks = tracks, refreshTrack = refreshTrack
+        runPageTask { [weak self, model, tracks, refreshTrack] in
             defer {
-                self.inspecting = false
-                if self.isPageActive, self.request != own, self.session == nil { self.pageDidBecomeActive() }
+                if let self, self.request == own {
+                    self.inspecting = false
+                    self.renderState()
+                    self.reconcileInspection()
+                }
             }
+            guard !Task.isCancelled, self?.request == own, self?.admitted == true else { return }
             do {
-                guard let target = self.model.current.flatMap({ current in
-                    self.tracks.contains { MusicSearchFusion.sameRecording($0, current.track) } ? current.track : nil
-                }) ?? self.tracks.first else { return }
+                guard let target = model.current.flatMap({ current in
+                    tracks.contains { MusicSearchFusion.sameRecording($0, current.track) } ? current.track : nil
+                }) ?? tracks.first else { return }
                 let track: MusicRemoteTrack
-                if self.canSelect { track = target }
-                else { track = try await self.refreshTrack(target) }
-                guard !Task.isCancelled, self.request == own, self.admitted else { return }
-                let value = try await self.model.inspectSources(for: track.ref)
-                guard !Task.isCancelled, self.request == own, self.admitted else {
+                if self?.canSelect == true { track = target }
+                else { track = try await refreshTrack(target) }
+                guard !Task.isCancelled, self?.request == own, self?.admitted == true else { return }
+                let value = try await model.inspectSources(for: track.ref)
+                guard !Task.isCancelled, self?.request == own, self?.admitted == true else {
                     await value.close()
                     return
                 }
-                self.session = value
+                self?.session = value
                 let updates = await value.updates()
-                self.loadMore(refresh: false)
+                self?.loadMore(refresh: false)
                 do {
                     for try await snapshot in updates {
-                        guard !Task.isCancelled, self.request == own, self.admitted else { break }
+                        guard !Task.isCancelled, let self, self.request == own else { break }
+                        if self.selecting, self.model.current?.id == self.fence.occurrence,
+                           self.model.accountAccessGeneration == self.fence.access, self.originIsCurrent() {
+                            if snapshot.sources.isEmpty { self.snapshot = snapshot; self.render() }
+                            continue
+                        }
+                        guard self.admitted else {
+                            self.snapshot = nil
+                            self.render()
+                            self.dismiss(animated: true)
+                            break
+                        }
                         self.snapshot = snapshot
                         self.render()
                     }
                 } catch {
-                    if !Task.isCancelled, self.request == own, self.admitted {
-                        self.showError(MusicServiceError.sanitized(error).localizedDescription)
+                    if !Task.isCancelled, let self, self.request == own, self.admitted {
+                        self.readError = MusicServiceError.sanitized(error).localizedDescription
+                        self.renderState()
                     }
                 }
-                await value.close()
-                if self.request == own { self.session = nil }
+                if self?.request == own {
+                    await value.close()
+                    if self?.request == own { self?.session = nil }
+                }
             } catch {
-                if !Task.isCancelled, self.request == own, self.admitted {
-                    self.showError(MusicServiceError.sanitized(error).localizedDescription)
+                if !Task.isCancelled, let self, self.request == own, self.admitted {
+                    self.readError = MusicServiceError.sanitized(error).localizedDescription
+                    self.renderState()
                 }
             }
         }
     }
 
     override func pageDidBecomeInactive() {
+        closeInspection()
+        snapshot = nil; rows = [:]
+    }
+
+    private func closeInspection() {
         request = UUID()
-        session = nil
+        if let session { Task { await session.close() } }
+        session = nil; inspecting = false
+    }
+
+    private func reconcileInspection() {
+        guard !selecting, !admitted else { return }
+        closeInspection()
+        snapshot = nil
+        render()
+        dismiss(animated: true)
     }
 
     override func applyTheme() {
         super.applyTheme()
-        if isViewLoaded { render() }
+        guard isViewLoaded, dataSource != nil else { return }
+        for path in table.indexPathsForVisibleRows ?? [] {
+            if let id = dataSource.itemIdentifier(for: path), let source = rows[id],
+               let cell = table.cellForRow(at: path) { configure(cell, source: source) }
+        }
+        renderState()
     }
 
-    func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        snapshot?.sources.count ?? 0
-    }
-
-    func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let source = snapshot!.sources[indexPath.row]
-        let cell = tableView.dequeueReusableCell(withIdentifier: "Source", for: indexPath)
+    private func configure(_ cell: UITableViewCell, source: MusicResolvedSource) {
         var content = cell.defaultContentConfiguration()
         content.text = source.title
         content.secondaryText = MusicQualityLabel.name(source.selection.quality)
@@ -131,12 +178,12 @@ final class MusicSourcesViewController: MusicPageViewController,
         content.secondaryTextProperties.color = UIColor(theme.muted)
         cell.contentConfiguration = content
         cell.backgroundColor = .clear
-        return cell
     }
 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        guard admitted, canSelect, !selecting, let session, let source = snapshot?.sources[indexPath.row] else { return }
+        guard admitted, canSelect, !selecting, let session,
+              let id = dataSource.itemIdentifier(for: indexPath), let source = rows[id] else { return }
         let own = request
         runPageTask { [weak self] in
             guard let self else { return }
@@ -174,16 +221,42 @@ final class MusicSourcesViewController: MusicPageViewController,
     }
 
     private func render() {
-        table.reloadData()
+        guard dataSource != nil else { return }
+        let previous = rows
+        let sources = snapshot?.sources ?? []
+        rows = Dictionary(uniqueKeysWithValues: sources.map { ($0.id, $0) })
+        var value = NSDiffableDataSourceSnapshot<Int, String>()
+        value.appendSections([0]); value.appendItems(sources.map(\.id))
+        let changed = value.itemIdentifiers.filter { previous[$0] != nil && previous[$0] != rows[$0] }
+        value.reconfigureItems(changed)
+        if dataSource.snapshot().itemIdentifiers != value.itemIdentifiers || !changed.isEmpty {
+            dataSource.apply(value, animatingDifferences: false)
+        }
+        renderState()
+    }
+
+    private func renderState() {
+        guard isViewLoaded else { return }
         more.isHidden = snapshot?.hasMore != true
+        more.isEnabled = admitted && !loading && !selecting
         more.tintColor = UIColor(theme.ink)
-        let status = snapshot?.isLoading == true ? "正在获取音源" :
+        let status = inspecting && snapshot == nil || snapshot?.isLoading == true ? "正在获取音源" :
             snapshot?.sources.isEmpty == true ? "暂无可用音源" : nil
         let label = UILabel()
         label.text = status
         label.textColor = UIColor(theme.muted)
         label.textAlignment = .center
         table.backgroundView = status == nil ? nil : label
+        guard canPresentPageAlert, admitted, let readError, shownReadError != readError else { return }
+        let own = request
+        let alert = UIAlertController(title: "错误", message: readError, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.addAction(UIAlertAction(title: "重试", style: .default) { [weak self] _ in
+            guard let self, self.request == own, self.admitted else { return }
+            self.refresh()
+        })
+        shownReadError = readError
+        present(alert, animated: true)
     }
 
     private func loadMore(refresh: Bool) {
@@ -193,7 +266,9 @@ final class MusicSourcesViewController: MusicPageViewController,
             guard let self else { return }
             guard !Task.isCancelled, self.request == own, self.admitted, !self.loading else { return }
             self.loading = true
-            defer { self.loading = false }
+            self.readError = nil; self.shownReadError = nil
+            self.renderState()
+            defer { self.loading = false; self.renderState() }
             do {
                 let value = try await session.loadMore(refresh: refresh)
                 guard !Task.isCancelled, self.request == own, self.admitted else { return }
@@ -201,12 +276,20 @@ final class MusicSourcesViewController: MusicPageViewController,
                 self.render()
             } catch {
                 if !Task.isCancelled, self.request == own, self.admitted {
-                    self.showError(MusicServiceError.sanitized(error).localizedDescription)
+                    self.readError = MusicServiceError.sanitized(error).localizedDescription
+                    self.renderState()
                 }
             }
         }
     }
 
-    @objc private func refresh() { loadMore(refresh: true) }
+    @objc private func refresh() {
+        if session == nil { startInspection() }
+        else { loadMore(refresh: true) }
+    }
+
+    isolated deinit {
+        if let session { Task { await session.close() } }
+    }
 }
 #endif

@@ -112,7 +112,7 @@ private actor ChannelFeedService: MusicPublicBrowsing {
             let service = ChannelFeedService(), model = await loaded(service)
             let intent = try XCTUnwrap(model.makeActionIntent())
             if action == 0 { await model.refresh() }
-            else if action == 1 { model.disappear(preservingContent: true); model.appear() }
+            else if action == 1 { model.disappear(); model.appear() }
             else { model.setAccess(available: true, generation: UUID()) }
             let before = await service.calls.count
             await model.selectSectionFilter("a|4", sectionID: "feed", intent: intent)

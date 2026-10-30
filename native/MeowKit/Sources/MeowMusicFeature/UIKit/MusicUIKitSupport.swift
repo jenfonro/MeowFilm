@@ -14,73 +14,27 @@ public class MusicPageViewController: PageViewController {
 }
 
 @MainActor
-final class MusicArtworkView: UIImageView {
+enum MusicArtworkImages {
     private static let cache: NSCache<NSURL, UIImage> = {
         let value = NSCache<NSURL, UIImage>()
         value.countLimit = 128
         value.totalCostLimit = 24 * 1_024 * 1_024
         return value
     }()
-    var onImage: ((UIImage, Data?) -> Void)?
-    var onFailure: ((URL) -> Void)?
-    private var task: Task<Void, Never>?
-    private var representedURL: URL?
-    private var completed = false
 
-    init(size: CGFloat = 48) {
-        super.init(frame: .zero)
-        contentMode = .scaleAspectFill
-        clipsToBounds = true
-        layer.cornerRadius = max(8, size * 0.14)
-        backgroundColor = UIColor.white.withAlphaComponent(0.18)
-        if size > 0 {
-            NSLayoutConstraint.activate([
-                widthAnchor.constraint(equalToConstant: size),
-                heightAnchor.constraint(equalToConstant: size),
-            ])
-        }
+    static func cached(_ url: URL) -> UIImage? { cache.object(forKey: url as NSURL) }
+
+    static func read(_ url: URL, cachedData: Data? = nil) async throws -> (UIImage, Data?) {
+        if cachedData == nil, let image = cached(url) { return (image, nil) }
+        let (image, data) = try await readBytes(url, cachedData: cachedData)
+        try Task.checkCancellation()
+        let cost = (image.cgImage?.width ?? 0) * (image.cgImage?.height ?? 0) * 4
+        cache.setObject(image, forKey: url as NSURL, cost: cost)
+        return (image, data)
     }
 
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    func load(_ url: URL?, cachedData: Data? = nil) {
-        if representedURL == url, task != nil || completed { return }
-        task?.cancel()
-        task = nil
-        representedURL = url
-        completed = false
-        image = nil
-        guard let url else { completed = true; return }
-        if cachedData == nil, let cached = Self.cache.object(forKey: url as NSURL) {
-            image = cached
-            completed = true
-            onImage?(cached, nil)
-            return
-        }
-        task = Task { [weak self] in
-            do {
-                let (value, data) = try await Self.read(url, cachedData: cachedData)
-                try Task.checkCancellation()
-                guard self?.representedURL == url else { return }
-                let cost = (value.cgImage?.width ?? 0) * (value.cgImage?.height ?? 0) * 4
-                Self.cache.setObject(value, forKey: url as NSURL, cost: cost)
-                self?.image = value
-                self?.task = nil
-                self?.completed = true
-                self?.onImage?(value, data)
-            } catch {
-                guard !Task.isCancelled, self?.representedURL == url else { return }
-                self?.task = nil
-                self?.completed = true
-                self?.onFailure?(url)
-            }
-        }
-    }
-
-    /// Network bytes and thumbnail decoding run on the generic executor, not
-    /// the UI actor. Cancellation follows this one physical read.
-    nonisolated private static func read(_ url: URL, cachedData: Data?) async throws -> (UIImage, Data) {
+    /// Cancellation follows the physical read; decoding stays off the UI actor.
+    nonisolated private static func readBytes(_ url: URL, cachedData: Data?) async throws -> (UIImage, Data) {
         let maximum = 4 * 1_024 * 1_024
         if let cachedData, cachedData.count <= maximum, let value = decode(cachedData) {
             try Task.checkCancellation()
@@ -116,6 +70,64 @@ final class MusicArtworkView: UIImageView {
               ] as CFDictionary) else { return nil }
         return UIImage(cgImage: image)
     }
+}
+
+@MainActor
+final class MusicArtworkView: UIImageView {
+    var onImage: ((UIImage, Data?) -> Void)?
+    var onFailure: ((URL) -> Void)?
+    private var task: Task<Void, Never>?
+    private var representedURL: URL?
+    private var completed = false
+
+    init(size: CGFloat = 48) {
+        super.init(frame: .zero)
+        contentMode = .scaleAspectFill
+        clipsToBounds = true
+        layer.cornerRadius = max(8, size * 0.14)
+        backgroundColor = UIColor.white.withAlphaComponent(0.18)
+        if size > 0 {
+            NSLayoutConstraint.activate([
+                widthAnchor.constraint(equalToConstant: size),
+                heightAnchor.constraint(equalToConstant: size),
+            ])
+        }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func load(_ url: URL?, cachedData: Data? = nil) {
+        if representedURL == url, task != nil || completed { return }
+        task?.cancel()
+        task = nil
+        representedURL = url
+        completed = false
+        image = nil
+        guard let url else { completed = true; return }
+        if cachedData == nil, let cached = MusicArtworkImages.cached(url) {
+            image = cached
+            completed = true
+            onImage?(cached, nil)
+            return
+        }
+        task = Task { [weak self] in
+            do {
+                let (value, data) = try await MusicArtworkImages.read(url, cachedData: cachedData)
+                try Task.checkCancellation()
+                guard self?.representedURL == url else { return }
+                self?.image = value
+                self?.task = nil
+                self?.completed = true
+                self?.onImage?(value, data)
+            } catch {
+                guard !Task.isCancelled, self?.representedURL == url else { return }
+                self?.task = nil
+                self?.completed = true
+                self?.onFailure?(url)
+            }
+        }
+    }
 
     deinit { task?.cancel() }
 }
@@ -123,6 +135,7 @@ final class MusicArtworkView: UIImageView {
 @MainActor
 final class MusicTrackCell: UITableViewCell {
     static let reuseIdentifier = "MusicTrackCell"
+    private(set) var representedReference: MusicReference?
     private let artwork = MusicArtworkView()
     private let titleLabel = UILabel()
     private let subtitleLabel = UILabel()
@@ -163,6 +176,7 @@ final class MusicTrackCell: UITableViewCell {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func configure(track: MusicRemoteTrack, active: Bool, theme: PageTheme, index: Int? = nil) {
+        representedReference = track.ref
         artwork.load(track.artwork)
         titleLabel.text = index.map { "\($0 + 1). \(track.title)" } ?? track.title
         subtitleLabel.text = [track.artist, track.album].filter { !$0.isEmpty }.joined(separator: " · ")
