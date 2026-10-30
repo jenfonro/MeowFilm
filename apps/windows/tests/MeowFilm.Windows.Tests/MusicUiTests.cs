@@ -225,12 +225,76 @@ public static partial class MusicUiTests
             True((await store.ReadAsync("music.library.v1")).Fingerprint.Exists, "native CAS persisted");
             Equal(0, runtime.DisposeCalls);
         });
+        yield return Case("local playlist creation uses the sidebar action and an in-view modal", async () =>
+        {
+            await using var f = await Fixture.Create();
+            var view = (MusicView)f.Module.View;
+            var favorite = f.Module.Navigation.Single(item => item.Route == "favorites");
+            var action = favorite.GroupAction;
+            True(action is not null && action.CanExecute(null), "local collection group exposes creation");
+            var header = ((IDesktopHeaderSource)view).Header;
+            Equal(0, header.HeaderActions.Count);
+            True(!Visuals(view).OfType<ComboBox>().Any(box =>
+                AutomationProperties.GetName(box) == "指定歌曲录音"), "collection page does not expose recording identity");
+
+            action!.Execute(null);
+            var overlay = (Grid)view.FindName("PlaylistDialogOverlay");
+            var panel = (Border)view.FindName("PlaylistDialogPanel");
+            var input = (TextBox)view.FindName("PlaylistNameInput");
+            var create = (Button)view.FindName("CreatePlaylistButton");
+            Equal(Visibility.Visible, overlay.Visibility);
+            True(!((FrameworkElement)view.FindName("PageContent")).IsHitTestVisible,
+                "modal blocks the underlying page");
+            True(!create.IsEnabled && input.MaxLength == 200, "empty local name is not submitted");
+            input.Text = "恢复失败后创建";
+            Equal("7 / 200", ((TextBlock)view.FindName("PlaylistNameCount")).Text);
+            True(create.IsEnabled, "valid local name enables creation");
+            Render(view, 900, 650);
+            Equal(420d, panel.ActualWidth);
+            True(Math.Abs(panel.TranslatePoint(new Point(panel.ActualWidth / 2, panel.ActualHeight / 2), view).X -
+                view.ActualWidth / 2) < 1, "dialog is centered inside the existing view");
+
+            f.Calls.FailNext("music.library.create", "STORAGE_UNAVAILABLE");
+            Click(create);
+            await Until(() => overlay.Visibility == Visibility.Visible && !f.Module.Busy && create.IsEnabled);
+            Equal(1, f.Module.Playlists.Count);
+            Equal("操作失败，请重试", f.Module.Status);
+
+            Click(create);
+            await Until(() => overlay.Visibility == Visibility.Collapsed && !f.Module.Busy &&
+                f.Module.Playlists.Any(item => item.Name == "恢复失败后创建"));
+            Equal("恢复失败后创建", f.Module.Heading);
+            header = ((IDesktopHeaderSource)view).Header;
+            True(header.HeaderActions.Select(item => item.Id).SequenceEqual(
+                new[] { "music.playlist.rename", "music.playlist.delete" }), "playlist header keeps only detail actions");
+            Equal(18d, ((Border)view.FindName("DetailArtworkFrame")).CornerRadius.TopLeft);
+            var playAll = (Button)view.FindName("PlayAllButton");
+            True(playAll.BorderBrush is not null && playAll.Background is SolidColorBrush { Color.A: 0 },
+                "play-all uses the theme-aware outlined treatment");
+
+            favorite.GroupAction!.Execute(null);
+            input.Text = "取消创建";
+            var escape = RaiseKey(overlay, Key.Escape);
+            True(escape.Handled && overlay.Visibility == Visibility.Collapsed, "escape closes the in-view modal");
+            True(!f.Module.Playlists.Any(item => item.Name == "取消创建"), "cancellation does not create");
+
+            await f.PlayableCollection();
+            True(playAll.IsEnabled, "play-all enables for a populated local playlist");
+            Equal(((SolidColorBrush)view.FindResource("MeowFilm.Brush.Accent")).Color,
+                ((SolidColorBrush)playAll.BorderBrush!).Color);
+            DesktopTheme.SetIsHighContrast(view, true);
+            view.UpdateLayout();
+            Equal(SystemColors.WindowTextColor, ((SolidColorBrush)playAll.BorderBrush!).Color);
+            Equal(SystemColors.WindowTextColor, ((SolidColorBrush)playAll.Foreground).Color);
+            DesktopTheme.SetIsHighContrast(view, false);
+        });
         yield return Case("real library CRUD, file grant isolation and cancellation", async () =>
         {
             await using var f = await Fixture.Create(persistent: true);
             Equal(1, f.Module.Playlists.Count); Equal("我的收藏", f.Module.Heading);
-            True(((IDesktopHeaderSource)f.Module.View).Header.HeaderActions
-                .Any(action => action.Id == "music.playlist.create"), "creation belongs to the actual collection page");
+            Equal(0, ((IDesktopHeaderSource)f.Module.View).Header.HeaderActions.Count);
+            True(f.Module.Navigation.Single(item => item.Route == "favorites").GroupAction is not null,
+                "creation belongs to the local sidebar group");
             await f.Module.CreatePlaylistAsync("本机测试歌单");
             var created = f.Module.Playlists.Single(item => item.Kind == "playlist");
             Equal(created.Name, f.Module.Heading);

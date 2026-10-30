@@ -304,7 +304,7 @@ public sealed partial class MusicCapability
         NavigationItem[] items = [
             new("catalog-home", "推荐", "\uE80F"),
             new("catalog-channels", "频道", "\uE8A9"),
-            new("favorites", "我的收藏", "\uEB51", "我的"),
+            new("favorites", "我的收藏", "\uEB51", "我的", GroupAction: page.CreatePlaylistAction),
             ..Playlists.Where(item => item.Kind == "playlist").Select(item =>
                 new NavigationItem("playlist/" + item.Id, item.Name, "\uE8D6", "我的")),
             // Declared routes remain reachable from content/settings and public-page handoff.

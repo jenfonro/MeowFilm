@@ -150,7 +150,29 @@
                         <GroupStyle>
                             <GroupStyle.HeaderTemplate>
                                 <DataTemplate>
-                                    <StackPanel><Border Height="1" Background="{DynamicResource MeowFilm.Brush.Border}" Margin="8,0,8,0"/><TextBlock Text="{Binding Name}" Style="{StaticResource MeowFilm.NavigationGroup}" /></StackPanel>
+                                    <StackPanel>
+                                        <Border Height="1" Background="{DynamicResource MeowFilm.Brush.Border}" Margin="8,0,8,0"/>
+                                        <DockPanel Margin="12,20,8,8">
+                                            <Button DockPanel.Dock="Right" Content="&#xE710;"
+                                                    Command="{Binding Items[0].GroupAction}"
+                                                    AutomationProperties.Name="{Binding Items[0].GroupAction.AutomationName}"
+                                                    ToolTip="{Binding Items[0].GroupAction.Label}"
+                                                    Width="28" Height="28" MinHeight="28" Padding="0"
+                                                    FontFamily="{DynamicResource MeowFilm.Font.Icons}" FontSize="14">
+                                                <Button.Style>
+                                                    <Style TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding Items[0].GroupAction}" Value="{x:Null}">
+                                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Button.Style>
+                                            </Button>
+                                            <TextBlock Text="{Binding Name}" Style="{StaticResource MeowFilm.NavigationGroup}" Margin="0"
+                                                       VerticalAlignment="Center"/>
+                                        </DockPanel>
+                                    </StackPanel>
                                 </DataTemplate>
                             </GroupStyle.HeaderTemplate>
                         </GroupStyle>
