@@ -39,12 +39,8 @@ export class ScriptHostError extends Error {
 }
 
 export const fault = (code) => new ScriptHostError(code);
-const foreignErrors = new WeakMap();
-export function markForeignError(error, code) {
-  foreignErrors.set(error, fault(code).code);
-}
 export const safeError = (error, fallback = 'SCRIPT_EXCEPTION') =>
-  error instanceof ScriptHostError ? error : fault(foreignErrors.get(error) ?? fallback);
+  error instanceof ScriptHostError ? error : fault(fallback);
 export function requireValue(condition, code = 'INVALID_ARGUMENT') {
   if (!condition) throw fault(code);
 }

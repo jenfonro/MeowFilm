@@ -41,7 +41,7 @@ public sealed partial class MusicLibraryOwner
             LJ.Fields(doc, "version entries", "version entries");
             LJ.Require(LJ.I(doc["version"]) == 1, "CORRUPT_STORAGE");
             var entries = LJ.Array(doc["entries"]);
-            LJ.Require(entries.Count <= CurrentAreas.Length + 16 * (NativeMusicSong.Platforms.Length + 1), "LIMIT");
+            LJ.Require(entries.Count <= CurrentAreas.Length + 32 * MaximumScriptSites, "LIMIT");
             var keys = new HashSet<string>(StringComparer.Ordinal);
             var scriptKeys = new HashSet<string>(StringComparer.Ordinal);
             var scriptEntries = new List<(string Installation, string Site)>();
@@ -88,6 +88,8 @@ public sealed partial class MusicLibraryOwner
             }
             foreach (var script in scriptEntries)
                 LJ.Require(installations.Contains(script.Installation), "CORRUPT_STORAGE");
+            foreach (string installation in scriptEntries.Select(script => script.Installation).Distinct(StringComparer.Ordinal))
+                _ = ScriptSites(doc, installation);
             if (HasValue(doc, "online-settings"))
             {
                 var settings = LJ.Object(Value(doc, "online-settings"), "CORRUPT_STORAGE");

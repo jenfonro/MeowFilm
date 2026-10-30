@@ -81,13 +81,13 @@ native-local-lyrics
 playback-settings
 ```
 
-脚本私有 area 使用当前安装实例和站点构成的精确 key；不存在实例、未知站点或重复 key 均拒绝。
+脚本私有 area 使用当前安装实例和站点构成的精确 key；每个实例最多 32 个有界站点标识，不存在实例、非法标识或重复 key 均拒绝。
 
-`lx-installations` 当前格式为 schema 2：
+`lx-installations` 唯一当前格式为 schema 3：
 
 ```json
 {
-  "schema": 2,
+  "schema": 3,
   "revision": 0,
   "installations": []
 }
@@ -95,9 +95,10 @@ playback-settings
 
 - 最多 32 个安装实例。
 - 每个 `current`／`previous` 只包含 `source`、`version`、`permissions`。
-- 单脚本最多 512 KiB；单实例最多 128 个 canonical 公网 HTTP(S) origin。
+- `permissions` 仅含 `storage`，值为不重复的 `read`／`write` 数组。
+- 单脚本最多 512 KiB，全部源元数据最多 3 MiB。
 - 禁用或删除当前播放目标时，在同一文档 CAS 中把 `online-settings.target` 置空并推进其 revision。
-- 不兼容的源记录明确失败。
+- 读取不写入文档；不符合当前格式的源记录明确失败，不迁移、转换、删除或回退。
 
 ## 曲库当前格式
 

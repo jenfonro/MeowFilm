@@ -1,6 +1,6 @@
 {
   "name": "@meowfilm/script-host",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "license": "UNLICENSED",
@@ -17,5 +17,9 @@
   "scripts": {
     "test": "node --test test/*.test.js",
     "check": "node scripts/check.mjs"
+  },
+  "dependencies": {
+    "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
+    "quickjs-emscripten-core": "0.32.0"
   }
 }

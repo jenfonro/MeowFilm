@@ -11,6 +11,7 @@ export class ResourceScope {
     this.cleanups = new Set();
     this.finished = deferred();
     this.reason = undefined;
+    this.deadline = timeoutMs > 0 ? Date.now() + timeoutMs : Infinity;
     if (parentSignal) {
       const abort = () => this.close(parentSignal.reason?.code
         ? fault(parentSignal.reason.code) : fault('CANCELLED'));
@@ -27,6 +28,7 @@ export class ResourceScope {
   }
 
   assertOpen() {
+    if (!this.signal.aborted && Date.now() >= this.deadline) this.close(fault('TIMEOUT'));
     if (this.signal.aborted) throw this.reason;
   }
 

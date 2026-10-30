@@ -10,7 +10,7 @@
 | `SelectedScriptSnapshot` | `.js` | 512 KiB | 原始字节、SHA-256、文件名 |
 | `SelectedLyricSnapshot` | `.lrc`、`.qrc`、`.yrc`、`.txt` | 256 KiB | 严格解码文本、SHA-256、文件名 |
 
-JSON 与脚本入口只创建字节快照；脚本 owner 随后执行严格无 BOM UTF-8、头部元数据、网络 origin、已审查内容哈希和 LX 安装事务校验。歌词接受 UTF-8，或带 BOM 的 UTF-8／UTF-16；最多 65536 个字符并拒绝非法控制字符。
+JSON 与脚本入口只创建字节快照；脚本 owner 随后执行严格无 BOM UTF-8、头部元数据、源码字节完整性和 LX 安装事务校验，不提取域名授权名单或按源码哈希补网络 origin。歌词接受 UTF-8，或带 BOM 的 UTF-8／UTF-16；最多 65536 个字符并拒绝非法控制字符。
 
 ## 路径与文件边界
 

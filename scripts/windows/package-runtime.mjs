@@ -99,7 +99,7 @@ function relocate(source, imports, dynamicImports = new Map()) {
 /**
  * Offline Windows wrapper. The shared packager alone resolves dependencies,
  * retains licenses, validates the lock and creates a NEW output directory.
- * This wrapper adds the selected platform entry and explicit script helpers.
+ * This wrapper adds only the platform bootstrap and thin entry.
  * Native-owned domains never ship their old ordinary JS business closure.
  * It never installs/downloads Node, copies node.exe or imports app code.
  */
@@ -167,20 +167,13 @@ export async function packageWindowsRuntime({
     save();
     const occupied = audit();
     const allowedSources = new Set([
-      'bootstrap.mjs', 'modules/music-script.mjs', 'entries/aggregate.mjs',
+      'bootstrap.mjs', 'entries/aggregate.mjs',
     ]);
     const sourceDirectory = checkedPath(root, WINDOWS_SOURCE);
     const sourceTree = inventory(sourceDirectory);
     check(sourceTree.paths.every(path => allowedSources.has(path)) &&
-      [...sourceTree.occupied.values()].every(item => !item.directory || ['entries', 'modules'].includes(item.path)),
+      [...sourceTree.occupied.values()].every(item => !item.directory || item.path === 'entries'),
     'WINDOWS_CLOSURE', 'Unexpected Windows runtime source; refusing to silently omit it');
-    const selectedSources = new Set(['bootstrap.mjs', 'entries/aggregate.mjs', 'modules/music-script.mjs']);
-    manifest.omittedWindowsSources = sourceTree.paths
-      .filter(path => !selectedSources.has(path))
-      .map(path => ({
-        path: `${WINDOWS_SOURCE}/${path}`,
-        reason: path.startsWith('modules/') ? 'unselected-domain-helper' : 'unselected-product-entry',
-      }));
     function appendFile(path, bytes) {
       safeRelative(path);
       assertOutput();
@@ -216,12 +209,12 @@ export async function packageWindowsRuntime({
       ['@meowfilm/runtime-bridge/descriptor', '@meowfilm/runtime-bridge/descriptor'],
       ['../../runtime/bootstrap.mjs', '../bootstrap.mjs'],
     ]);
-    const entryImports = new Map([['../bootstrap.mjs', '../bootstrap.mjs']]);
-    entryImports.set('../modules/music-script.mjs', '../modules/music-script.mjs');
+    const entryImports = new Map([
+      ['../bootstrap.mjs', '../bootstrap.mjs'],
+      ['../../../runtime/modules/music-script.mjs', '../../modules/music-script.mjs'],
+    ]);
     for (const [relative, imports, dynamicImports = new Map()] of [
       ['bootstrap.mjs', bootstrapImports], ['entries/aggregate.mjs', entryImports],
-      ['modules/music-script.mjs',
-        new Map([['node:crypto', 'node:crypto'], ['@meowfilm/script-host', '@meowfilm/script-host']])],
     ]) {
       const source = `${WINDOWS_SOURCE}/${relative}`, path = `${WINDOWS_OUTPUT}/${relative}`;
       const input = readStable(root, source);

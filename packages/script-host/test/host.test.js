@@ -15,15 +15,15 @@ function hostFor(t, options) {
   return host;
 }
 
-test('host validates options and local-service permissions', async t => {
+test('host validates options and storage permissions', async t => {
   const host = hostFor(t);
   assert.throws(() => createScriptHost({ unknownOption: true }), { code: 'INVALID_ARGUMENT' });
   assert.throws(() => createScriptHost({ limits: { unknownLimit: 1 } }), { code: 'INVALID_ARGUMENT' });
   assert.throws(() => host.install({ installationId: 'denied', source: lxScript(),
-    permissions: { localServices: true } }), { code: 'PERMISSION_DENIED' });
+    permissions: { unsupported: true } }), { code: 'INVALID_ARGUMENT' });
   assert.equal(host.list().length, 0);
   const value = await host.install({ installationId: 'a', source: lxScript(),
-    permissions: { localServices: false }, enabled: true });
+    permissions: {}, enabled: true });
   assert.equal(value.state, 'ready');
   assert.equal((await host.invoke(target())).action, 'musicUrl');
 });
@@ -70,18 +70,20 @@ test('same source, different configurations and same-named sites never select an
   await assert.rejects(host.invoke({ installationId: 'a', operation: 'musicUrl' }), { code: 'INVALID_ARGUMENT' });
 });
 
-test('capabilities intersect declarations; search and invented qualities are not granted', async t => {
+test('declared extension actions and qualities remain exact without manufactured capabilities', async t => {
   const host = hostFor(t);
   const value = await host.install({ installationId: 'a', enabled: true,
     source: lxScript({ sources: {
-      kw: { type: 'music', actions: ['search', 'musicUrl', 'musicUrl', 1], qualitys: ['hires', '320k', '320k', {}] },
+      kw: { type: 'music', actions: ['search', 'musicUrl', 'musicUrl'], qualitys: ['hires', '320k', '320k'] },
       imaginary: { type: 'music', actions: ['search'], qualitys: ['master'] },
     } }) });
   assert.deepEqual(value.capabilities, {
-    kw: { name: 'kw', type: 'music', actions: ['musicUrl'], qualitys: ['320k'] },
+    kw: { name: 'kw', type: 'music', actions: ['search', 'musicUrl'], qualitys: ['hires', '320k'] },
+    imaginary: { name: 'imaginary', type: 'music', actions: ['search'], qualitys: ['master'] },
   });
-  await assert.rejects(host.invoke(target('a', 'kw', {}, { operation: 'search' })), { code: 'CAPABILITY_UNAVAILABLE' });
-  await assert.rejects(host.invoke(target('a', 'kw', {}, { payload: { quality: 'hires' } })), { code: 'CAPABILITY_UNAVAILABLE' });
+  assert.equal((await host.invoke(target('a', 'kw', {}, { operation: 'search', payload: { keyword: 'test' } }))).info.keyword, 'test');
+  await assert.rejects(host.invoke(target('a', 'kw', {}, { operation: 'missing' })), { code: 'CAPABILITY_UNAVAILABLE' });
+  await assert.rejects(host.invoke(target('a', 'kw', {}, { payload: { quality: 'undeclared' } })), { code: 'CAPABILITY_UNAVAILABLE' });
   await assert.rejects(host.invoke(target('a', 'imaginary')), { code: 'CAPABILITY_UNAVAILABLE' });
   assert.equal((await host.invoke(target())).source, 'kw');
 });
@@ -153,36 +155,30 @@ test('timer ownership clears request timers and intervals on cancel, timeout, an
   assert.equal(host.stats().timers, 0);
 });
 
-test('network denied by default; exact origin permission precedes injected I/O', async t => {
+test('injected network accepts dynamically constructed origins without an origin grant', async t => {
   let calls = 0;
   const host = hostFor(t, { network: async () => { calls++; return { statusCode: 200, body: 'ok' }; } });
   await host.install({ installationId: 'a', enabled: true, source: lxScript({
-    handler: `async () => new Promise(resolve => lx.request('https://fixture.invalid/private',{},
-      e=>resolve({code:e.code,name:e.name})))`,
+    handler: `async () => new Promise((resolve,reject) => lx.request('https://' + 'fixture.invalid/private',{},
+      (e,r,b)=>e?reject(e):resolve(b)))`,
   }) });
-  assert.equal((await host.invoke(target())).code, 'PERMISSION_DENIED');
-  assert.equal(calls, 0);
-  await host.update('a', { permissions: { networkOrigins: ['https://fixture.invalid'] },
+  assert.equal(await host.invoke(target()), 'ok');
+  assert.equal(calls, 1);
+  await host.update('a', { permissions: {},
     source: lxScript({ handler: `async () => new Promise((resolve,reject)=>
       lx.request('https://fixture.invalid/public',{},(e,r,b)=>e?reject(e):resolve(b)))` }) });
   assert.equal(await host.invoke(target()), 'ok');
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
 });
 
-test('network permissions reject explicit local and private origins before installation', t => {
-  const host = hostFor(t);
-  for (const [installationId, origin] of [
-    ['loopback', 'http://127.0.0.1:8731'],
-    ['private', 'http://10.0.0.8'],
-    ['localhost', 'http://localhost:3000'],
-    ['local-name', 'http://service.local'],
-  ]) {
-    assert.throws(() => host.install({ installationId, source: lxScript(),
-      permissions: { networkOrigins: [origin] } }), { code: 'PERMISSION_DENIED' });
-  }
-  const imported = host.install({ installationId: 'idn', source: lxScript(),
-    permissions: { networkOrigins: ['https://88.lxmusic.xn--fiqs8s'] } });
-  return assert.doesNotReject(imported);
+test('non-HTTP input is rejected before injected network access', async t => {
+  let calls = 0;
+  const host = hostFor(t, { network: () => { calls++; } });
+  await host.install({ installationId: 'a', enabled: true,
+    source: lxScript({ handler: `async () => new Promise(resolve =>
+      lx.request('file:///private',{},error=>resolve(error.code)))` }) });
+  assert.equal(await host.invoke(target()), 'INVALID_ARGUMENT');
+  assert.equal(calls, 0);
 });
 
 test('cancel propagates AbortSignal; late network completion cannot call old callbacks', async t => {
@@ -190,7 +186,7 @@ test('cancel propagates AbortSignal; late network completion cannot call old cal
   let outbound;
   const host = hostFor(t, { network: request => { outbound = request; started.resolve(); return response.promise; } });
   await host.install({ installationId: 'a', enabled: true,
-    permissions: { networkOrigins: ['https://fixture.invalid'] },
+    permissions: {},
     source: lxScript({ setup: 'let callbacks = 0;', handler: `async ({info}) => {
       if (info.musicInfo.probe) return callbacks;
       return new Promise((resolve,reject)=>lx.request('https://fixture.invalid/x',{},
@@ -213,7 +209,7 @@ test('LX abort closure is idempotent and invokes one AbortError callback', async
   let transportStarted = 0;
   const host = hostFor(t, { network: async () => { transportStarted++; return { statusCode: 200, body: 'late' }; } });
   await host.install({ installationId: 'a', enabled: true,
-    permissions: { networkOrigins: ['https://fixture.invalid'] },
+    permissions: {},
     source: lxScript({ handler: `async () => new Promise(resolve => {
       let count = 0;
       const abort = lx.request('https://fixture.invalid/x',{},e => { count++; resolve({count,code:e.code,name:e.name}); });
@@ -226,7 +222,7 @@ test('LX abort closure is idempotent and invokes one AbortError callback', async
 test('per-request network deadline reports TIMEOUT without killing the session', async t => {
   const host = hostFor(t, { network: () => new Promise(() => {}) });
   await host.install({ installationId: 'a', enabled: true,
-    permissions: { networkOrigins: ['https://fixture.invalid'] },
+    permissions: {},
     source: lxScript({ handler: `async () => new Promise(resolve =>
       lx.request('https://fixture.invalid/x',{timeout:15},e=>resolve(e.code)))` }) });
   assert.equal(await host.invoke(target()), 'TIMEOUT');
@@ -237,9 +233,9 @@ test('per-request network deadline reports TIMEOUT without killing the session',
 test('storage is denied unless granted, uses instance/site scope and survives configuration revision', async t => {
   const storage = memoryStorage();
   const host = hostFor(t, { storage: storage.adapter });
-  const source = lxScript({ handler: `async ({info}) => {
-    if (info.musicInfo.write) await meow.storage.set('value',meow.config.label);
-    return await meow.storage.get('value');
+  const source = lxScript({ handler: `async ({info}, {storage}) => {
+    if (info.musicInfo.write) await storage.set('value',meow.config.label);
+    return await storage.get('value');
   }` });
   await host.install({ installationId: 'a', enabled: true, source, config: { label: 'A' } });
   await assert.rejects(host.invoke(target()), { code: 'PERMISSION_DENIED' });
@@ -264,7 +260,7 @@ test('cancelled storage receives fencing signal and no completion reaches the sc
     if (!value.signal.aborted && value.isCurrent()) writes++;
   } } });
   await host.install({ installationId: 'a', enabled: true, permissions: { storage: ['write'] },
-    source: lxScript({ handler: `async () => { await meow.storage.set('key','synthetic'); return 'done'; }` }) });
+    source: lxScript({ handler: `async (_request, {storage}) => { await storage.set('key','synthetic'); return 'done'; }` }) });
   const controller = new AbortController();
   const rejected = assert.rejects(host.invoke(target(), { signal: controller.signal }), { code: 'CANCELLED' });
   await entered.promise;
@@ -304,7 +300,7 @@ test('successful update invalidates pending old response, but never invokes anot
   const entered = deferred(), late = deferred();
   const host = hostFor(t, { network: () => { entered.resolve(); return late.promise; } });
   await host.install({ installationId: 'a', enabled: true,
-    permissions: { networkOrigins: ['https://fixture.invalid'] },
+    permissions: {},
     source: lxScript({ handler: `async () => new Promise((resolve,reject)=>
       lx.request('https://fixture.invalid/x',{},(e,r,b)=>e?reject(e):resolve(b)))` }) });
   const rejected = assert.rejects(host.invoke(target()), { code: 'STALE_SESSION' });
@@ -379,7 +375,7 @@ test('closing during pending initialization aborts startup and cannot publish a 
   const started = deferred();
   const host = hostFor(t, { network: () => { started.resolve(); return new Promise(() => {}); } });
   const installing = host.install({ installationId: 'a', enabled: true,
-    permissions: { networkOrigins: ['https://fixture.invalid'] },
+    permissions: {},
     source: `lx.request('https://fixture.invalid/init',{},()=>{});` });
   const rejected = assert.rejects(installing, { code: 'STALE_SESSION' });
   await started.promise;
@@ -404,7 +400,7 @@ test('uncooperative adapter tasks stay visible after bounded close, then retire 
   const host = hostFor(t, { limits: { cleanupTimeoutMs: 10 },
     network: () => { entered.resolve(); return finish.promise; } });
   await host.install({ installationId: 'a', enabled: true,
-    permissions: { networkOrigins: ['https://fixture.invalid'] },
+    permissions: {},
     source: lxScript({ handler: `async () => new Promise((resolve,reject)=>
       lx.request('https://fixture.invalid/pending',{},(e,r,b)=>e?reject(e):resolve(b)))` }) });
   const rejected = assert.rejects(host.invoke(target()), { code: 'STALE_SESSION' });
@@ -447,8 +443,8 @@ test('simultaneous storage calls keep their original site after awaits', async t
     await release.promise;
   }, get(input) { return input.siteId; } } });
   await host.install({ installationId: 'a', enabled: true, permissions: { storage: ['read', 'write'] },
-    source: lxScript({ handler: `async () => {
-      await meow.storage.set('key','value'); return await meow.storage.get('key');
+    source: lxScript({ handler: `async (_request, {storage}) => {
+      await storage.set('key','value'); return await storage.get('key');
     }` }) });
   const a = host.invoke(target('a', 'kw'));
   const b = host.invoke(target('a', 'tx'));
@@ -463,7 +459,7 @@ test('trial startup cannot write persistent storage; failed trial leaves stable 
   const storage = memoryStorage();
   const host = hostFor(t, { storage: storage.adapter });
   await host.install({ installationId: 'a', enabled: true, permissions: { storage: ['read', 'write'] },
-    source: lxScript({ handler: "async () => { await meow.storage.set('key','stable'); return 'ok'; }" }) });
+    source: lxScript({ handler: "async (_request, {storage}) => { await storage.set('key','stable'); return 'ok'; }" }) });
   await host.invoke(target());
   const old = host.get('a');
   await assert.rejects(host.update('a', {

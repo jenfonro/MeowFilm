@@ -30,8 +30,17 @@ public static class MusicNativeScriptTests
         yield return new("Native LX: no global target fallback for mismatched recording or generation", BadTarget);
         yield return new("Native LX: shutdown drains owned calls and never disposes borrowed owners", Shutdown);
         yield return new("Native LX: candidate storage transaction cannot leak on failed trial", CandidateStorage);
-        yield return new("Native LX: current source and reviewed origin limits reject local access", Limits);
-        yield return new("Native LX: selected script inspection extracts current metadata and reviewed origins", Inspection);
+        yield return new("Native LX: candidate storage cannot persist an undeclared site", CandidateSite);
+        yield return new("Native LX: bounded installation count remains native and Node-free", Limits);
+        yield return new("Native LX: selected script inspection preserves metadata encoding and integrity", Inspection);
+        yield return new("Native LX: installation and update accept only explicit storage permissions", PermissionShape);
+        yield return new("Native LX: actual extension declarations survive without expanding standard music UI", Declarations);
+        yield return new("Native LX: declared names and arrays accept the full protocol bounds", DeclarationBounds);
+        yield return new("Native LX: extension-only source cannot manufacture playback actions", ExtensionOnly);
+        yield return new("Native LX: malformed or over-budget declarations retire the failed candidate", InvalidDeclarations);
+        yield return new("Native LX: suspended old grant cannot write while a replacement is loading", SuspendedGrant);
+        yield return new("Native LX: runtime recovery fences old grants until explicit source activation", RecoveredGrants);
+        yield return new("Native LX: current script response contract is required before activation", ScriptContract);
     }
     private static JsonElement J(object value) => JsonSerializer.SerializeToElement(value);
     private static JsonObject O(object value) => JsonNode.Parse(JsonSerializer.Serialize(value))!.AsObject();
@@ -47,8 +56,7 @@ public static class MusicNativeScriptTests
         Check(result.GetProperty("ok").ValueKind == JsonValueKind.False &&
             result.GetProperty("code").GetString() == expected, expected + ":" + result.GetRawText());
     }
-    private static object Permissions(bool write = true, string[]? origins = null) => new { networkOrigins = origins ?? [],
-        storage = write ? new[] { "read", "write" } : new[] { "read" } };
+    private static object Permissions(bool write = true) => new { storage = write ? new[] { "read", "write" } : new[] { "read" } };
     private static JsonObject Song(string id = "11") => MusicSongFixture.Online(
         "wy", id, "Test track", "Test artist", "", 120,
         native: JsonSerializer.SerializeToNode(new {
@@ -77,11 +85,11 @@ public static class MusicNativeScriptTests
         return token;
     }
     private static async Task<string> Install(Fixture f, bool enable = false, string source = "// synthetic LX",
-        bool write = true, string[]? origins = null)
+        bool write = true)
     {
         string token = await Upload(f, source);
         var installed = await Ok(f.Owner, "music.sources.install", new { token, name = "Synthetic source", version = "1",
-            permissions = Permissions(write, origins) });
+            permissions = Permissions(write) });
         string id = installed.GetProperty("item").GetProperty("installationId").GetString()!;
         if (enable) await Ok(f.Owner, "music.sources.enable", new { installationId = id });
         return id;
@@ -91,7 +99,9 @@ public static class MusicNativeScriptTests
     private static async Task Ordinary()
     {
         await using var f = new Fixture();
-        await Ok(f.Owner, "music.online.describe"); string id = await Install(f);
+        var description = await Ok(f.Owner, "music.online.describe");
+        Check(!description.GetProperty("trustedScriptsOnly").GetBoolean());
+        string id = await Install(f);
         await Ok(f.Owner, "music.sources.list");
         await Ok(f.Owner, "music.sources.detail", new { installationId = id });
         string token = await Upload(f, "// updated inert source");
@@ -161,8 +171,10 @@ public static class MusicNativeScriptTests
         var old = f.Runtime.Instances[id].DeepClone().AsObject(); string token = await Upload(f, "// next");
         await Ok(f.Owner, "music.sources.update", new { installationId = id, token,
             version = "2", permissions = Permissions() });
-        Check(!(await f.Runtime.Storage("set", old, "old", 1)).GetProperty("ok").GetBoolean());
+        Check((await f.Runtime.Storage("set", old, "old", 1)).GetProperty("code").GetString() == "STALE_SESSION");
+        var updated = f.Runtime.Instances[id].DeepClone().AsObject();
         await Ok(f.Owner, "music.sources.rollback", new { installationId = id });
+        Check((await f.Runtime.Storage("get", updated, "old")).GetProperty("code").GetString() == "STALE_SESSION");
         var detail = await Ok(f.Owner, "music.sources.detail", new { installationId = id });
         Check(detail.GetProperty("item").GetProperty("version").GetString() == "1");
         await Resolve(f, id);
@@ -173,7 +185,10 @@ public static class MusicNativeScriptTests
         var old = f.Runtime.Instances[id].DeepClone().AsObject();
         Check((await f.Runtime.Storage("set", old, "k", 1)).GetProperty("ok").GetBoolean());
         await Ok(f.Owner, "music.sources.disable", new { installationId = id });
-        Check(!(await f.Runtime.Storage("get", old, "k")).GetProperty("ok").GetBoolean());
+        Check((await f.Runtime.Storage("get", old, "k")).GetProperty("code").GetString() == "STALE_SESSION");
+        await Ok(f.Owner, "music.sources.enable", new { installationId = id });
+        Check((await f.Runtime.Storage("get", f.Runtime.Instances[id], "k")).GetProperty("value").GetInt32() == 1);
+        Check((await f.Runtime.Storage("set", old, "k", 2)).GetProperty("code").GetString() == "STALE_SESSION");
         await Ok(f.Owner, "music.sources.remove", new { installationId = id });
         var meta = await f.Library.ReadSourceMetadataAsync();
         var data = await f.Library.ReadSourceScriptDataAsync(id, meta.State.GetProperty("revision").GetInt64());
@@ -263,11 +278,18 @@ public static class MusicNativeScriptTests
     }
     private static async Task Shutdown()
     {
-        await using var f = new Fixture(); _ = await Install(f, true);
+        await using var f = new Fixture(); string id = await Install(f, true);
+        var old = f.Runtime.Instances[id].DeepClone().AsObject();
         await f.Owner.PrepareShutdownAsync();
         await Error(f.Owner, "music.sources.list", null, "CLOSED");
         Check(f.Runtime.Instances.Count == 0 && !f.Store.Disposed);
         Check((await f.Library.ExecuteAsync("music.library.list")).GetProperty("ok").GetBoolean());
+        await f.Owner.CancelShutdownPreparationAsync();
+        Check((await f.Runtime.Storage("get", old, "k")).GetProperty("code").GetString() == "STALE_SESSION");
+        Check(f.Runtime.Instances.Count == 0);
+        await Ok(f.Owner, "music.sources.enable", new { installationId = id });
+        Check((await f.Runtime.Storage("get", f.Runtime.Instances[id], "k")).GetProperty("ok").GetBoolean());
+        Check((await f.Runtime.Storage("get", old, "k")).GetProperty("code").GetString() == "STALE_SESSION");
     }
     private static async Task CandidateStorage()
     {
@@ -283,27 +305,20 @@ public static class MusicNativeScriptTests
         await Ok(f.Owner, "music.sources.enable", new { installationId = id });
         Check((await f.Runtime.Storage("get", f.Runtime.Instances[id], "candidate")).GetProperty("value").GetInt32() == 7);
     }
+    private static async Task CandidateSite()
+    {
+        await using var f = new Fixture(); string id = await Install(f);
+        f.Runtime.CandidateWrite = true; f.Runtime.CandidateSite = "undeclared";
+        await Error(f.Owner, "music.sources.enable", new { installationId = id }, "SCRIPT_PROTOCOL_ERROR");
+        var metadata = await f.Library.ReadSourceMetadataAsync();
+        Check(!(await f.Library.ReadSourceScriptDataAsync(id, metadata.State.GetProperty("revision").GetInt64())).Sites.EnumerateObject().Any());
+        Check((await f.Runtime.Storage("get", f.Runtime.LastCandidate!, "late", site: "undeclared")).GetProperty("code").GetString() == "STALE_SESSION");
+    }
     private static async Task Limits()
     {
         await using var f = new Fixture();
-        var origins = Enumerable.Range(0, 55).Select(index => $"https://source-{index}.example").ToArray();
-        string first = await Install(f, origins: origins);
-        var detail = await Ok(f.Owner, "music.sources.detail", new { installationId = first });
-        Check(detail.GetProperty("permissions").GetProperty("networkOrigins").GetArrayLength() == 55);
-
+        for (int index = 0; index < 32; index++) _ = await Install(f);
         string token = await Upload(f);
-        await Error(f.Owner, "music.sources.install", new { token, name = "too many", version = "1",
-            permissions = Permissions(origins: Enumerable.Range(0, 129)
-                .Select(index => $"https://overflow-{index}.example").ToArray()) }, "LIMIT");
-        await Ok(f.Owner, "music.transfer.cancel", new { token });
-
-        token = await Upload(f);
-        await Error(f.Owner, "music.sources.install", new { token, name = "local", version = "1",
-            permissions = Permissions(origins: ["http://127.0.0.1:8731"]) }, "INVALID_REQUEST");
-        await Ok(f.Owner, "music.transfer.cancel", new { token });
-
-        for (int index = 1; index < 32; index++) _ = await Install(f);
-        token = await Upload(f);
         await Error(f.Owner, "music.sources.install", new { token, name = "overflow", version = "1",
             permissions = Permissions() }, "LIMIT");
         await Ok(f.Owner, "music.transfer.cancel", new { token });
@@ -323,14 +338,16 @@ public static class MusicNativeScriptTests
         var inspected = MusicSourceScriptInspector.Inspect(bytes, "fallback.js",
             Convert.ToHexStringLower(SHA256.HashData(bytes)));
         Check(inspected.Name == "Inspector source" && inspected.Version == "2.3");
-        Check(inspected.NetworkOrigins.SequenceEqual(["https://music.example"]));
-        Check(MusicSourceScriptInspector.ReviewedExtraOrigins(
-            "c68c2ab7045b94769786b56cf7c6e614d82bc8f303bff68173bef9790583affc")
-            .Contains("https://wyapi.toubiec.cn"));
-        foreach (var local in new[] { "http://2130706433", "http://0x7f000001", "http://127.1",
-            "http://169.254.169.254", "http://100.64.0.1", "http://[::1]",
-            "http://[::ffff:127.0.0.1]", "http://[fc00::1]", "http://[fe80::1]" })
-            Check(!MusicSourceNetworkPolicy.TryFromUrl(local, out _), local);
+        byte[] manyUrls = Encoding.UTF8.GetBytes(source + string.Join('\n',
+            Enumerable.Range(0, 200).Select(index => $"// https://source-{index}.example/path")));
+        Check(MusicSourceScriptInspector.Inspect(manyUrls, "fallback.js",
+            Convert.ToHexStringLower(SHA256.HashData(manyUrls))) == inspected);
+        try
+        {
+            MusicSourceScriptInspector.Inspect(bytes, "changed.js", new string('0', 64));
+            throw new InvalidOperationException("Altered hash accepted");
+        }
+        catch (MusicOperationException error) { Check(error.Code == "SCRIPT_INTEGRITY"); }
         try
         {
             MusicSourceScriptInspector.Inspect([0xef, 0xbb, 0xbf, .. bytes], "bom.js",
@@ -339,6 +356,155 @@ public static class MusicNativeScriptTests
         }
         catch (MusicOperationException error) { Check(error.Code == "SCRIPT_ENCODING"); }
         return Task.CompletedTask;
+    }
+    private static async Task PermissionShape()
+    {
+        await using var f = new Fixture(); string id = await Install(f);
+        var detail = await Ok(f.Owner, "music.sources.detail", new { installationId = id });
+        Check(detail.GetProperty("permissions").EnumerateObject().Select(field => field.Name).SequenceEqual(["storage"]));
+        foreach (object? permissions in new object?[]
+        {
+            null, new { }, new { storage = (object?)null }, new { storage = "read" },
+            new { storage = new[] { "network" } }, new { storage = new[] { "read", "read" } },
+            new { storage = new[] { 1 } }, new { storage = Array.Empty<string>(), unsupported = Array.Empty<string>() },
+            new { storage = Array.Empty<string>(), localServices = false }
+        })
+        {
+            string token = await Upload(f); int writes = f.Store.Writes;
+            await Error(f.Owner, "music.sources.install", new { token, name = "invalid", version = "1", permissions }, "INVALID_REQUEST");
+            await Error(f.Owner, "music.sources.update", new { installationId = id, token, version = "2", permissions }, "INVALID_REQUEST");
+            Check(writes == f.Store.Writes);
+            await Ok(f.Owner, "music.transfer.cancel", new { token });
+        }
+        Check(f.Runtime.Calls.Count == 0);
+    }
+    private static async Task Declarations()
+    {
+        await using var f = new Fixture();
+        f.Runtime.Declarations = O(new
+        {
+            wy = new { actions = new[] { "musicSearch", "musicUrl", "search", "pic", "lyric" }, qualitys = new[] { "qs", "320k", "qsvip" } },
+            custom = new { actions = new[] { "search", "pic" }, qualitys = new[] { "qsvip" } },
+            site2 = new { actions = Array.Empty<string>(), qualitys = Array.Empty<string>() },
+            site3 = new { actions = new[] { "catalog" }, qualitys = new[] { "lossless-custom" } },
+            site4 = new { actions = new[] { "search" }, qualitys = Array.Empty<string>() },
+            site5 = new { actions = new[] { "pic" }, qualitys = Array.Empty<string>() },
+            site6 = new { actions = new[] { "musicSearch" }, qualitys = Array.Empty<string>() }
+        });
+        string id = await Install(f, true);
+        var item = (await Ok(f.Owner, "music.sources.detail", new { installationId = id })).GetProperty("item");
+        var capabilities = item.GetProperty("capabilities");
+        Check(capabilities.GetArrayLength() == 7);
+        var wy = capabilities.EnumerateArray().Single(capability => capability.GetProperty("platform").GetString() == "wy");
+        Check(wy.GetProperty("actions").EnumerateArray().Select(n => n.GetString())
+            .SequenceEqual(["musicSearch", "musicUrl", "search", "pic", "lyric"]));
+        Check(wy.GetProperty("qualitys").EnumerateArray().Select(n => n.GetString()).SequenceEqual(["qs", "320k", "qsvip"]));
+        Check(MusicSourceRow.Read(item).Platforms.SequenceEqual(["wy"]));
+        var active = f.Runtime.Instances[id];
+        Check((await f.Runtime.Storage("set", active, "extension", new { enabled = false, items = new object?[] { null, 7, "qs" } },
+            site: "custom")).GetProperty("ok").GetBoolean());
+        var stored = (await f.Runtime.Storage("get", active, "extension", site: "custom")).GetProperty("value");
+        Check(!stored.GetProperty("enabled").GetBoolean() && stored.GetProperty("items")[0].ValueKind == JsonValueKind.Null &&
+            stored.GetProperty("items")[1].GetInt32() == 7 && stored.GetProperty("items")[2].GetString() == "qs");
+        Check((await f.Runtime.Storage("get", active, "extension", site: "undeclared")).GetProperty("code").GetString() == "STALE_SESSION");
+        await Resolve(f, id);
+        await Error(f.Owner, "music.online.resolve", new { installationId = id, platform = "wy", song = Song(), quality = "qsvip" }, "INVALID_REQUEST");
+        string token = await Upload(f, "// changed declarations");
+        f.Runtime.Declarations.Remove("custom");
+        await Ok(f.Owner, "music.sources.update", new { installationId = id, token, version = "2", permissions = Permissions() });
+        Check((await f.Runtime.Storage("get", f.Runtime.Instances[id], "extension", site: "custom")).GetProperty("code").GetString() == "STALE_SESSION");
+        var metadata = await f.Library.ReadSourceMetadataAsync();
+        Check((await f.Library.ReadSourceScriptDataAsync(id, metadata.State.GetProperty("revision").GetInt64()))
+            .Sites.GetProperty("custom").GetProperty("values").GetArrayLength() == 1);
+    }
+    private static async Task DeclarationBounds()
+    {
+        await using var f = new Fixture(); f.Runtime.Declarations = new JsonObject();
+        string site = new('s', 128), action = new('a', 128), quality = new('q', 64);
+        var actions = Enumerable.Range(1, 31).Select(index => "action-" + index).Prepend(action).ToArray();
+        var qualities = Enumerable.Range(1, 30).Select(index => "quality-" + index).Prepend(" qs ").Prepend(quality).ToArray();
+        foreach (string key in Enumerable.Range(1, 31).Select(index => "site-" + index).Prepend(site))
+            f.Runtime.Declarations[key] = O(new { actions, qualitys = qualities });
+        string id = await Install(f, true);
+        var item = (await Ok(f.Owner, "music.sources.detail", new { installationId = id })).GetProperty("item");
+        var cap = item.GetProperty("capabilities").EnumerateArray().Single(value => value.GetProperty("platform").GetString() == site);
+        Check(item.GetProperty("capabilities").GetArrayLength() == 32 && cap.GetProperty("actions").GetArrayLength() == 32);
+        Check(cap.GetProperty("actions")[0].GetString() == action && cap.GetProperty("qualitys")[0].GetString() == quality &&
+            cap.GetProperty("qualitys")[1].GetString() == " qs ");
+        Check(MusicSourceRow.Read(item).Platforms.Length == 0);
+        Check((await f.Runtime.Storage("set", f.Runtime.Instances[id], "bounded", 1, site)).GetProperty("ok").GetBoolean());
+    }
+    private static async Task ExtensionOnly()
+    {
+        await using var f = new Fixture();
+        f.Runtime.Declarations = O(new { wy = new { actions = new[] { "search", "musicSearch", "pic" }, qualitys = new[] { "qs", "qsvip" } } });
+        string id = await Install(f, true);
+        var item = (await Ok(f.Owner, "music.sources.detail", new { installationId = id })).GetProperty("item");
+        Check(MusicSourceRow.Read(item).Platforms.Length == 0, "the playback UI cannot offer an undeclared musicUrl action");
+        await Error(f.Owner, "music.online.resolve", new { installationId = id, platform = "wy", song = Song(), quality = "320k" }, "CAPABILITY_UNAVAILABLE");
+        await Error(f.Owner, "music.online.lyrics", new { installationId = id, platform = "wy", song = Song() }, "CAPABILITY_UNAVAILABLE");
+        Check(f.Runtime.Invoked.Count == 0);
+    }
+    private static async Task InvalidDeclarations()
+    {
+        JsonObject Cap(object[] actions, object[] qualitys) => O(new { wy = new { actions, qualitys } });
+        var tooManySites = new JsonObject();
+        for (int index = 0; index < 33; index++) tooManySites["site-" + index] = O(new { actions = new[] { "search" }, qualitys = Array.Empty<string>() });
+        foreach (var declarations in new[]
+        {
+            new JsonObject(), tooManySites, O(new Dictionary<string, object> { [" "] = new { actions = new[] { "search" }, qualitys = Array.Empty<string>() } }),
+            Cap([new string('a', 129)], []), Cap(["search", "search"], []), Cap([""], []), Cap(["search\n"], []), Cap([1], []),
+            Cap(["search"], [new string('q', 65)]), Cap(["search"], ["qs", "qs"]), Cap(["search"], [null!]),
+            Cap(Enumerable.Range(0, 33).Select(index => (object)("action-" + index)).ToArray(), []),
+            Cap(["search"], Enumerable.Range(0, 33).Select(index => (object)("quality-" + index)).ToArray())
+        })
+        {
+            await using var f = new Fixture(); f.Runtime.Declarations = declarations;
+            string id = await Install(f);
+            await Error(f.Owner, "music.sources.enable", new { installationId = id }, "SCRIPT_PROTOCOL_ERROR");
+            Check(f.Runtime.Instances.Count == 0);
+            Check(!(await Ok(f.Owner, "music.sources.detail", new { installationId = id })).GetProperty("item").GetProperty("enabled").GetBoolean());
+            Check((await f.Runtime.Storage("get", f.Runtime.LastCandidate!, "late")).GetProperty("code").GetString() == "STALE_SESSION");
+        }
+    }
+    private static async Task SuspendedGrant()
+    {
+        await using var f = new Fixture(); string id = await Install(f, true);
+        var old = f.Runtime.Instances[id].DeepClone().AsObject();
+        f.Runtime.Loading = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        f.Runtime.LoadRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        f.Runtime.FailAfterCandidate = true;
+        string token = await Upload(f);
+        var update = f.Owner.ExecuteAsync("music.sources.update", new { installationId = id, token, version = "2", permissions = Permissions() });
+        await f.Runtime.Loading.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Check((await f.Runtime.Storage("set", old, "late", 1)).GetProperty("code").GetString() == "STALE_SESSION");
+        f.Runtime.LoadRelease.TrySetResult();
+        Check((await update).GetProperty("code").GetString() == "SCRIPT_EXCEPTION");
+        Check((await f.Runtime.Storage("set", old, "restored", 2)).GetProperty("ok").GetBoolean());
+        Check((await f.Runtime.Storage("set", f.Runtime.LastCandidate!, "late", 3)).GetProperty("code").GetString() == "STALE_SESSION");
+    }
+    private static async Task RecoveredGrants()
+    {
+        await using var f = new Fixture(); string id = await Install(f, true);
+        var old = f.Runtime.Instances[id].DeepClone().AsObject(); int calls = f.Runtime.Calls.Count;
+        await f.Owner.PrepareRuntimeRecoveryAsync(CancellationToken.None);
+        Check((await f.Runtime.Storage("get", old, "late")).GetProperty("code").GetString() == "CLOSED");
+        f.Runtime.Instances.Clear();
+        f.Owner.ResumeAfterRuntimeRecovery();
+        Check(f.Runtime.Calls.Count == calls);
+        Check((await f.Runtime.Storage("get", old, "late")).GetProperty("code").GetString() == "STALE_SESSION");
+        await Ok(f.Owner, "music.sources.enable", new { installationId = id });
+        Check((await f.Runtime.Storage("get", f.Runtime.Instances[id], "current")).GetProperty("ok").GetBoolean());
+        Check((await f.Runtime.Storage("get", old, "late")).GetProperty("code").GetString() == "STALE_SESSION");
+    }
+    private static async Task ScriptContract()
+    {
+        await using var f = new Fixture(); string id = await Install(f);
+        f.Runtime.Contract = "music.script.v1";
+        await Error(f.Owner, "music.sources.enable", new { installationId = id }, "INVALID_RESPONSE");
+        Check(f.Runtime.Instances.Count == 0 && !f.Runtime.Calls.Contains("music.script.load"));
+        f.Runtime.Contract = "music.script.v2";
+        await Ok(f.Owner, "music.sources.enable", new { installationId = id });
     }
     private sealed class Store : IProtectedDocumentStore
     {
@@ -369,7 +535,11 @@ public static class MusicNativeScriptTests
         internal readonly Dictionary<string, JsonObject> Instances = [];
         internal IReadOnlyDictionary<string, Func<JsonElement, CancellationToken, Task<object?>>> Capabilities = null!;
         internal bool FailLoad, CandidateWrite, FailAfterCandidate;
-        internal TaskCompletionSource? Invoking;
+        internal TaskCompletionSource? Invoking, Loading, LoadRelease;
+        internal JsonObject? LastCandidate;
+        internal string Contract = "music.script.v2";
+        internal string CandidateSite = "wy";
+        internal JsonObject Declarations = O(new { wy = new { actions = new[] { "musicUrl", "lyric" }, qualitys = new[] { "320k" } } });
         internal JsonElement Value = J(new { url = "https://media.example/audio", headers = new { } });
         private long generation;
         internal async Task<JsonElement> Storage(string operation, JsonObject instance, string key, object? value = null, string site = "wy")
@@ -379,9 +549,9 @@ public static class MusicNativeScriptTests
             if (operation == "set") p["value"] = JsonSerializer.SerializeToNode(value);
             return JsonSerializer.SerializeToElement(await Capabilities["platform.musicScript.storage." + operation](J(p), CancellationToken.None));
         }
-        private static JsonElement Reply(object value)
+        private JsonElement Reply(object value)
         {
-            var result = O(value); result["ok"] = true; result["contract"] = "music.script.v1"; return J(result);
+            var result = O(value); result["ok"] = true; result["contract"] = Contract; return J(result);
         }
         public async Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         {
@@ -393,14 +563,16 @@ public static class MusicNativeScriptTests
                     return Reply(new { next = p["offset"]!.GetValue<int>() + Convert.FromBase64String(p["data"]!.GetValue<string>()).Length });
                 case "music.script.stage.abort": return Reply(new { released = true });
                 case "music.script.load":
-                    Check(p["permissions"]!["localServices"] is JsonValue flag && !flag.GetValue<bool>(), "LX cannot open local services");
-                    if (FailLoad) return J(new { ok = false, contract = "music.script.v1", code = "SCRIPT_EXCEPTION" });
+                    Check(p["permissions"]!.AsObject().Select(field => field.Key).SequenceEqual(["storage"]), "Only storage permissions cross load");
+                    if (FailLoad) return J(new { ok = false, contract = Contract, code = "SCRIPT_EXCEPTION" });
                     string id = p["installationId"]!.GetValue<string>();
                     var instance = O(new { installationId = id, revision = p["revision"]!.GetValue<long>(), generation = ++generation,
                         grant = p["grant"]!.GetValue<string>(), state = "ready",
-                        capabilities = new { wy = new { actions = new[] { "musicUrl", "lyric" }, qualitys = new[] { "320k" } } } });
-                    if (CandidateWrite) Check((await Storage("set", instance, "candidate", 7)).GetProperty("ok").GetBoolean());
-                    if (FailAfterCandidate) return J(new { ok = false, contract = "music.script.v1", code = "SCRIPT_EXCEPTION" });
+                        capabilities = Declarations });
+                    LastCandidate = instance;
+                    if (CandidateWrite) Check((await Storage("set", instance, "candidate", 7, CandidateSite)).GetProperty("ok").GetBoolean());
+                    if (Loading is not null) { Loading.TrySetResult(); await LoadRelease!.Task.WaitAsync(cancellationToken); }
+                    if (FailAfterCandidate) return J(new { ok = false, contract = Contract, code = "SCRIPT_EXCEPTION" });
                     Instances[id] = instance;
                     return Reply(new { instance });
                 case "music.script.status": return Reply(new { documentAccess = false, instances = Instances.Values.ToArray() });

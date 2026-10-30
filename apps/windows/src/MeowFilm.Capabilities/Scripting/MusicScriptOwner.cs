@@ -39,6 +39,8 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
         internal long Revision = revision, Generation;
         internal string State = "candidate";
         internal JsonObject Sites = new();
+        internal HashSet<string>? DeclaredSites;
+        internal readonly HashSet<string> AccessedSites = new(StringComparer.Ordinal);
         internal string DataHash = "";
     }
     private sealed record Live(long Revision, long Generation, string Grant, JsonObject Capabilities);
@@ -158,20 +160,12 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
     }
     private static JsonObject Permissions(JsonNode? value)
     {
-        var permissions = value is null ? new JsonObject() : LJ.Object(value);
-        LJ.Fields(permissions, "networkOrigins storage");
-        var origins = new List<string>();
-        foreach (var node in permissions["networkOrigins"] is null ? new JsonArray() : LJ.Array(permissions["networkOrigins"]))
-        {
-            string text = LJ.Text(node);
-            LJ.Require(MusicSourceNetworkPolicy.TryCanonical(text, out var origin));
-            origins.Add(origin);
-        }
-        LJ.Require(origins.Count <= MusicSourceNetworkPolicy.MaximumOrigins, "LIMIT");
-        var storage = permissions["storage"] is null ? new JsonArray() : LJ.Array(permissions["storage"]);
-        LJ.Require(storage.All(n => LJ.S(n) is "read" or "write"));
-        return LJ.Obj(("networkOrigins", LJ.Arr(origins.Distinct(StringComparer.Ordinal))),
-            ("storage", LJ.Arr(storage.Select(n => LJ.S(n)).Distinct(StringComparer.Ordinal))));
+        var permissions = LJ.Object(value);
+        LJ.Fields(permissions, "storage", "storage");
+        var storage = LJ.Array(permissions["storage"]);
+        LJ.Require(storage.Count <= 2 && storage.All(n => LJ.S(n) is "read" or "write") &&
+            storage.Select(n => LJ.S(n)).Distinct(StringComparer.Ordinal).Count() == storage.Count);
+        return LJ.Obj(("storage", storage));
     }
     private JsonObject Next(JsonObject? replacement = null, string? removed = null)
     {
@@ -210,7 +204,7 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
             LJ.Fields(p, "");
             return LJ.Obj(("version", 1), ("search", false), ("platforms", NativeMusicSong.Platforms.Append("local").ToArray()),
                 ("qualities", MusicQualityPolicy.LxTypes),
-                ("trustedScriptsOnly", true), ("transfer", new { scriptBytes = MusicNativeTransfers.ScriptBytes,
+                ("trustedScriptsOnly", false), ("transfer", new { scriptBytes = MusicNativeTransfers.ScriptBytes,
                     chunkBytes = MusicNativeTransfers.ChunkBytes }));
         }
         if (method == "music.transfer.begin") return transfers.Begin(p);
@@ -300,7 +294,7 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
     {
         var reply = await runtime.CallAsync("music.script." + operation, parameters, token).ConfigureAwait(false);
         var result = RequireSuccess(reply);
-        LJ.Require(LJ.S(result["contract"]) == "music.script.v1", "INVALID_RESPONSE");
+        LJ.Require(LJ.S(result["contract"]) == "music.script.v2", "INVALID_RESPONSE");
         result.Remove("contract"); return result;
     }
 }

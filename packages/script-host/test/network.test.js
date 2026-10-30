@@ -17,18 +17,18 @@ function networkFor(servers, adapterOptions) {
   const network = createNodeNetwork(adapterOptions);
   return input => network({
     ...input,
-    authorizeURL(next) {
-      const authorized = input.authorizeURL(replaceOrigin(next, sockets));
-      return replaceOrigin(authorized, aliases);
+    validateURL(next) {
+      const validated = input.validateURL(replaceOrigin(next, sockets));
+      return replaceOrigin(validated, aliases);
     },
   });
 }
 
-async function networkHost(t, servers, origins, handler, adapterOptions) {
+async function networkHost(t, servers, handler, adapterOptions) {
   const host = createScriptHost({ network: networkFor(servers, adapterOptions) });
   t.after(() => host.close());
   await host.install({ installationId: 'a', enabled: true,
-    permissions: { networkOrigins: origins }, source: lxScript({ handler }) });
+    source: lxScript({ handler }) });
   return host;
 }
 
@@ -42,7 +42,7 @@ test('real HTTP callback preserves status/body/raw and desktop JSON semantics', 
     else if (req.url === '/error') { res.statusCode = 503; res.end('unavailable'); }
     else { res.setHeader('Content-Type', 'application/json'); res.end('not-json'); }
   });
-  const host = await networkHost(t, [server], [server.origin], `async () => {
+  const host = await networkHost(t, [server], `async () => {
     const json = await ${requestExpression(server.origin + '/json')};
     const binary = await ${requestExpression(server.origin + '/binary', { encoding: null })};
     const plain = await ${requestExpression(server.origin + '/invalid')};
@@ -57,9 +57,24 @@ test('real HTTP callback preserves status/body/raw and desktop JSON semantics', 
 
 test('json:true malformed response reports INVALID_JSON', async t => {
   const server = await serverFor(t, (_req, res) => res.end('not-json'));
-  const host = await networkHost(t, [server], [server.origin],
+  const host = await networkHost(t, [server],
     `async () => ${requestExpression(server.origin, { json: true })}`);
   await assert.rejects(host.invoke(target()), { code: 'INVALID_JSON' });
+});
+
+test('LX retry extension is accepted without automatic GET or non-idempotent POST replay', async t => {
+  const methods = [];
+  const server = await serverFor(t, (req, res) => {
+    methods.push(req.method);
+    res.statusCode = 503; res.end('unavailable');
+  });
+  const host = await networkHost(t, [server], `async () => {
+    const get = await ${requestExpression(server.origin, { retry: 3 })};
+    const post = await ${requestExpression(server.origin, { method: 'POST', body: 'value', retry: 1 })};
+    return [get.statusCode,post.statusCode];
+  }`);
+  assert.deepEqual(await host.invoke(target()), [503, 503]);
+  assert.deepEqual(methods, ['GET', 'POST']);
 });
 
 test('real POST JSON, urlencoded and binary multipart use exact byte bodies', async t => {
@@ -69,7 +84,7 @@ test('real POST JSON, urlencoded and binary multipart use exact byte bodies', as
     req.on('end', () => res.end(JSON.stringify({ method: req.method, contentType: req.headers['content-type'],
       text: Buffer.concat(chunks).toString('latin1') })));
   });
-  const host = await networkHost(t, [server], [server.origin], `async () => {
+  const host = await networkHost(t, [server], `async () => {
     const post = await ${requestExpression(server.origin, { method: 'POST', body: { name: 'synthetic' }, json: true })};
     const form = await ${requestExpression(server.origin, { method: 'POST', form: { name: 'a b' } })};
     const multipart = await new Promise((resolve,reject)=>lx.request(${JSON.stringify(server.origin)},{
@@ -87,7 +102,7 @@ test('real POST JSON, urlencoded and binary multipart use exact byte bodies', as
   assert(result.multipart.text.includes('filename="fixture.bin"'));
 });
 
-test('redirect authorization runs before contact; allowed cross-origin hops strip credentials', async t => {
+test('cross-origin redirects do not need domain grants and strip credentials', async t => {
   let contacts = 0, received;
   const destination = await serverFor(t, (req, res) => {
     contacts++; received = req.headers; res.end('arrived');
@@ -98,11 +113,7 @@ test('redirect authorization runs before contact; allowed cross-origin hops stri
   const handler = `async () => (await ${requestExpression(redirect.origin, {
     headers: { authorization: 'synthetic-only', cookie: 'fixture=true', 'x-fixture': 'yes' },
   })}).body`;
-  const denied = await networkHost(t, [redirect, destination], [redirect.origin], handler);
-  await assert.rejects(denied.invoke(target()), { code: 'PERMISSION_DENIED' });
-  assert.equal(contacts, 0);
-  const allowed = await networkHost(t, [redirect, destination],
-    [redirect.origin, destination.origin], handler);
+  const allowed = await networkHost(t, [redirect, destination], handler);
   assert.equal(await allowed.invoke(target()), 'arrived');
   assert.equal(contacts, 1);
   assert.equal(received.authorization, undefined);
@@ -110,10 +121,29 @@ test('redirect authorization runs before contact; allowed cross-origin hops stri
   assert.equal(received['x-fixture'], 'yes');
 });
 
+test('followRedirect extension can explicitly stop or follow redirects within the hop budget', async t => {
+  let contacts = 0;
+  const destination = await serverFor(t, (_req, res) => { contacts++; res.end('arrived'); });
+  const redirect = await serverFor(t, (_req, res) => {
+    res.writeHead(302, { Location: destination.origin + '/target' }); res.end('redirect');
+  });
+  const host = await networkHost(t, [redirect, destination], `async ({info}) => {
+    const response = await new Promise((resolve,reject) => lx.request(${JSON.stringify(redirect.origin)},
+      {followRedirect:info.musicInfo.follow,follow_max:5},(error,response)=>error?reject(error):resolve(response)));
+    return {status:response.statusCode,body:response.body};
+  }`);
+  assert.deepEqual(await host.invoke(target('a', 'kw', { follow: false })), { status: 302, body: 'redirect' });
+  assert.equal(contacts, 0);
+  assert.deepEqual(await host.invoke(target('a', 'kw', { follow: true })), { status: 200, body: 'arrived' });
+  assert.equal(contacts, 1);
+  await assert.rejects(host.invoke(target('a', 'kw', { follow: 'yes' })), { code: 'INVALID_ARGUMENT' });
+  assert.equal(contacts, 1);
+});
+
 test('redirect loops have a finite hop budget', async t => {
   let contacts = 0;
   const server = await serverFor(t, (_req, res) => { contacts++; res.writeHead(302, { Location: '/' }); res.end(); });
-  const host = await networkHost(t, [server], [server.origin],
+  const host = await networkHost(t, [server],
     `async () => ${requestExpression(server.origin)}`, { maxRedirects: 2 });
   await assert.rejects(host.invoke(target()), { code: 'RESOURCE_LIMIT' });
   assert.equal(contacts, 3);
@@ -124,14 +154,14 @@ test('compressed response limit applies after real gzip inflation', async t => {
     res.setHeader('Content-Encoding', 'gzip');
     res.end(gzipSync('x'.repeat(4096)));
   });
-  const host = await networkHost(t, [server], [server.origin],
+  const host = await networkHost(t, [server],
     `async () => ${requestExpression(server.origin)}`, { maxResponseBytes: 256 });
   await assert.rejects(host.invoke(target()), { code: 'RESOURCE_LIMIT' });
 });
 
 test('stream response size is bounded before full buffering', async t => {
   const server = await serverFor(t, (_req, res) => res.end(Buffer.alloc(2048)));
-  const host = await networkHost(t, [server], [server.origin],
+  const host = await networkHost(t, [server],
     `async () => ${requestExpression(server.origin)}`, { maxResponseBytes: 128 });
   await assert.rejects(host.invoke(target()), { code: 'RESOURCE_LIMIT' });
 });
@@ -142,7 +172,7 @@ test('cancel physically closes the real HTTP request socket', async t => {
     req.socket.once('close', () => closed.resolve());
     reached.resolve();
   });
-  const host = await networkHost(t, [server], [server.origin],
+  const host = await networkHost(t, [server],
     `async () => ${requestExpression(server.origin)}`);
   const controller = new AbortController();
   const rejected = assert.rejects(host.invoke(target(), { signal: controller.signal }), { code: 'CANCELLED' });
@@ -160,7 +190,7 @@ test('restricted headers and unsupported request options fail before I/O', async
     [{ headers: { Host: 'other.invalid' } }, 'PERMISSION_DENIED'],
     [{ proxy: 'http://other.invalid' }, 'UNSUPPORTED_OPTION'],
   ]) {
-    const host = await networkHost(t, [server], [server.origin],
+    const host = await networkHost(t, [server],
       `async () => ${requestExpression(server.origin, options)}`);
     await assert.rejects(host.invoke(target()), { code });
   }

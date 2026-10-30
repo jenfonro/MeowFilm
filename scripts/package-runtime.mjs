@@ -11,6 +11,15 @@ const PRODUCTS = Object.freeze({
   aggregate: ['music'],
 });
 const MANIFEST = 'runtime-manifest.json';
+const SHARED_SOURCE = 'apps/runtime';
+const SHARED_FILES = ['bootstrap.mjs', 'modules/music-script.mjs'];
+const SHARED_IMPORTS = new Set(['node:crypto', '@meowfilm/runtime-bridge', '@meowfilm/script-host']);
+const ENGINE_POLICY = 'scripts/quickjs-runtime.json';
+const ENGINE_VERSION = '0.32.0';
+const ENGINE_WASM_PACKAGE = '@jitl/quickjs-wasmfile-release-sync';
+const ENGINE_PACKAGES = new Set([
+  ENGINE_WASM_PACKAGE, 'quickjs-emscripten-core', '@jitl/quickjs-ffi-types',
+]);
 const OMIT_DIRECTORIES = new Set([
   'node_modules', 'test', 'tests', '__tests__', 'fixtures', '__fixtures__', '__mocks__',
   'coverage', 'benchmark', 'benchmarks', 'example', 'examples',
@@ -314,6 +323,47 @@ function buildGraph(root, product, profile = 'windows-native') {
   const selected = ['runtime-bridge', 'script-host'];
   const workspacePaths = new Map(selected.map(name => [`packages/${name}`, `node_modules/@meowfilm/${name}`]));
   const nodes = new Map(), edges = [], omitted = [];
+  const inputs = [{ path: 'package.json', sha256: rootJSON.hash }, { path: 'package-lock.json', sha256: lockJSON.hash }];
+  let enginePolicy;
+
+  function trustedEngine(pkg, locked, manifestHash, location) {
+    if (!ENGINE_PACKAGES.has(pkg.name)) return undefined;
+    if (!enginePolicy) {
+      const { value, hash } = readJSON(root, ENGINE_POLICY);
+      const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+      check(value.schemaVersion === 1 && value.version === ENGINE_VERSION && value.variant === 'release-sync'
+        && Array.isArray(value.packages) && value.packages.length === ENGINE_PACKAGES.size
+        && new Set(value.packages.map(pkg => pkg?.name)).size === ENGINE_PACKAGES.size
+        && value.packages.every(pkg => isObject(pkg) && ENGINE_PACKAGES.has(pkg.name)
+          && pkg.version === ENGINE_VERSION && pkg.license === 'MIT'
+          && digest(pkg.manifestSha256) && digest(pkg.licenseSha256)
+          && (pkg.name === ENGINE_WASM_PACKAGE
+            ? isObject(pkg.wasm) && pkg.wasm.path === 'dist/emscripten-module.wasm'
+              && Number.isSafeInteger(pkg.wasm.bytes) && pkg.wasm.bytes > 0 && digest(pkg.wasm.sha256)
+            : pkg.wasm === undefined))
+        && isObject(value.license) && value.license.path === 'LICENSES/quickjs-emscripten-LICENSE.txt'
+        && digest(value.license.sha256),
+      'INVALID_ENGINE_POLICY', 'QuickJS policy must pin only the reviewed release-sync engine');
+      for (const pkg of value.packages) registryMetadata(pkg, ENGINE_POLICY);
+      const license = sourcePath(root, value.license.path);
+      check(lstatSync(license).isFile() && sha256(readFileSync(license)) === value.license.sha256,
+        'ENGINE_LICENSE_MISMATCH', 'Reviewed QuickJS license does not match the engine policy');
+      inputs.push({ path: ENGINE_POLICY, sha256: hash }, { ...value.license });
+      enginePolicy = value;
+    }
+    const trusted = enginePolicy.packages.find(expected => expected.name === pkg.name);
+    check(pkg.version === trusted.version && locked.version === trusted.version
+      && locked.resolved === trusted.resolved && locked.integrity === trusted.integrity,
+    'ENGINE_LOCK_MISMATCH', `${location}: QuickJS identity or registry integrity is not pinned`);
+    check(pkg.license === trusted.license && locked.license === trusted.license,
+      'ENGINE_LICENSE_MISMATCH', `${location}: QuickJS license declaration does not match`);
+    check(manifestHash === trusted.manifestSha256, 'ENGINE_MANIFEST_MISMATCH',
+      `${location}: QuickJS package manifest differs from the reviewed release`);
+    const license = sourcePath(root, `${location}/LICENSE`);
+    check(lstatSync(license).isFile() && sha256(readFileSync(license)) === trusted.licenseSha256,
+      'ENGINE_LICENSE_MISMATCH', `${location}: QuickJS license text differs from the reviewed release`);
+    return trusted;
+  }
 
   function outputPath(location) {
     for (const [source, dest] of workspacePaths) {
@@ -373,6 +423,7 @@ function buildGraph(root, product, profile = 'windows-native') {
     const node = {
       location, path: outputPath(location), name: pkg.name, version: pkg.version,
       workspace, manifest: pkg, manifestHash: data.hash, required: fileDeclarations(root, pkg, location, workspace), locked,
+      engine: trustedEngine(pkg, locked, data.hash, location),
     };
     nodes.set(location, node); // Register before traversal: real dependency cycles are legal.
     const dependencies = dependencyMap(pkg, 'dependencies', location);
@@ -403,6 +454,8 @@ function buildGraph(root, product, profile = 'windows-native') {
         } else {
           check(satisfies(found.version, entries[name]), 'RANGE_MISMATCH',
             `${location}: ${name}@${found.version} does not satisfy ${entries[name]}`);
+          if (found.engine) check(entries[name] === found.engine.version, 'ENGINE_VERSION_PIN',
+            `${location}: QuickJS dependency ${name} must use an exact version`);
         }
         edges.push({ from: node, name, to: found });
       }
@@ -423,7 +476,7 @@ function buildGraph(root, product, profile = 'windows-native') {
   }
   return { nodes: [...nodes.values()].sort((a, b) => compare(a.path, b.path)),
     omitted: omitted.sort((a, b) => compare(`${a.from}/${a.name}/${a.kind}`, `${b.from}/${b.name}/${b.kind}`)),
-    inputs: [{ path: 'package.json', sha256: rootJSON.hash }, { path: 'package-lock.json', sha256: lockJSON.hash }] };
+    inputs };
 }
 
 function newOutput(root, output) {
@@ -519,9 +572,10 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
     reserve(rel, false);
     return join(output, rel);
   }
-  function copy(location, rel, expectedHash) {
+  function copy(location, rel, expectedHash, wasm) {
     const file = sourcePath(root, location);
-    check(!NATIVE_FILE.test(posix.basename(location)), 'NATIVE_PAYLOAD', `Native payload is not allowed: ${location}`);
+    check(!NATIVE_FILE.test(posix.basename(location)) || wasm?.sourcePath === location,
+      'NATIVE_PAYLOAD', `Native payload is not allowed: ${location}`);
     const stat = lstatSync(file);
     check(stat.isFile(), 'INVALID_SOURCE', `Not a regular source file: ${location}`);
     const target = destination(rel);
@@ -544,7 +598,10 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
       check(before.size === after.size && before.mtimeMs === after.mtimeMs && before.ctimeMs === after.ctimeMs
         && bytes === before.size && (!expectedHash || expectedHash === digest),
       'SOURCE_CHANGED', `Source changed during packaging: ${location}`);
+      check(!wasm || (bytes === wasm.bytes && digest === wasm.sha256),
+        'ENGINE_HASH_MISMATCH', `QuickJS WASM differs from the reviewed release: ${location}`);
       files.push({ path: rel, bytes, sha256: digest });
+      manifest.inputs.push({ path: location, sha256: digest });
       delete manifest.incompleteFile;
     } finally {
       if (outputFD !== undefined) closeSync(outputFD);
@@ -559,15 +616,44 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
       const child = posix.join(rel, item.name);
       if (item.name === 'node_modules') continue; // Only the resolved graph can add dependencies.
       check(!item.isSymbolicLink(), 'UNSAFE_SYMLINK', `Package symlink is not allowed: ${location}/${item.name}`);
-      check(!NATIVE_FILE.test(item.name), 'NATIVE_PAYLOAD', `Native payload is not allowed: ${location}/${item.name}`);
+      const wasm = item.isFile() && node.engine?.wasm?.path === child
+        ? { ...node.engine.wasm, sourcePath: posix.join(node.location, child) } : undefined;
+      check(!NATIVE_FILE.test(item.name) || wasm, 'NATIVE_PAYLOAD', `Native payload is not allowed: ${location}/${item.name}`);
       if (item.isDirectory()) {
         if (OMIT_DIRECTORIES.has(item.name.toLowerCase())
           || (item.name.startsWith('.') && !LEGAL_FILE.test(item.name))) continue;
         copyPackage(node, child);
       } else if (includedFile(child, node)) {
         copy(posix.join(node.location, child), posix.join(node.path, child),
-          child === 'package.json' ? node.manifestHash : undefined);
+          child === 'package.json' ? node.manifestHash : child === 'LICENSE' ? node.engine?.licenseSha256 : undefined, wasm);
       }
+    }
+  }
+  function copySharedRuntime(rel = '') {
+    const location = posix.join(SHARED_SOURCE, rel);
+    for (const item of readdirSync(sourcePath(root, location), { withFileTypes: true })) {
+      const child = posix.join(rel, item.name);
+      safeRelative(child);
+      check(!item.isSymbolicLink(), 'UNSAFE_SYMLINK', `Shared runtime symlink is not allowed: ${location}/${item.name}`);
+      if (item.isDirectory()) {
+        check(child === 'modules', 'SHARED_CLOSURE', `Unexpected shared runtime directory: ${child}`);
+        copySharedRuntime(child);
+      } else {
+        check(item.isFile() && SHARED_FILES.includes(child), 'SHARED_CLOSURE', `Unexpected shared runtime source: ${child}`);
+      }
+    }
+    if (rel) return;
+    for (const file of SHARED_FILES) {
+      const location = `${SHARED_SOURCE}/${file}`;
+      const input = readFileSync(sourcePath(root, location)), hash = sha256(input);
+      const text = new TextDecoder('utf-8', { fatal: true }).decode(input);
+      for (const match of text.matchAll(/(?:\bfrom\s*|\bimport\s*(?:\(\s*)?|\brequire\s*\()\s*['"]([^'"]+)['"]/g)) {
+        const specifier = match[1];
+        const target = posix.normalize(posix.join(posix.dirname(file), specifier));
+        check(specifier.startsWith('.') ? SHARED_FILES.includes(target) : SHARED_IMPORTS.has(specifier),
+          'SHARED_IMPORT', `${location}: import escapes the shared runtime closure`);
+      }
+      copy(location, `app/${file}`, hash);
     }
   }
   try {
@@ -580,8 +666,14 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
       name: node.name, version: node.version, path: node.path, lockPath: node.location,
       workspace: node.workspace,
       ...(!node.workspace ? { resolved: node.locked.resolved, integrity: node.locked.integrity } : {}),
+      ...(node.engine ? { manifestSha256: node.engine.manifestSha256, licenseSha256: node.engine.licenseSha256 } : {}),
     }));
-    copy('apps/runtime/bootstrap.mjs', 'app/bootstrap.mjs');
+    manifest.trustedWasm = graph.nodes.filter(node => node.engine?.wasm).map(node => ({
+      package: node.name, version: node.version,
+      ...node.engine.wasm, path: `${node.path}/${node.engine.wasm.path}`,
+      licensePath: `${node.path}/LICENSE`, licenseSha256: node.engine.licenseSha256,
+    }));
+    copySharedRuntime();
     for (const node of graph.nodes) {
       copyPackage(node);
       for (const entry of node.required) {
@@ -590,11 +682,12 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
       }
     }
     for (const input of graph.inputs) {
-      check(readJSON(root, input.path).hash === input.sha256, 'SOURCE_CHANGED', `${input.path} changed during packaging`);
+      check(sha256(readFileSync(sourcePath(root, input.path))) === input.sha256,
+        'SOURCE_CHANGED', `${input.path} changed during packaging`);
     }
     files.sort((a, b) => compare(a.path, b.path));
-    // The Windows wrapper must add and verify its platform-specific entry and
-    // script-only helpers before this assembly can be marked executable.
+    // The Windows wrapper must add and verify only its platform bootstrap and
+    // thin entry before this shared assembly can be marked executable.
     manifest.status = 'platform-pending';
     saveManifest();
     return manifest;

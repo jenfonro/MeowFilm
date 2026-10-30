@@ -1,36 +1,31 @@
-import vm from 'node:vm';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { ResourceScope } from './scope.js';
-import { clone, deferred, fault, markForeignError, requireValue, safeError } from './errors.js';
+import { clone, deferred, fault, requireValue, safeError } from './errors.js';
 import { lxCapabilities, lxPayload } from './lx-capabilities.js';
 import { realmSource } from './realm.js';
 import { createUtilities } from './utilities.js';
-
-const bootstrap = new vm.Script(realmSource, { filename: 'meowfilm-lx-sdk.js' });
-const trampoline = new vm.Script('__meowInvocation.fn(...__meowInvocation.args)', {
-  filename: 'meowfilm-lx-dispatch.js',
-});
+import { QuickJSEngine } from './quickjs-engine.js';
 
 export class LXSession {
-  constructor({ installationId, generation, revision, network, storage, limits }) {
-    Object.assign(this, { installationId, generation, revision, network, storage, limits });
+  constructor({ installationId, generation, revision, network, storage, onDiagnostic, limits }) {
+    Object.assign(this, { installationId, generation, revision, network, storage, onDiagnostic, limits });
     this.live = true;
     this.activated = false;
     this.ready = deferred();
     this.root = new ResourceScope();
+    // Host execution-turn ownership, not guest Promise privilege propagation.
     this.contextScope = new AsyncLocalStorage();
-    this.invocations = new Set();
+    this.invocations = new Map();
     this.timers = new Map();
     this.networks = new Map();
+    this.networkTasks = new Set();
+    this.callbacks = new Map();
+    this.storageTasks = new Map();
     this.adapterTasks = new Set();
     this.nextId = 0;
     this.capabilities = {};
     this.alert = null;
     this.utils = createUtilities(limits.maxBytes);
-    this.context = vm.createContext({
-      __meowBridge: (operation, args) => this.bridge(operation, args),
-    }, { name: `meowfilm:${installationId}:${generation}` });
-    this.realm = bootstrap.runInContext(this.context, { timeout: limits.syncTimeoutMs });
   }
 
   scope() { return this.contextScope.getStore() ?? this.root; }
@@ -42,69 +37,131 @@ export class LXSession {
   async start() {
     const timeout = setTimeout(() => this.fail(fault('TIMEOUT')), this.limits.initTimeoutMs);
     try {
-      const script = new vm.Script(this.revision.source, { filename: 'installed-lx-script.js' });
-      const result = this.contextScope.run(this.root, () =>
-        script.runInContext(this.context, { timeout: this.limits.syncTimeoutMs }));
-      // Observe a returned startup Promise without requiring scripts to return one.
-      if (result && typeof result.then === 'function') {
-        Promise.resolve(result).catch((e) => this.fail(safeError(e)));
-      }
+      this.engine = await QuickJSEngine.create({
+        source: realmSource, limits: this.limits,
+        bridge: (operation, args) => {
+          try { return this.bridge(operation, args); }
+          catch (error) { this.bridgeDiagnostic(operation, args, error); throw error; }
+        },
+      });
+      if (!this.live) { this.engine.close(); throw fault('STALE_SESSION'); }
+      this.contextScope.run(this.root, () => this.engine.evaluate(this.revision.source));
       await this.ready.promise;
       this.assertLive();
       return this;
-    } catch (e) {
-      const error = e?.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT' ? fault('TIMEOUT') : safeError(e);
-      this.fail(error);
-      throw error;
+    } catch (error) {
+      const failure = this.failure ?? safeError(error);
+      this.fail(failure);
+      throw failure;
     } finally { clearTimeout(timeout); }
   }
 
   activate() { this.assertLive(); this.activated = true; }
 
-  call(fn, args, scope) {
+  call(name, args, scope) {
     if (!this.live) throw fault('STALE_SESSION');
     scope.assertOpen();
-    // Temporary trampoline bounds synchronous callbacks, not asynchronous CPU.
-    const context = this.context;
-    const previous = context.__meowInvocation;
-    context.__meowInvocation = { fn, args };
-    try {
-      return this.contextScope.run(scope, () =>
-        trampoline.runInContext(context, { timeout: this.limits.syncTimeoutMs }));
-    } catch (e) {
-      if (e?.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT') throw fault('TIMEOUT');
-      throw e;
-    } finally {
-      if (previous) context.__meowInvocation = previous;
-      else delete context.__meowInvocation;
+    const budget = Math.min(this.limits.syncTimeoutMs, scope.deadline - Date.now());
+    try { return this.contextScope.run(scope, () => this.engine.call(name, args, budget)); }
+    catch (error) {
+      // Pending guest jobs cannot be trusted to stop after a computation limit.
+      if (this.engine.interrupted) this.fail(safeError(error));
+      throw error;
     }
   }
 
-  callback(fn, args, scope) {
-    if (!this.live || scope.signal.aborted) return;
-    try {
-      const value = this.call(fn, args, scope);
-      if (value && typeof value.then === 'function') {
-        Promise.resolve(value).catch((e) => this.callbackFailed(e, scope));
+  registerCallback(id, scope, repeat = false) {
+    requireValue(Number.isSafeInteger(id) && id > 0 && !this.callbacks.has(id));
+    requireValue(this.callbacks.size < this.limits.maxTimers + this.limits.maxNetworkRequests, 'RESOURCE_LIMIT');
+    const detach = scope.add(() => this.forgetCallback(id));
+    this.callbacks.set(id, { scope, repeat, detach });
+  }
+
+  forgetCallback(id) {
+    const item = this.callbacks.get(id);
+    if (!item) return;
+    item.detach();
+    this.callbacks.delete(id);
+    queueMicrotask(() => {
+      if (this.live && !this.engine?.closing) {
+        try { this.engine.call('forgetCallback', [id]); }
+        catch (error) { if (this.engine?.interrupted) this.fail(safeError(error)); }
       }
-    } catch (e) { this.callbackFailed(e, scope); }
+    });
+  }
+
+  callback(id, value, scope) {
+    if (!this.live || scope.signal.aborted) return;
+    try { this.call('callback', [id, JSON.stringify(value)], scope); }
+    catch (error) { this.callbackFailed(error, scope); }
   }
 
   callbackFailed(error, scope) {
-    if (scope.signal.aborted || !this.live) return;
+    if (!this.live || scope.signal.aborted) return;
     if (scope === this.root) this.fail(safeError(error));
     else scope.close(safeError(error));
   }
 
+  bridgeDiagnostic(operation, args, error) {
+    if (!this.live || !this.onDiagnostic ||
+      !['on', 'send', 'request', 'util', 'storage', 'timer', 'microtask'].includes(operation)) return;
+    const code = safeError(error).code;
+    const scope = operation === 'storage' ? this.invocations.get(args[0])?.scope : this.scope();
+    if (!scope || scope.signal.aborted) return;
+    try {
+      this.onDiagnostic(Object.freeze({ ...this.scopeIdentity(scope),
+        kind: 'ScriptHostError', reason: 'host', operation, code }));
+    } catch { /* Diagnostics cannot alter guest results or capability checks. */ }
+  }
+
   bridge(operation, args) {
-    if (operation === 'rememberError') return markForeignError(...args);
-    // Clearing/aborting an already completed handle is always idempotent.
-    if (operation === 'abortRequest') {
-      const item = this.networks.get(args[0]);
-      if (item?.owner === this.scope()) item.child.close(fault('CANCELLED'));
+    if (operation === 'diagnostic') {
+      const scope = args[0] === 0 ? this.root : this.invocations.get(args[0])?.scope;
+      if (!this.live || !scope || scope.signal.aborted || !this.onDiagnostic) return;
+      const input = args[1];
+      const kinds = ['Error', 'TypeError', 'ReferenceError', 'SyntaxError', 'RangeError', 'InternalError'];
+      const reasons = ['reference', 'input', 'unsupported', 'configuration', 'upstream', 'script'];
+      if (!input || !kinds.includes(input.kind) || !reasons.includes(input.reason)) return;
+      const diagnostic = { kind: input.kind, reason: input.reason };
+      if (typeof input.reference === 'string' && /^[A-Za-z_$][\w$]{0,63}$/.test(input.reference))
+        diagnostic.reference = input.reference;
+      const members = ['from', 'toString', 'bufToString', 'readUInt32LE', 'readUInt32BE',
+        'readUInt16LE', 'readUInt16BE', 'writeUInt32LE', 'writeUInt32BE'];
+      if (members.includes(input.member)) diagnostic.member = input.member;
+      if (Number.isSafeInteger(input.line) && input.line > 0 && input.line <= 1_000_000)
+        diagnostic.line = input.line;
+      if (Number.isSafeInteger(input.column) && input.column >= 0 && input.column <= 1_000_000)
+        diagnostic.column = input.column;
+      try { this.onDiagnostic(Object.freeze({ ...this.scopeIdentity(scope), ...diagnostic })); }
+      catch { /* A diagnostic consumer cannot change guest results or authority. */ }
       return;
     }
-    if (operation === 'clearTimer') return this.clearTimer(args[0], this.scope());
+    if (operation === 'abortRequest') {
+      const item = this.networks.get(args[0]);
+      if (item) item.child.close(fault('CANCELLED'));
+      return;
+    }
+    if (operation === 'clearTimer') return this.clearTimer(args[0]);
+    if (operation === 'callbackDone') {
+      const item = this.callbacks.get(args[0]);
+      if (item && !item.repeat) this.forgetCallback(args[0]);
+      return;
+    }
+    if (operation === 'callbackFailure') {
+      const item = this.callbacks.get(args[0]);
+      if (item) this.callbackFailed(fault(this.engine?.interrupted ? 'TIMEOUT' : args[1]), item.scope);
+      return;
+    }
+    if (operation === 'invokeResult') {
+      const item = this.invocations.get(args[0]);
+      if (!this.live || !item || item.scope.signal.aborted) return;
+      if (args[1]) {
+        const value = clone(args[2]);
+        requireValue(Buffer.byteLength(JSON.stringify(value)) <= this.limits.maxBytes, 'RESOURCE_LIMIT');
+        item.result.resolve(value);
+      } else item.result.reject(fault(this.engine?.interrupted ? 'TIMEOUT' : args[2]));
+      return;
+    }
     this.assertLive();
     switch (operation) {
       case 'maxBytes': return this.limits.maxBytes;
@@ -112,19 +169,15 @@ export class LXSession {
       case 'scriptInfo': return JSON.stringify(this.scriptInfo());
       case 'util': return this.utils(...args);
       case 'on':
-        requireValue(args[0] === 'request' && typeof args[1] === 'function', 'SCRIPT_PROTOCOL_ERROR');
-        this.handler = args[1];
+        requireValue(args[0] === 'request', 'SCRIPT_PROTOCOL_ERROR');
+        this.handlerRegistered = true;
         return;
       case 'send': return this.send(...args);
       case 'request': return this.request(...args);
       case 'storage': return this.storageCall(...args);
       case 'timer': return this.timer(...args);
-      case 'microtask': {
-        requireValue(typeof args[0] === 'function');
-        const scope = this.scope();
-        queueMicrotask(() => this.callback(args[0], [], scope));
-        return;
-      }
+      case 'microtask': return this.registerCallback(args[0], this.scope());
+      case 'startupFailure': return this.fail(fault(args[0]));
       default: throw fault('UNSUPPORTED_OPTION');
     }
   }
@@ -162,20 +215,15 @@ export class LXSession {
   send(event, data) {
     try {
       if (event === 'inited') {
-        requireValue(!this.initialized && this.handler, 'SCRIPT_PROTOCOL_ERROR');
+        requireValue(!this.initialized && this.handlerRegistered, 'SCRIPT_PROTOCOL_ERROR');
         this.capabilities = lxCapabilities(data);
         this.initialized = true;
         this.ready.resolve();
       } else if (event === 'updateAlert') {
         requireValue(!this.alert && data && typeof data.log === 'string' &&
           data.log.length <= 1024 && (data.updateUrl === undefined ||
-          (typeof data.updateUrl === 'string' && data.updateUrl.length <= 1024)),
-        'SCRIPT_PROTOCOL_ERROR');
-        if (data.updateUrl) {
-          const url = new URL(data.updateUrl);
-          requireValue(['https:', 'http:'].includes(url.protocol) && !url.username && !url.password,
-            'SCRIPT_PROTOCOL_ERROR');
-        }
+          (typeof data.updateUrl === 'string' && data.updateUrl.length <= 1024)), 'SCRIPT_PROTOCOL_ERROR');
+        if (data.updateUrl) this.validateURL(data.updateUrl, this.root);
         this.alert = { log: data.log, updateUrl: data.updateUrl ?? '' };
       } else throw fault('SCRIPT_PROTOCOL_ERROR');
     } catch {
@@ -185,56 +233,49 @@ export class LXSession {
     }
   }
 
-  timer(fn, delay = 0, repeat, args) {
-    requireValue(typeof fn === 'function');
+  timer(id, delay = 0, repeat) {
     requireValue(this.timers.size < this.limits.maxTimers, 'RESOURCE_LIMIT');
     const scope = this.scope();
-    const id = ++this.nextId;
+    this.registerCallback(id, scope, repeat);
     const run = () => {
-      if (!repeat) this.clearTimer(id, scope);
-      this.callback(fn, args, scope);
+      if (!repeat) this.clearTimer(id, true);
+      this.callback(id, {}, scope);
     };
     const ms = Math.max(1, Math.min(Number(delay) || 0, 2 ** 31 - 1));
     const handle = repeat ? setInterval(run, ms) : setTimeout(run, ms);
-    const detach = scope.add(() => this.clearTimer(id, scope));
+    const detach = scope.add(() => this.clearTimer(id));
     this.timers.set(id, { handle, scope, detach });
-    return id;
   }
 
-  clearTimer(id, scope) {
+  clearTimer(id, firing = false) {
     const timer = this.timers.get(id);
-    if (!timer || timer.scope !== scope) return;
+    if (!timer) return;
     clearTimeout(timer.handle);
     clearInterval(timer.handle);
     timer.detach();
     this.timers.delete(id);
+    if (!firing) this.forgetCallback(id);
   }
 
-  authorizeURL(input, scope) {
+  validateURL(input, scope) {
     if (!this.live) throw fault('STALE_SESSION');
     scope.assertOpen();
     let url;
-    try { url = new URL(input); } catch { throw fault('PERMISSION_DENIED'); }
-    requireValue(['https:', 'http:'].includes(url.protocol) && !url.username && !url.password,
-      'PERMISSION_DENIED');
-    requireValue(this.revision.permissions.networkOrigins.includes(url.origin), 'PERMISSION_DENIED');
+    try { url = new URL(input); } catch { throw fault('INVALID_ARGUMENT'); }
+    requireValue(['https:', 'http:'].includes(url.protocol) && !url.username && !url.password);
     return url.href;
   }
 
-  request(url, options, fn) {
-    requireValue(typeof fn === 'function');
-    requireValue(this.networks.size < this.limits.maxNetworkRequests, 'RESOURCE_LIMIT');
+  request(url, options, id) {
+    requireValue(this.networkTasks.size < this.limits.maxNetworkRequests, 'RESOURCE_LIMIT');
     const owner = this.scope();
-    const id = ++this.nextId;
     const copied = clone(options);
     requireValue(copied && typeof copied === 'object' && !Array.isArray(copied));
-    if (copied.timeout !== undefined) {
-      requireValue(Number.isFinite(copied.timeout) && copied.timeout > 0);
-    }
+    if (copied.timeout !== undefined) requireValue(Number.isFinite(copied.timeout) && copied.timeout > 0);
     const timeout = Math.min(copied.timeout ?? this.limits.requestTimeoutMs, this.limits.requestTimeoutMs);
     const child = new ResourceScope(owner.signal, timeout);
-    const record = { owner, child };
-    this.networks.set(id, record);
+    this.registerCallback(id, owner);
+    this.networks.set(id, { owner, child });
     let settled = false;
     const complete = (error, response) => {
       if (settled) return;
@@ -242,70 +283,74 @@ export class LXSession {
       this.networks.delete(id);
       child.close();
       if (!this.live || owner.signal.aborted) return;
-      let callbackArgs;
+      let input;
       try {
-        let raw, meta;
-        if (!error) {
+        if (error) input = { code: error.code };
+        else {
           requireValue(response && Number.isInteger(response.statusCode), 'NETWORK_ERROR');
-          raw = typeof response.body === 'string' ? Buffer.from(response.body) : Buffer.from(response.body ?? []);
+          const raw = typeof response.body === 'string' ? Buffer.from(response.body) : Buffer.from(response.body ?? []);
           requireValue(raw.length <= this.limits.maxBytes, 'RESOURCE_LIMIT');
-          meta = JSON.stringify({
-            statusCode: response.statusCode, statusMessage: response.statusMessage ?? '',
-            headers: response.headers ?? {}, url: response.url ?? url,
-          });
+          input = {
+            response: { statusCode: response.statusCode, statusMessage: response.statusMessage ?? '',
+              headers: response.headers ?? {}, url: response.url ?? url },
+            body: raw.toString('base64'), encoding: copied.encoding ?? 'utf8', json: copied.json === true,
+          };
+          if (copied.encoding === null) input.encoding = null;
         }
-        callbackArgs = this.call(this.realm.httpArguments,
-          [error?.code ?? null, meta, raw ? [...raw] : [], copied.encoding, copied.json === true], owner);
-      } catch (e) {
-        callbackArgs = this.call(this.realm.httpArguments,
-          [safeError(e, 'NETWORK_ERROR').code, null, [], null, false], owner);
-      }
-      this.callback(fn, callbackArgs, owner);
+      } catch (failure) { input = { code: safeError(failure, 'NETWORK_ERROR').code }; }
+      this.callback(id, input, owner);
     };
     child.signal.addEventListener('abort', () => complete(child.reason), { once: true });
-    this.trackAdapter(Promise.resolve().then(() => {
-      const authorized = this.authorizeURL(url, child);
+    const task = this.trackAdapter(Promise.resolve().then(() => {
+      const validated = this.validateURL(url, child);
       requireValue(typeof this.network === 'function', 'PERMISSION_DENIED');
       return this.network({
-        url: authorized, options: copied, signal: child.signal,
-        scope: this.scopeIdentity(owner),
-        authorizeURL: (next) => this.authorizeURL(next, child),
+        url: validated, options: copied, signal: child.signal, scope: this.scopeIdentity(owner),
+        validateURL: next => this.validateURL(next, child),
       });
-    })).then(response => complete(null, response),
-      e => complete(safeError(e, 'NETWORK_ERROR')));
-    return id;
+    }));
+    this.networkTasks.add(task);
+    task.finally(() => this.networkTasks.delete(task)).catch(() => {});
+    task.then(response => complete(null, response), error => complete(safeError(error, 'NETWORK_ERROR')));
   }
 
   scopeIdentity(scope) {
-    return Object.freeze({
-      installationId: this.installationId,
-      generation: this.generation,
-      siteId: scope.siteId ?? null,
-      requestId: scope.requestId ?? null,
-    });
+    return Object.freeze({ installationId: this.installationId, generation: this.generation,
+      siteId: scope.siteId ?? null, requestId: scope.requestId ?? null });
   }
 
-  async storageCall(operation, key, value) {
-    const scope = this.scope();
-    // No startup writes: failed trial revisions cannot mutate live persistent data.
-    requireValue(this.activated && scope.siteId, 'PERMISSION_DENIED');
-    const permission = operation === 'get' ? 'read' : 'write';
-    requireValue(this.revision.permissions.storage.includes(permission), 'PERMISSION_DENIED');
+  storageCall(scopeId, operation, key, value, callbackId) {
+    const item = this.invocations.get(scopeId);
+    // The explicit request context survives guest awaits without ambient privileges.
+    requireValue(this.activated && item && !item.scope.signal.aborted, 'PERMISSION_DENIED');
+    const scope = item.scope;
+    requireValue(['get', 'set', 'delete'].includes(operation));
+    requireValue(this.revision.permissions.storage.includes(operation === 'get' ? 'read' : 'write'), 'PERMISSION_DENIED');
     requireValue(typeof this.storage?.[operation] === 'function', 'PERMISSION_DENIED');
     requireValue(typeof key === 'string' && key.length > 0 && key.length <= 256);
-    const input = {
-      ...this.scopeIdentity(scope), key, signal: scope.signal,
-      isCurrent: () => this.live && !scope.signal.aborted,
-    };
+    requireValue(this.storageTasks.size < this.limits.maxInstanceInFlight &&
+      [...this.storageTasks.values()].filter(task => task.scope.siteId === scope.siteId).length <
+        this.limits.maxSiteInFlight, 'RESOURCE_LIMIT');
+    const input = { ...this.scopeIdentity(scope), key, signal: scope.signal,
+      isCurrent: () => this.live && !scope.signal.aborted };
     if (operation === 'set') input.value = clone(value);
-    try {
-      const result = await scope.race(this.trackAdapter(Promise.resolve().then(() => {
-        scope.assertOpen();
-        return this.storage[operation](input);
-      })));
-      this.assertLive();
-      return clone(result);
-    } catch (e) { throw safeError(e, 'STORAGE_ERROR'); }
+    this.registerCallback(callbackId, scope);
+    const task = this.trackAdapter(Promise.resolve().then(() => {
+      scope.assertOpen();
+      return this.storage[operation](input);
+    }));
+    this.storageTasks.set(callbackId, { scope });
+    task.finally(() => this.storageTasks.delete(callbackId)).catch(() => {});
+    scope.race(task).then(
+      result => this.storageResult(callbackId, { value: clone(result ?? null) }, scope),
+      error => this.storageResult(callbackId, { code: safeError(error, 'STORAGE_ERROR').code }, scope),
+    ).catch(() => {});
+  }
+
+  storageResult(id, result, scope) {
+    if (!this.live || scope.signal.aborted) return;
+    try { this.call('storageResult', [id, JSON.stringify(result)], scope); }
+    catch (error) { this.callbackFailed(error, scope); }
   }
 
   async invoke(request, { signal, timeoutMs } = {}) {
@@ -314,30 +359,26 @@ export class LXSession {
     const scope = new ResourceScope(this.root.signal, timeoutMs ?? this.limits.requestTimeoutMs);
     scope.siteId = request.siteId;
     scope.requestId = ++this.nextId;
-    this.invocations.add(scope);
+    const result = deferred();
+    this.invocations.set(scope.requestId, { scope, result });
     let detach = () => {};
     try {
       if (signal) {
         const abort = () => scope.close(fault('CANCELLED'));
         if (signal.aborted) abort();
-        else {
-          signal.addEventListener('abort', abort, { once: true });
-          detach = () => signal.removeEventListener('abort', abort);
-        }
+        else { signal.addEventListener('abort', abort, { once: true }); detach = () => signal.removeEventListener('abort', abort); }
       }
       scope.assertOpen();
-      const inRealm = this.call(this.realm.parse, [JSON.stringify(payload)], scope);
-      const result = this.call(this.handler, [inRealm], scope);
-      requireValue(result && typeof result.then === 'function', 'SCRIPT_PROTOCOL_ERROR');
-      const value = await scope.race(Promise.resolve(result));
+      this.call('dispatch', [scope.requestId, JSON.stringify(payload)], scope);
+      const value = await scope.race(result.promise);
       if (!this.live) throw fault('STALE_SESSION');
       scope.assertOpen();
       return clone(value);
-    } catch (e) { throw safeError(e); }
+    } catch (error) { throw safeError(error); }
     finally {
       detach();
       scope.close();
-      this.invocations.delete(scope);
+      this.invocations.delete(scope.requestId);
     }
   }
 
@@ -354,10 +395,8 @@ export class LXSession {
     this.activated = false;
     this.ready.reject(reason);
     this.root.close(reason);
-    this.handler = null;
-    // ResourceScope closes all managed requests, timers, and storage waits.
-    this.context = null;
-    this.realm = null;
+    this.callbacks.clear();
+    this.engine?.close();
   }
 
   stats() {
