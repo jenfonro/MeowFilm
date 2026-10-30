@@ -323,7 +323,8 @@ public static class MusicRecommendationTests
     private static async Task NativeCatalog()
     {
         using var handler = new HttpFixture();
-        using var catalog = MusicPlatformCatalog.CreateWithHandler(new Sessions(), handler);
+        await using var clients = new MusicClientContextFixture();
+        using var catalog = MusicPlatformCatalog.CreateWithHandler(new Sessions(), handler, clients.Owner);
         await using var f = new Fixture(catalog);
         var result = await f.Start("fm"); Check(S(result, "status") == "ready" && handler.Calls == 1);
         Check(N(await f.Q(), "total") == 2 && f.Rec.GetFeedback(Current(await f.Q())) is { Algorithm: "native-alg" });
@@ -331,7 +332,8 @@ public static class MusicRecommendationTests
     private static async Task NativeHttpDrain()
     {
         using var handler = new HttpFixture { Release = NewSignal() };
-        using var catalog = MusicPlatformCatalog.CreateWithHandler(new Sessions(), handler);
+        await using var clients = new MusicClientContextFixture();
+        using var catalog = MusicPlatformCatalog.CreateWithHandler(new Sessions(), handler, clients.Owner);
         await using var f = new Fixture(catalog);
         var start = f.Start("fm"); await handler.Entered.Task;
         var close = f.Rec.PrepareCloseAsync(); await handler.Cancelled.Task; Check(!close.IsCompleted);

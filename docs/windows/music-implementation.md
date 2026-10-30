@@ -14,8 +14,8 @@ Windows 当前交付一个原生 meowfilm App，并接入音乐相关能力。
 | 目录 | 责任 |
 | --- | --- |
 | `Composition` | 唯一音乐装配、导航、生命周期和公开 seam |
-| `Accounts` | 三平台账号、登录、设备身份和账号详情 |
-| `Platforms` | 固定官方平台 HTTP、协议和歌曲 DTO |
+| `Accounts` | 三平台授权、登录交接和账号详情，旧设备格式只读迁移 |
+| `Platforms` | 固定官方平台 HTTP、协议和歌曲 DTO；`ClientContexts` 独立拥有客户端身份、匿名登记和受控更新 |
 | `Catalog` | 平台目录、个人内容和歌单读取／提交 |
 | `Search` | 歌曲／歌单聚合搜索、策略和请求代次 |
 | `Recommendations` | 每日推荐、持续推荐和唯一 queue lane |
@@ -113,7 +113,7 @@ music.transfer.*   // 仅 kind=script
 
 ## 请求生命周期
 
-所有网络能力必须定义：
+共同请求规则以[页面数据请求](../common/pages/data-requests.md)为准；下列清单说明 Windows owner 需要明确的实现边界，平台初始化见[客户端上下文](music-platform-client-context.md)：
 
 ```text
 owner

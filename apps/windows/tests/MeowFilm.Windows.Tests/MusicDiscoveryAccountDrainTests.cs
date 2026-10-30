@@ -194,19 +194,9 @@ public static class MusicDiscoveryAccountDrainTests
         public Task<MusicAccountDetailsObservation> ReadAccountDetailsAsync(
             MusicPlatformSession account, CancellationToken token = default)
             => Reject<MusicAccountDetailsObservation>("Account details");
-        public Task<MusicAccountChallenge> BeginKgAsync(
-            Func<CancellationToken, Task<StoredKgDevice>> acquire,
-            Func<StoredKgDevice, string, CancellationToken, Task<StoredKgDevice>> save,
-            CancellationToken token) => Reject<MusicAccountChallenge>("Kugou login");
-        public TimeProvider QqFeedbackClock => TimeProvider.System;
         public Task<MusicAccountProfile> VerifyQqFeedbackAccountAsync(
             MusicPlatformSession account, CancellationToken token)
             => Reject<MusicAccountProfile>("QQ feedback account verification");
-        public Task<StoredQqQimei> RequestQqQimeiAsync(StoredQqFeedbackDevice device, CancellationToken token)
-            => Reject<StoredQqQimei>("QQ QIMEI");
-        public Task<StoredQqDeviceSession> RequestQqDeviceSessionAsync(
-            StoredQqFeedbackDevice device, CancellationToken token)
-            => Reject<StoredQqDeviceSession>("QQ device session");
         public void Cancel(string platform) { Cancels++; }
         public ValueTask DisposeAsync() { Disposals++; return ValueTask.CompletedTask; }
     }
@@ -215,11 +205,12 @@ public static class MusicDiscoveryAccountDrainTests
         internal readonly Store Store = new();
         internal readonly Protocol Protocol = new();
         internal readonly MusicAccountOwner Owner;
-        internal Fixture() => Owner = new(Store, Protocol);
+        internal readonly MusicClientContextFixture Clients = new();
+        internal Fixture() => Owner = Clients.CreateAccountOwner(Store, Protocol);
         public async ValueTask DisposeAsync()
         {
             foreach (var hold in Store.Holds.Values) hold.Release.TrySetResult();
-            await Owner.DisposeAsync();
+            await Owner.DisposeAsync(); await Clients.DisposeAsync();
             Check(Store.Writes == 0 && Store.Disposals == 0 && Protocol.NetworkCalls == 0, "Borrowed store or no-network boundary");
             await Store.DisposeAsync();
         }

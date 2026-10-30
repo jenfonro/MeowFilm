@@ -1,5 +1,7 @@
 # 音乐能力
 
+共同规则见[页面数据请求](../common/pages/data-requests.md)和[平台客户端上下文](../common/music/platform-client-context.md)；本端按[逐端自查](../common/music/self-check.md)的报告格式验证，本文件保留 iOS 能力及实现差异。
+
 ## 范围
 
 - 页面：推荐、频道、我的、搜索与结果、公开及本地歌单、设置、账号、完整播放器、歌词、队列和历史。

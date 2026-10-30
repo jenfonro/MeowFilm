@@ -129,7 +129,13 @@ internal static class PlatformDiscovery
             return Finish("song", PJ.Obj(("type", "song"), ("id", nativeId)));
         }
         if (kind == "dailysongs" || S(click, "type") == "daily")
+        {
+            var day = Rank(A(r, "dayOfMonth"), 1);
+            result["dayOfMonth"] = day is <= 31 ? PJ.Node(day) : null;
+            var expandedTitle = Title(r);
+            result["previewSubtitle"] = modern && expandedTitle != S(result, "name") ? expandedTitle : "";
             return Finish("collection", PJ.Obj(("type", "daily"), ("branch", S(click, "branch") == "style" ? "style" : "default")));
+        }
         if (kind == "star" || S(r, "lunaItemType") == "heartRcmd") return Finish("collection", PJ.Obj(("type", "heartbeat")));
         if (kind == "fm" || S(click, "type") == "fm")
         {

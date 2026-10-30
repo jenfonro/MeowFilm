@@ -2,6 +2,8 @@
 
 meowfilm 是单一 iPhone App。界面、导航、呈现与手势由 UIKit 持有；业务、平台、账号、播放、缓存和持久化位于 Swift Package `native/MeowKit`。
 
+共同规则分别见[页面数据请求](../common/pages/data-requests.md)和[音乐平台客户端上下文](../common/music/platform-client-context.md)。本文件说明 Swift Package 与 UIKit 的端侧装配，不把目标契约视为已完成实现。
+
 ## 应用工程
 
 | 目录 | 职责 |

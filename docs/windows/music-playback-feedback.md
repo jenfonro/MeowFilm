@@ -6,7 +6,7 @@
 
 - `MusicFeedbackSettingsOwner` 独占反馈设置文档 `music.feedback.v1`。
 - `MusicFeedbackController` 拥有当前听音实例、资格计算、账号绑定、取消和关闭 drain。
-- `NativeMusicFeedbackProtocol` 拥有平台开始／结束协议会话；它借用当前账号 owner 与固定 `MusicPlatformHttp`。
+- `NativeMusicFeedbackProtocol` 拥有平台开始／结束协议会话；它显式借用当前账号 owner、固定 HTTP 和[客户端 owner](music-platform-client-context.md)。
 - 页面只投影三个平台开关和当前错误，不保存第二份草稿或后台设置。
 
 ## 设置格式
@@ -44,7 +44,8 @@ URL 解析、选择来源、恢复位置、缓存命中、页面打开或 `Play(
 ## 平台边界
 
 - 网易云使用当前账号及当前推荐／来源上下文，开始和结束都需固定 ACK。
-- QQ 使用当前账号、可撤销设备上下文和当前 QIMEI／session；设备过期、身份变化或不确定回执明确失败。
+- 网易云的实时账号身份、录音身份／时长和报告 ACK 分别先核对，再交接对应客户端响应；错误身份、录音或协议结果不会更新客户端，也不会继续发送报告。
+- QQ 使用当前账号和可撤销设备 lease；QIMEI／匿名 session 由独立客户端 owner 保存，账号 owner 每次实时验证账号后才签发组合 lease。客户端变化只撤销依赖它的反馈，设备过期、身份变化或不确定回执明确失败。
 - 酷狗当前仍拒绝发送：现有精确反馈配方未满足受验证 TLS 协议边界，`NativeMusicFeedbackProtocol` 返回 `UNVERIFIED_TLS_PROTOCOL`。不能降级到 HTTP、猜测网关或用匿名设备冒充账号。
 
 平台独立失败不会停止播放，也不能转换为另一平台成功。错误只保留固定代码，不记录 Cookie、设备标识、请求体、响应正文或 URL。

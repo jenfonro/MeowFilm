@@ -131,13 +131,14 @@ public static class MusicKwMgCatalogTests
         internal readonly Handler Handler;
         internal readonly MusicPlatformHttp Http;
         internal readonly MusicPlatformCatalog Catalog;
+        internal readonly MusicClientContextFixture Clients;
         internal Fixture(Func<HttpRequestMessage, HttpResponseMessage> handler)
             : this((r, _) => Task.FromResult(handler(r))) { }
         internal Fixture(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> handler)
-        { Handler = new(handler); Http = MusicPlatformHttp.CreateWithHandler(Handler); Catalog = new(Accounts, Http); }
+        { Handler = new(handler); Http = MusicPlatformHttp.CreateWithHandler(Handler); Clients = new(Http); Catalog = new(Accounts, Http, Clients.Owner); }
         public void Dispose()
         {
-            Catalog.Dispose(); Http.Dispose();
+            Catalog.Dispose(); Clients.Dispose(); Http.Dispose();
             Check(Accounts.Reads == 0 && Accounts.Checks == 0, "Public catalog used accounts");
         }
     }
@@ -452,7 +453,7 @@ public static class MusicKwMgCatalogTests
         finally { release.TrySetResult(); }
         await Error(reason == "cancel" ? "CANCELLED" : reason == "close" ? "CLOSED" : "STALE_SESSION", () => pending);
         Check(f.Handler.Calls == 1);
-        using var other = new MusicPlatformCatalog(f.Accounts, f.Http);
+        using var other = new MusicPlatformCatalog(f.Accounts, f.Http, f.Clients.Owner);
         _ = await other.SearchAsync(new(platform, "x", Limit: 1)); Check(f.Handler.Calls == 2);
     }
     private static async Task Invalid(string platform)
@@ -483,7 +484,8 @@ public static class MusicKwMgCatalogTests
         if (reason == "generation") accounts.Result = new("wy", "synthetic-scope", 1, "123", "MUSIC_U=SYNTHETIC_ONLY");
         var handler = new Handler((_, _) => throw new InvalidOperationException("Acquire never authorized HTTP"));
         using var http = MusicPlatformHttp.CreateWithHandler(handler);
-        using var catalog = new MusicPlatformCatalog(accounts, http, reason == "timeout" ? TimeSpan.FromMilliseconds(30) : null);
+        await using var clients = new MusicClientContextFixture(http);
+        using var catalog = new MusicPlatformCatalog(accounts, http, clients.Owner, reason == "timeout" ? TimeSpan.FromMilliseconds(30) : null);
         using var cancel = new CancellationTokenSource();
         var pending = catalog.SearchAsync(new("wy", "fixture"), cancel.Token);
         await accounts.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2));

@@ -30,7 +30,7 @@ public static class MusicFeedbackProtocolTests
             await f.Protocol.DisposeAsync();
             Equal(0, f.Calls); Equal(0, f.Accounts.Acquisitions); Equal(0, f.Accounts.Disposals);
             True(!f.Handler.Disposed);
-            using var request = MusicPlatformRequests.WyWithCookie("/api/v3/song/detail", new() { ["c"] = "[]" }, null, true);
+            using var request = MusicPlatformRequests.WyWithCookie("/api/v3/song/detail", new() { ["c"] = "[]" }, null, MusicClientContextFixture.Wy, true);
             _ = await f.Http.SendAsync("wy", request, CancellationToken.None);
             Equal(1, f.Calls);
         });
@@ -58,6 +58,26 @@ public static class MusicFeedbackProtocolTests
             foreach (string key in new[] { "mediaListened", "duration", "position", "rate", "mode", "is_heart", "resource_time", "realtime" })
                 True(finish[key] is null);
             Equal(0, f.Accounts.Acquisitions);
+        });
+        yield return Case("validated WY steps reuse each confirmed client update", async () =>
+        {
+            await using var f = new Fixture();
+            f.Reply = async (request, _, count) =>
+            {
+                var client = await f.Clients.Owner.AcquireWyAsync();
+                if (count > 1)
+                    True(client.Nmtid == "SYNTHETIC_FEEDBACK_" + (count - 1) &&
+                        request.Headers.GetValues("Cookie").Single().Contains("NMTID=" + client.Nmtid, StringComparison.Ordinal));
+                var response = Default(request);
+                response.Headers.TryAddWithoutValidation("Set-Cookie", "NMTID=SYNTHETIC_FEEDBACK_" + count + "; Domain=.music.163.com");
+                return response;
+            };
+            await using var session = await f.Protocol.StartAsync(f.Account, Start());
+            Equal("SYNTHETIC_FEEDBACK_3", (await f.Clients.Owner.AcquireWyAsync()).Nmtid);
+            f.Clock.Advance(10);
+            await session.FinishAsync(End());
+            Equal("SYNTHETIC_FEEDBACK_5", (await f.Clients.Owner.AcquireWyAsync()).Nmtid);
+            Equal(5, f.Calls); Equal(2, f.Logs.Count);
         });
         // These source/sourceId/sourceType vectors are copied as data, never executed as JS.
         foreach (var vector in new (string Source, string Id, string Type, string Wire)[]
@@ -94,9 +114,11 @@ public static class MusicFeedbackProtocolTests
             yield return Case("live account mismatch " + (body.Contains("\"account\"") ? "account" : "profile"), async () =>
             {
                 await using var f = new Fixture();
-                f.Reply = (_, _, _) => Task.FromResult(Response(body));
+                var before = await f.Clients.Owner.AcquireWyAsync();
+                f.Reply = (_, _, _) => Task.FromResult(Response(body, "NMTID=SYNTHETIC_REJECTED; Domain=.music.163.com"));
                 await Error(() => f.Protocol.StartAsync(f.Account, Start()), "IDENTITY_MISMATCH");
                 Equal(1, f.Calls); Equal(0, f.Logs.Count);
+                True(ReferenceEquals(before, await f.Clients.Owner.AcquireWyAsync()));
             });
         foreach (var vector in new (string Name, string Body, string Error)[]
         {
@@ -108,10 +130,12 @@ public static class MusicFeedbackProtocolTests
             yield return Case("recording rejects " + vector.Name, async () =>
             {
                 await using var f = new Fixture();
+                var before = await f.Clients.Owner.AcquireWyAsync();
                 f.Reply = (request, _, _) => Task.FromResult(request.RequestUri!.AbsolutePath == SongPath
-                    ? Response(vector.Body) : Default(request));
+                    ? Response(vector.Body, "NMTID=SYNTHETIC_REJECTED; Domain=.music.163.com") : Default(request));
                 await Error(() => f.Protocol.StartAsync(f.Account, Start()), vector.Error);
                 Equal(2, f.Calls); Equal(0, f.Logs.Count);
+                True(ReferenceEquals(before, await f.Clients.Owner.AcquireWyAsync()));
             });
         yield return Case("invalid local identities durations rates and provenance send zero HTTP", async () =>
         {
@@ -895,6 +919,7 @@ public static class MusicFeedbackProtocolTests
         internal readonly QqHandler Handler;
         internal readonly MusicPlatformHttp Http;
         internal readonly NativeMusicFeedbackProtocol Protocol;
+        internal readonly MusicClientContextFixture Clients;
         internal readonly List<JsonObject> Json = [];
         internal readonly List<XDocument> Reports = [];
         internal Func<HttpRequestMessage, CancellationToken, int, Task<HttpResponseMessage>>? Reply;
@@ -905,7 +930,7 @@ public static class MusicFeedbackProtocolTests
             Account = new("tx", "synthetic-qq-scope", 1, id,
                 "musicid=" + id + "; str_musicid=" + id + "; musickey=synthetic-key-" + id + "; login_type=2");
             Accounts = new(Account, Clock); Handler = new(this); Http = MusicPlatformHttp.CreateWithHandler(Handler);
-            Protocol = new(Accounts, Http, Clock);
+            Clients = new(Http, clock: Clock); Protocol = new(Accounts, Http, Clients.Owner, Clock);
         }
         internal HttpResponseMessage Default(HttpRequestMessage request)
         {
@@ -947,7 +972,7 @@ public static class MusicFeedbackProtocolTests
         }
         public async ValueTask DisposeAsync()
         {
-            await Protocol.DisposeAsync(); Http.Dispose();
+            await Protocol.DisposeAsync(); await Clients.DisposeAsync(); Http.Dispose();
         }
     }
 
@@ -978,8 +1003,13 @@ public static class MusicFeedbackProtocolTests
         try { await work(); } catch (OperationCanceledException) { return; }
         throw new Exception("Expected cancellation");
     }
-    private static HttpResponseMessage Response(string json) => new(HttpStatusCode.OK)
+    private static HttpResponseMessage Response(string json, string? cookie = null)
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
         { Content = new StringContent(json, Encoding.UTF8, "application/json") };
+        if (cookie is not null) response.Headers.TryAddWithoutValidation("Set-Cookie", cookie);
+        return response;
+    }
     private static HttpResponseMessage Default(HttpRequestMessage request) => request.RequestUri!.AbsolutePath switch
     {
         IdentityPath => Response("{\"code\":200,\"profile\":{\"userId\":123,\"nickname\":\"synthetic\"},\"account\":{\"id\":123}}"),
@@ -1019,6 +1049,7 @@ public static class MusicFeedbackProtocolTests
         internal readonly Handler Handler;
         internal readonly MusicPlatformHttp Http;
         internal readonly NativeMusicFeedbackProtocol Protocol;
+        internal readonly MusicClientContextFixture Clients;
         internal readonly List<JsonObject> Logs = [];
         internal Func<HttpRequestMessage, CancellationToken, int, Task<HttpResponseMessage>>? Reply;
         private int calls;
@@ -1026,7 +1057,7 @@ public static class MusicFeedbackProtocolTests
         internal Fixture()
         {
             Handler = new(this); Http = MusicPlatformHttp.CreateWithHandler(Handler);
-            Protocol = new(Accounts, Http, Clock);
+            Clients = new(Http, clock: Clock); Protocol = new(Accounts, Http, Clients.Owner, Clock);
         }
         internal async Task<HttpResponseMessage> Send(HttpRequestMessage request, CancellationToken token)
         {
@@ -1057,6 +1088,7 @@ public static class MusicFeedbackProtocolTests
         public async ValueTask DisposeAsync()
         {
             await Protocol.DisposeAsync();
+            await Clients.DisposeAsync();
             Http.Dispose();
         }
     }

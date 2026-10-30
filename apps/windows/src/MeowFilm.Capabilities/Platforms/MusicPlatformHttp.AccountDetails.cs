@@ -19,7 +19,9 @@ public sealed partial class MusicPlatformHttp
         catch { request.Dispose(); throw; }
         return SendCoreAsync(platform, request, token, 1048576,
             TimeSpan.FromMilliseconds(Math.Min(20000, remaining.TotalMilliseconds)),
-            (bytes, _, _) => new MusicPlatformHttpResult(PJ.Parse(bytes, 1048576), []),
+            (bytes, response, _) => platform == "wy"
+                ? JsonResult(PJ.Parse(bytes, 1048576), response)
+                : new MusicPlatformHttpResult(PJ.Parse(bytes, 1048576), []),
             nativePolicy: NativeHttpPolicy.AccountDetails);
     }
     private static bool AccountDetailsOrigin(string platform, HttpRequestMessage request)

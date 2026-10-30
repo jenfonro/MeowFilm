@@ -9,36 +9,36 @@ namespace MeowFilm.Capabilities.Platforms;
 /// Requests contain secrets: never log, serialize, cache or send them through Node/RPC.
 /// Only MusicPlatformHttp's fixed-origin transport may send the result.
 /// </summary>
-public static class MusicPlatformRequests
+internal static class MusicPlatformRequests
 {
-    public static HttpRequestMessage WyWithCookie(string path, JsonObject parameters,
-        string? cookieHeader, bool weapi = false)
-        => Safe(() => PlatformProtocols.WyWithCookie(path, parameters, cookieHeader, weapi));
-    internal static HttpRequestMessage WyVipSignCard(string cookieHeader) =>
+    internal static HttpRequestMessage WyWithCookie(string path, JsonObject parameters,
+        string? cookieHeader, MusicWyClientContext client, bool weapi = false)
+        => Safe(() => PlatformProtocols.WyWithCookie(path, parameters, cookieHeader, client, weapi));
+    internal static HttpRequestMessage WyVipSignCard(string cookieHeader, MusicWyClientContext client) =>
         Safe(() => PlatformProtocols.WyVipEapi(
             "/api/vipnewcenter/app/minidesk/music/sign/pc",
-            new() { ["type"] = 1 }, cookieHeader));
-    internal static HttpRequestMessage WyVipBanner(string cookieHeader) =>
+            new() { ["type"] = 1 }, cookieHeader, client));
+    internal static HttpRequestMessage WyVipBanner(string cookieHeader, MusicWyClientContext client) =>
         Safe(() => PlatformProtocols.WyVipEapi(
             "/api/vipnewcenter/app/resource/common/list",
-            new() { ["positionType"] = 16 }, cookieHeader));
-    internal static HttpRequestMessage WyVipCheckIn(string cookieHeader) =>
+            new() { ["positionType"] = 16 }, cookieHeader, client));
+    internal static HttpRequestMessage WyVipCheckIn(string cookieHeader, MusicWyClientContext client) =>
         Safe(() => PlatformProtocols.WyWithCookie(
-            "/api/vip-center-bff/task/sign", new(), cookieHeader, weapi: true));
-    public static HttpRequestMessage TxWithCookie(string module, string method, JsonObject parameters,
+            "/api/vip-center-bff/task/sign", new(), cookieHeader, client, weapi: true));
+    internal static HttpRequestMessage TxWithCookie(string module, string method, JsonObject parameters,
         string? cookieHeader)
         => Safe(() => PlatformProtocols.TxWithCookie(module, method, parameters, cookieHeader));
     /// <summary>Only QQ QR's short-lived OAuth code; not an arbitrary comm/module override.</summary>
-    public static HttpRequestMessage TxQrLogin(string authorizationCode)
+    internal static HttpRequestMessage TxQrLogin(string authorizationCode)
         => Safe(() => PlatformProtocols.TxQrLogin(authorizationCode));
-    public static HttpRequestMessage KgWithCookie(string path, JsonObject parameters,
-        string? cookieHeader, string guestMid, string? router = null, JsonObject? body = null)
-        => Safe(() => PlatformProtocols.KgWithCookie(path, parameters, cookieHeader, guestMid, router, body));
+    internal static HttpRequestMessage KgWithCookie(string path, JsonObject parameters,
+        string? cookieHeader, MusicKgClientContext client, string? router = null, JsonObject? body = null)
+        => Safe(() => PlatformProtocols.KgWithCookie(path, parameters, cookieHeader, client, router, body));
     // Internal account-only builders: no arbitrary URL, cookie, router or platform override.
-    internal static HttpRequestMessage WySmsSend(string phone, string country) =>
-        Safe(() => PlatformProtocols.WySms(phone, country, null));
-    internal static HttpRequestMessage WySmsLogin(string phone, string country, string captcha) =>
-        Safe(() => PlatformProtocols.WySms(phone, country, captcha));
+    internal static HttpRequestMessage WySmsSend(string phone, string country, MusicWyClientContext client) =>
+        Safe(() => PlatformProtocols.WySms(phone, country, null, client));
+    internal static HttpRequestMessage WySmsLogin(string phone, string country, string captcha, MusicWyClientContext client) =>
+        Safe(() => PlatformProtocols.WySms(phone, country, captcha, client));
     internal static HttpRequestMessage KgRegisterDevice(string mid, long time, string portrait, string encrypted) =>
         Safe(() => PlatformProtocols.KgAccount(MusicAccountHttpStep.KgRegister, mid, null, time,
             new() { ["part"] = "1", ["platid"] = "1", ["p"] = portrait }, encrypted));

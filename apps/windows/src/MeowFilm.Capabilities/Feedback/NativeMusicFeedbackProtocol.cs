@@ -9,11 +9,12 @@ namespace MeowFilm.Capabilities.Feedback;
 /// Borrowed native accounts/HTTP; no settings, media clock, automatic retry or durable work.
 /// Each platform/instance is reserved before I/O. Unsupported exact protocols fail closed.
 /// </summary>
-public sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource accounts, MusicPlatformHttp http,
-    TimeProvider? clock = null) : IMusicFeedbackProtocol
+internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource accounts, MusicPlatformHttp http,
+    MusicPlatformClientContextOwner clients, TimeProvider? clock = null) : IMusicFeedbackProtocol
 {
     private readonly IMusicPlatformSessionSource accounts = accounts ?? throw new ArgumentNullException(nameof(accounts));
     private readonly MusicPlatformHttp http = http ?? throw new ArgumentNullException(nameof(http));
+    private readonly MusicPlatformClientContextOwner clients = clients ?? throw new ArgumentNullException(nameof(clients));
     private readonly TimeProvider clock = clock ?? TimeProvider.System;
     private readonly object gate = new();
     private readonly CancellationTokenSource lifetime = new();
@@ -43,6 +44,8 @@ public sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource acco
         internal TaskCompletionSource? Finished;
         internal MusicFeedbackEnd? End;
         internal NativeMusicFeedbackQq? Qq;
+        internal MusicWyClientContext? Client;
+        internal MusicWyClientContext WyClient => Client!;
         internal Task? Disposal;
         internal bool Closed, Accepted;
         internal Session(NativeMusicFeedbackProtocol owner, MusicPlatformSession account, MusicFeedbackStart input,
@@ -122,16 +125,26 @@ public sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource acco
         FeedbackProtocolRules.Require(times.Count < 40, "RATE_LIMITED");
         times.Enqueue(now);
     }
-    private async Task<JsonObject> Send(Session session, HttpRequestMessage request, CancellationToken token)
+    private async Task Send(Session session, HttpRequestMessage request, CancellationToken token,
+        Action<JsonObject> validate)
     {
-        try { Guard(session, token); }
+        void GuardClient()
+        {
+            Guard(session, token);
+            FeedbackProtocolRules.Require(session.Client is not null && clients.IsCurrent(session.Client),
+                clients.NeedsReconciliation ? "COMMIT_UNKNOWN" : "STORAGE_CONFLICT");
+        }
+        try { GuardClient(); }
         catch { request.Dispose(); throw; }
         try
         {
             // The transport owner must drain the physical request even after cancellation.
             var result = await http.SendFeedbackJsonAsync(session.Account.Platform, request, token).ConfigureAwait(false);
-            Guard(session, token);
-            return result.Body;
+            GuardClient();
+            validate(result.Body);
+            session.Client = await clients.AcceptWyAsync(session.WyClient, session.Account.Cookie,
+                result.SetCookieHeaders, GuardClient, token).ConfigureAwait(false);
+            GuardClient();
         }
         catch (Exception error)
         {
@@ -161,12 +174,13 @@ public sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource acco
                     // Only http://d.kugou.com is evidenced by the fixed CSCC source.
                     throw new MusicFeedbackException("UNVERIFIED_TLS_PROTOCOL");
                 case "wy":
-                    var identity = await Send(session, FeedbackProtocolRequests.WyIdentity(session.Account), session.Token).ConfigureAwait(false);
-                    FeedbackProtocolRequests.VerifyWyIdentity(identity, session.Account);
-                    var recording = await Send(session, FeedbackProtocolRequests.WyRecording(session.Account, session.Input.Recording), session.Token).ConfigureAwait(false);
-                    FeedbackProtocolRequests.VerifyWyRecording(recording, session.Input);
-                    var receipt = await Send(session, FeedbackProtocolRequests.WyReport(session.Account, session.Input, null), session.Token).ConfigureAwait(false);
-                    FeedbackProtocolRules.WySuccess(receipt);
+                    session.Client = await clients.AcquireWyAsync(session.Token).ConfigureAwait(false);
+                    await Send(session, FeedbackProtocolRequests.WyIdentity(session.Account, session.WyClient), session.Token,
+                        body => FeedbackProtocolRequests.VerifyWyIdentity(body, session.Account)).ConfigureAwait(false);
+                    await Send(session, FeedbackProtocolRequests.WyRecording(session.Account, session.Input.Recording, session.WyClient), session.Token,
+                        body => FeedbackProtocolRequests.VerifyWyRecording(body, session.Input)).ConfigureAwait(false);
+                    await Send(session, FeedbackProtocolRequests.WyReport(session.Account, session.Input, null, session.WyClient), session.Token,
+                        FeedbackProtocolRules.WySuccess).ConfigureAwait(false);
                     break;
                 default: throw new MusicFeedbackException("UNSUPPORTED");
             }
@@ -245,10 +259,11 @@ public sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource acco
             else
             {
                 // Revalidate live login, not merely the saved account generation, before the final write.
-                var identity = await Send(session, FeedbackProtocolRequests.WyIdentity(session.Account), linked.Token).ConfigureAwait(false);
-                FeedbackProtocolRequests.VerifyWyIdentity(identity, session.Account);
-                var receipt = await Send(session, FeedbackProtocolRequests.WyReport(session.Account, session.Input, end), linked.Token).ConfigureAwait(false);
-                FeedbackProtocolRules.WySuccess(receipt);
+                session.Client = await clients.AcquireWyAsync(linked.Token).ConfigureAwait(false);
+                await Send(session, FeedbackProtocolRequests.WyIdentity(session.Account, session.WyClient), linked.Token,
+                    body => FeedbackProtocolRequests.VerifyWyIdentity(body, session.Account)).ConfigureAwait(false);
+                await Send(session, FeedbackProtocolRequests.WyReport(session.Account, session.Input, end, session.WyClient), linked.Token,
+                    FeedbackProtocolRules.WySuccess).ConfigureAwait(false);
             }
             Guard(session, linked.Token);
             session.Qq?.Guard(linked.Token);

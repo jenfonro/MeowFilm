@@ -18,3 +18,5 @@ Desktop 只拥有原生 WPF 壳、导航/历史、设置展示、窗口及界面
 - `PrepareForRender()` 只挂载视图并支持 STA 离屏检查，不 Show、不初始化业务。
 
 资源为 `/MeowFilm.Desktop;component/Theme.xaml`。样式覆盖焦点、键盘、悬停、按下、取消、禁用、卸载、高对比、减少动画与缩放。能力可覆盖明确语义色，不复制未知资源或按领域名分支。通知经 NoticeOutlet/NoticeStack，不添加解释性文字。
+
+`MeowFilm.OverlayScrollViewer` 复用 `OverlayScrollChrome.Enabled/Active`，不承载业务分派。普通模式只有滚轮、滚动键、纵向平移或所属纵向滚动条操作实际改变位移时才激活；模板内 viewer 的输入准入由其 `TemplatedParent` 接收。页面悬停、普通焦点、程序恢复位移、内容／视口变化和嵌套滚动不激活。空闲 900ms 后在 160ms 内淡出，重新滚动撤销旧淡出；所属 thumb 捕获鼠标期间保留可见与拖动，释放后重新计时。高对比始终显示系统文字色 thumb，减少动画时直接隐藏；卸载或停用撤销输入准入、计时、动画及所属 thumb 捕获，重新加载只恢复订阅、不恢复旧活动。

@@ -12,31 +12,33 @@ public sealed partial class MusicPlatformCatalog
     public Task<JsonElement> DailyAsync(MusicDailyRequest request, CancellationToken cancellationToken = default)
     {
         PJ.Require(request is not null && Enum.IsDefined(request.Branch)); var p = request!;
-        return RunAsync(p.Platform, "daily", p, p.Refresh, async c =>
+        return RunAsync(p.Platform, "daily", p, p.Refresh, c =>
         {
             PJ.Require(c.Platform == "wy", "UNSUPPORTED"); c.Auth();
             var style = p.Branch == MusicDailyBranch.Style;
-            var data = await c.Xeapi(style ? "/api/homepage/category/daily/song/list" : "/api/v3/discovery/recommend/songs",
-                style ? new() : PJ.Obj(("ispush", false)));
-            var body = data["data"] as JsonObject ?? data;
-            // A missing array, failed signature/decryption or failed upstream code never becomes empty success.
-            var rows = PJ.Rows(PJ.First(body["dailySongs"], data["recommend"]), 1000);
-            var branch = style ? "style" : "default";
-            var batch = Batch(c, "daily", rows, PJ.Obj(("branch", branch)));
-            var now = DateTimeOffset.UtcNow;
-            var local = now.ToOffset(TimeSpan.FromHours(8));
-            var six = new DateTimeOffset(local.Year, local.Month, local.Day, 6, 0, 0, local.Offset);
-            if (six <= local) six = six.AddDays(1);
-            batch["expiresAt"] = (style ? now.AddMinutes(1) : six).ToUnixTimeMilliseconds();
-            batch["id"] = "daily:" + branch; batch["branch"] = branch;
-            batch["name"] = style ? "风格推荐" : "每日推荐";
-            batch["collectionType"] = "daily"; batch["engine"] = "NeteaseCollection"; batch["source"] = "wy"; batch["more"] = false;
-            batch["cover"] = PJ.S(PJ.Array(batch["items"]).FirstOrDefault(), "cover_url");
-            batch["category"] = PJ.At(body, "tags", "categoryId") is { } category ? PJ.Id(category) : "";
-            var tags = PJ.At(body, "tags", "tagVOList");
-            batch["tags"] = PJ.Arr(PJ.Rows(tags ?? new JsonArray(), 100).Select(t =>
-                PJ.Obj(("id", PJ.Id(t["tagId"])), ("name", PJ.Metadata(t["tagName"])))));
-            return batch;
+            return c.Xeapi(style ? "/api/homepage/category/daily/song/list" : "/api/v3/discovery/recommend/songs",
+                style ? new() : PJ.Obj(("ispush", false)), data =>
+                {
+                    var body = data["data"] as JsonObject ?? data;
+                    // A missing array, failed signature/decryption or failed upstream code never becomes empty success.
+                    var rows = PJ.Rows(PJ.First(body["dailySongs"], data["recommend"]), 1000);
+                    var branch = style ? "style" : "default";
+                    var batch = Batch(c, "daily", rows, PJ.Obj(("branch", branch)));
+                    var now = DateTimeOffset.UtcNow;
+                    var local = now.ToOffset(TimeSpan.FromHours(8));
+                    var six = new DateTimeOffset(local.Year, local.Month, local.Day, 6, 0, 0, local.Offset);
+                    if (six <= local) six = six.AddDays(1);
+                    batch["expiresAt"] = (style ? now.AddMinutes(1) : six).ToUnixTimeMilliseconds();
+                    batch["id"] = "daily:" + branch; batch["branch"] = branch;
+                    batch["name"] = style ? "风格推荐" : "每日推荐";
+                    batch["collectionType"] = "daily"; batch["engine"] = "NeteaseCollection"; batch["source"] = "wy"; batch["more"] = false;
+                    batch["cover"] = PJ.S(PJ.Array(batch["items"]).FirstOrDefault(), "cover_url");
+                    batch["category"] = PJ.At(body, "tags", "categoryId") is { } category ? PJ.Id(category) : "";
+                    var tags = PJ.At(body, "tags", "tagVOList");
+                    batch["tags"] = PJ.Arr(PJ.Rows(tags ?? new JsonArray(), 100).Select(t =>
+                        PJ.Obj(("id", PJ.Id(t["tagId"])), ("name", PJ.Metadata(t["tagName"])))));
+                    return batch;
+                });
         }, cancellationToken, privateCache: true);
     }
     private static readonly string[] FmScenes = ["NIGHT_EMO", "EXERCISE", "SLEEP_HELP", "RELAX", "CHEERFUL", "LYRICAL", "CURE", "FOCUS",
@@ -61,20 +63,22 @@ public sealed partial class MusicPlatformCatalog
             PJ.Require(c.Platform == "wy", "UNSUPPORTED"); c.Auth();
             if (rule)
             {
-                var data = await c.Wy(p.Preview ? "/api/tag/tab/fm/cover" : "/api/tag/tab/fm/recommends",
-                    RuleParameters(p));
-                if (p.Preview)
+                return await c.Wy(p.Preview ? "/api/tag/tab/fm/cover" : "/api/tag/tab/fm/recommends",
+                    RuleParameters(p), data =>
                 {
-                    PJ.Require(PJ.At(data, "data") is JsonObject && PJ.At(data, "data", "cover") is not null, "INVALID_RESPONSE");
-                    return PJ.Obj(("platform", "wy"), ("kind", "fm-preview"), ("cover", PJ.Image(PJ.At(data, "data", "cover"))),
-                        ("preview", true), ("context", PJ.Obj(("provider", "rule"), ("ruleId", p.RuleId ?? ""), ("tabTagId", p.TabTagId ?? ""))));
-                }
-                return Batch(c, "fm", PJ.Rows(data["data"], 5), PJ.Obj(("provider", "rule"), ("ruleId", p.RuleId ?? ""), ("tabTagId", p.TabTagId ?? "")));
+                    if (p.Preview)
+                    {
+                        PJ.Require(PJ.At(data, "data") is JsonObject && PJ.At(data, "data", "cover") is not null, "INVALID_RESPONSE");
+                        return PJ.Obj(("platform", "wy"), ("kind", "fm-preview"), ("cover", PJ.Image(PJ.At(data, "data", "cover"))),
+                            ("preview", true), ("context", PJ.Obj(("provider", "rule"), ("ruleId", p.RuleId ?? ""), ("tabTagId", p.TabTagId ?? ""))));
+                    }
+                    return Batch(c, "fm", PJ.Rows(data["data"], 5), PJ.Obj(("provider", "rule"), ("ruleId", p.RuleId ?? ""), ("tabTagId", p.TabTagId ?? "")));
+                });
             }
             var mode = p.Mode switch { MusicFmMode.Familiar => "FAMILIAR", MusicFmMode.Explore => "EXPLORE",
                 MusicFmMode.Puzzle => "PUZZLE_MODE_RCMD", MusicFmMode.Scene => "SCENE_RCMD", _ => "DEFAULT" };
-            var response = await c.Wy("/api/v1/radio/get", PJ.Obj(("mode", mode), ("subMode", p.Submode), ("limit", p.Preview ? 1 : 3)));
-            return Batch(c, "fm", RadioRows(response, p.Preview ? 1 : 3), PJ.Obj(("mode", mode), ("submode", p.Submode), ("preview", p.Preview)));
+            return await c.Wy("/api/v1/radio/get", PJ.Obj(("mode", mode), ("subMode", p.Submode), ("limit", p.Preview ? 1 : 3)),
+                data => Batch(c, "fm", RadioRows(data, p.Preview ? 1 : 3), PJ.Obj(("mode", mode), ("submode", p.Submode), ("preview", p.Preview))));
         }, cancellationToken, cacheable: false);
     }
     private static JsonObject RuleParameters(MusicFmRequest p)
@@ -112,41 +116,43 @@ public sealed partial class MusicPlatformCatalog
     public Task<JsonElement> SimilarAsync(MusicSimilarRequest request, CancellationToken cancellationToken = default)
     {
         PJ.Require(request is not null); var p = request! with { SourceIds = SongIds(request!.SourceIds, 20) };
-        return RunAsync(p.Platform, "similar", p, false, async c =>
+        return RunAsync(p.Platform, "similar", p, false, c =>
         {
             PJ.Require(c.Platform == "wy", "UNSUPPORTED"); c.Auth();
-            var data = await c.Wy("/api/v1/radio/get", PJ.Obj(("limit", "3"), ("mode", "SIMILAR"), ("sourceType", "song"),
-                ("sourceIds", IntegerArray(p.SourceIds)), ("unplaySonIds", "[]")), true);
-            return Batch(c, "similar", RadioRows(data, 3), PJ.Obj(("sourceIds", p.SourceIds), ("sourceType", "song")));
+            return c.Wy("/api/v1/radio/get", PJ.Obj(("limit", "3"), ("mode", "SIMILAR"), ("sourceType", "song"),
+                ("sourceIds", IntegerArray(p.SourceIds)), ("unplaySonIds", "[]")),
+                data => Batch(c, "similar", RadioRows(data, 3), PJ.Obj(("sourceIds", p.SourceIds), ("sourceType", "song"))), true);
         }, cancellationToken, cacheable: false);
     }
     public Task<JsonElement> HeartbeatAsync(MusicHeartbeatRequest request, CancellationToken cancellationToken = default)
     {
         PJ.Require(request is not null); var p = request!;
         PJ.IdInput(p.PlaylistId); PJ.IdInput(p.StartMusicId); PJ.IdInput(p.SongId);
-        return RunAsync(p.Platform, "heartbeat", p, false, async c =>
+        return RunAsync(p.Platform, "heartbeat", p, false, c =>
         {
             PJ.Require(c.Platform == "wy", "UNSUPPORTED"); c.Auth();
-            var data = await c.Wy("/api/playmode/intelligence/list", PJ.Obj(("playlistId", p.PlaylistId), ("startMusicId", p.StartMusicId),
-                ("songId", p.SongId), ("type", p.FromHome ? "fromPlayAll" : "fromPlayOne"), ("count", 100)));
-            // Missing songInfo is not enough metadata for a playable placeholder.
-            var rows = PJ.Rows(data["data"], 100);
-            PJ.Require(rows.All(r => r["songInfo"] is JsonObject), "INVALID_RESPONSE");
-            return Batch(c, "heartbeat", rows, PJ.Obj(("playlistId", p.PlaylistId), ("startMusicId", p.StartMusicId),
-                ("songId", p.SongId), ("fromHome", p.FromHome)));
+            return c.Wy("/api/playmode/intelligence/list", PJ.Obj(("playlistId", p.PlaylistId), ("startMusicId", p.StartMusicId),
+                ("songId", p.SongId), ("type", p.FromHome ? "fromPlayAll" : "fromPlayOne"), ("count", 100)), data =>
+            {
+                // Missing songInfo is not enough metadata for a playable placeholder.
+                var rows = PJ.Rows(data["data"], 100);
+                PJ.Require(rows.All(r => r["songInfo"] is JsonObject), "INVALID_RESPONSE");
+                return Batch(c, "heartbeat", rows, PJ.Obj(("playlistId", p.PlaylistId), ("startMusicId", p.StartMusicId),
+                    ("songId", p.SongId), ("fromHome", p.FromHome)));
+            });
         }, cancellationToken, cacheable: false);
     }
     public Task<JsonElement> QueueRecommendationsAsync(MusicQueueRecommendationsRequest request, CancellationToken cancellationToken = default)
     {
         PJ.Require(request is not null); var p = request! with { SongIds = SongIds(request!.SongIds, 1000) };
         PJ.IdInput(p.CurrentPlaySongId); PJ.Require(p.SongIds.Contains(p.CurrentPlaySongId, StringComparer.Ordinal));
-        return RunAsync(p.Platform, "queue-recommendations", p, false, async c =>
+        return RunAsync(p.Platform, "queue-recommendations", p, false, c =>
         {
             PJ.Require(c.Platform == "wy", "UNSUPPORTED"); c.Auth();
-            var data = await c.Wy("/api/homepage/more/rcmd/song", PJ.Obj(("songIds", IntegerArray(p.SongIds)),
-                ("currentPlaySongId", p.CurrentPlaySongId), ("source", "curlist_more_rcmd")));
-            return Batch(c, "queue-recommendations", PJ.Rows(PJ.At(data, "data", "songList"), 1000),
-                PJ.Obj(("songIds", p.SongIds), ("currentPlaySongId", p.CurrentPlaySongId)), PJ.At(data, "data", "algMap") as JsonObject);
+            return c.Wy("/api/homepage/more/rcmd/song", PJ.Obj(("songIds", IntegerArray(p.SongIds)),
+                ("currentPlaySongId", p.CurrentPlaySongId), ("source", "curlist_more_rcmd")),
+                data => Batch(c, "queue-recommendations", PJ.Rows(PJ.At(data, "data", "songList"), 1000),
+                    PJ.Obj(("songIds", p.SongIds), ("currentPlaySongId", p.CurrentPlaySongId)), PJ.At(data, "data", "algMap") as JsonObject));
         }, cancellationToken, cacheable: false);
     }
     public Task<JsonElement> PersonalPlaylistsAsync(MusicPersonalPlaylistsRequest request, CancellationToken cancellationToken = default)
@@ -172,21 +178,24 @@ public sealed partial class MusicPlatformCatalog
             if (c.Platform == "wy")
             {
                 PJ.Require(p.Kind == MusicPersonalListKind.All, "UNSUPPORTED");
-                var data = await c.Wy("/api/user/playlist", PJ.Obj(("uid", uid), ("limit", p.Limit),
-                    ("offset", (p.Page - 1) * p.Limit), ("includeVideo", true)), true);
-                var raw = PJ.Rows(data["playlist"], p.Limit); more = PJ.Bool(data["more"]);
-                if (more) PJ.Require(raw.Count == p.Limit, "INCOMPLETE_PAGE");
-                items = raw.Select(r =>
+                return await c.Wy("/api/user/playlist", PJ.Obj(("uid", uid), ("limit", p.Limit),
+                    ("offset", (p.Page - 1) * p.Limit), ("includeVideo", true)), data =>
                 {
-                    var owner = PJ.Id(PJ.At(r, "creator", "userId"));
-                    if (r["userId"] is { } declared) PJ.Require(PJ.Id(declared) == owner, "IDENTITY_MISMATCH");
-                    var card = PlatformSongs.Playlist("wy", r); var id = PJ.S(card, "id");
-                    card["ownerId"] = owner; card["relationship"] = owner == uid ? "owned" : "subscribed";
-                    card["kind"] = owner == uid && PJ.Scalar(r["specialType"]) == "5" ? "favorites" : "playlist";
-                    card["locator"] = PJ.Obj(("playlistId", id), ("specialType", r["specialType"]));
-                    card["action"] = PJ.Obj(("type", "playlist"), ("id", id)); card["available"] = true;
-                    return card;
-                }).ToList();
+                    var raw = PJ.Rows(data["playlist"], p.Limit); var wyMore = PJ.Bool(data["more"]);
+                    if (wyMore) PJ.Require(raw.Count == p.Limit, "INCOMPLETE_PAGE");
+                    var wyItems = raw.Select(r =>
+                    {
+                        var owner = PJ.Id(PJ.At(r, "creator", "userId"));
+                        if (r["userId"] is { } declared) PJ.Require(PJ.Id(declared) == owner, "IDENTITY_MISMATCH");
+                        var card = PlatformSongs.Playlist("wy", r); var id = PJ.S(card, "id");
+                        card["ownerId"] = owner; card["relationship"] = owner == uid ? "owned" : "subscribed";
+                        card["kind"] = owner == uid && PJ.Scalar(r["specialType"]) == "5" ? "favorites" : "playlist";
+                        card["locator"] = PJ.Obj(("playlistId", id), ("specialType", r["specialType"]));
+                        card["action"] = PJ.Obj(("type", "playlist"), ("id", id)); card["available"] = true;
+                        return card;
+                    }).ToList();
+                    return Complete(wyItems, null, null, null, wyMore, null);
+                }, true);
             }
             else if (c.Platform == "tx")
             {
@@ -210,21 +219,26 @@ public sealed partial class MusicPlatformCatalog
                 more = total is { } count ? seen.Count + items.Count < count : items.Count > 0;
                 if (total is { } sum) PJ.Require(seen.Count + items.Count <= sum && (items.Count > 0 || seen.Count == sum), "INCOMPLETE_PAGE");
             }
-            if (prev["total"] is not null) PJ.Require(total == PJ.Count(prev["total"]), "SNAPSHOT_CHANGED");
-            if (prev["version"] is not null) PJ.Require(version == PJ.Scalar(prev["version"]), "SNAPSHOT_CHANGED");
-            if (prev["snapshot"] is not null) CheckSnapshot(PJ.S(prev, "snapshot"), snapshot ?? "");
-            foreach (var item in items) PJ.Require(seen.Add(PJ.S(item, "id")), "PAGINATION_STALLED");
-            if (more) PJ.Require((items.Count > 0 || providerCursor is not null) && p.Page < 100,
-                p.Page >= 100 ? "PAGINATION_LIMIT" : "PAGINATION_STALLED");
-            var next = more ? PJ.Obj(("scope", c.Scope), ("target", target), ("page", p.Page + 1), ("limit", p.Limit),
-                ("seen", seen.ToArray()), ("total", total), ("version", version), ("snapshot", snapshot)) : null;
-            if (next is not null && providerCursor is not null)
-                foreach (var field in providerCursor) next[field.Key] = field.Value?.DeepClone();
-            // Native UI keeps the whole cursor; cross-account or repeated pages cannot silently merge.
-            if (next is not null) PJ.Require(System.Text.Encoding.UTF8.GetByteCount(PJ.Encode(next)) <= 32768, "PAGINATION_LIMIT");
-            return PJ.Obj(("platform", c.Platform), ("accountId", uid), ("collection", p.Kind.ToString().ToLowerInvariant()),
-                ("items", PJ.Arr(items)), ("page", p.Page), ("limit", p.Limit), ("total", total), ("more", more),
-                ("continuation", next), ("snapshot", snapshot), ("version", version));
+            return Complete(items, total, version, snapshot, more, providerCursor);
+            JsonObject Complete(List<JsonObject> pageItems, long? pageTotal, string? pageVersion,
+                string? pageSnapshot, bool hasMore, JsonObject? cursor)
+            {
+                if (prev["total"] is not null) PJ.Require(pageTotal == PJ.Count(prev["total"]), "SNAPSHOT_CHANGED");
+                if (prev["version"] is not null) PJ.Require(pageVersion == PJ.Scalar(prev["version"]), "SNAPSHOT_CHANGED");
+                if (prev["snapshot"] is not null) CheckSnapshot(PJ.S(prev, "snapshot"), pageSnapshot ?? "");
+                foreach (var item in pageItems) PJ.Require(seen.Add(PJ.S(item, "id")), "PAGINATION_STALLED");
+                if (hasMore) PJ.Require((pageItems.Count > 0 || cursor is not null) && p.Page < 100,
+                    p.Page >= 100 ? "PAGINATION_LIMIT" : "PAGINATION_STALLED");
+                var next = hasMore ? PJ.Obj(("scope", c.Scope), ("target", target), ("page", p.Page + 1), ("limit", p.Limit),
+                    ("seen", seen.ToArray()), ("total", pageTotal), ("version", pageVersion), ("snapshot", pageSnapshot)) : null;
+                if (next is not null && cursor is not null)
+                    foreach (var field in cursor) next[field.Key] = field.Value?.DeepClone();
+                // Native UI keeps the whole cursor; cross-account or repeated pages cannot silently merge.
+                if (next is not null) PJ.Require(System.Text.Encoding.UTF8.GetByteCount(PJ.Encode(next)) <= 32768, "PAGINATION_LIMIT");
+                return PJ.Obj(("platform", c.Platform), ("accountId", uid), ("collection", p.Kind.ToString().ToLowerInvariant()),
+                    ("items", PJ.Arr(pageItems)), ("page", p.Page), ("limit", p.Limit), ("total", pageTotal), ("more", hasMore),
+                    ("continuation", next), ("snapshot", pageSnapshot), ("version", pageVersion));
+            }
         }, cancellationToken, cacheable: false);
     }
     private static JsonObject KgPersonalItem(JsonObject r, string uid, Call c)

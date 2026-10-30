@@ -15,6 +15,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using MeowFilm.Core.Runtime;
+using MeowFilm.AppHost;
 using MeowFilm.Desktop;
 using MeowFilm.Media;
 using MeowFilm.Capabilities;
@@ -1033,7 +1034,7 @@ public static partial class MusicUiTests
         {
             root ??= NewRoot();
             IProtectedDocumentStore store = persistent
-                ? new DpapiDocumentStore(root, ["music.library.v1", "music.files.v1", "music.accounts.v1"]) : new DocumentProbe();
+                ? new DpapiDocumentStore(root, AppIdentity.NativeNamespaces) : new DocumentProbe();
             var runtime = new NativeMusicScriptTestRuntime(); MusicCapability? module = null;
             var application = new MusicNativeApplication(store, runtime, new NoUpstream());
             try
@@ -1131,7 +1132,7 @@ public static partial class MusicUiTests
         {
             token.ThrowIfCancellationRequested();
             if (closed) throw new ProtectedDocumentException(DocumentStoreError.Closed);
-            if (ns is not ("music.library.v1" or "music.files.v1" or "music.accounts.v1")) throw new ProtectedDocumentException(DocumentStoreError.InvalidRequest);
+            if (!AppIdentity.NativeNamespaces.Contains(ns, StringComparer.Ordinal)) throw new ProtectedDocumentException(DocumentStoreError.InvalidRequest);
         }
         public ValueTask DisposeAsync() { lock (gate) { closed = true; values.Clear(); } return ValueTask.CompletedTask; }
     }

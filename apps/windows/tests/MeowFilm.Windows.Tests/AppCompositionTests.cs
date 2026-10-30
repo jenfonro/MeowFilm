@@ -50,6 +50,7 @@ public static class AppCompositionTests
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "meowfilm", "aggregate"));
         Check(AppIdentity.ScriptModules.Select(m => m.Id).SequenceEqual(new[] { "music" }));
         Check(AppIdentity.NativeNamespaces.Contains("music.accounts.v1"));
+        Check(AppIdentity.NativeNamespaces.Contains("music.platform-context.v1"));
         return Task.CompletedTask;
     }
     private static async Task Components()
@@ -126,6 +127,8 @@ public static class AppCompositionTests
             await using var music = new MusicCapability(application, store, playback);
             var lifecycle = new AppShutdown([music], []);
             var shell = new ShellWindow([music], [], lifecycle.CloseAsync, lifecycle.ForceReleaseAsync);
+            var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            shell.Closed += (_, _) => closed.TrySetResult();
             try
             {
                 CheckRecommendationPage(music);
@@ -172,7 +175,7 @@ public static class AppCompositionTests
             finally
             {
                 shell.Close();
-                await shell.ShutdownCompletion.WaitAsync(TimeSpan.FromSeconds(8));
+                await Task.WhenAll(shell.ShutdownCompletion, closed.Task).WaitAsync(TimeSpan.FromSeconds(8));
                 Check(shell.ShutdownSucceeded, "startup fixture must close through the actual App lifecycle");
                 await Dispatcher.Yield(DispatcherPriority.Background);
             }
@@ -198,6 +201,8 @@ public static class AppCompositionTests
         };
         var lifecycle = new AppShutdown([music], []);
         var shell = new ShellWindow([music], [], lifecycle.CloseAsync, lifecycle.ForceReleaseAsync);
+        var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        shell.Closed += (_, _) => closed.TrySetResult();
         try
         {
             CheckRecommendationPage(music);
@@ -219,7 +224,7 @@ public static class AppCompositionTests
         finally
         {
             shell.Close();
-            await shell.ShutdownCompletion.WaitAsync(TimeSpan.FromSeconds(8));
+            await Task.WhenAll(shell.ShutdownCompletion, closed.Task).WaitAsync(TimeSpan.FromSeconds(8));
             Check(shell.ShutdownSucceeded, "failed startup must still release the actual App");
             await Dispatcher.Yield(DispatcherPriority.Background);
         }

@@ -12,7 +12,7 @@ public static partial class MusicNativeAccountDetailsTests
 {
     private static IEnumerable<TestCase> HttpCases()
     {
-        yield return Case("HTTP-fixed-three-platform-read-recipes-no-SetCookie", HttpRecipes);
+        yield return Case("HTTP-fixed-three-platform-read-recipes-WY-client-cookies-only", HttpRecipes);
         yield return Case("HTTP-ordinary-and-public-catalog-not-widened", HttpSeparate);
         foreach (string fault in new[] { "http", "port", "fragment", "userinfo", "host", "path", "method",
             "cookie", "authorization", "cross-platform", "duplicate-query", "signature", "router", "body-batch", "body-pair", "body-comm" })
@@ -28,11 +28,9 @@ public static partial class MusicNativeAccountDetailsTests
     {
         string cookie = MusicAccountDetailsFixture.Cookie(platform);
         if (platform == "wy") return MusicPlatformRequests.WyWithCookie(profile ? "/api/w/nuser/account/get" :
-            "/api/music-vip-membership/client/vip/info", profile ? new() : new() { ["userId"] = UserId }, cookie, weapi: true);
+            "/api/music-vip-membership/client/vip/info", profile ? new() : new() { ["userId"] = UserId }, cookie, MusicClientContextFixture.Wy, weapi: true);
         if (platform == "tx") return MusicPlatformRequests.TxWithCookie("VipLogin.VipLoginInter", "vip_login_base", new(), cookie);
-        var request = MusicPlatformRequests.KgWithCookie(profile ? "/v3/get_my_info" : "/v1/get_union_vip",
-            profile ? new() { ["plat"] = 1 } : new() { ["busi_type"] = "concept" }, cookie, "123456789",
-            profile ? "usercenter.kugou.com" : null, profile ? new() { ["visit_time"] = 1800000000, ["usertype"] = 1,
+        var request = MusicPlatformRequests.KgWithCookie(profile ? "/v3/get_my_info" : "/v1/get_union_vip", profile ? new() { ["plat"] = 1 } : new() { ["busi_type"] = "concept" }, cookie, MusicClientContextFixture.Kg, profile ? "usercenter.kugou.com" : null, profile ? new() { ["visit_time"] = 1800000000, ["usertype"] = 1,
                 ["userid"] = JsonNode.Parse(UserId), ["p"] = new string('A', 256) } : null);
         if (!profile) request.RequestUri = new UriBuilder(request.RequestUri!) { Host = "kugouvip.kugou.com" }.Uri;
         return request;
@@ -46,9 +44,10 @@ public static partial class MusicNativeAccountDetailsTests
     private static HttpResponseMessage Response(string text = "{}") => new(HttpStatusCode.OK) { Content = new StringContent(text) };
     private static async Task HttpRecipes()
     {
+        const string update = "NMTID=SYNTHETIC_NEW_CLIENT; Domain=.music.163.com; Path=/; Secure";
         var handler = new DetailsHandler((_, _) => {
             var response = Response();
-            response.Headers.TryAddWithoutValidation("Set-Cookie", "SYNTHETIC_NEW_TOKEN=not-published");
+            response.Headers.TryAddWithoutValidation("Set-Cookie", update);
             return Task.FromResult(response);
         });
         using var http = MusicPlatformHttp.CreateWithHandler(handler);
@@ -56,7 +55,7 @@ public static partial class MusicNativeAccountDetailsTests
             foreach (bool profile in new[] { false, true })
             {
                 var result = await http.SendAccountDetailsAsync(platform, Request(platform, profile), default, TimeSpan.FromSeconds(1));
-                Check(result.SetCookieHeaders.Count == 0);
+                Check(platform == "wy" ? result.SetCookieHeaders.SequenceEqual([update]) : result.SetCookieHeaders.Count == 0);
             }
         foreach (var pair in new[] { ("VipLogin.VipLoginInter", "vip_login_base"),
             ("music.UserInfo.userInfoServer", "GetLoginUserInfo"), ("music.UnifiedHomepage.UnifiedHomepageSrv", "GetHomepageHeader") })
@@ -64,7 +63,8 @@ public static partial class MusicNativeAccountDetailsTests
             var request = MusicPlatformRequests.TxWithCookie(pair.Item1, pair.Item2, pair.Item2 == "GetHomepageHeader"
                 ? new() { ["uin"] = MusicAccountDetailsFixture.Euin, ["IsQueryTabDetail"] = 1 } : new(),
                 MusicAccountDetailsFixture.Cookie("tx"));
-            await http.SendAccountDetailsAsync("tx", request, default, TimeSpan.FromSeconds(1));
+            var result = await http.SendAccountDetailsAsync("tx", request, default, TimeSpan.FromSeconds(1));
+            Check(result.SetCookieHeaders.Count == 0);
         }
         Check(handler.Calls == 7);
     }

@@ -21,12 +21,36 @@ internal sealed record SyncRemote(string Id, string Name, string Kind, bool Writ
 internal sealed record SyncDirectory(string AccountId, IReadOnlyList<SyncRemote> Collections);
 
 internal abstract class MusicSyncAdapter(MusicPlatformSession session, MusicPlatformHttp http,
-    MusicSyncRequestBudget budget, Func<Task> guard, CancellationToken token)
+    MusicPlatformClientContextOwner clients, MusicPlatformClientContext? client, MusicSyncRequestBudget budget,
+    Func<Task> guard, Action accountGuard, CancellationToken token)
 {
     protected readonly MusicPlatformSession Session = session;
     protected readonly CancellationToken Token = token;
-    protected readonly Func<Task> Guard = guard;
+    private readonly Func<Task> checkpointGuard = guard;
     protected readonly MusicPlatformHttp Http = http;
+    protected readonly MusicPlatformClientContextOwner Clients = clients;
+    private MusicPlatformClientContext? clientContext = client;
+    protected MusicWyClientContext WyClient => (MusicWyClientContext)clientContext!;
+    protected MusicKgClientContext KgClient => (MusicKgClientContext)clientContext!;
+    private void GuardClient()
+    {
+        accountGuard();
+        Token.ThrowIfCancellationRequested();
+        if (clientContext is not null)
+            Require(Clients.IsCurrent(clientContext), Clients.NeedsReconciliation ? "COMMIT_UNKNOWN" : "STORAGE_CONFLICT");
+    }
+    protected async Task Guard()
+    {
+        await checkpointGuard().ConfigureAwait(false);
+        GuardClient();
+    }
+    protected async Task AcceptCatalogReadAsync()
+    {
+        accountGuard(); Token.ThrowIfCancellationRequested();
+        if (clientContext is not null)
+            clientContext = await Clients.AcquireAsync(Platform, Token).ConfigureAwait(false);
+        await Guard().ConfigureAwait(false);
+    }
     private readonly MusicSyncRequestBudget budget = budget;
     internal string Platform => Session.Platform;
     internal string AccountId => Session.UserId;
@@ -36,16 +60,19 @@ internal abstract class MusicSyncAdapter(MusicPlatformSession session, MusicPlat
         catch { request.Dispose(); throw; }
         var response = await Http.SendAsync(Platform, request, Token).ConfigureAwait(false);
         await Guard().ConfigureAwait(false);
-        return Platform switch { "wy" => PlatformProtocols.WySuccess(response.Body), "tx" => PlatformProtocols.TxSuccess(response.Body),
+        var body = Platform switch { "wy" => PlatformProtocols.WySuccess(response.Body), "tx" => PlatformProtocols.TxSuccess(response.Body),
             "kg" => PlatformProtocols.KgSuccess(response.Body, path ?? ""), _ => throw new MusicLibraryException("INVALID_PLATFORM") };
+        if (Platform == "wy") clientContext = await Clients.AcceptWyAsync(WyClient, Session.Cookie,
+            response.SetCookieHeaders, GuardClient, Token).ConfigureAwait(false);
+        await Guard().ConfigureAwait(false); return body;
     }
     protected Task<JsonObject> Wy(string path, JsonObject body, bool weapi = true) =>
-        Send(MusicPlatformRequests.WyWithCookie(path, body, Session.Cookie, weapi));
+        Send(MusicPlatformRequests.WyWithCookie(path, body, Session.Cookie, WyClient, weapi));
     protected Task<JsonObject> Tx(string module, string method, JsonObject body) =>
         Send(MusicPlatformRequests.TxWithCookie(module, method, body, Session.Cookie));
     protected Dictionary<string, string> Cookies => PJ.CookieHeader(Session.Cookie);
     protected Task<JsonObject> Kg(string path, JsonObject query, string? router = "cloudlist.service.kugou.com", JsonObject? body = null) =>
-        Send(MusicPlatformRequests.KgWithCookie(path, query, Session.Cookie, "", router, body), path);
+        Send(MusicPlatformRequests.KgWithCookie(path, query, Session.Cookie, KgClient, router, body), path);
     protected static JsonObject O(params (string Key, object? Value)[] v) => LJ.Obj(v);
     protected static JsonArray A(IEnumerable<string> v) => LJ.Arr(v);
     protected static string Id(JsonNode? v) => PJ.Id(v);
@@ -77,14 +104,14 @@ internal abstract class MusicSyncAdapter(MusicPlatformSession session, MusicPlat
     {
         if (LJ.S(song["title"]).Length == 0 || LJ.S(song["artist"]).Length == 0 || LJ.N(song["duration"]) <= 0) return null;
         // Read-only catalog owned by this round, pinned to this exact lease. No second data writer/cache authority.
-        using var catalog = new MusicPlatformCatalog(new Pinned(Session, Guard), Http);
+        using var catalog = new MusicPlatformCatalog(new Pinned(Session, checkpointGuard), Http, Clients);
         string query = (LJ.S(song["title"]) + " " + LJ.S(song["artist"])); query = query[..Math.Min(200, query.Length)];
         var matches = new Dictionary<string, JsonObject>(); long? total = null; int received = 0;
         for (int page = 1; page <= (Platform == "kg" ? 10 : 1); page++)
         {
             await AdmitRequest().ConfigureAwait(false);
             var result = await catalog.SearchAsync(new(Platform, query, Page: page, Limit: 30, Refresh: true), Token).ConfigureAwait(false);
-            await Guard().ConfigureAwait(false);
+            await AcceptCatalogReadAsync().ConfigureAwait(false);
             var value = JsonNode.Parse(result.GetRawText())!.AsObject();
             if (Platform == "kg") { long n = Count(value["total"]); if (total is not null) Require(total == n, "SNAPSHOT_CHANGED"); total = n; if (n > 300) return null; }
             foreach (var candidate in Rows(value["items"], 30))

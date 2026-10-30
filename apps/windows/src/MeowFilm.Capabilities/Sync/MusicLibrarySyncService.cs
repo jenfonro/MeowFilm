@@ -14,6 +14,7 @@ public sealed class MusicLibrarySyncService : IAsyncDisposable
     private readonly MusicLibraryOwner library;
     private readonly IMusicPlatformSessionSource sessions;
     private readonly MusicPlatformHttp http;
+    private readonly MusicPlatformClientContextOwner clients;
     private readonly Func<HttpRequestMessage, CancellationToken, Task<byte[]>>? cloud;
     private readonly TimeProvider time;
     private readonly object gate = new();
@@ -25,13 +26,15 @@ public sealed class MusicLibrarySyncService : IAsyncDisposable
     private bool closed, stopping, started;
     public event Action? StateChanged;
 
-    public MusicLibrarySyncService(MusicLibraryOwner library, IMusicPlatformSessionSource sessions, MusicPlatformHttp http)
-        : this(library, sessions, http, null) { }
-    public MusicLibrarySyncService(MusicLibraryOwner library, IMusicPlatformSessionSource sessions, MusicPlatformHttp http,
-        Func<HttpRequestMessage, CancellationToken, Task<byte[]>>? kugouCloudTransport, TimeProvider? timeProvider = null)
+    internal MusicLibrarySyncService(MusicLibraryOwner library, IMusicPlatformSessionSource sessions, MusicPlatformHttp http,
+        MusicPlatformClientContextOwner clients)
+        : this(library, sessions, http, clients, null) { }
+    internal MusicLibrarySyncService(MusicLibraryOwner library, IMusicPlatformSessionSource sessions, MusicPlatformHttp http,
+        MusicPlatformClientContextOwner clients, Func<HttpRequestMessage, CancellationToken, Task<byte[]>>? kugouCloudTransport, TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(library); ArgumentNullException.ThrowIfNull(sessions); ArgumentNullException.ThrowIfNull(http);
-        this.library = library; this.sessions = sessions; this.http = http; cloud = kugouCloudTransport; time = timeProvider ?? TimeProvider.System;
+        this.library = library; this.sessions = sessions; this.http = http;
+        this.clients = clients ?? throw new ArgumentNullException(nameof(clients)); cloud = kugouCloudTransport; time = timeProvider ?? TimeProvider.System;
     }
     private static JsonElement Failed(string code) => LJ.Element(LJ.Obj(("ok", false), ("code", code)));
     private void Changed() { foreach (Action listener in StateChanged?.GetInvocationList() ?? []) try { listener(); } catch { /* UI observers cannot change the durable outcome. */ } }
@@ -96,7 +99,7 @@ public sealed class MusicLibrarySyncService : IAsyncDisposable
                 try
                 {
                     void Check() { lock (gate) LJ.Require(!closed && !stopping && generation == epoch, "STALE_SESSION"); }
-                    return await new MusicLibrarySyncEngine(library, sessions, http, cloud, Check, source.Token).RunAsync().ConfigureAwait(false);
+                    return await new MusicLibrarySyncEngine(library, sessions, http, clients, cloud, Check, source.Token).RunAsync().ConfigureAwait(false);
                 }
                 catch (Exception e) { return Failed(MusicLibrarySyncEngine.Error(e)); }
                 finally { lock (gate) if (ReferenceEquals(roundCancellation, source)) roundCancellation = null; source.Dispose(); Changed(); }

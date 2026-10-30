@@ -21,10 +21,13 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     string Kind, string Platform, SongRow? Song = null, string ActionId = "", string PageCode = "",
     bool Available = true, string ErrorCode = "", string StableKey = "", JsonElement? Action = null,
     JsonElement? Locator = null, string MemberId = "", IReadOnlyList<MusicRankPreview>? Preview = null,
-    string UpdateFrequency = "", MusicCatalogEntryPresentation Presentation = MusicCatalogEntryPresentation.Static)
+    string UpdateFrequency = "", MusicCatalogEntryPresentation Presentation = MusicCatalogEntryPresentation.Static,
+    string PreviewSubtitle = "", int? DayOfMonth = null)
 {
     public IReadOnlyList<MusicRankPreview> PreviewSongs => Preview ?? [];
     public bool HasPreview => PreviewSongs.Count > 0;
+    public string ExpandedSubtitle => PreviewSubtitle.Length > 0 ? PreviewSubtitle : Subtitle;
+    public bool HasCalendarDay => DayOfMonth.HasValue;
     public bool IsPreviewEntry => Presentation == MusicCatalogEntryPresentation.Preview;
     public bool IsOverlayEntry => Presentation == MusicCatalogEntryPresentation.Overlay;
     public bool IsAnimatedEntry => Presentation == MusicCatalogEntryPresentation.Animated;
@@ -256,7 +259,13 @@ public static class MusicCatalogDto
             Text(item, "cover"), kind, platform, ActionId: actionId, PageCode: pageCode,
             Available: available, ErrorCode: available ? "" : error.Length == 0 ? "UNSUPPORTED" : error, StableKey: Text(item, "key"),
             Action: actionValue, Locator: locator, Preview: Preview(item), UpdateFrequency: Text(item, "updateFrequency"),
-            Presentation: presentation);
+            Presentation: presentation, PreviewSubtitle: Text(item, "previewSubtitle"), DayOfMonth: CalendarDay(item));
+    }
+    private static int? CalendarDay(JsonElement item)
+    {
+        if (!item.TryGetProperty("dayOfMonth", out var day) || day.ValueKind == JsonValueKind.Null) return null;
+        MusicDto.Require(day.ValueKind == JsonValueKind.Number && day.TryGetInt32(out var value) && value is >= 1 and <= 31);
+        return day.GetInt32();
     }
     private static MusicCatalogEntryPresentation EntryPresentation(JsonElement item, bool required)
     {
@@ -302,7 +311,7 @@ public static class MusicCatalogDto
         "INVALID_CREDENTIALS" or "CREDENTIALS_UNAVAILABLE" => "平台凭据不可用",
         "VERIFICATION_REQUIRED" => "平台要求验证码验证",
         "SIGNATURE_REQUIRED" => "平台请求签名不可用",
-        "DEVICE_CONTEXT_REQUIRED" or "DEVICE_REQUIRED" => "平台设备认证未通过",
+        "DEVICE_CONTEXT_REQUIRED" or "DEVICE_REQUIRED" => "平台客户端状态不可用",
         "UNSUPPORTED" => "当前内容暂不支持",
         "STALE_SESSION" or "SESSION_CHANGED" => "平台会话已变更",
         "SNAPSHOT_CHANGED" or "REVISION_CONFLICT" => "内容已变更，请刷新",

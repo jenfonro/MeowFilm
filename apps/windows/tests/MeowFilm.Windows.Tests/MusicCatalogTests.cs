@@ -16,6 +16,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Threading;
 using MeowFilm.Core.Runtime;
+using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Platform.Storage;
@@ -1782,7 +1783,7 @@ public static class MusicCatalogTests
         {
             var data = Environment.GetEnvironmentVariable("MEOWFILM_TEST_DATA_ROOT") ?? throw new InvalidOperationException("Isolated test data required");
             var dir = Path.Combine(data, "catalog-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(dir);
-            var store = new DpapiDocumentStore(dir, ["music.library.v1", "music.accounts.v1", "music.files.v1"]);
+            var store = new DpapiDocumentStore(dir, AppIdentity.NativeNamespaces);
             var f = new Fixture(store, vipAccount);
             try
             {

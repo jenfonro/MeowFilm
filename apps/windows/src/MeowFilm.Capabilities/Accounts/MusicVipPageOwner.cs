@@ -127,7 +127,7 @@ internal sealed class MusicVipPageOwner : IMusicVipPageSource, IAsyncDisposable
             // Once the remote mutation is admitted, route/caller cancellation cannot
             // recall it. The transport still owns its fixed deadline and App disposal
             // waits this operation, so an accepted sign is never retried after a lost ACK.
-            await protocol.SignAsync(session, CancellationToken.None).ConfigureAwait(false);
+            await protocol.SignAsync(session, CancellationToken.None, () => GuardAccount(session)).ConfigureAwait(false);
             acknowledged = true;
             if (!ConfirmSign(operation, session, expectedGeneration))
                 throw StateError();
@@ -135,7 +135,7 @@ internal sealed class MusicVipPageOwner : IMusicVipPageSource, IAsyncDisposable
             MusicVipSignCardData? sign;
             if (operation.Token.IsCancellationRequested)
                 sign = null;
-            else try { sign = await protocol.ReadSignAsync(session, operation.Token).ConfigureAwait(false); }
+            else try { sign = await protocol.ReadSignAsync(session, operation.Token, () => GuardAccount(session)).ConfigureAwait(false); }
             catch (OperationCanceledException) when (operation.Token.IsCancellationRequested)
             {
                 sign = null;
@@ -217,8 +217,8 @@ internal sealed class MusicVipPageOwner : IMusicVipPageSource, IAsyncDisposable
         }
         token.ThrowIfCancellationRequested();
         if (session is null) return new(null, new(null, ""), new(null, ""));
-        var sign = ReadBranchAsync(() => protocol.ReadSignAsync(session, token), token);
-        var banner = ReadBranchAsync(() => protocol.ReadBannerAsync(session, token), token);
+        var sign = ReadBranchAsync(() => protocol.ReadSignAsync(session, token, () => GuardAccount(session)), token);
+        var banner = ReadBranchAsync(() => protocol.ReadBannerAsync(session, token, () => GuardAccount(session)), token);
         await Task.WhenAll(sign, banner).ConfigureAwait(false);
         token.ThrowIfCancellationRequested();
         if (!accounts.IsCurrent(session)) throw new MusicOperationException("STALE_SESSION");
@@ -285,6 +285,10 @@ internal sealed class MusicVipPageOwner : IMusicVipPageSource, IAsyncDisposable
         lock (gate) GuardLocked(operation);
         if (session is not null && !accounts.IsCurrent(session))
             throw new MusicOperationException("STALE_SESSION");
+    }
+    private void GuardAccount(MusicPlatformSession session)
+    {
+        if (!accounts.IsCurrent(session)) throw new MusicPlatformException("STALE_SESSION");
     }
 
     private void GuardLocked(Operation operation)
