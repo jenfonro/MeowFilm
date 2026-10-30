@@ -8,6 +8,7 @@ export function createUtilities(maxBytes) {
   const bytes = (value, encoding = 'utf8') => {
     let result;
     if (typeof value === 'string') result = Buffer.from(value, encoding);
+    else if (value?.type === 'Buffer' && Array.isArray(value.data)) result = Buffer.from(value.data);
     else if (ArrayBuffer.isView(value)) {
       result = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
     } else if (Array.isArray(value)) result = Buffer.from(value);

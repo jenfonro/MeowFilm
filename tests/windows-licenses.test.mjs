@@ -24,6 +24,7 @@ const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const sources = [
   'NOTICE.md', 'Apache-2.0.txt', 'GPL-3.0-only.txt', 'api-enhanced-MIT.txt', 'KuGouMusicApi-MIT.txt',
   'iwebplus-NOTICE.txt', 'meowmusic-NOTICE.txt', 'node-LICENSE.txt', 'qr-code-generator-LICENSE.txt',
+  'quickjs-emscripten-LICENSE.txt',
 ].map(name => ({ source: `LICENSES/${name}`, path: name }));
 function boundedPath(path) {
   const rel = relative(temporary, path);
@@ -80,7 +81,7 @@ test('licenses: every reviewed file is copied byte-for-byte into one flat direct
   const f = fixture();
   const result = await packageLicenses(f);
   verify(f, result);
-  assert.equal(result.files.length, 9);
+  assert.equal(result.files.length, sources.length);
   assert.ok(result.files.every(file => !file.path.includes('/')));
 });
 test('licenses: output is reproducible', settings, async () => {
@@ -206,7 +207,7 @@ test('licenses: CLI successful output and strict arguments; import has no packag
     { cwd: repository, encoding: 'utf8', windowsHide: true, timeout: 30000 });
   const result = run(['--output', output]);
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), { status: 'complete', files: 9 });
+  assert.deepEqual(JSON.parse(result.stdout), { status: 'complete', files: sources.length });
   verify({ root: repository, output }, JSON.parse(readFileSync(join(output, manifestName), 'utf8')));
   for (const args of [[], ['--product', 'aggregate', '--output', output],
     ['--root', repository, '--output', output], ['--output']]) {

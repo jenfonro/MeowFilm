@@ -77,7 +77,7 @@ export function connectWindowsNamedPipe(pipeName, {
   });
 }
 
-/** One connection and one shared runtime per product, not one Node per domain. */
+/** Platform launch/transport only; shared assembly owns script modules and their instances. */
 export async function startWindowsAppRuntime({
   product, assemble, argv = process.argv.slice(2), connectTimeout = 5000,
 } = {}) {

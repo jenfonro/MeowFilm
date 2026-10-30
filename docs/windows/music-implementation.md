@@ -56,7 +56,7 @@ Windows App
 持久设置
 ```
 
-Node 只执行原始 LX JavaScript：
+Node 通过平台中性的共用 script-host／LX／QuickJS 核心执行原始 JavaScript；Windows 只负责启动、命名管道与打包，原生脚本入口为：
 
 ```text
 music.sources.*
@@ -71,7 +71,7 @@ music.transfer.*   // 仅 kind=script
 
 ## 脚本源生命周期
 
-原生 `MusicScriptOwner` 拥有安装元数据、权限、实例代次、取消和持久事务；Node host 只拥有实际 JS 执行会话。
+原生 `MusicScriptOwner` 拥有安装元数据、存储会话绑定、实例代次、取消和持久事务；公共 Node host 拥有实际 JS 执行会话。当前 `music.script.v2` 的请求处理器以第二参数 `context.storage` 取得绑定调用的权限，全局 `meow.storage`／startup／background 无隐式权限。
 
 - 安装输入来自原生已选择文件的只读字节快照。
 - 设置页允许一次明确选择多份 `.js`；导入只持久当前源元数据并保持停用，不连接音源服务器、不执行脚本。
@@ -81,6 +81,7 @@ music.transfer.*   // 仅 kind=script
 - 更新启用中的实例时，先撤销旧 grant，再验证候选；候选 metadata 与脚本 storage 通过同一 library envelope CAS 发布。
 - source rollback 只是在当前安装实例的 `current`／`previous` 之间切换当前脚本版本，不解释或转换旧数据格式。
 - 迟到脚本回调、旧 grant 和旧 generation 不能覆盖当前实例。
+- 音源不再维护域名／私网授权名单；`validateURL` 只检查 HTTP(S) 语法，网络可以访问已开放服务。文件／进程隔离不是网络隔离，官方业务的授权规则保持独立。
 
 ## 曲库、队列和播放
 

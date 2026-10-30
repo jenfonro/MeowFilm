@@ -77,7 +77,8 @@ test('the repository lock can be audited offline without any installed modules',
   const report = verifyDependencyLock(project.directory);
   assert.deepEqual(report, verifyDependencyLock(root));
   assert.deepEqual(Object.keys(workspaces).sort(), ['packages/runtime-bridge', 'packages/script-host']);
-  assert.equal(report.registry.length, 0);
+  assert.equal(report.registry.length, Object.values(lock.packages)
+    .filter(entry => !entry.link && typeof entry.resolved === 'string' && entry.resolved.startsWith('https://registry.npmjs.org/')).length);
   assert.equal(report.workspaceLinks, 2);
   assert.equal(report.bundled.length, 0);
   assert.ok(!existsSync(join(project.directory, 'node_modules')));

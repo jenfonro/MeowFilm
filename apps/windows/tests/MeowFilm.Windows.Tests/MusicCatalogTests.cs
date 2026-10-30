@@ -2121,7 +2121,8 @@ public static class MusicCatalogTests
                 sha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes)) });
             var token = upload.GetProperty("token").GetString()!;
             await Rpc("music.transfer.chunk", new { token, offset = 0, data = Convert.ToBase64String(bytes) });
-            var result = await Rpc("music.sources.install", new { token, name = "合成源", version = "1", permissions = new { } });
+            var result = await Rpc("music.sources.install", new { token, name = "合成源", version = "1",
+                permissions = new { storage = Array.Empty<string>() } });
             var installationId = result.GetProperty("item").GetProperty("installationId").GetString();
             await Rpc("music.sources.enable", new { installationId });
             await Module.RefreshOnlineAsync();
