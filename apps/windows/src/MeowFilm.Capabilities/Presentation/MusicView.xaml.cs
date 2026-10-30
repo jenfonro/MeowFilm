@@ -1,10 +1,10 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
-using System.Globalization;
 using MeowFilm.Desktop.Artwork;
 
 namespace MeowFilm.Capabilities;
@@ -161,7 +161,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
     }
     private ScrollViewer? ActiveScroll() => module.IsArchives ? ArchiveScroll :
         module.IsDiscovery ? Descendant<ScrollViewer>(DiscoveryView) :
-        module.IsContentDetailPage ? Descendant<ScrollViewer>(SongsGrid) :
+        module.IsContentDetailPage || module.IsAggregateSongs ? Descendant<ScrollViewer>(SongsGrid) :
         module.IsCatalogPage ? CatalogView.CatalogScroll : Descendant<ScrollViewer>(SongsGrid);
     private static T? Descendant<T>(DependencyObject parent) where T : DependencyObject
     {
@@ -172,6 +172,22 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
             if (Descendant<T>(child) is { } nested) return nested;
         }
         return null;
+    }
+    private void SongsGridScroll_Loaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is not ScrollViewer { TemplatedParent: DataGrid grid } scroll ||
+            !ReferenceEquals(grid, SongsGrid)) return;
+        scroll.ApplyTemplate();
+        if (scroll.Template.FindName("PART_VerticalScrollBar", scroll) is not ScrollBar bar) return;
+        bar.SetResourceReference(StyleProperty, "Capability.OverlayScrollBar");
+        if (scroll.Template.FindName("PART_ScrollContentPresenter", scroll) is not FrameworkElement content ||
+            !ReferenceEquals(VisualTreeHelper.GetParent(bar), VisualTreeHelper.GetParent(content)) ||
+            VisualTreeHelper.GetParent(bar) is not Grid) return;
+        Grid.SetColumn(bar, Grid.GetColumn(content));
+        Grid.SetRow(bar, Grid.GetRow(content));
+        Grid.SetColumnSpan(bar, Grid.GetColumnSpan(content));
+        Grid.SetRowSpan(bar, Grid.GetRowSpan(content));
+        Panel.SetZIndex(bar, Panel.GetZIndex(content) + 1);
     }
     private async void PlayContentDetail_Click(object sender, RoutedEventArgs e) => await module.PlayContentDetailAsync();
     private async void HistoryDate_Changed(object sender, SelectionChangedEventArgs e)
@@ -194,6 +210,14 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         var row = FindRow(e.OriginalSource as DependencyObject);
         module.SelectedSong = row?.Item as SongRow;
         row?.Focus();
+        if (SongsGrid.ContextMenu is { } menu)
+        {
+            menu.PlacementTarget = SongsGrid;
+            menu.Placement = PlacementMode.MousePoint;
+            menu.HorizontalOffset = 0;
+            menu.VerticalOffset = 0;
+            menu.GetBindingExpression(FrameworkElement.DataContextProperty)?.UpdateTarget();
+        }
     }
     private async void Song_KeyDown(object sender, KeyEventArgs e)
     {
@@ -209,15 +233,43 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         songScrollIntent.Set(e.Delta < 0);
         if (songScrollIntent.Active) LoadMoreSongsNearEnd();
     }
-    private static DataGridRow? FindRow(DependencyObject? source)
+    private static T? FindAncestor<T>(DependencyObject? source) where T : DependencyObject
     {
-        while (source is not null && source is not DataGridRow)
+        while (source is not null && source is not T)
             source = source is FrameworkContentElement content ? content.Parent : VisualTreeHelper.GetParent(source);
-        return source as DataGridRow;
+        return source as T;
     }
-    private async void Play_Click(object sender, RoutedEventArgs e) => await module.PlayContentSelectionAsync();
-    private async void NextInQueue_Click(object sender, RoutedEventArgs e) => await module.AppendNextAsync();
-    private async void Favorite_Click(object sender, RoutedEventArgs e) => await module.FavoriteAsync();
+    private static DataGridRow? FindRow(DependencyObject? source) => FindAncestor<DataGridRow>(source);
+    private bool SelectActionSong(object sender)
+    {
+        if (sender is Button { CommandParameter: SongRow song }) module.SelectedSong = song;
+        return module.HasSelection;
+    }
+    private async void Play_Click(object sender, RoutedEventArgs e)
+    {
+        if (SelectActionSong(sender)) await module.PlayContentSelectionAsync();
+    }
+    private async void NextInQueue_Click(object sender, RoutedEventArgs e)
+    {
+        if (SelectActionSong(sender)) await module.AppendNextAsync();
+    }
+    private async void Favorite_Click(object sender, RoutedEventArgs e)
+    {
+        if (SelectActionSong(sender)) await module.FavoriteAsync();
+    }
+    private void SongMore_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button button || !SelectActionSong(button) || SongsGrid.ContextMenu is not { } menu) return;
+        button.Focus();
+        menu.IsOpen = false;
+        menu.PlacementTarget = button;
+        menu.Placement = PlacementMode.Bottom;
+        menu.HorizontalOffset = 0;
+        menu.VerticalOffset = -2;
+        menu.GetBindingExpression(FrameworkElement.DataContextProperty)?.UpdateTarget();
+        menu.IsOpen = true;
+        e.Handled = true;
+    }
     private async void Remove_Click(object sender, RoutedEventArgs e) => await module.RemoveSongAsync();
     private async void PreviousPage_Click(object sender, RoutedEventArgs e) => await module.PageAsync(-1);
     private async void NextPage_Click(object sender, RoutedEventArgs e) => await module.PageAsync(1);
@@ -231,7 +283,8 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
     private async void LoadMoreSongsNearEnd()
     {
         if (loadingMoreSongs || !SongsGrid.IsVisible ||
-            (!module.CanLoadMoreCollection && !module.CanLoadMoreCatalogPlaylist) ||
+            (!module.CanLoadMoreCollection && !module.CanLoadMoreCatalogPlaylist &&
+             !module.CanLoadMoreAggregateSongs) ||
             Descendant<ScrollViewer>(SongsGrid) is not { } scroll ||
             scroll.ExtentHeight <= 0 || scroll.VerticalOffset + scroll.ViewportHeight < scroll.ExtentHeight - 96) return;
         loadingMoreSongs = true;
@@ -240,6 +293,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         {
             if (module.CanLoadMoreCollection) await module.LoadMoreCollectionAsync();
             else if (module.CanLoadMoreCatalogPlaylist) await module.LoadMoreCatalogPlaylistAsync();
+            else if (module.CanLoadMoreAggregateSongs) await module.MoreAggregateSearchAsync();
         }
         finally
         {
@@ -248,10 +302,17 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         }
     }
 
+    private async void SearchTab_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: string tab })
+            await module.OpenAggregateSearchTabAsync(tab);
+    }
+
     private void SongsGrid_MouseDown(object sender, MouseButtonEventArgs e)
     {
         EndSongDrag();
         if (!module.CanReorderPlaylist || e.OriginalSource is not DependencyObject source ||
+            FindAncestor<Button>(source) is not null ||
             FindRow(source) is not { Item: SongRow song }) return;
         songDragStart = e.GetPosition(SongsGrid);
         songDragItem = song;
@@ -477,13 +538,4 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
             return finalSize;
         }
     }
-}
-
-public sealed class PlaylistIndexConverter : System.Windows.Data.IValueConverter
-{
-    public object Convert(object value, Type targetType, object parameter, CultureInfo culture) =>
-        value is int index ? (index + 1).ToString("00", culture) : "";
-
-    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) =>
-        System.Windows.Data.Binding.DoNothing;
 }

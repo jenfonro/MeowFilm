@@ -134,11 +134,16 @@ public partial class MusicCatalogView : UserControl
     }
     private async void LoadMoreNearEnd()
     {
-        if (loadingMore || !IsVisible || Owner is not { IsCatalogLanding: true, CanCatalogNext: true } owner ||
+        if (loadingMore || !IsVisible || Owner is not { } owner ||
+            (!owner.IsCatalogLanding || !owner.CanCatalogNext) && !owner.CanLoadMoreAggregatePlaylists ||
             CatalogScroll.ScrollableHeight - CatalogScroll.VerticalOffset > 280) return;
         loadingMore = true;
         scrollIntent.Clear();
-        try { await owner.CatalogPageAsync(1); }
+        try
+        {
+            if (owner.CanLoadMoreAggregatePlaylists) await owner.MoreAggregateSearchAsync();
+            else await owner.CatalogPageAsync(1);
+        }
         catch { /* The owner publishes bounded business errors; never retry in a scroll loop. */ }
         finally { loadingMore = false; scrollIntent.Clear(); }
     }
@@ -158,16 +163,12 @@ public partial class MusicCatalogView : UserControl
         menu.PlacementTarget = button; menu.IsOpen = true;
     }
     private MusicCapability? Owner => DataContext as MusicCapability;
-    private async void SearchMore_Click(object sender, RoutedEventArgs e)
-    { if (Owner is { } owner) await owner.MoreAggregateSearchAsync(); }
-    private async void SearchCancel_Click(object sender, RoutedEventArgs e)
-    { if (Owner is { } owner) await owner.CancelAggregateSearchAsync(); }
     private async void SearchBack_Click(object sender, RoutedEventArgs e)
     { if (Owner is { } owner) await owner.ReturnToAggregateSearchAsync(); }
-    private async void SearchRetry_Click(object sender, RoutedEventArgs e)
+    private async void SearchSectionMore_Click(object sender, RoutedEventArgs e)
     {
-        if (Owner is { } owner && sender is Button { Tag: MusicSearchProgressRow row })
-            await owner.RetryAggregateSearchAsync(row);
+        if (Owner is { } owner && sender is Button { Tag: string title })
+            await owner.OpenAggregateSearchTabAsync(title == "歌单" ? "playlists" : "songs");
     }
     private void Cancel_Click(object sender, RoutedEventArgs e) => Owner?.CancelCatalog();
     private async void PlayAll_Click(object sender, RoutedEventArgs e)
@@ -193,7 +194,7 @@ public partial class MusicCatalogView : UserControl
     }
     private async void Kind_Changed(object sender, SelectionChangedEventArgs e)
     {
-        if (IsLoaded && Owner is { } owner)
+        if (IsLoaded && Owner is { IsAggregateSearch: false } owner)
             try { await owner.CatalogSearchKindAsync(); } catch { }
     }
     private async void Page_Click(object sender, RoutedEventArgs e)

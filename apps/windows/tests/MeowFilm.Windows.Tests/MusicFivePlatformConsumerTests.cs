@@ -109,6 +109,7 @@ public static partial class MusicUiTests
         {
             await Module.NavigateAsync("catalog-search", default);
             await Module.SearchAsync("版本搜索", default);
+            await Module.OpenAggregateSearchTabAsync("songs");
         }
         public async ValueTask DisposeAsync()
         {

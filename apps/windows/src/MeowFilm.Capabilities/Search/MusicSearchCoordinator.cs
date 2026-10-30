@@ -17,7 +17,8 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
     private readonly Func<MusicSearchRequest, CancellationToken, Task<JsonElement>> searchAsync;
     private readonly TimeProvider clock;
     private readonly object gate = new();
-    private readonly SemaphoreSlim slots = new(5, 5);
+    // Keep aggregate search within the shared HTTP transport's global physical-request budget.
+    private readonly SemaphoreSlim slots = new(4, 4);
     private readonly Dictionary<MusicSearchKind, Query> queries = [];
     private readonly Dictionary<MusicSearchKind, Notice> notices = [];
     private readonly AsyncLocal<ObserverFrame?> observerFrame = new();

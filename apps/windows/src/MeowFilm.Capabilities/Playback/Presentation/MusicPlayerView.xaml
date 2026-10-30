@@ -47,7 +47,7 @@
       </TextBlock>
      </StackPanel>
       <Button x:Name="FavoriteButton" Grid.Column="2" Click="Favorite_Click" IsEnabled="{Binding CanPlay}"
-              MinWidth="32" Height="32" Margin="0" Padding="4,3,3,3"
+              MinWidth="32" Height="32" Margin="0" Padding="3"
               AutomationProperties.Name="{Binding CurrentFavoriteLabel}" ToolTip="{Binding CurrentFavoriteLabel}">
        <Button.Style><Style TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
         <Setter Property="Width" Value="Auto"/><Setter Property="MinHeight" Value="0"/>
@@ -59,10 +59,8 @@
        <Button.Template><ControlTemplate TargetType="Button">
         <Border x:Name="FavoriteSurface" Background="Transparent" CornerRadius="16" Padding="{TemplateBinding Padding}">
          <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-           <Path Data="M12,21 C10.5,19.7 3,14.7 3,9 C3,3.5 9.5,2.5 12,7 C14.5,2.5 21,3.5 21,9 C21,14.7 13.5,19.7 12,21 Z"
-                 Width="19" Height="20" Margin="0,1,0,-1" Stretch="Fill" StrokeThickness="1.4" StrokeLineJoin="Round">
-           <Path.Style><Style TargetType="Path">
-             <Setter Property="Fill" Value="Transparent"/><Setter Property="Stroke" Value="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
+           <Path>
+            <Path.Style><Style TargetType="Path" BasedOn="{StaticResource Capability.FavoriteIcon}">
             <Style.Triggers><DataTrigger Binding="{Binding IsCurrentFavorite}" Value="True">
              <Setter Property="Fill" Value="#FC3D49"/><Setter Property="Stroke" Value="#FC3D49"/>
             </DataTrigger></Style.Triggers>
