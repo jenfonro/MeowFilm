@@ -61,6 +61,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         audioFileCache = playbackCache;
         persistentChorus = new(store);
         files = new(store, "music.files.v1", [".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma"]);
+        Lyrics.CollectionChanged += OnLyricRowsChanged;
         InitializeLibrarySync();
         vipPage = new(application, System.Windows.Threading.Dispatcher.CurrentDispatcher);
         InitializePlatformSettings();
