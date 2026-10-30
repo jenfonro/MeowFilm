@@ -18,6 +18,8 @@ public partial class MusicPlayerDetailView : UserControl
     private bool centerQueued;
     private bool realizingLyric;
     private bool? needlePlaying;
+    private CancellationTokenSource? activationRequest;
+    private IDisposable? artworkPresentation;
     private Thickness lyricEdgeSpace;
 
     public MusicPlayerDetailView(MusicCapability module)
@@ -25,8 +27,11 @@ public partial class MusicPlayerDetailView : UserControl
         this.module = module;
         InitializeComponent();
         DataContext = module;
-        DetailPlayerHost.Content = new MusicPlayerView(module);
-        DetailRecord.PaletteUpdated += (_, _) => module.RefreshPlayerAppearance(DetailRecord.PaletteBrush);
+        var footer = new MusicPlayerView(module, showArtwork: false);
+        // The footer's own theme supplies the ordinary-page defaults; this page's backdrop palette wins.
+        footer.Resources.MergedDictionaries.Add((ResourceDictionary)Resources["Player.FooterPalette"]);
+        DetailPlayerHost.Content = footer;
+        DetailRecord.PaletteUpdated += (_, _) => module.RefreshPlayerAppearance(DetailRecord.PaletteBrush, animate: IsVisible);
         lyricResumeTimer.Tick += (_, _) =>
         {
             lyricResumeTimer.Stop();
@@ -56,32 +61,59 @@ public partial class MusicPlayerDetailView : UserControl
         LyricList.SizeChanged += (_, _) => UpdateLyricViewport();
         IsVisibleChanged += (_, _) =>
         {
-            centeredLyric = centeringLyric = -1;
             if (IsVisible) { QueueCenterLyric(); SyncNeedle(); }
             else
             {
+                centeredLyric = centeringLyric = -1;
                 StopLyricMotion();
-                LyricOptionsPopup.IsOpen = false;
                 NeedleRotation.BeginAnimation(RotateTransform.AngleProperty, null);
             }
+        };
+        Unloaded += (_, _) =>
+        {
+            activationRequest?.Cancel();
+            artworkPresentation?.Dispose(); artworkPresentation = null;
         };
         module.PropertyChanged += OnModuleChanged;
     }
 
-    internal Task ActivateAsync(CancellationToken cancellationToken)
+    internal async Task ActivateAsync(CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        UpdateLyricViewport();
-        QueueCenterLyric();
-        SyncNeedle();
-        return module.RestoreLyricsAsync();
+        cancellationToken.ThrowIfCancellationRequested(); activationRequest?.Cancel();
+        using var request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        activationRequest = request;
+        IDisposable? prepared = null;
+        try
+        {
+            while (true)
+            {
+                var identity = module.PlaybackPresentationKey;
+                var address = DetailRecord.Address;
+                await module.RestoreLyricsAsync().WaitAsync(request.Token);
+                var latest = await DetailRecord.PrepareArtworkAsync(request.Token);
+                prepared?.Dispose(); prepared = latest;
+                request.Token.ThrowIfCancellationRequested();
+                if (identity == module.PlaybackPresentationKey && address == DetailRecord.Address) break;
+            }
+            UpdateLayout();
+            UpdateLyricViewport();
+            CenterLyric(animate: false);
+            SyncNeedle();
+            artworkPresentation?.Dispose(); artworkPresentation = prepared; prepared = null;
+        }
+        finally
+        {
+            prepared?.Dispose();
+            if (ReferenceEquals(activationRequest, request)) activationRequest = null;
+        }
     }
 
     internal void Deactivate()
     {
+        activationRequest?.Cancel();
+        if (!IsVisible) { artworkPresentation?.Dispose(); artworkPresentation = null; }
         StopLyricMotion();
         module.CancelLyricPreview();
-        LyricOptionsPopup.IsOpen = false;
         ((MusicPlayerView)DetailPlayerHost.Content).Deactivate();
     }
 
@@ -125,7 +157,7 @@ public partial class MusicPlayerDetailView : UserControl
         var from = NeedleRotation.Angle;
         NeedleRotation.BeginAnimation(RotateTransform.AngleProperty, null);
         NeedleRotation.Angle = module.IsPlaying ? 25 : 0;
-        if (SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast)
+        if (IsVisible && SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast)
             NeedleRotation.BeginAnimation(RotateTransform.AngleProperty,
                 new DoubleAnimation(from, NeedleRotation.Angle, TimeSpan.FromMilliseconds(450))
                 {
@@ -163,7 +195,7 @@ public partial class MusicPlayerDetailView : UserControl
         }));
     }
 
-    private void CenterLyric()
+    private void CenterLyric(bool animate = true)
     {
         var index = module.LyricDisplayIndex;
         if (index < 0 || index >= module.Lyrics.Count ||
@@ -177,15 +209,22 @@ public partial class MusicPlayerDetailView : UserControl
         if (Math.Abs(scroll.VerticalOffset - originalOffset) >= .5)
             MusicLyricScroll.Settle(scroll, originalOffset);
         var epoch = ++lyricMotionEpoch;
-        centeringLyric = index;
         var anchor = MusicLyricRowMarginConverter.ReadingAnchor(module.IsPlaying);
+        if (!animate)
+        {
+            MusicLyricScroll.Settle(scroll, absoluteCenter - scroll.ViewportHeight * anchor);
+            scroll.UpdateLayout();
+            SettleCenteredLyric(index, scroll, epoch, anchor, allowHidden: true);
+            return;
+        }
+        centeringLyric = index;
         MusicLyricScroll.Move(scroll, absoluteCenter - scroll.ViewportHeight * anchor,
             settled: () => SettleCenteredLyric(index, scroll, epoch, anchor));
     }
 
-    private void SettleCenteredLyric(int index, ScrollViewer scroll, long epoch, double anchor)
+    private void SettleCenteredLyric(int index, ScrollViewer scroll, long epoch, double anchor, bool allowHidden = false)
     {
-        if (epoch != lyricMotionEpoch || !IsVisible || module.HasLyricPreview ||
+        if (epoch != lyricMotionEpoch || (!allowHidden && !IsVisible) || module.HasLyricPreview ||
             lyricResumeTimer.IsEnabled || module.LyricDisplayIndex != index) return;
         LyricList.UpdateLayout();
         var row = RealizeLyric(index);
@@ -197,7 +236,10 @@ public partial class MusicPlayerDetailView : UserControl
         var rowCenter = row.TranslatePoint(new Point(0, row.ActualHeight / 2), scroll).Y;
         var correction = rowCenter - scroll.ViewportHeight * anchor;
         if (Math.Abs(correction) >= .5)
+        {
             MusicLyricScroll.Settle(scroll, scroll.VerticalOffset + correction);
+            scroll.UpdateLayout();
+        }
         centeredLyric = index;
         centeringLyric = -1;
     }
@@ -226,12 +268,6 @@ public partial class MusicPlayerDetailView : UserControl
         return null;
     }
 
-    private void LyricOptions_Click(object sender, RoutedEventArgs e) =>
-        LyricOptionsPopup.IsOpen = !LyricOptionsPopup.IsOpen;
-    private async void Lyrics_Click(object sender, RoutedEventArgs e) => await module.RefreshLyricsAsync();
-    private void CancelLyrics_Click(object sender, RoutedEventArgs e) => module.CancelLyrics();
-    private async void ImportLyrics_Click(object sender, RoutedEventArgs e) => await module.ImportLocalLyricsAsync();
-    private async void RemoveLocalLyrics_Click(object sender, RoutedEventArgs e) => await module.RemoveLocalLyricsAsync();
     private void LyricPreview_Click(object sender, RoutedEventArgs e)
     { if (sender is Button { Tag: MusicLyricRow row }) module.PreviewLyric(row); }
     private async void PlayLyric_Click(object sender, RoutedEventArgs e)

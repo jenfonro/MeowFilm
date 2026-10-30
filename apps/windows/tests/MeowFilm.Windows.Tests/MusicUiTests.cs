@@ -800,7 +800,9 @@ public static partial class MusicUiTests
                 Render(root, 860, 600);
                 var mode = FindButton(f.Module.PlayerView, f.Module.ModeText);
                 Equal(SystemColors.WindowTextColor, ((SolidColorBrush)mode.Foreground).Color);
-                Equal(SystemColors.WindowColor, ((SolidColorBrush)((Border)((UserControl)f.Module.PlayerView).Content).Background).Color);
+                var playerView = (UserControl)f.Module.PlayerView;
+                True(playerView.Background is null && ((Grid)playerView.Content).Background is SolidColorBrush { Color.A: 0 },
+                    "high-contrast footer shows the window backdrop instead of painting its own");
                 SimulateFocus(mode, UIElement.IsKeyboardFocusedProperty, true); await Drain();
                 True(mode.FocusVisualStyle is not null, "shared keyboard focus visual supplied");
                 var progress = (Slider)f.Module.PlayerView.FindName("Progress");
