@@ -7,12 +7,14 @@ actor MusicAccountQueuePages {
     private var roots: [[MusicNativeTrackData]]
     private var pages: [String: MusicNativeTrackPage]
     private var rootCursor: String?
+    private let rootTotal: Int?
     private var rootIndex = 0
     private var failCursor: String?
     private var gate: NativeMusicGate?
     private var gateCursor: String?
-    init(roots: [[MusicNativeTrackData]], pages: [String: MusicNativeTrackPage] = [:], rootCursor: String? = nil) {
-        self.roots = roots; self.pages = pages; self.rootCursor = rootCursor
+    init(roots: [[MusicNativeTrackData]], pages: [String: MusicNativeTrackPage] = [:], rootCursor: String? = nil,
+         rootTotal: Int? = nil) {
+        self.roots = roots; self.pages = pages; self.rootCursor = rootCursor; self.rootTotal = rootTotal
     }
     func read(_ cursor: String?) async throws -> MusicNativeTrackPage {
         let key = cursor ?? "root"; calls.append(key)
@@ -24,7 +26,7 @@ actor MusicAccountQueuePages {
         }
         guard rootIndex < roots.count else { throw MusicServiceError.upstreamInvalid }
         let rows = roots[rootIndex]; rootIndex += 1
-        return .init(items: rows, cursor: rootCursor)
+        return .init(items: rows, total: rootTotal ?? (rootCursor == nil ? rows.count : 0), cursor: rootCursor)
     }
     func fail(_ cursor: String?) { failCursor = cursor }
     func hold(_ cursor: String, gate: NativeMusicGate) { gateCursor = cursor; self.gate = gate }

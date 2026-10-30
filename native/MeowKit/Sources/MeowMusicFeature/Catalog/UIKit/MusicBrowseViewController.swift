@@ -606,7 +606,7 @@ public final class MusicBrowseViewController: MusicPageViewController,
     private func selectChoice(_ id: String, section: MusicPublicBrowseSection) {
         guard let page, let intent = page.makeActionIntent() else { return }
         if section.tabs.contains(where: { $0.id == id }) {
-            page.selectSectionTab(id, sectionID: section.id, intent: intent)
+            runPageTask { await page.selectSectionTab(id, sectionID: section.id, intent: intent) }
         } else {
             runPageTask { await page.selectSectionFilter(id, sectionID: section.id, intent: intent) }
         }
@@ -762,6 +762,7 @@ public final class MusicBrowseViewController: MusicPageViewController,
 
     private func loadFMPreview(_ item: MusicPublicBrowseItem, action: MusicHomeAction) {
         guard isPageActive, model.isAvailable, !model.isClosed,
+              item.artwork == nil, model.currentFMArtwork(action) == nil,
               !previewRequests.contains(item.id), previewTasks[item.id] == nil,
               let provider = model.publicBrowser as? any MusicFMPreviewServing else { return }
         let access = model.accountAccessGeneration

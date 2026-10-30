@@ -14,6 +14,7 @@ public actor NativeMusicQQPublicService: MusicPublicQQProviding {
     nonisolated let persistence: MusicQQPublicPersistenceState
     private let operationAdmission = RequestAdmission(maximum: 4, perHost: 4, waitingLimit: 64)
     private var closed = false
+    var closedForClient: Bool { closed }
     /// Explicit volatile-only construction. Production must use storeFactory.
     /// This initializer cannot silently serve as a persistent-store fallback.
     public init(transport: (any MusicAccountHTTPTransport)? = nil, clock: @escaping @Sendable () -> Date = { Date() }) {

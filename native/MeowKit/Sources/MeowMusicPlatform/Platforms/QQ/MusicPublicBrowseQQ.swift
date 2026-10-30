@@ -59,39 +59,59 @@ extension NativeMusicQQPublicService: MusicPublicBrowseQQProviding {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         return .init(platform: "tx", data: try encoder.encode(JSONValue.object(value)))
     }
-    func browsePlaylistRead(_ id: String, access own: UUID) async throws -> MusicPublicBrowseNativeCollection {
+    private func browsePlaylistPage(_ id: String, offset: Int, limit: Int,
+                                    access own: UUID) async throws -> MusicPublicBrowseNativeCollectionPage {
         let number = try MusicQQWire.id(id)
-        guard let numeric = Int64(number), numeric > 0 else { throw MusicServiceError.invalidRequest }
-        var tracks: [MusicNativeTrackData] = [], metadata: MusicPublicBrowseCollection?, expected: Int?
-        for offset in stride(from: 0, to: 2000, by: 100) {
-            try persistence.check(own); try Task.checkCancellation()
-            let data = try await qq.rpc("music.srfDissInfo.DissInfo", "CgiGetDiss", [
-                "disstid": numeric, "dirid": 0, "tag": 1, "song_begin": offset, "song_num": 100,
-                "userinfo": 1, "orderlist": 1, "onlysonglist": 0], publicAccess: own)
-            try persistence.check(own)
-            let info = try MusicQQWire.object(data["dirinfo"]), summary = try Self.browseCollection(info)
-            let total = try MusicQQWire.integer(data["total_song_num"], maximum: 2000)
-            let size = try MusicQQWire.integer(data["songlist_size"], maximum: 100)
-            let more = try MusicQQWire.integer(data["hasmore"], maximum: 1)
-            let rows = try await qq.array(data["songlist"], maximum: 100)
-            guard summary.nativeID == number, size == rows.count, tracks.count + size <= total,
-                  expected == nil || expected == total, metadata == nil || metadata == summary,
-                  more == (tracks.count + size < total ? 1 : 0), more == 0 || !rows.isEmpty else {
-                throw MusicServiceError.staleResult
-            }
-            metadata = summary; expected = total
-            for row in rows { tracks.append(try await browseTrack(row)) }
-            if more == 0 {
+        guard let numeric = Int64(number), numeric > 0, offset >= 0, offset <= 20_000,
+              (1...100).contains(limit) else { throw MusicServiceError.invalidRequest }
+        try persistence.check(own); try Task.checkCancellation()
+        let data = try await qq.rpc("music.srfDissInfo.DissInfo", "CgiGetDiss", [
+            "disstid": numeric, "dirid": 0, "tag": 1, "song_begin": offset, "song_num": limit,
+            "userinfo": 1, "orderlist": 1, "onlysonglist": 0], publicAccess: own)
+        try persistence.check(own)
+        let summary = try Self.browseCollection(MusicQQWire.object(data["dirinfo"]))
+        let total = try MusicQQWire.integer(data["total_song_num"], maximum: 20_000)
+        let size = try MusicQQWire.integer(data["songlist_size"], maximum: limit)
+        let more = try MusicQQWire.integer(data["hasmore"], maximum: 1)
+        let rows = try await qq.array(data["songlist"], maximum: limit)
+        guard summary.nativeID == number, size == rows.count, offset + size <= total,
+              more == (offset + size < total ? 1 : 0), more == 0 || !rows.isEmpty else {
+            throw MusicServiceError.staleResult
+        }
+        var tracks: [MusicNativeTrackData] = []
+        for row in rows { tracks.append(try await browseTrack(row)) }
+        try persistence.check(own); try Task.checkCancellation()
+        let head = try MusicQQWire.json(["id": summary.id, "title": summary.title, "creator": summary.creator,
+            "artwork": summary.artwork?.absoluteString ?? "", "count": total])
+        let signature = SHA256.hash(data: head).map { String(format: "%02x", $0) }.joined()
+        return .init(collection: summary, tracks: tracks, total: total, more: more == 1, headSignature: signature)
+    }
+    public func publicBrowsePlaylistPage(id: String, offset: Int) async throws -> MusicPublicBrowseNativeCollectionPage {
+        let (own, lease) = try await begin()
+        defer { end(lease) }
+        return try await browsePlaylistPage(id, offset: offset, limit: 30, access: own)
+    }
+    func browsePlaylistRead(_ id: String, access own: UUID) async throws -> MusicPublicBrowseNativeCollection {
+        var tracks: [MusicNativeTrackData] = [], head: String?
+        for _ in 0..<MusicRemoteQueueSource.maximumPages {
+            let offset = tracks.count
+            let page = try await browsePlaylistPage(id, offset: offset, limit: 100, access: own)
+            guard page.total <= 2000 else { throw MusicServiceError.limit }
+            guard head == nil || head == page.headSignature else { throw MusicServiceError.staleResult }
+            head = page.headSignature
+            tracks += page.tracks
+            if !page.more {
                 try persistence.check(own); try Task.checkCancellation()
+                guard tracks.count == page.total else { throw MusicServiceError.contentUnavailable }
                 var hash = SHA256()
-                hash.update(data: Data((summary.id + "\n" + summary.title + "\n" + String(total)).utf8))
+                hash.update(data: Data(page.headSignature.utf8))
                 for track in tracks {
                     // Length-delimited exact ordered locators; not an unordered
                     // set, page hash, total-only fence or accidental Double ID.
                     hash.update(data: Data("\n\(track.data.count):".utf8)); hash.update(data: track.data)
                 }
                 let digest = hash.finalize().map { String(format: "%02x", $0) }.joined()
-                return .init(collection: summary, tracks: tracks, snapshot: digest)
+                return .init(collection: page.collection, tracks: tracks, snapshot: digest, headSignature: page.headSignature)
             }
         }
         throw MusicServiceError.limit
@@ -100,7 +120,7 @@ extension NativeMusicQQPublicService: MusicPublicBrowseQQProviding {
         let (own, lease) = try await begin()
         defer { end(lease) }
         // CgiGetDiss has no verified whole-list revision: complete ordered
-        // double read, bounded at 2,000 members / 40 upstream page calls.
+        // double read, bounded at 2,000 members / 100 pages per pass.
         let first = try await browsePlaylistRead(id, access: own)
         let second = try await browsePlaylistRead(id, access: own)
         try persistence.check(own); try Task.checkCancellation()

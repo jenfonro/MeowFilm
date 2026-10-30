@@ -5,6 +5,21 @@ import Foundation
 import CryptoKit
 import MeowMusicFeature
 
+protocol MusicQQClientDeviceProviding: Sendable {
+    func clientDevice() async throws -> QQMusicAccountAdapter.DeviceValue
+}
+
+extension NativeMusicQQPublicService: MusicQQClientDeviceProviding {
+    func clientDevice() async throws -> QQMusicAccountAdapter.DeviceValue {
+        guard !closedForClient else { throw MusicServiceError.closed }
+        let token = try persistence.capture()
+        let fields = try await qq.ensureDevice(publicAccess: token)
+        try Task.checkCancellation(); try persistence.check(token)
+        guard !closedForClient else { throw MusicServiceError.closed }
+        return .init(fields: fields)
+    }
+}
+
 extension QQMusicAccountAdapter {
     func chinaDay(_ date: Date) -> String {
         MusicQQPublicPersistenceCodec.chinaDay(date)
@@ -27,6 +42,13 @@ extension QQMusicAccountAdapter {
     func ensureDevice(publicAccess: UUID? = nil) async throws -> [String: Any] {
         try Task.checkCancellation()
         try checkPublicAccess(publicAccess)
+        if let clientDeviceProvider {
+            let generation = deviceGeneration
+            let result = try await clientDeviceProvider.clientDevice()
+            try Task.checkCancellation()
+            guard generation == deviceGeneration else { throw MusicServiceError.staleResult }
+            return result.fields
+        }
         if let publicPersistence, let publicAccess, publicDeviceEpoch != publicAccess {
             revoke()
             let restored = try publicPersistence.read(publicAccess)
@@ -42,40 +64,21 @@ extension QQMusicAccountAdapter {
         }
         let at = now(), generation = deviceGeneration
         if qimeiIsCurrent(device, at: at), sessionIsCurrent(device, at: at) { return device }
-        if let deviceTask {
-            let result = try await waitForDevice(deviceTask, publicAccess: publicAccess)
-            try Task.checkCancellation()
-            try checkPublicAccess(publicAccess)
-            guard generation == deviceGeneration else { throw MusicServiceError.staleResult }
-            return result
-        }
         let previous = device
-        let task = Task { try await self.loadDevice(previous, publicAccess: publicAccess) }
-        deviceTask = task
-        let workID = UUID()
-        if let publicPersistence, let publicAccess {
-            do { try publicPersistence.register(workID, token: publicAccess) { task.cancel() } }
-            catch { task.cancel(); deviceTask = nil; throw error }
+        let result = try await deviceRequests.value(for: generation) { [self] in
+            try await loadAndPublishDevice(previous, generation: generation, publicAccess: publicAccess)
         }
-        defer { publicPersistence?.remove(workID) }
-        do {
-            let result = try await waitForDevice(task, publicAccess: publicAccess)
-            try Task.checkCancellation()
-            try checkPublicAccess(publicAccess)
-            guard generation == deviceGeneration else { throw MusicServiceError.staleResult }
-            device = result; deviceTask = nil; return result
-        } catch {
-            if generation == deviceGeneration { deviceTask = nil }
-            throw error
-        }
+        try Task.checkCancellation(); try checkPublicAccess(publicAccess)
+        guard generation == deviceGeneration else { throw MusicServiceError.staleResult }
+        return result.fields
     }
-    private func waitForDevice(_ task: Task<[String: Any], Error>, publicAccess: UUID?) async throws -> [String: Any] {
-        if publicAccess == nil { return try await task.value }
-        // Cancellation aborts this shared refresh; all waiters fail explicitly.
-        // A later deliberate request can resume from the last durable stage.
-        return try await withTaskCancellationHandler(operation: {
-            try await task.value
-        }, onCancel: { task.cancel() })
+    private func loadAndPublishDevice(_ previous: [String: Any], generation: UUID,
+                                      publicAccess: UUID?) async throws -> DeviceValue {
+        let value = try await loadDevice(previous, publicAccess: publicAccess)
+        try Task.checkCancellation(); try checkPublicAccess(publicAccess)
+        guard generation == deviceGeneration else { throw MusicServiceError.staleResult }
+        device = value
+        return DeviceValue(fields: value)
     }
     func makeDevice() throws -> [String: Any] {
         let raw = try MusicQQWire.randomHex(14)

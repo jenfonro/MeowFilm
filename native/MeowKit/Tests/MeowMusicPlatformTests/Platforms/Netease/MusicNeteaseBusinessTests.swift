@@ -6,6 +6,66 @@ import MeowJSON
 @testable import MeowMusicPlatform
 
 final class MusicNeteaseBusinessTests: XCTestCase {
+    private func displayFixture() async throws -> MusicNeteaseNativeFixture {
+        let f = try MusicNeteaseNativeFixture(); try await f.enable()
+        let ids = Array(101..<136)
+        var entry = MusicNeteaseFixture.collection(); entry["trackCount"] = ids.count
+        var detail = entry
+        detail["trackIds"] = ids.map { ["id": $0] }
+        detail["tracks"] = ids.map { id -> [String: Any] in
+            var song = MusicNeteaseFixture.song(id)
+            if id == 133 { song["ar"] = [["id": 900]] }
+            else if id >= 131 { song.removeValue(forKey: "name") }
+            return song
+        }
+        await f.http.replies("/weapi/user/playlist", [
+            try MusicNeteaseFixture.response(["code": 200, "more": false, "playlist": [entry]])
+        ])
+        await f.http.replies("/eapi/v6/playlist/detail", [
+            try MusicNeteaseFixture.response(["code": 200, "playlist": detail])
+        ])
+        await f.http.replies("/weapi/v3/song/detail", [
+            try MusicNeteaseFixture.response(["code": 200, "songs": (131..<136).map(MusicNeteaseFixture.song)])
+        ])
+        return f
+    }
+    func testCollectionDisplayKeepsCompleteMembersButOnlyHydratesExplicitlyOpenedMissingPage() async throws {
+        let f = try await displayFixture()
+        let first = try await f.service.nativeTracks(platform: .netease, collectionID: "501", cursor: nil)
+        XCTAssertEqual(first.items.count, 30); XCTAssertEqual(first.total, 35)
+        var requests = await f.http.recorded()
+        XCTAssertEqual(requests.filter { $0.request.url.path == "/weapi/v3/song/detail" }.count, 0)
+        XCTAssertEqual(requests.filter { $0.request.url.path == "/eapi/v6/playlist/detail" }.count, 2)
+        let cursor = try XCTUnwrap(first.cursor)
+        let second = try await f.service.nativeTracks(platform: .netease, collectionID: "501", cursor: cursor)
+        let replay = try await f.service.nativeTracks(platform: .netease, collectionID: "501", cursor: cursor)
+        XCTAssertEqual(second.items.map(\.data), replay.items.map(\.data))
+        XCTAssertEqual(second.total, 35); XCTAssertNil(second.cursor)
+        let rows = try second.items.map { try MusicQQWire.decode($0.data) }
+        XCTAssertEqual(rows.compactMap { $0["musicId"] as? String }, (131..<136).map(String.init))
+        XCTAssertEqual(rows.compactMap { $0["name"] as? String }, (131..<136).map { "合成歌曲\($0)" })
+        requests = await f.http.recorded()
+        XCTAssertEqual(requests.filter { $0.request.url.path == "/weapi/v3/song/detail" }.count, 1)
+        XCTAssertEqual(requests.filter { $0.request.url.path == "/eapi/v6/playlist/detail" }.count, 2)
+        XCTAssertFalse(requests.contains { $0.request.url.path.contains("player/url") })
+        _ = await f.service.close()
+    }
+    func testLateCollectionDisplayHydrationCannotRestorePageAfterLogout() async throws {
+        let f = try await displayFixture(), gate = MusicAccountTestGate()
+        let first = try await f.service.nativeTracks(platform: .netease, collectionID: "501", cursor: nil)
+        let cursor = try XCTUnwrap(first.cursor)
+        await f.http.hold("/weapi/v3/song/detail", gate)
+        let task = Task { try await f.service.nativeTracks(platform: .netease, collectionID: "501", cursor: cursor) }
+        await gate.started()
+        try await f.service.logout(platform: .netease)
+        await gate.release()
+        do { _ = try await task.value; XCTFail("Logged-out page was published") }
+        catch { XCTAssertNotNil(error as? MusicServiceError) }
+        XCTAssertNil(f.store.peek(f.identity))
+        do { _ = try await f.service.nativeTracks(platform: .netease, collectionID: "501", cursor: cursor); XCTFail("Retired cursor was reused") }
+        catch { XCTAssertNotNil(error as? MusicServiceError) }
+        _ = await f.service.close()
+    }
     func testDailyPagingChinaSixAMCacheBoundaryAndFMNeverFabricateContinuation() async throws {
         let f = try MusicNeteaseNativeFixture(); try await f.enable()
         let first = try await f.service.nativeRecommendations(platform: .netease, kind: "daily", cursor: nil)

@@ -12,6 +12,26 @@ private actor MusicAccountQueueSourceFixture {
 }
 
 final class MusicAccountQueueSourceTests: XCTestCase {
+    func testCollectionSaveRequiresCompleteStableTotalsWithoutRestrictingAvailablePlayback() async throws {
+        let row = MusicNativeTrackData(platform: "wy", data: Data("{}".utf8))
+        for mode in ["omitted", "partial", "changed", "complete"] {
+            let source = MusicRemoteQueueSource(context: .init(kind: .playlist, id: "synthetic", title: "Synthetic", platform: "wy",
+                unavailableCount: mode == "omitted" ? 1 : 0), loadPage: { cursor in
+                    .init(items: [row], total: mode == "changed" && cursor != nil ? 3 : 2,
+                          cursor: mode == "partial" || cursor != nil ? nil : "next")
+                })
+            let playable = try await source.completeTracks(intent: .init())
+            XCTAssertEqual(playable.count, mode == "partial" ? 1 : 2)
+            do {
+                let all = try await source.collectionTracks(intent: .init())
+                XCTAssertEqual(mode, "complete"); XCTAssertEqual(all.count, 2)
+            } catch {
+                XCTAssertNotEqual(mode, "complete")
+                XCTAssertEqual(error as? MusicServiceError, mode == "changed" ? .invalidResponse : .contentUnavailable)
+            }
+            await source.close()
+        }
+    }
     func testDailyStyleAcknowledgementFailureInvalidatesEveryOldPageWithoutReplayingWrite() async throws {
         let fixture = MusicStyleSourceFixture()
         let source = MusicRemoteQueueSource(

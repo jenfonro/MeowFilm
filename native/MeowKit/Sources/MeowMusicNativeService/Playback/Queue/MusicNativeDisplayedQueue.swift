@@ -84,7 +84,7 @@ extension NativeMusicService: MusicDisplayedQueuePlaying {
                         let data = try await owner.nativeHomePayload(.songMetadata(ids: batch), binding: binding)
                         let root = try MJ.parse(data, maximum: 2 * 1024 * 1024, mode: .upstream)
                         try musicRequire(root["songs"].isArray && root["songs"].array.count <= batch.count, .upstreamInvalid)
-                        for row in root["songs"].array { songs.append(try await port.browseWYSong(row)) }
+                        for row in root["songs"].array { songs.append(try MusicNativePlatforms.browseWYSong(row)) }
                     } else { songs += try await port.homeCollectionSongs(batch) }
                 }
                 return try songs.map(MusicModel.normalize)

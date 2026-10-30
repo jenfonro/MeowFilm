@@ -14,7 +14,8 @@ actor MusicAccountAccessGate {
     init(bundleIdentifier: String, cacheDocumentRoot: URL,
          audioCache: (any MusicAudioFileCaching)?,
          displayCache: (any MusicPlaybackDisplayCaching)?,
-         requestAdmission: RequestAdmission) throws {
+         requestAdmission: RequestAdmission, clientContexts: NativeMusicClientService,
+         qqClient: NativeMusicQQPublicService) throws {
         let store = try KeychainCredentialStore(
             service: bundleIdentifier + ".music.accounts.v1",
             accessibility: .whenUnlockedThisDeviceOnly
@@ -49,7 +50,7 @@ actor MusicAccountAccessGate {
                 case .accessChanged, .importPending, .closed:
                     await audioCache?.cancelPending()
                 }
-            }, requestAdmission: requestAdmission)
+            }, requestAdmission: requestAdmission, clientContexts: clientContexts, qqClient: qqClient)
     }
 
     func setAvailable(_ available: Bool) async {

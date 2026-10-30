@@ -194,7 +194,11 @@ enum MusicNativePublicBrowseParser {
         } else if kind == "song" || link?.kind == "song" || rawSong.isObject {
             let songID = try MusicPlatformProtocol.numericID(.string(rawSong.isObject ?
                 textID(rawSong["id"], rawSong["songId"], rawSong["resourceId"]) : id))
-            content = .songID(songID); stable = "song:" + songID
+            if MusicNativePlatforms.hasWYSongDisplayFields(rawSong) {
+                var song = rawSong; song["id"] = .string(songID)
+                content = .song(try MusicNativePlatforms.browseWYSong(song))
+            } else { content = .songID(songID) }
+            stable = "song:" + songID
         } else if kind == "dailysongs" || ["daily", "daily-style"].contains(link?.kind ?? "") {
             entrance = true
             let descriptor = MusicHomeAction.daily(branch: link?.kind == "daily-style" ? .style : .default)
@@ -406,7 +410,7 @@ extension MusicNativePlatforms {
                 let root = try await browseWEAPI("/api/v1/discovery/new/songs", .obj([("areaId", .n(0)), ("total", .bool(true))]))
                 try musicRequire(root["data"].isArray && root["data"].array.count <= 300, .limit)
                 let rows = try root["data"].array.map { raw -> MusicNativePublicBrowseItem in
-                    .init(id: try MusicPlatformProtocol.numericID(raw["id"]), title: try raw["name"].text(1024), content: .song(try browseWYSong(raw)))
+                    .init(id: try MusicPlatformProtocol.numericID(raw["id"]), title: try raw["name"].text(1024), content: .song(try Self.browseWYSong(raw)))
                 }
                 result = .init(sections: [.init(id: "new", title: channel.title, items: rows)])
             case .cube:
@@ -437,17 +441,15 @@ extension MusicNativePlatforms {
                      metadata: (@Sendable (MusicNativeBrowseMetadataRequest) async throws -> Data)? = nil) async throws -> MusicNativePublicBrowseDiscovery {
         let own = epoch
         var result = input
-        // A tab is a local selection, so hydrate every declared choice once.
-        // The selected items alias one tab; do not count or request them twice.
-        let all = result.sections.flatMap { section in
-            section.tabs.isEmpty ? section.items : section.tabs.flatMap(\.items)
-        }
-        try musicRequire(all.count <= 600, .limit)
+        let all = result.sections.flatMap(\.items)
+        try musicRequire(result.sections.count <= 60 && result.sections.reduce(0, { count, section in
+            count + (section.tabs.isEmpty ? section.items.count : section.tabs.reduce(0) { $0 + $1.items.count })
+        }) <= 600, .limit)
         var songIDs: [String] = [], listIDs: [String] = []
         for item in all {
             if case .songID(let id) = item.content, !songIDs.contains(id) { songIDs.append(id) }
             if case .collection(let value) = item.content, value.kind == .playlist,
-               (value.title.isEmpty || value.artwork == nil), !listIDs.contains(value.nativeID) { listIDs.append(value.nativeID) }
+               value.title.isEmpty, !listIDs.contains(value.nativeID) { listIDs.append(value.nativeID) }
         }
         var songs: [String: MusicNativeTrackData] = [:], lists: [String: MusicPublicBrowseCollection] = [:]
         for start in stride(from: 0, to: songIDs.count, by: 100) {
@@ -462,7 +464,7 @@ extension MusicNativePlatforms {
             for raw in root["songs"].array {
                 let id = try MusicPlatformProtocol.numericID(raw["id"])
                 try musicRequire(ids.contains(id) && songs[id] == nil, .upstreamInvalid)
-                songs[id] = try browseWYSong(raw)
+                songs[id] = try Self.browseWYSong(raw)
             }
         }
         for start in stride(from: 0, to: listIDs.count, by: 100) {
@@ -479,18 +481,14 @@ extension MusicNativePlatforms {
                 lists[value.nativeID] = value
             }
         }
-        func hydrate(_ input: [MusicNativePublicBrowseItem], layout: MusicPublicBrowseSection.Layout) async throws
-            -> [MusicNativePublicBrowseItem] {
+        func hydrate(_ input: [MusicNativePublicBrowseItem]) throws -> [MusicNativePublicBrowseItem] {
             var output: [MusicNativePublicBrowseItem] = []
             for var item in input {
                 if case .songID(let id) = item.content {
                     // The reference excludes a withdrawn/inaccessible song;
                     // it never fabricates a playable placeholder from its ID.
                     guard let row = songs[id] else { continue }
-                    let value = try MJ.parse(row.data)
-                    if item.title.isEmpty { item.title = value["name"].string }
-                    if item.subtitle.isEmpty { item.subtitle = value["singer"].string }
-                    item.artwork = item.artwork ?? MusicNativePublicBrowseSupport.artwork(value["img"]); item.content = .song(row)
+                    item.content = .song(row)
                 } else if case .collection(let value) = item.content, value.kind == .playlist, let full = lists[value.nativeID] {
                     // Hydration fills missing metadata; it must not replace a
                     // compact entry's own title or declared ALBUM_LOGO artwork.
@@ -501,27 +499,11 @@ extension MusicNativePlatforms {
                         creator: value.creator.isEmpty ? full.creator : value.creator,
                         artwork: value.artwork ?? full.artwork, count: value.count ?? full.count))
                 }
-                if [.rankedSongs, .vipRankedSongs].contains(layout),
-                   case .collection(let collection) = item.content, collection.platform == .netease,
-                   collection.kind == .playlist {
-                    do {
-                        // Reference playlist/track/all(limit: 3): read the real
-                        // ordered IDs, hydrate only the three displayed songs.
-                        let head = try await browseWYHead(collection.nativeID)
-                        let ids = Array(try browseWYIDs(head).prefix(3))
-                        item.previewSongs = try await browseWYSongs(ids)
-                    } catch {
-                        try Task.checkCancellation()
-                        try musicRequire(own == epoch, .staleResult)
-                        switch MusicServiceError.sanitized(error) {
-                        case .cancelled, .closed, .accessUnavailable, .staleAccess, .staleResult: throw error
-                        // These previews are public reads, not account authority.
-                        // A member-only song must not hide a usable VIP chart.
-                        default: item.previewSongs = []
-                        }
-                    }
-                    try Task.checkCancellation()
-                    try musicRequire(own == epoch, .staleResult)
+                if case .collection(let value) = item.content, value.kind == .playlist, value.title.isEmpty { continue }
+                if case .song(let row) = item.content {
+                    let value = try MJ.parse(row.data)
+                    if item.title.isEmpty { item.title = value["name"].string }
+                    item.artwork = item.artwork ?? MusicNativePublicBrowseSupport.artwork(value["img"])
                 }
                 output.append(item)
             }
@@ -530,21 +512,17 @@ extension MusicNativePlatforms {
         for index in result.sections.indices {
             var section = result.sections[index]
             if section.tabs.isEmpty {
-                section.items = try await hydrate(section.items, layout: section.layout)
+                section.items = try hydrate(section.items)
             } else {
-                for tab in section.tabs.indices {
-                    section.tabs[tab].items = try await hydrate(section.tabs[tab].items, layout: section.layout)
+                if let tab = section.tabs.firstIndex(where: { $0.id == section.selectedTab }) {
+                    section.tabs[tab].items = try hydrate(section.tabs[tab].items)
+                    section.items = section.tabs[tab].items
                 }
-                // A withdrawn song can empty a tab; keep only usable choices
-                // and select the first surviving one, like the reference.
-                section.tabs.removeAll { $0.items.isEmpty }
-                let selected = section.tabs.first { $0.id == section.selectedTab } ?? section.tabs.first
-                section.items = selected?.items ?? []
-                section.selectedTab = selected?.id ?? ""
             }
             result.sections[index] = section
         }
-        result.sections.removeAll { $0.items.isEmpty && $0.filters.isEmpty && $0.error == nil }
+        try musicRequire(own == epoch, .staleResult)
+        result.sections.removeAll { $0.items.isEmpty && $0.tabs.isEmpty && $0.filters.isEmpty && $0.error == nil }
         return result
     }
 }

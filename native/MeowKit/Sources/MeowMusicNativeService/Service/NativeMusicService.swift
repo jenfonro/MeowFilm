@@ -162,14 +162,15 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
                 transport: (any MusicNativeHTTPTransport)? = nil,
                 clock: @escaping @Sendable () -> Date = { Date() },
                 random: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) },
-                requestAdmission: RequestAdmission? = nil) {
+                requestAdmission: RequestAdmission? = nil,
+                clientContexts: (any MusicNativeClientContextProviding)? = nil) {
         self.document = document; self.scripts = scripts; self.accounts = accounts; self.homeSnapshot = homeSnapshot
         self.audioFileCache = audioFileCache
         now = clock; self.random = random
         self.enabledPlatforms = enabledPlatforms
         let owned = transport == nil ? URLSessionMusicNativeHTTPTransport(admission: requestAdmission ?? RequestAdmission()) : nil
         ownedTransport = owned
-        publicPlatforms = MusicNativePlatforms(transport: transport ?? owned!, qq: qq, clock: clock)
+        publicPlatforms = MusicNativePlatforms(transport: transport ?? owned!, qq: qq, clock: clock, clients: clientContexts)
         // The existing nonisolated protection fence must also revoke feedback
         // before the service actor can acknowledge a lock-screen transition.
         let feedback = playbackFeedback
