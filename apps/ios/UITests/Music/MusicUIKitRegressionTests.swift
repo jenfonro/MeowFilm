@@ -2,6 +2,7 @@
 import XCTest
 import UIKit
 import SwiftUI
+import Combine
 import MeowUI
 import MeowContracts
 import MeowPlayback
@@ -432,6 +433,250 @@ final class MusicPlayerContentModelTests: XCTestCase {
         XCTAssertEqual(completed.peak, 1)
         XCTAssertNil(content.clock.chorus, "A late old marker must not replace the new empty result")
         await model.close()
+    }
+
+    func testCapsuleBodyAndControlsHaveDistinctActionsAndRingUsesSharedProgress() async throws {
+        let (content, surface) = try makeDock()
+        let root = PageViewController(themeProvider: content.appearance)
+        let window = mountDock(surface, in: root)
+        defer { window.isHidden = true; window.rootViewController = nil }
+        await deliverUpdates()
+        let play = try dockButton("play", in: surface), queue = try dockButton("queue", in: surface)
+        let cover = try dockButton("open", in: surface)
+        let ring = try XCTUnwrap(play.layer.sublayers?.first { $0.name == "play.progress.played" } as? CAShapeLayer)
+        let track = try XCTUnwrap(play.layer.sublayers?.first { $0.name == "play.progress.track" } as? CAShapeLayer)
+        XCTAssertEqual(surface.backgroundColor, .white)
+        XCTAssertTrue(surface.isOpaque)
+        XCTAssertEqual(track.opacity, 1)
+        XCTAssertEqual(ring.strokeEnd, 1 / 6, accuracy: 0.001)
+        XCTAssertLessThan(try XCTUnwrap(track.strokeColor).alpha, try XCTUnwrap(ring.strokeColor).alpha)
+        content.model.clock.position = 60
+        await deliverUpdates()
+        XCTAssertEqual(ring.strokeEnd, 1 / 3, accuracy: 0.001)
+        XCTAssertTrue(surface.isPlayerBody(surface))
+        XCTAssertFalse(surface.isPlayerBody(play.imageView))
+        XCTAssertFalse(surface.isPlayerBody(queue))
+        XCTAssertFalse(surface.isPlayerBody(cover))
+        for width in [CGFloat(292), CGFloat(408)] {
+            surface.frame.size.width = width
+            surface.setNeedsLayout(); surface.layoutIfNeeded()
+            XCTAssertTrue(surface.bounds.contains(play.frame))
+            XCTAssertTrue(surface.bounds.contains(queue.frame))
+            XCTAssertFalse(play.frame.intersects(cover.frame))
+            XCTAssertTrue(surface.hitTest(cover.center, with: nil) === cover)
+        }
+        var destinations: [MusicPlaybackDestination] = []
+        surface.onPresent = { destinations.append($0) }
+        queue.sendActions(for: .touchUpInside)
+        cover.sendActions(for: .touchUpInside)
+        surface.presentPlayer()
+        XCTAssertEqual(destinations, [.queue, .player, .player])
+        XCTAssertFalse(content.dockExpanded)
+        attachDock(surface, name: "capsule-player")
+        await content.model.close()
+    }
+
+    func testCardControlHoldEndsOnOutsideTouchAndFullPageLeavesDockInPlace() async throws {
+        let (content, surface) = try makeDock()
+        let root = PageViewController(themeProvider: content.appearance)
+        let window = mountDock(surface, in: root)
+        defer { window.isHidden = true; window.rootViewController = nil }
+        let bottom = surface.frame.maxY
+        await expandDock(content)
+        surface.layoutIfNeeded()
+        let order = try ["favorite", "previous", "play", "next", "queue"].map { try dockButton($0, in: surface) }
+        XCTAssertEqual(order.map(\.frame.midX), order.map(\.frame.midX).sorted())
+        let slider = try XCTUnwrap(dockViews(surface).compactMap { $0 as? MusicProgressSlider }.first)
+        let close = try dockButton("collapse", in: surface)
+        let cover = try dockButton("open", in: surface)
+        XCTAssertFalse(cover.frame.intersects(slider.frame))
+        XCTAssertFalse(close.frame.intersects(cover.frame))
+        XCTAssertTrue(order.allSatisfy { $0.frame.minY > slider.frame.maxY && $0.frame.height >= 44 })
+        for width in [CGFloat(292), CGFloat(408)] {
+            surface.frame.size.width = width
+            surface.setNeedsLayout(); surface.layoutIfNeeded()
+            XCTAssertTrue(order.allSatisfy { surface.bounds.contains($0.frame) })
+            XCTAssertFalse(cover.frame.intersects(slider.frame))
+        }
+        let normalHeight = surface.dockHeight
+        surface.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
+        let enlarged = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                surface.layoutIfNeeded()
+                return surface.dockHeight > normalHeight &&
+                    abs(surface.bounds.height - surface.dockHeight) < 0.5
+            }
+        }, evaluatedWith: surface)
+        await fulfillment(of: [enlarged], timeout: 2)
+        XCTAssertGreaterThan(surface.dockHeight, normalHeight)
+        XCTAssertEqual(surface.bounds.height, surface.dockHeight, accuracy: 0.5)
+        XCTAssertTrue(order.allSatisfy { surface.bounds.contains($0.frame) })
+        surface.traitOverrides.preferredContentSizeCategory = .large
+        let restored = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                surface.layoutIfNeeded()
+                return abs(surface.dockHeight - normalHeight) < 0.5 &&
+                    abs(surface.bounds.height - surface.dockHeight) < 0.5
+            }
+        }, evaluatedWith: surface)
+        await fulfillment(of: [restored], timeout: 2)
+        XCTAssertEqual(try XCTUnwrap(slider.minimumTrackTintColor), slider.thumbColor)
+        let observer = try XCTUnwrap(window.gestureRecognizers?.compactMap { $0 as? MusicDockInteractionObserver }.first)
+        XCTAssertFalse(observer.cancelsTouchesInView)
+        XCTAssertFalse(observer.delaysTouchesBegan)
+        XCTAssertFalse(observer.delaysTouchesEnded)
+        slider.sendActions(for: .touchDown)
+        slider.sendActions(for: .touchCancel)
+        observer.observeTouch(in: slider)
+        XCTAssertTrue(content.dockExpanded)
+        attachDock(surface, name: "card-player")
+        observer.observeTouch(in: root.view)
+        XCTAssertFalse(content.dockExpanded)
+        await expandDock(content)
+        close.sendActions(for: .touchUpInside)
+        XCTAssertFalse(content.dockExpanded)
+        await expandDock(content)
+        let full = MusicPlayerViewController(content: content, appearance: content.appearance)
+        let opened = expectation(description: "independent player opened")
+        surface.onPresent = { destination in
+            XCTAssertEqual(destination, .player)
+            content.presentation.setFullPlayerPresented(true)
+            root.present(full, animated: true) { opened.fulfill() }
+        }
+        surface.presentPlayer()
+        XCTAssertFalse(content.dockExpanded)
+        XCTAssertFalse(surface.isHidden)
+        XCTAssertEqual(surface.alpha, 1)
+        XCTAssertEqual(surface.transform, .identity)
+        XCTAssertEqual(root.view.transform, .identity)
+        await fulfillment(of: [opened], timeout: 3)
+        root.view.layoutIfNeeded()
+        XCTAssertEqual(surface.frame.maxY, bottom, accuracy: 0.5)
+        XCTAssertTrue(surface.window === window)
+        XCTAssertEqual(root.view.transform, .identity)
+        let fullPlay = try XCTUnwrap(dockViews(full.view).compactMap { $0 as? UIButton }.first {
+            $0.accessibilityIdentifier == "music.player.play"
+        })
+        XCTAssertFalse(fullPlay === order[2])
+        XCTAssertEqual(fullPlay.layer.sublayers?.first { $0.name == "play.progress.track" }?.opacity, 0)
+        let fullControls = try XCTUnwrap(dockViews(full.view).compactMap { $0 as? MusicPlaybackControlsView }.first)
+        let fullHeight = fullControls.fullHeight
+        full.view.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
+        let fullEnlarged = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                full.view.layoutIfNeeded()
+                return fullControls.fullHeight > fullHeight &&
+                    abs(fullControls.bounds.height - fullControls.fullHeight) < 0.5
+            }
+        }, evaluatedWith: full.view)
+        await fulfillment(of: [fullEnlarged], timeout: 2)
+        XCTAssertTrue(full.view.bounds.contains(fullControls.frame))
+        let dismissed = expectation(description: "independent player dismissed")
+        full.onDismiss = { dismissed.fulfill() }
+        let back = try XCTUnwrap(dockViews(full.view).compactMap { $0 as? UIButton }.first {
+            $0.accessibilityIdentifier == "music.player.close"
+        })
+        back.sendActions(for: .touchUpInside)
+        await fulfillment(of: [dismissed], timeout: 3)
+        XCTAssertFalse(content.presentation.isFullPlayerPresented)
+        XCTAssertFalse(content.dockExpanded)
+        XCTAssertEqual(surface.frame.maxY, bottom, accuracy: 0.5)
+        await content.model.close()
+    }
+
+    func testHomeCardReturnsAfterFiveSecondsWithoutMediaProgressOrControlHold() async throws {
+        let (content, surface) = try makeDock()
+        let collapsed = expectation(description: "five-second preview expired")
+        let started = ProcessInfo.processInfo.systemUptime
+        await expandDock(content)
+        let observation = content.dockChanges.sink {
+            if !content.dockExpanded { collapsed.fulfill() }
+        }
+        defer { observation.cancel() }
+        var queueOpened = false
+        surface.onPresent = { queueOpened = $0 == .queue }
+        try dockButton("queue", in: surface).sendActions(for: .touchUpInside)
+        XCTAssertTrue(queueOpened)
+        XCTAssertNotEqual(content.model.phase, .playing)
+        await fulfillment(of: [collapsed], timeout: 7)
+        XCTAssertGreaterThanOrEqual(ProcessInfo.processInfo.systemUptime - started, 4.9)
+        XCTAssertEqual(content.clock.position, 30)
+        XCTAssertFalse(content.dockExpanded)
+        await content.model.close()
+    }
+
+    private func makeDock() throws -> (MusicPlayerContentModel, MusicPlayerSurface) {
+        let playback = PlaybackController()
+        let model = MusicViewModel(service: MusicUIKitRegressionService(), playback: playback)
+        try select("dock", model: model, playback: playback)
+        model.playbackState.queue = [.init(id: "dock", track: .init(ref: .init(kind: .queue, id: "dock"),
+            songId: "dock", title: "Goodbye", artist: "Ramsey"))]
+        model.playbackState.phase = .paused
+        model.clock.position = 30
+        let content = MusicPlayerContentModel(model: model, playback: playback,
+            appearance: MusicAppearancePreferencesStore(defaults: UserDefaults(suiteName: UUID().uuidString)!),
+            presentation: MusicMiniPlayerPresentation())
+        let surface = MusicPlayerSurface(content: content)
+        surface.frame = CGRect(x: 0, y: 0, width: 408, height: surface.dockHeight)
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 84, height: 84)).image { context in
+            UIColor(red: 0.15, green: 0.12, blue: 0.10, alpha: 1).setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 84, height: 84))
+            UIColor(red: 0.7, green: 0.55, blue: 0.3, alpha: 1).setStroke()
+            UIBezierPath(roundedRect: CGRect(x: 8, y: 8, width: 68, height: 68), cornerRadius: 8).stroke()
+        }
+        try dockButton("open", in: surface).setImage(image, for: .normal)
+        return (content, surface)
+    }
+
+    private func expandDock(_ content: MusicPlayerContentModel) async {
+        let intent = content.presentation.beginHomePlayback()
+        XCTAssertTrue(content.presentation.finishHomePlayback(intent, playback: .init(
+            occurrenceID: content.model.current!.id, nativeAttemptID: content.model.activeNativeAttemptID!,
+            accessGeneration: content.model.accountAccessGeneration)))
+        await deliverUpdates()
+        XCTAssertTrue(content.dockExpanded)
+    }
+
+    private func mountDock(_ surface: MusicPlayerSurface, in root: UIViewController) -> UIWindow {
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        let window = scene.map { UIWindow(windowScene: $0) }
+            ?? UIWindow(frame: CGRect(x: 0, y: 0, width: 430, height: 932))
+        window.rootViewController = root
+        window.makeKeyAndVisible()
+        root.view.addSubview(surface)
+        surface.frame = CGRect(x: 14, y: root.view.bounds.height - 144, width: root.view.bounds.width - 28,
+                               height: surface.dockHeight)
+        let bottom = surface.frame.maxY
+        surface.onSizeChanged = { [weak surface] in
+            guard let surface else { return }
+            surface.frame = CGRect(x: surface.frame.minX, y: bottom - surface.dockHeight,
+                                   width: surface.frame.width, height: surface.dockHeight)
+        }
+        surface.observeOutsideInteractions(in: window)
+        root.view.layoutIfNeeded()
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        return window
+    }
+
+    private func dockViews(_ view: UIView) -> [UIView] { view.subviews.flatMap { [$0] + dockViews($0) } }
+    private func dockButton(_ name: String, in surface: UIView) throws -> UIButton {
+        try XCTUnwrap(dockViews(surface).compactMap { $0 as? UIButton }.first {
+            $0.accessibilityIdentifier == "music.miniPlayer." + name
+        })
+    }
+    private func attachDock(_ surface: MusicPlayerSurface, name: String) {
+        surface.layoutIfNeeded()
+        let size = CGSize(width: surface.bounds.width + 32, height: surface.bounds.height + 32)
+        let image = UIGraphicsImageRenderer(size: size).image { context in
+            UIColor(white: 0.95, alpha: 1).setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+            context.cgContext.translateBy(x: 16, y: 16)
+            surface.layer.render(in: context.cgContext)
+        }
+        let attachment = XCTAttachment(image: image)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     private func select(_ id: String, model: MusicViewModel, playback: PlaybackController) throws {

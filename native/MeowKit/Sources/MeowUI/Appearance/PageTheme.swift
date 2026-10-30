@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// iWebPlus app-colors.js numeric rules; rendering values only.
+// Palette and gradient rules from iWebPlus app-colors.js; rendering values only.
 public struct PageGradientStop: Equatable, Sendable {
     public let location: Double
     public let color: PageColor
@@ -22,7 +22,7 @@ public struct PageTheme: Equatable, Sendable {
         bottom = dark ? .hsl(palette.hue, saturation: 20, lightness: 11) : .init(rgb: 0xf6fbfe)
         mid = top.mixed(with: bottom, ratio: 0.68)
         accent = dark ? palette.lightAccent.mixed(with: .init(rgb: 0xffffff), ratio: 0.55) : palette.lightAccent
-        ink = .init(rgb: dark ? 0xf3f1f8 : 0x292732); muted = .init(rgb: dark ? 0xb4b2c0 : 0x656875)
+        ink = .init(rgb: dark ? 0xf3f1f8 : 0x39343e); muted = .init(rgb: dark ? 0xb4b2c0 : 0x7f7a7d)
         surface = top.mixed(with: .init(rgb: 0xffffff), ratio: dark ? 0.045 : 0.89)
         border = top.mixed(with: .init(rgb: dark ? 0xffffff : 0x75737d), ratio: dark ? 0.17 : 0.15)
         chip = dark ? top.mixed(with: .init(rgb: 0xffffff), ratio: 0.04) : top.mixed(with: bottom, ratio: 0.48)

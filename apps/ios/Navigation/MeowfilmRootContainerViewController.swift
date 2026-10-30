@@ -26,6 +26,7 @@ final class MeowfilmRootContainerViewController: PageViewController {
 
     func install(surface: MusicPlayerSurface) {
         loadViewIfNeeded()
+        surface.observeOutsideInteractions(in: view.window ?? view)
         let dock = MeowfilmDockView(surface: surface)
         dock.onSelectPage = { [weak self] page in self?.onSelectPage?(page) }
         view.addSubview(dock)

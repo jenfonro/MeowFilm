@@ -18,163 +18,83 @@ final class MusicMiniPlayerStateTests: XCTestCase {
         XCTAssertEqual(collapse.y2, 0.95)
     }
 
-    func testMiniCoverAndDetailLinesUseIndependentReferenceAnchors() {
-        let normal = MusicMiniPlayerLayout(lineHeight: 22)
-        XCTAssertEqual(normal.compactArtworkTop, 8)
-        XCTAssertEqual(normal.compactControlsTop, 8)
-        XCTAssertEqual(normal.detailLineHeight, 21)
-        XCTAssertEqual(normal.expandedHeight - normal.seekTop - 44, 52)
-        XCTAssertEqual(normal.expandedHeight - normal.controlsTop - 44, 6)
-        let large = MusicMiniPlayerLayout(lineHeight: 44)
-        XCTAssertEqual(large.detailLineHeight, 42)
-        XCTAssertGreaterThan(large.compactArtworkTop, normal.compactArtworkTop)
-        XCTAssertGreaterThanOrEqual(large.expandedInfoHeight, large.detailLineHeight * 3 + 37)
+    func testMetadataProgressAndControlsStaySeparatedWithLargerText() {
+        let normal = MusicMiniPlayerLayout(titleLineHeight: 22, artistLineHeight: 15, lyricLineHeight: 20)
+        let large = MusicMiniPlayerLayout(titleLineHeight: 44, artistLineHeight: 30, lyricLineHeight: 40)
+        for layout in [normal, large] {
+            XCTAssertGreaterThanOrEqual(layout.seekTop,
+                16 + layout.titleLineHeight + 6 + layout.artistLineHeight + 8 + layout.lyricLineHeight + 16)
+            XCTAssertGreaterThan(layout.controlsTop, layout.seekTop + 46)
+            XCTAssertGreaterThanOrEqual(layout.expandedHeight, layout.controlsTop + 56 + 8)
+            XCTAssertEqual(layout.compactArtworkTop + 21, layout.compactHeight / 2)
+            let controls = layout.compactControlFrame(width: 292)
+            XCTAssertGreaterThanOrEqual(controls.minX, 0)
+            XCTAssertLessThanOrEqual(controls.maxX, 292)
+            XCTAssertLessThanOrEqual(controls.maxY, CGFloat(layout.compactHeight))
+        }
+        XCTAssertGreaterThan(large.expandedHeight, normal.expandedHeight)
+        XCTAssertGreaterThan(large.compactHeight, normal.compactHeight)
     }
 
-    private let attempt = UUID()
-    private func sample(_ at: Double, _ position: Double, key: String? = "occurrence",
-                        session: UUID? = nil, rate: Double = 1,
-                        playing: Bool = true, seeking: Bool = false) -> MusicMiniPlayerSample {
-        .init(occurrenceID: key, attemptID: session ?? attempt, at: at, position: position,
-              rate: rate, playing: playing, seeking: seeking)
-    }
-    private func identity(occurrence: String = "occurrence", attempt: UUID = UUID(),
-                          access: UUID = UUID()) -> MusicMiniPlayerPlaybackIdentity {
-        .init(occurrenceID: occurrence, nativeAttemptID: attempt, accessGeneration: access)
-    }
-
-    func testOrdinaryPlayingAndAutomaticTrackChangesNeverExpand() {
+    func testHomePreviewExpiresAfterFiveSecondsAndNewActivationRestartsIt() {
         var state = MusicMiniPlayerLifecycle()
-        state.sample(sample(0, 0))
-        state.sample(sample(20, 20))
-        state.sample(sample(21, 0, key: "automatic-next"))
-        XCTAssertFalse(state.expanded)
-        XCTAssertEqual(state.elapsed, 0)
-    }
-
-    func testExplicitActivationCollapsesOnlyAfterFiveConfirmedPlayingSeconds() {
-        var state = MusicMiniPlayerLifecycle()
-        state.activate("occurrence")
-        state.sample(sample(10, 40))
-        state.sample(sample(14.9, 44.9))
+        state.activate("first", at: 10)
+        XCTAssertEqual(state.autoCollapseAt, 15)
+        state.expire(at: 14.999)
         XCTAssertTrue(state.expanded)
-        XCTAssertEqual(state.elapsed, 4.9, accuracy: 0.0001)
-        state.sample(sample(15, 45))
+        state.expire(at: 15)
         XCTAssertFalse(state.expanded)
-        XCTAssertFalse(state.held)
-        XCTAssertEqual(state.elapsed, 0)
-    }
-
-    func testWaitingStallPauseAndSuspensionDoNotSpendTheRemainingTime() {
-        var state = MusicMiniPlayerLifecycle()
-        state.activate("occurrence")
-        state.sample(sample(0, 0, playing: false))
-        state.sample(sample(30, 0, playing: false))
-        state.sample(sample(31, 0))
-        state.sample(sample(33, 2))
-        state.sample(sample(34, 2)) // Playing flag alone cannot invent media movement.
-        state.sample(sample(50, 2))
-        XCTAssertEqual(state.elapsed, 2)
-        state.sample(sample(51, 2, playing: false))
-        state.sample(sample(80, 2))
-        state.sample(sample(81, 3))
-        XCTAssertEqual(state.elapsed, 3)
-        state.suspend()
-        state.sample(sample(100, 22))
-        XCTAssertEqual(state.elapsed, 3)
-        state.sample(sample(101.9, 23.9))
-        XCTAssertTrue(state.expanded)
-        state.sample(sample(102, 24))
-        XCTAssertFalse(state.expanded)
-    }
-
-    func testSeekJumpsReverseMovementAndExplicitSeekingNeverCount() {
-        var state = MusicMiniPlayerLifecycle()
-        state.activate("occurrence")
-        state.sample(sample(0, 0))
-        state.sample(sample(1, 1))
-        state.sample(sample(2, 100))
-        XCTAssertEqual(state.elapsed, 1)
-        state.sample(sample(3, 10))
-        XCTAssertEqual(state.elapsed, 1)
-        state.sample(sample(4, 11))
-        XCTAssertEqual(state.elapsed, 2)
-        state.sample(sample(5, 100, seeking: true))
-        state.sample(sample(6, 100))
-        XCTAssertEqual(state.elapsed, 2)
-        state.sample(sample(7, 101))
-        XCTAssertEqual(state.elapsed, 3)
-    }
-
-    func testRateAndAttemptBoundariesRebaseWithoutChargingOldIntervals() {
-        var state = MusicMiniPlayerLifecycle()
-        state.activate("occurrence")
-        state.sample(sample(0, 0, rate: 2))
-        state.sample(sample(2, 4, rate: 2))
-        XCTAssertEqual(state.elapsed, 2)
-        state.sample(sample(3, 5, rate: 1))
-        XCTAssertEqual(state.elapsed, 2)
-        let replacement = UUID()
-        state.sample(sample(4, 0, session: replacement))
-        XCTAssertEqual(state.elapsed, 2)
-        state.sample(sample(6.9, 2.9, session: replacement))
-        XCTAssertTrue(state.expanded)
-        state.sample(sample(7, 3, session: replacement))
-        XCTAssertFalse(state.expanded)
-    }
-
-    func testSparseDuplicateAndInvalidSamplesNeverInventPlayback() {
-        var state = MusicMiniPlayerLifecycle()
-        state.activate("occurrence")
-        state.sample(sample(0, 0))
-        state.sample(sample(0, 5))
-        XCTAssertEqual(state.elapsed, 0)
-        state.sample(sample(1, 1))
-        XCTAssertEqual(state.elapsed, 1)
-        state.sample(sample(2, .nan))
-        state.sample(sample(3, 3))
-        XCTAssertEqual(state.elapsed, 1)
-        state.sample(sample(4, 4, rate: 0))
-        state.sample(sample(5, 5))
-        XCTAssertEqual(state.elapsed, 1)
-        state.sample(sample(4, 6)) // Reversed monotonic timestamp.
-        XCTAssertEqual(state.elapsed, 1)
-        state.sample(.init(occurrenceID: "occurrence", attemptID: nil, at: 10,
-                           position: 10, rate: 1, playing: true, seeking: false))
-        XCTAssertTrue(state.expanded)
-        XCTAssertEqual(state.elapsed, 1)
-    }
-
-    func testUserInteractionHoldsAcrossTrackChangesButClearAlwaysCollapses() {
-        var state = MusicMiniPlayerLifecycle()
-        state.activate("occurrence")
-        state.sample(sample(0, 0))
-        state.sample(sample(2, 2))
+        XCTAssertNil(state.autoCollapseAt)
         state.hold()
-        state.sample(sample(100, 100))
+        XCTAssertFalse(state.expanded)
+        state.activate("second", at: 20)
+        state.activate("third", at: 23)
+        state.expire(at: 25)
+        XCTAssertTrue(state.expanded)
+        XCTAssertEqual(state.autoCollapseAt, 28)
+        state.expire(at: 28)
+        XCTAssertFalse(state.expanded)
+    }
+
+    func testPlaybackControlHoldsAcrossTracksUntilOutsideInteraction() {
+        var state = MusicMiniPlayerLifecycle()
+        state.activate("first", at: 0)
+        state.interactOutside()
+        XCTAssertTrue(state.expanded, "Only a held card follows outside-touch collapse")
+        state.hold()
+        XCTAssertTrue(state.held)
+        XCTAssertNil(state.autoCollapseAt)
+        state.expire(at: 100)
         state.select("next")
         XCTAssertTrue(state.expanded)
         XCTAssertTrue(state.held)
-        XCTAssertEqual(state.elapsed, 2)
-        state.select(nil)
+        state.interactOutside()
         XCTAssertFalse(state.expanded)
         XCTAssertFalse(state.held)
+        state.select("ordinary-next")
+        XCTAssertFalse(state.expanded)
     }
 
-    func testUnheldSelectionAndNewExplicitPlaybackResetTheLifecycle() {
+    func testSelectionClearAndInvalidationEndPreviewButNewHomeActionStartsFresh() {
         var state = MusicMiniPlayerLifecycle()
-        state.activate("occurrence")
-        state.select("next")
+        state.select("ordinary")
         XCTAssertFalse(state.expanded)
-        state.activate("next")
+        state.activate("first", at: 0)
+        state.select("automatic-next")
+        XCTAssertFalse(state.expanded)
+        state.activate("second", at: 1)
         state.hold()
-        state.activate("third")
-        XCTAssertTrue(state.expanded)
+        state.activate("third", at: 2)
         XCTAssertFalse(state.held)
-        XCTAssertEqual(state.elapsed, 0)
-        state.invalidate()
-        state.sample(sample(20, 20, key: "third"))
+        XCTAssertEqual(state.autoCollapseAt, 7)
+        state.hold()
+        state.select(nil)
         XCTAssertFalse(state.expanded)
+        state.activate("fourth", at: 3)
+        state.invalidate()
+        state.expire(at: 100)
+        XCTAssertFalse(state.expanded)
+        XCTAssertNil(state.autoCollapseAt)
     }
 
     func testCompactTextAndUnknownProgressMatchTheReferenceDisplayRules() {
