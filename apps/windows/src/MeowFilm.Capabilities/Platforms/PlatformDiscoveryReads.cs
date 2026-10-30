@@ -36,7 +36,10 @@ public sealed partial class MusicPlatformCatalog
             {
                 var supported = type is "song" or "playlist" or "channel" or "album" or "daily" or "fm" or "similar";
                 var needsAccount = type is "daily" or "fm" or "similar" or "heartbeat";
-                o["available"] = supported && (!needsAccount || c.Session is not null);
+                var display = !needsAccount || c.Session is not null;
+                o["requiresAccount"] = needsAccount;
+                o["display"] = display;
+                o["available"] = supported && display;
                 if (!supported || needsAccount && c.Session is null) o["errorCode"] = needsAccount && c.Session is null ? "AUTH_REQUIRED" : "UNSUPPORTED";
             }
         }

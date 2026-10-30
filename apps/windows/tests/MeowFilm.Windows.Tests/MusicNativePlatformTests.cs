@@ -470,8 +470,18 @@ public static class MusicNativePlatformTests
             Equal(1, r.GetProperty("entries").GetArrayLength());
             True(!r.GetProperty("entries")[0].GetProperty("available").GetBoolean());
             Equal("AUTH_REQUIRED", r.GetProperty("entries")[0].GetProperty("errorCode").GetString());
+            True(r.GetProperty("entries")[0].GetProperty("requiresAccount").GetBoolean());
+            True(!r.GetProperty("entries")[0].GetProperty("display").GetBoolean());
             Equal("preview", r.GetProperty("entries")[0].GetProperty("presentation").GetString());
             Equal(1, f.Calls);
+
+            using var signed = new Fixture(_ => Home(false, "1",
+                J(new { resourceType = "dailysongs", name = "每日推荐" })), Session("wy"));
+            var signedEntry = (await signed.Catalog.HomeAsync(new("wy"))).GetProperty("entries")[0];
+            True(signedEntry.GetProperty("available").GetBoolean() &&
+                signedEntry.GetProperty("requiresAccount").GetBoolean() &&
+                signedEntry.GetProperty("display").GetBoolean());
+            Equal(1, signed.Calls);
         });
         yield return Case("home daily preserves provider calendar and expanded caption without inventing songs", async () =>
         {
@@ -1090,6 +1100,105 @@ public static class MusicNativePlatformTests
                 True(!card.Song.Raw.GetRawText().Contains("imageView", StringComparison.Ordinal));
             }
             Equal("1", cards[0].ActionId); Equal("2", cards[1].ActionId);
+        });
+        yield return Case("wy album-logo entries preserve official decoration and upgrade trusted artwork to TLS", async () =>
+        {
+            const string decoration = "http://p1.music.126.net/synthetic-gradient/decoration.png";
+            const string cover = "http://p2.music.163.net/synthetic-cover/actual.jpg";
+            var action = "orpheus://playlist/500?coverUrl=" + Uri.EscapeDataString(cover);
+            using var f = new Fixture(_ => Home(false, "1", J(new
+            {
+                resourceType = "playlist",
+                resourceId = "500",
+                title = "私人雷达",
+                coverImg = decoration,
+                coverType = "ALBUM_LOGO",
+                action
+            })));
+            var reply = await f.Catalog.HomeAsync(new("wy"));
+            var card = MusicCatalogDto.Read(reply, "wy", "home", "")
+                .SelectMany(section => section.Items).Single();
+            Equal("https://p2.music.163.net/synthetic-cover/actual.jpg", card.Cover);
+            Equal("https://p1.music.126.net/synthetic-gradient/decoration.png", card.Decoration);
+            Equal("500", card.ActionId);
+            Equal(1, f.Calls);
+
+            using var same = new Fixture(_ => Home(false, "1", J(new
+            {
+                resourceType = "playlist",
+                resourceId = "500",
+                title = "私人雷达",
+                coverImg = decoration,
+                coverType = "ALBUM_LOGO",
+                action = "orpheus://playlist/500?coverUrl=" + Uri.EscapeDataString(decoration)
+            })));
+            var unchanged = MusicCatalogDto.Read(await same.Catalog.HomeAsync(new("wy")), "wy", "home", "")
+                .SelectMany(section => section.Items).Single();
+            Equal("https://p1.music.126.net/synthetic-gradient/decoration.png", unchanged.Cover);
+            Equal("", unchanged.Decoration);
+            Equal(1, same.Calls);
+
+            using var nested = new Fixture(_ => Home(false, "1", J(new
+            {
+                resourceType = "playlist",
+                resourceId = "500",
+                title = "私人雷达",
+                coverImg = decoration,
+                coverType = "ALBUM_LOGO",
+                action = new { type = "resource", @params = new { resourceType = "playlist", query = "500" } },
+                playBtnData = new { detailUrl = action }
+            })));
+            var nestedCard = MusicCatalogDto.Read(await nested.Catalog.HomeAsync(new("wy")), "wy", "home", "")
+                .SelectMany(section => section.Items).Single();
+            Equal("https://p2.music.163.net/synthetic-cover/actual.jpg", nestedCard.Cover);
+            Equal("https://p1.music.126.net/synthetic-gradient/decoration.png", nestedCard.Decoration);
+            Equal(1, nested.Calls);
+
+            using var invalid = new Fixture(_ => Home(false, "1", J(new
+            {
+                resourceType = "playlist",
+                resourceId = "500",
+                title = "私人雷达",
+                coverImg = decoration,
+                coverType = "ALBUM_LOGO",
+                action = "orpheus://playlist:99/500?coverUrl=" + Uri.EscapeDataString(cover)
+            })));
+            var rejected = MusicCatalogDto.Read(await invalid.Catalog.HomeAsync(new("wy")), "wy", "home", "")
+                .SelectMany(section => section.Items).Single();
+            Equal("https://p1.music.126.net/synthetic-gradient/decoration.png", rejected.Cover);
+            Equal("", rejected.Decoration);
+            Equal(1, invalid.Calls);
+        });
+        yield return Case("wy discovery artwork removes only validated CDN rendering parameters", async () =>
+        {
+            foreach (var (input, expected) in new[]
+            {
+                ("http://p1.music.126.net/synthetic/cover.jpg?imageView&type=webp&thumbnail=300y300",
+                    "https://p1.music.126.net/synthetic/cover.jpg"),
+                ("http://p2.music.163.net/synthetic/cover.jpg?imageView=1&type=png",
+                    "https://p2.music.163.net/synthetic/cover.jpg")
+            })
+            {
+                using var f = new Fixture(_ => Home(false, "1", J(new
+                {
+                    resourceType = "playlist", resourceId = "500", name = "歌单", coverImg = input
+                })));
+                var card = MusicCatalogDto.Read(await f.Catalog.HomeAsync(new("wy")), "wy", "home", "")
+                    .SelectMany(section => section.Items).Single();
+                Equal(expected, card.Cover);
+                Equal(1, f.Calls);
+            }
+
+            using var unsafeQuery = new Fixture(_ => Home(false, "1", J(new
+            {
+                resourceType = "playlist", resourceId = "500", name = "歌单",
+                coverImg = "https://p1.music.126.net/synthetic/cover.jpg?imageView&type=webp&token=SYNTHETIC_ONLY"
+            })));
+            var unchanged = MusicCatalogDto.Read(await unsafeQuery.Catalog.HomeAsync(new("wy")), "wy", "home", "")
+                .SelectMany(section => section.Items).Single();
+            Equal("https://p1.music.126.net/synthetic/cover.jpg?imageView&type=webp&token=SYNTHETIC_ONLY",
+                unchanged.Cover);
+            Equal(1, unsafeQuery.Calls);
         });
         yield return Case("wy thumbnail canonicalization rejects unknown signed and duplicate parameters", async () =>
         {

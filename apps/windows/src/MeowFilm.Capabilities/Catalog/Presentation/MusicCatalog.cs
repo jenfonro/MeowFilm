@@ -572,13 +572,17 @@ public sealed partial class MusicCapability
             homeDisplaySections.Clear();
             foreach (var source in state.Sections)
             {
-                var display = IsCatalogHome ? source.WithoutLoginOnlyCards() : source;
+                var display = IsCatalogHome ? source.DisplayableCards() : source;
                 if (display.Items.Count > 0) homeDisplaySections.Add(display);
             }
             CatalogTags.Clear(); foreach (var tag in state.Tags) CatalogTags.Add(tag);
-            Songs.Clear(); foreach (var song in state.Sections.SelectMany(s => s.Items).Select(i => i.Song).OfType<SongRow>()) Songs.Add(song);
+            IEnumerable<MusicCatalogSection> songSections = IsCatalogHome ? homeDisplaySections : state.Sections;
+            Songs.Clear(); foreach (var song in songSections.SelectMany(s => s.Items).Select(i => i.Song).OfType<SongRow>()) Songs.Add(song);
             selectedSong = null; collection = null; total = state.Total;
-            status = state.Sections.Sum(s => s.Items.Count) == 0 ? "暂无内容" : "";
+            var visibleCount = IsCatalogHome
+                ? homeDisplaySections.Sum(section => section.Items.Count)
+                : state.Sections.Sum(section => section.Items.Count);
+            status = visibleCount == 0 ? "暂无内容" : "";
             Changed(nameof(SelectedSong)); RefreshBindings(); CatalogBindings();
         }
         finally { publishing = false; }

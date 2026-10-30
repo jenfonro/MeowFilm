@@ -22,7 +22,8 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     bool Available = true, string ErrorCode = "", string StableKey = "", JsonElement? Action = null,
     JsonElement? Locator = null, string MemberId = "", IReadOnlyList<MusicRankPreview>? Preview = null,
     string UpdateFrequency = "", MusicCatalogEntryPresentation Presentation = MusicCatalogEntryPresentation.Static,
-    string PreviewSubtitle = "", int? DayOfMonth = null)
+    string PreviewSubtitle = "", int? DayOfMonth = null, string Decoration = "",
+    bool RequiresAccount = false, bool Display = true)
 {
     public IReadOnlyList<MusicRankPreview> PreviewSongs => Preview ?? [];
     public bool HasPreview => PreviewSongs.Count > 0;
@@ -40,12 +41,12 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
         ? MusicCatalogDto.Text(source, "albumId") : "";
     public bool CanAlbum => CanFavorite && Platform == "wy" && AlbumId.Length > 0;
     public string ErrorText => Available ? "" : MusicCatalogDto.ErrorText(ErrorCode);
-    public bool RequiresLogin => !Available && ErrorCode is "AUTH_REQUIRED" or "AUTH_EXPIRED";
     public string AccessHint => ErrorText.Length > 0 ? ErrorText : Title;
     public string Key => Platform + "/" + (StableKey.Length > 0 ? StableKey : Kind + "/" + Identity);
     public string ContentKey => Platform + "/" + Kind + "/" + Identity;
     private string Identity => MemberId.Length > 0 ? MemberId : ActionId.Length > 0 ? ActionId : Song?.Id ?? Id;
 }
+public sealed record MusicCatalogSongColumn(IReadOnlyList<MusicCatalogCard> Items);
 public enum MusicCatalogSectionPresentation
 {
     Shelf,
@@ -78,12 +79,15 @@ public sealed record MusicCatalogSection(string Title, IReadOnlyList<MusicCatalo
     public bool IsRankingCoverSection => Presentation == MusicCatalogSectionPresentation.RankingCovers;
     public bool IsBannerSection => Presentation == MusicCatalogSectionPresentation.Banner;
     public bool IsEntrySection => Presentation == MusicCatalogSectionPresentation.Entries;
+    public bool IsSongShelfSection => IsSongSection && Layout is "rail" or "grid";
     public bool IsPlaylistSection => Presentation == MusicCatalogSectionPresentation.Shelf &&
         Items.Count > 0 && Items.All(item => item.Kind is "playlist" or "album");
-    public MusicCatalogSection WithoutLoginOnlyCards() => this with
+    public IReadOnlyList<MusicCatalogSongColumn> SongColumns => Items
+        .Chunk(3).Select(items => new MusicCatalogSongColumn(items)).ToArray();
+    public MusicCatalogSection DisplayableCards() => this with
     {
-        Items = Items.Where(item => !item.RequiresLogin).ToArray(),
-        Action = Action?.RequiresLogin == true ? null : Action
+        Items = Items.Where(item => item.Display).ToArray(),
+        Action = Action?.Display == false ? null : Action
     };
 }
 
@@ -137,7 +141,7 @@ public static class MusicCatalogDto
                 var heading = Text(group, "title");
                 MusicCatalogCard? action = null;
                 if (group.TryGetProperty("action", out var a) && a.ValueKind == JsonValueKind.Object)
-                    action = Card(JsonSerializer.SerializeToElement(new { name = heading, action = a }), platform, "resource");
+                    action = Card(SectionActionItem(group, heading, a), platform, "resource");
                 sections.Add(new(heading, Cards(group.GetProperty("items"), platform, "resource"),
                     MusicDto.Text(group, "id"), Text(group, "type"), action, Text(group, "layout")));
             }
@@ -166,6 +170,17 @@ public static class MusicCatalogDto
             sections.Add(new(title, cards, "items", operation));
         }
         return sections;
+    }
+    private static JsonElement SectionActionItem(JsonElement group, string heading, JsonElement action)
+    {
+        var item = new Dictionary<string, object?>
+        {
+            ["name"] = heading,
+            ["action"] = action.Clone()
+        };
+        foreach (var name in new[] { "available", "errorCode", "requiresAccount", "display" })
+            if (group.TryGetProperty(name, out var value)) item[name] = value.Clone();
+        return JsonSerializer.SerializeToElement(item);
     }
     public static IReadOnlyList<MusicCatalogTag> Tags(JsonElement reply)
     {
@@ -208,6 +223,8 @@ public static class MusicCatalogDto
         var presentation = EntryPresentation(item, requirePresentation);
         var available = !item.TryGetProperty("available", out var enabled) || enabled.ValueKind == JsonValueKind.True;
         var error = Text(item, "errorCode");
+        var requiresAccount = Boolean(item, "requiresAccount", false);
+        var display = Boolean(item, "display", true);
         SongRow? song = null;
         if (item.TryGetProperty("songId", out _)) song = SongRow.Read(item);
         else if (item.TryGetProperty("song", out var nested) && nested.ValueKind == JsonValueKind.Object) song = SongRow.Read(nested);
@@ -216,7 +233,8 @@ public static class MusicCatalogDto
             MusicDto.Require(song.Raw.TryGetProperty("source_data", out var source) && Text(source, "source") == platform);
             return new(song.Id, song.Title, song.Artist, song.Cover, "song", platform, song,
                 SongNativeId(song.Raw), Available: available, ErrorCode: error, StableKey: Text(item, "key"),
-                MemberId: Text(item, "memberId"), Presentation: presentation);
+                MemberId: Text(item, "memberId"), Presentation: presentation,
+                RequiresAccount: requiresAccount, Display: display);
         }
         var id = Text(item, "id");
         var kind = Text(item, "kind");
@@ -259,7 +277,14 @@ public static class MusicCatalogDto
             Text(item, "cover"), kind, platform, ActionId: actionId, PageCode: pageCode,
             Available: available, ErrorCode: available ? "" : error.Length == 0 ? "UNSUPPORTED" : error, StableKey: Text(item, "key"),
             Action: actionValue, Locator: locator, Preview: Preview(item), UpdateFrequency: Text(item, "updateFrequency"),
-            Presentation: presentation, PreviewSubtitle: Text(item, "previewSubtitle"), DayOfMonth: CalendarDay(item));
+            Presentation: presentation, PreviewSubtitle: Text(item, "previewSubtitle"), DayOfMonth: CalendarDay(item),
+            Decoration: Text(item, "decoration"), RequiresAccount: requiresAccount, Display: display);
+    }
+    private static bool Boolean(JsonElement item, string name, bool fallback)
+    {
+        if (!item.TryGetProperty(name, out var value)) return fallback;
+        MusicDto.Require(value.ValueKind is JsonValueKind.True or JsonValueKind.False);
+        return value.GetBoolean();
     }
     private static int? CalendarDay(JsonElement item)
     {
