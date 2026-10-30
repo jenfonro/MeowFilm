@@ -337,16 +337,21 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         if (!IsSongList || direction > 0 && target.Offset >= total) return Task.CompletedTask;
         return RunAsync(async () => { if (origin == loadGeneration) await LoadAsync(target, lifetime.Token); });
     }
-    public Task CreatePlaylistAsync(string name)
+    public Task CreatePlaylistAsync(string name) => CreatePlaylistCoreAsync(name);
+    internal Task<bool> TryCreatePlaylistAsync(string name) => CreatePlaylistCoreAsync(name);
+    private async Task<bool> CreatePlaylistCoreAsync(string name)
     {
         name = name.Trim(); var origin = loadGeneration;
-        return RunAsync(async () =>
+        var created = false;
+        await RunAsync(async () =>
         {
             if (name.Length == 0) { status = "请输入歌单名称"; return; }
             var reply = await Call("music.library.create", new { name }, lifetime.Token);
+            created = true;
             await RefreshPlaylists(lifetime.Token);
             if (origin == loadGeneration) await RequestNavigationAsync("playlist/" + MusicDto.Text(reply.GetProperty("collection"), "id"));
         });
+        return created;
     }
     public Task DeletePlaylistAsync()
     {

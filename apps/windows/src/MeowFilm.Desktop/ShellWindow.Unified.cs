@@ -12,6 +12,7 @@ internal sealed record ShellNavigationEntry(ModuleSession Owner, NavigationItem 
     public string Title => Item.Title;
     public string Glyph => Item.Glyph;
     public string? Group => Item.Group;
+    public DesktopNavigationGroupAction? GroupAction => Item.GroupAction;
 }
 
 public sealed partial class ShellWindow
