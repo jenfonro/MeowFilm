@@ -7,8 +7,13 @@ import MeowMusicFeature
 @MainActor
 final class MeowfilmPrimaryShellViewController: PageViewController {
     var onSelectionChanged: ((MeowfilmPrimaryPage) -> Void)?
-    private let channels: MusicChannelsViewController
-    private let library: MusicLibraryViewController
+    private var pendingChannel: MusicPublicBrowseChannel?
+    private var channels: MusicChannelsViewController? {
+        pages.page(at: 1) as? MusicChannelsViewController
+    }
+    private var library: MusicLibraryViewController? {
+        pages.page(at: 2) as? MusicLibraryViewController
+    }
     private let pages: RetainedPagesController
     private let openMenu: () -> Void
     private let openSearch: () -> Void
@@ -16,12 +21,9 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
     private let menu = UIButton(type: .system), search = UIButton(type: .system)
     private let titleButton = UIButton(type: .system), add = UIButton(type: .system)
 
-    init(home: UIViewController, channels: MusicChannelsViewController,
-         library: MusicLibraryViewController, themeProvider: any PageThemeProviding,
+    init(pageFactories: [@MainActor () -> UIViewController], themeProvider: any PageThemeProviding,
          openMenu: @escaping () -> Void, openSearch: @escaping () -> Void) {
-        self.channels = channels
-        self.library = library
-        pages = RetainedPagesController(pages: [home, channels, library])
+        pages = RetainedPagesController(pageFactories: pageFactories)
         self.openMenu = openMenu
         self.openSearch = openSearch
         super.init(themeProvider: themeProvider)
@@ -45,10 +47,11 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
         pages.didMove(toParent: self)
         pages.didSelect = { [weak self] _ in
             guard let self else { return }
+            self.prepareSelectedPage()
             self.renderHeader()
             self.onSelectionChanged?(self.selectedPage)
         }
-        channels.onChannelChanged = { [weak self] _ in self?.renderHeader() }
+        prepareSelectedPage()
         renderHeader()
     }
 
@@ -58,8 +61,9 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
     }
 
     func selectChannel(_ channel: MusicPublicBrowseChannel) {
+        pendingChannel = channel
         select(.channels)
-        channels.select(channel)
+        prepareSelectedPage()
     }
 
     override func applyTheme() {
@@ -92,11 +96,11 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
         titleButton.contentHorizontalAlignment = .leading
         titleButton.titleLabel?.font = .systemFont(ofSize: 20, weight: .semibold)
         titleButton.addAction(UIAction { [weak self] _ in
-            if self?.selectedPage == .channels { self?.channels.showPicker() }
+            if self?.selectedPage == .channels { self?.channels?.showPicker() }
         }, for: .touchUpInside)
         add.setImage(PageIcon.image(.plus), for: .normal)
         add.accessibilityLabel = "新建歌单"
-        add.addAction(UIAction { [weak self] _ in self?.library.requestCreatePlaylist() }, for: .touchUpInside)
+        add.addAction(UIAction { [weak self] _ in self?.library?.requestCreatePlaylist() }, for: .touchUpInside)
         for item in [menu, search, titleButton, add] {
             item.translatesAutoresizingMaskIntoConstraints = false
             header.addSubview(item)
@@ -123,13 +127,21 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
         ])
     }
 
+    private func prepareSelectedPage() {
+        channels?.onChannelChanged = { [weak self] _ in self?.renderHeader() }
+        if selectedPage == .channels, let channel = pendingChannel, let channels {
+            pendingChannel = nil
+            channels.select(channel)
+        }
+    }
+
     private func renderHeader() {
         guard isViewLoaded else { return }
         search.isHidden = selectedPage != .recommend
         titleButton.isHidden = selectedPage == .recommend
         add.isHidden = selectedPage != .library
         titleButton.setTitle(selectedPage == .channels ?
-                             (channels.selectedChannel?.title ?? "频道") + " ⌄" : "我的", for: .normal)
+                             (channels?.selectedChannel?.title ?? "频道") + " ⌄" : "我的", for: .normal)
         titleButton.accessibilityLabel = selectedPage == .channels ? "选择频道" : "我的"
         applyTheme()
     }

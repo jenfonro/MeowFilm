@@ -13,6 +13,8 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     private var observations: Set<AnyCancellable> = []
     private var main: MeowfilmPrimaryShellViewController?
     private var surface: MusicPlayerSurface?
+    private var playerContent: MusicPlayerContentModel?
+    private var pendingPresentation: (destination: MusicPlaybackDestination, access: UUID, occurrence: String?)?
     private weak var player: MusicPlayerViewController?
     private var accessGeneration: UUID?
     private var presentedError: String?
@@ -38,6 +40,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         navigation.didShowPage = { [weak self] page in
             guard let self else { return }
             self.root.setRootVisible(page === self.main, animated: false)
+            self.showPendingError()
         }
         root.onSelectPage = { [weak self] page in
             self?.primaryPlaybackPresentation.invalidate()
@@ -59,7 +62,16 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         if let model = assembly.music { install(model) }
     }
 
-    func becameActive() { assembly.appearance.reload() }
+    func becameActive() {
+        assembly.appearance.reload()
+        if let pending = pendingPresentation, let model = assembly.music {
+            pendingPresentation = nil
+            if pending.access == model.accountAccessGeneration, pending.occurrence == model.current?.id {
+                showPlayer(pending.destination)
+            }
+        }
+        showPendingError()
+    }
 
     func showSearch() {
         guard let model = assembly.music else { return }
@@ -94,8 +106,12 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         ), animated: true)
     }
 
-    func showPlayer(_ destination: MusicPlaybackDestination, sourceView: UIView?) {
+    func showPlayer(_ destination: MusicPlaybackDestination) {
         guard let model = assembly.music, model.isAvailable, !model.isClosed else { return }
+        guard UIApplication.shared.applicationState == .active else {
+            pendingPresentation = (destination, model.accountAccessGeneration, model.current?.id)
+            return
+        }
         if destination == .queue {
             let page = MusicQueueViewController(model: model, appearance: assembly.appearance)
             let wrapper = PageNavigationController(themeProvider: assembly.appearance)
@@ -106,11 +122,13 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             presenter().present(wrapper, animated: true)
             return
         }
-        guard player == nil, let surface, let dock = root.dock?.surfaceHost else { return }
-        let page = MusicPlayerViewController(
-            model: model, playback: assembly.playback, appearance: assembly.appearance,
-            surface: surface, dock: dock
-        )
+        if let player {
+            if destination == .sources { player.requestSources() }
+            return
+        }
+        guard let playerContent else { return }
+        let page = MusicPlayerViewController(content: playerContent, appearance: assembly.appearance)
+        page.onPresent = { [weak self] destination in self?.showPlayer(destination) }
         page.onDismiss = { [weak self] in
             self?.player = nil
             self?.primaryPlaybackPresentation.setFullPlayerPresented(false)
@@ -118,7 +136,10 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         player = page
         primaryPlaybackPresentation.setFullPlayerPresented(true)
         primaryPlaybackPresentation.invalidate()
-        presenter().present(page, animated: true)
+        presenter().present(page, animated: true) { [weak self, weak page] in
+            if destination == .sources { page?.requestSources() }
+            self?.showPendingError()
+        }
     }
 
     func selectChannel(_ channel: MusicPublicBrowseChannel) {
@@ -129,54 +150,71 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     private func install(_ model: MusicViewModel) {
         guard main == nil else { return }
         let appearance = assembly.appearance
-        let home = MusicBrowseViewController(title: "推荐", model: model, browser: model.publicBrowser,
-                                             request: .discovery(.home), appearance: appearance,
-                                             router: self, embedded: true)
-        let channels = MusicChannelsViewController(model: model, browser: model.publicBrowser,
-                                                   appearance: appearance, router: self)
-        let library = MusicLibraryViewController(model: model, appearance: appearance, router: self)
+        let factories: [@MainActor () -> UIViewController] = [
+            { [weak self] in
+                guard let self else { return UIViewController() }
+                return MusicBrowseViewController(title: "推荐", model: model, browser: model.publicBrowser,
+                    request: .discovery(.home), appearance: appearance, router: self, embedded: true)
+            },
+            { [weak self] in
+                guard let self else { return UIViewController() }
+                return MusicChannelsViewController(model: model, browser: model.publicBrowser,
+                    appearance: appearance, router: self)
+            },
+            { [weak self] in
+                guard let self else { return UIViewController() }
+                return MusicLibraryViewController(model: model, appearance: appearance, router: self)
+            }
+        ]
         let page = MeowfilmPrimaryShellViewController(
-            home: home, channels: channels, library: library, themeProvider: appearance,
+            pageFactories: factories, themeProvider: appearance,
             openMenu: { [weak self] in self?.root.showSidebar() },
             openSearch: { [weak self] in self?.showSearch() }
         )
         page.onSelectionChanged = { [weak self] selected in self?.root.select(selected) }
         main = page
-        let surface = MusicPlayerSurface(model: model, playback: assembly.playback,
-                                         appearance: appearance, presentation: primaryPlaybackPresentation)
-        surface.onPresent = { [weak self] destination in self?.showPlayer(destination, sourceView: nil) }
+        let content = MusicPlayerContentModel(model: model, playback: assembly.playback,
+                                              appearance: appearance, presentation: primaryPlaybackPresentation)
+        playerContent = content
+        let surface = MusicPlayerSurface(content: content)
+        surface.onPresent = { [weak self] destination in self?.showPlayer(destination) }
         self.surface = surface
         root.install(surface: surface)
         navigation.setViewControllers([page], animated: false)
         accessGeneration = model.accountAccessGeneration
-        model.objectWillChange.receive(on: RunLoop.main).sink { [weak self, weak model] in
+        model.accessChanges.receive(on: RunLoop.main).sink { [weak self, weak model] in
             guard let self, let model else { return }
             if self.accessGeneration != model.accountAccessGeneration ||
                 !model.isAvailable || model.isClosed {
                 self.accessGeneration = model.accountAccessGeneration
+                self.pendingPresentation = nil
+                self.presentedError = nil
                 self.primaryPlaybackPresentation.invalidate()
                 self.surface?.collapse()
                 self.root.dismiss(animated: false)
             }
-            if model.showingPlayer || model.showingSources {
-                let sources = model.showingSources
-                model.showingPlayer = false
-                model.showingSources = false
-                self.showPlayer(.player, sourceView: nil)
-                if sources { self.player?.requestSources() }
-            }
-            if let error = model.error, self.presentedError != error {
-                let top = self.presenter()
-                let page = (top as? UINavigationController)?.topViewController ?? top
-                if let page = page as? PageViewController,
-                   page.showError(error, acknowledged: { [weak self, weak model] in
-                       if model?.error == error { model?.error = nil }
-                       self?.presentedError = nil
-                   }) {
-                    self.presentedError = error
-                }
-            }
         }.store(in: &observations)
+        model.noticeChanges.receive(on: RunLoop.main).sink { [weak self] in
+            self?.showPendingError()
+        }.store(in: &observations)
+        model.onRequestPresentation = { [weak self, weak model] destination in
+            guard let self, let model, self.assembly.music === model else { return }
+            self.showPlayer(destination)
+        }
+    }
+
+    private func showPendingError() {
+        guard UIApplication.shared.applicationState == .active, let model = assembly.music,
+              let error = model.error, presentedError != error else { return }
+        let top = presenter()
+        let page = (top as? UINavigationController)?.topViewController ?? top
+        if let page = page as? PageViewController,
+           page.showError(error, acknowledged: { [weak self, weak model] in
+               if model?.error == error { model?.error = nil }
+               self?.presentedError = nil
+           }) {
+            presentedError = error
+        }
     }
 
     private func presenter() -> UIViewController {

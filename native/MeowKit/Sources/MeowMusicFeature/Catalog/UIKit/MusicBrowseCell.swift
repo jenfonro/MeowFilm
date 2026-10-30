@@ -56,13 +56,24 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         if let frequency = item.ranking?.updateFrequency, !frequency.isEmpty {
             subtitle.text = [item.subtitle, frequency].filter { !$0.isEmpty }.joined(separator: " · ")
         }
-        for child in previews.arrangedSubviews { previews.removeArrangedSubview(child); child.removeFromSuperview() }
         previews.isHidden = !(layout == .rankedSongs || layout == .vipRankedSongs)
-        if !previews.isHidden {
-            for track in item.previewSongs.prefix(3) {
-                let button = MusicBrowsePreviewButton(track: track, theme: theme) { onPreview?(track) }
-                previews.addArrangedSubview(button)
+        var available = previews.arrangedSubviews.compactMap { $0 as? MusicBrowsePreviewButton }
+        let tracks = previews.isHidden ? [] : Array(item.previewSongs.prefix(3))
+        let buttons = tracks.map { track -> MusicBrowsePreviewButton in
+            if let index = available.firstIndex(where: { $0.reference == track.ref }) {
+                let button = available.remove(at: index)
+                button.configure(track: track, theme: theme) { onPreview?(track) }
+                return button
             }
+            return MusicBrowsePreviewButton(track: track, theme: theme) { onPreview?(track) }
+        }
+        for button in available {
+            previews.removeArrangedSubview(button); button.removeFromSuperview()
+        }
+        for (index, button) in buttons.enumerated() {
+            if previews.arrangedSubviews.indices.contains(index), previews.arrangedSubviews[index] === button { continue }
+            previews.removeArrangedSubview(button)
+            previews.insertArrangedSubview(button, at: index)
         }
         let covers = item.ranking?.preview.compactMap(\.artwork) ?? []
         for (index, view) in rankingCovers.enumerated() {
@@ -155,21 +166,30 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
 
 @MainActor
 private final class MusicBrowsePreviewButton: UIButton {
+    private let cover = MusicArtworkView(size: 40)
+    private let title = UILabel(), artist = UILabel()
+    private var action: (() -> Void)?
+    private(set) var reference: MusicReference
+
     init(track: MusicRemoteTrack, theme: PageTheme, action: @escaping () -> Void) {
+        reference = track.ref
         super.init(frame: .zero)
-        let cover = MusicArtworkView(size: 40)
-        cover.load(track.artwork)
-        let title = UILabel(), artist = UILabel()
-        title.text = track.title; title.font = .systemFont(ofSize: 14); title.textColor = UIColor(theme.ink)
-        artist.text = track.artist; artist.font = .systemFont(ofSize: 11); artist.textColor = UIColor(theme.muted)
+        title.font = .systemFont(ofSize: 14); artist.font = .systemFont(ofSize: 11)
         let copy = UIStackView(arrangedSubviews: [title, artist]); copy.axis = .vertical; copy.spacing = 3
         let row = UIStackView(arrangedSubviews: [cover, copy]); row.spacing = 10; row.alignment = .center
         row.isUserInteractionEnabled = false
         addSubview(row); row.pinEdges(to: self, insets: UIEdgeInsets(top: 3, left: 0, bottom: 3, right: 8))
-        accessibilityLabel = "播放" + track.title
-        addAction(UIAction { _ in action() }, for: .touchUpInside)
+        addAction(UIAction { [weak self] _ in self?.action?() }, for: .touchUpInside)
+        configure(track: track, theme: theme, action: action)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    func configure(track: MusicRemoteTrack, theme: PageTheme, action: @escaping () -> Void) {
+        reference = track.ref; self.action = action
+        cover.load(track.artwork)
+        title.text = track.title; title.textColor = UIColor(theme.ink)
+        artist.text = track.artist; artist.textColor = UIColor(theme.muted)
+        accessibilityLabel = "播放" + track.title
+    }
 }
 
 @MainActor

@@ -5,7 +5,7 @@ import MeowUI
 @MainActor
 public final class MusicQueueViewController: MusicPageViewController,
     UIPageViewControllerDataSource, UIPageViewControllerDelegate,
-    UITableViewDataSource, UITableViewDelegate
+    UITableViewDelegate
 {
     public var onDismiss: (() -> Void)?
     private let model: MusicViewModel
@@ -14,19 +14,28 @@ public final class MusicQueueViewController: MusicPageViewController,
     private let pager = UIPageViewController(transitionStyle: .scroll, navigationOrientation: .horizontal)
     private let current = MusicQueueTablePage()
     private let songs = MusicQueueTablePage()
+    private let emptyHistory = MusicQueueTablePage()
     private var histories: [String: MusicHistoryCardViewController] = [:]
     private var selected = "current"
     private var paging = false
     private var pendingSelection: String?
     private var entries: [MusicQueueEntry] = []
-    private var played: [[MusicPlayedSong]] = []
+    private var currentDataSource: MusicQueueDataSource!
+    private var songsDataSource: UITableViewDiffableDataSource<String, String>!
+    private var candidatesDataSource: UITableViewDiffableDataSource<Int, String>!
+    private var entryRows: [String: (entry: MusicQueueEntry, index: Int)] = [:]
+    private var playedRows: [String: (song: MusicPlayedSong, index: Int)] = [:]
+    private var candidateRows: [String: (candidate: MusicSimilarModeCandidate, index: Int)] = [:]
+    private var historyAccess: UUID?
+    private var pendingReorder: UUID?
+    private var shownSimilarError: String?
     private var displayed: MusicReferenceQueueIntent?
     private var similar: MusicSimilarModeSnapshot?
     private var ids: [String] { MusicReferenceQueueStrip.ids(history: model.playedPlaylists.map(\.id)) }
 
     public init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore) {
         self.model = model
-        favorites = MusicMiniPlayerFavorites(model: model)
+        favorites = model.favorites
         super.init(appearance: appearance)
         title = "播放队列"
     }
@@ -60,15 +69,35 @@ public final class MusicQueueViewController: MusicPageViewController,
         pager.didMove(toParent: self)
         for (index, page) in [current, songs].enumerated() {
             page.table.tag = index
-            page.table.dataSource = self
             page.table.delegate = self
             page.table.register(MusicTrackCell.self, forCellReuseIdentifier: MusicTrackCell.reuseIdentifier)
             page.table.register(UITableViewCell.self, forCellReuseIdentifier: "Status")
         }
         current.candidates.tag = 2
-        current.candidates.dataSource = self
         current.candidates.delegate = self
         current.candidates.register(UITableViewCell.self, forCellReuseIdentifier: "Candidate")
+        currentDataSource = MusicQueueDataSource(tableView: current.table) { [weak self] view, path, id in
+            guard let self, let row = self.entryRows[id] else { return nil }
+            let cell = view.dequeueReusableCell(withIdentifier: MusicTrackCell.reuseIdentifier,
+                                                for: path) as! MusicTrackCell
+            self.configure(cell, track: row.entry.track, active: id == self.model.state.currentId, index: row.index)
+            return cell
+        }
+        currentDataSource.onMove = { [weak self] in self?.moveQueue(from: $0, to: $1) }
+        songsDataSource = UITableViewDiffableDataSource(tableView: songs.table) { [weak self] view, path, id in
+            guard let self, let row = self.playedRows[id] else { return nil }
+            let cell = view.dequeueReusableCell(withIdentifier: MusicTrackCell.reuseIdentifier,
+                                                for: path) as! MusicTrackCell
+            let active = row.song.displayIdentity?.matches(self.model.current?.displayIdentity) == true
+            self.configure(cell, track: row.song.track, active: active, index: row.index)
+            return cell
+        }
+        candidatesDataSource = UITableViewDiffableDataSource(tableView: current.candidates) { [weak self] view, path, id in
+            guard let self, let row = self.candidateRows[id] else { return nil }
+            let cell = view.dequeueReusableCell(withIdentifier: "Candidate", for: path)
+            self.configureCandidate(cell, row: row)
+            return cell
+        }
         current.mode.addAction(UIAction { [weak self] _ in self?.cycleMode() }, for: .touchUpInside)
         current.continuePlaying.addAction(UIAction { [weak self] _ in
             guard let self, let snapshot = self.similar else { return }
@@ -83,22 +112,37 @@ public final class MusicQueueViewController: MusicPageViewController,
         navigationItem.rightBarButtonItem = UIBarButtonItem(
             title: "清空", style: .plain, target: self, action: #selector(clearQueue))
         navigationItem.leftBarButtonItem = editButtonItem
-        observe(model) { [weak self] in self?.render() }
-        observe(favorites) { [weak self] in self?.render() }
+        observe(model.queueChanges) { [weak self] in
+            self?.renderQueue()
+            self?.renderCandidates()
+            self?.renderChrome()
+        }
+        observe(model.historyChanges) { [weak self] in self?.renderHistory() }
+        observe(model.playbackChanges) { [weak self] in
+            self?.updateVisiblePlayback()
+            self?.renderChrome()
+        }
+        observe(model.accessChanges) { [weak self] in self?.reconcileAccess() }
+        observe(favorites) { [weak self] in
+            self?.updateVisiblePlayback()
+            if let self { _ = self.showError(self.favorites.error?.localizedDescription) {
+                [weak self] in self?.favorites.clearError()
+            } }
+        }
         pager.setViewControllers([current], direction: .forward, animated: false)
+        renderQueue(); renderHistory(); renderCandidates(); renderChrome()
     }
 
     public override func pageDidBecomeActive() {
-        favorites.setActive(true)
-        render()
-        runPageTask { [weak self] in
-            guard let self else { return }
-            await self.model.loadHistory()
-            if !Task.isCancelled { await self.model.loadSimilarMode(preview: true) }
-        }
+        reconcileAccess()
     }
 
-    public override func pageDidBecomeInactive() { favorites.suspend() }
+    public override func pageDidBecomeInactive() {
+        for history in histories.values { PageViewController.invalidatePages(in: history) }
+        histories.removeAll()
+    }
+    public override func pageDidBecomeVisible() { renderChrome() }
+    public override func pageDidFinishAppearing() { renderChrome() }
 
     public override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
@@ -109,60 +153,60 @@ public final class MusicQueueViewController: MusicPageViewController,
         super.applyTheme()
         guard isViewLoaded else { return }
         categories.setTitleTextAttributes([.foregroundColor: UIColor(theme.ink)], for: .normal)
-        render()
-    }
-
-    public func numberOfSections(in tableView: UITableView) -> Int {
-        tableView.tag == 1 ? played.count : 1
-    }
-
-    public func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        if tableView.tag == 0 { return entries.count }
-        if tableView.tag == 1 { return played[section].count }
-        return similar?.active == false ? similar?.candidates.count ?? 0 : 0
-    }
-
-    public func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        tableView.tag == 1 ? played[section].first?.date : nil
-    }
-
-    public func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        if tableView.tag == 0 || tableView.tag == 1 {
-            let track = tableView.tag == 0 ? entries[indexPath.row].track : played[indexPath.section][indexPath.row].track
-            let active = tableView.tag == 0 ? entries[indexPath.row].id == model.state.currentId :
-                played[indexPath.section][indexPath.row].displayIdentity?.matches(model.current?.displayIdentity) == true
-            let cell = tableView.dequeueReusableCell(
-                withIdentifier: MusicTrackCell.reuseIdentifier, for: indexPath) as! MusicTrackCell
-            cell.configure(track: track, active: active, theme: theme, index: indexPath.row)
-            cell.accessoryType = favorites.isFavorite(track) ? .checkmark : .none
-            cell.accessibilityTraits = active ? [.button, .selected] : .button
-            return cell
+        updateVisiblePlayback(force: true)
+        for path in current.candidates.indexPathsForVisibleRows ?? [] {
+            if let id = candidatesDataSource?.itemIdentifier(for: path), let row = candidateRows[id],
+               let cell = current.candidates.cellForRow(at: path) { configureCandidate(cell, row: row) }
         }
-        let row = similar!.candidates[indexPath.row]
-        let cell = tableView.dequeueReusableCell(withIdentifier: "Candidate", for: indexPath)
+        renderChrome()
+    }
+
+    private func configure(_ cell: MusicTrackCell, track: MusicRemoteTrack, active: Bool, index: Int) {
+        cell.configure(track: track, active: active, theme: theme, index: index)
+        cell.accessoryType = favorites.isFavorite(track) ? .checkmark : .none
+        cell.accessibilityTraits = active ? [.button, .selected] : .button
+    }
+
+    private func configureCandidate(_ cell: UITableViewCell,
+                                    row: (candidate: MusicSimilarModeCandidate, index: Int)) {
         var content = cell.defaultContentConfiguration()
-        content.text = "\(indexPath.row + 1). \(row.song.title)"
-        content.secondaryText = row.song.artist
+        content.text = "\(row.index + 1). \(row.candidate.song.title)"
+        content.secondaryText = row.candidate.song.artist
         content.textProperties.color = UIColor(theme.ink)
         content.secondaryTextProperties.color = UIColor(theme.muted)
         cell.contentConfiguration = content
         cell.backgroundColor = .clear
-        return cell
+    }
+
+    public func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
+        guard tableView.tag == 1 else { return nil }
+        let dates = songsDataSource.snapshot().sectionIdentifiers
+        guard dates.indices.contains(section) else { return nil }
+        let header = UITableViewHeaderFooterView(reuseIdentifier: nil)
+        var content = header.defaultContentConfiguration()
+        content.text = dates[section]; content.textProperties.font = .systemFont(ofSize: 12)
+        content.textProperties.color = UIColor(theme.muted)
+        header.contentConfiguration = content
+        return header
+    }
+    public func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
+        tableView.tag == 1 ? 28 : .leastNormalMagnitude
     }
 
     public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        if tableView.tag == 0, let intent = displayed {
-            let id = entries[indexPath.row].id
+        if tableView.tag == 0, let intent = captureQueueIntent() {
+            guard let id = currentDataSource.itemIdentifier(for: indexPath) else { return }
             runQueue(.select(id), intent: intent, startPlayback: true)
         } else if tableView.tag == 1 {
-            let row = played[indexPath.section][indexPath.row], access = model.accountAccessGeneration
+            guard let id = songsDataSource.itemIdentifier(for: indexPath), let row = playedRows[id]?.song else { return }
+            let access = model.accountAccessGeneration
             runPageTask { [weak self] in
                 guard let self, self.selected == "songs", self.model.accountAccessGeneration == access else { return }
                 await self.model.playHistorySong(row)
             }
         } else if let snapshot = similar {
-            let id = snapshot.candidates[indexPath.row].id
+            guard let id = candidatesDataSource.itemIdentifier(for: indexPath) else { return }
             runSimilar(snapshot) { await self.model.playSimilarCandidate(snapshotID: snapshot.id, candidateID: id) }
         }
     }
@@ -171,15 +215,21 @@ public final class MusicQueueViewController: MusicPageViewController,
                           trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath)
         -> UISwipeActionsConfiguration? {
         guard tableView.tag != 2 else { return nil }
-        let track = tableView.tag == 0 ? entries[indexPath.row].track : played[indexPath.section][indexPath.row].track
+        let track: MusicRemoteTrack
+        if tableView.tag == 0, let id = currentDataSource.itemIdentifier(for: indexPath),
+           let row = entryRows[id] { track = row.entry.track }
+        else if let id = songsDataSource.itemIdentifier(for: indexPath), let row = playedRows[id] { track = row.song.track }
+        else { return nil }
+        let access = model.accountAccessGeneration
         let like = UIContextualAction(style: .normal, title: favorites.isFavorite(track) ? "取消收藏" : "收藏") {
             [weak self] _, _, finish in
-            self?.favorites.toggle(track)
+            guard let self, self.model.accountAccessGeneration == access else { finish(false); return }
+            self.favorites.toggle(track)
             finish(true)
         }
         var actions = [like]
-        if tableView.tag == 0, let intent = displayed {
-            let id = entries[indexPath.row].id
+        if tableView.tag == 0, let intent = captureQueueIntent() {
+            guard let id = currentDataSource.itemIdentifier(for: indexPath) else { return nil }
             actions.insert(UIContextualAction(style: .destructive, title: "移除") { [weak self] _, _, finish in
                 self?.runQueue(.remove(id), intent: intent)
                 finish(true)
@@ -188,29 +238,39 @@ public final class MusicQueueViewController: MusicPageViewController,
         return UISwipeActionsConfiguration(actions: actions)
     }
 
-    public func tableView(_ tableView: UITableView, canMoveRowAt indexPath: IndexPath) -> Bool {
-        tableView.tag == 0
+    public func tableView(_ tableView: UITableView, shouldIndentWhileEditingRowAt indexPath: IndexPath) -> Bool {
+        false
     }
 
     public func tableView(_ tableView: UITableView, editingStyleForRowAt indexPath: IndexPath)
         -> UITableViewCell.EditingStyle { .none }
 
-    public func tableView(_ tableView: UITableView, shouldIndentWhileEditingRowAt indexPath: IndexPath) -> Bool {
-        false
-    }
-
     public override func setEditing(_ editing: Bool, animated: Bool) {
         super.setEditing(editing, animated: animated)
         current.table.setEditing(editing, animated: animated)
-        if !editing { render(forceQueue: true) }
+        if !editing { renderQueue() }
     }
 
-    public func tableView(_ tableView: UITableView, moveRowAt from: IndexPath, to: IndexPath) {
-        guard let intent = displayed, intent.ids.indices.contains(from.row),
-              intent.ids.indices.contains(to.row) else { render(forceQueue: true); return }
+    private func moveQueue(from: IndexPath, to: IndexPath) {
+        guard let intent = captureQueueIntent(), intent.ids.indices.contains(from.row),
+              intent.ids.indices.contains(to.row), pendingReorder == nil else { renderQueue(force: true); return }
         let destination = to.row > from.row ? to.row + 1 : to.row
         guard let order = intent.moving(IndexSet(integer: from.row), to: destination) else { return }
-        runQueue(.reorder(order), intent: intent)
+        let own = UUID()
+        pendingReorder = own
+        entries = order.compactMap { entryRows[$0]?.entry }
+        applyQueueRows()
+        runPageTask { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.pendingReorder == own {
+                    self.pendingReorder = nil
+                    if self.isPageActive { self.renderQueue(force: true); self.renderChrome() }
+                }
+            }
+            guard !Task.isCancelled, self.selected == "current", self.pendingReorder == own else { return }
+            await self.model.changeDisplayedQueue(.reorder(order), intent: intent)
+        }
     }
 
     public func pageViewController(_ pageViewController: UIPageViewController,
@@ -230,31 +290,133 @@ public final class MusicQueueViewController: MusicPageViewController,
                                    previousViewControllers: [UIViewController], transitionCompleted completed: Bool) {
         paging = false
         if completed, let shown = pager.viewControllers?.first, let id = id(of: shown) { selected = id }
-        render()
+        renderChrome()
         if let pendingSelection { self.pendingSelection = nil; select(pendingSelection) }
     }
 
-    private func render(forceQueue: Bool = false) {
-        guard isViewLoaded else { return }
-        favorites.setActive(isPageActive && model.isAvailable && !model.isClosed)
-        if forceQueue || !current.table.isEditing {
-            entries = model.queue
-            displayed = .init(access: model.accountAccessGeneration, revision: model.state.revision,
-                              ids: entries.map(\.id))
+    private func reconcileAccess() {
+        guard isPageActive else { return }
+        pendingReorder = nil
+        renderQueue(force: true); renderHistory(); renderCandidates(); renderChrome()
+        guard model.isAvailable, !model.isClosed else { historyAccess = nil; return }
+        let access = model.accountAccessGeneration
+        guard historyAccess != access else { return }
+        historyAccess = access
+        let model = model
+        runPageTask { [weak self, model] in
+            guard !Task.isCancelled, self?.historyAccess == access else { return }
+            await model.loadHistory()
+            if !Task.isCancelled, self?.historyAccess == access, model.accountAccessGeneration == access {
+                await model.loadSimilarMode(preview: true)
+            }
         }
+    }
+
+    private func renderQueue(force: Bool = false) {
+        guard currentDataSource != nil, force || pendingReorder == nil else { return }
+        entries = model.isAvailable && !model.isClosed ? model.queue : []
+        displayed = .init(access: model.accountAccessGeneration, revision: model.state.revision,
+                          ids: entries.map(\.id))
+        applyQueueRows()
+        updateVisiblePlayback()
+    }
+
+    private func applyQueueRows() {
+        let previous = entryRows
+        entryRows = Dictionary(uniqueKeysWithValues: entries.enumerated().map {
+            ($0.element.id, (entry: $0.element, index: $0.offset))
+        })
+        var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
+        snapshot.appendSections([0]); snapshot.appendItems(entries.map(\.id))
+        let changed = snapshot.itemIdentifiers.filter {
+            guard let old = previous[$0], let row = entryRows[$0] else { return false }
+            return old.entry != row.entry || old.index != row.index
+        }
+        snapshot.reconfigureItems(changed)
+        if currentDataSource.snapshot().itemIdentifiers != snapshot.itemIdentifiers || !changed.isEmpty {
+            currentDataSource.apply(snapshot, animatingDifferences: false)
+        }
+    }
+
+    private func renderHistory() {
+        guard songsDataSource != nil else { return }
+        let previous = playedRows
+        playedRows = [:]
         var dates: [String] = [], groups: [String: [MusicPlayedSong]] = [:]
-        for row in model.playedSongs {
+        for row in model.isAvailable && !model.isClosed ? model.playedSongs : [] {
             if groups[row.date] == nil { dates.append(row.date) }
             groups[row.date, default: []].append(row)
         }
-        played = dates.map { groups[$0]! }
-        similar = model.similarMode
+        var snapshot = NSDiffableDataSourceSnapshot<String, String>()
+        snapshot.appendSections(dates)
+        for date in dates {
+            let songs = groups[date] ?? []
+            for (index, song) in songs.enumerated() { playedRows[song.id] = (song, index) }
+            snapshot.appendItems(songs.map(\.id), toSection: date)
+        }
+        let changed = snapshot.itemIdentifiers.filter {
+            guard let old = previous[$0], let row = playedRows[$0] else { return false }
+            return old.song.track != row.song.track || old.song.displayIdentity != row.song.displayIdentity ||
+                old.index != row.index
+        }
+        snapshot.reconfigureItems(changed)
+        let old = songsDataSource.snapshot()
+        if old.sectionIdentifiers != dates || old.itemIdentifiers != snapshot.itemIdentifiers || !changed.isEmpty {
+            songsDataSource.apply(snapshot, animatingDifferences: false)
+        }
+        songs.setEmpty(playedRows.isEmpty ? "还没有播放记录" : nil, theme: theme)
+        let live = Set(model.playedPlaylists.map(\.id))
+        for (id, history) in histories where !live.contains(id) { PageViewController.invalidatePages(in: history) }
+        histories = histories.filter { live.contains($0.key) }
+        for summary in model.playedPlaylists { histories[summary.id]?.update(summary: summary) }
+        renderChrome()
+    }
+
+    private func renderCandidates() {
+        guard candidatesDataSource != nil else { return }
+        let previous = candidateRows
+        similar = model.isAvailable && !model.isClosed ? model.similarMode : nil
+        let values = similar?.active == false ? similar?.candidates ?? [] : []
+        candidateRows = Dictionary(uniqueKeysWithValues: values.enumerated().map {
+            ($0.element.id, (candidate: $0.element, index: $0.offset))
+        })
+        var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
+        snapshot.appendSections([0]); snapshot.appendItems(values.map(\.id))
+        let changed = snapshot.itemIdentifiers.filter {
+            guard let old = previous[$0], let row = candidateRows[$0] else { return false }
+            return old.candidate.song != row.candidate.song || old.index != row.index
+        }
+        snapshot.reconfigureItems(changed)
+        if candidatesDataSource.snapshot().itemIdentifiers != snapshot.itemIdentifiers || !changed.isEmpty {
+            candidatesDataSource.apply(snapshot, animatingDifferences: false)
+        }
+    }
+
+    private func updateVisiblePlayback(force: Bool = false) {
+        guard currentDataSource != nil, songsDataSource != nil else { return }
+        for table in [current.table, songs.table] {
+            for path in table.indexPathsForVisibleRows ?? [] {
+                let track: MusicRemoteTrack, active: Bool, index: Int
+                if table === current.table, let id = currentDataSource.itemIdentifier(for: path),
+                   let row = entryRows[id] {
+                    track = row.entry.track; active = id == model.state.currentId; index = row.index
+                } else if let id = songsDataSource.itemIdentifier(for: path), let row = playedRows[id] {
+                    track = row.song.track; active = row.song.displayIdentity?.matches(model.current?.displayIdentity) == true
+                    index = row.index
+                } else { continue }
+                guard let cell = table.cellForRow(at: path) as? MusicTrackCell else { continue }
+                if force || cell.accessibilityTraits.contains(.selected) != active {
+                    configure(cell, track: track, active: active, index: index)
+                } else { cell.accessoryType = favorites.isFavorite(track) ? .checkmark : .none }
+            }
+        }
+    }
+
+    private func renderChrome() {
+        guard currentDataSource != nil else { return }
         current.configure(snapshot: similar, queueCount: entries.count, modeTitle: model.state.mode.title,
                           notice: model.queueNotice, theme: theme)
-        current.table.reloadData()
-        current.candidates.reloadData()
-        songs.table.reloadData()
-        songs.setEmpty(played.isEmpty ? "还没有播放记录" : nil, theme: theme)
+        current.retry.isEnabled = similar?.canRetry == true && !model.isChangingSimilarMode
         if !paging {
             let next = MusicReferenceQueueStrip.reconciled(selected, history: model.playedPlaylists.map(\.id))
             if next != selected { select(next, animated: false) }
@@ -263,13 +425,21 @@ public final class MusicQueueViewController: MusicPageViewController,
         navigationItem.rightBarButtonItem = selected == "current" ? UIBarButtonItem(
             title: "清空", style: .plain, target: self, action: #selector(clearQueue)) : nil
         navigationItem.leftBarButtonItem = selected == "current" ? editButtonItem : nil
-        let live = Set(model.playedPlaylists.map(\.id))
-        histories = histories.filter { live.contains($0.key) }
-        for summary in model.playedPlaylists { histories[summary.id]?.update(summary: summary) }
+        if let error = similar?.error, similar?.status == .error {
+            let message = error.localizedDescription
+            if shownSimilarError != message, showError(message) { shownSimilarError = message }
+        } else { shownSimilarError = nil }
+    }
+
+    private func captureQueueIntent() -> MusicReferenceQueueIntent? {
+        let ids = entries.map(\.id)
+        guard isPageActive, model.isAvailable, !model.isClosed, pendingReorder == nil,
+              displayed?.access == model.accountAccessGeneration, entries == model.queue else { return nil }
+        return .init(access: model.accountAccessGeneration, revision: model.state.revision, ids: ids)
     }
 
     @objc private func clearQueue() {
-        guard let intent = displayed, !intent.ids.isEmpty else { return }
+        guard let intent = captureQueueIntent(), !intent.ids.isEmpty else { return }
         let alert = UIAlertController(title: "停止播放并清空队列？", message: nil, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "清空", style: .destructive) { [weak self] _ in
             self?.runQueue(.clear, intent: intent)
@@ -282,12 +452,12 @@ public final class MusicQueueViewController: MusicPageViewController,
         runPageTask { [weak self] in
             guard let self, self.selected == "current" else { return }
             await self.model.changeDisplayedQueue(change, intent: intent, startPlayback: startPlayback)
-            if !Task.isCancelled { self.render(forceQueue: true) }
+            if !Task.isCancelled { self.renderQueue(force: true); self.renderChrome() }
         }
     }
 
     private func runSimilar(_ snapshot: MusicSimilarModeSnapshot, operation: @escaping @MainActor () async -> Void) {
-        guard let intent = displayed else { return }
+        guard let intent = captureQueueIntent() else { return }
         runPageTask { [weak self] in
             guard let self, self.selected == "current", self.model.similarMode?.id == snapshot.id,
                   !self.model.isChangingSimilarMode,
@@ -317,7 +487,7 @@ public final class MusicQueueViewController: MusicPageViewController,
             [weak self] _ in
             guard let self else { return }
             self.paging = false
-            self.render()
+            self.renderChrome()
             if let pending = self.pendingSelection { self.pendingSelection = nil; self.select(pending) }
         }
         categories.selectedSegmentIndex = MusicReferenceQueueStrip.category(id).rawValue
@@ -328,15 +498,15 @@ public final class MusicQueueViewController: MusicPageViewController,
         if id == "songs" { return songs }
         guard let summary = model.playedPlaylists.first(where: { "history:" + $0.id == id }) else {
             if id == "playlists" {
-                let empty = MusicQueueTablePage()
-                empty.setEmpty("还没有已播歌单", theme: theme)
-                return empty
+                emptyHistory.setEmpty("还没有已播歌单", theme: theme)
+                return emptyHistory
             }
             return nil
         }
         if let existing = histories[summary.id] { return existing }
         let card = MusicHistoryCardViewController(model: model, summary: summary, appearance: appearance)
         card.isSelectedPage = { [weak self] in self?.selected == id }
+        card.lifetimeOwner = self
         histories[summary.id] = card
         return card
     }
@@ -352,6 +522,18 @@ public final class MusicQueueViewController: MusicPageViewController,
         else { return nil }
         return self.page(ids[index + step])
     }
+
+    isolated deinit {
+        for history in histories.values { PageViewController.invalidatePages(in: history) }
+    }
+}
+
+@MainActor
+private final class MusicQueueDataSource: UITableViewDiffableDataSource<Int, String> {
+    var onMove: ((IndexPath, IndexPath) -> Void)?
+    override func tableView(_ tableView: UITableView, canMoveRowAt indexPath: IndexPath) -> Bool { true }
+    override func tableView(_ tableView: UITableView, moveRowAt sourceIndexPath: IndexPath,
+                            to destinationIndexPath: IndexPath) { onMove?(sourceIndexPath, destinationIndexPath) }
 }
 
 @MainActor
@@ -382,7 +564,11 @@ private final class MusicQueueTablePage: UIViewController {
         self.snapshot = snapshot; self.queueCount = queueCount
         let presentation = snapshot.map { MusicReferenceSimilarPresentation(snapshot: $0) }
         heading.text = presentation?.showsSection == true ? presentation?.title : nil
-        status.text = presentation?.status ?? notice
+        switch snapshot?.status {
+        case .error: status.text = nil
+        case .empty: status.text = snapshot?.active == true ? "暂无新的相似歌曲" : "暂无有效相似歌曲"
+        default: status.text = presentation?.status ?? notice
+        }
         retry.isHidden = presentation?.showsRetry != true
         mode.isHidden = snapshot?.active != true
         continuePlaying.isHidden = mode.isHidden

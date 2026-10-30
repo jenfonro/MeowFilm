@@ -82,13 +82,14 @@ private actor HomeLifecycleFixture: MusicHomeBrowsing {
         await value.refresh()
         XCTAssertEqual(value.sections.first?.items.map(\.id), ["1"])
     }
-    func testAccountChangeClearsInactiveHomeWithoutStartingNetwork() async {
+    func testAccountChangeDoesNotReloadRemovedHome() async {
         let service = HomeLifecycleFixture(), value = model(service)
         await value.refresh()
         let observation = Task { await value.observeHomeChanges() }
         await service.waitForSubscription()
-        value.disappear(preservingContent: true)
         XCTAssertFalse(value.sections.isEmpty)
+        value.disappear()
+        XCTAssertTrue(value.sections.isEmpty)
         await service.change(); await service.end(); await observation.value
         XCTAssertTrue(value.sections.isEmpty); XCTAssertFalse(value.loaded)
         let calls = await service.calls; XCTAssertEqual(calls.count, 1)

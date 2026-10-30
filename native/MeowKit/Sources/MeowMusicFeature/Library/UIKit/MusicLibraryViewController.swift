@@ -1,14 +1,21 @@
 #if os(iOS)
 import UIKit
+import Combine
 import MeowUI
 
 @MainActor
-public final class MusicLibraryViewController: MusicPageViewController, UICollectionViewDataSource,
-    UICollectionViewDelegateFlowLayout
+public final class MusicLibraryViewController: MusicPageViewController, UICollectionViewDelegateFlowLayout
 {
     private let model: MusicViewModel
     private weak var router: (any MusicUIRouting)?
     private lazy var collection = UICollectionView(frame: .zero, collectionViewLayout: UICollectionViewFlowLayout())
+    private var dataSource: UICollectionViewDiffableDataSource<Int, Data>!
+    private var items: [Data: MusicCollection] = [:]
+    private var access: UUID?
+    private var request = UUID()
+    private var loading = false
+    private var loadError: String?
+    private var shownLoadError: String?
     public init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore, router: any MusicUIRouting) {
         self.model = model; self.router = router
         super.init(appearance: appearance)
@@ -16,39 +23,47 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
     public override func viewDidLoad() {
         super.viewDidLoad()
         collection.backgroundColor = .clear
-        collection.dataSource = self; collection.delegate = self
+        collection.delegate = self
+        collection.alwaysBounceVertical = true
         collection.register(MusicLibraryCell.self, forCellWithReuseIdentifier: "collection")
+        dataSource = UICollectionViewDiffableDataSource(collectionView: collection) { [weak self] view, path, id in
+            guard let self, let item = self.items[id] else { return nil }
+            let cell = view.dequeueReusableCell(withReuseIdentifier: "collection", for: path) as! MusicLibraryCell
+            cell.configure(item, grid: self.appearance.preferences.playlistView == .grid, theme: self.theme)
+            return cell
+        }
         collection.refreshControl = UIRefreshControl()
         collection.refreshControl?.addAction(UIAction { [weak self] _ in
             guard let self else { return }
-            self.runPageTask {
-                await self.model.load()
-                self.collection.refreshControl?.endRefreshing()
-            }
+            self.loadLibrary()
         }, for: .valueChanged)
         view.addSubview(collection); collection.pinEdges(to: view)
-        observe(model) { [weak self] in self?.collection.reloadData() }
-        observe(appearance) { [weak self] in self?.collection.collectionViewLayout.invalidateLayout() }
+        observe(model.libraryChanges) { [weak self] in self?.render() }
+        observe(model.accessChanges) { [weak self] in self?.reconcileAccess() }
+        observe(appearance.$preferences.map(\.playlistView).removeDuplicates().dropFirst().eraseToAnyPublisher()) {
+            [weak self] _ in
+            self?.collection.collectionViewLayout.invalidateLayout()
+            self?.updateVisibleCells()
+        }
+        render()
     }
     public override func pageDidBecomeActive() {
-        collection.reloadData()
+        reconcileAccess()
+    }
+    public override func pageDidBecomeInactive() { request = UUID() }
+    public override func pageDidBecomeVisible() { renderState() }
+    public override func pageDidFinishAppearing() {
+        if loadError != nil { renderState() }
     }
     public override func applyTheme() {
         super.applyTheme()
-        if isViewLoaded { collection.reloadData(); collection.collectionViewLayout.invalidateLayout() }
-    }
-    public func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
-        model.collections.count
-    }
-    public func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath)
-        -> UICollectionViewCell {
-        let item = model.collections[indexPath.item]
-        let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "collection", for: indexPath) as! MusicLibraryCell
-        cell.configure(item, grid: appearance.preferences.playlistView == .grid, theme: theme)
-        return cell
+        if isViewLoaded {
+            updateVisibleCells()
+        }
     }
     public func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
-        router?.showLocalCollection(model.collections[indexPath.item])
+        guard let id = dataSource.itemIdentifier(for: indexPath), let item = items[id] else { return }
+        router?.showLocalCollection(item)
     }
     public func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout,
                                sizeForItemAt indexPath: IndexPath) -> CGSize {
@@ -73,6 +88,89 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
             guard !name.isEmpty else { return }
             self.runPageTask { await self.model.createPlaylist(name) }
         })
+        present(alert, animated: true)
+    }
+
+    private func reconcileAccess() {
+        guard isPageActive else { return }
+        guard model.isAvailable, !model.isClosed else {
+            access = nil; request = UUID(); loading = false; loadError = nil
+            collection.refreshControl?.endRefreshing()
+            render()
+            return
+        }
+        guard access != model.accountAccessGeneration else { return }
+        access = model.accountAccessGeneration
+        request = UUID(); loading = false; loadError = nil
+        render()
+        if !model.hasLoadedLibrary, !model.isLoading { loadLibrary(refresh: false) }
+    }
+
+    private func loadLibrary(refresh: Bool = true) {
+        guard isPageActive, model.isAvailable, !model.isClosed, !loading, !model.isLoading else {
+            collection.refreshControl?.endRefreshing()
+            return
+        }
+        let own = UUID(), access = model.accountAccessGeneration
+        request = own; loading = true; loadError = nil; shownLoadError = nil
+        renderState()
+        let model = model
+        runPageTask { [weak self, model] in
+            guard !Task.isCancelled, self?.request == own else { return }
+            model.error = nil
+            if refresh { await model.load() }
+            else { await model.ensureLibraryLoaded() }
+            guard !Task.isCancelled, let self, self.request == own, model.accountAccessGeneration == access else { return }
+            self.loading = false; self.loadError = self.model.error
+            self.collection.refreshControl?.endRefreshing()
+            self.render()
+        }
+    }
+
+    private func render() {
+        guard dataSource != nil else { return }
+        let values = model.isAvailable && !model.isClosed ? model.collections : []
+        let previous = items
+        items = Dictionary(uniqueKeysWithValues: values.map { (Data($0.id.utf8), $0) })
+        var snapshot = NSDiffableDataSourceSnapshot<Int, Data>()
+        snapshot.appendSections([0])
+        let ids = values.map { Data($0.id.utf8) }
+        snapshot.appendItems(ids)
+        let changed = ids.filter { previous[$0] != nil && previous[$0] != items[$0] }
+        snapshot.reconfigureItems(changed)
+        if dataSource.snapshot().itemIdentifiers != ids || !changed.isEmpty {
+            dataSource.apply(snapshot, animatingDifferences: false)
+        }
+        renderState()
+    }
+
+    private func updateVisibleCells() {
+        guard dataSource != nil else { return }
+        for path in collection.indexPathsForVisibleItems {
+            guard let id = dataSource.itemIdentifier(for: path), let item = items[id],
+                  let cell = collection.cellForItem(at: path) as? MusicLibraryCell else { continue }
+            cell.configure(item, grid: appearance.preferences.playlistView == .grid, theme: theme)
+        }
+    }
+
+    private func renderState() {
+        guard isViewLoaded else { return }
+        let text = items.isEmpty ? loading || model.isLoading ? "加载中" :
+            model.hasLoadedLibrary ? "暂无歌单" : nil : nil
+        if let text {
+            let label = UILabel()
+            label.text = text; label.textAlignment = .center; label.textColor = UIColor(theme.muted)
+            collection.backgroundView = label
+        } else { collection.backgroundView = nil }
+        guard canPresentPageAlert, let loadError, shownLoadError != loadError else { return }
+        let own = request
+        let alert = UIAlertController(title: "错误", message: loadError, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.addAction(UIAlertAction(title: "重试", style: .default) { [weak self] _ in
+            guard let self, self.request == own else { return }
+            self.loadLibrary()
+        })
+        shownLoadError = loadError
         present(alert, animated: true)
     }
 }

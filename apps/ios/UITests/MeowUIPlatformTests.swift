@@ -12,7 +12,7 @@ final class MeowUIPlatformTests: XCTestCase {
         let theme = TestPageTheme()
         let firstPage = LifecyclePage(themeProvider: theme), secondPage = LifecyclePage(themeProvider: theme)
         let first = host(firstPage), second = host(secondPage)
-        let retained = RetainedPagesController(pages: [first, second])
+        let retained = RetainedPagesController(pageFactories: [{ first }, { second }])
         let navigation = PageNavigationController(themeProvider: theme)
         navigation.setViewControllers([retained], animated: false)
         firstPage.activation = expectation(description: "first page appeared")
@@ -32,14 +32,13 @@ final class MeowUIPlatformTests: XCTestCase {
         else { content = nil }
         let contentDelegate = content?.delegate
         let edges = navigation.view.gestureRecognizers?.filter { $0 is UIScreenEdgePanGestureRecognizer }.count
-
         let started = expectation(description: "page task started")
-        let cancelled = expectation(description: "physical page task observed cancellation")
+        let finished = expectation(description: "removed page task observed cancellation")
         var continuation: CheckedContinuation<Void, Never>?
         firstPage.runPageTask {
             await withCheckedContinuation { continuation = $0; started.fulfill() }
             XCTAssertTrue(Task.isCancelled)
-            cancelled.fulfill()
+            finished.fulfill()
         }
         await fulfillment(of: [started], timeout: 3)
         secondPage.activation = expectation(description: "retained selection appeared")
@@ -50,13 +49,12 @@ final class MeowUIPlatformTests: XCTestCase {
         activateForeground()
         await fulfillment(of: [selected, selectionCompleted], timeout: 3)
         retained.didSelect = nil
-        XCTAssertFalse(firstPage.isPageActive)
+        XCTAssertTrue(firstPage.isPageActive)
+        XCTAssertFalse(firstPage.isPageVisible)
         XCTAssertTrue(secondPage.isPageActive)
-        XCTAssertEqual(firstPage.inactiveCount, 1)
-        XCTAssertTrue(retained.children.first === second)
-        XCTAssertNil(first.parent)
-        continuation?.resume()
-        await fulfillment(of: [cancelled], timeout: 3)
+        XCTAssertEqual(firstPage.inactiveCount, 0)
+        XCTAssertEqual(retained.children.count, 2)
+        XCTAssertTrue(first.parent === retained)
 
         let detail = PageViewController(themeProvider: theme)
         navigation.pushViewController(detail, animated: false)
@@ -66,98 +64,73 @@ final class MeowUIPlatformTests: XCTestCase {
         XCTAssertTrue(content?.delegate === contentDelegate)
         XCTAssertEqual(navigation.view.gestureRecognizers?.filter { $0 is UIScreenEdgePanGestureRecognizer }.count, edges)
         XCTAssertFalse(detail.view.gestureRecognizers?.contains { $0 is UIScreenEdgePanGestureRecognizer } ?? false)
+        XCTAssertTrue(secondPage.isPageActive)
         XCTAssertEqual(navigation.viewControllers.count, 2)
-
         XCTAssertTrue(navigation.popViewController(animated: false) === detail)
+        XCTAssertFalse(detail.isPageActive)
         XCTAssertTrue(navigation.topViewController === retained)
-        XCTAssertEqual(navigation.viewControllers.count, 1)
         XCTAssertTrue(secondPage.isPageActive)
         XCTAssertEqual(retained.selectedIndex, 1)
-        XCTAssertTrue(retained.children.first === second)
         NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
-        XCTAssertFalse(secondPage.isPageActive)
+        XCTAssertTrue(secondPage.isPageActive)
         NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
         XCTAssertTrue(secondPage.isPageActive)
+        XCTAssertTrue(firstPage.isPageActive)
+        XCTAssertEqual(firstPage.inactiveCount, 0)
+        PageViewController.invalidatePages(in: navigation)
         XCTAssertFalse(firstPage.isPageActive)
+        XCTAssertFalse(secondPage.isPageActive)
+        continuation?.resume()
+        await fulfillment(of: [finished], timeout: 3)
     }
 
-    func testNativeSurfaceTransitionCancelsAndCommitsWithoutReplacingControls() async throws {
+    func testIndependentPageTransitionCancelsAndRevealsActualPresenter() async throws {
         let theme = TestPageTheme()
         let root = PageViewController(themeProvider: theme)
-        let window = try display(root)
+        try display(root)
         root.view.layoutIfNeeded()
-        let dock = UIView(frame: CGRect(x: 18, y: window.bounds.height - 180,
-                                       width: window.bounds.width - 36, height: 100))
+        let dock = UIView(frame: CGRect(x: 18, y: 400, width: 300, height: 100))
+        let dockPlay = UIButton(type: .system)
+        dock.addSubview(dockPlay)
         root.view.addSubview(dock)
-        let surface = WindowGradientView(themeProvider: theme)
-        let play = UIButton(type: .system), queue = UIButton(type: .system)
-        surface.addSubview(play); surface.addSubview(queue)
-        dock.addSubview(surface); surface.frame = dock.bounds
-        surface.layer.cornerRadius = 24
-        surface.layoutIfNeeded()
         let full = PageViewController(themeProvider: theme)
         full.loadViewIfNeeded()
-        full.view = UIView()
-        let transition = NativeSurfaceTransition(surface: surface, dock: dock,
-            presentLayout: {
-                play.frame = CGRect(x: 60, y: surface.bounds.height - 80, width: 44, height: 44)
-                queue.frame = CGRect(x: surface.bounds.width - 104, y: surface.bounds.height - 80,
-                                     width: 44, height: 44)
-            }, dockLayout: {
-                play.frame = CGRect(x: surface.bounds.width - 96, y: 28, width: 44, height: 44)
-                queue.frame = CGRect(x: surface.bounds.width - 48, y: 28, width: 44, height: 44)
-            })
-        let reference = WindowGradientView(themeProvider: theme)
-        window.addSubview(reference)
-        reference.frame = window.bounds
-        reference.layoutIfNeeded()
+        let fullPlay = UIButton(type: .system)
+        full.view.addSubview(fullPlay)
+        let transition = BottomPageTransition()
+        transition.installEdgeDismissal(on: full)
+        XCTAssertEqual(transition.edgeGesture.edges, .left)
+        XCTAssertTrue(full.view.isOpaque)
 
         for (presenting, cancelled) in [(true, true), (true, false), (false, true), (false, false)] {
-            if presenting {
-                _ = transition.animationController(forPresented: full, presenting: root, source: root)
-            } else { _ = transition.animationController(forDismissed: full) }
+            let delegate = try XCTUnwrap(presenting
+                ? transition.animationController(forPresented: full, presenting: root, source: root)
+                : transition.animationController(forDismissed: full))
             let context = SurfaceContext(container: root.view, from: presenting ? root : full,
                                          to: presenting ? full : root, frame: root.view.bounds)
-            let complete = expectation(description: "native transition completion")
-            context.completed = { complete.fulfill() }
-            let animator = try XCTUnwrap(transition.interruptibleAnimator(using: context) as? UIViewPropertyAnimator)
-            XCTAssertTrue(transition.interruptibleAnimator(using: context) === animator)
+            let completed = expectation(description: "independent page transition completion")
+            context.completed = { completed.fulfill() }
+            let animator = try XCTUnwrap(delegate.interruptibleAnimator?(using: context) as? UIViewPropertyAnimator)
+            XCTAssertTrue(delegate.interruptibleAnimator?(using: context) === animator)
             XCTAssertTrue(transition.isTransitioning)
-            XCTAssertTrue(surface.subviews.contains { $0 === play })
-            XCTAssertTrue(surface.subviews.contains { $0 === queue })
-            XCTAssertEqual(surface.subviews.filter { $0 is UIButton }.count, 2)
             animator.startAnimation()
             animator.pauseAnimation()
             animator.fractionComplete = 0.5
             context.transitionWasCancelled = cancelled
             animator.stopAnimation(false)
             animator.finishAnimation(at: cancelled ? .start : .end)
-            await fulfillment(of: [complete], timeout: 3)
+            await fulfillment(of: [completed], timeout: 3)
             XCTAssertEqual(context.result, !cancelled)
             XCTAssertFalse(transition.isTransitioning)
-            if presenting == cancelled {
-                XCTAssertTrue(surface.superview === dock)
-                XCTAssertEqual(surface.frame, dock.bounds)
-            } else {
-                XCTAssertTrue(surface.superview === full.view)
-                XCTAssertEqual(surface.frame, full.view.bounds)
-            }
-            XCTAssertTrue(play.superview === surface)
-            XCTAssertTrue(queue.superview === surface)
-            try assertCanvas(surface, reference: reference, window: window)
+            XCTAssertTrue(dock.superview === root.view)
+            XCTAssertTrue(dockPlay.superview === dock)
+            XCTAssertTrue(fullPlay.superview === full.view)
+            XCTAssertFalse(dockPlay === fullPlay)
+            XCTAssertEqual(root.view.transform, .identity)
+            XCTAssertEqual(full.view.transform, .identity)
+            if presenting == cancelled { XCTAssertNil(full.view.superview) }
+            else { XCTAssertTrue(full.view.superview === root.view) }
         }
-
-        full.view.addSubview(surface)
-        surface.frame = full.view.bounds
-        transition.restoreDock()
-        transition.restoreDock()
-        XCTAssertTrue(surface.superview === dock)
-        XCTAssertEqual(surface.frame, dock.bounds)
-        XCTAssertEqual(surface.layer.cornerRadius, 24)
-        XCTAssertEqual(dock.subviews.filter { $0 === surface }.count, 1)
-        XCTAssertTrue(play.superview === surface)
-        XCTAssertTrue(queue.superview === surface)
-        try assertCanvas(surface, reference: reference, window: window)
     }
 
     func testEditorEdgeRequestsConfirmationWithoutPoppingThePage() throws {
@@ -218,38 +191,6 @@ final class MeowUIPlatformTests: XCTestCase {
         value.makeKeyAndVisible()
         value.layoutIfNeeded()
         return value
-    }
-
-    private func assertCanvas(_ surface: WindowGradientView, reference: WindowGradientView, window: UIWindow) throws {
-        surface.setNeedsLayout(); surface.layoutIfNeeded()
-        XCTAssertTrue(surface.isOpaque)
-        XCTAssertEqual(surface.backgroundColor?.cgColor.alpha, 1)
-        XCTAssertTrue(surface.window === window)
-        let projected = surface.convert(window.bounds, from: window)
-        XCTAssertEqual(surface.canvasFrame, CGRect(x: 0, y: projected.minY,
-                                                   width: surface.bounds.width, height: projected.height))
-        let point = CGPoint(x: surface.bounds.midX, y: surface.bounds.midY)
-        let actual = try pixel(surface, at: point)
-        let expected = try pixel(reference, at: reference.convert(point, from: surface))
-        XCTAssertEqual(actual[3], 255)
-        for index in 0..<3 {
-            XCTAssertLessThanOrEqual(abs(Int(actual[index]) - Int(expected[index])), 2,
-                                     "component \(index): surface \(actual) reference \(expected)")
-        }
-    }
-
-    private func pixel(_ view: UIView, at point: CGPoint) throws -> [UInt8] {
-        let width = max(1, Int(view.bounds.width.rounded(.up))), height = max(1, Int(view.bounds.height.rounded(.up)))
-        var bytes = [UInt8](repeating: 0, count: width * height * 4)
-        let context = try XCTUnwrap(CGContext(data: &bytes, width: width, height: height,
-            bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
-        context.translateBy(x: 0, y: CGFloat(height))
-        context.scaleBy(x: 1, y: -1)
-        view.layer.render(in: context)
-        let x = min(width - 1, max(0, Int(point.x))), y = min(height - 1, max(0, Int(point.y)))
-        let offset = (y * width + x) * 4
-        return Array(bytes[offset..<offset + 4])
     }
 
     private func host(_ page: UIViewController) -> UIViewController {

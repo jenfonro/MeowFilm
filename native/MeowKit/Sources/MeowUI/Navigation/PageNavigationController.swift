@@ -10,6 +10,11 @@ public final class PageNavigationController: UINavigationController, UINavigatio
     public var didShowPage: ((UIViewController) -> Void)?
     private let themeProvider: any PageThemeProviding
     private var observation: AnyCancellable?
+    private struct CanvasKey: Equatable {
+        let theme: PageTheme
+        let width, height, originY, windowHeight, safeTop: CGFloat
+    }
+    private var canvasKey: CanvasKey?
 
     public init(themeProvider: any PageThemeProviding) {
         self.themeProvider = themeProvider
@@ -39,20 +44,63 @@ public final class PageNavigationController: UINavigationController, UINavigatio
 
     public func navigationController(_ navigationController: UINavigationController,
                                      didShow viewController: UIViewController, animated: Bool) {
+        let transition = navigationController.transitionCoordinator
         didShowPage?(viewController)
+        PageViewController.finishAppearance(in: viewController, transition: transition)
+    }
+
+    public override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        applyTheme()
     }
 
     private func applyTheme() {
         let theme = PageTheme(palette: themeProvider.pageColorway,
                               dark: traitCollection.userInterfaceStyle == .dark)
+        let frame = windowFrame()
+        let key = CanvasKey(theme: theme, width: navigationBar.bounds.width,
+                            height: navigationBar.bounds.height + view.safeAreaInsets.top,
+                            originY: frame.minY - view.safeAreaInsets.top,
+                            windowHeight: view.window?.bounds.height ?? view.bounds.height,
+                            safeTop: view.window?.safeAreaInsets.top ?? view.safeAreaInsets.top)
+        guard canvasKey != key else { return }
+        canvasKey = key
         let appearance = UINavigationBarAppearance()
-        appearance.configureWithTransparentBackground()
-        appearance.backgroundColor = .clear
+        appearance.configureWithOpaqueBackground()
+        appearance.backgroundColor = UIColor(theme.top)
+        if key.width > 0, key.height > 0, key.windowHeight > 0 {
+            let stops = theme.gradientStops(safeTopFraction: Double(key.safeTop / key.windowHeight))
+            let colors = stops.map { UIColor($0.color).cgColor }
+            let locations = stops.map { CGFloat($0.location) }
+            let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                                      colors: colors as CFArray, locations: locations)
+            let format = UIGraphicsImageRendererFormat()
+            format.opaque = true
+            appearance.backgroundImage = UIGraphicsImageRenderer(
+                size: CGSize(width: key.width, height: key.height), format: format
+            ).image { context in
+                UIColor(theme.top).setFill()
+                context.fill(CGRect(x: 0, y: 0, width: key.width, height: key.height))
+                if let gradient {
+                    context.cgContext.drawLinearGradient(
+                        gradient, start: CGPoint(x: 0, y: -key.originY),
+                        end: CGPoint(x: 0, y: key.windowHeight - key.originY),
+                        options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
+                    )
+                }
+            }
+            appearance.backgroundImageContentMode = .scaleToFill
+        }
         appearance.shadowColor = .clear
         appearance.titleTextAttributes = [.foregroundColor: UIColor(theme.ink)]
         navigationBar.standardAppearance = appearance
         navigationBar.scrollEdgeAppearance = appearance
         navigationBar.tintColor = UIColor(theme.ink)
+    }
+
+    private func windowFrame() -> CGRect {
+        guard let window = view.window else { return navigationBar.frame }
+        return navigationBar.convert(navigationBar.bounds, to: window)
     }
 }
 #endif
