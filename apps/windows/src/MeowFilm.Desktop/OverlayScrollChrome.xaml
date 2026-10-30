@@ -7,7 +7,10 @@
  </Style>
  <Style x:Key="MeowFilm.ScrollThumb" TargetType="Thumb">
   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Thumb">
-   <Border Width="6" CornerRadius="3" Background="{DynamicResource MeowFilm.Brush.Border}" Margin="2,0"/>
+   <Border x:Name="Chrome" Width="6" CornerRadius="3" Background="{DynamicResource MeowFilm.Brush.Border}" Margin="2,0"/>
+   <ControlTemplate.Triggers>
+    <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter TargetName="Chrome" Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/></Trigger>
+   </ControlTemplate.Triggers>
   </ControlTemplate></Setter.Value></Setter>
  </Style>
  <Style x:Key="MeowFilm.OverlayScrollViewer" TargetType="ScrollViewer">
@@ -28,10 +31,11 @@
     </ScrollBar>
    </Grid>
    <ControlTemplate.Triggers>
-    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="PART_VerticalScrollBar" Property="Opacity" Value="0.6"/></Trigger>
-    <Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter TargetName="PART_VerticalScrollBar" Property="Opacity" Value="0.6"/></Trigger>
     <Trigger Property="local:OverlayScrollChrome.Active" Value="True"><Setter TargetName="PART_VerticalScrollBar" Property="Opacity" Value="0.6"/></Trigger>
-    <Trigger SourceName="PART_VerticalScrollBar" Property="IsMouseOver" Value="True"><Setter TargetName="PART_VerticalScrollBar" Property="Opacity" Value="1"/></Trigger>
+    <MultiTrigger><MultiTrigger.Conditions>
+     <Condition Property="local:OverlayScrollChrome.Active" Value="True"/><Condition SourceName="PART_VerticalScrollBar" Property="IsMouseOver" Value="True"/>
+    </MultiTrigger.Conditions><Setter TargetName="PART_VerticalScrollBar" Property="Opacity" Value="1"/></MultiTrigger>
+    <Trigger SourceName="PART_VerticalScrollBar" Property="IsMouseCaptureWithin" Value="True"><Setter TargetName="PART_VerticalScrollBar" Property="Opacity" Value="1"/></Trigger>
     <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter TargetName="PART_VerticalScrollBar" Property="Opacity" Value="1"/></Trigger>
    </ControlTemplate.Triggers>
   </ControlTemplate></Setter.Value></Setter>

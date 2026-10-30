@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 using System.Diagnostics;
 using System.Text.Json.Serialization;
+using MeowFilm.Capabilities.Platforms;
 
 namespace MeowFilm.Capabilities.Accounts;
 
@@ -9,7 +10,7 @@ namespace MeowFilm.Capabilities.Accounts;
 /// partial/older protocol implementations are not accepted at runtime.
 /// </summary>
 internal interface IMusicAccountProtocol : IAsyncDisposable, IMusicAccountSmsProtocol,
-    IMusicAccountDetailsProtocol, IMusicKgDeviceProtocol, IMusicQqFeedbackDeviceProtocol
+    IMusicAccountDetailsProtocol, IMusicQqFeedbackAccountProtocol
 {
     Task<MusicAccountProfile> ValidateAsync(string platform, string cookie, CancellationToken cancellationToken = default);
     Task<MusicAccountChallenge> BeginAsync(string platform, CancellationToken cancellationToken = default);
@@ -33,6 +34,7 @@ public sealed class MusicAccountChallenge(string platform, string challengeId, s
     [JsonIgnore, DebuggerBrowsable(DebuggerBrowsableState.Never)] public string? ImageBase64 { get; } = imageBase64;
     public string DisplayKind => ImageBase64 is null ? "url" : "png";
     public long ExpiresAt { get; } = expiresAt;
+    [JsonIgnore] internal MusicKgClientContext? KgClient { get; init; }
     public override string ToString() => "MusicAccountChallenge (transient)";
 }
 

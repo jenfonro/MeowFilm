@@ -332,8 +332,8 @@ public static class MusicPublicCatalogHttpTests
             {
                 Check(!MusicPlatformHttp.IsAllowedOrigin(platform, new(Url(route))));
                 await Failure("ORIGIN_DENIED", () => http.SendAsync(platform, Request(route), default));
-                var lyric = typeof(MusicPlatformHttp).GetMethod("SendLyricBytesAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
-                    .CreateDelegate<Func<string, HttpRequestMessage, CancellationToken, TimeSpan, Task<byte[]>>>(http);
+                var lyric = typeof(MusicPlatformHttp).GetMethod("SendLyricAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .CreateDelegate<Func<string, HttpRequestMessage, CancellationToken, TimeSpan, Task<MusicPlatformHttpBytesResult>>>(http);
                 await Failure("ORIGIN_DENIED", () => lyric(platform, Request(route), default, TimeSpan.FromSeconds(1)));
             }
         Check(MusicPlatformHttp.IsAllowedOrigin("wy", new("https://music.163.com/weapi/v3/song/detail")));

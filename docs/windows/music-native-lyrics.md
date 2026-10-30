@@ -6,6 +6,9 @@
 - `MusicLyricApplication` 负责编排本地歌词、官方歌词、显式洛雪音源、请求合并、短期缓存、账号／设置代次和关闭排空。
 - `MusicLibraryOwner` 是本地歌词与已选显示歌词的唯一 writer。页面不能直接写保护文档或把显示快照当作平台授权。
 - 普通官方歌词不启动 Node。脚本只用于用户已经选择的同平台洛雪音源，不得作为官方协议失败后的任意跨平台回退。
+- 原生歌词借用同一[平台客户端 owner](music-platform-client-context.md)与账号会话源，不读写账号／客户端文档。WY、KG 捕获实际请求所需的客户端快照；QQ 精确录音与歌词请求不依赖匿名 QIMEI 或 GetSession。
+
+页面展示及请求时机以[共同页面数据契约](../common/pages/data-requests.md)为准；客户端字段与账号授权的分工以[共同音乐平台契约](../common/music/platform-client-context.md)为准。
 
 ## 精确录音请求
 
@@ -42,6 +45,7 @@ Task<NativeLyricPayload?> ReadAsync(
 - 有有效 YRC 时使用 YRC；否则使用 LRC。
 - YTLRC 只与已选 YRC 时钟配对。普通翻译歌词保留自己的时间戳，不进行按行猜测、时间平移或强制拉齐。
 - 返回 ID 时必须等于请求录音 ID。
+- 账号 Cookie 没有设备关联时仍使用已确认的本安装客户端身份。歌词、录音身份及成功状态校验后，相关 Set-Cookie 交给客户端唯一 writer 校验和 CAS 更新；提交前再次核对请求资格。外国设备关联不混入或改写本安装状态，响应授权字段不由歌词流程保存为账号。
 
 ### QQ
 
@@ -67,6 +71,7 @@ Task<NativeLyricPayload?> ReadAsync(
 - 每次请求前后重新取得并比较同一平台的 `scope`、`generation`、`userId` 和 Cookie；匿名与已登录状态互换也会使旧请求失效。
 - `Invalidate(platform)` 只退休指定平台；全局失效退休全部平台。迟到成功和迟到失败都不能发布。
 - 原始响应最多 1 MiB，JSON 深度、节点数、字符串、解码歌词和单段文本均有固定上限。重定向、非白名单 origin、损坏 UTF-8、重复 JSON 属性和超限内容明确失败。
+- 内部歌词 HTTP 结果仅瞬时携带原始字节和响应 Cookie，不暴露给 UI／RPC，也不使用 Cookie jar。原生解析结束或失败时清零本次接收的字节；客户端更新未知回执或失效时不发布歌词成功。
 
 ## 应用编排
 

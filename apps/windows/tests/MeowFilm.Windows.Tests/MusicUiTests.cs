@@ -15,6 +15,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using MeowFilm.Core.Runtime;
+using MeowFilm.AppHost;
 using MeowFilm.Desktop;
 using MeowFilm.Media;
 using MeowFilm.Capabilities;
@@ -799,7 +800,9 @@ public static partial class MusicUiTests
                 Render(root, 860, 600);
                 var mode = FindButton(f.Module.PlayerView, f.Module.ModeText);
                 Equal(SystemColors.WindowTextColor, ((SolidColorBrush)mode.Foreground).Color);
-                Equal(SystemColors.WindowColor, ((SolidColorBrush)((Border)((UserControl)f.Module.PlayerView).Content).Background).Color);
+                var playerView = (UserControl)f.Module.PlayerView;
+                True(playerView.Background is null && ((Grid)playerView.Content).Background is SolidColorBrush { Color.A: 0 },
+                    "high-contrast footer shows the window backdrop instead of painting its own");
                 SimulateFocus(mode, UIElement.IsKeyboardFocusedProperty, true); await Drain();
                 True(mode.FocusVisualStyle is not null, "shared keyboard focus visual supplied");
                 var progress = (Slider)f.Module.PlayerView.FindName("Progress");
@@ -1033,7 +1036,7 @@ public static partial class MusicUiTests
         {
             root ??= NewRoot();
             IProtectedDocumentStore store = persistent
-                ? new DpapiDocumentStore(root, ["music.library.v1", "music.files.v1", "music.accounts.v1"]) : new DocumentProbe();
+                ? new DpapiDocumentStore(root, AppIdentity.NativeNamespaces) : new DocumentProbe();
             var runtime = new NativeMusicScriptTestRuntime(); MusicCapability? module = null;
             var application = new MusicNativeApplication(store, runtime, new NoUpstream());
             try
@@ -1131,7 +1134,7 @@ public static partial class MusicUiTests
         {
             token.ThrowIfCancellationRequested();
             if (closed) throw new ProtectedDocumentException(DocumentStoreError.Closed);
-            if (ns is not ("music.library.v1" or "music.files.v1" or "music.accounts.v1")) throw new ProtectedDocumentException(DocumentStoreError.InvalidRequest);
+            if (!AppIdentity.NativeNamespaces.Contains(ns, StringComparer.Ordinal)) throw new ProtectedDocumentException(DocumentStoreError.InvalidRequest);
         }
         public ValueTask DisposeAsync() { lock (gate) { closed = true; values.Clear(); } return ValueTask.CompletedTask; }
     }

@@ -93,7 +93,7 @@ public sealed partial class MusicPlatformHttp : IDisposable
                 MusicQqDeviceHttpStep.Account => NativeHttpPolicy.QqAccount,
                 MusicQqDeviceHttpStep.Profile => NativeHttpPolicy.QqProfile,
                 MusicQqDeviceHttpStep.Session => NativeHttpPolicy.QqSession,
-                _ => NativeHttpPolicy.Denied });
+                _ => NativeHttpPolicy.Denied }, awaitPhysical: true);
 
     internal Task<MusicPlatformHttpResult> SendQqFeedbackJsonAsync(HttpRequestMessage request, CancellationToken token) =>
         SendCoreAsync("tx", request, token, 65536, TimeSpan.FromSeconds(20),
@@ -296,13 +296,13 @@ public sealed partial class MusicPlatformHttp : IDisposable
 
     // Separate policy: these origins NEVER enter IsAllowedOrigin/ordinary content or lyrics.
     internal Task<MusicAccountHttpResult> SendAccountStepAsync(MusicAccountHttpStep step,
-        HttpRequestMessage request, CancellationToken token, TimeSpan remaining) =>
+        HttpRequestMessage request, CancellationToken token, TimeSpan remaining, bool awaitPhysical = false) =>
         SendCoreAsync<MusicAccountHttpResult>(AccountPlatform(step), request, token,
             step == MusicAccountHttpStep.QqImage ? 524288 : step == MusicAccountHttpStep.KgRegister ? 1048576 : 65536, remaining,
             (bytes, response, _) => new(bytes,
                 response.Headers.TryGetValues("Set-Cookie", out var cookies) ? cookies.ToArray() : [],
                 response.Headers.Location?.OriginalString, response.Content.Headers.ContentType?.MediaType,
-                (int)response.StatusCode), step);
+                (int)response.StatusCode), step, awaitPhysical: awaitPhysical);
 
     private static string AccountPlatform(MusicAccountHttpStep step) => step switch
     {
@@ -337,8 +337,8 @@ public sealed partial class MusicPlatformHttp : IDisposable
 
     // Lyrics need bounded encrypted/base64 JSON strings larger than catalog metadata's
     // per-string cap. This internal native seam retains ALL physical HTTP budgets;
-    // it neither exposes arbitrary URLs to UI/RPC nor forwards Set-Cookie.
-    internal Task<byte[]> SendLyricBytesAsync(string platform, HttpRequestMessage request,
+    // response cookies remain transient and are validated by the native consumer.
+    internal Task<MusicPlatformHttpBytesResult> SendLyricAsync(string platform, HttpRequestMessage request,
         CancellationToken token, TimeSpan remaining)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -350,7 +350,8 @@ public sealed partial class MusicPlatformHttp : IDisposable
             _ => false }))
         { request.Dispose(); throw new MusicPlatformException("ORIGIN_DENIED"); }
         return SendCoreAsync(platform, request, token, 1024 * 1024, remaining,
-            (bytes, _, _) => bytes, awaitPhysical: true);
+            (bytes, response, _) => new MusicPlatformHttpBytesResult(bytes,
+                response.Headers.TryGetValues("Set-Cookie", out var cookies) ? cookies.ToArray() : []), awaitPhysical: true);
     }
     private async Task<T> SendCoreAsync<T>(string platform, HttpRequestMessage request,
         CancellationToken cancellationToken, int maxResponseBytes, TimeSpan? timeout,
@@ -503,6 +504,13 @@ internal sealed class MusicAccountHttpResult(byte[] bytes, string[] cookies, str
     [JsonIgnore] internal string? Location { get; } = location;
     [JsonIgnore] internal string? MediaType { get; } = mediaType;
     public override string ToString() => "MusicAccountHttpResult (redacted)";
+}
+
+internal sealed class MusicPlatformHttpBytesResult(byte[] bytes, string[] cookies)
+{
+    [JsonIgnore] internal byte[] Bytes { get; } = bytes;
+    [JsonIgnore] internal string[] Cookies { get; } = cookies;
+    public override string ToString() => "MusicPlatformHttpBytesResult (redacted)";
 }
 
 /// <summary>Transient native protocol result. Set-Cookie is never persisted or shared by transport.</summary>

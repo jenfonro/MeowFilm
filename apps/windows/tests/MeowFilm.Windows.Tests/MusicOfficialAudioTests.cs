@@ -142,8 +142,9 @@ public static class MusicOfficialAudioTests
                 return Qq(new { expiration = 600, midurlinfo = new[] { new { songmid = "FixtureMID", result = 0,
                     filename = "M800FixtureMIDFixtureMID.mp3", purl = "M800FixtureMIDFixtureMID.mp3?vkey=synthetic", ekey = "" } } });
             }));
-            var result = await new OfficialMusicAudio(http).ResolveAsync(Session("tx"),
-                new JsonObject { ["songmid"] = "FixtureMID" }, ["320k"], Rights(), default);
+            await using var clients = new MusicClientContextFixture(http);
+            var result = await new OfficialMusicAudio(http, clients.Owner).ResolveAsync(Session("tx"),
+                new JsonObject { ["songmid"] = "FixtureMID" }, ["320k"], Rights(), default, () => { });
             Check(calls == 2 && result.RequestQuality == "320k" && !result.QualityVerified && result.ActualQuality == "" &&
                 result.Full && result.Size == 1234567 && result.ExpiresAt <= DateTimeOffset.UtcNow.AddSeconds(120).ToUnixTimeMilliseconds());
         });
@@ -159,7 +160,8 @@ public static class MusicOfficialAudioTests
                         purl = wrong == "host" ? "https://example.org/M800FixtureMIDFixtureMID.mp3" : "M800FixtureMIDFixtureMID.mp3",
                         ekey = wrong == "ekey" ? "protected" : "" } } }))));
                 bool denied = false;
-                try { await new OfficialMusicAudio(http).ResolveAsync(Session("tx"), new() { ["songmid"] = "FixtureMID" }, ["320k"], Rights(), default); }
+                await using var clients = new MusicClientContextFixture(http);
+                try { await new OfficialMusicAudio(http, clients.Owner).ResolveAsync(Session("tx"), new() { ["songmid"] = "FixtureMID" }, ["320k"], Rights(), default, () => { }); }
                 catch (MusicPlatformException) { denied = true; }
                 Check(denied, wrong);
             }
@@ -185,10 +187,11 @@ public static class MusicOfficialAudioTests
                         url = new[] { "https://audio.kugou.com/fixture.mp3" } }));
                 }));
                 bool denied = false;
+                await using var clients = new MusicClientContextFixture(http);
                 try
                 {
-                    var result = await new OfficialMusicAudio(http).ResolveAsync(Session("kg"),
-                        new() { ["hash"] = hash }, ["128k"], Rights(), default);
+                    var result = await new OfficialMusicAudio(http, clients.Owner).ResolveAsync(Session("kg"),
+                        new() { ["hash"] = hash }, ["128k"], Rights(), default, () => { });
                     Check(result.Full && !result.QualityVerified && result.ExpiresAt is null);
                 }
                 catch (MusicPlatformException e) when (e.Code == "TRIAL_ONLY") { denied = true; }
@@ -198,11 +201,12 @@ public static class MusicOfficialAudioTests
         yield return new("Official audio requires real membership before any resource request", async () =>
         {
             using var http = MusicPlatformHttp.CreateWithHandler(new Handler(_ => throw new InvalidOperationException("Unexpected network")));
+            await using var clients = new MusicClientContextFixture(http);
             foreach (string platform in new[] { "wy", "tx", "kg" })
             {
                 bool denied = false;
-                try { await new OfficialMusicAudio(http).ResolveAsync(Session(platform), new(), ["320k"],
-                    Rights() with { Membership = new(false, "none", null) }, default); }
+                try { await new OfficialMusicAudio(http, clients.Owner).ResolveAsync(Session(platform), new(), ["320k"],
+                    Rights() with { Membership = new(false, "none", null) }, default, () => { }); }
                 catch (MusicPlatformException e) when (e.Code == "VIP_REQUIRED") { denied = true; }
                 Check(denied);
             }

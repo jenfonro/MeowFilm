@@ -5,8 +5,9 @@
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         Title="meowfilm" Width="1110" Height="869" MinWidth="860" MinHeight="600"
         WindowStartupLocation="CenterScreen" WindowStyle="SingleBorderWindow" ResizeMode="CanResize"
-        FontFamily="{DynamicResource MeowFilm.Font.Body}" FontSize="14"
+        FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="14"
         UseLayoutRounding="True" SnapsToDevicePixels="True" TextOptions.TextFormattingMode="Display"
+        TextOptions.TextRenderingMode="Grayscale"
         Loaded="OnLoaded" PreviewKeyDown="OnPreviewKeyDown"
         AutomationProperties.Name="meowfilm">
     <Window.Resources>
@@ -64,15 +65,15 @@
                 <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
 
-            <Border x:Name="SidebarBackground" Grid.RowSpan="2" BorderThickness="0,0,1,0">
+            <Border x:Name="SidebarBackground" Grid.RowSpan="2">
                 <Border.Style>
                     <Style TargetType="Border">
-                        <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Sidebar}" />
                         <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Border}" />
+                        <Setter Property="BorderThickness" Value="0" />
                         <Style.Triggers>
                             <Trigger Property="local:DesktopTheme.IsHighContrast" Value="True">
-                                <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}" />
                                 <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}" />
+                                <Setter Property="BorderThickness" Value="0,0,1,0" />
                             </Trigger>
                         </Style.Triggers>
                     </Style>
@@ -105,10 +106,10 @@
                         </TextBlock.Style>
                     </TextBlock>
                 </Border>
-                <TextBlock Text="meowfilm" FontSize="21" FontWeight="SemiBold" VerticalAlignment="Center" />
+                <TextBlock Text="meowfilm" FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center" />
             </StackPanel>
 
-            <ScrollViewer x:Name="SidebarScroll" PreviewMouseWheel="OnSidebarWheel" Style="{StaticResource MeowFilm.OverlayScrollViewer}" Grid.Row="1" Margin="23,15,8,16" IsEnabled="{Binding IsInteractive}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><StackPanel Margin="0,0,8,0">
+            <ScrollViewer x:Name="SidebarScroll" PreviewMouseWheel="OnSidebarWheel" Style="{StaticResource MeowFilm.OverlayScrollViewer}" Grid.Row="1" Margin="23,15,8,16" Focusable="False" IsEnabled="{Binding IsInteractive}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><StackPanel Margin="0,0,8,0">
                 <ListBox ScrollViewer.VerticalScrollBarVisibility="Disabled" x:Name="NavigationList" Padding="0" Style="{StaticResource MeowFilm.NavigationList}"
                          IsSynchronizedWithCurrentItem="False"
                          ItemContainerStyle="{StaticResource MeowFilm.NavigationItem}"
@@ -181,20 +182,31 @@
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <Button x:Name="BackButton" Style="{StaticResource MeowFilm.IconButton}" Width="28" Margin="0,0,8,0"
-                            Content="&#xE72B;" Click="OnBackClick" IsEnabled="{Binding CanGoBack}"
-                            AutomationProperties.Name="返回" AutomationProperties.AcceleratorKey="Alt+Left" ToolTip="返回" />
+                    <Button x:Name="BackButton" Width="28" Margin="0,0,8,0" Content="&#xE76B;"
+                            Click="OnBackClick" IsEnabled="{Binding CanGoBack}"
+                            AutomationProperties.Name="返回" AutomationProperties.AcceleratorKey="Alt+Left" ToolTip="返回">
+                        <Button.Style><Style TargetType="Button" BasedOn="{StaticResource MeowFilm.IconButton}">
+                            <Setter Property="BorderThickness" Value="1"/>
+                            <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Border}"/>
+                        </Style></Button.Style>
+                    </Button>
                     <Grid x:Name="SearchInput" Grid.Column="1" Width="300" MaxWidth="360">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="Auto" />
-                        </Grid.ColumnDefinitions>
-                        <TextBox x:Name="SearchBox" MinWidth="140" Width="Auto" MaxWidth="290"
-                                 Height="36" MinHeight="36" Padding="12,4" BorderBrush="#E1E4F0"
+                        <TextBox x:Name="SearchBox" MinWidth="140" Width="Auto" MaxWidth="360"
+                                 Height="36" MinHeight="36" Padding="38,4,12,4"
                                  TextChanged="OnSearchTextChanged" KeyDown="OnSearchKeyDown" AutomationProperties.Name="搜索"
-                                 AutomationProperties.AcceleratorKey="Ctrl+F"><TextBox.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#EDF0FF"/><GradientStop Color="#FAEFF8" Offset="1"/></LinearGradientBrush></TextBox.Background></TextBox>
-                        <Button x:Name="SearchButton" Grid.Column="1" Style="{StaticResource MeowFilm.IconButton}" Content="&#xE721;" Margin="8,0,0,0"
-                                Click="OnSearchClick" AutomationProperties.Name="搜索" ToolTip="搜索" />
+                                 AutomationProperties.AcceleratorKey="Ctrl+F">
+                            <TextBox.Style><Style TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}">
+                                <Setter Property="BorderBrush" Value="#E3E6ED"/>
+                                <Setter Property="Background" Value="#EFF1F6"/>
+                            </Style></TextBox.Style>
+                        </TextBox>
+                        <Button x:Name="SearchButton" Content="&#xE721;" Margin="2,0,0,0"
+                                Width="32" Height="32" MinHeight="0" HorizontalAlignment="Left" VerticalAlignment="Center"
+                                Click="OnSearchClick" AutomationProperties.Name="搜索" ToolTip="搜索">
+                            <Button.Style><Style TargetType="Button" BasedOn="{StaticResource MeowFilm.IconButton}">
+                                <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
+                            </Style></Button.Style>
+                        </Button>
                     </Grid>
                 </Grid>
                 <StackPanel x:Name="PageHeader" Grid.Column="0" Orientation="Horizontal"
@@ -267,9 +279,6 @@
                     </Button>
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top"
                                 Margin="0,16,12,0" shell:WindowChrome.IsHitTestVisibleInChrome="True">
-                        <Button x:Name="PlayerDetailSettingsButton" Style="{StaticResource MeowFilm.CaptionButton}"
-                                FontSize="17" Content="&#xE713;" Foreground="#ECECEE"
-                                Click="OnSettingsClick" AutomationProperties.Name="设置" ToolTip="设置" />
                         <Button Style="{StaticResource MeowFilm.CaptionButton}" Content="&#xE921;" Foreground="#ECECEE"
                                 Click="OnMinimizeClick" AutomationProperties.Name="最小化" ToolTip="最小化" />
                         <Button x:Name="PlayerDetailMaximizeButton" Style="{StaticResource MeowFilm.CaptionButton}" Foreground="#ECECEE"
@@ -300,13 +309,6 @@
 
             <!-- Auto-sized layout row, never an overlay on scrolling content. No player is created by the shell. -->
             <Border x:Name="PlayerFrame" Grid.Row="2" Grid.ColumnSpan="2" Visibility="Collapsed">
-                <Border.Style>
-                    <Style TargetType="Border" BasedOn="{StaticResource MeowFilm.Surface}">
-                        <Setter Property="BorderThickness" Value="0" />
-                        <Setter Property="CornerRadius" Value="0" />
-                        <Setter Property="Padding" Value="0" />
-                    </Style>
-                </Border.Style>
                 <ContentControl x:Name="PlayerHost" IsEnabled="{Binding IsInteractive}"
                                 HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"
                                 Focusable="False" IsTabStop="False" />

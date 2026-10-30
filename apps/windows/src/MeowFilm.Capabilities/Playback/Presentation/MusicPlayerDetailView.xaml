@@ -3,14 +3,33 @@
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:local="clr-namespace:MeowFilm.Capabilities"
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
- FontFamily="{DynamicResource MeowFilm.Font.Body}"
- TextOptions.TextFormattingMode="Ideal" TextOptions.TextRenderingMode="ClearType"
- Background="{Binding PlayerBackground}">
+ FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"
+ TextOptions.TextFormattingMode="Ideal" TextOptions.TextRenderingMode="Grayscale">
+ <UserControl.Style>
+  <Style TargetType="UserControl">
+   <!-- The page's only backdrop; detail content and footer stay transparent over it. -->
+   <Setter Property="Background" Value="{Binding PlayerBackground}"/>
+   <Style.Triggers>
+    <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
+     <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+    </Trigger>
+   </Style.Triggers>
+  </Style>
+ </UserControl.Style>
  <UserControl.Resources>
   <ResourceDictionary>
    <ResourceDictionary.MergedDictionaries>
     <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/>
    </ResourceDictionary.MergedDictionaries>
+   <local:MusicLyricRowMarginConverter x:Key="Player.LyricRowMargin"/>
+   <ResourceDictionary x:Key="Player.FooterPalette">
+    <SolidColorBrush x:Key="Capability.Player.Foreground" Color="#C5C3C8"/>
+    <SolidColorBrush x:Key="Capability.Player.Text" Color="#EBEAED"/>
+    <SolidColorBrush x:Key="Capability.Player.Muted" Color="#C5C3C8"/>
+    <SolidColorBrush x:Key="Capability.Player.Hover" Color="#14FFFFFF"/>
+    <SolidColorBrush x:Key="Capability.Player.Pressed" Color="#22FFFFFF"/>
+    <SolidColorBrush x:Key="Capability.Player.Rail" Color="#26FFFFFF"/>
+   </ResourceDictionary>
    <Style TargetType="TextBlock">
     <Setter Property="Foreground" Value="#EBEAED"/>
     <Style.Triggers>
@@ -116,32 +135,12 @@
      </StackPanel>
     </WrapPanel>
    </StackPanel>
-   <DockPanel Grid.Row="1" Margin="0,0,0,8">
-    <Button x:Name="LyricOptionsButton" DockPanel.Dock="Right" Content="&#xE713;"
-            Style="{StaticResource MeowFilm.IconButton}" Foreground="#C5C3C8"
-            Click="LyricOptions_Click" AutomationProperties.Name="歌词设置" ToolTip="歌词设置"/>
-    <Border Background="#0DFFFFFF" CornerRadius="16" HorizontalAlignment="Left">
+    <Border Grid.Row="1" Margin="0,0,0,8" Background="#0DFFFFFF" CornerRadius="16" HorizontalAlignment="Left">
      <StackPanel Orientation="Horizontal">
       <RadioButton Content="歌词" Style="{StaticResource Player.DetailTab}" IsChecked="True"/>
-      <RadioButton Content="百科" Style="{StaticResource Player.DetailTab}" IsHitTestVisible="False"/>
       <RadioButton Content="相似推荐" Style="{StaticResource Player.DetailTab}" IsHitTestVisible="False"/>
      </StackPanel>
     </Border>
-   </DockPanel>
-   <Popup x:Name="LyricOptionsPopup" PlacementTarget="{Binding ElementName=LyricOptionsButton}"
-          Placement="Bottom" StaysOpen="False" AllowsTransparency="True">
-    <Border Background="{DynamicResource MeowFilm.Brush.Surface}" Padding="12" CornerRadius="8" Margin="0,6,0,0">
-     <StackPanel>
-      <WrapPanel><Button Content="刷新歌词" Click="Lyrics_Click" IsEnabled="{Binding CanEdit}"/>
-       <ComboBox ItemsSource="{Binding LyricSources}" SelectedItem="{Binding SelectedLyricSource}"
-                 DisplayMemberPath="Label" MinWidth="120" MaxWidth="240" Margin="0,0,8,8"
-                 AutomationProperties.Name="歌词来源"/>
-       <Button Content="取消" Click="CancelLyrics_Click" IsEnabled="{Binding CanCancelLyrics}"/></WrapPanel>
-      <WrapPanel><Button Content="导入歌词" Click="ImportLyrics_Click" IsEnabled="{Binding CanImportLocalLyrics}"/>
-       <Button Content="移除本地歌词" Click="RemoveLocalLyrics_Click" IsEnabled="{Binding CanRemoveLocalLyrics}"/></WrapPanel>
-     </StackPanel>
-    </Border>
-   </Popup>
    <Grid Grid.Row="2">
     <ListBox Background="Transparent" BorderThickness="0" Padding="0"
      ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto"
@@ -154,7 +153,7 @@
      <ListBox.Template><ControlTemplate TargetType="ListBox">
       <ScrollViewer Focusable="False" CanContentScroll="True" VerticalScrollBarVisibility="Hidden"
                     HorizontalScrollBarVisibility="Disabled" Style="{StaticResource Capability.OverlayScrollViewer}">
-       <ItemsPresenter Margin="0,140,0,160"/>
+       <ItemsPresenter/>
       </ScrollViewer>
      </ControlTemplate></ListBox.Template>
      <ListBox.OpacityMask>
@@ -165,7 +164,14 @@
      </ListBox.OpacityMask>
      <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem">
       <Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/>
-      <Setter Property="Margin" Value="0"/><Setter Property="Opacity" Value=".40"/>
+      <Setter Property="Margin"><Setter.Value><MultiBinding Converter="{StaticResource Player.LyricRowMargin}">
+       <Binding Path="DataContext" RelativeSource="{RelativeSource Self}"/>
+       <Binding Path="DataContext.FirstLyric" RelativeSource="{RelativeSource AncestorType=local:MusicPlayerDetailView}"/>
+       <Binding Path="DataContext.LastLyric" RelativeSource="{RelativeSource AncestorType=local:MusicPlayerDetailView}"/>
+       <Binding Path="ActualHeight" RelativeSource="{RelativeSource AncestorType=ListBox}"/>
+       <Binding Path="DataContext.IsPlaying" RelativeSource="{RelativeSource AncestorType=local:MusicPlayerDetailView}"/>
+      </MultiBinding></Setter.Value></Setter>
+      <Setter Property="Opacity" Value=".40"/>
       <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem">
        <ContentPresenter/>
       </ControlTemplate></Setter.Value></Setter>

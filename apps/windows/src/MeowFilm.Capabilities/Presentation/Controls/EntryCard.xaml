@@ -3,25 +3,31 @@
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:local="clr-namespace:MeowFilm.Capabilities"
  xmlns:art="clr-namespace:MeowFilm.Desktop.Artwork;assembly=MeowFilm.Desktop"
- FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}">
+ FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"
+ TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Grayscale"
+ UseLayoutRounding="True" SnapsToDevicePixels="True">
  <UserControl.Resources>
   <local:MusicEntryOffsetConverter x:Key="Offset"/>
   <local:MusicCatalogPaletteConverter x:Key="EntryPalette" Role="Entry"/>
   <BooleanToVisibilityConverter x:Key="Visible"/>
   <Style x:Key="HitButton" TargetType="Button">
    <Setter Property="Background" Value="Transparent"/><Setter Property="Padding" Value="0"/>
+   <Setter Property="FocusVisualStyle" Value="{DynamicResource MeowFilm.FocusVisual}"/>
    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
     <Border Background="{TemplateBinding Background}"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
    </ControlTemplate></Setter.Value></Setter>
   </Style>
  </UserControl.Resources>
- <Grid x:Name="Surface" local:CardMotion.Enabled="True" local:CardClip.Radius="4">
+ <Grid x:Name="Surface" local:CardMotion.Enabled="True" local:CardClip.Radius="8">
   <Grid.Background><MultiBinding Converter="{StaticResource EntryPalette}">
    <Binding Path="RawPaletteBrush" ElementName="Cover"/><Binding Path="Presentation"/>
   </MultiBinding></Grid.Background>
   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="48"/></Grid.RowDefinitions>
-  <Grid Height="{Binding ActualWidth,ElementName=Surface}">
+  <Grid x:Name="ArtworkFrame" Height="{Binding ActualWidth,ElementName=Surface}">
    <art:ArtworkImage x:Name="Cover" Address="{Binding Cover}"/>
+   <Border x:Name="FooterShade" Background="{Binding Background,ElementName=Surface}" IsHitTestVisible="False">
+    <Border.OpacityMask><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#00FFFFFF" Offset=".62"/><GradientStop Color="#70FFFFFF" Offset=".82"/><GradientStop Color="White" Offset="1"/></LinearGradientBrush></Border.OpacityMask>
+   </Border>
     <Border Background="#48000000" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=Surface}" IsHitTestVisible="False">
      <Border.Style><Style TargetType="Border"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers>
       <DataTrigger Binding="{Binding IsOverlayEntry}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
@@ -37,17 +43,35 @@
    </MultiBinding></Border.Background>
    <Border.OpacityMask><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#00000000"/><GradientStop Color="#BFFFFFFF" Offset=".32"/><GradientStop Color="White" Offset=".6"/></LinearGradientBrush></Border.OpacityMask>
   </Border>
+  <Border x:Name="TitleShade" Height="64" VerticalAlignment="Top" IsHitTestVisible="False">
+   <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+    <GradientStop Color="#90000000"/><GradientStop Color="#90000000" Offset=".5"/><GradientStop Color="#00000000" Offset="1"/>
+   </LinearGradientBrush></Border.Background>
+  </Border>
   <Button x:Name="OpenButton" Grid.RowSpan="2" Tag="{Binding}" Click="Open_Click" IsEnabled="{Binding CanOpen}" Style="{StaticResource HitButton}" AutomationProperties.Name="{Binding Title}"/>
-  <TextBlock Text="{Binding Title}" Foreground="White" FontSize="18" FontWeight="Bold" LineHeight="24" LineStackingStrategy="BlockLineHeight"
-   Margin="10,9,8,0" VerticalAlignment="Top" TextTrimming="CharacterEllipsis" IsHitTestVisible="False"/>
-  <StackPanel Grid.RowSpan="2" Margin="10,6,10,0" VerticalAlignment="Top" IsHitTestVisible="False">
-   <StackPanel.RenderTransform><TranslateTransform><TranslateTransform.Y><MultiBinding Converter="{StaticResource Offset}"><Binding Path="ActualWidth" ElementName="Surface"/><Binding Path="(local:CardMotion.Progress)" ElementName="Surface"/><Binding Path="IsPreviewEntry"/></MultiBinding></TranslateTransform.Y></TranslateTransform></StackPanel.RenderTransform>
-   <TextBlock Text="{Binding Subtitle}" Foreground="White" FontSize="12" LineHeight="18" LineStackingStrategy="BlockLineHeight" Height="36" TextWrapping="Wrap" TextTrimming="CharacterEllipsis"/>
-   <ItemsControl ItemsSource="{Binding PreviewTitles,ElementName=Entry}" Margin="0,8,32,0"
-    Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=Surface}" Visibility="{Binding IsPreviewEntry,Converter={StaticResource Visible}}">
-    <ItemsControl.ItemTemplate><DataTemplate><TextBlock Text="{Binding}" Foreground="#DCFFFFFF" FontSize="13" Height="25" TextTrimming="CharacterEllipsis"/></DataTemplate></ItemsControl.ItemTemplate>
-   </ItemsControl>
-  </StackPanel>
+  <Grid Margin="10,10,10,0" VerticalAlignment="Top" IsHitTestVisible="False">
+   <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition/></Grid.ColumnDefinitions>
+   <Grid Width="17" Height="18" Margin="0,2,6,0" VerticalAlignment="Top" Visibility="{Binding HasCalendarDay,Converter={StaticResource Visible}}">
+    <Border BorderBrush="White" BorderThickness="1" CornerRadius="2" Margin="0,3,0,0"/>
+    <Path Data="M 0,7 L 17,7 M 4,0 L 4,5 M 13,0 L 13,5" Stroke="White" StrokeThickness="1"/>
+    <TextBlock Text="{Binding DayOfMonth}" Foreground="White" FontSize="9" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,1"/>
+   </Grid>
+   <TextBlock Grid.Column="1" Text="{Binding Title}" Foreground="White" FontSize="17" FontWeight="SemiBold" LineHeight="24" LineStackingStrategy="BlockLineHeight" TextTrimming="CharacterEllipsis"/>
+  </Grid>
+  <Canvas x:Name="CaptionHost" Grid.Row="1" Margin="10,6,10,0" IsHitTestVisible="False">
+   <StackPanel x:Name="Caption" Width="{Binding ActualWidth,ElementName=CaptionHost}">
+    <StackPanel.RenderTransform><TranslateTransform><TranslateTransform.Y><MultiBinding Converter="{StaticResource Offset}"><Binding Path="ActualHeight" ElementName="ArtworkFrame"/><Binding Path="(local:CardMotion.Progress)" ElementName="Surface"/><Binding Path="IsPreviewEntry"/></MultiBinding></TranslateTransform.Y></TranslateTransform></StackPanel.RenderTransform>
+    <TextBlock Foreground="White" FontSize="12" LineHeight="18" LineStackingStrategy="BlockLineHeight" Height="36" TextWrapping="Wrap" TextTrimming="CharacterEllipsis">
+     <TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Text" Value="{Binding ExpandedSubtitle}"/><Style.Triggers>
+      <DataTrigger Binding="{Binding Path=(local:CardMotion.Progress),ElementName=Surface}" Value="0"><Setter Property="Text" Value="{Binding Subtitle}"/></DataTrigger>
+     </Style.Triggers></Style></TextBlock.Style>
+    </TextBlock>
+    <ItemsControl ItemsSource="{Binding PreviewTitles,ElementName=Entry}" Margin="0,8,32,0"
+     Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=Surface}" Visibility="{Binding IsPreviewEntry,Converter={StaticResource Visible}}">
+     <ItemsControl.ItemTemplate><DataTemplate><TextBlock Text="{Binding}" Foreground="#DCFFFFFF" FontSize="13" Height="25" TextTrimming="CharacterEllipsis"/></DataTemplate></ItemsControl.ItemTemplate>
+    </ItemsControl>
+   </StackPanel>
+  </Canvas>
   <Button x:Name="PlayButton" Grid.RowSpan="2" Width="36" Height="36" HorizontalAlignment="Right" VerticalAlignment="Bottom"
    Click="Play_Click" IsEnabled="{Binding CanPlay}" AutomationProperties.Name="{Binding Title,StringFormat=播放 {0}}"
    Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=Surface}">

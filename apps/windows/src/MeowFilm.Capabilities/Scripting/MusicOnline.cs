@@ -16,7 +16,6 @@ public sealed partial class MusicCapability
     private readonly Dictionary<string, string> recordingChoices = [];
     private readonly Dictionary<string, string> recordingPlatforms = [];
     public ObservableCollection<MusicSourceRow> Sources { get; } = [];
-    public ObservableCollection<string> SourceNetworkOrigins { get; } = [];
     public ObservableCollection<MusicSourcePlatformRow> SourcePlatformRows { get; } = [];
     public ObservableCollection<MusicLyricRow> Lyrics { get; } = [];
     public ObservableCollection<MusicRecordingRow> RecordingCandidates { get; } = [];
@@ -66,7 +65,6 @@ public sealed partial class MusicCapability
         set
         {
             selectedSource = value;
-            SourceNetworkOrigins.Clear();
             SelectedPlatform = value?.InstallationId == targetInstallation ? targetPlatform ?? "" : "";
             RebuildSourcePlatforms();
             Changed();
@@ -80,7 +78,6 @@ public sealed partial class MusicCapability
     public bool CanUseSelectedSource => CanEdit && selectedSource is { Enabled: true } &&
         selectedSource.Platforms.Length > 0;
     public bool UsesOfficialSources => targetInstallation is null;
-    public string SourceOriginCountText => $"{SourceNetworkOrigins.Count} 个域名";
     public bool IsLyrics => playerDetailOpen;
     public string LyricStatus => lyricStatus;
     public int ActiveLyricIndex
@@ -101,7 +98,7 @@ public sealed partial class MusicCapability
     {
         foreach (var property in new[] { nameof(HasSource), nameof(CanEditSource), nameof(CanLoadSource),
             nameof(CanRollbackSource), nameof(CanUseSelectedSource),
-            nameof(UsesOfficialSources), nameof(SourceOriginCountText), nameof(IsLyrics), nameof(LyricStatus),
+            nameof(UsesOfficialSources), nameof(IsLyrics), nameof(LyricStatus),
             nameof(ActiveLyricIndex), nameof(SourceCapabilities), nameof(SourcePlatforms), nameof(SelectedPlatform),
             nameof(PlaybackTarget), nameof(CanCancelOnline) })
             Changed(property);
@@ -175,9 +172,8 @@ public sealed partial class MusicCapability
             throw;
         }
     }
-    private static object SourcePermissions(MusicSourceScriptInspection inspection) => new
+    private static object SourcePermissions() => new
     {
-        networkOrigins = inspection.NetworkOrigins,
         storage = Array.Empty<string>()
     };
     private static JsonElement ParseObject(string json)
@@ -217,7 +213,6 @@ public sealed partial class MusicCapability
         var rows = reply.GetProperty("items").EnumerateArray().Select(MusicSourceRow.Read).ToArray();
         Sources.Clear(); foreach (var row in rows) Sources.Add(row);
         SelectedSource = rows.SingleOrDefault(r => r.InstallationId == chosen);
-        if (selectedSource is not null) await LoadSourceCore(selectedSource, token);
     }
     public Task LoadSourceAsync(MusicSourceRow? source) => RunAsync(async () =>
     {
@@ -228,13 +223,11 @@ public sealed partial class MusicCapability
     {
         var reply = await Call("music.sources.detail", new { installationId = source.InstallationId }, token);
         if (SelectedSource?.InstallationId != source.InstallationId) return;
-        var permissions = reply.GetProperty("permissions");
-        SourceNetworkOrigins.Clear();
-        foreach (var origin in permissions.GetProperty("networkOrigins").EnumerateArray())
-            SourceNetworkOrigins.Add(origin.GetString()!);
-        SelectedPlatform = source.InstallationId == targetInstallation ? targetPlatform ?? "" : "";
-        RebuildSourcePlatforms();
-        OnlineBindings();
+        var refreshed = MusicSourceRow.Read(reply.GetProperty("item"));
+        var index = Sources.IndexOf(source);
+        if (index < 0) return;
+        Sources[index] = refreshed;
+        SelectedSource = refreshed;
     }
     public Task ImportSourceAsync()
     {
@@ -265,15 +258,12 @@ public sealed partial class MusicCapability
                     try
                     {
                         var inspection = MusicSourceScriptInspector.Inspect(snapshot.Bytes, snapshot.Basename, snapshot.Sha256);
-                        if (update?.Enabled == true && !dialogs.Confirm(
-                            $"更新“{update.Name}”并允许访问 {inspection.NetworkOrigins.Length} 个网络域名？", "更新音源"))
-                            return;
                         transfer = await UploadScript(snapshot.Bytes, snapshot.Sha256, snapshot.Basename, request.Token);
                         if (update is not null)
                         {
                             var changed = await Call("music.sources.update", new { installationId = update.InstallationId,
                                 token = transfer, version = inspection.Version,
-                                permissions = SourcePermissions(inspection) }, request.Token);
+                                permissions = SourcePermissions() }, request.Token);
                             choose = MusicDto.Text(changed.GetProperty("item"), "installationId");
                             await RevokeChangedMusicSource(update.InstallationId);
                         }
@@ -281,7 +271,7 @@ public sealed partial class MusicCapability
                         {
                             var installed = await Call("music.sources.install", new { token = transfer,
                                 name = inspection.Name, version = inspection.Version,
-                                permissions = SourcePermissions(inspection) }, request.Token);
+                                permissions = SourcePermissions() }, request.Token);
                             choose = MusicDto.Text(installed.GetProperty("item"), "installationId");
                         }
                     }
@@ -300,7 +290,6 @@ public sealed partial class MusicCapability
                     !ReferenceEquals(selectedSource, selected))
                 {
                     SelectedSource = selected;
-                    await LoadSourceCore(selected, lifetime.Token);
                 }
             }
             finally { EndOnline(request); }
@@ -314,8 +303,6 @@ public sealed partial class MusicCapability
         return RunAsync(async () =>
         {
             if (source is null) return;
-            if (action == "enable" && !dialogs.Confirm(
-                $"启用“{source.Name}”并允许访问 {SourceNetworkOrigins.Count} 个网络域名？", "启用音源")) return;
             if (action == "remove" && !dialogs.Confirm($"删除音源“{source.Name}”？", "删除音源")) return;
             if (action == "rollback" && !dialogs.Confirm($"回退音源“{source.Name}”？", "回退音源")) return;
             if (playbackInstallation == source.InstallationId && action != "enable") await StopOwnedPlayback();

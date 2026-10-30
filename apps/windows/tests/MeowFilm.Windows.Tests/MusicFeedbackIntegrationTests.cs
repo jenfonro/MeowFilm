@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 using MeowFilm.Capabilities;
+using MeowFilm.AppHost;
 using MeowFilm.Capabilities.Feedback;
 using MeowFilm.Platform.Storage;
 
@@ -17,8 +18,7 @@ public static class MusicFeedbackIntegrationTests
 // No private implementation from another business module is accessed.
 public static partial class MusicUiTests
 {
-    private static DpapiDocumentStore ServiceStore() => new(NewRoot(),
-        ["music.library.v1", "music.files.v1", "music.accounts.v1", "music.feedback.v1"]);
+    private static DpapiDocumentStore ServiceStore() => new(NewRoot(), AppIdentity.NativeNamespaces);
 
     internal static IEnumerable<TestCase> NativeServiceIntegrationCases()
     {

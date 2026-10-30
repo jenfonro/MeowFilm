@@ -23,6 +23,7 @@ public final class LoopingTextView: UIView {
         text: String,
         font: UIFont,
         color: UIColor,
+        colorRanges: [(NSRange, UIColor)] = [],
         allowsMotion: Bool,
         running: Bool,
         gap: CGFloat = 28,
@@ -36,7 +37,7 @@ public final class LoopingTextView: UIView {
             self.gap != safeGap || self.pointsPerSecond != safeSpeed ||
             self.minimumDuration != safeMinimum {
             needsGeometry = true
-            first.text = text; second.text = text; first.font = font; second.font = font
+            first.font = font; second.font = font
             self.allowsMotion = allowsMotion
             self.gap = safeGap
             self.pointsPerSecond = safeSpeed
@@ -45,7 +46,13 @@ public final class LoopingTextView: UIView {
             invalidateIntrinsicContentSize()
         }
         requestedRunning = running
-        first.textColor = color; second.textColor = color
+        let attributedText = NSMutableAttributedString(string: text, attributes: [.foregroundColor: color])
+        for (range, rangeColor) in colorRanges {
+            attributedText.addAttribute(.foregroundColor, value: rangeColor, range: range)
+        }
+        if first.attributedText?.isEqual(to: attributedText) != true {
+            first.attributedText = attributedText; second.attributedText = attributedText
+        }
         reconcileMotion()
         setNeedsLayout()
     }

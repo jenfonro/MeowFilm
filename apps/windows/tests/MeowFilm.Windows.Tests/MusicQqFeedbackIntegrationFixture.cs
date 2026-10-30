@@ -11,9 +11,11 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Xml.Linq;
 using MeowFilm.Core.Runtime;
+using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Feedback;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -27,8 +29,8 @@ internal sealed class MusicQqFeedbackIntegrationFixture : IAsyncDisposable
     internal const string Euin = "SYNTHETIC_JOINT_EUIN", Mid = "SYNTHETICMID4321";
     internal const string Qimei = "1234567890abcdef1234567890abcdef1234";
     internal const string DeviceUid = "SYNTHETIC_ANONYMOUS_UID", DeviceSid = "SYNTHETIC_ANONYMOUS_SID";
-    internal const string DeviceEntry = "[\"meowfilm\",\"music\",1,\"platform-device\",\"tx-feedback\"]";
     internal const string AccountNamespace = "music.accounts.v1";
+    internal const string ClientNamespace = MusicPlatformClientContextOwner.DocumentNamespace;
     internal readonly string Root;
     internal readonly StoreProbe Store;
     internal readonly RefusingRuntime Runtime = new();
@@ -43,8 +45,7 @@ internal sealed class MusicQqFeedbackIntegrationFixture : IAsyncDisposable
             Guid.NewGuid().ToString("N"));
         TestWorkspace.ValidatePath(TestWorkspace.DataRoot, Root);
         Directory.CreateDirectory(Root);
-        Store = new(new DpapiDocumentStore(Root,
-            ["music.library.v1", "music.files.v1", AccountNamespace, "music.feedback.v1"]));
+        Store = new(new DpapiDocumentStore(Root, AppIdentity.NativeNamespaces));
         Handler = new(Store);
         // The DEFAULT protocol factory must consume this application's real AccountOwner.
         App = new(Store, Runtime, Handler);
@@ -117,8 +118,7 @@ internal sealed class MusicQqFeedbackIntegrationFixture : IAsyncDisposable
             .Single(row => row.GetProperty("platform").GetString() == "tx").GetProperty("state").GetString()!;
     }
     internal async Task<JsonObject> Device() =>
-        (await Store.AccountRoot())["entries"]!.AsArray()
-            .Single(row => row!["key"]!.GetValue<string>() == DeviceEntry)!["value"]!.DeepClone().AsObject();
+        (await Store.ClientRoot())["tx"]!.DeepClone().AsObject();
     internal static void AssertRedacted(string value)
     {
         Check(new[] { Key, OtherKey, Euin, Qimei, DeviceUid, DeviceSid, "synthetic-vkey",
@@ -167,6 +167,7 @@ internal sealed class MusicQqFeedbackIntegrationFixture : IAsyncDisposable
             try { return saved.Data is null ? new JsonObject { ["entries"] = new JsonArray() } : JsonNode.Parse(saved.Data)!.AsObject(); }
             finally { if (saved.Data is { } bytes) CryptographicOperations.ZeroMemory(bytes); }
         }
+        internal Task<JsonObject> ClientRoot() => MusicClientContextFixture.ReadDocument(this);
         internal async Task<DocumentFingerprint> Fingerprint(string ns)
         {
             var saved = await ReadAsync(ns);
@@ -328,8 +329,7 @@ internal sealed class MusicQqFeedbackIntegrationFixture : IAsyncDisposable
             if (step == "profile") Check(body!["req_0"]!["param"]!["uin"]!.GetValue<string>() == Euin, "Exact homepage identity");
             if (step is "qimei" or "session")
             {
-                var root = await store.AccountRoot();
-                var device = root["entries"]!.AsArray().Single(row => row!["key"]!.GetValue<string>() == DeviceEntry)!["value"]!;
+                var device = (await store.ClientRoot())["tx"]!;
                 Check(device["generation"]!.GetValue<long>() >= 1 &&
                     !request.Headers.Contains("Cookie") && !request.Headers.Contains("Authorization"), "Persisted anonymous device only");
                 if (step == "session")
@@ -344,8 +344,7 @@ internal sealed class MusicQqFeedbackIntegrationFixture : IAsyncDisposable
             }
             if (step is "track" or "vkey" or "report")
             {
-                var device = (await store.AccountRoot())["entries"]!.AsArray()
-                    .Single(row => row!["key"]!.GetValue<string>() == DeviceEntry)!["value"]!;
+                var device = (await store.ClientRoot())["tx"]!;
                 Check(device["generation"]!.GetValue<long>() == 3 &&
                     device["session"]!["generation"]!.GetValue<long>() == 1, "Device/session saved before feedback");
                 Check(request.Headers.GetValues("User-Agent").Single() == "QQMusic 20090008(android 15)", "Fixed native QQ UA");

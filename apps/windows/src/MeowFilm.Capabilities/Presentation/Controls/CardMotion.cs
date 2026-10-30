@@ -59,7 +59,7 @@ public static class CardMotion
 public sealed class MusicEntryOffsetConverter : IMultiValueConverter
 {
     public object Convert(object[] values, Type type, object parameter, CultureInfo culture) =>
-        values.Length == 3 && values[0] is double width && values[1] is double progress
-            ? width - (values[2] is true ? Math.Max(0, width - 80) * progress : 0d) : 0d;
+        values.Length == 3 && values[0] is double height && values[1] is double progress && values[2] is true
+            ? -Math.Max(0, height - 80) * progress : 0d;
     public object[] ConvertBack(object value, Type[] types, object parameter, CultureInfo culture) => throw new NotSupportedException();
 }

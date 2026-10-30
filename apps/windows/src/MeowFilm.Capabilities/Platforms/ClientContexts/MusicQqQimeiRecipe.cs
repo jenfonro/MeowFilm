@@ -6,9 +6,7 @@ using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
-using MeowFilm.Capabilities.Platforms;
-
-namespace MeowFilm.Capabilities.Accounts;
+namespace MeowFilm.Capabilities.Platforms;
 
 internal static class QqQimeiRecipe
 {
@@ -48,10 +46,10 @@ internal static class QqQimeiRecipe
         }
         return output.ToString();
     }
-    internal static HttpRequestMessage Request(StoredQqFeedbackDevice device, DateTimeOffset now) =>
+    internal static HttpRequestMessage Request(MusicQqClientContext device, DateTimeOffset now) =>
         RequestCore(device, now, Hex(16), Hex(16), Beacon(now), RandomNumberGenerator.GetInt32(14401));
     // Separates ephemeral entropy from the audited wire recipe; no key or comm escapes in a DTO.
-    private static HttpRequestMessage RequestCore(StoredQqFeedbackDevice device, DateTimeOffset now,
+    private static HttpRequestMessage RequestCore(MusicQqClientContext device, DateTimeOffset now,
         string cryptKey, string nonce, string beacon, int uptimeOffset)
     {
         byte[] digest = MD5.HashData(Encoding.ASCII.GetBytes(device.AndroidId));

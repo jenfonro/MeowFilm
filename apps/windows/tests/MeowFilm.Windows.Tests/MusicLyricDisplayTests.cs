@@ -12,6 +12,7 @@ using System.Windows.Controls;
 using System.Windows.Threading;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Capabilities;
+using MeowFilm.AppHost;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Platform.Storage;
 
@@ -527,7 +528,7 @@ public static class MusicLyricDisplayTests
         private int syncNoticeHeld;
         private Fixture(string root, bool holdSync)
         {
-            Store = new(root, ["music.library.v1", "music.files.v1", "music.accounts.v1"]);
+            Store = new(root, AppIdentity.NativeNamespaces);
             Access = new(Store);
             Application = new(Access, Runtime, Http);
             if (holdSync) Application.LibrarySyncChanged += HoldSyncNotice;

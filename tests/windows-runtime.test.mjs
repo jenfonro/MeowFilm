@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter, once } from 'node:events';
 import { createServer } from 'node:net';
+import { createServer as createHTTPServer } from 'node:http';
 import { randomUUID, createHash } from 'node:crypto';
 import {
   existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
@@ -70,17 +71,26 @@ function verifyManifest(output, manifest) {
     assert.equal(file.sha256, sha256(bytes), file.path);
   }
   assert.deepEqual(paths.filter(path => path.startsWith('app/windows/')), [
-    'app/windows/bootstrap.mjs', manifest.entry, 'app/windows/modules/music-script.mjs',
+    'app/windows/bootstrap.mjs', manifest.entry,
   ]);
   assert.deepEqual(manifest.fileHashExcludes, ['runtime-manifest.json']);
-  assert.ok(!paths.some(path => /\.(?:exe|dll|node|wasm)$/i.test(path)));
+  assert.ok(!paths.some(path => /\.(?:exe|dll|node)$/i.test(path)));
+  const engine = readJSON(join(root, 'scripts/quickjs-runtime.json')).packages
+    .find(pkg => pkg.name === '@jitl/quickjs-wasmfile-release-sync');
+  assert.deepEqual(manifest.trustedWasm, [{
+    package: engine.name, version: engine.version,
+    ...engine.wasm, path: `node_modules/${engine.name}/${engine.wasm.path}`,
+    licensePath: `node_modules/${engine.name}/LICENSE`, licenseSha256: engine.licenseSha256,
+  }]);
+  assert.deepEqual(paths.filter(path => /\.wasm$/i.test(path)), manifest.trustedWasm.map(file => file.path));
   assert.equal(manifest.sharedEntry, undefined);
   assert.equal(manifest.assemblyProfile, 'windows-native');
-  assert.deepEqual(readFileSync(join(output, 'app/windows/modules/music-script.mjs')),
-    readFileSync(join(root, 'apps/windows/runtime/modules/music-script.mjs')));
+  assert.deepEqual(readFileSync(join(output, 'app/modules/music-script.mjs')),
+    readFileSync(join(root, 'apps/runtime/modules/music-script.mjs')));
   assert.equal(existsSync(join(output, 'node_modules/@meowfilm/script-host')), true);
   assert.deepEqual(manifest.dependencies.map(item => item.name).sort(),
-    ['@meowfilm/runtime-bridge', '@meowfilm/script-host']);
+    ['@jitl/quickjs-ffi-types', '@jitl/quickjs-wasmfile-release-sync',
+      '@meowfilm/runtime-bridge', '@meowfilm/script-host', 'quickjs-emscripten-core']);
   for (const dependency of manifest.dependencies) {
     const sourceManifest = readJSON(join(root, dependency.lockPath, 'package.json'));
     assert.deepEqual(readJSON(join(output, dependency.path, 'package.json')), sourceManifest);
@@ -347,10 +357,10 @@ async function assertRealBusiness(peer, product, domains) {
   await assert.rejects(peer.call('eval', privateMarker), { code: 'METHOD_UNAVAILABLE' });
   await assert.rejects(peer.call('runtime.describe', {}), { code: 'INVALID_MESSAGE' });
   const music = description.modules.find(module => module.id === 'music');
-  assert.equal(music.version, '0.4.0');
+  assert.equal(music.version, '0.5.0');
   assert.ok(music.methods.every(method => method.startsWith('music.script.')));
   assert.deepEqual(await peer.call('music.script.status', {}), {
-    ok: true, contract: 'music.script.v1', documentAccess: false, instances: [],
+    ok: true, contract: 'music.script.v2', documentAccess: false, instances: [],
   });
   for (const method of ['music.library.list', 'music.queue.get', 'music.history.list',
     'music.storage.flush', 'music.lyrics.parse', 'music.accounts.list', 'music.catalog.search',
@@ -359,10 +369,100 @@ async function assertRealBusiness(peer, product, domains) {
     await assert.rejects(peer.call(method, {}), { code: 'METHOD_UNAVAILABLE' });
 }
 
+async function verifyScriptExecution(t, peer, storageCalls) {
+  let requests = 0;
+  const upstream = createHTTPServer((request, response) => {
+    requests++;
+    assert.equal(request.url, '/fixture');
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end('{"fixture":"local-http"}');
+  });
+  t.after(async () => {
+    if (upstream.listening) await bounded(new Promise((resolve, reject) =>
+      upstream.close(error => error ? reject(error) : resolve())));
+  });
+  await bounded(new Promise((resolve, reject) => {
+    upstream.once('error', reject);
+    upstream.listen(0, '127.0.0.1', resolve);
+  }));
+  const url = `http://127.0.0.1:${upstream.address().port}/fixture`;
+  const siteId = 'fixture-site';
+  // Self-authored contract fixture, not acceptance evidence for external scripts.
+  const source = Buffer.from(`
+    // @name Packaged LX contract fixture
+    const startup = meow.storage.get('startup').then(() => 'UNEXPECTED', error => error.code);
+    const background = new Promise(resolve => setTimeout(() => {
+      meow.storage.get('background').then(() => resolve('UNEXPECTED'), error => resolve(error.code));
+    }, 1));
+    let previousContext;
+    lx.on(lx.EVENT_NAMES.request, async ({source, action}, context) => {
+      const startupCode = await startup, backgroundCode = await background;
+      let globalCode;
+      try { await meow.storage.get('global'); globalCode = 'UNEXPECTED'; }
+      catch (error) { globalCode = error.code; }
+      let retiredCode = 'NO_PREVIOUS';
+      if (previousContext) {
+        try { await previousContext.storage.get('retired'); retiredCode = 'UNEXPECTED'; }
+        catch (error) { retiredCode = error.code; }
+      }
+      previousContext = context;
+      await Promise.resolve();
+      const stored = await context.storage.get('probe-' + action);
+      const network = await new Promise((resolve, reject) => lx.request(${JSON.stringify(url)}, {},
+        (error, response, body) => error ? reject(error) : resolve(body)));
+      return {source, action, startupCode, backgroundCode, globalCode, retiredCode, stored, network};
+    });
+    lx.send(lx.EVENT_NAMES.inited, {sources:{
+      '${siteId}':{name:'Fixture',type:'music',actions:['fixtureAction','musicUrl'],
+        qualitys:[{type:'320k',label:'Fixture 320'}]}
+    }});
+  `);
+  const okay = reply => {
+    assert.equal(reply.ok, true, JSON.stringify(reply));
+    assert.equal(reply.contract, 'music.script.v2');
+    return reply;
+  };
+  const staged = okay(await peer.call('music.script.stage.begin', {
+    basename: 'packaged-fixture.js', length: source.length, sha256: sha256(source),
+  }));
+  assert.equal(okay(await peer.call('music.script.stage.chunk', {
+    token: staged.token, offset: 0, data: source.toString('base64'),
+  })).next, source.length);
+  const grant = randomUUID();
+  const instance = okay(await peer.call('music.script.load', {
+    token: staged.token, installationId: 'packaged-fixture', revision: 1, expectedRevision: 0,
+    version: 'fixture-1', config: {}, permissions: { storage: ['read'] }, grant,
+  })).instance;
+  assert.deepEqual(instance.capabilities[siteId].actions, ['fixtureAction', 'musicUrl']);
+  assert.deepEqual(instance.capabilities[siteId].qualitys, ['320k']);
+  assert.equal(storageCalls.length, 0, 'startup/background storage never reaches native');
+  for (const operation of ['fixtureAction', 'musicUrl']) {
+    const result = okay(await peer.call('music.script.invoke', {
+      installationId: instance.installationId, revision: instance.revision, generation: instance.generation,
+      siteId, operation, payload: { quality: '320k', musicInfo: {} },
+    }));
+    assert.deepEqual(result.value, {
+      source: siteId, action: operation,
+      startupCode: 'PERMISSION_DENIED', backgroundCode: 'PERMISSION_DENIED', globalCode: 'PERMISSION_DENIED',
+      retiredCode: operation === 'fixtureAction' ? 'NO_PREVIOUS' : 'PERMISSION_DENIED',
+      stored: 'native-scoped-value', network: { fixture: 'local-http' },
+    });
+  }
+  assert.deepEqual(storageCalls, ['fixtureAction', 'musicUrl'].map(operation => ({
+    grant, installationId: instance.installationId, siteId, generation: instance.generation, key: `probe-${operation}`,
+  })));
+  assert.equal(requests, 2, 'the controlled local HTTP service is reachable without an origin/private-network grant');
+  assert.equal(okay(await peer.call('music.script.unload', {
+    installationId: instance.installationId, revision: instance.revision, generation: instance.generation,
+  })).cleanupComplete, true);
+  assert.deepEqual(okay(await peer.call('music.script.status', {})).instances, []);
+}
+
 async function runProduct(t, product, entry, payload) {
   const counts = new Map(['music.library.v1', 'reader.sources.v1', 'reader.library.v1',
     'film.sources.v1', 'film.library.v1'].map(namespace => [namespace, 0]));
   let reads = 0, releases = 0;
+  const storageCalls = [];
   // Tripwires: no script-only product may touch ordinary native documents.
   const methods = {
     'platform.documents.read.begin': params => {
@@ -374,11 +474,16 @@ async function runProduct(t, product, entry, payload) {
       releases++;
       assert.fail('Script-only product attempted native document transfer release');
     },
+    'platform.musicScript.storage.get': params => {
+      storageCalls.push(structuredClone(params));
+      return { ok: true, value: 'native-scoped-value' };
+    },
   };
   const server = await pipeServer(t, { methods });
   const child = spawnRuntime(t, entry, server.argv, payload);
   const { peer } = await bounded(server.connection);
   await assertRealBusiness(peer, product, products[product]);
+  await verifyScriptExecution(t, peer, storageCalls);
   assert.equal(server.peers.length, 1, 'one runtime connection serves the whole product');
   assert.equal(reads, 0);
   assert.equal(counts.get('reader.sources.v1'), 0);
@@ -392,17 +497,12 @@ async function runProduct(t, product, entry, payload) {
 }
 
 for (const product of Object.keys(products)) {
-  test(`${product}: source entry explicitly imports only enabled domain factories`, () => {
+  test(`${product}: thin platform entry explicitly imports its shared music factory`, () => {
     const source = readFileSync(join(root, 'apps/windows/runtime/entries', `${product}.mjs`), 'utf8');
-    for (const domain of ['film', 'music', 'reader']) {
-      const scriptFile = domain === 'reader' ? 'reader-rules.mjs' : `${domain}-script.mjs`;
-      assert.equal(source.includes(`from '../modules/${scriptFile}'`), products[product].includes(domain));
-      assert.equal(source.includes(`from '../../../runtime/modules/${domain}.mjs'`), false);
-      assert.equal(source.includes("from '../../../runtime/adapters/reader-module.mjs'"), false);
-    }
+    assert.deepEqual([...source.matchAll(/^import\s+\{[^{}]+\}\s+from\s+['"]([^'"]+)['"];/gm)].map(match => match[1]),
+      ['../bootstrap.mjs', '../../../runtime/modules/music-script.mjs']);
     assert.equal(source.match(/await startWindowsAppRuntime\(/g)?.length, 1);
     if (products[product].includes('music')) assert.ok(source.includes('createMusicScriptModule({ call })'));
-    assert.ok(!source.includes('createDescriptorPeer'));
   });
   test(`${product}: real source entry, named pipe and native-only business boundary`, windows, async t => {
     await runProduct(t, product, join(root, 'apps/windows/runtime/entries', `${product}.mjs`));
@@ -434,7 +534,7 @@ test('CLI launch failure emits only a fixed code, never argv or underlying diagn
 // dependency traversal and failure-manifest assertions need no network/npm.
 function packagingFixture({
   missingBootstrap = false, extraSource = false, extraImport = false,
-  missingShared = false,
+  missingShared = false, missingCommonModule = false, platformModule = false,
 } = {}) {
   const area = mkdtempSync(join(temporary, 'failure-')), source = join(area, 'source');
   const manifest = { name: 'windows-package-fixture', version: '1.0.0', private: true, workspaces: ['packages/*'] };
@@ -454,13 +554,15 @@ function packagingFixture({
   }
   write(source, 'package-lock.json', lock);
   write(source, 'apps/runtime/bootstrap.mjs', inert);
-  for (const path of ['bootstrap.mjs', 'modules/music-script.mjs', 'entries/aggregate.mjs']) {
+  if (!missingCommonModule) write(source, 'apps/runtime/modules/music-script.mjs', inert);
+  for (const path of ['bootstrap.mjs', 'entries/aggregate.mjs']) {
     if (missingBootstrap && path === 'bootstrap.mjs') continue;
     let text = readFileSync(join(root, 'apps/windows/runtime', path), 'utf8');
     if (extraImport && path === 'bootstrap.mjs') text += "\nimport { unexpected } from './unexpected.mjs';\n";
     write(source, `apps/windows/runtime/${path}`, text);
   }
   if (extraSource) write(source, 'apps/windows/runtime/unlisted-helper.mjs', inert);
+  if (platformModule) write(source, 'apps/windows/runtime/modules/music-script.mjs', inert);
   return { root: source, area, output: join(area, 'payload') };
 }
 
@@ -477,6 +579,7 @@ test('packaging rejects existing output without changing a single prior byte', a
 for (const [option, code] of [
   ['missingBootstrap', 'ENOENT'], ['extraSource', 'WINDOWS_CLOSURE'],
   ['extraImport', 'WINDOWS_IMPORT'], ['missingShared', 'MISSING_PUBLIC_FILE'],
+  ['missingCommonModule', 'MISSING_SOURCE'], ['platformModule', 'WINDOWS_CLOSURE'],
 ]) {
   test(`packaging ${option} is explicit and retains a failed file inventory`, async () => {
     const f = packagingFixture({ [option]: true });
@@ -487,7 +590,7 @@ for (const [option, code] of [
     for (const file of manifest.files) {
       assert.equal(sha256(readFileSync(join(f.output, file.path))), file.sha256);
     }
-    if (option !== 'missingShared') {
+    if (!['missingShared', 'missingCommonModule'].includes(option)) {
       assert.equal(manifest.transport, 'windows-named-pipe-v1');
       assert.equal(manifest.entry, 'app/windows/entries/aggregate.mjs');
     }
@@ -505,12 +608,14 @@ test('Windows source junctions are rejected, not dereferenced or silently omitte
   assert.ok(existsSync(join(relocated, 'aggregate.mjs')), 'source is never removed');
 });
 
-test('App script payload excludes deferred capabilities and all ordinary business packages', async () => {
+test('App payload contains one common script assembly and only the Windows platform entry', async () => {
   const output = join(mkdtempSync(join(temporary, 'closure-')), 'payload');
   const manifest = await packageWindowsRuntime({ root, product: 'aggregate', output });
   assert.deepEqual(manifest.modules, ['music']);
-  for (const file of manifest.files)
-    assert.ok(!/reader|film-script|cat-session|local-services|app\/modules\//.test(file.path));
+  assert.deepEqual(manifest.files.filter(file => file.path.startsWith('app/')).map(file => file.path), [
+    'app/bootstrap.mjs', 'app/modules/music-script.mjs',
+    'app/windows/bootstrap.mjs', 'app/windows/entries/aggregate.mjs',
+  ]);
 });
 
 test('Windows packaging is reproducible and does not execute fixture code', async () => {

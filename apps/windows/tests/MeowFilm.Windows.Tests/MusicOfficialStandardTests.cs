@@ -89,13 +89,17 @@ public static class MusicOfficialStandardTests
             foreach (var membership in new[] { new MusicAccountMembership(false, "none", null),
                 new MusicAccountMembership(true, "vip", 1) })
             {
-                var handler = new StandardHandler { Bitrate = 96000 };
+                var handler = new StandardHandler { Bitrate = 96000, ClientCookie = "NMTID=SYNTHETIC_STANDARD_CLIENT; Domain=.music.163.com" };
                 using var http = MusicPlatformHttp.CreateWithHandler(handler);
-                var response = await new OfficialMusicAudio(http).ResolveAsync(
+                await using var clients = new MusicClientContextFixture(http);
+                var before = await clients.Owner.AcquireWyAsync();
+                var response = await new OfficialMusicAudio(http, clients.Owner).ResolveAsync(
                     new("wy", "fixture", 1, "123", "MUSIC_U=synthetic"), new() { ["musicId"] = "1" },
-                    ["128k"], new(membership, 0, 0, []), default);
+                    ["128k"], new(membership, 0, 0, []), default, () => { });
                 Check(handler.Calls == 1 && !response.QualityVerified && response.ActualQuality == "");
                 Check(response.RequestQuality == "128k");
+                var current = await clients.Owner.AcquireWyAsync();
+                Check(current.Generation == before.Generation + 1 && current.Nmtid == "SYNTHETIC_STANDARD_CLIENT");
             }
         });
         foreach (string problem in new[] { "trial", "no-url", "identity", "protected", "expired" })
@@ -103,23 +107,26 @@ public static class MusicOfficialStandardTests
             var issue = problem;
             yield return new("WY standard refuses " + issue, async () =>
             {
-                using var http = MusicPlatformHttp.CreateWithHandler(new StandardHandler { Problem = issue });
+                using var http = MusicPlatformHttp.CreateWithHandler(new StandardHandler
+                { Problem = issue, ClientCookie = "NMTID=SYNTHETIC_REJECTED; Domain=.music.163.com" });
+                await using var clients = new MusicClientContextFixture(http);
+                var before = await clients.Owner.AcquireWyAsync();
                 bool rejected = false;
                 try
                 {
-                    await new OfficialMusicAudio(http).ResolveAsync(
+                    await new OfficialMusicAudio(http, clients.Owner).ResolveAsync(
                         new("wy", "fixture", 0, "0", "__remember_me=true"), new() { ["musicId"] = "1" },
-                        ["128k"], new(new(false, "none", null), 0, 0, []), default);
+                        ["128k"], new(new(false, "none", null), 0, 0, []), default, () => { });
                 }
                 catch (MusicPlatformException) { rejected = true; }
-                Check(rejected);
+                Check(rejected && ReferenceEquals(before, await clients.Owner.AcquireWyAsync()));
             });
         }
         yield return new("WY guest lease cannot authenticate catalog or survive account fence", async () =>
         {
             await using var store = new MemoryStore();
-            await using var protocol = new MusicAccountProtocol();
-            await using var owner = new MusicAccountOwner(store, protocol);
+            await using var clients = new MusicClientContextFixture();
+            await using var owner = clients.CreateAccountOwner(store);
             var guest = await owner.AcquireOfficialAsync("wy", true, default);
             Check(guest is not null && guest.Generation > 0 && owner.IsOfficialCurrent(guest));
             Check(!owner.IsCurrent(guest!) && await owner.AcquireAsync("wy") is null);
@@ -159,6 +166,7 @@ public static class MusicOfficialStandardTests
     {
         internal int Calls, Bitrate = 128000, DurationMs = 100000, MediaSize = 1600000;
         internal string Problem = "";
+        internal string? ClientCookie;
         internal bool Hold;
         internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -173,7 +181,7 @@ public static class MusicOfficialStandardTests
             Check(payload["br"]!.GetValue<int>() == 128000 && payload["ids"]!.GetValue<string>() == "[1]");
             Entered.TrySetResult();
             if (Hold) await Release.Task;
-            return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new {
+            var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new {
                 code = 200, data = new[] { new {
                     id = Problem == "identity" ? 2 : 1, code = 200,
                     url = Problem == "no-url" ? null : "https://m701.music.126.net/fixture.mp3",
@@ -183,6 +191,8 @@ public static class MusicOfficialStandardTests
                     freeTrialInfo = Problem == "trial" ? new { start = 0, end = 30 } : null
                 } }
             }), Encoding.UTF8, "application/json") };
+            if (ClientCookie is not null) response.Headers.TryAddWithoutValidation("Set-Cookie", ClientCookie);
+            return response;
         }
     }
     private sealed class NoNode : IRuntimeClient

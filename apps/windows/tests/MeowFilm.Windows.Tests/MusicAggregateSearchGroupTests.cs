@@ -1,6 +1,4 @@
 using System.Collections.Concurrent;
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
@@ -13,7 +11,7 @@ public static class MusicAggregateSearchGroupTests
 {
     public static IEnumerable<TestCase> Cases()
     {
-        yield return Case("agreed provider vector keeps 3 items from 2 groups and 4 raw variants", Vector);
+        yield return Case("current provider vector keeps 3 items from 2 groups and 4 raw variants", Vector);
         yield return Case("expanded native pages preserve group cursor totals and shared ranks", Pages);
         yield return Case("cross-page copyright dedup never rewrites native resource ids", Copyright);
         yield return Case("other platforms and playlist search cannot opt into group units", OtherKinds);
@@ -51,7 +49,7 @@ public static class MusicAggregateSearchGroupTests
     }
     private static JsonObject CompactSong(int group, int variant)
     {
-        string id = Convert.ToString(group * 32 + variant, 36);
+        string id = Convert.ToString(group * 32 + variant + 1, 16);
         return new JsonObject
         {
             ["rank"] = group + 1,
@@ -111,18 +109,8 @@ public static class MusicAggregateSearchGroupTests
         catch (MusicLibraryException) { return; }
         throw new InvalidOperationException("invalid group page accepted");
     }
-    // Current provider vector is produced independently of the search consumer and
-    // frozen by a canonical semantic digest, so object property order is irrelevant.
-    private static JsonObject FrozenProviderVector() => Group(1, 2, 3, 2, 4,
+    private static JsonObject ProviderVector() => Group(1, 2, 3, 2, 4,
         ProviderSong("S1", 1, "C1"), ProviderSong("S2", 1, "C2"), ProviderSong("S3", 2, "C3"));
-    private static string Canonical(JsonNode? value) => value switch
-    {
-        null => "null",
-        JsonArray array => "[" + string.Join(',', array.Select(Canonical)) + "]",
-        JsonObject obj => "{" + string.Join(',', obj.OrderBy(p => p.Key, StringComparer.Ordinal)
-            .Select(p => JsonSerializer.Serialize(p.Key) + ":" + Canonical(p.Value))) + "}",
-        _ => value.ToJsonString()
-    };
     private static void CurrentSongSurface(JsonElement song)
     {
         foreach (string field in new[] { "id", "_rank", "_ranks", "_rankScore", "matchedPlatforms",
@@ -131,10 +119,12 @@ public static class MusicAggregateSearchGroupTests
     }
     private static async Task Vector()
     {
-        var source = FrozenProviderVector();
-        Check(Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Canonical(source)))) ==
-            "26954763D5BAE25E51F2B2370824CB7942B26DD6F2E3F520366ADB1BEC6D3D06",
-            "FROZEN_PROVIDER_VECTOR_CHANGED");
+        var source = ProviderVector();
+        var records = source["items"]!.AsArray().Select(item => item!["song"]!.AsObject()).ToArray();
+        Check(records.Select(song => song["source_data"]!["musicId"]!.GetValue<string>()).SequenceEqual(["S1", "S2", "S3"]) &&
+            records.Select(song => song["source_data"]!["copyrightId"]!.GetValue<string>()).SequenceEqual(["C1", "C2", "C3"]),
+            "Provider recording and copyright identities must remain exact");
+        foreach (var record in records) CurrentSongSurface(E(record));
         var first = Read(source);
         Check(first.Items.Length == 3 && first.Total == 3 && first.GroupCount == 2 && first.RawItemCount == 4 &&
             first.TotalUnit == "groups" && first.More && first.Next == 2);
@@ -149,7 +139,8 @@ public static class MusicAggregateSearchGroupTests
             S(state, "totalUnit") == "groups" && snapshot.GetProperty("more").GetBoolean());
         var song = snapshot.GetProperty("items").EnumerateArray()
             .Single(s => S(s.GetProperty("source_data"), "musicId") == "S1");
-        Check(S(song, "songId") == "song:4647b420a1172926");
+        Check(S(song, "songId") == records[0]["songId"]!.GetValue<string>(),
+            "Search grouping must preserve the supplied song identity");
         CurrentSongSurface(song);
         var native = song.GetProperty("source_data");
         Check(new[] { "id", "songId", "musicId", "songmid" }.All(field => S(native, field) == "S1") &&

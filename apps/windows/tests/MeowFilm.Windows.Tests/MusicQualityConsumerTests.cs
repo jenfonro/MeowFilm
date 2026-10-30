@@ -120,7 +120,7 @@ public static class MusicQualityConsumerTests
             length = bytes.Length, sha256 = Convert.ToHexStringLower(SHA256.HashData(bytes)) })).GetProperty("token").GetString()!;
         await Call("music.transfer.chunk", new { token, offset = 0, data = Convert.ToBase64String(bytes) });
         string id = (await Call("music.sources.install", new { token, name = "quality fixture", version = "1",
-            permissions = new { networkOrigins = Array.Empty<string>(), storage = Array.Empty<string>() } }))
+            permissions = new { storage = Array.Empty<string>() } }))
             .GetProperty("item").GetProperty("installationId").GetString()!;
         await Call("music.sources.enable", new { installationId = id });
         foreach (string quality in new[] { "master", "192k" })

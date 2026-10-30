@@ -8,6 +8,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using MeowFilm.Core.Runtime;
+using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Platform.Storage;
 
@@ -121,7 +122,7 @@ public static class MusicKgAccountUiTests
             window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded);
             OpenLogin(view);
             var begin = f.Module.BeginAccountQrAsync(); await f.Transport.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(4));
-            Check(f.Store.Writes == 1);
+            Check(f.Store.Writes == 1 && f.Store.AccountWrites == 0);
             window.Hide(); await begin.WaitAsync(TimeSpan.FromSeconds(4));
             Check(f.Module.AccountBusy);
             var prepare = f.Module.PrepareShutdownAsync();
@@ -142,7 +143,7 @@ public static class MusicKgAccountUiTests
         Check(f.Transport.Calls == 2);
         var cancel = f.Module.CancelAccountAsync(); f.Transport.Release.TrySetResult();
         await Task.WhenAll(poll, cancel);
-        Check(!f.Module.HasAccountQr && f.Store.Writes == 0);
+        Check(!f.Module.HasAccountQr && f.Store.AccountWrites == 0);
     }
     private static async Task Switch()
     {
@@ -153,7 +154,7 @@ public static class MusicKgAccountUiTests
         Check(!f.Module.HasAccountQr);
         f.Transport.Release.TrySetResult(); await poll;
         await f.Module.ReadAccountsAsync();
-        Check(f.Module.SelectedAccount!.Platform == "wy" && f.Module.Accounts[2].State == "none" && f.Store.Writes == 0);
+        Check(f.Module.SelectedAccount!.Platform == "wy" && f.Module.Accounts[2].State == "none" && f.Store.AccountWrites == 0);
     }
     private static async Task Expired()
     {
@@ -163,7 +164,7 @@ public static class MusicKgAccountUiTests
     }
     private static async Task Unknown()
     {
-        await using var f = await Fixture.Create(); f.Store.LoseReceiptAt = 1;
+        await using var f = await Fixture.Create(); f.Store.LoseReceiptAt = f.Store.Writes + 1;
         await f.Module.BeginAccountQrAsync(); await f.Module.CheckAccountQrAsync();
         Check(!f.Module.HasAccountQr && f.Module.AccountStatus.Contains("未确认") &&
             f.Module.SelectedAccount!.State != "verified" && !f.Module.CanBeginAccountQr);
@@ -278,7 +279,7 @@ public static class MusicKgAccountUiTests
         internal readonly MusicCapability Module;
         private Fixture()
         {
-            Store = new(new DpapiDocumentStore(Root, ["music.library.v1", "music.accounts.v1", "music.files.v1"]));
+            Store = new(new DpapiDocumentStore(Root, AppIdentity.NativeNamespaces));
             Dialogs = new() { Path = System.IO.Path.Combine(Root, "explicit-qr.png") };
             Module = new(new MusicNativeApplication(Store, Runtime, Transport), Store, new Output(), Dialogs);
         }

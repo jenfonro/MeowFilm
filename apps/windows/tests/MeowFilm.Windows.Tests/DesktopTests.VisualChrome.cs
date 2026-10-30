@@ -4,6 +4,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using MeowFilm.Desktop;
 
@@ -13,6 +14,59 @@ public static partial class DesktopTests
 {
     private static IEnumerable<TestCase> VisualChromeCases()
     {
+        yield return Case("shell text follows system typography and search and navigation retain accessible focus", async () =>
+        {
+            await using var f = new Fixture([new ProbeModule("typography")]); await f.LoadAsync();
+            Equal(SystemFonts.MessageFontFamily, f.Shell.FontFamily, "Windows system body font");
+            Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(f.Shell), "display text metrics");
+            Equal(TextRenderingMode.Grayscale, TextOptions.GetTextRenderingMode(f.Shell), "grayscale text rendering");
+            True(f.Shell.UseLayoutRounding && f.Shell.SnapsToDevicePixels, "native display pixels own text layout");
+            var root = DetachChrome(f.Shell);
+            using var source = new HwndSource(new HwndSourceParameters("shell-headless-hit-test-fixture")
+            {
+                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+                PositionX = -32000, PositionY = -32000, Width = 1110, Height = 800
+            });
+            source.RootVisual = root;
+            root.Measure(new(1110, 800)); root.Arrange(new Rect(0, 0, 1110, 800)); root.UpdateLayout(); await DrainAsync();
+            var navigation = f.Element<ListBox>("NavigationList");
+            True(!navigation.Focusable && !f.Element<ScrollViewer>("SidebarScroll").Focusable,
+                "scroll and list containers do not take focus away from navigation rows");
+            var item = (ListBoxItem)navigation.ItemContainerGenerator.ContainerFromIndex(0);
+            True(item.Focusable && item.FocusVisualStyle is not null, "navigation rows keep a visible keyboard focus");
+            Equal(KeyboardNavigationMode.Once, KeyboardNavigation.GetTabNavigation(navigation), "one navigation tab scope");
+            var search = f.Element<TextBox>("SearchBox");
+            var action = f.Element<Button>("SearchButton");
+            Equal(f.Shell.FontFamily, search.FontFamily, "search follows the body font");
+            True(search.Focusable && action.Focusable, "both search entry and submit remain keyboard accessible");
+            var origin = action.TranslatePoint(new Point(), search);
+            True(origin.X >= 0 && origin.Y >= 0 &&
+                origin.X + action.ActualWidth <= search.ActualWidth &&
+                origin.Y + action.ActualHeight <= search.ActualHeight,
+                "the real search action is inside the rounded search field");
+            bool Hits(FrameworkElement target, Point point) =>
+                target.IsEnabled && root.InputHitTest(target.TranslatePoint(point, root)) is DependencyObject hit &&
+                (ReferenceEquals(target, hit) || target.IsAncestorOf(hit));
+            True(Hits(action, new Point(action.ActualWidth / 2, action.ActualHeight / 2)),
+                "the embedded search action receives pointer hits");
+            True(Hits(search, new Point((search.Padding.Left + search.ActualWidth - search.Padding.Right) / 2, search.ActualHeight / 2)),
+                "the text area keeps independent pointer hits");
+            True(search.Background is SolidColorBrush { Color.A: 255 }, "search has an opaque flat background");
+            DesktopTheme.SetIsHighContrast(root, true); root.UpdateLayout(); await DrainAsync();
+            Equal(SystemColors.WindowColor, ((SolidColorBrush)search.Background).Color, "system search background");
+            Equal(SystemColors.WindowTextColor, ((SolidColorBrush)search.Foreground).Color, "system search text");
+            Equal(SystemColors.WindowTextColor, ((SolidColorBrush)action.Foreground).Color, "system search action");
+            Equal(SystemColors.WindowTextColor, ((SolidColorBrush)f.Back.BorderBrush).Color, "system back button edge");
+            True(f.Element<Border>("SidebarBackground").BorderThickness.Right > 0,
+                "high contrast restores the structural sidebar edge");
+            var alternate = new FontFamily("Arial");
+            f.Shell.Resources[SystemFonts.MessageFontFamilyKey] = alternate; await DrainAsync();
+            Equal(alternate, f.Shell.FontFamily, "shell follows dynamic system font resources");
+            Equal(alternate, search.FontFamily, "search follows dynamic system font resources");
+            f.Shell.Resources.Remove(SystemFonts.MessageFontFamilyKey); await DrainAsync();
+            Equal(SystemFonts.MessageFontFamily, search.FontFamily, "system font restored without changing Windows settings");
+            source.RootVisual = null;
+        });
         yield return Case("sidebar overlay scroll hides at rest and scrolls over collection items", async () =>
         {
             var module = new ProbeModule("scroll");
@@ -58,6 +112,8 @@ public static partial class DesktopTests
             Rect Bounds(FrameworkElement element) => new(element.TranslatePoint(new Point(), root), element.RenderSize);
             Layout();
             var ordinaryPlayer = f.Element<ContentControl>("PlayerHost").Content;
+            True(f.Element<Border>("SidebarBackground").Background is null && f.Element<Border>("PlayerFrame").Background is null,
+                "window background is the only ordinary page backdrop");
             var ordinaryPlayerBounds = Bounds(f.Element<Border>("PlayerFrame"));
             var ordinaryContentBounds = Bounds(f.Element<Grid>("ContentRegion"));
             module.Request(DesktopGlobalSurface.PlayerDetail);
@@ -126,9 +182,13 @@ public static partial class DesktopTests
             module.Request(DesktopGlobalSurface.PlayerDetail);
             await UntilAsync(() => f.Element<Grid>("PlayerDetailSurface").Visibility == Visibility.Visible,
                 "same retained detail opens from the restored app");
-            Click(f.Element<Button>("PlayerDetailSettingsButton")); await DrainAsync();
+            Click(f.Element<Button>("PlayerDetailBackButton"));
             await UntilAsync(() => playerSurface.Visibility == Visibility.Collapsed &&
-                Host(module.SettingsView).Visibility == Visibility.Visible, "player settings leaves the player page");
+                Host(module.View).Visibility == Visibility.Visible, "collapse restores the same app surface");
+            Same(ordinaryPlayer, f.Element<ContentControl>("PlayerHost").Content, "same ordinary footer restored after collapse");
+            Click(f.Element<Button>("SettingsButton")); await DrainAsync();
+            await UntilAsync(() => playerSurface.Visibility == Visibility.Collapsed &&
+                Host(module.SettingsView).Visibility == Visibility.Visible, "ordinary settings opens after collapsing the player page");
             Equal(1, module.InitializeCount, "presentation never creates another module");
         });
     }
@@ -137,12 +197,19 @@ public static partial class DesktopTests
         private readonly Border detail = new() { Background = Brushes.DarkSlateGray };
         private readonly Border queue = new() { Background = Brushes.White };
         public int Deactivations { get; private set; }
+        public Task? PlayerReady { get; set; }
+        public List<CancellationToken> PlayerActivations { get; } = [];
         public event EventHandler<DesktopGlobalSurfaceRequestEventArgs>? GlobalSurfaceRequested;
         public FrameworkElement GetGlobalSurface(DesktopGlobalSurface surface) =>
             surface == DesktopGlobalSurface.PlayerDetail ? detail : queue;
         public Task ActivateGlobalSurfaceAsync(DesktopGlobalSurface surface, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (surface == DesktopGlobalSurface.PlayerDetail)
+            {
+                PlayerActivations.Add(cancellationToken);
+                return PlayerReady ?? Task.CompletedTask;
+            }
             return Task.CompletedTask;
         }
         public void DeactivateGlobalSurface(DesktopGlobalSurface surface) => Deactivations++;

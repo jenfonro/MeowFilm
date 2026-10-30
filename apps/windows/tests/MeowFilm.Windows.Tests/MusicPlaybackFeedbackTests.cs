@@ -343,10 +343,11 @@ public static class MusicPlaybackFeedbackTests
                     "MUSIC_U=synthetic-session; __csrf=synthetic-csrf");
                 var wire = new NativeWire();
                 using var http = MusicPlatformHttp.CreateWithHandler(wire);
+                await using var clients = new MusicClientContextFixture(http);
                 var clock = new Clock();
                 var settings = new MusicFeedbackSettingsOwner(new MemoryStore());
                 await using var controller = new MusicFeedbackController(settings,
-                    new NativeMusicFeedbackProtocol(accounts, http, clock), accounts, clock);
+                    new NativeMusicFeedbackProtocol(accounts, http, clients.Owner, clock), accounts, clock);
                 await settings.ReadAsync(); await settings.SaveAsync(0, ["wy"]);
                 controller.Select(Selection());
                 controller.Started("entry-1", 0, 0);

@@ -111,7 +111,9 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         dialog.Resources.MergedDictionaries.Add(new ResourceDictionary
         { Source = new Uri("/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml", UriKind.Relative) });
         dialog.SetResourceReference(BackgroundProperty, "MeowFilm.Brush.Surface");
-        dialog.SetResourceReference(FontFamilyProperty, "MeowFilm.Font.Body");
+        dialog.SetResourceReference(FontFamilyProperty, SystemFonts.MessageFontFamilyKey);
+        TextOptions.SetTextFormattingMode(dialog, TextFormattingMode.Display);
+        TextOptions.SetTextRenderingMode(dialog, TextRenderingMode.Grayscale);
         confirm.IsEnabled = input.Text.Trim().Length > 0;
         input.TextChanged += (_, _) => confirm.IsEnabled = input.Text.Trim().Length > 0;
         confirm.Click += (_, _) => dialog.DialogResult = true;
@@ -124,7 +126,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         if (rename) await module.RenamePlaylistAsync(input.Text);
         else await module.CreatePlaylistAsync(input.Text);
     }
-    internal void RefreshAppearance(Brush sampled)
+    internal void RefreshAppearance(Brush sampled, bool animate = true)
     {
         playerSample = sampled;
         var palette = module.PlayerPalette(sampled);
@@ -132,7 +134,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         var prior = PlayerBackground as GradientBrush;
         // Each replacement samples the presentation colors once. WPF owns the
         // animation clocks; a retarget never queues per-frame business work.
-        if (IsVisible && SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast &&
+        if (animate && IsVisible && SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast &&
             prior is not null && prior.GradientStops.Count == next.GradientStops.Count)
         {
             next = next.Clone();

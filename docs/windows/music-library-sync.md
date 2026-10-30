@@ -4,10 +4,11 @@
 
 `MusicLibrarySyncService` 是网易云、QQ 音乐和酷狗曲库同步的唯一协调器。
 
-- 它借用同一个 `MusicLibraryOwner`、账号会话 owner 和固定平台 HTTP。
+- 它借用同一个 `MusicLibraryOwner`、账号会话 owner、[客户端 owner](music-platform-client-context.md)和固定平台 HTTP。
 - 它不拥有第二份曲库、不启动 Node、不保存账号凭据。
 - 同步状态位于 `music.library.v1` 的 `library-sync` area，并与曲库在同一 envelope CAS 中提交。
 - binding map 的唯一方向是 `nativeId -> songId`。
+- 按明确同步需求委托目录补读时，目录验证本次请求所用客户端快照和响应；成功后适配器显式取得已确认的当前快照再继续，不把合法委托更新误判为旧请求失效，也不通过重取代次绕过原请求校验。
 
 ## 平台与设置
 
