@@ -113,9 +113,10 @@ final class MeowUIPlatformTests: XCTestCase {
             let animator = try XCTUnwrap(delegate.interruptibleAnimator?(using: context) as? UIViewPropertyAnimator)
             XCTAssertTrue(delegate.interruptibleAnimator?(using: context) === animator)
             XCTAssertTrue(transition.isTransitioning)
-            animator.startAnimation()
+            animator.startAnimation(afterDelay: 1)
             animator.pauseAnimation()
-            animator.fractionComplete = 0.5
+            XCTAssertEqual(full.view.transform.tx, 0, accuracy: 0.5)
+            XCTAssertEqual(full.view.transform.ty, presenting ? 0 : root.view.bounds.height, accuracy: 0.5)
             context.transitionWasCancelled = cancelled
             animator.stopAnimation(false)
             animator.finishAnimation(at: cancelled ? .start : .end)

@@ -637,6 +637,10 @@ final class MusicPlayerContentModelTests: XCTestCase {
         XCTAssertFalse(cover.frame.intersects(slider.frame))
         XCTAssertFalse(close.frame.intersects(cover.frame))
         XCTAssertTrue(order.allSatisfy { $0.frame.minY > slider.frame.maxY && $0.frame.height >= 44 })
+        XCTAssertFalse(dockViews(surface).contains {
+            $0.accessibilityIdentifier == "music.player.lyricTranslation" ||
+                $0.accessibilityIdentifier == "music.player.lyricBackground"
+        })
         for width in [CGFloat(292), CGFloat(408)] {
             surface.frame.size.width = width
             surface.setNeedsLayout(); surface.layoutIfNeeded()
@@ -702,9 +706,59 @@ final class MusicPlayerContentModelTests: XCTestCase {
         let fullPlay = try XCTUnwrap(dockViews(full.view).compactMap { $0 as? UIButton }.first {
             $0.accessibilityIdentifier == "music.player.play"
         })
+        let fullButtons = dockViews(full.view).compactMap { $0 as? UIButton }
+        func fullButton(_ identifier: String) throws -> UIButton {
+            return try XCTUnwrap(fullButtons.first { $0.accessibilityIdentifier == identifier })
+        }
+        let transport = try ["mode", "previous", "play", "next", "queue"].map {
+            try fullButton("music.player.\($0)")
+        }
+        for pair in zip(transport, transport.dropFirst()) {
+            XCTAssertLessThan(pair.0.frame.midX, pair.1.frame.midX)
+            XCTAssertEqual(pair.0.frame.midY, pair.1.frame.midY, accuracy: 0.5)
+        }
+        let favorite = try fullButton("music.player.favorite")
+        let more = try fullButton("music.player.more")
+        XCTAssertLessThan(favorite.frame.midX, more.frame.midX)
+        XCTAssertEqual(favorite.frame.midY, more.frame.midY, accuracy: 0.5)
+        let lyricToggle = try fullButton("music.player.lyricToggle")
+        let translation = try fullButton("music.player.lyricTranslation")
+        let background = try fullButton("music.player.lyricBackground")
+        let fullControls = try XCTUnwrap(dockViews(full.view).compactMap { $0 as? MusicPlaybackControlsView }.first)
+        XCTAssertTrue(translation.isHidden)
+        XCTAssertTrue(background.isHidden)
+        lyricToggle.sendActions(for: .touchUpInside)
+        full.view.layoutIfNeeded()
+        XCTAssertFalse(translation.isHidden)
+        XCTAssertFalse(background.isHidden)
+        for button in [translation, background] {
+            XCTAssertTrue(button.superview === full.view)
+            XCTAssertTrue(full.view.hitTest(button.center, with: nil) === button)
+        }
         XCTAssertFalse(fullPlay === order[2])
         XCTAssertEqual(fullPlay.layer.sublayers?.first { $0.name == "play.progress.track" }?.opacity, 0)
-        let fullControls = try XCTUnwrap(dockViews(full.view).compactMap { $0 as? MusicPlaybackControlsView }.first)
+        do {
+            let responsiveControls = MusicPlaybackControlsView(content: content, layout: .full)
+            responsiveControls.setFullViewport(viewportHeight: 844, safeHeight: 763)
+            let regularControlsHeight = responsiveControls.fullHeight
+            responsiveControls.setFullViewport(viewportHeight: 650, safeHeight: 620)
+            let shortControlsHeight = responsiveControls.fullHeight
+            responsiveControls.setFullViewport(viewportHeight: 480, safeHeight: 460)
+            let veryShortControlsHeight = responsiveControls.fullHeight
+            XCTAssertLessThan(shortControlsHeight, regularControlsHeight)
+            XCTAssertLessThan(veryShortControlsHeight, shortControlsHeight)
+        }
+        do {
+            let responsivePlayer = MusicFullPlayerView(content: content)
+            responsivePlayer.frame = CGRect(x: 0, y: 0, width: 480, height: 640)
+            responsivePlayer.layoutIfNeeded()
+            let records = dockViews(responsivePlayer).compactMap { $0 as? MusicRecordDiscView }
+            XCTAssertFalse(records.isEmpty)
+            XCTAssertTrue(records.allSatisfy { $0.bounds.width > 0 })
+            responsivePlayer.frame = CGRect(x: 0, y: 0, width: 844, height: 390)
+            responsivePlayer.layoutIfNeeded()
+            XCTAssertTrue(records.allSatisfy { $0.bounds.width == 0 })
+        }
         let fullHeight = fullControls.fullHeight
         full.view.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
         let fullEnlarged = expectation(for: NSPredicate { _, _ in
