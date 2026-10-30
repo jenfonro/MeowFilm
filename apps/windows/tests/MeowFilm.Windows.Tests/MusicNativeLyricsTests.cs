@@ -45,6 +45,102 @@ public static class MusicNativeLyricsTests
             });
             var p = await f.Read(Wy); Equal("[1000,300](1000,300,0)甲", p!.Text); Equal("[00:01.000]译", p.Translation);
         });
+        yield return Case("wy anonymous identity and confirmed client updates are reused without granting login", async () =>
+        {
+            var sent = new List<JsonObject>();
+            using var f = new Fixture((req, _) =>
+            {
+                sent.Add(Eapi(req));
+                var response = WyReply("[00:01]fixture");
+                response.Headers.TryAddWithoutValidation("Set-Cookie", new[] {
+                    "NMTID=SYNTHETIC_LYRIC_NMTID; Domain=music.163.com",
+                    "MUSIC_U=SYNTHETIC_RESPONSE_AUTH; Domain=music.163.com" });
+                return Task.FromResult(response);
+            });
+            var before = await f.Clients.Owner.AcquireWyAsync();
+            await f.Read(Wy);
+            Equal(before.DeviceId, S(sent[0]["header"]!["deviceId"]));
+            Equal(before.Nuid, S(sent[0]["header"]!["_ntes_nuid"]));
+            var after = await f.Clients.Owner.AcquireWyAsync();
+            Equal("SYNTHETIC_LYRIC_NMTID", after.Nmtid); Equal(before.Generation + 1, after.Generation);
+            True(!f.Clients.Owner.IsCurrent(before) && f.Clients.Owner.IsCurrent(after));
+            await f.Read(Wy);
+            Equal(after.Nmtid, S(sent[1]["header"]!["NMTID"])); True(sent[1]["header"]!["MUSIC_U"] is null);
+            True(ReferenceEquals(after, await f.Clients.Owner.AcquireWyAsync()));
+            True(f.Sessions.Current.GetValueOrDefault("wy") is null); Equal(2, f.Calls);
+        });
+        yield return Case("wy foreign account association never mixes or rewrites the installation", async () =>
+        {
+            using var f = new Fixture((req, _) =>
+            {
+                var header = Eapi(req)["header"]!;
+                Equal("SYNTHETIC_FOREIGN_ID", S(header["deviceId"]));
+                Equal("SYNTHETIC_FOREIGN_NMTID", S(header["NMTID"]));
+                True(header["_ntes_nuid"] is null && header["WNMCID"] is null);
+                var response = WyReply("[00:01]fixture");
+                response.Headers.TryAddWithoutValidation("Set-Cookie",
+                    "NMTID=SYNTHETIC_FOREIGN_UPDATED; Domain=music.163.com");
+                return Task.FromResult(response);
+            });
+            var before = await f.Clients.Owner.AcquireWyAsync();
+            var account = Session("wy");
+            f.Sessions.Current["wy"] = new("wy", account.Scope, account.Generation, account.UserId,
+                account.Cookie + "; deviceId=SYNTHETIC_FOREIGN_ID; NMTID=SYNTHETIC_FOREIGN_NMTID");
+            await f.Read(Wy);
+            True(ReferenceEquals(before, await f.Clients.Owner.AcquireWyAsync())); Equal(1, f.Calls);
+        });
+        foreach (var (raw, code) in new[] {
+            ("""{"code":301,"lrc":{"lyric":"[00:01]fixture"}}""", "AUTH_REQUIRED"),
+            ("""{"code":200,"id":"222","lrc":{"lyric":"[00:01]fixture"}}""", "IDENTITY_MISMATCH"),
+            ("""{"code":200,"lrc":{"lyric":true}}""", "INVALID_RESPONSE") })
+            yield return Case("wy invalid business or recording response cannot persist client fields " + code, async () =>
+            {
+                using var f = new Fixture((_, _) =>
+                {
+                    var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(raw) };
+                    response.Headers.TryAddWithoutValidation("Set-Cookie",
+                        "NMTID=SYNTHETIC_UNTRUSTED; Domain=music.163.com");
+                    return Task.FromResult(response);
+                });
+                var before = await f.Clients.Owner.AcquireWyAsync();
+                await Error(code, () => f.Read(Wy));
+                True(ReferenceEquals(before, await f.Clients.Owner.AcquireWyAsync())); Equal(1, f.Calls);
+            });
+        foreach (var (cookie, code) in new[] {
+            ("deviceId=SYNTHETIC_WRONG_ID; Domain=music.163.com", "IDENTITY_MISMATCH"),
+            ("NMTID=SYNTHETIC_WRONG_ORIGIN; Domain=example.invalid", "INVALID_RESPONSE"),
+            ("MUSIC_U=; Max-Age=0; Domain=music.163.com", "AUTH_EXPIRED") })
+            yield return Case("wy rejected response context cannot publish lyrics " + code, async () =>
+            {
+                using var f = new Fixture((_, _) =>
+                {
+                    var response = WyReply("[00:01]fixture");
+                    response.Headers.TryAddWithoutValidation("Set-Cookie", cookie);
+                    return Task.FromResult(response);
+                });
+                var before = await f.Clients.Owner.AcquireWyAsync();
+                await Error(code, () => f.Read(Wy));
+                True(ReferenceEquals(before, await f.Clients.Owner.AcquireWyAsync())); Equal(1, f.Calls);
+            });
+        yield return Case("wy client replacement fences late lyrics and response updates", async () =>
+        {
+            var release = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var f = new Fixture((_, _) => release.Task);
+            var pending = f.Read(Wy);
+            try
+            {
+                await Until(() => f.Calls == 1);
+                await f.Clients.Owner.ReloadAsync();
+            }
+            finally
+            {
+                var response = WyReply("[00:01]late");
+                response.Headers.TryAddWithoutValidation("Set-Cookie", "NMTID=SYNTHETIC_LATE; Domain=music.163.com");
+                release.TrySetResult(response);
+            }
+            await Error("STORAGE_CONFLICT", () => pending);
+            True((await f.Clients.Owner.AcquireWyAsync()).Nmtid is null); Equal(1, f.Calls);
+        });
         yield return Case("wy LRC fallback does not take unrelated YTLRC", async () =>
         {
             using var f = new Fixture((_, _) => Task.FromResult(Json(new { code = 200, yrc = new { lyric = "untimed" },
@@ -253,8 +349,16 @@ public static class MusicNativeLyricsTests
         });
         yield return Case("anonymous to authenticated change fenced", async () =>
         {
-            using var f = new Fixture((_, _) => Task.FromResult(WyReply("[00:01]x"))); f.Handler.OnSent = () => f.Sessions.Current["wy"] = Session("wy");
+            using var f = new Fixture((_, _) =>
+            {
+                var response = WyReply("[00:01]x");
+                response.Headers.TryAddWithoutValidation("Set-Cookie", "NMTID=SYNTHETIC_RETIRED; Domain=music.163.com");
+                return Task.FromResult(response);
+            });
+            var before = await f.Clients.Owner.AcquireWyAsync();
+            f.Handler.OnSent = () => f.Sessions.Current["wy"] = Session("wy");
             await Error("STALE_SESSION", () => f.Read(Wy));
+            True(ReferenceEquals(before, await f.Clients.Owner.AcquireWyAsync())); Equal(1, f.Calls);
         });
         yield return Case("credentials unavailable never downgrade to guest", async () =>
         {
@@ -384,11 +488,12 @@ public static class MusicNativeLyricsTests
     {
         internal readonly Sessions Sessions = new(); internal readonly Handler Handler;
         internal readonly MusicPlatformHttp Http; internal readonly NativeMusicLyrics Service;
+        internal readonly MusicClientContextFixture Clients;
         internal int Calls => Handler.Calls;
         internal Fixture(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> handler)
-        { Handler = new(handler); Http = MusicPlatformHttp.CreateWithHandler(Handler); Service = new(Sessions, Http); }
+        { Handler = new(handler); Http = MusicPlatformHttp.CreateWithHandler(Handler); Clients = new(Http); Service = new(Sessions, Http, Clients.Owner); }
         internal Task<NativeLyricPayload?> Read(NativeLyricRequest request) => Service.ReadAsync(request, default);
-        public void Dispose() { Service.Invalidate(); Http.Dispose(); }
+        public void Dispose() { Service.Invalidate(); Clients.Dispose(); Http.Dispose(); }
     }
     private static MusicPlatformSession Session(string platform, long generation = 1) => new(platform, "fixture-scope", generation, "10001",
         platform switch { "wy" => "MUSIC_U=fixture-value; __csrf=fixture-csrf", "tx" => "musicid=10001; musickey=fixture-value; login_type=2",

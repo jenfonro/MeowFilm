@@ -6,6 +6,7 @@ using System.Net.Http;
 using System.Numerics;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace MeowFilm.Capabilities.Platforms;
@@ -15,6 +16,11 @@ internal static class PlatformProtocols
     private const string WyPublicKey = """
         -----BEGIN PUBLIC KEY-----
         MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDgtQn2JZ34ZC28NWYpAUd98iZ37BUrX/aKzmFbt7clFSs6sXqHauqKWqdtLkF2KexO40H1YTX8z2lSgBBOAxLsvaklV8k4cBFK9snQXE9/DDaFt6Rr7iVZMldczhC0JNgTz+SHXT6CBHuX3e9SdB1Ua44oncaTWz7OBGLbCiK45wIDAQAB
+        -----END PUBLIC KEY-----
+        """;
+    internal const string KgPublicKey = """
+        -----BEGIN PUBLIC KEY-----
+        MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDIAG7QOELSYoIJvTFJhMpe1s/gbjDJX51HBNnEl5HXqTW6lQ7LC8jr9fWZTwusknp+sVGzwd40MwP6U5yDE27M/X1+UR4tvOGOqp94TJtQ1EPnWGWXngpeIW5GxoQGao1rmYWAu6oi1z9XkChrsUdC6DJE5E221wf/4WLFxwAtRQIDAQAB
         -----END PUBLIC KEY-----
         """;
     internal const string KgSalt = "OIlwieks28dk2k092lksi2UIkp";
@@ -29,24 +35,26 @@ internal static class PlatformProtocols
         return cbc ? aes.EncryptCbc(Encoding.UTF8.GetBytes(text), "0102030405060708"u8, PaddingMode.PKCS7)
             : aes.EncryptEcb(Encoding.UTF8.GetBytes(text), PaddingMode.PKCS7);
     }
-    internal static HttpRequestMessage Wy(string path, JsonObject parameters, MusicPlatformSession? session, bool weapi = false)
-        => WyWithCookie(path, parameters, session?.Cookie, weapi);
+    internal static HttpRequestMessage Wy(string path, JsonObject parameters, MusicPlatformSession? session,
+        MusicWyClientContext client, bool weapi = false)
+        => WyWithCookie(path, parameters, session?.Cookie, client, weapi);
     // api-enhanced captcha_sent/login_cellphone at the pinned MIT source.
     // Never inherit a stored session, environment cookie, password or domain override.
-    internal static HttpRequestMessage WySms(string phone, string country, string? captcha) =>
+    internal static HttpRequestMessage WySms(string phone, string country, string? captcha, MusicWyClientContext client) =>
         captcha is null
         ? WyWithCookie("/api/sms/captcha/sent", new() {
             ["ctcode"] = country, ["secrete"] = "music_middleuser_pclogin", ["cellphone"] = phone
-        }, null, weapi: true)
+        }, null, client, weapi: true)
         : WyWithCookie("/api/w/login/cellphone", new() {
             ["type"] = "1", ["https"] = "true", ["phone"] = phone, ["countrycode"] = country,
             ["captcha"] = captcha, ["remember"] = "true", ["secureCaptcha"] = ""
-        }, null, weapi: true);
+        }, null, client, weapi: true);
     // Raw-cookie overloads are native account-validation seams, NOT public catalog/UI inputs.
-    internal static HttpRequestMessage WyWithCookie(string path, JsonObject parameters, string? cookieHeader, bool weapi = false)
+    internal static HttpRequestMessage WyWithCookie(string path, JsonObject parameters, string? cookieHeader,
+        MusicWyClientContext client, bool weapi = false)
     {
         PJ.Require(path.StartsWith("/api/", StringComparison.Ordinal));
-        var cookies = PJ.CookieHeader(cookieHeader);
+        var cookies = MusicWyRequestContext.Cookies(client, cookieHeader);
         var data = (JsonObject)parameters.DeepClone();
         var csrf = PJ.Cookie(cookies, "__csrf");
         data["e_r"] = false;
@@ -66,7 +74,7 @@ internal static class PlatformProtocols
             var secured = BigInteger.ModPow(message, new BigInteger(pub.Exponent!, true, true), new BigInteger(pub.Modulus!, true, true));
             var hex = Convert.ToHexStringLower(secured.ToByteArray(true, true)).PadLeft(256, '0');
             body = Form(new Dictionary<string, string> { ["params"] = encrypted, ["encSecKey"] = hex });
-            cookie = cookieHeader ?? "__remember_me=true";
+            cookie = MusicWyRequestContext.Header(cookies);
             agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36";
             origin = "https://music.163.com";
         }
@@ -79,14 +87,14 @@ internal static class PlatformProtocols
                 ("buildver", now.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture)),
                 ("requestId", now.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + "_" +
                     RandomNumberGenerator.GetInt32(1000).ToString("000", CultureInfo.InvariantCulture)));
-            foreach (var name in new[] { "MUSIC_U", "MUSIC_A", "NMTID", "deviceId" })
+            foreach (var name in new[] { "MUSIC_U", "MUSIC_A", "NMTID", "deviceId", "_ntes_nuid", "_ntes_nnid", "WNMCID" })
                 if (cookies.TryGetValue(name, out var value)) header[name] = value;
             data["header"] = header.DeepClone();
             var payload = PJ.Encode(data);
             var digest = Md5($"nobody{path}use{payload}md5forencrypt");
             body = Form(new Dictionary<string, string> {
                 ["params"] = Convert.ToHexString(Aes($"{path}-36cd479b6b5-{payload}-36cd479b6b5-{digest}", "e82ckenh8dichen8", false)) });
-            cookie = string.Join("; ", header.Select(p => p.Key + "=" + PJ.Scalar(p.Value)));
+            cookie = string.Join("; ", header.Select(p => p.Key + "=" + p.Value!.GetValue<string>()));
             agent = "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/3.1.29.205117";
             origin = "https://interfacepc.music.163.com";
         }
@@ -98,11 +106,11 @@ internal static class PlatformProtocols
         request.Headers.TryAddWithoutValidation("User-Agent", agent);
         return request;
     }
-    internal static HttpRequestMessage WyVipEapi(string path, JsonObject parameters, string cookieHeader)
+    internal static HttpRequestMessage WyVipEapi(string path, JsonObject parameters, string cookieHeader, MusicWyClientContext client)
     {
         PJ.Require(path is "/api/vipnewcenter/app/minidesk/music/sign/pc" or
             "/api/vipnewcenter/app/resource/common/list");
-        var cookies = PJ.CookieHeader(cookieHeader);
+        var cookies = MusicWyRequestContext.Cookies(client, cookieHeader);
         PJ.Require(PJ.Cookie(cookies, "MUSIC_U").Length > 0, "INVALID_CREDENTIALS");
         var data = (JsonObject)parameters.DeepClone();
         data["e_r"] = true;
@@ -113,7 +121,7 @@ internal static class PlatformProtocols
             ("buildver", now.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture)),
             ("requestId", now.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + "_" +
                 RandomNumberGenerator.GetInt32(1000).ToString("000", CultureInfo.InvariantCulture)));
-        foreach (var name in new[] { "MUSIC_U", "MUSIC_A", "NMTID", "deviceId" })
+        foreach (var name in new[] { "MUSIC_U", "MUSIC_A", "NMTID", "deviceId", "_ntes_nuid", "_ntes_nnid", "WNMCID" })
             if (cookies.TryGetValue(name, out var value)) header[name] = value;
         data["header"] = header.DeepClone();
         var payload = PJ.Encode(data);
@@ -128,7 +136,7 @@ internal static class PlatformProtocols
         };
         request.Headers.TryAddWithoutValidation("Referer", "https://music.163.com/");
         request.Headers.TryAddWithoutValidation("Cookie",
-            string.Join("; ", header.Select(pair => pair.Key + "=" + PJ.Scalar(pair.Value))));
+            string.Join("; ", header.Select(pair => pair.Key + "=" + pair.Value!.GetValue<string>())));
         request.Headers.TryAddWithoutValidation("User-Agent",
             "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/3.1.42.205594");
         return request;
@@ -188,22 +196,25 @@ internal static class PlatformProtocols
         return (JsonObject)PJ.At(data, "req_0", "data")!;
     }
     internal static HttpRequestMessage Kg(string path, JsonObject parameters, MusicPlatformSession? session,
-        string guestMid, string? router = null, JsonObject? body = null)
+        MusicKgClientContext client, string? router = null, JsonObject? body = null)
     {
         if (session is not null) PJ.Require(PJ.Cookie(PJ.Cookies(session), "userid") == session.UserId, "INVALID_CREDENTIALS");
-        return KgWithCookie(path, parameters, session?.Cookie, guestMid, router, body);
+        return KgWithCookie(path, parameters, session?.Cookie, client, router, body);
     }
     internal static HttpRequestMessage KgWithCookie(string path, JsonObject parameters, string? cookieHeader,
-        string guestMid, string? router = null, JsonObject? body = null)
+        MusicKgClientContext client, string? router = null, JsonObject? body = null)
     {
         var cookies = PJ.CookieHeader(cookieHeader);
-        var mid = PJ.Cookie(cookies, "KUGOU_API_MID", guestMid);
-        var dfid = PJ.Cookie(cookies, "dfid", "-");
+        var (mid, dfid) = KgIdentity(cookies, client);
         if (cookieHeader is not null)
         {
             PJ.Require(PJ.Cookie(cookies, "userid").Length > 0 && PJ.Cookie(cookies, "token").Length > 0, "INVALID_CREDENTIALS");
-            PJ.Require(PJ.Cookie(cookies, "KUGOU_API_MID").Length > 0, "DEVICE_CONTEXT_REQUIRED");
+            PJ.Id(JsonValue.Create(PJ.Cookie(cookies, "userid")), "^[1-9][0-9]{0,19}$", "INVALID_CREDENTIALS");
         }
+        void CheckIdentity(JsonObject fields) => PJ.Require(
+            (!fields.TryGetPropertyValue("mid", out var suppliedMid) || PJ.Scalar(suppliedMid) == mid) &&
+            (!fields.TryGetPropertyValue("dfid", out var suppliedDfid) || PJ.Scalar(suppliedDfid) == dfid), "INVALID_REQUEST");
+        CheckIdentity(parameters); if (body is not null) CheckIdentity(body);
         var time = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var query = PJ.Obj(("dfid", dfid), ("mid", mid), ("uuid", "-"), ("appid", 1005), ("clientver", 20489), ("clienttime", time));
         foreach (var p in parameters) query[p.Key] = p.Value?.DeepClone();
@@ -222,6 +233,18 @@ internal static class PlatformProtocols
         if (router is not null) request.Headers.TryAddWithoutValidation("x-router", router);
         return request;
     }
+    internal static (string Mid, string Dfid) KgIdentity(Dictionary<string, string> cookies, MusicKgClientContext client)
+    {
+        string localMid = client.Mid;
+        bool associated = cookies.TryGetValue("KUGOU_API_MID", out var accountMid);
+        string mid = associated ? accountMid! : localMid;
+        PJ.Require(mid.Length is > 0 and <= 39 && mid.All(char.IsAsciiDigit), "DEVICE_CONTEXT_REQUIRED");
+        string accountDfid = PJ.Cookie(cookies, "dfid", "-");
+        PJ.Require(accountDfid == "-" || accountDfid.Length is >= 8 and <= 128 &&
+            accountDfid.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-'), "DEVICE_CONTEXT_REQUIRED");
+        string dfid = mid == localMid ? client.Dfid ?? (associated ? accountDfid : "-") : accountDfid;
+        return (mid, dfid);
+    }
     internal static JsonObject KgSuccess(JsonObject data, string path)
     {
         var codes = new[] { "error_code", "errcode", "err_code" }.Select(k => data[k]).Where(v => v is not null).Select(PJ.Scalar).ToArray();
@@ -231,6 +254,21 @@ internal static class PlatformProtocols
         PJ.Require((PJ.Scalar(data["status"]) == "1" || path == "/v1/audio/audio" && data["status"] is null && codes.Length > 0) &&
             codes.All(c => c == "0") && (data["error"] is null || PJ.Scalar(data["error"]) is "false" or "0" or "\"\""), "UPSTREAM_ERROR");
         return data;
+    }
+    internal static void KgAccountStatus(JsonObject data)
+    {
+        var codes = new[] { "error_code", "errcode", "err_code" }.Where(k => data[k] is not null)
+            .Select(k => PJ.Scalar(data[k])).ToArray();
+        if (codes.Contains("20018")) throw new MusicPlatformException("AUTH_REQUIRED");
+        static bool Truth(JsonNode? node) => node is not null &&
+            node.ToJsonString() is not ("null" or "false" or "0" or "\"\"");
+        if (codes.Contains("20028") || Truth(data["ssaCode"]) || Truth(data["ssa-code"]))
+            throw new MusicPlatformException("VERIFICATION_REQUIRED");
+        PJ.Require(data["status"] is JsonValue status && !status.TryGetValue<string>(out _), "INVALID_RESPONSE");
+        using var json = JsonDocument.Parse(data["status"]!.ToJsonString());
+        PJ.Require(json.RootElement.ValueKind == JsonValueKind.Number && json.RootElement.TryGetDecimal(out var number) &&
+            number is >= int.MinValue and <= int.MaxValue && decimal.Truncate(number) == number, "INVALID_RESPONSE");
+        PJ.Require(json.RootElement.GetDecimal() == 1 && !Truth(data["error"]) && codes.All(c => c == "0"), "UPSTREAM_ERROR");
     }
     // KuGouMusicApi 514f870d util/request.js + helper.js; anonymous auth steps only.
     // Do not add these origins to the ordinary content/lyrics transport.

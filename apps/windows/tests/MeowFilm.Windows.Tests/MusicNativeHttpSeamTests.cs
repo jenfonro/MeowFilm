@@ -105,8 +105,8 @@ public static class MusicNativeHttpSeamTests
             return Task.FromResult(Response());
         }));
         foreach (string path in new[] { "/api/w/nuser/account/get", "/api/v3/song/detail" })
-            await Feedback(http)("wy", MusicPlatformRequests.WyWithCookie(path, new(), null, weapi: true), default);
-        var report = MusicPlatformRequests.WyWithCookie("/api/feedback/weblog", new(), null);
+            await Feedback(http)("wy", MusicPlatformRequests.WyWithCookie(path, new(), null, MusicClientContextFixture.Wy, weapi: true), default);
+        var report = MusicPlatformRequests.WyWithCookie("/api/feedback/weblog", new(), null, MusicClientContextFixture.Wy);
         report.RequestUri = new Uri(FeedbackUrl);
         await Feedback(http)("wy", report, default);
         Check(calls == 3);
@@ -168,8 +168,8 @@ public static class MusicNativeHttpSeamTests
         int calls = 0;
         using var http = MusicPlatformHttp.CreateWithHandler(new Handler((_, _) => { calls++; return Task.FromResult(Response()); }));
         await Failure("ORIGIN_DENIED", () => http.SendAsync("wy", Request(false), default));
-        var lyrics = typeof(MusicPlatformHttp).GetMethod("SendLyricBytesAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .CreateDelegate<Func<string, HttpRequestMessage, CancellationToken, TimeSpan, Task<byte[]>>>(http);
+        var lyrics = typeof(MusicPlatformHttp).GetMethod("SendLyricAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .CreateDelegate<Func<string, HttpRequestMessage, CancellationToken, TimeSpan, Task<MusicPlatformHttpBytesResult>>>(http);
         await Failure("ORIGIN_DENIED", () => lyrics("wy", Request(false), default, TimeSpan.FromSeconds(1)));
         await Failure("ORIGIN_DENIED", () => lyrics("kg", Request(true), default, TimeSpan.FromSeconds(1)));
         Check(calls == 0);

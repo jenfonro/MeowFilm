@@ -50,8 +50,24 @@ public static partial class MusicUiTests
             await f.Module.StepAsync(true); f.Playback.Start();
             await f.Module.StepAsync(true);
             int before = f.Http.Batches;
-            f.Playback.Start();
-            await RecommendationUntil(() => f.Http.Batches > before && !f.Module.RecommendationLoading);
+            f.Http.Hold = true;
+            var appended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            void AppendPublished(JsonElement snapshot)
+            {
+                if (snapshot.GetProperty("batch").GetInt32() > before && !snapshot.GetProperty("loading").GetBoolean())
+                    appended.TrySetResult();
+            }
+            f.App.Changed += AppendPublished;
+            try
+            {
+                f.Playback.Start();
+                await f.Http.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                Equal(3, (await f.Queue()).GetProperty("total").GetInt32());
+                True(!appended.Task.IsCompleted, "HTTP admission is not a committed recommendation append");
+                f.Http.Release.TrySetResult();
+                await appended.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            finally { f.App.Changed -= AppendPublished; }
             Equal(6, (await f.Queue()).GetProperty("total").GetInt32());
             f.Playback.End(); f.Playback.End();
             await RecommendationUntil(() => f.Playback.Opens.Count == 4);

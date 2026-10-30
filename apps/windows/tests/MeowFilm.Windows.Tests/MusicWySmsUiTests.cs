@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Threading;
 using MeowFilm.Core.Runtime;
+using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Platform.Storage;
 
@@ -248,12 +249,13 @@ public static class MusicWySmsUiTests
     private sealed class Fixture : IAsyncDisposable
     {
         internal readonly NoRuntime Runtime = new();
-        internal readonly WySmsHandler Transport = new();
+        internal readonly WySmsHandler Transport;
         internal readonly WySmsStore Store;
         internal readonly MusicCapability Module;
         private Fixture()
         {
-            Store = new(new DpapiDocumentStore(MusicNativeWySmsTests.Root(), ["music.library.v1", "music.accounts.v1", "music.files.v1"]));
+            Store = new(new DpapiDocumentStore(MusicNativeWySmsTests.Root(), AppIdentity.NativeNamespaces));
+            Transport = new(Store.Inner);
             Module = new(new MusicNativeApplication(Store, Runtime, Transport), Store, new Output(), new Dialogs());
         }
         internal static async Task<Fixture> Create()

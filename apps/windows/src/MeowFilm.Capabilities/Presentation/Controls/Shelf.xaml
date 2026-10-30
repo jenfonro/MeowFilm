@@ -24,7 +24,7 @@
    </Style.Triggers>
   </Style>
  </ResourceDictionary></UserControl.Resources>
- <Grid Margin="-32,0">
+ <Grid Margin="-32,0" Background="Transparent">
   <ListBox x:Name="ItemsHost" Margin="32,0" ItemsSource="{Binding Items}"
    ItemTemplate="{Binding CardTemplate,ElementName=ShelfRoot}" Background="Transparent" BorderThickness="0"
    Focusable="False" IsTabStop="False" SelectionMode="Single"

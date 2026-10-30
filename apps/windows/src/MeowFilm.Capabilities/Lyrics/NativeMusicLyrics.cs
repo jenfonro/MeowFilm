@@ -2,7 +2,7 @@
 // Fixed iWebPlus exact-recording behavior; see LICENSES/NOTICE.md. Native only, no cache.
 using System.Diagnostics;
 using System.Net.Http;
-using System.Text.Json.Nodes;
+using System.Security.Cryptography;
 using MeowFilm.Capabilities.Platforms;
 
 namespace MeowFilm.Capabilities.Lyrics;
@@ -13,14 +13,16 @@ public sealed partial class NativeMusicLyrics : INativeMusicLyrics
     public static readonly TimeSpan CallDeadline = TimeSpan.FromSeconds(25);
     private readonly IMusicPlatformSessionSource sessions;
     private readonly MusicPlatformHttp http;
+    private readonly MusicPlatformClientContextOwner clients;
     private readonly object gate = new();
     private readonly HashSet<Call> active = [];
 
     // Borrowed dependencies: no constructor IO, credential store, subscription or Dispose.
-    public NativeMusicLyrics(IMusicPlatformSessionSource sessions, MusicPlatformHttp http)
+    internal NativeMusicLyrics(IMusicPlatformSessionSource sessions, MusicPlatformHttp http, MusicPlatformClientContextOwner clients)
     {
         ArgumentNullException.ThrowIfNull(sessions); ArgumentNullException.ThrowIfNull(http);
         this.sessions = sessions; this.http = http;
+        this.clients = clients ?? throw new ArgumentNullException(nameof(clients));
     }
 
     private sealed class Call(NativeMusicLyrics owner, NativeLyricRequest request, CancellationToken caller) : IDisposable
@@ -33,6 +35,9 @@ public sealed partial class NativeMusicLyrics : INativeMusicLyrics
         private CancellationTokenSource? linked;
         internal CancellationToken Token => (linked ??= CancellationTokenSource.CreateLinkedTokenSource(Caller, deadline.Token, revoked.Token)).Token;
         internal MusicPlatformSession? Session;
+        internal MusicPlatformClientContext? Client;
+        internal MusicWyClientContext WyClient => (MusicWyClientContext)Client!;
+        internal MusicKgClientContext KgClient => (MusicKgClientContext)Client!;
         internal int Requests;
         private int stale;
         internal void Fence() => Volatile.Write(ref stale, 1);
@@ -46,6 +51,8 @@ public sealed partial class NativeMusicLyrics : INativeMusicLyrics
             L.Require(Volatile.Read(ref stale) == 0, "STALE_SESSION");
             L.Require(!Caller.IsCancellationRequested, "CANCELLED");
             L.Require(!deadline.IsCancellationRequested && Stopwatch.GetElapsedTime(started) < CallDeadline, "TIMEOUT");
+            if (Client is not null) L.Require(Owner.clients.IsCurrent(Client),
+                Owner.clients.NeedsReconciliation ? "COMMIT_UNKNOWN" : "STORAGE_CONFLICT");
             if (Session is not null)
             {
                 bool current;
@@ -73,7 +80,7 @@ public sealed partial class NativeMusicLyrics : INativeMusicLyrics
                 Session.Cookie == next.Cookie, "STALE_SESSION");
             Guard();
         }
-        internal async Task<JsonObject> Read(HttpRequestMessage request)
+        internal async Task<MusicPlatformHttpResult> Read(HttpRequestMessage request)
         {
             var dispatched = false;
             try
@@ -83,11 +90,21 @@ public sealed partial class NativeMusicLyrics : INativeMusicLyrics
                 var remaining = CallDeadline - Stopwatch.GetElapsedTime(started);
                 L.Require(remaining.TotalMilliseconds >= 1, "TIMEOUT");
                 dispatched = true;
-                var bytes = await Owner.http.SendLyricBytesAsync(Request.Platform, request, Token, remaining).ConfigureAwait(false);
-                Guard(); await Check().ConfigureAwait(false);
-                return L.Parse(bytes, Token);
+                var response = await Owner.http.SendLyricAsync(Request.Platform, request, Token, remaining).ConfigureAwait(false);
+                try
+                {
+                    Guard(); await Check().ConfigureAwait(false);
+                    return new(L.Parse(response.Bytes, Token), response.Cookies);
+                }
+                finally { CryptographicOperations.ZeroMemory(response.Bytes); }
             }
             finally { if (!dispatched) request.Dispose(); }
+        }
+        internal async Task AcceptWy(IReadOnlyList<string> cookies)
+        {
+            await Check().ConfigureAwait(false);
+            Client = await Owner.clients.AcceptWyAsync(WyClient, Session?.Cookie, cookies, Guard, Token).ConfigureAwait(false);
+            Guard();
         }
         public void Dispose() { linked?.Dispose(); deadline.Dispose(); revoked.Dispose(); }
     }
@@ -109,6 +126,8 @@ public sealed partial class NativeMusicLyrics : INativeMusicLyrics
             try
             {
                 call.Session = await call.Acquire().ConfigureAwait(false);
+                if (request.Platform is "wy" or "kg")
+                    call.Client = await clients.AcquireAsync(request.Platform, token).ConfigureAwait(false);
                 call.Guard();
                 if (call.Session is not null)
                 {

@@ -38,8 +38,6 @@ public sealed partial class MusicPlatformCatalog
                 var needsAccount = type is "daily" or "fm" or "similar" or "heartbeat";
                 o["available"] = supported && (!needsAccount || c.Session is not null);
                 if (!supported || needsAccount && c.Session is null) o["errorCode"] = needsAccount && c.Session is null ? "AUTH_REQUIRED" : "UNSUPPORTED";
-                if (type == "daily" && c.Session is not null && PJ.Cookie(PJ.Cookies(c.Session), "deviceId").Length == 0)
-                { o["available"] = false; o["errorCode"] = "DEVICE_CONTEXT_REQUIRED"; }
             }
         }
         Walk(page);
@@ -55,7 +53,7 @@ public sealed partial class MusicPlatformCatalog
         page["platform"] = "wy";
         return page;
     }
-    private static async Task<JsonObject> Content(Call c, JsonElement? continuation, string kind, string target)
+    private static Task<JsonObject> Content(Call c, JsonElement? continuation, string kind, string target)
     {
         var prev = Continuation(continuation, c, target, "cursor", "blockCodeOrderList", "loadedPositionCodes");
         var cursor = PJ.Scalar(prev["cursor"]); if (cursor.Length == 0) cursor = "0";
@@ -64,27 +62,29 @@ public sealed partial class MusicPlatformCatalog
             ("isFirstScreen", cursor == "0"), ("pageStyleType", "noCutBlock"), ("refresh", false));
         foreach (var key in new[] { "blockCodeOrderList", "loadedPositionCodes" })
             if (PJ.S(prev, key).Length > 0) input[key] = PJ.Input(PJ.S(prev, key), 16000);
-        var data = await c.Wy("/api/link/page/rcmd/resource/show", input);
-        Shape(data);
-        var page = PlatformDiscovery.Page(data, target, cursor);
-        if (page["continuation"] is JsonObject next)
+        return c.Wy("/api/link/page/rcmd/resource/show", input, data =>
         {
-            JsonArray ParseCodes(string text)
+            Shape(data);
+            var page = PlatformDiscovery.Page(data, target, cursor);
+            if (page["continuation"] is JsonObject next)
             {
-                if (text.Length == 0) return new();
-                try
+                JsonArray ParseCodes(string text)
                 {
-                    var result = JsonNode.Parse(text) as JsonArray;
-                    PJ.Require(result is not null && result.Count <= 2000 && result.All(v => PJ.Text(v).Length > 0));
-                    return result!;
+                    if (text.Length == 0) return new();
+                    try
+                    {
+                        var result = JsonNode.Parse(text) as JsonArray;
+                        PJ.Require(result is not null && result.Count <= 2000 && result.All(v => PJ.Text(v).Length > 0));
+                        return result!;
+                    }
+                    catch (JsonException) { throw new MusicPlatformException("INVALID_REQUEST"); }
                 }
-                catch (JsonException) { throw new MusicPlatformException("INVALID_REQUEST"); }
+                var all = ParseCodes(PJ.S(prev, "loadedPositionCodes")).Concat(ParseCodes(PJ.S(next, "loadedPositionCodes"))).Select(PJ.Text).Distinct(StringComparer.Ordinal).ToArray();
+                var encoded = PJ.Encode(PJ.Node(all)); PJ.Require(encoded.Length <= 16000, "LIMIT");
+                next["loadedPositionCodes"] = encoded;
             }
-            var all = ParseCodes(PJ.S(prev, "loadedPositionCodes")).Concat(ParseCodes(PJ.S(next, "loadedPositionCodes"))).Select(PJ.Text).Distinct(StringComparer.Ordinal).ToArray();
-            var encoded = PJ.Encode(PJ.Node(all)); PJ.Require(encoded.Length <= 16000, "LIMIT");
-            next["loadedPositionCodes"] = encoded;
-        }
-        return BindDiscovery(page, c, target, prev);
+            return BindDiscovery(page, c, target, prev);
+        });
     }
     private static void Shape(JsonObject data)
     {
@@ -95,8 +95,8 @@ public sealed partial class MusicPlatformCatalog
             if (PJ.True(more)) PJ.Require(PJ.At(data, "data", "cursor") is not null, "PAGINATION_STALLED");
         }
     }
-    private static async Task<JsonObject> Directory(Call c) => PlatformDiscovery.Directory(
-        await c.Wy("/api/link/position/show/resource", PJ.Obj(("positionCode", "music_top_tab_full"))));
+    private static Task<JsonObject> Directory(Call c) =>
+        c.Wy("/api/link/position/show/resource", PJ.Obj(("positionCode", "music_top_tab_full")), PlatformDiscovery.Directory);
     public Task<JsonElement> HomeAsync(MusicHomeRequest request, CancellationToken cancellationToken = default)
     {
         PJ.Require(request is not null); var p = request! with { Continuation = CloneContinuation(request!.Continuation) };
@@ -128,14 +128,15 @@ public sealed partial class MusicPlatformCatalog
                 case "featured": page = await Content(c, p.Continuation, "featured", target); break;
                 case "rankings":
                     PJ.Require(p.Continuation is null);
-                    page = BindDiscovery(PlatformDiscovery.Rankings(await c.Wy("/api/toplist/detail/v2", new(), true), target), c, target);
+                    page = await c.Wy("/api/toplist/detail/v2", new(),
+                        data => BindDiscovery(PlatformDiscovery.Rankings(data, target), c, target), true);
                     break;
                 case "new-songs":
                     PJ.Require(p.Continuation is null);
-                    var data = await c.Wy("/api/v1/discovery/new/songs", PJ.Obj(("areaId", 0), ("total", true)), true);
-                    page = BindDiscovery(PJ.Obj(("id", target), ("entries", new JsonArray()), ("sections", PJ.Arr([
-                        PJ.Obj(("id", target + ":songs"), ("title", PJ.S(descriptor, "name")), ("type", "songs"), ("layout", "list"),
-                            ("items", PJ.Arr(PJ.Rows(data["data"], 500).Select(PlatformSongs.Wy))))])), ("more", false), ("continuation", null)), c, target);
+                    page = await c.Wy("/api/v1/discovery/new/songs", PJ.Obj(("areaId", 0), ("total", true)),
+                        data => BindDiscovery(PJ.Obj(("id", target), ("entries", new JsonArray()), ("sections", PJ.Arr([
+                            PJ.Obj(("id", target + ":songs"), ("title", PJ.S(descriptor, "name")), ("type", "songs"), ("layout", "list"),
+                                ("items", PJ.Arr(PJ.Rows(data["data"], 500).Select(PlatformSongs.Wy))))])), ("more", false), ("continuation", null)), c, target), true);
                     break;
                 case "playlists":
                     var prev = Continuation(p.Continuation, c, target, "cursor", "tag");
@@ -145,15 +146,17 @@ public sealed partial class MusicPlatformCatalog
                     if (p.Continuation is not null) PJ.Require(PJ.S(prev, "tag") == category, "SNAPSHOT_CHANGED");
                     var input = PJ.Obj(("categoryName", category), ("offset", 0), ("limit", 20));
                     if (PJ.Scalar(prev["cursor"]).Length > 0) input["cursor"] = PJ.Input(PJ.Scalar(prev["cursor"]), 24000);
-                    var square = await c.Wy("/api/playlist/square/block/page", input, true);
-                    Shape(square);
-                    page = PlatformDiscovery.Page(square, target, PJ.Scalar(prev["cursor"]));
-                    page["tags"] = PJ.Arr(new[] { "推荐", "官方", "华语", "摇滚", "民谣", "电子", "轻音乐" }
-                        .Select(name => PJ.Obj(("id", name), ("name", name), ("group", "playlist"), ("selected", name == category))));
-                    page["selectedTag"] = category;
-                    if (page["continuation"] is not null) page["continuation"] = PJ.Obj(
-                        ("cursor", PJ.Scalar(PJ.At(square, "data", "cursor"))), ("tag", category));
-                    page = BindDiscovery(page, c, target, prev);
+                    page = await c.Wy("/api/playlist/square/block/page", input, square =>
+                    {
+                        Shape(square);
+                        var squarePage = PlatformDiscovery.Page(square, target, PJ.Scalar(prev["cursor"]));
+                        squarePage["tags"] = PJ.Arr(new[] { "推荐", "官方", "华语", "摇滚", "民谣", "电子", "轻音乐" }
+                            .Select(name => PJ.Obj(("id", name), ("name", name), ("group", "playlist"), ("selected", name == category))));
+                        squarePage["selectedTag"] = category;
+                        if (squarePage["continuation"] is not null) squarePage["continuation"] = PJ.Obj(
+                            ("cursor", PJ.Scalar(PJ.At(square, "data", "cursor"))), ("tag", category));
+                        return BindDiscovery(squarePage, c, target, prev);
+                    }, true);
                     break;
                 case "cube": page = await Cube(c, p, descriptor!, target); break;
                 case "artists":
@@ -162,18 +165,18 @@ public sealed partial class MusicPlatformCatalog
                     if (p.Continuation is not null) PJ.Require(PJ.S(artistPrev, "tag") == artistSelection.Token, "SNAPSHOT_CHANGED");
                     var offset = artistPrev["offset"] is null ? 0 : PJ.Count(artistPrev["offset"]);
                     PJ.Require(offset <= 10000, "PAGINATION_LIMIT");
-                    var artists = await c.Wy("/api/v1/artist/list", PJ.Obj(("area", artistSelection.Area),
+                    page = await c.Wy("/api/v1/artist/list", PJ.Obj(("area", artistSelection.Area),
                         ("type", artistSelection.Type), ("initial", artistSelection.Initial), ("offset", offset),
-                        ("limit", 40), ("total", true)), true);
-                    page = BindDiscovery(PlatformDiscovery.Artists(artists, target, artistSelection, (int)offset, 40),
-                        c, target, artistPrev);
+                        ("limit", 40), ("total", true)),
+                        artists => BindDiscovery(PlatformDiscovery.Artists(artists, target, artistSelection, (int)offset, 40),
+                            c, target, artistPrev), true);
                     break;
                 case "vip":
                     PJ.Require(p.Continuation is null);
                     async Task<(JsonObject? Section, MusicPlatformException? Failure)> ReadVip(
-                        Func<Task<JsonObject>> read, Func<JsonObject, JsonObject?> project)
+                        Func<Task<JsonObject?>> read)
                     {
-                        try { return (project(await read()), null); }
+                        try { return (await read(), null); }
                         catch (MusicPlatformException error) when (error.Code is not
                             ("CANCELLED" or "TIMEOUT" or "STALE_SESSION" or "CLOSED" or "CREDENTIALS_UNAVAILABLE"))
                         {
@@ -182,10 +185,10 @@ public sealed partial class MusicPlatformCatalog
                         }
                     }
                     var recommendations = await ReadVip(() =>
-                        c.Wy("/api/vipnewcenter/app/viptab/recommend/song/list"),
-                        response => PlatformDiscovery.VipRecommendations(response, target));
-                    var charts = await ReadVip(() => c.Wy("/api/toplist/detail/v2", new(), true),
-                        response => PlatformDiscovery.VipRankings(response, target));
+                        c.Wy("/api/vipnewcenter/app/viptab/recommend/song/list", new(),
+                            response => PlatformDiscovery.VipRecommendations(response, target)));
+                    var charts = await ReadVip(() => c.Wy("/api/toplist/detail/v2", new(),
+                        response => PlatformDiscovery.VipRankings(response, target), true));
                     if (recommendations.Failure is not null && charts.Failure is not null)
                         throw recommendations.Failure!;
                     page = BindDiscovery(PlatformDiscovery.Vip(recommendations.Section, charts.Section, target),
@@ -202,48 +205,65 @@ public sealed partial class MusicPlatformCatalog
     {
         var code = PJ.S(descriptor, "pageCode"); PJ.Require(Regex.IsMatch(code, "^[a-zA-Z0-9_-]{6,100}$"), "INVALID_RESPONSE");
         var prev = Continuation(p.Continuation, c, target, "offset", "ruleId", "pointIds", "tabTagId", "algTagIds", "tag");
-        var raw = await c.Wy("/api/cube/render/page/protocol", PJ.Obj(("pageCode", code), ("scene", "music")), true);
         var selectedTag = p.Tag ?? PJ.S(prev, "tag");
-        var page = PlatformDiscovery.Cube(raw, target, selectedTag);
-        var layoutTag = PJ.Array(page["tags"]).Any(t => PJ.S(t, "id") == selectedTag);
-        if (layoutTag) PJ.Require(PJ.S(page, "selectedTag") == selectedTag, "SNAPSHOT_CHANGED");
-        if (p.Continuation is not null) PJ.Require(PJ.S(prev, "tag") == selectedTag, "SNAPSHOT_CHANGED");
+        var layout = await c.Wy("/api/cube/render/page/protocol", PJ.Obj(("pageCode", code), ("scene", "music")), raw =>
+        {
+            var cubePage = PlatformDiscovery.Cube(raw, target, selectedTag);
+            var isLayoutTag = PJ.Array(cubePage["tags"]).Any(t => PJ.S(t, "id") == selectedTag);
+            if (isLayoutTag) PJ.Require(PJ.S(cubePage, "selectedTag") == selectedTag, "SNAPSHOT_CHANGED");
+            if (p.Continuation is not null) PJ.Require(PJ.S(prev, "tag") == selectedTag, "SNAPSHOT_CHANGED");
+            if (PJ.At(cubePage, "feed", "request") is JsonObject pageRequest)
+            {
+                PJ.Id(pageRequest["ruleId"], "^[0-9]{1,20}$");
+                if (p.Continuation is not null) PJ.Require(PJ.S(prev, "ruleId") == PJ.S(pageRequest, "ruleId") &&
+                    PJ.S(prev, "pointIds") == PJ.S(pageRequest, "pointIds"), "SNAPSHOT_CHANGED");
+            }
+            else
+            {
+                if (selectedTag.Length > 0) PJ.Require(isLayoutTag, "NOT_FOUND");
+                PJ.Require(p.Continuation is null, "PAGINATION_STALLED");
+                cubePage = BindDiscovery(cubePage, c, target);
+            }
+            return (Page: cubePage, LayoutTag: isLayoutTag);
+        }, true);
+        var page = layout.Page; var layoutTag = layout.LayoutTag;
         if (PJ.At(page, "feed", "request") is JsonObject req)
         {
-            PJ.Id(req["ruleId"], "^[0-9]{1,20}$");
-            if (p.Continuation is not null) PJ.Require(PJ.S(prev, "ruleId") == PJ.S(req, "ruleId") && PJ.S(prev, "pointIds") == PJ.S(req, "pointIds"), "SNAPSHOT_CHANGED");
             var offset = prev["offset"] is null ? 0 : PJ.Count(prev["offset"]); PJ.Require(offset <= 3000);
-            var tagData = await c.Wy("/api/tag/tab/tags", PJ.Obj(("ruleId", req["ruleId"]), ("ruleType", 1), ("tabTagId", "")));
-            var tagInfos = PJ.First(PJ.At(tagData, "data", "algTagInfos"), tagData["algTagInfos"]);
-            PJ.Require(tagInfos is null or JsonArray, "INVALID_RESPONSE");
-            var tags = PlatformDiscovery.AlgorithmTags(tagData);
-            if (selectedTag.Length > 0 && !layoutTag) PJ.Require(tags.Any(t => PJ.S(t, "id") == selectedTag), "NOT_FOUND");
             var algTagIds = !layoutTag && selectedTag.Length > 0 ? selectedTag : "";
             if (p.Continuation is not null) PJ.Require(PJ.S(prev, "algTagIds") == algTagIds && PJ.S(prev, "tabTagId") == "", "SNAPSHOT_CHANGED");
-            var feedData = await c.Wy("/api/tag/tab/alg/recommends", PJ.Obj(("ruleType", 1), ("ruleId", req["ruleId"]), ("tabTagId", ""),
-                ("algTagIds", algTagIds), ("extMap", PJ.Encode(PJ.Obj(("pointIds", req["pointIds"])))), ("limit", 30), ("offset", offset),
-                ("trialMode", 103), ("source", offset > 0 ? "nextPage" : "reset")));
-            var body = feedData["data"] as JsonObject ?? feedData;
-            var songs = PJ.Rows(body["songs"], 30).Select(PlatformSongs.Wy).ToArray();
-            var more = PJ.Bool(body["hasMore"]);
-            if (more) PJ.Require(songs.Length > 0 && offset < 2970, "PAGINATION_STALLED");
-            var feed = (JsonObject)page["feed"]!;
-            var request = (JsonObject)req.DeepClone(); request["algTagIds"] = algTagIds;
-            feed["songs"] = PJ.Arr(songs); feed["tags"] = tags; feed["selectedTag"] = selectedTag;
-            feed["request"] = request; feed["more"] = more; feed["cursor"] = more ? JsonValue.Create(offset + 30) : null;
-            page["more"] = more;
-            ((JsonArray)page["sections"]!).Add(PJ.Obj(("id", feed["id"]), ("title", feed["title"]), ("type", "songs"), ("layout", "list"), ("items", PJ.Arr(songs))));
-            page = BindDiscovery(page, c, target);
-            if (more)
+            var tags = await c.Wy("/api/tag/tab/tags", PJ.Obj(("ruleId", req["ruleId"]), ("ruleType", 1), ("tabTagId", "")), tagData =>
             {
-                var next = (JsonObject)request.DeepClone();
-                next["tag"] = selectedTag; next["offset"] = offset + 30; next["scope"] = c.Scope; next["target"] = target;
-                page["continuation"] = next;
-            }
-            return page;
+                var tagInfos = PJ.First(PJ.At(tagData, "data", "algTagInfos"), tagData["algTagInfos"]);
+                PJ.Require(tagInfos is null or JsonArray, "INVALID_RESPONSE");
+                var algorithmTags = PlatformDiscovery.AlgorithmTags(tagData);
+                if (selectedTag.Length > 0 && !layoutTag) PJ.Require(algorithmTags.Any(t => PJ.S(t, "id") == selectedTag), "NOT_FOUND");
+                return algorithmTags;
+            });
+            return await c.Wy("/api/tag/tab/alg/recommends", PJ.Obj(("ruleType", 1), ("ruleId", req["ruleId"]), ("tabTagId", ""),
+                ("algTagIds", algTagIds), ("extMap", PJ.Encode(PJ.Obj(("pointIds", req["pointIds"])))), ("limit", 30), ("offset", offset),
+                ("trialMode", 103), ("source", offset > 0 ? "nextPage" : "reset")), feedData =>
+            {
+                var body = feedData["data"] as JsonObject ?? feedData;
+                var songs = PJ.Rows(body["songs"], 30).Select(PlatformSongs.Wy).ToArray();
+                var more = PJ.Bool(body["hasMore"]);
+                if (more) PJ.Require(songs.Length > 0 && offset < 2970, "PAGINATION_STALLED");
+                var feed = (JsonObject)page["feed"]!;
+                var request = (JsonObject)req.DeepClone(); request["algTagIds"] = algTagIds;
+                feed["songs"] = PJ.Arr(songs); feed["tags"] = tags; feed["selectedTag"] = selectedTag;
+                feed["request"] = request; feed["more"] = more; feed["cursor"] = more ? JsonValue.Create(offset + 30) : null;
+                page["more"] = more;
+                ((JsonArray)page["sections"]!).Add(PJ.Obj(("id", feed["id"]), ("title", feed["title"]), ("type", "songs"), ("layout", "list"), ("items", PJ.Arr(songs))));
+                page = BindDiscovery(page, c, target);
+                if (more)
+                {
+                    var next = (JsonObject)request.DeepClone();
+                    next["tag"] = selectedTag; next["offset"] = offset + 30; next["scope"] = c.Scope; next["target"] = target;
+                    page["continuation"] = next;
+                }
+                return page;
+            });
         }
-        if (selectedTag.Length > 0) PJ.Require(layoutTag, "NOT_FOUND");
-        PJ.Require(p.Continuation is null, "PAGINATION_STALLED");
-        return BindDiscovery(page, c, target);
+        return page;
     }
 }

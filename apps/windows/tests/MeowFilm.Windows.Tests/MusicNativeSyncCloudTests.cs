@@ -24,6 +24,7 @@ public static partial class MusicNativeSyncTests
         yield return new("Music sync KG cloud encrypted JSON validation remains strict", CloudJson);
         yield return new("Music sync KG cloud request limit prevents dispatch", CloudRequestLimit);
         yield return new("Music sync KG cloud credentials and identity reject before dispatch", CloudCredentials);
+        yield return new("Music sync KG cloud local identity is independent of legacy account device fields", CloudLocalIdentity);
         yield return new("Music sync KG cloud caller cancellation before dispatch", CloudPreCancelled);
         yield return new("Music sync KG cloud in-flight cancellation disposes request", CloudCancelled);
         yield return new("Music sync KG cloud transport errors never retry or expose context", CloudTransportErrors);
@@ -61,8 +62,8 @@ public static partial class MusicNativeSyncTests
     {
         var type = typeof(MusicLibrarySyncService).Assembly.GetType("MeowFilm.Capabilities.Sync.MusicSyncKgCloud", true)!;
         var method = type.GetMethod(nativeEntropy ? "SendAsync" : "SendCoreAsync", BindingFlags.Static | BindingFlags.NonPublic)!;
-        object?[] args = nativeEntropy ? [session ?? Sessions.Make("kg", 1, "42"), path, body ?? CloudBody(path), send, token] :
-            [session ?? Sessions.Make("kg", 1, "42"), path, body ?? CloudBody(path), send, token, CloudSecret];
+        object?[] args = nativeEntropy ? [session ?? Sessions.Make("kg", 1, "42"), MusicClientContextFixture.Kg, path, body ?? CloudBody(path), send, token] :
+            [session ?? Sessions.Make("kg", 1, "42"), MusicClientContextFixture.Kg, path, body ?? CloudBody(path), send, token, CloudSecret];
         try { return (Task)method.Invoke(null, args)!; }
         catch (TargetInvocationException e) when (e.InnerException is not null)
         { ExceptionDispatchInfo.Capture(e.InnerException).Throw(); throw; }
@@ -174,14 +175,32 @@ public static partial class MusicNativeSyncTests
     {
         int calls = 0;
         foreach (var (cookie, code) in new[] {
-            ("userid=77; token=synthetic-only; KUGOU_API_MID=123", "DEVICE_CONTEXT_REQUIRED"),
-            ("userid=42; token=synthetic-only", "DEVICE_CONTEXT_REQUIRED"),
+            ("userid=77; token=synthetic-only; KUGOU_API_MID=123", "INVALID_CREDENTIALS"),
+            ("userid=42; token=synthetic-only; KUGOU_API_MID=bad", "DEVICE_CONTEXT_REQUIRED"),
+            ("userid=42; token=synthetic-only; KUGOU_API_MID=", "DEVICE_CONTEXT_REQUIRED"),
+            ("userid=42; token=synthetic-only; KUGOU_API_MID=123; dfid=bad", "DEVICE_CONTEXT_REQUIRED"),
             ("userid=42; KUGOU_API_MID=123", "AUTH_REQUIRED"),
             ("userid=42; token=" + new string('x', 150) + "; KUGOU_API_MID=123", "INVALID_CREDENTIALS") })
             await CloudFailure(code, () => CloudCall("/v1/modify_song_sort", (_, _) => { calls++; return Task.FromResult(Array.Empty<byte>()); },
                 session: new("kg", "synthetic", 1, "42", cookie)));
         await CloudFailure("INVALID_REQUEST", () => CloudCall("/wrong-path", (_, _) => { calls++; return Task.FromResult(Array.Empty<byte>()); }));
         Check(calls == 0);
+    }
+    private static async Task CloudLocalIdentity()
+    {
+        foreach (string cookie in new[] { "userid=42; token=synthetic-only", "userid=42; token=synthetic-only; dfid=SYNTHETIC_UNBOUND" })
+        {
+            int calls = 0;
+            await CloudCall("/v1/modify_song_sort", (request, _) =>
+            {
+                calls++; var query = CloudQuery(request);
+                Check(query["mid"] == MusicClientContextFixture.Kg.Mid && query["dfid"] == "-" &&
+                    request.Headers.GetValues("mid").Single() == query["mid"] &&
+                    request.Headers.GetValues("dfid").Single() == query["dfid"]);
+                return Task.FromResult(CloudCipher("""{"status":1,"error_code":0}"""));
+            }, session: new("kg", "synthetic", 1, "42", cookie));
+            Check(calls == 1);
+        }
     }
     private static async Task CloudPreCancelled()
     {
@@ -218,7 +237,7 @@ public static partial class MusicNativeSyncTests
         }, nativeEntropy: true);
     }
     private static async Task InstallCloud(Fixture f, Func<HttpRequestMessage, CancellationToken, Task<byte[]>> transport)
-    { await f.Sync.DisposeAsync(); f.Sync = new(f.Owner, f.Sessions, f.Http, transport); }
+    { await f.Sync.DisposeAsync(); f.Sync = new(f.Owner, f.Sessions, f.Http, f.Clients.Owner, transport); }
     private static async Task CloudOrder()
     {
         await using var f = new Fixture("kg"); await Reorder(f); int writes = 0;

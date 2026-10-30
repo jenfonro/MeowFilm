@@ -36,6 +36,12 @@ public static class MusicCatalogPersonalTests
         yield return Case("duplicate member and changed snapshot cannot publish second page", PageDefects);
         yield return Case("empty complete playlist may save but not play", EmptyPlaylist);
         yield return Case("daily style full batch saves and replaces only on explicit actions", DailyActions);
+        yield return Case("daily entries read complete members only when the expanded display needs them", DailyEntrySummaries);
+        yield return Case("channel daily entries do not expand members during page loading", ChannelDailySummaries);
+        yield return Case("supplied and unavailable daily summaries never trigger extra reads", SuppliedDailySummaries);
+        yield return Case("empty or failed daily summaries keep the page and do not retry on hover", FailedDailySummaries);
+        yield return Case("retired daily summary cannot overwrite a newer page and close drains its receipt", RetiredDailySummary);
+        yield return Case("daily preview expiry does not invalidate unrelated home content", DailySummaryExpiry);
         yield return Case("cancel after admitted batch commit waits receipt and does not autoplay", CancelledBatchCommitReceipt);
         yield return Case("FM modes rule cards and explicit next batch never auto-play", FmActions);
         yield return Case("similar native IDs album outlet and unsupported actions", SimilarAlbum);
@@ -249,6 +255,140 @@ public static class MusicCatalogPersonalTests
         Equal(3L, N(await f.Queue(), "total"));
         Equal(0, f.Output.Opens);
     }
+    private static object DailyEntry(string id = "daily-default", string branch = "default", bool available = true) => new
+    {
+        id, key = id, name = "每日推荐", subtitle = "符合你口味的新鲜好歌",
+        previewSubtitle = "每日推荐 | 从「合成歌曲」听起", dayOfMonth = 29, presentation = "preview",
+        available, errorCode = available ? "" : "AUTH_REQUIRED", action = new { type = "daily", branch }
+    };
+    private static async Task DailyEntrySummaries()
+    {
+        await using var f = await Fixture.Create();
+        f.Platform.DailyCount = 8;
+        f.Platform.HomeEntries = [DailyEntry(), DailyEntry("daily-copy"), DailyEntry("daily-style", "style"),
+            new { id = "500", name = "普通歌单", presentation = "preview", action = new { type = "playlist", id = "500" } }];
+        await f.Module.NavigateAsync("catalog-home", default);
+        var cards = f.Module.CatalogSections.Single().Items.Where(card => card.Kind == "daily").ToArray();
+        Equal(3, cards.Length);
+        Check(cards.All(card => !card.HasPreview), "an entry is not an instruction to preload its members");
+        Check(cards.All(card => card.DayOfMonth == 29 && card.ExpandedSubtitle.Contains("合成歌曲", StringComparison.Ordinal)));
+        Equal(0, f.Platform.Requests.OfType<MusicDailyRequest>().Count());
+        f.App.TransformNext("music.catalog.daily", reply => {
+            Equal(8, reply.GetProperty("items").GetArrayLength()); return reply; });
+        foreach (var card in new[] { cards[0], cards[2] })
+        {
+            Check((await f.Module.ReadCatalogCardPreviewAsync(card, default)).SequenceEqual(["1 Track 1", "2 Track 2", "3 Track 3"]));
+            Check((await f.Module.ReadCatalogCardPreviewAsync(card, default)).SequenceEqual(["1 Track 1", "2 Track 2", "3 Track 3"]));
+        }
+        Equal(2, f.Platform.Requests.OfType<MusicDailyRequest>().Count());
+        Check(f.Platform.Requests.OfType<MusicDailyRequest>().Select(request => request.Branch)
+            .ToHashSet().SetEquals([MusicDailyBranch.Default, MusicDailyBranch.Style]));
+        Check(!f.Platform.Requests.OfType<MusicPlaylistRequest>().Any(), "ordinary playlists stay lazy");
+        Check(!f.Platform.Requests.OfType<MusicFmRequest>().Any(), "summary does not start a radio session");
+        Equal(0, f.Store.LibraryWrites); Equal(0, f.Output.Opens); Equal(0L, N(await f.Queue(), "total"));
+        CheckNoDisplayEnrichment(f);
+        int calls = f.Platform.Requests.Count;
+        await f.Module.NavigateAsync("favorites", default);
+        await f.Module.NavigateAsync("catalog-home", default);
+        Equal(calls, f.Platform.Requests.Count);
+        await f.Module.RefreshCatalogAsync();
+        Equal(2, f.Platform.Requests.OfType<MusicDailyRequest>().Count());
+        CheckNoDisplayEnrichment(f);
+    }
+    private static async Task ChannelDailySummaries()
+    {
+        await using var f = await Fixture.Create();
+        f.Platform.ChannelEntries = [DailyEntry()];
+        await f.Module.NavigateAsync("catalog-channel/wy/rock", default);
+        var card = f.Module.CatalogSections.Single().Items.Single();
+        Equal(0, card.PreviewSongs.Count);
+        Equal(0, f.Platform.Requests.OfType<MusicDailyRequest>().Count());
+        Equal(3, (await f.Module.ReadCatalogCardPreviewAsync(card, default)).Count);
+        Equal(1, f.Platform.Requests.OfType<MusicDailyRequest>().Count());
+        Equal(0, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
+        CheckNoDisplayEnrichment(f);
+    }
+    private static async Task SuppliedDailySummaries()
+    {
+        await using var f = await Fixture.Create();
+        var supplied = Edit(E(DailyEntry()), row => row["preview"] = JsonSerializer.SerializeToNode(new[] {
+            new { title = "已有曲目", artist = "合成艺人", cover = "", rank = 1, lastRank = 0 } }));
+        f.Platform.HomeEntries = [supplied, DailyEntry("daily-unavailable", available: false)];
+        await f.Module.NavigateAsync("catalog-home", default);
+        Check(!f.Platform.Requests.OfType<MusicDailyRequest>().Any());
+        var card = f.Module.CatalogSections.Single().Items.First();
+        Check((await f.Module.ReadCatalogCardPreviewAsync(card, default)).SequenceEqual(["1 已有曲目"]));
+        Equal(1, f.Module.DisplayCatalogSections.Single().Items.Count);
+        Equal(0, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
+    }
+    private static async Task FailedDailySummaries()
+    {
+        foreach (bool empty in new[] { false, true })
+        {
+            await using var f = await Fixture.Create();
+            f.Platform.HomeEntries = [DailyEntry(),
+                new { id = "500", name = "普通歌单", presentation = "preview", action = new { type = "playlist", id = "500" } }];
+            if (empty)
+                f.App.TransformNext("music.catalog.daily", reply => Edit(reply, row => {
+                    row["items"] = new JsonArray(); row["count"] = 0; }));
+            else f.App.FailNext("music.catalog.daily", "UPSTREAM_ERROR");
+            await f.Module.NavigateAsync("catalog-home", default);
+            Equal("", f.Module.Status); Equal(2, f.Module.CatalogSections.Single().Items.Count);
+            var daily = f.Module.CatalogSections.Single().Items.First();
+            Check(!daily.HasPreview, "no fabricated songs");
+            Equal(0, f.App.Log.Count(call => call.Method == "music.catalog.daily"));
+            Equal(0, (await f.Module.ReadCatalogCardPreviewAsync(daily, default)).Count);
+            Equal(0, (await f.Module.ReadCatalogCardPreviewAsync(daily, default)).Count);
+            Equal(1, f.App.Log.Count(call => call.Method == "music.catalog.daily"));
+            await f.Module.RefreshCatalogAsync();
+            Equal(1, f.App.Log.Count(call => call.Method == "music.catalog.daily"));
+            Equal(3, (await f.Module.ReadCatalogCardPreviewAsync(f.Module.CatalogSections.Single().Items.First(), default)).Count);
+            Equal(2, f.App.Log.Count(call => call.Method == "music.catalog.daily"));
+            Equal(0, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
+        }
+    }
+    private static async Task RetiredDailySummary()
+    {
+        await using var f = await Fixture.Create();
+        f.Platform.HomeEntries = [DailyEntry()];
+        await f.Module.NavigateAsync("catalog-home", default);
+        var card = f.Module.CatalogSections.Single().Items.Single();
+        var held = f.App.HoldNext("music.catalog.daily");
+        var old = f.Module.ReadCatalogCardPreviewAsync(card, default);
+        await held.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        f.Module.CancelCatalog();
+        await f.Module.NavigateAsync("favorites", default);
+        await f.Module.NavigateAsync("catalog-home", default);
+        var published = f.Module.CatalogSections.Single();
+        Equal(3, (await f.Module.ReadCatalogCardPreviewAsync(published.Items.Single(), default)).Count);
+        var closing = f.Module.PrepareShutdownAsync();
+        await Task.Delay(25); await Drain();
+        Check(!closing.IsCompleted && !old.IsCompleted, "close retains the noncooperative physical summary receipt");
+        held.Release(); Equal(0, (await old).Count); await closing;
+        Check(ReferenceEquals(published, f.Module.CatalogSections.Single()), "late summary must not replace the new page");
+        Equal(0, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
+    }
+    private static async Task DailySummaryExpiry()
+    {
+        await using var f = await Fixture.Create();
+        f.Platform.HomeEntries = [DailyEntry()];
+        long expiry = 0;
+        f.App.TransformNext("music.catalog.daily", reply => Edit(reply, row => {
+            expiry = DateTimeOffset.UtcNow.AddMilliseconds(300).ToUnixTimeMilliseconds(); row["expiresAt"] = expiry; }));
+        await f.Module.NavigateAsync("catalog-home", default);
+        Equal(0, f.Platform.Requests.OfType<MusicDailyRequest>().Count());
+        Equal(3, (await f.Module.ReadCatalogCardPreviewAsync(f.Module.CatalogSections.Single().Items.Single(), default)).Count);
+        await f.Module.NavigateAsync("favorites", default);
+        await Until(() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= expiry);
+        await f.Module.NavigateAsync("catalog-home", default);
+        Equal(1, f.Platform.Requests.OfType<MusicHomeRequest>().Count());
+        Equal(1, f.Platform.Requests.OfType<MusicDailyRequest>().Count());
+        Equal(0, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
+    }
+    private static void CheckNoDisplayEnrichment(Fixture f) =>
+        Check(!f.App.Log.Any(call => call.Method.StartsWith("music.official.", StringComparison.Ordinal) ||
+            call.Method is "music.online.resolve" or "music.search.start" or "music.catalog.playlist.prepare"),
+            "displaying supplied metadata never resolves audio, discovers other platforms or prepares a full playlist");
     private static async Task FmActions()
     {
         await using var f = await Fixture.Create();
@@ -452,7 +592,7 @@ public static class MusicCatalogPersonalTests
         f.App.Authenticated = true; f.App.AccountGeneration++;
         await f.Module.ReadCatalogAccountAsync();
         f.App.FailNext("music.catalog.daily", "DEVICE_CONTEXT_REQUIRED");
-        await f.Module.NavigateAsync("catalog-daily", default); Equal("平台设备认证未通过", f.Module.Status);
+        await f.Module.NavigateAsync("catalog-daily", default); Equal("平台客户端状态不可用", f.Module.Status);
         Equal(0, f.Store.LibraryWrites);
     }
     private static async Task PartialBatch()
@@ -539,9 +679,11 @@ public static class MusicCatalogPersonalTests
     {
         public ConcurrentQueue<object> Requests { get; } = new();
         public int Total = 65;
+        public int DailyCount = 3;
         public bool EmptyDirectoryFirst, Expired;
         public string LocatorVersion = "7";
         public object[]? HomeActions;
+        public object[]? HomeEntries, ChannelEntries;
         public Func<MusicPlaylistRequest, JsonElement>? PlaylistChange;
         public T Last<T>() => Requests.OfType<T>().Last();
         private Task<JsonElement> Result(object request, JsonElement result, CancellationToken token)
@@ -567,8 +709,8 @@ public static class MusicCatalogPersonalTests
         }
         private JsonElement Batch(string kind, string title)
         {
-            var items = Enumerable.Range(0, 3).Select(i => Song("wy", i)).ToArray();
-            return E(new { platform = "wy", kind, name = title, count = 3, more = false, items,
+            var items = Enumerable.Range(0, kind == "daily" ? DailyCount : 3).Select(i => Song("wy", i)).ToArray();
+            return E(new { platform = "wy", kind, name = title, count = items.Length, more = false, items,
                 recommendations = items.Select(item => new
                 {
                     id = MusicSongFixture.NativeId(item),
@@ -585,12 +727,14 @@ public static class MusicCatalogPersonalTests
         public Task<JsonElement> AlbumAsync(MusicAlbumRequest r, CancellationToken t = default) =>
             Result(r, Edit(Batch("album", "合成专辑"), n => { n["id"] = r.Id; n["total"] = 3; }), t);
         public Task<JsonElement> HomeAsync(MusicHomeRequest r, CancellationToken t = default) =>
-            Result(r, E(new { platform = r.Platform, items = HomeActions ?? [new { id = r.Continuation is null ? "500" : "501", name = "歌单", kind = "playlist" }],
+            Result(r, HomeEntries is { } entries ? E(new { platform = r.Platform, entries, more = false }) :
+                E(new { platform = r.Platform, items = HomeActions ?? [new { id = r.Continuation is null ? "500" : "501", name = "歌单", kind = "playlist" }],
                 more = r.Continuation is null && HomeActions is null, continuation = r.Continuation is null && HomeActions is null ? Cursor(2) : null }), t);
         public Task<JsonElement> ChannelsAsync(MusicChannelsRequest r, CancellationToken t = default) =>
             Result(r, E(new { platform = r.Platform, items = new[] { new { id = "rock", kind = "cube", name = "摇滚" } } }), t);
         public Task<JsonElement> ChannelAsync(MusicChannelRequest r, CancellationToken t = default) =>
-            Result(r, E(new { platform = r.Platform, channel = new { id = r.Id }, items = new[] { Song(r.Platform, r.Continuation is null ? 0 : 1) },
+            Result(r, ChannelEntries is { } entries ? E(new { platform = r.Platform, channel = new { id = r.Id }, entries, more = false }) :
+                E(new { platform = r.Platform, channel = new { id = r.Id }, items = new[] { Song(r.Platform, r.Continuation is null ? 0 : 1) },
                 more = r.Continuation is null, continuation = r.Continuation is null ? Cursor(2) : null }), t);
         public Task<JsonElement> SearchAsync(MusicSearchRequest r, CancellationToken t = default) =>
             Result(r, E(new { platform = r.Platform, items = new[] { Song(r.Platform, 0) }, page = r.Page, limit = r.Limit, total = 1, more = false }), t);

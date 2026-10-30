@@ -11,18 +11,51 @@ internal sealed record OfficialAudioResult(Uri Uri, string RequestQuality, strin
     bool QualityVerified, double Duration, long Size, long? ExpiresAt, bool Full);
 
 /// <summary>Only official platform protocols. No LX identity, runtime, URL proxy or alternate-source retry.</summary>
-internal sealed class OfficialMusicAudio(MusicPlatformHttp http)
+internal sealed class OfficialMusicAudio
 {
-    private async Task<JsonObject> Send(MusicPlatformSession session, HttpRequestMessage request, CancellationToken token)
+    private readonly MusicPlatformHttp http;
+    private readonly MusicPlatformClientContextOwner clients;
+    internal OfficialMusicAudio(MusicPlatformHttp http, MusicPlatformClientContextOwner clients)
     {
-        var body = (await http.SendCatalogAsync(session.Platform, request, token).ConfigureAwait(false)).Body;
-        return session.Platform switch {
-            "wy" => PlatformProtocols.WySuccess(body), "tx" => PlatformProtocols.TxSuccess(body),
-            _ => PlatformProtocols.KgSuccess(body, request.RequestUri!.AbsolutePath)
-        };
+        this.http = http ?? throw new ArgumentNullException(nameof(http));
+        this.clients = clients ?? throw new ArgumentNullException(nameof(clients));
+    }
+    private sealed class Call(OfficialMusicAudio owner, MusicPlatformSession account,
+        MusicPlatformClientContext? client, Action accountGuard)
+    {
+        private MusicPlatformClientContext? current = client;
+        internal MusicWyClientContext WyClient => (MusicWyClientContext)current!;
+        internal MusicKgClientContext KgClient => (MusicKgClientContext)current!;
+        private void Guard(CancellationToken token)
+        {
+            accountGuard(); token.ThrowIfCancellationRequested();
+            if (current is not null)
+                PJ.Require(owner.clients.IsCurrent(current), owner.clients.NeedsReconciliation ? "COMMIT_UNKNOWN" : "STORAGE_CONFLICT");
+        }
+        internal async Task<(JsonObject Body, IReadOnlyList<string> Cookies)> Send(
+            HttpRequestMessage request, CancellationToken token, bool xeapi = false)
+        {
+            try { Guard(token); } catch { request.Dispose(); throw; }
+            var result = xeapi
+                ? await owner.http.SendCatalogXeapiAsync(request, token, 1024 * 1024, TimeSpan.FromSeconds(20)).ConfigureAwait(false)
+                : await owner.http.SendCatalogAsync(account.Platform, request, token).ConfigureAwait(false);
+            Guard(token);
+            var body = account.Platform switch {
+                "wy" => PlatformProtocols.WySuccess(result.Body), "tx" => PlatformProtocols.TxSuccess(result.Body),
+                _ => PlatformProtocols.KgSuccess(result.Body, request.RequestUri!.AbsolutePath)
+            };
+            return (body, result.SetCookieHeaders);
+        }
+        internal async Task AcceptWy(IReadOnlyList<string> cookies, CancellationToken token)
+        {
+            Guard(token);
+            current = await owner.clients.AcceptWyAsync(WyClient, account.Cookie,
+                cookies, () => Guard(token), token).ConfigureAwait(false);
+            Guard(token);
+        }
     }
     internal async Task<OfficialAudioResult> ResolveAsync(MusicPlatformSession session, JsonObject data,
-        IReadOnlyList<string> qualities, MusicAccountEntitlements rights, CancellationToken token)
+        IReadOnlyList<string> qualities, MusicAccountEntitlements rights, CancellationToken token, Action accountGuard)
     {
         bool member = !rights.VerificationDeferred && rights.Membership.Vip == true &&
             (rights.Membership.ExpiresAt is null || rights.Membership.ExpiresAt > Now);
@@ -31,10 +64,14 @@ internal sealed class OfficialMusicAudio(MusicPlatformHttp http)
             PJ.Require(session.Platform == "wy" && qualities.Contains("128k"), "VIP_REQUIRED");
             qualities = ["128k"];
         }
+        accountGuard();
+        var client = session.Platform is "wy" or "kg"
+            ? await clients.AcquireAsync(session.Platform, token).ConfigureAwait(false) : null;
+        var c = new Call(this, session, client, accountGuard);
         return session.Platform switch {
-            "wy" => await Wy(session, data, qualities, rights, token).ConfigureAwait(false),
-            "tx" => await Tx(session, data, qualities, token).ConfigureAwait(false),
-            "kg" => await Kg(session, data, qualities, token).ConfigureAwait(false),
+            "wy" => await Wy(c, session, data, qualities, rights, token).ConfigureAwait(false),
+            "tx" => await Tx(c, session, data, qualities, token).ConfigureAwait(false),
+            "kg" => await Kg(c, session, data, qualities, token).ConfigureAwait(false),
             _ => throw new MusicPlatformException("CAPABILITY_UNAVAILABLE")
         };
     }
@@ -56,14 +93,15 @@ internal sealed class OfficialMusicAudio(MusicPlatformHttp http)
     private static string Id(JsonObject data, string field, string pattern) =>
         PJ.Id(data[field], pattern, "INVALID_REQUEST");
 
-    private async Task<OfficialAudioResult> Wy(MusicPlatformSession session, JsonObject data,
+    private async Task<OfficialAudioResult> Wy(Call c, MusicPlatformSession session, JsonObject data,
         IReadOnlyList<string> qualities, MusicAccountEntitlements rights, CancellationToken token)
     {
         string id = Id(data, "musicId", "^[1-9][0-9]{0,19}$");
         if (qualities.Count > 0 && qualities[0] == "128k")
-            return await WyStandard(session, id, token).ConfigureAwait(false);
-        var resources = await Send(session, PlatformProtocols.Wy("/api/song/music/detail/get",
-            PJ.Obj(("songId", id)), session), token).ConfigureAwait(false);
+            return await WyStandard(c, session, id, token).ConfigureAwait(false);
+        var resourceResponse = await c.Send(PlatformProtocols.Wy("/api/song/music/detail/get",
+            PJ.Obj(("songId", id)), session, c.WyClient), token).ConfigureAwait(false);
+        var resources = resourceResponse.Body;
         var keys = new Dictionary<string, (string Level, string Resource)> {
             ["128k"] = ("standard", "l"), ["192k"] = ("higher", "m"), ["320k"] = ("exhigh", "h"),
             ["flac"] = ("lossless", "sq"), ["flac24bit"] = ("hires", "hr"), ["master"] = ("jymaster", "jm"),
@@ -73,16 +111,18 @@ internal sealed class OfficialMusicAudio(MusicPlatformHttp http)
         string? quality = qualities.FirstOrDefault(q => keys.TryGetValue(q, out var entry) &&
             (q == "128k" || rights.AudioLevels.Contains(entry.Level)) && PJ.At(resources, "data", entry.Resource) is not null);
         PJ.Require(quality is not null, "QUALITY_UNAVAILABLE");
-        if (quality == "128k") return await WyStandard(session, id, token).ConfigureAwait(false);
+        await c.AcceptWy(resourceResponse.Cookies, token).ConfigureAwait(false);
+        if (quality == "128k") return await WyStandard(c, session, id, token).ConfigureAwait(false);
         string level = keys[quality!].Level;
-        var (keyRequest, nonce) = PlatformXeapi.KeyRequest(session);
-        var keyBody = await http.SendCatalogAsync("wy", keyRequest, token).ConfigureAwait(false);
-        var key = PlatformXeapi.ReadKey(keyBody.Body, nonce);
+        var (keyRequest, nonce) = PlatformXeapi.KeyRequest(c.WyClient, session);
+        var keyResponse = await c.Send(keyRequest, token).ConfigureAwait(false);
+        var key = PlatformXeapi.ReadKey(keyResponse.Body, nonce);
+        await c.AcceptWy(keyResponse.Cookies, token).ConfigureAwait(false);
         var parameters = PJ.Obj(("ids", "[" + id + "]"), ("level", level), ("encodeType", level == "vivid" ? "mp3" : "flac"));
         if (level == "sky") parameters["immerseType"] = "c51";
-        var response = PlatformProtocols.WySuccess((await http.SendCatalogXeapiAsync(
-            PlatformXeapi.Request("/api/song/enhance/player/url/v1", parameters, session, key),
-            token, 1024 * 1024, TimeSpan.FromSeconds(20)).ConfigureAwait(false)).Body);
+        var mediaResponse = await c.Send(PlatformXeapi.Request("/api/song/enhance/player/url/v1", parameters,
+            session, c.WyClient, key), token, xeapi: true).ConfigureAwait(false);
+        var response = mediaResponse.Body;
         var rows = PJ.Rows(response["data"], 100).Where(r => PJ.Scalar(r["id"]) == id).ToArray();
         PJ.Require(rows.Length == 1, "IDENTITY_MISMATCH");
         var row = rows[0];
@@ -92,16 +132,19 @@ internal sealed class OfficialMusicAudio(MusicPlatformHttp http)
         string actual = keys.FirstOrDefault(p => p.Value.Level == actualLevel).Key ?? "";
         long expiry = Now + (long)(Math.Min(1800, Number(row["expi"])) * 1000);
         PJ.Require(expiry > Now, "MEDIA_EXPIRED");
-        return new(uri, quality!, actual, actual.Length > 0, Number(row["time"]) / 1000,
+        var result = new OfficialAudioResult(uri, quality!, actual, actual.Length > 0, Number(row["time"]) / 1000,
             Size(row["size"]), expiry, true);
+        await c.AcceptWy(mediaResponse.Cookies, token).ConfigureAwait(false);
+        return result;
     }
 
     // api-enhanced song_url.js at the fixed reference: official EAPI with br.
     // This standard-only route does not require an authenticated XEAPI device.
-    private async Task<OfficialAudioResult> WyStandard(MusicPlatformSession session, string id, CancellationToken token)
+    private async Task<OfficialAudioResult> WyStandard(Call c, MusicPlatformSession session, string id, CancellationToken token)
     {
-        var response = await Send(session, PlatformProtocols.Wy("/api/song/enhance/player/url",
-            PJ.Obj(("ids", "[" + id + "]"), ("br", 128000)), session), token).ConfigureAwait(false);
+        var mediaResponse = await c.Send(PlatformProtocols.Wy("/api/song/enhance/player/url",
+            PJ.Obj(("ids", "[" + id + "]"), ("br", 128000)), session, c.WyClient), token).ConfigureAwait(false);
+        var response = mediaResponse.Body;
         var rows = PJ.Rows(response["data"], 100).Where(r => PJ.Scalar(r["id"]) == id).ToArray();
         PJ.Require(rows.Length == 1, "IDENTITY_MISMATCH");
         var row = rows[0];
@@ -115,17 +158,19 @@ internal sealed class OfficialMusicAudio(MusicPlatformHttp http)
         string actual = Number(row["br"]) switch { 128000 => "128k", 192000 => "192k", 320000 => "320k", _ => "" };
         long expiry = Now + (long)(Math.Min(1800, Number(row["expi"])) * 1000);
         PJ.Require(expiry > Now, "MEDIA_EXPIRED");
-        return new(uri, "128k", actual, actual.Length > 0, Number(row["time"]) / 1000,
+        var result = new OfficialAudioResult(uri, "128k", actual, actual.Length > 0, Number(row["time"]) / 1000,
             Size(row["size"]), expiry, true);
+        await c.AcceptWy(mediaResponse.Cookies, token).ConfigureAwait(false);
+        return result;
     }
 
-    private async Task<OfficialAudioResult> Tx(MusicPlatformSession session, JsonObject data,
+    private async Task<OfficialAudioResult> Tx(Call c, MusicPlatformSession session, JsonObject data,
         IReadOnlyList<string> qualities, CancellationToken token)
     {
         string mid = Id(data, "songmid", "^[A-Za-z0-9]{1,64}$");
-        var detail = await Send(session, PlatformProtocols.Tx("music.trackInfo.UniformRuleCtrl", "CgiGetTrackInfo",
+        var detail = (await c.Send(PlatformProtocols.Tx("music.trackInfo.UniformRuleCtrl", "CgiGetTrackInfo",
             PJ.Obj(("ctx", 0), ("client", 1), ("types", new[] { 0 }), ("modify_stamp", new[] { 0 }),
-                ("mids", new[] { mid })), session), token).ConfigureAwait(false);
+                ("mids", new[] { mid })), session), token).ConfigureAwait(false)).Body;
         var tracks = PJ.Rows(detail["tracks"], 1);
         PJ.Require(tracks.Count == 1 && PJ.S(tracks[0], "mid") == mid, "IDENTITY_MISMATCH");
         var track = tracks[0]; var file = track["file"] as JsonObject ?? new();
@@ -139,10 +184,10 @@ internal sealed class OfficialMusicAudio(MusicPlatformHttp http)
         PJ.Require(quality is not null, "QUALITY_UNAVAILABLE");
         var format = formats[quality!];
         string filename = format.Prefix + mid + mid + "." + format.Extension;
-        var response = await Send(session, PlatformProtocols.Tx("music.vkey.GetVkey", "UrlGetVkey",
+        var response = (await c.Send(PlatformProtocols.Tx("music.vkey.GetVkey", "UrlGetVkey",
             PJ.Obj(("uin", session.UserId), ("filename", new[] { filename }),
                 ("guid", RandomNumberGenerator.GetInt32(1, int.MaxValue).ToString(System.Globalization.CultureInfo.InvariantCulture)),
-                ("songmid", new[] { mid }), ("songtype", new[] { 0 }), ("ctx", 0)), session), token).ConfigureAwait(false);
+                ("songmid", new[] { mid }), ("songtype", new[] { 0 }), ("ctx", 0)), session), token).ConfigureAwait(false)).Body;
         var rows = PJ.Rows(response["midurlinfo"], 100).Where(r => PJ.S(r, "songmid") == mid).ToArray();
         PJ.Require(rows.Length == 1, "IDENTITY_MISMATCH");
         var row = rows[0]; string returned = PJ.S(row, "filename");
@@ -156,17 +201,17 @@ internal sealed class OfficialMusicAudio(MusicPlatformHttp http)
         return new(uri, quality!, "", false, Number(track["interval"]), format.Bytes, expiry, true);
     }
 
-    private async Task<OfficialAudioResult> Kg(MusicPlatformSession session, JsonObject data,
+    private async Task<OfficialAudioResult> Kg(Call c, MusicPlatformSession session, JsonObject data,
         IReadOnlyList<string> qualities, CancellationToken token)
     {
         string hash = PlatformSongs.KgHash(data["hash"], "INVALID_REQUEST");
-        var cookies = PJ.Cookies(session); string mid = PJ.Cookie(cookies, "KUGOU_API_MID");
+        var (mid, dfid) = PlatformProtocols.KgIdentity(PJ.Cookies(session), c.KgClient);
         long now = Now;
         var body = PJ.Obj(("appid", 1005), ("clientver", 20489), ("clienttime", now),
-            ("data", PJ.Arr([PJ.Obj(("hash", hash), ("audio_id", 0))])), ("dfid", PJ.Cookie(cookies, "dfid", "-")),
+            ("data", PJ.Arr([PJ.Obj(("hash", hash), ("audio_id", 0))])), ("dfid", dfid),
             ("key", PlatformProtocols.Md5($"1005{PlatformProtocols.KgSalt}20489{now}")), ("mid", mid), ("userid", session.UserId));
-        var detail = await Send(session, PlatformProtocols.Kg("/v1/audio/audio", new(), session, mid,
-            "kmr.service.kugou.com", body), token).ConfigureAwait(false);
+        var detail = (await c.Send(PlatformProtocols.Kg("/v1/audio/audio", new(), session, c.KgClient,
+            "kmr.service.kugou.com", body), token).ConfigureAwait(false)).Body;
         var tracks = PJ.Rows(detail["data"], 1);
         PJ.Require(tracks.Count == 1, "IDENTITY_MISMATCH");
         var raw = tracks[0]; var audio = raw["audio_info"] as JsonObject ?? new();
@@ -194,8 +239,8 @@ internal sealed class OfficialMusicAudio(MusicPlatformHttp http)
             ("module", ""), ("clientver", 11430),
             ("key", PlatformProtocols.Md5(resourceHash.ToLowerInvariant() + "57ae12eb6890223e355ccfcb74edf70d" + "1005" + mid + session.UserId)));
         // The module's notSign is not request.js's notSignature: Android signature is still required.
-        var response = await Send(session, PlatformProtocols.Kg("/v5/url", args, session, mid,
-            "trackercdn.kugou.com"), token).ConfigureAwait(false);
+        var response = (await c.Send(PlatformProtocols.Kg("/v5/url", args, session, c.KgClient,
+            "trackercdn.kugou.com"), token).ConfigureAwait(false)).Body;
         PJ.Require(response["url"] is null || PJ.At(response, "data", "url") is null, "INVALID_RESPONSE");
         var result = response["url"] is not null ? response : response["data"] as JsonObject;
         PJ.Require(result is not null, "INVALID_RESPONSE");

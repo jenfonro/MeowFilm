@@ -8,8 +8,8 @@ namespace MeowFilm.Capabilities.Feedback;
 
 internal static class FeedbackProtocolRequests
 {
-    internal static HttpRequestMessage WyIdentity(MusicPlatformSession account) =>
-        MusicPlatformRequests.WyWithCookie("/api/w/nuser/account/get", new(), account.Cookie, weapi: true);
+    internal static HttpRequestMessage WyIdentity(MusicPlatformSession account, MusicWyClientContext client) =>
+        MusicPlatformRequests.WyWithCookie("/api/w/nuser/account/get", new(), account.Cookie, client, weapi: true);
     internal static void VerifyWyIdentity(JsonObject body, MusicPlatformSession account)
     {
         FeedbackProtocolRules.WySuccess(body);
@@ -25,9 +25,9 @@ internal static class FeedbackProtocolRequests
                 FeedbackProtocolRules.Require(FeedbackProtocolRules.ResponseId(id) == account.UserId, "IDENTITY_MISMATCH");
         }
     }
-    internal static HttpRequestMessage WyRecording(MusicPlatformSession account, MusicFeedbackRecording recording) =>
+    internal static HttpRequestMessage WyRecording(MusicPlatformSession account, MusicFeedbackRecording recording, MusicWyClientContext client) =>
         MusicPlatformRequests.WyWithCookie("/api/v3/song/detail",
-            new() { ["c"] = "[{\"id\":" + recording.Id + "}]" }, account.Cookie, weapi: true);
+            new() { ["c"] = "[{\"id\":" + recording.Id + "}]" }, account.Cookie, client, weapi: true);
     internal static void VerifyWyRecording(JsonObject body, MusicFeedbackStart start)
     {
         FeedbackProtocolRules.WySuccess(body);
@@ -38,7 +38,7 @@ internal static class FeedbackProtocolRequests
             FeedbackProtocolRules.Number(song["dt"]) / 1000, start.Duration), "IDENTITY_MISMATCH");
         // No title search, media URL, privilege override, alternate recording, or VIP gate.
     }
-    internal static HttpRequestMessage WyReport(MusicPlatformSession account, MusicFeedbackStart start, MusicFeedbackEnd? end)
+    internal static HttpRequestMessage WyReport(MusicPlatformSession account, MusicFeedbackStart start, MusicFeedbackEnd? end, MusicWyClientContext client)
     {
         string source = start.Source switch
         {
@@ -56,7 +56,7 @@ internal static class FeedbackProtocolRequests
         }
         var logs = new JsonArray(new JsonObject { ["action"] = end is null ? "startplay" : "play", ["json"] = json });
         var request = MusicPlatformRequests.WyWithCookie("/api/feedback/weblog",
-            new() { ["logs"] = logs.ToJsonString(FeedbackProtocolRules.Json) }, account.Cookie);
+            new() { ["logs"] = logs.ToJsonString(FeedbackProtocolRules.Json) }, account.Cookie, client);
         // Same EAPI plaintext path and cipher; the audited weblog domain is not the content domain.
         request.RequestUri = new Uri("https://clientlog.music.163.com/eapi/feedback/weblog");
         return request;

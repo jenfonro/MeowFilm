@@ -25,12 +25,14 @@ public sealed partial class MusicPlatformCatalog
         var songs = p.Kind == MusicSearchKind.Songs;
         if (c.Platform == "wy")
         {
-            var data = await c.Wy("/api/cloudsearch/pc", PJ.Obj(("s", p.Keyword), ("type", songs ? 1 : 1000),
-                ("limit", p.Limit), ("offset", (p.Page - 1) * p.Limit), ("total", true)));
-            var total = PJ.Count(PJ.At(data, "result", songs ? "songCount" : "playlistCount"));
-            var items = PJ.Rows(PJ.At(data, "result", songs ? "songs" : "playlists") ?? (total == 0 ? new JsonArray() : null), p.Limit)
-                .Select(r => songs ? PlatformSongs.Wy(r) : PlatformSongs.Playlist("wy", r));
-            return PJ.Page("wy", items, p.Page, p.Limit, total, p.Page * (long)p.Limit < total);
+            return await c.Wy("/api/cloudsearch/pc", PJ.Obj(("s", p.Keyword), ("type", songs ? 1 : 1000),
+                ("limit", p.Limit), ("offset", (p.Page - 1) * p.Limit), ("total", true)), data =>
+            {
+                var total = PJ.Count(PJ.At(data, "result", songs ? "songCount" : "playlistCount"));
+                var items = PJ.Rows(PJ.At(data, "result", songs ? "songs" : "playlists") ?? (total == 0 ? new JsonArray() : null), p.Limit)
+                    .Select(r => songs ? PlatformSongs.Wy(r) : PlatformSongs.Playlist("wy", r));
+                return PJ.Page("wy", items, p.Page, p.Limit, total, p.Page * (long)p.Limit < total);
+            });
         }
         if (c.Platform == "tx")
         {
@@ -73,9 +75,10 @@ public sealed partial class MusicPlatformCatalog
             }
             var id = PlatformSongs.KgHash(JsonValue.Create(p.Id), "INVALID_REQUEST");
             var cookies = PJ.Cookies(c.Session); var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var identity = PlatformProtocols.KgIdentity(cookies, c.KgClient);
             var body = PJ.Obj(("appid", 1005), ("clientver", 20489), ("clienttime", now),
-                ("data", PJ.Arr([PJ.Obj(("hash", id), ("audio_id", 0))])), ("dfid", PJ.Cookie(cookies, "dfid", "-")),
-                ("key", PlatformProtocols.Md5($"1005{PlatformProtocols.KgSalt}20489{now}")), ("mid", PJ.Cookie(cookies, "KUGOU_API_MID", guestMid)));
+                ("data", PJ.Arr([PJ.Obj(("hash", id), ("audio_id", 0))])), ("dfid", identity.Dfid),
+                ("key", PlatformProtocols.Md5($"1005{PlatformProtocols.KgSalt}20489{now}")), ("mid", identity.Mid));
             if (cookies.TryGetValue("token", out var token)) body["token"] = token;
             if (cookies.TryGetValue("userid", out var uid) && uid != "0") body["userid"] = uid;
             var dataKg = await c.Kg("/v1/audio/audio", new(), "kmr.service.kugou.com", body);
@@ -93,12 +96,14 @@ public sealed partial class MusicPlatformCatalog
         if (ids.Count == 0) return [];
         PJ.Require(ids.Count <= 100, "LIMIT");
         foreach (var id in ids) PJ.IdInput(id);
-        var data = await c.Wy("/api/v3/song/detail", PJ.Obj(("c", "[" + string.Join(",", ids.Select(id => "{\"id\":" + id + "}")) + "]")), true);
-        var songs = PJ.Rows(data["songs"], 100).Select(PlatformSongs.Wy).ToList();
-        var map = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
-        foreach (var song in songs) PJ.Require(map.TryAdd(NativeMusicSong.NativeId(song), song), "IDENTITY_MISMATCH");
-        PJ.Require(map.Count == ids.Count && ids.All(map.ContainsKey), "IDENTITY_MISMATCH");
-        return ids.Select(id => map[id]).ToList();
+        return await c.Wy("/api/v3/song/detail", PJ.Obj(("c", "[" + string.Join(",", ids.Select(id => "{\"id\":" + id + "}")) + "]")), data =>
+        {
+            var songs = PJ.Rows(data["songs"], 100).Select(PlatformSongs.Wy).ToList();
+            var map = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+            foreach (var song in songs) PJ.Require(map.TryAdd(NativeMusicSong.NativeId(song), song), "IDENTITY_MISMATCH");
+            PJ.Require(map.Count == ids.Count && ids.All(map.ContainsKey), "IDENTITY_MISMATCH");
+            return ids.Select(id => map[id]).ToList();
+        }, true);
     }
     public Task<JsonElement> PlaylistAsync(MusicPlaylistRequest request, CancellationToken cancellationToken = default)
     {
@@ -127,21 +132,45 @@ public sealed partial class MusicPlatformCatalog
         if (c.Platform == "wy")
         {
             var id = PJ.IdInput(p.Id);
-            // Membership is read from trackIds; the selected page is fetched below.
-            // Do not download a second, unused embedded copy of every song.
-            var data = await c.Wy("/api/v6/playlist/detail", PJ.Obj(("id", id), ("n", 0), ("s", 8)));
-            var list = data["playlist"];
-            PJ.Require(list is JsonObject && PJ.Id(PJ.At(list, "id")) == id, "IDENTITY_MISMATCH");
-            var total = PJ.Count(PJ.At(list, "trackCount"));
-            PJ.Require(total <= 10000, "LIMIT");
-            var ids = PJ.Rows(PJ.At(list, "trackIds") ?? (PJ.At(list, "tracks") is JsonArray tr && tr.Count == total ? tr : total == 0 ? new JsonArray() : null), 10000)
-                .Select(t => PJ.Id(t["id"])).ToArray();
-            PJ.Require(ids.LongLength == total && ids.Distinct(StringComparer.Ordinal).Count() == ids.Length, "INCOMPLETE_PLAYLIST");
-            snapshot = PJ.Hash(PJ.Node(new object?[] { c.Scope, id, ids, PJ.At(list, "updateTime"), PJ.At(list, "trackUpdateTime") }));
-            CheckSnapshot(p.Snapshot, snapshot);
-            var songs = await WyDetails(c, ids.Skip((p.Page - 1) * p.Limit).Take(p.Limit).ToArray());
-            page = PJ.Page("wy", songs, p.Page, p.Limit, total, p.Page * (long)p.Limit < total);
-            info = PlatformSongs.Playlist("wy", list!);
+            // Embedded tracks are a prefix; later pages need not download it again.
+            var membership = await c.Wy("/api/v6/playlist/detail",
+                PJ.Obj(("id", id), ("n", p.Page == 1 ? p.Limit : 0), ("s", 8)), data =>
+            {
+                var list = data["playlist"];
+                PJ.Require(list is JsonObject && PJ.Id(PJ.At(list, "id")) == id, "IDENTITY_MISMATCH");
+                var total = PJ.Count(PJ.At(list, "trackCount"));
+                PJ.Require(total <= 10000, "LIMIT");
+                var ids = PJ.Rows(PJ.At(list, "trackIds") ?? (PJ.At(list, "tracks") is JsonArray tr && tr.Count == total ? tr : total == 0 ? new JsonArray() : null), 10000)
+                    .Select(t => PJ.Id(t["id"])).ToArray();
+                var members = ids.ToHashSet(StringComparer.Ordinal);
+                PJ.Require(ids.LongLength == total && members.Count == ids.Length, "INCOMPLETE_PLAYLIST");
+                var revision = PJ.Hash(PJ.Node(new object?[] { c.Scope, id, ids, PJ.At(list, "updateTime"), PJ.At(list, "trackUpdateTime") }));
+                CheckSnapshot(p.Snapshot, revision);
+                var pageIds = ids.Skip((p.Page - 1) * p.Limit).Take(p.Limit).ToArray();
+                foreach (var memberId in pageIds) PJ.IdInput(memberId);
+                var tracks = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+                foreach (var track in PJ.Rows(PJ.At(list, "tracks") ?? new JsonArray(), 10000))
+                {
+                    var memberId = PJ.Id(track["id"]);
+                    PJ.Require(members.Contains(memberId) && tracks.TryAdd(memberId, track), "IDENTITY_MISMATCH");
+                }
+                var songs = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+                foreach (var memberId in pageIds)
+                {
+                    if (!tracks.TryGetValue(memberId, out var track)) continue;
+                    if (!PlatformSongs.HasWyDisplayTitle(track)) continue;
+                    var song = PlatformSongs.Wy(track);
+                    PJ.Require(NativeMusicSong.NativeId(song) == memberId, "IDENTITY_MISMATCH");
+                    songs.Add(memberId, song);
+                }
+                return (Info: PlatformSongs.Playlist("wy", list!), Snapshot: revision, PageIds: pageIds,
+                    Songs: songs, Total: total);
+            });
+            info = membership.Info; snapshot = membership.Snapshot;
+            var missing = membership.PageIds.Where(memberId => !membership.Songs.ContainsKey(memberId)).ToArray();
+            foreach (var song in await WyDetails(c, missing)) membership.Songs.Add(NativeMusicSong.NativeId(song), song);
+            page = PJ.Page("wy", membership.PageIds.Select(memberId => membership.Songs[memberId]), p.Page, p.Limit,
+                membership.Total, p.Page * (long)p.Limit < membership.Total);
             page["snapshotStrength"] = "ordered-membership";
         }
         else if (c.Platform == "tx")
@@ -198,17 +227,19 @@ public sealed partial class MusicPlatformCatalog
     public Task<JsonElement> AlbumAsync(MusicAlbumRequest request, CancellationToken cancellationToken = default)
     {
         PJ.Require(request is not null); var p = request!; PJ.IdInput(p.Id);
-        return RunAsync(p.Platform, "album", p, p.Refresh, async c =>
+        return RunAsync(p.Platform, "album", p, p.Refresh, c =>
         {
             PJ.Require(c.Platform == "wy", "UNSUPPORTED");
-            var data = await c.Wy("/api/v1/album/" + p.Id, new(), true);
-            var album = data["album"];
-            PJ.Require(album is JsonObject && PJ.Id(PJ.At(album, "id")) == p.Id, "IDENTITY_MISMATCH");
-            var songs = PJ.Rows(data["songs"], 1000).Select(PlatformSongs.Wy).ToArray();
-            if (PJ.At(album, "size") is { } count) PJ.Require(PJ.Count(count) == songs.Length, "INCOMPLETE_PLAYLIST");
-            return PJ.Obj(("platform", "wy"), ("id", p.Id), ("name", PJ.Metadata(PJ.At(album, "name"))),
-                ("cover", PJ.Image(PJ.At(album, "picUrl"))), ("items", PJ.Arr(songs)), ("count", songs.Length),
-                ("total", songs.Length), ("more", false), ("continuation", null), ("source", "wy"), ("engine", "NeteaseAlbum"));
+            return c.Wy("/api/v1/album/" + p.Id, new(), data =>
+            {
+                var album = data["album"];
+                PJ.Require(album is JsonObject && PJ.Id(PJ.At(album, "id")) == p.Id, "IDENTITY_MISMATCH");
+                var songs = PJ.Rows(data["songs"], 1000).Select(PlatformSongs.Wy).ToArray();
+                if (PJ.At(album, "size") is { } count) PJ.Require(PJ.Count(count) == songs.Length, "INCOMPLETE_PLAYLIST");
+                return PJ.Obj(("platform", "wy"), ("id", p.Id), ("name", PJ.Metadata(PJ.At(album, "name"))),
+                    ("cover", PJ.Image(PJ.At(album, "picUrl"))), ("items", PJ.Arr(songs)), ("count", songs.Length),
+                    ("total", songs.Length), ("more", false), ("continuation", null), ("source", "wy"), ("engine", "NeteaseAlbum"));
+            }, true);
         }, cancellationToken);
     }
 }

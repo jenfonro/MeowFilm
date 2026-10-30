@@ -8,7 +8,7 @@ using MeowFilm.Capabilities.Platforms;
 namespace MeowFilm.Capabilities.Sync;
 
 internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IMusicPlatformSessionSource sessions,
-    MusicPlatformHttp http, Func<HttpRequestMessage, CancellationToken, Task<byte[]>>? cloud, Action generationGuard, CancellationToken token)
+    MusicPlatformHttp http, MusicPlatformClientContextOwner clients, Func<HttpRequestMessage, CancellationToken, Task<byte[]>>? cloud, Action generationGuard, CancellationToken token)
 {
     private MusicLibrarySyncSnapshot snapshot = null!;
     private JsonObject library = null!, state = null!;
@@ -29,10 +29,14 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
     private static bool SubscribedOnly(JsonObject c) => !LJ.B(c["locallyCreated"]) && Bindings(c).Any() && Bindings(c).All(b => !LJ.B(b["writable"]));
     private bool Enabled(string platform, string kind) => LJ.B(state["platforms"]![platform]![kind == "favorites" ? "favorites" : "playlists"]);
     private string[] Kinds(string platform) => new[] { "favorites", "playlist" }.Where(k => Enabled(platform, k)).ToArray();
-    private async Task Guard()
+    private void GuardLeases()
     {
         token.ThrowIfCancellationRequested(); generationGuard();
         foreach (var lease in leases.Values) LJ.Require(sessions.IsCurrent(lease), "STALE_SESSION");
+    }
+    private async Task Guard()
+    {
+        GuardLeases();
         await owner.CheckLibrarySyncAsync(snapshot, token).ConfigureAwait(false);
     }
     private async Task Save()
@@ -70,11 +74,13 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
                 LJ.Require(S(state["platforms"]![platform]!["accountId"]) == lease.UserId, "ACCOUNT_REPLACED");
                 string previous = S(library["accounts"]![platform]); LJ.Require(previous.Length == 0 || previous == lease.UserId, "ACCOUNT_REBIND_REQUIRED");
                 leases[platform] = lease;
+                var client = platform is "wy" or "kg"
+                    ? await clients.AcquireAsync(platform, token).ConfigureAwait(false) : null;
                 adapters[platform] = platform switch
                 {
-                    "wy" => new MusicSyncWy(lease, http, requestBudget, Guard, token),
-                    "tx" => new MusicSyncTx(lease, http, requestBudget, Guard, token),
-                    "kg" => new MusicSyncKg(lease, http, Guard, token, cloud, requestBudget),
+                    "wy" => new MusicSyncWy(lease, http, clients, client, requestBudget, Guard, GuardLeases, token),
+                    "tx" => new MusicSyncTx(lease, http, clients, client, requestBudget, Guard, GuardLeases, token),
+                    "kg" => new MusicSyncKg(lease, http, clients, client, Guard, GuardLeases, token, cloud, requestBudget),
                     _ => throw new MusicLibraryException("INVALID_PLATFORM")
                 };
             }

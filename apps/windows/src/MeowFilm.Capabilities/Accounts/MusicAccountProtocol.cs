@@ -15,10 +15,11 @@ namespace MeowFilm.Capabilities.Accounts;
 public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
 {
     private readonly MusicPlatformHttp transport;
+    private readonly MusicPlatformClientContextOwner clients;
+    internal MusicPlatformClientProtocol ClientProtocol { get; }
     private readonly bool leaveOpen;
     private readonly TimeSpan timeout;
     private readonly TimeProvider clock;
-    private readonly Func<string> registrationEntropy;
     private readonly object gate = new();
     private readonly Dictionary<string, ProtocolState> states = AccountRules.Platforms.ToDictionary(p => p, _ => new ProtocolState());
     private readonly HashSet<Task> pending = [];
@@ -39,7 +40,7 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
         internal long Started { get; } = started;
         internal int Polls;
         internal bool Consumed;
-        internal StoredKgDevice? Device;
+        internal MusicKgClientContext? Device;
         public override string ToString() => "MusicAccountQR (transient)";
     }
     private sealed class Context : IDisposable
@@ -55,6 +56,9 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
         internal CancellationToken Token { get; }
         internal string Reason = "CANCELLED";
         internal bool HandoffStarted;
+        internal MusicPlatformClientContext? Client;
+        internal MusicWyClientContext WyClient => (MusicWyClientContext)Client!;
+        internal MusicKgClientContext KgClient => (MusicKgClientContext)Client!;
         private int requests;
         private readonly int requestLimit;
         internal Context(MusicAccountProtocol owner, string platform, long generation, CancellationToken external, int requestLimit,
@@ -80,13 +84,27 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
             AccountRules.Require(!external.IsCancellationRequested, "CANCELLED");
             AccountRules.Require(owner.clock.GetElapsedTime(started) < duration && !timeoutCancellation.IsCancellationRequested, "TIMEOUT");
             AccountRules.Require(!Token.IsCancellationRequested, Reason);
+            if (Client is not null)
+                AccountRules.Require(owner.clients.IsCurrent(Client),
+                    owner.clients.NeedsReconciliation ? "COMMIT_UNKNOWN" : "STORAGE_CONFLICT");
         }
+        internal HttpRequestMessage Wy(string path, JsonObject parameters, string? cookie, bool weapi = false) =>
+            MusicPlatformRequests.WyWithCookie(path, parameters, cookie, WyClient, weapi);
+        internal HttpRequestMessage Kg(string path, JsonObject parameters, string? cookie,
+            string? router = null, JsonObject? body = null) =>
+            MusicPlatformRequests.KgWithCookie(path, parameters, cookie, KgClient, router, body);
         internal async Task<MusicPlatformHttpResult> Send(HttpRequestMessage request)
         {
             var result = await SendCore(request, left => detailsRead
                 ? owner.transport.SendAccountDetailsAsync(Platform, request, Token, left)
                 : owner.transport.SendAsync(Platform, request, Token, 1024 * 1024, left)).ConfigureAwait(false);
-            Inspect(result.Body); Guard(); return result;
+            Inspect(result.Body); Guard();
+            return result;
+        }
+        internal async Task AcceptWyCookies(IReadOnlyList<string> cookies, string? accountCookie = null)
+        {
+            Client = await owner.clients.AcceptWyAsync(WyClient, accountCookie, cookies, Guard, Token).ConfigureAwait(false);
+            Guard();
         }
         internal Task<MusicAccountHttpResult> SendAccount(MusicAccountHttpStep step, HttpRequestMessage request) =>
             SendCore(request, left => owner.transport.SendAccountStepAsync(step, request, Token, left));
@@ -111,9 +129,8 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
             catch (Exception error)
             {
                 Guard();
-                throw new MusicAccountException(error is MusicPlatformException platformError
-                    ? platformError.Code == "AUTH_REQUIRED" ? "AUTH_EXPIRED" : platformError.Code
-                    : error is MusicAccountException accountError ? accountError.Code : "NETWORK_ERROR");
+                throw new MusicAccountException(error is MusicPlatformException or MusicAccountException
+                    ? AccountRules.Error(error) : "NETWORK_ERROR");
             }
         }
         internal async Task Accept(MusicAccountSessionHandoff accept, MusicAccountHandoff handoff)
@@ -138,17 +155,16 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
         }
         public void Dispose() { cancellation.Dispose(); timeoutCancellation.Dispose(); }
     }
-    public MusicAccountProtocol() : this(new MusicPlatformHttp(), leaveOpen: false) { }
-    public MusicAccountProtocol(MusicPlatformHttp transport, bool leaveOpen = true, TimeSpan? timeout = null, TimeProvider? clock = null)
-        : this(transport, leaveOpen, timeout, clock, KgRandomSecret) { }
-    private MusicAccountProtocol(MusicPlatformHttp transport, bool leaveOpen, TimeSpan? timeout, TimeProvider? clock,
-        Func<string> registrationEntropy)
+    internal MusicAccountProtocol(MusicPlatformHttp transport, MusicPlatformClientContextOwner clients,
+        bool leaveOpen = true, TimeSpan? timeout = null, TimeProvider? clock = null,
+        MusicPlatformClientProtocol? clientProtocol = null)
     {
         this.transport = transport ?? throw new ArgumentNullException(nameof(transport));
+        this.clients = clients ?? throw new ArgumentNullException(nameof(clients));
         this.leaveOpen = leaveOpen; this.timeout = timeout ?? TimeSpan.FromSeconds(25);
         AccountRules.Require(this.timeout.TotalMilliseconds is >= 1 and <= 60000);
         this.clock = clock ?? TimeProvider.System;
-        this.registrationEntropy = registrationEntropy;
+        ClientProtocol = clientProtocol ?? new(transport, this.clock);
     }
     private void Track(Task task)
     {
@@ -185,7 +201,14 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
         }
         async Task<T> Physical()
         {
-            try { ctx.Guard(); return await action(ctx).ConfigureAwait(false); }
+            try
+            {
+                ctx.Guard();
+                if (platform is "wy" or "kg")
+                    ctx.Client = await clients.AcquireAsync(platform, ctx.Token).ConfigureAwait(false);
+                ctx.Guard();
+                return await action(ctx).ConfigureAwait(false);
+            }
             finally { lock (gate) if (ReferenceEquals(states[platform].Active, ctx)) states[platform].Active = null; }
         }
         var task = Physical();
@@ -198,7 +221,7 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
         catch (Exception error)
         {
             string code = error switch { MusicAccountException known => known.Code,
-                MusicPlatformException known => known.Code, OperationCanceledException => "CANCELLED", _ => "UPSTREAM_ERROR" };
+                MusicPlatformException known => AccountRules.Error(known), OperationCanceledException => "CANCELLED", _ => "UPSTREAM_ERROR" };
             try { ctx.Guard(); } catch (MusicAccountException e) { code = e.Code; }
             if (ctx.HandoffStarted && code != "HANDOFF_REJECTED") code = "HANDOFF_UNCONFIRMED";
             lock (gate) if (states[platform].Generation == ctx.Generation) states[platform].Qr = null;
@@ -226,15 +249,16 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
     {
         AccountRules.Platform(platform);
         if (platform == "tx") return BeginTx(cancellationToken);
-        AccountRules.Require(platform != "kg", "DEVICE_CONTEXT_REQUIRED");
+        if (platform == "kg") return BeginKg(cancellationToken);
         AccountRules.Require(platform == "wy", "UNSUPPORTED");
         return Run(platform, cancellationToken, async ctx =>
         {
-            var result = await ctx.Send(MusicPlatformRequests.WyWithCookie("/api/login/qrcode/unikey",
+            var result = await ctx.Send(ctx.Wy("/api/login/qrcode/unikey",
                 new JsonObject { ["type"] = 3 }, null)).ConfigureAwait(false);
             WyStatus(result.Body);
             string key = Text(result.Body["unikey"]);
             AccountRules.Require(AccountRules.Match(key, "^[A-Za-z0-9_-]{1,256}$"), "INVALID_RESPONSE");
+            await ctx.AcceptWyCookies(result.SetCookieHeaders).ConfigureAwait(false);
             ctx.Guard();
             var challenge = new MusicAccountChallenge(platform, Guid.NewGuid().ToString("D"),
                 "https://music.163.com/login?codekey=" + Uri.EscapeDataString(key),
@@ -275,17 +299,20 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
                 AccountRules.Require(clock.GetElapsedTime(qr.Started) < TimeSpan.FromSeconds(180), "QR_EXPIRED");
             }
             GuardQr();
-            var result = await ctx.Send(MusicPlatformRequests.WyWithCookie("/api/login/qrcode/client/login",
+            var result = await ctx.Send(ctx.Wy("/api/login/qrcode/client/login",
                 new JsonObject { ["key"] = qr.Key, ["type"] = 3 }, null)).ConfigureAwait(false);
             GuardQr();
             int code = StrictCode(result.Body["code"]);
             AccountRules.Require(code is 800 or 801 or 802 or 803, "UPSTREAM_ERROR");
             if (code != 803)
             {
+                await ctx.AcceptWyCookies(result.SetCookieHeaders).ConfigureAwait(false);
+                GuardQr();
                 if (code == 800) lock (gate) states[platform].Qr = null;
                 return new MusicAccountPoll(platform, challengeId, code switch { 800 => "expired", 801 => "waiting", _ => "confirming" });
             }
             string cookie = QrCookie(result.SetCookieHeaders, clock.GetUtcNow());
+            await ctx.AcceptWyCookies(result.SetCookieHeaders).ConfigureAwait(false);
             var account = await ValidateWy(ctx, cookie, AccountRules.Cookies(cookie)).ConfigureAwait(false);
             GuardQr();
             await ctx.Accept(acceptSession!, new(platform, challengeId, cookie, account)).ConfigureAwait(false);

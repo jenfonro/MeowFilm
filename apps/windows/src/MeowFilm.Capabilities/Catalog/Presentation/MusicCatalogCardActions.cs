@@ -64,7 +64,7 @@ public sealed partial class MusicCapability
     {
         var parameters = new Dictionary<string, object?> { ["platform"] = card.Platform };
         if (card.Kind == "daily")
-            parameters["branch"] = card.Action is { } a && MusicCatalogDto.Text(a, "branch") == "style" ? "style" : "default";
+            parameters["branch"] = CardDailyBranch(card);
         else
         {
             parameters["id"] = card.ActionId;
@@ -73,6 +73,9 @@ public sealed partial class MusicCapability
         }
         return parameters;
     }
+    private static string CardDailyBranch(MusicCatalogCard card) =>
+        card.Action is { } action && MusicCatalogDto.Text(action, "branch") == "style" ? "style" : "default";
+
     // Optional read-only preview, bounded independently from explicit play intent.
     // Missing/failed data never fabricates titles or starts a recommendation session.
     public async Task<IReadOnlyList<string>> ReadCatalogCardPreviewAsync(MusicCatalogCard card, CancellationToken cancellationToken)
@@ -80,6 +83,8 @@ public sealed partial class MusicCapability
         if (cancellationToken.IsCancellationRequested || stopping || !IsCatalogPage || loadCancellation is not null ||
             !CanCatalogBrowse || !card.CanRequestPreview || !ContainsCatalogCard(card)) return [];
         try { RequireCatalogContent(); } catch (MusicOperationException) { return []; }
+        if (card.HasPreview)
+            return card.PreviewSongs.Take(3).Select((song, index) => $"{index + 1} {song.Title}").ToArray();
         var generation = loadGeneration;
         CatalogPreviewFlight? flight = null;
         IReadOnlyList<string> cachedTitles = Array.Empty<string>();

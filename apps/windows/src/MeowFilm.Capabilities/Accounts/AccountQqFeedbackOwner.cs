@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 using System.Diagnostics;
-using System.Security.Cryptography;
 using System.Text.Json.Serialization;
 using MeowFilm.Capabilities.Platforms;
-using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Accounts;
 
@@ -12,7 +10,6 @@ public sealed partial class MusicAccountOwner : IMusicQqFeedbackContextSource
     private readonly SemaphoreSlim qqContextSerial = new(1, 1);
     private readonly HashSet<QqContextAcquisition> qqAcquisitions = [];
     private readonly HashSet<QqContextLease> qqContexts = [];
-    private StoredQqFeedbackDevice? qqObservedDevice;
 
     private sealed class QqContextAcquisition : IDisposable
     {
@@ -27,17 +24,16 @@ public sealed partial class MusicAccountOwner : IMusicQqFeedbackContextSource
         internal CancellationTokenSource Deadline { get; }
         internal CancellationTokenSource Cancellation { get; }
         internal CancellationToken Token { get; }
-        internal bool Admitted;
         internal void Abort() { try { Cancellation.Cancel(); } catch (AggregateException) { } }
         public void Dispose() { Cancellation.Dispose(); Deadline.Dispose(); }
         public override string ToString() => "QqContextAcquisition (redacted)";
     }
 
-    private bool QqAccountCurrentLocked(MusicPlatformSession account, bool ownWrite = false)
+    private bool QqAccountCurrentLocked(MusicPlatformSession account)
     {
         var state = states["tx"];
         return !closed && account.Platform == "tx" && leases.TryGetValue(account, out var issued) &&
-            issued.Epoch == state.Epoch && !state.Revoked && (!state.Uncertain || ownWrite) &&
+            issued.Epoch == state.Epoch && !state.Revoked && !state.Uncertain &&
             state.Active is null && state.Current is { } current && current.Generation == account.Generation &&
             current.Scope == account.Scope && current.Profile?.UserId == account.UserId && current.Cookie == account.Cookie;
     }
@@ -47,8 +43,8 @@ public sealed partial class MusicAccountOwner : IMusicQqFeedbackContextSource
         lock (gate)
         {
             AccountRules.Require(!closed, "CLOSED");
-            AccountRules.Require(!states["tx"].Uncertain || op.Admitted, "COMMIT_UNKNOWN");
-            AccountRules.Require(QqAccountCurrentLocked(op.Account, op.Admitted), "SESSION_CHANGED");
+            AccountRules.Require(!states["tx"].Uncertain, "COMMIT_UNKNOWN");
+            AccountRules.Require(QqAccountCurrentLocked(op.Account), "SESSION_CHANGED");
         }
     }
     private static void CheckQqAccount(AccountDocument document, MusicPlatformSession account)
@@ -68,104 +64,33 @@ public sealed partial class MusicAccountOwner : IMusicQqFeedbackContextSource
         lock (gate)
         {
             foreach (var op in qqAcquisitions.ToArray())
-                if (!QqAccountCurrentLocked(op.Account, op.Admitted)) op.Abort();
+                if (!QqAccountCurrentLocked(op.Account)) op.Abort();
             foreach (var lease in qqContexts.ToArray())
                 if (!QqAccountCurrentLocked(lease.Account)) lease.Abort();
         }
     }
-    private StoredQqFeedbackDevice ObserveQqDocument(AccountDocument document)
+    private void ClientContextChanged(string platform)
+    {
+        if (platform != "tx") return;
+        lock (gate) foreach (var lease in qqContexts.ToArray()) lease.Abort();
+    }
+    private async Task ReadQqAccount(QqContextAcquisition op)
     {
         try
         {
-            var device = document.GetQqFeedbackDevice();
-            lock (gate)
-            {
-                if (qqObservedDevice is not null && !StoredQqFeedbackDevice.Same(qqObservedDevice, device))
-                    foreach (var lease in qqContexts.ToArray()) lease.Abort();
-                qqObservedDevice = device;
-            }
-            return device;
-        }
-        catch
-        {
-            InvalidateQqDocument();
-            throw;
-        }
-    }
-    private void InvalidateQqDocument()
-    {
-        lock (gate)
-        {
-            qqObservedDevice = null;
-            foreach (var lease in qqContexts.ToArray()) lease.Abort();
-        }
-    }
-    private async Task<StoredQqFeedbackDevice> ReadQqDevice(QqContextAcquisition op)
-    {
-        try
-        {
-            return await DiskAsync(async () =>
+            await DiskAsync(async () =>
             {
                 QqGuard(op);
                 var document = await ReadDocument(op.Token).ConfigureAwait(false);
-                QqGuard(op);
-                CheckQqAccount(document, op.Account);
-                return ObserveQqDocument(document);
+                QqGuard(op); CheckQqAccount(document, op.Account);
+                return true;
             }, op.Token).ConfigureAwait(false);
         }
         catch (MusicAccountException error) when (error.Code == "CORRUPT_STORAGE")
         {
-            InvalidateQqDocument();
+            lock (gate) foreach (var lease in qqContexts.ToArray()) lease.Abort();
             throw;
         }
-    }
-
-    private async Task<StoredQqFeedbackDevice> SaveQqDevice(QqContextAcquisition op,
-        StoredQqFeedbackDevice expected, StoredQqFeedbackDevice next)
-    {
-        // Unlike UI command receipts, this capability MUST await the physical CAS even
-        // after cancellation. No following network step can outrun an unknown save.
-        return await DiskAsync(async () =>
-        {
-            QqGuard(op);
-            var document = await ReadDocument(op.Token).ConfigureAwait(false);
-            QqGuard(op); CheckQqAccount(document, op.Account);
-            var actualDevice = ObserveQqDocument(document);
-            AccountRules.Require(StoredQqFeedbackDevice.Same(actualDevice, expected), "STORAGE_CONFLICT");
-            byte[] bytes = document.ReplaceQqFeedbackDevice(expected, next with { Generation = expected.Generation + 1 });
-            try
-            {
-                lock (gate)
-                {
-                    QqGuard(op);
-                    foreach (var lease in qqContexts.ToArray()) lease.Abort();
-                    states["tx"].Uncertain = true; op.Admitted = true;
-                }
-                try
-                {
-                    var receipt = await store.WriteAsync(DocumentNamespace, bytes, document.Fingerprint, op.Token).ConfigureAwait(false);
-                    AccountRules.Require(receipt == DocumentFingerprint.FromBytes(bytes), "COMMIT_UNKNOWN");
-                }
-                catch (ProtectedDocumentException error) when (error.Error == DocumentStoreError.Conflict)
-                {
-                    lock (gate)
-                    {
-                        op.Admitted = false;
-                        if (QqAccountCurrentLocked(op.Account, ownWrite: true)) states["tx"].Uncertain = false;
-                    }
-                    throw new MusicAccountException("STORAGE_CONFLICT");
-                }
-                catch { throw new MusicAccountException("COMMIT_UNKNOWN"); }
-                lock (gate)
-                {
-                    // An ACK arriving after cancellation/change does not restore authority.
-                    QqGuard(op);
-                    states["tx"].Uncertain = false; op.Admitted = false;
-                    return ObserveQqDocument(document);
-                }
-            }
-            finally { CryptographicOperations.ZeroMemory(bytes); }
-        }, op.Token).ConfigureAwait(false);
     }
 
     async ValueTask<IMusicQqFeedbackContextLease> IMusicQqFeedbackContextSource.AcquireForAccountAsync(
@@ -184,12 +109,14 @@ public sealed partial class MusicAccountOwner : IMusicQqFeedbackContextSource
                 AccountRules.Require(!states["tx"].Uncertain, "COMMIT_UNKNOWN");
                 AccountRules.Require(QqAccountCurrentLocked(exactAccount!), "SESSION_CHANGED");
                 AccountRules.Require(qqContexts.Count < 32, "RATE_LIMITED");
-                op = new(exactAccount!, token, deviceProtocol.QqFeedbackClock);
+                op = new(exactAccount!, token, clientProtocol.Clock);
                 qqAcquisitions.Add(op);
             }
             await qqContextSerial.WaitAsync(op.Token).ConfigureAwait(false); serial = true;
             QqGuard(op);
-            var device = await ReadQqDevice(op).ConfigureAwait(false);
+            await ReadQqAccount(op).ConfigureAwait(false);
+            QqGuard(op);
+            await clients.InitializeAsync(op.Token).ConfigureAwait(false);
             QqGuard(op);
             // Always live, including a warm cache and Finish reacquisition. Saved profile,
             // anonymous GetSession and successful QIMEI are NEVER authentication proof.
@@ -197,44 +124,26 @@ public sealed partial class MusicAccountOwner : IMusicQqFeedbackContextSource
                 exactAccount!, op.Token).ConfigureAwait(false), "tx", exactAccount!.Cookie);
             QqGuard(op);
             AccountRules.Require(profile.UserId == exactAccount.UserId, "IDENTITY_MISMATCH");
-            if (device.Generation == 0)
-                device = await SaveQqDevice(op, device, StoredQqFeedbackDevice.Create()).ConfigureAwait(false);
+            // Anonymous client initialization/renewal is independently owned;
+            // no account document write or login proof is involved in it.
+            var device = await clients.EnsureQqAsync(clientProtocol, op.Token).ConfigureAwait(false);
             QqGuard(op);
-            if (!device.QimeiCurrent(deviceProtocol.QqFeedbackClock.GetUtcNow()))
-            {
-                var qimei = await deviceProtocol.RequestQqQimeiAsync(device, op.Token).ConfigureAwait(false);
-                QqGuard(op);
-                AccountRules.Require(qimei.Generation == (device.Qimei?.Generation ?? 0) + 1, "INVALID_RESPONSE");
-                device = await SaveQqDevice(op, device, device with { Qimei = qimei }).ConfigureAwait(false);
-            }
+            await ReadQqAccount(op).ConfigureAwait(false);
             QqGuard(op);
-            if (!device.SessionCurrent(deviceProtocol.QqFeedbackClock.GetUtcNow()))
-            {
-                var session = await deviceProtocol.RequestQqDeviceSessionAsync(device, op.Token).ConfigureAwait(false);
-                QqGuard(op);
-                AccountRules.Require(session.Generation == (device.Session?.Generation ?? 0) + 1 &&
-                    session.QimeiGeneration == device.Qimei!.Generation, "INVALID_RESPONSE");
-                device = await SaveQqDevice(op, device, device with { Session = session }).ConfigureAwait(false);
-            }
-            // Reobserve account/device after the network and CAS, including other owners.
-            var observed = await ReadQqDevice(op).ConfigureAwait(false);
-            QqGuard(op);
-            AccountRules.Require(StoredQqFeedbackDevice.Same(device, observed), "STORAGE_CONFLICT");
+            AccountRules.Require(clients.IsCurrent(device), "STORAGE_CONFLICT");
             lock (gate)
             {
                 QqGuard(op);
-                if (!device.SessionCurrent(deviceProtocol.QqFeedbackClock.GetUtcNow()))
+                if (!device.SessionCurrent(clientProtocol.Clock.GetUtcNow()))
                     throw new MusicPlatformException("DEVICE_CONTEXT_EXPIRED");
                 AccountRules.Require(qqContexts.Count < 32, "RATE_LIMITED");
-                var lease = new QqContextLease(this, exactAccount, device, deviceProtocol.QqFeedbackClock, token);
+                var lease = new QqContextLease(this, exactAccount, device, clientProtocol.Clock, token);
                 qqContexts.Add(lease);
                 return lease;
             }
         }
         catch (Exception error)
         {
-            // Unknown admission outranks cancellation: recovery is explicit list/read only.
-            if (op?.Admitted == true) throw new MusicPlatformException("COMMIT_UNKNOWN");
             if (token.IsCancellationRequested) throw new OperationCanceledException(token);
             if (error is MusicPlatformException) throw;
             string code = AccountRules.Error(error);
@@ -262,12 +171,12 @@ public sealed partial class MusicAccountOwner : IMusicQqFeedbackContextSource
     private sealed class QqContextLease : IMusicQqFeedbackContextLease
     {
         private readonly MusicAccountOwner owner;
-        private readonly StoredQqFeedbackDevice stored;
+        private readonly MusicQqClientContext stored;
         private readonly TimeProvider clock;
         private readonly CancellationTokenSource cancellation;
         private readonly ITimer? timer;
         private bool disposed;
-        internal QqContextLease(MusicAccountOwner owner, MusicPlatformSession account, StoredQqFeedbackDevice stored,
+        internal QqContextLease(MusicAccountOwner owner, MusicPlatformSession account, MusicQqClientContext stored,
             TimeProvider clock, CancellationToken caller)
         {
             this.owner = owner; this.stored = stored; this.clock = clock; Account = account;
@@ -297,7 +206,7 @@ public sealed partial class MusicAccountOwner : IMusicQqFeedbackContextSource
                 lock (owner.gate)
                 {
                     if (!disposed && !Revoked.IsCancellationRequested && owner.QqAccountCurrentLocked(Account) &&
-                        owner.qqObservedDevice is { } observed && StoredQqFeedbackDevice.Same(observed, stored) &&
+                        owner.clients.IsCurrent(stored) &&
                         stored.SessionCurrent(clock.GetUtcNow())) return true;
                     Abort(); return false;
                 }

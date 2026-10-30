@@ -4,16 +4,16 @@ using System.Text.Json.Nodes;
 
 namespace MeowFilm.Capabilities.Platforms;
 
-internal sealed class MusicVipPageProtocol(MusicPlatformHttp http)
+internal sealed class MusicVipPageProtocol(MusicPlatformHttp http, MusicPlatformClientContextOwner clients)
 {
     private const int Maximum = 512 * 1024;
 
-    internal async Task<MusicVipSignCardData?> ReadSignAsync(
-        MusicPlatformSession session, CancellationToken token)
+    internal Task<MusicVipSignCardData?> ReadSignAsync(
+        MusicPlatformSession session, CancellationToken token, Action accountGuard) =>
+        Read(session, c => MusicPlatformRequests.WyVipSignCard(session.Cookie, c),
+            SignCard, token, Maximum, accountGuard);
+    private static MusicVipSignCardData? SignCard(JsonObject data)
     {
-        var request = MusicPlatformRequests.WyVipSignCard(session.Cookie);
-        var response = await http.SendVipPageEapiAsync(request, token, Maximum).ConfigureAwait(false);
-        var data = PlatformProtocols.WySuccess(response.Body);
         var background = Https(data["bgTexture"]);
         if (background.Length == 0) return null;
         if (data["signInfoList"] is not JsonArray rows || rows.Count > 31 ||
@@ -35,12 +35,12 @@ internal sealed class MusicVipPageProtocol(MusicPlatformHttp http)
             Array.AsReadOnly(days));
     }
 
-    internal async Task<MusicVipBannerData?> ReadBannerAsync(
-        MusicPlatformSession session, CancellationToken token)
+    internal Task<MusicVipBannerData?> ReadBannerAsync(
+        MusicPlatformSession session, CancellationToken token, Action accountGuard) =>
+        Read(session, c => MusicPlatformRequests.WyVipBanner(session.Cookie, c),
+            body => Banner(body, token), token, Maximum, accountGuard);
+    private static MusicVipBannerData? Banner(JsonObject body, CancellationToken token)
     {
-        var request = MusicPlatformRequests.WyVipBanner(session.Cookie);
-        var response = await http.SendVipPageEapiAsync(request, token, Maximum).ConfigureAwait(false);
-        var body = PlatformProtocols.WySuccess(response.Body);
         if (body["data"] is not JsonObject data ||
             data["contentList"] is not JsonArray rows ||
             rows.Count > 100 || !rows.All(row => row is JsonValue value &&
@@ -66,11 +66,11 @@ internal sealed class MusicVipPageProtocol(MusicPlatformHttp http)
         return null;
     }
 
-    internal async Task SignAsync(MusicPlatformSession session, CancellationToken token)
+    internal Task SignAsync(MusicPlatformSession session, CancellationToken token, Action accountGuard) =>
+        Read(session, c => MusicPlatformRequests.WyVipCheckIn(session.Cookie, c),
+            Signed, token, 65536, accountGuard, weapi: true);
+    private static bool Signed(JsonObject body)
     {
-        var request = MusicPlatformRequests.WyVipCheckIn(session.Cookie);
-        var response = await http.SendVipPageWeapiAsync(request, token, 65536).ConfigureAwait(false);
-        var body = PlatformProtocols.WySuccess(response.Body);
         PJ.Require(body["data"] switch
         {
             JsonObject or JsonArray => true,
@@ -79,8 +79,30 @@ internal sealed class MusicVipPageProtocol(MusicPlatformHttp http)
             JsonValue value when value.TryGetValue<long>(out var result) => result != 0,
             _ => false
         }, "UPSTREAM_ERROR");
+        return true;
     }
 
+    private async Task<T> Read<T>(MusicPlatformSession session,
+        Func<MusicWyClientContext, System.Net.Http.HttpRequestMessage> build, Func<JsonObject, T> decode, CancellationToken token,
+        int maximum, Action accountGuard, bool weapi = false)
+    {
+        var client = await clients.AcquireWyAsync(token).ConfigureAwait(false);
+        void Guard()
+        {
+            accountGuard();
+            token.ThrowIfCancellationRequested();
+            PJ.Require(clients.IsCurrent(client), clients.NeedsReconciliation ? "COMMIT_UNKNOWN" : "STORAGE_CONFLICT");
+        }
+        Guard();
+        var response = weapi
+            ? await http.SendVipPageWeapiAsync(build(client), token, maximum).ConfigureAwait(false)
+            : await http.SendVipPageEapiAsync(build(client), token, maximum).ConfigureAwait(false);
+        Guard();
+        var body = PlatformProtocols.WySuccess(response.Body);
+        var value = decode(body);
+        client = await clients.AcceptWyAsync(client, session.Cookie, response.SetCookieHeaders, Guard, token).ConfigureAwait(false);
+        Guard(); return value;
+    }
     private static string Text(JsonNode? value, int maximum)
     {
         var text = PJ.Text(value);

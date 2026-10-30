@@ -27,6 +27,7 @@ internal sealed class MusicAccountDetailsFixture : IAsyncDisposable
     internal readonly Store Wrapper;
     internal readonly MusicPlatformHttp Http;
     internal readonly MusicAccountOwner Owner;
+    internal readonly MusicClientContextFixture Clients;
     internal readonly List<string> Steps = [];
     internal string? HoldStep, Fault;
     internal string FaultStep = "rights";
@@ -39,9 +40,10 @@ internal sealed class MusicAccountDetailsFixture : IAsyncDisposable
         Root = root ?? TestWorkspace.DataPath("account-details", Guid.NewGuid().ToString("N"));
         TestWorkspace.ValidatePath(TestWorkspace.DataRoot, Root);
         Directory.CreateDirectory(Root);
-        Wrapper = new(new DpapiDocumentStore(Root, [MusicAccountOwner.DocumentNamespace]));
+        Wrapper = new(new DpapiDocumentStore(Root, [MusicAccountOwner.DocumentNamespace, MusicPlatformClientContextOwner.DocumentNamespace]));
         Http = MusicPlatformHttp.CreateWithHandler(new Handler(this));
-        Owner = new(Wrapper, new MusicAccountProtocol(Http, timeout: timeout));
+        Clients = new(Http, Wrapper.Inner, importAccounts: true);
+        Owner = Clients.CreateAccountOwner(Wrapper, timeout: timeout);
     }
     internal async Task Seed()
     {
@@ -82,7 +84,7 @@ internal sealed class MusicAccountDetailsFixture : IAsyncDisposable
     {
         Release.TrySetResult(); Wrapper.Release.TrySetResult();
         try { await Owner.DisposeAsync(); }
-        finally { Http.Dispose(); await Wrapper.DisposeAsync(); }
+        finally { await Clients.DisposeAsync(); Http.Dispose(); await Wrapper.DisposeAsync(); }
     }
     private sealed class Handler(MusicAccountDetailsFixture f) : HttpMessageHandler
     {

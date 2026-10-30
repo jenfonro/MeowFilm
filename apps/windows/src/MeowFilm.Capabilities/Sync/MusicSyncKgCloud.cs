@@ -17,25 +17,26 @@ internal static class MusicSyncKgCloud
         MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDIAG7QOELSYoIJvTFJhMpe1s/gbjDJX51HBNnEl5HXqTW6lQ7LC8jr9fWZTwusknp+sVGzwd40MwP6U5yDE27M/X1+UR4tvOGOqp94TJtQ1EPnWGWXngpeIW5GxoQGao1rmYWAu6oi1z9XkChrsUdC6DJE5E221wf/4WLFxwAtRQIDAQAB
         -----END PUBLIC KEY-----
         """;
-    internal static Task SendAsync(MusicPlatformSession session, string path, JsonObject body,
+    internal static Task SendAsync(MusicPlatformSession session, MusicKgClientContext client, string path, JsonObject body,
         Func<HttpRequestMessage, CancellationToken, Task<byte[]>> transport, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         LJ.Require(path is "/v2/delete_list" or "/v1/modify_song_sort");
         string alphabet = path == "/v2/delete_list" ? "0123456789abcdefghijklmnopqrstuvwxyz" : "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
         string secret = string.Concat(Enumerable.Range(0, 6).Select(_ => alphabet[RandomNumberGenerator.GetInt32(alphabet.Length)]));
-        return SendCoreAsync(session, path, body, transport, token, secret);
+        return SendCoreAsync(session, client, path, body, transport, token, secret);
     }
     // Protocol core is kept separate from entropy selection; no secret/key is exposed through HTTP or the public service.
-    private static async Task SendCoreAsync(MusicPlatformSession session, string path, JsonObject body,
+    private static async Task SendCoreAsync(MusicPlatformSession session, MusicKgClientContext client, string path, JsonObject body,
         Func<HttpRequestMessage, CancellationToken, Task<byte[]>> transport, CancellationToken token, string secret)
     {
         token.ThrowIfCancellationRequested();
         LJ.Require(path is "/v2/delete_list" or "/v1/modify_song_sort");
         LJ.Require(session.Platform == "kg", "INVALID_PLATFORM");
-        var cookies = PJ.CookieHeader(session.Cookie); string mid = PJ.Cookie(cookies, "KUGOU_API_MID"), dfid = PJ.Cookie(cookies, "dfid", "-");
-        LJ.Require(mid.Length is > 0 and <= 39 && mid.All(char.IsAsciiDigit) &&
-            PJ.Cookie(cookies, "userid") == session.UserId, "DEVICE_CONTEXT_REQUIRED");
+        var cookies = PJ.CookieHeader(session.Cookie);
+        var (mid, dfid) = PlatformProtocols.KgIdentity(cookies, client);
+        PJ.Id(JsonValue.Create(session.UserId), "^[1-9][0-9]{0,19}$", "INVALID_CREDENTIALS");
+        LJ.Require(PJ.Cookie(cookies, "userid") == session.UserId, "INVALID_CREDENTIALS");
         LJ.Require(PJ.Cookie(cookies, "token").Length > 0, "AUTH_REQUIRED");
         string digest = PlatformProtocols.Md5(secret); byte[] key = Encoding.ASCII.GetBytes(digest[..16]), iv = Encoding.ASCII.GetBytes(digest[16..]);
         byte[] plaintext = Encoding.UTF8.GetBytes(PJ.Encode(body)), credential = Encoding.UTF8.GetBytes(PJ.Encode(LJ.Obj(("aes", secret), ("uid", session.UserId), ("token", PJ.Cookie(cookies, "token")))));

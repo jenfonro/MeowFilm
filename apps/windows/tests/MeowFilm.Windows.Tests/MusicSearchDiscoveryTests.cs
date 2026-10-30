@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Actual native service -> request builders -> bounded HTTP; synthetic peer/session only.
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Net.Http;
@@ -21,6 +22,8 @@ public static class MusicSearchDiscoveryTests
         yield return Case("anonymous-never-borrows-auth-and-account-cookie-stays-native", Credentials);
         yield return Case("parallel-primary-and-charts-retain-two-physical-slots", Parallel);
         yield return Case("cache-copy-isolation-rotation-no-network", Cache);
+        yield return Case("successful-response-client-generation-keeps-completed-cache", () => ClientCache(true));
+        yield return Case("client-context-change-fences-rotation-and-completed-cache", () => ClientCache(false));
         yield return Case("empty-default-and-empty-sections-valid", Empty);
         yield return Case("default-hot-dedup-and-score-null", Dedup);
         foreach (var stage in new[] { "hot", "toplist", "default", "chart" })
@@ -36,7 +39,16 @@ public static class MusicSearchDiscoveryTests
             yield return Case("identity-" + value, () => Identity(value));
         }
         yield return Case("empty-chart-no-detail-request", EmptyChart);
+        yield return Case("embedded-chart-members-reused-no-song-detail", () => EmbeddedMembers(false));
+        yield return Case("partial-chart-members-request-only-missing-display-rows", () => EmbeddedMembers(true));
         yield return Case("duplicate-chart-identities-fail-toplist", DuplicateCharts);
+        foreach (var stage in new[] { "hot", "toplist", "default", "chart", "songs" })
+        {
+            var value = stage;
+            yield return Case("invalid-" + value + "-does-not-update-client-context", () => UntrustedClientResponse(value));
+        }
+        yield return Case("expired-primary-authorization-is-auth-required-without-client-update", () => ExpiredAuthorization(true));
+        yield return Case("expired-partial-authorization-is-auth-required-without-client-update", () => ExpiredAuthorization(false));
         foreach (var fault in new[] { "hot-nonstring", "default-nonstring", "score-negative", "keyword-control", "keyword-limit",
             "duplicate-json-key", "response-limit", "rows-limit", "invalid-json" })
         {
@@ -77,6 +89,28 @@ public static class MusicSearchDiscoveryTests
         yield return Case("rotate-generation-refuses-empty-or-revoked", RotateFence);
     }
     private static TestCase Case(string name, Func<Task> run) => new("music.search.discovery." + name, run);
+    private static async Task EmbeddedMembers(bool partial)
+    {
+        await using var f = new Fixture();
+        f.Peer.Reply = (wire, _) =>
+        {
+            var data = Default(wire);
+            if (wire.Path == "/api/v6/playlist/detail")
+            {
+                Check(wire.Data["n"]!.GetValue<int>() == 20);
+                int first = int.Parse(Id(wire)) * 100 + 1;
+                data["playlist"]!["tracks"] = new JsonArray(Enumerable.Range(first, partial ? 19 : 20)
+                    .Reverse().Select(i => (JsonNode)Song(i)).ToArray());
+            }
+            if (wire.Path == "/api/v3/song/detail")
+                Check(partial && SongIds(wire).Length == 1 && SongIds(wire)[0] % 100 == 20);
+            return Task.FromResult(Response(data));
+        };
+        var result = await f.Service.ReadAsync();
+        Check(result.Charts.Length == 3 && result.Charts.All(chart => chart.Songs.Length == 20));
+        Check(f.Peer.Calls.Count(call => call.Path == "/api/v3/song/detail") == (partial ? 3 : 0));
+        Check(f.Peer.Calls.Count == (partial ? 9 : 6));
+    }
     private static void Check(bool condition, string message = "Discovery assertion")
     { if (!condition) throw new InvalidOperationException(message); }
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -137,12 +171,13 @@ public static class MusicSearchDiscoveryTests
         internal readonly Peer Peer = new();
         internal readonly MusicPlatformHttp Http;
         internal readonly NativeMusicSearchDiscovery Service;
+        internal readonly MusicClientContextFixture Clients;
         internal Fixture(TimeProvider? clock = null)
         {
             Http = MusicPlatformHttp.CreateWithHandler(Peer);
-            Service = new(Sessions, Http, clock);
+            Clients = new(Http, clock: clock); Service = new(Sessions, Http, Clients.Owner, clock);
         }
-        public async ValueTask DisposeAsync() { await Service.DisposeAsync(); Http.Dispose(); Sessions.Dispose(); }
+        public async ValueTask DisposeAsync() { await Service.DisposeAsync(); await Clients.DisposeAsync(); Http.Dispose(); Sessions.Dispose(); }
     }
     private static async Task<Wire> Decode(HttpRequestMessage request, CancellationToken token)
     {
@@ -178,7 +213,7 @@ public static class MusicSearchDiscoveryTests
         };
         Check(data.Count == expected.Length && expected.All(data.ContainsKey));
         if (pieces[0] == "/api/v6/playlist/detail")
-            Check(data["n"]!.GetValue<int>() == 100000 && data["s"]!.GetValue<int>() == 8, "Fixed playlist recipe");
+            Check(data["n"]!.GetValue<int>() == 20 && data["s"]!.GetValue<int>() == 8, "Bounded discovery member recipe");
         if (pieces[0] == "/api/v3/song/detail")
         {
             var ids = JsonNode.Parse(data["c"]!.GetValue<string>())!.AsArray();
@@ -240,13 +275,79 @@ public static class MusicSearchDiscoveryTests
     private static async Task Credentials()
     {
         await using var f = new Fixture();
+        var client = await f.Clients.Owner.AcquireWyAsync();
+        var local = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["deviceId"] = client.DeviceId, ["_ntes_nuid"] = client.Nuid,
+            ["_ntes_nnid"] = client.Nnid, ["WNMCID"] = client.Wnmcid
+        };
+        if (client.Nmtid is { } nmtid) local["NMTID"] = nmtid;
+        bool ExactCookie(Wire wire, bool signedIn)
+        {
+            var values = wire.Cookie.Split(';', StringSplitOptions.RemoveEmptyEntries)
+                .Select(part => part.Trim().Split('=', 2)).ToDictionary(part => part[0], part => part[1], StringComparer.Ordinal);
+            var expected = new Dictionary<string, string>(local, StringComparer.Ordinal);
+            if (signedIn) { expected["MUSIC_U"] = "synthetic-only"; expected["__csrf"] = "fixture"; }
+            if (wire.Path == "/api/hotsearchlist/get") expected["__remember_me"] = "true";
+            else
+            {
+                var header = wire.Data["header"]!.AsObject();
+                var build = header["buildver"]!.GetValue<string>();
+                var requestId = header["requestId"]!.GetValue<string>();
+                var parts = requestId.Split('_');
+                if (parts.Length != 2 || parts[1].Length != 3 || !parts[1].All(char.IsAsciiDigit) ||
+                    !long.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out var milliseconds) ||
+                    !long.TryParse(build, NumberStyles.None, CultureInfo.InvariantCulture, out var seconds) ||
+                    seconds <= 0 || milliseconds / 1000 != seconds) return false;
+                expected["os"] = "pc"; expected["appver"] = "3.1.17.204416";
+                expected["osver"] = "Microsoft-Windows-10-Professional-build-19045-64bit";
+                expected["channel"] = "netease"; expected["versioncode"] = "140"; expected["resolution"] = "1920x1080";
+                expected["__csrf"] = signedIn ? "fixture" : ""; expected["buildver"] = build; expected["requestId"] = requestId;
+                if (header.Count != expected.Count || !expected.All(part =>
+                    header[part.Key] is JsonValue value && value.TryGetValue<string>(out var text) && text == part.Value)) return false;
+            }
+            return values.Count == expected.Count && expected.All(part => values.GetValueOrDefault(part.Key) == part.Value);
+        }
         await f.Service.ReadAsync();
         Check(f.Peer.Calls.All(w => !w.Cookie.Contains("MUSIC_U", StringComparison.Ordinal)));
-        Check(f.Peer.Calls.Single(w => Stage(w) == "hot").Cookie == "__remember_me=true");
+        Check(f.Peer.Calls.All(w => ExactCookie(w, false)), "Anonymous requests carry their exact native envelope and local client context");
         f.Sessions.Value = Account(); f.Service.Invalidate("wy");
         var current = await f.Service.ReadAsync();
-        Check(f.Peer.Calls.Skip(9).All(w => w.Cookie.Contains("MUSIC_U=synthetic-only", StringComparison.Ordinal)));
+        Check(f.Peer.Calls.Count == 18 && f.Peer.Calls.Skip(9).All(w => ExactCookie(w, true)),
+            "Authorized requests combine the same client with the exact account cookie");
         Check(!JsonSerializer.Serialize(current).Contains("synthetic-only", StringComparison.Ordinal));
+    }
+    private static async Task ClientCache(bool responseUpdate)
+    {
+        await using var f = new Fixture();
+        var before = await f.Clients.Owner.AcquireWyAsync();
+        if (responseUpdate)
+            f.Peer.Reply = (wire, _) =>
+            {
+                var response = Response(Default(wire));
+                if (Stage(wire) == "default")
+                    response.Headers.TryAddWithoutValidation("Set-Cookie", "NMTID=SYNTHETIC_DISCOVERY_CONTEXT; Domain=music.163.com");
+                return Task.FromResult(response);
+            };
+        var first = await f.Service.ReadAsync();
+        Check(first.Failures.Length == 0 && first.Charts.Length == 3 && f.Peer.Calls.Count == 9);
+        if (responseUpdate)
+        {
+            var client = await f.Clients.Owner.AcquireWyAsync();
+            Check(client.Generation == before.Generation + 1 && client.Nmtid == "SYNTHETIC_DISCOVERY_CONTEXT");
+        }
+        else
+        {
+            await f.Clients.Owner.AcceptWyAsync(before, null,
+                ["NMTID=SYNTHETIC_DISCOVERY_CONTEXT; Domain=music.163.com"], () => { }, default);
+            await Failure("STORAGE_CONFLICT", () => { f.Service.Rotate(first.Generation); return Task.CompletedTask; });
+        }
+        var next = await f.Service.ReadAsync();
+        Check(f.Peer.Calls.Count == (responseUpdate ? 9 : 18) &&
+            (responseUpdate ? next.Generation == first.Generation : next.Generation != first.Generation),
+            "Discovery cache must use its actual post-response client snapshot");
+        Check((await f.Service.ReadAsync()).Generation == next.Generation &&
+            f.Peer.Calls.Count == (responseUpdate ? 9 : 18));
     }
     private static async Task Parallel()
     {
@@ -384,6 +485,71 @@ public static class MusicSearchDiscoveryTests
         };
         var s = await f.Service.ReadAsync();
         Check(s.Charts.Length == 0 && s.Hot.Length == 20 && s.Failures.Single().Code == "IDENTITY_MISMATCH");
+    }
+    private static async Task UntrustedClientResponse(string stage)
+    {
+        await using var f = new Fixture();
+        var before = await f.Clients.Owner.AcquireWyAsync();
+        f.Peer.Reply = (wire, _) =>
+        {
+            var data = Default(wire);
+            bool target = stage switch
+            {
+                "chart" => wire.Path == "/api/v6/playlist/detail" && Id(wire) == "100",
+                "songs" => wire.Path == "/api/v3/song/detail" && SongIds(wire)[0] == 10001,
+                _ => Stage(wire) == stage
+            };
+            if (target)
+            {
+                switch (stage)
+                {
+                    case "hot": data["data"]![0]!["searchWord"] = 42; break;
+                    case "toplist": data["list"]![1]!["id"] = 100; break;
+                    case "default": data["data"]!["realkeyword"] = new JsonObject(); break;
+                    case "chart": data["playlist"]!["id"] = 101; break;
+                    case "songs": data["songs"]![1]!["id"] = data["songs"]![0]!["id"]!.DeepClone(); break;
+                }
+            }
+            var response = Response(data);
+            if (target)
+                response.Headers.TryAddWithoutValidation("Set-Cookie", "NMTID=SYNTHETIC_UNTRUSTED_DISCOVERY_CONTEXT; Domain=music.163.com");
+            return Task.FromResult(response);
+        };
+        var result = await f.Service.ReadAsync();
+        Check(result.Failures.Length == 1 && result.Failures[0].Stage == (stage == "songs" ? "chart" : stage) &&
+            result.Failures[0].Code == (stage is "hot" or "default" ? "INVALID_RESPONSE" : "IDENTITY_MISMATCH"));
+        Check(f.Clients.Owner.IsCurrent(before) && ReferenceEquals(before, await f.Clients.Owner.AcquireWyAsync()),
+            "Invalid discovery content must not authorize a client-state CAS");
+    }
+    private static async Task ExpiredAuthorization(bool primary)
+    {
+        await using var f = new Fixture();
+        f.Sessions.Value = Account();
+        var before = await f.Clients.Owner.AcquireWyAsync();
+        f.Peer.Reply = (wire, _) =>
+        {
+            var response = Response(Default(wire));
+            if (primary ? Stage(wire) is "hot" or "toplist" : Stage(wire) == "default")
+            {
+                response.Headers.TryAddWithoutValidation("Set-Cookie",
+                    "NMTID=SYNTHETIC_EXPIRED_DISCOVERY_CONTEXT; Domain=music.163.com");
+                response.Headers.TryAddWithoutValidation("Set-Cookie",
+                    "MUSIC_U=; Max-Age=0; Domain=music.163.com");
+            }
+            return Task.FromResult(response);
+        };
+        if (primary)
+            await Failure("AUTH_REQUIRED", () => f.Service.ReadAsync());
+        else
+        {
+            var result = await f.Service.ReadAsync();
+            Check(result.Hot.Length == 20 && result.Charts.Length == 3 &&
+                result.Failures.Length == 1 && result.Failures[0].Stage == "default" &&
+                result.Failures[0].Code == "AUTH_REQUIRED");
+        }
+        Check(f.Clients.Owner.IsCurrent(before) && ReferenceEquals(before, await f.Clients.Owner.AcquireWyAsync()),
+            "Expired authorization must not authorize otherwise valid client fields");
+        Check(f.Peer.Calls.Count == (primary ? 3 : 9) && f.Peer.Active == 0);
     }
     private static async Task Bounded(string kind)
     {
