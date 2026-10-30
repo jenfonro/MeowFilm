@@ -283,11 +283,6 @@ public static partial class MusicUiTests
             True(!module.HasSearchHistory, "history cleared"); Equal(0, runtime.Calls.Count);
             module.SettingsView.Measure(new System.Windows.Size(1000, 1800));
             module.SettingsView.Arrange(new System.Windows.Rect(0, 0, 1000, 1800)); module.SettingsView.UpdateLayout();
-            var tabs = Visuals(module.SettingsView).OfType<System.Windows.Controls.TabControl>()
-                .Single(tab => System.Windows.Automation.AutomationProperties.GetName(tab) == "设置分类");
-            tabs.SelectedIndex = 1;
-            module.SettingsView.Measure(new System.Windows.Size(1000, 1800));
-            module.SettingsView.Arrange(new System.Windows.Rect(0, 0, 1000, 1800)); module.SettingsView.UpdateLayout();
             var buttons = Visuals(module.SettingsView).OfType<System.Windows.Controls.Button>()
                 .Select(button => button.Content as string).ToArray();
             True(buttons.Contains("清空搜索历史"), "search history can be cleared from settings");

@@ -204,11 +204,14 @@ public static class MusicQqAccountUiTests
             window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded);
             OpenLogin(view);
             await first.Module.BeginAccountQrAsync();
+            await next.Module.BeginAccountQrAsync();
+            Check(next.Module.HasAccountQr);
+            int nextCalls = next.Transport.Calls;
             view.DataContext = next.Module;
             await Until(() => !first.Module.HasAccountQr && !first.Module.AccountBusy);
             int calls = first.Transport.Calls;
             await Task.Delay(2300);
-            Check(first.Transport.Calls == calls && next.Transport.Calls == 0 && !next.Module.HasAccountQr);
+            Check(first.Transport.Calls == calls && next.Transport.Calls == nextCalls && next.Module.HasAccountQr);
         }
         finally { window.Close(); }
     }

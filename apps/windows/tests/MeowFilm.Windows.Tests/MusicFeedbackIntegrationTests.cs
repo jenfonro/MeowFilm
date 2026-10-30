@@ -98,9 +98,6 @@ public static partial class MusicUiTests
             True(module.FeedbackPlatforms.Where(p => p.Platform != "wy").All(p => !p.Enabled), "no other platform consent");
             module.SettingsView.Measure(new Size(1000, 1000));
             module.SettingsView.Arrange(new Rect(0, 0, 1000, 1000)); module.SettingsView.UpdateLayout();
-            var tabs = Visuals(module.SettingsView).OfType<TabControl>()
-                .Single(control => AutomationProperties.GetName(control) == "设置分类");
-            tabs.SelectedIndex = 0; module.SettingsView.UpdateLayout();
             var accounts = Visuals(module.SettingsView).OfType<MusicAccountsView>().Single();
             True(ReferenceEquals(accounts.DataContext, module), "real settings consumer uses the capability");
             foreach (var row in module.PlatformSettings)

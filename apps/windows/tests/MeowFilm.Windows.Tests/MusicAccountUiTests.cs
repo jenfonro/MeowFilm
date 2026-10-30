@@ -100,7 +100,7 @@ public static class MusicAccountUiTests
             view.Measure(new Size(700, 600)); view.Arrange(new Rect(0, 0, 700, 600)); view.UpdateLayout();
             var platforms = (ItemsControl)view.FindName("PlatformSettingsList");
             var code = (PasswordBox)view.FindName("SmsCodeInput");
-            Check(platforms.Items.Count == 3 && code.MaxLength == 8);
+            Check(platforms.Items.Count == 5 && code.MaxLength == 8);
             Check(runtime.Calls.Count == 0);
         });
     }

@@ -35,133 +35,12 @@ public static partial class MusicUiTests
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection();
             Render(f.Module.SettingsView, 1080, 680);
-            var tabs = Visuals(f.Module.SettingsView).OfType<TabControl>()
-                .Single(t => AutomationProperties.GetName(t) == "设置分类");
-            Equal(6, tabs.Items.Count);
-            True(tabs.Items.Cast<TabItem>().Select(t => (string)t.Header)
-                .SequenceEqual(new[] { "平台", "搜索", "音质与缓存", "外观", "歌词与封面", "音源" }),
-                "current settings groups");
-            var tabItems = tabs.Items.Cast<TabItem>().ToArray();
-            void AssertTabLayout(TabControl owner, int width)
-            {
-                var items = owner.Items.Cast<TabItem>().ToArray();
-                var highContrast = DesktopTheme.GetIsHighContrast(owner);
-
-                var headers = items.Select(item =>
-                {
-                    var text = Visuals(item).OfType<TextBlock>().Single(label => label.Text == (string)item.Header);
-                    var bounds = new Rect(text.TranslatePoint(new Point(), owner), text.RenderSize);
-                    var inItem = new Rect(text.TranslatePoint(new Point(), item), text.RenderSize);
-                    True(text.ActualWidth > 0 && Math.Abs(text.ActualWidth - text.DesiredSize.Width) < 0.5,
-                        "settings headers keep their natural text width");
-                    True(LayoutInformation.GetLayoutSlot(item).Width + 0.5 >= item.DesiredSize.Width &&
-                        inItem.Left >= -0.5 && inItem.Right <= item.ActualWidth + 0.5 &&
-                        (LayoutInformation.GetLayoutClip(item) is not { } clip || clip.Bounds.Contains(inItem)),
-                        "settings header text is not clipped by its tab");
-                    True(bounds.Left >= -0.5 && bounds.Right <= owner.ActualWidth + 0.5 &&
-                        bounds.Top >= -0.5 && bounds.Bottom <= owner.ActualHeight + 0.5,
-                        "settings headers stay inside the available area");
-                    True(item.ActualHeight <= 32, "settings headers keep compact vertical spacing");
-                    var borders = Visuals(item).OfType<Border>().ToArray();
-                    var underline = borders.Single(border => border.BorderThickness.Bottom > 0 &&
-                        border.BorderThickness.Left == 0 && border.BorderThickness.Top == 0 && border.BorderThickness.Right == 0);
-                    Equal(2d, underline.BorderThickness.Bottom);
-                    True(Math.Abs(underline.ActualWidth - text.ActualWidth) < 0.5 &&
-                        Math.Abs(underline.TranslatePoint(new Point(), owner).X - bounds.Left) < 0.5,
-                        "settings underline covers only the header text width");
-                    if (item.IsSelected)
-                    {
-                        Equal(highContrast ? SystemColors.HighlightTextColor :
-                            ((SolidColorBrush)owner.FindResource("MeowFilm.Brush.Accent")).Color,
-                            ((SolidColorBrush)underline.BorderBrush).Color);
-                    }
-                    else Equal((byte)0, ((SolidColorBrush)underline.BorderBrush).Color.A);
-                    Equal(highContrast ? (item.IsSelected ? SystemColors.HighlightTextColor : SystemColors.WindowTextColor) :
-                        ((SolidColorBrush)owner.FindResource(item.IsSelected ? "MeowFilm.Brush.Text" : "MeowFilm.Brush.Muted")).Color,
-                        ((SolidColorBrush)text.Foreground).Color);
-
-                    return bounds;
-                }).ToArray();
-                var singleRow = headers.All(header => Math.Abs(header.Top - headers[0].Top) < 0.5);
-                if (width >= 860) True(singleRow, "settings tabs stay on one row at desktop widths");
-                if (items.Sum(item => item.DesiredSize.Width) > owner.ActualWidth + 0.5)
-                    True(!singleRow, "settings tabs wrap when their natural widths do not fit");
-                for (var i = 0; i < headers.Length; i++)
-                {
-                    for (var j = i + 1; j < headers.Length; j++)
-                        True(!headers[i].IntersectsWith(headers[j]), "settings headers do not overlap");
-                    if (i == 0 || Math.Abs(headers[i].Top - headers[i - 1].Top) >= 0.5) continue;
-                    var gap = headers[i].Left - headers[i - 1].Right;
-                    True(singleRow ? Math.Abs(gap - 20) < 0.5 : gap >= 19.5,
-                        "settings tabs keep 20 DIP spacing with native wrapped-row distribution");
-                }
-            }
-            foreach (var width in new[] { 1080, 860, 360 })
-            {
-                foreach (var selected in new[] { 0, 2, 5 })
-                {
-                    tabs.SelectedIndex = selected;
-                    Render(f.Module.SettingsView, width, 680); await Drain();
-                    AssertTabLayout(tabs, width);
-                }
-            }
-            tabs.SelectedIndex = 0;
-            Render(f.Module.SettingsView, 1080, 680);
-
-            // Mount the effective header templates without activating settings business through Loaded.
-            var keyboardTabs = new TabControl
-            {
-                Template = tabs.Template, FocusVisualStyle = tabs.FocusVisualStyle, Margin = tabs.Margin,
-                Background = tabs.Background, BorderThickness = tabs.BorderThickness, FontFamily = TextElement.GetFontFamily(f.Module.SettingsView)
-            };
-            keyboardTabs.Resources.MergedDictionaries.Add(f.Module.SettingsView.Resources);
-            foreach (var item in tabItems)
-                keyboardTabs.Items.Add(new TabItem
-                {
-                    Header = item.Header, Style = item.Style, Template = item.Template,
-                    Margin = item.Margin, FocusVisualStyle = item.FocusVisualStyle
-                });
-            var keyboardItems = keyboardTabs.Items.Cast<TabItem>().ToArray();
-            var window = new Window
-            {
-                Content = keyboardTabs, Width = 1080, Height = 680, Left = -10000, Top = -10000,
-                ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None
-            };
-            try
-            {
-                DesktopTheme.SetIsHighContrast(window, false);
-                window.Show(); window.UpdateLayout(); await Drain();
-                foreach (var width in new[] { 1080, 860, 360 })
-                {
-                    window.Width = width; window.UpdateLayout();
-                    True(keyboardItems[0].Focus(), "settings header accepts real keyboard focus");
-                    foreach (var key in new[] { Key.End, Key.Home })
-                    {
-                        var input = new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(keyboardTabs)!, 0, key)
-                        { RoutedEvent = Keyboard.KeyDownEvent };
-                        (Keyboard.FocusedElement as UIElement ?? throw new InvalidOperationException("Settings header keyboard focus missing")).RaiseEvent(input);
-                        window.UpdateLayout(); await Drain();
-                        var selected = key == Key.End ? 5 : 0;
-                        True(input.Handled && keyboardItems[selected].IsKeyboardFocused,
-                            "native settings keyboard selection retains header focus");
-                        Equal(selected, keyboardTabs.SelectedIndex);
-                        AssertTabLayout(keyboardTabs, width);
-                    }
-                    for (var selected = 1; selected <= 2; selected++)
-                    {
-                        True(keyboardItems[selected - 1].MoveFocus(new TraversalRequest(FocusNavigationDirection.Right)),
-                            "settings headers support native directional keyboard traversal");
-                        window.UpdateLayout(); await Drain();
-                        Equal(selected, keyboardTabs.SelectedIndex);
-                        True(keyboardItems[selected].IsKeyboardFocused, "directional traversal selects the focused header");
-                        AssertTabLayout(keyboardTabs, width);
-                    }
-                }
-                DesktopTheme.SetIsHighContrast(window, true);
-                window.UpdateLayout(); await Drain();
-                AssertTabLayout(keyboardTabs, 360);
-            }
-            finally { window.Content = null; window.Close(); await Drain(); }
+            var navigation = (Panel)f.Module.SettingsView.FindName("SettingsNavigation");
+            var anchors = navigation.Children.OfType<RadioButton>().ToArray();
+            Equal(6, anchors.Length);
+            True(anchors.Select(anchor => (string)anchor.Content)
+                .SequenceEqual(new[] { "账号与平台", "搜索", "音质与缓存", "外观", "歌词与封面", "音源" }),
+                "reference settings groups are all present");
             await f.Module.ActivateSettingsAsync();
             await Until(() => !f.Module.Busy && f.Module.Accounts.All(account => account.State == "none"));
             True(f.Module.SelectedAccount is null, "account selection belongs to an explicit login action");
@@ -170,7 +49,7 @@ public static partial class MusicUiTests
                 .SequenceEqual(new[] { "网易云音乐", "QQ 音乐", "酷狗音乐" }), "fixed platform cards");
             True(f.Module.PlatformSettings.All(row => !row.IsLoggedIn && row.ShowLogin),
                 "all platform capsules publish their logged-out state");
-            tabs.SelectedIndex = 5;
+            anchors[^1].IsChecked = true;
             f.Module.SettingsView.UpdateLayout();
             await Until(() => !f.Module.Busy);
             var sources = Visuals(f.Module.SettingsView).OfType<MusicSourcesSettingsView>().Single();
@@ -904,9 +783,8 @@ public static partial class MusicUiTests
                     AssertPlayerBounds(f.Module.PlayerView, f.Module.PlayerView.ActualWidth);
                 }
                 DesktopTheme.SetIsHighContrast(root, true);
-                var settingsTabs = Visuals(f.Module.SettingsView).OfType<TabControl>()
-                    .Single(t => AutomationProperties.GetName(t) == "设置分类");
-                settingsTabs.SelectedIndex = 2;
+                var settingsNavigation = (Panel)f.Module.SettingsView.FindName("SettingsNavigation");
+                settingsNavigation.Children.OfType<RadioButton>().ElementAt(2).IsChecked = true;
                 await Drain();
                 Render(root, 860, 600);
                 var picker = Visuals(f.Module.SettingsView).OfType<ComboBox>()

@@ -1,3 +1,5 @@
+using System.Collections.ObjectModel;
+using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
@@ -10,19 +12,31 @@ namespace MeowFilm.Capabilities;
 
 public partial class MusicAccountsView : UserControl
 {
+    public static readonly DependencyProperty IsCompactTableProperty = DependencyProperty.RegisterAttached(
+        "IsCompactTable", typeof(bool), typeof(MusicAccountsView),
+        new FrameworkPropertyMetadata(false, FrameworkPropertyMetadataOptions.Inherits));
+    public static bool GetIsCompactTable(DependencyObject target) => (bool)target.GetValue(IsCompactTableProperty);
+    public static void SetIsCompactTable(DependencyObject target, bool value) => target.SetValue(IsCompactTableProperty, value);
+
+    private readonly ObservableCollection<MusicAccountTableRow> tableRows = [];
+    private readonly MusicAccountTableRow[] publicCatalogs = [new("kw", "酷我音乐"), new("mg", "咪咕音乐")];
+    private ObservableCollection<MusicPlatformSettingsRow>? tableSource;
     private MusicCapability? observed;
     private Window? window;
     private CancellationTokenSource? pollingCancellation;
     private Task? polling;
     private DispatcherTimer? smsCountdown;
     private long seenSmsInputEpoch = -1;
+    private MusicCapability? loginOwner;
     private (MusicCapability Owner, MusicPlatformAccount Account)? logoutConfirmation;
+    public ReadOnlyObservableCollection<MusicAccountTableRow> AccountTableRows { get; }
     private bool SurfaceVisible => IsLoaded && IsVisible && window?.WindowState != WindowState.Minimized;
     private bool Visible => SurfaceVisible && LoginPopup.IsOpen;
     private MusicCapability? Owner => DataContext as MusicCapability;
 
     public MusicAccountsView()
     {
+        AccountTableRows = new(tableRows);
         InitializeComponent();
         LogoutPopup.CustomPopupPlacementCallback = (popup, target, _) =>
             [new(new Point(target.Width - popup.Width, target.Height + 8), PopupPrimaryAxis.Horizontal)];
@@ -31,10 +45,68 @@ public partial class MusicAccountsView : UserControl
         IsVisibleChanged += (_, _) => VisibilityChanged();
         DataContextChanged += (_, _) =>
         {
-            if (!IsLoaded) return;
             Detach();
-            Attach();
+            if (IsLoaded) Attach();
+            else ObserveTableRows();
         };
+        RebuildTableRows();
+    }
+
+    private void ObserveTableRows()
+    {
+        var source = Owner?.PlatformSettings;
+        if (ReferenceEquals(tableSource, source) && tableRows.Count > 0) return;
+        if (!ReferenceEquals(tableSource, source))
+        {
+            if (tableSource is not null)
+                CollectionChangedEventManager.RemoveHandler(tableSource, PlatformSettingsChanged);
+            tableSource = source;
+            if (tableSource is not null)
+                CollectionChangedEventManager.AddHandler(tableSource, PlatformSettingsChanged);
+        }
+        RebuildTableRows();
+    }
+
+    private void RebuildTableRows()
+    {
+        tableRows.Clear();
+        if (tableSource is not null)
+            foreach (var source in tableSource) tableRows.Add(new(source));
+        foreach (var row in publicCatalogs) tableRows.Add(row);
+    }
+
+    private void PlatformSettingsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (!ReferenceEquals(sender, tableSource)) return;
+        CloseTransientPopups();
+        RebuildTableRows();
+    }
+
+    private void AccountTableScroll_SizeChanged(object sender, SizeChangedEventArgs e) =>
+        SetIsCompactTable(this, e.NewSize.Width < 850);
+
+    public void CloseTransientPopups()
+    {
+        RetireLogoutPopup();
+        RetireLoginPopup();
+    }
+
+    private void RetireLoginPopup()
+    {
+        var owner = loginOwner;
+        loginOwner = null;
+        LoginPopup.IsOpen = false;
+        StopPolling();
+        StopSmsCountdown();
+        ClearSmsInputs();
+        if (owner is not null) _ = Leave(owner);
+    }
+
+    private void RetireLogoutPopup()
+    {
+        logoutConfirmation = null;
+        LogoutPopup.PlacementTarget = null;
+        LogoutPopup.IsOpen = false;
     }
 
     private void Attach()
@@ -42,6 +114,7 @@ public partial class MusicAccountsView : UserControl
         if (observed is not null) return;
         observed = Owner;
         if (observed is not null) observed.PropertyChanged += OwnerChanged;
+        ObserveTableRows();
         window = Window.GetWindow(this);
         if (window is not null) window.StateChanged += WindowChanged;
         ClearSmsInputs();
@@ -51,16 +124,17 @@ public partial class MusicAccountsView : UserControl
     private void Detach()
     {
         var old = observed;
+        var retiringLogin = loginOwner;
         observed = null;
         if (old is not null) old.PropertyChanged -= OwnerChanged;
+        if (tableSource is not null)
+            CollectionChangedEventManager.RemoveHandler(tableSource, PlatformSettingsChanged);
+        tableSource = null;
+        tableRows.Clear();
         if (window is not null) window.StateChanged -= WindowChanged;
         window = null;
-        StopPolling();
-        StopSmsCountdown();
-        LogoutPopup.IsOpen = false;
-        LoginPopup.IsOpen = false;
-        ClearSmsInputs();
-        if (old is not null) _ = Leave(old);
+        CloseTransientPopups();
+        if (old is not null && !ReferenceEquals(old, retiringLogin)) _ = Leave(old);
     }
 
     private static async Task Leave(MusicCapability owner)
@@ -77,9 +151,10 @@ public partial class MusicAccountsView : UserControl
 
     private void OwnerChanged(object? sender, PropertyChangedEventArgs e)
     {
+        if (!ReferenceEquals(sender, observed)) return;
         if (logoutConfirmation is { } confirmation &&
             (!ReferenceEquals(observed, confirmation.Owner) || !confirmation.Owner.CanLogoutAccount(confirmation.Account)))
-            LogoutPopup.IsOpen = false;
+            RetireLogoutPopup();
         if (e.PropertyName == nameof(MusicCapability.AccountSmsInputEpoch)) ClearSmsInputsIfChanged();
         if (e.PropertyName == nameof(MusicCapability.AccountSmsRetrySeconds)) RefreshSmsCountdown();
         if (e.PropertyName is nameof(MusicCapability.HasAccountQr) or nameof(MusicCapability.CanCheckAccountQr) or
@@ -87,17 +162,21 @@ public partial class MusicAccountsView : UserControl
             RefreshPolling();
         if (LoginPopup.IsOpen && observed?.SelectedAccount is { HasSession: true } &&
             !observed.AccountBusy && !observed.HasAccountQr)
-            LoginPopup.IsOpen = false;
+            RetireLoginPopup();
     }
 
     private async void Login_Click(object sender, RoutedEventArgs e)
     {
-        if (Owner is not { } owner || sender is not Button { Tag: MusicPlatformSettingsRow row }) return;
+        if (!SurfaceVisible || Owner is not { CanEdit: true, AccountBusy: false } owner ||
+            sender is not Button { Tag: MusicPlatformSettingsRow row } ||
+            !owner.PlatformSettings.Contains(row) || !row.ShowLogin) return;
         LoginTitle.Text = row.Name;
+        RetireLoginPopup();
+        loginOwner = owner;
         QrMode();
         LoginPopup.IsOpen = true;
         await owner.OpenPlatformLoginAsync(row);
-        VisibilityChanged();
+        if (ReferenceEquals(loginOwner, owner)) VisibilityChanged();
     }
 
     private async void RefreshDetails_Click(object sender, RoutedEventArgs e)
@@ -112,7 +191,7 @@ public partial class MusicAccountsView : UserControl
         if (!SurfaceVisible || Owner is not { } owner ||
             sender is not Button { Tag: MusicPlatformSettingsRow row } button ||
             !owner.PlatformSettings.Contains(row) || !row.CanLogout) return;
-        LogoutPopup.IsOpen = false;
+        RetireLogoutPopup();
         logoutConfirmation = (owner, row.Account);
         LogoutPopup.PlacementTarget = button;
         LogoutPopup.IsOpen = true;
@@ -145,28 +224,34 @@ public partial class MusicAccountsView : UserControl
 
     private async void Feedback_Click(object sender, RoutedEventArgs e)
     {
-        if (Owner is { } owner && sender is CheckBox { Tag: MusicPlatformSettingsRow row })
+        if (SurfaceVisible && Owner is { CanEditFeedback: true } owner &&
+            sender is CheckBox { Tag: MusicPlatformSettingsRow row } &&
+            owner.PlatformSettings.Contains(row) && row.IsLoggedIn)
             await owner.SetPlatformFeedbackAsync(row, !row.FeedbackEnabled);
     }
 
     private async void FavoritesSync_Click(object sender, RoutedEventArgs e)
     {
-        if (Owner is { } owner && sender is CheckBox { Tag: MusicPlatformSettingsRow row })
+        if (SurfaceVisible && Owner is { LibrarySync.CanEdit: true } owner &&
+            sender is CheckBox { Tag: MusicPlatformSettingsRow row } &&
+            owner.PlatformSettings.Contains(row) && row.IsLoggedIn)
             await owner.SetPlatformSyncAsync(row, "favorites", !row.FavoritesSyncEnabled);
     }
 
     private async void PlaylistsSync_Click(object sender, RoutedEventArgs e)
     {
-        if (Owner is { } owner && sender is CheckBox { Tag: MusicPlatformSettingsRow row })
+        if (SurfaceVisible && Owner is { LibrarySync.CanEdit: true } owner &&
+            sender is CheckBox { Tag: MusicPlatformSettingsRow row } &&
+            owner.PlatformSettings.Contains(row) && row.IsLoggedIn)
             await owner.SetPlatformSyncAsync(row, "playlists", !row.PlaylistsSyncEnabled);
     }
 
     private async void ConfirmSync_Click(object sender, RoutedEventArgs e)
     {
-        if (Owner is { } owner) await owner.ConfirmPlatformSyncAsync();
+        if (SurfaceVisible && Owner is { LibrarySync.CanEdit: true } owner) await owner.ConfirmPlatformSyncAsync();
     }
 
-    private void CloseLogin_Click(object sender, RoutedEventArgs e) => LoginPopup.IsOpen = false;
+    private void CloseLogin_Click(object sender, RoutedEventArgs e) => RetireLoginPopup();
     private void QrMode_Click(object sender, RoutedEventArgs e) => QrMode();
     private void SmsMode_Click(object sender, RoutedEventArgs e)
     {
@@ -204,23 +289,29 @@ public partial class MusicAccountsView : UserControl
         catch { }
     }
 
+    private void LoginPopup_Opened(object? sender, EventArgs e)
+    {
+        if (LoginPopup.IsOpen) loginOwner ??= Owner;
+    }
+
     private void LoginPopup_Closed(object? sender, EventArgs e)
     {
-        StopPolling();
-        StopSmsCountdown();
-        ClearSmsInputs();
-        if (observed is { } owner) _ = Leave(owner);
+        if (!LoginPopup.IsOpen) RetireLoginPopup();
     }
 
     private void VisibilityChanged()
     {
-        if (!SurfaceVisible) LogoutPopup.IsOpen = false;
+        if (!SurfaceVisible)
+        {
+            CloseTransientPopups();
+            return;
+        }
         if (!Visible)
         {
             StopPolling();
             StopSmsCountdown();
             ClearSmsInputs();
-            if (LoginPopup.IsOpen) LoginPopup.IsOpen = false;
+            if (LoginPopup.IsOpen) RetireLoginPopup();
             return;
         }
         RefreshPolling();
