@@ -610,12 +610,29 @@ public static partial class MusicUiTests
             Render(f.Module.View, 640, 480);
             Render(f.Module.PlayerView, 860, 92);
             grid.ContextMenu.PlacementTarget = grid; grid.ContextMenu.GetBindingExpression(FrameworkElement.DataContextProperty)!.UpdateTarget();
-            Equal(f.Module, grid.ContextMenu.DataContext); True(!grid.CanUserSortColumns, "visible index retains core order");
+            Equal(f.Module, grid.ContextMenu.DataContext); True(!grid.CanUserSortColumns, "presentation columns retain core order");
+            True(grid.ContextMenu.Items.OfType<MenuItem>().Take(3).Select(item => item.Header).SequenceEqual(
+                new object[] { "播放", "下一首播放", "收藏" }), "song menu exposes the primary row actions");
             f.Module.SelectedSong = f.Module.Songs[1];
             ((MenuItem)grid.ContextMenu.Items[2]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Until(() => !f.Module.Busy);
             Equal(1, f.Module.Playlists.Single(p => p.Id == "favorites").Count);
             ((MenuItem)grid.ContextMenu.Items[1]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Until(() => !f.Module.Busy);
             Equal(1, f.Calls.Count("music.queue.append"));
+            var row = (DataGridRow)grid.ItemContainerGenerator.ContainerFromIndex(0);
+            var rowButtons = Visuals(row).OfType<Button>().ToDictionary(AutomationProperties.GetName);
+            Equal(Visibility.Visible, rowButtons["收藏"].Visibility);
+            Equal(Visibility.Collapsed, rowButtons["下一首播放"].Visibility);
+            Equal(Visibility.Collapsed, rowButtons["更多"].Visibility);
+            SimulateFocus(row, UIElement.IsKeyboardFocusWithinProperty, true); row.UpdateLayout();
+            Equal(Visibility.Visible, rowButtons["下一首播放"].Visibility);
+            Equal(Visibility.Visible, rowButtons["更多"].Visibility);
+            Click(rowButtons["下一首播放"]); await Until(() => !f.Module.Busy);
+            True(ReferenceEquals(f.Module.Songs[0], f.Module.SelectedSong), "inline action selects its own song");
+            Equal(2, f.Calls.Count("music.queue.append"));
+            Click(rowButtons["更多"]);
+            True(grid.ContextMenu.IsOpen && ReferenceEquals(rowButtons["更多"], grid.ContextMenu.PlacementTarget),
+                "more action opens the shared row context menu");
+            grid.ContextMenu.IsOpen = false;
             f.Module.SelectedSong = f.Module.Songs[0];
             var enter = RaiseKey(grid, Key.Enter); True(enter.Handled, "Enter plays selected row"); await Until(() => !f.Module.Busy);
             Equal(1, f.Playback.Opens.Count); f.Playback.Start();

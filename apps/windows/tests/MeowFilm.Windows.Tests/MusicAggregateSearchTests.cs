@@ -15,7 +15,7 @@ public static class MusicAggregateSearchTests
         yield return new("Aggregate search two kinds retain ids and tab reads never refetch", DualKinds);
         yield return new("Aggregate search changing one kind platform set preserves the other tab", ReplaceOneKind);
         yield return new("Aggregate search later native providers can satisfy existing KW and MG retries", LaterProviders);
-        yield return new("Aggregate search two kinds share five physical request slots", SharedSlots);
+        yield return new("Aggregate search two kinds share four transport-compatible physical request slots", SharedSlots);
         yield return new("Aggregate search RRF consensus outranks single-platform first result", Consensus);
         yield return new("Aggregate search same-platform editions count only their best rank", BestRank);
         yield return new("Aggregate search rank ties and representatives ignore platform arrival order", Deterministic);
@@ -220,9 +220,15 @@ public static class MusicAggregateSearchTests
         try
         {
             string songs = S(await f.Start(Five), "id"), lists = S(await f.Start(Five, "playlists"), "id");
-            await f.Catalog.CountAsync(5); Check(f.Catalog.Maximum <= 5 && f.Catalog.Calls.Count == 5);
-            release.SetResult(); await f.Idle(songs); await f.Idle(lists);
-            Check(f.Catalog.Calls.Count == 10 && f.Catalog.Maximum <= 5);
+            await f.Catalog.CountAsync(4); Check(f.Catalog.Maximum <= 4 && f.Catalog.Calls.Count == 4);
+            release.SetResult();
+            var songResult = await f.Idle(songs);
+            var playlistResult = await f.Idle(lists);
+            Check(f.Catalog.Calls.Count == 10 && f.Catalog.Maximum <= 4 &&
+                !songResult.GetProperty("partial").GetBoolean() &&
+                !playlistResult.GetProperty("partial").GetBoolean() &&
+                songResult.GetProperty("items").GetArrayLength() == 5 &&
+                playlistResult.GetProperty("items").GetArrayLength() == 5);
         }
         finally { release.TrySetResult(); }
     }

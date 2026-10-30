@@ -4,6 +4,7 @@ using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using MeowFilm.Capabilities;
 using MeowFilm.Platform.Storage;
@@ -35,24 +36,32 @@ public static partial class MusicUiTests
             var empty = await f.Call("music.search.start", new { keyword = "空", kind = "songs", platforms = Array.Empty<string>() });
             Equal("NO_PLATFORMS", empty.GetProperty("code").GetString()); Equal(0, f.Http.Requests.Count);
         });
-        yield return Case("native aggregate search records the current kind without requesting platform home", async () =>
+        yield return Case("native aggregate search publishes comprehensive results without requesting platform home", async () =>
         {
             await using var f = await SearchScene.Create();
             await f.Policy(["wy"], ["wy"]);
             int accountReads = f.Store.AccountReads;
+            f.Http.Hold = true;
             await f.Search("原生");
-            await SearchUntil(() => f.Module.Songs.Count == 1 && !f.Module.SearchProgress.Any(p => p.Loading));
-            Equal(1, f.Http.SearchRequests); Equal(0, f.Http.HomeRequests);
-            True(f.Module.IsAggregateSearch && f.Module.HasAggregateSearch, "actual aggregate page");
+            await SearchUntil(() => f.Http.SearchRequests == 2 && f.Module.CatalogSections.Count == 2);
+            True(f.Module.CatalogSections.All(section => section.IsLoading),
+                "both visible kinds publish loading sections before either physical search settles");
+            f.Http.Release.TrySetResult();
+            await SearchUntil(() => f.Module.Songs.Count == 1 &&
+                f.Module.CatalogSections.All(section => !section.IsLoading && section.Items.Count == 1));
+            Equal(2, f.Http.SearchRequests); Equal(0, f.Http.HomeRequests);
+            True(f.Module.IsAggregateOverview && f.Module.HasAggregateSearch, "actual comprehensive page");
+            Equal(1, f.Module.CatalogSections.Single(section => section.Title == "单曲").Items.Count);
+            Equal(1, f.Module.CatalogSections.Single(section => section.Title == "歌单").Items.Count);
             var history = (await f.Call("music.search.history.get")).GetProperty("history").GetProperty("items")[0];
             Equal("原生", history.GetProperty("text").GetString());
             Equal("songs", history.GetProperty("kind").GetString());
             Equal("aggregate", history.GetProperty("platform").GetString());
-            f.Module.CatalogSearchKind = "歌单"; await f.Module.CatalogSearchKindAsync();
+            await f.Module.OpenAggregateSearchTabAsync("playlists");
             await SearchUntil(() => f.Module.CatalogSections.SelectMany(s => s.Items).Any(c => c.Kind == "playlist"));
             var playlist = f.Module.CatalogSections.Single().Items.Single();
             True(playlist.CanOpen && playlist.Platform == "wy", "public playlist consumer");
-            f.Module.CatalogSearchKind = "歌曲"; await f.Module.CatalogSearchKindAsync();
+            await f.Module.OpenAggregateSearchTabAsync("songs");
             Equal(1, f.Module.Songs.Count); Equal(2, f.Http.SearchRequests);
             Equal(accountReads + 3, f.Store.AccountReads);
             Equal(0, f.Runtime.Calls.Count);
@@ -81,13 +90,13 @@ public static partial class MusicUiTests
             await f.Policy(["wy"], ["wy"]);
             await f.Search("来源");
             await SearchUntil(() => f.Module.Songs.Count == 1);
-            var card = f.Module.CatalogSections.Single().Items.Single();
+            var card = f.Module.CatalogSections.SelectMany(section => section.Items).Single(item => item.Song is not null);
             await f.Module.FavoriteCatalogCardAsync(card);
             var favorites = await f.Call("music.library.detail", new { id = "favorites", offset = 0, limit = 100 });
             Equal(1, favorites.GetProperty("songs").GetArrayLength());
             // The favorite operation can publish a later fused snapshot. Use
             // the current card, never a detached UI object's stale callback.
-            card = f.Module.CatalogSections.Single().Items.Single();
+            card = f.Module.CatalogSections.SelectMany(section => section.Items).Single(item => item.Song is not null);
             await f.Module.QueueCatalogCardAsync(card);
             var queue = await f.Call("music.queue.get", new { offset = 0, limit = 100 });
             Equal(1, queue.GetProperty("entries").GetArrayLength());
@@ -104,15 +113,15 @@ public static partial class MusicUiTests
             await using var f = await SearchScene.Create();
             await f.Policy(["wy"], ["wy"]);
             await f.Search("返回");
-            f.Module.CatalogSearchKind = "歌单"; await f.Module.CatalogSearchKindAsync();
+            await f.Module.OpenAggregateSearchTabAsync("playlists");
             await SearchUntil(() => f.Module.CatalogSections.SelectMany(s => s.Items).Any(c => c.Kind == "playlist"));
             await f.Module.OpenCatalogCardAsync(f.Module.CatalogSections.Single().Items.Single());
             True(f.Module.IsCatalogPlaylist && f.Module.Songs.Count == 1, "native playlist opened");
             int searches = f.Http.SearchRequests;
             await f.Module.ReturnToAggregateSearchAsync();
-            True(f.Module.IsAggregateSearch && f.Module.CatalogSearchKind == "歌单", "same result tab");
+            True(f.Module.IsAggregatePlaylists && f.Module.AggregateSearchTab == "playlists", "same result tab");
             Equal(searches, f.Http.SearchRequests);
-            f.Module.CatalogSearchKind = "歌曲"; await f.Module.CatalogSearchKindAsync();
+            await f.Module.OpenAggregateSearchTabAsync("songs");
             Equal(1, f.Module.Songs.Count); Equal(searches, f.Http.SearchRequests);
         });
         yield return Case("native aggregate policy changes save immediately and retire old results", async () =>
@@ -175,7 +184,29 @@ public static partial class MusicUiTests
             Equal(2, f.Http.SearchRequests);
             f.Module.View.Measure(new Size(1000, 850)); f.Module.View.Arrange(new Rect(0, 0, 1000, 850)); f.Module.View.UpdateLayout();
             var buttons = Visuals(f.Module.View).OfType<Button>().Select(b => b.Content as string).ToArray();
-            True(buttons.Contains("更多结果") && buttons.Contains("取消搜索") && buttons.Contains("返回搜索"), "real result controls");
+            True(buttons.Contains("综合") && buttons.Contains("单曲") && buttons.Contains("歌单") &&
+                buttons.Count(text => text == "查看更多") == 2, "real result tabs and section actions");
+            True(!buttons.Contains("更多结果") && !buttons.Contains("取消搜索"), "retired utility controls");
+            var grid = Visuals(f.Module.View).OfType<DataGrid>().Single();
+            var catalog = Visuals(f.Module.View).OfType<MusicCatalogView>().Single();
+            var moreStyle = (Style)catalog.FindResource("Catalog.SectionMore");
+            var moreButtons = Visuals(catalog).OfType<Button>()
+                .Where(button => button.Content as string == "查看更多").ToArray();
+            True(moreButtons.All(button => ReferenceEquals(button.Style, moreStyle) &&
+                button.MinHeight == 30 && button.BorderThickness == new Thickness(1)),
+                "section actions use the visible button treatment");
+            var loadingIndicators = Visuals(catalog).OfType<Grid>()
+                .Where(element => AutomationProperties.GetName(element).EndsWith("搜索中", StringComparison.Ordinal))
+                .ToArray();
+            Equal(2, loadingIndicators.Length);
+            True(loadingIndicators.All(element => element.Visibility == Visibility.Collapsed),
+                "settled section spinners are hidden");
+            await f.Module.OpenAggregateSearchTabAsync("songs"); await Drain();
+            True(grid.Visibility == Visibility.Visible && catalog.Visibility == Visibility.Collapsed,
+                "song tab reuses the playlist song table");
+            await f.Module.OpenAggregateSearchTabAsync("playlists"); await Drain();
+            True(grid.Visibility == Visibility.Collapsed && catalog.Visibility == Visibility.Visible,
+                "playlist tab uses the card surface");
         });
         yield return Case("native aggregate shutdown resume drops old sessions but retains saved history", async () =>
         {

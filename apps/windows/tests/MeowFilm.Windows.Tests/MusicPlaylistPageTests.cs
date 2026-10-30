@@ -1,7 +1,12 @@
 using System.Text.Json;
+using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Input;
+using System.Windows.Media;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Desktop;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -66,14 +71,62 @@ public static partial class MusicUiTests
                 VirtualizingPanel.GetVirtualizationMode(grid) == VirtualizationMode.Recycling,
                 "playlist rows remain virtualized");
             Equal(4, grid.Columns.Count);
-            Equal("#", grid.Columns[0].Header);
-            Equal("标题", grid.Columns[1].Header);
+            Equal("歌曲 / 歌手", grid.Columns[0].Header);
+            Equal("专辑", grid.Columns[1].Header);
+            Equal("时长", grid.Columns[2].Header);
+            Equal("操作", grid.Columns[3].Header);
+            True(grid.Columns[0].Width.IsStar && grid.Columns[0].Width.Value == 3 &&
+                grid.Columns[1].Width.IsStar && grid.Columns[1].Width.Value == 2,
+                "song and album columns retain the shared three-to-two ratio");
             True(f.Module.IsContentDetailPage && f.Module.ShowsSongTable, "local playlist uses the shared detail surface");
             Equal("3", f.Module.DetailCountText);
             Equal(50d, grid.RowHeight);
             True(f.Module.CanReorderPlaylist, "same page owns drag reorder");
             True(((MeowFilm.Desktop.IDesktopHeaderSource)f.Module.View).Header.Slot is null,
                 "playlist detail does not publish the home-only create control");
+        });
+        yield return Case("song table reuses the shared overlay scroll chrome", async () =>
+        {
+            await using var f = await Fixture.Create();
+            string id = await f.Collection("滚动表格", 80);
+            await f.Module.NavigateAsync("playlist/" + id, default);
+            var page = (MusicView)f.Module.View;
+            var window = new Window
+            {
+                Content = page, Width = 760, Height = 360, WindowStyle = WindowStyle.None,
+                Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false
+            };
+            try
+            {
+                window.Show(); window.UpdateLayout(); await Drain();
+                var grid = (DataGrid)page.FindName("SongsGrid");
+                var scroll = Visuals(grid).OfType<ScrollViewer>()
+                    .Single(candidate => ReferenceEquals(candidate.TemplatedParent, grid));
+                True(OverlayScrollChrome.GetEnabled(scroll), "song table mounts the shared scroll behavior");
+                var bar = (ScrollBar)scroll.Template.FindName("PART_VerticalScrollBar", scroll);
+                True(ReferenceEquals(bar.Style, page.FindResource("Capability.OverlayScrollBar")),
+                    "song table uses the shared overlay scrollbar visual");
+                if (!DesktopTheme.GetIsHighContrast(bar))
+                    True(bar.Opacity == 0, "song scrollbar is hidden at rest");
+                var content = (FrameworkElement)scroll.Template.FindName("PART_ScrollContentPresenter", scroll);
+                True(ReferenceEquals(VisualTreeHelper.GetParent(bar), VisualTreeHelper.GetParent(content)) &&
+                    Grid.GetColumn(bar) == Grid.GetColumn(content) && Grid.GetRow(bar) == Grid.GetRow(content),
+                    "song scrollbar overlays the data viewport");
+                var headers = Visuals(grid).OfType<DataGridColumnHeadersPresenter>().Single();
+                True(headers.IsVisible && headers.ActualHeight > 0, "data grid column headers remain intact");
+                True(scroll.ScrollableHeight > 0 && scroll.CanContentScroll, "virtualized song rows remain scrollable");
+                bar.ApplyTemplate();
+                var track = (Track)bar.Template.FindName("PART_Track", bar);
+                ((RoutedCommand)track.IncreaseRepeatButton.Command).Execute(null, track.IncreaseRepeatButton);
+                await Drain();
+                True(scroll.VerticalOffset > 0 && OverlayScrollChrome.GetActive(scroll) && bar.Opacity > 0,
+                    "real table scrolling reveals the shared chrome");
+            }
+            finally
+            {
+                window.Content = null;
+                window.Close();
+            }
         });
     }
 

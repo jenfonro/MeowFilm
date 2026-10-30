@@ -14,10 +14,11 @@ public sealed record MusicSearchProgressRow(string Platform, int Page, int Count
 
 public sealed partial class MusicCapability
 {
+    private const string AggregateOverview = "overview";
     private readonly Dictionary<string, JsonElement> aggregateSnapshots = [];
     private readonly Dictionary<string, double> aggregateScroll = [];
     private readonly Dictionary<string, string> aggregateIds = [];
-    private string aggregateKeyword = "", aggregateKind = "songs";
+    private string aggregateKeyword = "", aggregateKind = "songs", aggregateView = AggregateOverview;
     private long aggregateEpoch, aggregateAccountEpoch;
     private bool aggregateStarting;
     private Task aggregateStartTail = Task.CompletedTask;
@@ -32,11 +33,18 @@ public sealed partial class MusicCapability
     }
     public ObservableCollection<MusicSearchProgressRow> SearchProgress { get; } = [];
     public bool IsAggregateSearch => location.Route == "catalog-search";
+    public string AggregateSearchTab => aggregateView;
+    public bool IsAggregateOverview => IsAggregateSearch && aggregateView == AggregateOverview;
+    public bool IsAggregateSongs => IsAggregateSearch && aggregateView == "songs";
+    public bool IsAggregatePlaylists => IsAggregateSearch && aggregateView == "playlists";
     public bool IsCatalogBrowsePage => IsCatalogPage && !IsAggregateSearch && !IsDiscovery;
-    public bool HasAggregateSearch => aggregateKeyword.Length > 0 && aggregateSnapshots.Count > 0;
-    public bool CanAggregateMore => CanCatalogBrowse && !aggregateStarting &&
+    public bool HasAggregateSearch => aggregateKeyword.Length > 0 &&
+        (aggregateSnapshots.Count > 0 || aggregateStarts.Count > 0);
+    public bool CanAggregateMore => CanCatalogBrowse && !IsAggregateOverview && !aggregateStarting &&
         aggregateSnapshots.TryGetValue(aggregateKind, out var snapshot) &&
         !snapshot.GetProperty("loading").GetBoolean() && snapshot.GetProperty("more").GetBoolean();
+    public bool CanLoadMoreAggregateSongs => IsAggregateSongs && CanAggregateMore;
+    public bool CanLoadMoreAggregatePlaylists => IsAggregatePlaylists && CanAggregateMore;
     public bool CanCancelAggregateSearch => !stopping && (aggregateStarting ||
         aggregateSnapshots.Values.Any(s => !s.GetProperty("cancelled").GetBoolean()));
     public string AggregateSearchSummary => !aggregateSnapshots.TryGetValue(aggregateKind, out var snapshot) ? "" :
@@ -58,12 +66,14 @@ public sealed partial class MusicCapability
     private void SearchBindings()
     {
         foreach (string name in new[] { nameof(IsAggregateSearch), nameof(IsCatalogBrowsePage), nameof(HasAggregateSearch),
-            nameof(CanAggregateMore), nameof(CanCancelAggregateSearch), nameof(AggregateSearchSummary), nameof(AggregateSearchStatus) })
+            nameof(AggregateSearchTab), nameof(IsAggregateOverview), nameof(IsAggregateSongs), nameof(IsAggregatePlaylists),
+            nameof(CanAggregateMore), nameof(CanLoadMoreAggregateSongs), nameof(CanLoadMoreAggregatePlaylists),
+            nameof(CanCancelAggregateSearch), nameof(AggregateSearchSummary), nameof(AggregateSearchStatus) })
             Changed(name);
     }
     private void RememberAggregateSearch()
     {
-        if (IsAggregateSearch) aggregateScroll[aggregateKind] = page.CaptureScroll();
+        if (IsAggregateSearch) aggregateScroll[aggregateView] = page.CaptureScroll();
     }
 
     private Task BeginAggregateSearchAsync(string keyword, CancellationToken token, bool refresh = false)
@@ -71,7 +81,14 @@ public sealed partial class MusicCapability
         if (stopping) return Task.CompletedTask;
         if (!searchPreferencesLoaded) return CatalogBusinessError("SEARCH_SETTINGS_UNCONFIRMED");
         RememberAggregateSearch();
-        string kind = CatalogSearchKind == "歌单" ? "playlists" : "songs";
+        if (aggregateKeyword != keyword)
+        {
+            aggregateView = AggregateOverview;
+            aggregateKind = "songs";
+            CatalogSearchKind = "歌曲";
+        }
+        string kind = aggregateView == "playlists" ? "playlists" : "songs";
+        aggregateKind = kind;
         string[] platforms = SearchDispatchPlatforms(kind);
         var key = AggregateStartIdentity(keyword, kind, platforms);
         if (aggregateKeyword == keyword && aggregateAccountEpoch == accountEpoch &&
@@ -79,14 +96,14 @@ public sealed partial class MusicCapability
             pending.Key == key)
         {
             aggregateKind = kind;
-            return pending.Work.WaitAsync(token);
+            return EnsureAggregateViewAsync(pending.Work, pending.Epoch, token, kind);
         }
         if (!refresh && aggregateKeyword == keyword && aggregateAccountEpoch == accountEpoch)
         {
             aggregateKind = kind;
-            return aggregateSnapshots.ContainsKey(kind)
-                ? RestoreAggregateSearchAsync(token)
-                : StartMissingAggregateKindAsync(token);
+            bool hasSnapshot = aggregateSnapshots.ContainsKey(kind);
+            var current = hasSnapshot ? RestoreAggregateSearchAsync(token) : StartMissingAggregateKindAsync(kind, token);
+            return EnsureAggregateViewAsync(current, aggregateEpoch, token, hasSnapshot ? null : kind);
         }
         var previous = aggregateStartTail;
         long epoch = ++aggregateEpoch, navigation = AdvanceLoadGeneration();
@@ -107,7 +124,9 @@ public sealed partial class MusicCapability
         aggregateStarts[kind] = flight;
         aggregateStartTail = flight.Work = Start();
         RefreshBindings();
-        return flight.Work;
+        var work = EnsureAggregateViewAsync(flight.Work, epoch, token, kind);
+        PublishAggregateView(restore: false);
+        return work;
 
         async Task Start()
         {
@@ -118,8 +137,8 @@ public sealed partial class MusicCapability
                 foreach (string oldId in oldIds)
                     await application.ExecuteAsync("music.search.cancel", new { id = oldId }, lifetime.Token);
                 if (stopping || epoch != aggregateEpoch || navigation != loadGeneration) return;
-                // Only the visible kind starts. Switching kind creates its own
-                // bounded session later; entering search never prefetches hidden work.
+                // Start the first visible kind; the comprehensive projection admits
+                // its other visible kind after this bounded start has settled.
                 token.ThrowIfCancellationRequested();
                 var snapshot = await Call("music.search.start", new { keyword, kind, platforms }, token);
                 string id = MusicDto.Text(snapshot, "id");
@@ -155,6 +174,23 @@ public sealed partial class MusicCapability
         }
     }
 
+    private async Task EnsureAggregateViewAsync(Task primary, long epoch, CancellationToken token,
+        string? attemptedKind = null)
+    {
+        if (stopping || epoch != aggregateEpoch || aggregateView != AggregateOverview)
+        {
+            await primary.WaitAsync(token);
+            return;
+        }
+        List<Task> starts = [primary];
+        foreach (string kind in new[] { "songs", "playlists" })
+        {
+            if (kind == attemptedKind || aggregateSnapshots.ContainsKey(kind)) continue;
+            starts.Add(StartMissingAggregateKindAsync(kind, token));
+        }
+        await Task.WhenAll(starts).WaitAsync(token);
+    }
+
     private AggregateStartKey AggregateStartIdentity(string keyword, string kind,
         string[] platforms) =>
         new(keyword, kind, string.Join("\u001f", platforms), accountEpoch);
@@ -165,7 +201,20 @@ public sealed partial class MusicCapability
             ReferenceEquals(current, flight))
             aggregateStarts.Remove(flight.Key.Kind);
         aggregateStarting = aggregateStarts.Values.Any(value => value.Epoch == aggregateEpoch);
-        if (!disposed) SearchBindings();
+        if (disposed) return;
+        if (!stopping && flight.Epoch == aggregateEpoch && IsAggregateSearch &&
+            (aggregateView == AggregateOverview || aggregateKind == flight.Key.Kind))
+        {
+            bool missing = !aggregateSnapshots.ContainsKey(flight.Key.Kind);
+            string message = AggregateSearchStatus;
+            PublishAggregateView(restore: false);
+            if (missing && message.Length > 0)
+            {
+                AggregateSearchStatus = message;
+                SearchBindings();
+            }
+        }
+        else SearchBindings();
     }
 
     private void AcceptAggregateSnapshot(JsonElement value)
@@ -179,39 +228,63 @@ public sealed partial class MusicCapability
             value.GetProperty("platforms").ValueKind == JsonValueKind.Array &&
             value.GetProperty("platforms").GetArrayLength() <= 5);
         aggregateSnapshots[kind] = value.Clone();
-        if (IsAggregateSearch && aggregateKind == kind) PublishAggregateSnapshot(value, restore: false);
+        if (IsAggregateSearch && (aggregateView == AggregateOverview || aggregateKind == kind))
+            PublishAggregateView(restore: false);
         SearchBindings();
     }
 
-    private void PublishAggregateSnapshot(JsonElement value, bool restore)
+    private MusicCatalogCard[] AggregateCards(string kind) =>
+        aggregateSnapshots.TryGetValue(kind, out var snapshot)
+            ? MusicCatalogDto.Aggregate(snapshot.GetProperty("items"), kind)
+            : [];
+    private bool AggregateKindLoading(string kind) =>
+        aggregateStarts.TryGetValue(kind, out var start) && start.Epoch == aggregateEpoch ||
+        aggregateSnapshots.TryGetValue(kind, out var snapshot) &&
+        snapshot.GetProperty("loading").GetBoolean();
+
+    private void PublishAggregateView(bool restore)
     {
-        var cards = MusicCatalogDto.Aggregate(value.GetProperty("items"), aggregateKind);
+        var songCards = AggregateCards("songs");
+        var playlistCards = AggregateCards("playlists");
         RetireCatalogPreviewSurface();
         string? selected = selectedSong?.SelectionKey;
-        double scroll = restore ? aggregateScroll.GetValueOrDefault(aggregateKind) : page.CaptureScroll();
+        double scroll = restore ? aggregateScroll.GetValueOrDefault(aggregateView) : page.CaptureScroll();
         publishing = true;
         try
         {
             catalogQuery = aggregateKeyword; catalogLoadedPlatform = "aggregate"; catalogLoadedTarget = null;
             catalogAccountStamp = ""; catalogExpiresAt = null; catalogMore = false; catalogContinuation = null;
             catalogLoadedKind = CatalogSearchKind = aggregateKind == "songs" ? "歌曲" : "歌单";
-            heading = aggregateKeyword; collection = null; total = cards.Length;
-            CatalogSections.Clear(); CatalogSections.Add(new("", cards)); CatalogTags.Clear();
-            Songs.Clear(); foreach (var card in cards) if (card.Song is { } song) Songs.Add(song);
+            heading = aggregateKeyword; collection = null;
+            CatalogSections.Clear();
+            if (aggregateView == AggregateOverview)
+            {
+                CatalogSections.Add(new("单曲", songCards.Take(6).ToArray(),
+                    IsLoading: AggregateKindLoading("songs")));
+                CatalogSections.Add(new("歌单", playlistCards.Take(6).ToArray(),
+                    IsLoading: AggregateKindLoading("playlists")));
+                total = songCards.Length + playlistCards.Length;
+            }
+            else if (aggregateView == "songs")
+            {
+                CatalogSections.Add(new("", songCards));
+                total = songCards.Length;
+            }
+            else
+            {
+                CatalogSections.Add(new("", playlistCards));
+                total = playlistCards.Length;
+            }
+            CatalogTags.Clear();
+            Songs.Clear(); foreach (var card in songCards) if (card.Song is { } song) Songs.Add(song);
             SelectedSong = Songs.FirstOrDefault(s => s.SelectionKey == selected);
             SearchProgress.Clear();
-            foreach (var state in value.GetProperty("platforms").EnumerateArray())
-                SearchProgress.Add(new(MusicDto.Text(state, "platform"), MusicDto.Count(state, "page"),
-                    MusicDto.Count(state, "count"), state.GetProperty("loading").GetBoolean(),
-                    state.GetProperty("more").GetBoolean(), MusicCatalogDto.Text(state, "error")));
-            AggregateSearchStatus = MusicCatalogDto.Text(value, "code") switch
-            {
-                "NO_PLATFORMS" => "未启用搜索平台",
-                "CANCELLED" => "已取消",
-                "PARTIAL" => "部分平台搜索失败",
-                "FUSION_FAILED" => "搜索结果排序失败",
-                _ => total == 0 && !value.GetProperty("loading").GetBoolean() ? "无搜索结果" : ""
-            };
+            if (aggregateSnapshots.TryGetValue(aggregateKind, out var active))
+                foreach (var state in active.GetProperty("platforms").EnumerateArray())
+                    SearchProgress.Add(new(MusicDto.Text(state, "platform"), MusicDto.Count(state, "page"),
+                        MusicDto.Count(state, "count"), state.GetProperty("loading").GetBoolean(),
+                        state.GetProperty("more").GetBoolean(), MusicCatalogDto.Text(state, "error")));
+            AggregateSearchStatus = AggregateViewStatus();
             status = ""; RefreshBindings();
         }
         finally { publishing = false; }
@@ -223,36 +296,59 @@ public sealed partial class MusicCapability
         }, DispatcherPriority.Loaded);
     }
 
+    private string AggregateViewStatus()
+    {
+        string[] kinds = aggregateView == AggregateOverview ? ["songs", "playlists"] : [aggregateKind];
+        var snapshots = kinds.Where(aggregateSnapshots.ContainsKey).Select(kind => aggregateSnapshots[kind]).ToArray();
+        if (snapshots.Length == 0 || snapshots.Any(value => value.GetProperty("loading").GetBoolean())) return "";
+        var codes = snapshots.Select(value => MusicCatalogDto.Text(value, "code")).ToArray();
+        if (codes.Contains("FUSION_FAILED", StringComparer.Ordinal)) return "搜索结果排序失败";
+        if (codes.Contains("PARTIAL", StringComparer.Ordinal)) return "部分平台搜索失败";
+        int count = snapshots.Sum(value => value.GetProperty("items").GetArrayLength());
+        if (count > 0) return "";
+        if (codes.All(code => code == "NO_PLATFORMS")) return "未启用搜索平台";
+        if (codes.All(code => code == "CANCELLED")) return "已取消";
+        return snapshots.Length == kinds.Length ? "无搜索结果" : "";
+    }
+
     private Task RestoreAggregateSearchAsync(CancellationToken token, bool navigate = true)
     {
         token.ThrowIfCancellationRequested();
         if (navigate) { AdvanceLoadGeneration(); loadCancellation?.Cancel(); }
         location = new("catalog-search", aggregateKeyword);
-        if (aggregateSnapshots.TryGetValue(aggregateKind, out var value))
-            PublishAggregateSnapshot(value, restore: true);
-        else ClearAggregateVisibleSnapshot();
+        PublishAggregateView(restore: true);
         return Task.CompletedTask;
     }
     public Task ReturnToAggregateSearchAsync() => !HasAggregateSearch || stopping
         ? Task.CompletedTask : RequestNavigationAsync("catalog-search");
     public Task SwitchAggregateSearchKindAsync()
+        => OpenAggregateSearchTabAsync(CatalogSearchKind == "歌单" ? "playlists" : "songs");
+    public Task OpenAggregateSearchTabAsync(string tab)
     {
         if (publishing || !IsAggregateSearch || stopping) return Task.CompletedTask;
+        if (tab is not (AggregateOverview or "songs" or "playlists")) return Task.CompletedTask;
         RememberAggregateSearch();
-        aggregateKind = CatalogSearchKind == "歌单" ? "playlists" : "songs";
-        if (aggregateSnapshots.ContainsKey(aggregateKind)) return RestoreAggregateSearchAsync(lifetime.Token, navigate: false);
-        return StartMissingAggregateKindAsync(lifetime.Token);
+        aggregateView = tab;
+        aggregateKind = tab == "playlists" ? "playlists" : "songs";
+        CatalogSearchKind = aggregateKind == "songs" ? "歌曲" : "歌单";
+        PublishAggregateView(restore: true);
+        SearchBindings();
+        return tab == AggregateOverview
+            ? EnsureAggregateViewAsync(Task.CompletedTask, aggregateEpoch, lifetime.Token)
+            : aggregateSnapshots.ContainsKey(aggregateKind)
+                ? Task.CompletedTask
+                : StartMissingAggregateKindAsync(aggregateKind, lifetime.Token);
     }
-    private Task StartMissingAggregateKindAsync(CancellationToken token)
+    private Task StartMissingAggregateKindAsync(string kind, CancellationToken token)
     {
         long epoch = aggregateEpoch, navigation = loadGeneration;
-        string kind = aggregateKind, keyword = aggregateKeyword;
+        string keyword = aggregateKeyword;
         string[] platforms = SearchDispatchPlatforms(kind);
         var key = AggregateStartIdentity(keyword, kind, platforms);
         if (aggregateStarts.TryGetValue(kind, out var pending) && pending.Epoch == epoch &&
             pending.Key == key)
             return pending.Work.WaitAsync(token);
-        ClearAggregateVisibleSnapshot();
+        if (aggregateView != AggregateOverview && aggregateKind == kind) ClearAggregateVisibleSnapshot();
         var previous = aggregateStartTail;
         var flight = new AggregateStartFlight(key, epoch);
         aggregateStarts[kind] = flight;
@@ -271,7 +367,11 @@ public sealed partial class MusicCapability
                     await previous;
                     if (epoch != aggregateEpoch || navigation != loadGeneration) return;
                     if (aggregateSnapshots.ContainsKey(kind))
-                    { await RestoreAggregateSearchAsync(lifetime.Token, navigate: false); return; }
+                    {
+                        if (IsAggregateSearch && (aggregateView == AggregateOverview || aggregateKind == kind))
+                            PublishAggregateView(restore: false);
+                        return;
+                    }
                     var snapshot = await Call("music.search.start", new { keyword, kind, platforms }, token);
                     string id = MusicDto.Text(snapshot, "id");
                     if (epoch != aggregateEpoch || navigation != loadGeneration)
@@ -323,6 +423,7 @@ public sealed partial class MusicCapability
         RetireCatalogPreviewSurface();
         string[] ids = aggregateIds.Values.ToArray();
         aggregateIds.Clear(); aggregateSnapshots.Clear(); aggregateScroll.Clear(); aggregateKeyword = "";
+        aggregateView = AggregateOverview; aggregateKind = "songs";
         SearchProgress.Clear(); SearchBindings();
         await aggregateStartTail;
         await CancelAggregateIds(ids);

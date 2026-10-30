@@ -2,5 +2,6 @@
  <ResourceDictionary.MergedDictionaries><ResourceDictionary Source="/MeowFilm.Desktop;component/OverlayScrollChrome.xaml"/></ResourceDictionary.MergedDictionaries>
  <Style x:Key="Capability.ScrollPage" TargetType="RepeatButton" BasedOn="{StaticResource MeowFilm.ScrollPage}"/>
  <Style x:Key="Capability.ScrollThumb" TargetType="Thumb" BasedOn="{StaticResource MeowFilm.ScrollThumb}"/>
+ <Style x:Key="Capability.OverlayScrollBar" TargetType="ScrollBar" BasedOn="{StaticResource MeowFilm.OverlayScrollBar}"/>
  <Style x:Key="Capability.OverlayScrollViewer" TargetType="ScrollViewer" BasedOn="{StaticResource MeowFilm.OverlayScrollViewer}"/>
 </ResourceDictionary>

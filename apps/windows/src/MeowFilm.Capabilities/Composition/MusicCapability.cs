@@ -103,7 +103,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         location.Route.StartsWith("playlist/", StringComparison.Ordinal);
     public bool IsCollectionPage => IsSongList && collection is not null;
     public bool IsContentDetailPage => IsCollectionPage || IsCatalogDetailPage;
-    public bool ShowsSongTable => IsSongList || IsCatalogDetailPage;
+    public bool ShowsSongTable => IsSongList || IsCatalogDetailPage || IsAggregateSongs;
     public bool ShowSongPager => IsSongList && !IsCollectionPage;
     public string? HistoryDate => location.Date;
     public bool HasCollection => collection is not null;

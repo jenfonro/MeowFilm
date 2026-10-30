@@ -32,7 +32,7 @@ public sealed partial class MusicCapability
     public ObservableCollection<MusicDiscoveryChart> DiscoveryCharts { get; } = [];
     public ObservableCollection<MusicDiscoveryFailure> DiscoveryFailures { get; } = [];
     public bool IsDiscovery => location.Route == "catalog-discovery";
-    public bool IsCatalogContent => IsCatalogPage && !IsDiscovery && !IsCatalogDetailPage;
+    public bool IsCatalogContent => IsCatalogPage && !IsDiscovery && !IsCatalogDetailPage && !IsAggregateSongs;
     public bool CanUseDiscovery => !stopping && IsDiscovery && discoveryRequest is null &&
         discoverySnapshot is { } value && application.IsDiscoveryCurrent(value.Generation);
     public bool CanRotateDiscovery => CanUseDiscovery && commands == 0 && DiscoveryRecommended.Count > 0;

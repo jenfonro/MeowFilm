@@ -375,7 +375,7 @@ public static class MusicCatalogTests
                 entry.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseLeaveEvent });
                 CardMotion.Transition(surface, false, false);
                 value.SetValue("  云歌单  "); Invoke(searchButton);
-                await Until(() => f.Client.Count("music.search.start") == 1 && f.Module.IsAggregateSearch,
+                await Until(() => f.Client.Count("music.search.start") == 2 && f.Module.IsAggregateSearch,
                     "headless search did not settle");
                 await WaitForSearch(f.Module); Layout();
                 Equal("云歌单", f.Client.Last("music.search.start").GetProperty("keyword").GetString());
@@ -1120,9 +1120,9 @@ public static class MusicCatalogTests
             await f.Configure(new { searchPlaylistTotal = 61 });
             await f.Module.NavigateAsync("catalog-home", default);
             await f.SearchPolicy("wy", playlists: true);
-            f.Module.CatalogSearchKind = "歌单";
             await f.Module.SearchAsync("云歌单", default);
             await WaitForSearch(f.Module);
+            await f.Module.OpenAggregateSearchTabAsync("playlists");
             True(f.Module.CanAggregateMore, "fixture search must expose another page");
             var card = f.Module.CatalogSections.Single().Items.First();
             Equal(MusicCatalogEntryPresentation.Static, card.Presentation);
@@ -1612,9 +1612,9 @@ public static class MusicCatalogTests
             await using var f = await Fixture.Create();
             await f.Module.NavigateAsync("catalog-home", default);
             await f.SearchPolicy("wy", playlists: true);
-            f.Module.CatalogSearchKind = "歌单";
             await f.Module.SearchAsync("云歌单", default);
             await WaitForSearch(f.Module);
+            await f.Module.OpenAggregateSearchTabAsync("playlists");
             var card = f.Module.CatalogSections.Single().Items.Single();
             True(card.CanOpen && card.Kind == "playlist" && card.ActionId == "500", "search playlist DTO is not an unknown resource");
             Equal("playlists", f.Client.Last("music.search.start").GetProperty("kind").GetString());
@@ -1712,7 +1712,7 @@ public static class MusicCatalogTests
                 f.Module.SelectedCatalogPlatform = f.Module.CatalogPlatforms.Single(p => p.Key == platform);
                 await f.Module.SearchAsync("歌曲", default);
                 await WaitForSearch(f.Module);
-                var card = f.Module.CatalogSections.Single().Items.Single();
+                var card = f.Module.CatalogSections.SelectMany(section => section.Items).Single(item => item.Song is not null);
                 True(card.CanOpen && card.Song is not null, "real provider normalized song is actionable");
                 Equal(platform, card.Song!.Raw.GetProperty("source_data").GetProperty("source").GetString());
                 var id = platform == "kg" ? "global-test" : "500";

@@ -58,7 +58,8 @@ public enum MusicCatalogSectionPresentation
     RankingPreviews
 }
 public sealed record MusicCatalogSection(string Title, IReadOnlyList<MusicCatalogCard> Items,
-    string Id = "", string Type = "", MusicCatalogCard? Action = null, string Layout = "")
+    string Id = "", string Type = "", MusicCatalogCard? Action = null, string Layout = "",
+    bool IsLoading = false)
 {
     public double HorizontalOffset { get; set; }
     public MusicCatalogSectionPresentation Presentation => Type switch
