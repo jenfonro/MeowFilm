@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { createScriptHost, ScriptHostError } from '@meowfilm/script-host';
-import { createMusicScriptModule, musicScriptContract } from '../apps/windows/runtime/modules/music-script.mjs';
+import { createMusicScriptModule, musicScriptContract } from '../apps/runtime/modules/music-script.mjs';
 
 const limit = 512 * 1024;
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -21,11 +21,11 @@ ${end}`;
 }
 const options = (id = 'one', revision = 1, expectedRevision = 0) => ({
   installationId: id, revision, expectedRevision, version: 'fixture-1',
-  config: { label: id }, permissions: { networkOrigins: [], storage: [], localServices: false },
+  config: { label: id }, permissions: { storage: [] },
   grant: randomUUID(),
 });
 const storageOptions = (...args) => ({
-  ...options(...args), permissions: { networkOrigins: [], storage: ['read', 'write'], localServices: false },
+  ...options(...args), permissions: { storage: ['read', 'write'] },
 });
 function okay(reply) {
   assert.equal(reply.ok, true, JSON.stringify(reply));
@@ -106,11 +106,11 @@ const request = (instance, siteId = 'kw', musicInfo = {}, extra = {}) => ({
 async function value(rpc, instance, siteId, musicInfo, extra) {
   return okay(await rpc('invoke', request(instance, siteId, musicInfo, extra))).value;
 }
-const storageFixture = fixture({ handler: `async ({info}) => {
+const storageFixture = fixture({ handler: `async ({info}, {storage}) => {
  const m=info.musicInfo;
- if(m.op==='set') return await meow.storage.set(m.key||'key',m.value);
- if(m.op==='delete') return await meow.storage.delete(m.key||'key');
- return await meow.storage.get(m.key||'key');
+ if(m.op==='set') return await storage.set(m.key||'key',m.value);
+ if(m.op==='delete') return await storage.delete(m.key||'key');
+ return await storage.get(m.key||'key');
 }` });
 const networkFixture = fixture({ handler: `async () => new Promise((resolve,reject) =>
  lx.request('https://fixture.invalid/value',{},(error,response,body)=>error?reject(error):resolve(body)))` });
@@ -149,7 +149,7 @@ function callback(installationId, generation, siteId = 'kw', extra = {}) {
 
 test('descriptor exposes only eight script RPCs, factory injection and enveloped close', async t => {
   const { module, rpc } = setup(t);
-  assert.equal(module.id, 'music'); assert.equal(module.version, '0.4.0');
+  assert.equal(module.id, 'music'); assert.equal(module.version, '0.5.0');
   assert.deepEqual(Object.keys(module.methods).sort(), [
     'stage.begin', 'stage.chunk', 'stage.abort', 'load', 'unload', 'invoke', 'status', 'close',
   ].map(name => `music.script.${name}`).sort());
@@ -234,7 +234,7 @@ test('two real LX instances with identical platforms/configured names remain dir
   assert.equal(a.state, 'ready'); assert.equal(a.protocol, 'lx');
   assert.deepEqual(a.capabilities.kw.actions, ['musicUrl']);
   assert.deepEqual(a.capabilities.kw.qualitys, ['320k', 'flac']);
-  assert.deepEqual(a.capabilities.local.actions, ['musicUrl', 'lyric']);
+  assert.deepEqual(a.capabilities.local.actions, ['musicUrl', 'lyric', 'pic']);
   const values = await Promise.all([value(rpc, a), value(rpc, b), value(rpc, a, 'tx'), value(rpc, b, 'tx')]);
   assert.deepEqual(values.map(item => [item.label, item.source, item.count]),
     [['a', 'kw', 1], ['b', 'kw', 1], ['a', 'tx', 1], ['b', 'tx', 1]]);
@@ -242,7 +242,7 @@ test('two real LX instances with identical platforms/configured names remain dir
   const lyrics = await load(rpc, options('lyrics'), fixture({ handler: `async () => ${JSON.stringify(text)}` }));
   assert.equal(await value(rpc, lyrics, 'local', {}, { operation: 'lyric' }), text);
   for (const target of [
-    request(a, 'kw', {}, { operation: 'lyric' }), request(a, 'local', {}, { operation: 'pic' }),
+    request(a, 'kw', {}, { operation: 'lyric' }), request(a, 'local', {}, { operation: 'missing' }),
     request(a, 'kw', {}, { operation: 'search' }), request(a, 'default'),
     request(a, 'kw', {}, { payload: { quality: 'hires' } }),
   ]) denied(await rpc('invoke', target), 'CAPABILITY_UNAVAILABLE');
@@ -309,9 +309,9 @@ test('actual LX startup storage is denied without default scope; formal invocati
   const source = `(async () => {
  let startupCode;
  try { await meow.storage.set('startup','must-not-save'); } catch(error) { startupCode=error.code; }
- lx.on('request',async ({source}) => {
-   await meow.storage.set('key',source);
-   return {startupCode,value:await meow.storage.get('key')};
+ lx.on('request',async ({source}, {storage}) => {
+   await storage.set('key',source);
+   return {startupCode,value:await storage.get('key')};
  });
  await lx.send('inited',{sources:${JSON.stringify(declared)}});
 })()`;
@@ -347,7 +347,7 @@ test('storage get/set/delete is isolated by installation and site; no document r
   for (const call of native.calls) assert.equal(call.message.grant, call.message.installationId === 'a' ? aa.grant : bb.grant);
 });
 
-test('storage/network permissions are enforced before reverse I/O, including read-only and malformed grants', async t => {
+test('storage permissions are enforced before reverse I/O and malformed grant parameters fail', async t => {
   const { rpc, native } = setup(t);
   const none = await load(rpc, options('none'), storageFixture);
   denied(await rpc('invoke', request(none)), 'PERMISSION_DENIED');
@@ -358,14 +358,15 @@ test('storage/network permissions are enforced before reverse I/O, including rea
   denied(await rpc('invoke', request(read, 'kw', { op: 'delete' })), 'PERMISSION_DENIED');
   assert.equal(native.calls.length, 1);
   const network = await load(rpc, options('network'), networkFixture);
-  denied(await rpc('invoke', request(network)), 'PERMISSION_DENIED');
+  denied(await rpc('invoke', request(network)), 'NETWORK_ERROR');
   const token = await upload(rpc);
   for (const permissions of [
-    { networkOrigins: ['https://user:password@fixture.invalid'], storage: [], localServices: false },
-    { networkOrigins: ['https://fixture.invalid/path'], storage: [], localServices: false },
-  ]) denied(await rpc('load', { ...options('invalid'), token, permissions }), 'PERMISSION_DENIED');
+    { storage: ['execute'] },
+    { storage: ['read', 'read'] },
+  ]) denied(await rpc('load', { ...options('invalid'), token, permissions }), 'INVALID_REQUEST');
   denied(await rpc('load', { ...options('invalid'), token,
-    permissions: { networkOrigins: [], storage: [], localServices: true } }), 'CAPABILITY_UNAVAILABLE');
+    permissions: { storage: [], unsupported: true } }), 'INVALID_REQUEST');
+  denied(await rpc('load', { ...options('invalid'), token, grant: 'not-a-uuid' }), 'PERMISSION_DENIED');
 });
 
 test('grant is not exposed in script globals/config/scriptInfo, host specs or public instances', async t => {
@@ -599,7 +600,7 @@ test('control envelope counts toward 512KiB, oversized input/config/reverse writ
   denied(await rpc('load', { ...options('config'), token, config: { data: 'x'.repeat(32768) } }), 'LIMIT');
   okay(await rpc('stage.abort', { token }));
   const storage = await load(rpc, storageOptions('storage'), fixture({
-    handler: `async () => meow.storage.set('big','x'.repeat(${limit}))`,
+    handler: `async (_request, {storage}) => storage.set('big','x'.repeat(${limit}))`,
   }));
   denied(await rpc('invoke', request(storage)), 'LIMIT');
   assert.equal(native.calls.length, 0);
@@ -621,16 +622,15 @@ test('thirty-two real instances are the limit, updates reuse slots, and unloadin
   assert.equal(okay(await rpc('status')).instances.length, 32);
 });
 
-test('network is origin-authorized and receives installation/generation/site identity, never platform credentials', async t => {
+test('network needs no domain grant and receives scoped identity, never platform credentials', async t => {
   const calls = [];
   const { rpc } = setup(t, { network: async input => {
     calls.push(input);
-    assert.equal(input.authorizeURL('https://fixture.invalid/redirect'), 'https://fixture.invalid/redirect');
-    assert.throws(() => input.authorizeURL('https://other.invalid/no'), { code: 'PERMISSION_DENIED' });
+    assert.equal(input.validateURL('https://fixture.invalid/redirect'), 'https://fixture.invalid/redirect');
+    assert.equal(input.validateURL('https://other.invalid/no'), 'https://other.invalid/no');
     return { statusCode: 200, body: 'synthetic-network' };
   } });
   const spec = options();
-  spec.permissions.networkOrigins = ['https://fixture.invalid'];
   const instance = await load(rpc, spec, networkFixture);
   assert.equal(await value(rpc, instance, 'tx'), 'synthetic-network');
   assert.equal(calls.length, 1);
@@ -641,31 +641,19 @@ test('network is origin-authorized and receives installation/generation/site ide
   assert.equal(calls[0].options.headers, undefined);
 });
 
-test('reviewed origin budget accepts 128 public origins and rejects local/private access', async t => {
+test('extended source actions preserve payload and returned values without a platform whitelist', async t => {
   const { rpc } = setup(t);
-  const accepted = Array.from({ length: 128 }, (_, index) => `https://source-${index}.example`);
-  const spec = options('origins');
-  spec.permissions.networkOrigins = accepted;
-  const instance = await load(rpc, spec);
+  const instance = await load(rpc, options('extension'), fixture({
+    sources: { qsvip: { name: 'extension', type: 'music', actions: ['musicSearch', 'musicUrl', 'lyric'],
+      qualitys: [{ type: '128k', label: 'standard' }] } },
+    handler: 'async ({source,action,info}) => ({source,action,info})',
+  }));
   assert.equal(instance.state, 'ready');
-
-  let token = await upload(rpc);
-  const overflow = options('origin-overflow');
-  overflow.permissions.networkOrigins = [...accepted, 'https://overflow.example'];
-  denied(await rpc('load', { ...overflow, token }), 'LIMIT');
-  okay(await rpc('stage.abort', { token }));
-
-  for (const [id, origin] of [
-    ['loopback', 'http://127.0.0.1:8731'],
-    ['private', 'http://192.168.1.8'],
-    ['localhost', 'http://localhost:3000'],
-  ]) {
-    token = await upload(rpc);
-    const deniedSpec = options(id);
-    deniedSpec.permissions.networkOrigins = [origin];
-    denied(await rpc('load', { ...deniedSpec, token }), 'PERMISSION_DENIED');
-    okay(await rpc('stage.abort', { token }));
-  }
+  const info = { keyword: 'song', page: 2, pagesize: 10 };
+  assert.deepEqual(await value(rpc, instance, 'qsvip', {}, { operation: 'musicSearch', payload: info }),
+    { source: 'qsvip', action: 'musicSearch', info });
+  assert.deepEqual(instance.capabilities.qsvip.qualitys, ['128k']);
+  denied(await rpc('invoke', request(instance, 'qsvip', {}, { operation: 'search', payload: info })), 'CAPABILITY_UNAVAILABLE');
 });
 
 test('per-site and per-instance invoke budgets reject excess work without targeting another script', async t => {
@@ -677,7 +665,7 @@ test('per-site and per-instance invoke budgets reject excess work without target
     await release.promise;
     return { statusCode: 200, body: 'done' };
   } });
-  const spec = options(); spec.permissions.networkOrigins = ['https://fixture.invalid'];
+  const spec = options();
   const instance = await load(rpc, spec, networkFixture);
   const requests = Array.from({ length: 4 }, () => rpc('invoke', request(instance)));
   try {
@@ -702,7 +690,7 @@ test('global control/invoke budget is bounded at sixteen requests', async t => {
   } });
   const instances = [];
   for (let index = 0; index < 4; index++) {
-    const spec = options(`i${index}`); spec.permissions.networkOrigins = ['https://fixture.invalid'];
+    const spec = options(`i${index}`);
     instances.push(await load(rpc, spec, networkFixture));
   }
   const requests = instances.flatMap(instance =>
@@ -723,7 +711,7 @@ test('one invocation cannot fan out unbounded reverse storage calls', async t =>
     calls++; await release.promise; return { ok: true, value: null };
   } });
   const instance = await load(rpc, storageOptions(), fixture({
-    handler: `async () => Promise.all(Array.from({length:20},(_,i)=>meow.storage.get('k'+i)))`,
+    handler: `async (_request, {storage}) => Promise.all(Array.from({length:20},(_,i)=>storage.get('k'+i)))`,
   }));
   try {
     denied(await rpc('invoke', request(instance)), 'LIMIT');

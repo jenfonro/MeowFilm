@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
@@ -13,6 +13,7 @@ export function verifyBoundaries(root = windowsRoot) {
     return readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
       if (['node_modules', 'dist', '.build', 'build', '.npm-cache', '.cache'].includes(entry.name)) return [];
       const path = join(directory, entry.name);
+      if (entry.isSymbolicLink()) { errors.push(`${relative(root, path)}: linked source`); return []; }
       return entry.isDirectory() ? walk(path) : [path];
     });
   }
@@ -33,6 +34,26 @@ export function verifyBoundaries(root = windowsRoot) {
           const name = target.split('/').slice(0, target.startsWith('@') ? 2 : 1).join('/');
           if (names.has(name) && name !== manifest.name && !dependencies.has(name))
             errors.push(`${relative(root, file)}: undeclared workspace dependency ${name}`);
+        }
+      }
+    }
+  }
+  const shared = join(root, 'apps/runtime');
+  const sharedImports = new Set(['node:crypto', '@meowfilm/runtime-bridge', '@meowfilm/script-host']);
+  if (existsSync(shared)) {
+    if (lstatSync(shared).isSymbolicLink()) errors.push('apps/runtime: linked source');
+    else for (const file of walk(shared).filter(path => /\.[cm]?js$/.test(path))) {
+      const text = readFileSync(file, 'utf8');
+      for (const match of text.matchAll(/(?:\bfrom\s*|\bimport\s*(?:\(\s*)?|\brequire\s*\()\s*['"]([^'"]+)['"]/g)) {
+        const target = match[1];
+        if (target.startsWith('.')) {
+          const path = relative(shared, resolve(dirname(file), target));
+          if (path === '..' || path.startsWith('..' + sep) || isAbsolute(path))
+            errors.push(`${relative(root, file)}: shared runtime depends on platform source: ${target}`);
+        } else if (!sharedImports.has(target)) {
+          errors.push(`${relative(root, file)}: shared runtime platform/private import: ${target}`);
+        } else if (target.startsWith('@meowfilm/') && !names.has(target)) {
+          errors.push(`${relative(root, file)}: undeclared shared runtime package: ${target}`);
         }
       }
     }

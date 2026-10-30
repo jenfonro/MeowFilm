@@ -571,7 +571,7 @@ public static class MusicKwMgCatalogTests
         string token = S(upload, "token");
         Ok(await scripts.ExecuteAsync("music.transfer.chunk", new { token, offset = 0, data = Convert.ToBase64String(bytes) }));
         var installed = Ok(await scripts.ExecuteAsync("music.sources.install", new { token, name = "Synthetic", version = "1",
-            permissions = new { networkOrigins = Array.Empty<string>(), storage = new[] { "read" } } }));
+            permissions = new { storage = new[] { "read" } } }));
         var installationId = S(installed.GetProperty("item"), "installationId");
         Ok(await scripts.ExecuteAsync("music.sources.enable", new { installationId }));
         if (platform == "kw")
@@ -612,7 +612,7 @@ public static class MusicKwMgCatalogTests
         internal JsonElement? Payload;
         private JsonObject? instance;
         private static JsonElement Reply(object value)
-        { var obj = O(value); obj["ok"] = true; obj["contract"] = "music.script.v1"; return E(obj); }
+        { var obj = O(value); obj["ok"] = true; obj["contract"] = "music.script.v2"; return E(obj); }
         public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -624,7 +624,7 @@ public static class MusicKwMgCatalogTests
                 case "music.script.stage.chunk": result = Reply(new { next = N(p, "offset") + Convert.FromBase64String(S(p, "data")).Length }); break;
                 case "music.script.stage.abort": result = Reply(new { released = true }); break;
                 case "music.script.load":
-                    Check(!p.GetProperty("permissions").GetProperty("localServices").GetBoolean());
+                    Check(p.GetProperty("permissions").EnumerateObject().Select(field => field.Name).SequenceEqual(["storage"]));
                     instance = O(new { installationId = S(p, "installationId"), revision = p.GetProperty("revision").GetInt64(),
                         generation = 1, state = "ready", capabilities = new Dictionary<string, object>
                         { [platform] = new { actions = new[] { "musicUrl" },

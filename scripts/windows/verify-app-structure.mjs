@@ -4,6 +4,12 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const generated = new Set(['bin', 'obj', 'node_modules', '.git']);
+const runtimeTrees = new Map([
+  ['apps/runtime', { files: ['bootstrap.mjs', 'modules/music-script.mjs'], directories: ['modules'] }],
+  ['apps/windows/runtime', { files: ['bootstrap.mjs', 'entries/aggregate.mjs'], directories: ['entries'] }],
+]);
+const sharedImports = new Set(['node:crypto', '@meowfilm/runtime-bridge', '@meowfilm/script-host']);
+const windowsImports = new Set(['node:net', '@meowfilm/runtime-bridge', '@meowfilm/runtime-bridge/descriptor']);
 function fail(message) { throw new Error('Windows App structure: ' + message); }
 function samePath(a, b) {
   return process.platform === 'win32'
@@ -19,8 +25,11 @@ function inside(base, target) {
 export function verifyAppStructure(directory = root) {
   directory = resolve(directory);
   if (lstatSync(directory).isSymbolicLink() || !samePath(realpathSync(directory), directory)) fail('source root alias');
-  const files = [];
+  const files = [], directories = [];
   function walk(rel) {
+    const path = join(directory, rel);
+    if (lstatSync(path).isSymbolicLink() || !samePath(realpathSync(path), path)) fail('linked source: ' + rel);
+    directories.push(rel);
     for (const item of readdirSync(join(directory, rel), { withFileTypes: true })) {
       if (generated.has(item.name)) continue;
       const child = rel + '/' + item.name;
@@ -31,6 +40,14 @@ export function verifyAppStructure(directory = root) {
     }
   }
   for (const part of ['apps/windows', 'apps/runtime', 'packages', 'scripts']) walk(part);
+  for (const [source, expected] of runtimeTrees) {
+    const authored = files.filter(file => file.startsWith(source + '/')).map(file => file.slice(source.length + 1));
+    if (expected.files.some(file => !authored.includes(file))) fail('missing runtime source: ' + source);
+    if (authored.some(file => !expected.files.includes(file)) ||
+        directories.filter(path => path.startsWith(source + '/'))
+          .some(path => !expected.directories.includes(path.slice(source.length + 1))))
+      fail('unexpected runtime source: ' + source);
+  }
 
   let imports = 0, resources = 0;
   function sourceTarget(owner, specifier) {
@@ -40,6 +57,11 @@ export function verifyAppStructure(directory = root) {
       fail('external source dependency: ' + owner);
     if (!existsSync(target) || !lstatSync(target).isFile() || !samePath(realpathSync(target), target))
       fail('missing/linked relative import: ' + owner + ' -> ' + specifier);
+    if (owner.startsWith('apps/runtime/') && !inside(join(directory, 'apps/runtime'), target))
+      fail('shared runtime platform dependency: ' + owner + ' -> ' + specifier);
+    if (owner.startsWith('apps/windows/runtime/') &&
+        !inside(join(directory, 'apps/windows/runtime'), target) && !inside(join(directory, 'apps/runtime'), target))
+      fail('Windows runtime source dependency: ' + owner + ' -> ' + specifier);
     imports++;
   }
   for (const file of files) {
@@ -50,7 +72,16 @@ export function verifyAppStructure(directory = root) {
         ...text.matchAll(/^[ \t]*import\s*(['"])([^'"\r\n]+)\1/gm),
         ...text.matchAll(/\bimport\(\s*(['"])([^'"\r\n]+)\1\s*\)/g),
       ];
-      for (const match of specs) sourceTarget(file, match[2]);
+      for (const match of specs) {
+        const specifier = match[2];
+        sourceTarget(file, specifier);
+        if (specifier.startsWith('.')) continue;
+        if (file.startsWith('apps/runtime/') && !sharedImports.has(specifier))
+          fail('shared runtime platform import: ' + file + ' -> ' + specifier);
+        if (file.startsWith('apps/windows/runtime/') &&
+            (file !== 'apps/windows/runtime/bootstrap.mjs' || !windowsImports.has(specifier)))
+          fail('Windows runtime bypasses shared module: ' + file + ' -> ' + specifier);
+      }
     }
     if (file.endsWith('.xaml')) {
       const text = readFileSync(join(directory, file), 'utf8');

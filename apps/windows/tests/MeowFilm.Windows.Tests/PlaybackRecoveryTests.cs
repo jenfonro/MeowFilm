@@ -616,7 +616,7 @@ public static class PlaybackRecoveryTests
                         key = """["meowfilm","music",1,"local","lx-installations"]""",
                         value = new
                         {
-                            schema = 2,
+                            schema = 3,
                             revision = 1,
                             installations = new[]
                             {
@@ -632,7 +632,6 @@ public static class PlaybackRecoveryTests
                                         version = "1",
                                         permissions = new
                                         {
-                                            networkOrigins = Array.Empty<string>(),
                                             storage = Array.Empty<string>()
                                         }
                                     }

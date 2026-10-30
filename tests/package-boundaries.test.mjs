@@ -44,3 +44,24 @@ test('workspace dependency cycles are reported', t => {
   f.write('packages/b/package.json', { name: '@meowfilm/b', dependencies: { '@meowfilm/a': '*' } });
   assert.throws(() => verifyBoundaries(f.root), /Dependency cycle/);
 });
+
+test('shared runtime may use its own modules and data-only builtins', t => {
+  const f = fixture(t);
+  f.write('apps/runtime/bootstrap.mjs', "import './modules/music-script.mjs';");
+  f.write('apps/runtime/modules/music-script.mjs', "import { createHash } from 'node:crypto';");
+  assert.deepEqual(verifyBoundaries(f.root), { packages: 2 });
+});
+
+test('shared runtime cannot depend on Windows source', t => {
+  const f = fixture(t);
+  f.write('apps/runtime/modules/music-script.mjs', "import '../../windows/runtime/bootstrap.mjs';");
+  assert.throws(() => verifyBoundaries(f.root), /shared runtime depends on platform source/);
+});
+
+for (const specifier of ['node:net', 'node:child_process', '@meowfilm/script-host/src/host.js']) {
+  test(`shared runtime rejects platform/private import: ${specifier}`, t => {
+    const f = fixture(t);
+    f.write('apps/runtime/modules/music-script.mjs', `import '${specifier}';`);
+    assert.throws(() => verifyBoundaries(f.root), /shared runtime platform\/private import/);
+  });
+}

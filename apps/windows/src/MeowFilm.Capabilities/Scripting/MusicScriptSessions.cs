@@ -49,8 +49,8 @@ public sealed partial class MusicScriptOwner
             touched.Add(id);
             var reply = await ScriptAsync("load", new { token = transfer, installationId = id, revision,
                 expectedRevision = previous?.Revision ?? 0, version = LJ.S(current["version"]),
-                config = new { }, permissions = new { networkOrigins = current["permissions"]!["networkOrigins"],
-                    storage = current["permissions"]!["storage"], localServices = false }, grant = candidate.Id }, token).ConfigureAwait(false);
+                config = new { }, permissions = new { storage = current["permissions"]!["storage"] },
+                grant = candidate.Id }, token).ConfigureAwait(false);
             var instance = LJ.Object(reply["instance"]); var generation = LJ.I(instance["generation"], 1);
             LJ.Require(LJ.S(instance["installationId"]) == id && LJ.I(instance["revision"]) == revision &&
                 LJ.S(instance["state"]) == "ready", "INVALID_RESPONSE");
@@ -60,7 +60,9 @@ public sealed partial class MusicScriptOwner
             try
             {
                 LJ.Require(candidate.Generation is 0 || candidate.Generation == generation, "STALE_SESSION");
+                LJ.Require(candidate.AccessedSites.All(capabilities.ContainsKey), "SCRIPT_PROTOCOL_ERROR");
                 candidate.Generation = generation;
+                candidate.DeclaredSites = capabilities.Select(pair => pair.Key).ToHashSet(StringComparer.Ordinal);
             }
             finally { storageGate.Release(); }
             token.ThrowIfCancellationRequested();
@@ -128,14 +130,19 @@ public sealed partial class MusicScriptOwner
     }
     private static void ValidateCapabilities(JsonObject capabilities)
     {
-        LJ.Require(capabilities.Count is > 0 and <= 6, "SCRIPT_PROTOCOL_ERROR");
+        LJ.Require(capabilities.Count is > 0 and <= MusicLibraryOwner.MaximumScriptSites, "SCRIPT_PROTOCOL_ERROR");
         foreach (var pair in capabilities)
         {
-            LJ.Require(NativeMusicSong.Platforms.Append("local").Contains(pair.Key), "SCRIPT_PROTOCOL_ERROR");
-            var cap = LJ.Object(pair.Value); var actions = LJ.Array(cap["actions"]);
-            LJ.Require(actions.Count > 0 && actions.All(n => LJ.S(n) is "musicUrl" or "lyric" or "pic"), "SCRIPT_PROTOCOL_ERROR");
-            var qualities = LJ.Array(cap["qualitys"]);
-            LJ.Require(qualities.All(n => LJ.S(n) is "128k" or "192k" or "320k" or "flac" or "flac24bit" or "master"), "SCRIPT_PROTOCOL_ERROR");
+            LJ.Require(MusicLibraryOwner.IsScriptIdentifier(pair.Key), "SCRIPT_PROTOCOL_ERROR");
+            var cap = LJ.Object(pair.Value, "SCRIPT_PROTOCOL_ERROR");
+            foreach (string field in new[] { "actions", "qualitys" })
+            {
+                var values = LJ.Array(cap[field], "SCRIPT_PROTOCOL_ERROR");
+                LJ.Require(values.Count <= 32 && values.All(n => field == "actions"
+                    ? MusicLibraryOwner.IsScriptIdentifier(LJ.S(n))
+                    : LJ.S(n) is { Length: > 0 and <= 64 } quality && !quality.Any(c => c < 32 || c == 127)) &&
+                    values.Select(n => LJ.S(n)).Distinct(StringComparer.Ordinal).Count() == values.Count, "SCRIPT_PROTOCOL_ERROR");
+            }
         }
     }
     private async Task UnloadAsync(string id, CancellationToken token)
@@ -201,18 +208,21 @@ public sealed partial class MusicScriptOwner
             var token = linked.Token;
             await storageGate.WaitAsync(token).ConfigureAwait(false); entered = true;
             string grantId = LJ.Text(p["grant"], 80), id = LJ.Text(p["installationId"], 128),
-                site = LJ.Text(p["siteId"]), key = LJ.Text(p["key"], 256);
+                site = LJ.Text(p["siteId"], 128), key = LJ.Text(p["key"], 256);
+            LJ.Require(MusicLibraryOwner.IsScriptIdentifier(site));
             long generation = LJ.I(p["generation"], 1);
             LJ.Require(!blocked && grants.TryGetValue(grantId, out _), "STALE_SESSION");
             var grant = grants[grantId];
             LJ.Require(grant.Installation == id && (grant.State is "candidate" or "active") &&
-                NativeMusicSong.Platforms.Append("local").Contains(site), "STALE_SESSION");
+                (grant.State == "candidate" && grant.DeclaredSites is null || grant.DeclaredSites?.Contains(site) == true), "STALE_SESSION");
             LJ.Require(LJ.Array(grant.Permissions["storage"]).Any(n => LJ.S(n) == (operation == "get" ? "read" : "write")), "PERMISSION_DENIED");
             LJ.Require(grant.Generation is 0 || grant.Generation == generation, "STALE_SESSION");
             if (grant.Generation == 0) grant.Generation = generation;
             JsonElement value;
             if (grant.State == "candidate")
             {
+                LJ.Require(grant.AccessedSites.Contains(site) || grant.AccessedSites.Count < MusicLibraryOwner.MaximumScriptSites, "LIMIT");
+                grant.AccessedSites.Add(site);
                 // The shared LX host already rejects startup storage without an
                 // activated site scope. This overlay does not weaken that rule.
                 var data = grant.Sites[site] as JsonObject ?? LJ.Obj(("schema", 1), ("values", new JsonArray()));
@@ -226,7 +236,10 @@ public sealed partial class MusicScriptOwner
                     if (operation == "set") next.Add(LJ.Obj(("key", key), ("value", p["value"])));
                     var result = LJ.Obj(("schema", 1), ("values", next));
                     LJ.Require(next.Count <= 64 && LJ.Bytes(result).Length <= 65536, "LIMIT");
-                    grant.Sites[site] = result; value = JsonSerializer.SerializeToElement<object?>(null);
+                    var sites = grant.Sites.DeepClone().AsObject();
+                    sites[site] = result;
+                    LJ.Require(sites.Count <= MusicLibraryOwner.MaximumScriptSites && LJ.Bytes(sites).Length <= 512 * 1024, "LIMIT");
+                    grant.Sites = sites; value = JsonSerializer.SerializeToElement<object?>(null);
                 }
             }
             else
