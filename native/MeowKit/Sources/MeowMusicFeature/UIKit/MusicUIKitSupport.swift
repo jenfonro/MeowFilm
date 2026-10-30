@@ -15,6 +15,7 @@ public class MusicPageViewController: PageViewController {
 
 @MainActor
 enum MusicArtworkImages {
+    nonisolated private static let http = MusicArtworkHTTP()
     private static let cache: NSCache<NSURL, UIImage> = {
         let value = NSCache<NSURL, UIImage>()
         value.countLimit = 128
@@ -35,26 +36,12 @@ enum MusicArtworkImages {
 
     /// Cancellation follows the physical read; decoding stays off the UI actor.
     nonisolated private static func readBytes(_ url: URL, cachedData: Data?) async throws -> (UIImage, Data) {
-        let maximum = 4 * 1_024 * 1_024
+        let maximum = MusicArtworkHTTP.maximumBytes
         if let cachedData, cachedData.count <= maximum, let value = decode(cachedData) {
             try Task.checkCancellation()
             return (value, cachedData)
         }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 30
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
-        guard response.expectedContentLength <= maximum else {
-            throw URLError(.dataLengthExceedsMaximum)
-        }
-        if let response = response as? HTTPURLResponse, !(200..<300).contains(response.statusCode) {
-            throw URLError(.badServerResponse)
-        }
-        var data = Data()
-        for try await byte in bytes {
-            try Task.checkCancellation()
-            guard data.count < maximum else { throw URLError(.dataLengthExceedsMaximum) }
-            data.append(byte)
-        }
+        let data = try await http.read(url)
         try Task.checkCancellation()
         guard let value = decode(data) else { throw URLError(.cannotDecodeContentData) }
         return (value, data)

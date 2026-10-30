@@ -2,8 +2,17 @@ import XCTest
 import MeowMusicFeature
 @testable import MeowMusicNativeService
 
+private actor BrowseMetadataReads {
+    var songIDs: [[String]] = []
+    func metadata(_ request: MusicNativeBrowseMetadataRequest) throws -> Data {
+        guard case .songIDs(let ids) = request else { throw MusicServiceError.invalidRequest }
+        songIDs.append(ids)
+        return MJ.obj([("code", .n(200)), ("songs", .array(ids.map { MusicNativePublicBrowseFixture.song($0) }))]).bytes
+    }
+}
+
 final class MusicNativePublicBrowseDiscoveryTests: XCTestCase {
-    func testHomeHydrationFillsPicURLAndCoverWithoutReplacingNativeEntryPresentation() async throws {
+    func testHomeSummaryOnlyFillsMissingTitleWithoutLoadingOptionalCoversOrMembers() async throws {
         let resources = try MJ.parse(Data(#"""
         [
           {"resourceType":"playlist","id":41,"title":"歌曲预览","subTitle":"私人雷达","singleLineTitle":"官方副标题"},
@@ -14,9 +23,7 @@ final class MusicNativePublicBrowseDiscoveryTests: XCTestCase {
         """#.utf8), mode: .upstream)
         let metadata = try MJ.parse(Data(#"""
         [
-          {"id":41,"name":"水合歌单名","picUrl":"http://p1.music.126.net/pic.jpg","coverImgUrl":""},
-          {"id":42,"name":"补齐歌单名","coverImgUrl":"https://p1.music.126.net/replacement.jpg"},
-          {"id":44,"name":"另一歌单名","coverImgUrl":"","cover":"https://p1.music.126.net/cover.jpg"}
+          {"id":42,"name":"补齐歌单名","coverImgUrl":"https://p1.music.126.net/replacement.jpg"}
         ]
         """#.utf8), mode: .upstream)
         let block = MJ.obj([("dslData", .obj([("dslShowTitle", .bool(false)),
@@ -30,9 +37,8 @@ final class MusicNativePublicBrowseDiscoveryTests: XCTestCase {
         XCTAssertEqual(page.sections.map(\.layout), [.featureRail])
         let items = try XCTUnwrap(page.sections.first).items
         XCTAssertEqual(items.map(\.title), ["私人雷达", "补齐歌单名", "封面完整", "保留标题"])
-        XCTAssertEqual(items.map { $0.artwork?.absoluteString }, ["pic", "original", "complete", "cover"].map {
-            "https://p1.music.126.net/" + $0 + ".jpg"
-        })
+        XCTAssertEqual(items.map { $0.artwork?.absoluteString },
+            [nil, "https://p1.music.126.net/original.jpg", "https://p1.music.126.net/complete.jpg", nil])
         for item in items {
             if case .collection(let value) = item.content {
                 XCTAssertEqual(value.artwork, item.artwork)
@@ -43,7 +49,34 @@ final class MusicNativePublicBrowseDiscoveryTests: XCTestCase {
         XCTAssertEqual(calls.count, 2)
         let request = try MusicNativePublicBrowseFixture.decryptEAPI(calls[1])
         XCTAssertEqual(request.0, "/api/tag/tab/playlists")
-        XCTAssertEqual(request.1["ids"].string, "41,42,44")
+        XCTAssertEqual(request.1["ids"].string, "42")
+    }
+    func testReturnedSongDataOnlyReadsMissingVisibleIDsAndLeavesHiddenTabUntouched() async throws {
+        let ids = (1...30).map(String.init)
+        let items = try ids.map { id -> MusicNativePublicBrowseItem in
+            var raw = MusicNativePublicBrowseFixture.song(id)
+            if id == "2" { raw.remove("name") }
+            if id == "9" { raw["ar"] = .array([.obj([("id", .n(900))])]) }
+            return try XCTUnwrap(MusicNativePublicBrowseParser.resource(
+                .obj([("resourceType", .string("song")), ("songData", raw)]), index: id))
+        }
+        let hidden = MusicNativePublicBrowseItem(id: "hidden", title: "", content: .songID("31"))
+        let input = MusicNativePublicBrowseDiscovery(sections: [.init(id: "songs", title: "", items: items,
+            tabs: [.init(id: "shown", title: "", items: items), .init(id: "hidden", title: "", items: [hidden])],
+            selectedTab: "shown")])
+        let reads = BrowseMetadataReads()
+        let port = MusicNativePlatforms(transport: NativeMusicNoNetwork(), qq: NativeMusicQQFixture(), clock: { NativeMusicFixture.date })
+        let enriched = try await port.browseEnrich(input, metadata: { try await reads.metadata($0) })
+        let requested = await reads.songIDs; XCTAssertEqual(requested, [["2", "9"]])
+        XCTAssertEqual(enriched.sections[0].items.count, 30)
+        let retained = try enriched.sections[0].items.map { item -> String in
+            guard case .song(let value) = item.content else { throw MusicServiceError.invalidResponse }
+            return try MJ.parse(value.data)["musicId"].string
+        }
+        XCTAssertEqual(retained, ids)
+        guard case .songID("31") = enriched.sections[0].tabs[1].items[0].content else {
+            return XCTFail("Hidden tab must retain its original identity without hydration")
+        }
     }
 
     func testHomeAuthorizationFailureDoesNotBecomeGuestPlaceholderContent() async throws {

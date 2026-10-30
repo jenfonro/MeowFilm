@@ -16,8 +16,24 @@ protocol MusicAccountProvider: Sendable {
     func recommendations(kind: String, page: Int, credential: AccountCredential) async throws -> MusicQQRecommendation
     func collectionRows(credential: AccountCredential) async throws -> [JSONValue]
     func tracks(collectionID: String, credential: AccountCredential) async throws -> [JSONValue]
+    func collectionTrackRead(collectionID: String, credential: AccountCredential) async throws -> MusicAccountTrackRead
     func capabilities(mid: String, credential: AccountCredential) async throws -> [String]
     func resolve(mid: String, quality: String, credential: AccountCredential) async throws -> JSONValue
+}
+
+/// Retains the verified member batch. An optional loader only completes the
+/// requested display slice and must preserve its ordered native locators.
+struct MusicAccountTrackRead: Sendable {
+    let rows: [JSONValue]
+    let displayPage: (@Sendable (Int) async throws -> [JSONValue])?
+    init(rows: [JSONValue], displayPage: (@Sendable (Int) async throws -> [JSONValue])? = nil) {
+        self.rows = rows; self.displayPage = displayPage
+    }
+}
+extension MusicAccountProvider {
+    func collectionTrackRead(collectionID: String, credential: AccountCredential) async throws -> MusicAccountTrackRead {
+        .init(rows: try await tracks(collectionID: collectionID, credential: credential))
+    }
 }
 
 enum MusicAccountPublicText {

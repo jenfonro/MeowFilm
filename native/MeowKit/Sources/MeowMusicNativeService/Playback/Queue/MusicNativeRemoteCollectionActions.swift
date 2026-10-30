@@ -12,7 +12,7 @@ extension NativeMusicService: MusicRemoteCollectionServing {
         _ = try musicText(name, maximum: 600); try musicRequire(name.utf16.count <= 200)
         _ = try remoteContext(source)
         let own = epoch
-        let raw = try await work { try await source.completeTracks(intent: intent) }
+        let raw = try await work { try await source.collectionTracks(intent: intent) }
         try check(own); try intent.check()
         try musicRequire(raw.allSatisfy { $0.platform == source.context.platform }, .invalidResponse)
         let songs = try raw.map(MusicModel.normalize)

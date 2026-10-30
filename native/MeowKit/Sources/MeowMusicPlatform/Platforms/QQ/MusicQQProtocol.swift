@@ -160,18 +160,22 @@ actor QQMusicAccountAdapter {
     let now: @Sendable () -> Date
     /// Only the separate anonymous instance receives this dependency.
     let publicPersistence: MusicQQPublicPersistenceState?
+    let clientDeviceProvider: (any MusicQQClientDeviceProviding)?
     var publicDeviceEpoch: UUID?
     var device: [String: Any] = [:]
-    var deviceTask: Task<[String: Any], Error>?
+    struct DeviceValue: @unchecked Sendable { let fields: [String: Any] }
+    let deviceRequests = MusicAccountSingleFlight<UUID, DeviceValue>()
     var deviceGeneration = UUID()
     struct QR { let expires: Date; var signature: String }
     var qr: [UUID: QR] = [:]
     init(transport: any MusicAccountHTTPTransport, now: @escaping @Sendable () -> Date,
-         publicPersistence: MusicQQPublicPersistenceState? = nil) {
+         publicPersistence: MusicQQPublicPersistenceState? = nil,
+         clientDeviceProvider: (any MusicQQClientDeviceProviding)? = nil) {
         self.transport = transport; self.now = now; self.publicPersistence = publicPersistence
+        self.clientDeviceProvider = clientDeviceProvider
     }
     func revoke() {
-        qr.removeAll(); deviceTask?.cancel(); deviceTask = nil
+        qr.removeAll(); deviceRequests.cancel()
         deviceGeneration = UUID(); device = [:]; publicDeviceEpoch = nil
     }
     func setPublicAccess(available: Bool, generation: UInt64) throws {

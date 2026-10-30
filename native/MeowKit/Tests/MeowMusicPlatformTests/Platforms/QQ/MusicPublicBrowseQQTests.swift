@@ -7,7 +7,9 @@ private actor MusicPublicBrowseQQHTTP: MusicAccountHTTPTransport {
     private var requests: [MusicAccountHTTPRequest] = []
     private var reads = 0
     var reorder = false
+    var paged = false
     func changeOnSecondRead() { reorder = true }
+    func useShortPages() { paged = true }
     func calls() -> [MusicAccountHTTPRequest] { requests }
     func send(_ request: MusicAccountHTTPRequest) throws -> MusicAccountHTTPResponse {
         requests.append(request)
@@ -33,10 +35,13 @@ private actor MusicPublicBrowseQQHTTP: MusicAccountHTTPTransport {
             case "CgiGetDiss":
                 reads += 1
                 XCTAssertEqual(params["disstid"] as? Int, 42)
-                XCTAssertEqual(params["song_begin"] as? Int, 0)
-                let songs = reorder && reads == 2 ? [song("MID2"), song("MID1"), song("MID1")] : [song("MID1"), song("MID2"), song("MID1")]
-                data = ["dirinfo": ["id": 42, "title": "Synthetic playlist", "songnum": 3],
-                        "total_song_num": 3, "songlist_size": 3, "hasmore": 0, "songlist": songs]
+                let offset = try XCTUnwrap(params["song_begin"] as? Int), limit = try XCTUnwrap(params["song_num"] as? Int)
+                let all = paged ? (0..<65).map { song("MID\($0)") } :
+                    reorder && reads == 2 ? [song("MID2"), song("MID1"), song("MID1")] : [song("MID1"), song("MID2"), song("MID1")]
+                let songs = Array(all.dropFirst(offset).prefix(paged ? min(limit, 27) : limit))
+                data = ["dirinfo": ["id": 42, "title": "Synthetic playlist", "songnum": all.count],
+                        "total_song_num": all.count, "songlist_size": songs.count,
+                        "hasmore": offset + songs.count < all.count ? 1 : 0, "songlist": songs]
             default: throw MusicServiceError.upstreamFailed
             }
             root = ["code": 0, "req_0": ["code": 0, "data": data]]
@@ -45,6 +50,23 @@ private actor MusicPublicBrowseQQHTTP: MusicAccountHTTPTransport {
     }
 }
 final class MusicPublicBrowseQQTests: XCTestCase {
+    func testCurrentMemberPagesUseThirtyLimitAndContinueAtActualOffsetWithoutCompleteRead() async throws {
+        let http = MusicPublicBrowseQQHTTP(); await http.useShortPages()
+        let service = NativeMusicQQPublicService(transport: http)
+        let first = try await service.publicBrowsePlaylistPage(id: "42", offset: 0)
+        let second = try await service.publicBrowsePlaylistPage(id: "42", offset: 27)
+        XCTAssertEqual(first.tracks.count, 27); XCTAssertEqual(second.tracks.count, 27); XCTAssertTrue(second.more)
+        let calls = await http.calls()
+        let params = try calls.filter { $0.url.host == "u.y.qq.com" }.compactMap { request -> [String: Any]? in
+            let root = try MusicQQWire.decode(XCTUnwrap(request.body)), rpc = try MusicQQWire.object(root["req_0"])
+            return rpc["method"] as? String == "CgiGetDiss" ? try MusicQQWire.object(rpc["param"]) : nil
+        }
+        XCTAssertEqual(params.compactMap { $0["song_begin"] as? Int }, [0, 27])
+        XCTAssertEqual(params.compactMap { $0["song_num"] as? Int }, [30, 30])
+        let all = try await service.publicBrowsePlaylist(id: "42")
+        XCTAssertEqual(all.tracks.count, 65); XCTAssertEqual(all.headSignature, first.headSignature)
+        await service.close()
+    }
     func testPublicSearchAndDetailUseExistingDeviceOwnerAndNativeRPCWithoutAccountCookie() async throws {
         let http = MusicPublicBrowseQQHTTP(), service = NativeMusicQQPublicService(transport: http)
         let search = try await service.publicBrowsePlaylists(query: "synthetic", page: 1)

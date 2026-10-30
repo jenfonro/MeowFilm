@@ -111,15 +111,19 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         } catch { XCTAssertEqual(error as? MusicServiceError, .staleAccess) }
         XCTAssertEqual(document.snapshot().0, before.0)
     }
-    func testSignedInHomeAndArtistMetadataUseSameNativeBindingNotAnonymousHTTP() async throws {
+    func testHomeReadsVisibleContentAndExplicitArtistActivityUsesSameAccountBinding() async throws {
         let account = HomeAccountFixture(), value = try await service(account)
         let page = try await value.homePage(cursor: nil, refresh: true)
-        XCTAssertEqual(page.sections.count, 2)
-        XCTAssertEqual(page.sections.last?.layout, .artistUpdates)
-        XCTAssertEqual(page.sections.last?.title, "艺人新作")
-        XCTAssertEqual(page.sections.last?.avatars.count, 1)
-        XCTAssertEqual(page.sections.last?.channel?.kind, .artistActivity)
+        XCTAssertEqual(page.sections.count, 1)
         XCTAssertNotNil(page.cursor)
+        let homeCalls = await account.calls
+        XCTAssertEqual(homeCalls, [.home(), .songMetadata(ids: ["41"])])
+        let activity = try await value.publicDiscovery(.channel(
+            .init(id: "artist", title: "艺人新作", kind: .artistActivity), tag: ""), cursor: nil)
+        XCTAssertEqual(activity.sections.last?.layout, .artistUpdates)
+        XCTAssertEqual(activity.sections.last?.title, "艺人新作")
+        XCTAssertEqual(activity.sections.last?.avatars.count, 1)
+        XCTAssertEqual(activity.sections.last?.channel?.kind, .artistActivity)
         let calls = await account.calls
         XCTAssertEqual(calls.count, 3)
         XCTAssertTrue(calls.contains(.home())); XCTAssertTrue(calls.contains(.artistActivity()))
@@ -147,7 +151,8 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         let restored = try XCTUnwrap(snapshot)
         XCTAssertNil(restored.cursor)
         XCTAssertEqual(restored.sections.map(\.id), first.sections.map(\.id))
-        XCTAssertEqual(restored.sections.last?.channel?.kind, .artistActivity)
+        XCTAssertEqual(restored.sections.last?.layout, .songColumns)
+        XCTAssertEqual(restored.sections.flatMap(\.items).map(\.subtitle), first.sections.flatMap(\.items).map(\.subtitle))
         if case .track(let old) = first.sections[0].items[0].content,
            case .track(let new) = restored.sections[0].items[0].content { XCTAssertNotEqual(old.ref, new.ref) }
         else { XCTFail("expected freshly registered native track handles") }

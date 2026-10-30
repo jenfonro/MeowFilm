@@ -13,7 +13,8 @@ enum MusicNeteaseFixture {
         try .init(data: MusicQQWire.json(["version": 1, "platform": "wy", "accountID": uid,
             "cookies": ["MUSIC_U": "synthetic-user-\(uid)", "__csrf": "synthetic-csrf"],
             "device": ["deviceId": "synthetic-device", "_ntes_nuid": "synthetic-nuid",
-                       "_ntes_nnid": "synthetic-nuid,1800000000000", "WNMCID": "synthetic-wnmcid"]]))
+                       "_ntes_nnid": "synthetic-nuid,1800000000000", "WNMCID": "synthetic-wnmcid",
+                       "NMTID": "synthetic-nmtid"]]))
     }
     static func response(_ body: [String: Any], headers: [String: String] = [:]) throws -> MusicAccountHTTPResponse {
         .init(status: 200, data: try MusicQQWire.json(body), headers: headers)

@@ -23,7 +23,7 @@ extension NativeMusicService: MusicHomeActionQueueServing {
         if case .songCollection(let ids) = action {
             let own = epoch, until = now().addingTimeInterval(600), registration = UUID()
             let authorization = MusicQueueAuthorization(), fence = access, port = publicPlatforms
-            let reader = MusicNativePublicBrowseQueueRead { [weak self] in
+            let reader = MusicNativePublicBrowseQueueRead(total: Set(ids).count) { [weak self] in
                 guard let self else { throw MusicServiceError.closed }
                 try await self.checkPublicQueue(epoch: own, until: until)
                 let value = try await port.homeCollectionSongs(ids)
@@ -86,7 +86,7 @@ extension MusicNativePlatforms {
             for row in root["songs"].array {
                 let id = try MusicPlatformProtocol.numericID(row["id"])
                 try musicRequire(batch.contains(id) && rows[id] == nil, .upstreamInvalid)
-                rows[id] = try browseWYSong(row)
+                rows[id] = try Self.browseWYSong(row)
             }
         }
         return ids.compactMap { rows[$0] }

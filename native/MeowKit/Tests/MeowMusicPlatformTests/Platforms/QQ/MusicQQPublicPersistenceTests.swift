@@ -344,6 +344,35 @@ final class MusicQQPublicPersistenceTests: XCTestCase {
         XCTAssertEqual(f.document.counts().commits, 3)
         await f.service.close()
     }
+    func testCancellingOneDeviceWaiterLeavesOtherWaiterAndPhysicalBootstrapAlive() async throws {
+        let f = QQPublicPersistenceFixture(), gate = QQPublicPersistenceGate()
+        addTeardownBlock { await gate.release(); await f.service.close() }
+        await f.http.hold("GetQimei", gate: gate); try await f.enable()
+        let first = Task { try await f.search() }
+        await fulfillment(of: [gate.entered], timeout: 3)
+        let second = Task { try await f.search() }
+        let joined = expectation(description: "second device waiter joined")
+        let adapter = await f.service.qq, flight = await adapter.deviceRequests
+        let observer = Task {
+            while !Task.isCancelled {
+                if flight.waiterCount == 2 { joined.fulfill(); return }
+                await Task.yield()
+            }
+        }
+        defer { observer.cancel() }
+        await fulfillment(of: [joined], timeout: 3)
+        XCTAssertEqual(flight.waiterCount, 2)
+        first.cancel()
+        do { try await first.value; XCTFail("Cancelled waiter returned") }
+        catch { XCTAssertTrue(error is CancellationError || error as? MusicServiceError == .cancelled) }
+        XCTAssertEqual(f.http.cancellations.get(), 0, "The valid waiter still owns the physical bootstrap")
+        await gate.release(); try await second.value
+        let methods = try await f.http.methods()
+        XCTAssertEqual(methods.filter { $0 == "GetQimei" }.count, 1)
+        XCTAssertEqual(methods.filter { $0 == "GetSession" }.count, 1)
+        XCTAssertEqual(methods.filter { $0 == "DoSearchForQQMusicMobile" }.count, 1)
+        await f.service.close()
+    }
 
     func testCloseCancelsInFlightDoesNotWriteAndCannotBeReopened() async throws {
         let f = QQPublicPersistenceFixture(), gate = QQPublicPersistenceGate()

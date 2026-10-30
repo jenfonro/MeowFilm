@@ -8,7 +8,10 @@ actor MusicNativePublicBrowseQueueRead {
     private var loading: (id: UUID, task: Task<[MusicNativeTrackData], Error>)?
     private var rows: [MusicNativeTrackData]?
     private var closed = false
-    init(load: @escaping @Sendable () async throws -> [MusicNativeTrackData]) { self.load = load }
+    private let declaredTotal: Int?
+    init(total: Int? = nil, load: @escaping @Sendable () async throws -> [MusicNativeTrackData]) {
+        declaredTotal = total; self.load = load
+    }
     func page(_ cursor: String?) async throws -> MusicNativeTrackPage {
         try musicRequire(!closed, .closed); try Task.checkCancellation()
         let text = cursor ?? "0"
@@ -46,8 +49,9 @@ actor MusicNativePublicBrowseQueueRead {
         }
         let values = rows ?? []
         try musicRequire(offset <= values.count, .staleResult)
+        try musicRequire(declaredTotal == nil || declaredTotal! >= values.count, .invalidResponse)
         let page = Array(values.dropFirst(offset).prefix(30)), end = offset + page.count
-        return .init(items: page, total: values.count, cursor: end < values.count ? String(end) : nil)
+        return .init(items: page, total: declaredTotal ?? values.count, cursor: end < values.count ? String(end) : nil)
     }
     func close() {
         closed = true; rows = nil; load = nil
