@@ -84,6 +84,237 @@ final class MeowUIPlatformTests: XCTestCase {
         await fulfillment(of: [finished], timeout: 3)
     }
 
+    func testPlainBackButtonTracksTheSourceAcrossPushPopAndStackReplacement() throws {
+        let theme = TestPageTheme()
+        let root = PageViewController(themeProvider: theme)
+        let first = PlainBackPage(themeProvider: theme), second = PlainBackPage(themeProvider: theme)
+        let ordinary = PageViewController(themeProvider: theme)
+        let pages: [UIViewController] = [root, first, second, ordinary]
+        let navigation = PageNavigationController(themeProvider: theme)
+        navigation.setViewControllers([root], animated: false)
+        try display(navigation)
+        XCTAssertFalse(root.prefersPlainBackButton)
+        XCTAssertTrue(first.prefersPlainBackButton)
+        try assertPlainBackSource(nil, pages: pages)
+
+        push(first, on: navigation)
+        XCTAssertTrue(navigation.topViewController === first)
+        try assertPlainBackSource(root, pages: pages)
+        push(second, on: navigation)
+        XCTAssertTrue(navigation.topViewController === second)
+        try assertPlainBackSource(first, pages: pages)
+        push(ordinary, on: navigation)
+        XCTAssertTrue(navigation.topViewController === ordinary)
+        try assertPlainBackSource(nil, pages: pages)
+
+        XCTAssertTrue(pop(navigation) === ordinary)
+        XCTAssertTrue(navigation.topViewController === second)
+        try assertPlainBackSource(first, pages: pages)
+        XCTAssertTrue(pop(navigation) === second)
+        XCTAssertTrue(navigation.topViewController === first)
+        try assertPlainBackSource(root, pages: pages)
+        XCTAssertTrue(pop(navigation) === first)
+        XCTAssertTrue(navigation.topViewController === root)
+        try assertPlainBackSource(nil, pages: pages)
+
+        let replacement = PageViewController(themeProvider: theme)
+        let detail = PlainBackPage(themeProvider: theme)
+        push(detail, on: navigation)
+        try assertPlainBackSource(root, pages: [root, detail])
+        navigation.setViewControllers([replacement], animated: false)
+        settle(navigation)
+        XCTAssertTrue(navigation.topViewController === replacement)
+        try assertPlainBackSource(nil, pages: pages + [detail, replacement])
+    }
+
+    func testPlainBackButtonPreservesCustomItemsAndConsumerReplacements() throws {
+        let theme = TestPageTheme()
+        let root = PageViewController(themeProvider: theme)
+        let target = BackItemTarget()
+        let action = #selector(BackItemTarget.selected)
+        let original = UIBarButtonItem(title: "Custom", style: .done, target: target, action: action)
+        original.tintColor = .systemPurple
+        root.navigationItem.backBarButtonItem = original
+        let navigation = PageNavigationController(themeProvider: theme)
+        navigation.setViewControllers([root], animated: false)
+        try display(navigation)
+
+        let first = PlainBackPage(themeProvider: theme)
+        push(first, on: navigation)
+        XCTAssertTrue(root.navigationItem.backBarButtonItem === original)
+        XCTAssertEqual(original.title, "Custom")
+        XCTAssertEqual(original.style, .done)
+        XCTAssertTrue(original.target === target)
+        XCTAssertEqual(original.action, action)
+        XCTAssertEqual(original.tintColor, .systemPurple)
+        if #available(iOS 26.0, *) { XCTAssertTrue(original.hidesSharedBackground) }
+        XCTAssertTrue(pop(navigation) === first)
+        XCTAssertTrue(root.navigationItem.backBarButtonItem === original)
+        if #available(iOS 26.0, *) {
+            XCTAssertFalse(original.hidesSharedBackground)
+            original.hidesSharedBackground = true
+        }
+
+        let second = PlainBackPage(themeProvider: theme)
+        push(second, on: navigation)
+        XCTAssertTrue(pop(navigation) === second)
+        XCTAssertTrue(root.navigationItem.backBarButtonItem === original)
+        if #available(iOS 26.0, *) {
+            XCTAssertTrue(original.hidesSharedBackground)
+            original.hidesSharedBackground = false
+        }
+
+        let third = PlainBackPage(themeProvider: theme)
+        let replacement = UIBarButtonItem(title: "Replacement", style: .plain, target: target, action: action)
+        navigation.willShowPage = { page, _ in
+            if page === third { root.navigationItem.backBarButtonItem = replacement }
+        }
+        push(third, on: navigation)
+        navigation.willShowPage = nil
+        XCTAssertTrue(root.navigationItem.backBarButtonItem === replacement)
+        if #available(iOS 26.0, *) {
+            XCTAssertFalse(original.hidesSharedBackground)
+            XCTAssertTrue(replacement.hidesSharedBackground)
+        }
+        // A later replacement must not be overwritten while the temporary
+        // adaptation is being restored.
+        let final = UIBarButtonItem(title: "Final", style: .done, target: target, action: action)
+        root.navigationItem.backBarButtonItem = final
+        XCTAssertTrue(pop(navigation) === third)
+        XCTAssertTrue(root.navigationItem.backBarButtonItem === final)
+        XCTAssertEqual(final.title, "Final")
+        XCTAssertTrue(final.target === target)
+        XCTAssertEqual(final.action, action)
+        if #available(iOS 26.0, *) {
+            XCTAssertFalse(replacement.hidesSharedBackground)
+            XCTAssertFalse(final.hidesSharedBackground)
+        }
+
+        root.navigationItem.backBarButtonItem = nil
+        let fourth = PlainBackPage(themeProvider: theme)
+        push(fourth, on: navigation)
+        let generated = root.navigationItem.backBarButtonItem
+        if #available(iOS 26.0, *) { XCTAssertEqual(generated?.hidesSharedBackground, true) }
+        else { XCTAssertNil(generated) }
+        root.navigationItem.backBarButtonItem = final
+        XCTAssertTrue(pop(navigation) === fourth)
+        XCTAssertTrue(root.navigationItem.backBarButtonItem === final)
+        if #available(iOS 26.0, *) { XCTAssertEqual(generated?.hidesSharedBackground, false) }
+    }
+
+    func testPlainBackButtonUsesTheFinalShownPageAfterCancelledTransitions() throws {
+        let theme = TestPageTheme()
+        let root = PageViewController(themeProvider: theme)
+        let first = PlainBackPage(themeProvider: theme), second = PlainBackPage(themeProvider: theme)
+        let ordinary = PageViewController(themeProvider: theme)
+        let pages: [UIViewController] = [root, first, second, ordinary]
+        let navigation = PageNavigationController(themeProvider: theme)
+        navigation.setViewControllers([root], animated: false)
+        try display(navigation)
+        push(first, on: navigation)
+        push(second, on: navigation)
+        try assertPlainBackSource(first, pages: pages)
+
+        // Drive only the delegate receipts of a cancelled pop; the real
+        // navigation stack still identifies the page UIKit finally displayed.
+        navigation.navigationController(navigation, willShow: first, animated: true)
+        try assertPlainBackSource(root, pages: pages)
+        navigation.navigationController(navigation, didShow: second, animated: true)
+        XCTAssertTrue(navigation.topViewController === second)
+        try assertPlainBackSource(first, pages: pages)
+        navigation.navigationController(navigation, willShow: root, animated: true)
+        try assertPlainBackSource(nil, pages: pages)
+        navigation.navigationController(navigation, didShow: second, animated: true)
+        try assertPlainBackSource(first, pages: pages)
+
+        push(ordinary, on: navigation)
+        try assertPlainBackSource(nil, pages: pages)
+        var willCalls = 0, didCalls = 0
+        navigation.willShowPage = { page, animated in
+            willCalls += 1
+            XCTAssertTrue(page === second)
+            XCTAssertTrue(animated)
+            XCTAssertEqual(page.navigationItem.backButtonDisplayMode, .minimal)
+        }
+        navigation.didShowPage = { page in
+            didCalls += 1
+            XCTAssertTrue(page === ordinary)
+        }
+        navigation.navigationController(navigation, willShow: second, animated: true)
+        try assertPlainBackSource(first, pages: pages)
+        navigation.navigationController(navigation, didShow: ordinary, animated: true)
+        XCTAssertTrue(navigation.topViewController === ordinary)
+        try assertPlainBackSource(nil, pages: pages)
+        XCTAssertEqual(willCalls, 1)
+        XCTAssertEqual(didCalls, 1)
+        navigation.willShowPage = nil
+        navigation.didShowPage = nil
+    }
+
+    func testPlainBackButtonLeavesSystemEdgeAndContentPopOwnershipUntouched() throws {
+        let theme = TestPageTheme()
+        let root = PageViewController(themeProvider: theme), ordinary = PageViewController(themeProvider: theme)
+        let plain = PlainBackPage(themeProvider: theme)
+        let navigation = PageNavigationController(themeProvider: theme)
+        navigation.setViewControllers([root], animated: false)
+        try display(navigation)
+        push(ordinary, on: navigation)
+        let system = try XCTUnwrap(navigation.interactivePopGestureRecognizer)
+        let delegate = system.delegate
+        let enabled = system.isEnabled
+        let content: UIGestureRecognizer?
+        if #available(iOS 26.0, *) { content = navigation.interactiveContentPopGestureRecognizer }
+        else { content = nil }
+        let contentDelegate = content?.delegate
+        let contentEnabled = content?.isEnabled
+        let recognizers = navigation.view.gestureRecognizers ?? []
+
+        push(plain, on: navigation)
+        XCTAssertTrue(navigation.navigationBar.topItem === plain.navigationItem)
+        XCTAssertTrue(navigation.navigationBar.backItem === ordinary.navigationItem)
+        XCTAssertTrue(navigation.delegate === navigation)
+        XCTAssertNil(plain.navigationItem.leftBarButtonItems)
+        XCTAssertFalse(plain.navigationItem.hidesBackButton)
+        try assertPlainBackSource(ordinary, pages: [root, ordinary, plain])
+        XCTAssertFalse(plain.view.gestureRecognizers?.contains { $0 is UIScreenEdgePanGestureRecognizer } ?? false)
+        for popped in [false, true] {
+            if popped { XCTAssertTrue(pop(navigation) === plain) }
+            XCTAssertTrue(navigation.interactivePopGestureRecognizer === system)
+            XCTAssertTrue(system.delegate === delegate)
+            XCTAssertEqual(system.isEnabled, enabled)
+            if #available(iOS 26.0, *) {
+                XCTAssertTrue(navigation.interactiveContentPopGestureRecognizer === content)
+            }
+            XCTAssertTrue(content?.delegate === contentDelegate)
+            XCTAssertEqual(content?.isEnabled, contentEnabled)
+            let current = navigation.view.gestureRecognizers ?? []
+            XCTAssertEqual(current.count, recognizers.count)
+            XCTAssertTrue(recognizers.allSatisfy { original in current.contains { $0 === original } })
+        }
+        XCTAssertTrue(navigation.topViewController === ordinary)
+        try assertPlainBackSource(nil, pages: [root, ordinary, plain])
+    }
+
+    func testPlainBackButtonRestoresCustomStateWhenNavigationIsReleased() {
+        let theme = TestPageTheme()
+        let root = PageViewController(themeProvider: theme), plain = PlainBackPage(themeProvider: theme)
+        let original = UIBarButtonItem(title: "Retained", style: .plain, target: nil, action: nil)
+        root.navigationItem.backBarButtonItem = original
+        weak var released: PageNavigationController?
+        autoreleasepool {
+            let navigation = PageNavigationController(themeProvider: theme)
+            navigation.loadViewIfNeeded()
+            navigation.setViewControllers([root, plain], animated: false)
+            navigation.navigationController(navigation, willShow: plain, animated: false)
+            navigation.navigationController(navigation, didShow: plain, animated: false)
+            if #available(iOS 26.0, *) { XCTAssertTrue(original.hidesSharedBackground) }
+            released = navigation
+        }
+        XCTAssertNil(released)
+        XCTAssertTrue(root.navigationItem.backBarButtonItem === original)
+        if #available(iOS 26.0, *) { XCTAssertFalse(original.hidesSharedBackground) }
+    }
+
     func testIndependentPageTransitionCancelsAndRevealsActualPresenter() async throws {
         let theme = TestPageTheme()
         let root = PageViewController(themeProvider: theme)
@@ -177,6 +408,37 @@ final class MeowUIPlatformTests: XCTestCase {
         XCTAssertTrue(navigation.topViewController === root)
     }
 
+    /// Non-animated push and pop start their deferred transition, and the
+    /// navigation delegate receipts, on the navigation view's next layout.
+    private func settle(_ navigation: UINavigationController) { navigation.view.layoutIfNeeded() }
+
+    private func push(_ page: UIViewController, on navigation: UINavigationController) {
+        navigation.pushViewController(page, animated: false)
+        settle(navigation)
+    }
+
+    @discardableResult
+    private func pop(_ navigation: UINavigationController) -> UIViewController? {
+        defer { settle(navigation) }
+        return navigation.popViewController(animated: false)
+    }
+
+    private func assertPlainBackSource(
+        _ source: UIViewController?, pages: [UIViewController],
+        file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        for page in pages {
+            if #available(iOS 26.0, *), page === source {
+                let item = try XCTUnwrap(page.navigationItem.backBarButtonItem, file: file, line: line)
+                XCTAssertTrue(item.hidesSharedBackground, file: file, line: line)
+                XCTAssertNil(item.target, file: file, line: line)
+                XCTAssertNil(item.action, file: file, line: line)
+            } else {
+                XCTAssertNil(page.navigationItem.backBarButtonItem, file: file, line: line)
+            }
+        }
+    }
+
     @discardableResult
     private func display(_ controller: UIViewController) throws -> UIWindow {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
@@ -215,6 +477,16 @@ final class MeowUIPlatformTests: XCTestCase {
         previousKeyWindow = nil
         super.tearDown()
     }
+}
+
+@MainActor
+private final class PlainBackPage: PageViewController {
+    override var prefersPlainBackButton: Bool { true }
+}
+
+@MainActor
+private final class BackItemTarget: NSObject {
+    @objc func selected() {}
 }
 
 @MainActor
