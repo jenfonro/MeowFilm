@@ -7,6 +7,19 @@ import MeowUI
 @MainActor
 final class MusicPlaybackControlsView: UIView {
     enum Layout { case compact, card, full }
+    private struct FullLayoutMetrics {
+        let actionsHeight: CGFloat
+        let actionProgressGap: CGFloat
+        let timeControlsGap: CGFloat
+        let transportHeight: CGFloat
+        let bottomSpace: CGFloat
+
+        var fixedHeight: CGFloat {
+            actionsHeight + actionProgressGap + 44 + 6 + 16 + timeControlsGap +
+                transportHeight + bottomSpace
+        }
+    }
+
     var onPresent: ((MusicPlaybackDestination) -> Void)?
     var onMore: (() -> Void)?
     var onMode: (() -> Void)?
@@ -27,6 +40,8 @@ final class MusicPlaybackControlsView: UIView {
     private var scrubFence: MusicReferencePlayerFence?
     private var rendering = false
     private var layout: Layout
+    private var fullViewportHeight: CGFloat?
+    private var fullSafeHeight: CGFloat?
     private var titleFont = UIFont.systemFont(ofSize: 14, weight: .semibold)
     private var displayedTheme: PageTheme?
     var moreAnchor: UIView { more }
@@ -35,14 +50,19 @@ final class MusicPlaybackControlsView: UIView {
         .init(titleLineHeight: Double(titleFont.lineHeight), artistLineHeight: Double(artist.font.lineHeight),
               lyricLineHeight: Double(lyricPreview.font.lineHeight + 4))
     }
-    var fullHeight: CGFloat { 221 + max(0, titleFont.lineHeight - 24) + max(0, artist.font.lineHeight - 20) }
+    var fullHeight: CGFloat {
+        fullLayoutMetrics.fixedHeight + max(0, titleFont.lineHeight - 23) +
+            max(0, artist.font.lineHeight - 18)
+    }
 
     init(content: MusicPlayerContentModel, layout: Layout) {
         self.content = content
         self.layout = layout
         super.init(frame: .zero)
         for item in [title, artist, lyricPreview, elapsed, durationLabel, progress,
-                     play, queue, previous, nextButton, favorite, mode, more, quality, collapse] { addSubview(item) }
+                     play, queue, previous, nextButton, favorite, mode, more, quality, collapse] {
+            addSubview(item)
+        }
         for ring in [playTrack, playProgress] {
             ring.fillColor = UIColor.clear.cgColor
             ring.lineCap = .round
@@ -75,6 +95,11 @@ final class MusicPlaybackControlsView: UIView {
         nextButton.accessibilityIdentifier = "\(prefix).next"
         favorite.accessibilityIdentifier = "\(prefix).favorite"
         progress.accessibilityIdentifier = "\(prefix).progress"
+        if layout == .full {
+            mode.accessibilityIdentifier = "music.player.mode"
+            more.accessibilityIdentifier = "music.player.more"
+            quality.accessibilityIdentifier = "music.player.quality"
+        }
         collapse.setImage(PageIcon.image(.down, size: 22), for: .normal)
         collapse.accessibilityLabel = "收起播放器"
         collapse.accessibilityIdentifier = "music.miniPlayer.collapse"
@@ -127,11 +152,14 @@ final class MusicPlaybackControlsView: UIView {
         setVisible(lyricPreview, layout == .card)
         setVisible(collapse, layout == .card)
         for item in [mode, more, quality] { setVisible(item, layout == .full) }
-        for (button, kind) in [
-            (previous, layout == .card ? PageIcon.Kind.previous : .miniPrevious),
-            (nextButton, layout == .card ? .next : .miniNext), (queue, .queue)
+        for (button, kind, size) in [
+            (previous, layout == .compact ? PageIcon.Kind.miniPrevious : .previous,
+             layout == .full ? CGFloat(25) : layout == .card ? 26 : 23),
+            (nextButton, layout == .compact ? .miniNext : .next,
+             layout == .full ? CGFloat(25) : layout == .card ? 26 : 23),
+            (queue, PageIcon.Kind.queue, layout == .full ? CGFloat(24) : layout == .card ? 26 : 23)
         ] {
-            button.setImage(PageIcon.image(kind, size: layout == .card ? 26 : 23), for: .normal)
+            button.setImage(PageIcon.image(kind, size: size), for: .normal)
         }
         applyControlStyle()
         updatePlayback()
@@ -147,6 +175,16 @@ final class MusicPlaybackControlsView: UIView {
         updateClock()
     }
 
+    func setFullViewport(viewportHeight: CGFloat, safeHeight: CGFloat) {
+        guard layout == .full else { return }
+        let viewportHeight = max(0, viewportHeight)
+        let safeHeight = max(0, safeHeight)
+        guard fullViewportHeight != viewportHeight || fullSafeHeight != safeHeight else { return }
+        fullViewportHeight = viewportHeight
+        fullSafeHeight = safeHeight
+        setNeedsLayout()
+    }
+
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         let hit = super.hitTest(point, with: event)
         return layout != .full && hit === self ? nil : hit
@@ -156,21 +194,32 @@ final class MusicPlaybackControlsView: UIView {
         super.layoutSubviews()
         let width = bounds.width, height = bounds.height
         if layout == .full {
-            title.frame = CGRect(x: 28, y: 0, width: max(0, width - 56), height: titleFont.lineHeight + 4)
-            artist.frame = CGRect(x: 28, y: title.frame.maxY + 4,
-                                  width: max(0, width - 56), height: max(20, artist.font.lineHeight))
-            let controlsY = height - 116
-            progress.frame = CGRect(x: 24, y: controlsY - 44, width: max(0, width - 48), height: 30)
-            elapsed.frame = CGRect(x: 28, y: controlsY - 17, width: 80, height: 18)
-            durationLabel.frame = CGRect(x: width - 108, y: controlsY - 17, width: 80, height: 18)
-            quality.frame = CGRect(x: width / 2 - 70, y: controlsY - 28, width: 140, height: 36)
-            for (index, button) in [previous, play, nextButton].enumerated() {
-                button.frame = CGRect(x: width / 2 - 126 + CGFloat(index) * 84, y: controlsY + 8, width: 84, height: 62)
+            let metrics = fullLayoutMetrics
+            let inset = width * 0.068
+            let actionHeight = metrics.actionsHeight + max(0, titleFont.lineHeight - 23) +
+                max(0, artist.font.lineHeight - 18)
+            more.frame = CGRect(x: width - inset - 44, y: 0, width: 44, height: metrics.actionsHeight)
+            favorite.frame = CGRect(x: more.frame.minX - 44, y: 0,
+                                    width: 44, height: metrics.actionsHeight)
+            let copyWidth = max(0, favorite.frame.minX - inset - 6)
+            title.frame = CGRect(x: inset + 4, y: 0, width: max(0, copyWidth - 4),
+                                 height: max(23, titleFont.lineHeight))
+            let copyGap: CGFloat = metrics.actionsHeight == 44 ? 3 : 4
+            artist.frame = CGRect(x: title.frame.minX, y: title.frame.maxY + copyGap,
+                                  width: title.frame.width, height: max(18, artist.font.lineHeight))
+            progress.frame = CGRect(x: inset, y: actionHeight + metrics.actionProgressGap,
+                                    width: max(0, width - inset * 2), height: 44)
+            let timeY = progress.frame.maxY + 6
+            elapsed.frame = CGRect(x: inset + 4, y: timeY, width: 80, height: 16)
+            durationLabel.frame = CGRect(x: width - inset - 84, y: timeY, width: 80, height: 16)
+            quality.frame = CGRect(x: width / 2 - 70, y: timeY - 6, width: 140, height: 28)
+            let transportY = timeY + 16 + metrics.timeControlsGap
+            let cellWidth = width / 5
+            for (index, button) in [mode, previous, play, nextButton, queue].enumerated() {
+                button.frame = CGRect(x: CGFloat(index) * cellWidth, y: transportY,
+                                      width: cellWidth, height: metrics.transportHeight)
             }
-            for (index, button) in [mode, favorite, more, queue].enumerated() {
-                button.frame = CGRect(x: 24 + CGFloat(index) * (width - 48) / 4, y: height - 48,
-                                      width: (width - 48) / 4, height: 44)
-            }
+            layoutPlayRing()
             return
         }
         let compact = layout == .compact
@@ -201,6 +250,24 @@ final class MusicPlaybackControlsView: UIView {
         layoutPlayRing()
     }
 
+    private var fullLayoutMetrics: FullLayoutMetrics {
+        guard let fullViewportHeight, let fullSafeHeight else {
+            return FullLayoutMetrics(actionsHeight: 48, actionProgressGap: 8,
+                                     timeControlsGap: 20, transportHeight: 56, bottomSpace: 18)
+        }
+        if fullViewportHeight <= 480 {
+            return FullLayoutMetrics(actionsHeight: 44, actionProgressGap: 0,
+                                     timeControlsGap: 5, transportHeight: 48, bottomSpace: 8)
+        }
+        if fullViewportHeight <= 650 {
+            return FullLayoutMetrics(actionsHeight: 48, actionProgressGap: 8,
+                                     timeControlsGap: 10, transportHeight: 52, bottomSpace: 14)
+        }
+        return FullLayoutMetrics(actionsHeight: 48, actionProgressGap: fullSafeHeight * 0.0225,
+                                 timeControlsGap: fullSafeHeight * 0.027,
+                                 transportHeight: 56, bottomSpace: fullSafeHeight * 0.027)
+    }
+
     private func setVisible(_ view: UIView, _ visible: Bool) {
         view.alpha = visible ? 1 : 0
         view.isUserInteractionEnabled = visible
@@ -209,18 +276,34 @@ final class MusicPlaybackControlsView: UIView {
 
     private func updatePlayback() {
         if scrubFence?.admits(content.fence, permitted: content.isAvailable) == false { cancelSeek() }
-        play.setImage(PageIcon.image(content.model.phase == .playing ? .pause : .play,
-                                     size: layout == .full ? 38 : layout == .card ? 28 : 18), for: .normal)
+        let playing = content.model.phase == .playing
+        let playKind: PageIcon.Kind = layout == .full
+            ? (playing ? .playerPause : .playerPlay) : (playing ? .pause : .play)
+        play.setImage(PageIcon.image(playKind, size: layout == .full ? 34 : layout == .card ? 28 : 18),
+                      for: .normal)
         play.isEnabled = content.isAvailable
         previous.isEnabled = content.model.canPrevious
         nextButton.isEnabled = content.model.canNext
         queue.isEnabled = content.isAvailable
         progress.isEnabled = content.isAvailable && content.model.activeNativeAttemptID != nil
         quality.isEnabled = content.isAvailable && content.model.current != nil
-        mode.setImage(UIImage(systemName: content.model.state.mode.symbol), for: .normal)
+        if layout == .full {
+            let configuration = UIImage.SymbolConfiguration(pointSize: 24, weight: .regular)
+            mode.setImage(UIImage(systemName: content.model.state.mode.symbol,
+                                  withConfiguration: configuration), for: .normal)
+        } else {
+            mode.setImage(UIImage(systemName: content.model.state.mode.symbol), for: .normal)
+        }
         mode.accessibilityValue = content.model.state.mode.title
-        quality.setTitle(content.model.activeAudioDelivery.map { MusicQualityLabel.name($0.quality) } ?? "音质未知",
-                         for: .normal)
+        let qualityName = content.model.activeAudioDelivery.map { MusicQualityLabel.name($0.quality) }
+        if layout == .full {
+            quality.setTitle(qualityName, for: .normal)
+            quality.alpha = qualityName == nil ? 0 : 1
+            quality.accessibilityElementsHidden = qualityName == nil
+            quality.isUserInteractionEnabled = qualityName != nil
+        } else {
+            quality.setTitle(qualityName ?? "音质未知", for: .normal)
+        }
         quality.accessibilityValue = content.model.activeAudioIsCached.map { $0 ? "本机缓存" : "网络音源" } ?? "未选择音源"
         updateFavorite()
         updateClock()
@@ -229,6 +312,11 @@ final class MusicPlaybackControlsView: UIView {
     private func updateFavorite() {
         let liked = content.model.current.map { content.favorites.isFavorite($0.track) } ?? false
         favorite.setImage(PageIcon.image(.heart, filled: liked, size: layout == .card ? 26 : 23), for: .normal)
+        if layout == .full {
+            favorite.tintColor = liked
+                ? UIColor(red: 0.90, green: 0.36, blue: 0.41, alpha: 1)
+                : UIColor(content.controlTheme.muted)
+        }
         favorite.accessibilityValue = liked ? "已收藏" : "未收藏"
         favorite.isEnabled = content.isAvailable && content.model.current != nil &&
             content.favorites.loaded && !content.favorites.loading && !content.favorites.busy
@@ -258,15 +346,16 @@ final class MusicPlaybackControlsView: UIView {
                         font: titleFont, color: UIColor(theme.ink),
                         colorRanges: colorRanges,
                         allowsMotion: !UIAccessibility.isReduceMotionEnabled, running: rendering,
-                        gap: 28, pointsPerSecond: 24, minimumDuration: 0)
+                        gap: layout == .full ? 40 : 28, pointsPerSecond: 24, minimumDuration: 0)
     }
 
     func updateFonts(compatibleWith traits: UITraitCollection) {
         titleFont = UIFontMetrics(forTextStyle: .subheadline).scaledFont(
-            for: .systemFont(ofSize: layout == .full ? 20 : layout == .card ? 16 : 14, weight: .semibold),
+            for: .systemFont(ofSize: layout == .full ? 16 : layout == .card ? 16 : 14,
+                             weight: layout == .full ? .medium : .semibold),
             compatibleWith: traits)
         artist.font = UIFontMetrics(forTextStyle: .caption1).scaledFont(
-            for: .systemFont(ofSize: 12), compatibleWith: traits)
+            for: .systemFont(ofSize: layout == .full ? 13 : 12), compatibleWith: traits)
         lyricPreview.font = UIFontMetrics(forTextStyle: .footnote).scaledFont(
             for: .systemFont(ofSize: 13), compatibleWith: traits)
         configureTitle()
@@ -279,18 +368,30 @@ final class MusicPlaybackControlsView: UIView {
         displayedTheme = theme
         configureTitle()
         for label in [artist, lyricPreview, elapsed, durationLabel] { label.textColor = UIColor(theme.muted) }
-        for button in [play, queue, previous, nextButton, favorite, mode, more, collapse] { button.tintColor = UIColor(theme.ink) }
+        if layout == .full {
+            for button in [play, previous, nextButton] { button.tintColor = UIColor(theme.ink) }
+            for button in [queue, favorite, mode, more] {
+                button.tintColor = UIColor(theme.muted)
+            }
+        } else {
+            for button in [play, queue, previous, nextButton, favorite, mode, more, collapse] {
+                button.tintColor = UIColor(theme.ink)
+            }
+        }
         quality.tintColor = UIColor(theme.muted)
         applyControlStyle()
+        if layout == .full { updateFavorite() }
     }
 
     private func applyControlStyle() {
         let ink = UIColor(content.controlTheme.ink)
+        let muted = UIColor(content.controlTheme.muted)
         let card = layout == .card
-        progress.minimumTrackTintColor = card ? ink : UIColor(content.controlTheme.accent)
+        progress.minimumTrackTintColor = layout == .full
+            ? muted : (card ? ink : UIColor(content.controlTheme.accent))
         progress.tintColor = progress.minimumTrackTintColor
-        progress.maximumTrackTintColor = UIColor(content.controlTheme.muted).withAlphaComponent(card ? 0.22 : 0.15)
-        progress.thumbColor = card ? ink : .white
+        progress.maximumTrackTintColor = muted.withAlphaComponent(layout == .full ? 0.18 : card ? 0.22 : 0.15)
+        progress.thumbColor = layout == .full ? muted : (card ? ink : .white)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         playTrack.strokeColor = ink.withAlphaComponent(card ? 0.85 : 0.18).cgColor

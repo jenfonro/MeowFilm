@@ -1,8 +1,8 @@
 #if os(iOS)
 import UIKit
 
-/// An independent opaque page enters from below. Edge dismissal translates
-/// that page to the right while the actual presenting hierarchy stays put.
+/// An independent opaque page enters from below and always returns downward.
+/// A horizontal edge gesture only supplies progress; it does not change axis.
 @MainActor
 public final class BottomPageTransition: NSObject, UIViewControllerTransitioningDelegate,
     UIGestureRecognizerDelegate
@@ -149,10 +149,9 @@ private final class BottomPageAnimator: NSObject, UIViewControllerAnimatedTransi
         }
         let value = UIViewPropertyAnimator(duration: transitionDuration(using: context),
                                           curve: edgeDismissal ? .linear : .easeInOut)
-        value.addAnimations { [presenting, edgeDismissal] in
+        value.addAnimations { [presenting] in
             root.transform = presenting ? .identity : CGAffineTransform(
-                translationX: edgeDismissal ? container.bounds.width : 0,
-                y: edgeDismissal ? 0 : container.bounds.height)
+                translationX: 0, y: container.bounds.height)
         }
         value.addCompletion { [weak self, presenting, completion] _ in
             let completed = !context.transitionWasCancelled
