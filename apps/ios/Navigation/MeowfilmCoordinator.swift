@@ -34,7 +34,6 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         navigation.willShowPage = { [weak self] page, animated in
             guard let self else { return }
             let primary = page === self.main
-            self.navigation.setNavigationBarHidden(primary, animated: animated)
             self.root.setRootVisible(primary, animated: animated)
         }
         navigation.didShowPage = { [weak self] page in

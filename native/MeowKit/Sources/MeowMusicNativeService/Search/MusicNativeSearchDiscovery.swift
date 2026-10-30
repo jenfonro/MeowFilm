@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // iWebPlus b900c259 static/netease-client.js discovery(), with the fixed routes
-// in api-enhanced/module/{search_hot_detail,toplist,search_default,playlist_track_all}.js.
+// in api-enhanced/module/{search_hot_detail,toplist,playlist_track_all}.js.
 import Foundation
 import MeowMusicFeature
 
@@ -23,7 +23,7 @@ extension NativeMusicService: MusicSearchDiscoveryProviding {
             return .init(collection: chart.collection,
                          tracks: Array(registered.dropFirst(offset).prefix(chart.tracks.count)))
         }
-        return .init(hot: result.hot, suggestions: result.suggestions, charts: charts,
+        return .init(hot: result.hot, charts: charts,
                      failures: result.failures, validUntil: now().addingTimeInterval(600))
     }
 }
@@ -34,7 +34,6 @@ fileprivate struct MusicNativeSearchDiscoveryChart: Sendable {
 }
 fileprivate struct MusicNativeSearchDiscoverySnapshot: Sendable {
     let hot: [MusicSearchHotKeyword]
-    let suggestions: [String]
     let charts: [MusicNativeSearchDiscoveryChart]
     let failures: [MusicSearchDiscoveryFailure]
 }
@@ -57,15 +56,6 @@ enum MusicNativeSearchDiscoveryParser {
             return .init(keyword: text, score: score)
         }
     }
-    static func defaultKeyword(_ root: MJ) throws -> String? {
-        let value = root["data"]["realkeyword"]
-        if value == .null || value == .string("") { return nil }
-        return try keyword(value)
-    }
-    static func suggestions(defaultKeyword: String?, hot: [MusicSearchHotKeyword]) -> [String] {
-        var seen = Set<String>()
-        return ([defaultKeyword].compactMap { $0 } + hot.map(\.keyword)).filter { seen.insert($0).inserted }
-    }
 }
 
 private func musicSearchDiscoveryAttempt<T: Sendable>(
@@ -78,7 +68,7 @@ private func musicSearchDiscoveryAttempt<T: Sendable>(
 extension MusicNativePlatforms {
     fileprivate func searchDiscovery() async throws -> MusicNativeSearchDiscoverySnapshot {
         let own = epoch
-        // Three independent requests, at most two on interfacepc's host. The
+        // Two independent requests, at most two on interfacepc's host. The
         // shared native transport's per-host budget is not raised for discovery.
         async let hotRequest = musicSearchDiscoveryAttempt { [self] in
             let root = try await browseWEAPI("/api/hotsearchlist/get", .obj())
@@ -87,14 +77,9 @@ extension MusicNativePlatforms {
         async let topsRequest = musicSearchDiscoveryAttempt { [self] in
             try await searchDiscoveryToplists()
         }
-        async let defaultRequest = musicSearchDiscoveryAttempt { [self] in
-            let root = try await wy("/api/search/defaultkeyword/get", .obj())
-            return try MusicNativeSearchDiscoveryParser.defaultKeyword(root)
-        }
-        let (hotResult, topsResult, defaultResult) = await (hotRequest, topsRequest, defaultRequest)
+        let (hotResult, topsResult) = await (hotRequest, topsRequest)
         try Task.checkCancellation()
         try musicRequire(own == epoch, .staleAccess)
-        // A default word alone was not a successful discovery in the reference.
         if case .failure(let error) = hotResult, case .failure = topsResult { throw error }
         var failures: [MusicSearchDiscoveryFailure] = []
         let hot: [MusicSearchHotKeyword]
@@ -106,11 +91,6 @@ extension MusicNativePlatforms {
         switch topsResult {
         case .success(let value): tops = value
         case .failure(let error): tops = []; failures.append(.init(component: .charts, error: error))
-        }
-        let word: String?
-        switch defaultResult {
-        case .success(let value): word = value
-        case .failure(let error): word = nil; failures.append(.init(component: .suggestions, error: error))
         }
         var charts: [MusicNativeSearchDiscoveryChart] = []
         // The three charts are bounded and retain toplist order. Serial hydration
@@ -131,8 +111,7 @@ extension MusicNativePlatforms {
             case .failure(let error): failures.append(.init(component: .charts, chartID: collection.id, error: error))
             }
         }
-        return .init(hot: hot, suggestions: MusicNativeSearchDiscoveryParser.suggestions(defaultKeyword: word, hot: hot),
-                     charts: charts, failures: failures)
+        return .init(hot: hot, charts: charts, failures: failures)
     }
 
     private func searchDiscoveryToplists() async throws -> [MusicPublicBrowseCollection] {

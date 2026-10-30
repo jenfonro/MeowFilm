@@ -20,11 +20,7 @@ public final class MusicSearchViewController: SearchPageViewController,
     private var discoveryTask: Task<Void, Never>?
     private var discoveryError: String?
     private var shownDiscoveryError: String?
-    private var suggestionOffset = 0
     private var dataSource: UITableViewDiffableDataSource<Int, RowID>!
-    private var renderedSuggestions: [String] = []
-    private var renderedSuggestionWidth: CGFloat = 0
-    private var renderedSuggestionOffset = 0
 
     public init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore, router: any MusicUIRouting) {
         self.model = model; self.appearance = appearance; self.router = router
@@ -33,11 +29,13 @@ public final class MusicSearchViewController: SearchPageViewController,
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        searchBar.placeholder = "搜索歌曲、歌手、歌单"
+        searchField.placeholder = "搜索歌曲、歌手、歌单"
         onSubmit = { [weak self] in self?.submit($0) }
         table.backgroundColor = .clear
         table.delegate = self
         table.separatorStyle = .none
+        table.sectionHeaderTopPadding = 0
+        table.contentInset.top = PageLayoutMetrics.contentGap
         table.register(UITableViewCell.self, forCellReuseIdentifier: "keyword")
         table.register(MusicSearchChartsCell.self, forCellReuseIdentifier: "charts")
         dataSource = UITableViewDiffableDataSource(tableView: table) { [weak self] view, path, id in
@@ -85,12 +83,6 @@ public final class MusicSearchViewController: SearchPageViewController,
                 button.tintColor = UIColor(theme.muted)
             }
         }
-        configureSuggestions(force: true)
-    }
-
-    public override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        if table.tableHeaderView?.bounds.width != table.bounds.width { configureSuggestions() }
     }
 
     public func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
@@ -169,8 +161,8 @@ public final class MusicSearchViewController: SearchPageViewController,
         guard model.isAvailable, !model.isClosed else { return }
         model.query = keyword
         history.record(keyword)
-        searchBar.text = keyword
-        searchBar.resignFirstResponder()
+        query = keyword
+        searchField.resignFirstResponder()
         navigationController?.pushViewController(MusicSearchResultsViewController(
             model: model, query: keyword, appearance: appearance, router: router, history: history
         ), animated: true)
@@ -199,7 +191,6 @@ public final class MusicSearchViewController: SearchPageViewController,
                     let operation: String
                     switch failure.component {
                     case .hot: operation = "热搜榜读取"
-                    case .suggestions: operation = "搜索推荐读取"
                     case .charts: operation = "音乐榜单读取"
                     }
                     return failure.error.message(operation: operation, platform: MusicPublicBrowsePlatform.netease.title)
@@ -277,47 +268,11 @@ public final class MusicSearchViewController: SearchPageViewController,
             previous.itemIdentifiers != snapshot.itemIdentifiers || discoveryChanged {
             dataSource.apply(snapshot, animatingDifferences: false)
         }
-        configureSuggestions()
     }
 
     private func sectionID(_ index: Int) -> Int? {
         let ids = dataSource?.snapshot().sectionIdentifiers ?? []
         return ids.indices.contains(index) ? ids[index] : nil
-    }
-
-    private func configureSuggestions(force: Bool = false) {
-        let suggestions = discovery?.suggestions ?? []
-        guard force || suggestions != renderedSuggestions || table.bounds.width != renderedSuggestionWidth ||
-            suggestionOffset != renderedSuggestionOffset else { return }
-        renderedSuggestions = suggestions; renderedSuggestionWidth = table.bounds.width
-        renderedSuggestionOffset = suggestionOffset
-        guard !suggestions.isEmpty, table.bounds.width > 0 else { table.tableHeaderView = nil; return }
-        let values = (0..<min(4, suggestions.count)).map { suggestions[(suggestionOffset + $0) % suggestions.count] }
-        let font = UIFont.systemFont(ofSize: 13)
-        let sizes = values.map { CGSize(width: ($0 as NSString).size(withAttributes: [.font: font]).width + 24,
-                                      height: 34) }
-        let rows = MusicChannelTagRows(width: table.bounds.width - 32, items: sizes)
-        let header = UIView(frame: CGRect(x: 0, y: 0, width: table.bounds.width, height: rows.size.height + 62))
-        let change = UIButton(type: .system)
-        change.setTitle("换一批", for: .normal)
-        change.tintColor = UIColor(theme.muted)
-        change.frame = CGRect(x: header.bounds.width - 76, y: 0, width: 60, height: 44)
-        change.addAction(UIAction { [weak self] _ in
-            self?.suggestionOffset += 4
-            self?.configureSuggestions()
-        }, for: .touchUpInside)
-        header.addSubview(change)
-        for (index, value) in values.enumerated() {
-            let button = UIButton(type: .system)
-            button.setTitle(value, for: .normal)
-            button.tintColor = UIColor(theme.ink)
-            button.backgroundColor = UIColor(theme.control)
-            button.layer.cornerRadius = 17
-            button.frame = rows.frames[index].offsetBy(dx: 16, dy: 46)
-            button.addAction(UIAction { [weak self] _ in self?.submit(value) }, for: .touchUpInside)
-            header.addSubview(button)
-        }
-        table.tableHeaderView = header
     }
 
     isolated deinit { discoveryTask?.cancel() }
@@ -367,7 +322,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        searchBar.placeholder = "搜索歌曲、歌手、歌单"
+        searchField.placeholder = "搜索歌曲、歌手、歌单"
         onSubmit = { [weak self] _ in self?.submit() }
         categories.selectedSegmentIndex = 0
         categories.addAction(UIAction { [weak self] _ in
@@ -383,7 +338,8 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         NSLayoutConstraint.activate([
             categories.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
             categories.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            categories.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            categories.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor,
+                                            constant: PageLayoutMetrics.contentGap),
             categories.heightAnchor.constraint(equalToConstant: 36),
             pager.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             pager.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -396,6 +352,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
             page.table.tag = index
             page.table.delegate = self
             page.table.backgroundColor = .clear; page.table.separatorStyle = .none
+            page.table.sectionHeaderTopPadding = 0
             page.table.register(MusicTrackCell.self, forCellReuseIdentifier: MusicTrackCell.reuseIdentifier)
             page.table.register(MusicCollectionCell.self, forCellReuseIdentifier: MusicCollectionCell.reuseIdentifier)
             page.table.register(MusicSearchPlaylistCell.self, forCellReuseIdentifier: "Playlists")
@@ -607,7 +564,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { results.resumePagination() }
 
     private func submit() {
-        let query = searchBar.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let query = self.query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty, model.isAvailable, !model.isClosed else { return }
         preferences.reload()
         history.record(query)

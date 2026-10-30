@@ -162,6 +162,11 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
         CGSize(width: max(0, (collectionView.bounds.width - 48) / 4), height: 52)
     }
 
+    public func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout,
+                               insetForSectionAt section: Int) -> UIEdgeInsets {
+        UIEdgeInsets(top: PageLayoutMetrics.contentGap, left: 0, bottom: 0, right: 0)
+    }
+
     private func activateCatalogue() {
         guard let catalogue, isPageActive else { return }
         catalogue.setAccess(available: model.isAvailable && !model.isClosed,

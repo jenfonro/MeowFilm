@@ -76,7 +76,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
     }
     public func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout,
                                insetForSectionAt section: Int) -> UIEdgeInsets {
-        UIEdgeInsets(top: 12, left: 16, bottom: 12, right: 16)
+        UIEdgeInsets(top: PageLayoutMetrics.contentGap, left: 16, bottom: 12, right: 16)
     }
     public func requestCreatePlaylist() {
         let alert = UIAlertController(title: "新建歌单", message: nil, preferredStyle: .alert)

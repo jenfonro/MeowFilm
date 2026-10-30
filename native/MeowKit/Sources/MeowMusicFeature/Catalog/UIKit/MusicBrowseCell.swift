@@ -202,6 +202,20 @@ final class MusicBrowseHeader: UICollectionReusableView {
     private let avatars = (0..<3).map { _ in MusicArtworkView(size: 0) }
     private let errorLabel = UILabel(), retry = UIButton(type: .system)
     private var playAction: (() -> Void)?
+    private var headingHeight: CGFloat = 0
+
+    static func height(for section: MusicPublicBrowseSection, collection: MusicPublicBrowseCollection?) -> CGFloat {
+        if collection != nil { return 190 }
+        return headingHeight(for: section) + (section.tabs.isEmpty ? 0 : 36)
+    }
+
+    private static func headingHeight(for section: MusicPublicBrowseSection) -> CGFloat {
+        let hasTrack = section.items.contains {
+            if case .track = $0.content { return true }; return false
+        }
+        return !section.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasTrack ||
+            !section.filters.isEmpty || section.channel != nil || !section.avatars.isEmpty ? 44 : 0
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -225,6 +239,7 @@ final class MusicBrowseHeader: UICollectionReusableView {
                    theme: PageTheme, onPlay: @escaping () -> Void,
                    onChannel: @escaping () -> Void, onChoice: @escaping (String) -> Void,
                    onRetry: @escaping () -> Void, error: String?) {
+        headingHeight = Self.headingHeight(for: section)
         title.text = collection?.title ?? section.title
         title.textColor = UIColor(theme.ink)
         creator.textColor = UIColor(theme.muted)
@@ -282,16 +297,18 @@ final class MusicBrowseHeader: UICollectionReusableView {
             choices.frame = CGRect(x: bounds.width - 44, y: 142, width: 44, height: 44)
             tabs.frame = .zero
         } else {
-            title.frame = CGRect(x: 0, y: 2, width: max(0, bounds.width - 88), height: 38)
-            play.frame = CGRect(x: bounds.width - 88, y: 0, width: 44, height: 44)
-            choices.frame = CGRect(x: bounds.width - 44, y: 0, width: 44, height: 44)
-            tabs.frame = CGRect(x: 0, y: 44, width: bounds.width, height: max(0, bounds.height - 44))
+            title.frame = CGRect(x: 0, y: 2, width: max(0, bounds.width - 88),
+                                 height: max(0, headingHeight - 6))
+            play.frame = CGRect(x: bounds.width - 88, y: 0, width: 44, height: headingHeight)
+            choices.frame = CGRect(x: bounds.width - 44, y: 0, width: 44, height: headingHeight)
+            tabs.frame = CGRect(x: 0, y: headingHeight, width: bounds.width,
+                                height: max(0, bounds.height - headingHeight))
         }
         if errorLabel.text != nil {
             let y = bounds.height - 64
             errorLabel.frame = CGRect(x: 0, y: y, width: max(0, bounds.width - 84), height: 60)
             retry.frame = CGRect(x: bounds.width - 80, y: y + 8, width: 76, height: 44)
-            if !hero { tabs.frame.size.height = max(0, y - 44) }
+            if !hero { tabs.frame.size.height = max(0, y - headingHeight) }
         } else { errorLabel.frame = .zero }
         for (index, avatar) in avatars.enumerated() {
             avatar.frame = CGRect(x: bounds.width - 150 + CGFloat(index) * 18, y: 8, width: 25, height: 25)

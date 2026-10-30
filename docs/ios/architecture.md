@@ -23,7 +23,7 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | `MeowStorage` | 普通及加密文档存储 | Contracts |
 | `MeowAccounts` | 凭据与账号状态基础设施 | Contracts |
 | `MeowPlayback` | 系统播放、媒体会话、播放所有权 | Contracts |
-| `MeowUI` | 中性主题、窗口渐变、页面生命周期、导航、搜索页与呈现机制 | 无 |
+| `MeowUI` | 中性主题、窗口渐变、页面生命周期、导航与标题容器、搜索页与呈现机制 | 无 |
 | `MeowMusicFeature` | 音乐界面、交互、公开业务契约与音乐外观策略 | Contracts、Storage、Playback、UI |
 | `MeowMusicPlatform` | 网易、QQ、酷狗协议、账号、加密、HTTP 与文件缓存 | Feature、Contracts、JSON、Accounts、Storage |
 | `MeowMusicNativeService` | 曲库、队列、搜索、推荐、歌词、缓存编排和持久化 | Contracts、Feature、Storage |

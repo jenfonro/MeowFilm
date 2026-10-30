@@ -99,10 +99,10 @@ final class MusicUIKitRegressionTests: XCTestCase {
             title: "榜单"), tracks: [])
         let until = Date().addingTimeInterval(3600)
         let service = MusicUIKitRegressionService(discovery: [
-            .init(hot: [.init(keyword: "保留热词")], suggestions: [], charts: [chart],
-                  failures: [.init(component: .suggestions, error: .networkOffline),
+            .init(hot: [.init(keyword: "保留热词")], charts: [chart],
+                  failures: [.init(component: .charts, chartID: "offline", error: .networkOffline),
                              .init(component: .charts, chartID: "failed", error: .timeout)], validUntil: until),
-            .init(hot: [.init(keyword: "恢复热词")], suggestions: [], charts: [chart], validUntil: until),
+            .init(hot: [.init(keyword: "恢复热词")], charts: [chart], validUntil: until),
         ])
         let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
         let controller = MusicSearchViewController(model: model, appearance: MusicAppearancePreferencesStore(),
@@ -119,7 +119,8 @@ final class MusicUIKitRegressionTests: XCTestCase {
         }, evaluatedWith: controller)
         await fulfillment(of: [failure], timeout: 2)
         let alert = try XCTUnwrap(controller.presentedViewController as? UIAlertController)
-        XCTAssertTrue(alert.message?.contains("搜索推荐读取") == true)
+        XCTAssertTrue(alert.message?.contains(MusicServiceError.networkOffline.message(
+            operation: "音乐榜单读取", platform: MusicPublicBrowsePlatform.netease.title)) == true)
         XCTAssertTrue(alert.message?.contains("音乐榜单读取") == true)
         XCTAssertTrue(alert.actions.contains { $0.title == "重试" })
         XCTAssertTrue(table.visibleCells.contains {
@@ -168,6 +169,41 @@ final class MusicUIKitRegressionTests: XCTestCase {
         XCTAssertFalse(descendants(cell).contains { $0.accessibilityLabel == "播放b" })
         first.sendActions(for: .touchUpInside)
         XCTAssertEqual(played, ["a"]); XCTAssertEqual(oldCalls, 0)
+    }
+
+    func testLeadingCardsUseSharedGapAndUntitledPlaybackHeadingRemainsTouchable() async throws {
+        let page = MusicPublicBrowsePage(sections: [
+            .init(id: "cards", title: "", items: [card("cover", previews: [])], layout: .featureRail),
+            .init(id: "songs", title: "", items: [
+                .init(id: "song", title: "歌曲", content: .track(track("song"))),
+            ], layout: .list),
+        ])
+        let service = MusicUIKitRegressionService(browse: page)
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let controller = MusicBrowseViewController(title: "推荐", model: model, browser: service,
+            request: .discovery(.home), appearance: MusicAppearancePreferencesStore(),
+            router: MusicUIKitRegressionRouter(), embedded: true)
+        let window = mount(controller)
+        defer { release(controller, window: window) }
+        let collection = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? UICollectionView }.first)
+        let kind = UICollectionView.elementKindSectionHeader
+        let loaded = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                collection.layoutIfNeeded()
+                return collection.cellForItem(at: IndexPath(item: 0, section: 0)) != nil &&
+                    collection.supplementaryView(forElementKind: kind, at: IndexPath(item: 0, section: 1)) != nil
+            }
+        }, evaluatedWith: collection)
+        await fulfillment(of: [loaded], timeout: 2)
+        let first = try XCTUnwrap(collection.cellForItem(at: IndexPath(item: 0, section: 0)))
+        XCTAssertEqual(first.convert(first.bounds, to: collection).minY,
+                       PageLayoutMetrics.contentGap, accuracy: 0.5)
+        let header = try XCTUnwrap(collection.supplementaryView(
+            forElementKind: kind, at: IndexPath(item: 0, section: 1)))
+        let play = try XCTUnwrap(descendants(header).compactMap { $0 as? UIButton }.first { !$0.isHidden })
+        XCTAssertGreaterThan(play.bounds.height, 0)
+        XCTAssertTrue(header.hitTest(play.center, with: nil) === play)
+        await model.close()
     }
 
     func testSectionTabLeavesUnchangedCellHeaderAndPreviewViewsIntact() async throws {

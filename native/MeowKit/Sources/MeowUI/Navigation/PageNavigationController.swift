@@ -39,6 +39,7 @@ public final class PageNavigationController: UINavigationController, UINavigatio
 
     public func navigationController(_ navigationController: UINavigationController,
                                      willShow viewController: UIViewController, animated: Bool) {
+        viewController.navigationItem.backButtonDisplayMode = .minimal
         willShowPage?(viewController, animated)
     }
 

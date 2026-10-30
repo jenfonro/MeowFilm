@@ -401,7 +401,8 @@ public final class MusicBrowseViewController: MusicPageViewController,
         if previousCollection != collectionInfo || previousSections.count != sections.count ||
             zip(previousSections, sections).contains(where: { pair in
                 pair.0.id != pair.1.id || pair.0.layout != pair.1.layout ||
-                    pair.0.tabs.isEmpty != pair.1.tabs.isEmpty
+                    MusicBrowseHeader.height(for: pair.0, collection: nil) !=
+                    MusicBrowseHeader.height(for: pair.1, collection: nil)
             }) {
             collection.collectionViewLayout.invalidateLayout()
         }
@@ -871,15 +872,18 @@ public final class MusicBrowseViewController: MusicPageViewController,
                 scrolling = .continuous
             }
             let result = NSCollectionLayoutSection(group: group)
-            result.contentInsets = .init(top: 4, leading: 16, bottom: 20, trailing: 16)
+            let headerHeight = MusicBrowseHeader.height(
+                for: section, collection: index == 0 && !self.embedded ? self.collectionInfo : nil)
+            result.contentInsets = .init(top: index == 0 && headerHeight == 0 ? PageLayoutMetrics.contentGap : 4,
+                                         leading: 16, bottom: 20, trailing: 16)
             result.interGroupSpacing = 9
             result.orthogonalScrollingBehavior = scrolling
-            let hero = index == 0 && !self.embedded && self.collectionInfo != nil
-            let header = NSCollectionLayoutBoundarySupplementaryItem(
-                layoutSize: .init(widthDimension: .fractionalWidth(1),
-                                  heightDimension: .absolute(hero ? 190 : section.tabs.isEmpty ? 44 : 80)),
-                elementKind: UICollectionView.elementKindSectionHeader, alignment: .top)
-            result.boundarySupplementaryItems = [header]
+            if headerHeight > 0 {
+                let header = NSCollectionLayoutBoundarySupplementaryItem(
+                    layoutSize: .init(widthDimension: .fractionalWidth(1), heightDimension: .absolute(headerHeight)),
+                    elementKind: UICollectionView.elementKindSectionHeader, alignment: .top)
+                result.boundarySupplementaryItems = [header]
+            }
             return result
         }
     }
