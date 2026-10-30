@@ -172,14 +172,14 @@ final class MusicUIKitRegressionTests: XCTestCase {
         XCTAssertEqual(played, ["a"]); XCTAssertEqual(oldCalls, 0)
     }
 
-    func testLeadingCardsUseSharedGapAndUntitledPlaybackHeadingRemainsTouchable() async throws {
+    func testLeadingCardsAndUntitledHomeSongsKeepContentGapAndRowPlaybackTouchable() async throws {
         let page = MusicPublicBrowsePage(sections: [
             .init(id: "cards", title: "", items: [card("cover", previews: [])], layout: .featureRail),
             .init(id: "songs", title: "", items: [
                 .init(id: "song", title: "歌曲", content: .track(track("song"))),
             ], layout: .list),
         ])
-        let service = MusicUIKitRegressionService(browse: page)
+        let service = MusicUIKitRegressionService(browse: .init(sections: [], cursor: "public", consumed: 1), nextBrowse: page)
         let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
         let controller = MusicBrowseViewController(title: "推荐", model: model, browser: service,
             request: .discovery(.home), appearance: MusicAppearancePreferencesStore(),
@@ -187,23 +187,101 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let window = mount(controller)
         defer { release(controller, window: window) }
         let collection = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? UICollectionView }.first)
-        let kind = UICollectionView.elementKindSectionHeader
         let loaded = expectation(for: NSPredicate { _, _ in
             MainActor.assumeIsolated {
                 collection.layoutIfNeeded()
                 return collection.cellForItem(at: IndexPath(item: 0, section: 0)) != nil &&
-                    collection.supplementaryView(forElementKind: kind, at: IndexPath(item: 0, section: 1)) != nil
+                    collection.cellForItem(at: IndexPath(item: 0, section: 1)) != nil
             }
         }, evaluatedWith: collection)
         await fulfillment(of: [loaded], timeout: 2)
         let first = try XCTUnwrap(collection.cellForItem(at: IndexPath(item: 0, section: 0)))
         XCTAssertEqual(first.convert(first.bounds, to: collection).minY,
                        PageLayoutMetrics.contentGap, accuracy: 0.5)
-        let header = try XCTUnwrap(collection.supplementaryView(
-            forElementKind: kind, at: IndexPath(item: 0, section: 1)))
-        let play = try XCTUnwrap(descendants(header).compactMap { $0 as? UIButton }.first { !$0.isHidden })
+        let row = try XCTUnwrap(collection.cellForItem(at: IndexPath(item: 0, section: 1)))
+        let play = try XCTUnwrap(descendants(row).compactMap { $0 as? UIButton }.first { !$0.isHidden })
         XCTAssertGreaterThan(play.bounds.height, 0)
-        XCTAssertTrue(header.hitTest(play.center, with: nil) === play)
+        XCTAssertTrue(row.hitTest(play.convert(CGPoint(x: play.bounds.midX, y: play.bounds.midY), to: row), with: nil) === play)
+        XCTAssertEqual(MusicBrowseHeader.height(for: page.sections[1], collection: nil, showsSectionPlayback: false), 0)
+        let counts = await service.counts(); XCTAssertEqual(counts.browse, 2)
+        await model.close()
+    }
+
+    func testHomeHeaderUsesTitleWidthAndKeepsFiltersAndDetailPlaybackSeparate() throws {
+        let song = MusicPublicBrowseItem(id: "song", title: "歌曲", content: .track(track("song")))
+        let header = MusicBrowseHeader(frame: CGRect(x: 0, y: 0, width: 360, height: 44))
+        var plays = 0, channelCalls = 0
+        header.configure(section: .init(id: "songs", title: "歌曲栏目", items: [song]), collection: nil,
+            theme: PageTheme(), showsSectionPlayback: false, onPlay: { plays += 1 }, onChannel: {},
+            onChoice: { _ in }, onRetry: {}, error: nil)
+        header.layoutIfNeeded()
+        let title = try XCTUnwrap(descendants(header).compactMap { $0 as? UILabel }.first { $0.text == "歌曲栏目" })
+        XCTAssertEqual(title.frame.width, header.bounds.width, accuracy: 0.5)
+
+        let channel = MusicPublicBrowseChannel(id: "playlist", title: "歌单", kind: .playlists)
+        let filters = [MusicPublicBrowseFilter(id: "all", title: "全部"), .init(id: "other", title: "其他")]
+        header.configure(section: .init(id: "lists", title: "推荐歌单", items: [], channel: channel,
+            filters: filters, selectedFilter: "all"), collection: nil, theme: PageTheme(),
+            showsSectionPlayback: false, onPlay: { plays += 1 }, onChannel: { channelCalls += 1 },
+            onChoice: { _ in }, onRetry: {}, error: nil)
+        header.layoutIfNeeded()
+        let entry = try XCTUnwrap(descendants(header).compactMap { $0 as? UIButton }.first {
+            $0.accessibilityIdentifier == "music.browse.channel.lists"
+        })
+        XCTAssertTrue(header.hitTest(CGPoint(x: 280, y: 22), with: nil) === entry)
+        entry.sendActions(for: .touchUpInside)
+        XCTAssertEqual(channelCalls, 1); XCTAssertEqual(plays, 0)
+        let choices = try XCTUnwrap(descendants(header).compactMap { $0 as? UIButton }.first { $0.menu != nil && !$0.isHidden })
+        XCTAssertEqual(choices.menu?.children.compactMap { ($0 as? UIAction)?.title }, filters.map(\.title))
+        let label = try XCTUnwrap(descendants(header).compactMap { $0 as? UILabel }.first { $0.text == "推荐歌单" })
+        let arrow = try XCTUnwrap(descendants(header).compactMap { $0 as? UIImageView }.first { !$0.isHidden && $0.image != nil })
+        XCTAssertEqual(arrow.frame.minX - label.frame.maxX, 6, accuracy: 0.5)
+
+        header.frame.size.height = 190
+        header.configure(section: .init(id: "detail", title: "歌曲", items: [song]),
+            collection: .init(platform: .netease, nativeID: "41", title: "歌单"), theme: PageTheme(),
+            onPlay: { plays += 1 }, onChannel: {}, onChoice: { _ in }, onRetry: {}, error: nil)
+        header.layoutIfNeeded()
+        let play = try XCTUnwrap(descendants(header).compactMap { $0 as? UIButton }.first {
+            $0.accessibilityLabel == "播放全部" && !$0.isHidden
+        })
+        play.sendActions(for: .touchUpInside)
+        XCTAssertEqual(plays, 1)
+    }
+
+    func testHomeChannelTitleAndCollectionCardUseIndependentNavigationActions() async throws {
+        let channel = MusicPublicBrowseChannel(id: "chart", title: "排行榜", kind: .rankings)
+        let destination = MusicPublicBrowseCollection(platform: .netease, nativeID: "41", title: "榜单")
+        let service = MusicUIKitRegressionService(browse: .init(sections: [
+            .init(id: "rankings", title: "排行榜", items: [
+                .init(id: destination.id, title: destination.title, content: .collection(destination)),
+            ], layout: .playlistRail, channel: channel),
+        ]))
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let router = MusicUIKitRegressionRouter()
+        var selected: [MusicPublicBrowseChannel] = [], opened: [MusicPublicBrowseCollection] = []
+        router.onChannel = { selected.append($0) }; router.onCollection = { opened.append($0) }
+        let controller = MusicBrowseViewController(title: "推荐", model: model, browser: service,
+            request: .discovery(.home), appearance: MusicAppearancePreferencesStore(), router: router, embedded: true)
+        let window = mount(controller)
+        defer { release(controller, window: window) }
+        let collection = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? UICollectionView }.first)
+        let kind = UICollectionView.elementKindSectionHeader
+        let ready = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                collection.layoutIfNeeded()
+                return collection.supplementaryView(forElementKind: kind, at: IndexPath(item: 0, section: 0)) != nil &&
+                    collection.cellForItem(at: IndexPath(item: 0, section: 0)) != nil
+            }
+        }, evaluatedWith: collection)
+        await fulfillment(of: [ready], timeout: 2)
+        let header = try XCTUnwrap(collection.supplementaryView(forElementKind: kind, at: IndexPath(item: 0, section: 0)))
+        let entry = try XCTUnwrap(header.hitTest(CGPoint(x: header.bounds.width - 2, y: 22), with: nil) as? UIButton)
+        entry.sendActions(for: .touchUpInside)
+        XCTAssertEqual(selected, [channel]); XCTAssertTrue(opened.isEmpty)
+        controller.collectionView(collection, didSelectItemAt: IndexPath(item: 0, section: 0))
+        XCTAssertEqual(opened, [destination]); XCTAssertEqual(selected, [channel])
+        let counts = await service.counts(); XCTAssertEqual(counts.browse, 1)
         await model.close()
     }
 
@@ -707,19 +785,28 @@ final class MusicPlayerContentModelTests: XCTestCase {
 @MainActor
 private final class MusicUIKitRegressionRouter: MusicUIRouting {
     let primaryPlaybackPresentation = MusicMiniPlayerPresentation()
+    var onChannel: ((MusicPublicBrowseChannel) -> Void)?
+    var onCollection: ((MusicPublicBrowseCollection) -> Void)?
     func showSearch() { XCTFail("Unexpected navigation") }
     func showSettings() { XCTFail("Unexpected navigation") }
     func showPublicBrowse(_ request: MusicPublicBrowseRequest, title: String) { XCTFail("Unexpected navigation") }
-    func showPublicCollection(_ collection: MusicPublicBrowseCollection) { XCTFail("Unexpected navigation") }
+    func showPublicCollection(_ collection: MusicPublicBrowseCollection) {
+        guard let onCollection else { XCTFail("Unexpected navigation"); return }
+        onCollection(collection)
+    }
     func showLocalCollection(_ collection: MusicCollection) { XCTFail("Unexpected navigation") }
     func showPlayer(_ destination: MusicPlaybackDestination) { XCTFail("Unexpected navigation") }
-    func selectChannel(_ channel: MusicPublicBrowseChannel) { XCTFail("Unexpected navigation") }
+    func selectChannel(_ channel: MusicPublicBrowseChannel) {
+        guard let onChannel else { XCTFail("Unexpected navigation"); return }
+        onChannel(channel)
+    }
 }
 
 private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, MusicPublicBrowsing,
     MusicSearchDiscoveryProviding, MusicChorusProviding {
     private let discovery: [MusicSearchDiscoverySnapshot]
     private let browse: MusicPublicBrowsePage
+    private let nextBrowse: MusicPublicBrowsePage?
     private let localTracks: [MusicRemoteTrack]
     private let collectionKind: String
     private var discoveryCalls = 0, browseCalls = 0, trackCalls = 0
@@ -727,9 +814,10 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     private var chorusGate: MusicUIKitChorusGate?
     private var chorusFailure: MusicServiceError?
     init(discovery: [MusicSearchDiscoverySnapshot] = [], browse: MusicPublicBrowsePage = .init(sections: []),
+         nextBrowse: MusicPublicBrowsePage? = nil,
          localTracks: [MusicRemoteTrack] = [], collectionKind: String = "playlist") {
         self.discovery = discovery; self.browse = browse; self.localTracks = localTracks
-        self.collectionKind = collectionKind
+        self.nextBrowse = nextBrowse; self.collectionKind = collectionKind
     }
     func counts() -> (discovery: Int, browse: Int, tracks: Int) { (discoveryCalls, browseCalls, trackCalls) }
     func holdChorus(_ gate: MusicUIKitChorusGate) { chorusGate = gate }
@@ -749,7 +837,7 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
         return discovery[discoveryCalls]
     }
     func publicDiscovery(_ destination: MusicPublicBrowseDestination, cursor: String?) -> MusicPublicBrowsePage {
-        browseCalls += 1; return browse
+        browseCalls += 1; return cursor == nil ? browse : nextBrowse ?? browse
     }
     func publicPlaylists(platform: MusicPublicBrowsePlatform, query: String, cursor: String?) throws -> MusicPublicBrowseCollectionPage { throw MusicServiceError.unsupported }
     func publicDetail(_ collection: MusicPublicBrowseCollection, cursor: String?) throws -> MusicPublicBrowseDetail { throw MusicServiceError.unsupported }

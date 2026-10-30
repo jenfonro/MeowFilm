@@ -69,6 +69,24 @@ private actor MusicReferenceHomeService: MusicPublicBrowsing {
         XCTAssertEqual(reads, 1)
     }
 
+    func testChannelRestorationSeparatesEqualProviderCodesAndPageCodes() throws {
+        let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let original = MusicPublicBrowseChannel(id: "shared", title: "当前来源", kind: .cube,
+            pageCode: "shared_page", platform: .netease)
+        let foreign = MusicPublicBrowseChannel(id: "shared", title: "其他来源", kind: .cube,
+            pageCode: "shared_page", platform: .qq)
+        let selection = MusicChannelSelection(defaults: defaults)
+        selection.selectChannel(original)
+        selection.restoreChannel(from: [foreign])
+        XCTAssertEqual(selection.channel, original)
+        let restored = MusicChannelSelection(defaults: defaults)
+        restored.restoreChannel(from: [foreign]); XCTAssertNil(restored.channel)
+        restored.restoreChannel(from: [foreign, original]); XCTAssertEqual(restored.channel, original)
+        XCTAssertNotEqual(original.identity, foreign.identity)
+    }
+
     func testExplicitRefreshReplacesCancelledUnfinishedChannelReadBeforeItUnwinds() async {
         let service = MusicReferenceHomeService(), gate = MusicChannelReadGate(), access = UUID()
         await service.holdFirstChannelRead(gate)

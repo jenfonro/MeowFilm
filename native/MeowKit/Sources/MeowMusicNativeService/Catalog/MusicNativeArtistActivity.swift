@@ -41,6 +41,7 @@ extension MusicNativePublicBrowseParser {
             .init(id: "artist-activity:works", title: title, items: items, layout: .artistUpdates,
                   avatars: avatars, channel: channel)
         ])
+        result.consumed = works.count
         let before = works.last?["publishTime"].id ?? ""
         if body["hasMore"] == .bool(true), before.range(of: "^[1-9][0-9]{0,17}$", options: .regularExpression) != nil {
             result.next = .obj([("before", .string(before))])

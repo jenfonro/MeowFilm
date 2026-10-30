@@ -56,6 +56,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         case .playlists(let platform, _): return platform.title + " · 歌单搜索"
         case .accountRecommendation(let platform, _, _): return platform.title + " · 推荐读取"
         case .discovery(.daily(let platform)): return platform.title + " · 推荐读取"
+        case .discovery(.channel(let channel, _)): return channel.platform.title + " · 音乐内容读取"
         default: return "网易云 · 音乐内容读取"
         }
     }
@@ -91,6 +92,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         case .playlists(let platform, _): return platform
         case .accountRecommendation(let platform, _, _): return .init(accountPlatform: platform)
         case .discovery(.daily(let platform)): return .init(accountPlatform: platform)
+        case .discovery(.channel(let channel, _)): return channel.platform
         default: return .netease
         }
     }
@@ -162,7 +164,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     /// while an inactive home tab retains its display, but never polls.
     public func observeHomeChanges() async {
         switch request {
-        case .discovery(.home), .discovery(.featured), .discovery(.channel): break
+        case .discovery(.home), .discovery(.featured), .discovery(.channels), .discovery(.channel): break
         default: return
         }
         guard let home = service as? any MusicHomeBrowsing else { return }
@@ -172,7 +174,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             guard !Task.isCancelled, generation == access else { return }
             let scoped: Bool
             switch request {
-            case .discovery(.home), .discovery(.featured): scoped = true
+            case .discovery(.home), .discovery(.featured), .discovery(.channels): scoped = true
             case .discovery(.channel(let channel, _)):
                 scoped = [.featured, .artistActivity, .vip].contains(channel.kind)
             default: scoped = false
@@ -630,7 +632,8 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                              consumed: result.consumed)
             case .discovery(let destination):
                 if destination == .home, let home = service as? any MusicHomeBrowsing {
-                    return .init(page: try await home.homePage(cursor: cursor, refresh: refresh))
+                    let page = try await home.homePage(cursor: cursor, refresh: refresh)
+                    return .init(page: page, consumed: page.consumed)
                 }
                 if case .daily(let platform) = destination, let queuePage,
                    let provider = service as? any MusicRemoteQueueServing {
@@ -650,7 +653,8 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                         if savedSource == nil { releaseSource(source) }; throw error
                     }
                 }
-                return .init(page: try await service.publicDiscovery(destination, cursor: cursor))
+                let page = try await service.publicDiscovery(destination, cursor: cursor)
+                return .init(page: page, consumed: page.consumed)
             }
             }
         }
@@ -675,6 +679,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             }
             let count = result.page.sections.reduce(0) { $0 + $1.items.count }
             guard count <= (request == .discovery(.home) ? 600 : 300), result.page.filters.count <= 300,
+                  result.consumed == nil || (0...20_000).contains(result.consumed!),
                   result.page.sections.reduce(0, { count, section in
                       count + (section.tabs.isEmpty ? section.items.count : section.tabs.reduce(0) { $0 + $1.items.count })
                   }) <= 600,
@@ -768,7 +773,8 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             filters = result.page.filters; selectedFilter = result.page.selectedFilter
             collection = result.collection; total = result.total; snapshot = result.snapshot; remoteSource = result.source; loaded = true
             contentIsCurrent = true
-            requiresExplicitNext = count == 0 && result.page.cursor != nil
+            if case .discovery = request { requiresExplicitNext = false }
+            else { requiresExplicitNext = count == 0 && result.page.cursor != nil }
             if result.consumed != nil, merged.reduce(0, { $0 + $1.items.count }) > 1970 {
                 usesPageNavigation = true
             }

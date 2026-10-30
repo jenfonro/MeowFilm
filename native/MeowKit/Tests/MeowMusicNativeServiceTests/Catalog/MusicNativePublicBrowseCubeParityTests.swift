@@ -120,8 +120,8 @@ final class MusicNativePublicBrowseCubeParityTests: XCTestCase {
         let item = MusicNativePublicBrowseItem(id: "fm", title: "FM", content: .action(.fm(mode: .default, submode: "", entry: nil)),
                                               coverLabel: "FM")
         let page = MusicNativePublicBrowseDiscovery(sections: [.init(id: "s", title: "", items: [item])])
-        let data = try MusicNativeHomeSnapshot.encode(page, scope: "synthetic")
-        let restored = try XCTUnwrap(MusicNativeHomeSnapshot.decode(data, scope: "synthetic"))
+        let data = try MusicNativeHomeSnapshot.encode(page, source: .netease, scope: "synthetic")
+        let restored = try XCTUnwrap(MusicNativeHomeSnapshot.decode(data, source: .netease, scope: "synthetic"))
         XCTAssertEqual(restored.sections[0].items[0].coverLabel, "FM")
         XCTAssertTrue(restored.sections[0].items[0].previewSongs.isEmpty)
         XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("authorization"))

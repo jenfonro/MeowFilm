@@ -32,7 +32,7 @@ extension NativeMusicService: MusicDisplayedQueuePlaying {
         var resolved: [Int: MJ] = [:], missing: [(Int, String)] = [], bytes = 0
         var cached: [MJ] = []
         if historyDate == nil, let binding, let cache = homeCache,
-           cache.scope == binding.scope, cache.revision == binding.revision {
+           cache.source == .netease, cache.scope == binding.scope, cache.revision == binding.revision {
             for section in cache.page.sections {
                 for item in section.items {
                     if case .song(let raw) = item.content { cached.append(try MusicModel.normalize(raw)) }

@@ -9,6 +9,7 @@ public final class MusicBrowseViewController: MusicPageViewController,
 {
     private let model: MusicViewModel
     private let page: MusicPublicBrowseViewModel?
+    private var showsSectionPlayback: Bool { page?.request != .discovery(.home) }
     private weak var router: (any MusicUIRouting)?
     private let embedded: Bool
     private var sections: [MusicPublicBrowseSection] = []
@@ -200,7 +201,7 @@ public final class MusicBrowseViewController: MusicPageViewController,
     private func configure(_ header: MusicBrowseHeader, section: MusicPublicBrowseSection, first: Bool) {
         header.configure(section: section,
                          collection: first && !embedded ? collectionInfo : nil,
-                         theme: theme, onPlay: { [weak self] in
+                         theme: theme, showsSectionPlayback: showsSectionPlayback, onPlay: { [weak self] in
             guard let self, let current = self.sections.first(where: { $0.id == section.id }),
                   let item = current.items.first else { return }
             self.play(item, section: current)
@@ -242,9 +243,12 @@ public final class MusicBrowseViewController: MusicPageViewController,
         if case .action(let action) = item.content, action.isPersonalFM {
             loadFMPreview(item, action: action)
         }
-        guard let page, indexPath.section == sections.count - 1,
-              indexPath.item >= row.section.items.count - 3,
-              isPageVisible, !automaticPaginationHeld, filter.isEmpty, page.error == nil,
+        guard indexPath.section == sections.count - 1, indexPath.item >= row.section.items.count - 3 else { return }
+        loadAutomaticNextPage()
+    }
+
+    private func loadAutomaticNextPage() {
+        guard let page, isPageVisible, !automaticPaginationHeld, filter.isEmpty, page.error == nil, !page.isLoading,
               !page.requiresExplicitNext, !page.usesPageNavigation, page.nextCursor != nil else { return }
         runPageTask { await page.appendNext() }
     }
@@ -401,8 +405,8 @@ public final class MusicBrowseViewController: MusicPageViewController,
         if previousCollection != collectionInfo || previousSections.count != sections.count ||
             zip(previousSections, sections).contains(where: { pair in
                 pair.0.id != pair.1.id || pair.0.layout != pair.1.layout ||
-                    MusicBrowseHeader.height(for: pair.0, collection: nil) !=
-                    MusicBrowseHeader.height(for: pair.1, collection: nil)
+                    MusicBrowseHeader.height(for: pair.0, collection: nil, showsSectionPlayback: showsSectionPlayback) !=
+                    MusicBrowseHeader.height(for: pair.1, collection: nil, showsSectionPlayback: showsSectionPlayback)
             }) {
             collection.collectionViewLayout.invalidateLayout()
         }
@@ -428,7 +432,8 @@ public final class MusicBrowseViewController: MusicPageViewController,
         guard isViewLoaded, tagsHeight != nil else { return }
         configureTags()
         if sections.isEmpty || sections.allSatisfy({ $0.items.isEmpty }) {
-            setStatus(page?.isLoading == true ? "加载中" : page?.loaded == true ? "暂无内容" : nil)
+            setStatus(page?.isLoading == true ? "加载中" : page?.loaded == true && page?.nextCursor == nil ? "暂无内容" : nil)
+            loadAutomaticNextPage()
         } else {
             collection.backgroundView = nil
         }
@@ -874,7 +879,8 @@ public final class MusicBrowseViewController: MusicPageViewController,
             }
             let result = NSCollectionLayoutSection(group: group)
             let headerHeight = MusicBrowseHeader.height(
-                for: section, collection: index == 0 && !self.embedded ? self.collectionInfo : nil)
+                for: section, collection: index == 0 && !self.embedded ? self.collectionInfo : nil,
+                showsSectionPlayback: self.showsSectionPlayback)
             result.contentInsets = .init(top: index == 0 && headerHeight == 0 ? PageLayoutMetrics.contentGap : 4,
                                          leading: 16, bottom: 20, trailing: 16)
             result.interGroupSpacing = 9

@@ -125,13 +125,19 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicBrowseQueueLoading
            channel.kind == .artistActivity || channel.kind == .featured || channel.kind == .vip {
             return try await scopedHomePage(destination, cursor: cursor, refresh: false)
         }
+        let source: MusicPublicBrowsePlatform, sourceRevision: UUID?
         switch destination {
-        case .daily(let platform): try requirePlatform(platform.rawValue)
-        // These catalog routes (including channels/cube) currently belong to
-        // NetEase, regardless of the selected foreground search platform.
-        case .home, .featured, .channels, .channel: try requirePlatform(MusicPublicBrowsePlatform.netease.rawValue)
+        case .daily(let platform):
+            source = .init(accountPlatform: platform); sourceRevision = nil
+            try requirePlatform(source.rawValue)
+        case .channel(let channel, _):
+            source = channel.platform; sourceRevision = nil
+            try requireHomeSource(source)
+        case .home, .featured, .channels:
+            source = try currentHomeSource(); sourceRevision = homeSourceRevision
         }
-        let key = MusicNativePublicBrowseDiscovery.key(destination), own = epoch
+        let key = source.rawValue + ":" + MusicNativePublicBrowseDiscovery.key(destination) +
+            (sourceRevision.map { ":" + $0.uuidString } ?? ""), own = epoch
         let position = try MusicNativePublicBrowseCursor.read(cursor, key: key, epoch: own, now: now())
         if case .daily(let platform) = destination {
             guard let accounts else { throw MusicServiceError.authRequired }
@@ -154,9 +160,9 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicBrowseQueueLoading
         }
         let port = publicPlatforms
         let result = try await work(label: "publicBrowse") {
-            try await port.browseDiscovery(destination, remote: position.remote, offset: position.offset)
+            try await port.browseDiscovery(destination, source: source, remote: position.remote, offset: position.offset)
         }
-        try check(own)
+        try checkHomeSource(source, revision: sourceRevision, epoch: own)
         try musicRequire(result.sections.reduce(0) { $0 + $1.items.count } <= 300, .limit)
         let sectionPrefix: String
         if case .channel(let channel, _) = destination, channel.kind == .cube {
@@ -169,7 +175,8 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicBrowseQueueLoading
             try musicRequire(remote != position.remote && position.offset < 199 && !sections.isEmpty, .limit)
             return try position.encode(key: key, epoch: own, offset: position.offset + 1, remote: remote)
         }
-        return .init(sections: sections, cursor: next, filters: result.filters, selectedFilter: result.selected, notice: result.notice)
+        return .init(sections: sections, cursor: next, filters: result.filters, selectedFilter: result.selected,
+                     notice: result.notice, consumed: result.consumed)
     }
 
     func publicSections(_ result: MusicNativePublicBrowseDiscovery, prefix: String,

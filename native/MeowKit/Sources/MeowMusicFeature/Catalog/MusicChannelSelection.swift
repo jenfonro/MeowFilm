@@ -13,18 +13,20 @@ import Combine
     /// not pushed detail pages and not another product navigation stack.
     public func selectChannel(_ value: MusicPublicBrowseChannel) {
         channel = value
-        defaults.set(value.id, forKey: lastChannelKey)
+        defaults.set(value.identity, forKey: lastChannelKey)
     }
     public func restoreChannel(from catalogue: [MusicPublicBrowseChannel]) {
         if let channel {
-            if let current = catalogue.first(where: { $0.id == channel.id ||
-                !channel.pageCode.isEmpty && $0.pageCode == channel.pageCode }) {
+            if let current = catalogue.first(where: { $0.platform == channel.platform &&
+                ($0.id == channel.id || !channel.pageCode.isEmpty && $0.pageCode == channel.pageCode) }) {
                 self.channel = current
             }
         } else if let key = defaults.string(forKey: lastChannelKey),
-                  let current = catalogue.first(where: { $0.id == key || $0.pageCode == key }) {
+                  let current = catalogue.first(where: { $0.identity == key ||
+                      !key.contains(":") && $0.platform == .netease && ($0.id == key || $0.pageCode == key) }) {
             // A late catalogue read must not switch the user's selected tab.
             channel = current
+            defaults.set(current.identity, forKey: lastChannelKey)
         }
     }
 }
