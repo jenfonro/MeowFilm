@@ -35,11 +35,13 @@ final class MusicFMConsumerTests: XCTestCase {
     }
     @MainActor private func begin(_ model: MusicViewModel, service: NativeMusicService,
                                   source: MusicRemoteQueueSource) async throws {
+        var requests: [MusicPlaybackDestination] = []
+        model.onRequestPresentation = { requests.append($0) }
         let start = try await MusicAccountQueueFixture.start(service, source)
         await model.playRemoteQueue(source, start: start)
         XCTAssertFalse(model.isChangingQueue); XCTAssertFalse(model.isPreparingRemoteQueue)
         XCTAssertNotNil(model.activeResourceID)
-        XCTAssertFalse(model.showingSources)
+        XCTAssertTrue(requests.isEmpty)
     }
 
     @MainActor func testNaturalEndAndManualNextUseLiveFMWhilePageDepartureTransfersOwnership() async throws {
@@ -84,10 +86,12 @@ final class MusicFMConsumerTests: XCTestCase {
 
     @MainActor func testPageDepartureDuringFullLoadPreservesOldPlayerAndQueue() async throws {
         let (service, player, model) = try await setup()
+        var requests: [MusicPlaybackDestination] = []
+        model.onRequestPresentation = { requests.append($0) }
         _ = try await MusicAccountQueueFixture.seed(service); await model.load()
         await model.prepareCurrent()
         XCTAssertNotNil(model.activeResourceID)
-        XCTAssertFalse(model.showingSources)
+        XCTAssertTrue(requests.isEmpty)
         let oldQueue = model.queue, oldCurrent = model.state.currentId
         let loader = MusicAccountQueuePages(roots: [[NativeMusicFixture.track("First")]],
             pages: ["p1": .init(items: [NativeMusicFixture.track("Second")])], rootCursor: "p1")
@@ -121,10 +125,12 @@ final class MusicFMConsumerTests: XCTestCase {
     @MainActor func testPageDepartureAfterQueueCommitBeforeLXReplyCannotSoundLate() async throws {
         let scripts = NativeMusicScriptFixture()
         let (service, player, model) = try await setup(scripts: scripts)
+        var requests: [MusicPlaybackDestination] = []
+        model.onRequestPresentation = { requests.append($0) }
         _ = try await MusicAccountQueueFixture.seed(service); await model.load()
         await model.prepareCurrent()
         XCTAssertNotNil(model.activeResourceID)
-        XCTAssertFalse(model.showingSources)
+        XCTAssertTrue(requests.isEmpty)
         let source = MusicAccountQueueFixture.source(.init(roots: [[NativeMusicFixture.track("New")]]))
         let start = try await MusicAccountQueueFixture.start(service, source)
         let gate = NativeMusicGate(); await scripts.configure(gate: gate)

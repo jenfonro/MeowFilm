@@ -10,7 +10,7 @@ enum MusicNativePublicBrowseRoutes {
         "/eapi/v6/playlist/detail", "/eapi/link/page/rcmd/resource/show",
         "/eapi/link/position/show/resource", "/eapi/tag/tab/tags",
         "/eapi/tag/tab/alg/recommends", "/eapi/tag/tab/playlists",
-        "/eapi/toplist", "/eapi/search/defaultkeyword/get"
+        "/eapi/toplist"
     ]
     static let weapi: Set<String> = [
         "/weapi/v3/song/detail", "/weapi/cube/render/page/protocol",

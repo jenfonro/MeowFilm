@@ -6,21 +6,26 @@ import MeowUI
 /// detail token, never a fabricated per-row playback reference.
 @MainActor
 final class MusicHistoryCardViewController: MusicPageViewController,
-    UITableViewDataSource, UITableViewDelegate
+    UITableViewDelegate
 {
     var isSelectedPage: (() -> Bool)?
     private let model: MusicViewModel
     private var summary: MusicPlayedPlaylist
     private let table = UITableView(frame: .zero, style: .plain)
-    private let heading = UILabel(), source = UILabel(), status = UILabel()
+    private let heading = UILabel(), source = UILabel()
     private let resume = UIButton(type: .system), remove = UIButton(type: .system)
     private let retry = UIButton(type: .system)
     private var detail: MusicHistoryDetail?
     private var displayed: MusicReferenceHistoryDisplayIdentity?
     private var command = UUID(), readRequest = UUID()
     private var reading = false
-    private var needsRead = false
+    private var needsRead = true
     private var error: String?
+    private var dataSource: UITableViewDiffableDataSource<Int, String>!
+    private var rows: [String: MusicHistoryDisplayEntry] = [:]
+    private var readTask: Task<Void, Never>?
+    private var shownReadError: String?
+    private var missing = false
 
     init(model: MusicViewModel, summary: MusicPlayedPlaylist, appearance: MusicAppearancePreferencesStore) {
         self.model = model; self.summary = summary
@@ -32,24 +37,27 @@ final class MusicHistoryCardViewController: MusicPageViewController,
         view.layer.cornerRadius = 20
         table.backgroundColor = .clear
         table.separatorStyle = .none
-        table.dataSource = self; table.delegate = self
+        table.delegate = self
         table.register(UITableViewCell.self, forCellReuseIdentifier: "History")
+        dataSource = UITableViewDiffableDataSource(tableView: table) { [weak self] view, path, id in
+            guard let self, let row = self.rows[id] else { return nil }
+            let cell = view.dequeueReusableCell(withIdentifier: "History", for: path)
+            self.configure(cell, row: row)
+            return cell
+        }
         heading.font = .systemFont(ofSize: 15, weight: .semibold)
         source.font = .systemFont(ofSize: 11)
-        status.font = .systemFont(ofSize: 13); status.numberOfLines = 0
         remove.setImage(PageIcon.image(.remove), for: .normal)
         remove.accessibilityLabel = "删除这份已播歌单"
         resume.addAction(UIAction { [weak self] _ in self?.continuePlaying() }, for: .touchUpInside)
         remove.addAction(UIAction { [weak self] _ in self?.confirmRemoval() }, for: .touchUpInside)
         retry.setTitle("重试", for: .normal)
-        retry.addAction(UIAction { [weak self] _ in self?.read() }, for: .touchUpInside)
-        for item in [table, source, heading, status, retry, resume, remove] { view.addSubview(item) }
-        observe(model) { [weak self] in
-            guard let self else { return }
-            self.update(summary: self.summary)
-            self.table.reloadData()
-        }
-        render()
+        retry.addAction(UIAction { [weak self] _ in self?.read(force: true) }, for: .touchUpInside)
+        for item in [table, source, heading, retry, resume, remove] { view.addSubview(item) }
+        observe(model.playbackChanges) { [weak self] in self?.updateVisiblePlayback() }
+        observe(model.historyChanges) { [weak self] in self?.reconcileSummary() }
+        observe(model.accessChanges) { [weak self] in self?.reconcileSummary() }
+        renderRows(); renderState()
     }
 
     override func viewDidLayoutSubviews() {
@@ -60,43 +68,54 @@ final class MusicHistoryCardViewController: MusicPageViewController,
         remove.frame = CGRect(x: width - 60, y: 16, width: 44, height: 44)
         resume.frame = CGRect(x: 16, y: 64, width: width - 32, height: 44)
         let height: CGFloat = error == nil ? 0 : 60
-        status.frame = CGRect(x: 16, y: 108, width: width - 110, height: height)
         retry.frame = CGRect(x: width - 92, y: 116, width: 76, height: 44)
         table.frame = CGRect(x: 0, y: 112 + height, width: width,
                              height: max(0, view.bounds.height - 112 - height))
     }
 
-    override func pageDidBecomeActive() { update(summary: summary); read() }
+    override func pageDidBecomeActive() { reconcileSummary() }
+    override func pageDidBecomeVisible() { renderState() }
+    override func pageDidFinishAppearing() {
+        if error != nil { renderState() }
+    }
 
     override func pageDidBecomeInactive() {
-        command = UUID()
-        readRequest = UUID()
-        needsRead = detail == nil || displayed != identity
+        invalidateDetail()
+        needsRead = false
     }
 
     override func applyTheme() {
         super.applyTheme()
-        if isViewLoaded { render() }
+        guard isViewLoaded else { return }
+        updateVisiblePlayback(force: true)
+        renderState()
     }
 
     func update(summary: MusicPlayedPlaylist) {
+        let previous = identity
         self.summary = summary
-        if displayed != nil, displayed != identity {
-            command = UUID(); readRequest = UUID(); detail = nil; displayed = nil
+        if previous != identity || displayed != nil && displayed != identity {
+            invalidateDetail()
             needsRead = true
         }
         if isPageActive, needsRead { read() }
-        if isViewLoaded { render() }
+        if isViewLoaded { renderState() }
     }
 
-    func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        detail?.entries.count ?? 0
+    private func reconcileSummary() {
+        guard model.isAvailable, !model.isClosed,
+              let summary = model.playedPlaylists.first(where: { $0.id == self.summary.id }) else {
+            invalidateDetail()
+            missing = true; needsRead = false
+            renderRows(); renderState()
+            return
+        }
+        if missing { missing = false; needsRead = true }
+        update(summary: summary)
     }
 
-    func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let row = detail!.entries[indexPath.row]
+    private func configure(_ cell: UITableViewCell, row: MusicHistoryDisplayEntry) {
         let active = row.displayIdentity?.matches(model.current?.displayIdentity) == true
-        let cell = tableView.dequeueReusableCell(withIdentifier: "History", for: indexPath)
         var content = cell.defaultContentConfiguration()
         content.text = "\(row.index + 1). \(row.title)"
         content.secondaryText = row.artist
@@ -106,7 +125,6 @@ final class MusicHistoryCardViewController: MusicPageViewController,
         cell.backgroundColor = active ? UIColor(theme.accent).withAlphaComponent(0.06) : .clear
         cell.selectionStyle = .none
         cell.accessibilityTraits = active ? [.staticText, .selected] : .staticText
-        return cell
     }
 
     private var identity: MusicReferenceHistoryDisplayIdentity {
@@ -115,41 +133,43 @@ final class MusicHistoryCardViewController: MusicPageViewController,
 
     private var permitted: Bool {
         isPageActive && isSelectedPage?() == true && model.isAvailable && !model.isClosed &&
-            displayed == identity && detail != nil && !reading
+            displayed == identity && detail != nil && !reading && !missing
     }
 
-    private func read() {
-        guard isPageActive, model.isAvailable, !model.isClosed else { return }
-        guard !reading else { needsRead = true; return }
-        guard detail == nil || displayed != identity || error != nil else { return }
+    private func read(force: Bool = false) {
+        guard isPageActive, model.isAvailable, !model.isClosed, !missing, !reading else { return }
+        guard force || error == nil && (detail == nil || displayed != identity) else { return }
         let own = UUID(), expected = identity
-        runPageTask { [weak self] in
-            guard let self else { return }
-            guard !Task.isCancelled, self.isPageActive, !self.reading,
-                  self.model.isAvailable, !self.model.isClosed,
-                  self.identity == expected else { return }
-            self.reading = true
-            self.needsRead = false
-            self.readRequest = own
-            self.command = UUID()
-            self.error = nil
-            self.render()
+        reading = true; needsRead = false; readRequest = own; command = UUID()
+        error = nil; shownReadError = nil
+        renderState()
+        let model = model
+        readTask = Task { [weak self, model] in
             defer {
-                self.reading = false
-                self.render()
-                if self.needsRead, self.isPageActive { self.needsRead = false; self.read() }
+                if let self, self.readRequest == own {
+                    self.reading = false; self.readTask = nil
+                    self.renderState()
+                }
             }
             do {
-                let value = try await self.model.historyDetail(id: expected.id)
-                guard !Task.isCancelled, self.readRequest == own, self.isPageActive,
+                let value = try await model.historyDetail(id: expected.id)
+                guard !Task.isCancelled, let self, self.readRequest == own, self.isPageActive, !self.missing,
                       self.identity == expected else { return }
                 self.detail = value; self.displayed = expected
+                self.renderRows()
             } catch {
-                if !Task.isCancelled, self.readRequest == own, self.isPageActive, self.identity == expected {
+                if !Task.isCancelled, let self, self.readRequest == own, self.isPageActive, self.identity == expected {
                     self.error = MusicServiceError.sanitized(error).localizedDescription
                 }
             }
         }
+    }
+
+    private func invalidateDetail() {
+        command = UUID(); readRequest = UUID()
+        readTask?.cancel(); readTask = nil; reading = false
+        detail = nil; displayed = nil; error = nil; shownReadError = nil
+        if isViewLoaded { renderRows() }
     }
 
     private func intent(_ detail: MusicHistoryDetail) -> MusicReferenceHistoryIntent {
@@ -184,23 +204,59 @@ final class MusicHistoryCardViewController: MusicPageViewController,
         present(alert, animated: true)
     }
 
-    private func render() {
+    private func renderRows() {
+        guard dataSource != nil else { return }
+        let previous = rows
+        let entries = detail?.entries ?? []
+        rows = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })
+        var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
+        snapshot.appendSections([0]); snapshot.appendItems(entries.map(\.id))
+        let changed = snapshot.itemIdentifiers.filter { previous[$0] != nil && previous[$0] != rows[$0] }
+        snapshot.reconfigureItems(changed)
+        if dataSource.snapshot().itemIdentifiers != snapshot.itemIdentifiers || !changed.isEmpty {
+            dataSource.apply(snapshot, animatingDifferences: false)
+        }
+    }
+
+    private func updateVisiblePlayback(force: Bool = false) {
+        guard dataSource != nil else { return }
+        for path in table.indexPathsForVisibleRows ?? [] {
+            guard let id = dataSource.itemIdentifier(for: path), let row = rows[id],
+                  let cell = table.cellForRow(at: path) else { continue }
+            let active = row.displayIdentity?.matches(model.current?.displayIdentity) == true
+            if force || cell.accessibilityTraits.contains(.selected) != active { configure(cell, row: row) }
+        }
+    }
+
+    private func renderState() {
         guard isViewLoaded else { return }
-        heading.text = "\(detail?.summary.title ?? summary.title) · \(detail?.entries.count ?? summary.count) 首"
-        source.text = detail?.sourceLabel ?? "已播歌单"
+        heading.text = missing ? nil : "\(detail?.summary.title ?? summary.title) · \(detail?.entries.count ?? summary.count) 首"
+        source.text = missing ? nil : detail?.sourceLabel ?? "已播歌单"
         let selected = detail?.selectedIndex.flatMap { index in detail?.entries.first { $0.index == index }?.title }
         resume.setTitle("继续播放：" + (selected ?? "播放列表"), for: .normal)
         heading.textColor = UIColor(theme.ink)
-        source.textColor = UIColor(theme.muted); status.textColor = UIColor(theme.muted)
+        source.textColor = UIColor(theme.muted)
         for button in [resume, remove, retry] { button.tintColor = UIColor(theme.ink) }
-        status.text = error
         retry.isHidden = error == nil
-        table.reloadData()
+        resume.isEnabled = detail != nil && !reading && !missing && model.isAvailable && !model.isClosed
+        remove.isEnabled = resume.isEnabled
         let label = UILabel()
         label.text = reading && detail == nil ? "正在读取已播歌单" : nil
         label.textAlignment = .center; label.textColor = UIColor(theme.muted)
         table.backgroundView = label.text == nil ? nil : label
         view.setNeedsLayout()
+        guard canPresentPageAlert, let error, shownReadError != error else { return }
+        let expected = identity
+        let alert = UIAlertController(title: "错误", message: error, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.addAction(UIAlertAction(title: "重试", style: .default) { [weak self] _ in
+            guard let self, self.identity == expected else { return }
+            self.read(force: true)
+        })
+        shownReadError = error
+        present(alert, animated: true)
     }
+
+    isolated deinit { readTask?.cancel() }
 }
 #endif

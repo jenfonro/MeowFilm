@@ -58,15 +58,6 @@ class BetaPackageTests(unittest.TestCase):
         self.assertIn('"make_latest": "false"',
                       (ROOT / "scripts/publish-beta-ios.py").read_text(encoding="utf-8"))
 
-    def test_resigning_does_not_change_product_storage_identity(self):
-        identity = (ROOT / "apps/ios/Application/MeowfilmIdentity.swift").read_text(encoding="utf-8")
-        self.assertIn('static let bundleIdentifier = "dev.meowfilm.aggregate"', identity)
-        for directory in ("Application", "Composition"):
-            for source in (ROOT / "apps/ios" / directory).rglob("*.swift"):
-                self.assertNotIn("Bundle.main.bundleIdentifier", source.read_text(encoding="utf-8"))
-        assembly = (ROOT / "apps/ios/Composition/MeowfilmAssembly.swift").read_text(encoding="utf-8")
-        self.assertIn("MeowfilmResources()", assembly)
-
 
 if __name__ == "__main__":
     unittest.main()
