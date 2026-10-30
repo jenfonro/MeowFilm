@@ -23,6 +23,9 @@ public sealed class SeekBar : Slider
     public static readonly DependencyProperty PlayedBrushProperty = DependencyProperty.Register(
         nameof(PlayedBrush), typeof(Brush), typeof(SeekBar),
         new FrameworkPropertyMetadata(Brushes.Gray, FrameworkPropertyMetadataOptions.AffectsRender));
+    public static readonly DependencyProperty RailBrushProperty = DependencyProperty.Register(
+        nameof(RailBrush), typeof(Brush), typeof(SeekBar),
+        new FrameworkPropertyMetadata(Frozen("#0D000000"), FrameworkPropertyMetadataOptions.AffectsRender));
     public static readonly DependencyProperty RailAtTopProperty = DependencyProperty.Register(
         nameof(RailAtTop), typeof(bool), typeof(SeekBar),
         new FrameworkPropertyMetadata(false, FrameworkPropertyMetadataOptions.AffectsRender));
@@ -40,6 +43,7 @@ public sealed class SeekBar : Slider
     private double pointerX;
     public double ChorusSeconds { get => (double)GetValue(ChorusSecondsProperty); set => SetValue(ChorusSecondsProperty, value); }
     public Brush PlayedBrush { get => (Brush)GetValue(PlayedBrushProperty); set => SetValue(PlayedBrushProperty, value); }
+    public Brush RailBrush { get => (Brush)GetValue(RailBrushProperty); set => SetValue(RailBrushProperty, value); }
     public bool RailAtTop { get => (bool)GetValue(RailAtTopProperty); set => SetValue(RailAtTopProperty, value); }
     internal bool IsScrubbing { get; private set; }
     public event EventHandler? ScrubStarted;
@@ -72,7 +76,7 @@ public sealed class SeekBar : Slider
         bool highContrast = DesktopTheme.GetIsHighContrast(this);
         Brush active = highContrast ? SystemColors.HighlightBrush : PlayedBrush;
         double expansion = Math.Clamp((double)GetValue(ExpansionProperty), 0, 1);
-        Brush rail = highContrast ? SystemColors.WindowTextBrush : NormalRail;
+        Brush rail = highContrast ? SystemColors.WindowTextBrush : RailBrush;
         double thickness = 2 + expansion * 3, y = RailAtTop ? 1 : height / 2;
         double end = Fraction(Value) * width;
         dc.PushOpacity(1);
@@ -92,7 +96,7 @@ public sealed class SeekBar : Slider
         }
     }
 
-    private static readonly Brush NormalActive = Frozen("#FC3B5A"), NormalRail = Frozen("#0D000000");
+    private static readonly Brush NormalActive = Frozen("#FC3B5A");
     private static Brush Frozen(string color) { var brush = (SolidColorBrush)new BrushConverter().ConvertFromString(color)!; brush.Freeze(); return brush; }
     private double Fraction(double value) => Maximum <= Minimum ? 0 : Math.Clamp((value - Minimum) / (Maximum - Minimum), 0, 1);
     internal double ValueAt(double x) => Minimum + Math.Clamp(x / Math.Max(1, ActualWidth), 0, 1) * (Maximum - Minimum);

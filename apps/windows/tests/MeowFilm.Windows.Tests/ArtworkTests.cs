@@ -161,6 +161,64 @@ public static class ArtworkTests
             }
             finally { foreach (var lease in leases) lease.Dispose(); }
         }));
+        yield return new("Native artwork presentation prepares outside the viewport and retains pixels until retirement", () => Sta(async () =>
+        {
+            var loader = new HeldLoader();
+            var host = new Canvas { Width = 100, Height = 100, ClipToBounds = true };
+            var view = new ArtworkImage { Width = 40, Height = 40, Address = "https://art.example.test/prepared" };
+            ArtworkScope.SetLoader(host, loader); Canvas.SetTop(view, 200); host.Children.Add(view);
+            using var surface = Mount(host); Layout(host); await Tick();
+            Equal(0, loader.Calls.Count);
+            var preparing = view.PrepareForPresentationAsync();
+            Equal(1, loader.Calls.Count); Check(!preparing.IsCompleted);
+            var lease = new FakeLease(); loader.Calls[0].Completion.SetResult(lease);
+            using var prepared = await preparing;
+            Check(ReferenceEquals(lease.Image, ((Image)view.Children[0]).Source));
+            Layout(host); await Tick(); Check(!lease.Disposed); Equal(1, loader.Calls.Count);
+            Canvas.SetTop(view, 0); Layout(host); await Tick();
+            Canvas.SetTop(view, 200); Layout(host); await Tick();
+            Check(!lease.Disposed); Equal(1, loader.Calls.Count);
+            view.RaiseEvent(new RoutedEventArgs(FrameworkElement.UnloadedEvent)); await Tick();
+            Check(lease.Disposed); Check(((Image)view.Children[0]).Source is null);
+        }));
+        yield return new("Native artwork preparation follows replacement without waiting for a cancelled old fetch", () => Sta(async () =>
+        {
+            var loader = new HeldLoader(); var host = new Grid { Width = 100, Height = 100, Visibility = Visibility.Hidden };
+            var view = new ArtworkImage { Width = 60, Height = 60, Address = "https://art.example.test/first" };
+            ArtworkScope.SetLoader(host, loader); host.Children.Add(view); using var surface = Mount(host); Layout(host);
+            var preparing = view.PrepareForPresentationAsync(); Equal(1, loader.Calls.Count);
+            view.Address = "https://art.example.test/second"; Equal(2, loader.Calls.Count);
+            Check(loader.Calls[0].Token.IsCancellationRequested);
+            var next = new FakeLease(); loader.Calls[1].Completion.SetResult(next);
+            var prepared = await preparing.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(!loader.Calls[0].Completion.Task.IsCompleted);
+            Check(ReferenceEquals(next.Image, ((Image)view.Children[0]).Source));
+            var old = new FakeLease(); loader.Calls[0].Completion.SetResult(old); await Tick(); Check(old.Disposed);
+            prepared.Dispose(); Check(next.Disposed); Check(((Image)view.Children[0]).Source is null);
+            using var cancellation = new CancellationTokenSource();
+            var cancelled = view.PrepareForPresentationAsync(cancellation.Token); Equal(3, loader.Calls.Count);
+            cancellation.Cancel();
+            try { using var unexpected = await cancelled.WaitAsync(TimeSpan.FromSeconds(5)); throw new InvalidOperationException("Expected cancelled preparation"); }
+            catch (OperationCanceledException) { }
+            Check(loader.Calls[2].Token.IsCancellationRequested);
+            var late = new FakeLease(); loader.Calls[2].Completion.SetResult(late); await Tick();
+            Check(late.Disposed); Check(((Image)view.Children[0]).Source is null);
+        }));
+        yield return new("Native artwork prepared failure is render ready and retries only on explicit action", () => Sta(async () =>
+        {
+            var loader = new HeldLoader(); var host = new Grid { Width = 100, Height = 100, Visibility = Visibility.Hidden };
+            var view = new ArtworkImage { Width = 60, Height = 60, Address = "https://art.example.test/failed" };
+            ArtworkScope.SetLoader(host, loader); host.Children.Add(view); using var surface = Mount(host); Layout(host);
+            var preparing = view.PrepareForPresentationAsync(); Equal(1, loader.Calls.Count);
+            loader.Calls[0].Completion.SetException(new ArtworkException("ARTWORK_NETWORK"));
+            using var prepared = await preparing;
+            var retry = (Button)view.Children[1]; Equal(Visibility.Visible, retry.Visibility);
+            Layout(host); await Tick(); Equal(1, loader.Calls.Count);
+            retry.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Equal(2, loader.Calls.Count);
+            var lease = new FakeLease(); loader.Calls[1].Completion.SetResult(lease); await Tick();
+            Check(ReferenceEquals(lease.Image, ((Image)view.Children[0]).Source));
+            prepared.Dispose(); Check(lease.Disposed);
+        }));
         yield return new("Native artwork view has no implicit loader and rejects late old-image completion", () => Sta(async () =>
         {
             var host = new Grid { Width = 200, Height = 200 }; var view = new ArtworkImage { Width = 100, Height = 100, Address = "https://art.example.test/first" };
