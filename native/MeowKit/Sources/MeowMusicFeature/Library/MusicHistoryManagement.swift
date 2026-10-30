@@ -45,6 +45,10 @@ public struct MusicHistoryDetail: Sendable, Identifiable {
     }
 }
 
+public enum MusicHistoryCategory: Equatable, Sendable {
+    case songs, playlists
+}
+
 /// History operations shared by the queue UI/model and native music service.
 ///
 /// Reference: iWebPlus b900c259 queue-sheet.js, playback-history.js and
@@ -59,6 +63,11 @@ public protocol MusicHistoryManaging: Sendable {
     /// queue, saved collections, downloads or files. The full snapshot must
     /// still match the detail, in the same service/access generation.
     func removeHistory(detail: MusicHistoryDetail) async throws
+
+    /// Clears only the requested local history in one transaction. Does not
+    /// stop playback, archive the queue, or delete the other history or library.
+    /// Cancellation after a committed write retains commitUnconfirmed semantics.
+    func clearHistory(_ category: MusicHistoryCategory) async throws
 
     /// Atomically archives the replaced queue and restores the bound snapshot
     /// in the existing transaction/schema. Nil resumes its selected occurrence;

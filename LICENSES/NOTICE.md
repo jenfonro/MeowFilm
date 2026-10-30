@@ -52,7 +52,9 @@ Adapted portions:
   `tests/{netease,qq-feedback,kugou-feedback}.test.cjs`.
 - Sync: `MusicSyncAdapter.cs`.
 - iOS: music interface and behavior in `native/MeowKit/Sources/MeowMusicFeature` and
-  `native/MeowKit/Sources/MeowUI`; ported files keep their SPDX and author notices.
+  `native/MeowKit/Sources/MeowUI`; queue appearance and drag admission follow
+  `static/queue-sheet.{js,css}` and `static/list-reorder.js`, with native UIKit
+  movement and presentation. Ported files keep their SPDX and author notices.
 
 ## MeowMusic — GPL-3.0-only
 

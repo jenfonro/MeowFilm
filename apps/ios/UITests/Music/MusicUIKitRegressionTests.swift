@@ -10,6 +10,73 @@ import MeowPlayback
 
 @MainActor
 final class MusicUIKitRegressionTests: XCTestCase {
+    func testFMArtworkOnlyUpdatesForEffectiveCoverWithoutReconfiguringCard() async throws {
+        let action = MusicHomeAction.fm(mode: .default, submode: "", entry: nil)
+        let appearance = MusicAppearancePreferencesStore()
+        let service = MusicUIKitRegressionService(browse: .init(sections: [
+            .init(id: "fm", title: "", items: [
+                .init(id: "fm", title: "私人 FM", content: .action(action)),
+            ], layout: .featureRail),
+        ]))
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let controller = MusicBrowseViewController(title: "推荐", model: model, browser: service,
+            request: .discovery(.home), appearance: appearance, router: MusicUIKitRegressionRouter(), embedded: true)
+        let window = mount(controller)
+        defer { release(controller, window: window) }
+        let collection = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? UICollectionView }.first)
+        let loaded = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated { collection.layoutIfNeeded(); return collection.visibleCells.count == 1 }
+        }, evaluatedWith: collection)
+        await fulfillment(of: [loaded], timeout: 2)
+        let cell = try XCTUnwrap(collection.visibleCells.first as? MusicBrowseCell)
+        let title = try XCTUnwrap(descendants(cell).compactMap { $0 as? UILabel }.first { $0.text == "私人 FM" })
+        let image = try XCTUnwrap(descendants(cell).compactMap { $0 as? MusicArtworkView }.first)
+        title.text = "保留已配置内容"
+        var events = 0, covers: [URL] = []
+        let subscription = model.fmArtworkChanges.sink { events += 1 }
+        image.onFailure = { covers.append($0) }
+        let source = MusicRemoteQueueSource(context: .init(kind: .fm, id: "fm", title: "FM", platform: "wy"),
+            loadPage: { _ in XCTFail("Artwork observation must not load a queue"); return .init(items: []) })
+        model.activateFM(source)
+        let first = try XCTUnwrap(URL(string: "synthetic-artwork://first"))
+        model.playbackState.queue = [.init(id: "fm-song", track: .init(ref: .init(kind: .queue, id: "fm-song"),
+            songId: "41", title: "当前歌曲", artwork: first), remoteSessionID: source.id)]
+        model.playbackState.state = .init(currentId: "fm-song", total: 1)
+        model.playbackState.activeHomeFM = action
+        let firstCover = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated { covers == [first] }
+        }, evaluatedWith: image)
+        await fulfillment(of: [firstCover], timeout: 2)
+        XCTAssertEqual(events, 1)
+        XCTAssertTrue(collection.visibleCells.first === cell); XCTAssertEqual(title.text, "保留已配置内容")
+        let unchanged = expectation(description: "unrelated state does not change the cover")
+        unchanged.isInverted = true
+        image.onFailure = { covers.append($0); unchanged.fulfill() }
+        model.playbackState.state = .init(settingsRevision: 1, currentId: "fm-song", total: 1, position: 12)
+        model.playbackState.phase = .playing
+        model.playbackState.canEnterSimilarMode = true
+        model.metadataState.lyricState = "loaded"
+        model.metadataState.artworkData = Data([1, 2, 3])
+        model.metadataState.artworkURL = first
+        model.metadataState.occurrenceID = "fm-song"
+        model.playbackState.queue = model.queue
+        await fulfillment(of: [unchanged], timeout: 0.1)
+        XCTAssertEqual(events, 1); XCTAssertEqual(covers, [first])
+        XCTAssertEqual(title.text, "保留已配置内容")
+        let second = try XCTUnwrap(URL(string: "synthetic-artwork://second"))
+        let nextCover = expectation(description: "new effective metadata cover")
+        image.onFailure = { covers.append($0); nextCover.fulfill() }
+        model.metadataState.artworkURL = second
+        await fulfillment(of: [nextCover], timeout: 2)
+        XCTAssertEqual(events, 2); XCTAssertEqual(covers, [first, second])
+        XCTAssertEqual(model.currentFMArtwork(action), second)
+        XCTAssertTrue(collection.visibleCells.first === cell); XCTAssertEqual(title.text, "保留已配置内容")
+        model.playbackState.phase = .failed
+        XCTAssertEqual(events, 3); XCTAssertNil(model.currentFMArtwork(action))
+        let counts = await service.counts(); XCTAssertEqual(counts.browse, 1)
+        subscription.cancel(); image.onFailure = nil; await model.close()
+    }
+
     func testImportHistoryFailureDuringPushIsShownAndReturningDoesNotReadAgain() async throws {
         let theme = PageLifecycleTestTheme(), root = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
         let navigation = PageNavigationController(themeProvider: theme)

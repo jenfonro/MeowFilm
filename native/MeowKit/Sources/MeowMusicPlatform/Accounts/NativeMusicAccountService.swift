@@ -595,7 +595,18 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicCredentialsIm
             return token
         }
         guard !restoring.contains(platform), login?.platform != platform else { throw MusicServiceError.busy }
-        // Revoke old business grants before any suspension. The account binding
+        if !force, inspected.contains(platform), tokens[platform] == nil {
+            let account = accountEpochs[platform], revision = revisions[platform, default: 0]
+            let snapshot = await accounts.snapshot(for: identity)
+            try check(own)
+            guard account == accountEpochs[platform], revision == revisions[platform, default: 0],
+                  !transitions.contains(platform), !localCacheRestoring.contains(platform),
+                  !restoring.contains(platform), login?.platform != platform else { throw MusicServiceError.staleResult }
+            // A locally confirmed guest has no session to restore or revoke.
+            // Business admission must not rotate its coordinator/display scope.
+            if snapshot.phase == .signedOut, tokens[platform] == nil { throw MusicServiceError.authRequired }
+        }
+        // Revoke old business grants before restore/validation can suspend. The account binding
         // itself stays stable; a successful update keeps the coordinator token.
         invalidateBusiness(platform)
         let revision = revisions[platform, default: 0], accountEpoch = accountEpochs[platform]
