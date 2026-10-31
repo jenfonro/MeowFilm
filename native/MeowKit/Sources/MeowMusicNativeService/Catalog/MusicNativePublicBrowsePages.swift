@@ -66,7 +66,8 @@ extension MusicNativePlatforms {
         let otherMembers = detailWitnesses.reduce(0) { $0 + ($1.key == key ? 0 : $1.value.members.count) }
         try musicRequire(otherMembers + witness.members.count <= 64_000, .limit)
         detailWitnesses[key] = witness
-        return .init(collection: page.collection, tracks: page.tracks, total: page.total,
+        return .init(collection: page.collection, tracks: page.tracks,
+                     sourcePositions: Array(offset..<(offset + page.tracks.count)), total: page.total,
                      more: page.more, snapshot: key, consumed: page.tracks.count)
     }
 

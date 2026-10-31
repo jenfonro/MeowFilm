@@ -392,15 +392,18 @@ public final class MusicQueueViewController: MusicPageViewController,
     }
 
     private func positionIndicator(_ position: CGFloat) {
-        let position = min(CGFloat(tabs.count - 1), max(0, position))
+        guard let interval = MusicPagingTabTransition.interval(position: position, count: tabs.count) else { return }
+        let position = CGFloat(interval.lower) + interval.progress
         UIView.performWithoutAnimation {
             for (index, tab) in tabs.enumerated() {
-                tab.applySelection(max(0, 1 - abs(position - CGFloat(index))))
+                tab.applySelection(MusicPagingTabTransition.selectionAmount(position: position, index: index))
             }
             guard let first = tabs.first, first.bounds.width > 0 else { return }
-            let lower = Int(position), upper = min(lower + 1, tabs.count - 1)
-            let progress = position - CGFloat(lower)
-            let x = tabs[lower].frame.minX + (tabs[upper].frame.minX - tabs[lower].frame.minX) * progress
+            let x = MusicPagingTabTransition.interpolate(
+                tabs[interval.lower].frame.minX,
+                tabs[interval.upper].frame.minX,
+                progress: interval.progress
+            )
             indicator.frame = CGRect(x: x, y: 6, width: first.bounds.width, height: 32)
         }
     }

@@ -87,23 +87,35 @@ actor MusicNativePlatforms {
     var epoch = UUID()
     var volatileClients: [MusicAccountPlatform: MusicNativeClientDevice] = [:]
     let playlistHeads: AsyncValueCache<String, MJ>
-    let songBatches: AsyncValueCache<String, [MusicNativeTrackData]>
+    let songBatches: AsyncValueCache<String, [String: MusicNativeTrackData]>
     let completeCollections: AsyncValueCache<String, MusicPublicBrowseNativeCollection>
     var detailWitnesses: [String: MusicNativePublicBrowseWitness] = [:]
+    let discoveryHot: AsyncValueCache<String, MusicNativeSearchDiscoveryValue<MusicNativeSearchHotValue>>
+    let discoveryCharts: AsyncValueCache<String, MusicNativeSearchDiscoveryValue<[MusicPublicBrowseCollection]>>
     init(transport: any MusicNativeHTTPTransport, qq: any MusicPublicQQProviding, clock: @escaping @Sendable () -> Date,
          clients: (any MusicNativeClientContextProviding)? = nil) {
         self.transport = transport; self.qq = qq; now = clock; self.clients = clients
         playlistHeads = .init(capacity: 24, maximumCost: 4 * 1024 * 1024, maximumFlights: 8,
                               cost: { $0.bytes.count }, clock: clock)
         songBatches = .init(capacity: 48, maximumCost: 4 * 1024 * 1024, maximumFlights: 8,
-                            cost: { $0.reduce(0) { $0 + $1.data.count } }, clock: clock)
+                            cost: { $0.values.reduce(0) { $0 + $1.data.count } }, clock: clock)
         completeCollections = .init(capacity: 6, maximumCost: 12 * 1024 * 1024, maximumFlights: 4,
                                     cost: { $0.tracks.reduce(0) { $0 + $1.data.count } }, clock: clock)
+        discoveryHot = .init(capacity: 1, maximumCost: 32 * 1024, maximumFlights: 2,
+                             cost: { $0.value.keywords.reduce(0) {
+                                 $0 + $1.keyword.utf8.count + 16
+                             } + 1 }, clock: clock)
+        discoveryCharts = .init(capacity: 1, maximumCost: 32 * 1024, maximumFlights: 2,
+                                cost: { $0.value.reduce(0) {
+                                    $0 + $1.id.utf8.count + $1.title.utf8.count + $1.creator.utf8.count +
+                                        ($1.artwork?.absoluteString.utf8.count ?? 0) + 16
+                                } }, clock: clock)
     }
     func revoke() async {
         epoch = UUID(); volatileClients = [:]
         detailWitnesses = [:]
         await playlistHeads.invalidate(); await songBatches.invalidate(); await completeCollections.invalidate()
+        await discoveryHot.invalidate(); await discoveryCharts.invalidate()
     }
     func invalidateCollection(_ collection: MusicPublicBrowseCollection) async {
         detailWitnesses = detailWitnesses.filter { $0.value.collectionID != collection.id }
@@ -164,10 +176,13 @@ actor MusicNativePlatforms {
         return try await request(.init(url: URL(string: "https://interfacepc.music.163.com/eapi/" + path.dropFirst(5))!, method: "POST",
             headers: ["Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
                       "User-Agent": "NeteaseMusic 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)", "Cookie": cookie], body: body),
-            // The official toplist repeats this unused display field with
-            // different values. Discard it only on this exact route, without
-            // passing identities through JSONSerialization/Double rounding.
-            ignoringUpstreamKeys: path == "/api/toplist" ? ["updateFrequency"] : [], checkingNeteaseCode: true, client: client)
+            // The official toplist and some official chart playlist details
+            // repeat these unused fields with different values. Discard them
+            // only on their exact routes, without passing identities through
+            // JSONSerialization/Double rounding.
+            ignoringUpstreamKeys: path == "/api/toplist" ? ["updateFrequency"]
+                : path == "/api/v6/playlist/detail" ? ["alg"] : [],
+            checkingNeteaseCode: true, client: client)
     }
     func kg(_ path: String, _ params: [String: String], lyric: Bool = false, clear: Bool = false) async throws -> MJ {
         let client = try await clientDevice(.kugou), mid = client.fields["KUGOU_API_MID"]!, dfid = client.fields["dfid"] ?? "-"

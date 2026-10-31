@@ -58,7 +58,8 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
 
     func configure(item: MusicPublicBrowseItem, layout: MusicPublicBrowseSection.Layout,
                    theme: PageTheme, artworkURL: URL? = nil,
-                   onPreview: ((MusicRemoteTrack) -> Void)? = nil, onPlay: @escaping () -> Void) {
+                   onPreview: ((MusicRemoteTrack) -> Void)? = nil, showsPlayButton: Bool = true,
+                   onPlay: @escaping () -> Void) {
         style = layout; action = onPlay; itemID = item.id
         featurePaletteRole = MusicBrowseFeaturePalette.Role(item)
         loadArtwork(artworkURL ?? item.artwork)
@@ -107,7 +108,7 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         preview.textColor = UIColor(theme.ink)
         play.tintColor = UIColor(theme.ink)
         switch item.content {
-        case .track, .collection, .action, .daily: play.isHidden = false
+        case .track, .collection, .action, .daily: play.isHidden = !showsPlayButton
         default: play.isHidden = true
         }
         if layout == .featureRail, case .action(let action) = item.content, action.isPersonalFM {
@@ -202,12 +203,13 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         let width = bounds.width, height = bounds.height
         let row = style == .songColumns || style == .vipSongs || style == .list
         if row {
+            let actionWidth: CGFloat = play.isHidden ? 0 : 44
             artwork.frame = CGRect(x: 0, y: 8, width: 46, height: 46)
-            title.frame = CGRect(x: 56, y: 10, width: max(0, width - 100), height: 23)
-            subtitle.frame = CGRect(x: 56, y: 35, width: max(0, width - 100), height: 18)
-            play.frame = CGRect(x: width - 36, y: 16, width: 32, height: 32)
+            title.frame = CGRect(x: 56, y: 10, width: max(0, width - 56 - actionWidth), height: 23)
+            subtitle.frame = CGRect(x: 56, y: 35, width: max(0, width - 56 - actionWidth), height: 18)
+            play.frame = play.isHidden ? .zero : CGRect(x: width - 36, y: 16, width: 32, height: 32)
             preview.frame = .zero
-            reason.frame = CGRect(x: 56, y: 51, width: max(0, width - 100), height: 14)
+            reason.frame = CGRect(x: 56, y: 51, width: max(0, width - 56 - actionWidth), height: 14)
         } else if style == .rankingStack || style == .rankedSongs || style == .vipRankedSongs ||
                     style == .artistUpdates {
             artwork.frame = CGRect(x: 0, y: 4, width: 94, height: 94)
