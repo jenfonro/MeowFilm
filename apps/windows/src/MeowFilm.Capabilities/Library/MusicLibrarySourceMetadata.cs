@@ -14,7 +14,7 @@ public sealed partial class MusicLibraryOwner
     internal static bool IsScriptIdentifier(string value) => value.Length is > 0 and <= 128 &&
         Regex.IsMatch(value, @"\A[A-Za-z0-9][A-Za-z0-9._-]*\z", RegexOptions.CultureInvariant, NativeMusicSong.RegexTimeout);
     private JsonObject SourceState(JsonObject doc) => Value(doc, "lx-installations") as JsonObject ??
-        LJ.Obj(("schema", 3), ("revision", 0), ("installations", new JsonArray()));
+        LJ.Obj(("schema", 4), ("revision", 0), ("installations", new JsonArray()));
     private JsonObject Settings(JsonObject doc) => Value(doc, "online-settings") as JsonObject ??
         LJ.Obj(("schema", 2), ("revision", 0), ("lyrics", true), ("target", null));
     private static string InstallationId(string id)
@@ -25,7 +25,7 @@ public sealed partial class MusicLibraryOwner
     private static void ValidateSources(JsonObject state)
     {
         LJ.Fields(state, "schema revision installations", "schema revision installations");
-        LJ.Require(LJ.I(state["schema"]) == 3, "CORRUPT_STORAGE"); _ = Revision(state);
+        LJ.Require(LJ.I(state["schema"]) == 4, "CORRUPT_STORAGE"); _ = Revision(state);
         var installations = LJ.Array(state["installations"]); LJ.Require(installations.Count <= 32, "LIMIT");
         var ids = new HashSet<string>();
         foreach (var n in installations)
@@ -34,8 +34,8 @@ public sealed partial class MusicLibraryOwner
             LJ.Require(ids.Add(InstallationId(LJ.Text(item["id"]))) && LJ.IsBool(item["enabled"])); _ = LJ.Text(item["name"], 255);
             void Check(JsonNode? n)
             {
-                var r = LJ.Object(n); LJ.Fields(r, "source version permissions", "source version permissions");
-                string source = LJ.S(r["source"]); LJ.Require(source.Trim().Length > 0 && System.Text.Encoding.UTF8.GetByteCount(source) <= 512 * 1024, "LIMIT");
+                var r = LJ.Object(n); LJ.Fields(r, "sourceHash sourceBytes version permissions", "sourceHash sourceBytes version permissions");
+                ContentIdentity(LJ.S(r["sourceHash"]), (int)LJ.I(r["sourceBytes"], 1, Array.MaxLength));
                 _ = LJ.Text(r["version"], 128);
                 var permissions = LJ.Object(r["permissions"]);
                 LJ.Fields(permissions, "storage", "storage");

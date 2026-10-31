@@ -30,11 +30,23 @@ public sealed partial class NodeRuntime : IRuntimeSession
     public static async Task<NodeRuntime> StartAsync(string nodeExecutable, RuntimeBundle bundle,
         IReadOnlyList<RuntimeModule> expectedModules,
         IReadOnlyDictionary<string, Func<JsonElement, CancellationToken, Task<object?>>> platformMethods,
+        string scriptDataRoot,
         CancellationToken cancellationToken = default)
     {
         var node = Path.GetFullPath(nodeExecutable);
         RuntimeBundle.EnsureOrdinaryAncestors(node);
         if (!File.Exists(node) || !Path.IsPathFullyQualified(nodeExecutable)) throw new BridgeException("INVALID_MESSAGE");
+        string dataRoot;
+        try
+        {
+            if (!Path.IsPathFullyQualified(scriptDataRoot)
+                || scriptDataRoot.StartsWith(@"\\", StringComparison.Ordinal)
+                || scriptDataRoot.StartsWith("//", StringComparison.Ordinal)
+                || scriptDataRoot.Any(char.IsControl)) throw new BridgeException("INVALID_MESSAGE");
+            dataRoot = Path.GetFullPath(scriptDataRoot);
+        }
+        catch (BridgeException) { throw; }
+        catch { throw new BridgeException("INVALID_MESSAGE"); }
         var session = Guid.NewGuid().ToString("D");
         var pipeName = "meowfilm-" + Guid.NewGuid().ToString("D");
         var server = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
@@ -55,6 +67,7 @@ public sealed partial class NodeRuntime : IRuntimeSession
                 .Select(key => (Key: key, Value: Environment.GetEnvironmentVariable(key))).ToArray();
             start.Environment.Clear();
             foreach (var pair in inherited) if (pair.Value is not null) start.Environment[pair.Key] = pair.Value;
+            start.Environment["MEOWFILM_SCRIPT_DATA_ROOT"] = dataRoot;
             foreach (var argument in new[] { bundle.EntryPath, "--meow-pipe", pipeName, "--meow-session", session })
                 start.ArgumentList.Add(argument);
             child = Process.Start(start) ?? throw new BridgeException("CLOSED");

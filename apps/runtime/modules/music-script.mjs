@@ -4,8 +4,8 @@ import {
 } from '@meowfilm/script-host';
 
 export const musicScriptContract = 'music.script.v2';
-const sourceBytes = 512 * 1024, controlBytes = 512 * 1024, chunkBytes = 64 * 1024;
-const maxInstances = 32, stageBytes = 1024 * 1024, stageTTL = 300000;
+const controlBytes = 512 * 1024, chunkBytes = 64 * 1024;
+const maxInstances = 32, stageTTL = 300000;
 const codes = new Set(['INVALID_REQUEST', 'CLOSED', 'CANCELLED', 'LIMIT', 'SCRIPT_INTEGRITY',
   'SCRIPT_ENCODING', 'STAGE_NOT_FOUND', 'STALE_SOURCE', 'SOURCE_NOT_FOUND', 'SOURCE_DISABLED',
   'CAPABILITY_UNAVAILABLE', 'PERMISSION_DENIED', 'TIMEOUT', 'SCRIPT_CLEANUP', 'SCRIPT_FAILURE',
@@ -95,13 +95,29 @@ function abortable(promise, signal) {
  * ScriptHost executes guest code in isolated QuickJS heaps.
  */
 export function createMusicScriptModule({ call, hostFactory = createScriptHost,
-  network = createNodeNetwork(), clock = Date.now } = {}) {
+  network = createNodeNetwork(), clock = Date.now,
+  setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
   requireValue(typeof call === 'function' && typeof hostFactory === 'function' &&
-    typeof network === 'function' && typeof clock === 'function');
+    typeof network === 'function' && typeof clock === 'function' &&
+    typeof setTimer === 'function' && typeof clearTimer === 'function');
   const stages = new Map(), bindings = new Map(), candidates = new Map(), sessions = new Map();
   const generations = new Map(), usedGrants = new Set(), adapterTasks = new Set();
   const lifetime = new AbortController();
   let closed = false, closing, tail = Promise.resolve(), pending = 0;
+  let stageTimer, stageTimerGeneration = 0, stageFailure;
+  const stageTimers = new Set(), stageTimerFailures = new Map();
+  const stageTimerOwner = {
+    fire(record, generation) {
+      if (!record.active) return;
+      deactivateStageTimer(record);
+      if (generation !== stageTimerGeneration || closed) return;
+      try { sweep(); }
+      catch (error) {
+        stageFailure ??= error;
+        for (const token of [...stages.keys()]) release(token, false);
+      }
+    },
+  };
   const sessionKey = (id, generation) => JSON.stringify([id, generation]);
   function track(input, promise, kind = 'network') {
     const task = { installationId: input.installationId, generation: input.generation,
@@ -115,7 +131,7 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
     network: input => track(input.scope, Promise.resolve().then(() => network(input))),
     storage: Object.fromEntries(['get', 'set', 'delete'].map(operation =>
       [operation, input => storage(operation, input)])),
-    limits: { maxInstances, maxSourceBytes: sourceBytes, maxBytes: controlBytes, syncTimeoutMs: 2000,
+    limits: { maxInstances, maxBytes: controlBytes, syncTimeoutMs: 2000,
       maxInFlight: 16, maxInstanceInFlight: 8, maxSiteInFlight: 4 },
   });
   function guard(signal) {
@@ -128,12 +144,65 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
     return result;
   }
   function current(id) { return host.list().find(value => value.installationId === id); }
-  function release(token) {
+  function deactivateStageTimer(record) {
+    if (!record?.active) return;
+    record.active = false;
+    stageTimers.delete(record);
+    stageTimerFailures.delete(record);
+    if (stageTimer === record) stageTimer = undefined;
+  }
+  function cancelStageTimer(record) {
+    if (!record?.active) return true;
+    try {
+      clearTimer(record.handle);
+      deactivateStageTimer(record);
+      return true;
+    } catch (error) {
+      stageTimerFailures.set(record, error);
+      return false;
+    }
+  }
+  function createStageTimer(generation, delay) {
+    const record = { generation, handle: undefined, active: true, armed: false, fired: false };
+    const ownerRef = new WeakRef(stageTimerOwner);
+    const fire = () => {
+      if (!record.armed) { record.fired = true; return; }
+      if (!record.active) return;
+      const owner = ownerRef.deref();
+      if (!owner) { record.active = false; return; }
+      owner.fire(record, generation);
+    };
+    record.handle = setTimer(fire, delay);
+    record.armed = true;
+    stageTimers.add(record);
+    try { record.handle?.unref?.(); } catch { /* An active timer still owns expiry. */ }
+    if (record.fired) queueMicrotask(fire);
+    return record;
+  }
+  function scheduleStages() {
+    const generation = stageTimerGeneration + 1;
+    let next;
+    if (!closed && stages.size) {
+      let expiresAt = Infinity;
+      for (const stage of stages.values()) expiresAt = Math.min(expiresAt, stage.expiresAt);
+      next = createStageTimer(generation, Math.max(1, expiresAt - clock()));
+    }
+    const previous = stageTimer;
+    stageTimerGeneration = generation;
+    stageTimer = next;
+    if (previous && previous !== next) cancelStageTimer(previous);
+    for (const record of [...stageTimers])
+      if (record !== stageTimer) cancelStageTimer(record);
+  }
+  function release(token, reschedule = true) {
     const stage = stages.get(token);
-    if (stage) { stage.bytes.fill(0); stages.delete(token); }
+    if (stage) { for (const bytes of stage.chunks) bytes.fill(0); stages.delete(token); }
+    if (reschedule) scheduleStages();
   }
   function sweep() {
-    for (const [token, stage] of stages) if (stage.expiresAt <= clock()) release(token);
+    for (const [token, stage] of stages)
+      if (stage.expiresAt <= clock()) release(token, false);
+    scheduleStages();
   }
   function staged(token) {
     text(token); sweep();
@@ -252,17 +321,28 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
   async function shutdown() {
     if (closing) return closing;
     closed = true; lifetime.abort();
-    for (const token of stages.keys()) release(token);
+    stageTimerGeneration++;
+    stageTimer = undefined;
+    for (const record of [...stageTimers]) cancelStageTimer(record);
+    for (const token of stages.keys()) release(token, false);
     for (const auth of [...candidates.values(), ...sessions.values()]) revoke(auth);
     // Stop sessions immediately, including one awaiting a reverse callback.
     closing = (async () => {
-      let result;
+      let result, cleanupFailure = stageFailure;
       try { result = await host.close(); }
-      catch { throw new Failure('SCRIPT_CLEANUP'); }
+      catch (error) { cleanupFailure ??= error; }
       finally {
         await tail;
         bindings.clear(); candidates.clear(); sessions.clear(); generations.clear(); usedGrants.clear();
       }
+      for (const record of [...stageTimers]) cancelStageTimer(record);
+      cleanupFailure ??= stageTimerFailures.values().next().value;
+      for (const record of stageTimers) {
+        record.active = false;
+        record.handle = undefined;
+      }
+      stageTimers.clear(); stageTimerFailures.clear(); stageFailure = null;
+      if (cleanupFailure) throw new Failure('SCRIPT_CLEANUP');
       requireValue(result.cleanupComplete && adapterTasks.size === 0, 'SCRIPT_CLEANUP');
       return { closed: true, cleanupComplete: true };
     })();
@@ -277,12 +357,12 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
       text(params.basename, 255);
       requireValue(!/[\\/:*?"<>|]/.test(params.basename) && params.basename.toLowerCase().endsWith('.js'));
       integer(params.length, 1);
-      requireValue(params.length <= sourceBytes && stages.size < 2 &&
-        [...stages.values()].reduce((sum, stage) => sum + stage.length, 0) + params.length <= stageBytes, 'LIMIT');
       requireValue(typeof params.sha256 === 'string' && /^[a-f0-9]{64}$/.test(params.sha256));
       const token = randomUUID();
-      stages.set(token, { bytes: Buffer.alloc(params.length), length: params.length,
+      stages.set(token, { chunks: [], length: params.length,
         hash: params.sha256, offset: 0, expiresAt: clock() + stageTTL });
+      try { scheduleStages(); }
+      catch (error) { release(token, false); throw error; }
       return { token, chunkBytes };
     }),
     'music.script.stage.chunk': method(['token', 'offset', 'data'], undefined, params => {
@@ -290,10 +370,23 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
       integer(params.offset); requireValue(params.offset === stage.offset, 'SCRIPT_INTEGRITY');
       requireValue(typeof params.data === 'string' && params.data.length <= Math.ceil(chunkBytes / 3) * 4, 'LIMIT');
       const bytes = Buffer.from(params.data, 'base64');
-      requireValue(bytes.length > 0 && bytes.length <= chunkBytes && bytes.toString('base64') === params.data &&
-        stage.offset + bytes.length <= stage.length, 'SCRIPT_INTEGRITY');
-      bytes.copy(stage.bytes, stage.offset); stage.offset += bytes.length;
-      return { next: stage.offset };
+      let retained = false;
+      try {
+        requireValue(bytes.length > 0 && bytes.length <= chunkBytes && bytes.toString('base64') === params.data &&
+          stage.offset + bytes.length <= stage.length, 'SCRIPT_INTEGRITY');
+        const previousExpires = stage.expiresAt;
+        stage.chunks.push(bytes); retained = true; stage.offset += bytes.length;
+        stage.expiresAt = clock() + stageTTL;
+        try { scheduleStages(); }
+        catch (error) {
+          stage.chunks.pop();
+          stage.offset -= bytes.length;
+          stage.expiresAt = previousExpires;
+          retained = false;
+          throw error;
+        }
+        return { next: stage.offset };
+      } finally { if (!retained) bytes.fill(0); }
     }),
     'music.script.stage.abort': method(['token'], undefined, params => {
       text(params.token); release(params.token); return { released: true };
@@ -303,8 +396,12 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
       guard(signal); identifier(params.installationId);
       integer(params.revision, 1); integer(params.expectedRevision); settings(params);
       const stage = staged(params.token);
-      requireValue(stage.offset === stage.length && digest(stage.bytes) === stage.hash, 'SCRIPT_INTEGRITY');
-      const source = decode(stage.bytes), contentHash = stage.hash;
+      requireValue(stage.offset === stage.length, 'SCRIPT_INTEGRITY');
+      const bytes = Buffer.concat(stage.chunks);
+      let source;
+      try { requireValue(digest(bytes) === stage.hash, 'SCRIPT_INTEGRITY'); source = decode(bytes); }
+      finally { bytes.fill(0); }
+      const contentHash = stage.hash;
       const signature = digest(canonical({ contentHash, version: params.version, config: params.config,
         permissions: params.permissions, grant: params.grant }));
       const id = params.installationId, old = bindings.get(id), live = current(id);
@@ -409,5 +506,5 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
       try { fields(params, []); return await close(); } catch (error) { return failure(error); }
     },
   };
-  return { id: 'music', version: '0.5.0', methods, close };
+  return { id: 'music', version: '0.6.0', methods, close };
 }

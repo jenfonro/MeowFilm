@@ -4,45 +4,76 @@ import RELEASE_SYNC from '@jitl/quickjs-wasmfile-release-sync';
 import { fault, requireValue } from './errors.js';
 
 let compiledPromise;
+const disposeAll = handles => {
+  let failure;
+  for (const handle of handles) {
+    try { handle.dispose(); } catch (error) { failure ??= error; }
+  }
+  return failure;
+};
 const loadModule = async () => {
   compiledPromise ??= readFile(new URL(import.meta.resolve('@jitl/quickjs-wasmfile-release-sync/wasm')))
     .then(bytes => WebAssembly.compile(bytes));
   return newQuickJSWASMModuleFromVariant(newVariant(RELEASE_SYNC, { wasmModule: await compiledPromise }));
 };
 
+// The pinned QuickJS build returns signed values from asUintN at wider bit
+// widths. Restore the standard operation in the guest before any SDK runs.
+function installIntegerSemantics() {
+  if (BigInt.asUintN(64, -1n) === (1n << 64n) - 1n) return;
+  const asIntN = BigInt.asIntN, toBigInt = BigInt, trunc = Math.trunc;
+  const { asUintN } = {
+    asUintN(bits, value) {
+      'use strict';
+      const number = +bits;
+      const width = number !== number ? 0 : trunc(number);
+      if (width < 0 || width > 9007199254740991) throw new RangeError('Invalid index');
+      const signed = asIntN(width, value);
+      return signed < 0n ? signed + (1n << toBigInt(width)) : signed;
+    },
+  };
+  Object.defineProperty(BigInt, 'asUintN', {
+    ...Object.getOwnPropertyDescriptor(BigInt, 'asUintN'), value: asUintN,
+  });
+}
+
 /** One isolated guest heap. The only host function exchanges JSON, never host objects. */
 export class QuickJSEngine {
-  static async create({ source, bridge, limits }) {
+  static async create({ source, bridge, limits, enforceMemoryLimit = true }) {
     const module = await loadModule();
-    const engine = new QuickJSEngine(module, limits);
+    const engine = new QuickJSEngine(module, limits, enforceMemoryLimit);
     try {
-      const fn = engine.context.newFunction('__meowBridge', (operation, input) => {
-        let response;
-        try {
-          const name = engine.context.getString(operation);
-          const json = engine.context.getString(input);
-          if (Buffer.byteLength(json) > limits.maxBytes * 4) throw fault('RESOURCE_LIMIT');
-          response = { ok: true, value: bridge(name, JSON.parse(json)) ?? null };
-        } catch (error) {
-          response = { ok: false, code: error?.code ?? 'SCRIPT_EXCEPTION' };
-        }
-        return engine.context.newString(JSON.stringify(response));
-      });
-      engine.context.setProp(engine.context.global, '__meowBridge', fn);
-      fn.dispose();
+      engine.installBridge(bridge);
       engine.run(() => {
+        engine.unwrap(engine.context.evalCode(`(${installIntegerSemantics})();`, 'engine-intrinsics.js')).dispose();
         engine.realm = engine.unwrap(engine.context.evalCode(source, 'script-sdk.js'));
       }, limits.initTimeoutMs);
       return engine;
-    } catch (error) { engine.close(); throw error; }
+    } catch (error) {
+      try { engine.close(); } catch { /* Preserve the initialization failure. */ }
+      throw error;
+    }
   }
 
-  constructor(module, limits) {
-    requireValue(limits.maxStackBytes <= 64 * 1024);
-    this.runtime = module.newRuntime();
-    this.runtime.setMemoryLimit(limits.maxMemoryBytes);
-    this.runtime.setMaxStackSize(limits.maxStackBytes);
-    this.context = this.runtime.newContext();
+  installBridge(bridge) {
+    const fn = this.context.newFunction('__meowBridge', (operation, input) => {
+      let response;
+      try {
+        const name = this.context.getString(operation);
+        const json = this.context.getString(input);
+        if (Buffer.byteLength(json) > this.limits.maxBytes * 4) throw fault('RESOURCE_LIMIT');
+        response = { ok: true, value: bridge(name, JSON.parse(json)) ?? null };
+      } catch (error) {
+        response = { ok: false, code: error?.code ?? 'SCRIPT_EXCEPTION' };
+      }
+      return this.context.newString(JSON.stringify(response));
+    });
+    try { this.context.setProp(this.context.global, '__meowBridge', fn); }
+    finally { fn.dispose(); }
+  }
+
+  constructor(module, limits, enforceMemoryLimit = true) {
+    requireValue(limits.maxStackBytes <= 1024 * 1024);
     this.methods = new Map();
     this.limits = limits;
     this.depth = 0;
@@ -50,13 +81,28 @@ export class QuickJSEngine {
     this.closed = false;
     this.deadline = Infinity;
     this.interrupted = false;
-    this.runtime.setInterruptHandler(() => {
-      if (Date.now() >= this.deadline) {
-        this.interrupted = true;
-        return true;
-      }
-      return false;
-    });
+    this.runtime = undefined;
+    this.context = undefined;
+    try {
+      this.runtime = module.newRuntime();
+      if (enforceMemoryLimit) this.runtime.setMemoryLimit(limits.maxMemoryBytes);
+      this.runtime.setMaxStackSize(limits.maxStackBytes);
+      this.context = this.runtime.newContext();
+      this.runtime.setInterruptHandler(() => {
+        if (Date.now() >= this.deadline) {
+          this.interrupted = true;
+          return true;
+        }
+        return false;
+      });
+    } catch (error) {
+      try { this.context?.dispose(); } catch { /* Preserve the construction failure. */ }
+      try { this.runtime?.dispose(); } catch { /* Preserve the construction failure. */ }
+      this.context = undefined;
+      this.runtime = undefined;
+      this.closed = true;
+      throw error;
+    }
   }
 
   errorCode(handle) {
@@ -111,12 +157,17 @@ export class QuickJSEngine {
   }
 
   callInside(name, args) {
-    const handles = args.map(value => typeof value === 'string'
-      ? this.context.newString(value) : this.context.newNumber(value));
+    const handles = [];
+    let failure;
     try {
+      for (const value of args) handles.push(typeof value === 'string'
+        ? this.context.newString(value) : this.context.newNumber(value));
       const value = this.unwrap(this.context.callFunction(this.method(name), this.realm, ...handles));
       value.dispose();
-    } finally { for (const handle of handles) handle.dispose(); }
+    } catch (error) { failure = error; }
+    const cleanupFailure = disposeAll(handles);
+    failure ??= cleanupFailure;
+    if (failure) throw failure;
   }
 
   pumpInside() {
@@ -153,6 +204,48 @@ export class QuickJSEngine {
     }, timeoutMs);
   }
 
+  /** Internal lifecycle notifications must not pump unrelated guest jobs under
+   * the notification caller's host scope. */
+  callUnpumped(name, args, timeoutMs = this.limits.syncTimeoutMs) {
+    this.run(() => this.callInside(name, args), timeoutMs);
+  }
+
+  /** Synchronous callback return across the same JSON boundary. Jobs are pumped
+   * after the native caller has registered any asynchronous callback receipt. */
+  callJSON(name, args, timeoutMs = this.limits.syncTimeoutMs) {
+    return this.run(() => {
+      const handles = [];
+      let result, failure;
+      try {
+        for (const value of args) handles.push(this.context.newString(value));
+        const value = this.unwrap(this.context.callFunction(this.method(name), this.realm, ...handles));
+        try {
+          const json = this.context.getString(value);
+          requireValue(Buffer.byteLength(json) <= this.limits.maxBytes * 4, 'RESOURCE_LIMIT');
+          result = JSON.parse(json);
+        }
+        catch (error) { failure = error; }
+        try { value.dispose(); } catch (error) { failure ??= error; }
+      } catch (error) { failure ??= error; }
+      const cleanupFailure = disposeAll(handles);
+      failure ??= cleanupFailure;
+      if (failure) throw failure;
+      return result;
+    }, timeoutMs);
+  }
+
+  pump() { this.run(() => this.pumpInside()); }
+
+  memoryUsage() {
+    const handle = this.runtime.computeMemoryUsage();
+    try {
+      const usage = this.context.dump(handle);
+      const binary = usage.binary_object_size ?? 0;
+      return { rss: usage.memory_used_size, heapTotal: usage.malloc_size,
+        heapUsed: usage.memory_used_size, external: binary, arrayBuffers: binary };
+    } finally { handle.dispose(); }
+  }
+
   close() {
     if (this.closing || this.closed) return;
     this.closing = true;
@@ -162,13 +255,43 @@ export class QuickJSEngine {
   destroy() {
     if (this.closed) return;
     this.closed = true;
-    for (const handle of this.methods.values()) handle.dispose();
+    let failure;
+    const attempt = operation => {
+      try { return operation(); }
+      catch (error) { failure ??= error; return undefined; }
+    };
+    const runtime = this.runtime;
+    const previousDeadline = this.deadline;
+    const deadline = Date.now() + Math.max(1, this.limits.cleanupTimeoutMs ?? 1000);
+    this.deadline = Math.min(previousDeadline, deadline);
+    this.interrupted = false;
+    try {
+      while (runtime && attempt(() => runtime.hasPendingJob()) && Date.now() < deadline) {
+        const result = attempt(() => runtime.executePendingJobs(1));
+        if (!result) break;
+        if (result.error) {
+          attempt(() => result.error.dispose());
+          break;
+        }
+      }
+    } finally {
+      this.deadline = previousDeadline;
+    }
+    for (const handle of this.methods.values()) attempt(() => handle.dispose());
     this.methods.clear();
-    this.realm?.dispose();
+    if (this.realm) attempt(() => this.realm.dispose());
     this.realm = undefined;
-    this.context.dispose();
-    this.runtime.dispose();
+    let contexts = [];
+    if (runtime) {
+      const values = attempt(() => runtime.contextMap.values());
+      if (values) contexts = attempt(() => [...values]) ?? [];
+    }
+    for (const context of contexts) {
+      if (attempt(() => context.alive)) attempt(() => context.dispose());
+    }
+    if (runtime) attempt(() => runtime.dispose());
     this.context = undefined;
     this.runtime = undefined;
+    if (failure) throw failure;
   }
 }

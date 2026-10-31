@@ -139,7 +139,7 @@ public sealed partial class MusicCapability
     }
     private async Task<string> UploadScript(byte[] bytes, string hash, string basename, CancellationToken token)
     {
-        if (bytes.Length is < 1 or > 512 * 1024)
+        if (bytes.Length < 1)
             throw new MusicOperationException("LIMIT");
         if (!StringComparer.Ordinal.Equals(hash, Convert.ToHexStringLower(SHA256.HashData(bytes))))
             throw new MusicOperationException("SCRIPT_INTEGRITY");

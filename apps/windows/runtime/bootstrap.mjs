@@ -1,4 +1,5 @@
 import { Socket } from 'node:net';
+import { isAbsolute, resolve } from 'node:path';
 import { BridgeError } from '@meowfilm/runtime-bridge';
 import { attachConnectedStream } from '@meowfilm/runtime-bridge/descriptor';
 import { createAppRuntime } from '../../runtime/bootstrap.mjs';
@@ -6,6 +7,14 @@ import { createAppRuntime } from '../../runtime/bootstrap.mjs';
 const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const sessionPattern = new RegExp(`^${uuid}$(?![\\s\\S])`);
 const pipePattern = new RegExp(`^meowfilm-${uuid}$(?![\\s\\S])`);
+
+/** Same fixed identity as native AppDataPaths. Never a script/argv-selected path. */
+export function windowsScriptDataRoot(input = process.env.MEOWFILM_SCRIPT_DATA_ROOT) {
+  if (typeof input !== 'string' || !isAbsolute(input) || /^[/\\]{2}/.test(input) ||
+    /[\u0000-\u001f]/.test(input))
+    throw new BridgeError('INVALID_MESSAGE');
+  return resolve(input);
+}
 
 export function parseWindowsLaunchArguments(argv) {
   if (!Array.isArray(argv) || argv.length !== 4 || argv.some(value => typeof value !== 'string') ||

@@ -56,7 +56,7 @@ public static class MusicScriptIntegrationTests
         internal NodeRuntime? Child;
         internal Fixture(string path)
         {
-            Store = new(path, ["music.library.v1"]);
+            Store = new(path, ["music.library.v1"], [MusicLibraryOwner.ScriptContentCollection]);
             Library = new(Store);
             MusicScriptOwner? owner = null;
             Runtime = new(async token =>
@@ -65,7 +65,7 @@ public static class MusicScriptIntegrationTests
                     ?? throw new InvalidOperationException("Packaged runtime root required.");
                 string node = Environment.GetEnvironmentVariable("MEOWFILM_TEST_NODE")
                     ?? throw new InvalidOperationException("Verified Node required.");
-                RuntimeModule[] modules = [new("music", "0.5.0")];
+                RuntimeModule[] modules = [new("music", "0.6.0"), new("cat", "0.1.0")];
                 var capabilities = owner!.ScriptCapabilities.ToDictionary(pair => pair.Key,
                     pair => new Func<JsonElement, CancellationToken, Task<object?>>(async (input, cancellationToken) =>
                     {
@@ -73,7 +73,7 @@ public static class MusicScriptIntegrationTests
                         return await pair.Value(input, cancellationToken);
                     }), StringComparer.Ordinal);
                 return Child = await NodeRuntime.StartAsync(node, RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate", modules),
-                    modules, capabilities, token);
+                    modules, capabilities, Path.Combine(path, "script-runtime"), token);
             });
             Owner = owner = new(Library, Runtime);
         }

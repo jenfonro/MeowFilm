@@ -1,7 +1,225 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createScriptHost } from '../src/index.js';
+import { LXSession } from '../src/lx-session.js';
+import { QuickJSEngine } from '../src/quickjs-engine.js';
 import { lxScript, target, memoryStorage, deferred, turn } from './fixtures.js';
+
+test('QuickJS unsigned BigInt widths and coercions match JavaScript before SDK initialization', async () => {
+  function inspectIntegers() {
+    const widths = [0, 1, 8, 31, 32, 33, 63, 64, 65, 95, 96, 127, 128, 129, 256, 512];
+    const values = [0n, 1n, -1n, -2n];
+    for (const width of widths) {
+      const edge = 1n << BigInt(width);
+      values.push(edge - 1n, edge, edge + 1n, -edge - 1n, -edge, -edge + 1n);
+    }
+    const matrix = widths.map(width => values.map(value => String(BigInt.asUintN(width, value))));
+    const order = [], results = [];
+    const check = (width, value) => {
+      try { results.push(String(BigInt.asUintN(width, value))); }
+      catch (error) { results.push(error.name); }
+    };
+    for (const width of [undefined, null, NaN, -0.5, 0.9, 64.9, '64.9', '', true,
+      -1, Infinity, -Infinity, 9007199254740991, 9007199254740992, 1n, Symbol('width')])
+      check(width, 1n);
+    for (const value of [true, false, ' 0xff ', 'bad bigint', 1, 1.5, null, undefined, Symbol('value')])
+      check(64, value);
+    check({ [Symbol.toPrimitive](hint) { order.push('bits:' + hint); return 64.8; } },
+      { [Symbol.toPrimitive](hint) { order.push('value:' + hint); return -1n; } });
+    check({ valueOf() { order.push('invalid-bits'); return -1; } },
+      { valueOf() { order.push('unreachable-value'); return 0n; } });
+    check({ valueOf() { order.push('throw-bits'); throw new SyntaxError(); } },
+      { valueOf() { order.push('unreachable-after-throw'); return 0n; } });
+    check(0, { valueOf() { order.push('zero-width-value'); return 1; } });
+    check({ valueOf() { order.push('nan-width'); return NaN; } },
+      { valueOf() { order.push('nan-value'); return 12n; } });
+    const descriptor = Object.getOwnPropertyDescriptor(BigInt, 'asUintN');
+    let constructible = false;
+    try { Reflect.construct(BigInt.asUintN, [64, 1n]); constructible = true; } catch {}
+    return { matrix, order, results, metadata: {
+      name: BigInt.asUintN.name, length: BigInt.asUintN.length,
+      prototype: Object.hasOwn(BigInt.asUintN, 'prototype'), constructible,
+      writable: descriptor.writable, configurable: descriptor.configurable, enumerable: descriptor.enumerable,
+    } };
+  }
+  const engine = await QuickJSEngine.create({
+    // The SDK itself computes this value, not a later script invocation.
+    source: `(() => {
+      const initial = (${inspectIntegers})();
+      const convert = BigInt.asUintN;
+      return {
+        inspect() { return JSON.stringify(initial); },
+        captured() {
+          BigInt.asIntN = () => { throw new Error('modified intrinsic'); };
+          Math.trunc = () => { throw new Error('modified intrinsic'); };
+          globalThis.BigInt = () => { throw new Error('modified intrinsic'); };
+          return JSON.stringify(String(convert(64.8, -1n)));
+        },
+      };
+    })()`,
+    bridge: () => null,
+    limits: {
+      maxBytes: 1024 * 1024, maxMemoryBytes: 32 * 1024 * 1024, maxStackBytes: 128 * 1024,
+      initTimeoutMs: 10000, syncTimeoutMs: 1000, cleanupTimeoutMs: 1000,
+    },
+  });
+  try {
+    assert.deepEqual(engine.callJSON('inspect', []), inspectIntegers());
+    assert.equal(engine.callJSON('captured', []), String((1n << 64n) - 1n));
+  } finally { engine.close(); }
+});
+
+test('QuickJS engine closes every context owned by its runtime', async () => {
+  const engine = await QuickJSEngine.create({
+    source: '({ errorCode: () => "SCRIPT_EXCEPTION", watchStartup: () => null })',
+    bridge: () => null,
+    limits: {
+      maxBytes: 1024, maxMemoryBytes: 16 * 1024 * 1024, maxStackBytes: 64 * 1024,
+      initTimeoutMs: 1000, syncTimeoutMs: 1000, cleanupTimeoutMs: 1000,
+    },
+  });
+  const main = engine.context, runtime = engine.runtime, extra = runtime.newContext();
+  const evaluated = extra.evalCode('globalThis.fixture = 1');
+  if (evaluated.error) evaluated.error.dispose();
+  else evaluated.value.dispose();
+  assert.equal(runtime.contextMap.size, 2);
+  engine.close();
+  assert.equal(main.alive, false);
+  assert.equal(extra.alive, false);
+  assert.equal(runtime.alive, false);
+});
+
+test('QuickJS engine continues disposal after an earlier cleanup operation fails', () => {
+  const calls = [];
+  const first = new Error('synthetic method disposal failure');
+  const context = name => ({
+    alive: true,
+    dispose() { calls.push(name); this.alive = false; },
+  });
+  const one = context('context-one'), two = context('context-two');
+  const engine = Object.assign(Object.create(QuickJSEngine.prototype), {
+    closed: false,
+    closing: true,
+    deadline: Infinity,
+    interrupted: false,
+    limits: { cleanupTimeoutMs: 10 },
+    methods: new Map([
+      ['one', { dispose() { calls.push('method-one'); throw first; } }],
+      ['two', { dispose() { calls.push('method-two'); } }],
+    ]),
+    realm: { dispose() { calls.push('realm'); } },
+    context: one,
+    runtime: {
+      contextMap: new Map([['one', one], ['two', two]]),
+      hasPendingJob: () => false,
+      dispose() { calls.push('runtime'); },
+    },
+  });
+  assert.throws(() => engine.destroy(), error => error === first);
+  assert.deepEqual(calls,
+    ['method-one', 'method-two', 'realm', 'context-one', 'context-two', 'runtime']);
+  assert.equal(engine.context, undefined);
+  assert.equal(engine.runtime, undefined);
+});
+
+test('QuickJS construction rolls back a created context and runtime when setup fails', () => {
+  const failure = new Error('synthetic interrupt setup failure');
+  let contextDisposed = false, runtimeDisposed = false;
+  const context = { dispose() { contextDisposed = true; } };
+  const runtime = {
+    setMaxStackSize() {},
+    newContext: () => context,
+    setInterruptHandler() { throw failure; },
+    dispose() { runtimeDisposed = true; },
+  };
+  assert.throws(() => new QuickJSEngine({ newRuntime: () => runtime }, {
+    maxMemoryBytes: 1024, maxStackBytes: 1024, cleanupTimeoutMs: 10,
+  }, false), error => error === failure);
+  assert.equal(contextDisposed, true);
+  assert.equal(runtimeDisposed, true);
+});
+
+test('QuickJS bridge setup disposes the function handle when setProp fails', () => {
+  const failure = new Error('synthetic setProp failure');
+  let disposed = false;
+  const engine = Object.assign(Object.create(QuickJSEngine.prototype), {
+    limits: { maxBytes: 1024 },
+    context: {
+      global: {},
+      newFunction: () => ({ dispose() { disposed = true; } }),
+      setProp() { throw failure; },
+    },
+  });
+  assert.throws(() => engine.installBridge(() => null), error => error === failure);
+  assert.equal(disposed, true);
+});
+
+test('QuickJS calls dispose partially-created argument handles after allocation fails', () => {
+  const failure = new Error('synthetic handle allocation failure');
+  for (const method of ['callInside', 'callJSON']) {
+    const disposed = [];
+    let created = 0;
+    const engine = Object.assign(Object.create(QuickJSEngine.prototype), {
+      closed: false, closing: false, depth: 0, deadline: Infinity, interrupted: false,
+      limits: { syncTimeoutMs: 1000 },
+      realm: {},
+      run: body => body(),
+      context: {
+        newString(value) {
+          if (++created === 2) throw failure;
+          return { dispose() { disposed.push(value); } };
+        },
+        newNumber(value) {
+          if (++created === 2) throw failure;
+          return { dispose() { disposed.push(value); } };
+        },
+      },
+    });
+    assert.throws(() => engine[method]('fixture', ['first', 'second']),
+      error => error === failure);
+    assert.deepEqual(disposed, ['first']);
+  }
+});
+
+test('QuickJS preserves the call failure when argument disposal also fails', () => {
+  const primary = new Error('synthetic call failure');
+  const cleanup = new Error('synthetic argument disposal failure');
+  let disposed = false;
+  const engine = Object.assign(Object.create(QuickJSEngine.prototype), {
+    realm: {},
+    method: () => ({}),
+    unwrap() { throw primary; },
+    context: {
+      newString: () => ({
+        dispose() { disposed = true; throw cleanup; },
+      }),
+      callFunction: () => ({}),
+    },
+  });
+  assert.throws(() => engine.callInside('fixture', ['value']), error => error === primary);
+  assert.equal(disposed, true);
+});
+
+test('adapter retirement waits for tasks registered by settlement continuations', async () => {
+  const session = new LXSession({
+    installationId: 'adapter-retirement', generation: 1,
+    revision: { source: '', permissions: { storage: [] } },
+    limits: { maxBytes: 1024 },
+  });
+  const late = deferred();
+  const first = Promise.resolve();
+  session.trackAdapter(first);
+  first.then(() => Promise.resolve().then(() => session.trackAdapter(late.promise)));
+  let idle = false;
+  const waiting = session.whenAdaptersIdle().then(() => { idle = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(session.adapterTasks.size, 1);
+  assert.equal(idle, false);
+  late.resolve();
+  await waiting;
+  assert.equal(session.adapterTasks.size, 0);
+  session.stop();
+});
 
 test('guest constructors, eval and prototype traversal cannot reach Node or the old host invocation object', async t => {
   const host = createScriptHost();
@@ -123,6 +341,64 @@ test('protocol factories share one manager rather than starting another runner',
   assert.deepEqual(await host.invoke({ installationId: 'two', siteId: 'site', operation: 'request',
     payload: { value: 3 } }), { value: 3 });
   assert.equal(host.stats().liveSessions, 1);
+});
+
+test('host close drains every session even when one stop operation fails', async () => {
+  const stopped = [];
+  const host = createScriptHost({ adapters: {
+    example: input => ({
+      generation: input.generation, installationId: input.installationId, revision: input.revision,
+      live: true, capabilities: {}, start: async function() { return this; }, activate() {},
+      async invoke(request) { return request.payload; },
+      stop() {
+        this.live = false;
+        stopped.push(this.installationId);
+        if (this.installationId === 'one') throw new Error('synthetic stop failure');
+      },
+      async drainAdapters() {}, async whenAdaptersIdle() {},
+      stats() {
+        return { live: this.live, timers: 0, networkRequests: 0,
+          invocations: 0, pendingAdapterTasks: 0 };
+      },
+    }),
+  } });
+  await host.install({ installationId: 'one', protocol: 'example', source: 'data', enabled: true });
+  await host.install({ installationId: 'two', protocol: 'example', source: 'data', enabled: true });
+  const closing = host.close();
+  await assert.rejects(closing, { code: 'SCRIPT_EXCEPTION' });
+  assert.deepEqual(stopped.sort(), ['one', 'two']);
+  assert.equal(host.stats().liveSessions, 0);
+  assert.equal(host.stats().installations, 0);
+  assert.deepEqual(host.list(), []);
+  assert.equal(host.close(), closing);
+  await assert.rejects(host.close(), { code: 'SCRIPT_EXCEPTION' });
+});
+
+test('failed lifecycle cleanup detaches stopped sessions from installation records', async () => {
+  const host = createScriptHost({ adapters: {
+    example: input => ({
+      generation: input.generation, installationId: input.installationId, revision: input.revision,
+      live: true, capabilities: {}, start: async function() { return this; }, activate() {},
+      async invoke(request) { return request.payload; },
+      stop() { this.live = false; throw new Error('synthetic stop failure'); },
+      async drainAdapters() {}, async whenAdaptersIdle() {},
+      stats() {
+        return { live: this.live, timers: 0, networkRequests: 0,
+          invocations: 0, pendingAdapterTasks: 0 };
+      },
+    }),
+  } });
+  await host.install({ installationId: 'disabled', protocol: 'example',
+    source: 'data', enabled: true });
+  await host.install({ installationId: 'removed', protocol: 'example',
+    source: 'data', enabled: true });
+  await assert.rejects(host.disable('disabled'), { code: 'SCRIPT_EXCEPTION' });
+  assert.equal(host.get('disabled').state, 'disabled');
+  assert.equal(host.stats().liveSessions, 1);
+  await assert.rejects(host.uninstall('removed'), { code: 'SCRIPT_EXCEPTION' });
+  assert.throws(() => host.get('removed'), { code: 'NOT_FOUND' });
+  assert.equal(host.stats().liveSessions, 0);
+  assert.equal((await host.close()).cleanupComplete, true);
 });
 
 test('guest diagnostic console methods do not require or expose the host console', async t => {

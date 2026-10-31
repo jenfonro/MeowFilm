@@ -1,8 +1,8 @@
 # AGENTS.md
 
-meowfilm 的 iPhone 与 Windows 原生客户端，当前实现音乐能力：
+meowfilm 的 iPhone 与 Windows 原生客户端：
 - iOS：UIKit 负责应用、窗口、导航、呈现与手势，Swift Package 提供业务、平台、账号、播放、缓存和持久化能力。
-- Windows：WPF / .NET 原生桌面应用；Node 运行时仅在执行用户导入的 JS 音源脚本时按需启动。
+- Windows：WPF / .NET 原生桌面应用；公共 Node 运行时仅在执行用户导入的 LX 音源或 Cat 脚本时按需启动。
 
 ## 命令
 
@@ -59,9 +59,9 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
   - `MeowFilm.AppHost` — 启动、注入与关闭
   - `MeowFilm.Capabilities` — 按职责组织的业务能力（Accounts、Platforms、Catalog、Search、Recommendations、Library、Sync、Playback、PlaybackCache、Lyrics、Scripting、Feedback、Settings、Presentation、Composition）
 - `apps/windows/tests/` — Windows 原生测试
-- `apps/runtime/` — 公共脚本传输装配与 `modules/music-script.mjs` 业务 owner，当前契约为 music.script.v2／music@0.5.0
+- `apps/runtime/` — 公共脚本传输装配与 `modules/{music,cat}-script.mjs` 业务 owner，当前契约为 music.script.v2／music@0.6.0 和 cat.script.v1／cat@0.1.0
 - `apps/windows/runtime/` — 仅 Windows 启动／命名管道 `bootstrap.mjs` 与薄 `entries/aggregate.mjs`，从公共目录导入业务模块，不保留 module 副本
-- `packages/` — 共用 script-host（当前 LX／QuickJS 执行）与 runtime-bridge 工作区包；未来协议适配复用同一核心，不预建 Cat／移动端空实现
+- `packages/` — 共用 script-host（LX、Cat、有限 Node 风格能力、QuickJS 执行）与 runtime-bridge 工作区包；其他平台接入复用同一核心，但各自负责运行环境引入和生命周期
 - `scripts/` — iOS 工程生成、结构检查、测试、构建打包与发布，`scripts/tests/` 为脚本测试；Node 共用工具
 - `scripts/windows/` — Windows 构建、测试、打包与结构检查
 - `tests/` — Node 测试
@@ -88,7 +88,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 | 平台与外部适配 | 系统能力、外部协议与契约实现 | 平台细节不扩散到业务核心，不替业务层决定策略 |
 
 - 每项职责有明确所有者；模块间通过最小公开契约协作，明确输入、输出、生命周期和错误语义。
-- 公共脚本层不依赖 Windows 源码或启动／管道实现。请求特权存储绑定显式 `context.storage`，不以 ambient 异步上下文授予全局／startup／background 权限；网络 `validateURL` 只校验 HTTP(S) 语法，文件／进程隔离不等于网络隔离。
+- 公共脚本层不依赖 Windows 源码或启动／管道实现。LX 请求特权存储绑定显式 `context.storage`，不以 ambient 异步上下文授予全局／startup／background 权限。Cat 的公开网络不使用域名授权名单，但拒绝私网、链路本地和未登记回环目标；文件只映射安装实例私有卷。两种协议的边界不得互相冒充。
 - 依赖显式且单向，不形成循环依赖或隐式初始化顺序。不用全局事件总线、服务定位器、无边界单例或跨模块直接读写绕过契约。
 - 新增能力前先检查现有实现。公共抽取以通用语义、稳定契约和实际使用为依据；共享层提供机制，业务层决定策略，不给共享实现堆叠业务分支。
 

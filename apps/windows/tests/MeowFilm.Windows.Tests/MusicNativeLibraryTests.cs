@@ -1,4 +1,5 @@
 using System.IO;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -99,35 +100,73 @@ public static class MusicNativeLibraryTests
     private sealed class Store : IProtectedDocumentStore
     {
         private readonly object sync = new();
-        internal byte[]? Bytes;
+        private readonly Dictionary<string, byte[]> documents = new(StringComparer.Ordinal);
+        internal byte[]? Bytes
+        {
+            get => documents.TryGetValue(MusicLibraryOwner.DocumentNamespace, out var value) ? value : null;
+            set
+            {
+                if (value is null) documents.Remove(MusicLibraryOwner.DocumentNamespace);
+                else documents[MusicLibraryOwner.DocumentNamespace] = value;
+            }
+        }
         internal int Writes, Failure;
+        internal int FailAtWrite;
         internal bool FailRead, Disposed;
         internal DocumentFingerprint? ReadFingerprint;
         internal TaskCompletionSource? Entered, Release;
+        private static bool ContentNamespace(string value)
+        {
+            string prefix = MusicLibraryOwner.ScriptContentCollection + ".";
+            if (!value.StartsWith(prefix, StringComparison.Ordinal)) return false;
+            string[] parts = value[prefix.Length..].Split('.');
+            return parts.Length == 2 && parts[0].Length == 64 &&
+                parts[0].All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f') &&
+                int.TryParse(parts[1], out int index) && index >= 0 &&
+                parts[1] == index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+        private static void Namespace(string value) =>
+            Check(value == MusicLibraryOwner.DocumentNamespace || ContentNamespace(value), "Unexpected document namespace");
+        internal void Seed(string documentNamespace, byte[] bytes)
+        {
+            Namespace(documentNamespace);
+            lock (sync) documents[documentNamespace] = bytes.ToArray();
+        }
+        internal byte[] Document(string documentNamespace)
+        {
+            Namespace(documentNamespace);
+            lock (sync) return documents[documentNamespace].ToArray();
+        }
         public Task<ProtectedDocument> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
         {
-            Check(documentNamespace == MusicLibraryOwner.DocumentNamespace);
+            Namespace(documentNamespace);
             cancellationToken.ThrowIfCancellationRequested();
             lock (sync)
             {
                 if (FailRead) throw new ProtectedDocumentException(DocumentStoreError.Storage);
-                return Task.FromResult(new ProtectedDocument(Bytes?.ToArray(), ReadFingerprint ??
-                    (Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes))));
+                byte[]? bytes = documents.TryGetValue(documentNamespace, out var value) ? value.ToArray() : null;
+                var fingerprint = documentNamespace == MusicLibraryOwner.DocumentNamespace && ReadFingerprint is not null
+                    ? ReadFingerprint : bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes);
+                return Task.FromResult(new ProtectedDocument(bytes, fingerprint));
             }
         }
         public async Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected, CancellationToken cancellationToken = default)
         {
-            Check(documentNamespace == MusicLibraryOwner.DocumentNamespace);
+            Namespace(documentNamespace);
             if (Release is { } release) { Entered!.TrySetResult(); await release.Task; }
             lock (sync)
             {
-                var current = Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes);
+                byte[]? prior = documents.TryGetValue(documentNamespace, out var value) ? value : null;
+                var current = prior is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(prior);
                 if (current != expected) throw new ProtectedDocumentException(DocumentStoreError.Conflict);
-                int failure = Failure; Failure = 0; Writes++;
+                int attempt = ++Writes;
+                int failure = Failure;
+                if (FailAtWrite == attempt) { failure = 1; FailAtWrite = 0; }
+                Failure = 0;
                 if (failure == 1) throw new ProtectedDocumentException(DocumentStoreError.Storage);
-                Bytes = bytes.ToArray();
+                documents[documentNamespace] = bytes.ToArray();
                 if (failure == 2) throw new ProtectedDocumentException(DocumentStoreError.Storage);
-                return DocumentFingerprint.FromBytes(Bytes);
+                return DocumentFingerprint.FromBytes(documents[documentNamespace]);
             }
         }
         internal JsonObject Root => JsonNode.Parse(Bytes!)!.AsObject();
@@ -158,7 +197,7 @@ public static class MusicNativeLibraryTests
         var q = await Ok(owner, "music.queue.get"); Check(q.GetProperty("total").GetInt32() == 0 && q.GetProperty("mode").GetInt32() == 1);
         await Ok(owner, "music.history.get"); await Ok(owner, "music.settings.get");
         var sources = await owner.ReadSourceMetadataAsync();
-        Check(sources.State.GetProperty("schema").GetInt32() == 3 && sources.State.GetProperty("revision").GetInt64() == 0 &&
+        Check(sources.State.GetProperty("schema").GetInt32() == 4 && sources.State.GetProperty("revision").GetInt64() == 0 &&
             sources.State.GetProperty("installations").GetArrayLength() == 0);
         Check(!(await owner.ReadSourceScriptDataAsync("test-install-a", 0)).Sites.EnumerateObject().Any());
         Check(f.Store.Bytes is null && f.Store.Writes == 0);
@@ -361,9 +400,22 @@ public static class MusicNativeLibraryTests
     {
         string root = Environment.GetEnvironmentVariable("MEOWFILM_TEST_DATA_ROOT") ?? throw new InvalidOperationException("Test data root required");
         Check(Path.IsPathFullyQualified(root) && Directory.Exists(root)); string path = Path.Combine(root, "native-music-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(path);
-        await using var store = new DpapiDocumentStore(path, [MusicLibraryOwner.DocumentNamespace]);
-        await using (var first = new MusicLibraryOwner(store)) await Ok(first, "music.library.create", new { name = "DPAPI", songs = new[] { Song() } });
-        await using var second = new MusicLibraryOwner(store); Check((await Ok(second, "music.library.list")).GetProperty("total").GetInt32() == 2);
+        byte[] source = Encoding.UTF8.GetBytes("// DPAPI source\n" + new string('猫', 600_000));
+        MusicScriptContent content;
+        await using (var store = new DpapiDocumentStore(path, [MusicLibraryOwner.DocumentNamespace],
+            [MusicLibraryOwner.ScriptContentCollection]))
+        await using (var first = new MusicLibraryOwner(store))
+        {
+            await Ok(first, "music.library.create", new { name = "DPAPI", songs = new[] { Song() } });
+            content = await first.StoreScriptContentAsync(source);
+        }
+        await using var reopened = new DpapiDocumentStore(path, [MusicLibraryOwner.DocumentNamespace],
+            [MusicLibraryOwner.ScriptContentCollection]);
+        await using var second = new MusicLibraryOwner(reopened);
+        Check((await Ok(second, "music.library.list")).GetProperty("total").GetInt32() == 2);
+        byte[] restored = await second.ReadScriptContentAsync(content.Sha256, content.Length);
+        try { Check(source.SequenceEqual(restored)); }
+        finally { CryptographicOperations.ZeroMemory(restored); CryptographicOperations.ZeroMemory(source); }
     }
     private static async Task UnknownCommit(bool committed)
     {
@@ -479,24 +531,33 @@ public static class MusicNativeLibraryTests
     }
     private static JsonObject CurrentSources() => new()
     {
-        ["schema"] = 3,
+        ["schema"] = 4,
         ["revision"] = 1,
         ["installations"] = new JsonArray(Installation())
     };
     private static async Task SourceSnapshots()
     {
         var sources = CurrentSources(); sources["revision"] = 7;
+        byte[] currentBytes = Encoding.UTF8.GetBytes("// current source\n// 中文 header and stable bytes");
+        byte[] previousBytes = Encoding.UTF8.GetBytes("// previous source");
+        var currentContent = new MusicScriptContent(Convert.ToHexStringLower(SHA256.HashData(currentBytes)), currentBytes.Length);
+        var previousContent = new MusicScriptContent(Convert.ToHexStringLower(SHA256.HashData(previousBytes)), previousBytes.Length);
         var item = sources["installations"]![0]!.AsObject();
-        item["current"]!["source"] = "// current source\n// 中文 header and stable bytes";
+        item["current"]!["sourceHash"] = currentContent.Sha256;
+        item["current"]!["sourceBytes"] = currentContent.Length;
         item["current"]!["version"] = "2.3";
         item["previous"] = item["current"]!.DeepClone();
-        item["previous"]!["source"] = "// previous source";
+        item["previous"]!["sourceHash"] = previousContent.Sha256;
+        item["previous"]!["sourceBytes"] = previousContent.Length;
         item["previous"]!["version"] = "1.8";
         item["previous"]!["permissions"]!["storage"] = new JsonArray("read");
         var disabled = Installation("test-install-b", false);
         disabled["current"]!["permissions"]!["storage"] = new JsonArray();
         sources["installations"]!.AsArray().Add(disabled);
-        await using var f = new Fixture(); f.Store.Bytes = Document(
+        await using var f = new Fixture();
+        f.Store.Seed(ContentKey(currentContent.Sha256, 0), currentBytes);
+        f.Store.Seed(ContentKey(previousContent.Sha256, 0), previousBytes);
+        f.Store.Bytes = Document(
             ("lx-installations", sources),
             ("library", CurrentLibraryState()), ("queue", CurrentQueue()), ("history", CurrentHistory()),
             ("online-settings", O(new { schema = 2, revision = 3, lyrics = false, target = new { installationId = "test-install-a", platform = "wy" } })),
@@ -519,6 +580,18 @@ public static class MusicNativeLibraryTests
         Check((await restored.ReadSourceScriptDataAsync("test-install-a", 7)).Sha256 == before.Sha256);
         Check((await restored.ReadSourceScriptDataAsync("test-install-b", 7)).Sites.GetProperty("wy")
             .GetProperty("values")[0].GetProperty("value").GetString() == "source-b");
+        byte[] currentSource = await restored.ReadScriptContentAsync(currentContent.Sha256, currentContent.Length);
+        byte[] previousSource = await restored.ReadScriptContentAsync(previousContent.Sha256, previousContent.Length);
+        try
+        {
+            Check(currentSource.SequenceEqual(currentBytes));
+            Check(previousSource.SequenceEqual(previousBytes));
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(currentSource);
+            CryptographicOperations.ZeroMemory(previousSource);
+        }
         Check(f.Store.Writes == 0 && original.SequenceEqual(f.Store.Bytes!));
     }
     private static async Task DeclaredSiteStorage()
@@ -612,12 +685,26 @@ public static class MusicNativeLibraryTests
         Check((await Ok(o, "music.library.list")).GetProperty("total").GetInt32() == 2);
         await o.DisposeAsync(); Check(!f.Store.Disposed); await Error(o, "music.queue.get", null, "CLOSED");
     }
-    private static JsonObject Installation(string id = "test-install-a", bool enabled = true) => O(new
+    private const string SyntheticSource = "// synthetic inert fixture; never executed";
+    private static MusicScriptContent Content(string source)
     {
-        id, name = "Synthetic source", enabled, previous = (object?)null,
-        current = new { source = "// synthetic inert fixture; never executed", version = "1",
-            permissions = new { storage = new[] { "read", "write" } } }
-    });
+        byte[] bytes = Encoding.UTF8.GetBytes(source);
+        try { return new(Convert.ToHexStringLower(SHA256.HashData(bytes)), bytes.Length); }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
+    }
+    private static string ContentKey(string hash, int index) =>
+        $"{MusicLibraryOwner.ScriptContentCollection}.{hash}.{index.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+    private static JsonObject Installation(string id = "test-install-a", bool enabled = true,
+        MusicScriptContent? content = null)
+    {
+        content ??= Content(SyntheticSource);
+        return O(new
+        {
+            id, name = "Synthetic source", enabled, previous = (object?)null,
+            current = new { sourceHash = content.Sha256, sourceBytes = content.Length, version = "1",
+                permissions = new { storage = new[] { "read", "write" } } }
+        });
+    }
     private static async Task<MusicSourceMetadataSnapshot> Install(MusicLibraryOwner o, params JsonObject[] items)
     {
         var current = await o.ReadSourceMetadataAsync(); var state = Parsed(current.State); state["revision"] = state["revision"]!.GetValue<long>() + 1;
@@ -695,7 +782,7 @@ public static class MusicNativeLibraryTests
         await Throws(expected, async () => await owner.CommitScriptValueAsync(
             "test-install-a", "wy", "key", 0, E("value"), false));
         await Throws(expected, async () => await owner.CommitSourceMetadataAsync(
-            E(new { schema = 3, revision = 0, installations = Array.Empty<object>() }), new string('0', 64)));
+            E(new { schema = 4, revision = 0, installations = Array.Empty<object>() }), new string('0', 64)));
         await Throws(expected, async () => await owner.ReadLibrarySyncAsync());
         Check(f.Store.Writes == 0 && original.SequenceEqual(f.Store.Bytes!), "Non-current data changed");
     }
@@ -776,9 +863,13 @@ public static class MusicNativeLibraryTests
         {
             Changed(sources, state => state["schema"] = 1),
             Changed(sources, state => state["schema"] = 2),
-            Changed(sources, state => state["schema"] = 4),
-            Changed(sources, state => state["schema"] = "3"),
+            Changed(sources, state => state["schema"] = 3),
+            Changed(sources, state => state["schema"] = 5),
+            Changed(sources, state => state["schema"] = "4"),
             Changed(sources, state => state["installations"]![0]!["current"]!["config"] = new JsonObject()),
+            Changed(sources, state => state["installations"]![0]!["current"]!["sourceHash"] = new string('0', 63)),
+            Changed(sources, state => state["installations"]![0]!["current"]!["sourceBytes"] = 0),
+            Changed(sources, state => state["installations"]![0]!["current"]!["source"] = SyntheticSource),
             Changed(sources, state => state["installations"]![0]!["current"]!["permissions"]!["unsupported"] = new JsonArray()),
             Changed(sources, state => state["installations"]![0]!["current"]!["permissions"]!.AsObject().Remove("storage")),
             Changed(sources, state => state["installations"]![0]!["previous"]!["permissions"]!["storage"] = new JsonArray("read", "read")),
@@ -808,13 +899,37 @@ public static class MusicNativeLibraryTests
     }
     private static async Task SourceBudget()
     {
-        await using var f = new Fixture(); var o = f.Owner(); var item = Installation();
-        item["current"]!["source"] = "//" + new string('x', 300000);
-        await Install(o, item); await o.DisposeAsync();
-        var other = f.Owner(); var read = await other.ReadSourceMetadataAsync();
-        Check(read.State.GetProperty("installations")[0].GetProperty("current").GetProperty("source").GetString() == item["current"]!["source"]!.GetValue<string>());
-        var tooLarge = Parsed(read.State); tooLarge["revision"] = 2; tooLarge["installations"]![0]!["current"]!["source"] = new string('x', 512 * 1024 + 1);
-        int writes = f.Store.Writes; await Throws("LIMIT", async () => await other.CommitSourceMetadataAsync(E(tooLarge), read.Sha256)); Check(writes == f.Store.Writes);
+        await using var f = new Fixture(); var owner = f.Owner();
+        byte[] source = Encoding.UTF8.GetBytes("// large source\n" + new string('猫', 900_000));
+        var content = await owner.StoreScriptContentAsync(source);
+        Check(content.Length == source.Length &&
+            content.Sha256 == Convert.ToHexStringLower(SHA256.HashData(source)));
+        var metadata = await owner.ReadSourceMetadataAsync();
+        var next = Parsed(metadata.State); next["revision"] = 1;
+        next["installations"]!.AsArray().Add(Installation(content: content));
+        await owner.CommitSourceMetadataAsync(E(next), metadata.Sha256);
+        await owner.DisposeAsync();
+        var reopened = f.Owner();
+        byte[] restored = await reopened.ReadScriptContentAsync(content.Sha256, content.Length);
+        try { Check(source.SequenceEqual(restored)); }
+        finally { CryptographicOperations.ZeroMemory(restored); }
+
+        int beforeInterrupted = f.Store.Writes;
+        byte[] interrupted = Encoding.UTF8.GetBytes("// interrupted\n" + new string('中', 800_000));
+        f.Store.FailAtWrite = beforeInterrupted + 2;
+        await Throws("STORAGE_ERROR", async () => await reopened.StoreScriptContentAsync(interrupted));
+        Check((await reopened.ReadSourceMetadataAsync()).State.GetProperty("revision").GetInt64() == 1);
+        var resumed = await reopened.StoreScriptContentAsync(interrupted);
+        Check(resumed.Sha256 == Convert.ToHexStringLower(SHA256.HashData(interrupted)));
+
+        byte[] corrupt = f.Store.Document(ContentKey(content.Sha256, 0));
+        corrupt[0] ^= 0xff;
+        f.Store.Seed(ContentKey(content.Sha256, 0), corrupt);
+        await Throws("CORRUPT_STORAGE", async () => await reopened.ReadScriptContentAsync(content.Sha256, content.Length));
+        await Throws("CORRUPT_STORAGE", async () => await reopened.StoreScriptContentAsync(source));
+        CryptographicOperations.ZeroMemory(corrupt);
+        CryptographicOperations.ZeroMemory(interrupted);
+        CryptographicOperations.ZeroMemory(source);
     }
     private static JsonObject Sites(string value) => O(new { wy = new { schema = 1, values = new[] { new { key = "shared-key", value } } } });
     private static JsonObject NextMetadata(MusicSourceMetadataSnapshot old)

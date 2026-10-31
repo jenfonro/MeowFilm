@@ -83,22 +83,24 @@ playback-settings
 
 脚本私有 area 使用当前安装实例和站点构成的精确 key；每个实例最多 32 个有界站点标识，不存在实例、非法标识或重复 key 均拒绝。
 
-`lx-installations` 唯一当前格式为 schema 3：
+`lx-installations` 唯一当前格式为 schema 4：
 
 ```json
 {
-  "schema": 3,
+  "schema": 4,
   "revision": 0,
   "installations": []
 }
 ```
 
 - 最多 32 个安装实例。
-- 每个 `current`／`previous` 只包含 `source`、`version`、`permissions`。
+- 每个 `current`／`previous` 只包含 `sourceHash`、`sourceBytes`、`version`、`permissions`。
 - `permissions` 仅含 `storage`，值为不重复的 `read`／`write` 数组。
-- 单脚本最多 512 KiB，全部源元数据最多 3 MiB。
+- metadata 总量最多 3 MiB；不设置人为整份脚本大小上限。
+- 源码位于受保护 collection `music.script-sources.v1`，按 1 MiB、内容 hash 和 chunk index 保存为不可变字节。发布 metadata 前必须已完整写入；读取核对每片 fingerprint、长度和整份 hash。
+- 中断或并发的相同不可变分片写入可通过读回相同字节结算；冲突或损坏明确失败。未被 metadata 引用的内容不会被静默删除或当作安装实例。
 - 禁用或删除当前播放目标时，在同一文档 CAS 中把 `online-settings.target` 置空并推进其 revision。
-- 读取不写入文档；不符合当前格式的源记录明确失败，不迁移、转换、删除或回退。
+- 读取不写入文档；schema 3、内联源码和其他不符合当前格式的记录明确失败，不迁移、转换、删除或回退。
 
 ## 曲库当前格式
 

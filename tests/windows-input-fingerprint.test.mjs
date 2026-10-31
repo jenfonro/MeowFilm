@@ -9,6 +9,7 @@ test('Windows input inventory covers shared packaging, locked configuration and 
   for (const path of [
     'scripts/package-runtime.mjs', 'scripts/test-root.mjs', 'scripts/windows/test.ps1',
     'scripts/quickjs-runtime.json', 'apps/runtime/modules/music-script.mjs',
+    'apps/runtime/modules/cat-script.mjs',
     'apps/windows/NuGet.Config', 'apps/windows/global.json',
     'LICENSES/node-LICENSE.txt',
     'LICENSES/NOTICE.md',

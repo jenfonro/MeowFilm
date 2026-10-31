@@ -10,6 +10,8 @@ createMusicScriptModule({
   hostFactory = createScriptHost,
   network = createNodeNetwork(),
   clock = Date.now,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
 })
 ```
 
@@ -17,7 +19,7 @@ createMusicScriptModule({
 
 ```text
 id: music
-version: 0.5.0
+version: 0.6.0
 contract: music.script.v2
 ```
 
@@ -41,10 +43,10 @@ contract: music.script.v2
 ## 暂存与加载
 
 - basename 只允许单个 `.js` 文件名，不允许路径。
-- 单源码最多 512 KiB；最多两份暂存，总计最多 1 MiB。
+- 不设置人为整份源码字节或活动暂存 token 数量上限；未完成暂存仅按超时、显式取消和模块关闭回收，实际分配失败按资源错误处理。
 - 分片最多 64 KiB，必须连续，长度和小写规范 SHA-256 必须一致。
 - 完成后严格 UTF-8 解码，不接受替换字符或非规范字节。
-- 暂存五分钟后在下一次暂存访问时惰性失效，不创建 timer 或 worker；失效 token 返回 `STAGE_NOT_FOUND`。
+- 暂存从创建或最近一次有效分片起五分钟后由单个主动 timer 回收；timer 重排以 generation 隔离陈旧回调，模块关闭时同步取消并清空全部暂存。失效 token 返回 `STAGE_NOT_FOUND`。
 - stage 是一次加载事务的临时字节容器，不是持久记录或文档桥。
 
 `load` 必须包含：

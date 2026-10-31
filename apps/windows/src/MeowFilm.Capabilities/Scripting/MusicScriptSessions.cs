@@ -1,5 +1,5 @@
 using System.Security.Cryptography;
-using System.Text;
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
@@ -31,9 +31,11 @@ public sealed partial class MusicScriptOwner
         finally { storageGate.Release(); }
         string? transfer = null;
         bool loadAttempted = false, committed = false;
-        byte[] bytes = Encoding.UTF8.GetBytes(LJ.S(selected["current"]!["source"]));
+        byte[] bytes = [];
         try
         {
+            bytes = await library.ReadScriptContentAsync(LJ.S(selected["current"]!["sourceHash"]),
+                (int)LJ.I(selected["current"]!["sourceBytes"], 1, Array.MaxLength), token).ConfigureAwait(false);
             string hash = LJ.Hash(bytes);
             var stage = await ScriptAsync("stage.begin", new { basename = "source.js", length = bytes.Length, sha256 = hash }, token).ConfigureAwait(false);
             transfer = LJ.Text(stage["token"]); int chunkBytes = (int)LJ.I(stage["chunkBytes"], 1, 65536);
@@ -309,8 +311,12 @@ public sealed partial class MusicScriptOwner
             closed = true; lifetime.Cancel();
             foreach (var operation in onlineOperations.ToArray()) operation.Cancel();
         }
+        Exception? failure = null;
         try { await PrepareShutdownAsync().ConfigureAwait(false); }
-        finally { transfers.Dispose(); }
+        catch (Exception error) { failure = error; }
+        try { transfers.Dispose(); }
+        catch (Exception error) { failure ??= error; }
+        if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
         // Store, runtime and library lifetimes are owned by the App.
     }
 }

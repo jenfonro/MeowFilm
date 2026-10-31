@@ -405,7 +405,8 @@ test('uncooperative adapter tasks stay visible after bounded close, then retire 
       lx.request('https://fixture.invalid/pending',{},(e,r,b)=>e?reject(e):resolve(b)))` }) });
   const rejected = assert.rejects(host.invoke(target()), { code: 'STALE_SESSION' });
   await entered.promise;
-  const closed = await host.close();
+  const closing = host.close();
+  const closed = await closing;
   await rejected;
   assert.equal(closed.liveSessions, 0);
   assert.equal(closed.networkRequests, 0);
@@ -414,7 +415,8 @@ test('uncooperative adapter tasks stay visible after bounded close, then retire 
   finish.resolve({ statusCode: 200, body: 'late' });
   await turn();
   assert.equal(host.stats().pendingAdapterTasks, 0);
-  assert.equal((await host.close()).cleanupComplete, true);
+  assert.equal(host.close(), closing);
+  assert.deepEqual(await host.close(), closed);
 });
 
 test('timer/network handle budgets fail explicitly and release request-owned handles', async t => {

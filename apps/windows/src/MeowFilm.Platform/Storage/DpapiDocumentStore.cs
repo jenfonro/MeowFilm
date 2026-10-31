@@ -23,17 +23,22 @@ public sealed class DpapiDocumentStore : IProtectedDocumentStore
     private const int EnvelopeHeaderBytes = 13, PlaintextHeaderBytes = 44;
     private readonly WindowsDocumentFiles.Root root;
     private readonly HashSet<string> namespaces;
+    private readonly HashSet<string> collections;
     private readonly SemaphoreSlim serial = new(1, 1);
     private readonly SemaphoreSlim admission = new(8, 8);
     private readonly CancellationTokenSource lifetime = new();
     private int closed;
 
-    public DpapiDocumentStore(string productRoot, IEnumerable<string> allowedNamespaces)
+    public DpapiDocumentStore(string productRoot, IEnumerable<string> allowedNamespaces,
+        IEnumerable<string>? allowedCollections = null)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Windows required.");
         try
         {
             namespaces = DocumentRules.Namespaces(allowedNamespaces);
+            collections = DocumentRules.Namespaces(allowedCollections ?? []);
+            if (collections.Any(value => value.Length > 48))
+                throw new ProtectedDocumentException(DocumentStoreError.InvalidRequest);
             root = new WindowsDocumentFiles.Root(productRoot);
         }
         catch (ProtectedDocumentException) { throw; }
@@ -95,7 +100,18 @@ public sealed class DpapiDocumentStore : IProtectedDocumentStore
     private void ValidateNamespace(string ns)
     {
         if (!DocumentRules.ValidNamespace(ns)) throw new ProtectedDocumentException(DocumentStoreError.InvalidRequest);
-        if (!namespaces.Contains(ns)) throw new ProtectedDocumentException(DocumentStoreError.Unavailable);
+        // Collection access is trusted-native only. ProtectedDocumentBridge
+        // still accepts only its separate exact namespace list.
+        bool member = collections.Any(collection =>
+        {
+            if (!ns.StartsWith(collection + ".", StringComparison.Ordinal)) return false;
+            string[] suffix = ns[(collection.Length + 1)..].Split('.');
+            return suffix.Length == 2 && DocumentRules.ValidHash(suffix[0]) &&
+                int.TryParse(suffix[1], System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture, out int index) && index >= 0 &&
+                index.ToString(System.Globalization.CultureInfo.InvariantCulture) == suffix[1];
+        });
+        if (!namespaces.Contains(ns) && !member) throw new ProtectedDocumentException(DocumentStoreError.Unavailable);
     }
 
     private SafeFileHandle AcquireRootLock(CancellationToken cancellation)

@@ -7,8 +7,6 @@ const defaults = Object.freeze({
   requestTimeoutMs: 15_000,
   cleanupTimeoutMs: 100,
   maxBytes: 2 * 1024 * 1024,
-  maxSourceBytes: 4 * 1024 * 1024,
-  maxTotalSourceBytes: 256 * 1024 * 1024,
   maxTimers: 128,
   maxNetworkRequests: 16,
   maxInstances: 32,
@@ -27,13 +25,12 @@ function permissions(raw = {}) {
   return { storage: [...new Set(storage)] };
 }
 
-function revision(spec, base, maxSourceBytes) {
+function revision(spec, base) {
   requireValue(spec && typeof spec === 'object' && !Array.isArray(spec));
   const source = spec.source ?? base?.source;
   const version = spec.version ?? base?.version ?? '0.0.0';
   const protocol = spec.protocol ?? base?.protocol ?? 'lx';
-  requireValue(typeof source === 'string' && source.trim().length > 0 &&
-    Buffer.byteLength(source) <= maxSourceBytes);
+  requireValue(typeof source === 'string' && source.trim().length > 0);
   requireValue(typeof version === 'string' && version.length > 0 && version.length <= 128);
   identifier(protocol);
   const config = clone(spec.config ?? base?.config ?? {});
@@ -45,7 +42,6 @@ function revision(spec, base, maxSourceBytes) {
   // Configuration is a JSON public contract; no functions, cycles or binary handles.
   let json;
   try { json = JSON.stringify(config); } catch { throw fault('INVALID_ARGUMENT'); }
-  requireValue(Buffer.byteLength(json) <= maxSourceBytes, 'RESOURCE_LIMIT');
   return {
     source, version, protocol,
     hash: createHash('sha256').update(source).digest('hex'),
@@ -64,13 +60,18 @@ export class ScriptHost {
   #closed = false;
   #pending = new Map();
   #cleanupIssues = new Map();
+  #closing;
 
-  constructor({ adapters, network, storage, onDiagnostic, limits = {}, ...unsupported }) {
+  constructor({ adapters, network, storage, onDiagnostic, limits = {},
+    lifecycleManagedProtocols = [], ...unsupported }) {
     requireValue(Object.keys(unsupported).length === 0);
     requireValue(adapters && typeof adapters === 'object');
     requireValue(network === undefined || typeof network === 'function');
     requireValue(storage === undefined || (storage && typeof storage === 'object'));
     requireValue(onDiagnostic === undefined || typeof onDiagnostic === 'function');
+    requireValue(Array.isArray(lifecycleManagedProtocols) &&
+      lifecycleManagedProtocols.every(protocol => typeof protocol === 'string' &&
+        Object.hasOwn(adapters, protocol)));
     requireValue(Object.keys(limits).every(k => Object.hasOwn(defaults, k)));
     this.limits = Object.freeze({ ...defaults, ...limits });
     for (const value of Object.values(this.limits)) requireValue(Number.isSafeInteger(value) && value > 0);
@@ -78,19 +79,10 @@ export class ScriptHost {
     this.network = network;
     this.storage = storage;
     this.onDiagnostic = onDiagnostic;
+    this.lifecycleManagedProtocols = new Set(lifecycleManagedProtocols);
   }
 
   #open() { requireValue(!this.#closed, 'HOST_CLOSED'); }
-  #sourceBudget(next) {
-    const revisions = new Set([next]);
-    for (const record of this.#records.values()) {
-      revisions.add(record.revision);
-      if (record.previous) revisions.add(record.previous);
-    }
-    for (const session of [...this.#sessions, ...this.#retired]) revisions.add(session.revision);
-    requireValue([...revisions].reduce((total, item) => total + Buffer.byteLength(item.source), 0) <=
-      this.limits.maxTotalSourceBytes, 'RESOURCE_LIMIT');
-  }
   #record(id) {
     identifier(id);
     const record = this.#records.get(id);
@@ -112,7 +104,12 @@ export class ScriptHost {
     return promise;
   }
   async #start(id, rev) {
-    requireValue(this.#sessions.size + this.#retired.size < this.limits.maxInstances * 2, 'RESOURCE_LIMIT');
+    const lifecycleManaged = this.lifecycleManagedProtocols.has(rev.protocol);
+    if (!lifecycleManaged) {
+      const active = [...this.#sessions].filter(session => !session.lifecycleManaged).length +
+        [...this.#retired].filter(record => !record.lifecycleManaged).length;
+      requireValue(active < this.limits.maxInstances * 2, 'RESOURCE_LIMIT');
+    }
     const factory = this.adapters[rev.protocol];
     requireValue(typeof factory === 'function', 'UNSUPPORTED_PROTOCOL');
     const generation = (this.#generations.get(id) ?? 0) + 1;
@@ -120,6 +117,7 @@ export class ScriptHost {
     const session = factory({
       installationId: id, generation, revision: rev,
       network: this.network, storage: this.storage, onDiagnostic: this.onDiagnostic, limits: this.limits,
+      lifecycleManaged,
     });
     this.#sessions.add(session);
     try {
@@ -128,26 +126,62 @@ export class ScriptHost {
       session.activate();
       return session;
     } catch (e) {
-      await this.#stop(session);
-      throw safeError(e);
+      const failure = safeError(e);
+      try { await this.#stop(session); } catch { /* Preserve the initiating failure. */ }
+      throw failure;
     }
   }
   async #stop(session) {
     if (!session) return;
-    await session.stop();
-    await session.drainAdapters();
-    const cleanupError = session.stats().cleanupError;
+    let failure;
+    try { await session.stop(); } catch (error) { failure ??= safeError(error); }
+    try { await session.drainAdapters(); } catch (error) { failure ??= safeError(error); }
+    let stats;
+    try { stats = session.stats(); } catch (error) {
+      failure ??= safeError(error);
+      stats = { cleanupError: 'SCRIPT_EXCEPTION', pendingAdapterTasks: 0 };
+    }
+    const cleanupError = stats.cleanupError;
     if (cleanupError) {
       this.#cleanupIssues.set(JSON.stringify([session.installationId, session.generation]), {
         installationId: session.installationId, generation: session.generation, code: cleanupError,
       });
-      if (this.#cleanupIssues.size > 32) this.#cleanupIssues.delete(this.#cleanupIssues.keys().next().value);
+    }
+    let retirement;
+    if (stats.pendingAdapterTasks) {
+      try {
+        const candidate = typeof session.adapterRetirement === 'function'
+          ? session.adapterRetirement() : null;
+        if (candidate && typeof candidate.pendingAdapterTasks === 'function') {
+          retirement = {
+            installationId: session.installationId,
+            generation: session.generation,
+            lifecycleManaged: session.lifecycleManaged,
+            pendingAdapterTasks: candidate.pendingAdapterTasks,
+            idle: Promise.resolve(candidate.idle),
+          };
+        } else {
+          let pending = stats.pendingAdapterTasks;
+          retirement = {
+            installationId: session.installationId,
+            generation: session.generation,
+            lifecycleManaged: session.lifecycleManaged,
+            pendingAdapterTasks: () => pending,
+            idle: Promise.resolve(session.whenAdaptersIdle()).finally(() => { pending = 0; }),
+          };
+        }
+      } catch (error) { failure ??= safeError(error); }
     }
     this.#sessions.delete(session);
-    if (session.stats().pendingAdapterTasks) {
-      this.#retired.add(session);
-      session.whenAdaptersIdle().then(() => this.#retired.delete(session));
+    if (retirement) {
+      this.#retired.add(retirement);
+      const hostRef = new WeakRef(this);
+      retirement.idle.finally(() => {
+        const host = hostRef.deref();
+        if (host) host.#retired.delete(retirement);
+      }).catch(() => {});
     }
+    if (failure) throw failure;
   }
   #snapshot(record) {
     const session = record.session;
@@ -168,13 +202,16 @@ export class ScriptHost {
   install(spec) {
     requireValue(spec && typeof spec === 'object');
     const id = identifier(spec.installationId);
-    const rev = revision(spec, null, this.limits.maxSourceBytes);
+    const rev = revision(spec);
     requireValue(Object.hasOwn(this.adapters, rev.protocol), 'UNSUPPORTED_PROTOCOL');
     requireValue(spec.enabled === undefined || typeof spec.enabled === 'boolean');
     return this.#locked(id, async () => {
       requireValue(!this.#records.has(id), 'ALREADY_EXISTS');
-      this.#sourceBudget(rev);
-      requireValue(this.#records.size < this.limits.maxInstances, 'RESOURCE_LIMIT');
+      if (!this.lifecycleManagedProtocols.has(rev.protocol)) {
+        const installations = [...this.#records.values()]
+          .filter(item => !this.lifecycleManagedProtocols.has(item.revision.protocol)).length;
+        requireValue(installations < this.limits.maxInstances, 'RESOURCE_LIMIT');
+      }
       const record = { id, revision: rev, enabled: false, session: null, previous: null };
       // Import does not execute code by default; enable is an explicit operation.
       this.#records.set(id, record);
@@ -190,7 +227,10 @@ export class ScriptHost {
     return this.#locked(id, async () => {
       const record = this.#record(id);
       if (!record.session?.live) {
-        await this.#stop(record.session);
+        const previous = record.session;
+        record.session = null;
+        record.enabled = false;
+        await this.#stop(previous);
         try {
           record.session = await this.#start(id, record.revision);
           record.enabled = true;
@@ -205,14 +245,21 @@ export class ScriptHost {
     return this.#locked(id, async () => {
       const record = this.#record(id);
       record.enabled = false;
-      await this.#stop(record.session);
+      const session = record.session;
       record.session = null;
+      await this.#stop(session);
       return this.#snapshot(record);
     });
   }
 
   async #replace(record, next) {
-    this.#sourceBudget(next);
+    if (!this.lifecycleManagedProtocols.has(next.protocol) &&
+      this.lifecycleManagedProtocols.has(record.revision.protocol)) {
+      const installations = [...this.#records.values()]
+        .filter(item => item !== record &&
+          !this.lifecycleManagedProtocols.has(item.revision.protocol)).length;
+      requireValue(installations < this.limits.maxInstances, 'RESOURCE_LIMIT');
+    }
     const old = record.session;
     let session = null;
     if (record.enabled) {
@@ -236,7 +283,7 @@ export class ScriptHost {
     const proposal = clone(spec);
     return this.#locked(id, () => {
       const record = this.#record(id);
-      const next = revision(proposal, record.revision, this.limits.maxSourceBytes);
+      const next = revision(proposal, record.revision);
       requireValue(Object.hasOwn(this.adapters, next.protocol), 'UNSUPPORTED_PROTOCOL');
       return this.#replace(record, next);
     });
@@ -256,8 +303,10 @@ export class ScriptHost {
     return this.#locked(id, async () => {
       const record = this.#record(id);
       record.enabled = false;
-      await this.#stop(record.session);
-      this.#records.delete(id);
+      const session = record.session;
+      record.session = null;
+      try { await this.#stop(session); }
+      finally { this.#records.delete(id); }
       // Retain the generation counter to prevent ABA after same-ID reinstall.
     });
   }
@@ -277,14 +326,15 @@ export class ScriptHost {
 
   async invoke(target, { signal, timeoutMs } = {}) {
     requireValue(target && typeof target === 'object');
-    identifier(target.siteId);
+    requireValue(typeof target.siteId === 'string' && target.siteId.length > 0 &&
+      target.siteId.length <= 1024 && !/[\u0000-\u001f\u007f]/.test(target.siteId));
     identifier(target.operation);
     if (timeoutMs !== undefined) {
       requireValue(Number.isSafeInteger(timeoutMs) && timeoutMs > 0 &&
         timeoutMs <= this.limits.requestTimeoutMs);
     }
     const record = this.#target(target);
-    const release = this.#reserveRequest(record.id, target.siteId);
+    const release = this.#reserveRequest(record.id, target.siteId, !record.session.lifecycleManaged);
     try {
       return await record.session.invoke({
         siteId: target.siteId, operation: target.operation, payload: clone(target.payload ?? {}),
@@ -292,14 +342,16 @@ export class ScriptHost {
     } finally { release(); }
   }
 
-  #reserveRequest(id, siteId) {
+  #reserveRequest(id, siteId, enforceLimit = true) {
     this.#open();
-    const instanceCount = [...this.#pending.values()].filter(v => v.id === id).length;
-    const siteCount = [...this.#pending.values()]
-      .filter(v => v.id === id && v.siteId === siteId).length;
-    requireValue(this.#pending.size < this.limits.maxInFlight &&
-      instanceCount < this.limits.maxInstanceInFlight && siteCount < this.limits.maxSiteInFlight,
-    'RESOURCE_LIMIT');
+    if (enforceLimit) {
+      const instanceCount = [...this.#pending.values()].filter(v => v.id === id).length;
+      const siteCount = [...this.#pending.values()]
+        .filter(v => v.id === id && v.siteId === siteId).length;
+      requireValue(this.#pending.size < this.limits.maxInFlight &&
+        instanceCount < this.limits.maxInstanceInFlight && siteCount < this.limits.maxSiteInFlight,
+      'RESOURCE_LIMIT');
+    }
     const token = Symbol();
     this.#pending.set(token, { id, siteId });
     return () => this.#pending.delete(token);
@@ -312,8 +364,9 @@ export class ScriptHost {
       activeRequests: this.#pending.size,
       timers: [...this.#sessions].reduce((sum, s) => sum + s.stats().timers, 0),
       networkRequests: [...this.#sessions].reduce((sum, s) => sum + s.stats().networkRequests, 0),
-      pendingAdapterTasks: [...this.#sessions, ...this.#retired]
-        .reduce((sum, s) => sum + s.stats().pendingAdapterTasks, 0),
+      pendingAdapterTasks: [...this.#sessions]
+        .reduce((sum, s) => sum + s.stats().pendingAdapterTasks, 0) +
+        [...this.#retired].reduce((sum, record) => sum + record.pendingAdapterTasks(), 0),
       cleanupIssues: [...this.#cleanupIssues.values()].map(clone),
     };
   }
@@ -322,16 +375,40 @@ export class ScriptHost {
   // must not make a successful install/update falsely report cleanup failure.
   cleanupPending(installationId) {
     identifier(installationId);
-    return [...this.#retired].filter(s => s.installationId === installationId)
-      .reduce((sum, s) => sum + s.stats().pendingAdapterTasks, 0);
+    return [...this.#retired].filter(record => record.installationId === installationId)
+      .reduce((sum, record) => sum + record.pendingAdapterTasks(), 0);
   }
 
-  async close() {
-    this.#closed = true;
-    for (const record of this.#records.values()) record.enabled = false;
-    await Promise.all([...this.#sessions].map(s => this.#stop(s)));
-    await Promise.allSettled([...this.#locks.values()]);
-    return { ...this.stats(),
-      cleanupComplete: this.stats().pendingAdapterTasks === 0 && this.#cleanupIssues.size === 0 };
+  close() {
+    if (this.#closing) return this.#closing;
+    this.#closing = (async () => {
+      this.#closed = true;
+      for (const record of this.#records.values()) record.enabled = false;
+      let failure;
+      const stopAll = async () => {
+        const results = await Promise.allSettled([...this.#sessions].map(session => this.#stop(session)));
+        for (const result of results)
+          if (result.status === 'rejected') failure ??= safeError(result.reason);
+      };
+      await stopAll();
+      await Promise.allSettled([...this.#locks.values()]);
+      // A lifecycle operation that had already passed #open() can publish a
+      // session after the first snapshot. Its lock is now settled, so drain it
+      // in the same close operation rather than leaving an unowned session.
+      await stopAll();
+      this.#records.clear();
+      this.#generations.clear();
+      this.#pending.clear();
+      this.#locks.clear();
+      const stats = this.stats();
+      const result = { ...stats,
+        cleanupComplete: stats.pendingAdapterTasks === 0 && this.#cleanupIssues.size === 0 };
+      this.#sessions.clear();
+      this.#retired.clear();
+      this.#cleanupIssues.clear();
+      if (failure) throw failure;
+      return result;
+    })();
+    return this.#closing;
   }
 }

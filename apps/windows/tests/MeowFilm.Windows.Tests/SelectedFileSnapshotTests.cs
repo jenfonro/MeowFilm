@@ -19,7 +19,7 @@ internal sealed class SelectedSnapshotCases(bool script)
 {
     private string Extension => script ? ".js" : ".json";
     private string Prefix => script ? "selected-script." : "selected-json.";
-    private int MaximumBytes => script ? SelectedScriptSnapshot.MaximumBytes : SelectedJsonSnapshot.MaximumBytes;
+    private int MaximumBytes => script ? Array.MaxLength : SelectedJsonSnapshot.MaximumBytes;
     private static Type SharedType => typeof(SelectedJsonSnapshot).Assembly.GetType("MeowFilm.Platform.Files.SelectedFileSnapshot", throwOnError: true)!;
     private sealed record Data(byte[] Bytes, string Sha256, string Basename);
     private async Task<Data> ReadAsync(string path, CancellationToken token = default)
@@ -109,11 +109,11 @@ internal sealed class SelectedSnapshotCases(bool script)
         yield return new(Prefix + "contract.dto-and-fixed-errors", Contract);
         yield return new(Prefix + "exact-bytes-sha-basename-owned", Exact);
         yield return new(Prefix + "empty-and-invalid-content-remain-bytes", OpaqueBytes);
-        yield return new(Prefix + (script ? "maximum-512-kib" : "maximum-eight-mib"), Maximum);
+        yield return new(Prefix + (script ? "former-512-kib-gate-removed" : "maximum-eight-mib"), Maximum);
         yield return new(Prefix + "extension-policies-do-not-overlap", ExtensionPolicy);
         yield return new(Prefix + "no-ui-synchronization-context-capture", UiContext);
         yield return new(Prefix + "raw-script-is-not-executed", ScriptNotExecuted);
-        yield return new(Prefix + "oversize-rejected-source-unchanged", Oversize);
+        if (!script) yield return new(Prefix + "oversize-rejected-source-unchanged", Oversize);
         yield return new(Prefix + "missing-source-and-parent", Missing);
         yield return new(Prefix + "existing-writer-rejected", ExistingWriter);
         yield return new(Prefix + "metadata-change-rejected", MetadataChange);
@@ -123,7 +123,11 @@ internal sealed class SelectedSnapshotCases(bool script)
 
     private Task Contract()
     {
-        Equal(script ? 512 * 1024 : 8 * 1024 * 1024, MaximumBytes);
+        if (script)
+            Assert(typeof(SelectedScriptSnapshot).GetField("MaximumBytes",
+                BindingFlags.Public | BindingFlags.Static) is null,
+                "Script selection must not publish an application source-size gate.");
+        else Equal(8 * 1024 * 1024, MaximumBytes);
         string[] properties = (script ? typeof(SelectedScriptSnapshotData) : typeof(SelectedJsonSnapshotData)).GetProperties().Select(property => property.Name).Order().ToArray();
         Assert(properties.SequenceEqual(new[] { "Basename", "Bytes", "Sha256" }), "Snapshot exposes an unexpected property.");
         foreach (var code in Enum.GetValues<SelectedJsonSnapshotError>())
@@ -238,11 +242,12 @@ internal sealed class SelectedSnapshotCases(bool script)
     private async Task Maximum()
     {
         using var fixture = new Temp(Extension);
-        byte[] data = new byte[MaximumBytes];
+        int length = script ? 2 * 1024 * 1024 + 17 : MaximumBytes;
+        byte[] data = new byte[length];
         for (int i = 0; i < data.Length; i++) data[i] = (byte)(i * 31 + 7);
         string path = fixture.Write("maximum" + Extension, data);
         var result = await ReadAsync(path);
-        Equal(MaximumBytes, result.Bytes.Length);
+        Equal(length, result.Bytes.Length);
         Bytes(data, result.Bytes);
         Equal(Hash(data), result.Sha256);
         fixture.AssertReleased(path);

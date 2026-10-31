@@ -66,6 +66,7 @@ function fixture(t) {
   write(policy.license.path, readFileSync(join(repository, policy.license.path)));
   write('apps/runtime/bootstrap.mjs', inert);
   write('apps/runtime/modules/music-script.mjs', inert);
+  write('apps/runtime/modules/cat-script.mjs', inert);
   for (const file of ['bootstrap.mjs', 'entries/aggregate.mjs'])
     write(`apps/windows/runtime/${file}`, readFileSync(join(repository, 'apps/windows/runtime', file)));
   const saveLock = () => write('package-lock.json', lock);
@@ -111,7 +112,8 @@ test('engine packaging pins real lock/manifest/license/WASM bytes without execut
     assert.equal(dependency.licenseSha256, hash(readFileSync(join(f.output, dependency.path, 'LICENSE'))));
   }
   for (const path of [policyPath, policy.license.path, wasmPath,
-    'apps/runtime/bootstrap.mjs', 'apps/runtime/modules/music-script.mjs']) {
+    'apps/runtime/bootstrap.mjs', 'apps/runtime/modules/music-script.mjs',
+    'apps/runtime/modules/cat-script.mjs']) {
     assert.deepEqual(manifest.inputs.find(input => input.path === path), {
       path, sha256: hash(readFileSync(join(f.root, path))),
     });
@@ -280,12 +282,15 @@ test('Windows wrapper relocates its entry onto the same common module/engine clo
   const manifest = await packageWindowsRuntime({ ...f, product: 'aggregate' });
   assert.equal(manifest.status, 'complete');
   assert.deepEqual(manifest.files.filter(file => file.path.startsWith('app/')).map(file => file.path), [
-    'app/bootstrap.mjs', 'app/modules/music-script.mjs',
+    'app/bootstrap.mjs', 'app/modules/cat-script.mjs', 'app/modules/music-script.mjs',
     'app/windows/bootstrap.mjs', 'app/windows/entries/aggregate.mjs',
   ]);
   assert.deepEqual(readFileSync(join(f.output, 'app/modules/music-script.mjs')),
     readFileSync(join(f.root, 'apps/runtime/modules/music-script.mjs')));
+  assert.deepEqual(readFileSync(join(f.output, 'app/modules/cat-script.mjs')),
+    readFileSync(join(f.root, 'apps/runtime/modules/cat-script.mjs')));
   assert.ok(readFileSync(join(f.output, manifest.entry), 'utf8').includes("from '../../modules/music-script.mjs'"));
+  assert.ok(readFileSync(join(f.output, manifest.entry), 'utf8').includes("from '../../modules/cat-script.mjs'"));
   assert.deepEqual(manifest.files.filter(file => /\.wasm$/i.test(file.path)).map(file => file.path), [wasmPath]);
 });
 

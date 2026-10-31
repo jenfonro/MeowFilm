@@ -158,6 +158,28 @@ public song metadata mapper):
 - `src/renderer/utils/musicSdk/kw/{musicSearch,songList,util,index,lyric}.js`
 - `src/renderer/utils/musicSdk/mg/{musicSearch,songList,musicInfo}.js` and `utils/index.js`
 
+## catpawrunner — MIT
+
+- Source: `hjdhnx/catpawrunner` `a7b29ea3ed9bcc05fa94105013d8f807f13152b8`.
+- Package metadata author: 道长. The reviewed checkout declares MIT in `package.json`
+  and does not contain a standalone license file.
+- License: `catpawrunner-MIT.txt`.
+
+Adapted portions:
+
+- Cat startup and service compatibility were informed by `src/util/onlineRuntime.js`, but
+  were rewritten for the QuickJS guest, finite Node-style capability bridge, installation
+  private volume and per-instance loopback listener. The original unrestricted host
+  `require`, `fs`, `process`, child process and VM execution path is not copied.
+- Management protocol discovery and field mapping in `cat-management.js` adapt the route
+  families represented by `src/plugins/api/onlineScriptAdapters.js`; requests go directly
+  to the selected installation's current managed endpoint.
+- Provider capture, Cat root-level extension and display metadata behavior in
+  `pan-interceptor.js` and `cat-output.js` were informed by
+  `runtimePanCapture.js`, `panmockDetailCodec.js` and `panDisplayMeta.js`.
+  Provider login, list, transfer, direct-link and playback SDK implementations are not
+  copied into the runner.
+
 ## Node.js
 
 The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
@@ -178,6 +200,22 @@ The unmodified release-sync `dist/emscripten-module.wasm` is the only permitted
 script-engine binary. Its exact package manifest, registry URL/integrity, license,
 length and SHA-256 are pinned in `scripts/quickjs-runtime.json`; no debug/asyncify
 engine variant or upstream reference script is bundled.
+
+## Node compatibility npm dependencies
+
+The Cat finite Node-style bridge bundles the exact dependency closure recorded in
+`package-lock.json`. Each packaged npm directory retains its own original license file.
+The direct non-engine packages are `@opentelemetry/api` 1.9.0, `acorn` 8.15.0, `buffer` 6.0.3,
+`events` 3.3.0, `path-browserify` 1.0.1, `readable-stream` 4.7.0,
+`supports-color` 8.1.1 and `util` 0.12.5.
+
+Acorn parses constant route declarations inside the QuickJS guest only when a
+script does not expose framework route registration. It does not execute source.
+
+- Apache-2.0 package text: `Apache-2.0.txt`.
+- MIT package notices and texts: `npm-node-compat-MIT.txt`.
+- BSD-3-Clause package text: `npm-node-compat-BSD-3-Clause.txt`.
+- ISC package text: `npm-node-compat-ISC.txt`.
 
 ## QR Code generator — MIT
 

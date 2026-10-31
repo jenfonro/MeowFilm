@@ -149,7 +149,7 @@ function callback(installationId, generation, siteId = 'kw', extra = {}) {
 
 test('descriptor exposes only eight script RPCs, factory injection and enveloped close', async t => {
   const { module, rpc } = setup(t);
-  assert.equal(module.id, 'music'); assert.equal(module.version, '0.5.0');
+  assert.equal(module.id, 'music'); assert.equal(module.version, '0.6.0');
   assert.deepEqual(Object.keys(module.methods).sort(), [
     'stage.begin', 'stage.chunk', 'stage.abort', 'load', 'unload', 'invoke', 'status', 'close',
   ].map(name => `music.script.${name}`).sort());
@@ -165,20 +165,77 @@ test('descriptor exposes only eight script RPCs, factory injection and enveloped
   denied(await rpc('status'), 'CLOSED');
 });
 
-test('stage limits are two 512KiB sources/1MiB total, expire lazily and abort idempotently', async t => {
+test('stage lifecycle has no whole-source byte or active-token quota', async t => {
   let now = 0;
   const { rpc } = setup(t, { clock: () => now });
   const begin = length => rpc('stage.begin', { basename: 'fixture.js', length, sha256: hash('x') });
-  denied(await begin(limit + 1), 'LIMIT');
   denied(await begin(0), 'INVALID_REQUEST');
-  const a = okay(await begin(limit)).token, b = okay(await begin(limit)).token;
-  denied(await begin(1), 'LIMIT');
-  okay(await rpc('stage.abort', { token: a })); okay(await rpc('stage.abort', { token: a }));
-  const c = okay(await begin(limit)).token;
+  const large = 8 * 1024 * 1024 + 1;
+  const tokens = [];
+  for (let index = 0; index < 12; index++)
+    tokens.push(okay(await begin(large + index)).token);
+  assert.equal(new Set(tokens).size, tokens.length);
+  okay(await rpc('stage.abort', { token: tokens[0] }));
+  okay(await rpc('stage.abort', { token: tokens[0] }));
   now = 300000;
-  denied(await rpc('stage.chunk', { token: b, offset: 0, data: 'YQ==' }), 'STAGE_NOT_FOUND');
-  denied(await rpc('stage.chunk', { token: c, offset: 0, data: 'YQ==' }), 'STAGE_NOT_FOUND');
-  okay(await begin(limit));
+  for (const token of tokens.slice(1))
+    denied(await rpc('stage.chunk', { token, offset: 0, data: 'YQ==' }), 'STAGE_NOT_FOUND');
+  okay(await begin(large + tokens.length));
+});
+
+test('stage expiry is active, renewed by chunks and ignores stale timer callbacks', async t => {
+  let now = 0;
+  const timers = [];
+  const { rpc } = setup(t, {
+    clock: () => now,
+    setTimer(callback, delay) {
+      const timer = { callback, delay, cleared: false, unref() {} };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimer(timer) { timer.cleared = true; },
+  });
+  const first = okay(await rpc('stage.begin', {
+    basename: 'first.js', length: 2, sha256: hash('ab'),
+  })).token;
+  const stale = timers.at(-1);
+  now = 100;
+  okay(await rpc('stage.chunk', { token: first, offset: 0, data: 'YQ==' }));
+  assert.equal(stale.cleared, true);
+  now = 300000;
+  stale.callback();
+  okay(await rpc('stage.chunk', { token: first, offset: 1, data: 'Yg==' }));
+
+  const abandoned = okay(await rpc('stage.begin', {
+    basename: 'abandoned.js', length: 1, sha256: hash('x'),
+  })).token;
+  const active = timers.at(-1);
+  now = 600000;
+  active.callback();
+  denied(await rpc('stage.chunk', { token: first, offset: 2, data: 'Yw==' }), 'STAGE_NOT_FOUND');
+  denied(await rpc('stage.chunk', { token: abandoned, offset: 0, data: 'eA==' }), 'STAGE_NOT_FOUND');
+});
+
+test('stage shutdown neutralizes a timer whose native cleanup permanently fails', async () => {
+  let timer, clearAttempts = 0;
+  const module = createMusicScriptModule({
+    call: async () => ({ ok: false, code: 'PERMISSION_DENIED' }),
+    setTimer(callback) {
+      timer = { callback, unref() {} };
+      return timer;
+    },
+    clearTimer() {
+      clearAttempts++;
+      throw new Error('synthetic timer cleanup failure');
+    },
+  });
+  okay(await module.methods['music.script.stage.begin']({
+    basename: 'cleanup.js', length: 1, sha256: hash('x'),
+  }));
+  denied(await module.close(), 'SCRIPT_CLEANUP');
+  assert.equal(clearAttempts, 2);
+  assert.doesNotThrow(() => timer.callback());
+  denied(await module.close(), 'SCRIPT_CLEANUP');
 });
 
 test('stage validates names, sequence, canonical base64, chunk size, hash and strict UTF-8', async t => {
@@ -200,13 +257,14 @@ test('stage validates names, sequence, canonical base64, chunk size, hash and st
   assert.equal(native.calls.length, 0);
 });
 
-test('exact maximum source, BOM and a UTF-8 character split across chunks execute as real LX', async t => {
+test('source larger than the former 512KiB gate and a split UTF-8 character execute as real LX', async t => {
   const { rpc } = setup(t);
   const code = fixture();
   const prefix = '// ' + ' '.repeat(65532) + '猫\n'; // character starts at byte 65535.
   const unpadded = prefix + code;
-  const source = unpadded + ' '.repeat(limit - Buffer.byteLength(unpadded));
-  assert.equal(Buffer.byteLength(source), limit);
+  const sourceBytes = limit * 2 + 17;
+  const source = unpadded + ' '.repeat(sourceBytes - Buffer.byteLength(unpadded));
+  assert.equal(Buffer.byteLength(source), sourceBytes);
   const instance = await load(rpc, options(), source);
   assert.equal(instance.contentHash, hash(Buffer.from(source)));
   assert.equal((await value(rpc, instance)).label, 'one');
@@ -611,7 +669,8 @@ test('thirty-two real instances are the limit, updates reuse slots, and unloadin
   const instances = [];
   for (let index = 0; index < 32; index++) instances.push(await load(rpc, options(`i${index}`)));
   assert.equal(host().limits.maxInstances, 32);
-  assert.equal(host().limits.maxSourceBytes, limit);
+  assert.equal('maxSourceBytes' in host().limits, false);
+  assert.equal('maxTotalSourceBytes' in host().limits, false);
   assert.equal(host().limits.syncTimeoutMs, 2000);
   const token = await upload(rpc), spec = options('thirty-third');
   denied(await rpc('load', { ...spec, token }), 'LIMIT');

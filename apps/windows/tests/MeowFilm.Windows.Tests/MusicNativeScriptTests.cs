@@ -16,6 +16,11 @@ public static class MusicNativeScriptTests
     {
         yield return new("Native LX: ordinary source and settings workflows never call Node", Ordinary);
         yield return new("Native LX: bounded snapshot rejects altered chunks and content hash", Transfer);
+        yield return new("Native LX: abandoned transfers actively expire and stale timers cannot retire renewed stages", TransferExpiry);
+        yield return new("Native LX: lookup after an overdue sweep reschedules remaining transfers", TransferSweepReschedule);
+        yield return new("Native LX: transfer shutdown retries a transient timer disposal failure", TransferTimerCleanup);
+        yield return new("Native LX: source content storage failures retain native storage error semantics", SourceStorageErrors);
+        yield return new("Native LX: disposal preserves the first shutdown failure while releasing transfers", DisposeFirstFailure);
         yield return new("Native LX: explicit enable then invoke targets one selected installation", Target);
         yield return new("Native LX: stored enabled source reopens idle without starting Node", Restart);
         yield return new("Native LX: update failure preserves metadata grant and live generation", FailedUpdate);
@@ -68,9 +73,9 @@ public static class MusicNativeScriptTests
         internal readonly Runtime Runtime = new();
         internal readonly MusicLibraryOwner Library;
         internal readonly MusicScriptOwner Owner;
-        internal Fixture(Store? store = null)
+        internal Fixture(Store? store = null, TimeProvider? clock = null)
         {
-            Store = store ?? new(); Library = new(Store); Owner = new(Library, Runtime);
+            Store = store ?? new(); Library = new(Store); Owner = new(Library, Runtime, clock);
             Runtime.Capabilities = Owner.ScriptCapabilities;
         }
         public async ValueTask DisposeAsync() { await Owner.DisposeAsync(); await Library.DisposeAsync(); }
@@ -110,12 +115,29 @@ public static class MusicNativeScriptTests
         await Ok(f.Owner, "music.sources.disable", new { installationId = id });
         await Ok(f.Owner, "music.sources.remove", new { installationId = id });
         Check(f.Runtime.Calls.Count == 0);
-        Check(f.Store.Writes > 0 && f.Store.Namespaces.SetEquals(["music.library.v1"]));
+        Check(f.Store.Writes > 0 && f.Store.Namespaces.Contains(MusicLibraryOwner.DocumentNamespace) &&
+            f.Store.Namespaces.Any(Store.ContentNamespace) &&
+            f.Store.Namespaces.All(value => value == MusicLibraryOwner.DocumentNamespace || Store.ContentNamespace(value)));
     }
     private static async Task Transfer()
     {
         await using var f = new Fixture();
         await Error(f.Owner, "music.transfer.begin", new { kind = "script", length = 1, sha256 = new string('0', 64), basename = "../x.js" }, "INVALID_REQUEST");
+        var active = new List<string>();
+        for (int index = 0; index < 12; index++)
+        {
+            var pending = await Ok(f.Owner, "music.transfer.begin", new
+            {
+                kind = "script",
+                length = index + 1,
+                sha256 = new string('0', 64),
+                basename = $"pending-{index}.js"
+            });
+            active.Add(pending.GetProperty("token").GetString()!);
+        }
+        Check(active.Distinct(StringComparer.Ordinal).Count() == active.Count);
+        foreach (string pending in active)
+            await Ok(f.Owner, "music.transfer.cancel", new { token = pending });
         var stage = await Ok(f.Owner, "music.transfer.begin", new { kind = "script", length = 1, sha256 = new string('0', 64), basename = "x.js" });
         string token = stage.GetProperty("token").GetString()!;
         await Error(f.Owner, "music.transfer.chunk", new { token, offset = 1, data = "YQ==" }, "TRANSFER_OFFSET");
@@ -130,6 +152,144 @@ public static class MusicNativeScriptTests
         await Error(f.Owner, "music.sources.install", new { token, name = "x", version = "1",
             permissions = Permissions() }, "SCRIPT_ENCODING");
         Check(f.Runtime.Calls.Count == 0 && f.Store.Writes == 0);
+    }
+    private static Task TransferExpiry()
+    {
+        var clock = new TransferClock();
+        using var transfers = new MusicNativeTransfers(clock);
+        byte[] source = Encoding.UTF8.GetBytes("ab");
+        var first = transfers.Begin(O(new
+        {
+            kind = "script",
+            length = source.Length,
+            sha256 = Convert.ToHexStringLower(SHA256.HashData(source)),
+            basename = "first.js"
+        }));
+        string firstToken = first["token"]!.GetValue<string>();
+        var stale = clock.Last!;
+        clock.Advance(TimeSpan.FromMinutes(1));
+        transfers.Chunk(O(new { token = firstToken, offset = 0, data = "YQ==" }));
+        stale.FireStale();
+        transfers.Chunk(O(new { token = firstToken, offset = 1, data = "Yg==" }));
+        var abandoned = transfers.Begin(O(new
+        {
+            kind = "script",
+            length = 1,
+            sha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes("x"))),
+            basename = "abandoned.js"
+        }));
+        string abandonedToken = abandoned["token"]!.GetValue<string>();
+        clock.Advance(TimeSpan.FromMinutes(5));
+        Check(clock.Fired > 0);
+        foreach (string token in new[] { firstToken, abandonedToken })
+        {
+            try
+            {
+                transfers.Chunk(O(new { token, offset = 0, data = "eA==" }));
+                Check(false, "expired transfer survived active timer");
+            }
+            catch (MusicLibraryException error) { Check(error.Code == "TRANSFER_NOT_FOUND", error.Code); }
+        }
+        CryptographicOperations.ZeroMemory(source);
+        return Task.CompletedTask;
+    }
+    private static Task TransferTimerCleanup()
+    {
+        var clock = new TransferClock();
+        var transfers = new MusicNativeTransfers(clock);
+        transfers.Begin(O(new
+        {
+            kind = "script",
+            length = 1,
+            sha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes("x"))),
+            basename = "cleanup.js"
+        }));
+        clock.DisposeFailures = 1;
+        transfers.Dispose();
+        Check(clock.DisposeAttempts >= 2, "timer disposal was not retried");
+        Check(clock.ActiveTimers == 0, "timer remained active after retry");
+        return Task.CompletedTask;
+    }
+    private static Task TransferSweepReschedule()
+    {
+        var clock = new TransferClock();
+        using var transfers = new MusicNativeTransfers(clock);
+        JsonObject Begin(string basename) => transfers.Begin(O(new
+        {
+            kind = "script",
+            length = 1,
+            sha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes("x"))),
+            basename
+        }));
+        string first = Begin("first.js")["token"]!.GetValue<string>();
+        clock.Jump(TimeSpan.FromMinutes(1));
+        string second = Begin("second.js")["token"]!.GetValue<string>();
+        var dormant = clock.Last!;
+        dormant.SuppressCallback();
+        clock.Jump(TimeSpan.FromMinutes(4));
+        try
+        {
+            transfers.Chunk(O(new { token = first, offset = 0, data = "eA==" }));
+            Check(false, "expired transfer survived lookup sweep");
+        }
+        catch (MusicLibraryException error) { Check(error.Code == "TRANSFER_NOT_FOUND", error.Code); }
+        Check(!ReferenceEquals(clock.Last, dormant), "remaining transfer did not receive a new timer");
+        Check(clock.ActiveTimers == 1, "overdue timer was not replaced");
+        clock.Advance(TimeSpan.FromMinutes(1));
+        try
+        {
+            transfers.Chunk(O(new { token = second, offset = 0, data = "eA==" }));
+            Check(false, "remaining transfer did not expire on the replacement timer");
+        }
+        catch (MusicLibraryException error) { Check(error.Code == "TRANSFER_NOT_FOUND", error.Code); }
+        return Task.CompletedTask;
+    }
+    private static async Task SourceStorageErrors()
+    {
+        foreach (var (error, code) in new[]
+        {
+            (DocumentStoreError.Unavailable, "STORAGE_UNAVAILABLE"),
+            (DocumentStoreError.Storage, "STORAGE")
+        })
+        {
+            await using var f = new Fixture();
+            string token = await Upload(f);
+            f.Store.ContentReadFailure = error;
+            await Error(f.Owner, "music.sources.install", new
+            {
+                token,
+                name = "Synthetic source",
+                version = "1",
+                permissions = Permissions()
+            }, code);
+        }
+    }
+    private static async Task DisposeFirstFailure()
+    {
+        var clock = new TransferClock();
+        var f = new Fixture(clock: clock);
+        try
+        {
+            _ = await Install(f, true);
+            _ = await Ok(f.Owner, "music.transfer.begin", new
+            {
+                kind = "script",
+                length = 1,
+                sha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes("x"))),
+                basename = "pending.js"
+            });
+            f.Runtime.FailUnload = true;
+            int disposeAttempts = clock.DisposeAttempts;
+            clock.DisposeFailures = 2;
+            try
+            {
+                await f.Owner.DisposeAsync();
+                Check(false, "expected shutdown failure");
+            }
+            catch (MusicLibraryException error) { Check(error.Code == "SCRIPT_EXCEPTION", error.Code); }
+            Check(clock.DisposeAttempts - disposeAttempts == 2, "transfer timer disposal was not attempted after shutdown failure");
+        }
+        finally { await f.Library.DisposeAsync(); }
     }
     private static async Task Target()
     {
@@ -506,26 +666,128 @@ public static class MusicNativeScriptTests
         f.Runtime.Contract = "music.script.v2";
         await Ok(f.Owner, "music.sources.enable", new { installationId = id });
     }
+    private sealed class TransferClock : TimeProvider
+    {
+        private readonly List<TransferTimer> timers = [];
+        private DateTimeOffset now = DateTimeOffset.UnixEpoch;
+        internal int Fired;
+        internal int DisposeFailures;
+        internal int DisposeAttempts;
+        internal int ActiveTimers { get { lock (timers) return timers.Count; } }
+        internal TransferTimer? Last { get; private set; }
+        public override DateTimeOffset GetUtcNow() => now;
+        public override ITimer CreateTimer(TimerCallback callback, object? state,
+            TimeSpan dueTime, TimeSpan period)
+        {
+            var timer = new TransferTimer(this, callback, state);
+            lock (timers) { timers.Add(timer); Last = timer; }
+            timer.Change(dueTime, period);
+            return timer;
+        }
+        internal void Advance(TimeSpan duration)
+        {
+            now = now.Add(duration);
+            while (true)
+            {
+                TransferTimer[] ready;
+                lock (timers) ready = timers.Where(timer => timer.Due is { } due && due <= now).ToArray();
+                if (ready.Length == 0) return;
+                foreach (var timer in ready) timer.Fire();
+            }
+        }
+        internal void Jump(TimeSpan duration) => now = now.Add(duration);
+        internal sealed class TransferTimer(TransferClock owner, TimerCallback callback, object? state) : ITimer
+        {
+            internal DateTimeOffset? Due;
+            private bool disposed;
+            public bool Change(TimeSpan dueTime, TimeSpan period)
+            {
+                lock (owner.timers)
+                {
+                    if (disposed) return false;
+                    Check(period == Timeout.InfiniteTimeSpan);
+                    Due = dueTime == Timeout.InfiniteTimeSpan ? null : owner.now.Add(dueTime);
+                    return true;
+                }
+            }
+            internal void Fire()
+            {
+                lock (owner.timers)
+                {
+                    if (disposed || Due is null || Due > owner.now) return;
+                    Due = null;
+                    owner.Fired++;
+                }
+                callback(state);
+            }
+            internal void FireStale() => callback(state);
+            internal void SuppressCallback()
+            {
+                lock (owner.timers)
+                {
+                    if (!disposed) Due = null;
+                }
+            }
+            public void Dispose()
+            {
+                lock (owner.timers)
+                {
+                    if (disposed) return;
+                    owner.DisposeAttempts++;
+                    if (owner.DisposeFailures > 0)
+                    {
+                        owner.DisposeFailures--;
+                        throw new InvalidOperationException("synthetic timer disposal failure");
+                    }
+                    disposed = true;
+                    Due = null;
+                    owner.timers.Remove(this);
+                }
+            }
+            public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
+        }
+    }
     private sealed class Store : IProtectedDocumentStore
     {
-        internal byte[]? Bytes;
+        private readonly Dictionary<string, byte[]> documents = new(StringComparer.Ordinal);
         internal int Writes;
         internal bool FailAfter, Disposed;
+        internal DocumentStoreError? ContentReadFailure;
         internal readonly HashSet<string> Namespaces = [];
+        internal static bool ContentNamespace(string value)
+        {
+            string prefix = MusicLibraryOwner.ScriptContentCollection + ".";
+            if (!value.StartsWith(prefix, StringComparison.Ordinal)) return false;
+            string[] parts = value[prefix.Length..].Split('.');
+            return parts.Length == 2 && parts[0].Length == 64 &&
+                parts[0].All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f') &&
+                int.TryParse(parts[1], out int index) && index >= 0 &&
+                parts[1] == index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+        private static void Namespace(string value) =>
+            Check(value == MusicLibraryOwner.DocumentNamespace || ContentNamespace(value), "Unexpected document namespace");
         public Task<ProtectedDocument> ReadAsync(string name, CancellationToken cancellationToken = default)
         {
-            cancellationToken.ThrowIfCancellationRequested(); Namespaces.Add(name);
-            return Task.FromResult(new ProtectedDocument(Bytes?.ToArray(), Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes)));
+            cancellationToken.ThrowIfCancellationRequested(); Namespace(name); Namespaces.Add(name);
+            if (ContentNamespace(name) && ContentReadFailure is { } error)
+            {
+                ContentReadFailure = null;
+                throw new ProtectedDocumentException(error);
+            }
+            byte[]? bytes = documents.TryGetValue(name, out var value) ? value.ToArray() : null;
+            return Task.FromResult(new ProtectedDocument(bytes,
+                bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes)));
         }
         public Task<DocumentFingerprint> WriteAsync(string name, ReadOnlyMemory<byte> data, DocumentFingerprint expected,
             CancellationToken cancellationToken = default)
         {
-            cancellationToken.ThrowIfCancellationRequested(); Namespaces.Add(name);
-            var before = Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes);
+            cancellationToken.ThrowIfCancellationRequested(); Namespace(name); Namespaces.Add(name);
+            byte[]? prior = documents.TryGetValue(name, out var value) ? value : null;
+            var before = prior is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(prior);
             if (before != expected) throw new ProtectedDocumentException(DocumentStoreError.Conflict);
-            Bytes = data.ToArray(); Writes++;
+            documents[name] = data.ToArray(); Writes++;
             if (FailAfter) { FailAfter = false; throw new InvalidOperationException("synthetic commit receipt loss"); }
-            return Task.FromResult(DocumentFingerprint.FromBytes(Bytes));
+            return Task.FromResult(DocumentFingerprint.FromBytes(documents[name]));
         }
         public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
     }
@@ -534,7 +796,7 @@ public static class MusicNativeScriptTests
         internal readonly List<string> Calls = [], Invoked = [];
         internal readonly Dictionary<string, JsonObject> Instances = [];
         internal IReadOnlyDictionary<string, Func<JsonElement, CancellationToken, Task<object?>>> Capabilities = null!;
-        internal bool FailLoad, CandidateWrite, FailAfterCandidate;
+        internal bool FailLoad, CandidateWrite, FailAfterCandidate, FailUnload;
         internal TaskCompletionSource? Invoking, Loading, LoadRelease;
         internal JsonObject? LastCandidate;
         internal string Contract = "music.script.v2";
@@ -577,6 +839,7 @@ public static class MusicNativeScriptTests
                     return Reply(new { instance });
                 case "music.script.status": return Reply(new { documentAccess = false, instances = Instances.Values.ToArray() });
                 case "music.script.unload":
+                    if (FailUnload) return J(new { ok = false, contract = Contract, code = "SCRIPT_EXCEPTION" });
                     Instances.Remove(p["installationId"]!.GetValue<string>()); return Reply(new { cleanupComplete = true });
                 case "music.script.invoke":
                     Invoked.Add(p["installationId"]!.GetValue<string>());

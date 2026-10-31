@@ -1,3 +1,5 @@
+import { describeScriptError } from './script-diagnostic.js';
+
 /**
  * Executed inside QuickJS. Host calls exchange JSON; guest callbacks stay in
  * this heap and are referenced by IDs, never passed as host callable objects.
@@ -17,6 +19,7 @@ export const realmSource = String.raw`
   const callbacks = new Map();
   const promises = new Map();
   let nextId = 0, handler, realm;
+  const describeDiagnostic = ` + describeScriptError.toString() + String.raw`;
   const error = data => {
     const e = new Error(data.code);
     e.code = data.code;
@@ -29,23 +32,7 @@ export const realmSource = String.raw`
       ? 'RESOURCE_LIMIT' : 'SCRIPT_EXCEPTION');
   function diagnose(e, id) {
     if (trustedErrors.has(e)) return;
-    const text = String(e && e.message || '');
-    const kind = ['Error','TypeError','ReferenceError','SyntaxError','RangeError','InternalError'].includes(e && e.name)
-      ? e.name : 'Error';
-    const reference = kind === 'ReferenceError'
-      ? text.match(/['"]?([A-Za-z_$][\w$]{0,63})['"]? is not defined/) : null;
-    const member = kind === 'TypeError'
-      ? text.match(/(?:['"]|\.)(from|toString|bufToString|readUInt32LE|readUInt32BE|readUInt16LE|readUInt16BE|writeUInt32LE|writeUInt32BE)['"]?\s+(?:is not a function|of undefined)/) : null;
-    const location = String(e && e.stack || '').match(/installed-script\.js:(\d+)(?::(\d+))?/);
-    const reason = reference ? 'reference'
-      : /api.?key|密钥|未配置|无API配置|config.*required|token.*missing/i.test(text) ? 'configuration'
-      : /缺少|missing|参数|信息不完整|undefined|null/i.test(text) ? 'input'
-      : /unsupported|不支持|action not support|unknown (?:action|source)|未知(?:动作|音源)|未实现/i.test(text) ? 'unsupported'
-      : /api|接口|获取|请求|HTTP|找不到|不存在|为空|解析.*失败|所有(?:音源|音质)均失败|无歌词|no.*url|not found|invalid.*response|没有.*可用|response/i.test(text)
-        ? 'upstream' : 'script';
-    try { call('diagnostic',id,{kind,reason,...(reference ? {reference:reference[1]} : {}),
-      ...(member ? {member:member[1]} : {}),
-      ...(location ? {line:Number(location[1]),column:Number(location[2] || 0)} : {})}); } catch (_) {}
+    try { call('diagnostic',id,describeDiagnostic(e)); } catch (_) {}
   }
   const call = (op, ...args) => {
     // Control arguments must not inherit a guest toJSON or use its serializer.
@@ -178,9 +165,9 @@ export const realmSource = String.raw`
     ])));
   }
   Object.defineProperties(globalThis, {
-    lx:{value:lx},
-    meow:{value:freeze({config:deepFreeze(parse(call('config'))),storage:scopedStorage(0)})},
-    Buffer:{value:ScriptBuffer},
+    lx:{value:lx, configurable:true},
+    meow:{value:freeze({config:deepFreeze(parse(call('config'))),storage:scopedStorage(0)}), configurable:true},
+    Buffer:{value:ScriptBuffer, configurable:true},
   });
   const timer = (fn,delay,repeat,args) => {
     if (typeof fn !== 'function') throw error({code:'INVALID_ARGUMENT'});
@@ -216,6 +203,7 @@ export const realmSource = String.raw`
   return realm = freeze({
     parse,
     errorCode:failureCode,
+    diagnose(error,id=0) { diagnose(error,id); return failureCode(error); },
     watchStartup(value) {
       if (value && typeof value.then === 'function') Promise.resolve(value)
         .catch(e => { diagnose(e,0); call('startupFailure',failureCode(e)); });
