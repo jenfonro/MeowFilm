@@ -23,14 +23,19 @@ final class MusicQueueUIKitTests: XCTestCase {
         let labels = try tabs.enumerated().map { index, tab in
             try XCTUnwrap(tab.subviews.first { $0.accessibilityIdentifier == "music.queue.tab.title.\(index)" } as? UILabel)
         }
-        let titles = labels.map { $0.attributedText?.string }
-        XCTAssertEqual(titles, ["当前播放 4", "已播歌曲", "已播歌单"])
-        let currentTitle = try XCTUnwrap(labels[0].attributedText)
-        let titleFont = try XCTUnwrap(currentTitle.attribute(.font, at: 0, effectiveRange: nil) as? UIFont)
-        let countFont = try XCTUnwrap(currentTitle.attribute(.font, at: currentTitle.length - 1, effectiveRange: nil) as? UIFont)
-        let countOffset = try XCTUnwrap(currentTitle.attribute(.baselineOffset, at: currentTitle.length - 1, effectiveRange: nil) as? NSNumber)
-        XCTAssertLessThan(countFont.pointSize, titleFont.pointSize)
-        XCTAssertGreaterThan(countOffset.doubleValue, 0, "The queue count is a raised badge, not a second title line")
+        let titles = ["当前播放", "已播歌曲", "已播歌单"]
+        XCTAssertEqual(labels.map(\.text), titles)
+        XCTAssertEqual(tabs.map(\.accessibilityLabel), ["当前播放 4", "已播歌曲", "已播歌单"])
+        let titleFont = labels[0].font!
+        let badge = try XCTUnwrap(tabs[0].subviews.first { $0.accessibilityIdentifier == "music.queue.tab.badge.0" } as? UILabel)
+        tabs[0].layoutIfNeeded()
+        XCTAssertEqual(badge.text, "4")
+        XCTAssertEqual(badge.font.pointSize, 8)
+        XCTAssertLessThan(badge.frame.minY, labels[0].frame.minY + 2, "The queue count stays as a raised badge")
+        XCTAssertEqual(badge.frame.minX, labels[0].frame.maxX, accuracy: 0.5)
+        XCTAssertLessThanOrEqual(badge.frame.maxX, tabs[0].bounds.maxX)
+        XCTAssertEqual(labels[0].center.x, tabs[0].bounds.midX, accuracy: 0.5)
+        XCTAssertGreaterThanOrEqual(labels[0].frame.minX, 18)
         for (tab, label) in zip(tabs, labels) {
             tab.layoutIfNeeded()
             XCTAssertEqual(label.numberOfLines, 1)
@@ -75,7 +80,8 @@ final class MusicQueueUIKitTests: XCTestCase {
             XCTAssertEqual(tabs.map(\.frame), frames)
             XCTAssertEqual(group.frame, groupFrame)
             XCTAssertEqual(queue.view.frame, panelFrame)
-            XCTAssertEqual(labels.map { $0.attributedText?.string }, titles)
+            XCTAssertEqual(labels.map(\.text), titles)
+            XCTAssertEqual(badge.textColor, labels[0].textColor)
             for (index, label) in labels.enumerated() {
                 XCTAssertEqual(label.transform.a, index == category ? selectedScale : normalScale, accuracy: 0.001)
                 XCTAssertEqual(label.textColor, UIColor(index == category ? theme.ink : theme.muted))
@@ -195,11 +201,19 @@ final class MusicQueueUIKitTests: XCTestCase {
         defer { release(queue, root: root, window: window) }
         let (collection, reorder) = try movement(in: queue)
         let from = try center(0, in: collection), to = try center(2, in: collection)
+        let firstCell = try XCTUnwrap(collection.cellForItem(at: IndexPath(item: 0, section: 0)) as? MusicQueueCell)
+        let resting = firstCell.row.backgroundColor
+        reorder.beginPress(at: from)
+        XCTAssertEqual(firstCell.row.backgroundColor, UIColor(queue.theme.chip), "Touch down highlights immediately")
+        reorder.endPress()
+        XCTAssertEqual(firstCell.row.backgroundColor, resting)
         // Grab below the centre: native movement must retain this offset.
         XCTAssertTrue(reorder.begin(at: CGPoint(x: from.x, y: from.y + 14)))
+        XCTAssertEqual(firstCell.row.backgroundColor, UIColor(queue.theme.chip))
         reorder.move(to: CGPoint(x: to.x, y: to.y + 14))
         await updates()
         reorder.end()
+        XCTAssertEqual(firstCell.row.backgroundColor, resting)
         await wait("native drop saved") { model.queue.map(\.id) == ["entry-1", "entry-2", "entry-0", "entry-3"] }
         let saved = await service.statistics()
         XCTAssertEqual(saved.reorders, [["entry-1", "entry-2", "entry-0", "entry-3"]])
