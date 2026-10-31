@@ -1,0 +1,31 @@
+using System.Globalization;
+using System.Windows.Data;
+
+namespace MeowFilm.Capabilities;
+
+public sealed class FilmScaleConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        double progress = value is double number ? Math.Clamp(number, 0, 1) : 0;
+        double factor = parameter is string text &&
+            double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
+            ? parsed
+            : 0;
+        return 1 + progress * factor;
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) =>
+        throw new NotSupportedException();
+}
+
+public sealed class FilmGridColumnsConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture) =>
+        value is double width && double.IsFinite(width)
+            ? Math.Clamp((int)((width + 36) / 212), 1, 8)
+            : 1;
+
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) =>
+        throw new NotSupportedException();
+}

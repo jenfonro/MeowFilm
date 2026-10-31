@@ -18,6 +18,7 @@ public sealed partial class ShellWindow
     private IDesktopHeaderSource? _headerSource;
     private EventHandler? _headerChanged;
     private CancellationTokenSource? _headerLifetime;
+    private ModuleSession? _searchOwnerSession;
     private long _headerGeneration;
 
     private void InitializeHeaderPresentation() => HeaderActions.ItemsSource = _headerActions;
@@ -53,7 +54,7 @@ public sealed partial class ShellWindow
         slotHost.Visibility = slot is null ? Visibility.Collapsed : Visibility.Visible;
         SettingsHeading.Text = string.IsNullOrWhiteSpace(contribution.Title) ? "设置" : contribution.Title;
         SettingsHeading.Visibility = settings ? Visibility.Visible : Visibility.Collapsed;
-        ContentRegion.Margin = settings ? new Thickness(0) : new Thickness(0, 4, 0, 0);
+        ContentRegion.Margin = new Thickness(0);
 
         _headerActions.Clear();
         foreach (var action in contribution.HeaderActions)
@@ -74,10 +75,15 @@ public sealed partial class ShellWindow
                     () => !_isClosing, automationName: target.Page.Title)));
             }
 
-        var searchAvailable = _currentPage is null && !current.IsSettingsOpen &&
-            contribution.SearchVisible && contribution.SearchEnabled;
-        SearchInput.Visibility = contribution.SearchVisible && _currentPage is null && !current.IsSettingsOpen
-            ? Visibility.Visible : Visibility.Collapsed;
+        var previousSearchOwner = _searchOwnerSession;
+        if (_currentPage is null && !current.IsSettingsOpen && current.Mounted &&
+            contribution.SearchVisible && contribution.SearchEnabled)
+            _searchOwnerSession = current;
+        if (!ReferenceEquals(previousSearchOwner, _searchOwnerSession))
+            ApplySearchPresentation(force: true);
+
+        var searchAvailable = !current.IsSettingsOpen && _searchOwnerSession is not null;
+        SearchInput.Visibility = searchAvailable ? Visibility.Visible : Visibility.Collapsed;
         SearchBox.IsEnabled = SearchButton.IsEnabled = searchAvailable;
         PageHeader.Visibility = (!settings && slot is not null) || _headerActions.Count > 0
             ? Visibility.Visible : Visibility.Collapsed;
