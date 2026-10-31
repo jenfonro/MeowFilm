@@ -192,7 +192,7 @@ public static partial class MusicUiTests
             down.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); toggle.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
             Equal(writes, f.Calls.Count("music.quality.settings.save")); True(!priority.CanMoveUp && !priority.CanMoveDown, "unloaded controls cannot submit");
         });
-        yield return Case("replica settings remain within shell content and retain sidebar and bottom player", async () =>
+        yield return Case("replica settings remain within shell content and retain the hidden global player", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             var shell = new ShellWindow([f.Module], () => Task.CompletedTask)
@@ -202,7 +202,9 @@ public static partial class MusicUiTests
             try
             {
                 shell.Show(); await Drain(); await Until(() => f.Module.CanEdit);
-                var region = (Grid)shell.FindName("ContentRegion"); Equal(new Thickness(0, 4, 0, 0), region.Margin);
+                var region = (Grid)shell.FindName("ContentRegion"); Equal(new Thickness(0), region.Margin);
+                var player = ((ContentControl)shell.FindName("PlayerHost")).Content;
+                True(player is not null, "ordinary page mounts the global player");
                 ((Button)shell.FindName("SettingsButton")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
                 await Drain(); await Until(() => f.Module.CanEdit);
                 var root = (FrameworkElement)shell.Content;
@@ -221,14 +223,17 @@ public static partial class MusicUiTests
                 True(area.All(tab => ReferenceEquals(tab.Style, settingsView.FindResource("Settings.Anchor"))) && selectedLine.BorderBrush is SolidColorBrush line && line.Color == accent &&
                     ((Border)area[1].Template.FindName("Underline", area[1])).BorderBrush is SolidColorBrush { Color.A: 0 }, "header category reuses the settings anchor tabs outside the view");
                 double tabsTop = tabs.TranslatePoint(new Point(), root).Y, regionTop = region.TranslatePoint(new Point(), root).Y;
-                True(tabsTop - regionTop < 1, "settings remove the home content gap below the header");
+                True(tabsTop - regionTop < 1, "settings content starts directly below the compact header");
                 foreach (var size in new[] { new Size(1440, 900), new Size(1110, 869), new Size(860, 600) })
                 {
                     shell.Width = size.Width; shell.Height = size.Height; shell.UpdateLayout(); await Drain(); root.UpdateLayout();
                     var sidebar = (ScrollViewer)shell.FindName("SidebarScroll"); var footer = (Border)shell.FindName("PlayerFrame");
-                    Equal(Visibility.Visible, sidebar.Visibility); Equal(Visibility.Visible, footer.Visibility);
+                    Equal(Visibility.Visible, sidebar.Visibility); Equal(Visibility.Collapsed, footer.Visibility);
+                    True(ReferenceEquals(player, ((ContentControl)shell.FindName("PlayerHost")).Content),
+                        "settings retain the same global player instance");
                     var view = (MusicSettingsView)f.Module.SettingsView; var bounds = new Rect(view.TranslatePoint(new Point(), root), view.RenderSize);
-                    True(bounds.Left >= 203 && bounds.Bottom <= footer.TranslatePoint(new Point(), root).Y + 1, "settings never cover sidebar or bottom player");
+                    True(bounds.Left >= 203 && bounds.Bottom <= root.ActualHeight + 1,
+                        "settings remain inside the shell while the player footer is hidden");
                     if (size.Width == 860)
                     {
                         True(SettingsLayout.GetIsNarrow(view), "sidebar-reduced content uses stacked section labels");
@@ -240,7 +245,8 @@ public static partial class MusicUiTests
                             "the minimum shell does not waste a label column beside its account table");
                     }
                     ReplicaAnchors(view)[^1].IsChecked = true; await Drain(); root.UpdateLayout();
-                    True(((MusicSourcesSettingsView)view.FindName("SourcesPage")).IsVisible && footer.Visibility == Visibility.Visible, "independent source management keeps player");
+                    True(((MusicSourcesSettingsView)view.FindName("SourcesPage")).IsVisible &&
+                        footer.Visibility == Visibility.Collapsed, "independent source management keeps the player hidden");
                     if (size.Width == 860)
                     {
                         var sources = (MusicSourcesSettingsView)view.FindName("SourcesPage");
@@ -257,12 +263,19 @@ public static partial class MusicUiTests
                 var content = (FrameworkElement)settingsView.FindName("MusicContent");
                 area[1].IsChecked = true; await Drain(); root.UpdateLayout();
                 True(!content.IsVisible && !Visuals(settingsView).OfType<TextBlock>().Any(text => text.IsVisible) && ((ScrollViewer)shell.FindName("SidebarScroll")).IsVisible &&
-                    ((Border)shell.FindName("PlayerFrame")).IsVisible && heading.IsVisible && slot.IsVisible && area[1].IsChecked == true && area[0].IsChecked == false, "video settings are an empty page inside the shell chrome");
+                    ((Border)shell.FindName("PlayerFrame")).Visibility == Visibility.Collapsed &&
+                    ReferenceEquals(player, ((ContentControl)shell.FindName("PlayerHost")).Content) &&
+                    heading.IsVisible && slot.IsVisible && area[1].IsChecked == true && area[0].IsChecked == false,
+                    "video settings are an empty page that retains but hides the global player");
                 area[2].IsChecked = true; await Drain(); True(!content.IsVisible && area[1].IsChecked == false, "book settings are an empty page");
                 area[0].IsChecked = true; await Drain(); await Until(() => f.Module.CanEdit); root.UpdateLayout();
                 True(content.IsVisible, "music settings return");
                 back.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain(); await Until(() => !heading.IsVisible);
-                True(region.Margin == new Thickness(0, 4, 0, 0) && !slot.IsVisible && slot.Content is null, "home keeps its original content gap");
+                True(region.Margin == new Thickness(0) && !slot.IsVisible && slot.Content is null,
+                    "home keeps the compact shared content gap");
+                Equal(Visibility.Visible, ((Border)shell.FindName("PlayerFrame")).Visibility);
+                True(ReferenceEquals(player, ((ContentControl)shell.FindName("PlayerHost")).Content),
+                    "home restores the same global player instance");
             }
             finally { shell.Close(); await shell.ShutdownCompletion.WaitAsync(TimeSpan.FromSeconds(5)); await Drain(); }
         });
