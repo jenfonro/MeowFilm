@@ -7,7 +7,12 @@ import MeowStorage
 @MainActor
 extension MusicViewModel {
     public func add(_ track: MusicRemoteTrack, to collection: MusicCollection) async {
-        await updateLibrary(operation: "添加到歌单") { try await self.libraryActions.add(track, to: collection) }
+        await add([track], to: collection)
+    }
+    /// Adds a selected batch with one playlist write.
+    public func add(_ tracks: [MusicRemoteTrack], to collection: MusicCollection) async {
+        guard !tracks.isEmpty else { return }
+        await updateLibrary(operation: "添加到歌单") { try await self.libraryActions.add(tracks, to: collection) }
     }
     public func createPlaylist(_ title: String, tracks: [MusicRemoteTrack] = []) async {
         await updateLibrary(operation: "创建歌单") { try await self.libraryActions.create(title, tracks: tracks) }

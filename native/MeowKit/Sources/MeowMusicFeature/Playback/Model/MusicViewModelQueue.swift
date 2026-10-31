@@ -59,6 +59,11 @@ extension MusicViewModel {
     }
     public func selectOccurrence(_ id: String) async { await queueAction(.select(id), startPlayback: true) }
     public func insertNext(_ track: MusicRemoteTrack) async { await queueAction(.append([track.ref], next: true), startPlayback: false) }
+    /// Inserts a selected batch as one queue transaction, preserving its order.
+    public func insertNext(_ tracks: [MusicRemoteTrack]) async {
+        guard !tracks.isEmpty else { return }
+        await queueAction(.append(tracks.map(\.ref), next: true), startPlayback: false)
+    }
     public func append(_ track: MusicRemoteTrack) async { await queueAction(.append([track.ref], next: false), startPlayback: false) }
     public func removeOccurrence(_ id: String) async {
         await queueAction(.remove(id), startPlayback: false)

@@ -7,7 +7,7 @@ public enum PageIcon {
     public enum Kind: Sendable {
         case home, channels, person, menu, search, recognize, plus, append, more, play, pause, queue, down
         case playerDown, playerPlay, playerPause, lyricPlay, previous, next, miniPrevious, miniNext
-        case heart, translation, image, remove, playing, miniResume, reorder
+        case heart, translation, image, remove, playing, miniResume, reorder, multiSelect
     }
     public static func image(_ kind: Kind, filled: Bool = false, size: CGFloat = 23) -> UIImage {
         UIGraphicsImageRenderer(size: CGSize(width: size, height: size)).image { renderer in
@@ -133,6 +133,11 @@ public enum PageIcon {
             line([(15,7),(15,17)]); line([(20,10),(20,14)])
         case .reorder:
             for y in [7.0, 12.0, 17.0] { line([(5,y),(19,y)]) }
+        case .multiSelect:
+            line([(3,6),(5,8),(8,4)])
+            line([(11,6),(21,6)])
+            line([(3,12),(21,12)])
+            line([(3,18),(21,18)])
         }
         return p
     }

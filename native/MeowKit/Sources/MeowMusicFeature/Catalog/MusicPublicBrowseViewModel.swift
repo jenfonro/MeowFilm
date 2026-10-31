@@ -480,6 +480,22 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     /// handle cache. Reissue only the selected occurrence's original page; do
     /// not replace display rows, alter pagination, or extend handle lifetimes.
     public func refreshedActionTrack(_ track: MusicRemoteTrack) async throws -> MusicRemoteTrack {
+        var details: [String: MusicPublicBrowseDetail] = [:]
+        return try await refreshedActionTrack(track, details: &details)
+    }
+    /// Batch actions reuse each original detail page once while keeping every
+    /// selected occurrence's own identity checks.
+    public func refreshedActionTracks(_ tracks: [MusicRemoteTrack]) async throws -> [MusicRemoteTrack] {
+        var details: [String: MusicPublicBrowseDetail] = [:]
+        var renewed: [MusicRemoteTrack] = []
+        renewed.reserveCapacity(tracks.count)
+        for track in tracks { renewed.append(try await refreshedActionTrack(track, details: &details)) }
+        return renewed
+    }
+    private func refreshedActionTrack(
+        _ track: MusicRemoteTrack,
+        details: inout [String: MusicPublicBrowseDetail]
+    ) async throws -> MusicRemoteTrack {
         try Task.checkCancellation()
         guard available, visible, loaded, contentIsCurrent, !isLoading, let index = queueIndex(of: track),
               let displayed = tracks.first(where: { $0.ref == track.ref }),
@@ -490,7 +506,13 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             let own = pageEpoch, access = generation
             let source = remoteSource
             try source?.authorization.check()
-            let result = try await service.publicDetail(collection, cursor: occurrence.cursor.isEmpty ? nil : occurrence.cursor)
+            let result: MusicPublicBrowseDetail
+            if let cached = details[occurrence.cursor] {
+                result = cached
+            } else {
+                result = try await service.publicDetail(collection, cursor: occurrence.cursor.isEmpty ? nil : occurrence.cursor)
+                details[occurrence.cursor] = result
+            }
             try Task.checkCancellation()
             // The observer is asynchronous; a revoked queue must fence this
             // result even before its observation task invalidates the page.

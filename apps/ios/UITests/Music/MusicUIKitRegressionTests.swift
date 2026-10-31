@@ -343,16 +343,16 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let play = try XCTUnwrap(descendants(row).compactMap { $0 as? UIButton }.first { !$0.isHidden })
         XCTAssertGreaterThan(play.bounds.height, 0)
         XCTAssertTrue(row.hitTest(play.convert(CGPoint(x: play.bounds.midX, y: play.bounds.midY), to: row), with: nil) === play)
-        XCTAssertEqual(MusicBrowseHeader.height(for: page.sections[1], collection: nil, showsSectionPlayback: false), 0)
+        XCTAssertEqual(MusicBrowseHeader.height(for: page.sections[1], showsSectionPlayback: false), 0)
         let counts = await service.counts(); XCTAssertEqual(counts.browse, 2)
         await model.close()
     }
 
-    func testHomeHeaderUsesTitleWidthAndKeepsFiltersAndDetailPlaybackSeparate() throws {
+    func testHomeHeaderUsesTitleWidthAndKeepsFiltersAndChannelActionsSeparate() throws {
         let song = MusicPublicBrowseItem(id: "song", title: "歌曲", content: .track(track("song")))
         let header = MusicBrowseHeader(frame: CGRect(x: 0, y: 0, width: 360, height: 44))
         var plays = 0, channelCalls = 0
-        header.configure(section: .init(id: "songs", title: "歌曲栏目", items: [song]), collection: nil,
+        header.configure(section: .init(id: "songs", title: "歌曲栏目", items: [song]),
             theme: PageTheme(), showsSectionPlayback: false, onPlay: { plays += 1 }, onChannel: {},
             onChoice: { _ in }, onRetry: {}, error: nil)
         header.layoutIfNeeded()
@@ -362,7 +362,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let channel = MusicPublicBrowseChannel(id: "playlist", title: "歌单", kind: .playlists)
         let filters = [MusicPublicBrowseFilter(id: "all", title: "全部"), .init(id: "other", title: "其他")]
         header.configure(section: .init(id: "lists", title: "推荐歌单", items: [], channel: channel,
-            filters: filters, selectedFilter: "all"), collection: nil, theme: PageTheme(),
+            filters: filters, selectedFilter: "all"), theme: PageTheme(),
             showsSectionPlayback: false, onPlay: { plays += 1 }, onChannel: { channelCalls += 1 },
             onChoice: { _ in }, onRetry: {}, error: nil)
         header.layoutIfNeeded()
@@ -377,17 +377,6 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let label = try XCTUnwrap(descendants(header).compactMap { $0 as? UILabel }.first { $0.text == "推荐歌单" })
         let arrow = try XCTUnwrap(descendants(header).compactMap { $0 as? UIImageView }.first { !$0.isHidden && $0.image != nil })
         XCTAssertEqual(arrow.frame.minX - label.frame.maxX, 6, accuracy: 0.5)
-
-        header.frame.size.height = 190
-        header.configure(section: .init(id: "detail", title: "歌曲", items: [song]),
-            collection: .init(platform: .netease, nativeID: "41", title: "歌单"), theme: PageTheme(),
-            onPlay: { plays += 1 }, onChannel: {}, onChoice: { _ in }, onRetry: {}, error: nil)
-        header.layoutIfNeeded()
-        let play = try XCTUnwrap(descendants(header).compactMap { $0 as? UIButton }.first {
-            $0.accessibilityLabel == "播放全部" && !$0.isHidden
-        })
-        play.sendActions(for: .touchUpInside)
-        XCTAssertEqual(plays, 1)
     }
 
     func testHomeChannelTitleAndCollectionCardUseIndependentNavigationActions() async throws {
@@ -481,7 +470,431 @@ final class MusicUIKitRegressionTests: XCTestCase {
         await model.close()
     }
 
-    func testEditorDragUpdatesVisibleNumbersWithoutReplacingCells() async throws {
+    func testCollectionDetailHeaderAndTrackRowsMatchReferenceGeometry() throws {
+        let theme = PageTheme()
+        let tracks = [
+            MusicRemoteTrack(ref: .init(kind: .library, id: "rain"), songId: "rain",
+                             title: "Rain", artist: "秦凡淇", album: "羽毛剑"),
+            MusicRemoteTrack(ref: .init(kind: .library, id: "slow"), songId: "slow",
+                             title: "慢慢听", artist: "房东的猫", album: "世界"),
+        ]
+        let header = MusicCollectionDetailHeaderView(themeProvider: MusicAppearancePreferencesStore())
+        header.configure(
+            content: .init(title: "慢慢听", owner: "我的歌单", count: tracks.count,
+                           artwork: tracks.first?.artwork),
+            filteredCount: tracks.count,
+            searchQuery: "",
+            playTitle: "播放全部",
+            isPlaying: false,
+            canPlay: true,
+            showsSave: false,
+            canSave: false,
+            showsEdit: true,
+            canEdit: true,
+            showsRename: true,
+            canRename: true,
+            theme: theme
+        )
+        header.frame = CGRect(x: 0, y: 0, width: 390, height: header.preferredHeight(for: 390))
+        header.layoutIfNeeded()
+
+        let cover = try XCTUnwrap(descendants(header).first {
+            $0.accessibilityIdentifier == "music.collection.cover"
+        })
+        let card = try XCTUnwrap(descendants(header).first {
+            $0.accessibilityIdentifier == "music.collection.infoCard"
+        })
+        let coverFrame = cover.convert(cover.bounds, to: header)
+        XCTAssertEqual(header.heroHeight(for: 390), 149, accuracy: 0.5)
+        XCTAssertEqual(header.bounds.height, 211, accuracy: 0.5)
+        XCTAssertEqual(card.frame.minX, 12, accuracy: 0.5)
+        XCTAssertEqual(card.frame.minY, 10, accuracy: 0.5)
+        XCTAssertEqual(card.frame.width, 366, accuracy: 0.5)
+        XCTAssertEqual(card.layer.cornerRadius, 18, accuracy: 0.5)
+        XCTAssertEqual(card.layer.borderWidth, 1, accuracy: 0.1)
+        XCTAssertEqual(coverFrame.minX, 24, accuracy: 0.5)
+        XCTAssertEqual(coverFrame.minY, 22, accuracy: 0.5)
+        XCTAssertEqual(coverFrame.width, 102.6, accuracy: 0.5)
+        XCTAssertEqual(coverFrame.height, 102.6, accuracy: 0.5)
+        XCTAssertTrue(descendants(header).compactMap { $0 as? UILabel }.contains { $0.text == "慢慢听" })
+        XCTAssertTrue(descendants(header).compactMap { $0 as? UILabel }.contains { $0.text == "我的歌单" })
+        XCTAssertEqual(descendants(header).compactMap { $0 as? UILabel }.filter { $0.text == "2首" }.count, 1)
+
+        let bar = header.actionBar
+        bar.frame = CGRect(x: 0, y: 0, width: 390, height: bar.preferredHeight)
+        bar.layoutIfNeeded()
+        XCTAssertEqual(descendants(bar).compactMap { $0 as? UILabel }.filter { $0.text == "2首" }.count, 1)
+        let play = try XCTUnwrap(descendants(bar).compactMap { $0 as? UIButton }.first {
+            $0.accessibilityIdentifier == "music.collection.playAll"
+        })
+        let edit = try XCTUnwrap(descendants(bar).compactMap { $0 as? UIButton }.first {
+            $0.accessibilityIdentifier == "music.collection.edit"
+        })
+        XCTAssertEqual(bar.bounds.height, 62, accuracy: 0.5)
+        XCTAssertEqual(play.frame.minY, 0, accuracy: 0.5)
+        XCTAssertEqual(play.frame.height, 62, accuracy: 0.5)
+        XCTAssertEqual(edit.frame.minX, 330, accuracy: 0.6)
+        XCTAssertEqual(edit.frame.minY, 9, accuracy: 0.6)
+        XCTAssertEqual(edit.frame.width, 44, accuracy: 0.5)
+        XCTAssertEqual(edit.frame.height, 44, accuracy: 0.5)
+        XCTAssertEqual(edit.accessibilityLabel, "多选")
+        XCTAssertEqual(edit.accessibilityCustomActions?.map(\.name) ?? [], ["重命名"])
+
+        header.setCollapseProgress(1)
+        XCTAssertEqual(card.alpha, 0, accuracy: 0.01)
+        header.setCollapseProgress(0)
+        XCTAssertEqual(card.alpha, 1, accuracy: 0.01)
+
+        header.setSearchVisible(true)
+        bar.frame.size.height = bar.preferredHeight
+        bar.layoutIfNeeded()
+        XCTAssertEqual(header.preferredHeight(for: 390), 263, accuracy: 0.5)
+        XCTAssertEqual(bar.bounds.height, 114, accuracy: 0.5)
+        XCTAssertFalse(header.searchField.isHidden)
+        XCTAssertEqual(header.searchField.frame.minX, 16, accuracy: 0.5)
+        XCTAssertEqual(header.searchField.frame.width, 358, accuracy: 0.5)
+        XCTAssertEqual(header.searchField.frame.height, 40, accuracy: 0.5)
+
+        let cell = MusicCollectionTrackCell(style: .default,
+                                            reuseIdentifier: MusicCollectionTrackCell.reuseIdentifier)
+        cell.frame = CGRect(x: 0, y: 0, width: 390, height: 72)
+        cell.configure(
+            track: tracks[0],
+            active: false,
+            isFavorite: true,
+            favoriteEnabled: true,
+            actionsEnabled: true,
+            theme: theme,
+            menu: UIMenu(children: [UIAction(title: "下一首播放") { _ in }]),
+            onPlay: {},
+            onFavorite: {},
+            onAppend: {}
+        )
+        cell.layoutIfNeeded()
+        let artwork = try XCTUnwrap(descendants(cell).compactMap { $0 as? MusicArtworkView }.first)
+        let artworkFrame = artwork.convert(artwork.bounds, to: cell.contentView)
+        XCTAssertEqual(artworkFrame.minX, 16, accuracy: 0.5)
+        XCTAssertEqual(artworkFrame.minY, 15, accuracy: 0.5)
+        XCTAssertEqual(artworkFrame.width, 42, accuracy: 0.5)
+        XCTAssertEqual(artworkFrame.height, 42, accuracy: 0.5)
+        let buttons = descendants(cell).compactMap { $0 as? UIButton }
+        let favorite = try XCTUnwrap(buttons.first {
+            $0.accessibilityIdentifier == "music.collection.favorite.rain"
+        })
+        let append = try XCTUnwrap(buttons.first {
+            $0.accessibilityIdentifier == "music.collection.append.rain"
+        })
+        let more = try XCTUnwrap(buttons.first {
+            $0.accessibilityIdentifier == "music.collection.more.rain"
+        })
+        XCTAssertEqual(favorite.frame.minX, 260, accuracy: 0.5)
+        XCTAssertEqual(append.frame.minX, 299, accuracy: 0.5)
+        XCTAssertEqual(more.frame.minX, 338, accuracy: 0.5)
+        for button in [favorite, append, more] {
+            XCTAssertEqual(button.frame.minY, 14, accuracy: 0.5)
+            XCTAssertEqual(button.frame.width, 36, accuracy: 0.5)
+            XCTAssertEqual(button.frame.height, 44, accuracy: 0.5)
+        }
+        XCTAssertTrue(favorite.accessibilityTraits.contains(.selected))
+        XCTAssertEqual(favorite.accessibilityLabel, "取消收藏 Rain")
+        XCTAssertEqual(append.accessibilityLabel, "添加 Rain 到播放队列")
+        XCTAssertEqual(more.accessibilityLabel, "Rain 更多操作")
+
+        let dark = PageTheme(dark: true)
+        header.applyTheme(dark)
+        let title = try XCTUnwrap(descendants(header).compactMap { $0 as? UILabel }.first {
+            $0.text == "慢慢听"
+        })
+        XCTAssertEqual(title.textColor, UIColor(dark.ink))
+        XCTAssertEqual(header.searchField.backgroundColor, UIColor(dark.control))
+    }
+
+    func testPublicCollectionDetailUsesReferenceRowsAndPaginatesWithoutExtraPlayButtons() async throws {
+        let collection = MusicPublicBrowseCollection(
+            platform: .netease,
+            nativeID: "reference",
+            title: "未来复古合成波",
+            creator: "用户7883263058",
+            count: 3
+        )
+        let tracks = [
+            MusicRemoteTrack(ref: .init(kind: .queue, id: "first"), songId: "first",
+                             title: "Time to Pretend", artist: "Lazer Boomerang",
+                             album: "Time to Pretend"),
+            MusicRemoteTrack(ref: .init(kind: .queue, id: "second"), songId: "second",
+                             title: "The Best Of Me", artist: "Dion Timmer",
+                             album: "Very Extra"),
+            MusicRemoteTrack(ref: .init(kind: .queue, id: "third"), songId: "third",
+                             title: "Midnight City", artist: "M83",
+                             album: "Hurry Up, We're Dreaming"),
+        ]
+        let firstPage = MusicPublicBrowseDetail(
+            collection: collection,
+            tracks: Array(tracks.prefix(2)),
+            total: tracks.count,
+            cursor: "next",
+            snapshot: "reference-snapshot",
+            consumed: 2
+        )
+        let nextPage = MusicPublicBrowseDetail(
+            collection: collection,
+            tracks: [tracks[2]],
+            total: tracks.count,
+            cursor: nil,
+            snapshot: "reference-snapshot",
+            consumed: 1
+        )
+        let service = MusicUIKitRegressionService(detail: firstPage, nextDetail: nextPage)
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let appearance = MusicAppearancePreferencesStore()
+        let controller = MusicCollectionViewController(
+            model: model,
+            collection: collection,
+            browser: service,
+            appearance: appearance,
+            router: MusicUIKitRegressionRouter()
+        )
+        let navigation = PageNavigationController(themeProvider: appearance)
+        navigation.setViewControllers([controller], animated: false)
+        let window = mount(navigation)
+        defer { release(navigation, window: window) }
+        let table = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? UITableView }.first)
+        let initial = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                table.layoutIfNeeded()
+                return table.numberOfRows(inSection: 0) >= 2
+            }
+        }, evaluatedWith: table)
+        await fulfillment(of: [initial], timeout: 2)
+        if table.numberOfRows(inSection: 0) == 2,
+           let last = table.cellForRow(at: IndexPath(row: 1, section: 0)) {
+            controller.tableView(table, willDisplay: last, forRowAt: IndexPath(row: 1, section: 0))
+        }
+        let appended = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                table.layoutIfNeeded()
+                return table.numberOfRows(inSection: 0) == 3
+            }
+        }, evaluatedWith: table)
+        await fulfillment(of: [appended], timeout: 2)
+
+        XCTAssertTrue(controller.prefersPlainBackButton)
+        XCTAssertNil(controller.title)
+        XCTAssertEqual(
+            controller.navigationItem.rightBarButtonItems?.compactMap(\.accessibilityIdentifier),
+            ["music.collection.search", "music.collection.refresh"]
+        )
+        let header = try XCTUnwrap(table.tableHeaderView as? MusicCollectionDetailHeaderView)
+        let labels = descendants(header).compactMap { $0 as? UILabel }
+        XCTAssertTrue(labels.contains { $0.text == collection.title })
+        XCTAssertTrue(labels.contains { $0.text == collection.creator })
+        XCTAssertEqual(labels.filter { $0.text == "3首" }.count, 1)
+        XCTAssertEqual(descendants(header.actionBar).compactMap { $0 as? UILabel }.filter { $0.text == "3首" }.count, 1)
+        let save = try XCTUnwrap(descendants(header).compactMap { $0 as? UIButton }.first {
+            $0.accessibilityIdentifier == "music.collection.save"
+        })
+        XCTAssertFalse(save.isHidden)
+        XCTAssertNil(save.title(for: .normal))
+        XCTAssertEqual(save.accessibilityLabel, "收藏歌单")
+        let owner = try XCTUnwrap(labels.first { $0.text == collection.creator })
+        let count = try XCTUnwrap(labels.first { $0.text == "3首" && $0.frame.minY > owner.frame.minY })
+        XCTAssertEqual(save.convert(save.bounds, to: header).maxX, header.bounds.width - 18, accuracy: 0.5)
+        XCTAssertEqual(save.frame.midY, (owner.frame.minY + count.frame.maxY) / 2, accuracy: 0.5)
+        XCTAssertLessThanOrEqual(owner.frame.maxX, save.frame.minX - 8)
+        save.layoutIfNeeded()
+        let heart = try XCTUnwrap(save.imageView)
+        XCTAssertNotNil(save.currentImage)
+        XCTAssertEqual(heart.frame.width, 22, accuracy: 0.5)
+        XCTAssertEqual(heart.frame.height, 22, accuracy: 0.5)
+        XCTAssertEqual(heart.frame.midX, save.bounds.midX, accuracy: 0.5)
+        XCTAssertEqual(heart.frame.midY, save.bounds.midY, accuracy: 0.5)
+        let edit = try XCTUnwrap(descendants(header.actionBar).compactMap { $0 as? UIButton }.first {
+            $0.accessibilityIdentifier == "music.collection.edit"
+        })
+        XCTAssertFalse(edit.isHidden)
+        XCTAssertTrue(edit.isEnabled)
+        XCTAssertEqual(edit.accessibilityLabel, "多选")
+
+        let first = try XCTUnwrap(table.cellForRow(at: IndexPath(row: 0, section: 0))
+                                  as? MusicCollectionTrackCell)
+        let buttons = descendants(first).compactMap { $0 as? UIButton }
+        XCTAssertEqual(buttons.count, 4)
+        XCTAssertEqual(
+            Set(buttons.compactMap(\.accessibilityIdentifier)),
+            Set([
+                "music.collection.play.first",
+                "music.collection.favorite.first",
+                "music.collection.append.first",
+                "music.collection.more.first",
+            ])
+        )
+        let more = try XCTUnwrap(buttons.first {
+            $0.accessibilityIdentifier == "music.collection.more.first"
+        })
+        XCTAssertEqual(
+            more.menu?.children.compactMap { ($0 as? UIAction)?.title },
+            ["下一首播放", "音源", "添加到播放队列"]
+        )
+
+        edit.sendActions(for: .touchUpInside)
+        let pushed = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                navigation.view.layoutIfNeeded()
+                NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+                return (navigation.topViewController as? MusicCollectionEditorViewController)?.isPageVisible == true
+            }
+        }, evaluatedWith: navigation)
+        await fulfillment(of: [pushed], timeout: 2)
+        try await Task.sleep(nanoseconds: 600_000_000)
+        let editor = try XCTUnwrap(navigation.topViewController as? MusicCollectionEditorViewController)
+        let editorTable = try XCTUnwrap(editor.view.subviews.compactMap { $0 as? UITableView }.first)
+        let actions = try XCTUnwrap(editor.view.subviews.compactMap {
+            $0 as? MusicCollectionEditorActionsView
+        }.first)
+        editorTable.layoutIfNeeded()
+        XCTAssertFalse(editorTable.isEditing)
+        XCTAssertEqual(editorTable.numberOfRows(inSection: 0), 3)
+        XCTAssertFalse(editor.tableView(editorTable, canMoveRowAt: IndexPath(row: 0, section: 0)))
+        let editorCell = try XCTUnwrap(editorTable.cellForRow(at: IndexPath(row: 0, section: 0))
+                                       as? MusicCollectionEditorTrackCell)
+        XCTAssertFalse(editorCell.showsReorderControl)
+        XCTAssertEqual(
+            descendants(actions).compactMap { $0 as? UIButton }.filter { !$0.isHidden }
+                .compactMap(\.accessibilityLabel),
+            ["下一首播放", "收藏到歌单"]
+        )
+        let select = try XCTUnwrap(descendants(editorCell).compactMap { $0 as? UIButton }.first {
+            $0.accessibilityIdentifier == "music.collection.editor.select.first"
+        })
+        select.sendActions(for: .touchUpInside)
+        XCTAssertTrue(editorCell.isTrackSelected)
+        navigation.popViewController(animated: false)
+        navigation.view.layoutIfNeeded()
+        XCTAssertTrue(navigation.topViewController === controller)
+
+        header.setSearchVisible(true)
+        header.searchField.text = "Midnight"
+        header.searchField.sendActions(for: .editingChanged)
+        let filtered = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated { table.numberOfRows(inSection: 0) == 1 }
+        }, evaluatedWith: table)
+        await fulfillment(of: [filtered], timeout: 2)
+        let detailReads = await service.detailReadCount()
+        XCTAssertEqual(detailReads, 2)
+        await model.close()
+    }
+
+    func testCollectionDetailSearchFiltersRowsAndKeepsInlineActions() async throws {
+        let tracks = [
+            MusicRemoteTrack(ref: .init(kind: .library, id: "rain"), songId: "rain",
+                             title: "Rain", artist: "秦凡淇", album: "羽毛剑"),
+            MusicRemoteTrack(ref: .init(kind: .library, id: "slow"), songId: "slow",
+                             title: "慢慢听", artist: "房东的猫", album: "世界"),
+        ]
+        let service = MusicUIKitRegressionService(localTracks: tracks)
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let page = MusicCollectionViewModel(
+            model: model,
+            collectionID: "playlist:1",
+            currentQueueCollectionID: { model.state.sourceCollectionID }
+        )
+        await page.appear()?.value
+        let appearance = MusicAppearancePreferencesStore()
+        let controller = MusicCollectionViewController(
+            model: model,
+            page: page,
+            appearance: appearance,
+            router: MusicUIKitRegressionRouter()
+        )
+        let navigation = PageNavigationController(themeProvider: appearance)
+        navigation.setViewControllers([controller], animated: false)
+        let window = mount(navigation)
+        defer { release(navigation, window: window) }
+        let table = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? UITableView }.first)
+        let loaded = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                table.layoutIfNeeded()
+                guard let header = table.tableHeaderView as? MusicCollectionDetailHeaderView,
+                      table.numberOfRows(inSection: 0) == 2,
+                      abs(header.bounds.height - header.preferredHeight(for: table.bounds.width)) < 0.5,
+                      table.cellForRow(at: IndexPath(row: 0, section: 0)) != nil else { return false }
+                return true
+            }
+        }, evaluatedWith: table)
+        await fulfillment(of: [loaded], timeout: 2)
+
+        XCTAssertTrue(controller.prefersPlainBackButton)
+        XCTAssertEqual(controller.navigationItem.rightBarButtonItems?.compactMap(\.accessibilityIdentifier),
+                       ["music.collection.search", "music.collection.delete", "music.collection.refresh"])
+        let header = try XCTUnwrap(table.tableHeaderView as? MusicCollectionDetailHeaderView)
+        let first = try XCTUnwrap(table.cellForRow(at: IndexPath(row: 0, section: 0))
+                                  as? MusicCollectionTrackCell)
+        let actionButtons = descendants(first).compactMap { $0 as? UIButton }
+        XCTAssertNotNil(actionButtons.first {
+            $0.accessibilityIdentifier == "music.collection.favorite.rain"
+        })
+        XCTAssertNotNil(actionButtons.first {
+            $0.accessibilityIdentifier == "music.collection.append.rain"
+        })
+        let more = try XCTUnwrap(actionButtons.first {
+            $0.accessibilityIdentifier == "music.collection.more.rain"
+        })
+        XCTAssertEqual(more.menu?.children.compactMap { $0 as? UIAction }.map(\.title) ?? [],
+                       ["下一首播放", "添加到播放队列", "从歌单移除"])
+
+        let bar = header.actionBar
+        let hero = header.heroHeight(for: header.bounds.width)
+        XCTAssertTrue(bar.superview === controller.view)
+        XCTAssertEqual(bar.frame.height, 62, accuracy: 0.5)
+        XCTAssertEqual(bar.frame.minY, table.adjustedContentInset.top + hero, accuracy: 0.5)
+        let top = -table.adjustedContentInset.top
+        table.contentInset.bottom = 1000
+        table.setContentOffset(CGPoint(x: 0, y: top + hero + 20), animated: false)
+        table.layoutIfNeeded()
+        XCTAssertEqual(header.collapseProgress, 1, accuracy: 0.01)
+        XCTAssertEqual(controller.navigationItem.title, "歌单")
+        XCTAssertEqual(bar.frame.minY, table.adjustedContentInset.top, accuracy: 0.5)
+        table.setContentOffset(CGPoint(x: 0, y: top), animated: false)
+        table.layoutIfNeeded()
+        XCTAssertEqual(header.collapseProgress, 0, accuracy: 0.01)
+        XCTAssertNil(controller.navigationItem.title)
+        XCTAssertEqual(bar.frame.minY, table.adjustedContentInset.top + hero, accuracy: 0.5)
+        table.contentInset.bottom = 0
+
+        header.setSearchVisible(true)
+        XCTAssertEqual(bar.frame.height, 114, accuracy: 0.5)
+        header.searchField.text = "Rain"
+        header.searchField.sendActions(for: .editingChanged)
+        let filtered = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                table.layoutIfNeeded()
+                return table.numberOfRows(inSection: 0) == 1 &&
+                    self.descendants(header.actionBar).compactMap { $0 as? UILabel }.contains { $0.text == "1首" }
+            }
+        }, evaluatedWith: table)
+        await fulfillment(of: [filtered], timeout: 2)
+
+        header.searchField.text = "不存在"
+        header.searchField.sendActions(for: .editingChanged)
+        let empty = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                table.layoutIfNeeded()
+                return table.numberOfRows(inSection: 0) == 0 &&
+                    self.descendants(table.tableFooterView ?? UIView()).compactMap { $0 as? UILabel }
+                        .contains { $0.text == "无匹配歌曲" }
+            }
+        }, evaluatedWith: table)
+        await fulfillment(of: [empty], timeout: 2)
+
+        header.setSearchVisible(false)
+        let restored = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated { table.numberOfRows(inSection: 0) == 2 }
+        }, evaluatedWith: table)
+        await fulfillment(of: [restored], timeout: 2)
+        await model.close()
+    }
+
+    func testEditorSelectionAndDragPreserveTrackIdentityWithoutReplacingCells() async throws {
         let service = MusicUIKitRegressionService(localTracks: ["a", "b", "c", "d"].map {
             .init(ref: .init(kind: .library, id: $0), songId: $0, title: $0)
         })
@@ -501,9 +914,75 @@ final class MusicUIKitRegressionTests: XCTestCase {
             MainActor.assumeIsolated { editor.isPageVisible }
         }, evaluatedWith: editor)
         await fulfillment(of: [appeared], timeout: 2)
+        let toolbar = try XCTUnwrap(editor.view.subviews.compactMap {
+            $0 as? MusicCollectionEditorToolbarView
+        }.first)
+        let actions = try XCTUnwrap(editor.view.subviews.compactMap {
+            $0 as? MusicCollectionEditorActionsView
+        }.first)
         let table = try XCTUnwrap(editor.view.subviews.compactMap { $0 as? UITableView }.first)
+        editor.view.layoutIfNeeded()
         table.layoutIfNeeded()
-        let cells = try (0..<4).map { try XCTUnwrap(table.cellForRow(at: IndexPath(row: $0, section: 0))) }
+        XCTAssertEqual(toolbar.frame.height, 58, accuracy: 0.5)
+        XCTAssertEqual(actions.frame.height, 72, accuracy: 0.5)
+        XCTAssertEqual(table.rowHeight, 72, accuracy: 0.5)
+        XCTAssertNil(editor.navigationItem.rightBarButtonItem)
+        let selectAll = try XCTUnwrap(descendants(toolbar).compactMap { $0 as? UIButton }.first {
+            $0.accessibilityIdentifier == "music.collection.editor.selectAll"
+        })
+        let done = try XCTUnwrap(descendants(toolbar).compactMap { $0 as? UIButton }.first {
+            $0.accessibilityIdentifier == "music.collection.editor.done"
+        })
+        XCTAssertEqual(selectAll.accessibilityLabel, "全选")
+        XCTAssertEqual(done.accessibilityLabel, "完成")
+        XCTAssertEqual(descendants(actions).compactMap { $0 as? UIButton }.compactMap(\.accessibilityLabel),
+                       ["下一首播放", "收藏到歌单", "删除"])
+
+        let cells = try (0..<4).map {
+            try XCTUnwrap(table.cellForRow(at: IndexPath(row: $0, section: 0))
+                          as? MusicCollectionEditorTrackCell)
+        }
+        XCTAssertTrue(editor.tableView(table, canEditRowAt: IndexPath(row: 0, section: 0)))
+        XCTAssertTrue(editor.tableView(table, canMoveRowAt: IndexPath(row: 0, section: 0)))
+        XCTAssertEqual(editor.tableView(table, editingStyleForRowAt: IndexPath(row: 0, section: 0)),
+                       .none)
+        XCTAssertTrue(cells.allSatisfy { $0.showsReorderControl })
+        XCTAssertTrue(cells[0].isTrackSelected)
+        XCTAssertFalse(cells[1].isTrackSelected)
+        let mark = try XCTUnwrap(descendants(cells[0]).first {
+            $0.accessibilityIdentifier == "music.collection.editor.selectionMark.a"
+        })
+        let markFrame = mark.convert(mark.bounds, to: cells[0].contentView)
+        XCTAssertEqual(markFrame.minX, 20.5, accuracy: 0.5)
+        XCTAssertEqual(markFrame.minY, 24.5, accuracy: 0.5)
+        XCTAssertEqual(markFrame.width, 23, accuracy: 0.5)
+        XCTAssertEqual(markFrame.height, 23, accuracy: 0.5)
+        let artwork = try XCTUnwrap(descendants(cells[0]).compactMap { $0 as? MusicArtworkView }.first)
+        let artworkFrame = artwork.convert(artwork.bounds, to: cells[0].contentView)
+        XCTAssertEqual(artworkFrame.minX, 56, accuracy: 0.5)
+        XCTAssertEqual(artworkFrame.minY, 15, accuracy: 0.5)
+        XCTAssertEqual(artworkFrame.width, 42, accuracy: 0.5)
+        XCTAssertEqual(artworkFrame.height, 42, accuracy: 0.5)
+        selectAll.sendActions(for: .touchUpInside)
+        XCTAssertEqual(draft.selectedTracks.map(\.songId), ["a", "b", "c", "d"])
+        XCTAssertEqual(selectAll.accessibilityLabel, "取消全选")
+        XCTAssertTrue(cells.allSatisfy { $0.isTrackSelected })
+        selectAll.sendActions(for: .touchUpInside)
+        XCTAssertTrue(draft.selectedTracks.isEmpty)
+        XCTAssertEqual(selectAll.accessibilityLabel, "全选")
+        XCTAssertTrue(cells.allSatisfy { !$0.isTrackSelected })
+        let firstSelection = try XCTUnwrap(descendants(cells[0]).compactMap { $0 as? UIButton }.first {
+            $0.accessibilityIdentifier == "music.collection.editor.select.a"
+        })
+        let secondSelection = try XCTUnwrap(descendants(cells[1]).compactMap { $0 as? UIButton }.first {
+            $0.accessibilityIdentifier == "music.collection.editor.select.b"
+        })
+        firstSelection.sendActions(for: .touchUpInside)
+        secondSelection.sendActions(for: .touchUpInside)
+        XCTAssertEqual(draft.selectedTracks.map(\.songId), ["a", "b"])
+        XCTAssertTrue(cells[0].isTrackSelected)
+        XCTAssertTrue(cells[1].isTrackSelected)
+
         let from = IndexPath(row: 0, section: 0), to = IndexPath(row: 2, section: 0)
         let moved = expectation(description: "row movement completed")
         UIView.performWithoutAnimation {
@@ -514,16 +993,77 @@ final class MusicUIKitRegressionTests: XCTestCase {
         }
         await fulfillment(of: [moved], timeout: 2)
         XCTAssertEqual(draft.tracks.map(\.songId), ["b", "c", "a", "d"])
-        XCTAssertEqual(draft.selectedTracks.map(\.songId), ["a"])
+        XCTAssertEqual(draft.selectedTracks.map(\.songId), ["b", "a"])
         for (index, original) in [1, 2, 0, 3].enumerated() {
-            let cell = try XCTUnwrap(table.cellForRow(at: IndexPath(row: index, section: 0)))
+            let cell = try XCTUnwrap(table.cellForRow(at: IndexPath(row: index, section: 0))
+                                     as? MusicCollectionEditorTrackCell)
             XCTAssertTrue(cell === cells[original])
-            XCTAssertEqual(cell.accessoryType, draft.tracks[index].songId == "a" ? .checkmark : .none)
+            XCTAssertEqual(cell.isTrackSelected, ["a", "b"].contains(draft.tracks[index].songId))
+            XCTAssertTrue(cell.showsReorderControl)
             XCTAssertTrue(descendants(cell).compactMap { $0 as? UILabel }.contains {
-                $0.text == "\(index + 1). \(draft.tracks[index].title)"
+                $0.text == draft.tracks[index].title
             })
         }
         page.disappear()
+        await model.close()
+    }
+
+    func testUnchangedLocalEditorBackReturnsToDetailOnce() async throws {
+        let service = MusicUIKitRegressionService(localTracks: ["a", "b"].map {
+            .init(ref: .init(kind: .library, id: $0), songId: $0, title: $0)
+        })
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let appearance = MusicAppearancePreferencesStore()
+        let root = MusicCollectionViewController(model: model, collectionID: "playlist:1",
+                                                 appearance: appearance, router: MusicUIKitRegressionRouter())
+        let navigation = PageNavigationController(themeProvider: appearance)
+        navigation.setViewControllers([UIViewController(), root], animated: false)
+        let window = mount(navigation)
+        defer { release(navigation, window: window) }
+        let table = try XCTUnwrap(root.view.subviews.compactMap { $0 as? UITableView }.first)
+        let loaded = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                table.layoutIfNeeded()
+                guard let header = table.tableHeaderView as? MusicCollectionDetailHeaderView,
+                      let edit = self.descendants(header.actionBar).compactMap({ $0 as? UIButton }).first(where: {
+                          $0.accessibilityIdentifier == "music.collection.edit"
+                      }) else { return false }
+                return table.numberOfRows(inSection: 0) == 2 && edit.isEnabled
+            }
+        }, evaluatedWith: table)
+        await fulfillment(of: [loaded], timeout: 2)
+        let header = try XCTUnwrap(table.tableHeaderView as? MusicCollectionDetailHeaderView)
+        let edit = try XCTUnwrap(descendants(header.actionBar).compactMap { $0 as? UIButton }.first {
+            $0.accessibilityIdentifier == "music.collection.edit"
+        })
+        edit.sendActions(for: .touchUpInside)
+        let visible = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                navigation.view.layoutIfNeeded()
+                NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+                return (navigation.topViewController as? MusicCollectionEditorViewController)?.isPageVisible == true
+            }
+        }, evaluatedWith: navigation)
+        await fulfillment(of: [visible], timeout: 2)
+        try await Task.sleep(nanoseconds: 600_000_000)
+        let editor = try XCTUnwrap(navigation.topViewController as? MusicCollectionEditorViewController)
+        XCTAssertNil(editor.navigationItem.leftBarButtonItem)
+        navigation.popViewController(animated: true)
+        let returned = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                navigation.view.layoutIfNeeded()
+                return navigation.viewControllers.count == 2 && navigation.topViewController === root &&
+                    root.isPageVisible
+            }
+        }, evaluatedWith: navigation)
+        await fulfillment(of: [returned], timeout: 2)
+        let stable = expectation(description: "No second pop")
+        stable.isInverted = true
+        await fulfillment(of: [stable], timeout: 0.4)
+        XCTAssertEqual(navigation.viewControllers.count, 2)
+        XCTAssertTrue(navigation.topViewController === root)
+        XCTAssertEqual(table.numberOfRows(inSection: 0), 2)
+        XCTAssertTrue(edit.isEnabled)
         await model.close()
     }
 
@@ -1004,19 +1544,24 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     private let discovery: [MusicSearchDiscoverySnapshot]
     private let browse: MusicPublicBrowsePage
     private let nextBrowse: MusicPublicBrowsePage?
+    private let detail: MusicPublicBrowseDetail?
+    private let nextDetail: MusicPublicBrowseDetail?
     private let localTracks: [MusicRemoteTrack]
     private let collectionKind: String
-    private var discoveryCalls = 0, browseCalls = 0, trackCalls = 0
+    private var discoveryCalls = 0, browseCalls = 0, detailCalls = 0, trackCalls = 0
     private var chorusCalls: [String] = [], chorusActive = 0, chorusPeak = 0
     private var chorusGate: MusicUIKitChorusGate?
     private var chorusFailure: MusicServiceError?
     init(discovery: [MusicSearchDiscoverySnapshot] = [], browse: MusicPublicBrowsePage = .init(sections: []),
-         nextBrowse: MusicPublicBrowsePage? = nil,
+         nextBrowse: MusicPublicBrowsePage? = nil, detail: MusicPublicBrowseDetail? = nil,
+         nextDetail: MusicPublicBrowseDetail? = nil,
          localTracks: [MusicRemoteTrack] = [], collectionKind: String = "playlist") {
-        self.discovery = discovery; self.browse = browse; self.localTracks = localTracks
-        self.nextBrowse = nextBrowse; self.collectionKind = collectionKind
+        self.discovery = discovery; self.browse = browse; self.detail = detail
+        self.nextBrowse = nextBrowse; self.nextDetail = nextDetail
+        self.localTracks = localTracks; self.collectionKind = collectionKind
     }
     func counts() -> (discovery: Int, browse: Int, tracks: Int) { (discoveryCalls, browseCalls, trackCalls) }
+    func detailReadCount() -> Int { detailCalls }
     func holdChorus(_ gate: MusicUIKitChorusGate) { chorusGate = gate }
     func failNextChorus(_ error: MusicServiceError) { chorusFailure = error }
     func chorusStatistics() -> (calls: [String], peak: Int) { (chorusCalls, chorusPeak) }
@@ -1037,7 +1582,13 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
         browseCalls += 1; return cursor == nil ? browse : nextBrowse ?? browse
     }
     func publicPlaylists(platform: MusicPublicBrowsePlatform, query: String, cursor: String?) throws -> MusicPublicBrowseCollectionPage { throw MusicServiceError.unsupported }
-    func publicDetail(_ collection: MusicPublicBrowseCollection, cursor: String?) throws -> MusicPublicBrowseDetail { throw MusicServiceError.unsupported }
+    func publicDetail(_ collection: MusicPublicBrowseCollection, cursor: String?) throws -> MusicPublicBrowseDetail {
+        detailCalls += 1
+        guard let detail, detail.collection.id == collection.id else { throw MusicServiceError.unsupported }
+        if cursor == nil { return detail }
+        guard cursor == detail.cursor, let nextDetail else { throw MusicServiceError.notFound }
+        return nextDetail
+    }
     func recommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) throws -> MusicBrowsePage { throw MusicServiceError.unsupported }
     func accountCollections(platform: MusicAccountPlatform, cursor: String?) throws -> MusicAccountCollectionPage { throw MusicServiceError.unsupported }
     func accountTracks(platform: MusicAccountPlatform, collectionID: String, cursor: String?) throws -> MusicBrowsePage { throw MusicServiceError.unsupported }
