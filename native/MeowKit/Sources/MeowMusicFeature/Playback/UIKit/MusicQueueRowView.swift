@@ -13,6 +13,8 @@ final class MusicQueueRowView: UIView {
     private let favorite = UIButton(type: .system), remove = UIButton(type: .system)
     private static let heart = PageIcon.image(.heart, size: 22)
     private static let filledHeart = PageIcon.image(.heart, filled: true, size: 22)
+    private var restingBackground = UIColor.clear, interactionBackground = UIColor.clear
+    private var isPressed = false, isReordering = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -44,7 +46,9 @@ final class MusicQueueRowView: UIView {
         playing.tintColor = UIColor(theme.accent)
         self.title.textColor = UIColor(active ? theme.accent : theme.ink)
         self.artist.textColor = UIColor(theme.muted)
-        backgroundColor = active ? UIColor(theme.accent).withAlphaComponent(0.06) : .clear
+        restingBackground = active ? UIColor(theme.accent).withAlphaComponent(0.06) : .clear
+        interactionBackground = UIColor(theme.chip)
+        updateBackground()
         self.favorite.isHidden = favorite == nil
         self.favorite.setImage(favorite == true ? Self.filledHeart : Self.heart, for: .normal)
         self.favorite.tintColor = UIColor(favorite == true ? theme.accent : theme.muted)
@@ -55,6 +59,22 @@ final class MusicQueueRowView: UIView {
         reorderHandle.isHidden = !reorderable
         reorderHandle.tintColor = UIColor(theme.muted).withAlphaComponent(0.6)
         setNeedsLayout()
+    }
+
+    func setPressed(_ pressed: Bool) {
+        guard isPressed != pressed else { return }
+        isPressed = pressed
+        updateBackground()
+    }
+
+    func setReordering(_ reordering: Bool) {
+        guard isReordering != reordering else { return }
+        isReordering = reordering
+        updateBackground()
+    }
+
+    private func updateBackground() {
+        backgroundColor = isPressed || isReordering ? interactionBackground : restingBackground
     }
 
     override func layoutSubviews() {
@@ -100,6 +120,7 @@ final class MusicQueueCell: UICollectionViewCell {
     override func prepareForReuse() {
         super.prepareForReuse()
         row.onFavorite = nil; row.onRemove = nil
+        row.setPressed(false); row.setReordering(false)
         accessibilityCustomActions = nil
     }
 }
