@@ -4,9 +4,7 @@ import Combine
 import MeowUI
 
 @MainActor
-public final class MusicBrowseViewController: MusicPageViewController,
-    UICollectionViewDelegate, UISearchResultsUpdating
-{
+public final class MusicBrowseViewController: MusicPageViewController, UICollectionViewDelegate {
     private let model: MusicViewModel
     private let page: MusicPublicBrowseViewModel?
     private var showsSectionPlayback: Bool { page?.request != .discovery(.home) }
@@ -19,15 +17,12 @@ public final class MusicBrowseViewController: MusicPageViewController,
     }
     private var rows: [ItemID: (section: MusicPublicBrowseSection, item: MusicPublicBrowseItem)] = [:]
     private var dataSource: UICollectionViewDiffableDataSource<String, ItemID>!
-    private var filter = ""
-    private let search = UISearchController(searchResultsController: nil)
     private let tags = UIScrollView()
     private var tagsHeight: NSLayoutConstraint!
     private var fmPreviews: [String: MusicFMPreview] = [:]
     private var previewTasks: [String: Task<Void, Never>] = [:]
     private var previewRequests = Set<String>()
     private var previewAccess: UUID?
-    private var collectionInfo: MusicPublicBrowseCollection?
     private var observation: Task<Void, Never>?
     private var observationID: UUID?
     private var observationAccess: UUID?
@@ -93,17 +88,8 @@ public final class MusicBrowseViewController: MusicPageViewController,
             collection.topAnchor.constraint(equalTo: tags.bottomAnchor),
             collection.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
-        if !embedded {
-            search.searchResultsUpdater = self
-            search.obscuresBackgroundDuringPresentation = false
-            search.searchBar.placeholder = "歌单内搜索"
-            if let page, case .detail = page.request { navigationItem.searchController = search }
-        }
         if let page {
             observe(page.$sections.map { _ in }.eraseToAnyPublisher()) { [weak self] in self?.render() }
-            observe(page.$collection.removeDuplicates().map { _ in }.eraseToAnyPublisher()) {
-                [weak self] in self?.render()
-            }
             observe(page) { [weak self] in self?.renderState() }
         }
         observe(model.accessChanges) { [weak self] in self?.activatePage() }
@@ -193,7 +179,6 @@ public final class MusicBrowseViewController: MusicPageViewController,
 
     private func configure(_ header: MusicBrowseHeader, section: MusicPublicBrowseSection, first: Bool) {
         header.configure(section: section,
-                         collection: first && !embedded ? collectionInfo : nil,
                          theme: theme, showsSectionPlayback: showsSectionPlayback, onPlay: { [weak self] in
             guard let self, let current = self.sections.first(where: { $0.id == section.id }),
                   let item = current.items.first else { return }
@@ -241,7 +226,7 @@ public final class MusicBrowseViewController: MusicPageViewController,
     }
 
     private func loadAutomaticNextPage() {
-        guard let page, isPageVisible, !automaticPaginationHeld, filter.isEmpty, page.error == nil, !page.isLoading,
+        guard let page, isPageVisible, !automaticPaginationHeld, page.error == nil, !page.isLoading,
               !page.requiresExplicitNext, !page.usesPageNavigation, page.nextCursor != nil else { return }
         runPageTask { await page.appendNext() }
     }
@@ -249,11 +234,6 @@ public final class MusicBrowseViewController: MusicPageViewController,
     public func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell,
                                forItemAt indexPath: IndexPath) {
         (cell as? MusicBannerCarouselCell)?.setActive(false)
-    }
-
-    public func updateSearchResults(for searchController: UISearchController) {
-        filter = searchController.searchBar.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        render()
     }
 
     public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { automaticPaginationHeld = false }
@@ -366,21 +346,9 @@ public final class MusicBrowseViewController: MusicPageViewController,
 
     private func render() {
         guard isViewLoaded else { return }
-        let previousCollection = collectionInfo
         let previousSections = sections
         let previousRows = rows
-        collectionInfo = page?.collection
-        sections = (page?.sections ?? []).map { section in
-            guard !filter.isEmpty else { return section }
-            let items = section.items.filter {
-                if case .track(let track) = $0.content { return MusicRemoteCollectionFilter.matches(track, query: filter) }
-                return true
-            }
-            return .init(id: section.id, title: section.title, items: items, layout: section.layout,
-                         avatars: section.avatars, channel: section.channel, filters: section.filters,
-                         selectedFilter: section.selectedFilter, error: section.error,
-                         tabs: section.tabs, selectedTab: section.selectedTab)
-        }
+        sections = page?.sections ?? []
         rows = [:]
         var snapshot = NSDiffableDataSourceSnapshot<String, ItemID>()
         for section in sections {
@@ -395,11 +363,11 @@ public final class MusicBrowseViewController: MusicPageViewController,
             previous.itemIdentifiers != snapshot.itemIdentifiers {
             dataSource.apply(snapshot, animatingDifferences: false)
         }
-        if previousCollection != collectionInfo || previousSections.count != sections.count ||
+        if previousSections.count != sections.count ||
             zip(previousSections, sections).contains(where: { pair in
                 pair.0.id != pair.1.id || pair.0.layout != pair.1.layout ||
-                    MusicBrowseHeader.height(for: pair.0, collection: nil, showsSectionPlayback: showsSectionPlayback) !=
-                    MusicBrowseHeader.height(for: pair.1, collection: nil, showsSectionPlayback: showsSectionPlayback)
+                    MusicBrowseHeader.height(for: pair.0, showsSectionPlayback: showsSectionPlayback) !=
+                    MusicBrowseHeader.height(for: pair.1, showsSectionPlayback: showsSectionPlayback)
             }) {
             collection.collectionViewLayout.invalidateLayout()
         }
@@ -409,13 +377,10 @@ public final class MusicBrowseViewController: MusicPageViewController,
                 (id.item == nil ? !sameItems(old.section.items, row.section.items) : !sameItem(old.item, row.item))
         })
         let oldSections = Dictionary(uniqueKeysWithValues: previousSections.map { ($0.id, $0) })
-        var changedHeaders = Set(sections.filter { section in
+        let changedHeaders = Set(sections.filter { section in
             guard let old = oldSections[section.id] else { return true }
             return !sameHeader(old, section)
         }.map(\.id))
-        if previousCollection != collectionInfo, !embedded, let first = sections.first {
-            changedHeaders.insert(first.id)
-        }
         updateVisibleCells(items: changedItems)
         updateVisibleHeaders(sections: changedHeaders)
         renderState()
@@ -621,7 +586,6 @@ public final class MusicBrowseViewController: MusicPageViewController,
     private func play(_ item: MusicPublicBrowseItem, section: MusicPublicBrowseSection,
                       startingAt selected: MusicRemoteTrack? = nil) {
         guard let page else { return }
-        let query = filter
         perform(operation: "播放歌曲") { [weak self] in
             guard let self else { return }
             try await self.model.performPrimaryPlayback(
@@ -631,16 +595,7 @@ public final class MusicBrowseViewController: MusicPageViewController,
                 case .track(let track):
                     if page.canSaveCollection {
                         let (source, index) = try await page.playbackSource(for: track)
-                        if query.isEmpty {
-                            await self.model.playRemoteQueue(source, start: .init(index: index, track: track))
-                        } else {
-                            let filteredIndex = try await page.filteredQueueIndex(
-                                source: source, index: index, track: track, query: query)
-                            let filtered = try await self.model.filteredRemoteQueue(source, query: query)
-                            defer { self.model.releaseRemoteQueueSource(filtered) }
-                            guard self.filter == query else { throw MusicServiceError.cancelled }
-                            await self.model.playRemoteQueue(filtered, start: .init(index: filteredIndex, track: track))
-                        }
+                        await self.model.playRemoteQueue(source, start: .init(index: index, track: track))
                     } else {
                         let tracks = section.items.compactMap { item -> MusicRemoteTrack? in
                             if case .track(let value) = item.content { return value }; return nil
@@ -687,7 +642,7 @@ public final class MusicBrowseViewController: MusicPageViewController,
     private func saveCollection() {
         guard let page, let intent = page.makeActionIntent() else { return }
         let alert = UIAlertController(title: "保存到我的歌单", message: nil, preferredStyle: .alert)
-        alert.addTextField { [weak self] in $0.text = self?.collectionInfo?.title ?? self?.title }
+        alert.addTextField { [weak self] in $0.text = self?.title }
         alert.addAction(UIAlertAction(title: "取消", style: .cancel))
         alert.addAction(UIAlertAction(title: "保存", style: .default) { [weak self, weak alert] _ in
             let name = alert?.textFields?.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -885,8 +840,7 @@ public final class MusicBrowseViewController: MusicPageViewController,
             }
             let result = NSCollectionLayoutSection(group: group)
             let headerHeight = MusicBrowseHeader.height(
-                for: section, collection: index == 0 && !self.embedded ? self.collectionInfo : nil,
-                showsSectionPlayback: self.showsSectionPlayback)
+                for: section, showsSectionPlayback: self.showsSectionPlayback)
             result.contentInsets = .init(top: index == 0 && headerHeight == 0 ? PageLayoutMetrics.contentGap : 4,
                                          leading: 16, bottom: 20, trailing: 16)
             result.interGroupSpacing = 9

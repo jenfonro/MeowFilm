@@ -357,8 +357,7 @@ private final class MusicBrowsePreviewButton: UIButton {
 @MainActor
 final class MusicBrowseHeader: UICollectionReusableView {
     static let reuseIdentifier = "MusicBrowseHeader"
-    private let title = UILabel(), creator = UILabel()
-    private let artwork = MusicArtworkView(size: 0)
+    private let title = UILabel()
     private let play = UIButton(type: .system), choices = UIButton(type: .system)
     private let channelButton = UIButton(type: .system)
     private let channelArrow = UIImageView(image: UIImage(systemName: "chevron.right",
@@ -370,9 +369,7 @@ final class MusicBrowseHeader: UICollectionReusableView {
     private var channelAction: (() -> Void)?
     private var headingHeight: CGFloat = 0
 
-    static func height(for section: MusicPublicBrowseSection, collection: MusicPublicBrowseCollection?,
-                       showsSectionPlayback: Bool = true) -> CGFloat {
-        if collection != nil { return 190 }
+    static func height(for section: MusicPublicBrowseSection, showsSectionPlayback: Bool = true) -> CGFloat {
         return headingHeight(for: section, showsSectionPlayback: showsSectionPlayback) + (section.tabs.isEmpty ? 0 : 36)
     }
 
@@ -387,8 +384,7 @@ final class MusicBrowseHeader: UICollectionReusableView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         title.font = .systemFont(ofSize: 16, weight: .semibold)
-        creator.font = .systemFont(ofSize: 12)
-        title.numberOfLines = 2
+        title.numberOfLines = 1
         play.setImage(PageIcon.image(.play), for: .normal)
         play.accessibilityLabel = "播放全部"
         play.addAction(UIAction { [weak self] _ in self?.playAction?() }, for: .touchUpInside)
@@ -400,34 +396,25 @@ final class MusicBrowseHeader: UICollectionReusableView {
         tabs.axis = .horizontal; tabs.spacing = 9; tabs.distribution = .fillEqually
         errorLabel.numberOfLines = 0; errorLabel.font = .systemFont(ofSize: 13)
         retry.setTitle("重试", for: .normal)
-        for item in [channelButton, title, channelArrow, creator, artwork, play, choices, tabs, errorLabel, retry] + avatars { addSubview(item) }
+        for item in [channelButton, title, channelArrow, play, choices, tabs, errorLabel, retry] + avatars { addSubview(item) }
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func configure(section: MusicPublicBrowseSection, collection: MusicPublicBrowseCollection?,
+    func configure(section: MusicPublicBrowseSection,
                    theme: PageTheme, showsSectionPlayback: Bool = true, onPlay: @escaping () -> Void,
                    onChannel: @escaping () -> Void, onChoice: @escaping (String) -> Void,
                    onRetry: @escaping () -> Void, error: String?) {
         headingHeight = Self.headingHeight(for: section, showsSectionPlayback: showsSectionPlayback)
-        title.text = collection?.title ?? section.title
-        title.numberOfLines = collection == nil ? 1 : 2
+        title.text = section.title
         title.textColor = UIColor(theme.ink)
-        creator.textColor = UIColor(theme.muted)
-        artwork.isHidden = collection == nil
-        creator.isHidden = collection == nil
-        if let collection {
-            artwork.load(collection.artwork)
-            creator.text = [collection.creator, collection.count.map { "\($0)首" }]
-                .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
-        }
         playAction = onPlay
-        play.isHidden = collection == nil && (!showsSectionPlayback || !section.items.contains {
+        play.isHidden = !showsSectionPlayback || !section.items.contains {
             if case .track = $0.content { return true }; return false
-        })
+        }
         channelAction = onChannel
-        channelButton.isHidden = collection != nil || section.channel == nil
+        channelButton.isHidden = section.channel == nil
         channelButton.accessibilityLabel = section.title
         channelButton.accessibilityIdentifier = "music.browse.channel.\(section.id)"
         channelArrow.isHidden = channelButton.isHidden
@@ -464,42 +451,31 @@ final class MusicBrowseHeader: UICollectionReusableView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let hero = !artwork.isHidden
-        if hero {
-            artwork.frame = CGRect(x: 0, y: 20, width: 110, height: 110)
-            title.frame = CGRect(x: 128, y: 26, width: max(0, bounds.width - 128), height: 60)
-            creator.frame = CGRect(x: 128, y: 92, width: max(0, bounds.width - 128), height: 30)
-            play.frame = CGRect(x: 0, y: 142, width: 44, height: 44)
-            choices.frame = CGRect(x: bounds.width - 44, y: 142, width: 44, height: 44)
-            channelButton.frame = .zero; channelArrow.frame = .zero
-            tabs.frame = .zero
-        } else {
-            let choiceWidth: CGFloat = choices.isHidden ? 0 : 44
-            let playWidth: CGFloat = play.isHidden ? 0 : 44
-            let avatarCount = avatars.filter { !$0.isHidden }.count
-            let avatarWidth: CGFloat = avatarCount == 0 ? 0 : 25 + CGFloat(avatarCount - 1) * 18 + 8
-            let titleArea = max(0, bounds.width - choiceWidth - playWidth - avatarWidth)
-            let height = max(0, headingHeight - 6)
-            let maximum = max(0, titleArea - (channelArrow.isHidden ? 0 : 18))
-            let width = channelArrow.isHidden ? maximum :
-                min(maximum, title.sizeThatFits(CGSize(width: maximum, height: height)).width)
-            title.frame = CGRect(x: 0, y: 2, width: width, height: height)
-            channelArrow.frame = channelArrow.isHidden ? .zero :
-                CGRect(x: title.frame.maxX + 6, y: title.frame.midY - 8, width: 12, height: 16)
-            channelButton.frame = CGRect(x: 0, y: 0, width: max(0, bounds.width - choiceWidth - playWidth), height: headingHeight)
-            play.frame = CGRect(x: bounds.width - choiceWidth - playWidth, y: 0, width: playWidth, height: headingHeight)
-            choices.frame = CGRect(x: bounds.width - choiceWidth, y: 0, width: choiceWidth, height: headingHeight)
-            tabs.frame = CGRect(x: 0, y: headingHeight, width: bounds.width,
-                                height: max(0, bounds.height - headingHeight))
-            for (index, avatar) in avatars.enumerated() {
-                avatar.frame = CGRect(x: titleArea + CGFloat(index) * 18 + 8, y: 8, width: 25, height: 25)
-            }
+        let choiceWidth: CGFloat = choices.isHidden ? 0 : 44
+        let playWidth: CGFloat = play.isHidden ? 0 : 44
+        let avatarCount = avatars.filter { !$0.isHidden }.count
+        let avatarWidth: CGFloat = avatarCount == 0 ? 0 : 25 + CGFloat(avatarCount - 1) * 18 + 8
+        let titleArea = max(0, bounds.width - choiceWidth - playWidth - avatarWidth)
+        let height = max(0, headingHeight - 6)
+        let maximum = max(0, titleArea - (channelArrow.isHidden ? 0 : 18))
+        let width = channelArrow.isHidden ? maximum :
+            min(maximum, title.sizeThatFits(CGSize(width: maximum, height: height)).width)
+        title.frame = CGRect(x: 0, y: 2, width: width, height: height)
+        channelArrow.frame = channelArrow.isHidden ? .zero :
+            CGRect(x: title.frame.maxX + 6, y: title.frame.midY - 8, width: 12, height: 16)
+        channelButton.frame = CGRect(x: 0, y: 0, width: max(0, bounds.width - choiceWidth - playWidth), height: headingHeight)
+        play.frame = CGRect(x: bounds.width - choiceWidth - playWidth, y: 0, width: playWidth, height: headingHeight)
+        choices.frame = CGRect(x: bounds.width - choiceWidth, y: 0, width: choiceWidth, height: headingHeight)
+        tabs.frame = CGRect(x: 0, y: headingHeight, width: bounds.width,
+                            height: max(0, bounds.height - headingHeight))
+        for (index, avatar) in avatars.enumerated() {
+            avatar.frame = CGRect(x: titleArea + CGFloat(index) * 18 + 8, y: 8, width: 25, height: 25)
         }
         if errorLabel.text != nil {
             let y = bounds.height - 64
             errorLabel.frame = CGRect(x: 0, y: y, width: max(0, bounds.width - 84), height: 60)
             retry.frame = CGRect(x: bounds.width - 80, y: y + 8, width: 76, height: 44)
-            if !hero { tabs.frame.size.height = max(0, y - headingHeight) }
+            tabs.frame.size.height = max(0, y - headingHeight)
         } else { errorLabel.frame = .zero }
     }
 }
