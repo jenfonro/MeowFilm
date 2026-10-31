@@ -26,6 +26,7 @@
 
 - [App 结构与能力划分](windows/app-structure.md)
 - [桌面壳](windows/desktop-shell.md)
+- [影视首页](windows/film-home.md)
 - [受保护文档存储](windows/protected-storage.md)
 - [公共图像](windows/artwork.md)
 - [系统媒体会话](windows/system-media.md)

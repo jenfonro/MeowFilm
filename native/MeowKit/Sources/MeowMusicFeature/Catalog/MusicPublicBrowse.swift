@@ -192,9 +192,21 @@ public struct MusicPublicBrowseCollectionPage: Sendable {
         self.items = items; self.total = total; self.cursor = cursor
     }
 }
+/// An available member retains its native identity and absolute, zero-based
+/// source position. Missing members leave gaps; position is not a queue index.
+public struct MusicPublicBrowseMember: Sendable {
+    public let nativeID: String
+    public let sourcePosition: Int
+    public let track: MusicRemoteTrack
+    public init(nativeID: String, sourcePosition: Int, track: MusicRemoteTrack) {
+        self.nativeID = nativeID; self.sourcePosition = sourcePosition; self.track = track
+    }
+}
+
 public struct MusicPublicBrowseDetail: Sendable {
     public let collection: MusicPublicBrowseCollection
-    public let tracks: [MusicRemoteTrack]
+    public let members: [MusicPublicBrowseMember]
+    public var tracks: [MusicRemoteTrack] { members.map(\.track) }
     public let total: Int
     public let cursor: String?
     public let snapshot: String
@@ -202,11 +214,11 @@ public struct MusicPublicBrowseDetail: Sendable {
     /// Number of source positions examined, including unavailable members.
     /// A nonterminal page may contain no visible tracks, but must advance.
     public let consumed: Int
-    public init(collection: MusicPublicBrowseCollection, tracks: [MusicRemoteTrack], total: Int,
+    public init(collection: MusicPublicBrowseCollection, members: [MusicPublicBrowseMember], total: Int,
                 cursor: String?, snapshot: String, notice: String? = nil, consumed: Int? = nil) {
-        self.collection = collection; self.tracks = tracks; self.total = total
+        self.collection = collection; self.members = members; self.total = total
         self.cursor = cursor; self.snapshot = snapshot; self.notice = notice
-        self.consumed = consumed ?? tracks.count
+        self.consumed = consumed ?? members.count
     }
 }
 public protocol MusicPublicBrowsing: Sendable {

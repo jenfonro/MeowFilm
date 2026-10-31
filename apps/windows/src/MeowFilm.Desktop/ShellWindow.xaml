@@ -31,7 +31,7 @@
         </Style>
     </Window.Style>
     <shell:WindowChrome.WindowChrome>
-        <shell:WindowChrome CaptionHeight="72" ResizeBorderThickness="6" GlassFrameThickness="0"
+        <shell:WindowChrome CaptionHeight="64" ResizeBorderThickness="6" GlassFrameThickness="0"
                             CornerRadius="0" UseAeroCaptionButtons="False" />
     </shell:WindowChrome.WindowChrome>
 
@@ -56,7 +56,7 @@
         <Grid x:Name="PresentationSurface" ClipToBounds="True" SizeChanged="OnPresentationSizeChanged">
         <Grid x:Name="RootLayout" KeyboardNavigation.TabNavigation="Cycle">
             <Grid.RowDefinitions>
-                <RowDefinition Height="72" />
+                <RowDefinition Height="64" />
                 <RowDefinition Height="*" />
                 <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
@@ -109,7 +109,7 @@
                 <TextBlock Text="meowfilm" FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center" />
             </StackPanel>
 
-            <ScrollViewer x:Name="SidebarScroll" PreviewMouseWheel="OnSidebarWheel" Style="{StaticResource MeowFilm.OverlayScrollViewer}" Grid.Row="1" Margin="23,15,8,16" Focusable="False" IsEnabled="{Binding IsInteractive}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><StackPanel Margin="0,0,8,0">
+            <ScrollViewer x:Name="SidebarScroll" PreviewMouseWheel="OnSidebarWheel" Style="{StaticResource MeowFilm.OverlayScrollViewer}" Grid.Row="1" Margin="23,8,8,16" Focusable="False" IsEnabled="{Binding IsInteractive}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><StackPanel Margin="0,0,8,0">
                 <ListBox ScrollViewer.VerticalScrollBarVisibility="Disabled" x:Name="NavigationList" Padding="0" Style="{StaticResource MeowFilm.NavigationList}"
                          IsSynchronizedWithCurrentItem="False"
                          ItemContainerStyle="{StaticResource MeowFilm.NavigationItem}"
@@ -289,7 +289,7 @@
                 </StackPanel>
             </Grid>
 
-            <Grid x:Name="ContentRegion" Grid.Row="1" Grid.Column="1" Margin="0,4,0,0">
+            <Grid x:Name="ContentRegion" Grid.Row="1" Grid.Column="1">
                 <Grid x:Name="ContentDeck" IsEnabled="{Binding IsInteractive}" />
             </Grid>
 
@@ -324,7 +324,7 @@
                     Focusable="False" IsTabStop="False" Click="OnQueueDismissClick"
                     AutomationProperties.Name="收起播放列表" />
             <Border x:Name="QueueSurface" Grid.RowSpan="2" Grid.ColumnSpan="2" Panel.ZIndex="30"
-                    Width="386" Margin="0,84,0,16" HorizontalAlignment="Right"
+                    Width="386" Margin="0,76,0,16" HorizontalAlignment="Right"
                     Background="{DynamicResource MeowFilm.Brush.Surface}" CornerRadius="12,0,0,12"
                     Visibility="Collapsed" ClipToBounds="True">
                 <Border.Effect>
@@ -342,7 +342,7 @@
                                 Focusable="False" IsTabStop="False" />
             </Border>
         </Grid>
-        <StackPanel x:Name="NotificationOverlay" Panel.ZIndex="100" HorizontalAlignment="Center" VerticalAlignment="Top" MaxWidth="560" Margin="24,84,24,12">
+        <StackPanel x:Name="NotificationOverlay" Panel.ZIndex="100" HorizontalAlignment="Center" VerticalAlignment="Top" MaxWidth="560" Margin="24,76,24,12">
                 <Border x:Name="StatusPanel" Margin="0,0,0,8">
                     <Border.Style>
                         <Style TargetType="Border" BasedOn="{StaticResource MeowFilm.Surface}">

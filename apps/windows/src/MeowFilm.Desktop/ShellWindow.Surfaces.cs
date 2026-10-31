@@ -28,8 +28,7 @@ public sealed partial class ShellWindow
             if (args is null) return;
             QueueUi(() =>
             {
-                if (_isClosing || !ReferenceEquals(_current, session) ||
-                    !ReferenceEquals(_playerSession, session)) return;
+                if (!CanPresentPlayerSurface(session)) return;
                 RunUiAction(() => ToggleGlobalSurfaceAsync(session, source, args.Surface));
             });
         };
@@ -51,7 +50,7 @@ public sealed partial class ShellWindow
 
     private async Task OpenPlayerDetailAsync(ModuleSession session, IDesktopGlobalSurfaceSource source)
     {
-        if (_isClosing || !ReferenceEquals(_current, session) || !ReferenceEquals(_playerSession, session)) return;
+        if (!CanPresentPlayerSurface(session)) return;
         var view = source.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail)
             ?? throw new InvalidOperationException("GLOBAL_SURFACE_UNAVAILABLE");
         var continuing = ReferenceEquals(PlayerDetailHost.Content, view) && PlayerDetailSurface.Visibility == Visibility.Visible;
@@ -83,8 +82,8 @@ public sealed partial class ShellWindow
             if (generation == _playerDetailGeneration && _playerDetailOpen)
                 SetStatus("播放器暂时无法加载完整内容", error: true);
         }
-        if (generation != _playerDetailGeneration || !_playerDetailOpen || _isClosing ||
-            !ReferenceEquals(_current, session) || !ReferenceEquals(_playerSession, session)) return;
+        if (generation != _playerDetailGeneration || !_playerDetailOpen ||
+            !CanPresentPlayerSurface(session)) return;
         PlayerDetailSurface.UpdateLayout();
         PlayerDetailSurface.Visibility = Visibility.Visible;
         UpdatePlayerDetailChrome();
@@ -112,7 +111,7 @@ public sealed partial class ShellWindow
 
     private async Task OpenQueueAsync(ModuleSession session, IDesktopGlobalSurfaceSource source)
     {
-        if (_isClosing || !ReferenceEquals(_current, session) || !ReferenceEquals(_playerSession, session)) return;
+        if (!CanPresentPlayerSurface(session)) return;
         var view = source.GetGlobalSurface(DesktopGlobalSurface.PlayQueue)
             ?? throw new InvalidOperationException("GLOBAL_SURFACE_UNAVAILABLE");
         if (!ReferenceEquals(QueueHost.Content, view))
@@ -159,13 +158,19 @@ public sealed partial class ShellWindow
 
     private void ApplyGlobalSurfacePresentation(ModuleSession current)
     {
-        if (_playerDetailOpen && (!ReferenceEquals(_playerDetailSession, current) ||
-            current.Module is not IDesktopGlobalSurfaceSource))
+        if (_playerDetailOpen && (_playerDetailSession is not { } detail ||
+            !CanPresentPlayerSurface(detail)))
             _ = ClosePlayerDetailAsync();
-        if (_queueOpen && (!ReferenceEquals(_queueSession, current) ||
-            current.Module is not IDesktopGlobalSurfaceSource))
+        if (_queueOpen && (_queueSession is not { } queue ||
+            !CanPresentPlayerSurface(queue)))
             _ = CloseQueueAsync();
     }
+
+    private bool CanPresentPlayerSurface(ModuleSession session) =>
+        !_isClosing &&
+        _current is { IsSettingsOpen: false } &&
+        ReferenceEquals(_playerSession, session) &&
+        session.Module.PlayerView is not null;
 
     private void AnimatePlayerDetail(bool open, long generation)
     {

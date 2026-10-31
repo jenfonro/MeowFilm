@@ -27,11 +27,16 @@ public static partial class DesktopTests
             await using var f = new Fixture([a,b]); await f.LoadAsync();
             Equal(10, f.Navigation.Items.Count, "all declared visible destinations share one sidebar");
             await f.NavigateAsync(a, "two"); await f.NavigateAsync(b, "three");
-            True(LogicalTreeHelper.GetParent(a.PlayerView!) is null, "inactive player is detached");
-            Equal(Visibility.Collapsed, f.Element<Border>("PlayerFrame").Visibility, "current owner has no player");
+            Same(a.PlayerView, f.Element<ContentControl>("PlayerHost").Content,
+                "the last real player remains in the global host");
+            Same(f.Element<ContentControl>("PlayerHost"), Host(a.PlayerView!),
+                "the retained player remains attached once");
+            Equal(Visibility.Visible, f.Element<Border>("PlayerFrame").Visibility,
+                "a playerless capability keeps the global player visible");
             Click(f.Back); await UntilAsync(() => f.SelectedRoute == "two" && f.Status == "", "cross-type back");
             Same(a, f.SelectedOwner, "restored owner");
-            Equal(Visibility.Visible, Host(a.PlayerView!).Visibility, "restored owner remounts its player");
+            Same(a.PlayerView, f.Element<ContentControl>("PlayerHost").Content,
+                "restored owner reuses the same global player");
             var hidden = new ObservableCollection<NavigationItem>(b.Navigation) { new("new", "new", "\uE8F1") };
             b.ReplaceNavigation(hidden); await DrainAsync();
             True(f.Navigation.Items.OfType<ShellNavigationEntry>().Any(x => x.Owner.Module == b && x.Route == "new"), "inactive owner dynamic data visible");
@@ -54,18 +59,34 @@ public static partial class DesktopTests
             Same(a, f.SelectedOwner, "original content restored"); Equal("two", f.SelectedRoute, "same route");
             Equal(before, a.Calls.Count, "no content replay");
         });
-        yield return Case("only the current player can open its declared route", async () =>
+        yield return Case("global player owner can navigate from other pages but not settings", async () =>
         {
             var a = new NavigationProbe("music"); var b = new ProbeModule("reader", hasPlayer: false);
-            await using var f = new Fixture([a,b]); await f.LoadAsync(); await f.NavigateAsync(b, "two");
+            var page = new ProbePage("public-page");
+            await using var f = new Fixture([a,b], pages: [page]); await f.LoadAsync(); await f.NavigateAsync(b, "two");
+            Same(a.PlayerView, f.Element<ContentControl>("PlayerHost").Content,
+                "music remains the active player owner on another capability");
             a.Request("three", fromPlayer: true);
-            await DrainAsync();
-            Same(b, f.SelectedOwner, "detached player cannot navigate");
-            Equal("two", f.SelectedRoute, "current route remains");
-            False(a.Calls.Contains("route:three"), "stale player request rejected");
-            await f.SwitchAsync(a);
+            await UntilAsync(() => f.SelectedOwner == a && f.SelectedRoute == "three" && f.Status == "",
+                "global player route leaves another capability");
+
+            await f.NavigateAsync(b, "two");
+            f.Element<ListBox>("PublicNavigationList").SelectedItem = page;
+            await UntilAsync(() => page.Activations == 1, "ordinary public page");
             a.Request("three", fromPlayer: true);
-            await UntilAsync(() => f.SelectedOwner == a && f.SelectedRoute == "three" && f.Status == "", "current player route");
+            await UntilAsync(() => f.SelectedOwner == a && f.SelectedRoute == "three" && f.Status == "",
+                "global player route leaves an ordinary public page");
+            True(LogicalTreeHelper.GetParent(page.View) is null, "player navigation retires the public page");
+
+            await f.NavigateAsync(b, "two");
+            Click(f.Element<Button>("SettingsButton")); await DrainAsync();
+            var before = a.Calls.Count;
+            a.Request("three", fromPlayer: true); await DrainAsync();
+            Equal(before, a.Calls.Count, "settings reject player navigation");
+            Equal(Visibility.Visible, Host(b.SettingsView).Visibility, "settings retain their current owner");
+            Equal(Visibility.Collapsed, f.Element<Border>("PlayerFrame").Visibility,
+                "settings are the only ordinary shell surface that hides the player");
+            Click(f.Back); await DrainAsync();
             a.Request("undeclared", fromPlayer: true); await DrainAsync();
             False(a.Calls.Contains("route:undeclared"), "player cannot invent routes");
         });
@@ -76,6 +97,12 @@ public static partial class DesktopTests
             await using var f = new Fixture([module], pages: [downloads, hidden]); await f.LoadAsync();
             Equal(1, f.Element<ListBox>("PublicNavigationList").Items.Count, "only sidebar pages");
             Click(f.Element<Button>("SettingsButton")); await DrainAsync();
+            Equal(Visibility.Collapsed, f.Element<Grid>("SearchInput").Visibility,
+                "settings hide the retained global search");
+            False(f.Search.IsEnabled, "settings disable search submission");
+            var before = module.Calls.Count;
+            f.Search.Text = "blocked"; Click(f.Button("搜索")); await DrainAsync();
+            Equal(before, module.Calls.Count, "settings cannot submit global search");
             var actions = f.Element<ItemsControl>("HeaderActions");
             Equal(1, actions.Items.Count, "settings-only page is exposed by the one header");
             var item = actions.Items.Cast<ShellHeaderActionItem>().Single();
@@ -83,10 +110,25 @@ public static partial class DesktopTests
             InvokeHeaderAction(f.Shell, item);
             await UntilAsync(() => hidden.Activations == 1, "settings public page activates");
             Equal(1, module.InitializeCount, "same domain instance");
+            Equal(Visibility.Collapsed, f.Element<Border>("PlayerFrame").Visibility,
+                "settings-owned public pages also hide the player");
+            Equal(Visibility.Collapsed, f.Element<Grid>("SearchInput").Visibility,
+                "settings-owned public pages also hide search");
+            False(f.Search.IsEnabled, "settings-owned public pages cannot submit search");
+            Click(f.Button("搜索")); await DrainAsync();
+            Equal(before, module.Calls.Count, "settings-owned public page cannot target the search owner");
             Click(f.Back); await DrainAsync();
             Equal(module.Title, AutomationProperties.GetName(f.Element<Grid>("ContentDeck")),
                 "returns to the same shell-owned accessible title");
             Equal(1, actions.Items.Count, "settings action restored");
+            Equal(Visibility.Collapsed, f.Element<Border>("PlayerFrame").Visibility,
+                "returning from a settings page remains in settings");
+            Click(f.Back); await DrainAsync();
+            Equal(Visibility.Visible, f.Element<Border>("PlayerFrame").Visibility,
+                "leaving settings restores the retained player");
+            Equal(Visibility.Visible, f.Element<Grid>("SearchInput").Visibility,
+                "leaving settings restores the retained global search");
+            True(f.Search.IsEnabled, "restored global search is interactive");
         });
         yield return Case("public page is not an App mode and returning retains capability state and player", async () =>
         {
@@ -104,7 +146,9 @@ public static partial class DesktopTests
             Equal(Visibility.Collapsed, ((FrameworkElement)view.Parent).Visibility, "capability surface hidden");
             Equal(Visibility.Visible, Host(page.View).Visibility, "public page visible");
             Equal(Visibility.Visible, player.Visibility, "same current player stays visible");
-            False(f.Search.IsEnabled, "capability search disabled on public page");
+            Equal(Visibility.Visible, f.Element<Grid>("SearchInput").Visibility,
+                "ordinary public page keeps the global search visible");
+            True(f.Search.IsEnabled, "ordinary public page keeps the global search enabled");
             var before = module.Calls.Count;
             Click(f.Back); await DrainAsync();
             Equal(before, module.Calls.Count, "no capability route replay");
@@ -170,14 +214,16 @@ public static partial class DesktopTests
             Equal(1, page.MaximumActive, "no overlapping activation");
             Equal(1, module.Calls.Count, "domain not replayed");
         });
-        yield return Case("public activation failure has explicit retry and never dispatches domain search", async () =>
+        yield return Case("public activation failure has explicit retry and recovered page can use global search", async () =>
         {
             var module = new ProbeModule("domain"); var page = new ProbePage("shared") { Activate = _ => Task.FromException(new Exception("private-page-detail")) };
             await using var f = new Fixture([module], pages: [page]); await f.LoadAsync();
             f.Element<ListBox>("PublicNavigationList").SelectedItem = page; await UntilAsync(() => f.Status == "暂时无法完成操作", "failure");
             False(f.Status.Contains("private", StringComparison.Ordinal), "sanitized");
-            f.Search.Text = "test"; Click(f.Button("搜索")); await DrainAsync(); Equal(1, module.Calls.Count, "page cannot target old domain search");
             page.Activate = _ => Task.CompletedTask; Click(f.Button("重试")); await UntilAsync(() => page.Activations == 2 && f.Status == "", "retry");
+            f.Search.Text = "test"; Click(f.Button("搜索"));
+            await UntilAsync(() => module.Calls.Contains("search:test") && f.Status == "", "global search");
+            True(LogicalTreeHelper.GetParent(page.View) is null, "global search retires the public page");
             Click(f.Element<Button>("SettingsButton")); await DrainAsync();
             True(f.Element<ListBox>("PublicNavigationList").SelectedItem is null, "settings leaves public page");
             Equal(Visibility.Visible, Host(module.SettingsView).Visibility, "current domain settings");
@@ -281,6 +327,33 @@ public static partial class DesktopTests
             Same(aMainHost, Host(a.View), "capability owner retains the original view and host");
             True(LogicalTreeHelper.GetParent(b.PlayerView!) is null, "second player detached after switch");
         });
+        yield return Case("global player owner can replace or withdraw its view while another capability is current", async () =>
+        {
+            var owner = new ProbeModule("player-owner");
+            var viewing = new ProbeModule("playerless-view", hasPlayer: false);
+            await using var f = new Fixture([owner, viewing]); await f.LoadAsync();
+            var original = owner.PlayerView!;
+            await f.SwitchAsync(viewing);
+            var replacement = new Border
+            {
+                Height = 64,
+                Background = Brushes.DarkOliveGreen,
+                Child = new TextBlock { Text = "replacement-player" }
+            };
+            owner.ReplacePlayer(replacement);
+            await DrainAsync();
+            Same(replacement, f.Element<ContentControl>("PlayerHost").Content,
+                "the retained owner refreshes its supplied player");
+            True(LogicalTreeHelper.GetParent(original) is null, "the replaced player is detached");
+            Equal(Visibility.Visible, f.Element<Border>("PlayerFrame").Visibility,
+                "the replacement remains visible on the playerless capability");
+            owner.ReplacePlayer(null);
+            await DrainAsync();
+            True(f.Element<ContentControl>("PlayerHost").Content is null,
+                "withdrawing the owner clears the global host");
+            Equal(Visibility.Collapsed, f.Element<Border>("PlayerFrame").Visibility,
+                "no supplied player collapses the footer");
+        });
         yield return Case("Loaded initializes selected module only and only once", async () =>
         {
             var a = new ProbeModule("probe-a"); var b = new ProbeModule("probe-b");
@@ -304,20 +377,27 @@ public static partial class DesktopTests
             Equal(1, module.InitializeCount, "first real request initializes");
             Equal("route:two", module.Calls.Single(), "no implicit capability/id fallback");
         });
-        yield return Case("settings targets the current capability without retaining a stale player", async () =>
+        yield return Case("settings hide but retain the global player for a playerless current capability", async () =>
         {
             var playing = new ProbeModule("player-capability"); var viewing = new ProbeModule("view-capability", hasPlayer: false);
             await using var f = new Fixture([playing, viewing]);
             await f.LoadAsync(); await f.SwitchAsync(viewing); await f.NavigateAsync(viewing, "two");
             ((TextBox)viewing.View).Text = "test-edit-state"; f.Search.Text = "test-query-draft";
-            Equal(Visibility.Collapsed, f.Element<Border>("PlayerFrame").Visibility, "a previous capability cannot retain the footer");
-            True(LogicalTreeHelper.GetParent(playing.PlayerView!) is null, "stale player is detached");
+            Same(playing.PlayerView, f.Element<ContentControl>("PlayerHost").Content,
+                "the last player owner remains global");
+            Same(f.Element<ContentControl>("PlayerHost"), Host(playing.PlayerView!),
+                "the global player stays attached once");
+            Equal(Visibility.Visible, f.Element<Border>("PlayerFrame").Visibility,
+                "playerless content keeps the player visible");
             var before = viewing.Calls.Count;
             Click(f.Element<Button>("SettingsButton")); await DrainAsync();
             Equal(Visibility.Visible, Host(viewing.SettingsView).Visibility, "current capability settings shown");
             True(LogicalTreeHelper.GetParent(viewing.View) is null, "main view is detached, not retained as hidden chrome");
             True(LogicalTreeHelper.GetParent(playing.SettingsView) is null, "other player's settings not selected");
-            Equal(Visibility.Collapsed, f.Element<Border>("PlayerFrame").Visibility, "settings cannot revive a stale player");
+            Equal(Visibility.Collapsed, f.Element<Border>("PlayerFrame").Visibility,
+                "settings hide the retained player");
+            Same(playing.PlayerView, f.Element<ContentControl>("PlayerHost").Content,
+                "hiding settings does not destroy the player instance");
             True(f.SelectedRoute is null, "settings clears selection so old route is clickable");
             Click(f.Back); await DrainAsync();
             Equal(before, viewing.Calls.Count, "settings back does not navigate/rebuild");
@@ -325,6 +405,8 @@ public static partial class DesktopTests
             Equal("test-query-draft", f.Search.Text, "query retained");
             Equal("two", f.SelectedRoute, "old sidebar selection restored");
             Equal(Visibility.Visible, Host(viewing.View).Visibility, "same main visible again");
+            Equal(Visibility.Visible, f.Element<Border>("PlayerFrame").Visibility,
+                "leaving settings restores the retained player");
         });
         yield return Case("sidebar history back follows successful routes without crossing modules", async () =>
         {
@@ -349,6 +431,36 @@ public static partial class DesktopTests
             Equal("search:first", a.Calls[^1], "back replays search not route");
             Click(f.Back); await UntilAsync(() => f.SelectedRoute == "one", "back to source route");
             Sequence(["route:one", "search:first", "search:second", "search:first", "route:one"], a.Calls, "search history");
+        });
+        yield return Case("global search owner survives searchless capability and ordinary public page", async () =>
+        {
+            var music = new ProbeModule("music");
+            var film = new ProbeModule("film", hasPlayer: false, supportsSearch: false);
+            var page = new ProbePage("downloads");
+            await using var f = new Fixture([music, film], pages: [page]); await f.LoadAsync();
+            f.Search.Text = "music-route-draft";
+
+            await f.SwitchAsync(film);
+            Equal(Visibility.Visible, f.Element<Grid>("SearchInput").Visibility,
+                "searchless capability keeps the global search visible");
+            True(f.Search.IsEnabled, "searchless capability can submit through the retained owner");
+            Equal("music-route-draft", f.Search.Text, "searchless capability presents the owner draft");
+            await f.SearchAsync("from-film");
+            Equal("search:from-film", music.Calls[^1], "film search enters the music search owner");
+            False(film.Calls.Any(call => call.StartsWith("search:", StringComparison.Ordinal)),
+                "searchless capability never receives the query");
+            Equal(Visibility.Visible, Host(music.View).Visibility, "search owner becomes the current presentation");
+            Click(f.Back); await UntilAsync(() => f.SelectedOwner == film && f.SelectedRoute == "one", "return to film");
+
+            f.Element<ListBox>("PublicNavigationList").SelectedItem = page;
+            await UntilAsync(() => page.Activations == 1 && f.Status == "", "ordinary public page");
+            Equal(Visibility.Visible, f.Element<Grid>("SearchInput").Visibility,
+                "ordinary public page keeps the same global search");
+            await f.SearchAsync("from-public");
+            Equal("search:from-public", music.Calls[^1], "public page search enters the retained owner");
+            True(LogicalTreeHelper.GetParent(page.View) is null, "search retires the public page");
+            Click(f.Back); await UntilAsync(() => f.SelectedOwner == film && f.SelectedRoute == "one",
+                "return to the page behind public content");
         });
         yield return Case("search drafts are isolated by owner and route", async () =>
         {
@@ -996,6 +1108,18 @@ public static partial class DesktopTests
             headerChanged?.Invoke(this, EventArgs.Empty);
         }
     }
+    private sealed class SearchlessProbeView : TextBox, IDesktopHeaderSource
+    {
+        public SearchlessProbeView()
+        {
+            Text = "test-view";
+            VerticalAlignment = VerticalAlignment.Top;
+            MinHeight = 80;
+        }
+        public DesktopHeaderContribution Header =>
+            new("", SearchVisible: false, SearchEnabled: false);
+        public event EventHandler? HeaderChanged { add { } remove { } }
+    }
     private class ProbeModule : IDesktopModule
     {
         private PropertyChangedEventHandler? _propertyChanged;
@@ -1011,7 +1135,8 @@ public static partial class DesktopTests
         public ObservableCollection<NavigationItem> Navigation { get; private set; }
         public FrameworkElement View { get; }
         public FrameworkElement SettingsView { get; }
-        public FrameworkElement? PlayerView { get; }
+        private FrameworkElement? playerView;
+        public FrameworkElement? PlayerView => playerView;
         public int InitializeCount { get; private set; }
         public int DisposeCount { get; private set; }
         public int ActiveCalls { get; private set; }
@@ -1019,13 +1144,15 @@ public static partial class DesktopTests
         public List<string> Calls { get; } = [];
         public Func<CancellationToken, Task>? InitializeHook { get; set; }
         public Func<string, CancellationToken, Task>? NavigateHook { get; set; }
-        public ProbeModule(string id, bool hasPlayer = true)
+        public ProbeModule(string id, bool hasPlayer = true, bool supportsSearch = true)
         {
             Id = id;
             Navigation = new(new[] { "one", "two", "three", "slow", "broken" }.Select(route => new NavigationItem(route, "test-" + route, "")));
-            View = new TextBox { Text = "test-view", VerticalAlignment = VerticalAlignment.Top, MinHeight = 80 };
+            View = supportsSearch
+                ? new TextBox { Text = "test-view", VerticalAlignment = VerticalAlignment.Top, MinHeight = 80 }
+                : new SearchlessProbeView();
             SettingsView = new TextBox { Text = "test-settings", VerticalAlignment = VerticalAlignment.Top, MinHeight = 80 };
-            PlayerView = hasPlayer ? new Border { Height = 64, Background = Brushes.DarkSlateGray, Child = new TextBlock { Text = "test-player" } } : null;
+            playerView = hasPlayer ? new Border { Height = 64, Background = Brushes.DarkSlateGray, Child = new TextBlock { Text = "test-player" } } : null;
         }
         public Task InitializeAsync(CancellationToken cancellationToken)
         {
@@ -1051,6 +1178,11 @@ public static partial class DesktopTests
         public void ReplaceNavigation(ObservableCollection<NavigationItem> items)
         {
             Navigation = items; _propertyChanged?.Invoke(this, new(nameof(Navigation)));
+        }
+        public void ReplacePlayer(FrameworkElement? player)
+        {
+            playerView = player;
+            _propertyChanged?.Invoke(this, new(nameof(PlayerView)));
         }
         public void NotifyAll() => _propertyChanged?.Invoke(this, new(null));
         public Task PrepareShutdownAsync() => Task.CompletedTask;

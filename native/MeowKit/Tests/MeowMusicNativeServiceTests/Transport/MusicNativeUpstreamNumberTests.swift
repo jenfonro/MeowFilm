@@ -37,6 +37,20 @@ final class MusicNativeUpstreamNumberTests: XCTestCase {
         }
     }
 
+    func testPlaylistDetailDiscardsOnlyItsUnusedRepeatedTrackAlgorithm() async throws {
+        let raw = #"{"code":200,"playlist":{"id":19723756,"tracks":[{"id":9007199254740993,"alg":null,"alg":"ops-music-1"}]}}"#
+        let http = MusicUpstreamNumberHTTP([raw, raw])
+        let platforms = MusicNativePlatforms(transport: http, qq: NativeMusicQQFixture(), clock: { NativeMusicFixture.date })
+        let root = try await platforms.wy("/api/v6/playlist/detail", .obj())
+        let track = try XCTUnwrap(root["playlist"]["tracks"].array.first)
+        XCTAssertEqual(track["id"].id, "9007199254740993")
+        XCTAssertFalse(track.contains("alg"))
+        do {
+            _ = try await platforms.wy("/api/toplist", .obj())
+            XCTFail("Playlist-detail-only compatibility escaped to another route")
+        } catch { XCTAssertEqual(error as? MusicServiceError, .upstreamInvalid) }
+    }
+
     private func wySong(_ id: String, title: String = "Synthetic", albumID: String? = "18446744073709551615") -> String {
         let albumField = albumID.map { #""id":\#($0),"# } ?? ""
         return #"{"id":\#(id),"name":\#(MJ.quote(title)),"ar":[{"name":"Artist"}],"al":{\#(albumField)"name":"Album","pic":18446744073709551617,"picUrl":"https://p1.music.126.net/synthetic.jpg"},"dt":180000,"unused":{"otherID":1234567890123456789012345678901234567890}}"#
@@ -81,7 +95,9 @@ final class MusicNativeUpstreamNumberTests: XCTestCase {
         XCTAssertEqual(data.map { $0["albumId"].string }, Array(repeating: "18446744073709551615", count: 2))
         let calls = await http.calls()
         XCTAssertEqual(calls.count, 1); XCTAssertEqual(calls[0].url.path, "/weapi/v3/song/detail")
-        XCTAssertNil(calls[0].headers["Cookie"])
+        // WEAPI carries only the isolated public device context, never an account cookie.
+        XCTAssertTrue((calls[0].headers["Cookie"] ?? "").contains("deviceId="))
+        XCTAssertFalse((calls[0].headers["Cookie"] ?? "").contains("MUSIC_U"))
     }
 
     func testWYMissingNullAndZeroAlbumIDsKeepAllThirtySearchRowsAndPersistExactSongs() async throws {
