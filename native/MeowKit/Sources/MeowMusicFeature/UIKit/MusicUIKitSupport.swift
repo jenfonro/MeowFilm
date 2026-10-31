@@ -218,6 +218,23 @@ final class MusicCollectionCell: UITableViewCell {
     }
 }
 
+enum MusicPagingTabTransition {
+    static func selectionAmount(position: CGFloat, index: Int) -> CGFloat {
+        max(0, 1 - abs(position - CGFloat(index)))
+    }
+
+    static func interval(position: CGFloat, count: Int) -> (lower: Int, upper: Int, progress: CGFloat)? {
+        guard count > 0 else { return nil }
+        let value = min(CGFloat(count - 1), max(0, position))
+        let lower = Int(value)
+        return (lower, min(lower + 1, count - 1), value - CGFloat(lower))
+    }
+
+    static func interpolate(_ lower: CGFloat, _ upper: CGFloat, progress: CGFloat) -> CGFloat {
+        lower + (upper - lower) * progress
+    }
+}
+
 @MainActor
 func musicSystemButton(
     symbol: String,

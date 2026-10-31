@@ -83,14 +83,25 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicBrowseQueueLoading
         let consumed = result.consumed ?? result.tracks.count
         try musicRequire(result.collection.id == collection.id && result.tracks.count <= 30 &&
             (result.tracks.count...30).contains(consumed) && result.total >= position.offset + consumed &&
+            result.sourcePositions.count == result.tracks.count &&
+            result.sourcePositions == result.sourcePositions.sorted() &&
+            Set(result.sourcePositions).count == result.sourcePositions.count &&
+            result.sourcePositions.allSatisfy { (position.offset..<(position.offset + consumed)).contains($0) } &&
             (!result.more || consumed > 0) &&
             result.tracks.allSatisfy { $0.platform == collection.platform.rawValue }, .upstreamInvalid)
-        let songs = try result.tracks.map(MusicModel.normalize)
         let next = result.more ? try position.encode(key: key, epoch: own,
             offset: position.offset + consumed, snapshot: result.snapshot) : nil
-        let rows = try songs.map(remember)
-        return .init(collection: result.collection, tracks: rows, total: result.total, cursor: next,
-                     snapshot: result.snapshot, notice: result.notice, consumed: result.consumed)
+        // Reserve the full bounded page before registering any handles. Cached
+        // native data never grants the lifetime of a previously issued handle.
+        let rows = try page(.init(items: result.tracks)).items
+        let members = try zip(result.sourcePositions, rows).map { sourcePosition, track -> MusicPublicBrowseMember in
+            guard let source = track.sources.first(where: { $0.platform == collection.platform.rawValue }) else {
+                throw MusicServiceError.upstreamInvalid
+            }
+            return .init(nativeID: source.nativeId, sourcePosition: sourcePosition, track: track)
+        }
+        return .init(collection: result.collection, members: members, total: result.total, cursor: next,
+                     snapshot: result.snapshot, notice: result.notice, consumed: consumed)
     }
 
     public func publicQueueTracks(_ request: MusicPublicBrowseQueueRequest) async throws -> [MusicNativeTrackData] {
