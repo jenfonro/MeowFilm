@@ -95,7 +95,14 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     }
 
     func showPublicCollection(_ collection: MusicPublicBrowseCollection) {
-        showPublicBrowse(.detail(collection), title: collection.title)
+        guard let model = assembly.music, let browser = model.publicBrowser else { return }
+        navigation.pushViewController(MusicCollectionViewController(
+            model: model,
+            collection: collection,
+            browser: browser,
+            appearance: assembly.appearance,
+            router: self
+        ), animated: true)
     }
 
     func showLocalCollection(_ collection: MusicCollection) {

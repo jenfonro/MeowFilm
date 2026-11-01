@@ -44,11 +44,14 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
     func publicDetail(_ collection: MusicPublicBrowseCollection, cursor: String?) async throws -> MusicPublicBrowseDetail {
         cursors.append(cursor)
         if emptyDetailFirst {
-            return .init(collection: collection, tracks: cursor == nil ? [] : [Self.track("31")], total: 31,
+            let members: [MusicPublicBrowseMember] = cursor == nil ? [] :
+                [.init(nativeID: "31", sourcePosition: 30, track: Self.track("31"))]
+            return .init(collection: collection, members: members, total: 31,
                          cursor: cursor == nil ? "raw30" : nil, snapshot: String(repeating: "a", count: 64),
                          notice: cursor == nil ? "部分歌曲当前不可见或不可用" : nil, consumed: cursor == nil ? 30 : 1)
         }
-        return .init(collection: collection, tracks: [Self.track("1")], total: 1, cursor: nil, snapshot: String(repeating: "a", count: 64))
+        return .init(collection: collection, members: [.init(nativeID: "1", sourcePosition: 0, track: Self.track("1"))],
+                     total: 1, cursor: nil, snapshot: String(repeating: "a", count: 64))
     }
     func publicDiscovery(_ destination: MusicPublicBrowseDestination, cursor: String?) async throws -> MusicPublicBrowsePage {
         if let gate { await gate.wait() }
@@ -153,6 +156,8 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
         var cursors = await service.cursors; XCTAssertEqual(cursors.count, 1)
         await model.appendNext()
         XCTAssertNil(model.error); XCTAssertEqual(model.tracks.map(\.title), ["31"]); XCTAssertFalse(model.requiresExplicitNext)
+        XCTAssertEqual(model.sections[0].items.map(\.id), ["30:song:31"])
+        XCTAssertEqual(model.queueIndex(of: model.tracks[0]), 30)
         _ = try await model.refreshedActionTrack(model.tracks[0])
         cursors = await service.cursors; XCTAssertEqual(cursors, [nil, "raw30", "raw30"])
         let opens = await service.openedQueues; XCTAssertEqual(opens, 0)

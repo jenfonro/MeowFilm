@@ -6,9 +6,11 @@ private actor OccurrenceBrowseService: MusicPublicBrowsing, MusicPublicBrowseQue
     private(set) var cursors: [String?] = []
     private(set) var opened = 0
     private var changed = false
+    private var shiftsOnRenewal = false
     private let onClose: @Sendable () -> Void
     init(onClose: @escaping @Sendable () -> Void = {}) { self.onClose = onClose }
     func changeSelectedIdentity() { changed = true }
+    func shiftSecondPageOnRenewal() { shiftsOnRenewal = true }
     static func track(_ index: Int, handle: String, changed: Bool = false) -> MusicRemoteTrack {
         let id = changed ? "999" : [1, 29, 30, 31].contains(index) ? "7" : String(index + 100)
         return .init(ref: .init(kind: .handle, id: handle + ":" + String(index)),
@@ -17,10 +19,21 @@ private actor OccurrenceBrowseService: MusicPublicBrowsing, MusicPublicBrowseQue
     }
     func publicDetail(_ collection: MusicPublicBrowseCollection, cursor: String?) -> MusicPublicBrowseDetail {
         cursors.append(cursor)
-        let start = cursor == nil ? 0 : 30, end = cursor == nil ? 30 : 32
-        return .init(collection: collection, tracks: (start..<end).map {
-            Self.track($0, handle: "read-\(cursors.count)", changed: changed && $0 == 31)
-        }, total: 32, cursor: cursor == nil ? "30" : nil, snapshot: String(repeating: "a", count: 64))
+        let positions: [Int]
+        let consumed: Int
+        if cursor == nil {
+            positions = Array(0..<30); consumed = 30
+        } else if shiftsOnRenewal {
+            positions = cursors.count >= 3 ? [31, 32] : [30, 31, 32]
+            consumed = 3
+        } else {
+            positions = [30, 31]; consumed = 2
+        }
+        return .init(collection: collection, members: positions.map {
+            let track = Self.track($0, handle: "read-\(cursors.count)", changed: changed && $0 == 31)
+            return MusicPublicBrowseMember(nativeID: track.sources[0].nativeId, sourcePosition: $0, track: track)
+        }, total: shiftsOnRenewal ? 33 : 32, cursor: cursor == nil ? "30" : nil,
+                     snapshot: String(repeating: "a", count: 64), consumed: consumed)
     }
     func publicPlaylists(platform: MusicPublicBrowsePlatform, query: String, cursor: String?) throws -> MusicPublicBrowseCollectionPage {
         throw MusicServiceError.unsupported
@@ -81,6 +94,19 @@ private actor OccurrenceBrowseService: MusicPublicBrowsing, MusicPublicBrowseQue
         catch { XCTAssertEqual(error as? MusicServiceError, .targetChanged) }
         XCTAssertEqual(model.tracks.last?.ref, selected.ref)
         XCTAssertNil(model.remoteSource)
+        model.disappear()
+    }
+    func testRenewalUsesSourcePositionWhenEarlierMemberBecomesUnavailable() async throws {
+        let service = OccurrenceBrowseService()
+        await service.shiftSecondPageOnRenewal()
+        let model = model(service)
+        await model.refresh(); await model.next()
+        let selected = try XCTUnwrap(model.tracks.last)
+        XCTAssertEqual(model.queueIndex(of: selected), 32)
+        XCTAssertEqual(model.sections[0].items.last?.id, "32:tx:132")
+        let renewed = try await model.refreshedActionTrack(selected)
+        XCTAssertEqual(renewed.ref.id, "read-3:32")
+        XCTAssertEqual(renewed.songId, selected.songId)
         model.disappear()
     }
     func testDefaultSourceReleaseRevokesSynchronouslyAndClosesExactlyOnce() async throws {

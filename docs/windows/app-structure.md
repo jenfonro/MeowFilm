@@ -32,6 +32,7 @@ Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口�
 | Scripting | 原始 JS 音源管理与必要宿主调用，不拥有官方业务 |
 | Feedback / Settings | 实际反馈协议与设置消费者 |
 | Presentation | 共同视图、主题及中性命名的控件 |
+| Film | 固定影视首页数据、模块生命周期和影片专属展示 |
 
 具体歌曲、歌词、音乐平台协议保留 `Music` 语义。跨多个职责的既有 partial 类型保持原公开 namespace，不为凑目录重新设计业务模型或复制 owner。中性控件包括 `CardMotion`、`EntryCard`、`Shelf`、`OverlayScrollChrome`、`SeekBar`、`SkipButton`；主题键为 `Capability.*`。WPF 共享资源使用显式程序集 pack URI，不靠移动后目录的相对搜索回退。
 
@@ -59,3 +60,5 @@ Windows 的唯一 Node 入口是 `apps/windows/runtime/entries/aggregate.mjs`，
 载荷包含公共 bootstrap、共享 music-script、Windows 两个入口文件、runtime-bridge、script-host、锁定的 QuickJS release-sync 依赖和必要许可，没有普通业务文档桥授权。公共执行、存储与网络边界见 [共用运行时](../runtime/script-runtime.md)。
 
 App 原生能力装配与 `AppIdentity.ScriptModules` 独立校验：原生能力数量和 `IDesktopModule.Id` 不要求等于脚本模块数量或名称。增加不依赖脚本的原生能力不会被迫增加 Node 模块；脚本清单只决定按需启动后的 JS 载荷与协议版本。
+
+当前 App 先注册音乐能力，再注册不依赖脚本、存储或播放器的 `FilmCapability`，因此启动页保持音乐推荐。影视首页的数据和路由边界见[影视首页](film-home.md)。

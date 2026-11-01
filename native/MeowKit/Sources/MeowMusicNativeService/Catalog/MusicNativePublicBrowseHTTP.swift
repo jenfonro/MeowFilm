@@ -10,12 +10,13 @@ enum MusicNativePublicBrowseRoutes {
         "/eapi/v6/playlist/detail", "/eapi/link/page/rcmd/resource/show",
         "/eapi/link/position/show/resource", "/eapi/tag/tab/tags",
         "/eapi/tag/tab/alg/recommends", "/eapi/tag/tab/playlists",
-        "/eapi/toplist"
+        "/eapi/toplist", "/eapi/search/pc/chart/list",
+        "/eapi/search/pc/chart/detail", "/eapi/hot/search/relate/song/get"
     ]
     static let weapi: Set<String> = [
         "/weapi/v3/song/detail", "/weapi/cube/render/page/protocol",
         "/weapi/playlist/square/block/page", "/weapi/toplist/detail/v2",
-        "/weapi/v1/discovery/new/songs", "/weapi/hotsearchlist/get"
+        "/weapi/v1/discovery/new/songs"
     ]
     static func allows(_ request: MusicNativeHTTPRequest) -> Bool {
         let url = request.url

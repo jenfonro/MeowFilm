@@ -7,6 +7,7 @@ using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Shell;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Windows.Tests;
@@ -22,6 +23,18 @@ public static partial class DesktopTests
             Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(f.Shell), "display text metrics");
             Equal(TextRenderingMode.Grayscale, TextOptions.GetTextRenderingMode(f.Shell), "grayscale text rendering");
             True(f.Shell.UseLayoutRounding && f.Shell.SnapsToDevicePixels, "native display pixels own text layout");
+            Equal(64d, WindowChrome.GetWindowChrome(f.Shell)!.CaptionHeight,
+                "compact header remains the complete draggable caption");
+            Equal(new GridLength(64), f.Element<Grid>("RootLayout").RowDefinitions[0].Height,
+                "shell header and caption share one compact height");
+            Equal(new Thickness(0), f.Element<Grid>("ContentRegion").Margin,
+                "content starts directly below the header row");
+            Equal(8d, f.Element<ScrollViewer>("SidebarScroll").Margin.Top,
+                "sidebar navigation uses the same compact top rhythm");
+            Equal(76d, f.Element<Border>("QueueSurface").Margin.Top,
+                "queue offset follows the compact header");
+            Equal(76d, f.Element<StackPanel>("NotificationOverlay").Margin.Top,
+                "notifications remain below the compact header");
             var root = DetachChrome(f.Shell);
             using var source = new HwndSource(new HwndSourceParameters("shell-headless-hit-test-fixture")
             {
@@ -157,8 +170,9 @@ public static partial class DesktopTests
         yield return Case("global player detail overlays the unchanged shell and restores it on dismissal", async () =>
         {
             var module = new ImmersiveProbe();
+            var passive = new ProbeModule("film", hasPlayer: false);
             var page = new ProbePage("downloads");
-            await using var f = new Fixture([module], pages: [page]); await f.LoadAsync();
+            await using var f = new Fixture([module, passive], pages: [page]); await f.LoadAsync();
             var root = DetachChrome(f.Shell);
             void Layout()
             {
@@ -199,23 +213,42 @@ public static partial class DesktopTests
             True(escape.Handled, "escape handled");
             Equal(203d, f.Element<Grid>("RootLayout").ColumnDefinitions[0].Width.Value, "sidebar width restored");
             Equal(1, module.Deactivations, "detail owner deactivated once");
-            Click(f.Element<Button>("SettingsButton")); await DrainAsync();
-            Equal(Visibility.Visible, f.Element<ScrollViewer>("SidebarScroll").Visibility, "settings restores shell");
+
+            await f.SwitchAsync(passive);
+            Same(ordinaryPlayer, f.Element<ContentControl>("PlayerHost").Content,
+                "player remains mounted on a capability without its own player");
+            Equal(Visibility.Visible, f.Element<Border>("PlayerFrame").Visibility,
+                "global player remains visible across capabilities");
             module.Request(DesktopGlobalSurface.PlayerDetail);
             await UntilAsync(() => f.Element<Grid>("PlayerDetailSurface").Visibility == Visibility.Visible,
-                "player detail opens while settings is current");
+                "player detail opens from another capability");
             RaiseKey(f.Shell, Key.Escape, ModifierKeys.None, preview: true);
-            await UntilAsync(() => Host(module.SettingsView).Visibility == Visibility.Visible,
-                "closing detail restores the same settings surface");
+            await UntilAsync(() => Host(passive.View).Visibility == Visibility.Visible,
+                "closing detail restores the other capability");
             module.Request(DesktopGlobalSurface.PlayQueue);
             await UntilAsync(() => f.Element<Border>("QueueSurface").Visibility == Visibility.Visible,
-                "global queue opens while settings is current");
+                "global queue opens from another capability");
             RaiseKey(f.Shell, Key.Escape, ModifierKeys.None, preview: true);
             await UntilAsync(() => f.Element<Border>("QueueSurface").Visibility == Visibility.Collapsed,
-                "queue closes back to settings");
-            Equal(Visibility.Visible, Host(module.SettingsView).Visibility,
-                "settings surface remains mounted after queue dismissal");
+                "queue closes back to the other capability");
+
+            Click(f.Element<Button>("SettingsButton")); await DrainAsync();
+            Equal(Visibility.Visible, f.Element<ScrollViewer>("SidebarScroll").Visibility, "settings restores shell");
+            Equal(Visibility.Collapsed, f.Element<Border>("PlayerFrame").Visibility,
+                "settings hide the global player");
+            module.Request(DesktopGlobalSurface.PlayerDetail);
+            await DrainAsync();
+            Equal(Visibility.Collapsed, f.Element<Grid>("PlayerDetailSurface").Visibility,
+                "player detail is unavailable while settings are current");
+            module.Request(DesktopGlobalSurface.PlayQueue);
+            await DrainAsync();
+            Equal(Visibility.Collapsed, f.Element<Border>("QueueSurface").Visibility,
+                "queue is unavailable while settings are current");
+            Equal(Visibility.Visible, Host(passive.SettingsView).Visibility,
+                "the current settings surface remains mounted");
             Click(f.Back); await DrainAsync();
+            Equal(Visibility.Visible, f.Element<Border>("PlayerFrame").Visibility,
+                "leaving settings restores the global player");
             f.Element<ListBox>("PublicNavigationList").SelectedItem = page; await DrainAsync();
             Equal(Visibility.Visible, f.Element<Grid>("SearchChrome").Visibility, "shared public pages restore shell");
             module.Request(DesktopGlobalSurface.PlayerDetail);
@@ -239,11 +272,11 @@ public static partial class DesktopTests
                 "same retained detail opens from the restored app");
             Click(f.Element<Button>("PlayerDetailBackButton"));
             await UntilAsync(() => playerSurface.Visibility == Visibility.Collapsed &&
-                Host(module.View).Visibility == Visibility.Visible, "collapse restores the same app surface");
+                Host(passive.View).Visibility == Visibility.Visible, "collapse restores the same app surface");
             Same(ordinaryPlayer, f.Element<ContentControl>("PlayerHost").Content, "same ordinary footer restored after collapse");
             Click(f.Element<Button>("SettingsButton")); await DrainAsync();
             await UntilAsync(() => playerSurface.Visibility == Visibility.Collapsed &&
-                Host(module.SettingsView).Visibility == Visibility.Visible, "ordinary settings opens after collapsing the player page");
+                Host(passive.SettingsView).Visibility == Visibility.Visible, "ordinary settings opens after collapsing the player page");
             Equal(1, module.InitializeCount, "presentation never creates another module");
         });
     }

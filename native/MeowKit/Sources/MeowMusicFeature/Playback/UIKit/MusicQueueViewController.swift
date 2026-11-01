@@ -392,15 +392,18 @@ public final class MusicQueueViewController: MusicPageViewController,
     }
 
     private func positionIndicator(_ position: CGFloat) {
-        let position = min(CGFloat(tabs.count - 1), max(0, position))
+        guard let interval = MusicPagingTabTransition.interval(position: position, count: tabs.count) else { return }
+        let position = CGFloat(interval.lower) + interval.progress
         UIView.performWithoutAnimation {
             for (index, tab) in tabs.enumerated() {
-                tab.applySelection(max(0, 1 - abs(position - CGFloat(index))))
+                tab.applySelection(MusicPagingTabTransition.selectionAmount(position: position, index: index))
             }
             guard let first = tabs.first, first.bounds.width > 0 else { return }
-            let lower = Int(position), upper = min(lower + 1, tabs.count - 1)
-            let progress = position - CGFloat(lower)
-            let x = tabs[lower].frame.minX + (tabs[upper].frame.minX - tabs[lower].frame.minX) * progress
+            let x = MusicPagingTabTransition.interpolate(
+                tabs[interval.lower].frame.minX,
+                tabs[interval.upper].frame.minX,
+                progress: interval.progress
+            )
             indicator.frame = CGRect(x: x, y: 6, width: first.bounds.width, height: 32)
         }
     }
@@ -535,7 +538,7 @@ public final class MusicQueueViewController: MusicPageViewController,
 
 @MainActor
 private final class MusicQueueTabButton: UIButton {
-    private let page: MusicReferenceQueuePage, text = UILabel()
+    private let page: MusicReferenceQueuePage, text = UILabel(), badge = UILabel()
     private var count: Int?, fontSize: CGFloat = 14
     private var primary: PageColor, secondary: PageColor
     private var primaryColor: UIColor, secondaryColor: UIColor
@@ -552,6 +555,11 @@ private final class MusicQueueTabButton: UIButton {
         text.isAccessibilityElement = false
         text.accessibilityIdentifier = "music.queue.tab.title.\(page.rawValue)"
         addSubview(text)
+        badge.font = UIFont.monospacedDigitSystemFont(ofSize: 8, weight: .regular)
+        badge.textColor = secondaryColor
+        badge.isAccessibilityElement = false
+        badge.accessibilityIdentifier = "music.queue.tab.badge.\(page.rawValue)"
+        addSubview(badge)
         isAccessibilityElement = true
         renderTitle()
     }
@@ -573,14 +581,16 @@ private final class MusicQueueTabButton: UIButton {
     }
 
     override var intrinsicContentSize: CGSize {
-        CGSize(width: ceil(text.intrinsicContentSize.width) + 8, height: 44)
+        let side = max(18, badge.isHidden ? 0 : ceil(badge.intrinsicContentSize.width) + 4)
+        return CGSize(width: ceil(text.intrinsicContentSize.width) + side * 2, height: 44)
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
         let size = text.intrinsicContentSize
-        text.bounds = CGRect(x: 0, y: 0, width: min(size.width, max(0, bounds.width - 8)), height: size.height)
+        text.bounds = CGRect(x: 0, y: 0, width: min(size.width, max(0, bounds.width - 36)), height: size.height)
         text.center = CGPoint(x: bounds.midX, y: bounds.midY)
+        positionBadge()
     }
 
     func applySelection(_ amount: CGFloat) {
@@ -588,21 +598,25 @@ private final class MusicQueueTabButton: UIButton {
         text.transform = CGAffineTransform(scaleX: scale, y: scale)
         text.textColor = amount == 0 ? secondaryColor : amount == 1 ? primaryColor :
             UIColor(secondary.mixed(with: primary, ratio: Double(amount)))
+        badge.textColor = text.textColor
+        positionBadge()
+    }
+
+    private func positionBadge() {
+        guard !badge.isHidden else { return }
+        let size = badge.intrinsicContentSize, title = text.frame
+        badge.frame = CGRect(x: min(title.maxX, bounds.maxX - size.width),
+                             y: title.minY - 1, width: size.width, height: size.height)
     }
 
     private func renderTitle() {
         // Draw at the largest size; paging only scales down and blends text color.
-        let font = fontSize + 2, factor = font / fontSize
-        let typeface = UIFont.systemFont(ofSize: font)
+        let typeface = UIFont.systemFont(ofSize: fontSize + 2)
         text.font = typeface
-        let title = NSMutableAttributedString(string: page.title, attributes: [.font: typeface])
-        if let count {
-            title.append(NSAttributedString(string: " \(count)",
-                attributes: [.font: UIFont.monospacedDigitSystemFont(ofSize: 10 * factor, weight: .regular),
-                             .baselineOffset: 4 * factor]))
-        }
-        text.attributedText = title
-        accessibilityLabel = title.string
+        text.text = page.title
+        badge.text = count.map(String.init)
+        badge.isHidden = count == nil
+        accessibilityLabel = count.map { "\(page.title) \($0)" } ?? page.title
         invalidateIntrinsicContentSize()
         setNeedsLayout()
     }
