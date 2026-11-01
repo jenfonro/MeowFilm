@@ -8,6 +8,7 @@ public enum PageIcon {
         case home, channels, person, menu, search, recognize, plus, append, more, play, pause, queue, down
         case playerDown, playerPlay, playerPause, lyricPlay, previous, next, miniPrevious, miniNext
         case heart, translation, image, remove, playing, miniResume, reorder, multiSelect
+        case back, close
     }
     public static func image(_ kind: Kind, filled: Bool = false, size: CGFloat = 23) -> UIImage {
         UIGraphicsImageRenderer(size: CGSize(width: size, height: size)).image { renderer in
@@ -138,6 +139,10 @@ public enum PageIcon {
             line([(11,6),(21,6)])
             line([(3,12),(21,12)])
             line([(3,18),(21,18)])
+        case .back:
+            line([(15,5),(8,12),(15,19)])
+        case .close:
+            line([(6,6),(18,18)]); line([(18,6),(6,18)])
         }
         return p
     }

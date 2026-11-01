@@ -45,7 +45,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
                 }, releaseSource: { [weak model] in model?.releaseRemoteQueueSource($0) })
         }
         super.init(appearance: appearance)
-        self.title = title
+        pageTitle = title
     }
 
     public override func viewDidLoad() {
@@ -82,7 +82,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         NSLayoutConstraint.activate([
             tags.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             tags.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            tags.topAnchor.constraint(equalTo: view.topAnchor), tagsHeight,
+            tags.topAnchor.constraint(equalTo: contentTopAnchor), tagsHeight,
             collection.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             collection.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             collection.topAnchor.constraint(equalTo: tags.bottomAnchor),
@@ -562,8 +562,10 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
                 }
             }))
         }
-        navigationItem.rightBarButtonItem = UIBarButtonItem(
-            image: UIImage(systemName: "ellipsis.circle"), menu: UIMenu(children: actions))
+        pageHeader.setTrailing([PageHeaderButton(
+            image: PageIcon.image(.more), accessibilityLabel: "更多",
+            menu: UIMenu(children: actions)
+        )])
     }
 
     private func setStatus(_ text: String?) {

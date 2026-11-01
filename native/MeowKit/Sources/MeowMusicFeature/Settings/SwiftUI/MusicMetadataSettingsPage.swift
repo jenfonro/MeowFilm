@@ -22,7 +22,7 @@ final class MusicMetadataSettingsViewController: MusicSettingsPageViewController
         super.init(appearance: appearance, content: MusicMetadataSettingsContent(
             state: state, theme: PageTheme(palette: appearance.pageColorway)
         ))
-        title = "歌词／封面设置"
+        pageTitle = "歌词／封面设置"
     }
 
     override func viewDidLoad() {

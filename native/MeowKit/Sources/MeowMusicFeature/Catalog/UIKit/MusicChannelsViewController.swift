@@ -61,7 +61,14 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
         gridPage.view = grid
         pager.dataSource = self; pager.delegate = self
         addChild(modes)
-        view.addSubview(modes.view); modes.view.pinEdges(to: view)
+        view.addSubview(modes.view)
+        modes.view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            modes.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            modes.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            modes.view.topAnchor.constraint(equalTo: contentTopAnchor),
+            modes.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
         modes.didMove(toParent: self)
         if let catalogue {
             observe(catalogue.$sections.map { _ in }.eraseToAnyPublisher()) {

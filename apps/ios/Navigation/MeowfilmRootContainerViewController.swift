@@ -4,6 +4,10 @@ import MeowMusicFeature
 
 @MainActor
 final class MeowfilmRootContainerViewController: PageViewController {
+    /// The window root only hosts the navigation stack; the visible header
+    /// belongs to the top page inside it.
+    override var usesPageHeader: Bool { false }
+
     let navigation: PageNavigationController
     private(set) var dock: MeowfilmDockView?
     var onSelectPage: ((MeowfilmPrimaryPage) -> Void)?

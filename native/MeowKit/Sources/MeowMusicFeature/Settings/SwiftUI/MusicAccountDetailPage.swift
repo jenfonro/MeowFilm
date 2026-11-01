@@ -25,12 +25,13 @@ final class MusicAccountDetailViewController: MusicSettingsPageViewController<Mu
         super.init(appearance: appearance, content: MusicAccountDetailContent(
             state: state, platform: platform, theme: PageTheme(palette: appearance.pageColorway), actions: actions
         ))
-        title = platform.title
+        pageTitle = platform.title
         modalPresentationStyle = .overFullScreen
         modalTransitionStyle = .crossDissolve
     }
 
     override func loadView() { view = MusicAccountFloatingBackdrop() }
+    override var usesPageHeader: Bool { false }
 
     override func viewDidLoad() {
         super.viewDidLoad()

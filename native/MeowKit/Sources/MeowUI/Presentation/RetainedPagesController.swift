@@ -159,11 +159,15 @@ public final class RetainedPagesController: UIViewController {
         select(pending.index, animated: pending.animated)
     }
 
-    isolated deinit {
-        finishSwitchAppearance()
-        finishContainerAppearance()
-        for page in pages.compactMap({ $0 }) {
-            PageViewController.invalidatePages(in: page)
+    // UIKit owners release pages on MainActor, including its autorelease pool.
+    // Avoid entering the back-deployed isolated-deinit runtime teardown.
+    nonisolated deinit {
+        MainActor.assumeIsolated {
+            finishSwitchAppearance()
+            finishContainerAppearance()
+            for page in pages.compactMap({ $0 }) {
+                PageViewController.invalidatePages(in: page)
+            }
         }
     }
 }

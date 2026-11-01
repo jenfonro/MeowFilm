@@ -70,6 +70,42 @@ final class HostingPageViewControllerTests: XCTestCase {
         XCTAssertTrue(field.isFirstResponder)
     }
 
+    func testRetainedHostingContentSharesItsParentHeaderWithoutASecondInset() throws {
+        let theme = PageLifecycleTestTheme()
+        let parent = PageViewController(themeProvider: theme)
+        parent.loadViewIfNeeded()
+        let page = HostingPageViewController(themeProvider: theme, content: Text("内容"))
+        parent.addChild(page)
+        parent.view.addSubview(page.view)
+        page.view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            page.view.leadingAnchor.constraint(equalTo: parent.view.leadingAnchor),
+            page.view.trailingAnchor.constraint(equalTo: parent.view.trailingAnchor),
+            page.view.topAnchor.constraint(equalTo: parent.contentTopAnchor),
+            page.view.bottomAnchor.constraint(equalTo: parent.view.bottomAnchor),
+        ])
+        page.didMove(toParent: parent)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        window.rootViewController = parent
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        parent.view.layoutIfNeeded()
+        page.view.layoutIfNeeded()
+        let host = try XCTUnwrap(page.children.first)
+        XCTAssertTrue(parent.hasOwnPageHeader)
+        XCTAssertFalse(page.hasOwnPageHeader)
+        XCTAssertEqual(page.view.frame.minY, parent.pageHeader.frame.maxY, accuracy: 0.5)
+        XCTAssertEqual(host.view.frame.minY, 0, accuracy: 0.5)
+        XCTAssertEqual(host.view.bounds.height, page.view.bounds.height, accuracy: 0.5)
+    }
+
     private func textField(in view: UIView) -> UITextField? {
         if let field = view as? UITextField { return field }
         for child in view.subviews {

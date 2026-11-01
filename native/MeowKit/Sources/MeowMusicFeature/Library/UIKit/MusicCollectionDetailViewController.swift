@@ -5,8 +5,6 @@ import MeowUI
 
 @MainActor
 public final class MusicCollectionViewController: MusicPageViewController, UITableViewDelegate {
-    public override var prefersPlainBackButton: Bool { true }
-
     private enum Content {
         case local(MusicCollectionViewModel)
         case remote(MusicPublicBrowseCollection, MusicPublicBrowseViewModel)
@@ -34,9 +32,9 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     private var rows: [RowID: Row] = [:]
     private var orderedRows: [(id: RowID, row: Row)] = []
     private var remoteFilter = ""
-    private var searchItem: UIBarButtonItem?
-    private var deleteItem: UIBarButtonItem?
-    private var refreshItem: UIBarButtonItem?
+    private var searchButton: PageHeaderButton?
+    private var deleteButton: PageHeaderButton?
+    private var refreshButton: PageHeaderButton?
     private var shownReadError: String?
     private var automaticPaginationHeld = false
 
@@ -123,11 +121,12 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        title = nil
-        navigationItem.largeTitleDisplayMode = .never
+        pageTitle = nil
 
         table.backgroundColor = .clear
+        table.accessibilityIdentifier = "music.collection.tracks"
         table.separatorStyle = .none
+        table.contentInsetAdjustmentBehavior = .never
         table.delegate = self
         table.rowHeight = 72
         table.estimatedRowHeight = 72
@@ -148,7 +147,13 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
             self?.refresh()
         }, for: .valueChanged)
         view.addSubview(table)
-        table.pinEdges(to: view)
+        table.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            table.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            table.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            table.topAnchor.constraint(equalTo: contentTopAnchor),
+            table.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
+        ])
         view.addSubview(detailHeader.actionBar)
 
         detailHeader.onPlay = { [weak self] in self?.playAll() }
@@ -160,7 +165,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         }
         detailHeader.onSearchVisibilityChange = { [weak self] in
             guard let self else { return }
-            self.searchItem?.accessibilityLabel = self.detailHeader.isSearchVisible
+            self.searchButton?.accessibilityLabel = self.detailHeader.isSearchVisible
                 ? "关闭歌单内搜索" : "歌单内搜索"
             self.updateHeaderFrame()
         }
@@ -172,30 +177,22 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         statusFooter.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: 0.01)
         table.tableFooterView = statusFooter
 
-        searchItem = UIBarButtonItem(
-            image: PageIcon.image(.search),
-            style: .plain,
-            target: self,
-            action: #selector(toggleSearch)
-        )
-        searchItem?.accessibilityLabel = "歌单内搜索"
-        searchItem?.accessibilityIdentifier = "music.collection.search"
-        deleteItem = UIBarButtonItem(
-            image: PageIcon.image(.remove),
-            style: .plain,
-            target: self,
-            action: #selector(requestCollectionRemoval)
-        )
-        deleteItem?.accessibilityLabel = "删除歌单"
-        deleteItem?.accessibilityIdentifier = "music.collection.delete"
-        refreshItem = UIBarButtonItem(
-            image: UIImage(systemName: "arrow.clockwise"),
-            style: .plain,
-            target: self,
-            action: #selector(refreshFromNavigation)
-        )
-        refreshItem?.accessibilityLabel = "刷新歌单"
-        refreshItem?.accessibilityIdentifier = "music.collection.refresh"
+        let search = PageHeaderButton(
+            image: PageIcon.image(.search), accessibilityLabel: "歌单内搜索"
+        ) { [weak self] in self?.toggleSearch() }
+        search.accessibilityIdentifier = "music.collection.search"
+        searchButton = search
+        let delete = PageHeaderButton(
+            image: PageIcon.image(.remove), accessibilityLabel: "删除歌单"
+        ) { [weak self] in self?.requestCollectionRemoval() }
+        delete.accessibilityIdentifier = "music.collection.delete"
+        deleteButton = delete
+        let refresh = PageHeaderButton(
+            image: UIImage(systemName: "arrow.clockwise") ?? PageIcon.image(.playing),
+            accessibilityLabel: "刷新歌单"
+        ) { [weak self] in self?.refreshFromNavigation() }
+        refresh.accessibilityIdentifier = "music.collection.refresh"
+        refreshButton = refresh
 
         switch content {
         case .local(let page):
@@ -677,21 +674,21 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         switch content {
         case .local(let page):
             let hasCollection = page.collection != nil
-            searchItem?.isEnabled = hasCollection
-            refreshItem?.isEnabled = !page.isLoading && !page.isActing && !page.isMissing
+            searchButton?.isEnabled = hasCollection
+            refreshButton?.isEnabled = !page.isLoading && !page.isActing && !page.isMissing
             if page.collection?.kind == "playlist" {
-                deleteItem?.isEnabled = page.canRename
-                navigationItem.rightBarButtonItems = [searchItem, deleteItem, refreshItem].compactMap { $0 }
+                deleteButton?.isEnabled = page.canRename
+                pageHeader.setTrailing([searchButton, deleteButton, refreshButton].compactMap { $0 })
             } else {
-                navigationItem.rightBarButtonItems = [searchItem, refreshItem].compactMap { $0 }
+                pageHeader.setTrailing([searchButton, refreshButton].compactMap { $0 })
             }
         case .remote:
-            searchItem?.isEnabled = true
+            searchButton?.isEnabled = true
             if let page = remotePage {
-                refreshItem?.isEnabled = !page.isLoading && !page.isActing &&
+                refreshButton?.isEnabled = !page.isLoading && !page.isActing &&
                     model.isAvailable && !model.isClosed
             }
-            navigationItem.rightBarButtonItems = [searchItem, refreshItem].compactMap { $0 }
+            pageHeader.setTrailing([searchButton, refreshButton].compactMap { $0 })
         }
     }
 
@@ -731,20 +728,23 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     private func updateScrollChrome() {
         guard isViewLoaded else { return }
         let heroHeight = detailHeader.heroHeight(for: detailHeader.bounds.width)
-        let offset = table.contentOffset.y + table.adjustedContentInset.top
+        let offset = table.contentOffset.y
         let progress = heroHeight > 1 ? offset / heroHeight : 0
         detailHeader.setCollapseProgress(progress)
         let collapsed = detailHeader.hasContent && progress >= 0.98
         let nextTitle = collapsed ? collectionTitle : nil
-        if navigationItem.title != nextTitle { navigationItem.title = nextTitle }
+        if pageHeader.title != nextTitle { pageHeader.title = nextTitle }
         let bar = detailHeader.actionBar
         bar.isHidden = !detailHeader.hasContent
         guard detailHeader.hasContent else { return }
+        // The table starts below the app-owned header. Its own coordinate
+        // space is zero at the header's bottom edge.
+        let pin = table.frame.minY
         let heroBottom = table.convert(
             CGPoint(x: 0, y: detailHeader.frame.minY + heroHeight),
             to: view
         ).y
-        let frame = CGRect(x: 0, y: max(table.adjustedContentInset.top, heroBottom),
+        let frame = CGRect(x: 0, y: max(pin, heroBottom),
                            width: view.bounds.width, height: bar.preferredHeight)
         if bar.frame != frame { bar.frame = frame }
         bar.updateBackgroundPosition()
@@ -1267,15 +1267,15 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         }
     }
 
-    @objc private func toggleSearch() {
+    private func toggleSearch() {
         detailHeader.setSearchVisible(!detailHeader.isSearchVisible, focus: true)
     }
 
-    @objc private func requestCollectionRemoval() {
+    private func requestCollectionRemoval() {
         removeCollection()
     }
 
-    @objc private func refreshFromNavigation() {
+    private func refreshFromNavigation() {
         refresh()
     }
 }

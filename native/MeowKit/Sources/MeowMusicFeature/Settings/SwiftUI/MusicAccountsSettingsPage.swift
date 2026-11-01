@@ -21,7 +21,7 @@ final class MusicAccountsViewController: MusicSettingsPageViewController<MusicAc
         super.init(appearance: appearance, content: MusicAccountsSettingsContent(
             state: state, theme: PageTheme(palette: appearance.pageColorway)
         ))
-        title = "平台账号"
+        pageTitle = "平台账号"
     }
 
     override func viewDidLoad() {

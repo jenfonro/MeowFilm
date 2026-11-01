@@ -19,7 +19,13 @@ open class HostingPageViewController<Content: SwiftUI.View>: PageViewController 
         addChild(hostingController)
         hostingController.view.backgroundColor = .clear
         view.addSubview(hostingController.view)
-        hostingController.view.pinEdges(to: view)
+        hostingController.view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            hostingController.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            hostingController.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            hostingController.view.topAnchor.constraint(equalTo: contentTopAnchor),
+            hostingController.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
         hostingController.didMove(toParent: self)
     }
 

@@ -47,7 +47,7 @@ final class MusicSearchSettingsViewController: MusicSettingsPageViewController<M
         super.init(appearance: appearance, content: MusicSearchSettingsContent(
             state: state, theme: PageTheme(palette: appearance.pageColorway)
         ))
-        title = "搜索设置"
+        pageTitle = "搜索设置"
     }
 
     override func applyTheme() {

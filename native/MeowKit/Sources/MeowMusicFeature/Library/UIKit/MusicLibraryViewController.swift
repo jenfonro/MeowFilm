@@ -37,7 +37,14 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
             guard let self else { return }
             self.loadLibrary()
         }, for: .valueChanged)
-        view.addSubview(collection); collection.pinEdges(to: view)
+        view.addSubview(collection)
+        collection.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            collection.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            collection.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            collection.topAnchor.constraint(equalTo: contentTopAnchor),
+            collection.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
         observe(model.libraryChanges) { [weak self] in self?.render() }
         observe(model.accessChanges) { [weak self] in self?.reconcileAccess() }
         observe(appearance.$preferences.map(\.playlistView).removeDuplicates().dropFirst().eraseToAnyPublisher()) {

@@ -21,7 +21,12 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
 
     private let content: MusicPlayerContentModel
     private let controls: MusicPlaybackControlsView
-    private let close = UIButton(type: .system)
+    private lazy var close: PageHeaderButton = {
+        let button = PageHeaderButton(image: PageIcon.image(.playerDown, size: 25),
+                                      accessibilityLabel: "收起播放器") { [weak self] in self?.onClose?() }
+        button.accessibilityIdentifier = "music.player.close"
+        return button
+    }()
     private let route = AVRoutePickerView()
     private let sourceLabel = UILabel()
     private let recordScroll = UIScrollView()
@@ -85,12 +90,9 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
             addSubview(item)
         }
 
-        close.setImage(PageIcon.image(.playerDown, size: 25), for: .normal)
-        close.accessibilityLabel = "收起播放器"
-        close.accessibilityIdentifier = "music.player.close"
-        close.addAction(UIAction { [weak self] _ in self?.onClose?() }, for: .touchUpInside)
         route.prioritizesVideoDevices = false
         route.accessibilityLabel = "音频输出"
+        route.accessibilityIdentifier = "music.player.audioOutput"
         sourceLabel.font = .systemFont(ofSize: 14, weight: .medium)
         sourceLabel.textAlignment = .center
         sourceLabel.lineBreakMode = .byTruncatingTail
@@ -230,24 +232,19 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
             shortHeight ? 56 : min(72, max(56, safeHeight * 0.0768))
         let headerButton = min(50, max(44, width * 0.1125))
         let headerInset = width * 0.05
+        let headerLeading = max(headerInset, safeAreaInsets.left + 8)
+        let headerTrailing = max(headerInset, safeAreaInsets.right + 8)
         if previewWidth != width {
             previewWidth = width
             updateLyricPreview(force: true)
         }
         let headerY = top + (headerHeight - headerButton) / 2
-        close.frame = CGRect(x: headerInset, y: headerY, width: headerButton, height: headerButton)
-        route.frame = CGRect(x: width - headerInset - headerButton, y: headerY,
+        close.frame = CGRect(x: headerLeading, y: headerY, width: headerButton, height: headerButton)
+        route.frame = CGRect(x: width - headerTrailing - headerButton, y: headerY,
                              width: headerButton, height: headerButton)
         sourceLabel.frame = CGRect(x: close.frame.maxX + 12, y: top,
                                    width: max(0, route.frame.minX - close.frame.maxX - 24),
                                    height: headerHeight)
-        for button in [close] {
-            button.layer.cornerRadius = headerButton / 2
-            button.layer.borderWidth = 1
-        }
-        route.layer.cornerRadius = headerButton / 2
-        route.layer.borderWidth = 1
-        route.clipsToBounds = true
 
         controls.setFullViewport(viewportHeight: bounds.height, safeHeight: safeHeight)
         let controlsHeight = controls.fullHeight
@@ -738,10 +735,6 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
             button.tintColor = UIColor(theme.muted)
             button.backgroundColor = UIColor(theme.buttonSurface)
             button.layer.cornerRadius = 22
-        }
-        for view in [close, route] {
-            view.backgroundColor = UIColor(theme.buttonSurface)
-            view.layer.borderColor = UIColor(theme.control).cgColor
         }
         updateVisibility()
         synchronizeRecords()
