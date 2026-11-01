@@ -17,7 +17,7 @@ final class MusicCollectionDetailActionBar: UIView {
     private let background: WindowGradientView
     fileprivate let play = MusicCollectionPlayAllButton()
     let edit = UIButton(type: .system)
-    let searchField = UISearchTextField()
+    let searchField = UITextField()
     fileprivate(set) var searchVisible = false
     var preferredHeight: CGFloat {
         Self.actionHeight + (searchVisible ? Self.searchHeight : 0)
@@ -49,6 +49,13 @@ final class MusicCollectionDetailActionBar: UIView {
         searchField.autocapitalizationType = .none
         searchField.layer.cornerRadius = 20
         searchField.layer.borderWidth = 1
+        let searchIcon = UIImageView(image: PageIcon.image(.search, size: 16))
+        let searchInset = UIView(frame: CGRect(x: 0, y: 0, width: 36, height: 40))
+        searchIcon.frame = CGRect(x: 12, y: 12, width: 16, height: 16)
+        searchInset.addSubview(searchIcon)
+        searchField.leftView = searchInset
+        searchField.leftViewMode = .always
+        searchField.font = .systemFont(ofSize: 15)
         searchField.isHidden = true
         addSubview(searchField)
     }
@@ -125,7 +132,7 @@ final class MusicCollectionDetailHeaderView: UIView, UITextFieldDelegate {
     private var currentTheme = PageTheme()
     private(set) var collapseProgress: CGFloat = 0
     var isSearchVisible: Bool { actionBar.searchVisible }
-    var searchField: UISearchTextField { actionBar.searchField }
+    var searchField: UITextField { actionBar.searchField }
 
     init(themeProvider: any PageThemeProviding) {
         actionBar = MusicCollectionDetailActionBar(themeProvider: themeProvider)

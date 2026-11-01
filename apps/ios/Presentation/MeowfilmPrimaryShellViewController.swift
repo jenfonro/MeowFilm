@@ -17,12 +17,11 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
     private let pages: RetainedPagesController
     private let openMenu: () -> Void
     private let openSearch: () -> Void
-    private let menu = UIButton(type: .system), add = UIButton(type: .system), feature = UIButton(type: .system)
-    private let search = UIButton(type: .system), titleButton = UIButton(type: .system)
-    private lazy var searchTitle = NavigationTitleView(content: search)
-    private lazy var pageTitle = NavigationTitleView(content: titleButton)
-    private lazy var addItem = UIBarButtonItem(customView: add)
-    private lazy var featureItem = UIBarButtonItem(customView: feature)
+    private let menu = UIButton(type: .custom), add = UIButton(type: .custom), feature = UIButton(type: .custom)
+    private lazy var search = PageHeaderTextButton(title: "") { [weak self] in self?.openSearch() }
+    private lazy var titleButton = PageHeaderTextButton(title: "") { [weak self] in
+        if self?.selectedPage == .channels { self?.channels?.showPicker() }
+    }
 
     init(pageFactories: [@MainActor () -> UIViewController], themeProvider: any PageThemeProviding,
          openMenu: @escaping () -> Void, openSearch: @escaping () -> Void) {
@@ -40,7 +39,13 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
         configureHeader()
         addChild(pages)
         view.addSubview(pages.view)
-        pages.view.pinEdges(to: view)
+        pages.view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            pages.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            pages.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            pages.view.topAnchor.constraint(equalTo: contentTopAnchor),
+            pages.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
         pages.didMove(toParent: self)
         pages.didSelect = { [weak self] _ in
             guard let self else { return }
@@ -70,6 +75,7 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
         search.configuration?.baseForegroundColor = UIColor(theme.muted)
         search.backgroundColor = UIColor(theme.control)
         search.layer.borderColor = UIColor(theme.border).cgColor
+        titleButton.setTitleColor(UIColor(theme.ink), for: .normal)
     }
 
     private func configureHeader() {
@@ -92,19 +98,18 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
         search.layer.cornerRadius = PageLayoutMetrics.searchControl / 2
         search.layer.borderWidth = 0.5
         search.accessibilityIdentifier = "search.open"
-        search.addAction(UIAction { [weak self] _ in self?.openSearch() }, for: .touchUpInside)
         titleButton.contentHorizontalAlignment = .leading
         titleButton.titleLabel?.font = .systemFont(ofSize: 20, weight: .semibold)
-        titleButton.addAction(UIAction { [weak self] _ in
-            if self?.selectedPage == .channels { self?.channels?.showPicker() }
-        }, for: .touchUpInside)
+        titleButton.accessibilityIdentifier = "app.primary.title"
         add.setImage(PageIcon.image(.plus), for: .normal)
         add.accessibilityLabel = "新建歌单"
+        add.accessibilityIdentifier = "app.primary.add"
         add.addAction(UIAction { [weak self] _ in self?.library?.requestCreatePlaylist() }, for: .touchUpInside)
         feature.setImage(PageIcon.image(.recognize), for: .normal)
         feature.accessibilityLabel = "更多功能"
         feature.accessibilityIdentifier = "app.feature"
         for item in [menu, add, feature] {
+            item.adjustsImageWhenHighlighted = false
             item.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([
                 item.widthAnchor.constraint(equalToConstant: 44),
@@ -114,12 +119,8 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
         for item in [search, titleButton] {
             item.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         }
-        navigationItem.leftBarButtonItem = UIBarButtonItem(customView: menu)
-        if #available(iOS 26.0, *) {
-            navigationItem.leftBarButtonItem?.hidesSharedBackground = true
-            addItem.hidesSharedBackground = true
-            featureItem.hidesSharedBackground = true
-        }
+        pageHeader.setLeading(menu)
+        pageHeader.title = nil
     }
 
     private func prepareSelectedPage() {
@@ -132,9 +133,9 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
 
     private func renderHeader() {
         guard isViewLoaded else { return }
-        navigationItem.titleView = selectedPage == .recommend ? searchTitle : pageTitle
-        navigationItem.rightBarButtonItem = selectedPage == .recommend ? featureItem :
-            selectedPage == .library ? addItem : nil
+        pageHeader.setTitleView(selectedPage == .recommend ? search : titleButton)
+        pageHeader.setTrailing(selectedPage == .recommend ? [feature] :
+            selectedPage == .library ? [add] : [])
         titleButton.setTitle(selectedPage == .channels ?
                              (channels?.selectedChannel?.title ?? "频道") + " ⌄" : "我的", for: .normal)
         titleButton.accessibilityLabel = selectedPage == .channels ? "选择频道" : "我的"

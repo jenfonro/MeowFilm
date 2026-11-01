@@ -46,6 +46,7 @@ public final class MusicQueueViewController: MusicPageViewController,
     }
 
     public override func loadView() { view = UIView() }
+    public override var usesPageHeader: Bool { false }
 
     public override func viewDidLoad() {
         super.viewDidLoad()

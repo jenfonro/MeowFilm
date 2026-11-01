@@ -4,6 +4,7 @@ import MeowUI
 
 @MainActor
 public final class MusicDailyStyleViewController: HostingPageViewController<MusicDailyStyleContent> {
+    private var done: PageHeaderTextButton?
     private let model: MusicDailyStyleViewModel
     private var rendered: (MusicDailyStyleState, PageTheme)?
 
@@ -17,17 +18,17 @@ public final class MusicDailyStyleViewController: HostingPageViewController<Musi
             themeProvider: appearance,
             content: MusicDailyStyleContent(theme: PageTheme(palette: appearance.pageColorway))
         )
-        title = "选择推荐风格"
+        pageTitle = "选择推荐风格"
     }
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        navigationItem.leftBarButtonItem = UIBarButtonItem(
-            barButtonSystemItem: .close, target: self, action: #selector(close)
-        )
-        navigationItem.rightBarButtonItem = UIBarButtonItem(
-            title: "完成", style: .done, target: self, action: #selector(save)
-        )
+        let done = PageHeaderTextButton(title: "完成") { [weak self] in self?.save() }
+        self.done = done
+        pageHeader.setLeading(PageHeaderButton(
+            image: PageIcon.image(.close, size: 18), accessibilityLabel: "关闭"
+        ) { [weak self] in self?.close() })
+        pageHeader.setTrailing([done])
         observe(model) { [weak self] in self?.render() }
         render()
     }
@@ -67,7 +68,7 @@ public final class MusicDailyStyleViewController: HostingPageViewController<Musi
                 retry: { [weak model] in model?.retry() }
             ))
         }
-        navigationItem.rightBarButtonItem?.isEnabled = model.canSave
+        done?.isEnabled = model.canSave
         if let error = model.error {
             showError(error, acknowledged: { [weak model] in model?.dismissError(error) })
         }
@@ -77,7 +78,7 @@ public final class MusicDailyStyleViewController: HostingPageViewController<Musi
         }
     }
 
-    @objc private func save() { model.save() }
-    @objc private func close() { dismiss(animated: true) }
+    private func save() { model.save() }
+    private func close() { dismiss(animated: true) }
 }
 #endif

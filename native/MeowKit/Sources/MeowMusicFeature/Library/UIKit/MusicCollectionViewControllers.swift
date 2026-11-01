@@ -7,8 +7,6 @@ import MeowUI
 final class MusicCollectionEditorViewController: MusicPageViewController,
     UITableViewDataSource, UITableViewDelegate
 {
-    public override var prefersPlainBackButton: Bool { true }
-
     private enum Content {
         case local(MusicCollectionViewModel, MusicCollectionEditorDraft)
         case remote(MusicPublicBrowseViewModel)
@@ -20,7 +18,6 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
     private let table = UITableView(frame: .zero, style: .plain)
     private let toolbar = MusicCollectionEditorToolbarView()
     private let actions = MusicCollectionEditorActionsView()
-    private var backLease: UIKitEditorBackGestureLease?
     private var closing = false
     private var displayedTracks: [MusicRemoteTrack] = []
     private var displayedTrackIndices: [MusicReference: Int] = [:]
@@ -82,7 +79,7 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
         self.owner = owner
         self.origin = origin
         super.init(appearance: appearance)
-        title = draft.title
+        pageTitle = draft.title
     }
 
     init(
@@ -96,13 +93,15 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
         self.owner = owner
         self.origin = origin
         super.init(appearance: appearance)
-        self.title = title
+        pageTitle = title
     }
 
     public override func viewDidLoad() {
         super.viewDidLoad()
         table.backgroundColor = .clear
+        table.accessibilityIdentifier = "music.collection.editor.tracks"
         table.separatorStyle = .none
+        table.contentInsetAdjustmentBehavior = .never
         table.rowHeight = 72
         table.estimatedRowHeight = 72
         table.contentInset.bottom = 18
@@ -137,7 +136,7 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
         NSLayoutConstraint.activate([
             toolbar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             toolbar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            toolbar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            toolbar.topAnchor.constraint(equalTo: contentTopAnchor),
             toolbar.heightAnchor.constraint(equalToConstant: 58),
             table.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             table.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -149,10 +148,6 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
             actions.heightAnchor.constraint(equalToConstant: 72),
         ])
 
-        navigationItem.hidesBackButton = true
-        navigationItem.leftBarButtonItem = editorBackItem()
-        navigationItem.rightBarButtonItem = nil
-        navigationItem.largeTitleDisplayMode = .never
         switch content {
         case .local(let page, let draft):
             observe(draft) { [weak self] in
@@ -177,10 +172,6 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
             if canPresentPageAlert { navigationController?.popViewController(animated: false) }
             return
         }
-        if localContent != nil, let navigationController {
-            backLease = UIKitEditorBackGestureLease(navigationController: navigationController,
-                hostView: view, requestConfirmation: { [weak self] in self?.requestClose() })
-        }
         renderActions()
     }
 
@@ -194,7 +185,6 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
     }
 
     public override func pageDidBecomeInactive() {
-        backLease?.invalidate(); backLease = nil
         // A popped editor has no navigation controller; ask its detail owner instead.
         guard origin?.navigationController == nil else {
             if case .local(let page, let draft) = content, page.editor === draft {
@@ -209,7 +199,12 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
         }
     }
 
-    public override func pageDidBecomeHidden() { backLease?.invalidate(); backLease = nil }
+    public override func requestsBackConfirmationForNavigationPop() -> Bool {
+        guard case .local(let page, let draft) = content else { return false }
+        return page.editor === draft && draft.hasChanges
+    }
+
+    public override func requestBackConfirmationForNavigationPop() { requestClose() }
 
     public override func applyTheme() {
         super.applyTheme()
@@ -313,7 +308,7 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
         shouldIndentWhileEditingRowAt indexPath: IndexPath
     ) -> Bool { false }
 
-    @objc private func requestClose() {
+    private func requestClose() {
         guard !closing else { return }
         guard case .local(let page, let draft) = content else {
             closing = true
@@ -363,9 +358,8 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
 
     private func renderActions() {
         if case .local(let page, let draft) = content, page.editor !== draft {
-            title = nil
+            pageHeader.title = nil
             renderTracks()
-            backLease?.invalidate()
             if canPresentPageAlert, !closing, navigationController?.topViewController === self {
                 navigationController?.popViewController(animated: true)
             }
@@ -379,15 +373,7 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
         actions.applyTheme(theme)
         table.isUserInteractionEnabled = canSelect
         updateVisibleTracks()
-        if case .local(let page, let draft) = content, draft.hasChanges, page.editor === draft {
-            if isPageVisible { backLease?.activate() }
-            navigationItem.hidesBackButton = true
-            navigationItem.leftBarButtonItem = editorBackItem()
-        } else {
-            backLease?.invalidate()
-            navigationItem.hidesBackButton = false
-            navigationItem.leftBarButtonItem = nil
-        }
+        updateEditorTitle()
         switch content {
         case .local(let page, _):
             _ = showError(page.actionError ?? page.error?.localizedDescription)
@@ -475,16 +461,13 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
         }
     }
 
-    private func editorBackItem() -> UIBarButtonItem {
-        let item = UIBarButtonItem(
-            image: UIImage(systemName: "chevron.left"),
-            style: .plain,
-            target: self,
-            action: #selector(requestClose)
-        )
-        item.accessibilityLabel = "返回"
-        item.accessibilityIdentifier = "music.collection.editor.back"
-        return item
+    private func updateEditorTitle() {
+        let next: String?
+        switch content {
+        case .local(let page, let draft): next = page.editor === draft ? draft.title : nil
+        case .remote: next = pageTitle
+        }
+        if pageHeader.title != next { pageHeader.title = next }
     }
 
     private func chooseCollection() {

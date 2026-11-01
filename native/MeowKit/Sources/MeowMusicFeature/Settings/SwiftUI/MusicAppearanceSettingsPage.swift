@@ -37,7 +37,7 @@ final class MusicAppearanceSettingsViewController: MusicSettingsPageViewControll
         super.init(appearance: store, content: MusicAppearanceSettingsContent(
             state: state, theme: PageTheme(palette: store.pageColorway)
         ))
-        title = "偏好设置"
+        pageTitle = "偏好设置"
     }
 
     override func viewDidLoad() {

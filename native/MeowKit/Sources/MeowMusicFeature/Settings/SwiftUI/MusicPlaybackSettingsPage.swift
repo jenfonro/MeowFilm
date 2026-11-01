@@ -12,7 +12,7 @@ final class MusicPlaybackSettingsViewController: MusicSettingsPageViewController
         super.init(appearance: appearance, content: MusicPlaybackSettingsContent(
             theme: PageTheme(palette: appearance.pageColorway)
         ))
-        title = "播放设置"
+        pageTitle = "播放设置"
     }
 
     override func applyTheme() {
@@ -63,7 +63,7 @@ final class MusicQualitySettingsViewController: MusicSettingsPageViewController<
         super.init(appearance: appearance, content: MusicQualitySettingsContent(
             state: state, spatial: spatial, theme: PageTheme(palette: appearance.pageColorway)
         ))
-        title = spatial ? "空间／全景音频设置" : "音质设置"
+        pageTitle = spatial ? "空间／全景音频设置" : "音质设置"
     }
 
     override func viewDidLoad() {

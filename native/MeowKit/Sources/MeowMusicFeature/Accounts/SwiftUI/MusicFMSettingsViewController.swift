@@ -22,7 +22,7 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
             themeProvider: appearance,
             content: MusicFMSettingsContent(theme: PageTheme(palette: appearance.pageColorway))
         )
-        title = "私人漫游"
+        pageTitle = "私人漫游"
     }
 
     public override func viewDidLoad() {
@@ -30,9 +30,9 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
         icons = Dictionary(uniqueKeysWithValues: MusicFMModeChoice.scenes.map {
             ($0.submode, MusicFMSceneIcon.image(code: $0.submode))
         })
-        navigationItem.leftBarButtonItem = UIBarButtonItem(
-            barButtonSystemItem: .close, target: self, action: #selector(close)
-        )
+        pageHeader.setLeading(PageHeaderButton(
+            image: PageIcon.image(.close, size: 18), accessibilityLabel: "关闭"
+        ) { [weak self] in self?.close() })
         observe(model) { [weak self] in self?.render() }
         observe(owner.accessChanges) { [weak self] in self?.syncAccess() }
         observe(owner.playbackChanges) { [weak self] in self?.render() }
@@ -93,6 +93,6 @@ public final class MusicFMSettingsViewController: HostingPageViewController<Musi
         }
     }
 
-    @objc private func close() { dismiss(animated: true) }
+    private func close() { dismiss(animated: true) }
 }
 #endif

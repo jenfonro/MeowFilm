@@ -47,6 +47,8 @@ public final class MusicSearchViewController: SearchPageViewController,
         onSubmit = { [weak self] in self?.submit($0) }
         table.backgroundColor = .clear
         table.delegate = self
+        table.accessibilityIdentifier = "music.search.discovery"
+        table.keyboardDismissMode = .onDrag
         table.separatorStyle = .none
         table.sectionHeaderTopPadding = 0
         table.contentInset.top = PageLayoutMetrics.contentGap
@@ -62,7 +64,14 @@ public final class MusicSearchViewController: SearchPageViewController,
             case .charts: return self.chartsCell
             }
         }
-        view.addSubview(table); table.pinEdges(to: view)
+        view.addSubview(table)
+        table.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            table.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            table.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            table.topAnchor.constraint(equalTo: contentTopAnchor),
+            table.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
         observe(history) { [weak self] in self?.render() }
         observe(model.accessChanges) { [weak self] in self?.reconcileAccess() }
         if let discoveryPage {
@@ -391,7 +400,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         NSLayoutConstraint.activate([
             categories.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
             categories.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            categories.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            categories.topAnchor.constraint(equalTo: contentTopAnchor),
             categoriesHeight,
             pager.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             pager.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -476,6 +485,12 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
             }
         }
         updateHeaders()
+    }
+
+    override func shouldBeginInteractiveBack(at point: CGPoint, in view: UIView) -> Bool {
+        // UIPageViewController keeps the visible page at the middle offset.
+        // Its selected kind, not that implementation offset, owns admission.
+        kinds.firstIndex(of: selected) == 0 && !paging
     }
 
     func pageViewController(_ pageViewController: UIPageViewController, viewControllerBefore page: UIViewController)

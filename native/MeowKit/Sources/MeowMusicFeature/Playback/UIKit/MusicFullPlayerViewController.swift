@@ -31,6 +31,7 @@ public final class MusicPlayerViewController: MusicPageViewController, UIPopover
 
     public override var prefersStatusBarHidden: Bool { true }
     public override func loadView() { view = playerView }
+    public override var usesPageHeader: Bool { false }
 
     public override func viewDidLoad() {
         super.viewDidLoad()

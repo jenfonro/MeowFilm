@@ -7,8 +7,30 @@ import Combine
 @MainActor
 open class PageViewController: UIViewController {
     public let themeProvider: any PageThemeProviding
-    /// Requests a system Back button without its shared background on iOS 26 and later.
-    open var prefersPlainBackButton: Bool { false }
+    /// Visible titles belong to the page header. Leave UIKit's `title` unset
+    /// so its native navigation item remains empty, including lazy creation.
+    public var pageTitle: String? {
+        didSet {
+            if hasOwnHeader { pageHeader.title = pageTitle }
+        }
+    }
+    /// The page owns its visible header; the system navigation bar stays hidden.
+    public private(set) lazy var pageHeader = PageHeaderView(themeProvider: themeProvider)
+    /// Return must be confirmed before the interactive or tapped pop begins.
+    open func requestsBackConfirmationForNavigationPop() -> Bool { false }
+    /// Subclasses present the confirmation and only then pop.
+    open func requestBackConfirmationForNavigationPop() {}
+    /// Horizontal page content can keep a right swipe until it reaches its first page.
+    open func shouldBeginInteractiveBack(at point: CGPoint, in view: UIView) -> Bool {
+        var touched = view.hitTest(point, with: nil)
+        while let value = touched {
+            if let scroll = value as? UIScrollView,
+               scroll.contentSize.width > scroll.bounds.width + 1,
+               scroll.contentOffset.x > -scroll.adjustedContentInset.left + 1 { return false }
+            touched = value.superview
+        }
+        return true
+    }
     /// Retained pager content uses its root lifetime, not temporary containment.
     /// The cache must explicitly invalidate content when releasing it.
     public weak var lifetimeOwner: PageViewController?
@@ -24,6 +46,9 @@ open class PageViewController: UIViewController {
     private var observationFactories: [() -> AnyCancellable] = []
     private var subscriptions: [AnyCancellable] = []
     private var tasks: [UUID: Task<Void, Never>] = [:]
+    private var headerHeight: NSLayoutConstraint?
+    private weak var defaultBackButton: PageHeaderButton?
+    private var hasOwnHeader = false
 
     public init(themeProvider: any PageThemeProviding) {
         self.themeProvider = themeProvider
@@ -40,6 +65,10 @@ open class PageViewController: UIViewController {
     open override func viewDidLoad() {
         super.viewDidLoad()
         guard !invalidated else { return }
+        if usesPageHeader, !hasHeaderAncestor {
+            hasOwnHeader = true
+            installHeader()
+        }
         foreground = UIApplication.shared.applicationState == .active
         themeObservation = themeProvider.pageThemeChanges
             .receive(on: RunLoop.main)
@@ -145,6 +174,82 @@ open class PageViewController: UIViewController {
     open func applyTheme() {
         guard isViewLoaded else { return }
         view.tintColor = UIColor(theme.accent)
+        if hasOwnHeader { pageHeader.applyTheme(theme) }
+    }
+
+    /// The content is laid out below the app-owned header. Pages with their own
+    /// full-screen layout (the player) override `usesPageHeader`.
+    open var usesPageHeader: Bool { true }
+
+    private func installHeader() {
+        view.addSubview(pageHeader)
+        pageHeader.accessibilityIdentifier = "page.header"
+        pageHeader.translatesAutoresizingMaskIntoConstraints = false
+        let height = pageHeader.heightAnchor.constraint(equalToConstant: PageLayoutMetrics.navigation)
+        headerHeight = height
+        NSLayoutConstraint.activate([
+            pageHeader.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            pageHeader.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            pageHeader.topAnchor.constraint(equalTo: view.topAnchor),
+            height,
+        ])
+        pageHeader.title = pageTitle
+        updateHeaderNavigationState(
+            canReturn: navigationController.map { $0.viewControllers.first !== self } ?? false
+        )
+    }
+
+    public func updateHeaderNavigationState(canReturn: Bool) {
+        guard hasOwnHeader else { return }
+        if canReturn {
+            guard defaultBackButton == nil, !pageHeader.hasExplicitLeading else { return }
+            let button = PageHeaderButton(
+                image: PageIcon.image(.back, size: 20), accessibilityLabel: "返回"
+            ) { [weak self] in
+                (self?.navigationController as? PageNavigationController)?.requestBack()
+            }
+            button.accessibilityIdentifier = "page.header.back"
+            defaultBackButton = button
+            pageHeader.setLeading(button)
+        } else if defaultBackButton != nil {
+            defaultBackButton = nil
+            pageHeader.setLeading(nil)
+        }
+    }
+
+    /// The first content row below the app-owned header.
+    public var contentTopAnchor: NSLayoutYAxisAnchor {
+        hasOwnHeader ? pageHeader.bottomAnchor : view.topAnchor
+    }
+    /// A page nested in a retained tab shell shares the shell's single header.
+    public var hasOwnPageHeader: Bool { hasOwnHeader }
+    open override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        guard hasOwnHeader else { return }
+        view.bringSubviewToFront(pageHeader)
+        updateHeaderGeometry()
+    }
+
+    open override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        updateHeaderGeometry()
+    }
+
+    private func updateHeaderGeometry() {
+        guard hasOwnHeader else { return }
+        let statusBar = view.safeAreaInsets.top
+        pageHeader.statusBarHeight = statusBar
+        let height = statusBar + PageLayoutMetrics.navigation
+        if headerHeight?.constant != height { headerHeight?.constant = height }
+    }
+
+    private var hasHeaderAncestor: Bool {
+        var ancestor = parent
+        while let value = ancestor {
+            if let page = value as? PageViewController, page.usesPageHeader { return true }
+            ancestor = value.parent
+        }
+        return false
     }
 
     public func observe<Object: ObservableObject>(

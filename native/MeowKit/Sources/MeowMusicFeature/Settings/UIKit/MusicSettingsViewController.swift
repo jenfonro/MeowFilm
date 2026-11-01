@@ -5,7 +5,6 @@ import MeowUI
 
 @MainActor
 public final class MusicSettingsViewController: HostingPageViewController<MusicSettingsContent> {
-    public override var prefersPlainBackButton: Bool { true }
     private let model: MusicViewModel
     private let appearance: MusicAppearancePreferencesStore
     private weak var router: (any MusicUIRouting)?
@@ -24,7 +23,7 @@ public final class MusicSettingsViewController: HostingPageViewController<MusicS
             themeProvider: appearance,
             content: MusicSettingsContent(theme: PageTheme(palette: appearance.pageColorway))
         )
-        title = "设置"
+        pageTitle = "设置"
     }
 
     public override func viewDidLoad() {

@@ -7,6 +7,7 @@ import UIKit
 open class SearchPageViewController: PageViewController {
     private let input = SearchInputView()
     public var searchField: UITextField { input.field }
+    public var searchCapsule: UIView { input }
     public var query: String {
         get { searchField.text ?? "" }
         set { searchField.text = newValue; updateSubmission() }
@@ -27,7 +28,7 @@ open class SearchPageViewController: PageViewController {
         searchField.addTarget(self, action: #selector(updateSubmission), for: .editingChanged)
         searchField.addTarget(self, action: #selector(submitQuery), for: .editingDidEndOnExit)
         input.submit.addTarget(self, action: #selector(submitQuery), for: .touchUpInside)
-        navigationItem.titleView = input
+        pageHeader.setTitleView(input)
         updateSubmission()
     }
 
@@ -48,6 +49,8 @@ open class SearchPageViewController: PageViewController {
         searchField.tintColor = UIColor(theme.accent)
         searchField.textColor = UIColor(theme.ink)
         input.submit.tintColor = UIColor(theme.ink)
+        input.submit.setTitleColor(UIColor(theme.ink), for: .normal)
+        input.submit.setTitleColor(UIColor(theme.muted), for: .disabled)
     }
 
     @objc private func submitQuery() {
@@ -65,7 +68,7 @@ open class SearchPageViewController: PageViewController {
 @MainActor
 private final class SearchInputView: UIView {
     let field = UITextField()
-    let submit = UIButton(type: .system)
+    let submit = UIButton(type: .custom)
     let icon = UIImageView(image: PageIcon.image(.search, size: 18))
     let dividers = [UIView(), UIView()]
 

@@ -34,6 +34,8 @@ final class MusicHistoryCardViewController: MusicPageViewController,
 
     override func loadView() { view = UIView() }
 
+    override var usesPageHeader: Bool { false }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.layer.cornerRadius = 20

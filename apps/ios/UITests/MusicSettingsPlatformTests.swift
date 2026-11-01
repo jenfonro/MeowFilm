@@ -12,7 +12,7 @@ import MeowPlayback
 final class MusicSettingsPlatformTests: XCTestCase {
     /// Synchronous on purpose: pages released inside a Swift task enter the
     /// back-deployed isolated-deinit path, which UIKit owners never use.
-    func testSettingsConsumersOptIntoPlainBackButtonsWithoutChangingOrdinaryPages() throws {
+    func testSettingsConsumersUseTheAppOwnedHeaderAndKeepFloatingCards() throws {
         let domain = "MusicSettingsPlatformTests." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
         defer { defaults.removePersistentDomain(forName: domain) }
@@ -31,17 +31,22 @@ final class MusicSettingsPlatformTests: XCTestCase {
         )
         let pages: [PageViewController] = [root, carrier, accounts, login, detail]
         for page in pages {
-            XCTAssertTrue(page.prefersPlainBackButton)
             XCTAssertFalse(page.isViewLoaded)
+            XCTAssertNil(page.title)
+            XCTAssertNil(page.navigationItem.title)
         }
+        XCTAssertEqual(root.pageTitle, "设置")
+        XCTAssertEqual(accounts.pageTitle, "平台账号")
+        XCTAssertEqual(login.pageTitle, MusicAccountPlatform.qq.title)
+        XCTAssertEqual(detail.pageTitle, MusicAccountPlatform.qq.title)
         for card in [login, detail] as [UIViewController] {
             XCTAssertEqual(card.modalPresentationStyle, .overFullScreen, "Account login and details float over the list")
             XCTAssertTrue(card.view is MusicAccountFloatingBackdrop)
         }
-        XCTAssertFalse(PageViewController(themeProvider: appearance).prefersPlainBackButton)
-        XCTAssertFalse(HostingPageViewController(
+        XCTAssertNil(PageViewController(themeProvider: appearance).navigationItem.titleView)
+        XCTAssertNil(HostingPageViewController(
             themeProvider: appearance, content: EmptyView()
-        ).prefersPlainBackButton)
+        ).navigationItem.titleView)
         let closed = expectation(description: "owner closed")
         Task { await owner.close(); closed.fulfill() }
         wait(for: [closed], timeout: 2)
