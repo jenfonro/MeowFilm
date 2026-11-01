@@ -43,7 +43,7 @@ public static class MusicNativeKgAccountTests
         yield return Case("other-owner-logout-rejects-old-authorization", OtherOwner);
         yield return Case("cooldown-ttl-cap-and-local-challenge-identity", Lifetime);
         yield return Case("deadline-covers-registration-device-save-and-key", Deadline);
-        yield return Case("concurrent-poll-and-physical-http-budget", Budget);
+        yield return Case("concurrent-poll-busy-and-unthrottled-physical-http", Budget);
         yield return Case("two-native-owners-cannot-mint-competing-installation-seeds", CompetingSeeds);
         yield return Case("unknown-entry-rejected-without-network-or-write", UnknownEntry);
         yield return Case("corrupt-device-rejects-whole-document-without-write", CorruptDeviceDocument);
@@ -273,8 +273,8 @@ public static class MusicNativeKgAccountTests
         Check((await Poll(f.Owner, Id(second))).GetProperty("status").GetString() == "expired");
         var third = await Begin(f.Owner);
         for (int i = 0; i < 100; i++) Check(Ok(await Poll(f.Owner, Id(third))));
-        var cap = await Poll(f.Owner, Id(third));
-        Check(!Ok(cap) && Code(cap) == "RATE_LIMITED");
+        Check(Ok(await Poll(f.Owner, Id(third))));
+        f.Clock.Advance(181);
         Check((await Poll(f.Owner, Id(third))).GetProperty("status").GetString() == "expired");
     }
     private static async Task Deadline()
@@ -295,9 +295,11 @@ public static class MusicNativeKgAccountTests
         await Until(() => f.Transport.Calls == 4);
         await f.Owner.CallAsync("music.accounts.cancel", new { platform = "kg" }); await next;
         f.Clock.Advance(5);
-        var third = await Begin(f.Owner);
-        Check(!Ok(third) && Code(third) == "RATE_LIMITED" && f.Transport.Calls == 4);
+        // Cancelled requests that are still draining do not block a new login attempt.
+        var third = Begin(f.Owner);
+        await Until(() => f.Transport.Calls > 4);
         f.Transport.Release.TrySetResult();
+        await third;
     }
     private static async Task CompetingSeeds()
     {

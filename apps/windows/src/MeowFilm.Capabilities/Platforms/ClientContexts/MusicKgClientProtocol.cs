@@ -25,7 +25,7 @@ internal sealed partial class MusicPlatformClientProtocol
             string encrypted = Convert.ToBase64String(aes.EncryptCbc(plaintext, iv, PaddingMode.PKCS7));
             string p = Convert.ToHexStringLower(rsa.Encrypt(portrait, RSAEncryptionPadding.Pkcs1));
             var response = await transport.SendAccountStepAsync(MusicAccountHttpStep.KgRegister,
-                MusicPlatformRequests.KgRegisterDevice(device.Mid, Clock.GetUtcNow().ToUnixTimeSeconds(), p, encrypted), token, TimeSpan.FromSeconds(25), awaitPhysical: true)
+                MusicPlatformRequests.KgRegisterDevice(device.Mid, Clock.GetUtcNow().ToUnixTimeSeconds(), p, encrypted), token, TimeSpan.FromSeconds(25))
                 .ConfigureAwait(false);
             byte[]? plain = null;
             try

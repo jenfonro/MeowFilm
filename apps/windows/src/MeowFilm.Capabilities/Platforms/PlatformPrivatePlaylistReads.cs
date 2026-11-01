@@ -24,7 +24,7 @@ public sealed partial class MusicPlatformCatalog
             var euin = PJ.Cookie(cookies, "encrypt_uin", PJ.Cookie(cookies, "encryptUin"));
             PJ.Require(euin.Length > 0 && (!cookies.TryGetValue("encryptUin", out var other) || other == euin), "INVALID_CREDENTIALS");
             var data = await c.Tx("music.srfDissInfo.DissInfo", "CgiGetDiss", PJ.Obj(
-                ("disstid", 0), ("dirid", 201), ("tag", true), ("song_begin", (p.Page - 1) * p.Limit),
+                ("disstid", 0), ("dirid", 201), ("tag", true), ("song_begin", (p.Page - 1L) * p.Limit),
                 ("song_num", p.Limit), ("userinfo", true), ("orderlist", true), ("enc_host_uin", euin)));
             var info = data["dirinfo"];
             PJ.Require(info is JsonObject && PJ.Id(PJ.At(info, "creator", "musicid")) == c.Session!.UserId &&
@@ -72,7 +72,7 @@ public sealed partial class MusicPlatformCatalog
             var songs = rows.Select(PlatformSongs.Kg).ToArray();
             var snapshot = PJ.Hash(PJ.Node(new object?[] { c.Scope, p.Id, total, version }));
             CheckSnapshot(p.Snapshot, snapshot);
-            page = PJ.Page("kg", songs, p.Page, p.Limit, total.Value, p.Page * (long)p.Limit < total, maximumPages: 334);
+            page = PJ.Page("kg", songs, p.Page, p.Limit, total.Value, p.Page * (long)p.Limit < total);
             page["name"] = PJ.Metadata(PJ.First(PJ.At(info, "name"), JsonValue.Create(locator.Name ?? "歌单")));
             page["cover"] = PJ.Image(PJ.First(PJ.At(info, "cover"), PJ.At(info, "imgurl")));
             page["snapshot"] = snapshot; page["memberIds"] = PJ.Node(members); page["version"] = version;

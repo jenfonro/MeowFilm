@@ -62,7 +62,7 @@ public static class MusicSyncClientContextTests
     }
     private sealed class Adapter(MusicPlatformSession account, MusicPlatformHttp http,
         MusicPlatformClientContextOwner clients, MusicWyClientContext client)
-        : MusicSyncAdapter(account, http, clients, client, new(), () => Task.CompletedTask, () => { }, default)
+        : MusicSyncAdapter(account, http, clients, client, () => Task.CompletedTask, () => { }, default)
     {
         internal Task<JsonObject> ReadProbeAsync() => Wy("/api/toplist", new(), weapi: false);
         internal override Task<SyncDirectory> ReadAsync(string[] kinds) => throw Unused();

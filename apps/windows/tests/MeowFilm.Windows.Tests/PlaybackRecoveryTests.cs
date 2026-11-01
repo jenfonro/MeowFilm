@@ -1138,8 +1138,8 @@ public static class PlaybackRecoveryTests
                 var songNode = JsonNode.Parse(song.GetRawText())!.AsObject();
                 string cache = LJ.Digest(LJ.Obj(("contract", "music.quality.cache.v1"), ("policy", policy),
                     ("installation", "fixture-source"), ("platform", "wy"), ("revision", 1), ("generation", 7),
-                    ("sourceKey", sourceKey), ("recording", source.GetProperty("source_data")),
-                    ("songId", songNode["songId"]), ("songRevision", songNode["revision"]),
+                    ("sourceKey", sourceKey), ("recording", source.GetProperty("musicInfo")),
+                    ("songId", songNode["songId"]),
                     ("duration", songNode["duration"]), ("quality", "320k")));
                 if (input.TryGetProperty("qualityPolicySignature", out var expectedPolicy) && expectedPolicy.GetString() != policy)
                     return Element(new { ok = false, code = "QUALITY_POLICY_CHANGED" });

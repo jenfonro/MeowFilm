@@ -21,11 +21,11 @@ public static class MusicAggregateSearchGroupTests
         yield return Case("group ranks are required and remain within native group positions", Ranks);
         yield return Case("copyright identity is required and page duplicates are rejected", Identities);
         yield return Case("100 groups 1000 expanded variants remain an accepted bounded page", MaximumPage);
-        yield return Case("512KiB response and 32KiB item budgets still apply to group pages", Bytes);
-        yield return Case("failed group page keeps last statistics and retries the same native page", Retry);
-        yield return Case("account fence clears statistics and excludes late group completion", Invalidate);
-        yield return Case("candidate budget rejects a whole group page instead of cropping variants", CandidateBudget);
-        yield return Case("group pages still stop after four copyright-stalled pages", Stalled);
+        yield return Case("expanded pages are not truncated while per-song metadata remains validated", Bytes);
+        yield return Case("failed group page keeps its cursor and the next round retries the same native page", Retry);
+        yield return Case("account fence clears the platform and excludes late group completion", Invalidate);
+        yield return Case("complete group pages retain every variant across search rounds", CandidateBudget);
+        yield return Case("duplicate copyrights do not stop an advancing group cursor", Stalled);
     }
     private static TestCase Case(string name, Func<Task> run) => new("Music MG group search " + name, run);
     private static void Check(bool condition, string message = "ASSERTION_FAILED")
@@ -37,7 +37,7 @@ public static class MusicAggregateSearchGroupTests
     {
         var native = new JsonObject
         {
-            ["source"] = "mg", ["id"] = id, ["musicId"] = id, ["songmid"] = id, ["songId"] = id,
+            ["source"] = "mg", ["id"] = id, ["songmid"] = id, ["songId"] = id,
             ["copyrightId"] = copyright ?? "C" + id
         };
         return new JsonObject
@@ -95,11 +95,8 @@ public static class MusicAggregateSearchGroupTests
         page["items"]![index]!["song"]!.AsObject();
     private static void SetCopyright(JsonObject page, int index, string? value)
     {
-        var song = WrappedSong(page, index);
-        var primary = song["source_data"]!.AsObject();
-        var source = song["sources"]![0]!["source_data"]!.AsObject();
-        if (value is null) { primary.Remove("copyrightId"); source.Remove("copyrightId"); }
-        else { primary["copyrightId"] = value; source["copyrightId"] = value; }
+        var info = MusicSongFixture.Info(WrappedSong(page, index));
+        if (value is null) info.Remove("copyrightId"); else info["copyrightId"] = value;
     }
     private static MusicSearchPage Read(JsonObject page, string platform = "mg", MusicSearchKind kind = MusicSearchKind.Songs, int number = 1) =>
         MusicSearchPage.Read(E(page), platform, kind, number);
@@ -121,8 +118,8 @@ public static class MusicAggregateSearchGroupTests
     {
         var source = ProviderVector();
         var records = source["items"]!.AsArray().Select(item => item!["song"]!.AsObject()).ToArray();
-        Check(records.Select(song => song["source_data"]!["musicId"]!.GetValue<string>()).SequenceEqual(["S1", "S2", "S3"]) &&
-            records.Select(song => song["source_data"]!["copyrightId"]!.GetValue<string>()).SequenceEqual(["C1", "C2", "C3"]),
+        Check(records.Select(song => MusicSongFixture.Info(song)["songmid"]!.GetValue<string>()).SequenceEqual(["S1", "S2", "S3"]) &&
+            records.Select(song => MusicSongFixture.Info(song)["copyrightId"]!.GetValue<string>()).SequenceEqual(["C1", "C2", "C3"]),
             "Provider recording and copyright identities must remain exact");
         foreach (var record in records) CurrentSongSurface(E(record));
         var first = Read(source);
@@ -134,16 +131,15 @@ public static class MusicAggregateSearchGroupTests
         Check(second.Items.Length == 2 && !second.More && second.Items.All(i => i.Rank == 3) && second.Total == 3);
         await using var f = new Fixture(r => Task.FromResult(E(r.Page == 1 ? source : secondPage)));
         string id = S(await f.Start(), "id"); var snapshot = await f.Idle(id); var state = State(snapshot);
-        Check(state.GetProperty("count").GetInt32() == 3 && state.GetProperty("total").GetInt32() == 3 &&
-            state.GetProperty("groupCount").GetInt32() == 2 && state.GetProperty("rawItemCount").GetInt32() == 4 &&
-            S(state, "totalUnit") == "groups" && snapshot.GetProperty("more").GetBoolean());
+        Check(state.GetProperty("count").GetInt32() == 3 && state.GetProperty("page").GetInt32() == 1 &&
+            snapshot.GetProperty("more").GetBoolean());
         var song = snapshot.GetProperty("items").EnumerateArray()
-            .Single(s => S(s.GetProperty("source_data"), "musicId") == "S1");
+            .Single(s => S(MusicSongFixture.Info(s), "songmid") == "S1");
         Check(S(song, "songId") == records[0]["songId"]!.GetValue<string>(),
             "Search grouping must preserve the supplied song identity");
         CurrentSongSurface(song);
-        var native = song.GetProperty("source_data");
-        Check(new[] { "id", "songId", "musicId", "songmid" }.All(field => S(native, field) == "S1") &&
+        var native = MusicSongFixture.Info(song);
+        Check(new[] { "id", "songId", "songmid" }.All(field => S(native, field) == "S1") &&
             S(native, "copyrightId") == "C1" && S(native, "contentId") == "CONTENT1");
         // Existing NativeMusicSong quality projection keeps hash/size only; native format
         // metadata remains in audioFormats and must still identify the original resource.
@@ -151,8 +147,8 @@ public static class MusicAggregateSearchGroupTests
             native.GetProperty("audioFormats")[0].GetProperty("asize").GetInt64() == 1048576 &&
             S(native.GetProperty("audioFormats")[0], "formatType") == "HQ");
         await f.Call("next", id); var final = await f.Idle(id);
-        Check(State(final).GetProperty("count").GetInt32() == 5 && State(final).GetProperty("total").GetInt32() == 3 &&
-            State(final).GetProperty("groupCount").GetInt32() == 1 && !final.GetProperty("more").GetBoolean());
+        Check(State(final).GetProperty("count").GetInt32() == 5 && State(final).GetProperty("page").GetInt32() == 2 &&
+            !final.GetProperty("more").GetBoolean() && final.GetProperty("round").GetInt32() == 2);
         Check(f.Catalog.Calls.Select(r => r.Page).SequenceEqual([1, 2]));
     }
     private static JsonObject Page(MusicSearchRequest request, int variants, long total = 31)
@@ -166,17 +162,15 @@ public static class MusicAggregateSearchGroupTests
     {
         await using var f = new Fixture(r => Task.FromResult(E(Page(r, 2))));
         string id = S(await f.Start(), "id"); var first = await f.Idle(id); var a = State(first);
-        Check(a.GetProperty("count").GetInt32() == 60 && a.GetProperty("total").GetInt64() == 31 &&
-            a.GetProperty("groupCount").GetInt32() == 30 && a.GetProperty("rawItemCount").GetInt32() == 60 && S(a, "totalUnit") == "groups");
+        Check(a.GetProperty("count").GetInt32() == 60 && a.GetProperty("page").GetInt32() == 1);
         var rows = first.GetProperty("items").EnumerateArray().ToArray();
         Check(rows.Length == 60 &&
-            rows.Take(2).Select(r => S(r.GetProperty("source_data"), "musicId"))
+            rows.Take(2).Select(r => S(MusicSongFixture.Info(r), "songmid"))
                 .ToHashSet(StringComparer.Ordinal).SetEquals(["S1V0", "S1V1"]));
         Check(rows.All(r => !r.TryGetProperty("_ranks", out _) && !r.TryGetProperty("_rankScore", out _)));
         await f.Call("next", id); var final = await f.Idle(id); var b = State(final);
         Check(b.GetProperty("count").GetInt32() == 62 && b.GetProperty("page").GetInt32() == 2 &&
-            b.GetProperty("groupCount").GetInt32() == 1 && b.GetProperty("rawItemCount").GetInt32() == 2 &&
-            b.GetProperty("total").GetInt64() == 31 && !final.GetProperty("more").GetBoolean());
+            !final.GetProperty("more").GetBoolean() && final.GetProperty("items").GetArrayLength() == 62);
         Check(f.Catalog.Calls.Select(r => r.Page).SequenceEqual([1, 2]));
     }
     private static async Task Copyright()
@@ -187,11 +181,11 @@ public static class MusicAggregateSearchGroupTests
         var result = await f.Idle(id);
         Check(State(result).GetProperty("count").GetInt32() == 30 && State(result).GetProperty("page").GetInt32() == 2);
         var song = result.GetProperty("items").EnumerateArray()
-            .Single(s => S(s.GetProperty("source_data"), "musicId") == "S1V0");
-        Check(S(song.GetProperty("source_data"), "musicId") == "S1V0" &&
-            S(song.GetProperty("source_data"), "copyrightId") == "CS1V0");
+            .Single(s => S(MusicSongFixture.Info(s), "songmid") == "S1V0");
+        Check(S(MusicSongFixture.Info(song), "songmid") == "S1V0" &&
+            S(MusicSongFixture.Info(song), "copyrightId") == "CS1V0");
         Check(result.GetProperty("items").EnumerateArray()
-            .All(s => S(s.GetProperty("source_data"), "musicId") != "differentNative"));
+            .All(s => S(MusicSongFixture.Info(s), "songmid") != "differentNative"));
     }
     private static Task OtherKinds()
     {
@@ -221,7 +215,7 @@ public static class MusicAggregateSearchGroupTests
             { p = Small(); p[field] = value; Reject(p); }
         }
         foreach (var (field, value) in new[] { ("groupCount", 1), ("groupCount", 3), ("rawItemCount", 2),
-            ("rawItemCount", 65), ("rawItemCount", 1001), ("total", -1), ("limit", 101) })
+            ("rawItemCount", -1), ("total", -1), ("limit", 101) })
         { var p = Small(); p[field] = value; Reject(p); }
         Reject(Group(1, 2, 1, 1, 0));
         Reject(Group(1, 2, 1, 1, 1)); // Nonempty raw groups cannot become an empty deduplicated page.
@@ -243,7 +237,7 @@ public static class MusicAggregateSearchGroupTests
         { var p = Small(); p["items"]![0]!["rank"] = value; Reject(p); }
         var missing = Small(); missing["items"]![0]!.AsObject().Remove("rank"); Reject(missing);
         var crowded = Group(1, 2, 2, 2, 34, Enumerable.Range(0, 33).Select(i => Song("x" + i, 1)).Append(Song("last", 2)).ToArray());
-        Reject(crowded); return Task.CompletedTask;
+        Check(Read(crowded).Items.Length == 34); return Task.CompletedTask;
     }
     private static Task Identities()
     {
@@ -263,7 +257,8 @@ public static class MusicAggregateSearchGroupTests
     }
     private static Task Bytes()
     {
-        var p = Small(); p["padding"] = new string('x', 512 * 1024); Reject(p);
+        var p = Small(); p["padding"] = new string('x', 512 * 1024);
+        Check(Read(p).Items.Length == 3);
         p = Small(); p["items"]![0]!["song"]!["title"] = new string('x', 32 * 1024); Reject(p);
         return Task.CompletedTask;
     }
@@ -274,10 +269,13 @@ public static class MusicAggregateSearchGroupTests
             ? Task.FromException<JsonElement>(new InvalidOperationException("synthetic page two"))
             : Task.FromResult(E(Page(r, 2))));
         string id = S(await f.Start(), "id"); await f.Idle(id); await f.Call("next", id); var failed = State(await f.Idle(id));
-        Check(failed.GetProperty("page").GetInt32() == 1 && failed.GetProperty("rawItemCount").GetInt32() == 60);
-        await f.Call("retry", id); var result = State(await f.Idle(id));
-        Check(result.GetProperty("page").GetInt32() == 2 && result.GetProperty("rawItemCount").GetInt32() == 2 &&
-            f.Catalog.Calls.Select(r => r.Page).SequenceEqual([1, 2, 2]) && f.Catalog.Calls.Last().Refresh);
+        Check(failed.GetProperty("page").GetInt32() == 1 && failed.GetProperty("count").GetInt32() == 60 &&
+            S(failed, "error") == "INVALID_RESPONSE" && failed.GetProperty("more").GetBoolean());
+        // The failed cursor did not advance: the next round asks for the same native page.
+        await f.Call("next", id); var result = State(await f.Idle(id));
+        Check(result.GetProperty("page").GetInt32() == 2 && result.GetProperty("count").GetInt32() == 62 &&
+            S(result, "error") == "" && f.Catalog.Calls.Select(r => r.Page).SequenceEqual([1, 2, 2]) &&
+            !f.Catalog.Calls.Last().Refresh);
     }
     private static async Task Invalidate()
     {
@@ -292,11 +290,14 @@ public static class MusicAggregateSearchGroupTests
         {
             string id = S(await f.Start(), "id"); await f.Idle(id); await f.Call("next", id); await entered.Task;
             f.Search.Invalidate("mg");
-            var invalid = State(await f.Call("get", id)); Check(invalid.GetProperty("groupCount").ValueKind == JsonValueKind.Null);
+            var invalid = State(await f.Call("get", id));
+            Check(invalid.GetProperty("count").GetInt32() == 0 && S(invalid, "error") == "STALE_SESSION");
             held.SetResult(E(Page(f.Catalog.Calls.Last(), 2))); var result = State(await f.Idle(id));
-            Check(result.GetProperty("page").GetInt32() == 0 && result.GetProperty("count").GetInt32() == 0 &&
-                result.GetProperty("total").ValueKind == JsonValueKind.Null && result.GetProperty("rawItemCount").ValueKind == JsonValueKind.Null);
-            await f.Call("retry", id); Check(State(await f.Idle(id)).GetProperty("rawItemCount").GetInt32() == 60);
+            Check(result.GetProperty("page").GetInt32() == 0 && result.GetProperty("count").GetInt32() == 0);
+            // The late page 2 is excluded and the platform restarts from its first page.
+            await f.Call("next", id); var restarted = State(await f.Idle(id));
+            Check(restarted.GetProperty("page").GetInt32() == 1 && restarted.GetProperty("count").GetInt32() == 60 &&
+                f.Catalog.Calls.Last().Page == 1);
         }
         finally { held.TrySetResult(E(new { })); }
     }
@@ -314,10 +315,12 @@ public static class MusicAggregateSearchGroupTests
         });
         string id = S(await f.Start(), "id"); await f.Idle(id);
         await f.Call("next", id); var second = State(await f.Idle(id)); Check(second.GetProperty("count").GetInt32() == 1920);
-        await f.Call("next", id); var stopped = State(await f.Idle(id));
-        Check(stopped.GetProperty("count").GetInt32() == 1920 && stopped.GetProperty("page").GetInt32() == 2 &&
-            stopped.GetProperty("rawItemCount").GetInt32() == 960 && S(stopped, "error") == "SEARCH_LIMIT");
-        await f.Call("retry", id); Check(f.Catalog.Calls.Count == 3);
+        await f.Call("next", id); var third = State(await f.Idle(id));
+        Check(third.GetProperty("count").GetInt32() == 2880 && third.GetProperty("page").GetInt32() == 3 &&
+            S(third, "error") == "" && third.GetProperty("more").GetBoolean());
+        await f.Call("next", id); var last = State(await f.Idle(id));
+        Check(last.GetProperty("count").GetInt32() == 3200 && !last.GetProperty("more").GetBoolean());
+        Check(f.Catalog.Calls.Count == 4);
     }
     private static async Task Stalled()
     {
@@ -331,16 +334,16 @@ public static class MusicAggregateSearchGroupTests
         for (int i = 0; i < 4; i++) { await f.Call("next", id); await f.Idle(id); }
         var state = State(await f.Call("get", id));
         Check(state.GetProperty("page").GetInt32() == 5 && state.GetProperty("count").GetInt32() == 30 &&
-            state.GetProperty("total").GetInt32() == 180 && S(state, "error") == "SEARCH_LIMIT");
+            S(state, "error") == "" && state.GetProperty("more").GetBoolean());
     }
     private sealed class Fixture(Func<MusicSearchRequest, Task<JsonElement>> handler) : IAsyncDisposable
     {
         internal readonly Catalog Catalog = new(handler);
         private MusicSearchCoordinator? search;
         internal MusicSearchCoordinator Search => search ??= new(Catalog);
-        internal Task<JsonElement> Start() => Search.ExecuteAsync("music.search.start", new { keyword = "group", kind = "songs", platforms = new[] { "mg" } });
-        internal Task<JsonElement> Call(string method, string id) => Search.ExecuteAsync("music.search." + method,
-            method == "retry" ? new { id, platform = "mg" } : (object)new { id });
+        internal Task<JsonElement> Start() => Search.ExecuteAsync("music.search.start", new { keyword = "group", kind = "songs",
+            platforms = new[] { "mg" }, pages = 1, concurrency = 1, cacheMinutes = 60 });
+        internal Task<JsonElement> Call(string method, string id) => Search.ExecuteAsync("music.search." + method, new { id });
         internal async Task<JsonElement> Idle(string id)
         {
             var done = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);

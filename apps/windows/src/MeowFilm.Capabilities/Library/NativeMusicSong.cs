@@ -6,14 +6,14 @@ using System.Text.RegularExpressions;
 
 namespace MeowFilm.Capabilities.Library;
 
-internal static class NativeMusicSong
+internal static partial class NativeMusicSong
 {
     internal static readonly string[] Platforms = ["wy", "tx", "kw", "kg", "mg"];
-    private const string SongFields = "songId title artist album duration cover_url source_data sources quarantinedSources revision nextCheckAt stableCount sourcesCheckedAt sourcesRetryAfter partial libraryIds memberLibraryIds";
-    private const string RequiredSongFields = "songId title artist album duration cover_url source_data sources quarantinedSources";
-    private const string SourceFields = "sourceKey source source_data title artist album duration cover_url observedAt nextCheckAt revision";
-    private const string RequiredSourceFields = "sourceKey source source_data title artist album duration cover_url";
-    private const string LocatorFields = "musicId songmid mid id songId qqSongId copyrightId mediaMid strMediaMid albumId album_id albumMid albumAudioId mixsongid fileid fileId contentId hash hash128 hash320 hashflac md5 androidMd5";
+    // Lean unified song: display fields plus one record per platform recording.
+    // sources[0] is the primary recording; the rest are ordered by sourceKey.
+    private const string SongFields = "songId title artist album duration cover_url sources";
+    private const string SourceFields = "sourceKey source musicInfo";
+    private const string LocatorFields = "songmid mid id songId qqSongId copyrightId strMediaMid albumId album_id albumMid albumAudioId mixsongid fileid fileId contentId hash md5 androidMd5";
     internal static readonly TimeSpan RegexTimeout = TimeSpan.FromMilliseconds(100);
     private const string JsWhitespace = @"[\u0009-\u000D\u0020\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF]";
     private static string Pattern(string p) => p.Replace(@"\s", JsWhitespace, StringComparison.Ordinal);
@@ -51,58 +51,35 @@ internal static class NativeMusicSong
         return a.ToString("x8", CultureInfo.InvariantCulture) + b.ToString("x8", CultureInfo.InvariantCulture);
     }
     private static string First(params JsonNode?[] nodes) => nodes.Select(LJ.Scalar).FirstOrDefault(s => s.Length > 0 && s != "0" && s != "false") ?? "";
-    internal static JsonObject SourceData(JsonObject song) =>
-        LJ.Object(song["source_data"], "INVALID_SONG");
-    internal static string NativeId(JsonObject song)
+    private static bool IsSource(JsonObject value) => value.ContainsKey("musicInfo");
+    /// <summary>Primary recording of a song, or null for a local song.</summary>
+    internal static JsonObject? Primary(JsonObject song) =>
+        LJ.Array(song["sources"], "INVALID_SONG").FirstOrDefault() as JsonObject;
+    /// <summary>musicInfo of a source record, or of the primary recording of a song.</summary>
+    internal static JsonObject SourceData(JsonObject value) => IsSource(value)
+        ? LJ.Object(value["musicInfo"], "INVALID_SOURCE")
+        : LJ.Object(Primary(value)?["musicInfo"], "INVALID_SONG");
+    internal static string InfoId(JsonObject info) => LJ.Scalar(info["songmid"] ?? info["id"]);
+    internal static string NativeId(JsonObject value) => InfoId(SourceData(value));
+    internal static string InfoKey(JsonObject info)
     {
-        var data = SourceData(song);
-        return LJ.Scalar(data["musicId"] ?? data["songmid"] ?? data["id"]);
-    }
-    internal static string SourceKey(JsonObject song)
-    {
-        var sd = SourceData(song); string platform = LJ.S(sd["source"]);
-        string id = NativeId(song);
+        string platform = LJ.S(info["source"]), id = InfoId(info);
         if (!Platforms.Contains(platform) || id.Length == 0) return "";
-        return LJ.Stringify(new JsonArray(platform, id, platform == "kg" ? First(JsonValue.Create(NormalText(LJ.S(sd["hash"]))), sd["albumAudioId"]) : ""));
+        return LJ.Stringify(new JsonArray(platform, id, platform == "kg" ? First(JsonValue.Create(NormalText(LJ.S(info["hash"]))), info["albumAudioId"]) : ""));
     }
-    internal static JsonObject Descriptor(JsonObject song)
+    /// <summary>Key of a source record, or of the primary recording of a song ("" for local).</summary>
+    internal static string SourceKey(JsonObject value) => IsSource(value)
+        ? InfoKey(SourceData(value))
+        : Primary(value) is { } primary ? InfoKey(SourceData(primary)) : "";
+    /// <summary>Per-recording display metadata, read from its musicInfo.</summary>
+    internal static (string Title, string Artist, string Album, double Duration, string Cover) Display(JsonObject value)
     {
-        var sd = SourceData(song);
-        string name = NormalText(LJ.S(song["title"]));
-        string artist = string.Join(" & ", Regex.Split(NormalText(LJ.S(song["artist"])),
-            Pattern(@"\s*(?:、|;|\s/\s|\s&\s|\sfeat\.?\s|\sfeaturing\s)\s*"), RegexOptions.CultureInvariant, RegexTimeout).Where(s => s.Length > 0).Order(StringComparer.Ordinal));
-        string[] patterns = ["和声伴奏|和聲伴奏", "伴奏|instrumental|karaoke", @"(?<![a-z0-9_])live(?![a-z0-9_])|现场|現場",
-            @"remix|(?<![a-z0-9_])dj(?![a-z0-9_])", "remaster|重制|重製", "acoustic|不插电|不插電", @"翻唱|(?<![a-z0-9_])cover(?![a-z0-9_])"];
-        string[] tags = ["harmony", "instrumental", "live", "remix", "remaster", "acoustic", "cover"];
-        var versions = tags.Where((_, i) => Match(name, patterns[i]));
-        string title = Regex.Replace(name, Pattern(@"\s*[\(（]([^()（）]+)[\)）]\s*$"), m =>
-            NormalText(m.Groups[1].Value) == Regex.Split(name, "[（(]", RegexOptions.None, RegexTimeout)[0].Trim(' ') ? "" : m.Value, RegexOptions.CultureInvariant, RegexTimeout);
-        title = Replace(Replace(title, @"\s*\(\s*", "("), @"\s*\)\s*", ")").Trim(' ');
-        return LJ.Obj(("title", title), ("artist", artist), ("version", string.Join(',', versions)), ("duration", LJ.N(song["duration"])));
-    }
-    internal static string Fingerprint(JsonObject song)
-    {
-        var d = Descriptor(song); string title = LJ.S(d["title"]), artist = LJ.S(d["artist"]);
-        return title.Length == 0 || artist.Length == 0 || Match(title, "^(未知|unknown)") || Match(artist, "^(未知|unknown)") ? "" :
-            LJ.Stringify(new JsonArray(title, artist, LJ.S(d["version"])));
-    }
-    internal static bool Compatible(JsonObject a, JsonObject b)
-    {
-        string ka = SourceKey(a), kb = SourceKey(b); var da = Descriptor(a); var db = Descriptor(b);
-        double x = LJ.N(da["duration"]), y = LJ.N(db["duration"]);
-        bool durations = !(x > 0 && y > 0) || Math.Abs(x - y) <= Math.Max(3, Math.Min(x, y) * .02);
-        bool Known(string s) => s.Length > 0 && !Match(s, "^(未知|unknown)");
-        if (ka.Length > 0 && ka == kb)
-            return (!Known(LJ.S(da["artist"])) || !Known(LJ.S(db["artist"])) || LJ.S(da["artist"]) == LJ.S(db["artist"])) &&
-                (!Known(LJ.S(da["title"])) || !Known(LJ.S(db["title"])) || LJ.S(da["version"]) == LJ.S(db["version"])) && durations;
-        return Fingerprint(a).Length > 0 && Fingerprint(a) == Fingerprint(b) && x > 0 && y > 0 && durations;
-    }
-    internal static bool Same(JsonObject a, JsonObject b)
-    {
-        HashSet<string> Keys(JsonObject s) => LJ.Array(s["sources"], "INVALID_SONG").OfType<JsonObject>()
-            .Select(n => LJ.S(n["sourceKey"])).Append(SourceKey(s)).Where(value => value.Length > 0).ToHashSet();
-        var ka = Keys(a); var kb = Keys(b);
-        return ka.Overlaps(kb) || LJ.S(a["songId"]) == LJ.S(b["songId"]) && (ka.Count == 0 || kb.Count == 0 || Compatible(a, b));
+        if (!IsSource(value))
+            return (LJ.S(value["title"]), LJ.S(value["artist"]), LJ.S(value["album"]), LJ.N(value["duration"]), LJ.S(value["cover_url"]));
+        var info = SourceData(value);
+        string title = LJ.S(info["name"]), artist = LJ.S(info["singer"]);
+        return (title.Length == 0 ? "未知歌曲" : title, artist.Length == 0 ? "未知歌手" : artist,
+            LJ.S(info["albumName"]), LJ.N(info["duration"]), LJ.S(info["img"]));
     }
     private static void ValidateLocator(JsonObject value)
     {
@@ -131,8 +108,8 @@ internal static class NativeMusicSong
     private static JsonObject CleanNative(JsonObject sd)
     {
         ValidateLocator(sd); var r = new JsonObject();
-        foreach (string key in ("source musicId songmid mid id songId qqSongId songType type copyrightId mediaMid strMediaMid hash hash128 hash320 hashflac " +
-            "albumId album_id albumMid albumAudioId mixsongid fileid fileId name singer album albumName duration size interval catalogSongId sourceSongId").Split(' '))
+        foreach (string key in ("source songmid mid id songId qqSongId songType type copyrightId strMediaMid hash " +
+            "albumId album_id albumMid albumAudioId mixsongid fileid fileId name singer albumName duration size").Split(' '))
             if (Scalar(sd[key])) r[key] = sd[key]?.DeepClone();
         if (PublicUrl(sd["img"]) is { Length: > 0 } img) r["img"] = img;
         if (LJ.S(r["source"]) == "mg")
@@ -153,7 +130,6 @@ internal static class NativeMusicSong
                     }
                     r[key] = list;
                 }
-            foreach (string key in new[] { "lrcUrl", "mrcUrl", "trcUrl" }) if (PublicUrl(sd[key]) is { Length: > 0 } url) r[key] = url;
         }
         string[] qualities = ["128k", "192k", "320k", "flac", "flac24bit", "master"];
         if (LJ.IsBool(sd["qualityKnown"])) r["qualityKnown"] = sd["qualityKnown"]?.DeepClone();
@@ -182,101 +158,64 @@ internal static class NativeMusicSong
     internal static JsonObject DurableSource(JsonNode? input)
     {
         var source = LJ.Object(input, "INVALID_SOURCE");
-        LJ.Fields(source, SourceFields, RequiredSourceFields);
-        foreach (string field in new[] { "sourceKey", "source", "title", "artist", "album", "cover_url" })
+        LJ.Fields(source, SourceFields, SourceFields);
+        foreach (string field in new[] { "sourceKey", "source" })
             LJ.Require(source[field] is JsonValue value && value.TryGetValue<string>(out _), "INVALID_SOURCE");
         LJ.Require(Platforms.Contains(LJ.S(source["source"])), "INVALID_SOURCE");
-        LJ.Require(source["duration"] is JsonValue && double.IsFinite(LJ.N(source["duration"], double.NaN)) &&
-            LJ.N(source["duration"]) >= 0, "INVALID_SOURCE");
-        foreach (string field in new[] { "observedAt", "nextCheckAt", "revision" })
-            if (source.ContainsKey(field)) _ = LJ.I(source[field]);
-        var data = LJ.Object(source["source_data"], "INVALID_SOURCE");
-        var cleanedData = CleanNative(data);
-        LJ.Require(JsonNode.DeepEquals(data, cleanedData), "INVALID_SOURCE");
-        var clean = (JsonObject)source.DeepClone();
-        LJ.Require(LJ.S(clean["cover_url"]) == PublicUrl(clean["cover_url"]), "INVALID_SOURCE");
-        LJ.Require(LJ.S(clean["source"]) == LJ.S(cleanedData["source"]) &&
-            LJ.S(clean["sourceKey"]) == SourceKey(clean), "INVALID_SOURCE");
-        return clean;
+        var info = LJ.Object(source["musicInfo"], "INVALID_SOURCE");
+        LJ.Require(JsonNode.DeepEquals(info, CleanNative(info)), "INVALID_SOURCE");
+        LJ.Require(info["duration"] is null || LJ.N(info["duration"], -1) >= 0, "INVALID_SOURCE");
+        LJ.Require(LJ.S(source["source"]) == LJ.S(info["source"]) &&
+            LJ.S(source["sourceKey"]) == InfoKey(info) && LJ.Id(LJ.S(source["sourceKey"])), "INVALID_SOURCE");
+        return (JsonObject)source.DeepClone();
     }
-    internal static bool IsOnline(JsonObject song) => SourceKey(song).Length > 0;
-    internal static JsonObject CreateOnline(string platform, JsonObject native, string title, string artist = "",
+    internal static bool IsOnline(JsonObject song) => Primary(song) is not null;
+    /// <summary>One canonical recording record. Its musicInfo carries the recording's own display metadata.</summary>
+    internal static JsonObject CreateSource(string platform, JsonObject native, string title, string artist = "",
         string album = "", double duration = 0, string cover = "")
     {
         LJ.Require(Platforms.Contains(platform) && double.IsFinite(duration) && duration >= 0, "INVALID_SONG");
-        var sourceData = (JsonObject)native.DeepClone();
-        sourceData["source"] = platform;
-        string nativeId = First(sourceData["musicId"], sourceData["songmid"], sourceData["id"]);
+        var info = (JsonObject)native.DeepClone();
+        info["source"] = platform;
+        string nativeId = First(info["musicId"], info["songmid"], info["id"]);
         LJ.Require(LJ.Id(nativeId, 512), "INVALID_SONG");
-        sourceData["musicId"] = nativeId;
-        sourceData["songmid"] = nativeId;
-        sourceData = CleanNative(sourceData);
+        info["songmid"] = nativeId;
+        info["name"] = title; info["singer"] = artist; info["albumName"] = album; info["duration"] = duration;
+        if (PublicUrl(JsonValue.Create(cover)) is { Length: > 0 } image) info["img"] = image; else info.Remove("img");
+        info = CleanNative(info);
+        string key = InfoKey(info);
+        LJ.Require(key.Length > 0, "INVALID_SONG");
+        return LJ.Obj(("sourceKey", key), ("source", platform), ("musicInfo", info));
+    }
+    internal static JsonObject CreateOnline(string platform, JsonObject native, string title, string artist = "",
+        string album = "", double duration = 0, string cover = "")
+    {
+        var source = CreateSource(platform, native, title, artist, album, duration, cover);
         title = title.Length == 0 ? "未知歌曲" : title;
         artist = artist.Length == 0 ? "未知歌手" : artist;
         cover = PublicUrl(JsonValue.Create(cover));
         var song = LJ.Obj(("songId", ""), ("title", title), ("artist", artist), ("album", album),
-            ("duration", duration), ("cover_url", cover), ("source_data", sourceData),
-            ("sources", new JsonArray()), ("quarantinedSources", new JsonArray()));
-        string key = SourceKey(song), fingerprint = Fingerprint(song);
-        LJ.Require(key.Length > 0, "INVALID_SONG");
+            ("duration", duration), ("cover_url", cover), ("sources", LJ.Arr([source])));
+        string key = LJ.S(source["sourceKey"]), fingerprint = Fingerprint(song);
         song["songId"] = "song:" + Hash(fingerprint.Length > 0 && duration > 0 ? fingerprint : key);
-        song["sources"] = LJ.Arr([
-            LJ.Obj(("sourceKey", key), ("source", platform), ("source_data", sourceData),
-                ("title", title), ("artist", artist), ("album", album), ("duration", duration), ("cover_url", cover))
-        ]);
         return Normalize(song);
     }
     internal static JsonObject CreateLocal(string songId, string title, string artist = "", string album = "",
         double duration = 0, string cover = "") => Normalize(LJ.Obj(
             ("songId", songId), ("title", title), ("artist", artist), ("album", album),
-            ("duration", duration), ("cover_url", cover), ("source_data", new JsonObject()),
-            ("sources", new JsonArray()), ("quarantinedSources", new JsonArray())));
+            ("duration", duration), ("cover_url", cover), ("sources", new JsonArray())));
     internal static JsonObject Normalize(JsonNode? input)
     {
         var raw = LJ.Object(input, "INVALID_SONG");
-        LJ.Fields(raw, SongFields, RequiredSongFields);
+        LJ.Fields(raw, SongFields, SongFields);
         LJ.Require(LJ.Id(LJ.S(raw["songId"])), "INVALID_SONG_ID");
         foreach (string field in new[] { "title", "artist", "album", "cover_url" })
             LJ.Require(raw[field] is JsonValue value && value.TryGetValue<string>(out _), "INVALID_SONG");
         LJ.Require(raw["duration"] is JsonValue && double.IsFinite(LJ.N(raw["duration"], double.NaN)) &&
             LJ.N(raw["duration"]) >= 0, "INVALID_SONG");
         LJ.Require(LJ.S(raw["cover_url"]) == PublicUrl(raw["cover_url"]), "INVALID_SONG");
-        foreach (string field in new[] { "revision", "nextCheckAt", "stableCount", "sourcesCheckedAt", "sourcesRetryAfter" })
-            if (raw.ContainsKey(field)) _ = LJ.I(raw[field]);
-        if (raw.ContainsKey("partial")) LJ.Require(LJ.IsBool(raw["partial"]), "INVALID_SONG");
-        foreach (string field in new[] { "libraryIds", "memberLibraryIds" })
-            if (raw.ContainsKey(field))
-            {
-                var ids = LJ.Array(raw[field], "INVALID_SONG");
-                LJ.Require(ids.All(value => value is JsonValue scalar && scalar.TryGetValue<string>(out var id) && LJ.Id(id)) &&
-                    ids.Select(value => LJ.S(value)).Distinct(StringComparer.Ordinal).Count() == ids.Count, "INVALID_SONG");
-            }
-        var data = SourceData(raw);
-        var cleanData = CleanNative(data);
-        LJ.Require(JsonNode.DeepEquals(data, cleanData), "INVALID_SONG");
-        var sources = LJ.Array(raw["sources"], "INVALID_SOURCE").Select(DurableSource)
-            .OrderBy(source => LJ.S(source["sourceKey"]), StringComparer.Ordinal).ToArray();
-        var quarantined = LJ.Array(raw["quarantinedSources"], "INVALID_SOURCE").Select(DurableSource)
-            .OrderBy(source => LJ.S(source["sourceKey"]), StringComparer.Ordinal).ToArray();
-        var keys = new HashSet<string>(StringComparer.Ordinal);
-        LJ.Require(sources.Concat(quarantined).All(source => keys.Add(LJ.S(source["sourceKey"]))), "INVALID_SOURCE");
-        string primaryKey = SourceKey(raw);
-        if (primaryKey.Length == 0)
-            LJ.Require(data.Count == 0 && sources.Length == 0 && quarantined.Length == 0, "INVALID_SONG");
-        else
-        {
-            LJ.Require(sources.Length > 0 && sources.All(source => Compatible(raw, source)) &&
-                sources.All(source => sources.All(other => Compatible(source, other))), "RECORDING_CONFLICT");
-            var primary = sources.Where(source => LJ.S(source["sourceKey"]) == primaryKey).ToArray();
-            LJ.Require(primary.Length == 1 && LJ.S(primary[0]["source"]) == LJ.S(data["source"]) &&
-                JsonNode.DeepEquals(primary[0]["source_data"], data) &&
-                new[] { "title", "artist", "album", "duration", "cover_url" }
-                    .All(field => JsonNode.DeepEquals(primary[0][field], raw[field])), "INVALID_SONG");
-        }
-        var result = (JsonObject)raw.DeepClone();
-        result["sources"] = LJ.Arr(sources);
-        result["quarantinedSources"] = LJ.Arr(quarantined);
-        return result;
+        var listed = LJ.Array(raw["sources"], "INVALID_SOURCE").Select(DurableSource).ToArray();
+        return new Recordings(raw, listed).ToSong();
     }
     internal static JsonObject View(JsonNode? song) => Normalize(song);
 }

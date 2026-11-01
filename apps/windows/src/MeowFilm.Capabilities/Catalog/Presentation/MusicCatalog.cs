@@ -57,7 +57,7 @@ public sealed partial class MusicCapability
     public bool IsLocalLibraryPage => IsSongList || IsArchives;
     public bool CanCatalogBrowse => !stopping && commands == 0;
     public bool CanCatalogNext => CanCatalogBrowse && loadCancellation is null && catalogMore &&
-        catalogPage < (catalogLoadedTarget?.MaximumPages ?? 100);
+        catalogPage < (catalogLoadedTarget?.MaximumPages ?? int.MaxValue);
     public bool CanCatalogPrevious => CanCatalogBrowse && loadCancellation is null && !IsCatalogDetailPage && catalogPage > 1;
     public bool CanLoadMoreCatalogPlaylist => IsCatalogPlaylist && CanCatalogNext;
     public bool HasCatalogTags => CatalogTags.Count > 0 && location.Route.StartsWith("catalog-channel/", StringComparison.Ordinal);
@@ -111,7 +111,7 @@ public sealed partial class MusicCapability
     private void RememberCatalogLocation()
     {
         if (IsDiscovery) return;
-        if (IsAggregateSearch) { RememberAggregateSearch(); return; }
+        if (IsSearchPage) { RememberSearch(); return; }
         if (!IsCatalogPage || !catalogPages.TryGetValue(catalogPage, out var state)) return;
         catalogPages[catalogPage] = state with { Scroll = page.CaptureScroll() };
         var key = location.Route + "/" + catalogLoadedPlatform;
@@ -128,7 +128,7 @@ public sealed partial class MusicCapability
         if (SelectedCatalogPlatform.Key != "tx") CatalogPersonalKind = "all";
         return LoadCatalogAsync(IsCatalogPersonal ? "catalog-personal" : "catalog-home", "", 1, null, lifetime.Token);
     }
-    public Task CatalogSearchKindAsync() => IsAggregateSearch ? SwitchAggregateSearchKindAsync() :
+    public Task CatalogSearchKindAsync() => IsSearchPage ? SwitchSearchKindAsync() :
         publishing || !CanCatalogBrowse || location.Route != "catalog-search" || catalogQuery.Length == 0 ||
         CatalogSearchKind == catalogLoadedKind && loadCancellation is null ? Task.CompletedTask :
         LoadCatalogAsync("catalog-search", catalogQuery, 1, null, lifetime.Token);
@@ -140,7 +140,7 @@ public sealed partial class MusicCapability
         return LoadCatalogAsync(location.Route, catalogQuery, 1, null, lifetime.Token, tag: tag.Id);
     }
     public Task RefreshCatalogAsync() => !IsCatalogPage || stopping ? Task.CompletedTask :
-        IsAggregateSearch ? BeginAggregateSearchAsync(aggregateKeyword, lifetime.Token, refresh: true) :
+        IsSearchPage ? BeginSearchAsync(searchKeyword, lifetime.Token, refresh: true) :
         LoadCatalogAsync(location.Route, catalogQuery, 1, null, lifetime.Token, refresh: true, tag: catalogTag);
     public Task CatalogPageAsync(int direction)
     {
@@ -197,7 +197,7 @@ public sealed partial class MusicCapability
     }
     private Task CatalogNavigateAsync(string route, CancellationToken token)
     {
-        if (route == "catalog-search") return RestoreAggregateSearchAsync(token);
+        if (route == "catalog-search") return RestoreSearchAsync(token);
         if (!route.Contains('/') && SelectedCatalogPlatform.Key is "kw" or "mg")
             SelectedCatalogPlatform = CatalogPlatforms[0];
         InvalidateCatalogAction();
@@ -219,14 +219,14 @@ public sealed partial class MusicCapability
     public void CancelCatalog()
     {
         if (stopping) return;
-        if (IsAggregateSearch) { _ = CancelAggregateSearchAsync(); return; }
+        if (IsSearchPage) { _ = CancelSearchAsync(); return; }
         RetireCatalogLoad();
         InvalidateCatalogAction();
         status = "已取消"; RefreshBindings(); CatalogBindings();
     }
     public void RetireCatalogSession()
     {
-        RetireAggregateSearchTracked();
+        RetireSearchTracked();
         var wasPublishing = publishing; publishing = true;
         try
         {
@@ -390,7 +390,7 @@ public sealed partial class MusicCapability
         try
         {
             MusicDto.Require(CatalogPlatforms.Any(item => item.Key == platform));
-            MusicDto.Require(CatalogPlatforms.Any(item => item.Key == platform) && number >= 1 && number <= (target?.MaximumPages ?? 100));
+            MusicDto.Require(CatalogPlatforms.Any(item => item.Key == platform) && number >= 1 && number <= (target?.MaximumPages ?? int.MaxValue));
             if (target is not null && target.Operation is not ("personalPlaylists" or "playlist") && platform != "wy")
                 throw new MusicOperationException("UNSUPPORTED");
             if (target?.Private == true) await ReadCatalogAccountForRequestAsync(platform, generation, token);
@@ -449,7 +449,6 @@ public sealed partial class MusicCapability
             if (stopping || generation != loadGeneration) return;
             if (accountStamp != CatalogAccountKey(platform)) throw new MusicOperationException("STALE_SESSION");
             var sections = MusicCatalogDto.Read(reply, platform, operation, title, kind == "歌单" ? "playlists" : "songs").ToArray();
-            MusicDto.Require(sections.Sum(section => section.Items.Count) <= 10000);
             ValidatePersonalCatalog(reply, target, sections.Sum(section => section.Items.Count));
             bool more = reply.TryGetProperty("more", out var hasMore) && hasMore.ValueKind == JsonValueKind.True;
             JsonElement? next = reply.TryGetProperty("continuation", out var c) && c.ValueKind == JsonValueKind.Object ? c.Clone() : null;
@@ -475,7 +474,7 @@ public sealed partial class MusicCapability
             if (more && (next is null || operation != "personalPlaylists" && sections.Sum(s => s.Items.Count) == 0 ||
                 number > 1 && catalogCursors.Take(number).Any(old => MusicCatalogDto.CursorKey(old) == MusicCatalogDto.CursorKey(next))))
                 throw new MusicOperationException("PAGINATION_STALLED");
-            if (more && number == (target?.MaximumPages ?? 100)) throw new MusicOperationException("PAGINATION_LIMIT");
+            if (more && number == (target?.MaximumPages ?? int.MaxValue)) throw new MusicOperationException("PAGINATION_LIMIT");
             if (number > 1)
             {
                 var oldKeys = catalogPages.Where(p => p.Key < number).SelectMany(p => p.Value.Sections)
@@ -546,7 +545,6 @@ public sealed partial class MusicCapability
                 result[index] = merged;
             }
         }
-        if (result.Sum(s => s.Items.Count) > 10000) throw new MusicOperationException("PAGINATION_LIMIT");
         return result.ToArray();
     }
     private void PublishCatalog(string route, string query, string platform, string kind, int number, CatalogPageState state)

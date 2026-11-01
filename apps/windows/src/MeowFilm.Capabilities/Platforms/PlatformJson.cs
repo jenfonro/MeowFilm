@@ -84,46 +84,26 @@ internal static class PJ
     internal static JsonArray Arr(IEnumerable<JsonNode?> values) => new(values.Select(n => n?.DeepClone()).ToArray());
     internal static string Encode(JsonNode? node) => node?.ToJsonString(Options) ?? "null";
     internal static string Hash(JsonNode? value) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(Encode(value))));
-    internal static JsonObject Parse(byte[] bytes, int maximum = 4 * 1024 * 1024)
+    internal static JsonObject Parse(byte[] bytes, int? maximum = 4 * 1024 * 1024)
     {
-        Require(bytes.Length <= maximum, "LIMIT");
+        Require(maximum is null || bytes.Length <= maximum, "LIMIT");
         try
         {
             var text = new UTF8Encoding(false, true).GetString(bytes);
-            using var doc = JsonDocument.Parse(text, new JsonDocumentOptions { MaxDepth = 40 });
-            var nodes = 0;
-            void Inspect(JsonElement e, int depth)
-            {
-                Require(++nodes <= 100000 && depth <= 40, "LIMIT");
-                if (e.ValueKind == JsonValueKind.Object)
-                {
-                    var names = new HashSet<string>(StringComparer.Ordinal);
-                    foreach (var p in e.EnumerateObject())
-                    {
-                        Require(names.Add(p.Name), "INVALID_RESPONSE");
-                        Require(names.Count <= 10000, "LIMIT");
-                        Inspect(p.Value, depth + 1);
-                    }
-                }
-                else if (e.ValueKind == JsonValueKind.Array)
-                {
-                    Require(e.GetArrayLength() <= 10000, "LIMIT");
-                    foreach (var child in e.EnumerateArray()) Inspect(child, depth + 1);
-                }
-                else if (e.ValueKind == JsonValueKind.String) Require(e.GetString()!.Length <= 50000, "LIMIT");
-            }
-            Inspect(doc.RootElement, 0);
-            Require(doc.RootElement.ValueKind == JsonValueKind.Object, "INVALID_RESPONSE");
-            return (JsonObject)JsonNode.Parse(text, documentOptions: new JsonDocumentOptions { MaxDepth = 40 })!;
+            // The transport bounds buffered bytes; the JSON parser owns nesting and
+            // duplicate-key validation. Unused provider fields have no extra quotas.
+            return JsonNode.Parse(text, documentOptions: new JsonDocumentOptions { AllowDuplicateProperties = false })
+                as JsonObject ?? throw new MusicPlatformException("INVALID_RESPONSE");
         }
         catch (MusicPlatformException) { throw; }
         catch (Exception e) when (e is JsonException or ArgumentException or DecoderFallbackException)
         { throw new MusicPlatformException("INVALID_RESPONSE"); }
     }
-    internal static JsonElement Element(JsonNode node, int max = 512 * 1024)
+    internal static JsonElement Element(JsonNode node, int? max = 512 * 1024)
     {
+        if (max is null) return JsonSerializer.SerializeToElement(node, Options);
         var bytes = Encoding.UTF8.GetBytes(Encode(node));
-        Require(bytes.Length <= max, "LIMIT");
+        Require(bytes.Length <= max.Value, "LIMIT");
         using var doc = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 40 });
         return doc.RootElement.Clone();
     }
@@ -165,23 +145,27 @@ internal static class PJ
         }
         return u.AbsoluteUri;
     }
-    internal static void PageInput(int page, int size) => Require(page is >= 1 and <= 100 && size is >= 1 and <= 100);
+    internal static void PageInput(int page, int size) => Require(page >= 1 && size is >= 1 and <= 100);
     internal static JsonObject Page(string platform, IEnumerable<JsonNode?> values, int page, int limit, long total, bool more,
-        int? next = null, int maximumPages = 100)
+        int? next = null, long? offset = null)
     {
         var items = Arr(values);
         Require(items.Count <= limit, "INVALID_RESPONSE");
-        var offset = (page - 1L) * limit;
-        Require(items.Count > 0 || offset >= total, "INCOMPLETE_PAGE");
-        Require(offset + items.Count <= total || (offset >= total && items.Count == 0), "INVALID_RESPONSE");
+        // An explicit offset marks a multi-page batch: page is its first page, limit its item count.
+        var start = offset ?? (page - 1L) * limit;
+        Require(items.Count > 0 || start >= total, "INCOMPLETE_PAGE");
+        Require(start + items.Count <= total || (start >= total && items.Count == 0), "INVALID_RESPONSE");
         if (more)
         {
-            Require(items.Count > 0 && (next ?? page + 1) > page, "PAGINATION_STALLED");
-            Require(page < maximumPages && offset + items.Count < total, "PAGINATION_LIMIT");
+            Require(page < int.MaxValue, "INVALID_RESPONSE");
+            Require(items.Count > 0 && (next ?? checked(page + 1)) > page, "PAGINATION_STALLED");
+            Require(start + items.Count < total, "INVALID_RESPONSE");
         }
-        else Require(offset + items.Count >= total, "INCOMPLETE_PAGE");
-        return Obj(("platform", platform), ("items", items), ("page", page), ("limit", limit),
+        else Require(start + items.Count >= total, "INCOMPLETE_PAGE");
+        var result = Obj(("platform", platform), ("items", items), ("page", page), ("limit", limit),
             ("total", total), ("more", more), ("continuation", more ? Obj(("page", next ?? page + 1)) : null));
+        if (offset is not null) result["offset"] = offset;
+        return result;
     }
     internal static Dictionary<string, string> Cookies(MusicPlatformSession? session)
         => CookieHeader(session?.Cookie);

@@ -143,13 +143,13 @@
    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
     <RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
    <Grid>
-     <StackPanel Visibility="{Binding IsAggregateSearch,Converter={StaticResource Visible}}" Margin="0,4,0,24">
+     <StackPanel Visibility="{Binding IsSearchPage,Converter={StaticResource Visible}}" Margin="0,4,0,24">
       <TextBlock Text="{Binding Heading}" FontSize="23" FontWeight="SemiBold"
                  Foreground="{DynamicResource MeowFilm.Brush.Text}" TextTrimming="CharacterEllipsis"/>
       <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
        <Button Content="综合" Tag="overview" Click="SearchTab_Click" AutomationProperties.Name="综合搜索结果">
         <Button.Style><Style TargetType="Button" BasedOn="{StaticResource Search.Tab}">
-         <Style.Triggers><DataTrigger Binding="{Binding IsAggregateOverview}" Value="True">
+         <Style.Triggers><DataTrigger Binding="{Binding IsSearchOverview}" Value="True">
           <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
           <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}"/>
           <Setter Property="FontWeight" Value="SemiBold"/>
@@ -158,7 +158,7 @@
        </Button>
        <Button Content="单曲" Tag="songs" Click="SearchTab_Click" AutomationProperties.Name="单曲搜索结果">
         <Button.Style><Style TargetType="Button" BasedOn="{StaticResource Search.Tab}">
-         <Style.Triggers><DataTrigger Binding="{Binding IsAggregateSongs}" Value="True">
+         <Style.Triggers><DataTrigger Binding="{Binding IsSearchSongs}" Value="True">
           <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
           <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}"/>
           <Setter Property="FontWeight" Value="SemiBold"/>
@@ -167,7 +167,7 @@
        </Button>
        <Button Content="歌单" Tag="playlists" Click="SearchTab_Click" AutomationProperties.Name="歌单搜索结果">
         <Button.Style><Style TargetType="Button" BasedOn="{StaticResource Search.Tab}">
-         <Style.Triggers><DataTrigger Binding="{Binding IsAggregatePlaylists}" Value="True">
+         <Style.Triggers><DataTrigger Binding="{Binding IsSearchPlaylists}" Value="True">
           <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
           <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}"/>
           <Setter Property="FontWeight" Value="SemiBold"/>
@@ -229,7 +229,7 @@
    </DockPanel>
    <local:MusicRecommendationView/>
    <desktop:NoticeOutlet Message="{Binding Status}"/>
-    <desktop:NoticeOutlet Message="{Binding AggregateSearchStatus}"/>
+    <desktop:NoticeOutlet Message="{Binding SearchStatus}"/>
   </StackPanel>
    <Grid Grid.Row="2">
    <local:MusicCatalogView x:Name="CatalogView" Visibility="{Binding IsCatalogContent,Converter={StaticResource Visible}}"/>
@@ -252,7 +252,7 @@
     PreviewMouseLeftButtonDown="SongsGrid_MouseDown" PreviewMouseMove="SongsGrid_MouseMove"
     DragOver="SongsGrid_DragOver" DragLeave="SongsGrid_DragLeave" Drop="SongsGrid_Drop"
     QueryContinueDrag="SongsGrid_QueryContinueDrag" ScrollViewer.ScrollChanged="SongsGrid_ScrollChanged" AllowDrop="True"
-    SelectionMode="Single" SelectionUnit="FullRow" AlternationCount="100000"
+    SelectionMode="Single" SelectionUnit="FullRow"
     EnableRowVirtualization="True" VirtualizingPanel.IsVirtualizing="True"
     VirtualizingPanel.VirtualizationMode="Recycling" ScrollViewer.CanContentScroll="True"
     ColumnHeaderStyle="{StaticResource Playlist.Header}" RowStyle="{StaticResource Playlist.Row}"

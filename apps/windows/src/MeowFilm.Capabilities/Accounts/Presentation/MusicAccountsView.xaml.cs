@@ -32,6 +32,7 @@ public partial class MusicAccountsView : UserControl
     public ReadOnlyObservableCollection<MusicAccountTableRow> AccountTableRows { get; }
     private bool SurfaceVisible => IsLoaded && IsVisible && window?.WindowState != WindowState.Minimized;
     private bool Visible => SurfaceVisible && LoginPopup.IsOpen;
+    private bool QrVisible => Visible && QrPanel.Visibility == Visibility.Visible;
     private MusicCapability? Owner => DataContext as MusicCapability;
 
     public MusicAccountsView()
@@ -260,6 +261,7 @@ public partial class MusicAccountsView : UserControl
         SmsPanel.Visibility = Visibility.Visible;
         QrModeButton.Background = System.Windows.Media.Brushes.Transparent;
         SmsModeButton.Background = FindResource("MeowFilm.Brush.Surface") as System.Windows.Media.Brush;
+        StopPolling();
         RefreshSmsCountdown();
         SmsPhoneInput.Focus();
     }
@@ -270,6 +272,8 @@ public partial class MusicAccountsView : UserControl
         SmsPanel.Visibility = Visibility.Collapsed;
         QrModeButton.Background = FindResource("MeowFilm.Brush.Surface") as System.Windows.Media.Brush;
         SmsModeButton.Background = System.Windows.Media.Brushes.Transparent;
+        StopSmsCountdown();
+        RefreshPolling();
     }
 
     private async void RefreshQr_Click(object sender, RoutedEventArgs e)
@@ -318,11 +322,16 @@ public partial class MusicAccountsView : UserControl
         RefreshSmsCountdown();
     }
 
-    private void StopPolling() => pollingCancellation?.Cancel();
+    private void StopPolling()
+    {
+        try { pollingCancellation?.Cancel(); }
+        catch (ObjectDisposedException) { }
+        catch (AggregateException) { }
+    }
 
     private void RefreshPolling()
     {
-        if (!Visible || observed is not { HasAccountQr: true } owner)
+        if (!QrVisible || observed is not { HasAccountQr: true } owner)
         {
             StopPolling();
             return;
@@ -338,18 +347,15 @@ public partial class MusicAccountsView : UserControl
         string? challenge = owner.AccountQrIdentity;
         try
         {
-            for (int attempt = 0; attempt < 100 && Visible && ReferenceEquals(observed, owner) &&
-                owner.HasAccountQr && owner.AccountQrIdentity == challenge; attempt++)
+            while (QrVisible && ReferenceEquals(observed, owner) &&
+                owner.HasAccountQr && owner.AccountQrIdentity == challenge)
             {
                 await Task.Delay(TimeSpan.FromSeconds(2), cancellation.Token);
-                if (!Visible || !ReferenceEquals(observed, owner) || !owner.HasAccountQr ||
+                if (!QrVisible || !ReferenceEquals(observed, owner) || !owner.HasAccountQr ||
                     owner.AccountQrIdentity != challenge) break;
-                if (owner.CanCheckAccountQr) await owner.CheckAccountQrAsync();
+                if (owner.CanCheckAccountQr) await owner.CheckAccountQrAsync(cancellation.Token);
                 cancellation.Token.ThrowIfCancellationRequested();
             }
-            if (!cancellation.IsCancellationRequested && ReferenceEquals(observed, owner) &&
-                owner.HasAccountQr && owner.AccountQrIdentity == challenge)
-                await Leave(owner);
         }
         catch (OperationCanceledException) { }
         catch

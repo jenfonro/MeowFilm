@@ -101,13 +101,13 @@ public sealed class MusicLyricApplication(
                 string platform = LJ.Text(row["source"]), sourceKey = LJ.Text(row["sourceKey"]);
                 long epoch;
                 lock (gate) { CheckPolicy(policy); epoch = epochs.GetValueOrDefault(platform); }
-                var data = LJ.Object(row["source_data"]);
+                var data = NativeMusicSong.SourceData(row);
                 if (platform is "wy" or "tx" or "kg")
                 {
                     var id = platform switch {
                         "tx" => LJ.S(data["songmid"]),
                         "kg" => LJ.S(data["hash"]).ToUpperInvariant(),
-                        _ => LJ.Scalar(data["musicId"] ?? data["songmid"])
+                        _ => NativeMusicSong.InfoId(data)
                     };
                     var duration = LJ.N(data["duration"], LJ.N(song["duration"]));
                     if (duration <= 0) duration = LJ.N(song["duration"]);
@@ -176,9 +176,8 @@ public sealed class MusicLyricApplication(
             }
             if (!pending.TryGetValue(key, out entry!))
             {
-                // Cancelled work still consumes a slot until its real provider
-                // exits. Removing a dedup key is not physical cancellation.
-                LJ.Require(operations.Count < 16, "LIMIT");
+                // Cancelled work stays owned until its real provider exits.
+                // Removing a dedup key is not physical cancellation.
                 entry = new(key, request, epoch, lifetime.Token);
                 pending.Add(key, entry); entry.Subscribers = 1;
                 entry.Work = Complete(entry);

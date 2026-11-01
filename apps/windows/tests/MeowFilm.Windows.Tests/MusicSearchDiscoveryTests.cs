@@ -20,10 +20,12 @@ public static class MusicSearchDiscoveryTests
     {
         yield return Case("fixed-wire-first-three-twenty-normalized-exact-order", WireAndShape);
         yield return Case("anonymous-never-borrows-auth-and-account-cookie-stays-native", Credentials);
-        yield return Case("parallel-primary-and-charts-retain-two-physical-slots", Parallel);
+        yield return Case("independent-primary-and-chart-reads-run-without-a-shared-request-quota", Parallel);
+        yield return Case("display-lists-ignore-unused-row-count-within-response-bytes", DisplayRows);
         yield return Case("cache-copy-isolation-rotation-no-network", Cache);
         yield return Case("successful-response-client-generation-keeps-completed-cache", () => ClientCache(true));
-        yield return Case("client-context-change-fences-rotation-and-completed-cache", () => ClientCache(false));
+        yield return Case("ordinary-client-cookie-update-keeps-rotation-and-completed-cache", () => ClientCache(false));
+        yield return Case("authoritative-client-reload-fences-rotation-and-completed-cache", () => ClientCache(false, reload: true));
         yield return Case("empty-default-and-empty-sections-valid", Empty);
         yield return Case("default-hot-dedup-and-score-null", Dedup);
         foreach (var stage in new[] { "hot", "toplist", "default", "chart" })
@@ -50,7 +52,7 @@ public static class MusicSearchDiscoveryTests
         yield return Case("expired-primary-authorization-is-auth-required-without-client-update", () => ExpiredAuthorization(true));
         yield return Case("expired-partial-authorization-is-auth-required-without-client-update", () => ExpiredAuthorization(false));
         foreach (var fault in new[] { "hot-nonstring", "default-nonstring", "score-negative", "keyword-control", "keyword-limit",
-            "duplicate-json-key", "response-limit", "rows-limit", "invalid-json" })
+            "duplicate-json-key", "response-limit", "invalid-json" })
         {
             var value = fault;
             yield return Case("bounded-" + value, () => Bounded(value));
@@ -267,8 +269,8 @@ public static class MusicSearchDiscoveryTests
                 Enumerable.Range(1, 20).Select(i => (long.Parse(chart.Id) * 100 + i).ToString())));
             var song = chart.Songs[0];
             Check(song.GetProperty("duration").GetDouble() == 180 && song.GetProperty("songId").GetString()!.StartsWith("song:", StringComparison.Ordinal));
-            Check(song.GetProperty("source_data").GetProperty("source").GetString() == "wy" &&
-                song.GetProperty("source_data").GetProperty("musicId").GetString() == MusicSongFixture.NativeId(song));
+            Check(MusicSongFixture.Info(song).GetProperty("source").GetString() == "wy" &&
+                MusicSongFixture.Info(song).GetProperty("songmid").GetString() == MusicSongFixture.NativeId(song));
         }
         Check(snapshot.FetchedAt > 0);
     }
@@ -317,7 +319,7 @@ public static class MusicSearchDiscoveryTests
             "Authorized requests combine the same client with the exact account cookie");
         Check(!JsonSerializer.Serialize(current).Contains("synthetic-only", StringComparison.Ordinal));
     }
-    private static async Task ClientCache(bool responseUpdate)
+    private static async Task ClientCache(bool responseUpdate, bool reload = false)
     {
         await using var f = new Fixture();
         var before = await f.Clients.Owner.AcquireWyAsync();
@@ -340,14 +342,19 @@ public static class MusicSearchDiscoveryTests
         {
             await f.Clients.Owner.AcceptWyAsync(before, null,
                 ["NMTID=SYNTHETIC_DISCOVERY_CONTEXT; Domain=music.163.com"], () => { }, default);
+        }
+        if (reload)
+        {
+            await f.Clients.Owner.ReloadAsync();
             await Failure("STORAGE_CONFLICT", () => { f.Service.Rotate(first.Generation); return Task.CompletedTask; });
         }
+        else f.Service.Rotate(first.Generation);
         var next = await f.Service.ReadAsync();
-        Check(f.Peer.Calls.Count == (responseUpdate ? 9 : 18) &&
-            (responseUpdate ? next.Generation == first.Generation : next.Generation != first.Generation),
-            "Discovery cache must use its actual post-response client snapshot");
+        Check(f.Peer.Calls.Count == (reload ? 18 : 9) &&
+            (reload ? next.Generation != first.Generation : next.Generation == first.Generation),
+            "Only authoritative client replacement invalidates the completed cache");
         Check((await f.Service.ReadAsync()).Generation == next.Generation &&
-            f.Peer.Calls.Count == (responseUpdate ? 9 : 18));
+            f.Peer.Calls.Count == (reload ? 18 : 9));
     }
     private static async Task Parallel()
     {
@@ -355,20 +362,38 @@ public static class MusicSearchDiscoveryTests
         int primaries = 0, details = 0;
         f.Peer.Reply = async (wire, token) =>
         {
-            if (Stage(wire) is "hot" or "toplist")
-            { if (Interlocked.Increment(ref primaries) == 2) primary.TrySetResult(); await release.Task; }
-            if (wire.Path == "/api/v6/playlist/detail" && Id(wire) is "100" or "101")
-            { if (Interlocked.Increment(ref details) == 2) charts.TrySetResult(); await releaseCharts.Task; }
+            if (Stage(wire) is "hot" or "toplist" or "default")
+            { if (Interlocked.Increment(ref primaries) == 3) primary.TrySetResult(); await release.Task; }
+            if (wire.Path == "/api/v6/playlist/detail")
+            { if (Interlocked.Increment(ref details) == 3) charts.TrySetResult(); await releaseCharts.Task; }
             return Response(Default(wire));
         };
         var read = f.Service.ReadAsync();
         try
         {
-            await Wait(primary.Task); Check(f.Peer.Maximum == 2 && f.Peer.Calls.Count == 2);
-            release.TrySetResult(); await Wait(charts.Task); Check(f.Peer.Maximum == 2 && !read.IsCompleted);
+            await Wait(primary.Task); Check(f.Peer.Maximum == 3 && f.Peer.Calls.Count == 3);
+            release.TrySetResult(); await Wait(charts.Task); Check(f.Peer.Maximum == 3 && !read.IsCompleted);
         }
         finally { release.TrySetResult(); releaseCharts.TrySetResult(); }
-        Check((await read).Charts.Length == 3 && f.Peer.Maximum == 2);
+        Check((await read).Charts.Length == 3 && f.Peer.Maximum == 3 && f.Peer.Active == 0);
+    }
+    private static async Task DisplayRows()
+    {
+        await using var f = new Fixture();
+        f.Peer.Reply = (wire, _) =>
+        {
+            var data = Default(wire);
+            var field = Stage(wire) switch { "hot" => "data", "toplist" => "list", _ => null };
+            if (field is not null)
+            {
+                var rows = data[field]!.AsArray();
+                while (rows.Count < 10001) rows.Add(new JsonObject());
+            }
+            return Task.FromResult(Response(data));
+        };
+        var result = await f.Service.ReadAsync();
+        Check(result.Failures.Length == 0 && result.Hot.Length == 20 && result.Charts.Length == 3 &&
+            f.Peer.Calls.Count == 9);
     }
     private static async Task Cache()
     {
@@ -562,7 +587,6 @@ public static class MusicSearchDiscoveryTests
             if (kind == "duplicate-json-key") return Task.FromResult(Raw("""{"code":200,"data":[],"code":200}"""));
             if (kind == "invalid-json") return Task.FromResult(Raw("synthetic-secret-do-not-copy"));
             if (kind == "response-limit") return Task.FromResult(Raw(new string('x', 2 * 1024 * 1024 + 1)));
-            if (kind == "rows-limit") data["data"] = new JsonArray(Enumerable.Range(0, 10001).Select(_ => (JsonNode)new JsonObject()).ToArray());
             if (kind == "default-nonstring") data["data"]!["realkeyword"] = new JsonObject { ["secret"] = "not-a-string" };
             if (kind == "hot-nonstring") data["data"]![0]!["searchWord"] = 42;
             if (kind == "score-negative") data["data"]![0]!["score"] = -1;
@@ -571,7 +595,7 @@ public static class MusicSearchDiscoveryTests
             return Task.FromResult(Response(data));
         };
         var s = await f.Service.ReadAsync();
-        Check(s.Failures.Single().Stage == stage && s.Failures[0].Code == (kind is "response-limit" or "rows-limit" ? "LIMIT" : "INVALID_RESPONSE"));
+        Check(s.Failures.Single().Stage == stage && s.Failures[0].Code == (kind == "response-limit" ? "LIMIT" : "INVALID_RESPONSE"));
         Check(s.Charts.Length == 3);
     }
     private static async Task WholeBudget()

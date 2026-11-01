@@ -6,14 +6,14 @@ using MeowFilm.Capabilities.Platforms;
 namespace MeowFilm.Capabilities.Sync;
 
 internal sealed class MusicSyncWy(MusicPlatformSession session, MusicPlatformHttp http,
-    MusicPlatformClientContextOwner clients, MusicPlatformClientContext? client, MusicSyncRequestBudget budget,
+    MusicPlatformClientContextOwner clients, MusicPlatformClientContext? client,
     Func<Task> guard, Action accountGuard, CancellationToken token)
-    : MusicSyncAdapter(session, http, clients, client, budget, guard, accountGuard, token)
+    : MusicSyncAdapter(session, http, clients, client, guard, accountGuard, token)
 {
     private async Task<List<JsonObject>> Directory()
     {
         var all = new List<JsonObject>(); var seen = new HashSet<string>();
-        for (int offset = 0; offset < MusicSyncRequestBudget.MaximumDirectoryPages * 100; offset += 100)
+        for (long offset = 0; ; offset = checked(offset + 100))
         {
             var data = await Wy("/api/user/playlist", O(("uid", AccountId), ("limit", 100), ("offset", offset), ("includeVideo", true)));
             var rows = Rows(data["playlist"], 100); Require(LJ.IsBool(data["more"])); bool more = LJ.B(data["more"]);
@@ -21,7 +21,6 @@ internal sealed class MusicSyncWy(MusicPlatformSession session, MusicPlatformHtt
             Require(!more || rows.Count > 0, "PAGINATION_STALLED");
             if (!more) { Require(all.Count(r => Favorite(r)) == 1, "FAVORITES_UNCONFIRMED"); return all; }
         }
-        throw new MusicLibraryException("PAGINATION_LIMIT");
     }
     private bool Favorite(JsonObject entry) => Id(entry["creator"]?["userId"]) == AccountId && PJ.Scalar(entry["specialType"]) == "5";
     private static string Signature(IEnumerable<JsonObject> rows) => LJ.Digest(LJ.Arr(rows.Select(r => O(("id", Id(r["id"])),
@@ -65,7 +64,7 @@ internal sealed class MusicSyncWy(MusicPlatformSession session, MusicPlatformHtt
             int n = occurrences.GetValueOrDefault(sid); occurrences[sid] = n + 1;
             bool hasMetadata = songs.TryGetValue(sid, out var raw);
             JsonObject song = hasMetadata ? PlatformSongs.Wy(raw!) :
-                NativeMusicSong.CreateOnline("wy", O(("musicId", sid)), "未知歌曲");
+                NativeMusicSong.CreateOnline("wy", O(("songmid", sid)), "未知歌曲");
             return new SyncMember(sid, n == 0 ? sid : sid + "#" + n, song, HasMetadata: hasMetadata);
         }).ToArray();
         bool owned = owner == AccountId; string special = PJ.Scalar(second["specialType"] ?? entry["specialType"] ?? JsonValue.Create(0));
@@ -76,7 +75,6 @@ internal sealed class MusicSyncWy(MusicPlatformSession session, MusicPlatformHtt
     {
         var before = await Directory(); var all = new List<SyncRemote>();
         var selected = before.Where(entry => kinds.Contains(Favorite(entry) ? "favorites" : "playlist")).ToArray();
-        Require(selected.Length <= MusicSyncRequestBudget.MaximumCollectionsPerPlatform, "SYNC_REQUEST_LIMIT");
         foreach (var entry in selected) all.Add(await ReadEntry(entry));
         Require(Signature(before) == Signature(await Directory()), "SNAPSHOT_CHANGED"); return new(AccountId, all);
     }

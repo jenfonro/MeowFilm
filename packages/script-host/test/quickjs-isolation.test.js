@@ -159,14 +159,13 @@ test('guest module imports and prototype changes never cross the heap boundary',
   assert.equal(Object.prototype.privateMarker, undefined);
 });
 
-test('storage budgets retain physical tasks after cancellation until the adapter settles', async t => {
+test('storage cancellation tracks physical tasks without refusing unrelated work', async t => {
   const entered = deferred(), release = deferred(), calls = [];
   const host = createScriptHost({
-    limits: { maxInstanceInFlight: 2, maxSiteInFlight: 2 },
     storage: { get(input) {
       calls.push(input);
       if (calls.length === 2) entered.resolve();
-      return release.promise;
+      return calls.length <= 2 ? release.promise : 'available';
     } },
   });
   t.after(() => { release.resolve('available'); return host.close(); });
@@ -179,22 +178,22 @@ test('storage budgets retain physical tasks after cancellation until the adapter
   const pending = assert.rejects(host.invoke(target('a', 'kw', { hold: true }),
     { signal: controller.signal }), { code: 'CANCELLED' });
   await entered.promise;
-  assert.equal(await host.invoke(target('a', 'tx')), 'RESOURCE_LIMIT');
+  assert.equal(await host.invoke(target('a', 'tx')), 'available');
   controller.abort();
   await pending;
-  assert(calls.every(input => input.signal.aborted));
+  assert(calls.slice(0, 2).every(input => input.signal.aborted));
   assert.equal(host.stats().pendingAdapterTasks, 2);
-  assert.equal(await host.invoke(target('a', 'tx')), 'RESOURCE_LIMIT');
-  assert.equal(calls.length, 2);
+  assert.equal(await host.invoke(target('a', 'tx')), 'available');
+  assert.equal(calls.length, 4);
   release.resolve('available');
   await turn();
   assert.equal(host.stats().pendingAdapterTasks, 0);
   assert.equal(await host.invoke(target('a', 'tx')), 'available');
 });
 
-test('settled storage callbacks release their budget within a long request', async t => {
+test('settled storage callbacks release ownership within a long request', async t => {
   const host = createScriptHost({
-    limits: { maxTimers: 1, maxNetworkRequests: 1 },
+    limits: { maxTimers: 1 },
     storage: { get: async () => 'value' },
   });
   t.after(() => host.close());
@@ -207,11 +206,10 @@ test('settled storage callbacks release their budget within a long request', asy
   assert.equal(host.stats().pendingAdapterTasks, 0);
 });
 
-test('cancelled network tasks retain their physical budget until the adapter settles', async t => {
+test('cancelled network tasks stay tracked without blocking fresh requests', async t => {
   const entered = deferred(), release = deferred();
   let calls = 0;
-  const host = createScriptHost({ limits: { maxNetworkRequests: 1 },
-    network: () => { calls++; entered.resolve(); return release.promise; } });
+  const host = createScriptHost({ network: () => { calls++; entered.resolve(); return calls === 1 ? release.promise : { statusCode: 200, body: 'available' }; } });
   t.after(() => { release.resolve({ statusCode: 200, body: 'available' }); return host.close(); });
   await host.install({ installationId: 'a', enabled: true, source: lxScript({
     handler: `async () => {
@@ -226,19 +224,18 @@ test('cancelled network tasks retain their physical budget until the adapter set
   controller.abort(); await pending;
   assert.equal(host.stats().networkRequests, 0);
   assert.equal(host.stats().pendingAdapterTasks, 1);
-  assert.equal(await host.invoke(target('a', 'tx')), 'RESOURCE_LIMIT');
-  assert.equal(calls, 1);
+  assert.equal(await host.invoke(target('a', 'tx')), 'available');
+  assert.equal(calls, 2);
   release.resolve({ statusCode: 200, body: 'available' });
   await turn();
   assert.equal(host.stats().pendingAdapterTasks, 0);
   assert.equal(await host.invoke(target('a', 'tx')), 'available');
-  assert.equal(calls, 2);
+  assert.equal(calls, 3);
 });
 
 test('rapid guest aborts cannot accumulate unbounded queued network tasks in one execution turn', async t => {
   let calls = 0;
-  const host = createScriptHost({ limits: { maxNetworkRequests: 1 },
-    network: async () => { calls++; return { statusCode: 200, body: '' }; } });
+  const host = createScriptHost({ network: async () => { calls++; return { statusCode: 200, body: '' }; } });
   t.after(() => host.close());
   await host.install({ installationId: 'a', enabled: true, source: lxScript({
     handler: `async () => {
@@ -251,7 +248,7 @@ test('rapid guest aborts cannot accumulate unbounded queued network tasks in one
     }`,
   }) });
   assert.deepEqual(await host.invoke(target()),
-    ['CANCELLED', 'RESOURCE_LIMIT', 'RESOURCE_LIMIT', 'RESOURCE_LIMIT', 'RESOURCE_LIMIT']);
+    Array(5).fill('CANCELLED'));
   assert.equal(calls, 0);
   assert.equal(host.stats().pendingAdapterTasks, 0);
 });
@@ -277,7 +274,7 @@ test('bridge diagnostics contain only scoped codes and cannot change guest resul
 });
 
 test('cleared timers release callback slots and guest microtasks preserve Promise ordering', async t => {
-  const host = createScriptHost({ limits: { maxTimers: 1, maxNetworkRequests: 1 } });
+  const host = createScriptHost({ limits: { maxTimers: 1 } });
   t.after(() => host.close());
   await host.install({ installationId: 'a', enabled: true, source: lxScript({
     setup: `

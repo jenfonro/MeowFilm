@@ -115,8 +115,7 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
     network: input => track(input.scope, Promise.resolve().then(() => network(input))),
     storage: Object.fromEntries(['get', 'set', 'delete'].map(operation =>
       [operation, input => storage(operation, input)])),
-    limits: { maxInstances, maxSourceBytes: sourceBytes, maxBytes: controlBytes, syncTimeoutMs: 2000,
-      maxInFlight: 16, maxInstanceInFlight: 8, maxSiteInFlight: 4 },
+    limits: { maxInstances, maxSourceBytes: sourceBytes, maxBytes: controlBytes, syncTimeoutMs: 2000 },
   });
   function guard(signal) {
     requireValue(!closed, 'CLOSED');
@@ -191,11 +190,6 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
       if (operation === 'set') message.value = input.value;
       const captured = bounded(message);
       if (operation === 'set') requireValue(Object.hasOwn(captured, 'value'));
-      const activeStorage = [...adapterTasks].filter(task => task.kind === 'storage');
-      requireValue(activeStorage.length < 16 &&
-        activeStorage.filter(task => task.installationId === input.installationId).length < 8 &&
-        activeStorage.filter(task => task.installationId === input.installationId &&
-          task.siteId === input.siteId).length < 4, 'LIMIT');
       const signal = AbortSignal.any([lifetime.signal, auth.controller.signal, input.signal,
         ...(auth.phase === 'candidate' ? [auth.loadSignal] : [])]);
       const task = track(input, Promise.resolve().then(() => {
@@ -238,7 +232,6 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
         const { signal } = context;
         requireValue(signal === undefined || signal instanceof AbortSignal);
         guard(signal); fields(parameters, allowed, required);
-        requireValue(pending < 16, 'LIMIT');
         const captured = bounded(parameters);
         pending++; admitted = true;
         const active = signal ? AbortSignal.any([lifetime.signal, signal]) : lifetime.signal;

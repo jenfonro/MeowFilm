@@ -94,7 +94,16 @@ public sealed partial class MusicRecommendationCoordinator
                         if (code is "COMMIT_UNKNOWN" or "STORAGE_CONFLICT") MarkUnknown(s, operation, code);
                         throw new RecommendationException(code);
                     }
-                    current = await ReadAsync(owner, CancellationToken.None).ConfigureAwait(false);
+                    try
+                    {
+                        current = await ReadAsync(owner, CancellationToken.None).ConfigureAwait(false);
+                        await owner.AcknowledgeRecommendationAsync(operation.Nonce).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        MarkUnknown(s, operation, "COMMIT_UNKNOWN");
+                        throw;
+                    }
                 }
                 lock (gate)
                 {
@@ -175,17 +184,28 @@ public sealed partial class MusicRecommendationCoordinator
                     if (code is "COMMIT_UNKNOWN" or "STORAGE_CONFLICT") MarkUnknown(s, operation, code);
                     throw new RecommendationException(code);
                 }
-                var restored = await ReadAsync(owner, CancellationToken.None).ConfigureAwait(false);
-                lock (gate)
+                try
                 {
-                    s.Checkpoint = "";
-                    if (!ReferenceEquals(session, s) || s.Navigation != navigation || queue.Epoch != epoch) return false;
-                    s.Active = false; s.Returning = false; s.Continue = false; s.Waiting = false; s.Status = "returned";
-                    s.Feedback.Clear(); s.Queue = restored;
-                    if (before.CurrentId != restored.CurrentId)
-                        selection = SelectionLocked(s, restored.CurrentId, false, false, true,
-                            restored.CurrentId.Length == 0 ? MusicRecommendationPlaybackAction.Stop : MusicRecommendationPlaybackAction.Select, inactive: true);
-                    PublishLocked();
+                    var restored = await ReadAsync(owner, CancellationToken.None).ConfigureAwait(false);
+                    lock (gate)
+                    {
+                        s.Checkpoint = "";
+                        if (ReferenceEquals(session, s) && s.Navigation == navigation && queue.Epoch == epoch)
+                        {
+                            s.Active = false; s.Returning = false; s.Continue = false; s.Waiting = false; s.Status = "returned";
+                            s.Feedback.Clear(); s.Queue = restored;
+                            if (before.CurrentId != restored.CurrentId)
+                                selection = SelectionLocked(s, restored.CurrentId, false, false, true,
+                                    restored.CurrentId.Length == 0 ? MusicRecommendationPlaybackAction.Stop : MusicRecommendationPlaybackAction.Select, inactive: true);
+                            PublishLocked();
+                        }
+                    }
+                    await owner.AcknowledgeRecommendationAsync(operation.Nonce).ConfigureAwait(false);
+                }
+                catch
+                {
+                    MarkUnknown(s, operation, "COMMIT_UNKNOWN");
+                    throw;
                 }
                 return true;
             }, token).ConfigureAwait(false);

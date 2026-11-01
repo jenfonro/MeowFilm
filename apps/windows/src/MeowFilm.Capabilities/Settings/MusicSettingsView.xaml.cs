@@ -1,6 +1,8 @@
+using System.Globalization;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 
@@ -13,6 +15,7 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
     private readonly Border[] sections;
     private readonly StackPanel areaTabs;
     private string area = "music";
+    private string searchAdvancedKind = "songs";
     private bool updatingNavigation;
 
     public MusicSettingsView(MusicCapability module)
@@ -20,6 +23,9 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         this.module = module;
         InitializeComponent();
         DataContext = module;
+        // Right-aligned below its button; the arrow sits over the button.
+        SearchAdvancedPopup.CustomPopupPlacementCallback = (popup, target, _) =>
+            [new(new Point(target.Width - popup.Width, target.Height + 4), PopupPrimaryAxis.Horizontal)];
         anchors = SettingsNavigation.Children.OfType<RadioButton>().ToArray();
         sections = [AccountsSection, SearchSection, QualitySection, CacheSection, AppearanceSection, MetadataSection];
         // The anchor underline reserves 4 DIP below its text; offset it to centre the labels on the heading.
@@ -38,7 +44,7 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         Unloaded += View_Unloaded;
         IsVisibleChanged += async (_, _) =>
         {
-            if (!IsVisible) AccountsPanel.CloseTransientPopups();
+            if (!IsVisible) { AccountsPanel.CloseTransientPopups(); SearchAdvancedPopup.IsOpen = false; }
             if (IsLoaded) await UpdateActivation();
         };
     }
@@ -132,15 +138,53 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
     }
     private async void ClearPlaybackCache_Click(object sender, RoutedEventArgs e) => await module.ClearPlaybackCacheAsync();
     private async void SearchHistoryClear_Click(object sender, RoutedEventArgs e) => await module.ClearSearchHistoryAsync();
-    private async void SearchMode_Changed(object sender, SelectionChangedEventArgs e)
+    private MusicSearchKindSettings SearchAdvancedSettings => searchAdvancedKind == "songs" ? module.SongSearch : module.PlaylistSearch;
+    private void SearchAdvanced_Click(object sender, RoutedEventArgs e)
     {
-        if (!IsLoaded || sender is not ComboBox { Tag: string kind, SelectedValue: string value }) return;
-        if ((kind == "songs" ? module.SongSearch.Mode : module.PlaylistSearch.Mode) != value) await module.SetSearchModeAsync(kind, value);
+        if (sender is not Button { Tag: string kind } button) return;
+        SearchAdvancedPopup.IsOpen = false;
+        searchAdvancedKind = kind;
+        ShowSearchAdvanced();
+        SearchAdvancedPopup.PlacementTarget = button;
+        SearchAdvancedPopup.IsOpen = true;
     }
-    private async void SearchPlatform_Changed(object sender, SelectionChangedEventArgs e)
+    private void ShowSearchAdvanced(bool keepEditing = false)
     {
-        if (!IsLoaded || sender is not ComboBox { Tag: string kind, SelectedValue: string value }) return;
-        if ((kind == "songs" ? module.SongSearch.Platform : module.PlaylistSearch.Platform) != value) await module.SetSearchPlatformAsync(kind, value);
+        var settings = SearchAdvancedSettings;
+        foreach (var (box, value) in new[] { (SearchPagesBox, settings.Pages),
+            (SearchConcurrencyBox, settings.Concurrency), (SearchCacheBox, settings.CacheMinutes) })
+            // Do not overwrite the field the user has moved on to edit.
+            if (!keepEditing || !box.IsKeyboardFocusWithin) box.Text = value.ToString(CultureInfo.InvariantCulture);
+    }
+    private void SearchAdvancedPopup_Opened(object? sender, EventArgs e) { SearchPagesBox.Focus(); SearchPagesBox.SelectAll(); }
+    private async void SearchAdvancedPopup_Closed(object? sender, EventArgs e)
+    {
+        SearchAdvancedPopup.PlacementTarget = null;
+        await CommitSearchAdvancedAsync();
+    }
+    private async void SearchAdvancedBox_LostFocus(object sender, KeyboardFocusChangedEventArgs e) => await CommitSearchAdvancedAsync();
+    private async void SearchAdvancedPopup_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape)
+        {
+            // Discard unsaved edits.
+            ShowSearchAdvanced();
+            SearchAdvancedPopup.IsOpen = false; e.Handled = true;
+        }
+        else if (e.Key == Key.Enter) { e.Handled = true; await CommitSearchAdvancedAsync(); ShowSearchAdvanced(); }
+    }
+    /// <summary>Saves valid input immediately; invalid input reverts to the saved value.</summary>
+    private async Task CommitSearchAdvancedAsync()
+    {
+        static int? Read(TextBox box, int maximum) =>
+            int.TryParse(box.Text.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out var value) &&
+            value >= 1 && value <= maximum ? value : null;
+        var settings = SearchAdvancedSettings;
+        int pages = Read(SearchPagesBox, MusicSearchLimits.Pages) ?? settings.Pages;
+        int concurrency = Read(SearchConcurrencyBox, MusicSearchLimits.Concurrency) ?? settings.Concurrency;
+        int cacheMinutes = Read(SearchCacheBox, MusicSearchLimits.CacheMinutes) ?? settings.CacheMinutes;
+        await module.SetSearchAdvancedAsync(searchAdvancedKind, pages, concurrency, cacheMinutes);
+        ShowSearchAdvanced(keepEditing: true);
     }
     private async void PlaybackQuality_Changed(object sender, SelectionChangedEventArgs e)
     {

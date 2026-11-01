@@ -135,29 +135,81 @@ public static class ArtworkTests
             await Code("ARTWORK_CLOSED", () => service.AcquireAsync("https://art.example.test/x"));
             await service.DisposeAsync();
         });
-        yield return new("Native artwork one congested host cannot monopolize global admission", () => Sta(async () =>
+        yield return new("Native artwork concurrent visible URLs have no host or global request quota", () => Sta(async () =>
         {
-            var arrived = Signal(); var release = Signal(); int active = 0, maximum = 0;
+            var arrived = Signal(); var release = Signal(); int active = 0;
             byte[] png = Encode("png", 1, 1);
             var handler = new Handler(async (request, ct) =>
             {
                 if (request.RequestUri!.Host == "busy.example.test")
                 {
                     int count = Interlocked.Increment(ref active);
-                    maximum = Math.Max(maximum, count); if (count == 2) arrived.TrySetResult();
+                    if (count == 80) arrived.TrySetResult();
                     try { await release.Task.WaitAsync(ct); } finally { Interlocked.Decrement(ref active); }
                 }
                 return Reply(png);
             });
             await using var service = new ArtworkService(handler);
-            var busy = Enumerable.Range(0, 10).Select(i => service.AcquireAsync("https://busy.example.test/" + i)).ToArray();
+            var busy = Enumerable.Range(0, 80).Select(i => service.AcquireAsync("https://busy.example.test/" + i)).ToArray();
             await arrived.Task;
             using var independent = await service.AcquireAsync("https://other.example.test/x").WaitAsync(TimeSpan.FromSeconds(5));
-            Equal(2, maximum); release.SetResult();
+            Equal(80, Volatile.Read(ref active)); release.SetResult();
             foreach (var lease in await Task.WhenAll(busy)) lease.Dispose();
-            Equal(2, maximum);
+            Equal(0, active);
         }));
-        yield return new("Native artwork cache cannot evict pinned visuals and can evict after last release", () => Sta(async () =>
+        yield return new("Native artwork shared URL survives one consumer cancellation", () => Sta(async () =>
+        {
+            var entered = Signal(); var cancelled = Signal();
+            var response = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var handler = new Handler(async (_, token) =>
+            {
+                using var registration = token.Register(() => cancelled.TrySetResult());
+                entered.TrySetResult(); return await response.Task;
+            });
+            await using var service = new ArtworkService(handler);
+            using var firstCancellation = new CancellationTokenSource();
+            var first = service.AcquireAsync("https://art.example.test/shared", firstCancellation.Token);
+            await entered.Task;
+            var second = service.AcquireAsync("https://art.example.test/shared");
+            firstCancellation.Cancel();
+            try { using var unexpected = await first; throw new InvalidOperationException("Expected consumer cancellation"); }
+            catch (OperationCanceledException) { }
+            Check(!cancelled.Task.IsCompleted); Equal(1, handler.Count);
+            response.SetResult(Reply(Encode("png", 3, 2)));
+            using var visible = await second;
+            using var cached = await service.AcquireAsync("https://art.example.test/shared");
+            Check(ReferenceEquals(visible.Image, cached.Image)); Equal(1, handler.Count);
+        }));
+        yield return new("Native artwork last consumer cancels old flight and close awaits its physical completion", () => Sta(async () =>
+        {
+            var entered = Signal(); var cancelled = Signal(); int calls = 0;
+            var response = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            byte[] current = Encode("png", 3, 2), stale = Encode("png", 1, 1);
+            var handler = new Handler(async (_, token) =>
+            {
+                if (Interlocked.Increment(ref calls) != 1) return Reply(current);
+                using var registration = token.Register(() => cancelled.TrySetResult());
+                entered.TrySetResult();
+                return await response.Task; // Deliberately ignores physical cancellation.
+            });
+            await using var service = new ArtworkService(handler);
+            using var cancellation = new CancellationTokenSource();
+            var first = service.AcquireAsync("https://art.example.test/shared", cancellation.Token);
+            await entered.Task; cancellation.Cancel();
+            try { using var unexpected = await first; throw new InvalidOperationException("Expected consumer cancellation"); }
+            catch (OperationCanceledException) { }
+            await cancelled.Task;
+            using var replacement = await service.AcquireAsync("https://art.example.test/shared");
+            using var cached = await service.AcquireAsync("https://art.example.test/shared");
+            Equal(2, handler.Count); Equal(3, replacement.Image.PixelWidth);
+            Check(ReferenceEquals(replacement.Image, cached.Image));
+            var close = service.DisposeAsync().AsTask();
+            Check(!close.IsCompleted && !handler.Disposed);
+            response.SetResult(Reply(stale));
+            await close;
+            Check(handler.Disposed); Equal(3, replacement.Image.PixelWidth);
+        }));
+        yield return new("Native artwork cache eviction preserves pinned visuals and admits fresh images", () => Sta(async () =>
         {
             byte[] png = Encode("png", 1, 1);
             await using var service = new ArtworkService(new Handler((_, _) => Task.FromResult(Reply(png))));
@@ -165,10 +217,8 @@ public static class ArtworkTests
             try
             {
                 for (int i = 0; i < 64; i++) leases.Add(await service.AcquireAsync("https://art.example.test/" + i));
-                await Code("ARTWORK_LIMIT", () => service.AcquireAsync("https://art.example.test/overflow"));
-                leases[0].Dispose();
                 using var replacement = await service.AcquireAsync("https://art.example.test/overflow");
-                Check(leases[1].Image.IsFrozen);
+                Check(leases[0].Image.IsFrozen && leases[1].Image.IsFrozen && replacement.Image.IsFrozen);
             }
             finally { foreach (var lease in leases) lease.Dispose(); }
         }));

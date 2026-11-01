@@ -21,6 +21,8 @@ internal sealed record MusicWyClientContext(
     : MusicPlatformClientContext(Generation)
 {
     internal override string Platform => "wy";
+    // Ordinary response cookies share this observation; an authoritative reload does not.
+    [JsonIgnore] internal object Observation { get; init; } = new();
     internal static MusicWyClientContext Create()
     {
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture);

@@ -24,20 +24,16 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
     private CancellationTokenSource session = new();
     private TaskCompletionSource drained = Completed();
     private long epoch, reservedBytes;
-    private int pending, preparing, committing;
+    private int pending;
     private bool closed;
     private Task? disposal;
     private sealed record Stage(string Platform, string Id, string Name, string Snapshot,
         JsonElement[] Songs, string[] Members, long Bytes, DateTimeOffset Expires, long Epoch);
     private static string NativeId(JsonElement song)
     {
-        Check(song.TryGetProperty("source_data", out var data) && data.ValueKind == JsonValueKind.Object,
-            "IDENTITY_MISMATCH");
-        foreach (var key in new[] { "musicId", "songmid", "id" })
-            if (data.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String &&
-                !string.IsNullOrEmpty(value.GetString()))
-                return value.GetString()!;
-        throw new CatalogFailure("IDENTITY_MISMATCH");
+        var id = SongJson.NativeId(song);
+        Check(id.Length > 0, "IDENTITY_MISMATCH");
+        return id;
     }
 
     public MusicNativeCatalogOwner(IMusicPlatformCatalog catalog, MusicLibraryOwner library, TimeProvider? clock = null)
@@ -57,10 +53,9 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
             var input = parameters is JsonElement json ? json.Clone()
                 : JsonSerializer.SerializeToElement(parameters ?? new { });
             Check(input.ValueKind == JsonValueKind.Object, "INVALID_REQUEST");
-            Check(Encoding.UTF8.GetByteCount(input.GetRawText()) <= 65536, "LIMIT");
             lock (gate)
             {
-                Check(!closed, "CLOSED"); Check(pending < 8, "LIMIT");
+                Check(!closed, "CLOSED");
                 deadline = new(TimeSpan.FromSeconds(25), clock);
                 operation = CancellationTokenSource.CreateLinkedTokenSource(
                     cancellationToken, lifetime.Token, session.Token, deadline.Token);
@@ -216,7 +211,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
         int maximumPages = (MaximumSongs + pageSize - 1) / pageSize;
         lock (gate)
         {
-            Prune(); Check(preparing + committing + stages.Count < 2, "LIMIT"); preparing++;
+            Prune();
         }
         long size = 2;
         bool reservationTransferred = false;
@@ -300,7 +295,6 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
         {
             lock (gate)
             {
-                preparing--;
                 if (!reservationTransferred) reservedBytes -= size - 2;
             }
         }
@@ -336,7 +330,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
                 Check(!input.TryGetProperty("expectedSongId", out _) ||
                     Text(input, "expectedSongId") == Text(item.Songs[index], "songId"), "SNAPSHOT_CHANGED");
             }
-            stages.Remove(token); committing++;
+            stages.Remove(token);
             // Keep bytes reserved throughout an admitted storage transaction.
         }
         try
@@ -363,7 +357,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
                 : JsonSerializer.SerializeToElement(new { currentId = result.GetProperty("currentId"),
                     version = result.GetProperty("version"), mode = result.GetProperty("mode") });
         }
-        finally { lock (gate) { committing--; reservedBytes -= item.Bytes; } }
+        finally { lock (gate) reservedBytes -= item.Bytes; }
     }
 
     public void Invalidate(string? platform = null)
@@ -454,7 +448,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
         {
             _ = Text(song, "songId");
             var nativeId = NativeId(song);
-            Check(Text(song.GetProperty("source_data"), "source") == platform, "IDENTITY_MISMATCH");
+            Check(SongJson.Platform(song) == platform, "IDENTITY_MISMATCH");
             string member = hasMembers ? StringValue(declaredMembers[identities.Count], 256) : nativeId;
             long? sort = null;
             if (hasSorts && declaredSorts[identities.Count].ValueKind != JsonValueKind.Null)
@@ -479,9 +473,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
         Check(value.ValueKind == JsonValueKind.Object &&
             (!value.TryGetProperty("ok", out var ok) || ok.ValueKind == JsonValueKind.True), "INVALID_RESPONSE");
         var result = JsonNode.Parse(value.GetRawText())!.AsObject(); result["ok"] = true;
-        var response = JsonSerializer.SerializeToElement(result);
-        Check(Encoding.UTF8.GetByteCount(response.GetRawText()) <= 512 * 1024, "LIMIT");
-        return response;
+        return JsonSerializer.SerializeToElement(result);
     }
     private static MusicPersonalPlaylistLocator? Personal(JsonElement input, string platform, string id)
     {

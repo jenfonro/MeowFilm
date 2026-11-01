@@ -70,7 +70,7 @@ public static class MusicQqFeedbackContextTests
         yield return Case("QIMEI-HTTP-exact-headers-and-envelope", HttpQimei);
         yield return Case("report-HTTP-gzip-status200-nonempty-and-bound", HttpReport);
         yield return Case("new-HTTP-request-body-headers-response-bounded", HttpLimits);
-        yield return Case("new-HTTP-stream-dispose-cancel-retains-slot-until-settle", HttpCleanup);
+        yield return Case("new-HTTP-stream-dispose-cancel-retains-physical-work-without-blocking-requests", HttpCleanup);
         yield return Case("new-HTTP-cancelled-request-producer-retains-slot", HttpProducer);
         yield return Case("new-HTTP-awaiting-producer-cannot-retarget-before-send", () => HttpRetarget(false));
         yield return Case("new-HTTP-awaiting-producer-cannot-replace-host-before-send", () => HttpRetarget(true));
@@ -474,8 +474,7 @@ public static class MusicQqFeedbackContextTests
         await using var f = new Fixture(); var a = await f.Login();
         using var cancel = new CancellationTokenSource(); f.Handler.Hold = "auth";
         var first = f.Acquire(a, cancel.Token); await f.Handler.Arrived.Task;
-        var rest = Enumerable.Range(0, 7).Select(_ => f.Acquire(a, cancel.Token)).ToArray();
-        await Error(async () => await f.Acquire(a), "RATE_LIMITED");
+        var rest = Enumerable.Range(0, 16).Select(_ => f.Acquire(a, cancel.Token)).ToArray();
         cancel.Cancel(); await NotDone(first);
         f.Handler.Release.TrySetResult(); await Cancelled(async () => await first);
         foreach (var t in rest) await Cancelled(async () => await t);
@@ -485,8 +484,7 @@ public static class MusicQqFeedbackContextTests
         await using var f = new Fixture(); var a = await f.Login(); var leases = new List<IMusicQqFeedbackContextLease>();
         try
         {
-            for (int i = 0; i < 32; i++) leases.Add(await f.Acquire(a));
-            await Error(async () => await f.Acquire(a), "RATE_LIMITED");
+            for (int i = 0; i < 48; i++) leases.Add(await f.Acquire(a));
             await leases[0].DisposeAsync();
             await using var resumed = await f.Acquire(a); Check(resumed.IsCurrent);
         }
@@ -655,8 +653,11 @@ public static class MusicQqFeedbackContextTests
         var second = http.SendQqFeedbackReportAsync(ReportRequest(), cancel.Token);
         await streams[1].Arrived.Task;
         cancel.Cancel(); await NotDone(first); await NotDone(second);
-        await Error(async () => await http.SendAsync("tx", FeedbackRequest(), default), "RATE_LIMITED");
+        var third = http.SendAsync("tx", FeedbackRequest(), default);
+        for (int i = 0; i < 200 && streams.Count < 3; i++) await Task.Delay(10);
+        Check(streams.Count == 3, "a draining request does not block a new one");
         foreach (var s in streams) s.Release.TrySetResult();
+        await third;
         await Cancelled(async () => await first); await Cancelled(async () => await second);
     }
     private static async Task HttpProducer()

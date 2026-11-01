@@ -32,7 +32,7 @@ public static class MusicNativeQqAccountTests
         yield return Case("ttl-cooldown-local-id-poll-cap-no-replay", Lifetime);
         yield return Case("caller-cancel-after-authorization-no-handoff", Cancel);
         yield return Case("old-poll-cannot-overwrite-new-challenge", Replace);
-        yield return Case("single-poll-admission-noncooperative-physical-http-slots", Budget);
+        yield return Case("single-poll-admission-noncooperative-physical-http-unthrottled", Budget);
         yield return Case("real-dpapi-save-restart-validate-local-logout", Storage);
         yield return Case("lost-cas-receipt-reconcile-no-auth-replay", UnknownSave);
         yield return Case("failed-validation-never-saves-grant", InvalidSave);
@@ -156,8 +156,10 @@ public static class MusicNativeQqAccountTests
         var qr = await protocol.BeginAsync("tx");
         for (int i = 0; i < 100; i++) Check((await protocol.PollAsync("tx", qr.ChallengeId, (_, _) => Task.FromResult(true))).Status == "waiting");
         int calls = handler.Calls;
-        await Error(() => protocol.PollAsync("tx", qr.ChallengeId, (_, _) => Task.FromResult(true)), "RATE_LIMITED");
-        Check(calls == handler.Calls);
+        Check((await protocol.PollAsync("tx", qr.ChallengeId, (_, _) => Task.FromResult(true))).Status == "waiting");
+        Check(calls + 1 == handler.Calls);
+        clock.Advance(181);
+        Check((await protocol.PollAsync("tx", qr.ChallengeId, (_, _) => Task.FromResult(true))).Status == "expired");
     }
     private static async Task Cancel()
     {
@@ -197,8 +199,8 @@ public static class MusicNativeQqAccountTests
         clock.Advance(3);
         await Error(() => protocol.BeginAsync("tx"), "TIMEOUT");
         clock.Advance(3);
-        await Error(() => protocol.BeginAsync("tx"), "RATE_LIMITED");
-        Check(handler.Calls == 2); handler.Release.TrySetResult();
+        await Error(() => protocol.BeginAsync("tx"), "TIMEOUT");
+        Check(handler.Calls == 3); handler.Release.TrySetResult();
     }
     internal static string DataPath()
     {

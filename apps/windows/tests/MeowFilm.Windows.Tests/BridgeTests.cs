@@ -170,7 +170,7 @@ public static class BridgeTests
         yield return new("bridge: pending and cancelled frame queues remain bounded", PendingBounds);
         yield return new("bridge: close tolerates throwing reentrant cancellation callbacks", ThrowingCancellation);
         yield return new("bridge: blocking cancellation callback retains ownership not transport", BlockingCancellation);
-        yield return new("bridge: noncooperative timeout retains active admission budget", ActiveBounds);
+        yield return new("bridge: noncooperative timeout retains work without blocking unrelated requests", ActiveBounds);
         yield return new("bridge: close stops timers and suppresses old generation results", OldGeneration);
         yield return new("bridge: cancel timeout result races emit one terminal frame", TerminalRace);
         yield return new("bridge: replayed IDs close before a second handler starts", Replay);
@@ -357,8 +357,8 @@ public static class BridgeTests
             Equal(true, server.QueuedBytes < 8L * BridgeCodec.MaximumFrameBytes);
             gate.ReleaseWrites();
             var outcomes = await Task.WhenAll(calls).WaitAsync(TestDeadline);
-            Equal(9, outcomes.Count(value => value == "result"));
-            Equal(3, outcomes.Count(value => value == "LIMIT"));
+            Equal(8, outcomes.Count(value => value == "result"));
+            Equal(4, outcomes.Count(value => value == "LIMIT"));
             Equal(false, server.IsClosed);
             await Eventually(() => server.QueuedBytes == 0);
         }
@@ -373,8 +373,16 @@ public static class BridgeTests
         await using var server = new BridgePeer(gate, "audit");
         try
         {
-            // The small control frames must be bounded by count, not only bytes.
-            for (var i = 1; i <= 520; i++) await Write(raw, Request(i, "missing.method"));
+            int minimumFrameBytes = BridgeCodec.Encode(new { version = 1, session = "audit", id = 1,
+                kind = "error", code = "METHOD_UNAVAILABLE" }).Length;
+            long frames = 8L * BridgeCodec.MaximumFrameBytes / minimumFrameBytes + 1;
+            for (long id = 1; id <= frames && !server.IsClosed;)
+            {
+                using var batch = new MemoryStream();
+                for (int count = 0; count < 512 && id <= frames; count++, id++)
+                    batch.Write(Request(id, "missing.method"));
+                await Write(raw, batch.ToArray());
+            }
         }
         catch (IOException) when (server.IsClosed) { }
         await server.Completion.WaitAsync(TestDeadline);
@@ -387,9 +395,8 @@ public static class BridgeTests
         using var raw = streams.Server;
         var gate = new TestStream(streams.Client, holdWrites: true);
         await using var peer = new BridgePeer(gate, "audit");
-        var pending = Enumerable.Range(0, BridgePeer.MaximumPending).Select(_ => peer.CallAsync("remote.wait")).ToArray();
-        await Expect("LIMIT", () => peer.CallAsync("remote.wait"));
-        Equal(BridgePeer.MaximumPending, peer.PendingCount);
+        var pending = Enumerable.Range(0, 160).Select(_ => peer.CallAsync("remote.wait")).ToArray();
+        Equal(160, peer.PendingCount);
         peer.Close();
         foreach (var task in pending) await Expect("CLOSED", () => task);
         await peer.Completion.WaitAsync(TestDeadline); Equal(0L, peer.QueuedBytes);
@@ -409,7 +416,9 @@ public static class BridgeTests
             try { await call; throw new InvalidOperationException("Cancelled call succeeded"); }
             catch (BridgeException error) when (error.Code is "CANCELLED" or "LIMIT") { if (error.Code == "LIMIT") limited++; }
         }
-        Equal(true, limited > 0);
+        Equal(0, limited);
+        Equal(true, cancelled.QueuedBytes < 1024);
+        Equal(0, cancelled.QueuedFrameCount);
         Equal(1, cancelled.PendingCount); Equal(false, cancelled.IsClosed);
         cancelled.Close(); await Expect("CLOSED", () => first);
         await cancelled.Completion.WaitAsync(TestDeadline); Equal(0L, cancelled.QueuedBytes);
@@ -494,26 +503,27 @@ public static class BridgeTests
             {
                 ["native.wait"] = async (_, _) =>
                 {
-                    if (Interlocked.Increment(ref count) == BridgePeer.MaximumPending) started.TrySetResult();
+                    if (Interlocked.Increment(ref count) == 160) started.TrySetResult();
                     await release.Task; return null;
                 }
             }, TimeSpan.FromSeconds(1));
         try
         {
-            for (var i = 1; i <= BridgePeer.MaximumPending; i++) await Write(raw, Request(i));
+            for (var i = 1; i <= 160; i++) await Write(raw, Request(i));
             await started.Task.WaitAsync(TestDeadline);
             var replies = new HashSet<long>();
-            for (var i = 0; i < BridgePeer.MaximumPending; i++)
+            for (var i = 0; i < 160; i++)
             {
                 var reply = await Read(raw);
                 Equal("TIMEOUT", reply.GetProperty("code").GetString());
                 Equal(true, replies.Add(reply.GetProperty("id").GetInt64()));
             }
-            Equal(BridgePeer.MaximumPending, server.ActiveCount);
-            await Write(raw, Request(BridgePeer.MaximumPending + 1));
-            Equal("LIMIT", (await Read(raw)).GetProperty("code").GetString());
+            Equal(160, server.ActiveCount);
+            await Write(raw, Request(160 + 1));
+            Equal("TIMEOUT", (await Read(raw)).GetProperty("code").GetString());
+            Equal(161, count);
             server.Close(); await server.Completion.WaitAsync(TestDeadline);
-            Equal(BridgePeer.MaximumPending, server.ActiveCount);
+            Equal(161, server.ActiveCount);
         }
         finally { release.TrySetResult(); await Eventually(() => server.ActiveCount == 0); }
     }

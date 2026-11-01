@@ -131,17 +131,8 @@ public sealed partial class MusicLibraryOwner
                 LJ.Require(LJ.Id(pair.Key) && LJ.S(song["songId"]) == pair.Key, "INVALID_SONG_ID");
                 var normalized = NativeMusicSong.Normalize(song);
                 LJ.Require(JsonNode.DeepEquals(song, normalized), "INVALID_SONG");
-                var sources = LJ.Array(song["sources"], "INVALID_SOURCE");
-                var quarantined = LJ.Array(song["quarantinedSources"], "INVALID_SOURCE");
-                var seen = new HashSet<string>(StringComparer.Ordinal);
-                foreach (var n in sources.Concat(quarantined))
+                foreach (var source in LJ.Array(song["sources"]).OfType<JsonObject>())
                 {
-                    var s = LJ.Object(n); string key = LJ.S(s["sourceKey"]);
-                    LJ.Require(LJ.Id(key) && key == NativeMusicSong.SourceKey(s) && seen.Add(key), "INVALID_SOURCE");
-                }
-                foreach (var source in sources.OfType<JsonObject>())
-                {
-                    LJ.Require(NativeMusicSong.Compatible(song, source) && sources.OfType<JsonObject>().All(other => NativeMusicSong.Compatible(source, other)), "RECORDING_CONFLICT");
                     string key = LJ.S(source["sourceKey"]);
                     LJ.Require(!nativeOwners.TryGetValue(key, out string? existing) || existing == pair.Key, "NATIVE_ID_CONFLICT"); nativeOwners[key] = pair.Key;
                 }

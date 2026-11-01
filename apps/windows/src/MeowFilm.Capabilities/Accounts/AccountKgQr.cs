@@ -37,7 +37,7 @@ public sealed partial class MusicAccountProtocol
                 states["kg"].Qr = new(challenge.ChallengeId, key, ctx.Generation, clock.GetTimestamp()) { Device = device };
             }
             return challenge;
-        }, requestLimit: 1);
+        });
 
     private static JsonObject KgAccountJson(MusicAccountHttpResult response)
     {
@@ -62,8 +62,7 @@ public sealed partial class MusicAccountProtocol
             if (clock.GetElapsedTime(current.Started) >= TimeSpan.FromSeconds(180))
             { Fence(state, "CANCELLED"); return Task.FromResult(new MusicAccountPoll("kg", id, "expired")); }
             AccountRules.Require(state.Active is null, "BUSY");
-            if (current.Polls >= 100) { Fence(state, "CANCELLED"); throw new MusicAccountException("RATE_LIMITED"); }
-            current.Polls++; qr = current;
+            qr = current;
         }
         return Run<MusicAccountPoll>("kg", token, async ctx =>
         {
@@ -113,6 +112,6 @@ public sealed partial class MusicAccountProtocol
             GuardQr();
             await ctx.Accept(accept, new("kg", id, cookie, details)).ConfigureAwait(false);
             return new("kg", id, "authenticated");
-        }, replace: false, requestLimit: 3);
+        }, replace: false);
     }
 }

@@ -42,7 +42,7 @@ public static class MusicNativeHttpSeamTests
         }
         yield return Case("feedback-strict-JSON-and-transient-result", FeedbackJson);
         yield return Case("cloud-empty-response-cannot-ACK", CloudEmpty);
-        yield return Case("physical-slots-shared-with-ordinary-HTTP-until-settled", Slots);
+        yield return Case("transport-never-throttles-and-cancelled-physical-work-drains", Slots);
         yield return Case("both-fixed-20-second-deadlines-wait-for-physical-settle", Deadlines);
     }
 
@@ -401,31 +401,30 @@ public static class MusicNativeHttpSeamTests
     {
         var started = Signal(); var cancelled = Signal(); var release = Signal(); int calls = 0, cancellations = 0;
         using var http = MusicPlatformHttp.CreateWithHandler(new Handler(async (_, token) => {
-            if (Interlocked.Increment(ref calls) == 4) started.TrySetResult();
-            using var registration = token.Register(() => { if (Interlocked.Increment(ref cancellations) == 4) cancelled.TrySetResult(); });
+            if (Interlocked.Increment(ref calls) == 6) started.TrySetResult();
+            using var registration = token.Register(() => { if (Interlocked.Increment(ref cancellations) == 6) cancelled.TrySetResult(); });
             await release.Task; return Response();
         }));
         using var cancellation = new CancellationTokenSource();
-        var first = Call(http, false, Request(false), cancellation.Token);
-        var second = Call(http, false, Request(false), cancellation.Token);
-        var tasks = new List<Task> { first, second };
+        // Six concurrent requests on two platforms are all admitted: the transport has no request budget.
+        var tasks = new List<Task>
+        {
+            Call(http, false, Request(false), cancellation.Token), Call(http, false, Request(false), cancellation.Token),
+            Call(http, false, Request(false), cancellation.Token),
+            Call(http, true, Request(true), cancellation.Token), Call(http, true, Request(true), cancellation.Token)
+        };
+        var ordinary = http.SendAsync("wy", new HttpRequestMessage(HttpMethod.Get, "https://music.163.com/api/song/detail"), cancellation.Token);
         try
         {
-            await Failure("RATE_LIMITED", () => Call(http, false, Request(false)));
-            await Failure("RATE_LIMITED", () => http.SendAsync("wy", new HttpRequestMessage(HttpMethod.Get,
-                "https://music.163.com/api/song/detail"), default));
-            tasks.Add(Call(http, true, Request(true), cancellation.Token));
-            tasks.Add(Call(http, true, Request(true), cancellation.Token));
             await started.Task.WaitAsync(TimeSpan.FromSeconds(3)); cancellation.Cancel();
-            await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(3)); Check(tasks.All(t => !t.IsCompleted));
-            await Failure("RATE_LIMITED", () => http.SendAsync("tx", new HttpRequestMessage(HttpMethod.Post,
-                "https://u.y.qq.com/cgi-bin/musicu.fcg"), default));
-            await Failure("RATE_LIMITED", () => Call(http, true, Request(true)));
-            Check(calls == 4);
+            await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            Check(tasks.All(t => !t.IsCompleted), "cancelled physical work is retained until settled");
+            Check(calls == 6);
         }
         finally { release.TrySetResult(); }
         foreach (var task in tasks) await Failure("CANCELLED", () => task, cancellation.Token);
-        await Call(http, false, Request(false)); await Call(http, true, Request(true)); Check(calls == 6);
+        await Failure("CANCELLED", () => ordinary, cancellation.Token);
+        await Call(http, false, Request(false)); await Call(http, true, Request(true)); Check(calls == 8);
     }
     private static async Task Deadlines()
     {

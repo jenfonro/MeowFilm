@@ -213,11 +213,11 @@ public sealed partial class MusicCapability
         return ChangeAccountAsync(account.Platform, "logout", new { platform = account.Platform }, account);
     }
     private async Task ChangeAccountAsync(string platform, string operation, object parameters,
-        MusicPlatformAccount? expectedAccount = null)
+        MusicPlatformAccount? expectedAccount = null, CancellationToken token = default)
     {
         var epoch = ++accountEpoch;
         accountCancellation?.Cancel();
-        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token, token);
         // Admission is visible even while the shared command queue has not dispatched it.
         accountCancellation = cancellation; accountOperationPlatform = platform;
         accountQrOperation = operation.StartsWith("qr.", StringComparison.Ordinal);
@@ -262,7 +262,13 @@ public sealed partial class MusicCapability
                 RetireLyrics();
             }
             catch (OperationCanceledException)
-            { if (epoch == accountEpoch) accountStatus = operation == "sms.send" ? "短信发送结果未确认" : "已取消"; }
+            {
+                if (epoch == accountEpoch)
+                {
+                    if (operation.StartsWith("qr.", StringComparison.Ordinal)) ClearAccountQr();
+                    accountStatus = operation == "sms.send" ? "短信发送结果未确认" : "已取消";
+                }
+            }
             catch (Exception error)
             {
                 if (epoch == accountEpoch && error is MusicOperationException { Code: "COMMIT_UNKNOWN" or "HANDOFF_UNCONFIRMED" })

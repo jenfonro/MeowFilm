@@ -17,6 +17,26 @@ public static partial class MusicUiTests
 {
     private static IEnumerable<TestCase> OnlineCases()
     {
+        yield return Case("online metadata keeps precise source duration and derives LX interval at dispatch", async () =>
+        {
+            await using var f = await Fixture.Create();
+            await SetupOnline(f, "info.musicInfo.duration === 180.125 && info.musicInfo.interval === '03:00' ? 'https://media.invalid/precise' : 'https://media.invalid/wrong'");
+            var song = (await f.Rpc("music.online.song", new
+            {
+                platform = "wy", title = "精确时长", artist = "合成艺人", duration = 180.125,
+                musicInfo = new { songmid = "42", interval = "09:59" }
+            })).GetProperty("song");
+            var info = song.GetProperty("sources")[0].GetProperty("musicInfo");
+            Equal(180.125, info.GetProperty("duration").GetDouble());
+            True(!info.TryGetProperty("interval", out _), "formatted duration is not persisted");
+            var reply = await f.Rpc("music.online.resolve", new
+            {
+                installationId = f.Module.Sources.Single().InstallationId, platform = "wy", song, quality = "320k"
+            });
+            Equal("https://media.invalid/precise", reply.GetProperty("url").GetString());
+            Equal(180.125, song.GetProperty("sources")[0].GetProperty("musicInfo").GetProperty("duration").GetDouble());
+            True(!song.GetRawText().Contains("\"interval\""), "dispatch does not mutate durable metadata");
+        });
         yield return Case("online safe JS selection, explicit quality and target, queue and native Started history", async () =>
         {
             await using var f = await Fixture.Create();
@@ -200,7 +220,7 @@ public static partial class MusicUiTests
             Console.WriteLine("Music native evidence: authored LX + generated WAV + libVLC dummy output; no upstream/account/speaker acceptance.");
         });
     }
-    private static string TestScript(string result = "'https://media.invalid/' + info.musicInfo.musicId",
+    private static string TestScript(string result = "'https://media.invalid/' + info.musicInfo.songmid",
         string version = "1", string name = "合成源") => $$$"""
         /*!
          * @name {{{name}}}
@@ -214,7 +234,7 @@ public static partial class MusicUiTests
     private static async Task SetupOnline(Fixture f, string? result = null)
     {
         f.Dialogs.ScriptPath = Path.Combine(f.Root, "authored-lx.js");
-        File.WriteAllText(f.Dialogs.ScriptPath, TestScript(result ?? "'https://media.invalid/' + info.musicInfo.musicId"), new UTF8Encoding(false));
+        File.WriteAllText(f.Dialogs.ScriptPath, TestScript(result ?? "'https://media.invalid/' + info.musicInfo.songmid"), new UTF8Encoding(false));
         await f.Module.ImportSourceAsync(); Equal(1, f.Module.Sources.Count);
         f.Module.SelectedSource = f.Module.Sources.Single();
         await f.Module.LoadSourceAsync(f.Module.SelectedSource);

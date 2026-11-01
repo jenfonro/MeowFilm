@@ -16,7 +16,6 @@ public sealed record ProtectedDocumentBridgeOptions
     public int MaximumBufferedBytes { get; init; } = 16 * 1024 * 1024;
     public int MaximumRecentTokens { get; init; } = 1024;
     public TimeSpan TransferTimeout { get; init; } = TimeSpan.FromSeconds(60);
-    public int MaximumPendingCalls { get; init; } = 32;
 }
 
 public sealed record ProtectedDocumentBridgeState(Guid Generation, bool IsClosed, int Reads, int Writes,
@@ -97,14 +96,10 @@ public sealed class ProtectedDocumentBridge : IAsyncDisposable
 
     private async Task<object?> InvokeAsync(Operation operation, JsonElement value, CancellationToken cancellation)
     {
-        if (Interlocked.Increment(ref pending) > options.MaximumPendingCalls)
-        {
-            Interlocked.Decrement(ref pending);
-            return Error(Closed ? "CLOSED" : "LIMIT");
-        }
+        Interlocked.Increment(ref pending);
         try
         {
-            // Bounded admission; don't abandon a queued cancelled request before it
+            // Don't abandon a queued cancelled request before it
             // can discard its owned transfer. The store must honor cancellation pre-commit.
             await serial.WaitAsync().ConfigureAwait(false);
             (string Namespace, string Token)? context = null;
@@ -457,7 +452,7 @@ public sealed class ProtectedDocumentBridge : IAsyncDisposable
         if (options.MaximumTransfers is < 1 or > 8 || options.MaximumBufferedBytes < MaximumDocumentBytes ||
             options.MaximumBufferedBytes > 32 * 1024 * 1024 || options.MaximumRecentTokens < Math.Max(4, options.MaximumTransfers) ||
             options.MaximumRecentTokens > 4096 || options.TransferTimeout < TimeSpan.FromSeconds(1) ||
-            options.TransferTimeout > TimeSpan.FromSeconds(120) || options.MaximumPendingCalls is < 1 or > 64)
+            options.TransferTimeout > TimeSpan.FromSeconds(120))
             throw new ArgumentException("Invalid document bridge configuration.");
     }
 }

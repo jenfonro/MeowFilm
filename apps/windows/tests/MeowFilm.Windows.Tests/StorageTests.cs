@@ -70,7 +70,7 @@ public static class StorageTests
         yield return new("storage.bridge.commit-wins-cancel-close-race", CommitWins);
         yield return new("storage.bridge.transfer-byte-budgets", BridgeBudgets);
         yield return new("storage.bridge.recent-budget-quarantine-recovers", RecentBudget);
-        yield return new("storage.bridge.bounded-pending-serial-store", PendingBudget);
+        yield return new("storage.bridge.queued-methods-retain-serial-store-without-a-pending-quota", QueuedMethods);
         yield return new("storage.bridge.fixed-errors-no-provider-details", FixedErrors);
     }
 
@@ -489,7 +489,6 @@ public static class StorageTests
             new ProtectedDocumentBridgeOptions { MaximumBufferedBytes = Maximum - 1 }, new ProtectedDocumentBridgeOptions { MaximumBufferedBytes = 33 * 1024 * 1024 },
             new ProtectedDocumentBridgeOptions { MaximumRecentTokens = 3 }, new ProtectedDocumentBridgeOptions { MaximumRecentTokens = 4097 },
             new ProtectedDocumentBridgeOptions { TransferTimeout = TimeSpan.Zero }, new ProtectedDocumentBridgeOptions { TransferTimeout = TimeSpan.FromSeconds(121) },
-            new ProtectedDocumentBridgeOptions { MaximumPendingCalls = 0 }
         }) Throws<ArgumentException>(() => new ProtectedDocumentBridge(store, [Ns], options));
         Throws<ProtectedDocumentException>(() => new ProtectedDocumentBridge(store, ["../x"]));
         Throws<ProtectedDocumentException>(() => new ProtectedDocumentBridge(store, [Ns, Ns]));
@@ -711,7 +710,7 @@ public static class StorageTests
         Assert((await bridge.GetStateAsync()).RecentTokens == 4); clock.Advance(TimeSpan.FromSeconds(2) + TimeSpan.FromTicks(1));
         string fresh = NewToken(); Success(await Call(bridge, "read.begin", fresh), fresh, "exists", "length", "sha256", "chunkBytes");
     }
-    private static async Task PendingBudget()
+    private static async Task QueuedMethods()
     {
         var started = Signal(); var release = Signal(); int active = 0, maximum = 0;
         var store = new MemoryStore { ReadHook = async (_, ct) =>
@@ -719,11 +718,17 @@ public static class StorageTests
             int current = Interlocked.Increment(ref active); maximum = Math.Max(maximum, current); started.TrySetResult();
             await release.Task.WaitAsync(ct); Interlocked.Decrement(ref active); return new ProtectedDocument(null, DocumentFingerprint.Missing);
         } };
-        await using var bridge = new ProtectedDocumentBridge(store, [Ns], new() { MaximumPendingCalls = 2 });
+        await using var bridge = new ProtectedDocumentBridge(store, [Ns]);
         string one = NewToken(), two = NewToken(); var first = Call(bridge, "read.begin", one); await started.Task;
-        var second = Call(bridge, "read.begin", two); Error(await Call(bridge, "read.begin", NewToken()), "LIMIT"); release.SetResult();
+        var second = Call(bridge, "read.begin", two);
+        var extra = Enumerable.Range(0, 40).Select(_ => { string token = NewToken(); return (Token: token, Task: Call(bridge, "release", token)); }).ToArray();
+        release.SetResult();
         Success(await first, one, "exists", "length", "sha256", "chunkBytes"); Success(await second, two, "exists", "length", "sha256", "chunkBytes");
+        foreach (var item in extra) Success(await item.Task, item.Token, "released");
         Assert(maximum == 1 && store.Reads == 2);
+        Success(await Call(bridge, "release", one), one, "released");
+        Success(await Call(bridge, "release", two), two, "released");
+        await Empty(bridge);
     }
     private static async Task FixedErrors()
     {

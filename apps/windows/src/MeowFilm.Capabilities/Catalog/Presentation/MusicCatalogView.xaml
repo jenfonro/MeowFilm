@@ -375,7 +375,7 @@
      <DataTrigger Binding="{Binding IsSongSection}" Value="True">
       <Setter Property="ContentTemplate" Value="{StaticResource Catalog.Section.Songs}"/>
      </DataTrigger>
-     <DataTrigger Binding="{Binding DataContext.IsAggregatePlaylists,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView}}" Value="True">
+     <DataTrigger Binding="{Binding DataContext.IsSearchPlaylists,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView}}" Value="True">
       <Setter Property="ContentTemplate" Value="{StaticResource Catalog.Section.PlaylistGrid}"/>
      </DataTrigger>
      <DataTrigger Binding="{Binding IsSongShelfSection}" Value="True">
@@ -414,7 +414,7 @@
    </DockPanel>
   </DockPanel>
   <WrapPanel DockPanel.Dock="Top" Visibility="{Binding IsCatalogUtilityPage,Converter={StaticResource Visible}}" Margin="0,0,0,12" >
-   <Button Content="返回搜索" Click="SearchBack_Click" Visibility="{Binding HasAggregateSearch,Converter={StaticResource Visible}}"/>
+   <Button Content="返回搜索" Click="SearchBack_Click" Visibility="{Binding HasSearchSession,Converter={StaticResource Visible}}"/>
    <ComboBox ItemsSource="{Binding CatalogPlatformChoices}" DisplayMemberPath="Name" SelectedItem="{Binding SelectedCatalogPlatform}"
     SelectionChanged="Platform_Changed" Width="150" Margin="0,0,12,8" IsEnabled="{Binding CanCatalogBrowse}" AutomationProperties.Name="内容平台"/>
    <TextBlock Text="{Binding CatalogAccountText}" VerticalAlignment="Center" Margin="0,0,8,8" AutomationProperties.Name="当前平台账号"/>
@@ -615,7 +615,7 @@
        </StackPanel>
        <Button DockPanel.Dock="Right" Content="查看更多" Tag="{Binding Title}" Click="SearchSectionMore_Click"
                Style="{StaticResource Catalog.SectionMore}" HorizontalAlignment="Right"
-               Visibility="{Binding DataContext.IsAggregateOverview,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView},Converter={StaticResource Visible}}"
+               Visibility="{Binding DataContext.IsSearchOverview,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView},Converter={StaticResource Visible}}"
                AutomationProperties.Name="{Binding Title,StringFormat=查看更多{0}}"/>
        <StackPanel Orientation="Horizontal">
         <TextBlock Text="{Binding Title}" Style="{StaticResource Catalog.SectionTitle}" VerticalAlignment="Center"/>

@@ -59,7 +59,7 @@ public static class MusicNativeAccountTests
         yield return Case("protocol.kg-device-context-RSA-signature-SSA", KgProtocol);
         yield return Case("protocol.response-budgets-malformed-duplicates-depth", ResponseBudgets);
         yield return Case("protocol.fixed-origin-and-redirect-observation", Origin);
-        yield return Case("protocol.timeout-and-real-physical-transport-slots", TransportBudget);
+        yield return Case("protocol.timeout-and-unthrottled-physical-transport", TransportBudget);
         yield return Case("protocol.no-secret-DTOS-errors-or-ToString", Redaction);
         yield return Case("qr.owner-one-query-per-click-trusted-validate-before-CAS", QrChain);
         yield return Case("qr.unsupported-account-platform-rejects-before-IO", UnsupportedQr);
@@ -656,8 +656,9 @@ public static class MusicNativeAccountTests
         await using var protocol = clientContext9.CreateAccountProtocol(timeout: TimeSpan.FromMilliseconds(60));
         await Throws("TIMEOUT", () => protocol.ValidateAsync("wy", Wy)); await Wait(first.Task);
         await Throws("TIMEOUT", () => protocol.ValidateAsync("wy", Wy));
-        await Throws("RATE_LIMITED", () => protocol.ValidateAsync("wy", Wy));
-        Check(handler.Calls == 2); release.SetResult();
+        // Timed-out requests still draining do not block another request.
+        await Throws("TIMEOUT", () => protocol.ValidateAsync("wy", Wy));
+        Check(handler.Calls == 3); release.SetResult();
     }
     private static async Task Redaction()
     {

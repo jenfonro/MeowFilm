@@ -24,7 +24,10 @@ public sealed class DpapiDocumentStore : IProtectedDocumentStore
     private readonly WindowsDocumentFiles.Root root;
     private readonly HashSet<string> namespaces;
     private readonly SemaphoreSlim serial = new(1, 1);
-    private readonly SemaphoreSlim admission = new(8, 8);
+    private readonly object gate = new();
+    private int pending;
+    private TaskCompletionSource? drained;
+    private Task? disposal;
     private readonly CancellationTokenSource lifetime = new();
     private int closed;
 
@@ -48,7 +51,7 @@ public sealed class DpapiDocumentStore : IProtectedDocumentStore
     {
         if (data.Length > MaximumDocumentBytes) throw new ProtectedDocumentException(DocumentStoreError.Limit);
         if (expected is null || !expected.IsValid) throw new ProtectedDocumentException(DocumentStoreError.InvalidRequest);
-        // RunAsync takes an immediate owned snapshot after bounded admission, before its first await.
+        // Take an immediate owned snapshot before waiting for the serial writer.
         return RunAsync(documentNamespace, data, token => WriteLocked(documentNamespace, expected, token), cancellationToken);
     }
 
@@ -59,13 +62,17 @@ public sealed class DpapiDocumentStore : IProtectedDocumentStore
     {
         ValidateNamespace(ns);
         cancellationToken.ThrowIfCancellationRequested();
-        if (Volatile.Read(ref closed) != 0) throw new ProtectedDocumentException(DocumentStoreError.Closed);
-        if (!admission.Wait(0)) throw new ProtectedDocumentException(DocumentStoreError.Limit);
+        lock (gate)
+        {
+            if (closed != 0) throw new ProtectedDocumentException(DocumentStoreError.Closed);
+            if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
         byte[]? owned = null;
         bool entered = false;
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token);
+        CancellationTokenSource? linked = null;
         try
         {
+            linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token);
             owned = data?.ToArray();
             await serial.WaitAsync(linked.Token).ConfigureAwait(false);
             entered = true;
@@ -88,7 +95,8 @@ public sealed class DpapiDocumentStore : IProtectedDocumentStore
         {
             if (owned is not null) CryptographicOperations.ZeroMemory(owned);
             if (entered) serial.Release();
-            admission.Release();
+            linked?.Dispose();
+            lock (gate) if (--pending == 0) drained!.TrySetResult();
         }
     }
 
@@ -248,12 +256,22 @@ public sealed class DpapiDocumentStore : IProtectedDocumentStore
         finally { if (!committed && !stage.IsClosed) WindowsDocumentFiles.DiscardStage(stage); }
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        if (Interlocked.Exchange(ref closed, 1) == 0) lifetime.Cancel();
-        await serial.WaitAsync().ConfigureAwait(false);
-        try { root.Dispose(); }
-        finally { serial.Release(); }
-        // Semaphores/CTS remain valid for queued waiters and repeated disposal.
+        lock (gate)
+        {
+            if (disposal is not null) return new(disposal);
+            Volatile.Write(ref closed, 1);
+            return new(disposal = CloseAsync(pending == 0 ? Task.CompletedTask : drained!.Task));
+        }
+    }
+    private async Task CloseAsync(Task work)
+    {
+        await Task.Yield();
+        try { lifetime.Cancel(); } catch (AggregateException) { /* Cancellation callbacks cannot skip physical drain. */ }
+        await work.ConfigureAwait(false);
+        root.Dispose();
+        serial.Dispose();
+        lifetime.Dispose();
     }
 }

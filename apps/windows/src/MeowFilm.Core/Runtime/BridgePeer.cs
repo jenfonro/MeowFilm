@@ -1,5 +1,4 @@
 using System.Text.Json;
-using System.Threading.Channels;
 
 namespace MeowFilm.Core.Runtime;
 
@@ -15,6 +14,7 @@ public sealed class BridgePeer : IAsyncDisposable
         public bool Sent;
         public string? Cancelled;
         public Timer? Deadline;
+        public LinkedListNode<Outbound>? Queued;
     }
 
     private sealed class Active
@@ -25,7 +25,11 @@ public sealed class BridgePeer : IAsyncDisposable
         public bool Responded, HandlerFinished;
     }
 
-    private sealed record Outbound(byte[] Frame, Pending? Request = null);
+    private sealed class Outbound(byte[] frame, Pending? request)
+    {
+        internal readonly byte[] Frame = frame;
+        internal readonly Pending? Request = request;
+    }
 
     private readonly Stream stream;
     private readonly string session;
@@ -33,20 +37,18 @@ public sealed class BridgePeer : IAsyncDisposable
     private readonly Dictionary<long, Pending> pending = new();
     private readonly Dictionary<long, Active> active = new();
     private readonly object gate = new();
-    // Admission is bounded by BOTH bytes and frame count under gate, including
-    // the in-flight write. Channel continuations must never run under gate.
-    private readonly Channel<Outbound> outgoing = Channel.CreateUnbounded<Outbound>(
-        new UnboundedChannelOptions { AllowSynchronousContinuations = false });
+    // Removable FIFO: cancellation releases both the payload and its queue node,
+    // even while a preceding transport write is stalled.
+    private readonly LinkedList<Outbound> outgoing = new();
+    private TaskCompletionSource outboundAvailable = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly CancellationTokenSource lifetime = new();
     private readonly TaskCompletionSource<Task> transportStopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TimeSpan timeout;
     private readonly Task completion;
     private long nextId, lastIncomingId, queuedBytes;
-    private int queuedFrames, closed;
-    public const int MaximumPending = 128;
+    private int closed;
     private const long MaximumQueuedBytes = 8L * BridgeCodec.MaximumFrameBytes;
-    private const int MaximumQueuedFrames = MaximumPending * 4;
-    private const int ControlReserveBytes = MaximumPending * 256;
+    private const int ControlReserveBytes = BridgeCodec.MaximumFrameBytes;
 
     public BridgePeer(Stream stream, string session,
         IReadOnlyDictionary<string, Func<JsonElement, CancellationToken, Task<object?>>>? methods = null,
@@ -69,6 +71,7 @@ public sealed class BridgePeer : IAsyncDisposable
     public int PendingCount { get { lock (gate) return pending.Count; } }
     public int ActiveCount { get { lock (gate) return active.Count; } }
     public long QueuedBytes { get { lock (gate) return queuedBytes; } }
+    internal int QueuedFrameCount { get { lock (gate) return outgoing.Count; } }
     /// <summary>Transport workers have stopped, not proof that non-cooperative handlers have stopped.</summary>
     public Task Completion => completion;
 
@@ -103,7 +106,7 @@ public sealed class BridgePeer : IAsyncDisposable
         {
             if (IsClosed) throw new BridgeException("CLOSED");
             if (entry.Cancelled is { } code) throw new BridgeException(code);
-            if (pending.Count >= MaximumPending || nextId >= BridgeCodec.MaximumSafeInteger) throw new BridgeException("LIMIT");
+            if (nextId >= BridgeCodec.MaximumSafeInteger) throw new BridgeException("LIMIT");
             var id = ++nextId;
             var message = Envelope("request", id);
             message["method"] = method;
@@ -128,12 +131,20 @@ public sealed class BridgePeer : IAsyncDisposable
             if (!pending.Remove(entry.Id, out var removed)) return;
             removed.Deadline?.Dispose();
             removed.Completion.TrySetException(new BridgeException(code));
-            // Unsent requests stay in the bounded FIFO but are discarded by
-            // the writer, without ever invoking a remote mutation.
+            // Release an unsent payload immediately, even if a physical write is stalled.
+            DiscardQueuedLocked(removed);
             if (removed.Sent && !IsClosed)
                 close = !EnqueueLocked(BridgeCodec.Encode(Envelope("cancel", entry.Id)), true);
         }
         if (close) Close();
+    }
+
+    private void DiscardQueuedLocked(Pending request)
+    {
+        if (request.Queued is not { } queued) return;
+        outgoing.Remove(queued); queuedBytes -= queued.Value.Frame.Length; request.Queued = null;
+        if (outgoing.Count == 0)
+            outboundAvailable = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
     // Caller holds gate. False for data means explicit LIMIT; false for
@@ -141,11 +152,11 @@ public sealed class BridgePeer : IAsyncDisposable
     private bool EnqueueLocked(byte[] frame, bool control, Pending? request = null)
     {
         var bytesLimit = MaximumQueuedBytes - (control ? 0 : ControlReserveBytes);
-        var framesLimit = MaximumQueuedFrames - (control ? 0 : MaximumPending);
-        if (IsClosed || queuedBytes + frame.Length > bytesLimit || queuedFrames >= framesLimit) return false;
-        if (!outgoing.Writer.TryWrite(new Outbound(frame, request))) return false;
+        if (IsClosed || queuedBytes + frame.Length > bytesLimit) return false;
+        var queued = outgoing.AddLast(new Outbound(frame, request));
+        if (request is not null) request.Queued = queued;
         queuedBytes += frame.Length;
-        queuedFrames++;
+        outboundAvailable.TrySetResult();
         return true;
     }
 
@@ -153,28 +164,39 @@ public sealed class BridgePeer : IAsyncDisposable
     {
         try
         {
-            await foreach (var item in outgoing.Reader.ReadAllAsync(lifetime.Token).ConfigureAwait(false))
+            while (true)
             {
+                byte[]? frame = null;
+                Task? available = null;
                 try
                 {
                     lock (gate)
                     {
-                        if (IsClosed) continue;
-                        if (item.Request is { } request)
+                        if (IsClosed) return;
+                        if (outgoing.First is not { } node) available = outboundAvailable.Task;
+                        else
                         {
-                            if (!pending.ContainsKey(request.Id)) continue;
-                            request.Sent = true;
+                            var item = node.Value; outgoing.RemoveFirst(); frame = item.Frame;
+                            if (outgoing.Count == 0)
+                                outboundAvailable = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                            if (item.Request is { } request)
+                            {
+                                request.Queued = null;
+                                if (!pending.ContainsKey(request.Id)) continue;
+                                request.Sent = true;
+                            }
                         }
                     }
-                    await stream.WriteAsync(item.Frame, lifetime.Token).ConfigureAwait(false);
+                    if (available is not null)
+                    { await available.WaitAsync(lifetime.Token).ConfigureAwait(false); continue; }
+                    await stream.WriteAsync(frame!, lifetime.Token).ConfigureAwait(false);
                     await stream.FlushAsync(lifetime.Token).ConfigureAwait(false);
                 }
                 finally
                 {
                     lock (gate)
                     {
-                        queuedBytes -= item.Frame.Length;
-                        queuedFrames--;
+                        if (frame is not null) queuedBytes -= frame.Length;
                     }
                 }
             }
@@ -206,6 +228,7 @@ public sealed class BridgePeer : IAsyncDisposable
                         case "error":
                             if (pending.Remove(id, out var request))
                             {
+                                DiscardQueuedLocked(request);
                                 request.Deadline?.Dispose();
                                 if (kind == "result") request.Completion.TrySetResult(message.GetProperty("value").Clone());
                                 else request.Completion.TrySetException(new BridgeException(message.GetProperty("code").GetString()!));
@@ -221,8 +244,6 @@ public sealed class BridgePeer : IAsyncDisposable
                             var name = message.GetProperty("method").GetString()!;
                             if (!methods.TryGetValue(name, out var handler))
                                 close = !EnqueueLocked(ErrorFrame(id, "METHOD_UNAVAILABLE"), true);
-                            else if (active.Count >= MaximumPending)
-                                close = !EnqueueLocked(ErrorFrame(id, "LIMIT"), true);
                             else
                             {
                                 var operation = new Active();
@@ -286,7 +307,7 @@ public sealed class BridgePeer : IAsyncDisposable
         try
         {
             // Linearize dispatch with Close/timeout before entering user code.
-            // Already-running work still owns its slot until it really settles.
+            // Already-running work remains owned until it really settles.
             lock (gate) { if (operation.Responded || IsClosed) return; }
             operation.Cancellation.Token.ThrowIfCancellationRequested();
             var result = await handler(parameters, operation.Cancellation.Token).ConfigureAwait(false);
@@ -356,12 +377,12 @@ public sealed class BridgePeer : IAsyncDisposable
                 StopDeadline(operation);
                 RequestCancellationLocked(operation);
             }
-            outgoing.Writer.TryComplete();
-            while (outgoing.Reader.TryRead(out var item))
+            foreach (var item in outgoing)
             {
                 queuedBytes -= item.Frame.Length;
-                queuedFrames--;
+                if (item.Request is { } request) request.Queued = null;
             }
+            outgoing.Clear(); outboundAvailable.TrySetResult();
         }
         // Do not let a throwing transport/cancellation callback leave pending
         // callers unresolved or prevent the other cleanup steps.

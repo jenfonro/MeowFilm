@@ -67,7 +67,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         InitializePlatformSettings();
         page = new(this); settings = new(this); player = new(this);
         InitializeGlobalSurfaces();
-        InitializeAggregateSearch();
+        InitializeSearch();
         InitializeDiscovery();
         InitializeRecommendations();
         SubscribePlayback();
@@ -103,7 +103,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         location.Route.StartsWith("playlist/", StringComparison.Ordinal);
     public bool IsCollectionPage => IsSongList && collection is not null;
     public bool IsContentDetailPage => IsCollectionPage || IsCatalogDetailPage;
-    public bool ShowsSongTable => IsSongList || IsCatalogDetailPage || IsAggregateSongs;
+    public bool ShowsSongTable => IsSongList || IsCatalogDetailPage || IsSearchSongs;
     public bool ShowSongPager => IsSongList && !IsCollectionPage;
     public string? HistoryDate => location.Date;
     public bool HasCollection => collection is not null;
@@ -818,7 +818,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         playerDetail.Deactivate();
         SealRecommendations();
         TrackMusicRecovery(RetireMusicRecovery());
-        aggregateEpoch++;
+        searchEpoch++;
         discoveryEpoch++; discoveryRequest?.Cancel();
         searchHistoryRequest?.Cancel();
         InvalidateCatalogAction();
@@ -936,7 +936,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         try { await DisposeAccountDetailsAsync(); } catch (Exception error) { failure ??= error; }
         try { await vipPage.DisposeAsync(); } catch (Exception error) { failure ??= error; }
         try { await application.AbortAsync(); } catch (Exception error) { failure ??= error; }
-        UnsubscribeAggregateSearch();
+        UnsubscribeSearch();
         UnsubscribeDiscovery();
         ReleaseRecommendations();
         disposed = true; UnsubscribePlayback(); lifetime.Dispose();
@@ -951,7 +951,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         finally
         {
             disposed = true;
-            UnsubscribeAggregateSearch();
+            UnsubscribeSearch();
             UnsubscribeDiscovery();
             ReleaseRecommendations();
             try { lifetime.Cancel(); }

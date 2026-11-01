@@ -17,18 +17,13 @@ public static class MusicArtworkPolicyTests
             Equal("https://wy.example.test/a", Pick(current, ["tx", "wy"], ["wy"]));
             Equal("", Pick(current, ["wy", "tx"], [])); return Task.CompletedTask;
         });
-        yield return new("Native music artwork does not inspect quarantined or unadmitted source metadata", () =>
-        {
-            var song = Song("tx", "other");
-            song["quarantinedSources"]!.AsArray().Add(Row("wy", "42", "https://hidden.example.test/a"));
-            Equal("", Pick(MusicSongFixture.Element(song), ["wy"], ["wy"])); return Task.CompletedTask;
-        });
-        yield return new("Native music artwork rejects a noncurrent root and reads admitted native metadata", () =>
+        yield return new("Native music artwork rejects a noncurrent root and reads recording metadata", () =>
         {
             var invalid = Song("wy", "42");
-            invalid["cover_url"] = "https://unrelated.example.test/a";
+            invalid["sources"]![0]!["musicInfo"]!["img"] = "https://unrelated.example.test/a?token=x";
             Equal("", Pick(MusicSongFixture.Element(invalid), ["wy"], ["wy"]));
-            var song = Song("wy", "42", nativeCover: "https://native.example.test/a");
+            var song = Song("wy", "42", "https://native.example.test/a");
+            song["cover_url"] = "https://display.example.test/a";
             Equal("https://native.example.test/a", Pick(MusicSongFixture.Element(song), ["wy"], ["wy"]));
             return Task.CompletedTask;
         });
@@ -38,7 +33,7 @@ public static class MusicArtworkPolicyTests
                 "file:///C:/private.png", "https://example.test/a#x" })
             {
                 var song = Song("wy", "42");
-                song["sources"]![0]!["cover_url"] = uri;
+                song["sources"]![0]!["musicInfo"]!["img"] = uri;
                 Equal("", Pick(MusicSongFixture.Element(song), ["wy"], ["wy"]));
             }
             var many = Song("wy", "1");
@@ -49,15 +44,10 @@ public static class MusicArtworkPolicyTests
             return Task.CompletedTask;
         });
     }
-    private static JsonObject Song(string platform, string id, string cover = "", string? nativeCover = null)
-    {
-        var native = new JsonObject();
-        if (!string.IsNullOrEmpty(nativeCover)) native["img"] = nativeCover;
-        return MusicSongFixture.Online(platform, id, "Artwork fixture", "Synthetic artist",
-            "Synthetic album", 180, cover, native);
-    }
-    private static JsonObject Row(string platform, string id, string cover, string? nativeCover = null) =>
-        Song(platform, id, cover, nativeCover)["sources"]![0]!.DeepClone().AsObject();
+    private static JsonObject Song(string platform, string id, string cover = "") =>
+        MusicSongFixture.Online(platform, id, "Artwork fixture", "Synthetic artist", "Synthetic album", 180, cover);
+    private static JsonObject Row(string platform, string id, string cover) =>
+        Song(platform, id, cover)["sources"]![0]!.DeepClone().AsObject();
     private static string Pick(JsonElement song, string[] order, string[] enabled) =>
         MusicArtworkPolicy.Select(song, order, enabled.ToHashSet(StringComparer.Ordinal));
     private static void Equal(string expected, string actual)

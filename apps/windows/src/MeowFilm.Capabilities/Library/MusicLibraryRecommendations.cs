@@ -8,15 +8,14 @@ public sealed partial class MusicLibraryOwner
     // Native, owner-local capabilities. They are never serialized into the library
     // document or restored as a live recommendation/account session.
     private sealed record RecommendationCheckpoint(JsonObject Queue, string[] History, string[] Failed, int Bytes);
-    private sealed record RecommendationReceipt(string Hash, JsonObject Result);
+    private sealed record RecommendationReceipt(string Nonce, string Hash, JsonObject Result);
     private sealed record RecommendationCommit(string Nonce, string Hash, string Checkpoint,
         RecommendationCheckpoint? Capture, bool Consume, JsonObject Result,
         string[] BeforeHistory, string[] BeforeFailed, string[] AfterHistory, string[] AfterFailed);
     private readonly Dictionary<string, RecommendationCheckpoint> recommendationCheckpoints = [];
-    private readonly Dictionary<string, RecommendationReceipt> recommendationReceipts = [];
+    private RecommendationReceipt? recommendationReceipt;
     private RecommendationCommit? recommendationStage;
     private Pending? recommendationUnknown;
-    private int recommendationReceiptBytes;
     private const int RecommendationMemoryLimit = 8 * 1024 * 1024;
 
     private static string RecommendationNonce(JsonObject p)
@@ -30,13 +29,12 @@ public sealed partial class MusicLibraryOwner
         Convert.ToHexString(SHA256.HashData(LJ.Bytes(LJ.Obj(("method", method), ("parameters", p)))));
     private bool RecommendationReplay(string nonce, string hash, out JsonObject result)
     {
-        if (recommendationReceipts.TryGetValue(nonce, out var receipt))
+        if (recommendationReceipt is { } receipt && receipt.Nonce == nonce)
         {
             LJ.Require(receipt.Hash == hash, "INVALID_NONCE");
             result = (JsonObject)receipt.Result.DeepClone();
             return true;
         }
-        LJ.Require(recommendationReceipts.Count < 4096, "LIMIT");
         result = new();
         return false;
     }
@@ -44,14 +42,11 @@ public sealed partial class MusicLibraryOwner
     {
         var q = (JsonObject)Queue(doc).DeepClone();
         int bytes = LJ.Bytes(q).Length;
-        LJ.Require(recommendationCheckpoints.Count < 4 &&
-            recommendationCheckpoints.Values.Sum(c => c.Bytes) + bytes <= RecommendationMemoryLimit, "LIMIT");
+        LJ.Require(recommendationCheckpoints.Values.Sum(c => c.Bytes) + bytes <= RecommendationMemoryLimit, "LIMIT");
         return new(q, shuffleHistory.ToArray(), failedEntries.ToArray(), bytes);
     }
     private static JsonObject RecommendationResult(JsonObject result, string nonce, bool applied = true) =>
         LJ.Merge(result, LJ.Obj(("nonce", nonce), ("applied", applied)));
-    private void CheckRecommendationReceipt(JsonObject result) =>
-        LJ.Require(recommendationReceiptBytes + LJ.Bytes(result).Length + 128 <= 4 * 1024 * 1024, "LIMIT");
     private void AcceptRecommendation(RecommendationCommit commit, bool applied)
     {
         // Force-loading a durable envelope deliberately clears runtime navigation.
@@ -72,22 +67,20 @@ public sealed partial class MusicLibraryOwner
             result["version"] = queueVersion;
             result["currentId"] = Queue(document!)["currentId"]?.DeepClone();
         }
-        recommendationReceipts[commit.Nonce] = new(commit.Hash, result);
-        recommendationReceiptBytes += LJ.Bytes(result).Length;
+        recommendationReceipt = new(commit.Nonce, commit.Hash, result);
     }
     private void SettleRecommendation(Pending? attempt)
     {
         if (attempt?.Recommendation is not { } change) return;
         LJ.Require(fingerprint == attempt.Before || fingerprint == attempt.After, "STORAGE_CONFLICT");
-        if (!recommendationReceipts.ContainsKey(change.Nonce))
+        if (recommendationReceipt?.Nonce != change.Nonce)
             AcceptRecommendation(change, fingerprint == attempt.After);
         if (ReferenceEquals(recommendationUnknown, attempt)) recommendationUnknown = null;
     }
     private void ClearRecommendations()
     {
         recommendationCheckpoints.Clear();
-        recommendationReceipts.Clear();
-        recommendationReceiptBytes = 0;
+        recommendationReceipt = null;
         recommendationStage = null;
         recommendationUnknown = null;
     }
@@ -99,13 +92,13 @@ public sealed partial class MusicLibraryOwner
         if (action == "reconcile")
         {
             LJ.Fields(p, "nonce", "nonce"); string nonce = RecommendationNonce(p);
-            if (recommendationReceipts.TryGetValue(nonce, out var receipt))
+            if (recommendationReceipt is { } receipt && receipt.Nonce == nonce)
                 return ((JsonObject)receipt.Result.DeepClone(), false);
             var unknown = recommendationUnknown;
             LJ.Require(unknown?.Recommendation?.Nonce == nonce, "OPERATION_NOT_FOUND");
             await ReconcileLockedAsync(token).ConfigureAwait(false);
             SettleRecommendation(unknown);
-            return ((JsonObject)recommendationReceipts[nonce].Result.DeepClone(), false);
+            return ((JsonObject)recommendationReceipt!.Result.DeepClone(), false);
         }
         LJ.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
         if (action == "discard")
@@ -121,10 +114,8 @@ public sealed partial class MusicLibraryOwner
             LJ.Require(LJ.I(p["expectedVersion"]) == queueVersion, "REVISION_CONFLICT");
             var capture = CaptureRecommendation(doc); string key = Guid.NewGuid().ToString("D");
             var result = RecommendationResult(LJ.Merge(Position(Queue(doc), doc), LJ.Obj(("checkpoint", key))), nonce);
-            CheckRecommendationReceipt(result);
             recommendationCheckpoints.Add(key, capture);
-            recommendationReceipts.Add(nonce, new(hash, (JsonObject)result.DeepClone()));
-            recommendationReceiptBytes += LJ.Bytes(result).Length;
+            recommendationReceipt = new(nonce, hash, (JsonObject)result.DeepClone());
             return (result, false);
         }
         LJ.Require(action is "enter" or "append" or "select" or "restore", "INVALID_REQUEST");
@@ -200,9 +191,23 @@ public sealed partial class MusicLibraryOwner
             response = RecommendationResult(LJ.Merge(Position(restored, doc),
                 LJ.Obj(("checkpoint", checkpoint), ("restored", true))), operation);
         }
-        CheckRecommendationReceipt(response);
         recommendationStage = new(operation, signature, checkpoint, captured, action == "restore", response,
             beforeHistory, beforeFailed, shuffleHistory.ToArray(), failedEntries.ToArray());
         return (response, true);
+    }
+
+    internal bool HasRecommendationReceipt => Volatile.Read(ref recommendationReceipt) is not null;
+
+    // Only the consumer of this nonce may acknowledge its accepted result/readback.
+    // Unrelated queue operations cannot discard evidence for an unresolved commit.
+    internal async Task AcknowledgeRecommendationAsync(string nonce)
+    {
+        await gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (recommendationUnknown is null && recommendationReceipt?.Nonce == nonce)
+                recommendationReceipt = null;
+        }
+        finally { gate.Release(); }
     }
 }

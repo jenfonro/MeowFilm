@@ -96,13 +96,15 @@ Task PrepareRecommendationsAsync(CancellationToken ct = default);
 
 队列 CAS 返回 `COMMIT_UNKNOWN` 或无法确认的冲突时：
 
-- 唯一 library owner 保留 nonce 和 before／after 指纹。
+- 唯一 library owner 只保留当前未确认操作的 nonce 和 before／after 指纹，不累计历史回执。
 - 协调器将对应会话加入 `reconcileIds`，封闭新的推荐读取和写入。
 - 仅允许 get、cancel 和显式 reconcile。
 - reconcile 只读取当前持久文档判断该 nonce 是否生效，不重放 enter、append、select 或 restore。
 - 全部未知项结算后才恢复推荐准入。
 
-未确认的 pending 只通过对应 owner 的 reconcile 结算。
+未确认的 pending 只通过对应 owner 的 reconcile 结算。已提交但队列读回或 consumer 接受失败时也保留协调状态。对应结果被协调器接纳后才以精确 nonce 显式确认回执；普通队列读取、无关成功操作或错误 nonce 都不能清掉它，unknown CAS 尚未解决时也不能提前确认。
+
+返回原队列所需 checkpoint 按实际保留字节管理（8 MiB），由恢复、discard 或关闭释放，不另设四个 checkpoint 的数量门槛。
 
 ## 关闭
 

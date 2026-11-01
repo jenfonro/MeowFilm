@@ -35,6 +35,7 @@ public static class MusicRecommendationTests
         yield return new("Recommendation identical in-flight start reuses one physical request and session", DuplicateStart);
         yield return new("Recommendation new start waits old physical read no overlap", Replacement);
         yield return new("Recommendation commit unknown only explicit reconcile no duplicate write", Unknown);
+        yield return new("Recommendation cancelled reconciliation retains receipt until its consumer accepts", ReconcileCancellation);
         yield return new("Recommendation preview malformed identity and unsupported platform do not replace", Invalid);
         yield return new("Recommendation observers repeating cancel produce no notification loop", ObserverCancel);
         yield return new("Recommendation Changed synchronous dispose does not await itself", ObserverDispose);
@@ -63,6 +64,7 @@ public static class MusicRecommendationTests
         var state = await start; Check(S(state, "status") == "ready" && N(state, "batch") == 1);
         Check((await f.Q()).GetProperty("total").GetInt32() == 3 && f.Selections.Count == 1);
         Check(f.Selections.Single().IsCurrent());
+        Check(!f.Library.HasRecommendationReceipt);
     }
     private static async Task InitialFailure()
     {
@@ -293,6 +295,22 @@ public static class MusicRecommendationTests
         Check(S(await f.Start("fm"), "error") == "IDENTITY_MISMATCH" && f.Store.Writes == writes);
         var remote = await f.Rec.ExecuteAsync("music.recommendations.start", new { kind = "fm", platform = "wy", local = false });
         Check(S(remote, "code") == "REMOTE_NOT_SUPPORTED");
+    }
+    private static async Task ReconcileCancellation()
+    {
+        await using var f = new Fixture(); await f.Replace("1");
+        f.Store.Failure = 2; f.Catalog.Reply("similar", "10");
+        string id = S(await f.Start("similar"), "id");
+        using var cancellation = new CancellationTokenSource();
+        f.Store.AfterRead = cancellation.Cancel;
+        await f.Rec.ExecuteAsync("music.recommendations.reconcile", new { id }, cancellation.Token);
+        f.Store.AfterRead = null;
+        Check((await f.State()).GetProperty("requiresReconcile").GetBoolean() && f.Library.HasRecommendationReceipt);
+        int writes = f.Store.Writes, reads = f.Catalog.Calls.Count;
+        await f.Port.ExecuteAsync("music.queue.get");
+        var accepted = await f.Rec.ExecuteAsync("music.recommendations.reconcile", new { id });
+        Check(!accepted.GetProperty("requiresReconcile").GetBoolean() && !f.Library.HasRecommendationReceipt);
+        Check(N(accepted, "batch") == 1 && f.Store.Writes == writes && f.Catalog.Calls.Count == reads && f.Selections.IsEmpty);
     }
     private static async Task ObserverCancel()
     {
@@ -558,11 +576,15 @@ internal static class RecommendationTest
         private readonly object gate = new();
         internal byte[]? Bytes;
         internal int Writes, Failure;
+        internal Action? AfterRead;
         internal TaskCompletionSource? Entered, Release;
         public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken ct = default)
         {
             ct.ThrowIfCancellationRequested(); Check(ns == MusicLibraryOwner.DocumentNamespace);
-            lock (gate) return Task.FromResult(new ProtectedDocument(Bytes?.ToArray(), Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes)));
+            ProtectedDocument result;
+            lock (gate) result = new(Bytes?.ToArray(), Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes));
+            AfterRead?.Invoke();
+            return Task.FromResult(result);
         }
         public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected, CancellationToken ct = default)
         {

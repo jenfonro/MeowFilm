@@ -90,7 +90,6 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
         lock (gate)
         {
             if (!isPhysical) AccountRules.Require(!closed, "CLOSED");
-            if (!isPhysical) AccountRules.Require(calls + physical < 8, "RATE_LIMITED");
             if (calls + physical == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
             if (isPhysical) physical++; else calls++;
         }

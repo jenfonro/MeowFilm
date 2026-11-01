@@ -22,26 +22,27 @@ public sealed class MusicSearchPlatformRow(string platform, bool enabled) : INot
 
 public sealed class MusicSearchKindSettings(string kind) : INotifyPropertyChanged
 {
-    private string mode = "aggregate", platform = "wy";
+    private int pages = 1, concurrency = 1, cacheMinutes = 60;
     public string Kind { get; } = kind;
-    public string Mode => mode;
-    public string Platform => platform;
-    public bool IsAggregate => mode == "aggregate";
+    public int Pages => pages;
+    public int Concurrency => concurrency;
+    public int CacheMinutes => cacheMinutes;
     public ObservableCollection<MusicSearchPlatformRow> Platforms { get; } = [];
     public event PropertyChangedEventHandler? PropertyChanged;
 
     internal void Apply(JsonElement value)
     {
-        var nextMode = MusicDto.Text(value, "mode");
-        var nextPlatform = MusicDto.Text(value, "platform");
+        int nextPages = MusicDto.Count(value, "pages"), nextConcurrency = MusicDto.Count(value, "concurrency"),
+            nextCache = MusicDto.Count(value, "cacheMinutes");
         var enabled = value.GetProperty("enabled").EnumerateArray()
             .Select(item => item.GetString()!).ToHashSet(StringComparer.Ordinal);
         var order = value.GetProperty("order").EnumerateArray()
             .Select(item => item.GetString()!).ToArray();
-        MusicDto.Require(nextMode is "aggregate" or "single" &&
+        MusicDto.Require(nextPages is >= 1 and <= MusicSearchLimits.Pages &&
+            nextConcurrency is >= 1 and <= MusicSearchLimits.Concurrency &&
+            nextCache is >= 1 and <= MusicSearchLimits.CacheMinutes &&
             order.Length == 5 && order.Distinct(StringComparer.Ordinal).Count() == 5 &&
-            order.All(key => key is "wy" or "tx" or "kw" or "kg" or "mg") &&
-            order.Contains(nextPlatform, StringComparer.Ordinal));
+            order.All(key => key is "wy" or "tx" or "kw" or "kg" or "mg"));
         var existing = Platforms.ToDictionary(row => row.Platform, StringComparer.Ordinal);
         for (var index = 0; index < order.Length; index++)
         {
@@ -55,24 +56,32 @@ public sealed class MusicSearchKindSettings(string kind) : INotifyPropertyChange
             else if (currentIndex != index) Platforms.Move(currentIndex, index);
         }
         while (Platforms.Count > order.Length) Platforms.RemoveAt(Platforms.Count - 1);
-        mode = nextMode;
-        platform = nextPlatform;
-        Changed(nameof(Mode));
-        Changed(nameof(Platform));
-        Changed(nameof(IsAggregate));
+        pages = nextPages; concurrency = nextConcurrency; cacheMinutes = nextCache;
+        Changed(nameof(Pages));
+        Changed(nameof(Concurrency));
+        Changed(nameof(CacheMinutes));
     }
 
-    internal SearchKindState Snapshot() => new(mode, platform,
+    internal SearchKindState Snapshot() => new(
         Platforms.Select(row => row.Platform).ToArray(),
-        Platforms.Where(row => row.Enabled).Select(row => row.Platform).ToArray());
+        Platforms.Where(row => row.Enabled).Select(row => row.Platform).ToArray(),
+        pages, concurrency, cacheMinutes);
 
     private void Changed([CallerMemberName] string name = "") =>
         PropertyChanged?.Invoke(this, new(name));
 }
 
-internal sealed record SearchKindState(string Mode, string Platform, string[] Order, string[] Enabled)
+/// <summary>Accepted ranges of the per-kind advanced search settings.</summary>
+public static class MusicSearchLimits
 {
-    internal object Request => new { mode = Mode, platform = Platform, order = Order, enabled = Enabled };
+    public const int Pages = Library.MusicLibraryOwner.MaxSearchPages;
+    public const int Concurrency = Library.MusicLibraryOwner.MaxSearchConcurrency;
+    public const int CacheMinutes = Library.MusicLibraryOwner.MaxSearchCacheMinutes;
+}
+
+internal sealed record SearchKindState(string[] Order, string[] Enabled, int Pages, int Concurrency, int CacheMinutes)
+{
+    internal object Request => new { order = Order, enabled = Enabled, pages = Pages, concurrency = Concurrency, cacheMinutes = CacheMinutes };
 }
 
 public sealed partial class MusicCapability
@@ -95,11 +104,6 @@ public sealed partial class MusicCapability
     private string searchPreferenceStatus = "";
     public MusicSearchKindSettings SongSearch { get; } = new("songs");
     public MusicSearchKindSettings PlaylistSearch { get; } = new("playlists");
-    public MusicCatalogChoice[] SearchModes { get; } =
-        [new("aggregate", "聚合搜索"), new("single", "单平台搜索")];
-    public MusicCatalogPlatform[] SearchPlatformChoices { get; } =
-        [new("wy", "网易云音乐"), new("tx", "QQ 音乐"), new("kw", "酷我音乐"),
-         new("kg", "酷狗音乐"), new("mg", "咪咕音乐")];
     public bool CanEditSearchPreferences => CanEdit && searchPreferencesLoaded && !searchPreferencesBusy;
     public bool HasSearchHistory => searchHistoryCount > 0;
     public string SearchPreferenceStatus => searchPreferenceStatus;
@@ -143,7 +147,6 @@ public sealed partial class MusicCapability
         {
             _ = MusicDto.Text(item, "text");
             _ = MusicDto.Text(item, "kind");
-            _ = MusicDto.Text(item, "platform");
         }
         if (searchHistoryLoaded && revision < searchHistoryRevision) return;
         searchHistoryRevision = revision;
@@ -216,30 +219,19 @@ public sealed partial class MusicCapability
         Changed(nameof(SearchPreferenceStatus));
     }
 
-    public Task SetSearchModeAsync(string kind, string mode)
+    /// <summary>Saves one kind's advanced settings. Out-of-range input is rejected, not clamped.</summary>
+    public Task SetSearchAdvancedAsync(string kind, int pages, int concurrency, int cacheMinutes)
     {
-        if (!CanEditSearchPreferences || mode is not ("aggregate" or "single")) return Task.CompletedTask;
+        if (!CanEditSearchPreferences || kind is not ("songs" or "playlists") ||
+            pages is < 1 or > MusicSearchLimits.Pages || concurrency is < 1 or > MusicSearchLimits.Concurrency ||
+            cacheMinutes is < 1 or > MusicSearchLimits.CacheMinutes) return Task.CompletedTask;
         var songs = SongSearch.Snapshot();
         var playlists = PlaylistSearch.Snapshot();
-        if (kind == "songs" && songs.Mode == mode || kind == "playlists" && playlists.Mode == mode)
+        var current = kind == "songs" ? songs : playlists;
+        if (current.Pages == pages && current.Concurrency == concurrency && current.CacheMinutes == cacheMinutes)
             return Task.CompletedTask;
-        if (kind == "songs") songs = songs with { Mode = mode };
-        else if (kind == "playlists") playlists = playlists with { Mode = mode };
-        else return Task.CompletedTask;
-        return SaveSearchPreferencesAsync(songs, playlists);
-    }
-
-    public Task SetSearchPlatformAsync(string kind, string platform)
-    {
-        if (!CanEditSearchPreferences || !SearchPlatformChoices.Any(row => row.Key == platform))
-            return Task.CompletedTask;
-        var songs = SongSearch.Snapshot();
-        var playlists = PlaylistSearch.Snapshot();
-        if (kind == "songs" && songs.Platform == platform || kind == "playlists" && playlists.Platform == platform)
-            return Task.CompletedTask;
-        if (kind == "songs") songs = songs with { Platform = platform };
-        else if (kind == "playlists") playlists = playlists with { Platform = platform };
-        else return Task.CompletedTask;
+        var desired = current with { Pages = pages, Concurrency = concurrency, CacheMinutes = cacheMinutes };
+        if (kind == "songs") songs = desired; else playlists = desired;
         return SaveSearchPreferencesAsync(songs, playlists);
     }
 
@@ -284,8 +276,8 @@ public sealed partial class MusicCapability
     }
 
     private static bool Matches(MusicSearchKindSettings current, SearchKindState desired) =>
-        current.Mode == desired.Mode &&
-        current.Platform == desired.Platform &&
+        current.Pages == desired.Pages && current.Concurrency == desired.Concurrency &&
+        current.CacheMinutes == desired.CacheMinutes &&
         current.Platforms.Select(row => row.Platform).SequenceEqual(desired.Order) &&
         current.Platforms.Where(row => row.Enabled).Select(row => row.Platform).SequenceEqual(desired.Enabled);
 
@@ -302,9 +294,9 @@ public sealed partial class MusicCapability
         SearchPreferenceBindings();
         return RunAsync(async () =>
         {
-            await RetireAggregateSearchAsync();
-            if (IsAggregateSearch)
-                ClearAggregateVisibleSnapshot();
+            await RetireSearchAsync();
+            if (IsSearchPage)
+                ClearSearchVisibleSnapshot();
             try
             {
                 PublishSearchPreferences((await Call("music.search.settings.save", request, lifetime.Token))
@@ -362,8 +354,7 @@ public sealed partial class MusicCapability
             PublishSearchHistory((await Call("music.search.history.record", new
             {
                 text,
-                kind = online ? CatalogSearchKind == "歌单" ? "playlists" : "songs" : "local",
-                platform = online ? "aggregate" : "local"
+                kind = online ? CatalogSearchKind == "歌单" ? "playlists" : "songs" : "local"
             }, token)).GetProperty("history"));
         }
         catch (OperationCanceledException) { throw; }
@@ -374,11 +365,7 @@ public sealed partial class MusicCapability
         }
     }
 
-    private string[] SearchDispatchPlatforms(string kind)
-    {
-        var settings = kind == "songs" ? SongSearch : PlaylistSearch;
-        return settings.Mode == "single"
-            ? [settings.Platform]
-            : settings.Platforms.Where(row => row.Enabled).Select(row => row.Platform).ToArray();
-    }
+    private string[] SearchDispatchPlatforms(string kind) =>
+        (kind == "songs" ? SongSearch : PlaylistSearch).Platforms
+            .Where(row => row.Enabled).Select(row => row.Platform).ToArray();
 }

@@ -86,7 +86,7 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
     {
         lock (activityGate)
         {
-            LJ.Require(!closed && !preparing && !recoveringRuntime, "CLOSED"); LJ.Require(pending < 24, "LIMIT");
+            LJ.Require(!closed && !preparing && !recoveringRuntime, "CLOSED");
             if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
         }
     }

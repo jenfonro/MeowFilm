@@ -194,6 +194,7 @@ public sealed partial class MusicLibraryOwner
         }
         finally { gate.Release(); }
     }
-    internal static string[] AddLibrarySyncSongs(JsonObject library, IEnumerable<JsonObject> songs) => AddSongs(library, songs);
+    internal static string[] AddLibrarySyncSongs(JsonObject library, IEnumerable<JsonObject> songs, NativeMusicSongGroups groups) =>
+        AddSongs(library, songs, groups);
 
 }

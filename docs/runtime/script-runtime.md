@@ -59,7 +59,7 @@ lx.on(lx.EVENT_NAMES.request, async (payload, context) => {
 
 存储实例与业务作用域仍必须隔离。音乐宿主的原生存储回调与安装会话绑定见 [音乐脚本契约](music-script-runtime.md)；这里的存储 token 不是域名授权或网络隔离机制。
 
-存储物理任务占用实例／site 限额直至 adapter 真正完成；取消只撤销结果和 guest 回调引用，不提前释放不合作 I/O 的槽位。一次长请求内已完成的存储回调即时释放，不累计挤占后续调用。
+存储物理任务归属实例及请求直至 adapter 真正完成；取消只撤销结果和 guest 回调引用，不提前遗弃不合作 I/O。已完成任务即时释放，不累计历史回调，也不设置全局／实例／site 请求数额度。
 
 Node 的异步上下文只记录宿主执行回合，不能当作 guest Promise 的权限传播。存储必须使用显式请求 context；网络／定时器的执行回合归属不授予特权。取消结果、网络截止时间、实例退休与物理排空分别核对，不把会话后台请求误报为已在初始化期间完成的请求。
 
@@ -75,7 +75,7 @@ network({ url, options, signal, scope, validateURL })
 
 脚本网络可以访问已开放的 HTTP(S) 服务，包括本机和私网地址。受控网络桥接保留截止时间、取消、响应大小、重定向上限及跨 origin 不转发 Authorization/Cookie 的行为，但这些不构成网络隔离。文件／进程隔离、Windows 命名管道身份检查和 QuickJS guest heap 都不能冒称网络沙箱；其他官方业务的网络或播放授权规则不受影响。
 
-网络物理任务占用 `maxNetworkRequests` 预算直至 adapter 真正结束；取消只回收结果和回调句柄，不能通过连续 request／abort 绕过任务预算。`followRedirect` 接受布尔值，false 禁止自动跳转，true 仍受 `follow_max`／宿主上限约束。`retry` 扩展字段兼容接受但不触发宿主自动重放，重试由脚本负责，不叠加非幂等请求的重放。
+网络物理任务通过 `adapterTasks` 跟踪至 adapter 真正结束，不设置 `maxNetworkRequests` 数量额度；取消只回收结果和回调句柄，不伪造已排空。`followRedirect` 接受布尔值，false 禁止自动跳转，true 仍受 `follow_max`／宿主上限约束。`retry` 扩展字段兼容接受但不触发宿主自动重放，重试由脚本负责，不叠加非幂等请求的重放。
 
 ## 后续按需 Web 能力
 

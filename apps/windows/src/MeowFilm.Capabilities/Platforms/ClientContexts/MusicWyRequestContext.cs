@@ -92,16 +92,27 @@ internal sealed partial class MusicPlatformClientContextOwner
             MusicClientContextDocument.Require(device == sent["deviceId"], "IDENTITY_MISMATCH");
         if (sent["deviceId"] != expected.DeviceId) return expected;
         string Value(string key, string previous) => fields.GetValueOrDefault(key) ?? previous;
-        var next = expected with
+        MusicWyClientContext Merge(MusicWyClientContext latest) => latest with
         {
-            Nuid = Value("_ntes_nuid", expected.Nuid), Nnid = Value("_ntes_nnid", expected.Nnid),
-            Wnmcid = Value("WNMCID", expected.Wnmcid),
-            Nmtid = fields.TryGetValue("NMTID", out var nmtid) ? nmtid : expected.Nmtid
+            Nuid = Value("_ntes_nuid", latest.Nuid), Nnid = Value("_ntes_nnid", latest.Nnid),
+            Wnmcid = Value("WNMCID", latest.Wnmcid),
+            Nmtid = fields.TryGetValue("NMTID", out var nmtid) ? nmtid : latest.Nmtid
         };
-        if (next == expected) return expected;
-        guard(); token.ThrowIfCancellationRequested();
-        var result = await UpdateAsync(expected, document => document with
-        { Wy = next with { Generation = Next(expected.Generation) } }, token, guard).ConfigureAwait(false);
+        if (!fields.Keys.Any(key => key is "_ntes_nuid" or "_ntes_nnid" or "WNMCID" or "NMTID"))
+        {
+            lock (gate)
+            {
+                RequireReady();
+                MusicClientContextDocument.Require(IsCurrent(expected), "STORAGE_CONFLICT");
+                return current!.Wy;
+            }
+        }
+        var result = await UpdateAsync(expected, document =>
+        {
+            var next = Merge(document.Wy);
+            return next == document.Wy ? document : document with
+            { Wy = next with { Generation = Next(document.Wy.Generation) } };
+        }, token, guard).ConfigureAwait(false);
         return result.Wy;
     }
 }

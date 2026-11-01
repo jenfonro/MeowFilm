@@ -114,7 +114,7 @@ Adapted portions:
   profile/entitlement via `qqmusic_api/modules/user.py::get_vip_info` and
   `qqmusic_api/models/user.py::{UserVipInfoResponse,VipIdentity,VipUserInfo}`.
 - Platforms: read-only recipes from `qqmusic_api/modules/{search,song,songlist,user}.py`,
-  `models/{base,search,songlist,user}.py` and the response/versioning envelope;
+  `models/{base,search,songlist,user}.py`, `utils/common.py::get_searchID` and the response/versioning envelope;
   `user.get_fav_song`; `song.get_song_urls`; `ClientContexts/MusicQqClientProtocol.cs`
   and `ClientContexts/MusicQqQimeiRecipe.cs` adapt `qqmusic_api/utils/{device,qimei,android_session}.py`,
   `qqmusic_api/core/versioning.py`, `qqmusic_api/models/request.py`,

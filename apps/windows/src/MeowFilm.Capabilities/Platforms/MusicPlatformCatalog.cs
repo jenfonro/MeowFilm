@@ -11,16 +11,17 @@ namespace MeowFilm.Capabilities.Platforms;
 
 public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
 {
-    private const int MaxResponse = 4 * 1024 * 1024, MaxResult = 512 * 1024;
+    private const int MaxResponse = 4 * 1024 * 1024;
     private readonly IMusicPlatformSessionSource sessions;
     private readonly MusicPlatformClientContextOwner clients;
     private readonly MusicPlatformHttp http;
+    private readonly MusicPlatformClientProtocol clientProtocol;
     private readonly bool ownsHttp;
     private readonly TimeSpan timeout;
     private readonly object gate = new();
     private readonly HashSet<Call> active = [];
     private readonly Dictionary<string, CacheEntry> cache = [];
-    private int acquiring, cacheBytes;
+    private int cacheBytes;
     private bool closed;
     private sealed record CacheEntry(JsonElement Value, DateTimeOffset Expires, int Bytes, string Platform);
 
@@ -29,15 +30,17 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
         : this(sessions, new MusicPlatformHttp(), clients, timeout, leaveOpen: false) { }
 
     internal MusicPlatformCatalog(IMusicPlatformSessionSource sessions, MusicPlatformHttp transport,
-        MusicPlatformClientContextOwner clients, TimeSpan? timeout = null, bool leaveOpen = true)
+        MusicPlatformClientContextOwner clients, TimeSpan? timeout = null, bool leaveOpen = true,
+        MusicPlatformClientProtocol? clientProtocol = null)
     {
         ArgumentNullException.ThrowIfNull(sessions);
         ArgumentNullException.ThrowIfNull(transport);
         this.sessions = sessions;
         this.clients = clients ?? throw new ArgumentNullException(nameof(clients));
         this.timeout = timeout ?? TimeSpan.FromSeconds(25);
-        PJ.Require(this.timeout.TotalMilliseconds is >= 1 and <= 60000);
+        PJ.Require(this.timeout > TimeSpan.Zero);
         http = transport; ownsHttp = !leaveOpen;
+        this.clientProtocol = clientProtocol ?? new(transport);
     }
     /// <summary>Trusted composition/test seam only. Origin, redirect/status and streaming budgets remain enforced.</summary>
     internal static MusicPlatformCatalog CreateWithHandler(IMusicPlatformSessionSource sessions,
@@ -57,13 +60,12 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
         internal MusicWyClientContext WyClient => (MusicWyClientContext)Client!;
         internal MusicKgClientContext KgClient => (MusicKgClientContext)Client!;
         internal string Scope = "", Reason = "";
-        internal int RequestCount;
         internal readonly CancellationToken Token;
         internal bool PublicCatalog => Platform is "kw" or "mg";
         internal Call(MusicPlatformCatalog owner, string platform, string operation, CancellationToken caller)
         {
             Owner = owner; Platform = platform; Operation = operation; Caller = caller;
-            Duration = PublicCatalog && owner.timeout > TimeSpan.FromSeconds(25) ? TimeSpan.FromSeconds(25) : owner.timeout;
+            Duration = owner.timeout;
             Deadline = new(Duration); Cancelled = new();
             Linked = CancellationTokenSource.CreateLinkedTokenSource(caller, Deadline.Token, Cancelled.Token);
             Token = Linked.Token;
@@ -110,7 +112,8 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
         internal Task<T> Wy<T>(string path, JsonObject parameters, Func<JsonObject, T> decode, bool weapi = false) =>
             Read(PlatformProtocols.Wy(path, parameters, Session, WyClient, weapi), d => decode(PlatformProtocols.WySuccess(d)));
         internal Task<JsonObject> Tx(string module, string method, JsonObject parameters) =>
-            Read(PlatformProtocols.Tx(module, method, parameters, Session), PlatformProtocols.TxSuccess);
+            Read(PlatformProtocols.Tx(module, method, parameters, Session, Client as MusicQqClientContext,
+                Client is MusicQqClientContext ? Owner.clientProtocol.Clock.GetUtcNow() : null), PlatformProtocols.TxSuccess);
         internal Task<JsonObject> Kg(string path, JsonObject parameters, string? router = null, JsonObject? body = null) =>
             Read(PlatformProtocols.Kg(path, parameters, Session, KgClient, router, body), d => PlatformProtocols.KgSuccess(d, path));
         internal async Task<T> Xeapi<T>(string path, JsonObject parameters, Func<JsonObject, T> decode)
@@ -128,10 +131,9 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
             try
             {
                 await CheckSessionAsync();
-                PJ.Require(++RequestCount <= 8, "LIMIT");
                 dispatched = true;
-                var result = xeapi ? await Owner.http.SendCatalogXeapiAsync(request, Token, MaxResponse, Owner.timeout)
-                    : await Owner.http.SendCatalogAsync(Platform, request, Token, MaxResponse, Owner.timeout);
+                var result = xeapi ? await Owner.http.SendXeapiAsync(request, Token, MaxResponse, Owner.timeout)
+                    : await Owner.http.SendAsync(Platform, request, Token, MaxResponse, Owner.timeout);
                 Guard();
                 await CheckSessionAsync();
                 var body = business(result.Body);
@@ -149,7 +151,6 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
             {
                 Guard();
                 PJ.Require(PublicCatalog && Session is null, "IDENTITY_MISMATCH");
-                PJ.Require(++RequestCount <= 8, "LIMIT");
                 var remaining = Duration - Stopwatch.GetElapsedTime(Started);
                 PJ.Require(remaining.TotalMilliseconds >= 1, "TIMEOUT");
                 dispatched = true;
@@ -169,15 +170,9 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
     {
         call.Guard();
         if (call.PublicCatalog) return null;
-        lock (gate) { PJ.Require(acquiring < 8, "RATE_LIMITED"); acquiring++; }
-        async Task<MusicPlatformSession?> Physical()
-        {
-            try { return await sessions.AcquireAsync(call.Platform, call.Token); }
-            finally { lock (gate) acquiring--; }
-        }
         try
         {
-            var value = await Physical();
+            var value = await sessions.AcquireAsync(call.Platform, call.Token);
             call.Guard();
             PJ.Require(value is null || value.Platform == call.Platform, "IDENTITY_MISMATCH");
             return value;
@@ -194,12 +189,14 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
             PJ.Require(operation is "search" or "song" or "playlist" &&
                 input is not MusicPlaylistRequest { Personal: not null }, "UNSUPPORTED");
         using var call = new Call(this, platform, operation, token);
-        lock (gate) { PJ.Require(!closed, "CLOSED"); PJ.Require(active.Count < 8, "RATE_LIMITED"); active.Add(call); }
+        lock (gate) { PJ.Require(!closed, "CLOSED"); active.Add(call); }
         try
         {
             call.Session = await AcquireAsync(call);
             if (platform is "wy" or "kg")
                 call.Client = await clients.AcquireAsync(platform, call.Token).ConfigureAwait(false);
+            else if (platform == "tx" && operation == "search")
+                call.Client = await clients.EnsureQqAsync(clientProtocol, call.Token).ConfigureAwait(false);
             call.Guard();
             if (call.Session is not null) _ = PJ.Cookies(call.Session);
             call.Scope = PJ.Hash(PJ.Node(new object?[] { platform, call.Session?.Scope ?? "anonymous", call.Session?.Generation ?? 0, call.Session?.UserId }));
@@ -234,14 +231,14 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
                     _ => throw new MusicPlatformException("UNSUPPORTED")
                 },
                 _ => action(call)
-            }), MaxResult);
+            }), null);
             call.Guard();
             await call.CheckSessionAsync();
             call.Guard();
             if (cacheable && (call.Session is null || privateCache) && cached is null)
             {
                 var bytes = Encoding.UTF8.GetByteCount(result.GetRawText());
-                var ttl = operation == "search" ? TimeSpan.FromDays(1) : operation is "song" or "playlist" ? TimeSpan.FromHours(1) : TimeSpan.FromMinutes(10);
+                var ttl = operation is "song" or "playlist" ? TimeSpan.FromHours(1) : TimeSpan.FromMinutes(10);
                 if (operation == "daily" && result.TryGetProperty("expiresAt", out var expiry))
                     ttl = DateTimeOffset.FromUnixTimeMilliseconds(expiry.GetInt64()) - DateTimeOffset.UtcNow;
                 lock (gate)
@@ -249,8 +246,11 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
                     call.Guard();
                     key = CacheKey(); // A trusted response may have advanced this call's client context.
                     Erase(key);
-                    while (cache.Count >= 64 || cacheBytes + bytes > 2 * 1024 * 1024) Erase(cache.Keys.First());
-                    cache[key] = new(result.Clone(), DateTimeOffset.UtcNow + ttl, bytes, platform); cacheBytes += bytes;
+                    if (bytes <= 2 * 1024 * 1024)
+                    {
+                        while (cache.Count >= 64 || cacheBytes + bytes > 2 * 1024 * 1024) Erase(cache.Keys.First());
+                        cache[key] = new(result.Clone(), DateTimeOffset.UtcNow + ttl, bytes, platform); cacheBytes += bytes;
+                    }
                 }
             }
             return result;
@@ -304,8 +304,7 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
                 ("home", false), ("channels", false), ("personalPlaylists", false), ("accounts", false), ("anonymousMetadataHttp", true))),
             ("mg", PJ.Obj(("search", new[] { "songs", "playlists" }), ("song", true), ("playlist", true),
                 ("home", false), ("channels", false), ("personalPlaylists", false), ("accounts", false),
-                ("songSearchTotalUnit", "groups"), ("maxSearchGroupVariants", 32), ("maxSearchExpandedItems", 1000))))),
-        ("limits", PJ.Obj(("maxOperations", 8), ("maxRequests", 4), ("maxPlatformRequests", 2), ("requestsPerOperation", 8),
-            ("maxPages", 100), ("maxPageSize", 100), ("maxResponseBytes", MaxResponse), ("maxResultBytes", MaxResult))),
+                ("songSearchTotalUnit", "groups"))))),
+        ("limits", PJ.Obj(("maxPageSize", 100), ("maxResponseBytes", MaxResponse))),
         ("liveVerified", false), ("cloudWrites", false), ("timeoutMs", timeout.TotalMilliseconds)));
 }

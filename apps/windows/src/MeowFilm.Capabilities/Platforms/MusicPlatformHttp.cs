@@ -15,14 +15,15 @@ public sealed partial class MusicPlatformHttp : IDisposable
     private readonly HttpClient client;
     private readonly CancellationTokenSource lifetime = new();
     private readonly object gate = new();
-    private readonly Dictionary<string, int> platformActive = [];
+    // In-flight count is lifetime bookkeeping only. The transport never throttles;
+    // request volume is owned by business logic (search concurrency, caches, paging).
     private int active;
     private bool closed, cancellationSent;
     public MusicPlatformHttp() : this(new SocketsHttpHandler {
         AllowAutoRedirect = false, UseCookies = false, UseProxy = false,
         AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli,
         ConnectTimeout = TimeSpan.FromSeconds(10), PooledConnectionLifetime = TimeSpan.FromMinutes(5),
-        MaxConnectionsPerServer = 4, MaxResponseHeadersLength = 32
+        MaxResponseHeadersLength = 32
     }) { }
     private MusicPlatformHttp(HttpMessageHandler handler) =>
         client = new(handler, disposeHandler: true) { Timeout = Timeout.InfiniteTimeSpan };
@@ -57,17 +58,6 @@ public sealed partial class MusicPlatformHttp : IDisposable
         CancellationToken token, int maximum, TimeSpan timeout)
         => SendCoreAsync("wy", request, token, maximum, timeout,
             (bytes, response, ct) => JsonResult(PlatformXeapi.DecodeResponse(bytes, maximum, ct), response));
-    // Catalog cancellation must include physical handler/stream/request cleanup.
-    // Keep the ordinary origin and credential policy; catalog additionally waits
-    // for physical handler, stream and request cleanup.
-    internal Task<MusicPlatformHttpResult> SendCatalogAsync(string platform, HttpRequestMessage request,
-        CancellationToken token, int maxResponseBytes = 4 * 1024 * 1024, TimeSpan? timeout = null)
-        => SendCoreAsync(platform, request, token, maxResponseBytes, timeout,
-            (bytes, response, _) => JsonResult(PJ.Parse(bytes, maxResponseBytes), response), awaitPhysical: true);
-    internal Task<MusicPlatformHttpResult> SendCatalogXeapiAsync(HttpRequestMessage request,
-        CancellationToken token, int maximum, TimeSpan timeout)
-        => SendCoreAsync("wy", request, token, maximum, timeout,
-            (bytes, response, ct) => JsonResult(PlatformXeapi.DecodeResponse(bytes, maximum, ct), response), awaitPhysical: true);
     private static MusicPlatformHttpResult JsonResult(JsonObject body, HttpResponseMessage response) =>
         new(body, response.Headers.TryGetValues("Set-Cookie", out var cookies) ? cookies.ToArray() : []);
 
@@ -93,7 +83,7 @@ public sealed partial class MusicPlatformHttp : IDisposable
                 MusicQqDeviceHttpStep.Account => NativeHttpPolicy.QqAccount,
                 MusicQqDeviceHttpStep.Profile => NativeHttpPolicy.QqProfile,
                 MusicQqDeviceHttpStep.Session => NativeHttpPolicy.QqSession,
-                _ => NativeHttpPolicy.Denied }, awaitPhysical: true);
+                _ => NativeHttpPolicy.Denied });
 
     internal Task<MusicPlatformHttpResult> SendQqFeedbackJsonAsync(HttpRequestMessage request, CancellationToken token) =>
         SendCoreAsync("tx", request, token, 65536, TimeSpan.FromSeconds(20),
@@ -108,17 +98,17 @@ public sealed partial class MusicPlatformHttp : IDisposable
     internal Task<MusicPlatformHttpResult> SendChorusAsync(HttpRequestMessage request, CancellationToken token, TimeSpan timeout) =>
         SendCoreAsync("kg", request, token, 65536, timeout,
             (bytes, response, _) => JsonResult(PJ.Parse(bytes, 65536), response),
-            nativePolicy: NativeHttpPolicy.Chorus, awaitPhysical: true);
+            nativePolicy: NativeHttpPolicy.Chorus);
     internal Task<MusicPlatformHttpResult> SendVipPageEapiAsync(HttpRequestMessage request,
         CancellationToken token, int maximum) =>
         SendCoreAsync("wy", request, token, maximum, TimeSpan.FromSeconds(20),
             (bytes, response, ct) => JsonResult(PlatformXeapi.DecodeResponse(bytes, maximum, ct), response),
-            nativePolicy: NativeHttpPolicy.VipPage, awaitPhysical: true);
+            nativePolicy: NativeHttpPolicy.VipPage);
     internal Task<MusicPlatformHttpResult> SendVipPageWeapiAsync(HttpRequestMessage request,
         CancellationToken token, int maximum) =>
         SendCoreAsync("wy", request, token, maximum, TimeSpan.FromSeconds(20),
             (bytes, response, _) => JsonResult(PJ.Parse(bytes, maximum), response),
-            nativePolicy: NativeHttpPolicy.VipPage, awaitPhysical: true);
+            nativePolicy: NativeHttpPolicy.VipPage);
     private enum NativeHttpPolicy { Feedback, MusicLibrarySyncCloud, QqQimei, QqAccount, QqProfile,
         QqSession, QqFeedbackJson, QqFeedbackReport, PublicCatalogRead, AccountDetails, Chorus, VipPage, Denied }
     // HttpHeaders.Contains throws for a known header in the other header collection.
@@ -174,7 +164,7 @@ public sealed partial class MusicPlatformHttp : IDisposable
             _ => false };
     }
 
-    // Request inspection is within the admitted physical slot and deadline. Never buffer
+    // Request inspection belongs to the tracked request and its deadline. Never buffer
     // an arbitrary producer without a limit or release a cancelled producer early.
     private static async Task CheckNativeBody(NativeHttpPolicy? policy, HttpRequestMessage request, CancellationToken token)
     {
@@ -296,13 +286,13 @@ public sealed partial class MusicPlatformHttp : IDisposable
 
     // Separate policy: these origins NEVER enter IsAllowedOrigin/ordinary content or lyrics.
     internal Task<MusicAccountHttpResult> SendAccountStepAsync(MusicAccountHttpStep step,
-        HttpRequestMessage request, CancellationToken token, TimeSpan remaining, bool awaitPhysical = false) =>
+        HttpRequestMessage request, CancellationToken token, TimeSpan remaining) =>
         SendCoreAsync<MusicAccountHttpResult>(AccountPlatform(step), request, token,
             step == MusicAccountHttpStep.QqImage ? 524288 : step == MusicAccountHttpStep.KgRegister ? 1048576 : 65536, remaining,
             (bytes, response, _) => new(bytes,
                 response.Headers.TryGetValues("Set-Cookie", out var cookies) ? cookies.ToArray() : [],
                 response.Headers.Location?.OriginalString, response.Content.Headers.ContentType?.MediaType,
-                (int)response.StatusCode), step, awaitPhysical: awaitPhysical);
+                (int)response.StatusCode), step);
 
     private static string AccountPlatform(MusicAccountHttpStep step) => step switch
     {
@@ -335,9 +325,8 @@ public sealed partial class MusicPlatformHttp : IDisposable
             _ => false };
     }
 
-    // Lyrics need bounded encrypted/base64 JSON strings larger than catalog metadata's
-    // per-string cap. This internal native seam retains ALL physical HTTP budgets;
-    // response cookies remain transient and are validated by the native consumer.
+    // Lyrics decode their encrypted/base64 representation in the native consumer.
+    // Response cookies remain transient; cancellation includes physical cleanup.
     internal Task<MusicPlatformHttpBytesResult> SendLyricAsync(string platform, HttpRequestMessage request,
         CancellationToken token, TimeSpan remaining)
     {
@@ -351,12 +340,12 @@ public sealed partial class MusicPlatformHttp : IDisposable
         { request.Dispose(); throw new MusicPlatformException("ORIGIN_DENIED"); }
         return SendCoreAsync(platform, request, token, 1024 * 1024, remaining,
             (bytes, response, _) => new MusicPlatformHttpBytesResult(bytes,
-                response.Headers.TryGetValues("Set-Cookie", out var cookies) ? cookies.ToArray() : []), awaitPhysical: true);
+                response.Headers.TryGetValues("Set-Cookie", out var cookies) ? cookies.ToArray() : []));
     }
     private async Task<T> SendCoreAsync<T>(string platform, HttpRequestMessage request,
         CancellationToken cancellationToken, int maxResponseBytes, TimeSpan? timeout,
         Func<byte[], HttpResponseMessage, CancellationToken, T> decode, MusicAccountHttpStep? accountStep = null,
-        NativeHttpPolicy? nativePolicy = null, bool awaitPhysical = false)
+        NativeHttpPolicy? nativePolicy = null)
     {
         ArgumentNullException.ThrowIfNull(request);
         var interval = timeout ?? TimeSpan.FromSeconds(25);
@@ -364,7 +353,7 @@ public sealed partial class MusicPlatformHttp : IDisposable
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            PJ.Require(maxResponseBytes is >= 1 and <= 4 * 1024 * 1024 && interval.TotalMilliseconds is >= 1 and <= 60000);
+            PJ.Require(maxResponseBytes >= 1 && interval > TimeSpan.Zero);
             PJ.Require(request.RequestUri is not null && (nativePolicy is { } policy
                 ? accountStep is null && NativeOrigin(policy, platform, request)
                 : accountStep is { } step
@@ -378,10 +367,9 @@ public sealed partial class MusicPlatformHttp : IDisposable
             lock (gate)
             {
                 PJ.Require(!closed, "CLOSED");
-                PJ.Require(active < 4 && platformActive.GetValueOrDefault(platform) < 2, "RATE_LIMITED");
                 deadline = new(interval);
                 linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline.Token, lifetime.Token);
-                active++; platformActive[platform] = platformActive.GetValueOrDefault(platform) + 1;
+                active++;
             }
         }
         catch { request.Dispose(); throw; }
@@ -429,8 +417,7 @@ public sealed partial class MusicPlatformHttp : IDisposable
                     PJ.Require(HeaderBytes(response.Headers) + HeaderBytes(response.Content.Headers) <= 32768, "LIMIT");
                     if (response.Headers.TryGetValues("ssa-code", out var ssa) && ssa.Any(v => v.Length > 0))
                         throw new MusicPlatformException("VERIFICATION_REQUIRED");
-                    PJ.Require(response.Content.Headers.ContentLength is null or <= 4 * 1024 * 1024 &&
-                        (response.Content.Headers.ContentLength ?? 0) <= maxResponseBytes, "LIMIT");
+                    PJ.Require((response.Content.Headers.ContentLength ?? 0) <= maxResponseBytes, "LIMIT");
                     await using var stream = await response.Content.ReadAsStreamAsync(token);
                     using var output = new MemoryStream();
                     var buffer = new byte[16384];
@@ -453,16 +440,15 @@ public sealed partial class MusicPlatformHttp : IDisposable
                 linked.Dispose(); deadline.Dispose();
                 lock (gate)
                 {
-                    active--; platformActive[platform]--;
+                    active--;
                     if (closed && cancellationSent && active == 0) lifetime.Dispose();
                 }
             }
         }
         try
         {
-            var physical = Physical();
-            if (nativePolicy is null && !awaitPhysical) return await physical.WaitAsync(token);
-            var result = await physical;
+            // Cancellation revokes publication, not ownership of handler/stream cleanup.
+            var result = await Physical();
             // Includes stream/request disposal: cancellation during cleanup cannot publish a late ACK.
             token.ThrowIfCancellationRequested();
             return result;
@@ -490,7 +476,7 @@ public sealed partial class MusicPlatformHttp : IDisposable
                 if (active == 0) lifetime.Dispose();
             }
         }
-        // Non-cooperative trusted handlers retain their physical slot and CTS until they settle.
+        // Non-cooperative trusted handlers remain tracked with their CTS until they settle.
     }
 }
 

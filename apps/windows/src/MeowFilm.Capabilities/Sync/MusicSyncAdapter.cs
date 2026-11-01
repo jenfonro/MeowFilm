@@ -21,7 +21,7 @@ internal sealed record SyncRemote(string Id, string Name, string Kind, bool Writ
 internal sealed record SyncDirectory(string AccountId, IReadOnlyList<SyncRemote> Collections);
 
 internal abstract class MusicSyncAdapter(MusicPlatformSession session, MusicPlatformHttp http,
-    MusicPlatformClientContextOwner clients, MusicPlatformClientContext? client, MusicSyncRequestBudget budget,
+    MusicPlatformClientContextOwner clients, MusicPlatformClientContext? client,
     Func<Task> guard, Action accountGuard, CancellationToken token)
 {
     protected readonly MusicPlatformSession Session = session;
@@ -51,12 +51,11 @@ internal abstract class MusicSyncAdapter(MusicPlatformSession session, MusicPlat
             clientContext = await Clients.AcquireAsync(Platform, Token).ConfigureAwait(false);
         await Guard().ConfigureAwait(false);
     }
-    private readonly MusicSyncRequestBudget budget = budget;
     internal string Platform => Session.Platform;
     internal string AccountId => Session.UserId;
     protected async Task<JsonObject> Send(HttpRequestMessage request, string? path = null)
     {
-        try { await AdmitRequest().ConfigureAwait(false); }
+        try { await Guard().ConfigureAwait(false); }
         catch { request.Dispose(); throw; }
         var response = await Http.SendAsync(Platform, request, Token).ConfigureAwait(false);
         await Guard().ConfigureAwait(false);
@@ -81,11 +80,6 @@ internal abstract class MusicSyncAdapter(MusicPlatformSession session, MusicPlat
     protected static void Require(bool condition, string code = "INCOMPLETE_PAGE") => LJ.Require(condition, code);
     protected static string Name(JsonNode? n) { string value = PJ.Metadata(n); Require(LJ.Id(value, 200), "INVALID_RESPONSE"); return value; }
     protected static void Same(IEnumerable<string> a, IEnumerable<string> b) => Require(a.SequenceEqual(b), "SNAPSHOT_CHANGED");
-    protected async Task AdmitRequest()
-    {
-        await Guard().ConfigureAwait(false);
-        budget.Admit(Platform);
-    }
     internal abstract Task<SyncDirectory> ReadAsync(string[] kinds);
     internal abstract Task<SyncRemote?> ReadCollectionAsync(string id);
     internal virtual void CheckWriteCapability(string operation) { }
@@ -97,7 +91,7 @@ internal abstract class MusicSyncAdapter(MusicPlatformSession session, MusicPlat
     {
         var sd = NativeMusicSong.SourceData(song);
         if (LJ.S(sd["source"]) != Platform) return null;
-        string id = Platform == "kg" ? LJ.S(sd["hash"]).ToUpperInvariant() : PJ.Scalar(sd["musicId"] ?? sd["songmid"]);
+        string id = Platform == "kg" ? LJ.S(sd["hash"]).ToUpperInvariant() : NativeMusicSong.InfoId(sd);
         return LJ.Id(id, 64) ? id : null;
     }
     internal virtual async Task<JsonObject?> ResolveAsync(JsonObject song)
@@ -107,17 +101,18 @@ internal abstract class MusicSyncAdapter(MusicPlatformSession session, MusicPlat
         using var catalog = new MusicPlatformCatalog(new Pinned(Session, checkpointGuard), Http, Clients);
         string query = (LJ.S(song["title"]) + " " + LJ.S(song["artist"])); query = query[..Math.Min(200, query.Length)];
         var matches = new Dictionary<string, JsonObject>(); long? total = null; int received = 0;
-        for (int page = 1; page <= (Platform == "kg" ? 10 : 1); page++)
+        var recordings = new NativeMusicSong.Recordings(song, Token);
+        for (int page = 1; ; page = checked(page + 1))
         {
-            await AdmitRequest().ConfigureAwait(false);
+            await Guard().ConfigureAwait(false);
             var result = await catalog.SearchAsync(new(Platform, query, Page: page, Limit: 30, Refresh: true), Token).ConfigureAwait(false);
             await AcceptCatalogReadAsync().ConfigureAwait(false);
             var value = JsonNode.Parse(result.GetRawText())!.AsObject();
-            if (Platform == "kg") { long n = Count(value["total"]); if (total is not null) Require(total == n, "SNAPSHOT_CHANGED"); total = n; if (n > 300) return null; }
+            if (Platform == "kg") { long n = Count(value["total"]); if (total is not null) Require(total == n, "SNAPSHOT_CHANGED"); total = n; }
             foreach (var candidate in Rows(value["items"], 30))
             {
                 received++;
-                if (NativeMusicSong.Compatible(song, candidate) && (song["sources"] as JsonArray ?? []).OfType<JsonObject>().All(s => NativeMusicSong.Compatible(s, candidate)) && NativeId(candidate) is { } id)
+                if (recordings.CanMerge(new(candidate, Token), Token) && NativeId(candidate) is { } id)
                     matches[id] = candidate;
             }
             if (Platform != "kg" || !LJ.B(value["more"])) break;

@@ -15,29 +15,40 @@ public sealed partial class MusicPlatformCatalog
         PJ.Require(request is not null);
         var p = request!;
         PJ.PageInput(p.Page, p.Limit);
+        PJ.Require(p.Pages >= 1 && p.Pages <= MusicSearchPaging.For(p.Platform).PagesPerRequest &&
+            p.Limit * p.Pages <= MusicSearchPaging.MaxItemsPerRequest && p.Page + (long)p.Pages - 1 <= int.MaxValue);
         PJ.Require(Enum.IsDefined(p.Kind));
         p = p with { Keyword = PJ.Input(p.Keyword).Trim() };
         PJ.Require(p.Keyword.Length > 0);
-        return RunAsync(p.Platform, "search", p, p.Refresh, c => Search(c, p), cancellationToken);
+        // Search results are cached once, by the search owner (per kind TTL, account aware).
+        return RunAsync(p.Platform, "search", p, p.Refresh, c => Search(c, p), cancellationToken, cacheable: false);
     }
     private static async Task<JsonObject> Search(Call c, MusicSearchRequest p)
     {
         var songs = p.Kind == MusicSearchKind.Songs;
         if (c.Platform == "wy")
         {
+            // Offset platform: one request covers p.Pages pages of p.Limit items.
+            int count = p.Limit * p.Pages;
+            long offset = (p.Page - 1L) * p.Limit;
             return await c.Wy("/api/cloudsearch/pc", PJ.Obj(("s", p.Keyword), ("type", songs ? 1 : 1000),
-                ("limit", p.Limit), ("offset", (p.Page - 1) * p.Limit), ("total", true)), data =>
+                ("limit", count), ("offset", offset), ("total", true)), data =>
             {
                 var total = PJ.Count(PJ.At(data, "result", songs ? "songCount" : "playlistCount"));
-                var items = PJ.Rows(PJ.At(data, "result", songs ? "songs" : "playlists") ?? (total == 0 ? new JsonArray() : null), p.Limit)
+                var items = PJ.Rows(PJ.At(data, "result", songs ? "songs" : "playlists") ?? (total == 0 ? new JsonArray() : null), count)
                     .Select(r => songs ? PlatformSongs.Wy(r) : PlatformSongs.Playlist("wy", r));
-                return PJ.Page("wy", items, p.Page, p.Limit, total, p.Page * (long)p.Limit < total);
+                return p.Pages == 1
+                    ? PJ.Page("wy", items, p.Page, p.Limit, total, p.Page * (long)p.Limit < total)
+                    : PJ.Page("wy", items, p.Page, count, total, offset + (long)count < total,
+                        next: p.Page + p.Pages, offset: offset);
             });
         }
         if (c.Platform == "tx")
         {
+            var searchId = RandomNumberGenerator.GetInt32(1, 21) * 18014398509481984L +
+                RandomNumberGenerator.GetInt32(4194305) * 4294967296L + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() % 86400000;
             var data = await c.Tx("music.search.SearchCgiService", "DoSearchForQQMusicMobile",
-                PJ.Obj(("searchid", new System.Numerics.BigInteger(RandomNumberGenerator.GetBytes(8), true).ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                PJ.Obj(("searchid", searchId.ToString(System.Globalization.CultureInfo.InvariantCulture)),
                     ("query", p.Keyword), ("search_type", songs ? 0 : 3), ("num_per_page", p.Limit), ("page_num", p.Page),
                     ("highlight", 0), ("grp", 1), ("selectors", new JsonObject()), ("vec_selectors", new JsonArray())));
             var total = PJ.Count(PJ.At(data, "meta", "sum"));
@@ -146,7 +157,7 @@ public sealed partial class MusicPlatformCatalog
                 PJ.Require(ids.LongLength == total && members.Count == ids.Length, "INCOMPLETE_PLAYLIST");
                 var revision = PJ.Hash(PJ.Node(new object?[] { c.Scope, id, ids, PJ.At(list, "updateTime"), PJ.At(list, "trackUpdateTime") }));
                 CheckSnapshot(p.Snapshot, revision);
-                var pageIds = ids.Skip((p.Page - 1) * p.Limit).Take(p.Limit).ToArray();
+                var pageIds = ids.Skip((int)Math.Min(ids.LongLength, (p.Page - 1L) * p.Limit)).Take(p.Limit).ToArray();
                 foreach (var memberId in pageIds) PJ.IdInput(memberId);
                 var tracks = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
                 foreach (var track in PJ.Rows(PJ.At(list, "tracks") ?? new JsonArray(), 10000))
@@ -177,7 +188,7 @@ public sealed partial class MusicPlatformCatalog
         {
             var id = PJ.IdInput(p.Id);
             var data = await c.Tx("music.srfDissInfo.DissInfo", "CgiGetDiss",
-                PJ.Obj(("disstid", JsonNode.Parse(id)), ("dirid", 0), ("tag", 1), ("song_begin", (p.Page - 1) * p.Limit),
+                PJ.Obj(("disstid", JsonNode.Parse(id)), ("dirid", 0), ("tag", 1), ("song_begin", (p.Page - 1L) * p.Limit),
                     ("song_num", p.Limit), ("userinfo", 1), ("orderlist", 1), ("onlysonglist", 0)));
             var total = PJ.Count(data["total_song_num"]);
             var more = PJ.Count(data["hasmore"]); PJ.Require(more is 0 or 1, "INVALID_RESPONSE");
@@ -196,16 +207,28 @@ public sealed partial class MusicPlatformCatalog
             var id = PJ.IdInput(p.Id, @"^[\w-]{1,200}$");
             PJ.Require(!id.StartsWith("id_", StringComparison.Ordinal));
             var data = (await c.Kg("/pubsongs/v2/get_other_list_file_nofilt",
-                PJ.Obj(("area_code", 1), ("begin_idx", (p.Page - 1) * p.Limit), ("plat", 1), ("type", 1), ("mode", 1),
+                PJ.Obj(("area_code", 1), ("begin_idx", (p.Page - 1L) * p.Limit), ("plat", 1), ("type", 1), ("mode", 1),
                     ("personal_switch", 1), ("extend_fields", "abtags,hot_cmt,popularization"), ("pagesize", p.Limit), ("global_collection_id", id))))["data"];
-            var list = PJ.At(data, "list_info");
-            PJ.Require(list is JsonObject && (PJ.At(list, "global_collection_id") is null || PJ.S(list, "global_collection_id") == id), "IDENTITY_MISMATCH");
-            var total = PJ.Count(PJ.First(PJ.At(list, "count"), PJ.At(data, "count")));
+            var listNode = PJ.At(data, "list_info");
+            PJ.Require(listNode is null or JsonObject || listNode.GetValueKind() == JsonValueKind.Null, "INVALID_RESPONSE");
+            var list = listNode as JsonObject;
+            PJ.Require(list is null || PJ.At(list, "global_collection_id") is null || PJ.S(list, "global_collection_id") == id, "IDENTITY_MISMATCH");
+            var listCount = list is null ? null : PJ.At(list, "count");
+            var dataCount = PJ.At(data, "count");
+            if (listCount is not null && dataCount is not null)
+                PJ.Require(PJ.Count(listCount) == PJ.Count(dataCount), "INVALID_RESPONSE");
+            var totalValue = PJ.First(listCount, dataCount);
+            PJ.Require(totalValue is not null, "INVALID_RESPONSE");
+            var total = PJ.Count(totalValue);
             var songs = ExactPage(PJ.First(PJ.At(data, "songs"), PJ.At(data, "info")) ?? (total == 0 ? new JsonArray() : null),
                 p.Page, p.Limit, total).Select(PlatformSongs.Kg);
-            var cardInput = (JsonObject)list!.DeepClone(); cardInput["global_collection_id"] = id;
-            info = PlatformSongs.Playlist("kg", cardInput);
-            snapshot = PJ.Hash(PJ.Node(new object?[] { c.Scope, id, total, PJ.S(info, "name"), PJ.At(list, "version") }));
+            if (list is null) info = PJ.Obj(("name", ""), ("cover", ""));
+            else
+            {
+                var cardInput = (JsonObject)list.DeepClone(); cardInput["global_collection_id"] = id;
+                info = PlatformSongs.Playlist("kg", cardInput);
+            }
+            snapshot = PJ.Hash(PJ.Node(new object?[] { c.Platform, c.Scope, id, total }));
             CheckSnapshot(p.Snapshot, snapshot);
             page = PJ.Page("kg", songs, p.Page, p.Limit, total, p.Page * (long)p.Limit < total);
             page["snapshotStrength"] = "metadata-only";
@@ -218,7 +241,7 @@ public sealed partial class MusicPlatformCatalog
     {
         if (expected is not null) PJ.Require(expected == actual, "SNAPSHOT_CHANGED");
     }
-    private static List<JsonObject> ExactPage(JsonNode? input, int page, int limit, long total)
+    private static List<JsonObject> ExactPage(JsonNode? input, long page, int limit, long total)
     {
         var values = PJ.Rows(input, limit);
         PJ.Require(values.Count == Math.Min(limit, Math.Max(0, total - (page - 1L) * limit)), "INCOMPLETE_PAGE");

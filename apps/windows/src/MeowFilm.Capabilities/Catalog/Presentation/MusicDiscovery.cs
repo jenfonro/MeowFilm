@@ -32,7 +32,7 @@ public sealed partial class MusicCapability
     public ObservableCollection<MusicDiscoveryChart> DiscoveryCharts { get; } = [];
     public ObservableCollection<MusicDiscoveryFailure> DiscoveryFailures { get; } = [];
     public bool IsDiscovery => location.Route == "catalog-discovery";
-    public bool IsCatalogContent => IsCatalogPage && !IsDiscovery && !IsCatalogDetailPage && !IsAggregateSongs;
+    public bool IsCatalogContent => IsCatalogPage && !IsDiscovery && !IsCatalogDetailPage && !IsSearchSongs;
     public bool CanUseDiscovery => !stopping && IsDiscovery && discoveryRequest is null &&
         discoverySnapshot is { } value && application.IsDiscoveryCurrent(value.Generation);
     public bool CanRotateDiscovery => CanUseDiscovery && commands == 0 && DiscoveryRecommended.Count > 0;
@@ -204,7 +204,7 @@ public sealed partial class MusicCapability
         if (!CanUseDiscovery || commands > 0 || word is null ||
             !(DiscoveryHot.Any(r => ReferenceEquals(r, word)) || DiscoveryRecommended.Any(r => ReferenceEquals(r, word)))) return;
         await SearchAsync(word.Text, lifetime.Token);
-        if (!stopping && IsAggregateSearch && aggregateKeyword == word.Text) await RequestNavigationAsync("catalog-search");
+        if (!stopping && IsSearchPage && searchKeyword == word.Text) await RequestNavigationAsync("catalog-search");
     }
     private bool CurrentDiscoveryChart(MusicDiscoveryChart chart) =>
         CanUseDiscovery && DiscoveryCharts.Any(c => ReferenceEquals(c, chart));

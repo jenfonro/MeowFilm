@@ -165,7 +165,7 @@ public sealed partial class MusicCapability
         if (!currentAction() || !sourceCurrent()) return;
         var song = SongRow.Read(reply.GetProperty("song"));
         MusicDto.Require(MusicCatalogDto.SongNativeId(song.Raw) == id &&
-            MusicCatalogDto.Text(song.Raw.GetProperty("source_data"), "source") == platform);
+            SongJson.Platform(song.Raw) == platform);
         await RunAsync(async () =>
         {
             if (!currentAction() || !sourceCurrent()) return;

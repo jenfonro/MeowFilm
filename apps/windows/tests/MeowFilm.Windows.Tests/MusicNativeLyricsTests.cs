@@ -63,7 +63,7 @@ public static class MusicNativeLyricsTests
             Equal(before.Nuid, S(sent[0]["header"]!["_ntes_nuid"]));
             var after = await f.Clients.Owner.AcquireWyAsync();
             Equal("SYNTHETIC_LYRIC_NMTID", after.Nmtid); Equal(before.Generation + 1, after.Generation);
-            True(!f.Clients.Owner.IsCurrent(before) && f.Clients.Owner.IsCurrent(after));
+            True(f.Clients.Owner.IsCurrent(before) && f.Clients.Owner.IsCurrent(after));
             await f.Read(Wy);
             Equal(after.Nmtid, S(sent[1]["header"]!["NMTID"])); True(sent[1]["header"]!["MUSIC_U"] is null);
             True(ReferenceEquals(after, await f.Clients.Owner.AcquireWyAsync()));
@@ -389,7 +389,7 @@ public static class MusicNativeLyricsTests
             await Error("STALE_SESSION", () => pending);
             await Until(() => f.Handler.Physical == 0);
         });
-        yield return Case("cancelled HTTP retains physical per-platform slots", async () =>
+        yield return Case("cancelled HTTP drains without blocking another lyric read", async () =>
         {
             var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             using var f = new Fixture(async (_, _) => { await release.Task; return WyReply("[00:01]late"); }); using var cts = new CancellationTokenSource();
@@ -398,24 +398,25 @@ public static class MusicNativeLyricsTests
             {
                 await Until(() => f.Calls == 2); cts.Cancel(); await Task.Delay(30);
                 True(!a.IsCompleted && !b.IsCompleted);
-                await Error("RATE_LIMITED", () => f.Read(Wy)); Equal(2, f.Calls);
+                var c = f.Read(Wy); await Until(() => f.Calls == 3);
+                release.TrySetResult(true); await c;
             }
             finally { release.TrySetResult(true); }
             await Error("CANCELLED", () => a); await Error("CANCELLED", () => b);
             await Until(() => f.Handler.Physical == 0);
         });
-        yield return Case("noncooperative session keeps eight physical operation slots", async () =>
+        yield return Case("noncooperative session reads remain owned without a shared request quota", async () =>
         {
             var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             using var f = new Fixture((_, _) => Task.FromResult(WyReply("[00:01]x"))); int physical = 0;
             f.Sessions.Read = async (_, _) => { Interlocked.Increment(ref physical); try { await release.Task; return null; } finally { Interlocked.Decrement(ref physical); } };
             using var cts = new CancellationTokenSource();
-            var reads = Enumerable.Range(0, 8).Select(_ => f.Service.ReadAsync(Wy, cts.Token)).ToArray();
+            var reads = Enumerable.Range(0, 20).Select(_ => f.Service.ReadAsync(Wy, cts.Token)).ToArray();
             try
             {
-                await Until(() => Volatile.Read(ref physical) == 8); cts.Cancel(); await Task.Delay(30);
+                await Until(() => Volatile.Read(ref physical) == 20); cts.Cancel(); await Task.Delay(30);
                 True(reads.All(read => !read.IsCompleted));
-                await Error("RATE_LIMITED", () => f.Read(Wy)); Equal(0, f.Calls);
+                Equal(0, f.Calls);
             }
             finally { release.TrySetResult(true); }
             foreach (var read in reads) await Error("CANCELLED", () => read);
@@ -438,10 +439,12 @@ public static class MusicNativeLyricsTests
             yield return Case("strict JSON response " + i, async () =>
             { using var f = new Fixture((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(raw) })); await Error("INVALID_RESPONSE", () => f.Read(Wy)); });
         }
-        yield return Case("larger lyric string seam preserves ordinary JSON cap", async () =>
+        yield return Case("lyric-sized strings remain valid in both native lyrics and ordinary JSON responses", async () =>
         {
             var text = "[00:01]" + new string('x', 60000); using var f = new Fixture((_, _) => Task.FromResult(WyReply(text)));
-            Equal(text, (await f.Read(Wy))!.Text); await Error("LIMIT", () => f.Http.SendAsync("wy", new(HttpMethod.Get, "https://music.163.com/api/test"), default));
+            Equal(text, (await f.Read(Wy))!.Text);
+            var ordinary = await f.Http.SendAsync("wy", new(HttpMethod.Get, "https://music.163.com/api/test"), default);
+            Equal(text, ordinary.Body["lrc"]!["lyric"]!.GetValue<string>());
         });
         yield return Case("decoded segment declared and streamed response caps", async () =>
         {

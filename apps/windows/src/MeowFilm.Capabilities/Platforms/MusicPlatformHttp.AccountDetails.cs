@@ -15,10 +15,9 @@ public sealed partial class MusicPlatformHttp
         HttpRequestMessage request, CancellationToken token, TimeSpan remaining)
     {
         ArgumentNullException.ThrowIfNull(request);
-        try { PJ.Require(remaining.TotalMilliseconds is >= 1 and <= 60000, "LIMIT"); }
+        try { PJ.Require(remaining > TimeSpan.Zero, "LIMIT"); }
         catch { request.Dispose(); throw; }
-        return SendCoreAsync(platform, request, token, 1048576,
-            TimeSpan.FromMilliseconds(Math.Min(20000, remaining.TotalMilliseconds)),
+        return SendCoreAsync(platform, request, token, 1048576, remaining,
             (bytes, response, _) => platform == "wy"
                 ? JsonResult(PJ.Parse(bytes, 1048576), response)
                 : new MusicPlatformHttpResult(PJ.Parse(bytes, 1048576), []),

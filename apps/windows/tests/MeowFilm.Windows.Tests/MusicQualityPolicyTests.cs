@@ -290,13 +290,12 @@ public static class MusicQualityPolicyTests
         }
         var page = await Call("music.catalog.search", new { platform = "wy", keyword = "合成歌曲", limit = 1 });
         var song = page.GetProperty("items")[0].Clone();
-        Check(wire.Calls == 1 && !song.GetProperty("source_data").TryGetProperty("types", out _) &&
-            !song.GetProperty("sources")[0].GetProperty("source_data").TryGetProperty("types", out _));
+        Check(wire.Calls == 1 && !MusicSongFixture.Info(song).TryGetProperty("types", out _));
         Check(!runtime.HasStarted, "ordinary native catalog must not start Node");
         const string source = """
             let calls=0;
             lx.on(lx.EVENT_NAMES.request,async ({info})=>{
-              if(info.type!=='320k'||info.musicInfo.musicId!=='11'||'types' in info.musicInfo)
+              if(info.type!=='320k'||info.musicInfo.songmid!=='11'||'types' in info.musicInfo)
                 throw new Error('unexpected recording or type');
               if(++calls>1) return null;
               return 'https://media.invalid/wy/11/320k';
@@ -327,8 +326,7 @@ public static class MusicQualityPolicyTests
             new { installationId = id, platform = "wy", quality = "auto", song }), "QUALITY_UNAVAILABLE");
         Check(runtime.Calls.Count(method => method == "music.script.invoke") == invokes, "auto must not guess types");
         var known = QualityFixture.O(song);
-        known["source_data"]!["qualityKnown"] = true;
-        foreach (var row in known["sources"]!.AsArray()) row!["source_data"]!["qualityKnown"] = true;
+        foreach (var row in known["sources"]!.AsArray()) row!["musicInfo"]!["qualityKnown"] = true;
         QualityFixture.Code(await app.ExecuteAsync("music.online.resolve",
             new { installationId = id, platform = "wy", quality = "320k", song = known }), "RECORDING_QUALITY_UNAVAILABLE");
         Check(runtime.Calls.Count(method => method == "music.script.invoke") == invokes,

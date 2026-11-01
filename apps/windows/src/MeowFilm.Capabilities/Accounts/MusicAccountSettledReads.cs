@@ -129,7 +129,7 @@ public sealed partial class MusicAccountOwner
     }
 
     // Native discovery hydration, not another JSON/Node command or credential owner.
-    // Same list/reconciliation rules and admission budget; only this physical read
+    // Same list/reconciliation rules; only this physical read
     // and its synchronous notifications are awaited. No global barrier or replay.
     internal async Task<JsonElement> RestoreForDiscoveryAsync(CancellationToken cancellationToken = default)
     {

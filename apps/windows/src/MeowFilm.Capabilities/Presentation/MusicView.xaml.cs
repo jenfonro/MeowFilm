@@ -255,7 +255,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
     }
     private ScrollViewer? ActiveScroll() => module.IsArchives ? ArchiveScroll :
         module.IsDiscovery ? Descendant<ScrollViewer>(DiscoveryView) :
-        module.IsContentDetailPage || module.IsAggregateSongs ? Descendant<ScrollViewer>(SongsGrid) :
+        module.IsContentDetailPage || module.IsSearchSongs ? Descendant<ScrollViewer>(SongsGrid) :
         module.IsCatalogPage ? CatalogView.CatalogScroll : Descendant<ScrollViewer>(SongsGrid);
     private static T? Descendant<T>(DependencyObject parent) where T : DependencyObject
     {
@@ -378,7 +378,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
     {
         if (loadingMoreSongs || !SongsGrid.IsVisible ||
             (!module.CanLoadMoreCollection && !module.CanLoadMoreCatalogPlaylist &&
-             !module.CanLoadMoreAggregateSongs) ||
+             !module.CanLoadMoreSearchSongs) ||
             Descendant<ScrollViewer>(SongsGrid) is not { } scroll ||
             scroll.ExtentHeight <= 0 || scroll.VerticalOffset + scroll.ViewportHeight < scroll.ExtentHeight - 96) return;
         loadingMoreSongs = true;
@@ -387,7 +387,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         {
             if (module.CanLoadMoreCollection) await module.LoadMoreCollectionAsync();
             else if (module.CanLoadMoreCatalogPlaylist) await module.LoadMoreCatalogPlaylistAsync();
-            else if (module.CanLoadMoreAggregateSongs) await module.MoreAggregateSearchAsync();
+            else if (module.CanLoadMoreSearchSongs) await module.MoreSearchAsync();
         }
         finally
         {
@@ -399,7 +399,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
     private async void SearchTab_Click(object sender, RoutedEventArgs e)
     {
         if (sender is Button { Tag: string tab })
-            await module.OpenAggregateSearchTabAsync(tab);
+            await module.OpenSearchTabAsync(tab);
     }
 
     private void SongsGrid_MouseDown(object sender, MouseButtonEventArgs e)

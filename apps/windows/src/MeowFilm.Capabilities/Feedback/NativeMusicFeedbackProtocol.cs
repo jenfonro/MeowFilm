@@ -7,7 +7,7 @@ namespace MeowFilm.Capabilities.Feedback;
 
 /// <summary>
 /// Borrowed native accounts/HTTP; no settings, media clock, automatic retry or durable work.
-/// Each platform/instance is reserved before I/O. Unsupported exact protocols fail closed.
+/// Each playback/platform attempt is reserved before I/O. Only active sessions are retained.
 /// </summary>
 internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource accounts, MusicPlatformHttp http,
     MusicPlatformClientContextOwner clients, TimeProvider? clock = null) : IMusicFeedbackProtocol
@@ -18,12 +18,11 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
     private readonly TimeProvider clock = clock ?? TimeProvider.System;
     private readonly object gate = new();
     private readonly CancellationTokenSource lifetime = new();
-    private readonly Dictionary<(string Platform, string Id), Entry> entries = [];
-    private readonly Dictionary<string, Queue<long>> attempts = [];
     private readonly HashSet<Task> pending = [];
     private readonly HashSet<Session> sessions = [];
     private Task? disposal;
     private bool closed;
+    internal int ActiveSessionCount { get { lock (gate) return sessions.Count; } }
     private sealed class Entry(string fingerprint)
     {
         internal readonly string Fingerprint = fingerprint;
@@ -47,6 +46,7 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
         internal MusicWyClientContext? Client;
         internal MusicWyClientContext WyClient => Client!;
         internal Task? Disposal;
+        internal Task? Release;
         internal bool Closed, Accepted;
         internal Session(NativeMusicFeedbackProtocol owner, MusicPlatformSession account, MusicFeedbackStart input,
             Entry entry, CancellationToken token)
@@ -71,25 +71,22 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
         string fingerprint = FeedbackProtocolRules.Fingerprint(account, start);
         Session session;
         lock (gate)
+        lock (start.Attempt.Gate)
         {
             GuardAccount(account);
-            var key = (account.Platform, start.InstanceId);
-            if (entries.TryGetValue(key, out var old))
+            if (start.Attempt.State is Entry old)
             {
                 FeedbackProtocolRules.Require(old.Fingerprint == fingerprint, "INSTANCE_MISMATCH");
                 FeedbackProtocolRules.Require(old.Terminal is null, old.Terminal ?? "START_UNCONFIRMED");
                 FeedbackProtocolRules.Require(old.Active is { Closed: false }, "CLOSED");
+                FeedbackProtocolRules.Require(ReferenceEquals(old.Active!.Owner, this), "INSTANCE_MISMATCH");
                 old.Active!.Token.ThrowIfCancellationRequested();
                 return ObserveDuplicate(old.Start!, old.Active, cancellationToken);
             }
-            // Compact terminal entries are not expired/evicted: eviction could replay an ambiguous write.
-            FeedbackProtocolRules.Require(entries.Count < 8192, "INSTANCE_LIMIT");
-            FeedbackProtocolRules.Require(sessions.Count < 128 && pending.Count < 8, "RATE_LIMITED");
-            Reserve(account.Platform);
             var entry = new Entry(fingerprint);
             session = new(this, account, start, entry, cancellationToken);
             entry.Active = session; entry.Start = session.Started.Task;
-            entries.Add(key, entry); sessions.Add(session); pending.Add(session.Started.Task);
+            start.Attempt.State = entry; sessions.Add(session); pending.Add(session.Started.Task);
         }
         _ = RunStart(session);
         return session.Started.Task;
@@ -116,14 +113,6 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
             session.Token.ThrowIfCancellationRequested();
             token.ThrowIfCancellationRequested();
         }
-    }
-    private void Reserve(string platform)
-    {
-        if (!attempts.TryGetValue(platform, out var times)) attempts[platform] = times = new();
-        long now = clock.GetTimestamp();
-        while (times.TryPeek(out var at) && clock.GetElapsedTime(at, now) >= TimeSpan.FromMinutes(1)) times.Dequeue();
-        FeedbackProtocolRules.Require(times.Count < 40, "RATE_LIMITED");
-        times.Enqueue(now);
     }
     private async Task Send(Session session, HttpRequestMessage request, CancellationToken token,
         Action<JsonObject> validate)
@@ -201,17 +190,12 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
             }
         }
         // Failed registrations still own any returned device lease until it has settled.
-        if (session.Qq is not null)
-        {
-            try { await session.Qq.DisposeAsync().ConfigureAwait(false); }
-            catch (Exception error) { failure = Sanitize(error); }
-            session.Qq = null;
-        }
+        try { await ReleaseResources(session).ConfigureAwait(false); }
+        catch (Exception error) { failure = Sanitize(error); }
         lock (gate)
         {
             Retire(session, "START_UNCONFIRMED");
             session.Closed = true;
-            session.Stop.Dispose();
             pending.Remove(session.Started.Task);
             if (failure is OperationCanceledException cancelled) session.Started.TrySetCanceled(cancelled.CancellationToken);
             else session.Started.TrySetException(failure!);
@@ -223,29 +207,21 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
         token.ThrowIfCancellationRequested();
         lock (gate)
         {
-            Guard(session, token);
-            session.Qq?.Guard(token);
-            FeedbackProtocolRules.Require(session.Accepted, "START_UNCONFIRMED");
             if (session.Finished is not null)
             {
                 FeedbackProtocolRules.Require(session.End == end, "INSTANCE_MISMATCH");
-                return ObserveFinish(session.Finished.Task, session, token);
+                return session.Finished.Task.WaitAsync(token);
             }
-            FeedbackProtocolRules.Require(pending.Count < 8, "RATE_LIMITED");
-            Reserve(session.Account.Platform);
+            Guard(session, token);
+            session.Qq?.Guard(token);
+            FeedbackProtocolRules.Require(session.Accepted, "START_UNCONFIRMED");
             session.End = end;
             session.Finished = new(TaskCreationOptions.RunContinuationsAsynchronously);
             pending.Add(session.Finished.Task);
-            session.Entry.Terminal = "INSTANCE_ENDED";
+            lock (session.Input.Attempt.Gate) session.Entry.Terminal = "INSTANCE_ENDED";
         }
         _ = RunFinish(session, end, token);
         return session.Finished.Task;
-    }
-    private async Task ObserveFinish(Task task, Session session, CancellationToken token)
-    {
-        await task.WaitAsync(token).ConfigureAwait(false);
-        Guard(session, token);
-        session.Qq?.Guard(token);
     }
     private async Task RunFinish(Session session, MusicFeedbackEnd end, CancellationToken external)
     {
@@ -274,7 +250,13 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
             if (failure is null)
                 try { Guard(session, linked.Token); session.Qq?.Guard(linked.Token); }
                 catch (Exception error) { failure = Sanitize(error); }
-            linked.Dispose();
+        }
+        linked.Dispose();
+        try { await ReleaseResources(session).ConfigureAwait(false); }
+        catch (Exception error) { failure = Sanitize(error); }
+        lock (gate)
+        {
+            session.Closed = true;
             Retire(session, "INSTANCE_ENDED");
             pending.Remove(session.Finished!.Task);
             if (failure is OperationCanceledException cancelled) session.Finished.TrySetCanceled(cancelled.CancellationToken);
@@ -286,11 +268,23 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
         ? error : new MusicFeedbackException(FeedbackProtocolRules.SafeError(error));
     private void Retire(Session session, string reason)
     {
-        session.Entry.Terminal = reason;
-        session.Entry.Active = null;
-        session.Entry.Start = null;
-        // The caller owns a successful session until Dispose; retaining it here allows owner-wide drain.
-        if (!session.Accepted) sessions.Remove(session);
+        lock (session.Input.Attempt.Gate)
+        {
+            session.Entry.Terminal = reason;
+            session.Entry.Active = null;
+            session.Entry.Start = null;
+        }
+        sessions.Remove(session);
+    }
+    private Task ReleaseResources(Session session)
+    {
+        lock (gate) return session.Release ??= Release();
+        async Task Release()
+        {
+            await Task.Yield();
+            try { if (session.Qq is not null) await session.Qq.DisposeAsync().ConfigureAwait(false); }
+            finally { session.Qq = null; session.Stop.Dispose(); }
+        }
     }
     private Task DisposeSession(Session session)
     {
@@ -301,7 +295,7 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
             if (session.Disposal is not null) return session.Disposal;
             done = new(TaskCreationOptions.RunContinuationsAsynchronously);
             session.Disposal = done.Task; session.Closed = true;
-            session.Entry.Terminal ??= "INSTANCE_ENDED";
+            lock (session.Input.Attempt.Gate) session.Entry.Terminal ??= "INSTANCE_ENDED";
             work = session.Finished is null ? [session.Started.Task] : [session.Started.Task, session.Finished.Task];
         }
         _ = Drain();
@@ -311,14 +305,11 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
             Cancel(session.Stop);
             try { await Task.WhenAll(work).ConfigureAwait(false); } catch { /* Results stay on their original tasks. */ }
             Exception? releaseFailure = null;
-            if (session.Qq is not null)
-                try { await session.Qq.DisposeAsync().ConfigureAwait(false); }
-                catch (Exception error) { releaseFailure = Sanitize(error); }
+            try { await ReleaseResources(session).ConfigureAwait(false); }
+            catch (Exception error) { releaseFailure = Sanitize(error); }
             lock (gate)
             {
                 Retire(session, "INSTANCE_ENDED");
-                sessions.Remove(session);
-                session.Stop.Dispose();
                 if (releaseFailure is null) done.TrySetResult();
                 else done.TrySetException(releaseFailure);
             }
@@ -352,7 +343,7 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
             catch (Exception error) { releaseFailure = Sanitize(error); }
             lock (gate)
             {
-                entries.Clear(); attempts.Clear(); lifetime.Dispose();
+                lifetime.Dispose();
                 if (releaseFailure is null) done.TrySetResult();
                 else done.TrySetException(releaseFailure);
             }
