@@ -39,11 +39,12 @@ function fixture(t) {
   const manifest = { name: 'runtime-engine-fixture', version: '1.0.0', private: true, workspaces: ['packages/*'] };
   const lock = { name: manifest.name, version: manifest.version, lockfileVersion: 3, packages: { '': { ...manifest } } };
   write('package.json', manifest);
-  for (const name of ['runtime-bridge', 'script-host']) {
+  for (const name of ['runtime-bridge', 'source-runtime', 'script-host']) {
     const location = `packages/${name}`, installed = `node_modules/@meowfilm/${name}`;
     const pkg = { name: `@meowfilm/${name}`, version: '1.0.0', type: 'module', license: 'UNLICENSED',
       exports: './src/index.js', files: ['src'],
       ...(name === 'script-host' ? { dependencies: {
+        '@meowfilm/source-runtime': '1.0.0',
         'quickjs-emscripten-core': '0.32.0', '@jitl/quickjs-wasmfile-release-sync': '0.32.0',
       } } : {}),
     };
@@ -66,6 +67,7 @@ function fixture(t) {
   write(policy.license.path, readFileSync(join(repository, policy.license.path)));
   write('apps/runtime/bootstrap.mjs', inert);
   write('apps/runtime/modules/music-script.mjs', inert);
+  write('apps/runtime/modules/source-runtime.mjs', inert);
   for (const file of ['bootstrap.mjs', 'entries/aggregate.mjs'])
     write(`apps/windows/runtime/${file}`, readFileSync(join(repository, 'apps/windows/runtime', file)));
   const saveLock = () => write('package-lock.json', lock);
@@ -111,7 +113,8 @@ test('engine packaging pins real lock/manifest/license/WASM bytes without execut
     assert.equal(dependency.licenseSha256, hash(readFileSync(join(f.output, dependency.path, 'LICENSE'))));
   }
   for (const path of [policyPath, policy.license.path, wasmPath,
-    'apps/runtime/bootstrap.mjs', 'apps/runtime/modules/music-script.mjs']) {
+    'apps/runtime/bootstrap.mjs', 'apps/runtime/modules/music-script.mjs',
+    'apps/runtime/modules/source-runtime.mjs']) {
     assert.deepEqual(manifest.inputs.find(input => input.path === path), {
       path, sha256: hash(readFileSync(join(f.root, path))),
     });
@@ -280,12 +283,15 @@ test('Windows wrapper relocates its entry onto the same common module/engine clo
   const manifest = await packageWindowsRuntime({ ...f, product: 'aggregate' });
   assert.equal(manifest.status, 'complete');
   assert.deepEqual(manifest.files.filter(file => file.path.startsWith('app/')).map(file => file.path), [
-    'app/bootstrap.mjs', 'app/modules/music-script.mjs',
+    'app/bootstrap.mjs', 'app/modules/music-script.mjs', 'app/modules/source-runtime.mjs',
     'app/windows/bootstrap.mjs', 'app/windows/entries/aggregate.mjs',
   ]);
-  assert.deepEqual(readFileSync(join(f.output, 'app/modules/music-script.mjs')),
-    readFileSync(join(f.root, 'apps/runtime/modules/music-script.mjs')));
-  assert.ok(readFileSync(join(f.output, manifest.entry), 'utf8').includes("from '../../modules/music-script.mjs'"));
+  for (const module of ['music-script.mjs', 'source-runtime.mjs']) {
+    assert.deepEqual(readFileSync(join(f.output, `app/modules/${module}`)),
+      readFileSync(join(f.root, `apps/runtime/modules/${module}`)));
+    assert.ok(readFileSync(join(f.output, manifest.entry), 'utf8')
+      .includes(`from '../../modules/${module}'`));
+  }
   assert.deepEqual(manifest.files.filter(file => /\.wasm$/i.test(file.path)).map(file => file.path), [wasmPath]);
 });
 

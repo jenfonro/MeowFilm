@@ -9,9 +9,12 @@
 ## 共用脚本运行时
 
 - [公共核心与平台边界](runtime/script-runtime.md)
+- [来源 capability ABI](runtime/source-capability-abi.md)
 - [原始 LX 音源契约 music.script.v2](runtime/music-script-runtime.md)
+- [Reader 书源运行时](runtime/reader-source-runtime.md)
+- [CatVod JS 运行时](runtime/cat-source-runtime.md)
 - [Runtime bridge](runtime/runtime-bridge.md)
-- [外部音源动态验收](runtime/source-acceptance.md)
+- [外部来源动态验收](runtime/source-acceptance.md)
 
 ## iOS
 

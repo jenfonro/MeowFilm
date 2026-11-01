@@ -8,12 +8,14 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 
 const PRODUCTS = Object.freeze({
-  aggregate: ['music'],
+  aggregate: ['music', 'source'],
 });
 const MANIFEST = 'runtime-manifest.json';
 const SHARED_SOURCE = 'apps/runtime';
-const SHARED_FILES = ['bootstrap.mjs', 'modules/music-script.mjs'];
-const SHARED_IMPORTS = new Set(['node:crypto', '@meowfilm/runtime-bridge', '@meowfilm/script-host']);
+const SHARED_FILES = ['bootstrap.mjs', 'modules/music-script.mjs', 'modules/source-runtime.mjs'];
+const SHARED_IMPORTS = new Set([
+  'node:crypto', '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
+]);
 const ENGINE_POLICY = 'scripts/quickjs-runtime.json';
 const ENGINE_VERSION = '0.32.0';
 const ENGINE_WASM_PACKAGE = '@jitl/quickjs-wasmfile-release-sync';
@@ -320,7 +322,7 @@ function buildGraph(root, product, profile = 'windows-native') {
     if (value.link) safeRelative(value.resolved);
   }
   const modules = PRODUCTS[product];
-  const selected = ['runtime-bridge', 'script-host'];
+  const selected = ['runtime-bridge', 'source-runtime', 'script-host'];
   const workspacePaths = new Map(selected.map(name => [`packages/${name}`, `node_modules/@meowfilm/${name}`]));
   const nodes = new Map(), edges = [], omitted = [];
   const inputs = [{ path: 'package.json', sha256: rootJSON.hash }, { path: 'package-lock.json', sha256: lockJSON.hash }];

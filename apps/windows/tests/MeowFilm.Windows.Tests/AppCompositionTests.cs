@@ -48,8 +48,8 @@ public static class AppCompositionTests
         Check(AppDataPaths.Current == AppDataPaths.ForIdentity("aggregate"));
         Check(AppDataPaths.Current.Documents == Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "meowfilm", "aggregate"));
-        Check(AppIdentity.ScriptModules.Select(m => m.Id).SequenceEqual(new[] { "music" }));
-        Check(AppIdentity.ScriptModules.Single().Version == "0.5.0");
+        Check(AppIdentity.ScriptModules.Select(m => m.Id).SequenceEqual(new[] { "music", "source" }));
+        Check(AppIdentity.ScriptModules.Select(m => m.Version).SequenceEqual(new[] { "0.5.0", "0.1.0" }));
         Check(AppIdentity.NativeNamespaces.Contains("music.accounts.v1"));
         Check(AppIdentity.NativeNamespaces.Contains("music.platform-context.v1"));
         return Task.CompletedTask;

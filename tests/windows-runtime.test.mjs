@@ -24,7 +24,42 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const temporary = join(temporaryRoot, 'windows-runtime-tests');
 mkdirSync(temporary, { recursive: true });
 const windows = { skip: process.platform !== 'win32' ? 'Requires real Windows named pipes' : false, timeout: 20000 };
-const products = { aggregate: ['music'] };
+const products = { aggregate: ['music', 'source'] };
+const runtimeDependencies = [
+  'node_modules/@acemir/cssom',
+  'node_modules/@jitl/quickjs-ffi-types',
+  'node_modules/@jitl/quickjs-wasmfile-release-sync',
+  'node_modules/@meowfilm/runtime-bridge',
+  'node_modules/@meowfilm/script-host',
+  'node_modules/@meowfilm/source-runtime',
+  'node_modules/acorn',
+  'node_modules/boolbase',
+  'node_modules/css-select',
+  'node_modules/css-what',
+  'node_modules/dom-serializer',
+  'node_modules/domelementtype',
+  'node_modules/domhandler',
+  'node_modules/domutils',
+  'node_modules/entities',
+  'node_modules/fontoxpath',
+  'node_modules/html-escaper',
+  'node_modules/htmlparser2',
+  'node_modules/htmlparser2/node_modules/dom-serializer',
+  'node_modules/htmlparser2/node_modules/dom-serializer/node_modules/entities',
+  'node_modules/htmlparser2/node_modules/domelementtype',
+  'node_modules/htmlparser2/node_modules/domhandler',
+  'node_modules/htmlparser2/node_modules/domutils',
+  'node_modules/htmlparser2/node_modules/entities',
+  'node_modules/iconv-lite',
+  'node_modules/linkedom',
+  'node_modules/nth-check',
+  'node_modules/prsc',
+  'node_modules/quickjs-emscripten-core',
+  'node_modules/safer-buffer',
+  'node_modules/uhyphen',
+  'node_modules/whynot',
+  'node_modules/xspattern',
+].sort();
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const readJSON = path => JSON.parse(readFileSync(path, 'utf8'));
 const privateMarker = 'synthetic-private-diagnostic-must-not-be-logged';
@@ -85,12 +120,14 @@ function verifyManifest(output, manifest) {
   assert.deepEqual(paths.filter(path => /\.wasm$/i.test(path)), manifest.trustedWasm.map(file => file.path));
   assert.equal(manifest.sharedEntry, undefined);
   assert.equal(manifest.assemblyProfile, 'windows-native');
-  assert.deepEqual(readFileSync(join(output, 'app/modules/music-script.mjs')),
-    readFileSync(join(root, 'apps/runtime/modules/music-script.mjs')));
-  assert.equal(existsSync(join(output, 'node_modules/@meowfilm/script-host')), true);
-  assert.deepEqual(manifest.dependencies.map(item => item.name).sort(),
-    ['@jitl/quickjs-ffi-types', '@jitl/quickjs-wasmfile-release-sync',
-      '@meowfilm/runtime-bridge', '@meowfilm/script-host', 'quickjs-emscripten-core']);
+  for (const module of ['music-script.mjs', 'source-runtime.mjs']) {
+    assert.deepEqual(readFileSync(join(output, `app/modules/${module}`)),
+      readFileSync(join(root, `apps/runtime/modules/${module}`)));
+  }
+  for (const workspace of ['runtime-bridge', 'script-host', 'source-runtime']) {
+    assert.equal(existsSync(join(output, `node_modules/@meowfilm/${workspace}`)), true);
+  }
+  assert.deepEqual(manifest.dependencies.map(item => item.path).sort(), runtimeDependencies);
   for (const dependency of manifest.dependencies) {
     const sourceManifest = readJSON(join(root, dependency.lockPath, 'package.json'));
     assert.deepEqual(readJSON(join(output, dependency.path, 'package.json')), sourceManifest);
@@ -359,8 +396,14 @@ async function assertRealBusiness(peer, product, domains) {
   const music = description.modules.find(module => module.id === 'music');
   assert.equal(music.version, '0.5.0');
   assert.ok(music.methods.every(method => method.startsWith('music.script.')));
+  const source = description.modules.find(module => module.id === 'source');
+  assert.equal(source.version, '0.1.0');
+  assert.ok(source.methods.every(method => method.startsWith('source.runtime.')));
   assert.deepEqual(await peer.call('music.script.status', {}), {
     ok: true, contract: 'music.script.v2', documentAccess: false, instances: [],
+  });
+  assert.deepEqual(await peer.call('source.runtime.status', {}), {
+    ok: true, contract: 'source.runtime.v1', instances: [],
   });
   for (const method of ['music.library.list', 'music.queue.get', 'music.history.list',
     'music.storage.flush', 'music.lyrics.parse', 'music.accounts.list', 'music.catalog.search',
@@ -458,6 +501,82 @@ async function verifyScriptExecution(t, peer, storageCalls) {
   assert.deepEqual(okay(await peer.call('music.script.status', {})).instances, []);
 }
 
+async function verifySourceExecution(t, peer) {
+  const upstream = createHTTPServer((request, response) => {
+    assert.match(request.url, /^\/search\?key=/);
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end(`
+      <div class="book">
+        <span class="name">Portable Book</span>
+        <a href="/book/1">open</a>
+      </div>
+    `);
+  });
+  t.after(async () => {
+    if (upstream.listening) await bounded(new Promise((resolve, reject) =>
+      upstream.close(error => error ? reject(error) : resolve())));
+  });
+  await bounded(new Promise((resolve, reject) => {
+    upstream.once('error', reject);
+    upstream.listen(0, '127.0.0.1', resolve);
+  }));
+  const origin = `http://127.0.0.1:${upstream.address().port}`;
+  const source = Buffer.from(`${JSON.stringify({
+    bookSourceName: 'Packaged Reader fixture',
+    bookSourceUrl: origin,
+    searchUrl: `${origin}/search?key={{key}}`,
+    ruleSearch: {
+      bookList: '.book',
+      name: '.name@text',
+      bookUrl: 'a@href',
+    },
+  })}\n`);
+  const okay = reply => {
+    assert.equal(reply.ok, true, JSON.stringify(reply));
+    assert.equal(reply.contract, 'source.runtime.v1');
+    return reply;
+  };
+  const staged = okay(await peer.call('source.runtime.stage.begin', {
+    basename: 'packaged-reader.json',
+    length: source.length,
+    sha256: sha256(source),
+  }));
+  assert.equal(okay(await peer.call('source.runtime.stage.chunk', {
+    token: staged.token,
+    offset: 0,
+    data: source.toString('base64'),
+  })).next, source.length);
+  const instance = okay(await peer.call('source.runtime.load', {
+    token: staged.token,
+    installationId: 'packaged-reader',
+    revision: 1,
+    expectedRevision: 0,
+    protocol: 'legado',
+    version: '1.0.0',
+    metadata: {},
+  })).instance;
+  assert.deepEqual(instance.capabilities.source, {
+    protocol: 'legado',
+    importedProtocol: 'legado',
+    actions: ['search', 'loginStatus', 'image'],
+  });
+  const result = okay(await peer.call('source.runtime.invoke', {
+    installationId: instance.installationId,
+    revision: instance.revision,
+    generation: instance.generation,
+    action: 'search',
+    payload: { keyword: 'fixture', page: 1 },
+  })).value;
+  assert.equal(result.books[0].name, 'Portable Book');
+  assert.equal(result.books[0].bookUrl, `${origin}/book/1`);
+  assert.equal(okay(await peer.call('source.runtime.unload', {
+    installationId: instance.installationId,
+    revision: instance.revision,
+    generation: instance.generation,
+  })).cleanupComplete, true);
+  assert.deepEqual(okay(await peer.call('source.runtime.status', {})).instances, []);
+}
+
 async function runProduct(t, product, entry, payload) {
   const counts = new Map(['music.library.v1', 'reader.sources.v1', 'reader.library.v1',
     'film.sources.v1', 'film.library.v1'].map(namespace => [namespace, 0]));
@@ -484,6 +603,7 @@ async function runProduct(t, product, entry, payload) {
   const { peer } = await bounded(server.connection);
   await assertRealBusiness(peer, product, products[product]);
   await verifyScriptExecution(t, peer, storageCalls);
+  await verifySourceExecution(t, peer);
   assert.equal(server.peers.length, 1, 'one runtime connection serves the whole product');
   assert.equal(reads, 0);
   assert.equal(counts.get('reader.sources.v1'), 0);
@@ -497,12 +617,16 @@ async function runProduct(t, product, entry, payload) {
 }
 
 for (const product of Object.keys(products)) {
-  test(`${product}: thin platform entry explicitly imports its shared music factory`, () => {
+  test(`${product}: thin platform entry explicitly imports its shared factories`, () => {
     const source = readFileSync(join(root, 'apps/windows/runtime/entries', `${product}.mjs`), 'utf8');
     assert.deepEqual([...source.matchAll(/^import\s+\{[^{}]+\}\s+from\s+['"]([^'"]+)['"];/gm)].map(match => match[1]),
-      ['../bootstrap.mjs', '../../../runtime/modules/music-script.mjs']);
+      ['../bootstrap.mjs', '../../../runtime/modules/music-script.mjs',
+        '../../../runtime/modules/source-runtime.mjs']);
     assert.equal(source.match(/await startWindowsAppRuntime\(/g)?.length, 1);
     if (products[product].includes('music')) assert.ok(source.includes('createMusicScriptModule({ call })'));
+    if (products[product].includes('source')) {
+      assert.ok(source.includes("createSourceRuntimeModule({ call, platform: 'windows' })"));
+    }
   });
   test(`${product}: real source entry, named pipe and native-only business boundary`, windows, async t => {
     await runProduct(t, product, join(root, 'apps/windows/runtime/entries', `${product}.mjs`));
@@ -541,20 +665,33 @@ function packagingFixture({
   const lock = { name: manifest.name, version: manifest.version, lockfileVersion: 3, packages: { '': { ...manifest } } };
   const inert = 'throw new Error("Synthetic fixture must not execute");\n';
   write(source, 'package.json', manifest);
-  for (const name of ['runtime-bridge', 'script-host', 'inactive-core']) {
+  for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'inactive-core']) {
     const location = `packages/${name}`, installed = `node_modules/@meowfilm/${name}`;
-    const pkg = { name: `@meowfilm/${name}`, version: '1.0.0', type: 'module', license: 'MIT', exports: './src/index.js' };
+    const pkg = {
+      name: `@meowfilm/${name}`,
+      version: '1.0.0',
+      type: 'module',
+      license: 'MIT',
+      exports: './src/index.js',
+      ...(name === 'script-host'
+        ? { dependencies: { '@meowfilm/source-runtime': '1.0.0' } }
+        : {}),
+    };
     write(source, `${location}/package.json`, pkg);
     if (!(missingShared && name === 'script-host')) write(source, `${location}/src/index.js`, inert);
     write(source, `${location}/LICENSE`, 'Synthetic fixture license\n');
-    lock.packages[location] = { version: pkg.version };
+    lock.packages[location] = {
+      version: pkg.version,
+      ...(pkg.dependencies ? { dependencies: pkg.dependencies } : {}),
+    };
     lock.packages[installed] = { resolved: location, link: true };
     mkdirSync(dirname(join(source, installed)), { recursive: true });
     symlinkSync(join(source, location), join(source, installed), process.platform === 'win32' ? 'junction' : 'dir');
   }
   write(source, 'package-lock.json', lock);
   write(source, 'apps/runtime/bootstrap.mjs', inert);
-  if (!missingCommonModule) write(source, 'apps/runtime/modules/music-script.mjs', inert);
+  write(source, 'apps/runtime/modules/music-script.mjs', inert);
+  if (!missingCommonModule) write(source, 'apps/runtime/modules/source-runtime.mjs', inert);
   for (const path of ['bootstrap.mjs', 'entries/aggregate.mjs']) {
     if (missingBootstrap && path === 'bootstrap.mjs') continue;
     let text = readFileSync(join(root, 'apps/windows/runtime', path), 'utf8');
@@ -608,12 +745,12 @@ test('Windows source junctions are rejected, not dereferenced or silently omitte
   assert.ok(existsSync(join(relocated, 'aggregate.mjs')), 'source is never removed');
 });
 
-test('App payload contains one common script assembly and only the Windows platform entry', async () => {
+test('App payload contains the common script assemblies and only the Windows platform entry', async () => {
   const output = join(mkdtempSync(join(temporary, 'closure-')), 'payload');
   const manifest = await packageWindowsRuntime({ root, product: 'aggregate', output });
-  assert.deepEqual(manifest.modules, ['music']);
+  assert.deepEqual(manifest.modules, ['music', 'source']);
   assert.deepEqual(manifest.files.filter(file => file.path.startsWith('app/')).map(file => file.path), [
-    'app/bootstrap.mjs', 'app/modules/music-script.mjs',
+    'app/bootstrap.mjs', 'app/modules/music-script.mjs', 'app/modules/source-runtime.mjs',
     'app/windows/bootstrap.mjs', 'app/windows/entries/aggregate.mjs',
   ]);
 });

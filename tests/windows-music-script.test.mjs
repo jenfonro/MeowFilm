@@ -161,8 +161,82 @@ test('descriptor exposes only eight script RPCs, factory injection and enveloped
     assert.equal(module.methods[method], undefined);
   }
   assert.throws(() => createMusicScriptModule(), { code: 'INVALID_REQUEST' });
+  assert.throws(() => createMusicScriptModule({
+    call: async () => ({ ok: true, value: null }),
+    capabilityOwner: { invoke() {} },
+  }), { code: 'INVALID_REQUEST' });
   okay(await module.close()); okay(await rpc('close')); okay(await module.close());
   denied(await rpc('status'), 'CLOSED');
+});
+
+test('music profiles are generation-scoped and released on failure, update, unload and close', async t => {
+  const releases = [];
+  const owner = {
+    invoke() {
+      assert.fail('profile lifecycle fixture does not perform capability calls');
+    },
+    async releaseProfiles(prefix, except) {
+      releases.push({ prefix, except });
+    },
+  };
+  const { module, rpc } = setup(t, { capabilityOwner: owner });
+  const first = await load(rpc, options('profiles'));
+  assert.ok(releases.some(value =>
+    value.prefix === 'music:profiles:' &&
+    value.except === `music:profiles:${first.generation}`));
+
+  const beforeFailure = releases.length;
+  denied(await rpc('load', {
+    ...options('profiles', 2, 1),
+    token: await upload(rpc, `throw Error('candidate');`),
+  }), 'SCRIPT_FAILURE');
+  assert.ok(releases.slice(beforeFailure).some(value =>
+    value.prefix === 'music:profiles:' &&
+    value.except === `music:profiles:${first.generation}`));
+
+  const second = await load(rpc, options('profiles', 2, 1));
+  assert.ok(second.generation > first.generation);
+  assert.ok(releases.some(value =>
+    value.prefix === 'music:profiles:' &&
+    value.except === `music:profiles:${second.generation}`));
+
+  okay(await rpc('unload', {
+    installationId: second.installationId,
+    revision: second.revision,
+    generation: second.generation,
+  }));
+  assert.ok(releases.some(value =>
+    value.prefix === 'music:profiles:' && value.except === ''));
+
+  const closing = await load(rpc, options('closing'));
+  assert.ok(releases.some(value =>
+    value.prefix === 'music:closing:' &&
+    value.except === `music:closing:${closing.generation}`));
+  okay(await module.close());
+  assert.ok(releases.some(value =>
+    value.prefix === 'music:closing:' && value.except === ''));
+});
+
+test('music profile cleanup debt remains tracked until close retries it', async t => {
+  let failures = 2;
+  let releases = 0;
+  const owner = {
+    invoke() {
+      assert.fail('cleanup debt fixture does not perform capability calls');
+    },
+    async releaseProfiles() {
+      releases++;
+      if (failures-- > 0) throw new Error('synthetic cleanup failure');
+    },
+  };
+  const { module, rpc } = setup(t, { capabilityOwner: owner });
+  denied(await rpc('load', {
+    ...options('cleanup-debt'),
+    token: await upload(rpc),
+  }), 'SCRIPT_CLEANUP');
+  assert.deepEqual(okay(await rpc('status')).instances, []);
+  okay(await module.close());
+  assert.ok(releases >= 3);
 });
 
 test('stage limits are two 512KiB sources/1MiB total, expire lazily and abort idempotently', async t => {
@@ -638,7 +712,7 @@ test('network needs no domain grant and receives scoped identity, never platform
   assert.equal(calls[0].scope.generation, instance.generation);
   assert.equal(calls[0].scope.siteId, 'tx');
   assert.equal(calls[0].grant, undefined);
-  assert.equal(calls[0].options.headers, undefined);
+  assert.deepEqual(calls[0].options.headers, {});
 });
 
 test('extended source actions preserve payload and returned values without a platform whitelist', async t => {

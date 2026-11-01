@@ -9,6 +9,7 @@ createMusicScriptModule({
   call,
   hostFactory = createScriptHost,
   network = createNodeNetwork(),
+  capabilityOwner,
   clock = Date.now,
 })
 ```
@@ -111,11 +112,13 @@ grant installationId siteId generation key value?
 
 ## 网络
 
-注入适配器接收 `validateURL`，只验证 HTTP(S) 语法；没有域名／私网授权名单，也不按源码哈希补 origin。网络能访问已开放服务，不能将文件／进程隔离写成网络隔离。
+音乐模块经公共 `hostApiVersion = 1` 的 `http.request` capability 调用注入适配器；默认由 `createNodeSourceCapabilities` 包装 `createNodeNetwork`。每次请求使用 `music:<installationId>:<generation>:<siteId|startup>` Cookie profile，更新、失败候选、卸载和关闭释放退休 profile；外部 capability owner 必须实现 `invoke` 与 `releaseProfiles`。`validateURL` 只验证 HTTP(S) 语法；没有域名／私网授权名单，也不按源码哈希补 origin。网络能访问已开放服务，不能将文件／进程隔离写成网络隔离。
 
-LX `request` 的回调、返回体和取消语义保留；`follow_max` 在 Node 适配器中受最大重定向次数约束，不等于任意 LX 版本都定义该字段。`showConfigView` 等扩展事件也不等于当前已提供 Web 管理服务，需依脚本实际路径单独验收。
+LX `request` 的回调、返回体和取消语义保留；单请求 timeout 由 Node owner 的同一截止信号覆盖完整重定向链。`follow_max` 在 Node 适配器中受最大重定向次数约束，不等于任意 LX 版本都定义该字段。`showConfigView` 等扩展事件也不等于当前已提供 Web 管理服务，需依脚本实际路径单独验收。
 
 已遇到的扩展选项 `followRedirect` 按布尔值控制自动跳转；false 优先关闭跳转，true 仍遵守重定向上限。`retry` 兼容接受，不额外启动宿主重试或重放 POST；与核对的 LX 桌面 request 封装不消费该字段的行为一致。网络任务在取消后仍占物理预算，直至底层确认结束。
+
+ABI 与 Reader/Cat 共用，但 LX 的 site/action/quality、原生 storage grant 和响应契约仍由音乐模块拥有；公共 capability 不把三种协议合并。见 [capability ABI](source-capability-abi.md)。
 
 ## 取消与关闭
 

@@ -212,6 +212,7 @@ export async function packageWindowsRuntime({
     const entryImports = new Map([
       ['../bootstrap.mjs', '../bootstrap.mjs'],
       ['../../../runtime/modules/music-script.mjs', '../../modules/music-script.mjs'],
+      ['../../../runtime/modules/source-runtime.mjs', '../../modules/source-runtime.mjs'],
     ]);
     for (const [relative, imports, dynamicImports = new Map()] of [
       ['bootstrap.mjs', bootstrapImports], ['entries/aggregate.mjs', entryImports],

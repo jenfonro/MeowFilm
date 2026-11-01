@@ -10,10 +10,15 @@ const messages = Object.freeze({
   PERMISSION_DENIED: 'Capability denied',
   CAPABILITY_UNAVAILABLE: 'Capability unavailable',
   UNSUPPORTED_PROTOCOL: 'Unsupported script protocol',
+  UNSUPPORTED_ACTION: 'Unsupported source action',
+  UNSUPPORTED_RULE: 'Unsupported source rule',
+  UNSUPPORTED_SCRIPT_ASYNC: 'Source script cannot be converted to asynchronous calls',
   SCRIPT_PROTOCOL_ERROR: 'Invalid script protocol',
   SCRIPT_EXCEPTION: 'Script execution failed',
   RESOURCE_LIMIT: 'Resource limit exceeded',
   NETWORK_ERROR: 'Network operation failed',
+  HTTP_ERROR: 'Source HTTP endpoint failed',
+  INVALID_RESPONSE: 'Source response is invalid',
   INVALID_JSON: 'Invalid JSON response',
   STORAGE_ERROR: 'Storage operation failed',
   STORAGE_CONFLICT: 'Script state changed',
@@ -26,6 +31,8 @@ const messages = Object.freeze({
   UNSUPPORTED_OPTION: 'Unsupported protocol option',
   UNSUPPORTED_CRYPTO: 'Unsupported LX crypto operation',
   UNSUPPORTED_DEPENDENCY: 'Dependency is outside this protocol profile',
+  WEB_INTERACTION_REQUIRED: 'Source requires interactive web access',
+  VIRTUAL_ROUTE_NOT_FOUND: 'Virtual source route was not found',
   UNMAPPED_LOCAL_URL: 'Local URL has no current scoped endpoint',
   UPSTREAM_HTTP_ERROR: 'Script HTTP endpoint failed',
 });
@@ -39,8 +46,14 @@ export class ScriptHostError extends Error {
 }
 
 export const fault = (code) => new ScriptHostError(code);
-export const safeError = (error, fallback = 'SCRIPT_EXCEPTION') =>
-  error instanceof ScriptHostError ? error : fault(fallback);
+export const safeError = (error, fallback = 'SCRIPT_EXCEPTION') => {
+  if (error instanceof ScriptHostError) return error;
+  if (typeof error?.code === 'string' && Object.hasOwn(messages, error.code)) {
+    return fault(error.code);
+  }
+  if (error?.name === 'AbortError') return fault('CANCELLED');
+  return fault(fallback);
+};
 export function requireValue(condition, code = 'INVALID_ARGUMENT') {
   if (!condition) throw fault(code);
 }

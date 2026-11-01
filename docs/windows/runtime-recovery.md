@@ -2,14 +2,14 @@
 
 ## 契约与影响
 
-- `IRuntimeRecovery` / `IRuntimeRecoveryScope` 是进程内生命周期契约；真实 `NodeRuntime.IsConnected` 报告实际连接。连接使用 `aggregate` 身份及 `music@0.5.0` 握手，业务响应为 `music.script.v2`；恢复仅重建进程和连接，实例执行仍属于公共运行时。
+- `IRuntimeRecovery` / `IRuntimeRecoveryScope` 是进程内生命周期契约；真实 `NodeRuntime.IsConnected` 报告实际连接。连接使用 `aggregate` 身份及 `music@0.5.0`、`source@0.1.0` 握手，业务响应分别为 `music.script.v2`、`source.runtime.v1`；恢复仅重建进程和连接，实例执行仍属于公共运行时。
 - 当前只有唯一 App、AppHost/Core 和音乐脚本适配器。普通原生账号、曲库、固定 API 和播放不以连接为前置条件；不向 Node 开放普通文档权限。
 - 首个脚本请求前显式注册 scope，最多 32 个，重复/迟到注册拒绝。无全局事件总线、全局当前源或跨 App 进程共享。
 
 ## 实际链路
 
 1. 构造、普通页面和脚本页不启动 Node；真实脚本操作首次启动。
-2. 失败保留为失败。普通请求不自动创建新进程、重放失败操作或激活全部音源。
+2. 失败保留为失败。普通请求不自动创建新进程、重放失败操作或激活全部来源。
 3. 用户在原生脚本页明确重试：退役旧 transport/进程、等待释放，再排空已接纳任务并撤销临时会话/授权。
 4. 音乐通过唯一 Library owner 只读核对未确认 CAS，不重写不确定数据。恢复仅建立新握手，下次明确操作才装载指定源。
 5. 新连接发布与准入原子化，旧代次成功被拒绝；多个重试共享同一恢复任务，恢复中拒绝新脚本调用。

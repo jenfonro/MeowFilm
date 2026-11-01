@@ -54,8 +54,8 @@ Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口�
 
 网易云、QQ、酷狗官方业务独立于 LX。账号、平台 API、搜索、曲库、缓存和播放在 .NET 内执行；无脚本操作时不启动 Node。
 
-Windows 的唯一 Node 入口是 `apps/windows/runtime/entries/aggregate.mjs`，从公共 `apps/runtime/modules/music-script.mjs` 装配 `music@0.5.0`／`music.script.v2`。公共层复用一套 script-host／LX／QuickJS 核心；Windows 目录只有启动／命名管道 bootstrap 与薄 entry，没有业务 module 副本。
+Windows 的唯一 Node 入口是 `apps/windows/runtime/entries/aggregate.mjs`，从公共目录装配 `music@0.5.0`／`music.script.v2` 和 `source@0.1.0`／`source.runtime.v1`。公共层复用一套实例、QuickJS 与 capability 基础设施，并保留 LX、Reader、Cat 独立 adapter；Windows 目录只有启动／命名管道 bootstrap 与薄 entry，没有业务 module 副本。
 
-载荷包含公共 bootstrap、共享 music-script、Windows 两个入口文件、runtime-bridge、script-host、锁定的 QuickJS release-sync 依赖和必要许可，没有普通业务文档桥授权。公共执行、存储与网络边界见 [共用运行时](../runtime/script-runtime.md)。
+载荷包含公共 bootstrap、music/source module、Windows 两个入口文件、runtime-bridge、source-runtime、script-host、锁定的 QuickJS release-sync、规则解析依赖和必要许可，没有普通业务文档桥授权。公共执行、存储与网络边界见 [共用运行时](../runtime/script-runtime.md)。
 
 App 原生能力装配与 `AppIdentity.ScriptModules` 独立校验：原生能力数量和 `IDesktopModule.Id` 不要求等于脚本模块数量或名称。增加不依赖脚本的原生能力不会被迫增加 Node 模块；脚本清单只决定按需启动后的 JS 载荷与协议版本。

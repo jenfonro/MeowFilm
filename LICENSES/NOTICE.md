@@ -179,6 +179,26 @@ script-engine binary. Its exact package manifest, registry URL/integrity, licens
 length and SHA-256 are pinned in `scripts/quickjs-runtime.json`; no debug/asyncify
 engine variant or upstream reference script is bundled.
 
+## Portable source runtime npm dependencies
+
+The runtime payload preserves each package's original `package.json` and license
+file. These packages are used as unmodified libraries; no source code from them is
+copied into the application's protocol adapters.
+
+- `acorn` 8.19.0 — MIT.
+- `fontoxpath` 3.34.0 — MIT.
+- `linkedom` 0.18.14 — ISC.
+- `iconv-lite` 0.6.3 — MIT.
+- Transitive closure: `@acemir/cssom` 0.9.32 (MIT), `boolbase` 2.0.0 (ISC),
+  `css-select` 7.0.0 (BSD-2-Clause), `css-what` 8.0.0 (BSD-2-Clause),
+  `dom-serializer` 3.1.1 and 2.0.0 (MIT), `domelementtype` 3.0.0 and
+  2.3.0 (BSD-2-Clause), `domhandler` 6.0.1 and 5.0.3 (BSD-2-Clause),
+  `domutils` 4.0.2 and 3.2.2 (BSD-2-Clause), `entities` 8.1.0, 7.0.1,
+  and 4.5.0 (BSD-2-Clause), `html-escaper` 3.0.3 (MIT),
+  `htmlparser2` 10.1.0 (MIT), `nth-check` 3.0.1 (BSD-2-Clause),
+  `prsc` 4.0.0 (MIT), `safer-buffer` 2.1.2 (MIT), `uhyphen` 0.2.0 (ISC),
+  `whynot` 5.0.0 (MIT), and `xspattern` 3.1.0 (MIT).
+
 ## QR Code generator — MIT
 
 Copyright (c) 2018 Manuel Bleichenbacher. License: `qr-code-generator-LICENSE.txt`.

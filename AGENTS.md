@@ -1,8 +1,8 @@
 # AGENTS.md
 
-meowfilm 的 iPhone 与 Windows 原生客户端，当前实现音乐能力：
+meowfilm 的 iPhone 与 Windows 原生客户端；音乐为当前原生业务，Windows 另包含公共来源脚本运行时：
 - iOS：UIKit 负责应用、窗口、导航、呈现与手势，Swift Package 提供业务、平台、账号、播放、缓存和持久化能力。
-- Windows：WPF / .NET 原生桌面应用；Node 运行时仅在执行用户导入的 JS 音源脚本时按需启动。
+- Windows：WPF / .NET 原生桌面应用；随包 Node 仅在执行用户导入的音源、书源或 CatVod JS 时按需启动。
 
 ## 命令
 
@@ -59,9 +59,11 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
   - `MeowFilm.AppHost` — 启动、注入与关闭
   - `MeowFilm.Capabilities` — 按职责组织的业务能力（Accounts、Platforms、Catalog、Search、Recommendations、Library、Sync、Playback、PlaybackCache、Lyrics、Scripting、Feedback、Settings、Presentation、Composition）
 - `apps/windows/tests/` — Windows 原生测试
-- `apps/runtime/` — 公共脚本传输装配与 `modules/music-script.mjs` 业务 owner，当前契约为 music.script.v2／music@0.5.0
+- `apps/runtime/` — 公共脚本传输装配；`modules/music-script.mjs` 为 music.script.v2／music@0.5.0，`modules/source-runtime.mjs` 为 source.runtime.v1／source@0.1.0
 - `apps/windows/runtime/` — 仅 Windows 启动／命名管道 `bootstrap.mjs` 与薄 `entries/aggregate.mjs`，从公共目录导入业务模块，不保留 module 副本
-- `packages/` — 共用 script-host（当前 LX／QuickJS 执行）与 runtime-bridge 工作区包；未来协议适配复用同一核心，不预建 Cat／移动端空实现
+- `packages/source-runtime/` — Node 无关的 capability ABI、规则核心及 LX 网络、Legado／异次元、轻悦时光、CatVod adapter
+- `packages/script-host/` — Windows 当前 QuickJS/WASM 承载、guest SDK、Node capability adapter 与实例生命周期
+- `packages/runtime-bridge/` — 有界双向 RPC、取消和连接生命周期
 - `scripts/` — iOS 工程生成、结构检查、测试、构建打包与发布，`scripts/tests/` 为脚本测试；Node 共用工具
 - `scripts/windows/` — Windows 构建、测试、打包与结构检查
 - `tests/` — Node 测试

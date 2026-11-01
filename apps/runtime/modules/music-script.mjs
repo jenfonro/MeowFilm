@@ -1,10 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  createScriptHost, createNodeNetwork, ScriptHostError,
+  createScriptHost, createNodeNetwork, createNodeSourceCapabilities, ScriptHostError,
 } from '@meowfilm/script-host';
+import {
+  createCapabilityClient, createLXNetworkFromCapabilities,
+} from '@meowfilm/source-runtime';
 
 export const musicScriptContract = 'music.script.v2';
 const sourceBytes = 512 * 1024, controlBytes = 512 * 1024, chunkBytes = 64 * 1024;
+const networkBytes = 2 * 1024 * 1024;
 const maxInstances = 32, stageBytes = 1024 * 1024, stageTTL = 300000;
 const codes = new Set(['INVALID_REQUEST', 'CLOSED', 'CANCELLED', 'LIMIT', 'SCRIPT_INTEGRITY',
   'SCRIPT_ENCODING', 'STAGE_NOT_FOUND', 'STALE_SOURCE', 'SOURCE_NOT_FOUND', 'SOURCE_DISABLED',
@@ -95,13 +99,23 @@ function abortable(promise, signal) {
  * ScriptHost executes guest code in isolated QuickJS heaps.
  */
 export function createMusicScriptModule({ call, hostFactory = createScriptHost,
-  network = createNodeNetwork(), clock = Date.now } = {}) {
+  network = createNodeNetwork(), capabilityOwner, clock = Date.now } = {}) {
   requireValue(typeof call === 'function' && typeof hostFactory === 'function' &&
-    typeof network === 'function' && typeof clock === 'function');
+    typeof network === 'function' && typeof clock === 'function' &&
+    (capabilityOwner === undefined ||
+      typeof capabilityOwner?.invoke === 'function' &&
+      typeof capabilityOwner?.releaseProfiles === 'function'));
+  const owner = capabilityOwner ?? createNodeSourceCapabilities({ network });
   const stages = new Map(), bindings = new Map(), candidates = new Map(), sessions = new Map();
   const generations = new Map(), usedGrants = new Set(), adapterTasks = new Set();
+  const profileInstallations = new Set();
   const lifetime = new AbortController();
   let closed = false, closing, tail = Promise.resolve(), pending = 0;
+  const sourceCapabilities = createCapabilityClient({
+    maximumBytes: networkBytes,
+    invoke: (name, input, context) => owner.invoke(name, input, context),
+  });
+  const lxNetwork = createLXNetworkFromCapabilities(sourceCapabilities);
   const sessionKey = (id, generation) => JSON.stringify([id, generation]);
   function track(input, promise, kind = 'network') {
     const task = { installationId: input.installationId, generation: input.generation,
@@ -112,7 +126,7 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
   }
   // Track actual adapter completion, not merely a cancelled Promise.race.
   const host = hostFactory({
-    network: input => track(input.scope, Promise.resolve().then(() => network(input))),
+    network: input => track(input.scope, Promise.resolve().then(() => lxNetwork(input))),
     storage: Object.fromEntries(['get', 'set', 'delete'].map(operation =>
       [operation, input => storage(operation, input)])),
     limits: { maxInstances, maxSourceBytes: sourceBytes, maxBytes: controlBytes, syncTimeoutMs: 2000,
@@ -221,6 +235,11 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
       ![...adapterTasks].some(task => task.installationId === id && task.generation !== keepGeneration),
     'SCRIPT_CLEANUP');
   }
+  async function releaseProfiles(id, keepGeneration) {
+    const keep = keepGeneration === undefined ? '' : `music:${id}:${keepGeneration}`;
+    try { await owner.releaseProfiles(`music:${id}:`, keep); }
+    catch { throw new Failure('SCRIPT_CLEANUP'); }
+  }
   function instance(binding, live = current(binding.installationId)) {
     requireValue(live && live.generation === binding.generation, 'STALE_SOURCE');
     const capabilities = live.capabilities;
@@ -256,14 +275,23 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
     for (const auth of [...candidates.values(), ...sessions.values()]) revoke(auth);
     // Stop sessions immediately, including one awaiting a reverse callback.
     closing = (async () => {
-      let result;
+      let result, hostClosed = true, profilesReleased = true;
       try { result = await host.close(); }
-      catch { throw new Failure('SCRIPT_CLEANUP'); }
+      catch { hostClosed = false; }
       finally {
         await tail;
+        for (const id of bindings.keys()) profileInstallations.add(id);
+        for (const id of candidates.keys()) profileInstallations.add(id);
+        for (const auth of sessions.values()) profileInstallations.add(auth.installationId);
+        const released = await Promise.allSettled(
+          [...profileInstallations].map(id => releaseProfiles(id)),
+        );
+        profilesReleased = released.every(value => value.status === 'fulfilled');
         bindings.clear(); candidates.clear(); sessions.clear(); generations.clear(); usedGrants.clear();
+        profileInstallations.clear();
       }
-      requireValue(result.cleanupComplete && adapterTasks.size === 0, 'SCRIPT_CLEANUP');
+      requireValue(hostClosed && result?.cleanupComplete &&
+        adapterTasks.size === 0 && profilesReleased, 'SCRIPT_CLEANUP');
       return { closed: true, cleanupComplete: true };
     })();
     return closing;
@@ -326,6 +354,7 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
         generation: null, floor: Math.max(generations.get(id) ?? 0, old?.generation ?? 0),
         controller: new AbortController(), loadSignal: signal };
       // Register BEFORE install/update; storage never waits for this queue/load.
+      profileInstallations.add(id);
       candidates.set(id, candidate); usedGrants.add(grantHash); release(params.token);
       const spec = { installationId: id, protocol: 'lx', enabled: true, source,
         version: params.version, config: params.config, permissions: params.permissions };
@@ -341,6 +370,8 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
         // Preflight the whole response before publishing the authorization.
         const response = { instance: instance(candidate, next) };
         success(response);
+        await releaseProfiles(id, next.generation);
+        guard(signal);
         revoke(old);
         candidates.delete(id);
         candidate.phase = 'session'; candidate.loadSignal = null; candidate.capabilities = next.capabilities;
@@ -355,6 +386,7 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
             remaining.contentHash === old.contentHash) {
           // Public host.update failed its trial: preserve EXACT old generation/grant.
           cleanup(id, old.generation);
+          await releaseProfiles(id, old.generation);
         } else {
           // Never call rollback: it creates another generation and cannot reuse
           // Native's old grant/metadata. A post-publication failure retires the
@@ -363,9 +395,15 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
           revoke(old); bindings.delete(id);
           if (remaining) {
             generations.set(id, Math.max(generations.get(id) ?? 0, remaining.generation));
-            try { await host.uninstall(id); } catch { throw new Failure('SCRIPT_CLEANUP'); }
+            try { await host.uninstall(id); }
+            catch {
+              try { await releaseProfiles(id); } catch { /* Preserve cleanup failure below. */ }
+              throw new Failure('SCRIPT_CLEANUP');
+            }
           }
           cleanup(id);
+          await releaseProfiles(id);
+          profileInstallations.delete(id);
         }
         throw error;
       }
@@ -379,10 +417,15 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
         requireValue(binding.revision === params.revision && live.generation === binding.generation &&
           (params.generation === undefined || params.generation === binding.generation), 'STALE_SOURCE');
         revoke(binding);
+        let uninstalled = true;
         try { await host.uninstall(params.installationId); }
+        catch { uninstalled = false; }
         finally { bindings.delete(params.installationId); }
+        requireValue(uninstalled, 'SCRIPT_CLEANUP');
         requireValue(!current(params.installationId), 'SCRIPT_CLEANUP');
         cleanup(params.installationId);
+        await releaseProfiles(params.installationId);
+        profileInstallations.delete(params.installationId);
         return { unloaded: true, cleanupComplete: true };
       })),
     'music.script.invoke': method(['installationId', 'revision', 'generation', 'siteId', 'operation', 'payload'],

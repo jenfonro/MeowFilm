@@ -23,7 +23,7 @@ Windows 源码目录只保留启动／管道 bootstrap 与薄 entry，没有 `mo
 
 命名管道传输有界源码分片和控制 JSON，不传输媒体字节。反向存储 RPC 只转发明确 installation/site/generation 的会话请求，不授予通用文档、文件、进程或官方账号权限。全局 `meow.storage`、startup 和 background 不能借助原生适配层获得隐式权限。
 
-握手身份为 `aggregate`、protocol 1、`music@0.5.0`；业务响应为 `music.script.v2`，旧 descriptor 不作为当前契约接纳。启动参数与管道生命周期见 [Windows 装配](app-runtime.md)，连接失败与显式恢复见 [恢复](runtime-recovery.md)。
+握手身份为 `aggregate`、protocol 1，descriptor 同时包含 `music@0.5.0` 和 `source@0.1.0`；本模块业务响应为 `music.script.v2`，旧 descriptor 不作为当前契约接纳。启动参数与管道生命周期见 [Windows 装配](app-runtime.md)，连接失败与显式恢复见 [恢复](runtime-recovery.md)。
 
 Windows 进程／管道身份检查不等于脚本网络隔离；公共 `validateURL` 不阻止访问已开放的本机或私网 HTTP(S) 服务。其他官方业务的授权和网络策略保持独立。
 

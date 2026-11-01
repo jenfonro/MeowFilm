@@ -37,9 +37,11 @@ Windows 上运行 Python 脚本时将 `python3` 换为 `python -X utf8`。iOS �
 
 ## 脚本运行时
 
-原始 LX 音源使用一套公共 script-host／QuickJS WebAssembly 核心，音乐契约为 `music.script.v2`／`music@0.5.0`。Windows 只保留按需启动、命名管道和平台打包；官方原生业务无脚本操作时不启动 Node。特权存储使用请求第二参数 `context.storage`，网络只校验 HTTP(S) 语法，不声称网络隔离。见 [公共运行时](docs/runtime/script-runtime.md)。
+公共来源运行时使用 QuickJS WebAssembly 隔离 guest，并由协议无关 capability ABI 提供 HTTP、Cookie、存储、编码、加解密、Web 交互和虚拟路由。当前模块为 `music@0.5.0`／`music.script.v2` 与 `source@0.1.0`／`source.runtime.v1`；支持 LX、Legado、异次元旧格式导入、轻悦时光 HTML 和 CatVod JS。
 
-外部脚本验收使用 [实际声明动作与联网报告](docs/runtime/source-acceptance.md)，不会修改或把用户脚本打包进应用。
+Windows 只负责随包 Node 的按需启动、命名管道和平台打包；目标电脑不需要安装 Node。公共 Reader/Cat 核心不依赖 Node、JVM 或 Windows API，后续平台只需实现相同 capability ABI。网络只校验 HTTP(S) 语法和资源边界，不声称阻断本机或私网。见 [公共运行时](docs/runtime/script-runtime.md)。
+
+外部来源验收使用 [实际声明动作与联网报告](docs/runtime/source-acceptance.md)，不会修改或把用户来源打包进应用。
 
 ## 文档
 

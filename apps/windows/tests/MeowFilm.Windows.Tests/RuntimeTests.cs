@@ -24,7 +24,7 @@ public static class RuntimeTests
         return path;
     }
     private const string Identity = "aggregate";
-    private static RuntimeModule[] Modules => [new("music", "0.5.0")];
+    private static RuntimeModule[] Modules => [new("music", "0.5.0"), new("source", "0.1.0")];
     private static string[] Namespaces => ["music.library.v1", "music.accounts.v1"];
 
     public static IEnumerable<TestCase> Cases()
@@ -44,6 +44,9 @@ public static class RuntimeTests
                 BridgeTests.Equal("music.script.v2", status.GetProperty("contract").GetString());
                 BridgeTests.Equal(false, status.GetProperty("documentAccess").GetBoolean());
                 BridgeTests.Equal(0, status.GetProperty("instances").GetArrayLength());
+                var sourceStatus = await runtime.CallAsync("source.runtime.status", new { });
+                BridgeTests.Equal("source.runtime.v1", sourceStatus.GetProperty("contract").GetString());
+                BridgeTests.Equal(0, sourceStatus.GetProperty("instances").GetArrayLength());
                 foreach (var method in new[] { "music.library.list", "music.queue.get", "music.accounts.list",
                     "music.catalog.search", "film.script.status", "film.sources.list", "reader.rules.reset",
                     "reader.sources.list", "reader.content.chapter", "missing.operation" })

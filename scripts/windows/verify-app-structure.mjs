@@ -5,10 +5,15 @@ import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const generated = new Set(['bin', 'obj', 'node_modules', '.git']);
 const runtimeTrees = new Map([
-  ['apps/runtime', { files: ['bootstrap.mjs', 'modules/music-script.mjs'], directories: ['modules'] }],
+  ['apps/runtime', {
+    files: ['bootstrap.mjs', 'modules/music-script.mjs', 'modules/source-runtime.mjs'],
+    directories: ['modules'],
+  }],
   ['apps/windows/runtime', { files: ['bootstrap.mjs', 'entries/aggregate.mjs'], directories: ['entries'] }],
 ]);
-const sharedImports = new Set(['node:crypto', '@meowfilm/runtime-bridge', '@meowfilm/script-host']);
+const sharedImports = new Set([
+  'node:crypto', '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
+]);
 const windowsImports = new Set(['node:net', '@meowfilm/runtime-bridge', '@meowfilm/runtime-bridge/descriptor']);
 function fail(message) { throw new Error('Windows App structure: ' + message); }
 function samePath(a, b) {

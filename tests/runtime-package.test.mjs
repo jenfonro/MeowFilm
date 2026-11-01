@@ -82,8 +82,17 @@ function fixture({ missing = [], omitFiles = [] } = {}) {
   }
   add('packages/runtime-bridge', '@meowfilm/runtime-bridge', '0.1.0',
     { dependencies: { shared: '^1.0.0' } }, true);
+  add('packages/source-runtime', '@meowfilm/source-runtime', '0.1.0',
+    { files: ['src'] }, true);
   add('packages/script-host', '@meowfilm/script-host', '0.2.0',
-    { files: ['src'], dependencies: { 'fixture-lib': '^1.0.0', 'host-lib': '1.x', 'music-lib': '~1.0.0', 'fixture-dom': '26.1.0', acorn: '8.18.0' } }, true);
+    { files: ['src'], dependencies: {
+      '@meowfilm/source-runtime': '0.1.0',
+      'fixture-lib': '^1.0.0',
+      'host-lib': '1.x',
+      'music-lib': '~1.0.0',
+      'fixture-dom': '26.1.0',
+      acorn: '8.18.0',
+    } }, true);
   add('packages/unused-core', '@meowfilm/unused-core', '0.2.0',
     { dependencies: { 'music-lib': '~1.0.0' } }, true);
   add('packages/inactive-core', '@meowfilm/inactive-core', '0.1.0',
@@ -110,6 +119,7 @@ function fixture({ missing = [], omitFiles = [] } = {}) {
   file('node_modules/unlocked-dev-only/package.json', { name: 'unlocked-dev-only', version: '9.0.0' });
   file('apps/runtime/bootstrap.mjs', `import '@meowfilm/runtime-bridge';\n${sourceCode}`);
   file('apps/runtime/modules/music-script.mjs', sourceCode);
+  file('apps/runtime/modules/source-runtime.mjs', sourceCode);
   function saveLock() { write(root, 'package-lock.json', lock); }
   function update(location, changes, updateLock = true) {
     const manifest = { ...readJSON(join(root, location, 'package.json')), ...changes };
@@ -159,15 +169,16 @@ test('interpreted workspace files still reject unsupported negative rules', asyn
 test('one App packaging stages only the script dependency closure with exact hashes', async () => {
   const f = fixture(), manifest = await f.pack();
   assert.equal(manifest.product, 'aggregate');
-  assert.deepEqual(manifest.modules, ['music']);
+  assert.deepEqual(manifest.modules, ['music', 'source']);
   assert.equal(manifest.schemaVersion, 1);
   assert.equal(manifest.status, 'platform-pending');
   assert.equal(manifest.entry, 'app/windows/entries/aggregate.mjs');
   assert.match(manifest.integrityScope, /not an upstream signature/);
   assert.deepEqual(manifest.files.filter(f => f.path.startsWith('app/')).map(f => f.path),
-    ['app/bootstrap.mjs', 'app/modules/music-script.mjs']);
+    ['app/bootstrap.mjs', 'app/modules/music-script.mjs', 'app/modules/source-runtime.mjs']);
   assert.deepEqual(manifest.dependencies.map(p => p.path).sort(), [
     'node_modules/@meowfilm/runtime-bridge', 'node_modules/@meowfilm/script-host',
+    'node_modules/@meowfilm/source-runtime',
     'node_modules/shared', 'node_modules/host-lib', 'node_modules/peer-lib',
     'node_modules/fixture-lib', 'node_modules/fixture-lib/node_modules/shared', 'node_modules/@fixture/token',
     'node_modules/music-lib', 'node_modules/@meowfilm/script-host/node_modules/fixture-dom',
@@ -240,6 +251,7 @@ for (const [label, location, code] of [
   ['required peer', 'node_modules/peer-lib', 'MISSING_DEPENDENCY'],
   ['nested required peer', 'packages/script-host/node_modules/required-fixture-peer', 'MISSING_DEPENDENCY'],
   ['installed workspace link', 'node_modules/@meowfilm/script-host', 'MISSING_WORKSPACE_LINK'],
+  ['source workspace link', 'node_modules/@meowfilm/source-runtime', 'MISSING_WORKSPACE_LINK'],
 ]) {
   test(`rejects missing ${label}`, async () => {
     await fails(fixture({ missing: [location] }), code);
@@ -257,9 +269,11 @@ test('missing required bootstrap leaves an explicit failed payload', async () =>
   assert.equal(readJSON(join(f.output(), 'runtime-manifest.json')).status, 'failed');
 });
 
-test('missing shared music module cannot leave a platform-pending assembly', async () => {
-  await fails(fixture({ omitFiles: ['apps/runtime/modules/music-script.mjs'] }), 'MISSING_SOURCE');
-});
+for (const module of ['music-script.mjs', 'source-runtime.mjs']) {
+  test(`missing shared ${module} cannot leave a platform-pending assembly`, async () => {
+    await fails(fixture({ omitFiles: [`apps/runtime/modules/${module}`] }), 'MISSING_SOURCE');
+  });
+}
 
 test('unlisted shared helpers are rejected rather than silently omitted', async () => {
   const f = fixture();
