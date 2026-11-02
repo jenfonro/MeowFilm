@@ -241,6 +241,19 @@ final class MusicViewModelTests: XCTestCase {
         await model.close()
     }
 
+    @MainActor func testMainActorReleaseCancelsOwnedTasks() async {
+        let gate = MusicCollectionGate {}
+        var model: MusicViewModel? = MusicViewModel(service: MusicModelService(), player: MusicModelPlayer())
+        let task = Task { await gate.wait() }
+        model?.eventTail = task
+
+        model = nil
+
+        XCTAssertTrue(task.isCancelled)
+        await gate.release()
+        await task.value
+    }
+
     @MainActor func testDismissedImportCannotReviveLatePreviewAndReleasesExactToken() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

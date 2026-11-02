@@ -6,6 +6,7 @@ public struct PageGradientStop: Equatable, Sendable {
 }
 
 public struct PageTheme: Equatable, Sendable {
+    public static let scrim = PageColor(rgb: 0x000000, alpha: 82)
     public let palette: PageColorway
     public let dark: Bool
     public let top, bottom, mid, ink, muted, accent, surface, border, chip, headerDark: PageColor

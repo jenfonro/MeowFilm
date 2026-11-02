@@ -18,10 +18,10 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
     private let openMenu: () -> Void
     private let openSearch: () -> Void
     private let menu = UIButton(type: .custom), add = UIButton(type: .custom), feature = UIButton(type: .custom)
+    private let channelMenu = UIButton(type: .custom)
     private lazy var search = PageHeaderTextButton(title: "") { [weak self] in self?.openSearch() }
-    private lazy var titleButton = PageHeaderTextButton(title: "") { [weak self] in
-        if self?.selectedPage == .channels { self?.channels?.showPicker() }
-    }
+    private lazy var titleButton = PageHeaderTextButton(title: "") {}
+    private let channelTitleHost = UIView()
 
     init(pageFactories: [@MainActor () -> UIViewController], themeProvider: any PageThemeProviding,
          openMenu: @escaping () -> Void, openSearch: @escaping () -> Void) {
@@ -70,7 +70,7 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
 
     override func applyTheme() {
         super.applyTheme()
-        for button in [menu, titleButton, add, feature] { button.tintColor = UIColor(theme.ink) }
+        for button in [menu, titleButton, add, feature, channelMenu] { button.tintColor = UIColor(theme.ink) }
         search.tintColor = UIColor(theme.muted)
         search.configuration?.baseForegroundColor = UIColor(theme.muted)
         search.backgroundColor = UIColor(theme.control)
@@ -108,7 +108,14 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
         feature.setImage(PageIcon.image(.recognize), for: .normal)
         feature.accessibilityLabel = "更多功能"
         feature.accessibilityIdentifier = "app.feature"
-        for item in [menu, add, feature] {
+        channelMenu.setImage(PageIcon.image(.channels), for: .normal)
+        channelMenu.accessibilityLabel = "选择频道"
+        channelMenu.accessibilityIdentifier = "app.channels"
+        channelMenu.addAction(UIAction { [weak self] _ in
+            guard self?.selectedPage == .channels else { return }
+            self?.channels?.showPicker()
+        }, for: .touchUpInside)
+        for item in [menu, add, feature, channelMenu] {
             item.adjustsImageWhenHighlighted = false
             item.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([
@@ -124,7 +131,13 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
     }
 
     private func prepareSelectedPage() {
-        channels?.onChannelChanged = { [weak self] _ in self?.renderHeader() }
+        if let switcher = channels?.channelSwitcherView {
+            if switcher.superview !== channelTitleHost {
+                channelTitleHost.subviews.forEach { $0.removeFromSuperview() }
+                channelTitleHost.addSubview(switcher)
+                switcher.pinEdges(to: channelTitleHost)
+            }
+        }
         if selectedPage == .channels, let channel = pendingChannel, let channels {
             pendingChannel = nil
             channels.select(channel)
@@ -133,12 +146,13 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
 
     private func renderHeader() {
         guard isViewLoaded else { return }
-        pageHeader.setTitleView(selectedPage == .recommend ? search : titleButton)
+        pageHeader.setTitleView(selectedPage == .recommend ? search :
+            selectedPage == .channels ? channelTitleHost : titleButton)
         pageHeader.setTrailing(selectedPage == .recommend ? [feature] :
+            selectedPage == .channels ? [channelMenu] :
             selectedPage == .library ? [add] : [])
-        titleButton.setTitle(selectedPage == .channels ?
-                             (channels?.selectedChannel?.title ?? "频道") + " ⌄" : "我的", for: .normal)
-        titleButton.accessibilityLabel = selectedPage == .channels ? "选择频道" : "我的"
+        titleButton.setTitle("我的", for: .normal)
+        titleButton.accessibilityLabel = "我的"
         applyTheme()
     }
 }

@@ -23,6 +23,9 @@ final class MusicBannerCarouselCell: UICollectionViewCell, UIScrollViewDelegate 
         contentView.addSubview(scroll)
         contentView.addSubview(dots)
         dots.hidesForSinglePage = true
+        dots.backgroundStyle = .minimal
+        dots.currentPageIndicatorTintColor = .white
+        dots.pageIndicatorTintColor = UIColor.white.withAlphaComponent(0.4)
         dots.addAction(UIAction { [weak self] _ in
             guard let self else { return }
             self.holdUntil = Date().addingTimeInterval(10)
@@ -53,7 +56,7 @@ final class MusicBannerCarouselCell: UICollectionViewCell, UIScrollViewDelegate 
         }
         for (tile, item) in zip(tiles, items) {
             tile.configure(item: item, layout: .banner, theme: theme, onPlay: { open(item) })
-            if changed { tile.setOpenAction { open(item) } }
+            tile.setOpenAction { open(item) }
         }
         dots.numberOfPages = items.count
         setNeedsLayout()
@@ -76,7 +79,10 @@ final class MusicBannerCarouselCell: UICollectionViewCell, UIScrollViewDelegate 
                                 width: scroll.bounds.width, height: scroll.bounds.height)
         }
         scroll.contentSize = CGSize(width: CGFloat(items.count) * scroll.bounds.width, height: scroll.bounds.height)
-        dots.frame = CGRect(x: 16, y: bounds.height - 28, width: bounds.width - 32, height: 26)
+        let dotWidth = min(max(0, bounds.width - 32), dots.size(forNumberOfPages: items.count).width)
+        dots.frame = CGRect(x: bounds.width - 12 - dotWidth, y: bounds.height - 27, width: dotWidth, height: 26)
+        let trailingInset = items.count > 1 ? 12 + dotWidth + 8 : 14
+        for tile in tiles { tile.bannerTrailingInset = trailingInset }
         if changed { scroll.contentOffset.x = CGFloat(dots.currentPage) * scroll.bounds.width }
     }
 

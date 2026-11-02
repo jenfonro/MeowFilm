@@ -15,18 +15,30 @@ import Combine
         channel = value
         defaults.set(value.identity, forKey: lastChannelKey)
     }
-    public func restoreChannel(from catalogue: [MusicPublicBrowseChannel]) {
+    public func restoreChannel(from catalogue: [MusicPublicBrowseChannel], catalogueLoaded: Bool) {
+        guard !catalogue.isEmpty else { return }
         if let channel {
             if let current = catalogue.first(where: { $0.platform == channel.platform &&
                 ($0.id == channel.id || !channel.pageCode.isEmpty && $0.pageCode == channel.pageCode) }) {
-                self.channel = current
+                if current != channel { self.channel = current }
+                if current.identity != channel.identity {
+                    defaults.set(current.identity, forKey: lastChannelKey)
+                }
             }
-        } else if let key = defaults.string(forKey: lastChannelKey),
-                  let current = catalogue.first(where: { $0.identity == key ||
-                      !key.contains(":") && $0.platform == .netease && ($0.id == key || $0.pageCode == key) }) {
-            // A late catalogue read must not switch the user's selected tab.
-            channel = current
-            defaults.set(current.identity, forKey: lastChannelKey)
+            return
         }
+        if let key = defaults.string(forKey: lastChannelKey) {
+            if let current = catalogue.first(where: { $0.identity == key ||
+                !key.contains(":") && $0.platform == .netease && ($0.id == key || $0.pageCode == key) }) {
+                // A late catalogue read must not switch the user's selected tab.
+                channel = current
+                defaults.set(current.identity, forKey: lastChannelKey)
+                return
+            }
+        }
+        guard catalogueLoaded else { return }
+        // The first visit starts on the directory's ranking channel. Once
+        // selected, the same persisted identity takes precedence forever.
+        selectChannel(catalogue.first(where: { $0.kind == .rankings }) ?? catalogue[0])
     }
 }

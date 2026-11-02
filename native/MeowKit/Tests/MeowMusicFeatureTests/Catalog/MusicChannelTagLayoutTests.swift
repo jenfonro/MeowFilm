@@ -32,4 +32,12 @@ final class MusicChannelTagLayoutTests: XCTestCase {
         XCTAssertEqual(wider.frames.map(\.minY), [0, 0, 0])
         XCTAssertEqual(wider.size.height, 60)
     }
+    func testChannelPanelCanUseWiderRowSpacingWithoutChangingChipGaps() {
+        let rows = MusicChannelTagRows(width: 160, items: [
+            CGSize(width: 60, height: 30), CGSize(width: 80, height: 30), CGSize(width: 52, height: 30),
+        ], rowSpacing: 12)
+        XCTAssertEqual(rows.frames.map(\.minX), [0, 68, 0])
+        XCTAssertEqual(rows.frames.map(\.minY), [0, 0, 42])
+        XCTAssertEqual(rows.size.height, 72)
+    }
 }
