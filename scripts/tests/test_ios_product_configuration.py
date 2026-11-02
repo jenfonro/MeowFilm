@@ -48,6 +48,7 @@ class ProductConfigurationTests(unittest.TestCase):
         app = plistlib.loads((self.root / "apps/ios/Info-Meowfilm.plist").read_bytes())
         self.assertNotIn("NSAppTransportSecurity", base)
         self.assertNotIn("NSLocalNetworkUsageDescription", base)
+        self.assertIs(app["UIDesignRequiresCompatibility"], True)
         self.assertEqual(app["NSAppTransportSecurity"], {
             "NSExceptionDomains": {"d.kugou.com": {
                 "NSExceptionAllowsInsecureHTTPLoads": True,
