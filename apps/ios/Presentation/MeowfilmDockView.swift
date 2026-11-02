@@ -9,28 +9,36 @@ final class MeowfilmDockView: UIView {
     var onSelectPage: ((MeowfilmPrimaryPage) -> Void)?
     private let surface: MusicPlayerSurface
     private let navigation = UIStackView()
-    private let navigationBackground = UIView()
+    private let navigationHost = UIView()
+    private let opaqueBackdrop: WindowGradientView
+    private let fadedBackdrop: WindowGradientView
+    private let fadeMask = CAGradientLayer()
+    private let stack = UIStackView()
     private var buttons: [MeowfilmPrimaryPage: UIButton] = [:]
     private var selected = MeowfilmPrimaryPage.recommend
+    private var navigationVisible = true
     private var surfaceHeight: NSLayoutConstraint!
     private var navigationHeight: NSLayoutConstraint!
     private var stackBottom: NSLayoutConstraint!
 
     private enum NavigationColors {
-        static let background = UIColor.white
         static let selected = UIColor.black
         static let unselected = UIColor.darkGray
     }
 
-    init(surface: MusicPlayerSurface) {
+    init(surface: MusicPlayerSurface, themeProvider: any PageThemeProviding) {
         self.surface = surface
+        opaqueBackdrop = WindowGradientView(themeProvider: themeProvider)
+        fadedBackdrop = WindowGradientView(themeProvider: themeProvider)
         super.init(frame: .zero)
         backgroundColor = .clear
-        navigationBackground.backgroundColor = NavigationColors.background
-        navigationBackground.isOpaque = true
-        navigationBackground.isUserInteractionEnabled = false
-        addSubview(navigationBackground)
-        navigationBackground.translatesAutoresizingMaskIntoConstraints = false
+        for backdrop in [opaqueBackdrop, fadedBackdrop] as [UIView] {
+            backdrop.isUserInteractionEnabled = false
+            addSubview(backdrop)
+            backdrop.pinEdges(to: self)
+        }
+        fadeMask.colors = [UIColor.clear.cgColor, UIColor.black.cgColor]
+        fadedBackdrop.layer.mask = fadeMask
         navigation.axis = .horizontal
         navigation.distribution = .fillEqually
         for page in MeowfilmPrimaryPage.allCases {
@@ -50,22 +58,26 @@ final class MeowfilmDockView: UIView {
             buttons[page] = button
             navigation.addArrangedSubview(button)
         }
-        let stack = UIStackView(arrangedSubviews: [surfaceHost, navigation])
+        navigationHost.clipsToBounds = true
+        navigationHost.addSubview(navigation)
+        navigation.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(surfaceHost)
+        stack.addArrangedSubview(navigationHost)
         stack.axis = .vertical
         addSubview(stack)
         stack.translatesAutoresizingMaskIntoConstraints = false
         stackBottom = stack.bottomAnchor.constraint(equalTo: bottomAnchor)
         surfaceHeight = surfaceHost.heightAnchor.constraint(equalToConstant: surface.dockHeight)
-        navigationHeight = navigation.heightAnchor.constraint(equalToConstant: PageLayoutMetrics.navigation)
+        navigationHeight = navigationHost.heightAnchor.constraint(equalToConstant: PageLayoutMetrics.navigation)
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: topAnchor, constant: PageLayoutMetrics.dockTop),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
             stackBottom, surfaceHeight, navigationHeight,
-            navigationBackground.leadingAnchor.constraint(equalTo: leadingAnchor),
-            navigationBackground.trailingAnchor.constraint(equalTo: trailingAnchor),
-            navigationBackground.topAnchor.constraint(equalTo: navigation.topAnchor),
-            navigationBackground.bottomAnchor.constraint(equalTo: bottomAnchor),
+            navigation.topAnchor.constraint(equalTo: navigationHost.topAnchor),
+            navigation.leadingAnchor.constraint(equalTo: navigationHost.leadingAnchor),
+            navigation.trailingAnchor.constraint(equalTo: navigationHost.trailingAnchor),
+            navigation.heightAnchor.constraint(equalToConstant: PageLayoutMetrics.navigation),
         ])
         surfaceHost.addSubview(surface)
         surface.frame = surfaceHost.bounds
@@ -77,6 +89,7 @@ final class MeowfilmDockView: UIView {
             self.superview?.layoutIfNeeded()
         }
         renderNavigation()
+        updateBackdrop()
     }
 
     @available(*, unavailable)
@@ -87,16 +100,44 @@ final class MeowfilmDockView: UIView {
         stackBottom?.constant = -safeAreaInsets.bottom
     }
 
-    func select(_ page: MeowfilmPrimaryPage) {
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // Taller than the dock so the mask still covers it while it animates smaller.
+        let height = max(superview?.bounds.height ?? 0, bounds.height, 1)
+        let top = stack.frame.minY
+        let start = min(1, max(0, top / height))
+        let end = min(1, max(start, (top + surfaceHeight.constant) / height))
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        fadeMask.frame = CGRect(x: 0, y: 0, width: bounds.width, height: height)
+        fadeMask.locations = [NSNumber(value: Double(start)), NSNumber(value: Double(end))]
+        CATransaction.commit()
+    }
+
+    func select(_ page: MeowfilmPrimaryPage, duration: TimeInterval = 0) {
         selected = page
         renderNavigation()
+        if duration > 0 && window != nil {
+            UIView.animate(withDuration: duration) { self.updateBackdrop() }
+        } else {
+            updateBackdrop()
+        }
     }
 
     func setNavigationVisible(_ visible: Bool) {
-        navigation.isHidden = !visible
-        navigationBackground.isHidden = !visible
+        navigationVisible = visible
+        // Collapse by height only: the row keeps its horizontal layout, so
+        // showing it again never animates the buttons sideways.
+        navigationHost.isUserInteractionEnabled = visible
+        navigationHost.accessibilityElementsHidden = !visible
         navigationHeight.constant = visible ? PageLayoutMetrics.navigation : 0
         surfaceHeight.constant = surface.dockHeight
+    }
+
+    /// The recommend page fades its content out beside the capsule; every other
+    /// page ends its content above the capsule.
+    func updateBackdrop() {
+        opaqueBackdrop.alpha = navigationVisible && selected == .recommend ? 0 : 1
     }
 
     private func renderNavigation() {

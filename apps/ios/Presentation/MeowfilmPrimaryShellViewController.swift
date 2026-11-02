@@ -6,7 +6,7 @@ import MeowMusicFeature
 /// tasks; retained containment forwards only the visible page's UIKit lifecycle.
 @MainActor
 final class MeowfilmPrimaryShellViewController: PageViewController {
-    var onSelectionChanged: ((MeowfilmPrimaryPage) -> Void)?
+    var onSelectionChanged: ((MeowfilmPrimaryPage, TimeInterval) -> Void)?
     private var pendingChannel: MusicPublicBrowseChannel?
     private var channels: MusicChannelsViewController? {
         pages.page(at: 1) as? MusicChannelsViewController
@@ -47,11 +47,11 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
             pages.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
         pages.didMove(toParent: self)
-        pages.didSelect = { [weak self] _ in
+        pages.willSelect = { [weak self] _, duration in
             guard let self else { return }
             self.prepareSelectedPage()
-            self.renderHeader()
-            self.onSelectionChanged?(self.selectedPage)
+            self.renderHeader(duration: duration)
+            self.onSelectionChanged?(self.selectedPage, duration)
         }
         prepareSelectedPage()
         renderHeader()
@@ -144,15 +144,24 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
         }
     }
 
-    private func renderHeader() {
+    private func renderHeader(duration: TimeInterval = 0) {
         guard isViewLoaded else { return }
-        pageHeader.setTitleView(selectedPage == .recommend ? search :
-            selectedPage == .channels ? channelTitleHost : titleButton)
-        pageHeader.setTrailing(selectedPage == .recommend ? [feature] :
-            selectedPage == .channels ? [channelMenu] :
-            selectedPage == .library ? [add] : [])
-        titleButton.setTitle("我的", for: .normal)
-        titleButton.accessibilityLabel = "我的"
-        applyTheme()
+        let apply = {
+            self.pageHeader.setTitleView(self.selectedPage == .recommend ? self.search :
+                self.selectedPage == .channels ? self.channelTitleHost : self.titleButton)
+            self.pageHeader.setTrailing(self.selectedPage == .recommend ? [self.feature] :
+                self.selectedPage == .channels ? [self.channelMenu] :
+                self.selectedPage == .library ? [self.add] : [])
+            self.titleButton.setTitle("我的", for: .normal)
+            self.titleButton.accessibilityLabel = "我的"
+            self.applyTheme()
+        }
+        if duration > 0 && view.window != nil {
+            UIView.transition(with: pageHeader, duration: duration,
+                              options: [.transitionCrossDissolve, .allowAnimatedContent],
+                              animations: apply)
+        } else {
+            apply()
+        }
     }
 }

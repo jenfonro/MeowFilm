@@ -172,7 +172,9 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             openMenu: { [weak self] in self?.root.showSidebar() },
             openSearch: { [weak self] in self?.showSearch() }
         )
-        page.onSelectionChanged = { [weak self] selected in self?.root.select(selected) }
+        page.onSelectionChanged = { [weak self] selected, duration in
+            self?.root.select(selected, duration: duration)
+        }
         main = page
         let content = MusicPlayerContentModel(model: model, playback: assembly.playback,
                                               appearance: appearance, presentation: primaryPlaybackPresentation)

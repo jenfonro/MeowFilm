@@ -7,6 +7,9 @@ import UIKit
 public final class RetainedPagesController: UIViewController {
     public private(set) var selectedIndex: Int
     public var didSelect: ((Int) -> Void)?
+    /// Called when a selection starts, after its page is loaded and before the
+    /// crossfade, with that crossfade's duration (0 when immediate).
+    public var willSelect: ((Int, TimeInterval) -> Void)?
     private let pageFactories: [@MainActor () -> UIViewController]
     private var pages: [UIViewController?]
     private enum Appearance { case hidden, appearing, visible, disappearing }
@@ -95,6 +98,7 @@ public final class RetainedPagesController: UIViewController {
         if !isViewLoaded {
             selectedIndex = index
             loadViewIfNeeded()
+            willSelect?(index, 0)
             didSelect?(index)
             return
         }
@@ -108,6 +112,7 @@ public final class RetainedPagesController: UIViewController {
             previous.beginAppearanceTransition(false, animated: duration > 0)
             next.beginAppearanceTransition(true, animated: duration > 0)
         }
+        willSelect?(index, duration)
         let complete = { [weak self] in
             guard let self else { return }
             self.finishSwitchAppearance()

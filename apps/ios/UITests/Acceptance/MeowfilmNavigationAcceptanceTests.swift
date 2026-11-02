@@ -275,6 +275,51 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         XCTAssertTrue(app.buttons["search.open"].waitForExistence(timeout: 5))
     }
 
+    func testDockStaysAtTheBottomWhileTheKeyboardIsShown() {
+        XCTAssertTrue(app.buttons["search.open"].waitForExistence(timeout: 30))
+        app.buttons["search.open"].tap()
+        let field = app.textFields["search.field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        let capsule = app.buttons["music.miniPlayer.open"]
+        XCTAssertTrue(capsule.exists)
+        let raised = capsule.frame
+        XCTAssertGreaterThanOrEqual(raised.minY, keyboard.frame.minY - 1, "The dock rose with the keyboard")
+        attach("50-search-keyboard-dock")
+        app.tables["music.search.discovery"].swipeUp()
+        XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5))
+        XCTAssertEqual(capsule.frame.minY, raised.minY, accuracy: 1)
+        attach("51-search-dock-after-keyboard")
+        app.buttons["page.header.back"].tap()
+        XCTAssertTrue(app.buttons["search.open"].waitForExistence(timeout: 5))
+    }
+
+    /// Records the dock backdrop on each page for visual review; the Simulator
+    /// cannot assert the gradient blend, so this test only checks navigation.
+    func testRecordsDockBackdropAcrossPages() {
+        XCTAssertTrue(app.buttons["search.open"].waitForExistence(timeout: 30))
+        let content = app.collectionViews.firstMatch
+        for _ in 0..<4 { content.swipeUp() }
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
+        start.press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55)),
+                    withVelocity: .slow, thenHoldForDuration: 0.3)
+        attach("52-home-faded-dock")
+        app.buttons["app.primary.channels"].tap()
+        XCTAssertTrue(app.buttons["app.channels"].waitForExistence(timeout: 5))
+        attach("53-channels-opaque-dock")
+        app.buttons["app.primary.library"].tap()
+        attach("54-library-opaque-dock")
+        app.buttons["app.primary.recommend"].tap()
+        XCTAssertTrue(app.buttons["search.open"].waitForExistence(timeout: 5))
+        app.buttons["search.open"].tap()
+        XCTAssertTrue(app.textFields["search.field"].waitForExistence(timeout: 5))
+        app.tables["music.search.discovery"].swipeUp()
+        attach("55-search-opaque-dock")
+        app.buttons["page.header.back"].tap()
+        XCTAssertTrue(app.buttons["search.open"].waitForExistence(timeout: 5))
+    }
+
     /// A failed earlier run can leave its acceptance playlist behind. Remove it
     /// first so the test always opens the collection it creates.
     private func deleteCollections(named name: String) {
