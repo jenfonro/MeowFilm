@@ -5,9 +5,9 @@ import MeowUI
 
 @MainActor
 public final class MusicBrowseViewController: MusicPageViewController, UICollectionViewDelegate {
+    private static let sectionHorizontalInset: CGFloat = 16
     private let model: MusicViewModel
     private let page: MusicPublicBrowseViewModel?
-    private var showsSectionPlayback: Bool { page?.request != .discovery(.home) }
     private weak var router: (any MusicUIRouting)?
     private let embedded: Bool
     private var sections: [MusicPublicBrowseSection] = []
@@ -15,10 +15,21 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         let section: String
         let item: String?
     }
+    private var showsSectionPlayback: Bool {
+        guard let request = page?.request else { return false }
+        switch request {
+        case .discovery(.home): return false
+        case .discovery(.channel(let channel, _)) where channel.kind == .cube: return false
+        default: return true
+        }
+    }
     private var rows: [ItemID: (section: MusicPublicBrowseSection, item: MusicPublicBrowseItem)] = [:]
     private var dataSource: UICollectionViewDiffableDataSource<String, ItemID>!
-    private let tags = UIScrollView()
+    private lazy var tags = MusicChannelTagsView(themeProvider: appearance)
+    private let tagsBackdrop = UIButton(type: .custom)
     private var tagsHeight: NSLayoutConstraint!
+    private var tagsLayoutWidth: CGFloat = -1
+    private var collectionTop: NSLayoutConstraint!
     private var fmPreviews: [String: MusicFMPreview] = [:]
     private var previewTasks: [String: Task<Void, Never>] = [:]
     private var previewRequests = Set<String>()
@@ -74,18 +85,29 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
                 self?.collection.refreshControl?.endRefreshing()
             }
         }, for: .valueChanged)
-        tags.showsHorizontalScrollIndicator = false
-        view.addSubview(tags); view.addSubview(collection)
+        tags.onExpansionChanged = { [weak self] in self?.updateTagsHeight() }
+        tagsBackdrop.backgroundColor = UIColor(PageTheme.scrim)
+        tagsBackdrop.accessibilityLabel = "收起标签"
+        tagsBackdrop.accessibilityIdentifier = "music.channel.tags.dismiss"
+        tagsBackdrop.isHidden = true
+        tagsBackdrop.addAction(UIAction { [weak self] _ in self?.tags.collapse() }, for: .touchUpInside)
+        view.addSubview(collection); view.addSubview(tagsBackdrop); view.addSubview(tags)
         tags.translatesAutoresizingMaskIntoConstraints = false
+        tagsBackdrop.translatesAutoresizingMaskIntoConstraints = false
         collection.translatesAutoresizingMaskIntoConstraints = false
         tagsHeight = tags.heightAnchor.constraint(equalToConstant: 0)
+        collectionTop = collection.topAnchor.constraint(equalTo: contentTopAnchor)
         NSLayoutConstraint.activate([
             tags.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             tags.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             tags.topAnchor.constraint(equalTo: contentTopAnchor), tagsHeight,
+            tagsBackdrop.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            tagsBackdrop.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            tagsBackdrop.topAnchor.constraint(equalTo: contentTopAnchor),
+            tagsBackdrop.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             collection.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             collection.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            collection.topAnchor.constraint(equalTo: tags.bottomAnchor),
+            collectionTop,
             collection.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
         if let page {
@@ -96,6 +118,11 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         observe(model.accountChanges) { [weak self] platform in self?.accountChanged(platform) }
         observe(model.fmArtworkChanges) { [weak self] in self?.updateFMArtwork() }
         render()
+    }
+
+    public override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        if abs(view.bounds.width - tagsLayoutWidth) > 0.5 { updateTagsHeight() }
     }
 
     public override func pageDidBecomeActive() { activatePage() }
@@ -110,13 +137,16 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     }
 
     public override func pageDidBecomeVisible() {
-        for cell in collection.visibleCells.compactMap({ $0 as? MusicBannerCarouselCell }) { cell.setActive(true) }
+        for cell in collection.visibleCells.compactMap({ $0 as? MusicBannerCarouselCell }) {
+            cell.setActive(!tags.isExpanded)
+        }
         if let page, page.needsDateRefresh { runPageTask { await page.refreshForDateIfNeeded() } }
         renderState()
     }
 
     public override func pageDidBecomeHidden() {
         automaticPaginationHeld = true
+        tags.collapse()
         for cell in collection.visibleCells.compactMap({ $0 as? MusicBannerCarouselCell }) { cell.setActive(false) }
     }
 
@@ -148,11 +178,12 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     private func configure(_ cell: UICollectionViewCell, section: MusicPublicBrowseSection,
                            item: MusicPublicBrowseItem) {
         if let cell = cell as? MusicBannerCarouselCell {
+            cell.accessibilityIdentifier = "music.browse.banner.\(section.id)"
             cell.configure(section.items, theme: theme) { [weak self] item in
                 if case .track = item.content { self?.play(item, section: section) }
                 else { self?.open(item, section: section) }
             }
-            cell.setActive(isPageVisible)
+            cell.setActive(isPageVisible && !tags.isExpanded)
             return
         }
         guard let cell = cell as? MusicBrowseCell else { return }
@@ -215,7 +246,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
 
     public func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell,
                                forItemAt indexPath: IndexPath) {
-        (cell as? MusicBannerCarouselCell)?.setActive(isPageVisible)
+        (cell as? MusicBannerCarouselCell)?.setActive(isPageVisible && !tags.isExpanded)
         guard let row = row(at: indexPath) else { return }
         let item = row.item
         if case .action(let action) = item.content, action.isPersonalFM {
@@ -326,7 +357,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         render()
         loadVisibleFMPreviews()
         for cell in collection.visibleCells.compactMap({ $0 as? MusicBannerCarouselCell }) {
-            cell.setActive(isPageVisible)
+            cell.setActive(isPageVisible && !tags.isExpanded)
         }
     }
 
@@ -701,26 +732,31 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         let selected = page?.selectedFilter ?? ""
         guard force || values != renderedFilters || selected != renderedFilter else { return }
         renderedFilters = values; renderedFilter = selected
-        for item in tags.subviews where item is UIButton { item.removeFromSuperview() }
-        tagsHeight.constant = values.count > 1 ? 44 : 0
-        let font = UIFont.systemFont(ofSize: 13)
-        var x: CGFloat = 16
-        for value in values where values.count > 1 {
-            let button = UIButton(type: .system)
-            button.setTitle(value.title, for: .normal)
-            button.titleLabel?.font = font
-            button.tintColor = UIColor(value.id == page?.selectedFilter ? theme.accent : theme.ink)
-            let width = (value.title as NSString).size(withAttributes: [.font: font]).width + 24
-            button.frame = CGRect(x: x, y: 5, width: width, height: 34)
-            button.backgroundColor = UIColor(theme.chip); button.layer.cornerRadius = 17
-            button.addAction(UIAction { [weak self] _ in
-                guard let self, let page = self.page else { return }
-                self.runPageTask { await page.selectFilter(value.id) }
-            }, for: .touchUpInside)
-            tags.addSubview(button)
-            x += width + 8
+        tags.configure(filters: values, selectedID: selected, theme: theme) { [weak self] id in
+            guard let self, self.isPageVisible, let page = self.page else { return }
+            self.runPageTask { await page.selectFilter(id) }
         }
-        tags.contentSize = CGSize(width: x + 8, height: 44)
+        updateTagsHeight()
+    }
+
+    private func updateTagsHeight() {
+        guard isViewLoaded, tagsHeight != nil else { return }
+        let width = view.bounds.width
+        tagsLayoutWidth = width
+        tags.updateLayout(width: width)
+        let height = tags.preferredHeight(for: width)
+        let collapsed = tags.collapsedHeight
+        let wasExpanded = !tagsBackdrop.isHidden
+        if abs(tagsHeight.constant - height) > 0.5 { tagsHeight.constant = height }
+        if abs(collectionTop.constant - collapsed) > 0.5 { collectionTop.constant = collapsed }
+        tags.isHidden = height == 0
+        tagsBackdrop.isHidden = !tags.isExpanded
+        collection.accessibilityElementsHidden = tags.isExpanded
+        if wasExpanded != tags.isExpanded {
+            for cell in collection.visibleCells.compactMap({ $0 as? MusicBannerCarouselCell }) {
+                cell.setActive(isPageVisible && !tags.isExpanded)
+            }
+        }
     }
 
     private func loadFMPreview(_ item: MusicPublicBrowseItem, action: MusicHomeAction) {
@@ -809,8 +845,9 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
                     heightDimension: .absolute(180)), subitem: item, count: 3)
                 scrolling = .groupPaging
             case .banner:
-                group = .horizontal(layoutSize: .init(widthDimension: .fractionalWidth(1),
-                    heightDimension: .absolute((width - 32) / 2.56)), subitems: [item])
+                let bannerWidth = max(1, width - Self.sectionHorizontalInset * 2)
+                group = .horizontal(layoutSize: .init(widthDimension: .absolute(bannerWidth),
+                    heightDimension: .absolute(bannerWidth / 2.56)), subitems: [item])
                 scrolling = .groupPagingCentered
             case .grid:
                 let count = width < 359 ? 2 : 3
@@ -821,10 +858,13 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             case .rankingStack:
                 group = .vertical(layoutSize: .init(widthDimension: .fractionalWidth(1),
                     heightDimension: .absolute(156)), subitems: [item])
-            case .rankedSongs, .vipRankedSongs, .artistUpdates:
+            case .rankedSongs, .artistUpdates:
                 group = .horizontal(layoutSize: .init(widthDimension: .absolute(max(240, (width - 32) * 0.91)),
                     heightDimension: .absolute(210)), subitems: [item])
                 scrolling = .groupPaging
+            case .vipRankedSongs:
+                group = .vertical(layoutSize: .init(widthDimension: .fractionalWidth(1),
+                    heightDimension: .absolute(210)), subitems: [item])
             case .list where trackList:
                 group = .vertical(layoutSize: .init(widthDimension: .fractionalWidth(1),
                     heightDimension: .absolute(64)), subitems: [item])
@@ -843,8 +883,10 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             let result = NSCollectionLayoutSection(group: group)
             let headerHeight = MusicBrowseHeader.height(
                 for: section, showsSectionPlayback: self.showsSectionPlayback)
-            result.contentInsets = .init(top: index == 0 && headerHeight == 0 ? PageLayoutMetrics.contentGap : 4,
-                                         leading: 16, bottom: 20, trailing: 16)
+            result.contentInsets = .init(top: index == 0 && headerHeight == 0 &&
+                                         section.layout != .banner ? PageLayoutMetrics.contentGap : 4,
+                                         leading: Self.sectionHorizontalInset, bottom: 20,
+                                         trailing: Self.sectionHorizontalInset)
             result.interGroupSpacing = 9
             result.orthogonalScrollingBehavior = scrolling
             if headerHeight > 0 {
@@ -857,9 +899,11 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         }
     }
 
-    isolated deinit {
-        observation?.cancel()
-        for task in previewTasks.values { task.cancel() }
+    nonisolated deinit {
+        MainActor.assumeIsolated {
+            observation?.cancel()
+            for task in previewTasks.values { task.cancel() }
+        }
     }
 }
 #endif

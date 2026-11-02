@@ -26,13 +26,28 @@ final class MeowfilmNavigationAcceptanceTests: XCTestCase {
         attach("01-home")
 
         app.buttons["app.primary.channels"].tap()
-        let title = app.buttons["app.primary.title"]
-        XCTAssertTrue(title.waitForExistence(timeout: 5))
-        XCTAssertEqual(title.label, "选择频道")
-        assertInsideHeader(title)
+        let channelMenu = app.buttons["app.channels"]
+        let switcher = app.otherElements["music.channel.switcher"]
+        XCTAssertTrue(channelMenu.waitForExistence(timeout: 5))
+        XCTAssertTrue(switcher.waitForExistence(timeout: 5))
+        assertInsideHeader(channelMenu)
+        assertInsideHeader(switcher)
         attach("02-channels")
 
+        channelMenu.tap()
+        let picker = app.otherElements["music.channels.picker"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        app.buttons["music.channels.picker.close"].tap()
+        let pickerDismissed = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: picker)
+        wait(for: [pickerDismissed], timeout: 5)
+        XCTAssertEqual(app.otherElements.matching(identifier: "page.header").count, 1)
+        XCTAssertTrue(switcher.exists)
+        assertInsideHeader(switcher)
+        attach("02-channels-picker-dismissed")
+
         app.buttons["app.primary.library"].tap()
+        let title = app.buttons["app.primary.title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
         XCTAssertEqual(title.label, "我的")
         assertInsideHeader(title)
         XCTAssertTrue(app.buttons["app.primary.add"].isHittable)

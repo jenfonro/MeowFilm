@@ -5,6 +5,59 @@ import UIKit
 
 @MainActor
 final class FixedSheetTransitionTests: XCTestCase {
+    func testTopSheetPresentsAtTopWithExpectedGeometry() async throws {
+        let (root, page, sheet, window) = await mount(edge: .top, dragHandle: false)
+        defer { release(root, window: window) }
+        let frame = page.view.frame
+        XCTAssertEqual(frame.minY, window.bounds.minY, accuracy: 0.5)
+        XCTAssertEqual(frame.height, 520, accuracy: 0.5)
+        let presentation = try XCTUnwrap(page.presentationController)
+        XCTAssertEqual(frame, presentation.frameOfPresentedViewInContainerView)
+        XCTAssertFalse(presentation.shouldRemovePresentersView)
+        XCTAssertFalse(sheet.isTransitioning)
+    }
+
+    func testOffscreenTranslationFollowsSheetEdge() {
+        let frame = CGRect(x: 0, y: 120, width: 390, height: 520)
+        XCTAssertEqual(FixedSheetTransition.offscreenTranslation(frame: frame, edge: .top),
+                       CGSize(width: 0, height: -544))
+        XCTAssertEqual(FixedSheetTransition.offscreenTranslation(frame: frame, edge: .bottom),
+                       CGSize(width: 0, height: 544))
+    }
+
+    func testTopSheetCancelledInteractiveDismissalRestoresFrameAndPresenter() async throws {
+        let (root, page, sheet, window) = await mount(edge: .top, dragHandle: false)
+        defer { release(root, window: window) }
+        let frame = page.view.frame, underlay = root.view!, marker = underlay.subviews[0]
+        let markerFrame = marker.frame
+        sheet.handleDrag(.began, translation: 0, velocity: -100)
+        sheet.handleDrag(.changed, translation: -40, velocity: -100)
+        NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
+        await wait("top interactive cancellation settled") { !sheet.isTransitioning }
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        XCTAssertTrue(root.presentedViewController === page)
+        XCTAssertEqual(page.view.frame, frame)
+        XCTAssertEqual(page.view.transform, .identity)
+        XCTAssertTrue(page.isPageActive)
+        XCTAssertTrue(root.view === underlay)
+        XCTAssertEqual(underlay.transform, .identity)
+        XCTAssertEqual(marker.frame, markerFrame)
+        XCTAssertEqual(page.inactiveCount, 0)
+    }
+
+    func testTopSheetCompletedInteractiveDismissalClosesSheet() async throws {
+        let (root, page, sheet, window) = await mount(edge: .top, dragHandle: false)
+        defer { release(root, window: window) }
+        sheet.handleDrag(.began, translation: 0, velocity: -500)
+        sheet.handleDrag(.changed, translation: -160, velocity: -500)
+        sheet.handleDrag(.ended, translation: -160, velocity: -500)
+        await wait("top sheet dismissed") {
+            root.presentedViewController == nil && !sheet.isTransitioning
+        }
+        XCTAssertFalse(page.isPageActive)
+        XCTAssertEqual(page.inactiveCount, 1)
+    }
+
     func testCancelledInteractiveSheetRestoresFrameAndKeepsOriginalPresenter() async throws {
         let (root, page, sheet, window) = await mount()
         defer { release(root, window: window) }
@@ -52,7 +105,9 @@ final class FixedSheetTransitionTests: XCTestCase {
         XCTAssertEqual(underlay.transform, .identity)
     }
 
-    private func mount() async -> (UIViewController, FixedSheetTestPage, FixedSheetTransition, UIWindow) {
+    private func mount(edge: FixedSheetTransition.Edge = .bottom,
+                       dragHandle: Bool = true)
+        async -> (UIViewController, FixedSheetTestPage, FixedSheetTransition, UIWindow) {
         let root = UIViewController()
         root.view.backgroundColor = .white
         root.view.addSubview(UIView(frame: CGRect(x: 12, y: 96, width: 140, height: 80)))
@@ -62,9 +117,10 @@ final class FixedSheetTransitionTests: XCTestCase {
         page.view.backgroundColor = .white
         let handle = UIView(frame: CGRect(x: 0, y: 0, width: 390, height: 24))
         page.view.addSubview(handle)
-        let sheet = FixedSheetTransition { .init(width: $0.width, height: 520) }
+        let sheet = FixedSheetTransition(edge: edge) { .init(width: $0.width, height: 520) }
         page.modalPresentationStyle = .custom; page.transitioningDelegate = sheet
-        sheet.install(on: page, dragHandle: handle)
+        if dragHandle { sheet.install(on: page, dragHandle: handle) }
+        else { sheet.install(on: page) }
         root.present(page, animated: false)
         NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
         await wait("fixed sheet appeared") { page.isPageVisible && !page.isBeingPresented && !sheet.isTransitioning }

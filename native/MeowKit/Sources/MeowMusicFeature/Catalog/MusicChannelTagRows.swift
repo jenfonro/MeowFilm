@@ -7,7 +7,7 @@ struct MusicChannelTagRows {
     let size: CGSize
     let frames: [CGRect]
 
-    init(width: CGFloat?, items: [CGSize]) {
+    init(width: CGFloat?, items: [CGSize], rowSpacing: CGFloat = 8) {
         let gap: CGFloat = 8
         let intrinsic = items.reduce(CGFloat.zero) { $0 + $1.width } + CGFloat(max(0, items.count - 1)) * gap
         let width = max(1, width ?? intrinsic)
@@ -16,7 +16,7 @@ struct MusicChannelTagRows {
         for item in items {
             let itemWidth = min(width, max(0, item.width))
             if x > 0 && x + itemWidth > width {
-                x = 0; y += rowHeight + gap; rowHeight = 0
+                x = 0; y += rowHeight + rowSpacing; rowHeight = 0
             }
             frames.append(CGRect(x: x, y: y, width: itemWidth, height: item.height))
             x += itemWidth + gap; rowHeight = max(rowHeight, item.height)

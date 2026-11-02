@@ -6,9 +6,14 @@ import UIKit
 public final class FixedSheetTransition: NSObject, UIViewControllerTransitioningDelegate,
     UIGestureRecognizerDelegate
 {
+    public enum Edge: Sendable {
+        case bottom, top
+    }
+
     public let handleGesture = UIPanGestureRecognizer()
     public var onTransitionEnded: ((_ presenting: Bool, _ completed: Bool) -> Void)?
     public var isTransitioning: Bool { animation != nil || interaction != nil }
+    private let edge: Edge
     private let size: (CGSize) -> CGSize
     private weak var controller: UIViewController?
     private var animation: FixedSheetAnimator?
@@ -16,19 +21,25 @@ public final class FixedSheetTransition: NSObject, UIViewControllerTransitioning
     private var interactionEnding = false
     private var foregroundObserver: NSObjectProtocol?
 
-    public init(size: @escaping (CGSize) -> CGSize) {
+    public init(edge: Edge = .bottom, size: @escaping (CGSize) -> CGSize) {
+        self.edge = edge
         self.size = size
         super.init()
     }
 
-    public func install(on controller: UIViewController, dragHandle: UIView) {
+    public func install(on controller: UIViewController) {
         self.controller = controller
-        handleGesture.delegate = self
-        handleGesture.addTarget(self, action: #selector(panned))
-        dragHandle.addGestureRecognizer(handleGesture)
+        guard foregroundObserver == nil else { return }
         foregroundObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.willResignActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in MainActor.assumeIsolated { self?.cancelInteraction() } }
+    }
+
+    public func install(on controller: UIViewController, dragHandle: UIView) {
+        install(on: controller)
+        handleGesture.delegate = self
+        handleGesture.addTarget(self, action: #selector(panned))
+        dragHandle.addGestureRecognizer(handleGesture)
     }
 
     public func cancelInteraction() {
@@ -40,7 +51,10 @@ public final class FixedSheetTransition: NSObject, UIViewControllerTransitioning
     public func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         guard canDismiss, let pan = gestureRecognizer as? UIPanGestureRecognizer else { return false }
         let velocity = pan.velocity(in: controller?.view.window)
-        return velocity.y > abs(velocity.x)
+        switch edge {
+        case .bottom: return velocity.y > abs(velocity.x)
+        case .top: return velocity.y < -abs(velocity.x)
+        }
     }
 
     private var canDismiss: Bool {
@@ -63,7 +77,15 @@ public final class FixedSheetTransition: NSObject, UIViewControllerTransitioning
         guard let controller else { return }
         // The window does not move with the sheet. Translation retains the
         // touch-down offset for both the handle and the outside shade.
-        let distance = max(0, translation)
+        let distance: CGFloat, dismissalVelocity: CGFloat
+        switch edge {
+        case .bottom:
+            distance = max(0, translation)
+            dismissalVelocity = velocity
+        case .top:
+            distance = max(0, -translation)
+            dismissalVelocity = -velocity
+        }
         let height = max(1, controller.view.bounds.height)
         let progress = min(1, distance / (height + 24))
         switch state {
@@ -81,7 +103,7 @@ public final class FixedSheetTransition: NSObject, UIViewControllerTransitioning
             guard interaction != nil, !interactionEnding else { return }
             interactionEnding = true
             let threshold = max(64, min(112, height * 0.2))
-            if distance > threshold || distance > 24 && velocity > 650 { interaction?.finish() }
+            if distance > threshold || distance > 24 && dismissalVelocity > 650 { interaction?.finish() }
             else { interaction?.cancel() }
         case .cancelled, .failed:
             cancelInteraction()
@@ -103,7 +125,9 @@ public final class FixedSheetTransition: NSObject, UIViewControllerTransitioning
     public func presentationController(forPresented presented: UIViewController,
                                        presenting: UIViewController?, source: UIViewController)
         -> UIPresentationController? {
-        let value = FixedSheetPresentationController(presented: presented, presenting: presenting, size: size)
+        let value = FixedSheetPresentationController(
+            presented: presented, presenting: presenting, edge: edge, size: size
+        )
         value.tap.addTarget(self, action: #selector(dismissSheet))
         value.pan.addTarget(self, action: #selector(panned))
         value.pan.delegate = self
@@ -112,7 +136,9 @@ public final class FixedSheetTransition: NSObject, UIViewControllerTransitioning
     }
 
     private func makeAnimator(presenting: Bool) -> FixedSheetAnimator {
-        let value = FixedSheetAnimator(presenting: presenting, interactive: interaction != nil) {
+        let value = FixedSheetAnimator(
+            presenting: presenting, interactive: interaction != nil, edge: edge
+        ) {
             [weak self] completed in
             self?.animation = nil
             self?.interaction = nil
@@ -121,6 +147,11 @@ public final class FixedSheetTransition: NSObject, UIViewControllerTransitioning
         }
         animation = value
         return value
+    }
+
+    static func offscreenTranslation(frame: CGRect, edge: Edge) -> CGSize {
+        let distance = frame.height + 24
+        return CGSize(width: 0, height: edge == .top ? -distance : distance)
     }
 
     deinit {
@@ -132,11 +163,14 @@ public final class FixedSheetTransition: NSObject, UIViewControllerTransitioning
 private final class FixedSheetAnimator: NSObject, UIViewControllerAnimatedTransitioning {
     private let presenting: Bool
     private let interactive: Bool
+    private let edge: FixedSheetTransition.Edge
     private let completion: (Bool) -> Void
     private var animator: UIViewPropertyAnimator?
 
-    init(presenting: Bool, interactive: Bool, completion: @escaping (Bool) -> Void) {
-        self.presenting = presenting; self.interactive = interactive; self.completion = completion
+    init(presenting: Bool, interactive: Bool, edge: FixedSheetTransition.Edge,
+         completion: @escaping (Bool) -> Void) {
+        self.presenting = presenting; self.interactive = interactive; self.edge = edge
+        self.completion = completion
         super.init()
     }
 
@@ -158,7 +192,8 @@ private final class FixedSheetAnimator: NSObject, UIViewControllerAnimatedTransi
             return failed
         }
         let frame = presenting ? context.finalFrame(for: controller) : context.initialFrame(for: controller)
-        let offscreen = CGAffineTransform(translationX: 0, y: frame.height + 24)
+        let translation = FixedSheetTransition.offscreenTranslation(frame: frame, edge: edge)
+        let offscreen = CGAffineTransform(translationX: translation.width, y: translation.height)
         root.transform = .identity
         root.frame = frame
         if presenting {
@@ -187,12 +222,15 @@ private final class FixedSheetAnimator: NSObject, UIViewControllerAnimatedTransi
 private final class FixedSheetPresentationController: UIPresentationController {
     let tap = UITapGestureRecognizer(), pan = UIPanGestureRecognizer()
     private let shade = UIView()
+    private let edge: FixedSheetTransition.Edge
     private let size: (CGSize) -> CGSize
 
-    init(presented: UIViewController, presenting: UIViewController?, size: @escaping (CGSize) -> CGSize) {
+    init(presented: UIViewController, presenting: UIViewController?, edge: FixedSheetTransition.Edge,
+         size: @escaping (CGSize) -> CGSize) {
+        self.edge = edge
         self.size = size
         super.init(presentedViewController: presented, presenting: presenting)
-        shade.backgroundColor = UIColor.black.withAlphaComponent(0.32)
+        shade.backgroundColor = UIColor(PageTheme.scrim)
         shade.addGestureRecognizer(tap)
         shade.addGestureRecognizer(pan)
     }
@@ -203,7 +241,8 @@ private final class FixedSheetPresentationController: UIPresentationController {
         let bounds = containerView.bounds, requested = size(bounds.size)
         let width = min(bounds.width, max(0, requested.width))
         let height = min(bounds.height, max(0, requested.height))
-        return CGRect(x: bounds.midX - width / 2, y: bounds.maxY - height, width: width, height: height)
+        let y = edge == .top ? bounds.minY : bounds.maxY - height
+        return CGRect(x: bounds.midX - width / 2, y: y, width: width, height: height)
     }
 
     override func presentationTransitionWillBegin() {
