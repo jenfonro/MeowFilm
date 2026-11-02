@@ -44,7 +44,7 @@ public sealed partial class MusicAccountProtocol
         try
         {
             AccountRules.Require(response.Location is null, "REDIRECT_DENIED");
-            var data = PJ.Parse(response.Bytes, 65536); Inspect(data); PlatformProtocols.KgAccountStatus(data); return data;
+            var data = PJ.Parse(response.Bytes); Inspect(data); PlatformProtocols.KgAccountStatus(data); return data;
         }
         finally { CryptographicOperations.ZeroMemory(response.Bytes); }
     }

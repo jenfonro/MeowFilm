@@ -7,7 +7,7 @@ public sealed partial class MusicLibraryOwner
     private static JsonObject[] Songs(JsonObject p, bool empty, bool full = false)
     {
         var a = p["songs"] is null && empty ? new JsonArray() : LJ.Array(p["songs"]);
-        LJ.Require(a.Count <= (full ? 10000 : 1000) && (empty || a.Count > 0), "LIMIT");
+        LJ.Require((full || a.Count <= 1000) && (empty || a.Count > 0), "LIMIT");
         return a.Select(NativeMusicSong.Normalize).ToArray();
     }
     internal static NativeMusicSongGroups IndexLibrarySongs(JsonObject library, CancellationToken token = default)
@@ -42,7 +42,7 @@ public sealed partial class MusicLibraryOwner
             var c = FindCollection(library, LJ.Text(p["id"]));
             LJ.Require(Revision(c) == LJ.I(p["ifRevision"]), "REVISION_CONFLICT"); return c;
         }
-        JsonObject DetailSong(string id) => NativeMusicSong.View(LJ.Object(library["songs"])[id]);
+        JsonObject DetailSong(string id) => NativeMusicSong.Normalize(LJ.Object(library["songs"])[id]);
         if (method == "music.library.list")
         {
             LJ.Fields(p, "offset limit");
@@ -68,7 +68,7 @@ public sealed partial class MusicLibraryOwner
             LJ.Fields(p, "query offset limit", "query"); string query = LJ.Text(p["query"], 200).ToLowerInvariant();
             var matches = collections.OfType<JsonObject>().Where(c => !LJ.B(c["deleted"])).SelectMany(Order).Distinct()
                 .Select(id => LJ.Object(library["songs"])[id]).OfType<JsonObject>()
-                .Where(s => new[] { "title", "artist", "album" }.Any(f => LJ.S(s[f]).Contains(query, StringComparison.OrdinalIgnoreCase))).Select(NativeMusicSong.View);
+                .Where(s => new[] { "title", "artist", "album" }.Any(f => LJ.S(s[f]).Contains(query, StringComparison.OrdinalIgnoreCase))).Select(NativeMusicSong.Normalize);
             return (LJ.Merge(LJ.Page(matches, p), LJ.Obj(("revision", library["revision"]))), false);
         }
         LJ.Require(pending is null, "PENDING_WRITE");

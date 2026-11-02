@@ -30,7 +30,7 @@ public static class MusicCatalogPersonalTests
         yield return Case("directory filters nullable totals empty intermediate page and failed refresh", DirectoryFilters);
         yield return Case("KG locator 30-page membership selection survives global sorting", KgMembers);
         yield return Case("QQ favorites complete save never stores only visible page", TxSave);
-        yield return Case("KG UI can navigate beyond the old hundred-page limit", LongKg);
+        yield return Case("KG UI navigates past one hundred pages by platform total", LongKg);
         yield return Case("updated private locator cannot restore an old cached revision", LocatorRefresh);
         yield return Case("private tail failure preserves display and durable queue", TailFailure);
         yield return Case("duplicate member and changed snapshot cannot publish second page", PageDefects);

@@ -50,7 +50,6 @@ public static class MusicFeedbackProtocolTests
             var end = End() with { Listened = 8.75, MediaListened = 17.5, Rate = 2, Position = 200, Reason = "playend" };
             await session.FinishAsync(end);
             await session.FinishAsync(end);
-            Equal(0, f.Protocol.ActiveSessionCount);
             Equal(5, f.Calls); Equal(2, f.Logs.Count);
             Equal("play", Text(f.Logs[1]["action"]));
             var finish = f.Logs[1]["json"]!.AsObject();
@@ -491,7 +490,7 @@ public static class MusicFeedbackProtocolTests
                 await Error(() => f.Protocol.StartAsync(f.Account, Start(new())), "AUTH_EXPIRED");
             Equal(81, f.Calls);
             await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "START_UNCONFIRMED");
-            Equal(81, f.Calls); Equal(0, f.Protocol.ActiveSessionCount);
+            Equal(81, f.Calls);
         });
     }
     // Separate post-WY inventory: the QQ harness enumerates only this method.

@@ -34,7 +34,7 @@ public static class MusicNativeCatalogTests
         yield return new("Native catalog complete private locator projection and exact 30-member pages", PrivateLocator);
         yield return new("Native catalog private KG sort across pages preserves duplicate hash occurrences", PrivateOrder);
         yield return new("Native catalog private KG duplicate fileid and changed sort are not snapshots", PrivateChanges);
-        yield return new("Native catalog private KG exceeds old 100-page ceiling without truncation", PrivateLong);
+        yield return new("Native catalog private KG exceeds 100 pages without truncation", PrivateLong);
         yield return new("Native catalog stage tokens expire and discard independently", StageSlots);
         yield return new("Native catalog simultaneous preparations own cancellation independently", PreparingSlots);
         yield return new("Native catalog concurrent reads have no shared request quota", RequestSlots);
@@ -717,7 +717,7 @@ public static class MusicNativeCatalogTests
         Error(await f.Run("home", new { platform = "wy" }), "INVALID_RESPONSE");
         f.Platform.Handler = null;
         f.Platform.Pages = p => Page(p, 10001);
-        Error(await f.Run("playlist.prepare", new { platform = "wy", id = "42" }), "PAGINATION_LIMIT");
+        Check(N(await f.Prepare(), "count") == 10001);
         var huge = O(Song("wy", 0)); huge["title"] = new string('x', 32 * 1024 * 1024);
         var large = J(huge);
         f.Platform.Pages = p => Page(p, 1, _ => large);

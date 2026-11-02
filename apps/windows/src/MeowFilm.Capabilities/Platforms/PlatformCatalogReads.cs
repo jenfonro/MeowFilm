@@ -37,10 +37,8 @@ public sealed partial class MusicPlatformCatalog
                 var total = PJ.Count(PJ.At(data, "result", songs ? "songCount" : "playlistCount"));
                 var items = PJ.Rows(PJ.At(data, "result", songs ? "songs" : "playlists") ?? (total == 0 ? new JsonArray() : null), count)
                     .Select(r => songs ? PlatformSongs.Wy(r) : PlatformSongs.Playlist("wy", r));
-                return p.Pages == 1
-                    ? PJ.Page("wy", items, p.Page, p.Limit, total, p.Page * (long)p.Limit < total)
-                    : PJ.Page("wy", items, p.Page, count, total, offset + (long)count < total,
-                        next: p.Page + p.Pages, offset: offset);
+                return PJ.SearchPage("wy", items, p.Page, count, total, offset + (long)count < total,
+                    next: p.Page + (long)p.Pages, offset: p.Pages > 1 ? offset : null);
             });
         }
         if (c.Platform == "tx")
@@ -55,7 +53,7 @@ public sealed partial class MusicPlatformCatalog
             PJ.Require(int.TryParse(PJ.Scalar(PJ.At(data, "meta", "nextpage")), out var next) && (next == -1 || next > p.Page), "PAGINATION_STALLED");
             var items = PJ.Rows(PJ.At(data, "body", songs ? "item_song" : "item_songlist") ?? (total == 0 ? new JsonArray() : null), p.Limit)
                 .Select(r => songs ? PlatformSongs.Tx(r) : PlatformSongs.Playlist("tx", r));
-            return PJ.Page("tx", items, p.Page, p.Limit, total, next != -1, next);
+            return PJ.SearchPage("tx", items, p.Page, p.Limit, total, next != -1, next: next, shortPageEnds: false);
         }
         var args = PJ.Obj(("keyword", p.Keyword), ("page", p.Page), ("pagesize", p.Limit),
             ("platform", "AndroidFilter"), ("iscorrection", 1), ("area_code", 1));
@@ -63,8 +61,8 @@ public sealed partial class MusicPlatformCatalog
         else { args["albumhide"] = 0; args["nocollect"] = 0; }
         var kg = await c.Kg(songs ? "/v2/search/song" : "/v1/search/special", args, "complexsearch.kugou.com");
         var kgTotal = PJ.Count(PJ.At(kg, "data", "total"));
-        var kgRows = ExactPage(PJ.First(PJ.At(kg, "data", "lists"), songs ? null : PJ.At(kg, "data", "info")), p.Page, p.Limit, kgTotal);
-        return PJ.Page("kg", kgRows.Select(r => songs ? PlatformSongs.Kg(r) : PlatformSongs.Playlist("kg", r)),
+        var kgRows = PJ.Rows(PJ.First(PJ.At(kg, "data", "lists"), songs ? null : PJ.At(kg, "data", "info")), p.Limit);
+        return PJ.SearchPage("kg", kgRows.Select(r => songs ? PlatformSongs.Kg(r) : PlatformSongs.Playlist("kg", r)),
             p.Page, p.Limit, kgTotal, p.Page * (long)p.Limit < kgTotal);
     }
     public Task<JsonElement> SongAsync(MusicSongRequest request, CancellationToken cancellationToken = default)
@@ -125,10 +123,10 @@ public sealed partial class MusicPlatformCatalog
         {
             PJ.Require(Enum.IsDefined(locator.Kind) && Regex.IsMatch(PJ.Input(locator.Scope, 64), "^[a-f0-9]{64}$"));
             PJ.IdInput(locator.ListId);
-            PJ.Require(locator.Total is null or >= 0 and <= 10000);
+            PJ.Require(locator.Total is null or >= 0);
             if (locator.Version is not null) PJ.Id(JsonValue.Create(locator.Version), "^[0-9]{1,20}$", "INVALID_REQUEST");
             if (locator.Name is not null) PJ.Require(locator.Name.Length <= 4096);
-            PJ.Require(p.Page >= 1 && p.Page <= (locator.Kind == MusicPersonalPlaylistKind.KugouOwned ? 334 : 100) &&
+            PJ.Require(p.Page >= 1 &&
                 p.Limit >= 1 && p.Limit <= (locator.Kind == MusicPersonalPlaylistKind.KugouOwned ? 30 : 100));
         }
         else PJ.PageInput(p.Page, p.Limit);
@@ -150,8 +148,7 @@ public sealed partial class MusicPlatformCatalog
                 var list = data["playlist"];
                 PJ.Require(list is JsonObject && PJ.Id(PJ.At(list, "id")) == id, "IDENTITY_MISMATCH");
                 var total = PJ.Count(PJ.At(list, "trackCount"));
-                PJ.Require(total <= 10000, "LIMIT");
-                var ids = PJ.Rows(PJ.At(list, "trackIds") ?? (PJ.At(list, "tracks") is JsonArray tr && tr.Count == total ? tr : total == 0 ? new JsonArray() : null), 10000)
+                var ids = PJ.RowsAll(PJ.At(list, "trackIds") ?? (PJ.At(list, "tracks") is JsonArray tr && tr.Count == total ? tr : total == 0 ? new JsonArray() : null))
                     .Select(t => PJ.Id(t["id"])).ToArray();
                 var members = ids.ToHashSet(StringComparer.Ordinal);
                 PJ.Require(ids.LongLength == total && members.Count == ids.Length, "INCOMPLETE_PLAYLIST");
@@ -160,7 +157,7 @@ public sealed partial class MusicPlatformCatalog
                 var pageIds = ids.Skip((int)Math.Min(ids.LongLength, (p.Page - 1L) * p.Limit)).Take(p.Limit).ToArray();
                 foreach (var memberId in pageIds) PJ.IdInput(memberId);
                 var tracks = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
-                foreach (var track in PJ.Rows(PJ.At(list, "tracks") ?? new JsonArray(), 10000))
+                foreach (var track in PJ.RowsAll(PJ.At(list, "tracks") ?? new JsonArray()))
                 {
                     var memberId = PJ.Id(track["id"]);
                     PJ.Require(members.Contains(memberId) && tracks.TryAdd(memberId, track), "IDENTITY_MISMATCH");

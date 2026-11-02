@@ -35,14 +35,14 @@ public static partial class MusicUiTests
             True(!words.SequenceEqual(f.Module.DiscoveryRecommended.Select(w => w.Text)), "six-word local rotation");
             Equal(before, f.Http.Requests.Count); Equal(0, f.Runtime.Calls.Count);
         });
-        yield return Case("native discovery keyword consumes saved aggregate policy and history without JS", async () =>
+        yield return Case("native discovery keyword consumes saved search policy and history without JS", async () =>
         {
             await using var f = await DiscoveryScene.Create();
             await f.Policy(); await f.Open();
             var word = f.Module.DiscoveryHot[0];
             await f.Module.SearchDiscoveryKeywordAsync(word);
             await DiscoveryUntil(() => f.Module.Songs.Count == 3);
-            True(f.Module.IsSearchPage, "actual aggregate results");
+            True(f.Module.IsSearchPage, "actual music search results");
             Equal(1, f.Http.Searches);
             var history = (await f.Call("music.search.history.get")).GetProperty("history").GetProperty("items");
             True(history.EnumerateArray().Any(h => h.GetProperty("text").GetString() == word.Text &&

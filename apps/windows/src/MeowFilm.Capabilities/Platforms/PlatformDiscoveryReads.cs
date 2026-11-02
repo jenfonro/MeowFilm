@@ -17,7 +17,7 @@ public sealed partial class MusicPlatformCatalog
     private static JsonObject Continuation(JsonElement? value, Call c, string target, params string[] allowed)
     {
         if (value is null) return new();
-        var input = PJ.Parse(Encoding.UTF8.GetBytes(value.Value.GetRawText()), null);
+        var input = PJ.Parse(Encoding.UTF8.GetBytes(value.Value.GetRawText()));
         PJ.Require(input.All(p => allowed.Contains(p.Key) || p.Key is "scope" or "target"));
         PJ.Require(PJ.S(input, "scope") == c.Scope && PJ.S(input, "target") == target, "STALE_SESSION");
         return input;
@@ -64,7 +64,7 @@ public sealed partial class MusicPlatformCatalog
         var input = PJ.Obj(("pageCode", kind == "home" ? "HOME_RECOMMEND_PAGE" : "HOME_DISCOVERY_PAGE"), ("cursor", numeric),
             ("isFirstScreen", cursor == "0"), ("pageStyleType", "noCutBlock"), ("refresh", false));
         foreach (var key in new[] { "blockCodeOrderList", "loadedPositionCodes" })
-            if (PJ.S(prev, key).Length > 0) input[key] = PJ.Input(PJ.S(prev, key), int.MaxValue);
+            if (PJ.S(prev, key).Length > 0) input[key] = PJ.InputAll(PJ.S(prev, key));
         return c.Wy("/api/link/page/rcmd/resource/show", input, data =>
         {
             Shape(data);

@@ -35,7 +35,7 @@ public static class MusicRecommendationTests
         yield return new("Recommendation identical in-flight start reuses one physical request and session", DuplicateStart);
         yield return new("Recommendation new start waits old physical read no overlap", Replacement);
         yield return new("Recommendation commit unknown only explicit reconcile no duplicate write", Unknown);
-        yield return new("Recommendation cancelled reconciliation retains receipt until its consumer accepts", ReconcileCancellation);
+        yield return new("Recommendation cancelled reconciliation keeps its result replayable until the next commit", ReconcileCancellation);
         yield return new("Recommendation preview malformed identity and unsupported platform do not replace", Invalid);
         yield return new("Recommendation observers repeating cancel produce no notification loop", ObserverCancel);
         yield return new("Recommendation Changed synchronous dispose does not await itself", ObserverDispose);
@@ -64,7 +64,6 @@ public static class MusicRecommendationTests
         var state = await start; Check(S(state, "status") == "ready" && N(state, "batch") == 1);
         Check((await f.Q()).GetProperty("total").GetInt32() == 3 && f.Selections.Count == 1);
         Check(f.Selections.Single().IsCurrent());
-        Check(!f.Library.HasRecommendationReceipt);
     }
     private static async Task InitialFailure()
     {
@@ -305,11 +304,11 @@ public static class MusicRecommendationTests
         f.Store.AfterRead = cancellation.Cancel;
         await f.Rec.ExecuteAsync("music.recommendations.reconcile", new { id }, cancellation.Token);
         f.Store.AfterRead = null;
-        Check((await f.State()).GetProperty("requiresReconcile").GetBoolean() && f.Library.HasRecommendationReceipt);
+        Check((await f.State()).GetProperty("requiresReconcile").GetBoolean());
         int writes = f.Store.Writes, reads = f.Catalog.Calls.Count;
         await f.Port.ExecuteAsync("music.queue.get");
         var accepted = await f.Rec.ExecuteAsync("music.recommendations.reconcile", new { id });
-        Check(!accepted.GetProperty("requiresReconcile").GetBoolean() && !f.Library.HasRecommendationReceipt);
+        Check(!accepted.GetProperty("requiresReconcile").GetBoolean());
         Check(N(accepted, "batch") == 1 && f.Store.Writes == writes && f.Catalog.Calls.Count == reads && f.Selections.IsEmpty);
     }
     private static async Task ObserverCancel()

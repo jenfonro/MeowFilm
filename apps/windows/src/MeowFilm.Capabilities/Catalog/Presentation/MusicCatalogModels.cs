@@ -107,8 +107,6 @@ public static class MusicCatalogDto
     public static string Text(JsonElement element, string name) =>
         element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value) &&
         value.ValueKind == JsonValueKind.String ? value.GetString()! : "";
-    public static string SongNativeId(JsonElement song) => SongJson.NativeId(song);
-
     public static MusicCatalogCard[] SearchResults(JsonElement items, string kind)
     {
         MusicDto.Require(kind is "songs" or "playlists" && items.ValueKind == JsonValueKind.Array);
@@ -224,7 +222,7 @@ public static class MusicCatalogDto
         {
             MusicDto.Require(SongJson.Platform(song.Raw) == platform);
             return new(song.Id, song.Title, song.Artist, song.Cover, "song", platform, song,
-                SongNativeId(song.Raw), Available: available, ErrorCode: error, StableKey: Text(item, "key"),
+                SongJson.NativeId(song.Raw), Available: available, ErrorCode: error, StableKey: Text(item, "key"),
                 MemberId: Text(item, "memberId"), Presentation: presentation,
                 RequiresAccount: requiresAccount, Display: display);
         }
@@ -334,7 +332,7 @@ public static class MusicCatalogDto
         "SNAPSHOT_CHANGED" or "REVISION_CONFLICT" => "内容已变更，请刷新",
         "PAGINATION_STALLED" => "分页未前进",
         "INCOMPLETE_PAGE" or "INCOMPLETE_PLAYLIST" => "歌单内容不完整",
-        "PAGINATION_LIMIT" or "LIMIT" => "内容超过数量限制",
+        "LIMIT" => "内容超过数量限制",
         "IDENTITY_MISMATCH" => "平台内容身份不一致",
         "INVALID_RESPONSE" or "INVALID_REQUEST" => "平台内容格式无效",
         "RATE_LIMITED" => "平台请求过于频繁",

@@ -1,12 +1,32 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace MeowFilm.Capabilities.Library;
+
+internal static class MusicSearchSettings
+{
+    internal const int MaxCacheMinutes = 1440;
+    internal static bool ValidPages(int value) => value >= 1;
+    internal static bool ValidConcurrency(int value) => value >= 1;
+    internal static bool ValidCacheMinutes(int value) => value is >= 1 and <= MaxCacheMinutes;
+    internal static int Pages(JsonNode? value) => (int)LJ.I(value, 1, int.MaxValue);
+    internal static int Concurrency(JsonNode? value) => (int)LJ.I(value, 1, int.MaxValue);
+    internal static int CacheMinutes(JsonNode? value) => (int)LJ.I(value, 1, MaxCacheMinutes);
+    private static int Read(JsonElement value, string key, Func<int, bool> valid)
+    {
+        long number = MusicDto.Integer(value, key);
+        MusicDto.Require(number is >= 1 and <= int.MaxValue && valid((int)number));
+        return (int)number;
+    }
+    internal static int Pages(JsonElement value, string key) => Read(value, key, ValidPages);
+    internal static int Concurrency(JsonElement value, string key) => Read(value, key, ValidConcurrency);
+    internal static int CacheMinutes(JsonElement value, string key) => Read(value, key, ValidCacheMinutes);
+}
 
 public sealed partial class MusicLibraryOwner
 {
     private const string SearchPolicyArea = "native-search-policy", SearchHistoryArea = "native-search-history";
     private static readonly string[] SearchPlatforms = ["wy", "tx", "kw", "kg", "mg"];
-    internal const int MaxSearchPages = 10, MaxSearchConcurrency = 10, MaxSearchCacheMinutes = 1440;
 
     private static JsonObject EmptySearchKind() =>
         LJ.Obj(("order", LJ.Arr(SearchPlatforms)), ("enabled", LJ.Arr(SearchPlatforms)),
@@ -36,9 +56,9 @@ public sealed partial class MusicLibraryOwner
     private static void ValidateSearchKind(JsonObject value)
     {
         LJ.Fields(value, "order enabled pages concurrency cacheMinutes", "order enabled pages concurrency cacheMinutes");
-        _ = LJ.I(value["pages"], 1, MaxSearchPages);
-        _ = LJ.I(value["concurrency"], 1, MaxSearchConcurrency);
-        _ = LJ.I(value["cacheMinutes"], 1, MaxSearchCacheMinutes);
+        _ = MusicSearchSettings.Pages(value["pages"]);
+        _ = MusicSearchSettings.Concurrency(value["concurrency"]);
+        _ = MusicSearchSettings.CacheMinutes(value["cacheMinutes"]);
         var order = LJ.Array(value["order"]).Select(item => LJ.Text(item, 2)).ToArray();
         var enabled = LJ.Array(value["enabled"]).Select(item => LJ.Text(item, 2)).ToArray();
         var enabledSet = enabled.ToHashSet(StringComparer.Ordinal);

@@ -6,71 +6,72 @@ using MeowFilm.Capabilities.Search;
 
 namespace MeowFilm.Windows.Tests;
 
-public static partial class MusicAggregateSearchTests
+public static partial class MusicSearchTests
 {
     private static readonly string[] Five = ["wy", "tx", "kw", "kg", "mg"];
     public static IEnumerable<TestCase> Cases()
     {
         foreach (var test in RecordingCases()) yield return test;
-        yield return new("Aggregate search five explicit platforms and genuine missing-provider partial", FivePlatforms);
-        yield return new("Aggregate search get preserves both kinds and resubmission uses cached pages", DualKinds);
-        yield return new("Aggregate search changing one kind platform set preserves the other tab", ReplaceOneKind);
-        yield return new("Aggregate search unsupported providers stop for the session and a refreshed search uses them", LaterProviders);
-        yield return new("Aggregate search concurrency is limited per kind and platform without a global cap", PlatformConcurrency);
-        yield return new("Aggregate search pages per round follow each platform's paging adapter", PagesPerRound);
-        yield return new("Aggregate search first round is published as platforms return", FirstRoundLive);
-        yield return new("Aggregate search later rounds appear only after every platform settles", RoundBarrier);
-        yield return new("Aggregate search later rounds append and only merge recordings into shown rows", RoundAppend);
-        yield return new("Aggregate search platform priority picks representative metadata and breaks ties", Priority);
-        yield return new("Aggregate search later rounds never show a conflicting recording twice", RoundConflict);
-        yield return new("Aggregate search pages are cached per kind and expire after the configured time", Cache);
+        yield return new("Search five explicit platforms and genuine missing-provider partial", FivePlatforms);
+        yield return new("Search get preserves both kinds and resubmission uses cached pages", DualKinds);
+        yield return new("Search changing one kind platform set preserves the other tab", ReplaceOneKind);
+        yield return new("Search unsupported providers stop for the session and a refreshed search uses them", LaterProviders);
+        yield return new("Search concurrency is limited per kind and platform without a global cap", PlatformConcurrency);
+        yield return new("Search pages per round follow each platform's paging adapter", PagesPerRound);
+        yield return new("Search accepts more than ten pages and concurrent requests per round", LargePages);
+        yield return new("Search huge page counts request only the committed window", HugePages);
+        yield return new("Search first round is published as platforms return", FirstRoundLive);
+        yield return new("Search later rounds appear only after every platform settles", RoundBarrier);
+        yield return new("Search later rounds append and only merge recordings into shown rows", RoundAppend);
+        yield return new("Search platform priority picks representative metadata and breaks ties", Priority);
+        yield return new("Search later rounds never show a conflicting recording twice", RoundConflict);
+        yield return new("Search pages are cached per kind and expire after the configured time", Cache);
         foreach (string kind in new[] { "songs", "playlists" })
         {
             string selected = kind;
-            yield return new($"Aggregate search {kind} same-keyword resubmission respects original page expiry", () => SameQueryExpiry(selected));
+            yield return new($"Search {kind} same-keyword resubmission respects original page expiry", () => SameQueryExpiry(selected));
         }
-        yield return new("Aggregate search RRF consensus outranks single-platform first result", Consensus);
-        yield return new("Aggregate search same-platform editions count only their best rank", BestRank);
-        yield return new("Aggregate search rank ties and representatives ignore platform arrival order", Deterministic);
-        yield return new("Aggregate search same title different singer never merges", () => Separate("Singer B", 180, "Song"));
-        yield return new("Aggregate search incompatible duration never merges", () => Separate("Singer A", 220, "Song"));
-        yield return new("Aggregate search recording version never merges", () => Separate("Singer A", 180, "Song (Live)"));
-        yield return new("Aggregate search zero duration is not cross-platform identity evidence", () => Separate("Singer A", 0, "Song"));
-        yield return new("Aggregate search duration compatibility does not transitively merge", DurationChain);
-        yield return new("Aggregate search KG native discriminators remain separate candidates", KgDiscriminators);
-        yield return new("Aggregate search playlists use platform plus native id not names", PlaylistIdentity);
-        yield return new("Aggregate search preserves original rank holes after paged dedup", RankHoles);
-        yield return new("Aggregate search honors native forward continuation without refetch", Continuation);
-        yield return new("Aggregate search next round retries only the failed platform and its uncommitted page", Retry);
-        yield return new("Aggregate search page two failure is retried by the next round without refetching page one", RetrySecondPage);
-        yield return new("Aggregate search concurrent next calls never double-admit a round", DuplicateAdmission);
-        yield return new("Aggregate search duplicate-only pages advance without repeating displayed songs", () => Stalled(false));
-        yield return new("Aggregate search empty pages follow the provider continuation", () => Stalled(true));
-        yield return new("Aggregate search provider continuations can advance beyond one hundred pages", PageCap);
-        yield return new("Aggregate search rounds stop cleanly at the final representable platform page", FinalPage);
+        yield return new("Search RRF consensus outranks single-platform first result", Consensus);
+        yield return new("Search same-platform editions count only their best rank", BestRank);
+        yield return new("Search rank ties and representatives ignore platform arrival order", Deterministic);
+        yield return new("Search same title different singer never merges", () => Separate("Singer B", 180, "Song"));
+        yield return new("Search incompatible duration never merges", () => Separate("Singer A", 220, "Song"));
+        yield return new("Search recording version never merges", () => Separate("Singer A", 180, "Song (Live)"));
+        yield return new("Search zero duration is not cross-platform identity evidence", () => Separate("Singer A", 0, "Song"));
+        yield return new("Search duration compatibility does not transitively merge", DurationChain);
+        yield return new("Search KG native discriminators remain separate candidates", KgDiscriminators);
+        yield return new("Search playlists use platform plus native id not names", PlaylistIdentity);
+        yield return new("Search preserves original rank holes after paged dedup", RankHoles);
+        yield return new("Search honors native forward continuation without refetch", Continuation);
+        yield return new("Search next round retries only the failed platform and its uncommitted page", Retry);
+        yield return new("Search page two failure is retried by the next round without refetching page one", RetrySecondPage);
+        yield return new("Search concurrent next calls never double-admit a round", DuplicateAdmission);
+        yield return new("Search duplicate-only pages advance without repeating displayed songs", () => Stalled(false));
+        yield return new("Search empty pages follow the provider continuation", () => Stalled(true));
+        yield return new("Search provider continuations can advance beyond one hundred pages", PageCap);
         foreach (int count in new[] { 1, 3, 5 })
         {
             int selected = count;
-            yield return new($"Aggregate search results remain complete with {count} enabled platforms", () => CandidateCap(selected));
+            yield return new($"Search results remain complete with {count} enabled platforms", () => CandidateCap(selected));
         }
-        yield return new("Aggregate search virtual 25 second deadline retains physical drain", Timeout);
-        yield return new("Aggregate search new keyword drains both old kinds, joins its duplicate and rejects a different replacement", ReplaceBoth);
-        yield return new("Aggregate search cancelled replacement waiter cannot start its query later", CancelReplacement);
-        yield return new("Aggregate search account invalidation clears one platform in both kinds", InvalidateBoth);
-        yield return new("Aggregate search account invalidation fences late results and restarts from page one", InvalidateLate);
-        yield return new("Aggregate search injected per-request delegate isolates auth frames across both kinds", DelegateFrames);
-        yield return new("Aggregate search injected auth failure preserves precise platform error", DelegateAuthError);
-        yield return new("Aggregate search synchronous account fence inside delegate does not retire other platforms or query ids", DelegateAccountFence);
-        yield return new("Aggregate search invalidate and cancelled shutdown waiter retain injected physical drain", DelegateDrain);
-        yield return new("Aggregate search observer-triggered account fence suppresses remaining stale deliveries", ObserverFence);
-        yield return new("Aggregate search cancelled close resumes admission without replaying old queries", ReversibleClose);
-        yield return new("Aggregate search dispose fences concurrent resume and borrows catalog", DisposeDuringResume);
-        yield return new("Aggregate search observers cannot corrupt snapshots or break publication", Observers);
-        yield return new("Aggregate search malformed page does not commit a partial page", MalformedPage);
-        yield return new("Aggregate search foreign platform page is rejected independently", ForeignPage);
-        yield return new("Aggregate search long native ids retain exact identity", LongId);
-        yield return new("Aggregate search empty selection is explicit and makes no catalog calls", EmptySelection);
-        yield return new("Aggregate search rejects malformed and cancelled admission without IO", InvalidInput);
+        yield return new("Search virtual 25 second deadline retains physical drain", Timeout);
+        yield return new("Search new keyword drains both old kinds, joins its duplicate and rejects a different replacement", ReplaceBoth);
+        yield return new("Search cancelled replacement waiter cannot start its query later", CancelReplacement);
+        yield return new("Search account invalidation clears one platform in both kinds", InvalidateBoth);
+        yield return new("Search account invalidation fences late results and restarts from page one", InvalidateLate);
+        yield return new("Search injected per-request delegate isolates auth frames across both kinds", DelegateFrames);
+        yield return new("Search injected auth failure preserves precise platform error", DelegateAuthError);
+        yield return new("Search synchronous account fence inside delegate does not retire other platforms or query ids", DelegateAccountFence);
+        yield return new("Search invalidate and cancelled shutdown waiter retain injected physical drain", DelegateDrain);
+        yield return new("Search observer-triggered account fence suppresses remaining stale deliveries", ObserverFence);
+        yield return new("Search cancelled close resumes admission without replaying old queries", ReversibleClose);
+        yield return new("Search dispose fences concurrent resume and borrows catalog", DisposeDuringResume);
+        yield return new("Search observers cannot corrupt snapshots or break publication", Observers);
+        yield return new("Search malformed page does not commit a partial page", MalformedPage);
+        yield return new("Search foreign platform page is rejected independently", ForeignPage);
+        yield return new("Search long native ids retain exact identity", LongId);
+        yield return new("Search empty selection is explicit and makes no catalog calls", EmptySelection);
+        yield return new("Search rejects malformed and cancelled admission without IO", InvalidInput);
     }
 
     private static void Check(bool value, string message = "ASSERTION_FAILED")
@@ -295,6 +296,38 @@ public static partial class MusicAggregateSearchTests
         Check(f.Catalog.Calls.Last(r => r.Platform == "wy") is { Page: 3, Pages: 2 } &&
             f.Catalog.Calls.Where(r => r.Platform == "tx").Select(r => r.Page).Order().SequenceEqual([1, 2, 3, 4]));
     }
+    private static async Task LargePages()
+    {
+        await using var f = new Fixture();
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        f.Catalog.Handler = async (r, _) =>
+        {
+            await release.Task;
+            return Page(r, [Song(r.Platform, r.Platform + r.Page, r.Platform + " Song " + r.Page)], true);
+        };
+        string id = S(await f.Start(["tx"], pages: 11, concurrency: 11), "id");
+        await f.Catalog.CountAsync(11);
+        Check(f.Catalog.Maximum == 11, "eleven platform requests may run concurrently");
+        release.SetResult();
+        var result = await f.Idle(id);
+        Check(f.Catalog.Calls.Count == 11 && State(result, "tx").GetProperty("page").GetInt32() == 11);
+        await f.Call("next", id);
+        result = await f.Idle(id);
+        Check(f.Catalog.Calls.Count == 22 && State(result, "tx").GetProperty("page").GetInt32() == 22);
+    }
+    private static async Task HugePages()
+    {
+        await using var f = new Fixture();
+        f.Catalog.Handler = (r, _) => Task.FromResult(r.Page == 3
+            ? Page(r, [Song("tx", "3", "Page 3")])
+            : Page(r, [Song("tx", r.Page.ToString(), "Page " + r.Page)], true));
+        string id = S(await f.Start(["tx"], pages: int.MaxValue, concurrency: 2), "id");
+        var result = await f.Idle(id);
+        Check(f.Catalog.Maximum <= 2, "in-flight requests stay within concurrency");
+        Check(f.Catalog.Calls.Count <= 3 + 2 - 1, "a terminal page stops the round without planning every page");
+        Check(!result.GetProperty("more").GetBoolean());
+        Check(State(result, "tx").GetProperty("page").GetInt32() == 3);
+    }
     private static async Task FirstRoundLive()
     {
         await using var f = new Fixture(); var held = new Held();
@@ -391,22 +424,6 @@ public static partial class MusicAggregateSearchTests
         await f.Idle(S(await f.Start(["wy"], word: "e"), "id"));
         await f.Idle(S(await f.Start(["wy"], word: "d", cacheMinutes: 1), "id"));
         Check(f.Catalog.Calls.Count == 9, "an account change drops that platform's cached pages");
-    }
-    private static async Task FinalPage()
-    {
-        foreach (string platform in new[] { "wy", "tx" })
-        {
-            await using var f = new Fixture();
-            f.Catalog.Handler = (r, _) => Task.FromResult(Page(r,
-                [Song(platform, r.Page.ToString(), "Page " + r.Page)], r.Page == 1, int.MaxValue));
-            string id = S(await f.Start([platform], pages: 10), "id");
-            await f.Idle(id);
-            await f.Call("next", id);
-            var done = await f.Idle(id);
-            Check(State(done, platform).GetProperty("page").GetInt32() == int.MaxValue);
-            Check(!done.GetProperty("more").GetBoolean() && !done.GetProperty("partial").GetBoolean());
-            Check(f.Catalog.Calls.Single(r => r.Page == int.MaxValue).Pages == 1);
-        }
     }
     private static async Task Consensus()
     {
@@ -852,7 +869,8 @@ public static partial class MusicAggregateSearchTests
             new { keyword = "x", kind = "other", platforms = Five }, new { keyword = "x", kind = "songs", platforms = new[] { "evil" } },
             new { keyword = "x", kind = "songs", platforms = Five, pages = 1, concurrency = 1, cacheMinutes = 60, unexpected = true },
             new { keyword = "x", kind = "songs", platforms = Five, pages = 0, concurrency = 1, cacheMinutes = 60 },
-            new { keyword = "x", kind = "songs", platforms = Five, pages = 1, concurrency = 11, cacheMinutes = 60 },
+            new { keyword = "x", kind = "songs", platforms = Five, pages = 2147483648L, concurrency = 1, cacheMinutes = 60 },
+            new { keyword = "x", kind = "songs", platforms = Five, pages = 1, concurrency = 0, cacheMinutes = 60 },
             new { keyword = "x", kind = "songs", platforms = Five, pages = 1, concurrency = 1, cacheMinutes = 1441 },
             new { keyword = "x", kind = "songs", platforms = new[] { "wy", "wy" }, pages = 1, concurrency = 1, cacheMinutes = 60 } })
             Code(await f.Search.ExecuteAsync("music.search.start", data), "INVALID_REQUEST");

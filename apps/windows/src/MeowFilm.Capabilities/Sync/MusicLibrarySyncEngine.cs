@@ -142,7 +142,7 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
         var ids = new HashSet<string>();
         foreach (var r in directory.Collections)
         {
-            LJ.Require(LJ.Id(r.Id, 240) && ids.Add(r.Id) && Kinds(adapter.Platform).Contains(r.Kind) && LJ.Id(r.Name, 200) && r.Members.Count <= 10000, "INCOMPLETE_PAGE");
+            LJ.Require(LJ.Id(r.Id, 240) && ids.Add(r.Id) && Kinds(adapter.Platform).Contains(r.Kind) && LJ.Id(r.Name, 200), "INCOMPLETE_PAGE");
             LJ.Require(r.Keys.Distinct().Count() == r.Keys.Length && r.Members.All(m => LJ.Id(m.Key) && m.Id == adapter.NativeId(m.Song)), "IDENTITY_MISMATCH");
         }
         LJ.Require(!Kinds(adapter.Platform).Contains("favorites") || directory.Collections.Count(r => r.Kind == "favorites") == 1, "FAVORITES_UNCONFIRMED");

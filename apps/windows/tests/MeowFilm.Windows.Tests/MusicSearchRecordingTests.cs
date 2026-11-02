@@ -1,11 +1,10 @@
-using System.Reflection;
 using System.Text.Json;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Windows.Tests;
 
-public static partial class MusicAggregateSearchTests
+public static partial class MusicSearchTests
 {
     private static IEnumerable<TestCase> RecordingCases()
     {
@@ -167,16 +166,11 @@ public static partial class MusicAggregateSearchTests
         string previous = S(await f.Start(["wy", "tx"], kind), "id");
         CurrentAccount(await f.Idle(previous), kind, "A");
         account = "B";
-        Task<JsonElement> request, duplicate;
-        // Select the legal admission-before-recomputation schedule with the existing owner lock.
-        // No query state is modified and no product test hook or artificial delay is required.
-        object gate = f.Search.GetType().GetField("gate", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(f.Search)!;
-        lock (gate)
-        {
-            f.Search.Invalidate("wy");
-            request = f.Start(["wy", "tx"], kind);
-            duplicate = f.Start(["wy", "tx"], kind);
-        }
+        // Invalidate fences the platform synchronously; a following explicit
+        // start must not reuse the emptied first round, and its duplicate joins.
+        f.Search.Invalidate("wy");
+        var request = f.Start(["wy", "tx"], kind);
+        var duplicate = f.Start(["wy", "tx"], kind);
         string next = S(await request, "id");
         Check(next != previous && S(await duplicate, "id") == next, "invalid identity reused as a live initial search");
         CurrentAccount(await f.Idle(next), kind, "B");

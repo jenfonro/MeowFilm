@@ -40,7 +40,7 @@ internal sealed class MusicSyncKg(MusicPlatformSession session, MusicPlatformHtt
                 string id = tracks ? owned ? Id(row["fileid"]) : PlatformSongs.KgHash(row["hash"] ?? row["audio_info"]?["hash"]) : PJ.Scalar(row["type"]) + ":" + Id(row["listid"]);
                 Require(seen.Add(id), "PAGINATION_STALLED"); all.Add(row);
             }
-            Require(all.Count <= 10000 && (count is null || all.Count <= count), "PAGINATION_LIMIT");
+            Require(count is null || all.Count <= count, "INCOMPLETE_PAGE");
             if (count is not null && all.Count == count || next.Rows.Count == 0)
             { Require(count is null || all.Count == count); return new(all, count, version); }
         }

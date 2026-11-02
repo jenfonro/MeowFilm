@@ -54,7 +54,7 @@ public sealed partial class MusicCapability
             try
             {
                 MusicDto.Require(MusicCatalogDto.Text(prepared, "platform") == platform &&
-                    MusicCatalogDto.Text(prepared, "id") == id && MusicDto.Count(prepared, "count") <= 10000);
+                    MusicCatalogDto.Text(prepared, "id") == id);
                 if (action == "play" && entry is null && expectedSnapshot != MusicCatalogDto.Text(prepared, "snapshot"))
                     throw new MusicOperationException("SNAPSHOT_CHANGED");
                 if (!currentAction()) return;
@@ -164,7 +164,7 @@ public sealed partial class MusicCapability
         var reply = await Call("music.catalog.song", new { platform, id }, signal);
         if (!currentAction() || !sourceCurrent()) return;
         var song = SongRow.Read(reply.GetProperty("song"));
-        MusicDto.Require(MusicCatalogDto.SongNativeId(song.Raw) == id &&
+        MusicDto.Require(SongJson.NativeId(song.Raw) == id &&
             SongJson.Platform(song.Raw) == platform);
         await RunAsync(async () =>
         {

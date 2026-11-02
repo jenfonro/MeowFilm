@@ -17,8 +17,8 @@ public static class MusicRecommendationLibraryTests
         yield return new("Recommendation owner full paged queue restore preserves all occurrences", () => Restore(120));
         yield return new("Recommendation owner enter preserves current seed and one envelope CAS", Seed);
         yield return new("Recommendation owner nonce receipt replay does not write again", Replay);
-        yield return new("Recommendation owner unrelated reads preserve a reconciled but unaccepted receipt", UnacceptedReceipt);
-        yield return new("Recommendation owner acknowledged receipts do not accumulate across operations", ReceiptLifetime);
+        yield return new("Recommendation owner unrelated reads preserve a reconciled receipt", UnacceptedReceipt);
+        yield return new("Recommendation owner receipt is replaced by the next capture", ReceiptLifetime);
         yield return new("Recommendation owner optimistic conflict never captures checkpoint", VersionConflict);
         yield return new("Recommendation owner failed before enter explicit reconcile not applied", () => UnknownEnter(false));
         yield return new("Recommendation owner lost enter ACK explicitly restores real runtime", () => UnknownEnter(true));
@@ -105,7 +105,6 @@ public static class MusicRecommendationLibraryTests
         var port = new MusicRecommendationQueuePort(owner);
         string nonce = Nonce(); store.Failure = 2;
         await Error(owner, "enter", new { nonce, expectedVersion = 0, songs = new[] { Song("1") } }, "COMMIT_UNKNOWN");
-        await owner.AcknowledgeRecommendationAsync(nonce);
         JsonElement receipt = default;
         try
         {
@@ -117,28 +116,24 @@ public static class MusicRecommendationLibraryTests
             throw new InvalidOperationException("Expected readback failure");
         }
         catch (IOException) { }
-        Check(owner.HasRecommendationReceipt);
         await port.ExecuteAsync("music.queue.get");
-        await owner.AcknowledgeRecommendationAsync(Nonce());
         Check((await Command(owner, "reconcile", new { nonce })).GetRawText() == receipt.GetRawText());
-        Check(store.Writes == 1 && owner.HasRecommendationReceipt);
-        await owner.AcknowledgeRecommendationAsync(nonce);
-        Check(!owner.HasRecommendationReceipt);
-        await Error(owner, "reconcile", new { nonce }, "OPERATION_NOT_FOUND");
+        Check(store.Writes == 1);
     }
     private static async Task ReceiptLifetime()
     {
         var store = new Store(); await using var owner = new MusicLibraryOwner(store);
         long version = N(await Queue(owner), "version");
-        for (int i = 0; i < 4200; i++)
-        {
-            string nonce = Nonce();
-            var receipt = await Command(owner, "capture", new { nonce, expectedVersion = version });
-            Check(owner.HasRecommendationReceipt);
-            await owner.AcknowledgeRecommendationAsync(nonce);
-            Check(!owner.HasRecommendationReceipt);
-            await Command(owner, "discard", new { checkpoint = S(receipt, "checkpoint") });
-        }
+        string first = Nonce();
+        var previous = await Command(owner, "capture", new { nonce = first, expectedVersion = version });
+        string next = Nonce();
+        var latest = await Command(owner, "capture", new { nonce = next, expectedVersion = version });
+        Check((await Command(owner, "capture", new { nonce = next, expectedVersion = version })).GetRawText() == latest.GetRawText());
+        var replaced = await Command(owner, "capture", new { nonce = first, expectedVersion = version });
+        Check(replaced.GetRawText() != previous.GetRawText());
+        await Command(owner, "discard", new { checkpoint = S(previous, "checkpoint") });
+        await Command(owner, "discard", new { checkpoint = S(latest, "checkpoint") });
+        await Command(owner, "discard", new { checkpoint = S(replaced, "checkpoint") });
         Check(store.Writes == 0);
     }
     private static async Task UnknownEnter(bool applied)

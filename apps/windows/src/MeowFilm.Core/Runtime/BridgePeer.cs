@@ -71,7 +71,6 @@ public sealed class BridgePeer : IAsyncDisposable
     public int PendingCount { get { lock (gate) return pending.Count; } }
     public int ActiveCount { get { lock (gate) return active.Count; } }
     public long QueuedBytes { get { lock (gate) return queuedBytes; } }
-    internal int QueuedFrameCount { get { lock (gate) return outgoing.Count; } }
     /// <summary>Transport workers have stopped, not proof that non-cooperative handlers have stopped.</summary>
     public Task Completion => completion;
 

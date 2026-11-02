@@ -14,10 +14,9 @@ internal sealed partial class MusicPlatformClientProtocol
         var body = await SendQqDevice(MusicQqDeviceHttpStep.Qimei, QqQimeiRecipe.Request(device, Clock.GetUtcNow()), token).ConfigureAwait(false);
         if (body["code"] is { } code) PJ.Require(StrictCode(code) == 0, "UPSTREAM_ERROR");
         string serialized = Text(body["data"]);
-        PJ.Require(Encoding.UTF8.GetByteCount(serialized) <= 65536, "LIMIT");
         JsonObject inner;
         byte[] encoded = Encoding.UTF8.GetBytes(serialized);
-        try { inner = PJ.Parse(encoded, 65536); }
+        try { inner = PJ.Parse(encoded); }
         finally { CryptographicOperations.ZeroMemory(encoded); }
         if (inner["code"] is { } innerCode) PJ.Require(StrictCode(innerCode) == 0, "UPSTREAM_ERROR");
         PJ.Require(inner["data"] is JsonObject, "INVALID_RESPONSE");

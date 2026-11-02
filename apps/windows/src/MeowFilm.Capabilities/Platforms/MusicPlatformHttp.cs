@@ -53,7 +53,7 @@ public sealed partial class MusicPlatformHttp : IDisposable
     public Task<MusicPlatformHttpResult> SendAsync(string platform, HttpRequestMessage request,
         CancellationToken cancellationToken, int maxResponseBytes = 4 * 1024 * 1024, TimeSpan? timeout = null)
         => SendCoreAsync(platform, request, cancellationToken, maxResponseBytes, timeout,
-            (bytes, response, _) => JsonResult(PJ.Parse(bytes, maxResponseBytes), response));
+            (bytes, response, _) => JsonResult(PJ.Parse(bytes), response));
     internal Task<MusicPlatformHttpResult> SendXeapiAsync(HttpRequestMessage request,
         CancellationToken token, int maximum, TimeSpan timeout)
         => SendCoreAsync("wy", request, token, maximum, timeout,
@@ -66,7 +66,7 @@ public sealed partial class MusicPlatformHttp : IDisposable
     internal Task<MusicPlatformHttpResult> SendFeedbackJsonAsync(string platform,
         HttpRequestMessage request, CancellationToken token) =>
         SendCoreAsync(platform, request, token, 65536, TimeSpan.FromSeconds(20),
-            (bytes, response, _) => JsonResult(PJ.Parse(bytes, 65536), response),
+            (bytes, response, _) => JsonResult(PJ.Parse(bytes), response),
             nativePolicy: NativeHttpPolicy.Feedback);
 
     internal Task<byte[]> SendMusicLibrarySyncCloudAsync(HttpRequestMessage request, CancellationToken token) =>
@@ -77,7 +77,7 @@ public sealed partial class MusicPlatformHttp : IDisposable
     internal Task<MusicPlatformHttpResult> SendQqDeviceJsonAsync(MusicQqDeviceHttpStep step,
         HttpRequestMessage request, CancellationToken token) =>
         SendCoreAsync("tx", request, token, 65536, TimeSpan.FromSeconds(20),
-            (bytes, response, _) => JsonResult(PJ.Parse(bytes, 65536), response),
+            (bytes, response, _) => JsonResult(PJ.Parse(bytes), response),
             nativePolicy: step switch {
                 MusicQqDeviceHttpStep.Qimei => NativeHttpPolicy.QqQimei,
                 MusicQqDeviceHttpStep.Account => NativeHttpPolicy.QqAccount,
@@ -87,7 +87,7 @@ public sealed partial class MusicPlatformHttp : IDisposable
 
     internal Task<MusicPlatformHttpResult> SendQqFeedbackJsonAsync(HttpRequestMessage request, CancellationToken token) =>
         SendCoreAsync("tx", request, token, 65536, TimeSpan.FromSeconds(20),
-            (bytes, response, _) => JsonResult(PJ.Parse(bytes, 65536), response),
+            (bytes, response, _) => JsonResult(PJ.Parse(bytes), response),
             nativePolicy: NativeHttpPolicy.QqFeedbackJson);
 
     internal Task<byte[]> SendQqFeedbackReportAsync(HttpRequestMessage request, CancellationToken token) =>
@@ -97,7 +97,7 @@ public sealed partial class MusicPlatformHttp : IDisposable
 
     internal Task<MusicPlatformHttpResult> SendChorusAsync(HttpRequestMessage request, CancellationToken token, TimeSpan timeout) =>
         SendCoreAsync("kg", request, token, 65536, timeout,
-            (bytes, response, _) => JsonResult(PJ.Parse(bytes, 65536), response),
+            (bytes, response, _) => JsonResult(PJ.Parse(bytes), response),
             nativePolicy: NativeHttpPolicy.Chorus);
     internal Task<MusicPlatformHttpResult> SendVipPageEapiAsync(HttpRequestMessage request,
         CancellationToken token, int maximum) =>
@@ -107,7 +107,7 @@ public sealed partial class MusicPlatformHttp : IDisposable
     internal Task<MusicPlatformHttpResult> SendVipPageWeapiAsync(HttpRequestMessage request,
         CancellationToken token, int maximum) =>
         SendCoreAsync("wy", request, token, maximum, TimeSpan.FromSeconds(20),
-            (bytes, response, _) => JsonResult(PJ.Parse(bytes, maximum), response),
+            (bytes, response, _) => JsonResult(PJ.Parse(bytes), response),
             nativePolicy: NativeHttpPolicy.VipPage);
     private enum NativeHttpPolicy { Feedback, MusicLibrarySyncCloud, QqQimei, QqAccount, QqProfile,
         QqSession, QqFeedbackJson, QqFeedbackReport, PublicCatalogRead, AccountDetails, Chorus, VipPage, Denied }
@@ -217,7 +217,7 @@ public sealed partial class MusicPlatformHttp : IDisposable
             if (policy == NativeHttpPolicy.QqFeedbackReport) return; // XML/gzip validation belongs to its typed consumer.
             PJ.Require(request.Content.Headers.ContentType?.MediaType == "application/json" &&
                 request.Content.Headers.ContentEncoding.Count == 0, "INVALID_REQUEST");
-            var body = PJ.Parse(bytes, 65536);
+            var body = PJ.Parse(bytes);
             static bool Fields(JsonObject value, params string[] keys) =>
                 value.Count == keys.Length && keys.All(value.ContainsKey);
             if (policy == NativeHttpPolicy.QqQimei)

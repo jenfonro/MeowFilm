@@ -69,14 +69,14 @@ internal sealed class MusicPlatformSearchDiscovery(MusicPlatformHttp http, Music
             {
                 var playlist = raw["playlist"] as JsonObject ?? throw new MusicPlatformException("INVALID_RESPONSE");
                 PJ.Require(PJ.Id(playlist["id"]) == id, "IDENTITY_MISMATCH");
-                var allIds = PJ.Rows(playlist["trackIds"], 10000).Select(row => PJ.Id(row["id"], "^[1-9][0-9]{0,19}$")).ToArray();
+                var allIds = PJ.RowsAll(playlist["trackIds"]).Select(row => PJ.Id(row["id"], "^[1-9][0-9]{0,19}$")).ToArray();
                 var members = allIds.ToHashSet(StringComparer.Ordinal);
                 PJ.Require(members.Count == allIds.Length, "IDENTITY_MISMATCH");
                 var selectedIds = allIds.Take(20).ToArray();
                 var selected = selectedIds.ToHashSet(StringComparer.Ordinal);
                 var embeddedSongs = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
                 var embedded = new HashSet<string>(StringComparer.Ordinal);
-                foreach (var row in PJ.Rows(playlist["tracks"] ?? new JsonArray(), 10000))
+                foreach (var row in PJ.RowsAll(playlist["tracks"] ?? new JsonArray()))
                 {
                     var member = PJ.Id(row["id"], "^[1-9][0-9]{0,19}$");
                     PJ.Require(members.Contains(member) && embedded.Add(member), "IDENTITY_MISMATCH");

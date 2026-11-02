@@ -144,7 +144,7 @@ public sealed partial class MusicAccountProtocol
         try
         {
             AccountRules.Require(response.Location is null, "REDIRECT_DENIED");
-            var data = PJ.Parse(response.Bytes, 65536); Inspect(data);
+            var data = PJ.Parse(response.Bytes); Inspect(data);
             int code = StrictCode(data["code"]);
             if (response.Status == 429 || code is 405 or 429 or 509) throw new MusicAccountException("RATE_LIMITED", 60);
             if (code is 250 or 460 or 461) throw new MusicAccountException("VERIFICATION_REQUIRED");

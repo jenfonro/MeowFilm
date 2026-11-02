@@ -14,7 +14,6 @@ public sealed partial class MusicCapability
         public bool Cacheable => Operation is not ("fm" or "similar" or "heartbeat" or "queueRecommendations");
         public int Limit => Operation == "personalPlaylists" ? 30 :
             Parameters.TryGetProperty("personal", out var p) && MusicCatalogDto.Text(p, "kind") == "kugou-owned" ? 30 : 100;
-        public int MaximumPages => Operation == "playlist" ? (10000 + Limit - 1) / Limit : int.MaxValue;
     }
     private readonly Dictionary<string, CatalogTarget> catalogTargets = [];
     private CatalogTarget? catalogLoadedTarget;
@@ -225,13 +224,13 @@ public sealed partial class MusicCapability
                 if (version is not null && version != nextVersion) throw new MusicOperationException("REVISION_CONFLICT");
                 version = nextVersion;
                 if (reply.GetProperty("current").ValueKind == JsonValueKind.Object)
-                    currentId = MusicCatalogDto.SongNativeId(reply.GetProperty("current").GetProperty("song"));
+                    currentId = SongJson.NativeId(reply.GetProperty("current").GetProperty("song"));
                 foreach (var entry in MusicDto.Page(reply, "entries", ids.Count))
                 {
                     var song = entry.GetProperty("song");
                     if (SongJson.Platform(song) != "wy")
                         throw new MusicOperationException("UNSUPPORTED");
-                    var id = MusicCatalogDto.SongNativeId(song);
+                    var id = SongJson.NativeId(song);
                     MusicDto.Require(id.Length > 0);
                     ids.Add(id);
                 }

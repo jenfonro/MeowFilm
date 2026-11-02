@@ -22,7 +22,6 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
     private readonly HashSet<Session> sessions = [];
     private Task? disposal;
     private bool closed;
-    internal int ActiveSessionCount { get { lock (gate) return sessions.Count; } }
     private sealed class Entry(string fingerprint)
     {
         internal readonly string Fingerprint = fingerprint;

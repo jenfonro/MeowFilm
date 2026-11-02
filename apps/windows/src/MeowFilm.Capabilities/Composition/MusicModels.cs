@@ -55,7 +55,9 @@ internal static class SongJson
         field.ValueKind == JsonValueKind.String ? field.GetString()! : "";
     internal static string Platform(JsonElement song) => Text(PrimaryInfo(song), "source");
     internal static string InfoId(JsonElement info) =>
-        Text(info, "songmid") is { Length: > 0 } mid ? mid : Text(info, "id");
+        info.ValueKind == JsonValueKind.Object && info.TryGetProperty("songmid", out var value)
+            ? value.ValueKind == JsonValueKind.String ? value.GetString()! : value.ValueKind is JsonValueKind.Null ? "" : value.GetRawText()
+            : "";
     internal static string NativeId(JsonElement song) => InfoId(PrimaryInfo(song));
 }
 

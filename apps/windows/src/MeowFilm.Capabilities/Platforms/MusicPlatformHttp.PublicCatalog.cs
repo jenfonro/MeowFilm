@@ -72,7 +72,7 @@ public sealed partial class MusicPlatformHttp
                 };
             }
             if (uri.Scheme == "http" && uri.Host == "nplserver.kuwo.cn" && uri.AbsolutePath == "/pl.svc")
-                return PublicNumericId(q.GetValueOrDefault("pid")) && PublicNumber(q.GetValueOrDefault("pn"), 0, 9) &&
+                return PublicNumericId(q.GetValueOrDefault("pid")) && PublicNumber(q.GetValueOrDefault("pn"), 0, int.MaxValue - 1) &&
                     PublicFields(q, ["pid", "pn"], ("op", "getlistinfo"), ("rn", "1000"), ("encode", "utf8"),
                         ("keyset", "pl2012"), ("identity", "kuwo"), ("pcmp4", "1"),
                         ("vipver", "MUSIC_9.0.5.0_W1"), ("newver", "1"));
@@ -102,7 +102,7 @@ public sealed partial class MusicPlatformHttp
             return PublicFields(q, ["playlistId"]) && PublicNumericId(q["playlistId"]);
         return uri.Host == "app.c.nf.migu.cn" && uri.AbsolutePath == "/MIGUM3.0/resource/playlist/song/v2.0" &&
             PublicFields(q, ["playlistId", "pageNo"], ("pageSize", "50")) &&
-            PublicNumericId(q["playlistId"]) && PublicNumber(q["pageNo"], 1, 200);
+            PublicNumericId(q["playlistId"]) && PublicNumber(q["pageNo"], 1, int.MaxValue);
     }
 
     private static bool PublicFields(Dictionary<string, string> fields, string[] variables,

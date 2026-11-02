@@ -53,8 +53,11 @@ public sealed partial class MusicLibraryOwner
                 string operation = LJ.S(w["operation"]);
                 LJ.Require(operation is "create" or "delete" or "add" or "remove" or "order");
                 foreach (string field in new[] { "before", "desired", "ids", "directory" })
-                    LJ.Require(LJ.Array(w[field]).Count <= 10000 && LJ.Array(w[field]).All(value =>
+                {
+                    var values = LJ.Array(w[field]);
+                    LJ.Require((field != "directory" || values.Count <= 10000) && values.All(value =>
                         value is JsonValue scalar && scalar.TryGetValue<string>(out string? id) && LJ.Id(id)));
+                }
                 string remoteId = LJ.S(w["remoteId"]);
                 LJ.Require(LJ.Id(LJ.S(w["name"]), 200) &&
                     (operation == "create" ? remoteId.Length == 0 : LJ.Id(remoteId, 240)));

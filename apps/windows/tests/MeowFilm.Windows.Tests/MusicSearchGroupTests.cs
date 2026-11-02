@@ -7,7 +7,7 @@ using MeowFilm.Capabilities.Search;
 
 namespace MeowFilm.Windows.Tests;
 
-public static class MusicAggregateSearchGroupTests
+public static class MusicSearchGroupTests
 {
     public static IEnumerable<TestCase> Cases()
     {
@@ -18,10 +18,11 @@ public static class MusicAggregateSearchGroupTests
         yield return Case("ordinary item pages retain their original limits and optional total", ItemPages);
         yield return Case("group count total and variant statistics must be exact bounded integers", Counts);
         yield return Case("native group continuation cannot be guessed from expanded item count", Cursors);
+        yield return Case("short group page against a larger total is terminal", ShortTotal);
         yield return Case("group ranks are required and remain within native group positions", Ranks);
         yield return Case("copyright identity is required and page duplicates are rejected", Identities);
         yield return Case("100 groups 1000 expanded variants remain an accepted bounded page", MaximumPage);
-        yield return Case("expanded pages are not truncated while per-song metadata remains validated", Bytes);
+        yield return Case("expanded pages are not truncated", Bytes);
         yield return Case("failed group page keeps its cursor and the next round retries the same native page", Retry);
         yield return Case("account fence clears the platform and excludes late group completion", Invalidate);
         yield return Case("complete group pages retain every variant across search rounds", CandidateBudget);
@@ -86,8 +87,9 @@ public static class MusicAggregateSearchGroupTests
     {
         ["platform"] = "mg", ["page"] = page, ["limit"] = limit, ["total"] = total, ["totalUnit"] = "groups",
         ["groupCount"] = groups, ["rawItemCount"] = raw, ["items"] = new JsonArray(items.Select(s => (JsonNode)s).ToArray()),
-        ["more"] = page * (long)limit < total,
-        ["continuation"] = page * (long)limit < total ? new JsonObject { ["page"] = page + 1 } : null
+        ["more"] = page * (long)limit < total && groups == limit && page < int.MaxValue,
+        ["continuation"] = page * (long)limit < total && groups == limit && page < int.MaxValue
+            ? new JsonObject { ["page"] = page + 1 } : null
     };
     private static JsonObject Small() => Group(1, 2, 3, 2, 4,
         Song("S1", 1, "C1"), Song("S2", 1, "C2"), Song("S3", 2, "C3"));
@@ -219,7 +221,8 @@ public static class MusicAggregateSearchGroupTests
         { var p = Small(); p[field] = value; Reject(p); }
         Reject(Group(1, 2, 1, 1, 0));
         Reject(Group(1, 2, 1, 1, 1)); // Nonempty raw groups cannot become an empty deduplicated page.
-        Reject(Group(1, 2, 1, 0, 0)); // Empty page is not a substitute for missing groups.
+        var emptyFirst = Read(Group(1, 2, 1, 0, 0));
+        Check(emptyFirst.Items.Length == 0 && !emptyFirst.More && emptyFirst.GroupCount == 0);
         var empty = Read(Group(2, 2, 2, 0, 0), number: 2); Check(empty.Items.Length == 0 && !empty.More);
         return Task.CompletedTask;
     }
@@ -227,8 +230,15 @@ public static class MusicAggregateSearchGroupTests
     {
         var p = Small(); p["continuation"] = new JsonObject { ["page"] = 3 }; Reject(p);
         p = Small(); p["continuation"] = null; Reject(p);
-        p = Small(); p["more"] = false; p["continuation"] = null; Reject(p);
+        p = Small(); p["more"] = false; p["continuation"] = null;
+        Check(Read(p) is { Items.Length: 3, More: false });
         p = Group(1, 2, 2, 2, 2, Song("1", 1), Song("2", 2)); p["more"] = true; p["continuation"] = new JsonObject { ["page"] = 2 }; Reject(p);
+        return Task.CompletedTask;
+    }
+    private static Task ShortTotal()
+    {
+        var page = Read(Group(1, 30, 100, 1, 1, Song("S1", 1, "C1")));
+        Check(page.Items.Length == 1 && !page.More);
         return Task.CompletedTask;
     }
     private static Task Ranks()
@@ -259,7 +269,6 @@ public static class MusicAggregateSearchGroupTests
     {
         var p = Small(); p["padding"] = new string('x', 512 * 1024);
         Check(Read(p).Items.Length == 3);
-        p = Small(); p["items"]![0]!["song"]!["title"] = new string('x', 32 * 1024); Reject(p);
         return Task.CompletedTask;
     }
     private static async Task Retry()

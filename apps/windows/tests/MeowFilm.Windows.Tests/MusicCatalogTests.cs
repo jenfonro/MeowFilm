@@ -1113,7 +1113,7 @@ public static class MusicCatalogTests
             Equal(3, (await f.Module.ReadCatalogCardPreviewAsync(current, default)).Count);
             Equal(2, f.Client.Count("music.catalog.playlist"));
         });
-        yield return Case("aggregate playlist search cards stay static and never request entry previews", async () =>
+        yield return Case("playlist search cards stay static and never request entry previews", async () =>
         {
             await using var f = await Fixture.Create();
             await f.Configure(new { searchPlaylistTotal = 61 });
@@ -1125,14 +1125,14 @@ public static class MusicCatalogTests
             True(f.Module.CanSearchMore, "fixture search must expose another page");
             var card = f.Module.CatalogSections.Single().Items.First();
             Equal(MusicCatalogEntryPresentation.Static, card.Presentation);
-            True(!card.CanRequestPreview, "aggregate search is not an entry preview surface");
+            True(!card.CanRequestPreview, "music search is not an entry preview surface");
             var calls = f.Client.Count("music.catalog.playlist");
             Equal(0, (await f.Module.ReadCatalogCardPreviewAsync(card, default)).Count);
             Equal(calls, f.Client.Count("music.catalog.playlist"));
             await f.Module.MoreSearchAsync();
             await WaitForSearch(f.Module);
             var current = f.Module.CatalogSections.Single().Items.First();
-            True(!ReferenceEquals(card, current), "aggregate snapshot did not replace visible card identity");
+            True(!ReferenceEquals(card, current), "search snapshot did not replace visible card identity");
             Equal(MusicCatalogEntryPresentation.Static, current.Presentation);
             Equal(0, (await f.Module.ReadCatalogCardPreviewAsync(current, default)).Count);
             Equal(calls, f.Client.Count("music.catalog.playlist"));
@@ -1998,7 +1998,7 @@ public static class MusicCatalogTests
             if (module.CatalogSections.SelectMany(s => s.Items).Any() && module.CatalogSections.All(s => !s.IsLoading)) return;
             await Task.Delay(10); await Drain();
         }
-        throw new InvalidOperationException("Native aggregate search did not settle");
+        throw new InvalidOperationException("Native music search did not settle");
     }
     private static IEnumerable<T> Descendants<T>(DependencyObject parent) where T : DependencyObject
     {

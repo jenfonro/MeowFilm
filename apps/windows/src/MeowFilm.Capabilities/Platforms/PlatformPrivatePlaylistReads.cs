@@ -30,7 +30,6 @@ public sealed partial class MusicPlatformCatalog
             PJ.Require(info is JsonObject && PJ.Id(PJ.At(info, "creator", "musicid")) == c.Session!.UserId &&
                 PJ.Scalar(PJ.At(info, "dirid")) == "201", "IDENTITY_MISMATCH");
             var total = PJ.Count(data["total_song_num"]);
-            PJ.Require(total <= 10000, "PAGINATION_LIMIT");
             var more = PJ.Count(data["hasmore"]); PJ.Require(more is 0 or 1, "INVALID_RESPONSE");
             var rows = ExactPage(data["songlist"] ?? (total == 0 ? new JsonArray() : null), p.Page, p.Limit, total);
             PJ.Require(PJ.Count(data["songlist_size"]) == rows.Count, "INCOMPLETE_PAGE");
@@ -60,7 +59,6 @@ public sealed partial class MusicPlatformCatalog
             var count = PJ.First(data["count"], data["total"], PJ.At(info, "count"), response["count"], response["total"]);
             var total = count is null ? locator.Total : PJ.Count(count);
             PJ.Require(total is not null, "INCOMPLETE_PAGE");
-            PJ.Require(total <= 10000, "PAGINATION_LIMIT");
             if (locator.Total is not null) PJ.Require(total == locator.Total, "SNAPSHOT_CHANGED");
             var rawVersion = PJ.First(PJ.At(info, "list_ver"), data["list_ver"], response["list_ver"]);
             var version = rawVersion is null ? locator.Version : PJ.Id(rawVersion);

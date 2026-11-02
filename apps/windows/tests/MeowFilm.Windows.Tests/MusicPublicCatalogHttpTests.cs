@@ -201,12 +201,14 @@ public static class MusicPublicCatalogHttpTests
             }
         }
         foreach (var (route, key, min, max) in new[] { (1, "pn", 0, int.MaxValue - 1), (1, "rn", 1, 100),
-            (2, "pn", 0, int.MaxValue - 1), (3, "pn", 0, 9), (6, "pageNo", 1, int.MaxValue),
-            (6, "pageSize", 1, 100), (9, "pageNo", 1, 200) })
+            (2, "pn", 0, int.MaxValue - 1), (3, "pn", 0, int.MaxValue - 1), (6, "pageNo", 1, int.MaxValue),
+            (6, "pageSize", 1, 100), (9, "pageNo", 1, int.MaxValue) })
         {
             foreach (int value in new[] { min, max })
             { var q = Query(route); q[key] = value.ToString(); await Send(http, route, Request(route, q)); }
-            foreach (string bad in new[] { "-1", "+1", "01", "1.0", (min - 1L).ToString(), (max + 1L).ToString() })
+            var badValues = new List<string> { "+1", "01", "1.0", "-1", ((long)max + 1).ToString() };
+            if (min > 0) badValues.Add((min - 1L).ToString());
+            foreach (string bad in badValues)
             { var q = Query(route); q[key] = bad; await Denied(route, Request(route, q)); }
         }
         foreach (var (route, key) in new[] { (3, "pid"), (4, "musicId"), (8, "playlistId"), (9, "playlistId") })

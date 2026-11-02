@@ -133,6 +133,18 @@ public static class MusicNativePlatformTests
             Equal(185d, page.GetProperty("items")[0].GetProperty("duration").GetDouble());
             Equal(3L, page.GetProperty("total").GetInt64()); Equal(1, f.Calls);
         });
+        yield return Case("native short search pages without an explicit cursor are terminal", async () =>
+        {
+            foreach (string platform in new[] { "wy", "kg" }) await ShortNativeSearch(platform, false);
+        });
+        yield return Case("qq short nonterminal search page follows nextpage", async () =>
+        {
+            await ShortNativeSearch("tx", false);
+        });
+        yield return Case("native empty search pages against a larger total are terminal", async () =>
+        {
+            foreach (string platform in new[] { "wy", "tx", "kg" }) await ShortNativeSearch(platform, true);
+        });
         yield return Case("qq search uses raw native mid numeric id and no signature fallback", async () =>
         {
             using var f = new Fixture(req =>
@@ -656,7 +668,7 @@ public static class MusicNativePlatformTests
                 Equal(2, f.Calls);
             }
         });
-        yield return Case("wy playlist maximum page uses one bounded detail batch without prefix prefetch", async () =>
+        yield return Case("wy playlist page 100 uses one detail batch without prefix prefetch", async () =>
         {
             var ids = Enumerable.Range(1, 10000).Select(id => id.ToString(System.Globalization.CultureInfo.InvariantCulture)).ToArray();
             using var f = new Fixture(req =>
@@ -2467,6 +2479,27 @@ public static class MusicNativePlatformTests
         } }));
     }
     private static HttpResponseMessage Kg(JsonObject data) => Json(J(new { status = 1, error_code = 0, data }));
+    private static async Task ShortNativeSearch(string platform, bool empty)
+    {
+        using var f = new Fixture(request =>
+        {
+            if (platform == "wy") return WySearch(empty ? Array.Empty<JsonObject>() : new[] { Wy("1") }, 100);
+            if (platform == "tx")
+                return Tx(J(new { meta = new { sum = 100, nextpage = 2 }, body = new JsonObject
+                {
+                    ["item_song"] = empty ? new JsonArray() : new JsonArray(Qq())
+                } }));
+            VerifyKg(request);
+            return Kg(J(new { total = 100, lists = empty ? Array.Empty<object>() : new object[] { KgSong() } }));
+        });
+        var page = await f.Catalog.SearchAsync(new(platform, "x", Limit: 30, Pages: platform == "wy" ? 3 : 1));
+        Equal(empty ? 0 : 1, page.GetProperty("items").GetArrayLength());
+        bool more = !empty && platform == "tx";
+        True(page.GetProperty("more").GetBoolean() == more);
+        if (more) Equal(2, page.GetProperty("continuation").GetProperty("page").GetInt32());
+        else Equal(JsonValueKind.Null, page.GetProperty("continuation").ValueKind);
+        Equal(1, f.Calls);
+    }
     private static JsonObject Wy(string id) => J(new { id = JsonNode.Parse(id), name = "测试曲", ar = new[] { new { name = "测试艺人" } },
         al = new { id = "31", name = "测试专辑", picUrl = "https://images.invalid/a.jpg" }, dt = 185000 });
     private static JsonObject Qq() => J(new { id = JsonNode.Parse(Huge), mid = "midA001", type = 0, title = "测试曲", singer = new[] { new { name = "测试艺人" } },
@@ -2533,7 +2566,7 @@ public static class MusicNativePlatformTests
         True(!s.TryGetProperty("id", out _));
         True(s.GetProperty("songId").GetString()!.StartsWith("song:", StringComparison.Ordinal));
         var native = MusicSongFixture.Info(s); Equal(platform, native.GetProperty("source").GetString());
-        True(!native.TryGetProperty("musicId", out _)); Equal(id, native.GetProperty("songmid").GetString());
+        Equal(id, native.GetProperty("songmid").GetString());
         Equal(1, s.GetProperty("sources").GetArrayLength()); True(s.GetProperty("songId").GetString() != id);
     }
     private static MusicPlatformSession Session(string platform, long generation = 1) => new(platform, "synthetic-scope", generation, Huge,

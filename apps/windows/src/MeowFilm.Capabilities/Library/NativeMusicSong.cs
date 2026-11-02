@@ -59,7 +59,7 @@ internal static partial class NativeMusicSong
     internal static JsonObject SourceData(JsonObject value) => IsSource(value)
         ? LJ.Object(value["musicInfo"], "INVALID_SOURCE")
         : LJ.Object(Primary(value)?["musicInfo"], "INVALID_SONG");
-    internal static string InfoId(JsonObject info) => LJ.Scalar(info["songmid"] ?? info["id"]);
+    internal static string InfoId(JsonObject info) => LJ.Scalar(info["songmid"]);
     internal static string NativeId(JsonObject value) => InfoId(SourceData(value));
     internal static string InfoKey(JsonObject info)
     {
@@ -177,7 +177,7 @@ internal static partial class NativeMusicSong
         LJ.Require(Platforms.Contains(platform) && double.IsFinite(duration) && duration >= 0, "INVALID_SONG");
         var info = (JsonObject)native.DeepClone();
         info["source"] = platform;
-        string nativeId = First(info["musicId"], info["songmid"], info["id"]);
+        string nativeId = First(info["songmid"]);
         LJ.Require(LJ.Id(nativeId, 512), "INVALID_SONG");
         info["songmid"] = nativeId;
         info["name"] = title; info["singer"] = artist; info["albumName"] = album; info["duration"] = duration;
@@ -217,5 +217,4 @@ internal static partial class NativeMusicSong
         var listed = LJ.Array(raw["sources"], "INVALID_SOURCE").Select(DurableSource).ToArray();
         return new Recordings(raw, listed).ToSong();
     }
-    internal static JsonObject View(JsonNode? song) => Normalize(song);
 }

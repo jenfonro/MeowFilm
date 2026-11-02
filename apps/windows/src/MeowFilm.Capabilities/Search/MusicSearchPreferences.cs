@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities;
 
@@ -32,16 +33,14 @@ public sealed class MusicSearchKindSettings(string kind) : INotifyPropertyChange
 
     internal void Apply(JsonElement value)
     {
-        int nextPages = MusicDto.Count(value, "pages"), nextConcurrency = MusicDto.Count(value, "concurrency"),
-            nextCache = MusicDto.Count(value, "cacheMinutes");
+        int nextPages = MusicSearchSettings.Pages(value, "pages"),
+            nextConcurrency = MusicSearchSettings.Concurrency(value, "concurrency"),
+            nextCache = MusicSearchSettings.CacheMinutes(value, "cacheMinutes");
         var enabled = value.GetProperty("enabled").EnumerateArray()
             .Select(item => item.GetString()!).ToHashSet(StringComparer.Ordinal);
         var order = value.GetProperty("order").EnumerateArray()
             .Select(item => item.GetString()!).ToArray();
-        MusicDto.Require(nextPages is >= 1 and <= MusicSearchLimits.Pages &&
-            nextConcurrency is >= 1 and <= MusicSearchLimits.Concurrency &&
-            nextCache is >= 1 and <= MusicSearchLimits.CacheMinutes &&
-            order.Length == 5 && order.Distinct(StringComparer.Ordinal).Count() == 5 &&
+        MusicDto.Require(order.Length == 5 && order.Distinct(StringComparer.Ordinal).Count() == 5 &&
             order.All(key => key is "wy" or "tx" or "kw" or "kg" or "mg"));
         var existing = Platforms.ToDictionary(row => row.Platform, StringComparer.Ordinal);
         for (var index = 0; index < order.Length; index++)
@@ -69,14 +68,6 @@ public sealed class MusicSearchKindSettings(string kind) : INotifyPropertyChange
 
     private void Changed([CallerMemberName] string name = "") =>
         PropertyChanged?.Invoke(this, new(name));
-}
-
-/// <summary>Accepted ranges of the per-kind advanced search settings.</summary>
-public static class MusicSearchLimits
-{
-    public const int Pages = Library.MusicLibraryOwner.MaxSearchPages;
-    public const int Concurrency = Library.MusicLibraryOwner.MaxSearchConcurrency;
-    public const int CacheMinutes = Library.MusicLibraryOwner.MaxSearchCacheMinutes;
 }
 
 internal sealed record SearchKindState(string[] Order, string[] Enabled, int Pages, int Concurrency, int CacheMinutes)
@@ -223,8 +214,9 @@ public sealed partial class MusicCapability
     public Task SetSearchAdvancedAsync(string kind, int pages, int concurrency, int cacheMinutes)
     {
         if (!CanEditSearchPreferences || kind is not ("songs" or "playlists") ||
-            pages is < 1 or > MusicSearchLimits.Pages || concurrency is < 1 or > MusicSearchLimits.Concurrency ||
-            cacheMinutes is < 1 or > MusicSearchLimits.CacheMinutes) return Task.CompletedTask;
+            !MusicSearchSettings.ValidPages(pages) ||
+            !MusicSearchSettings.ValidConcurrency(concurrency) ||
+            !MusicSearchSettings.ValidCacheMinutes(cacheMinutes)) return Task.CompletedTask;
         var songs = SongSearch.Snapshot();
         var playlists = PlaylistSearch.Snapshot();
         var current = kind == "songs" ? songs : playlists;

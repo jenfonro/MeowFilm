@@ -20,7 +20,6 @@ internal sealed record MusicSearchPage(SearchCandidate[] Items, bool More, int N
         LJ.Require(!groups || platform == "mg" && kind == MusicSearchKind.Songs, "INVALID_RESPONSE");
         var items = LJ.Array(data["items"]); LJ.Require(LJ.IsBool(data["more"]), "INVALID_RESPONSE");
         bool more = LJ.B(data["more"]);
-        LJ.Require(!more || page < int.MaxValue, "INVALID_RESPONSE");
         int next = data["continuation"] is JsonObject continuation
             ? (int)LJ.I(continuation["page"], page + 1L, int.MaxValue) : more ? checked(page + 1) : page;
         long? total = data["total"] is null ? null : LJ.I(data["total"]);
@@ -34,10 +33,9 @@ internal sealed record MusicSearchPage(SearchCandidate[] Items, bool More, int N
             LJ.Require(total is not null, "INVALID_RESPONSE");
             groupCount = (int)LJ.I(data["groupCount"], 0, limit);
             rawItemCount = (int)LJ.I(data["rawItemCount"], 0, int.MaxValue);
-            LJ.Require(groupCount == Math.Min(limit, Math.Max(0, total.Value - offset)) &&
+            LJ.Require((!more || groupCount == limit && page * (long)limit < total.Value) &&
                 rawItemCount >= groupCount && items.Count <= rawItemCount &&
-                (rawItemCount == 0 || items.Count > 0) &&
-                more == (page * (long)limit < total.Value), "INVALID_RESPONSE");
+                (rawItemCount == 0 || items.Count > 0), "INVALID_RESPONSE");
             // A group page is one native page, not a page of flattened recordings.
             LJ.Require(!more || data["continuation"] is JsonObject && next == page + 1, "INVALID_RESPONSE");
             LJ.Require(more || data["continuation"] is null, "INVALID_RESPONSE");
@@ -49,7 +47,6 @@ internal sealed record MusicSearchPage(SearchCandidate[] Items, bool More, int N
         for (int index = 0; index < items.Count; index++)
         {
             var raw = LJ.Object(items[index]);
-            LJ.Require(LJ.Bytes(raw).Length <= 32 * 1024, "LIMIT");
             JsonObject itemInput;
             double rank;
             if (groups)
@@ -86,8 +83,6 @@ internal sealed record MusicSearchPage(SearchCandidate[] Items, bool More, int N
                     // Dedup identity is not the resource id: keep native songId/songmid untouched.
                     key = LJ.Stringify(new JsonArray("mg-copyright", copyright));
                 }
-                foreach (string field in new[] { "title", "artist", "album", "cover_url" })
-                    LJ.Require(LJ.S(item[field]).Length <= 4096, "LIMIT");
             }
             else
             {
@@ -98,7 +93,7 @@ internal sealed record MusicSearchPage(SearchCandidate[] Items, bool More, int N
                     .Select(p => KeyValuePair.Create(p.Key, NativeMusicSong.Durable(p.Value, p.Key))));
                 item["id"] = id; item["source"] = platform;
                 foreach (var field in new[] { "name", "cover", "creator", "description" })
-                    LJ.Require(item[field] is null || item[field] is JsonValue v && v.TryGetValue<string>(out var text) && text.Length <= 4096, "INVALID_RESPONSE");
+                    LJ.Require(item[field] is null || item[field] is JsonValue v && v.TryGetValue<string>(out _), "INVALID_RESPONSE");
                 key = id;
             }
             rows.Add(new(platform, key, item, rank));

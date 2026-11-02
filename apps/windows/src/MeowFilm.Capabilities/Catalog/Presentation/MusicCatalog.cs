@@ -56,8 +56,7 @@ public sealed partial class MusicCapability
     public bool IsCatalogDetailPage => IsCatalogPlaylist || IsCatalogArtist;
     public bool IsLocalLibraryPage => IsSongList || IsArchives;
     public bool CanCatalogBrowse => !stopping && commands == 0;
-    public bool CanCatalogNext => CanCatalogBrowse && loadCancellation is null && catalogMore &&
-        catalogPage < (catalogLoadedTarget?.MaximumPages ?? int.MaxValue);
+    public bool CanCatalogNext => CanCatalogBrowse && loadCancellation is null && catalogMore;
     public bool CanCatalogPrevious => CanCatalogBrowse && loadCancellation is null && !IsCatalogDetailPage && catalogPage > 1;
     public bool CanLoadMoreCatalogPlaylist => IsCatalogPlaylist && CanCatalogNext;
     public bool HasCatalogTags => CatalogTags.Count > 0 && location.Route.StartsWith("catalog-channel/", StringComparison.Ordinal);
@@ -390,7 +389,7 @@ public sealed partial class MusicCapability
         try
         {
             MusicDto.Require(CatalogPlatforms.Any(item => item.Key == platform));
-            MusicDto.Require(CatalogPlatforms.Any(item => item.Key == platform) && number >= 1 && number <= (target?.MaximumPages ?? int.MaxValue));
+            MusicDto.Require(CatalogPlatforms.Any(item => item.Key == platform) && number >= 1);
             if (target is not null && target.Operation is not ("personalPlaylists" or "playlist") && platform != "wy")
                 throw new MusicOperationException("UNSUPPORTED");
             if (target?.Private == true) await ReadCatalogAccountForRequestAsync(platform, generation, token);
@@ -474,7 +473,6 @@ public sealed partial class MusicCapability
             if (more && (next is null || operation != "personalPlaylists" && sections.Sum(s => s.Items.Count) == 0 ||
                 number > 1 && catalogCursors.Take(number).Any(old => MusicCatalogDto.CursorKey(old) == MusicCatalogDto.CursorKey(next))))
                 throw new MusicOperationException("PAGINATION_STALLED");
-            if (more && number == (target?.MaximumPages ?? int.MaxValue)) throw new MusicOperationException("PAGINATION_LIMIT");
             if (number > 1)
             {
                 var oldKeys = catalogPages.Where(p => p.Key < number).SelectMany(p => p.Value.Sections)
@@ -512,7 +510,7 @@ public sealed partial class MusicCapability
                 if (error is MusicOperationException { Code: "AUTH_REQUIRED" or "AUTH_EXPIRED" or "FORBIDDEN" or "STALE_SESSION" or "SESSION_CHANGED" or "INVALID_CREDENTIALS" })
                     RetireCatalogSession();
                 status = MusicCatalogDto.ErrorText(error is MusicOperationException failure ? failure.Code : "INVALID_RESPONSE");
-                if (error is MusicOperationException { Code: "PAGINATION_STALLED" or "PAGINATION_LIMIT" })
+                if (error is MusicOperationException { Code: "PAGINATION_STALLED" })
                 {
                     catalogMore = false;
                     if (catalogPages.TryGetValue(catalogPage, out var prior))

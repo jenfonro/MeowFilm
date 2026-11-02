@@ -195,19 +195,4 @@ public sealed partial class MusicLibraryOwner
             beforeHistory, beforeFailed, shuffleHistory.ToArray(), failedEntries.ToArray());
         return (response, true);
     }
-
-    internal bool HasRecommendationReceipt => Volatile.Read(ref recommendationReceipt) is not null;
-
-    // Only the consumer of this nonce may acknowledge its accepted result/readback.
-    // Unrelated queue operations cannot discard evidence for an unresolved commit.
-    internal async Task AcknowledgeRecommendationAsync(string nonce)
-    {
-        await gate.WaitAsync().ConfigureAwait(false);
-        try
-        {
-            if (recommendationUnknown is null && recommendationReceipt?.Nonce == nonce)
-                recommendationReceipt = null;
-        }
-        finally { gate.Release(); }
-    }
 }

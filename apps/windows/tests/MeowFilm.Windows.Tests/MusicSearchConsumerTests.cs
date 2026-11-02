@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -36,7 +37,7 @@ public static partial class MusicUiTests
             var empty = await f.Call("music.search.start", new { keyword = "空", kind = "songs", platforms = Array.Empty<string>() });
             Equal("NO_PLATFORMS", empty.GetProperty("code").GetString()); Equal(0, f.Http.Requests.Count);
         });
-        yield return Case("native aggregate search publishes comprehensive results without requesting platform home", async () =>
+        yield return Case("native search publishes comprehensive results without requesting platform home", async () =>
         {
             await using var f = await SearchScene.Create();
             await f.Policy(["wy"], ["wy"]);
@@ -66,7 +67,7 @@ public static partial class MusicUiTests
             Equal(accountReads + 3, f.Store.AccountReads);
             Equal(0, f.Runtime.Calls.Count);
         });
-        yield return Case("duplicate visible aggregate start shares one owner flight and one initial account observation", async () =>
+        yield return Case("duplicate visible search start shares one owner flight and one initial account observation", async () =>
         {
             await using var f = await SearchScene.Create();
             await f.Policy(["wy"], [], automaticPlaylists: false);
@@ -119,7 +120,7 @@ public static partial class MusicUiTests
             await SearchUntil(() => f.Module.Songs.Count == 1 && f.Module.CatalogSections.All(s => !s.IsLoading));
             Equal(1, f.Http.SearchRequests);
         });
-        yield return Case("native aggregate card favorite and queue preserve recording and search provenance", async () =>
+        yield return Case("native search card favorite and queue preserve recording and search provenance", async () =>
         {
             await using var f = await SearchScene.Create();
             await f.Policy(["wy"], ["wy"]);
@@ -147,8 +148,9 @@ public static partial class MusicUiTests
         {
             await using var f = await SearchScene.Create();
             await f.Policy(["wy"], [], automaticPlaylists: false);
-            f.Http.SearchResult = count => new { code = 200,
-                result = new { songCount = 61, songs = new[] { SearchHttp.Track(1004 - count) } } };
+            f.Http.SearchResult = count => new { code = 200, result = new { songCount = 61,
+                songs = Enumerable.Range(0, count == 3 ? 1 : 30)
+                    .Select(index => SearchHttp.Track(1001 + (count - 1) * 30 + index)).ToArray() } };
             await f.Search("分页录音");
             await f.Module.OpenSearchTabAsync("songs");
             await SearchUntil(() => f.Module.Songs.Count == 1 && f.Module.CanLoadMoreSearchSongs);
@@ -158,15 +160,15 @@ public static partial class MusicUiTests
                 True(f.Module.CanLoadMoreSearchSongs, "provider continuation is available");
                 await f.Module.MoreSearchAsync();
                 await SearchUntil(() => f.Module.Songs.Count == 1 &&
-                    f.Module.Songs[0].Raw.GetProperty("sources").GetArrayLength() == round);
+                    f.Module.Songs[0].Raw.GetProperty("sources").GetArrayLength() == (round == 3 ? 61 : round * 30));
                 Equal(id, f.Module.Songs[0].Id);
-                Equal("1003", MusicSongFixture.NativeId(f.Module.Songs[0].Raw));
+                Equal("1001", MusicSongFixture.NativeId(f.Module.Songs[0].Raw));
                 _ = SongRow.Read(f.Module.Songs[0].Raw);
             }
             Equal(3, f.Http.SearchRequests); Equal(0, f.Runtime.Calls.Count);
             True(!f.Module.CanLoadMoreSearchSongs, "final native page ends the search");
         });
-        yield return Case("native aggregate playlist back restores song and playlist tabs without refetch", async () =>
+        yield return Case("native search playlist back restores song and playlist tabs without refetch", async () =>
         {
             await using var f = await SearchScene.Create();
             await f.Policy(["wy"], ["wy"]);
@@ -182,7 +184,7 @@ public static partial class MusicUiTests
             await f.Module.OpenSearchTabAsync("songs");
             Equal(1, f.Module.Songs.Count); Equal(searches, f.Http.SearchRequests);
         });
-        yield return Case("native aggregate policy changes save immediately and retire old results", async () =>
+        yield return Case("native search policy changes save immediately and retire old results", async () =>
         {
             await using var f = await SearchScene.Create();
             await f.Policy(["wy"], ["wy"], automaticPlaylists: false);
@@ -197,7 +199,7 @@ public static partial class MusicUiTests
             Equal("未启用搜索平台", f.Module.SearchStatus);
             Equal(requests, f.Http.SearchRequests);
         });
-        yield return Case("native aggregate cancellation waits for physical HTTP and ignores late results", async () =>
+        yield return Case("native search cancellation waits for physical HTTP and ignores late results", async () =>
         {
             await using var f = await SearchScene.Create();
             await f.Policy(["wy"], [], automaticPlaylists: false);
@@ -213,7 +215,7 @@ public static partial class MusicUiTests
             Equal(0, f.Module.Songs.Count); Equal("已取消", f.Module.SearchStatus);
             True(f.Module.CatalogSections.All(s => !s.IsLoading), "actual loading drained");
         });
-        yield return Case("native aggregate background result cannot reopen a later local page", async () =>
+        yield return Case("native search background result cannot reopen a later local page", async () =>
         {
             await using var f = await SearchScene.Create();
             await f.Policy(["wy"], [], automaticPlaylists: false);
@@ -228,7 +230,99 @@ public static partial class MusicUiTests
             await SearchUntil(() => f.Module.Songs.Count == 1);
             Equal(1, f.Http.SearchRequests);
         });
-        yield return Case("native aggregate transient failure is retried by the next round and real WPF search controls", async () =>
+        yield return Case("search start draining an old query does not block get next or cancel behind the policy lane", async () =>
+        {
+            await using var f = await SearchScene.Create();
+            await f.Policy(["wy"], [], automaticPlaylists: false);
+            f.Http.Hold = true;
+            await f.Search("旧查询");
+            await f.Http.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            string old = (await f.Call("music.search.start",
+                new { keyword = "旧查询", kind = "songs", platforms = new[] { "wy" } })).GetProperty("id").GetString()!;
+            var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            void Changed(JsonElement value)
+            {
+                if (value.TryGetProperty("id", out var id) && id.GetString() == old &&
+                    value.TryGetProperty("cancelled", out var cancelled) && cancelled.GetBoolean())
+                    stopped.TrySetResult();
+            }
+            f.App.SearchChanged += Changed;
+            try
+            {
+                var replacement = f.App.ExecuteAsync("music.search.start",
+                    new { keyword = "新查询", kind = "songs", platforms = new[] { "wy" } });
+                await stopped.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                True(!replacement.IsCompleted, "replacement must wait for the old physical request");
+                var get = f.App.ExecuteAsync("music.search.get", new { id = old });
+                var next = f.App.ExecuteAsync("music.search.next", new { id = old });
+                await Task.WhenAll(get, next).WaitAsync(TimeSpan.FromSeconds(2));
+                Equal("SEARCH_BUSY", (await f.App.ExecuteAsync("music.search.start",
+                    new { keyword = "第三个", kind = "songs", platforms = new[] { "wy" } })).GetProperty("code").GetString());
+                var cancel = f.App.ExecuteAsync("music.search.cancel", new { id = old });
+                True(!cancel.IsCompleted, "cancel still waits for the old physical request");
+                f.Http.Release.TrySetResult();
+                await Task.WhenAll(cancel, replacement).WaitAsync(TimeSpan.FromSeconds(10));
+            }
+            finally
+            {
+                f.App.SearchChanged -= Changed;
+                f.Http.Release.TrySetResult();
+            }
+        });
+        yield return Case("search start queued during a settings save cannot dispatch the replaced policy", async () =>
+        {
+            await using var f = await SearchScene.Create();
+            await f.Policy(["wy"], [], automaticPlaylists: false);
+            f.Http.Hold = true;
+            await f.Search("旧策略");
+            await f.Http.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var settings = (await f.Call("music.search.settings.get")).GetProperty("settings");
+            var songs = JsonNode.Parse(settings.GetProperty("songs").GetRawText())!.AsObject();
+            songs["enabled"] = new JsonArray("tx");
+            var save = f.App.ExecuteAsync("music.search.settings.save", new
+            {
+                ifRevision = settings.GetProperty("revision").GetInt64(),
+                songs,
+                playlists = settings.GetProperty("playlists")
+            });
+            await Drain();
+            True(!save.IsCompleted, "save must wait for the old physical request");
+            var start = f.App.ExecuteAsync("music.search.start",
+                new { keyword = "新策略", kind = "songs", platforms = new[] { "wy" } });
+            await Drain();
+            True(!start.IsCompleted, "start waits for the pending policy save");
+            f.Http.Release.TrySetResult();
+            True((await save.WaitAsync(TimeSpan.FromSeconds(5))).GetProperty("ok").GetBoolean(),
+                "the settings save commits");
+            Equal("SEARCH_SETTINGS_CHANGED", (await start.WaitAsync(TimeSpan.FromSeconds(5))).GetProperty("code").GetString());
+            Equal(1, f.Http.SearchRequests);
+        });
+        yield return Case("unconfirmed search settings block start until the next authoritative read", async () =>
+        {
+            await using var f = await SearchScene.Create();
+            await f.Policy(["wy"], [], automaticPlaylists: false);
+            var settings = (await f.Call("music.search.settings.get")).GetProperty("settings");
+            var songs = JsonNode.Parse(settings.GetProperty("songs").GetRawText())!.AsObject();
+            songs["pages"] = 2;
+            f.Store.FailNextWrite = true;
+            var save = await f.App.ExecuteAsync("music.search.settings.save", new
+            {
+                ifRevision = settings.GetProperty("revision").GetInt64(),
+                songs,
+                playlists = settings.GetProperty("playlists")
+            });
+            Equal("COMMIT_UNKNOWN", save.GetProperty("code").GetString());
+            var blocked = await f.App.ExecuteAsync("music.search.start",
+                new { keyword = "未确认", kind = "songs", platforms = new[] { "wy" } });
+            Equal("SEARCH_SETTINGS_UNCONFIRMED", blocked.GetProperty("code").GetString());
+            Equal(0, f.Http.SearchRequests);
+            var current = await f.Call("music.search.settings.get");
+            Equal(1, current.GetProperty("settings").GetProperty("songs").GetProperty("pages").GetInt32());
+            True((await f.Call("music.search.start",
+                new { keyword = "已确认", kind = "songs", platforms = new[] { "wy" } })).GetProperty("ok").GetBoolean(),
+                "start succeeds after the authoritative read");
+        });
+        yield return Case("native search transient failure is retried by the next round and real WPF search controls", async () =>
         {
             await using var f = await SearchScene.Create();
             await f.Policy(["wy"], [], automaticPlaylists: false);
@@ -267,7 +361,7 @@ public static partial class MusicUiTests
             True(grid.Visibility == Visibility.Collapsed && catalog.Visibility == Visibility.Visible,
                 "playlist tab uses the card surface");
         });
-        yield return Case("native aggregate shutdown resume drops old sessions but retains saved history", async () =>
+        yield return Case("native search shutdown resume drops old sessions but retains saved history", async () =>
         {
             await using var f = await SearchScene.Create();
             await f.Policy(["wy"], [], automaticPlaylists: false);
@@ -284,7 +378,7 @@ public static partial class MusicUiTests
             await SearchUntil(() => f.Module.Songs.Count == 1);
             Equal(0, f.Runtime.Calls.Count);
         });
-        yield return Case("native aggregate disabling providers waits for the admitted physical request", async () =>
+        yield return Case("native search disabling providers waits for the admitted physical request", async () =>
         {
             await using var f = await SearchScene.Create();
             await f.Policy(["wy"], [], automaticPlaylists: false);
@@ -301,7 +395,7 @@ public static partial class MusicUiTests
             True(!f.Module.HasSearchSession, "disabled results cannot revive");
         });
         foreach (bool holdDispose in new[] { false, true })
-            yield return Case("native aggregate shutdown drains " + (holdDispose ? "async stream disposal" : "physical handler"), async () =>
+            yield return Case("native search shutdown drains " + (holdDispose ? "async stream disposal" : "physical handler"), async () =>
             {
                 await using var f = await SearchScene.Create();
                 await f.Policy(["wy"], [], automaticPlaylists: false);
@@ -417,6 +511,7 @@ public static partial class MusicUiTests
     {
         private AccountReadHold? nextAccountRead;
         internal int AccountReads;
+        internal bool FailNextWrite;
 
         internal AccountReadHold HoldNextAccountRead()
         {
@@ -443,8 +538,11 @@ public static partial class MusicUiTests
         }
 
         public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
-            DocumentFingerprint expected, CancellationToken cancellationToken = default) =>
-            inner.WriteAsync(documentNamespace, data, expected, cancellationToken);
+            DocumentFingerprint expected, CancellationToken cancellationToken = default)
+        {
+            if (FailNextWrite) { FailNextWrite = false; throw new ProtectedDocumentException(DocumentStoreError.Storage); }
+            return inner.WriteAsync(documentNamespace, data, expected, cancellationToken);
+        }
 
         public async ValueTask DisposeAsync()
         {

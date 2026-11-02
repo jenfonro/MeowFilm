@@ -76,7 +76,8 @@ internal abstract class MusicSyncAdapter(MusicPlatformSession session, MusicPlat
     protected static JsonArray A(IEnumerable<string> v) => LJ.Arr(v);
     protected static string Id(JsonNode? v) => PJ.Id(v);
     protected static long Count(JsonNode? v) => PJ.Count(v);
-    protected static List<JsonObject> Rows(JsonNode? v, int max = 10000) => PJ.Rows(v, max);
+    protected static List<JsonObject> Rows(JsonNode? v) => PJ.RowsAll(v);
+    protected static List<JsonObject> Rows(JsonNode? v, int max) => PJ.Rows(v, max);
     protected static void Require(bool condition, string code = "INCOMPLETE_PAGE") => LJ.Require(condition, code);
     protected static string Name(JsonNode? n) { string value = PJ.Metadata(n); Require(LJ.Id(value, 200), "INVALID_RESPONSE"); return value; }
     protected static void Same(IEnumerable<string> a, IEnumerable<string> b) => Require(a.SequenceEqual(b), "SNAPSHOT_CHANGED");
@@ -108,7 +109,13 @@ internal abstract class MusicSyncAdapter(MusicPlatformSession session, MusicPlat
             var result = await catalog.SearchAsync(new(Platform, query, Page: page, Limit: 30, Refresh: true), Token).ConfigureAwait(false);
             await AcceptCatalogReadAsync().ConfigureAwait(false);
             var value = JsonNode.Parse(result.GetRawText())!.AsObject();
-            if (Platform == "kg") { long n = Count(value["total"]); if (total is not null) Require(total == n, "SNAPSHOT_CHANGED"); total = n; }
+            if (Platform == "kg")
+            {
+                long n = Count(value["total"]);
+                if (total is not null) Require(total == n, "SNAPSHOT_CHANGED");
+                total = n;
+                if (n > 300) return null;
+            }
             foreach (var candidate in Rows(value["items"], 30))
             {
                 received++;

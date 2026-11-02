@@ -231,7 +231,7 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
                     _ => throw new MusicPlatformException("UNSUPPORTED")
                 },
                 _ => action(call)
-            }), null);
+            }));
             call.Guard();
             await call.CheckSessionAsync();
             call.Guard();

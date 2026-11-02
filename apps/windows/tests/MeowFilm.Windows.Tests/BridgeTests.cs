@@ -418,7 +418,6 @@ public static class BridgeTests
         }
         Equal(0, limited);
         Equal(true, cancelled.QueuedBytes < 1024);
-        Equal(0, cancelled.QueuedFrameCount);
         Equal(1, cancelled.PendingCount); Equal(false, cancelled.IsClosed);
         cancelled.Close(); await Expect("CLOSED", () => first);
         await cancelled.Completion.WaitAsync(TestDeadline); Equal(0L, cancelled.QueuedBytes);

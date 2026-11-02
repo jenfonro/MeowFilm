@@ -1,6 +1,6 @@
 # Windows 原生搜索发现
 
-`NativeMusicSearchDiscovery` 是搜索空白页的只读原生 owner。它读取网易云推荐词、热搜和榜单预览，不是逐字输入联想、聚合搜索、账号校验或第二套首页。
+`NativeMusicSearchDiscovery` 是搜索空白页的只读原生 owner。它读取网易云推荐词、热搜和榜单预览，不是逐字输入联想、搜索结果页、账号校验或第二套首页。
 
 展示复用遵循[共同页面契约](../common/pages/data-requests.md)，客户端字段使用[同一 Windows 上下文](music-platform-client-context.md)。
 

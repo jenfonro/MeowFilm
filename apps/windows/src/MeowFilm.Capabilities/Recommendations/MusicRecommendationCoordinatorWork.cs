@@ -97,17 +97,8 @@ public sealed partial class MusicRecommendationCoordinator
                     if (code is "COMMIT_UNKNOWN" or "STORAGE_CONFLICT") MarkUnknown(s, operation, code);
                     throw new RecommendationException(code);
                 }
-                try
-                {
-                    var after = await ReadAsync(owner, CancellationToken.None).ConfigureAwait(false);
-                    ApplyCommitted(s, operation, result, after, generation, epoch);
-                    await owner.AcknowledgeRecommendationAsync(operation.Nonce).ConfigureAwait(false);
-                }
-                catch
-                {
-                    MarkUnknown(s, operation, "COMMIT_UNKNOWN");
-                    throw;
-                }
+                var after = await ReadAsync(owner, CancellationToken.None).ConfigureAwait(false);
+                ApplyCommitted(s, operation, result, after, generation, epoch);
                 return true;
             }, token).ConfigureAwait(false);
             MusicRecommendationSelection? selection = null;
@@ -286,7 +277,6 @@ public sealed partial class MusicRecommendationCoordinator
                 { next.Checkpoint = s.Checkpoint; s.Checkpoint = ""; }
                 if (ReferenceEquals(recipient, session)) PublishLocked();
             }
-            await owner.AcknowledgeRecommendationAsync(pending!.Nonce).ConfigureAwait(false);
             return true;
         }, token).ConfigureAwait(false);
         if (!s.Active || s.Config.Kind == "fm") await DiscardAsync(s).ConfigureAwait(false);

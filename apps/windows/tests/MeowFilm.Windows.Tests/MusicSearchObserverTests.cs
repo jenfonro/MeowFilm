@@ -5,7 +5,7 @@ using MeowFilm.Capabilities.Search;
 
 namespace MeowFilm.Windows.Tests;
 
-public static class MusicAggregateSearchObserverTests
+public static class MusicSearchObserverTests
 {
     public static IEnumerable<TestCase> Cases()
     {

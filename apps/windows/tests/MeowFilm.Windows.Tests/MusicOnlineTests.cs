@@ -92,7 +92,7 @@ public static partial class MusicUiTests
         {
             await using var f = await Fixture.Create();
             await SetupOnline(f, "new Promise(() => {})");
-            var song = (await f.Rpc("music.online.song", new { platform = "wy", musicInfo = new { musicId = "42" },
+            var song = (await f.Rpc("music.online.song", new { platform = "wy", musicInfo = new { songmid = "42" },
                 title = "合成歌曲", artist = "合成艺人" })).GetProperty("song");
             var settings = (await f.Rpc("music.settings.get")).GetProperty("settings");
             var revision = settings.GetProperty("revision").GetInt64();
@@ -249,7 +249,7 @@ public static partial class MusicUiTests
     }
     private static Task PlayOnlineSong(MusicCapability module) =>
         module.PlayOnlineSongAsync("wy", "合成歌曲", "合成艺人", "",
-            JsonSerializer.SerializeToElement(new { musicId = "42" }));
+            JsonSerializer.SerializeToElement(new { songmid = "42" }));
 
     private sealed class MusicWaveServer : IAsyncDisposable
     {

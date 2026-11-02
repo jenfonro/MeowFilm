@@ -62,7 +62,7 @@ public sealed partial class MusicLibraryOwner
     private static JsonObject EntryView(JsonNode? n)
     {
         var e = LJ.Object(n);
-        return LJ.Obj(("id", e["id"]), ("key", e["key"]), ("song", NativeMusicSong.View(e["song"])), ("context", ContextView(e["context"])));
+        return LJ.Obj(("id", e["id"]), ("key", e["key"]), ("song", NativeMusicSong.Normalize(e["song"])), ("context", ContextView(e["context"])));
     }
     private static void ValidateQueue(JsonObject q, bool schema)
     {
@@ -83,7 +83,7 @@ public sealed partial class MusicLibraryOwner
                 _ = LJ.I(q["at"], 1);
                 _ = LJ.Text(q["title"], 2048);
             }
-            var entries = LJ.Array(q["entries"]); LJ.Require(entries.Count <= 10000, "LIMIT");
+            var entries = LJ.Array(q["entries"]);
             var ids = new HashSet<string>();
             foreach (var n in entries)
             {
@@ -255,7 +255,6 @@ public sealed partial class MusicLibraryOwner
             case "music.queue.append":
             {
                 LJ.Fields(p, "songs context next", "songs"); LJ.Require(p["next"] is null || LJ.IsBool(p["next"])); var songs = Songs(p, false, full); var context = Context(p["context"]);
-                LJ.Require(entries.Count + songs.Length <= 10000, "LIMIT");
                 var added = songs.Select(s => MakeEntry(s, context)).ToArray();
                 int index = LJ.B(p["next"]) && current.Length > 0 ? entries.Select(e => LJ.S(e?["id"])).ToList().IndexOf(current) + 1 : entries.Count;
                 foreach (var entry in added) entries.Insert(index++, entry.DeepClone());
@@ -345,7 +344,7 @@ public sealed partial class MusicLibraryOwner
             string id = LJ.Text(p["id"]); var item = list.OfType<JsonObject>().FirstOrDefault(i => LJ.S(i[kind == "playlists" ? "id" : "date"]) == id)
                 ?? throw new MusicLibraryException("HISTORY_NOT_FOUND");
             return kind == "days" ? (LJ.Merge(LJ.Page(LJ.Array(item["songs"]).OfType<JsonObject>().Select(v =>
-                LJ.Obj(("song", NativeMusicSong.View(v["song"])), ("context", ContextView(v["context"])), ("at", v["at"]))), p), LJ.Obj(("id", id), ("date", id))), false) :
+                LJ.Obj(("song", NativeMusicSong.Normalize(v["song"])), ("context", ContextView(v["context"])), ("at", v["at"]))), p), LJ.Obj(("id", id), ("date", id))), false) :
                 (LJ.Merge(LJ.Page(LJ.Array(item["entries"]).Select(EntryView), p, "entries"), LJ.Obj(("id", id), ("title", item["title"]), ("at", item["at"]), ("currentId", item["currentId"]), ("source", SourceView(item["source"])))), false);
         }
         LJ.Require(pending is null, "PENDING_WRITE");

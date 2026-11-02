@@ -36,7 +36,7 @@ internal sealed partial class MusicPlatformClientProtocol
                 try { plain = aes.DecryptCbc(response.Bytes, iv, PaddingMode.PKCS7); }
                 catch { throw new MusicPlatformException("INVALID_RESPONSE"); }
                 token.ThrowIfCancellationRequested();
-                var data = PJ.Parse(plain, 1048576); PlatformProtocols.KgAccountStatus(data);
+                var data = PJ.Parse(plain); PlatformProtocols.KgAccountStatus(data);
                 // The fixed adapter explicitly accepts a successful [] with no issued dfid.
                 if (data["data"] is JsonArray { Count: 0 }) return null;
                 PJ.Require(data["data"] is JsonObject, "INVALID_RESPONSE");

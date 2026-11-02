@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities;
 
@@ -176,13 +177,13 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
     /// <summary>Saves valid input immediately; invalid input reverts to the saved value.</summary>
     private async Task CommitSearchAdvancedAsync()
     {
-        static int? Read(TextBox box, int maximum) =>
+        static int? Read(TextBox box, Func<int, bool> valid) =>
             int.TryParse(box.Text.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out var value) &&
-            value >= 1 && value <= maximum ? value : null;
+            valid(value) ? value : null;
         var settings = SearchAdvancedSettings;
-        int pages = Read(SearchPagesBox, MusicSearchLimits.Pages) ?? settings.Pages;
-        int concurrency = Read(SearchConcurrencyBox, MusicSearchLimits.Concurrency) ?? settings.Concurrency;
-        int cacheMinutes = Read(SearchCacheBox, MusicSearchLimits.CacheMinutes) ?? settings.CacheMinutes;
+        int pages = Read(SearchPagesBox, MusicSearchSettings.ValidPages) ?? settings.Pages;
+        int concurrency = Read(SearchConcurrencyBox, MusicSearchSettings.ValidConcurrency) ?? settings.Concurrency;
+        int cacheMinutes = Read(SearchCacheBox, MusicSearchSettings.ValidCacheMinutes) ?? settings.CacheMinutes;
         await module.SetSearchAdvancedAsync(searchAdvancedKind, pages, concurrency, cacheMinutes);
         ShowSearchAdvanced(keepEditing: true);
     }

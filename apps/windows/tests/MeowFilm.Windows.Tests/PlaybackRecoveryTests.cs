@@ -707,7 +707,7 @@ public static class PlaybackRecoveryTests
             return f;
         }
         internal Task Play() => Module.PlayOnlineSongAsync("wy", "合成歌曲", "fixture", "",
-            JsonSerializer.SerializeToElement(new { musicId = "42" }));
+            JsonSerializer.SerializeToElement(new { songmid = "42" }));
         public async ValueTask DisposeAsync()
         {
             App.ReleaseRefresh.TrySetResult();
@@ -758,7 +758,7 @@ public static class PlaybackRecoveryTests
             return f;
         }
         internal Task Play() => Module.PlayOnlineSongAsync("wy", "合成歌曲", "fixture", "",
-            JsonSerializer.SerializeToElement(new { musicId = "42" }));
+            JsonSerializer.SerializeToElement(new { songmid = "42" }));
         internal async Task PlayPair(string nextPlatform = "wy")
         {
             var first = MusicSongFixture.Online("wy", "First", "当前首", "fixture");

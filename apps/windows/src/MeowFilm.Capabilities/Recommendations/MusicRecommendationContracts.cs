@@ -115,14 +115,10 @@ internal static class RecommendationJson
     private static string FromData(JsonElement data)
     {
         if (data.ValueKind != JsonValueKind.Object || Text(data, "source") != "wy") return "";
-        foreach (string name in new[] { "songmid", "id" })
-            if (data.TryGetProperty(name, out var value))
-            {
-                string id = value.ValueKind == JsonValueKind.String ? value.GetString()! :
-                    value.ValueKind == JsonValueKind.Number ? value.GetRawText() : "";
-                if (ValidId(id)) return id;
-            }
-        return "";
+        if (!data.TryGetProperty("songmid", out var value)) return "";
+        string id = value.ValueKind == JsonValueKind.String ? value.GetString()! :
+            value.ValueKind == JsonValueKind.Number ? value.GetRawText() : "";
+        return ValidId(id) ? id : "";
     }
     internal static bool ValidId(string id) => id.Length is > 0 and <= 16 && id[0] != '0' &&
         id.All(char.IsAsciiDigit) && long.TryParse(id, out var n) && n is > 0 and <= 9007199254740991;

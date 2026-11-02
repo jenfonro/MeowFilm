@@ -180,10 +180,10 @@
       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
       <TextBlock Text="单次请求页数" VerticalAlignment="Center"/>
       <TextBox x:Name="SearchPagesBox" Grid.Column="1" Style="{StaticResource Settings.TextBox}" Height="32" Padding="8,4" HorizontalContentAlignment="Right"
-               MaxLength="2" LostKeyboardFocus="SearchAdvancedBox_LostFocus" AutomationProperties.Name="单次请求页数"/>
+               MaxLength="10" LostKeyboardFocus="SearchAdvancedBox_LostFocus" AutomationProperties.Name="单次请求页数"/>
       <TextBlock Grid.Row="1" Text="平台并发数" VerticalAlignment="Center" Margin="0,10,0,0"/>
       <TextBox x:Name="SearchConcurrencyBox" Grid.Row="1" Grid.Column="1" Style="{StaticResource Settings.TextBox}" Height="32" Padding="8,4" Margin="0,10,0,0" HorizontalContentAlignment="Right"
-               MaxLength="2" LostKeyboardFocus="SearchAdvancedBox_LostFocus" AutomationProperties.Name="平台并发数"/>
+               MaxLength="10" LostKeyboardFocus="SearchAdvancedBox_LostFocus" AutomationProperties.Name="平台并发数"/>
       <TextBlock Grid.Row="2" Text="缓存时长（分钟）" VerticalAlignment="Center" Margin="0,10,0,0"/>
       <TextBox x:Name="SearchCacheBox" Grid.Row="2" Grid.Column="1" Style="{StaticResource Settings.TextBox}" Height="32" Padding="8,4" Margin="0,10,0,0" HorizontalContentAlignment="Right"
                MaxLength="4" LostKeyboardFocus="SearchAdvancedBox_LostFocus" AutomationProperties.Name="缓存时长（分钟）"/>

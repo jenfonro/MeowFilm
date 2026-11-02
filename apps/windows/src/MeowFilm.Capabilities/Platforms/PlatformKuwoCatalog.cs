@@ -39,8 +39,8 @@ public sealed partial class MusicPlatformCatalog
         var raw = PublicCatalogData.KuwoJson(await c.PublicRead(KwRequest("http://search.kuwo.cn/r.s", query)));
         var total = PJ.Count(raw["TOTAL"]);
         PJ.Require(!songs || total == 0 || PJ.Scalar(raw["SHOW"]) != "0", "INVALID_RESPONSE");
-        var rows = ExactPage(raw["abslist"] ?? (total == 0 ? new JsonArray() : null), p.Page, p.Limit, total);
-        return PJ.Page("kw", rows.Select(r => songs ? PlatformSongs.Kw(r) : PlatformSongs.PublicPlaylist("kw", r)),
+        var rows = PJ.Rows(raw["abslist"] ?? (total == 0 ? new JsonArray() : null), p.Limit);
+        return PJ.SearchPage("kw", rows.Select(r => songs ? PlatformSongs.Kw(r) : PlatformSongs.PublicPlaylist("kw", r)),
             p.Page, p.Limit, total, p.Page * (long)p.Limit < total);
     }
     private static async Task<JsonObject> KwSong(Call c, MusicSongRequest p)
@@ -81,7 +81,6 @@ public sealed partial class MusicPlatformCatalog
             var card = PlatformSongs.PublicPlaylist("kw", raw, detail: true);
             PJ.Require(PJ.S(card, "id") == id, "IDENTITY_MISMATCH");
             var count = PJ.Count(raw["total"]);
-            PJ.Require(count <= 10000, "LIMIT");
             CheckDeclaredPage(raw, "pn", batch); CheckDeclaredPage(raw, "rn", 1000);
             var revision = PJ.Hash(PJ.Node(new object?[] { c.Scope, id, count, PJ.S(card, "name"),
                 PJ.Scalar(raw["uid"]), PJ.S(card, "creator") }));
@@ -92,7 +91,7 @@ public sealed partial class MusicPlatformCatalog
             var expected = (int)Math.Min(p.Limit, Math.Max(0, count - offset));
             items.AddRange(rows.Skip(start).Take(expected - items.Count).Select(r => PlatformSongs.Kw(r)));
             if (items.Count == expected) break;
-            PJ.Require(batch < 9 && rows.Count == 1000, "INCOMPLETE_PAGE");
+            PJ.Require(rows.Count == 1000, "INCOMPLETE_PAGE");
         }
         return PublicPlaylistPage(c, p, info!, items, total, snapshot!, offset);
     }

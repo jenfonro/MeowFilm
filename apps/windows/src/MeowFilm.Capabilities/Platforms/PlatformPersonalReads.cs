@@ -227,9 +227,8 @@ public sealed partial class MusicPlatformCatalog
                 if (prev["version"] is not null) PJ.Require(pageVersion == PJ.Scalar(prev["version"]), "SNAPSHOT_CHANGED");
                 if (prev["snapshot"] is not null) CheckSnapshot(PJ.S(prev, "snapshot"), pageSnapshot ?? "");
                 foreach (var item in pageItems) PJ.Require(seen.Add(PJ.S(item, "id")), "PAGINATION_STALLED");
-                if (hasMore) PJ.Require((pageItems.Count > 0 || cursor is not null) && p.Page < int.MaxValue,
-                    "PAGINATION_STALLED");
-                var next = hasMore ? PJ.Obj(("scope", c.Scope), ("target", target), ("page", p.Page + 1), ("limit", p.Limit),
+                if (hasMore) PJ.Require(pageItems.Count > 0 || cursor is not null, "PAGINATION_STALLED");
+                var next = hasMore ? PJ.Obj(("scope", c.Scope), ("target", target), ("page", checked(p.Page + 1)), ("limit", p.Limit),
                     ("seen", seen.ToArray()), ("total", pageTotal), ("version", pageVersion), ("snapshot", pageSnapshot)) : null;
                 if (next is not null && cursor is not null)
                     foreach (var field in cursor) next[field.Key] = field.Value?.DeepClone();
@@ -273,7 +272,7 @@ public sealed partial class MusicPlatformCatalog
         if (p.Kind != MusicPersonalListKind.Subscribed)
         {
             var data = await c.Tx("music.musicasset.PlaylistBaseRead", "GetPlaylistByUin", PJ.Obj(("uin", uid)));
-            var raw = PJ.Rows(data["v_playlist"], int.MaxValue);
+            var raw = PJ.RowsAll(data["v_playlist"]);
             PJ.Require(PJ.Bool(data["bFinish"]) && PJ.Count(data["total"]) == raw.Count, "INCOMPLETE_PAGE");
             var favorites = PrivateLocator(c, "qq-favorites", "201", null, null, "我喜欢");
             favorites["playlistId"] = "favorites"; favorites["dirId"] = "201";

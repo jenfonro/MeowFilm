@@ -102,7 +102,7 @@ Task PrepareRecommendationsAsync(CancellationToken ct = default);
 - reconcile 只读取当前持久文档判断该 nonce 是否生效，不重放 enter、append、select 或 restore。
 - 全部未知项结算后才恢复推荐准入。
 
-未确认的 pending 只通过对应 owner 的 reconcile 结算。已提交但队列读回或 consumer 接受失败时也保留协调状态。对应结果被协调器接纳后才以精确 nonce 显式确认回执；普通队列读取、无关成功操作或错误 nonce 都不能清掉它，unknown CAS 尚未解决时也不能提前确认。
+未确认的 pending 只通过对应 owner 的 reconcile 结算。已提交但队列读回失败时保留协调状态，且不把成功提交后的回读失败改记为 `COMMIT_UNKNOWN`。owner 只保留最近一次推荐结果回执，由下一次推荐提交覆盖；replay 和 reconcile 仍按 nonce 读取该回执。
 
 返回原队列所需 checkpoint 按实际保留字节管理（8 MiB），由恢复、discard 或关闭释放，不另设四个 checkpoint 的数量门槛。
 

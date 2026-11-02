@@ -48,12 +48,23 @@ public static class MusicSearchPreferenceTests
             Check(playlists.GetProperty("pages").GetInt32() == 3 && playlists.GetProperty("concurrency").GetInt32() == 2 &&
                 playlists.GetProperty("cacheMinutes").GetInt32() == 5);
         });
+        yield return Case("search page and concurrency accept any positive int while cache stays bounded", async () =>
+        {
+            var store = new Store(); await using var owner = new MusicLibraryOwner(store);
+            var saved = await Call(owner, "music.search.settings.save", Policy(0,
+                Kind(pages: 11, concurrency: 12), Kind(pages: int.MaxValue, concurrency: int.MaxValue)));
+            var songs = saved.GetProperty("settings").GetProperty("songs");
+            var playlists = saved.GetProperty("settings").GetProperty("playlists");
+            Check(songs.GetProperty("pages").GetInt32() == 11 && songs.GetProperty("concurrency").GetInt32() == 12 &&
+                playlists.GetProperty("pages").GetInt32() == int.MaxValue &&
+                playlists.GetProperty("concurrency").GetInt32() == int.MaxValue);
+            await Code(owner, "music.search.settings.save", Policy(1, Kind(pages: 0), Kind()), "INVALID_REQUEST");
+            await Code(owner, "music.search.settings.save", Policy(1, Kind(concurrency: 0), Kind()), "INVALID_REQUEST");
+            Check(store.Writes == 1);
+        });
         foreach (var invalid in new object[] {
-            Policy(0, new { mode = "aggregate", platform = "wy", order = Platforms, enabled = Platforms }, Kind()),
-            Policy(0, Kind(pages: 0), Kind()),
-            Policy(0, Kind(pages: 11), Kind()),
-            Policy(0, Kind(concurrency: 0), Kind()),
-            Policy(0, Kind(concurrency: 11), Kind()),
+            Policy(0, new { order = Platforms, enabled = Platforms, pages = 2147483648L, concurrency = 1, cacheMinutes = 60 }, Kind()),
+            Policy(0, new { order = Platforms, enabled = Platforms, pages = 1, concurrency = 2147483648L, cacheMinutes = 60 }, Kind()),
             Policy(0, Kind(cacheMinutes: 0), Kind()),
             Policy(0, Kind(cacheMinutes: 1441), Kind()),
             Policy(0, Kind(order: ["wy", "tx", "kw", "kg", "kg"]), Kind()),
@@ -73,7 +84,6 @@ public static class MusicSearchPreferenceTests
                 for (int i = 0; i < 65; i++) await Call(owner, "music.search.history.record",
                     new { text = "词" + i, kind = "songs" });
                 await Call(owner, "music.search.history.record", new { text = " 词20 ", kind = "playlists" });
-                await Code(owner, "music.search.history.record", new { text = "旧格式", kind = "songs", platform = "aggregate" }, "INVALID_REQUEST");
             }
             await using var reopened = new MusicLibraryOwner(store);
             var history = (await Call(reopened, "music.search.history.get")).GetProperty("history");
