@@ -179,7 +179,7 @@ public sealed partial class MusicPlatformCatalog
             {
                 PJ.Require(p.Kind == MusicPersonalListKind.All, "UNSUPPORTED");
                 return await c.Wy("/api/user/playlist", PJ.Obj(("uid", uid), ("limit", p.Limit),
-                    ("offset", (p.Page - 1) * p.Limit), ("includeVideo", true)), data =>
+                    ("offset", (p.Page - 1L) * p.Limit), ("includeVideo", true)), data =>
                 {
                     var raw = PJ.Rows(data["playlist"], p.Limit); var wyMore = PJ.Bool(data["more"]);
                     if (wyMore) PJ.Require(raw.Count == p.Limit, "INCOMPLETE_PAGE");
@@ -227,14 +227,11 @@ public sealed partial class MusicPlatformCatalog
                 if (prev["version"] is not null) PJ.Require(pageVersion == PJ.Scalar(prev["version"]), "SNAPSHOT_CHANGED");
                 if (prev["snapshot"] is not null) CheckSnapshot(PJ.S(prev, "snapshot"), pageSnapshot ?? "");
                 foreach (var item in pageItems) PJ.Require(seen.Add(PJ.S(item, "id")), "PAGINATION_STALLED");
-                if (hasMore) PJ.Require((pageItems.Count > 0 || cursor is not null) && p.Page < 100,
-                    p.Page >= 100 ? "PAGINATION_LIMIT" : "PAGINATION_STALLED");
-                var next = hasMore ? PJ.Obj(("scope", c.Scope), ("target", target), ("page", p.Page + 1), ("limit", p.Limit),
+                if (hasMore) PJ.Require(pageItems.Count > 0 || cursor is not null, "PAGINATION_STALLED");
+                var next = hasMore ? PJ.Obj(("scope", c.Scope), ("target", target), ("page", checked(p.Page + 1)), ("limit", p.Limit),
                     ("seen", seen.ToArray()), ("total", pageTotal), ("version", pageVersion), ("snapshot", pageSnapshot)) : null;
                 if (next is not null && cursor is not null)
                     foreach (var field in cursor) next[field.Key] = field.Value?.DeepClone();
-                // Native UI keeps the whole cursor; cross-account or repeated pages cannot silently merge.
-                if (next is not null) PJ.Require(System.Text.Encoding.UTF8.GetByteCount(PJ.Encode(next)) <= 32768, "PAGINATION_LIMIT");
                 return PJ.Obj(("platform", c.Platform), ("accountId", uid), ("collection", p.Kind.ToString().ToLowerInvariant()),
                     ("items", PJ.Arr(pageItems)), ("page", p.Page), ("limit", p.Limit), ("total", pageTotal), ("more", hasMore),
                     ("continuation", next), ("snapshot", pageSnapshot), ("version", pageVersion));
@@ -275,7 +272,7 @@ public sealed partial class MusicPlatformCatalog
         if (p.Kind != MusicPersonalListKind.Subscribed)
         {
             var data = await c.Tx("music.musicasset.PlaylistBaseRead", "GetPlaylistByUin", PJ.Obj(("uin", uid)));
-            var raw = PJ.Rows(data["v_playlist"], 10000);
+            var raw = PJ.RowsAll(data["v_playlist"]);
             PJ.Require(PJ.Bool(data["bFinish"]) && PJ.Count(data["total"]) == raw.Count, "INCOMPLETE_PAGE");
             var favorites = PrivateLocator(c, "qq-favorites", "201", null, null, "我喜欢");
             favorites["playlistId"] = "favorites"; favorites["dirId"] = "201";
@@ -299,7 +296,7 @@ public sealed partial class MusicPlatformCatalog
             return (page.Item1, page.Item2, page.Item3, page.Item4, null);
         }
         PJ.Require(euin.Length > 0, "INVALID_CREDENTIALS");
-        async Task<(List<JsonObject> Items, long Total, bool More)> FavoritePage(int offset, int size)
+        async Task<(List<JsonObject> Items, long Total, bool More)> FavoritePage(long offset, int size)
         {
             var data = await c.Tx("music.musicasset.PlaylistFavRead", "CgiGetPlaylistFavInfo", PJ.Obj(("uin", euin), ("offset", offset), ("size", size)));
             PJ.Require(data["hide"] is not null && !PJ.Bool(data["hide"]), "FORBIDDEN");
@@ -312,7 +309,7 @@ public sealed partial class MusicPlatformCatalog
         }
         if (p.Kind == MusicPersonalListKind.Subscribed)
         {
-            var r = await FavoritePage((p.Page - 1) * p.Limit, p.Limit);
+            var r = await FavoritePage((p.Page - 1L) * p.Limit, p.Limit);
             if (r.More) PJ.Require(r.Items.Count == p.Limit, "INCOMPLETE_PAGE");
             return (r.Items, r.Total, r.More, null, null);
         }
@@ -322,7 +319,6 @@ public sealed partial class MusicPlatformCatalog
         var phase = p.Page == 1 ? "created" : PJ.S(previous, "txPhase");
         PJ.Require(phase is "created" or "subscribed");
         var offset = p.Page == 1 ? 0 : PJ.Count(previous["txOffset"]);
-        PJ.Require(offset <= 10000, "PAGINATION_LIMIT");
         var beforeOffset = offset; var beforePhase = phase;
         var rawSeen = new HashSet<string>(StringComparer.Ordinal);
         if (previous["txSeen"] is JsonArray already)
@@ -340,7 +336,7 @@ public sealed partial class MusicPlatformCatalog
         var more = true;
         if (phase == "subscribed" && items.Count < p.Limit)
         {
-            var page = await FavoritePage((int)offset, p.Limit - items.Count);
+            var page = await FavoritePage(offset, p.Limit - items.Count);
             if (remoteTotal is not null) PJ.Require(remoteTotal == page.Total, "SNAPSHOT_CHANGED");
             remoteTotal = page.Total;
             var owned = created.ToDictionary(i => PJ.S(i, "id"), StringComparer.Ordinal);
@@ -362,9 +358,8 @@ public sealed partial class MusicPlatformCatalog
     }
     private static (List<JsonObject>, long?, bool, string?) LocalPage(List<JsonObject> all, Call c, MusicPersonalPlaylistsRequest p)
     {
-        PJ.Require(all.Count <= 10000, "LIMIT");
         var snapshot = PJ.Hash(PJ.Obj(("scope", c.Scope), ("items", PJ.Arr(all))));
-        var items = all.Skip((p.Page - 1) * p.Limit).Take(p.Limit).ToList();
+        var items = all.Skip((int)Math.Min(all.Count, (p.Page - 1L) * p.Limit)).Take(p.Limit).ToList();
         return (items, all.Count, p.Page * (long)p.Limit < all.Count, snapshot);
     }
     private static JsonObject TxPersonalItem(JsonObject raw, string uid, bool created)

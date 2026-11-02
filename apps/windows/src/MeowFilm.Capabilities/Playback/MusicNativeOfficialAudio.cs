@@ -125,7 +125,7 @@ public sealed partial class MusicNativeApplication
                 // A guest/non-member cannot authorize a completed file merely by
                 // existing locally. Recheck the exact recording with the platform.
                 if (!member)
-                    _ = await officialAudio.ResolveAsync(session, recording["source_data"]!.AsObject(),
+                    _ = await officialAudio.ResolveAsync(session, NativeMusicSong.SourceData(recording),
                         qualities, rights, token, Current).ConfigureAwait(false);
                 await library.CheckQualityAsync(policy, token).ConfigureAwait(false);
                 Current();
@@ -142,7 +142,7 @@ public sealed partial class MusicNativeApplication
             if (result is null)
             {
                 await sourceCache.InvalidateAsync(session.Scope, songId, token).ConfigureAwait(false);
-                var media = await officialAudio.ResolveAsync(session, recording["source_data"]!.AsObject(),
+                var media = await officialAudio.ResolveAsync(session, NativeMusicSong.SourceData(recording),
                     qualities, rights, token, Current).ConfigureAwait(false);
                 Current();
                 double expected = LJ.N(song["duration"]);

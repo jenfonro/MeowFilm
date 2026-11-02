@@ -51,25 +51,22 @@ internal sealed partial class AdaptiveHttpTransport : IDisposable
     private readonly Dictionary<string, string> _headers;
     private readonly string _credentialOrigin;
     private readonly HttpClient _client;
-    private readonly SemaphoreSlim _global = new(4, 4);
-    private readonly Dictionary<string, SemaphoreSlim> _origins = new(StringComparer.Ordinal);
     private readonly Dictionary<string, AdaptiveResource> _representations = new(StringComparer.Ordinal);
     private readonly CancellationToken _lifetime;
-    private readonly Func<string, CancellationToken, Task<IDisposable>>? _hostAdmission;
     private readonly Action<Uri>? _validateAddress;
     private readonly OfflineAdaptiveArchive? _offline;
     internal bool IsOffline => _offline is not null;
 
     internal AdaptiveHttpTransport(NativeHttpMediaOptions options, Dictionary<string, string> headers,
         Uri credentialOrigin, CancellationToken lifetime,
-        Func<string, CancellationToken, Task<IDisposable>>? hostAdmission = null, Action<Uri>? validateAddress = null)
+        Action<Uri>? validateAddress = null)
     {
         _options = options;
         _headers = new(headers, StringComparer.OrdinalIgnoreCase);
         _credentialOrigin = NativeHttpMediaOptions.Origin(credentialOrigin);
         _client = options.CreateClient();
         _lifetime = lifetime;
-        _hostAdmission = hostAdmission; _validateAddress = validateAddress;
+        _validateAddress = validateAddress;
     }
     internal AdaptiveHttpTransport(OfflineAdaptiveArchive offline, CancellationToken lifetime)
     {
@@ -97,12 +94,10 @@ internal sealed partial class AdaptiveHttpTransport : IDisposable
     {
         if (_offline is not null) return await _offline.OpenAsync(resource, start, end, token, _lifetime).ConfigureAwait(false);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, _lifetime);
-        linked.CancelAfter(_options.RequestTimeout); // Includes admission and all redirect hops.
+        linked.CancelAfter(_options.RequestTimeout); // Includes representation ownership and redirect hops.
         var ct = linked.Token;
-        bool global = false, held = false;
-        SemaphoreSlim? originGate = null;
+        bool held = false;
         HttpResponseMessage? response = null;
-        IDisposable? externalSlot = null;
         AdaptiveResource representation;
         if (resource.Independent) representation = resource.Representation ?? resource;
         else lock (_representations)
@@ -116,7 +111,6 @@ internal sealed partial class AdaptiveHttpTransport : IDisposable
         }
         try
         {
-            await _global.WaitAsync(ct).ConfigureAwait(false); global = true;
             await representation.Gate.WaitAsync(ct).ConfigureAwait(false); held = true;
             if (start < 0 || end < start || resource.Count is long count && start >= count)
                 throw new PlaybackException(PlaybackError.HttpInvalidRange);
@@ -135,18 +129,6 @@ internal sealed partial class AdaptiveHttpTransport : IDisposable
                 _validateAddress?.Invoke(uri);
                 if (!visited.Add(uri.AbsoluteUri)) throw new PlaybackException(PlaybackError.HttpRedirectFailed);
                 var origin = NativeHttpMediaOptions.Origin(uri);
-                SemaphoreSlim candidate;
-                lock (_origins)
-                {
-                    if (!_origins.TryGetValue(origin, out candidate!))
-                    {
-                        if (_origins.Count >= 64) throw new PlaybackException(PlaybackError.AdaptiveBudget);
-                        _origins.Add(origin, candidate = new SemaphoreSlim(2, 2));
-                    }
-                }
-                await candidate.WaitAsync(ct).ConfigureAwait(false);
-                originGate = candidate;
-                if (_hostAdmission is not null) externalSlot = await _hostAdmission(uri.IdnHost, ct).ConfigureAwait(false);
                 using var request = new HttpRequestMessage(HttpMethod.Get, uri)
                 {
                     Version = HttpVersion.Version11, VersionPolicy = HttpVersionPolicy.RequestVersionExact
@@ -170,8 +152,6 @@ internal sealed partial class AdaptiveHttpTransport : IDisposable
                         throw new PlaybackException(PlaybackError.HttpRedirectFailed);
                     (uri, credentials) = Resolve(uri, credentials, location.OriginalString);
                     response.Dispose(); response = null;
-                    originGate.Release(); originGate = null;
-                    externalSlot?.Dispose(); externalSlot = null;
                     continue;
                 }
                 if (representation.Opened && status == 412 || range && status == 200)
@@ -226,16 +206,15 @@ internal sealed partial class AdaptiveHttpTransport : IDisposable
                 representation.Uri = resource.Uri = uri; representation.Credentials = resource.Credentials = credentials;
                 var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
                 var owned = new Response(response, stream, length, resource.Count ?? total, start,
-                    _options.ReadTimeout, _lifetime, token, externalSlot, _global, representation.Gate, originGate);
-                response = null; global = held = false; originGate = null;
-                externalSlot = null;
+                    _options.ReadTimeout, _lifetime, token, representation.Gate);
+                response = null; held = false;
                 return owned;
             }
         }
         catch (Exception error) when (_validateAddress is not null &&
             error is not (PlaybackException or OperationCanceledException or HttpRequestException or IOException))
         {
-            // Trusted download-owner authority/admission failures retain their fixed classifier.
+            // Trusted download-owner authority failures retain their fixed classifier.
             // The ordinary playback transport has no injected policy and keeps its existing mapping.
             throw;
         }
@@ -248,10 +227,7 @@ internal sealed partial class AdaptiveHttpTransport : IDisposable
         finally
         {
             response?.Dispose();
-            originGate?.Release();
-            externalSlot?.Dispose();
             if (held) representation.Gate.Release();
-            if (global) _global.Release();
         }
     }
 
@@ -272,9 +248,7 @@ internal sealed partial class AdaptiveHttpTransport : IDisposable
 
     public void Dispose()
     {
-        _client?.Dispose(); _headers.Clear(); _global.Dispose();
-        foreach (var gate in _origins.Values) gate.Dispose();
-        _origins.Clear();
+        _client?.Dispose(); _headers.Clear();
         foreach (var resource in _representations.Values) resource.Gate.Dispose();
         _representations.Clear();
     }
@@ -286,8 +260,7 @@ internal sealed partial class AdaptiveHttpTransport : IDisposable
         private readonly CancellationTokenSource _lifetime;
         private readonly CancellationTokenRegistration _abort;
         private readonly TimeSpan _timeout;
-        private readonly SemaphoreSlim[] _gates;
-        private readonly IDisposable? _externalSlot;
+        private readonly SemaphoreSlim? _gate;
         private long _read;
         private int _disposed;
         internal long Length { get; }
@@ -295,12 +268,10 @@ internal sealed partial class AdaptiveHttpTransport : IDisposable
         internal long Start { get; }
         internal string? ETag => _response.Headers.ETag is { IsWeak: false } tag ? tag.ToString() : null;
         internal Response(HttpResponseMessage response, Stream stream, long length, long total, long start,
-            TimeSpan timeout, CancellationToken session, CancellationToken caller, IDisposable? externalSlot,
-            params SemaphoreSlim[] gates)
+            TimeSpan timeout, CancellationToken session, CancellationToken caller, SemaphoreSlim? gate = null)
         {
             _response = response; _stream = stream; Length = length; Total = total; Start = start;
-            _timeout = timeout; _gates = gates;
-            _externalSlot = externalSlot;
+            _timeout = timeout; _gate = gate;
             _lifetime = CancellationTokenSource.CreateLinkedTokenSource(session, caller);
             _abort = _lifetime.Token.Register(response.Dispose);
         }
@@ -324,8 +295,7 @@ internal sealed partial class AdaptiveHttpTransport : IDisposable
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
             _response.Dispose(); _abort.Dispose(); _lifetime.Dispose();
-            foreach (var gate in _gates) gate.Release();
-            _externalSlot?.Dispose();
+            _gate?.Release();
         }
     }
 }

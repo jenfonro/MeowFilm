@@ -59,8 +59,13 @@ internal sealed partial class MusicPlatformClientContextOwner : IAsyncDisposable
         (MusicQqClientContext)await AcquireAsync("tx", token).ConfigureAwait(false);
     internal bool IsCurrent(MusicPlatformClientContext snapshot)
     {
-        lock (gate) return !closed && !stopping && !uncertain && reload is not { IsCompleted: false } && current is not null &&
-            ReferenceEquals(Select(current, snapshot.Platform), snapshot);
+        lock (gate)
+        {
+            if (closed || stopping || uncertain || reload is { IsCompleted: false } || current is null) return false;
+            var active = Select(current, snapshot.Platform);
+            return ReferenceEquals(active, snapshot) || active is MusicWyClientContext wy && snapshot is MusicWyClientContext before &&
+                ReferenceEquals(wy.Observation, before.Observation) && wy.DeviceId == before.DeviceId;
+        }
     }
     private static MusicPlatformClientContext Select(MusicClientContextDocument document, string platform) =>
         platform switch { "wy" => document.Wy, "kg" => document.Kg, _ => document.Qq };
@@ -150,7 +155,6 @@ internal sealed partial class MusicPlatformClientContextOwner : IAsyncDisposable
         lock (gate)
         {
             RequireReady();
-            MusicClientContextDocument.Require(work.Count < 8, "RATE_LIMITED");
             task = ExecuteAsync(lifetime.Token); Track(task);
         }
         return task;
@@ -214,7 +218,8 @@ internal sealed partial class MusicPlatformClientContextOwner : IAsyncDisposable
                 var previous = current;
                 changed = new[] { "wy", "kg", "tx" }.Where(p =>
                     previous is null || !ReferenceEquals(Select(previous, p), Select(next, p))).ToArray();
-                current = new(previous is not null && ReferenceEquals(previous.Wy, next.Wy) ? previous.Wy : validated.Wy,
+                current = new(previous is not null && ReferenceEquals(previous.Wy, next.Wy) ? previous.Wy :
+                    validated.Wy with { Observation = next.Wy.Observation },
                     previous is not null && ReferenceEquals(previous.Kg, next.Kg) ? previous.Kg : validated.Kg,
                     previous is not null && ReferenceEquals(previous.Qq, next.Qq) ? previous.Qq : validated.Qq);
                 fingerprint = actual; uncertain = false;
@@ -270,7 +275,7 @@ internal sealed partial class MusicPlatformClientContextOwner : IAsyncDisposable
             MusicClientContextDocument.Require(!closed, "CLOSED");
             if (!stopping) return;
             if (current is { } value)
-                current = new(value.Wy with { }, value.Kg with { }, value.Qq with { });
+                current = new(value.Wy with { Observation = new() }, value.Kg with { }, value.Qq with { });
             lifetime.Dispose(); lifetime = new();
             preparation = null; stopping = false;
         }

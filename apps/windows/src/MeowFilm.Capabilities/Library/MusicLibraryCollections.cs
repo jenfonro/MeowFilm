@@ -7,42 +7,32 @@ public sealed partial class MusicLibraryOwner
     private static JsonObject[] Songs(JsonObject p, bool empty, bool full = false)
     {
         var a = p["songs"] is null && empty ? new JsonArray() : LJ.Array(p["songs"]);
-        LJ.Require(a.Count <= (full ? 10000 : 1000) && (empty || a.Count > 0), "LIMIT");
+        LJ.Require((full || a.Count <= 1000) && (empty || a.Count > 0), "LIMIT");
         return a.Select(NativeMusicSong.Normalize).ToArray();
     }
-    private static string[] AddSongs(JsonObject library, IEnumerable<JsonObject> input)
+    internal static NativeMusicSongGroups IndexLibrarySongs(JsonObject library, CancellationToken token = default)
     {
-        var store = LJ.Object(library["songs"]); var ids = new List<string>();
+        var groups = new NativeMusicSongGroups(token);
+        foreach (var pair in LJ.Object(library["songs"])) groups.Import(LJ.Object(pair.Value));
+        return groups;
+    }
+    private static string[] AddSongs(JsonObject library, IEnumerable<JsonObject> input, NativeMusicSongGroups? groups = null)
+    {
+        var store = LJ.Object(library["songs"]); var ids = new HashSet<string>(StringComparer.Ordinal);
+        var ordered = new List<string>();
         foreach (var raw in input)
         {
-            var song = NativeMusicSong.Normalize(raw); string native = NativeMusicSong.SourceKey(song);
-            var existing = store.Select(p => p.Value).OfType<JsonObject>().FirstOrDefault(other => native.Length > 0 &&
-                (NativeMusicSong.SourceKey(other) == native || (other["sources"] as JsonArray ?? []).OfType<JsonObject>().Any(s => LJ.S(s["sourceKey"]) == native)));
-            bool Compatible(JsonObject known) => NativeMusicSong.Compatible(known, song) &&
-                (known["sources"] as JsonArray ?? []).OfType<JsonObject>().All(s => NativeMusicSong.Compatible(s, song));
-            LJ.Require(existing is null || Compatible(existing), "NATIVE_ID_CONFLICT");
-            if (existing is not null) song["songId"] = existing["songId"]!.DeepClone();
-            string id = LJ.S(song["songId"]); var previous = store[id] as JsonObject;
-            if (previous is not null && native.Length > 0 && !Compatible(previous))
-            {
-                string fingerprint = NativeMusicSong.Fingerprint(song);
-                id = "song:" + NativeMusicSong.Hash(fingerprint.Length > 0 ? fingerprint : native) + ":" +
-                    NativeMusicSong.Hash(LJ.Stringify(new JsonArray(native, NativeMusicSong.Descriptor(song))));
-                song["songId"] = id; previous = store[id] as JsonObject;
-            }
-            LJ.Require(previous is null || Compatible(previous) || native.Length == 0 && LJ.S(previous["songId"]) == id, "SONG_ID_CONFLICT");
-            if (previous is not null)
-            {
-                var combined = new Dictionary<string, JsonObject>();
-                foreach (var s in (previous["sources"] as JsonArray ?? []).Concat(song["sources"] as JsonArray ?? []).OfType<JsonObject>()) combined[LJ.S(s["sourceKey"])] = s;
-                LJ.Require(combined.Values.All(a => combined.Values.All(b => NativeMusicSong.Compatible(a, b))), "RECORDING_CONFLICT");
-                if (LJ.N(previous["revision"]) > LJ.N(song["revision"])) song = (JsonObject)previous.DeepClone();
-                else song["sources"] = LJ.Arr(combined.Values);
-            }
-            song = NativeMusicSong.Normalize(song);
-            store[id] = song; if (!ids.Contains(id)) ids.Add(id);
+            var incoming = new NativeMusicSong.Recordings(NativeMusicSong.Normalize(raw));
+            groups ??= IndexLibrarySongs(library);
+            var owners = incoming.Sources.Select(source => groups.NativeOwner(LJ.S(source["sourceKey"])))
+                .OfType<NativeMusicSong.Recordings>().Distinct().ToArray();
+            // A native recording has exactly one library owner; do not silently rebind collections.
+            LJ.Require(owners.Length <= 1 && owners.All(owner => owner.CanMerge(incoming)), "NATIVE_ID_CONFLICT");
+            var group = groups.Add(incoming, preferIncoming: true);
+            store[group.Id] = group.ToSong();
+            if (ids.Add(group.Id)) ordered.Add(group.Id);
         }
-        return ids.ToArray();
+        return ordered.ToArray();
     }
     private (JsonObject Result, bool Mutate) CollectionCommand(string method, JsonObject p, JsonObject doc, bool full)
     {
@@ -52,7 +42,7 @@ public sealed partial class MusicLibraryOwner
             var c = FindCollection(library, LJ.Text(p["id"]));
             LJ.Require(Revision(c) == LJ.I(p["ifRevision"]), "REVISION_CONFLICT"); return c;
         }
-        JsonObject DetailSong(string id) => LJ.Merge(NativeMusicSong.View(LJ.Object(library["songs"])[id]), LJ.Obj(("memberLibraryIds", new JsonArray(id))));
+        JsonObject DetailSong(string id) => NativeMusicSong.Normalize(LJ.Object(library["songs"])[id]);
         if (method == "music.library.list")
         {
             LJ.Fields(p, "offset limit");
@@ -67,17 +57,10 @@ public sealed partial class MusicLibraryOwner
         {
             LJ.Fields(p, "id song", "id song");
             var c = FindCollection(library, LJ.Text(p["id"]));
-            var song = NativeMusicSong.Normalize(p["song"]);
-            string id = LJ.S(song["songId"]), key = NativeMusicSong.SourceKey(song);
-            var store = LJ.Object(library["songs"]);
-            var member = Order(c).FirstOrDefault(memberId =>
-            {
-                var known = LJ.Object(store[memberId]);
-                return memberId == id && (key.Length == 0 || NativeMusicSong.Compatible(known, song)) ||
-                    key.Length > 0 && NativeMusicSong.Compatible(known, song) &&
-                    (NativeMusicSong.SourceKey(known) == key ||
-                    (known["sources"] as JsonArray ?? []).OfType<JsonObject>().Any(s => LJ.S(s["sourceKey"]) == key));
-            });
+            var song = new NativeMusicSong.Recordings(NativeMusicSong.Normalize(p["song"]));
+            var store = LJ.Object(library["songs"]); var groups = new NativeMusicSongGroups();
+            foreach (string id in Order(c)) groups.Import(LJ.Object(store[id]));
+            string? member = groups.Find(song)?.Id;
             return (LJ.Obj(("present", member is not null), ("songId", member), ("revision", Revision(c))), false);
         }
         if (method == "music.library.search")
@@ -85,7 +68,7 @@ public sealed partial class MusicLibraryOwner
             LJ.Fields(p, "query offset limit", "query"); string query = LJ.Text(p["query"], 200).ToLowerInvariant();
             var matches = collections.OfType<JsonObject>().Where(c => !LJ.B(c["deleted"])).SelectMany(Order).Distinct()
                 .Select(id => LJ.Object(library["songs"])[id]).OfType<JsonObject>()
-                .Where(s => new[] { "title", "artist", "album" }.Any(f => LJ.S(s[f]).Contains(query, StringComparison.OrdinalIgnoreCase))).Select(NativeMusicSong.View);
+                .Where(s => new[] { "title", "artist", "album" }.Any(f => LJ.S(s[f]).Contains(query, StringComparison.OrdinalIgnoreCase))).Select(NativeMusicSong.Normalize);
             return (LJ.Merge(LJ.Page(matches, p), LJ.Obj(("revision", library["revision"]))), false);
         }
         LJ.Require(pending is null, "PENDING_WRITE");

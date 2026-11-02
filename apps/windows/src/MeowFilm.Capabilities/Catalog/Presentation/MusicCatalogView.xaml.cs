@@ -135,13 +135,13 @@ public partial class MusicCatalogView : UserControl
     private async void LoadMoreNearEnd()
     {
         if (loadingMore || !IsVisible || Owner is not { } owner ||
-            (!owner.IsCatalogLanding || !owner.CanCatalogNext) && !owner.CanLoadMoreAggregatePlaylists ||
+            (!owner.IsCatalogLanding || !owner.CanCatalogNext) && !owner.CanLoadMoreSearchPlaylists ||
             CatalogScroll.ScrollableHeight - CatalogScroll.VerticalOffset > 280) return;
         loadingMore = true;
         scrollIntent.Clear();
         try
         {
-            if (owner.CanLoadMoreAggregatePlaylists) await owner.MoreAggregateSearchAsync();
+            if (owner.CanLoadMoreSearchPlaylists) await owner.MoreSearchAsync();
             else await owner.CatalogPageAsync(1);
         }
         catch { /* The owner publishes bounded business errors; never retry in a scroll loop. */ }
@@ -164,11 +164,11 @@ public partial class MusicCatalogView : UserControl
     }
     private MusicCapability? Owner => DataContext as MusicCapability;
     private async void SearchBack_Click(object sender, RoutedEventArgs e)
-    { if (Owner is { } owner) await owner.ReturnToAggregateSearchAsync(); }
+    { if (Owner is { } owner) await owner.ReturnToSearchAsync(); }
     private async void SearchSectionMore_Click(object sender, RoutedEventArgs e)
     {
         if (Owner is { } owner && sender is Button { Tag: string title })
-            await owner.OpenAggregateSearchTabAsync(title == "歌单" ? "playlists" : "songs");
+            await owner.OpenSearchTabAsync(title == "歌单" ? "playlists" : "songs");
     }
     private void Cancel_Click(object sender, RoutedEventArgs e) => Owner?.CancelCatalog();
     private async void PlayAll_Click(object sender, RoutedEventArgs e)
@@ -194,7 +194,7 @@ public partial class MusicCatalogView : UserControl
     }
     private async void Kind_Changed(object sender, SelectionChangedEventArgs e)
     {
-        if (IsLoaded && Owner is { IsAggregateSearch: false } owner)
+        if (IsLoaded && Owner is { IsSearchPage: false } owner)
             try { await owner.CatalogSearchKindAsync(); } catch { }
     }
     private async void Page_Click(object sender, RoutedEventArgs e)

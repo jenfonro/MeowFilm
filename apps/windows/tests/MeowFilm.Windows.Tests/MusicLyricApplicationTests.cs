@@ -24,7 +24,7 @@ public static class MusicLyricApplicationTests
         yield return Case("QQ uses exact songmid never numeric music id or media id", async f =>
         {
             var song = Song("tx", "004exact");
-            SetNative(song, "qqSongId", "987"); SetNative(song, "mediaMid", "wrong");
+            SetNative(song, "qqSongId", "987"); SetNative(song, "strMediaMid", "wrong");
             Ready(await f.Lookup(song)); Equal("004exact", f.Provider.Requests.Single().RecordingId);
         });
         yield return Case("Kugou hash remains the exact uppercase recording with seconds and album identity", async f =>
@@ -40,16 +40,7 @@ public static class MusicLyricApplicationTests
             var result = await f.Owner.ExecuteAsync(new { song = Song(), sourceKey = "[\"wy\",\"different\"]" });
             Code(result, "TARGET_CHANGED"); Equal(0, f.Provider.Requests.Count); Equal(0, f.ScriptCalls);
         });
-        yield return Case("quarantined edition cannot reappear as the canonical source", async f =>
-        {
-            Ready(await f.Lookup(Song()));
-            var song = Song();
-            var quarantined = Song("wy", "43")["sources"]![0]!.DeepClone();
-            song["quarantinedSources"] = new JsonArray(quarantined);
-            var key = quarantined!["sourceKey"]!.GetValue<string>();
-            Code(await f.Owner.ExecuteAsync(new { song, sourceKey = key }), "TARGET_CHANGED");
-            Equal(1, f.Provider.Requests.Count);
-        });
+
         yield return Case("metadata request does not inherit the chosen audio delivery platform", async f =>
         {
             var result = await f.Owner.ExecuteAsync(new { song = Song(),
@@ -95,7 +86,7 @@ public static class MusicLyricApplicationTests
         {
             var song = Song();
             var qq = await f.Library.ExecuteAsync("music.online.song", new { platform = "tx",
-                musicInfo = Song("tx", "004exact")["source_data"], title = "Fixture song",
+                musicInfo = MusicSongFixture.Info(Song("tx", "004exact")), title = "Fixture song",
                 artist = "Fixture artist", album = "Fixture album", duration = 120 });
             True(qq.GetProperty("ok").GetBoolean());
             // The public contract admits exact normalized source rows, not
@@ -245,10 +236,10 @@ public static class MusicLyricApplicationTests
             release.TrySetResult(); await close; Code(await read, "CANCELLED");
             Code(await f.Lookup(Song()), "CLOSED");
         });
-        yield return Case("cancelled but physically running requests retain the sixteen-work admission budget", async f =>
+        yield return Case("cancelled physical work stays tracked without refusing current lyrics", async f =>
         {
             var release = f.ReleaseGate();
-            var arrived = Enumerable.Range(0, 16).Select(_ => Signal()).ToArray();
+            var arrived = Enumerable.Range(0, 24).Select(_ => Signal()).ToArray();
             int calls = -1;
             f.Provider.Handler = async (request, _) => {
                 arrived[Interlocked.Increment(ref calls)].TrySetResult();
@@ -256,7 +247,7 @@ public static class MusicLyricApplicationTests
             };
             var cancellations = new List<CancellationTokenSource>();
             var work = new List<Task<JsonElement>>();
-            for (int i = 0; i < 16; i++)
+            for (int i = 0; i < 24; i++)
             {
                 var cancel = new CancellationTokenSource();
                 cancellations.Add(cancel);
@@ -265,8 +256,7 @@ public static class MusicLyricApplicationTests
                 await arrived[i].Task;
                 cancel.Cancel();
             }
-            Code(await f.Lookup(Song(id: "99")), "LIMIT");
-            Equal(16, f.Provider.Requests.Count);
+            Equal(24, f.Provider.Requests.Count);
             release.TrySetResult();
             foreach (var pending in work) Code(await pending, "CANCELLED");
             foreach (var cancellation in cancellations) cancellation.Dispose();
@@ -286,8 +276,7 @@ public static class MusicLyricApplicationTests
     }
     private static void SetNative(JsonObject song, string name, string value)
     {
-        song["source_data"]![name] = value;
-        song["sources"]![0]!["source_data"]![name] = value;
+        MusicSongFixture.Info(song)[name] = value;
     }
     private static void True(bool condition) { if (!condition) throw new InvalidOperationException("Lyric assertion failed"); }
     private static void Equal<T>(T expected, T actual)

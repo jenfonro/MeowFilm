@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Threading;
 using MeowFilm.Core.Runtime;
 using MeowFilm.AppHost;
@@ -141,6 +142,34 @@ public static class MusicAccountIntegrationTests
             Check(!f.Module.HasAccountQr);
             await Dispatcher.Yield(DispatcherPriority.DataBind);
             Check(qr.Source is null);
+        });
+        yield return Case("switching SMS and QR modes suspends and resumes only visible QR polling", async () =>
+        {
+            await using var f = await Fixture.Create();
+            f.Module.SelectedAccount = f.Module.Accounts[0];
+            var view = new MusicAccountsView { DataContext = f.Module };
+            var window = new Window { Content = view, Width = 620, Height = 1000,
+                Left = -32000, Top = -32000, ShowInTaskbar = false, ShowActivated = false, WindowStyle = WindowStyle.None };
+            try
+            {
+                window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded);
+                ((Popup)view.FindName("LoginPopup")).IsOpen = true;
+                await f.Module.BeginAccountQrAsync();
+                int before = f.Transport.Requests;
+                ((Button)view.FindName("SmsModeButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                await Task.Delay(2300);
+                Check(f.Transport.Requests == before && f.Module.HasAccountQr,
+                    $"SMS mode: requests {before}->{f.Transport.Requests}, QR {f.Module.HasAccountQr}, popup {((Popup)view.FindName("LoginPopup")).IsOpen}, platform {f.Module.SelectedAccount?.Platform}");
+                ((Button)view.FindName("QrModeButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                while (f.Transport.Requests == before || f.Module.AccountBusy) await Task.Delay(20, deadline.Token);
+                ((Button)view.FindName("SmsModeButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                int polled = f.Transport.Requests;
+                await Task.Delay(2300);
+                Check(polled > before && f.Transport.Requests == polled && !f.Module.SelectedAccount!.HasSession,
+                    $"After QR resume: requests {before}->{polled}->{f.Transport.Requests}, state {f.Module.SelectedAccount?.State}, QR {f.Module.HasAccountQr}");
+            }
+            finally { window.Close(); }
         });
         yield return Case("native import cancellation before validation cannot persist late credentials", async () =>
         {
@@ -306,8 +335,8 @@ public static class MusicAccountIntegrationTests
         catch (Exception error) when (error.Message == "COMMIT_UNKNOWN") { }
     }
     private static TestCase Case(string name, Func<Task> body) => new("music-account-chain: " + name, () => Sta(body));
-    private static void Check(bool condition)
-    { if (!condition) throw new InvalidOperationException("Account integration assertion"); }
+    private static void Check(bool condition, string message = "Account integration assertion")
+    { if (!condition) throw new InvalidOperationException(message); }
     private static async Task WaitForEditable(MusicCapability module)
     {
         // Admit the posted resume refresh before observing actual idle state.

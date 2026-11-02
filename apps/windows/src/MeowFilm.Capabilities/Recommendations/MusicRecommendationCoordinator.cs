@@ -213,7 +213,6 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
             }
             else
             {
-                Require(work.Count < 64, "BUSY");
                 bool switchFm = old is { Active: true, Batch: > 0 } && old.Config.Kind == "fm" && config.Kind == "fm";
                 next = new(config, switchFm ? old!.Id : null) { QueueEpoch = queue.Epoch };
                 if (old is { Active: true })

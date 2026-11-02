@@ -121,7 +121,7 @@ public sealed partial class MusicCapability
         if (stopping || submission != searchSubmission || pageGeneration != loadGeneration || navigation != navigationSubmission) return;
         await RecordSearchHistory(query, online, cancellationToken);
         if (stopping || submission != searchSubmission || pageGeneration != loadGeneration) return;
-        if (online) { await BeginAggregateSearchAsync(query, cancellationToken); return; }
+        if (online) { await BeginSearchAsync(query, cancellationToken); return; }
         var target = new Location("search", query);
         await LoadAsync(locations.GetValueOrDefault(target.Key) ?? target, cancellationToken, publishStatus: false);
     }

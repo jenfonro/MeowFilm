@@ -124,11 +124,11 @@ public sealed partial class MusicCapability
     private Dictionary<string, object> CaptureFeedbackContext()
     {
         var result = new Dictionary<string, object>(StringComparer.Ordinal);
-        if (IsAggregateSearch && aggregateKeyword.Length > 0)
+        if (IsSearchPage && searchKeyword.Length > 0)
         {
             // A fused result is not a WY playlist or a single-platform search.
             // The controller resolves the exact selected recording separately.
-            result["sourceType"] = "search"; result["searchKeyword"] = aggregateKeyword;
+            result["sourceType"] = "search"; result["searchKeyword"] = searchKeyword;
             return result;
         }
         if (!IsCatalogPage || catalogLoadedPlatform is not ("wy" or "tx" or "kg")) return result;

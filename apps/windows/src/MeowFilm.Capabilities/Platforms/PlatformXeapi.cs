@@ -76,7 +76,7 @@ internal static class PlatformXeapi
         catch (CryptographicException) { throw new MusicPlatformException("INVALID_RESPONSE"); }
         try
         {
-            var state = PJ.Parse(plain, 16384);
+            var state = PJ.Parse(plain);
             var version = PJ.Scalar(state["version"]); var sk = PJ.S(state, "sk");
             PJ.Require(version.Length is > 0 and <= 128 && sk.Length is > 0 and <= 4096 &&
                 !version.Contains('|') && !sk.Contains('|') && !version.Any(char.IsControl) && !sk.Any(char.IsControl), "INVALID_RESPONSE");
@@ -181,10 +181,10 @@ internal static class PlatformXeapi
                     output.Write(buffer, 0, read);
                 }
                 var decoded = output.ToArray();
-                try { return PJ.Parse(decoded, maximum); }
+                try { return PJ.Parse(decoded); }
                 finally { CryptographicOperations.ZeroMemory(decoded); }
             }
-            return PJ.Parse(plain, maximum);
+            return PJ.Parse(plain);
         }
         catch (InvalidDataException) { throw new MusicPlatformException("INVALID_RESPONSE"); }
         finally { CryptographicOperations.ZeroMemory(plain); }

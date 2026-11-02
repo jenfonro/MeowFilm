@@ -99,8 +99,7 @@ internal static class FeedbackProtocolRules
     {
         Require(value is not null && value.Recording is not null);
         Require(value!.Recording.Platform == account.Platform, "IDENTITY_MISMATCH");
-        Require(value.InstanceId is { Length: >= 8 and <= 128 } &&
-            value.InstanceId.All(c => char.IsAsciiLetterOrDigit(c) || c is ':' or '_' or '-'));
+        Require(value.Attempt is not null);
         var recording = value.Recording;
         Require(recording.Platform switch
         {
@@ -146,7 +145,7 @@ internal static class FeedbackProtocolRules
     }
     internal static string Fingerprint(MusicPlatformSession account, MusicFeedbackStart start)
     {
-        // Only a digest survives retirement; no credentials or outbound report are persisted.
+        // Attempt-local equality check; no process-wide history or outbound queue.
         byte[] bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
         {
             account.Platform, account.Scope, account.Generation, account.UserId, account.Cookie, Start = start

@@ -91,10 +91,9 @@ public sealed partial class MusicCapability
             foreach (var source in sources.EnumerateArray())
             {
                 string platform = MusicDto.Text(source, "source"), key = MusicDto.Text(source, "sourceKey");
-                var data = source.GetProperty("source_data");
-                var id = platform == "tx" && data.TryGetProperty("songmid", out var mid) ? mid.ToString() :
-                    platform == "kg" && data.TryGetProperty("hash", out var hash) ? hash.ToString() :
-                    data.TryGetProperty("musicId", out var musicId) ? musicId.ToString() : key;
+                var data = source.GetProperty("musicInfo");
+                var id = platform == "kg" && data.TryGetProperty("hash", out var hash) ? hash.ToString() :
+                    SongJson.InfoId(data) is { Length: > 0 } native ? native : key;
                 LyricSources.Add(new(key, platform + " · " + id));
             }
         if (previousChoice is not null)

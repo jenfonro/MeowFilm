@@ -375,7 +375,7 @@ public static class MusicCatalogTests
                 entry.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseLeaveEvent });
                 CardMotion.Transition(surface, false, false);
                 value.SetValue("  云歌单  "); Invoke(searchButton);
-                await Until(() => f.Client.Count("music.search.start") == 2 && f.Module.IsAggregateSearch,
+                await Until(() => f.Client.Count("music.search.start") == 2 && f.Module.IsSearchPage,
                     "headless search did not settle");
                 await WaitForSearch(f.Module); Layout();
                 Equal("云歌单", f.Client.Last("music.search.start").GetProperty("keyword").GetString());
@@ -688,8 +688,7 @@ public static class MusicCatalogTests
                     f.Playback.Opens.Count == 1, "VIP song banner did not use shared playback");
                 var queue = await f.Rpc("music.queue.get", new { limit = 1 });
                 Equal(1, queue.GetProperty("total").GetInt32());
-                Equal("1001", queue.GetProperty("current").GetProperty("song")
-                    .GetProperty("source_data").GetProperty("musicId").GetString());
+                Equal("1001", MusicSongFixture.NativeId(queue.GetProperty("current").GetProperty("song")));
             }
             finally { window.Close(); }
         });
@@ -1114,7 +1113,7 @@ public static class MusicCatalogTests
             Equal(3, (await f.Module.ReadCatalogCardPreviewAsync(current, default)).Count);
             Equal(2, f.Client.Count("music.catalog.playlist"));
         });
-        yield return Case("aggregate playlist search cards stay static and never request entry previews", async () =>
+        yield return Case("playlist search cards stay static and never request entry previews", async () =>
         {
             await using var f = await Fixture.Create();
             await f.Configure(new { searchPlaylistTotal = 61 });
@@ -1122,18 +1121,18 @@ public static class MusicCatalogTests
             await f.SearchPolicy("wy", playlists: true);
             await f.Module.SearchAsync("云歌单", default);
             await WaitForSearch(f.Module);
-            await f.Module.OpenAggregateSearchTabAsync("playlists");
-            True(f.Module.CanAggregateMore, "fixture search must expose another page");
+            await f.Module.OpenSearchTabAsync("playlists");
+            True(f.Module.CanSearchMore, "fixture search must expose another page");
             var card = f.Module.CatalogSections.Single().Items.First();
             Equal(MusicCatalogEntryPresentation.Static, card.Presentation);
-            True(!card.CanRequestPreview, "aggregate search is not an entry preview surface");
+            True(!card.CanRequestPreview, "music search is not an entry preview surface");
             var calls = f.Client.Count("music.catalog.playlist");
             Equal(0, (await f.Module.ReadCatalogCardPreviewAsync(card, default)).Count);
             Equal(calls, f.Client.Count("music.catalog.playlist"));
-            await f.Module.MoreAggregateSearchAsync();
+            await f.Module.MoreSearchAsync();
             await WaitForSearch(f.Module);
             var current = f.Module.CatalogSections.Single().Items.First();
-            True(!ReferenceEquals(card, current), "aggregate snapshot did not replace visible card identity");
+            True(!ReferenceEquals(card, current), "search snapshot did not replace visible card identity");
             Equal(MusicCatalogEntryPresentation.Static, current.Presentation);
             Equal(0, (await f.Module.ReadCatalogCardPreviewAsync(current, default)).Count);
             Equal(calls, f.Client.Count("music.catalog.playlist"));
@@ -1364,7 +1363,7 @@ public static class MusicCatalogTests
             await f.Module.NavigateAsync("catalog-home", default);
             var cards = f.Module.CatalogSections.SelectMany(s => s.Items).ToArray();
             var song = cards.Single(c => c.Song is not null);
-            Equal("1001", song.Song!.Raw.GetProperty("source_data").GetProperty("musicId").GetString());
+            Equal("1001", MusicSongFixture.NativeId(song.Song!.Raw));
             True(song.Id != song.ActionId && song.ActionId == "1001", "domain identity not upstream locator");
             var daily = cards.Single(c => c.Kind == "daily");
             True(!daily.CanOpen && daily.ErrorText.Length > 0, "unavailable business error, not fake clickable");
@@ -1508,8 +1507,8 @@ public static class MusicCatalogTests
             Equal(2, p.GetProperty("page").GetInt32()); Equal(100, p.GetProperty("limit").GetInt32());
             Equal(64, p.GetProperty("snapshot").GetString()!.Length);
             Equal(200, f.Module.Songs.Count);
-            Equal("1001", f.Module.Songs[0].Raw.GetProperty("source_data").GetProperty("musicId").GetString());
-            Equal("1101", f.Module.Songs[100].Raw.GetProperty("source_data").GetProperty("musicId").GetString());
+            Equal("1001", MusicSongFixture.NativeId(f.Module.Songs[0].Raw));
+            Equal("1101", MusicSongFixture.NativeId(f.Module.Songs[100].Raw));
             var calls = f.Client.Count("music.catalog.playlist");
             await f.Module.NavigateAsync("catalog-home", default);
             await f.Module.NavigateAsync("catalog-playlist/wy/500", default);
@@ -1566,15 +1565,20 @@ public static class MusicCatalogTests
             True(before.SequenceEqual(f.Module.CatalogSections), "stalled page cannot replace old content");
             Equal("分页未前进", f.Module.Status);
         });
-        yield return Case("page 100 with more is rejected; page 101 never sent", async () =>
+        yield return Case("home paging follows continuation through page 101 and stops at the native end", async () =>
         {
             await using var f = await Fixture.Create();
             await f.Configure(new { homePages = 101 });
             await f.Module.NavigateAsync("catalog-home", default);
             for (int i = 0; i < 99; i++) await f.Module.CatalogPageAsync(1);
-            Equal("第 99 页", f.Module.CatalogPageText);
-            Equal("内容超过数量限制", f.Module.Status);
+            Equal("第 100 页", f.Module.CatalogPageText);
+            True(f.Module.CanCatalogNext, "page 100 keeps its native continuation");
             Equal(100, f.Client.Count("music.catalog.home"));
+            await f.Module.CatalogPageAsync(1);
+            Equal("第 101 页", f.Module.CatalogPageText);
+            True(!f.Module.CanCatalogNext, "native final page stops paging");
+            await f.Module.CatalogPageAsync(1);
+            Equal(101, f.Client.Count("music.catalog.home"));
         });
         yield return Case("cancelled and retired responses cannot republish private display or cache", async () =>
         {
@@ -1614,11 +1618,10 @@ public static class MusicCatalogTests
             await f.SearchPolicy("wy", playlists: true);
             await f.Module.SearchAsync("云歌单", default);
             await WaitForSearch(f.Module);
-            await f.Module.OpenAggregateSearchTabAsync("playlists");
+            await f.Module.OpenSearchTabAsync("playlists");
             var card = f.Module.CatalogSections.Single().Items.Single();
             True(card.CanOpen && card.Kind == "playlist" && card.ActionId == "500", "search playlist DTO is not an unknown resource");
             Equal("playlists", f.Client.Last("music.search.start").GetProperty("kind").GetString());
-            True(f.Module.SearchProgress.All(p => p.Page is >= 0 and <= 100), "bounded aggregate provider page");
         });
         yield return Case("platform playlist uses the one playlist detail surface", async () =>
         {
@@ -1714,7 +1717,7 @@ public static class MusicCatalogTests
                 await WaitForSearch(f.Module);
                 var card = f.Module.CatalogSections.SelectMany(section => section.Items).Single(item => item.Song is not null);
                 True(card.CanOpen && card.Song is not null, "real provider normalized song is actionable");
-                Equal(platform, card.Song!.Raw.GetProperty("source_data").GetProperty("source").GetString());
+                Equal(platform, MusicSongFixture.Info(card.Song!.Raw).GetProperty("source").GetString());
                 var id = platform == "kg" ? "global-test" : "500";
                 await f.Module.NavigateAsync("catalog-playlist/" + platform + "/" + id, default);
                 await f.Module.SaveCatalogPlaylistAsync();
@@ -1765,7 +1768,7 @@ public static class MusicCatalogTests
             await f.Module.OpenCatalogCardAsync(card);
             var q = await f.Rpc("music.queue.get", new { limit = 1 });
             Equal(205, q.GetProperty("total").GetInt32());
-            Equal("1205", q.GetProperty("current").GetProperty("song").GetProperty("source_data").GetProperty("musicId").GetString());
+            Equal("1205", MusicSongFixture.NativeId(q.GetProperty("current").GetProperty("song")));
             Equal(1, f.Playback.Opens.Count);
             Equal("https://media.invalid/1205", f.Playback.Opens.Single().AbsoluteUri);
             Equal(0, f.Client.Count("music.history.recordPlayed"));
@@ -1992,10 +1995,10 @@ public static class MusicCatalogTests
     {
         for (int i = 0; i < 500; i++)
         {
-            if (module.CatalogSections.SelectMany(s => s.Items).Any() && module.SearchProgress.All(p => !p.Loading)) return;
+            if (module.CatalogSections.SelectMany(s => s.Items).Any() && module.CatalogSections.All(s => !s.IsLoading)) return;
             await Task.Delay(10); await Drain();
         }
-        throw new InvalidOperationException("Native aggregate search did not settle");
+        throw new InvalidOperationException("Native music search did not settle");
     }
     private static IEnumerable<T> Descendants<T>(DependencyObject parent) where T : DependencyObject
     {
@@ -2159,6 +2162,7 @@ public static class MusicCatalogTests
             var data = Environment.GetEnvironmentVariable("MEOWFILM_TEST_DATA_ROOT") ?? throw new InvalidOperationException("Isolated test data required");
             var dir = Path.Combine(data, "catalog-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(dir);
             var store = new DpapiDocumentStore(dir, AppIdentity.NativeNamespaces);
+            await MusicClientContextFixture.SeedQqAsync(store);
             var f = new Fixture(store, vipAccount);
             try
             {
@@ -2180,7 +2184,6 @@ public static class MusicCatalogTests
                 await Module.SetSearchPlatformEnabledAsync("songs", row, !playlists && row.Platform == platform);
             foreach (var row in Module.PlaylistSearch.Platforms.ToArray())
                 await Module.SetSearchPlatformEnabledAsync("playlists", row, playlists && row.Platform == platform);
-            await Module.SetSearchModeAsync(playlists ? "playlists" : "songs", "aggregate");
         }
         public Task Configure(object state)
         {
@@ -2191,7 +2194,7 @@ public static class MusicCatalogTests
         public async Task SetupSource()
         {
             const string source = """
-                lx.on(lx.EVENT_NAMES.request, async ({info}) => 'https://media.invalid/' + info.musicInfo.musicId);
+                lx.on(lx.EVENT_NAMES.request, async ({info}) => 'https://media.invalid/' + info.musicInfo.songmid);
                 lx.send(lx.EVENT_NAMES.inited,{status:true,sources:{wy:{name:'合成',type:'music',actions:['musicUrl'],qualitys:['320k']}}});
                 """;
             var bytes = System.Text.Encoding.UTF8.GetBytes(source);

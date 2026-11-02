@@ -38,7 +38,6 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
         internal string Key { get; } = key;
         internal long Generation { get; } = generation;
         internal long Started { get; } = started;
-        internal int Polls;
         internal bool Consumed;
         internal MusicKgClientContext? Device;
         public override string ToString() => "MusicAccountQR (transient)";
@@ -59,15 +58,12 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
         internal MusicPlatformClientContext? Client;
         internal MusicWyClientContext WyClient => (MusicWyClientContext)Client!;
         internal MusicKgClientContext KgClient => (MusicKgClientContext)Client!;
-        private int requests;
-        private readonly int requestLimit;
-        internal Context(MusicAccountProtocol owner, string platform, long generation, CancellationToken external, int requestLimit,
+        internal Context(MusicAccountProtocol owner, string platform, long generation, CancellationToken external,
             bool detailsRead = false)
         {
             this.owner = owner; Platform = platform; Generation = generation; this.external = external;
-            this.requestLimit = requestLimit;
             this.detailsRead = detailsRead;
-            duration = detailsRead && owner.timeout > TimeSpan.FromSeconds(25) ? TimeSpan.FromSeconds(25) : owner.timeout;
+            duration = owner.timeout;
             started = owner.clock.GetTimestamp();
             timeoutCancellation = new(duration);
             cancellation = CancellationTokenSource.CreateLinkedTokenSource(external, timeoutCancellation.Token);
@@ -113,7 +109,6 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
             try
             {
                 Guard();
-                AccountRules.Require(++requests <= requestLimit, "LIMIT");
                 int bytes = Encoding.UTF8.GetByteCount(request.RequestUri!.AbsoluteUri) +
                     request.Headers.Sum(h => Encoding.UTF8.GetByteCount(h.Key) + h.Value.Sum(Encoding.UTF8.GetByteCount));
                 AccountRules.Require(bytes + (request.Content?.Headers.ContentLength ?? 0) <= 65536, "LIMIT");
@@ -122,7 +117,7 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
             var left = duration - owner.clock.GetElapsedTime(started);
             try
             {
-                var result = await send(TimeSpan.FromMilliseconds(Math.Clamp(left.TotalMilliseconds, 1, 60000))).ConfigureAwait(false);
+                var result = await send(TimeSpan.FromMilliseconds(Math.Max(left.TotalMilliseconds, 1))).ConfigureAwait(false);
                 Guard();
                 return result;
             }
@@ -162,7 +157,7 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
         this.transport = transport ?? throw new ArgumentNullException(nameof(transport));
         this.clients = clients ?? throw new ArgumentNullException(nameof(clients));
         this.leaveOpen = leaveOpen; this.timeout = timeout ?? TimeSpan.FromSeconds(25);
-        AccountRules.Require(this.timeout.TotalMilliseconds is >= 1 and <= 60000);
+        AccountRules.Require(this.timeout > TimeSpan.Zero);
         this.clock = clock ?? TimeProvider.System;
         ClientProtocol = clientProtocol ?? new(transport, this.clock);
     }
@@ -184,20 +179,21 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
         AccountRules.Platform(platform);
         lock (gate) { AccountRules.Require(!closed, "CLOSED"); Fence(states[platform], "CANCELLED"); }
     }
-    private async Task<T> Run<T>(string platform, CancellationToken token, Func<Context, Task<T>> action, bool replace = true, int requestLimit = 3,
+    private async Task<T> Run<T>(string platform, CancellationToken token, Func<Context, Task<T>> action, bool replace = true,
         bool detailsRead = false)
     {
         token.ThrowIfCancellationRequested();
         Context ctx;
+        var settled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (gate)
         {
             AccountRules.Require(!closed, "CLOSED");
-            AccountRules.Require(pending.Count < 8, "RATE_LIMITED");
             var state = states[platform];
             if (replace) Fence(state, "SUPERSEDED");
             else AccountRules.Require(state.Active is null, "BUSY");
-            ctx = new(this, platform, state.Generation, token, requestLimit, detailsRead);
+            ctx = new(this, platform, state.Generation, token, detailsRead);
             state.Active = ctx;
+            Track(settled.Task);
         }
         async Task<T> Physical()
         {
@@ -212,7 +208,6 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
             finally { lock (gate) if (ReferenceEquals(states[platform].Active, ctx)) states[platform].Active = null; }
         }
         var task = Physical();
-        Track(task);
         try
         {
             var result = detailsRead ? await task.ConfigureAwait(false) : await task.WaitAsync(ctx.Token).ConfigureAwait(false);
@@ -230,8 +225,14 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
         finally
         {
             // A trusted callback that ignores cancellation retains its resources until settled.
-            if (task.IsCompleted) ctx.Dispose();
-            else _ = task.ContinueWith(_ => ctx.Dispose(), CancellationToken.None,
+            void Release()
+            {
+                _ = task.Exception;
+                ctx.Dispose();
+                settled.TrySetResult();
+            }
+            if (task.IsCompleted) Release();
+            else _ = task.ContinueWith(_ => Release(), CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         }
     }
@@ -344,6 +345,16 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
             tasks = pending.ToArray();
         }
         if (!leaveOpen) transport.Dispose();
-        try { await Task.WhenAll(tasks).ConfigureAwait(false); } catch { /* Individual calls already have finite diagnostics. */ }
+        while (tasks.Length > 0)
+        {
+            try { await Task.WhenAll(tasks).ConfigureAwait(false); } catch { /* Results belong to the individual callers. */ }
+            lock (gate) tasks = pending.Where(task => !task.IsCompleted).ToArray();
+        }
+        lock (gate)
+        {
+            smsExpiry?.Dispose(); smsExpiry = null;
+            smsLimits.Clear();
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(smsLedgerKey);
+        }
     }
 }

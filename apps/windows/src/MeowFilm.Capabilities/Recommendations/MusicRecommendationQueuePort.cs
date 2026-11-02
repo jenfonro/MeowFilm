@@ -70,7 +70,7 @@ public sealed class MusicRecommendationQueuePort
             long actualVersion = Number(value, "version");
             string actualCurrent = value.GetProperty("currentId").ValueKind == JsonValueKind.Null ? "" : Text(value, "currentId");
             int actualTotal = checked((int)Number(value, "total"));
-            Require(actualTotal <= 10000 && (version is null || version == actualVersion && current == actualCurrent && total == actualTotal), "STALE_QUEUE");
+            Require(version is null || version == actualVersion && current == actualCurrent && total == actualTotal, "STALE_QUEUE");
             version = actualVersion; current = actualCurrent; total = actualTotal; mode = checked((int)Number(value, "mode"));
             var rows = value.GetProperty("entries");
             Require(rows.ValueKind == JsonValueKind.Array && rows.GetArrayLength() == Math.Min(100, total - offset), "INVALID_RESPONSE");

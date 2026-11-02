@@ -27,16 +27,16 @@ public static class MusicNativeWySmsTests
         { int c = code; yield return Case("fixed-error-" + c, () => BusinessError(c)); }
         yield return Case("send-cooldown-cancel-platform-and-clock-boundary", Cooldown);
         yield return Case("ledger-expiry-cannot-shorten-latest-send-cooldown", CooldownExpiry);
-        yield return Case("global-20-per-ten-minutes-and-reset", GlobalRate);
-        yield return Case("eight-login-attempts-then-ten-minute-reset", AttemptRate);
-        yield return Case("128-phone-hash-ledger-bounded-and-expiry", Ledger);
+        yield return Case("independent-numbers-do-not-share-a-send-quota", GlobalRate);
+        yield return Case("login-attempts-use-upstream-results-without-local-count-quota", AttemptRate);
+        yield return Case("completed-logins-do-not-accumulate-a-phone-ledger", Ledger);
         yield return Case("cancel-send-keeps-reservation-no-automatic-resend", () => Cancel("send"));
         yield return Case("cancel-login-no-late-session", () => Cancel("login"));
         yield return Case("cancel-identity-no-late-session", () => Cancel("status"));
         yield return Case("new-operation-rejects-old-result-and-handoff", Supersede);
         yield return Case("deadline-send-is-unconfirmed-not-recalled", Deadline);
         yield return Case("one-deadline-covers-login-and-identity", LoginDeadline);
-        yield return Case("physical-http-slots-not-released-by-cancelled-call", Budget);
+        yield return Case("held-physical-http-does-not-block-another-send", Budget);
         yield return Case("lost-durable-receipt-explicit-read-no-replay", Unknown);
         yield return Case("store-CAS-conflict-is-not-unknown-or-success", Conflict);
         yield return Case("other-owner-logout-fences-old-login-CAS", OtherOwner);
@@ -153,10 +153,8 @@ public static class MusicNativeWySmsTests
     private static async Task GlobalRate()
     {
         await using var f = new WySmsFixture();
-        for (int i = 0; i < 20; i++) Check(Ok(await Send(f.Owner, (10000000000L + i).ToString())));
-        var blocked = await Send(f.Owner, "10000000099");
-        Check(Code(blocked) == "RATE_LIMITED" && blocked.GetProperty("retryAfter").GetInt32() == 600 && f.Transport.Calls == 20);
-        f.Clock.Advance(600); Check(Ok(await Send(f.Owner)) && f.Transport.Calls == 21);
+        for (int i = 0; i < 40; i++) Check(Ok(await Send(f.Owner, (10000000000L + i).ToString())));
+        Check(Ok(await Send(f.Owner, "10000000099")) && f.Transport.Calls == 41);
     }
     private static async Task CooldownExpiry()
     {
@@ -170,9 +168,9 @@ public static class MusicNativeWySmsTests
     private static async Task AttemptRate()
     {
         await using var f = new WySmsFixture(); f.Transport.BusinessCode = 502;
-        for (int i = 0; i < 8; i++) Check(Code(await Login(f.Owner)) == "INVALID_CODE");
-        Check(Code(await Login(f.Owner)) == "RATE_LIMITED" && f.Transport.Calls == 8);
-        f.Clock.Advance(600); f.Transport.BusinessCode = 200; Check(Ok(await Login(f.Owner)));
+        for (int i = 0; i < 16; i++) Check(Code(await Login(f.Owner)) == "INVALID_CODE");
+        Check(f.Transport.Calls == 16);
+        f.Transport.BusinessCode = 200; Check(Ok(await Login(f.Owner)));
     }
     private static async Task Ledger()
     {
@@ -180,8 +178,8 @@ public static class MusicNativeWySmsTests
         for (int i = 0; i < 128; i++)
             Check(Code(await f.Owner.CallAsync("music.accounts.sms.login", new { platform = "wy",
                 phone = (10000000000L + i).ToString(), captcha = WySmsHandler.Captcha })) == "INVALID_CODE");
-        Check(Code(await Send(f.Owner, "10000000999")) == "RATE_LIMITED" && f.Transport.Calls == 128);
-        f.Clock.Advance(600); f.Transport.BusinessCode = 200; Check(Ok(await Send(f.Owner)));
+        Check(f.Transport.Calls == 128);
+        f.Transport.BusinessCode = 200; Check(Ok(await Send(f.Owner, "10000000999")) && f.Transport.Calls == 129);
     }
     private static async Task Cancel(string step)
     {
@@ -234,9 +232,9 @@ public static class MusicNativeWySmsTests
         f.Transport.HoldEverySend = true;
         var one = Send(f.Owner, "10000000001"); await f.Transport.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(4));
         var two = Send(f.Owner, "10000000002"); await Until(() => f.Transport.Calls == 2);
-        Check(Code(await Send(f.Owner, "10000000003")) == "RATE_LIMITED" && f.Transport.Calls == 2);
+        var three = Send(f.Owner, "10000000003"); await Until(() => f.Transport.Calls == 3);
         f.Transport.Release.TrySetResult();
-        Check(!Ok(await one) && !Ok(await two) && f.Store.Writes == 0);
+        Check(!Ok(await one) && !Ok(await two)); _ = await three; Check(f.Store.Writes == 0);
     }
     private static async Task Unknown()
     {

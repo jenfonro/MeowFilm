@@ -273,7 +273,7 @@ internal static class PublicCatalogData
                 {
                     White();
                     string name = at < text.Length && text[at] == '"' ? String() : Word();
-                    PJ.Require(!obj.ContainsKey(name) && obj.Count < 10000, "INVALID_RESPONSE");
+                    PJ.Require(!obj.ContainsKey(name), "INVALID_RESPONSE");
                     Need(':'); obj[name] = Value(depth + 1);
                     if (Take('}')) return obj;
                 } while (Take(','));
@@ -285,7 +285,7 @@ internal static class PublicCatalogData
                 if (Take(']')) return array;
                 do
                 {
-                    PJ.Require(array.Count < 10000, "LIMIT"); array.Add(Value(depth + 1));
+                    array.Add(Value(depth + 1));
                     if (Take(']')) return array;
                 } while (Take(','));
                 throw new MusicPlatformException("INVALID_RESPONSE");

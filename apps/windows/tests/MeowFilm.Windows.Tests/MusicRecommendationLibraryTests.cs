@@ -1,6 +1,7 @@
 using System.IO;
 using System.Text.Json;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Capabilities.Recommendations;
 using MeowFilm.Platform.Storage;
 using static MeowFilm.Windows.Tests.RecommendationTest;
 
@@ -16,6 +17,8 @@ public static class MusicRecommendationLibraryTests
         yield return new("Recommendation owner full paged queue restore preserves all occurrences", () => Restore(120));
         yield return new("Recommendation owner enter preserves current seed and one envelope CAS", Seed);
         yield return new("Recommendation owner nonce receipt replay does not write again", Replay);
+        yield return new("Recommendation owner unrelated reads preserve a reconciled receipt", UnacceptedReceipt);
+        yield return new("Recommendation owner receipt is replaced by the next capture", ReceiptLifetime);
         yield return new("Recommendation owner optimistic conflict never captures checkpoint", VersionConflict);
         yield return new("Recommendation owner failed before enter explicit reconcile not applied", () => UnknownEnter(false));
         yield return new("Recommendation owner lost enter ACK explicitly restores real runtime", () => UnknownEnter(true));
@@ -25,7 +28,7 @@ public static class MusicRecommendationLibraryTests
         yield return new("Recommendation owner checkpoint private to owner cannot cold revive", OwnerScope);
         yield return new("Recommendation owner cancelled before admission no writes or captures", CancelBefore);
         yield return new("Recommendation owner cancellation after admission awaits physical CAS", CancelAfter);
-        yield return new("Recommendation owner pending close blocked checkpoint budget bounded", CloseBudget);
+        yield return new("Recommendation owner pending close blocked and independent checkpoints retained", CloseBudget);
         yield return new("Recommendation owner DPAPI cold queue retained live checkpoint absent", Dpapi);
     }
     private static string Nonce() => Guid.NewGuid().ToString("D");
@@ -95,6 +98,43 @@ public static class MusicRecommendationLibraryTests
         await Error(owner, "enter", new { nonce = Nonce(), expectedVersion = version, songs = new[] { Song("2") } }, "REVISION_CONFLICT");
         Check(store.Writes == writes);
         await Error(owner, "capture", new { nonce = "wrong", expectedVersion = version }, "INVALID_NONCE");
+    }
+    private static async Task UnacceptedReceipt()
+    {
+        var store = new Store(); await using var owner = new MusicLibraryOwner(store);
+        var port = new MusicRecommendationQueuePort(owner);
+        string nonce = Nonce(); store.Failure = 2;
+        await Error(owner, "enter", new { nonce, expectedVersion = 0, songs = new[] { Song("1") } }, "COMMIT_UNKNOWN");
+        JsonElement receipt = default;
+        try
+        {
+            await port.InLaneAsync<bool>(async (library, _) =>
+            {
+                receipt = await Command(library, "reconcile", new { nonce });
+                throw new IOException("Synthetic consumer readback failure");
+            }, CancellationToken.None);
+            throw new InvalidOperationException("Expected readback failure");
+        }
+        catch (IOException) { }
+        await port.ExecuteAsync("music.queue.get");
+        Check((await Command(owner, "reconcile", new { nonce })).GetRawText() == receipt.GetRawText());
+        Check(store.Writes == 1);
+    }
+    private static async Task ReceiptLifetime()
+    {
+        var store = new Store(); await using var owner = new MusicLibraryOwner(store);
+        long version = N(await Queue(owner), "version");
+        string first = Nonce();
+        var previous = await Command(owner, "capture", new { nonce = first, expectedVersion = version });
+        string next = Nonce();
+        var latest = await Command(owner, "capture", new { nonce = next, expectedVersion = version });
+        Check((await Command(owner, "capture", new { nonce = next, expectedVersion = version })).GetRawText() == latest.GetRawText());
+        var replaced = await Command(owner, "capture", new { nonce = first, expectedVersion = version });
+        Check(replaced.GetRawText() != previous.GetRawText());
+        await Command(owner, "discard", new { checkpoint = S(previous, "checkpoint") });
+        await Command(owner, "discard", new { checkpoint = S(latest, "checkpoint") });
+        await Command(owner, "discard", new { checkpoint = S(replaced, "checkpoint") });
+        Check(store.Writes == 0);
     }
     private static async Task UnknownEnter(bool applied)
     {
@@ -168,8 +208,7 @@ public static class MusicRecommendationLibraryTests
     {
         var store = new Store(); await using var owner = new MusicLibraryOwner(store);
         long version = N(await Queue(owner), "version");
-        for (int i = 0; i < 4; i++) await Command(owner, "capture", new { nonce = Nonce(), expectedVersion = version });
-        await Error(owner, "capture", new { nonce = Nonce(), expectedVersion = version }, "LIMIT");
+        for (int i = 0; i < 8; i++) await Command(owner, "capture", new { nonce = Nonce(), expectedVersion = version });
         await owner.PrepareShutdownAsync(); await owner.CancelShutdownPreparationAsync();
         await Command(owner, "capture", new { nonce = Nonce(), expectedVersion = version });
         store.Failure = 1; string nonce = Nonce();

@@ -45,9 +45,7 @@ public sealed partial class MusicCapability
             {
                 var platform = MusicDto.Text(source, "source");
                 var key = MusicDto.Text(source, "sourceKey");
-                var data = source.GetProperty("source_data");
-                var native = data.TryGetProperty("musicId", out var nativeId) ? nativeId.ToString() :
-                    data.TryGetProperty("songmid", out var mid) ? mid.ToString() : key;
+                var native = SongJson.InfoId(source.GetProperty("musicInfo")) is { Length: > 0 } id ? id : key;
                 var row = new MusicRecordingRow(subject.Id, key, platform, platform + " · " + native);
                 RecordingCandidates.Add(row);
                 if (recordingPlatforms.GetValueOrDefault(subject.Id) == platform &&

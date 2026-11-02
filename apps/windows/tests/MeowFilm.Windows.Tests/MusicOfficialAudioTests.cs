@@ -52,7 +52,7 @@ public static class MusicOfficialAudioTests
                 new { platform = "tx", cookie = "musicid=123; musickey=synthetic; encrypt_uin=FixtureEUIN" })).GetProperty("ok").GetBoolean());
             var oneSecondSong = JsonSerializer.SerializeToNode(Song("tx", "FixtureMID"))!.AsObject();
             oneSecondSong["duration"] = 1; // Match the actual one-second WAV fixture and protocol duration.
-            oneSecondSong["sources"]![0]!["duration"] = 1;
+            oneSecondSong["sources"]![0]!["musicInfo"]!["duration"] = 1;
             var song = JsonSerializer.SerializeToElement(oneSecondSong);
             var response = await app.ExecuteAsync("music.official.resolve", new { platform = "tx", song, quality = "320k" });
             Check(response.GetProperty("ok").GetBoolean());

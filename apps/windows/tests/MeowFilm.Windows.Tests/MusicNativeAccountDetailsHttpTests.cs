@@ -19,7 +19,7 @@ public static partial class MusicNativeAccountDetailsTests
         { var f = fault; yield return Case("HTTP-denies-" + f, () => HttpDenied(f)); }
         yield return Case("HTTP-header-request-response-byte-budgets", HttpBudgets);
         yield return Case("HTTP-redirect-non2xx-ssa-invalid-json-finite", HttpResponses);
-        yield return Case("HTTP-cancelled-body-producer-retains-shared-slot", HttpProducer);
+        yield return Case("HTTP-cancelled-body-producer-drains-without-blocking-requests", HttpProducer);
         foreach (string mutation in new[] { "uri", "header", "content" })
         { var m = mutation; yield return Case("HTTP-awaiting-producer-cannot-mutate-" + m, () => HttpMutation(m)); }
         yield return Case("HTTP-deadline-includes-handler-and-physical-settle", HttpDeadline);
@@ -75,7 +75,7 @@ public static partial class MusicNativeAccountDetailsTests
         foreach (string platform in new[] { "wy", "tx", "kg", "kw", "mg" })
             Check(!MusicPlatformHttp.IsAllowedOrigin(platform, new("https://kugouvip.kugou.com/v1/get_union_vip")));
         await Error(() => http.SendAsync("kg", Request("kg"), default), "ORIGIN_DENIED");
-        await Error(() => http.SendCatalogAsync("kg", Request("kg"), default), "ORIGIN_DENIED");
+        await Error(() => http.SendAsync("kg", Request("kg"), default), "ORIGIN_DENIED");
         await Error(() => http.SendPublicCatalogReadAsync("kg", Request("kg"), default, 1024, TimeSpan.FromSeconds(1)), "ORIGIN_DENIED");
         Check(handler.Calls == 0);
     }
@@ -193,15 +193,14 @@ public static partial class MusicNativeAccountDetailsTests
         try
         {
             await Until(() => entered == 2); cancellation.Cancel(); await Pending(first); await Pending(second);
-            await Error(() => http.SendAccountDetailsAsync("tx", Request("tx"), default, TimeSpan.FromSeconds(1)), "RATE_LIMITED");
-            // Same physical counter is shared with ordinary content, not a separate account pool.
-            await Error(() => http.SendAsync("tx", Request("tx"), default), "RATE_LIMITED");
+            // The transport has no request budget: draining producers block neither account nor ordinary requests.
+            await http.SendAccountDetailsAsync("tx", Request("tx"), default, TimeSpan.FromSeconds(1));
+            await http.SendAsync("tx", Request("tx"), default);
+            Check(handler.Calls == 2);
         }
         finally { release.TrySetResult(); }
         await Error(() => first, "CANCELLED"); await Error(() => second, "CANCELLED");
-        Check(handler.Calls == 0);
-        await http.SendAccountDetailsAsync("tx", Request("tx"), default, TimeSpan.FromSeconds(1));
-        Check(handler.Calls == 1);
+        Check(handler.Calls == 2);
     }
     private static async Task HttpMutation(string mutation)
     {

@@ -7,68 +7,97 @@ namespace MeowFilm.Capabilities.Search;
 
 /// <summary>
 /// Borrowed native catalog; one keyword, at most one songs and one playlists session.
+/// A session advances in rounds: the submitted search is round 1, every "next" is one more round.
+/// Each round asks every eligible platform for the configured number of pages, limited per
+/// platform by the configured concurrency. Round 1 is fused and published as results arrive;
+/// later rounds are fused once every platform of the round has settled and are appended.
+/// Parsed platform pages are cached in memory for the configured time.
 /// No timers except per-request deadlines, no storage, implicit provider fallback or script calls.
 /// </summary>
 public sealed partial class MusicSearchCoordinator : IAsyncDisposable
 {
     public static TimeSpan RequestTimeout => TimeSpan.FromSeconds(25);
+    private const long CacheBudgetBytes = 32L * 1024 * 1024;
     private static readonly string[] Platforms = ["wy", "tx", "kw", "kg", "mg"];
     private readonly IMusicPlatformCatalog catalog;
     private readonly Func<MusicSearchRequest, CancellationToken, Task<JsonElement>> searchAsync;
     private readonly TimeProvider clock;
     private readonly object gate = new();
-    // Keep aggregate search within the shared HTTP transport's global physical-request budget.
-    private readonly SemaphoreSlim slots = new(4, 4);
     private readonly Dictionary<MusicSearchKind, Query> queries = [];
     private readonly Dictionary<MusicSearchKind, Notice> notices = [];
+    private readonly Dictionary<CacheKey, CacheEntry> cache = [];
     private readonly AsyncLocal<ObserverFrame?> observerFrame = new();
+    private long cacheBytes, cacheUse;
     private Replacement? replacement;
     private Task publisher = Task.CompletedTask;
     private Task? preparation, resumption, disposal;
     private bool publishing, stopping, closed;
     private string keyword = "";
 
-    private sealed class PlatformState(string platform)
+    private sealed record CacheKey(MusicSearchKind Kind, string Platform, string Keyword, int Page, int Pages, int Limit);
+    private sealed class CacheEntry(MusicSearchPage page, DateTimeOffset expires, long bytes)
+    {
+        internal readonly MusicSearchPage Page = page;
+        internal readonly DateTimeOffset Expires = expires;
+        internal readonly long Bytes = bytes;
+        internal long Used;
+    }
+    internal sealed record SearchOptions(int Pages, int Concurrency, TimeSpan CacheTime, bool Refresh);
+
+    private sealed class PlatformState(string platform, int concurrency)
     {
         internal readonly string Platform = platform;
-        internal readonly List<SearchCandidate> Items = [];
+        internal readonly MusicSearchPaging Paging = MusicSearchPaging.For(platform);
+        internal readonly List<SearchCandidate> Items = [], RoundItems = [];
         internal readonly HashSet<string> Seen = new(StringComparer.Ordinal);
-        internal int Page, NextPage = 1, Stalled, Generation;
+        // Per kind x platform concurrency: this query is the only owner of the kind.
+        internal readonly SemaphoreSlim Slots = new(concurrency, concurrency);
+        internal int Page, NextPage = 1, Generation;
         internal bool More = true, Loading;
         internal string Error = "";
-        internal string TotalUnit = "items";
-        internal long? Total;
-        internal int? GroupCount, RawItemCount;
         internal CancellationTokenSource? Cancellation;
         internal Task Flight = Task.CompletedTask;
     }
 
-    private sealed class Query(string keyword, MusicSearchKind kind, string[] platforms)
+    private enum FusionPlan { None, Full, Merge }
+
+    private sealed class Query(string keyword, MusicSearchKind kind, string[] platforms, SearchOptions options)
     {
         internal readonly string Id = Guid.NewGuid().ToString("N"), Keyword = keyword;
         internal readonly MusicSearchKind Kind = kind;
-        internal readonly PlatformState[] States = platforms.Select(p => new PlatformState(p)).ToArray();
-        internal readonly int Budget = Math.Min(2000, 5000 / Math.Max(1, platforms.Length));
+        internal readonly string[] Order = platforms;
+        internal readonly SearchOptions Options = options;
+        internal readonly PlatformState[] States = platforms.Select(p => new PlatformState(p, options.Concurrency)).ToArray();
         internal readonly CancellationTokenSource Lifetime = new();
         internal JsonArray Items = [];
         internal long Revision, DataVersion;
-        internal bool Stopped, Computing, FusionRunning, Released, SettlementNoticePending;
+        internal int Round;
+        internal bool RoundOpen, Stopped, Computing, FusionRunning, Released, SettlementNoticePending;
+        internal bool InitialIdentityCurrent = true;
+        internal FusionPlan Plan;
         internal Task<JsonElement>? CancellationDrain;
         internal string FusionError = "";
         internal Task Fusion = Task.CompletedTask;
+        internal bool Matches(string word, MusicSearchKind requestedKind, string[] requestedPlatforms, SearchOptions requested) =>
+            Keyword == word && Kind == requestedKind && Order.SequenceEqual(requestedPlatforms) &&
+            Options with { Refresh = false } == requested with { Refresh = false };
     }
     private sealed record Notice(Query Query, long Revision, JsonElement Value);
     private sealed class ObserverFrame { internal int Active = 1; }
-    private sealed class Replacement(string keyword, MusicSearchKind kind, string[] platforms)
+    private sealed class Replacement(string keyword, MusicSearchKind kind, string[] platforms, SearchOptions options)
     {
         internal string Keyword { get; } = keyword;
         internal MusicSearchKind Kind { get; } = kind;
         internal string[] Platforms { get; } = platforms;
+        internal SearchOptions Options { get; } = options;
         internal Task<JsonElement> Work { get; set; } = Task.FromResult(Failed("SEARCH_BUSY"));
-        internal bool Matches(string word, MusicSearchKind requestedKind, string[] requestedPlatforms) =>
-            Keyword == word && Kind == requestedKind &&
-            Platforms.ToHashSet(StringComparer.Ordinal).SetEquals(requestedPlatforms);
+        internal bool Matches(string word, MusicSearchKind requestedKind, string[] requestedPlatforms, SearchOptions requested) =>
+            Keyword == word && Kind == requestedKind && Platforms.SequenceEqual(requestedPlatforms) && Options == requested;
     }
+    private sealed record Chunk(int Page, int Pages);
+    private sealed record ChunkResult(MusicSearchPage? Page, string Error, long Bytes, bool Cached);
+    /// <summary>A chunk's outcome is published at once; Settled ends with its physical request and slot.</summary>
+    private sealed record ChunkFetch(int Index, ChunkResult Result, Task Settled);
 
     public MusicSearchCoordinator(IMusicPlatformCatalog catalog, TimeProvider? timeProvider = null,
         Func<MusicSearchRequest, CancellationToken, Task<JsonElement>>? searchAsync = null)
@@ -84,67 +113,23 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var input = LJ.Parameters(parameters, 4096);
             if (method == "music.search.start")
-            {
-                LJ.Fields(input, "keyword kind platforms", "keyword kind platforms");
-                string word = LJ.S(input["keyword"]).Trim();
-                LJ.Require(LJ.Id(word, 200));
-                string kindName = LJ.Text(input["kind"], 16);
-                LJ.Require(kindName is "songs" or "playlists");
-                var kind = kindName == "songs" ? MusicSearchKind.Songs : MusicSearchKind.Playlists;
-                var selected = LJ.Array(input["platforms"]);
-                LJ.Require(selected.Count <= 5);
-                var platforms = selected.Select(p => LJ.Text(p, 2)).Distinct(StringComparer.Ordinal).ToArray();
-                LJ.Require(platforms.All(Platforms.Contains));
-                Task<JsonElement> start;
-                lock (gate)
-                {
-                    Guard();
-                    if (replacement is { } pending)
-                    {
-                        if (!pending.Matches(word, kind, platforms)) return Failed("SEARCH_BUSY");
-                        start = pending.Work;
-                    }
-                    else
-                    {
-                        if (word == keyword && queries.TryGetValue(kind, out var existing) && !existing.Stopped &&
-                            existing.States.Select(s => s.Platform).ToHashSet(StringComparer.Ordinal).SetEquals(platforms))
-                            return Snapshot(existing);
-                        var retired = queries.Values.Where(q => word != keyword || q.Kind == kind).ToArray();
-                        if (retired.Length == 0) return BeginLocked(word, kind, platforms);
-                        foreach (var old in retired) StopLocked(old);
-                        var admitted = new Replacement(word, kind, platforms);
-                        replacement = admitted;
-                        start = admitted.Work = ReplaceAsync(admitted, retired, cancellationToken);
-                    }
-                }
-                return await start.WaitAsync(cancellationToken).ConfigureAwait(false);
-            }
-            LJ.Fields(input, method == "music.search.retry" ? "id platform" : "id",
-                method == "music.search.retry" ? "id platform" : "id");
+                return await ExecuteStartAsync(parameters, cancellationToken).ConfigureAwait(false);
+            var input = LJ.Parameters(parameters, 4096);
+            LJ.Fields(input, "id", "id");
             string id = LJ.Text(input["id"], 32);
-            Query query;
             Task<JsonElement>? cancellation = null;
             lock (gate)
             {
                 Guard();
-                query = queries.Values.FirstOrDefault(q => q.Id == id) ?? throw new MusicLibraryException("SEARCH_NOT_FOUND");
+                var query = queries.Values.FirstOrDefault(q => q.Id == id) ?? throw new MusicLibraryException("SEARCH_NOT_FOUND");
                 switch (method)
                 {
                     case "music.search.get": return Snapshot(query);
                     case "music.search.next":
-                        if (!query.Stopped)
-                            foreach (var state in query.States.Where(s => Eligible(query, s) && s.Error.Length == 0))
-                                BeginFetchLocked(query, state, false);
-                        PublishLocked(query); return Snapshot(query);
-                    case "music.search.retry":
-                        string platform = LJ.Text(input["platform"], 2);
-                        var target = query.States.FirstOrDefault(s => s.Platform == platform) ??
-                            throw new MusicLibraryException("INVALID_REQUEST");
-                        if (!query.Stopped && !target.Loading && target.Error.Length > 0 && Eligible(query, target))
-                            BeginFetchLocked(query, target, true);
-                        PublishLocked(query); return Snapshot(query);
+                        // A new round starts only after the previous round and its fusion have settled.
+                        if (!query.Stopped && !query.RoundOpen && !query.Computing) BeginRoundLocked(query);
+                        return Snapshot(query);
                     case "music.search.cancel":
                         StopLocked(query);
                         cancellation = query.CancellationDrain ??= Task.Run(() => CancelQueryAsync(query));
@@ -160,12 +145,69 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
         catch { return Failed("INVALID_REQUEST"); }
     }
 
-    private JsonElement BeginLocked(string word, MusicSearchKind kind, string[] platforms)
+    /// <summary>
+    /// Admits a start synchronously and returns the task that settles it. The
+    /// caller may release its policy lane before waiting for an old query drain.
+    /// </summary>
+    internal Task<JsonElement> ExecuteStartAsync(object? parameters, CancellationToken cancellationToken)
+    {
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var input = LJ.Parameters(parameters, 4096);
+            LJ.Fields(input, "keyword kind platforms pages concurrency cacheMinutes refresh",
+                "keyword kind platforms pages concurrency cacheMinutes");
+            string word = LJ.S(input["keyword"]).Trim();
+            LJ.Require(LJ.Id(word, 200));
+            string kindName = LJ.Text(input["kind"], 16);
+            LJ.Require(kindName is "songs" or "playlists");
+            var kind = kindName == "songs" ? MusicSearchKind.Songs : MusicSearchKind.Playlists;
+            var selected = LJ.Array(input["platforms"]);
+            LJ.Require(selected.Count <= 5);
+            var platforms = selected.Select(p => LJ.Text(p, 2)).ToArray();
+            LJ.Require(platforms.All(Platforms.Contains) && platforms.Distinct(StringComparer.Ordinal).Count() == platforms.Length);
+            var options = new SearchOptions(
+                MusicSearchSettings.Pages(input["pages"]),
+                MusicSearchSettings.Concurrency(input["concurrency"]),
+                TimeSpan.FromMinutes(MusicSearchSettings.CacheMinutes(input["cacheMinutes"])),
+                input["refresh"] is not null && LJ.B(input["refresh"]));
+            Task<JsonElement> start;
+            lock (gate)
+            {
+                Guard();
+                if (replacement is { } pending)
+                {
+                    if (!pending.Matches(word, kind, platforms, options)) return Task.FromResult(Failed("SEARCH_BUSY"));
+                    start = pending.Work;
+                }
+                else
+                {
+                    if (!options.Refresh && word == keyword && queries.TryGetValue(kind, out var existing) &&
+                        !existing.Stopped && existing.InitialIdentityCurrent && existing.Round == 1 &&
+                        (existing.RoundOpen || existing.Computing) &&
+                        existing.Matches(word, kind, platforms, options))
+                        return Task.FromResult(Snapshot(existing));
+                    var retired = queries.Values.Where(q => word != keyword || q.Kind == kind).ToArray();
+                    if (retired.Length == 0)
+                        return Task.FromResult(BeginLocked(word, kind, platforms, options));
+                    foreach (var old in retired) StopLocked(old);
+                    var admitted = new Replacement(word, kind, platforms, options);
+                    replacement = admitted;
+                    start = admitted.Work = ReplaceAsync(admitted, retired, cancellationToken);
+                }
+            }
+            return start.WaitAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) { return Task.FromResult(Failed("CANCELLED")); }
+        catch (MusicLibraryException error) { return Task.FromResult(Failed(error.Code)); }
+        catch { return Task.FromResult(Failed("INVALID_REQUEST")); }
+    }
+
+    private JsonElement BeginLocked(string word, MusicSearchKind kind, string[] platforms, SearchOptions options)
     {
         keyword = word;
-        var query = new Query(word, kind, platforms); queries[kind] = query;
-        foreach (var state in query.States) BeginFetchLocked(query, state, false);
-        PublishLocked(query);
+        var query = new Query(word, kind, platforms, options); queries[kind] = query;
+        BeginRoundLocked(query);
         return Snapshot(query);
     }
 
@@ -185,7 +227,7 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
                     if (queries.TryGetValue(old.Kind, out var current) && ReferenceEquals(old, current)) queries.Remove(old.Kind);
                     ReleaseLocked(old);
                 }
-                return BeginLocked(admitted.Keyword, admitted.Kind, admitted.Platforms);
+                return BeginLocked(admitted.Keyword, admitted.Kind, admitted.Platforms, admitted.Options);
             }
         }
         catch (OperationCanceledException) { return Failed("CANCELLED"); }
@@ -198,90 +240,186 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
         }
     }
 
-    private static bool Eligible(Query query, PlatformState state) => state.More && !state.Loading &&
-        state.NextPage <= 100 && state.Page < 100 && state.Stalled < 4 && state.Items.Count < query.Budget;
+    // A failed platform keeps its cursor and stays eligible: the next round retries the same pages.
+    private static bool Eligible(PlatformState state) => state.More && !state.Loading;
 
-    private void BeginFetchLocked(Query query, PlatformState state, bool refresh)
+    private void BeginRoundLocked(Query query)
     {
-        if (query.Stopped || !Eligible(query, state)) return;
-        state.Loading = true; state.Error = ""; state.Cancellation = new();
-        int generation = ++state.Generation, page = state.NextPage;
-        var cancellation = state.Cancellation;
-        state.Flight = Task.Run(() => FetchAsync(query, state, generation, page, refresh, cancellation));
+        var eligible = query.States.Where(Eligible).ToArray();
+        if (eligible.Length == 0) { PublishLocked(query); return; }
+        query.Round++; query.RoundOpen = true;
+        foreach (var state in query.States) state.RoundItems.Clear();
+        foreach (var state in eligible)
+        {
+            state.Error = ""; state.Loading = true; state.Cancellation = new();
+            int generation = ++state.Generation;
+            int start = state.NextPage, pages = query.Options.Pages;
+            var cancellation = state.Cancellation;
+            int round = query.Round;
+            state.Flight = Task.Run(() => FetchRoundAsync(query, state, generation, round, start, pages, cancellation));
+        }
+        PublishLocked(query);
     }
 
-    private async Task FetchAsync(Query query, PlatformState state, int generation, int page, bool refresh,
+    private static Chunk? ChunkAt(int index, int start, int pages, int per)
+    {
+        long offset = (long)index * per;
+        long page = start + offset;
+        if (offset >= pages || page > int.MaxValue) return null;
+        return new((int)page, (int)Math.Min(Math.Min(per, pages - offset), int.MaxValue - page + 1));
+    }
+
+    private async Task FetchRoundAsync(Query query, PlatformState state, int generation, int round, int start, int pages,
         CancellationTokenSource cancellation)
     {
-        using var deadline = new CancellationTokenSource(RequestTimeout, clock);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(query.Lifetime.Token, cancellation.Token, deadline.Token);
-        bool admitted = false;
-        Task<JsonElement>? physical = null;
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(query.Lifetime.Token, cancellation.Token);
+        int per = state.Paging.PagesPerRequest, concurrency = query.Options.Concurrency;
+        var chunks = new Dictionary<int, Chunk>();
+        var results = new Dictionary<int, ChunkResult>();
+        var pending = new List<Task<ChunkFetch>>();
+        var settled = new List<Task>();
+        int committed = 0, next = 0;
+        bool halted = false;
         try
         {
-            await slots.WaitAsync(linked.Token).ConfigureAwait(false); admitted = true;
-            if (!Supports(state.Platform, query.Kind)) throw new MusicLibraryException("UNSUPPORTED");
-            physical = searchAsync(new(state.Platform, query.Keyword, query.Kind, page, 30, refresh), linked.Token);
-            var response = await physical.WaitAsync(linked.Token).ConfigureAwait(false);
-            linked.Token.ThrowIfCancellationRequested();
-            var parsed = MusicSearchPage.Read(response, state.Platform, query.Kind, page);
-            lock (gate)
+            while (true)
             {
-                if (!Current(query, state, generation)) return;
-                if (parsed.TotalUnit == "groups" &&
-                    state.Items.Count + parsed.Items.Count(item => !state.Seen.Contains(item.Key)) > query.Budget)
+                while (!halted && next - committed < concurrency)
                 {
-                    // The source budget is still hard, but never silently crop an expanded group page.
-                    // Keep the last committed native cursor/statistics and report the explicit stop.
-                    state.More = false; state.Error = "SEARCH_LIMIT"; PublishLocked(query); return;
+                    if (ChunkAt(next, start, pages, per) is not { } chunk) break;
+                    chunks[next] = chunk;
+                    pending.Add(FetchChunkAsync(query, state, chunk, next++, linked.Token));
                 }
-                int added = 0;
-                foreach (var item in parsed.Items)
-                    if (state.Items.Count < query.Budget && state.Seen.Add(item.Key)) { state.Items.Add(item); added++; }
-                state.Page = page; state.NextPage = parsed.Next; state.More = parsed.More;
-                state.TotalUnit = parsed.TotalUnit; state.Total = parsed.Total;
-                state.GroupCount = parsed.GroupCount; state.RawItemCount = parsed.RawItemCount;
-                state.Stalled = added == 0 ? state.Stalled + 1 : 0;
-                if (state.More && (state.Page >= 100 || state.NextPage > 100 || state.Stalled >= 4 || state.Items.Count >= query.Budget))
-                { state.More = false; state.Error = "SEARCH_LIMIT"; }
-                if (added > 0 || query.Items.Count == 0) QueueFusionLocked(query);
-                PublishLocked(query);
-            }
-        }
-        catch (Exception error)
-        {
-            lock (gate)
-            {
-                if (Current(query, state, generation))
+                if (pending.Count == 0) break;
+                var done = await Task.WhenAny(pending).ConfigureAwait(false);
+                pending.Remove(done);
+                var fetch = await done.ConfigureAwait(false);
+                settled.Add(fetch.Settled);
+                results[fetch.Index] = fetch.Result;
+                lock (gate)
                 {
-                    state.Error = deadline.IsCancellationRequested ? "TIMEOUT" : ErrorCode(error);
-                    if (state.Error is "AUTH_REQUIRED" or "AUTH_EXPIRED" or "STALE_SESSION" or "FORBIDDEN")
+                    if (!Current(query, state, generation)) { halted = true; Cancel(linked); continue; }
+                    // Commit the contiguous prefix only. A failure, an end of results or a
+                    // cursor the platform moved elsewhere halts the round; the cursor stays for the next round.
+                    int before = committed;
+                    while (!halted && results.TryGetValue(committed, out var result))
                     {
-                        state.Items.Clear(); state.Seen.Clear(); state.Page = 0; state.NextPage = 1; state.Stalled = 0;
-                        ClearPageStatistics(state);
-                        query.Items = []; QueueFusionLocked(query);
+                        var chunk = chunks[committed];
+                        if (result.Page is null)
+                        {
+                            if (result.Error != "CANCELLED") state.Error = result.Error;
+                            if (result.Error == "UNSUPPORTED") state.More = false;
+                            halted = true; break;
+                        }
+                        if (chunk.Page != state.NextPage) { halted = true; break; }
+                        if (!result.Cached) Store(query, state.Platform, chunk, result);
+                        halted = !CommitLocked(query, state, chunk, result.Page);
+                        committed++;
+                        results.Remove(committed - 1);
+                        chunks.Remove(committed - 1);
                     }
+                    if (round == 1 && committed > before) QueueFusionLocked(query, FusionPlan.Full);
                     PublishLocked(query);
                 }
+                if (halted || committed == next && ChunkAt(next, start, pages, per) is null) Cancel(linked);
             }
         }
         finally
         {
-            // A provider that ignores cancellation keeps its slot and loading state
-            // until its physical operation has really settled.
-            if (physical is not null) { try { await physical.ConfigureAwait(false); } catch { } }
-            if (admitted) slots.Release();
+            // The platform stays loading, and its slots stay taken, until physical work has settled.
+            await Task.WhenAll(settled).ConfigureAwait(false);
             lock (gate)
             {
                 if (ReferenceEquals(state.Cancellation, cancellation))
                 {
                     state.Cancellation = null; state.Loading = false;
-                    if (Current(query)) PublishLocked(query);
+                    if (Current(query)) SettleRoundLocked(query, round);
                 }
             }
             cancellation.Dispose();
         }
     }
+
+    private async Task<ChunkFetch> FetchChunkAsync(Query query, PlatformState state, Chunk chunk, int index, CancellationToken token)
+    {
+        var key = new CacheKey(query.Kind, state.Platform, query.Keyword, chunk.Page, chunk.Pages, state.Paging.PageSize);
+        if (!query.Options.Refresh)
+            lock (gate)
+                if (cache.TryGetValue(key, out var entry))
+                {
+                    if (entry.Expires > clock.GetUtcNow())
+                    { entry.Used = ++cacheUse; return new(index, new(entry.Page, "", entry.Bytes, true), Task.CompletedTask); }
+                    EraseLocked(key);
+                }
+        bool admitted = false;
+        Task<JsonElement>? physical = null;
+        CancellationTokenSource? deadline = null, linked = null;
+        ChunkResult result;
+        try
+        {
+            await state.Slots.WaitAsync(token).ConfigureAwait(false); admitted = true;
+            // The request deadline starts when the request is admitted, not while it waits for a slot.
+            deadline = new CancellationTokenSource(RequestTimeout, clock);
+            linked = CancellationTokenSource.CreateLinkedTokenSource(token, deadline.Token);
+            if (!Supports(state.Platform, query.Kind)) throw new MusicLibraryException("UNSUPPORTED");
+            physical = searchAsync(new(state.Platform, query.Keyword, query.Kind, chunk.Page, state.Paging.PageSize,
+                query.Options.Refresh, chunk.Pages), linked.Token);
+            var response = await physical.WaitAsync(linked.Token).ConfigureAwait(false);
+            linked.Token.ThrowIfCancellationRequested();
+            var parsed = MusicSearchPage.Read(response, state.Platform, query.Kind, chunk.Page);
+            result = new(parsed, "", response.GetRawText().Length * 2L, false);
+        }
+        catch (Exception error)
+        {
+            result = new(null, token.IsCancellationRequested ? "CANCELLED" :
+                deadline?.IsCancellationRequested == true ? "TIMEOUT" : ErrorCode(error), 0, false);
+        }
+        return new(index, result, SettleAsync(state, physical, admitted, linked, deadline));
+    }
+
+    // A provider that ignores cancellation keeps its slot until its physical operation has settled.
+    private static async Task SettleAsync(PlatformState state, Task<JsonElement>? physical, bool admitted,
+        CancellationTokenSource? linked, CancellationTokenSource? deadline)
+    {
+        try { if (physical is not null) { try { await physical.ConfigureAwait(false); } catch { } } }
+        finally
+        {
+            if (admitted) state.Slots.Release();
+            linked?.Dispose(); deadline?.Dispose();
+        }
+    }
+    /// <summary>Returns false when this platform cannot continue in the current round.</summary>
+    private static bool CommitLocked(Query query, PlatformState state, Chunk chunk, MusicSearchPage parsed)
+    {
+        int added = 0;
+        foreach (var item in parsed.Items)
+            if (state.Seen.Add(item.Key))
+            { state.Items.Add(item); state.RoundItems.Add(item); added++; }
+        state.Page = chunk.Page + chunk.Pages - 1; state.NextPage = parsed.Next; state.More = parsed.More;
+        if (added > 0) query.DataVersion++;
+        return state.More;
+    }
+
+    private void SettleRoundLocked(Query query, int round)
+    {
+        if (round != query.Round || !query.RoundOpen || query.States.Any(s => s.Loading)) { PublishLocked(query); return; }
+        query.RoundOpen = false;
+        // Later rounds become visible together, after every platform of the round has settled.
+        QueueFusionLocked(query, round == 1 ? FusionPlan.Full : FusionPlan.Merge);
+        PublishLocked(query);
+    }
+
+    private void Store(Query query, string platform, Chunk chunk, ChunkResult result)
+    {
+        var key = new CacheKey(query.Kind, platform, query.Keyword, chunk.Page, chunk.Pages, MusicSearchPaging.For(platform).PageSize);
+        EraseLocked(key);
+        if (result.Bytes > CacheBudgetBytes / 4) return;
+        while (cacheBytes + result.Bytes > CacheBudgetBytes && cache.Count > 0)
+            EraseLocked(cache.MinBy(pair => pair.Value.Used).Key);
+        cache[key] = new(result.Page!, clock.GetUtcNow() + query.Options.CacheTime, result.Bytes) { Used = ++cacheUse };
+        cacheBytes += result.Bytes;
+    }
+    private void EraseLocked(CacheKey key) { if (cache.Remove(key, out var entry)) cacheBytes -= entry.Bytes; }
 
     private bool Supports(string platform, MusicSearchKind kind)
     {
@@ -292,8 +430,10 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
             kinds.EnumerateArray().Any(k => k.ValueKind == JsonValueKind.String && k.GetString() == Kind(kind));
     }
 
-    private void QueueFusionLocked(Query query)
+    private void QueueFusionLocked(Query query, FusionPlan plan)
     {
+        // A merge waits for the round barrier; a full fusion supersedes a pending merge.
+        query.Plan = plan == FusionPlan.Full || query.Plan == FusionPlan.None ? plan : query.Plan;
         query.DataVersion++; query.Computing = true;
         if (query.FusionRunning) return;
         query.FusionRunning = true;
@@ -304,14 +444,22 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
     {
         while (true)
         {
-            SearchCandidate[] candidates; long version;
+            SearchCandidate[] candidates; long version; FusionPlan plan; JsonArray displayed;
             lock (gate)
             {
                 if (!Current(query)) { query.Computing = query.FusionRunning = false; return; }
-                version = query.DataVersion; candidates = query.States.SelectMany(s => s.Items).ToArray();
+                version = query.DataVersion; plan = query.Plan;
+                candidates = plan == FusionPlan.Merge
+                    ? query.States.SelectMany(s => s.RoundItems).ToArray()
+                    : query.States.SelectMany(s => s.Items).ToArray();
+                displayed = query.Items;
             }
             JsonArray? items = null; string error = "";
-            try { items = MusicRankFusion.Fuse(candidates, query.Kind, query.Lifetime.Token); }
+            try
+            {
+                items = MusicRankFusion.Fuse(candidates, query.Kind, query.Order, query.Lifetime.Token,
+                    plan == FusionPlan.Merge ? displayed : null);
+            }
             catch (OperationCanceledException) { }
             catch { error = "FUSION_FAILED"; }
             lock (gate)
@@ -319,6 +467,7 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
                 if (!Current(query)) { query.Computing = query.FusionRunning = false; return; }
                 if (version != query.DataVersion) continue;
                 if (items is not null) query.Items = items;
+                query.Plan = FusionPlan.None;
                 query.FusionError = error; query.Computing = query.FusionRunning = false;
                 PublishLocked(query); return;
             }
@@ -327,8 +476,8 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
 
     /// <summary>
     /// Retire affected platform generations in both kinds synchronously, without retiring the query ids.
-    /// Physical flights remain tracked (and loading) until settled; retry/close cannot bypass them.
-    /// This means genuine account change/revocation, not an unclassified initial-restore notification.
+    /// Physical flights remain tracked (and loading) until settled. Cached pages of the platform are
+    /// dropped. This means genuine account change/revocation, not an unclassified initial-restore notification.
     /// The account owner separately invalidates its borrowed catalog.
     /// </summary>
     public void Invalidate(string? platform = null)
@@ -337,20 +486,24 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
         List<CancellationTokenSource> cancelled = [];
         lock (gate)
         {
-            if (stopping || closed) return;
+            if (closed) return;
+            foreach (var key in cache.Keys.Where(k => platform is null || k.Platform == platform).ToArray()) EraseLocked(key);
+            if (stopping) return;
             foreach (var query in queries.Values.Where(q => !q.Stopped))
             {
                 var affected = query.States.Where(s => platform is null || s.Platform == platform).ToArray();
                 if (affected.Length == 0) continue;
+                query.InitialIdentityCurrent = false;
                 foreach (var state in affected)
                 {
                     state.Generation++;
                     if (state.Cancellation is { } pending) cancelled.Add(pending);
-                    state.Items.Clear(); state.Seen.Clear(); state.Page = 0; state.NextPage = 1; state.Stalled = 0;
-                    ClearPageStatistics(state);
+                    state.Items.Clear(); state.RoundItems.Clear(); state.Seen.Clear();
+                    state.Page = 0; state.NextPage = 1;
                     state.More = true; state.Error = "STALE_SESSION";
                 }
-                query.Items = []; QueueFusionLocked(query); PublishLocked(query);
+                // Remaining platforms' candidates are fused again from scratch.
+                query.Items = []; QueueFusionLocked(query, FusionPlan.Full); PublishLocked(query);
             }
         }
         foreach (var pending in cancelled) Cancel(pending);
@@ -358,8 +511,6 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
 
     private bool Current(Query query) => !closed && !stopping && !query.Stopped &&
         queries.TryGetValue(query.Kind, out var value) && ReferenceEquals(value, query);
-    private static void ClearPageStatistics(PlatformState state)
-    { state.TotalUnit = "items"; state.Total = null; state.GroupCount = state.RawItemCount = null; }
     private bool Current(Query query, PlatformState state, int generation) => Current(query) && state.Generation == generation;
     private void Guard() { if (stopping || closed) throw new MusicLibraryException("CLOSED"); }
     private static string Kind(MusicSearchKind kind) => kind == MusicSearchKind.Songs ? "songs" : "playlists";
@@ -379,14 +530,14 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
         string code = query.Stopped ? "CANCELLED" : query.States.Length == 0 ? "NO_PLATFORMS" :
             query.FusionError.Length > 0 ? query.FusionError : partial ? "PARTIAL" : "";
         return LJ.Element(LJ.Obj(("ok", true), ("id", query.Id), ("revision", query.Revision),
-            ("keyword", query.Keyword), ("kind", Kind(query.Kind)), ("items", query.Items),
-            ("more", !query.Stopped && query.States.Any(s => s.Error.Length == 0 && s.More && s.Page < 100 &&
-                s.NextPage <= 100 && s.Stalled < 4 && s.Items.Count < query.Budget)),
-            ("loading", query.Computing || query.States.Any(s => s.Loading)),
+            ("keyword", query.Keyword), ("kind", Kind(query.Kind)), ("round", query.Round), ("items", query.Items),
+            ("more", !query.Stopped && query.States.Any(s => s.More)),
+            // A cancelled round never settles; it is loading only while its physical work drains.
+            ("loading", query.Computing || query.RoundOpen && !query.Stopped || query.States.Any(s => s.Loading)),
             ("partial", partial), ("code", code), ("cancelled", query.Stopped),
             ("platforms", LJ.Arr(query.States.Select(s => LJ.Obj(("platform", s.Platform), ("page", s.Page),
-                ("count", s.Items.Count), ("more", !query.Stopped && s.More), ("loading", s.Loading), ("error", s.Error),
-                ("totalUnit", s.TotalUnit), ("total", s.Total), ("groupCount", s.GroupCount), ("rawItemCount", s.RawItemCount)))))));
+                ("count", s.Items.Count), ("more", !query.Stopped && s.More), ("loading", s.Loading),
+                ("error", s.Error)))))));
     }
 
     private void PublishLocked(Query query)

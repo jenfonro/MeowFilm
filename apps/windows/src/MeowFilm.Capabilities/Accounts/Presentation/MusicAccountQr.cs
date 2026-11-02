@@ -120,14 +120,14 @@ public sealed partial class MusicCapability
         string platform = selectedAccount!.Platform;
         return ChangeAccountAsync(platform, "qr.begin", new { platform });
     }
-    public Task CheckAccountQrAsync()
+    public Task CheckAccountQrAsync(CancellationToken token = default)
     {
         var challenge = accountQr;
         if (!CanCheckAccountQr || challenge is null) return Task.CompletedTask;
         if (challenge.ExpiresAt <= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
         { ClearAccountQr(); accountStatus = "二维码已过期"; AccountBindings(); return Task.CompletedTask; }
         return ChangeAccountAsync(challenge.Platform, "qr.poll",
-            new { platform = challenge.Platform, challengeId = challenge.Id });
+            new { platform = challenge.Platform, challengeId = challenge.Id }, token: token);
     }
     private bool PublishQrPoll(JsonElement reply, string platform)
     {

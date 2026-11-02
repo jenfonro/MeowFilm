@@ -615,15 +615,13 @@ public static class LiveHlsTests
         Invoke(m.Session, "ReportRequestFailure", error, true, cancelled.Token);
         Check((string?)Prop(m.Session, "LastErrorCode") == PlaybackError.AdaptiveInvalid, "not masked by local disconnect");
     }
-    private sealed class Slot : IDisposable { public void Dispose() { } }
     private static async Task DownloadBoundary()
     {
         await using var origin = new A.Origin(); var feed = new Feed("aes"); origin.Route = feed.Route;
         try
         {
             await using var archive = await NativeAdaptiveArchive.CreateAsync(Text(feed.Manifest(0)), origin.Uri("root.m3u8"), true,
-                origin.Base, origin.Headers, Options(origin), 1024 * 1024, _ => { },
-                (_, _) => Task.FromResult<IDisposable>(new Slot()));
+                origin.Base, origin.Headers, Options(origin), 1024 * 1024, _ => { });
             throw new InvalidOperationException("live incorrectly published as finite archive");
         }
         catch (PlaybackException error) { Check(error.Code == PlaybackError.AdaptiveUnsupported, "explicit live archive boundary"); }

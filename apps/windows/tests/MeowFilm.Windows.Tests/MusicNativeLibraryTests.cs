@@ -8,10 +8,11 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
-public static class MusicNativeLibraryTests
+public static partial class MusicNativeLibraryTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        foreach (var test in RecordingConsumerCases()) yield return test;
         yield return new("Native music library contract version and storage identity", Contract);
         yield return new("Native music library initial reads never manufacture a document", Initial);
         yield return new("Native music collection member edits exact ordering revisions and tombstones", Collections);
@@ -262,7 +263,7 @@ public static class MusicNativeLibraryTests
     {
         await using var f = new Fixture(); var o = f.Owner(); var song = Online("a");
         song["url"] = "https://media.invalid/temporary"; song["cover_url"] = "https://image.invalid/a?signature=synthetic-private";
-        song["cookie"] = "synthetic-private"; song["source_data"]!["headers"] = O(new { Authorization = "synthetic-private" });
+        song["cookie"] = "synthetic-private"; MusicSongFixture.Info(song)["headers"] = O(new { Authorization = "synthetic-private" });
         await Error(o, "music.queue.replace", new { songs = new[] { song }, index = 0 }, "INVALID_REQUEST");
         var fabricated = Online("b"); fabricated["favoriteCount"] = 250_000;
         await Error(o, "music.queue.replace", new { songs = new[] { fabricated }, index = 0 }, "INVALID_REQUEST");
@@ -746,7 +747,7 @@ public static class MusicNativeLibraryTests
             Changed(library, state => state["library"]!["extra"] = true),
             Changed(library, state => state["library"]!.AsObject().Remove("accounts")),
             Changed(library, state => state["library"]!["songs"]!["library:local:a"]!["extra"] = true),
-            Changed(library, state => state["library"]!["songs"]!["library:local:a"]!.AsObject().Remove("source_data")),
+            Changed(library, state => state["library"]!["songs"]!["library:local:a"]!.AsObject().Remove("sources")),
             Changed(library, state => state["revision"] = 1),
             Changed(library, state => state["library"]!["accounts"]!["kw"] = "account-a"),
             Changed(library, state => state["library"]!["accounts"]!["wy"] = new string('a', 65)),

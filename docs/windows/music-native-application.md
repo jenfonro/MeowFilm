@@ -19,7 +19,7 @@ MusicRecommendationQueuePort
 MusicScriptOwner
 MusicLyricApplication
 MusicFeedbackController
-聚合搜索与发现协调器
+搜索与发现协调器
 ```
 
 它借用 App 提供的：
@@ -59,7 +59,7 @@ public interface IMusicApplication : IAsyncDisposable, IScriptPlatformCapabiliti
 | `music.accounts.*` | `MusicAccountOwner` |
 | `music.accountDetails.*` | 原生账号详情 |
 | `music.catalog.*` | `MusicNativeCatalogOwner` |
-| `music.search.*` | 原生聚合搜索 |
+| `music.search.*` | 原生搜索 |
 | `music.discovery.*` | 原生发现 |
 | `music.recommendations.*` | 原生推荐协调器 |
 | `music.official.*` | 原生官方候选／授权／取链 |
@@ -101,7 +101,7 @@ public interface IMusicApplication : IAsyncDisposable, IScriptPlatformCapabiliti
 
 1. 封闭新请求并取消当前 generation。
 2. 排空推荐启动读取、选择 callback 和协调器工作。
-3. 取消发现、聚合搜索和目录临时状态。
+3. 取消发现、搜索和目录临时状态。
 4. 排空曲库同步、反馈和脚本工作。
 5. 排空所有已准入 application 请求。
 6. 准备唯一 `MusicLibraryOwner`，再由客户端 owner 取消并排空共享匿名登记及客户端写入。

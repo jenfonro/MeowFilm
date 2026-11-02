@@ -4,20 +4,20 @@ using MeowFilm.Capabilities.Search;
 
 namespace MeowFilm.Capabilities;
 
-public interface IMusicAggregateSearchSource
+public interface IMusicSearchSource
 {
     event Action<JsonElement>? SearchChanged;
 }
 
 public sealed partial class MusicNativeApplication
 {
-    private readonly MusicSearchCoordinator aggregateSearch;
+    private readonly MusicSearchCoordinator searchCoordinator;
     private readonly SemaphoreSlim searchPolicyLane = new(1, 1);
     private bool searchPolicyUnconfirmed;
     public event Action<JsonElement>? SearchChanged
     {
-        add => aggregateSearch.Changed += value;
-        remove => aggregateSearch.Changed -= value;
+        add => searchCoordinator.Changed += value;
+        remove => searchCoordinator.Changed -= value;
     }
 
     private async Task<JsonElement> SearchCatalogAsync(MusicSearchRequest request, CancellationToken token)
@@ -37,6 +37,10 @@ public sealed partial class MusicNativeApplication
     {
         if (method.StartsWith("music.search.history.", StringComparison.Ordinal))
             return await library.ExecuteAsync(method, parameters, token).ConfigureAwait(false);
+        if (method == "music.search.start")
+            return await StartSearchAsync(parameters, token).ConfigureAwait(false);
+        if (method is not ("music.search.settings.save" or "music.search.settings.get"))
+            return await searchCoordinator.ExecuteAsync(method, parameters, token).ConfigureAwait(false);
         await searchPolicyLane.WaitAsync(token).ConfigureAwait(false);
         try
         {
@@ -45,55 +49,72 @@ public sealed partial class MusicNativeApplication
                 // A lost CAS receipt may already have disabled providers. Fence
                 // and physically drain both kinds before the policy write.
                 searchPolicyUnconfirmed = true;
-                await aggregateSearch.PrepareShutdownAsync().ConfigureAwait(false);
+                await searchCoordinator.PrepareShutdownAsync().ConfigureAwait(false);
                 var receipt = await library.ExecuteAsync(method, parameters, token).ConfigureAwait(false);
                 if (Okay(receipt))
                 {
-                    await aggregateSearch.CancelShutdownPreparationAsync().ConfigureAwait(false);
+                    await searchCoordinator.CancelShutdownPreparationAsync().ConfigureAwait(false);
                     searchPolicyUnconfirmed = false;
                 }
                 return receipt;
             }
-            if (method == "music.search.settings.get")
+            var reply = await library.ExecuteAsync(method, parameters, token).ConfigureAwait(false);
+            if (Okay(reply) && searchPolicyUnconfirmed)
             {
-                var receipt = await library.ExecuteAsync(method, parameters, token).ConfigureAwait(false);
-                if (Okay(receipt) && searchPolicyUnconfirmed)
-                {
-                    await aggregateSearch.CancelShutdownPreparationAsync().ConfigureAwait(false);
-                    searchPolicyUnconfirmed = false;
-                }
-                return receipt;
+                await searchCoordinator.CancelShutdownPreparationAsync().ConfigureAwait(false);
+                searchPolicyUnconfirmed = false;
             }
-            if (searchPolicyUnconfirmed) return Failed("SEARCH_SETTINGS_UNCONFIRMED");
-            if (method == "music.search.start")
-            {
-                var input = parameters is JsonElement element ? element : JsonSerializer.SerializeToElement(parameters);
-                if (input.ValueKind != JsonValueKind.Object ||
-                    input.EnumerateObject().Any(p => p.Name is not ("keyword" or "kind" or "platforms")) ||
-                    !input.TryGetProperty("keyword", out var word) || word.ValueKind != JsonValueKind.String ||
-                    !input.TryGetProperty("kind", out var kind) || kind.ValueKind != JsonValueKind.String ||
-                    kind.GetString() is not ("songs" or "playlists")) return Failed("INVALID_REQUEST");
-                var policy = await library.ExecuteAsync("music.search.settings.get", new { }, token).ConfigureAwait(false);
-                if (!Okay(policy)) return policy;
-                var settings = policy.GetProperty("settings")
-                    .GetProperty(kind.GetString() == "songs" ? "songs" : "playlists");
-                string[] platforms = settings.GetProperty("mode").GetString() == "single"
-                    ? [settings.GetProperty("platform").GetString()!]
-                    : settings.GetProperty("enabled").EnumerateArray().Select(p => p.GetString()!).ToArray();
-                // A trusted UI still cannot dispatch its unsaved draft or a
-                // retired preference revision. Empty saved selections stay empty.
-                if (!input.TryGetProperty("platforms", out var requested) || requested.ValueKind != JsonValueKind.Array ||
-                    !requested.EnumerateArray().All(p => p.ValueKind == JsonValueKind.String) ||
-                    !requested.EnumerateArray().Select(p => p.GetString()).SequenceEqual(platforms))
-                    return Failed("SEARCH_SETTINGS_CHANGED");
-                // Hydrate the native account snapshot before registering either
-                // query. Initial durable-load notifications are not a logout.
-                var restored = await accounts.EnsureInitialObservationAsync(token).ConfigureAwait(false);
-                if (!Okay(restored)) return restored;
-            }
-            return await aggregateSearch.ExecuteAsync(method, parameters, token).ConfigureAwait(false);
+            return reply;
         }
         finally { searchPolicyLane.Release(); }
+    }
+
+    private async Task<JsonElement> StartSearchAsync(object? parameters, CancellationToken token)
+    {
+        var input = parameters is JsonElement element ? element : JsonSerializer.SerializeToElement(parameters);
+        if (input.ValueKind != JsonValueKind.Object ||
+            input.EnumerateObject().Any(p => p.Name is not ("keyword" or "kind" or "platforms" or "refresh")) ||
+            !input.TryGetProperty("keyword", out var word) || word.ValueKind != JsonValueKind.String ||
+            !input.TryGetProperty("kind", out var kind) || kind.ValueKind != JsonValueKind.String ||
+            kind.GetString() is not ("songs" or "playlists") ||
+            input.TryGetProperty("refresh", out var refresh) && refresh.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            return Failed("INVALID_REQUEST");
+        // Hydrate the native account snapshot before taking the policy lane. A
+        // settings save may then run to completion while this read is pending;
+        // the policy snapshot below is always the one current at admission.
+        var restored = await accounts.EnsureInitialObservationAsync(token).ConfigureAwait(false);
+        if (!Okay(restored)) return restored;
+        Task<JsonElement> start;
+        await searchPolicyLane.WaitAsync(token).ConfigureAwait(false);
+        try
+        {
+            if (searchPolicyUnconfirmed) return Failed("SEARCH_SETTINGS_UNCONFIRMED");
+            var policy = await library.ExecuteAsync("music.search.settings.get", new { }, token).ConfigureAwait(false);
+            if (!Okay(policy)) return policy;
+            var settings = policy.GetProperty("settings")
+                .GetProperty(kind.GetString() == "songs" ? "songs" : "playlists");
+            // Enabled platforms are already in saved priority order.
+            string[] platforms = settings.GetProperty("enabled").EnumerateArray().Select(p => p.GetString()!).ToArray();
+            // A trusted UI still cannot dispatch its unsaved draft or a
+            // retired preference revision. Empty saved selections stay empty.
+            if (!input.TryGetProperty("platforms", out var requested) || requested.ValueKind != JsonValueKind.Array ||
+                !requested.EnumerateArray().All(p => p.ValueKind == JsonValueKind.String) ||
+                !requested.EnumerateArray().Select(p => p.GetString()).SequenceEqual(platforms))
+                return Failed("SEARCH_SETTINGS_CHANGED");
+            // Admission is synchronous. The lane is released before waiting for
+            // an old query to drain, so get/next/cancel and replacement
+            // admission never wait behind this start.
+            start = searchCoordinator.ExecuteStartAsync(new
+            {
+                keyword = word.GetString(), kind = kind.GetString(), platforms,
+                pages = settings.GetProperty("pages").GetInt32(),
+                concurrency = settings.GetProperty("concurrency").GetInt32(),
+                cacheMinutes = settings.GetProperty("cacheMinutes").GetInt32(),
+                refresh = input.TryGetProperty("refresh", out var again) && again.GetBoolean()
+            }, token);
+        }
+        finally { searchPolicyLane.Release(); }
+        return await start.ConfigureAwait(false);
     }
 
     private static bool Okay(JsonElement reply) =>

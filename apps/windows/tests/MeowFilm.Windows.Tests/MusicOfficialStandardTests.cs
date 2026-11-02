@@ -94,7 +94,7 @@ public static class MusicOfficialStandardTests
                 await using var clients = new MusicClientContextFixture(http);
                 var before = await clients.Owner.AcquireWyAsync();
                 var response = await new OfficialMusicAudio(http, clients.Owner).ResolveAsync(
-                    new("wy", "fixture", 1, "123", "MUSIC_U=synthetic"), new() { ["musicId"] = "1" },
+                    new("wy", "fixture", 1, "123", "MUSIC_U=synthetic"), new() { ["songmid"] = "1" },
                     ["128k"], new(membership, 0, 0, []), default, () => { });
                 Check(handler.Calls == 1 && !response.QualityVerified && response.ActualQuality == "");
                 Check(response.RequestQuality == "128k");
@@ -115,7 +115,7 @@ public static class MusicOfficialStandardTests
                 try
                 {
                     await new OfficialMusicAudio(http, clients.Owner).ResolveAsync(
-                        new("wy", "fixture", 0, "0", "__remember_me=true"), new() { ["musicId"] = "1" },
+                        new("wy", "fixture", 0, "0", "__remember_me=true"), new() { ["songmid"] = "1" },
                         ["128k"], new(new(false, "none", null), 0, 0, []), default, () => { });
                 }
                 catch (MusicPlatformException) { rejected = true; }

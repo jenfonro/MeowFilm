@@ -26,26 +26,29 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
     private readonly object gate = new();
     private readonly ArtworkHttp http;
     private readonly CancellationTokenSource lifetime = new();
-    private readonly SemaphoreSlim slots = new(4, 4);
-    private readonly Dictionary<string, HostSlot> hosts = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Flight> flights = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Entry> cache = new(StringComparer.Ordinal);
     private TaskCompletionSource drained = Completed(), released = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int pending;
     private long bytes, clock;
     private bool closed;
-    private sealed class HostSlot { internal readonly SemaphoreSlim Slots = new(2, 2); internal int Users; }
+    private sealed class Flight(CancellationToken lifetime)
+    {
+        internal readonly CancellationTokenSource Cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
+        internal Task<Entry> Work = null!;
+        internal int Readers;
+    }
     private sealed class Entry(BitmapSource image, long cost)
     {
         internal readonly BitmapSource Image = image;
         internal readonly long Cost = cost;
-        internal int Readers;
         internal long Used;
     }
-    private sealed class Lease(ArtworkService owner, Entry entry) : IArtworkLease
+    private sealed class Lease(Entry entry) : IArtworkLease
     {
-        private ArtworkService? parent = owner;
-        public BitmapSource Image => Volatile.Read(ref parent) is not null ? entry.Image : throw new ObjectDisposedException(nameof(Lease));
-        public void Dispose() { var old = Interlocked.Exchange(ref parent, null); if (old is not null) lock (old.gate) entry.Readers--; }
+        private Entry? value = entry;
+        public BitmapSource Image => Volatile.Read(ref value)?.Image ?? throw new ObjectDisposedException(nameof(Lease));
+        public void Dispose() => Interlocked.Exchange(ref value, null);
     }
     public ArtworkService(HttpMessageHandler? handler = null) => http = new(handler);
 
@@ -54,30 +57,59 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
         cancellationToken.ThrowIfCancellationRequested();
         var uri = ArtworkHttp.Parse(address);
         string key = uri.AbsoluteUri;
-        HostSlot host;
+        Flight flight;
         lock (gate)
         {
             CheckOpen();
             if (cache.TryGetValue(key, out var hit)) return Own(hit);
-            if (pending >= 64) throw new ArtworkException("ARTWORK_LIMIT");
-            if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            if (!hosts.TryGetValue(uri.IdnHost, out host!)) hosts.Add(uri.IdnHost, host = new());
-            host.Users++;
+            if (!flights.TryGetValue(key, out flight!))
+            {
+                flight = new(lifetime.Token);
+                flights.Add(key, flight);
+                if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                flight.Work = LoadAsync(key, uri, flight);
+                _ = flight.Work.ContinueWith(t =>
+                {
+                    _ = t.Exception;
+                    lock (gate)
+                    {
+                        if (flights.TryGetValue(key, out var current) && ReferenceEquals(current, flight)) flights.Remove(key);
+                        flight.Cancellation.Dispose();
+                        if (--pending == 0) drained.TrySetResult();
+                    }
+                }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            }
+            flight.Readers++;
         }
-        bool globalHeld = false, hostHeld = false;
-        using var request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token);
+        try
+        {
+            var entry = await flight.Work.WaitAsync(cancellationToken).ConfigureAwait(false);
+            lock (gate)
+            {
+                CheckOpen(); cancellationToken.ThrowIfCancellationRequested();
+                return Own(entry);
+            }
+        }
+        finally
+        {
+            bool cancel;
+            lock (gate)
+            {
+                cancel = --flight.Readers == 0 && !flight.Work.IsCompleted;
+                if (cancel && flights.TryGetValue(key, out var current) && ReferenceEquals(current, flight)) flights.Remove(key);
+            }
+            if (cancel) Cancel(flight.Cancellation);
+        }
+    }
+
+    private async Task<Entry> LoadAsync(string key, Uri uri, Flight flight)
+    {
+        await Task.Yield(); // Register the flight and its first consumer before starting physical work.
+        var request = flight.Cancellation;
         request.CancelAfter(TimeSpan.FromSeconds(30));
         try
         {
-            // Host admission precedes global admission: one host cannot occupy
-            // all global slots while merely waiting on its own two slots.
-            await host.Slots.WaitAsync(request.Token).ConfigureAwait(false); hostHeld = true;
-            await slots.WaitAsync(request.Token).ConfigureAwait(false); globalHeld = true;
-            lock (gate)
-            {
-                CheckOpen(); request.Token.ThrowIfCancellationRequested();
-                if (cache.TryGetValue(key, out var hit)) return Own(hit);
-            }
+            request.Token.ThrowIfCancellationRequested();
             byte[] encoded = await http.ReadAsync(uri, request.Token).ConfigureAwait(false);
             BitmapSource image;
             try { image = await Task.Run(() => ArtworkRaster.Decode(encoded), request.Token).ConfigureAwait(false); }
@@ -87,37 +119,35 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
             lock (gate)
             {
                 CheckOpen(); request.Token.ThrowIfCancellationRequested();
-                if (cache.TryGetValue(key, out var hit)) return Own(hit);
-                // Never evict an active visual lease to manufacture room.
-                foreach (var item in cache.Where(pair => pair.Value.Readers == 0).OrderBy(pair => pair.Value.Used).ToArray())
+                if (flight.Readers == 0) throw new OperationCanceledException(request.Token);
+                // Cache ownership and visible leases are independent. Eviction never invalidates an image.
+                foreach (var item in cache.OrderBy(pair => pair.Value.Used).ToArray())
                 {
                     if (bytes + cost <= CacheBytes && cache.Count < 64) break;
                     cache.Remove(item.Key); bytes -= item.Value.Cost;
                 }
-                if (bytes + cost > CacheBytes || cache.Count >= 64) throw new ArtworkException("ARTWORK_LIMIT");
-                var entry = new Entry(image, cost);
-                cache.Add(key, entry); bytes += cost;
-                return Own(entry);
+                var entry = new Entry(image, cost) { Used = ++clock };
+                if (cost <= CacheBytes) { cache.Add(key, entry); bytes += cost; }
+                return entry;
             }
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && !lifetime.IsCancellationRequested)
-        { throw new ArtworkException("ARTWORK_TIMEOUT"); }
+        catch (OperationCanceledException) when (!lifetime.IsCancellationRequested)
+        {
+            lock (gate) if (flight.Readers == 0) throw;
+            throw new ArtworkException("ARTWORK_TIMEOUT");
+        }
         catch (ArtworkException) { throw; }
         catch (OperationCanceledException) { throw; }
         catch { throw new ArtworkException("ARTWORK_FAILED"); }
-        finally
-        {
-            if (globalHeld) slots.Release();
-            if (hostHeld) host.Slots.Release();
-            lock (gate)
-            {
-                if (--host.Users == 0) { hosts.Remove(uri.IdnHost); host.Slots.Dispose(); }
-                if (--pending == 0) drained.TrySetResult();
-            }
-        }
     }
 
-    private IArtworkLease Own(Entry entry) { entry.Readers++; entry.Used = ++clock; return new Lease(this, entry); }
+    private IArtworkLease Own(Entry entry) { entry.Used = ++clock; return new Lease(entry); }
+    private static void Cancel(CancellationTokenSource source)
+    {
+        try { source.Cancel(); }
+        catch (ObjectDisposedException) { }
+        catch (AggregateException) { }
+    }
     private void CheckOpen() { if (closed) throw new ArtworkException("ARTWORK_CLOSED"); }
     private static TaskCompletionSource Completed()
     { var result = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); result.SetResult(); return result; }
@@ -129,11 +159,11 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
         if (!owner) { await released.Task.ConfigureAwait(false); return; }
         try
         {
-            lifetime.Cancel();
+            Cancel(lifetime);
             await drain.ConfigureAwait(false);
             http.Dispose();
             lock (gate) { cache.Clear(); bytes = 0; }
-            slots.Dispose(); lifetime.Dispose();
+            lifetime.Dispose();
             released.TrySetResult();
         }
         catch (Exception error) { released.TrySetException(error); throw; }

@@ -279,20 +279,39 @@ public static partial class MusicUiTests
             }
             finally { shell.Close(); await shell.ShutdownCompletion.WaitAsync(TimeSpan.FromSeconds(5)); await Drain(); }
         });
-        yield return Case("replica search lists stay visible in every mode and only source management keeps wheel input", async () =>
+        yield return Case("replica search advanced bubble saves each kind and only source management keeps wheel input", async () =>
         {
             await using var f = await Fixture.Create(); await f.Module.ActivateSettingsAsync();
             var view = (MusicSettingsView)f.Module.SettingsView; using var mount = new ReplicaMount(view); mount.Window.Height = 560;
             await Drain(); await Until(() => !f.Module.Busy); view.UpdateLayout();
-            foreach (var kind in new[] { "songs", "playlists" })
+            True(!Visuals(view).OfType<ComboBox>().Any(box => AutomationProperties.GetName(box).Contains("搜索模式")),
+                "search mode controls are removed");
+            var popup = (Popup)view.FindName("SearchAdvancedPopup");
+            foreach (var (kind, label, pages, concurrency) in new[]
             {
-                await f.Module.SetSearchModeAsync(kind, "single"); await Until(() => !f.Module.Busy); view.UpdateLayout();
+                ("songs", "歌曲搜索高级设置", 11, 12),
+                ("playlists", "歌单搜索高级设置", 2, 0)
+            })
+            {
+                var button = Visuals(view).OfType<Button>().Single(b => AutomationProperties.GetName(b) == label);
+                button.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Drain();
+                True(popup.IsOpen && ReferenceEquals(popup.PlacementTarget, button), "advanced bubble opens below its button");
+                ((TextBox)view.FindName("SearchPagesBox")).Text = pages.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                ((TextBox)view.FindName("SearchConcurrencyBox")).Text = concurrency.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                popup.IsOpen = false; await Drain(); await Until(() => !f.Module.Busy && f.Module.CanEditSearchPreferences);
+                var saved = kind == "songs" ? f.Module.SongSearch : f.Module.PlaylistSearch;
+                True(saved.Pages == pages && saved.Concurrency == Math.Max(1, concurrency) && saved.CacheMinutes == 60,
+                    "positive page and concurrency values are saved; invalid fields are ignored");
+                view.UpdateLayout();
                 True(((FrameworkElement)view.FindName("SongPriorities")).IsVisible && ((FrameworkElement)view.FindName("PlaylistPriorities")).IsVisible,
-                    "platform lists remain visible for single-platform search");
-                await f.Module.SetSearchModeAsync(kind, "aggregate"); await Until(() => !f.Module.Busy); view.UpdateLayout();
-                True(((FrameworkElement)view.FindName("SongPriorities")).IsVisible && ((FrameworkElement)view.FindName("PlaylistPriorities")).IsVisible,
-                    "platform lists remain visible for aggregate search");
+                    "platform lists remain visible");
             }
+            var settings = (await f.Rpc("music.search.settings.get")).GetProperty("settings");
+            True(settings.GetProperty("songs").GetProperty("pages").GetInt32() == 11 &&
+                settings.GetProperty("songs").GetProperty("concurrency").GetInt32() == 12 &&
+                settings.GetProperty("playlists").GetProperty("pages").GetInt32() == 2 &&
+                settings.GetProperty("playlists").GetProperty("concurrency").GetInt32() == 1,
+                "advanced settings persisted per kind");
             var scroll = (ScrollViewer)view.FindName("SettingsScroller");
             void Wheel(UIElement target, RoutedEvent routed)
             {

@@ -19,7 +19,7 @@ public sealed partial class MusicScriptOwner
             string signature = LJ.Digest(LJ.Obj(("contract", "music.quality.cache.v1"),
                 ("policy", policy!.Signature), ("installation", id), ("platform", platform),
                 ("revision", active.Revision), ("generation", active.Generation), ("sourceKey", selected.Key),
-                ("recording", selected.Data), ("songId", song["songId"]), ("songRevision", song["revision"]),
+                ("recording", selected.Data), ("songId", song["songId"]),
                 ("duration", song["duration"]), ("quality", quality)));
             if (input.ContainsKey("qualityCacheSignature"))
                 LJ.Require(LJ.Text(input["qualityCacheSignature"], 64) == signature, "QUALITY_CACHE_CHANGED");
@@ -30,7 +30,7 @@ public sealed partial class MusicScriptOwner
                 {
                     installationId = id, revision = active.Revision, generation = active.Generation,
                     siteId = platform, operation = "musicUrl",
-                    payload = LJ.Obj(("musicInfo", selected.Data), ("quality", quality))
+                    payload = ScriptPayload(selected.Data, quality)
                 }, token).ConfigureAwait(false);
                 token.ThrowIfCancellationRequested();
                 media = QualityMedia(result["value"], song, selected, id, platform, active, quality);

@@ -324,8 +324,8 @@ public static partial class MusicUiTests
                 string cache = LJ.Digest(LJ.Obj(("contract", "music.quality.cache.v1"), ("policy", policy),
                     ("installation", request.GetProperty("installationId")), ("platform", request.GetProperty("platform")),
                     ("revision", 1), ("generation", request.GetProperty("generation")),
-                    ("sourceKey", source.GetProperty("sourceKey")), ("recording", source.GetProperty("source_data")),
-                    ("songId", songNode["songId"]), ("songRevision", songNode["revision"]),
+                    ("sourceKey", source.GetProperty("sourceKey")), ("recording", source.GetProperty("musicInfo")),
+                    ("songId", songNode["songId"]),
                     ("duration", songNode["duration"]), ("quality", request.GetProperty("quality"))));
                 if (request.TryGetProperty("qualityPolicySignature", out var expectedPolicy) && expectedPolicy.GetString() != policy)
                     return JsonSerializer.SerializeToElement(new { ok = false, code = "QUALITY_POLICY_CHANGED" });

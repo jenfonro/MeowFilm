@@ -87,7 +87,6 @@ public sealed partial class MusicLibraryOwner
             var lease = new QualityLease(this, QualityPolicy(document!), QualitySignature(document!));
             lock (qualityLeaseGate)
             {
-                if (qualityLeases.Count >= 24) { lease.Dispose(); throw new MusicLibraryException("LIMIT"); }
                 qualityLeases.Add(lease);
             }
             return lease;

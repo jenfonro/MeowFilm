@@ -37,7 +37,7 @@ public static class MusicDiscoveryAccountDrainTests
             yield return Case(kind + "-corrupt-storage-finite-error", () => ReadError(restore, corrupt: true));
             yield return Case(kind + "-storage-error-finite-error", () => ReadError(restore, corrupt: false));
             yield return Case(kind + "-ordinary-public-early-cancel-contract", () => OrdinaryRead(restore));
-            yield return Case(kind + "-same-admission-limit-no-retry-or-extra-read", () => Admission(restore));
+            yield return Case(kind + "-queued-reads-cancel-without-a-shared-count-limit", () => Admission(restore));
         }
         yield return Case("reconcile-anonymous-account-tombstone-invalidates-old-lease", Reconcile);
         yield return Case("acquire-invalid-platform-no-storage", InvalidPlatform);
@@ -416,10 +416,9 @@ public static class MusicDiscoveryAccountDrainTests
     {
         await using var f = new Fixture(); var hold = f.Store.Block(1); using var cancel = new CancellationTokenSource();
         var first = Read(f, restore); await Wait(hold.Entered.Task);
-        var queued = Enumerable.Range(0, 3).Select(_ => Read(f, restore, cancel.Token)).ToArray();
+        var queued = Enumerable.Range(0, 16).Select(_ => Read(f, restore, cancel.Token)).ToArray();
         try
         {
-            await Failure(Read(f, restore), restore, "RATE_LIMITED");
             cancel.Cancel(); await Task.WhenAll(queued.Select(t => Failure(t, restore, "CANCELLED", cancel.Token)));
             Check(!first.IsCompleted && f.Store.Reads == 1);
         }

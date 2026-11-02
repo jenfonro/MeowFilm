@@ -416,7 +416,7 @@ internal static class PlatformDiscovery
         return (area, type, initial, $"{area}:{type}:{initial}");
     }
     internal static JsonObject Artists(JsonObject raw, string target,
-        (int Area, int Type, int Initial, string Token) selection, int offset, int limit)
+        (int Area, int Type, int Initial, string Token) selection, long offset, int limit)
     {
         var data = raw["data"] as JsonObject ?? raw;
         var artists = PJ.Rows(PJ.First(data["artists"], raw["artists"]), limit);
@@ -431,7 +431,7 @@ internal static class PlatformDiscovery
         }).ToArray();
         var moreNode = PJ.First(data["more"], raw["more"]);
         var more = moreNode is not null && PJ.Bool(moreNode);
-        if (more) PJ.Require(items.Length > 0 && offset <= 9960, "PAGINATION_STALLED");
+        if (more) PJ.Require(items.Length > 0 && offset <= 9007199254740991 - items.Length, "PAGINATION_STALLED");
 
         string Token(int area, int type, int initial) => $"{area}:{type}:{initial}";
         var tags = new JsonArray();

@@ -9,7 +9,7 @@ live HLS 由 `AdaptiveLiveSession` 和 `NativePlayback` 当前会话共同拥有
 - 媒体使用当前受支持的 MPEG-TS 或固定初始化 fragmented MP4 profile。
 - 重叠序号的媒体、时长、discontinuity、初始化段和实际 payload 身份必须保持一致。
 - 刷新后的媒体 endpoint 不能变成新的 master，也不能扩张到未经初次图授权的新 authority。
-- live window 最多 8 个 playlist、每窗最多 1024 个 segment；其余资源、请求和字节预算继续服从自适应媒体公共上限。
+- live window 最多 8 个 playlist、每窗最多 1024 个 segment；资源图和实际缓冲字节继续服从自适应媒体资源边界，不附加 HTTP 请求数或总并发额度。
 
 不支持动态 DASH、DVR／录制、任意 live seek、LL-HLS part、delta update、blocking reload、运行时 master 演化、任意初始化段切换、DRM 或 `SAMPLE-AES`。开放中的 live window 不能被发布为完整离线归档。
 

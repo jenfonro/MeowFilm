@@ -37,8 +37,7 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     public bool CanOpen => Available && (Song is not null || MusicCatalogDto.SupportsAction(Platform, Kind));
     public bool CanFavorite => Available && Song is not null;
     public bool CanSimilar => CanFavorite && Platform == "wy" && ActionId.Length > 0;
-    public string AlbumId => Song is { } song && song.Raw.TryGetProperty("source_data", out var source)
-        ? MusicCatalogDto.Text(source, "albumId") : "";
+    public string AlbumId => Song is { } song ? MusicCatalogDto.Text(SongJson.PrimaryInfo(song.Raw), "albumId") : "";
     public bool CanAlbum => CanFavorite && Platform == "wy" && AlbumId.Length > 0;
     public string ErrorText => Available ? "" : MusicCatalogDto.ErrorText(ErrorCode);
     public string AccessHint => ErrorText.Length > 0 ? ErrorText : Title;
@@ -108,22 +107,12 @@ public static class MusicCatalogDto
     public static string Text(JsonElement element, string name) =>
         element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value) &&
         value.ValueKind == JsonValueKind.String ? value.GetString()! : "";
-    public static string SongNativeId(JsonElement song)
+    public static MusicCatalogCard[] SearchResults(JsonElement items, string kind)
     {
-        if (!song.TryGetProperty("source_data", out var source) || source.ValueKind != JsonValueKind.Object) return "";
-        foreach (var key in new[] { "musicId", "songmid", "id" })
-            if (Text(source, key) is { Length: > 0 } value) return value;
-        return "";
-    }
-
-    public static MusicCatalogCard[] Aggregate(JsonElement items, string kind)
-    {
-        MusicDto.Require(kind is "songs" or "playlists" && items.ValueKind == JsonValueKind.Array &&
-            items.GetArrayLength() <= 10000);
+        MusicDto.Require(kind is "songs" or "playlists" && items.ValueKind == JsonValueKind.Array);
         return items.EnumerateArray().Select(item =>
         {
-            string platform = kind == "songs" && item.TryGetProperty("source_data", out var source)
-                ? Text(source, "source") : Text(item, "source");
+            string platform = kind == "songs" ? SongJson.Platform(item) : Text(item, "source");
             MusicDto.Require(platform is "wy" or "tx" or "kw" or "kg" or "mg");
             return Card(item, platform, kind == "songs" ? "song" : "playlist");
         }).ToArray();
@@ -231,9 +220,9 @@ public static class MusicCatalogDto
         else if (item.TryGetProperty("song", out var nested) && nested.ValueKind == JsonValueKind.Object) song = SongRow.Read(nested);
         if (song is not null)
         {
-            MusicDto.Require(song.Raw.TryGetProperty("source_data", out var source) && Text(source, "source") == platform);
+            MusicDto.Require(SongJson.Platform(song.Raw) == platform);
             return new(song.Id, song.Title, song.Artist, song.Cover, "song", platform, song,
-                SongNativeId(song.Raw), Available: available, ErrorCode: error, StableKey: Text(item, "key"),
+                SongJson.NativeId(song.Raw), Available: available, ErrorCode: error, StableKey: Text(item, "key"),
                 MemberId: Text(item, "memberId"), Presentation: presentation,
                 RequiresAccount: requiresAccount, Display: display);
         }
@@ -343,7 +332,7 @@ public static class MusicCatalogDto
         "SNAPSHOT_CHANGED" or "REVISION_CONFLICT" => "内容已变更，请刷新",
         "PAGINATION_STALLED" => "分页未前进",
         "INCOMPLETE_PAGE" or "INCOMPLETE_PLAYLIST" => "歌单内容不完整",
-        "PAGINATION_LIMIT" or "LIMIT" => "内容超过数量限制",
+        "LIMIT" => "内容超过数量限制",
         "IDENTITY_MISMATCH" => "平台内容身份不一致",
         "INVALID_RESPONSE" or "INVALID_REQUEST" => "平台内容格式无效",
         "RATE_LIMITED" => "平台请求过于频繁",

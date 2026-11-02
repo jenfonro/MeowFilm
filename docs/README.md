@@ -52,7 +52,7 @@
 - [平台客户端上下文](windows/music-platform-client-context.md)
 - [设置页呈现与音源演示边界](windows/music-settings-presentation.md)
 - [平台目录](windows/music-native-platforms.md)、[目录与频道](windows/music-catalog.md)、[个人目录页面](windows/music-catalog-personal-ui.md)
-- [聚合搜索](windows/music-aggregate-search.md)、[搜索发现](windows/music-search-discovery.md)、[搜索设置与历史](windows/music-search-preferences.md)、[搜索观察者](windows/music-search-observers.md)、[发现账号读取](windows/music-discovery-account-drain.md)
+- [多平台搜索](windows/music-search.md)、[搜索发现](windows/music-search-discovery.md)、[搜索设置与历史](windows/music-search-preferences.md)、[搜索观察者](windows/music-search-observers.md)、[发现账号读取](windows/music-discovery-account-drain.md)
 - [曲库状态](windows/music-native-library.md)、[曲库同步](windows/music-library-sync.md)
 - [推荐](windows/music-recommendations.md)、[推荐消费](windows/music-native-recommendations.md)
 - [歌词](windows/music-native-lyrics.md)、[歌词应用链](windows/music-lyric-application.md)、[元数据偏好](windows/music-metadata-policy.md)

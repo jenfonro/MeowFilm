@@ -108,7 +108,6 @@ public sealed partial class MusicAccountOwner : IMusicQqFeedbackContextSource
             {
                 AccountRules.Require(!states["tx"].Uncertain, "COMMIT_UNKNOWN");
                 AccountRules.Require(QqAccountCurrentLocked(exactAccount!), "SESSION_CHANGED");
-                AccountRules.Require(qqContexts.Count < 32, "RATE_LIMITED");
                 op = new(exactAccount!, token, clientProtocol.Clock);
                 qqAcquisitions.Add(op);
             }
@@ -136,7 +135,6 @@ public sealed partial class MusicAccountOwner : IMusicQqFeedbackContextSource
                 QqGuard(op);
                 if (!device.SessionCurrent(clientProtocol.Clock.GetUtcNow()))
                     throw new MusicPlatformException("DEVICE_CONTEXT_EXPIRED");
-                AccountRules.Require(qqContexts.Count < 32, "RATE_LIMITED");
                 var lease = new QqContextLease(this, exactAccount, device, clientProtocol.Clock, token);
                 qqContexts.Add(lease);
                 return lease;

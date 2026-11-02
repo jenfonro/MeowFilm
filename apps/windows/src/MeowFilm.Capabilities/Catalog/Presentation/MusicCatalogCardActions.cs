@@ -7,7 +7,6 @@ public sealed partial class MusicCapability
     private readonly Dictionary<string, (long Generation, IReadOnlyList<string> Titles)> entryPreviews = [];
     private readonly Dictionary<string, CatalogPreviewFlight> entryPreviewFlights = [];
     private readonly object entryPreviewGate = new();
-    private int entryPreviewRequests;
     private sealed class CatalogPreviewFlight(
         string key,
         long generation,
@@ -88,7 +87,7 @@ public sealed partial class MusicCapability
         var generation = loadGeneration;
         CatalogPreviewFlight? flight = null;
         IReadOnlyList<string> cachedTitles = Array.Empty<string>();
-        bool cacheHit = false, saturated = false, stale = false;
+        bool cacheHit = false, stale = false;
         lock (entryPreviewGate)
         {
             if (generation != loadGeneration)
@@ -113,23 +112,18 @@ public sealed partial class MusicCapability
             }
             if (!stale && !cacheHit && flight is null)
             {
-                if (entryPreviewRequests >= 2) saturated = true;
-                else
-                {
-                    var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
-                    request.CancelAfter(TimeSpan.FromSeconds(8));
-                    flight = new(card.Key, generation, card, request) { Subscribers = 1 };
-                    var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                    loadDrains.Add(drained.Task);
-                    entryPreviewFlights[card.Key] = flight;
-                    entryPreviewRequests++;
-                    flight.Work = ReadCatalogCardPreviewCoreAsync(card, flight, drained);
-                }
+                var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+                request.CancelAfter(TimeSpan.FromSeconds(8));
+                flight = new(card.Key, generation, card, request) { Subscribers = 1 };
+                var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                loadDrains.Add(drained.Task);
+                entryPreviewFlights[card.Key] = flight;
+                flight.Work = ReadCatalogCardPreviewCoreAsync(card, flight, drained);
             }
         }
         if (stale) return [];
         if (cacheHit) return cachedTitles;
-        if (saturated || flight is null) return [];
+        if (flight is null) return [];
         return await WaitForCatalogPreviewAsync(flight, cancellationToken);
     }
 
@@ -210,7 +204,6 @@ public sealed partial class MusicCapability
         {
             lock (entryPreviewGate)
             {
-                entryPreviewRequests--;
                 if (entryPreviewFlights.TryGetValue(flight.Key, out var current) &&
                     ReferenceEquals(current, flight))
                     entryPreviewFlights.Remove(flight.Key);

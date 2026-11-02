@@ -135,22 +135,7 @@ public static class MusicPlaybackFeedbackTests
             await using var f = new Fixture(); await f.Enable("wy");
             f.Play(Song(sources: Array.Empty<JsonObject>())); await f.Drain(); Check(f.Protocol.Starts.IsEmpty);
         });
-        yield return Case("quarantined-mappings-are-not-reported", async () =>
-        {
-            await using var f = new Fixture(); await f.Enable("tx");
-            var song = SongNode();
-            song["quarantinedSources"]!.AsArray().Add(Raw("tx", "mid456"));
-            f.Play(MusicSongFixture.Element(song));
-            await f.Drain(); Check(f.Protocol.Starts.IsEmpty);
-        });
-        yield return Case("missing-current-primary-provenance-is-rejected", async () =>
-        {
-            await using var f = new Fixture(); await f.Enable("wy");
-            var song = SongNode(sources: [Raw("wy", "123"), Raw("wy", "456")]);
-            song["source_data"] = new JsonObject();
-            f.Play(MusicSongFixture.Element(song));
-            await f.Drain(); Check(f.Protocol.Starts.IsEmpty);
-        });
+
         yield return Case("mapping-revocation-cancels-live-feedback", async () =>
         {
             await using var f = new Fixture(); await f.Enable("wy"); f.Play(); await f.Drain();

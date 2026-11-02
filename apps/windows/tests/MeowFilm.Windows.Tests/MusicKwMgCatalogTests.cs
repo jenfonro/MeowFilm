@@ -10,6 +10,7 @@ using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Capabilities.Scripting;
+using MeowFilm.Capabilities.Search;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -22,6 +23,8 @@ public static class MusicKwMgCatalogTests
     {
         yield return Case("capabilities are public-only and do not acquire accounts", Capabilities);
         yield return Case("KW search retains precise recording quality and identity", KwSearch);
+        yield return Case("KW short search page against a larger total is terminal", () => ShortSearch("kw"));
+        yield return Case("KW empty search page against a larger total is terminal", () => EmptySearch("kw"));
         yield return Case("KW single-quoted playlist card opens complete detail", KwQuotedPlaylist);
         yield return Case("KW detail has exact ID and no invented quality", KwDetail);
         yield return Case("KW specific missing-detail response uses literal Nuxt aliases", KwPage);
@@ -31,8 +34,11 @@ public static class MusicKwMgCatalogTests
             yield return Case("KW SSR rejects " + defect, () => KwUnsafePage(defect));
         yield return Case("MG fixed anonymous signature vector", MgSignature);
         yield return Case("MG groups expand beyond limit without corrupting total cursor or rank", MgGroups);
-        yield return Case("MG output budget fails instead of truncating expanded metadata", MgOutputBudget);
-        foreach (string defect in new[] { "variants", "expanded", "empty-group", "short-group-page", "wrong-shape", "missing-id" })
+        yield return Case("MG short grouped search page against a larger total is terminal", () => ShortSearch("mg"));
+        yield return Case("MG empty grouped search page against a larger total is terminal", () => EmptySearch("mg"));
+        yield return Case("MG expanded metadata reaches the search consumer without page-wide truncation", MgExpandedMetadata);
+        yield return Case("MG grouped search preserves every returned recording", MgExpandedRecordings);
+        foreach (string defect in new[] { "empty-group", "wrong-shape", "missing-id" })
             yield return Case("MG grouped search rejects " + defect, () => MgGroupFailure(defect));
         yield return Case("MG native songId is resourceId and copyrightId remains separate", MgDetail);
         foreach (string defect in new[] { "wrong-id", "two-resources", "business", "wrong-copyright" })
@@ -43,9 +49,11 @@ public static class MusicKwMgCatalogTests
         foreach (string platform in new[] { "kw", "mg" })
         {
             yield return Case(platform + " search card reaches real native LX payload builder", () => SearchToLx(platform));
-            yield return Case(platform + " cache refresh and explicit invalidation do not acquire accounts", () => Cache(platform));
+            yield return Case(platform + " uncached search refresh and explicit invalidation do not acquire accounts", () => Cache(platform));
+            foreach (var kind in new[] { MusicSearchKind.Songs, MusicSearchKind.Playlists })
+                yield return Case(platform + " " + kind + " native search continues beyond one hundred pages", () => HighPage(platform, kind));
             yield return Case(platform + " duplicate playlist recordings preserve unique occurrences", () => Duplicates(platform));
-            yield return Case(platform + " count budget rejects instead of truncating", () => CountBudget(platform));
+            yield return Case(platform + " large playlist continues by platform total", () => LargePlaylist(platform));
             yield return Case(platform + " declared repeated native page is rejected", () => RepeatedPage(platform));
             yield return Case(platform + " metadata snapshot changes reject exact old snapshot", () => Snapshot(platform));
             yield return Case(platform + " complete native owner double scan queue and LX payload", () => OwnerChain(platform));
@@ -169,7 +177,7 @@ public static class MusicKwMgCatalogTests
             return KwResults(raw);
         });
         var data = await f.Catalog.SearchAsync(new("kw", " 合成 & ? keyword ", Limit: 1));
-        var song = data.GetProperty("items")[0]; var native = song.GetProperty("source_data");
+        var song = data.GetProperty("items")[0]; var native = MusicSongFixture.Info(song);
         Check(NativeId(song) == "1" && S(native, "songmid") == "1" && S(native, "source") == "kw");
         Check(S(song, "artist") == "A、B" && native.GetProperty("types").GetArrayLength() == 2);
         Check(S(native.GetProperty("_types").GetProperty("flac"), "size") == "12MB");
@@ -195,8 +203,8 @@ public static class MusicKwMgCatalogTests
             return Json(new { status = 200, data = new { songinfo = raw } });
         });
         var song = await f.Catalog.SongAsync(new("kw", "1"));
-        Check(NativeId(song) == "1" && song.GetProperty("source_data").GetProperty("types").GetArrayLength() == 0);
-        Check(!song.GetProperty("source_data").GetProperty("qualityKnown").GetBoolean() && f.Handler.Calls == 1);
+        Check(NativeId(song) == "1" && MusicSongFixture.Info(song).GetProperty("types").GetArrayLength() == 0);
+        Check(!MusicSongFixture.Info(song).GetProperty("qualityKnown").GetBoolean() && f.Handler.Calls == 1);
     }
     private const string SafePage = """<html><script>window.__NUXT__=(function(a,b){return {data:[{songinfo:{rid:a,musicrid:"MUSIC_1",name:"Synthetic",artist:"A",album:"B",duration:180,formats:b}}]}}("1","MP3128"));</script></html>""";
     private static async Task KwPage()
@@ -206,7 +214,7 @@ public static class MusicKwMgCatalogTests
         var song = await f.Catalog.SongAsync(new("kw", "1"));
         Check(NativeId(song) == "1" && f.Handler.Calls == 2 &&
             !song.TryGetProperty("detailSource", out _));
-        Check(song.GetProperty("source_data").GetProperty("types").GetArrayLength() == 1);
+        Check(MusicSongFixture.Info(song).GetProperty("types").GetArrayLength() == 1);
     }
     private static async Task KwFailure(string defect)
     {
@@ -279,28 +287,83 @@ public static class MusicKwMgCatalogTests
             !second.GetProperty("more").GetBoolean());
         Check(!first.GetRawText().Contains("DO_NOT_PERSIST", StringComparison.Ordinal));
     }
-    private static async Task MgOutputBudget()
+    private static async Task MgExpandedMetadata()
     {
         var rows = Enumerable.Range(1, 30).Select(i =>
         {
-            var raw = Mg(i); raw["songName"] = new string('x', 4096); raw["album"] = new string('a', 4096); return new[] { raw };
+            // Expanded native pages are not a single persisted song or queue command.
+            JsonObject Large(int id)
+            { var raw = Mg(id); raw["songName"] = new string('x', 4096); raw["album"] = new string('a', 4096); return raw; }
+            return new[] { Large(i), Large(i + 1000) };
         }).ToArray();
         using var f = new Fixture(_ => MgResults(rows, 30));
-        await Error("LIMIT", () => f.Catalog.SearchAsync(new("mg", "x", Limit: 30)));
+        var result = await f.Catalog.SearchAsync(new("mg", "x", Limit: 30));
+        Check(Encoding.UTF8.GetByteCount(result.GetRawText()) > 512 * 1024);
+        Check(MusicSearchPage.Read(result, "mg", MusicSearchKind.Songs, 1).Items.Length == 60);
+    }
+    private static async Task MgExpandedRecordings()
+    {
+        var groups = Enumerable.Range(0, 30)
+            .Select(g => Enumerable.Range(g * 40 + 1, 40).Select(i => Mg(i)).ToArray()).ToArray();
+        using var f = new Fixture(_ => MgResults(groups, 30));
+        var result = await f.Catalog.SearchAsync(new("mg", "x", Limit: 30));
+        var page = MusicSearchPage.Read(result, "mg", MusicSearchKind.Songs, 1);
+        Check(page.Items.Length == 1200 && page.RawItemCount == 1200 && page.GroupCount == 30 && !page.More);
+    }
+    private static async Task ShortSearch(string platform)
+    {
+        using var f = new Fixture(_ => platform == "kw"
+            ? Json(new { TOTAL = "100", SHOW = "1", abslist = new[] { Kw() } })
+            : MgResults([new[] { Mg() }], 100));
+        var page = await f.Catalog.SearchAsync(new(platform, "x", Limit: 30));
+        Check(page.GetProperty("items").GetArrayLength() == 1);
+        Check(!page.GetProperty("more").GetBoolean());
+        Check(page.GetProperty("continuation").ValueKind == JsonValueKind.Null);
+        if (platform == "mg")
+            Check(MusicSearchPage.Read(page, "mg", MusicSearchKind.Songs, 1) is { Items.Length: 1, More: false });
+        Check(f.Handler.Calls == 1);
+    }
+    private static async Task EmptySearch(string platform)
+    {
+        using var f = new Fixture(_ => platform == "kw"
+            ? Json(new { TOTAL = "100", SHOW = "1", abslist = Array.Empty<JsonObject>() })
+            : MgResults([], 100));
+        var page = await f.Catalog.SearchAsync(new(platform, "x", Limit: 30));
+        Check(page.GetProperty("items").GetArrayLength() == 0);
+        Check(!page.GetProperty("more").GetBoolean());
+        Check(page.GetProperty("continuation").ValueKind == JsonValueKind.Null);
+        if (platform == "mg")
+            Check(MusicSearchPage.Read(page, "mg", MusicSearchKind.Songs, 1) is { Items.Length: 0, More: false });
+        Check(f.Handler.Calls == 1);
+    }
+    private static async Task HighPage(string platform, MusicSearchKind kind)
+    {
+        bool songs = kind == MusicSearchKind.Songs;
+        using var f = new Fixture(request =>
+        {
+            var query = Query(request);
+            Check(query[platform == "kw" ? "pn" : "pageNo"] == (platform == "kw" ? "100" : "101"));
+            if (platform == "kw")
+                return Json(new { TOTAL = "102", SHOW = "1", abslist = new[] {
+                    songs ? Kw() : O(new { playlistid = "42", name = "Synthetic list", songnum = 2 }) } });
+            return songs ? MgResults([new[] { Mg() }], 102) :
+                Json(new { code = "000000", songListResultData = new { totalCount = 102,
+                    result = new[] { new { id = "42", name = "Synthetic list", musicNum = 2 } } } });
+        });
+        var page = await f.Catalog.SearchAsync(new(platform, "fixture", kind, Page: 101, Limit: 1));
+        Check(N(page, "page") == 101 && page.GetProperty("items").GetArrayLength() == 1 &&
+            page.GetProperty("more").GetBoolean() && N(page.GetProperty("continuation"), "page") == 102);
     }
     private static async Task MgGroupFailure(string defect)
     {
-        int limit = defect == "expanded" ? 33 : 1;
+        const int limit = 1;
         using var f = new Fixture(_ =>
         {
             if (defect == "wrong-shape") return Json(new { code = "000000", songResultData = new { totalCount = 1, resultList = new[] { Mg() } } });
-            if (defect == "short-group-page") return MgResults([], 1);
             if (defect == "empty-group") return MgResults([Array.Empty<JsonObject>()], 1);
-            if (defect == "expanded") return MgResults(Enumerable.Range(0, 33).Select(g => Enumerable.Range(g * 31, 31).Select(i => Mg(i + 1)).ToArray()), 33);
-            if (defect == "variants") return MgResults([Enumerable.Range(1, 33).Select(i => Mg(i)).ToArray()], 1);
             var raw = Mg(); raw.Remove("copyrightId"); return MgResults([new[] { raw }], 1);
         });
-        string error = defect switch { "short-group-page" or "empty-group" => "INCOMPLETE_PAGE", "missing-id" => "INVALID_RESPONSE", _ => "LIMIT" };
+        string error = defect == "empty-group" ? "INCOMPLETE_PAGE" : "INVALID_RESPONSE";
         await Error(error, () => f.Catalog.SearchAsync(new("mg", "x", Limit: limit)));
         Check(f.Handler.Calls == 1);
     }
@@ -313,7 +376,7 @@ public static class MusicKwMgCatalogTests
             return Json(new { returnCode = "000000", resource = new[] { Mg() } });
         });
         var song = await f.Catalog.SongAsync(new("mg", "S1"));
-        var native = song.GetProperty("source_data");
+        var native = MusicSongFixture.Info(song);
         Check(NativeId(song) == "S1" && S(native, "songId") == "S1" &&
             S(native, "copyrightId") == "C1" && !song.TryGetProperty("id", out _));
         Check(S(native, "contentId") == "CONTENT1" && native.GetProperty("audioFormats")[0].GetProperty("asize").GetInt32() == 1048576);
@@ -395,14 +458,14 @@ public static class MusicKwMgCatalogTests
     {
         int number = 1;
         using var f = new Fixture(_ => platform == "kw" ? KwResults(Kw(number)) : MgResults([new[] { Mg(number) }], 1));
-        var first = await f.Catalog.SearchAsync(new(platform, "x", Limit: 1));
-        number = 2; var cached = await f.Catalog.SearchAsync(new(platform, "x", Limit: 1));
-        Check(first.GetRawText() == cached.GetRawText() && f.Handler.Calls == 1);
-        var next = await f.Catalog.SearchAsync(new(platform, "x", Limit: 1, Refresh: true));
-        Check(NativeId(SearchSong(platform, next.GetProperty("items")[0])) == (platform == "kw" ? "2" : "S2") &&
+        _ = await f.Catalog.SearchAsync(new(platform, "x", Limit: 1));
+        // Search results are cached by the search owner only; every catalog call reaches the platform.
+        number = 2; var again = await f.Catalog.SearchAsync(new(platform, "x", Limit: 1));
+        Check(NativeId(SearchSong(platform, again.GetProperty("items")[0])) == (platform == "kw" ? "2" : "S2") &&
             f.Handler.Calls == 2);
+        _ = await f.Catalog.SearchAsync(new(platform, "x", Limit: 1, Refresh: true)); Check(f.Handler.Calls == 3);
         f.Catalog.Invalidate(platform);
-        await f.Catalog.SearchAsync(new(platform, "x", Limit: 1)); Check(f.Handler.Calls == 3);
+        await f.Catalog.SearchAsync(new(platform, "x", Limit: 1)); Check(f.Handler.Calls == 4);
     }
     private static async Task Duplicates(string platform)
     {
@@ -412,11 +475,11 @@ public static class MusicKwMgCatalogTests
         Check(rows.GetArrayLength() == 2 && NativeId(rows[0]) == NativeId(rows[1]));
         Check(page.GetProperty("memberIds")[0].GetString() != page.GetProperty("memberIds")[1].GetString());
     }
-    private static async Task CountBudget(string platform)
+    private static async Task LargePlaylist(string platform)
     {
         using var f = new Fixture(r => PlaylistWire(platform, r, 10001));
-        await Error("LIMIT", () => f.Catalog.PlaylistAsync(new(platform, "42")));
-        Check(f.Handler.Calls == 1);
+        var page = await f.Catalog.PlaylistAsync(new(platform, "42"));
+        Check(page.GetProperty("items").GetArrayLength() == 100 && page.GetProperty("more").GetBoolean());
     }
     private static async Task RepeatedPage(string platform)
     {
@@ -587,9 +650,9 @@ public static class MusicKwMgCatalogTests
         Check(S(resolution, "installationId") == installationId && runtime.Payload is { });
         Check(S(resolution, "quality") == quality && S(runtime.Payload!.Value, "quality") == quality);
         var info = runtime.Payload!.Value.GetProperty("musicInfo");
-        Check(S(info, "source") == platform && S(info, "musicId") == NativeId(song));
-        if (platform == "mg") Check(S(info, "copyrightId") == S(song.GetProperty("source_data"), "copyrightId") &&
-            S(info, "contentId") == S(song.GetProperty("source_data"), "contentId") &&
+        Check(S(info, "source") == platform && S(info, "songmid") == NativeId(song));
+        if (platform == "mg") Check(S(info, "copyrightId") == S(MusicSongFixture.Info(song), "copyrightId") &&
+            S(info, "contentId") == S(MusicSongFixture.Info(song), "contentId") &&
             info.GetProperty("audioFormats")[0].GetProperty("asize").GetInt32() == 1048576);
         Check(!info.GetRawText().Contains("DO_NOT_PERSIST", StringComparison.Ordinal));
     }

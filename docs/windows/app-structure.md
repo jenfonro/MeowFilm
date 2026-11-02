@@ -25,7 +25,7 @@ Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口�
 | Composition | 本期能力注册、原生调度入口、公开 seam、导航与共同模型 |
 | Accounts | 原生授权、登录交接、账号资料权益和只读旧格式迁移 |
 | Platforms | 固定 HTTP／加密协议、来源元数据；`ClientContexts` 独立管理客户端身份、匿名登记、快照及唯一客户端 writer |
-| Catalog / Search / Recommendations | 目录、聚合搜索、发现及推荐消费者 |
+| Catalog / Search / Recommendations | 目录、搜索、发现及推荐消费者 |
 | Library / Sync | 歌单、队列、历史、当前本地曲库与显式同步 |
 | Playback / Lyrics | 实际播放编排、恢复、来源选择与歌词 |
 | PlaybackCache | 可淘汰播放缓存、授权复核、容量及读取生命周期 |
