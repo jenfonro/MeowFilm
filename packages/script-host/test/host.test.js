@@ -328,20 +328,19 @@ test('disable/uninstall clean background handles, reinstall does not reuse a gen
   await assert.rejects(host.invoke({ ...target(), generation: second.generation }), { code: 'STALE_SESSION' });
 });
 
-test('global/instance/site request budgets reject only excess work and recover on cancellation', async t => {
-  const host = hostFor(t, { limits: { maxSiteInFlight: 1, maxInstanceInFlight: 2, maxInFlight: 3 } });
+test('concurrent scoped requests are cancelled and drained without shared count quotas', async t => {
+  const host = hostFor(t);
   const source = lxScript({ handler: 'async () => new Promise(()=>{})' });
   await host.install({ installationId: 'a', source, enabled: true });
   await host.install({ installationId: 'b', source, enabled: true });
   const controller = new AbortController();
-  const a = assert.rejects(host.invoke(target(), { signal: controller.signal }), { code: 'CANCELLED' });
-  await assert.rejects(host.invoke(target()), { code: 'RESOURCE_LIMIT' });
-  const a2 = assert.rejects(host.invoke(target('a', 'tx'), { signal: controller.signal }), { code: 'CANCELLED' });
-  await assert.rejects(host.invoke(target('a', 'local')), { code: 'RESOURCE_LIMIT' });
-  const b = assert.rejects(host.invoke(target('b'), { signal: controller.signal }), { code: 'CANCELLED' });
-  await assert.rejects(host.invoke(target('b', 'tx')), { code: 'RESOURCE_LIMIT' });
-  controller.abort(); await Promise.all([a, a2, b]);
+  const requests = Array.from({length:48}, (_,i) => assert.rejects(
+    host.invoke(target(i % 2 ? 'a' : 'b', ['kw','tx','local'][i % 3]), {signal:controller.signal}),
+    {code:'CANCELLED'}));
+  assert.equal(host.stats().activeRequests, 48);
+  controller.abort(); await Promise.all(requests);
   assert.equal(host.stats().activeRequests, 0);
+  assert.equal(host.stats().pendingAdapterTasks, 0);
 });
 
 test('byte utilities, offset, encoding, zlib, AES and LX RSA operate on real bytes', async t => {
@@ -419,8 +418,8 @@ test('uncooperative adapter tasks stay visible after bounded close, then retire 
   assert.deepEqual(await host.close(), closed);
 });
 
-test('timer/network handle budgets fail explicitly and release request-owned handles', async t => {
-  const host = hostFor(t, { limits: { maxTimers: 1, maxNetworkRequests: 1 } });
+test('timer isolation and request-owned network cleanup remain independent', async t => {
+  const host = hostFor(t, { limits: { maxTimers: 1 } });
   await host.install({ installationId: 'a', enabled: true, source: lxScript({
     handler: `async ({info}) => {
       if(info.musicInfo.timer) {
@@ -428,12 +427,13 @@ test('timer/network handle budgets fail explicitly and release request-owned han
       } else {
         lx.request('https://fixture.invalid/1',{},()=>{});
         lx.request('https://fixture.invalid/2',{},()=>{});
+        return 'queued';
       }
     }`,
   }) });
   await assert.rejects(host.invoke(target('a', 'kw', { timer: true })), { code: 'RESOURCE_LIMIT' });
   assert.equal(host.stats().timers, 0);
-  await assert.rejects(host.invoke(target()), { code: 'RESOURCE_LIMIT' });
+  assert.equal(await host.invoke(target()), 'queued');
   assert.equal(host.stats().networkRequests, 0);
 });
 

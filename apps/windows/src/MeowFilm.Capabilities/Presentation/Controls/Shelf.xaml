@@ -5,7 +5,8 @@
  PreviewMouseWheel="OnPreviewMouseWheel" PreviewMouseLeftButtonDown="OnPreviewMouseLeftButtonDown"
  PreviewMouseMove="OnPreviewMouseMove" PreviewMouseLeftButtonUp="OnPreviewMouseLeftButtonUp"
  LostMouseCapture="OnLostMouseCapture" PreviewKeyDown="OnPreviewKeyDown"
- PreviewTouchDown="OnPreviewTouchDown">
+ PreviewTouchDown="OnPreviewTouchDown" PreviewTouchUp="OnPreviewTouchUp"
+ LostTouchCapture="OnLostTouchCapture">
  <UserControl.Resources><ResourceDictionary><ResourceDictionary.MergedDictionaries><ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/></ResourceDictionary.MergedDictionaries>
   <Style x:Key="ShelfArrow" TargetType="Button">
    <Setter Property="Width" Value="28"/><Setter Property="Height" Value="48"/><Setter Property="Margin" Value="0"/>
@@ -25,7 +26,7 @@
   </Style>
  </ResourceDictionary></UserControl.Resources>
  <Grid Margin="-32,0" Background="Transparent">
-  <ListBox x:Name="ItemsHost" Margin="32,0" ItemsSource="{Binding Items}"
+  <ListBox x:Name="ItemsHost" Margin="32,0" ItemsSource="{Binding ItemsSource,ElementName=ShelfRoot}"
    ItemTemplate="{Binding CardTemplate,ElementName=ShelfRoot}" Background="Transparent" BorderThickness="0"
    Focusable="False" IsTabStop="False" SelectionMode="Single"
    ScrollViewer.HorizontalScrollBarVisibility="Hidden" ScrollViewer.VerticalScrollBarVisibility="Disabled"

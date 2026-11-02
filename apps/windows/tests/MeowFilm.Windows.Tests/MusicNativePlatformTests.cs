@@ -47,11 +47,11 @@ public static class MusicNativePlatformTests
                 await using var clients = new MusicClientContextFixture(transport);
                 if (trial)
                     await Error("PLAYBACK_RESTRICTED", () => new OfficialMusicAudio(transport, clients.Owner).ResolveAsync(DeviceSession(),
-                        new() { ["musicId"] = "123" }, ["320k"], rights, default, () => { }));
+                        new() { ["songmid"] = "123" }, ["320k"], rights, default, () => { }));
                 else
                 {
                     var result = await new OfficialMusicAudio(transport, clients.Owner).ResolveAsync(DeviceSession(),
-                        new() { ["musicId"] = "123" }, ["320k"], rights, default, () => { });
+                        new() { ["songmid"] = "123" }, ["320k"], rights, default, () => { });
                     Equal("320k", result.RequestQuality); Equal("128k", result.ActualQuality); True(result.QualityVerified);
                 }
             }
@@ -113,6 +113,10 @@ public static class MusicNativePlatformTests
             Equal("featured,playlists,rankings,new-songs,cube,artists,vip",
                 string.Join(",", wy.GetProperty("channelKinds").EnumerateArray().Select(kind => kind.GetString())));
             True(!d.GetProperty("platforms").GetProperty("tx").GetProperty("home").GetBoolean());
+            var limits = d.GetProperty("limits");
+            Equal(100, limits.GetProperty("maxPageSize").GetInt32());
+            Equal(4 * 1024 * 1024, limits.GetProperty("maxResponseBytes").GetInt32());
+            Equal(2, limits.EnumerateObject().Count());
             Equal(0, f.Calls); return Task.CompletedTask;
         });
         yield return Case("wy search real eapi envelope and lossless song identity", async () =>
@@ -129,6 +133,18 @@ public static class MusicNativePlatformTests
             Equal(185d, page.GetProperty("items")[0].GetProperty("duration").GetDouble());
             Equal(3L, page.GetProperty("total").GetInt64()); Equal(1, f.Calls);
         });
+        yield return Case("native short search pages without an explicit cursor are terminal", async () =>
+        {
+            foreach (string platform in new[] { "wy", "kg" }) await ShortNativeSearch(platform, false);
+        });
+        yield return Case("qq short nonterminal search page follows nextpage", async () =>
+        {
+            await ShortNativeSearch("tx", false);
+        });
+        yield return Case("native empty search pages against a larger total are terminal", async () =>
+        {
+            foreach (string platform in new[] { "wy", "tx", "kg" }) await ShortNativeSearch(platform, true);
+        });
         yield return Case("qq search uses raw native mid numeric id and no signature fallback", async () =>
         {
             using var f = new Fixture(req =>
@@ -136,11 +152,209 @@ public static class MusicNativePlatformTests
                 var body = RequestJson(req); var call = body["req_0"]!;
                 Equal("music.search.SearchCgiService", S(call["module"])); Equal("DoSearchForQQMusicMobile", S(call["method"]));
                 Equal("0", S(call["param"]!["search_type"])); True(body["comm"]!["authst"] is null);
+                Equal("SYNTHETIC_Q36", S(body["comm"]!["QIMEI36"]));
+                Equal("SYNTHETIC_UID", S(body["comm"]!["uid"])); Equal("SYNTHETIC_SID", S(body["comm"]!["sid"]));
+                True(long.TryParse(S(call["param"]!["searchid"]), out var searchId) &&
+                    searchId >= 18014398509481984L && searchId <= 378302368785521663L);
+                Equal("QQMusic 20090008(android 15)", req.Headers.GetValues("User-Agent").Single());
                 return Tx(J(new { meta = new { sum = 1, nextpage = -1 }, body = new { item_song = new[] { Qq() } } }));
             });
             var r = await f.Catalog.SearchAsync(new("tx", "q"));
             Song(r.GetProperty("items")[0], "tx", "midA001");
-            Equal(Huge, r.GetProperty("items")[0].GetProperty("source_data").GetProperty("qqSongId").GetString());
+            Equal(Huge, MusicSongFixture.Info(r.GetProperty("items")[0]).GetProperty("qqSongId").GetString());
+        });
+        yield return Case("qq songs and playlists share one anonymous bootstrap and reuse the current session", async () =>
+        {
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var f = new Fixture(async (request, _) =>
+            {
+                if (request.RequestUri!.Host == "api.tencentmusic.com")
+                { entered.TrySetResult(); await release.Task; }
+                return QqClientResponse(request) ?? QqSearchResponse(request);
+            }, readyQq: false);
+            Equal(0, f.Calls);
+            var songs = f.Catalog.SearchAsync(new("tx", "词"));
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var playlists = f.Catalog.SearchAsync(new("tx", "词", MusicSearchKind.Playlists));
+            var deviceWaiter = f.Clients.Owner.EnsureQqAsync(f.Clients.Protocol, default);
+            try { Equal(1, f.Calls); True(!songs.IsCompleted && !playlists.IsCompleted); }
+            finally { release.TrySetResult(); }
+            var pages = await Task.WhenAll(songs, playlists).WaitAsync(TimeSpan.FromSeconds(5));
+            Song(pages[0].GetProperty("items")[0], "tx", "midA001");
+            Equal("77", pages[1].GetProperty("items")[0].GetProperty("id").GetString());
+            Equal(4, f.Calls);
+            var device = await f.Clients.Owner.AcquireQqAsync();
+            True(device.Qimei is not null && device.SessionCurrent(DateTimeOffset.UtcNow));
+            True(ReferenceEquals(device, await deviceWaiter));
+            await f.Catalog.SearchAsync(new("tx", "词"));
+            await f.Catalog.SearchAsync(new("tx", "词", MusicSearchKind.Playlists));
+            Equal(6, f.Calls);
+            True(ReferenceEquals(device, await f.Clients.Owner.AcquireQqAsync()));
+        });
+        foreach (var phase in new[] { "qimei", "session" })
+            yield return Case("qq " + phase + " bootstrap failure never searches or falls back", async () =>
+            {
+                using var f = new Fixture(request =>
+                {
+                    bool qimei = request.RequestUri!.Host == "api.tencentmusic.com";
+                    if ((phase == "qimei") == qimei)
+                        return Json(J(new { code = 1, req_0 = new { code = 1 } }));
+                    return QqClientResponse(request) ?? throw new InvalidOperationException("Unexpected search after failed bootstrap");
+                }, readyQq: false);
+                await Error("UPSTREAM_ERROR", () => f.Catalog.SearchAsync(new("tx", "词")));
+                Equal(phase == "qimei" ? 1 : 2, f.Calls);
+                var device = await f.Clients.Owner.AcquireQqAsync();
+                True(device.Session is null && (device.Qimei is not null) == (phase == "session"));
+            });
+        yield return Case("qq cancelling one search waiter retains the other anonymous bootstrap consumer", async () =>
+        {
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var f = new Fixture(async (request, _) =>
+            {
+                if (request.RequestUri!.Host == "api.tencentmusic.com")
+                { entered.TrySetResult(); await release.Task; }
+                return QqClientResponse(request) ?? QqSearchResponse(request);
+            }, readyQq: false);
+            using var cancel = new CancellationTokenSource();
+            var songs = f.Catalog.SearchAsync(new("tx", "词"), cancel.Token);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var playlists = f.Catalog.SearchAsync(new("tx", "词", MusicSearchKind.Playlists));
+            try
+            {
+                cancel.Cancel();
+                await Error("CANCELLED", () => songs);
+                True(!playlists.IsCompleted); Equal(1, f.Calls);
+            }
+            finally { release.TrySetResult(); }
+            Equal(1, (await playlists.WaitAsync(TimeSpan.FromSeconds(5))).GetProperty("items").GetArrayLength());
+            Equal(3, f.Calls);
+        });
+        yield return Case("qq search account authorization remains distinct from the anonymous device session", async () =>
+        {
+            using var f = new Fixture(request =>
+            {
+                var comm = RequestJson(request)["comm"]!;
+                Equal(Huge, S(comm["qq"])); Equal("SYNTHETIC_ONLY", S(comm["authst"]));
+                Equal("SYNTHETIC_UID", S(comm["uid"])); Equal("SYNTHETIC_SID", S(comm["sid"]));
+                True(S(comm["traceid"]).StartsWith("10002_" + Huge + "_", StringComparison.Ordinal));
+                True(!request.Headers.Contains("Cookie") && !request.Headers.Contains("Authorization"));
+                return QqSearchResponse(request);
+            }, Session("tx"));
+            Song((await f.Catalog.SearchAsync(new("tx", "词"))).GetProperty("items")[0], "tx", "midA001");
+            Equal(1, f.Calls);
+        });
+        yield return Case("qq authoritative client reload rejects an old search response without replay", async () =>
+        {
+            Fixture? f = null;
+            using (f = new Fixture(async (request, _) =>
+            {
+                await f!.Clients.Owner.ReloadAsync();
+                return QqSearchResponse(request);
+            }))
+            {
+                await Error("STORAGE_CONFLICT", () => f.Catalog.SearchAsync(new("tx", "词")));
+                Equal(1, f.Calls);
+            }
+        });
+        yield return Case("qq signature-required search remains an explicit error with no alternate request", async () =>
+        {
+            using var f = new Fixture(_ => Json(J(new { code = 0, req_0 = new { code = 2000 } })));
+            await Error("SIGNATURE_REQUIRED", () => f.Catalog.SearchAsync(new("tx", "词")));
+            Equal(1, f.Calls);
+        });
+        yield return Case("qq search uses the shared client protocol clock", async () =>
+        {
+            var now = new DateTimeOffset(2026, 10, 20, 12, 0, 0, TimeSpan.Zero);
+            using var http = MusicPlatformHttp.CreateWithHandler(new Handler((request, _) =>
+            {
+                True(S(RequestJson(request)["comm"]!["traceid"]).EndsWith("_" + now.ToUnixTimeSeconds(), StringComparison.Ordinal));
+                return Task.FromResult(QqSearchResponse(request));
+            }));
+            await using var clients = new MusicClientContextFixture(http, clock: new FixedClock(now));
+            await clients.SeedQqAsync();
+            using var catalog = new MusicPlatformCatalog(new Source(), http, clients.Owner, clientProtocol: clients.Protocol);
+            Equal(1, (await catalog.SearchAsync(new("tx", "词"))).GetProperty("items").GetArrayLength());
+        });
+        yield return Case("qq search refreshes expired session and QIMEI through the same client owner", async () =>
+        {
+            var clock = new FixedClock(new DateTimeOffset(2026, 10, 20, 12, 0, 0, TimeSpan.Zero));
+            List<string> steps = [];
+            using var http = MusicPlatformHttp.CreateWithHandler(new Handler((request, _) =>
+            {
+                steps.Add(request.RequestUri!.Host == "api.tencentmusic.com" ? "QIMEI" : S(RequestJson(request)["req_0"]!["method"]));
+                return Task.FromResult(QqClientResponse(request) ?? QqSearchResponse(request));
+            }));
+            await using var clients = new MusicClientContextFixture(http, clock: clock);
+            await clients.SeedQqAsync();
+            using var catalog = new MusicPlatformCatalog(new Source(), http, clients.Owner, clientProtocol: clients.Protocol);
+            await catalog.SearchAsync(new("tx", "词"));
+            var first = await clients.Owner.AcquireQqAsync();
+            clock.Advance(TimeSpan.FromHours(12));
+            await catalog.SearchAsync(new("tx", "词", MusicSearchKind.Playlists));
+            var midnight = await clients.Owner.AcquireQqAsync();
+            Equal(first.Qimei, midnight.Qimei);
+            Equal(first.Session!.Generation + 1, midnight.Session!.Generation);
+            clock.Advance(TimeSpan.FromHours(25));
+            await catalog.SearchAsync(new("tx", "词"));
+            var next = await clients.Owner.AcquireQqAsync();
+            Equal(first.Qimei!.Generation + 1, next.Qimei!.Generation);
+            Equal(next.Qimei.Generation, next.Session!.QimeiGeneration);
+            Equal("DoSearchForQQMusicMobile,GetSession,DoSearchForQQMusicMobile,QIMEI,GetSession,DoSearchForQQMusicMobile",
+                string.Join(",", steps));
+        });
+        yield return Case("qq exact song and playlist reads do not require anonymous bootstrap", async () =>
+        {
+            using var f = new Fixture(request => S(RequestJson(request)["req_0"]!["method"]) switch
+            {
+                "CgiGetTrackInfo" => Tx(J(new { tracks = new[] { Qq() } })),
+                "CgiGetDiss" => Tx(J(new { total_song_num = 1, hasmore = 0, songlist_size = 1,
+                    dirinfo = new { id = 77, title = "歌单" }, songlist = new[] { Qq() } })),
+                _ => throw new InvalidOperationException("Unexpected anonymous bootstrap")
+            }, readyQq: false);
+            Song(await f.Catalog.SongAsync(new("tx", "midA001")), "tx", "midA001");
+            Song((await f.Catalog.PlaylistAsync(new("tx", "77"))).GetProperty("items")[0], "tx", "midA001");
+            Equal(2, f.Calls);
+            True((await f.Clients.Owner.AcquireQqAsync()).Qimei is null);
+        });
+        yield return Case("qq application shutdown drains a noncooperative anonymous bootstrap before release", async () =>
+        {
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            int calls = 0;
+            await using var store = new MusicClientContextFixture.MemoryStore();
+            await using var application = new MusicNativeApplication(store, new NoRuntime(), new Handler(async (request, token) =>
+            {
+                Interlocked.Increment(ref calls);
+                Equal("api.tencentmusic.com", request.RequestUri!.Host);
+                using var registration = token.Register(() => cancelled.TrySetResult());
+                entered.TrySetResult(); await release.Task;
+                return QqClientResponse(request)!;
+            }));
+            await application.InitializeAsync();
+            var settings = (await application.ExecuteAsync("music.search.settings.get")).GetProperty("settings");
+            var songSettings = JsonNode.Parse(settings.GetProperty("songs").GetRawText())!.AsObject();
+            songSettings["enabled"] = new JsonArray("tx");
+            var saved = await application.ExecuteAsync("music.search.settings.save", new
+            {
+                ifRevision = settings.GetProperty("revision").GetInt64(),
+                songs = songSettings, playlists = settings.GetProperty("playlists")
+            });
+            True(saved.GetProperty("ok").GetBoolean());
+            var start = await application.ExecuteAsync("music.search.start", new { keyword = "词", kind = "songs", platforms = new[] { "tx" } });
+            True(start.GetProperty("ok").GetBoolean());
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var preparation = application.PrepareShutdownAsync();
+            try
+            {
+                await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                True(!preparation.IsCompleted); Equal(1, calls);
+            }
+            finally { release.TrySetResult(); }
+            await preparation.WaitAsync(TimeSpan.FromSeconds(5));
+            Equal(1, calls);
         });
         yield return Case("kg search signs actual query and maps hash and units", async () =>
         {
@@ -152,7 +366,134 @@ public static class MusicNativePlatformTests
             });
             var r = await f.Catalog.SearchAsync(new("kg", "曲"));
             Song(r.GetProperty("items")[0], "kg", KgHash);
-            Equal(Huge, r.GetProperty("items")[0].GetProperty("source_data").GetProperty("albumAudioId").GetString());
+            Equal(Huge, MusicSongFixture.Info(r.GetProperty("items")[0]).GetProperty("albumAudioId").GetString());
+        });
+        yield return Case("kg search gid maps card metadata and reads the same paged global playlist", async () =>
+        {
+            const string globalId = "collection_3_42_287_0";
+            using var f = new Fixture(request =>
+            {
+                VerifyKg(request);
+                if (request.RequestUri!.AbsolutePath == "/v1/search/special")
+                    return Kg(J(new { total = 1, lists = new[] { new { specialid = 99, gid = globalId, specialname = "搜索歌单",
+                        img = "https://images.invalid/{size}/list.jpg", song_count = 2, nickname = "创建者" } } }));
+                Equal("/pubsongs/v2/get_other_list_file_nofilt", request.RequestUri.AbsolutePath);
+                var query = Query(request.RequestUri);
+                Equal(globalId, query["global_collection_id"]); Equal("1", query["pagesize"]);
+                var song = KgSong(); if (query["begin_idx"] == "1") song["FileHash"] = new string('B', 32);
+                return Kg(J(new { list_info = new { global_collection_id = globalId, count = 2,
+                    name = "搜索歌单", pic = "https://images.invalid/{size}/detail.jpg", version = 1 }, songs = new[] { song } }));
+            });
+            var card = (await f.Catalog.SearchAsync(new("kg", "词", MusicSearchKind.Playlists))).GetProperty("items")[0];
+            Equal(globalId, card.GetProperty("id").GetString()); Equal("搜索歌单", card.GetProperty("name").GetString());
+            Equal("https://images.invalid/480/list.jpg", card.GetProperty("cover").GetString());
+            Equal(2L, card.GetProperty("count").GetInt64()); Equal("创建者", card.GetProperty("creator").GetString());
+            var first = await f.Catalog.PlaylistAsync(new("kg", card.GetProperty("id").GetString()!, Limit: 1));
+            Song(first.GetProperty("items")[0], "kg", KgHash); True(first.GetProperty("more").GetBoolean());
+            Equal("https://images.invalid/480/detail.jpg", first.GetProperty("cover").GetString());
+            var next = await f.Catalog.PlaylistAsync(new("kg", globalId, Page: 2, Limit: 1, Snapshot: first.GetProperty("snapshot").GetString()));
+            Song(next.GetProperty("items")[0], "kg", new string('B', 32));
+            True(!next.GetProperty("more").GetBoolean()); Equal(globalId, next.GetProperty("id").GetString());
+            Equal(first.GetProperty("snapshot").GetString(), next.GetProperty("snapshot").GetString());
+            Equal(3, f.Calls);
+        });
+        yield return Case("kg playlist page without list info keeps total and snapshot while leaving metadata empty", async () =>
+        {
+            const string globalId = "collection_3_42_287_0";
+            using var f = new Fixture(request =>
+            {
+                VerifyKg(request); Equal("/pubsongs/v2/get_other_list_file_nofilt", request.RequestUri!.AbsolutePath);
+                var query = Query(request.RequestUri); Equal(globalId, query["global_collection_id"]);
+                var song = KgSong(); if (query["begin_idx"] == "1") song["FileHash"] = new string('B', 32);
+                return query["begin_idx"] == "0"
+                    ? Kg(J(new { list_info = new { global_collection_id = globalId, name = "搜索歌单", version = 1 },
+                        count = 2, songs = new[] { song } }))
+                    : Kg(J(new { list_info = (object?)null, count = 2, songs = new[] { song } }));
+            });
+            var first = await f.Catalog.PlaylistAsync(new("kg", globalId, Limit: 1));
+            Equal("搜索歌单", first.GetProperty("name").GetString());
+            Equal(2L, first.GetProperty("total").GetInt64());
+            var next = await f.Catalog.PlaylistAsync(new("kg", globalId, Page: 2, Limit: 1,
+                Snapshot: first.GetProperty("snapshot").GetString()));
+            Song(next.GetProperty("items")[0], "kg", new string('B', 32));
+            Equal(2L, next.GetProperty("total").GetInt64()); Equal("", next.GetProperty("name").GetString());
+            Equal("", next.GetProperty("cover").GetString());
+            Equal(first.GetProperty("snapshot").GetString(), next.GetProperty("snapshot").GetString());
+            Equal(2, f.Calls);
+        });
+        foreach (var (identity, code) in new[]
+        {
+            (new JsonObject { ["specialid"] = 99 }, "INVALID_RESPONSE"),
+            (new JsonObject { ["gid"] = "../99" }, "INVALID_RESPONSE"),
+            (new JsonObject { ["gid"] = "id_fake" }, "IDENTITY_MISMATCH"),
+            (new JsonObject { ["gid"] = "collection-A", ["global_collection_id"] = "collection-B" }, "IDENTITY_MISMATCH")
+        })
+            yield return Case("kg search rejects unconfirmed global identity " + identity.ToJsonString(), async () =>
+            {
+                using var f = new Fixture(_ => Kg(J(new { total = 1, lists = new[] { identity } })));
+                await Error(code, () => f.Catalog.SearchAsync(new("kg", "词", MusicSearchKind.Playlists)));
+                Equal(1, f.Calls);
+            });
+        yield return Case("kg agreeing search and detail global fields preserve one identity", async () =>
+        {
+            using var f = new Fixture(_ => Kg(J(new { total = 1, lists = new[] {
+                new { specialid = 99, gid = "collection-A", global_collection_id = "collection-A", specialname = "搜索歌单" } } })));
+            Equal("collection-A", (await f.Catalog.SearchAsync(new("kg", "词", MusicSearchKind.Playlists)))
+                .GetProperty("items")[0].GetProperty("id").GetString());
+            Equal(1, f.Calls);
+        });
+        yield return Case("kg search playlist detail rejects a different declared global collection", async () =>
+        {
+            using var f = new Fixture(_ => Kg(J(new { list_info = new { global_collection_id = "collection-B", count = 0, name = "另一歌单" } })));
+            await Error("IDENTITY_MISMATCH", () => f.Catalog.PlaylistAsync(new("kg", "collection-A")));
+            Equal(1, f.Calls);
+        });
+        yield return Case("kg search playlist detail rejects disagreeing total counts", async () =>
+        {
+            using var f = new Fixture(_ => Kg(J(new { list_info = new { global_collection_id = "collection-A", count = 2, name = "搜索歌单" },
+                count = 3, songs = new[] { KgSong() } })));
+            await Error("INVALID_RESPONSE", () => f.Catalog.PlaylistAsync(new("kg", "collection-A")));
+            Equal(1, f.Calls);
+        });
+        foreach (string platform in new[] { "wy", "tx", "kg" })
+            foreach (var kind in new[] { MusicSearchKind.Songs, MusicSearchKind.Playlists })
+                yield return Case(platform + " " + kind + " native search continues beyond one hundred pages", async () =>
+                {
+                    bool songs = kind == MusicSearchKind.Songs;
+                    using var f = new Fixture(req =>
+                    {
+                        if (platform == "wy")
+                        {
+                            var (_, body) = Eapi(req); Equal("100", S(body["offset"]));
+                            return songs ? WySearch([Wy("1")], 102) :
+                                Json(J(new { code = 200, result = new { playlistCount = 102,
+                                    playlists = new[] { new { id = 1, name = "Synthetic list" } } } }));
+                        }
+                        if (platform == "tx")
+                        {
+                            Equal("101", S(RequestJson(req)["req_0"]!["param"]!["page_num"]));
+                            return Tx(J(new { meta = new { sum = 102, nextpage = 102 },
+                                body = new JsonObject { [songs ? "item_song" : "item_songlist"] =
+                                    new JsonArray(songs ? Qq() : J(new { id = 1, title = "Synthetic list" })) } }));
+                        }
+                        VerifyKg(req); Equal("101", Query(req.RequestUri!)["page"]);
+                        return Kg(new JsonObject { ["total"] = 102, [songs ? "lists" : "info"] =
+                            new JsonArray(songs ? KgSong() : J(new { global_collection_id = "fixture", name = "Synthetic list" })) });
+                    });
+                    var page = await f.Catalog.SearchAsync(new(platform, "fixture", kind, Page: 101, Limit: 1));
+                    Equal(1, page.GetProperty("items").GetArrayLength());
+                    True(page.GetProperty("more").GetBoolean());
+                    Equal(102, page.GetProperty("continuation").GetProperty("page").GetInt32());
+                });
+        yield return Case("catalog operation owns deadline and ignores unused provider field quotas", async () =>
+        {
+            using var f = new Fixture((_, _) => Task.FromResult(Json(J(new
+            {
+                code = 200, result = new { songCount = 1, songs = new[] { Wy("1") } },
+                unusedText = new string('x', 60000), unusedRows = Enumerable.Range(0, 12000).ToArray()
+            }))), timeout: TimeSpan.FromMinutes(2));
+            var page = await f.Catalog.SearchAsync(new("wy", "fixture", Limit: 1));
+            Equal(1, page.GetProperty("items").GetArrayLength());
         });
         yield return Case("kg public search tolerates absent album but not malformed nonempty identity", async () =>
         {
@@ -161,7 +502,7 @@ public static class MusicNativePlatformTests
                 return Kg(J(new { total = 1, lists = new[] { row } }));
             });
             var reply = await f.Catalog.SearchAsync(new("kg", "曲"));
-            Equal("0", reply.GetProperty("items")[0].GetProperty("source_data").GetProperty("albumId").GetString());
+            Equal("0", MusicSongFixture.Info(reply.GetProperty("items")[0]).GetProperty("albumId").GetString());
             Song(reply.GetProperty("items")[0], "kg", KgHash);
             using var bad = new Fixture(_ => {
                 var row = KgSong(); row["album_id"] = "-1";
@@ -327,7 +668,7 @@ public static class MusicNativePlatformTests
                 Equal(2, f.Calls);
             }
         });
-        yield return Case("wy playlist maximum page uses one bounded detail batch without prefix prefetch", async () =>
+        yield return Case("wy playlist page 100 uses one detail batch without prefix prefetch", async () =>
         {
             var ids = Enumerable.Range(1, 10000).Select(id => id.ToString(System.Globalization.CultureInfo.InvariantCulture)).ToArray();
             using var f = new Fixture(req =>
@@ -470,8 +811,18 @@ public static class MusicNativePlatformTests
             Equal(1, r.GetProperty("entries").GetArrayLength());
             True(!r.GetProperty("entries")[0].GetProperty("available").GetBoolean());
             Equal("AUTH_REQUIRED", r.GetProperty("entries")[0].GetProperty("errorCode").GetString());
+            True(r.GetProperty("entries")[0].GetProperty("requiresAccount").GetBoolean());
+            True(!r.GetProperty("entries")[0].GetProperty("display").GetBoolean());
             Equal("preview", r.GetProperty("entries")[0].GetProperty("presentation").GetString());
             Equal(1, f.Calls);
+
+            using var signed = new Fixture(_ => Home(false, "1",
+                J(new { resourceType = "dailysongs", name = "每日推荐" })), Session("wy"));
+            var signedEntry = (await signed.Catalog.HomeAsync(new("wy"))).GetProperty("entries")[0];
+            True(signedEntry.GetProperty("available").GetBoolean() &&
+                signedEntry.GetProperty("requiresAccount").GetBoolean() &&
+                signedEntry.GetProperty("display").GetBoolean());
+            Equal(1, signed.Calls);
         });
         yield return Case("home daily preserves provider calendar and expanded caption without inventing songs", async () =>
         {
@@ -611,7 +962,7 @@ public static class MusicNativePlatformTests
             var fresh = await f.Catalog.ChannelAsync(new("wy", "newsong"));
             Song(fresh.GetProperty("sections")[0].GetProperty("items")[0], "wy", "1");
         });
-        yield return Case("artist channel keeps grouped selection token and bounded continuation", async () =>
+        yield return Case("artist channel keeps grouped selection token and advancing continuation", async () =>
         {
             int reads = 0;
             using var f = new Fixture(req =>
@@ -654,6 +1005,17 @@ public static class MusicNativePlatformTests
             await Error("SNAPSHOT_CHANGED", () => f.Catalog.ChannelAsync(new("wy", "artist",
                 Continuation: continuation, Tag: "96:1:65")));
             await Error("INVALID_REQUEST", () => f.Catalog.ChannelAsync(new("wy", "artist", Tag: "96:x:65")));
+        });
+        yield return Case("artist continuation supports large offsets without truncation or integer overflow", async () =>
+        {
+            using var f = new Fixture(req => req.RequestUri!.AbsolutePath.Contains("position/show", StringComparison.Ordinal)
+                ? Directory() : Json(J(new { code = 200, artists = new[] { new { id = "1", name = "歌手" } }, more = true })));
+            var first = await f.Catalog.ChannelAsync(new("wy", "artist"));
+            var cursor = JsonNode.Parse(first.GetProperty("continuation").GetRawText())!.AsObject();
+            cursor["offset"] = (long)int.MaxValue + 40;
+            var next = await f.Catalog.ChannelAsync(new("wy", "artist",
+                Continuation: JsonSerializer.SerializeToElement(cursor)));
+            Equal((long)int.MaxValue + 41, next.GetProperty("continuation").GetProperty("offset").GetInt64());
         });
         yield return Case("VIP channel uses native recommendation and filters explicit member rankings", async () =>
         {
@@ -799,6 +1161,38 @@ public static class MusicNativePlatformTests
                 playlist = new[] { new { id = "1", name = "列表", creator = new { userId = Huge } } } })), Session("wy"));
             var first = await f.Catalog.PersonalPlaylistsAsync(new("wy", Limit: 1));
             await Error("PAGINATION_STALLED", () => f.Catalog.PersonalPlaylistsAsync(new("wy", Page: 2, Limit: 1, Continuation: first.GetProperty("continuation"))));
+        });
+        yield return Case("personal directory retains a large identity cursor across later pages", async () =>
+        {
+            var calls = 0;
+            using var f = new Fixture(_ => Json(J(new { code = 200, more = true,
+                playlist = new[] { new { id = (++calls + 40000).ToString(), name = "列表", creator = new { userId = Huge } } } })), Session("wy"));
+            var first = await f.Catalog.PersonalPlaylistsAsync(new("wy", Limit: 1));
+            var cursor = JsonNode.Parse(first.GetProperty("continuation").GetRawText())!.AsObject();
+            cursor["page"] = 30001;
+            cursor["seen"] = JsonSerializer.SerializeToNode(Enumerable.Range(1, 30000).Select(i => i.ToString("D20")).ToArray());
+            var next = await f.Catalog.PersonalPlaylistsAsync(new("wy", Page: 30001, Limit: 1,
+                Continuation: JsonSerializer.SerializeToElement(cursor)));
+            True(Encoding.UTF8.GetByteCount(next.GetRawText()) > 512 * 1024);
+            Equal(30001, next.GetProperty("continuation").GetProperty("seen").GetArrayLength());
+            var tail = await f.Catalog.PersonalPlaylistsAsync(new("wy", Page: 30002, Limit: 1,
+                Continuation: next.GetProperty("continuation")));
+            Equal(30002, tail.GetProperty("continuation").GetProperty("seen").GetArrayLength());
+            Equal(3, calls);
+        });
+        yield return Case("catalog returns a complete large normalized page without requiring cache admission", async () =>
+        {
+            var songs = Enumerable.Range(1, 280).Select(i =>
+            {
+                var song = Wy(i.ToString()); song["name"] = new string('x', 4096); return song;
+            }).ToArray();
+            using var f = new Fixture(_ => Json(J(new { code = 200, album = new { id = "1", name = "专辑", size = songs.Length }, songs })));
+            var first = await f.Catalog.AlbumAsync(new("wy", "1"));
+            True(Encoding.UTF8.GetByteCount(first.GetRawText()) > 2 * 1024 * 1024);
+            Equal(songs.Length, first.GetProperty("items").GetArrayLength());
+            var second = await f.Catalog.AlbumAsync(new("wy", "1"));
+            Equal(songs.Length, second.GetProperty("items").GetArrayLength());
+            Equal(2, f.Calls);
         });
         yield return Case("personal continuation revoked before sending on account change", async () =>
         {
@@ -1067,7 +1461,7 @@ public static class MusicNativePlatformTests
             var raw = Wy("1"); raw["al"]!["picUrl"] = "https://images.invalid/a?token=SYNTHETIC_ONLY";
             using var f = new Fixture(_ => WySearch([raw], 1));
             var r = (await f.Catalog.SearchAsync(new("wy", "x"))).GetProperty("items")[0];
-            Equal("", r.GetProperty("cover_url").GetString()); True(!r.GetProperty("source_data").TryGetProperty("img", out _));
+            Equal("", r.GetProperty("cover_url").GetString()); True(!MusicSongFixture.Info(r).TryGetProperty("img", out _));
             True(!r.GetRawText().Contains("SYNTHETIC_ONLY", StringComparison.Ordinal));
         });
         yield return Case("wy public thumbnail artwork survives home normalization without storing queries", async () =>
@@ -1085,11 +1479,109 @@ public static class MusicNativePlatformTests
             foreach (var card in cards)
             {
                 Equal(original, card.Cover);
-                Equal(original, card.Song!.Raw.GetProperty("source_data").GetProperty("img").GetString());
-                Equal(original, card.Song.Raw.GetProperty("sources")[0].GetProperty("cover_url").GetString());
+                Equal(original, MusicSongFixture.Info(card.Song!.Raw).GetProperty("img").GetString());
                 True(!card.Song.Raw.GetRawText().Contains("imageView", StringComparison.Ordinal));
             }
             Equal("1", cards[0].ActionId); Equal("2", cards[1].ActionId);
+        });
+        yield return Case("wy album-logo entries preserve official decoration and upgrade trusted artwork to TLS", async () =>
+        {
+            const string decoration = "http://p1.music.126.net/synthetic-gradient/decoration.png";
+            const string cover = "http://p2.music.163.net/synthetic-cover/actual.jpg";
+            var action = "orpheus://playlist/500?coverUrl=" + Uri.EscapeDataString(cover);
+            using var f = new Fixture(_ => Home(false, "1", J(new
+            {
+                resourceType = "playlist",
+                resourceId = "500",
+                title = "私人雷达",
+                coverImg = decoration,
+                coverType = "ALBUM_LOGO",
+                action
+            })));
+            var reply = await f.Catalog.HomeAsync(new("wy"));
+            var card = MusicCatalogDto.Read(reply, "wy", "home", "")
+                .SelectMany(section => section.Items).Single();
+            Equal("https://p2.music.163.net/synthetic-cover/actual.jpg", card.Cover);
+            Equal("https://p1.music.126.net/synthetic-gradient/decoration.png", card.Decoration);
+            Equal("500", card.ActionId);
+            Equal(1, f.Calls);
+
+            using var same = new Fixture(_ => Home(false, "1", J(new
+            {
+                resourceType = "playlist",
+                resourceId = "500",
+                title = "私人雷达",
+                coverImg = decoration,
+                coverType = "ALBUM_LOGO",
+                action = "orpheus://playlist/500?coverUrl=" + Uri.EscapeDataString(decoration)
+            })));
+            var unchanged = MusicCatalogDto.Read(await same.Catalog.HomeAsync(new("wy")), "wy", "home", "")
+                .SelectMany(section => section.Items).Single();
+            Equal("https://p1.music.126.net/synthetic-gradient/decoration.png", unchanged.Cover);
+            Equal("", unchanged.Decoration);
+            Equal(1, same.Calls);
+
+            using var nested = new Fixture(_ => Home(false, "1", J(new
+            {
+                resourceType = "playlist",
+                resourceId = "500",
+                title = "私人雷达",
+                coverImg = decoration,
+                coverType = "ALBUM_LOGO",
+                action = new { type = "resource", @params = new { resourceType = "playlist", query = "500" } },
+                playBtnData = new { detailUrl = action }
+            })));
+            var nestedCard = MusicCatalogDto.Read(await nested.Catalog.HomeAsync(new("wy")), "wy", "home", "")
+                .SelectMany(section => section.Items).Single();
+            Equal("https://p2.music.163.net/synthetic-cover/actual.jpg", nestedCard.Cover);
+            Equal("https://p1.music.126.net/synthetic-gradient/decoration.png", nestedCard.Decoration);
+            Equal(1, nested.Calls);
+
+            using var invalid = new Fixture(_ => Home(false, "1", J(new
+            {
+                resourceType = "playlist",
+                resourceId = "500",
+                title = "私人雷达",
+                coverImg = decoration,
+                coverType = "ALBUM_LOGO",
+                action = "orpheus://playlist:99/500?coverUrl=" + Uri.EscapeDataString(cover)
+            })));
+            var rejected = MusicCatalogDto.Read(await invalid.Catalog.HomeAsync(new("wy")), "wy", "home", "")
+                .SelectMany(section => section.Items).Single();
+            Equal("https://p1.music.126.net/synthetic-gradient/decoration.png", rejected.Cover);
+            Equal("", rejected.Decoration);
+            Equal(1, invalid.Calls);
+        });
+        yield return Case("wy discovery artwork removes only validated CDN rendering parameters", async () =>
+        {
+            foreach (var (input, expected) in new[]
+            {
+                ("http://p1.music.126.net/synthetic/cover.jpg?imageView&type=webp&thumbnail=300y300",
+                    "https://p1.music.126.net/synthetic/cover.jpg"),
+                ("http://p2.music.163.net/synthetic/cover.jpg?imageView=1&type=png",
+                    "https://p2.music.163.net/synthetic/cover.jpg")
+            })
+            {
+                using var f = new Fixture(_ => Home(false, "1", J(new
+                {
+                    resourceType = "playlist", resourceId = "500", name = "歌单", coverImg = input
+                })));
+                var card = MusicCatalogDto.Read(await f.Catalog.HomeAsync(new("wy")), "wy", "home", "")
+                    .SelectMany(section => section.Items).Single();
+                Equal(expected, card.Cover);
+                Equal(1, f.Calls);
+            }
+
+            using var unsafeQuery = new Fixture(_ => Home(false, "1", J(new
+            {
+                resourceType = "playlist", resourceId = "500", name = "歌单",
+                coverImg = "https://p1.music.126.net/synthetic/cover.jpg?imageView&type=webp&token=SYNTHETIC_ONLY"
+            })));
+            var unchanged = MusicCatalogDto.Read(await unsafeQuery.Catalog.HomeAsync(new("wy")), "wy", "home", "")
+                .SelectMany(section => section.Items).Single();
+            Equal("https://p1.music.126.net/synthetic/cover.jpg?imageView&type=webp&token=SYNTHETIC_ONLY",
+                unchanged.Cover);
+            Equal(1, unsafeQuery.Calls);
         });
         yield return Case("wy thumbnail canonicalization rejects unknown signed and duplicate parameters", async () =>
         {
@@ -1107,28 +1599,28 @@ public static class MusicNativePlatformTests
                 using var f = new Fixture(_ => WySearch([raw], 1));
                 var song = (await f.Catalog.SearchAsync(new("wy", "x"))).GetProperty("items")[0];
                 Equal("", song.GetProperty("cover_url").GetString());
-                True(!song.GetProperty("source_data").TryGetProperty("img", out _));
+                True(!MusicSongFixture.Info(song).TryGetProperty("img", out _));
                 True(!song.GetRawText().Contains("SYNTHETIC_ONLY", StringComparison.Ordinal));
             }
         });
-        yield return Case("refresh failure never serves cached success and callers cannot mutate cache", async () =>
+        yield return Case("catalog never caches search so a failure is never hidden by an earlier success", async () =>
         {
             var fail = false;
             using var f = new Fixture(_ => fail ? Json(J(new { code = 500 })) : WySearch([Wy("1")], 1));
             var first = await f.Catalog.SearchAsync(new("wy", "x")); fail = true;
-            _ = await f.Catalog.SearchAsync(new("wy", "x")); Equal(1, f.Calls);
+            await Error("UPSTREAM_ERROR", () => f.Catalog.SearchAsync(new("wy", "x"))); Equal(2, f.Calls);
             await Error("UPSTREAM_ERROR", () => f.Catalog.SearchAsync(new("wy", "x", Refresh: true)));
             Equal("1", MusicSongFixture.NativeId(first.GetProperty("items")[0]));
         });
-        yield return Case("successful refresh replaces ordinary anonymous cache key", async () =>
+        yield return Case("catalog search always reaches the platform; the search owner caches once", async () =>
         {
             var id = "1";
             using var f = new Fixture(_ => WySearch([Wy(id)], 1));
             _ = await f.Catalog.SearchAsync(new("wy", "x")); id = "2";
+            var again = await f.Catalog.SearchAsync(new("wy", "x"));
             var refreshed = await f.Catalog.SearchAsync(new("wy", "x", Refresh: true));
-            var cached = await f.Catalog.SearchAsync(new("wy", "x"));
-            Equal("2", MusicSongFixture.NativeId(refreshed.GetProperty("items")[0]));
-            Equal("2", MusicSongFixture.NativeId(cached.GetProperty("items")[0])); Equal(2, f.Calls);
+            Equal("2", MusicSongFixture.NativeId(again.GetProperty("items")[0]));
+            Equal("2", MusicSongFixture.NativeId(refreshed.GetProperty("items")[0])); Equal(3, f.Calls);
         });
         yield return Case("logout during first request blocks second request and old result", async () =>
         {
@@ -1176,14 +1668,16 @@ public static class MusicNativePlatformTests
                 await Error(close ? "CLOSED" : "STALE_SESSION", () => task);
             }
         });
-        yield return Case("cancelled physical requests retain per-platform budget until settled", async () =>
+        yield return Case("cancelled physical requests never block a new request", async () =>
         {
             var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var second = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var third = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); var calls = 0;
             using var http = MusicPlatformHttp.CreateWithHandler(new Handler(async (_, _) =>
             {
-                if (Interlocked.Increment(ref calls) == 1) first.TrySetResult(); else second.TrySetResult();
+                int call = Interlocked.Increment(ref calls);
+                (call == 1 ? first : call == 2 ? second : third).TrySetResult();
                 await release.Task; return Json(J(new { code = 200 }));
             }));
             using var cancelled = new CancellationTokenSource();
@@ -1192,9 +1686,12 @@ public static class MusicNativePlatformTests
             await Task.WhenAll(first.Task, second.Task).WaitAsync(TimeSpan.FromSeconds(2)); cancelled.Cancel();
             try
             {
-                try { await Task.WhenAll(a, b); } catch (OperationCanceledException) { }
-                await Error("RATE_LIMITED", () => http.SendAsync("wy", new(HttpMethod.Get, "https://music.163.com/api/z"), default));
-                Equal(2, calls);
+                True(!a.IsCompleted && !b.IsCompleted);
+                var c = http.SendAsync("wy", new(HttpMethod.Get, "https://music.163.com/api/z"), default);
+                await third.Task.WaitAsync(TimeSpan.FromSeconds(2)); Equal(3, calls);
+                release.TrySetResult(); await c;
+                try { await Task.WhenAll(a, b); throw new InvalidOperationException("Expected cancellation"); }
+                catch (OperationCanceledException) { }
             }
             finally { release.TrySetResult(); }
         });
@@ -1527,7 +2024,7 @@ public static class MusicNativePlatformTests
                 () => fixture.Application.SignVipPageAsync(snapshot.Generation));
             Equal(1, fixture.Transport.SignWrites);
         });
-        yield return Case("VIP shutdown drains an admitted sign and resume does not replay its lost publication", async () =>
+        yield return Case("VIP shutdown drains an admitted sign and resume never replays it", async () =>
         {
             await using var fixture = await VipApplicationFixture.CreateAsync();
             var snapshot = await fixture.Application.ReadVipPageAsync();
@@ -1538,13 +2035,15 @@ public static class MusicNativePlatformTests
             var preparing = fixture.Application.PrepareShutdownAsync();
             True(!hold.Cancelled.Task.IsCompleted && !preparing.IsCompleted);
             hold.Release.TrySetResult();
-            await OperationError("CLOSED", () => signing);
+            bool confirmed = true;
+            try { await signing; }
+            catch (MusicOperationException error) when (error.Code == "CLOSED") { confirmed = false; }
             await preparing;
 
             await fixture.Application.CancelShutdownPreparationAsync();
             var resumed = await fixture.Application.ReadVipPageAsync();
-            True(resumed.SignUnconfirmed && !resumed.SignedToday);
-            await OperationError("COMMIT_UNKNOWN",
+            True(resumed.SignUnconfirmed == !confirmed && resumed.SignedToday == confirmed);
+            await OperationError(confirmed ? "ALREADY_SIGNED" : "COMMIT_UNKNOWN",
                 () => fixture.Application.SignVipPageAsync(snapshot.Generation));
             Equal(1, fixture.Transport.SignWrites);
         });
@@ -1716,7 +2215,7 @@ public static class MusicNativePlatformTests
             row["SQFileHash"] = KgHash; row["SQFileSize"] = "not-a-size";
             using var f = new Fixture(_ => Kg(J(new { total = 1, lists = new[] { row } })));
             var r = (await f.Catalog.SearchAsync(new("kg", "x"))).GetProperty("items")[0];
-            Song(r, "kg", KgHash); Equal(1, r.GetProperty("source_data").GetProperty("types").GetArrayLength());
+            Song(r, "kg", KgHash); Equal(1, MusicSongFixture.Info(r).GetProperty("types").GetArrayLength());
         });
         foreach (var branch in new[] { "search", "search-playlists", "song", "playlist", "album", "artist", "home",
             "directory", "fm", "fm-rule", "fm-preview", "similar", "heartbeat", "queue", "personal", "rankings",
@@ -1953,7 +2452,54 @@ public static class MusicNativePlatformTests
     private static string S(JsonNode? n) => n is JsonValue v && v.TryGetValue<string>(out var s) ? s : n?.ToJsonString() ?? "";
     private static HttpResponseMessage Json(JsonObject value) => new(HttpStatusCode.OK) { Content = new StringContent(value.ToJsonString(), Encoding.UTF8, "application/json") };
     private static HttpResponseMessage Tx(JsonObject data) => Json(J(new { code = 0, req_0 = new { code = 0, data } }));
+    private static HttpResponseMessage? QqClientResponse(HttpRequestMessage request)
+    {
+        if (request.RequestUri!.Host == "api.tencentmusic.com")
+            return Json(J(new { data = JsonSerializer.Serialize(new { code = 0,
+                data = new { q16 = "SYNTHETIC_Q16", q36 = "SYNTHETIC_Q36" } }) }));
+        var body = RequestJson(request);
+        if (S(body["req_0"]!["method"]) != "GetSession") return null;
+        var comm = body["comm"]!.AsObject();
+        Equal("SYNTHETIC_Q36", S(comm["QIMEI36"]));
+        True(!comm.ContainsKey("qq") && !comm.ContainsKey("authst") &&
+            !comm.ContainsKey("tmeLoginType") && !comm.ContainsKey("uid") && !comm.ContainsKey("sid"));
+        True(!request.Headers.Contains("Cookie") && !request.Headers.Contains("Authorization"));
+        return Tx(J(new { session = new { uid = "SYNTHETIC_UID", sid = "SYNTHETIC_SID" } }));
+    }
+    private static HttpResponseMessage QqSearchResponse(HttpRequestMessage request)
+    {
+        var body = RequestJson(request);
+        Equal("DoSearchForQQMusicMobile", S(body["req_0"]!["method"]));
+        Equal("SYNTHETIC_Q36", S(body["comm"]!["QIMEI36"]));
+        Equal("SYNTHETIC_UID", S(body["comm"]!["uid"])); Equal("SYNTHETIC_SID", S(body["comm"]!["sid"]));
+        bool songs = S(body["req_0"]!["param"]!["search_type"]) == "0";
+        return Tx(J(new { meta = new { sum = 1, nextpage = -1 }, body = new JsonObject
+        {
+            [songs ? "item_song" : "item_songlist"] = new JsonArray(songs ? Qq() : J(new { id = 77, title = "搜索歌单" }))
+        } }));
+    }
     private static HttpResponseMessage Kg(JsonObject data) => Json(J(new { status = 1, error_code = 0, data }));
+    private static async Task ShortNativeSearch(string platform, bool empty)
+    {
+        using var f = new Fixture(request =>
+        {
+            if (platform == "wy") return WySearch(empty ? Array.Empty<JsonObject>() : new[] { Wy("1") }, 100);
+            if (platform == "tx")
+                return Tx(J(new { meta = new { sum = 100, nextpage = 2 }, body = new JsonObject
+                {
+                    ["item_song"] = empty ? new JsonArray() : new JsonArray(Qq())
+                } }));
+            VerifyKg(request);
+            return Kg(J(new { total = 100, lists = empty ? Array.Empty<object>() : new object[] { KgSong() } }));
+        });
+        var page = await f.Catalog.SearchAsync(new(platform, "x", Limit: 30, Pages: platform == "wy" ? 3 : 1));
+        Equal(empty ? 0 : 1, page.GetProperty("items").GetArrayLength());
+        bool more = !empty && platform == "tx";
+        True(page.GetProperty("more").GetBoolean() == more);
+        if (more) Equal(2, page.GetProperty("continuation").GetProperty("page").GetInt32());
+        else Equal(JsonValueKind.Null, page.GetProperty("continuation").ValueKind);
+        Equal(1, f.Calls);
+    }
     private static JsonObject Wy(string id) => J(new { id = JsonNode.Parse(id), name = "测试曲", ar = new[] { new { name = "测试艺人" } },
         al = new { id = "31", name = "测试专辑", picUrl = "https://images.invalid/a.jpg" }, dt = 185000 });
     private static JsonObject Qq() => J(new { id = JsonNode.Parse(Huge), mid = "midA001", type = 0, title = "测试曲", singer = new[] { new { name = "测试艺人" } },
@@ -2019,8 +2565,8 @@ public static class MusicNativePlatformTests
     {
         True(!s.TryGetProperty("id", out _));
         True(s.GetProperty("songId").GetString()!.StartsWith("song:", StringComparison.Ordinal));
-        var native = s.GetProperty("source_data"); Equal(platform, native.GetProperty("source").GetString());
-        Equal(id, native.GetProperty("musicId").GetString()); Equal(id, native.GetProperty("songmid").GetString());
+        var native = MusicSongFixture.Info(s); Equal(platform, native.GetProperty("source").GetString());
+        Equal(id, native.GetProperty("songmid").GetString());
         Equal(1, s.GetProperty("sources").GetArrayLength()); True(s.GetProperty("songId").GetString() != id);
     }
     private static MusicPlatformSession Session(string platform, long generation = 1) => new(platform, "synthetic-scope", generation, Huge,
@@ -2042,18 +2588,25 @@ public static class MusicNativePlatformTests
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => send(request, cancellationToken);
     }
+    private sealed class FixedClock(DateTimeOffset now) : TimeProvider
+    {
+        private DateTimeOffset current = now;
+        public override DateTimeOffset GetUtcNow() => current;
+        internal void Advance(TimeSpan by) => current += by;
+    }
     private sealed class Fixture : IDisposable
     {
         public readonly Source Sessions = new();
         public readonly MusicPlatformCatalog Catalog;
         public readonly MusicClientContextFixture Clients = new();
         public int Calls;
-        public Fixture(Func<HttpRequestMessage, HttpResponseMessage> send, MusicPlatformSession? session = null)
-            : this((r, _) => Task.FromResult(send(r)), session) { }
+        public Fixture(Func<HttpRequestMessage, HttpResponseMessage> send, MusicPlatformSession? session = null, bool readyQq = true)
+            : this((r, _) => Task.FromResult(send(r)), session, readyQq: readyQq) { }
         public Fixture(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send,
-            MusicPlatformSession? session = null, TimeSpan? timeout = null)
+            MusicPlatformSession? session = null, TimeSpan? timeout = null, bool readyQq = true)
         {
             Sessions.Current = session;
+            if (readyQq) Clients.SeedQqAsync().GetAwaiter().GetResult();
             Catalog = MusicPlatformCatalog.CreateWithHandler(Sessions, new Handler((r, ct) => { Interlocked.Increment(ref Calls); return send(r, ct); }), Clients.Owner, timeout);
         }
         public void Dispose() { Catalog.Dispose(); Clients.Dispose(); }

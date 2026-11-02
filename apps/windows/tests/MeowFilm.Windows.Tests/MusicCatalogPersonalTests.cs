@@ -30,7 +30,7 @@ public static class MusicCatalogPersonalTests
         yield return Case("directory filters nullable totals empty intermediate page and failed refresh", DirectoryFilters);
         yield return Case("KG locator 30-page membership selection survives global sorting", KgMembers);
         yield return Case("QQ favorites complete save never stores only visible page", TxSave);
-        yield return Case("KG UI can navigate beyond the old hundred-page limit", LongKg);
+        yield return Case("KG UI navigates past one hundred pages by platform total", LongKg);
         yield return Case("updated private locator cannot restore an old cached revision", LocatorRefresh);
         yield return Case("private tail failure preserves display and durable queue", TailFailure);
         yield return Case("duplicate member and changed snapshot cannot publish second page", PageDefects);
@@ -154,8 +154,8 @@ public static class MusicCatalogPersonalTests
         var commit = f.App.Last("music.catalog.playlist.commit");
         Equal("1031", S(commit, "memberId")); Check(!commit.TryGetProperty("index", out _));
         var queue = await f.Queue();
-        Equal(65L, N(queue, "total")); Equal("1031", S(queue.GetProperty("current").GetProperty("song").GetProperty("source_data"), "fileid"));
-        var ids = queue.GetProperty("entries").EnumerateArray().Select(e => S(e.GetProperty("song").GetProperty("source_data"), "fileid")).ToArray();
+        Equal(65L, N(queue, "total")); Equal("1031", S(MusicSongFixture.Info(queue.GetProperty("current").GetProperty("song")), "fileid"));
+        var ids = queue.GetProperty("entries").EnumerateArray().Select(e => S(MusicSongFixture.Info(e.GetProperty("song")), "fileid")).ToArray();
         Equal("1064", ids[0]); Check(ids.Contains("1000") && ids.Contains("1031"));
         Check(f.Platform.Requests.OfType<MusicPlaylistRequest>().All(r => r.Limit == 30 && r.Personal?.ListId == "42"), "every page keeps locator");
         Equal(1, f.Output.Opens);
@@ -859,8 +859,8 @@ public static class MusicCatalogPersonalTests
             string sourceKey = S(source, "sourceKey");
             string cache = LJ.Digest(LJ.Obj(("contract", "music.quality.cache.v1"), ("policy", policy),
                 ("installation", "fixture-script"), ("platform", TargetPlatform), ("revision", 1), ("generation", 1),
-                ("sourceKey", sourceKey), ("recording", source.GetProperty("source_data")),
-                ("songId", songNode["songId"]), ("songRevision", songNode["revision"]),
+                ("sourceKey", sourceKey), ("recording", source.GetProperty("musicInfo")),
+                ("songId", songNode["songId"]),
                 ("duration", songNode["duration"]), ("quality", S(p, "quality"))));
             if (p.TryGetProperty("qualityPolicySignature", out var expectedPolicy) && expectedPolicy.GetString() != policy)
                 return E(new { ok = false, code = "QUALITY_POLICY_CHANGED" });

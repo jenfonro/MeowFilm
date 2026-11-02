@@ -103,6 +103,7 @@ final class MusicNeteaseContext {
     var qrID: UUID?
     // Only validation/refresh has an owner-held pre-request update lease.
     var permitsCredentialUpdate = false
+    var clientDevice: MusicNativeClientDevice?
     init(cookies: [String: String] = [:], device: [String: String] = [:], accountID: String = "") {
         self.cookies = cookies; self.device = device; self.accountID = accountID
     }
@@ -111,6 +112,7 @@ final class MusicNeteaseContext {
 actor NeteaseMusicAccountAdapter: MusicAccountProvider {
     let transport: any MusicAccountHTTPTransport
     let now: @Sendable () -> Date
+    let clientContexts: NativeMusicClientService?
     var epoch = UUID()
     struct QR {
         let expires: Date
@@ -127,7 +129,10 @@ actor NeteaseMusicAccountAdapter: MusicAccountProvider {
     }
     var dailyCache: DailyCache?
     var publicAudioContext: MusicNeteaseContext?
-    init(transport: any MusicAccountHTTPTransport, now: @escaping @Sendable () -> Date) { self.transport = transport; self.now = now }
+    init(transport: any MusicAccountHTTPTransport, now: @escaping @Sendable () -> Date,
+         clientContexts: NativeMusicClientService? = nil) {
+        self.transport = transport; self.now = now; self.clientContexts = clientContexts
+    }
     func revoke() { epoch = UUID(); qr.removeAll(); sms.removeAll(); dailyCache = nil; publicAudioContext = nil }
     func cancelQR(_ id: UUID) { qr.removeValue(forKey: id) }
     func check(_ own: UUID) throws {
@@ -146,6 +151,19 @@ actor NeteaseMusicAccountAdapter: MusicAccountProvider {
         }
     }
     func ensureDevice(_ context: MusicNeteaseContext) throws {
+        if let clientContexts {
+            let device: MusicNativeClientDevice?
+            if let current = context.clientDevice { device = try clientContexts.current(current) }
+            else if context.device.isEmpty {
+                guard context.accountID.isEmpty || context.permitsCredentialUpdate else { throw MusicServiceError.verificationRequired }
+                device = try clientContexts.installationDevice(.netease)
+            }
+            else if let id = context.device["deviceId"], !id.isEmpty {
+                device = try clientContexts.matchingDevice(.netease, identity: id)
+            } else { throw MusicServiceError.invalidResponse }
+            if let device { context.clientDevice = device; context.device = device.fields }
+            return
+        }
         for (key, count, alphabet) in [("deviceId", 52, "0123456789ABCDEF"), ("_ntes_nuid", 64, "0123456789abcdef"), ("WNMCID", 6, "abcdefghijklmnopqrstuvwxyz")] {
             if context.device[key] == nil {
                 var value = try MusicNeteaseCrypto.text(count, alphabet: alphabet)
@@ -162,6 +180,7 @@ actor NeteaseMusicAccountAdapter: MusicAccountProvider {
         var headers = headers
         headers["Content-Type"] = "application/x-www-form-urlencoded;charset=utf-8"
         headers["Cache-Control"] = "no-store"
+        let readDevice = context.device, readCookies = context.cookies, clientRead = context.clientDevice
         let response = try await transport.send(.init(url: url, method: "POST", headers: headers, body: MusicQQWire.form(form)))
         try check(context, epoch: own)
         let body: [String: Any]
@@ -179,24 +198,36 @@ actor NeteaseMusicAccountAdapter: MusicAccountProvider {
            let code = try? MusicNeteaseWire.code(rows[0]["code"]), [429, 509].contains(code) {
             await transport.recordRateLimit(for: url, retryAfter: response.header("retry-after"))
         }
+        var nextDevice = readDevice, nextCookies = readCookies
         for (key, value) in try MusicNeteaseWire.cookies(response, host: url.host!) {
             if MusicNeteaseWire.deviceKeys.contains(key) {
                 if context.qrID == nil, !context.accountID.isEmpty, !context.permitsCredentialUpdate,
-                   context.device[key] != value { throw MusicServiceError.verificationRequired }
-                context.device[key] = value
+                   clientRead == nil, readDevice[key] != value { throw MusicServiceError.verificationRequired }
+                nextDevice[key] = value
             }
             else {
                 if context.qrID == nil, !context.accountID.isEmpty, MusicNeteaseWire.credentialKeys.contains(key),
-                   context.cookies[key] != value {
+                   readCookies[key] != value {
                     if key == "MUSIC_U", value == nil { throw MusicServiceError.authRequired }
                     guard context.permitsCredentialUpdate else { throw MusicServiceError.verificationRequired }
                 }
-                context.cookies[key] = value
+                nextCookies[key] = value
             }
         }
         if let id = response.header("x-encr-ssid"), let key = response.header("x-encr-sskey") {
             guard !id.isEmpty, id.utf8.count <= 512,
                   [16, 24, 32].contains(key.utf8.count) else { throw MusicServiceError.upstreamInvalid }
+        }
+        guard context.cookies == readCookies else { throw MusicServiceError.staleResult }
+        if let client = clientRead, let clientContexts {
+            let saved = try nextDevice == readDevice ? clientContexts.current(client) : clientContexts.update(client, fields: nextDevice)
+            context.clientDevice = saved; context.device = saved.fields
+        } else {
+            guard context.device == readDevice else { throw MusicServiceError.staleResult }
+            context.device = nextDevice
+        }
+        context.cookies = nextCookies
+        if let id = response.header("x-encr-ssid"), let key = response.header("x-encr-sskey") {
             context.keyState?.sessionID = id; context.keyState?.sessionKey = Data(key.utf8)
         }
         return body
@@ -230,10 +261,22 @@ actor NeteaseMusicAccountAdapter: MusicAccountProvider {
                  context: MusicNeteaseContext, qr: Bool = false) async throws -> [String: Any] {
         let own = epoch; try check(context, epoch: own); try ensureDevice(context)
         guard path.hasPrefix("/api/"), ["weapi", "eapi", "xeapi"].contains(crypto) else { throw MusicServiceError.invalidRequest }
+        if crypto != "eapi", context.device["NMTID"] == nil,
+           context.clientDevice != nil || context.accountID.isEmpty || context.permitsCredentialUpdate {
+            context.device["NMTID"] = "00O" + (try MusicQQWire.randomHex(19))
+            if let client = context.clientDevice, let clientContexts {
+                let saved = try clientContexts.update(client, fields: context.device)
+                context.clientDevice = saved; context.device = saved.fields
+            }
+        }
+        let xeapiState: MusicNeteaseKeyState?
+        if crypto == "xeapi" {
+            xeapiState = try await handshake(context)
+            try check(context, epoch: own)
+        } else { xeapiState = nil }
         var cookies = ["__remember_me": "true", "ntes_kaola_ad": "1", "WEVNSM": "1.0.0", "os": "pc",
             "appver": "3.1.17.204416", "osver": "Microsoft-Windows-10-Professional-build-19045-64bit", "channel": "netease"]
         cookies.merge(context.cookies) { _, value in value }; cookies.merge(context.device) { _, value in value }
-        if crypto != "eapi", cookies["NMTID"] == nil { cookies["NMTID"] = "00O" + (try MusicQQWire.randomHex(19)) }
         var body = data; body["e_r"] = false
         var headers: [String: String] = [:], form: [String: String], domain: String
         if crypto == "weapi" {
@@ -251,7 +294,7 @@ actor NeteaseMusicAccountAdapter: MusicAccountProvider {
             form = try MusicNeteaseCrypto.eapi(path, plain: MusicQQWire.json(body))
         } else {
             domain = "interface3.music.163.com"
-            let state = try await handshake(context); try check(context, epoch: own)
+            guard let state = xeapiState else { throw MusicServiceError.invalidRequest }
             cookies["os"] = "android"; cookies["osver"] = "16"; cookies["appver"] = data["level"] as? String == "vivid" ? "9.5.61" : "9.1.65"
             cookies["buildver"] = String(Int(now().timeIntervalSince1970)); cookies["sDeviceId"] = cookies["deviceId"]
             headers = ["User-Agent": Self.mobileUA, "X-Client-Enc-State": "ENCRYPTED", "X-Aeapi": "true"]

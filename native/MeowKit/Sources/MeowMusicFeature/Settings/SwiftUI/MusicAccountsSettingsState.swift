@@ -4,19 +4,56 @@ import Combine
 
 struct MusicAccountSettingsSummary: Equatable, Identifiable {
     let account: MusicAccountStatus
-    let automaticSync: Bool
-    let playbackFeedback: Bool
     var id: MusicAccountPlatform { account.platform }
 
-    var detail: String {
-        var values = [account.nickname, account.phase.title].filter { !$0.isEmpty }
-        if account.phase == .signedIn, let membership = account.profile?.membership {
-            values.append(membership.title(at: Date()))
+    func detail(at date: Date) -> MusicAccountSettingsDetail {
+        guard account.phase == .signedIn else {
+            return .init(status: account.phase.title)
         }
-        if automaticSync { values.append("自动同步") }
-        if playbackFeedback { values.append("播放上报") }
-        return values.joined(separator: " · ")
+        let nickname = account.nickname.trimmingCharacters(in: .whitespacesAndNewlines)
+        let profileName = account.profile?.nickname.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let name = nickname.isEmpty ? (profileName.isEmpty ? account.phase.title : profileName) : nickname
+        guard let membership = account.profile?.membership, let vip = membership.vip else {
+            return .init(name: name, status: "会员状态未知")
+        }
+        if !vip || membership.expiresAt.map({ $0 <= date }) == true {
+            return .init(name: name, status: "无VIP", isNonVIP: true)
+        }
+        guard let expiresAt = membership.expiresAt else {
+            return .init(name: name, status: "VIP · 到期时间未知")
+        }
+        return .init(name: name, status: Self.day(expiresAt) + " 到期")
     }
+
+    /// Detail-card membership; unknown fields stay unknown and never read as non-VIP.
+    func membership(at date: Date) -> MusicAccountSettingsMembership {
+        guard let membership = account.profile?.membership, let vip = membership.vip else {
+            return .init(title: "会员状态未知", tone: .muted, expiry: "—")
+        }
+        if !vip || membership.expiresAt.map({ $0 <= date }) == true {
+            return .init(title: "无VIP", tone: .danger, expiry: "—")
+        }
+        let tier = membership.tier.trimmingCharacters(in: .whitespacesAndNewlines)
+        return .init(title: tier.isEmpty ? "VIP" : tier, tone: .accent,
+                     expiry: membership.expiresAt.map(Self.day) ?? "—")
+    }
+
+    private static func day(_ date: Date) -> String {
+        date.formatted(Date.ISO8601FormatStyle(timeZone: .current).year().month().day())
+    }
+}
+
+struct MusicAccountSettingsDetail: Equatable {
+    var name: String?
+    let status: String
+    var isNonVIP = false
+}
+
+struct MusicAccountSettingsMembership: Equatable {
+    enum Tone { case accent, muted, danger }
+    let title: String
+    let tone: Tone
+    let expiry: String
 }
 
 enum MusicAccountSettingsAction {
@@ -35,6 +72,7 @@ struct MusicAccountSettingsContext {
 final class MusicAccountsSettingsState: ObservableObject {
     @Published private(set) var rows: [MusicAccountSettingsSummary] = []
     @Published private(set) var available = false
+    @Published private(set) var busy = false
     @Published private(set) var pendingAccounts = Set<MusicAccountPlatform>()
     let accounts: MusicAccountsViewModel?
     let sync: MusicLibrarySyncViewModel?
@@ -77,25 +115,13 @@ final class MusicAccountsSettingsState: ObservableObject {
         }
         hasCredentialsImport = owner.accounts is any MusicCredentialsImporting
         let statuses = accounts?.$rows.eraseToAnyPublisher() ?? Just<[MusicAccountStatus]>([]).eraseToAnyPublisher()
-        let selections = sync?.$selections.eraseToAnyPublisher()
-            ?? Just<[MusicLibrarySyncSelection]>([]).eraseToAnyPublisher()
-        let settings = feedback?.$value.eraseToAnyPublisher()
-            ?? Just<MusicPlaybackFeedbackSettings?>(nil).eraseToAnyPublisher()
-        Publishers.CombineLatest3(statuses, selections, settings)
-            .map { statuses, selections, settings in
-                statuses.map { account in
-                    let selection = selections.first { $0.platform == account.platform }
-                    return MusicAccountSettingsSummary(
-                        account: account,
-                        automaticSync: selection?.favorites == true || selection?.playlists == true,
-                        playbackFeedback: settings?.platforms[account.platform]?.enabled == true
-                    )
-                }
-            }
+        statuses.map { $0.map { MusicAccountSettingsSummary(account: $0) } }
             .removeDuplicates()
             .sink { [weak self] in self?.rows = $0 }
             .store(in: &subscriptions)
         if let accounts {
+            accounts.$isBusy.removeDuplicates().sink { [weak self] in self?.busy = $0 }
+                .store(in: &subscriptions)
             accounts.$statusesRevision.dropFirst().sink { [weak self] _ in
                 guard let self, !pendingAccounts.isEmpty else { return }
                 pendingAccounts = []

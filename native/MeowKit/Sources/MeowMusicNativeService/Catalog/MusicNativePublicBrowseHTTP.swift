@@ -10,12 +10,13 @@ enum MusicNativePublicBrowseRoutes {
         "/eapi/v6/playlist/detail", "/eapi/link/page/rcmd/resource/show",
         "/eapi/link/position/show/resource", "/eapi/tag/tab/tags",
         "/eapi/tag/tab/alg/recommends", "/eapi/tag/tab/playlists",
-        "/eapi/toplist"
+        "/eapi/toplist", "/eapi/search/pc/chart/list",
+        "/eapi/search/pc/chart/detail", "/eapi/hot/search/relate/song/get"
     ]
     static let weapi: Set<String> = [
         "/weapi/v3/song/detail", "/weapi/cube/render/page/protocol",
         "/weapi/playlist/square/block/page", "/weapi/toplist/detail/v2",
-        "/weapi/v1/discovery/new/songs", "/weapi/hotsearchlist/get"
+        "/weapi/v1/discovery/new/songs"
     ]
     static func allows(_ request: MusicNativeHTTPRequest) -> Bool {
         let url = request.url
@@ -85,6 +86,7 @@ extension MusicNativePlatforms {
     /// WEAPI endpoints keep their verified crypto/host, not an unverified EAPI substitution.
     func browseWEAPI(_ path: String, _ params: MJ) async throws -> MJ {
         try Task.checkCancellation()
+        let client = try await clientDevice(.netease)
         var data = params; data["csrf_token"] = .string("")
         let secret = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16))
         func aes(_ bytes: Data, key: String) throws -> Data {
@@ -112,9 +114,11 @@ extension MusicNativePlatforms {
             "&encSecKey=" + (rsa as Data).map { String(format: "%02x", $0) }.joined()
         let request = MusicNativeHTTPRequest(url: URL(string: "https://music.163.com/weapi/" + path.dropFirst(5))!,
             method: "POST", headers: ["Content-Type": "application/x-www-form-urlencoded", "Referer": "https://music.163.com/",
-                                     "User-Agent": "Mozilla/5.0"], body: Data(body.utf8))
+                                     "User-Agent": "Mozilla/5.0",
+                                     "Cookie": MusicPlatformProtocol.cookieHeader(client.fields)],
+            body: Data(body.utf8))
         try musicRequire(MusicNativePublicBrowseRoutes.allows(request))
-        return try await self.request(request, checkingNeteaseCode: true)
+        return try await self.request(request, checkingNeteaseCode: true, client: client)
     }
     func browseWYCode(_ response: MJ) throws -> MJ {
         func readCode(_ value: MJ) throws -> Int {
@@ -144,9 +148,9 @@ extension MusicNativePlatforms {
     }
     func browseKGDetail(_ id: String, offset: Int, limit: Int) async throws -> MJ {
         try musicRequire(id.range(of: "^[A-Za-z0-9_-]{1,200}$", options: .regularExpression) != nil && !id.hasPrefix("id_"))
-        if kgDevice.isEmpty { kgDevice = MusicPlatformProtocol.md5(UUID().uuidString.lowercased()) }
+        let client = try await clientDevice(.kugou), mid = client.fields["KUGOU_API_MID"]!, dfid = client.fields["dfid"] ?? "-"
         let time = String(Int(now().timeIntervalSince1970))
-        var params = ["dfid": "-", "mid": kgDevice, "uuid": "-", "appid": "1005", "clientver": "20489", "clienttime": time,
+        var params = ["dfid": dfid, "mid": mid, "uuid": "-", "appid": "1005", "clientver": "20489", "clienttime": time,
             "area_code": "1", "begin_idx": String(offset), "plat": "1", "type": "1", "mode": "1", "personal_switch": "1",
             "extend_fields": "abtags,hot_cmt,popularization", "pagesize": String(limit), "global_collection_id": id]
         params["signature"] = MusicPlatformProtocol.kugou(params)
@@ -154,7 +158,7 @@ extension MusicNativePlatforms {
         url.queryItems = params.sorted { $0.key < $1.key }.map { .init(name: $0.key, value: $0.value) }
         // No complexsearch x-router on pubsongs; no borrowed user token/cookie.
         let response = try await request(.init(url: url.url!, headers: [
-            "User-Agent": "Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi", "dfid": "-", "mid": kgDevice,
+            "User-Agent": "Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi", "dfid": dfid, "mid": mid,
             "clienttime": time, "kg-rc": "1", "kg-thash": "5d816a0", "kg-rec": "1", "kg-rf": "B9EDA08A64250DEFFBCADDEE00F8F25F"]))
         let codes = ["error_code", "errcode", "err_code"].filter(response.contains).map { response[$0].id }
         if codes.contains("20018") { throw MusicServiceError.authRequired }

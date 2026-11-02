@@ -180,7 +180,6 @@ public sealed partial class MusicNativeApplication
         lock (gate)
         {
             if (closed || stopping || recommendationPreparing) throw new MusicOperationException("CLOSED");
-            if (pending >= 32) throw new MusicOperationException("LIMIT");
             if (accountReceiptUnknown) throw new MusicOperationException("COMMIT_UNKNOWN");
             if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
             generation = lifetime.Token;

@@ -4,11 +4,15 @@ import MeowMusicFeature
 
 @MainActor
 final class MeowfilmRootContainerViewController: PageViewController {
+    /// The window root only hosts the navigation stack; the visible header
+    /// belongs to the top page inside it.
+    override var usesPageHeader: Bool { false }
+
     let navigation: PageNavigationController
     private(set) var dock: MeowfilmDockView?
     var onSelectPage: ((MeowfilmPrimaryPage) -> Void)?
     private var sidebar: MeowfilmSidebarView?
-    private var dockBottom: NSLayoutConstraint?
+    private let keyboardArea = UILayoutGuide()
     var onOpenSettings: (() -> Void)?
 
     init(navigation: PageNavigationController, themeProvider: any PageThemeProviding) {
@@ -22,21 +26,27 @@ final class MeowfilmRootContainerViewController: PageViewController {
         view.addSubview(navigation.view)
         navigation.view.pinEdges(to: view)
         navigation.didMove(toParent: self)
+        view.addLayoutGuide(keyboardArea)
+        NSLayoutConstraint.activate([
+            keyboardArea.topAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
+            keyboardArea.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            keyboardArea.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            keyboardArea.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
     }
 
     func install(surface: MusicPlayerSurface) {
         loadViewIfNeeded()
         surface.observeOutsideInteractions(in: view.window ?? view)
-        let dock = MeowfilmDockView(surface: surface)
+        let dock = MeowfilmDockView(surface: surface, themeProvider: themeProvider)
         dock.onSelectPage = { [weak self] page in self?.onSelectPage?(page) }
+        dock.accessibilityIdentifier = "app.dock"
         view.addSubview(dock)
         dock.translatesAutoresizingMaskIntoConstraints = false
-        let bottom = dock.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor)
-        dockBottom = bottom
         NSLayoutConstraint.activate([
             dock.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             dock.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            bottom,
+            dock.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
         self.dock = dock
         view.setNeedsLayout()
@@ -45,28 +55,33 @@ final class MeowfilmRootContainerViewController: PageViewController {
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         guard let dock else { return }
-        let keyboardTop = view.keyboardLayoutGuide.layoutFrame.minY
-        let keyboardRaised = keyboardTop < view.bounds.maxY - view.safeAreaInsets.bottom - 0.5
-        let bottomInset = keyboardRaised ? 0 : view.safeAreaInsets.bottom
-        if dockBottom?.constant != bottomInset { dockBottom?.constant = bottomInset }
-        let occupied = max(0, view.bounds.maxY - dock.frame.minY - view.safeAreaInsets.bottom)
+        // The dock stays at the bottom edge; the keyboard only insets content.
+        let bottom = view.safeAreaInsets.bottom
+        let docked = max(0, view.bounds.maxY - dock.frame.minY - bottom)
+        let keyboard = max(0, keyboardArea.layoutFrame.height - bottom)
+        let occupied = max(docked, keyboard)
         if abs(navigation.additionalSafeAreaInsets.bottom - occupied) > 0.5 {
             navigation.additionalSafeAreaInsets.bottom = occupied
         }
-        if keyboardTop > 0 { view.bringSubviewToFront(dock) }
         if let sidebar { view.bringSubviewToFront(sidebar) }
     }
 
     func setRootVisible(_ visible: Bool, animated: Bool) {
         dock?.setNavigationVisible(visible)
         if animated, let transition = navigation.transitionCoordinator {
-            transition.animate(alongsideTransition: { [weak self] _ in self?.view.layoutIfNeeded() })
+            transition.animate(alongsideTransition: { [weak self] _ in
+                self?.dock?.updateBackdrop()
+                self?.view.layoutIfNeeded()
+            })
         } else {
+            dock?.updateBackdrop()
             view.setNeedsLayout()
         }
     }
 
-    func select(_ page: MeowfilmPrimaryPage) { dock?.select(page) }
+    func select(_ page: MeowfilmPrimaryPage, duration: TimeInterval = 0) {
+        dock?.select(page, duration: duration)
+    }
 
     func showSidebar() {
         guard sidebar == nil else { return }

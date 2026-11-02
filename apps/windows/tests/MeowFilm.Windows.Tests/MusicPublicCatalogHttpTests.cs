@@ -38,14 +38,14 @@ public static class MusicPublicCatalogHttpTests
         yield return Case("no-response-cookie-forwarding-or-retention", Cookies);
         yield return Case("non2xx-verification-redirect-and-network-errors-are-finite", Failures);
         yield return Case("response-declared-stream-header-and-empty-limits", ResponseLimits);
-        yield return Case("caller-can-only-reduce-response-and-deadline-budget", CallerLimits);
+        yield return Case("caller-owns-response-buffer-and-operation-deadline", CallerLimits);
         yield return Case("precancellation-disposes-without-http", Precancel);
         yield return Case("cancellation-waits-for-noncooperative-handler", CancelHandler);
         yield return Case("cancellation-waits-for-noncooperative-response-read", CancelRead);
         yield return Case("cancellation-during-disposeasync-rejects-late-publication", CancelDispose);
         yield return Case("short-deadline-still-waits-for-physical-settle", Deadline);
         yield return Case("close-fences-but-does-not-detach-physical-request", Close);
-        yield return Case("global4-platform2-share-ordinary-budget-until-drained", Slots);
+        yield return Case("no-transport-request-budget-and-cancelled-requests-drain", Slots);
     }
     private static Func<string, HttpRequestMessage, CancellationToken, int, TimeSpan, Task<byte[]>> Port(MusicPlatformHttp http) =>
         typeof(MusicPlatformHttp).GetMethod("SendPublicCatalogReadAsync", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -200,10 +200,17 @@ public static class MusicPublicCatalogHttpTests
                 await Denied(route, request);
             }
         }
-        foreach (var (route, key, min, max) in new[] { (1, "pn", 0, 99), (1, "rn", 1, 100),
-            (2, "pn", 0, 99), (3, "pn", 0, 9), (6, "pageNo", 1, 100), (6, "pageSize", 1, 100), (9, "pageNo", 1, 200) })
-            foreach (string bad in new[] { "-1", "+1", "01", "1.0", (min - 1).ToString(), (max + 1).ToString() })
+        foreach (var (route, key, min, max) in new[] { (1, "pn", 0, int.MaxValue - 1), (1, "rn", 1, 100),
+            (2, "pn", 0, int.MaxValue - 1), (3, "pn", 0, int.MaxValue - 1), (6, "pageNo", 1, int.MaxValue),
+            (6, "pageSize", 1, 100), (9, "pageNo", 1, int.MaxValue) })
+        {
+            foreach (int value in new[] { min, max })
+            { var q = Query(route); q[key] = value.ToString(); await Send(http, route, Request(route, q)); }
+            var badValues = new List<string> { "+1", "01", "1.0", "-1", ((long)max + 1).ToString() };
+            if (min > 0) badValues.Add((min - 1L).ToString());
+            foreach (string bad in badValues)
             { var q = Query(route); q[key] = bad; await Denied(route, Request(route, q)); }
+        }
         foreach (var (route, key) in new[] { (3, "pid"), (4, "musicId"), (8, "playlistId"), (9, "playlistId") })
         {
             var q = Query(route); q[key] = "99999999999999999999"; await Send(http, route, Request(route, q));
@@ -387,13 +394,14 @@ public static class MusicPublicCatalogHttpTests
     private static async Task CallerLimits()
     {
         using var http = MusicPlatformHttp.CreateWithHandler(new Handler((_, _) => Task.FromResult(Response([1]))));
-        foreach (int max in new[] { 0, -1, 4194305 })
+        foreach (int max in new[] { 0, -1 })
             await Failure("LIMIT", () => Send(http, 4, Request(4), maximum: max));
-        foreach (double time in new[] { -1, 0, 0.1, 25001 })
+        foreach (double time in new[] { -1, 0, 0.1 })
             await Failure("LIMIT", () => Send(http, 4, Request(4), timeout: TimeSpan.FromMilliseconds(time)));
         Check((await Send(http, 4, Request(4), maximum: 1)).Length == 1);
+        Check((await Send(http, 4, Request(4), maximum: 4194305, timeout: TimeSpan.FromMinutes(2))).Length == 1);
         var request = Request(7); var content = request.Content!;
-        await Failure("LIMIT", () => Send(http, 7, request, maximum: 4194305)); await Disposed(content);
+        Check((await Send(http, 7, request, maximum: 4194305)).Length == 1); await Disposed(content);
     }
     private static async Task Precancel()
     {
@@ -462,25 +470,24 @@ public static class MusicPublicCatalogHttpTests
     }
     private static async Task Slots()
     {
-        var four = Signal(); var release = Signal(); int calls = 0;
+        var five = Signal(); var release = Signal(); int calls = 0;
         using var http = MusicPlatformHttp.CreateWithHandler(new Handler(async (_, _) => {
-            if (Interlocked.Increment(ref calls) == 4) four.TrySetResult();
+            if (Interlocked.Increment(ref calls) == 5) five.TrySetResult();
             await release.Task; return Response("{}"u8.ToArray());
         }));
         using var cancel = new CancellationTokenSource();
-        var tasks = new List<Task<byte[]>> { Send(http, 1, Request(1), cancel.Token), Send(http, 2, Request(2), cancel.Token) };
+        var tasks = new List<Task<byte[]>> { Send(http, 1, Request(1), cancel.Token), Send(http, 2, Request(2), cancel.Token),
+            Send(http, 3, Request(3), cancel.Token), Send(http, 6, Request(6), cancel.Token), Send(http, 8, Request(8), cancel.Token) };
         try
         {
-            await Failure("RATE_LIMITED", () => Send(http, 3, Request(3)));
-            tasks.Add(Send(http, 6, Request(6), cancel.Token)); tasks.Add(Send(http, 8, Request(8), cancel.Token));
-            await four.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            // Every request is admitted at once; nothing is rejected for volume.
+            await five.Task.WaitAsync(TimeSpan.FromSeconds(2));
             cancel.Cancel(); await Task.Delay(40); Check(tasks.All(t => !t.IsCompleted));
-            await Failure("RATE_LIMITED", () => http.SendAsync("tx", new(HttpMethod.Get, "https://u.y.qq.com/cgi-bin/musicu.fcg"), default));
         }
         finally { release.TrySetResult(); }
         foreach (var pending in tasks) await Failure("CANCELLED", () => pending, cancel.Token);
         await Send(http, 3, Request(3)); await http.SendAsync("tx", new(HttpMethod.Get, "https://u.y.qq.com/cgi-bin/musicu.fcg"), default);
-        Check(calls == 6);
+        Check(calls == 7);
     }
     private sealed class Handler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send) : HttpMessageHandler
     {

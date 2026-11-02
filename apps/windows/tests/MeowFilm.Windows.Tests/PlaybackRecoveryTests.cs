@@ -713,7 +713,7 @@ public static class PlaybackRecoveryTests
             return f;
         }
         internal Task Play() => Module.PlayOnlineSongAsync("wy", "合成歌曲", "fixture", "",
-            JsonSerializer.SerializeToElement(new { musicId = "42" }));
+            JsonSerializer.SerializeToElement(new { songmid = "42" }));
         public async ValueTask DisposeAsync()
         {
             App.ReleaseRefresh.TrySetResult();
@@ -764,7 +764,7 @@ public static class PlaybackRecoveryTests
             return f;
         }
         internal Task Play() => Module.PlayOnlineSongAsync("wy", "合成歌曲", "fixture", "",
-            JsonSerializer.SerializeToElement(new { musicId = "42" }));
+            JsonSerializer.SerializeToElement(new { songmid = "42" }));
         internal async Task PlayPair(string nextPlatform = "wy")
         {
             var first = MusicSongFixture.Online("wy", "First", "当前首", "fixture");
@@ -1144,8 +1144,8 @@ public static class PlaybackRecoveryTests
                 var songNode = JsonNode.Parse(song.GetRawText())!.AsObject();
                 string cache = LJ.Digest(LJ.Obj(("contract", "music.quality.cache.v1"), ("policy", policy),
                     ("installation", "fixture-source"), ("platform", "wy"), ("revision", 1), ("generation", 7),
-                    ("sourceKey", sourceKey), ("recording", source.GetProperty("source_data")),
-                    ("songId", songNode["songId"]), ("songRevision", songNode["revision"]),
+                    ("sourceKey", sourceKey), ("recording", source.GetProperty("musicInfo")),
+                    ("songId", songNode["songId"]),
                     ("duration", songNode["duration"]), ("quality", "320k")));
                 if (input.TryGetProperty("qualityPolicySignature", out var expectedPolicy) && expectedPolicy.GetString() != policy)
                     return Element(new { ok = false, code = "QUALITY_POLICY_CHANGED" });

@@ -8,6 +8,13 @@ import MeowMusicFeature
 
 enum MusicPlatformProtocol {
     static func md5(_ text: String) -> String { Insecure.MD5.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined() }
+    static func cookieHeader(_ fields: [String: String]) -> String {
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.!~*'()")
+        return fields.sorted { $0.key < $1.key }.map {
+            ($0.key.addingPercentEncoding(withAllowedCharacters: allowed) ?? "") + "=" +
+                ($0.value.addingPercentEncoding(withAllowedCharacters: allowed) ?? "")
+        }.joined(separator: "; ")
+    }
     static func netease(uri: String, data: MJ) throws -> Data {
         let plain = data.json, checksum = md5("nobody" + uri + "use" + plain + "md5forencrypt")
         let payload = Array((uri + "-36cd479b6b5-" + plain + "-36cd479b6b5-" + checksum).utf8)
@@ -75,25 +82,43 @@ enum MusicNativeSearchProtocol {
 actor MusicNativePlatforms {
     let transport: any MusicNativeHTTPTransport
     let qq: any MusicPublicQQProviding
+    let clients: (any MusicNativeClientContextProviding)?
     let now: @Sendable () -> Date
-    var wyDevice = "", kgDevice = "", epoch = UUID()
+    var epoch = UUID()
+    var volatileClients: [MusicAccountPlatform: MusicNativeClientDevice] = [:]
     let playlistHeads: AsyncValueCache<String, MJ>
-    let songBatches: AsyncValueCache<String, [MusicNativeTrackData]>
+    let songBatches: AsyncValueCache<String, [String: MusicNativeTrackData]>
     let completeCollections: AsyncValueCache<String, MusicPublicBrowseNativeCollection>
-    init(transport: any MusicNativeHTTPTransport, qq: any MusicPublicQQProviding, clock: @escaping @Sendable () -> Date) {
-        self.transport = transport; self.qq = qq; now = clock
+    var detailWitnesses: [String: MusicNativePublicBrowseWitness] = [:]
+    let discoveryHot: AsyncValueCache<String, MusicNativeSearchDiscoveryValue<MusicNativeSearchHotValue>>
+    let discoveryCharts: AsyncValueCache<String, MusicNativeSearchDiscoveryValue<[MusicPublicBrowseCollection]>>
+    init(transport: any MusicNativeHTTPTransport, qq: any MusicPublicQQProviding, clock: @escaping @Sendable () -> Date,
+         clients: (any MusicNativeClientContextProviding)? = nil) {
+        self.transport = transport; self.qq = qq; now = clock; self.clients = clients
         playlistHeads = .init(capacity: 24, maximumCost: 4 * 1024 * 1024, maximumFlights: 8,
                               cost: { $0.bytes.count }, clock: clock)
         songBatches = .init(capacity: 48, maximumCost: 4 * 1024 * 1024, maximumFlights: 8,
-                            cost: { $0.reduce(0) { $0 + $1.data.count } }, clock: clock)
+                            cost: { $0.values.reduce(0) { $0 + $1.data.count } }, clock: clock)
         completeCollections = .init(capacity: 6, maximumCost: 12 * 1024 * 1024, maximumFlights: 4,
                                     cost: { $0.tracks.reduce(0) { $0 + $1.data.count } }, clock: clock)
+        discoveryHot = .init(capacity: 1, maximumCost: 32 * 1024, maximumFlights: 2,
+                             cost: { $0.value.keywords.reduce(0) {
+                                 $0 + $1.keyword.utf8.count + 16
+                             } + 1 }, clock: clock)
+        discoveryCharts = .init(capacity: 1, maximumCost: 32 * 1024, maximumFlights: 2,
+                                cost: { $0.value.reduce(0) {
+                                    $0 + $1.id.utf8.count + $1.title.utf8.count + $1.creator.utf8.count +
+                                        ($1.artwork?.absoluteString.utf8.count ?? 0) + 16
+                                } }, clock: clock)
     }
     func revoke() async {
-        epoch = UUID(); wyDevice = ""; kgDevice = ""
+        epoch = UUID(); volatileClients = [:]
+        detailWitnesses = [:]
         await playlistHeads.invalidate(); await songBatches.invalidate(); await completeCollections.invalidate()
+        await discoveryHot.invalidate(); await discoveryCharts.invalidate()
     }
     func invalidateCollection(_ collection: MusicPublicBrowseCollection) async {
+        detailWitnesses = detailWitnesses.filter { $0.value.collectionID != collection.id }
         await playlistHeads.invalidate(collection.nativeID)
         await completeCollections.invalidate(collection.id)
         // Song metadata is anonymous but can change on a user's explicit refresh.
@@ -115,7 +140,8 @@ actor MusicNativePlatforms {
         try await requestResponse(value).data
     }
     func request(_ value: MusicNativeHTTPRequest, ignoringUpstreamKeys: Set<String> = [],
-                 checkingNeteaseCode: Bool = false) async throws -> MJ {
+                 checkingNeteaseCode: Bool = false, client: MusicNativeClientDevice? = nil) async throws -> MJ {
+        let own = epoch
         let response = try await requestResponse(value)
         let result: MJ
         do {
@@ -125,40 +151,47 @@ actor MusicNativePlatforms {
         } catch { throw MusicServiceError.upstreamInvalid }
         // Keep the response header beside its own body across suspension.
         // A shared "last response" would attribute concurrent limits wrongly.
-        return checkingNeteaseCode
+        let checked = checkingNeteaseCode
             ? try await checkedWYCode(result, url: value.url, retryAfter: response.header("retry-after"))
             : result
+        try musicRequire(own == epoch, .staleResult)
+        if let client, let clients, response.header("set-cookie") != nil {
+            _ = try await clients.acceptNativeClientResponse(client, url: value.url, headers: response.headers)
+            try musicRequire(own == epoch, .staleResult)
+        }
+        return checked
     }
     func wy(_ path: String, _ params: MJ) async throws -> MJ {
-        if wyDevice.isEmpty { wyDevice = (0..<26).map { _ in String(format: "%02X", UInt8.random(in: 0...255)) }.joined() }
+        let client = try await clientDevice(.netease)
         let milliseconds = Int(now().timeIntervalSince1970 * 1000)
         let header = MJ.obj([("os", .string("pc")), ("appver", .string("3.1.17.204416")), ("osver", .string("Microsoft-Windows-10-Professional-build-19045-64bit")),
-            ("channel", .string("netease")), ("deviceId", .string(wyDevice)), ("versioncode", .string("140")), ("mobilename", .string("")),
+            ("channel", .string("netease")), ("deviceId", .string(client.fields["deviceId"]!)), ("versioncode", .string("140")), ("mobilename", .string("")),
             ("buildver", .string(String(milliseconds / 1000))), ("resolution", .string("1920x1080")), ("__csrf", .string("")),
             ("requestId", .string(String(milliseconds) + "_0" + String(format: "%03d", Int.random(in: 0..<1000))))])
         var input = params; input["e_r"] = .bool(false); input["header"] = header
         let body = try MusicPlatformProtocol.netease(uri: path, data: input)
-        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.!~*'()")
-        let cookie = header.fields.sorted { $0.0 < $1.0 }.map {
-            ($0.0.addingPercentEncoding(withAllowedCharacters: allowed) ?? "") + "=" +
-            ($0.1.string.addingPercentEncoding(withAllowedCharacters: allowed) ?? "")
-        }.joined(separator: "; ")
+        var cookieFields = client.fields
+        for (key, value) in header.fields { cookieFields[key] = value.string }
+        let cookie = MusicPlatformProtocol.cookieHeader(cookieFields)
         return try await request(.init(url: URL(string: "https://interfacepc.music.163.com/eapi/" + path.dropFirst(5))!, method: "POST",
             headers: ["Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
                       "User-Agent": "NeteaseMusic 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)", "Cookie": cookie], body: body),
-            // The official toplist repeats this unused display field with
-            // different values. Discard it only on this exact route, without
-            // passing identities through JSONSerialization/Double rounding.
-            ignoringUpstreamKeys: path == "/api/toplist" ? ["updateFrequency"] : [], checkingNeteaseCode: true)
+            // The official toplist and some official chart playlist details
+            // repeat these unused fields with different values. Discard them
+            // only on their exact routes, without passing identities through
+            // JSONSerialization/Double rounding.
+            ignoringUpstreamKeys: path == "/api/toplist" ? ["updateFrequency"]
+                : path == "/api/v6/playlist/detail" ? ["alg"] : [],
+            checkingNeteaseCode: true, client: client)
     }
     func kg(_ path: String, _ params: [String: String], lyric: Bool = false, clear: Bool = false) async throws -> MJ {
-        if kgDevice.isEmpty { kgDevice = MusicPlatformProtocol.md5(UUID().uuidString.lowercased()) }
+        let client = try await clientDevice(.kugou), mid = client.fields["KUGOU_API_MID"]!, dfid = client.fields["dfid"] ?? "-"
         let time = String(Int(now().timeIntervalSince1970))
-        var p = clear ? [:] : ["dfid": "-", "mid": kgDevice, "uuid": "-", "appid": "1005", "clientver": "20489", "clienttime": time]
+        var p = clear ? [:] : ["dfid": dfid, "mid": mid, "uuid": "-", "appid": "1005", "clientver": "20489", "clienttime": time]
         p.merge(params) { _, new in new }; p["signature"] = MusicPlatformProtocol.kugou(p)
         var url = URLComponents(string: (lyric ? "https://lyrics.kugou.com" : "https://gateway.kugou.com") + path)!
         url.queryItems = p.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) }
-        var headers = ["User-Agent": "Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi", "dfid": "-", "mid": kgDevice,
+        var headers = ["User-Agent": "Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi", "dfid": dfid, "mid": mid,
             "clienttime": time, "kg-rc": "1", "kg-thash": "5d816a0", "kg-rec": "1", "kg-rf": "B9EDA08A64250DEFFBCADDEE00F8F25F"]
         if !lyric { headers["x-router"] = "complexsearch.kugou.com" }
         let data = try await request(.init(url: url.url!, headers: headers))
@@ -204,10 +237,10 @@ actor MusicNativePlatforms {
             try musicRequire(list.isArray, .upstreamInvalid); rows = list.array
         } else { throw MusicServiceError.sourceUnavailable }
         try musicRequire(rows.count <= 30 && (rows.isEmpty ? (page - 1) * 30 >= total : (page - 1) * 30 + rows.count <= total), .upstreamInvalid)
-        let items = try rows.map { platform == "wy" ? try neteaseSong($0) : try kugouSong($0) }
+        let items = try rows.map { platform == "wy" ? try Self.neteaseSong($0) : try kugouSong($0) }
         return .init(items: items, total: total, nextPage: page * 30 < total && page < 200 && !rows.isEmpty ? page + 1 : nil)
     }
-    func neteaseSong(_ raw: MJ) throws -> MusicNativeTrackData {
+    static func neteaseSong(_ raw: MJ) throws -> MusicNativeTrackData {
         let id = try MusicPlatformProtocol.numericID(raw["id"]), album = raw.contains("al") ? raw["al"] : raw["album"]
         let artists = raw.contains("ar") ? raw["ar"] : raw["artists"]
         try musicRequire(artists.isArray && artists.array.count <= 64, .upstreamInvalid)

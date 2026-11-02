@@ -23,7 +23,7 @@ final class MusicImportHistoryViewController: HostingPageViewController<MusicImp
             themeProvider: appearance,
             content: MusicImportHistoryContent(theme: PageTheme(palette: appearance.pageColorway))
         )
-        title = "导入记录"
+        pageTitle = "导入记录"
     }
 
     public override func viewDidLoad() {

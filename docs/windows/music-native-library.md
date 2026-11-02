@@ -134,6 +134,16 @@ version ownerId revision nextId collections songs accounts
 - intent 的 `acknowledged` 只包含该集合中现存 binding 的 canonical binding key。
 - 歌曲必须等于 `NativeMusicSong.Normalize` 的当前规范结果；临时媒体 URL、凭据和签名资源字段不得进入持久歌曲。
 
+## 统一歌曲与录音分组
+
+- `NativeMusicSong` 是 Windows 精简歌曲模型的唯一 owner。显示字段为 `songId / title / artist / album / duration / cover_url`；`sources` 中每项保存 `sourceKey / source / musicInfo`，录音自身的精确秒数保存在 `musicInfo.duration`。
+- `RecordingIdentity` 解析规范标题、歌手、版本、来源键和时长。精确来源键匹配允许补全未知信息；跨来源匹配要求已知且相同的标题/歌手/版本指纹，以及双方有效时长。容差为 `max(3 秒, 较短时长 × 2%)`，不能通过中间录音传递兼容。
+- `Recordings` 管理一个操作内的代表歌曲与录音集合。代表及全部来源必须两两兼容；来源键唯一，输出时主录音第一，其余按 `sourceKey` 排序。规范化、搜索、曲库、播放历史、官方候选与同步复用此实现。
+- `NativeMusicSongGroups` 是搜索、曲库 upsert 和播放历史共用的操作内索引：依次检查兼容的精确来源组、既有歌曲 ID、同指纹子组；无匹配才建组。原 ID 冲突时，根据新候选的完整规范录音证据生成确定性后缀，不因代表相同就覆盖不同录音集合。
+- 导入已显示或已持久化的分组不重新合并、不改变 ID。曲库更新优先采用新显示信息、主来源及同键录音，保留既有逻辑 ID；播放历史则由最新 occurrence 保留时间、context、代表和同键录音。本地歌曲只按本地 `songId` 参与分组，不能凭同名元信息隐式并入另一文件或在线结果；同步显式绑定仍需通过完整录音兼容检查。
+- 同步复用同一曲库快照内的分组索引，不在逐条 upsert 时重复解析整库；检查点提交重读后丢弃旧索引，再按新快照建立，不能保留跨检查点的旧 JsonNode。
+- `membership` 与 upsert 使用相同的完整录音匹配，能够找到带冲突后缀的子组。曲库专属的“每个原生来源只属于一首歌曲”仍由 Library owner 校验，冲突返回 `NATIVE_ID_CONFLICT`，不能隐式重绑集合。
+
 ## 当前命令
 
 曲库：

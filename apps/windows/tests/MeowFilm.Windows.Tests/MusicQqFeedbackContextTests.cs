@@ -70,7 +70,7 @@ public static class MusicQqFeedbackContextTests
         yield return Case("QIMEI-HTTP-exact-headers-and-envelope", HttpQimei);
         yield return Case("report-HTTP-gzip-status200-nonempty-and-bound", HttpReport);
         yield return Case("new-HTTP-request-body-headers-response-bounded", HttpLimits);
-        yield return Case("new-HTTP-stream-dispose-cancel-retains-slot-until-settle", HttpCleanup);
+        yield return Case("new-HTTP-stream-dispose-cancel-retains-physical-work-without-blocking-requests", HttpCleanup);
         yield return Case("new-HTTP-cancelled-request-producer-retains-slot", HttpProducer);
         yield return Case("new-HTTP-awaiting-producer-cannot-retarget-before-send", () => HttpRetarget(false));
         yield return Case("new-HTTP-awaiting-producer-cannot-replace-host-before-send", () => HttpRetarget(true));
@@ -122,7 +122,11 @@ public static class MusicQqFeedbackContextTests
             var document = await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace);
             var raw = JsonNode.Parse(document.Data!)!.AsObject(); CryptographicOperations.ZeroMemory(document.Data!);
             var entries = raw["entries"]!.AsArray();
-            Check(entries.Count == 1 && entries.Single(e => e!["key"]!.GetValue<string>() == AccountDocument.Key("tx"))!["value"]!.AsObject().Count == 6);
+            Check(entries.Count == 2 && entries.Single(e => e!["key"]!.GetValue<string>() == AccountDocument.Key("tx"))!["value"]!.AsObject().Count == 6);
+            var accounts = AccountDocument.Decode(await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace));
+            var details = accounts.GetDetails("tx");
+            Check(details is not null && details.BelongsTo(accounts.Get("tx")) &&
+                details.Rights.Membership.Vip == false, "Login rights remain bound alongside the feedback device");
             foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
             {
                 byte[] bytes = await File.ReadAllBytesAsync(file);
@@ -470,8 +474,7 @@ public static class MusicQqFeedbackContextTests
         await using var f = new Fixture(); var a = await f.Login();
         using var cancel = new CancellationTokenSource(); f.Handler.Hold = "auth";
         var first = f.Acquire(a, cancel.Token); await f.Handler.Arrived.Task;
-        var rest = Enumerable.Range(0, 7).Select(_ => f.Acquire(a, cancel.Token)).ToArray();
-        await Error(async () => await f.Acquire(a), "RATE_LIMITED");
+        var rest = Enumerable.Range(0, 16).Select(_ => f.Acquire(a, cancel.Token)).ToArray();
         cancel.Cancel(); await NotDone(first);
         f.Handler.Release.TrySetResult(); await Cancelled(async () => await first);
         foreach (var t in rest) await Cancelled(async () => await t);
@@ -481,8 +484,7 @@ public static class MusicQqFeedbackContextTests
         await using var f = new Fixture(); var a = await f.Login(); var leases = new List<IMusicQqFeedbackContextLease>();
         try
         {
-            for (int i = 0; i < 32; i++) leases.Add(await f.Acquire(a));
-            await Error(async () => await f.Acquire(a), "RATE_LIMITED");
+            for (int i = 0; i < 48; i++) leases.Add(await f.Acquire(a));
             await leases[0].DisposeAsync();
             await using var resumed = await f.Acquire(a); Check(resumed.IsCurrent);
         }
@@ -651,8 +653,11 @@ public static class MusicQqFeedbackContextTests
         var second = http.SendQqFeedbackReportAsync(ReportRequest(), cancel.Token);
         await streams[1].Arrived.Task;
         cancel.Cancel(); await NotDone(first); await NotDone(second);
-        await Error(async () => await http.SendAsync("tx", FeedbackRequest(), default), "RATE_LIMITED");
+        var third = http.SendAsync("tx", FeedbackRequest(), default);
+        for (int i = 0; i < 200 && streams.Count < 3; i++) await Task.Delay(10);
+        Check(streams.Count == 3, "a draining request does not block a new one");
         foreach (var s in streams) s.Release.TrySetResult();
+        await third;
         await Cancelled(async () => await first); await Cancelled(async () => await second);
     }
     private static async Task HttpProducer()
@@ -823,9 +828,17 @@ public static class MusicQqFeedbackContextTests
             string method = body["req_0"]?["method"]?.GetValue<string>() ?? "";
             string step = request.RequestUri!.Host == "api.tencentmusic.com" ? "qimei" : method switch {
                 "GetLoginUserInfo" => "auth", "GetHomepageHeader" => "profile", "GetSession" => "session",
+                "vip_login_base" => "rights",
                 "CgiGetTrackInfo" => "track", "UrlGetVkey" => "vkey", _ => throw new InvalidOperationException("Unexpected synthetic route") };
             lock (Steps) Steps.Add(step);
             if (step == Hold) { Hold = ""; Arrived.TrySetResult(); await Release.Task; }
+            if (step == "rights")
+            {
+                Check(body["req_0"]!["module"]!.GetValue<string>() == "VipLogin.VipLoginInter" &&
+                    body["comm"]!["qq"]!.GetValue<string>() == UserId &&
+                    body["comm"]!["authst"]!.GetValue<string>() == "SYNTHETIC_QQ_CONTEXT_KEY");
+                return Envelope(new JsonObject { ["svip"] = 0, ["identity"] = new JsonObject { ["vip"] = 0 } });
+            }
             if (step is "auth" or "profile")
             {
                 Check(body["comm"]!["qq"]!.GetValue<string>() == UserId &&

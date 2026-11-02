@@ -253,11 +253,13 @@ struct MusicKugouContext: Sendable {
     var auth: MusicKugouAuth?
     var qrID: UUID?
     var qrNonce: UUID?
+    var clientDevice: MusicNativeClientDevice?
 }
 
 actor KugouMusicAccountAdapter: MusicAccountProvider {
     let transport: any MusicAccountHTTPTransport
     let now: @Sendable () -> Date
+    let clientContexts: NativeMusicClientService?
     var epoch = UUID()
     struct QR {
         var expires: Date
@@ -271,8 +273,9 @@ actor KugouMusicAccountAdapter: MusicAccountProvider {
     var nextCreate = Date.distantPast
     struct Flight { let qrID: UUID?; let task: Task<MusicAccountHTTPResponse, Error> }
     var flights: [UUID: Flight] = [:]
-    init(transport: any MusicAccountHTTPTransport, now: @escaping @Sendable () -> Date) {
-        self.transport = transport; self.now = now
+    init(transport: any MusicAccountHTTPTransport, now: @escaping @Sendable () -> Date,
+         clientContexts: NativeMusicClientService? = nil) {
+        self.transport = transport; self.now = now; self.clientContexts = clientContexts
     }
     func revoke() {
         epoch = UUID(); qr.removeAll(); sms.removeAll()

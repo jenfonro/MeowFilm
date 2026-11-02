@@ -511,19 +511,23 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
             if let attempt { do { try await service.cancel(attemptId: attempt) } catch { self.error = MusicServiceError.sanitized(error).localizedDescription } }
         }
     }
-    isolated deinit {
-        favoritesObservation?.cancel()
-        favoritesStorage?.suspend()
-        accountObservation?.cancel()
-        remoteQueueIntent?.revoke(); remoteQueueTask?.cancel()
-        fmAdvanceIntent?.revoke(); fmRevocationTask?.cancel(); fmSource?.revoke()
-        searchTask?.cancel(); resolutionTask?.cancel(); candidateDiscoveryTask?.cancel()
-        lyricTask?.cancel(); eventTail?.cancel(); navigationTask?.cancel()
-        metadataPreferencesRefreshTask?.cancel()
-        cachedAudioLookup?.cancel(); cachedAudioObservation?.cancel(); cachedAudioRecoveryTask?.cancel()
-        remoteAudioRecoveryTask?.cancel()
-        for task in recoveryDrains.values { task.cancel() }
-        similarObservation?.cancel()
+    // The model is owned by MainActor UI. Tear down synchronously instead of
+    // entering the nested isolated-deinit runtime path on older runtimes.
+    nonisolated deinit {
+        MainActor.assumeIsolated {
+            favoritesObservation?.cancel()
+            favoritesStorage?.suspend()
+            accountObservation?.cancel()
+            remoteQueueIntent?.revoke(); remoteQueueTask?.cancel()
+            fmAdvanceIntent?.revoke(); fmRevocationTask?.cancel(); fmSource?.revoke()
+            searchTask?.cancel(); resolutionTask?.cancel(); candidateDiscoveryTask?.cancel()
+            lyricTask?.cancel(); eventTail?.cancel(); navigationTask?.cancel()
+            metadataPreferencesRefreshTask?.cancel()
+            cachedAudioLookup?.cancel(); cachedAudioObservation?.cancel(); cachedAudioRecoveryTask?.cancel()
+            remoteAudioRecoveryTask?.cancel()
+            for task in recoveryDrains.values { task.cancel() }
+            similarObservation?.cancel()
+        }
     }
 }
 #endif

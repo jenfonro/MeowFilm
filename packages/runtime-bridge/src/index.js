@@ -179,14 +179,14 @@ export class BridgePeer {
   #nextID = 0;
   #lastIncomingID = 0;
   #closed = false;
-  #sendChain = Promise.resolve();
+  #writing = false;
+  #queued = new Set();
   #queuedBytes = 0;
   #methods;
-  constructor({ session, send, close = () => {}, methods = {}, maximumPending = 64,
+  constructor({ session, send, close = () => {}, methods = {},
     maximumBytes = MAX_FRAME_BYTES, timeout = 30000 } = {}) {
     if (typeof session !== 'string' || !identity.test(session) || typeof send !== 'function' ||
-        typeof close !== 'function' || !Number.isSafeInteger(maximumPending) ||
-        maximumPending < 1 || maximumPending > 1024 || !Number.isSafeInteger(timeout) ||
+        typeof close !== 'function' || !Number.isSafeInteger(timeout) ||
         timeout < 1 || timeout > 300000) invalid();
     for (const [name, method] of Object.entries(methods)) {
       if (!methodName.test(name) || typeof method !== 'function') invalid();
@@ -194,7 +194,6 @@ export class BridgePeer {
     this.session = session;
     this.send = send;
     this.closeTransport = close;
-    this.maximumPending = maximumPending;
     this.maximumBytes = maximumBytes;
     this.timeout = timeout;
     this.#methods = new Map(Object.entries(methods));
@@ -207,7 +206,7 @@ export class BridgePeer {
   #envelope(kind, id, fields = {}) {
     return { version: BRIDGE_VERSION, session: this.session, kind, id, ...fields };
   }
-  #write(message, { shouldSend = () => true, onSend = () => {} } = {}) {
+  #write(message, { shouldSend = () => true, onSend = () => {}, onQueued = () => {} } = {}) {
     if (this.#closed) return Promise.reject(new BridgeError('CLOSED'));
     let bytes;
     try { bytes = encodeFrame(message, this.maximumBytes); }
@@ -216,26 +215,57 @@ export class BridgePeer {
     // Bounded reserve for cancellation/errors prevents a full data queue from
     // silently retaining cancelled remote work. Exhausting even the reserve
     // closes the transport, making failure visible to both peers.
-    const reserve = Math.min(this.maximumBytes, this.maximumPending * 256);
+    const reserve = this.maximumBytes;
     const budget = this.maximumBytes * 4 - (control ? 0 : reserve);
     if (this.#queuedBytes + bytes.length > budget) {
       if (control) this.close();
       return Promise.reject(new BridgeError('LIMIT'));
     }
     this.#queuedBytes += bytes.length;
-    const operation = this.#sendChain.then(() => {
-      if (this.#closed) throw new BridgeError('CLOSED');
-      if (!shouldSend()) return;
-      onSend();
-      return this.send(bytes);
+    const operation = new Promise((resolve, reject) => {
+      const entry = { bytes, shouldSend, onSend, resolve, reject, writing: false };
+      entry.discard = error => {
+        if (entry.writing || !this.#queued.delete(entry)) return;
+        this.#queuedBytes -= entry.bytes.length;
+        entry.bytes = undefined;
+        if (error) reject(error); else resolve();
+      };
+      this.#queued.add(entry);
+      onQueued(entry.discard);
     });
-    this.#sendChain = operation.catch(() => { this.close(); });
-    return operation.finally(() => { this.#queuedBytes -= bytes.length; });
+    if (!this.#writing) {
+      this.#writing = true;
+      queueMicrotask(() => { void this.#drainWrites(); });
+    }
+    return operation;
+  }
+  async #drainWrites() {
+    try {
+      while (this.#queued.size) {
+        const entry = this.#queued.values().next().value;
+        this.#queued.delete(entry);
+        entry.writing = true;
+        try {
+          if (this.#closed) throw new BridgeError('CLOSED');
+          if (entry.shouldSend()) {
+            entry.onSend();
+            await this.send(entry.bytes);
+          }
+          entry.resolve();
+        } catch (error) {
+          entry.reject(error);
+          this.close();
+        } finally {
+          this.#queuedBytes -= entry.bytes.length;
+          entry.bytes = undefined;
+        }
+      }
+    } finally { this.#writing = false; }
   }
   call(method, params = null, { signal, timeout = this.timeout } = {}) {
     if (this.#closed) return Promise.reject(new BridgeError('CLOSED'));
     if (signal?.aborted) return Promise.reject(new BridgeError('CANCELLED'));
-    if (this.#pending.size >= this.maximumPending || this.#nextID >= Number.MAX_SAFE_INTEGER) {
+    if (this.#nextID >= Number.MAX_SAFE_INTEGER) {
       return Promise.reject(new BridgeError('LIMIT'));
     }
     if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 300000) {
@@ -253,6 +283,7 @@ export class BridgePeer {
         const entry = this.#pending.get(id);
         if (!entry) return;
         this.#pending.delete(id);
+        entry.discard?.();
         clearTimeout(entry.timer);
         signal?.removeEventListener('abort', entry.onAbort);
         if (error) reject(error); else resolve(value);
@@ -268,7 +299,8 @@ export class BridgePeer {
       signal?.addEventListener('abort', onAbort, { once: true });
       this.#write(message, {
         shouldSend: () => this.#pending.has(id),
-        onSend: () => { const entry = this.#pending.get(id); if (entry) entry.sent = true; }
+        onSend: () => { const entry = this.#pending.get(id); if (entry) entry.sent = true; },
+        onQueued: discard => { const entry = this.#pending.get(id); if (entry) entry.discard = discard; else discard(); }
       }).catch(error => settle(error instanceof BridgeError ? error : new BridgeError('CLOSED')));
     });
   }
@@ -290,8 +322,8 @@ export class BridgePeer {
     if (message.id <= this.#lastIncomingID) throw new BridgeError('INVALID_MESSAGE');
     this.#lastIncomingID = message.id;
     const method = this.#methods.get(message.method);
-    if (!method || this.#active.size >= this.maximumPending) {
-      this.#write(this.#envelope('error', message.id, { code: method ? 'LIMIT' : 'METHOD_UNAVAILABLE' })).catch(() => this.close());
+    if (!method) {
+      this.#write(this.#envelope('error', message.id, { code: 'METHOD_UNAVAILABLE' })).catch(() => this.close());
       return;
     }
     const controller = new AbortController();
@@ -327,6 +359,7 @@ export class BridgePeer {
     if (this.#closed) return;
     this.#closed = true;
     for (const pending of this.#pending.values()) pending.settle(new BridgeError('CLOSED'));
+    for (const entry of this.#queued) entry.discard(new BridgeError('CLOSED'));
     for (const entry of this.#active.values()) {
       clearTimeout(entry.timer);
       entry.controller.abort();

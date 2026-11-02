@@ -8,8 +8,8 @@ namespace MeowFilm.Capabilities.Sync;
 
 internal sealed class MusicSyncKg(MusicPlatformSession session, MusicPlatformHttp http,
     MusicPlatformClientContextOwner clients, MusicPlatformClientContext? client, Func<Task> guard, Action accountGuard, CancellationToken token,
-    Func<HttpRequestMessage, CancellationToken, Task<byte[]>>? cloud, MusicSyncRequestBudget budget)
-    : MusicSyncAdapter(session, http, clients, client, budget, guard, accountGuard, token)
+    Func<HttpRequestMessage, CancellationToken, Task<byte[]>>? cloud)
+    : MusicSyncAdapter(session, http, clients, client, guard, accountGuard, token)
 {
     private sealed record Entry(string Id, string ListId, int Type, string Name, string Owner, long Count,
         string? Version, string GlobalId, bool Favorite, bool Special, bool Writable, long Source, long? Sort);
@@ -26,11 +26,11 @@ internal sealed class MusicSyncKg(MusicPlatformSession session, MusicPlatformHtt
         var version = tracks ? info?["list_ver"] ?? data["list_ver"] ?? response["list_ver"] : data["total_ver"] ?? response["total_ver"];
         return new(rows, count, version is null ? null : Id(version));
     }
-    private async Task<Page> Paginate(Func<int, Task<JsonObject>> read, int maximumPages,
+    private async Task<Page> Paginate(Func<int, Task<JsonObject>> read,
         bool tracks, bool owned, Action<JsonObject>? inspect = null)
     {
         var all = new List<JsonObject>(); var seen = new HashSet<string>(); long? count = null; string? version = null;
-        for (int page = 1; page <= maximumPages; page++)
+        for (int page = 1; ; page = checked(page + 1))
         {
             var response = await read(page); inspect?.Invoke(response); var next = ParsePage(response, tracks);
             Require(count is null || next.Count is null || count == next.Count, "SNAPSHOT_CHANGED");
@@ -40,17 +40,16 @@ internal sealed class MusicSyncKg(MusicPlatformSession session, MusicPlatformHtt
                 string id = tracks ? owned ? Id(row["fileid"]) : PlatformSongs.KgHash(row["hash"] ?? row["audio_info"]?["hash"]) : PJ.Scalar(row["type"]) + ":" + Id(row["listid"]);
                 Require(seen.Add(id), "PAGINATION_STALLED"); all.Add(row);
             }
-            Require(all.Count <= 10000 && (count is null || all.Count <= count), "PAGINATION_LIMIT");
+            Require(count is null || all.Count <= count, "INCOMPLETE_PAGE");
             if (count is not null && all.Count == count || next.Rows.Count == 0)
             { Require(count is null || all.Count == count); return new(all, count, version); }
         }
-        throw new MusicLibraryException("PAGINATION_LIMIT");
     }
     private async Task<(List<Entry> Entries, string? Version)> Directory()
     {
         Require(PJ.Cookie(Cookies, "userid") == AccountId, "INVALID_CREDENTIALS");
         var page = await Paginate(p => Kg("/v7/get_all_list", O(("plat", 1)), body: LJ.Merge(Credentials(), O(("total_ver", 979), ("type", 2), ("page", p), ("pagesize", 30)))),
-            MusicSyncRequestBudget.MaximumDirectoryPages, false, false);
+            false, false);
         var entries = page.Rows.Select(r =>
         {
             string list = Id(r["listid"]), name = Name(r["name"]), owner = Id(r["list_create_userid"]); long type = Count(r["type"]), source = Count(r["source"]);
@@ -82,13 +81,13 @@ internal sealed class MusicSyncKg(MusicPlatformSession session, MusicPlatformHtt
         if (entry.Type == 0)
             page = await Paginate(p => Kg("/v4/get_list_all_file_v3", new(), body: LJ.Merge(Credentials(), O(("listid", entry.ListId), ("type", 0),
                 ("page", p), ("pagesize", 30), ("area_code", 1), ("allplatform", 1), ("show_cover", 1)))),
-                MusicSyncRequestBudget.MaximumCollectionPages, true, true, Identity);
+                true, true, Identity);
         else
         {
             Require(System.Text.RegularExpressions.Regex.IsMatch(entry.GlobalId, "^[A-Za-z0-9_-]{1,200}$") && !entry.GlobalId.StartsWith("id_", StringComparison.Ordinal), "IDENTITY_MISMATCH");
-            page = await Paginate(p => Kg("/pubsongs/v2/get_other_list_file_nofilt", O(("area_code", 1), ("begin_idx", (p - 1) * 30), ("plat", 1),
+            page = await Paginate(p => Kg("/pubsongs/v2/get_other_list_file_nofilt", O(("area_code", 1), ("begin_idx", (p - 1L) * 30), ("plat", 1),
                 ("type", 1), ("mode", 1), ("personal_switch", 1), ("extend_fields", "abtags,hot_cmt,popularization"), ("pagesize", 30), ("global_collection_id", entry.GlobalId)), null),
-                MusicSyncRequestBudget.MaximumCollectionPages, true, false, Identity);
+                true, false, Identity);
         }
         Require(page.Rows.Count == entry.Count); Require(entry.Version is null || page.Version is null || entry.Version == page.Version, "SNAPSHOT_CHANGED");
         var members = page.Rows.OrderBy(r => r["sort"] is null ? long.MaxValue : Count(r["sort"])).Select(r =>
@@ -107,7 +106,6 @@ internal sealed class MusicSyncKg(MusicPlatformSession session, MusicPlatformHtt
         var result = new List<SyncRemote>();
         var selected = before.Entries.Where(e => e.Source != 2 &&
             kinds.Contains(e.Favorite ? "favorites" : "playlist")).ToArray();
-        Require(selected.Length <= MusicSyncRequestBudget.MaximumCollectionsPerPlatform, "SYNC_REQUEST_LIMIT");
         foreach (var entry in selected) result.Add(await ReadEntry(entry));
         Require(DirectorySignature(before) == DirectorySignature(await Directory()), "SNAPSHOT_CHANGED"); return new(AccountId, result);
     }
@@ -127,7 +125,7 @@ internal sealed class MusicSyncKg(MusicPlatformSession session, MusicPlatformHtt
     internal override async Task DeleteAsync(SyncRemote remote)
     {
         CheckWriteCapability("delete"); Require(remote.Writable && remote.Kind != "favorites" && !LJ.B(remote.Locator["special"]), "READ_ONLY");
-        await AdmitRequest(); await MusicSyncKgCloud.SendAsync(Session, KgClient, "/v2/delete_list", O(("listid", JsonNode.Parse(Id(remote.Locator["listId"]))), ("total_ver", 0), ("type", 1)), cloud!, Token); await Guard();
+        await Guard(); await MusicSyncKgCloud.SendAsync(Session, KgClient, "/v2/delete_list", O(("listid", JsonNode.Parse(Id(remote.Locator["listId"]))), ("total_ver", 0), ("type", 1)), cloud!, Token); await Guard();
     }
     internal override async Task ChangeAsync(SyncRemote remote, bool add, IReadOnlyList<string> ids, IReadOnlyDictionary<string, JsonObject> songs)
     {
@@ -142,7 +140,7 @@ internal sealed class MusicSyncKg(MusicPlatformSession session, MusicPlatformHtt
                 {
                     // Native catalog detail is read-only and account-bound, never a Node fallback.
                     using var catalog = new MusicPlatformCatalog(new FixedSession(Session), Http, Clients);
-                    await AdmitRequest();
+                    await Guard();
                     var result = await catalog.SongAsync(new("kg", id, true), Token); await AcceptCatalogReadAsync(); source = NativeMusicSong.SourceData(JsonNode.Parse(result.GetRawText())!.AsObject());
                 }
                 string name = LJ.S(source["name"], LJ.S(songs[id]["title"])); Require(LJ.Id(name, 200) && name != "未知歌曲" && !name.Any(c => c is ',' or '|' or '\r' or '\n'), "UNMAPPED_SONG");
@@ -166,7 +164,7 @@ internal sealed class MusicSyncKg(MusicPlatformSession session, MusicPlatformHtt
         Require(remote.Locator["version"] is not null, "INCOMPLETE_PAGE");
         var byHash = remote.Members.GroupBy(m => m.Id).ToDictionary(g => g.Key, g => new Queue<string>(g.Select(m => m.Key)));
         var data = new JsonArray(ids.Select((id, index) => (JsonNode)O(("fileid", JsonNode.Parse(byHash[id].Dequeue())), ("sort", index))).ToArray());
-        await AdmitRequest(); await MusicSyncKgCloud.SendAsync(Session, KgClient, "/v1/modify_song_sort", O(("listid", JsonNode.Parse(Id(remote.Locator["listId"]))),
+        await Guard(); await MusicSyncKgCloud.SendAsync(Session, KgClient, "/v1/modify_song_sort", O(("listid", JsonNode.Parse(Id(remote.Locator["listId"]))),
             ("list_ver", JsonNode.Parse(Id(remote.Locator["version"]))), ("type", 0), ("data", data)), cloud!, Token); await Guard();
     }
     private sealed class FixedSession(MusicPlatformSession session) : IMusicPlatformSessionSource

@@ -25,7 +25,7 @@ internal sealed partial class MusicPlatformClientProtocol
             string encrypted = Convert.ToBase64String(aes.EncryptCbc(plaintext, iv, PaddingMode.PKCS7));
             string p = Convert.ToHexStringLower(rsa.Encrypt(portrait, RSAEncryptionPadding.Pkcs1));
             var response = await transport.SendAccountStepAsync(MusicAccountHttpStep.KgRegister,
-                MusicPlatformRequests.KgRegisterDevice(device.Mid, Clock.GetUtcNow().ToUnixTimeSeconds(), p, encrypted), token, TimeSpan.FromSeconds(25), awaitPhysical: true)
+                MusicPlatformRequests.KgRegisterDevice(device.Mid, Clock.GetUtcNow().ToUnixTimeSeconds(), p, encrypted), token, TimeSpan.FromSeconds(25))
                 .ConfigureAwait(false);
             byte[]? plain = null;
             try
@@ -36,7 +36,7 @@ internal sealed partial class MusicPlatformClientProtocol
                 try { plain = aes.DecryptCbc(response.Bytes, iv, PaddingMode.PKCS7); }
                 catch { throw new MusicPlatformException("INVALID_RESPONSE"); }
                 token.ThrowIfCancellationRequested();
-                var data = PJ.Parse(plain, 1048576); PlatformProtocols.KgAccountStatus(data);
+                var data = PJ.Parse(plain); PlatformProtocols.KgAccountStatus(data);
                 // The fixed adapter explicitly accepts a successful [] with no issued dfid.
                 if (data["data"] is JsonArray { Count: 0 }) return null;
                 PJ.Require(data["data"] is JsonObject, "INVALID_RESPONSE");

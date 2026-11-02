@@ -51,7 +51,7 @@ internal sealed partial class MusicLibrarySyncEngine
                 {
                     string mapping = platform + ":" + id;
                     if (!reportedMappings.Contains(mapping))
-                        Issue(platform, cid, deferredMappings.Contains(mapping) ? "SYNC_DEFERRED" : "UNMAPPED_SONG");
+                        Issue(platform, cid, "UNMAPPED_SONG");
                     continue;
                 }
                 string native = adapter.NativeId(source)!; desired.Add(native); songs[native] = source;

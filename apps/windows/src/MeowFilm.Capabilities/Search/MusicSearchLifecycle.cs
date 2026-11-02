@@ -43,6 +43,7 @@ public sealed partial class MusicSearchCoordinator
     {
         if (query.Released) return;
         query.Released = true; query.Lifetime.Dispose();
+        foreach (var state in query.States) state.Slots.Dispose();
     }
 
     public Task PrepareShutdownAsync(CancellationToken cancellationToken = default)
@@ -116,9 +117,8 @@ public sealed partial class MusicSearchCoordinator
         lock (gate)
         {
             foreach (var query in queries.Values) ReleaseLocked(query);
-            queries.Clear(); notices.Clear();
+            queries.Clear(); notices.Clear(); cache.Clear(); cacheBytes = 0;
         }
-        slots.Dispose();
     }
 
     private Task WithNotificationBarrier(Task work)

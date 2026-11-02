@@ -51,7 +51,7 @@ internal sealed class MusicVipPageProtocol(MusicPlatformHttp http, MusicPlatform
             token.ThrowIfCancellationRequested();
             var text = value!.GetValue<string>();
             JsonObject item;
-            try { item = PJ.Parse(Encoding.UTF8.GetBytes(text), 65536); }
+            try { item = PJ.Parse(Encoding.UTF8.GetBytes(text)); }
             catch (MusicPlatformException) { continue; }
             if (item["algFlag"] is not null && PJ.Count(item["algFlag"]) == 1) continue;
             var image = Https(item["imgUrl"]);

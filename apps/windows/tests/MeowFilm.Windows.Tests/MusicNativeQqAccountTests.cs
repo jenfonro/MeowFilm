@@ -32,7 +32,7 @@ public static class MusicNativeQqAccountTests
         yield return Case("ttl-cooldown-local-id-poll-cap-no-replay", Lifetime);
         yield return Case("caller-cancel-after-authorization-no-handoff", Cancel);
         yield return Case("old-poll-cannot-overwrite-new-challenge", Replace);
-        yield return Case("single-poll-admission-noncooperative-physical-http-slots", Budget);
+        yield return Case("single-poll-admission-noncooperative-physical-http-unthrottled", Budget);
         yield return Case("real-dpapi-save-restart-validate-local-logout", Storage);
         yield return Case("lost-cas-receipt-reconcile-no-auth-replay", UnknownSave);
         yield return Case("failed-validation-never-saves-grant", InvalidSave);
@@ -64,12 +64,13 @@ public static class MusicNativeQqAccountTests
         {
             handoffs++; Check(value.Profile.UserId == "42" && value.Profile.DisplayName == "合成账号" &&
                 value.Cookie.Contains("musickey=SYNTHETIC_MUSICKEY") && !value.Cookie.Contains("QRSIG") &&
-                !value.Cookie.Contains("PSKEY") && JsonSerializer.Serialize(value) == "{}");
+                !value.Cookie.Contains("PSKEY") && JsonSerializer.Serialize(value) == "{}" &&
+                value.Details.Entitlements.Membership.Vip == true && value.Details.Entitlements.Membership.Tier == "svip");
             return Task.FromResult(true);
         });
-        Check(poll.Status == "authenticated" && handoffs == 1 && handler.Calls == 7);
+        Check(poll.Status == "authenticated" && handoffs == 1 && handler.Calls == 8);
         Check((await protocol.PollAsync("tx", challenge.ChallengeId, (_, _) => Task.FromResult(true))).Status == "expired");
-        Check(handler.Calls == 7);
+        Check(handler.Calls == 8);
     }
     private static async Task State(int state, string expected)
     {
@@ -89,7 +90,7 @@ public static class MusicNativeQqAccountTests
         await using var protocol = clientContext10.CreateAccountProtocol();
         var qr = await protocol.BeginAsync("tx");
         Check((await protocol.PollAsync("tx", qr.ChallengeId, (_, _) => Task.FromResult(true))).Status == "authenticated");
-        Check(handler.Calls == 7);
+        Check(handler.Calls == 8);
     }
     private static async Task Reject(string fault)
     {
@@ -155,8 +156,10 @@ public static class MusicNativeQqAccountTests
         var qr = await protocol.BeginAsync("tx");
         for (int i = 0; i < 100; i++) Check((await protocol.PollAsync("tx", qr.ChallengeId, (_, _) => Task.FromResult(true))).Status == "waiting");
         int calls = handler.Calls;
-        await Error(() => protocol.PollAsync("tx", qr.ChallengeId, (_, _) => Task.FromResult(true)), "RATE_LIMITED");
-        Check(calls == handler.Calls);
+        Check((await protocol.PollAsync("tx", qr.ChallengeId, (_, _) => Task.FromResult(true))).Status == "waiting");
+        Check(calls + 1 == handler.Calls);
+        clock.Advance(181);
+        Check((await protocol.PollAsync("tx", qr.ChallengeId, (_, _) => Task.FromResult(true))).Status == "expired");
     }
     private static async Task Cancel()
     {
@@ -196,8 +199,8 @@ public static class MusicNativeQqAccountTests
         clock.Advance(3);
         await Error(() => protocol.BeginAsync("tx"), "TIMEOUT");
         clock.Advance(3);
-        await Error(() => protocol.BeginAsync("tx"), "RATE_LIMITED");
-        Check(handler.Calls == 2); handler.Release.TrySetResult();
+        await Error(() => protocol.BeginAsync("tx"), "TIMEOUT");
+        Check(handler.Calls == 3); handler.Release.TrySetResult();
     }
     internal static string DataPath()
     {
@@ -213,6 +216,9 @@ public static class MusicNativeQqAccountTests
         await using (var owner = clientContext1.CreateAccountOwner(store))
         {
             var result = await Login(owner); Check(Ok(result) && AccountState(result) == "verified");
+            var details = await owner.ReadDetailsAsync("tx");
+            Check(details.Generation == 1 && details.Membership.Vip == true && details.Membership.Tier == "svip" &&
+                details.MembershipFreshness == MusicAccountDetailsFreshness.Fresh);
             var session = await owner.AcquireAsync("tx"); Check(session is not null && owner.IsCurrent(session));
             Check(owner.Revoke(session!) && !owner.IsCurrent(session!));
         }
@@ -221,6 +227,7 @@ public static class MusicNativeQqAccountTests
         await using var clientContext2 = new MusicClientContextFixture(http);
         await using var reopened = clientContext2.CreateAccountOwner(store);
         Check(RowState(await reopened.CallAsync("music.accounts.list")) == "saved");
+        Check((await reopened.ReadDetailsAsync("tx")).Membership.Vip == true);
         Check(AccountState(await reopened.CallAsync("music.accounts.validate", new { platform = "tx" })) == "verified");
         Check(AccountState(await reopened.CallAsync("music.accounts.logout", new { platform = "tx" })) == "none");
         Check(await reopened.AcquireAsync("tx") is null);
@@ -468,6 +475,8 @@ internal sealed class QqAccountFixtureHandler : HttpMessageHandler
         if (step == "GetHomepageHeader") return Json(new { code = 0, req_0 = new { code = 0, data = new { Info = new { BaseInfo = new {
             EncryptedUin = Fault == "profile-identity" ? "WRONG_EUIN" : "SYNTHETIC_EUIN",
             Name = Fault == "profile-ticket" ? "SYNTHETIC_QRSIG" : "合成账号" } } } } });
+        if (step == "vip_login_base") return Json(new { code = 0, req_0 = new { code = 0,
+            data = new { svip = 1, userinfo = new { expire = DateTimeOffset.UtcNow.AddDays(30).ToUnixTimeMilliseconds() } } } });
         throw new InvalidOperationException("Unexpected synthetic QQ step");
     }
     protected override void Dispose(bool disposing) { if (disposing) Disposals++; base.Dispose(disposing); }

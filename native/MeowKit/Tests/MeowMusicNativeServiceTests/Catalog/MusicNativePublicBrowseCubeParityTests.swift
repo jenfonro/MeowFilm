@@ -8,7 +8,7 @@ final class MusicNativePublicBrowseCubeParityTests: XCTestCase {
     private func response(_ page: MJ) -> MJ {
         .obj([("code", .n(200)), ("data", .obj([("pageProtocol", .obj([("pages", .array([page]))]))]))])
     }
-    func testRecommendTabsHydrateAllChoicesAndKeepFMNumericSelectorAndCoverLabel() async throws {
+    func testRecommendTabsHydrateOnlySelectedChoiceAndKeepFMNumericSelectorAndCoverLabel() async throws {
         let root = try node(#"""
         {"componentName":"Root","children":[{"id":"recommend","props":{"tab":"electronic","title":"官方栏目","recommendModule":[
           {"title":"一","modules":[{"type":"song","id":11},{"type":"playlist","id":41}]},
@@ -18,7 +18,8 @@ final class MusicNativePublicBrowseCubeParityTests: XCTestCase {
         ]}}]}
         """#)
         let http = NativeMusicHTTPFixture([response(root),
-            .obj([("code", .n(200)), ("songs", .array([MusicNativePublicBrowseFixture.song("11"), MusicNativePublicBrowseFixture.song("12")]))]),
+            .obj([("code", .n(200)), ("songs", .array([MusicNativePublicBrowseFixture.song("12")]))]),
+            .obj([("code", .n(200)), ("songs", .array([MusicNativePublicBrowseFixture.song("11")]))]),
             .obj([("code", .n(200)), ("data", .array([.obj([("id", .n(41)), ("name", .string("水合歌单")),
                 ("coverImgUrl", .string("https://p1.music.126.net/fixture.jpg"))])]))])
         ])
@@ -29,7 +30,7 @@ final class MusicNativePublicBrowseCubeParityTests: XCTestCase {
         XCTAssertEqual(section.title, "官方栏目"); XCTAssertEqual(section.tabs.map(\.title), ["一", "二"])
         XCTAssertEqual(section.selectedTab, "recommend:group:1")
         XCTAssertEqual(section.items.map(\.id), section.tabs[1].items.map(\.id))
-        XCTAssertEqual(section.tabs[0].items.map(\.title), ["Synthetic song", "水合歌单"])
+        XCTAssertTrue(section.tabs[0].items.isEmpty)
         XCTAssertEqual(section.tabs[1].items.map(\.coverLabel), ["", "规则封面", "继承封面"])
         if case .action(let action) = section.items[1].content {
             XCTAssertEqual(action, .ruleFM(ruleID: "", tabTagID: "17001", sourceName: "规则封面"))
@@ -37,11 +38,15 @@ final class MusicNativePublicBrowseCubeParityTests: XCTestCase {
         if case .action(let action) = section.items[2].content {
             XCTAssertEqual(action, .ruleFM(ruleID: "", tabTagID: "electronic", sourceName: "继承封面"))
         } else { XCTFail("empty FM tab must inherit") }
-        for tab in section.tabs {
-            if case .track(let track) = tab.items[0].content { XCTAssertFalse(track.sources.isEmpty) }
-            else { XCTFail("every tab must be hydrated") }
-        }
-        let calls = await http.calls(); XCTAssertEqual(calls.count, 3)
+        if case .track(let track) = section.tabs[1].items[0].content { XCTAssertEqual(track.sources[0].nativeId, "12") }
+        else { XCTFail("selected song must be available") }
+        let initial = await http.calls(); XCTAssertEqual(initial.count, 2)
+        let load = try XCTUnwrap(section.tabs[0].loadItems)
+        let selected = try await load()
+        XCTAssertEqual(selected.map(\.title), ["Synthetic song", "水合歌单"])
+        if case .track(let track) = selected[0].content { XCTAssertEqual(track.sources[0].nativeId, "11") }
+        else { XCTFail("explicit choice must complete its missing display fields") }
+        let calls = await http.calls(); XCTAssertEqual(calls.count, 4)
         await service.close()
     }
     func testGridAndScrollSplitDirectSongsFromCollectionsWithoutFlatteningLeaves() throws {
@@ -115,8 +120,8 @@ final class MusicNativePublicBrowseCubeParityTests: XCTestCase {
         let item = MusicNativePublicBrowseItem(id: "fm", title: "FM", content: .action(.fm(mode: .default, submode: "", entry: nil)),
                                               coverLabel: "FM")
         let page = MusicNativePublicBrowseDiscovery(sections: [.init(id: "s", title: "", items: [item])])
-        let data = try MusicNativeHomeSnapshot.encode(page, scope: "synthetic")
-        let restored = try XCTUnwrap(MusicNativeHomeSnapshot.decode(data, scope: "synthetic"))
+        let data = try MusicNativeHomeSnapshot.encode(page, source: .netease, scope: "synthetic")
+        let restored = try XCTUnwrap(MusicNativeHomeSnapshot.decode(data, source: .netease, scope: "synthetic"))
         XCTAssertEqual(restored.sections[0].items[0].coverLabel, "FM")
         XCTAssertTrue(restored.sections[0].items[0].previewSongs.isEmpty)
         XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("authorization"))

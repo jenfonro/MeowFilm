@@ -36,12 +36,12 @@ public static partial class MusicUiTests
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection();
             Render(f.Module.SettingsView, 1080, 680);
-            var tabs = Visuals(f.Module.SettingsView).OfType<TabControl>()
-                .Single(t => AutomationProperties.GetName(t) == "设置分类");
-            Equal(6, tabs.Items.Count);
-            True(tabs.Items.Cast<TabItem>().Select(t => (string)t.Header)
-                .SequenceEqual(new[] { "平台", "搜索", "音质与缓存", "外观", "歌词与封面", "音源" }),
-                "current settings groups");
+            var navigation = (Panel)f.Module.SettingsView.FindName("SettingsNavigation");
+            var anchors = navigation.Children.OfType<RadioButton>().ToArray();
+            Equal(6, anchors.Length);
+            True(anchors.Select(anchor => (string)anchor.Content)
+                .SequenceEqual(new[] { "账号与平台", "搜索", "音质与缓存", "外观", "歌词与封面", "音源" }),
+                "reference settings groups are all present");
             await f.Module.ActivateSettingsAsync();
             await Until(() => !f.Module.Busy && f.Module.Accounts.All(account => account.State == "none"));
             True(f.Module.SelectedAccount is null, "account selection belongs to an explicit login action");
@@ -50,7 +50,7 @@ public static partial class MusicUiTests
                 .SequenceEqual(new[] { "网易云音乐", "QQ 音乐", "酷狗音乐" }), "fixed platform cards");
             True(f.Module.PlatformSettings.All(row => !row.IsLoggedIn && row.ShowLogin),
                 "all platform capsules publish their logged-out state");
-            tabs.SelectedIndex = 5;
+            anchors[^1].IsChecked = true;
             f.Module.SettingsView.UpdateLayout();
             await Until(() => !f.Module.Busy);
             var sources = Visuals(f.Module.SettingsView).OfType<MusicSourcesSettingsView>().Single();
@@ -225,12 +225,76 @@ public static partial class MusicUiTests
             True((await store.ReadAsync("music.library.v1")).Fingerprint.Exists, "native CAS persisted");
             Equal(0, runtime.DisposeCalls);
         });
+        yield return Case("local playlist creation uses the sidebar action and an in-view modal", async () =>
+        {
+            await using var f = await Fixture.Create();
+            var view = (MusicView)f.Module.View;
+            var favorite = f.Module.Navigation.Single(item => item.Route == "favorites");
+            var action = favorite.GroupAction;
+            True(action is not null && action.CanExecute(null), "local collection group exposes creation");
+            var header = ((IDesktopHeaderSource)view).Header;
+            Equal(0, header.HeaderActions.Count);
+            True(!Visuals(view).OfType<ComboBox>().Any(box =>
+                AutomationProperties.GetName(box) == "指定歌曲录音"), "collection page does not expose recording identity");
+
+            action!.Execute(null);
+            var overlay = (Grid)view.FindName("PlaylistDialogOverlay");
+            var panel = (Border)view.FindName("PlaylistDialogPanel");
+            var input = (TextBox)view.FindName("PlaylistNameInput");
+            var create = (Button)view.FindName("CreatePlaylistButton");
+            Equal(Visibility.Visible, overlay.Visibility);
+            True(!((FrameworkElement)view.FindName("PageContent")).IsHitTestVisible,
+                "modal blocks the underlying page");
+            True(!create.IsEnabled && input.MaxLength == 200, "empty local name is not submitted");
+            input.Text = "恢复失败后创建";
+            Equal("7 / 200", ((TextBlock)view.FindName("PlaylistNameCount")).Text);
+            True(create.IsEnabled, "valid local name enables creation");
+            Render(view, 900, 650);
+            Equal(420d, panel.ActualWidth);
+            True(Math.Abs(panel.TranslatePoint(new Point(panel.ActualWidth / 2, panel.ActualHeight / 2), view).X -
+                view.ActualWidth / 2) < 1, "dialog is centered inside the existing view");
+
+            f.Calls.FailNext("music.library.create", "STORAGE_UNAVAILABLE");
+            Click(create);
+            await Until(() => overlay.Visibility == Visibility.Visible && !f.Module.Busy && create.IsEnabled);
+            Equal(1, f.Module.Playlists.Count);
+            Equal("操作失败，请重试", f.Module.Status);
+
+            Click(create);
+            await Until(() => overlay.Visibility == Visibility.Collapsed && !f.Module.Busy &&
+                f.Module.Playlists.Any(item => item.Name == "恢复失败后创建"));
+            Equal("恢复失败后创建", f.Module.Heading);
+            header = ((IDesktopHeaderSource)view).Header;
+            True(header.HeaderActions.Select(item => item.Id).SequenceEqual(
+                new[] { "music.playlist.rename", "music.playlist.delete" }), "playlist header keeps only detail actions");
+            Equal(18d, ((Border)view.FindName("DetailArtworkFrame")).CornerRadius.TopLeft);
+            var playAll = (Button)view.FindName("PlayAllButton");
+            True(playAll.BorderBrush is not null && playAll.Background is SolidColorBrush { Color.A: 0 },
+                "play-all uses the theme-aware outlined treatment");
+
+            favorite.GroupAction!.Execute(null);
+            input.Text = "取消创建";
+            var escape = RaiseKey(overlay, Key.Escape);
+            True(escape.Handled && overlay.Visibility == Visibility.Collapsed, "escape closes the in-view modal");
+            True(!f.Module.Playlists.Any(item => item.Name == "取消创建"), "cancellation does not create");
+
+            await f.PlayableCollection();
+            True(playAll.IsEnabled, "play-all enables for a populated local playlist");
+            Equal(((SolidColorBrush)view.FindResource("MeowFilm.Brush.Accent")).Color,
+                ((SolidColorBrush)playAll.BorderBrush!).Color);
+            DesktopTheme.SetIsHighContrast(view, true);
+            view.UpdateLayout();
+            Equal(SystemColors.WindowTextColor, ((SolidColorBrush)playAll.BorderBrush!).Color);
+            Equal(SystemColors.WindowTextColor, ((SolidColorBrush)playAll.Foreground).Color);
+            DesktopTheme.SetIsHighContrast(view, false);
+        });
         yield return Case("real library CRUD, file grant isolation and cancellation", async () =>
         {
             await using var f = await Fixture.Create(persistent: true);
             Equal(1, f.Module.Playlists.Count); Equal("我的收藏", f.Module.Heading);
-            True(((IDesktopHeaderSource)f.Module.View).Header.HeaderActions
-                .Any(action => action.Id == "music.playlist.create"), "creation belongs to the actual collection page");
+            Equal(0, ((IDesktopHeaderSource)f.Module.View).Header.HeaderActions.Count);
+            True(f.Module.Navigation.Single(item => item.Route == "favorites").GroupAction is not null,
+                "creation belongs to the local sidebar group");
             await f.Module.CreatePlaylistAsync("本机测试歌单");
             var created = f.Module.Playlists.Single(item => item.Kind == "playlist");
             Equal(created.Name, f.Module.Heading);
@@ -546,12 +610,29 @@ public static partial class MusicUiTests
             Render(f.Module.View, 640, 480);
             Render(f.Module.PlayerView, 860, 92);
             grid.ContextMenu.PlacementTarget = grid; grid.ContextMenu.GetBindingExpression(FrameworkElement.DataContextProperty)!.UpdateTarget();
-            Equal(f.Module, grid.ContextMenu.DataContext); True(!grid.CanUserSortColumns, "visible index retains core order");
+            Equal(f.Module, grid.ContextMenu.DataContext); True(!grid.CanUserSortColumns, "presentation columns retain core order");
+            True(grid.ContextMenu.Items.OfType<MenuItem>().Take(3).Select(item => item.Header).SequenceEqual(
+                new object[] { "播放", "下一首播放", "收藏" }), "song menu exposes the primary row actions");
             f.Module.SelectedSong = f.Module.Songs[1];
             ((MenuItem)grid.ContextMenu.Items[2]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Until(() => !f.Module.Busy);
             Equal(1, f.Module.Playlists.Single(p => p.Id == "favorites").Count);
             ((MenuItem)grid.ContextMenu.Items[1]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Until(() => !f.Module.Busy);
             Equal(1, f.Calls.Count("music.queue.append"));
+            var row = (DataGridRow)grid.ItemContainerGenerator.ContainerFromIndex(0);
+            var rowButtons = Visuals(row).OfType<Button>().ToDictionary(AutomationProperties.GetName);
+            Equal(Visibility.Visible, rowButtons["收藏"].Visibility);
+            Equal(Visibility.Collapsed, rowButtons["下一首播放"].Visibility);
+            Equal(Visibility.Collapsed, rowButtons["更多"].Visibility);
+            SimulateFocus(row, UIElement.IsKeyboardFocusWithinProperty, true); row.UpdateLayout();
+            Equal(Visibility.Visible, rowButtons["下一首播放"].Visibility);
+            Equal(Visibility.Visible, rowButtons["更多"].Visibility);
+            Click(rowButtons["下一首播放"]); await Until(() => !f.Module.Busy);
+            True(ReferenceEquals(f.Module.Songs[0], f.Module.SelectedSong), "inline action selects its own song");
+            Equal(2, f.Calls.Count("music.queue.append"));
+            Click(rowButtons["更多"]);
+            True(grid.ContextMenu.IsOpen && ReferenceEquals(rowButtons["更多"], grid.ContextMenu.PlacementTarget),
+                "more action opens the shared row context menu");
+            grid.ContextMenu.IsOpen = false;
             f.Module.SelectedSong = f.Module.Songs[0];
             var enter = RaiseKey(grid, Key.Enter); True(enter.Handled, "Enter plays selected row"); await Until(() => !f.Module.Busy);
             Equal(1, f.Playback.Opens.Count); f.Playback.Start();
@@ -784,9 +865,8 @@ public static partial class MusicUiTests
                     AssertPlayerBounds(f.Module.PlayerView, f.Module.PlayerView.ActualWidth);
                 }
                 DesktopTheme.SetIsHighContrast(root, true);
-                var settingsTabs = Visuals(f.Module.SettingsView).OfType<TabControl>()
-                    .Single(t => AutomationProperties.GetName(t) == "设置分类");
-                settingsTabs.SelectedIndex = 2;
+                var settingsNavigation = (Panel)f.Module.SettingsView.FindName("SettingsNavigation");
+                settingsNavigation.Children.OfType<RadioButton>().ElementAt(2).IsChecked = true;
                 await Drain();
                 Render(root, 860, 600);
                 var picker = Visuals(f.Module.SettingsView).OfType<ComboBox>()

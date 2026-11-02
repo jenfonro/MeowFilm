@@ -102,7 +102,7 @@ extension KugouMusicAccountAdapter: MusicAccountSMSProvider {
     private func smsContext(_ id: UUID) async throws -> MusicKugouContext {
         if let context = sms[id] { try check(context); return context }
         guard sms.count < 1 else { throw MusicServiceError.busy }
-        let context = MusicKugouContext(epoch: epoch, device: try MusicKugouDevice())
+        let context = try newContext()
         sms[id] = context
         do {
             let registered = try await register(context)

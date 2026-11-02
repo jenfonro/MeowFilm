@@ -17,7 +17,7 @@ Windows 当前交付一个原生 meowfilm App，并接入音乐相关能力。
 | `Accounts` | 三平台授权、登录交接和账号详情，旧设备格式只读迁移 |
 | `Platforms` | 固定官方平台 HTTP、协议和歌曲 DTO；`ClientContexts` 独立拥有客户端身份、匿名登记和受控更新 |
 | `Catalog` | 平台目录、个人内容和歌单读取／提交 |
-| `Search` | 歌曲／歌单聚合搜索、策略和请求代次 |
+| `Search` | 歌曲／歌单搜索、策略和请求代次 |
 | `Recommendations` | 每日推荐、持续推荐和唯一 queue lane |
 | `Library` | 曲库、队列、历史、设置、歌词快照和脚本源元数据 |
 | `Sync` | 网易云／QQ／酷狗收藏和歌单同步 |

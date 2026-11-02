@@ -30,6 +30,8 @@ final class MusicSMSLoginFieldsState: ObservableObject {
 struct MusicSMSLoginActionsSnapshot: Equatable {
     let resendSeconds: Int
     let canSend, canSubmit: Bool
+    /// A code was requested for the current phone number, so the action reads as a resend.
+    var sent = false
 }
 
 @MainActor
@@ -37,6 +39,7 @@ final class MusicSMSLoginActionsState: ObservableObject {
     @Published private(set) var value: MusicSMSLoginActionsSnapshot
     private let model: MusicAccountsViewModel
     private var subscription: AnyCancellable?
+    private var sentPhone: String?
 
     init(model: MusicAccountsViewModel) {
         self.model = model
@@ -58,8 +61,11 @@ final class MusicSMSLoginActionsState: ObservableObject {
     func submit() { model.submitSMS() }
 
     func refresh() {
+        if model.resendSeconds > 0 { sentPhone = model.phone }
+        if model.loginPlatform == nil || sentPhone != model.phone { sentPhone = nil }
         let next = MusicSMSLoginActionsSnapshot(
-            resendSeconds: model.resendSeconds, canSend: model.canSendSMS, canSubmit: model.canSubmitSMS
+            resendSeconds: model.resendSeconds, canSend: model.canSendSMS, canSubmit: model.canSubmitSMS,
+            sent: sentPhone != nil
         )
         if value != next { value = next }
     }
@@ -72,12 +78,14 @@ final class MusicAccountLoginState: ObservableObject {
     @Published private(set) var status: String?
     @Published private(set) var available = false
     @Published private(set) var canRetry = false
+    @Published private(set) var signedIn = false
+    @Published private(set) var checkingAccount = false
     let fields: MusicSMSLoginFieldsState
     let actions: MusicSMSLoginActionsState
     let supportsSMS: Bool
     let model: MusicAccountsViewModel
+    let platform: MusicAccountPlatform
     private let owner: MusicViewModel
-    private let platform: MusicAccountPlatform
     private var started = false
     private var generation: UUID?
     private var imageData: Data?
@@ -111,6 +119,17 @@ final class MusicAccountLoginState: ObservableObject {
         Publishers.MergeMany(changes).receive(on: RunLoop.main)
             .sink { [weak self] in self?.refreshPresentation() }
             .store(in: &subscriptions)
+        model.$statusesRevision.dropFirst().receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.finishAccountCheck() }
+            .store(in: &subscriptions)
+        model.$error.compactMap { $0 }.receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.finishAccountCheck() }
+            .store(in: &subscriptions)
+    }
+
+    var canFinish: Bool {
+        started && available && signedIn && !checkingAccount && owner.isAvailable && !owner.isClosed &&
+            generation == owner.accountAccessGeneration
     }
 
     func start() {
@@ -129,6 +148,7 @@ final class MusicAccountLoginState: ObservableObject {
         guard available != next || generation != access else { return }
         let first = generation == nil
         generation = access; available = next
+        checkingAccount = false
         if first { model.activate(isAvailable: next, accessGeneration: access) }
         else { model.setAccess(isAvailable: next, accessGeneration: access) }
         actions.refresh()
@@ -145,11 +165,24 @@ final class MusicAccountLoginState: ObservableObject {
         model.selectLogin(platform)
     }
 
+    func accountSessionChanged(_ changed: MusicAccountPlatform) {
+        guard changed == platform, started, available, owner.isAvailable, !owner.isClosed,
+              generation == owner.accountAccessGeneration else { return }
+        checkingAccount = true
+        model.reloadStatuses()
+    }
+
     func close() {
-        started = false; available = false
+        started = false; available = false; checkingAccount = false
         model.deactivate()
         imageData = nil; cachedImage = nil; image = nil
         actions.refresh()
+    }
+
+    private func finishAccountCheck() {
+        guard checkingAccount else { return }
+        checkingAccount = false
+        refreshPresentation()
     }
 
     private func updateImage(_ data: Data?) {
@@ -163,9 +196,11 @@ final class MusicAccountLoginState: ObservableObject {
 
     private func refreshPresentation() {
         if method != model.loginMethod { method = model.loginMethod }
-        let signedIn = model.rows.first { $0.platform == platform }?.phase == .signedIn
-        let nextStatus: String? = signedIn ? MusicLoginProgress.confirmed.title
-            : method == .qr ? model.progress.title
+        let nextSignedIn = model.rows.first { $0.platform == platform }?.phase == .signedIn
+        if signedIn != nextSignedIn { signedIn = nextSignedIn }
+        let nextStatus: String? = !available ? MusicAccountStatus.Phase.unavailable.title
+            : signedIn ? MusicLoginProgress.confirmed.title
+            : method == .qr ? (model.challenge == nil ? nil : model.progress.title)
             : model.submittingSMS ? MusicAccountStatus.Phase.signingIn.title : nil
         if status != nextStatus { status = nextStatus }
         let retry = started && available && !model.isBusy && !signedIn &&

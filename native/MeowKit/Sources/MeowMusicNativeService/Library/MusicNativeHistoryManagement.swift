@@ -28,6 +28,15 @@ extension NativeMusicService: MusicHistoryManaging {
         }
     }
 
+    public func clearHistory(_ category: MusicHistoryCategory) async throws {
+        try transaction(["history"]) { d in
+            switch category {
+            case .songs: d.history["days"] = .array([])
+            case .playlists: d.history["playlists"] = .array([])
+            }
+        }
+    }
+
     public func restoreHistory(detail: MusicHistoryDetail, startIndex: Int?,
                                expectedRevision: Int) async throws -> MusicPlaybackState {
         do {

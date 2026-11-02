@@ -46,8 +46,27 @@ public enum MusicPersonalPlaylistKind { QqFavorites, KugouOwned }
 public sealed record MusicPersonalPlaylistLocator(string Scope, MusicPersonalPlaylistKind Kind, string ListId,
     long? Total = null, string? Version = null, string? Name = null);
 
+/// <summary>
+/// Page is the first native page, Limit the platform page size. Pages &gt; 1 is a single
+/// offset request spanning several pages, allowed only where <see cref="MusicSearchPaging"/> says so.
+/// </summary>
 public sealed record MusicSearchRequest(string Platform, string Keyword,
-    MusicSearchKind Kind = MusicSearchKind.Songs, int Page = 1, int Limit = 30, bool Refresh = false);
+    MusicSearchKind Kind = MusicSearchKind.Songs, int Page = 1, int Limit = 30, bool Refresh = false, int Pages = 1);
+
+/// <summary>
+/// Platform search adapter: what one "page" means for a platform. Page-numbered platforms
+/// send one request per page; offset platforms may cover several pages with one request
+/// of at most <see cref="MaxItemsPerRequest"/> items.
+/// </summary>
+public sealed record MusicSearchPaging(int PageSize, int PagesPerRequest)
+{
+    public const int MaxItemsPerRequest = 100;
+    public static MusicSearchPaging For(string platform) => platform switch
+    {
+        "wy" => new(30, MaxItemsPerRequest / 30),
+        _ => new(30, 1)
+    };
+}
 public sealed record MusicSongRequest(string Platform, string Id, bool Refresh = false);
 public sealed record MusicPlaylistRequest(string Platform, string Id, int Page = 1, int Limit = 100,
     string? Snapshot = null, bool Refresh = false, MusicPersonalPlaylistLocator? Personal = null);

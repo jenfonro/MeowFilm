@@ -15,7 +15,6 @@ internal static class MusicSongFixture
         double duration = 180, string cover = "", JsonObject? native = null)
     {
         var data = native is null ? new JsonObject() : (JsonObject)native.DeepClone();
-        data["musicId"] = nativeId;
         data["songmid"] = nativeId;
         return NativeMusicSong.CreateOnline(platform, data, title ?? "Synthetic track " + nativeId,
             artist, album, duration, cover);
@@ -29,5 +28,11 @@ internal static class MusicSongFixture
         JsonSerializer.SerializeToElement(song);
 
     internal static string NativeId(JsonElement song) =>
-        song.GetProperty("source_data").GetProperty("musicId").GetString()!;
+        Info(song).GetProperty("songmid").GetString()!;
+
+    /// <summary>musicInfo of the primary (first) recording.</summary>
+    internal static JsonElement Info(JsonElement song) =>
+        song.GetProperty("sources")[0].GetProperty("musicInfo");
+    internal static JsonObject Info(JsonNode song) =>
+        song["sources"]![0]!["musicInfo"]!.AsObject();
 }

@@ -15,33 +15,25 @@ internal sealed class MusicPlatformSearchDiscovery(MusicPlatformHttp http, Music
     private sealed record Branch<T>(T? Value, MusicSearchDiscoveryFailure? Failure);
     internal async Task<Data> ReadAsync(MusicPlatformSession? session, Action guard, CancellationToken token)
     {
-        using var slots = new SemaphoreSlim(2); // Preserve the shared native WY physical two-slot limit.
-        var requests = 0;
         var client = await clients.AcquireWyAsync(token).ConfigureAwait(false);
         async Task<T> Read<T>(string path, JsonObject parameters, Func<JsonObject, T> decode, bool weapi = false)
         {
-            await slots.WaitAsync(token).ConfigureAwait(false);
-            try
+            guard(); token.ThrowIfCancellationRequested();
+            var requestClient = await clients.AcquireWyAsync(token).ConfigureAwait(false);
+            void GuardClient()
             {
                 guard(); token.ThrowIfCancellationRequested();
-                PJ.Require(Interlocked.Increment(ref requests) <= 9, "LIMIT");
-                var requestClient = await clients.AcquireWyAsync(token).ConfigureAwait(false);
-                void GuardClient()
-                {
-                    guard(); token.ThrowIfCancellationRequested();
-                    PJ.Require(clients.IsCurrent(requestClient), clients.NeedsReconciliation ? "COMMIT_UNKNOWN" : "STORAGE_CONFLICT");
-                }
-                GuardClient();
-                var request = MusicPlatformRequests.WyWithCookie(path, parameters, session?.Cookie, requestClient, weapi);
-                var response = await http.SendCatalogAsync("wy", request, token, 2 * 1024 * 1024, TimeSpan.FromSeconds(25)).ConfigureAwait(false);
-                GuardClient();
-                var result = decode(PlatformProtocols.WySuccess(response.Body));
-                requestClient = await clients.AcceptWyAsync(requestClient, session?.Cookie, response.SetCookieHeaders, GuardClient, token).ConfigureAwait(false);
-                GuardClient();
-                Interlocked.Exchange(ref client, requestClient);
-                return result;
+                PJ.Require(clients.IsCurrent(requestClient), clients.NeedsReconciliation ? "COMMIT_UNKNOWN" : "STORAGE_CONFLICT");
             }
-            finally { slots.Release(); }
+            GuardClient();
+            var request = MusicPlatformRequests.WyWithCookie(path, parameters, session?.Cookie, requestClient, weapi);
+            var response = await http.SendAsync("wy", request, token, 2 * 1024 * 1024, TimeSpan.FromSeconds(25)).ConfigureAwait(false);
+            GuardClient();
+            var result = decode(PlatformProtocols.WySuccess(response.Body));
+            requestClient = await clients.AcceptWyAsync(requestClient, session?.Cookie, response.SetCookieHeaders, GuardClient, token).ConfigureAwait(false);
+            GuardClient();
+            Interlocked.Exchange(ref client, requestClient);
+            return result;
         }
         async Task<Branch<T>> Capture<T>(string stage, string? id, Func<Task<T>> action)
         {
@@ -53,11 +45,11 @@ internal sealed class MusicPlatformSearchDiscovery(MusicPlatformHttp http, Music
             catch { guard(); return new(default, new(stage, id, "INVALID_RESPONSE")); }
         }
         var hot = Capture("hot", null, () => Read("/api/hotsearchlist/get", new(), raw =>
-            PJ.Rows(raw["data"], 10000).Take(20).Select(row => new MusicSearchDiscoveryHot(Keyword(row["searchWord"]),
+            DisplayRows(raw["data"], 20).Select(row => new MusicSearchDiscoveryHot(Keyword(row["searchWord"]),
                 row["score"] is null ? null : PJ.Number(row["score"]))).ToArray(), true));
         var top = Capture("toplist", null, () => Read("/api/toplist", new(), raw =>
         {
-            var charts = PJ.Rows(raw["list"], 10000).Take(3).Select(row => PlatformSongs.Playlist("wy", row)).ToArray();
+            var charts = DisplayRows(raw["list"], 3).Select(row => PlatformSongs.Playlist("wy", row)).ToArray();
             PJ.Require(charts.Select(c => PJ.S(c, "id")).Distinct(StringComparer.Ordinal).Count() == charts.Length, "IDENTITY_MISMATCH");
             return charts;
         }));
@@ -77,14 +69,14 @@ internal sealed class MusicPlatformSearchDiscovery(MusicPlatformHttp http, Music
             {
                 var playlist = raw["playlist"] as JsonObject ?? throw new MusicPlatformException("INVALID_RESPONSE");
                 PJ.Require(PJ.Id(playlist["id"]) == id, "IDENTITY_MISMATCH");
-                var allIds = PJ.Rows(playlist["trackIds"], 10000).Select(row => PJ.Id(row["id"], "^[1-9][0-9]{0,19}$")).ToArray();
+                var allIds = PJ.RowsAll(playlist["trackIds"]).Select(row => PJ.Id(row["id"], "^[1-9][0-9]{0,19}$")).ToArray();
                 var members = allIds.ToHashSet(StringComparer.Ordinal);
                 PJ.Require(members.Count == allIds.Length, "IDENTITY_MISMATCH");
                 var selectedIds = allIds.Take(20).ToArray();
                 var selected = selectedIds.ToHashSet(StringComparer.Ordinal);
                 var embeddedSongs = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
                 var embedded = new HashSet<string>(StringComparer.Ordinal);
-                foreach (var row in PJ.Rows(playlist["tracks"] ?? new JsonArray(), 10000))
+                foreach (var row in PJ.RowsAll(playlist["tracks"] ?? new JsonArray()))
                 {
                     var member = PJ.Id(row["id"], "^[1-9][0-9]{0,19}$");
                     PJ.Require(members.Contains(member) && embedded.Add(member), "IDENTITY_MISMATCH");
@@ -125,6 +117,12 @@ internal sealed class MusicPlatformSearchDiscovery(MusicPlatformHttp http, Music
         var failures = new[] { h.Failure, t.Failure, s.Failure }.Concat(charts.Select(c => c.Failure)).OfType<MusicSearchDiscoveryFailure>().ToArray();
         PJ.Require(clients.IsCurrent(client), clients.NeedsReconciliation ? "COMMIT_UNKNOWN" : "STORAGE_CONFLICT");
         return new(hotItems, keywords, charts.Where(c => c.Failure is null).Select(c => c.Value!).ToArray(), failures, client);
+    }
+    private static IEnumerable<JsonObject> DisplayRows(JsonNode? node, int count)
+    {
+        PJ.Require(node is JsonArray, "INVALID_RESPONSE");
+        return ((JsonArray)node!).Take(count).Select(row => row as JsonObject ??
+            throw new MusicPlatformException("INVALID_RESPONSE"));
     }
     private static string Keyword(JsonNode? node, bool allowEmpty = false)
     {

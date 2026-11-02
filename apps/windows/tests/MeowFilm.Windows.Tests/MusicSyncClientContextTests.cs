@@ -31,6 +31,20 @@ public static class MusicSyncClientContextTests
             await adapter.ReadProbeAsync();
             Check(handler.Calls == 2 && ReferenceEquals(current, await clients.Owner.AcquireWyAsync()));
         });
+        yield return new("Music sync KG search over 300 is not a unique mapping and stops paging", async () =>
+        {
+            var handler = new KgHandler();
+            using var http = MusicPlatformHttp.CreateWithHandler(handler);
+            await using var clients = new MusicClientContextFixture(http);
+            var kg = await clients.Owner.AcquireKgAsync();
+            var account = new MusicPlatformSession("kg", "synthetic-sync-kg", 1, "42",
+                "userid=42; token=SYNTHETIC_KG_TOKEN; KUGOU_API_MID=" + kg.Mid);
+            var adapter = new Adapter(account, http, clients.Owner, kg);
+            var song = MusicSongFixture.Online("tx", "SYNTHETIC_ORIGINAL", "Synthetic track",
+                "Synthetic artist", "Synthetic album", 200);
+            Check(await adapter.ResolveAsync(song) is null);
+            Check(handler.Calls == 1);
+        });
     }
     private static void Check(bool condition)
     { if (!condition) throw new InvalidOperationException("Sync client handoff invariant"); }
@@ -60,9 +74,22 @@ public static class MusicSyncClientContextTests
             return response;
         }
     }
+    private sealed class KgHandler : HttpMessageHandler
+    {
+        internal int Calls;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        {
+            Calls++;
+            Check(request.RequestUri is { Host: "gateway.kugou.com", AbsolutePath: "/v2/search/song" });
+            const string row = """{"FileHash":"ABCDEF0123456789ABCDEF0123456789","FileName":"Synthetic artist - Synthetic track","Duration":200,"SingerName":"Synthetic artist","AlbumName":"Synthetic album","FileSize":1000}""";
+            var body = "{\"status\":1,\"error_code\":0,\"data\":{\"total\":301,\"lists\":[" +
+                string.Join(",", Enumerable.Repeat(row, 30)) + "]}}";
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") });
+        }
+    }
     private sealed class Adapter(MusicPlatformSession account, MusicPlatformHttp http,
-        MusicPlatformClientContextOwner clients, MusicWyClientContext client)
-        : MusicSyncAdapter(account, http, clients, client, new(), () => Task.CompletedTask, () => { }, default)
+        MusicPlatformClientContextOwner clients, MusicPlatformClientContext client)
+        : MusicSyncAdapter(account, http, clients, client, () => Task.CompletedTask, () => { }, default)
     {
         internal Task<JsonObject> ReadProbeAsync() => Wy("/api/toplist", new(), weapi: false);
         internal override Task<SyncDirectory> ReadAsync(string[] kinds) => throw Unused();

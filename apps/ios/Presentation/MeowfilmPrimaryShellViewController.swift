@@ -6,7 +6,7 @@ import MeowMusicFeature
 /// tasks; retained containment forwards only the visible page's UIKit lifecycle.
 @MainActor
 final class MeowfilmPrimaryShellViewController: PageViewController {
-    var onSelectionChanged: ((MeowfilmPrimaryPage) -> Void)?
+    var onSelectionChanged: ((MeowfilmPrimaryPage, TimeInterval) -> Void)?
     private var pendingChannel: MusicPublicBrowseChannel?
     private var channels: MusicChannelsViewController? {
         pages.page(at: 1) as? MusicChannelsViewController
@@ -17,12 +17,11 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
     private let pages: RetainedPagesController
     private let openMenu: () -> Void
     private let openSearch: () -> Void
-    private let menu = UIButton(type: .system), add = UIButton(type: .system), feature = UIButton(type: .system)
-    private let search = UIButton(type: .system), titleButton = UIButton(type: .system)
-    private lazy var searchTitle = NavigationTitleView(content: search)
-    private lazy var pageTitle = NavigationTitleView(content: titleButton)
-    private lazy var addItem = UIBarButtonItem(customView: add)
-    private lazy var featureItem = UIBarButtonItem(customView: feature)
+    private let menu = UIButton(type: .custom), add = UIButton(type: .custom), feature = UIButton(type: .custom)
+    private let channelMenu = UIButton(type: .custom)
+    private lazy var search = PageHeaderTextButton(title: "") { [weak self] in self?.openSearch() }
+    private lazy var titleButton = PageHeaderTextButton(title: "") {}
+    private let channelTitleHost = UIView()
 
     init(pageFactories: [@MainActor () -> UIViewController], themeProvider: any PageThemeProviding,
          openMenu: @escaping () -> Void, openSearch: @escaping () -> Void) {
@@ -40,13 +39,19 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
         configureHeader()
         addChild(pages)
         view.addSubview(pages.view)
-        pages.view.pinEdges(to: view)
+        pages.view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            pages.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            pages.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            pages.view.topAnchor.constraint(equalTo: contentTopAnchor),
+            pages.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
         pages.didMove(toParent: self)
-        pages.didSelect = { [weak self] _ in
+        pages.willSelect = { [weak self] _, duration in
             guard let self else { return }
             self.prepareSelectedPage()
-            self.renderHeader()
-            self.onSelectionChanged?(self.selectedPage)
+            self.renderHeader(duration: duration)
+            self.onSelectionChanged?(self.selectedPage, duration)
         }
         prepareSelectedPage()
         renderHeader()
@@ -65,11 +70,12 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
 
     override func applyTheme() {
         super.applyTheme()
-        for button in [menu, titleButton, add, feature] { button.tintColor = UIColor(theme.ink) }
+        for button in [menu, titleButton, add, feature, channelMenu] { button.tintColor = UIColor(theme.ink) }
         search.tintColor = UIColor(theme.muted)
         search.configuration?.baseForegroundColor = UIColor(theme.muted)
         search.backgroundColor = UIColor(theme.control)
         search.layer.borderColor = UIColor(theme.border).cgColor
+        titleButton.setTitleColor(UIColor(theme.ink), for: .normal)
     }
 
     private func configureHeader() {
@@ -92,19 +98,25 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
         search.layer.cornerRadius = PageLayoutMetrics.searchControl / 2
         search.layer.borderWidth = 0.5
         search.accessibilityIdentifier = "search.open"
-        search.addAction(UIAction { [weak self] _ in self?.openSearch() }, for: .touchUpInside)
         titleButton.contentHorizontalAlignment = .leading
         titleButton.titleLabel?.font = .systemFont(ofSize: 20, weight: .semibold)
-        titleButton.addAction(UIAction { [weak self] _ in
-            if self?.selectedPage == .channels { self?.channels?.showPicker() }
-        }, for: .touchUpInside)
+        titleButton.accessibilityIdentifier = "app.primary.title"
         add.setImage(PageIcon.image(.plus), for: .normal)
         add.accessibilityLabel = "新建歌单"
+        add.accessibilityIdentifier = "app.primary.add"
         add.addAction(UIAction { [weak self] _ in self?.library?.requestCreatePlaylist() }, for: .touchUpInside)
         feature.setImage(PageIcon.image(.recognize), for: .normal)
         feature.accessibilityLabel = "更多功能"
         feature.accessibilityIdentifier = "app.feature"
-        for item in [menu, add, feature] {
+        channelMenu.setImage(PageIcon.image(.channels), for: .normal)
+        channelMenu.accessibilityLabel = "选择频道"
+        channelMenu.accessibilityIdentifier = "app.channels"
+        channelMenu.addAction(UIAction { [weak self] _ in
+            guard self?.selectedPage == .channels else { return }
+            self?.channels?.showPicker()
+        }, for: .touchUpInside)
+        for item in [menu, add, feature, channelMenu] {
+            item.adjustsImageWhenHighlighted = false
             item.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([
                 item.widthAnchor.constraint(equalToConstant: 44),
@@ -114,30 +126,42 @@ final class MeowfilmPrimaryShellViewController: PageViewController {
         for item in [search, titleButton] {
             item.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         }
-        navigationItem.leftBarButtonItem = UIBarButtonItem(customView: menu)
-        if #available(iOS 26.0, *) {
-            navigationItem.leftBarButtonItem?.hidesSharedBackground = true
-            addItem.hidesSharedBackground = true
-            featureItem.hidesSharedBackground = true
-        }
+        pageHeader.setLeading(menu)
+        pageHeader.title = nil
     }
 
     private func prepareSelectedPage() {
-        channels?.onChannelChanged = { [weak self] _ in self?.renderHeader() }
+        if let switcher = channels?.channelSwitcherView {
+            if switcher.superview !== channelTitleHost {
+                channelTitleHost.subviews.forEach { $0.removeFromSuperview() }
+                channelTitleHost.addSubview(switcher)
+                switcher.pinEdges(to: channelTitleHost)
+            }
+        }
         if selectedPage == .channels, let channel = pendingChannel, let channels {
             pendingChannel = nil
             channels.select(channel)
         }
     }
 
-    private func renderHeader() {
+    private func renderHeader(duration: TimeInterval = 0) {
         guard isViewLoaded else { return }
-        navigationItem.titleView = selectedPage == .recommend ? searchTitle : pageTitle
-        navigationItem.rightBarButtonItem = selectedPage == .recommend ? featureItem :
-            selectedPage == .library ? addItem : nil
-        titleButton.setTitle(selectedPage == .channels ?
-                             (channels?.selectedChannel?.title ?? "频道") + " ⌄" : "我的", for: .normal)
-        titleButton.accessibilityLabel = selectedPage == .channels ? "选择频道" : "我的"
-        applyTheme()
+        let apply = {
+            self.pageHeader.setTitleView(self.selectedPage == .recommend ? self.search :
+                self.selectedPage == .channels ? self.channelTitleHost : self.titleButton)
+            self.pageHeader.setTrailing(self.selectedPage == .recommend ? [self.feature] :
+                self.selectedPage == .channels ? [self.channelMenu] :
+                self.selectedPage == .library ? [self.add] : [])
+            self.titleButton.setTitle("我的", for: .normal)
+            self.titleButton.accessibilityLabel = "我的"
+            self.applyTheme()
+        }
+        if duration > 0 && view.window != nil {
+            UIView.transition(with: pageHeader, duration: duration,
+                              options: [.transitionCrossDissolve, .allowAnimatedContent],
+                              animations: apply)
+        } else {
+            apply()
+        }
     }
 }

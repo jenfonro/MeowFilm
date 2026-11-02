@@ -59,7 +59,22 @@ final class MusicNativePublicBrowseTests: XCTestCase {
         let calls = await http.calls()
         XCTAssertEqual(calls.map(\.url.path), ["/eapi/v6/playlist/detail", "/weapi/v3/song/detail"])
         XCTAssertEqual(calls[1].url.host, "music.163.com")
-        XCTAssertNil(calls[1].headers["Cookie"])
+        XCTAssertTrue((calls[1].headers["Cookie"] ?? "").contains("deviceId="))
+        XCTAssertFalse((calls[1].headers["Cookie"] ?? "").contains("MUSIC_U"))
+    }
+    func testWYHeadRetainsCompleteBatchAndVisiblePagesDoNotRefetchMetadata() async throws {
+        let ids = (1...35).map(String.init)
+        var head = MusicNativePublicBrowseFixture.head(ids: ids), playlist = head["playlist"]
+        playlist["tracks"] = .array(ids.map { MusicNativePublicBrowseFixture.song($0) })
+        head["playlist"] = playlist
+        let http = NativeMusicHTTPFixture([head]), service = try await NativeMusicFixture.service(http: http)
+        let first = try await service.publicDetail(MusicNativePublicBrowseFixture.collection, cursor: nil)
+        XCTAssertEqual(first.tracks.map { $0.sources[0].nativeId }, Array(ids.prefix(30)))
+        let second = try await service.publicDetail(first.collection, cursor: XCTUnwrap(first.cursor))
+        XCTAssertEqual(second.tracks.map { $0.sources[0].nativeId }, Array(ids.suffix(5)))
+        XCTAssertNil(second.cursor)
+        let calls = await http.calls(); XCTAssertEqual(calls.map(\.url.path), ["/eapi/v6/playlist/detail"])
+        await service.close()
     }
     func testWYMissingSongIsVisibleStatusAndChangedCompleteSnapshotCannotCommit() async throws {
         let head = MusicNativePublicBrowseFixture.head()
@@ -83,7 +98,7 @@ final class MusicNativePublicBrowseTests: XCTestCase {
         let ids = (1...31).map(String.init), head = MusicNativePublicBrowseFixture.head(ids: ids)
         let http = NativeMusicHTTPFixture([head, .obj([("code", .n(200)), ("songs", .array([]))]),
             .obj([("code", .n(200)), ("songs", .array([MusicNativePublicBrowseFixture.song("31")]))]), head])
-        let service = try await NativeMusicFixture.service(http: http)
+        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store, http: http)
         let first = try await service.publicDetail(MusicNativePublicBrowseFixture.collection, cursor: nil)
         XCTAssertTrue(first.tracks.isEmpty); XCTAssertEqual(first.consumed, 30)
         XCTAssertEqual(first.total, 31); XCTAssertNotNil(first.notice); XCTAssertNotNil(first.cursor)
@@ -94,6 +109,13 @@ final class MusicNativePublicBrowseTests: XCTestCase {
         XCTAssertEqual(source.context.unavailableCount, 30)
         let rows = try await source.completeTracks(intent: MusicQueueAuthorization())
         XCTAssertEqual(rows.count, 1)
+        let beforeSave = store.snapshot()
+        do {
+            _ = try await service.saveRemoteCollection(source: source, name: "Incomplete", intent: .init())
+            XCTFail("Visible subset saved as a complete collection")
+        } catch { XCTAssertEqual(error as? MusicServiceError, .contentUnavailable) }
+        let afterSave = store.snapshot()
+        XCTAssertEqual(afterSave.0, beforeSave.0); XCTAssertEqual(afterSave.2, beforeSave.2)
         calls = await http.calls()
         XCTAssertEqual(calls.map(\.url.path), ["/eapi/v6/playlist/detail", "/weapi/v3/song/detail",
                                              "/weapi/v3/song/detail", "/eapi/v6/playlist/detail"])

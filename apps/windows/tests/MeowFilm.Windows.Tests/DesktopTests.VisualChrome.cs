@@ -1,11 +1,13 @@
 using System.Collections.ObjectModel;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Shell;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Windows.Tests;
@@ -21,6 +23,18 @@ public static partial class DesktopTests
             Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(f.Shell), "display text metrics");
             Equal(TextRenderingMode.Grayscale, TextOptions.GetTextRenderingMode(f.Shell), "grayscale text rendering");
             True(f.Shell.UseLayoutRounding && f.Shell.SnapsToDevicePixels, "native display pixels own text layout");
+            Equal(64d, WindowChrome.GetWindowChrome(f.Shell)!.CaptionHeight,
+                "compact header remains the complete draggable caption");
+            Equal(new GridLength(64), f.Element<Grid>("RootLayout").RowDefinitions[0].Height,
+                "shell header and caption share one compact height");
+            Equal(new Thickness(0), f.Element<Grid>("ContentRegion").Margin,
+                "content starts directly below the header row");
+            Equal(8d, f.Element<ScrollViewer>("SidebarScroll").Margin.Top,
+                "sidebar navigation uses the same compact top rhythm");
+            Equal(76d, f.Element<Border>("QueueSurface").Margin.Top,
+                "queue offset follows the compact header");
+            Equal(76d, f.Element<StackPanel>("NotificationOverlay").Margin.Top,
+                "notifications remain below the compact header");
             var root = DetachChrome(f.Shell);
             using var source = new HwndSource(new HwndSourceParameters("shell-headless-hit-test-fixture")
             {
@@ -51,6 +65,32 @@ public static partial class DesktopTests
                 "the embedded search action receives pointer hits");
             True(Hits(search, new Point((search.Padding.Left + search.ActualWidth - search.Padding.Right) / 2, search.ActualHeight / 2)),
                 "the text area keeps independent pointer hits");
+            double TextOrigin(TextBox box)
+            {
+                box.ApplyTemplate(); box.UpdateLayout();
+                var textView = VisualDescendants<FrameworkElement>(box)
+                    .Single(element => element.GetType().Name == "TextBoxView");
+                return textView.TranslatePoint(new Point(), box).X;
+            }
+            search.Text = "搜索内容"; root.UpdateLayout(); await DrainAsync();
+            var searchTextOrigin = TextOrigin(search);
+            var textChromeInset = searchTextOrigin - search.Padding.Left;
+            True(textChromeInset is >= 0 and <= 4,
+                $"search padding is applied once before the native text chrome ({searchTextOrigin:0.##} vs {search.Padding.Left:0.##})");
+            True(searchTextOrigin - (origin.X + action.ActualWidth) is >= 2 and <= 8,
+                "the search glyph and input text have only their intentional gap");
+            var layout = (Grid)root.Child;
+            var ordinary = new TextBox
+            {
+                Width = 220, Height = 38, Text = "普通输入", HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Top
+            };
+            Panel.SetZIndex(ordinary, 100);
+            layout.Children.Add(ordinary); root.UpdateLayout(); await DrainAsync();
+            True(Math.Abs((TextOrigin(ordinary) - ordinary.Padding.Left) - textChromeInset) <= 1 &&
+                Math.Abs(ordinary.Padding.Left - 12) < .01,
+                "the shared text-box template preserves one ordinary padding application");
+            layout.Children.Remove(ordinary);
             True(search.Background is SolidColorBrush { Color.A: 255 }, "search has an opaque flat background");
             DesktopTheme.SetIsHighContrast(root, true); root.UpdateLayout(); await DrainAsync();
             Equal(SystemColors.WindowColor, ((SolidColorBrush)search.Background).Color, "system search background");
@@ -66,6 +106,34 @@ public static partial class DesktopTests
             f.Shell.Resources.Remove(SystemFonts.MessageFontFamilyKey); await DrainAsync();
             Equal(SystemFonts.MessageFontFamily, search.FontFamily, "system font restored without changing Windows settings");
             source.RootVisual = null;
+        });
+        yield return Case("sidebar collection group exposes one accessible action", async () =>
+        {
+            var enabled = true;
+            var executions = 0;
+            var action = new DesktopNavigationGroupAction("创建歌单", () => executions++, () => enabled);
+            var module = new ProbeModule("collections");
+            module.ReplaceNavigation(new ObservableCollection<NavigationItem>(
+            new NavigationItem[]
+            {
+                new("one", "首页", ""),
+                new("favorites", "我的收藏", "", "我的", GroupAction: action),
+                new("playlist/1", "本地歌单", "", "我的")
+            }));
+            await using var f = new Fixture([module]);
+            await f.LoadAsync();
+            var root = DetachChrome(f.Shell);
+            root.Measure(new(860, 600)); root.Arrange(new Rect(0, 0, 860, 600)); root.UpdateLayout();
+            await DrainAsync();
+
+            var button = ChromeVisuals(root).OfType<Button>().Single(item =>
+                AutomationProperties.GetName(item) == "创建歌单");
+            True(button.IsEnabled && button.Command is not null, "group action is keyboard-command enabled");
+            Equal("\uE710", button.Content as string, "visible add glyph");
+            button.Command!.Execute(button.CommandParameter);
+            Equal(1, executions, "bound action executes once");
+            enabled = false; action.Refresh(); await DrainAsync();
+            False(button.IsEnabled, "group action observes current admission");
         });
         yield return Case("sidebar overlay scroll hides at rest and scrolls over collection items", async () =>
         {
@@ -102,8 +170,9 @@ public static partial class DesktopTests
         yield return Case("global player detail overlays the unchanged shell and restores it on dismissal", async () =>
         {
             var module = new ImmersiveProbe();
+            var passive = new ProbeModule("film", hasPlayer: false);
             var page = new ProbePage("downloads");
-            await using var f = new Fixture([module], pages: [page]); await f.LoadAsync();
+            await using var f = new Fixture([module, passive], pages: [page]); await f.LoadAsync();
             var root = DetachChrome(f.Shell);
             void Layout()
             {
@@ -144,23 +213,42 @@ public static partial class DesktopTests
             True(escape.Handled, "escape handled");
             Equal(203d, f.Element<Grid>("RootLayout").ColumnDefinitions[0].Width.Value, "sidebar width restored");
             Equal(1, module.Deactivations, "detail owner deactivated once");
-            Click(f.Element<Button>("SettingsButton")); await DrainAsync();
-            Equal(Visibility.Visible, f.Element<ScrollViewer>("SidebarScroll").Visibility, "settings restores shell");
+
+            await f.SwitchAsync(passive);
+            Same(ordinaryPlayer, f.Element<ContentControl>("PlayerHost").Content,
+                "player remains mounted on a capability without its own player");
+            Equal(Visibility.Visible, f.Element<Border>("PlayerFrame").Visibility,
+                "global player remains visible across capabilities");
             module.Request(DesktopGlobalSurface.PlayerDetail);
             await UntilAsync(() => f.Element<Grid>("PlayerDetailSurface").Visibility == Visibility.Visible,
-                "player detail opens while settings is current");
+                "player detail opens from another capability");
             RaiseKey(f.Shell, Key.Escape, ModifierKeys.None, preview: true);
-            await UntilAsync(() => Host(module.SettingsView).Visibility == Visibility.Visible,
-                "closing detail restores the same settings surface");
+            await UntilAsync(() => Host(passive.View).Visibility == Visibility.Visible,
+                "closing detail restores the other capability");
             module.Request(DesktopGlobalSurface.PlayQueue);
             await UntilAsync(() => f.Element<Border>("QueueSurface").Visibility == Visibility.Visible,
-                "global queue opens while settings is current");
+                "global queue opens from another capability");
             RaiseKey(f.Shell, Key.Escape, ModifierKeys.None, preview: true);
             await UntilAsync(() => f.Element<Border>("QueueSurface").Visibility == Visibility.Collapsed,
-                "queue closes back to settings");
-            Equal(Visibility.Visible, Host(module.SettingsView).Visibility,
-                "settings surface remains mounted after queue dismissal");
+                "queue closes back to the other capability");
+
+            Click(f.Element<Button>("SettingsButton")); await DrainAsync();
+            Equal(Visibility.Visible, f.Element<ScrollViewer>("SidebarScroll").Visibility, "settings restores shell");
+            Equal(Visibility.Collapsed, f.Element<Border>("PlayerFrame").Visibility,
+                "settings hide the global player");
+            module.Request(DesktopGlobalSurface.PlayerDetail);
+            await DrainAsync();
+            Equal(Visibility.Collapsed, f.Element<Grid>("PlayerDetailSurface").Visibility,
+                "player detail is unavailable while settings are current");
+            module.Request(DesktopGlobalSurface.PlayQueue);
+            await DrainAsync();
+            Equal(Visibility.Collapsed, f.Element<Border>("QueueSurface").Visibility,
+                "queue is unavailable while settings are current");
+            Equal(Visibility.Visible, Host(passive.SettingsView).Visibility,
+                "the current settings surface remains mounted");
             Click(f.Back); await DrainAsync();
+            Equal(Visibility.Visible, f.Element<Border>("PlayerFrame").Visibility,
+                "leaving settings restores the global player");
             f.Element<ListBox>("PublicNavigationList").SelectedItem = page; await DrainAsync();
             Equal(Visibility.Visible, f.Element<Grid>("SearchChrome").Visibility, "shared public pages restore shell");
             module.Request(DesktopGlobalSurface.PlayerDetail);
@@ -184,11 +272,11 @@ public static partial class DesktopTests
                 "same retained detail opens from the restored app");
             Click(f.Element<Button>("PlayerDetailBackButton"));
             await UntilAsync(() => playerSurface.Visibility == Visibility.Collapsed &&
-                Host(module.View).Visibility == Visibility.Visible, "collapse restores the same app surface");
+                Host(passive.View).Visibility == Visibility.Visible, "collapse restores the same app surface");
             Same(ordinaryPlayer, f.Element<ContentControl>("PlayerHost").Content, "same ordinary footer restored after collapse");
             Click(f.Element<Button>("SettingsButton")); await DrainAsync();
             await UntilAsync(() => playerSurface.Visibility == Visibility.Collapsed &&
-                Host(module.SettingsView).Visibility == Visibility.Visible, "ordinary settings opens after collapsing the player page");
+                Host(passive.SettingsView).Visibility == Visibility.Visible, "ordinary settings opens after collapsing the player page");
             Equal(1, module.InitializeCount, "presentation never creates another module");
         });
     }
@@ -216,6 +304,12 @@ public static partial class DesktopTests
         public void Request(DesktopGlobalSurface surface) =>
             GlobalSurfaceRequested?.Invoke(this, new(surface));
     }
+    private static IEnumerable<DependencyObject> ChromeVisuals(DependencyObject current)
+    {
+        yield return current;
+        for (var index = 0; index < VisualTreeHelper.GetChildrenCount(current); index++)
+            foreach (var child in ChromeVisuals(VisualTreeHelper.GetChild(current, index))) yield return child;
+    }
     private static Border DetachChrome(ShellWindow shell)
     {
         var root = (Border)shell.Content; shell.Content = null;
@@ -223,5 +317,14 @@ public static partial class DesktopTests
         root.Background = shell.Background; TextElement.SetForeground(root, shell.Foreground);
         TextElement.SetFontFamily(root, shell.FontFamily); TextElement.SetFontSize(root, shell.FontSize);
         return root;
+    }
+    private static IEnumerable<T> VisualDescendants<T>(DependencyObject root) where T : DependencyObject
+    {
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is T match) yield return match;
+            foreach (var descendant in VisualDescendants<T>(child)) yield return descendant;
+        }
     }
 }

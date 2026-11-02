@@ -71,18 +71,35 @@ public actor MusicRemoteQueueSource {
         return value
     }
     public func completeTracks(intent: MusicQueueAuthorization) async throws -> [MusicNativeTrackData] {
+        try await readTracks(intent: intent, requireAllMembers: false)
+    }
+    /// A complete available queue is not proof of a complete collection.
+    /// Saving must reject omitted members and inconsistent declared totals.
+    public func collectionTracks(intent: MusicQueueAuthorization) async throws -> [MusicNativeTrackData] {
+        guard context.unavailableCount == 0 else { throw MusicServiceError.contentUnavailable }
+        return try await readTracks(intent: intent, requireAllMembers: true)
+    }
+    private func readTracks(intent: MusicQueueAuthorization, requireAllMembers: Bool) async throws -> [MusicNativeTrackData] {
         let revision = contentRevision
         var rows: [MusicNativeTrackData] = [], cursor: String?, visited = Set<String>()
+        var expected: Int?
         repeat {
             try intent.check()
             guard visited.insert(cursor ?? "").inserted, visited.count <= Self.maximumPages else { throw MusicServiceError.limit }
             let value = try await page(cursor: cursor)
             guard revision == contentRevision else { throw MusicServiceError.staleResult }
+            if requireAllMembers {
+                guard value.total <= Self.maximumTracks else { throw MusicServiceError.limit }
+                guard value.total >= value.items.count,
+                      expected == nil || expected == value.total else { throw MusicServiceError.invalidResponse }
+                expected = value.total
+            }
             rows += value.items; cursor = value.cursor
             guard rows.count <= Self.maximumTracks else { throw MusicServiceError.limit }
         } while cursor != nil
         try intent.check(); try await validate()
         guard revision == contentRevision else { throw MusicServiceError.staleResult }
+        if requireAllMembers, rows.count != expected { throw MusicServiceError.contentUnavailable }
         return rows
     }
     /// The returned songs and selection come from the single read after the

@@ -549,12 +549,25 @@ final class PageViewControllerTests: XCTestCase {
         }
         await fulfillment(of: [started], timeout: 2)
         weak var released = page
-        page = nil
-        XCTAssertNil(released)
-        XCTAssertEqual(cancellations, 1)
+        let synchronousRelease = expectation(description: "synchronous page release in task-local scope")
+        let releaseOnMain = { @MainActor in
+            PageLifecycleTestLocal.$marker.withValue(1) {
+                page = nil
+                XCTAssertNil(released)
+                XCTAssertEqual(cancellations, 1)
+            }
+            XCTAssertEqual(PageLifecycleTestLocal.marker, 0)
+            synchronousRelease.fulfill()
+        }
+        RunLoop.main.perform { MainActor.assumeIsolated { releaseOnMain() } }
+        await fulfillment(of: [synchronousRelease], timeout: 2)
         continuation?.resume()
         await fulfillment(of: [cancelled], timeout: 2)
     }
+}
+
+private enum PageLifecycleTestLocal {
+    @TaskLocal static var marker = 0
 }
 
 @MainActor

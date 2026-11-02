@@ -71,7 +71,7 @@ public sealed partial class MusicAccountProtocol
                 return Task.FromResult(new MusicAccountPoll("tx", id, "expired"));
             if (clock.GetElapsedTime(current.Started) >= TimeSpan.FromSeconds(180))
             { Fence(states["tx"], "CANCELLED"); return Task.FromResult(new MusicAccountPoll("tx", id, "expired")); }
-            AccountRules.Require(++current.Polls <= 100, "RATE_LIMITED"); qr = current;
+            qr = current;
         }
         return Run("tx", token, async ctx =>
         {
@@ -157,9 +157,11 @@ public sealed partial class MusicAccountProtocol
                     .Any(value => value.Contains(secret, StringComparison.Ordinal) ||
                         value.Contains(Uri.EscapeDataString(secret), StringComparison.Ordinal)), "INVALID_RESPONSE");
             GuardQr();
-            await ctx.Accept(accept, new("tx", id, cookie, profile)).ConfigureAwait(false);
+            var details = await ObserveAccountDetails(ctx, profile, cookie).ConfigureAwait(false);
+            GuardQr();
+            await ctx.Accept(accept, new("tx", id, cookie, details)).ConfigureAwait(false);
             return new MusicAccountPoll("tx", id, "authenticated");
-        }, replace: false, requestLimit: 6);
+        }, replace: false);
     }
     private static void QqLoginStatus(JsonNode? node)
     {

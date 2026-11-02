@@ -37,11 +37,16 @@ final class MusicSourcesViewController: MusicPageViewController,
                       access: model.accountAccessGeneration, queueRevision: model.state.revision,
                       settingsRevision: model.state.settingsRevision)
         super.init(appearance: appearance)
-        title = "选择音源"
+        pageTitle = "选择音源"
     }
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        let close = PageHeaderButton(image: PageIcon.image(.close, size: 18), accessibilityLabel: "关闭") {
+            [weak self] in self?.dismiss(animated: true)
+        }
+        close.accessibilityIdentifier = "page.header.close"
+        pageHeader.setLeading(close)
         table.backgroundColor = .clear
         table.separatorStyle = .none
         table.delegate = self
@@ -53,13 +58,21 @@ final class MusicSourcesViewController: MusicPageViewController,
             return cell
         }
         view.addSubview(table)
-        table.pinEdges(to: view)
+        table.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            table.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            table.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            table.topAnchor.constraint(equalTo: contentTopAnchor),
+            table.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
         more.setTitle("加载更多", for: .normal)
         more.frame.size.height = 48
         more.addAction(UIAction { [weak self] _ in self?.loadMore(refresh: false) }, for: .touchUpInside)
         table.tableFooterView = more
-        navigationItem.rightBarButtonItem = UIBarButtonItem(
-            barButtonSystemItem: .refresh, target: self, action: #selector(refresh))
+        pageHeader.setTrailing([PageHeaderButton(
+            image: UIImage(systemName: "arrow.clockwise") ?? PageIcon.image(.playing),
+            accessibilityLabel: "刷新"
+        ) { [weak self] in self?.refresh() }])
         observe(model.playbackChanges) { [weak self] in self?.reconcileInspection() }
         observe(model.accessChanges) { [weak self] in self?.reconcileInspection() }
         render()
@@ -283,7 +296,7 @@ final class MusicSourcesViewController: MusicPageViewController,
         }
     }
 
-    @objc private func refresh() {
+    private func refresh() {
         if session == nil { startInspection() }
         else { loadMore(refresh: true) }
     }

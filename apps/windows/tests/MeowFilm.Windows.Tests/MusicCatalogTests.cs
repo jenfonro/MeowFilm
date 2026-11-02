@@ -227,7 +227,7 @@ public static class MusicCatalogTests
                     var y = caption.TranslatePoint(new Point(), surface).Y;
                     var pixelY = y * VisualTreeHelper.GetDpi(surface).DpiScaleY;
                     True(Math.Abs(pixelY - Math.Round(pixelY)) < .01, "caption baseline starts on a display pixel");
-                    var cover = Descendants<ArtworkImage>(surface).Single();
+                    var cover = (ArtworkImage)entry.FindName("Cover");
                     True(y >= cover.ActualHeight && y + subtitle.ActualHeight <= surface.ActualHeight,
                         "the resting caption fits in its footer after resize");
                     var clip = (RectangleGeometry)surface.Clip;
@@ -375,7 +375,7 @@ public static class MusicCatalogTests
                 entry.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = Mouse.MouseLeaveEvent });
                 CardMotion.Transition(surface, false, false);
                 value.SetValue("  云歌单  "); Invoke(searchButton);
-                await Until(() => f.Client.Count("music.search.start") == 1 && f.Module.IsAggregateSearch,
+                await Until(() => f.Client.Count("music.search.start") == 2 && f.Module.IsSearchPage,
                     "headless search did not settle");
                 await WaitForSearch(f.Module); Layout();
                 Equal("云歌单", f.Client.Last("music.search.start").GetProperty("keyword").GetString());
@@ -455,6 +455,8 @@ public static class MusicCatalogTests
                 (new MusicCatalogSection("会员榜", [playlist], Type: "rankings", Layout: "vip-ranked-songs"), "Catalog.Section.Rankings", MusicCatalogSectionPresentation.RankingPreviews),
                 (new MusicCatalogSection("官方榜数据", [ranking], Type: "rankings"), "Catalog.Section.Rankings", MusicCatalogSectionPresentation.RankingPreviews),
                 (new MusicCatalogSection("歌曲", [new MusicCatalogCard("s", "歌曲", "歌手", "", "song", "wy", song)]), "Catalog.Section.Songs", MusicCatalogSectionPresentation.Songs),
+                (new MusicCatalogSection("歌曲摘要", [new MusicCatalogCard("s", "歌曲", "歌手", "", "song", "wy", song)],
+                    Type: "songs", Layout: "rail"), "Catalog.Section.SongShelf", MusicCatalogSectionPresentation.Songs),
                 (new MusicCatalogSection("", [artist], Type: "artists", Layout: "artist-grid"), "Catalog.Section.Artists", MusicCatalogSectionPresentation.Artists)
             };
             foreach (var (section, resource, presentation) in cases)
@@ -473,6 +475,45 @@ public static class MusicCatalogTests
                 }
                 finally { window.Close(); }
             }
+        });
+        yield return Case("summary song shelves keep source order in fixed three-row horizontal columns", async () =>
+        {
+            var cards = Enumerable.Range(1, 7).Select(index =>
+            {
+                var song = SongRow.Read(MusicSongFixture.Element(
+                    MusicSongFixture.Online("wy", index.ToString(), "歌曲" + index, "歌手", "专辑", 180)));
+                return new MusicCatalogCard(index.ToString(), song.Title, song.Artist, song.Cover,
+                    "song", "wy", song, ActionId: index.ToString());
+            }).ToArray();
+            var section = new MusicCatalogSection("歌曲", cards, Type: "songs", Layout: "rail");
+            Equal("1,2,3|4,5,6|7", string.Join("|",
+                section.SongColumns.Select(column => string.Join(",", column.Items.Select(item => item.Id)))));
+
+            var view = new MusicCatalogView();
+            var singleColumn = (FrameworkElement)((DataTemplate)view.FindResource("Catalog.SongColumn")).LoadContent();
+            singleColumn.DataContext = new MusicCatalogSongColumn(cards.Take(1).ToArray());
+            singleColumn.Measure(new Size(420, double.PositiveInfinity));
+            Equal(252d, singleColumn.DesiredSize.Height);
+            var presenter = new ContentControl
+            {
+                DataContext = section,
+                Content = section,
+                Style = (Style)view.FindResource("Catalog.SectionPresenter")
+            };
+            var window = new Window
+            {
+                Content = presenter, Width = 900, Height = 320, WindowStyle = WindowStyle.None,
+                Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false
+            };
+            try
+            {
+                window.Show(); window.UpdateLayout(); await Drain();
+                var shelf = Descendants<Shelf>(presenter).Single();
+                Equal(3, shelf.ItemsSource!.Cast<MusicCatalogSongColumn>().Count());
+                Equal(Visibility.Collapsed, ((Button)shelf.FindName("Previous")).Visibility);
+                Equal(Visibility.Visible, ((Button)shelf.FindName("Next")).Visibility);
+            }
+            finally { window.Close(); }
         });
         yield return Case("channel chrome owns direct tabs filters and no duplicate platform selector", async () =>
         {
@@ -647,8 +688,7 @@ public static class MusicCatalogTests
                     f.Playback.Opens.Count == 1, "VIP song banner did not use shared playback");
                 var queue = await f.Rpc("music.queue.get", new { limit = 1 });
                 Equal(1, queue.GetProperty("total").GetInt32());
-                Equal("1001", queue.GetProperty("current").GetProperty("song")
-                    .GetProperty("source_data").GetProperty("musicId").GetString());
+                Equal("1001", MusicSongFixture.NativeId(queue.GetProperty("current").GetProperty("song")));
             }
             finally { window.Close(); }
         });
@@ -835,7 +875,7 @@ public static class MusicCatalogTests
                 var rail = shelf.ScrollHost ?? throw new InvalidOperationException("shelf scroll host");
                 var previous = (Button)shelf.FindName("Previous"); var next = (Button)shelf.FindName("Next");
                 True(rail.ScrollableWidth > 0 && next.IsEnabled && !previous.IsEnabled, "overflow right, left boundary disabled");
-                Equal(Visibility.Visible, previous.Visibility); Equal(Visibility.Visible, next.Visibility);
+                Equal(Visibility.Collapsed, previous.Visibility); Equal(Visibility.Visible, next.Visibility);
                 Equal(0d, next.Opacity); True(!next.IsHitTestVisible, "hidden controls do not intercept pointer");
                 True(previous.TranslatePoint(new Point(previous.ActualWidth,0), rail).X <= 0, "left arrow outside card viewport");
                 True(next.TranslatePoint(new Point(),rail).X >= rail.ActualWidth, "right arrow outside card viewport");
@@ -850,7 +890,7 @@ public static class MusicCatalogTests
                 { RoutedEvent = Keyboard.PreviewKeyDownEvent };
                 shelf.RaiseEvent(end);
                 True(end.Handled, "End is handled by the shelf");
-                await Until(() => Math.Abs(rail.HorizontalOffset - rail.ScrollableWidth) < .5);
+                await Until(() => Math.Abs(rail.HorizontalOffset - shelf.MaximumOffset) < .5);
                 var home = new KeyEventArgs(Keyboard.PrimaryDevice, source, 0, Key.Home)
                 { RoutedEvent = Keyboard.PreviewKeyDownEvent };
                 shelf.RaiseEvent(home);
@@ -910,7 +950,7 @@ public static class MusicCatalogTests
 
                 rail.ScrollToHorizontalOffset(saved + shelf.CardWidth * .37); window.UpdateLayout();
                 var inBetween = rail.HorizontalOffset;
-                var settled = Math.Clamp(Math.Round(inBetween / shelf.CardWidth) * shelf.CardWidth, 0, rail.ScrollableWidth);
+                var settled = Math.Clamp(Math.Round(inBetween / shelf.CardWidth) * shelf.CardWidth, 0, shelf.MaximumOffset);
                 shelf.DataContext = second; window.UpdateLayout();
                 await Until(() => Math.Abs(first.HorizontalOffset - settled) < .5 && rail.HorizontalOffset < .5);
                 True(Math.Abs(first.HorizontalOffset - inBetween) > 1,
@@ -930,7 +970,7 @@ public static class MusicCatalogTests
                 window.UpdateLayout();
                 var pendingUnloadOffset = rail.HorizontalOffset;
                 var pendingUnloadTarget = Math.Clamp(
-                    Math.Round(pendingUnloadOffset / shelf.CardWidth) * shelf.CardWidth, 0, rail.ScrollableWidth);
+                    Math.Round(pendingUnloadOffset / shelf.CardWidth) * shelf.CardWidth, 0, shelf.MaximumOffset);
                 view.Content = null; await Drain();
                 True(Math.Abs(first.HorizontalOffset - pendingUnloadTarget) < .5,
                     "unload commits the settled target before discarding the timer");
@@ -1073,26 +1113,26 @@ public static class MusicCatalogTests
             Equal(3, (await f.Module.ReadCatalogCardPreviewAsync(current, default)).Count);
             Equal(2, f.Client.Count("music.catalog.playlist"));
         });
-        yield return Case("aggregate playlist search cards stay static and never request entry previews", async () =>
+        yield return Case("playlist search cards stay static and never request entry previews", async () =>
         {
             await using var f = await Fixture.Create();
             await f.Configure(new { searchPlaylistTotal = 61 });
             await f.Module.NavigateAsync("catalog-home", default);
             await f.SearchPolicy("wy", playlists: true);
-            f.Module.CatalogSearchKind = "歌单";
             await f.Module.SearchAsync("云歌单", default);
             await WaitForSearch(f.Module);
-            True(f.Module.CanAggregateMore, "fixture search must expose another page");
+            await f.Module.OpenSearchTabAsync("playlists");
+            True(f.Module.CanSearchMore, "fixture search must expose another page");
             var card = f.Module.CatalogSections.Single().Items.First();
             Equal(MusicCatalogEntryPresentation.Static, card.Presentation);
-            True(!card.CanRequestPreview, "aggregate search is not an entry preview surface");
+            True(!card.CanRequestPreview, "music search is not an entry preview surface");
             var calls = f.Client.Count("music.catalog.playlist");
             Equal(0, (await f.Module.ReadCatalogCardPreviewAsync(card, default)).Count);
             Equal(calls, f.Client.Count("music.catalog.playlist"));
-            await f.Module.MoreAggregateSearchAsync();
+            await f.Module.MoreSearchAsync();
             await WaitForSearch(f.Module);
             var current = f.Module.CatalogSections.Single().Items.First();
-            True(!ReferenceEquals(card, current), "aggregate snapshot did not replace visible card identity");
+            True(!ReferenceEquals(card, current), "search snapshot did not replace visible card identity");
             Equal(MusicCatalogEntryPresentation.Static, current.Presentation);
             Equal(0, (await f.Module.ReadCatalogCardPreviewAsync(current, default)).Count);
             Equal(calls, f.Client.Count("music.catalog.playlist"));
@@ -1323,7 +1363,7 @@ public static class MusicCatalogTests
             await f.Module.NavigateAsync("catalog-home", default);
             var cards = f.Module.CatalogSections.SelectMany(s => s.Items).ToArray();
             var song = cards.Single(c => c.Song is not null);
-            Equal("1001", song.Song!.Raw.GetProperty("source_data").GetProperty("musicId").GetString());
+            Equal("1001", MusicSongFixture.NativeId(song.Song!.Raw));
             True(song.Id != song.ActionId && song.ActionId == "1001", "domain identity not upstream locator");
             var daily = cards.Single(c => c.Kind == "daily");
             True(!daily.CanOpen && daily.ErrorText.Length > 0, "unavailable business error, not fake clickable");
@@ -1467,8 +1507,8 @@ public static class MusicCatalogTests
             Equal(2, p.GetProperty("page").GetInt32()); Equal(100, p.GetProperty("limit").GetInt32());
             Equal(64, p.GetProperty("snapshot").GetString()!.Length);
             Equal(200, f.Module.Songs.Count);
-            Equal("1001", f.Module.Songs[0].Raw.GetProperty("source_data").GetProperty("musicId").GetString());
-            Equal("1101", f.Module.Songs[100].Raw.GetProperty("source_data").GetProperty("musicId").GetString());
+            Equal("1001", MusicSongFixture.NativeId(f.Module.Songs[0].Raw));
+            Equal("1101", MusicSongFixture.NativeId(f.Module.Songs[100].Raw));
             var calls = f.Client.Count("music.catalog.playlist");
             await f.Module.NavigateAsync("catalog-home", default);
             await f.Module.NavigateAsync("catalog-playlist/wy/500", default);
@@ -1525,15 +1565,20 @@ public static class MusicCatalogTests
             True(before.SequenceEqual(f.Module.CatalogSections), "stalled page cannot replace old content");
             Equal("分页未前进", f.Module.Status);
         });
-        yield return Case("page 100 with more is rejected; page 101 never sent", async () =>
+        yield return Case("home paging follows continuation through page 101 and stops at the native end", async () =>
         {
             await using var f = await Fixture.Create();
             await f.Configure(new { homePages = 101 });
             await f.Module.NavigateAsync("catalog-home", default);
             for (int i = 0; i < 99; i++) await f.Module.CatalogPageAsync(1);
-            Equal("第 99 页", f.Module.CatalogPageText);
-            Equal("内容超过数量限制", f.Module.Status);
+            Equal("第 100 页", f.Module.CatalogPageText);
+            True(f.Module.CanCatalogNext, "page 100 keeps its native continuation");
             Equal(100, f.Client.Count("music.catalog.home"));
+            await f.Module.CatalogPageAsync(1);
+            Equal("第 101 页", f.Module.CatalogPageText);
+            True(!f.Module.CanCatalogNext, "native final page stops paging");
+            await f.Module.CatalogPageAsync(1);
+            Equal(101, f.Client.Count("music.catalog.home"));
         });
         yield return Case("cancelled and retired responses cannot republish private display or cache", async () =>
         {
@@ -1571,13 +1616,12 @@ public static class MusicCatalogTests
             await using var f = await Fixture.Create();
             await f.Module.NavigateAsync("catalog-home", default);
             await f.SearchPolicy("wy", playlists: true);
-            f.Module.CatalogSearchKind = "歌单";
             await f.Module.SearchAsync("云歌单", default);
             await WaitForSearch(f.Module);
+            await f.Module.OpenSearchTabAsync("playlists");
             var card = f.Module.CatalogSections.Single().Items.Single();
             True(card.CanOpen && card.Kind == "playlist" && card.ActionId == "500", "search playlist DTO is not an unknown resource");
             Equal("playlists", f.Client.Last("music.search.start").GetProperty("kind").GetString());
-            True(f.Module.SearchProgress.All(p => p.Page is >= 0 and <= 100), "bounded aggregate provider page");
         });
         yield return Case("platform playlist uses the one playlist detail surface", async () =>
         {
@@ -1671,9 +1715,9 @@ public static class MusicCatalogTests
                 f.Module.SelectedCatalogPlatform = f.Module.CatalogPlatforms.Single(p => p.Key == platform);
                 await f.Module.SearchAsync("歌曲", default);
                 await WaitForSearch(f.Module);
-                var card = f.Module.CatalogSections.Single().Items.Single();
+                var card = f.Module.CatalogSections.SelectMany(section => section.Items).Single(item => item.Song is not null);
                 True(card.CanOpen && card.Song is not null, "real provider normalized song is actionable");
-                Equal(platform, card.Song!.Raw.GetProperty("source_data").GetProperty("source").GetString());
+                Equal(platform, MusicSongFixture.Info(card.Song!.Raw).GetProperty("source").GetString());
                 var id = platform == "kg" ? "global-test" : "500";
                 await f.Module.NavigateAsync("catalog-playlist/" + platform + "/" + id, default);
                 await f.Module.SaveCatalogPlaylistAsync();
@@ -1724,7 +1768,7 @@ public static class MusicCatalogTests
             await f.Module.OpenCatalogCardAsync(card);
             var q = await f.Rpc("music.queue.get", new { limit = 1 });
             Equal(205, q.GetProperty("total").GetInt32());
-            Equal("1205", q.GetProperty("current").GetProperty("song").GetProperty("source_data").GetProperty("musicId").GetString());
+            Equal("1205", MusicSongFixture.NativeId(q.GetProperty("current").GetProperty("song")));
             Equal(1, f.Playback.Opens.Count);
             Equal("https://media.invalid/1205", f.Playback.Opens.Single().AbsoluteUri);
             Equal(0, f.Client.Count("music.history.recordPlayed"));
@@ -1798,19 +1842,27 @@ public static class MusicCatalogTests
         });
         yield return Case("anonymous home hides login-only cards but keeps real public content", async () =>
         {
+            const string publicCover = "https://art.example.test/public-playlist.jpg";
+            const string privateCover = "https://art.example.test/private-daily.jpg";
             await using var f = await Fixture.Create();
             await f.Module.NavigateAsync("catalog-home", default);
             var view = new MusicCatalogView { DataContext = f.Module };
+            var loader = new CatalogArtworkLoader();
+            ArtworkScope.SetLoader(view, loader);
             var window = new Window { Content = view, Width = 900, Height = 650, Left = -10000, Top = -10000,
                 ShowActivated = false, ShowInTaskbar = false };
             try
             {
-            window.Show(); window.UpdateLayout(); await Drain();
-            var buttons = Descendants<Button>(view).ToArray();
-            True(!buttons.Any(b => b.Tag is MusicCatalogCard { Kind: "daily" }), "login-only entry not rendered");
-            True(!Descendants<TextBlock>(view).Any(t => t.Text == "当前内容需要平台登录"), "no login warning tiles");
-            True(f.Module.CatalogSections.SelectMany(s => s.Items).Any(c => c.Kind == "daily" && !c.CanOpen), "capability and action denial remain intact");
-            True(buttons.Any(b => b.Tag is MusicCatalogCard { Song: not null } && b.IsEnabled), "nested song actual WPF card enabled");
+                window.Show(); window.UpdateLayout();
+                await Until(() => loader.Addresses.Contains(publicCover), "public home artwork was not requested");
+                var buttons = Descendants<Button>(view).ToArray();
+                True(!buttons.Any(b => b.Tag is MusicCatalogCard { Kind: "daily" }), "login-only entry not rendered");
+                True(!Descendants<TextBlock>(view).Any(t => t.Text == "当前内容需要平台登录"), "no login warning tiles");
+                True(f.Module.CatalogSections.SelectMany(s => s.Items).Any(c =>
+                    c.Kind == "daily" && c.Cover == privateCover && !c.CanOpen), "capability and action denial remain intact");
+                True(buttons.Any(b => b.Tag is MusicCatalogCard { Song: not null } && b.IsEnabled), "nested song actual WPF card enabled");
+                True(!loader.Addresses.Contains(privateCover), "hidden account artwork is never requested");
+                Equal(0, f.Client.Count("music.catalog.playlist"));
             }
             finally { window.Close(); }
         });
@@ -1861,9 +1913,38 @@ public static class MusicCatalogTests
                 shelf.Measure(new Size(826, 300)); shelf.Arrange(new Rect(0, 0, 826, 300)); shelf.UpdateLayout();
                 True(Math.Abs(shelf.CardWidth - expected) < .01, type + " reference pitch");
             }
-            var anonymous = new MusicCatalogSection("", [row, row with { Id = "private", Available = false, ErrorCode = "AUTH_REQUIRED" }]);
-            Equal(1, anonymous.WithoutLoginOnlyCards().Items.Count);
-            Equal(2, (anonymous with { Items = [row, row with { Id = "private", Available = true }] }).WithoutLoginOnlyCards().Items.Count);
+            var hidden = row with
+            {
+                Id = "private", Available = false, ErrorCode = "AUTH_REQUIRED",
+                RequiresAccount = true, Display = false
+            };
+            var anonymous = new MusicCatalogSection("", [row, hidden], Action: hidden);
+            var display = anonymous.DisplayableCards();
+            Equal(1, display.Items.Count);
+            True(display.Action is null, "a hidden account action is removed from the display projection");
+            Equal(2, (anonymous with
+            {
+                Items = [row, hidden with { Available = true, ErrorCode = "", Display = true }]
+            }).DisplayableCards().Items.Count);
+
+            var reply = JsonSerializer.SerializeToElement(new
+            {
+                platform = "wy",
+                sections = new[]
+                {
+                    new
+                    {
+                        id = "private-section", title = "账号栏目", type = "playlists",
+                        available = false, errorCode = "AUTH_REQUIRED",
+                        requiresAccount = true, display = false,
+                        action = new { type = "daily" },
+                        items = new[] { new { id = "1", name = "公开歌单", kind = "playlist" } }
+                    }
+                }
+            });
+            var action = MusicCatalogDto.Read(reply, "wy", "home", "").Single().Action!;
+            True(action.RequiresAccount && !action.Display && !action.Available &&
+                action.ErrorCode == "AUTH_REQUIRED", "section action display and account admission survive DTO projection");
             return Task.CompletedTask;
         });
     }
@@ -1914,10 +1995,10 @@ public static class MusicCatalogTests
     {
         for (int i = 0; i < 500; i++)
         {
-            if (module.CatalogSections.SelectMany(s => s.Items).Any() && module.SearchProgress.All(p => !p.Loading)) return;
+            if (module.CatalogSections.SelectMany(s => s.Items).Any() && module.CatalogSections.All(s => !s.IsLoading)) return;
             await Task.Delay(10); await Drain();
         }
-        throw new InvalidOperationException("Native aggregate search did not settle");
+        throw new InvalidOperationException("Native music search did not settle");
     }
     private static IEnumerable<T> Descendants<T>(DependencyObject parent) where T : DependencyObject
     {
@@ -2081,6 +2162,7 @@ public static class MusicCatalogTests
             var data = Environment.GetEnvironmentVariable("MEOWFILM_TEST_DATA_ROOT") ?? throw new InvalidOperationException("Isolated test data required");
             var dir = Path.Combine(data, "catalog-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(dir);
             var store = new DpapiDocumentStore(dir, AppIdentity.NativeNamespaces);
+            await MusicClientContextFixture.SeedQqAsync(store);
             var f = new Fixture(store, vipAccount);
             try
             {
@@ -2102,7 +2184,6 @@ public static class MusicCatalogTests
                 await Module.SetSearchPlatformEnabledAsync("songs", row, !playlists && row.Platform == platform);
             foreach (var row in Module.PlaylistSearch.Platforms.ToArray())
                 await Module.SetSearchPlatformEnabledAsync("playlists", row, playlists && row.Platform == platform);
-            await Module.SetSearchModeAsync(playlists ? "playlists" : "songs", "aggregate");
         }
         public Task Configure(object state)
         {
@@ -2113,7 +2194,7 @@ public static class MusicCatalogTests
         public async Task SetupSource()
         {
             const string source = """
-                lx.on(lx.EVENT_NAMES.request, async ({info}) => 'https://media.invalid/' + info.musicInfo.musicId);
+                lx.on(lx.EVENT_NAMES.request, async ({info}) => 'https://media.invalid/' + info.musicInfo.songmid);
                 lx.send(lx.EVENT_NAMES.inited,{status:true,sources:{wy:{name:'合成',type:'music',actions:['musicUrl'],qualitys:['320k']}}});
                 """;
             var bytes = System.Text.Encoding.UTF8.GetBytes(source);
@@ -2313,12 +2394,14 @@ public static class MusicCatalogTests
                 var entries = new List<object>();
                 if (Number("detailLimit") > 0)
                     entries.Add(new { resourceType = "playlist", resourceId = (600 + cursor).ToString(), name = "入口歌单" });
-                entries.Add(new { resourceType = "dailysongs", name = "每日推荐" });
+                entries.Add(new { resourceType = "dailysongs", name = "每日推荐",
+                    coverImg = "https://art.example.test/private-daily.jpg" });
                 entries.Add(new { resourceType = "song", resourceExtInfo = new { songData = Wy(1001 + cursor) }, name = "嵌套歌曲" });
                 return Json(new { code = 200, data = new { cursor = (cursor + 1).ToString(), hasMore = cursor < Number("homePages", 2) - 1,
                     blockCodeOrderList = "[\"PLAYLIST\"]", blocks = new object[] {
                         new { positionCode = "PLAYLIST", uiElement = new { subTitle = new { title = "推荐歌单" } },
-                            creatives = new[] { new { resources = new[] { new { resourceType = "playlist", resourceId = (500 + cursor).ToString(), name = "合成歌单" } } } } },
+                            creatives = new[] { new { resources = new[] { new { resourceType = "playlist", resourceId = (500 + cursor).ToString(),
+                                name = "合成歌单", coverImg = "https://art.example.test/public-playlist.jpg" } } } } },
                         new { positionCode = "ENTRANCE", creatives = new[] { new { resources = entries.ToArray() } } } } } });
             }
             throw new InvalidOperationException("Unexpected synthetic catalog request");

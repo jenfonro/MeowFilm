@@ -31,6 +31,7 @@ public final class MusicPlayerViewController: MusicPageViewController, UIPopover
 
     public override var prefersStatusBarHidden: Bool { true }
     public override func loadView() { view = playerView }
+    public override var usesPageHeader: Bool { false }
 
     public override func viewDidLoad() {
         super.viewDidLoad()
@@ -144,16 +145,6 @@ public final class MusicPlayerViewController: MusicPageViewController, UIPopover
                 self?.dismissMenu(alert) { self?.openFMSettings() }
             })
         }
-        alert.addAction(UIAlertAction(title: appearance.preferences.translationActionLabel, style: .default) {
-            [weak self] _ in
-            guard let self else { return }
-            self.appearance.set(\.lyricTranslation, !self.appearance.preferences.lyricTranslation)
-        })
-        alert.addAction(UIAlertAction(title: appearance.preferences.backgroundActionLabel, style: .default) {
-            [weak self] _ in
-            guard let self else { return }
-            self.appearance.set(\.lyricBackground, !self.appearance.preferences.lyricBackground)
-        })
         alert.addAction(UIAlertAction(title: "取消", style: .cancel))
         presentPopover(alert, anchor: playerView.moreAnchor)
     }

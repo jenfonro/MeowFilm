@@ -8,11 +8,7 @@ const defaults = Object.freeze({
   cleanupTimeoutMs: 100,
   maxBytes: 2 * 1024 * 1024,
   maxTimers: 128,
-  maxNetworkRequests: 16,
   maxInstances: 32,
-  maxInFlight: 32,
-  maxInstanceInFlight: 8,
-  maxSiteInFlight: 4,
   maxMemoryBytes: 64 * 1024 * 1024,
   maxStackBytes: 64 * 1024,
 });
@@ -58,7 +54,7 @@ export class ScriptHost {
   #sessions = new Set();
   #retired = new Set();
   #closed = false;
-  #pending = new Map();
+  #pending = new Set();
   #cleanupIssues = new Map();
   #closing;
 
@@ -334,7 +330,7 @@ export class ScriptHost {
         timeoutMs <= this.limits.requestTimeoutMs);
     }
     const record = this.#target(target);
-    const release = this.#reserveRequest(record.id, target.siteId, !record.session.lifecycleManaged);
+    const release = this.#reserveRequest();
     try {
       return await record.session.invoke({
         siteId: target.siteId, operation: target.operation, payload: clone(target.payload ?? {}),
@@ -342,18 +338,10 @@ export class ScriptHost {
     } finally { release(); }
   }
 
-  #reserveRequest(id, siteId, enforceLimit = true) {
+  #reserveRequest() {
     this.#open();
-    if (enforceLimit) {
-      const instanceCount = [...this.#pending.values()].filter(v => v.id === id).length;
-      const siteCount = [...this.#pending.values()]
-        .filter(v => v.id === id && v.siteId === siteId).length;
-      requireValue(this.#pending.size < this.limits.maxInFlight &&
-        instanceCount < this.limits.maxInstanceInFlight && siteCount < this.limits.maxSiteInFlight,
-      'RESOURCE_LIMIT');
-    }
     const token = Symbol();
-    this.#pending.set(token, { id, siteId });
+    this.#pending.add(token);
     return () => this.#pending.delete(token);
   }
 

@@ -5,6 +5,7 @@ import XCTest
 final class MusicReferenceQueueTests: XCTestCase {
     func testQueueStripPreservesCategoryLabelsButMakesHistoricalCardsRealNeighbors() {
         let history = ["a", "b", "c"]
+        XCTAssertEqual(MusicReferenceQueuePage.allCases.map(\.title), ["当前播放", "已播歌曲", "已播歌单"])
         XCTAssertEqual(MusicReferenceQueueStrip.ids(history: history),
                        ["current", "songs", "history:a", "history:b", "history:c"])
         XCTAssertEqual(MusicReferenceQueueStrip.tab(.playlists, selected: "current", history: history), "history:a")
@@ -101,54 +102,6 @@ final class MusicReferenceQueueTests: XCTestCase {
                                     token: .init(rawValue: "new-detail-token"), permitted: true))
     }
 
-    private func similar(active: Bool, status: MusicSimilarModeSnapshot.Status,
-                         canRetry: Bool = false) -> MusicSimilarModeSnapshot {
-        .init(id: request, active: active, status: status, seed: .init(title: "种子歌曲"),
-              seedEntryID: ids[0], continueEnabled: true,
-              candidates: [.init(id: "candidate", song: .init(title: "候选歌曲"))],
-              batches: [], sourceIDs: ["101"], fromHome: false, provider: .songRoaming,
-              error: nil, canRetry: canRetry, legacy: false)
-    }
-
-    func testReadyRecommendationPreviewShowsCandidatesButActiveSessionDoesNot() {
-        let preview = MusicReferenceSimilarPresentation(snapshot: similar(active: false, status: .ready))
-        XCTAssertTrue(preview.showsSection)
-        XCTAssertEqual(preview.title, "根据 种子歌曲 推荐")
-        XCTAssertEqual(preview.candidates.map(\.id), ["candidate"])
-        XCTAssertNil(preview.status)
-        let active = MusicReferenceSimilarPresentation(snapshot: similar(active: true, status: .ready))
-        XCTAssertFalse(active.showsSection)
-        XCTAssertEqual(active.title, "推荐续播")
-        XCTAssertTrue(active.candidates.isEmpty)
-        XCTAssertFalse(active.showsRetry)
-    }
-
-    func testLoadingNeverOffersRetryAndUsesTheRealPreviewOrContinuationState() {
-        let preview = MusicReferenceSimilarPresentation(snapshot: similar(active: false, status: .loading, canRetry: true))
-        let active = MusicReferenceSimilarPresentation(snapshot: similar(active: true, status: .loading, canRetry: true))
-        XCTAssertTrue(preview.showsSection)
-        XCTAssertTrue(active.showsSection)
-        XCTAssertEqual(preview.status, "正在获取相似歌曲…")
-        XCTAssertEqual(active.status, "正在获取下一批相似歌曲…")
-        XCTAssertFalse(preview.showsRetry)
-        XCTAssertFalse(preview.canRetry)
-        XCTAssertFalse(active.canRetry)
-    }
-
-    func testRetryRequiresErrorOrEmptyAndOwnerPermissionRatherThanAnUnconditionalButton() {
-        let statuses: [MusicSimilarModeSnapshot.Status] = [.error, .empty]
-        for status in statuses {
-            let blocked = MusicReferenceSimilarPresentation(snapshot: similar(active: true, status: status))
-            let allowed = MusicReferenceSimilarPresentation(snapshot: similar(active: true, status: status, canRetry: true))
-            XCTAssertTrue(blocked.showsSection)
-            XCTAssertTrue(blocked.showsRetry)
-            XCTAssertFalse(blocked.canRetry)
-            XCTAssertTrue(allowed.canRetry)
-            XCTAssertNotNil(blocked.status)
-        }
-        XCTAssertFalse(MusicReferenceSimilarPresentation(snapshot: similar(active: false, status: .ready, canRetry: true)).canRetry)
-    }
-
     func testQueueMetricsUseFullViewportWithReferenceHeightCapAndSheetInsets() {
         let normal = MusicReferenceQueueMetrics(viewportWidth: 375, viewportHeight: 812)
         XCTAssertEqual(normal.width, 375)
@@ -196,14 +149,6 @@ final class MusicReferenceQueueTests: XCTestCase {
         XCTAssertEqual(MusicReferenceQueueMetrics.historyCardWidth(pageWidth: page), 319)
         XCTAssertEqual(MusicReferenceQueueMetrics.historyCardWidth(pageWidth: 100), 68)
         XCTAssertEqual(MusicReferenceQueueMetrics.historyCardWidth(pageWidth: 20), 0)
-    }
-
-    func testRecommendationPreviewDoesNotReserveFortyPercentForOneShortRow() {
-        XCTAssertEqual(MusicReferenceQueueMetrics.previewQueueHeight(count: 1, availableHeight: 500), 64)
-        XCTAssertEqual(MusicReferenceQueueMetrics.previewQueueHeight(count: 2, availableHeight: 500), 128)
-        XCTAssertEqual(MusicReferenceQueueMetrics.previewQueueHeight(count: 20, availableHeight: 500), 200)
-        XCTAssertEqual(MusicReferenceQueueMetrics.previewQueueHeight(count: 20, availableHeight: 40), 40)
-        XCTAssertEqual(MusicReferenceQueueMetrics.previewQueueHeight(count: 1, availableHeight: .nan), 0)
     }
 
     func testHistoryDisplayIdentityTracksSummaryAndAccountButNotCardSelection() {

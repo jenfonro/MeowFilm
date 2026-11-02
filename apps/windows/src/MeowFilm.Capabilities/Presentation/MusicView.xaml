@@ -7,7 +7,6 @@
  <UserControl.Resources><ResourceDictionary>
   <ResourceDictionary.MergedDictionaries><ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/></ResourceDictionary.MergedDictionaries>
   <BooleanToVisibilityConverter x:Key="Visible"/>
-  <local:PlaylistIndexConverter x:Key="PlaylistIndex"/>
   <Style x:Key="Playlist.Grid" TargetType="DataGrid" BasedOn="{StaticResource {x:Type DataGrid}}">
    <Setter Property="Background" Value="Transparent"/>
    <Setter Property="BorderThickness" Value="0"/>
@@ -44,20 +43,147 @@
    <Setter Property="Padding" Value="8,0"/>
    <Setter Property="BorderThickness" Value="0"/>
   </Style>
+  <Style x:Key="Playlist.ActionButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.IconButton}">
+   <Setter Property="Width" Value="32"/>
+   <Setter Property="Height" Value="32"/>
+   <Setter Property="MinHeight" Value="0"/>
+   <Setter Property="Margin" Value="0"/>
+   <Setter Property="Padding" Value="0"/>
+   <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
+  </Style>
+  <Style x:Key="Playlist.HoverActionButton" TargetType="Button" BasedOn="{StaticResource Playlist.ActionButton}">
+   <Setter Property="Visibility" Value="Collapsed"/>
+   <Style.Triggers>
+    <DataTrigger Binding="{Binding IsMouseOver,RelativeSource={RelativeSource AncestorType=DataGridRow}}" Value="True">
+     <Setter Property="Visibility" Value="Visible"/>
+    </DataTrigger>
+    <DataTrigger Binding="{Binding IsKeyboardFocusWithin,RelativeSource={RelativeSource AncestorType=DataGridRow}}" Value="True">
+     <Setter Property="Visibility" Value="Visible"/>
+    </DataTrigger>
+   </Style.Triggers>
+  </Style>
+  <Style x:Key="Search.Tab" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
+   <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
+   <Setter Property="BorderBrush" Value="Transparent"/>
+   <Setter Property="Margin" Value="0,0,28,0"/>
+   <Setter Property="Padding" Value="0"/>
+   <Setter Property="FontSize" Value="15"/>
+   <Setter Property="Height" Value="34"/>
+   <Setter Property="MinHeight" Value="0"/>
+   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+    <Border Background="Transparent">
+     <Grid>
+      <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,0,0,5"/>
+      <Border Width="18" Height="3" CornerRadius="1.5" Background="{TemplateBinding BorderBrush}"
+              VerticalAlignment="Bottom"/>
+     </Grid>
+    </Border>
+   </ControlTemplate></Setter.Value></Setter>
+  </Style>
+  <Style x:Key="Playlist.PlayAllButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}">
+   <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
+   <Setter Property="Background" Value="Transparent"/>
+   <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}"/>
+   <Setter Property="Padding" Value="16,7"/>
+   <Setter Property="MinHeight" Value="38"/>
+   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+    <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+            BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="10"
+            Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+     <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                       VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+    </Border>
+   </ControlTemplate></Setter.Value></Setter>
+   <Style.Triggers>
+    <Trigger Property="IsMouseOver" Value="True">
+     <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.AccentSoft}"/>
+    </Trigger>
+    <Trigger Property="IsPressed" Value="True">
+     <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Accent}"/>
+     <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.OnAccent}"/>
+    </Trigger>
+    <Trigger Property="IsEnabled" Value="False">
+     <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Disabled}"/>
+     <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Border}"/>
+    </Trigger>
+    <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
+     <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
+     <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+     <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
+    </Trigger>
+    <MultiTrigger><MultiTrigger.Conditions>
+     <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/>
+     <Condition Property="IsMouseOver" Value="True"/>
+    </MultiTrigger.Conditions>
+     <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
+     <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
+    </MultiTrigger>
+   </Style.Triggers>
+  </Style>
+  <Style x:Key="Playlist.DialogPrimaryButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.PrimaryButton}">
+   <Setter Property="Width" Value="96"/>
+   <Setter Property="MinHeight" Value="40"/>
+   <Setter Property="Padding" Value="20,8"/>
+   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+    <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+            BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="20"
+            Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+     <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                       VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+    </Border>
+   </ControlTemplate></Setter.Value></Setter>
+  </Style>
+  <Style x:Key="Playlist.DialogTextBox" TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}">
+   <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Window}"/>
+  </Style>
  </ResourceDictionary></UserControl.Resources>
-  <Grid>
+ <Grid>
+  <Grid x:Name="PageContent">
   <Grid.Style><Style TargetType="Grid"><Setter Property="Margin" Value="40,16,24,20"/><Setter Property="MaxWidth" Value="1490"/><Style.Triggers><DataTrigger Binding="{Binding IsCatalogLanding}" Value="True"><Setter Property="Margin" Value="0,12,0,0"/><Setter Property="MaxWidth" Value="{x:Static sys:Double.PositiveInfinity}"/></DataTrigger></Style.Triggers></Style></Grid.Style>
    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
     <RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
    <Grid>
+     <StackPanel Visibility="{Binding IsSearchPage,Converter={StaticResource Visible}}" Margin="0,4,0,24">
+      <TextBlock Text="{Binding Heading}" FontSize="23" FontWeight="SemiBold"
+                 Foreground="{DynamicResource MeowFilm.Brush.Text}" TextTrimming="CharacterEllipsis"/>
+      <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+       <Button Content="综合" Tag="overview" Click="SearchTab_Click" AutomationProperties.Name="综合搜索结果">
+        <Button.Style><Style TargetType="Button" BasedOn="{StaticResource Search.Tab}">
+         <Style.Triggers><DataTrigger Binding="{Binding IsSearchOverview}" Value="True">
+          <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
+          <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}"/>
+          <Setter Property="FontWeight" Value="SemiBold"/>
+         </DataTrigger></Style.Triggers>
+        </Style></Button.Style>
+       </Button>
+       <Button Content="单曲" Tag="songs" Click="SearchTab_Click" AutomationProperties.Name="单曲搜索结果">
+        <Button.Style><Style TargetType="Button" BasedOn="{StaticResource Search.Tab}">
+         <Style.Triggers><DataTrigger Binding="{Binding IsSearchSongs}" Value="True">
+          <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
+          <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}"/>
+          <Setter Property="FontWeight" Value="SemiBold"/>
+         </DataTrigger></Style.Triggers>
+        </Style></Button.Style>
+       </Button>
+       <Button Content="歌单" Tag="playlists" Click="SearchTab_Click" AutomationProperties.Name="歌单搜索结果">
+        <Button.Style><Style TargetType="Button" BasedOn="{StaticResource Search.Tab}">
+         <Style.Triggers><DataTrigger Binding="{Binding IsSearchPlaylists}" Value="True">
+          <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
+          <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}"/>
+          <Setter Property="FontWeight" Value="SemiBold"/>
+         </DataTrigger></Style.Triggers>
+        </Style></Button.Style>
+       </Button>
+      </StackPanel>
+     </StackPanel>
     <Grid Visibility="{Binding IsContentDetailPage,Converter={StaticResource Visible}}" Margin="0,4,0,28">
      <Grid.ColumnDefinitions><ColumnDefinition Width="152"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
      <Border x:Name="DetailArtworkFrame" Width="152" Height="152" ClipToBounds="True"
              Background="{DynamicResource MeowFilm.Brush.Surface}"
              BorderBrush="{DynamicResource MeowFilm.Brush.Border}" BorderThickness="1">
       <Border.Style><Style TargetType="Border">
-       <Setter Property="CornerRadius" Value="8"/>
-        <Setter Property="local:CardClip.Radius" Value="8"/>
+       <Setter Property="CornerRadius" Value="18"/>
+        <Setter Property="local:CardClip.Radius" Value="18"/>
        <Style.Triggers><DataTrigger Binding="{Binding IsCatalogArtist}" Value="True">
         <Setter Property="CornerRadius" Value="76"/>
          <Setter Property="local:CardClip.Radius" Value="76"/>
@@ -71,12 +197,13 @@
                          AutomationProperties.Name="{Binding DetailArtworkName}"/>
       </Grid>
      </Border>
-     <StackPanel Grid.Column="1" Margin="22,2,0,0">
+     <Grid Grid.Column="1" Margin="22,2,0,2">
+      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
       <TextBlock Text="{Binding Heading}" FontSize="23" FontWeight="SemiBold"
                  Foreground="{DynamicResource MeowFilm.Brush.Text}" TextTrimming="CharacterEllipsis"/>
-      <StackPanel Orientation="Horizontal" Margin="0,82,0,0">
-       <Button Click="PlayContentDetail_Click" IsEnabled="{Binding CanPlayContentDetail}"
-               Style="{StaticResource MeowFilm.PrimaryButton}" Padding="16,7"
+      <StackPanel Grid.Row="2" Orientation="Horizontal">
+       <Button x:Name="PlayAllButton" Click="PlayContentDetail_Click" IsEnabled="{Binding CanPlayContentDetail}"
+               Style="{StaticResource Playlist.PlayAllButton}"
                AutomationProperties.Name="播放全部">
         <StackPanel Orientation="Horizontal">
          <Path Data="M 0,0 L 0,12 L 10,6 Z" Fill="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"
@@ -85,14 +212,11 @@
         </StackPanel>
        </Button>
       </StackPanel>
-     </StackPanel>
+     </Grid>
     </Grid>
-    <StackPanel Visibility="{Binding IsSongList,Converter={StaticResource Visible}}" HorizontalAlignment="Left">
+    <StackPanel Visibility="{Binding IsHistory,Converter={StaticResource Visible}}" HorizontalAlignment="Left">
      <ComboBox x:Name="HistoryPicker" ItemsSource="{Binding HistoryDates}" SelectionChanged="HistoryDate_Changed" IsEnabled="{Binding CanEdit}"
-      MinWidth="160" Margin="0,0,8,8" Visibility="{Binding IsHistory,Converter={StaticResource Visible}}" AutomationProperties.Name="播放日期"/>
-     <ComboBox ItemsSource="{Binding RecordingCandidates}" DisplayMemberPath="Label" SelectedItem="{Binding SelectedRecording}"
-      MinWidth="160" MaxWidth="280" Margin="0,0,8,8" IsEnabled="{Binding CanEdit}"
-      Visibility="{Binding HasRecordingCandidates,Converter={StaticResource Visible}}" AutomationProperties.Name="指定歌曲录音"/>
+      MinWidth="160" Margin="0,0,8,8" AutomationProperties.Name="播放日期"/>
     </StackPanel>
    </Grid>
    <StackPanel Grid.Row="1">
@@ -105,6 +229,7 @@
    </DockPanel>
    <local:MusicRecommendationView/>
    <desktop:NoticeOutlet Message="{Binding Status}"/>
+    <desktop:NoticeOutlet Message="{Binding SearchStatus}"/>
   </StackPanel>
    <Grid Grid.Row="2">
    <local:MusicCatalogView x:Name="CatalogView" Visibility="{Binding IsCatalogContent,Converter={StaticResource Visible}}"/>
@@ -121,22 +246,29 @@
     </DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
    </ScrollViewer>
    <DataGrid x:Name="SongsGrid" ItemsSource="{Binding Songs}" SelectedItem="{Binding SelectedSong}" MouseDoubleClick="Song_DoubleClick"
+    Tag="{Binding}"
     PreviewMouseRightButtonDown="Song_RightClick" PreviewKeyDown="Song_KeyDown"
      PreviewMouseWheel="SongsGrid_MouseWheel"
     PreviewMouseLeftButtonDown="SongsGrid_MouseDown" PreviewMouseMove="SongsGrid_MouseMove"
     DragOver="SongsGrid_DragOver" DragLeave="SongsGrid_DragLeave" Drop="SongsGrid_Drop"
     QueryContinueDrag="SongsGrid_QueryContinueDrag" ScrollViewer.ScrollChanged="SongsGrid_ScrollChanged" AllowDrop="True"
-    SelectionMode="Single" SelectionUnit="FullRow" AlternationCount="100000"
+    SelectionMode="Single" SelectionUnit="FullRow"
     EnableRowVirtualization="True" VirtualizingPanel.IsVirtualizing="True"
     VirtualizingPanel.VirtualizationMode="Recycling" ScrollViewer.CanContentScroll="True"
     ColumnHeaderStyle="{StaticResource Playlist.Header}" RowStyle="{StaticResource Playlist.Row}"
     CellStyle="{StaticResource Playlist.Cell}" AutomationProperties.Name="歌曲列表">
+    <DataGrid.Resources>
+     <Style TargetType="ScrollViewer">
+      <Setter Property="desktop:OverlayScrollChrome.Enabled" Value="True"/>
+      <EventSetter Event="Loaded" Handler="SongsGridScroll_Loaded"/>
+     </Style>
+    </DataGrid.Resources>
     <DataGrid.Style><Style TargetType="DataGrid" BasedOn="{StaticResource Playlist.Grid}">
      <Style.Triggers><DataTrigger Binding="{Binding ShowsSongTable}" Value="False"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers>
     </Style></DataGrid.Style>
-    <DataGrid.ContextMenu><ContextMenu DataContext="{Binding PlacementTarget.DataContext,RelativeSource={RelativeSource Self}}">
+    <DataGrid.ContextMenu><ContextMenu DataContext="{Binding PlacementTarget.Tag,RelativeSource={RelativeSource Self}}">
      <MenuItem Header="播放" Click="Play_Click" IsEnabled="{Binding HasSelection}"/><MenuItem Header="下一首播放" Click="NextInQueue_Click" IsEnabled="{Binding HasSelection}"/>
-     <MenuItem Header="添加到收藏" Click="Favorite_Click" IsEnabled="{Binding HasSelection}"/>
+     <MenuItem Header="收藏" Click="Favorite_Click" IsEnabled="{Binding HasSelection}"/>
      <MenuItem Header="添加到歌单" ItemsSource="{Binding Playlists}" IsEnabled="{Binding HasSelection}">
       <MenuItem.ItemContainerStyle><Style TargetType="MenuItem">
        <Setter Property="Header" Value="{Binding Name}"/><Setter Property="Tag" Value="{Binding Id}"/>
@@ -146,13 +278,7 @@
      <Separator/><MenuItem Header="移除" Click="Remove_Click" IsEnabled="{Binding CanRemoveSelection}"/>
     </ContextMenu></DataGrid.ContextMenu>
     <DataGrid.Columns>
-     <DataGridTemplateColumn Header="#" Width="44">
-      <DataGridTemplateColumn.CellTemplate><DataTemplate>
-       <TextBlock Text="{Binding RelativeSource={RelativeSource AncestorType=DataGridRow},Path=(ItemsControl.AlternationIndex),Converter={StaticResource PlaylistIndex}}"
-                  FontSize="12" Foreground="{DynamicResource MeowFilm.Brush.Muted}" HorizontalAlignment="Center"/>
-      </DataTemplate></DataGridTemplateColumn.CellTemplate>
-     </DataGridTemplateColumn>
-     <DataGridTemplateColumn Header="标题" Width="2*" MinWidth="220">
+     <DataGridTemplateColumn Header="歌曲 / 歌手" Width="3*" MinWidth="240">
       <DataGridTemplateColumn.CellTemplate><DataTemplate>
        <Grid>
         <Grid.ColumnDefinitions><ColumnDefinition Width="34"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -173,8 +299,46 @@
        </Grid>
       </DataTemplate></DataGridTemplateColumn.CellTemplate>
      </DataGridTemplateColumn>
-     <DataGridTextColumn Header="专辑" Binding="{Binding Album}" ElementStyle="{StaticResource Capability.CellText}" Width="*" MinWidth="120"/>
-     <DataGridTextColumn Header="时长" Binding="{Binding Duration}" ElementStyle="{StaticResource Capability.CellText}" Width="72"/>
+     <DataGridTextColumn Header="专辑" Binding="{Binding Album}" ElementStyle="{StaticResource Capability.CellText}" Width="2*" MinWidth="140"/>
+     <DataGridTextColumn Header="时长" Binding="{Binding Duration}" ElementStyle="{StaticResource Capability.CellText}" Width="68"/>
+     <DataGridTemplateColumn Header="操作" Width="120">
+      <DataGridTemplateColumn.CellTemplate><DataTemplate>
+       <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
+        <Button Style="{StaticResource Playlist.ActionButton}" Click="Favorite_Click"
+                Tag="{Binding DataContext,RelativeSource={RelativeSource AncestorType=UserControl}}"
+                CommandParameter="{Binding}"
+                IsEnabled="{Binding DataContext.CanEdit,RelativeSource={RelativeSource AncestorType=UserControl}}"
+                AutomationProperties.Name="收藏" ToolTip="收藏">
+         <Path Style="{StaticResource Capability.FavoriteIcon}"/>
+        </Button>
+        <Button Style="{StaticResource Playlist.HoverActionButton}" Click="NextInQueue_Click"
+                Tag="{Binding DataContext,RelativeSource={RelativeSource AncestorType=UserControl}}"
+                CommandParameter="{Binding}"
+                IsEnabled="{Binding DataContext.CanEdit,RelativeSource={RelativeSource AncestorType=UserControl}}"
+                AutomationProperties.Name="下一首播放" ToolTip="下一首播放">
+         <Grid Width="20" Height="20">
+          <Path Data="M3,2 L3,15 L14,8.5 Z" Fill="Transparent"
+                Stroke="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"
+                StrokeThickness="1.5" StrokeLineJoin="Round"/>
+          <Path Data="M16,13 L16,19 M13,16 L19,16"
+                Stroke="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"
+                StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+         </Grid>
+        </Button>
+        <Button Style="{StaticResource Playlist.HoverActionButton}" Click="SongMore_Click"
+                Tag="{Binding DataContext,RelativeSource={RelativeSource AncestorType=UserControl}}"
+                CommandParameter="{Binding}"
+                IsEnabled="{Binding DataContext.CanEdit,RelativeSource={RelativeSource AncestorType=UserControl}}"
+                AutomationProperties.Name="更多" ToolTip="更多">
+         <StackPanel Orientation="Horizontal">
+          <Ellipse Width="2.5" Height="2.5" Margin="0,0,3,0" Fill="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
+          <Ellipse Width="2.5" Height="2.5" Margin="0,0,3,0" Fill="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
+          <Ellipse Width="2.5" Height="2.5" Fill="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
+         </StackPanel>
+        </Button>
+       </StackPanel>
+      </DataTemplate></DataGridTemplateColumn.CellTemplate>
+     </DataGridTemplateColumn>
     </DataGrid.Columns>
    </DataGrid>
   </Grid>
@@ -185,5 +349,50 @@
      <Button Content="下一页" IsEnabled="{Binding CanNextPage}" Click="NextPage_Click"/>
     </StackPanel>
    </DockPanel>
+ </Grid>
+  <Grid x:Name="PlaylistDialogOverlay" Panel.ZIndex="50" Visibility="Collapsed"
+        Background="#52000000" Focusable="False"
+        KeyboardNavigation.TabNavigation="Cycle"
+        PreviewKeyDown="PlaylistDialog_PreviewKeyDown"
+        AutomationProperties.Name="创建歌单浮层">
+   <Border x:Name="PlaylistDialogPanel" Width="420" MinHeight="252"
+           HorizontalAlignment="Center" VerticalAlignment="Center"
+           Background="{DynamicResource MeowFilm.Brush.Surface}"
+           BorderBrush="{DynamicResource MeowFilm.Brush.Border}" BorderThickness="1"
+           CornerRadius="18" Padding="28">
+    <Border.Effect><DropShadowEffect BlurRadius="24" ShadowDepth="5" Opacity=".2"/></Border.Effect>
+    <Grid KeyboardNavigation.TabNavigation="Cycle">
+     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+     <TextBlock Text="创建歌单" HorizontalAlignment="Center" VerticalAlignment="Center"
+                FontSize="20" FontWeight="SemiBold"/>
+     <Button x:Name="ClosePlaylistDialogButton" Content="&#xE711;"
+             Style="{StaticResource MeowFilm.IconButton}" Width="32" Height="32" MinHeight="32"
+             HorizontalAlignment="Right" VerticalAlignment="Center"
+             Click="ClosePlaylistDialog_Click"
+             AutomationProperties.Name="关闭创建歌单" ToolTip="关闭"/>
+     <Grid Grid.Row="1" Margin="0,24,0,0">
+      <TextBox x:Name="PlaylistNameInput" Height="82" MaxLength="200"
+               Style="{StaticResource Playlist.DialogTextBox}"
+               Padding="14,12,14,28" VerticalContentAlignment="Top"
+               TextChanged="PlaylistName_Changed"
+               AutomationProperties.Name="歌单名称"/>
+      <TextBlock x:Name="PlaylistNamePlaceholder" Text="输入歌单标题"
+                 Margin="15,12,15,0" VerticalAlignment="Top"
+                 Foreground="{DynamicResource MeowFilm.Brush.Muted}"
+                 IsHitTestVisible="False"/>
+      <TextBlock x:Name="PlaylistNameCount" Text="0 / 200"
+                 Margin="15,0,15,10" HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                 FontSize="12" Foreground="{DynamicResource MeowFilm.Brush.Muted}"
+                 IsHitTestVisible="False"/>
+     </Grid>
+     <Button x:Name="CreatePlaylistButton" Grid.Row="2" Content="创建"
+             Style="{StaticResource Playlist.DialogPrimaryButton}"
+             HorizontalAlignment="Center" Margin="0,24,0,0"
+             IsDefault="True" IsEnabled="False"
+             Click="CreatePlaylist_Click"
+             AutomationProperties.Name="创建歌单"/>
+    </Grid>
+   </Border>
+  </Grid>
  </Grid>
 </UserControl>

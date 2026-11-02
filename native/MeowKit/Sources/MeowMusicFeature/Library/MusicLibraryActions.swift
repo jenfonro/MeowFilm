@@ -30,11 +30,13 @@ final class MusicLibraryActions {
         }
     }
 
-    func add(_ track: MusicRemoteTrack, to collection: MusicCollection) async throws -> [MusicCollection] {
+    func add(_ tracks: [MusicRemoteTrack], to collection: MusicCollection) async throws -> [MusicCollection] {
         let (service, generation) = try begin()
         let existing = try await service.tracks(in: collection)
         try check(generation)
-        _ = try await service.editPlaylist(collection, name: nil, refs: existing.map(\.ref) + [track.ref], order: nil)
+        var seen = Set<MusicReference>()
+        let added = tracks.map(\.ref).filter { seen.insert($0).inserted }
+        _ = try await service.editPlaylist(collection, name: nil, refs: existing.map(\.ref) + added, order: nil)
         try check(generation)
         let values = try await service.collections()
         try check(generation)

@@ -29,7 +29,23 @@ internal sealed class MusicClientContextFixture : IAsyncDisposable, IDisposable
         new(Http, Owner, timeout: timeout, clock: clock ?? Protocol.Clock, clientProtocol: Protocol);
     internal MusicAccountOwner CreateAccountOwner(IProtectedDocumentStore accountStore, IMusicAccountProtocol? protocol = null,
         TimeSpan? timeout = null, TimeProvider? clock = null) =>
-        new(accountStore, protocol ?? CreateAccountProtocol(timeout, clock), Owner, Protocol);
+        new(accountStore, protocol ?? CreateAccountProtocol(timeout, clock), Owner, Protocol, clock ?? Protocol.Clock);
+    internal async Task SeedQqAsync(TimeProvider? clock = null)
+    {
+        var now = (clock ?? Protocol.Clock).GetUtcNow();
+        var device = await Owner.AcquireQqAsync();
+        if (device.SessionCurrent(now)) return;
+        var qimei = new MusicClientQimei((device.Qimei?.Generation ?? 0) + 1,
+            "SYNTHETIC_Q16", "SYNTHETIC_Q36", now.ToUnixTimeMilliseconds());
+        var session = new MusicClientDeviceSession((device.Session?.Generation ?? 0) + 1,
+            "SYNTHETIC_UID", "SYNTHETIC_SID", now.ToUnixTimeMilliseconds(), qimei.Generation);
+        await Owner.SaveQqAsync(device, qimei, session);
+    }
+    internal static async Task SeedQqAsync(IProtectedDocumentStore store, TimeProvider? clock = null)
+    {
+        await using var fixture = new MusicClientContextFixture(store: store, clock: clock);
+        await fixture.SeedQqAsync();
+    }
     internal static MusicWyClientContext Wy { get; } = new(1, new('A', 52), new('a', 64),
         new string('a', 64) + ",1700000000000", "abcdef.1700000000000.01.0");
     internal static MusicKgClientContext Kg { get; } = new(1, "0123456789abcdef0123456789abcdef");

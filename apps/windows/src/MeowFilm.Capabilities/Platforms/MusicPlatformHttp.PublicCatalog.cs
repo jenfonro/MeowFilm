@@ -19,7 +19,7 @@ public sealed partial class MusicPlatformHttp
     private const string PublicMgPlaylists = """{"song":0,"album":0,"singer":0,"tagSong":0,"mvSong":0,"bestShow":0,"songlist":1,"lyricSong":0}""";
 
     // Transfers request ownership, including validation failures. Uses the same
-    // physical slots and settle semantics as native writes, not ordinary WaitAsync.
+    // physical settle semantics as native writes.
     internal Task<byte[]> SendPublicCatalogReadAsync(string platform, HttpRequestMessage request,
         CancellationToken token, int maxResponseBytes, TimeSpan timeout)
     {
@@ -27,8 +27,7 @@ public sealed partial class MusicPlatformHttp
         try
         {
             token.ThrowIfCancellationRequested();
-            PJ.Require(maxResponseBytes is >= 1 and <= 4194304 &&
-                timeout.TotalMilliseconds is >= 1 and <= 25000, "LIMIT");
+            PJ.Require(maxResponseBytes >= 1 && timeout >= TimeSpan.FromMilliseconds(1), "LIMIT");
         }
         catch { request.Dispose(); throw; }
         return SendCoreAsync(platform, request, token, maxResponseBytes, timeout,
@@ -56,7 +55,7 @@ public sealed partial class MusicPlatformHttp
                 return false;
             if (uri.Scheme == "http" && uri.Host == "search.kuwo.cn" && uri.AbsolutePath == "/r.s")
             {
-                if (!PublicKeyword(q.GetValueOrDefault("all")) || !PublicNumber(q.GetValueOrDefault("pn"), 0, 99) ||
+                if (!PublicKeyword(q.GetValueOrDefault("all")) || !PublicNumber(q.GetValueOrDefault("pn"), 0, int.MaxValue - 1) ||
                     !PublicNumber(q.GetValueOrDefault("rn"), 1, 100)) return false;
                 return q.GetValueOrDefault("ft") switch
                 {
@@ -73,7 +72,7 @@ public sealed partial class MusicPlatformHttp
                 };
             }
             if (uri.Scheme == "http" && uri.Host == "nplserver.kuwo.cn" && uri.AbsolutePath == "/pl.svc")
-                return PublicNumericId(q.GetValueOrDefault("pid")) && PublicNumber(q.GetValueOrDefault("pn"), 0, 9) &&
+                return PublicNumericId(q.GetValueOrDefault("pid")) && PublicNumber(q.GetValueOrDefault("pn"), 0, int.MaxValue - 1) &&
                     PublicFields(q, ["pid", "pn"], ("op", "getlistinfo"), ("rn", "1000"), ("encode", "utf8"),
                         ("keyset", "pl2012"), ("identity", "kuwo"), ("pcmp4", "1"),
                         ("vipver", "MUSIC_9.0.5.0_W1"), ("newver", "1"));
@@ -94,7 +93,7 @@ public sealed partial class MusicPlatformHttp
         if (uri.Host == "jadeite.migu.cn" && uri.AbsolutePath == "/music_search/v3/search/searchAll")
             return PublicFields(q, ["isCorrect", "pageSize", "text", "pageNo", "searchSwitch"],
                     ("isCopyright", "1"), ("sort", "0"), ("sid", "USS")) &&
-                PublicKeyword(q["text"]) && PublicNumber(q["pageSize"], 1, 100) && PublicNumber(q["pageNo"], 1, 100) &&
+                PublicKeyword(q["text"]) && PublicNumber(q["pageSize"], 1, 100) && PublicNumber(q["pageNo"], 1, int.MaxValue) &&
                 (q["isCorrect"] == "0" && q["searchSwitch"] == PublicMgSongs ||
                  q["isCorrect"] == "1" && q["searchSwitch"] == PublicMgPlaylists) &&
                 PublicHeaders(request, PublicMgMobileAgent, "https://m.music.migu.cn/", migu: true, search: q["text"]);
@@ -103,7 +102,7 @@ public sealed partial class MusicPlatformHttp
             return PublicFields(q, ["playlistId"]) && PublicNumericId(q["playlistId"]);
         return uri.Host == "app.c.nf.migu.cn" && uri.AbsolutePath == "/MIGUM3.0/resource/playlist/song/v2.0" &&
             PublicFields(q, ["playlistId", "pageNo"], ("pageSize", "50")) &&
-            PublicNumericId(q["playlistId"]) && PublicNumber(q["pageNo"], 1, 200);
+            PublicNumericId(q["playlistId"]) && PublicNumber(q["pageNo"], 1, int.MaxValue);
     }
 
     private static bool PublicFields(Dictionary<string, string> fields, string[] variables,

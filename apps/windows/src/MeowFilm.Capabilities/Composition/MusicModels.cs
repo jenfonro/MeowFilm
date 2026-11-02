@@ -24,7 +24,7 @@ public sealed record SongRow(JsonElement Raw, string? EntryId = null)
     public string Artist => Text("artist");
     public string Album => Text("album");
     public string Cover => Text("cover_url");
-    public bool IsOnline => Raw.GetProperty("source_data").EnumerateObject().Any();
+    public bool IsOnline => Raw.GetProperty("sources").GetArrayLength() > 0;
     public string Duration => Raw.TryGetProperty("duration", out var value) && value.ValueKind == JsonValueKind.Number
         && value.TryGetDouble(out var seconds) && double.IsFinite(seconds) && seconds > 0 && seconds < TimeSpan.MaxValue.TotalSeconds
         ? TimeSpan.FromSeconds(seconds).ToString(seconds >= 3600 ? @"h\:mm\:ss" : @"m\:ss") : "—";
@@ -41,6 +41,24 @@ public sealed record SongRow(JsonElement Raw, string? EntryId = null)
         catch (MusicOperationException) { throw; }
         catch { throw new MusicOperationException("INVALID_RESPONSE"); }
     }
+}
+
+/// <summary>Read-only accessors for the lean song wire shape (sources[0] is the primary recording).</summary>
+internal static class SongJson
+{
+    internal static JsonElement PrimaryInfo(JsonElement song) =>
+        song.ValueKind == JsonValueKind.Object && song.TryGetProperty("sources", out var sources) &&
+        sources.ValueKind == JsonValueKind.Array && sources.GetArrayLength() > 0 &&
+        sources[0].TryGetProperty("musicInfo", out var info) && info.ValueKind == JsonValueKind.Object ? info : default;
+    internal static string Text(JsonElement value, string name) =>
+        value.ValueKind == JsonValueKind.Object && value.TryGetProperty(name, out var field) &&
+        field.ValueKind == JsonValueKind.String ? field.GetString()! : "";
+    internal static string Platform(JsonElement song) => Text(PrimaryInfo(song), "source");
+    internal static string InfoId(JsonElement info) =>
+        info.ValueKind == JsonValueKind.Object && info.TryGetProperty("songmid", out var value)
+            ? value.ValueKind == JsonValueKind.String ? value.GetString()! : value.ValueKind is JsonValueKind.Null ? "" : value.GetRawText()
+            : "";
+    internal static string NativeId(JsonElement song) => InfoId(PrimaryInfo(song));
 }
 
 internal sealed class MusicOperationException(string code) : Exception(code)

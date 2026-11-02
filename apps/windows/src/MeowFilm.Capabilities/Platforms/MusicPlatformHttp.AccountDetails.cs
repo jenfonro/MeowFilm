@@ -15,13 +15,12 @@ public sealed partial class MusicPlatformHttp
         HttpRequestMessage request, CancellationToken token, TimeSpan remaining)
     {
         ArgumentNullException.ThrowIfNull(request);
-        try { PJ.Require(remaining.TotalMilliseconds is >= 1 and <= 60000, "LIMIT"); }
+        try { PJ.Require(remaining > TimeSpan.Zero, "LIMIT"); }
         catch { request.Dispose(); throw; }
-        return SendCoreAsync(platform, request, token, 1048576,
-            TimeSpan.FromMilliseconds(Math.Min(20000, remaining.TotalMilliseconds)),
+        return SendCoreAsync(platform, request, token, 1048576, remaining,
             (bytes, response, _) => platform == "wy"
-                ? JsonResult(PJ.Parse(bytes, 1048576), response)
-                : new MusicPlatformHttpResult(PJ.Parse(bytes, 1048576), []),
+                ? JsonResult(PJ.Parse(bytes), response)
+                : new MusicPlatformHttpResult(PJ.Parse(bytes), []),
             nativePolicy: NativeHttpPolicy.AccountDetails);
     }
     private static bool AccountDetailsOrigin(string platform, HttpRequestMessage request)
@@ -132,7 +131,7 @@ public sealed partial class MusicPlatformHttp
             if (host == "u.y.qq.com")
             {
                 PJ.Require(content!.Headers.ContentType?.MediaType == "application/json", "INVALID_REQUEST");
-                var body = PJ.Parse(bytes, 65536);
+                var body = PJ.Parse(bytes);
                 PJ.Require(DetailsFields(body, "comm", "req_0") && body["comm"] is JsonObject && body["req_0"] is JsonObject, "INVALID_REQUEST");
                 var comm = body["comm"]!.AsObject(); var req = body["req_0"]!.AsObject();
                 PJ.Require(DetailsFields(comm, "ct", "cv", "v", "chid", "tmeAppID", "qq", "authst", "tmeLoginType") &&
@@ -161,7 +160,7 @@ public sealed partial class MusicPlatformHttp
             if (content is not null)
             {
                 PJ.Require(content.Headers.ContentType?.MediaType == "application/json", "INVALID_REQUEST");
-                var body = PJ.Parse(bytes, 65536);
+                var body = PJ.Parse(bytes);
                 PJ.Require(DetailsFields(body, "visit_time", "usertype", "p", "userid") &&
                     PJ.Scalar(body["usertype"]) == "1" && PJ.Scalar(body["userid"]) == query["userid"] &&
                     DetailsDigits(PJ.Scalar(body["visit_time"]), 1, 12) && PJ.Text(body["p"]).Length == 256 &&

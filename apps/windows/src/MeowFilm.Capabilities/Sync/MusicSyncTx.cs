@@ -6,9 +6,9 @@ using MeowFilm.Capabilities.Platforms;
 namespace MeowFilm.Capabilities.Sync;
 
 internal sealed class MusicSyncTx(MusicPlatformSession session, MusicPlatformHttp http,
-    MusicPlatformClientContextOwner clients, MusicPlatformClientContext? client, MusicSyncRequestBudget budget,
+    MusicPlatformClientContextOwner clients, MusicPlatformClientContext? client,
     Func<Task> guard, Action accountGuard, CancellationToken token)
-    : MusicSyncAdapter(session, http, clients, client, budget, guard, accountGuard, token)
+    : MusicSyncAdapter(session, http, clients, client, guard, accountGuard, token)
 {
     private sealed record Entry(string Id, string DirId, string Owner, string Name, bool Writable, string Kind);
     private Entry Favorites => new("favorites", "201", AccountId, "我喜欢", true, "favorites");
@@ -35,7 +35,7 @@ internal sealed class MusicSyncTx(MusicPlatformSession session, MusicPlatformHtt
             var entry = Parse(row, true); Require(seen.Add(entry.Id), "PAGINATION_STALLED"); result.Add(entry);
         }
         long? total = null; int received = 0;
-        for (int page = 0; page < MusicSyncRequestBudget.MaximumDirectoryPages; page++)
+        for (long page = 0; ; page = checked(page + 1))
         {
             var next = await Tx("music.musicasset.PlaylistFavRead", "CgiGetPlaylistFavInfo", O(("uin", Euin), ("offset", page * 100), ("size", 100)));
             Require(next["hide"] is not null && !LJ.B(next["hide"]), "FORBIDDEN"); Require(next["v_failTids"] is JsonArray fail && fail.Count == 0);
@@ -50,12 +50,11 @@ internal sealed class MusicSyncTx(MusicPlatformSession session, MusicPlatformHtt
             if (more == 0) { Require(received == total); return result; }
             Require(items.Count == 100 && received < total, "PAGINATION_STALLED");
         }
-        throw new MusicLibraryException("PAGINATION_LIMIT");
     }
     private async Task<SyncMember[]> Scan(Entry entry)
     {
         var result = new List<SyncMember>(); var seen = new HashSet<string>(); long? total = null;
-        for (int page = 0; page < MusicSyncRequestBudget.MaximumCollectionPages; page++)
+        for (long page = 0; ; page = checked(page + 1))
         {
             var args = O(("disstid", entry.Kind == "favorites" ? JsonValue.Create(0) : JsonNode.Parse(entry.Id)), ("dirid", JsonNode.Parse(entry.DirId)),
                 ("tag", true), ("song_begin", page * 100), ("song_num", 100), ("userinfo", true), ("orderlist", true), ("onlysonglist", false));
@@ -73,7 +72,6 @@ internal sealed class MusicSyncTx(MusicPlatformSession session, MusicPlatformHtt
             if (more == 0) { Require(result.Count == total); return result.ToArray(); }
             Require(rows.Count == 100 && result.Count < total, "PAGINATION_STALLED");
         }
-        throw new MusicLibraryException("PAGINATION_LIMIT");
     }
     private async Task<SyncRemote> ReadEntry(Entry entry)
     {
@@ -89,8 +87,6 @@ internal sealed class MusicSyncTx(MusicPlatformSession session, MusicPlatformHtt
     internal override async Task<SyncDirectory> ReadAsync(string[] kinds)
     {
         var before = kinds.Contains("playlist") ? await Directory() : []; var result = new List<SyncRemote>();
-        Require(before.Count + (kinds.Contains("favorites") ? 1 : 0) <=
-            MusicSyncRequestBudget.MaximumCollectionsPerPlatform, "SYNC_REQUEST_LIMIT");
         if (kinds.Contains("favorites")) result.Add(await ReadEntry(Favorites));
         foreach (var entry in before) result.Add(await ReadEntry(entry));
         if (kinds.Contains("playlist")) Require(Signature(before) == Signature(await Directory()), "SNAPSHOT_CHANGED");

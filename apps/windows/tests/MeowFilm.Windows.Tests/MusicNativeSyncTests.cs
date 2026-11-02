@@ -28,6 +28,7 @@ public static partial class MusicNativeSyncTests
             yield return new($"Music sync {p} unknown creation never duplicated after restart", () => UnknownCreate(p));
             yield return new($"Music sync {p} read-only binding never writes", () => ReadOnly(p));
             yield return new($"Music sync {p} full paged members retained", () => Pages(p));
+            yield return new($"Music sync {p} local source-free song does not block other favorites", () => LocalUnmapped(p));
         }
         yield return new("Music sync per-platform favorite and playlist switches never over-select", IndependentKinds);
         yield return new("Music sync remote empty requires exact explicit confirmation", EmptyConfirmation);
@@ -48,9 +49,8 @@ public static partial class MusicNativeSyncTests
         yield return new("Music sync cancellation and reversible close retain singleton owner", Lifecycle);
         yield return new("Music sync startup defers network and five minute clock keeps one flight", Scheduling);
         yield return new("Music sync blocked scheduled round does not retry-loop", ScheduledFailure);
-        yield return new("Music sync physical platform requests have one bounded owner", RequestBudget);
-        yield return new("Music sync mapping lookup limit defers the twenty fifth song without a request", MappingLookupBudget);
-        yield return new("Music sync round request budget is shared across platforms", SharedRoundRequestBudget);
+        yield return new("Music sync completes every selected collection without a round request quota", RequestBudget);
+        yield return new("Music sync resolves every selected mapping without a lookup quota", MappingLookupBudget);
         yield return new("Music sync unknown before CAS prevents remote dispatch", () => UnknownCas(false));
         yield return new("Music sync unknown after CAS durable fence recovers without replay", () => UnknownCas(true));
         yield return new("Music sync pending write partial acknowledgement survives reopen", PartialAck);
@@ -130,7 +130,7 @@ public static partial class MusicNativeSyncTests
         internal readonly MusicPlatformHttp Http; internal MusicLibraryOwner Owner; internal MusicLibrarySyncService Sync;
         internal readonly MusicClientContextFixture Clients;
         internal Fixture(string platform = "tx", TimeProvider? clock = null)
-        { Server = new(platform); Http = MusicPlatformHttp.CreateWithHandler(Server); Clients = new(Http, clock: clock); Owner = new(Store); Sync = new(Owner, Sessions, Http, Clients.Owner, null, clock); }
+        { Server = new(platform); Http = MusicPlatformHttp.CreateWithHandler(Server); Clients = new(Http, clock: clock); if (platform == "tx") Clients.SeedQqAsync(TimeProvider.System).GetAwaiter().GetResult(); Owner = new(Store); Sync = new(Owner, Sessions, Http, Clients.Owner, null, clock); }
         internal async Task Enable(bool favorites = true, bool playlists = false)
         {
             var before = Ok(await Sync.ExecuteAsync("music.librarySync.get"));
@@ -336,6 +336,29 @@ public static partial class MusicNativeSyncTests
         Check(f.Server.Creates == 1 && f.Server.Entries.Single(e => !e.Favorite).Songs.SequenceEqual(new[] { 1 }));
         await f.Restart(); Ok(await f.Run()); Check(f.Server.Creates == 1);
     }
+    private static async Task LocalUnmapped(string platform)
+    {
+        await using var f = new Fixture(platform);
+        await f.AddFavorite(1);
+        var collection = Ok(await f.Owner.ExecuteAsync("music.library.detail", new { id = "favorites" })).GetProperty("collection");
+        var local = MusicSongFixture.Local("local:unmapped", "Synthetic local file");
+        Ok(await f.Owner.ExecuteAsync("music.library.addSongs", new
+        {
+            id = "favorites", ifRevision = collection.GetProperty("revision").GetInt64(), songs = new[] { local }
+        }));
+        await f.Enable();
+        var result = Ok(await f.Run());
+        Check(S(result.GetProperty("status"), "phase") == "partial");
+        Check(result.GetProperty("status").GetProperty("issues").EnumerateArray()
+            .All(issue => S(issue, "code") == "UNMAPPED_SONG"));
+        Check(f.Server.Favorite.Songs.SequenceEqual([1]) && f.Server.Writes == 1);
+        var detail = Ok(await f.Owner.ExecuteAsync("music.library.detail", new { id = "favorites" }));
+        Check(detail.GetProperty("songs").GetArrayLength() == 2 &&
+            detail.GetProperty("songs").EnumerateArray().Single(song => S(song, "songId") == "local:unmapped")
+                .GetProperty("sources").GetArrayLength() == 0);
+        Ok(await f.Run());
+        Check(f.Server.Writes == 1, "An unmapped local song does not replay successful writes");
+    }
     private static async Task UnknownCreate(string platform)
     {
         await using var f = new Fixture(platform); f.Server.DropWrites = true;
@@ -493,23 +516,22 @@ public static partial class MusicNativeSyncTests
     private static async Task RequestBudget()
     {
         await using var f = new Fixture();
-        for (int n = 0; n < MusicSyncRequestBudget.MaximumCollectionsPerPlatform; n++)
+        for (int n = 0; n < 50; n++)
         {
             var entry = new Entry((300 + n).ToString(), "Remote " + n);
             for (int song = 1; song <= 101; song++) entry.Add(song);
             f.Server.Entries.Add(entry);
         }
         await f.Enable(false, true);
-        Code(await f.Run(), "SYNC_REQUEST_LIMIT");
-        Check(f.Server.Reads == MusicSyncRequestBudget.MaximumPlatformRequests &&
-            f.Server.Writes == 0, "UNBOUNDED_SYNC_REQUESTS");
+        Ok(await f.Run());
+        Check(f.Server.Reads > 192 && f.Server.Writes == 0, "INCOMPLETE_SYNC_READS");
     }
     private static async Task MappingLookupBudget()
     {
         await using var f = new Fixture();
         var favorites = Ok(await f.Owner.ExecuteAsync("music.library.detail",
             new { id = "favorites" })).GetProperty("collection");
-        var songs = Enumerable.Range(1, MusicSyncRequestBudget.MaximumMappingLookupsPerPlatform + 1)
+        var songs = Enumerable.Range(1, 32)
             .Select(n => Song("wy", Native("wy", n), n)).ToArray();
         Ok(await f.Owner.ExecuteAsync("music.library.addSongs", new
         {
@@ -522,26 +544,10 @@ public static partial class MusicNativeSyncTests
         var issues = result.GetProperty("status").GetProperty("issues").EnumerateArray().ToArray();
         Check(result.GetProperty("status").GetProperty("phase").GetString() == "partial" &&
             issues.Count(issue => S(issue, "code") == "UNMAPPED_SONG") == 1 &&
-            issues.Count(issue => S(issue, "code") == "SYNC_DEFERRED") == 1,
+            issues.All(issue => S(issue, "code") == "UNMAPPED_SONG"),
             "MAPPING_LOOKUP_BOUNDARY");
-        Check(f.Server.Reads == 2 + MusicSyncRequestBudget.MaximumMappingLookupsPerPlatform &&
+        Check(f.Server.Reads == 2 + 32 &&
             f.Server.Writes == 0, "MAPPING_LOOKUP_REQUEST_COUNT");
-    }
-    private static Task SharedRoundRequestBudget()
-    {
-        var budget = new MusicSyncRequestBudget();
-        for (int n = 0; n < MusicSyncRequestBudget.MaximumPlatformRequests; n++)
-            budget.Admit("wy");
-        for (int n = 0; n < MusicSyncRequestBudget.MaximumPlatformRequests - 1; n++)
-            budget.Admit("tx");
-        budget.Admit("kg");
-        try
-        {
-            budget.Admit("tx");
-            throw new InvalidOperationException("ROUND_REQUEST_LIMIT_NOT_ENFORCED");
-        }
-        catch (MusicLibraryException error) when (error.Code == "SYNC_REQUEST_LIMIT") { }
-        return Task.CompletedTask;
     }
     private static async Task UnknownCas(bool after)
     {

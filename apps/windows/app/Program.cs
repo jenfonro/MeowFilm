@@ -17,6 +17,7 @@ internal static class Program
                 playback = new NativePlayback();
                 capabilities.Add(new MusicCapability(runtime, storage, playback,
                     Path.Combine(AppDataPaths.Current.Documents, "music-playback-cache")));
+                capabilities.Add(new FilmCapability());
             },
             async () => { if (playback is not null) await playback.DisposeAsync(); },
             (window, capabilities) =>

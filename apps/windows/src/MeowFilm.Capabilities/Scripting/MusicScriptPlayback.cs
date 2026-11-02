@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
@@ -60,7 +61,7 @@ public sealed partial class MusicScriptOwner
             finally { gate.Release(); }
             if (!isLyrics)
                 return await ResolveQualityAsync(p, song, selected, id, platform, active, choices, policy, token).ConfigureAwait(false);
-            var payload = LJ.Obj(("musicInfo", selected.Data));
+            var payload = ScriptPayload(selected.Data);
             var result = await ScriptAsync("invoke", new { installationId = id, revision = active.Revision,
                 generation = active.Generation, siteId = platform, operation = "lyric", payload }, token).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
@@ -87,6 +88,19 @@ public sealed partial class MusicScriptOwner
                 onlineOperations.Remove(operation);
             }
         }
+    }
+    private static JsonObject ScriptPayload(JsonObject recording, string? quality = null)
+    {
+        var payload = LJ.Obj(("musicInfo", recording));
+        var info = (JsonObject)payload["musicInfo"]!;
+        if (info["duration"] is not null)
+        {
+            double seconds = LJ.N(info["duration"]);
+            info["interval"] = Math.Floor(seconds / 60).ToString("00", CultureInfo.InvariantCulture) + ":" +
+                Math.Floor(seconds % 60).ToString("00", CultureInfo.InvariantCulture);
+        }
+        if (quality is not null) payload["quality"] = quality;
+        return payload;
     }
     private JsonObject QualityMedia(JsonNode? raw, JsonObject song, (string Key, JsonObject Data) selected,
         string id, string platform, Live active, string quality)
@@ -115,12 +129,12 @@ public sealed partial class MusicScriptOwner
         if (platform == "local")
         {
             LJ.Require(!NativeMusicSong.IsOnline(song), "TARGET_CHANGED");
-            return (LJ.Text(song["songId"]), LJ.Object(song["source_data"]).DeepClone().AsObject());
+            return (LJ.Text(song["songId"]), new JsonObject());
         }
         var records = LJ.Array(song["sources"]).OfType<JsonObject>()
             .Where(s => LJ.S(s["source"]) == platform && (key is null || LJ.S(s["sourceKey"]) == LJ.Text(key))).ToArray();
         LJ.Require(records.Length == 1, records.Length > 0 ? "TARGET_REQUIRED" : "TARGET_CHANGED");
-        return (LJ.Text(records[0]["sourceKey"]), LJ.Object(records[0]["source_data"]).DeepClone().AsObject());
+        return (LJ.Text(records[0]["sourceKey"]), NativeMusicSong.SourceData(records[0]).DeepClone().AsObject());
     }
     private static bool Truthy(JsonNode? value)
     {

@@ -3,7 +3,6 @@
 using System.IO;
 using System.Net;
 using System.Net.Http;
-using System.Reflection;
 using System.Security.Cryptography;
 using MeowFilm.Capabilities.Platforms;
 
@@ -24,7 +23,7 @@ public static class MusicCatalogHttpDrainTests
             yield return new(prefix + "deadline-handler-physical-settle", () => Drain(xeapi, 0, "timeout"));
             yield return new(prefix + "close-handler-physical-settle", () => Drain(xeapi, 0, "close"));
         }
-        yield return new("music.catalog.http.drain.slots-retained-with-ordinary-until-settle", Slots);
+        yield return new("music.catalog.http.drain.cancelled-requests-drain-without-blocking-new-requests", Slots);
         yield return new("music.catalog.http.drain.ordinary-sendasync-cancellation-settles-response", OrdinaryCancellation);
     }
     private static void Check(bool value, string message = "Catalog drain assertion")
@@ -45,13 +44,9 @@ public static class MusicCatalogHttpDrainTests
     private static Task<MusicPlatformHttpResult> Send(MusicPlatformHttp http, bool xeapi,
         HttpRequestMessage request, CancellationToken token = default, TimeSpan? timeout = null)
     {
-        var method = typeof(MusicPlatformHttp).GetMethod(xeapi ? "SendCatalogXeapiAsync" : "SendCatalogAsync",
-            BindingFlags.Instance | BindingFlags.NonPublic)!;
         return xeapi
-            ? method.CreateDelegate<Func<HttpRequestMessage, CancellationToken, int, TimeSpan, Task<MusicPlatformHttpResult>>>(http)
-                (request, token, 65536, timeout ?? TimeSpan.FromSeconds(25))
-            : method.CreateDelegate<Func<string, HttpRequestMessage, CancellationToken, int, TimeSpan?, Task<MusicPlatformHttpResult>>>(http)
-                ("wy", request, token, 65536, timeout ?? TimeSpan.FromSeconds(25));
+            ? http.SendXeapiAsync(request, token, 65536, timeout ?? TimeSpan.FromSeconds(25))
+            : http.SendAsync("wy", request, token, 65536, timeout ?? TimeSpan.FromSeconds(25));
     }
     private static async Task Failure(string code, Func<Task> run, CancellationToken token = default)
     {
@@ -120,11 +115,14 @@ public static class MusicCatalogHttpDrainTests
         {
             await both.Task.WaitAsync(TimeSpan.FromSeconds(2)); cancel.Cancel(); await Task.Delay(40);
             Check(!one.IsCompleted && !two.IsCompleted);
-            await Failure("RATE_LIMITED", () => http.SendAsync("wy", Request(), default));
+            // Draining requests do not hold any admission budget.
+            var three = http.SendAsync("wy", Request(), default);
+            for (int i = 0; i < 200 && Volatile.Read(ref calls) < 3; i++) await Task.Delay(10);
+            Check(calls == 3);
+            release.TrySetResult(); await three;
         }
         finally { release.TrySetResult(); }
         await Failure("CANCELLED", () => one, cancel.Token); await Failure("CANCELLED", () => two, cancel.Token);
-        await http.SendAsync("wy", Request(), default); Check(calls == 3);
     }
     private static async Task OrdinaryCancellation()
     {
@@ -138,10 +136,10 @@ public static class MusicCatalogHttpDrainTests
         try
         {
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(2)); cancel.Cancel();
-            await Failure("CANCELLED", () => pending.WaitAsync(TimeSpan.FromSeconds(2)), cancel.Token);
-            Check(!disposed.Task.IsCompleted);
+            Check(!pending.IsCompleted && !disposed.Task.IsCompleted);
         }
         finally { release.TrySetResult(); }
+        await Failure("CANCELLED", () => pending.WaitAsync(TimeSpan.FromSeconds(2)), cancel.Token);
         await disposed.Task.WaitAsync(TimeSpan.FromSeconds(2));
     }
     private sealed class Handler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send) : HttpMessageHandler

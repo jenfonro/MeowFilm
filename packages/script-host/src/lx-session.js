@@ -83,9 +83,7 @@ export class LXSession {
     this.invocations = new Map();
     this.timers = new Map();
     this.networks = new Map();
-    this.networkTasks = new Set();
     this.callbacks = new Map();
-    this.storageTasks = new Map();
     this.adapterTracker = new AdapterTaskTracker();
     this.adapterTasks = this.adapterTracker.tasks;
     this.nextId = 0;
@@ -138,8 +136,6 @@ export class LXSession {
 
   registerCallback(id, scope, repeat = false) {
     requireValue(Number.isSafeInteger(id) && id > 0 && !this.callbacks.has(id));
-    if (!this.lifecycleManaged)
-      requireValue(this.callbacks.size < this.limits.maxTimers + this.limits.maxNetworkRequests, 'RESOURCE_LIMIT');
     const detach = scope.add(() => this.forgetCallback(id));
     this.callbacks.set(id, { scope, repeat, detach });
   }
@@ -339,8 +335,6 @@ export class LXSession {
   }
 
   request(url, options, id) {
-    if (!this.lifecycleManaged)
-      requireValue(this.networkTasks.size < this.limits.maxNetworkRequests, 'RESOURCE_LIMIT');
     const owner = this.scope();
     const copied = clone(options);
     requireValue(copied && typeof copied === 'object' && !Array.isArray(copied));
@@ -398,10 +392,6 @@ export class LXSession {
       requireValue(typeof network === 'function', 'PERMISSION_DENIED');
       return network(requestInput);
     }));
-    const networkTasks = this.networkTasks;
-    networkTasks.add(task);
-    const releaseTask = () => networkTasks.delete(task);
-    task.then(releaseTask, releaseTask);
     task.then(
       response => completion.settle(null, response),
       error => completion.settle(safeError(error, 'NETWORK_ERROR')),
@@ -422,10 +412,6 @@ export class LXSession {
     requireValue(this.revision.permissions.storage.includes(operation === 'get' ? 'read' : 'write'), 'PERMISSION_DENIED');
     requireValue(typeof this.storage?.[operation] === 'function', 'PERMISSION_DENIED');
     requireValue(typeof key === 'string' && key.length > 0 && key.length <= 256);
-    if (!this.lifecycleManaged)
-      requireValue(this.storageTasks.size < this.limits.maxInstanceInFlight &&
-        [...this.storageTasks.values()].filter(task => task.siteId === scope.siteId).length <
-          this.limits.maxSiteInFlight, 'RESOURCE_LIMIT');
     const sessionRef = new WeakRef(this);
     const signal = scope.signal;
     const input = { ...this.scopeIdentity(scope), key, signal,
@@ -438,10 +424,6 @@ export class LXSession {
       scope.assertOpen();
       return Reflect.apply(adapter, storage, [input]);
     }));
-    const storageTasks = this.storageTasks;
-    storageTasks.set(callbackId, { siteId: scope.siteId });
-    const releaseTask = () => storageTasks.delete(callbackId);
-    task.then(releaseTask, releaseTask);
     scope.race(task).then(
       result => this.storageResult(callbackId, { value: clone(result ?? null) }, scope),
       error => this.storageResult(callbackId, { code: safeError(error, 'STORAGE_ERROR').code }, scope),

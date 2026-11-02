@@ -6,57 +6,72 @@ using MeowFilm.Capabilities.Search;
 
 namespace MeowFilm.Windows.Tests;
 
-public static class MusicAggregateSearchTests
+public static partial class MusicSearchTests
 {
     private static readonly string[] Five = ["wy", "tx", "kw", "kg", "mg"];
     public static IEnumerable<TestCase> Cases()
     {
-        yield return new("Aggregate search five explicit platforms and genuine missing-provider partial", FivePlatforms);
-        yield return new("Aggregate search two kinds retain ids and tab reads never refetch", DualKinds);
-        yield return new("Aggregate search changing one kind platform set preserves the other tab", ReplaceOneKind);
-        yield return new("Aggregate search later native providers can satisfy existing KW and MG retries", LaterProviders);
-        yield return new("Aggregate search two kinds share five physical request slots", SharedSlots);
-        yield return new("Aggregate search RRF consensus outranks single-platform first result", Consensus);
-        yield return new("Aggregate search same-platform editions count only their best rank", BestRank);
-        yield return new("Aggregate search rank ties and representatives ignore platform arrival order", Deterministic);
-        yield return new("Aggregate search same title different singer never merges", () => Separate("Singer B", 180, "Song"));
-        yield return new("Aggregate search incompatible duration never merges", () => Separate("Singer A", 220, "Song"));
-        yield return new("Aggregate search recording version never merges", () => Separate("Singer A", 180, "Song (Live)"));
-        yield return new("Aggregate search zero duration is not cross-platform identity evidence", () => Separate("Singer A", 0, "Song"));
-        yield return new("Aggregate search duration compatibility does not transitively merge", DurationChain);
-        yield return new("Aggregate search KG native discriminators remain separate candidates", KgDiscriminators);
-        yield return new("Aggregate search playlists use platform plus native id not names", PlaylistIdentity);
-        yield return new("Aggregate search preserves original rank holes after paged dedup", RankHoles);
-        yield return new("Aggregate search honors native forward continuation without refetch", Continuation);
-        yield return new("Aggregate search failure retry affects only failed platform and uncommitted page", Retry);
-        yield return new("Aggregate search retry after page two failure never refetches page one", RetrySecondPage);
-        yield return new("Aggregate search concurrent next and retry never double-admit", DuplicateAdmission);
-        yield return new("Aggregate search repeated pages stop after four stalled pages", () => Stalled(false));
-        yield return new("Aggregate search empty pages stop after four stalled pages", () => Stalled(true));
-        yield return new("Aggregate search hundred-page cap cannot be bypassed by retry", PageCap);
+        foreach (var test in RecordingCases()) yield return test;
+        yield return new("Search five explicit platforms and genuine missing-provider partial", FivePlatforms);
+        yield return new("Search get preserves both kinds and resubmission uses cached pages", DualKinds);
+        yield return new("Search changing one kind platform set preserves the other tab", ReplaceOneKind);
+        yield return new("Search unsupported providers stop for the session and a refreshed search uses them", LaterProviders);
+        yield return new("Search concurrency is limited per kind and platform without a global cap", PlatformConcurrency);
+        yield return new("Search pages per round follow each platform's paging adapter", PagesPerRound);
+        yield return new("Search accepts more than ten pages and concurrent requests per round", LargePages);
+        yield return new("Search huge page counts request only the committed window", HugePages);
+        yield return new("Search first round is published as platforms return", FirstRoundLive);
+        yield return new("Search later rounds appear only after every platform settles", RoundBarrier);
+        yield return new("Search later rounds append and only merge recordings into shown rows", RoundAppend);
+        yield return new("Search platform priority picks representative metadata and breaks ties", Priority);
+        yield return new("Search later rounds never show a conflicting recording twice", RoundConflict);
+        yield return new("Search pages are cached per kind and expire after the configured time", Cache);
+        foreach (string kind in new[] { "songs", "playlists" })
+        {
+            string selected = kind;
+            yield return new($"Search {kind} same-keyword resubmission respects original page expiry", () => SameQueryExpiry(selected));
+        }
+        yield return new("Search RRF consensus outranks single-platform first result", Consensus);
+        yield return new("Search same-platform editions count only their best rank", BestRank);
+        yield return new("Search rank ties and representatives ignore platform arrival order", Deterministic);
+        yield return new("Search same title different singer never merges", () => Separate("Singer B", 180, "Song"));
+        yield return new("Search incompatible duration never merges", () => Separate("Singer A", 220, "Song"));
+        yield return new("Search recording version never merges", () => Separate("Singer A", 180, "Song (Live)"));
+        yield return new("Search zero duration is not cross-platform identity evidence", () => Separate("Singer A", 0, "Song"));
+        yield return new("Search duration compatibility does not transitively merge", DurationChain);
+        yield return new("Search KG native discriminators remain separate candidates", KgDiscriminators);
+        yield return new("Search playlists use platform plus native id not names", PlaylistIdentity);
+        yield return new("Search preserves original rank holes after paged dedup", RankHoles);
+        yield return new("Search honors native forward continuation without refetch", Continuation);
+        yield return new("Search next round retries only the failed platform and its uncommitted page", Retry);
+        yield return new("Search page two failure is retried by the next round without refetching page one", RetrySecondPage);
+        yield return new("Search concurrent next calls never double-admit a round", DuplicateAdmission);
+        yield return new("Search duplicate-only pages advance without repeating displayed songs", () => Stalled(false));
+        yield return new("Search empty pages follow the provider continuation", () => Stalled(true));
+        yield return new("Search provider continuations can advance beyond one hundred pages", PageCap);
         foreach (int count in new[] { 1, 3, 5 })
         {
             int selected = count;
-            yield return new($"Aggregate search candidate budget min(2000,5000/{count})", () => CandidateCap(selected));
+            yield return new($"Search results remain complete with {count} enabled platforms", () => CandidateCap(selected));
         }
-        yield return new("Aggregate search virtual 25 second deadline retains physical drain", Timeout);
-        yield return new("Aggregate search new keyword drains both old kinds, joins its duplicate and rejects a different replacement", ReplaceBoth);
-        yield return new("Aggregate search cancelled replacement waiter cannot start its query later", CancelReplacement);
-        yield return new("Aggregate search account invalidation clears one platform in both kinds", InvalidateBoth);
-        yield return new("Aggregate search account invalidation fences late results and retries from page one", InvalidateLate);
-        yield return new("Aggregate search injected per-request delegate isolates auth frames across both kinds", DelegateFrames);
-        yield return new("Aggregate search injected auth failure preserves precise platform error", DelegateAuthError);
-        yield return new("Aggregate search synchronous account fence inside delegate does not retire other platforms or query ids", DelegateAccountFence);
-        yield return new("Aggregate search invalidate and cancelled shutdown waiter retain injected physical drain", DelegateDrain);
-        yield return new("Aggregate search observer-triggered account fence suppresses remaining stale deliveries", ObserverFence);
-        yield return new("Aggregate search cancelled close resumes admission without replaying old queries", ReversibleClose);
-        yield return new("Aggregate search dispose fences concurrent resume and borrows catalog", DisposeDuringResume);
-        yield return new("Aggregate search observers cannot corrupt snapshots or break publication", Observers);
-        yield return new("Aggregate search malformed page does not commit a partial page", MalformedPage);
-        yield return new("Aggregate search foreign platform page is rejected independently", ForeignPage);
-        yield return new("Aggregate search long native ids retain exact identity", LongId);
-        yield return new("Aggregate search empty selection is explicit and makes no catalog calls", EmptySelection);
-        yield return new("Aggregate search rejects malformed and cancelled admission without IO", InvalidInput);
+        yield return new("Search virtual 25 second deadline retains physical drain", Timeout);
+        yield return new("Search new keyword drains both old kinds, joins its duplicate and rejects a different replacement", ReplaceBoth);
+        yield return new("Search cancelled replacement waiter cannot start its query later", CancelReplacement);
+        yield return new("Search account invalidation clears one platform in both kinds", InvalidateBoth);
+        yield return new("Search account invalidation fences late results and restarts from page one", InvalidateLate);
+        yield return new("Search injected per-request delegate isolates auth frames across both kinds", DelegateFrames);
+        yield return new("Search injected auth failure preserves precise platform error", DelegateAuthError);
+        yield return new("Search synchronous account fence inside delegate does not retire other platforms or query ids", DelegateAccountFence);
+        yield return new("Search invalidate and cancelled shutdown waiter retain injected physical drain", DelegateDrain);
+        yield return new("Search observer-triggered account fence suppresses remaining stale deliveries", ObserverFence);
+        yield return new("Search cancelled close resumes admission without replaying old queries", ReversibleClose);
+        yield return new("Search dispose fences concurrent resume and borrows catalog", DisposeDuringResume);
+        yield return new("Search observers cannot corrupt snapshots or break publication", Observers);
+        yield return new("Search malformed page does not commit a partial page", MalformedPage);
+        yield return new("Search foreign platform page is rejected independently", ForeignPage);
+        yield return new("Search long native ids retain exact identity", LongId);
+        yield return new("Search empty selection is explicit and makes no catalog calls", EmptySelection);
+        yield return new("Search rejects malformed and cancelled admission without IO", InvalidInput);
     }
 
     private static void Check(bool value, string message = "ASSERTION_FAILED")
@@ -81,9 +96,15 @@ public static class MusicAggregateSearchTests
     }
     private static JsonObject Card(string platform, string id, string name = "Same name") =>
         new() { ["id"] = id, ["name"] = name, ["source"] = platform, ["count"] = 1, ["creator"] = "Synthetic" };
-    private static JsonElement Page(MusicSearchRequest request, IEnumerable<JsonObject> items, bool more = false, int? next = null) =>
-        E(new { platform = request.Platform, page = request.Page, limit = request.Limit, items = items.ToArray(), more,
-            continuation = more ? new { page = next ?? request.Page + 1 } : null });
+    private static JsonElement Page(MusicSearchRequest request, IEnumerable<JsonObject> items, bool more = false, int? next = null)
+    {
+        var page = JsonSerializer.SerializeToNode(new { platform = request.Platform, page = request.Page,
+            limit = request.Limit * request.Pages, items = items.ToArray(), more,
+            continuation = more ? new { page = next ?? request.Page + request.Pages } : null })!.AsObject();
+        // An offset platform batch declares where its items start.
+        if (request.Pages > 1) page["offset"] = (request.Page - 1) * request.Limit;
+        return E(page);
+    }
     private static JsonElement Single(MusicSearchRequest r) => Page(r, [r.Kind == MusicSearchKind.Songs
         ? Song(r.Platform, r.Platform + r.Page, r.Platform + " Song " + r.Page) : Card(r.Platform, r.Platform + r.Page)]);
 
@@ -153,10 +174,11 @@ public static class MusicAggregateSearchTests
         internal Fixture(TimeProvider? clock = null,
             Func<Catalog, MusicSearchRequest, CancellationToken, Task<JsonElement>>? searchAsync = null)
             => Search = new(Catalog, clock, searchAsync is null ? null : (r, t) => searchAsync(Catalog, r, t));
-        internal Task<JsonElement> Start(string[] platforms, string kind = "songs", string word = "needle", CancellationToken token = default) =>
-            Search.ExecuteAsync("music.search.start", new { keyword = word, kind, platforms }, token);
-        internal Task<JsonElement> Call(string method, string id, string? platform = null, CancellationToken token = default) =>
-            Search.ExecuteAsync("music.search." + method, platform is null ? new { id } : (object)new { id, platform }, token);
+        internal Task<JsonElement> Start(string[] platforms, string kind = "songs", string word = "needle", CancellationToken token = default,
+            int pages = 1, int concurrency = 1, int cacheMinutes = 60, bool refresh = false) =>
+            Search.ExecuteAsync("music.search.start", new { keyword = word, kind, platforms, pages, concurrency, cacheMinutes, refresh }, token);
+        internal Task<JsonElement> Call(string method, string id, CancellationToken token = default) =>
+            Search.ExecuteAsync("music.search." + method, new { id }, token);
         internal Task<JsonElement> Idle(string id) => Until(id, r => !r.GetProperty("loading").GetBoolean());
         internal async Task<JsonElement> Until(string id, Func<JsonElement, bool> condition)
         {
@@ -180,7 +202,7 @@ public static class MusicAggregateSearchTests
         Check(result.GetProperty("platforms").GetArrayLength() == 5 && f.Catalog.Calls.Count == 3);
         Check(S(State(result, "kw"), "error") == "UNSUPPORTED" && S(State(result, "mg"), "error") == "UNSUPPORTED");
         Check(result.GetProperty("partial").GetBoolean() && S(result, "code") == "PARTIAL");
-        await f.Call("retry", S(start, "id"), "kw"); result = await f.Idle(S(start, "id"));
+        await f.Call("next", S(start, "id")); result = await f.Idle(S(start, "id"));
         Check(f.Catalog.Calls.Count == 3 && S(State(result, "kw"), "error") == "UNSUPPORTED", "unsupported is not success or silent filtering");
     }
     private static async Task DualKinds()
@@ -188,10 +210,29 @@ public static class MusicAggregateSearchTests
         await using var f = new Fixture();
         string songs = S(await f.Start(["wy", "tx"]), "id"), lists = S(await f.Start(["wy", "tx"], "playlists"), "id");
         Check(songs != lists); await f.Idle(songs); await f.Idle(lists);
-        Check(S(await f.Start(["tx", "wy"]), "id") == songs);
-        Check(S(await f.Start(["wy", "tx"], "playlists"), "id") == lists);
         await f.Call("get", songs); await f.Call("get", lists);
+        string nextSongs = S(await f.Start(["wy", "tx"]), "id");
+        await f.Idle(nextSongs);
+        Check(nextSongs != songs && S(await f.Call("get", lists), "id") == lists);
+        string nextLists = S(await f.Start(["wy", "tx"], "playlists"), "id");
+        await f.Idle(nextLists);
+        Check(nextLists != lists && S(await f.Call("get", nextSongs), "id") == nextSongs);
         Check(f.Catalog.Calls.Count == 4);
+    }
+    private static async Task SameQueryExpiry(string kind)
+    {
+        var clock = new Clock();
+        await using var f = new Fixture(clock);
+        string first = S(await f.Start(["wy"], kind, cacheMinutes: 1), "id");
+        await f.Idle(first);
+        clock.Advance(TimeSpan.FromSeconds(30));
+        string cached = S(await f.Start(["wy"], kind, cacheMinutes: 1), "id");
+        var page = await f.Idle(cached);
+        Check(first != cached && f.Catalog.Calls.Count == 1 && page.GetProperty("round").GetInt32() == 1);
+        clock.Advance(TimeSpan.FromSeconds(31));
+        string expired = S(await f.Start(["wy"], kind, cacheMinutes: 1), "id");
+        await f.Idle(expired);
+        Check(expired != cached && f.Catalog.Calls.Count == 2, "replaying cached pages never extends their TTL");
     }
     private static async Task ReplaceOneKind()
     {
@@ -207,24 +248,182 @@ public static class MusicAggregateSearchTests
         await using var f = new Fixture(); f.Catalog.Supported = ["wy", "tx", "kg"];
         string id = S(await f.Start(Five), "id"); await f.Idle(id);
         f.Catalog.Supported = Five;
-        await f.Call("retry", id, "kw"); await f.Idle(id);
-        await f.Call("retry", id, "mg"); var result = await f.Idle(id);
-        Check(!result.GetProperty("partial").GetBoolean() && f.Catalog.Calls.Count == 5 &&
+        await f.Call("next", id); await f.Idle(id);
+        Check(f.Catalog.Calls.Count == 3, "an unsupported provider is not retried within its session");
+        var result = await f.Idle(S(await f.Start(Five, refresh: true), "id"));
+        Check(!result.GetProperty("partial").GetBoolean() && f.Catalog.Calls.Count == 8 &&
             State(result, "kw").GetProperty("count").GetInt32() == 1 && State(result, "mg").GetProperty("count").GetInt32() == 1);
     }
-    private static async Task SharedSlots()
+    private static async Task PlatformConcurrency()
     {
         await using var f = new Fixture();
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        f.Catalog.Handler = async (r, _) => { await release.Task; return Single(r); };
+        var active = new ConcurrentDictionary<string, int>(); var peak = new ConcurrentDictionary<string, int>();
+        f.Catalog.Handler = async (r, _) =>
+        {
+            string key = r.Kind + "/" + r.Platform;
+            int now = active.AddOrUpdate(key, 1, (_, v) => v + 1); peak.AddOrUpdate(key, now, (_, v) => Math.Max(v, now));
+            try { await release.Task; } finally { active.AddOrUpdate(key, 0, (_, v) => v - 1); }
+            return Page(r, [r.Kind == MusicSearchKind.Songs ? Song(r.Platform, r.Platform + r.Page, r.Platform + " Song " + r.Page)
+                : Card(r.Platform, r.Platform + r.Page)], true);
+        };
         try
         {
-            string songs = S(await f.Start(Five), "id"), lists = S(await f.Start(Five, "playlists"), "id");
-            await f.Catalog.CountAsync(5); Check(f.Catalog.Maximum <= 5 && f.Catalog.Calls.Count == 5);
-            release.SetResult(); await f.Idle(songs); await f.Idle(lists);
-            Check(f.Catalog.Calls.Count == 10 && f.Catalog.Maximum <= 5);
+            string songs = S(await f.Start(Five, pages: 3, concurrency: 2), "id");
+            string lists = S(await f.Start(Five, "playlists", pages: 3, concurrency: 2), "id");
+            // WY covers three pages with one offset request; page platforms admit two of their three pages.
+            await f.Catalog.CountAsync(18);
+            Check(f.Catalog.Calls.Count == 18 && f.Catalog.Maximum == 18, "no global request cap");
+            release.SetResult();
+            var songResult = await f.Idle(songs); var playlistResult = await f.Idle(lists);
+            Check(f.Catalog.Calls.Count == 26 && peak.Values.All(v => v <= 2) &&
+                songResult.GetProperty("items").GetArrayLength() == 13 && playlistResult.GetProperty("items").GetArrayLength() == 13);
         }
         finally { release.TrySetResult(); }
+    }
+    private static async Task PagesPerRound()
+    {
+        await using var f = new Fixture();
+        f.Catalog.Handler = (r, _) => Task.FromResult(Page(r, Enumerable.Range(r.Page, r.Pages)
+            .Select(p => Song(r.Platform, r.Platform + p, r.Platform + " Song " + p)), true));
+        string id = S(await f.Start(["wy", "tx"], pages: 2), "id"); var first = await f.Idle(id);
+        var calls = f.Catalog.Calls.ToArray();
+        Check(calls.Count(r => r.Platform == "wy") == 1 && calls.Single(r => r.Platform == "wy") is { Page: 1, Pages: 2, Limit: 30 });
+        Check(calls.Where(r => r.Platform == "tx").Select(r => r.Page).Order().SequenceEqual([1, 2]) &&
+            calls.Where(r => r.Platform == "tx").All(r => r.Pages == 1));
+        Check(State(first, "wy").GetProperty("page").GetInt32() == 2 && State(first, "tx").GetProperty("page").GetInt32() == 2);
+        await f.Call("next", id); await f.Idle(id);
+        Check(f.Catalog.Calls.Last(r => r.Platform == "wy") is { Page: 3, Pages: 2 } &&
+            f.Catalog.Calls.Where(r => r.Platform == "tx").Select(r => r.Page).Order().SequenceEqual([1, 2, 3, 4]));
+    }
+    private static async Task LargePages()
+    {
+        await using var f = new Fixture();
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        f.Catalog.Handler = async (r, _) =>
+        {
+            await release.Task;
+            return Page(r, [Song(r.Platform, r.Platform + r.Page, r.Platform + " Song " + r.Page)], true);
+        };
+        string id = S(await f.Start(["tx"], pages: 11, concurrency: 11), "id");
+        await f.Catalog.CountAsync(11);
+        Check(f.Catalog.Maximum == 11, "eleven platform requests may run concurrently");
+        release.SetResult();
+        var result = await f.Idle(id);
+        Check(f.Catalog.Calls.Count == 11 && State(result, "tx").GetProperty("page").GetInt32() == 11);
+        await f.Call("next", id);
+        result = await f.Idle(id);
+        Check(f.Catalog.Calls.Count == 22 && State(result, "tx").GetProperty("page").GetInt32() == 22);
+    }
+    private static async Task HugePages()
+    {
+        await using var f = new Fixture();
+        f.Catalog.Handler = (r, _) => Task.FromResult(r.Page == 3
+            ? Page(r, [Song("tx", "3", "Page 3")])
+            : Page(r, [Song("tx", r.Page.ToString(), "Page " + r.Page)], true));
+        string id = S(await f.Start(["tx"], pages: int.MaxValue, concurrency: 2), "id");
+        var result = await f.Idle(id);
+        Check(f.Catalog.Maximum <= 2, "in-flight requests stay within concurrency");
+        Check(f.Catalog.Calls.Count <= 3 + 2 - 1, "a terminal page stops the round without planning every page");
+        Check(!result.GetProperty("more").GetBoolean());
+        Check(State(result, "tx").GetProperty("page").GetInt32() == 3);
+    }
+    private static async Task FirstRoundLive()
+    {
+        await using var f = new Fixture(); var held = new Held();
+        f.Catalog.Handler = (r, t) => r.Platform == "tx" ? held.Handle(r, t) : Task.FromResult(Single(r));
+        try
+        {
+            string id = S(await f.Start(["wy", "tx"]), "id");
+            var live = await f.Until(id, r => r.GetProperty("items").GetArrayLength() == 1);
+            Check(live.GetProperty("loading").GetBoolean() && State(live, "tx").GetProperty("loading").GetBoolean());
+            held.Release(); var done = await f.Idle(id);
+            Check(done.GetProperty("items").GetArrayLength() == 2);
+        }
+        finally { held.Release(); }
+    }
+    private static async Task RoundBarrier()
+    {
+        await using var f = new Fixture(); var held = new Held();
+        f.Catalog.Handler = (r, t) => r.Page == 2 && r.Platform == "tx" ? held.Handle(r, t)
+            : Task.FromResult(Page(r, [Song(r.Platform, r.Platform + r.Page, r.Platform + " Song " + r.Page)], r.Page == 1));
+        try
+        {
+            string id = S(await f.Start(["wy", "tx"]), "id"); var first = await f.Idle(id);
+            string shown = first.GetProperty("items").GetRawText();
+            await f.Call("next", id); await f.Catalog.CountAsync(4);
+            var waiting = await f.Until(id, r => !State(r, "wy").GetProperty("loading").GetBoolean() &&
+                State(r, "wy").GetProperty("page").GetInt32() == 2);
+            Check(waiting.GetProperty("loading").GetBoolean() && waiting.GetProperty("items").GetRawText() == shown,
+                "a settled platform must not change the list before its round completes");
+            held.Release(); var done = await f.Idle(id);
+            var rows = done.GetProperty("items").EnumerateArray().ToArray();
+            Check(rows.Length == 4 && rows.Take(2).Select(r => r.GetRawText()).SequenceEqual(first.GetProperty("items").EnumerateArray().Select(r => r.GetRawText())));
+            Check(done.GetProperty("round").GetInt32() == 2);
+        }
+        finally { held.Release(); }
+    }
+    private static async Task RoundAppend()
+    {
+        await using var f = new Fixture();
+        f.Catalog.Handler = (r, _) => Task.FromResult(r.Platform == "wy"
+            ? Page(r, r.Page == 1 ? [Song("wy", "a", "A"), Song("wy", "b", "B")] : [Song("wy", "c", "C")], r.Page == 1)
+            : Page(r, r.Page == 1 ? [Song("tx", "x", "X")] : [Song("tx", "c2", "C"), Song("tx", "a2", "A")], r.Page == 1));
+        string id = S(await f.Start(["wy", "tx"]), "id"); var first = await f.Idle(id);
+        var order = first.GetProperty("items").EnumerateArray().Select(r => S(r, "title")).ToArray();
+        await f.Call("next", id); var done = await f.Idle(id);
+        var rows = done.GetProperty("items").EnumerateArray().ToArray();
+        Check(rows.Take(order.Length).Select(r => S(r, "title")).SequenceEqual(order), "shown rows keep their positions");
+        Check(rows.Length == 4 && S(rows[3], "title") == "C" && rows[3].GetProperty("sources").GetArrayLength() == 2);
+        var a = rows.Single(r => S(r, "title") == "A");
+        Check(a.GetProperty("sources").GetArrayLength() == 2 && S(a.GetProperty("sources")[0], "source") == "wy",
+            "a later recording joins the shown row without replacing its primary");
+    }
+    private static async Task RoundConflict()
+    {
+        await using var f = new Fixture();
+        // Same title and singer share the fused identity; incompatible durations are different recordings.
+        f.Catalog.Handler = (r, _) => Task.FromResult(Page(r, r.Page == 1
+            ? [Song("wy", "a", "Song", duration: 180)]
+            : [Song("wy", "b", "Song", duration: 240), Song("wy", "c", "Song", duration: 300)], r.Page == 1));
+        string id = S(await f.Start(["wy"]), "id"); await f.Idle(id);
+        await f.Call("next", id); var done = await f.Idle(id);
+        var ids = done.GetProperty("items").EnumerateArray().Select(r => S(r, "songId")).ToArray();
+        Check(ids.Length == 3 && ids.Distinct(StringComparer.Ordinal).Count() == 3, "each recording is shown once");
+    }
+    private static async Task Priority()
+    {
+        await using var f = new Fixture();
+        f.Catalog.Handler = (r, _) => Task.FromResult(Page(r, [
+            Song(r.Platform, "shared", "Shared"),
+            Song(r.Platform, "own", r.Platform + " own")
+        ]));
+        var result = await f.Idle(S(await f.Start(["tx", "wy"]), "id"));
+        var rows = result.GetProperty("items").EnumerateArray().ToArray();
+        Check(S(rows[0], "title") == "Shared" && S(rows[0].GetProperty("sources")[0], "source") == "tx",
+            "the highest-priority platform supplies the primary recording");
+        Check(S(rows[1], "title") == "tx own" && S(rows[2], "title") == "wy own", "equal scores follow platform priority");
+    }
+    private static async Task Cache()
+    {
+        var clock = new Clock(); await using var f = new Fixture(clock);
+        string first = S(await f.Start(["wy"], word: "a"), "id"); await f.Idle(first);
+        await f.Idle(S(await f.Start(["wy"], word: "b"), "id"));
+        await f.Idle(S(await f.Start(["wy"], word: "a"), "id"));
+        Check(f.Catalog.Calls.Count == 2, "a cached page is not requested again");
+        await f.Idle(S(await f.Start(["wy"], "playlists", word: "a"), "id"));
+        Check(f.Catalog.Calls.Count == 3, "songs and playlists are cached separately");
+        await f.Idle(S(await f.Start(["wy"], word: "a", refresh: true), "id"));
+        Check(f.Catalog.Calls.Count == 4 && f.Catalog.Calls.Last().Refresh, "refresh bypasses the cache");
+        await f.Idle(S(await f.Start(["wy"], word: "c", cacheMinutes: 1), "id"));
+        clock.Advance(TimeSpan.FromSeconds(61));
+        await f.Idle(S(await f.Start(["wy"], word: "d", cacheMinutes: 1), "id"));
+        await f.Idle(S(await f.Start(["wy"], word: "c", cacheMinutes: 1), "id"));
+        Check(f.Catalog.Calls.Count == 7, "an expired page is requested again");
+        f.Search.Invalidate("wy");
+        await f.Idle(S(await f.Start(["wy"], word: "e"), "id"));
+        await f.Idle(S(await f.Start(["wy"], word: "d", cacheMinutes: 1), "id"));
+        Check(f.Catalog.Calls.Count == 9, "an account change drops that platform's cached pages");
     }
     private static async Task Consensus()
     {
@@ -262,13 +461,17 @@ public static class MusicAggregateSearchTests
     }
     private static async Task Deterministic()
     {
-        async Task<string> Run(string[] order)
+        async Task<string> Run(string late)
         {
             await using var f = new Fixture();
-            f.Catalog.Handler = (r, _) => Task.FromResult(Page(r, [Song(r.Platform, "shared"), Song(r.Platform, "unique", r.Platform + " unique")]));
-            return (await f.Idle(S(await f.Start(order), "id"))).GetProperty("items").GetRawText();
+            f.Catalog.Handler = async (r, _) =>
+            {
+                if (r.Platform == late) await Task.Delay(50);
+                return Page(r, [Song(r.Platform, "shared"), Song(r.Platform, "unique", r.Platform + " unique")]);
+            };
+            return (await f.Idle(S(await f.Start(["wy", "tx", "kg"]), "id"))).GetProperty("items").GetRawText();
         }
-        Check(await Run(["wy", "tx", "kg"]) == await Run(["kg", "tx", "wy"]), "hash representatives and RRF ties must be deterministic");
+        Check(await Run("wy") == await Run("kg"), "representatives and RRF ties must not depend on arrival order");
     }
     private static async Task Separate(string artist, double duration, string title)
     {
@@ -330,11 +533,11 @@ public static class MusicAggregateSearchTests
             ? Task.FromException<JsonElement>(new InvalidOperationException("synthetic-sensitive-message"))
             : Task.FromResult(Single(r));
         string id = S(await f.Start(["wy", "tx"]), "id"); var initial = await f.Idle(id);
-        Check(initial.GetProperty("partial").GetBoolean() && !initial.GetRawText().Contains("synthetic-sensitive-message"));
-        await f.Call("next", id); Check(f.Catalog.Calls.Count == 2, "next cannot implicitly retry errors");
-        await f.Call("retry", id, "tx"); var result = await f.Idle(id);
+        Check(initial.GetProperty("partial").GetBoolean() && !initial.GetRawText().Contains("synthetic-sensitive-message") &&
+            initial.GetProperty("more").GetBoolean(), "a failed platform keeps the session loadable");
+        await f.Call("next", id); var result = await f.Idle(id);
         Check(!result.GetProperty("partial").GetBoolean() && f.Catalog.Calls.Count == 3);
-        Check(f.Catalog.Calls.Last() is { Platform: "tx", Page: 1, Refresh: true } && f.Catalog.Calls.Count(r => r.Platform == "wy") == 1);
+        Check(f.Catalog.Calls.Last() is { Platform: "tx", Page: 1, Refresh: false } && f.Catalog.Calls.Count(r => r.Platform == "wy") == 1);
     }
     private static async Task RetrySecondPage()
     {
@@ -345,9 +548,9 @@ public static class MusicAggregateSearchTests
         string id = S(await f.Start(["wy"]), "id"); await f.Idle(id);
         await f.Call("next", id); var failed = await f.Idle(id);
         Check(State(failed, "wy").GetProperty("page").GetInt32() == 1 && State(failed, "wy").GetProperty("count").GetInt32() == 1);
-        await f.Call("retry", id, "wy"); var result = await f.Idle(id);
+        await f.Call("next", id); var result = await f.Idle(id);
         Check(f.Catalog.Calls.Select(r => r.Page).SequenceEqual([1, 2, 2]) &&
-            f.Catalog.Calls.Last().Refresh && State(result, "wy").GetProperty("count").GetInt32() == 2);
+            !f.Catalog.Calls.Last().Refresh && State(result, "wy").GetProperty("count").GetInt32() == 2);
     }
     private static async Task DuplicateAdmission()
     {
@@ -356,7 +559,7 @@ public static class MusicAggregateSearchTests
         try
         {
             string id = S(await f.Start(["wy"]), "id"); await f.Catalog.CountAsync(1);
-            await Task.WhenAll(f.Call("next", id), f.Call("next", id), f.Call("retry", id, "wy"));
+            await Task.WhenAll(f.Call("next", id), f.Call("next", id), f.Call("next", id));
             Check(f.Catalog.Calls.Count == 1); response.SetResult(Single(f.Catalog.Calls.Single())); await f.Idle(id);
         }
         finally { response.TrySetResult(E(new { })); }
@@ -366,19 +569,18 @@ public static class MusicAggregateSearchTests
         await using var f = new Fixture();
         f.Catalog.Handler = (r, _) => Task.FromResult(Page(r, empty ? [] : [Song("wy", "same")], true));
         string id = S(await f.Start(["wy"]), "id"); var result = await f.Idle(id);
-        for (int i = 0; i < (empty ? 3 : 4); i++) { await f.Call("next", id); result = await f.Idle(id); }
-        Check(S(State(result, "wy"), "error") == "SEARCH_LIMIT" && !result.GetProperty("more").GetBoolean());
-        int count = f.Catalog.Calls.Count; await f.Call("retry", id, "wy"); await f.Call("next", id);
-        Check(f.Catalog.Calls.Count == count && count == (empty ? 4 : 5));
+        for (int i = 0; i < 6; i++) { await f.Call("next", id); result = await f.Idle(id); }
+        Check(S(State(result, "wy"), "error") == "" && result.GetProperty("more").GetBoolean());
+        Check(f.Catalog.Calls.Count == 7 && State(result, "wy").GetProperty("count").GetInt32() == (empty ? 0 : 1));
     }
     private static async Task PageCap()
     {
         await using var f = new Fixture();
         f.Catalog.Handler = (r, _) => Task.FromResult(Page(r, [Song("wy", r.Page.ToString(), "Song " + r.Page)], true));
         string id = S(await f.Start(["wy"]), "id"); var result = await f.Idle(id);
-        for (int page = 2; page <= 100; page++) { await f.Call("next", id); result = await f.Idle(id); }
-        Check(State(result, "wy").GetProperty("page").GetInt32() == 100 && S(State(result, "wy"), "error") == "SEARCH_LIMIT");
-        await f.Call("retry", id, "wy"); Check(f.Catalog.Calls.Count == 100);
+        for (int page = 2; page <= 105; page++) { await f.Call("next", id); result = await f.Idle(id); }
+        Check(State(result, "wy").GetProperty("page").GetInt32() == 105 && S(State(result, "wy"), "error") == "");
+        Check(f.Catalog.Calls.Count == 105 && result.GetProperty("more").GetBoolean());
     }
     private static async Task CandidateCap(int platforms)
     {
@@ -386,10 +588,10 @@ public static class MusicAggregateSearchTests
         f.Catalog.Handler = (r, _) => Task.FromResult(Page(r, Enumerable.Range(0, 30).Select(i =>
             Song("wy", $"{r.Page}-{i}", $"Song {r.Page}-{i}")), true));
         string id = S(await f.Start(Five.Take(platforms).ToArray()), "id"); var result = await f.Idle(id);
-        int budget = Math.Min(2000, 5000 / platforms), pages = (budget + 29) / 30;
+        const int pages = 70;
         for (int page = 2; page <= pages; page++) { await f.Call("next", id); result = await f.Idle(id); }
-        Check(State(result, "wy").GetProperty("count").GetInt32() == budget && S(State(result, "wy"), "error") == "SEARCH_LIMIT");
-        await f.Call("retry", id, "wy"); Check(f.Catalog.Calls.Count == pages);
+        Check(State(result, "wy").GetProperty("count").GetInt32() == pages * 30 && S(State(result, "wy"), "error") == "");
+        Check(f.Catalog.Calls.Count == pages && result.GetProperty("more").GetBoolean());
     }
 
     private sealed class Held
@@ -412,7 +614,7 @@ public static class MusicAggregateSearchTests
             clock.Advance(TimeSpan.FromSeconds(1));
             var result = await f.Until(id, r => S(State(r, "wy"), "error") == "TIMEOUT");
             Check(result.GetProperty("loading").GetBoolean() && held.Calls.Single().Token.IsCancellationRequested);
-            await f.Call("retry", id, "wy"); Check(f.Catalog.Calls.Count == 1);
+            await f.Call("next", id); Check(f.Catalog.Calls.Count == 1, "no round starts while one is still settling");
             var cancel = f.Call("cancel", id); Check(!cancel.IsCompleted, "cancel must wait for physical settlement");
             held.Release(); result = await cancel;
             Check(!result.GetProperty("loading").GetBoolean() && result.GetProperty("items").GetArrayLength() == 0);
@@ -471,8 +673,9 @@ public static class MusicAggregateSearchTests
             Check(State(result, "tx").GetProperty("count").GetInt32() == 1);
         }
         Check(f.Catalog.Calls.Count == 4);
-        await f.Call("retry", songs, "wy"); var retried = await f.Idle(songs);
-        Check(!retried.GetProperty("partial").GetBoolean() && f.Catalog.Calls.Last() is { Platform: "wy", Page: 1, Refresh: true });
+        await f.Call("next", songs); var retried = await f.Idle(songs);
+        Check(!retried.GetProperty("partial").GetBoolean() && f.Catalog.Calls.Last() is { Platform: "wy", Page: 1, Refresh: false } &&
+            f.Catalog.Calls.Count == 5, "the cleared platform restarts uncached; settled platforms are not asked again");
         Check(S(State(await f.Call("get", lists), "wy"), "error") == "STALE_SESSION");
     }
     private static async Task InvalidateLate()
@@ -481,11 +684,13 @@ public static class MusicAggregateSearchTests
         try
         {
             string id = S(await f.Start(["wy"]), "id"); await f.Catalog.CountAsync(1); f.Search.Invalidate("wy");
-            await f.Call("retry", id, "wy"); Check(f.Catalog.Calls.Count == 1);
+            await f.Call("next", id); Check(f.Catalog.Calls.Count == 1);
             held.Release(); var retired = await f.Idle(id);
             Check(retired.GetProperty("items").GetArrayLength() == 0 && S(State(retired, "wy"), "error") == "STALE_SESSION");
             f.Catalog.Handler = (r, _) => Task.FromResult(Single(r));
-            await f.Call("retry", id, "wy"); await f.Idle(id); Check(f.Catalog.Calls.Last() is { Page: 1, Refresh: true });
+            await f.Call("next", id); var restarted = await f.Idle(id);
+            Check(f.Catalog.Calls.Count == 2 && f.Catalog.Calls.Last() is { Page: 1 } &&
+                restarted.GetProperty("items").GetArrayLength() == 1);
         }
         finally { held.Release(); }
     }
@@ -540,8 +745,8 @@ public static class MusicAggregateSearchTests
         Check(State(result, "tx").GetProperty("count").GetInt32() == 1);
         string lists = S(await f.Start(["wy", "tx"], "playlists"), "id");
         Check(!(await f.Idle(lists)).GetProperty("partial").GetBoolean() && S(await f.Call("get", songs), "id") == songs);
-        await f.Call("retry", songs, "wy"); var retried = await f.Idle(songs);
-        Check(!retried.GetProperty("partial").GetBoolean() && f.Catalog.Calls.Last() is { Platform: "wy", Page: 1, Refresh: true });
+        await f.Call("next", songs); var retried = await f.Idle(songs);
+        Check(!retried.GetProperty("partial").GetBoolean() && f.Catalog.Calls.Last() is { Platform: "wy", Page: 1 });
     }
     private static async Task DelegateDrain()
     {
@@ -662,7 +867,12 @@ public static class MusicAggregateSearchTests
         await using var f = new Fixture();
         foreach (var data in new object[] { new { keyword = "", kind = "songs", platforms = Five },
             new { keyword = "x", kind = "other", platforms = Five }, new { keyword = "x", kind = "songs", platforms = new[] { "evil" } },
-            new { keyword = "x", kind = "songs", platforms = Five, unexpected = true } })
+            new { keyword = "x", kind = "songs", platforms = Five, pages = 1, concurrency = 1, cacheMinutes = 60, unexpected = true },
+            new { keyword = "x", kind = "songs", platforms = Five, pages = 0, concurrency = 1, cacheMinutes = 60 },
+            new { keyword = "x", kind = "songs", platforms = Five, pages = 2147483648L, concurrency = 1, cacheMinutes = 60 },
+            new { keyword = "x", kind = "songs", platforms = Five, pages = 1, concurrency = 0, cacheMinutes = 60 },
+            new { keyword = "x", kind = "songs", platforms = Five, pages = 1, concurrency = 1, cacheMinutes = 1441 },
+            new { keyword = "x", kind = "songs", platforms = new[] { "wy", "wy" }, pages = 1, concurrency = 1, cacheMinutes = 60 } })
             Code(await f.Search.ExecuteAsync("music.search.start", data), "INVALID_REQUEST");
         using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
         Code(await f.Start(["wy"], token: cancelled.Token), "CANCELLED"); Check(f.Catalog.Calls.IsEmpty);

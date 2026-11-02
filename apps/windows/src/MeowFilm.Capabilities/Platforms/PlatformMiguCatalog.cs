@@ -4,6 +4,7 @@ using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
+using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities.Platforms;
 
@@ -51,36 +52,36 @@ public sealed partial class MusicPlatformCatalog
         var raw = await MgRead(c, request);
         var result = PJ.At(raw, songs ? "songResultData" : "songListResultData");
         var total = PJ.Count(PJ.At(result, "totalCount"));
-        var more = p.Page * (long)p.Limit < total;
         if (!songs)
-            return PJ.Page("mg", ExactPage(PJ.At(result, "result") ?? (total == 0 ? new JsonArray() : null),
-                p.Page, p.Limit, total).Select(r => PlatformSongs.PublicPlaylist("mg", r)),
-                p.Page, p.Limit, total, more);
+        {
+            var rows = PJ.Rows(PJ.At(result, "result") ?? (total == 0 ? new JsonArray() : null), p.Limit);
+            return PJ.SearchPage("mg", rows.Select(r => PlatformSongs.PublicPlaylist("mg", r)),
+                p.Page, p.Limit, total, p.Page * (long)p.Limit < total);
+        }
         // totalCount counts groups, not their versions. Never truncate the expanded page to limit.
         var groups = PJ.At(result, "resultList") ?? (total == 0 ? new JsonArray() : null);
         PJ.Require(groups is JsonArray, "INVALID_RESPONSE");
         var array = (JsonArray)groups!;
         PJ.Require(array.Count <= p.Limit, "LIMIT");
-        PJ.Require(array.Count == Math.Min(p.Limit, Math.Max(0, total - (p.Page - 1L) * p.Limit)), "INCOMPLETE_PAGE");
-        PJ.Require(!more || p.Page < 100, "PAGINATION_LIMIT");
         var items = new List<JsonObject>(); var seen = new HashSet<string>(StringComparer.Ordinal);
         int rawCount = 0;
         for (int index = 0; index < array.Count; index++)
         {
-            PJ.Require(array[index] is JsonArray variants && variants.Count <= 32, "LIMIT");
-            var rows = PJ.Rows(array[index], 32);
+            PJ.Require(array[index] is JsonArray, "INVALID_RESPONSE");
+            var rows = PJ.RowsAll(array[index]);
             PJ.Require(rows.Count > 0, "INCOMPLETE_PAGE");
-            rawCount += rows.Count; PJ.Require(rawCount <= 1000, "LIMIT");
+            rawCount = checked(rawCount + rows.Count);
             foreach (var row in rows)
             {
                 var song = PlatformSongs.Mg(row);
-                if (!seen.Add(PJ.S(song, "source_data", "copyrightId"))) continue;
+                if (!seen.Add(PJ.S(NativeMusicSong.SourceData(song), "copyrightId"))) continue;
                 items.Add(PJ.Obj(("rank", (p.Page - 1L) * p.Limit + index + 1), ("song", song)));
             }
         }
+        var more = p.Page * (long)p.Limit < total && array.Count == p.Limit && p.Page < int.MaxValue;
         return PJ.Obj(("platform", "mg"), ("items", PJ.Arr(items)), ("page", p.Page), ("limit", p.Limit),
             ("total", total), ("totalUnit", "groups"), ("groupCount", array.Count), ("rawItemCount", rawCount),
-            ("more", more), ("continuation", more ? PJ.Obj(("page", p.Page + 1)) : null));
+            ("more", more), ("continuation", more ? PJ.Obj(("page", checked(p.Page + 1))) : null));
     }
     private static async Task<JsonObject> MgSong(Call c, MusicSongRequest p)
     {
@@ -99,12 +100,11 @@ public sealed partial class MusicPlatformCatalog
         var info = PlatformSongs.PublicPlaylist("mg", metadata, detail: true);
         PJ.Require(PJ.S(info, "id") == id, "IDENTITY_MISMATCH");
         long total = PJ.Count(metadata["musicNum"]);
-        PJ.Require(total <= 10000, "LIMIT");
-        int offset = (p.Page - 1) * p.Limit;
+        long offset = (p.Page - 1L) * p.Limit;
         int expected = (int)Math.Min(p.Limit, Math.Max(0, total - offset));
         var items = new List<JsonObject>();
         string? snapshot = null;
-        for (int batch = offset / 50; ; batch++)
+        for (long batch = offset / 50; ; batch++)
         {
             var raw = await MgRead(c, MgRequest("https://app.c.nf.migu.cn/MIGUM3.0/resource/playlist/song/v2.0", new()
             { ["playlistId"] = id, ["pageNo"] = Dec(batch + 1), ["pageSize"] = "50" }, playlist: true));
@@ -116,10 +116,10 @@ public sealed partial class MusicPlatformCatalog
                 PJ.Scalar(metadata["ownerId"]), PJ.S(info, "creator"), PJ.Scalar(raw["publishTime"]) }));
             CheckSnapshot(p.Snapshot, revision); CheckSnapshot(snapshot, revision); snapshot ??= revision;
             var rows = ExactPage(raw["songList"] ?? (total == 0 ? new JsonArray() : null), batch + 1, 50, total);
-            int start = Math.Max(offset - batch * 50, 0);
+            int start = checked((int)Math.Max(offset - batch * 50, 0));
             items.AddRange(rows.Skip(start).Take(expected - items.Count).Select(PlatformSongs.Mg));
             if (items.Count == expected) break;
-            PJ.Require(batch < 199 && rows.Count == 50, "INCOMPLETE_PAGE");
+            PJ.Require(rows.Count == 50, "INCOMPLETE_PAGE");
         }
         return PublicPlaylistPage(c, p, info, items, total, snapshot!, offset);
     }

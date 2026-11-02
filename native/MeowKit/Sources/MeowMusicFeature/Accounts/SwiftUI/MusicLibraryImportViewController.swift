@@ -20,7 +20,7 @@ public final class MusicLibraryImportViewController: HostingPageViewController<M
             themeProvider: appearance,
             content: MusicLibraryImportContent(theme: PageTheme(palette: appearance.pageColorway))
         )
-        title = "导入曲库"
+        pageTitle = "导入曲库"
     }
 
     public override func viewDidLoad() {

@@ -64,27 +64,30 @@ test('arguments are captured, errors redacted, no arbitrary eval', async t => {
   await assert.rejects(a.call('business.fail'), error => error.code === 'INTERNAL' && error.message === 'INTERNAL');
   await assert.rejects(a.call('eval', 'process.exit()'), { code: 'METHOD_UNAVAILABLE' });
 });
-test('abort settles client while noncooperative server work stays budgeted', async t => {
+test('cancelled handlers stay owned while fresh calls exceed the old pending quota', async t => {
   let release, started;
   const ready = new Promise(resolve => { started = resolve; });
-  const [a, b] = pair(t, {}, { 'business.wait': (_, { signal }) => {
-    started(signal);
-    return new Promise(resolve => { release = resolve; });
-  } }, { maximumPending: 1 });
+  const held = new Promise(resolve => { release = resolve; });
+  let count = 0;
+  const signals = [];
+  const [a,b] = pair(t, {}, {'business.wait': (_, {signal}) => {
+    signals.push(signal); if (++count === 96) started(); return held;
+  }, 'business.echo': value => value});
   const controller = new AbortController();
-  const result = a.call('business.wait', null, { signal: controller.signal });
-  const signal = await ready;
-  controller.abort();
-  await assert.rejects(result, { code: 'CANCELLED' });
+  const pending = Array.from({length:96}, () => assert.rejects(
+    a.call('business.wait', null, {signal:controller.signal}), {code:'CANCELLED'}));
+  try {
+    await ready;
+    controller.abort(); await Promise.all(pending);
+    await new Promise(resolve => setImmediate(resolve));
+    assert(signals.every(signal => signal.aborted));
+    assert.equal(b.state.active, 96);
+    assert.equal(await a.call('business.echo', 'fresh'), 'fresh');
+  } finally { release('late'); }
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(signal.aborted, true);
-  assert.equal(b.state.active, 1);
-  await assert.rejects(a.call('business.wait'), { code: 'LIMIT' });
-  release('late');
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(b.state.active, 0);
-  assert.equal(a.state.pending, 0);
+  assert.equal(b.state.active, 0); assert.equal(a.state.pending, 0);
 });
+
 test('timeout and closed transport reject without late revival', async t => {
   let release;
   const [a] = pair(t, {}, { 'business.wait': () => new Promise(resolve => { release = resolve; }) });
@@ -92,6 +95,32 @@ test('timeout and closed transport reject without late revival', async t => {
   release('late');
   a.close();
   await assert.rejects(a.call('business.wait'), { code: 'CLOSED' });
+});
+test('cancelled unsent frames release their queue ownership behind a stalled write', async t => {
+  let enter, release;
+  const entered = new Promise(resolve => { enter = resolve; });
+  const held = new Promise(resolve => { release = resolve; });
+  let sent = 0;
+  const peer = new BridgePeer({ session: 'cancel-queue', send: async () => {
+    sent++; enter(); await held;
+  } });
+  t.after(() => { release(); peer.close(); });
+  const first = assert.rejects(peer.call('business.wait'), { code: 'CLOSED' });
+  await entered;
+  const baseline = peer.state.queuedBytes;
+  for (let i = 0; i < 600; i++) {
+    const controller = new AbortController();
+    const cancelled = assert.rejects(peer.call('business.wait', 'x'.repeat(128 * 1024),
+      { signal: controller.signal }), { code: 'CANCELLED' });
+    controller.abort(); await cancelled;
+    assert.equal(peer.state.queuedBytes, baseline);
+    assert.equal(peer.state.pending, 1);
+  }
+  release();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(sent, 1);
+  assert.equal(peer.state.queuedBytes, 0);
+  peer.close(); await first;
 });
 test('wrong generations and replayed IDs close before dispatch', async t => {
   let calls = 0;

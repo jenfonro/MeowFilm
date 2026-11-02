@@ -107,7 +107,6 @@ public sealed class NativeHttpMediaOptions
             Credentials = null,
             PreAuthenticate = false,
             AutomaticDecompression = DecompressionMethods.None,
-            MaxConnectionsPerServer = 1,
             MaxResponseHeadersLength = 32,
             MaxResponseDrainSize = 0,
             ConnectTimeout = RequestTimeout,

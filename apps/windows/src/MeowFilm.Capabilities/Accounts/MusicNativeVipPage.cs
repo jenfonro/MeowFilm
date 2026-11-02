@@ -24,7 +24,6 @@ public sealed partial class MusicNativeApplication
         lock (gate)
         {
             if (stopping || closed) throw new MusicOperationException("CLOSED");
-            if (pending >= 32) throw new MusicOperationException("LIMIT");
             if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
             generation = lifetime.Token;
         }

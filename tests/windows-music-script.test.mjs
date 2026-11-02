@@ -715,67 +715,47 @@ test('extended source actions preserve payload and returned values without a pla
   denied(await rpc('invoke', request(instance, 'qsvip', {}, { operation: 'search', payload: info })), 'CAPABILITY_UNAVAILABLE');
 });
 
-test('per-site and per-instance invoke budgets reject excess work without targeting another script', async t => {
-  let entered = deferred(), needed = 4;
-  const release = deferred(), calls = [];
-  const { rpc } = setup(t, { network: async input => {
-    calls.push(input);
-    if (calls.length === needed) entered.resolve();
-    await release.promise;
-    return { statusCode: 200, body: 'done' };
-  } });
-  const spec = options();
-  const instance = await load(rpc, spec, networkFixture);
-  const requests = Array.from({ length: 4 }, () => rpc('invoke', request(instance)));
-  try {
-    await entered.promise;
-    denied(await rpc('invoke', request(instance)), 'LIMIT');
-    entered = deferred(); needed = 8;
-    requests.push(...Array.from({ length: 4 }, () => rpc('invoke', request(instance, 'tx'))));
-    await entered.promise;
-    denied(await rpc('invoke', request(instance, 'local')), 'LIMIT');
-    assert.equal(calls.length, 8);
-  } finally { release.resolve(); }
+test('native script calls retain scope without per-site or per-instance count quotas', async t => {
+  const entered = deferred(), release = deferred(), calls = [];
+  const {rpc} = setup(t, {network: async input => {
+    calls.push(input); if (calls.length === 24) entered.resolve();
+    await release.promise; return {statusCode:200, body:'done'};
+  }});
+  const instance = await load(rpc, options(), networkFixture);
+  const requests = Array.from({length:24}, (_,i) => rpc('invoke', request(instance, i % 2 ? 'kw' : 'tx')));
+  try { await entered.promise; assert.equal(calls.length, 24); }
+  finally { release.resolve(); }
   for (const reply of await Promise.all(requests)) okay(reply);
 });
 
-test('global control/invoke budget is bounded at sixteen requests', async t => {
-  const entered = deferred(), release = deferred();
-  let count = 0;
-  const { rpc } = setup(t, { network: async () => {
-    if (++count === 16) entered.resolve();
-    await release.promise;
-    return { statusCode: 200, body: 'done' };
-  } });
+test('script control remains available while many invocations are in flight', async t => {
+  const entered = deferred(), release = deferred(); let count = 0;
+  const {rpc} = setup(t, {network: async () => {
+    if (++count === 32) entered.resolve(); await release.promise;
+    return {statusCode:200, body:'done'};
+  }});
   const instances = [];
-  for (let index = 0; index < 4; index++) {
-    const spec = options(`i${index}`);
-    instances.push(await load(rpc, spec, networkFixture));
-  }
-  const requests = instances.flatMap(instance =>
-    Array.from({ length: 4 }, () => rpc('invoke', request(instance))));
+  for (let i=0;i<4;i++) instances.push(await load(rpc, options(`i${i}`), networkFixture));
+  const requests = instances.flatMap(instance => Array.from({length:8}, () => rpc('invoke', request(instance))));
   try {
-    await entered.promise;
-    denied(await rpc('invoke', request(instances[0], 'tx')), 'LIMIT');
-    assert.equal(count, 16);
+    await entered.promise; assert.equal(count,32);
+    assert.equal(okay(await rpc('status')).instances.length,4);
   } finally { release.resolve(); }
   for (const reply of await Promise.all(requests)) okay(reply);
-  assert.equal(okay(await rpc('status')).instances.length, 4);
 });
 
-test('one invocation cannot fan out unbounded reverse storage calls', async t => {
-  const release = deferred();
-  let calls = 0;
-  const { rpc } = setup(t, { call: async () => {
-    calls++; await release.promise; return { ok: true, value: null };
-  } });
+test('one invocation owns all reverse storage calls until their real completion', async t => {
+  const entered = deferred(), release = deferred(); let calls = 0;
+  const {rpc} = setup(t, {call: async () => {
+    if (++calls === 20) entered.resolve(); await release.promise; return {ok:true, value:null};
+  }});
   const instance = await load(rpc, storageOptions(), fixture({
     handler: `async (_request, {storage}) => Promise.all(Array.from({length:20},(_,i)=>storage.get('k'+i)))`,
   }));
-  try {
-    denied(await rpc('invoke', request(instance)), 'LIMIT');
-    assert.ok(calls <= 4);
-  } finally { release.resolve(); await turn(); }
+  const pending = rpc('invoke', request(instance));
+  try { await entered.promise; assert.equal(calls,20); }
+  finally { release.resolve(); }
+  okay(await pending);
 });
 
 test('pre-cancelled requests do not stage/load, cancellation fences reverse completion and future requests still work', async t => {

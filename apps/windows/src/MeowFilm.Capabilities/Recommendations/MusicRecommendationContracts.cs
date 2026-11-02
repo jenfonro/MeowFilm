@@ -108,21 +108,17 @@ internal static class RecommendationJson
     {
         if (song.TryGetProperty("sources", out var sources) && sources.ValueKind == JsonValueKind.Array)
             foreach (var row in sources.EnumerateArray())
-                if (Text(row, "source") == "wy" && row.TryGetProperty("source_data", out var data) &&
+                if (Text(row, "source") == "wy" && row.TryGetProperty("musicInfo", out var data) &&
                     FromData(data) is { Length: > 0 } id) return id;
-        return song.TryGetProperty("source_data", out var direct) ? FromData(direct) : "";
+        return "";
     }
     private static string FromData(JsonElement data)
     {
         if (data.ValueKind != JsonValueKind.Object || Text(data, "source") != "wy") return "";
-        foreach (string name in new[] { "musicId", "songmid", "id" })
-            if (data.TryGetProperty(name, out var value))
-            {
-                string id = value.ValueKind == JsonValueKind.String ? value.GetString()! :
-                    value.ValueKind == JsonValueKind.Number ? value.GetRawText() : "";
-                if (ValidId(id)) return id;
-            }
-        return "";
+        if (!data.TryGetProperty("songmid", out var value)) return "";
+        string id = value.ValueKind == JsonValueKind.String ? value.GetString()! :
+            value.ValueKind == JsonValueKind.Number ? value.GetRawText() : "";
+        return ValidId(id) ? id : "";
     }
     internal static bool ValidId(string id) => id.Length is > 0 and <= 16 && id[0] != '0' &&
         id.All(char.IsAsciiDigit) && long.TryParse(id, out var n) && n is > 0 and <= 9007199254740991;

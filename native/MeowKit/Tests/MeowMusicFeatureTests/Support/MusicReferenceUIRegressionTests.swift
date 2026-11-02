@@ -22,26 +22,6 @@ final class MusicReferenceUIRegressionTests: XCTestCase {
         XCTAssertEqual(MusicReferencePlayerLabels.quality(requestedLabel: nil), "音源与音质")
     }
 
-    func testQueueHasThreeCategoriesAndHistorySelectionIsSecondLevel() {
-        XCTAssertEqual(MusicReferenceQueuePage.allCases, [.current, .songs, .playlists])
-        XCTAssertEqual(MusicReferenceQueuePage.allCases.map(\.title), ["当前播放", "已播歌曲", "已播歌单"])
-        XCTAssertEqual(MusicReferenceQueuePage.historySelection(nil, ids: ["a", "b"]), "a")
-        XCTAssertEqual(MusicReferenceQueuePage.historySelection("b", ids: ["a", "b"]), "b")
-    }
-
-    func testEmptyHistoryDoesNotRemoveItsCategoryOrCreateSentinelCategories() {
-        XCTAssertNil(MusicReferenceQueuePage.historySelection(nil, ids: []))
-        XCTAssertEqual(MusicReferenceQueuePage(rawValue: 2), .playlists)
-        XCTAssertNil(MusicReferenceQueuePage(rawValue: -1))
-        XCTAssertNil(MusicReferenceQueuePage(rawValue: 3))
-    }
-
-    func testHistoryDeletionReconcilesStableSelectionWithoutReinterpretingAnIndex() {
-        XCTAssertEqual(MusicReferenceQueuePage.historySelection("c", ids: ["b", "c"]), "c")
-        XCTAssertEqual(MusicReferenceQueuePage.historySelection("a", ids: ["b", "c"]), "b")
-        XCTAssertNil(MusicReferenceQueuePage.historySelection("b", ids: []))
-    }
-
     func testLastEffectiveQualityIsLockedBeforeAnyWrite() {
         XCTAssertTrue(MusicQualityTogglePolicy.locksQuality("standard", qualities: ["standard"], spatial: []))
         XCTAssertFalse(MusicQualityTogglePolicy.locksQuality("high", qualities: ["standard"], spatial: []))

@@ -150,10 +150,24 @@ internal static class PlatformProtocols
         if (error is not null) throw new MusicPlatformException(error);
         return data;
     }
-    internal static HttpRequestMessage Tx(string module, string method, JsonObject param, MusicPlatformSession? session)
+    private static JsonObject TxComm() =>
+        PJ.Obj(("ct", "11"), ("cv", "20090008"), ("v", "20090008"), ("chid", "10003505"), ("tmeAppID", "qqmusic"));
+    internal static JsonObject TxAndroidComm(MusicQqClientContext device, DateTimeOffset now, bool includeSession)
+    {
+        PJ.Require(includeSession ? device.SessionCurrent(now) : device.QimeiCurrent(now), "DEVICE_CONTEXT_REQUIRED");
+        var comm = TxComm();
+        comm["traceid"] = "10002_" + device.OpenUdid + "_" + now.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
+        comm["QIMEI36"] = device.Qimei!.Q36; comm["OpenUDID"] = device.OpenUdid; comm["udid"] = device.OpenUdid;
+        comm["OpenUDID2"] = device.OpenUdid2; comm["aid"] = device.AndroidId;
+        comm["os_ver"] = "15"; comm["phonetype"] = "V2408A";
+        if (includeSession) { comm["uid"] = device.Session!.Uid; comm["sid"] = device.Session.Sid; }
+        return comm;
+    }
+    internal static HttpRequestMessage Tx(string module, string method, JsonObject param, MusicPlatformSession? session,
+        MusicQqClientContext? client = null, DateTimeOffset? now = null)
     {
         if (session is not null) PJ.Require(PJ.Cookie(PJ.Cookies(session), "musicid") == session.UserId, "INVALID_CREDENTIALS");
-        return TxWithCookie(module, method, param, session?.Cookie);
+        return TxRequest(module, method, param, session?.Cookie, false, client, now);
     }
     internal static HttpRequestMessage TxWithCookie(string module, string method, JsonObject param, string? cookieHeader)
         => TxRequest(module, method, param, cookieHeader, false);
@@ -162,9 +176,11 @@ internal static class PlatformProtocols
         PJ.Require(code.Length is > 0 and <= 512 && code.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-'));
         return TxRequest("QQConnectLogin.LoginServer", "QQLogin", PJ.Obj(("code", code)), null, true);
     }
-    private static HttpRequestMessage TxRequest(string module, string method, JsonObject param, string? cookieHeader, bool qrLogin)
+    private static HttpRequestMessage TxRequest(string module, string method, JsonObject param, string? cookieHeader, bool qrLogin,
+        MusicQqClientContext? client = null, DateTimeOffset? now = null)
     {
-        var comm = PJ.Obj(("ct", "11"), ("cv", "20090008"), ("v", "20090008"), ("chid", "10003505"), ("tmeAppID", "qqmusic"));
+        var at = client is null ? default : now ?? DateTimeOffset.UtcNow;
+        var comm = client is null ? TxComm() : TxAndroidComm(client, at, includeSession: true);
         if (qrLogin) comm["tmeLoginType"] = 2;
         if (cookieHeader is not null)
         {
@@ -174,13 +190,15 @@ internal static class PlatformProtocols
             PJ.Id(JsonValue.Create(id), "^[1-9][0-9]{0,19}$", "INVALID_CREDENTIALS");
             comm["qq"] = id; comm["authst"] = key;
             comm["tmeLoginType"] = PJ.Cookie(cookies, "login_type", PJ.Cookie(cookies, "loginType", key.StartsWith("W_X", StringComparison.Ordinal) ? "1" : "2"));
+            if (client is not null)
+                comm["traceid"] = "10002_" + id + "_" + at.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
         }
         // Pin defaults sign=false. A signature-required result remains an error, not a retry route.
         var body = PJ.Obj(("comm", comm), ("req_0", PJ.Obj(("module", module), ("method", method), ("param", param))));
         var request = new HttpRequestMessage(HttpMethod.Post, "https://u.y.qq.com/cgi-bin/musicu.fcg") {
             Content = new StringContent(PJ.Encode(body), Encoding.UTF8, "application/json")
         };
-        request.Headers.TryAddWithoutValidation("User-Agent", "QQMusic 20090008(android 12)");
+        request.Headers.TryAddWithoutValidation("User-Agent", client is null ? "QQMusic 20090008(android 12)" : "QQMusic 20090008(android 15)");
         return request;
     }
     internal static JsonObject TxSuccess(JsonObject data)

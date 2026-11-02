@@ -58,6 +58,13 @@ internal static class AccountDetailsSnapshot
         return DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None, out var offset) &&
             offset.ToUnixTimeMilliseconds() > 0 ? offset.ToUnixTimeMilliseconds() : null;
     }
+    private static long CacheUntil(bool? vip, long? expiry, long now)
+    {
+        if (vip is null) return 0;
+        if (vip == true && expiry is { } end)
+            return end - now > Day ? end - Day : end;
+        return now + Day;
+    }
     internal static MusicAccountEntitlements Wy(JsonObject data, string userId, long now)
     {
         Identity(data["userId"], userId, required: true);
@@ -71,6 +78,7 @@ internal static class AccountDetailsSnapshot
         long? expired = new[] { a, m, r }.Where(t => t > 0 && t <= upstream).DefaultIfEmpty().Max();
         long until = vip ? checked(now + (svip ? svipRemaining : vipRemaining)) : known ? now + Day : 0;
         AccountRules.Require(until <= AccountRules.MaxInteger, "INVALID_RESPONSE");
+        until = CacheUntil(vip ? true : known ? false : null, vip ? until : null, now);
         return new(new(vip ? true : known ? false : null, vip ? svip ? "svip" : "vip" : known ? "none" : "unknown",
             vip ? svip ? r : Math.Max(a ?? 0, m ?? 0) : expired), now, until,
             Array.AsReadOnly(vip ? WyLevels.Take(svip ? 10 : 6).ToArray() : []), !known);
@@ -93,8 +101,7 @@ internal static class AccountDetailsSnapshot
             new("exp_vip", identity["ExpVip"], null), new("ad_vip", identity["AdVipFlag"], null)
         ];
         var membership = Select(products, now);
-        long until = membership.Vip == false ? now + Day :
-            membership.Vip == true && membership.ExpiresAt is { } end ? end : 0;
+        long until = CacheUntil(membership.Vip, membership.ExpiresAt, now);
         foreach (var p in products.Where(p => Flag(p.Flag) == 1))
             foreach (long? boundary in new[] { Expiry(p.End), Expiry(p.Start) })
                 if (boundary > now && until > 0) until = Math.Min(until, boundary.Value);
@@ -136,7 +143,7 @@ internal static class AccountDetailsSnapshot
         }
         products.Add(new("vip", data["is_vip"], data["vip_end_time"], data["vip_begin_time"]));
         var membership = Select(products, now);
-        long until = membership.Vip is null ? 0 : membership.Vip == true ? membership.ExpiresAt ?? now + Retry : now + Day;
+        long until = CacheUntil(membership.Vip, membership.ExpiresAt, now);
         foreach (var row in new JsonNode?[] { data }.Concat(rows))
             if (row is JsonObject p && Flag(p["is_vip"]) is not null)
                 foreach (long? boundary in new[] { Expiry(p["vip_begin_time"]), Expiry(p["vip_end_time"]) })

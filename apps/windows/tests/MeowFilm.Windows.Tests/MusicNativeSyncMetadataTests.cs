@@ -8,8 +8,7 @@ public static partial class MusicNativeSyncTests
     // Included by the existing RecoveryCases registration; no new runner or product wiring is required.
     private static IEnumerable<TestCase> MetadataCases()
     {
-        yield return new("Music sync WY metadata missing detail preserves equal revision zero", () => MissingMetadata(0));
-        yield return new("Music sync WY metadata missing detail preserves newer local fields", () => MissingMetadata(7));
+        yield return new("Music sync WY metadata missing detail preserves newer local fields", MissingMetadata);
         yield return new("Music sync WY metadata secondary source preserves canonical recording", MissingSecondarySource);
         yield return new("Music sync WY metadata new placeholder later enriches same identity", MissingThenAvailable);
         yield return new("Music sync WY metadata network failure preserves duplicate occurrences", MissingOccurrences);
@@ -24,14 +23,12 @@ public static partial class MusicNativeSyncTests
     private static JsonObject SongStore(JsonElement library) => JsonNode.Parse(library.GetRawText())!["songs"]!.AsObject();
     private static void SameMetadata(JsonObject before, JsonObject after) =>
         Check(JsonNode.DeepEquals(before, after), "KNOWN_METADATA_DOWNGRADED");
-    private static async Task MissingMetadata(long revision)
+    private static async Task MissingMetadata()
     {
         await using var f = new Fixture("wy"); f.Server.Favorite.Add(1); await f.Enable(); Ok(await f.Run());
         var snapshot = await f.Owner.ReadLibrarySyncAsync(); var data = JsonNode.Parse(snapshot.Library.GetRawText())!.AsObject();
         var song = data["songs"]!.AsObject().First().Value!.AsObject();
-        song["revision"] = revision; song["album"] = "Preserved Album"; song["stableCount"] = 3;
-        song["sources"]![0]!["album"] = "Preserved Album";
-        song["sourcesCheckedAt"] = 1234; song["sourcesRetryAfter"] = 5678;
+        song["album"] = "Preserved Album"; song["sources"]![0]!["musicInfo"]!["albumName"] = "Preserved Album";
         await f.Owner.CommitLibrarySyncAsync(snapshot, E(data), snapshot.State);
         var before = await f.Owner.ReadLibrarySyncAsync();
         f.Server.WyMissingTracks.Add(1); Ok(await f.Run()); var after = await f.Owner.ReadLibrarySyncAsync();
@@ -46,7 +43,7 @@ public static partial class MusicNativeSyncTests
         Ok(await f.Owner.ExecuteAsync("music.library.addSongs", new { id = "favorites", ifRevision = c.GetProperty("revision").GetInt64(),
             songs = new[] { Song("wy", "1001"), Song("tx", "MID1") } }));
         var initial = await f.Owner.ReadLibrarySyncAsync(); var songs = SongStore(initial.Library);
-        Check(songs.Count == 1 && songs.First().Value!["source_data"]!["source"]!.GetValue<string>() == "tx" &&
+        Check(songs.Count == 1 && MusicSongFixture.Info(songs.First().Value!)["source"]!.GetValue<string>() == "tx" &&
             songs.First().Value!["sources"]!.AsArray().Count == 2, "SYNTHETIC_CANONICAL_SETUP");
         await f.Enable();
         // Enabling already passes through the public owner's existing source ordering normalization.
@@ -63,7 +60,7 @@ public static partial class MusicNativeSyncTests
     {
         await using var f = new Fixture("wy"); f.Server.Favorite.Add(1); f.Server.WyMissingTracks.Add(1); await f.Enable(); Ok(await f.Run());
         var first = await f.Owner.ReadLibrarySyncAsync(); var initial = SongStore(first.Library); var item = initial.Single();
-        Check(item.Value!["title"]!.GetValue<string>() == "未知歌曲" && item.Value["source_data"]!["musicId"]!.GetValue<string>() == "1001");
+        Check(item.Value!["title"]!.GetValue<string>() == "未知歌曲" && MusicSongFixture.Info(item.Value)["songmid"]!.GetValue<string>() == "1001");
         f.Server.WyMissingTracks.Clear(); await f.Restart(); Ok(await f.Run());
         var after = await f.Owner.ReadLibrarySyncAsync(); var actual = SongStore(after.Library);
         Check(actual.Count == 1 && actual.ContainsKey(item.Key) && actual[item.Key]!["title"]!.GetValue<string>() == "Track 1");

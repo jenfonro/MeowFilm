@@ -11,13 +11,13 @@ public sealed partial class MusicPlatformCatalog
     private static JsonElement? CloneContinuation(JsonElement? value)
     {
         if (value is null) return null;
-        PJ.Require(value.Value.ValueKind == JsonValueKind.Object && Encoding.UTF8.GetByteCount(value.Value.GetRawText()) <= 32768);
+        PJ.Require(value.Value.ValueKind == JsonValueKind.Object);
         return value.Value.Clone();
     }
     private static JsonObject Continuation(JsonElement? value, Call c, string target, params string[] allowed)
     {
         if (value is null) return new();
-        var input = PJ.Parse(Encoding.UTF8.GetBytes(value.Value.GetRawText()), 32768);
+        var input = PJ.Parse(Encoding.UTF8.GetBytes(value.Value.GetRawText()));
         PJ.Require(input.All(p => allowed.Contains(p.Key) || p.Key is "scope" or "target"));
         PJ.Require(PJ.S(input, "scope") == c.Scope && PJ.S(input, "target") == target, "STALE_SESSION");
         return input;
@@ -36,7 +36,10 @@ public sealed partial class MusicPlatformCatalog
             {
                 var supported = type is "song" or "playlist" or "channel" or "album" or "daily" or "fm" or "similar";
                 var needsAccount = type is "daily" or "fm" or "similar" or "heartbeat";
-                o["available"] = supported && (!needsAccount || c.Session is not null);
+                var display = !needsAccount || c.Session is not null;
+                o["requiresAccount"] = needsAccount;
+                o["display"] = display;
+                o["available"] = supported && display;
                 if (!supported || needsAccount && c.Session is null) o["errorCode"] = needsAccount && c.Session is null ? "AUTH_REQUIRED" : "UNSUPPORTED";
             }
         }
@@ -61,7 +64,7 @@ public sealed partial class MusicPlatformCatalog
         var input = PJ.Obj(("pageCode", kind == "home" ? "HOME_RECOMMEND_PAGE" : "HOME_DISCOVERY_PAGE"), ("cursor", numeric),
             ("isFirstScreen", cursor == "0"), ("pageStyleType", "noCutBlock"), ("refresh", false));
         foreach (var key in new[] { "blockCodeOrderList", "loadedPositionCodes" })
-            if (PJ.S(prev, key).Length > 0) input[key] = PJ.Input(PJ.S(prev, key), 16000);
+            if (PJ.S(prev, key).Length > 0) input[key] = PJ.InputAll(PJ.S(prev, key));
         return c.Wy("/api/link/page/rcmd/resource/show", input, data =>
         {
             Shape(data);
@@ -74,14 +77,13 @@ public sealed partial class MusicPlatformCatalog
                     try
                     {
                         var result = JsonNode.Parse(text) as JsonArray;
-                        PJ.Require(result is not null && result.Count <= 2000 && result.All(v => PJ.Text(v).Length > 0));
+                        PJ.Require(result is not null && result.All(v => PJ.Text(v).Length > 0));
                         return result!;
                     }
                     catch (JsonException) { throw new MusicPlatformException("INVALID_REQUEST"); }
                 }
                 var all = ParseCodes(PJ.S(prev, "loadedPositionCodes")).Concat(ParseCodes(PJ.S(next, "loadedPositionCodes"))).Select(PJ.Text).Distinct(StringComparer.Ordinal).ToArray();
-                var encoded = PJ.Encode(PJ.Node(all)); PJ.Require(encoded.Length <= 16000, "LIMIT");
-                next["loadedPositionCodes"] = encoded;
+                next["loadedPositionCodes"] = PJ.Encode(PJ.Node(all));
             }
             return BindDiscovery(page, c, target, prev);
         });
@@ -164,11 +166,10 @@ public sealed partial class MusicPlatformCatalog
                     var artistSelection = PlatformDiscovery.ArtistSelection(p.Tag ?? PJ.S(artistPrev, "tag"));
                     if (p.Continuation is not null) PJ.Require(PJ.S(artistPrev, "tag") == artistSelection.Token, "SNAPSHOT_CHANGED");
                     var offset = artistPrev["offset"] is null ? 0 : PJ.Count(artistPrev["offset"]);
-                    PJ.Require(offset <= 10000, "PAGINATION_LIMIT");
                     page = await c.Wy("/api/v1/artist/list", PJ.Obj(("area", artistSelection.Area),
                         ("type", artistSelection.Type), ("initial", artistSelection.Initial), ("offset", offset),
                         ("limit", 40), ("total", true)),
-                        artists => BindDiscovery(PlatformDiscovery.Artists(artists, target, artistSelection, (int)offset, 40),
+                        artists => BindDiscovery(PlatformDiscovery.Artists(artists, target, artistSelection, offset, 40),
                             c, target, artistPrev), true);
                     break;
                 case "vip":

@@ -15,6 +15,7 @@ public static class MusicWyAccountClientTests
 {
     private const string Cookie = "MUSIC_U=SYNTHETIC_CLIENT_ACCOUNT; __csrf=SYNTHETIC_CLIENT_CSRF";
     private const string Update = "NMTID=SYNTHETIC_CLIENT_UPDATE; Domain=.music.163.com; Path=/; Secure";
+    private const string RightsPath = "/weapi/music-vip-membership/client/vip/info";
     public static IEnumerable<TestCase> Cases()
     {
         yield return Case("validated-profile-updates-client-without-granting-account", ProfileUpdate);
@@ -56,6 +57,15 @@ public static class MusicWyAccountClientTests
     {
         code = 200, account = new { id = accountId }, profile = new { userId = id, nickname }
     });
+    private static HttpResponseMessage RightsReply(string id = "42", params string[] cookies)
+    {
+        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        return Json(JsonSerializer.Serialize(new
+        {
+            code = 200, data = new { userId = id, now, associator = new { expireTime = now + 120000 },
+                musicPackage = new { expireTime = 0 }, redplus = new { expireTime = 0 } }
+        }), cookies);
+    }
     private static HttpResponseMessage Json(string body, params string[] cookies)
     {
         var response = new HttpResponseMessage(HttpStatusCode.OK)
@@ -77,19 +87,25 @@ public static class MusicWyAccountClientTests
         MusicWyClientContext? expected = null;
         await using var f = new Fixture(request =>
         {
+            // Login validation also reads rights; the rights read carries the exact account cookie.
+            if (request.RequestUri!.AbsolutePath == RightsPath)
+            {
+                Check(request.Headers.GetValues("Cookie").Single().Contains("MUSIC_U=SYNTHETIC_CLIENT_ACCOUNT", StringComparison.Ordinal));
+                return Task.FromResult(RightsReply());
+            }
             Check(request.RequestUri!.AbsolutePath == "/weapi/w/nuser/account/get");
             MusicClientContextFixture.VerifyLocalWyCookie(request, expected!, Cookie);
             return Task.FromResult(Json(Profile(), Update));
         });
         expected = await f.Clients.Owner.AcquireWyAsync();
         var before = expected;
-        Check((await f.Protocol.ValidateAsync("wy", Cookie)).UserId == "42");
+        Check((await f.Protocol.ValidateAsync("wy", Cookie)).Profile.UserId == "42");
         expected = await f.Clients.Owner.AcquireWyAsync();
         Check(expected.Generation == before.Generation + 1 && expected.Nmtid == "SYNTHETIC_CLIENT_UPDATE");
         await MissingAccount(f);
         var reply = await Import(f);
         Check(Ok(reply) && !reply.GetRawText().Contains("SYNTHETIC_CLIENT_UPDATE", StringComparison.Ordinal));
-        Check(ReferenceEquals(expected, await f.Clients.Owner.AcquireWyAsync()) && f.Calls == 2);
+        Check(ReferenceEquals(expected, await f.Clients.Owner.AcquireWyAsync()) && f.Calls == 4);
         var account = await f.Accounts.AcquireAsync("wy");
         Check(account is not null && account.Cookie == Cookie && f.Accounts.IsCurrent(account));
     }
@@ -128,6 +144,12 @@ public static class MusicWyAccountClientTests
                     "__csrf=SYNTHETIC_CLIENT_CSRF; Domain=.music.163.com",
                     "NMTID=SYNTHETIC_LOGIN_CLIENT; Domain=.music.163.com");
             }
+            if (path == RightsPath)
+            {
+                Check(client.Nmtid == "SYNTHETIC_CLIENT_UPDATE");
+                MusicClientContextFixture.VerifyLocalWyCookie(request, client, Cookie);
+                return RightsReply();
+            }
             Check(path == "/weapi/w/nuser/account/get" && client.Nmtid == "SYNTHETIC_LOGIN_CLIENT");
             MusicClientContextFixture.VerifyLocalWyCookie(request, client, Cookie);
             return Json(Profile(), Update);
@@ -143,7 +165,7 @@ public static class MusicWyAccountClientTests
             Check(Ok(waiting) && waiting.GetProperty("status").GetString() == "waiting");
             await MissingAccount(f);
             var reply = await f.Accounts.CallAsync("music.accounts.qr.poll", parameters);
-            Check(Ok(reply) && reply.GetProperty("status").GetString() == "authenticated" && f.Calls == 4);
+            Check(Ok(reply) && reply.GetProperty("status").GetString() == "authenticated" && f.Calls == 5);
             Check((await f.Clients.Owner.AcquireWyAsync()).Nmtid == "SYNTHETIC_CLIENT_UPDATE");
             Check((await f.Accounts.AcquireAsync("wy"))?.Cookie == Cookie);
         }
@@ -165,7 +187,7 @@ public static class MusicWyAccountClientTests
             var client = await f!.Clients.Owner.AcquireWyAsync();
             var path = request.RequestUri!.AbsolutePath;
             MusicClientContextFixture.VerifyLocalWyCookie(request, client,
-                path == "/weapi/w/nuser/account/get" ? Cookie : null);
+                path is "/weapi/w/nuser/account/get" or RightsPath ? Cookie : null);
             if (path == "/weapi/sms/captcha/sent")
             {
                 Check(client.Nmtid is null);
@@ -178,6 +200,11 @@ public static class MusicWyAccountClientTests
                     "__csrf=SYNTHETIC_CLIENT_CSRF; Domain=.music.163.com",
                     "NMTID=SYNTHETIC_LOGIN_CLIENT; Domain=.music.163.com");
             }
+            if (path == RightsPath)
+            {
+                Check(client.Nmtid == "SYNTHETIC_CLIENT_UPDATE");
+                return RightsReply();
+            }
             Check(path == "/weapi/w/nuser/account/get" && client.Nmtid == "SYNTHETIC_LOGIN_CLIENT");
             return Json(Profile(), Update);
         }))
@@ -187,7 +214,7 @@ public static class MusicWyAccountClientTests
             await MissingAccount(f);
             var reply = await f.Accounts.CallAsync("music.accounts.sms.login", new
             { platform = "wy", phone = "10000000000", captcha = "864209" });
-            Check(Ok(reply) && f.Calls == 3 && (await f.Accounts.AcquireAsync("wy"))?.Cookie == Cookie);
+            Check(Ok(reply) && f.Calls == 4 && (await f.Accounts.AcquireAsync("wy"))?.Cookie == Cookie);
             Check((await f.Clients.Owner.AcquireWyAsync()).Nmtid == "SYNTHETIC_CLIENT_UPDATE");
         }
     }
@@ -219,7 +246,9 @@ public static class MusicWyAccountClientTests
         {
             if (request.RequestUri!.AbsolutePath == "/weapi/w/nuser/account/get")
                 return Task.FromResult(fail && step == "profile" ? Json(Profile("43", "43"), Update) : Json(Profile()));
-            Check(request.RequestUri.AbsolutePath == "/weapi/music-vip-membership/client/vip/info" && fail && step == "rights");
+            Check(request.RequestUri.AbsolutePath == RightsPath);
+            if (!fail) return Task.FromResult(RightsReply());
+            Check(step == "rights");
             long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             return Task.FromResult(Json(JsonSerializer.Serialize(new
             {

@@ -5,6 +5,7 @@ import MeowMusicFeature
 struct MusicNativePublicBrowseDetailPage: Sendable {
     let collection: MusicPublicBrowseCollection
     let tracks: [MusicNativeTrackData]
+    let sourcePositions: [Int]
     let total: Int
     let more: Bool
     let snapshot: String
@@ -94,6 +95,16 @@ extension MusicNativePlatforms {
         let root = try await wy("/api/v6/playlist/detail", .obj([("id", .string(id)), ("n", .n(100000)), ("s", .n(8))]))
         let row = root["playlist"]
         try musicRequire(row.isObject && (try MusicPlatformProtocol.numericID(row["id"])) == id, .targetChanged)
+        let ids = try browseWYIDs(row), returned = row["tracks"]
+        if returned != .null {
+            try musicRequire(returned.isArray && returned.array.count <= 20_000, .upstreamInvalid)
+            let members = Set(ids)
+            var seen = Set<String>()
+            for track in returned.array {
+                let nativeID = try MusicPlatformProtocol.numericID(track["id"])
+                try musicRequire(members.contains(nativeID) && seen.insert(nativeID).inserted, .targetChanged)
+            }
+        }
         return row
     }
     func browseWYIDs(_ row: MJ) throws -> [String] {
@@ -102,13 +113,33 @@ extension MusicNativePlatforms {
         try musicRequire(Set(ids).count == ids.count && (try row["trackCount"].integer(20_000)) >= ids.count, .upstreamInvalid)
         return ids
     }
-    func browseWYSignature(_ row: MJ) throws -> String {
-        MusicNativePublicBrowseSupport.digest(.array([row["id"], row["name"], row["creator"]["userId"],
-            row["updateTime"], row["trackUpdateTime"], row["trackCount"], .strings(try browseWYIDs(row))]))
+    func browseWYSignature(_ row: MJ, ids: [String]? = nil) throws -> String {
+        let members = try ids ?? browseWYIDs(row)
+        return MusicNativePublicBrowseSupport.digest(.array([row["id"], row["name"], row["creator"]["userId"],
+            row["updateTime"], row["trackUpdateTime"], row["trackCount"], .strings(members)]))
     }
-    func browseWYSongs(_ ids: [String], snapshot: String = "") async throws -> [MusicNativeTrackData] {
-        guard !ids.isEmpty else { return [] }
+    static func hasWYSongDisplayFields(_ row: MJ) -> Bool {
+        let artists = row.contains("ar") ? row["ar"] : row["artists"]
+        return !row["name"].string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            artists.isArray && artists.array.allSatisfy {
+                !$0["name"].string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+    }
+    private func browseWYReturnedSongs(_ row: MJ) throws -> [String: MJ] {
+        guard row["tracks"] != .null else { return [:] }
+        var songs: [String: MJ] = [:]
+        // The head cache admits only unique member IDs. Index its returned
+        // rows once per consumption, not again for every complete-queue page.
+        for track in row["tracks"].array {
+            songs[try MusicPlatformProtocol.numericID(track["id"])] = track
+        }
+        return songs
+    }
+    func browseWYSongs(_ ids: [String], snapshot: String,
+                       returned: [String: MJ]) async throws -> [String: MusicNativeTrackData] {
+        guard !ids.isEmpty else { return [:] }
         try musicRequire(ids.count <= 100)
+        try musicRequire(Set(ids).count == ids.count, .upstreamInvalid)
         let own = epoch
         let trace = MusicRequestTrace(.playlist)
         let rows = try await songBatches.value(for: snapshot + ":" + ids.joined(separator: ","), lifetime: 120, observe: { access in
@@ -118,27 +149,57 @@ extension MusicNativePlatforms {
             case .coalesced: trace.record(.coalesced)
             }
         }) { [self] in
-            try await readWYSongs(ids)
+            try await readWYSongs(ids, returned: returned)
         }
         try musicRequire(own == epoch, .staleResult)
         return rows
     }
-    private func readWYSongs(_ ids: [String]) async throws -> [MusicNativeTrackData] {
-        let c = "[" + (try ids.map { "{\"id\":" + (try MusicPlatformProtocol.numericID(.string($0))) + "}" }).joined(separator: ",") + "]"
+    /// Callers without a playlist head retain the ordered array contract.
+    /// Playlist consumers use the keyed overload so returned head fields and
+    /// absolute source positions remain available.
+    func browseWYSongs(_ ids: [String], snapshot: String = "") async throws -> [MusicNativeTrackData] {
+        let songs = try await browseWYSongs(ids, snapshot: snapshot, returned: [:])
+        return ids.compactMap { songs[$0] }
+    }
+    private func readWYSongs(_ ids: [String], returned: [String: MJ]) async throws -> [String: MusicNativeTrackData] {
+        var available: [String: MusicNativeTrackData] = [:]
+        for id in ids {
+            if let row = returned[id], let song = try browseWYDisplaySong(row) { available[id] = song }
+        }
+        let missing = ids.filter { available[$0] == nil }
+        guard !missing.isEmpty else { return available }
+        let c = "[" + (try missing.map { "{\"id\":" + (try MusicPlatformProtocol.numericID(.string($0))) + "}" }).joined(separator: ",") + "]"
         let root = try await browseWEAPI("/api/v3/song/detail", .obj([("c", .string(c))]))
-        try musicRequire(root["songs"].isArray && root["songs"].array.count <= ids.count, .upstreamInvalid)
-        var rows: [String: MJ] = [:]
+        try musicRequire(root["songs"].isArray && root["songs"].array.count <= missing.count, .upstreamInvalid)
+        let needed = Set(missing)
+        var seen = Set<String>()
         for row in root["songs"].array {
             let id = try MusicPlatformProtocol.numericID(row["id"])
-            try musicRequire(ids.contains(id) && rows[id] == nil, .targetChanged); rows[id] = row
+            try musicRequire(needed.contains(id) && seen.insert(id).inserted, .targetChanged)
+            guard let song = try browseWYDisplaySong(row) else { throw MusicServiceError.upstreamInvalid }
+            available[id] = song
         }
         // Omitted/inaccessible members are never fabricated into playable placeholders.
-        return try ids.compactMap { id in
-            guard let row = rows[id] else { return nil }
-            return try browseWYSong(row)
-        }
+        return available
     }
-    func browseWYSong(_ row: MJ) throws -> MusicNativeTrackData {
+    private func browseWYDisplaySong(_ row: MJ) throws -> MusicNativeTrackData? {
+        let artists = row.contains("ar") ? row["ar"] : row["artists"]
+        let duration = row.contains("dt") ? row["dt"] : row["duration"]
+        // A genuine field gap may be filled in one batch. Present but malformed
+        // identity/display fields are a protocol failure, not a retry hint.
+        if row["name"] != .null { _ = try row["name"].text(1024) }
+        if artists != .null {
+            try musicRequire(artists.isArray && artists.array.count <= 64, .upstreamInvalid)
+            for artist in artists.array { _ = try artist["name"].text(256, empty: true) }
+        }
+        if duration != .null {
+            try musicRequire(duration.isNumber && duration.number.isFinite &&
+                (0...604_800_000).contains(duration.number), .upstreamInvalid)
+        }
+        guard row["name"] != .null, artists != .null, duration != .null else { return nil }
+        return try Self.browseWYSong(row)
+    }
+    static func browseWYSong(_ row: MJ) throws -> MusicNativeTrackData {
         var raw = row
         let albumKey = row.contains("al") ? "al" : "album"
         if raw[albumKey]["id"] == .n(0) || raw[albumKey]["id"].id == "0" {
@@ -153,18 +214,25 @@ extension MusicNativePlatforms {
         return .init(platform: "wy", data: native.bytes)
     }
     func browseDetail(_ collection: MusicPublicBrowseCollection, offset: Int, snapshot: String) async throws -> MusicNativePublicBrowseDetailPage {
-        try musicRequire(offset >= 0 && offset <= 20_000 && offset % 30 == 0)
+        try musicRequire(offset >= 0 && offset <= 20_000)
+        if collection.kind == .playlist && [.qq, .kugou].contains(collection.platform) {
+            return try await browsePagedDetail(collection, offset: offset, snapshot: snapshot)
+        }
+        try musicRequire(offset % 30 == 0)
         if collection.platform == .netease && collection.kind == .playlist {
             let first = try await browseWYHead(collection.nativeID)
-            let ids = try browseWYIDs(first), signature = try browseWYSignature(first)
+            let ids = try browseWYIDs(first), signature = try browseWYSignature(first, ids: ids)
             try musicRequire(snapshot.isEmpty || snapshot == signature, .staleResult)
             try musicRequire(offset <= ids.count, .staleResult)
             // A fully unavailable page still advances its raw cursor. Do not
             // scan a 20,000-song collection just to display one empty page.
             let requested = Array(ids.dropFirst(offset).prefix(30))
-            let tracks = try await browseWYSongs(requested, snapshot: signature), consumed = requested.count
+            let songs = try await browseWYSongs(requested, snapshot: signature, returned: browseWYReturnedSongs(first))
+            let positions = requested.indices.filter { songs[requested[$0]] != nil }
+            let tracks = positions.compactMap { songs[requested[$0]] }, consumed = requested.count
             let hidden = first["trackCount"].int > ids.count || consumed > tracks.count
             return .init(collection: try browseCollection(first, platform: .netease), tracks: tracks,
+                         sourcePositions: positions.map { offset + $0 },
                          total: max(ids.count, first["trackCount"].int), more: offset + consumed < ids.count,
                          snapshot: signature, consumed: consumed,
                          notice: hidden ? "部分歌曲当前不可见或不可用" : nil)
@@ -173,7 +241,8 @@ extension MusicNativePlatforms {
         try musicRequire(snapshot.isEmpty || snapshot == all.snapshot, .staleResult)
         try musicRequire(offset <= all.tracks.count, .staleResult)
         let tracks = Array(all.tracks.dropFirst(offset).prefix(30))
-        return .init(collection: all.collection, tracks: tracks, total: all.tracks.count,
+        return .init(collection: all.collection, tracks: tracks,
+                     sourcePositions: Array(offset..<(offset + tracks.count)), total: all.tracks.count,
                      more: offset + tracks.count < all.tracks.count, snapshot: all.snapshot)
     }
     func browseComplete(_ collection: MusicPublicBrowseCollection) async throws -> MusicPublicBrowseNativeCollection {
@@ -216,18 +285,21 @@ extension MusicNativePlatforms {
                 try musicRequire(try MusicPlatformProtocol.numericID(album["id"]) == id, .targetChanged)
                 try musicRequire(rows.isArray && rows.array.count <= 2000 &&
                     (try album["size"].integer(2000)) == rows.array.count, .upstreamInvalid)
-                let tracks = try rows.array.map(browseWYSong)
+                let tracks = try rows.array.map(Self.browseWYSong)
                 let signature = MusicNativePublicBrowseSupport.digest(.array([album, rows]))
                 return .init(collection: try browseCollection(album, platform: .netease, album: true), tracks: tracks, snapshot: signature)
             }
             let first = try await browseWYHead(collection.nativeID), ids = try browseWYIDs(first)
             try musicRequire(ids.count <= 2000, .limit)
-            let signature = try browseWYSignature(first)
+            let signature = try browseWYSignature(first, ids: ids)
+            let returned = try browseWYReturnedSongs(first)
             var tracks: [MusicNativeTrackData] = []
             // Use the same page keys as browsing so opening a queue reuses
             // already validated metadata, rather than fetching it twice.
             for offset in stride(from: 0, to: ids.count, by: 30) {
-                tracks += try await browseWYSongs(Array(ids.dropFirst(offset).prefix(30)), snapshot: signature)
+                let requested = Array(ids.dropFirst(offset).prefix(30))
+                let songs = try await browseWYSongs(requested, snapshot: signature, returned: returned)
+                tracks += requested.compactMap { songs[$0] }
             }
             let second = try await browseWYHead(collection.nativeID, fresh: true)
             if try browseWYSignature(second) != signature {
@@ -248,24 +320,19 @@ extension MusicNativePlatforms {
         }
     }
     func browseKGComplete(_ id: String) async throws -> MusicPublicBrowseNativeCollection {
-        var tracks: [MusicNativeTrackData] = [], rows: [MJ] = [], head: MJ?, total = 0
-        for offset in stride(from: 0, to: 2000, by: 100) {
-            let root = try await browseKGDetail(id, offset: offset, limit: 100), data = root["data"], info = data["list_info"]
-            try musicRequire(info.isObject && (!info.contains("global_collection_id") || info["global_collection_id"].string == id), .targetChanged)
-            let count = try (info.contains("count") ? info["count"] : data["count"]).integer(2000)
-            let version = info.contains("list_ver") ? info["list_ver"] : data.contains("list_ver") ? data["list_ver"] : root["list_ver"]
-            try musicRequire(version == .null || version.isInteger, .upstreamInvalid)
-            let summary = MJ.array([info, .n(count), version])
-            if let head { try musicRequire(summary == head && count == total, .staleResult) }
-            else { head = summary; total = count }
-            let page = data.contains("songs") ? data["songs"] : data["info"]
-            try musicRequire(page.isArray && page.array.count <= 100 && rows.count + page.array.count <= total &&
-                (!page.array.isEmpty || offset >= total), .upstreamInvalid)
-            rows += page.array; tracks += try page.array.map(kugouSong)
-            if rows.count == total {
-                var meta = info; meta["global_collection_id"] = .string(id); meta["count"] = .n(total)
-                return .init(collection: try browseCollection(meta, platform: .kugou), tracks: tracks,
-                    snapshot: MusicNativePublicBrowseSupport.digest(.array([.string(id), summary, .array(rows)])))
+        var tracks: [MusicNativeTrackData] = [], head: String?
+        for _ in 0..<MusicRemoteQueueSource.maximumPages {
+            let offset = tracks.count
+            let page = try await browseKGPage(id, offset: offset, limit: 100)
+            try musicRequire(page.total <= 2000, .limit)
+            try musicRequire(head == nil || head == page.headSignature, .staleResult)
+            head = page.headSignature; tracks += page.tracks
+            if !page.more {
+                try musicRequire(tracks.count == page.total, .contentUnavailable)
+                return .init(collection: page.collection, tracks: tracks,
+                    snapshot: MusicNativePublicBrowseSupport.digest(.array([.string(page.headSignature),
+                        .array(tracks.map { .string(MusicNativePublicBrowseSupport.digestData($0.data)) })])),
+                    headSignature: page.headSignature)
             }
         }
         throw MusicServiceError.limit

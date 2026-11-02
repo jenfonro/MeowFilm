@@ -110,7 +110,11 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
     var audioCacheTask: Task<Void, Never>?
     var audioCacheCaptures: [UUID: Task<Void, Never>] = [:]
     var lastAudioCacheScope: String?
-    var homeCache: (scope: String, revision: UUID, expires: Date, page: MusicNativePublicBrowseDiscovery)?
+    var homeCache: (source: MusicPublicBrowsePlatform, scope: String, revision: UUID,
+                    expires: Date, page: MusicNativePublicBrowseDiscovery)?
+    var selectedHomeSource: MusicPublicBrowsePlatform?
+    var homeSourceRevision = UUID()
+    var homeObservers: [UUID: AsyncStream<Void>.Continuation] = [:]
     var anonymousHomeBinding: MusicNativeHomeBinding?
     var lastHomeScope: String?
     let ownedTransport: URLSessionMusicNativeHTTPTransport?
@@ -162,14 +166,16 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
                 transport: (any MusicNativeHTTPTransport)? = nil,
                 clock: @escaping @Sendable () -> Date = { Date() },
                 random: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) },
-                requestAdmission: RequestAdmission? = nil) {
+                requestAdmission: RequestAdmission? = nil,
+                clientContexts: (any MusicNativeClientContextProviding)? = nil) {
         self.document = document; self.scripts = scripts; self.accounts = accounts; self.homeSnapshot = homeSnapshot
         self.audioFileCache = audioFileCache
         now = clock; self.random = random
         self.enabledPlatforms = enabledPlatforms
+        selectedHomeSource = enabledPlatforms.contains(.netease) ? .netease : nil
         let owned = transport == nil ? URLSessionMusicNativeHTTPTransport(admission: requestAdmission ?? RequestAdmission()) : nil
         ownedTransport = owned
-        publicPlatforms = MusicNativePlatforms(transport: transport ?? owned!, qq: qq, clock: clock)
+        publicPlatforms = MusicNativePlatforms(transport: transport ?? owned!, qq: qq, clock: clock, clients: clientContexts)
         // The existing nonisolated protection fence must also revoke feedback
         // before the service actor can acknowledge a lock-screen transition.
         let feedback = playbackFeedback
@@ -215,6 +221,8 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
         audioCacheCaptures.removeAll()
         clearSimilarRuntime()
         homeCache = nil
+        for observer in homeObservers.values { observer.finish() }
+        homeObservers.removeAll()
         anonymousHomeBinding?.authorization.revoke(); anonymousHomeBinding = nil
         lastHomeScope = nil
         playbackFeedback.invalidate()

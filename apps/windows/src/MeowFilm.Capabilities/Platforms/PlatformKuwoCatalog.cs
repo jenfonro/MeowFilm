@@ -39,8 +39,8 @@ public sealed partial class MusicPlatformCatalog
         var raw = PublicCatalogData.KuwoJson(await c.PublicRead(KwRequest("http://search.kuwo.cn/r.s", query)));
         var total = PJ.Count(raw["TOTAL"]);
         PJ.Require(!songs || total == 0 || PJ.Scalar(raw["SHOW"]) != "0", "INVALID_RESPONSE");
-        var rows = ExactPage(raw["abslist"] ?? (total == 0 ? new JsonArray() : null), p.Page, p.Limit, total);
-        return PJ.Page("kw", rows.Select(r => songs ? PlatformSongs.Kw(r) : PlatformSongs.PublicPlaylist("kw", r)),
+        var rows = PJ.Rows(raw["abslist"] ?? (total == 0 ? new JsonArray() : null), p.Limit);
+        return PJ.SearchPage("kw", rows.Select(r => songs ? PlatformSongs.Kw(r) : PlatformSongs.PublicPlaylist("kw", r)),
             p.Page, p.Limit, total, p.Page * (long)p.Limit < total);
     }
     private static async Task<JsonObject> KwSong(Call c, MusicSongRequest p)
@@ -64,12 +64,12 @@ public sealed partial class MusicPlatformCatalog
     private static async Task<JsonObject> KwPlaylist(Call c, MusicPlaylistRequest p)
     {
         var id = PJ.IdInput(p.Id, PlatformSongs.PublicNumericId);
-        int offset = (p.Page - 1) * p.Limit, first = offset / 1000;
+        long offset = (p.Page - 1L) * p.Limit, first = offset / 1000;
         var items = new List<JsonObject>();
         JsonObject? info = null;
         long total = 0;
         string? snapshot = null;
-        for (int batch = first; ; batch++)
+        for (long batch = first; ; batch++)
         {
             var raw = PublicCatalogData.KuwoJson(await c.PublicRead(KwRequest("http://nplserver.kuwo.cn/pl.svc", new()
             {
@@ -81,28 +81,27 @@ public sealed partial class MusicPlatformCatalog
             var card = PlatformSongs.PublicPlaylist("kw", raw, detail: true);
             PJ.Require(PJ.S(card, "id") == id, "IDENTITY_MISMATCH");
             var count = PJ.Count(raw["total"]);
-            PJ.Require(count <= 10000, "LIMIT");
             CheckDeclaredPage(raw, "pn", batch); CheckDeclaredPage(raw, "rn", 1000);
             var revision = PJ.Hash(PJ.Node(new object?[] { c.Scope, id, count, PJ.S(card, "name"),
                 PJ.Scalar(raw["uid"]), PJ.S(card, "creator") }));
             CheckSnapshot(p.Snapshot, revision); CheckSnapshot(snapshot, revision);
             snapshot ??= revision; info ??= card; total = count;
             var rows = ExactPage(raw["musiclist"] ?? (count == 0 ? new JsonArray() : null), batch + 1, 1000, count);
-            int start = Math.Max(offset - batch * 1000, 0);
+            int start = checked((int)Math.Max(offset - batch * 1000, 0));
             var expected = (int)Math.Min(p.Limit, Math.Max(0, count - offset));
             items.AddRange(rows.Skip(start).Take(expected - items.Count).Select(r => PlatformSongs.Kw(r)));
             if (items.Count == expected) break;
-            PJ.Require(batch < 9 && rows.Count == 1000, "INCOMPLETE_PAGE");
+            PJ.Require(rows.Count == 1000, "INCOMPLETE_PAGE");
         }
         return PublicPlaylistPage(c, p, info!, items, total, snapshot!, offset);
     }
-    private static void CheckDeclaredPage(JsonNode data, string field, int expected)
+    private static void CheckDeclaredPage(JsonNode data, string field, long expected)
     {
         if (PJ.At(data, field) is { } declared)
             PJ.Require(PJ.Count(declared) == expected, "PAGINATION_STALLED");
     }
     private static JsonObject PublicPlaylistPage(Call c, MusicPlaylistRequest p, JsonObject info,
-        List<JsonObject> items, long total, string snapshot, int offset)
+        List<JsonObject> items, long total, string snapshot, long offset)
     {
         var page = PJ.Page(c.Platform, items, p.Page, p.Limit, total, p.Page * (long)p.Limit < total);
         page["id"] = p.Id; page["name"] = info["name"]?.DeepClone(); page["cover"] = info["cover"]?.DeepClone();
@@ -111,7 +110,7 @@ public sealed partial class MusicPlatformCatalog
         // pretending these local identities are a strong upstream revision.
         page["memberIds"] = PJ.Arr(items.Select((s, i) => JsonValue.Create(c.Platform + ":" + p.Id + ":" +
             Dec(offset + i) + ":" + NativeMusicSong.NativeId(s) +
-            (c.Platform == "mg" ? ":" + PJ.S(s, "source_data", "copyrightId") : ""))));
+            (c.Platform == "mg" ? ":" + PJ.S(NativeMusicSong.SourceData(s), "copyrightId") : ""))));
         return page;
     }
 }

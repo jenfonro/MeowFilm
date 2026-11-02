@@ -63,8 +63,8 @@ public static class MusicWySmsUiTests
         Check(f.Module.AccountStatus == "会话验证成功" && f.Module.SelectedAccount!.State == "verified" &&
             f.Module.SelectedAccount.UserId == "42" && !f.Module.HasAccountSms && f.Store.Writes == 1);
         await f.Module.ReadAccountsAsync(); Check(f.Module.SelectedAccount!.State == "verified");
-        await f.Module.LogoutAccountAsync();
-        Check(f.Module.SelectedAccount!.State == "none" && f.Transport.Calls == 3 && f.Runtime.Calls == 0);
+        await f.Module.LogoutAccountAsync(f.Module.SelectedAccount!, confirmed: true);
+        Check(f.Module.SelectedAccount!.State == "none" && f.Transport.Calls == 4 && f.Runtime.Calls == 0);
     }
     private static Window Offscreen(object content) => new() { Content = content, Width = 620, Height = 1000,
         Left = -20000, Top = -20000, ShowInTaskbar = false, WindowStyle = WindowStyle.ToolWindow };
@@ -103,7 +103,7 @@ public static class MusicWySmsUiTests
             // fence. This success case must settle before closing the test view;
             // closing while busy deliberately exercises cancellation instead.
             await MusicNativeWySmsTests.Until(() => f.Module.SelectedAccount!.State == "verified" && !f.Module.AccountBusy);
-            Check(f.Module.AccountStatus == "会话验证成功" && f.Store.Writes == 1 && f.Transport.Calls == 3);
+            Check(f.Module.AccountStatus == "会话验证成功" && f.Store.Writes == 1 && f.Transport.Calls == 4);
             Cleared(view); Check(f.Runtime.Calls == 0);
         }
         finally { window.Close(); }

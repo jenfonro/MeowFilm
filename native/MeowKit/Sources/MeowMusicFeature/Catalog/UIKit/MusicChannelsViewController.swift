@@ -5,28 +5,34 @@ import MeowUI
 
 @MainActor
 public final class MusicChannelsViewController: MusicPageViewController, UIPageViewControllerDataSource,
-    UIPageViewControllerDelegate, UICollectionViewDelegateFlowLayout
+    UIPageViewControllerDelegate
 {
-    public var onChannelChanged: ((MusicPublicBrowseChannel?) -> Void)?
-    public var selectedChannel: MusicPublicBrowseChannel? { selection.channel }
+    /// The dynamic channel switcher is placed in the app-owned page header title area.
+    public var channelSwitcherView: UIView { channelTabs }
     private let model: MusicViewModel
     private let browser: (any MusicPublicBrowsing)?
     private weak var router: (any MusicUIRouting)?
     private let selection = MusicChannelSelection()
     private let catalogue: MusicPublicBrowseViewModel?
     private let pager = UIPageViewController(transitionStyle: .scroll, navigationOrientation: .horizontal)
-    private let gridPage = UIViewController()
-    private lazy var modes = RetainedPagesController(pageFactories: [
-        { [gridPage] in gridPage }, { [pager] in pager },
-    ])
+    /// A scroll pager cannot hold an empty controller list while the catalogue is empty.
+    private let emptyPage = UIViewController()
     private var pages: [String: MusicBrowseViewController] = [:]
     private var channels: [MusicPublicBrowseChannel] = []
     private var pagingAccess: UUID?
+    private var observation: Task<Void, Never>?
+    private var observationAccess: UUID?
     private var pendingChannel: MusicPublicBrowseChannel?
-    private var dataSource: UICollectionViewDiffableDataSource<Int, String>!
     private var shownCatalogueError: String?
     private weak var channelPicker: MusicChannelsPickerViewController?
-    private lazy var grid = UICollectionView(frame: .zero, collectionViewLayout: UICollectionViewFlowLayout())
+    private lazy var pickerSheet = FixedSheetTransition(edge: .top) { [weak self] viewport in
+        let safeTop = self?.view.window?.safeAreaInsets.top ?? 0
+        let content = self?.channelPicker?.preferredHeight ?? 360
+        return CGSize(width: viewport.width,
+                      height: min(min(620, viewport.height * 0.72), safeTop + content))
+    }
+    private let channelTabs = MusicChannelTabsView()
+    private let cataloguePlaceholder = UILabel()
 
     public init(model: MusicViewModel, browser: (any MusicPublicBrowsing)?,
                 appearance: MusicAppearancePreferencesStore, router: any MusicUIRouting) {
@@ -37,30 +43,31 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        grid.backgroundColor = .clear
-        grid.delegate = self
-        grid.alwaysBounceVertical = true
-        grid.register(MusicChannelCell.self, forCellWithReuseIdentifier: "channel")
-        dataSource = UICollectionViewDiffableDataSource(collectionView: grid) { [weak self] view, path, id in
-            guard let self, let channel = self.channels.first(where: { $0.id == id }) else { return nil }
-            let cell = view.dequeueReusableCell(withReuseIdentifier: "channel", for: path) as! MusicChannelCell
-            cell.configure(channel, theme: self.theme)
-            return cell
+        pickerSheet.onTransitionEnded = { [weak self] presenting, _ in
+            guard !presenting else { return }
+            self?.channelPicker = nil
         }
-        grid.refreshControl = UIRefreshControl()
-        grid.refreshControl?.addAction(UIAction { [weak self] _ in
-            guard let self else { return }
-            guard let catalogue = self.catalogue else { self.grid.refreshControl?.endRefreshing(); return }
-            self.runPageTask {
-                await catalogue.refresh()
-                self.grid.refreshControl?.endRefreshing()
-            }
-        }, for: .valueChanged)
-        gridPage.view = grid
+        channelTabs.isHidden = true
         pager.dataSource = self; pager.delegate = self
-        addChild(modes)
-        view.addSubview(modes.view); modes.view.pinEdges(to: view)
-        modes.didMove(toParent: self)
+        emptyPage.view.backgroundColor = .clear
+        addChild(pager)
+        view.addSubview(pager.view)
+        cataloguePlaceholder.textAlignment = .center
+        cataloguePlaceholder.textColor = UIColor(theme.muted)
+        cataloguePlaceholder.isHidden = true
+        view.addSubview(cataloguePlaceholder)
+        pager.view.translatesAutoresizingMaskIntoConstraints = false
+        cataloguePlaceholder.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            pager.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            pager.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            pager.view.topAnchor.constraint(equalTo: contentTopAnchor),
+            pager.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            cataloguePlaceholder.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
+            cataloguePlaceholder.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
+            cataloguePlaceholder.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+        ])
+        pager.didMove(toParent: self)
         if let catalogue {
             observe(catalogue.$sections.map { _ in }.eraseToAnyPublisher()) {
                 [weak self] in self?.renderCatalogue()
@@ -73,6 +80,7 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
 
     public override func pageDidBecomeActive() { activateCatalogue() }
     public override func pageDidBecomeInactive() {
+        observation?.cancel(); observation = nil; observationAccess = nil
         catalogue?.disappear()
         for page in pages.values { PageViewController.invalidatePages(in: page) }
         pages.removeAll()
@@ -84,40 +92,34 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
 
     public override func applyTheme() {
         super.applyTheme()
-        if isViewLoaded, dataSource != nil {
-            for path in grid.indexPathsForVisibleItems {
-                guard let id = dataSource.itemIdentifier(for: path),
-                      let channel = channels.first(where: { $0.id == id }),
-                      let cell = grid.cellForItem(at: path) as? MusicChannelCell else { continue }
-                cell.configure(channel, theme: theme)
-            }
+        if isViewLoaded {
+            cataloguePlaceholder.textColor = UIColor(theme.muted)
+            updateChannelTabs()
+            renderCatalogueState()
         }
     }
 
     public func select(_ channel: MusicPublicBrowseChannel) {
         if pagingAccess != nil { pendingChannel = channel; return }
         selection.selectChannel(channel)
-        if !channels.contains(where: { $0.id == channel.id }) { channels.insert(channel, at: 0) }
-        updateGrid()
+        if !channels.contains(where: { $0.identity == channel.identity }) { channels.insert(channel, at: 0) }
         renderSelection()
     }
 
     public func showPicker() {
-        guard canPresentPageAlert, model.isAvailable, !model.isClosed else { return }
+        guard canPresentPageAlert, model.isAvailable, !model.isClosed,
+              presentedViewController == nil else { return }
         let access = model.accountAccessGeneration
-        let picker = MusicChannelsPickerViewController(channels: channels, selectedID: selection.channel?.id,
-                                                       appearance: appearance) {
+        let picker = MusicChannelsPickerViewController(channels: channels, selectedID: selection.channel?.identity,
+                                                       emptyTitle: pickerEmptyTitle, appearance: appearance) {
             [weak self] channel in
             guard let self, self.isPageActive, self.model.accountAccessGeneration == access else { return }
             self.select(channel)
         }
         channelPicker = picker
-        picker.modalPresentationStyle = .pageSheet
-        picker.sheetPresentationController?.detents = [.custom { context in
-            min(620, context.maximumDetentValue * 0.72)
-        }]
-        picker.sheetPresentationController?.preferredCornerRadius = 24
-        picker.sheetPresentationController?.prefersGrabberVisible = true
+        picker.modalPresentationStyle = .custom
+        picker.transitioningDelegate = pickerSheet
+        pickerSheet.install(on: picker)
         present(picker, animated: true)
     }
 
@@ -145,26 +147,10 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
             select(pending)
         } else if completed, access == model.accountAccessGeneration,
                   let shown = pager.viewControllers?.first,
-                  let channel = channels.first(where: { pages[$0.id] === shown }) {
+                  let channel = channels.first(where: { pages[$0.identity] === shown }) {
             selection.selectChannel(channel)
-            onChannelChanged?(channel)
         }
-    }
-
-    public func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
-        guard let id = dataSource.itemIdentifier(for: indexPath),
-              let channel = channels.first(where: { $0.id == id }) else { return }
-        select(channel)
-    }
-
-    public func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout,
-                               sizeForItemAt indexPath: IndexPath) -> CGSize {
-        CGSize(width: max(0, (collectionView.bounds.width - 48) / 4), height: 52)
-    }
-
-    public func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout,
-                               insetForSectionAt section: Int) -> UIEdgeInsets {
-        UIEdgeInsets(top: PageLayoutMetrics.contentGap, left: 0, bottom: 0, right: 0)
+        if channels.isEmpty { renderSelection() }
     }
 
     private func activateCatalogue() {
@@ -172,6 +158,10 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
         catalogue.setAccess(available: model.isAvailable && !model.isClosed,
                             generation: model.accountAccessGeneration)
         catalogue.appear()
+        if observationAccess != model.accountAccessGeneration {
+            observation?.cancel(); observationAccess = model.accountAccessGeneration
+            observation = Task { await catalogue.observeHomeChanges() }
+        }
         if !catalogue.loaded, !catalogue.isLoading, catalogue.error == nil {
             runPageTask { await catalogue.loadIfNeeded() }
         }
@@ -183,35 +173,32 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
             if case .channel(let value) = item.content { return value }; return nil
         } ?? []
         channels = items
-        selection.restoreChannel(from: channels)
-        if catalogue?.loaded == true, let selected = selection.channel,
-           !channels.contains(where: { $0.id == selected.id }) {
+        selection.restoreChannel(from: channels, catalogueLoaded: catalogue?.loaded == true)
+        if catalogue?.loaded == true, !channels.isEmpty, let selected = selection.channel,
+           !channels.contains(where: { $0.identity == selected.identity }) {
             channels.insert(selected, at: 0)
         }
-        channelPicker?.update(channels: channels, selectedID: selection.channel?.id)
-        if isViewLoaded { updateGrid(); renderSelection(); renderCatalogueState() }
+        if isViewLoaded { renderSelection(); renderCatalogueState() }
     }
 
-    private func updateGrid() {
-        guard dataSource != nil else { return }
-        var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
-        snapshot.appendSections([0])
-        snapshot.appendItems(channels.map(\.id))
-        if dataSource.snapshot().itemIdentifiers != snapshot.itemIdentifiers {
-            dataSource.apply(snapshot, animatingDifferences: false)
+    private var pickerEmptyTitle: String {
+        catalogue?.isLoading == true ? "加载中" : "暂无频道"
+    }
+
+    private func updateChannelTabs() {
+        guard isViewLoaded else { return }
+        channelTabs.isHidden = channels.isEmpty || selection.channel == nil
+        channelTabs.configure(channels: channels, selectedID: selection.channel?.identity, theme: theme) {
+            [weak self] channel in self?.select(channel)
         }
-        applyTheme()
     }
 
     private func renderCatalogueState() {
         guard isViewLoaded else { return }
         let text = channels.isEmpty ? catalogue?.isLoading == true ? "加载中" :
             catalogue?.loaded == true ? "暂无频道" : nil : nil
-        if let text {
-            let label = UILabel()
-            label.text = text; label.textAlignment = .center; label.textColor = UIColor(theme.muted)
-            grid.backgroundView = label
-        } else { grid.backgroundView = nil }
+        cataloguePlaceholder.text = text
+        cataloguePlaceholder.isHidden = text == nil
         if catalogue?.error == nil { shownCatalogueError = nil; return }
         guard canPresentPageAlert, let catalogue, let error = catalogue.error else { return }
         let message = error.message(operation: catalogue.errorContext, diagnosticID: catalogue.errorDiagnosticID)
@@ -230,20 +217,33 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
 
     private func renderSelection() {
         guard isViewLoaded else { return }
+        channelPicker?.update(channels: channels, selectedID: selection.channel?.identity,
+                              emptyTitle: pickerEmptyTitle)
+        updateChannelTabs()
         guard !channels.isEmpty, let selected = selection.channel, let page = controller(selected) else {
-            modes.select(0, animated: false)
-            onChannelChanged?(nil)
+            showEmptySelection()
             return
         }
-        modes.select(1, animated: false)
+        show(page)
+    }
+
+    private func showEmptySelection() {
+        guard pagingAccess == nil else { return }
+        // Container appearance alone does not invalidate retained pages, and
+        // hidden pages can keep their carousel active.
+        for page in pages.values { PageViewController.invalidatePages(in: page) }
+        pages.removeAll()
+        show(emptyPage)
+    }
+
+    private func show(_ page: UIViewController) {
         if pager.viewControllers?.first !== page, pagingAccess == nil {
             pager.setViewControllers([page], direction: .forward, animated: false)
         }
-        onChannelChanged?(selected)
     }
 
     private func controller(_ channel: MusicPublicBrowseChannel) -> MusicBrowseViewController? {
-        if let existing = pages[channel.id] { return existing }
+        if let existing = pages[channel.identity] { return existing }
         guard let router else { return nil }
         let page = MusicBrowseViewController(
             title: channel.title, model: model, browser: browser,
@@ -251,35 +251,21 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
             router: router, embedded: true
         )
         page.lifetimeOwner = self
-        pages[channel.id] = page
+        pages[channel.identity] = page
         return page
     }
 
     private func neighbor(of viewController: UIViewController, step: Int) -> UIViewController? {
-        guard let index = channels.firstIndex(where: { pages[$0.id] === viewController }),
+        guard let index = channels.firstIndex(where: { pages[$0.identity] === viewController }),
               channels.indices.contains(index + step) else { return nil }
         return controller(channels[index + step])
     }
 
-    isolated deinit {
-        for page in pages.values { PageViewController.invalidatePages(in: page) }
-    }
-}
-
-@MainActor
-private final class MusicChannelCell: UICollectionViewCell {
-    private let title = UILabel()
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        title.font = .systemFont(ofSize: 13); title.numberOfLines = 2; title.textAlignment = .center
-        contentView.addSubview(title); title.pinEdges(to: contentView)
-        contentView.layer.cornerRadius = 13
-    }
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    func configure(_ channel: MusicPublicBrowseChannel, theme: PageTheme) {
-        title.text = channel.title; title.textColor = UIColor(theme.ink)
-        contentView.backgroundColor = UIColor(theme.chip)
-        accessibilityIdentifier = "music.channel.\(channel.id)"
+    nonisolated deinit {
+        MainActor.assumeIsolated {
+            observation?.cancel()
+            for page in pages.values { PageViewController.invalidatePages(in: page) }
+        }
     }
 }
 

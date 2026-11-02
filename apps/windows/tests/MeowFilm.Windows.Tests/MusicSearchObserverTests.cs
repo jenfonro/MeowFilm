@@ -5,7 +5,7 @@ using MeowFilm.Capabilities.Search;
 
 namespace MeowFilm.Windows.Tests;
 
-public static class MusicAggregateSearchObserverTests
+public static class MusicSearchObserverTests
 {
     public static IEnumerable<TestCase> Cases()
     {
@@ -32,7 +32,7 @@ public static class MusicAggregateSearchObserverTests
     private static long Revision(JsonElement value) => value.GetProperty("revision").GetInt64();
     private static Task<JsonElement> Start(MusicSearchCoordinator search, string[]? platforms = null,
         string kind = "songs", string keyword = "observer") =>
-        search.ExecuteAsync("music.search.start", new { keyword, kind, platforms = platforms ?? ["wy"] });
+        search.ExecuteAsync("music.search.start", new { keyword, kind, platforms = platforms ?? ["wy"], pages = 1, concurrency = 1, cacheMinutes = 60 });
     private static Task<JsonElement> Call(MusicSearchCoordinator search, string method, string id) =>
         search.ExecuteAsync("music.search." + method, new { id });
     private static JsonElement Empty(MusicSearchRequest request) => JsonSerializer.SerializeToElement(new

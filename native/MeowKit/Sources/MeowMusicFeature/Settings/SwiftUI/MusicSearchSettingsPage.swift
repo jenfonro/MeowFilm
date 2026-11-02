@@ -47,7 +47,7 @@ final class MusicSearchSettingsViewController: MusicSettingsPageViewController<M
         super.init(appearance: appearance, content: MusicSearchSettingsContent(
             state: state, theme: PageTheme(palette: appearance.pageColorway)
         ))
-        title = "搜索设置"
+        pageTitle = "搜索设置"
     }
 
     override func applyTheme() {
@@ -66,16 +66,20 @@ struct MusicSearchSettingsContent: View {
         List {
             Section("歌曲搜索平台") {
                 ForEach(MusicSearchPreferences.platforms, id: \.rawValue) { platform in
-                    Toggle(platform.title, isOn: platformBinding(platform, songs: true))
+                    Toggle(isOn: platformBinding(platform, songs: true)) {
+                        MusicPlatformLabel(platform: platform, theme: theme)
+                    }
                         .accessibilityIdentifier("music.search.platform.\(platform.rawValue)")
+                        .modifier(MusicSettingsRowStyle(theme: theme))
                 }
             }
-            .listRowBackground(Color(uiColor: UIColor(theme.surface)).opacity(0.58))
+            .headerProminence(.increased)
             Section {
                 Toggle("搜索歌曲同时搜索歌单", isOn: Binding(
                     get: { state.value.searchPlaylists },
                     set: { state.setSearchPlaylists($0) }
                 ))
+                .modifier(MusicSettingsRowStyle(theme: theme))
                 Picker("歌单搜索", selection: Binding(
                     get: { state.value.playlistMode },
                     set: { state.setPlaylistMode($0) }
@@ -86,15 +90,18 @@ struct MusicSearchSettingsContent: View {
                     Text("聚合").tag("aggregate")
                 }
                 .pickerStyle(.menu)
+                .modifier(MusicSettingsRowStyle(theme: theme))
             }
-            .listRowBackground(Color(uiColor: UIColor(theme.surface)).opacity(0.58))
             if state.value.playlistMode == "aggregate" {
                 Section("歌单搜索聚合平台") {
                     ForEach(MusicSearchPreferences.platforms, id: \.rawValue) { platform in
-                        Toggle(platform.title, isOn: platformBinding(platform, songs: false))
+                        Toggle(isOn: platformBinding(platform, songs: false)) {
+                            MusicPlatformLabel(platform: platform, theme: theme)
+                        }
+                            .modifier(MusicSettingsRowStyle(theme: theme))
                     }
                 }
-                .listRowBackground(Color(uiColor: UIColor(theme.surface)).opacity(0.58))
+                .headerProminence(.increased)
             }
         }
         .modifier(MusicSettingsListStyle(theme: theme))

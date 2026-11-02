@@ -22,7 +22,7 @@ namespace MeowFilm.Capabilities;
 public interface IMusicApplication : IAsyncDisposable, IScriptPlatformCapabilities,
     IMusicRecommendationSource, IMusicDiscoverySource, IMusicAccountDetailsSource,
     IMusicAccountDetailsNotifications, IMusicPlaybackFeedbackSource, IMusicLibrarySyncSource,
-    IMusicAggregateSearchSource, IMusicChorusInvalidationSource, IMusicOfficialPlaybackAuthority,
+    IMusicSearchSource, IMusicChorusInvalidationSource, IMusicOfficialPlaybackAuthority,
     IMusicVipPageSource
 {
     Task InitializeAsync(CancellationToken cancellationToken = default);
@@ -89,7 +89,8 @@ public sealed partial class MusicNativeApplication : IMusicApplication
     internal MusicNativeApplication(IProtectedDocumentStore store, IRuntimeClient scriptRuntime,
         HttpMessageHandler? transportHandler,
         Func<IMusicPlatformSessionSource, MusicPlatformHttp, IMusicFeedbackProtocol>? feedbackFactory,
-        Func<IMusicPlatformSessionSource, MusicPlatformHttp, IMusicSearchDiscovery>? discoveryFactory)
+        Func<IMusicPlatformSessionSource, MusicPlatformHttp, IMusicSearchDiscovery>? discoveryFactory,
+        TimeProvider? searchClock = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(scriptRuntime);
@@ -102,11 +103,11 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         officialAudio = new(http, clients);
         sourceCache = new(store);
         sessions = new(accounts);
-        catalog = new(sessions, http, clients);
+        catalog = new(sessions, http, clients, clientProtocol: clientProtocol);
         nativeCatalog = new(catalog, library);
         recommendationQueue = new(library);
         recommendations = new(catalog, recommendationQueue, SelectRecommendationAsync, readAsync: ReadRecommendationsAsync);
-        aggregateSearch = new(catalog, searchAsync: SearchCatalogAsync);
+        searchCoordinator = new(catalog, searchClock, searchAsync: SearchCatalogAsync);
         var discoverySessions = new DiscoverySessions(accounts);
         discovery = discoveryFactory?.Invoke(discoverySessions, http) ?? new NativeMusicSearchDiscovery(discoverySessions, http, clients);
         scripts = new(library, scriptRuntime);
@@ -117,7 +118,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         // Fence recommendation callbacks synchronously before any catalog cleanup.
         accounts.SessionChanged += RecommendationAccountChanged;
         accounts.SessionChanged += nativeCatalog.Invalidate;
-        accounts.SessionChanged += aggregateSearch.Invalidate;
+        accounts.SessionChanged += searchCoordinator.Invalidate;
         accounts.SessionChanged += lyrics.Invalidate;
         accounts.SessionChanged += Feedback.AccountChanged;
         accounts.SessionChanged += librarySync.Invalidate;
@@ -164,7 +165,6 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         lock (gate)
         {
             if (stopping) return Failed("CLOSED");
-            if (pending >= 32) return Failed("LIMIT");
             if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
             generation = lifetime.Token;
         }
@@ -293,7 +293,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         lock (gate) issuedDiscoveryGeneration = 0;
         try { discovery.Invalidate(); } catch (Exception e) { failure ??= e; }
         await Attempt(discovery.CancelAndDrainAsync).ConfigureAwait(false);
-        await Attempt(() => aggregateSearch.PrepareShutdownAsync()).ConfigureAwait(false);
+        await Attempt(() => searchCoordinator.PrepareShutdownAsync()).ConfigureAwait(false);
         await Attempt(() => librarySync.PrepareShutdownAsync()).ConfigureAwait(false);
         // Native mutations ignore cancellation after CAS admission. Their receipts
         // must settle before the final library preparation, even on earlier failure.
@@ -347,7 +347,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         await library.CancelShutdownPreparationAsync().ConfigureAwait(false);
         await scripts.CancelShutdownPreparationAsync().ConfigureAwait(false);
         await librarySync.CancelShutdownPreparationAsync().ConfigureAwait(false);
-        await aggregateSearch.CancelShutdownPreparationAsync().ConfigureAwait(false);
+        await searchCoordinator.CancelShutdownPreparationAsync().ConfigureAwait(false);
         await vipPage.CancelShutdownPreparationAsync().ConfigureAwait(false);
         Feedback.CancelShutdownPreparation();
         // All borrowed owners are usable before the coordinator can admit new work.
@@ -426,7 +426,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         await Attempt(() => scripts.DisposeAsync().AsTask()).ConfigureAwait(false);
         await Attempt(() => lyrics.DisposeAsync().AsTask()).ConfigureAwait(false);
         await Attempt(() => nativeCatalog.DisposeAsync().AsTask()).ConfigureAwait(false);
-        await Attempt(() => aggregateSearch.DisposeAsync().AsTask()).ConfigureAwait(false);
+        await Attempt(() => searchCoordinator.DisposeAsync().AsTask()).ConfigureAwait(false);
         await Attempt(() => discovery.DisposeAsync().AsTask()).ConfigureAwait(false);
         await Attempt(() => Feedback.DisposeAsync().AsTask()).ConfigureAwait(false);
         await Attempt(() => librarySync.DisposeAsync().AsTask()).ConfigureAwait(false);
@@ -436,7 +436,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         lock (gate) officialAccepted.Clear();
         accounts.SessionChanged -= RecommendationAccountChanged;
         accounts.SessionChanged -= nativeCatalog.Invalidate;
-        accounts.SessionChanged -= aggregateSearch.Invalidate;
+        accounts.SessionChanged -= searchCoordinator.Invalidate;
         accounts.SessionChanged -= lyrics.Invalidate;
         accounts.SessionChanged -= Feedback.AccountChanged;
         accounts.SessionChanged -= librarySync.Invalidate;

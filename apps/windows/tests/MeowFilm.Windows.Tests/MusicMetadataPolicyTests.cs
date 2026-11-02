@@ -45,7 +45,7 @@ public static class MusicMetadataPolicyTests
         yield return Case("disabled cached source does not suppress an enabled exact alternative", async (owner, _) =>
         {
             var qq = Ok(await owner.ExecuteAsync("music.online.song", new {
-                platform = "tx", musicInfo = new { musicId = "qq42", songmid = "qq42" },
+                platform = "tx", musicInfo = new { songmid = "qq42" },
                 title = "same", artist = "same", duration = 120
             })).GetProperty("song");
             var song = MusicSongFixture.Online("wy", "42", "same", "same", duration: 120);

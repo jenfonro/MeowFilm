@@ -14,7 +14,6 @@ namespace MeowFilm.Capabilities;
 public sealed class MusicNativeCatalogOwner : IAsyncDisposable
 {
     private const long MaximumStageBytes = 32 * 1024 * 1024;
-    private const int MaximumSongs = 10000;
     private readonly IMusicPlatformCatalog catalog;
     private readonly MusicLibraryOwner library;
     private readonly TimeProvider clock;
@@ -24,20 +23,16 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
     private CancellationTokenSource session = new();
     private TaskCompletionSource drained = Completed();
     private long epoch, reservedBytes;
-    private int pending, preparing, committing;
+    private int pending;
     private bool closed;
     private Task? disposal;
     private sealed record Stage(string Platform, string Id, string Name, string Snapshot,
         JsonElement[] Songs, string[] Members, long Bytes, DateTimeOffset Expires, long Epoch);
     private static string NativeId(JsonElement song)
     {
-        Check(song.TryGetProperty("source_data", out var data) && data.ValueKind == JsonValueKind.Object,
-            "IDENTITY_MISMATCH");
-        foreach (var key in new[] { "musicId", "songmid", "id" })
-            if (data.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String &&
-                !string.IsNullOrEmpty(value.GetString()))
-                return value.GetString()!;
-        throw new CatalogFailure("IDENTITY_MISMATCH");
+        var id = SongJson.NativeId(song);
+        Check(id.Length > 0, "IDENTITY_MISMATCH");
+        return id;
     }
 
     public MusicNativeCatalogOwner(IMusicPlatformCatalog catalog, MusicLibraryOwner library, TimeProvider? clock = null)
@@ -57,10 +52,9 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
             var input = parameters is JsonElement json ? json.Clone()
                 : JsonSerializer.SerializeToElement(parameters ?? new { });
             Check(input.ValueKind == JsonValueKind.Object, "INVALID_REQUEST");
-            Check(Encoding.UTF8.GetByteCount(input.GetRawText()) <= 65536, "LIMIT");
             lock (gate)
             {
-                Check(!closed, "CLOSED"); Check(pending < 8, "LIMIT");
+                Check(!closed, "CLOSED");
                 deadline = new(TimeSpan.FromSeconds(25), clock);
                 operation = CancellationTokenSource.CreateLinkedTokenSource(
                     cancellationToken, lifetime.Token, session.Token, deadline.Token);
@@ -213,10 +207,9 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
         var platform = Platform(input, publicCatalog: true); var id = Text(input, "id"); var refresh = Flag(input, "refresh");
         var personal = Personal(input, platform, id);
         int pageSize = personal?.Kind == MusicPersonalPlaylistKind.KugouOwned ? 30 : 100;
-        int maximumPages = (MaximumSongs + pageSize - 1) / pageSize;
         lock (gate)
         {
-            Prune(); Check(preparing + committing + stages.Count < 2, "LIMIT"); preparing++;
+            Prune();
         }
         long size = 2;
         bool reservationTransferred = false;
@@ -226,7 +219,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
             var seen = new HashSet<string>(StringComparer.Ordinal);
             string? snapshot = null, name = null, strength = null; int? total = null;
             bool? memberIds = null;
-            for (int page = 1; page <= maximumPages; page++)
+            for (int page = 1; ; page = checked(page + 1))
             {
                 Guard(signal, captured);
                 var result = await catalog.PlaylistAsync(new(platform, id, page, pageSize, snapshot, refresh, personal), signal).ConfigureAwait(false);
@@ -251,13 +244,12 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
                     songs.Add(song.Clone()); members.Add(member.Id); sorts.Add(member.Sort);
                 }
                 if (!Flag(result, "more")) break;
-                Check(page < maximumPages, "PAGINATION_LIMIT");
             }
             Check(songs.Count == total, "INCOMPLETE_PLAYLIST");
             // These platforms may only expose a metadata/count snapshot. Verify
             // the complete ordered identity list with fresh pages, not just page 1.
             if (platform != "wy")
-                for (int page = 1; page <= Math.Max(1, (songs.Count + pageSize - 1) / pageSize); page++)
+                for (int page = 1; page <= Math.Max(1, (int)(((long)songs.Count + pageSize - 1) / pageSize)); page++)
                 {
                     Guard(signal, captured);
                     var result = await catalog.PlaylistAsync(new(platform, id, page, pageSize, snapshot, true, personal), signal).ConfigureAwait(false);
@@ -300,7 +292,6 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
         {
             lock (gate)
             {
-                preparing--;
                 if (!reservationTransferred) reservedBytes -= size - 2;
             }
         }
@@ -336,7 +327,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
                 Check(!input.TryGetProperty("expectedSongId", out _) ||
                     Text(input, "expectedSongId") == Text(item.Songs[index], "songId"), "SNAPSHOT_CHANGED");
             }
-            stages.Remove(token); committing++;
+            stages.Remove(token);
             // Keep bytes reserved throughout an admitted storage transaction.
         }
         try
@@ -363,7 +354,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
                 : JsonSerializer.SerializeToElement(new { currentId = result.GetProperty("currentId"),
                     version = result.GetProperty("version"), mode = result.GetProperty("mode") });
         }
-        finally { lock (gate) { committing--; reservedBytes -= item.Bytes; } }
+        finally { lock (gate) reservedBytes -= item.Bytes; }
     }
 
     public void Invalidate(string? platform = null)
@@ -430,16 +421,17 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
     {
         Check(Text(value, "platform") == platform && Text(value, "id") == id, "IDENTITY_MISMATCH");
         Check(Number(value, "page") == page && Number(value, "limit") == pageSize, "INVALID_RESPONSE");
-        int count = Number(value, "total"); Check(count is >= 0 and <= MaximumSongs, "PAGINATION_LIMIT");
+        int count = Number(value, "total"); Check(count >= 0, "INVALID_RESPONSE");
         string current = Text(value, "snapshot");
         Check(current.Length == 64 && current.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f'), "INVALID_RESPONSE");
         Check((snapshot is null || snapshot == current) && (total is null || total == count), "SNAPSHOT_CHANGED");
         var items = value.GetProperty("items");
-        Check(items.ValueKind == JsonValueKind.Array && items.GetArrayLength() == Math.Min(pageSize, Math.Max(0, count - (page - 1) * pageSize)),
+        Check(items.ValueKind == JsonValueKind.Array &&
+            items.GetArrayLength() == Math.Min(pageSize, Math.Max(0L, count - (page - 1L) * pageSize)),
             "INCOMPLETE_PLAYLIST");
         bool more = Flag(value, "more");
-        Check(value.TryGetProperty("more", out _) && more == (page * pageSize < count), "INCOMPLETE_PLAYLIST");
-        if (more) Check(Number(value.GetProperty("continuation"), "page") == page + 1, "PAGINATION_STALLED");
+        Check(value.TryGetProperty("more", out _) && more == (page * (long)pageSize < count), "INCOMPLETE_PLAYLIST");
+        if (more) Check(Number(value.GetProperty("continuation"), "page") == checked(page + 1), "PAGINATION_STALLED");
         else Check(!value.TryGetProperty("continuation", out var next) || next.ValueKind == JsonValueKind.Null, "PAGINATION_STALLED");
         bool hasMembers = value.TryGetProperty("memberIds", out var declaredMembers);
         Check((!requireMembers || hasMembers) && (expectedMembers is null || expectedMembers == hasMembers), "IDENTITY_MISMATCH");
@@ -454,7 +446,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
         {
             _ = Text(song, "songId");
             var nativeId = NativeId(song);
-            Check(Text(song.GetProperty("source_data"), "source") == platform, "IDENTITY_MISMATCH");
+            Check(SongJson.Platform(song) == platform, "IDENTITY_MISMATCH");
             string member = hasMembers ? StringValue(declaredMembers[identities.Count], 256) : nativeId;
             long? sort = null;
             if (hasSorts && declaredSorts[identities.Count].ValueKind != JsonValueKind.Null)
@@ -479,9 +471,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
         Check(value.ValueKind == JsonValueKind.Object &&
             (!value.TryGetProperty("ok", out var ok) || ok.ValueKind == JsonValueKind.True), "INVALID_RESPONSE");
         var result = JsonNode.Parse(value.GetRawText())!.AsObject(); result["ok"] = true;
-        var response = JsonSerializer.SerializeToElement(result);
-        Check(Encoding.UTF8.GetByteCount(response.GetRawText()) <= 512 * 1024, "LIMIT");
-        return response;
+        return JsonSerializer.SerializeToElement(result);
     }
     private static MusicPersonalPlaylistLocator? Personal(JsonElement input, string platform, string id)
     {
@@ -519,7 +509,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
                     raw.ValueKind == JsonValueKind.Number && raw.TryGetInt64(out _), "INVALID_REQUEST");
         }
         long? total = value.TryGetProperty("total", out var count) && count.ValueKind != JsonValueKind.Null ? Long(value, "total") : null;
-        Check(total is null or >= 0 and <= MaximumSongs, "PAGINATION_LIMIT");
+        Check(total is null or >= 0, "INVALID_REQUEST");
         return new(scope, kind, listId, total, OptionalText(value, "version"), OptionalText(value, "name"));
     }
     private static string[] Strings(JsonElement value, string name, int max)

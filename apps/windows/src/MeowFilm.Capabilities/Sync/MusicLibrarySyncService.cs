@@ -92,7 +92,7 @@ public sealed class MusicLibrarySyncService : IAsyncDisposable
         {
             if (closed || stopping) return Task.FromResult(Failed("CLOSED"));
             if (round is { IsCompleted: false }) return Task.FromResult(Failed("SYNC_BUSY"));
-            var source = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken); source.CancelAfter(TimeSpan.FromMinutes(4));
+            var source = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             roundCancellation = source; long epoch = generation;
             round = Task.Run(async () =>
             {
