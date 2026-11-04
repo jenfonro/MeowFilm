@@ -17,15 +17,22 @@ internal static class PlatformDiscovery
     private static JsonNode? A(JsonNode? n, params string[] path) => PJ.At(n, path);
     private static JsonNode? Pick(JsonNode? n, params string[] names) => PJ.First(names.Select(k => A(n, k)).ToArray());
     private static IEnumerable<JsonNode?> Children(JsonNode? n) => PJ.Array(A(n, "children"));
-    private static string Title(JsonNode? n) => PJ.Metadata(PJ.First(Pick(n, "name", "title"), A(n, "uiElement", "mainTitle", "title")));
-    private static string Cover(JsonNode? n) => PJ.Image(PJ.First(Pick(n, "cover", "coverImg", "coverUrl", "picUrl", "coverImgUrl", "background"),
-        A(n, "uiElement", "image", "imageUrl"), PJ.Array(A(n, "uiElement", "images")).Select(x => Pick(x, "imageUrl", "url")).FirstOrDefault()));
+    private static string Title(JsonNode? n) => new[] { A(n, "name"), A(n, "title"), A(n, "uiElement", "mainTitle", "title") }
+        .Select(PJ.Metadata).FirstOrDefault(text => text.Length > 0) ?? "";
+    private static string Cover(JsonNode? n) => new[] { A(n, "cover"), A(n, "coverImg"), A(n, "coverUrl"),
+        A(n, "picUrl"), A(n, "coverImgUrl"), A(n, "img1v1Url"), A(n, "background"), A(n, "uiElement", "image", "imageUrl") }
+        .Concat(PJ.Array(A(n, "uiElement", "images")).Select(x => Pick(x, "imageUrl", "url")))
+        .Select(PJ.Image).FirstOrDefault(address => address.Length > 0) ?? "";
     private static JsonNode? Nested(JsonNode? n)
     {
         if (n is JsonObject or JsonArray) return n;
         var s = PJ.Text(n);
         if (s.Length is 0 or >= 50000) return null;
-        try { return JsonNode.Parse(s, documentOptions: new JsonDocumentOptions { MaxDepth = 25 }); }
+        try
+        {
+            using var document = JsonDocument.Parse(s, new JsonDocumentOptions { MaxDepth = 25 });
+            return PJ.Read(document.RootElement);
+        }
         catch (JsonException) { return null; }
     }
     private static Dictionary<string, string[]> Query(Uri uri) => uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries)
@@ -431,7 +438,8 @@ internal static class PlatformDiscovery
             PJ.Require(id.Length > 0 && name.Length > 0);
             var count = PJ.OptionalCount(Pick(artist, "musicSize", "songCount"));
             return PJ.Obj(("id", id), ("name", name), ("subtitle", count is null ? "" : "单曲：" + count),
-                ("cover", Cover(artist)), ("kind", "artist"), ("source", "wy"));
+                ("cover", new[] { artist["img1v1Url"], artist["picUrl"] }.Select(PJ.Image)
+                    .FirstOrDefault(address => address.Length > 0) ?? Cover(artist)), ("kind", "artist"), ("source", "wy"));
         }).ToArray();
         var moreNode = PJ.First(data["more"], raw["more"]);
         var more = moreNode is not null && PJ.Bool(moreNode);
