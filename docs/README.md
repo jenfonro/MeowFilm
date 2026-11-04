@@ -10,8 +10,9 @@
 
 - [公共核心与平台边界](runtime/script-runtime.md)
 - [原始 LX 音源契约 music.script.v2](runtime/music-script-runtime.md)
+- [统一 Cat 脚本契约 cat.script.v1](runtime/cat-script-runtime.md)
 - [Runtime bridge](runtime/runtime-bridge.md)
-- [外部音源动态验收](runtime/source-acceptance.md)
+- [外部 LX/Cat 脚本动态验收](runtime/source-acceptance.md)
 
 ## iOS
 

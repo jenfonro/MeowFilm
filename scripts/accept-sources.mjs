@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { readFile, readdir, stat, mkdir, writeFile, rename, realpath } from 'node:fs/promises';
+import { readFile, readdir, stat, mkdir, mkdtemp, writeFile, rename, realpath, rm } from 'node:fs/promises';
 import { registerHooks } from 'node:module';
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { classifySourceFailure, sourceDiagnosticObservers } from './source-acceptance-diagnostics.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const defaultOutput = join(root, 'tmp/test-results/script-sources/acceptance.json');
@@ -11,10 +12,13 @@ for (let i = 0; i < args.length; i++) {
   const arg = args[i];
   if (arg === '--live') { options.live = true; continue; }
   if (arg === '--probe-media') { options.probeMedia = true; continue; }
-  if (!['--scripts', '--records', '--payload', '--output'].includes(arg) || !args[i + 1]) throw new Error('Invalid acceptance arguments');
+  if (!['--kind', '--scripts', '--records', '--payload', '--output'].includes(arg) || !args[i + 1]) throw new Error('Invalid acceptance arguments');
   options[arg.slice(2)] = args[++i];
 }
-if (!options.scripts) throw new Error('Use --scripts <directory> [--live] [--records <json>] [--payload <runtime>]');
+options.kind ??= 'lx';
+if (!['lx', 'cat'].includes(options.kind)) throw new Error('Acceptance kind must be lx or cat');
+if (!options.scripts) throw new Error('Use --kind <lx|cat> --scripts <directory> [--live] [--records <json>] [--payload <runtime>]');
+if (options.kind === 'cat' && !options.live) throw new Error('Cat acceptance requires --live');
 if (options.probeMedia && !options.live) throw new Error('Media probing requires --live');
 const output = options.output ?? defaultOutput;
 if (!isAbsolute(output)) throw new Error('Acceptance output must be absolute');
@@ -31,12 +35,13 @@ function saveReport() {
   return writing;
 }
 
-let modulePath = join(root, 'apps/runtime/modules/music-script.mjs');
+const moduleFile = options.kind === 'cat' ? 'cat-script.mjs' : 'music-script.mjs';
+let modulePath = join(root, 'apps/runtime/modules', moduleFile);
 let hook;
 if (options.payload) {
   const payload = await realpath(options.payload);
   const manifest = JSON.parse(await readFile(join(payload, 'runtime-manifest.json'), 'utf8'));
-  const entry = 'app/modules/music-script.mjs';
+  const entry = `app/modules/${moduleFile}`;
   if (manifest.status !== 'complete' || !manifest.files.some(file => file.path === entry)) throw new Error('Incomplete runtime payload');
   modulePath = join(payload, entry);
   hook = registerHooks({
@@ -50,20 +55,28 @@ if (options.payload) {
     },
   });
 }
-const { createMusicScriptModule } = await import(pathToFileURL(modulePath).href);
-const records = options.records ? JSON.parse(await readFile(options.records, 'utf8')) : {};
-const sourcePath = await realpath(options.scripts);
-const singleFile = (await stat(sourcePath)).isFile();
-const directory = singleFile ? dirname(sourcePath) : sourcePath;
-const files = singleFile ? [basename(sourcePath)].filter(file => file.endsWith('.js'))
-  : (await readdir(directory, { withFileTypes: true }))
-    .filter(file => file.isFile() && file.name.endsWith('.js')).map(file => file.name).sort();
-if (!files.length) throw new Error('No JS sources to accept');
-const report = { mode: options.live ? 'live' : 'offline-init', modulePath, rows: [] };
+let runtimeModule, records, directory, files;
+try {
+  runtimeModule = await import(pathToFileURL(modulePath).href);
+  records = options.records ? JSON.parse(await readFile(options.records, 'utf8')) : {};
+  const sourcePath = await realpath(options.scripts);
+  const singleFile = (await stat(sourcePath)).isFile();
+  directory = singleFile ? dirname(sourcePath) : sourcePath;
+  files = singleFile ? [basename(sourcePath)].filter(file => file.endsWith('.js'))
+    : (await readdir(directory, { withFileTypes: true }))
+      .filter(file => file.isFile() && file.name.endsWith('.js')).map(file => file.name).sort();
+  if (!files.length) throw new Error('No JS sources to accept');
+} catch (error) {
+  hook?.deregister();
+  throw error;
+}
+const createMusicScriptModule = runtimeModule.createMusicScriptModule;
+const createCatScriptModule = runtimeModule.createCatScriptModule;
+const report = { kind: options.kind, mode: options.live ? 'live' : 'offline-init', modulePath, rows: [] };
 
 function describe(value, action) {
   if (value === null || value === undefined || value === '') return { kind: 'empty' };
-  if (action === 'musicUrl' || action === 'pic') {
+  if (action === 'musicUrl' || action === 'pic' || action === 'play') {
     const url = typeof value === 'string' ? value : value?.url;
     if (typeof url === 'string' && /^https?:\/\//.test(url)) return { kind: 'url' };
   }
@@ -85,29 +98,8 @@ function firstRecording(value) {
   return list[0].source_data ?? list[0].musicInfo ?? list[0];
 }
 
-function diagnostic({ kind, reason, reference, member, line, column, operation, code }) {
-  return { kind, reason, reference, member, line, column, operation, code };
-}
-
-function failureState(reply, network, diagnostics) {
-  const hostGlobals = ['Buffer', 'URL', 'URLSearchParams', 'TextEncoder', 'TextDecoder',
-    'fetch', 'lx', 'setTimeout', 'setInterval'];
-  const guest = diagnostics.findLast(event => event.reason !== 'host');
-  if (diagnostics.some(event => event.reason === 'host' &&
-    ['UNSUPPORTED_OPTION', 'UNSUPPORTED_CRYPTO', 'CAPABILITY_UNAVAILABLE'].includes(event.code)) ||
-    network.some(event => ['UNSUPPORTED_OPTION', 'UNSUPPORTED_CRYPTO', 'CAPABILITY_UNAVAILABLE'].includes(event.code)) ||
-    guest?.reason === 'reference' && hostGlobals.includes(guest.reference)) return 'host_failure';
-  if (reply.code === 'LIMIT') return 'runtime_limit';
-  if (network.some(event => event.responseReason === 'configuration') ||
-    guest?.reason === 'configuration') return 'configuration_required';
-  if (guest?.reason === 'unsupported' || guest?.reason === 'reference') return 'script_rejected';
-  if (network.some(event => event.code || event.statusCode >= 400 ||
-    typeof event.businessCode === 'number' && ![0, 1, 200].includes(event.businessCode) ||
-    event.responseReason === 'upstream') || guest?.reason === 'upstream') return 'upstream_failure';
-  if (guest?.reason === 'input') return 'input_required';
-  if (diagnostics.some(event => event.reason === 'host' && event.code === 'PERMISSION_DENIED'))
-    return 'script_rejected';
-  return 'requires_diagnosis';
+function diagnostic({ kind, reason, reference, member, dependency, line, column, operation, code, statusCode }) {
+  return { kind, reason, reference, member, dependency, line, column, operation, code, statusCode };
 }
 
 async function probeMedia(value) {
@@ -120,7 +112,7 @@ async function probeMedia(value) {
   let reader;
   try {
     const headers = {};
-    for (const [key, input] of Object.entries(candidate.headers ?? {})) {
+    for (const [key, input] of Object.entries(candidate.headers ?? candidate.header ?? {})) {
       if (typeof input === 'string' && !/host|content-length|transfer-encoding/i.test(key)) headers[key] = input;
     }
     const reply = await fetch(url, { headers: { ...headers, Range: 'bytes=0-1023' }, signal: controller.signal });
@@ -147,8 +139,116 @@ async function probeMedia(value) {
   }
 }
 
-const batches = new Set(), concurrency = 2;
-async function accept(file, index) {
+async function catResult(rpc, reply) {
+  if (!reply.ok) return reply;
+  let bytes;
+  if (typeof reply.data === 'string') bytes = Buffer.from(reply.data);
+  else if (reply.blob && typeof reply.blob === 'object') {
+    const { token, length, sha256 } = reply.blob;
+    const chunks = [];
+    let offset = 0;
+    try {
+      while (offset < length) {
+        const part = await rpc('blob.read', { token, offset });
+        if (!part.ok || typeof part.data !== 'string' || !Number.isSafeInteger(part.next) ||
+          part.next <= offset || part.next > length) throw Object.assign(new Error(), { code: part.code ?? 'SCRIPT_PROTOCOL_ERROR' });
+        const chunk = Buffer.from(part.data, 'base64');
+        if (!chunk.length || chunk.toString('base64') !== part.data || offset + chunk.length !== part.next)
+          throw Object.assign(new Error(), { code: 'SCRIPT_PROTOCOL_ERROR' });
+        chunks.push(chunk); offset = part.next;
+      }
+      bytes = Buffer.concat(chunks);
+      if (bytes.length !== length || createHash('sha256').update(bytes).digest('hex') !== sha256)
+        throw Object.assign(new Error(), { code: 'SCRIPT_PROTOCOL_ERROR' });
+    } finally { await rpc('blob.release', { token }); }
+  } else throw Object.assign(new Error(), { code: 'SCRIPT_PROTOCOL_ERROR' });
+  try { return { ...reply, value: JSON.parse(bytes.toString('utf8')) }; }
+  catch { throw Object.assign(new Error(), { code: 'SCRIPT_PROTOCOL_ERROR' }); }
+}
+
+async function catPayload(rpc, value) {
+  const bytes = Buffer.from(JSON.stringify(value));
+  if (bytes.length <= 48 * 1024) return { payload: bytes.toString() };
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const begun = await rpc('stage.begin', { length: bytes.length, sha256, kind: 'json' });
+  if (!begun.ok) throw Object.assign(new Error(), { code: begun.code });
+  try {
+    for (let offset = 0; offset < bytes.length; offset += begun.chunkBytes) {
+      const chunk = await rpc('stage.chunk', { token: begun.token, offset,
+        data: bytes.subarray(offset, offset + begun.chunkBytes).toString('base64') });
+      if (!chunk.ok) throw Object.assign(new Error(), { code: chunk.code });
+    }
+    return { payloadToken: begun.token };
+  } catch (error) {
+    await rpc('stage.abort', { token: begun.token });
+    throw error;
+  }
+}
+
+function catRecord(records, file, siteId, operation) {
+  const stem = file.replace(/\.js$/i, '');
+  for (const root of [records[file], records[stem], records]) {
+    const site = root?.sites?.[siteId] ?? root?.[siteId];
+    const value = site?.actions?.[operation] ?? site?.[operation];
+    if (value && typeof value === 'object' && !Array.isArray(value)) return structuredClone(value);
+  }
+  return null;
+}
+
+function catList(value) {
+  if (Array.isArray(value?.list)) return value.list;
+  if (Array.isArray(value?.data?.list)) return value.data.list;
+  if (Array.isArray(value?.data)) return value.data;
+  return [];
+}
+
+function catItemId(value) {
+  const item = catList(value).find(candidate => candidate && typeof candidate === 'object');
+  const id = item?.vod_id ?? item?.id ?? item?.url;
+  return typeof id === 'string' && id ? id : null;
+}
+
+function catCategoryId(value) {
+  const item = (Array.isArray(value?.class) ? value.class : Array.isArray(value?.data?.class) ? value.data.class : [])
+    .find(candidate => candidate && typeof candidate === 'object');
+  const id = item?.type_id ?? item?.id;
+  return typeof id === 'string' && id ? id : Number.isSafeInteger(id) ? String(id) : null;
+}
+
+function catPlaySeed(value) {
+  const item = catList(value).find(candidate => candidate && typeof candidate === 'object');
+  if (!item || typeof item.vod_play_from !== 'string' || typeof item.vod_play_url !== 'string') return null;
+  const flags = item.vod_play_from.split('$$$');
+  const lines = item.vod_play_url.split('$$$');
+  for (let index = 0; index < lines.length; index++) {
+    const episode = lines[index].split('#').find(Boolean);
+    if (!episode) continue;
+    const separator = episode.indexOf('$');
+    const id = separator < 0 ? episode : episode.slice(separator + 1);
+    if (id) return { flag: flags[index] ?? flags[0] ?? '', id, flags };
+  }
+  return null;
+}
+
+function deriveCatPayload(operation, state) {
+  if (operation === 'init') return { ext: {} };
+  if (operation === 'home') return { filter: true };
+  if (operation === 'homeVod' || operation === 'homeVideo') return {};
+  if (operation === 'search') return { wd: '海阔天空', quick: false, page: 1 };
+  if (operation === 'category') return state.categoryId
+    ? { id: state.categoryId, page: 1, filter: true, filters: {} } : null;
+  if (operation === 'detail') return state.detailId ? { id: state.detailId } : null;
+  if (operation === 'play') return state.play ? { ...state.play } : null;
+  if (operation === 'report' || operation === 'watchReport') return state.play ? {
+    ...state.play, event: 'progress', position: 1, duration: 60,
+    positionSeconds: 1, durationSeconds: 60,
+  } : null;
+  if (['test', 'support', 'filters', 'thumb'].includes(operation)) return {};
+  return null;
+}
+
+const batches = new Set(), concurrency = 4;
+async function acceptLx(file, index) {
   const id = `accept-${index}`, audit = [], diagnostics = [];
   const row = { file, actions: [] };
   let startupAuditEnd = 0, startupDiagnosticsEnd = 0;
@@ -159,7 +259,7 @@ async function accept(file, index) {
   const network = createNodeNetwork();
   const module = createMusicScriptModule({
     call: async () => ({ ok: false, code: 'PERMISSION_DENIED' }),
-    hostFactory: input => createScriptHost({ ...input, onDiagnostic: event => diagnostics.push(event) }),
+    hostFactory: input => createScriptHost({ ...input, ...sourceDiagnosticObservers(diagnostics) }),
     network: async input => {
       const event = { requestId: input.scope.requestId, siteId: input.scope.siteId,
         mode: options.live ? 'live' : 'blocked', finished: false };
@@ -249,7 +349,7 @@ async function accept(file, index) {
             if (search) recording = firstRecording(reply.value) ?? recording;
           } else {
             entry.code = reply.code;
-            entry.state = failureState(reply, entry.network, entry.diagnostics);
+            entry.state = classifySourceFailure(options.kind, reply, entry.network, entry.diagnostics);
           }
           row.actions.push(entry);
         }
@@ -259,8 +359,10 @@ async function accept(file, index) {
     if (!unloaded.ok) row.unloadCode = unloaded.code;
   } catch (error) { row.initialization = 'failed'; row.code = error.code ?? 'HOST_ERROR'; }
   finally {
-    const close = await module.close();
-    row.cleanup = close.ok ? 'complete' : close.code;
+    try {
+      const close = await module.close();
+      row.cleanup = close.ok ? 'complete' : close.code;
+    } catch (error) { row.cleanup = error.code ?? 'SCRIPT_CLEANUP'; }
     if (row.initialization === 'ready') {
       row.backgroundNetwork = audit.filter((event, index) => event.requestId === null &&
         (index >= startupAuditEnd || startupPending.has(event)))
@@ -283,6 +385,172 @@ async function accept(file, index) {
       code: row.code, cleanup: row.cleanup }));
   }
 }
+
+async function acceptCat(file, index) {
+  const id = `accept-${index}`, audit = [], diagnostics = [];
+  const row = { file, actions: [] };
+  let initializationAuditEnd, initializationDiagnosticsEnd, initializationNetwork;
+  let progressAt = Date.now();
+  let dataRoot, module, instance;
+  const { createCatRuntime } = await import(pathToFileURL(
+    options.payload ? join(options.payload, 'node_modules/@meowfilm/script-host/src/index.js')
+      : join(root, 'packages/script-host/src/index.js')).href);
+  const pendingNetwork = new Map();
+  const observeNetwork = input => {
+    const key = `${input.scope.installationId}/${input.scope.generation}/${input.networkId}`;
+    if (input.phase === 'request') {
+      const event = { requestId: input.scope.requestId, siteId: input.scope.siteId,
+        mode: 'live', finished: false };
+      audit.push(event);
+      pendingNetwork.set(key, event);
+      return;
+    }
+    const event = pendingNetwork.get(key);
+    if (!event) return;
+    if (input.phase === 'response') event.statusCode = input.statusCode;
+    else if (input.phase === 'error') event.code = input.code;
+    event.finished = true;
+    pendingNetwork.delete(key);
+  };
+  try {
+    const temporary = join(root, 'tmp/test-results/script-sources');
+    await mkdir(temporary, { recursive: true });
+    dataRoot = await mkdtemp(join(temporary, 'cat-runtime-'));
+    module = createCatScriptModule({
+      dataRoot,
+      runtimeFactory: input => createCatRuntime({ ...input, onNetwork: observeNetwork,
+        ...sourceDiagnosticObservers(diagnostics) }),
+    });
+    const rpc = (name, params = {}) => module.methods[`cat.script.${name}`](params);
+    const bytes = await readFile(join(directory, file));
+    row.contentHash = createHash('sha256').update(bytes).digest('hex');
+    const begun = await rpc('stage.begin', {
+      length: bytes.length, sha256: row.contentHash, kind: 'source',
+    });
+    if (!begun.ok) throw Object.assign(new Error(), { code: begun.code });
+    for (let offset = 0; offset < bytes.length; offset += begun.chunkBytes) {
+      const chunk = await rpc('stage.chunk', { token: begun.token, offset,
+        data: bytes.subarray(offset, offset + begun.chunkBytes).toString('base64') });
+      if (!chunk.ok) throw Object.assign(new Error(), { code: chunk.code });
+    }
+    const start = Date.now();
+    const installed = await catResult(rpc, await rpc('install', {
+      installationId: id, token: begun.token, version: 'acceptance', enabled: true,
+      config: JSON.stringify({}),
+    }));
+    initializationAuditEnd = audit.length;
+    initializationDiagnosticsEnd = diagnostics.length;
+    initializationNetwork = audit.map(({ finished, statusCode, code }) =>
+      ({ state: finished ? 'completed' : 'pending', statusCode, code }));
+    row.initializationMs = Date.now() - start;
+    if (!installed.ok) throw Object.assign(new Error(), { code: installed.code });
+    instance = installed.value;
+    row.initialization = instance?.state === 'ready' ? 'ready' : 'failed';
+    if (row.initialization !== 'ready')
+      throw Object.assign(new Error(), { code: instance?.error ?? 'SCRIPT_PROTOCOL_ERROR' });
+    row.capabilities = Object.fromEntries((instance.sites ?? []).map(site =>
+      [site.key, { actions: site.actions ?? [], methods: site.methods,
+        discovery: site.discovery, name: site.name }]));
+    const priority = ['init', 'home', 'homeVod', 'homeVideo', 'search', 'category', 'detail', 'play',
+      'proxy', 'report', 'watchReport'];
+    for (const site of instance.sites ?? []) {
+      const actions = [...new Set(site.actions ?? [])].sort((left, right) => {
+        const a = priority.indexOf(left), b = priority.indexOf(right);
+        return (a < 0 ? priority.length : a) - (b < 0 ? priority.length : b) || left.localeCompare(right);
+      });
+      if (!actions.length) {
+        const observedEmpty = site.discovery === 'registered-routes' &&
+          (instance.sites ?? []).some(candidate => candidate.actions?.length);
+        row.actions.push({ siteId: site.key, operation: 'discover',
+          state: observedEmpty ? 'no_actions' : 'requires_diagnosis',
+          reason: observedEmpty ? 'no_registered_actions' : 'actions_undiscovered' });
+        continue;
+      }
+      if (!options.live) continue;
+      const state = {};
+      for (const operation of actions) {
+        const entry = { siteId: site.key, operation };
+        const payload = catRecord(records, file, site.key, operation) ?? deriveCatPayload(operation, state);
+        if (!payload) {
+          entry.state = 'input_required'; row.actions.push(entry); continue;
+        }
+        const before = audit.length, beforeDiagnostic = diagnostics.length, began = Date.now();
+        let reply;
+        let staged;
+        try {
+          staged = await catPayload(rpc, payload);
+          reply = await catResult(rpc, await rpc('invoke', {
+            installationId: id, generation: instance.generation, siteId: site.key, operation,
+            ...staged,
+          }));
+        } catch (error) { reply = { ok: false, code: error.code ?? 'HOST_ERROR' }; }
+        finally {
+          if (staged?.payloadToken) {
+            try { await rpc('stage.abort', { token: staged.payloadToken }); } catch {}
+          }
+        }
+        entry.elapsedMs = Date.now() - began;
+        entry.network = audit.slice(before)
+          .map(({ requestId, finished, statusCode, code, businessCode, responseReason }) =>
+            ({ scope: requestId === null ? 'session' : 'request',
+              state: finished ? 'completed' : 'pending',
+              statusCode, code, businessCode, responseReason }));
+        entry.diagnostics = diagnostics.slice(beforeDiagnostic).filter(event => event.requestId !== null)
+          .map(diagnostic);
+        if (reply.ok) {
+          entry.state = 'returned'; entry.result = describe(reply.value, operation);
+          state.categoryId ??= catCategoryId(reply.value);
+          state.detailId ??= catItemId(reply.value);
+          state.play ??= catPlaySeed(reply.value);
+          if (options.probeMedia && operation === 'play' && entry.result.kind === 'url')
+            entry.media = await probeMedia(reply.value);
+        } else {
+          entry.code = reply.code;
+          entry.state = classifySourceFailure(options.kind, reply, entry.network, entry.diagnostics);
+        }
+        row.actions.push(entry);
+        if (Date.now() - progressAt >= 30000) {
+          progressAt = Date.now();
+          console.log(JSON.stringify({ file, phase: 'actions', processed: row.actions.length }));
+        }
+      }
+    }
+    const removed = await catResult(rpc, await rpc('uninstall', { installationId: id }));
+    if (!removed.ok) row.unloadCode = removed.code;
+  } catch (error) {
+    row.initialization ??= 'failed';
+    row.code = error.code ?? 'HOST_ERROR';
+    if (row.initialization === 'failed') row.initializationFailure = classifySourceFailure('cat',
+      { code: row.code }, audit.slice(0, initializationAuditEnd ?? audit.length)
+        .map(event => ({ ...event, scope: 'startup' })),
+      diagnostics.slice(0, initializationDiagnosticsEnd ?? diagnostics.length));
+  } finally {
+    try {
+      await module?.close();
+      row.cleanup = 'complete';
+    } catch (error) { row.cleanup = error.code ?? 'SCRIPT_CLEANUP'; }
+    if (dataRoot) {
+      try { await rm(dataRoot, { recursive: true, force: true }); }
+      catch { row.cleanup = 'SCRIPT_CLEANUP'; }
+    }
+    try {
+      row.sourceUnchanged = createHash('sha256').update(await readFile(join(directory, file))).digest('hex') === row.contentHash;
+    } catch { row.sourceUnchanged = false; }
+    row.initializationNetwork = initializationNetwork ?? audit.slice(0, initializationAuditEnd ?? audit.length)
+      .map(({ finished, statusCode, code }) =>
+        ({ state: finished ? 'completed' : 'pending', statusCode, code }));
+    row.initializationDiagnostics = diagnostics.slice(0, initializationDiagnosticsEnd ?? diagnostics.length)
+      .map(diagnostic);
+    report.rows.push(row);
+    await saveReport();
+    console.log(JSON.stringify({ file, initialization: row.initialization,
+      returned: row.actions.filter(action => action.state === 'returned').length,
+      failed: row.actions.filter(action => ['upstream_failure', 'requires_diagnosis'].includes(action.state)).length,
+      code: row.code, cleanup: row.cleanup }));
+  }
+}
+
+const accept = options.kind === 'cat' ? acceptCat : acceptLx;
 try {
   for (const [index, file] of files.entries()) {
     const task = accept(file, index);
@@ -301,6 +569,7 @@ try {
     returned: report.rows.flatMap(row => row.actions).filter(action => action.state === 'returned').length,
     upstreamFailures: report.rows.flatMap(row => row.actions).filter(action => action.state === 'upstream_failure').length,
     requiresDiagnosis: report.rows.flatMap(row => row.actions).filter(action => action.state === 'requires_diagnosis').length,
+    sitesWithoutActions: report.rows.flatMap(row => row.actions).filter(action => action.state === 'no_actions').length,
     hostFailures: report.rows.flatMap(row => row.actions).filter(action => action.state === 'host_failure').length,
     runtimeLimits: report.rows.flatMap(row => row.actions).filter(action => action.state === 'runtime_limit').length,
     inputRequired: report.rows.flatMap(row => row.actions).filter(action => action.state === 'input_required').length,
@@ -315,5 +584,10 @@ try {
   console.log(JSON.stringify(report.summary));
   if (report.summary.initialized !== report.summary.scripts || report.summary.cleanupFailures ||
     report.summary.unloadFailures || report.summary.changedSources || report.summary.hostFailures ||
-    report.summary.runtimeLimits || report.summary.requiresDiagnosis) process.exitCode = 1;
-} finally { hook?.deregister(); }
+    report.summary.runtimeLimits || report.summary.requiresDiagnosis ||
+    report.summary.scriptRejected) process.exitCode = 1;
+} finally {
+  await Promise.allSettled([...batches]);
+  await Promise.allSettled([writing]);
+  hook?.deregister();
+}

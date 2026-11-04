@@ -61,7 +61,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     {
         var entries = LJ.Array(doc["entries"]);
         var entry = entries.OfType<JsonObject>().FirstOrDefault(e => LJ.S(e["key"]) == Key(area));
-        if (entry is null) { LJ.Require(entries.Count < 1024, "LIMIT"); entries.Add(LJ.Obj(("key", Key(area)), ("value", value))); }
+        if (entry is null) entries.Add(LJ.Obj(("key", Key(area)), ("value", value)));
         else entry["value"] = value.DeepClone();
     }
     private async Task EnterAsync(CancellationToken token) =>

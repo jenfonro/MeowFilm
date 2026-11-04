@@ -11,7 +11,7 @@ internal static class Program
     {
         NativePlayback? playback = null;
         AppLauncher.Run(new(AppIdentity.RuntimeId, AppIdentity.ScriptModules,
-            AppIdentity.NativeNamespaces, []),
+            AppIdentity.NativeNamespaces, [], AppIdentity.NativeCollections),
             (runtime, storage, capabilities) =>
             {
                 playback = new NativePlayback();

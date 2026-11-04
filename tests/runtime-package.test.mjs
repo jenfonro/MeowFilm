@@ -110,6 +110,7 @@ function fixture({ missing = [], omitFiles = [] } = {}) {
   file('node_modules/unlocked-dev-only/package.json', { name: 'unlocked-dev-only', version: '9.0.0' });
   file('apps/runtime/bootstrap.mjs', `import '@meowfilm/runtime-bridge';\n${sourceCode}`);
   file('apps/runtime/modules/music-script.mjs', sourceCode);
+  file('apps/runtime/modules/cat-script.mjs', sourceCode);
   function saveLock() { write(root, 'package-lock.json', lock); }
   function update(location, changes, updateLock = true) {
     const manifest = { ...readJSON(join(root, location, 'package.json')), ...changes };
@@ -159,13 +160,13 @@ test('interpreted workspace files still reject unsupported negative rules', asyn
 test('one App packaging stages only the script dependency closure with exact hashes', async () => {
   const f = fixture(), manifest = await f.pack();
   assert.equal(manifest.product, 'aggregate');
-  assert.deepEqual(manifest.modules, ['music']);
+  assert.deepEqual(manifest.modules, ['music', 'cat']);
   assert.equal(manifest.schemaVersion, 1);
   assert.equal(manifest.status, 'platform-pending');
   assert.equal(manifest.entry, 'app/windows/entries/aggregate.mjs');
   assert.match(manifest.integrityScope, /not an upstream signature/);
   assert.deepEqual(manifest.files.filter(f => f.path.startsWith('app/')).map(f => f.path),
-    ['app/bootstrap.mjs', 'app/modules/music-script.mjs']);
+    ['app/bootstrap.mjs', 'app/modules/cat-script.mjs', 'app/modules/music-script.mjs']);
   assert.deepEqual(manifest.dependencies.map(p => p.path).sort(), [
     'node_modules/@meowfilm/runtime-bridge', 'node_modules/@meowfilm/script-host',
     'node_modules/shared', 'node_modules/host-lib', 'node_modules/peer-lib',
@@ -224,6 +225,13 @@ test('extensionless Node main entries resolve locally without loading package co
   }
 });
 
+test('an explicitly disabled Node main does not invalidate exported package files', async () => {
+  const f = fixture();
+  f.update('node_modules/shared', { main: false });
+  const manifest = await f.pack('aggregate');
+  assert.ok(manifest.dependencies.some(item => item.name === 'shared'));
+});
+
 test('large payload files are streamed and their byte lengths and hashes are exact', async () => {
   const f = fixture();
   const payload = Buffer.from(`export const text = ${JSON.stringify('猫'.repeat(60_000))};\n`);
@@ -257,9 +265,11 @@ test('missing required bootstrap leaves an explicit failed payload', async () =>
   assert.equal(readJSON(join(f.output(), 'runtime-manifest.json')).status, 'failed');
 });
 
-test('missing shared music module cannot leave a platform-pending assembly', async () => {
-  await fails(fixture({ omitFiles: ['apps/runtime/modules/music-script.mjs'] }), 'MISSING_SOURCE');
-});
+for (const module of ['music', 'cat']) {
+  test(`missing shared ${module} module cannot leave a platform-pending assembly`, async () => {
+    await fails(fixture({ omitFiles: [`apps/runtime/modules/${module}-script.mjs`] }), 'MISSING_SOURCE');
+  });
+}
 
 test('unlisted shared helpers are rejected rather than silently omitted', async () => {
   const f = fixture();

@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Scripting;
 
@@ -71,6 +72,8 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
     {
         MusicLibraryException e => e.Code,
         BridgeException e => e.Code,
+        ProtectedDocumentException e => e.Error == DocumentStoreError.Unavailable
+            ? "STORAGE_UNAVAILABLE" : "STORAGE",
         OperationCanceledException => "CANCELLED",
         JsonException or FormatException => "INVALID_REQUEST",
         _ => "SCRIPT_EXCEPTION"
@@ -152,7 +155,7 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
             }
         var current = LJ.Object(item["current"]);
         return LJ.Obj(("installationId", id), ("name", item["name"]), ("version", current["version"]),
-            ("contentHash", LJ.Hash(Encoding.UTF8.GetBytes(LJ.S(current["source"])))),
+            ("contentHash", current["sourceHash"]),
             ("executionHash", LJ.Digest(current)), ("sourceRevision", state!["revision"]),
             ("generation", active?.Generation ?? 0), ("enabled", LJ.B(item["enabled"])),
             ("state", active is not null ? "ready" : LJ.B(item["enabled"]) ? "idle" : "disabled"),
@@ -204,8 +207,7 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
             LJ.Fields(p, "");
             return LJ.Obj(("version", 1), ("search", false), ("platforms", NativeMusicSong.Platforms.Append("local").ToArray()),
                 ("qualities", MusicQualityPolicy.LxTypes),
-                ("trustedScriptsOnly", false), ("transfer", new { scriptBytes = MusicNativeTransfers.ScriptBytes,
-                    chunkBytes = MusicNativeTransfers.ChunkBytes }));
+                ("trustedScriptsOnly", false), ("transfer", new { chunkBytes = MusicNativeTransfers.ChunkBytes }));
         }
         if (method == "music.transfer.begin") return transfers.Begin(p);
         if (method == "music.transfer.chunk") return transfers.Chunk(p);
@@ -227,13 +229,13 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
         if (method == "music.sources.install")
         {
             LJ.Fields(p, "token name version permissions", "token name version permissions");
-            LJ.Require(Installations.Count < 32, "LIMIT");
             string name = LJ.Text(p["name"], 255), version = LJ.Text(p["version"], 128);
             var permissions = Permissions(p["permissions"]);
             using var snapshot = transfers.Take(LJ.Text(p["token"]), "script");
-            string source = snapshot.Text(); LJ.Require(!string.IsNullOrWhiteSpace(source), "SCRIPT_ENCODING");
+            var content = await library.StoreScriptContentAsync(snapshot.Bytes, token).ConfigureAwait(false);
             var item = LJ.Obj(("id", snapshot.InstallationId), ("name", name), ("enabled", false), ("previous", null),
-                ("current", LJ.Obj(("source", source), ("version", version), ("permissions", permissions))));
+                ("current", LJ.Obj(("sourceHash", content.Sha256), ("sourceBytes", content.Length),
+                    ("version", version), ("permissions", permissions))));
             var next = Next(); LJ.Array(next["installations"]).Add(item.DeepClone());
             await PersistAsync(next, null, token).ConfigureAwait(false);
             return LJ.Obj(("item", View(item))); // Import and ordinary listing never start Node.
@@ -272,8 +274,9 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
                 LJ.Fields(p, "installationId token version permissions", "installationId token version permissions");
                 string version = LJ.Text(p["version"], 128);
                 using var snapshot = transfers.Take(LJ.Text(p["token"]), "script");
-                string source = snapshot.Text(); LJ.Require(!string.IsNullOrWhiteSpace(source), "SCRIPT_ENCODING");
-                selected["current"]!["source"] = source; selected["current"]!["version"] = version;
+                var content = await library.StoreScriptContentAsync(snapshot.Bytes, token).ConfigureAwait(false);
+                selected["current"]!["sourceHash"] = content.Sha256;
+                selected["current"]!["sourceBytes"] = content.Length; selected["current"]!["version"] = version;
                 selected["current"]!["permissions"] = Permissions(p["permissions"]);
             }
             selected["previous"] = previous;

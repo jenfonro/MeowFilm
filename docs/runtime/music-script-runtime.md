@@ -10,6 +10,8 @@ createMusicScriptModule({
   hostFactory = createScriptHost,
   network = createNodeNetwork(),
   clock = Date.now,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
 })
 ```
 
@@ -17,7 +19,7 @@ createMusicScriptModule({
 
 ```text
 id: music
-version: 0.5.0
+version: 0.6.0
 contract: music.script.v2
 ```
 
@@ -41,10 +43,10 @@ contract: music.script.v2
 ## 暂存与加载
 
 - basename 只允许单个 `.js` 文件名，不允许路径。
-- 单源码最多 512 KiB；最多两份暂存，总计最多 1 MiB。
+- 整份源码最多 16 MiB，在 `stage.begin` 按声明长度提前拒绝；不设置活动暂存 token 数量上限，未完成暂存仅按超时、显式取消和模块关闭回收，实际分配失败按资源错误处理。
 - 分片最多 64 KiB，必须连续，长度和小写规范 SHA-256 必须一致。
 - 完成后严格 UTF-8 解码，不接受替换字符或非规范字节。
-- 暂存五分钟后在下一次暂存访问时惰性失效，不创建 timer 或 worker；失效 token 返回 `STAGE_NOT_FOUND`。
+- 暂存从创建或最近一次有效分片起五分钟后由单个主动 timer 回收；任一暂存变更后按最早过期时间重排，陈旧回调只清理已过期项，模块关闭时同步取消并清空全部暂存。失效 token 返回 `STAGE_NOT_FOUND`。
 - stage 是一次加载事务的临时字节容器，不是持久记录或文档桥。
 
 `load` 必须包含：
@@ -58,7 +60,7 @@ token installationId revision expectedRevision version config permissions grant
 - `permissions` 只有 `storage`，值为不重复的 `read`／`write` 数组；不接受网络 origin、私网或域名授权字段。
 - `grant` 是非零 UUID，属于原生存储会话绑定，不是网络权限。
 - 相同 revision 仅在源码、版本、config、storage 权限和 grant 全部一致时幂等；新 revision 必须更大并使用未使用过的 grant。
-- 安装实例最多 32 个；load 只安装启用实例。禁用和删除由原生 owner 调用 unload，公共模块不保存 disabled 影子状态。
+- 不设安装实例数量上限；load 只安装启用实例。禁用和删除由原生 owner 调用 unload，公共模块不保存 disabled 影子状态。
 - 更新失败仅在公开 host 保持旧 generation、源码和 ready 状态时保留旧 binding。host 已换代时退休改变后的会话并要求原生明确协调，不通过再次生成代次伪造回滚。
 
 实例响应只含 installationId、revision、generation、state、contentHash、protocol、version 和 capabilities，不泄漏配置、grant 或原生数据路径。当前 protocol 明确为 `lx`。
@@ -80,7 +82,7 @@ LX 请求数据保留 `{source,action,info}`：
 - 其他声明动作保留自身数据语义；`search` 与 `musicSearch` 不被强行视作所有脚本通用的别名。
 - 返回数据按 LX 处理器实际值传递，不改成未来 Cat 的业务格式。
 
-控制请求和响应各不超过 512 KiB；命令及反向存储调用不设置全局／实例／site 的 pending 数量额度。音乐同步执行片段上限为 2000 ms，初始化总上限为 5 秒，请求仍受独立截止时间约束。
+控制请求和响应各不超过 512 KiB（LX 单帧线协议上限，不是脚本单次数据量）；脚本内部字节处理、桥接与 `invokeResult` 不设 8 MiB 上限，只受单脚本内存上限约束；宿主缓冲网络响应体及解压输出以单脚本内存上限为上界。不设全局／实例／site 调用数量预算。没有单次同步执行时限；初始化等待上限为 5 秒，调用等待与请求内截止均为 60 秒。调用或初始化等待到期后由主线程探测对应 worker，`cleanupTimeoutMs` 内无回应才终止并判 `TIMEOUT`。
 
 ## 请求绑定的存储
 
@@ -104,7 +106,7 @@ grant installationId siteId generation key value?
 - 每次回调在调用前后核对实例、generation、site、当前绑定与取消信号。
 - 原生保持安装事务与 storage overlay 的发布归属；候选 binding 的登记不赋予 LX startup 特权。
 - 旧实例与迟到回调不能借用新 binding 的 grant；结束的请求 context 不能被其他活跃调用接管。
-- 未结束 storage 任务由所属请求和实例跟踪，不因其他调用数量拒绝。
+- 未结束 storage 任务不设固定数量预算，按调用和实例生命周期回收；物理任务保留至 adapter 真正结束。
 - guest 存储回调随请求完成、取消和退休释放；物理任务仍保留归属至 adapter 真正结束。
 
 脚本 guest 不获得任意文件、进程、官方账号凭据、应用数据根或通用 document bridge；可信 Node 引擎读取自身锁定的 WASM 不构成 guest 文件权限。
@@ -115,7 +117,7 @@ grant installationId siteId generation key value?
 
 LX `request` 的回调、返回体和取消语义保留；`follow_max` 在 Node 适配器中受最大重定向次数约束，不等于任意 LX 版本都定义该字段。`showConfigView` 等扩展事件也不等于当前已提供 Web 管理服务，需依脚本实际路径单独验收。
 
-已遇到的扩展选项 `followRedirect` 按布尔值控制自动跳转；false 优先关闭跳转，true 仍遵守重定向上限。`retry` 兼容接受，不额外启动宿主重试或重放 POST；与核对的 LX 桌面 request 封装不消费该字段的行为一致。网络任务在取消后仍由实例跟踪，直至底层确认结束，不设置网络任务总量额度。
+已遇到的扩展选项 `followRedirect` 按布尔值控制自动跳转；false 优先关闭跳转，true 仍遵守重定向上限，`follow_max` 超过上限时按上限截断。`retry` 兼容接受，不额外启动宿主重试或重放 POST；与核对的 LX 桌面 request 封装不消费该字段的行为一致。网络任务在取消后仍保持登记，直至底层确认结束。
 
 ## 取消与关闭
 

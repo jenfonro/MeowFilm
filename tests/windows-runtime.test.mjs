@@ -6,7 +6,7 @@ import { createServer as createHTTPServer } from 'node:http';
 import { randomUUID, createHash } from 'node:crypto';
 import {
   existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
-  renameSync, symlinkSync, writeFileSync,
+  renameSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
@@ -15,6 +15,7 @@ import { attachConnectedStream } from '@meowfilm/runtime-bridge/descriptor';
 import { encodeFrame } from '@meowfilm/runtime-bridge';
 import {
   connectWindowsNamedPipe, parseWindowsLaunchArguments, startWindowsAppRuntime,
+  windowsScriptDataRoot,
 } from '../apps/windows/runtime/bootstrap.mjs';
 import { packageWindowsRuntime } from '../scripts/windows/package-runtime.mjs';
 import { packageRuntime } from '../scripts/package-runtime.mjs';
@@ -24,7 +25,7 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const temporary = join(temporaryRoot, 'windows-runtime-tests');
 mkdirSync(temporary, { recursive: true });
 const windows = { skip: process.platform !== 'win32' ? 'Requires real Windows named pipes' : false, timeout: 20000 };
-const products = { aggregate: ['music'] };
+const products = { aggregate: ['music', 'cat'] };
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const readJSON = path => JSON.parse(readFileSync(path, 'utf8'));
 const privateMarker = 'synthetic-private-diagnostic-must-not-be-logged';
@@ -87,10 +88,22 @@ function verifyManifest(output, manifest) {
   assert.equal(manifest.assemblyProfile, 'windows-native');
   assert.deepEqual(readFileSync(join(output, 'app/modules/music-script.mjs')),
     readFileSync(join(root, 'apps/runtime/modules/music-script.mjs')));
+  assert.deepEqual(readFileSync(join(output, 'app/modules/cat-script.mjs')),
+    readFileSync(join(root, 'apps/runtime/modules/cat-script.mjs')));
   assert.equal(existsSync(join(output, 'node_modules/@meowfilm/script-host')), true);
-  assert.deepEqual(manifest.dependencies.map(item => item.name).sort(),
-    ['@jitl/quickjs-ffi-types', '@jitl/quickjs-wasmfile-release-sync',
-      '@meowfilm/runtime-bridge', '@meowfilm/script-host', 'quickjs-emscripten-core']);
+  const workerPaths = new Set(manifest.files.map(file => file.path));
+  const scriptHostPrefix = 'node_modules/@meowfilm/script-host/src/';
+  const workerFiles = ['index.js', 'worker-session.js', 'worker-entry.js', 'worker-protocol.js'];
+  for (const file of workerFiles) {
+    assert.equal(workerPaths.has(scriptHostPrefix + file), true, `worker runtime source missing: ${file}`);
+  }
+  const dependencies = new Set(manifest.dependencies.map(item => item.name));
+  for (const name of [
+    '@jitl/quickjs-ffi-types', '@jitl/quickjs-wasmfile-release-sync',
+    '@meowfilm/runtime-bridge', '@meowfilm/script-host', 'quickjs-emscripten-core',
+    '@opentelemetry/api', 'buffer', 'events', 'path-browserify',
+    'readable-stream', 'supports-color', 'util',
+  ]) assert.equal(dependencies.has(name), true, name);
   for (const dependency of manifest.dependencies) {
     const sourceManifest = readJSON(join(root, dependency.lockPath, 'package.json'));
     assert.deepEqual(readJSON(join(output, dependency.path, 'package.json')), sourceManifest);
@@ -125,6 +138,15 @@ test('Windows launch accepts only the exact ordered pipe-name/session UUID proto
     ].map(value => pipeArgs(pipeName, value)),
   ]) {
     assert.throws(() => parseWindowsLaunchArguments(argv), { code: 'INVALID_MESSAGE', message: 'INVALID_MESSAGE' });
+  }
+});
+
+test('Windows script data root accepts only the native-injected absolute local path', () => {
+  const expected = join(temporary, 'script-data-root');
+  assert.equal(windowsScriptDataRoot(expected), expected);
+  for (const value of ['', 'relative/script-data', '//server/share/script-data',
+    '\\\\server\\share\\script-data', `bad${String.fromCharCode(0)}path`, null, 1]) {
+    assert.throws(() => windowsScriptDataRoot(value), { code: 'INVALID_MESSAGE' });
   }
 });
 
@@ -304,7 +326,11 @@ test('failed assembly releases its connected Windows pipe and disposes the modul
 });
 
 function spawnRuntime(t, entry, argv, payload) {
-  const env = { ...process.env, NODE_OPTIONS: '', NODE_PATH: '' };
+  const scriptDataRoot = mkdtempSync(join(temporary, 'script-runtime-'));
+  t.after(() => rmSync(scriptDataRoot, { recursive: true, force: true }));
+  const env = { ...process.env, NODE_OPTIONS: '', NODE_PATH: '',
+    MEOWFILM_SCRIPT_DATA_ROOT: scriptDataRoot };
+  delete env.LOCALAPPDATA;
   if (payload) {
     // Test-only resolver guard: neither ESM nor CJS may be rescued by the
     // development worktree's ancestor node_modules. No guard ships in payload.
@@ -357,13 +383,17 @@ async function assertRealBusiness(peer, product, domains) {
   await assert.rejects(peer.call('eval', privateMarker), { code: 'METHOD_UNAVAILABLE' });
   await assert.rejects(peer.call('runtime.describe', {}), { code: 'INVALID_MESSAGE' });
   const music = description.modules.find(module => module.id === 'music');
-  assert.equal(music.version, '0.5.0');
+  assert.equal(music.version, '0.6.0');
   assert.ok(music.methods.every(method => method.startsWith('music.script.')));
+  const cat = description.modules.find(module => module.id === 'cat');
+  assert.equal(cat.version, '0.1.0');
+  assert.ok(cat.methods.every(method => method.startsWith('cat.script.')));
   assert.deepEqual(await peer.call('music.script.status', {}), {
     ok: true, contract: 'music.script.v2', documentAccess: false, instances: [],
   });
   for (const method of ['music.library.list', 'music.queue.get', 'music.history.list',
     'music.storage.flush', 'music.lyrics.parse', 'music.accounts.list', 'music.catalog.search',
+    'cat.library.list', 'cat.sources.inspect',
     'film.script.status', 'film.playback.recognize', 'film.sources.list', 'film.library.read',
     'reader.rules.reset', 'reader.sources.setAccess', 'reader.library.list', 'reader.content.chapter'])
     await assert.rejects(peer.call(method, {}), { code: 'METHOD_UNAVAILABLE' });
@@ -497,12 +527,14 @@ async function runProduct(t, product, entry, payload) {
 }
 
 for (const product of Object.keys(products)) {
-  test(`${product}: thin platform entry explicitly imports its shared music factory`, () => {
+  test(`${product}: thin platform entry explicitly imports its shared script factories`, () => {
     const source = readFileSync(join(root, 'apps/windows/runtime/entries', `${product}.mjs`), 'utf8');
     assert.deepEqual([...source.matchAll(/^import\s+\{[^{}]+\}\s+from\s+['"]([^'"]+)['"];/gm)].map(match => match[1]),
-      ['../bootstrap.mjs', '../../../runtime/modules/music-script.mjs']);
+      ['../bootstrap.mjs', '../../../runtime/modules/music-script.mjs',
+        '../../../runtime/modules/cat-script.mjs']);
     assert.equal(source.match(/await startWindowsAppRuntime\(/g)?.length, 1);
     if (products[product].includes('music')) assert.ok(source.includes('createMusicScriptModule({ call })'));
+    if (products[product].includes('cat')) assert.ok(source.includes('createCatScriptModule({ dataRoot: windowsScriptDataRoot() })'));
   });
   test(`${product}: real source entry, named pipe and native-only business boundary`, windows, async t => {
     await runProduct(t, product, join(root, 'apps/windows/runtime/entries', `${product}.mjs`));
@@ -554,7 +586,10 @@ function packagingFixture({
   }
   write(source, 'package-lock.json', lock);
   write(source, 'apps/runtime/bootstrap.mjs', inert);
-  if (!missingCommonModule) write(source, 'apps/runtime/modules/music-script.mjs', inert);
+  if (!missingCommonModule) {
+    write(source, 'apps/runtime/modules/music-script.mjs', inert);
+    write(source, 'apps/runtime/modules/cat-script.mjs', inert);
+  }
   for (const path of ['bootstrap.mjs', 'entries/aggregate.mjs']) {
     if (missingBootstrap && path === 'bootstrap.mjs') continue;
     let text = readFileSync(join(root, 'apps/windows/runtime', path), 'utf8');
@@ -611,9 +646,9 @@ test('Windows source junctions are rejected, not dereferenced or silently omitte
 test('App payload contains one common script assembly and only the Windows platform entry', async () => {
   const output = join(mkdtempSync(join(temporary, 'closure-')), 'payload');
   const manifest = await packageWindowsRuntime({ root, product: 'aggregate', output });
-  assert.deepEqual(manifest.modules, ['music']);
+  assert.deepEqual(manifest.modules, ['music', 'cat']);
   assert.deepEqual(manifest.files.filter(file => file.path.startsWith('app/')).map(file => file.path), [
-    'app/bootstrap.mjs', 'app/modules/music-script.mjs',
+    'app/bootstrap.mjs', 'app/modules/cat-script.mjs', 'app/modules/music-script.mjs',
     'app/windows/bootstrap.mjs', 'app/windows/entries/aggregate.mjs',
   ]);
 });

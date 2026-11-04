@@ -12,7 +12,8 @@ using MeowFilm.Platform.Storage;
 namespace MeowFilm.AppHost;
 
 public sealed record AppDefinition(string Id, IReadOnlyList<RuntimeModule> RuntimeModules,
-    IReadOnlyList<string> NativeNamespaces, IReadOnlyList<string> BridgeNamespaces);
+    IReadOnlyList<string> NativeNamespaces, IReadOnlyList<string> BridgeNamespaces,
+    IReadOnlyList<string>? NativeCollections = null);
 
 public static class AppLauncher
 {
@@ -140,7 +141,7 @@ public static class AppLauncher
             {
                 var paths = AppDataPaths.Current;
                 Directory.CreateDirectory(paths.Documents);
-                store = new DpapiDocumentStore(paths.Documents, definition.NativeNamespaces);
+                store = new DpapiDocumentStore(paths.Documents, definition.NativeNamespaces, definition.NativeCollections);
                 documents = new ProtectedDocumentBridge(store, definition.BridgeNamespaces);
                 runtime = new OnDemandRuntimeClient(async token =>
                 {
@@ -152,7 +153,8 @@ public static class AppLauncher
                         definition.RuntimeModules), token).ConfigureAwait(false);
                     token.ThrowIfCancellationRequested();
                     return await NodeRuntime.StartAsync(Path.Combine(root, "node.exe"), bundle,
-                        definition.RuntimeModules, platformMethods ?? throw new BridgeException("INVALID_MESSAGE"), token).ConfigureAwait(false);
+                        definition.RuntimeModules, platformMethods ?? throw new BridgeException("INVALID_MESSAGE"),
+                        paths.ScriptRuntime, token).ConfigureAwait(false);
                 });
                 cancellationToken.ThrowIfCancellationRequested();
                 createModules(runtime, store, modules);
