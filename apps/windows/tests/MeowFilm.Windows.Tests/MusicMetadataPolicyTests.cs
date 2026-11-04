@@ -156,22 +156,22 @@ public static class MusicMetadataPolicyTests
     { if (!result.GetProperty("ok").GetBoolean()) throw new InvalidOperationException(result.GetProperty("code").GetString()); return result; }
     private static void Code(JsonElement result, string code)
     { Check(!result.GetProperty("ok").GetBoolean()); Equal(code, result.GetProperty("code").GetString()); }
-    private sealed class Store : IProtectedDocumentStore
+    private sealed class Store : IDocumentStore
     {
         internal byte[]? Data;
         internal int Writes;
         internal bool FailAfterWrite;
-        public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken token = default)
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
         {
             token.ThrowIfCancellationRequested(); Equal(MusicLibraryOwner.DocumentNamespace, ns);
-            return Task.FromResult(new ProtectedDocument(Data?.ToArray(), Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data)));
+            return Task.FromResult(new DocumentSnapshot(Data?.ToArray(), Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data)));
         }
         public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken token = default)
         {
             token.ThrowIfCancellationRequested(); Equal(MusicLibraryOwner.DocumentNamespace, ns);
             Equal(Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data), expected);
             Data = data.ToArray(); Writes++;
-            if (FailAfterWrite) { FailAfterWrite = false; throw new ProtectedDocumentException(DocumentStoreError.Unavailable); }
+            if (FailAfterWrite) { FailAfterWrite = false; throw new DocumentStoreException(DocumentStoreError.Unavailable); }
             return Task.FromResult(DocumentFingerprint.FromBytes(Data));
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;

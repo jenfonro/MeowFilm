@@ -55,6 +55,31 @@ public static class ArtworkTests
                 Check(ReferenceEquals(first.Image, second.Image)); Equal(1, handler.Count);
                 first.Dispose(); Check(second.Image.IsFrozen);
             }));
+        yield return new("Native artwork requests bounded NetEase thumbnails without changing stored identity or other URLs", () => Sta(async () =>
+        {
+            foreach (var (input, requested) in new[]
+            {
+                ("https://p1.music.126.net/avatar/109951100000001.jpg", "https://p1.music.126.net/avatar/109951100000001.jpg?param=512y512"),
+                ("https://p2.music.163.net/cover/109951100000002.png", "https://p2.music.163.net/cover/109951100000002.png?param=512y512"),
+                ("https://images.invalid/cover/109951100000002.jpg", "https://images.invalid/cover/109951100000002.jpg"),
+                ("https://p1.music.126.net/obj/decoration.png", "https://p1.music.126.net/obj/decoration.png"),
+                ("https://p1.music.126.net/cover/109951100000002.jpg?signature=synthetic", "https://p1.music.126.net/cover/109951100000002.jpg?signature=synthetic"),
+                ("https://p1.music.126.net.evil.invalid/cover/109951100000002.jpg", "https://p1.music.126.net.evil.invalid/cover/109951100000002.jpg")
+            })
+            {
+                int calls = 0;
+                await using var service = new ArtworkService(new Handler((request, _) =>
+                {
+                    calls++;
+                    Equal(requested, request.RequestUri!.AbsoluteUri);
+                    return Task.FromResult(Reply(Encode("png", 512, 512)));
+                }));
+                using var first = await service.AcquireAsync(input);
+                using var second = await service.AcquireAsync(input);
+                Equal(512, first.Image.PixelWidth);
+                Equal(1, calls); Check(ReferenceEquals(first.Image, second.Image));
+            }
+        }));
         yield return new("Native artwork public-only address rejection happens before transport", async () =>
         {
             var handler = new Handler((_, _) => throw new InvalidOperationException("No HTTP expected"));
@@ -157,6 +182,26 @@ public static class ArtworkTests
             foreach (var lease in await Task.WhenAll(busy)) lease.Dispose();
             Equal(0, active);
         }));
+        yield return new("Native artwork close drains a response body that ignores cancellation", async () =>
+        {
+            var body = new HeldReadStream();
+            var handler = new Handler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            { Content = new StreamContent(body) }));
+            await using var service = new ArtworkService(handler);
+            using var cancellation = new CancellationTokenSource();
+            var read = service.AcquireAsync("https://art.example.test/body", cancellation.Token);
+            await body.Entered.Task;
+            cancellation.Cancel();
+            try { using var unexpected = await read; throw new InvalidOperationException("Expected consumer cancellation"); }
+            catch (OperationCanceledException) { }
+            await body.Cancelled.Task;
+            var close = service.DisposeAsync().AsTask();
+            var secondClose = service.DisposeAsync().AsTask();
+            try { Check(!close.IsCompleted && !secondClose.IsCompleted && !handler.Disposed && !body.Disposed); }
+            finally { body.Release.TrySetResult(); }
+            await Task.WhenAll(close, secondClose);
+            Check(body.Disposed && handler.Disposed);
+        });
         yield return new("Native artwork shared URL survives one consumer cancellation", () => Sta(async () =>
         {
             var entered = Signal(); var cancelled = Signal();
@@ -212,15 +257,103 @@ public static class ArtworkTests
         yield return new("Native artwork cache eviction preserves pinned visuals and admits fresh images", () => Sta(async () =>
         {
             byte[] png = Encode("png", 1, 1);
-            await using var service = new ArtworkService(new Handler((_, _) => Task.FromResult(Reply(png))));
+            var handler = new Handler((_, _) => Task.FromResult(Reply(png)));
+            await using var service = new ArtworkService(handler);
             var leases = new List<IArtworkLease>();
             try
             {
                 for (int i = 0; i < 64; i++) leases.Add(await service.AcquireAsync("https://art.example.test/" + i));
                 using var replacement = await service.AcquireAsync("https://art.example.test/overflow");
                 Check(leases[0].Image.IsFrozen && leases[1].Image.IsFrozen && replacement.Image.IsFrozen);
+                var original = leases[0].Image;
+                var reused = await service.AcquireAsync("https://art.example.test/0");
+                Check(ReferenceEquals(original, reused.Image)); Equal(65, handler.Count);
+                leases[0].Dispose(); leases[0].Dispose();
+                using (var shared = await service.AcquireAsync("https://art.example.test/0"))
+                {
+                    Check(ReferenceEquals(original, shared.Image)); Equal(65, handler.Count);
+                }
+                reused.Dispose(); reused.Dispose();
+                using var fresh = await service.AcquireAsync("https://art.example.test/0");
+                Check(!ReferenceEquals(original, fresh.Image)); Equal(66, handler.Count);
             }
             finally { foreach (var lease in leases) lease.Dispose(); }
+        }));
+        yield return new("Native artwork hidden retained page restores identical pixels and palettes without HTTP", () => Sta(async () =>
+        {
+            var encoder = new PngBitmapEncoder();
+            using var sample = new FakeLease();
+            encoder.Frames.Add(BitmapFrame.Create(sample.Image));
+            using var encoded = new MemoryStream(); encoder.Save(encoded);
+            byte[] png = encoded.ToArray();
+            var handler = new Handler((_, _) => Task.FromResult(Reply(png)));
+            await using var service = new ArtworkService(handler);
+            var host = new Grid { Width = 100, Height = 100 };
+            var view = new ArtworkImage { Width = 60, Height = 60, Address = "https://art.example.test/retained" };
+            ArtworkScope.SetLoader(host, service); host.Children.Add(view);
+            using var surface = Mount(host); Layout(host);
+            using (await view.PrepareForPresentationAsync()) { }
+            var pixels = ((Image)view.Children[0]).Source;
+            var raw = view.RawPaletteBrush; var palette = view.PaletteBrush; var top = view.TopPaletteBrush;
+            Check(pixels is not null); Equal(1, handler.Count); Check(ObservesLayout(view));
+            Check(view.HasTopPalette && !ReferenceEquals(raw, Brushes.DimGray));
+            foreach (var visibility in new[] { Visibility.Hidden, Visibility.Collapsed })
+            {
+                host.Visibility = visibility; Layout(host); await Tick();
+                Check(!ObservesLayout(view));
+                Check(ReferenceEquals(pixels, ((Image)view.Children[0]).Source));
+                host.Visibility = Visibility.Visible; Layout(host); await Tick();
+                Check(ObservesLayout(view)); Equal(1, handler.Count);
+                Check(ReferenceEquals(pixels, ((Image)view.Children[0]).Source));
+                Check(ReferenceEquals(raw, view.RawPaletteBrush));
+                Check(ReferenceEquals(palette, view.PaletteBrush));
+                Check(ReferenceEquals(top, view.TopPaletteBrush));
+            }
+            host.Children.Remove(view); await Tick();
+            Check(!ObservesLayout(view)); Check(((Image)view.Children[0]).Source is null);
+            Check(!view.HasTopPalette);
+        }));
+        yield return new("Native artwork leaving a visible viewport releases its lease and reuses the bounded cache", () => Sta(async () =>
+        {
+            byte[] png = Encode("png", 2, 2);
+            var handler = new Handler((_, _) => Task.FromResult(Reply(png)));
+            await using var service = new ArtworkService(handler);
+            var host = new Canvas { Width = 100, Height = 100, ClipToBounds = true };
+            var view = new ArtworkImage { Width = 60, Height = 60, Address = "https://art.example.test/viewport" };
+            ArtworkScope.SetLoader(host, service);
+            host.Children.Add(view);
+            using var surface = Mount(host);
+            Layout(host);
+            await WaitFor(() => ((Image)view.Children[0]).Source is not null);
+            var pixels = ((Image)view.Children[0]).Source;
+            Check(pixels is not null);
+            Equal(1, handler.Count);
+
+            Canvas.SetTop(view, 200);
+            Layout(host);
+            await Tick();
+            Check(((Image)view.Children[0]).Source is null, "leaving the clipped viewport releases the image");
+            Check(ReferenceEquals(Brushes.DimGray, view.RawPaletteBrush), "leaving the viewport clears its palette");
+
+            Canvas.SetTop(view, 0);
+            Layout(host);
+            await WaitFor(() => ReferenceEquals(pixels, ((Image)view.Children[0]).Source),
+                "returning to the viewport must reuse the cached decoded image");
+            Equal(1, handler.Count);
+        }));
+        yield return new("Native artwork close preserves external leases and forbids further acquisition", () => Sta(async () =>
+        {
+            byte[] png = Encode("png", 1, 1);
+            var handler = new Handler((_, _) => Task.FromResult(Reply(png)));
+            await using var service = new ArtworkService(handler);
+            var first = service.AcquireAsync("https://art.example.test/shared");
+            var second = service.AcquireAsync("https://art.example.test/shared");
+            using var a = await first; using var b = await second;
+            Check(ReferenceEquals(a.Image, b.Image)); Equal(1, handler.Count);
+            await service.DisposeAsync();
+            Check(handler.Disposed && a.Image.IsFrozen && b.Image.IsFrozen);
+            await Code("ARTWORK_CLOSED", () => service.AcquireAsync("https://art.example.test/shared"));
+            a.Dispose(); a.Dispose(); Check(b.Image.IsFrozen);
         }));
         yield return new("Native artwork presentation prepares outside the viewport and retains pixels until retirement", () => Sta(async () =>
         {
@@ -307,14 +440,14 @@ public static class ArtworkTests
             Check(!ReferenceEquals(Brushes.DimGray, view.PaletteBrush));
             Check(!ReferenceEquals(Brushes.DimGray, view.TopPaletteBrush));
             Check(view.HasTopPalette);
-            view.RaiseEvent(new RoutedEventArgs(FrameworkElement.UnloadedEvent)); await Tick();
-            Check(next.Disposed); Check(((Image)view.Children[0]).Source is null);
+            host.Children.Remove(view); await Tick();
+            Equal(1, next.DisposeCount); Check(((Image)view.Children[0]).Source is null);
             Check(ReferenceEquals(Brushes.DimGray, view.RawPaletteBrush));
             Check(ReferenceEquals(Brushes.DimGray, view.PaletteBrush));
             Check(ReferenceEquals(Brushes.DimGray, view.TopPaletteBrush));
             Check(!view.HasTopPalette);
         }));
-        yield return new("Native artwork clipped and hidden views release images until visible again", () => Sta(async () =>
+        yield return new("Native artwork hidden views retain pixels and unload rejects late replacement", () => Sta(async () =>
         {
             var loader = new HeldLoader(); var host = new Canvas { Width = 100, Height = 100, ClipToBounds = true };
             var view = new ArtworkImage { Width = 40, Height = 40, Address = "https://art.example.test/a" };
@@ -324,10 +457,38 @@ public static class ArtworkTests
             view.RaiseEvent(new RoutedEventArgs(FrameworkElement.LoadedEvent)); await Tick(); Equal(0, loader.Calls.Count);
             Canvas.SetTop(view, 0); Layout(host); await Tick(); Equal(1, loader.Calls.Count);
             var lease = new FakeLease(); loader.Calls[0].Completion.SetResult(lease); await Tick(); Check(!lease.Disposed);
-            view.Visibility = Visibility.Collapsed; await Tick(); Check(lease.Disposed);
-            view.Visibility = Visibility.Visible; Layout(host); await Tick(); Equal(2, loader.Calls.Count);
+            view.Visibility = Visibility.Collapsed; await Tick(); Check(!lease.Disposed);
+            Check(!ObservesLayout(view));
+            view.Visibility = Visibility.Visible; Layout(host); await Tick(); Equal(1, loader.Calls.Count);
+            Check(ReferenceEquals(lease.Image, ((Image)view.Children[0]).Source));
+            view.Address = "https://art.example.test/b"; Equal(2, loader.Calls.Count); Check(lease.Disposed);
             view.RaiseEvent(new RoutedEventArgs(FrameworkElement.UnloadedEvent));
             var late = new FakeLease(); loader.Calls[1].Completion.SetResult(late); await Tick(); Check(late.Disposed);
+            Equal(1, lease.DisposeCount); Equal(1, late.DisposeCount);
+            Check(((Image)view.Children[0]).Source is null); Check(!ObservesLayout(view));
+        }));
+        yield return new("Native artwork hiding cancels unfinished demand and hidden identity changes do not fetch", () => Sta(async () =>
+        {
+            var first = new HeldLoader(); var second = new HeldLoader();
+            var host = new Grid { Width = 100, Height = 100 };
+            var view = new ArtworkImage { Width = 60, Height = 60, Address = "https://art.example.test/a" };
+            ArtworkScope.SetLoader(host, first); host.Children.Add(view);
+            using var surface = Mount(host); Layout(host); await Tick(); Equal(1, first.Calls.Count);
+            host.Visibility = Visibility.Collapsed; await Tick();
+            Check(first.Calls[0].Token.IsCancellationRequested); Check(!ObservesLayout(view));
+            view.Address = "https://art.example.test/b"; ArtworkScope.SetLoader(host, second);
+            Layout(host); await Tick(); Equal(0, second.Calls.Count);
+            var late = new FakeLease(); first.Calls[0].Completion.SetResult(late); await Tick();
+            Equal(1, late.DisposeCount); Check(((Image)view.Children[0]).Source is null);
+            host.Visibility = Visibility.Visible; Layout(host); await Tick(); Equal(1, second.Calls.Count);
+            var current = new FakeLease(); second.Calls[0].Completion.SetResult(current); await Tick();
+            host.Visibility = Visibility.Collapsed; await Tick(); Check(!current.Disposed);
+            ArtworkScope.SetLoader(host, first); await Tick(); Equal(1, current.DisposeCount);
+            Equal(1, first.Calls.Count); Check(((Image)view.Children[0]).Source is null);
+            host.Visibility = Visibility.Visible; Layout(host); await Tick(); Equal(2, first.Calls.Count);
+            host.Children.Remove(view); await Tick(); Check(first.Calls[1].Token.IsCancellationRequested);
+            var unloaded = new FakeLease(); first.Calls[1].Completion.SetResult(unloaded); await Tick();
+            Equal(1, unloaded.DisposeCount); Check(((Image)view.Children[0]).Source is null);
         }));
         yield return new("Native artwork visible failure retries only on explicit action and scope replacement retires old pixels", () => Sta(async () =>
         {
@@ -356,6 +517,19 @@ public static class ArtworkTests
         { Interlocked.Increment(ref Count); return action(request, token); }
         protected override void Dispose(bool disposing) { Disposed = true; base.Dispose(disposing); }
     }
+    private sealed class HeldReadStream() : MemoryStream(new byte[] { 1 })
+    {
+        internal readonly TaskCompletionSource Entered = Signal(), Cancelled = Signal(), Release = Signal();
+        internal bool Disposed;
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            using var registration = cancellationToken.Register(() => Cancelled.TrySetResult());
+            Entered.TrySetResult();
+            await Release.Task;
+            return await base.ReadAsync(buffer, CancellationToken.None);
+        }
+        protected override void Dispose(bool disposing) { Disposed = true; base.Dispose(disposing); }
+    }
     private sealed class HeldLoader : IArtworkLoader
     {
         internal readonly List<(TaskCompletionSource<IArtworkLease> Completion, CancellationToken Token)> Calls = [];
@@ -368,10 +542,14 @@ public static class ArtworkTests
     private sealed class FakeLease : IArtworkLease
     {
         internal bool Disposed;
+        internal int DisposeCount;
         public BitmapSource Image { get; } = BitmapSource.Create(1, 1, 96, 96, PixelFormats.Bgra32, null,
             new byte[] { 100, 200, 250, 255 }, 4);
-        public void Dispose() => Disposed = true;
+        public void Dispose() { Disposed = true; DisposeCount++; }
     }
+    private static bool ObservesLayout(ArtworkImage view) =>
+        (bool)typeof(ArtworkImage).GetField("observingLayout",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(view)!;
     private static HttpResponseMessage Reply(byte[] bytes) => new(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
     private static byte[] Encode(string kind, int width, int height)
     {
@@ -392,10 +570,17 @@ public static class ArtworkTests
         source.RootVisual = root; return source;
     }
     private static async Task Tick() { await Dispatcher.Yield(DispatcherPriority.Background); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle); }
+    private static async Task WaitFor(Func<bool> condition, string failure = "Artwork image acquisition did not settle")
+    {
+        for (int attempt = 0; attempt < 100 && !condition(); attempt++)
+            await Task.Delay(10);
+        Check(condition(), failure);
+    }
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     private static async Task Code(string code, Func<Task> action)
     { try { await action(); throw new InvalidOperationException("Expected artwork rejection"); } catch (ArtworkException e) { Equal(code, e.Code); Equal(code, e.Message); Check(e.InnerException is null); } }
-    private static void Check(bool value) { if (!value) throw new InvalidOperationException("Artwork assertion failed"); }
+    private static void Check(bool value, string message = "Artwork assertion failed")
+    { if (!value) throw new InvalidOperationException(message); }
     private static void Equal<T>(T expected, T actual)
     { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new InvalidOperationException($"Artwork expected {expected}, actual {actual}"); }
     private static async Task Sta(Func<Task> action)

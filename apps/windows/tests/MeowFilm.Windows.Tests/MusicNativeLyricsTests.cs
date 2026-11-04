@@ -158,6 +158,19 @@ public static class MusicNativeLyricsTests
             { using var f = new Fixture((_, _) => Task.FromResult(WyReply(text))); True(await f.Read(Wy) is null); });
         yield return Case("wy explicit ID mismatch is failure", async () =>
         { using var f = new Fixture((_, _) => Task.FromResult(Json(new { code = 200, id = 222, lrc = new { lyric = "[00:01]x" } }))); await Error("IDENTITY_MISMATCH", () => f.Read(Wy)); });
+        yield return Case("wy lyric response accepts repeated JSON fields but checks the final recording identity", async () =>
+        {
+            foreach (var (id, error) in new[] { ("12345", false), ("222", true) })
+            {
+                var json = """{"code":500,"code":200,"id":0,"id":""" + id +
+                    ""","lrc":{"lyric":"old","lyric":"[00:01]final"},"metadata":{"alg":null,"alg":"current"}}""";
+                using var f = new Fixture((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                    { Content = new StringContent(json, Encoding.UTF8, "application/json") }));
+                if (error) await Error("IDENTITY_MISMATCH", () => f.Read(Wy));
+                else Equal("[00:01]final", (await f.Read(Wy))!.Text);
+                Equal(1, f.Calls);
+            }
+        });
         yield return Case("wy invalid field is not absence", async () =>
         { using var f = new Fixture((_, _) => Task.FromResult(Json(new { code = 200, yrc = new { lyric = 123 } }))); await Error("INVALID_RESPONSE", () => f.Read(Wy)); });
         foreach (var pair in new[] { (301, "AUTH_REQUIRED"), (403, "FORBIDDEN"), (460, "VERIFICATION_REQUIRED"), (509, "RATE_LIMITED"), (999, "UPSTREAM_ERROR") })
@@ -432,12 +445,13 @@ public static class MusicNativeLyricsTests
         });
         yield return Case("HTTP raw exception never exposed", async () =>
         { using var f = new Fixture((_, _) => throw new IOException("Cookie=private-value; accesskey=private")); await Error("NETWORK_ERROR", () => f.Read(Wy)); });
-        var invalidJson = new[] { "{\"code\":200,\"code\":301}", "[]", "{", "{\"code\":200,\"lrc\":{\"lyric\":true}}" };
+        var invalidJson = new[] { ("{\"code\":200,\"code\":301}", "AUTH_REQUIRED"), ("[]", "INVALID_RESPONSE"),
+            ("{", "INVALID_RESPONSE"), ("{\"code\":200,\"lrc\":{\"lyric\":true}}", "INVALID_RESPONSE") };
         for (int i = 0; i < invalidJson.Length; i++)
         {
-            var raw = invalidJson[i];
-            yield return Case("strict JSON response " + i, async () =>
-            { using var f = new Fixture((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(raw) })); await Error("INVALID_RESPONSE", () => f.Read(Wy)); });
+            var (raw, error) = invalidJson[i];
+            yield return Case("JSON response preserves syntax and business errors " + i, async () =>
+            { using var f = new Fixture((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(raw) })); await Error(error, () => f.Read(Wy)); });
         }
         yield return Case("lyric-sized strings remain valid in both native lyrics and ordinary JSON responses", async () =>
         {

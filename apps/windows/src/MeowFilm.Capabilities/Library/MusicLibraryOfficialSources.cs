@@ -176,7 +176,7 @@ public sealed partial class MusicLibraryOwner
             LJ.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
             return RefreshOfficialSources(document!).Retain();
         }
-        catch (ProtectedDocumentException error)
+        catch (DocumentStoreException error)
         {
             throw new MusicLibraryException(error.Error == DocumentStoreError.Unavailable ? "STORAGE_UNAVAILABLE" : "STORAGE");
         }

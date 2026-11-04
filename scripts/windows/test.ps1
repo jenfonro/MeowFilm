@@ -7,7 +7,11 @@ if (([int][bool]$Group + [int][bool]$Case + [int][bool]$All) -ne 1) {
 $Run = New-WindowsDirectory (Join-Path $WindowsTestResults 'windows-native')
 foreach ($Name in @('bundles', 'data')) {
     $Path = Assert-WindowsPath -Owner $Run -Path (Join-Path $Run $Name)
-    if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Recurse -Force }
+    if (Test-Path -LiteralPath $Path) {
+        # Windows PowerShell cannot reliably recurse long fixture paths.
+        & $WindowsNode -e "require('node:fs').rmSync(process.argv[1], { recursive: true, force: true })" $Path
+        if ($LASTEXITCODE -ne 0) { throw 'Native test fixture cleanup failed.' }
+    }
     New-WindowsDirectory $Path | Out-Null
 }
 $env:MEOWFILM_TEST_RUNTIME_ROOT = Join-Path $Run 'bundles'

@@ -14,7 +14,6 @@ public static class GrantedMediaFilesTests
     {
         yield return Case("current-format-roundtrip-restart-and-resolve", Roundtrip);
         yield return Case("every-non-current-document-is-rejected-without-write", NonCurrentDocuments);
-        yield return Case("wrong-fingerprint-rejects-every-entry-point-without-write", WrongFingerprint);
         yield return Case("CAS-conflict-is-not-retried-or-overwritten", CasConflict);
         yield return Case("wrong-write-receipt-is-explicitly-uncertain", WrongReceipt);
         yield return Case("constructor-rejects-invalid-owner-contracts", ConstructorContracts);
@@ -50,8 +49,7 @@ public static class GrantedMediaFilesTests
         var listed = await restarted.ListAsync();
         Check(listed.SequenceEqual(granted) && store.Writes == 1);
         Check(await restarted.ResolveAsync(granted[0].Id) == new Uri(file.MediaPath));
-        Check(store.Writes == 1 && store.LastReadBuffer is not null &&
-            store.LastReadBuffer.All(value => value == 0), "read plaintext was not cleared");
+        Check(store.Writes == 1);
     }
 
     private static async Task NonCurrentDocuments()
@@ -104,28 +102,8 @@ public static class GrantedMediaFilesTests
             await Corrupt(() => owner.GrantAsync([file.MediaPath]));
             Check(store.Writes == 0 && store.Data.SequenceEqual(original),
                 "invalid document was written or replaced");
-            Check(store.LastReadBuffer is not null && store.LastReadBuffer.All(value => value == 0),
-                "invalid read plaintext was not cleared");
             CryptographicOperations.ZeroMemory(original);
         }
-    }
-
-    private static async Task WrongFingerprint()
-    {
-        using var file = new Fixture();
-        await using var store = new MemoryStore
-        {
-            Data = Encoding.UTF8.GetBytes(CurrentDocument(file.MediaPath)),
-            WrongFingerprint = true
-        };
-        byte[] original = store.Data.ToArray();
-        var owner = Owner(store);
-        await Corrupt(() => owner.ListAsync());
-        await Corrupt(async () => _ = await owner.ResolveAsync(Id(file.MediaPath)));
-        await Corrupt(() => owner.GrantAsync([file.MediaPath]));
-        Check(store.Writes == 0 && store.Data.SequenceEqual(original));
-        Check(store.LastReadBuffer is not null && store.LastReadBuffer.All(value => value == 0));
-        CryptographicOperations.ZeroMemory(original);
     }
 
     private static async Task CasConflict()
@@ -133,7 +111,7 @@ public static class GrantedMediaFilesTests
         using var file = new Fixture();
         await using var store = new MemoryStore { Behavior = WriteBehavior.Conflict };
         var error = await Capture(() => Owner(store).GrantAsync([file.MediaPath]));
-        Check(error is ProtectedDocumentException { Error: DocumentStoreError.Conflict });
+        Check(error is DocumentStoreException { Error: DocumentStoreError.Conflict });
         Check(store.Writes == 1 && store.Data is null, "conflict was retried or overwritten");
     }
 
@@ -160,7 +138,7 @@ public static class GrantedMediaFilesTests
         return store.DisposeAsync().AsTask();
     }
 
-    private static GrantedMediaFiles Owner(IProtectedDocumentStore store) =>
+    private static GrantedMediaFiles Owner(IDocumentStore store) =>
         new(store, Namespace, [".wav"]);
 
     private static string CurrentDocument(string path) =>
@@ -226,26 +204,21 @@ public static class GrantedMediaFilesTests
 
     private enum WriteBehavior { Normal, Conflict, WrongReceipt }
 
-    private sealed class MemoryStore : IProtectedDocumentStore
+    private sealed class MemoryStore : IDocumentStore
     {
         internal byte[]? Data;
-        internal byte[]? LastReadBuffer;
         internal int Reads;
         internal int Writes;
-        internal bool WrongFingerprint;
         internal WriteBehavior Behavior;
 
-        public Task<ProtectedDocument> ReadAsync(string documentNamespace,
+        public Task<DocumentSnapshot> ReadAsync(string documentNamespace,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
             Check(documentNamespace == Namespace);
             Reads++;
-            LastReadBuffer = Data?.ToArray();
-            var fingerprint = Data is null ? DocumentFingerprint.Missing :
-                WrongFingerprint ? new DocumentFingerprint(true, Data.Length, new string('0', 64)) :
-                DocumentFingerprint.FromBytes(Data);
-            return Task.FromResult(new ProtectedDocument(LastReadBuffer, fingerprint));
+            var fingerprint = Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data);
+            return Task.FromResult(new DocumentSnapshot(Data?.ToArray(), fingerprint));
         }
 
         public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
@@ -256,7 +229,7 @@ public static class GrantedMediaFilesTests
             Writes++;
             var current = Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data);
             if (current != expected || Behavior == WriteBehavior.Conflict)
-                throw new ProtectedDocumentException(DocumentStoreError.Conflict);
+                throw new DocumentStoreException(DocumentStoreError.Conflict);
             Data = data.ToArray();
             return Task.FromResult(Behavior == WriteBehavior.WrongReceipt
                 ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data));
@@ -265,7 +238,6 @@ public static class GrantedMediaFilesTests
         public ValueTask DisposeAsync()
         {
             if (Data is not null) CryptographicOperations.ZeroMemory(Data);
-            if (LastReadBuffer is not null) CryptographicOperations.ZeroMemory(LastReadBuffer);
             return ValueTask.CompletedTask;
         }
     }

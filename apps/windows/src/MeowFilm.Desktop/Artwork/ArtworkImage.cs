@@ -62,7 +62,6 @@ public sealed class ArtworkImage : Grid
         Loaded += (_, _) =>
         {
             loaded = true;
-            if (!observingLayout) { LayoutUpdated += OnLayout; observingLayout = true; }
             UpdateVisibility();
         };
         Unloaded += (_, _) =>
@@ -110,7 +109,9 @@ public sealed class ArtworkImage : Grid
         {
             var prior = owner; owner = null;
             if (prior is null || !ReferenceEquals(prior.presentation, this)) return;
-            prior.presentation = null; prior.UpdateVisibility();
+            prior.presentation = null;
+            if (!prior.InViewport()) prior.Retire();
+            prior.UpdateVisibility();
         }
     }
     private bool HasDemand() => presentation is not null || InViewport();
@@ -193,7 +194,24 @@ public sealed class ArtworkImage : Grid
     }
     private void UpdateVisibility()
     {
-        if (!HasDemand()) { if (attempted || request is not null || lease is not null) Retire(); return; }
+        bool observe = loaded && IsVisible;
+        if (observe != observingLayout)
+        {
+            if (observe) LayoutUpdated += OnLayout;
+            else LayoutUpdated -= OnLayout;
+            observingLayout = observe;
+        }
+        if (!HasDemand())
+        {
+            // Retained views own successful pixels, including while layout is restored after showing.
+            // Actual Unloaded/recycling and explicit presentation retirement release those resources.
+            if (loaded)
+            {
+                if (request is not null || IsVisible && (attempted || lease is not null)) Retire();
+            }
+            else if (attempted || request is not null || lease is not null) Retire();
+            return;
+        }
         if (attempted || string.IsNullOrWhiteSpace(Address) || ArtworkScope.GetLoader(this) is not { } loader) return;
         attempted = true; var stamp = epoch; string address = Address;
         var current = new CancellationTokenSource(); request = current;

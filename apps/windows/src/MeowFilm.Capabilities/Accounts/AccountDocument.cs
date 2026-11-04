@@ -32,7 +32,7 @@ internal sealed partial class AccountDocument
     private AccountDocument(JsonObject root, DocumentFingerprint fingerprint)
     { this.root = root; Fingerprint = fingerprint; }
     internal static string Key(string platform) => $"[\"meowfilm\",\"music\",1,\"platform-account\",\"{platform}\"]";
-    internal static AccountDocument Decode(ProtectedDocument document)
+    internal static AccountDocument Decode(DocumentSnapshot document)
     {
         try
         {

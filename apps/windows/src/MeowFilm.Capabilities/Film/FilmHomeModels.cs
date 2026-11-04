@@ -250,7 +250,8 @@ public sealed class FilmHomeSection : INotifyPropertyChanged
     public string Title => Definition.Title;
     public ObservableCollection<FilmCardItem> Items { get; } = [];
     public bool HasItems => Items.Count > 0;
-    public bool ShowStatus => !HasItems;
+    public bool ShowSkeleton => !HasItems && state is FilmHomeSectionState.Pending or FilmHomeSectionState.Loading;
+    public bool ShowStatus => !HasItems && !ShowSkeleton;
     public bool CanRetry => state is FilmHomeSectionState.Failed or FilmHomeSectionState.Cancelled;
     public string StatusText => state switch
     {
@@ -297,6 +298,7 @@ public sealed class FilmHomeSection : INotifyPropertyChanged
     {
         Changed(nameof(HasItems));
         Changed(nameof(ShowStatus));
+        Changed(nameof(ShowSkeleton));
         Changed(nameof(CanRetry));
         Changed(nameof(StatusText));
     }
@@ -343,7 +345,8 @@ public sealed class FilmDataSection : INotifyPropertyChanged
     public IReadOnlyList<FilmFilterRow> FilterRows { get; }
     public ObservableCollection<FilmCardItem> Items { get; } = [];
     public bool HasItems => Items.Count > 0;
-    public bool ShowStatus => !HasItems;
+    public bool ShowSkeleton => !HasItems && state is FilmDataSectionState.Pending or FilmDataSectionState.Loading;
+    public bool ShowStatus => !HasItems && !ShowSkeleton;
     public bool CanRetry => !HasItems && state is FilmDataSectionState.Failed or FilmDataSectionState.Cancelled;
     public bool ShowPageAction => HasItems &&
         (hasMore || state is FilmDataSectionState.Loading or FilmDataSectionState.Failed or FilmDataSectionState.Cancelled);
@@ -433,6 +436,7 @@ public sealed class FilmDataSection : INotifyPropertyChanged
     {
         Changed(nameof(HasItems));
         Changed(nameof(ShowStatus));
+        Changed(nameof(ShowSkeleton));
         Changed(nameof(CanRetry));
         Changed(nameof(ShowPageAction));
         Changed(nameof(CanPage));

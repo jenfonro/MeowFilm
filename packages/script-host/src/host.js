@@ -8,9 +8,6 @@ export const SCRIPT_LIMITS = Object.freeze({
   maxStackBytes: 256 * 1024,
 });
 
-/** LX results travel in one native bridge frame; Cat results use SourceTransfers. */
-export const LX_CONTROL_BYTES = 512 * 1024;
-
 /** Per-protocol wait/init/cleanup deadlines. No synchronous execution deadline. */
 const protocolLimits = Object.freeze({
   lx: Object.freeze({

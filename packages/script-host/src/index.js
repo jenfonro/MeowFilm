@@ -1,7 +1,7 @@
 import { ScriptHost } from './host.js';
 import { WorkerSession } from './worker-session.js';
 
-export { SCRIPT_LIMITS, LX_CONTROL_BYTES } from './host.js';
+export { SCRIPT_LIMITS } from './host.js';
 export { ScriptHostError } from './errors.js';
 export { createNodeNetwork } from './node-network.js';
 export { CatRuntime, createCatRuntime } from './cat-runtime.js';

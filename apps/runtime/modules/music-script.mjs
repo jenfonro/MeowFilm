@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  createScriptHost, createNodeNetwork, ScriptHostError, SCRIPT_LIMITS, LX_CONTROL_BYTES,
+  createScriptHost, createNodeNetwork, ScriptHostError, SCRIPT_LIMITS, SourceTransfers,
 } from '@meowfilm/script-host';
+import { BridgeError, encodeJSONValue, decodeJSONValue } from '@meowfilm/runtime-bridge';
 
 export const musicScriptContract = 'music.script.v2';
-const controlBytes = LX_CONTROL_BYTES, chunkBytes = 64 * 1024;
+const chunkBytes = 64 * 1024;
 const stageTTL = 300000;
 const codes = new Set(['INVALID_REQUEST', 'CLOSED', 'CANCELLED', 'LIMIT', 'SCRIPT_INTEGRITY',
   'SCRIPT_ENCODING', 'STAGE_NOT_FOUND', 'STALE_SOURCE', 'SOURCE_NOT_FOUND', 'SOURCE_DISABLED',
@@ -30,12 +31,10 @@ function text(value, max = 128) {
 function identifier(value) {
   text(value); requireValue(/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value));
 }
-function bounded(value, max = controlBytes) {
-  let json;
-  try { json = JSON.stringify(value); } catch { throw new Failure('INVALID_REQUEST'); }
-  requireValue(typeof json === 'string', 'INVALID_REQUEST');
-  requireValue(Buffer.byteLength(json) <= max, 'LIMIT');
-  return JSON.parse(json);
+function snapshot(value) {
+  const bytes = encodeJSONValue(value);
+  try { return decodeJSONValue(bytes); }
+  finally { bytes.fill(0); }
 }
 // Object ordering is not a revision change; array ordering remains meaningful.
 const canonical = value => JSON.stringify(value, (_key, item) => object(item)
@@ -49,7 +48,10 @@ function decode(bytes) {
 }
 function settings(params) {
   text(params.version);
-  requireValue(object(params.config)); bounded(params.config, 32 * 1024);
+  requireValue(object(params.config));
+  const bytes = encodeJSONValue(params.config);
+  try { requireValue(bytes.length <= 32 * 1024, 'LIMIT'); }
+  finally { bytes.fill(0); }
   fields(params.permissions, ['storage']);
   const permissions = params.permissions;
   requireValue(Array.isArray(permissions.storage) && permissions.storage.length <= 2 &&
@@ -63,6 +65,7 @@ function settings(params) {
 }
 function errorCode(error) {
   if (error instanceof Failure) return error.code;
+  if (error instanceof BridgeError) return 'INVALID_REQUEST';
   if (error instanceof ScriptHostError) return ({
     INVALID_ARGUMENT: 'INVALID_REQUEST', HOST_CLOSED: 'CLOSED', CANCELLED: 'CANCELLED',
     TIMEOUT: 'TIMEOUT', STALE_SESSION: 'STALE_SOURCE', DISABLED: 'SOURCE_DISABLED',
@@ -102,6 +105,7 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
     typeof setTimer === 'function' && typeof clearTimer === 'function');
   const stages = new Map(), bindings = new Map(), candidates = new Map(), sessions = new Map();
   const generations = new Map(), usedGrants = new Set(), adapterTasks = new Set();
+  const transfers = new SourceTransfers({ clock, setTimer, clearTimer });
   const lifetime = new AbortController();
   let closed = false, closing, tail = Promise.resolve();
   let stageTimer, stageFailure;
@@ -217,7 +221,7 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
       const message = { grant: auth.grant, installationId: input.installationId,
         siteId: input.siteId, generation: input.generation, key: input.key };
       if (operation === 'set') message.value = input.value;
-      const captured = bounded(message);
+      const captured = snapshot(message);
       if (operation === 'set') requireValue(Object.hasOwn(captured, 'value'));
       const signal = AbortSignal.any([lifetime.signal, auth.controller.signal, input.signal,
         ...(auth.phase === 'candidate' ? [auth.loadSignal] : [])]);
@@ -225,7 +229,7 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
         authorized(auth, input);
         return call(`platform.musicScript.storage.${operation}`, captured, { signal });
       }), 'storage');
-      const response = bounded(await abortable(task, signal));
+      const response = snapshot(await abortable(task, signal));
       authorized(auth, input);
       requireValue(object(response) && typeof response.ok === 'boolean', 'STORAGE_ERROR');
       if (!response.ok) {
@@ -251,22 +255,60 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
       generation: binding.generation, state: live.state, capabilities, contentHash: live.contentHash,
       protocol: live.protocol, version: live.version };
   }
-  const success = value => bounded({ ok: true, contract: musicScriptContract, ...value });
-  const failure = error => ({ ok: false, contract: musicScriptContract, code: errorCode(error) });
-  function method(allowed, required, body) {
-    return async (parameters = {}, context = {}) => {
+  function success(value, blob = false) {
+    const reply = { ok: true, contract: musicScriptContract, ...value };
+    const bytes = encodeJSONValue(reply);
+    if (blob) {
       try {
+        const result = transfers.result(bytes, { inline: decodeJSONValue });
+        return Object.hasOwn(result, 'blob') ? { ok: true, contract: musicScriptContract, ...result } : result;
+      } catch (error) { bytes.fill(0); throw error; }
+    }
+    try { return decodeJSONValue(bytes); }
+    finally { bytes.fill(0); }
+  }
+  const failure = error => ({ ok: false, contract: musicScriptContract, code: errorCode(error) });
+  function method(allowed, required, body, { blob = false, transfer = false,
+    envelope = false } = {}) {
+    return async (parameters = {}, context = {}) => {
+      let token, result;
+      try {
+        if (transfer && object(parameters)) {
+          const descriptor = Object.getOwnPropertyDescriptor(parameters, 'token');
+          if (typeof descriptor?.value === 'string') token = descriptor.value;
+        }
         requireValue(object(context));
         const { signal } = context;
         requireValue(signal === undefined || signal instanceof AbortSignal);
         guard(signal); fields(parameters, allowed, required);
-        const captured = bounded(parameters);
+        const captured = snapshot(parameters);
         const active = signal ? AbortSignal.any([lifetime.signal, signal]) : lifetime.signal;
-        const result = await body(captured, active);
+        result = await body(captured, active);
         guard(active);
-        return success(result);
-      } catch (error) { return failure(error); }
+        return envelope ? result : success(result, blob);
+      } catch (error) {
+        if (transfer) {
+          try {
+            transfers.release(token);
+            if (!token && typeof result?.token === 'string') transfers.release(result.token);
+            if (envelope && typeof result?.blob?.token === 'string') transfers.release(result.blob.token);
+          } catch { return failure(new Failure('SCRIPT_CLEANUP')); }
+        }
+        return failure(error);
+      }
     };
+  }
+  const business = (allowed, required, body) => method(allowed, required, body, { blob: true });
+  function transferred(body) {
+    try { return body(); }
+    catch (error) {
+      if (error instanceof ScriptHostError) {
+        if (error.code === 'NOT_FOUND') throw new Failure('STAGE_NOT_FOUND');
+        if (['INVALID_ARGUMENT', 'SCRIPT_PROTOCOL_ERROR'].includes(error.code))
+          throw new Failure('SCRIPT_INTEGRITY');
+      }
+      throw error;
+    }
   }
   async function shutdown() {
     if (closing) return closing;
@@ -277,6 +319,8 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
     // Stop sessions immediately, including one awaiting a reverse callback.
     closing = (async () => {
       let result, cleanupFailure = stageFailure;
+      try { transfers.close(); }
+      catch (error) { cleanupFailure ??= error; }
       try { result = await host.close(); }
       catch (error) { cleanupFailure ??= error; }
       finally {
@@ -334,7 +378,35 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
     'music.script.stage.abort': method(['token'], undefined, params => {
       text(params.token); release(params.token); return { released: true };
     }),
-    'music.script.load': method(['token', 'installationId', 'revision', 'expectedRevision', 'version',
+    'music.script.control.begin': method(['length', 'sha256'], undefined, params => {
+      integer(params.length, 1);
+      requireValue(typeof params.sha256 === 'string' && /^[a-f0-9]{64}$/.test(params.sha256));
+      return transfers.begin({ ...params, kind: 'json' });
+    }, { transfer: true }),
+    'music.script.control.chunk': method(['token', 'offset', 'data'], undefined, params => {
+      text(params.token); integer(params.offset);
+      return transferred(() => transfers.chunk(params));
+    }, { transfer: true }),
+    'music.script.control.abort': method(['token'], undefined, params => {
+      text(params.token); transfers.release(params.token); return { released: true };
+    }, { transfer: true }),
+    'music.script.control.call': method(['operation', 'token'], undefined, async (params, signal) => {
+      text(params.token);
+      requireValue(['load', 'unload', 'invoke', 'status'].includes(params.operation));
+      const bytes = transferred(() => transfers.take(params.token, 'json'));
+      let input;
+      try { input = decodeJSONValue(bytes); }
+      finally { bytes.fill(0); }
+      return methods[`music.script.${params.operation}`](input, { signal });
+    }, { transfer: true, envelope: true }),
+    'music.script.blob.read': method(['token', 'offset'], undefined, params => {
+      text(params.token); integer(params.offset);
+      return transferred(() => transfers.read(params));
+    }, { transfer: true }),
+    'music.script.blob.release': method(['token'], undefined, params => {
+      text(params.token); transfers.release(params.token); return { released: true };
+    }, { transfer: true }),
+    'music.script.load': business(['token', 'installationId', 'revision', 'expectedRevision', 'version',
       'config', 'permissions', 'grant'], undefined, (params, signal) => serialize(async () => {
       guard(signal); identifier(params.installationId);
       integer(params.revision, 1); integer(params.expectedRevision); settings(params);
@@ -379,7 +451,8 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
         cleanup(id, next.generation);
         // Preflight the whole response before publishing the authorization.
         const response = { instance: instance(candidate, next) };
-        success(response);
+        const preflight = encodeJSONValue({ ok: true, contract: musicScriptContract, ...response });
+        preflight.fill(0);
         revoke(old);
         candidates.delete(id);
         candidate.phase = 'session'; candidate.loadSignal = null; candidate.capabilities = next.capabilities;
@@ -409,7 +482,7 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
         throw error;
       }
     })),
-    'music.script.unload': method(['installationId', 'revision', 'generation'],
+    'music.script.unload': business(['installationId', 'revision', 'generation'],
       ['installationId', 'revision'], (params, signal) => serialize(async () => {
         guard(signal); identifier(params.installationId); integer(params.revision, 1);
         if (params.generation !== undefined) integer(params.generation, 1);
@@ -424,7 +497,7 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
         cleanup(params.installationId);
         return { unloaded: true, cleanupComplete: true };
       })),
-    'music.script.invoke': method(['installationId', 'revision', 'generation', 'siteId', 'operation', 'payload'],
+    'music.script.invoke': business(['installationId', 'revision', 'generation', 'siteId', 'operation', 'payload'],
       undefined, async (params, signal) => {
         identifier(params.installationId); identifier(params.siteId); identifier(params.operation);
         integer(params.revision, 1); integer(params.generation, 1);
@@ -440,7 +513,7 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
           current(params.installationId)?.generation === params.generation, 'STALE_SOURCE');
         return { value: value ?? null };
       }),
-    'music.script.status': method([], undefined, (_params, signal) => serialize(() => {
+    'music.script.status': business([], undefined, (_params, signal) => serialize(() => {
       guard(signal);
       return { documentAccess: false, instances: [...bindings.values()].map(binding => instance(binding)) };
     })),
@@ -448,5 +521,5 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
       try { fields(params, []); return await close(); } catch (error) { return failure(error); }
     },
   };
-  return { id: 'music', version: '0.6.0', methods, close };
+  return { id: 'music', version: '0.7.0', methods, close };
 }

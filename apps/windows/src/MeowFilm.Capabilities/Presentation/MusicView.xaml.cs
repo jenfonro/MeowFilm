@@ -12,8 +12,27 @@ namespace MeowFilm.Capabilities;
 public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSource
 {
     private readonly MusicCapability module;
+    private DataGrid ActiveSongsGrid => module.IsSearchPage ? SearchSongsGrid : SongsGrid;
+    internal void ResetSearchPresentation() => CatalogView.ResetSearchPlaylistProjection();
     private readonly MeowFilm.Desktop.DesktopHeaderAction refreshAction;
     private readonly MeowFilm.Desktop.DesktopHeaderAction renamePlaylistAction, deletePlaylistAction;
+    private async void UpdateVisibilityActivity()
+    {
+        bool active = IsLoaded && IsVisible;
+        if (!active)
+        {
+            CloseCreatePlaylistDialog(restoreFocus: false);
+            songScrollIntent.Clear();
+            EndSongDrag();
+        }
+        try
+        {
+            await Task.WhenAll(active ? module.ActivateDiscoveryViewAsync() : module.DeactivateDiscoveryViewAsync(),
+                module.UpdateVipPageAsync(active));
+        }
+        catch { /* Navigation and shutdown retain final drain ownership. */ }
+    }
+    private (bool CollectionActions, bool RefreshAction, bool Editable) publishedHeaderState;
     private bool syncingDate;
     private bool playlistDialogOpen, playlistDialogSubmitting;
     private IInputElement? playlistDialogReturnFocus;
@@ -49,25 +68,14 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
             token => { token.ThrowIfCancellationRequested(); return module.DeletePlaylistAsync(); },
             () => module.CanEdit && module.CanDeleteCollection);
         InitializeComponent(); DataContext = module;
-        Loaded += async (_, _) =>
+        AddHandler(ScrollBar.ScrollEvent, new ScrollEventHandler((_, args) =>
         {
-            await Task.WhenAll(
-                module.ActivateDiscoveryViewAsync(),
-                module.UpdateVipPageAsync(true));
-        };
-        Unloaded += async (_, _) =>
-        {
-            CloseCreatePlaylistDialog(restoreFocus: false);
-            songScrollIntent.Clear();
-            EndSongDrag();
-            try
-            {
-                await Task.WhenAll(
-                    module.DeactivateDiscoveryViewAsync(),
-                    module.UpdateVipPageAsync(false));
-            }
-            catch { /* Final app preparation independently observes cleanup failures. */ }
-        };
+            if (IsVisible && Descendant<ScrollViewer>(ActiveSongsGrid) is { } scroll) songScrollIntent.ObserveScroll(scroll, args);
+        }), true);
+        publishedHeaderState = HeaderState();
+        Loaded += (_, _) => UpdateVisibilityActivity();
+        Unloaded += (_, _) => UpdateVisibilityActivity();
+        IsVisibleChanged += (_, _) => UpdateVisibilityActivity();
         module.PropertyChanged += async (_, e) =>
         {
             if (e.PropertyName == nameof(MusicCapability.CanReorderPlaylist) && !module.CanReorderPlaylist)
@@ -83,15 +91,29 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
                 CloseCreatePlaylistDialog();
             if (string.IsNullOrEmpty(e.PropertyName) || e.PropertyName == nameof(MusicCapability.IsVipChannel))
             {
-                try { await module.UpdateVipPageAsync(IsLoaded); }
+                try { await module.UpdateVipPageAsync(IsLoaded && IsVisible); }
                 catch { /* Navigation or shutdown owns the published state and final drain. */ }
             }
             if (string.IsNullOrEmpty(e.PropertyName) || e.PropertyName is nameof(MusicCapability.Heading) or
                 nameof(MusicCapability.CountText) or nameof(MusicCapability.CanEdit) or
                 nameof(MusicCapability.IsCatalogPage) or nameof(MusicCapability.IsCollectionPage) or
-                nameof(MusicCapability.CanDeleteCollection))
-                HeaderChanged?.Invoke(this, EventArgs.Empty);
+                nameof(MusicCapability.CanDeleteCollection) or nameof(MusicCapability.IsLocalLibraryPage) or
+                nameof(MusicCapability.IsHistory) or nameof(MusicCapability.IsArchives) or nameof(MusicCapability.IsSongList))
+            {
+                var state = HeaderState();
+                if (state != publishedHeaderState)
+                {
+                    publishedHeaderState = state;
+                    HeaderChanged?.Invoke(this, EventArgs.Empty);
+                }
+            }
         };
+    }
+    private (bool CollectionActions, bool RefreshAction, bool Editable) HeaderState()
+    {
+        bool collectionActions = module.IsCollectionPage && module.CanDeleteCollection;
+        bool refresh = module.IsLocalLibraryPage && !module.IsCollectionPage;
+        return (collectionActions, refresh, (collectionActions || refresh) && module.CanEdit);
     }
     public MeowFilm.Desktop.DesktopHeaderContribution Header => new("", "",
         SearchVisible: true, SearchEnabled: true,
@@ -251,12 +273,13 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
     internal double CaptureScroll() => ActiveScroll()?.VerticalOffset ?? 0;
     internal void RestoreScroll(double offset)
     {
-        UpdateLayout(); ActiveScroll()?.ScrollToVerticalOffset(offset);
+        if (IsVisible) UpdateLayout();
+        ActiveScroll()?.ScrollToVerticalOffset(offset);
     }
     private ScrollViewer? ActiveScroll() => module.IsArchives ? ArchiveScroll :
         module.IsDiscovery ? Descendant<ScrollViewer>(DiscoveryView) :
-        module.IsContentDetailPage || module.IsSearchSongs ? Descendant<ScrollViewer>(SongsGrid) :
-        module.IsCatalogPage ? CatalogView.CatalogScroll : Descendant<ScrollViewer>(SongsGrid);
+        module.IsContentDetailPage || module.IsSearchSongs ? Descendant<ScrollViewer>(ActiveSongsGrid) :
+        module.IsCatalogPage ? CatalogView.ActiveScroll : Descendant<ScrollViewer>(ActiveSongsGrid);
     private static T? Descendant<T>(DependencyObject parent) where T : DependencyObject
     {
         for (var i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
@@ -270,7 +293,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
     private void SongsGridScroll_Loaded(object sender, RoutedEventArgs e)
     {
         if (sender is not ScrollViewer { TemplatedParent: DataGrid grid } scroll ||
-            !ReferenceEquals(grid, SongsGrid)) return;
+            !ReferenceEquals(grid, SongsGrid) && !ReferenceEquals(grid, SearchSongsGrid)) return;
         scroll.ApplyTemplate();
         if (scroll.Template.FindName("PART_VerticalScrollBar", scroll) is not ScrollBar bar) return;
         bar.SetResourceReference(StyleProperty, "Capability.OverlayScrollBar");
@@ -304,9 +327,9 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         var row = FindRow(e.OriginalSource as DependencyObject);
         module.SelectedSong = row?.Item as SongRow;
         row?.Focus();
-        if (SongsGrid.ContextMenu is { } menu)
+        if (ActiveSongsGrid.ContextMenu is { } menu)
         {
-            menu.PlacementTarget = SongsGrid;
+            menu.PlacementTarget = ActiveSongsGrid;
             menu.Placement = PlacementMode.MousePoint;
             menu.HorizontalOffset = 0;
             menu.VerticalOffset = 0;
@@ -353,7 +376,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
     }
     private void SongMore_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not Button button || !SelectActionSong(button) || SongsGrid.ContextMenu is not { } menu) return;
+        if (sender is not Button button || !SelectActionSong(button) || ActiveSongsGrid.ContextMenu is not { } menu) return;
         button.Focus();
         menu.IsOpen = false;
         menu.PlacementTarget = button;
@@ -371,15 +394,15 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
     { if (sender is MenuItem { Tag: string id }) await module.AddSelectionToPlaylistAsync(id); }
     private void SongsGrid_ScrollChanged(object sender, ScrollChangedEventArgs e)
     {
-        if (e.VerticalChange <= 0 || !songScrollIntent.Accepts(SongsGrid)) return;
+        if (e.VerticalChange <= 0 || !songScrollIntent.Accepts(ActiveSongsGrid)) return;
         LoadMoreSongsNearEnd();
     }
     private async void LoadMoreSongsNearEnd()
     {
-        if (loadingMoreSongs || !SongsGrid.IsVisible ||
+        if (loadingMoreSongs || !ActiveSongsGrid.IsVisible ||
             (!module.CanLoadMoreCollection && !module.CanLoadMoreCatalogPlaylist &&
              !module.CanLoadMoreSearchSongs) ||
-            Descendant<ScrollViewer>(SongsGrid) is not { } scroll ||
+            Descendant<ScrollViewer>(ActiveSongsGrid) is not { } scroll ||
             scroll.ExtentHeight <= 0 || scroll.VerticalOffset + scroll.ViewportHeight < scroll.ExtentHeight - 96) return;
         loadingMoreSongs = true;
         songScrollIntent.Clear();
@@ -408,7 +431,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         if (!module.CanReorderPlaylist || e.OriginalSource is not DependencyObject source ||
             FindAncestor<Button>(source) is not null ||
             FindRow(source) is not { Item: SongRow song }) return;
-        songDragStart = e.GetPosition(SongsGrid);
+        songDragStart = e.GetPosition(ActiveSongsGrid);
         songDragItem = song;
     }
 
@@ -419,21 +442,21 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
             if (e.LeftButton != MouseButtonState.Pressed) EndSongDrag();
             return;
         }
-        var point = e.GetPosition(SongsGrid);
+        var point = e.GetPosition(ActiveSongsGrid);
         if (Math.Abs(point.X - songDragStart.X) < SystemParameters.MinimumHorizontalDragDistance &&
             Math.Abs(point.Y - songDragStart.Y) < SystemParameters.MinimumVerticalDragDistance) return;
         var item = songDragItem;
-        var layer = AdornerLayer.GetAdornerLayer(SongsGrid);
+        var layer = AdornerLayer.GetAdornerLayer(ActiveSongsGrid);
         if (layer is not null)
         {
             songDragLayer = layer;
-            songDragAdorner = new(SongsGrid, item);
+            songDragAdorner = new(ActiveSongsGrid, item);
             layer.Add(songDragAdorner);
             songDragAdorner.Move(point);
         }
         try
         {
-            DragDrop.DoDragDrop(SongsGrid, new DataObject(typeof(SongRow), item), DragDropEffects.Move);
+            DragDrop.DoDragDrop(ActiveSongsGrid, new DataObject(typeof(SongRow), item), DragDropEffects.Move);
         }
         finally
         {
@@ -456,16 +479,16 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         }
         bool after = e.GetPosition(row).Y >= row.ActualHeight / 2;
         ShowInsertAdorner(row, after);
-        songDragAdorner?.Move(e.GetPosition(SongsGrid));
-        AutoScrollSongs(e.GetPosition(SongsGrid).Y);
+        songDragAdorner?.Move(e.GetPosition(ActiveSongsGrid));
+        AutoScrollSongs(e.GetPosition(ActiveSongsGrid).Y);
         e.Effects = DragDropEffects.Move;
         e.Handled = true;
     }
 
     private void SongsGrid_DragLeave(object sender, DragEventArgs e)
     {
-        var point = e.GetPosition(SongsGrid);
-        if (point.X < 0 || point.Y < 0 || point.X > SongsGrid.ActualWidth || point.Y > SongsGrid.ActualHeight)
+        var point = e.GetPosition(ActiveSongsGrid);
+        if (point.X < 0 || point.Y < 0 || point.X > ActiveSongsGrid.ActualWidth || point.Y > ActiveSongsGrid.ActualHeight)
             RemoveInsertAdorner();
     }
 
@@ -523,10 +546,10 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
 
     private void AutoScrollSongs(double y)
     {
-        if (Descendant<ScrollViewer>(SongsGrid) is not { } scroll) return;
+        if (Descendant<ScrollViewer>(ActiveSongsGrid) is not { } scroll) return;
         const double edge = 36;
         if (y < edge) scroll.ScrollToVerticalOffset(Math.Max(0, scroll.VerticalOffset - 12));
-        else if (y > SongsGrid.ActualHeight - edge)
+        else if (y > ActiveSongsGrid.ActualHeight - edge)
             scroll.ScrollToVerticalOffset(Math.Min(scroll.ScrollableHeight, scroll.VerticalOffset + 12));
     }
 

@@ -7,7 +7,7 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.PlaybackCache;
 
-internal sealed class MusicChorusCache(IProtectedDocumentStore store, TimeProvider? time = null)
+internal sealed class MusicChorusCache(IDocumentStore store, TimeProvider? time = null)
 {
     internal const string Namespace = "music.chorus.v1";
     private const int MaximumBytes = 65536, MaximumEntries = 100;
@@ -37,9 +37,7 @@ internal sealed class MusicChorusCache(IProtectedDocumentStore store, TimeProvid
         try
         {
             var saved = await store.ReadAsync(Namespace, token).ConfigureAwait(false);
-            Dictionary<string, Entry> entries;
-            try { entries = Decode(saved); }
-            finally { if (saved.Data is not null) CryptographicOperations.ZeroMemory(saved.Data); }
+            var entries = Decode(saved);
 
             long now = Now;
             foreach (var pair in entries.ToArray())
@@ -60,14 +58,14 @@ internal sealed class MusicChorusCache(IProtectedDocumentStore store, TimeProvid
                 : null;
         }
         catch (OperationCanceledException) { throw; }
-        catch (ProtectedDocumentException error) when (MusicPlaybackCacheDataException.IsStoredFormatFailure(error))
+        catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsStoredFormatFailure(error))
         { throw MusicPlaybackCacheDataException.FromStore(error); }
-        catch (ProtectedDocumentException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error))
+        catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error))
         { return null; }
         finally { gate.Release(); }
     }
 
-    private static Dictionary<string, Entry> Decode(ProtectedDocument saved)
+    private static Dictionary<string, Entry> Decode(DocumentSnapshot saved)
     {
         if (saved.Data is null)
         {
@@ -75,7 +73,7 @@ internal sealed class MusicChorusCache(IProtectedDocumentStore store, TimeProvid
                 throw MusicPlaybackCacheDataException.Corrupt();
             return new(StringComparer.Ordinal);
         }
-        if (saved.Data.Length == 0 || DocumentFingerprint.FromBytes(saved.Data) != saved.Fingerprint)
+        if (saved.Data.Length == 0)
             throw MusicPlaybackCacheDataException.Corrupt();
         if (saved.Data.Length > MaximumBytes) throw MusicPlaybackCacheDataException.Limit();
         try
@@ -122,15 +120,11 @@ internal sealed class MusicChorusCache(IProtectedDocumentStore store, TimeProvid
             };
         byte[] output = JsonSerializer.SerializeToUtf8Bytes(
             new JsonObject { ["schema"] = 1, ["entries"] = outputEntries });
-        try
-        {
-            if (output.Length > MaximumBytes) throw MusicPlaybackCacheDataException.Limit();
-            var expected = DocumentFingerprint.FromBytes(output);
-            _ = Decode(new ProtectedDocument(output, expected));
-            var receipt = await store.WriteAsync(Namespace, output, before, token).ConfigureAwait(false);
-            if (receipt != expected) throw new MusicPlaybackCacheCommitException();
-        }
-        finally { CryptographicOperations.ZeroMemory(output); }
+        if (output.Length > MaximumBytes) throw MusicPlaybackCacheDataException.Limit();
+        var expected = DocumentFingerprint.FromBytes(output);
+        _ = Decode(new DocumentSnapshot(output, expected));
+        var receipt = await store.WriteAsync(Namespace, output, before, token).ConfigureAwait(false);
+        if (receipt != expected) throw new MusicPlaybackCacheCommitException();
     }
 
     private static void CheckJson(JsonElement value)

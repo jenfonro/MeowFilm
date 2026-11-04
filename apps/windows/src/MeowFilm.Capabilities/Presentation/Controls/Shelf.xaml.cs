@@ -37,6 +37,7 @@ public partial class Shelf : UserControl
     private int? pendingVisibleCardCount;
     private int visibleCardCount = 1;
     private bool resizeAtEnd, applyingRestore, applyingSeek;
+    private bool presentationActive;
     private bool pointerPending, dragging, animating, restoring, seeking;
     private bool usesDataContextItems = true, settingDataContextItems;
     private int restoreAttempts, restoreStablePasses, seekAttempts;
@@ -65,16 +66,9 @@ public partial class Shelf : UserControl
             }
             if (!restoring && !dragging && !animating) SnapToNearest();
         };
-        Loaded += (_, _) =>
-        {
-            SystemParameters.StaticPropertyChanged += OnSystemSettingChanged;
-            AttachScrollHost();
-        };
-        Unloaded += (_, _) =>
-        {
-            SystemParameters.StaticPropertyChanged -= OnSystemSettingChanged;
-            DetachScrollHost();
-        };
+        Loaded += (_, _) => UpdatePresentation();
+        Unloaded += (_, _) => StopPresentation();
+        IsVisibleChanged += (_, _) => UpdatePresentation();
         DataContextChanged += (_, e) =>
         {
             CommitSettledOffset(e.OldValue as MusicCatalogSection);
@@ -88,9 +82,25 @@ public partial class Shelf : UserControl
             CancelRestore();
             CancelPointerInput();
             StopMotion();
-            UpdateCardWidth();
+            if (presentationActive) UpdateCardWidth();
             ScheduleRestore();
         };
+    }
+    private void UpdatePresentation()
+    {
+        if (!IsLoaded || !IsVisible) { StopPresentation(); return; }
+        if (presentationActive) return;
+        presentationActive = true;
+        SystemParameters.StaticPropertyChanged += OnSystemSettingChanged;
+        UpdateCardWidth();
+        AttachScrollHost();
+    }
+    private void StopPresentation()
+    {
+        if (!presentationActive) return;
+        presentationActive = false;
+        SystemParameters.StaticPropertyChanged -= OnSystemSettingChanged;
+        DetachScrollHost();
     }
     private void OnItemsSourceChanged()
     {
@@ -103,6 +113,7 @@ public partial class Shelf : UserControl
     }
     private void OnSizeChanged(object sender, SizeChangedEventArgs e)
     {
+        if (!IsVisible) return;
         if (!IsLoaded || rail is null)
         {
             UpdateCardWidth();
@@ -133,6 +144,7 @@ public partial class Shelf : UserControl
             return;
         if (animating) StopMotion();
         if (!restoring && !dragging) SnapToNearest();
+        PageIndicator.InvalidateVisual();
     }
     private bool UpdateCardWidth()
     {
@@ -146,8 +158,12 @@ public partial class Shelf : UserControl
     private (int Count, double Width) CardLayout()
     {
         var (target, gap) = LayoutMetrics();
-        var count = Math.Max(1, (int)Math.Floor((ActualWidth + gap) / (target + gap)));
-        return (count, Math.Max(1, (ActualWidth + gap) / count));
+        return MeasureCards(ActualWidth, target, gap, DataContext is MusicCatalogSection { IsBannerSection: true });
+    }
+    internal static (int Count, double Width) MeasureCards(double width, double target, double gap, bool banner = false)
+    {
+        var count = banner ? 2 : Math.Max(1, (int)Math.Floor((width + gap) / (target + gap)));
+        return (count, Math.Max(1, (width + gap) / count));
     }
     private (double Target, double Gap) LayoutMetrics() =>
         DataContext is MusicCatalogSection { IsBannerSection: true } ? (260, 20) :
@@ -169,6 +185,7 @@ public partial class Shelf : UserControl
     }
     private void OnPreviewMouseWheel(object sender, MouseWheelEventArgs e)
     {
+        if (!presentationActive) return;
         if (Keyboard.Modifiers.HasFlag(ModifierKeys.Shift))
         {
             if (rail is null) return;
@@ -218,7 +235,7 @@ public partial class Shelf : UserControl
     }
     private void ScheduleRestore()
     {
-        if (!IsLoaded || rail is null) return;
+        if (!presentationActive || rail is null) return;
         CancelRestore();
         restoreOffset = DataContext is MusicCatalogSection section ? section.HorizontalOffset : 0;
         BeginRestore();
@@ -241,12 +258,13 @@ public partial class Shelf : UserControl
     }
     private void ScheduleSnap()
     {
-        if (restoring || seeking) return;
+        if (!presentationActive || restoring || seeking) return;
         settle.Stop();
         settle.Start();
     }
     private bool Page(int direction)
     {
+        if (!presentationActive) return false;
         if (PageTarget(direction) is not { } target) return false;
         AnimateTo(target);
         return true;
@@ -384,6 +402,13 @@ public partial class Shelf : UserControl
     private double NearestOffset(double offset, double maximum)
     {
         var pitch = Math.Max(1, CardWidth);
+        if (DataContext is MusicCatalogSection { IsBannerSection: true })
+        {
+            var page = VisibleCardCount() * pitch;
+            var before = Math.Floor(offset / page) * page;
+            var after = Math.Min(maximum, before + page);
+            return Math.Clamp(offset - before < after - offset ? before : after, 0, maximum);
+        }
         return Math.Clamp(Math.Round(offset / pitch, MidpointRounding.AwayFromZero) * pitch, 0, maximum);
     }
     private void UpdateButtons()
@@ -395,6 +420,24 @@ public partial class Shelf : UserControl
         Next.Visibility = next ? Visibility.Visible : Visibility.Collapsed;
         Previous.IsEnabled = previous;
         Next.IsEnabled = next;
+        UpdatePageIndicator();
+    }
+    private void UpdatePageIndicator()
+    {
+        var maximum = LogicalMaxOffset();
+        if (DataContext is not MusicCatalogSection { IsBannerSection: true } || maximum <= .5)
+        {
+            PageIndicator.Visibility = Visibility.Collapsed;
+            return;
+        }
+        double page = VisibleCardCount() * Math.Max(1, CardWidth);
+        double offset = Math.Clamp(PresentedOffset, 0, maximum);
+        double fullPages = Math.Floor(maximum / page);
+        double remainder = maximum - fullPages * page;
+        PageIndicator.PageCount = (int)Math.Ceiling(maximum / page) + 1;
+        PageIndicator.Position = remainder > .5 && offset > fullPages * page
+            ? fullPages + (offset - fullPages * page) / remainder : offset / page;
+        PageIndicator.Visibility = Visibility.Visible;
     }
     private double? PageTarget(int direction)
     {

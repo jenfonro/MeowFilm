@@ -306,7 +306,7 @@ public final class MusicPlayerContentModel {
         failedImages.formIntersection(wantedImages)
         for url in wantedImages where images[url] == nil && artworkReads[url] == nil && !failedImages.contains(url) {
             let data = url == request.url ? model.metadataArtworkData : nil
-            if data == nil, let cached = MusicArtworkImages.cached(url) {
+            if data == nil, let cached = MusicArtworkImages.shared.cached(url) {
                 images[url] = cached
                 changed = true
             } else { readArtwork(url, cachedData: data) }
@@ -327,7 +327,7 @@ public final class MusicPlayerContentModel {
                 }
             }
             do {
-                let (image, data) = try await MusicArtworkImages.read(url, cachedData: cachedData)
+                let (image, data) = try await MusicArtworkImages.shared.read(url, cachedData: cachedData)
                 try Task.checkCancellation()
                 guard let self, self.wantedImages.contains(url), self.isAvailable,
                       self.model.accountAccessGeneration == access,

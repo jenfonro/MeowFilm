@@ -8,7 +8,7 @@
  UseLayoutRounding="True" SnapsToDevicePixels="True">
  <UserControl.Resources>
   <local:MusicEntryOffsetConverter x:Key="Offset"/>
-  <local:MusicCatalogPaletteConverter x:Key="EntryPalette" Role="Entry"/>
+  <local:MusicCatalogPaletteConverter x:Key="EntryPalette"/>
   <local:MusicEntryTitlePaletteConverter x:Key="EntryTitleShade" Role="Shade"/>
   <local:MusicEntryTitlePaletteConverter x:Key="EntryTitleForeground" Role="Foreground"/>
   <BooleanToVisibilityConverter x:Key="Visible"/>

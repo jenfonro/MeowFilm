@@ -315,9 +315,9 @@ enum MusicNativePublicBrowseSupport {
     static func artwork(_ value: MJ) -> URL? {
         guard value.isString, value.string.utf8.count <= 4096,
               var url = URLComponents(string: value.string), url.user == nil, url.password == nil,
-              url.port == nil || url.port == 443, url.fragment == nil, let host = url.host?.lowercased() else { return nil }
-        let roots = ["music.126.net", "music.163.net", "y.gtimg.cn", "qpic.cn", "kugou.com"]
-        guard roots.contains(where: { host == $0 || host.hasSuffix("." + $0) }), url.scheme == "http" || url.scheme == "https" else { return nil }
+              url.port == nil || url.port == 443, url.fragment == nil,
+              let host = url.host, !host.isEmpty,
+              url.scheme == "http" || url.scheme == "https" else { return nil }
         url.scheme = "https"; return url.url
     }
 }

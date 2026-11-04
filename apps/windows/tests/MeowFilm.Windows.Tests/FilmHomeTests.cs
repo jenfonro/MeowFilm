@@ -9,6 +9,8 @@ public static class FilmHomeTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        yield return new("film-home: skeletons end on empty failure cancellation and never cover pagination",
+            () => MusicQualityConsumerTests.Sta(SkeletonStates));
         yield return new("film-home: ranged Douban requests parse bounded cards and rewrite poster hosts",
             RequestContract);
         yield return new("film-home: independent section failure caches results and retries only that section",
@@ -21,6 +23,29 @@ public static class FilmHomeTests
             () => MusicQualityConsumerTests.Sta(FilterReplacement));
         yield return new("film-home: route replacement and shutdown fence late home and data publication",
             () => MusicQualityConsumerTests.Sta(CancellationAndDrain));
+    }
+
+    private static Task SkeletonStates()
+    {
+        var home = new FilmHomeSection(FilmSectionDefinition.Home[0]);
+        Check(home.ShowSkeleton && !home.ShowStatus, "pending home has a skeleton");
+        home.Begin();
+        home.Complete([]);
+        Check(!home.ShowSkeleton && home.ShowStatus && !home.CanRetry, "empty result ends skeleton");
+        home.Begin(); home.Fail();
+        Check(!home.ShowSkeleton && home.CanRetry, "failure ends skeleton and retains retry");
+        home.Begin(); home.Cancel();
+        Check(!home.ShowSkeleton && home.CanRetry, "cancellation ends skeleton and retains retry");
+        var data = new FilmDataSection(FilmSectionDefinition.Home[0]);
+        Check(data.ShowSkeleton, "pending data has a skeleton");
+        data.Begin(); data.Complete([Card("movie")], 0, 1);
+        var card = data.Items[0];
+        data.Begin();
+        Check(!data.ShowSkeleton && data.HasItems && ReferenceEquals(card, data.Items[0]),
+            "pagination keeps existing content visible");
+        data.Fail();
+        Check(!data.ShowSkeleton && data.HasItems && data.CanPage, "failed page retains content and retry");
+        return Task.CompletedTask;
     }
 
     private static async Task RequestContract()
@@ -99,9 +124,12 @@ public static class FilmHomeTests
     {
         var source = new ControlledFilmSource();
         await using var module = new FilmCapability(source);
+        await module.InitializeAsync(default);
+        Check(source.Calls.Count == 0 && module.Sections.All(section => section.ShowSkeleton),
+            "constructing and initializing film does not read business data");
         var navigation = module.NavigateAsync(FilmCapability.HomeRoute, default);
         await source.WaitForCalls(4);
-        Check(module.Sections.All(section => section.StatusText == "加载中…"),
+        Check(module.Sections.All(section => section.StatusText == "加载中…" && section.ShowSkeleton && !section.ShowStatus),
             "all fixed sections begin together");
         Check(source.Calls.All(call => call.Start == 0 && call.Limit == 12),
             "home uses one fixed twelve-card request per section");
@@ -118,6 +146,20 @@ public static class FilmHomeTests
         Check(module.Sections.Where(section => section.Key != "anime")
             .All(section => section.Items.Count == 1), "successful peers remain visible");
         Check(source.Calls.Count == 4, "one request per fixed section");
+        Check(module.Sections.All(section => !section.ShowSkeleton),
+            "both successful and failed sections finish their skeletons");
+        var retainedItems = module.Sections[0].Items;
+        var retainedCard = retainedItems[0];
+        module.Sections[0].HorizontalOffset = 192;
+        string homeLocation = module.CaptureNavigationLocation();
+        Check(homeLocation == FilmCapability.HomeRoute, "capture retains the current film route");
+        await module.RestoreNavigationAsync(FilmCapability.PlaybackRoute, default);
+        Check(module.CaptureNavigationLocation().StartsWith(FilmCapability.PlaybackRoute + ":", StringComparison.Ordinal),
+            "capture follows the restored playback destination and film identity");
+        await module.RestoreNavigationAsync(homeLocation, default);
+        Check(source.Calls.Count == 4 && ReferenceEquals(retainedItems, module.Sections[0].Items) &&
+            ReferenceEquals(retainedCard, retainedItems[0]) && module.Sections[0].HorizontalOffset == 192,
+            "route restoration preserves ready collection, cards and offset without requests");
 
         await module.NavigateAsync(FilmCapability.HomeRoute, default);
         Check(source.Calls.Count == 4, "resolved success and failure states are reused");
@@ -140,20 +182,20 @@ public static class FilmHomeTests
         Check(module.ActiveData.Key == "show" && module.ActiveData.Title == "热门综艺",
             "the selected section context is retained for shell navigation");
         var card = show.Items.Single();
-        await module.OpenDoubanAsync(card);
-        Check(routes.SequenceEqual([FilmCapability.DataRoute, FilmCapability.DoubanRoute]) &&
-            ReferenceEquals(module.ActiveDoubanItem, card),
-            "film cards retain their Douban identity and request the hidden detail route");
+        await module.OpenPlaybackAsync(card);
+        Check(routes.SequenceEqual([FilmCapability.DataRoute, FilmCapability.PlaybackRoute]) &&
+            ReferenceEquals(module.Playback?.Item, card),
+            "film cards retain their catalog identity and request the hidden playback route");
         Check(module.Navigation.Count == 3 &&
             module.Navigation.Single(item => item.Route == FilmCapability.HomeRoute).ShowInSidebar &&
             module.Navigation.Where(item => item.Route != FilmCapability.HomeRoute)
                 .All(item => !item.ShowInSidebar),
             "only the film home is exposed in the sidebar");
         int calls = source.Calls.Count;
-        await module.NavigateAsync(FilmCapability.DoubanRoute, default);
-        Check(module.IsDouban && !module.IsHome && !module.IsData &&
-            module.Heading == "豆瓣" && source.Calls.Count == calls,
-            "the empty Douban route publishes context without another data request");
+        await module.NavigateAsync(FilmCapability.PlaybackRoute, default);
+        Check(module.IsPlayback && !module.IsHome && !module.IsData &&
+            module.Heading == "播放页" && source.Calls.Count == calls,
+            "the playback route publishes local preview context without another data request");
     }
 
     private static async Task DataPagination()

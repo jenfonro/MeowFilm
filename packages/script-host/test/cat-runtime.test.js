@@ -1667,7 +1667,7 @@ test('Cat startup failure is recorded without blocking later instances',
     }), { instance: 'healthy' });
   });
 
-test('Cat cold-start background apply records disabled instances for consistent invocation',
+test('Cat cold-start reports disabled instances without loading a host revision',
   { timeout: 30000 }, async t => {
     const runtime = createCatRuntime({ dataRoot: rootFor(t) });
     t.after(() => runtime.close());
@@ -1683,10 +1683,269 @@ test('Cat cold-start background apply records disabled instances for consistent 
     const state = (await reopened.status()).instances.find(instance =>
       instance.installationId === 'disabled-cold');
     assert.equal(state.state, 'disabled');
-    assert.equal(reopened.hostState('disabled-cold')?.enabled, false);
+    assert.equal(reopened.hostState('disabled-cold'), null);
     await assert.rejects(reopened.invoke({
       installationId: 'disabled-cold', siteId: 'site-disabled-cold', operation: 'home', payload: {},
     }), { code: 'DISABLED' });
+    await assert.rejects(reopened.management('disabled-cold'), { code: 'DISABLED' });
+    await assert.rejects(reopened.sync('disabled-cold', undefined, {
+      provider: 'quark', credentials: { cookie: 'fixture' },
+    }), { code: 'DISABLED' });
+  });
+
+test('Cat executes length-changing source edits after re-enable and restart',
+  { timeout: 30000 }, async t => {
+    const root = rootFor(t);
+    const runtime = createCatRuntime({ dataRoot: root });
+    t.after(() => runtime.close());
+    const original = 'module.exports = { home() { return { value: "original" }; } };';
+    const edited = 'module.exports = { home() { return { value: "edited with a different length" }; } };';
+    await runtime.install({ installationId: 'editable', source: original, enabled: true });
+    const reference = settingsScript(runtime, 'editable').sourceHash;
+    const file = sourceFile(root, reference);
+    const target = { installationId: 'editable', siteId: 'default', operation: 'home', payload: {} };
+    const initialGeneration = runtime.instance('editable').generation;
+    writeFileSync(file, edited);
+    assert.notEqual(Buffer.byteLength(edited), Buffer.byteLength(original));
+    assert.deepEqual(await runtime.invoke(target), { value: 'original' });
+    await runtime.setEnabled('editable', false);
+    const enabled = await runtime.setEnabled('editable', true);
+    assert.equal(enabled.state, 'ready');
+    assert.ok(enabled.generation > initialGeneration);
+    assert.equal(enabled.sourceHash, sourceHash(edited));
+    assert.equal(settingsScript(runtime, 'editable').sourceHash, reference);
+    assert.deepEqual(await runtime.invoke(target), { value: 'edited with a different length' });
+
+    const restartedSource = 'module.exports = { home() { return { value: "restart" }; } }; // current';
+    await runtime.close();
+    writeFileSync(file, restartedSource);
+    const reopened = createCatRuntime({ dataRoot: root });
+    t.after(() => reopened.close());
+    await reopened.start();
+    await waitForState(reopened, 'editable', 'ready');
+    assert.deepEqual(await reopened.invoke(target), { value: 'restart' });
+    assert.equal(settingsScript(reopened, 'editable').sourceHash, reference);
+    assert.equal(reopened.instance('editable').sourceHash, sourceHash(restartedSource));
+  });
+
+test('Cat source file failures affect only the enabled instance',
+  { timeout: 60000 }, async t => {
+    for (const [kind, badBytes, expectedCode] of [
+      ['missing', null, 'CORRUPT_STORAGE'],
+      ['encoding', Buffer.from([0xc3, 0x28]), 'SCRIPT_PROTOCOL_ERROR'],
+      ['bom', Buffer.from('\uFEFFmodule.exports = {};'), 'SCRIPT_PROTOCOL_ERROR'],
+      ['syntax', Buffer.from('module.exports = { home( };'), 'SCRIPT_EXCEPTION'],
+      ['oversized', Buffer.alloc(SCRIPT_LIMITS.maxSourceBytes + 1, 0x20), 'RESOURCE_LIMIT'],
+    ]) {
+      await t.test(kind, async t => {
+        const root = rootFor(t);
+        const runtime = createCatRuntime({ dataRoot: root });
+        t.after(() => runtime.close());
+        const brokenSource = `module.exports = { home() { return "${kind}"; } };`;
+        await runtime.install({ installationId: 'broken-file', source: brokenSource });
+        await runtime.install({
+          installationId: 'healthy-file', source: delayedSource('healthy-file', 0), enabled: true,
+        });
+        writeSettings(runtime.settings.path, value => ({
+          ...value, scripts: value.scripts.map(script => ({ ...script, enabled: true })),
+        }));
+        await runtime.close();
+        const file = sourceFile(root, sourceHash(brokenSource));
+        if (badBytes === null) rmSync(file);
+        else writeFileSync(file, badBytes);
+        const reopened = createCatRuntime({ dataRoot: root });
+        t.after(() => reopened.close());
+        const started = await reopened.start();
+        assert.ok(reopened.server.listening);
+        assert.match(started.aggregate.origin, /^http:\/\/127\.0\.0\.1:\d+$/);
+        await waitForState(reopened, 'broken-file', 'failed');
+        await waitForState(reopened, 'healthy-file', 'ready');
+        assert.equal(reopened.instance('broken-file').error, expectedCode);
+        assert.deepEqual(await reopened.invoke({
+          installationId: 'healthy-file', siteId: 'site-healthy-file', operation: 'home', payload: {},
+        }), { instance: 'healthy-file' });
+        assert.deepEqual(reopened.applyResult(), {
+          applied: false, failures: [{ installationId: 'broken-file', code: expectedCode }],
+        });
+      });
+    }
+  });
+
+test('Cat leaves disabled bad files unread and refresh loads only changed enabled targets',
+  { timeout: 30000 }, async t => {
+    const root = rootFor(t);
+    const runtime = createCatRuntime({ dataRoot: root });
+    t.after(() => runtime.close());
+    for (const id of ['disabled', 'missing-disabled', 'unchanged', 'changed']) {
+      await runtime.install({
+        installationId: id, source: delayedSource(id, 0),
+        enabled: id === 'unchanged' || id === 'changed',
+      });
+    }
+    await runtime.close();
+    writeFileSync(sourceFile(root, sourceHash(delayedSource('disabled', 0))), Buffer.from([0xff]));
+    rmSync(sourceFile(root, sourceHash(delayedSource('missing-disabled', 0))));
+    const reopened = createCatRuntime({ dataRoot: root });
+    t.after(() => reopened.close());
+    const reads = [];
+    const files = Object.fromEntries(['disabled', 'missing-disabled', 'unchanged', 'changed']
+      .map(id => [id, sourceFile(root, sourceHash(delayedSource(id, 0)))]));
+    const originalRead = fs.readFileSync;
+    fs.readFileSync = (file, ...options) => {
+      if (Object.values(files).includes(file)) reads.push(file);
+      return originalRead(file, ...options);
+    };
+    syncBuiltinESMExports();
+    try {
+      await reopened.start();
+      await waitForState(reopened, 'unchanged', 'ready');
+      await waitForState(reopened, 'changed', 'ready');
+      assert.deepEqual(reads, [files.unchanged, files.changed]);
+      assert.equal(reopened.instance('disabled').state, 'disabled');
+      assert.equal(reopened.instance('missing-disabled').state, 'disabled');
+      const unchangedGeneration = reopened.instance('unchanged').generation;
+      const changedGeneration = reopened.instance('changed').generation;
+      reads.length = 0;
+      rmSync(files.unchanged);
+      writeSettings(reopened.settings.path, value => ({
+        ...value, providers: { quark: true },
+      }));
+      assert.deepEqual(await reopened.refresh(), { applied: true, failures: [] });
+      assert.deepEqual(reads, []);
+      writeSettings(reopened.settings.path, value => ({
+        ...value, scripts: value.scripts.map(script =>
+          ['changed', 'disabled'].includes(script.installationId) ? { ...script, version: '2' } : script),
+      }));
+      assert.deepEqual(await reopened.refresh(), { applied: true, failures: [] });
+      assert.deepEqual(reads, [files.changed]);
+      assert.equal(reopened.instance('unchanged').generation, unchangedGeneration);
+      assert.ok(reopened.instance('changed').generation > changedGeneration);
+      assert.equal(reopened.instance('disabled').version, '2');
+      assert.deepEqual(await reopened.invoke({
+        installationId: 'unchanged', siteId: 'site-unchanged', operation: 'home', payload: {},
+      }), { instance: 'unchanged' });
+      await assert.rejects(reopened.setEnabled('disabled', true), { code: 'SCRIPT_PROTOCOL_ERROR' });
+      assert.equal(reopened.instance('disabled').state, 'failed');
+      assert.equal((await reopened.setEnabled('disabled', false)).state, 'disabled');
+      assert.equal(reopened.instance('changed').state, 'ready');
+      writeFileSync(files.changed, 'module.exports = { home( };');
+      writeSettings(reopened.settings.path, value => ({
+        ...value, scripts: value.scripts.map(script =>
+          script.installationId === 'changed' ? { ...script, version: '3' } : script),
+      }));
+      assert.deepEqual(await reopened.refresh(), {
+        applied: false, failures: [{ installationId: 'changed', code: 'SCRIPT_EXCEPTION' }],
+      });
+      assert.equal(reopened.instance('changed').state, 'failed');
+      assert.equal(reopened.instance('unchanged').state, 'ready');
+      assert.equal(reopened.instance('unchanged').generation, unchangedGeneration);
+      writeFileSync(files.changed, delayedSource('changed', 0) + '\n// repaired file');
+      assert.deepEqual(await reopened.refresh(), { applied: true, failures: [] });
+      assert.equal(reopened.instance('changed').state, 'ready');
+    } finally {
+      fs.readFileSync = originalRead;
+      syncBuiltinESMExports();
+    }
+  });
+
+test('Cat explicit reimport atomically replaces edited bytes even with unchanged import metadata',
+  { timeout: 30000 }, async t => {
+    const root = rootFor(t);
+    const runtime = createCatRuntime({ dataRoot: root });
+    t.after(() => runtime.close());
+    const original = 'module.exports = { home() { return { value: "imported" }; } };';
+    const edited = 'module.exports = { home() { return { value: "manual edit" }; } }; // longer';
+    const spec = { installationId: 'reimport', source: original, enabled: true };
+    await runtime.install(spec);
+    const file = sourceFile(root, sourceHash(original));
+    writeFileSync(file, edited);
+    await runtime.setEnabled('reimport', false);
+    await runtime.setEnabled('reimport', true);
+    const target = { installationId: 'reimport', siteId: 'default', operation: 'home', payload: {} };
+    assert.deepEqual(await runtime.invoke(target), { value: 'manual edit' });
+    const generation = runtime.instance('reimport').generation;
+    assert.equal((await runtime.install(spec)).state, 'ready');
+    assert.ok(runtime.instance('reimport').generation > generation);
+    assert.equal(readFileSync(file, 'utf8'), original);
+    assert.deepEqual(await runtime.invoke(target), { value: 'imported' });
+  });
+
+test('Cat failed atomic reimport preserves the edited file and running generation',
+  { timeout: 30000 }, async t => {
+    const root = rootFor(t);
+    const runtime = createCatRuntime({ dataRoot: root });
+    t.after(() => runtime.close());
+    const original = 'module.exports = { home() { return { value: "original" }; } };';
+    const edited = 'module.exports = { home() { return { value: "manually edited" }; } };';
+    const spec = { installationId: 'atomic-reimport', source: original, enabled: true };
+    await runtime.install(spec);
+    const file = sourceFile(root, sourceHash(original));
+    writeFileSync(file, edited);
+    const generation = runtime.instance('atomic-reimport').generation;
+    const settings = readFileSync(runtime.settings.path, 'utf8');
+    const rename = fs.renameSync;
+    fs.renameSync = (from, to) => {
+      if (resolve(to) === file) throw Object.assign(new Error('synthetic rename failure'), { code: 'EBUSY' });
+      return rename(from, to);
+    };
+    syncBuiltinESMExports();
+    try {
+      await assert.rejects(runtime.install(spec), { code: 'EBUSY' });
+    } finally {
+      fs.renameSync = rename;
+      syncBuiltinESMExports();
+    }
+    assert.equal(readFileSync(file, 'utf8'), edited);
+    assert.equal(readFileSync(runtime.settings.path, 'utf8'), settings);
+    assert.equal(runtime.instance('atomic-reimport').generation, generation);
+    assert.deepEqual(await runtime.invoke({
+      installationId: 'atomic-reimport', siteId: 'default', operation: 'home', payload: {},
+    }), { value: 'original' });
+  });
+
+test('Cat removal and updates clean the import reference rather than the executed content hash',
+  { timeout: 60000 }, async t => {
+    for (const operation of ['uninstall', 'refresh-remove', 'install-update', 'refresh-update']) {
+      await t.test(operation, async t => {
+        const root = rootFor(t);
+        const runtime = createCatRuntime({ dataRoot: root });
+        t.after(() => runtime.close());
+        const original = 'module.exports = { home() { return { value: "original" }; } };';
+        const edited = 'module.exports = { home() { return { value: "edited source with different bytes" }; } };';
+        const replacement = 'module.exports = { home() { return { value: "replacement" }; } };';
+        await runtime.install({ installationId: 'cleanup', source: original, enabled: true });
+        const importedFile = sourceFile(root, sourceHash(original));
+        const unrelatedFile = sourceFile(root, sourceHash(edited));
+        writeFileSync(importedFile, edited);
+        writeFileSync(unrelatedFile, 'unrelated unreferenced file');
+        await runtime.setEnabled('cleanup', false);
+        await runtime.setEnabled('cleanup', true);
+        assert.equal(runtime.instance('cleanup').sourceHash, sourceHash(edited));
+        if (operation === 'uninstall') {
+          assert.deepEqual(await runtime.uninstall('cleanup'), { applied: true, failures: [] });
+        } else if (operation === 'install-update') {
+          assert.equal((await runtime.install({
+            installationId: 'cleanup', source: replacement, enabled: true,
+          })).state, 'ready');
+        } else {
+          if (operation === 'refresh-update')
+            writeFileSync(sourceFile(root, sourceHash(replacement)), replacement);
+          writeSettings(runtime.settings.path, value => ({
+            ...value, scripts: operation === 'refresh-remove' ? [] : value.scripts.map(script =>
+              ({ ...script, sourceHash: sourceHash(replacement) })),
+          }));
+          assert.deepEqual(await runtime.refresh(), { applied: true, failures: [] });
+        }
+        assert.equal(existsSync(importedFile), false);
+        assert.equal(readFileSync(unrelatedFile, 'utf8'), 'unrelated unreferenced file');
+        if (operation.endsWith('update')) {
+          assert.equal(existsSync(sourceFile(root, sourceHash(replacement))), true);
+          assert.deepEqual(await runtime.invoke({
+            installationId: 'cleanup', siteId: 'default', operation: 'home', payload: {},
+          }), { value: 'replacement' });
+        }
+      });
+    }
   });
 
 test('Cat compressed fetch handles an aborted upstream response without a host error leak',
@@ -6625,6 +6884,9 @@ test('Cat uninstall deletes the private volume and unreferenced source but keeps
     const sharedHash = sourceHash(shared);
     assert.equal(existsSync(sourceFile(root, uniqueHash)), true);
     assert.equal(existsSync(sourceFile(root, sharedHash)), true);
+    writeFileSync(sourceFile(root, sharedHash), volumeSource('shared', '// manually edited shared file'));
+    await runtime.setEnabled('remove-b', false);
+    await runtime.setEnabled('remove-b', true);
     assert.equal(existsSync(join(root, 'volumes', 'remove-a')), true);
 
     await runtime.uninstall('remove-a');
@@ -7053,7 +7315,7 @@ test('Cat rejects a hard-linked settings authority', { timeout: 30000 }, async t
   await assert.rejects(reopened.start(), { code: 'CORRUPT_STORAGE' });
 });
 
-test('Cat rejects hard-linked immutable source content', { timeout: 30000 }, async t => {
+test('Cat rejects hard-linked source files within the affected instance', { timeout: 30000 }, async t => {
   const root = rootFor(t);
   const runtime = await installed(t, root);
   const status = await runtime.status();
@@ -7064,7 +7326,10 @@ test('Cat rejects hard-linked immutable source content', { timeout: 30000 }, asy
   linkSync(path + '.original', path);
   const reopened = createCatRuntime({ dataRoot: root });
   t.after(() => reopened.close());
-  await assert.rejects(reopened.start(), { code: 'CORRUPT_STORAGE' });
+  await reopened.start();
+  await waitForState(reopened, 'fixture-a', 'failed');
+  assert.equal(reopened.instance('fixture-a').error, 'CORRUPT_STORAGE');
+  assert.ok(reopened.server.listening);
 });
 
 test('Cat normalizes a missing live source directory to CORRUPT_STORAGE', { timeout: 30000 }, async t => {

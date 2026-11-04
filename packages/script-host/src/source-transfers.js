@@ -91,13 +91,14 @@ export class SourceTransfers {
     if (digest(bytes) !== entry.sha256) { bytes.fill(0); throw fault('SCRIPT_PROTOCOL_ERROR'); }
     return bytes;
   }
-  result(value) {
+  // A caller with a validated encoding can transfer its Buffer directly and
+  // decode its small inline envelope, avoiding a second serialization.
+  result(value, { inline } = {}) {
     this.sweep();
-    const bytes = Buffer.from(JSON.stringify(value));
+    const bytes = inline === undefined ? Buffer.from(JSON.stringify(value)) : value;
     if (bytes.length <= this.chunkBytes) {
-      const data = bytes.toString('utf8');
-      bytes.fill(0);
-      return { data };
+      try { return inline === undefined ? { data: bytes.toString('utf8') } : inline(bytes); }
+      finally { bytes.fill(0); }
     }
     const token = randomUUID(), sha256 = digest(bytes);
     this.entries.set(token, { kind: 'result', bytes, length: bytes.length, sha256,

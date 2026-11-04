@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Platform.Storage;
@@ -10,7 +9,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
 {
     public const string ContractVersion = "0.6.0";
     public const string DocumentNamespace = "music.library.v1";
-    private readonly IProtectedDocumentStore store;
+    private readonly IDocumentStore store;
     private readonly string scope;
     private readonly SemaphoreSlim gate = new(1, 1);
     private JsonObject? document;
@@ -42,8 +41,8 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     private sealed record Pending(JsonObject Candidate, DocumentFingerprint Before, DocumentFingerprint After, string Code,
         PendingOwner Owner, RecommendationCommit? Recommendation = null);
 
-    public MusicLibraryOwner(IProtectedDocumentStore store) : this(store, "local") { }
-    public MusicLibraryOwner(IProtectedDocumentStore store, string scope)
+    public MusicLibraryOwner(IDocumentStore store) : this(store, "local") { }
+    public MusicLibraryOwner(IDocumentStore store, string scope)
     { ArgumentNullException.ThrowIfNull(store); LJ.Require(LJ.Id(scope)); this.store = store; this.scope = scope; }
 
     public Task<JsonElement> ExecuteAsync(string method, object? parameters = null, CancellationToken cancellationToken = default) =>
@@ -71,22 +70,14 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     {
         if (document is not null && !force) return;
         var saved = await store.ReadAsync(DocumentNamespace, token).ConfigureAwait(false);
-        try
-        {
-            JsonObject candidate;
-            if (saved.Data is null) { LJ.Require(saved.Fingerprint == DocumentFingerprint.Missing, "CORRUPT_STORAGE"); candidate = LJ.Obj(("version", 1), ("entries", new JsonArray())); }
-            else
-            {
-                LJ.Require(DocumentFingerprint.FromBytes(saved.Data) == saved.Fingerprint, "CORRUPT_STORAGE");
-                candidate = LJ.PersistedDocument(saved.Data);
-            }
-            ValidateDocument(candidate);
-            if (Value(candidate, "queue") is JsonObject q) RestoreRuntime(q, false);
-            else if (force) RestoreRuntime(Queue(candidate), false);
-            document = candidate; fingerprint = saved.Fingerprint;
-            if (pending is null && recommendationUnknown is null) RefreshOfficialSources(candidate);
-        }
-        finally { if (saved.Data is not null) CryptographicOperations.ZeroMemory(saved.Data); }
+        JsonObject candidate;
+        if (saved.Data is null) { LJ.Require(saved.Fingerprint == DocumentFingerprint.Missing, "CORRUPT_STORAGE"); candidate = LJ.Obj(("version", 1), ("entries", new JsonArray())); }
+        else candidate = LJ.PersistedDocument(saved.Data);
+        ValidateDocument(candidate);
+        if (Value(candidate, "queue") is JsonObject q) RestoreRuntime(q, false);
+        else if (force) RestoreRuntime(Queue(candidate), false);
+        document = candidate; fingerprint = saved.Fingerprint;
+        if (pending is null && recommendationUnknown is null) RefreshOfficialSources(candidate);
     }
     private static PendingOwner CommandOwner(string method)
     {
@@ -147,13 +138,12 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         }
         catch (Exception error)
         {
-            string code = error is ProtectedDocumentException { Error: DocumentStoreError.Conflict } ? "STORAGE_CONFLICT" : "COMMIT_UNKNOWN";
+            string code = error is DocumentStoreException { Error: DocumentStoreError.Conflict } ? "STORAGE_CONFLICT" : "COMMIT_UNKNOWN";
             pending = new(candidate, fingerprint, expected, code, owner, recommendationStage);
             if (recommendationStage is not null) recommendationUnknown = pending;
             InvalidateOfficialSources();
             throw new MusicLibraryException(code);
         }
-        finally { CryptographicOperations.ZeroMemory(bytes); }
     }
     private async Task ReconcileLockedAsync(CancellationToken token)
     {
@@ -219,7 +209,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         }
         catch (OperationCanceledException) { return LJ.Element(LJ.Obj(("ok", false), ("code", "CANCELLED"))); }
         catch (MusicLibraryException error) { return LJ.Element(LJ.Obj(("ok", false), ("code", error.Code))); }
-        catch (ProtectedDocumentException error) { return LJ.Element(LJ.Obj(("ok", false), ("code", error.Error == DocumentStoreError.Unavailable ? "STORAGE_UNAVAILABLE" : "STORAGE"))); }
+        catch (DocumentStoreException error) { return LJ.Element(LJ.Obj(("ok", false), ("code", error.Error == DocumentStoreError.Unavailable ? "STORAGE_UNAVAILABLE" : "STORAGE"))); }
         catch { return LJ.Element(LJ.Obj(("ok", false), ("code", "INVALID_REQUEST"))); }
         finally
         {

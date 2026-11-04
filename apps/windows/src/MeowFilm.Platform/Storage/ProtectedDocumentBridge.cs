@@ -54,7 +54,7 @@ public sealed class ProtectedDocumentBridge : IAsyncDisposable
         internal bool TimedOut;
     }
 
-    private readonly IProtectedDocumentStore store;
+    private readonly IDocumentStore store;
     private readonly HashSet<string> namespaces;
     private readonly ProtectedDocumentBridgeOptions options;
     private readonly TimeProvider time;
@@ -67,7 +67,7 @@ public sealed class ProtectedDocumentBridge : IAsyncDisposable
     private long quarantineUntil;
     private int reserved, pending, stopping;
 
-    public ProtectedDocumentBridge(IProtectedDocumentStore store, IEnumerable<string> allowedNamespaces,
+    public ProtectedDocumentBridge(IDocumentStore store, IEnumerable<string> allowedNamespaces,
         ProtectedDocumentBridgeOptions? options = null, TimeProvider? timeProvider = null)
     {
         this.store = store ?? throw new ArgumentNullException(nameof(store));
@@ -249,7 +249,7 @@ public sealed class ProtectedDocumentBridge : IAsyncDisposable
         }
     }
 
-    private static DocumentFingerprint ValidateRead(ProtectedDocument value)
+    private static DocumentFingerprint ValidateRead(DocumentSnapshot value)
     {
         if (value is null || value.Fingerprint is null) throw new Failure("STORAGE");
         if (value.Data?.Length > MaximumDocumentBytes) throw new Failure("LIMIT");
@@ -439,10 +439,10 @@ public sealed class ProtectedDocumentBridge : IAsyncDisposable
     private string Code(Exception exception) => exception switch
     {
         Failure failure => failure.Code,
-        ProtectedDocumentException { Error: DocumentStoreError.Limit } => "LIMIT",
-        ProtectedDocumentException { Error: DocumentStoreError.Conflict } => "CONFLICT",
-        ProtectedDocumentException { Error: DocumentStoreError.Closed } => "CLOSED",
-        ProtectedDocumentException { Error: DocumentStoreError.Unavailable } => "UNAVAILABLE",
+        DocumentStoreException { Error: DocumentStoreError.Limit } => "LIMIT",
+        DocumentStoreException { Error: DocumentStoreError.Conflict } => "CONFLICT",
+        DocumentStoreException { Error: DocumentStoreError.Closed } => "CLOSED",
+        DocumentStoreException { Error: DocumentStoreError.Unavailable } => "UNAVAILABLE",
         OperationCanceledException => Closed ? "CLOSED" : "CANCELLED",
         _ => "STORAGE"
     };

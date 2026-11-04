@@ -60,6 +60,8 @@
   </ResourceDictionary>
  </UserControl.Resources>
  <Grid>
+  <local:FilmLoadingCards Margin="24,0" Height="294"
+      Visibility="{Binding ShowSkeleton,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
   <Grid x:Name="RailRoot" Background="Transparent"
         Visibility="{Binding HasItems,Converter={StaticResource MeowFilm.BoolToVisibility}}">
    <ListBox x:Name="ItemsHost" Margin="24,0" Height="294"

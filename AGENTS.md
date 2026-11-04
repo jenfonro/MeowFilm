@@ -52,14 +52,14 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 - `apps/windows/app/` — Windows 应用入口与装配
 - `apps/windows/src/` — Windows 原生库
   - `MeowFilm.Core` — 基础契约
-  - `MeowFilm.Platform` — 受保护存储、命名管道、子进程、文件授权
+  - `MeowFilm.Platform` — 本地文档存储与敏感信息保护、命名管道、子进程、文件授权
   - `MeowFilm.Desktop` — 窗口、导航、设置入口、主题、通知
   - `MeowFilm.Media` — 媒体播放与自适应流
   - `MeowFilm.SystemMedia` — 系统媒体传输控件
   - `MeowFilm.AppHost` — 启动、注入与关闭
   - `MeowFilm.Capabilities` — 按职责组织的业务能力（Accounts、Platforms、Catalog、Search、Recommendations、Library、Sync、Playback、PlaybackCache、Lyrics、Scripting、Feedback、Settings、Presentation、Composition）
 - `apps/windows/tests/` — Windows 原生测试
-- `apps/runtime/` — 公共脚本传输装配；`modules/{music,cat}-script.mjs` 与 `modules/source-runtime.mjs` 分别拥有 music.script.v2／music@0.6.0、cat.script.v1／cat@0.1.0、source.runtime.v1／source@0.1.0
+- `apps/runtime/` — 公共脚本传输装配；`modules/{music,cat}-script.mjs` 与 `modules/source-runtime.mjs` 分别拥有 music.script.v2／music@0.7.0、cat.script.v1／cat@0.1.0、source.runtime.v1／source@0.1.0
 - `apps/windows/runtime/` — 仅 Windows 启动／命名管道 `bootstrap.mjs` 与薄 `entries/aggregate.mjs`，从公共目录导入业务模块，不保留 module 副本
 - `packages/script-host/` — LX、CatNode 和 portable 来源共用的 WorkerSession／QuickJS 执行、有限 Node 风格能力、平台适配与实例生命周期
 - `packages/source-runtime/` — Node 无关的 Reader 规则、CatVod Spider adapter 与来源 capability ABI；不替代 CatNode 的输入契约或 Node 兼容层

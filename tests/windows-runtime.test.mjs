@@ -397,7 +397,7 @@ async function assertRealBusiness(peer, product, domains) {
   await assert.rejects(peer.call('eval', privateMarker), { code: 'METHOD_UNAVAILABLE' });
   await assert.rejects(peer.call('runtime.describe', {}), { code: 'INVALID_MESSAGE' });
   const music = description.modules.find(module => module.id === 'music');
-  assert.equal(music.version, '0.6.0');
+  assert.equal(music.version, '0.7.0');
   assert.ok(music.methods.every(method => method.startsWith('music.script.')));
   const cat = description.modules.find(module => module.id === 'cat');
   assert.equal(cat.version, '0.1.0');

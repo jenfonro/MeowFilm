@@ -91,8 +91,12 @@ final class MusicNativeHomePresentationTests: XCTestCase {
         let item = try XCTUnwrap(MusicNativePublicBrowseParser.resource(row, index: "logo", modern: true))
         XCTAssertEqual(item.title, "私人雷达")
         XCTAssertEqual(item.artwork?.absoluteString, "https://p1.music.126.net/album.jpg")
+        for host in ["independent-cdn.invalid", "pic.kuwo.cn", "d.musicapp.migu.cn", "p1.music.126.net.evil.invalid"] {
+            row["action"] = .string(action("https://\(host)/album.jpg"))
+            XCTAssertEqual(try MusicNativePublicBrowseParser.resource(row, index: "cdn")?.artwork?.host, host)
+        }
         for unsafe in ["javascript:alert(1)", "https://user:secret@p1.music.126.net/a.jpg",
-                       "https://p1.music.126.net.evil.invalid/a.jpg", "https://p1.music.126.net/a.jpg#fragment"] {
+                       "https://cdn.invalid:8443/a.jpg", "https://p1.music.126.net/a.jpg#fragment"] {
             row["action"] = .string(action(unsafe))
             XCTAssertEqual(try MusicNativePublicBrowseParser.resource(row, index: "unsafe")?.artwork?.lastPathComponent, "gradient.jpg")
         }

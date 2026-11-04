@@ -8,7 +8,7 @@ namespace MeowFilm.Capabilities.Platforms;
 internal sealed partial class MusicPlatformClientContextOwner : IAsyncDisposable
 {
     internal const string DocumentNamespace = "music.platform-context.v1";
-    private readonly IProtectedDocumentStore store;
+    private readonly IDocumentStore store;
     private readonly Func<CancellationToken, Task<MusicClientContextSeeds>>? import;
     private readonly object gate = new();
     private readonly SemaphoreSlim serial = new(1, 1);
@@ -21,7 +21,7 @@ internal sealed partial class MusicPlatformClientContextOwner : IAsyncDisposable
     internal event Action<string>? ContextChanged;
     internal bool NeedsReconciliation { get { lock (gate) return uncertain; } }
 
-    internal MusicPlatformClientContextOwner(IProtectedDocumentStore store,
+    internal MusicPlatformClientContextOwner(IDocumentStore store,
         Func<CancellationToken, Task<MusicClientContextSeeds>>? import = null)
     { this.store = store ?? throw new ArgumentNullException(nameof(store)); this.import = import; }
 
@@ -127,7 +127,7 @@ internal sealed partial class MusicPlatformClientContextOwner : IAsyncDisposable
             lock (gate)
             { RequireOpen(); current = next; fingerprint = document.Fingerprint; uncertain = false; observed = true; }
         }
-        catch (ProtectedDocumentException error) { throw new MusicPlatformException(StorageCode(error)); }
+        catch (DocumentStoreException error) { throw new MusicPlatformException(StorageCode(error)); }
         catch (MusicPlatformException) { throw; }
         catch (OperationCanceledException) { throw; }
         catch { throw new MusicPlatformException("STORAGE"); }
@@ -193,7 +193,7 @@ internal sealed partial class MusicPlatformClientContextOwner : IAsyncDisposable
             lock (gate) { RequireOpen(); observed = true; }
             DocumentFingerprint actual;
             try { actual = await store.WriteAsync(DocumentNamespace, bytes, before, token).ConfigureAwait(false); }
-            catch (ProtectedDocumentException error) when (error.Error == DocumentStoreError.Conflict)
+            catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Conflict)
             {
                 lock (gate) { current = null; initialization = null; }
                 NotifyAll();
@@ -242,7 +242,7 @@ internal sealed partial class MusicPlatformClientContextOwner : IAsyncDisposable
         MusicClientContextDocument.Require(reload is not { IsCompleted: false }, "STORAGE_CONFLICT");
         MusicClientContextDocument.Require(current is not null, "DEVICE_CONTEXT_REQUIRED");
     }
-    private static string StorageCode(ProtectedDocumentException error) => error.Error switch
+    private static string StorageCode(DocumentStoreException error) => error.Error switch
     {
         DocumentStoreError.Conflict => "STORAGE_CONFLICT",
         DocumentStoreError.Corrupt or DocumentStoreError.UnsupportedVersion or DocumentStoreError.Protection => "CORRUPT_STORAGE",

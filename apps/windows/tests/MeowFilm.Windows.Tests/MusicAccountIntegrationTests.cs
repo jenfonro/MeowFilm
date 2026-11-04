@@ -388,7 +388,7 @@ public static class MusicAccountIntegrationTests
             data ??= Path.Combine(Environment.GetEnvironmentVariable("MEOWFILM_TEST_DATA_ROOT")
                 ?? throw new InvalidOperationException("Isolated data required"), "account-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(data);
-            var store = new ControlledStore(new DpapiDocumentStore(data, AppIdentity.NativeNamespaces));
+            var store = new ControlledStore(new LocalDocumentStore(data, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
             var result = new Fixture(data, store);
             try
             {
@@ -415,12 +415,12 @@ public static class MusicAccountIntegrationTests
             }
         }
     }
-    private sealed class ControlledStore(DpapiDocumentStore inner) : IProtectedDocumentStore
+    private sealed class ControlledStore(LocalDocumentStore inner) : IDocumentStore
     {
         public string? LoseReceipt;
         public int Writes, AccountWrites, DisposeCalls;
         public TaskCompletionSource? Arrived, Release;
-        public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken token = default) => inner.ReadAsync(ns, token);
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) => inner.ReadAsync(ns, token);
         public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken token = default)
         {
             token.ThrowIfCancellationRequested();
@@ -434,7 +434,7 @@ public static class MusicAccountIntegrationTests
                 token = CancellationToken.None; // The held physical write still settles in real DPAPI.
             }
             var saved = await inner.WriteAsync(ns, data, expected, token);
-            if (LoseReceipt == ns) { LoseReceipt = null; throw new ProtectedDocumentException(DocumentStoreError.Storage); }
+            if (LoseReceipt == ns) { LoseReceipt = null; throw new DocumentStoreException(DocumentStoreError.Storage); }
             return saved;
         }
         public async ValueTask DisposeAsync() { DisposeCalls++; await inner.DisposeAsync(); }

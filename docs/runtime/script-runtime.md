@@ -6,7 +6,7 @@
 apps/runtime/bootstrap.mjs
   被动装配方法表、双向调用与模块关闭
 apps/runtime/modules/music-script.mjs
-  音乐脚本暂存、安装身份、版本与存储会话绑定
+  音乐源码／控制参数／结果分片、安装身份、版本与存储会话绑定
 apps/runtime/modules/cat-script.mjs
   Cat 源码/结果分片、安装、设置刷新、调用与管理同步
 apps/runtime/modules/source-runtime.mjs
@@ -27,7 +27,7 @@ apps/windows/runtime/
 
 | descriptor | 响应契约 | 输入与职责 |
 | --- | --- | --- |
-| `music@0.6.0` | `music.script.v2` | 原始 LX 音源 |
+| `music@0.7.0` | `music.script.v2` | 原始 LX 音源 |
 | `cat@0.1.0` | `cat.script.v1` | CatNode 的有限 Node 兼容、HTTP 服务、direct Spider、私有卷与管理同步 |
 | `source@0.1.0` | `source.runtime.v1` | Legado、异次元、轻悦时光及独立 CatVod Spider 输入 |
 
@@ -59,9 +59,9 @@ Node-independent 只指 `@meowfilm/source-runtime` 的纯规则与 ABI 包：不
 
 派生引擎在 Promise reaction、原生 await、异步生成器请求及 FinalizationRegistry 登记时保存 SDK 的任务身份，在执行期间切入并于返回／异常后恢复；不包装公开 `Promise.prototype.then`，不新增微任务或改变排队顺序。portable 来源以此保留旧异步工作的身份，不能借后续动作发 capability；原生入口仅供可信 SDK 初始化捕获，任何用户代码执行前从全局删除。该机制不改变 LX 的显式特权存储契约，也不授予 CatNode 新权限。
 
-ScriptHost 在 `host.js` 的 `SCRIPT_LIMITS` 一处定义脚本层限制，LX、CatNode 与 source 同值且按单个脚本计：源码最多 16 MiB（UTF-8 字节）、QuickJS 栈 256 KiB、单脚本内存上限 `maxMemoryBytes`。QuickJS 内部桥接与脚本内数据处理不设单次 8 MiB 字节上限，仍受单脚本内存约束。宿主整体缓冲且不受 guest 堆约束的位置以 `maxMemoryBytes` 为上界：Cat 聚合入口请求体、Cat 脚本 listener 响应汇总、LX 宿主网络响应体及解压输出；超出报 `RESOURCE_LIMIT`，请求失败而实例继续服务。source ABI 的请求/响应字节同样受单脚本内存预算约束，错误按 `source.runtime.v1` 契约返回。`maxMemoryBytes` 默认为 256 MiB；依据是 11 份真实脚本的 QuickJS 单脚本峰值约 77 MiB，默认值约为该峰值的 3.3 倍。所有协议均启用 `setMemoryLimit`，超限即判该实例失败。已就绪实例在运行中超限时由 ScriptHost 自动以同一 revision 重启一次（保留 CatNode 私有卷并记录结构化诊断）；初始化超限或重启后再次初始化超限停在 failed，不循环。用户 enable／update 后重启计数复位。
+ScriptHost 在 `host.js` 的 `SCRIPT_LIMITS` 一处定义脚本层限制，LX、CatNode 与 source 同值且按单个脚本计：源码最多 16 MiB（UTF-8 字节）、QuickJS 栈 256 KiB、单脚本内存上限 `maxMemoryBytes`。脚本运行器不设对外单次消息或结果字节上限；QuickJS 内部桥接与脚本内数据处理只受单脚本内存上限约束。宿主整体缓冲且不受 guest 堆约束的位置以 `maxMemoryBytes` 为上界：Cat 聚合入口请求体、Cat 脚本 listener 响应汇总、LX 宿主网络响应体及解压输出；超出报 `RESOURCE_LIMIT`，请求失败而实例继续服务。source ABI 的请求/响应字节同样受单脚本内存预算约束，错误按 `source.runtime.v1` 契约返回。`maxMemoryBytes` 默认为 256 MiB；依据是 11 份真实脚本的 QuickJS 单脚本峰值约 77 MiB，默认值约为该峰值的 3.3 倍。所有协议均启用 `setMemoryLimit`，超限即判该实例失败。已就绪实例在运行中超限时由 ScriptHost 自动以同一 revision 重启一次（保留 CatNode 私有卷并记录结构化诊断）；初始化超限或重启后再次初始化超限停在 failed，不循环。用户 enable／update 后重启计数复位。
 
-LX `music@0.6.0` 结果仍受 512 KiB 单帧线协议上限，原生桥接帧 1 MiB 不变；Cat `cat@0.1.0` 结果走分片传输。source 控制请求和响应各限 1 MiB，源码以 64 KiB 分片上传，暂存 TTL 为 5 分钟并由主动 timer 回收，不设 token 数量门槛。CatNode 原生桥的字节参数与返回值均以 ArrayBuffer 帧传输，JSON 只描述结构和帧索引。线协议帧与上传分片大小不等于源码、网络响应或 guest 堆的大小上限。
+LX 与 Cat 的大控制参数／结果均走 64 KiB 字节分片，不设独立逻辑总量上限；原生桥接的 1 MiB 物理帧边界不变。LX 小请求和结果保持原有业务信封，大数据由传输适配层透明还原，见 [LX 传输契约](music-script-runtime.md#控制数据传输)。source 控制请求和响应各限 1 MiB，源码以 64 KiB 分片上传，暂存 TTL 为 5 分钟并由主动 timer 回收，不设 token 数量门槛。Cat 原生桥的字节参数与返回值均以 ArrayBuffer 帧传输，JSON 只描述结构和帧索引。线协议帧与上传分片大小不等于源码、网络响应或 guest 堆的大小上限。
 
 不按实例、timer、网络、in-flight、storage、method pending、stage token 或 profile 固定数量配额拒绝工作，资源按请求和 session 生命周期回收。Reader 的 DOM 文档/节点/字符串、分页和规则解析预算仍是明确的解析资源边界，ABI JSON、HTTP 语法、重定向和截止时间仍是数据/协议边界。CatNode 的 `os.totalmem()` 返回单脚本内存上限，`os.freemem()` 为上限减当前 guest 堆占用；其余 `os` 字段仍是兼容元数据。公共引擎拒绝超过 1 MiB 的栈配置。取消、超时或卸载 fence 当前结果并按请求、服务和 session 生命周期回收资源；不把取消信号当作不合作外部 I/O 已完成的证明，无法排空时明确报告清理失败。source 的能力与 profile 退休规则见[capability ABI](source-capability-abi.md)。
 
@@ -97,7 +97,7 @@ Node 网络适配器接受：
 network({ url, options, signal, scope, validateURL })
 ```
 
-LX 的 `validateURL` 检查 HTTP(S) URL 语法并拒绝 URL 中的用户信息，初始地址和每次重定向都重新检查；它不是域名或私网授权判断。接口不再叫 `authorizeURL`，安装记录也不维护 origin 白名单或按源码 SHA-256 补域名的策略。源码哈希仍用于脚本字节完整性与版本身份，不能误删其他业务的数据完整性校验。
+LX 的 `validateURL` 检查 HTTP(S) URL 语法并拒绝 URL 中的用户信息，初始地址和每次重定向都重新检查；它不是域名或私网授权判断。接口不再叫 `authorizeURL`，安装记录也不维护 origin 白名单或按源码 SHA-256 补域名的策略。源码哈希可用于导入文件引用、更新标识及本次分片传输完整性；激活读取保存的源码不比较历史内容哈希，编辑后可重新启用或重启执行。其他业务的并发 CAS 和格式检查不因此移除。
 
 LX 网络可以访问已开放的 HTTP(S) 服务，包括本机和私网地址；其受控桥接保留截止时间、取消、响应大小、重定向上限及跨 origin 不转发 Authorization/Cookie 的行为。
 

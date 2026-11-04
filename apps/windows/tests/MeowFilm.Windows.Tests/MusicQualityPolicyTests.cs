@@ -415,7 +415,7 @@ internal sealed class QualityFixture : IAsyncDisposable
         protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request, CancellationToken token)
             => throw new InvalidOperationException("Real upstream is forbidden in quality fixtures");
     }
-    internal sealed class DocumentStore : IProtectedDocumentStore
+    internal sealed class DocumentStore : IDocumentStore
     {
         private readonly object gate = new();
         internal readonly Dictionary<string, byte[]> Data = [];
@@ -425,13 +425,13 @@ internal sealed class QualityFixture : IAsyncDisposable
         internal string? FaultNamespace, HoldNamespace;
         internal readonly TaskCompletionSource Entered = Gate(), Release = Gate();
         internal void Put(string ns, JsonObject value) { lock (gate) Data[ns] = JsonSerializer.SerializeToUtf8Bytes(value); }
-        public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken token = default)
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
         {
             token.ThrowIfCancellationRequested();
             lock (gate)
             {
                 Names.Add(ns); var bytes = Data.GetValueOrDefault(ns)?.ToArray();
-                return Task.FromResult(new ProtectedDocument(bytes, bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes)));
+                return Task.FromResult(new DocumentSnapshot(bytes, bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes)));
             }
         }
         public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected, CancellationToken token = default)
@@ -446,7 +446,7 @@ internal sealed class QualityFixture : IAsyncDisposable
                 if (fault && !FaultAfter) throw new InvalidOperationException("synthetic before CAS receipt loss");
                 var before = Data.GetValueOrDefault(ns);
                 if ((before is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(before)) != expected)
-                    throw new ProtectedDocumentException(DocumentStoreError.Conflict);
+                    throw new DocumentStoreException(DocumentStoreError.Conflict);
                 Data[ns] = bytes.ToArray();
                 if (fault) throw new InvalidOperationException("synthetic after CAS receipt loss");
                 return DocumentFingerprint.FromBytes(bytes.Span);

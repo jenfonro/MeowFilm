@@ -74,10 +74,8 @@ enum MusicNativePublicBrowseWire {
         if platform == .migu && text.hasPrefix("/") && !text.hasPrefix("//") { text = "https://d.musicapp.migu.cn" + text }
         guard text.utf8.count <= 4096, var url = URLComponents(string: text),
               url.user == nil, url.password == nil, url.fragment == nil,
-              url.port == nil || url.port == 443, let host = url.host?.lowercased(),
+              url.port == nil || url.port == 443, let host = url.host, !host.isEmpty,
               url.scheme == "https" || url.scheme == "http" else { return nil }
-        let roots = platform == .kuwo ? ["kuwo.cn"] : ["migu.cn"]
-        guard roots.contains(where: { host == $0 || host.hasSuffix("." + $0) }) else { return nil }
         url.scheme = "https"; return url.url
     }
 }

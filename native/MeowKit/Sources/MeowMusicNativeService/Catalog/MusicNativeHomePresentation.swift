@@ -69,7 +69,7 @@ enum MusicNativeHomePresentation {
               url.user == nil, url.password == nil, url.port == nil, url.fragment == nil else { return nil }
         let covers = (url.queryItems ?? []).filter { $0.name == "coverUrl" }
         guard covers.count == 1, let cover = covers.first?.value else { return nil }
-        // Keep the existing native host/TLS/credential policy; no new image host.
+        // Keep HTTPS and credential rejection, but image delivery may use any CDN host.
         return MusicNativePublicBrowseSupport.artwork(.string(cover))
     }
 

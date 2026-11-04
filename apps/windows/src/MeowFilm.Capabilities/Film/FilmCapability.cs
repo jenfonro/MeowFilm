@@ -12,13 +12,14 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
 {
     internal const string HomeRoute = "film-home";
     internal const string DataRoute = "film-data";
-    internal const string DoubanRoute = "film-douban";
+    internal const string PlaybackRoute = "film-playback";
     internal const int DataPageSize = 24;
 
     private readonly IFilmHomeSource source;
     private readonly CancellationTokenSource lifetime = new();
     private readonly Dictionary<FilmHomeSection, CancellationTokenSource> requests = [];
     private readonly HashSet<Task> operations = [];
+    private readonly Dictionary<string, FilmPlaybackPage> playbackPages = new(StringComparer.Ordinal);
     private readonly FilmView view;
     private readonly Grid settings = new() { Background = Brushes.Transparent };
     private Task? preparation;
@@ -45,7 +46,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
         [
             new(HomeRoute, "影视", "\uE8B2"),
             new(DataRoute, "影片数据", "\uE8B2", ShowInSidebar: false),
-            new(DoubanRoute, "豆瓣", "\uE8B2", ShowInSidebar: false)
+            new(PlaybackRoute, "播放页", "\uE8B2", ShowInSidebar: false)
         ];
         view = new(this);
     }
@@ -60,15 +61,15 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
     public IReadOnlyList<FilmHomeSection> Sections { get; }
     public IReadOnlyList<FilmDataSection> DataSections { get; }
     public FilmDataSection ActiveData { get; private set; }
-    public FilmCardItem? ActiveDoubanItem { get; private set; }
+    public FilmPlaybackPage? Playback { get; private set; }
     public bool IsHome => route == HomeRoute;
     public bool IsData => route == DataRoute;
-    public bool IsDouban => route == DoubanRoute;
+    public bool IsPlayback => route == PlaybackRoute;
     public string Heading => route switch
     {
         HomeRoute => "影视",
         DataRoute => "影片数据",
-        DoubanRoute => "豆瓣",
+        PlaybackRoute => "播放页",
         _ => ""
     };
 
@@ -88,7 +89,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
         cancellationToken.ThrowIfCancellationRequested();
         if (stopping) return;
         ObjectDisposedException.ThrowIf(disposed, this);
-        if (route is not (HomeRoute or DataRoute or DoubanRoute))
+        if (route is not (HomeRoute or DataRoute or PlaybackRoute))
             throw new ArgumentException("Unknown film route.", nameof(route));
 
         long generation = ++navigationGeneration;
@@ -96,9 +97,16 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
         this.route = route;
         Changed(nameof(IsHome));
         Changed(nameof(IsData));
-        Changed(nameof(IsDouban));
+        Changed(nameof(IsPlayback));
         Changed(nameof(Heading));
-        if (route == DoubanRoute) return;
+        if (route == PlaybackRoute)
+        {
+            if (Playback is null)
+                SelectPlayback(new("preview:long-season", "漫长的季节",
+                    "pack://application:,,,/MeowFilm.Capabilities;component/Film/Presentation/Assets/poster-long-season.jpg",
+                    "9.4"), "tv");
+            return;
+        }
         if (route == DataRoute)
         {
             if (ActiveData.LoadsOnEntry)
@@ -123,6 +131,31 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
         await Task.WhenAll(targets.Select(section =>
             StartSectionLoad(section, generation, cancellationToken)));
         cancellationToken.ThrowIfCancellationRequested();
+    }
+
+    public string CaptureNavigationLocation() =>
+        IsPlayback && Playback is { } page ? $"{PlaybackRoute}:{page.Item.Id}" : route;
+
+    public Task RestoreNavigationAsync(string location, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        if (stopping) return Task.CompletedTask;
+        ObjectDisposedException.ThrowIf(disposed, this);
+        if (location.StartsWith(PlaybackRoute + ":", StringComparison.Ordinal))
+        {
+            if (!playbackPages.TryGetValue(location[(PlaybackRoute.Length + 1)..], out var page))
+                throw new ArgumentException("Unknown film playback location.", nameof(location));
+            Playback = page;
+            Changed(nameof(Playback));
+            return NavigateAsync(PlaybackRoute, token);
+        }
+        return NavigateAsync(location, token);
+    }
+
+    internal void SuspendPresentation()
+    {
+        navigationGeneration++;
+        RetireRequests();
     }
 
     public Task SearchAsync(string query, CancellationToken cancellationToken)
@@ -151,7 +184,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
         return Task.CompletedTask;
     }
 
-    internal Task OpenDoubanAsync(FilmCardItem item)
+    internal Task OpenPlaybackAsync(FilmCardItem item)
     {
         ArgumentNullException.ThrowIfNull(item);
         if (stopping || disposed || (!IsHome && !IsData)) return Task.CompletedTask;
@@ -159,15 +192,39 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
             ? Sections.Any(section => section.Items.Contains(item))
             : ActiveData.Items.Contains(item);
         if (!visible) throw new ArgumentException("Unknown film item.", nameof(item));
-        if (!ReferenceEquals(ActiveDoubanItem, item))
-        {
-            ActiveDoubanItem = item;
-            Changed(nameof(ActiveDoubanItem));
-        }
+        string sectionKey = IsData ? ActiveData.Key :
+            Sections.First(section => section.Items.Contains(item)).Key;
+        SelectPlayback(item, sectionKey);
         if (NavigationRequested is not { } requested)
-            return NavigateAsync(DoubanRoute, lifetime.Token);
-        requested(this, new(DoubanRoute));
+            return NavigateAsync(PlaybackRoute, lifetime.Token);
+        requested(this, new(PlaybackRoute));
         return Task.CompletedTask;
+    }
+
+    internal Task OpenRecommendationAsync(FilmCardItem item)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        if (stopping || disposed || !IsPlayback || Playback is null) return Task.CompletedTask;
+        if (!Playback.Recommendations.Contains(item))
+            throw new ArgumentException("Unknown film recommendation.", nameof(item));
+        SelectPlayback(item, "tv");
+        if (NavigationRequested is not { } requested)
+            return NavigateAsync(PlaybackRoute, lifetime.Token);
+        requested(this, new(PlaybackRoute));
+        return Task.CompletedTask;
+    }
+
+    private void SelectPlayback(FilmCardItem item, string sectionKey)
+    {
+        if (!playbackPages.TryGetValue(item.Id, out var page))
+        {
+            page = FilmPlaybackPreview.Create(item, sectionKey);
+            playbackPages.Add(item.Id, page);
+        }
+        else page.UpdateItem(item);
+        if (ReferenceEquals(Playback, page)) return;
+        Playback = page;
+        Changed(nameof(Playback));
     }
 
     internal async Task RetrySectionAsync(FilmHomeSection section)
@@ -229,6 +286,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
             try
             {
                 await Task.Yield();
+                request.Token.ThrowIfCancellationRequested();
                 var items = await source.LoadAsync(section.Definition, request.Token);
                 request.Token.ThrowIfCancellationRequested();
                 if (CanPublish(section, request, generation)) section.Complete(items);
@@ -283,6 +341,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
             try
             {
                 await Task.Yield();
+                request.Token.ThrowIfCancellationRequested();
                 var items = await source.LoadAsync(definition, start, limit, request.Token);
                 request.Token.ThrowIfCancellationRequested();
                 if (CanPublishData(section, request, generation))
@@ -324,6 +383,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
     private void RetireRequests()
     {
         var retired = requests.Values.ToArray();
+        foreach (var section in requests.Keys) section.Cancel();
         requests.Clear();
         foreach (var request in retired)
         {
@@ -336,6 +396,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
     private void RetireDataRequest()
     {
         var retiredData = dataRequest;
+        if (retiredData is not null) dataRequestSection?.Cancel();
         dataRequest = null;
         dataRequestSection = null;
         if (retiredData is not null)

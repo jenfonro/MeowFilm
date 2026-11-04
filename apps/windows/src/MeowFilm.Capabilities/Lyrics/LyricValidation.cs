@@ -57,9 +57,8 @@ internal static class L
                 token.ThrowIfCancellationRequested(); Require(++nodes <= 20000, "LIMIT");
                 if (value.ValueKind == JsonValueKind.Object)
                 {
-                    var names = new HashSet<string>(StringComparer.Ordinal);
                     foreach (var property in value.EnumerateObject())
-                    { Require(names.Add(property.Name), "INVALID_RESPONSE"); Check(property.Value); }
+                        Check(property.Value);
                 }
                 else if (value.ValueKind == JsonValueKind.Array) foreach (var item in value.EnumerateArray()) Check(item);
                 else if (value.ValueKind == JsonValueKind.String)
@@ -70,7 +69,7 @@ internal static class L
             }
             Check(doc.RootElement);
             Require(doc.RootElement.ValueKind == JsonValueKind.Object, "INVALID_RESPONSE");
-            return (JsonObject)JsonNode.Parse(text, documentOptions: new JsonDocumentOptions { MaxDepth = 32 })!;
+            return (JsonObject)PJ.Read(doc.RootElement)!;
         }
         catch (Exception e) when (e is JsonException or DecoderFallbackException or EncoderFallbackException or InvalidOperationException)
         { throw new MusicPlatformException("INVALID_RESPONSE"); }

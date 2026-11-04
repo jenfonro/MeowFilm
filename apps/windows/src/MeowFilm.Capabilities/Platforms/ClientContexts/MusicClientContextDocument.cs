@@ -35,7 +35,7 @@ internal sealed record MusicClientContextDocument(MusicWyClientContext Wy,
                 savedAt = s.SavedAt, qimeiGeneration = s.QimeiGeneration } : null }
     });
 
-    internal static MusicClientContextDocument Decode(ProtectedDocument document)
+    internal static MusicClientContextDocument Decode(DocumentSnapshot document)
     {
         try
         {

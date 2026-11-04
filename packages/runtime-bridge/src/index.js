@@ -87,6 +87,25 @@ function checkJSON(value, depth = 0, ancestors = new Set()) {
   ancestors.delete(value);
 }
 
+/** The bridge JSON value contract without a physical frame size limit. */
+export function encodeJSONValue(value) {
+  checkJSON(value);
+  return Buffer.from(JSON.stringify(value), 'utf8');
+}
+
+export function decodeJSONValue(bytes) {
+  try {
+    if (!(bytes instanceof Uint8Array)) invalid();
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    checkWire(text);
+    const value = JSON.parse(text);
+    checkJSON(value);
+    return value;
+  } catch (error) {
+    throw error instanceof BridgeError ? error : new BridgeError('INVALID_MESSAGE');
+  }
+}
+
 function validate(message) {
   checkJSON(message);
   if (!message || typeof message !== 'object' || Array.isArray(message) ||

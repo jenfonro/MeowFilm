@@ -16,7 +16,7 @@ public final class MusicSearchViewController: SearchPageViewController,
     private let historyCell = MusicSearchHistoryCell(style: .default, reuseIdentifier: "history")
     private let suggestionsCell = MusicSearchSuggestionsCell(style: .default, reuseIdentifier: "suggestions")
     private let chartsCell = MusicSearchChartRailCell(style: .default, reuseIdentifier: "charts")
-    private let loading = UIActivityIndicatorView(style: .medium)
+    private let loading = MusicLoadingSkeletonView()
     private let discoveryPage: MusicSearchDiscoveryModel?
     private var historyExpanded = false
     private var rowHeights: [RowID: CGFloat] = [:]
@@ -53,7 +53,6 @@ public final class MusicSearchViewController: SearchPageViewController,
         table.sectionHeaderTopPadding = 0
         table.contentInset.top = PageLayoutMetrics.contentGap
         table.estimatedRowHeight = 100
-        loading.hidesWhenStopped = true
         loading.accessibilityLabel = "搜索内容加载中"
         table.backgroundView = loading
         dataSource = UITableViewDiffableDataSource(tableView: table) { [weak self] _, _, id in
@@ -93,6 +92,7 @@ public final class MusicSearchViewController: SearchPageViewController,
     }
     public override func pageDidBecomeVisible() {
         discoveryPage?.appear()
+        render()
         measureMemberDemand()
         showDiscoveryError()
     }
@@ -101,7 +101,10 @@ public final class MusicSearchViewController: SearchPageViewController,
         measureMemberDemand()
         showDiscoveryError()
     }
-    public override func pageDidBecomeHidden() { discoveryPage?.disappear() }
+    public override func pageDidBecomeHidden() {
+        discoveryPage?.disappear()
+        loading.setDisplayVisible(false)
+    }
 
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
@@ -110,6 +113,7 @@ public final class MusicSearchViewController: SearchPageViewController,
     }
 
     public override func pageDidBecomeInactive() {
+        loading.setDisplayVisible(false)
         discoveryPage?.close()
     }
 
@@ -221,9 +225,8 @@ public final class MusicSearchViewController: SearchPageViewController,
         if !history.entries.isEmpty { snapshot.appendItems([.history]) }
         if discoveryPage?.loadedComponents.contains(.hot) == true { snapshot.appendItems([.suggestions]) }
         if !cards.isEmpty { snapshot.appendItems([.charts]) }
-        if snapshot.itemIdentifiers.isEmpty, discoveryPage?.loadingComponents.isEmpty == false {
-            loading.startAnimating()
-        } else { loading.stopAnimating() }
+        loading.configure(loading: snapshot.itemIdentifiers.isEmpty && discoveryPage?.loadingComponents.isEmpty == false,
+                          visible: isPageVisible, theme: theme)
         let previous = dataSource.snapshot()
         if previous.sectionIdentifiers != snapshot.sectionIdentifiers ||
             previous.itemIdentifiers != snapshot.itemIdentifiers {
@@ -373,16 +376,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         self.history = history
         preferences = MusicSearchPreferencesStore()
         actions = MusicSearchActions(model: model)
-        results = MusicSearchResultsModel(readSongs: { [weak model] platform, query, page, limit in
-            guard let model else { throw MusicServiceError.closed }
-            return try await model.searchPage(platform: platform.rawValue, query: query, page: page, limit: limit)
-        }, readPlaylists: { [weak model] platform, query, page, limit in
-            guard let model else { throw MusicServiceError.closed }
-            return try await model.searchPlaylistPage(platform: platform, query: query, page: page, limit: limit)
-        }, readRecording: { [weak model] request in
-            guard let model else { throw MusicServiceError.closed }
-            return try await model.searchRecording(request)
-        })
+        results = MusicSearchResultsModel(owner: model)
         super.init(themeProvider: appearance, query: query)
     }
 
@@ -467,12 +461,18 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         render()
     }
 
-    override func pageDidBecomeInactive() { results.disappear(); actions.suspend() }
+    override func pageDidBecomeInactive() {
+        results.disappear(); actions.suspend()
+        updateLoadingSkeletons()
+    }
     override func pageDidBecomeHidden() {
         results.holdPagination()
         finishPagingTransition(at: selected)
     }
-    override func pageDidBecomeVisible() { showActionError(); showSearchFailure() }
+    override func pageDidBecomeVisible() {
+        updateLoadingSkeletons()
+        showActionError(); showSearchFailure()
+    }
     override func pageDidFinishAppearing() {
         showActionError(); showSearchFailure()
     }
@@ -548,10 +548,21 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         let index = kinds.firstIndex(of: kind) ?? 0
         categories.setSelectedIndex(index)
         categories.setPosition(CGFloat(index))
+        updateLoadingSkeletons()
+    }
+    private func updateLoadingSkeletons() {
+        for (kind, page) in pages {
+            for skeleton in page.skeletons.values {
+                skeleton.setDisplayVisible(isPageVisible && selected == kind)
+            }
+        }
     }
     func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
         if case .heading? = rowID(in: tableView, at: indexPath) { return 44 }
         if case .status(let section)? = rowID(in: tableView, at: indexPath) {
+            if footerState(kind: Kind.allCases[tableView.tag], section: section)?.showsSkeleton == true {
+                return MusicLoadingSkeletonView.preferredHeight + 72
+            }
             guard let footer = statusView(in: tableView, section: section) else { return .leastNormalMagnitude }
             return max(52, footer.systemLayoutSizeFitting(CGSize(width: tableView.bounds.width, height: 0),
                 withHorizontalFittingPriority: .required, verticalFittingPriority: .fittingSizeLevel).height)
@@ -979,6 +990,15 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         guard let state = footerState(kind: kind, section: section) else { return nil }
         let footer = UIStackView()
         footer.axis = .vertical; footer.spacing = 8
+        if state.showsSkeleton, let page = pages[kind] {
+            let skeleton = page.skeletons[section] ?? MusicLoadingSkeletonView()
+            if page.skeletons[section] == nil {
+                page.skeletons[section] = skeleton
+                skeleton.heightAnchor.constraint(equalToConstant: MusicLoadingSkeletonView.preferredHeight).isActive = true
+            }
+            skeleton.configure(loading: true, visible: isPageVisible && selected == kind, theme: theme)
+            footer.addArrangedSubview(skeleton)
+        }
         if let message = state.message {
             let text = UILabel(); text.text = message; text.numberOfLines = 0
             text.textColor = UIColor(theme.muted); text.font = .systemFont(ofSize: 13)
@@ -989,6 +1009,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
             let button = UIButton(type: .system)
             button.setTitle(label, for: .normal); button.tintColor = UIColor(theme.ink)
             button.titleLabel?.font = .systemFont(ofSize: 14, weight: action == .category ? .medium : .regular)
+            if state.showsSkeleton { button.heightAnchor.constraint(equalToConstant: 40).isActive = true }
             button.accessibilityIdentifier = "music.search.results.action.\(tableView.tag).\(section)"
             if action == .category {
                 button.backgroundColor = UIColor(theme.chip)
@@ -1022,6 +1043,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         let noPlatforms = section == 0 ? results.songPlatformsEmpty : results.playlistPlatformsEmpty
         let loaded = section == 0 ? results.songsLoaded : results.playlistsLoaded
         let empty = section == 0 ? results.songs.isEmpty : results.playlists.isEmpty
+        let showsSkeleton = loading && empty && !loaded
         var message: String?
         var label: String?
         var action: MusicSearchFooterState.Action?
@@ -1032,7 +1054,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         } else if cancelled {
             message = "已取消"; label = "重试"; action = .retry
         } else if loading {
-            message = section == 0 ? "单曲加载中" : "歌单加载中"
+            if !showsSkeleton { message = section == 0 ? "单曲加载中" : "歌单加载中" }
             label = "取消"; action = .cancel
         } else if loaded && empty { message = section == 0 ? "未找到歌曲" : "未找到歌单" }
         else if kind == .all, (section == 0 ? results.songs.count : results.playlists.count) > 5 {
@@ -1041,7 +1063,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
             label = "加载更多"; action = .more
         }
         guard message != nil || label != nil else { return nil }
-        return .init(message: message, label: label, action: action, request: results.requestID)
+        return .init(message: message, label: label, action: action, showsSkeleton: showsSkeleton, request: results.requestID)
     }
     func tableView(_ tableView: UITableView, heightForFooterInSection section: Int) -> CGFloat { .leastNormalMagnitude }
 }
@@ -1101,6 +1123,7 @@ private final class MusicSearchTableController: UIViewController {
     var playlistRows: [Data: [MusicPublicBrowseCollection]] = [:]
     var headerStates: [Int: MusicSearchHeaderState] = [:]
     var footerStates: [Int: MusicSearchFooterState] = [:]
+    var skeletons: [Int: MusicLoadingSkeletonView] = [:]
     var columns = 1
     var onLayout: (() -> Void)?
     override func loadView() { view = table }
@@ -1120,6 +1143,7 @@ private struct MusicSearchFooterState: Equatable {
     let message: String?
     let label: String?
     let action: Action?
+    let showsSkeleton: Bool
     let request: UUID
 }
 

@@ -185,8 +185,8 @@ public sealed partial class ShellWindow : Window
             _retryPlan = null;
             SetStatus();
         }
-        // Retire inactive capability visuals before touching newly supplied views. Owners retain
-        // their view instances and state; the shell retains only the current visual tree.
+        // Hide the previous capability before attaching the first-visited surface.
+        // Visited surfaces retain their visual tree and owner-managed state.
         ApplyPresentation();
         _suppressSelection = true;
         try { NavigationList.SelectedItem = null; }
@@ -206,18 +206,6 @@ public sealed partial class ShellWindow : Window
         session.Mounted = true;
     }
 
-    private void Unmount(ModuleSession session)
-    {
-        if (!session.Mounted) return;
-        session.Surface.Visibility = Visibility.Collapsed;
-        session.MainHost.Content = null;
-        session.SettingsHost.Content = null;
-        session.Surface.Children.Remove(session.MainHost);
-        session.Surface.Children.Remove(session.SettingsHost);
-        ContentDeck.Children.Remove(session.Surface);
-        session.Mounted = false;
-    }
-
     private static void RefreshSuppliedViews(ModuleSession session)
     {
         var main = session.Module.View ?? throw new InvalidOperationException();
@@ -229,12 +217,10 @@ public sealed partial class ShellWindow : Window
         ValidateView(settings, session.SettingsHost);
         if (session.IsSettingsOpen)
         {
-            session.MainHost.Content = null;
             if (!ReferenceEquals(session.SettingsHost.Content, settings)) session.SettingsHost.Content = settings;
         }
         else
         {
-            session.SettingsHost.Content = null;
             if (!ReferenceEquals(session.MainHost.Content, main)) session.MainHost.Content = main;
         }
     }
@@ -262,9 +248,7 @@ public sealed partial class ShellWindow : Window
     private void ApplyPresentation()
     {
         if (_current is not { } current) return;
-        foreach (var inactive in _sessions.Where(session => session.Mounted && !ReferenceEquals(session, current)).ToArray())
-            Unmount(inactive);
-        if (current.Mounted) RefreshSuppliedViews(current);
+        if (current.Mounted && _currentPage is null) RefreshSuppliedViews(current);
         foreach (var session in _sessions.Where(session => session.Mounted))
         {
             var selected = ReferenceEquals(session, current);
@@ -442,7 +426,7 @@ public sealed partial class ShellWindow : Window
         var all = string.IsNullOrEmpty(e.PropertyName);
         if (all || e.PropertyName == nameof(IDesktopModule.Navigation)) BindNavigation(session);
         if (all || e.PropertyName is nameof(IDesktopModule.View) or nameof(IDesktopModule.SettingsView))
-            { if (session.Mounted) RefreshSuppliedViews(session); }
+            { if (session.Mounted && ReferenceEquals(session, _current) && _currentPage is null) RefreshSuppliedViews(session); }
         if (ReferenceEquals(session, _current) || ReferenceEquals(session, _playerSession))
             ApplyPresentation();
     });
@@ -687,9 +671,21 @@ public sealed partial class ShellWindow : Window
             if (destination is null && session.Current is null && !session.IsSettingsOpen && session.Module.Navigation.Count > 0)
                 destination = new(session.Module.Navigation[0].Route);
             if (destination is null) return null;
-            if (destination.IsSearch) await session.Module.SearchAsync(destination.Value, token);
+            if (plan.IsBack)
+            {
+                if (string.IsNullOrEmpty(destination.Location)) throw new InvalidOperationException("SHELL_NAVIGATION_LOCATION_MISSING");
+                await session.Module.RestoreNavigationAsync(destination.Location, token);
+            }
+            else if (destination.IsSearch) await session.Module.SearchAsync(destination.Value, token);
             else await session.Module.NavigateAsync(destination.Value, token);
             token.ThrowIfCancellationRequested();
+            if (!plan.IsBack)
+            {
+                var location = session.Module.CaptureNavigationLocation();
+                token.ThrowIfCancellationRequested();
+                if (string.IsNullOrEmpty(location)) throw new InvalidOperationException("SHELL_NAVIGATION_LOCATION_MISSING");
+                destination = destination with { Location = location };
+            }
             return destination;
         }
         finally { session.Gate.Release(); }

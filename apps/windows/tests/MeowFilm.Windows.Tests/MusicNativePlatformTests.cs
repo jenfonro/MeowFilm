@@ -19,6 +19,19 @@ public static class MusicNativePlatformTests
     private const string KgHash = "ABCDEF0123456789ABCDEF0123456789";
     public static IEnumerable<TestCase> Cases()
     {
+        yield return Case("platform response uses the last JSON field at every object without stripping provider metadata", async () =>
+        {
+            using var http = MusicPlatformHttp.CreateWithHandler(new Handler((_, _) => Task.FromResult(
+                new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(
+                    """{"code":500,"code":200,"alg":null,"alg":"root","data":{"id":1,"id":2,"rows":[{"alg":null,"alg":"track","meta":{"name":"old","name":"new"}}]}}""",
+                    Encoding.UTF8, "application/json") })));
+            var result = await http.SendAsync("wy", new(HttpMethod.Post,
+                "https://interfacepc.music.163.com/eapi/v6/playlist/detail"), default);
+            Equal("200", S(result.Body["code"])); Equal("root", S(result.Body["alg"]));
+            Equal("2", S(result.Body["data"]!["id"]));
+            Equal("track", S(result.Body["data"]!["rows"]![0]!["alg"]));
+            Equal("new", S(result.Body["data"]!["rows"]![0]!["meta"]!["name"]));
+        });
         yield return Case("official WY audio uses XEAPI and separates requested from delivered quality", async () =>
         {
             foreach (bool trial in new[] { false, true })
@@ -596,6 +609,50 @@ public static class MusicNativePlatformTests
             var beyond = await f.Catalog.PlaylistAsync(new("wy", "500", 3, 2, snapshot));
             Equal(0, beyond.GetProperty("items").GetArrayLength()); Equal(3, f.Calls);
         });
+        yield return Case("wy recommended playlist accepts repeated unused track alg and retains preview songs", async () =>
+        {
+            var tracks = Enumerable.Range(1, 3).Select(i =>
+                Wy(i.ToString()).ToJsonString().Insert(1, "\"alg\":null,\"alg\":\"recommendation\",")).ToArray();
+            var json = "{\"code\":200,\"playlist\":{\"id\":\"500\",\"name\":\"推荐歌单\",\"trackCount\":3," +
+                "\"trackIds\":[{\"id\":\"1\"},{\"id\":\"2\"},{\"id\":\"3\"}],\"tracks\":[" + string.Join(",", tracks) + "]}}";
+            using var f = new Fixture(req =>
+            {
+                var (path, body) = Eapi(req);
+                Equal("/api/v6/playlist/detail", path); Equal("3", S(body["n"]));
+                return new(HttpStatusCode.OK) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
+            });
+            var reply = await f.Catalog.PlaylistAsync(new("wy", "500", Limit: 3));
+            var cards = MusicCatalogDto.Read(reply, "wy", "playlist", "").SelectMany(section => section.Items).ToArray();
+            Equal(3, cards.Length);
+            for (int i = 0; i < cards.Length; i++)
+            {
+                Song(reply.GetProperty("items")[i], "wy", (i + 1).ToString());
+                Equal("测试曲", cards[i].Title);
+            }
+            Equal(1, f.Calls);
+        });
+        yield return Case("wy final response fields still enforce playlist and recording identity", async () =>
+        {
+            foreach (var (json, error) in new[]
+            {
+                ("""{"code":200,"playlist":{"id":"500","id":"501"}}""", "IDENTITY_MISMATCH"),
+                ("""{"code":200,"playlist":{"id":"500","trackIds":[{"id":"1"}],"trackCount":1,"tracks":[{"id":"1","id":"2","name":"other"}]}}""", "IDENTITY_MISMATCH"),
+                ("""{"code":200,"code":500,"playlist":{}}""", "UPSTREAM_ERROR")
+            })
+            {
+                using var f = new Fixture(_ => new(HttpStatusCode.OK)
+                    { Content = new StringContent(json, Encoding.UTF8, "application/json") });
+                await Error(error, () => f.Catalog.PlaylistAsync(new("wy", "500", Limit: 3)));
+                Equal(1, f.Calls);
+            }
+            using var other = new Fixture(_ => new(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"code":200,"alg":null,"alg":"x","data":{"blocks":[]}}""", Encoding.UTF8, "application/json")
+            });
+            var home = await other.Catalog.HomeAsync(new("wy"));
+            Equal(0, home.GetProperty("sections").GetArrayLength());
+            Equal(1, other.Calls);
+        });
         yield return Case("wy playlist batches only missing current page display members once", async () =>
         {
             var embedded = Wy(Huge); embedded["name"] = "歌单原曲"; embedded.Remove("dt");
@@ -1006,6 +1063,79 @@ public static class MusicNativePlatformTests
                 Continuation: continuation, Tag: "96:1:65")));
             await Error("INVALID_REQUEST", () => f.Catalog.ChannelAsync(new("wy", "artist", Tag: "96:x:65")));
         });
+        yield return Case("artist list and details prefer square artwork and do not lose a fallback behind empty metadata", async () =>
+        {
+            foreach (var square in new[] { "", "http://p1.music.126.net/avatar/109951100000001.jpg" })
+            {
+                var row = J(new { id = "30", name = "歌手", picUrl = "https://images.invalid/portrait.jpg", img1v1Url = square });
+                using var f = new Fixture(req =>
+                    req.RequestUri!.AbsolutePath.Contains("position/show", StringComparison.Ordinal) ? Directory() :
+                    req.RequestUri.AbsolutePath.EndsWith("/list", StringComparison.Ordinal)
+                        ? Json(J(new { code = 200, artists = new[] { row }, more = false }))
+                        : Json(J(new { code = 200, artist = row, hotSongs = Array.Empty<object>() })));
+                var expected = square.Length == 0 ? "https://images.invalid/portrait.jpg" :
+                    "https://p1.music.126.net/avatar/109951100000001.jpg";
+                var channel = await f.Catalog.ChannelAsync(new("wy", "artist"));
+                Equal(expected, channel.GetProperty("sections")[0].GetProperty("items")[0].GetProperty("cover").GetString());
+                Equal(expected, (await f.Catalog.ArtistAsync(new("wy", "30"))).GetProperty("cover").GetString());
+            }
+        });
+        yield return Case("wy home and search use later real display fields when optional image and title fields are empty", async () =>
+        {
+            using var f = new Fixture(_ => Home(false, "1", J(new
+            {
+                resourceType = "playlist", resourceId = "500", name = "", title = "真实歌单",
+                cover = "", coverImg = "", picUrl = "https://images.invalid/real.jpg"
+            })));
+            var card = MusicCatalogDto.Read(await f.Catalog.HomeAsync(new("wy")), "wy", "home", "")
+                .SelectMany(section => section.Items).Single();
+            Equal("真实歌单", card.Title); Equal("https://images.invalid/real.jpg", card.Cover);
+
+            using var search = new Fixture(_ => Json(J(new { code = 200, result = new
+            {
+                playlistCount = 1,
+                playlists = new[] { new { id = "500", name = "", title = "真实歌单", picUrl = "", coverImgUrl = "https://images.invalid/real.jpg" } }
+            } })));
+            var item = (await search.Catalog.SearchAsync(new("wy", "x", Kind: MusicSearchKind.Playlists))).GetProperty("items")[0];
+            Equal("真实歌单", item.GetProperty("name").GetString());
+            Equal("https://images.invalid/real.jpg", item.GetProperty("cover").GetString());
+        });
+        yield return Case("wy song search and embedded playlist use real title and cover behind empty optional fields", async () =>
+        {
+            var raw = Wy("1"); raw["name"] = ""; raw["title"] = "真实歌曲";
+            raw["al"]!["picUrl"] = ""; raw["picUrl"] = ""; raw["coverUrl"] = "https://images.invalid/real.jpg";
+            using var search = new Fixture(_ => WySearch([raw], 1));
+            var song = (await search.Catalog.SearchAsync(new("wy", "x"))).GetProperty("items")[0];
+            Equal("真实歌曲", song.GetProperty("title").GetString());
+            Equal("https://images.invalid/real.jpg", song.GetProperty("cover_url").GetString());
+            using var playlist = new Fixture(req =>
+            {
+                True(req.RequestUri!.AbsolutePath.Contains("/playlist/", StringComparison.Ordinal));
+                return WyList(["1"], [raw]);
+            });
+            var member = (await playlist.Catalog.PlaylistAsync(new("wy", "500"))).GetProperty("items")[0];
+            Equal("真实歌曲", member.GetProperty("title").GetString());
+            Equal("https://images.invalid/real.jpg", member.GetProperty("cover_url").GetString());
+            Equal(1, playlist.Calls);
+        });
+        yield return Case("wy home consumes final fields in embedded provider JSON without executing templates", async () =>
+        {
+            using var f = new Fixture(_ => Json(J(new { code = 200, data = new { blocks = new[] {
+                new { positionCode = "PLAYLIST", dslData =
+                    """
+                    {"blockResource":{"header":{"title":"旧栏目","title":"推荐"},"items":[
+                      {"resourceType":"playlist","resourceId":"500","name":"旧歌单","name":"真实歌单",
+                       "cover":"https://images.invalid/real.jpg",
+                       "playBtnData":"{\"detailUrl\":\"orpheus://playlist/499\",\"detailUrl\":\"orpheus://playlist/500\"}"}
+                    ]}}
+                    """ }
+            } } })));
+            var section = MusicCatalogDto.Read(await f.Catalog.HomeAsync(new("wy")), "wy", "home", "").Single();
+            var card = section.Items.Single();
+            Equal("推荐", section.Title); Equal("真实歌单", card.Title);
+            Equal("500", card.ActionId); Equal("https://images.invalid/real.jpg", card.Cover);
+            Equal(1, f.Calls);
+        });
         yield return Case("artist continuation supports large offsets without truncation or integer overflow", async () =>
         {
             using var f = new Fixture(req => req.RequestUri!.AbsolutePath.Contains("position/show", StringComparison.Ordinal)
@@ -1139,6 +1269,155 @@ public static class MusicNativePlatformTests
             Equal(1, page.GetProperty("sections")[0].GetProperty("items").GetArrayLength());
             True(!page.GetProperty("more").GetBoolean());
         });
+        yield return Case("cube recommendation entries complete visible playlist summaries and preserve typed actions", async () =>
+        {
+            const string cover = "http://p1.music.126.net/synthetic/cube.jpg?imageView=1&thumbnail=800y800&enlarge=1%7CimageView%3D1&watermark=&type=1&image=fixture&dx=0&dy=0%7CimageView%3D1";
+            var recommendation = J(new { id = "recommend", componentName = "RecommendHorizontal", props = new
+            {
+                title = "电音旗舰", tab = "electronic", recommendModule = new[] {
+                    new { title = "默认", isDefaultTab = true, modules = new object[] {
+                        new { type = "fm", mode = "SCENE_RCMD", subMode = "ELECTRONIC", title = "电音漫游", fmLogoTextContent = "电音漫游" },
+                        new { type = "song_list", resource = 500, title = "栏目自己的标题", songCount = 7,
+                            creator = new { nickname = "原创建者" },
+                            rankItems = new[] { new { trackId = "1", songName = "已供预览", artistName = "合成艺人" } } },
+                        new { type = "song_list", resource = 501, title = "", cover = "http://p2.music.126.net/synthetic/inline.jpg" },
+                        new { type = "album", resource = 30, title = "专辑", cover = "https://images.invalid/album.jpg" },
+                        new { type = "song", resource = 1, resourceExtInfo = new { songData = Wy("1") } },
+                        new { type = "similarsong", title = "相似歌曲",
+                            action = "orpheus://nm/play/similarFM?sourceType=song&sourceId=%5B%221%22%5D" },
+                        new { type = "fm", mode = "UNKNOWN", title = "不支持的漫游" }
+                    } },
+                    new { title = "其他", isDefaultTab = false, modules = new object[] {
+                        new { type = "song_list", resource = 500, title = "同一歌单的另一入口" },
+                        new { type = "song_list", resource = 599, title = "未选择的歌单" }
+                    } }
+                }
+            } });
+            var grid = J(new { id = "grid", componentName = "Grid", children = new[] {
+                new { componentName = "Playlist", props = new { id = 700, title = "普通歌单", coverUrl = "https://images.invalid/grid.jpg" } }
+            } });
+            using var f = new Fixture(req =>
+            {
+                var path = req.RequestUri!.AbsolutePath;
+                if (path.Contains("position/show", StringComparison.Ordinal)) return Directory();
+                if (path.Contains("cube/render", StringComparison.Ordinal)) return CubePage(recommendation, grid);
+                Equal("/eapi/tag/tab/playlists", path);
+                Equal("500,501", S(Eapi(req).Body["ids"]));
+                return Json(J(new { code = 200, data = new[] {
+                    new { id = 501, name = "补齐的歌单名称", cover = "https://images.invalid/replacement.jpg", songCount = 44, userName = "合成创建者" },
+                    new { id = 500, name = "服务端歌单名称", cover, songCount = 100, userName = "另一创建者" }
+                } }));
+            }, Session("wy"));
+            var reply = await f.Catalog.ChannelAsync(new("wy", "rock"));
+            var sections = reply.GetProperty("sections");
+            Equal(2, sections.GetArrayLength());
+            Equal("entries", sections[0].GetProperty("type").GetString());
+            var items = sections[0].GetProperty("items").EnumerateArray().ToArray();
+            Equal("animated,preview,preview,preview,static,overlay,static",
+                string.Join(",", items.Select(item => item.GetProperty("presentation").GetString())));
+            Equal("fm,playlist,playlist,album,song,similar,unsupported",
+                string.Join(",", items.Select(item => item.GetProperty("action").GetProperty("type").GetString())));
+            Equal("SCENE_RCMD", items[0].GetProperty("action").GetProperty("mode").GetString());
+            Equal("ELECTRONIC", items[0].GetProperty("action").GetProperty("submode").GetString());
+            Equal("电音漫游", items[0].GetProperty("coverLabel").GetString());
+            Equal("栏目自己的标题", items[1].GetProperty("name").GetString());
+            Equal(cover.Replace("http://", "https://", StringComparison.Ordinal), items[1].GetProperty("cover").GetString());
+            Equal(7, items[1].GetProperty("count").GetInt32());
+            Equal("原创建者", items[1].GetProperty("creator").GetString());
+            Equal("已供预览", items[1].GetProperty("preview")[0].GetProperty("title").GetString());
+            Equal("补齐的歌单名称", items[2].GetProperty("name").GetString());
+            Equal("https://p2.music.126.net/synthetic/inline.jpg", items[2].GetProperty("cover").GetString());
+            Equal(44, items[2].GetProperty("count").GetInt32());
+            Equal("合成创建者", items[2].GetProperty("creator").GetString());
+            Equal(0, items[2].GetProperty("preview").GetArrayLength());
+            Song(items[4].GetProperty("song"), "wy", "1");
+            True(!items[6].GetProperty("available").GetBoolean());
+            var tabs = sections[0].GetProperty("tabs");
+            Equal("recommend:group:0", sections[0].GetProperty("selectedTab").GetString());
+            Equal(items[1].GetProperty("cover").GetString(), tabs[0].GetProperty("items")[1].GetProperty("cover").GetString());
+            Equal(items[1].GetProperty("key").GetString(), tabs[0].GetProperty("items")[1].GetProperty("key").GetString());
+            Equal(items[1].GetProperty("cover").GetString(), tabs[1].GetProperty("items")[0].GetProperty("cover").GetString());
+            True(items[1].GetProperty("key").GetString() != tabs[1].GetProperty("items")[0].GetProperty("key").GetString());
+            Equal("同一歌单的另一入口", tabs[1].GetProperty("items")[0].GetProperty("name").GetString());
+            Equal("", tabs[1].GetProperty("items")[1].GetProperty("cover").GetString());
+            True(tabs.EnumerateArray().SelectMany(tab => tab.GetProperty("items").EnumerateArray())
+                .All(item => item.TryGetProperty("presentation", out _)));
+            Equal("playlists", sections[1].GetProperty("type").GetString());
+            True(!sections[1].GetProperty("items")[0].TryGetProperty("presentation", out _));
+            Equal(3, f.Calls);
+        });
+        yield return Case("cube supplied entry artwork and preview need no playlist metadata or members", async () =>
+        {
+            const string cover = "https://p1.music.126.net/synthetic/cube.jpg?imageView=1&watermark=&type=1&image=fixture";
+            using var f = new Fixture(req =>
+            {
+                if (req.RequestUri!.AbsolutePath.Contains("position/show", StringComparison.Ordinal)) return Directory();
+                Weapi(req, "/weapi/cube/render/page/protocol");
+                return CubePage(J(new { id = "recommend", componentName = "RecommendHorizontal", props = new {
+                    title = "官方栏目", recommendModule = new[] { new { modules = new[] {
+                        new { type = "song_list", resource = Huge, title = "现有歌单", cover,
+                            rankItems = new[] { new { trackId = "1", songName = "现有歌曲", artistName = "现有艺人" } } }
+                    } } }
+                } }));
+            });
+            var reply = await f.Catalog.ChannelAsync(new("wy", "rock"));
+            var card = MusicCatalogDto.Read(reply, "wy", "channel", "").Single().Items.Single();
+            Equal(MusicCatalogEntryPresentation.Preview, card.Presentation);
+            Equal(Huge, card.ActionId); Equal(cover, card.Cover);
+            True(card.HasPreview && card.CanRequestPreview);
+            Equal("现有歌曲", card.PreviewSongs.Single().Title);
+            Equal(2, f.Calls);
+        });
+        yield return Case("cube playlist summary batches do not truncate the visible collection", async () =>
+        {
+            var modules = Enumerable.Range(500, 101).Select(id => new { type = "song_list", resource = id, title = "入口 " + id }).ToArray();
+            var batches = new List<int>();
+            using var f = new Fixture(req =>
+            {
+                var path = req.RequestUri!.AbsolutePath;
+                if (path.Contains("position/show", StringComparison.Ordinal)) return Directory();
+                if (path.Contains("cube/render", StringComparison.Ordinal))
+                    return CubePage(J(new { id = "recommend", componentName = "RecommendHorizontal",
+                        props = new { title = "栏目", recommendModule = new[] { new { modules } } } }));
+                Equal("/eapi/tag/tab/playlists", path);
+                var ids = S(Eapi(req).Body["ids"]).Split(',');
+                batches.Add(ids.Length);
+                return Json(J(new { code = 200, data = ids.Select(id => new {
+                    id, name = "服务端 " + id, cover = "https://images.invalid/" + id + ".jpg", songCount = 1, userName = ""
+                }).ToArray() }));
+            });
+            var items = (await f.Catalog.ChannelAsync(new("wy", "rock"))).GetProperty("sections")[0].GetProperty("items");
+            Equal(101, items.GetArrayLength());
+            Equal("100,1", string.Join(",", batches));
+            Equal("600", items[100].GetProperty("action").GetProperty("id").GetString());
+            True(items.EnumerateArray().All(item => item.GetProperty("cover").GetString()!.Length > 0));
+            Equal(4, f.Calls);
+        });
+        foreach (var failure in new[] { "missing", "foreign", "duplicate", "upstream" })
+            yield return Case("cube playlist summary rejects " + failure + " results", async () =>
+            {
+                using var f = new Fixture(req =>
+                {
+                    var path = req.RequestUri!.AbsolutePath;
+                    if (path.Contains("position/show", StringComparison.Ordinal)) return Directory();
+                    if (path.Contains("cube/render", StringComparison.Ordinal))
+                        return CubePage(J(new { id = "recommend", componentName = "RecommendHorizontal", props = new {
+                            title = "栏目", recommendModule = new[] { new { modules = new[] {
+                                new { type = "song_list", resource = 500, title = "入口一" },
+                                new { type = "song_list", resource = 501, title = "入口二" }
+                            } } }
+                        } }));
+                    Equal("/eapi/tag/tab/playlists", path);
+                    var ids = failure switch { "missing" => Array.Empty<int>(), "foreign" => new[] { 500, 502 }, _ => new[] { 500, 500 } };
+                    return Json(J(new { code = failure == "upstream" ? 500 : 200, data = ids.Select(id => new {
+                        id, name = "歌单", cover = "https://images.invalid/list.jpg", songCount = 1, userName = ""
+                    }).ToArray() }));
+                });
+                await Error(failure switch {
+                    "missing" => "NOT_FOUND", "upstream" => "UPSTREAM_ERROR", _ => "IDENTITY_MISMATCH"
+                }, () => f.Catalog.ChannelAsync(new("wy", "rock")));
+                Equal(3, f.Calls);
+            });
         yield return Case("personal wy uid from native owner with paginated identity", async () =>
         {
             var page = 0;
@@ -1450,11 +1729,14 @@ public static class MusicNativePlatformTests
                 Content = new StreamContent(new System.IO.MemoryStream(Encoding.UTF8.GetBytes("{\"tooLong\":\"1234567890\"}"))) })));
             await Error("LIMIT", () => http.SendAsync("wy", new(HttpMethod.Get, "https://music.163.com/api/x"), default, maxResponseBytes: 8));
         });
-        foreach (var body in new[] { "{\"code\":200,\"code\":500}", "{\"code\":200,\"result\":null}", "not JSON" })
-            yield return Case("invalid raw response " + Array.IndexOf(new[] { "{\"code\":200,\"code\":500}", "{\"code\":200,\"result\":null}", "not JSON" }, body), async () =>
+        foreach (var (name, body, error) in new[] {
+            ("final-business-status", "{\"code\":200,\"code\":500}", "UPSTREAM_ERROR"),
+            ("missing-result", "{\"code\":200,\"result\":null}", "INVALID_RESPONSE"),
+            ("invalid-json", "not JSON", "INVALID_RESPONSE") })
+            yield return Case("raw response preserves final business or schema error " + name, async () =>
             {
                 using var f = new Fixture(_ => new(HttpStatusCode.OK) { Content = new StringContent(body) });
-                await Error("INVALID_RESPONSE", () => f.Catalog.SearchAsync(new("wy", "x")));
+                await Error(error, () => f.Catalog.SearchAsync(new("wy", "x")));
             });
         yield return Case("no secret signed artwork enters durable song metadata", async () =>
         {
@@ -1559,7 +1841,9 @@ public static class MusicNativePlatformTests
                 ("http://p1.music.126.net/synthetic/cover.jpg?imageView&type=webp&thumbnail=300y300",
                     "https://p1.music.126.net/synthetic/cover.jpg"),
                 ("http://p2.music.163.net/synthetic/cover.jpg?imageView=1&type=png",
-                    "https://p2.music.163.net/synthetic/cover.jpg")
+                    "https://p2.music.163.net/synthetic/cover.jpg"),
+                ("http://p3.music.126.net/synthetic/cover.png?param=200y200",
+                    "https://p3.music.126.net/synthetic/cover.png")
             })
             {
                 using var f = new Fixture(_ => Home(false, "1", J(new
@@ -2523,6 +2807,9 @@ public static class MusicNativePlatformTests
         new { code = "newsong", name = "新歌", url = "" }, new { code = "rock", name = "摇滚", url = "orpheus://rnpage?component=cube-renderer-rn&page=MUSIC_ROCK" } } } }));
     private static HttpResponseMessage Cube() => Json(J(new { code = 200, data = new { pageProtocol = new { title = "摇滚", pages = new[] {
         new { id = "root", componentName = "Root", props = new { songList = new { ruleId = "123", title = "推荐曲", pointId = new[] { new { id = "4" } } } } } } } } }));
+    private static HttpResponseMessage CubePage(params JsonObject[] pages) => Json(J(new {
+        code = 200, data = new { pageProtocol = new { title = "频道", pages } }
+    }));
     private static JsonObject RequestJson(HttpRequestMessage request) => (JsonObject)JsonNode.Parse(request.Content!.ReadAsStringAsync().GetAwaiter().GetResult())!;
     private static Dictionary<string, string> Query(Uri uri) => uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries).Select(p => p.Split('=', 2))
         .ToDictionary(p => Uri.UnescapeDataString(p[0]), p => Uri.UnescapeDataString(p[1].Replace("+", " ", StringComparison.Ordinal)));
@@ -2632,7 +2919,7 @@ public static class MusicNativePlatformTests
                 throw new InvalidOperationException("Isolated test data required");
             var path = Path.Combine(root, "vip-native-" + Guid.NewGuid().ToString("N"));
             System.IO.Directory.CreateDirectory(path);
-            var store = new VipApplicationStore(new DpapiDocumentStore(path, AppIdentity.NativeNamespaces));
+            var store = new VipApplicationStore(new LocalDocumentStore(path, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
             var fixture = new VipApplicationFixture(store, new());
             try
             {
@@ -2661,7 +2948,7 @@ public static class MusicNativePlatformTests
         }
     }
 
-    private sealed class VipApplicationStore(DpapiDocumentStore inner) : IProtectedDocumentStore
+    private sealed class VipApplicationStore(LocalDocumentStore inner) : IDocumentStore
     {
         private readonly object gate = new();
         private int accountReadsToFail;
@@ -2676,7 +2963,7 @@ public static class MusicNativePlatformTests
             }
         }
 
-        public Task<ProtectedDocument> ReadAsync(string documentNamespace,
+        public Task<DocumentSnapshot> ReadAsync(string documentNamespace,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -2685,8 +2972,8 @@ public static class MusicNativePlatformTests
                 if (documentNamespace == "music.accounts.v1" && accountReadsToFail > 0)
                 {
                     accountReadsToFail--;
-                    return Task.FromException<ProtectedDocument>(
-                        new ProtectedDocumentException(DocumentStoreError.Unavailable));
+                    return Task.FromException<DocumentSnapshot>(
+                        new DocumentStoreException(DocumentStoreError.Unavailable));
                 }
             }
             return inner.ReadAsync(documentNamespace, cancellationToken);

@@ -6,7 +6,7 @@
 
 原生 launcher 拥有单实例 CurrentUserOnly 管道服务器，并在 RPC 前核对 child PID。连接成功后才调用公共 `createAppRuntime` 被动装配方法表；装配本身不读取用户文件或账号、不选择或执行业务源。原生 `AppDataPaths.ScriptRuntime` 计算稳定数据目录，`NodeRuntime` 清空继承环境后通过 `MEOWFILM_SCRIPT_DATA_ROOT` 注入该绝对路径；Node 不自行推导或读取 `%LOCALAPPDATA%`。Cat 在 start、status、refresh、install、enable、invoke 或 management 请求首次需要运行状态时读取该目录并按需创建回环 listener。
 
-`runtime.describe(null)` 返回 protocol 1、wire 身份 `aggregate` 以及 `music@0.6.0`、`cat@0.1.0`、`source@0.1.0` 方法清单；消费者分别核对 `music.script.v2`、`cat.script.v1` 与 `source.runtime.v1`。三个 module 复用同一 script-host WorkerSession、worker 协议和 QuickJS 后端。CatNode 保留服务、direct Spider 和私有卷；source 的 CatVod 是独立 Spider 输入，不能替代 CatNode。官方账号、目录、曲库、歌词、缓存和播放由原生 owner 承担，无脚本操作时不启动 Node。
+`runtime.describe(null)` 返回 protocol 1、wire 身份 `aggregate` 以及 `music@0.7.0`、`cat@0.1.0`、`source@0.1.0` 方法清单；消费者分别核对 `music.script.v2`、`cat.script.v1` 与 `source.runtime.v1`。三个 module 复用同一 script-host WorkerSession、worker 协议和 QuickJS 后端。CatNode 保留服务、direct Spider 和私有卷；source 的 CatVod 是独立 Spider 输入，不能替代 CatNode。官方账号、目录、曲库、歌词、缓存和播放由原生 owner 承担，无脚本操作时不启动 Node。
 
 连接 EOF／error／close 与重复关闭汇聚到公共模块 disposal；装配失败释放已连接的 pipe，业务实例由公共 owner 回收。清理失败使用固定错误；CLI 启动失败只输出 `WINDOWS_RUNTIME_START_FAILED`，不记录 argv、来源、凭据或底层异常。不自动重启或重放失败操作。
 

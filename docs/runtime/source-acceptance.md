@@ -4,7 +4,7 @@
 
 | 入口 | 公共契约 | 运行路径 |
 | --- | --- | --- |
-| `--kind lx`（默认） | `music.script.v2`／`music@0.6.0` | main LX 运行器 |
+| `--kind lx`（默认） | `music.script.v2`／`music@0.7.0` | main LX 运行器 |
 | `--kind cat` | `cat.script.v1`／`cat@0.1.0` | main Cat Node、私有卷及服务能力 |
 | `--kind source` | `source.runtime.v1`／`source@0.1.0` | `scripts/accept-reader-sources.mjs`，Reader 规则与 portable CatVod Spider adapter |
 
@@ -87,7 +87,7 @@ node_modules/@meowfilm/script-host/src/index.js
 node_modules/@meowfilm/source-runtime/src/index.js
 ```
 
-本次保持 `music@0.6.0` 的 LX 512 KiB 与通用 1 MiB 物理帧边界；源码仍分片上传，不引入 `music@0.7.0` 的透明分片契约。
+LX 沿用 `music@0.7.0` 的透明分片：大控制参数与结果按 64 KiB 字节块传输，原生桥接 1 MiB 物理帧边界不变，见 [LX 传输契约](music-script-runtime.md#控制数据传输)。
 
 ## 报告与退出条件
 

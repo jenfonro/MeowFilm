@@ -4,7 +4,8 @@
 
 ## 唯一 owner 与数据身份
 
-- `MusicAccountOwner` 是 `music.accounts.v1` 的唯一原生 writer；底层使用当前 App 数据身份下的 `IProtectedDocumentStore`。
+- `MusicAccountOwner` 是 `music.accounts.v1` 的唯一原生 writer；底层使用当前 App 数据身份下的 `IDocumentStore`。
+- App 将该敏感命名空间配置为 DPAPI 加密，保留原命名空间、存储路径和密文格式；通用 API 中性命名不改变账号保护范围。
 - 活动账号和账号详情共享同一严格文档事务，不能由页面、平台 HTTP 或脚本直接写入。
 - 已发布 KG／QQ 旧设备条目仍严格读取并原样保留，只作为新客户端文档首次创建的迁移来源；不再由账号 writer 生成、更新或同步。
 - 缺失文档创建当前空结构。非当前 schema、未知键、未知字段、重复字段、非规范整数、错误指纹或损坏值使整份文档以 `CORRUPT_STORAGE` 失败。

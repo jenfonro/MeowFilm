@@ -746,7 +746,7 @@ public static class MusicQqFeedbackContextTests
             Root = root ?? TestWorkspace.DataPath("qq-context-fixtures", Guid.NewGuid().ToString("N"));
             TestWorkspace.ValidatePath(TestWorkspace.DataRoot, Root);
             Directory.CreateDirectory(Root);
-            Store = new(new DpapiDocumentStore(Root, [MusicAccountOwner.DocumentNamespace, MusicPlatformClientContextOwner.DocumentNamespace]));
+            Store = new(new LocalDocumentStore(Root, [MusicAccountOwner.DocumentNamespace, MusicPlatformClientContextOwner.DocumentNamespace], protectedNamespaces: [MusicAccountOwner.DocumentNamespace, MusicPlatformClientContextOwner.DocumentNamespace]));
             Handler = new(this); Http = MusicPlatformHttp.CreateWithHandler(Handler);
             Clients = new(Http, Store, importAccounts: true, clock: Clock);
             Owner = Clients.CreateAccountOwner(Store);
@@ -776,14 +776,14 @@ public static class MusicQqFeedbackContextTests
             finally { await Clients.DisposeAsync(); Http.Dispose(); await Store.DisposeAsync(); }
         }
     }
-    private sealed class TestStore(DpapiDocumentStore inner) : IProtectedDocumentStore
+    private sealed class TestStore(LocalDocumentStore inner) : IDocumentStore
     {
-        internal DpapiDocumentStore Inner => inner;
+        internal LocalDocumentStore Inner => inner;
         internal int Writes, Disposals, LoseAt;
         internal bool Conflict, LoseReceipt, Hold, FailRead;
         internal readonly TaskCompletionSource Arrived = Signal(), Release = Signal();
-        public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken token = default) =>
-            FailRead ? throw new ProtectedDocumentException(DocumentStoreError.Unavailable) : inner.ReadAsync(ns, token);
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) =>
+            FailRead ? throw new DocumentStoreException(DocumentStoreError.Unavailable) : inner.ReadAsync(ns, token);
         public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected, CancellationToken token = default)
         {
             Interlocked.Increment(ref Writes);
@@ -810,7 +810,7 @@ public static class MusicQqFeedbackContextTests
                 }
             }
             var receipt = await inner.WriteAsync(ns, bytes, expected, token);
-            if (LoseReceipt || LoseAt != 0 && Writes == LoseAt) throw new ProtectedDocumentException(DocumentStoreError.Storage);
+            if (LoseReceipt || LoseAt != 0 && Writes == LoseAt) throw new DocumentStoreException(DocumentStoreError.Storage);
             return receipt;
         }
         public async ValueTask DisposeAsync() { Disposals++; await inner.DisposeAsync(); }
