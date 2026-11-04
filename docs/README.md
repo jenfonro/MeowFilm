@@ -18,7 +18,7 @@
 
 - [架构与模块职责](ios/architecture.md)
 - [音乐能力](ios/music.md)
-- [加密文档存储](ios/storage.md)
+- [本地文档存储](ios/storage.md)
 - [构建、发布与安装](ios/release.md)
 
 ## Windows

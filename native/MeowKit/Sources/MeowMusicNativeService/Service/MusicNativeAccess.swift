@@ -3,7 +3,7 @@ import MeowMusicFeature
 
 /// Synchronous protection fence, separate from the service actor's queue.
 /// An already-entered atomic commit settles before revoke returns; a queued
-/// old grant cannot reopen the document after a lock-screen notification.
+/// old grant cannot reopen the document after revocation.
 final class MusicNativeAccess: @unchecked Sendable {
     private let lock = NSLock()
     private var available = false

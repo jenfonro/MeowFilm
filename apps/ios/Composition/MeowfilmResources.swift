@@ -8,13 +8,13 @@ import MeowMusicNativeService
 /// Filesystem preparation is off MainActor. No script engine, multi-domain
 /// registrations, download service or dormant domain store is constructed.
 struct MeowfilmResources: Sendable {
-    let root: URL
-    let musicDocument: MusicNativeEncryptedDocument
+    let musicDocument: MusicNativeLibraryDocument
     let musicAccounts: NativeMusicAccountService?
     let musicAccountGate: MusicAccountAccessGate?
     let musicAudioCache: NativeMusicAudioFileCache?
     let musicDisplayCache: MusicNativePlaybackDisplayCache
-    let musicSourceDiscoveryCache: MusicNativeEncryptedSourceDiscoveryCache
+    let musicSourceDiscoveryCache: MusicNativePersistentSourceDiscoveryCache
+    let musicHomeSnapshot: MusicNativeHomeSnapshotDocument
     let musicPublicQQ: NativeMusicQQPublicService
     let musicClients: NativeMusicClientService
 
@@ -22,58 +22,61 @@ struct MeowfilmResources: Sendable {
         // A sideloading host may rewrite the installed bundle identifier while
         // signing. Product storage identities are stable and never signer-derived.
         try Task.checkCancellation()
-        root = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
-                                           appropriateFor: nil, create: true)
+        let root = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                               appropriateFor: nil, create: true)
             .appendingPathComponent("meowfilm", isDirectory: true)
-        let musicRoot = root.appendingPathComponent("encrypted-documents-v1", isDirectory: true)
-        let libraryKey = MeowfilmIdentity.bundleIdentifier + ".music.library.v1"
-        musicDocument = MusicNativeEncryptedDocument(storeFactory: {
-            try FileManager.default.createDirectory(at: musicRoot, withIntermediateDirectories: true)
-            let provider = try KeychainEncryptedDocumentKeyProvider(service: libraryKey)
-            return try EncryptedDocumentStore(baseURL: musicRoot, namespace: "music.library.v1",
-                                              keyProvider: provider)
-        })
-        if let caches = try? FileManager.default.url(for: .cachesDirectory, in: .userDomainMask,
-                                                     appropriateFor: nil, create: true) {
+        let caches = try? FileManager.default.url(for: .cachesDirectory, in: .userDomainMask,
+                                                  appropriateFor: nil, create: true)
+        // Ordinary documents are plain JSON: the library is backed up, disposable
+        // caches live in Caches. Only sensitive device sessions stay encrypted.
+        let libraryRoot = root.appendingPathComponent("documents", isDirectory: true)
+        let cacheRoot = caches?.appendingPathComponent("meowfilm", isDirectory: true)
+            .appendingPathComponent("documents", isDirectory: true)
+        musicDocument = MusicNativeLibraryDocument(storeFactory: Self.documentFactory(
+            base: libraryRoot, namespace: MusicNativeLibraryDocument.namespace))
+        if let caches {
             musicAudioCache = NativeMusicAudioFileCache(rootURL: caches.resolvingSymlinksInPath()
                 .appendingPathComponent("meowfilm.music.audio-cache.v1", isDirectory: true))
         } else { musicAudioCache = nil }
-        let displayKey = MeowfilmIdentity.bundleIdentifier + "." + MusicNativePlaybackDisplayCache.namespace
-        musicDisplayCache = MusicNativePlaybackDisplayCache(storeFactory: {
-            try FileManager.default.createDirectory(at: musicRoot, withIntermediateDirectories: true)
-            let keys = try KeychainEncryptedDocumentKeyProvider(service: displayKey)
-            return try EncryptedDocumentStore(baseURL: musicRoot,
-                namespace: MusicNativePlaybackDisplayCache.namespace, keyProvider: keys,
-                limits: .init(maximumDocumentBytes: 16 * 1024 * 1024))
-        })
-        let discoveryKey = MeowfilmIdentity.bundleIdentifier + "." + MusicNativeEncryptedSourceDiscoveryCache.namespace
-        musicSourceDiscoveryCache = MusicNativeEncryptedSourceDiscoveryCache(storeFactory: {
-            try FileManager.default.createDirectory(at: musicRoot, withIntermediateDirectories: true)
-            let keys = try KeychainEncryptedDocumentKeyProvider(service: discoveryKey)
-            return try EncryptedDocumentStore(baseURL: musicRoot,
-                namespace: MusicNativeEncryptedSourceDiscoveryCache.namespace, keyProvider: keys,
-                limits: .init(maximumDocumentBytes: 4 * 1024 * 1024,
-                              maximumNamespaceBytes: 8 * 1024 * 1024))
-        })
-        let clientRoot = root
+        musicDisplayCache = MusicNativePlaybackDisplayCache(storeFactory: Self.documentFactory(
+            base: cacheRoot, namespace: MusicNativePlaybackDisplayCache.namespace,
+            maximumDocumentBytes: 16 * 1024 * 1024))
+        musicSourceDiscoveryCache = MusicNativePersistentSourceDiscoveryCache(storeFactory: Self.documentFactory(
+            base: cacheRoot, namespace: MusicNativePersistentSourceDiscoveryCache.namespace,
+            maximumDocumentBytes: 4 * 1024 * 1024))
+        musicHomeSnapshot = MusicNativeHomeSnapshotDocument(storeFactory: Self.documentFactory(
+            base: cacheRoot, namespace: MusicNativeHomeSnapshotDocument.namespace))
+        let protectedRoot = root.appendingPathComponent("encrypted-documents-v1", isDirectory: true)
         musicClients = NativeMusicClientService(storeFactory: { platform in
-            try Self.documentFactory(root: clientRoot, namespace: NativeMusicClientService.namespace(platform))()
+            try Self.protectedDocumentFactory(base: protectedRoot,
+                                              namespace: NativeMusicClientService.namespace(platform))()
         })
-        musicPublicQQ = NativeMusicQQPublicService(
-            storeFactory: Self.documentFactory(root: clientRoot, namespace: MusicQQPublicPersistenceDocument.namespace))
+        musicPublicQQ = NativeMusicQQPublicService(storeFactory: Self.protectedDocumentFactory(
+            base: protectedRoot, namespace: MusicQQPublicPersistenceDocument.namespace))
         musicAccountGate = try? MusicAccountAccessGate(
-            bundleIdentifier: MeowfilmIdentity.bundleIdentifier, cacheDocumentRoot: musicRoot,
+            bundleIdentifier: MeowfilmIdentity.bundleIdentifier,
+            urlCacheStore: try? Self.documentFactory(base: cacheRoot, namespace: "music.account-url-cache.v1")(),
             audioCache: musicAudioCache, displayCache: musicDisplayCache,
             clientContexts: musicClients, qqClient: musicPublicQQ
         )
         musicAccounts = musicAccountGate?.service
     }
 
-    func documentFactory(_ namespace: String) -> @Sendable () throws -> EncryptedDocumentStore {
-        Self.documentFactory(root: root, namespace: namespace)
+    /// Ordinary document namespace. A missing Caches directory is a store failure,
+    /// which each cache consumer treats as a miss.
+    private static func documentFactory(base: URL?, namespace: String,
+                                        maximumDocumentBytes: Int = 8 * 1024 * 1024)
+        -> @Sendable () throws -> DocumentStore {
+        return {
+            guard let base else { throw DocumentStoreError.storageFailure }
+            try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+            return try DocumentStore(baseURL: base, namespace: namespace, maximumDocumentBytes: maximumDocumentBytes)
+        }
     }
-    private static func documentFactory(root: URL, namespace: String) -> @Sendable () throws -> EncryptedDocumentStore {
-        let base = root.appendingPathComponent("encrypted-documents-v1", isDirectory: true)
+
+    /// Sensitive device-session namespace: encrypted with its own Keychain key.
+    private static func protectedDocumentFactory(base: URL, namespace: String)
+        -> @Sendable () throws -> EncryptedDocumentStore {
         let service = MeowfilmIdentity.bundleIdentifier + "." + namespace
         return {
             try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)

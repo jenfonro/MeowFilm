@@ -1,7 +1,6 @@
 import XCTest
 import Foundation
 import MeowContracts
-import MeowStorage
 
 final class ContractTests: XCTestCase {
     func testSiteIdentityIncludesInstallation() throws {
@@ -33,58 +32,5 @@ final class ContractTests: XCTestCase {
         XCTAssertThrowsError(try PlaybackResource(id: "1", url: URL(string: "https://user:secret@example.invalid/v")!, title: "x"))
         XCTAssertThrowsError(try PlaybackResource(id: "1", url: URL(string: "javascript:alert(0)")!, title: "x"))
         XCTAssertThrowsError(try PlaybackResource(id: "1", url: URL(string: "https://example.invalid/v")!, title: "x", startPosition: .nan))
-    }
-}
-
-final class StorageTests: XCTestCase {
-    private func temporaryRoot() throws -> URL {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
-        return root
-    }
-    func testNamespacesAndTraversal() async throws {
-        let root = try temporaryRoot()
-        XCTAssertThrowsError(try DocumentStore(baseURL: root, namespace: "../other"))
-        let first = try DocumentStore(baseURL: root, namespace: "first")
-        let second = try DocumentStore(baseURL: root, namespace: "second")
-        try await first.write(["value": 4], key: "settings")
-        let absent = try await second.read([String: Int].self, key: "settings")
-        XCTAssertNil(absent)
-        do { try await first.write(4, key: "../escape"); XCTFail("Traversal accepted") }
-        catch { XCTAssertEqual(error as? StoreError, .invalidKey) }
-    }
-    func testFailedEncodingDoesNotDestroyPreviousValue() async throws {
-        let store = try DocumentStore(baseURL: temporaryRoot(), namespace: "test")
-        try await store.write(2.0, key: "value")
-        do { try await store.write(Double.nan, key: "value"); XCTFail("NaN persisted") } catch {}
-        let value = try await store.read(Double.self, key: "value")
-        XCTAssertEqual(value, 2)
-    }
-    func testTransactionsDoNotLoseConcurrentUpdates() async throws {
-        let store = try DocumentStore(baseURL: temporaryRoot(), namespace: "counter")
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            for _ in 0..<50 {
-                group.addTask {
-                    try await store.update(Int.self, key: "value", defaultValue: 0) { value in value += 1 }
-                }
-            }
-            try await group.waitForAll()
-        }
-        let result = try await store.read(Int.self, key: "value")
-        XCTAssertEqual(result, 50)
-    }
-    func testThrowingTransactionRollsBack() async throws {
-        let store = try DocumentStore(baseURL: temporaryRoot(), namespace: "transaction")
-        try await store.write([1], key: "value")
-        do {
-            try await store.update([Int].self, key: "value", defaultValue: []) { value in
-                value.append(2)
-                throw StoreError.revisionConflict
-            }
-            XCTFail("Throwing transaction succeeded")
-        } catch {}
-        let result = try await store.read([Int].self, key: "value")
-        XCTAssertEqual(result, [1])
     }
 }

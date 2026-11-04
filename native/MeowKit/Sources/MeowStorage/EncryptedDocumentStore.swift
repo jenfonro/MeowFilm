@@ -23,7 +23,8 @@ public enum EncryptedDocumentStoreError: Error, Equatable, Sendable {
     case transactionFailed
 }
 
-/// Apple-only, complete-Data AES-256-GCM storage, not a subclass/fallback of DocumentStore.
+/// Apple-only AES-256-GCM storage for sensitive namespaces only, not a subclass/fallback of
+/// DocumentStore. Files use Data Protection until first user authentication.
 /// v1 envelope: "MEOWEDOC" | 0x01 | nonce(12) | ciphertext | tag(16).
 /// AAD: header | UInt16-BE(namespace UTF8 length) | namespace UTF8 |
 ///               UInt16-BE(document key UTF8 length) | document key UTF8.
@@ -164,7 +165,23 @@ public final class EncryptedDocumentStore: @unchecked Sendable {
         guard try checkDirectories(), let bytes = try envelope(at: destination) else { return nil }
         // Validate the format before consulting protected storage.
         try EncryptedDocumentFormat.validate(bytes)
-        return try decrypt(bytes, material: requiredKey(), key: key)
+        let plaintext = try decrypt(bytes, material: requiredKey(), key: key)
+        adoptProtection(destination)
+        return plaintext
+    }
+
+    /// Files and directories written by an earlier release carry a stricter class that is
+    /// unreadable while locked. A successful read proves access, so converge them to the
+    /// current class; a failure leaves the readable file unchanged for the next read.
+    private func adoptProtection(_ document: URL) {
+        #if os(iOS)
+        for (url, directory) in [(root, true), (document, false)] {
+            let saved = try? FileManager.default.attributesOfItem(atPath: url.path)[.protectionKey]
+            if NativeFileProtectionVerification.inspect(saved) == .rejected {
+                try? protect(url, directory: directory)
+            }
+        }
+        #endif
     }
 
     private func writeUnlocked(_ data: Data, key: String) throws {
@@ -220,7 +237,7 @@ public final class EncryptedDocumentStore: @unchecked Sendable {
         do {
             var options: Data.WritingOptions = [.withoutOverwriting]
             #if os(iOS)
-            options.insert(.completeFileProtection)
+            options.insert(.completeFileProtectionUntilFirstUserAuthentication)
             #endif
             // The only Data written to disk is the complete authenticated envelope.
             try sealed.write(to: staged, options: options)
@@ -396,7 +413,7 @@ public final class EncryptedDocumentStore: @unchecked Sendable {
         if try checkDirectories() == false {
             var attributes: [FileAttributeKey: Any] = [.posixPermissions: 0o700]
             #if os(iOS)
-            attributes[.protectionKey] = FileProtectionType.complete
+            attributes[.protectionKey] = FileProtectionType.completeUntilFirstUserAuthentication
             #endif
             do {
                 try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false,
@@ -411,7 +428,7 @@ public final class EncryptedDocumentStore: @unchecked Sendable {
         do {
             var attributes: [FileAttributeKey: Any] = [.posixPermissions: directory ? 0o700 : 0o600]
             #if os(iOS)
-            attributes[.protectionKey] = FileProtectionType.complete
+            attributes[.protectionKey] = FileProtectionType.completeUntilFirstUserAuthentication
             #endif
             try FileManager.default.setAttributes(attributes, ofItemAtPath: url.path)
             var target = url

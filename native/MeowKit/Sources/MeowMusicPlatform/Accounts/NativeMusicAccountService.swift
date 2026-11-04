@@ -275,7 +275,7 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicCredentialsIm
 
     public init(accounts: AccountSessionCoordinator, scopes: [MusicAccountPlatform: AccountIdentity],
                 transport: (any MusicAccountHTTPTransport)? = nil,
-                urlCacheStore: EncryptedDocumentStore? = nil,
+                urlCacheStore: DocumentStore? = nil,
                 cacheLifecycle: (@Sendable (MusicNativeCacheLifecycleEvent) async -> Void)? = nil,
                 clock: @escaping @Sendable () -> Date = { Date() },
                 clientContexts: NativeMusicClientService? = nil,
@@ -296,7 +296,7 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicCredentialsIm
     // Product construction still registers only the fixed native providers above.
     init(accounts: AccountSessionCoordinator, scopes: [MusicAccountPlatform: AccountIdentity],
          providers: [MusicAccountPlatform: any MusicAccountProvider],
-         urlCacheStore: EncryptedDocumentStore? = nil,
+         urlCacheStore: DocumentStore? = nil,
          cacheLifecycle: (@Sendable (MusicNativeCacheLifecycleEvent) async -> Void)? = nil,
          clock: @escaping @Sendable () -> Date = { Date() }) {
         self.accounts = accounts; self.scopes = scopes; self.providers = providers
@@ -442,7 +442,7 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicCredentialsIm
         if let oldToken { _ = try? await accounts.failLogin(oldToken, reason: .cancelled) }
         await drainCacheLifecycle()
         // A dispatched coordinator write can complete first; never claim that
-        // cancellation rolled it back. No business grant is issued while locked.
+        // cancellation rolled it back. No business grant is issued while access is unavailable.
         return .init(ok: true, available: value, generation: generation)
     }
     public func close() async -> MusicAccountCloseReport {

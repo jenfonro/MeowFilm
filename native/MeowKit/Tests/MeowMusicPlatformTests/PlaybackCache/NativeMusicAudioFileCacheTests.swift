@@ -496,7 +496,7 @@ final class NativeMusicAudioFileCacheTests: XCTestCase {
     }
 
     #if os(iOS) && !targetEnvironment(simulator)
-    func testDeviceCacheIndexDirectoryAndMediaAreCompleteUnlessOpen() async throws {
+    func testDeviceCacheIndexDirectoryAndMediaAreProtectedUntilFirstUserAuthentication() async throws {
         let f = try AudioCacheTestFixture()
         defer { f.cleanup() }
         let cache = f.cache()
@@ -506,7 +506,8 @@ final class NativeMusicAudioFileCacheTests: XCTestCase {
             let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
             XCTAssertGreaterThanOrEqual(fd, 0)
             if fd >= 0 {
-                XCTAssertEqual(fcntl(fd, F_GETPROTECTIONCLASS), NativeMusicAudioCacheProtection.completeUnlessOpen)
+                XCTAssertEqual(fcntl(fd, F_GETPROTECTIONCLASS),
+                               NativeMusicAudioCacheProtection.completeUntilFirstUserAuthentication)
                 Darwin.close(fd)
             }
         }
