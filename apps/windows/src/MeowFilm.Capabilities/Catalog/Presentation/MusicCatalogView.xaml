@@ -9,7 +9,6 @@
  <UserControl.Resources><ResourceDictionary>
   <ResourceDictionary.MergedDictionaries><ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/></ResourceDictionary.MergedDictionaries>
   <BooleanToVisibilityConverter x:Key="Visible"/>
-  <local:MusicCatalogPaletteConverter x:Key="Catalog.CoverFooterPalette" Role="CoverFooter"/>
   <SolidColorBrush x:Key="MeowFilm.Brush.Text" Color="#343845"/>
   <SolidColorBrush x:Key="MeowFilm.Brush.Muted" Color="#6C7280"/>
   <Style x:Key="Catalog.SectionTitle" TargetType="TextBlock" BasedOn="{StaticResource Capability.Text}">
@@ -175,10 +174,11 @@
    </Style.Triggers>
   </Style>
   <DataTemplate x:Key="Catalog.Entry">
-   <local:EntryCard Margin="0,0,16,0" OpenRequested="Entry_Open" PlayRequested="CardPlay_Click" PreviewRequested="Entry_Preview"/>
+   <local:EntryCard Margin="0,0,16,0" OpenRequested="Entry_Open" PlayRequested="CardPlay_Click" PreviewRequested="Entry_Preview"
+                    ToolTip="{Binding ErrorText}" ToolTipService.ShowOnDisabled="True"/>
   </DataTemplate>
   <DataTemplate x:Key="Catalog.PlaylistCard">
-   <Button x:Name="PlaylistHost" local:CardMotion.Enabled="True" Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.Flat}" Margin="0,0,16,0" IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}">
+   <Button x:Name="PlaylistHost" local:CardMotion.Enabled="True" Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.Flat}" Margin="0,0,16,0" IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}" ToolTip="{Binding ErrorText}" ToolTipService.ShowOnDisabled="True">
     <StackPanel>
      <Grid Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" Background="#E7EAF0" local:CardClip.Radius="8">
       <art:ArtworkImage Address="{Binding Cover}"/>
@@ -213,27 +213,6 @@
      </StackPanel>
     </Grid>
    </Button>
-  </DataTemplate>
-  <DataTemplate x:Key="Catalog.CoverCard">
-   <Grid x:Name="CoverHost" Margin="0,0,16,0" local:CardMotion.Enabled="True" ToolTip="{Binding ErrorText}" ToolTipService.ShowOnDisabled="True">
-    <Button Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.Flat}" IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}">
-     <StackPanel local:CardClip.Radius="8">
-      <Grid x:Name="CoverFrame" Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" Background="#E7EAF0">
-       <art:ArtworkImage x:Name="CardCover" Address="{Binding Cover}" AutomationProperties.Name="{Binding Title}"/>
-       <Border VerticalAlignment="Bottom" Padding="10,26,10,10"><Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#00000000"/><GradientStop Color="#A0000000" Offset="1"/></LinearGradientBrush></Border.Background>
-        <TextBlock Text="{Binding Title}" Foreground="White" FontSize="17" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" TextWrapping="Wrap" MaxHeight="48"/>
-       </Border>
-       <Button Click="CardPlay_Click" Style="{StaticResource Catalog.CoverPlay}" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=CoverHost}"/>
-      </Grid>
-       <Border Padding="10,6" Height="48" CornerRadius="0,0,8,8">
-        <Border.Background><MultiBinding Converter="{StaticResource Catalog.CoverFooterPalette}">
-         <Binding Path="RawPaletteBrush" ElementName="CardCover"/>
-        </MultiBinding></Border.Background>
-       <TextBlock Foreground="White" FontSize="12" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" MaxHeight="36"><TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Text" Value="{Binding Subtitle}"/><Style.Triggers><DataTrigger Binding="{Binding Subtitle}" Value=""><Setter Property="Text" Value="{Binding Title}"/></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock>
-      </Border>
-     </StackPanel>
-    </Button>
-   </Grid>
   </DataTemplate>
   <local:MusicChannelSelectionConverter x:Key="Catalog.ChannelSelected"/>
   <local:ColumnsConverter x:Key="Catalog.Columns"/>
@@ -341,10 +320,9 @@
    <DataTemplate x:Key="Catalog.Section.Shelf">
     <local:Shelf>
      <local:Shelf.Style><Style TargetType="local:Shelf">
-      <Setter Property="CardTemplate" Value="{StaticResource Catalog.CoverCard}"/>
+      <Setter Property="CardTemplate" Value="{StaticResource Catalog.PlaylistCard}"/>
       <Style.Triggers>
        <DataTrigger Binding="{Binding (local:MusicCatalogSurface.IsHome),RelativeSource={RelativeSource Self}}" Value="True">
-        <Setter Property="CardTemplate" Value="{StaticResource Catalog.PlaylistCard}"/>
         <Setter Property="MinimumCardWidth" Value="124"/>
        </DataTrigger>
        <DataTrigger Binding="{Binding IsRankingCoverSection}" Value="True">
