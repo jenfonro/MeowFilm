@@ -159,26 +159,27 @@ private enum SourceDiscoveryDocument {
     }
 }
 
-/// Encrypted implementation for the product. No credentials, audio URLs or handles
-/// are stored; every source row is reconstructed through MusicModel.cleanSource.
-public actor MusicNativeEncryptedSourceDiscoveryCache: MusicSourceDiscoveryCaching {
+/// Persistent implementation for the product, an ordinary cache document. No
+/// credentials, audio URLs or handles are stored; every source row is
+/// reconstructed through MusicModel.cleanSource.
+public actor MusicNativePersistentSourceDiscoveryCache: MusicSourceDiscoveryCaching {
     public static let namespace = "music.source-discovery.v1"
     private static let key = "records"
-    private let factory: @Sendable () throws -> EncryptedDocumentStore
+    private let factory: @Sendable () throws -> DocumentStore
     private let now: @Sendable () -> Date
     private let ttl: TimeInterval
     private let maximumBytes: Int
-    private var document: EncryptedDocumentStore?
+    private var document: DocumentStore?
     private var envelope: SourceDiscoveryEnvelope?
 
-    public init(storeFactory: @escaping @Sendable () throws -> EncryptedDocumentStore,
+    public init(storeFactory: @escaping @Sendable () throws -> DocumentStore,
                 clock: @escaping @Sendable () -> Date = { Date() },
                 ttl: TimeInterval = 30 * 24 * 60 * 60,
                 maximumBytes: Int = 4 * 1024 * 1024) {
         factory = storeFactory; now = clock; self.ttl = ttl; self.maximumBytes = maximumBytes
     }
 
-    private func store() throws -> EncryptedDocumentStore {
+    private func store() throws -> DocumentStore {
         if let document { return document }
         let value = try factory(); document = value; return value
     }
@@ -216,7 +217,7 @@ public actor MusicNativeEncryptedSourceDiscoveryCache: MusicSourceDiscoveryCachi
 }
 
 /// Test and default implementation. It applies the same validation, TTL and
-/// byte budget without touching the filesystem or Keychain.
+/// byte budget without touching the filesystem.
 public actor MusicNativeMemorySourceDiscoveryCache: MusicSourceDiscoveryCaching {
     private let now: @Sendable () -> Date
     private let ttl: TimeInterval

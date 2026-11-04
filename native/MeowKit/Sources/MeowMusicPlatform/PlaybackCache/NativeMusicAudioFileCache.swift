@@ -916,16 +916,19 @@ final class NativeMusicAudioCacheDirectory: @unchecked Sendable {
 
 /// iOS Data Protection is set and checked on owned descriptors, not via a
 /// path-based Foundation attribute setter that could follow a swapped symlink.
-/// Darwin's public F_{SET,GET}PROTECTIONCLASS uses class B (2) for
-/// NSFileProtectionCompleteUnlessOpen. macOS/Simulator are not device evidence.
+/// Darwin's public F_{SET,GET}PROTECTIONCLASS uses class C (3) for
+/// NSFileProtectionCompleteUntilFirstUserAuthentication, so cached audio opens
+/// while locked. An entry from an earlier release with class B (2) is converged
+/// once it is open. macOS/Simulator are not device evidence.
 /// Simulator can report successful SET yet return its fixed class C from GET.
 /// Only the physical-device branch enforces Data Protection; descriptor,
 /// ownership, permissions, no-follow and authorization checks apply everywhere.
 enum NativeMusicAudioCacheProtection {
-    static let completeUnlessOpen: Int32 = 2
+    static let completeUntilFirstUserAuthentication: Int32 = 3
+    private static let earlierCompleteUnlessOpen: Int32 = 2
     static func apply(to descriptor: Int32) throws {
         #if os(iOS) && !targetEnvironment(simulator)
-        if fcntl(descriptor, F_SETPROTECTIONCLASS, completeUnlessOpen) != 0 {
+        if fcntl(descriptor, F_SETPROTECTIONCLASS, completeUntilFirstUserAuthentication) != 0 {
             throw NativeMusicAudioCacheFailure.miss
         }
         try check(descriptor)
@@ -933,8 +936,12 @@ enum NativeMusicAudioCacheProtection {
     }
     static func check(_ descriptor: Int32) throws {
         #if os(iOS) && !targetEnvironment(simulator)
-        let actual = fcntl(descriptor, F_GETPROTECTIONCLASS)
-        guard actual == completeUnlessOpen else { throw NativeMusicAudioCacheFailure.miss }
+        var actual = fcntl(descriptor, F_GETPROTECTIONCLASS)
+        if actual == earlierCompleteUnlessOpen,
+           fcntl(descriptor, F_SETPROTECTIONCLASS, completeUntilFirstUserAuthentication) == 0 {
+            actual = fcntl(descriptor, F_GETPROTECTIONCLASS)
+        }
+        guard actual == completeUntilFirstUserAuthentication else { throw NativeMusicAudioCacheFailure.miss }
         #endif
     }
 }

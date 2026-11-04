@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import XCTest
 @testable import MeowAccounts
 
@@ -14,6 +15,25 @@ final class KeychainCredentialStoreTests: XCTestCase {
         XCTAssertEqual(Set(CredentialAccessibility.allCases), [
             .whenUnlockedThisDeviceOnly, .afterFirstUnlockThisDeviceOnly
         ])
+    }
+
+    func testStoredAccessibilityMustMatchExceptEarlierStricterItemsForBackgroundPolicy() {
+        let unlocked = kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String
+        let background = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String
+        XCTAssertEqual(KeychainAccessibilityAdmission.classify(
+            stored: background, configured: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly), .current)
+        XCTAssertEqual(KeychainAccessibilityAdmission.classify(
+            stored: unlocked, configured: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly), .adopt)
+        XCTAssertEqual(KeychainAccessibilityAdmission.classify(
+            stored: unlocked, configured: kSecAttrAccessibleWhenUnlockedThisDeviceOnly), .current)
+        XCTAssertEqual(KeychainAccessibilityAdmission.classify(
+            stored: background, configured: kSecAttrAccessibleWhenUnlockedThisDeviceOnly), .rejected)
+        for stored in [nil, kSecAttrAccessibleAfterFirstUnlock as String, "unknown"] {
+            XCTAssertEqual(KeychainAccessibilityAdmission.classify(
+                stored: stored, configured: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly), .rejected)
+            XCTAssertEqual(KeychainAccessibilityAdmission.classify(
+                stored: stored, configured: kSecAttrAccessibleWhenUnlockedThisDeviceOnly), .rejected)
+        }
     }
 
     func testInvalidConfigurationNeverCallsDriver() {

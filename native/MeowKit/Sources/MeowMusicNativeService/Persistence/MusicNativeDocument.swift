@@ -9,21 +9,21 @@ public protocol MusicNativeDocumentStoring: Sendable {
     func compareAndSwap(expected: Data?, replacement: Data) throws
 }
 
-/// The sole native writer for namespace music.library.v1. Construction is
-/// passive; the product's protected-data gate controls access.
-public final class MusicNativeEncryptedDocument: MusicNativeDocumentStoring, @unchecked Sendable {
+/// The sole native writer for namespace music.library.v1, an ordinary JSON
+/// document. Construction is passive; the service's access admission controls use.
+public final class MusicNativeLibraryDocument: MusicNativeDocumentStoring, @unchecked Sendable {
     public static let namespace = "music.library.v1"
     public static let key = "music.library.v1"
     private let lock = NSLock()
-    private var store: EncryptedDocumentStore?
-    private let storeFactory: (@Sendable () throws -> EncryptedDocumentStore)?
-    public init(store: EncryptedDocumentStore) { self.store = store; self.storeFactory = nil }
-    /// Passive construction: no directory, Keychain or document access until
-    /// the first read/CAS. A failed factory is retriable, never an empty library.
-    public init(storeFactory: @escaping @Sendable () throws -> EncryptedDocumentStore) {
+    private var store: DocumentStore?
+    private let storeFactory: (@Sendable () throws -> DocumentStore)?
+    public init(store: DocumentStore) { self.store = store; self.storeFactory = nil }
+    /// Passive construction: no directory or document access until the first
+    /// read/CAS. A failed factory is retriable, never an empty library.
+    public init(storeFactory: @escaping @Sendable () throws -> DocumentStore) {
         self.storeFactory = storeFactory
     }
-    private func storage() throws -> EncryptedDocumentStore {
+    private func storage() throws -> DocumentStore {
         lock.lock(); defer { lock.unlock() }
         if let store { return store }
         guard let storeFactory else { throw MusicServiceError.storageFailed }
@@ -32,32 +32,18 @@ public final class MusicNativeEncryptedDocument: MusicNativeDocumentStoring, @un
     }
     private static func failure(_ error: Error) -> MusicServiceError {
         if let e = error as? MusicServiceError { return e }
-        if let e = error as? EncryptedDocumentStoreError {
-            switch e {
-            case .keyProvider(.locked), .keyProvider(.accessDenied), .keyProvider(.unavailable): return .accessUnavailable
-            case .revisionConflict: return .storageConflict
-            case .invalidEnvelope, .unsupportedVersion, .authenticationFailed: return .corruptDocument
-            case .documentTooLarge, .namespaceFull: return .limit
-            default: return .storageFailed
-            }
+        switch error as? DocumentStoreError {
+        case .revisionConflict: return .storageConflict
+        case .documentTooLarge: return .limit
+        default: return .storageFailed
         }
-        return .storageFailed
     }
     public func read() throws -> Data? {
         do { return try storage().read(key: Self.key) }
         catch { throw Self.failure(error) }
     }
     public func compareAndSwap(expected: Data?, replacement: Data) throws {
-        // An empty encrypted JSON document is invalid, so it is an unambiguous
-        // missing-value sentinel within EncryptedDocumentStore.update's lock.
-        var conflict = false
-        do {
-            try storage().update(key: Self.key, defaultValue: Data()) { current in
-                guard current == (expected ?? Data()) else {
-                    conflict = true; throw MusicServiceError.storageConflict
-                }
-                current = replacement
-            }
-        } catch { throw conflict ? MusicServiceError.storageConflict : Self.failure(error) }
+        do { try storage().compareAndSwap(key: Self.key, expected: expected, replacement: replacement) }
+        catch { throw Self.failure(error) }
     }
 }
