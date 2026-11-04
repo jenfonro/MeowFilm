@@ -70,6 +70,7 @@ queue
 history
 lx-installations
 online-settings
+native-official-sources
 native-quality-policy
 native-lyric-display
 native-metadata-policy
@@ -101,6 +102,24 @@ playback-settings
 - 中断或并发的相同不可变分片写入可通过读回相同字节结算；冲突或损坏明确失败。未被 metadata 引用的内容不会被静默删除或当作安装实例。
 - 禁用或删除当前播放目标时，在同一文档 CAS 中把 `online-settings.target` 置空并推进其 revision。
 - 读取不写入文档；schema 3、内联源码和其他不符合当前格式的记录明确失败，不迁移、转换、删除或回退。
+
+## 官方音源设置当前格式
+
+`native-official-sources` 的当前格式为 schema 1：
+
+```json
+{
+  "schema": 1,
+  "revision": 0,
+  "enabled": ["wy", "tx", "kg"]
+}
+```
+
+- `enabled` 是 `wy`、`tx`、`kg` 的无重复子集；空数组表示三平台全部关闭。
+- 缺少该 area 时，`music.officialSources.settings.get` 返回上述 revision 0、三平台全开的缺省 `settings`，不为读取创建或写入文档。
+- `music.officialSources.settings.save` 必须携带 `ifRevision` 和 `enabled`；`ifRevision` 与当前 revision 不符时返回 `REVISION_CONFLICT`，成功保存只推进本设置的 revision。
+- 该设置独立于 `online-settings`、`native-quality-policy` 和 `native-metadata-policy`，不复用它们的启停字段或改写播放目标、音质、歌词／封面设置。
+- 持久化覆盖契约与测试归属见 `MusicOfficialSourcesPolicyTests.cs`，包括缺省读取、独立启停与全关、重启恢复及同职责未知 CAS 结算；测试执行结果另行记录。
 
 ## 曲库当前格式
 
@@ -190,6 +209,7 @@ music.history.recordPlayed
 
 ```text
 music.settings.get / save
+music.officialSources.settings.get / save
 music.quality.settings.get / save
 music.metadata.settings.get / save
 music.appearance.get / save
@@ -206,7 +226,7 @@ music.online.song
 
 - 所有持久写入在同一 owner gate 内对完整 envelope 执行 CAS。
 - CAS 准入后不把取消解释为回滚；丢失写入回执时保留内存候选并阻止后续写。
-- `appearance`、`metadata`、`quality`、`queue` 和搜索策略在各自写入回执不确定时，只允许对应的权威 current read 在 owner gate 内读取实际文档并核对该次 CAS 的 before/after 指纹；不重放业务命令。
+- `appearance`、`metadata`、`quality`、官方音源设置（`music.officialSources.settings.get`）、`queue` 和搜索策略在各自写入回执不确定时，只允许对应的权威 current read 在 owner gate 内读取实际文档并核对该次 CAS 的 before/after 指纹；该读取会结算同职责的未知 CAS 结果，不重放业务命令。官方音源设置的权威读取对应 `music.officialSources.settings.save`。
 - 其他职责以及跨职责命令继续由显式 `ReconcileAsync` 协调；recommendation 使用其 nonce reconcile。一个职责的 current read 不得替另一个职责结算未知写入。
 - 第三状态保持 `STORAGE_CONFLICT`，不提供“丢弃旧数据后继续”的回退入口。
 - `PrepareShutdownAsync` 封闭新业务并要求未知写已结算；取消关闭只恢复当前 owner，不重放写入。

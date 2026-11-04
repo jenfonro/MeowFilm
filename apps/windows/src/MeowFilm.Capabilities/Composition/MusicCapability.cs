@@ -18,6 +18,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
     private readonly IMusicApplication application;
     private readonly IMusicPlayback playback;
     private readonly IMusicDialogs dialogs;
+    private readonly MusicSourceNetworkDownload sourceNetworkDownload;
     private readonly GrantedMediaFiles files;
     private readonly PlaybackCache.MusicAudioFileCache? audioFileCache;
     private readonly PlaybackCache.MusicChorusCache persistentChorus;
@@ -54,10 +55,12 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
             dialogs) { }
 
     internal MusicCapability(IMusicApplication application, IProtectedDocumentStore store, IMusicPlayback playback,
-        PlaybackCache.MusicAudioFileCache? playbackCache, IMusicDialogs? dialogs = null)
+        PlaybackCache.MusicAudioFileCache? playbackCache, IMusicDialogs? dialogs = null,
+        MusicSourceNetworkDownload? sourceNetworkDownload = null)
     {
         this.application = application ?? throw new ArgumentNullException(nameof(application));
         this.playback = playback; this.dialogs = dialogs ?? new MusicDialogs();
+        this.sourceNetworkDownload = sourceNetworkDownload ?? new MusicSourceNetworkDownload();
         audioFileCache = playbackCache;
         persistentChorus = new(store);
         files = new(store, "music.files.v1", [".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma"]);
@@ -275,6 +278,10 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         MusicOperationException { Code: "REVISION_CONFLICT" or "STORAGE_CONFLICT" } => "数据已变更，请刷新",
         MusicOperationException { Code: "COMMIT_UNKNOWN" } => "保存结果未确认",
         MusicOperationException { Code: "LIMIT" } => "操作超过数量限制",
+        MusicOperationException { Code: "INVALID_SOURCE_URL" } => "请输入 HTTPS .js 音源地址",
+        MusicOperationException { Code: "SOURCE_DOWNLOAD_FAILED" } => "音源下载失败",
+        MusicOperationException { Code: "OFFICIAL_SOURCE_DISABLED" } => "该官方音源已停用",
+        MusicOperationException { Code: "OFFICIAL_SOURCES_CHANGED" } => "官方音源设置已变更，请重试",
         MusicOperationException { Code: "PENDING_WRITE" } => "保存未完成，请重试保存",
         MusicOperationException { Code: "TARGET_REQUIRED" or "TARGET_CHANGED" } => "未选择匹配的音源、平台或歌曲",
         MusicOperationException { Code: "DISABLED" } => "音源已停用",
@@ -936,6 +943,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         try { await DisposeAccountDetailsAsync(); } catch (Exception error) { failure ??= error; }
         try { await vipPage.DisposeAsync(); } catch (Exception error) { failure ??= error; }
         try { await application.AbortAsync(); } catch (Exception error) { failure ??= error; }
+        sourceNetworkDownload.Dispose();
         UnsubscribeSearch();
         UnsubscribeDiscovery();
         ReleaseRecommendations();
@@ -966,6 +974,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
             catch (Exception error) { failure ??= error; }
             try { await application.DisposeAsync(); }
             catch (Exception error) { failure ??= error; }
+            sourceNetworkDownload.Dispose();
             // The capability owns its application. Runtime, store and playback remain App-owned.
         }
         if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();

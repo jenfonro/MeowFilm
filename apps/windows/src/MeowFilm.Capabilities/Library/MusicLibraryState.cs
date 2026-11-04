@@ -7,7 +7,7 @@ public sealed partial class MusicLibraryOwner
     private static readonly string[] CurrentAreas =
     [
         "library", LibrarySyncArea, "queue", "history", "lx-installations", "online-settings",
-        QualityPolicyArea, LyricDisplayArea, MetadataPolicyArea, AppearanceArea, DeviceSettingsArea,
+        OfficialSourcesArea, QualityPolicyArea, LyricDisplayArea, MetadataPolicyArea, AppearanceArea, DeviceSettingsArea,
         SearchPolicyArea, SearchHistoryArea, LocalLyricsArea, "playback-settings"
     ];
 
@@ -96,6 +96,8 @@ public sealed partial class MusicLibraryOwner
                 if (settings["target"] is JsonObject target)
                     LJ.Require(installations.Contains(LJ.S(target["installationId"])), "CORRUPT_STORAGE");
             }
+            if (HasValue(doc, OfficialSourcesArea))
+                ValidateOfficialSources(LJ.Object(Value(doc, OfficialSourcesArea), "CORRUPT_STORAGE"));
             if (HasValue(doc, QualityPolicyArea)) ValidateQualityPolicy(LJ.Object(Value(doc, QualityPolicyArea), "CORRUPT_STORAGE"));
             if (HasValue(doc, LyricDisplayArea)) ValidateLyricDisplay(LJ.Object(Value(doc, LyricDisplayArea), "CORRUPT_STORAGE"));
             if (HasValue(doc, MetadataPolicyArea)) ValidateMetadataPolicy(LJ.Object(Value(doc, MetadataPolicyArea), "CORRUPT_STORAGE"));
