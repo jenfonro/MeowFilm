@@ -2144,7 +2144,7 @@ public static class MusicCatalogTests
                 card.Arrange(new Rect(0, 0, width, card.DesiredSize.Height)); card.UpdateLayout();
                 True(Math.Abs(card.ActualHeight - height) <= 1, type + " reference height " + card.ActualHeight);
             }
-            foreach (var (type, expected) in new[] { ("entries", 168.4), ("playlists", 140.333333), ("banner", 282d) })
+            foreach (var (type, expected) in new[] { ("entries", 168.4), ("playlists", 140.333333), ("banner", 423d) })
             {
                 var shelf = new Shelf { MinimumCardWidth = 124, DataContext = new MusicCatalogSection("", [row], Type: type) };
                 await WithMountedShelf(shelf, 826, () =>

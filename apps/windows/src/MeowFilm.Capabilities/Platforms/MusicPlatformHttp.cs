@@ -53,7 +53,9 @@ public sealed partial class MusicPlatformHttp : IDisposable
     public Task<MusicPlatformHttpResult> SendAsync(string platform, HttpRequestMessage request,
         CancellationToken cancellationToken, int maxResponseBytes = 4 * 1024 * 1024, TimeSpan? timeout = null)
         => SendCoreAsync(platform, request, cancellationToken, maxResponseBytes, timeout,
-            (bytes, response, _) => JsonResult(PJ.Parse(bytes), response));
+            (bytes, response, _) => JsonResult(platform == "wy" &&
+                request.RequestUri is { Host: "interfacepc.music.163.com", AbsolutePath: "/eapi/v6/playlist/detail" }
+                ? PlatformWyPlaylistResponse.Parse(bytes) : PJ.Parse(bytes), response));
     internal Task<MusicPlatformHttpResult> SendXeapiAsync(HttpRequestMessage request,
         CancellationToken token, int maximum, TimeSpan timeout)
         => SendCoreAsync("wy", request, token, maximum, timeout,
