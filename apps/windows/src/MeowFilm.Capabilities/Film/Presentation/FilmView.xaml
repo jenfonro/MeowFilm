@@ -182,6 +182,8 @@
      </ItemsControl>
     </Border>
     <Grid MinHeight="260">
+     <local:FilmLoadingCards IsGrid="True" Height="660"
+         Visibility="{Binding ActiveData.ShowSkeleton,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
      <ItemsControl x:Name="DataItems" ItemsSource="{Binding ActiveData.Items}"
                    AutomationProperties.Name="影片列表">
       <ItemsControl.Style><Style TargetType="ItemsControl">

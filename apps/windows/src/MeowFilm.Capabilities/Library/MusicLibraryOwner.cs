@@ -29,6 +29,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         LyricDisplay,
         Metadata,
         OnlineSettings,
+        OfficialSources,
         Quality,
         Queue,
         Recommendation,
@@ -83,6 +84,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             if (Value(candidate, "queue") is JsonObject q) RestoreRuntime(q, false);
             else if (force) RestoreRuntime(Queue(candidate), false);
             document = candidate; fingerprint = saved.Fingerprint;
+            if (pending is null && recommendationUnknown is null) RefreshOfficialSources(candidate);
         }
         finally { if (saved.Data is not null) CryptographicOperations.ZeroMemory(saved.Data); }
     }
@@ -93,6 +95,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         if (method.StartsWith("music.queue.", StringComparison.Ordinal)) return PendingOwner.Queue;
         if (method.StartsWith("music.history.", StringComparison.Ordinal)) return PendingOwner.History;
         if (method is "music.settings.save") return PendingOwner.OnlineSettings;
+        if (method is "music.officialSources.settings.save") return PendingOwner.OfficialSources;
         if (method is "music.quality.settings.save") return PendingOwner.Quality;
         if (method is "music.metadata.settings.save") return PendingOwner.Metadata;
         if (method is "music.appearance.save") return PendingOwner.Appearance;
@@ -108,6 +111,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         PendingOwner.Appearance => method == "music.appearance.get",
         PendingOwner.Metadata => method == "music.metadata.settings.get",
         PendingOwner.Quality => method == "music.quality.settings.get",
+        PendingOwner.OfficialSources => method == "music.officialSources.settings.get",
         PendingOwner.Queue => method == "music.queue.get",
         PendingOwner.SearchPolicy => method == "music.search.settings.get",
         _ => false
@@ -139,12 +143,14 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             var result = await store.WriteAsync(DocumentNamespace, bytes, fingerprint, CancellationToken.None).ConfigureAwait(false);
             LJ.Require(result == expected, "COMMIT_UNKNOWN");
             document = candidate; fingerprint = result;
+            if (owner == PendingOwner.OfficialSources) RefreshOfficialSources(candidate);
         }
         catch (Exception error)
         {
             string code = error is ProtectedDocumentException { Error: DocumentStoreError.Conflict } ? "STORAGE_CONFLICT" : "COMMIT_UNKNOWN";
             pending = new(candidate, fingerprint, expected, code, owner, recommendationStage);
             if (recommendationStage is not null) recommendationUnknown = pending;
+            InvalidateOfficialSources();
             throw new MusicLibraryException(code);
         }
         finally { CryptographicOperations.ZeroMemory(bytes); }
@@ -161,11 +167,14 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
                 LJ.Require(fingerprint == p.Before || fingerprint == p.After, "STORAGE_CONFLICT");
             SettleRecommendation(attempt);
             pending = null;
+            RefreshOfficialSources(document!);
         }
         catch
         {
             document = previous; fingerprint = previousFingerprint; queueVersion = previousVersion; shuffleHistory = previousHistory;
-            failedEntries.Clear(); failedEntries.UnionWith(failures); throw;
+            failedEntries.Clear(); failedEntries.UnionWith(failures);
+            InvalidateOfficialSources();
+            throw;
         }
     }
     public async Task ReconcileAsync(CancellationToken cancellationToken = default)
@@ -179,7 +188,11 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         bool entered = false, captured = false, success = false; long previousVersion = 0; List<string>? previousHistory = null; string[] previousFailures = [];
         try
         {
-            var p = LJ.Parameters(parameters, full ? 16 * 1024 * 1024 : 512 * 1024);
+            JsonObject p;
+            try { p = LJ.Parameters(parameters, full ? 16 * 1024 * 1024 : 512 * 1024); }
+            catch (MusicLibraryException error) when (error.Code == "CORRUPT_STORAGE" &&
+                (method is "music.officialSources.settings.get" or "music.officialSources.settings.save"))
+            { throw new MusicLibraryException("INVALID_REQUEST"); }
             await EnterAsync(token).ConfigureAwait(false); entered = true;
             recommendationStage = null;
             LJ.Require(!closed && !preparing, "CLOSED");
@@ -220,7 +233,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     public async Task PrepareShutdownAsync(CancellationToken cancellationToken = default)
     {
         await EnterAsync(cancellationToken).ConfigureAwait(false);
-        try { LJ.Require(!closed, "CLOSED"); LJ.Require(pending is null && recommendationUnknown is null, pending?.Code ?? "PENDING_WRITE"); preparing = true; ClearRecommendations(); }
+        try { LJ.Require(!closed, "CLOSED"); LJ.Require(pending is null && recommendationUnknown is null, pending?.Code ?? "PENDING_WRITE"); preparing = true; ClearRecommendations(); InvalidateOfficialSources(); }
         finally { gate.Release(); }
     }
     public async Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default)
@@ -231,7 +244,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     public async Task AbortAsync(CancellationToken cancellationToken = default)
     {
         await EnterAsync(cancellationToken).ConfigureAwait(false);
-        try { closed = true; ClearRecommendations(); } finally { gate.Release(); }
+        try { closed = true; ClearRecommendations(); InvalidateOfficialSources(); } finally { gate.Release(); }
     }
     public async ValueTask DisposeAsync()
     { if (closed) return; await PrepareShutdownAsync().ConfigureAwait(false); await AbortAsync().ConfigureAwait(false); }

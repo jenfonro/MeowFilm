@@ -358,14 +358,10 @@ internal sealed class NativeMusicScriptTestRuntime : IRuntimeClient, IAsyncDispo
         var session = Guid.NewGuid().ToString("D");
         var pipe = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
             PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
-        var bootstrap = new Uri(Path.Combine(root.FullName, "apps/windows/runtime/bootstrap.mjs")).AbsoluteUri;
-        var module = new Uri(Path.Combine(root.FullName, "apps/runtime/modules/music-script.mjs")).AbsoluteUri;
-        var code = $"import {{startWindowsAppRuntime}} from {JsonSerializer.Serialize(bootstrap)};\n" +
-            $"import {{createMusicScriptModule}} from {JsonSerializer.Serialize(module)};\n" +
-            "await startWindowsAppRuntime({product:'music',argv:process.argv.slice(1),assemble:({call})=>[createMusicScriptModule({call})]});";
+        var entry = Path.Combine(root.FullName, "apps/windows/tests/fixtures/music-script-runtime.mjs");
         var info = new ProcessStartInfo(node) { WorkingDirectory = root.FullName, UseShellExecute = false, CreateNoWindow = true,
             RedirectStandardOutput = true, RedirectStandardError = true };
-        foreach (var arg in new[] { "--input-type=module", "-e", code, "--", "--meow-pipe", pipeName, "--meow-session", session })
+        foreach (var arg in new[] { entry, "--meow-pipe", pipeName, "--meow-session", session })
             info.ArgumentList.Add(arg);
         Process? child = null;
         try

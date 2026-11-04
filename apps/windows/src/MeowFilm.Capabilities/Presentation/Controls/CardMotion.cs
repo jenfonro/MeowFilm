@@ -23,6 +23,7 @@ public static class CardMotion
         {
             element.MouseEnter += Mouse; element.MouseLeave += Mouse;
             element.IsKeyboardFocusWithinChanged += State; element.IsEnabledChanged += State;
+            element.IsVisibleChanged += State;
             element.Loaded += Loaded; element.Unloaded += Unloaded; element.DataContextChanged += Context;
             Update(element);
         }
@@ -30,6 +31,7 @@ public static class CardMotion
         {
             element.MouseEnter -= Mouse; element.MouseLeave -= Mouse;
             element.IsKeyboardFocusWithinChanged -= State; element.IsEnabledChanged -= State;
+            element.IsVisibleChanged -= State;
             element.Loaded -= Loaded; element.Unloaded -= Unloaded; element.DataContextChanged -= Context;
             Reset(element);
         }
@@ -41,9 +43,12 @@ public static class CardMotion
     private static void Context(object sender, DependencyPropertyChangedEventArgs _) { Reset((FrameworkElement)sender); Update((FrameworkElement)sender); }
     internal static void Reset(FrameworkElement element)
     { element.BeginAnimation(ProgressProperty, null); SetProgress(element, 0); }
-    private static void Update(FrameworkElement element) => Transition(element,
-        element.IsLoaded && element.IsEnabled && (element.IsMouseOver || element.IsKeyboardFocusWithin),
-        SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast);
+    private static void Update(FrameworkElement element)
+    {
+        if (!element.IsLoaded || !element.IsVisible) { Reset(element); return; }
+        Transition(element, element.IsEnabled && (element.IsMouseOver || element.IsKeyboardFocusWithin),
+            SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast);
+    }
     internal static void Transition(FrameworkElement element, bool active, bool animate)
     {
         double from = GetProgress(element), to = active ? 1 : 0;

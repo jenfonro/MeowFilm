@@ -21,7 +21,7 @@ public static partial class DesktopTests
     {
         foreach (var test in VisualChromeCases()) yield return test;
         foreach (var test in PresentationCases()) yield return test;
-        yield return Case("unified sidebar keeps one current visual tree and back crosses content types", async () =>
+        yield return Case("unified sidebar retains visited visual trees and back crosses content types", async () =>
         {
             var a = new ProbeModule("music"); var b = new ProbeModule("film", hasPlayer: false);
             await using var f = new Fixture([a,b]); await f.LoadAsync();
@@ -52,7 +52,7 @@ public static partial class DesktopTests
             True(!LogicalDescendants(f.Element<Border>("WindowFrame")).OfType<ComboBox>()
                 .Any(box => AutomationProperties.GetName(box) == "设置类别"), "settings has no app/module switcher");
             Equal(Visibility.Visible, Host(a.SettingsView).Visibility, "current app settings visible");
-            True(LogicalTreeHelper.GetParent(a.View) is null, "main view is detached while settings is active");
+            Equal(Visibility.Collapsed, Host(a.View).Visibility, "main view is retained but hidden while settings is active");
             True(LogicalTreeHelper.GetParent(b.SettingsView) is null, "another owner cannot mount settings");
             Equal(0, b.InitializeCount + b.Calls.Count, "settings does not initialize another owner");
             Click(f.Back); await DrainAsync();
@@ -317,9 +317,9 @@ public static partial class DesktopTests
             Same(b.PlayerView, host.Content, "current player replaces host content");
             Same(host, Host(b.PlayerView!), "replacement uses same host");
             True(LogicalTreeHelper.GetParent(a.PlayerView!) is null, "old player is detached, not hidden in another host");
-            True(LogicalTreeHelper.GetParent(a.View) is null && LogicalTreeHelper.GetParent(aMainHost) is null,
-                "inactive capability visual tree is unmounted");
-            Equal(1, f.Element<Grid>("ContentDeck").Children.Count, "only the current capability surface is mounted");
+            Same(aMainHost, Host(a.View), "inactive capability retains its main host");
+            Equal(Visibility.Collapsed, Surface(a.View).Visibility, "inactive capability is hidden");
+            Equal(2, f.Element<Grid>("ContentDeck").Children.Count, "both visited capability surfaces remain mounted");
             Equal(1, LogicalDescendants(f.Element<Border>("WindowFrame")).OfType<ContentControl>().Count(x => x.Name == "PlayerHost"),
                 "only one player host exists");
             await f.SwitchAsync(a);
@@ -392,7 +392,7 @@ public static partial class DesktopTests
             var before = viewing.Calls.Count;
             Click(f.Element<Button>("SettingsButton")); await DrainAsync();
             Equal(Visibility.Visible, Host(viewing.SettingsView).Visibility, "current capability settings shown");
-            True(LogicalTreeHelper.GetParent(viewing.View) is null, "main view is detached, not retained as hidden chrome");
+            Equal(Visibility.Collapsed, Host(viewing.View).Visibility, "main view remains mounted and hidden behind settings");
             True(LogicalTreeHelper.GetParent(playing.SettingsView) is null, "other player's settings not selected");
             Equal(Visibility.Collapsed, f.Element<Border>("PlayerFrame").Visibility,
                 "settings hide the retained player");
@@ -417,7 +417,7 @@ public static partial class DesktopTests
             Click(f.Back); await UntilAsync(() => f.SelectedRoute == "two", "back to second route");
             Click(f.Back); await UntilAsync(() => f.SelectedRoute == "one", "back to initial route");
             False(f.Back.IsEnabled, "root has no earlier history");
-            Sequence(["route:one", "route:two", "route:three", "route:two", "route:one"], a.Calls, "history execution order");
+            Sequence(["route:one", "route:two", "route:three", "restore-route:two", "restore-route:one"], a.Calls, "history execution order");
             Equal(0, b.Calls.Count, "no fallback into hidden domain");
         });
         yield return Case("search trims input restores query history and ignores whitespace", async () =>
@@ -428,9 +428,33 @@ public static partial class DesktopTests
             await f.SearchAsync(" first "); await f.SearchAsync("second");
             True(f.SelectedRoute is null, "search is not a fake sidebar route");
             Click(f.Back); await UntilAsync(() => f.Search.Text == "first" && f.Status == "", "restore first query");
-            Equal("search:first", a.Calls[^1], "back replays search not route");
+            Equal("restore-search:first", a.Calls[^1], "back restores search without explicit submission");
             Click(f.Back); await UntilAsync(() => f.SelectedRoute == "one", "back to source route");
-            Sequence(["route:one", "search:first", "search:second", "search:first", "route:one"], a.Calls, "search history");
+            Sequence(["route:one", "search:first", "search:second", "restore-search:first", "restore-route:one"], a.Calls, "search history");
+        });
+        yield return Case("same query preserves distinct opaque owner locations through back", async () =>
+        {
+            var a = new ProbeModule("search-origin");
+            await using var f = new Fixture([a]); await f.LoadAsync();
+            const string local = "opaque/local-origin|alpha?source=one";
+            const string online = "opaque/online-origin|beta?source=two";
+            a.NextSearchLocation = local; await f.SearchAsync("same query");
+            a.NextSearchLocation = online; await f.SearchAsync("same query");
+            await f.NavigateAsync(a, "two");
+            var captures = a.CaptureCount;
+            Click(f.Back); await UntilAsync(() => a.CurrentLocation == online && f.Status == "", "restore online origin");
+            Equal("same query", f.Search.Text, "owner location is not displayed as the query");
+            True(f.SelectedRoute is null, "restored search retains IsSearch");
+            f.Search.Text = "unfinished draft";
+            Click(f.Back); await UntilAsync(() => a.CurrentLocation == local && f.Status == "", "restore local origin");
+            Equal("same query", f.Search.Text, "back retains original query draft semantics");
+            True(f.SelectedRoute is null, "local origin is still a search destination");
+            Sequence(["route:one", "search:same query", "search:same query", "route:two",
+                "restore-" + online, "restore-" + local], a.Calls,
+                "identical queries keep distinct history positions and never resubmit on back");
+            Equal(captures, a.CaptureCount, "back reuses the original location without recapturing");
+            Click(f.Back); await UntilAsync(() => f.SelectedRoute == "one" && f.Status == "", "restore original route");
+            False(f.Back.IsEnabled, "each opaque position contributes exactly one history entry");
         });
         yield return Case("global search owner survives searchless capability and ordinary public page", async () =>
         {
@@ -503,7 +527,7 @@ public static partial class DesktopTests
             Equal("route:two", a.Calls[^1], "subscribed source wins over sender");
             Equal(0, b.Calls.Count, "forged sender does not select other module");
             Click(f.Back); await UntilAsync(() => f.SelectedRoute == "one", "internal request contributed history");
-            Sequence(["route:one", "route:two", "route:one"], a.Calls, "same history path as sidebar");
+            Sequence(["route:one", "route:two", "restore-route:one"], a.Calls, "same history path as sidebar");
         });
         yield return Case("hidden module navigation events rejected without initialization", async () =>
         {
@@ -512,6 +536,56 @@ public static partial class DesktopTests
             b.Request("two", sender: a); await Task.Run(() => b.Request("three", sender: null)); await DrainAsync();
             Equal(0, b.InitializeCount, "hidden event cannot activate module"); Equal(0, b.Calls.Count, "hidden requests rejected");
             Equal("one", f.SelectedRoute, "current selection unchanged"); Equal(1, a.Calls.Count, "no redirection to current module");
+        });
+        yield return Case("visited hidden module rejects intents and back restores retained search without resubmission", async () =>
+        {
+            var a = new NavigationProbe("retained-search"); var b = new NavigationProbe("visible");
+            var unvisited = new NavigationProbe("unvisited");
+            await using var f = new Fixture([a, b, unvisited]); await f.LoadAsync();
+            await f.SearchAsync("retained-query");
+            var main = Host(a.View); var surface = Surface(a.View);
+            ((TextBox)a.View).Text = "retained content";
+            ((TextBox)a.View).Select(2, 5);
+            await f.SwitchAsync(b);
+            var before = a.Calls.Count;
+            a.Request("two"); await Task.Run(() => a.Request("three"));
+            a.NotifyAll(); unvisited.NotifyAll(); await DrainAsync();
+            Equal(before, a.Calls.Count, "hidden visited module receives no new request");
+            Same(b, f.SelectedOwner, "hidden intent does not change owner");
+            Same(main, Host(a.View), "hidden main retains parent");
+            Same(surface, Surface(a.View), "hidden surface retains identity");
+            Equal(Visibility.Collapsed, surface.Visibility, "hidden surface cannot receive input");
+            Equal(0, unvisited.InitializeCount + unvisited.Calls.Count, "unvisited owner has zero business calls");
+            True(LogicalTreeHelper.GetParent(unvisited.View) is null, "unvisited view is not mounted");
+            Equal(2, f.Element<Grid>("ContentDeck").Children.Count, "only visited surfaces are mounted");
+            Click(f.Back); await UntilAsync(() => a.Calls.Count == before + 1 && f.Status == "", "search restoration");
+            Sequence(["route:one", "search:retained-query", "restore-search:retained-query"], a.Calls,
+                "return restores a location without another initialization, navigation or search submission");
+            Equal(1, a.InitializeCount, "visited owner initializes once");
+            Same(main, Host(a.View), "restored main retains parent");
+            Same(surface, Surface(a.View), "restored surface retains identity");
+            Equal(Visibility.Visible, surface.Visibility, "restored surface visible");
+            Equal("retained content", ((TextBox)a.View).Text, "retained content");
+            Equal(2, ((TextBox)a.View).SelectionStart, "retained selection start");
+            Equal(5, ((TextBox)a.View).SelectionLength, "retained selection length");
+            Equal(2, f.Element<Grid>("ContentDeck").Children.Count, "history does not copy visual trees");
+        });
+        yield return Case("cancelled restore keeps history and retries through restore", async () =>
+        {
+            var a = new ProbeModule("restore-cancel");
+            await using var f = new Fixture([a]); await f.LoadAsync(); await f.NavigateAsync(a, "two");
+            using var pending = new HeldOperation(true);
+            a.RestoreHook = (_, token) => pending.RunAsync(token);
+            Click(f.Back); await pending.Started.Task;
+            Click(f.Button("取消当前操作")); await UntilAsync(() => a.ActiveCalls == 0, "restore cancellation unwinds");
+            True(pending.Token.IsCancellationRequested, "restore receives shell cancellation");
+            Equal("two", f.SelectedRoute, "cancelled restore cannot commit history");
+            True(f.Back.IsEnabled, "previous location remains available");
+            a.RestoreHook = null;
+            Click(f.Back); await UntilAsync(() => f.SelectedRoute == "one" && f.Status == "", "restore after cancellation");
+            Sequence(["route:one", "route:two", "restore-route:one", "restore-route:one"], a.Calls,
+                "cancelled and successful back both use restore");
+            Equal(1, a.MaximumConcurrentCalls, "restore shares the module operation gate");
         });
         yield return Case("queued internal event fenced after switching away and back", async () =>
         {
@@ -528,7 +602,7 @@ public static partial class DesktopTests
             var a = new NavigationProbe("settings-event-probe"); await using var f = new Fixture([a]); await f.LoadAsync();
             var player = Host(a.PlayerView!); Click(f.Element<Button>("SettingsButton")); await DrainAsync();
             a.Request("two"); await UntilAsync(() => f.SelectedRoute == "two", "request from settings");
-            True(LogicalTreeHelper.GetParent(a.SettingsView) is null, "settings left and detached");
+            Equal(Visibility.Collapsed, Host(a.SettingsView).Visibility, "settings left and hidden");
             Equal(Visibility.Visible, Host(a.View).Visibility, "main restored");
             Same(player, Host(a.PlayerView!), "no new player for internal navigation");
         });
@@ -545,8 +619,9 @@ public static partial class DesktopTests
             old.Release(); await UntilAsync(() => f.SelectedRoute == "two", "replacement completes");
             Equal(1, a.MaximumConcurrentCalls, "same module never overlaps");
             Equal("", f.Status, "old completion cannot overwrite success status");
+            Equal(2, a.CaptureCount, "cancelled late success cannot capture a navigation location");
             Click(f.Back); await UntilAsync(() => f.SelectedRoute == "one", "back skips cancelled route");
-            Sequence(["route:one", "route:slow", "route:two", "route:one"], a.Calls, "cancelled route not committed to history");
+            Sequence(["route:one", "route:slow", "route:two", "restore-route:one"], a.Calls, "cancelled route not committed to history");
         });
         yield return Case("old failure after domain switch cannot alter current status or selection", async () =>
         {
@@ -627,14 +702,14 @@ public static partial class DesktopTests
                 "one retained settings host belongs to the same surface");
             Click(f.Back); await DrainAsync(); await f.SearchAsync("retention-query"); await f.SwitchAsync(b); await f.SwitchAsync(a);
             Same(main, Host(a.View), "main host identity");
-            True(LogicalTreeHelper.GetParent(a.SettingsView) is null, "inactive settings visual is detached");
+            Same(settings, Host(a.SettingsView), "visited settings visual retains its host");
             Same(player, Host(a.PlayerView!), "player host identity"); Same(a.View, main.Content, "main instance");
             Click(f.Element<Button>("SettingsButton")); await DrainAsync();
             Same(settings, Host(a.SettingsView), "settings host identity");
             Same(a.SettingsView, settings.Content, "settings instance");
             Click(f.Back); await DrainAsync();
             Same(a.PlayerView!, player.Content, "player instance");
-            Equal(1, f.Element<Grid>("ContentDeck").Children.Count, "only the current capability surface remains mounted");
+            Equal(2, f.Element<Grid>("ContentDeck").Children.Count, "visited capability surfaces remain mounted");
             Equal(1, a.InitializeCount, "no reinitialize");
         });
         yield return Case("Ctrl F routed keyboard event selects search without native input", async () =>
@@ -1162,13 +1237,39 @@ public static partial class DesktopTests
         public Task NavigateAsync(string route, CancellationToken cancellationToken)
         {
             Calls.Add("route:" + route);
-            return ExecuteAsync(() => NavigateHook?.Invoke(route, cancellationToken) ?? Task.CompletedTask);
+            return ExecuteAsync(async () =>
+            {
+                await (NavigateHook?.Invoke(route, cancellationToken) ?? Task.CompletedTask);
+                CurrentLocation = "route:" + route;
+            });
         }
         public Task SearchAsync(string query, CancellationToken cancellationToken)
         {
             View.Dispatcher.VerifyAccess(); cancellationToken.ThrowIfCancellationRequested();
-            Calls.Add("search:" + query); return Task.CompletedTask;
+            Calls.Add("search:" + query);
+            CurrentLocation = NextSearchLocation ?? "search:" + query;
+            return Task.CompletedTask;
         }
+        public string? NextSearchLocation { get; set; }
+        public string CurrentLocation { get; private set; } = "initial";
+        public int CaptureCount { get; private set; }
+        public string CaptureNavigationLocation()
+        {
+            View.Dispatcher.VerifyAccess(); CaptureCount++;
+            return CurrentLocation;
+        }
+        public Task RestoreNavigationAsync(string location, CancellationToken cancellationToken)
+        {
+            View.Dispatcher.VerifyAccess(); cancellationToken.ThrowIfCancellationRequested();
+            Calls.Add("restore-" + location);
+            return ExecuteAsync(async () =>
+            {
+                await (RestoreHook?.Invoke(location, cancellationToken) ?? Task.CompletedTask);
+                cancellationToken.ThrowIfCancellationRequested();
+                CurrentLocation = location;
+            });
+        }
+        public Func<string, CancellationToken, Task>? RestoreHook { get; set; }
         private async Task ExecuteAsync(Func<Task> action)
         {
             View.Dispatcher.VerifyAccess(); ActiveCalls++; MaximumConcurrentCalls = Math.Max(ActiveCalls, MaximumConcurrentCalls);

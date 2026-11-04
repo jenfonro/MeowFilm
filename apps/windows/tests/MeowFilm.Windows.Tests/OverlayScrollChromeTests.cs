@@ -162,7 +162,7 @@ public static class OverlayScrollChromeTests
             f.Wheel(f.Scroll, 0); await DrainAsync();
             Equal(0d, f.Bar.Opacity, "zero-delta input remains hidden");
         });
-        yield return Case("nested scrolling and an unrelated captured thumb cannot activate the enclosing viewer", async () =>
+        yield return Case("nested scrolling and unrelated drag event lifecycle cannot activate the enclosing viewer", async () =>
         {
             using var f = new Fixture();
             var inner = new ScrollViewer
@@ -181,34 +181,41 @@ public static class OverlayScrollChromeTests
             True(inner.VerticalOffset > 0 && OverlayScrollChrome.GetActive(inner), "nested viewer owns its real scroll");
             Equal(0d, f.Scroll.VerticalOffset, "nested wheel is consumed by its owner");
             False(OverlayScrollChrome.GetActive(f.Scroll), "bubbled nested changes cannot activate the enclosing chrome");
-            True(Mouse.Capture(unrelated), "unrelated content thumb captures the pointer");
+            var captured = Mouse.Captured;
+            NotifyCapture(unrelated, Mouse.GotMouseCaptureEvent);
             try
             {
                 f.Scroll.ScrollToVerticalOffset(120); await DrainAsync();
                 True(f.Scroll.VerticalOffset > 0, "enclosing offset really changes");
                 False(OverlayScrollChrome.GetActive(f.Scroll), "another thumb does not grant scrollbar intent");
-                Equal(0d, f.Bar.Opacity, "unrelated capture stays hidden");
+                Equal(0d, f.Bar.Opacity, "unrelated drag notification stays hidden");
             }
-            finally { unrelated.ReleaseMouseCapture(); }
+            finally { NotifyCapture(unrelated, Mouse.LostMouseCaptureEvent); }
+            True(ReferenceEquals(captured, Mouse.Captured), "unrelated drag notifications leave OS capture unchanged");
         });
-        yield return Case("owned thumb capture survives idle and release starts a fresh idle interval", async () =>
+        yield return Case("owned drag event lifecycle survives idle and loss starts a fresh idle interval", async () =>
         {
             using var f = new Fixture(); await DrainAsync();
             f.Wheel(f.Scroll, -120); await DrainAsync();
-            True(Mouse.Capture(f.Thumb), "actual scrollbar thumb captures the pointer");
+            var captured = Mouse.Captured;
+            NotifyCapture(f.Thumb, Mouse.GotMouseCaptureEvent);
+            SetState(f.Bar, UIElement.IsMouseCaptureWithinProperty, true);
             await Task.Delay(1100); await DrainAsync();
-            True(OverlayScrollChrome.GetActive(f.Scroll), "capture holds chrome beyond the idle deadline");
+            True(OverlayScrollChrome.GetActive(f.Scroll), "owned drag notification holds chrome beyond the idle deadline");
             Equal(1d, f.Bar.Opacity, "dragging stays fully visible");
             False(f.Bar.HasAnimatedProperties, "dragging does not leave a hide animation running");
             var offset = f.Scroll.VerticalOffset;
             f.Thumb.RaiseEvent(new DragDeltaEventArgs(0, 30) { RoutedEvent = Thumb.DragDeltaEvent });
             await DrainAsync();
             True(f.Scroll.VerticalOffset > offset, "real scrollbar DragDelta continues to scroll");
-            f.Thumb.ReleaseMouseCapture(); await DrainAsync();
+            NotifyCapture(f.Thumb, Mouse.LostMouseCaptureEvent);
+            SetState(f.Bar, UIElement.IsMouseCaptureWithinProperty, false);
+            await DrainAsync();
             await Task.Delay(550); await DrainAsync();
-            True(OverlayScrollChrome.GetActive(f.Scroll), "release starts a fresh idle interval");
+            True(OverlayScrollChrome.GetActive(f.Scroll), "loss notification starts a fresh idle interval");
             await UntilAsync(() => !OverlayScrollChrome.GetActive(f.Scroll) && f.Bar.Opacity == 0 &&
-                !f.Bar.HasAnimatedProperties, "released drag fades out");
+                !f.Bar.HasAnimatedProperties, "ended drag event lifecycle fades out");
+            True(ReferenceEquals(captured, Mouse.Captured), "owned drag notifications leave OS capture unchanged");
         });
         yield return Case("unload and disable retire input, timers and clocks, while remount restores only subscriptions", async () =>
         {
@@ -243,17 +250,29 @@ public static class OverlayScrollChromeTests
             await UntilAsync(() => !OverlayScrollChrome.GetActive(f.Scroll) && f.Bar.Opacity == 0 &&
                 !f.Bar.HasAnimatedProperties, "reenabled behavior settles once");
         });
-        yield return Case("unloading an owned drag releases its pointer capture", async () =>
+        yield return Case("owned drag event lifecycle retires on unmount and does not revive on remount", async () =>
         {
             using var f = new Fixture(); await DrainAsync();
             f.Wheel(f.Scroll, -120); await DrainAsync();
-            True(Mouse.Capture(f.Thumb), "owned thumb captures before unload");
+            var captured = Mouse.Captured;
+            NotifyCapture(f.Thumb, Mouse.GotMouseCaptureEvent);
+            True(OverlayScrollChrome.GetActive(f.Scroll), "owned drag event activates before unmount");
             f.Root.Children.Remove(f.Scroll); await DrainAsync();
-            False(ReferenceEquals(Mouse.Captured, f.Thumb), "unload releases only the owned capture");
+            True(ReferenceEquals(captured, Mouse.Captured), "unmount does not change OS capture");
             False(OverlayScrollChrome.GetActive(f.Scroll), "unload retires the drag");
             False(f.Bar.HasAnimatedProperties, "unload owns no fade clock");
             f.Root.Children.Add(f.Scroll); f.Layout(); await DrainAsync();
+            True(f.Scroll.IsLoaded, "same viewer really remounts");
             Equal(0d, f.Bar.Opacity, "old drag does not survive remount");
+            NotifyCapture(f.Thumb, Mouse.LostMouseCaptureEvent);
+            await Task.Delay(1100); await DrainAsync();
+            False(OverlayScrollChrome.GetActive(f.Scroll), "late loss cannot revive retired activity or timer");
+            False(f.Bar.HasAnimatedProperties, "remount retains no retired drag clock");
+            f.Wheel(f.Scroll, -120); await DrainAsync();
+            True(OverlayScrollChrome.GetActive(f.Scroll), "remount restores actual scrolling intent");
+            await UntilAsync(() => !OverlayScrollChrome.GetActive(f.Scroll) && f.Bar.Opacity == 0 &&
+                !f.Bar.HasAnimatedProperties, "fresh scrolling settles after drag retirement");
+            True(ReferenceEquals(captured, Mouse.Captured), "remount and scrolling leave OS capture unchanged");
         });
         yield return Case("high contrast remains visible and immediately cancels an ordinary fade", async () =>
         {
@@ -298,10 +317,10 @@ public static class OverlayScrollChromeTests
                 Style = (Style)Root.FindResource("MeowFilm.OverlayScrollViewer")
             };
             Root.Children.Add(Scroll);
-            // Offscreen HWND drives actual WPF layout, animation clocks and capture; no OS input is injected.
+            // Nonactivating offscreen HWND drives real WPF loading, layout and clocks; input uses routed APIs.
             source = new HwndSource(new HwndSourceParameters("overlay-scroll-code-fixture")
             {
-                WindowStyle = unchecked((int)0x90000000), ExtendedWindowStyle = 0x08000080,
+                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
                 PositionX = -32000, PositionY = -32000, Width = 320, Height = 240
             });
             source.RootVisual = Root; Layout();
@@ -345,6 +364,12 @@ public static class OverlayScrollChromeTests
     private sealed class KeyboardProbe() : KeyboardDevice(InputManager.Current)
     {
         protected override KeyStates GetKeyStatesFromSystem(Key key) => KeyStates.None;
+    }
+    private static void NotifyCapture(Thumb thumb, RoutedEvent routedEvent)
+    {
+        var captured = Mouse.Captured;
+        thumb.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0) { RoutedEvent = routedEvent });
+        True(ReferenceEquals(captured, Mouse.Captured), "capture adapter notification cannot change OS capture");
     }
     private static void SetState(UIElement element, DependencyProperty property, bool value)
     {

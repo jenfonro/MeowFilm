@@ -41,7 +41,10 @@ public static partial class MusicUiTests
             Equal(Visibility.Collapsed, scroll.Visibility); Equal(Visibility.Visible, ((MusicSourcesSettingsView)view.FindName("SourcesPage")).Visibility);
             anchors[0].IsChecked = true; Render(view, 1200, 760); await Drain();
             Equal(Visibility.Visible, scroll.Visibility); Equal(Visibility.Collapsed, ((MusicSourcesSettingsView)view.FindName("SourcesPage")).Visibility);
-            Equal(calls, f.Calls.Log.Count); True(!f.Runtime.HasStarted, "reference navigation never starts script execution");
+            True(f.Calls.Log.Skip(calls).All(call => call.Method is "music.officialSources.settings.get" or
+                "music.quality.settings.get" or "music.sources.list"),
+                "source navigation reads its native settings and installations without writing");
+            True(!f.Runtime.HasStarted, "reference navigation never starts script execution");
         });
         yield return Case("replica priority lists preserve 52 pixel rows unnumbered 36 pixel grips and paired panels", async () =>
         {
@@ -195,6 +198,7 @@ public static partial class MusicUiTests
         yield return Case("replica settings remain within shell content and retain the hidden global player", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
+            await InstallSettingsSources(f, 6);
             var shell = new ShellWindow([f.Module], () => Task.CompletedTask)
             {
                 Width = 1440, Height = 900, Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false
@@ -282,6 +286,7 @@ public static partial class MusicUiTests
         yield return Case("replica search advanced bubble saves each kind and only source management keeps wheel input", async () =>
         {
             await using var f = await Fixture.Create(); await f.Module.ActivateSettingsAsync();
+            await InstallSettingsSources(f, 6);
             var view = (MusicSettingsView)f.Module.SettingsView; using var mount = new ReplicaMount(view); mount.Window.Height = 560;
             await Drain(); await Until(() => !f.Module.Busy); view.UpdateLayout();
             True(!Visuals(view).OfType<ComboBox>().Any(box => AutomationProperties.GetName(box).Contains("搜索模式")),

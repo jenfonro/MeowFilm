@@ -24,10 +24,11 @@ public partial class EntryCard : UserControl
         MouseEnter += (_, _) => RequestPreview(); MouseLeave += (_, _) => { if (!IsKeyboardFocusWithin) Cancel(); };
         IsKeyboardFocusWithinChanged += (_, _) => { if (IsKeyboardFocusWithin) RequestPreview(); else if (!IsMouseOver) Cancel(); };
         Unloaded += (_, _) => Cancel();
+        IsVisibleChanged += (_, _) => { if (!IsVisible) Cancel(); };
     }
     private void RequestPreview()
     {
-        if (request is not null || PreviewTitles.Count > 0 || !IsEnabled ||
+        if (request is not null || PreviewTitles.Count > 0 || !IsLoaded || !IsVisible || !IsEnabled ||
             DataContext is not MusicCatalogCard { CanRequestPreview: true }) return;
         request = new(); RaiseEvent(new RoutedEventArgs(PreviewRequestedEvent, this));
     }
