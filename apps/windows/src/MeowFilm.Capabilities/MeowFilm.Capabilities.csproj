@@ -5,6 +5,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Resource Include="Accounts/Presentation/Assets/*.png" />
+    <Resource Include="Film/Presentation/Assets/*.jpg" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Net.Codecrete.QrCodeGenerator" Version="[3.2.1]" />
