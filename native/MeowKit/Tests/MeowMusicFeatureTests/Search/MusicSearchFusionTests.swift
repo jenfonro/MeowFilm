@@ -90,6 +90,9 @@ final class MusicSearchFusionTests: XCTestCase {
         XCTAssertEqual(Array(appended.prefix(displayed.count)).map(\.id), displayed.map(\.id))
         XCTAssertEqual(appended[position].matchedPlatforms, ["tx", "wy"])
         XCTAssertTrue(appended[position].variants.contains(tx))
+        XCTAssertEqual(appended[position].track, displayed[position].track)
+        XCTAssertNotEqual(appended[position], displayed[position], "来源变化也是歌曲行的内容变化")
+        XCTAssertEqual(MusicSearchFusion.appendSongs(displayed: appended, adding: []), appended)
     }
     func testLaterRoundDoesNotFoldIncompatibleRecordingIntoShownSongID() {
         let shown = track("wy", "a", title: "Song")
