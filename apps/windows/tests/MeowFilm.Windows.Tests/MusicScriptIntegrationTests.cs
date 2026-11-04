@@ -69,7 +69,7 @@ public static class MusicScriptIntegrationTests
                     ?? throw new InvalidOperationException("Packaged runtime root required.");
                 string node = Environment.GetEnvironmentVariable("MEOWFILM_TEST_NODE")
                     ?? throw new InvalidOperationException("Verified Node required.");
-                RuntimeModule[] modules = [new("music", "0.7.0"), new("cat", "0.1.0")];
+                RuntimeModule[] modules = [new("music", "0.7.0"), new("cat", "0.1.0"), new("source", "0.1.0")];
                 var capabilities = owner!.ScriptCapabilities.ToDictionary(pair => pair.Key,
                     pair => new Func<JsonElement, CancellationToken, Task<object?>>(async (input, cancellationToken) =>
                     {

@@ -10,9 +10,12 @@
 
 - [公共核心与平台边界](runtime/script-runtime.md)
 - [原始 LX 音源契约 music.script.v2](runtime/music-script-runtime.md)
-- [统一 Cat 脚本契约 cat.script.v1](runtime/cat-script-runtime.md)
+- [CatNode 脚本契约 cat.script.v1](runtime/cat-script-runtime.md)
+- [Reader 书源契约 source.runtime.v1](runtime/reader-source-runtime.md)
+- [source CatVod Spider 输入契约](runtime/cat-source-runtime.md)
+- [来源 capability ABI（共同契约唯一来源）](runtime/source-capability-abi.md)
 - [Runtime bridge](runtime/runtime-bridge.md)
-- [外部 LX/Cat 脚本动态验收](runtime/source-acceptance.md)
+- [外部 LX、CatNode 与 Reader／CatVod 来源动态验收](runtime/source-acceptance.md)
 
 ## iOS
 

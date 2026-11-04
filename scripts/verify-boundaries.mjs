@@ -2,8 +2,48 @@ import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
+import { parse } from 'acorn';
 import { windowsRoot } from './windows/working-paths.mjs';
 import { discoverWorkspaces } from './verify-dependency-lock.mjs';
+
+const portablePackage = '@meowfilm/source-runtime';
+const portableGlobals = new Set([
+  'Buffer', 'process', 'require', 'module', '__dirname', '__filename',
+  'Packages', 'Java', 'ActiveXObject', 'Deno', 'Bun',
+]);
+
+function portableReferences(text) {
+  let ast;
+  try { ast = parse(text, { ecmaVersion: 'latest', sourceType: 'module' }); }
+  catch { return []; }
+  const references = [];
+  function visit(node, parent) {
+    if (!node || typeof node !== 'object') return;
+    if (node.type === 'MemberExpression' && !node.computed &&
+        ['globalThis', 'global', 'window'].includes(node.object?.name) &&
+        portableGlobals.has(node.property?.name)) {
+      references.push(node.property.name);
+    } else if (node.type === 'Identifier' && portableGlobals.has(node.name)) {
+      const propertyKey = parent?.type === 'Property' && parent.key === node &&
+        !parent.computed && !parent.shorthand;
+      const memberKey = parent?.type === 'MemberExpression' && parent.property === node &&
+        !parent.computed;
+      const methodKey = ['MethodDefinition', 'PropertyDefinition'].includes(parent?.type) &&
+        parent.key === node && !parent.computed;
+      const label = ['LabeledStatement', 'BreakStatement', 'ContinueStatement'].includes(parent?.type) &&
+        parent.label === node;
+      if (!propertyKey && !memberKey && !methodKey && !label) references.push(node.name);
+    }
+    for (const [key, value] of Object.entries(node)) {
+      if (['start', 'end', 'loc', 'range'].includes(key)) continue;
+      if (Array.isArray(value)) {
+        for (const child of value) if (child?.type) visit(child, node);
+      } else if (value?.type) visit(value, node);
+    }
+  }
+  visit(ast, null);
+  return [...new Set(references)];
+}
 
 export function verifyBoundaries(root = windowsRoot) {
   const workspaces = discoverWorkspaces(root, JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')));
@@ -26,6 +66,9 @@ export function verifyBoundaries(root = windowsRoot) {
       const text = readFileSync(file, 'utf8');
       for (const match of text.matchAll(/(?:\bfrom\s*|\bimport\s*(?:\(\s*)?|\brequire\s*\()\s*['"]([^'"]+)['"]/g)) {
         const target = match[1];
+        if (manifest.name === portablePackage && target.startsWith('node:')) {
+          errors.push(`${relative(root, file)}: portable runtime imports Node builtin ${target}`);
+        }
         if (target.startsWith('.')) {
           const path = relative(base, resolve(dirname(file), target));
           if (path === '..' || path.startsWith('..' + sep) || isAbsolute(path))
@@ -36,10 +79,17 @@ export function verifyBoundaries(root = windowsRoot) {
             errors.push(`${relative(root, file)}: undeclared workspace dependency ${name}`);
         }
       }
+      if (manifest.name === portablePackage) {
+        for (const name of portableReferences(text)) {
+          errors.push(`${relative(root, file)}: portable runtime uses host global ${name}`);
+        }
+      }
     }
   }
   const shared = join(root, 'apps/runtime');
-  const sharedImports = new Set(['node:crypto', '@meowfilm/runtime-bridge', '@meowfilm/script-host']);
+  const sharedImports = new Set([
+    'node:crypto', '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
+  ]);
   if (existsSync(shared)) {
     if (lstatSync(shared).isSymbolicLink()) errors.push('apps/runtime: linked source');
     else for (const file of walk(shared).filter(path => /\.[cm]?js$/.test(path))) {
