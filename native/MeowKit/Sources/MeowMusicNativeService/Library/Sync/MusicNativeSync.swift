@@ -62,12 +62,11 @@ extension NativeMusicService: MusicLibrarySyncing {
             snapshot.collections.count <= 2000 &&
             Set(snapshot.collections.map(\.id)).count == snapshot.collections.count, .invalidResponse)
         try musicRequire(!selection.favorites || snapshot.collections.filter { $0.kind == .favorites }.count == 1, .invalidResponse)
-        var bytes = 0, total = 0
+        var bytes = 0
         for c in snapshot.collections {
             _ = try musicText(c.id, maximum: 128); _ = try musicText(c.name, maximum: 600)
             try musicRequire(selection.kinds.contains(c.kind) && !c.revision.isEmpty &&
-                c.members.count <= 20_000 && Set(c.members.map(\.occurrenceID)).count == c.members.count, .invalidResponse)
-            total += c.members.count
+                Set(c.members.map(\.occurrenceID)).count == c.members.count, .invalidResponse)
             for member in c.members {
                 bytes += member.track.count
                 _ = try musicText(member.occurrenceID, maximum: 128)
@@ -79,7 +78,7 @@ extension NativeMusicService: MusicLibrarySyncing {
                 }, .targetChanged)
             }
         }
-        try musicRequire(bytes <= 4 * 1024 * 1024 && total <= 20_000, .limit)
+        try musicRequire(bytes <= 4 * 1024 * 1024, .limit)
         return snapshot
     }
     func performLibrarySync(_ request: MusicLibrarySyncRequest, port: any MusicNativeLibrarySyncProviding) async throws -> MusicLibrarySyncState {

@@ -225,6 +225,7 @@ private struct RecoveryAccountFixture {
         captured = await f.provider.captured(); XCTAssertEqual(captured, calls)
 
         f.store.seed(try MusicUpdateProvider.credential("new-account", uid: "99"), for: f.identity)
+        _ = try await f.service.validate(platform: .netease)
         _ = try await f.selection()
         reads = f.store.counts().reads; calls = await f.provider.captured()
         await refuseBoth(f.service, current)

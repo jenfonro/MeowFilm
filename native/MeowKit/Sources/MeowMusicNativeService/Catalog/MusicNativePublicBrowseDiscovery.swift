@@ -236,8 +236,6 @@ enum MusicNativePublicBrowseParser {
             if MusicNativeHomePresentation.positiveID(.string(id)) == nil {
                 switch MusicNativeHomePresentation.songCollection(row, play: play) {
                 case .none: return nil
-                case .overLimit:
-                    return .init(id: index, title: name, subtitle: sub, artwork: cover, content: .unavailable)
                 case .ids(let ids):
                     let descriptor = MusicHomeAction.songCollection(ids: ids)
                     return .init(id: MusicNativeHomePresentation.actionID(descriptor, resourceID: row["resourceId"].string),

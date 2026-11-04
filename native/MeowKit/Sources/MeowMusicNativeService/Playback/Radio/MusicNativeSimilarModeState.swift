@@ -102,10 +102,10 @@ enum MusicNativeSimilarData {
             (UInt64(value).map { $0 <= 9_007_199_254_740_991 } ?? false)
     }
     static func nativeID(_ song: MJ) -> String? {
-        let sources = [MusicModel.sourceData(song)] + song["sources"].array.map { $0["source_data"] }
+        let sources = song["sources"].array.map { MusicModel.sourceData($0) }
         return sources.first(where: {
-            $0["source"].string == "wy" && id($0["musicId"].id.isEmpty ? $0["songmid"].id : $0["musicId"].id)
-        }).map { $0["musicId"].id.isEmpty ? $0["songmid"].id : $0["musicId"].id }
+            $0["source"].string == "wy" && id($0["songmid"].id)
+        }).map { $0["songmid"].id }
     }
     static func display(_ song: MJ) -> MusicSimilarModeSong {
         .init(title: MusicModel.firstText(song["title"], song["name"]), artist: song["artist"].string,
@@ -117,13 +117,24 @@ enum MusicNativeSimilarData {
         if !left.isDisjoint(with: right) { return true }
         return a["songId"] == b["songId"] && (left.isEmpty || right.isEmpty || MusicModel.compatible(a, b))
     }
-    static func unique(_ values: [MJ], excluding known: [MJ], maximum: Int = 2000) -> [MJ] {
+    static func unique(_ values: [MJ], excluding known: [MJ], maximum: Int? = nil) -> [MJ] {
         var result: [MJ] = []
-        guard maximum > 0 else { return [] }
+        var knownKeys = Set<Data>(), knownByID: [Data: [MJ]] = [:]
+        for value in known {
+            let id = Data(value["songId"].string.utf8)
+            knownByID[id, default: []].append(value)
+            for key in (try? MusicModel.sources(value).map(\.sourceKey)) ?? [] { knownKeys.insert(Data(key.utf8)) }
+        }
+        var seenKeys = Set<Data>(), seenByID: [Data: [MJ]] = [:]
+        if let maximum, maximum <= 0 { return [] }
         for value in values where !MusicModel.firstText(value["title"], value["name"]).isEmpty {
-            if known.contains(where: { same($0, value) }) || result.contains(where: { same($0, value) }) { continue }
+            let keys = Set(((try? MusicModel.sources(value).map(\.sourceKey)) ?? []).map { Data($0.utf8) })
+            let id = Data(value["songId"].string.utf8)
+            if !keys.isDisjoint(with: knownKeys) || knownByID[id]?.contains(where: { same($0, value) }) == true ||
+               !keys.isDisjoint(with: seenKeys) || seenByID[id]?.contains(where: { same($0, value) }) == true { continue }
             result.append(value)
-            if result.count == maximum { break }
+            seenKeys.formUnion(keys); seenByID[id, default: []].append(value)
+            if let maximum, result.count == maximum { break }
         }
         return result
     }
@@ -131,8 +142,7 @@ enum MusicNativeSimilarData {
         .obj(["entries", "currentId", "priority", "history", "source"].map { ($0, MusicModel.durable(queue[$0])) })
     }
     static func validateQueue(_ saved: MJ) throws {
-        try musicRequire(saved.isObject && saved["entries"].isArray &&
-            saved["entries"].array.count <= 2000, .corruptDocument)
+        try musicRequire(saved.isObject && saved["entries"].isArray, .corruptDocument)
         var d = try MusicDocument(nil, runID: "similar-validation")
         for key in ["entries", "currentId", "priority", "history", "source"] { d.queue[key] = saved[key] }
         let serial = saved["entries"].array.compactMap { Int($0["id"].string.dropFirst(6)) }.max() ?? 0

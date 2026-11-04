@@ -24,7 +24,7 @@ struct MusicQQRecommendation: Sendable {
     }
 }
 extension QQMusicAccountAdapter {
-    func array(_ value: Any?, maximum: Int = 2000) throws -> [Any] {
+    func array(_ value: Any?, maximum: Int) throws -> [Any] {
         guard let rows = value as? [Any], rows.count <= maximum else { throw MusicServiceError.upstreamInvalid }; return rows
     }
     func song(_ raw: Any) throws -> JSONValue {
@@ -41,14 +41,15 @@ extension QQMusicAccountAdapter {
             if let value, let size = try? MusicQQWire.integer(value), size > 0 { levels.append(quality) }
         }
         return .object([
-            "musicId": .string(mid), "qqSongId": .string(id), "songType": .number(Double(type)),
+            "songmid": .string(mid), "qqSongId": .string(id), "songType": .number(Double(type)),
             "name": .string(try MusicQQWire.string(raw["title"] ?? raw["name"], maximum: 1024)),
             "singer": .string(artist), "album": .string(try MusicQQWire.string(album["name"] ?? "", maximum: 1024, empty: true)),
             "albumMid": .string(albumMid), "duration": .number(Double(duration)), "types": .array(levels.map(JSONValue.string))
         ])
     }
     func recommendations(kind: String, page: Int, credential: AccountCredential) async throws -> MusicQQRecommendation {
-        guard ["guess", "radar"].contains(kind), (1...200).contains(page), kind != "guess" || page == 1 else {
+        guard ["guess", "radar"].contains(kind), (1...MusicPlatformJSON.maximumInteger).contains(page),
+              kind != "guess" || page == 1 else {
             throw MusicServiceError.invalidRequest
         }
         let auth = try auth(credential), data: [String: Any], raw: [Any], more: Bool
@@ -69,13 +70,15 @@ extension QQMusicAccountAdapter {
             }
         }
         let rows = try raw.map(song)
-        guard !more || !rows.isEmpty && page < 200 else { throw MusicServiceError.limit }
+        guard !more || !rows.isEmpty else { throw MusicServiceError.upstreamInvalid }
+        // Keep JSON page numbers exact, not a cumulative recommendation budget.
+        guard !more || page < MusicPlatformJSON.maximumInteger else { throw MusicServiceError.limit }
         return MusicQQRecommendation(rows: rows, nextPage: more ? page + 1 : nil)
     }
     func directory(_ auth: [String: Any]) async throws -> [MusicQQCollection] {
         let uid = try MusicQQWire.id(auth["musicid"])
         let data = try await rpc("music.musicasset.PlaylistBaseRead", "GetPlaylistByUin", ["uin": uid], auth: auth)
-        let created = try array(data["v_playlist"])
+        let created = try array(data["v_playlist"], maximum: 2000)
         let finished = data["bFinish"] as? NSNumber
         guard finished?.intValue == 1, try MusicQQWire.integer(data["total"], maximum: 2000) == created.count else {
             throw MusicServiceError.upstreamInvalid
@@ -105,7 +108,7 @@ extension QQMusicAccountAdapter {
         for page in 0..<20 {
             let data = try await rpc("music.musicasset.PlaylistFavRead", "CgiGetPlaylistFavInfo",
                                      ["uin": euin, "offset": page * 100, "size": 100], auth: auth)
-            let items = try array(data["v_list"], maximum: 100), failed = try array(data["v_failTids"])
+            let items = try array(data["v_list"], maximum: 100), failed = try array(data["v_failTids"], maximum: 2000)
             let total = try MusicQQWire.integer(data["total"], maximum: 2000), more = try MusicQQWire.integer(data["hasmore"], maximum: 1)
             guard let hide = data["hide"] as? NSNumber, CFGetTypeID(hide) == CFBooleanGetTypeID(),
                   !hide.boolValue, failed.isEmpty, expected == nil || expected == total else { throw MusicServiceError.upstreamInvalid }
@@ -125,7 +128,8 @@ extension QQMusicAccountAdapter {
     }
     func scan(_ entry: MusicQQCollection, auth: [String: Any]) async throws -> [JSONValue] {
         var output: [JSONValue] = [], seen = Set<String>(), expected: Int?, bytes = 0
-        for page in 0..<200 {
+        var page = 0
+        while true {
             var params: [String: Any] = ["disstid": entry.id == "favorites" ? 0 : Int(entry.id)!,
                 "dirid": entry.dirID, "tag": 1, "song_begin": page * 100, "song_num": 100,
                 "userinfo": 1, "orderlist": 1]
@@ -133,7 +137,7 @@ extension QQMusicAccountAdapter {
             else { params["onlysonglist"] = 0 }
             let data = try await rpc("music.srfDissInfo.DissInfo", "CgiGetDiss", params, auth: auth)
             let raw = try array(data["songlist"], maximum: 100), info = try MusicQQWire.object(data["dirinfo"])
-            let total = try MusicQQWire.integer(data["total_song_num"], maximum: 20_000)
+            let total = try MusicQQWire.integer(data["total_song_num"])
             guard try MusicQQWire.integer(data["songlist_size"], maximum: 100) == raw.count,
                   expected == nil || expected == total,
                   try MusicQQWire.id(MusicQQWire.object(info["creator"])["musicid"]) == entry.owner,
@@ -155,8 +159,8 @@ extension QQMusicAccountAdapter {
                 guard output.count == total else { throw MusicServiceError.upstreamInvalid }; return output
             }
             guard !raw.isEmpty, output.count < total else { throw MusicServiceError.upstreamInvalid }
+            page += 1
         }
-        throw MusicServiceError.limit
     }
     func tracks(collectionID: String, credential: AccountCredential) async throws -> [JSONValue] {
         let auth = try auth(credential), before = try await directory(auth)

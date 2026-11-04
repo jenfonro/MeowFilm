@@ -57,7 +57,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     public let libraryState = MusicLibraryState()
     public let playbackState = MusicPlaybackFeatureState()
     public let metadataState = MusicMetadataState()
-    public let searchState = MusicSearchState()
+    public var query = ""
     public let notices = MusicNoticeState()
     private var favoritesStorage: MusicMiniPlayerFavorites?
     private var favoritesObservation: AnyCancellable?
@@ -114,7 +114,12 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     /// Other account adapters publish after their actual mutation completes.
     public func accountSessionsChanged(_ platform: MusicAccountPlatform? = nil) {
         guard !(accounts is any MusicAccountSessionsObserving), isAvailable, !isClosed else { return }
-        for value in platform.map({ [$0] }) ?? MusicAccountPlatform.allCases { accountEvents.send(value) }
+        publishAccountSessionChanges(platform.map({ [$0] }) ?? MusicAccountPlatform.allCases)
+    }
+
+    private func publishAccountSessionChanges(_ platforms: [MusicAccountPlatform]) {
+        searchAccessGeneration = UUID()
+        for platform in platforms { accountEvents.send(platform) }
     }
 
     func observeAccountSessions() {
@@ -123,7 +128,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
             let changes = await source.accountSessionChanges()
             for await platform in changes {
                 guard let self, !Task.isCancelled, !self.isClosed else { return }
-                if self.isAvailable { self.accountEvents.send(platform) }
+                if self.isAvailable { self.publishAccountSessionChanges([platform]) }
             }
         }
     }
@@ -179,13 +184,16 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
                                   receipt: MusicMiniPlayerPlaybackIdentity?)?
     var lifecycle: UUID {
         get { accessState.generation }
-        set { accessState.generation = newValue }
+        set {
+            searchAccessGeneration = UUID()
+            accessState.generation = newValue
+        }
     }
-    var searchID = UUID(), selectionID = UUID(), loadID = UUID()
+    var selectionID = UUID(), loadID = UUID()
     var collectionConsumers: [UUID: WeakMusicCollectionConsumer] = [:]
     var collectionCatalogueID = UUID()
     public var accountAccessGeneration: UUID { lifecycle }
-    var searchTask: Task<MusicSearchPage, Error>?
+    public private(set) var searchAccessGeneration = UUID()
     var resolutionTask: Task<MusicPlaybackCandidate, Error>?
     var candidateDiscoveryTask: Task<MusicCandidateDiscoveryResolution, Error>?
     var lyricTask: Task<MusicLyricsSnapshot, Error>?
@@ -212,7 +220,6 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     var navigationID = UUID()
     var navigationQueueID: UUID?
     var pendingNativeResourceID: String?
-    var pending = 0, pendingFacts = 0
     var candidate: MusicPlaybackCandidate?
     var nativeAttempt: MusicPlayerAttempt?
     var resolvingAttempt: String?
@@ -224,7 +231,6 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         let position: Double
         let remainsPaused: Bool
     }
-    var searchContext: (platform: String, query: String)?
     var similarObservation: Task<Void, Never>?
     var similarObservationID = UUID()
     var remoteQueueTask: Task<MusicPlaybackState, Error>?
@@ -278,7 +284,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     }
     public var canNavigate: Bool {
         isAvailable && !isClosed && service != nil && player != nil && current != nil &&
-        !isResolving && !isNavigating && !isChangingQueue && pending < 10
+        !isResolving && !isNavigating && !isChangingQueue
     }
     public var canNext: Bool {
         guard canNavigate else { return false }
@@ -305,8 +311,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     func enter() throws -> UUID {
         guard !isClosed else { throw MusicServiceError.closed }
         guard isAvailable else { throw MusicServiceError.accessUnavailable }
-        guard pending < 10 else { throw MusicServiceError.busy }
-        pending += 1; return lifecycle
+        return lifecycle
     }
     func check(_ epoch: UUID) throws {
         try Task.checkCancellation()
@@ -372,18 +377,17 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         cancelRemoteQueuePreparation(); stopFM()
         stopSimilarObservation()
         if candidate?.isCachedAudio == true { stopOwned() }
-        accessState.isAvailable = available; lifecycle = UUID(); loadID = UUID(); searchID = UUID()
+        accessState.isAvailable = available; lifecycle = UUID(); loadID = UUID()
         playbackMetadata.setAccess(available: available, generation: lifecycle)
         metadataPreferencesRefreshRequested = false
         metadataPreferencesRefreshTask?.cancel()
-        searchTask?.cancel(); searchTask = nil; navigationTask?.cancel(); navigationTask = nil
+        navigationTask?.cancel(); navigationTask = nil
         navigationID = UUID(); playbackState.isNavigating = false; playbackState.isChangingQueue = false; pendingNativeResourceID = nil
         invalidateSelection(stopMedia: false); eventTail?.cancel()
         candidate = nil; resolvingAttempt = nil; terminalAttempt = nil
         playbackState.state = MusicPlaybackState(); playbackState.queue = []; notices.queueNotice = nil; libraryState.collections = []; libraryState.platforms = []
-        searchState.results = []; searchState.hasSearched = false; searchState.nextPage = nil; searchContext = nil
         libraryState.playedSongs = []; libraryState.playedPlaylists = []; importWorkflow.invalidate()
-        libraryState.isLoaded = false; libraryState.isLoading = false; searchState.isSearching = false
+        libraryState.isLoaded = false; libraryState.isLoading = false
         position = 0; duration = nil; error = nil
         notifyCollectionPages(.access)
     }
@@ -391,7 +395,6 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     public func load() async {
         let epoch: UUID
         do { epoch = try enter() } catch { return }
-        defer { pending -= 1 }
         let token = UUID(); loadID = token; libraryState.isLoading = true
         defer { if loadID == token { libraryState.isLoading = false } }
         do {
@@ -418,47 +421,9 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         } catch { report(error, epoch: epoch, operation: "读取曲库与播放状态", kind: .library) }
     }
 
-    public func search(loadMore: Bool = false) async {
-        let epoch: UUID
-        do { epoch = try enter() } catch { return }
-        defer { pending -= 1 }
-        let platform = selectedPlatform, keyword = query
-        let page = loadMore ? nextSearchPage : 1
-        guard let page, !keyword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        if loadMore {
-            guard !isSearching, searchContext?.platform == platform, searchContext?.query == keyword else { return }
-        }
-        let token = UUID(); searchID = token; searchTask?.cancel(); searchState.isSearching = true
-        let trace = MusicRequestTrace(.search, platform: MusicPublicBrowsePlatform(rawValue: platform))
-        trace.record(.started)
-        defer { if searchID == token { searchState.isSearching = false; searchTask = nil } }
-        do {
-            let service = try requireService()
-            let task = Task {
-                try await MusicRequestTrace.$current.withValue(trace) {
-                    try await service.search(platform: platform, query: keyword, page: page)
-                }
-            }
-            searchTask = task
-            let result = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
-            try check(epoch)
-            guard searchID == token, selectedPlatform == platform, query == keyword else { return }
-            guard result.platform == platform, result.query == keyword, result.page == page else { throw MusicServiceError.invalidResponse }
-            if loadMore {
-                guard searchResults.count + result.items.count <= 600 else { throw MusicServiceError.limit }
-                searchState.results += result.items
-            } else { searchState.results = result.items }
-            searchState.hasSearched = true; searchState.nextPage = result.nextPage; searchContext = (platform, keyword)
-            trace.record(.completed)
-        } catch {
-            guard searchID == token, selectedPlatform == platform, query == keyword else { trace.failed(error); return }
-            report(error, epoch: epoch, operation: "搜索歌曲", kind: .search, trace: trace)
-        }
-    }
     public func updateSettings(_ change: MusicSettingsChange) async {
         let epoch: UUID
         do { epoch = try enter() } catch { return }
-        defer { pending -= 1 }
         // A settings action supersedes an in-flight selection, not an already
         // playing resource. Do this before the first await, even if the write fails.
         if isResolving { invalidateSelection(stopMedia: true) }
@@ -479,7 +444,6 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     public func importFile(_ url: URL) async { await importWorkflow.loadFile(url) }
     public func previewImport() async {
         do { _ = try enter() } catch { return }
-        defer { pending -= 1 }
         await importWorkflow.previewImport()
     }
     public func confirmImport() async { await importWorkflow.confirmImport() }
@@ -496,14 +460,14 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         cancelRemoteQueuePreparation(); cancelFMNavigation(); stopFM()
         stopSimilarObservation()
         let attempt = resolvingAttempt ?? candidate?.attemptId
-        accessState.isClosed = true; lifecycle = UUID(); searchTask?.cancel(); navigationTask?.cancel(); eventTail?.cancel()
+        accessState.isClosed = true; lifecycle = UUID(); navigationTask?.cancel(); eventTail?.cancel()
         metadataPreferencesRefreshRequested = false
         metadataPreferencesRefreshTask?.cancel()
         playbackMetadata.close()
         notifyCollectionPages(.access)
         navigationID = UUID(); playbackState.isNavigating = false; playbackState.isChangingQueue = false
         invalidateSelection(stopMedia: true)
-        searchState.results = []; playbackState.queue = []; notices.queueNotice = nil; metadataState.lyricLines = []
+        playbackState.queue = []; notices.queueNotice = nil; metadataState.lyricLines = []
         libraryState.isLoaded = false
         await favoritesStorage?.flush()
         await importWorkflow.close()
@@ -520,7 +484,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
             accountObservation?.cancel()
             remoteQueueIntent?.revoke(); remoteQueueTask?.cancel()
             fmAdvanceIntent?.revoke(); fmRevocationTask?.cancel(); fmSource?.revoke()
-            searchTask?.cancel(); resolutionTask?.cancel(); candidateDiscoveryTask?.cancel()
+            resolutionTask?.cancel(); candidateDiscoveryTask?.cancel()
             lyricTask?.cancel(); eventTail?.cancel(); navigationTask?.cancel()
             metadataPreferencesRefreshTask?.cancel()
             cachedAudioLookup?.cancel(); cachedAudioObservation?.cancel(); cachedAudioRecoveryTask?.cancel()

@@ -15,8 +15,7 @@ enum MusicNativeMiguLyrics {
         let songID: String
         let copyrightID: String?
         init(_ info: MJ) throws {
-            var keys = ["songmid", "musicId", "songId"].filter { !info[$0].id.isEmpty }
-            if keys.isEmpty { keys = ["id"] }
+            let keys = ["songmid", "songId"].filter { !info[$0].id.isEmpty }
             let ids = try keys.map { try MusicNativeMiguSearch.nativeID(info[$0]) }
             try musicRequire(!ids.isEmpty && Set(ids).count == 1, .lyricIdentityMismatch)
             songID = ids[0]

@@ -13,7 +13,7 @@ final class NativeMusicBusinessTests: XCTestCase {
         }
         let accounts = NativeMusicAccountFixture(), service = try await NativeMusicFixture.service(scripts: UnavailableLX(), accounts: accounts)
         let state = try await service.state(); XCTAssertEqual(state.total, 0)
-        let search = try await service.search(platform: "tx", query: "Synthetic", page: 1)
+        let search = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30)
         let collection = try await service.createPlaylist(name: "Native", refs: search.items.map(\.ref))
         let tracks = try await service.tracks(in: collection)
         let queued = try await service.changeQueue(.replace(tracks.map(\.ref), index: 0), expectedRevision: 0)
@@ -47,7 +47,7 @@ final class NativeMusicBusinessTests: XCTestCase {
     func testNativeCompleteLocalChainAndColdQueueRestoration() async throws {
         let store = NativeMusicMemoryDocument(), scripts = NativeMusicScriptFixture()
         let service = try await NativeMusicFixture.service(store, scripts: scripts)
-        let page = try await service.search(platform: "tx", query: "SyntheticMID", page: 1)
+        let page = try await service.search(platform: "tx", query: "SyntheticMID", page: 1, limit: 30)
         let created = try await service.createPlaylist(name: "Synthetic playlist", refs: page.items.map(\.ref))
         let tracks = try await service.tracks(in: created)
         let state = try await service.changeQueue(.replace([tracks[0].ref, tracks[0].ref], index: 0), expectedRevision: 0)
@@ -81,7 +81,7 @@ final class NativeMusicBusinessTests: XCTestCase {
     func testWriteFailureDoesNotPublishPlayedOrDestroyCurrentAttempt() async throws {
         let store = NativeMusicMemoryDocument(), scripts = NativeMusicScriptFixture()
         let service = try await NativeMusicFixture.service(store, scripts: scripts)
-        let page = try await service.search(platform: "tx", query: "A", page: 1)
+        let page = try await service.search(platform: "tx", query: "A", page: 1, limit: 30)
         let state = try await service.changeQueue(.replace([page.items[0].ref], index: 0), expectedRevision: 0)
         let options = try await service.playbackOptions(for: page.items[0].ref)
         let candidate = try await service.resolve(attemptId: UUID().uuidString.lowercased(), occurrenceId: XCTUnwrap(state.currentId), selection: options[0].selection(quality: "128k"))
@@ -99,9 +99,9 @@ final class NativeMusicBusinessTests: XCTestCase {
     func testLockRejectsNoncooperativeSearchAndOldHandle() async throws {
         let store = NativeMusicMemoryDocument(), qq = NativeMusicQQFixture(), gate = NativeMusicGate()
         let service = try await NativeMusicFixture.service(store, qq: qq)
-        let old = try await service.search(platform: "tx", query: "Old", page: 1)
+        let old = try await service.search(platform: "tx", query: "Old", page: 1, limit: 30)
         await qq.suspend(gate)
-        let task = Task { try await service.search(platform: "tx", query: "Late", page: 1) }
+        let task = Task { try await service.search(platform: "tx", query: "Late", page: 1, limit: 30) }
         await gate.started()
         try await service.setAccess(available: false, generation: 2)
         do { _ = try await task.value; XCTFail("late result") } catch { XCTAssertNotNil(error as? MusicServiceError) }
@@ -129,7 +129,7 @@ final class NativeMusicBusinessTests: XCTestCase {
         let qq = NativeMusicQQFixture(), gate = NativeMusicGate()
         let service = try await NativeMusicFixture.service(qq: qq)
         await qq.suspend(gate)
-        let request = Task { try await service.search(platform: "tx", query: "late", page: 1) }
+        let request = Task { try await service.search(platform: "tx", query: "late", page: 1, limit: 30) }
         await gate.started()
         service.revokeAccess(generation: 2)
         do { _ = try await request.value; XCTFail("revoked search must settle without waiting for server") }
@@ -140,7 +140,7 @@ final class NativeMusicBusinessTests: XCTestCase {
     func testExplicitCancelRejectsNoncooperativeResolverWithoutPlaybackFacts() async throws {
         let scripts = NativeMusicScriptFixture(), gate = NativeMusicGate(), store = NativeMusicMemoryDocument()
         let service = try await NativeMusicFixture.service(store, scripts: scripts)
-        let page = try await service.search(platform: "tx", query: "A", page: 1)
+        let page = try await service.search(platform: "tx", query: "A", page: 1, limit: 30)
         let state = try await service.changeQueue(.replace(page.items.map(\.ref), index: 0), expectedRevision: 0)
         let options = try await service.playbackOptions(for: page.items[0].ref)
         await scripts.configure(gate: gate)

@@ -60,11 +60,21 @@ final class MusicNativeMiguLyricsTests: XCTestCase {
             do { _ = try await port.lyrics(platform: "mg", info: MusicNativeLyricsFixture.miguIdentity); XCTFail("wrong resource") } catch {}
             let calls = await transport.calls(); XCTAssertEqual(calls.count, 1)
         }
-        let transport = MusicNativeLyricsTransport([])
-        let port = MusicNativePlatforms(transport: transport, qq: NativeMusicQQFixture(), clock: { NativeMusicFixture.date })
-        var identity = MusicNativeLyricsFixture.miguIdentity; identity["musicId"] = .string("124")
-        do { _ = try await port.lyrics(platform: "mg", info: identity); XCTFail("conflicting identity") } catch {}
-        let calls = await transport.calls(); XCTAssertTrue(calls.isEmpty)
+        var conflictingIdentity = MusicNativeLyricsFixture.miguIdentity; conflictingIdentity["songId"] = .string("124")
+        let conflictingTransport = MusicNativeLyricsTransport([])
+        let conflictingPort = MusicNativePlatforms(transport: conflictingTransport, qq: NativeMusicQQFixture(),
+            clock: { NativeMusicFixture.date })
+        do {
+            _ = try await conflictingPort.lyrics(platform: "mg", info: conflictingIdentity)
+            XCTFail("conflicting identity must not reach the resource request")
+        } catch { XCTAssertEqual(error as? MusicServiceError, .lyricIdentityMismatch) }
+        let conflictingCalls = await conflictingTransport.calls()
+        XCTAssertEqual(conflictingCalls.count, 0)
+
+        var identity = MusicNativeLyricsFixture.miguIdentity; identity["songId"] = .string("124")
+        XCTAssertThrowsError(try MusicNativeMiguLyrics.Identity(identity)) {
+            XCTAssertEqual($0 as? MusicServiceError, .lyricIdentityMismatch)
+        }
     }
 
     func testMalformedCipherTimingAndChosenMRCFailureAreNotRetriedOrReplacedWithLRC() async throws {

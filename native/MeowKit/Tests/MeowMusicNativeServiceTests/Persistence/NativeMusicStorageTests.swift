@@ -3,6 +3,130 @@ import MeowMusicFeature
 @testable import MeowMusicNativeService
 
 final class NativeMusicStorageTests: XCTestCase {
+    func testOversizedDocumentDropsOldestHistoryArchivesBeforeReportingLimit() throws {
+        var document = try MusicDocument(nil, runID: "storage")
+        let padding = String(repeating: "x", count: 5 * 1024 * 1024)
+        let archives = ["newest", "oldest"].map {
+            MJ.obj([("id", .string($0)), ("title", .string("Archive")),
+                    ("at", .number(NativeMusicFixture.date.timeIntervalSince1970 * 1000)),
+                    ("entries", .array([])), ("currentId", .null), ("priority", .array([])),
+                    ("history", .array([])), ("source", .null), ("padding", .string(padding))])
+        }
+        document.history["playlists"] = .array(archives)
+        let data = try document.encode(changed: ["history"])
+        XCTAssertLessThanOrEqual(data.count, 8 * 1024 * 1024)
+        let saved = try MJ.parse(data)
+        let retained = saved["records"][MusicModel.key("history")]["playlists"].array
+        XCTAssertEqual(retained.map { $0["id"].string }, ["newest"])
+        XCTAssertEqual(document.history["playlists"].array.map { $0["id"].string }, ["newest"])
+        XCTAssertEqual(saved["records"][MusicModel.key("history")]["days"].array.count, 0)
+    }
+
+    func testDocumentStillOverLimitAfterDiscardingHistoryReportsLimit() throws {
+        var document = try MusicDocument(nil, runID: "storage")
+        document.history["playlists"] = .array([
+            MJ.obj([("id", .string("archive")), ("title", .string("Archive")),
+                    ("at", .number(NativeMusicFixture.date.timeIntervalSince1970 * 1000)),
+                    ("entries", .array([])), ("currentId", .null), ("priority", .array([])),
+                    ("history", .array([])), ("source", .null),
+                    ("padding", .string(String(repeating: "x", count: 3 * 1024 * 1024)))])
+        ])
+        document.history["days"] = .array([
+            MJ.obj([("date", .string("2026-10-23")), ("songs", .array([])),
+                    ("padding", .string(String(repeating: "x", count: 9 * 1024 * 1024)))])
+        ])
+        XCTAssertThrowsError(try document.encode(changed: ["history"])) {
+            XCTAssertEqual($0 as? MusicServiceError, .limit)
+        }
+        XCTAssertTrue(document.history["playlists"].array.isEmpty)
+    }
+
+    func testQueueOnlyTransactionEvictsOldestArchiveAndKeepsOtherAreasAtomic() async throws {
+        var document = try MusicDocument(nil, runID: "storage")
+        let padding = String(repeating: "x", count: 3 * 1024 * 1024)
+        document.history["playlists"] = .array(["newest", "oldest"].map {
+            .obj([("id", .string($0)), ("title", .string("Archive")),
+                  ("at", .number(NativeMusicFixture.date.timeIntervalSince1970 * 1000)),
+                  ("entries", .array([])), ("currentId", .null), ("priority", .array([])),
+                  ("history", .array([])), ("source", .null), ("padding", .string(padding))])
+        })
+        let song = try NativeMusicFixture.song()
+        document.history["days"] = .array([.obj([
+            ("date", .string("2026-10-23")),
+            ("songs", .array([.obj([("song", song), ("context", .obj()), ("at", .n(1))])]))
+        ])])
+        let original = try document.encode(changed: ["library", "queue", "history", "playback"])
+        let before = try MJ.parse(original)
+        let store = NativeMusicMemoryDocument(original), service = try await NativeMusicFixture.service(store)
+        let context = MJ.obj([("sourceTitle", .string(String(repeating: "q", count: 1024)))])
+        let entries = (1...2001).map {
+            MJ.obj([("id", .string("entry-\($0)")), ("key", song["songId"]),
+                    ("song", song), ("context", context)])
+        }
+        for failing in [true, false] {
+            store.fail(failing ? .storageConflict : nil)
+            do {
+                try await service.transaction(["queue"]) { draft in
+                    draft.queue["entries"] = .array(entries)
+                    draft.queue["currentId"] = entries.last?["id"] ?? .null
+                    draft.queue["serial"] = .n(entries.count)
+                    draft.queue["revision"] = .n(1)
+                }
+                XCTAssertFalse(failing)
+            } catch {
+                XCTAssertTrue(failing); XCTAssertEqual(error as? MusicServiceError, .storageConflict)
+            }
+            if failing {
+                XCTAssertEqual(store.snapshot().0, original); XCTAssertEqual(store.snapshot().2, 0)
+            }
+        }
+        let saved = try MJ.parse(XCTUnwrap(store.snapshot().0)), records = saved["records"]
+        XCTAssertEqual(records[MusicModel.key("queue")]["entries"].array.count, 2001)
+        XCTAssertEqual(records[MusicModel.key("history")]["playlists"].array.map { $0["id"].string }, ["newest"])
+        XCTAssertEqual(records[MusicModel.key("history")]["days"], before["records"][MusicModel.key("history")]["days"])
+        for area in ["library", "playback"] { XCTAssertEqual(records[MusicModel.key(area)], before["records"][MusicModel.key(area)]) }
+        XCTAssertEqual(saved["revision"].int, before["revision"].int + 1)
+        XCTAssertEqual(store.snapshot().2, 1)
+        XCTAssertLessThanOrEqual(try XCTUnwrap(store.snapshot().0).count, 8 * 1024 * 1024)
+        await service.close()
+    }
+
+    func testCompactSourcesRejectInvalidDurationBeforeRecordingComparison() throws {
+        let original = try XCTUnwrap(NativeMusicFixture.song()["sources"].array.first)
+        let invalid: [MJ] = [.n(-1), .n(604_801), .string("-1"), .string("NaN"), .string("Infinity"),
+                             .string("1e999"), .bool(true), .obj(), .array([])]
+        for value in invalid {
+            var source = original
+            source["musicInfo"]["duration"] = value
+            XCTAssertThrowsError(try MusicModel.cleanSource(source)) {
+                XCTAssertEqual($0 as? MusicServiceError, .invalidImport)
+            }
+        }
+        let valid: [MJ] = [.n(0), .n(604_800), .string("180")]
+        for value in valid {
+            var source = original
+            source["musicInfo"]["duration"] = value
+            XCTAssertNoThrow(try MusicModel.cleanSource(source))
+        }
+    }
+
+    func testImportPlansUseRetainedContentCostAndReleaseIndependently() async throws {
+        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let data = try NativeMusicFixture.legacy().bytes
+        var previews: [MusicImportPreview] = []
+        for index in 0..<4 {
+            previews.append(try await service.prepareImport(data: data, sourceId: "synthetic-\(index)", ownerId: "legacy-owner"))
+        }
+        let plans = await service.prepared
+        XCTAssertEqual(plans.count, 4)
+        XCTAssertTrue(plans.values.allSatisfy { $0.bytes > 0 })
+        XCTAssertNil(store.snapshot().0)
+        for preview in previews { try await service.releaseImport(preview) }
+        let remaining = await service.prepared.count
+        XCTAssertEqual(remaining, 0)
+        await service.close()
+    }
+
     func testV1ImportReceiptIdempotenceRollbackAndNoSecretPersistence() async throws {
         let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
         var legacy = try NativeMusicFixture.legacy()
@@ -11,7 +135,9 @@ final class NativeMusicStorageTests: XCTestCase {
         song["cookie"] = .string("synthetic-private")
         song["url"] = .string("https://media.invalid/temporary")
         song["cover_url"] = .string("https://cover.invalid/a?signature=synthetic-private")
-        song["source_data"]["credential"] = .string("synthetic-private")
+        var source = song["sources"].array.first ?? .obj()
+        source["musicInfo"]["credential"] = .string("synthetic-private")
+        song["sources"] = .array([source])
         legacy["songs"][id] = song
         let preview = try await service.prepareImport(data: legacy.bytes, sourceId: "fixed-synthetic", ownerId: "legacy-owner")
         XCTAssertNil(store.snapshot().0)
@@ -55,6 +181,21 @@ final class NativeMusicStorageTests: XCTestCase {
             XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
         }
     }
+    func testParsedDocumentMemoryNeverMasksChangedCorruptBytes() async throws {
+        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        var document = try await service.read()
+        let valid = try document.encode(changed: [])
+        _ = try await service.state()
+        _ = try await service.queue()
+        let corrupt = Data(#"{"version":1,"scope":"device","revision":0,"records":{"unknown":{}}}"#.utf8)
+        store.replace(corrupt)
+        do { _ = try await service.queue(); XCTFail("Changed corrupt bytes must be revalidated") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
+        store.replace(valid)
+        do { _ = try await service.queue() }
+        catch { XCTFail("Restored valid bytes must be readable: \(error)") }
+        await service.close()
+    }
     func testJSONPreservesUnicodeByteIdentitiesAndNativeNumericStrings() throws {
         let value = try MJ.parse(Data(#"{"é":1,"e\u0301":2,"id":"9007199254740993"}"#.utf8))
         XCTAssertEqual(value.fields.count, 3)
@@ -85,7 +226,7 @@ final class NativeMusicStorageTests: XCTestCase {
     }
     func testOnlyWholeQueueReplaceArchivesAndEndedAdvanceIsSingleUse() async throws {
         let scripts = NativeMusicScriptFixture(), service = try await NativeMusicFixture.service(scripts: scripts)
-        let page = try await service.search(platform: "tx", query: "A", page: 1), ref = page.items[0].ref
+        let page = try await service.search(platform: "tx", query: "A", page: 1, limit: 30), ref = page.items[0].ref
         var state = try await service.changeQueue(.replace([ref, ref], index: 0), expectedRevision: 0)
         state = try await service.changeQueue(.append([ref], next: true), expectedRevision: state.revision)
         let empty = try await service.playedPlaylists(); XCTAssertTrue(empty.isEmpty)

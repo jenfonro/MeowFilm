@@ -44,14 +44,70 @@ final class MusicNativeMiguSearchTests: XCTestCase {
             MusicNativeMiguSearchFixture.page([[tail, tail]], total: 31)
         ])
         let service = try await NativeMusicFixture.service(http: http)
-        let first = try await service.search(platform: "mg", query: "Synthetic", page: 1)
+        let first = try await service.search(platform: "mg", query: "Synthetic", page: 1, limit: 30)
         XCTAssertEqual(first.items.count, 60); XCTAssertEqual(first.total, 31); XCTAssertEqual(first.nextPage, 2)
         XCTAssertEqual(Set(first.items.flatMap(\.sources).map(\.nativeId)).count, 60)
-        let second = try await service.search(platform: "mg", query: "Synthetic", page: 2)
+        let second = try await service.search(platform: "mg", query: "Synthetic", page: 2, limit: 30)
         XCTAssertEqual(second.items.count, 1); XCTAssertEqual(second.total, 31); XCTAssertNil(second.nextPage)
         XCTAssertEqual(second.items[0].sources[0].nativeId, "2000")
         let calls = await http.calls(); XCTAssertEqual(calls.count, 2)
         await service.close()
+    }
+
+    func testShortRawGroupPageEndsAndFullPageAtTotalEnds() throws {
+        let first = MusicNativeMiguSearchFixture.song(id: "100", copyrightID: "600100")
+        let editions = (0..<40).map {
+            MusicNativeMiguSearchFixture.song(id: String(1000 + $0), copyrightID: String(600000 + $0))
+        }
+        let short = try MusicNativeMiguSearch.decode(
+            MusicNativeMiguSearchFixture.page([Array(editions.prefix(20)), Array(editions.suffix(20))], total: 100), page: 1)
+        XCTAssertEqual(short.items.count, 40)
+        XCTAssertNil(short.nextPage)
+        let full = try MusicNativeMiguSearch.decode(
+            MusicNativeMiguSearchFixture.page(Array(repeating: [first], count: 30), total: 30), page: 1)
+        XCTAssertEqual(full.items.count, 1)
+        XCTAssertNil(full.nextPage)
+        let more = try MusicNativeMiguSearch.decode(
+            MusicNativeMiguSearchFixture.page(Array(repeating: [first], count: 30), total: 31), page: 1)
+        XCTAssertEqual(more.items.count, 1); XCTAssertEqual(more.nextPage, 2)
+        let exceeded = try MusicNativeMiguSearch.decode(
+            MusicNativeMiguSearchFixture.page(Array(repeating: [first], count: 30), total: 29), page: 1)
+        XCTAssertNil(exceeded.nextPage)
+        let empty = try MusicNativeMiguSearch.decode(MusicNativeMiguSearchFixture.page([], total: 100), page: 1)
+        XCTAssertTrue(empty.items.isEmpty); XCTAssertNil(empty.nextPage)
+        XCTAssertThrowsError(try MusicNativeMiguSearch.decode(
+            MusicNativeMiguSearchFixture.page(Array(repeating: [first], count: 31), total: 31), page: 1)) {
+            XCTAssertEqual($0 as? MusicServiceError, .upstreamInvalid)
+        }
+    }
+    @MainActor func testShortExpandedEmptyAndFullTotalGroupPagesDoNotIssueAnotherSearch() async throws {
+        let rows = (0..<40).map {
+            MusicNativeMiguSearchFixture.song(id: String(1000 + $0), copyrightID: String(600000 + $0),
+                title: "Synthetic \($0)")
+        }
+        for (groups, total) in [
+            ([[MJ]](), 100),
+            ([Array(rows.prefix(20)), Array(rows.suffix(20))], 100),
+            (rows.prefix(30).map { [$0] }, 30),
+            (rows.prefix(30).map { [$0] }, 29)
+        ] {
+            let http = NativeMusicHTTPFixture([MusicNativeMiguSearchFixture.page(groups, total: total)])
+            let service = try await NativeMusicFixture.service(http: http)
+            let results = MusicSearchResultsModel(readSongs: { platform, query, page, limit in
+                try await service.search(platform: platform.rawValue, query: query, page: page, limit: limit)
+            }, readPlaylists: { _, _, _, _ in throw MusicServiceError.unsupported },
+                readRecording: { _ in throw MusicServiceError.unsupported })
+            results.setAccess(available: true, generation: UUID()); results.appear()
+            results.submit("Synthetic", preferences: .init(songPlatforms: [.migu], searchPlaylists: false,
+                pages: 10, concurrency: 1))
+            await results.finishPendingReads()
+            results.more(.songs); await results.finishPendingReads()
+            XCTAssertEqual(results.songs.count, groups.reduce(0) { $0 + $1.count })
+            XCTAssertFalse(results.moreSongs); XCTAssertTrue(results.songFailures.isEmpty)
+            let calls = await http.calls(); XCTAssertEqual(calls.count, 1)
+            results.disappear()
+            await service.close()
+        }
     }
 
     func testExpandedPageReservesAllHandlesBeforeEqualTimestampEviction() async throws {
@@ -78,7 +134,8 @@ final class MusicNativeMiguSearchTests: XCTestCase {
         raw["url"] = .string("https://private.invalid/audio?signature=synthetic")
         raw["lrcUrl"] = .string("https://private.invalid/lyrics?signature=synthetic")
         let track = try MusicNativeMiguSearch.song(raw), native = try MJ.parse(track.data)
-        let clean = try MusicModel.normalize(track), locator = try MusicModel.locator(MusicModel.sourceData(clean))
+        let clean = try MusicModel.normalize(track),
+            locator = try MusicModel.locator(MusicModel.sourceData(clean["sources"].array[0]))
         XCTAssertEqual(locator["songmid"].string, "123"); XCTAssertEqual(locator["songId"].string, "123")
         XCTAssertEqual(locator["copyrightId"].string, "600123"); XCTAssertEqual(locator["contentId"].string, "60090001")
         XCTAssertEqual(locator["audioFormats"].array[0]["aformat"].string, "020010")
@@ -96,23 +153,35 @@ final class MusicNativeMiguSearchTests: XCTestCase {
         XCTAssertEqual(data["newRateFormats"].array.count, 1)
     }
 
-    func testMalformedGroupsAmbiguousNativeAliasesAndBudgetsFailWithoutFabricatingEmpty() throws {
+    func testMalformedGroupsAndAmbiguousNativeAliasesFailWithoutFabricatingEmpty() throws {
         let row = MusicNativeMiguSearchFixture.song()
         var nested = MusicNativeMiguSearchFixture.page([[row]], total: 1)
         nested = .obj([("code", nested["code"]), ("data", .obj([("songResultData", nested["songResultData"])]))])
         XCTAssertEqual(try MusicNativeMiguSearch.decode(nested, page: 1).items.count, 1)
         XCTAssertTrue(try MusicNativeMiguSearch.decode(MusicNativeMiguSearchFixture.page([], total: 0), page: 1).items.isEmpty)
         for bad in [MJ.obj([("code", .string("000000"))]), MJ.obj([("code", .string("error"))]),
-                    MusicNativeMiguSearchFixture.page([], total: 1), MusicNativeMiguSearchFixture.page([[]], total: 1),
+                    MusicNativeMiguSearchFixture.page([[]], total: 1),
                     MusicNativeMiguSearchFixture.page(Array(repeating: [row], count: 31), total: 31),
                     MusicNativeMiguSearchFixture.page([[row, MusicNativeMiguSearchFixture.song(id: "124")]], total: 1),
                     MusicNativeMiguSearchFixture.page([[row, MusicNativeMiguSearchFixture.song(copyrightID: "600124")]], total: 1)] {
             XCTAssertThrowsError(try MusicNativeMiguSearch.decode(bad, page: 1))
         }
-        XCTAssertThrowsError(try MusicNativeMiguSearch.decode(
-            MusicNativeMiguSearchFixture.page([Array(repeating: row, count: 201)], total: 1), page: 1)) {
-            XCTAssertEqual($0 as? MusicServiceError, .limit)
+        // A group may contain many editions; no candidate-total cap truncates
+        // distinct recordings in one page.
+        let distinct = (0..<201).map {
+            MusicNativeMiguSearchFixture.song(id: String(1000 + $0), copyrightID: String(600000 + $0))
         }
+        let editions = try MusicNativeMiguSearch.decode(
+            MusicNativeMiguSearchFixture.page([distinct], total: 1), page: 1)
+        XCTAssertEqual(editions.items.count, 201)
+        XCTAssertEqual(Set(editions.items.map { $0.data }).count, 201)
+        XCTAssertEqual(editions.total, 1); XCTAssertNil(editions.nextPage)
+        // Repeating one copyright edition in a group still collapses to one
+        // recording, independently of the no-total-cap behavior above.
+        let repeated = try MusicNativeMiguSearch.decode(
+            MusicNativeMiguSearchFixture.page([Array(repeating: row, count: 201)], total: 1), page: 1)
+        XCTAssertEqual(repeated.items.count, 1)
+        XCTAssertEqual(repeated.total, 1); XCTAssertNil(repeated.nextPage)
         var bad = row; bad["songId"] = .string("https://evil.invalid")
         XCTAssertThrowsError(try MusicNativeMiguSearch.song(bad))
         bad = row; bad["copyrightId"] = .null
@@ -152,7 +221,7 @@ final class MusicNativeMiguSearchTests: XCTestCase {
             let body = MusicNativeMiguSearchFixture.page([[MusicNativeMiguSearchFixture.song()]], total: 1)
             let http = MusicNativeKuwoSearchTransport(.init(status: 200, data: body.bytes), gate: gate)
             let platforms = MusicNativePlatforms(transport: http, qq: NativeMusicQQFixture(), clock: { NativeMusicFixture.date })
-            let task = Task { try await platforms.search(platform: "mg", query: "Synthetic", page: 1) }
+            let task = Task { try await platforms.search(platform: "mg", query: "Synthetic", page: 1, limit: 30) }
             await gate.started()
             if cancel { task.cancel() } else { await platforms.revoke() }
             await gate.release()
@@ -166,7 +235,7 @@ final class MusicNativeMiguSearchTests: XCTestCase {
         let store = NativeMusicMemoryDocument()
         let http = MusicNativeKuwoSearchTransport(.init(status: 429, data: Data()))
         let service = try await NativeMusicFixture.service(store, http: http)
-        do { _ = try await service.search(platform: "mg", query: "Synthetic", page: 1); XCTFail("limited") }
+        do { _ = try await service.search(platform: "mg", query: "Synthetic", page: 1, limit: 30); XCTFail("limited") }
         catch { XCTAssertEqual(error as? MusicServiceError, .rateLimited) }
         let calls = await http.calls(); XCTAssertEqual(calls.count, 1); XCTAssertEqual(store.snapshot().2, 0)
         await service.close()
@@ -199,10 +268,10 @@ final class MusicNativeMiguSearchTests: XCTestCase {
 }
 
 enum MusicNativeMiguSearchFixture {
-    static func song(id: String = "123", copyrightID: String = "600123") -> MJ {
+    static func song(id: String = "123", copyrightID: String = "600123", title: String = "Synthetic recording") -> MJ {
         .obj([("songId", .string(id)), ("copyrightId", .string(copyrightID)), ("contentId", .string("60090001")),
-            ("name", .string("Synthetic recording")), ("singerList", .array([.obj([("name", .string("Fixture"))])])),
-            ("album", .string("Synthetic album")), ("albumId", .string("45")), ("duration", .n(180)), ("img3", .string("/cover.jpg")),
+            ("name", .string(title)), ("singerList", .array([.obj([("name", .string("Fixture"))])])),
+            ("albumName", .string("Synthetic album")), ("albumId", .string("45")), ("duration", .n(180)), ("img3", .string("/cover.jpg")),
             ("audioFormats", .array([
                 .obj([("formatType", .string("PQ")), ("asize", .string("1234567")), ("aformat", .string("020010")),
                     ("hash", .string("synthetic-checksum")), ("url", .string("https://private.invalid/signed"))]),

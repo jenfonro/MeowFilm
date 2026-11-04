@@ -160,6 +160,32 @@ class MusicClientContextState<Value>: @unchecked Sendable {
             throw failure
         }
     }
+    func update(_ token: UUID, _ transform: (Value) throws -> Value) throws -> (value: Value, revision: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        try checked(token)
+        if !loaded {
+            do {
+                let bytes = try document?.read()
+                value = try bytes.map(decode); expected = bytes; loaded = true
+            } catch {
+                let failure = MusicClientContextDocument.failure(error); fault = failure
+                throw failure
+            }
+        }
+        guard let current = value else { throw MusicServiceError.storageFailed }
+        let next = try transform(current)
+        let bytes = try encode(next)
+        guard bytes != expected else { return (current, revision) }
+        do {
+            try document?.compareAndSwap(expected: expected, replacement: bytes)
+            expected = bytes; value = next; revision = UUID()
+            return (next, revision)
+        } catch {
+            let failure = MusicClientContextDocument.failure(error, committing: true)
+            fault = failure
+            throw failure
+        }
+    }
     func register(_ id: UUID, token: UUID, cancel: @escaping @Sendable () -> Void) throws {
         lock.lock()
         do { try checked(token); cancellations[id] = cancel; lock.unlock() }

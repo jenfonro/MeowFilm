@@ -193,7 +193,7 @@ extension MusicNativePlatforms {
         cube.page.selected = cube.selected + "|"
         for (index, page) in node["pages"].array.enumerated() { try cube.walk(page, path: "page-\(index)") }
         if let feed = cube.feed {
-            let offset = remote["offset"] == .null ? 0 : try remote["offset"].integer(6000)
+            let offset = remote["offset"] == .null ? 0 : try remote["offset"].integer()
             try musicRequire(offset % 30 == 0)
             var seen = Set<String>(), filters: [MusicPublicBrowseFilter] = []
             do {
@@ -242,7 +242,8 @@ extension MusicNativePlatforms {
                     .init(id: try MusicPlatformProtocol.numericID(raw["id"]), title: try raw["name"].text(1024), content: .song(try Self.browseWYSong(raw)))
                 }
                 if more.bool && !section.items.isEmpty {
-                    try musicRequire(offset < 5970, .limit)
+                    // The next offset must remain exactly representable in JSON.
+                    try musicRequire(offset <= 9_007_199_254_740_991 - 30, .limit)
                     cube.page.next = .obj([("offset", .n(offset + 30)), ("snapshot", .string(signature))])
                 }
             } catch {

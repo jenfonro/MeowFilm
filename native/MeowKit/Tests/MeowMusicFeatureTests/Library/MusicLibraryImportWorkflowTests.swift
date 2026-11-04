@@ -466,7 +466,7 @@ private actor LibraryImportWorkflowService: MusicServing {
     func collections() -> [MusicCollection] { libraryReads += 1; return [] }
     func rollbackImport(batchId: String) throws { rollbacks += 1; throw MusicServiceError.unsupported }
     func platforms() -> [MusicPlatform] { [] }
-    func search(platform: String, query: String, page: Int) throws -> MusicSearchPage { throw MusicServiceError.unsupported }
+    func search(platform: String, query: String, page: Int, limit: Int) throws -> MusicSearchPage { throw MusicServiceError.unsupported }
     func tracks(in collection: MusicCollection) throws -> [MusicRemoteTrack] { throw MusicServiceError.unsupported }
     func createPlaylist(name: String, refs: [MusicReference]) throws -> MusicCollection { throw MusicServiceError.unsupported }
     func editPlaylist(_ collection: MusicCollection, name: String?, refs: [MusicReference]?, order: [String]?) throws -> MusicCollection { throw MusicServiceError.unsupported }

@@ -8,7 +8,7 @@ final class AsyncValueCacheTests: XCTestCase {
             try await Task.sleep(nanoseconds: 1_000_000)
         }
         XCTFail("Cache operation did not reach its expected state")
-        throw RequestAdmission.Failure.timedOut
+        throw MusicCacheTestFailure.timeout
     }
     func testSameKeySingleFlightIndependentCancellationAndCacheHit() async throws {
         let cache = AsyncValueCache<String, Int>(capacity: 2), read = CacheTestRead()
@@ -46,9 +46,9 @@ final class AsyncValueCacheTests: XCTestCase {
             XCTAssertEqual(cached, 9)
         }
     }
-    func testCostTTLFailureAndFlightBounds() async throws {
+    func testCostTTLAndFailureNeverRejectDistinctReads() async throws {
         let clock = CacheTestClock()
-        let cache = AsyncValueCache<String, Int>(capacity: 3, maximumCost: 6, maximumFlights: 1,
+        let cache = AsyncValueCache<String, Int>(capacity: 3, maximumCost: 6,
             cost: { $0 }, clock: { clock.now })
         _ = try await cache.value(for: "a", lifetime: 10) { 4 }
         _ = try await cache.value(for: "b", lifetime: 10) { 4 }
@@ -58,9 +58,9 @@ final class AsyncValueCacheTests: XCTestCase {
         let expired = try await cache.value(for: "a", lifetime: 10) { 1 }
         XCTAssertEqual(expired, 1)
         do {
-            _ = try await cache.value(for: "fail", lifetime: 10) { throw RequestAdmission.Failure.timedOut }
+            _ = try await cache.value(for: "fail", lifetime: 10) { throw MusicCacheTestFailure.timeout }
             XCTFail("Failure cached as a value")
-        } catch { XCTAssertEqual(error as? RequestAdmission.Failure, .timedOut) }
+        } catch { XCTAssertEqual(error as? MusicCacheTestFailure, .timeout) }
         let retry = try await cache.value(for: "fail", lifetime: 10) { 2 }
         XCTAssertEqual(retry, 2)
         _ = try await cache.value(for: "oversize", lifetime: 10) { 7 }
@@ -69,17 +69,40 @@ final class AsyncValueCacheTests: XCTestCase {
         let read = CacheTestRead()
         let held = Task { try await cache.value(for: "held", lifetime: 10) { await read.load() } }
         try await waitFor { await read.count == 1 }
-        do {
-            _ = try await cache.value(for: "other", lifetime: 10) { 1 }
-            XCTFail("Distinct flight budget exceeded")
-        } catch { XCTAssertEqual(error as? RequestAdmission.Failure, .queueFull) }
+        let concurrent = try await cache.value(for: "other", lifetime: 10) { 1 }
+        XCTAssertEqual(concurrent, 1)
         await read.finish(0, value: 1)
         _ = try await held.value
         let after = try await cache.value(for: "other", lifetime: 10) { 2 }
-        XCTAssertEqual(after, 2)
+        XCTAssertEqual(after, 1)
     }
-    func testCancelledLoaderThatIgnoresCancellationRemainsChargedUntilItReturns() async throws {
-        let cache = AsyncValueCache<String, Int>(capacity: 2, maximumFlights: 1)
+    func testNilCapacityEvictsOnlyByCostAndFiniteCapacityKeepsItsEntryLimit() async throws {
+        let clock = CacheTestClock()
+        let unbounded = AsyncValueCache<String, Int>(capacity: nil, maximumCost: 6,
+            cost: { $0 }, clock: { clock.now })
+        _ = try await unbounded.value(for: "a", lifetime: 10) { 4 }
+        _ = try await unbounded.value(for: "b", lifetime: 10) { 4 }
+        let evicted = try await unbounded.value(for: "a", lifetime: 10) { 2 }
+        XCTAssertEqual(evicted, 2)
+        _ = try await unbounded.value(for: "c", lifetime: 10) { 2 }
+        _ = try await unbounded.value(for: "d", lifetime: 10) { 2 }
+        let cachedA = try await unbounded.value(for: "a", lifetime: 10) { -1 }
+        XCTAssertEqual(cachedA, 2)
+        let cachedC = try await unbounded.value(for: "c", lifetime: 10) { -1 }
+        let cachedD = try await unbounded.value(for: "d", lifetime: 10) { -1 }
+        XCTAssertEqual(cachedC, 2); XCTAssertEqual(cachedD, 2)
+
+        let finite = AsyncValueCache<String, Int>(capacity: 0, maximumCost: .max,
+            cost: { $0 }, clock: { clock.now })
+        _ = try await finite.value(for: "a", lifetime: 10) { 1 }
+        _ = try await finite.value(for: "b", lifetime: 10) { 2 }
+        let cachedB = try await finite.value(for: "b", lifetime: 10) { -1 }
+        let reloadedA = try await finite.value(for: "a", lifetime: 10) { 3 }
+        XCTAssertEqual(cachedB, 2)
+        XCTAssertEqual(reloadedA, 3)
+    }
+    func testCancelledLoaderThatIgnoresCancellationCannotPublishOrBlockNewKey() async throws {
+        let cache = AsyncValueCache<String, Int>(capacity: 2)
         let read = CacheTestRead()
         let first = Task { try await cache.value(for: "first", lifetime: 30) { await read.load() } }
         try await waitFor { await read.count == 1 }
@@ -87,16 +110,12 @@ final class AsyncValueCacheTests: XCTestCase {
         do { _ = try await first.value; XCTFail("cancelled waiter returned") }
         catch { XCTAssertTrue(error is CancellationError) }
 
-        do {
-            _ = try await cache.value(for: "second", lifetime: 30) { 2 }
-            XCTFail("cancelled physical loader released the concurrency budget early")
-        } catch { XCTAssertEqual(error as? RequestAdmission.Failure, .queueFull) }
+        let second = try await cache.value(for: "second", lifetime: 30) { 2 }
+        XCTAssertEqual(second, 2)
 
         await read.finish(0, value: 1)
-        try await waitFor {
-            do { return try await cache.value(for: "second", lifetime: 30) { 2 } == 2 }
-            catch { return false }
-        }
+        let cached = try await cache.value(for: "second", lifetime: 30) { 3 }
+        XCTAssertEqual(cached, 2)
     }
 }
 
@@ -115,6 +134,7 @@ private final class CacheTestClock: @unchecked Sendable {
     var now: Date { lock.lock(); defer { lock.unlock() }; return date }
     func advance(_ seconds: TimeInterval) { lock.lock(); defer { lock.unlock() }; date.addTimeInterval(seconds) }
 }
+private enum MusicCacheTestFailure: Error, Equatable { case timeout }
 private final class CacheTestEvents: @unchecked Sendable {
     typealias Event = AsyncValueCache<String, Int>.Access
     private let lock = NSLock()

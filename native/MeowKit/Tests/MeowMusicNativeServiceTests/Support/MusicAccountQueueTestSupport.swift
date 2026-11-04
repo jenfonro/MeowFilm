@@ -40,7 +40,7 @@ enum MusicAccountQueueFixture {
               authorization: authorization, loadPage: { try await pages.read($0) })
     }
     static func seed(_ service: NativeMusicService) async throws -> MusicQueueSnapshot {
-        let page = try await service.search(platform: "tx", query: "Old", page: 1)
+        let page = try await service.search(platform: "tx", query: "Old", page: 1, limit: 30)
         _ = try await service.changeQueue(.replace([page.items[0].ref, page.items[0].ref], index: 1), expectedRevision: 0)
         return try await service.queue()
     }

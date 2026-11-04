@@ -17,7 +17,7 @@ public struct MusicAppearanceSongIdentity: Equatable, Sendable {
         else if let filePath, !filePath.isEmpty { stableKey = filePath }
         else { stableKey = [title, artist, album].map(Self.normalizeMetadata).joined(separator: "|") }
     }
-    /// Pass originalSource when the producer still has the original source_data
+    /// Pass originalSource when the producer still has the original source locator
     /// identity, for byte-identical reference fallbacks/imported cover-cache keys.
     /// Otherwise use the domain songId, also when a single source later gains
     /// candidates. Never derive identity from sources.first or the currently

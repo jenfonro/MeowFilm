@@ -28,23 +28,23 @@ final class MusicNativeHistoryManagementTests: XCTestCase {
         } catch { XCTAssertEqual(error as? MusicServiceError, .notFound) }
         XCTAssertEqual(store.snapshot().0, before.0)
     }
-    func testFullTwoThousandOccurrenceDetailUsesNoHandlesOrWrites() async throws {
-        let raw = try MusicHistoryFixture.snapshot(count: 2000, selected: 1999)
+    func testTwoThousandAndOneOccurrenceDetailUsesNoHandlesOrWrites() async throws {
+        let raw = try MusicHistoryFixture.snapshot(count: 2001, selected: 2000)
         let store = NativeMusicMemoryDocument(try MusicHistoryFixture.document([raw]))
         let service = try await NativeMusicFixture.service(store)
-        _ = try await service.search(platform: "tx", query: "Existing handle", page: 1)
+        _ = try await service.search(platform: "tx", query: "Existing handle", page: 1, limit: 30)
         let handles = await service.handles.keys.sorted(), before = store.snapshot()
         let detail = try await service.historyDetail(id: "archive")
 
         XCTAssertEqual(detail.summary.id, "archive")
         XCTAssertEqual(detail.summary.title, "Archived playlist")
-        XCTAssertEqual(detail.summary.count, 2000)
+        XCTAssertEqual(detail.summary.count, 2001)
         XCTAssertEqual(detail.summary.at, raw["at"].number)
-        XCTAssertEqual(detail.selectedIndex, 1999)
+        XCTAssertEqual(detail.selectedIndex, 2000)
         XCTAssertEqual(detail.sourceLabel, "歌单")
-        XCTAssertEqual(detail.entries.count, 2000)
-        XCTAssertEqual(Set(detail.entries.map(\.id)).count, 2000)
-        XCTAssertEqual(detail.entries.last?.index, 1999)
+        XCTAssertEqual(detail.entries.count, 2001)
+        XCTAssertEqual(Set(detail.entries.map(\.id)).count, 2001)
+        XCTAssertEqual(detail.entries.last?.index, 2000)
         XCTAssertEqual(detail.entries.first?.title, detail.entries.last?.title, "duplicate songs remain separate occurrences")
         XCTAssertEqual(detail.entries.first?.artwork?.absoluteString, "https://p1.music.126.net/fixture.jpg")
         let afterHandles = await service.handles.keys.sorted()
@@ -298,6 +298,21 @@ final class MusicNativeHistoryManagementTests: XCTestCase {
         XCTAssertEqual(store.snapshot().0, before.0); XCTAssertEqual(store.snapshot().2, before.2)
     }
 
+    func testHistoryRestoreRetainsMoreThanFormerTwoThousandOccurrencesAfterColdRead() async throws {
+        let raw = try MusicHistoryFixture.snapshot(count: 2001, selected: 2000)
+        let store = NativeMusicMemoryDocument(try MusicHistoryFixture.document([raw]))
+        let service = try await NativeMusicFixture.service(store)
+        let detail = try await service.historyDetail(id: "archive")
+        let state = try await service.restoreHistory(detail: detail, startIndex: nil, expectedRevision: 7)
+        let queue = try await service.queue()
+        XCTAssertEqual(state.total, 2001); XCTAssertEqual(state.currentId, detail.entries.last?.id)
+        XCTAssertEqual(queue.entries.map(\.id), detail.entries.map(\.id))
+        let cold = try await NativeMusicFixture.service(store)
+        let restored = try await cold.queue()
+        XCTAssertEqual(restored.entries, queue.entries); XCTAssertEqual(restored.currentId, queue.currentId)
+        await cold.close(); await service.close()
+    }
+
     func testCASFailurePreservesPlaybackUntilSuccessfulRestore() async throws {
         let store = NativeMusicMemoryDocument(try MusicHistoryFixture.document([MusicHistoryFixture.snapshot()]))
         let service = try await NativeMusicFixture.service(store, accounts: NativeMusicAccountFixture())
@@ -357,13 +372,13 @@ final class MusicNativeHistoryManagementTests: XCTestCase {
 
     func testMalformedOccurrencesAndAmbiguousSnapshotIDAreRejectedWithoutWrites() async throws {
         let raw = try MusicHistoryFixture.snapshot()
-        var duplicate = raw, badID = raw, badSong = raw, tooLarge = raw
+        var duplicate = raw, badID = raw, badSong = raw, repeatedOccurrences = raw
         var entries = raw["entries"].array
         entries[1]["id"] = entries[0]["id"]; duplicate["entries"] = .array(entries)
         entries = raw["entries"].array; entries[0]["id"] = .string("entry-9007199254740992"); badID["entries"] = .array(entries)
         entries = raw["entries"].array; entries[0]["song"] = .array([]); badSong["entries"] = .array(entries)
-        tooLarge["entries"] = .array(Array(repeating: raw["entries"].array[0], count: 2001))
-        for snapshots in [[duplicate], [badID], [badSong], [tooLarge], [raw, raw]] {
+        repeatedOccurrences["entries"] = .array(Array(repeating: raw["entries"].array[0], count: 2001))
+        for snapshots in [[duplicate], [badID], [badSong], [repeatedOccurrences], [raw, raw]] {
             let store = NativeMusicMemoryDocument(try MusicHistoryFixture.document(snapshots))
             let service = try await NativeMusicFixture.service(store), before = store.snapshot()
             do { _ = try await service.historyDetail(id: "archive"); XCTFail("corrupt snapshot") }

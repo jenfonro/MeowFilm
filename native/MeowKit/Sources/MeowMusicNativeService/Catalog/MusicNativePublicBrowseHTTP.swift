@@ -53,21 +53,21 @@ enum MusicNativePublicBrowseWire {
         try musicRequire(id.range(of: "^[1-9][0-9]{0,19}$", options: .regularExpression) != nil, .upstreamInvalid)
         return id
     }
-    static func count(_ value: MJ, maximum: Int = 1_000_000) throws -> Int {
+    static func count(_ value: MJ, maximum: Int = 9_007_199_254_740_991) throws -> Int {
         let number = try MusicNativeSearchProtocol.count(value, maximum: 9_007_199_254_740_991)
         try musicRequire(number >= 0, .upstreamInvalid)
         try musicRequire(number <= maximum, .limit)
         return number
     }
-    static func searchPage(_ items: [MusicPublicBrowseCollection], total: Int, page: Int) throws -> MusicPublicBrowseQQSearch {
-        try musicRequire((1...200).contains(page) && total >= 0, .upstreamInvalid)
-        let offset = (page - 1) * 30
-        // A short nonterminal page is not permission to skip missing members.
-        try musicRequire(items.count == min(30, max(0, total - offset)) &&
-            Set(items.map(\.id)).count == items.count, .upstreamInvalid)
-        let more = offset + items.count < total
-        try musicRequire(!more || page < 200, .limit)
-        return .init(items: items, total: total, nextPage: more ? page + 1 : nil)
+    static func searchPage(_ items: [MusicPublicBrowseCollection], total: Int, page: Int,
+                           limit: Int = 30) throws -> MusicPublicBrowseQQSearch {
+        try musicRequire(page > 0 && page <= Int.max / 100 && (1...100).contains(limit) && total >= 0, .upstreamInvalid)
+        // A short or empty page ends the search; it does not imply missing
+        // members or authorize a skipped range.
+        try musicRequire(items.count <= limit && Set(items.map(\.id)).count == items.count, .upstreamInvalid)
+        return .init(items: items, total: total,
+                     nextPage: try MusicSearchPagination.nextPage(page: page, limit: limit,
+                        count: items.count, total: total))
     }
     static func artwork(_ value: MJ, platform: MusicPublicBrowsePlatform) -> URL? {
         var text = value.string
@@ -137,15 +137,6 @@ extension MusicNativePlatforms {
         }
         return response
     }
-    func checkedWYCode(_ response: MJ, url: URL, retryAfter: String? = nil) async throws -> MJ {
-        do { return try browseWYCode(response) }
-        catch {
-            if MusicServiceError.sanitized(error) == .rateLimited {
-                await transport.recordRateLimit(for: url, retryAfter: retryAfter)
-            }
-            throw error
-        }
-    }
     func browseKGDetail(_ id: String, offset: Int, limit: Int) async throws -> MJ {
         try musicRequire(id.range(of: "^[A-Za-z0-9_-]{1,200}$", options: .regularExpression) != nil && !id.hasPrefix("id_"))
         let client = try await clientDevice(.kugou), mid = client.fields["KUGOU_API_MID"]!, dfid = client.fields["dfid"] ?? "-"
@@ -163,6 +154,11 @@ extension MusicNativePlatforms {
         let codes = ["error_code", "errcode", "err_code"].filter(response.contains).map { response[$0].id }
         if codes.contains("20018") { throw MusicServiceError.authRequired }
         if codes.contains("20028") || response.contains("ssaCode") { throw MusicServiceError.verificationRequired }
+        // Out-of-range detail pages are an empty tail, not an upstream failure.
+        if codes.contains("149") {
+            return .obj([("status", .n(1)), ("error_code", .n(149)),
+                         ("data", .obj([("count", .n(0)), ("songs", .array([])), ("list_info", .null)]))])
+        }
         try musicRequire(["1", "200"].contains(response["status"].id) && codes.allSatisfy { $0 == "0" }, .upstreamFailed)
         return response
     }

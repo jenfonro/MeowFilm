@@ -92,11 +92,12 @@ final class MeowfilmAssembly: ObservableObject {
         self.publicQQ = publicQQ
         let service = NativeMusicService(
             document: resources.musicDocument, accounts: resources.musicAccounts, qq: publicQQ,
-            enabledPlatforms: [.netease, .qq, .kugou],
+            sourceDiscovery: resources.musicSourceDiscoveryCache,
+            enabledPlatforms: [.netease, .qq, .kugou, .kuwo, .migu],
             homeSnapshot: MusicNativeHomeSnapshotDocument(
                 storeFactory: resources.documentFactory(MusicNativeHomeSnapshotDocument.namespace)
             ),
-            audioFileCache: resources.musicAudioCache, requestAdmission: resources.musicRequests,
+            audioFileCache: resources.musicAudioCache,
             clientContexts: resources.musicClients
         )
         self.service = service

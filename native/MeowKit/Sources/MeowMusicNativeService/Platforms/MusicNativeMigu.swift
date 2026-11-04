@@ -11,20 +11,22 @@ enum MusicNativeMiguSearch {
     static let userAgent = "Mozilla/5.0 (Linux; U; Android 11.0.0; zh-cn; MI 11 Build/OPR1.170623.032) AppleWebKit/534.30 (KHTML, like Gecko) Version/4.0 Mobile Safari/534.30"
     static let switches = #"{"song":1,"album":0,"singer":0,"tagSong":1,"mvSong":0,"bestShow":1,"songlist":0,"lyricSong":0}"#
     static let fixed = ["isCorrect": "0", "isCopyright": "1", "searchSwitch": switches,
-        "pageSize": "30", "sort": "0", "sid": "USS"]
+        "sort": "0", "sid": "USS"]
     static func signature(query: String, timestamp: String) -> String {
         MusicPlatformProtocol.md5(query + "6cdc72a439cef99a3418d2a78aa28c73" +
             "yyapp2d16148780a1dcc7408e06336b98cfd50" + deviceID + timestamp)
     }
-    static func request(query: String, page: Int, now: Date) throws -> MusicNativeHTTPRequest {
+    static func request(query: String, page: Int, limit: Int = 30, now: Date) throws -> MusicNativeHTTPRequest {
         let milliseconds = now.timeIntervalSince1970 * 1000
         try musicRequire(milliseconds.isFinite && milliseconds >= 0 && milliseconds <= 9_007_199_254_740_991)
-        return try request(query: query, page: page, timestamp: String(Int64(milliseconds)))
+        return try request(query: query, page: page, limit: limit, timestamp: String(Int64(milliseconds)))
     }
-    static func request(query: String, page: Int, timestamp: String) throws -> MusicNativeHTTPRequest {
+    static func request(query: String, page: Int, limit: Int = 30, timestamp: String) throws -> MusicNativeHTTPRequest {
         try MusicNativeSearchProtocol.validate(query: query, page: page)
+        try musicRequire((1...100).contains(limit))
         try musicRequire(timestamp.range(of: "^[0-9]{1,16}$", options: .regularExpression) != nil)
         var values = fixed; values["text"] = query; values["pageNo"] = String(page)
+        values["pageSize"] = String(limit)
         var url = URLComponents(string: "https://" + host + path)!
         url.queryItems = values.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) }
         url.percentEncodedQuery = url.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
@@ -35,27 +37,24 @@ enum MusicNativeMiguSearch {
     }
     static func permits(_ value: MusicNativeHTTPRequest) -> Bool {
         guard let query = MusicNativeSearchProtocol.query(value, host: host, path: path,
-                keys: Set(fixed.keys).union(["text", "pageNo"])),
+                keys: Set(fixed.keys).union(["text", "pageNo", "pageSize"])),
               let page = Int(query["pageNo"] ?? ""),
+              let limit = Int(query["pageSize"] ?? ""),
               let time = value.headers["timestamp"],
-              let expected = try? request(query: query["text"] ?? "", page: page, timestamp: time) else { return false }
+              let expected = try? request(query: query["text"] ?? "", page: page, limit: limit, timestamp: time) else { return false }
         return MusicNativeSearchProtocol.matches(value, expected)
     }
-    static func decode(_ raw: MJ, page: Int) throws -> MusicNativeTrackPage {
-        try musicRequire((1...200).contains(page) && raw.isObject &&
+    static func decode(_ raw: MJ, page: Int, limit: Int = 30) throws -> MusicNativeTrackPage {
+        try musicRequire(raw.isObject &&
             MusicNativeSearchProtocol.first(raw, "code", "returnCode").id == "000000", .upstreamInvalid)
         let data = raw["data"].isObject ? raw["data"] : raw, result = data["songResultData"]
         try musicRequire(result.isObject && result["resultList"].isArray, .upstreamInvalid)
-        let total = try MusicNativeSearchProtocol.count(result["totalCount"], maximum: 1_000_000)
-        let groups = result["resultList"].array, offset = (page - 1) * 30
-        try musicRequire(groups.count <= 30 &&
-            (groups.isEmpty ? offset >= total : offset + groups.count <= total), .upstreamInvalid)
+        let total = try MusicNativeSearchProtocol.count(result["totalCount"], maximum: 9_007_199_254_740_991)
+        let groups = result["resultList"].array
+        try musicRequire(groups.count <= limit, .upstreamInvalid)
         var items: [MusicNativeTrackData] = [], copyrightIDs: [String: String] = [:], songIDs: [String: String] = [:]
-        var rawCount = 0
         for group in groups {
             try musicRequire(group.isArray && !group.array.isEmpty, .upstreamInvalid)
-            rawCount += group.array.count
-            try musicRequire(rawCount <= MusicNativeSearchProtocol.maximumItems("mg"), .limit)
             for rawSong in group.array {
                 let track = try song(rawSong)
                 let id = rawSong["songId"].id, copyrightID = rawSong["copyrightId"].id
@@ -67,7 +66,8 @@ enum MusicNativeMiguSearch {
             }
         }
         return .init(items: items, total: total,
-            nextPage: page * 30 < total && page < 200 && !groups.isEmpty ? page + 1 : nil)
+            nextPage: try MusicSearchPagination.nextPage(page: page, limit: limit,
+                count: groups.count, total: total))
     }
     static func nativeID(_ value: MJ) throws -> String {
         let text = value.id
@@ -124,9 +124,9 @@ enum MusicNativeMiguSearch {
         var cover = MusicNativeSearchProtocol.first(raw, "img3", "img2", "img1").string
         if cover.isEmpty { cover = raw["albumImgs"].array.first?["img"].string ?? "" }
         if cover.hasPrefix("/") && !cover.hasPrefix("//") { cover = "https://d.musicapp.migu.cn" + cover }
-        var native = MJ.obj([("source", .string("mg")), ("musicId", .string(id)), ("id", .string(id)),
+        var native = MJ.obj([("source", .string("mg")), ("id", .string(id)),
             ("songmid", .string(id)), ("songId", .string(id)), ("copyrightId", .string(copyrightID)),
-            ("name", .string(title)), ("singer", .string(singer)), ("album", .string(album)), ("albumName", .string(album)),
+            ("name", .string(title)), ("singer", .string(singer)), ("albumName", .string(album)),
             ("albumId", .string(albumID)), ("duration", .n(duration)),
             ("interval", .string(String(format: "%02d:%02d", duration / 60, duration % 60))),
             ("img", MusicModel.publicURL(.string(cover))), ("types", .array(types)), ("_types", details)])

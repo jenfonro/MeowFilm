@@ -58,7 +58,7 @@ extension MusicViewModel {
     func performSimilarMode(
         _ operation: (any MusicSimilarModeServing) async throws -> MusicSimilarModeResult
     ) async throws {
-        let own = try enter(); defer { pending -= 1 }
+        let own = try enter()
         guard !isChangingSimilarMode, !isChangingQueue, !isNavigating,
               let provider = service as? any MusicSimilarModeServing else { throw MusicServiceError.busy }
         playbackState.isChangingSimilarMode = true

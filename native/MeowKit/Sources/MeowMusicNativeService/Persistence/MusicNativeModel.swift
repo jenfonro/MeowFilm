@@ -7,10 +7,14 @@ enum MusicModel {
     static let sites = ["wy", "tx", "kg", "kw", "mg"]
     static let qualityOrder = ["master", "spatial", "enhanced", "hires", "lossless", "high", "standard"]
     static let spatialOrder = ["dolby", "dts_x", "sony360", "sky", "vivid", "qq_atmos", "viper_atmos"]
-    static let locatorKeys = ["musicId", "songmid", "mid", "id", "songId", "qqSongId", "copyrightId",
-        "mediaMid", "strMediaMid", "hash", "hash128", "hash320", "hashflac", "albumId", "album_id",
-        "albumMid", "albumAudioId", "mixsongid", "fileid", "contentId", "md5"]
+    static let locatorKeys = ["songmid", "mid", "id", "songId", "qqSongId", "copyrightId",
+        "strMediaMid", "hash", "albumId", "album_id",
+        "albumMid", "albumAudioId", "mixsongid", "fileid", "fileId", "contentId", "md5", "androidMd5"]
     static let metadataKeys = ["name", "singer", "album", "albumName", "duration", "interval", "size", "songType", "type"]
+    private static let locatorScalar = try! NSRegularExpression(pattern: "^[a-zA-Z0-9_. -]*$")
+    private static let secretField = try! NSRegularExpression(
+        pattern: "cookie|token|password|secret|credential|authorization|api[-_]?key|^headers$|^url$|^audioUrl$|^playUrl$",
+        options: [.caseInsensitive])
     static func key(_ area: String) -> String { MJ.array([.string("meowfilm"), .string("music"), .n(1), .string("device"), .string(area)]).json }
     static func freshCollection(_ id: String, _ name: String, _ kind: String = "playlist") -> MJ {
         .obj([("id", .string(id)), ("name", .string(name)), ("kind", .string(kind)), ("order", .array([])),
@@ -27,51 +31,23 @@ enum MusicModel {
     static var playback: MJ { .obj([("schema", .n(1)), ("revision", .n(0)), ("mode", .n(1)), ("qualitySettings", .obj()),
         ("lyricsEnabled", .bool(true)), ("showTranslation", .bool(true)), ("position", .obj([("occurrenceId", .null), ("seconds", .n(0))]))]) }
     static var history: MJ { .obj([("schema", .n(1)), ("playlists", .array([])), ("days", .array([]))]) }
-    static func norm(_ text: String) -> String {
-        text.precomposedStringWithCompatibilityMapping.lowercased()
-            .replacingOccurrences(of: "[\\u200b-\\u200d\\ufeff]", with: "", options: .regularExpression)
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-    static func hash(_ text: String) -> String {
-        var a: UInt32 = 2166136261, b: UInt32 = 3339675911
-        for c in text.utf16 { a = (a ^ UInt32(c)) &* 16777619; b = (b ^ UInt32(c)) &* 2246822519 }
-        return String(format: "%08x%08x", a, b)
-    }
-    static func fingerprint(_ song: MJ) -> String {
-        let d = descriptor(song)
-        if d.title.isEmpty || d.artist.isEmpty || d.title.hasPrefix("未知") || d.artist.hasPrefix("未知") ||
-            d.title.hasPrefix("unknown") || d.artist.hasPrefix("unknown") { return "" }
-        return MJ.strings([d.title, d.artist, d.version]).json
-    }
-    static func descriptor(_ song: MJ) -> (title: String, artist: String, version: String, duration: Double) {
+    static func norm(_ text: String) -> String { MusicRecordingIdentity.normalize(text) }
+    static func hash(_ text: String) -> String { MusicRecordingIdentity.hash(text) }
+    static func fingerprint(_ song: MJ) -> String { descriptor(song).fingerprint }
+    /// Adapts the durable/native JSON shapes to the one recording rule.
+    static func descriptor(_ song: MJ) -> MusicRecordingIdentity {
         let data = sourceData(song)
-        var title = norm(firstText(song["title"], song["name"], data["name"]))
-        let artist = norm(firstText(song["artist"], song["singer"], data["singer"])).components(separatedBy: try! NSRegularExpression(pattern: "\\s*(?:、|;|\\s/\\s|\\s&\\s|\\sfeat\\.?\\s|\\sfeaturing\\s)\\s*"))
-            .filter { !$0.isEmpty }.sorted { $0.utf16.lexicographicallyPrecedes($1.utf16) }.joined(separator: " & ")
-        let tags = [("harmony", "和声伴奏|和聲伴奏"), ("instrumental", "伴奏|instrumental|karaoke"), ("live", "\\blive\\b|现场|現場"),
-            ("remix", "remix|\\bdj\\b"), ("remaster", "remaster|重制|重製"), ("acoustic", "acoustic|不插电|不插電"), ("cover", "翻唱|\\bcover\\b")]
-        let version = tags.filter { title.range(of: $0.1, options: .regularExpression) != nil }.map(\.0).joined(separator: ",")
-        if let open = title.firstIndex(where: { $0 == "(" || $0 == "（" }), let last = title.last, last == ")" || last == "）" {
-            let prefix = norm(String(title[..<open])), inside = norm(String(title[title.index(after: open)..<title.index(before: title.endIndex)]))
-            if prefix == inside { title = prefix }
-        }
-        title = title.replacingOccurrences(of: "\\s*\\(\\s*", with: "(", options: .regularExpression)
-            .replacingOccurrences(of: "\\s*\\)\\s*", with: ")", options: .regularExpression).trimmingCharacters(in: .whitespaces)
-        return (title, artist, version, nativeNumber(song["duration"]) != 0 ? nativeNumber(song["duration"]) : nativeNumber(data["duration"]))
+        let keys = song["sources"].isArray ? song["sources"].array.map { $0["sourceKey"].string } : [nativeKey(song)]
+        return .init(title: firstText(song["title"], song["name"], data["name"]),
+                     artist: firstText(song["artist"], song["singer"], data["singer"]),
+                     duration: nativeNumber(song["duration"]) > 0 ? nativeNumber(song["duration"]) : nativeNumber(data["duration"]),
+                     sourceKeys: keys)
     }
     static func compatible(_ a: MJ, _ b: MJ, sameNative: Bool? = nil) -> Bool {
-        let x = descriptor(a), y = descriptor(b), da = x.duration, db = y.duration
-        let duration = da <= 0 || db <= 0 || abs(da - db) <= max(3, min(da, db) * 0.02)
-        let key = nativeKey(a)
-        if sameNative ?? (!key.isEmpty && musicSame(key, nativeKey(b))) {
-            let unknown: (String) -> Bool = { $0.isEmpty || $0.hasPrefix("未知") || $0.hasPrefix("unknown") }
-            return (unknown(x.artist) || unknown(y.artist) || x.artist == y.artist) &&
-                (unknown(x.title) || unknown(y.title) || x.version == y.version) && duration
-        }
-        return !fingerprint(a).isEmpty && fingerprint(a) == fingerprint(b) && da > 0 && db > 0 && duration
+        descriptor(a).isCompatible(with: descriptor(b), sameNative: sameNative)
     }
     static func sourceKey(_ data: MJ) throws -> String {
-        let platform = data["source"].string, id = (data["musicId"] != .null ? data["musicId"] : data["songmid"] != .null ? data["songmid"] : data["id"]).id
+        let platform = data["source"].string, id = data["songmid"].id
         try musicRequire(sites.contains(platform) && !id.isEmpty, .sourceUnavailable)
         return MJ.strings([platform, id, platform == "kg" ? (!data["hash"].string.isEmpty ? norm(data["hash"].string) : data["albumAudioId"].id) : ""]).json
     }
@@ -81,7 +57,7 @@ enum MusicModel {
         for key in locatorKeys where raw.contains(key) {
             let v = raw[key]
             try musicRequire(v.isInteger || v.isString && v.string.utf8.count <= 256 &&
-                v.string.range(of: "^[a-zA-Z0-9_. -]*$", options: .regularExpression) != nil, .invalidResponse)
+                matches(locatorScalar, v.string), .invalidResponse)
             out[key] = v
         }
         for key in metadataKeys where raw.contains(key) {
@@ -108,7 +84,7 @@ enum MusicModel {
                 try row.requireFields(allowed)
                 for (_, field) in row.fields {
                     try musicRequire(field.isInteger || field.isString && field.string.utf8.count <= 256 &&
-                        field.string.range(of: "^[a-zA-Z0-9_. -]*$", options: .regularExpression) != nil, .invalidResponse)
+                        matches(locatorScalar, field.string), .invalidResponse)
                 }
             }
             out[key] = value
@@ -118,10 +94,13 @@ enum MusicModel {
     }
     static func rejectSecrets(_ value: MJ) throws {
         for (key, child) in value.fields {
-            try musicRequire(key.range(of: "cookie|token|password|secret|credential|authorization|api[-_]?key|^headers$|^url$|^audioUrl$|^playUrl$", options: [.regularExpression, .caseInsensitive]) == nil, .invalidImport)
+            try musicRequire(!matches(secretField, key), .invalidImport)
             try rejectSecrets(child)
         }
         for child in value.array { try rejectSecrets(child) }
+    }
+    private static func matches(_ expression: NSRegularExpression, _ value: String) -> Bool {
+        expression.firstMatch(in: value, range: NSRange(value.startIndex..<value.endIndex, in: value)) != nil
     }
     static func publicURL(_ raw: MJ) -> MJ {
         guard let url = URL(string: raw.string), ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
@@ -131,31 +110,96 @@ enum MusicModel {
         guard !["local", "localhost"].contains(host), !host.hasSuffix(".local"), !host.hasSuffix(".localhost") else { return .string("") }
         return raw
     }
-    static func cleanNative(_ raw: MJ) throws -> MJ { try legacyNative(raw) }
     static func cleanSong(_ raw: MJ) throws -> MJ {
         let normalized = try normalizeSong(raw)
-        let fields = ["songId", "id", "title", "artist", "album", "duration", "cover_url", "source_data", "sources", "quarantinedSources",
-            "plugin_entry_path", "dedup_key", "file_path", "revision", "nextCheckAt", "stableCount", "sourcesCheckedAt", "sourcesRetryAfter",
-            "partial", "libraryIds", "memberLibraryIds", "_libraryId", "_isOnlineObj"]
+        let fields = ["songId", "title", "artist", "album", "duration", "cover_url", "sources"]
         var song = durable(.obj(fields.filter(normalized.contains).map { ($0, normalized[$0]) }))
-        song["source_data"] = try cleanNative(sourceData(normalized))
-        for field in ["sources", "quarantinedSources"] where song.contains(field) {
-            song[field] = .array(try song[field].array.map { raw in
-                let keys = ["sourceKey", "source", "source_data", "title", "artist", "album", "duration",
-                    "cover_url", "observedAt", "nextCheckAt", "revision"]
-                var source = MJ.obj(keys.filter(raw.contains).map { ($0, raw[$0]) })
-                source["source_data"] = try cleanNative(raw["source_data"])
-                if !source["cover_url"].string.isEmpty { source["cover_url"] = publicURL(source["cover_url"]) }
-                return source
-            })
+        _ = try song["songId"].text()
+        _ = try song["title"].text(1024)
+        try musicRequire(song["duration"].isNumber && song["duration"].number.isFinite &&
+            (0...604_800).contains(song["duration"].number), .invalidImport)
+        if song.contains("sources") {
+            let rows = try song["sources"].array.map(cleanSource)
+            var keys = Set<String>(), accepted: [MJ] = []
+            for row in rows {
+                try musicRequire(keys.insert(row["sourceKey"].string).inserted &&
+                    compatible(song, row) && accepted.allSatisfy { compatible($0, row) }, .nativeIDConflict)
+                accepted.append(row)
+            }
+            song["sources"] = .array(orderedSources(accepted))
         }
         if !song["cover_url"].string.isEmpty { song["cover_url"] = publicURL(song["cover_url"]) }
-        for field in ["file_path", "dedup_key"] {
-            let text = song[field].string
-            if text.hasPrefix("{") || text.hasPrefix("[") { song[field] = .string(song["source_data"].json) }
-            else if song["_isOnlineObj"].bool && text.range(of: "^https?://", options: [.regularExpression, .caseInsensitive]) != nil { song.remove(field) }
-        }
         return song
+    }
+    static func cleanSource(_ raw: MJ) throws -> MJ {
+        try raw.requireFields(["sourceKey", "source", "musicInfo"], required: ["sourceKey", "source", "musicInfo"])
+        try musicRequire(raw["musicInfo"].isObject, .invalidImport)
+        if raw["musicInfo"]["duration"] != .null {
+            let value = raw["musicInfo"]["duration"]
+            let duration: Double? = value.isNumber ? value.number : Double(value.string)
+            try musicRequire(duration.map { $0.isFinite && (0...604_800).contains($0) } == true, .invalidImport)
+        }
+        let data = try cleanNative(raw["musicInfo"]), key = try sourceKey(data)
+        try musicRequire(raw["source"].string == data["source"].string &&
+            raw["sourceKey"].string.utf8.elementsEqual(key.utf8), .nativeIDConflict)
+        return .obj([("sourceKey", .string(key)), ("source", data["source"]), ("musicInfo", data)])
+    }
+    /// `sources[0]` is the primary recording; all other recordings are sorted
+    /// by their ordinal source key.
+    static func orderedSources(_ rows: [MJ]) -> [MJ] {
+        guard let primary = rows.first else { return rows }
+        let rest = rows.dropFirst().enumerated().sorted { left, right in
+            let a = left.element["sourceKey"].string, b = right.element["sourceKey"].string
+            return a.utf16.lexicographicallyPrecedes(b.utf16) || (a == b && left.offset < right.offset)
+        }.map { $0.element }
+        return [primary] + Array(rest)
+    }
+    /// The one durable source merge. Callers choose display/refresh precedence;
+    /// every accepted source must agree with the recording and all its peers.
+    static func mergeSources(_ input: MJ, adding incoming: [MJ], preferIncoming: Bool = false) throws -> MJ {
+        var song = try cleanSong(input), rows = song["sources"].array
+        var positions: [Data: Int] = [:]
+        for (offset, row) in rows.enumerated() { positions[Data(row["sourceKey"].string.utf8)] = offset }
+        var primary = rows.first?["sourceKey"].string
+        for (incomingIndex, raw) in incoming.enumerated() {
+            var proposed = try cleanSource(raw)
+            if preferIncoming && incomingIndex == 0 { primary = proposed["sourceKey"].string }
+            let proposedKey = Data(proposed["sourceKey"].string.utf8)
+            if let index = positions[proposedKey] {
+                try musicRequire(compatible(rows[index], proposed, sameNative: true), .nativeIDConflict)
+                let preferred = preferIncoming ? proposed : rows[index]
+                let fallback = preferIncoming ? rows[index] : proposed
+                var data = preferred["musicInfo"]
+                for (key, value) in fallback["musicInfo"].fields where !data.contains(key) { data[key] = value }
+                for key in ["name", "singer", "albumName"] {
+                    let text = norm(data[key].string)
+                    if text.isEmpty || text.hasPrefix("未知") || text.hasPrefix("unknown") {
+                        data[key] = fallback["musicInfo"][key]
+                    }
+                }
+                if nativeNumber(data["duration"]) <= 0 { data["duration"] = fallback["musicInfo"]["duration"] }
+                proposed = try cleanSource(.obj([("sourceKey", preferred["sourceKey"]),
+                    ("source", preferred["source"]), ("musicInfo", data)]))
+                try musicRequire(compatible(song, proposed) &&
+                    rows.enumerated().allSatisfy { $0.offset == index || compatible($0.element, proposed) }, .nativeIDConflict)
+                rows[index] = proposed
+            } else {
+                try musicRequire(compatible(song, proposed) && rows.allSatisfy { compatible($0, proposed) }, .nativeIDConflict)
+                try musicRequire(rows.count < 16, .limit)
+                positions[proposedKey] = rows.count
+                rows.append(proposed)
+            }
+        }
+        if let primary, let index = positions[Data(primary.utf8)] {
+            let row = rows[index]
+            let rest = rows.enumerated().filter { $0.offset != index }.map { $0.element }.enumerated().sorted {
+                let a = $0.element["sourceKey"].string, b = $1.element["sourceKey"].string
+                return a.utf16.lexicographicallyPrecedes(b.utf16) || (a == b && $0.offset < $1.offset)
+            }.map { $0.element }
+            rows = [row] + rest
+        }
+        song["sources"] = .array(rows)
+        return try cleanSong(song)
     }
     static func normalize(_ value: MusicNativeTrackData) throws -> MJ {
         var raw = try MJ.parse(value.data, maximum: 16 * 1024)
@@ -165,28 +209,23 @@ enum MusicModel {
         if raw["types"].array.first?.isString == true {
             raw["types"] = .array(raw["types"].strings.map { .obj([("type", .string($0))]) })
         }
-        if !raw.contains("songmid") { raw["songmid"] = raw["musicId"] }
         if value.platform == "tx" {
             if !raw.contains("songId") { raw["songId"] = raw["qqSongId"] }
             if !raw.contains("albumId") { raw["albumId"] = raw["albumMid"] }
-            if !raw.contains("albumName") { raw["albumName"] = raw["album"] }
         }
         _ = try raw["name"].text(1024)
         try musicRequire(raw["duration"].number.isFinite && (0...604_800).contains(raw["duration"].number), .invalidResponse)
-        return try cleanSong(.obj([("source_data", raw)]))
+        return try cleanSong(.obj([("musicInfo", raw)]))
     }
     static func sources(_ song: MJ) throws -> [MusicNativeSource] {
-        let key = nativeKey(song), data = sourceData(song)
-        let rows = song["sources"].isArray ? song["sources"].array : key.isEmpty ? [] :
-            [.obj([("sourceKey", .string(key)), ("source", data["source"]), ("source_data", data)])]
+        let rows = song["sources"].array
         try musicRequire(rows.count <= 16, .limit)
         return try rows.map {
+            try $0.requireFields(["sourceKey", "source", "musicInfo"], required: ["sourceKey", "source", "musicInfo"])
             let info = sourceData($0), key = try sourceKey(info)
             try musicRequire($0["sourceKey"].string.utf8.elementsEqual(key.utf8), .corruptDocument)
             let platform = info["source"].string
-            let native = platform == "kg" && !info["hash"].id.isEmpty ? info["hash"].id :
-                !info["musicId"].id.isEmpty ? info["musicId"].id : !info["songmid"].id.isEmpty ? info["songmid"].id : info["id"].id
-            return .init(sourceKey: key, platform: platform, nativeId: native)
+            return .init(sourceKey: key, platform: platform, nativeId: info["songmid"].id)
         }
     }
     static func track(_ song: MJ, _ ref: MusicReference) throws -> MusicRemoteTrack {
@@ -209,13 +248,5 @@ enum MusicModel {
         return qualities.filter { p.enabled.contains(map[$0] ?? $0) }.sorted {
             (p.order.firstIndex(of: map[$0] ?? $0) ?? 100) < (p.order.firstIndex(of: map[$1] ?? $1) ?? 100)
         }
-    }
-}
-private extension String {
-    func components(separatedBy re: NSRegularExpression) -> [String] {
-        let ns = self as NSString, matches = re.matches(in: self, range: NSRange(location: 0, length: ns.length))
-        var start = 0, result: [String] = []
-        for match in matches { result.append(ns.substring(with: NSRange(location: start, length: match.range.location - start))); start = NSMaxRange(match.range) }
-        result.append(ns.substring(from: start)); return result
     }
 }

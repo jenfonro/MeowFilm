@@ -73,14 +73,6 @@ public enum MusicServiceError: String, Error, Sendable, LocalizedError {
 
     public static func sanitized(_ error: Error) -> MusicServiceError {
         if Task.isCancelled || error is CancellationError { return .cancelled }
-        if let error = error as? RequestAdmission.Failure {
-            switch error {
-            case .closed: return .closed
-            case .queueFull: return .busy
-            case .timedOut: return .timeout
-            case .coolingDown: return .rateLimited
-            }
-        }
         if let error = error as? URLError {
             switch error.code {
             case .cancelled: return .cancelled
@@ -255,11 +247,14 @@ public struct MusicSearchPage: Sendable {
     public let platform: String
     public let query: String
     public let page: Int
+    public let limit: Int
     public let total: Int
     public let nextPage: Int?
     public let items: [MusicRemoteTrack]
-    public init(platform: String, query: String, page: Int, total: Int, nextPage: Int?, items: [MusicRemoteTrack]) {
-        self.platform = platform; self.query = query; self.page = page; self.total = total; self.nextPage = nextPage; self.items = items
+    public init(platform: String, query: String, page: Int, limit: Int = 30, total: Int, nextPage: Int?,
+                items: [MusicRemoteTrack]) {
+        self.platform = platform; self.query = query; self.page = page; self.limit = limit
+        self.total = total; self.nextPage = nextPage; self.items = items
     }
 }
 
@@ -468,7 +463,7 @@ public struct MusicImportPreview: Sendable {
 public protocol MusicServing: Sendable {
     func state() async throws -> MusicPlaybackState
     func platforms() async throws -> [MusicPlatform]
-    func search(platform: String, query: String, page: Int) async throws -> MusicSearchPage
+    func search(platform: String, query: String, page: Int, limit: Int) async throws -> MusicSearchPage
     func collections() async throws -> [MusicCollection]
     func tracks(in collection: MusicCollection) async throws -> [MusicRemoteTrack]
     func createPlaylist(name: String, refs: [MusicReference]) async throws -> MusicCollection

@@ -15,25 +15,36 @@ import Combine
     private let model: MusicViewModel
     private var binding: MusicCollectionPageBinding?
     private var readTask: Task<Void, Never>?
+    private var reads: [UUID: Task<Void, Never>] = [:]
     private var actionTask: Task<Void, Never>?
+    private var accountObservation: AnyCancellable?
+    private var access: UUID?
     private var readID = UUID(), actionID = UUID()
     private var active = false
     private var needsRead = false
 
-    public init(model: MusicViewModel) { self.model = model }
+    public init(model: MusicViewModel) {
+        self.model = model
+        accountObservation = model.accountChanges.sink { [weak self] _ in
+            guard let self else { return }
+            self.setActive(self.active)
+        }
+    }
     public func setActive(_ active: Bool) {
         let valid = active && model.isAvailable && !model.isClosed
-        if valid, self.active, binding?.matches(model) == true { return }
+        if valid, self.active, access == model.searchAccessGeneration, binding?.matches(model) == true { return }
         suspend()
         guard valid else { return }
         self.active = true
+        access = model.searchAccessGeneration
         binding = MusicCollectionPageBinding(owner: model)
         refreshFavorites()
     }
     public func suspend() {
-        active = false; binding?.active = false; binding = nil
+        active = false; access = nil; binding?.active = false; binding = nil
         readID = UUID(); actionID = UUID()
         readTask?.cancel(); actionTask?.cancel()
+        readTask = nil
         needsRead = false
         favorites = []; favoritesLoaded = false; favoritesLoading = false; busy = actionTask != nil
         error = nil; actionError = nil
@@ -47,12 +58,14 @@ import Combine
         needsRead = false
         let token = UUID(); readID = token; readTask?.cancel()
         favoritesLoading = true; error = nil
-        readTask = Task { [weak self] in
+        let task = Task { [weak self] in
             guard let self else { return }
             defer {
-                self.readTask = nil
-                if self.readID == token { self.favoritesLoading = false }
-                if self.active, !self.busy, self.needsRead || self.binding !== own { self.refreshFavorites() }
+                self.reads[token] = nil
+                if self.readID == token {
+                    self.readTask = nil; self.favoritesLoading = false
+                    if self.active, !self.busy, self.needsRead { self.refreshFavorites() }
+                }
             }
             do {
                 let snapshot = try await self.favoriteSnapshot(own)
@@ -64,6 +77,7 @@ import Combine
                 self.error = MusicServiceError.sanitized(error)
             }
         }
+        readTask = task; reads[token] = task
     }
     @discardableResult public func toggleFavorite(_ song: MusicSearchSong,
         refresh: (@MainActor () async throws -> MusicRemoteTrack)? = nil) -> Task<Void, Never>? {
@@ -72,7 +86,7 @@ import Combine
         // re-ranking cannot turn "remove" into "add" after the first suspension.
         let remove = isFavorite(song), token = UUID()
         actionID = token; busy = true; actionError = nil; error = nil
-        readID = UUID(); readTask?.cancel(); favoritesLoading = false
+        readID = UUID(); readTask?.cancel(); readTask = nil; favoritesLoading = false
         let task = Task { [weak self] in
             guard let self else { return }
             defer {
@@ -150,8 +164,7 @@ import Combine
         let request: MusicSearchBatchRequest
         do { request = try session.makeBatchRequest() }
         catch {
-            actionError = session.songs.count > MusicSearchBatchRequest.maximumCount
-                ? "最多播放2000首" : MusicServiceError.sanitized(error).localizedDescription
+            actionError = MusicServiceError.sanitized(error).localizedDescription
             return nil
         }
         let page = session.requestID
@@ -177,9 +190,10 @@ import Combine
         }
     }
     func finishPending() async {
-        while readTask != nil || actionTask != nil {
-            let read = readTask, action = actionTask
-            await read?.value; await action?.value
+        while !reads.isEmpty || actionTask != nil {
+            let pending = Array(reads.values), action = actionTask
+            for read in pending { await read.value }
+            await action?.value
         }
     }
     private func favoriteSnapshot(_ binding: MusicCollectionPageBinding) async throws -> MusicCollectionPageSnapshot {
@@ -190,6 +204,6 @@ import Combine
               snapshot.collection.kind == "favorites" else { throw MusicServiceError.notFound }
         return snapshot
     }
-    deinit { readTask?.cancel(); actionTask?.cancel() }
+    deinit { accountObservation?.cancel(); for read in reads.values { read.cancel() }; actionTask?.cancel() }
 }
 #endif

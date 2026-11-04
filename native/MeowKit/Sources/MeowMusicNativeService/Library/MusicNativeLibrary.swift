@@ -16,22 +16,9 @@ enum MusicLibraryValidation {
             try musicRequire(song["songId"].string.utf8.elementsEqual(id.utf8), .songIDConflict)
             let clean = try MusicModel.cleanSong(song)
             try musicRequire(musicSame(clean["songId"].string, id), .songIDConflict)
-            for field in ["sources", "quarantinedSources"] {
-                try musicRequire(!song.contains(field) || song[field].isArray, .corruptDocument)
-            }
-            var seen = Set<String>()
-            for source in song["sources"].array + song["quarantinedSources"].array {
-                let key = try MusicModel.sourceKey(MusicModel.sourceData(source))
-                try musicRequire(source["sourceKey"].string.utf8.elementsEqual(key.utf8) && seen.insert(key).inserted, .nativeIDConflict)
-                try MusicModel.validateNativeNumbers(MusicModel.sourceData(source))
-            }
-            for source in song["sources"].array {
+            for source in clean["sources"].array {
                 let key = source["sourceKey"].string
                 try musicRequire(nativeOwners[key] == nil || musicSame(nativeOwners[key]!, id), .nativeIDConflict)
-                try musicRequire(MusicModel.compatible(song, source), .nativeIDConflict)
-                for other in song["sources"].array {
-                    try musicRequire(MusicModel.compatible(source, other, sameNative: key == other["sourceKey"].string), .nativeIDConflict)
-                }
                 nativeOwners[key] = id
             }
         }
@@ -95,51 +82,70 @@ extension NativeMusicService {
         .init(id: c["id"].string, title: c["name"].string, kind: c["kind"].string, count: c["order"].array.count, revision: c["revision"].int)
     }
     func upsert(_ input: [MJ], library: inout MJ) throws -> [String] {
-        try musicRequire(input.count <= 2000, .limit)
-        var songs = library["songs"], result: [String] = []
+        var songs = library["songs"], rows = songs.fields, result: [String] = []
+        var positions: [Data: Int] = [:]
+        for (offset, row) in rows.enumerated() { positions[Data(row.0.utf8)] = offset }
+        var cleaned: [Data: MJ] = [:]
+        var sourceOwner: [Data: String] = [:]
+        for (id, row) in rows {
+            for source in row["sources"].array {
+                let key = Data(source["sourceKey"].string.utf8)
+                if let owner = sourceOwner[key], !musicSame(owner, id) { throw MusicServiceError.songIDConflict }
+                sourceOwner[key] = id
+            }
+        }
+        var returned = Set<Data>()
         for raw in input {
-            var song = try MusicModel.cleanSong(raw)
+            let songID = raw["songId"].string
+            var song: MJ
+            if !songID.isEmpty, let value = cleaned[Data(songID.utf8)],
+               value["title"] == raw["title"], value["artist"] == raw["artist"],
+               value["album"] == raw["album"], value["duration"] == raw["duration"],
+               value["cover_url"] == raw["cover_url"], value["sources"] == raw["sources"] { song = value }
+            else {
+                song = try MusicModel.cleanSong(raw)
+                if !songID.isEmpty { cleaned[Data(songID.utf8)] = song }
+            }
             let key = MusicModel.nativeKey(song), firstKey: String? = key.isEmpty ? nil : key
+            let keys = Set(song["sources"].array.map { $0["sourceKey"].string })
             func compatible(_ known: MJ) -> Bool {
                 MusicModel.compatible(known, song) && known["sources"].array.allSatisfy { MusicModel.compatible($0, song) }
             }
-            if let existing = songs.fields.map(\.1).first(where: { row in
-                firstKey != nil && (MusicModel.nativeKey(row) == firstKey || row["sources"].array.contains { $0["sourceKey"].string == firstKey })
-            }) {
-                try musicRequire(compatible(existing), .nativeIDConflict)
-                song["songId"] = existing["songId"]
+            let existingIDs = Set(keys.compactMap { sourceOwner[Data($0.utf8)] })
+            try musicRequire(existingIDs.count <= 1, .songIDConflict)
+            if let existingID = existingIDs.first, let index = positions[Data(existingID.utf8)] {
+                try musicRequire(compatible(rows[index].1), .nativeIDConflict)
+                song["songId"] = rows[index].1["songId"]
             }
             var id = try song["songId"].text()
-            if songs.contains(id), let firstKey,
-               !compatible(songs[id]) {
+            if let index = positions[Data(id.utf8)], let firstKey,
+               !compatible(rows[index].1) {
                 let d = MusicModel.descriptor(song)
                 let description = MJ.obj([("title", .string(d.title)), ("artist", .string(d.artist)), ("version", .string(d.version)), ("duration", .number(d.duration))])
                 let fingerprint = MusicModel.fingerprint(song)
                 id = "song:" + MusicModel.hash(fingerprint.isEmpty ? firstKey : fingerprint) + ":" + MusicModel.hash(MJ.array([.string(firstKey), description]).json)
                 song["songId"] = .string(id)
             }
-            if songs.contains(id) {
-                let previous = songs[id]
+            if let index = positions[Data(id.utf8)] {
+                let previous = rows[index].1
                 try musicRequire(firstKey == nil || compatible(previous), .songIDConflict)
-                var combined = previous["sources"].array
-                for source in song["sources"].array {
-                    if let i = combined.firstIndex(where: { $0["sourceKey"] == source["sourceKey"] }) { combined[i] = source }
-                    else { combined.append(source) }
-                }
-                for a in combined { for b in combined {
-                    try musicRequire(MusicModel.compatible(a, b, sameNative: a["sourceKey"] == b["sourceKey"]), .nativeIDConflict)
-                } }
-                if previous["revision"].int > song["revision"].int { song = previous }
-                else { song["sources"] = .array(combined) }
+                song = try MusicModel.mergeSources(song, adding: previous["sources"].array)
+                rows[index].1 = song
+            } else {
+                positions[Data(id.utf8)] = rows.count
+                rows.append((id, song))
             }
-            songs[id] = song
-            if !result.contains(where: { musicSame($0, id) }) { result.append(id) }
+            for source in song["sources"].array { sourceOwner[Data(source["sourceKey"].string.utf8)] = id }
+            if returned.insert(Data(id.utf8)).inserted { result.append(id) }
         }
-        try musicRequire(songs.fields.count <= 20_000, .limit); library["songs"] = songs; return result
+        try musicRequire(rows.count <= 20_000, .limit)
+        songs = .obj(rows); library["songs"] = songs; return result
     }
     func saveCollection(_ c: MJ, _ d: inout MusicDocument) {
         var library = d.library["library"], rows = library["collections"].array
-        if let i = rows.firstIndex(where: { $0["id"] == c["id"] }) { rows[i] = c } else { rows.append(c) }
+        var positions: [Data: Int] = [:]
+        for (offset, row) in rows.enumerated() { positions[Data(row["id"].string.utf8)] = offset }
+        if let i = positions[Data(c["id"].string.utf8)] { rows[i] = c } else { rows.append(c) }
         library["collections"] = .array(rows); library["revision"] = .n(library["revision"].int + 1)
         d.library["library"] = library; d.library["revision"] = .n(d.library["revision"].int + 1)
     }
@@ -242,10 +248,11 @@ extension NativeMusicService {
         try MusicModel.rejectSecrets(lib)
         lib["status"] = .obj([("phase", .string("blocked")), ("at", .n(0)), ("issues", .array([.obj([("code", .string("legacy_import_requires_rebinding"))])]))])
         let batch = MJ.obj([("sourceId", .string(sourceId)), ("ownerId", .string(ownerId)), ("scope", .string("device")), ("library", lib)]).stable.digest
-        let plan = Import(library: lib, sourceID: sourceId, ownerID: ownerId, batch: batch, at: now())
+        let bytes = lib.bytes.count + sourceId.utf8.count + ownerId.utf8.count + batch.utf8.count
+        let plan = Import(library: lib, bytes: bytes, sourceID: sourceId, ownerID: ownerId, batch: batch, at: now())
         let applied = try checkImport(read(), plan)
         prepared = prepared.filter { now().timeIntervalSince($0.value.at) < 600 }
-        try musicRequire(prepared.count < 2, .busy)
+        try musicRequire(prepared.values.reduce(bytes, { $0 + $1.bytes }) <= 14 * 1024 * 1024, .limit)
         let id = UUID().uuidString.lowercased(); prepared[id] = plan
         return .init(importId: id, report: report(plan, applied: applied))
     }

@@ -51,8 +51,7 @@ final class NativeMusicKugouIntegrationTests: XCTestCase {
             let item = try XCTUnwrap(page.items.first)
             XCTAssertEqual(item.platform, "kg")
             let raw = try MusicKugouFixture.object(JSONDecoder().decode(JSONValue.self, from: item.data))
-            XCTAssertEqual(raw["musicId"], .string(MusicKugouFixture.baseHash))
-            XCTAssertEqual(raw["songmid"], .string("21"))
+            XCTAssertEqual(raw["songmid"], .string(MusicKugouFixture.baseHash))
             XCTAssertNil(raw["token"])
         }
         let collections = try await f.service.nativeCollections(platform: .kugou, cursor: nil)
@@ -79,6 +78,45 @@ final class NativeMusicKugouIntegrationTests: XCTestCase {
         XCTAssertNil(f.store.peek(f.identity))
         let status = try await f.service.statuses()
         XCTAssertEqual(status.first?.phase, .signedOut); XCTAssertEqual(status.first?.nickname, "")
+        _ = await f.service.close()
+    }
+
+    func testKugouOwnerCreateCooldownUsesFiveSecondBoundary() async throws {
+        let f = try NativeKugouOwnerFixture(restored: false)
+        try await f.enable()
+        let challenge = try await f.service.beginLogin(platform: .kugou)
+        await f.service.cancelLogin(challengeID: challenge.id)
+        let requestsAfterCreate = await f.http.recorded()
+        let callsAfterCreate = f.store.calls()
+
+        f.clock.advance(4)
+        do {
+            _ = try await f.service.beginLogin(platform: .kugou)
+            XCTFail("Kugou four-second create admitted")
+        } catch { XCTAssertEqual(error as? MusicServiceError, .rateLimited) }
+        let requestsAfterRejection = await f.http.recorded()
+        XCTAssertEqual(requestsAfterRejection.count, requestsAfterCreate.count)
+        for (rejected, created) in zip(requestsAfterRejection, requestsAfterCreate) {
+            XCTAssertEqual(rejected.url, created.url)
+            XCTAssertEqual(rejected.method, created.method)
+            XCTAssertEqual(rejected.headers, created.headers)
+            XCTAssertEqual(rejected.body, created.body)
+            XCTAssertEqual(rejected.maximumBytes, created.maximumBytes)
+        }
+        XCTAssertEqual(f.store.calls(), callsAfterCreate)
+        XCTAssertNil(f.store.peek(f.identity))
+
+        f.clock.advance(1)
+        let next = try await f.service.beginLogin(platform: .kugou)
+        XCTAssertEqual(next.platform, .kugou)
+        XCTAssertNotEqual(next.id, challenge.id)
+        XCTAssertEqual(Array(next.image.prefix(8)), [137, 80, 78, 71, 13, 10, 26, 10])
+        let finalRequests = await f.http.recorded()
+        XCTAssertEqual(finalRequests.filter { $0.url.path == "/risk/v2/r_register_dev" }.count, 1)
+        XCTAssertEqual(finalRequests.filter { $0.url.path == "/v2/qrcode" }.count, 2)
+        XCTAssertFalse(finalRequests.contains { $0.url.path == "/v3/get_my_info" })
+        XCTAssertNil(f.store.peek(f.identity))
+        await f.service.cancelLogin(challengeID: next.id)
         _ = await f.service.close()
     }
 

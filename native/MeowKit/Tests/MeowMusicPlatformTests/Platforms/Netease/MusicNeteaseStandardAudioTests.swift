@@ -154,7 +154,7 @@ final class MusicNeteaseStandardAudioTests: XCTestCase {
         }
     }
 
-    func testAudioRateLimitRetainsOnlyItsOwnResponseRetryAfterAndDoesNotRetry() async throws {
+    func testAudioRateLimitIsReportedWithoutLocalRetry() async throws {
         for code in [429, 509] {
             for nested in [false, true] {
                 let f = try MusicNeteaseNativeFixture(restored: false); try await f.enable()
@@ -167,10 +167,6 @@ final class MusicNeteaseStandardAudioTests: XCTestCase {
                     _ = try await f.service.nativeResolve(platform: .netease, nativeID: "101", selection: options[0].selection(quality: "128k"))
                     XCTFail("Rate limit accepted")
                 } catch { XCTAssertEqual(error as? MusicServiceError, .rateLimited) }
-                let limits = await f.http.rateLimits()
-                XCTAssertEqual(limits.count, 1)
-                XCTAssertEqual(limits.first?.path, playerPath)
-                XCTAssertEqual(limits.first?.retryAfter, "17")
                 let calls = await f.http.recorded()
                 XCTAssertEqual(calls.filter { $0.request.url.path == playerPath }.count, 1)
                 _ = await f.service.close()

@@ -5,7 +5,6 @@ import Foundation
 extension HLSLoopbackRoute: URLSessionDataDelegate {
     func pump() {
         guard !invalidated, let plan else { return }
-        refreshConnectionLimit()
         for client in Array(clients.values) where !client.closed && client.taskID == nil {
             guard let request = client.request, let resource = client.resource else { continue }
             do {

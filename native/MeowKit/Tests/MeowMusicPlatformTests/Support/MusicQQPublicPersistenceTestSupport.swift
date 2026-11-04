@@ -89,7 +89,18 @@ actor QQPublicPersistenceHTTP: MusicAccountHTTPTransport {
     private let document: QQPublicPersistenceMemory?
     nonisolated let cancellations = QQPublicPersistenceCounter()
     init(document: QQPublicPersistenceMemory? = nil) { self.document = document }
-    func hold(_ method: String, gate: QQPublicPersistenceGate) { held[method, default: []].append(gate) }
+    func hold(_ method: String, gate: QQPublicPersistenceGate) {
+        held[method, default: []].append(gate)
+    }
+    func waitForCalls(_ method: String, count: Int) async throws {
+        for _ in 0..<10_000 {
+            var matched = 0
+            for seen in requests where (try? Self.method(seen.request)) == method { matched += 1 }
+            if matched >= count { return }
+            await Task.yield()
+        }
+        throw MusicServiceError.timeout
+    }
     func fail(_ method: String, status: Int?) { failures[method] = status }
     func override(_ method: String, bytes: Data?) { overrides[method] = bytes }
     func calls() -> [Seen] { requests }
@@ -153,7 +164,7 @@ struct QQPublicPersistenceFixture {
     func enable(_ generation: UInt64 = 1) async throws {
         try await service.setAccess(available: true, generation: generation)
     }
-    func search() async throws { _ = try await service.search(query: "synthetic", page: 1) }
+    func search() async throws { _ = try await service.search(query: "synthetic", page: 1, limit: 30) }
     func stored() throws -> [String: Any] {
         try MusicQQPublicPersistenceCodec.decode(XCTUnwrap(document.peek()))
     }

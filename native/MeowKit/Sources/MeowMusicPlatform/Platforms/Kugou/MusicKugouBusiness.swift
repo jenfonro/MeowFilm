@@ -15,7 +15,7 @@ struct MusicKugouCollection: Sendable, Equatable {
     let count: Int
     let globalID: String
     let favorite: Bool
-    let sort: Int
+    let sort: Int?
     let fingerprint: Data
     var dto: JSONValue { .object(["id": .string(id), "title": .string(name), "count": .number(Double(count)), "owned": .bool(owned)]) }
     let owned: Bool
@@ -75,8 +75,11 @@ extension KugouMusicAccountAdapter {
     }
     func paginate(_ entry: MusicKugouCollection?, context: MusicKugouContext) async throws -> MusicKugouPages {
         var output = MusicKugouPages(), seen = Set<String>(), byteCount = 0
-        let uid = context.auth!.uid, token = context.auth!.token, maximum = entry == nil ? 2000 : 20_000
-        for page in 1...((maximum + 29) / 30 + 1) {
+        let uid = context.auth!.uid, token = context.auth!.token
+        let directoryRowLimit = entry == nil ? 2000 : nil
+        var page = 1
+        while true {
+            if let directoryRowLimit, page > (directoryRowLimit + 29) / 30 + 1 { throw MusicServiceError.limit }
             try check(context)
             let root: [String: Any]
             if let entry {
@@ -99,6 +102,10 @@ extension KugouMusicAccountAdapter {
                                          body: ["userid": uid, "token": token, "total_ver": 979, "type": 2, "page": page, "pagesize": 30])
             }
             let data = root["data"] as? [String: Any] ?? root
+            let listInfo = data["list_info"]
+            if let listInfo, !(listInfo is NSNull), !(listInfo is [String: Any]) {
+                throw MusicServiceError.upstreamInvalid
+            }
             let info = data["list_info"] as? [String: Any] ?? [:]
             if entry == nil || entry?.type == 0 {
                 for source in [root, data] {
@@ -107,18 +114,31 @@ extension KugouMusicAccountAdapter {
             }
             if let entry {
                 if entry.type == 1 {
-                    guard data["list_info"] is [String: Any] else { throw MusicServiceError.upstreamInvalid }
                     if let value = info["global_collection_id"], value as? String != entry.globalID { throw MusicServiceError.targetChanged }
                 }
                 for source in [data, info] {
                     if let value = source["listid"], try MusicKugouWire.id(value) != entry.listID { throw MusicServiceError.targetChanged }
                 }
             }
-            var count = try MusicKugouWire.first(data["count"], data["total"], info["count"], root["count"], root["total"])
-                .map { try MusicKugouWire.integer($0, maximum: maximum) }
-            if count == nil, entry == nil, ["list_count", "collect_count", "album_count"].contains(where: { data[$0] != nil }) {
-                count = try ["list_count", "collect_count", "album_count"].reduce(0) { try $0 + MusicKugouWire.integer(data[$1], maximum: maximum) }
-                guard count! <= maximum else { throw MusicServiceError.limit }
+            var count: Int?
+            if entry == nil {
+                count = try MusicKugouWire.first(data["count"], data["total"], info["count"], root["count"], root["total"])
+                    .map { try MusicKugouWire.integer($0, maximum: 2000) }
+                if count == nil, ["list_count", "collect_count", "album_count"].contains(where: { data[$0] != nil }) {
+                    count = try ["list_count", "collect_count", "album_count"].reduce(0) {
+                        try $0 + MusicKugouWire.integer(data[$1], maximum: 2000)
+                    }
+                    guard count! <= 2000 else { throw MusicServiceError.limit }
+                }
+            } else if entry?.type == 1 {
+                guard let value = data["count"] else { throw MusicServiceError.upstreamInvalid }
+                count = try MusicKugouWire.integer(value)
+                if let listCount = info["count"] {
+                    guard try MusicKugouWire.integer(listCount) == count else { throw MusicServiceError.upstreamInvalid }
+                }
+            } else {
+                count = try MusicKugouWire.first(data["count"], data["total"], info["count"], root["count"], root["total"])
+                    .map { try MusicKugouWire.integer($0) }
             }
             let versionValue = entry == nil ? MusicKugouWire.first(data["total_ver"], root["total_ver"])
                 : MusicKugouWire.first(info["list_ver"], data["list_ver"], root["list_ver"])
@@ -135,7 +155,8 @@ extension KugouMusicAccountAdapter {
                 else { identity = try MusicKugouWire.hash(MusicKugouWire.first(row["hash"], (row["audio_info"] as? [String: Any])?["hash"])) }
                 guard seen.insert(identity).inserted else { throw MusicServiceError.upstreamInvalid }
                 byteCount += try MusicKugouWire.json(row).count
-                guard byteCount <= 4 * 1024 * 1024, output.rows.count < maximum else { throw MusicServiceError.limit }
+                guard byteCount <= 4 * 1024 * 1024 else { throw MusicServiceError.limit }
+                if let directoryRowLimit { guard output.rows.count < directoryRowLimit else { throw MusicServiceError.limit } }
                 output.rows.append(row)
             }
             if let total = output.count {
@@ -143,8 +164,8 @@ extension KugouMusicAccountAdapter {
                 if output.rows.count == total { return output }
                 guard !rows.isEmpty else { throw MusicServiceError.upstreamInvalid }
             } else if rows.isEmpty { return output }
+            page += 1
         }
-        throw MusicServiceError.limit
     }
     func directory(_ context: MusicKugouContext) async throws -> [MusicKugouCollection] {
         let pages = try await paginate(nil, context: context)
@@ -153,16 +174,16 @@ extension KugouMusicAccountAdapter {
             let type = try MusicKugouWire.integer(row["type"], maximum: 1)
             let source = try MusicKugouWire.integer(row["source"])
             let listID = try MusicKugouWire.id(row["listid"]), owner = try MusicKugouWire.id(row["list_create_userid"], zero: true)
-            let name = try MusicKugouWire.text(row["name"], maximum: 600), count = try MusicKugouWire.integer(row["count"], maximum: 20_000)
+            let name = try MusicKugouWire.text(row["name"], maximum: 600), count = try MusicKugouWire.integer(row["count"])
             let special = [1, 2].contains((try? MusicKugouWire.integer(row["is_def"])) ?? 0) || (try? MusicKugouWire.integer(row["is_default"])) == 1
             let owned = type == 0 && owner == context.auth!.uid
             let favorite = owned && special && ["我喜欢", "我喜欢的音乐"].contains(name)
             if favorite { favoriteCount += 1 }
             let global = try MusicKugouWire.text(MusicKugouWire.first(row["global_collection_id"], row["list_create_gid"]) ?? "", maximum: 200, empty: true)
-            let sort = (try? MusicKugouWire.integer(row["sort"])) ?? MusicPlatformJSON.maximumInteger
+            let sort = try? MusicKugouWire.integer(row["sort"])
             var fingerprint: [String: Any] = [
                 "id": "\(type):\(listID)", "owner": owner, "name": name, "count": count, "source": source,
-                "globalID": global, "special": special, "favorite": favorite, "sort": sort,
+                "globalID": global, "special": special, "favorite": favorite, "sort": sort.map { $0 as Any } ?? NSNull(),
                 "directoryVersion": pages.version.map { $0 as Any } ?? NSNull()
             ]
             for key in ["list_ver", "tags", "intro", "pic"] { fingerprint[key] = row[key] ?? NSNull() }
@@ -173,7 +194,9 @@ extension KugouMusicAccountAdapter {
         guard favoriteCount <= 1 else { throw MusicServiceError.upstreamInvalid }
         return output.enumerated().sorted {
             if $0.element.type != $1.element.type { return $0.element.type < $1.element.type }
-            if $0.element.sort != $1.element.sort { return $0.element.sort < $1.element.sort }
+            if let left = $0.element.sort, let right = $1.element.sort { return left < right }
+            if $0.element.sort == nil && $1.element.sort != nil { return false }
+            if $0.element.sort != nil && $1.element.sort == nil { return true }
             return $0.offset < $1.offset
         }.map(\.element)
     }
@@ -198,9 +221,12 @@ extension KugouMusicAccountAdapter {
         try check(context)
         guard first == last else { throw MusicServiceError.staleResult }
         let sorted = b.rows.enumerated().sorted {
-            let a = (try? MusicKugouWire.integer($0.element["sort"])) ?? MusicPlatformJSON.maximumInteger
-            let b = (try? MusicKugouWire.integer($1.element["sort"])) ?? MusicPlatformJSON.maximumInteger
-            return a == b ? $0.offset < $1.offset : a < b
+            let a = try? MusicKugouWire.integer($0.element["sort"])
+            let b = try? MusicKugouWire.integer($1.element["sort"])
+            if let left = a, let right = b { return left < right }
+            if a == nil && b != nil { return false }
+            if a != nil && b == nil { return true }
+            return $0.offset < $1.offset
         }
         var bytes = 0
         return try sorted.map { _, raw in

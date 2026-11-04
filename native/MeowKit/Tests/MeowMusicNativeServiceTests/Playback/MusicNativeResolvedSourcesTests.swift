@@ -11,6 +11,66 @@ final class MusicNativeResolvedSourcesTests: XCTestCase {
             throw MusicServiceError.closed
         }
     }
+
+    func testInspectionMergesCachedSourcesWithoutSearchAndAdoptsThroughCurrentQueueCAS() async throws {
+        let song = try MusicNativeCandidateDiscoveryFixture.song()
+        let cached = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "cached"))
+        let row = try XCTUnwrap(cached["sources"].array.first)
+        let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
+        let fingerprint = MusicModel.fingerprint(song), at = NativeMusicFixture.date.timeIntervalSince1970 * 1000
+        for platform in MusicNativeSearchProtocol.platforms {
+            await cache.record(fingerprint: fingerprint, duration: 180, platform: platform, checkedAt: at,
+                sources: platform == "wy" ? [.init(sourceKey: row["sourceKey"].string, source: platform,
+                    musicInfo: row["musicInfo"].json)] : [])
+        }
+        let store = try MusicNativeCandidateDiscoveryFixture.store(song: song), slow = NativeMusicGate()
+        await slow.release()
+        let accounts = MusicInspectionConcurrencyAccounts(slow: slow, onLower: {})
+        let http = MusicNativeCandidateDiscoveryHTTP(), qq = MusicNativeCandidateDiscoveryQQ()
+        let service = try await NativeMusicFixture.service(store, accounts: accounts, qq: qq, http: http, sourceDiscovery: cache)
+        let before = store.snapshot().0
+        let inspection = try await service.inspectSources(for: .init(kind: .queue, id: "entry-1"))
+        let snapshot = try await settle(inspection)
+        let choice = try XCTUnwrap(snapshot.sources.first { $0.selection.siteId == "wy" })
+        let calls = await http.calls(), qqCalls = await qq.calls()
+        XCTAssertTrue(calls.isEmpty); XCTAssertTrue(qqCalls.isEmpty)
+        XCTAssertEqual(store.snapshot().0, before)
+        let selected = try await inspection.adopt(sourceID: choice.id, occurrenceID: "entry-1", expectedQueueRevision: 1)
+        XCTAssertEqual(selected, choice.selection)
+        let queue = try await service.queue()
+        XCTAssertEqual(queue.revision, 2); XCTAssertEqual(queue.currentId, "entry-1")
+        XCTAssertTrue(queue.entries[0].track.sources.contains { $0.platform == "wy" && $0.nativeId == "cached" })
+        let history = try await service.playedSongs()
+        XCTAssertTrue(history.isEmpty)
+        await inspection.close(); await service.close()
+    }
+
+    func testInspectionManualRefreshBypassesSuccessfulEmptyCacheChecks() async throws {
+        let song = try MusicNativeCandidateDiscoveryFixture.song()
+        let cache = MusicNativeMemorySourceDiscoveryCache(clock: { NativeMusicFixture.date })
+        for platform in MusicNativeSearchProtocol.platforms {
+            await cache.record(fingerprint: MusicModel.fingerprint(song), duration: 180, platform: platform,
+                checkedAt: NativeMusicFixture.date.timeIntervalSince1970 * 1000, sources: [])
+        }
+        let store = try MusicNativeCandidateDiscoveryFixture.store(song: song), slow = NativeMusicGate()
+        await slow.release()
+        let accounts = MusicInspectionConcurrencyAccounts(slow: slow, onLower: {})
+        let http = MusicNativeCandidateDiscoveryHTTP(), qq = MusicNativeCandidateDiscoveryQQ()
+        let service = try await NativeMusicFixture.service(store, accounts: accounts, qq: qq, http: http, sourceDiscovery: cache)
+        let inspection = try await service.inspectSources(for: .init(kind: .queue, id: "entry-1"))
+        _ = try await settle(inspection)
+        let initial = await http.calls(), initialQQ = await qq.calls()
+        XCTAssertTrue(initial.isEmpty); XCTAssertTrue(initialQQ.isEmpty)
+        let before = store.snapshot().0
+        _ = try await inspection.loadMore(refresh: true)
+        _ = try await settle(inspection)
+        let refreshed = await http.calls(), refreshedQQ = await qq.calls()
+        XCTAssertEqual(Set(refreshed), ["wy", "kg", "kw", "mg"]); XCTAssertEqual(refreshed.count, 4)
+        XCTAssertEqual(refreshedQQ.count, 1)
+        XCTAssertEqual(store.snapshot().0, before)
+        await inspection.close(); await service.close()
+    }
+
     func testInspectionAndCloseKeepCurrentAttemptDocumentAndListeningFactsUntouched() async throws {
         let f = try await MusicRecoveryTestFixture.make()
         let before = f.store.snapshot().0

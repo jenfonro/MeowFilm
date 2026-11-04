@@ -14,22 +14,14 @@ public struct PlaybackNetworkUsage: Equatable, Sendable {
 }
 
 struct PlaybackNetworkLimits {
-    // Conservative product-wide cap, including retiring generations. Keep it
-    // no larger than the default host cap so redirect waves cannot overbook a
-    // CDN by first acquiring slots against several initial hosts.
-    var activeTasks = 2
-    var tasksPerHost = 2
     var retainedPayloadBytes = 16 * 1024 * 1024
     var windowBytes = 256 * 1024
     var deliveryBytes = 64 * 1024
-    var requestsPerAsset = 8
     var budgetWaitSeconds: TimeInterval = 30
-    var hlsConnections = 8
-    var hlsListeners = 2
 }
 
 /// Product/controller lifetime, not item lifetime. A cancelled old item's
-/// uncooperative task therefore cannot donate its slot to the next item.
+/// uncooperative task retains its actual payload reservation until completion.
 final class PlaybackNetworkBudget: @unchecked Sendable {
     let limits: PlaybackNetworkLimits
     private let lock = NSLock()
@@ -39,9 +31,9 @@ final class PlaybackNetworkBudget: @unchecked Sendable {
     private var auxiliary: [UUID: PlaybackAuxiliaryReservation.Kind] = [:]
 
     init(limits: PlaybackNetworkLimits = .init()) {
-        precondition(limits.activeTasks > 0 && limits.tasksPerHost > 0 && limits.windowBytes > 0 &&
+        precondition(limits.windowBytes > 0 &&
                      limits.deliveryBytes > 0 && limits.deliveryBytes <= limits.windowBytes &&
-                     limits.retainedPayloadBytes >= limits.windowBytes && limits.requestsPerAsset > 0 &&
+                     limits.retainedPayloadBytes >= limits.windowBytes &&
                      limits.budgetWaitSeconds > 0)
         self.limits = limits
     }
@@ -68,8 +60,6 @@ final class PlaybackNetworkBudget: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard requested > 0, requested <= limits.windowBytes,
               additionalStorageBytes >= 0,
-              tasks.count < limits.activeTasks,
-              tasks.values.filter({ $0 == host }).count < limits.tasksPerHost,
               requested <= limits.retainedPayloadBytes - bytes,
               additionalStorageBytes <= limits.retainedPayloadBytes - bytes - requested else { return nil }
         let id = UUID()
@@ -82,7 +72,6 @@ final class PlaybackNetworkBudget: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard let old = tasks[id] else { return false }
         if old == host { return true }
-        guard tasks.values.filter({ $0 == host }).count < limits.tasksPerHost else { return false }
         tasks[id] = host
         return true
     }
@@ -99,9 +88,7 @@ final class PlaybackNetworkBudget: @unchecked Sendable {
 
     func acquireAuxiliary(_ kind: PlaybackAuxiliaryReservation.Kind, bytes requested: Int) -> PlaybackAuxiliaryReservation? {
         lock.lock(); defer { lock.unlock() }
-        let maximum = kind == .connection ? limits.hlsConnections : kind == .listener ? limits.hlsListeners : Int.max
-        guard requested >= 0, requested <= limits.retainedPayloadBytes - bytes,
-              auxiliary.values.filter({ $0 == kind }).count < maximum else { return nil }
+        guard requested >= 0, requested <= limits.retainedPayloadBytes - bytes else { return nil }
         let id = UUID(); auxiliary[id] = kind; bytes += requested
         return PlaybackAuxiliaryReservation(budget: self, id: id, bytes: requested)
     }

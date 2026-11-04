@@ -23,7 +23,9 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
     var error: MusicServiceError?
     var duplicateCursor = false
     var longCycle = false
+    var longPages = false
     var emptyDetailFirst = false
+    var detailCount = 1, detailPageSize = 30
     var openedQueues = 0
     var queries: [String] = []
     var cursors: [String?] = []
@@ -32,13 +34,19 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
     func fail(_ error: MusicServiceError?) { self.error = error }
     func loopCursor() { duplicateCursor = true }
     func loopMultiplePages() { longCycle = true }
+    func keepPaging() { longPages = true }
     func omitFirstDetailPage() { emptyDetailFirst = true }
+    func keepDetailPaging(count: Int, pageSize: Int = 30) { detailCount = count; detailPageSize = pageSize }
     func publicPlaylists(platform: MusicPublicBrowsePlatform, query: String, cursor: String?) async throws -> MusicPublicBrowseCollectionPage {
         queries.append(query); cursors.append(cursor); platforms.append(platform)
         if let gate { await gate.wait() }
         if let error { throw error }
         let row = MusicPublicBrowseCollection(platform: platform, nativeID: cursor == nil ? "1" : "2", title: query)
         if longCycle { return .init(items: [row], total: 90, cursor: cursor == nil ? "a" : cursor == "a" ? "b" : "a") }
+        if longPages {
+            let page = cursor.flatMap(Int.init) ?? 1
+            return .init(items: [row], total: 201, cursor: page < 201 ? String(page + 1) : nil)
+        }
         return .init(items: [row], total: 2, cursor: cursor == nil || duplicateCursor ? "next" : nil)
     }
     func publicDetail(_ collection: MusicPublicBrowseCollection, cursor: String?) async throws -> MusicPublicBrowseDetail {
@@ -49,6 +57,13 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
             return .init(collection: collection, members: members, total: 31,
                          cursor: cursor == nil ? "raw30" : nil, snapshot: String(repeating: "a", count: 64),
                          notice: cursor == nil ? "部分歌曲当前不可见或不可用" : nil, consumed: cursor == nil ? 30 : 1)
+        }
+        if detailCount > 1 {
+            let start = cursor.flatMap(Int.init) ?? 0, end = min(start + detailPageSize, detailCount)
+            return .init(collection: collection, members: (start..<end).map {
+                .init(nativeID: String($0 + 1), sourcePosition: $0, track: Self.track(String($0 + 1)))
+            }, total: detailCount, cursor: end < detailCount ? String(end) : nil,
+               snapshot: String(repeating: "a", count: 64))
         }
         return .init(collection: collection, members: [.init(nativeID: "1", sourcePosition: 0, track: Self.track("1"))],
                      total: 1, cursor: nil, snapshot: String(repeating: "a", count: 64))
@@ -213,6 +228,76 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
             model.disappear()
         }
     }
+    func testPlaylistPaginationKeepsMoreThanFormerTwoHundredPages() async {
+        let service = MusicPublicBrowseFeatureService(), model = model(service)
+        await service.keepPaging(); await model.refresh()
+        for page in 1...200 {
+            await model.next()
+            XCTAssertNil(model.error, "page \(page + 1)")
+        }
+        XCTAssertEqual(model.pageNumber, 201)
+        XCTAssertEqual(model.total, 201)
+        XCTAssertEqual(model.sections.reduce(0, { $0 + $1.items.count }), 1)
+        model.disappear()
+    }
+
+    func testDetailAppendsBeyondTwoThousandSongsAndFindsFullAndFilteredQueueIndex() async throws {
+        let service = MusicPublicBrowseFeatureService(), count = 2001
+        await service.keepDetailPaging(count: count)
+        let model = MusicPublicBrowseViewModel(service: service, request: .detail(MusicPublicBrowseFeatureService.collection),
+            queuePage: { _, cursor in
+                let start = cursor.flatMap(Int.init) ?? 0, end = min(start + 30, count)
+                return .init(items: (start..<end).map { MusicPublicBrowseFeatureService.track(String($0 + 1)) },
+                             cursor: end < count ? String(end) : nil)
+            })
+        model.setAccess(available: true, generation: UUID()); model.appear(); await model.refresh()
+        while model.nextCursor != nil, model.error == nil { await model.appendNext() }
+        XCTAssertNil(model.error); XCTAssertFalse(model.usesPageNavigation)
+        XCTAssertEqual(model.tracks.count, count); XCTAssertEqual(model.total, count)
+        let track = try XCTUnwrap(model.tracks.last)
+        XCTAssertEqual(model.queueIndex(of: track), 2000)
+        let (source, index) = try await model.playbackSource(for: track)
+        XCTAssertEqual(index, 2000)
+        let filtered = try await model.filteredQueueIndex(source: source, index: index, track: track, query: "2001")
+        XCTAssertEqual(filtered, 0)
+        model.disappear(); await source.close()
+    }
+
+    func testDetailPaginationKeepsMoreThanFormerSixHundredSixtySevenPages() async {
+        let service = MusicPublicBrowseFeatureService()
+        await service.keepDetailPaging(count: 670, pageSize: 1)
+        let model = model(service, request: .detail(MusicPublicBrowseFeatureService.collection))
+        await model.refresh()
+        for page in 1..<670 {
+            await model.next()
+            XCTAssertNil(model.error, "page \(page + 1)")
+        }
+        XCTAssertEqual(model.pageNumber, 670); XCTAssertEqual(model.total, 670)
+        XCTAssertEqual(model.tracks.last?.title, "670"); XCTAssertNil(model.nextCursor)
+        model.disappear()
+    }
+
+    func testQueueIndexTraversalStillRejectsMultiPageCursorCycles() async throws {
+        let service = MusicPublicBrowseFeatureService()
+        let model = MusicPublicBrowseViewModel(service: service, request: .detail(MusicPublicBrowseFeatureService.collection),
+            queuePage: { _, cursor in
+                .init(items: [MusicPublicBrowseFeatureService.track("other")],
+                      cursor: cursor == nil ? "a" : cursor == "a" ? "b" : "a")
+            })
+        model.setAccess(available: true, generation: UUID()); model.appear(); await model.refresh()
+        do {
+            _ = try await model.playbackSource(for: XCTUnwrap(model.tracks.first))
+            XCTFail("cursor cycle")
+        } catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
+        let source = try XCTUnwrap(model.remoteSource)
+        do {
+            _ = try await model.filteredQueueIndex(source: source, index: 2001,
+                track: MusicPublicBrowseFeatureService.track("missing"), query: "")
+            XCTFail("filtered cursor cycle")
+        } catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
+        model.disappear(); await source.close()
+    }
+
     func testNewPlatformSearchLateCallbackCannotSurviveProtectionGenerationChange() async {
         for platform in [MusicPublicBrowsePlatform.kuwo, .migu] {
             let service = MusicPublicBrowseFeatureService(), gate = MusicPublicBrowseGate()

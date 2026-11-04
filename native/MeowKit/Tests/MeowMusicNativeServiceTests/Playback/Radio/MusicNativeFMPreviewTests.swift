@@ -8,8 +8,10 @@ private actor FMPreviewOwner: MusicNativeAccountProviding, MusicNativeFMProvidin
     var calls: [(MusicHomeAction, Bool)] = []
     var gate: NativeMusicGate?
     var failure: MusicServiceError?
-    func configure(gate: NativeMusicGate? = nil, failure: MusicServiceError? = nil) {
-        self.gate = gate; self.failure = failure
+    var onRead: (@Sendable () -> Void)?
+    func configure(gate: NativeMusicGate? = nil, failure: MusicServiceError? = nil,
+                   onRead: (@Sendable () -> Void)? = nil) {
+        self.gate = gate; self.failure = failure; self.onRead = onRead
     }
     func changeAccount() {
         binding.authorization.revoke()
@@ -26,6 +28,7 @@ private actor FMPreviewOwner: MusicNativeAccountProviding, MusicNativeFMProvidin
     }
     func nativeFM(_ action: MusicHomeAction, preview: Bool, binding: MusicNativeHomeBinding) async throws -> MusicNativeFMResponse {
         try checkNativeHomeBinding(binding); calls.append((action, preview))
+        onRead?()
         let serial = calls.count
         if let gate { await gate.wait() }
         if let failure { throw failure }
@@ -33,9 +36,9 @@ private actor FMPreviewOwner: MusicNativeAccountProviding, MusicNativeFMProvidin
         let cover = URL(string: "https://p1.music.126.net/fixture-\(serial).jpg")!
         if preview, case .ruleFM = action { return .init(artwork: cover) }
         let track = MusicNativeTrackData(platform: "wy", data: MJ.obj([
-            ("musicId", .string(String(serial))), ("songmid", .string(String(serial))),
+            ("songmid", .string(String(serial))),
             ("name", .string("Synthetic \(serial)")), ("singer", .string("Artist")),
-            ("album", .string("Album")), ("duration", .n(180)), ("img", .string(cover.absoluteString)),
+            ("albumName", .string("Album")), ("duration", .n(180)), ("img", .string(cover.absoluteString)),
             ("types", .array([.obj([("type", .string("128k"))])]))
         ]).bytes)
         return .init(tracks: [track], artwork: cover)
@@ -61,6 +64,43 @@ final class MusicNativeFMPreviewTests: XCTestCase {
         XCTAssertEqual(document.snapshot().1, 0); XCTAssertEqual(document.snapshot().2, 0)
         let activeAttempt = await service.attempt; XCTAssertNil(activeAttempt)
         await service.close(); XCTAssertFalse(values.0?.authorization.isActive == true)
+    }
+    func testQueueLeasesStayIndependentAndReleaseWithoutFetching() async throws {
+        let owner = FMPreviewOwner(), service = try await NativeMusicFixture.service(accounts: owner)
+        var sources: [MusicRemoteQueueSource] = []
+        for index in 0..<9 {
+            sources.append(try await service.openHomeActionQueue(fm, title: "FM \(index)"))
+        }
+        let leases = await service.fmQueues.count, calls = await owner.calls
+        XCTAssertEqual(leases, 9); XCTAssertTrue(calls.isEmpty)
+        for (index, source) in sources.enumerated() {
+            XCTAssertTrue(source.authorization.isActive)
+            await source.close()
+            XCTAssertFalse(source.authorization.isActive)
+            let remaining = await service.fmQueues.count
+            XCTAssertEqual(remaining, sources.count - index - 1)
+            XCTAssertTrue(sources.dropFirst(index + 1).allSatisfy { $0.authorization.isActive })
+        }
+        await service.close()
+    }
+    func testDistinctVisiblePreviewsStartWithoutAnAccountRequestLane() async throws {
+        let owner = FMPreviewOwner(), service = try await NativeMusicFixture.service(accounts: owner)
+        let gate = NativeMusicGate(), started = expectation(description: "visible FM previews entered")
+        started.expectedFulfillmentCount = 6
+        await owner.configure(gate: gate, onRead: { started.fulfill() })
+        let tasks = (1...6).map { index in
+            Task { try await service.fmPreview(.ruleFM(ruleID: String(index), tabTagID: "", sourceName: "")) }
+        }
+        await fulfillment(of: [started], timeout: 3)
+        await gate.release()
+        var previews: [MusicFMPreview] = []
+        for task in tasks {
+            let value = try await task.value
+            previews.append(try XCTUnwrap(value))
+        }
+        XCTAssertTrue(previews.allSatisfy { $0.authorization.isActive && $0.artwork != nil })
+        await service.close()
+        XCTAssertTrue(previews.allSatisfy { !$0.authorization.isActive })
     }
     func testPendingPreviewTransfersExactBatchAndOnlyBoundaryFetchesNextBatch() async throws {
         let owner = FMPreviewOwner(), service = try await NativeMusicFixture.service(accounts: owner), gate = NativeMusicGate()

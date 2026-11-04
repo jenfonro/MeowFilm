@@ -55,16 +55,16 @@ enum MusicAccountSyncWire {
         let data = try encoded(value), raw = try MusicQQWire.decode(data)
         let id: String
         switch platform {
-        case .netease: id = try MusicNeteaseWire.id(raw["musicId"])
-        case .qq: id = try MusicQQWire.id(raw["musicId"], mid: true)
-        case .kugou: id = try MusicKugouWire.hash(raw["hash"] ?? raw["musicId"])
+        case .netease: id = try MusicNeteaseWire.id(raw["songmid"])
+        case .qq: id = try MusicQQWire.id(raw["songmid"], mid: true)
+        case .kugou: id = try MusicKugouWire.hash(raw["hash"] ?? raw["songmid"])
         }
         let occurrence = platform == .kugou && raw["fileid"] != nil ? try MusicKugouWire.id(raw["fileid"]) : id
         return .init(nativeID: id, occurrenceID: occurrence, track: data)
     }
     static func collection(id: String, name: String, kind: MusicLibrarySyncKind, writable: Bool,
                            canOrder: Bool, members: [MusicLibrarySyncMember], fingerprint: Data = Data()) throws -> MusicLibrarySyncCollection {
-        guard members.count <= 20_000, Set(members.map(\.occurrenceID)).count == members.count else { throw MusicServiceError.upstreamInvalid }
+        guard Set(members.map(\.occurrenceID)).count == members.count else { throw MusicServiceError.upstreamInvalid }
         let bytes = try encoded(members)
         guard bytes.count <= 4 * 1024 * 1024 else { throw MusicServiceError.limit }
         let revision = hash(try encoded([id, name, kind.rawValue, String(writable), String(canOrder)]) + bytes + fingerprint)

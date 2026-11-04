@@ -14,14 +14,14 @@ final class MusicCandidateDiscoveryPolicyTests: XCTestCase {
         XCTAssertEqual(high.map(\.quality), ["320k", "192k"])
         XCTAssertEqual(Set(plan.map(\.selection.installationId)), ["script-a", "official:fixture"])
     }
-    func testBoundedEditionsRotatePlatformsAndKeepExactScriptInstances() throws {
+    func testAllKnownEditionsRotatePlatformsAndKeepExactScriptInstances() throws {
         var options: [MusicCandidateDiscoveryOption] = []
         for n in 0..<14 { options.append(MusicCandidateDiscoveryFixture.option("script-\(n)", source: "tx-\(n)", qualities: ["flac"])) }
         options.append(MusicCandidateDiscoveryFixture.option("script-a", platform: "wy", source: "wy-1", qualities: ["flac"]))
         options.append(MusicCandidateDiscoveryFixture.option("script-b", platform: "wy", source: "wy-1", qualities: ["flac"]))
         let plan = try MusicCandidateDiscoveryPolicy().plan(MusicCandidateDiscoveryFixture.snapshot(options))
-        XCTAssertLessThanOrEqual(Set(plan.map(\.selection.sourceKey)).count, 10)
-        XCTAssertLessThanOrEqual(plan.count, 15)
+        XCTAssertEqual(Set(plan.map(\.selection.sourceKey)).count, 15)
+        XCTAssertEqual(plan.count, 16)
         XCTAssertTrue(plan.contains { $0.selection.siteId == "wy" && $0.selection.installationId == "script-a" })
         XCTAssertTrue(plan.contains { $0.selection.siteId == "wy" && $0.selection.installationId == "script-b" })
         XCTAssertEqual(Set(plan.prefix(2).map(\.selection.siteId)), ["tx", "wy"])

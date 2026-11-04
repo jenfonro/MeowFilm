@@ -54,11 +54,7 @@ extension NativeMusicService: MusicFMPreviewServing {
             guard !fmQueues.values.contains(where: { $0.0 == key && $0.1.isActive }) else { return nil }
             if fmPreviewOrder.count >= 6, let oldest = fmPreviewOrder.first { discardFMPreview(oldest) }
             let id = UUID(), authorization = MusicQueueAuthorization(parent: binding.authorization)
-            let previous = fmPreviewTail
-            // Optional previews use one lane, leaving an account-operation slot
-            // for a user action. Still at most six bounded pending/failed reads.
             let task = Task { [weak self] () -> MusicNativeFMResponse? in
-                _ = await previous?.value
                 guard let self, !Task.isCancelled, binding.authorization.isActive else { return nil }
                 return await self.readFMPreview(key, id: id, binding: binding, epoch: own)
             }
@@ -72,7 +68,7 @@ extension NativeMusicService: MusicFMPreviewServing {
             access.register(id) { authorization.revoke(); task.cancel() }
             fmPreviews[key] = .init(id: id, binding: binding, authorization: authorization,
                 task: task, observer: observer)
-            fmPreviewOrder.append(key); fmPreviewTail = task
+            fmPreviewOrder.append(key)
         }
         guard let entry = fmPreviews[key] else { return nil }
         let value = await entry.task.value
@@ -98,7 +94,6 @@ extension NativeMusicService: MusicFMPreviewServing {
     }
     func clearFMPreviews() {
         for key in Array(fmPreviews.keys) { discardFMPreview(key) }
-        fmPreviewTail?.cancel(); fmPreviewTail = nil
     }
     private func loadFM(_ action: MusicHomeAction, preview: Bool, binding: MusicNativeHomeBinding,
                         epoch own: UUID) async throws -> MusicNativeFMResponse {
@@ -119,7 +114,6 @@ extension NativeMusicService: MusicFMPreviewServing {
         try await checkHomeBinding(binding, epoch: own)
         guard accounts is any MusicNativeFMProviding else { throw MusicServiceError.unsupported }
         for (id, value) in fmQueues where !value.1.isActive { releaseFMQueue(id) }
-        try musicRequire(fmQueues.count < 8, .busy)
         let id = UUID(), authorization = MusicQueueAuthorization(parent: binding.authorization)
         var preview: Task<MusicNativeFMResponse?, Never>?
         if let entry = fmPreviews[key] {

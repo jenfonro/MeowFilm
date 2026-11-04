@@ -36,7 +36,9 @@ private actor BrowseActionService: MusicPublicBrowsing, MusicPublicBrowseQueueLo
     }
     func publicQueueTracks(_ request: MusicPublicBrowseQueueRequest) -> [MusicNativeTrackData] { [] }
     func publicDiscovery(_ destination: MusicPublicBrowseDestination, cursor: String?) throws -> MusicPublicBrowsePage { throw MusicServiceError.unsupported }
-    func publicPlaylists(platform: MusicPublicBrowsePlatform, query: String, cursor: String?) throws -> MusicPublicBrowseCollectionPage { throw MusicServiceError.unsupported }
+    func publicPlaylists(platform: MusicPublicBrowsePlatform, query: String, cursor: String?) throws -> MusicPublicBrowseCollectionPage {
+        throw MusicServiceError.unsupported
+    }
 }
 @MainActor private final class BrowseActionPages {
     let sizes: [Int]

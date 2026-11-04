@@ -1,4 +1,5 @@
 import Foundation
+import XCTest
 import MeowMusicFeature
 @testable import MeowMusicNativeService
 
@@ -7,8 +8,8 @@ enum MusicNativeCandidateDiscoveryFixture {
     static let installation = "22222222-2222-4222-8222-222222222222"
     static func track(_ platform: String = "tx", id: String = "SeedMID", title: String = "Synthetic recording",
                       artist: String = "Fixture", duration: Int = 180) -> MusicNativeTrackData {
-        var data = MJ.obj([("source", .string(platform)), ("musicId", .string(id)), ("songmid", .string(id)),
-            ("name", .string(title)), ("singer", .string(artist)), ("album", .string("Synthetic album")),
+        var data = MJ.obj([("source", .string(platform)), ("songmid", .string(id)),
+            ("name", .string(title)), ("singer", .string(artist)), ("albumName", .string("Synthetic album")),
             ("duration", .n(duration)), ("types", .array([.obj([("type", .string("128k"))]), .obj([("type", .string("flac"))])]))])
         if platform == "kg" { data["hash"] = .string(id) }
         return .init(platform: platform, data: data.bytes)
@@ -31,28 +32,58 @@ enum MusicNativeCandidateDiscoveryFixture {
 actor MusicNativeCandidateDiscoveryBarrier {
     private var calls = 0, released = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
-    private var observers: [(Int, CheckedContinuation<Void, Never>)] = []
+    private struct Observer {
+        let count: Int
+        let continuation: CheckedContinuation<Bool, Never>
+        let timeout: Task<Void, Never>
+    }
+    private var observers: [UUID: Observer] = [:]
     func enter() async {
         calls += 1
-        let ready = observers.filter { $0.0 <= calls }; observers.removeAll { $0.0 <= calls }
-        ready.forEach { $0.1.resume() }
+        let ready = observers.filter { calls >= $0.value.count }.map(\.key)
+        for id in ready { finish(id, reached: true) }
         if !released { await withCheckedContinuation { waiters.append($0) } }
     }
-    func started(_ count: Int) async {
-        if calls < count { await withCheckedContinuation { observers.append((count, $0)) } }
+    func started(_ count: Int, file: StaticString = #filePath, line: UInt = #line) async {
+        let reached = await wait(count, timeout: .seconds(3))
+        if !reached { XCTFail("Discovery requests did not enter", file: file, line: line) }
     }
-    func release() { released = true; waiters.forEach { $0.resume() }; waiters = [] }
+    private func wait(_ count: Int, timeout: Duration) async -> Bool {
+        if calls >= count { return true }
+        let id = UUID()
+        return await withCheckedContinuation { continuation in
+            let timer = Task {
+                do { try await Task.sleep(for: timeout) } catch { return }
+                self.finish(id, reached: false)
+            }
+            observers[id] = .init(count: count, continuation: continuation, timeout: timer)
+        }
+    }
+    private func finish(_ id: UUID, reached: Bool) {
+        guard let observer = observers.removeValue(forKey: id) else { return }
+        observer.timeout.cancel()
+        observer.continuation.resume(returning: reached)
+    }
+    func release() {
+        released = true; waiters.forEach { $0.resume() }; waiters = []
+    }
     func count() -> Int { calls }
 }
 
 actor MusicNativeCandidateDiscoveryQQ: MusicPublicQQProviding {
     let barrier: MusicNativeCandidateDiscoveryBarrier?
+    let items: [MusicNativeTrackData]
     var queries: [String] = []
-    init(barrier: MusicNativeCandidateDiscoveryBarrier? = nil) { self.barrier = barrier }
-    func search(query: String, page: Int) async throws -> MusicNativeTrackPage {
+    var fail: MusicServiceError?
+    init(barrier: MusicNativeCandidateDiscoveryBarrier? = nil, fail: MusicServiceError? = nil,
+         items: [MusicNativeTrackData] = [MusicNativeCandidateDiscoveryFixture.track()]) {
+        self.barrier = barrier; self.fail = fail; self.items = items
+    }
+    func search(query: String, page: Int, limit: Int) async throws -> MusicNativeTrackPage {
         queries.append(query)
         if let barrier { await barrier.enter() }
-        return .init(items: [MusicNativeCandidateDiscoveryFixture.track()], total: 1)
+        if let fail { throw fail }
+        return .init(items: items, total: items.count)
     }
     func lyrics(mid: String) -> MusicNativeLyrics { .init(text: "") }
     func calls() -> [String] { queries }
@@ -61,9 +92,12 @@ actor MusicNativeCandidateDiscoveryQQ: MusicPublicQQProviding {
 actor MusicNativeCandidateDiscoveryHTTP: MusicNativeHTTPTransport {
     let barrier: MusicNativeCandidateDiscoveryBarrier?
     let wyStatus: Int
+    var empty: Set<String>
+    var failures: [String: MusicServiceError]
     private var platforms: [String] = []
-    init(barrier: MusicNativeCandidateDiscoveryBarrier? = nil, wyStatus: Int = 200) {
-        self.barrier = barrier; self.wyStatus = wyStatus
+    init(barrier: MusicNativeCandidateDiscoveryBarrier? = nil, wyStatus: Int = 200,
+         empty: Set<String> = [], failures: [String: MusicServiceError] = [:]) {
+        self.barrier = barrier; self.wyStatus = wyStatus; self.empty = empty; self.failures = failures
     }
     func send(_ request: MusicNativeHTTPRequest) async throws -> MusicNativeHTTPResponse {
         guard let platform = ["interfacepc.music.163.com": "wy", "gateway.kugou.com": "kg",
@@ -73,6 +107,20 @@ actor MusicNativeCandidateDiscoveryHTTP: MusicNativeHTTPTransport {
         let wy = platform == "wy"
         platforms.append(platform)
         if let barrier { await barrier.enter() }
+        if let failure = failures[platform] { throw failure }
+        if empty.contains(platform) {
+            let body: MJ
+            if wy {
+                body = .obj([("code", .n(200)), ("result", .obj([("songCount", .n(0)), ("songs", .array([]))]))])
+            } else if platform == "kg" {
+                body = .obj([("status", .n(1)), ("error_code", .n(0)), ("data", .obj([("total", .n(0)), ("lists", .array([]))]))])
+            } else if platform == "kw" {
+                body = MusicNativeKuwoSearchFixture.page([], total: 0)
+            } else {
+                body = MusicNativeMiguSearchFixture.page([], total: 0)
+            }
+            return .init(status: 200, data: body.bytes)
+        }
         if wy && wyStatus != 200 { return .init(status: wyStatus, data: Data()) }
         let body: MJ
         if wy {

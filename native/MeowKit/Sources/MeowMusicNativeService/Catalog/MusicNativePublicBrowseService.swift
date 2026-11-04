@@ -17,7 +17,7 @@ struct MusicNativePublicBrowseCursor {
         try row.requireFields(["v", "key", "epoch", "offset", "snapshot", "remote", "expires"],
                               required: ["v", "key", "epoch", "offset", "snapshot", "remote", "expires"])
         try musicRequire(row["v"] == .n(1) && row["key"].string == key && row["epoch"].string == epoch.uuidString, .staleResult)
-        let offset = try row["offset"].integer(20_000)
+        let offset = try row["offset"].integer()
         let snapshot = try row["snapshot"].text(64, empty: true)
         try musicRequire(row["expires"].isNumber && row["expires"].number.isFinite && row["remote"].isObject, .invalidRequest)
         let expires = Date(timeIntervalSince1970: row["expires"].number)
@@ -33,7 +33,8 @@ struct MusicNativePublicBrowseCursor {
     }
 }
 
-extension NativeMusicService: MusicPublicBrowsing, MusicPublicBrowseQueueLoading, MusicPublicBrowseRefreshing {
+extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
+    MusicPublicBrowseQueueLoading, MusicPublicBrowseRefreshing {
     public func refreshPublicCollection(_ collection: MusicPublicBrowseCollection) async {
         guard !closed, available else { return }
         publicCollectionRefreshes += 1
@@ -46,27 +47,46 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicBrowseQueueLoading
         for entry in retired.values { await entry.reader.close() }
         await publicPlatforms.invalidateCollection(collection)
     }
-    public func publicPlaylists(platform: MusicPublicBrowsePlatform, query: String, cursor: String?) async throws -> MusicPublicBrowseCollectionPage {
+    public func publicPlaylists(platform: MusicPublicBrowsePlatform, query: String,
+                                cursor: String?) async throws -> MusicPublicBrowseCollectionPage {
         try check(); try requirePlatform(platform.rawValue)
+        let limit = 30
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         _ = try musicText(query, maximum: 800)
         try musicRequire(query.unicodeScalars.count <= 200)
-        let key = "search:" + platform.rawValue + ":" + query
+        let key = "search:" + platform.rawValue + ":\(limit):" + query
         let own = epoch, position = try MusicNativePublicBrowseCursor.read(cursor, key: key, epoch: own, now: now())
-        try musicRequire(position.offset % 30 == 0 && position.offset < 6000)
-        let port = publicPlatforms, page = position.offset / 30 + 1
-        let result = try await work(label: "publicBrowse") {
-            try await port.browsePlaylists(platform: platform, query: query, page: page)
-        }
+        try musicRequire(position.offset % limit == 0)
+        let page = position.offset / limit + 1
+        let result = try await searchPublicPlaylists(platform: platform, query: query, page: page, limit: limit)
         try check(own)
-        try musicRequire(result.items.count <= 30 && result.items.allSatisfy { $0.platform == platform && $0.kind == .playlist } &&
-                         Set(result.items.map(\.id)).count == result.items.count, .upstreamInvalid)
         let next: String?
         if let n = result.nextPage {
-            try musicRequire(n > page && n <= 200 && !result.items.isEmpty, .limit)
-            next = try position.encode(key: key, epoch: own, offset: (n - 1) * 30)
+            next = try position.encode(key: key, epoch: own, offset: (n - 1) * limit)
         } else { next = nil }
         return .init(items: result.items, total: result.total, cursor: next)
+    }
+
+    public func searchPublicPlaylists(platform: MusicPublicBrowsePlatform, query: String,
+                                      page: Int, limit: Int) async throws -> MusicPlaylistSearchPage {
+        try check(); try requirePlatform(platform.rawValue)
+        _ = try MusicSearchPagination.offset(platform: platform, page: page, limit: limit)
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        _ = try musicText(query, maximum: 800)
+        try musicRequire(query.unicodeScalars.count <= 200)
+        let own = epoch
+        let port = publicPlatforms
+        let result = try await work(label: "publicBrowse") {
+            try await port.browsePlaylists(platform: platform, query: query, page: page, limit: limit)
+        }
+        try check(own)
+        try musicRequire(result.total >= 0 && result.items.count <= limit &&
+            result.items.allSatisfy { $0.platform == platform && $0.kind == .playlist } &&
+            Set(result.items.map(\.id)).count == result.items.count, .upstreamInvalid)
+        try musicRequire(MusicSearchPagination.validNextPage(page: page, limit: limit,
+            next: result.nextPage, hasItems: !result.items.isEmpty), .invalidResponse)
+        return .init(platform: platform, query: query, page: page, limit: limit, total: result.total,
+                     nextPage: result.nextPage, items: result.items)
     }
 
     public func publicDetail(_ collection: MusicPublicBrowseCollection, cursor: String?) async throws -> MusicPublicBrowseDetail {
@@ -122,7 +142,7 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicBrowseQueueLoading
         let rows = result.tracks
         try musicRequire(result.collection.id == request.collection.id &&
             (result.collection.count ?? rows.count) >= rows.count, .upstreamInvalid)
-        try musicRequire(rows.count <= 2000 && rows.reduce(0, { $0 + $1.data.count }) <= 6 * 1024 * 1024 &&
+        try musicRequire(rows.reduce(0, { $0 + $1.data.count }) <= MusicRemoteQueueSource.maximumBytes &&
             rows.allSatisfy { $0.platform == request.collection.platform.rawValue }, .limit)
         _ = try rows.map(MusicModel.normalize) // Fully validate before giving the queue owner any rows.
         return result
@@ -183,7 +203,7 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicBrowseQueueLoading
         } else { sectionPrefix = key + ":\(position.offset):" }
         let sections = try publicSections(result, prefix: sectionPrefix)
         let next = try result.next.map { remote in
-            try musicRequire(remote != position.remote && position.offset < 199 && !sections.isEmpty, .limit)
+            try musicRequire(remote != position.remote && !sections.isEmpty, .limit)
             return try position.encode(key: key, epoch: own, offset: position.offset + 1, remote: remote)
         }
         return .init(sections: sections, cursor: next, filters: result.filters, selectedFilter: result.selected,

@@ -26,7 +26,7 @@ final class ProgressiveMediaLoader: NSObject, URLSessionDataDelegate, @unchecked
     private var invalidated = false
     private var reportedFailure = false
     private var loads: [ObjectIdentifier: Load] = [:]
-    private var pending: [ObjectIdentifier] = [] // bounded, round-robin between windows
+    private var pending: [ObjectIdentifier] = [] // round-robin between payload windows
     private var transfers: [Int: Transfer] = [:]
     private var information: ProgressiveContentInformation?
     private var pumping = false
@@ -77,7 +77,6 @@ final class ProgressiveMediaLoader: NSObject, URLSessionDataDelegate, @unchecked
         config.httpAdditionalHeaders = nil
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 60
-        config.httpMaximumConnectionsPerHost = budget.limits.tasksPerHost
         self.configuration = config
         queue = DispatchQueue(label: "meow.playback.bytes.\(UUID().uuidString)")
         super.init()
@@ -94,11 +93,6 @@ final class ProgressiveMediaLoader: NSObject, URLSessionDataDelegate, @unchecked
             guard !reportedFailure else { sink.finish(.transportFailed); return }
             let id = ObjectIdentifier(sink)
             guard loads[id] == nil else { return }
-            guard loads.count < budget.limits.requestsPerAsset else {
-                sink.finish(.resourceBudgetExceeded)
-                failAsset(.resourceBudgetExceeded)
-                return
-            }
             loads[id] = Load(sink)
             pending.append(id)
             pump()

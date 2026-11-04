@@ -218,7 +218,8 @@ actor QQMusicAccountAdapter {
                 try publicPersistence.check(publicAccess)
                 return try await transport.send(input)
             }
-            try publicPersistence.register(id, token: publicAccess) { task.cancel() }
+            do { try publicPersistence.register(id, token: publicAccess) { task.cancel() } }
+            catch { task.cancel(); throw error }
             defer { publicPersistence.remove(id) }
             result = try await withTaskCancellationHandler(operation: {
                 try await task.value

@@ -25,7 +25,6 @@ public enum MusicHomeAction: Codable, Hashable, Sendable {
     case songCollection(ids: [String])
 
     public static let maximumSimilarSeeds = 20
-    public static let maximumCollectionSongs = 1000
 
     /// Reading capability, not execution authorization. FM has an anonymous
     /// provider path; personal recommendations require the account owner.
@@ -56,7 +55,6 @@ public enum MusicHomeAction: Codable, Hashable, Sendable {
             guard !sourceIDs.isEmpty, sourceIDs.allSatisfy(Self.safeID) else { throw MusicServiceError.invalidRequest }
             try Self.validateName(sourceName)
         case .songCollection(let ids):
-            guard ids.count <= Self.maximumCollectionSongs else { throw MusicServiceError.limit }
             guard !ids.isEmpty, ids.allSatisfy({ Self.positiveID($0, digits: 18) }) else {
                 throw MusicServiceError.invalidRequest
             }
@@ -113,18 +111,18 @@ public enum MusicHomeAction: Codable, Hashable, Sendable {
             // Old snapshots may have playlistId/resourceId. Never retain them.
             self = .heartbeat
         case "song-collection":
-            self = .songCollection(ids: try Self.decodeIDs(data, key: .ids, maximum: Self.maximumCollectionSongs))
+            self = .songCollection(ids: try Self.decodeIDs(data, key: .ids, maximum: nil))
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: data, debugDescription: "Unknown home action")
         }
         try validate()
     }
     private static func decodeIDs(_ data: KeyedDecodingContainer<CodingKeys>, key: CodingKeys,
-                                  maximum: Int) throws -> [String] {
+                                  maximum: Int?) throws -> [String] {
         var array = try data.nestedUnkeyedContainer(forKey: key), result: [String] = []
-        if let count = array.count, count > maximum { throw MusicServiceError.limit }
+        if let maximum, let count = array.count, count > maximum { throw MusicServiceError.limit }
         while !array.isAtEnd {
-            guard result.count < maximum else { throw MusicServiceError.limit }
+            if let maximum, result.count >= maximum { throw MusicServiceError.limit }
             result.append(try array.decode(String.self))
         }
         return result

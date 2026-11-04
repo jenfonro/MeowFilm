@@ -14,7 +14,7 @@ final class MusicQQPublicPersistenceDocumentTests: XCTestCase {
         XCTAssertEqual(counter.get(), 0)
         try await service.setAccess(available: true, generation: 1)
         XCTAssertEqual(counter.get(), 0)
-        do { _ = try await service.search(query: "synthetic", page: 1); XCTFail("Locked factory bypassed") }
+        do { _ = try await service.search(query: "synthetic", page: 1, limit: 30); XCTFail("Locked factory bypassed") }
         catch { XCTAssertEqual(error as? MusicServiceError, .accessUnavailable) }
         XCTAssertEqual(counter.get(), 1)
         let methods = try await http.methods()
@@ -34,14 +34,14 @@ final class MusicQQPublicPersistenceDocumentTests: XCTestCase {
         let http = QQPublicPersistenceHTTP()
         let first = NativeMusicQQPublicService(storeFactory: { store }, transport: http, clock: { clock.now() })
         try await first.setAccess(available: true, generation: 1)
-        _ = try await first.search(query: "synthetic", page: 1)
+        _ = try await first.search(query: "synthetic", page: 1, limit: 30)
         let plaintext = try XCTUnwrap(store.read(key: MusicQQPublicPersistenceDocument.key))
         await first.close()
         let reopenedStore = try EncryptedDocumentStore(baseURL: root, namespace: MusicQQPublicPersistenceDocument.namespace, keyProvider: keys)
         let coldHTTP = QQPublicPersistenceHTTP()
         let cold = NativeMusicQQPublicService(storeFactory: { reopenedStore }, transport: coldHTTP, clock: { clock.now() })
         try await cold.setAccess(available: true, generation: 1)
-        _ = try await cold.search(query: "synthetic", page: 1)
+        _ = try await cold.search(query: "synthetic", page: 1, limit: 30)
         let methods = try await coldHTTP.methods()
         XCTAssertEqual(methods, ["DoSearchForQQMusicMobile"])
         XCTAssertEqual(try reopenedStore.read(key: MusicQQPublicPersistenceDocument.key), plaintext)
@@ -89,13 +89,13 @@ final class MusicQQPublicPersistenceDocumentTests: XCTestCase {
         let service = NativeMusicQQPublicService(storeFactory: { store }, transport: http)
         keys.setLocked(true)
         try await service.setAccess(available: true, generation: 1)
-        do { _ = try await service.search(query: "synthetic", page: 1); XCTFail("Protected read bypassed") }
+        do { _ = try await service.search(query: "synthetic", page: 1, limit: 30); XCTFail("Protected read bypassed") }
         catch { XCTAssertEqual(error as? MusicServiceError, .accessUnavailable) }
         service.revokeAccess(generation: 1)
         try await service.setAccess(available: false, generation: 1)
         keys.setLocked(false)
         try await service.setAccess(available: true, generation: 2)
-        do { _ = try await service.search(query: "synthetic", page: 1); XCTFail("Corrupt JSON reset") }
+        do { _ = try await service.search(query: "synthetic", page: 1, limit: 30); XCTFail("Corrupt JSON reset") }
         catch { XCTAssertEqual(error as? MusicServiceError, .corruptDocument) }
         XCTAssertEqual(try store.read(key: MusicQQPublicPersistenceDocument.key), bytes)
         let methods = try await http.methods()

@@ -8,7 +8,7 @@ extension KugouMusicAccountAdapter {
     func syncAddition(_ member: MusicLibrarySyncMember, context: MusicKugouContext,
                       guard authorization: MusicAccountSyncAuthorization) async throws -> [String: Any] {
         let hash = try MusicKugouWire.hash(member.nativeID), hint = try MusicQQWire.decode(member.track)
-        guard try MusicKugouWire.hash(hint["hash"] ?? hint["musicId"]) == hash else { throw MusicServiceError.targetChanged }
+        guard try MusicKugouWire.hash(hint["hash"] ?? hint["songmid"]) == hash else { throw MusicServiceError.targetChanged }
         let song = try await audioDetail(hash, context: context)
         func checkHints(album: String, mix: String) throws {
             for (raw, verified) in [(hint["albumId"] ?? hint["album_id"], album),
