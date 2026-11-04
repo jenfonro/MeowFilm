@@ -3,6 +3,7 @@ const messages = Object.freeze({
   NOT_FOUND: 'Installation not found',
   ALREADY_EXISTS: 'Installation already exists',
   DISABLED: 'Installation is disabled',
+  STARTING: 'Installation is starting',
   HOST_CLOSED: 'Host is closed',
   STALE_SESSION: 'Session is no longer current',
   CANCELLED: 'Operation cancelled',
@@ -46,14 +47,8 @@ export class ScriptHostError extends Error {
 }
 
 export const fault = (code) => new ScriptHostError(code);
-export const safeError = (error, fallback = 'SCRIPT_EXCEPTION') => {
-  if (error instanceof ScriptHostError) return error;
-  if (typeof error?.code === 'string' && Object.hasOwn(messages, error.code)) {
-    return fault(error.code);
-  }
-  if (error?.name === 'AbortError') return fault('CANCELLED');
-  return fault(fallback);
-};
+export const safeError = (error, fallback = 'SCRIPT_EXCEPTION') =>
+  error instanceof ScriptHostError ? error : fault(fallback);
 export function requireValue(condition, code = 'INVALID_ARGUMENT') {
   if (!condition) throw fault(code);
 }

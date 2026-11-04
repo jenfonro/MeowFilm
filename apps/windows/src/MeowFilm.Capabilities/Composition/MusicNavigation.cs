@@ -121,7 +121,7 @@ public sealed partial class MusicCapability
         if (stopping || submission != searchSubmission || pageGeneration != loadGeneration || navigation != navigationSubmission) return;
         await RecordSearchHistory(query, online, cancellationToken);
         if (stopping || submission != searchSubmission || pageGeneration != loadGeneration) return;
-        if (online) { await BeginAggregateSearchAsync(query, cancellationToken); return; }
+        if (online) { await BeginSearchAsync(query, cancellationToken); return; }
         var target = new Location("search", query);
         await LoadAsync(locations.GetValueOrDefault(target.Key) ?? target, cancellationToken, publishStatus: false);
     }
@@ -304,7 +304,7 @@ public sealed partial class MusicCapability
         NavigationItem[] items = [
             new("catalog-home", "推荐", "\uE80F"),
             new("catalog-channels", "频道", "\uE8A9"),
-            new("favorites", "我的收藏", "\uEB51", "我的"),
+            new("favorites", "我的收藏", "\uEB51", "我的", GroupAction: page.CreatePlaylistAction),
             ..Playlists.Where(item => item.Kind == "playlist").Select(item =>
                 new NavigationItem("playlist/" + item.Id, item.Name, "\uE8D6", "我的")),
             // Declared routes remain reachable from content/settings and public-page handoff.

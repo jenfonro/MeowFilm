@@ -417,3 +417,272 @@ test('RPC validates staged integrity, stale identities and cancellation without 
   controller.abort();
   denied(await rpc('status', {}, { signal: controller.signal }), 'CANCELLED');
 });
+
+function mockSourceRuntime(t, { clock, setTimer, clearTimer } = {}) {
+  const records = new Map();
+  const installations = [];
+  const invocations = [];
+  const releases = [];
+  const host = {
+    list: () => [...records.values()].map(value => structuredClone(value)),
+    stats: () => ({ cleanupIssues: [] }),
+    cleanupPending: () => 0,
+    async install(spec) {
+      installations.push(structuredClone(spec));
+      const record = {
+        installationId: spec.installationId,
+        generation: 1,
+        state: 'ready',
+        enabled: true,
+        protocol: spec.protocol,
+        version: spec.version,
+        contentHash: createHash('sha256').update(spec.source).digest('hex'),
+        capabilities: {
+          source: {
+            protocol: spec.protocol,
+            importedProtocol: spec.metadata.importedProtocol,
+            actions: ['search'],
+          },
+        },
+      };
+      records.set(spec.installationId, record);
+      return structuredClone(record);
+    },
+    async invoke(target) {
+      invocations.push(structuredClone(target));
+      return { keyword: target.payload.keyword };
+    },
+    async uninstall(id) { records.delete(id); },
+    async close() {
+      records.clear();
+      return { cleanupComplete: true };
+    },
+  };
+  const module = createSourceRuntimeModule({
+    call: async () => ({ ok: false, code: 'PERMISSION_DENIED' }),
+    hostFactory: () => host,
+    network: async () => { throw new Error('mock host must not execute guest network'); },
+    capabilityOwner: {
+      async invoke() { throw new Error('mock host must not invoke capabilities'); },
+      async releaseProfiles(prefix, except) { releases.push({ prefix, except }); },
+    },
+    platform: 'test',
+    clock, setTimer, clearTimer,
+  });
+  t.after(() => module.close());
+  const rpc = (name, params = {}) => module.methods[`source.runtime.${name}`](params);
+  return { module, rpc, records, installations, invocations, releases };
+}
+
+test('R5 source staging accepts exactly 16 MiB and rejects the next byte', async t => {
+  const { rpc } = mockSourceRuntime(t);
+  const params = { basename: 'source.js', length: 16 * 1024 * 1024, sha256: '0'.repeat(64) };
+  const stage = okay(await rpc('stage.begin', params));
+  assert.equal(stage.chunkBytes, 64 * 1024);
+  denied(await rpc('stage.begin', { ...params, length: params.length + 1 }), 'LIMIT');
+  okay(await rpc('stage.abort', { token: stage.token }));
+});
+
+test('R5 source staging retains more than four simultaneous uploads', async t => {
+  const { rpc } = mockSourceRuntime(t);
+  const bytes = Buffer.from('{}');
+  const params = {
+    basename: 'source.json',
+    length: bytes.length,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+  };
+  const stages = [];
+  for (let index = 0; index < 6; index++) {
+    stages.push(okay(await rpc('stage.begin', params)).token);
+  }
+  assert.equal(new Set(stages).size, 6);
+  for (const token of stages) {
+    assert.equal(okay(await rpc('stage.chunk', {
+      token, offset: 0, data: bytes.toString('base64'),
+    })).next, bytes.length);
+    okay(await rpc('stage.abort', { token }));
+  }
+});
+
+test('R5 source module installs more than 32 instances', async t => {
+  const { rpc, records, installations } = mockSourceRuntime(t);
+  const ids = Array.from({ length: 33 }, (_value, index) => `source-${index}`);
+  for (const installationId of ids) {
+    const instance = await load(rpc, { installationId, protocol: 'cat', source: catSource });
+    assert.equal(instance.installationId, installationId);
+    assert.equal(instance.state, 'ready');
+  }
+  assert.equal(records.size, 33);
+  assert.equal(installations.length, 33);
+  assert.deepEqual(okay(await rpc('status')).instances.map(value => value.installationId).sort(),
+    [...ids].sort());
+});
+
+test('R5 staged uploads share one active TTL timer, renew on valid chunks and cancel it on close', async t => {
+  let now = 0;
+  const timers = new Map();
+  const { module, rpc } = mockSourceRuntime(t, {
+    clock: () => now,
+    setTimer(callback, delay) {
+      const handle = { unref() {} };
+      timers.set(handle, { callback, due: now + delay });
+      return handle;
+    },
+    clearTimer(handle) { timers.delete(handle); },
+  });
+  const fireDue = () => {
+    for (const [handle, timer] of [...timers]) {
+      if (timer.due <= now) {
+        timers.delete(handle);
+        timer.callback();
+      }
+    }
+  };
+  const bytes = Buffer.from('{}');
+  const params = {
+    basename: 'source.json',
+    length: bytes.length,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+  };
+  const first = okay(await rpc('stage.begin', params)).token;
+  const second = okay(await rpc('stage.begin', params)).token;
+  assert.equal(timers.size, 1);
+  assert.equal([...timers.values()][0].due, 300000);
+  now = 299999;
+  assert.equal(okay(await rpc('stage.chunk', {
+    token: first, offset: 0, data: Buffer.from('{').toString('base64'),
+  })).next, 1);
+  assert.equal(timers.size, 1);
+  now = 300000;
+  fireDue();
+  assert.equal(timers.size, 1, 'only the renewed upload should retain an expiry timer');
+  denied(await rpc('stage.chunk', {
+    token: second, offset: 0, data: bytes.toString('base64'),
+  }), 'STAGE_NOT_FOUND');
+  assert.equal(okay(await rpc('stage.chunk', {
+    token: first, offset: 1, data: Buffer.from('}').toString('base64'),
+  })).next, 2);
+  assert.equal(timers.size, 1);
+  now = 600000;
+  fireDue();
+  assert.equal(timers.size, 0, 'expiry must release the final stage without another RPC');
+  denied(await rpc('stage.chunk', {
+    token: first, offset: 0, data: bytes.toString('base64'),
+  }), 'STAGE_NOT_FOUND');
+  okay(await rpc('stage.begin', params));
+  assert.equal(timers.size, 1);
+  okay(await module.close());
+  assert.equal(timers.size, 0);
+  denied(await rpc('stage.begin', params), 'CLOSED');
+});
+
+test('source status adopts a same-revision restart, rejects the old generation and keeps only the new profiles', async t => {
+  const { rpc, records, invocations, releases } = mockSourceRuntime(t);
+  const first = await load(rpc, { protocol: 'cat', source: catSource });
+  const nextGeneration = first.generation + 1;
+  records.set(first.installationId, {
+    ...records.get(first.installationId), generation: nextGeneration,
+  });
+  const releaseOffset = releases.length;
+  const current = okay(await rpc('status')).instances[0];
+  assert.deepEqual(current, { ...first, generation: nextGeneration });
+  assert.deepEqual(releases.slice(releaseOffset), [{
+    prefix: `source:${first.installationId}:`,
+    except: `source:${first.installationId}:${nextGeneration}`,
+  }]);
+  const params = {
+    installationId: first.installationId,
+    revision: first.revision,
+    generation: first.generation,
+    action: 'search',
+    payload: { keyword: 'current' },
+  };
+  denied(await rpc('invoke', params), 'STALE_SOURCE');
+  assert.equal(invocations.length, 0);
+  assert.deepEqual(okay(await rpc('invoke', {
+    ...params, generation: nextGeneration,
+  })).value, { keyword: 'current' });
+  assert.equal(invocations.length, 1);
+  assert.equal(invocations[0].generation, nextGeneration);
+  assert.equal(releases.length, releaseOffset + 1);
+});
+
+for (const method of ['load', 'invoke', 'unload']) {
+  test(`source ${method} refreshes a same-revision restart before checking the generation`, async t => {
+    const { rpc, records, installations, invocations, releases } = mockSourceRuntime(t);
+    const first = await load(rpc, { protocol: 'cat', source: catSource });
+    const nextGeneration = first.generation + 1;
+    records.set(first.installationId, {
+      ...records.get(first.installationId), generation: nextGeneration,
+    });
+    const releaseOffset = releases.length;
+    if (method === 'load') {
+      const current = await load(rpc, {
+        protocol: 'cat', source: catSource, revision: first.revision, expectedRevision: first.revision,
+      });
+      assert.deepEqual(current, { ...first, generation: nextGeneration });
+      assert.equal(installations.length, 1, 'a same-revision reload must not reinstall the worker');
+    } else if (method === 'invoke') {
+      assert.deepEqual(okay(await rpc('invoke', {
+        installationId: first.installationId,
+        revision: first.revision,
+        generation: nextGeneration,
+        action: 'search',
+        payload: { keyword: 'direct' },
+      })).value, { keyword: 'direct' });
+      assert.equal(invocations.length, 1);
+      assert.equal(invocations[0].generation, nextGeneration);
+    } else {
+      const identity = { installationId: first.installationId, revision: first.revision };
+      denied(await rpc('unload', { ...identity, generation: first.generation }), 'STALE_SOURCE');
+      assert.equal(records.size, 1, 'the stale unload must leave the new generation installed');
+      assert.equal(okay(await rpc('unload', { ...identity, generation: nextGeneration })).unloaded, true);
+      assert.equal(records.size, 0);
+    }
+    assert.deepEqual(releases[releaseOffset], {
+      prefix: `source:${first.installationId}:`,
+      except: `source:${first.installationId}:${nextGeneration}`,
+    });
+    assert.deepEqual(releases.slice(releaseOffset + 1), method === 'unload' ? [{
+      prefix: `source:${first.installationId}:`, except: '',
+    }] : []);
+  });
+}
+
+for (const [field, value] of [
+  ['contentHash', '0'.repeat(64)],
+  ['version', '2.0.0'],
+  ['protocol', 'qysg'],
+]) {
+  test(`source entry points reject a restarted generation with a different ${field} as SOURCE_CLEANUP`, async t => {
+    const { rpc, records, installations, invocations, releases } = mockSourceRuntime(t);
+    const first = await load(rpc, { protocol: 'cat', source: catSource });
+    records.set(first.installationId, {
+      ...records.get(first.installationId), generation: first.generation + 1, [field]: value,
+    });
+    const releaseOffset = releases.length;
+    const identity = {
+      installationId: first.installationId,
+      revision: first.revision,
+      generation: first.generation,
+    };
+    denied(await rpc('status'), 'SOURCE_CLEANUP');
+    denied(await rpc('invoke', {
+      ...identity, action: 'search', payload: { keyword: 'mismatched' },
+    }), 'SOURCE_CLEANUP');
+    denied(await rpc('unload', identity), 'SOURCE_CLEANUP');
+    denied(await rpc('load', {
+      token: await upload(rpc, catSource, 'source.js'),
+      installationId: first.installationId,
+      revision: first.revision,
+      expectedRevision: first.revision,
+      protocol: 'cat',
+      version: '1.0.0',
+      metadata: {},
+    }), 'SOURCE_CLEANUP');
+    assert.equal(records.size, 1);
+    assert.equal(installations.length, 1);
+    assert.equal(invocations.length, 0);
+    assert.equal(releases.length, releaseOffset);
+  });
+}

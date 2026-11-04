@@ -33,7 +33,7 @@ public sealed class MusicFeedbackController : IMusicPlaybackFeedback, IAsyncDisp
         internal readonly MusicFeedbackRecording Recording = recording;
         internal readonly long Generation = generation;
         internal readonly CancellationTokenSource Cancellation = new();
-        internal readonly string Instance = Guid.NewGuid().ToString("D");
+        internal readonly MusicFeedbackAttempt Instance = new();
         internal MusicPlatformSession? Account;
         internal IMusicFeedbackSession? Session;
         internal Task Begin = Task.CompletedTask;
@@ -153,7 +153,7 @@ public sealed class MusicFeedbackController : IMusicPlaybackFeedback, IAsyncDisp
         foreach (string platform in Platforms)
         {
             if (!settings.IsEnabled(platform) || attempted.Contains(platform) || active.ContainsKey(platform) ||
-                platform == "kg" && rate < .25 || targets.Count >= 9 || work.Count >= 12) continue;
+                platform == "kg" && rate < .25) continue;
             var recording = MusicFeedbackIdentity.Resolve(selection.Song, platform);
             if (recording is null) continue;
             attempted.Add(platform);

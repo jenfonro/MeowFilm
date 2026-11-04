@@ -391,10 +391,10 @@ final class MusicQQPublicPersistenceTests: XCTestCase {
         XCTAssertGreaterThan(f.http.cancellations.get(), 0)
     }
 
-    func testRevokedNoncooperativeRequestsKeepAllFourSlotsUntilActuallyFinished() async throws {
+    func testRevokedNoncooperativeRequestsCannotPublishAndNewAccessCanFinish() async throws {
         let f = QQPublicPersistenceFixture()
         try await f.enable(); try await f.search()
-        let gates = (0..<4).map { _ in QQPublicPersistenceGate() }
+        let gates = (0..<2).map { _ in QQPublicPersistenceGate() }
         addTeardownBlock {
             for gate in gates { await gate.release() }
             await f.service.close()
@@ -405,44 +405,37 @@ final class MusicQQPublicPersistenceTests: XCTestCase {
             work.append(Task { try await f.search() })
             await fulfillment(of: [gate.entered], timeout: 3)
         }
-        let queuedOld = Task { try await f.search() }
-        try await waitForSlots(f.service, active: 4, waiting: 1)
         f.service.revokeAccess(generation: 1)
-        do { try await queuedOld.value; XCTFail("Revoked queued request was admitted") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .cancelled) }
         try await f.enable(2)
         let queuedNew = Task { try await f.search() }
-        try await waitForSlots(f.service, active: 4, waiting: 1)
+        try await f.http.waitForCalls("DoSearchForQQMusicMobile", count: 3)
         let before = try await f.http.methods()
-        XCTAssertEqual(before.filter { $0 == "DoSearchForQQMusicMobile" }.count, 5)
+        XCTAssertEqual(before.filter { $0 == "DoSearchForQQMusicMobile" }.count, 3)
         for gate in gates { await gate.release() }
         for task in work {
             do { try await task.value; XCTFail("Old result delivered") } catch {}
         }
         try await queuedNew.value
-        try await waitForSlots(f.service, active: 0, waiting: 0)
         let after = try await f.http.methods()
-        XCTAssertEqual(after.filter { $0 == "DoSearchForQQMusicMobile" }.count, 6)
+        XCTAssertEqual(after.filter { $0 == "DoSearchForQQMusicMobile" }.count, 4)
         XCTAssertEqual(after.filter { $0 == "GetQimei" }.count, 1)
         await f.service.close()
     }
 
-    func testCancellingQueuedReadDoesNotContactHTTPOrReleaseAnotherLease() async throws {
+    func testCancellingInFlightReadCannotPublishAndFreshReadCanFinish() async throws {
         let f = QQPublicPersistenceFixture()
-        try await f.enable()
-        var leases: [UUID] = []
-        for _ in 0..<4 { leases.append(try await f.service.begin().lease) }
-        let queued = Task { try await f.search() }
-        try await waitForSlots(f.service, active: 4, waiting: 1)
-        queued.cancel()
-        do { try await queued.value; XCTFail("Cancelled waiter received a lease") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .cancelled) }
-        try await waitForSlots(f.service, active: 4, waiting: 0)
-        let methods = try await f.http.methods()
-        XCTAssertTrue(methods.isEmpty)
-        XCTAssertEqual(f.document.counts().reads, 0)
-        for lease in leases { await f.service.end(lease) }
-        try await waitForSlots(f.service, active: 0, waiting: 0)
+        let gate = QQPublicPersistenceGate()
+        addTeardownBlock { await gate.release(); await f.service.close() }
+        try await f.enable(); try await f.search()
+        let before = f.document.peek()
+        await f.http.hold("DoSearchForQQMusicMobile", gate: gate)
+        let cancelled = Task { try await f.search() }
+        await fulfillment(of: [gate.entered], timeout: 3)
+        cancelled.cancel()
+        await gate.release()
+        do { try await cancelled.value; XCTFail("Cancelled read delivered") } catch {}
+        XCTAssertEqual(f.document.peek(), before)
+        try await f.search()
         await f.service.close()
     }
 
@@ -508,18 +501,9 @@ final class MusicQQPublicPersistenceTests: XCTestCase {
     func testExplicitVolatileConstructionHasNoPersistentFallback() async throws {
         let http = QQPublicPersistenceHTTP()
         let service = NativeMusicQQPublicService(transport: http)
-        _ = try await service.search(query: "synthetic", page: 1)
+        _ = try await service.search(query: "synthetic", page: 1, limit: 30)
         _ = try await service.lyrics(mid: "SyntheticMID")
         await service.close()
     }
 
-    private func waitForSlots(_ service: NativeMusicQQPublicService, active: Int, waiting: Int) async throws {
-        for _ in 0..<10_000 {
-            let counts = await service.operationCounts()
-            if counts.active == active && counts.waiting == waiting { return }
-            await Task.yield()
-        }
-        XCTFail("QQ owner did not reach expected physical/waiting counts")
-        throw MusicServiceError.timeout
-    }
 }

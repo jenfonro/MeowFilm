@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Fixed iWebPlus SMS admission and api-enhanced WEAPI recipes. See LICENSES/NOTICE.md.
+// Fixed api-enhanced WEAPI recipes. See LICENSES/NOTICE.md.
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
@@ -9,17 +9,13 @@ namespace MeowFilm.Capabilities.Accounts;
 
 public sealed partial class MusicAccountProtocol
 {
-    // No phone numbers or codes in the ledger; per-owner random-key hashes cannot
-    // be used as stable phone identifiers. Cancel/logout never reset this ledger.
+    // Only active requests and unexpired cooldowns; cancel/logout cannot bypass a send.
     private readonly byte[] smsLedgerKey = RandomNumberGenerator.GetBytes(32);
     private readonly Dictionary<string, SmsLimit> smsLimits = new(StringComparer.Ordinal);
-    private long? smsWindow;
-    private int smsSends;
-    private sealed class SmsLimit(long started)
+    private ITimer? smsExpiry;
+    private sealed class SmsLimit
     {
-        internal readonly long Started = started;
         internal long? SentAt;
-        internal int Attempts;
         internal bool Busy;
         public override string ToString() => "MusicSmsLimit (private)";
     }
@@ -32,31 +28,37 @@ public sealed partial class MusicAccountProtocol
         lock (gate)
         {
             AccountRules.Require(!closed, "CLOSED");
-            int Left(long start, int seconds) =>
-                Math.Clamp((int)Math.Ceiling(seconds - clock.GetElapsedTime(start).TotalSeconds), 1, 600);
-            foreach (var item in smsLimits.Where(p => !p.Value.Busy &&
-                clock.GetElapsedTime(p.Value.Started) >= TimeSpan.FromMinutes(10) &&
-                (p.Value.SentAt is not { } sentAt || clock.GetElapsedTime(sentAt) >= TimeSpan.FromSeconds(60)))
-                .Select(p => p.Key).ToArray())
-                smsLimits.Remove(item);
-            if (smsWindow is null || clock.GetElapsedTime(smsWindow.Value) >= TimeSpan.FromMinutes(10))
-            { smsWindow = clock.GetTimestamp(); smsSends = 0; }
+            PruneSms();
             if (!smsLimits.TryGetValue(key, out var limit))
-            {
-                if (smsLimits.Count >= 128) throw new MusicAccountException("RATE_LIMITED", 60);
-                smsLimits.Add(key, limit = new(clock.GetTimestamp()));
-            }
+                smsLimits.Add(key, limit = new());
             if (limit.Busy) throw new MusicAccountException("BUSY", 1);
-            if (send && smsSends >= 20) throw new MusicAccountException("RATE_LIMITED", Left(smsWindow.Value, 600));
             if (send && limit.SentAt is { } sent && clock.GetElapsedTime(sent) < TimeSpan.FromSeconds(60))
-                throw new MusicAccountException("RATE_LIMITED", Left(sent, 60));
-            if (!send && limit.Attempts >= 8) throw new MusicAccountException("RATE_LIMITED", Left(limit.Started, 600));
+                throw new MusicAccountException("RATE_LIMITED",
+                    Math.Max(1, (int)Math.Ceiling(60 - clock.GetElapsedTime(sent).TotalSeconds)));
             limit.Busy = true;
-            if (send) { limit.SentAt = clock.GetTimestamp(); smsSends++; } else limit.Attempts++;
+            if (send) limit.SentAt = clock.GetTimestamp();
             return limit;
         }
     }
-    private void ReleaseSms(SmsLimit limit) { lock (gate) limit.Busy = false; }
+    private void ReleaseSms(SmsLimit limit)
+    {
+        lock (gate) { limit.Busy = false; if (!closed) PruneSms(); }
+    }
+    private void PruneSms()
+    {
+        TimeSpan? next = null;
+        foreach (var (key, limit) in smsLimits.ToArray())
+        {
+            if (limit.Busy) continue;
+            var left = limit.SentAt is { } sent ? TimeSpan.FromSeconds(60) - clock.GetElapsedTime(sent) : TimeSpan.Zero;
+            if (left <= TimeSpan.Zero) smsLimits.Remove(key);
+            else if (next is null || left < next) next = left;
+        }
+        if (next is not null)
+            smsExpiry ??= clock.CreateTimer(_ => { lock (gate) { if (!closed) PruneSms(); } },
+                null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        smsExpiry?.Change(next ?? Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+    }
 
     public async Task<MusicAccountSmsSent> SendSmsAsync(MusicAccountSmsInput input, CancellationToken cancellationToken = default)
     {
@@ -80,7 +82,7 @@ public sealed partial class MusicAccountProtocol
                     return new MusicAccountSmsSent("wy", true, 60);
                 }
                 finally { ReleaseSms(limit); }
-            }, requestLimit: 1).ConfigureAwait(false);
+            }).ConfigureAwait(false);
         }
         catch (Exception error) when (dispatched && AccountRules.Error(error) is
             "CANCELLED" or "TIMEOUT" or "NETWORK_ERROR" or "SUPERSEDED" or "CLOSED")
@@ -114,11 +116,13 @@ public sealed partial class MusicAccountProtocol
                 GuardSmsProfile(verified, input);
                 await ctx.AcceptWyCookies(status.SetCookieHeaders, cookie).ConfigureAwait(false);
                 ctx.Guard();
-                await ctx.Accept(acceptSession!, new("wy", attemptId, cookie, verified)).ConfigureAwait(false);
+                var details = await ObserveAccountDetails(ctx, verified, cookie).ConfigureAwait(false);
+                ctx.Guard();
+                await ctx.Accept(acceptSession!, new("wy", attemptId, cookie, details)).ConfigureAwait(false);
                 return true;
             }
             finally { ReleaseSms(limit); }
-        }, requestLimit: 2).ConfigureAwait(false);
+        }).ConfigureAwait(false);
     }
     private static void GuardSmsProfile(MusicAccountProfile profile, MusicAccountSmsInput input)
     {
@@ -140,7 +144,7 @@ public sealed partial class MusicAccountProtocol
         try
         {
             AccountRules.Require(response.Location is null, "REDIRECT_DENIED");
-            var data = PJ.Parse(response.Bytes, 65536); Inspect(data);
+            var data = PJ.Parse(response.Bytes); Inspect(data);
             int code = StrictCode(data["code"]);
             if (response.Status == 429 || code is 405 or 429 or 509) throw new MusicAccountException("RATE_LIMITED", 60);
             if (code is 250 or 460 or 461) throw new MusicAccountException("VERIFICATION_REQUIRED");

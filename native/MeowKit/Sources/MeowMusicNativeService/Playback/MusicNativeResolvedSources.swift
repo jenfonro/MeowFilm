@@ -31,12 +31,18 @@ extension NativeMusicService: MusicResolvedSourcesServing {
         }
     }
 
-    func inspectionDiscover(_ seed: MusicSourceInspectionSeed, label: String, force: Bool) async throws -> MJ {
+    func inspectionDiscover(_ seed: MusicSourceInspectionSeed, label: String,
+                            force: Bool) async throws -> MJ {
         try inspectionCheck(seed)
-        guard MusicNativeCandidateDiscoveryMerge.needsDiscovery(seed.song, now: now(), force: force) else { return seed.song }
+        let cache = await sourceDiscoveryEntries(seed.song)
+        try inspectionCheck(seed)
+        let staged = mergeSourceDiscoveryCache(seed.song, entries: cache)
+        guard MusicNativeCandidateDiscoveryMerge.needsDiscovery(staged, force: force, cache: cache) else {
+            return staged
+        }
         let query = String((seed.song["title"].string + " " + seed.song["artist"].string).prefix(200))
         let platforms = MusicNativeSearchProtocol.platforms.filter {
-            platformEnabled($0) && MusicNativeCandidateDiscoveryMerge.needsPlatform($0, song: seed.song, now: now(), force: force)
+            platformEnabled($0) && MusicNativeCandidateDiscoveryMerge.needsPlatform($0, song: staged, force: force, cache: cache[$0])
         }
         let observations = try await withThrowingTaskGroup(of: MusicNativeCandidateDiscoveryObservation.self) { group in
             for platform in platforms {
@@ -57,8 +63,13 @@ extension NativeMusicService: MusicResolvedSourcesServing {
             return values
         }
         try inspectionCheck(seed)
-        if observations.isEmpty { return seed.song }
-        return try MusicNativeCandidateDiscoveryMerge.merge(seed.song, observations: observations, now: now()).song
+        let merged = try MusicNativeCandidateDiscoveryMerge.merge(staged, observations: observations).song
+        for observation in observations {
+            guard let page = observation.page else { continue }
+            await recordSourceDiscovery(staged, platform: observation.platform, page: page)
+            try inspectionCheck(seed)
+        }
+        return merged
     }
 
     private func inspectionSearch(_ seed: MusicSourceInspectionSeed, platform: String,
@@ -66,9 +77,12 @@ extension NativeMusicService: MusicResolvedSourcesServing {
         try inspectionCheck(seed); try requirePlatform(platform)
         let port = publicPlatforms
         let value = try await MusicCandidateDiscoveryDeadline.run(seconds: 12, timing: .init()) {
-            try await self.work(label: label) { try await port.search(platform: platform, query: query, page: 1) }
+            try await self.work(label: label) {
+                try await port.search(platform: platform, query: query, page: 1, limit: 30)
+            }
         }
         try inspectionCheck(seed)
+        try musicRequire(value.total >= 0 && value.items.allSatisfy({ $0.platform == platform }), .upstreamInvalid)
         return value
     }
 
@@ -76,18 +90,11 @@ extension NativeMusicService: MusicResolvedSourcesServing {
                            receive: @escaping @Sendable ([MusicPlaybackOption]) async -> Void) async throws {
         try inspectionCheck(seed)
         let rows = try MusicModel.sources(staged).filter { platformEnabled($0.platform) }
-        try musicRequire(rows.count <= 160, .limit)
         try await withThrowingTaskGroup(of: [MusicPlaybackOption].self) { group in
-            var next = 0
-            func add() {
-                let source = rows[next]; next += 1
-                group.addTask { try await self.inspectionOption(seed, source: source, label: label) }
-            }
-            for _ in 0..<min(3, rows.count) { add() }
+            for source in rows { group.addTask { try await self.inspectionOption(seed, source: source, label: label) } }
             while let options = try await group.next() {
                 try inspectionCheck(seed)
                 await receive(options)
-                if next < rows.count { add() }
             }
         }
     }
@@ -286,16 +293,18 @@ actor MusicNativeSourceInspection: MusicSourceInspectionSession {
                 await self?.preparedOptions([], song: nil, revision: own, completed: true)
             } catch { await self?.preparationFailed(error, discovery: false, revision: own) }
         }
-        if MusicNativeCandidateDiscoveryMerge.needsDiscovery(seed.song, now: clock(), force: force) {
-            discovery = Task { [weak self] in
-                do {
-                    let song = try await owner.inspectionDiscover(captured, label: label, force: force)
-                    try await owner.inspectionOptions(captured, staged: song, label: label) { [weak self] options in
-                        await self?.preparedOptions(options, song: song, revision: own, completed: false)
-                    }
+        discovery = Task { [weak self] in
+            do {
+                let song = try await owner.inspectionDiscover(captured, label: label, force: force)
+                if song == captured.song {
                     await self?.preparedOptions([], song: song, revision: own, completed: true)
-                } catch { await self?.preparationFailed(error, discovery: true, revision: own) }
-            }
+                    return
+                }
+                try await owner.inspectionOptions(captured, staged: song, label: label) { [weak self] options in
+                    await self?.preparedOptions(options, song: song, revision: own, completed: false)
+                }
+                await self?.preparedOptions([], song: song, revision: own, completed: true)
+            } catch { await self?.preparationFailed(error, discovery: true, revision: own) }
         }
     }
     private func requestID(_ option: MusicPlaybackOption, _ quality: String) -> String {
@@ -314,7 +323,6 @@ actor MusicNativeSourceInspection: MusicSourceInspectionSession {
             for quality in option.qualities {
                 let key = requestID(option, quality)
                 guard let tier = order.firstIndex(of: category(quality)), !registered.contains(key) else { continue }
-                guard registered.count < 160 else { fail(MusicServiceError.limit); return }
                 let sequence = registered.count
                 registered.insert(key)
                 pending.append(.init(key: key, option: option, quality: quality, tier: tier, sequence: sequence))
@@ -334,11 +342,10 @@ actor MusicNativeSourceInspection: MusicSourceInspectionSession {
     }
     private func pump() {
         guard !closed, !adopting else { return }
-        // Match SourcePolicy: official slots are bounded to three, each exact
-        // provider has one request in flight, and tiers are priorities rather
-        // than barriers. A slow provider cannot block a ready peer's next tier.
+        // Each exact provider has one current request; quality tiers prioritize
+        // useful work without imposing a shared request quota.
         pending.sort { $0.tier == $1.tier ? $0.sequence < $1.sequence : $0.tier < $1.tier }
-        while running.count < 3 {
+        while true {
             let ready = pending.indices.filter { !busy.contains(pending[$0].provider) }
             guard let index = ready.first(where: {
                 pending[$0].tier <= frontier || scoutProviders && !scouted.contains(pending[$0].provider)

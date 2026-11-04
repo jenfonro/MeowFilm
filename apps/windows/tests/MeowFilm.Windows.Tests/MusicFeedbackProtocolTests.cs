@@ -37,7 +37,7 @@ public static class MusicFeedbackProtocolTests
         yield return Case("fixed FM vector exact identity encrypted start and wall-second finish once", async () =>
         {
             await using var f = new Fixture();
-            var input = Start() with { Source = "userfm", Mode = "playFm", Algorithm = "fixture-alg" };
+            var input = Start(f.Attempt) with { Source = "userfm", Mode = "playFm", Algorithm = "fixture-alg" };
             await using var session = await f.Protocol.StartAsync(f.Account, input);
             Equal(input.Recording, session.Recording); Equal(3, f.Calls);
             Equal("startplay", Text(f.Logs[0]["action"]));
@@ -72,7 +72,7 @@ public static class MusicFeedbackProtocolTests
                 response.Headers.TryAddWithoutValidation("Set-Cookie", "NMTID=SYNTHETIC_FEEDBACK_" + count + "; Domain=.music.163.com");
                 return response;
             };
-            await using var session = await f.Protocol.StartAsync(f.Account, Start());
+            await using var session = await f.Protocol.StartAsync(f.Account, Start(f.Attempt));
             Equal("SYNTHETIC_FEEDBACK_3", (await f.Clients.Owner.AcquireWyAsync()).Nmtid);
             f.Clock.Advance(10);
             await session.FinishAsync(End());
@@ -90,7 +90,7 @@ public static class MusicFeedbackProtocolTests
             yield return Case("fixed provenance " + vector.Source, async () =>
             {
                 await using var f = new Fixture();
-                await using var s = await f.Protocol.StartAsync(f.Account, Start() with
+                await using var s = await f.Protocol.StartAsync(f.Account, Start(f.Attempt) with
                     { Source = vector.Source, SourceId = vector.Id, SourceType = vector.Type, Mode = "ai" });
                 var json = f.Logs.Single()["json"]!.AsObject();
                 if (vector.Wire.Length > 0) { Equal(vector.Wire, Text(json["source"])); Equal(vector.Id, Text(json["sourceId"])); }
@@ -101,9 +101,9 @@ public static class MusicFeedbackProtocolTests
         {
             await using var f = new Fixture();
             f.Reply = (_, _, _) => Task.FromResult(Response("{\"code\":200,\"profile\":null}"));
-            await Error(() => f.Protocol.StartAsync(f.Account, Start()), "AUTH_EXPIRED");
+            await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "AUTH_EXPIRED");
             Equal(1, f.Calls); Equal(0, f.Logs.Count);
-            await Error(() => f.Protocol.StartAsync(f.Account, Start()), "START_UNCONFIRMED");
+            await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "START_UNCONFIRMED");
             Equal(1, f.Calls);
         });
         foreach (var body in new[]
@@ -116,7 +116,7 @@ public static class MusicFeedbackProtocolTests
                 await using var f = new Fixture();
                 var before = await f.Clients.Owner.AcquireWyAsync();
                 f.Reply = (_, _, _) => Task.FromResult(Response(body, "NMTID=SYNTHETIC_REJECTED; Domain=.music.163.com"));
-                await Error(() => f.Protocol.StartAsync(f.Account, Start()), "IDENTITY_MISMATCH");
+                await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "IDENTITY_MISMATCH");
                 Equal(1, f.Calls); Equal(0, f.Logs.Count);
                 True(ReferenceEquals(before, await f.Clients.Owner.AcquireWyAsync()));
             });
@@ -133,7 +133,7 @@ public static class MusicFeedbackProtocolTests
                 var before = await f.Clients.Owner.AcquireWyAsync();
                 f.Reply = (request, _, _) => Task.FromResult(request.RequestUri!.AbsolutePath == SongPath
                     ? Response(vector.Body, "NMTID=SYNTHETIC_REJECTED; Domain=.music.163.com") : Default(request));
-                await Error(() => f.Protocol.StartAsync(f.Account, Start()), vector.Error);
+                await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), vector.Error);
                 Equal(2, f.Calls); Equal(0, f.Logs.Count);
                 True(ReferenceEquals(before, await f.Clients.Owner.AcquireWyAsync()));
             });
@@ -142,14 +142,14 @@ public static class MusicFeedbackProtocolTests
             await using var f = new Fixture();
             foreach (var input in new[]
             {
-                Start() with { Recording = new("tx", "001FixtureMID") },
-                Start() with { Recording = new("wy", "042") },
-                Start() with { Recording = new("wy", "42", "7") },
-                Start() with { Duration = double.NaN }, Start() with { Duration = 0 },
-                Start() with { Rate = double.PositiveInfinity }, Start() with { Position = 201 },
-                Start() with { Source = "search", SourceId = "keyword\n" },
-                Start() with { Source = "playlist", SourceId = "7", SourceType = "album" },
-                Start() with { Algorithm = "\ud800" }
+                Start(f.Attempt) with { Recording = new("tx", "001FixtureMID") },
+                Start(f.Attempt) with { Recording = new("wy", "042") },
+                Start(f.Attempt) with { Recording = new("wy", "42", "7") },
+                Start(f.Attempt) with { Duration = double.NaN }, Start(f.Attempt) with { Duration = 0 },
+                Start(f.Attempt) with { Rate = double.PositiveInfinity }, Start(f.Attempt) with { Position = 201 },
+                Start(f.Attempt) with { Source = "search", SourceId = "keyword\n" },
+                Start(f.Attempt) with { Source = "playlist", SourceId = "7", SourceType = "album" },
+                Start(f.Attempt) with { Algorithm = "\ud800" }
             })
                 await AnyFeedbackError(() => f.Protocol.StartAsync(f.Account, input));
             Equal(0, f.Calls);
@@ -157,7 +157,7 @@ public static class MusicFeedbackProtocolTests
         yield return Case("stale account before start has no HTTP", async () =>
         {
             await using var f = new Fixture(); f.Accounts.Current = false;
-            await Error(() => f.Protocol.StartAsync(f.Account, Start()), "SESSION_CHANGED");
+            await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "SESSION_CHANGED");
             Equal(0, f.Calls);
         });
         foreach (int stage in new[] { 1, 2, 3 })
@@ -169,7 +169,7 @@ public static class MusicFeedbackProtocolTests
                     if (count == stage) f.Accounts.Current = false;
                     return Task.FromResult(Default(request));
                 };
-                await Error(() => f.Protocol.StartAsync(f.Account, Start()), "SESSION_CHANGED");
+                await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "SESSION_CHANGED");
                 Equal(stage, f.Calls);
             });
         yield return Case("concurrent duplicate start shares one physical chain and same session", async () =>
@@ -181,12 +181,12 @@ public static class MusicFeedbackProtocolTests
                 if (count == 1) { entered.SetResult(); await release.Task; }
                 return Default(request);
             };
-            var first = f.Protocol.StartAsync(f.Account, Start()); await entered.Task;
-            var second = f.Protocol.StartAsync(f.Account, Start());
+            var first = f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await entered.Task;
+            var second = f.Protocol.StartAsync(f.Account, Start(f.Attempt));
             try
             {
                 True(!first.IsCompleted && !second.IsCompleted); Equal(1, f.Calls);
-                await Error(() => f.Protocol.StartAsync(f.Account, Start() with { Algorithm = "changed" }), "INSTANCE_MISMATCH");
+                await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt) with { Algorithm = "changed" }), "INSTANCE_MISMATCH");
             }
             finally { release.TrySetResult(); }
             await using var session = await first;
@@ -195,9 +195,9 @@ public static class MusicFeedbackProtocolTests
         yield return Case("same scope new generation and changed credential cannot adopt an instance", async () =>
         {
             await using var f = new Fixture();
-            await using var s = await f.Protocol.StartAsync(f.Account, Start());
-            await Error(() => f.Protocol.StartAsync(new("wy", f.Account.Scope, 2, "123", f.Account.Cookie), Start()), "INSTANCE_MISMATCH");
-            await Error(() => f.Protocol.StartAsync(new("wy", f.Account.Scope, 1, "123", "MUSIC_U=synthetic-new"), Start()), "INSTANCE_MISMATCH");
+            await using var s = await f.Protocol.StartAsync(f.Account, Start(f.Attempt));
+            await Error(() => f.Protocol.StartAsync(new("wy", f.Account.Scope, 2, "123", f.Account.Cookie), Start(f.Attempt)), "INSTANCE_MISMATCH");
+            await Error(() => f.Protocol.StartAsync(new("wy", f.Account.Scope, 1, "123", "MUSIC_U=synthetic-new"), Start(f.Attempt)), "INSTANCE_MISMATCH");
             Equal(3, f.Calls);
         });
         foreach (string code in new[] { "\"200\"", "true", "0", "500", "null" })
@@ -206,11 +206,11 @@ public static class MusicFeedbackProtocolTests
                 await using var f = new Fixture();
                 f.Reply = (request, _, _) => Task.FromResult(request.RequestUri!.AbsolutePath == ReportPath
                     ? Response("{\"code\":" + code + "}") : Default(request));
-                await Error(() => f.Protocol.StartAsync(f.Account, Start()), "UPSTREAM_UNCONFIRMED");
-                await Error(() => f.Protocol.StartAsync(f.Account, Start()), "START_UNCONFIRMED");
+                await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "UPSTREAM_UNCONFIRMED");
+                await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "START_UNCONFIRMED");
                 Equal(3, f.Calls);
                 f.Clock.Advance(5 * 3600);
-                await Error(() => f.Protocol.StartAsync(f.Account, Start()), "START_UNCONFIRMED");
+                await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "START_UNCONFIRMED");
                 Equal(3, f.Calls);
             });
         yield return Case("numeric receipt representation preserves JS numeric equality without string coercion", async () =>
@@ -218,13 +218,13 @@ public static class MusicFeedbackProtocolTests
             await using var f = new Fixture();
             f.Reply = (request, _, _) => Task.FromResult(request.RequestUri!.AbsolutePath == ReportPath
                 ? Response("{\"code\":2e2}") : Default(request));
-            await using var s = await f.Protocol.StartAsync(f.Account, Start());
+            await using var s = await f.Protocol.StartAsync(f.Account, Start(f.Attempt));
             Equal(3, f.Calls);
         });
         yield return Case("ambiguous end is single-shot concurrent and cannot be changed or retried", async () =>
         {
             await using var f = new Fixture();
-            await using var s = await f.Protocol.StartAsync(f.Account, Start()); f.Clock.Advance(10);
+            await using var s = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); f.Clock.Advance(10);
             var entered = Signal(); var release = Signal();
             f.Reply = async (request, _, _) =>
             {
@@ -242,13 +242,13 @@ public static class MusicFeedbackProtocolTests
             finally { release.TrySetResult(); }
             await Error(() => a, "NETWORK_ERROR"); await Error(() => b, "NETWORK_ERROR");
             await Error(() => s.FinishAsync(End()), "NETWORK_ERROR");
-            await Error(() => f.Protocol.StartAsync(f.Account, Start()), "INSTANCE_ENDED");
+            await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "INSTANCE_ENDED");
             Equal(5, f.Calls);
         });
         yield return Case("finish repeats live identity and never writes for expired login", async () =>
         {
             await using var f = new Fixture();
-            await using var s = await f.Protocol.StartAsync(f.Account, Start()); f.Clock.Advance(10);
+            await using var s = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); f.Clock.Advance(10);
             f.Reply = (_, _, _) => Task.FromResult(Response("{\"code\":301}"));
             await Error(() => s.FinishAsync(End()), "AUTH_EXPIRED");
             await Error(() => s.FinishAsync(End()), "AUTH_EXPIRED");
@@ -258,7 +258,7 @@ public static class MusicFeedbackProtocolTests
             yield return Case("finish account change fenced at physical step " + stage, async () =>
             {
                 await using var f = new Fixture();
-                await using var s = await f.Protocol.StartAsync(f.Account, Start()); f.Clock.Advance(10);
+                await using var s = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); f.Clock.Advance(10);
                 f.Reply = (request, _, count) =>
                 {
                     if (count == stage) f.Accounts.Current = false;
@@ -278,7 +278,7 @@ public static class MusicFeedbackProtocolTests
             yield return Case("finish validates " + vector.Name + " without I/O or correction replay", async () =>
             {
                 await using var f = new Fixture();
-                await using var s = await f.Protocol.StartAsync(f.Account, Start()); f.Clock.Advance(10);
+                await using var s = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); f.Clock.Advance(10);
                 await Error(() => s.FinishAsync(vector.End), vector.Code);
                 await Error(() => s.FinishAsync(End()), "INSTANCE_MISMATCH");
                 Equal(3, f.Calls);
@@ -286,14 +286,14 @@ public static class MusicFeedbackProtocolTests
         yield return Case("zero heard time and seeks never become a full track", async () =>
         {
             await using var f = new Fixture();
-            await using var s = await f.Protocol.StartAsync(f.Account, Start()); f.Clock.Advance(5);
+            await using var s = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); f.Clock.Advance(5);
             await s.FinishAsync(End() with { Listened = 0, MediaListened = 0, Position = 200, Reason = "playend" });
             Equal("0", Text(f.Logs[1]["json"]!["time"]));
         });
         yield return Case("monotonic pause and wall clock jump retain only observed listening", async () =>
         {
             await using var f = new Fixture();
-            await using var s = await f.Protocol.StartAsync(f.Account, Start());
+            await using var s = await f.Protocol.StartAsync(f.Account, Start(f.Attempt));
             f.Clock.Advance(5 * 3600); f.Clock.Wall = DateTimeOffset.UnixEpoch;
             await s.FinishAsync(End() with { Listened = 12, MediaListened = 6, Rate = .5, Position = 180 });
             Equal("12", Text(f.Logs[1]["json"]!["time"])); Equal(5, f.Calls);
@@ -301,16 +301,16 @@ public static class MusicFeedbackProtocolTests
         yield return Case("pre-cancellation is zero I/O", async () =>
         {
             await using var f = new Fixture(); using var token = new CancellationTokenSource(); token.Cancel();
-            await Cancelled(() => f.Protocol.StartAsync(f.Account, Start(), token.Token));
+            await Cancelled(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt), token.Token));
             Equal(0, f.Calls);
         });
         yield return Case("disposing an accepted idle session never fabricates end", async () =>
         {
             await using var f = new Fixture();
-            var s = await f.Protocol.StartAsync(f.Account, Start());
+            var s = await f.Protocol.StartAsync(f.Account, Start(f.Attempt));
             await s.DisposeAsync(); await s.DisposeAsync();
             await Error(() => s.FinishAsync(End()), "CLOSED");
-            await Error(() => f.Protocol.StartAsync(f.Account, Start()), "INSTANCE_ENDED");
+            await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "INSTANCE_ENDED");
             Equal(3, f.Calls); Equal(1, f.Logs.Count);
         });
         yield return Case("start cancellation drains a noncooperative physical handler and never retries", async () =>
@@ -322,12 +322,12 @@ public static class MusicFeedbackProtocolTests
                 using var registration = ct.Register(() => cancelled.TrySetResult());
                 entered.SetResult(); await release.Task; return Default(request);
             };
-            var start = f.Protocol.StartAsync(f.Account, Start(), token.Token); await entered.Task;
+            var start = f.Protocol.StartAsync(f.Account, Start(f.Attempt), token.Token); await entered.Task;
             token.Cancel(); await cancelled.Task;
             try { True(!start.IsCompleted, "transport must retain physical request until settled"); }
             finally { release.TrySetResult(); }
             await Cancelled(() => start);
-            await Error(() => f.Protocol.StartAsync(f.Account, Start()), "START_UNCONFIRMED");
+            await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "START_UNCONFIRMED");
             Equal(1, f.Calls);
         });
         yield return Case("protocol disposal drains ignored cancellation without disposing borrowed ports", async () =>
@@ -339,7 +339,7 @@ public static class MusicFeedbackProtocolTests
                 using var registration = ct.Register(() => cancelled.TrySetResult());
                 entered.SetResult(); await release.Task; return Default(request);
             };
-            var start = f.Protocol.StartAsync(f.Account, Start()); await entered.Task;
+            var start = f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await entered.Task;
             var disposal = f.Protocol.DisposeAsync().AsTask(); await cancelled.Task;
             try { True(!disposal.IsCompleted && !start.IsCompleted); }
             finally { release.TrySetResult(); }
@@ -349,7 +349,7 @@ public static class MusicFeedbackProtocolTests
         yield return Case("session disposal drains ignored finish cancellation without fabricated retry", async () =>
         {
             await using var f = new Fixture();
-            var s = await f.Protocol.StartAsync(f.Account, Start()); f.Clock.Advance(10);
+            var s = await f.Protocol.StartAsync(f.Account, Start(f.Attempt)); f.Clock.Advance(10);
             var entered = Signal(); var cancelled = Signal(); var release = Signal();
             f.Reply = async (request, ct, count) =>
             {
@@ -370,7 +370,7 @@ public static class MusicFeedbackProtocolTests
         yield return Case("original token remains an invalidation fence after successful start", async () =>
         {
             await using var f = new Fixture(); using var token = new CancellationTokenSource();
-            await using var s = await f.Protocol.StartAsync(f.Account, Start(), token.Token);
+            await using var s = await f.Protocol.StartAsync(f.Account, Start(f.Attempt), token.Token);
             token.Cancel(); f.Clock.Advance(10);
             await Cancelled(() => s.FinishAsync(End()));
             Equal(3, f.Calls);
@@ -384,8 +384,8 @@ public static class MusicFeedbackProtocolTests
                 if (count == 1) { entered.SetResult(); await release.Task; }
                 return Default(request);
             };
-            var a = f.Protocol.StartAsync(f.Account, Start()); await entered.Task;
-            var b = f.Protocol.StartAsync(f.Account, Start(), token.Token); token.Cancel();
+            var a = f.Protocol.StartAsync(f.Account, Start(f.Attempt)); await entered.Task;
+            var b = f.Protocol.StartAsync(f.Account, Start(f.Attempt), token.Token); token.Cancel();
             try { await Cancelled(() => b); True(!a.IsCompleted); }
             finally { release.TrySetResult(); }
             await using var s = await a; Equal(3, f.Calls);
@@ -394,14 +394,14 @@ public static class MusicFeedbackProtocolTests
         {
             await using var f = new Fixture();
             var account = new MusicPlatformSession("tx", "synthetic-qq", 1, "123", "musicid=123; musickey=synthetic-key");
-            await Error(() => f.Protocol.StartAsync(account, Start() with { Recording = new("tx", "001FixtureMID") }), "DEVICE_CONTEXT_REQUIRED");
+            await Error(() => f.Protocol.StartAsync(account, Start(f.Attempt) with { Recording = new("tx", "001FixtureMID") }), "DEVICE_CONTEXT_REQUIRED");
             Equal(0, f.Calls);
         });
         yield return Case("KG without native device cannot emit CSCC", async () =>
         {
             await using var f = new Fixture();
             var account = new MusicPlatformSession("kg", "synthetic-kg", 1, "123", "userid=123; token=synthetic-token");
-            await Error(() => f.Protocol.StartAsync(account, Start() with
+            await Error(() => f.Protocol.StartAsync(account, Start(f.Attempt) with
                 { Recording = new("kg", "ABCDEF0123456789ABCDEF0123456789", "477417208") }), "DEVICE_CONTEXT_REQUIRED");
             Equal(0, f.Calls);
         });
@@ -410,7 +410,7 @@ public static class MusicFeedbackProtocolTests
             await using var f = new Fixture();
             var account = new MusicPlatformSession("kg", "synthetic-kg", 1, "123",
                 "userid=123; token=synthetic-token; KUGOU_API_MID=123456; KUGOU_API_GUID=0123456789abcdef0123456789abcdef; KUGOU_API_DEV=synthetic-device");
-            await Error(() => f.Protocol.StartAsync(account, Start() with
+            await Error(() => f.Protocol.StartAsync(account, Start(f.Attempt) with
                 { Recording = new("kg", "abcdef0123456789abcdef0123456789", "477417208") }), "UNVERIFIED_TLS_PROTOCOL");
             Equal(0, f.Calls);
         });
@@ -418,8 +418,8 @@ public static class MusicFeedbackProtocolTests
         {
             await using var f = new Fixture();
             var account = new MusicPlatformSession("tx", "synthetic-qq", 1, "124", "musicid=123; musickey=synthetic-key");
-            await Error(() => f.Protocol.StartAsync(account, Start() with { Recording = new("tx", "001FixtureMID") }), "INVALID_CREDENTIALS");
-            await Error(() => f.Protocol.StartAsync(f.Account, Start() with { Recording = new("kg", new string('A', 32)) }), "IDENTITY_MISMATCH");
+            await Error(() => f.Protocol.StartAsync(account, Start(f.Attempt) with { Recording = new("tx", "001FixtureMID") }), "INVALID_CREDENTIALS");
+            await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt) with { Recording = new("kg", new string('A', 32)) }), "IDENTITY_MISMATCH");
             Equal(0, f.Calls);
         });
         yield return Case("credential injection duplicate cookies and absent login are rejected before HTTP", async () =>
@@ -428,7 +428,7 @@ public static class MusicFeedbackProtocolTests
             {
                 await using var f = new Fixture();
                 var account = new MusicPlatformSession("wy", "synthetic-invalid-cookie", 1, "123", cookie);
-                await Error(() => f.Protocol.StartAsync(account, Start()), cookie.StartsWith("__csrf", StringComparison.Ordinal)
+                await Error(() => f.Protocol.StartAsync(account, Start(f.Attempt)), cookie.StartsWith("__csrf", StringComparison.Ordinal)
                     ? "AUTH_REQUIRED" : "INVALID_CREDENTIALS");
                 Equal(0, f.Calls);
             }
@@ -442,8 +442,8 @@ public static class MusicFeedbackProtocolTests
             {
                 await using var f = new Fixture();
                 f.Reply = (_, _, _) => Task.FromResult(new HttpResponseMessage(vector.Status) { Content = new StringContent("{}") });
-                await Error(() => f.Protocol.StartAsync(f.Account, Start()), vector.Code);
-                await Error(() => f.Protocol.StartAsync(f.Account, Start()), "START_UNCONFIRMED");
+                await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), vector.Code);
+                await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "START_UNCONFIRMED");
                 Equal(1, f.Calls);
             });
         yield return Case("unconfirmed timeout remains reserved rather than automatically repeated", async () =>
@@ -452,8 +452,8 @@ public static class MusicFeedbackProtocolTests
             f.Reply = (request, _, _) => request.RequestUri!.AbsolutePath == ReportPath
                 ? Task.FromException<HttpResponseMessage>(new OperationCanceledException())
                 : Task.FromResult(Default(request));
-            await Error(() => f.Protocol.StartAsync(f.Account, Start()), "TIMEOUT");
-            await Error(() => f.Protocol.StartAsync(f.Account, Start()), "START_UNCONFIRMED");
+            await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "TIMEOUT");
+            await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "START_UNCONFIRMED");
             Equal(3, f.Calls);
         });
         yield return Case("bounded response and redirect remain failures not successful receipts", async () =>
@@ -468,7 +468,7 @@ public static class MusicFeedbackProtocolTests
                     if (redirect) { response.StatusCode = HttpStatusCode.TemporaryRedirect; response.Headers.Location = new("https://example.invalid"); }
                     return Task.FromResult(response);
                 };
-                await Error(() => f.Protocol.StartAsync(f.Account, Start()), redirect ? "REDIRECT_DENIED" : "LIMIT");
+                await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), redirect ? "REDIRECT_DENIED" : "LIMIT");
                 Equal(3, f.Calls);
             }
         });
@@ -481,18 +481,16 @@ public static class MusicFeedbackProtocolTests
             catch (MusicPlatformException error) { Equal("ORIGIN_DENIED", error.Code); }
             Equal(0, f.Calls);
         });
-        yield return Case("per-platform rate budget and nonexpiring tombstones forbid automatic replay", async () =>
+        yield return Case("independent playback attempts do not accumulate receipts or exhaust a rate ledger", async () =>
         {
             await using var f = new Fixture();
-            f.Reply = (_, _, _) => Task.FromResult(Response("{\"code\":301}"));
-            for (int i = 0; i < 40; i++)
-                await Error(() => f.Protocol.StartAsync(f.Account, Start() with { InstanceId = "rate-instance-" + i }), "AUTH_EXPIRED");
-            await Error(() => f.Protocol.StartAsync(f.Account, Start()), "RATE_LIMITED");
-            Equal(40, f.Calls);
-            f.Clock.Advance(61);
-            await Error(() => f.Protocol.StartAsync(f.Account, Start() with { InstanceId = "rate-instance-0" }), "START_UNCONFIRMED");
-            await Error(() => f.Protocol.StartAsync(f.Account, Start()), "AUTH_EXPIRED");
-            Equal(41, f.Calls);
+            f.Reply = (_, _, _) => Task.FromResult(Response("{\"code\":200,\"profile\":null}"));
+            await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "AUTH_EXPIRED");
+            for (int i = 0; i < 80; i++)
+                await Error(() => f.Protocol.StartAsync(f.Account, Start(new())), "AUTH_EXPIRED");
+            Equal(81, f.Calls);
+            await Error(() => f.Protocol.StartAsync(f.Account, Start(f.Attempt)), "START_UNCONFIRMED");
+            Equal(81, f.Calls);
         });
     }
     // Separate post-WY inventory: the QQ harness enumerates only this method.
@@ -510,8 +508,8 @@ public static class MusicFeedbackProtocolTests
             yield return Q("fixed report account " + vector.Account + " wall " + vector.Heard, async () =>
             {
                 await using var f = new QqFixture(vector.Account);
-                var s = await f.Protocol.StartAsync(f.Account, QqStart());
-                Equal(QqStart().Recording, s.Recording); Equal(1, f.Calls); Equal(1, f.Accounts.Acquisitions);
+                var s = await f.Protocol.StartAsync(f.Account, QqStart(f.Attempt));
+                Equal(QqStart(f.Attempt).Recording, s.Recording); Equal(1, f.Calls); Equal(1, f.Accounts.Acquisitions);
                 Equal(0, f.Reports.Count);
                 f.Clock.Advance(10);
                 var end = QqEnd() with { Listened = vector.Heard, MediaListened = vector.Heard * 2, Rate = 2, Position = 180 };
@@ -541,7 +539,7 @@ public static class MusicFeedbackProtocolTests
                 Equal(vector.Account, Text(vkey["req_0"]!["param"]!["uin"]));
                 Equal("M500syntheticsynthetic.mp3", Text(vkey["req_0"]!["param"]!["filename"]![0]));
                 True(Guid.TryParseExact(Text(vkey["req_0"]!["param"]!["guid"]), "N", out _));
-                Equal(1, f.Accounts.Leases.Count(x => x.Disposed)); // Fresh verification lease, not original registration.
+                Equal(2, f.Accounts.Leases.Count(x => x.Disposed)); // Completion releases both verification and registration leases.
                 await s.DisposeAsync(); Equal(2, f.Accounts.Leases.Count(x => x.Disposed));
                 Equal(0, f.Accounts.Disposals); True(!f.Handler.Disposed);
             });
@@ -558,22 +556,22 @@ public static class MusicFeedbackProtocolTests
         yield return Q("live login rejection is not anonymous registration and is never retried", async () =>
         {
             await using var f = new QqFixture(); f.Accounts.AuthError = "AUTH_REQUIRED";
-            await Error(() => f.Protocol.StartAsync(f.Account, QqStart()), "AUTH_EXPIRED");
-            await Error(() => f.Protocol.StartAsync(f.Account, QqStart()), "START_UNCONFIRMED");
+            await Error(() => f.Protocol.StartAsync(f.Account, QqStart(f.Attempt)), "AUTH_EXPIRED");
+            await Error(() => f.Protocol.StartAsync(f.Account, QqStart(f.Attempt)), "START_UNCONFIRMED");
             Equal(1, f.Accounts.Acquisitions); Equal(0, f.Calls); Equal(0, f.Accounts.Leases.Count);
         });
         yield return Q("context must retain the exact account reference rather than a cloned identity", async () =>
         {
             await using var f = new QqFixture();
             f.Accounts.ReturnAccount = new("tx", f.Account.Scope, f.Account.Generation, f.Account.UserId, f.Account.Cookie);
-            await Error(() => f.Protocol.StartAsync(f.Account, QqStart()), "SESSION_CHANGED");
+            await Error(() => f.Protocol.StartAsync(f.Account, QqStart(f.Attempt)), "SESSION_CHANGED");
             Equal(0, f.Calls); True(f.Accounts.Leases.Single().Disposed);
         });
         foreach (string error in new[] { "COMMIT_UNKNOWN", "DEVICE_CONTEXT_EXPIRED", "SESSION_CHANGED", "VERIFICATION_REQUIRED" })
             yield return Q("context stable expected error " + error, async () =>
             {
                 await using var f = new QqFixture(); f.Accounts.AuthError = error;
-                await Error(() => f.Protocol.StartAsync(f.Account, QqStart()), error);
+                await Error(() => f.Protocol.StartAsync(f.Account, QqStart(f.Attempt)), error);
                 Equal(0, f.Calls);
             });
         foreach (string bad in new[] { "qimei", "uid", "device", "future", "expired", "previous-day" })
@@ -584,7 +582,7 @@ public static class MusicFeedbackProtocolTests
                     uid: bad == "uid" ? "" : d.Uid, openUdid: bad == "device" ? "random" : d.OpenUdid,
                     qimeiAt: bad == "future" ? d.QimeiRetrievedAt + 1 : bad == "expired" ? d.QimeiRetrievedAt - 86400000 : d.QimeiRetrievedAt,
                     sessionAt: bad == "previous-day" ? d.SessionRetrievedAt - 86400000 : d.SessionRetrievedAt);
-                await Error(() => f.Protocol.StartAsync(f.Account, QqStart()),
+                await Error(() => f.Protocol.StartAsync(f.Account, QqStart(f.Attempt)),
                     bad is "future" or "expired" or "previous-day" ? "DEVICE_CONTEXT_EXPIRED" : "DEVICE_CONTEXT_REQUIRED");
                 Equal(0, f.Calls); True(f.Accounts.Leases.Single().Disposed);
             });
@@ -592,8 +590,8 @@ public static class MusicFeedbackProtocolTests
         {
             await using var f = new QqFixture(); var entered = Signal(); var release = Signal();
             f.Accounts.AcquireWork = async (_, _) => { entered.TrySetResult(); await release.Task; };
-            var first = f.Protocol.StartAsync(f.Account, QqStart()); await entered.Task;
-            var second = f.Protocol.StartAsync(f.Account, QqStart());
+            var first = f.Protocol.StartAsync(f.Account, QqStart(f.Attempt)); await entered.Task;
+            var second = f.Protocol.StartAsync(f.Account, QqStart(f.Attempt));
             Equal(1, f.Accounts.Acquisitions); Equal(0, f.Calls); True(!second.IsCompleted);
             release.TrySetResult();
             await using var a = await first; var b = await second; True(ReferenceEquals(a, b)); Equal(1, f.Calls);
@@ -612,14 +610,14 @@ public static class MusicFeedbackProtocolTests
             {
                 await using var f = new QqFixture();
                 f.Reply = (_, _, _) => Task.FromResult(Response("{\"code\":0,\"req_0\":{\"code\":0,\"data\":{\"tracks\":" + vector.Tracks + "}}}"));
-                await Error(() => f.Protocol.StartAsync(f.Account, QqStart()), vector.Code);
+                await Error(() => f.Protocol.StartAsync(f.Account, QqStart(f.Attempt)), vector.Code);
                 Equal(1, f.Calls); Equal(0, f.Reports.Count); True(f.Accounts.Leases.Single().Disposed);
             });
         yield return Q("account change after track receipt cannot return an accepted registration", async () =>
         {
             await using var f = new QqFixture();
             f.Reply = (request, _, _) => { f.Accounts.Current = false; return Task.FromResult(f.Default(request)); };
-            await Error(() => f.Protocol.StartAsync(f.Account, QqStart()), "SESSION_CHANGED");
+            await Error(() => f.Protocol.StartAsync(f.Account, QqStart(f.Attempt)), "SESSION_CHANGED");
             True(f.Accounts.Leases.Single().Disposed); Equal(1, f.Calls);
         });
         foreach (var vector in new (string Code, string Error)[]
@@ -627,24 +625,24 @@ public static class MusicFeedbackProtocolTests
             ("\"0\"", "UPSTREAM_UNCONFIRMED"), ("false", "UPSTREAM_UNCONFIRMED"),
             ("0.0", "UPSTREAM_UNCONFIRMED"), ("2000", "SIGNATURE_REQUIRED"), ("2001", "RATE_LIMITED")
         })
-            yield return Q("CGI code " + vector.Code + " never bypasses receipt signature or rate policy", async () =>
+            yield return Q("CGI code " + vector.Code + " never bypasses receipt validation", async () =>
             {
                 await using var f = new QqFixture();
                 f.Reply = (_, _, _) => Task.FromResult(Response("{\"code\":" + vector.Code +
                     ",\"req_0\":{\"code\":0,\"data\":{\"tracks\":[" + QqTrackJson + "]}}}"));
-                await Error(() => f.Protocol.StartAsync(f.Account, QqStart()), vector.Error);
+                await Error(() => f.Protocol.StartAsync(f.Account, QqStart(f.Attempt)), vector.Error);
                 Equal(1, f.Calls); True(f.Accounts.Leases.Single().Disposed);
             });
         yield return Q("finish performs live login again without inheriting saved authentication", async () =>
         {
-            await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart());
+            await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart(f.Attempt));
             f.Clock.Advance(5); f.Accounts.AuthError = "AUTH_REQUIRED";
             await Error(() => s.FinishAsync(QqEnd()), "AUTH_EXPIRED"); await Error(() => s.FinishAsync(QqEnd()), "AUTH_EXPIRED");
             Equal(2, f.Accounts.Acquisitions); Equal(1, f.Calls);
         });
         yield return Q("expired device registration never renews itself to send an old report", async () =>
         {
-            await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart());
+            await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart(f.Attempt));
             f.Clock.Advance(86400);
             await Error(() => s.FinishAsync(QqEnd()), "DEVICE_CONTEXT_EXPIRED");
             Equal(1, f.Accounts.Acquisitions); Equal(1, f.Calls);
@@ -652,7 +650,7 @@ public static class MusicFeedbackProtocolTests
         foreach (string field in new[] { "installation", "generation", "session", "qimei", "uid" })
             yield return Q("finish cannot substitute " + field + " from a newly acquired context", async () =>
             {
-                await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart());
+                await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart(f.Attempt));
                 f.Clock.Advance(5); var d = f.Accounts.Device;
                 f.Accounts.NextDevice = new(field == "installation" ? "other-installation" : d.InstallationId,
                     field == "generation" ? d.DeviceGeneration + 1 : d.DeviceGeneration,
@@ -661,12 +659,12 @@ public static class MusicFeedbackProtocolTests
                     field == "qimei" ? new string('B', 36) : d.Qimei36, d.QimeiRetrievedAt,
                     field == "uid" ? "different-uid" : d.Uid, d.Sid, d.SessionRetrievedAt);
                 await Error(() => s.FinishAsync(QqEnd()), "SESSION_CHANGED");
-                Equal(2, f.Accounts.Acquisitions); Equal(1, f.Calls); Equal(1, f.Accounts.Leases.Count(x => x.Disposed));
+                Equal(2, f.Accounts.Acquisitions); Equal(1, f.Calls); Equal(2, f.Accounts.Leases.Count(x => x.Disposed));
             });
         foreach (double seconds in new[] { 0d, .999 })
             yield return Q("sub-second listen " + seconds + " is not rounded up or retried", async () =>
             {
-                await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart());
+                await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart(f.Attempt));
                 f.Clock.Advance(5); var end = QqEnd() with { Listened = seconds, MediaListened = seconds };
                 await Error(() => s.FinishAsync(end), "INSUFFICIENT_LISTEN_TIME");
                 await Error(() => s.FinishAsync(end), "INSUFFICIENT_LISTEN_TIME");
@@ -675,14 +673,14 @@ public static class MusicFeedbackProtocolTests
             });
         yield return Q("forged listened clock fails before a fresh context or report", async () =>
         {
-            await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart());
+            await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart(f.Attempt));
             await Error(() => s.FinishAsync(QqEnd() with { Listened = 50 }), "INVALID_LISTEN_TIME");
             Equal(1, f.Calls); Equal(1, f.Accounts.Acquisitions);
         });
         foreach (string changed in new[] { "id", "interval" })
             yield return Q("finish rechecks unchanged native " + changed + " before vkey", async () =>
             {
-                await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart());
+                await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart(f.Attempt));
                 f.Clock.Advance(5);
                 f.Reply = (_, _, _) => Task.FromResult(Response(QqTracks(QqTrackJson.Replace(changed == "id" ? "4321" : "240",
                     changed == "id" ? "4322" : "241"))));
@@ -700,7 +698,7 @@ public static class MusicFeedbackProtocolTests
         })
             yield return Q("same-account vkey rejects " + vector.Name + " without report or fallback", async () =>
             {
-                await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart());
+                await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart(f.Attempt));
                 f.Clock.Advance(5);
                 f.Reply = (request, _, count) => Task.FromResult(count == 3
                     ? Response("{\"code\":0,\"req_0\":{\"code\":0,\"data\":{\"midurlinfo\":" + vector.Rows + "}}}") : f.Default(request));
@@ -710,7 +708,7 @@ public static class MusicFeedbackProtocolTests
         foreach (string code in new[] { "false", "true", "\"0\"", "0.0", "0e0", "null", "-1", "200" })
             yield return Q("binary receipt non-integer-zero " + code + " never confirms or retries", async () =>
             {
-                await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart());
+                await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart(f.Attempt));
                 f.Clock.Advance(5);
                 f.Reply = (request, _, count) => Task.FromResult(count == 4 ? QqBinary(QqAck("{\"code\":" + code + "}")) : f.Default(request));
                 await Error(() => s.FinishAsync(QqEnd()), "UPSTREAM_UNCONFIRMED");
@@ -735,7 +733,7 @@ public static class MusicFeedbackProtocolTests
             });
         yield return Q("XML escapes credential device and vkey without inventing nodes", async () =>
         {
-            await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart());
+            await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart(f.Attempt));
             f.Clock.Advance(5);
             const string value = "synthetic<&\"vkey";
             f.Reply = (request, _, count) => Task.FromResult(count == 3
@@ -749,14 +747,14 @@ public static class MusicFeedbackProtocolTests
         foreach (int step in new[] { 2, 3, 4 })
             yield return Q("account generation change after physical finish step " + step + " fences publication", async () =>
             {
-                await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart());
+                await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart(f.Attempt));
                 f.Clock.Advance(5);
                 f.Reply = (request, _, count) => { if (count == step) f.Accounts.Current = false; return Task.FromResult(f.Default(request)); };
                 await Error(() => s.FinishAsync(QqEnd()), "SESSION_CHANGED"); Equal(step, f.Calls);
             });
         yield return Q("device revocation cancels in-flight report but disposal waits physical handler", async () =>
         {
-            await using var f = new QqFixture(); var s = await f.Protocol.StartAsync(f.Account, QqStart()); f.Clock.Advance(5);
+            await using var f = new QqFixture(); var s = await f.Protocol.StartAsync(f.Account, QqStart(f.Attempt)); f.Clock.Advance(5);
             var entered = Signal(); var release = Signal();
             f.Reply = async (request, _, count) => { if (count == 4) { entered.TrySetResult(); await release.Task; } return f.Default(request); };
             var end = s.FinishAsync(QqEnd()); await entered.Task;
@@ -768,7 +766,7 @@ public static class MusicFeedbackProtocolTests
         });
         yield return Q("concurrent ambiguous finishes share one physical report and preserve failure", async () =>
         {
-            await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart()); f.Clock.Advance(5);
+            await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart(f.Attempt)); f.Clock.Advance(5);
             var entered = Signal(); var release = Signal();
             f.Reply = async (request, _, count) =>
             {
@@ -782,7 +780,7 @@ public static class MusicFeedbackProtocolTests
         });
         yield return Q("lost report response never causes a second vkey or report attempt", async () =>
         {
-            await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart()); f.Clock.Advance(5);
+            await using var f = new QqFixture(); await using var s = await f.Protocol.StartAsync(f.Account, QqStart(f.Attempt)); f.Clock.Advance(5);
             f.Reply = (request, _, count) => count == 4 ? Task.FromException<HttpResponseMessage>(new OperationCanceledException())
                 : Task.FromResult(f.Default(request));
             await Error(() => s.FinishAsync(QqEnd()), "TIMEOUT"); await Error(() => s.FinishAsync(QqEnd()), "TIMEOUT");
@@ -791,7 +789,7 @@ public static class MusicFeedbackProtocolTests
         yield return Q("original lifetime cancellation retires accepted registration without final send", async () =>
         {
             await using var f = new QqFixture(); using var token = new CancellationTokenSource();
-            await using var s = await f.Protocol.StartAsync(f.Account, QqStart(), token.Token);
+            await using var s = await f.Protocol.StartAsync(f.Account, QqStart(f.Attempt), token.Token);
             token.Cancel(); await Cancelled(() => s.FinishAsync(QqEnd())); Equal(1, f.Calls); Equal(1, f.Accounts.Acquisitions);
         });
         yield return Q("close waits noncooperative context acquisition and actual lease release", async () =>
@@ -800,7 +798,7 @@ public static class MusicFeedbackProtocolTests
             var releaseEntered = Signal(); var releaseDispose = Signal();
             f.Accounts.AcquireWork = async (_, _) => { entered.TrySetResult(); await releaseAcquire.Task; };
             f.Accounts.ReleaseWork = async _ => { releaseEntered.TrySetResult(); await releaseDispose.Task; };
-            var start = f.Protocol.StartAsync(f.Account, QqStart()); await entered.Task;
+            var start = f.Protocol.StartAsync(f.Account, QqStart(f.Attempt)); await entered.Task;
             var close = f.Protocol.DisposeAsync().AsTask(); True(!close.IsCompleted);
             releaseAcquire.TrySetResult(); await releaseEntered.Task;
             try { True(!close.IsCompleted && !start.IsCompleted); Equal(0, f.Calls); }
@@ -812,7 +810,7 @@ public static class MusicFeedbackProtocolTests
             var f = new QqFixture();
             try
             {
-                _ = await f.Protocol.StartAsync(f.Account, QqStart());
+                _ = await f.Protocol.StartAsync(f.Account, QqStart(f.Attempt));
                 f.Accounts.ReleaseWork = _ => Task.FromException(new MusicPlatformException("RELEASE_FAILED"));
                 await Error(() => f.Protocol.DisposeAsync().AsTask(), "RELEASE_FAILED");
                 await Error(() => f.Protocol.DisposeAsync().AsTask(), "RELEASE_FAILED");
@@ -825,7 +823,7 @@ public static class MusicFeedbackProtocolTests
     private const string QqTrackJson = "{\"mid\":\"synthetic\",\"id\":4321,\"interval\":240,\"singer\":[{\"id\":77}]}";
     private const string QqVkeyJson = "{\"songmid\":\"synthetic\",\"filename\":\"M500syntheticsynthetic.mp3\",\"result\":0,\"vkey\":\"synthetic-vkey\"}";
     private static string QqTracks(string track) => "{\"code\":0,\"req_0\":{\"code\":0,\"data\":{\"tracks\":[" + track + "]}}}";
-    private static MusicFeedbackStart QqStart() => new("qq-feedback-instance-123", new("tx", "synthetic"), 240, 0, 1, false);
+    private static MusicFeedbackStart QqStart(MusicFeedbackAttempt attempt) => new(attempt, new("tx", "synthetic"), 240, 0, 1, false);
     private static MusicFeedbackEnd QqEnd() => new(5, 5, 240, 5, 1, "ui");
     private static byte[] QqAck(string json)
     {
@@ -913,6 +911,7 @@ public static class MusicFeedbackProtocolTests
     }
     private sealed class QqFixture : IAsyncDisposable
     {
+        internal readonly MusicFeedbackAttempt Attempt = new();
         internal readonly MusicPlatformSession Account;
         internal readonly QqAccounts Accounts;
         internal readonly QqClock Clock = new();
@@ -976,7 +975,7 @@ public static class MusicFeedbackProtocolTests
         }
     }
 
-    private static MusicFeedbackStart Start() => new("feedback-instance-123", new("wy", "42"), 200, 0, 1, false);
+    private static MusicFeedbackStart Start(MusicFeedbackAttempt attempt) => new(attempt, new("wy", "42"), 200, 0, 1, false);
     private static MusicFeedbackEnd End() => new(5, 5, 200, 5, 1, "ui");
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     private static string Text(JsonNode? value) => value is JsonValue v && v.TryGetValue<string>(out var s) ? s : value?.ToJsonString() ?? "";
@@ -1043,6 +1042,7 @@ public static class MusicFeedbackProtocolTests
     }
     private sealed class Fixture : IAsyncDisposable
     {
+        internal readonly MusicFeedbackAttempt Attempt = new();
         internal readonly Accounts Accounts = new();
         internal readonly FakeClock Clock = new();
         internal readonly MusicPlatformSession Account = new("wy", "synthetic-account-a", 1, "123", "MUSIC_U=synthetic-session; __csrf=synthetic-csrf");

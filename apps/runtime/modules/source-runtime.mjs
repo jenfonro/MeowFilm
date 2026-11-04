@@ -4,6 +4,7 @@ import {
   createNodeSourceCapabilities,
   createPortableSourceAdapter,
   createScriptHost,
+  SCRIPT_LIMITS,
   ScriptHostError,
 } from '@meowfilm/script-host';
 import {
@@ -13,12 +14,10 @@ import {
 } from '@meowfilm/source-runtime';
 
 export const sourceRuntimeContract = 'source.runtime.v1';
-const sourceBytes = 8 * 1024 * 1024;
+const sourceBytes = SCRIPT_LIMITS.maxSourceBytes;
 const controlBytes = 1024 * 1024;
 const chunkBytes = 64 * 1024;
-const stageBytes = 16 * 1024 * 1024;
 const stageTTL = 300_000;
-const maxInstances = 32;
 const protocols = new Set(['legado', 'yiciyuan', 'qysg', 'cat']);
 const codes = new Set([
   'INVALID_REQUEST', 'CLOSED', 'CANCELLED', 'LIMIT', 'SOURCE_INTEGRITY',
@@ -119,20 +118,23 @@ function errorCode(error) {
 export function createSourceRuntimeModule({
   call,
   hostFactory = createScriptHost,
-  network = createNodeNetwork({ maxResponseBytes: sourceBytes }),
+  network = createNodeNetwork(),
   capabilityOwner,
   platform = 'unknown',
   clock = Date.now,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
 } = {}) {
   requireValue(typeof call === 'function' && typeof hostFactory === 'function' &&
     typeof network === 'function' && typeof clock === 'function' &&
+    typeof setTimer === 'function' && typeof clearTimer === 'function' &&
     typeof platform === 'string' && platform.length > 0 &&
     (capabilityOwner === undefined ||
       typeof capabilityOwner?.invoke === 'function' &&
       typeof capabilityOwner?.releaseProfiles === 'function'));
   const owner = capabilityOwner ?? createNodeSourceCapabilities({ network });
   const capabilities = createCapabilityClient({
-    maximumBytes: sourceBytes,
+    maximumBytes: SCRIPT_LIMITS.maxMemoryBytes,
     invoke: (name, input, context) => owner.invoke(name, input, context),
   });
   const adapter = createPortableSourceAdapter({
@@ -141,16 +143,6 @@ export function createSourceRuntimeModule({
   });
   const host = hostFactory({
     adapters: { legado: adapter, qysg: adapter, cat: adapter },
-    limits: {
-      maxInstances,
-      maxSourceBytes: sourceBytes,
-      maxBytes: sourceBytes,
-      syncTimeoutMs: 2_000,
-      requestTimeoutMs: 120_000,
-      maxInFlight: 16,
-      maxInstanceInFlight: 4,
-      maxSiteInFlight: 4,
-    },
   });
   const stages = new Map();
   const bindings = new Map();
@@ -159,7 +151,7 @@ export function createSourceRuntimeModule({
   let closed = false;
   let closing;
   let tail = Promise.resolve();
-  let pending = 0;
+  let stageTimer;
 
   const success = value => bounded({ ok: true, contract: sourceRuntimeContract, ...value });
   const failure = error => ({ ok: false, contract: sourceRuntimeContract, code: errorCode(error) });
@@ -178,10 +170,24 @@ export function createSourceRuntimeModule({
     if (stage) {
       stage.bytes.fill(0);
       stages.delete(token);
+      scheduleSweep();
     }
   };
   const sweep = () => {
     for (const [token, stage] of stages) if (stage.expiresAt <= clock()) release(token);
+    scheduleSweep();
+  };
+  const scheduleSweep = () => {
+    if (stageTimer !== undefined) clearTimer(stageTimer);
+    stageTimer = undefined;
+    if (closed || !stages.size) return;
+    let expiresAt = Infinity;
+    for (const stage of stages.values()) expiresAt = Math.min(expiresAt, stage.expiresAt);
+    stageTimer = setTimer(() => {
+      stageTimer = undefined;
+      sweep();
+    }, Math.max(1, expiresAt - clock()));
+    stageTimer?.unref?.();
   };
   const staged = token => {
     text(token);
@@ -216,26 +222,31 @@ export function createSourceRuntimeModule({
     try { await owner.releaseProfiles(`source:${installationId}:`, keep); }
     catch { throw new Failure('SOURCE_CLEANUP'); }
   };
+  const refreshBinding = async (binding, live) => {
+    if (!binding || !live || binding.generation === live.generation) return;
+    requireValue(live.generation > binding.generation &&
+      live.contentHash === binding.contentHash && live.version === binding.version &&
+      live.protocol === binding.protocol, 'SOURCE_CLEANUP');
+    cleanup(binding.installationId);
+    await releaseProfiles(binding.installationId, live.generation);
+    requireValue(current(binding.installationId)?.generation === live.generation, 'STALE_SOURCE');
+    binding.generation = live.generation;
+  };
 
   function method(allowed, required, body) {
     return async (parameters = {}, context = {}) => {
-      let admitted = false;
       try {
         requireValue(object(context));
         const { signal } = context;
         requireValue(signal === undefined || signal instanceof AbortSignal);
         guard(signal);
         fields(parameters, allowed, required);
-        requireValue(pending < 16, 'LIMIT');
         const captured = bounded(parameters);
-        pending++;
-        admitted = true;
         const active = signal ? AbortSignal.any([lifetime.signal, signal]) : lifetime.signal;
         const result = await body(captured, active);
         guard(active);
         return success(result);
       } catch (error) { return failure(error); }
-      finally { if (admitted) pending--; }
     };
   }
 
@@ -273,9 +284,7 @@ export function createSourceRuntimeModule({
       requireValue(!/[\\/:*?"<>|]/.test(params.basename) &&
         /\.(?:json|js|html?)$/i.test(params.basename));
       integer(params.length, 1);
-      requireValue(params.length <= sourceBytes && stages.size < 4 &&
-        [...stages.values()].reduce((total, stage) => total + stage.length, 0) + params.length <= stageBytes,
-      'LIMIT');
+      requireValue(params.length <= sourceBytes, 'LIMIT');
       requireValue(typeof params.sha256 === 'string' && /^[a-f0-9]{64}$/.test(params.sha256));
       const token = randomUUID();
       stages.set(token, {
@@ -285,6 +294,7 @@ export function createSourceRuntimeModule({
         offset: 0,
         expiresAt: clock() + stageTTL,
       });
+      scheduleSweep();
       return { token, chunkBytes };
     }),
     'source.runtime.stage.chunk': method(['token', 'offset', 'data'], undefined, params => {
@@ -299,6 +309,8 @@ export function createSourceRuntimeModule({
         stage.offset + bytes.length <= stage.length, 'SOURCE_INTEGRITY');
       bytes.copy(stage.bytes, stage.offset);
       stage.offset += bytes.length;
+      stage.expiresAt = clock() + stageTTL;
+      scheduleSweep();
       return { next: stage.offset };
     }),
     'source.runtime.stage.abort': method(['token'], undefined, params => {
@@ -340,6 +352,7 @@ export function createSourceRuntimeModule({
         const id = params.installationId;
         const old = bindings.get(id);
         const live = current(id);
+        await refreshBinding(old, live);
         requireValue((old?.revision ?? 0) === params.expectedRevision, 'STALE_SOURCE');
         requireValue(Boolean(old) === Boolean(live), 'SOURCE_CLEANUP');
         requireValue(!old || params.revision >= old.revision, 'STALE_SOURCE');
@@ -351,7 +364,6 @@ export function createSourceRuntimeModule({
         }
         requireValue(!old || live.state === 'ready' && live.generation === old.generation,
           'SOURCE_DISABLED');
-        requireValue(old || bindings.size < maxInstances, 'LIMIT');
         const spec = {
           installationId: id,
           protocol: normalized.protocol,
@@ -381,6 +393,8 @@ export function createSourceRuntimeModule({
             importedProtocol: normalized.importedProtocol,
             uploadHash,
             signature,
+            contentHash: next.contentHash,
+            version: next.version,
           };
           const response = { instance: instance(binding, next) };
           success(response);
@@ -437,10 +451,12 @@ export function createSourceRuntimeModule({
         const binding = bindings.get(params.installationId);
         const live = current(params.installationId);
         requireValue(binding && live, 'SOURCE_NOT_FOUND');
+        await refreshBinding(binding, live);
         requireValue(binding.revision === params.revision &&
           (params.generation === undefined || binding.generation === params.generation),
         'STALE_SOURCE');
-        await host.uninstall(params.installationId);
+        try { await host.uninstall(params.installationId); }
+        catch { throw new Failure('SOURCE_CLEANUP'); }
         bindings.delete(params.installationId);
         requireValue(!current(params.installationId), 'SOURCE_CLEANUP');
         cleanup(params.installationId);
@@ -459,11 +475,16 @@ export function createSourceRuntimeModule({
       requireValue(object(params.payload));
       if (params.timeoutMs !== undefined) {
         integer(params.timeoutMs, 1);
-        requireValue(params.timeoutMs <= 120_000);
+        requireValue(params.timeoutMs <= 60_000);
       }
-      const binding = bindings.get(params.installationId);
-      const live = current(params.installationId);
-      requireValue(binding && live, 'SOURCE_NOT_FOUND');
+      const { binding, live } = await serialize(async () => {
+        guard(signal);
+        const binding = bindings.get(params.installationId);
+        const live = current(params.installationId);
+        requireValue(binding && live, 'SOURCE_NOT_FOUND');
+        await refreshBinding(binding, live);
+        return { binding, live };
+      });
       requireValue(binding.revision === params.revision &&
         binding.generation === params.generation &&
         live.generation === params.generation, 'STALE_SOURCE');
@@ -480,7 +501,11 @@ export function createSourceRuntimeModule({
         current(params.installationId)?.generation === params.generation, 'STALE_SOURCE');
       return { value: value ?? null };
     }),
-    'source.runtime.status': method([], undefined, (_params, signal) => serialize(() => {
+    'source.runtime.status': method([], undefined, (_params, signal) => serialize(async () => {
+      guard(signal);
+      for (const binding of bindings.values()) {
+        await refreshBinding(binding, current(binding.installationId));
+      }
       guard(signal);
       return { instances: [...bindings.values()].map(binding => instance(binding)) };
     })),

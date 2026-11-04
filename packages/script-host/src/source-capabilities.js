@@ -109,7 +109,6 @@ class ScopedCookieJar {
   }
 
   #profile(name) {
-    requireValue(this.#profiles.has(name) || this.#profiles.size < 1024, 'RESOURCE_LIMIT');
     if (!this.#profiles.has(name)) this.#profiles.set(name, new Map());
     return this.#profiles.get(name);
   }
@@ -188,12 +187,8 @@ class ScopedCookieJar {
       else {
         const bytes = jsonBytes({ name, value, domain, hostOnly, path, secure, expires });
         const previous = map.get(key);
-        const evictedKey = !previous && map.size >= 512 ? map.keys().next().value : null;
-        const evicted = evictedKey === null ? null : map.get(evictedKey);
-        requireValue(this.#bytes - (previous?.bytes ?? 0) - (evicted?.bytes ?? 0) +
-          bytes <= this.maximumBytes,
+        requireValue(this.#bytes - (previous?.bytes ?? 0) + bytes <= this.maximumBytes,
           'RESOURCE_LIMIT');
-        if (evictedKey !== null) this.#delete(map, evictedKey);
         map.set(key, {
           name, value, domain, hostOnly, path, secure, expires,
           sequence: ++this.#sequence, bytes,
@@ -231,7 +226,6 @@ function memoryStorage({ maximumBytes, maximumProfileBytes }) {
   const profiles = new Map();
   let bytes = 0;
   const map = profile => {
-    requireValue(profiles.has(profile) || profiles.size < 1024, 'RESOURCE_LIMIT');
     if (!profiles.has(profile)) profiles.set(profile, { values: new Map(), bytes: 0 });
     return profiles.get(profile);
   };
@@ -242,7 +236,6 @@ function memoryStorage({ maximumBytes, maximumProfileBytes }) {
     },
     set: ({ profile, key, value }) => {
       const bucket = map(profile);
-      requireValue(bucket.values.has(key) || bucket.values.size < 512, 'RESOURCE_LIMIT');
       const captured = structuredClone(value);
       const size = Buffer.byteLength(String(key)) + jsonBytes(captured);
       const previous = bucket.values.get(key);
@@ -304,7 +297,7 @@ function requestDeadline(parent, timeoutMs) {
  * Android/iOS native implementations of the same ABI.
  */
 export function createNodeSourceCapabilities({
-  network = createNodeNetwork({ maxResponseBytes: 8 * 1024 * 1024 }),
+  network = createNodeNetwork(),
   storage,
   web,
   onDiagnostic,
@@ -439,9 +432,6 @@ export function createNodeSourceCapabilities({
             if (!web) throw fault('CAPABILITY_UNAVAILABLE');
             return await web({ ...input, signal: activeSignal, scope });
           case 'virtual.register': {
-            requireValue(virtual.size < 1024 ||
-              virtual.has(JSON.stringify([input.profile, input.route])),
-              'RESOURCE_LIMIT');
             const key = JSON.stringify([input.profile, input.route]);
             const metadata = structuredClone(input.metadata);
             const bytes = Buffer.byteLength(key) + jsonBytes(metadata);

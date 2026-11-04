@@ -13,31 +13,40 @@
    </ControlTemplate.Triggers>
   </ControlTemplate></Setter.Value></Setter>
  </Style>
+ <Style x:Key="MeowFilm.OverlayScrollBar" TargetType="ScrollBar">
+  <Setter Property="Width" Value="10"/>
+  <Setter Property="Margin" Value="0,0,2,0"/>
+  <Setter Property="HorizontalAlignment" Value="Right"/>
+  <Setter Property="Opacity" Value="0"/>
+  <Setter Property="Background" Value="Transparent"/>
+  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ScrollBar">
+   <Grid Background="Transparent"><Track x:Name="PART_Track" IsDirectionReversed="True" Orientation="Vertical">
+    <Track.DecreaseRepeatButton><RepeatButton Command="ScrollBar.PageUpCommand" Style="{StaticResource MeowFilm.ScrollPage}"/></Track.DecreaseRepeatButton>
+    <Track.Thumb><Thumb Style="{StaticResource MeowFilm.ScrollThumb}" MinHeight="28"/></Track.Thumb>
+    <Track.IncreaseRepeatButton><RepeatButton Command="ScrollBar.PageDownCommand" Style="{StaticResource MeowFilm.ScrollPage}"/></Track.IncreaseRepeatButton>
+   </Track></Grid>
+  </ControlTemplate></Setter.Value></Setter>
+  <Style.Triggers>
+   <DataTrigger Binding="{Binding Path=(local:OverlayScrollChrome.Active),RelativeSource={RelativeSource AncestorType=ScrollViewer}}" Value="True">
+    <Setter Property="Opacity" Value="0.6"/>
+   </DataTrigger>
+   <MultiDataTrigger><MultiDataTrigger.Conditions>
+    <Condition Binding="{Binding Path=(local:OverlayScrollChrome.Active),RelativeSource={RelativeSource AncestorType=ScrollViewer}}" Value="True"/>
+    <Condition Binding="{Binding IsMouseOver,RelativeSource={RelativeSource Self}}" Value="True"/>
+   </MultiDataTrigger.Conditions><Setter Property="Opacity" Value="1"/></MultiDataTrigger>
+   <Trigger Property="IsMouseCaptureWithin" Value="True"><Setter Property="Opacity" Value="1"/></Trigger>
+   <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Opacity" Value="1"/></Trigger>
+  </Style.Triggers>
+ </Style>
  <Style x:Key="MeowFilm.OverlayScrollViewer" TargetType="ScrollViewer">
   <Setter Property="local:OverlayScrollChrome.Enabled" Value="True"/>
   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ScrollViewer">
    <Grid ClipToBounds="True">
     <ScrollContentPresenter x:Name="PART_ScrollContentPresenter" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" CanContentScroll="{TemplateBinding CanContentScroll}"/>
-    <ScrollBar x:Name="PART_VerticalScrollBar" Orientation="Vertical" Width="10" Margin="0,0,2,0" HorizontalAlignment="Right"
+    <ScrollBar x:Name="PART_VerticalScrollBar" Orientation="Vertical" Style="{StaticResource MeowFilm.OverlayScrollBar}"
      Minimum="0" Maximum="{TemplateBinding ScrollableHeight}" ViewportSize="{TemplateBinding ViewportHeight}" Value="{TemplateBinding VerticalOffset}"
-     Visibility="{TemplateBinding ComputedVerticalScrollBarVisibility}" Opacity="0" Background="Transparent">
-     <ScrollBar.Template><ControlTemplate TargetType="ScrollBar">
-      <Grid Background="Transparent"><Track x:Name="PART_Track" IsDirectionReversed="True" Orientation="Vertical">
-       <Track.DecreaseRepeatButton><RepeatButton Command="ScrollBar.PageUpCommand" Style="{StaticResource MeowFilm.ScrollPage}"/></Track.DecreaseRepeatButton>
-       <Track.Thumb><Thumb Style="{StaticResource MeowFilm.ScrollThumb}" MinHeight="28"/></Track.Thumb>
-       <Track.IncreaseRepeatButton><RepeatButton Command="ScrollBar.PageDownCommand" Style="{StaticResource MeowFilm.ScrollPage}"/></Track.IncreaseRepeatButton>
-      </Track></Grid>
-     </ControlTemplate></ScrollBar.Template>
-    </ScrollBar>
+     Visibility="{TemplateBinding ComputedVerticalScrollBarVisibility}"/>
    </Grid>
-   <ControlTemplate.Triggers>
-    <Trigger Property="local:OverlayScrollChrome.Active" Value="True"><Setter TargetName="PART_VerticalScrollBar" Property="Opacity" Value="0.6"/></Trigger>
-    <MultiTrigger><MultiTrigger.Conditions>
-     <Condition Property="local:OverlayScrollChrome.Active" Value="True"/><Condition SourceName="PART_VerticalScrollBar" Property="IsMouseOver" Value="True"/>
-    </MultiTrigger.Conditions><Setter TargetName="PART_VerticalScrollBar" Property="Opacity" Value="1"/></MultiTrigger>
-    <Trigger SourceName="PART_VerticalScrollBar" Property="IsMouseCaptureWithin" Value="True"><Setter TargetName="PART_VerticalScrollBar" Property="Opacity" Value="1"/></Trigger>
-    <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter TargetName="PART_VerticalScrollBar" Property="Opacity" Value="1"/></Trigger>
-   </ControlTemplate.Triggers>
   </ControlTemplate></Setter.Value></Setter>
  </Style>
 </ResourceDictionary>

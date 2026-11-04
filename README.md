@@ -37,11 +37,11 @@ Windows 上运行 Python 脚本时将 `python3` 换为 `python -X utf8`。iOS �
 
 ## 脚本运行时
 
-公共来源运行时使用 QuickJS WebAssembly 隔离 guest，并由协议无关 capability ABI 提供 HTTP、Cookie、存储、编码、加解密、Web 交互和虚拟路由。当前模块为 `music@0.5.0`／`music.script.v2` 与 `source@0.1.0`／`source.runtime.v1`；支持 LX、Legado、异次元旧格式导入、轻悦时光 HTML 和 CatVod JS。
+LX 音源、CatNode 和 Reader／CatVod 来源共用 script-host 的 WorkerSession 与 QuickJS WebAssembly 后端。当前模块为 `music@0.6.0`／`music.script.v2`、`cat@0.1.0`／`cat.script.v1`、`source@0.1.0`／`source.runtime.v1`。Windows 只保留按需启动、命名管道、持久数据根和平台打包；官方原生业务无脚本操作时不启动 Node。
 
-Windows 只负责随包 Node 的按需启动、命名管道和平台打包；目标电脑不需要安装 Node。公共 Reader/Cat 核心不依赖 Node、JVM 或 Windows API，后续平台只需实现相同 capability ABI。网络只校验 HTTP(S) 语法和资源边界，不声称阻断本机或私网。见 [公共运行时](docs/runtime/script-runtime.md)。
+LX 特权存储使用请求第二参数 `context.storage`。CatNode 保留有限 Node 风格能力、受控 HTTP 服务、direct Spider 和安装实例私有卷，不获得宿主任意 `require`、文件或进程访问；网络不按公网、私网、回环或局域网域名分类拒绝目标。source 的 CatVod 只接受独立 Spider 输入，不能代替 CatNode。Reader 的 Legado、异次元和轻悦时光规则通过[来源 capability ABI](docs/runtime/source-capability-abi.md)请求平台能力。Node 无关仅指 `source-runtime` 规则包，不表示 Node 兼容层或当前 Windows 承载能脱离 Node。见[公共运行时](docs/runtime/script-runtime.md)。
 
-外部来源验收使用 [实际声明动作与联网报告](docs/runtime/source-acceptance.md)，不会修改或把用户来源打包进应用。
+外部 LX、CatNode 和 Reader／CatVod 来源验收使用[实际声明动作与联网报告](docs/runtime/source-acceptance.md)，不会修改或把用户脚本打包进应用；底层来源支持不表示已接入阅读 UI 或其他平台客户端。
 
 ## 文档
 

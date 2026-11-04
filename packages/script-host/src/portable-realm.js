@@ -9,6 +9,9 @@ export const portableRealmSource = String.raw`
   delete globalThis.__meowBridge;
   const parse = JSON.parse.bind(JSON);
   const stringify = JSON.stringify.bind(JSON);
+  const setPrototypeOf = Object.setPrototypeOf;
+  const isView = ArrayBuffer.isView;
+  const arrayFrom = Array.from.bind(Array);
   const pending = new Map();
   const callbacks = new Map();
   const trustedErrors = new WeakMap();
@@ -24,11 +27,13 @@ export const portableRealmSource = String.raw`
     return value;
   };
   const errorCode = value => trustedErrors.get(value)
-    || (value && value.name === 'InternalError' && /out of memory|stack overflow/i.test(value.message)
-      ? 'RESOURCE_LIMIT' : 'SCRIPT_EXCEPTION');
+    || (value && value.name === 'InternalError' && /out of memory|allocation failed/i.test(value.message)
+      ? 'MEMORY_LIMIT' : value && value.name === 'InternalError' && /stack overflow/i.test(value.message)
+        ? 'RESOURCE_LIMIT' : 'SCRIPT_EXCEPTION');
   const call = (operation, ...args) => {
+    setPrototypeOf(args, null);
     const response = parse(bridge(operation, stringify(args, (_key, value) =>
-      ArrayBuffer.isView(value) ? Array.from(value) : value)));
+      isView(value) ? arrayFrom(value) : value)));
     if (!response.ok) throw error(response.code);
     return response.value;
   };

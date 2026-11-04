@@ -42,18 +42,16 @@ enum MusicPlatformProtocol {
     }
 }
 
-/// Search-only budgets. Migu counts groups, whose recording editions must not
-/// be truncated to the group page size. Account/browse pages remain unchanged.
+/// Search wire validation. Migu pages count groups, not recording editions.
 enum MusicNativeSearchProtocol {
     static let platforms = ["wy", "tx", "kg", "kw", "mg"]
-    static func maximumItems(_ platform: String) -> Int { platform == "mg" ? 200 : 30 }
     static func validate(query: String, page: Int) throws {
         _ = try musicText(query, maximum: 800)
         try musicRequire(!query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-            query.unicodeScalars.count <= 200 && (1...200).contains(page))
+            query.unicodeScalars.count <= 200 && page > 0 && page <= Int.max / 100)
     }
     static func count(_ value: MJ, maximum: Int) throws -> Int {
-        if value.isInteger && value.number <= Double(maximum) { return value.int }
+        if value.isInteger && value.number >= 0 && value.number <= Double(maximum) { return value.int }
         if value.isString, value.string.range(of: "^[0-9]{1,16}$", options: .regularExpression) != nil,
            let result = Int(value.string), result <= maximum { return result }
         throw MusicServiceError.upstreamInvalid
@@ -87,23 +85,35 @@ actor MusicNativePlatforms {
     var epoch = UUID()
     var volatileClients: [MusicAccountPlatform: MusicNativeClientDevice] = [:]
     let playlistHeads: AsyncValueCache<String, MJ>
-    let songBatches: AsyncValueCache<String, [MusicNativeTrackData]>
+    let songBatches: AsyncValueCache<String, [String: MusicNativeTrackData]>
     let completeCollections: AsyncValueCache<String, MusicPublicBrowseNativeCollection>
     var detailWitnesses: [String: MusicNativePublicBrowseWitness] = [:]
+    let discoveryHot: AsyncValueCache<String, MusicNativeSearchDiscoveryValue<MusicNativeSearchHotValue>>
+    let discoveryCharts: AsyncValueCache<String, MusicNativeSearchDiscoveryValue<[MusicPublicBrowseCollection]>>
     init(transport: any MusicNativeHTTPTransport, qq: any MusicPublicQQProviding, clock: @escaping @Sendable () -> Date,
          clients: (any MusicNativeClientContextProviding)? = nil) {
         self.transport = transport; self.qq = qq; now = clock; self.clients = clients
-        playlistHeads = .init(capacity: 24, maximumCost: 4 * 1024 * 1024, maximumFlights: 8,
+        playlistHeads = .init(capacity: 24, maximumCost: 4 * 1024 * 1024,
                               cost: { $0.bytes.count }, clock: clock)
-        songBatches = .init(capacity: 48, maximumCost: 4 * 1024 * 1024, maximumFlights: 8,
-                            cost: { $0.reduce(0) { $0 + $1.data.count } }, clock: clock)
-        completeCollections = .init(capacity: 6, maximumCost: 12 * 1024 * 1024, maximumFlights: 4,
+        songBatches = .init(capacity: 48, maximumCost: 4 * 1024 * 1024,
+                            cost: { $0.values.reduce(0) { $0 + $1.data.count } }, clock: clock)
+        completeCollections = .init(capacity: 6, maximumCost: 12 * 1024 * 1024,
                                     cost: { $0.tracks.reduce(0) { $0 + $1.data.count } }, clock: clock)
+        discoveryHot = .init(capacity: 1, maximumCost: 32 * 1024,
+                             cost: { $0.value.keywords.reduce(0) {
+                                 $0 + $1.keyword.utf8.count + 16
+                             } + 1 }, clock: clock)
+        discoveryCharts = .init(capacity: 1, maximumCost: 32 * 1024,
+                                cost: { $0.value.reduce(0) {
+                                    $0 + $1.id.utf8.count + $1.title.utf8.count + $1.creator.utf8.count +
+                                        ($1.artwork?.absoluteString.utf8.count ?? 0) + 16
+                                } }, clock: clock)
     }
     func revoke() async {
         epoch = UUID(); volatileClients = [:]
         detailWitnesses = [:]
         await playlistHeads.invalidate(); await songBatches.invalidate(); await completeCollections.invalidate()
+        await discoveryHot.invalidate(); await discoveryCharts.invalidate()
     }
     func invalidateCollection(_ collection: MusicPublicBrowseCollection) async {
         detailWitnesses = detailWitnesses.filter { $0.value.collectionID != collection.id }
@@ -140,7 +150,7 @@ actor MusicNativePlatforms {
         // Keep the response header beside its own body across suspension.
         // A shared "last response" would attribute concurrent limits wrongly.
         let checked = checkingNeteaseCode
-            ? try await checkedWYCode(result, url: value.url, retryAfter: response.header("retry-after"))
+            ? try browseWYCode(result)
             : result
         try musicRequire(own == epoch, .staleResult)
         if let client, let clients, response.header("set-cookie") != nil {
@@ -164,10 +174,13 @@ actor MusicNativePlatforms {
         return try await request(.init(url: URL(string: "https://interfacepc.music.163.com/eapi/" + path.dropFirst(5))!, method: "POST",
             headers: ["Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
                       "User-Agent": "NeteaseMusic 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)", "Cookie": cookie], body: body),
-            // The official toplist repeats this unused display field with
-            // different values. Discard it only on this exact route, without
-            // passing identities through JSONSerialization/Double rounding.
-            ignoringUpstreamKeys: path == "/api/toplist" ? ["updateFrequency"] : [], checkingNeteaseCode: true, client: client)
+            // The official toplist and some official chart playlist details
+            // repeat these unused fields with different values. Discard them
+            // only on their exact routes, without passing identities through
+            // JSONSerialization/Double rounding.
+            ignoringUpstreamKeys: path == "/api/toplist" ? ["updateFrequency"]
+                : path == "/api/v6/playlist/detail" ? ["alg"] : [],
+            checkingNeteaseCode: true, client: client)
     }
     func kg(_ path: String, _ params: [String: String], lyric: Bool = false, clear: Bool = false) async throws -> MJ {
         let client = try await clientDevice(.kugou), mid = client.fields["KUGOU_API_MID"]!, dfid = client.fields["dfid"] ?? "-"
@@ -183,6 +196,13 @@ actor MusicNativePlatforms {
         let codes = ["error_code", "errcode", "err_code"].filter(data.contains).map { data[$0].id }
         if codes.contains("20018") { throw MusicServiceError.authRequired }
         if codes.contains("20028") || data.contains("ssaCode") { throw MusicServiceError.verificationRequired }
+        // KuGou reports an out-of-range list/page as 149 rather than an empty
+        // page. Only this dedicated end-of-results code becomes an empty result.
+        if !lyric && codes.contains("149") {
+            return .obj([("status", .n(1)), ("error_code", .n(0)), ("data", .obj([
+                ("count", .n(0)), ("total", .n(0)), ("lists", .array([])), ("info", .array([])), ("songs", .array([]))
+            ]))])
+        }
         if path == "/v1/search" {
             try musicRequire(["200", "404"].contains(data["status"].id) && data["status"].id == data["errcode"].id && data["candidates"].isArray, .upstreamFailed)
         } else {
@@ -190,40 +210,46 @@ actor MusicNativePlatforms {
         }
         return data
     }
-    func search(platform: String, query: String, page: Int) async throws -> MusicNativeTrackPage {
+    func search(platform: String, query: String, page: Int, limit: Int) async throws -> MusicNativeTrackPage {
         let own = epoch
         try Task.checkCancellation()
-        try musicRequire((1...200).contains(page))
+        guard let kind = MusicPublicBrowsePlatform(rawValue: platform) else { throw MusicServiceError.sourceUnavailable }
+        guard (1...100).contains(limit) else { throw MusicServiceError.invalidRequest }
+        let offset = try MusicSearchPagination.offset(platform: kind, page: page, limit: limit)
         if platform == "kw" {
-            let request = try MusicNativeKuwoSearch.request(query: query, page: page)
+            let request = try MusicNativeKuwoSearch.request(query: query, page: page, limit: limit)
             let data = try await requestData(request)
-            return try MusicNativeKuwoSearch.decode(data, page: page)
+            return try MusicNativeKuwoSearch.decode(data, page: page, limit: limit)
         }
         if platform == "mg" {
-            let request = try MusicNativeMiguSearch.request(query: query, page: page, now: now())
+            let request = try MusicNativeMiguSearch.request(query: query, page: page, limit: limit, now: now())
             let data = try await self.request(request)
-            return try MusicNativeMiguSearch.decode(data, page: page)
+            return try MusicNativeMiguSearch.decode(data, page: page, limit: limit)
         }
         if platform == "tx" {
-            let value = try await qq.search(query: query, page: page)
+            let value = try await qq.search(query: query, page: page, limit: limit)
             try musicRequire(own == epoch, .staleResult); return value
         }
         let rows: [MJ], total: Int
         if platform == "wy" {
-            let data = try await wy("/api/cloudsearch/pc", .obj([("s", .string(query)), ("type", .n(1)), ("limit", .n(30)), ("offset", .n((page - 1) * 30)), ("total", .bool(true))]))
-            let result = data["result"]; total = try result["songCount"].integer(1_000_000)
+            let data = try await wy("/api/cloudsearch/pc", .obj([("s", .string(query)), ("type", .n(1)),
+                ("limit", .n(limit)), ("offset", .n(offset)), ("total", .bool(true))]))
+            let result = data["result"]; total = try result["songCount"].integer()
             try musicRequire(result["songs"].isArray || total == 0 && !result.contains("songs"), .upstreamInvalid)
             rows = result["songs"].array
         } else if platform == "kg" {
-            let data = try await kg("/v2/search/song", ["keyword": query, "page": String(page), "pagesize": "30", "platform": "AndroidFilter",
+            let data = try await kg("/v2/search/song", ["keyword": query, "page": String(page),
+                "pagesize": String(limit), "platform": "AndroidFilter",
                 "iscorrection": "1", "privilegefilter": "0", "area_code": "1", "dopicfull": "1"])
-            let result = data["data"]; total = try result["total"].integer(1_000_000)
+            let result = data["data"]; total = try result["total"].integer()
             let list = result.contains("lists") ? result["lists"] : result["info"]
             try musicRequire(list.isArray, .upstreamInvalid); rows = list.array
         } else { throw MusicServiceError.sourceUnavailable }
-        try musicRequire(rows.count <= 30 && (rows.isEmpty ? (page - 1) * 30 >= total : (page - 1) * 30 + rows.count <= total), .upstreamInvalid)
+        try musicRequire(rows.count <= limit, .upstreamInvalid)
         let items = try rows.map { platform == "wy" ? try Self.neteaseSong($0) : try kugouSong($0) }
-        return .init(items: items, total: total, nextPage: page * 30 < total && page < 200 && !rows.isEmpty ? page + 1 : nil)
+        return .init(items: items, total: total,
+                     nextPage: try MusicSearchPagination.nextPage(page: page, limit: limit,
+                        count: rows.count, total: total))
     }
     static func neteaseSong(_ raw: MJ) throws -> MusicNativeTrackData {
         let id = try MusicPlatformProtocol.numericID(raw["id"]), album = raw.contains("al") ? raw["al"] : raw["album"]
@@ -235,9 +261,9 @@ actor MusicNativePlatforms {
         let albumID: String
         if album["id"] == .null || album["id"].id == "0" { albumID = "" }
         else { albumID = try MusicPlatformProtocol.numericID(album["id"]) }
-        let native = MJ.obj([("source", .string("wy")), ("musicId", .string(id)), ("songmid", .string(id)),
+        let native = MJ.obj([("source", .string("wy")), ("songmid", .string(id)),
             ("name", .string(try raw["name"].text(1024))), ("singer", .string(try artists.array.map { try $0["name"].text(256, empty: true) }.joined(separator: "、"))),
-            ("album", .string(album["name"].string)), ("albumId", .string(albumID)),
+            ("albumName", .string(album["name"].string)), ("albumId", .string(albumID)),
             ("duration", .number((raw.contains("dt") ? raw["dt"] : raw["duration"]).number / 1000)), ("img", album["picUrl"] == .null ? .string("") : album["picUrl"])])
         return .init(platform: "wy", data: native.bytes)
     }
@@ -276,8 +302,9 @@ actor MusicNativePlatforms {
         let albumID = first(raw["album_id"], raw["AlbumID"], album["id"])
         let mix = first(raw["mixsongid"], raw["add_mixsongid"], raw["album_audio_id"], raw["MixSongID"])
         let duration = raw.contains("Duration") ? raw["Duration"].number : first(raw["timelen"], raw["timelength"], audio["timelength"]).number / 1000
-        let info = MJ.obj([("source", .string("kg")), ("musicId", .string(hash)), ("hash", .string(hash)), ("songmid", .string(ids.first ?? "")),
-            ("name", .string(title)), ("singer", .string(singer)), ("album", first(raw["AlbumName"], album["name"], album["album_name"], .string(""))),
+        let albumName = first(raw["AlbumName"], album["name"], album["album_name"], .string(""))
+        let info = MJ.obj([("source", .string("kg")), ("hash", .string(hash)), ("songmid", .string(hash)),
+            ("name", .string(title)), ("singer", .string(singer)), ("albumName", albumName),
             ("albumId", .string(albumID == .null || albumID == .string("") ? "0" : try MusicPlatformProtocol.numericID(albumID, zero: true))),
             ("albumAudioId", .string(mix == .null || mix == .string("") ? "0" : try MusicPlatformProtocol.numericID(mix, zero: true))),
             ("duration", .number(duration)), ("img", first(raw["cover"], raw["Image"], raw["trans_param"]["union_cover"], .string(""))),
@@ -298,11 +325,11 @@ actor MusicNativePlatforms {
             try musicRequire(own == epoch, .staleResult); return value
         }
         if platform == "tx" {
-            let value = try await qq.lyrics(mid: info["songmid"].id.isEmpty ? info["musicId"].id : info["songmid"].id)
+            let value = try await qq.lyrics(mid: info["songmid"].id)
             try musicRequire(own == epoch, .staleResult); return value
         }
         if platform == "wy" {
-            let id = try MusicPlatformProtocol.numericID(info.contains("musicId") ? info["musicId"] : info["songmid"])
+            let id = try MusicPlatformProtocol.numericID(info["songmid"])
             let data = try await wy("/api/song/lyric/v1", .obj([("id", .string(id)), ("cp", .bool(false)), ("tv", .n(0)), ("lv", .n(0)),
                 ("rv", .n(0)), ("kv", .n(0)), ("yv", .n(0)), ("ytv", .n(0)), ("yrv", .n(0))]))
             let yrc = MusicNativeLyricsParser.timed(data["yrc"]["lyric"].string)

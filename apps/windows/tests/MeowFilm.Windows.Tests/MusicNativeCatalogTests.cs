@@ -34,11 +34,11 @@ public static class MusicNativeCatalogTests
         yield return new("Native catalog complete private locator projection and exact 30-member pages", PrivateLocator);
         yield return new("Native catalog private KG sort across pages preserves duplicate hash occurrences", PrivateOrder);
         yield return new("Native catalog private KG duplicate fileid and changed sort are not snapshots", PrivateChanges);
-        yield return new("Native catalog private KG exceeds old 100-page ceiling without truncation", PrivateLong);
-        yield return new("Native catalog stage token expires discards and admits at most two preparations", StageSlots);
-        yield return new("Native catalog simultaneous preparing work reserves slots", PreparingSlots);
-        yield return new("Native catalog eight pending requests reject excess without extra platform calls", RequestSlots);
-        yield return new("Native catalog commit keeps slot until CAS or queued cancellation actually ends", CommitSlots);
+        yield return new("Native catalog private KG exceeds 100 pages without truncation", PrivateLong);
+        yield return new("Native catalog stage tokens expire and discard independently", StageSlots);
+        yield return new("Native catalog simultaneous preparations own cancellation independently", PreparingSlots);
+        yield return new("Native catalog concurrent reads have no shared request quota", RequestSlots);
+        yield return new("Native catalog commit drain and cancellation do not block unrelated preparation", CommitSlots);
         yield return new("Native catalog invalid selection retains token and stale queue CAS consumes it", SelectionAndCas);
         yield return new("Native catalog pre-cancel and late page cancellation never publish hidden stage", Cancellation);
         yield return new("Native catalog cancellation at stage publication releases hidden token", PublicationCancellation);
@@ -51,7 +51,7 @@ public static class MusicNativeCatalogTests
         yield return new("Native catalog close drains ignored read cancellation and borrows dependencies", CloseRead);
         yield return new("Native catalog close drains admitted CAS without pretending cancellation rollback", CloseCommit);
         yield return new("Native catalog bounded close fails until actual drain rather than disposing dependencies", CloseTimeout);
-        yield return new("Native catalog control and stage byte budgets never admit partial persistence", Budgets);
+        yield return new("Native catalog field and storage capacity checks never admit partial persistence", Budgets);
     }
 
     private static void Check(bool value, string message = "Assertion failed")
@@ -87,11 +87,10 @@ public static class MusicNativeCatalogTests
     private static void ReplaceNativeIdentity(JsonObject song, JsonElement replacement)
     {
         var next = O(replacement);
-        song["source_data"] = next["source_data"]!.DeepClone();
         var currentSource = song["sources"]![0]!.AsObject();
         var nextSource = next["sources"]![0]!.AsObject();
         currentSource["sourceKey"] = nextSource["sourceKey"]!.DeepClone();
-        currentSource["source_data"] = nextSource["source_data"]!.DeepClone();
+        currentSource["musicInfo"] = nextSource["musicInfo"]!.DeepClone();
     }
     private static JsonElement Page(MusicPlaylistRequest request, int total = 235, Func<int, JsonElement>? song = null)
     {
@@ -282,6 +281,10 @@ public static class MusicNativeCatalogTests
         Check(f.Platform.Calls[^1].Request is MusicChannelRequest { PageCode: "p", Tag: "", Refresh: true });
         Ok(await f.Run("channel", new { platform = "wy", id = "artist", tag = "96:2:65" }));
         Check(f.Platform.Calls[^1].Request is MusicChannelRequest { Id: "artist", Tag: "96:2:65" });
+        var personalCursor = E(new { seen = Enumerable.Range(1, 5000).Select(i => i.ToString("D20")).ToArray() });
+        Check(Encoding.UTF8.GetByteCount(personalCursor.GetRawText()) > 65536);
+        Ok(await f.Run("personalPlaylists", new { platform = "wy", page = 5001, limit = 1, continuation = personalCursor }));
+        Check(((MusicPersonalPlaylistsRequest)f.Platform.Calls[^1].Request!).Continuation!.Value.GetRawText() == personalCursor.GetRawText());
         Check(f.Store.Writes == 0);
     }
     private static async Task PersonalRoute(string route)
@@ -499,11 +502,11 @@ public static class MusicNativeCatalogTests
             expectedSongId = S(Song("kg", 0), "songId"), expectedVersion = 0 }));
         var queue = await f.Queue();
         var members = queue.GetProperty("entries").EnumerateArray().Select(e =>
-            S(e.GetProperty("song").GetProperty("source_data"), "fileid")).ToArray();
+            S(MusicSongFixture.Info(e.GetProperty("song")), "fileid")).ToArray();
         var expected = Enumerable.Range(0, 65).OrderBy(i => Sort(i) is null).ThenBy(Sort).ThenBy(i => i)
             .Select(i => (1000 + i).ToString()).ToArray();
         Check(members.SequenceEqual(expected) && members.Contains("1000") && members.Contains("1031"));
-        Check(S(queue.GetProperty("current").GetProperty("song").GetProperty("source_data"), "fileid") == "1031");
+        Check(S(MusicSongFixture.Info(queue.GetProperty("current").GetProperty("song")), "fileid") == "1031");
         Check(N(queue, "total") == 65 && f.Store.Writes == 1);
     }
     private static async Task PrivateChanges()
@@ -537,7 +540,7 @@ public static class MusicNativeCatalogTests
     {
         await using var f = new Fixture(); f.Platform.Total = 1;
         var a = await f.Prepare(); var b = await f.Prepare();
-        Error(await f.Run("playlist.prepare", new { platform = "wy", id = "42" }), "LIMIT");
+        await f.Prepare();
         Check(Ok(await f.Run("playlist.discard", new { token = S(a, "token") })).GetProperty("discarded").GetBoolean());
         Check(!Ok(await f.Run("playlist.discard", new { token = S(a, "token") })).GetProperty("discarded").GetBoolean());
         var c = await f.Prepare(); f.Clock.Advance(TimeSpan.FromMinutes(1));
@@ -553,19 +556,18 @@ public static class MusicNativeCatalogTests
         var a = f.Run("playlist.prepare", new { platform = "wy", id = "42" }, cancellation.Token);
         var b = f.Run("playlist.prepare", new { platform = "wy", id = "43" });
         await Until(() => f.Platform.Calls.Length == 2);
-        Error(await f.Run("playlist.prepare", new { platform = "wy", id = "44" }), "LIMIT");
-        cancellation.Cancel(); Error(await a, "CANCELLED");
         var c = f.Run("playlist.prepare", new { platform = "wy", id = "44" });
-        await Until(() => f.Platform.Calls.Length == 3); release.TrySetResult(); Ok(await b); Ok(await c);
+        await Until(() => f.Platform.Calls.Length == 3);
+        cancellation.Cancel(); Error(await a, "CANCELLED");
+        release.TrySetResult(); Ok(await b); Ok(await c);
     }
     private static async Task RequestSlots()
     {
         await using var f = new Fixture(); var release = f.Hold();
         f.Platform.Handler = async c => { await release.Task.WaitAsync(c.Token); return E(new { marker = "home" }); };
-        var tasks = Enumerable.Range(0, 8).Select(_ => f.Run("home", new { platform = "wy" })).ToArray();
-        await Until(() => f.Platform.Calls.Length == 8);
-        Error(await f.Run("home", new { platform = "tx" }), "LIMIT");
-        Check(f.Platform.Calls.Length == 8); release.TrySetResult();
+        var tasks = Enumerable.Range(0, 40).Select(_ => f.Run("home", new { platform = "wy" })).ToArray();
+        await Until(() => f.Platform.Calls.Length == 40);
+        release.TrySetResult();
         foreach (var reply in await Task.WhenAll(tasks)) Ok(reply);
         Ok(await f.Run("describe"));
     }
@@ -578,10 +580,10 @@ public static class MusicNativeCatalogTests
         await f.Store.Entered!.Task;
         using var cancel = new CancellationTokenSource();
         var queued = f.Run("playlist.commit", new { token = S(b, "token"), action = "save" }, cancel.Token);
-        Error(await f.Run("playlist.prepare", new { platform = "wy", id = "42" }), "LIMIT");
+        await f.Prepare();
         cancel.Cancel(); Error(await queued, "CANCELLED");
-        await f.Prepare(); // The cancelled waiting commit released its slot.
-        Error(await f.Run("playlist.prepare", new { platform = "wy", id = "42" }), "LIMIT");
+        await f.Prepare();
+        Check(!writing.IsCompleted);
         f.Store.Release!.TrySetResult(); Ok(await writing); Check(f.Store.Writes == 1);
     }
     private static async Task SelectionAndCas()
@@ -707,15 +709,15 @@ public static class MusicNativeCatalogTests
     {
         await using var f = new Fixture();
         using var json = JsonDocument.Parse("{\"platform\":\"wy\",\"keyword\":\"" + new string('猫', 30000) + "\"}");
-        Error(await f.Run("search", json.RootElement), "LIMIT");
+        Error(await f.Run("search", json.RootElement), "INVALID_REQUEST");
         Check(f.Platform.Calls.Length == 0);
         f.Platform.Handler = _ => Task.FromResult(E(new { data = new string('x', 512 * 1024) }));
-        Error(await f.Run("home", new { platform = "wy" }), "LIMIT");
+        Check(S(Ok(await f.Run("home", new { platform = "wy" })), "data").Length == 512 * 1024);
         f.Platform.Handler = _ => Task.FromResult(E(new { ok = false, code = "AUTH_REQUIRED" }));
         Error(await f.Run("home", new { platform = "wy" }), "INVALID_RESPONSE");
         f.Platform.Handler = null;
         f.Platform.Pages = p => Page(p, 10001);
-        Error(await f.Run("playlist.prepare", new { platform = "wy", id = "42" }), "PAGINATION_LIMIT");
+        Check(N(await f.Prepare(), "count") == 10001);
         var huge = O(Song("wy", 0)); huge["title"] = new string('x', 32 * 1024 * 1024);
         var large = J(huge);
         f.Platform.Pages = p => Page(p, 1, _ => large);

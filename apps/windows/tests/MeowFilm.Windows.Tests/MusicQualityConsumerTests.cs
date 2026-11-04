@@ -109,7 +109,7 @@ public static class MusicQualityConsumerTests
         const string source = """
             lx.on(lx.EVENT_NAMES.request,async ({info})=>{
               if(!info.musicInfo.types.some(t=>t.type===info.type)) throw new Error('type mismatch');
-              return 'https://media.invalid/'+info.musicInfo.musicId+'/'+info.type;
+              return 'https://media.invalid/'+info.musicInfo.songmid+'/'+info.type;
             });
             lx.send(lx.EVENT_NAMES.inited,{status:true,sources:{
               wy:{name:'quality fixture',type:'music',actions:['musicUrl'],qualitys:['128k','192k','320k','flac','flac24bit','master']}
@@ -158,7 +158,7 @@ public static class MusicQualityConsumerTests
         internal async Task Play(string id)
         {
             await Module.PlayOnlineSongAsync("wy", "合成歌曲", "合成艺人", "",
-                QualityFixture.Song(id).GetProperty("source_data"));
+                MusicSongFixture.Info(QualityFixture.Song(id)));
         }
         public async ValueTask DisposeAsync()
         {

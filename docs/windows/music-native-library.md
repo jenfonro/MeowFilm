@@ -70,6 +70,7 @@ queue
 history
 lx-installations
 online-settings
+native-official-sources
 native-quality-policy
 native-lyric-display
 native-metadata-policy
@@ -83,22 +84,42 @@ playback-settings
 
 脚本私有 area 使用当前安装实例和站点构成的精确 key；每个实例最多 32 个有界站点标识，不存在实例、非法标识或重复 key 均拒绝。
 
-`lx-installations` 唯一当前格式为 schema 3：
+`lx-installations` 唯一当前格式为 schema 4：
 
 ```json
 {
-  "schema": 3,
+  "schema": 4,
   "revision": 0,
   "installations": []
 }
 ```
 
-- 最多 32 个安装实例。
-- 每个 `current`／`previous` 只包含 `source`、`version`、`permissions`。
+- 不设固定安装实例数量或根文档 entries 数量上限；仍受 metadata 的 3 MiB 和根文档的 8 MiB 字节边界约束。
+- 每个 `current`／`previous` 只包含 `sourceHash`、`sourceBytes`、`version`、`permissions`。
 - `permissions` 仅含 `storage`，值为不重复的 `read`／`write` 数组。
-- 单脚本最多 512 KiB，全部源元数据最多 3 MiB。
+- metadata 总量最多 3 MiB；单个脚本源码最多 16 MiB，与公共 ScriptHost 上限一致。
+- 源码位于受保护 collection `music.script-sources.v1`，按 1 MiB、内容 hash 和 chunk index 保存为不可变字节。发布 metadata 前必须已完整写入；读取核对每片 fingerprint、长度和整份 hash。
+- 中断或并发的相同不可变分片写入可通过读回相同字节结算；冲突或损坏明确失败。未被 metadata 引用的内容不会被静默删除或当作安装实例。
 - 禁用或删除当前播放目标时，在同一文档 CAS 中把 `online-settings.target` 置空并推进其 revision。
-- 读取不写入文档；不符合当前格式的源记录明确失败，不迁移、转换、删除或回退。
+- 读取不写入文档；schema 3、内联源码和其他不符合当前格式的记录明确失败，不迁移、转换、删除或回退。
+
+## 官方音源设置当前格式
+
+`native-official-sources` 的当前格式为 schema 1：
+
+```json
+{
+  "schema": 1,
+  "revision": 0,
+  "enabled": ["wy", "tx", "kg"]
+}
+```
+
+- `enabled` 是 `wy`、`tx`、`kg` 的无重复子集；空数组表示三平台全部关闭。
+- 缺少该 area 时，`music.officialSources.settings.get` 返回上述 revision 0、三平台全开的缺省 `settings`，不为读取创建或写入文档。
+- `music.officialSources.settings.save` 必须携带 `ifRevision` 和 `enabled`；`ifRevision` 与当前 revision 不符时返回 `REVISION_CONFLICT`，成功保存只推进本设置的 revision。
+- 该设置独立于 `online-settings`、`native-quality-policy` 和 `native-metadata-policy`，不复用它们的启停字段或改写播放目标、音质、歌词／封面设置。
+- 持久化覆盖契约与测试归属见 `MusicOfficialSourcesPolicyTests.cs`，包括缺省读取、独立启停与全关、重启恢复及同职责未知 CAS 结算；测试执行结果另行记录。
 
 ## 曲库当前格式
 
@@ -131,6 +152,16 @@ version ownerId revision nextId collections songs accounts
 - binding 只允许相同三个平台；`map` 方向固定为 `nativeId -> songId`。
 - intent 的 `acknowledged` 只包含该集合中现存 binding 的 canonical binding key。
 - 歌曲必须等于 `NativeMusicSong.Normalize` 的当前规范结果；临时媒体 URL、凭据和签名资源字段不得进入持久歌曲。
+
+## 统一歌曲与录音分组
+
+- `NativeMusicSong` 是 Windows 精简歌曲模型的唯一 owner。显示字段为 `songId / title / artist / album / duration / cover_url`；`sources` 中每项保存 `sourceKey / source / musicInfo`，录音自身的精确秒数保存在 `musicInfo.duration`。
+- `RecordingIdentity` 解析规范标题、歌手、版本、来源键和时长。精确来源键匹配允许补全未知信息；跨来源匹配要求已知且相同的标题/歌手/版本指纹，以及双方有效时长。容差为 `max(3 秒, 较短时长 × 2%)`，不能通过中间录音传递兼容。
+- `Recordings` 管理一个操作内的代表歌曲与录音集合。代表及全部来源必须两两兼容；来源键唯一，输出时主录音第一，其余按 `sourceKey` 排序。规范化、搜索、曲库、播放历史、官方候选与同步复用此实现。
+- `NativeMusicSongGroups` 是搜索、曲库 upsert 和播放历史共用的操作内索引：依次检查兼容的精确来源组、既有歌曲 ID、同指纹子组；无匹配才建组。原 ID 冲突时，根据新候选的完整规范录音证据生成确定性后缀，不因代表相同就覆盖不同录音集合。
+- 导入已显示或已持久化的分组不重新合并、不改变 ID。曲库更新优先采用新显示信息、主来源及同键录音，保留既有逻辑 ID；播放历史则由最新 occurrence 保留时间、context、代表和同键录音。本地歌曲只按本地 `songId` 参与分组，不能凭同名元信息隐式并入另一文件或在线结果；同步显式绑定仍需通过完整录音兼容检查。
+- 同步复用同一曲库快照内的分组索引，不在逐条 upsert 时重复解析整库；检查点提交重读后丢弃旧索引，再按新快照建立，不能保留跨检查点的旧 JsonNode。
+- `membership` 与 upsert 使用相同的完整录音匹配，能够找到带冲突后缀的子组。曲库专属的“每个原生来源只属于一首歌曲”仍由 Library owner 校验，冲突返回 `NATIVE_ID_CONFLICT`，不能隐式重绑集合。
 
 ## 当前命令
 
@@ -178,6 +209,7 @@ music.history.recordPlayed
 
 ```text
 music.settings.get / save
+music.officialSources.settings.get / save
 music.quality.settings.get / save
 music.metadata.settings.get / save
 music.appearance.get / save
@@ -194,7 +226,7 @@ music.online.song
 
 - 所有持久写入在同一 owner gate 内对完整 envelope 执行 CAS。
 - CAS 准入后不把取消解释为回滚；丢失写入回执时保留内存候选并阻止后续写。
-- `appearance`、`metadata`、`quality`、`queue` 和搜索策略在各自写入回执不确定时，只允许对应的权威 current read 在 owner gate 内读取实际文档并核对该次 CAS 的 before/after 指纹；不重放业务命令。
+- `appearance`、`metadata`、`quality`、官方音源设置（`music.officialSources.settings.get`）、`queue` 和搜索策略在各自写入回执不确定时，只允许对应的权威 current read 在 owner gate 内读取实际文档并核对该次 CAS 的 before/after 指纹；该读取会结算同职责的未知 CAS 结果，不重放业务命令。官方音源设置的权威读取对应 `music.officialSources.settings.save`。
 - 其他职责以及跨职责命令继续由显式 `ReconcileAsync` 协调；recommendation 使用其 nonce reconcile。一个职责的 current read 不得替另一个职责结算未知写入。
 - 第三状态保持 `STORAGE_CONFLICT`，不提供“丢弃旧数据后继续”的回退入口。
 - `PrepareShutdownAsync` 封闭新业务并要求未知写已结算；取消关闭只恢复当前 owner，不重放写入。

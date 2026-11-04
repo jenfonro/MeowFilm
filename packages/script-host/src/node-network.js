@@ -3,6 +3,7 @@ import https from 'node:https';
 import { randomBytes } from 'node:crypto';
 import { gunzipSync, inflateSync, brotliDecompressSync } from 'node:zlib';
 import { fault, requireValue, safeError } from './errors.js';
+import { SCRIPT_LIMITS } from './host.js';
 
 const knownOptions = new Set([
   'method', 'headers', 'body', 'form', 'formData', 'timeout', 'json', 'encoding', 'follow_max', 'followRedirect', 'retry',
@@ -134,14 +135,17 @@ function requestOnce(url, { method, headers, body }, signal, limit, follow) {
  * Optional, explicitly injected adapter for metadata HTTP, not a media relay.
  * Validate HTTP(S) on every redirect and never forward credentials cross-origin.
  */
-export function createNodeNetwork({ maxResponseBytes = 2 * 1024 * 1024, maxRedirects = 5 } = {}) {
+export function createNodeNetwork({
+  maxResponseBytes = SCRIPT_LIMITS.maxMemoryBytes, maxRedirects = 5,
+} = {}) {
   requireValue(Number.isSafeInteger(maxResponseBytes) && maxResponseBytes > 0);
   requireValue(Number.isSafeInteger(maxRedirects) && maxRedirects >= 0 && maxRedirects <= 10);
   return async ({ url: input, options = {}, signal, validateURL }) => {
     requireValue(signal && typeof validateURL === 'function');
     requireValue(options.followRedirect === undefined || typeof options.followRedirect === 'boolean');
-    const follow = options.followRedirect === false ? 0 : options.follow_max ?? maxRedirects;
-    requireValue(Number.isSafeInteger(follow) && follow >= 0 && follow <= maxRedirects);
+    const requestedFollow = options.followRedirect === false ? 0 : options.follow_max ?? maxRedirects;
+    requireValue(Number.isSafeInteger(requestedFollow) && requestedFollow >= 0);
+    const follow = Math.min(requestedFollow, maxRedirects);
     let request = prepare(options, maxResponseBytes);
     let url = new URL(validateURL(input));
     try {
@@ -170,7 +174,11 @@ export function createNodeNetwork({ maxResponseBytes = 2 * 1024 * 1024, maxRedir
         if (encoding !== 'identity') {
           requireValue(decompressor, 'UNSUPPORTED_OPTION');
           try { response.body = decompressor(response.body, { maxOutputLength: maxResponseBytes }); }
-          catch { throw fault('RESOURCE_LIMIT'); }
+          catch (error) {
+            throw fault(error.code === 'ERR_BUFFER_TOO_LARGE' ? 'RESOURCE_LIMIT' : 'NETWORK_ERROR');
+          }
+          delete response.headers['content-encoding'];
+          delete response.headers['content-length'];
         }
         return { ...response, url: url.href };
       }

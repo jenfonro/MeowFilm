@@ -22,9 +22,6 @@ public static partial class MusicUiTests
             var view = f.Module.SettingsView;
             view.Measure(new Size(1000, 1000));
             view.Arrange(new Rect(0, 0, 1000, 1000)); view.UpdateLayout();
-            var tabs = Visuals(view).OfType<TabControl>()
-                .Single(control => AutomationProperties.GetName(control) == "设置分类");
-            tabs.SelectedIndex = 0; view.UpdateLayout();
             var accounts = Visuals(view).OfType<MusicAccountsView>().Single();
             True(ReferenceEquals(accounts.DataContext, f.Module),
                 "platform capsules bind directly to the capability");

@@ -8,9 +8,9 @@ enum MusicRemoteCollectionActionsFixture {
     static func track(_ id: String, title: String? = nil, artist: String = "Fixture",
                       album: String = "Synthetic album") -> MusicNativeTrackData {
         .init(platform: "tx", data: MJ.obj([
-            ("musicId", .string(id)), ("songmid", .string(id)),
+            ("songmid", .string(id)),
             ("name", .string(title ?? "Synthetic " + id)), ("singer", .string(artist)),
-            ("album", .string(album)), ("duration", .n(180))
+            ("albumName", .string(album)), ("duration", .n(180))
         ]).bytes)
     }
     static func pages(_ rows: [MusicNativeTrackData]) -> MusicAccountQueuePages {
@@ -32,7 +32,7 @@ enum MusicRemoteCollectionActionsFixture {
             close: { await probe.close() })
     }
     static func nativeIDs(_ rows: [MusicNativeTrackData]) throws -> [String] {
-        try rows.map { try MJ.parse($0.data)["musicId"].string }
+        try rows.map { try MJ.parse($0.data)["songmid"].string }
     }
 }
 

@@ -248,12 +248,11 @@ import MeowJSON
         }
     }
 
-    func testCapacityIsBoundedAndExplicitEndOrCallerRevocationReleasesTheSlotWithoutRevalidation() async throws {
+    func testDistinctLeasesRemainIndependentAndExplicitEndOrCallerRevocationNeverRevalidates() async throws {
         let f = try MusicAccountQueueOwnerFixture()
         try await f.enable()
         var leases: [MusicAccountQueueLease] = []
-        for _ in 0..<8 { leases.append(try await f.owner.beginAccountQueue(platform: .qq)) }
-        await denied(.busy) { _ = try await f.owner.beginAccountQueue(platform: .qq) }
+        for _ in 0..<24 { leases.append(try await f.owner.beginAccountQueue(platform: .qq)) }
         let record = f.store.peek(f.identity), writes = f.store.counts().writes
         let first = try await f.owner.accountQueuePage(leases[0], kind: .collection(id: "501"), cursor: nil)
         await f.owner.endAccountQueue(leases[0]); assertRevoked(leases[0])
@@ -263,7 +262,7 @@ import MeowJSON
         }
         leases[1].revoke()
         let afterCallerRevoke = try await f.owner.beginAccountQueue(platform: .qq)
-        await denied(.busy) { _ = try await f.owner.beginAccountQueue(platform: .qq) }
+        await denied(.staleAccess) { try await f.owner.checkAccountQueue(leases[1]) }
         for live in Array(leases.dropFirst(2)) + [replacement, afterCallerRevoke] {
             try await f.owner.checkAccountQueue(live)
             await f.owner.endAccountQueue(live); assertRevoked(live)

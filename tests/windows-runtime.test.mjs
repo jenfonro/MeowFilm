@@ -6,7 +6,7 @@ import { createServer as createHTTPServer } from 'node:http';
 import { randomUUID, createHash } from 'node:crypto';
 import {
   existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
-  renameSync, symlinkSync, writeFileSync,
+  renameSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
@@ -15,6 +15,7 @@ import { attachConnectedStream } from '@meowfilm/runtime-bridge/descriptor';
 import { encodeFrame } from '@meowfilm/runtime-bridge';
 import {
   connectWindowsNamedPipe, parseWindowsLaunchArguments, startWindowsAppRuntime,
+  windowsScriptDataRoot,
 } from '../apps/windows/runtime/bootstrap.mjs';
 import { packageWindowsRuntime } from '../scripts/windows/package-runtime.mjs';
 import { packageRuntime } from '../scripts/package-runtime.mjs';
@@ -24,42 +25,7 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const temporary = join(temporaryRoot, 'windows-runtime-tests');
 mkdirSync(temporary, { recursive: true });
 const windows = { skip: process.platform !== 'win32' ? 'Requires real Windows named pipes' : false, timeout: 20000 };
-const products = { aggregate: ['music', 'source'] };
-const runtimeDependencies = [
-  'node_modules/@acemir/cssom',
-  'node_modules/@jitl/quickjs-ffi-types',
-  'node_modules/@jitl/quickjs-wasmfile-release-sync',
-  'node_modules/@meowfilm/runtime-bridge',
-  'node_modules/@meowfilm/script-host',
-  'node_modules/@meowfilm/source-runtime',
-  'node_modules/acorn',
-  'node_modules/boolbase',
-  'node_modules/css-select',
-  'node_modules/css-what',
-  'node_modules/dom-serializer',
-  'node_modules/domelementtype',
-  'node_modules/domhandler',
-  'node_modules/domutils',
-  'node_modules/entities',
-  'node_modules/fontoxpath',
-  'node_modules/html-escaper',
-  'node_modules/htmlparser2',
-  'node_modules/htmlparser2/node_modules/dom-serializer',
-  'node_modules/htmlparser2/node_modules/dom-serializer/node_modules/entities',
-  'node_modules/htmlparser2/node_modules/domelementtype',
-  'node_modules/htmlparser2/node_modules/domhandler',
-  'node_modules/htmlparser2/node_modules/domutils',
-  'node_modules/htmlparser2/node_modules/entities',
-  'node_modules/iconv-lite',
-  'node_modules/linkedom',
-  'node_modules/nth-check',
-  'node_modules/prsc',
-  'node_modules/quickjs-emscripten-core',
-  'node_modules/safer-buffer',
-  'node_modules/uhyphen',
-  'node_modules/whynot',
-  'node_modules/xspattern',
-].sort();
+const products = { aggregate: ['music', 'cat', 'source'] };
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const readJSON = path => JSON.parse(readFileSync(path, 'utf8'));
 const privateMarker = 'synthetic-private-diagnostic-must-not-be-logged';
@@ -120,14 +86,31 @@ function verifyManifest(output, manifest) {
   assert.deepEqual(paths.filter(path => /\.wasm$/i.test(path)), manifest.trustedWasm.map(file => file.path));
   assert.equal(manifest.sharedEntry, undefined);
   assert.equal(manifest.assemblyProfile, 'windows-native');
-  for (const module of ['music-script.mjs', 'source-runtime.mjs']) {
-    assert.deepEqual(readFileSync(join(output, `app/modules/${module}`)),
-      readFileSync(join(root, `apps/runtime/modules/${module}`)));
+  assert.deepEqual(readFileSync(join(output, 'app/modules/music-script.mjs')),
+    readFileSync(join(root, 'apps/runtime/modules/music-script.mjs')));
+  assert.deepEqual(readFileSync(join(output, 'app/modules/cat-script.mjs')),
+    readFileSync(join(root, 'apps/runtime/modules/cat-script.mjs')));
+  assert.deepEqual(readFileSync(join(output, 'app/modules/source-runtime.mjs')),
+    readFileSync(join(root, 'apps/runtime/modules/source-runtime.mjs')));
+  assert.equal(existsSync(join(output, 'node_modules/@meowfilm/script-host')), true);
+  assert.equal(existsSync(join(output, 'node_modules/@meowfilm/source-runtime')), true);
+  const workerPaths = new Set(manifest.files.map(file => file.path));
+  const scriptHostPrefix = 'node_modules/@meowfilm/script-host/src/';
+  const workerFiles = ['index.js', 'worker-session.js', 'worker-entry.js', 'worker-protocol.js'];
+  for (const file of workerFiles) {
+    assert.equal(workerPaths.has(scriptHostPrefix + file), true, `worker runtime source missing: ${file}`);
   }
-  for (const workspace of ['runtime-bridge', 'script-host', 'source-runtime']) {
-    assert.equal(existsSync(join(output, `node_modules/@meowfilm/${workspace}`)), true);
-  }
-  assert.deepEqual(manifest.dependencies.map(item => item.path).sort(), runtimeDependencies);
+  const dependencies = new Set(manifest.dependencies.map(item => item.name));
+  for (const name of [
+    '@jitl/quickjs-ffi-types', '@jitl/quickjs-wasmfile-release-sync',
+    '@meowfilm/runtime-bridge', '@meowfilm/script-host', 'quickjs-emscripten-core',
+    '@opentelemetry/api', 'buffer', 'events', 'path-browserify',
+    'readable-stream', 'supports-color', 'util',
+    '@meowfilm/source-runtime', 'acorn', 'fontoxpath', 'linkedom', 'iconv-lite',
+    '@acemir/cssom', 'boolbase', 'css-select', 'css-what', 'dom-serializer',
+    'domelementtype', 'domhandler', 'domutils', 'entities', 'html-escaper',
+    'htmlparser2', 'nth-check', 'prsc', 'safer-buffer', 'uhyphen', 'whynot', 'xspattern',
+  ]) assert.equal(dependencies.has(name), true, name);
   for (const dependency of manifest.dependencies) {
     const sourceManifest = readJSON(join(root, dependency.lockPath, 'package.json'));
     assert.deepEqual(readJSON(join(output, dependency.path, 'package.json')), sourceManifest);
@@ -162,6 +145,15 @@ test('Windows launch accepts only the exact ordered pipe-name/session UUID proto
     ].map(value => pipeArgs(pipeName, value)),
   ]) {
     assert.throws(() => parseWindowsLaunchArguments(argv), { code: 'INVALID_MESSAGE', message: 'INVALID_MESSAGE' });
+  }
+});
+
+test('Windows script data root accepts only the native-injected absolute local path', () => {
+  const expected = join(temporary, 'script-data-root');
+  assert.equal(windowsScriptDataRoot(expected), expected);
+  for (const value of ['', 'relative/script-data', '//server/share/script-data',
+    '\\\\server\\share\\script-data', `bad${String.fromCharCode(0)}path`, null, 1]) {
+    assert.throws(() => windowsScriptDataRoot(value), { code: 'INVALID_MESSAGE' });
   }
 });
 
@@ -341,7 +333,11 @@ test('failed assembly releases its connected Windows pipe and disposes the modul
 });
 
 function spawnRuntime(t, entry, argv, payload) {
-  const env = { ...process.env, NODE_OPTIONS: '', NODE_PATH: '' };
+  const scriptDataRoot = mkdtempSync(join(temporary, 'script-runtime-'));
+  t.after(() => rmSync(scriptDataRoot, { recursive: true, force: true }));
+  const env = { ...process.env, NODE_OPTIONS: '', NODE_PATH: '',
+    MEOWFILM_SCRIPT_DATA_ROOT: scriptDataRoot };
+  delete env.LOCALAPPDATA;
   if (payload) {
     // Test-only resolver guard: neither ESM nor CJS may be rescued by the
     // development worktree's ancestor node_modules. No guard ships in payload.
@@ -394,8 +390,11 @@ async function assertRealBusiness(peer, product, domains) {
   await assert.rejects(peer.call('eval', privateMarker), { code: 'METHOD_UNAVAILABLE' });
   await assert.rejects(peer.call('runtime.describe', {}), { code: 'INVALID_MESSAGE' });
   const music = description.modules.find(module => module.id === 'music');
-  assert.equal(music.version, '0.5.0');
+  assert.equal(music.version, '0.6.0');
   assert.ok(music.methods.every(method => method.startsWith('music.script.')));
+  const cat = description.modules.find(module => module.id === 'cat');
+  assert.equal(cat.version, '0.1.0');
+  assert.ok(cat.methods.every(method => method.startsWith('cat.script.')));
   const source = description.modules.find(module => module.id === 'source');
   assert.equal(source.version, '0.1.0');
   assert.ok(source.methods.every(method => method.startsWith('source.runtime.')));
@@ -407,6 +406,7 @@ async function assertRealBusiness(peer, product, domains) {
   });
   for (const method of ['music.library.list', 'music.queue.get', 'music.history.list',
     'music.storage.flush', 'music.lyrics.parse', 'music.accounts.list', 'music.catalog.search',
+    'cat.library.list', 'cat.sources.inspect',
     'film.script.status', 'film.playback.recognize', 'film.sources.list', 'film.library.read',
     'reader.rules.reset', 'reader.sources.setAccess', 'reader.library.list', 'reader.content.chapter'])
     await assert.rejects(peer.call(method, {}), { code: 'METHOD_UNAVAILABLE' });
@@ -617,13 +617,14 @@ async function runProduct(t, product, entry, payload) {
 }
 
 for (const product of Object.keys(products)) {
-  test(`${product}: thin platform entry explicitly imports its shared factories`, () => {
+  test(`${product}: thin platform entry explicitly imports its shared script factories`, () => {
     const source = readFileSync(join(root, 'apps/windows/runtime/entries', `${product}.mjs`), 'utf8');
     assert.deepEqual([...source.matchAll(/^import\s+\{[^{}]+\}\s+from\s+['"]([^'"]+)['"];/gm)].map(match => match[1]),
       ['../bootstrap.mjs', '../../../runtime/modules/music-script.mjs',
-        '../../../runtime/modules/source-runtime.mjs']);
+        '../../../runtime/modules/cat-script.mjs', '../../../runtime/modules/source-runtime.mjs']);
     assert.equal(source.match(/await startWindowsAppRuntime\(/g)?.length, 1);
     if (products[product].includes('music')) assert.ok(source.includes('createMusicScriptModule({ call })'));
+    if (products[product].includes('cat')) assert.ok(source.includes('createCatScriptModule({ dataRoot: windowsScriptDataRoot() })'));
     if (products[product].includes('source')) {
       assert.ok(source.includes("createSourceRuntimeModule({ call, platform: 'windows' })"));
     }
@@ -658,40 +659,34 @@ test('CLI launch failure emits only a fixed code, never argv or underlying diagn
 // dependency traversal and failure-manifest assertions need no network/npm.
 function packagingFixture({
   missingBootstrap = false, extraSource = false, extraImport = false,
-  missingShared = false, missingCommonModule = false, platformModule = false,
+  missingShared = false, missingCommonModule = false, missingSourceModule = false, platformModule = false,
 } = {}) {
   const area = mkdtempSync(join(temporary, 'failure-')), source = join(area, 'source');
   const manifest = { name: 'windows-package-fixture', version: '1.0.0', private: true, workspaces: ['packages/*'] };
   const lock = { name: manifest.name, version: manifest.version, lockfileVersion: 3, packages: { '': { ...manifest } } };
   const inert = 'throw new Error("Synthetic fixture must not execute");\n';
   write(source, 'package.json', manifest);
-  for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'inactive-core']) {
+  for (const name of ['runtime-bridge', 'script-host', 'source-runtime', 'inactive-core']) {
     const location = `packages/${name}`, installed = `node_modules/@meowfilm/${name}`;
     const pkg = {
-      name: `@meowfilm/${name}`,
-      version: '1.0.0',
-      type: 'module',
-      license: 'MIT',
-      exports: './src/index.js',
-      ...(name === 'script-host'
-        ? { dependencies: { '@meowfilm/source-runtime': '1.0.0' } }
-        : {}),
+      name: `@meowfilm/${name}`, version: '1.0.0', type: 'module', license: 'MIT', exports: './src/index.js',
+      ...(name === 'script-host' ? { dependencies: { '@meowfilm/source-runtime': '1.0.0' } } : {}),
     };
     write(source, `${location}/package.json`, pkg);
     if (!(missingShared && name === 'script-host')) write(source, `${location}/src/index.js`, inert);
     write(source, `${location}/LICENSE`, 'Synthetic fixture license\n');
-    lock.packages[location] = {
-      version: pkg.version,
-      ...(pkg.dependencies ? { dependencies: pkg.dependencies } : {}),
-    };
+    lock.packages[location] = { version: pkg.version, ...(pkg.dependencies ? { dependencies: pkg.dependencies } : {}) };
     lock.packages[installed] = { resolved: location, link: true };
     mkdirSync(dirname(join(source, installed)), { recursive: true });
     symlinkSync(join(source, location), join(source, installed), process.platform === 'win32' ? 'junction' : 'dir');
   }
   write(source, 'package-lock.json', lock);
   write(source, 'apps/runtime/bootstrap.mjs', inert);
-  write(source, 'apps/runtime/modules/music-script.mjs', inert);
-  if (!missingCommonModule) write(source, 'apps/runtime/modules/source-runtime.mjs', inert);
+  if (!missingCommonModule) {
+    write(source, 'apps/runtime/modules/music-script.mjs', inert);
+    write(source, 'apps/runtime/modules/cat-script.mjs', inert);
+  }
+  if (!missingSourceModule) write(source, 'apps/runtime/modules/source-runtime.mjs', inert);
   for (const path of ['bootstrap.mjs', 'entries/aggregate.mjs']) {
     if (missingBootstrap && path === 'bootstrap.mjs') continue;
     let text = readFileSync(join(root, 'apps/windows/runtime', path), 'utf8');
@@ -717,6 +712,7 @@ for (const [option, code] of [
   ['missingBootstrap', 'ENOENT'], ['extraSource', 'WINDOWS_CLOSURE'],
   ['extraImport', 'WINDOWS_IMPORT'], ['missingShared', 'MISSING_PUBLIC_FILE'],
   ['missingCommonModule', 'MISSING_SOURCE'], ['platformModule', 'WINDOWS_CLOSURE'],
+  ['missingSourceModule', 'MISSING_SOURCE'],
 ]) {
   test(`packaging ${option} is explicit and retains a failed file inventory`, async () => {
     const f = packagingFixture({ [option]: true });
@@ -727,7 +723,7 @@ for (const [option, code] of [
     for (const file of manifest.files) {
       assert.equal(sha256(readFileSync(join(f.output, file.path))), file.sha256);
     }
-    if (!['missingShared', 'missingCommonModule'].includes(option)) {
+    if (!['missingShared', 'missingCommonModule', 'missingSourceModule'].includes(option)) {
       assert.equal(manifest.transport, 'windows-named-pipe-v1');
       assert.equal(manifest.entry, 'app/windows/entries/aggregate.mjs');
     }
@@ -745,12 +741,13 @@ test('Windows source junctions are rejected, not dereferenced or silently omitte
   assert.ok(existsSync(join(relocated, 'aggregate.mjs')), 'source is never removed');
 });
 
-test('App payload contains the common script assemblies and only the Windows platform entry', async () => {
+test('App payload contains one common script assembly and only the Windows platform entry', async () => {
   const output = join(mkdtempSync(join(temporary, 'closure-')), 'payload');
   const manifest = await packageWindowsRuntime({ root, product: 'aggregate', output });
-  assert.deepEqual(manifest.modules, ['music', 'source']);
+  assert.deepEqual(manifest.modules, ['music', 'cat', 'source']);
   assert.deepEqual(manifest.files.filter(file => file.path.startsWith('app/')).map(file => file.path), [
-    'app/bootstrap.mjs', 'app/modules/music-script.mjs', 'app/modules/source-runtime.mjs',
+    'app/bootstrap.mjs', 'app/modules/cat-script.mjs', 'app/modules/music-script.mjs',
+    'app/modules/source-runtime.mjs',
     'app/windows/bootstrap.mjs', 'app/windows/entries/aggregate.mjs',
   ]);
 });

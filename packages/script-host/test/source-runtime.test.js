@@ -692,20 +692,22 @@ test('Node capability owner bounds cumulative storage, cookies and virtual metad
 });
 
 test('portable Cat routes cannot retain metadata beyond the session byte budget', async t => {
-  const { host, owner } = sourceHost(t, { limits: { maxBytes: 1024 } });
+  const { host, owner } = sourceHost(t, { limits: { maxMemoryBytes: 16 * 1024 * 1024 } });
   await host.install({
     installationId: 'route-budget',
     protocol: 'cat',
     source: `
       export default class Spider {
         async playerContent() {
-          js2Proxy(false, 0, 'fixture', 'https://fixture.invalid/one', {
-            value: 'x'.repeat(700)
-          });
+          for (let index = 0; index < 200; index++) {
+            js2Proxy(false, 0, 'fixture', 'https://fixture.invalid/' + index, {
+              value: 'x'.repeat(90000)
+            });
+          }
           return {
             parse: 0,
             url: js2Proxy(false, 0, 'fixture', 'https://fixture.invalid/two', {
-              value: 'x'.repeat(700)
+              value: 'x'.repeat(90000)
             })
           };
         }
@@ -717,10 +719,35 @@ test('portable Cat routes cannot retain metadata beyond the session byte budget'
     code: 'RESOURCE_LIMIT',
   });
   assert.equal(owner.resolveVirtual('source:route-budget:1', 'route-1'), null);
+  assert.equal(host.get('route-budget').state, 'ready');
+});
+
+test('portable Cat routes are bounded by metadata bytes, not a fixed route count', async t => {
+  const { host, owner } = sourceHost(t);
+  await host.install({
+    installationId: 'many-routes',
+    protocol: 'cat',
+    source: `
+      export default class Spider {
+        async playerContent() {
+          let url;
+          for (let index = 0; index < 129; index++) {
+            url = js2Proxy(false, 0, 'fixture', 'https://fixture.invalid/' + index, {});
+          }
+          return { parse: 0, url };
+        }
+      }
+    `,
+    enabled: true,
+  });
+  const value = await host.invoke(target('many-routes', 'play'));
+  assert.equal(owner.resolveVirtual('source:many-routes:1', 'route-129').url,
+    'https://fixture.invalid/128');
+  assert.ok(value.url.includes('route-129'));
 });
 
 test('portable session state cannot grow beyond the host byte budget', async t => {
-  const { host } = sourceHost(t, { limits: { maxBytes: 1024 } });
+  const { host } = sourceHost(t, { limits: { maxMemoryBytes: 16 * 1024 * 1024 } });
   await host.install({
     installationId: 'state-budget',
     protocol: 'legado',
@@ -728,8 +755,8 @@ test('portable session state cannot grow beyond the host byte budget', async t =
       bookSourceName: 'State budget',
       bookSourceUrl: 'https://fixture.invalid/',
       coverDecodeJs: `
-        for (let index = 0; index < 16; index++) {
-          source.put('key-' + index, 'x'.repeat(128));
+        for (let index = 0; index < 130; index++) {
+          source.put('key-' + index, 'x'.repeat(128 * 1024));
         }
         result
       `,
@@ -868,21 +895,33 @@ test('Legado URL templates accept complete js blocks', async t => {
   assert.equal(result.url, 'https://fixture.invalid/search?key=%E6%B5%8B%E8%AF%95');
 });
 
-test('portable guest aborts retain physical capability budget until the adapter settles', async t => {
-  let release;
+test('portable guest aborts retain physical capability ownership until adapters settle', { timeout: 15000 }, async t => {
+  const releases = [];
+  let entered;
+  const started = new Promise(resolve => { entered = resolve; });
+  let firstEntered;
+  const firstStarted = new Promise(resolve => { firstEntered = resolve; });
   let calls = 0;
   const { host } = sourceHost(t, {
-    limits: { maxNetworkRequests: 1 },
     network: async input => {
+      if (input.url.endsWith('/first-entered') || input.url.endsWith('/second-entered')) {
+        await (input.url.endsWith('/first-entered') ? firstStarted : started);
+        return {
+          statusCode: 200, headers: { 'content-type': 'text/plain' },
+          body: 'entered', url: input.url,
+        };
+      }
       calls++;
       return await new Promise(resolve => {
-        release = () => resolve({
+        releases.push(() => resolve({
           statusCode: 200,
           statusMessage: 'OK',
           headers: { 'content-type': 'text/plain' },
           body: 'late',
           url: input.url,
-        });
+        }));
+        if (calls === 1) firstEntered();
+        if (calls === 2) entered();
       });
     },
   });
@@ -897,28 +936,26 @@ test('portable guest aborts retain physical capability budget until the adapter 
           const controller = new AbortController();
           const first = fetch('/first', { signal: controller.signal })
             .then(() => 'unexpected', error => error.code);
+          await fetch('/first-entered');
           controller.abort();
-          await Promise.resolve();
-          let second = 'unexpected';
-          try { await fetch('/second'); }
-          catch (error) { second = error.code; }
-          return [{ name: (await first) + ':' + second }];
+          fetch('/second').catch(() => {});
+          await fetch('/second-entered');
+          return [{ name: await first }];
         }
       </script>`,
     }),
     enabled: true,
   });
   const result = await host.invoke(target('physical-budget', 'search'));
-  assert.equal(result.books[0].name, 'CANCELLED:RESOURCE_LIMIT');
-  while (!release) await new Promise(resolve => setImmediate(resolve));
-  assert.equal(calls, 1);
-  assert.equal(host.stats().networkRequests, 1);
-  assert.equal(host.stats().pendingAdapterTasks, 1);
-  release();
+  assert.equal(result.books[0].name, 'CANCELLED');
+  await started;
+  assert.equal(calls, 2);
+  assert.equal(host.stats().pendingAdapterTasks, 2);
+  for (const release of releases) release();
   while (host.stats().pendingAdapterTasks) {
     await new Promise(resolve => setImmediate(resolve));
   }
-  assert.equal(host.stats().networkRequests, 0);
+  assert.equal(host.stats().pendingAdapterTasks, 0);
 });
 
 test('Node capability owner enforces one timeout across the redirect chain', async () => {

@@ -18,6 +18,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
     private readonly IMusicApplication application;
     private readonly IMusicPlayback playback;
     private readonly IMusicDialogs dialogs;
+    private readonly MusicSourceNetworkDownload sourceNetworkDownload;
     private readonly GrantedMediaFiles files;
     private readonly PlaybackCache.MusicAudioFileCache? audioFileCache;
     private readonly PlaybackCache.MusicChorusCache persistentChorus;
@@ -54,10 +55,12 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
             dialogs) { }
 
     internal MusicCapability(IMusicApplication application, IProtectedDocumentStore store, IMusicPlayback playback,
-        PlaybackCache.MusicAudioFileCache? playbackCache, IMusicDialogs? dialogs = null)
+        PlaybackCache.MusicAudioFileCache? playbackCache, IMusicDialogs? dialogs = null,
+        MusicSourceNetworkDownload? sourceNetworkDownload = null)
     {
         this.application = application ?? throw new ArgumentNullException(nameof(application));
         this.playback = playback; this.dialogs = dialogs ?? new MusicDialogs();
+        this.sourceNetworkDownload = sourceNetworkDownload ?? new MusicSourceNetworkDownload();
         audioFileCache = playbackCache;
         persistentChorus = new(store);
         files = new(store, "music.files.v1", [".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma"]);
@@ -67,7 +70,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         InitializePlatformSettings();
         page = new(this); settings = new(this); player = new(this);
         InitializeGlobalSurfaces();
-        InitializeAggregateSearch();
+        InitializeSearch();
         InitializeDiscovery();
         InitializeRecommendations();
         SubscribePlayback();
@@ -103,7 +106,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         location.Route.StartsWith("playlist/", StringComparison.Ordinal);
     public bool IsCollectionPage => IsSongList && collection is not null;
     public bool IsContentDetailPage => IsCollectionPage || IsCatalogDetailPage;
-    public bool ShowsSongTable => IsSongList || IsCatalogDetailPage;
+    public bool ShowsSongTable => IsSongList || IsCatalogDetailPage || IsSearchSongs;
     public bool ShowSongPager => IsSongList && !IsCollectionPage;
     public string? HistoryDate => location.Date;
     public bool HasCollection => collection is not null;
@@ -168,7 +171,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
     private void Changed([CallerMemberName] string? property = null) => PropertyChanged?.Invoke(this, new(property));
     private void RefreshBindings()
     {
-        foreach (var name in new[] { nameof(Heading), nameof(Status), nameof(Busy), nameof(CanEdit), nameof(CanClearPlaybackCache),
+        foreach (var name in new[] { nameof(Heading), nameof(Status), nameof(Busy), nameof(CanEdit), nameof(CanEditQuality),
+            nameof(CanEditAppearance), nameof(CanClearPlaybackCache),
             nameof(IsHistory), nameof(IsArchives), nameof(IsSongList), nameof(IsCollectionPage), nameof(IsContentDetailPage), nameof(ShowsSongTable),
             nameof(ShowSongPager), nameof(HistoryDate),
             nameof(HasSelection), nameof(CanRemoveSelection), nameof(CanReorderPlaylist), nameof(CanLoadMoreCollection), nameof(HasCollection), nameof(CanDeleteCollection), nameof(CanEditMetadata),
@@ -274,6 +278,10 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         MusicOperationException { Code: "REVISION_CONFLICT" or "STORAGE_CONFLICT" } => "数据已变更，请刷新",
         MusicOperationException { Code: "COMMIT_UNKNOWN" } => "保存结果未确认",
         MusicOperationException { Code: "LIMIT" } => "操作超过数量限制",
+        MusicOperationException { Code: "INVALID_SOURCE_URL" } => "请输入 HTTPS .js 音源地址",
+        MusicOperationException { Code: "SOURCE_DOWNLOAD_FAILED" } => "音源下载失败",
+        MusicOperationException { Code: "OFFICIAL_SOURCE_DISABLED" } => "该官方音源已停用",
+        MusicOperationException { Code: "OFFICIAL_SOURCES_CHANGED" } => "官方音源设置已变更，请重试",
         MusicOperationException { Code: "PENDING_WRITE" } => "保存未完成，请重试保存",
         MusicOperationException { Code: "TARGET_REQUIRED" or "TARGET_CHANGED" } => "未选择匹配的音源、平台或歌曲",
         MusicOperationException { Code: "DISABLED" } => "音源已停用",
@@ -337,16 +345,21 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         if (!IsSongList || direction > 0 && target.Offset >= total) return Task.CompletedTask;
         return RunAsync(async () => { if (origin == loadGeneration) await LoadAsync(target, lifetime.Token); });
     }
-    public Task CreatePlaylistAsync(string name)
+    public Task CreatePlaylistAsync(string name) => CreatePlaylistCoreAsync(name);
+    internal Task<bool> TryCreatePlaylistAsync(string name) => CreatePlaylistCoreAsync(name);
+    private async Task<bool> CreatePlaylistCoreAsync(string name)
     {
         name = name.Trim(); var origin = loadGeneration;
-        return RunAsync(async () =>
+        var created = false;
+        await RunAsync(async () =>
         {
             if (name.Length == 0) { status = "请输入歌单名称"; return; }
             var reply = await Call("music.library.create", new { name }, lifetime.Token);
+            created = true;
             await RefreshPlaylists(lifetime.Token);
             if (origin == loadGeneration) await RequestNavigationAsync("playlist/" + MusicDto.Text(reply.GetProperty("collection"), "id"));
         });
+        return created;
     }
     public Task DeletePlaylistAsync()
     {
@@ -812,7 +825,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         playerDetail.Deactivate();
         SealRecommendations();
         TrackMusicRecovery(RetireMusicRecovery());
-        aggregateEpoch++;
+        searchEpoch++;
         discoveryEpoch++; discoveryRequest?.Cancel();
         searchHistoryRequest?.Cancel();
         InvalidateCatalogAction();
@@ -930,7 +943,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         try { await DisposeAccountDetailsAsync(); } catch (Exception error) { failure ??= error; }
         try { await vipPage.DisposeAsync(); } catch (Exception error) { failure ??= error; }
         try { await application.AbortAsync(); } catch (Exception error) { failure ??= error; }
-        UnsubscribeAggregateSearch();
+        sourceNetworkDownload.Dispose();
+        UnsubscribeSearch();
         UnsubscribeDiscovery();
         ReleaseRecommendations();
         disposed = true; UnsubscribePlayback(); lifetime.Dispose();
@@ -945,7 +959,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         finally
         {
             disposed = true;
-            UnsubscribeAggregateSearch();
+            UnsubscribeSearch();
             UnsubscribeDiscovery();
             ReleaseRecommendations();
             try { lifetime.Cancel(); }
@@ -960,6 +974,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
             catch (Exception error) { failure ??= error; }
             try { await application.DisposeAsync(); }
             catch (Exception error) { failure ??= error; }
+            sourceNetworkDownload.Dispose();
             // The capability owns its application. Runtime, store and playback remain App-owned.
         }
         if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();

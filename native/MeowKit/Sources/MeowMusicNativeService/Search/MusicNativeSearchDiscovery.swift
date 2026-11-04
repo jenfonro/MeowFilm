@@ -1,124 +1,234 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// iWebPlus b900c259 static/netease-client.js discovery(), with the fixed routes
-// in api-enhanced/module/{search_hot_detail,toplist,playlist_track_all}.js.
+// iWebPlus b900c259 static/netease-client.js discovery(), with fixed discovery routes.
 import Foundation
 import MeowMusicFeature
 
-extension NativeMusicService: MusicSearchDiscoveryProviding {
-    public func searchDiscovery() async throws -> MusicSearchDiscoverySnapshot {
+extension NativeMusicService: MusicSearchDiscoveryProviding, MusicSearchHotPlaybackProviding {
+    public func searchDiscovery(components: Set<MusicSearchDiscoveryFailure.Component>) async throws -> MusicSearchDiscoverySnapshot {
         try check()
         try requirePlatform(MusicPublicBrowsePlatform.netease.rawValue)
+        try musicRequire(!components.isEmpty)
         let own = epoch, port = publicPlatforms
         let result = try await work(label: "musicSearchDiscovery") {
-            try await port.searchDiscovery()
+            try await port.searchDiscovery(components: components)
         }
         try check(own)
-        // Reserve the complete batch before issuing any handles: a later chart
-        // must not evict this response's earlier chart when timestamps tie.
-        let nativeTracks = result.charts.flatMap(\.tracks)
-        let registered = try page(.init(items: nativeTracks), maximumItems: 60).items
-        var offset = 0
-        let charts = result.charts.map { chart -> MusicSearchDiscoveryChart in
-            defer { offset += chart.tracks.count }
-            return .init(collection: chart.collection,
-                         tracks: Array(registered.dropFirst(offset).prefix(chart.tracks.count)))
+        return result
+    }
+
+    public func searchHotPlayback(keywords: [String]) async throws -> [MusicRemoteTrack] {
+        try check()
+        try requirePlatform(MusicPublicBrowsePlatform.netease.rawValue)
+        let params = try MusicNativeSearchHotPlaybackParser.parameters(keywords)
+        let own = epoch, port = publicPlatforms
+        let result = try await work(label: "musicSearchHotPlayback") {
+            try await port.searchHotPlayback(params: params, count: keywords.count)
         }
-        return .init(hot: result.hot, charts: charts,
-                     failures: result.failures, validUntil: now().addingTimeInterval(600))
+        try check(own)
+        try musicRequire(result.count == keywords.count &&
+            result.allSatisfy { $0.platform == MusicPublicBrowsePlatform.netease.rawValue },
+            .upstreamInvalid)
+        return try page(.init(items: result, total: result.count), maximumItems: 20).items
     }
 }
 
-fileprivate struct MusicNativeSearchDiscoveryChart: Sendable {
-    let collection: MusicPublicBrowseCollection
-    let tracks: [MusicNativeTrackData]
+struct MusicNativeSearchDiscoveryValue<Value: Sendable>: Sendable {
+    let value: Value
+    let validUntil: Date
 }
-fileprivate struct MusicNativeSearchDiscoverySnapshot: Sendable {
-    let hot: [MusicSearchHotKeyword]
-    let charts: [MusicNativeSearchDiscoveryChart]
-    let failures: [MusicSearchDiscoveryFailure]
+
+struct MusicNativeSearchHotValue: Sendable {
+    let keywords: [MusicSearchHotKeyword]
+    let canPlay: Bool
+}
+
+struct MusicNativeSearchHotDirectory: Sendable {
+    let canPlay: Bool
+    let items: [MJ]
 }
 
 /// Decode only bounded UI data; no fallback to home recommendation sections.
 enum MusicNativeSearchDiscoveryParser {
+    static let hotChartID = "HOT_SEARCH_SONG#@#"
+
     static func keyword(_ value: MJ) throws -> String {
         let text = try value.text(800).trimmingCharacters(in: .whitespacesAndNewlines)
         try musicRequire(!text.isEmpty && text.unicodeScalars.count <= 200, .upstreamInvalid)
         return text
     }
-    static func hot(_ root: MJ) throws -> [MusicSearchHotKeyword] {
-        try musicRequire(root["data"].isArray && root["data"].array.count <= 1000, .upstreamInvalid)
-        var seen = Set<String>()
-        return try root["data"].array.prefix(20).compactMap { row in
+
+    static func hotDirectory(_ root: MJ) throws -> MusicNativeSearchHotDirectory? {
+        let data = root["data"], tab = data["tabInfo"], list = tab["list"], items = data["items"]
+        try musicRequire(data.isObject && tab.isObject && list.isArray && list.array.count <= 100 &&
+            (items == .null || items.isObject && items.fields.count <= 100), .upstreamInvalid)
+        var selected: MJ?
+        for row in list.array {
+            try musicRequire(row.isObject, .upstreamInvalid)
+            let id = try row["id"].text(128)
+            if id == hotChartID {
+                try musicRequire(selected == nil, .upstreamInvalid)
+                selected = row
+            }
+        }
+        guard let selected else { return nil }
+        _ = try selected["name"].text(256)
+        let rawPlay = selected["needPlay"]
+        let canPlay: Bool
+        if rawPlay.isBool { canPlay = rawPlay.bool }
+        else if rawPlay.isInteger, (0...1).contains(rawPlay.int) { canPlay = rawPlay.int == 1 }
+        else { throw MusicServiceError.upstreamInvalid }
+        let embedded = items[hotChartID]
+        try musicRequire(embedded == .null || embedded.isArray && embedded.array.count <= 1000,
+                         .upstreamInvalid)
+        return .init(canPlay: canPlay, items: embedded.array)
+    }
+
+    static func hotDetail(_ root: MJ) throws -> [MJ] {
+        let data = root["data"], rows = data["itemList"]
+        try musicRequire(data.isObject && rows.isArray && rows.array.count <= 1000, .upstreamInvalid)
+        return rows.array
+    }
+
+    static func hotItems(_ rows: [MJ]) throws -> [MusicSearchHotKeyword] {
+        try musicRequire(rows.count <= 1000, .upstreamInvalid)
+        var seen = Set<Data>()
+        return try rows.prefix(20).enumerated().compactMap { index, row in
+            try musicRequire(row.isObject, .upstreamInvalid)
             let text = try keyword(row["searchWord"])
-            guard seen.insert(text).inserted else { return nil }
+            guard seen.insert(Data(text.utf8)).inserted else { return nil }
             let rawScore = row["score"]
             let score = rawScore.isNumber && rawScore.number.isFinite && rawScore.number >= 0 ? rawScore.number : nil
-            return .init(keyword: text, score: score)
+            return .init(keyword: text, rank: index + 1, score: score)
+        }
+    }
+}
+
+enum MusicNativeSearchHotPlaybackParser {
+    static func parameters(_ keywords: [String]) throws -> MJ {
+        try musicRequire((1...20).contains(keywords.count), .invalidRequest)
+        var seen = Set<Data>()
+        for value in keywords {
+            let normalized = try MusicNativeSearchDiscoveryParser.keyword(.string(value))
+            try musicRequire(normalized == value && seen.insert(Data(value.utf8)).inserted,
+                             .invalidRequest)
+        }
+        return .obj([("keywords", .string(MJ.strings(keywords).json))])
+    }
+
+    static func songs(_ root: MJ, count: Int) throws -> [MJ] {
+        let data = root["data"], rows = data["songs"]
+        try musicRequire((1...20).contains(count) && data.isObject && rows.isArray &&
+            rows.array.count == count, .upstreamInvalid)
+        return try rows.array.map { row in
+            try musicRequire(row.isObject && row["song"].isObject, .upstreamInvalid)
+            if row.contains("alg"), row["alg"] != .null {
+                _ = try row["alg"].text(4096, empty: true)
+            }
+            return row["song"]
         }
     }
 }
 
 private func musicSearchDiscoveryAttempt<T: Sendable>(
+    ifRequested requested: Bool,
     _ operation: @escaping @Sendable () async throws -> T
-) async -> Result<T, MusicServiceError> {
+) async -> Result<T, MusicServiceError>? {
+    guard requested else { return nil }
     do { try Task.checkCancellation(); return .success(try await operation()) }
     catch { return .failure(MusicServiceError.sanitized(error)) }
 }
 
 extension MusicNativePlatforms {
-    fileprivate func searchDiscovery() async throws -> MusicNativeSearchDiscoverySnapshot {
+    fileprivate func searchDiscovery(components: Set<MusicSearchDiscoveryFailure.Component>) async throws -> MusicSearchDiscoverySnapshot {
         let own = epoch
-        // Two independent requests, at most two on interfacepc's host. The
-        // shared native transport's per-host budget is not raised for discovery.
-        async let hotRequest = musicSearchDiscoveryAttempt { [self] in
-            let root = try await browseWEAPI("/api/hotsearchlist/get", .obj())
-            return try MusicNativeSearchDiscoveryParser.hot(root)
-        }
-        async let topsRequest = musicSearchDiscoveryAttempt { [self] in
-            try await searchDiscoveryToplists()
-        }
+        // Read only the requested targets. Cache hits and independent waiters
+        // share pure data; no member or playback handle is part of discovery.
+        async let hotRequest: Result<MusicNativeSearchDiscoveryValue<MusicNativeSearchHotValue>, MusicServiceError>? =
+            musicSearchDiscoveryAttempt(ifRequested: components.contains(.hot)) { [self] in
+                try await searchDiscoveryHot()
+            }
+        async let topsRequest: Result<MusicNativeSearchDiscoveryValue<[MusicPublicBrowseCollection]>, MusicServiceError>? =
+            musicSearchDiscoveryAttempt(ifRequested: components.contains(.charts)) { [self] in
+                try await searchDiscoveryToplists()
+            }
         let (hotResult, topsResult) = await (hotRequest, topsRequest)
         try Task.checkCancellation()
         try musicRequire(own == epoch, .staleAccess)
-        if case .failure(let error) = hotResult, case .failure = topsResult { throw error }
         var failures: [MusicSearchDiscoveryFailure] = []
-        let hot: [MusicSearchHotKeyword]
+        var hot: [MusicSearchHotKeyword] = [], hotCanPlay = false
+        var tops: [MusicPublicBrowseCollection] = []
+        var expiries: [Date] = []
         switch hotResult {
-        case .success(let value): hot = value
-        case .failure(let error): hot = []; failures.append(.init(component: .hot, error: error))
+        case .some(.success(let value)):
+            hot = value.value.keywords; hotCanPlay = value.value.canPlay
+            expiries.append(value.validUntil)
+        case .some(.failure(let error)): failures.append(.init(component: .hot, error: error))
+        case nil: break
         }
-        let tops: [MusicPublicBrowseCollection]
         switch topsResult {
-        case .success(let value): tops = value
-        case .failure(let error): tops = []; failures.append(.init(component: .charts, error: error))
+        case .some(.success(let value)): tops = value.value; expiries.append(value.validUntil)
+        case .some(.failure(let error)): failures.append(.init(component: .charts, error: error))
+        case nil: break
         }
-        var charts: [MusicNativeSearchDiscoveryChart] = []
-        // The three charts are bounded and retain toplist order. Serial hydration
-        // avoids a third concurrent playlist request exhausting the host budget.
-        for collection in tops {
-            try Task.checkCancellation()
-            try musicRequire(own == epoch, .staleAccess)
-            let attempt = await musicSearchDiscoveryAttempt { [self] in
-                let head = try await browseWYHead(collection.nativeID)
-                let ids = try await browseWYIDs(head)
-                let tracks = try await browseWYSongs(Array(ids.prefix(20)))
-                return MusicNativeSearchDiscoveryChart(collection: collection, tracks: tracks)
-            }
-            try Task.checkCancellation()
-            try musicRequire(own == epoch, .staleAccess)
-            switch attempt {
-            case .success(let chart): charts.append(chart)
-            case .failure(let error): failures.append(.init(component: .charts, chartID: collection.id, error: error))
-            }
-        }
-        return .init(hot: hot, charts: charts, failures: failures)
+        return .init(hot: hot, hotCanPlay: hotCanPlay,
+                     charts: tops.map { .init(collection: $0) }, failures: failures,
+                     validUntil: expiries.min() ?? now())
     }
 
-    private func searchDiscoveryToplists() async throws -> [MusicPublicBrowseCollection] {
-        let root = try await wy("/api/toplist", .obj())
-        try musicRequire(root["list"].isArray && root["list"].array.count <= 1000, .upstreamInvalid)
-        let collections = try root["list"].array.prefix(3).map { try browseCollection($0, platform: .netease) }
-        try musicRequire(Set(collections.map(\.id)).count == collections.count, .upstreamInvalid)
-        return collections
+    private func searchDiscoveryHot() async throws -> MusicNativeSearchDiscoveryValue<MusicNativeSearchHotValue> {
+        let trace = MusicRequestTrace(.search, platform: .netease)
+        return try await discoveryHot.value(for: "wy", lifetime: 600, observe: { access in
+            switch access {
+            case .hit: trace.record(.cacheHit)
+            case .miss: trace.record(.cacheMiss)
+            case .coalesced: trace.record(.coalesced)
+            }
+        }) { [self] in
+            try await MusicRequestTrace.$current.withValue(trace) {
+                let root = try await wy("/api/search/pc/chart/list", .obj())
+                guard let directory = try MusicNativeSearchDiscoveryParser.hotDirectory(root) else {
+                    return .init(value: .init(keywords: [], canPlay: false),
+                                 validUntil: now().addingTimeInterval(600))
+                }
+                let rows: [MJ]
+                if directory.items.isEmpty {
+                    let detail = try await wy("/api/search/pc/chart/detail",
+                                              .obj([("id", .string(MusicNativeSearchDiscoveryParser.hotChartID))]))
+                    rows = try MusicNativeSearchDiscoveryParser.hotDetail(detail)
+                } else { rows = directory.items }
+                let keywords = try MusicNativeSearchDiscoveryParser.hotItems(rows)
+                return .init(value: .init(keywords: keywords,
+                                          canPlay: directory.canPlay && !keywords.isEmpty),
+                             validUntil: now().addingTimeInterval(600))
+            }
+        }
+    }
+
+    fileprivate func searchHotPlayback(params: MJ, count: Int) async throws -> [MusicNativeTrackData] {
+        let root = try await wy("/api/hot/search/relate/song/get", params)
+        let rows = try MusicNativeSearchHotPlaybackParser.songs(root, count: count)
+        return try rows.map { try Self.neteaseSong($0) }
+    }
+
+    private func searchDiscoveryToplists() async throws -> MusicNativeSearchDiscoveryValue<[MusicPublicBrowseCollection]> {
+        let trace = MusicRequestTrace(.browse, platform: .netease)
+        return try await discoveryCharts.value(for: "wy", lifetime: 600, observe: { access in
+            switch access {
+            case .hit: trace.record(.cacheHit)
+            case .miss: trace.record(.cacheMiss)
+            case .coalesced: trace.record(.coalesced)
+            }
+        }) { [self] in
+            try await MusicRequestTrace.$current.withValue(trace) {
+                let root = try await wy("/api/toplist", .obj())
+                try musicRequire(root["list"].isArray && root["list"].array.count <= 1000, .upstreamInvalid)
+                var collections: [MusicPublicBrowseCollection] = []
+                for row in root["list"].array.prefix(3) {
+                    collections.append(try await browseCollection(row, platform: .netease))
+                }
+                try musicRequire(Set(collections.map(\.id)).count == collections.count, .upstreamInvalid)
+                return .init(value: collections, validUntil: now().addingTimeInterval(600))
+            }
+        }
     }
 }

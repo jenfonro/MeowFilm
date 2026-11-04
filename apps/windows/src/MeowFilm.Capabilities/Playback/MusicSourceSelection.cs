@@ -47,9 +47,7 @@ public sealed partial class MusicCapability
                     string platform = MusicDto.Text(source, "source"), key = MusicDto.Text(source, "sourceKey");
                     if (platform is not ("wy" or "tx" or "kg")) continue;
                     string name = platform switch { "wy" => "网易云音乐", "tx" => "QQ 音乐", _ => "酷狗音乐" };
-                    var data = source.GetProperty("source_data");
-                    string locator = data.TryGetProperty("musicId", out var id) ? id.ToString() :
-                        data.TryGetProperty("songmid", out var mid) ? mid.ToString() : "";
+                    string locator = SongJson.InfoId(source.GetProperty("musicInfo"));
                     CurrentRecordings.Add(new(song.Id, key, platform,
                         name + " · " + locator + (state.Media.Target.SourceKey == key ? " ✓" : "")));
                 }

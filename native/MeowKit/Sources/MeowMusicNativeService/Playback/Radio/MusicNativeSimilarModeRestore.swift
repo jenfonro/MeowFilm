@@ -18,8 +18,7 @@ extension NativeMusicService {
         do {
             let schema = saved["schema"].int
             try musicRequire([1, 2].contains(schema) && saved["seed"].isObject &&
-                saved["batches"].isArray && saved["batches"].array.count <= 2000 &&
-                saved["attempted"].isArray && saved["attempted"].array.count <= 2000, .corruptDocument)
+                saved["batches"].isArray && saved["attempted"].isArray, .corruptDocument)
             try MusicNativeSimilarData.validateQueue(saved["returnQueue"])
             let sourceIDs = schema == 1 ? MusicNativeSimilarData.nativeID(saved["seed"]).map { [$0] } ?? [] :
                 saved["sourceIds"].strings

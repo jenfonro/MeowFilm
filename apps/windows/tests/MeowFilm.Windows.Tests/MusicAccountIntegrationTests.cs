@@ -6,10 +6,12 @@ using System.Text;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Threading;
 using MeowFilm.Core.Runtime;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
+using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -39,8 +41,13 @@ public static class MusicAccountIntegrationTests
                 Check(f.Module.SelectedAccount!.State == "verified");
                 Check(f.Module.SelectedAccount.UserId == "9007199254740997");
                 Check(f.Module.AccountStatus == "会话验证成功");
+                Check(f.Transport.RightsRequests == 1);
                 var document = await f.Store.ReadAsync("music.accounts.v1");
                 Check(document.Fingerprint.Exists);
+                var accounts = AccountDocument.Decode(document);
+                var details = accounts.GetDetails("wy");
+                Check(details is not null && details.BelongsTo(accounts.Get("wy")) &&
+                    details.Rights.Membership.Vip == false);
                 foreach (var file in Directory.EnumerateFiles(data, "*", SearchOption.AllDirectories))
                     Check(!Encoding.UTF8.GetString(await File.ReadAllBytesAsync(file)).Contains("SYNTHETIC_SESSION", StringComparison.Ordinal));
             }
@@ -49,9 +56,11 @@ public static class MusicAccountIntegrationTests
             await reopened.Module.ReadAccountsAsync();
             Check(reopened.Module.SelectedAccount!.State == "saved");
             Check(!reopened.Module.HasAccountQr);
+            Check(reopened.Transport.Requests == 0);
             await reopened.Module.ValidateAccountAsync();
             Check(reopened.Module.SelectedAccount.State == "verified");
-            await reopened.Module.LogoutAccountAsync();
+            Check(reopened.Transport.RightsRequests == 1);
+            await reopened.Module.LogoutAccountAsync(reopened.Module.SelectedAccount!, confirmed: true);
             Check(reopened.Module.SelectedAccount.State == "none");
         });
         yield return Case("native QR cancel retires pixels and cannot later publish a session", async () =>
@@ -86,6 +95,7 @@ public static class MusicAccountIntegrationTests
             await f.Module.ImportAccountAsync("musicid=42; musickey=SYNTHETIC_QQ; encrypt_uin=SYNTHETIC_EUIN");
             Check(f.Module.SelectedAccount.State == "verified" && f.Module.SelectedAccount.Platform == "tx");
             Check(!f.Module.HasAccountQr);
+            Check(f.Transport.RightsRequests == 1);
         });
         yield return Case("QR account failure is finite and does not save an anonymous profile", async () =>
         {
@@ -132,6 +142,34 @@ public static class MusicAccountIntegrationTests
             Check(!f.Module.HasAccountQr);
             await Dispatcher.Yield(DispatcherPriority.DataBind);
             Check(qr.Source is null);
+        });
+        yield return Case("switching SMS and QR modes suspends and resumes only visible QR polling", async () =>
+        {
+            await using var f = await Fixture.Create();
+            f.Module.SelectedAccount = f.Module.Accounts[0];
+            var view = new MusicAccountsView { DataContext = f.Module };
+            var window = new Window { Content = view, Width = 620, Height = 1000,
+                Left = -32000, Top = -32000, ShowInTaskbar = false, ShowActivated = false, WindowStyle = WindowStyle.None };
+            try
+            {
+                window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded);
+                ((Popup)view.FindName("LoginPopup")).IsOpen = true;
+                await f.Module.BeginAccountQrAsync();
+                int before = f.Transport.Requests;
+                ((Button)view.FindName("SmsModeButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                await Task.Delay(2300);
+                Check(f.Transport.Requests == before && f.Module.HasAccountQr,
+                    $"SMS mode: requests {before}->{f.Transport.Requests}, QR {f.Module.HasAccountQr}, popup {((Popup)view.FindName("LoginPopup")).IsOpen}, platform {f.Module.SelectedAccount?.Platform}");
+                ((Button)view.FindName("QrModeButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                while (f.Transport.Requests == before || f.Module.AccountBusy) await Task.Delay(20, deadline.Token);
+                ((Button)view.FindName("SmsModeButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                int polled = f.Transport.Requests;
+                await Task.Delay(2300);
+                Check(polled > before && f.Transport.Requests == polled && !f.Module.SelectedAccount!.HasSession,
+                    $"After QR resume: requests {before}->{polled}->{f.Transport.Requests}, state {f.Module.SelectedAccount?.State}, QR {f.Module.HasAccountQr}");
+            }
+            finally { window.Close(); }
         });
         yield return Case("native import cancellation before validation cannot persist late credentials", async () =>
         {
@@ -297,8 +335,8 @@ public static class MusicAccountIntegrationTests
         catch (Exception error) when (error.Message == "COMMIT_UNKNOWN") { }
     }
     private static TestCase Case(string name, Func<Task> body) => new("music-account-chain: " + name, () => Sta(body));
-    private static void Check(bool condition)
-    { if (!condition) throw new InvalidOperationException("Account integration assertion"); }
+    private static void Check(bool condition, string message = "Account integration assertion")
+    { if (!condition) throw new InvalidOperationException(message); }
     private static async Task WaitForEditable(MusicCapability module)
     {
         // Admit the posted resume refresh before observing actual idle state.
@@ -403,7 +441,7 @@ public static class MusicAccountIntegrationTests
     }
     private sealed class AccountTransport : HttpMessageHandler
     {
-        public int QrStatus = 801, CatalogStatus = 200, Requests, DisposeCalls, CatalogRequests;
+        public int QrStatus = 801, CatalogStatus = 200, Requests, DisposeCalls, CatalogRequests, RightsRequests;
         public bool Expired;
         public TaskCompletionSource? Arrived, Release;
         public bool HoldValidation, HoldCatalog;
@@ -424,8 +462,20 @@ public static class MusicAccountIntegrationTests
             if (uri.Host == "u.y.qq.com")
             {
                 using var payload = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
-                if (payload.RootElement.GetProperty("req_0").GetProperty("method").GetString() == "GetLoginUserInfo")
+                var operation = payload.RootElement.GetProperty("req_0");
+                var method = operation.GetProperty("method").GetString();
+                if (method == "GetLoginUserInfo")
                     return Json(new { code = 0, req_0 = new { code = 0, data = new { code = 0 } } });
+                if (method == "vip_login_base")
+                {
+                    Check(operation.GetProperty("module").GetString() == "VipLogin.VipLoginInter" &&
+                        payload.RootElement.GetProperty("comm").GetProperty("qq").GetString() == "42" &&
+                        payload.RootElement.GetProperty("comm").GetProperty("authst").GetString() == "SYNTHETIC_QQ");
+                    Interlocked.Increment(ref RightsRequests);
+                    return Json(new { code = 0, req_0 = new { code = 0, data = new { svip = 0, identity = new { vip = 0 } } } });
+                }
+                Check(method == "GetHomepageHeader" &&
+                    operation.GetProperty("module").GetString() == "music.UnifiedHomepage.UnifiedHomepageSrv");
                 return Json(new { code = 0, req_0 = new { code = 0, data = new { Info = new { BaseInfo = new { EncryptedUin = "SYNTHETIC_EUIN", Name = "合成账号" } } } } });
             }
             Check(uri.Host is "music.163.com" or "interfacepc.music.163.com");
@@ -435,6 +485,17 @@ public static class MusicAccountIntegrationTests
                 if (HoldValidation) { HoldValidation = false; Arrived!.TrySetResult(); await Release!.Task; }
                 return Json(new { code = 200, profile = expired ? null : new { userId = "9007199254740997", nickname = "合成账号" } });
             }
+            if (uri.AbsolutePath == "/weapi/music-vip-membership/client/vip/info")
+            {
+                Check(uri.Host == "music.163.com" && uri.Scheme == "https" &&
+                    request.Headers.TryGetValues("Cookie", out var cookies) &&
+                    cookies.Single().Contains("MUSIC_U=SYNTHETIC_", StringComparison.Ordinal));
+                Interlocked.Increment(ref RightsRequests);
+                return Json(new { code = 200, data = new { userId = "9007199254740997",
+                    now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), associator = new { expireTime = 0 },
+                    musicPackage = new { expireTime = 0 }, redplus = new { expireTime = 0 } } });
+            }
+            Check(uri.Host == "interfacepc.music.163.com" && uri.AbsolutePath == "/eapi/link/page/rcmd/resource/show");
             Interlocked.Increment(ref CatalogRequests);
             var catalogStatus = CatalogStatus;
             if (HoldCatalog) { HoldCatalog = false; Arrived!.TrySetResult(); await Release!.Task; }

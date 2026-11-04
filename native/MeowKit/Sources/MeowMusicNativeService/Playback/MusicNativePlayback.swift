@@ -30,10 +30,15 @@ extension NativeMusicService {
         return MusicModel.qualities([selection.quality], prefs).count == 1
     }
     func target(_ song: MJ, _ key: String) throws -> (MusicNativeSource, MJ) {
-        let sources = try MusicModel.sources(song)
-        guard let source = sources.first(where: { $0.sourceKey.utf8.elementsEqual(key.utf8) }),
-              let row = song["sources"].array.first(where: { $0["sourceKey"].string.utf8.elementsEqual(key.utf8) }) else { throw MusicServiceError.targetChanged }
-        return (source, try MusicModel.locator(row["source_data"]))
+        guard let row = song["sources"].array.first(where: {
+                  $0["sourceKey"].string.utf8.elementsEqual(key.utf8)
+              }),
+              let source = try MusicModel.sources(song).first(where: {
+                  $0.sourceKey.utf8.elementsEqual(key.utf8)
+              }) else {
+            throw MusicServiceError.targetChanged
+        }
+        return (source, try MusicModel.locator(MusicModel.sourceData(row)))
     }
     func validate(_ source: MusicScriptSource, site: String, quality: String? = nil, action: String = "musicUrl") throws -> MusicScriptCapability {
         try musicRequire(source.enabled && source.ready && source.generation > 0 &&
@@ -133,7 +138,6 @@ extension NativeMusicService {
     public func resolve(attemptId: String, occurrenceId: String, selection: MusicPlaybackSelection) async throws -> MusicPlaybackCandidate {
         try check()
         try musicRequire(UUID(uuidString: attemptId)?.uuidString.lowercased() == attemptId && !spent.contains(attemptId), .staleResult)
-        try musicRequire(spent.count < 16_384, .limit)
         let d = try read()
         try musicRequire(d.queue["currentId"].string == occurrenceId, .targetChanged)
         let song = try self.song(.init(kind: .queue, id: occurrenceId), d), (source, info) = try target(song, selection.sourceKey)

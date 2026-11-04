@@ -119,7 +119,7 @@ enum MusicNativeFeedbackMapping {
     static func recording(_ raw: MJ, platform: MusicAccountPlatform) -> MusicPlaybackFeedbackTarget? {
         let data = MusicModel.sourceData(raw)
         guard data["source"].string == platform.rawValue else { return nil }
-        let id = !data["musicId"].id.isEmpty ? data["musicId"].id : data["songmid"].id
+        let id = data["songmid"].id
         if platform == .netease { return positive(id) ? .init(platform: platform, nativeID: id) : nil }
         if platform == .qq {
             return id.range(of: "^[a-zA-Z0-9]{1,64}$", options: .regularExpression) != nil ? .init(platform: platform, nativeID: id) : nil
@@ -128,11 +128,9 @@ enum MusicNativeFeedbackMapping {
         guard hash.range(of: "^[A-F0-9]{32}$", options: .regularExpression) != nil,
               hash != String(repeating: "0", count: 32) else { return nil }
         let ids = ["albumAudioId", "album_audio_id", "mixsongid"].map { data[$0].id }.filter { !$0.isEmpty && $0 != "0" }
+        let songmid = data["songmid"].id.uppercased()
         guard ids.allSatisfy(positive), Set(ids).count <= 1,
-              !["musicId", "songmid"].contains(where: {
-                  let value = data[$0].id.uppercased()
-                  return value.range(of: "^[A-F0-9]{32}$", options: .regularExpression) != nil && value != hash
-              }) else { return nil }
+              !(songmid.range(of: "^[A-F0-9]{32}$", options: .regularExpression) != nil && songmid != hash) else { return nil }
         return .init(platform: platform, nativeID: hash, mixsongID: ids.first)
     }
     static func targets(song: MJ, context: MJ) throws -> [MusicPlaybackFeedbackTarget] {
@@ -144,7 +142,6 @@ enum MusicNativeFeedbackMapping {
             var values: [MusicPlaybackFeedbackTarget] = []
             for row in song["sources"].array {
                 guard MusicModel.compatible(song, row),
-                      !song["quarantinedSources"].array.contains(where: { musicSame($0["sourceKey"].string, row["sourceKey"].string) }),
                       let value = recording(row, platform: platform), !values.contains(value) else { continue }
                 values.append(value)
             }
@@ -162,7 +159,9 @@ enum MusicNativeFeedbackMapping {
             guard let chosen else { continue }
             var source = "", sourceID = "", algorithm = ""
             if platform == .netease {
-                let native = MusicModel.sourceData(song)["source"].string == "wy"
+                let native = song["sources"].array.contains {
+                    MusicModel.sourceData($0)["source"].string == "wy"
+                }
                 let type = context["sourceType"].string, id = context["sourceId"].id
                 // No live FM/recommendation-session proof is supplied by this
                 // owner. Preserve verified source attribution, not stale FM tags.

@@ -4,6 +4,7 @@ using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Accounts;
+using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities.Platforms;
 
@@ -37,8 +38,8 @@ internal sealed class OfficialMusicAudio
         {
             try { Guard(token); } catch { request.Dispose(); throw; }
             var result = xeapi
-                ? await owner.http.SendCatalogXeapiAsync(request, token, 1024 * 1024, TimeSpan.FromSeconds(20)).ConfigureAwait(false)
-                : await owner.http.SendCatalogAsync(account.Platform, request, token).ConfigureAwait(false);
+                ? await owner.http.SendXeapiAsync(request, token, 1024 * 1024, TimeSpan.FromSeconds(20)).ConfigureAwait(false)
+                : await owner.http.SendAsync(account.Platform, request, token).ConfigureAwait(false);
             Guard(token);
             var body = account.Platform switch {
                 "wy" => PlatformProtocols.WySuccess(result.Body), "tx" => PlatformProtocols.TxSuccess(result.Body),
@@ -96,7 +97,7 @@ internal sealed class OfficialMusicAudio
     private async Task<OfficialAudioResult> Wy(Call c, MusicPlatformSession session, JsonObject data,
         IReadOnlyList<string> qualities, MusicAccountEntitlements rights, CancellationToken token)
     {
-        string id = Id(data, "musicId", "^[1-9][0-9]{0,19}$");
+        string id = Id(data, "songmid", "^[1-9][0-9]{0,19}$");
         if (qualities.Count > 0 && qualities[0] == "128k")
             return await WyStandard(c, session, id, token).ConfigureAwait(false);
         var resourceResponse = await c.Send(PlatformProtocols.Wy("/api/song/music/detail/get",
@@ -217,7 +218,7 @@ internal sealed class OfficialMusicAudio
         var raw = tracks[0]; var audio = raw["audio_info"] as JsonObject ?? new();
         var hashes = new[] { raw["hash"], raw["FileHash"], audio["hash"] }.Where(n => n is not null).ToArray();
         PJ.Require(hashes.Length > 0 && hashes.All(n => PlatformSongs.KgHash(n) == hash), "IDENTITY_MISMATCH");
-        var song = PlatformSongs.Kg(raw); var sd = song["source_data"]!.AsObject();
+        var song = PlatformSongs.Kg(raw); var sd = NativeMusicSong.SourceData(song);
         var types = sd["_types"] as JsonObject ?? new();
         var levels = new Dictionary<string, string> { ["128k"] = "128", ["320k"] = "320", ["flac"] = "flac", ["flac24bit"] = "high" };
         string? quality = qualities.FirstOrDefault(q => levels.ContainsKey(q) && (q == "128k" || types[q]?["hash"] is not null));

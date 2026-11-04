@@ -5,6 +5,7 @@ namespace MeowFilm.Desktop;
 /// <summary>
 /// Narrow page contribution consumed by the one shell-owned header.
 /// Contributors never supply another header, search box, or back button.
+/// A mounted ordinary capability with enabled search becomes the owner of the retained shell search.
 /// </summary>
 public interface IDesktopHeaderSource
 {

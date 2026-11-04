@@ -4,6 +4,7 @@ namespace MeowFilm.AppHost;
 
 public sealed record AppDataPaths(string Documents)
 {
+    public string ScriptRuntime => Path.Combine(Documents, "script-runtime");
     public static AppDataPaths Current => ForIdentity(AppIdentity.StorageId);
     /// <summary>Fixed App-identity LocalAppData location, never a caller-supplied user path.</summary>
     public static AppDataPaths ForIdentity(string identity)

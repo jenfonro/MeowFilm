@@ -35,14 +35,14 @@ public static partial class MusicUiTests
             True(!words.SequenceEqual(f.Module.DiscoveryRecommended.Select(w => w.Text)), "six-word local rotation");
             Equal(before, f.Http.Requests.Count); Equal(0, f.Runtime.Calls.Count);
         });
-        yield return Case("native discovery keyword consumes saved aggregate policy and history without JS", async () =>
+        yield return Case("native discovery keyword consumes saved search policy and history without JS", async () =>
         {
             await using var f = await DiscoveryScene.Create();
             await f.Policy(); await f.Open();
             var word = f.Module.DiscoveryHot[0];
             await f.Module.SearchDiscoveryKeywordAsync(word);
             await DiscoveryUntil(() => f.Module.Songs.Count == 3);
-            True(f.Module.IsAggregateSearch, "actual aggregate results");
+            True(f.Module.IsSearchPage, "actual music search results");
             Equal(1, f.Http.Searches);
             var history = (await f.Call("music.search.history.get")).GetProperty("history").GetProperty("items");
             True(history.EnumerateArray().Any(h => h.GetProperty("text").GetString() == word.Text &&
@@ -57,7 +57,7 @@ public static partial class MusicUiTests
             var queue = await f.Call("music.queue.get", new { offset = 0, limit = 100 });
             Equal(1, queue.GetProperty("entries").GetArrayLength());
             var raw = queue.GetProperty("entries")[0].GetProperty("song");
-            Equal("1002", raw.GetProperty("source_data").GetProperty("musicId").GetString());
+            Equal("1002", MusicSongFixture.NativeId(raw));
             string saved = queue.GetRawText();
             True(saved.Contains("\"sourcePlatform\":\"wy\"") && saved.Contains("\"sourceType\":\"playlist\"") &&
                 saved.Contains("\"sourceId\":\"500\""), "actual chart origin");
@@ -196,7 +196,7 @@ public static partial class MusicUiTests
             Equal(Visibility.Collapsed, Visuals(view).OfType<MusicCatalogView>().Single().Visibility);
             var button = Visuals(discovery).OfType<Button>().First(b => b.Tag is MusicDiscoveryKeyword word && word.Text == "热搜1");
             Click(button);
-            await DiscoveryUntil(() => f.Module.IsAggregateSearch && f.Module.Songs.Count == 3);
+            await DiscoveryUntil(() => f.Module.IsSearchPage && f.Module.Songs.Count == 3);
             Equal(1, f.Http.Searches);
         });
         yield return Case("native discovery navigation keeps scroll before clearing the retired display", async () =>
@@ -292,7 +292,6 @@ public static partial class MusicUiTests
                 await Module.SetSearchPlatformEnabledAsync("songs", row, row.Platform == "wy");
             foreach (var row in Module.PlaylistSearch.Platforms.ToArray())
                 await Module.SetSearchPlatformEnabledAsync("playlists", row, false);
-            await Module.SetSearchModeAsync("songs", "aggregate");
         }
         internal async Task EnableScript()
         {

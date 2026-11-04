@@ -5,7 +5,7 @@ import {
 import { deflateSync, inflateSync } from 'node:zlib';
 import { fault, requireValue } from './errors.js';
 
-export function createUtilities(maxBytes) {
+export function createUtilities(maxMemoryBytes) {
   const bytes = (value, encoding = 'utf8') => {
     let result;
     if (typeof value === 'string') result = Buffer.from(value, encoding);
@@ -14,7 +14,6 @@ export function createUtilities(maxBytes) {
       result = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
     } else if (Array.isArray(value)) result = Buffer.from(value);
     else throw fault('INVALID_ARGUMENT');
-    requireValue(result.length <= maxBytes, 'RESOURCE_LIMIT');
     return result;
   };
   return (operation, args) => {
@@ -31,7 +30,8 @@ export function createUtilities(maxBytes) {
         return createHmac(args[0], bytes(args[1])).update(bytes(args[2])).digest(args[3] ?? 'hex');
       }
       case 'random': {
-        requireValue(Number.isSafeInteger(args[0]) && args[0] >= 0 && args[0] <= maxBytes);
+        requireValue(Number.isSafeInteger(args[0]) && args[0] >= 0 &&
+          args[0] <= maxMemoryBytes, 'RESOURCE_LIMIT');
         return [...randomBytes(args[0])];
       }
       case 'aes': {
@@ -81,7 +81,7 @@ export function createUtilities(maxBytes) {
       case 'deflate': {
         try {
           const fn = operation === 'inflate' ? inflateSync : deflateSync;
-          return [...fn(bytes(args[0]), { maxOutputLength: maxBytes })];
+          return [...fn(bytes(args[0]), { maxOutputLength: maxMemoryBytes })];
         } catch { throw fault('RESOURCE_LIMIT'); }
       }
       default: throw fault('UNSUPPORTED_OPTION');

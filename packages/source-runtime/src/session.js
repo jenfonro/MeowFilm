@@ -28,7 +28,6 @@ const defaults = Object.freeze({
   maximumPages: 32,
   maximumExternalScripts: 8,
   maximumSourceCandidates: 8,
-  maximumVirtualRoutes: 128,
   cleanupTimeoutMs: 2_000,
 });
 const textEncoder = new TextEncoder();
@@ -45,11 +44,9 @@ class BoundedState {
   #entries = new Map();
   #bytes = 0;
 
-  constructor(maximumBytes, maximumEntries = 1024) {
-    sourceRequire(Number.isSafeInteger(maximumBytes) && maximumBytes > 0 &&
-      Number.isSafeInteger(maximumEntries) && maximumEntries > 0);
+  constructor(maximumBytes) {
+    sourceRequire(Number.isSafeInteger(maximumBytes) && maximumBytes > 0);
     this.maximumBytes = maximumBytes;
-    this.maximumEntries = maximumEntries;
   }
 
   #identity(namespace, key) {
@@ -68,7 +65,6 @@ class BoundedState {
     const captured = sourceClone(value === undefined ? null : value);
     const bytes = textEncoder.encode(identity).length + jsonBytes(captured);
     const previous = this.#entries.get(identity);
-    sourceRequire(previous || this.#entries.size < this.maximumEntries, 'RESOURCE_LIMIT');
     sourceRequire(this.#bytes - (previous?.bytes ?? 0) + bytes <= this.maximumBytes,
       'RESOURCE_LIMIT');
     this.#entries.set(identity, { value: captured, bytes });
@@ -398,7 +394,6 @@ class SessionKernel {
         sourceRequire(this.protocol === 'qysg');
         return this.registry(context).parse(this.initialDocument ?? '<!doctype html><html><body></body></html>');
       case 'cat.virtualUrl': {
-        sourceRequire(this.virtualRoutes.size < this.limits.maximumVirtualRoutes, 'RESOURCE_LIMIT');
         const route = `route-${++this.nextRoute}`;
         const metadata = {
           siteKey: String(input.siteKey ?? ''),

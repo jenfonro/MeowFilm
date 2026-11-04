@@ -22,8 +22,9 @@ public sealed partial class MusicNativeApplication
             var song = NativeMusicSong.Normalize(input["song"]);
             string songId = LJ.S(song["songId"]), request = LJ.S(input["quality"]);
             LJ.Require(request == "auto" || MusicQualityPolicy.RequestTypes.Contains(request), "QUALITY_UNAVAILABLE");
+            using var officialPolicy = await library.AcquireOfficialSourcesAsync(token).ConfigureAwait(false);
             using var policy = await library.AcquireQualityAsync(token).ConfigureAwait(false);
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, policy.Token);
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, policy.Token, officialPolicy.Token);
             token = linked.Token;
             LJ.Require(LJ.S(input["qualityPolicySignature"]) == policy.Signature, "QUALITY_POLICY_CHANGED");
             LJ.Require(request == "auto" ? MusicQualityPolicy.HasEnabled(policy.Policy) :
@@ -31,11 +32,13 @@ public sealed partial class MusicNativeApplication
             var owners = new Dictionary<string, MusicPlatformSession?>(StringComparer.Ordinal);
             // Settled restore is local; a file-first lookup must not invoke a platform endpoint.
             foreach (string platform in new[] { "wy", "tx", "kg" })
-                owners[platform] = await accounts.AcquireOfficialAsync(platform,
-                    request is "128k" or "auto" && MusicQualityPolicy.Enabled("128k", policy.Policy), token).ConfigureAwait(false);
+                if (officialPolicy.IsEnabled(platform))
+                    owners[platform] = await accounts.AcquireOfficialAsync(platform,
+                        request is "128k" or "auto" && MusicQualityPolicy.Enabled("128k", policy.Policy), token).ConfigureAwait(false);
             void Current()
             {
                 token.ThrowIfCancellationRequested();
+                officialPolicy.Check();
                 foreach (var owner in owners.Values.OfType<MusicPlatformSession>())
                     LJ.Require(accounts.IsOfficialCurrent(owner), "AUTH_CHANGED");
             }
@@ -86,21 +89,24 @@ public sealed partial class MusicNativeApplication
                 }
             }
             await library.CheckQualityAsync(policy, token).ConfigureAwait(false);
-            Current();
-            var response = plan.Snapshot(owners.Where(pair => pair.Value is not null).Select(pair => pair.Key));
-            foreach (var candidate in response["candidates"]!.AsArray().OfType<JsonObject>())
+            return officialPolicy.Publish(null, () =>
             {
-                var owner = owners[LJ.S(candidate["platform"])]!;
-                candidate["scope"] = owner.Scope;
-                candidate["generation"] = owner.Generation;
-            }
-            response["ok"] = true;
-            response["qualityPolicySignature"] = policy.Signature;
-            response["failures"] = failures;
-            response["hasMore"] = pageNumber < 3 && hasMore;
-            response["authorizationRequired"] = owners.Values.All(owner => owner is null);
-            response["page"] = pageNumber;
-            return JsonSerializer.SerializeToElement(response);
+                Current();
+                var response = plan.Snapshot(owners.Where(pair => pair.Value is not null).Select(pair => pair.Key));
+                foreach (var candidate in response["candidates"]!.AsArray().OfType<JsonObject>())
+                {
+                    var owner = owners[LJ.S(candidate["platform"])]!;
+                    candidate["scope"] = owner.Scope;
+                    candidate["generation"] = owner.Generation;
+                }
+                response["ok"] = true;
+                response["qualityPolicySignature"] = policy.Signature;
+                response["failures"] = failures;
+                response["hasMore"] = pageNumber < 3 && hasMore;
+                response["authorizationRequired"] = owners.Values.All(owner => owner is null);
+                response["page"] = pageNumber;
+                return JsonSerializer.SerializeToElement(response);
+            });
         }
         catch (MusicLibraryException e) { return Failed(e.Code); }
         catch (MusicAccountException e) { return Failed(e.Code); }

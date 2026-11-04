@@ -8,11 +8,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 
 const PRODUCTS = Object.freeze({
-  aggregate: ['music', 'source'],
+  aggregate: ['music', 'cat', 'source'],
 });
 const MANIFEST = 'runtime-manifest.json';
 const SHARED_SOURCE = 'apps/runtime';
-const SHARED_FILES = ['bootstrap.mjs', 'modules/music-script.mjs', 'modules/source-runtime.mjs'];
+const SHARED_FILES = [
+  'bootstrap.mjs', 'modules/music-script.mjs', 'modules/cat-script.mjs', 'modules/source-runtime.mjs',
+];
 const SHARED_IMPORTS = new Set([
   'node:crypto', '@meowfilm/runtime-bridge', '@meowfilm/script-host', '@meowfilm/source-runtime',
 ]);
@@ -263,6 +265,7 @@ function fileDeclarations(root, manifest, location, workspace) {
   const required = new Set();
   function target(value, exports = false, packageMain = false) {
     if (value === null) return;
+    if (packageMain && value === false) return;
     if (Array.isArray(value)) { for (const item of value) target(item, exports, packageMain); return; }
     if (isObject(value)) { for (const item of Object.values(value)) target(item, exports, packageMain); return; }
     check(typeof value === 'string' && (!exports || value.startsWith('./')),

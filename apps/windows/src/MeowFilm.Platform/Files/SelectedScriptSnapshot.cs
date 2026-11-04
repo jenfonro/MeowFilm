@@ -22,15 +22,16 @@ public sealed class SelectedScriptSnapshotException : Exception
 /// <summary>
 /// Snapshots a raw .js file explicitly selected by native UI, never a .jsc plugin.
 /// Does not decode, parse, execute, install or authorize the script. Does not expose Node
-/// filesystem access. Callers still own LX validation, permissions and bounded transport.
+/// filesystem access. Callers still own protocol validation and framed transport.
 /// </summary>
 public static class SelectedScriptSnapshot
 {
-    public const int MaximumBytes = 512 * 1024;
+    public const int MaximumBytes = 16 * 1024 * 1024;
 
     /// <summary>
-    /// Same local-only safety and lifecycle policy as SelectedJsonSnapshot, with a 512 KiB
-    /// inclusive bound. Empty/invalid script bytes are preserved, not marked valid LX.
+    /// Same local-only safety and lifecycle policy as SelectedJsonSnapshot, with the same
+    /// 16 MiB single-script source bound as ScriptHost. Empty/invalid bytes are preserved,
+    /// not marked valid LX.
     /// Cancellation is cooperative between bounded OS calls; no partial snapshot escapes.
     /// </summary>
     public static async Task<SelectedScriptSnapshotData> ReadAsync(string selectedPath,

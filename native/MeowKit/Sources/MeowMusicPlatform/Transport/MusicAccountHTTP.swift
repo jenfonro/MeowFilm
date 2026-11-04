@@ -25,10 +25,6 @@ public struct MusicAccountHTTPResponse: Sendable {
 }
 public protocol MusicAccountHTTPTransport: Sendable {
     func send(_ request: MusicAccountHTTPRequest) async throws -> MusicAccountHTTPResponse
-    func recordRateLimit(for url: URL, retryAfter: String?) async
-}
-public extension MusicAccountHTTPTransport {
-    func recordRateLimit(for url: URL, retryAfter: String?) async {}
 }
 
 /// One instance per product music account service, not per request. No CookieJar,
@@ -54,8 +50,6 @@ public final class URLSessionMusicAccountTransport: NSObject, MusicAccountHTTPTr
     private var sessionValue: URLSession?
     private var closed = false
     private var transfers: [Int: Transfer] = [:]
-    private let admission: RequestAdmission
-    private let admissionScope = UUID()
     private let routes: [String: Set<String>] = [
         "ssl.ptlogin2.qq.com": ["/ptqrshow", "/ptqrlogin"],
         "ssl.ptlogin2.graph.qq.com": ["/check_sig"],
@@ -71,8 +65,7 @@ public final class URLSessionMusicAccountTransport: NSObject, MusicAccountHTTPTr
         "music.163.com": ["/weapi/w/nuser/account/get", "/weapi/v1/radio/get", "/weapi/user/playlist",
                           "/weapi/v3/song/detail", "/weapi/music-vip-membership/client/vip/info", "/weapi/song/chorus"]
     ]
-    public override convenience init() { self.init(admission: RequestAdmission()) }
-    public init(admission: RequestAdmission) { self.admission = admission; super.init() }
+    public override init() { super.init() }
     private func session() throws -> URLSession {
         lock.lock(); defer { lock.unlock() }
         guard !closed else { throw MusicServiceError.closed }
@@ -82,7 +75,6 @@ public final class URLSessionMusicAccountTransport: NSObject, MusicAccountHTTPTr
         config.urlCredentialStorage = nil; config.urlCache = nil
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         config.timeoutIntervalForRequest = 15; config.timeoutIntervalForResource = 30
-        config.httpMaximumConnectionsPerHost = 2
         let value = URLSession(configuration: config, delegate: self, delegateQueue: nil)
         sessionValue = value
         return value
@@ -104,22 +96,11 @@ public final class URLSessionMusicAccountTransport: NSObject, MusicAccountHTTPTr
         else { throw MusicServiceError.invalidRequest }
         try Task.checkCancellation()
         let trace = MusicRequestTrace(.accountAPI)
-        let lease: UUID
-        do { lease = try await admission.acquire(host: host, scope: admissionScope, priority: trace.priority) }
-        catch { trace.failed(error); throw MusicServiceError.sanitized(error) }
-        defer { Task { await admission.release(lease) } }
         do {
             let response = try await transfer(value, trace: trace)
-            if response.status == 429 {
-                await recordRateLimit(for: value.url, retryAfter: response.header("retry-after"))
-            }
             trace.record(.completed, http: response.status)
             return response
         } catch { trace.failed(error); throw MusicServiceError.sanitized(error) }
-    }
-    public func recordRateLimit(for url: URL, retryAfter: String?) async {
-        guard let host = url.host else { return }
-        await admission.coolDown(host: host, seconds: RequestAdmission.retryAfter(retryAfter) ?? 2)
     }
     private func transfer(_ value: MusicAccountHTTPRequest, trace: MusicRequestTrace) async throws -> MusicAccountHTTPResponse {
         try Task.checkCancellation()
@@ -213,7 +194,6 @@ public final class URLSessionMusicAccountTransport: NSObject, MusicAccountHTTPTr
     /// Product service owns this transport, not any shared URLSession.
     public func close() {
         lock.lock(); closed = true; let value = sessionValue; sessionValue = nil; lock.unlock()
-        Task { await admission.close(scope: admissionScope) }
         value?.invalidateAndCancel()
     }
 }

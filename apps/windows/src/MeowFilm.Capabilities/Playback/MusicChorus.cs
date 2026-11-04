@@ -59,14 +59,13 @@ public sealed partial class MusicCapability
         { if (chorusKey is not null) ClearChorus(); return; }
         var rows = sources.EnumerateArray().Where(row =>
             MusicDto.Text(row, "sourceKey") == target.SourceKey).ToArray();
-        if (rows.Length != 1 || !rows[0].TryGetProperty("source_data", out var data)) { ClearChorus(); return; }
+        if (rows.Length != 1 || !rows[0].TryGetProperty("musicInfo", out var data)) { ClearChorus(); return; }
         string platform = target.Platform;
-        string field = platform switch { "wy" => "musicId", "tx" => "songmid", "kg" => "hash", _ => "" };
+        string field = platform switch { "wy" or "tx" => "songmid", "kg" => "hash", _ => "" };
         if (field.Length == 0 || !data.TryGetProperty(field, out var idValue)) { ClearChorus(); return; }
         var id = idValue.ValueKind is JsonValueKind.String or JsonValueKind.Number ? idValue.ToString() : "";
         if (id.Length == 0) { ClearChorus(); return; }
-        var durationValue = rows[0].TryGetProperty("duration", out var d) ? d :
-            data.TryGetProperty("duration", out d) ? d : default;
+        var durationValue = data.TryGetProperty("duration", out var d) ? d : default;
         if (durationValue.ValueKind != JsonValueKind.Number || !durationValue.TryGetDouble(out var expected) ||
             !double.IsFinite(expected) || expected <= 0 || Math.Abs(expected - DurationSeconds) > 10)
         { if (chorusKey is not null) ClearChorus(); return; }

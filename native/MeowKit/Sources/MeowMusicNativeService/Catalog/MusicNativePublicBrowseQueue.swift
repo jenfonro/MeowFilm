@@ -15,9 +15,10 @@ actor MusicNativePublicBrowseQueueRead {
     func page(_ cursor: String?) async throws -> MusicNativeTrackPage {
         try musicRequire(!closed, .closed); try Task.checkCancellation()
         let text = cursor ?? "0"
-        try musicRequire(text.range(of: "^(0|[1-9][0-9]{0,3})$", options: .regularExpression) != nil)
+        try musicRequire(text.range(of: "^(0|[1-9][0-9]{0,17})$", options: .regularExpression) != nil)
         let offset = Int(text)!
         try musicRequire(offset % 30 == 0, .staleResult)
+        try musicRequire(rows != nil || offset == 0, .staleResult)
         if rows == nil {
             let flight: (id: UUID, task: Task<[MusicNativeTrackData], Error>)
             if let loading { flight = loading }
@@ -27,8 +28,7 @@ actor MusicNativePublicBrowseQueueRead {
                     try Task.checkCancellation()
                     let value = try await load()
                     try Task.checkCancellation()
-                    try musicRequire(value.count <= 2000 &&
-                        value.reduce(0, { $0 + $1.data.count }) <= 6 * 1024 * 1024, .limit)
+                    try musicRequire(value.reduce(0, { $0 + $1.data.count }) <= MusicRemoteQueueSource.maximumBytes, .limit)
                     return value
                 })
                 loading = flight
@@ -75,7 +75,6 @@ extension NativeMusicService {
             publicQueueSources.removeValue(forKey: id); access.remove(id)
             Task { await entry.reader.close() }
         }
-        try musicRequire(publicQueueSources.count < 32, .busy)
         let bytes = snapshot.tracks.reduce(0) { $0 + $1.data.count }
         // Bound retained native snapshots across open sources, not merely each
         // source. This is a byte budget, not an estimate of the App's RSS.

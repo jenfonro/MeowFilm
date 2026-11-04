@@ -48,6 +48,56 @@ final class RetainedPagesControllerTests: XCTestCase {
         XCTAssertNil(retained.page(at: 0))
     }
 
+    func testWillSelectStartsWithTheCrossfadeAndPrecedesDidSelect() async throws {
+        let theme = PageLifecycleTestTheme()
+        let retained = RetainedPagesController(pageFactories: [
+            { PageLifecycleTestPage(themeProvider: theme) },
+            { PageLifecycleTestPage(themeProvider: theme) },
+            { PageLifecycleTestPage(themeProvider: theme) }
+        ])
+        var events: [String] = []
+        var crossfadeWill: (index: Int, duration: TimeInterval)?
+        retained.willSelect = { index, duration in
+            events.append("will \(index)")
+            crossfadeWill = (index, duration)
+        }
+        retained.didSelect = { events.append("did \($0)") }
+        retained.select(1, animated: true)
+        XCTAssertEqual(crossfadeWill?.index, 1)
+        XCTAssertEqual(crossfadeWill?.duration, 0)
+        XCTAssertEqual(events, ["will 1", "did 1"])
+
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = retained
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        let displayed = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                (retained.page(at: 1) as? PageLifecycleTestPage)?.appearanceEvents.last == "didAppear"
+            }
+        }, evaluatedWith: retained)
+        await fulfillment(of: [displayed], timeout: 2)
+
+        events.removeAll()
+        let selected = expectation(description: "crossfade finished")
+        retained.didSelect = {
+            events.append("did \($0)")
+            if $0 == 2 { selected.fulfill() }
+        }
+        retained.select(2, animated: true)
+        XCTAssertEqual(crossfadeWill?.index, 2)
+        XCTAssertGreaterThan(crossfadeWill?.duration ?? 0, 0)
+        XCTAssertEqual(events, ["will 2"])
+        await fulfillment(of: [selected], timeout: 2)
+        XCTAssertEqual(events, ["will 2", "did 2"])
+    }
+
     func testSwitchingKeepsContainmentStateAndBalancedAppearance() async throws {
         let theme = PageLifecycleTestTheme()
         let retained = RetainedPagesController(pageFactories: [

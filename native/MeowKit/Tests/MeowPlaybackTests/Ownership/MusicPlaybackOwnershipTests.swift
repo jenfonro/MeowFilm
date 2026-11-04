@@ -108,7 +108,7 @@ private actor CrossDomainNavigationService: MusicServing {
     func tracks(in collection: MusicCollection) -> [MusicRemoteTrack] { [] }
     func playedSongs() -> [MusicPlayedSong] { [] }
     func playedPlaylists() -> [MusicPlayedPlaylist] { [] }
-    func search(platform: String, query: String, page: Int) throws -> MusicSearchPage { throw MusicServiceError.unsupported }
+    func search(platform: String, query: String, page: Int, limit: Int) throws -> MusicSearchPage { throw MusicServiceError.unsupported }
     func createPlaylist(name: String, refs: [MusicReference]) throws -> MusicCollection { throw MusicServiceError.unsupported }
     func editPlaylist(_ collection: MusicCollection, name: String?, refs: [MusicReference]?,
                       order: [String]?) throws -> MusicCollection { throw MusicServiceError.unsupported }

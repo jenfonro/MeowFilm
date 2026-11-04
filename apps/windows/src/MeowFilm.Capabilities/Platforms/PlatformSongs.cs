@@ -23,18 +23,14 @@ internal static partial class PlatformSongs
     {
         PJ.Require(double.IsFinite(duration) && duration >= 0, "INVALID_RESPONSE");
         title = title.Length == 0 ? "未知歌曲" : title;
-        var originalArtist = artist;
-        artist = artist.Length == 0 ? "未知歌手" : artist;
         // Match music-core's durable metadata policy: never archive signed/query URLs.
         if (cover.Length > 0 && (!Uri.TryCreate(cover, UriKind.Absolute, out var artwork) ||
             artwork.Query.Length > 0 || artwork.Fragment.Length > 0 ||
             artwork.Host is "local" or "localhost" || artwork.Host.EndsWith(".local", StringComparison.OrdinalIgnoreCase) ||
             artwork.Host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase))) cover = "";
         native ??= new JsonObject();
-        foreach (var (key, value) in new[] { ("source", platform), ("musicId", id), ("songmid", id),
-            ("name", title), ("singer", originalArtist), ("album", album), ("albumName", album), ("img", cover) }) native[key] = value;
-        native["duration"] = duration;
-        if (cover.Length == 0) native.Remove("img");
+        native["source"] = platform; native["songmid"] = id;
+        // musicInfo display fields (name/singer/albumName/duration/img) are written by CreateOnline.
         return NativeMusicSong.CreateOnline(platform, native, title, artist, album, duration, cover);
     }
     private static string M(JsonNode? value) => PJ.Metadata(value);
@@ -150,12 +146,14 @@ internal static partial class PlatformSongs
         JsonNode? Pick(params string[] keys) => PJ.First(keys.Select(k => PJ.At(raw, k)).ToArray());
         var id = platform switch {
             "wy" => PJ.Id(Pick("id")), "tx" => PJ.Id(Pick("id", "tid", "dissid")),
-            _ => PJ.Id(Pick("global_collection_id"), @"^[\w-]{1,200}$") };
+            _ => PJ.Id(Pick("global_collection_id", "gid"), @"^[\w-]{1,200}$") };
         PJ.Require(platform != "kg" || !id.StartsWith("id_", StringComparison.Ordinal), "IDENTITY_MISMATCH");
+        if (platform == "kg" && raw["global_collection_id"] is { } global && raw["gid"] is { } gid)
+            PJ.Require(PJ.Id(global, @"^[\w-]{1,200}$") == PJ.Id(gid, @"^[\w-]{1,200}$"), "IDENTITY_MISMATCH");
         return PJ.Obj(("id", id), ("name", M(platform == "wy" ? Pick("name", "title") : platform == "tx" ? Pick("title", "dissname", "name", "dirName") : Pick("specialname", "name"))),
-            ("cover", PJ.Image(platform == "wy" ? Pick("picUrl", "coverImgUrl", "cover") : platform == "tx" ? Pick("picurl", "cover", "logo", "picUrl") : Pick("imgurl", "cover"))),
-            ("count", PJ.OptionalCount(platform == "wy" ? Pick("trackCount", "songCount") : platform == "tx" ? Pick("songnum", "songNum", "song_cnt") : Pick("songcount", "count"))),
-            ("creator", M(platform == "wy" ? PJ.At(raw, "creator", "nickname") : Pick("nickname", "creator_nick"))),
+            ("cover", PJ.Image(platform == "wy" ? Pick("picUrl", "coverImgUrl", "cover") : platform == "tx" ? Pick("picurl", "cover", "logo", "picUrl") : Pick("imgurl", "img", "cover", "pic"))),
+            ("count", PJ.OptionalCount(platform == "wy" ? Pick("trackCount", "songCount") : platform == "tx" ? Pick("songnum", "songNum", "song_cnt") : Pick("songcount", "song_count", "count"))),
+            ("creator", M(platform == "wy" ? PJ.At(raw, "creator", "nickname") : platform == "tx" ? Pick("nickname", "creator_nick") : Pick("nickname", "list_create_username"))),
             ("source", platform), ("engine", platform == "wy" ? "Netease" : platform == "tx" ? "QQ" : "Kugou"));
     }
 }

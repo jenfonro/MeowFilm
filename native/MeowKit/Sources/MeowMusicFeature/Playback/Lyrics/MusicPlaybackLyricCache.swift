@@ -26,7 +26,7 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
         private let identity: Data
 
         /// The current DTO exposes recording/source identity and duration, but
-        /// not the original song revision, quarantine list or full source_data.
+        /// not the original song revision, rejected source list or full source locator.
         /// Pass the actual content revision when available; otherwise the owner
         /// must be cleared on changes to those unexposed inputs. Do not substitute
         /// the queue/settings revision or selectionID: ordinary navigation and
@@ -184,8 +184,6 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
 
     private let lock = NSLock()
     private let now: @Sendable () -> TimeInterval
-    private let maximumProducers: Int
-    private let maximumWaiters: Int
     private var available = false
     private var closed = false
     private var generation: UUID?
@@ -197,10 +195,8 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
     private var producers: [UUID: Producer] = [:]
     private var waiterCount = 0
 
-    init(maximumProducers: Int = 4, maximumWaiters: Int = 32,
-         now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
-        precondition(maximumProducers > 0 && maximumWaiters > 0)
-        self.maximumProducers = maximumProducers; self.maximumWaiters = maximumWaiters; self.now = now
+    init(now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.now = now
     }
 
     var usage: Usage {
@@ -223,7 +219,7 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
         retirement.finish()
     }
 
-    /// Use for recording/catalogue/quarantine changes not represented in Key.
+    /// Use for recording/catalogue changes not represented in Key.
     /// Access remains unchanged; old responses and already-delivered handles
     /// cannot repopulate/read the freshly cleared scope.
     func removeAll() {
@@ -260,15 +256,13 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
                 request.finish(.success(.init(occurrenceId: occurrenceID, state: .ready, lines: entry.lines)))
                 return request
             }
-            guard waiterCount < maximumWaiters else { throw MusicServiceError.busy }
             let producer: Producer
             let isNew: Bool
             if let id = active[key], let current = producers[id] {
                 producer = current; isNew = false
             } else {
-                // Retired, non-cooperative work still consumes a slot. Clearing
-                // access or cancelling a waiter is NOT proof of resource release.
-                guard producers.count < maximumProducers else { throw MusicServiceError.busy }
+                // Retired work stays tracked until its actual completion; it
+                // does not prevent a new valid recording/access scope from reading.
                 producer = Producer(key: key, scope: scope, occurrenceID: occurrenceID); isNew = true
                 producers[producer.id] = producer; active[key] = producer.id
             }

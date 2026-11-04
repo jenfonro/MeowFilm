@@ -14,8 +14,8 @@ final class MusicNativeKuwoSearchTests: XCTestCase {
         XCTAssertEqual(platforms.suffix(2).map(\.lyrics), [true, true])
         XCTAssertEqual(platforms.suffix(2).map(\.accountState), ["unsupported", "unsupported"])
         let before = await http.calls(); XCTAssertTrue(before.isEmpty, "platform selection is passive")
-        let page = try await service.search(platform: "kw", query: "A + B & 中文", page: 2)
-        XCTAssertEqual(page.total, 61); XCTAssertEqual(page.nextPage, 3)
+        let page = try await service.search(platform: "kw", query: "A + B & 中文", page: 2, limit: 30)
+        XCTAssertEqual(page.total, 61); XCTAssertNil(page.nextPage)
         XCTAssertEqual(page.items[0].sources[0].nativeId, "9007199254740993")
         XCTAssertEqual(page.items[0].title, "A & B"); XCTAssertEqual(page.items[0].artist, "One、Two")
         let calls = await http.calls(), wire = try XCTUnwrap(calls.first)
@@ -32,7 +32,8 @@ final class MusicNativeKuwoSearchTests: XCTestCase {
         XCTAssertEqual(native["types"].array.map { $0["type"].string }, ["128k", "320k", "flac"])
         XCTAssertEqual(native["_types"]["flac"]["size"].string, "25MB")
         XCTAssertEqual(native["duration"].int, 180)
-        let locator = try MusicModel.locator(MusicModel.sourceData(MusicModel.normalize(.init(platform: "kw", data: native.bytes))))
+        let clean = try MusicModel.normalize(.init(platform: "kw", data: native.bytes))
+        let locator = try MusicModel.locator(MusicModel.sourceData(clean["sources"].array[0]))
         XCTAssertEqual(locator["songmid"].string, "9007199254740993"); XCTAssertEqual(locator["_types"], native["_types"])
         await service.close()
     }
@@ -50,13 +51,17 @@ final class MusicNativeKuwoSearchTests: XCTestCase {
         XCTAssertThrowsError(try MusicNativeKuwoSearch.text(.string("&#13;bad"), maximum: 1024))
     }
 
-    func testPaginationKeepsDuplicateOccurrencesAndRejectsFalseEmptyOrInvalidQuality() throws {
+    func testPaginationKeepsDuplicateOccurrencesAndAcceptsEmptyEndWithoutInvalidQuality() throws {
         let raw = MusicNativeKuwoSearchFixture.song()
         let page = try MusicNativeKuwoSearch.decode(MusicNativeKuwoSearchFixture.page([raw, raw], total: 32).bytes, page: 2)
         XCTAssertEqual(page.items.count, 2); XCTAssertEqual(page.total, 32); XCTAssertNil(page.nextPage)
         XCTAssertEqual(page.items[0].data, page.items[1].data)
         XCTAssertTrue(try MusicNativeKuwoSearch.decode(MusicNativeKuwoSearchFixture.page([], total: 0).bytes, page: 1).items.isEmpty)
-        XCTAssertThrowsError(try MusicNativeKuwoSearch.decode(MusicNativeKuwoSearchFixture.page([], total: 1).bytes, page: 1))
+        let empty = try MusicNativeKuwoSearch.decode(MusicNativeKuwoSearchFixture.page([], total: 1).bytes, page: 1)
+        XCTAssertTrue(empty.items.isEmpty); XCTAssertNil(empty.nextPage)
+        var emptyEnd = MusicNativeKuwoSearchFixture.page([], total: 61); emptyEnd["SHOW"] = .string("0")
+        let shownEmpty = try MusicNativeKuwoSearch.decode(emptyEnd.bytes, page: 1)
+        XCTAssertTrue(shownEmpty.items.isEmpty); XCTAssertNil(shownEmpty.nextPage)
         XCTAssertThrowsError(try MusicNativeKuwoSearch.decode(MusicNativeKuwoSearchFixture.page(Array(repeating: raw, count: 31), total: 31).bytes, page: 1))
         var hidden = MusicNativeKuwoSearchFixture.page([raw], total: 1); hidden["SHOW"] = .string("0")
         XCTAssertThrowsError(try MusicNativeKuwoSearch.decode(hidden.bytes, page: 1))
@@ -65,7 +70,50 @@ final class MusicNativeKuwoSearchTests: XCTestCase {
         bad = raw; bad["MUSICRID"] = .string("MUSIC_../123")
         XCTAssertThrowsError(try MusicNativeKuwoSearch.song(bad))
         XCTAssertThrowsError(try MusicNativeKuwoSearch.request(query: String(repeating: "a", count: 201), page: 1))
-        XCTAssertThrowsError(try MusicNativeKuwoSearch.request(query: "query", page: 201))
+        let later = try MusicNativeKuwoSearch.request(query: "query", page: 201)
+        let parameters = URLComponents(url: later.url, resolvingAgainstBaseURL: false)?.queryItems
+        XCTAssertEqual(parameters?.first { $0.name == "pn" }?.value, "200")
+        XCTAssertTrue(MusicNativeKuwoSearch.permits(later))
+    }
+
+    @MainActor func testShortPageEndsWithoutAnotherRequestAndFullPageAtTotalAlsoEnds() async throws {
+        for (rows, total) in [(0, 61), (2, 61), (30, 30), (30, 29)] {
+            let raw = (0..<rows).map {
+                MusicNativeKuwoSearchFixture.song(id: String(100 + $0), title: "Synthetic \($0)")
+            }
+            let http = NativeMusicHTTPFixture([MusicNativeKuwoSearchFixture.page(raw, total: total)])
+            let service = try await NativeMusicFixture.service(http: http)
+            let results = MusicSearchResultsModel(readSongs: { platform, query, page, limit in
+                try await service.search(platform: platform.rawValue, query: query, page: page, limit: limit)
+            }, readPlaylists: { _, _, _, _ in throw MusicServiceError.unsupported },
+                readRecording: { _ in throw MusicServiceError.unsupported })
+            results.setAccess(available: true, generation: UUID()); results.appear()
+            results.submit("Synthetic", preferences: .init(songPlatforms: [.kuwo], searchPlaylists: false,
+                pages: 10, concurrency: 1))
+            await results.finishPendingReads()
+            results.more(.songs); await results.finishPendingReads()
+            XCTAssertEqual(results.songs.count, rows)
+            XCTAssertFalse(results.moreSongs); XCTAssertTrue(results.songFailures.isEmpty)
+            let calls = await http.calls(); XCTAssertEqual(calls.count, 1)
+            results.disappear()
+            await service.close()
+        }
+    }
+    func testFullPageBeforeTotalAdvancesExactlyOnePage() throws {
+        let row = MusicNativeKuwoSearchFixture.song()
+        let page = try MusicNativeKuwoSearch.decode(
+            MusicNativeKuwoSearchFixture.page(Array(repeating: row, count: 30), total: 61).bytes, page: 2)
+        XCTAssertEqual(page.items.count, 30)
+        XCTAssertEqual(page.nextPage, 3)
+    }
+
+    func testLimitAboveOneHundredIsRejectedBeforeAnyRequest() async throws {
+        let http = NativeMusicHTTPFixture([])
+        let service = try await NativeMusicFixture.service(http: http)
+        do { _ = try await service.search(platform: "kw", query: "Synthetic", page: 1, limit: 101); XCTFail("limit") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .invalidRequest) }
+        let calls = await http.calls(); XCTAssertTrue(calls.isEmpty)
+        await service.close()
     }
 
     func testHTTPSRouteAdmissionRejectsHeadersMethodOriginAndQueryWithoutNetworking() async throws {
@@ -82,6 +130,11 @@ final class MusicNativeKuwoSearchTests: XCTestCase {
             .init(url: URL(string: good.url.absoluteString + "&all=other")!, headers: good.headers),
             .init(url: URL(string: good.url.absoluteString.replacingOccurrences(of: "/r.s?", with: "/elsewhere?"))!, headers: good.headers)
         ]
+        var overflow = URLComponents(url: good.url, resolvingAgainstBaseURL: false)!
+        overflow.queryItems = overflow.queryItems?.map {
+            $0.name == "pn" ? URLQueryItem(name: "pn", value: String(Int.max)) : $0
+        }
+        bad.append(.init(url: overflow.url!, headers: good.headers))
         for field in ["Cookie", "Authorization", "X-Unbounded"] {
             var headers = good.headers; headers[field] = "synthetic"
             bad.append(.init(url: good.url, headers: headers))
@@ -102,7 +155,7 @@ final class MusicNativeKuwoSearchTests: XCTestCase {
         for (status, expected) in [(429, MusicServiceError.rateLimited), (503, .upstreamFailed), (403, .requestRejected)] {
             let http = MusicNativeKuwoSearchTransport(.init(status: status, data: Data()))
             let service = try await NativeMusicFixture.service(http: http)
-            do { _ = try await service.search(platform: "kw", query: "Synthetic", page: 1); XCTFail("failure") }
+            do { _ = try await service.search(platform: "kw", query: "Synthetic", page: 1, limit: 30); XCTFail("failure") }
             catch { XCTAssertEqual(error as? MusicServiceError, expected) }
             let calls = await http.calls(); XCTAssertEqual(calls.count, 1)
             XCTAssertEqual(calls[0].url.host, "search.kuwo.cn")
@@ -110,7 +163,7 @@ final class MusicNativeKuwoSearchTests: XCTestCase {
         }
         let http = MusicNativeKuwoSearchTransport(.init(status: 200, data: Data(repeating: 32, count: 2 * 1024 * 1024 + 1)))
         let service = try await NativeMusicFixture.service(http: http)
-        do { _ = try await service.search(platform: "kw", query: "Synthetic", page: 1); XCTFail("budget") }
+        do { _ = try await service.search(platform: "kw", query: "Synthetic", page: 1, limit: 30); XCTFail("budget") }
         catch { XCTAssertEqual(error as? MusicServiceError, .limit) }
         await service.close()
     }
@@ -121,7 +174,7 @@ final class MusicNativeKuwoSearchTests: XCTestCase {
             let body = MusicNativeKuwoSearchFixture.page([MusicNativeKuwoSearchFixture.song()], total: 1)
             let http = MusicNativeKuwoSearchTransport(.init(status: 200, data: body.bytes), gate: gate)
             let service = try await NativeMusicFixture.service(store, http: http)
-            let task = Task { try await service.search(platform: "kw", query: "Synthetic", page: 1) }
+            let task = Task { try await service.search(platform: "kw", query: "Synthetic", page: 1, limit: 30) }
             await gate.started()
             if locked { service.revokeAccess(generation: 2) } else { task.cancel() }
             await gate.release()
@@ -150,7 +203,7 @@ final class MusicNativeKuwoSearchTests: XCTestCase {
                 : MusicNativeMiguSearchFixture.page([[MusicNativeMiguSearchFixture.song()]], total: 1)
             let accounts = NativeMusicAccountFixture(), http = NativeMusicHTTPFixture([body])
             let service = try await NativeMusicFixture.service(store, scripts: scripts, accounts: accounts, http: http)
-            let search = try await service.search(platform: platform, query: "Synthetic", page: 1)
+            let search = try await service.search(platform: platform, query: "Synthetic", page: 1, limit: 30)
             XCTAssertEqual(store.snapshot().2, 0, "search is read-only")
             let first = try XCTUnwrap(search.items.first)
             let playlist = try await service.createPlaylist(name: "Synthetic", refs: [first.ref])

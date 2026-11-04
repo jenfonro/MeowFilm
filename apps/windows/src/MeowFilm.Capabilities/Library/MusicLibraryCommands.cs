@@ -21,6 +21,8 @@ public sealed partial class MusicLibraryOwner
             return HistoryCommand(method, parameters, document);
         if (method is "music.settings.get" or "music.settings.save")
             return SettingsCommand(method, parameters, document);
+        if (method is "music.officialSources.settings.get" or "music.officialSources.settings.save")
+            return OfficialSourcesCommand(method, parameters, document, cancellationToken);
         if (method is "music.quality.settings.get" or "music.quality.settings.save")
             return await QualityCommandAsync(method, parameters, document, cancellationToken).ConfigureAwait(false);
         if (method.StartsWith("music.metadata.settings.", StringComparison.Ordinal))
@@ -45,7 +47,7 @@ public sealed partial class MusicLibraryOwner
             var song = NativeMusicSong.CreateOnline(platform, info,
                 LJ.Text(parameters["title"], 512), LJ.S(parameters["artist"]),
                 LJ.S(parameters["album"]), LJ.N(parameters["duration"]));
-            return (LJ.Obj(("song", NativeMusicSong.View(song))), false);
+            return (LJ.Obj(("song", NativeMusicSong.Normalize(song))), false);
         }
         throw new MusicLibraryException("CAPABILITY_UNAVAILABLE");
     }

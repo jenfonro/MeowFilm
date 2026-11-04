@@ -9,12 +9,13 @@
 ## 共用脚本运行时
 
 - [公共核心与平台边界](runtime/script-runtime.md)
-- [来源 capability ABI](runtime/source-capability-abi.md)
 - [原始 LX 音源契约 music.script.v2](runtime/music-script-runtime.md)
-- [Reader 书源运行时](runtime/reader-source-runtime.md)
-- [CatVod JS 运行时](runtime/cat-source-runtime.md)
+- [CatNode 脚本契约 cat.script.v1](runtime/cat-script-runtime.md)
+- [Reader 书源契约 source.runtime.v1](runtime/reader-source-runtime.md)
+- [source CatVod Spider 输入契约](runtime/cat-source-runtime.md)
+- [来源 capability ABI（共同契约唯一来源）](runtime/source-capability-abi.md)
 - [Runtime bridge](runtime/runtime-bridge.md)
-- [外部来源动态验收](runtime/source-acceptance.md)
+- [外部 LX、CatNode 与 Reader／CatVod 来源动态验收](runtime/source-acceptance.md)
 
 ## iOS
 
@@ -29,6 +30,7 @@
 
 - [App 结构与能力划分](windows/app-structure.md)
 - [桌面壳](windows/desktop-shell.md)
+- [影视首页](windows/film-home.md)
 - [受保护文档存储](windows/protected-storage.md)
 - [公共图像](windows/artwork.md)
 - [系统媒体会话](windows/system-media.md)
@@ -52,8 +54,9 @@
 - [原生音乐应用边界](windows/music-native-application.md)
 - [账号](windows/music-native-accounts.md)、[账号存储](windows/music-account-storage.md)
 - [平台客户端上下文](windows/music-platform-client-context.md)
+- [设置页呈现与音源演示边界](windows/music-settings-presentation.md)
 - [平台目录](windows/music-native-platforms.md)、[目录与频道](windows/music-catalog.md)、[个人目录页面](windows/music-catalog-personal-ui.md)
-- [聚合搜索](windows/music-aggregate-search.md)、[搜索发现](windows/music-search-discovery.md)、[搜索设置与历史](windows/music-search-preferences.md)、[搜索观察者](windows/music-search-observers.md)、[发现账号读取](windows/music-discovery-account-drain.md)
+- [多平台搜索](windows/music-search.md)、[搜索发现](windows/music-search-discovery.md)、[搜索设置与历史](windows/music-search-preferences.md)、[搜索观察者](windows/music-search-observers.md)、[发现账号读取](windows/music-discovery-account-drain.md)
 - [曲库状态](windows/music-native-library.md)、[曲库同步](windows/music-library-sync.md)
 - [推荐](windows/music-recommendations.md)、[推荐消费](windows/music-native-recommendations.md)
 - [歌词](windows/music-native-lyrics.md)、[歌词应用链](windows/music-lyric-application.md)、[元数据偏好](windows/music-metadata-policy.md)

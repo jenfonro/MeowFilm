@@ -52,7 +52,9 @@ Adapted portions:
   `tests/{netease,qq-feedback,kugou-feedback}.test.cjs`.
 - Sync: `MusicSyncAdapter.cs`.
 - iOS: music interface and behavior in `native/MeowKit/Sources/MeowMusicFeature` and
-  `native/MeowKit/Sources/MeowUI`; ported files keep their SPDX and author notices.
+  `native/MeowKit/Sources/MeowUI`; queue appearance and drag admission follow
+  `static/queue-sheet.{js,css}` and `static/list-reorder.js`, with native UIKit
+  movement and presentation. Ported files keep their SPDX and author notices.
 
 ## MeowMusic — GPL-3.0-only
 
@@ -112,7 +114,7 @@ Adapted portions:
   profile/entitlement via `qqmusic_api/modules/user.py::get_vip_info` and
   `qqmusic_api/models/user.py::{UserVipInfoResponse,VipIdentity,VipUserInfo}`.
 - Platforms: read-only recipes from `qqmusic_api/modules/{search,song,songlist,user}.py`,
-  `models/{base,search,songlist,user}.py` and the response/versioning envelope;
+  `models/{base,search,songlist,user}.py`, `utils/common.py::get_searchID` and the response/versioning envelope;
   `user.get_fav_song`; `song.get_song_urls`; `ClientContexts/MusicQqClientProtocol.cs`
   and `ClientContexts/MusicQqQimeiRecipe.cs` adapt `qqmusic_api/utils/{device,qimei,android_session}.py`,
   `qqmusic_api/core/versioning.py`, `qqmusic_api/models/request.py`,
@@ -158,6 +160,28 @@ public song metadata mapper):
 - `src/renderer/utils/musicSdk/kw/{musicSearch,songList,util,index,lyric}.js`
 - `src/renderer/utils/musicSdk/mg/{musicSearch,songList,musicInfo}.js` and `utils/index.js`
 
+## catpawrunner — MIT
+
+- Source: `hjdhnx/catpawrunner` `a7b29ea3ed9bcc05fa94105013d8f807f13152b8`.
+- Package metadata author: 道长. The reviewed checkout declares MIT in `package.json`
+  and does not contain a standalone license file.
+- License: `catpawrunner-MIT.txt`.
+
+Adapted portions:
+
+- Cat startup and service compatibility were informed by `src/util/onlineRuntime.js`, but
+  were rewritten for the QuickJS guest, finite Node-style capability bridge, installation
+  private volume and per-instance loopback listener. The original unrestricted host
+  `require`, `fs`, `process`, child process and VM execution path is not copied.
+- Management protocol discovery and field mapping in `cat-management.js` adapt the route
+  families represented by `src/plugins/api/onlineScriptAdapters.js`; requests go directly
+  to the selected installation's current managed endpoint.
+- Provider capture, Cat root-level extension and display metadata behavior in
+  `pan-interceptor.js` and `cat-output.js` were informed by
+  `runtimePanCapture.js`, `panmockDetailCodec.js` and `panDisplayMeta.js`.
+  Provider login, list, transfer, direct-link and playback SDK implementations are not
+  copied into the runner.
+
 ## Node.js
 
 The bundled `runtime/node.exe` is distributed under `node-LICENSE.txt`.
@@ -179,13 +203,30 @@ script-engine binary. Its exact package manifest, registry URL/integrity, licens
 length and SHA-256 are pinned in `scripts/quickjs-runtime.json`; no debug/asyncify
 engine variant or upstream reference script is bundled.
 
+## Node compatibility npm dependencies
+
+The Cat finite Node-style bridge bundles the exact dependency closure recorded in
+`package-lock.json`. Each packaged npm directory retains its own original license file.
+The direct non-engine packages are `@opentelemetry/api` 1.9.0, `acorn` 8.15.0, `buffer` 6.0.3,
+`events` 3.3.0, `path-browserify` 1.0.1, `readable-stream` 4.7.0,
+`supports-color` 8.1.1 and `util` 0.12.5.
+
+Acorn parses constant route declarations inside the QuickJS guest only when a
+script does not expose framework route registration. It does not execute source.
+
+- Apache-2.0 package text: `Apache-2.0.txt`.
+- MIT package notices and texts: `npm-node-compat-MIT.txt`.
+- BSD-3-Clause package text: `npm-node-compat-BSD-3-Clause.txt`.
+- ISC package text: `npm-node-compat-ISC.txt`.
+
 ## Portable source runtime npm dependencies
 
 The runtime payload preserves each package's original `package.json` and license
 file. These packages are used as unmodified libraries; no source code from them is
 copied into the application's protocol adapters.
 
-- `acorn` 8.19.0 — MIT.
+- `acorn` 8.19.0 — MIT, used by `@meowfilm/source-runtime`; the Cat bridge keeps
+  its separate 8.15.0 dependency listed above.
 - `fontoxpath` 3.34.0 — MIT.
 - `linkedom` 0.18.14 — ISC.
 - `iconv-lite` 0.6.3 — MIT.
@@ -202,3 +243,69 @@ copied into the application's protocol adapters.
 ## QR Code generator — MIT
 
 Copyright (c) 2018 Manuel Bleichenbacher. License: `qr-code-generator-LICENSE.txt`.
+## Music platform brand marks
+
+The Windows music-platform assets identify NetEase Cloud Music, QQ Music, KuGou
+Music, Kuwo Music and Migu Music with marks obtained from image URLs referenced
+by their official homepages on 2026-10-29 (NetEase, QQ and KuGou) and 2026-10-30
+(Kuwo and Migu). These marks and trademarks remain the property of their respective
+owners; they are not covered by the application's GPL license or the API-code
+licenses above. Their presence does not imply endorsement or a verified grant
+of redistribution or commercial-use rights.
+
+Assets are embedded under
+`apps/windows/src/MeowFilm.Capabilities/Accounts/Presentation/Assets/` and loaded
+locally, without contacting the platform when the account cards are rendered.
+No brand shape was redrawn.
+
+| Asset | Official source | Local transformation | Source SHA-256 |
+| --- | --- | --- | --- |
+| `netease-music.png` | [NetEase Cloud Music homepage image metadata](https://p3.music.126.net/9z9CeujRSPOPm7Rq2DFw_g==/6674035581283071.jpg?param=200y200) | JPEG to PNG, original 200 × 200 pixels | `186e4684e688681c8b564bcd4b956c9b946d5e960d7ad788199b1b27c56fa19d` |
+| `qq-music.png` | [QQ Music homepage logo](https://y.qq.com/mediastyle/yqq/img/logo.png?max_age=2592000) | Cropped the 46 × 46 left-hand mark, excluding the wordmark | `57ee90c7d8d67e9012c7882ce23871af2a654296e8ad567dfb2dc1e0e9d0116f` |
+| `kugou-music.png` | [KuGou Music homepage logo](https://www.kugou.com/common/images/icon_logo_v20.png) | Cropped the 76 × 76 left-hand mark and composited its transparent portions over the official favicon blue `#1E84E4` | `1ba3beeb8060dfd9047c27021d63ba5a0d25ccc990ea7f48abe1e7fa62df2d1a` |
+| `kuwo-music.png` | [Kuwo Music homepage logo](https://h5s.kuwo.cn/www/kw-www/img/logo.ce08bf7.png) | Cropped the 112 × 112 left-hand mark from the 420 × 120 PNG: `(0, 4, 112, 116)` | `a984eea4477b7092e8235805716a8e9c1a3e410ec6e4c70bb325c49bf78fbdd5` |
+| `migu-music.png` | [Migu Music homepage header logo](https://music.migu.cn/v5/static/png/logo-517fd150.png) | Cropped the 64 × 64 left-hand mark from the 290 × 64 PNG: `(0, 0, 64, 64)` | `517fd150cb4443576343d420eea3fc8f7b3e208ef15ec2e50420fbbc68c11010` |
+
+KuGou color reference: [official favicon](https://www.kugou.com/root/favicon.ico),
+SHA-256 `78339bbc8393aea26d56c4285488b17a16d60ddc4a698e6b2cfc5d753c91ef24`.
+
+Kuwo and Migu provenance, retrieved on 2026-10-30:
+
+- The [Kuwo homepage](https://www.kuwo.cn/) directly references the Kuwo PNG above
+  in its header `<img class="logo">`.
+- The [Migu homepage](https://music.migu.cn/v5/) references its
+  [official JavaScript module](https://music.migu.cn/v5/static/js/main-4f72ecaf.js),
+  which resolves `../png/logo-517fd150.png` relative to the module URL for the
+  `migu-logo` header image.
+- Both source downloads returned PNG images. Source SHA-256 values above refer
+  to the downloaded bytes, before cropping. With Pillow, each image was decoded
+  to RGBA, cropped using the stated `(left, top, right, bottom)` coordinates
+  (right and bottom exclusive), and saved losslessly as PNG. Original transparent
+  pixels, rounded brand backgrounds and intrinsic colors were retained; no
+  resizing, recoloring, SVG rendering or redrawing was performed.
+
+| Cropped asset | Output SHA-256 |
+| --- | --- |
+| `kuwo-music.png` | `488d72ecf0709df33580ae81b5224eecc464419022a506bef8e84405920e7582` |
+| `migu-music.png` | `f519240351d82cf337fffa6534c759dfa2921dad3923c33b4cd3f6a50d8825d4` |
+
+## Music platform brand assets — iOS only
+
+The assets below identify music platforms on the iOS account settings page.
+Their names, marks and artwork remain the property of their respective rights
+holders; use here does not imply affiliation or endorsement. They are not
+licensed under this application's GPL source license. Public availability is
+not a redistribution license; no open-source or redistribution permission has
+been established, and rights must be confirmed before distributing these assets.
+
+- NetEase Cloud Music: `apps/ios/Assets.xcassets/MusicPlatformNetease.imageset/netease.png`,
+  unmodified 200×200 PNG from the logo declared by `https://music.163.com/`:
+  `https://p3.music.126.net/9z9CeujRSPOPm7Rq2DFw_g==/6674035581283071.jpg?param=200y200`.
+- QQ Music: `apps/ios/Assets.xcassets/MusicPlatformQQ.imageset/qq.svg`,
+  unmodified SVG referenced by `https://i2.y.qq.com/n3/other/pages/myqq/index.html`:
+  `https://y.qq.com/mediastyle/mod/mobile/img/logo.svg?max_age=2592000`.
+- Kugou Music: `apps/ios/Assets.xcassets/MusicPlatformKugou.imageset/kugou.png`,
+  the original 160×160 icon cropped from the 600×160 official logo referenced
+  by `https://m.kugou.com/`:
+  `https://m.kugou.com/v3/static/images/img/icon_kugou2.png`.
+  No resizing, recolouring or redrawing was applied.

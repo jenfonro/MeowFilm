@@ -1,13 +1,14 @@
 import { SourceRuntimeError, SourceSession } from '@meowfilm/source-runtime';
 import { fault, requireValue, safeError } from './errors.js';
 import { PortableSandbox } from './portable-sandbox.js';
+import { WorkerSession } from './worker-session.js';
 
 function hostError(error) {
   if (error instanceof SourceRuntimeError) return fault(error.code);
   return safeError(error);
 }
 
-class PortableSourceSession {
+export class PortableSourceSession {
   constructor({
     installationId,
     generation,
@@ -15,11 +16,13 @@ class PortableSourceSession {
     capabilities,
     metadata,
     onDiagnostic,
+    onFailure,
     limits,
+    wasmModule,
   }) {
     Object.assign(this, {
       installationId, generation, revision, capabilitiesClient: capabilities,
-      metadata, onDiagnostic, limits,
+      metadata, onDiagnostic, onFailure, limits, wasmModule,
     });
     this.live = true;
     this.activated = false;
@@ -41,8 +44,9 @@ class PortableSourceSession {
           adapterVersion: this.revision.version,
         },
         limits: {
-          maximumBytes: this.limits.maxBytes,
+          maximumBytes: this.limits.maxMemoryBytes,
           requestTimeoutMs: this.limits.requestTimeoutMs,
+          cleanupTimeoutMs: this.limits.cleanupTimeoutMs,
         },
         onDiagnostic: event => {
           if (!this.onDiagnostic) return;
@@ -56,6 +60,8 @@ class PortableSourceSession {
         createSandbox: options => PortableSandbox.create({
           ...options,
           limits: this.limits,
+          wasmModule: this.wasmModule,
+          onFailure: error => this.fail(error),
         }),
       });
       const description = await this.session.start();
@@ -68,7 +74,7 @@ class PortableSourceSession {
       };
       return this;
     } catch (error) {
-      this.live = false;
+      if (error.memoryLimitExceeded) this.fail(error);
       throw hostError(error);
     }
   }
@@ -84,15 +90,33 @@ class PortableSourceSession {
     requireValue(request?.siteId === 'source');
     try {
       return await this.session.invoke(request.operation, request.payload ?? {}, options);
-    } catch (error) { throw hostError(error); }
+    } catch (error) {
+      if (error.memoryLimitExceeded) this.fail(error);
+      throw hostError(error);
+    }
   }
 
-  async stop() {
+  fail(error) {
     if (!this.live) return;
+    const ready = this.activated;
+    this.memoryLimitExceeded = Boolean(error.memoryLimitExceeded);
+    this.failure = hostError(error);
+    if (this.memoryLimitExceeded) this.failure.memoryLimitExceeded = true;
+    this.stop().catch(() => {});
+    try { this.onFailure?.(this.failure, { ready }); } catch {}
+  }
+
+  stop() {
+    if (this.stopping) return this.stopping;
     this.live = false;
     this.activated = false;
-    try { await this.session?.close(); }
-    catch (error) { this.cleanupError = hostError(error).code; }
+    this.stopping = Promise.resolve().then(() => this.session?.close()).catch(error => {
+      const failure = hostError(error);
+      this.cleanupError = failure.code;
+      throw failure;
+    });
+    this.stopping.catch(() => {});
+    return this.stopping;
   }
 
   async drainAdapters() {
@@ -119,9 +143,15 @@ export function createPortableSourceAdapter({
 } = {}) {
   requireValue(capabilities && typeof capabilities.call === 'function');
   requireValue(metadata && typeof metadata === 'object' && !Array.isArray(metadata));
-  return input => new PortableSourceSession({
+  return input => new WorkerSession({
     ...input,
-    capabilities,
-    metadata,
+    protocol: 'source',
+    capabilitiesClient: {
+      async call(...args) {
+        try { return await capabilities.call(...args); }
+        catch (error) { throw hostError(error); }
+      },
+    },
+    startParams: { sourceMetadata: metadata },
   });
 }

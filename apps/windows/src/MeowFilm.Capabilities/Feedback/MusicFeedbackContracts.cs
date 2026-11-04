@@ -5,7 +5,15 @@ namespace MeowFilm.Capabilities.Feedback;
 /// <summary>Native recording identity, never the platform delivering the media URL.</summary>
 public sealed record MusicFeedbackRecording(string Platform, string Id, string? MixSongId = null);
 
-public sealed record MusicFeedbackStart(string InstanceId, MusicFeedbackRecording Recording,
+/// <summary>One platform attempt belonging to one playback, never a reusable string identity.</summary>
+public sealed class MusicFeedbackAttempt
+{
+    internal readonly object Gate = new();
+    internal object? State;
+    public override string ToString() => "MusicFeedbackAttempt (transient)";
+}
+
+public sealed record MusicFeedbackStart(MusicFeedbackAttempt Attempt, MusicFeedbackRecording Recording,
     double Duration, double Position, double Rate, bool Automatic,
     string Source = "unknown", string SourceId = "", string SourceType = "", string Algorithm = "",
     string Mode = "");

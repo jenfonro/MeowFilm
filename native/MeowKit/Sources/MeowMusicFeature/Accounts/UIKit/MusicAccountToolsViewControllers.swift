@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 public final class MusicCredentialImportViewController: HostingPageViewController<MusicCredentialImportContent>,
     UIDocumentPickerDelegate
 {
+    private var completed: PageHeaderTextButton?
     private let owner: MusicViewModel
     private let model: MusicCredentialImportViewModel
     private let draft = MusicCredentialImportDraft()
@@ -33,7 +34,7 @@ public final class MusicCredentialImportViewController: HostingPageViewControlle
                 draft: draft, theme: PageTheme(palette: appearance.pageColorway)
             )
         )
-        title = "导入音乐凭据"
+        pageTitle = "导入音乐凭据"
     }
 
     public override func viewDidLoad() {
@@ -138,9 +139,14 @@ public final class MusicCredentialImportViewController: HostingPageViewControlle
                 commit: { [weak self] in self?.commitImport() }
             ))
         }
-        navigationItem.rightBarButtonItem = state.completed == nil ? nil : UIBarButtonItem(
-            title: "完成", style: .done, target: self, action: #selector(close)
-        )
+        if state.completed == nil {
+            completed = nil
+            pageHeader.setTrailing([])
+        } else if completed == nil {
+            let button = PageHeaderTextButton(title: "完成") { [weak self] in self?.close() }
+            completed = button
+            pageHeader.setTrailing([button])
+        }
         if currentAccess, let error = model.error {
             let access = owner.accountAccessGeneration
             showError(error.localizedDescription, acknowledged: { [weak self] in
@@ -191,6 +197,6 @@ public final class MusicCredentialImportViewController: HostingPageViewControlle
         present(picker, animated: true)
     }
 
-    @objc private func close() { navigationController?.popViewController(animated: true) }
+    private func close() { navigationController?.popViewController(animated: true) }
 }
 #endif

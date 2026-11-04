@@ -9,11 +9,13 @@ enum MusicNativeKuwoSearch {
     static let userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
     static let fixed = ["client": "kt", "uid": "794762570", "ver": "kwplayer_ar_9.2.2.1", "vipver": "1",
         "show_copyright_off": "1", "newver": "1", "ft": "music", "cluster": "0", "strategy": "2012",
-        "encoding": "utf8", "rformat": "json", "vermerge": "1", "mobi": "1", "issubtitle": "1", "rn": "30"]
+        "encoding": "utf8", "rformat": "json", "vermerge": "1", "mobi": "1", "issubtitle": "1"]
 
-    static func request(query: String, page: Int) throws -> MusicNativeHTTPRequest {
+    static func request(query: String, page: Int, limit: Int = 30) throws -> MusicNativeHTTPRequest {
         try MusicNativeSearchProtocol.validate(query: query, page: page)
+        try musicRequire((1...100).contains(limit))
         var values = fixed; values["all"] = query; values["pn"] = String(page - 1)
+        values["rn"] = String(limit)
         // HTTPS-only adaptation of the fixed reference's identical HTTP route.
         // No redirect, insecure downgrade, account state or server proxy.
         var url = URLComponents(string: "https://" + host + path)!
@@ -26,24 +28,24 @@ enum MusicNativeKuwoSearch {
     }
     static func permits(_ value: MusicNativeHTTPRequest) -> Bool {
         guard let query = MusicNativeSearchProtocol.query(value, host: host, path: path,
-                keys: Set(fixed.keys).union(["all", "pn"])),
-              let page = Int(query["pn"] ?? ""), (0..<200).contains(page),
-              let expected = try? request(query: query["all"] ?? "", page: page + 1) else { return false }
+                keys: Set(fixed.keys).union(["all", "pn", "rn"])),
+              let page = Int(query["pn"] ?? ""), page >= 0, page < Int.max, let limit = Int(query["rn"] ?? ""),
+              let expected = try? request(query: query["all"] ?? "", page: page + 1, limit: limit) else { return false }
         return MusicNativeSearchProtocol.matches(value, expected)
     }
-    static func decode(_ bytes: Data, page: Int) throws -> MusicNativeTrackPage {
+    static func decode(_ bytes: Data, page: Int, limit: Int = 30) throws -> MusicNativeTrackPage {
         let raw = try object(bytes)
-        let total = try MusicNativeSearchProtocol.count(raw["TOTAL"], maximum: 1_000_000)
-        try musicRequire((1...200).contains(page) && raw["abslist"].isArray &&
-            !(total > 0 && raw["SHOW"].id == "0"), .upstreamInvalid)
-        let rows = raw["abslist"].array, offset = (page - 1) * 30
-        try musicRequire(rows.count <= 30 &&
-            (rows.isEmpty ? offset >= total : offset + rows.count <= total), .upstreamInvalid)
+        let total = try MusicNativeSearchProtocol.count(raw["TOTAL"], maximum: 9_007_199_254_740_991)
+        try musicRequire(raw["abslist"].isArray, .upstreamInvalid)
+        let rows = raw["abslist"].array
+        try musicRequire(rows.count <= limit &&
+            (rows.isEmpty || !(total > 0 && raw["SHOW"].id == "0")), .upstreamInvalid)
         // Keep upstream order and repeated occurrences. Pagination counts raw
         // rows, not deduplicated titles or the number of compatible candidates.
         let items = try rows.map(song)
         return .init(items: items, total: total,
-            nextPage: page * 30 < total && page < 200 && !rows.isEmpty ? page + 1 : nil)
+            nextPage: try MusicSearchPagination.nextPage(page: page, limit: limit,
+                count: rows.count, total: total))
     }
     static func song(_ raw: MJ) throws -> MusicNativeTrackData {
         try musicRequire(raw.isObject, .upstreamInvalid)
@@ -75,8 +77,8 @@ enum MusicNativeKuwoSearch {
             types.insert(.obj([("type", .string(kind)), ("size", .string(size))]), at: 0)
             details[kind] = .obj([("size", .string(size))])
         }
-        let native = MJ.obj([("source", .string("kw")), ("musicId", .string(id)), ("id", .string(id)), ("songmid", .string(id)),
-            ("name", .string(title)), ("singer", .string(artist)), ("album", .string(album)), ("albumName", .string(album)),
+        let native = MJ.obj([("source", .string("kw")), ("id", .string(id)), ("songmid", .string(id)),
+            ("name", .string(title)), ("singer", .string(artist)), ("albumName", .string(album)),
             ("albumId", .string(albumID)), ("duration", .n(duration)),
             ("interval", .string(String(format: "%02d:%02d", duration / 60, duration % 60))),
             ("img", MusicModel.publicURL(raw["pic"])), ("types", .array(types)), ("_types", details)])

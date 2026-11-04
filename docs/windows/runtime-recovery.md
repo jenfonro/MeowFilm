@@ -2,17 +2,19 @@
 
 ## 契约与影响
 
-- `IRuntimeRecovery` / `IRuntimeRecoveryScope` 是进程内生命周期契约；真实 `NodeRuntime.IsConnected` 报告实际连接。连接使用 `aggregate` 身份及 `music@0.5.0`、`source@0.1.0` 握手，业务响应分别为 `music.script.v2`、`source.runtime.v1`；恢复仅重建进程和连接，实例执行仍属于公共运行时。
-- 当前只有唯一 App、AppHost/Core 和音乐脚本适配器。普通原生账号、曲库、固定 API 和播放不以连接为前置条件；不向 Node 开放普通文档权限。
+- `IRuntimeRecovery` / `IRuntimeRecoveryScope` 是进程内生命周期契约；真实 `NodeRuntime.IsConnected` 报告实际连接。连接使用 `aggregate` 身份并核对 `music@0.6.0`、`cat@0.1.0`、`source@0.1.0`；业务响应分别为 `music.script.v2`、`cat.script.v1`、`source.runtime.v1`。恢复仅重建进程和连接，三类 module 的实例执行仍属于同一 WorkerSession/worker 协议/QuickJS 机制。
+- 当前只有唯一 App、AppHost/Core 和脚本运行时适配器。普通原生账号、曲库、固定 API 和播放不以连接为前置条件；不向 Node 开放普通文档权限。Cat 的设置和私有卷由稳定 dataRoot 持久化，进程恢复后从当前文件重新读取，不靠再次同步账号恢复状态。
 - 首个脚本请求前显式注册 scope，最多 32 个，重复/迟到注册拒绝。无全局事件总线、全局当前源或跨 App 进程共享。
 
 ## 实际链路
 
 1. 构造、普通页面和脚本页不启动 Node；真实脚本操作首次启动。
-2. 失败保留为失败。普通请求不自动创建新进程、重放失败操作或激活全部来源。
+2. 失败保留为失败。普通请求不自动创建新进程、重放失败操作或激活全部音源。
 3. 用户在原生脚本页明确重试：退役旧 transport/进程、等待释放，再排空已接纳任务并撤销临时会话/授权。
 4. 音乐通过唯一 Library owner 只读核对未确认 CAS，不重写不确定数据。恢复仅建立新握手，下次明确操作才装载指定源。
 5. 新连接发布与准入原子化，旧代次成功被拒绝；多个重试共享同一恢复任务，恢复中拒绝新脚本调用。
 6. 离页只取消 UI 等待，不丢失恢复归属；App 关闭取消并等待恢复及迟到 factory。退役失败仍是失败，不能并发启动第二套进程。
 
 `ResumeAfterRuntimeRecovery` 只做同步非阻塞准入更新，不重入 runtime、执行 IO 或自动请求源。清理信号不等于资源释放。命名管道/PID/Job/会话检查不代表恶意脚本沙箱。
+
+实例卡住、取消和 OOM 的处理属于[共用运行时](../runtime/script-runtime.md#quickjs-执行边界)：source 初始化/请求 60 秒，清理 3 秒；到期探测/终止并等待真实 worker 退出，就绪 OOM 按同一 revision 最多自动重启一次。该实例内重启不等于连接恢复，不重放失败调用。source capability 的物理任务和 profile 退休按[共同 ABI](../runtime/source-capability-abi.md)继续跟踪，线程退出或 signal 触发不能冒充不合作 I/O 已完成。

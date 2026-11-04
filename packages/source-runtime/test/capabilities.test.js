@@ -4,7 +4,6 @@ import {
   base64ToBytes,
   bytesToBase64,
   createCapabilityClient,
-  createLXNetworkFromCapabilities,
   hostApiVersion,
 } from '../src/index.js';
 
@@ -151,93 +150,4 @@ test('capability completion is fenced by cancellation', async () => {
   controller.abort();
   release();
   await assert.rejects(result, { code: 'CANCELLED' });
-});
-
-test('LX network adapter preserves JSON, form and multipart request semantics through the ABI', async () => {
-  const calls = [];
-  const scopes = [];
-  const client = createCapabilityClient({
-    maximumBytes: 2 * 1024 * 1024,
-    invoke(name, input, context) {
-      if (name === 'crypto.random') return bytesToBase64(new Uint8Array(16));
-      assert.equal(name, 'http.request');
-      calls.push(structuredClone(input));
-      scopes.push(structuredClone(context.scope));
-      return {
-        version: hostApiVersion,
-        status: 200,
-        statusText: 'OK',
-        headers: {},
-        url: input.url,
-        body: encoded('response'),
-      };
-    },
-  });
-  const network = createLXNetworkFromCapabilities(client);
-  const scope = {
-    installationId: 'fixture',
-    generation: 7,
-    siteId: 'kw',
-    requestId: 4,
-  };
-  const signal = new AbortController().signal;
-
-  await network({
-    url: 'https://fixture.invalid/json',
-    options: { method: 'POST', body: { name: 'synthetic' }, json: true, retry: 2 },
-    signal,
-    scope,
-  });
-  await network({
-    url: 'https://fixture.invalid/form',
-    options: { method: 'POST', form: { name: 'a b' } },
-    signal,
-    scope,
-  });
-  await network({
-    url: 'https://fixture.invalid/multipart',
-    options: {
-      method: 'POST',
-      formData: {
-        name: 'synthetic',
-        file: {
-          value: { type: 'Buffer', data: [0, 255, 65] },
-          options: { filename: 'fixture.bin' },
-        },
-      },
-    },
-    signal,
-    scope,
-  });
-
-  assert.equal(new TextDecoder().decode(base64ToBytes(calls[0].body)), '{"name":"synthetic"}');
-  assert.equal(calls[0].headers['content-type'][0], 'application/json');
-  assert.equal(new TextDecoder().decode(base64ToBytes(calls[1].body)), 'name=a+b');
-  assert.equal(calls[1].headers['content-type'][0], 'application/x-www-form-urlencoded');
-  const multipart = base64ToBytes(calls[2].body);
-  const multipartText = new TextDecoder('latin1').decode(multipart);
-  assert.equal(calls[2].headers['content-type'][0],
-    'multipart/form-data; boundary=meowfilm-00000000000000000000000000000000');
-  assert.match(multipartText, /filename="fixture\.bin"/);
-  assert.equal(Buffer.from(multipart).includes(Buffer.from([0, 255, 65])), true);
-  assert.equal(calls.every(call => call.cookieProfile === 'music:fixture:7:kw'), true);
-  assert.deepEqual(scopes, [scope, scope, scope]);
-
-  await assert.rejects(network({
-    url: 'https://fixture.invalid/',
-    options: { proxy: 'https://proxy.invalid/' },
-    signal,
-    scope,
-  }), { code: 'UNSUPPORTED_OPTION' });
-  await assert.rejects(network({
-    url: 'https://fixture.invalid/',
-    options: { headers: { Host: 'other.invalid' } },
-    signal,
-    scope,
-  }), { code: 'PERMISSION_DENIED' });
-  await assert.rejects(network({
-    url: 'https://fixture.invalid/',
-    signal,
-    scope: { installationId: 'fixture', siteId: 'kw', requestId: 4 },
-  }), { code: 'INVALID_ARGUMENT' });
 });

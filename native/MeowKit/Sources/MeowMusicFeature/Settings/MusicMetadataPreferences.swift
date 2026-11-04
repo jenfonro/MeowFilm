@@ -54,7 +54,7 @@ public struct MusicMetadataCandidates: Equatable, Sendable {
     /// Never replace it with queueRevision or preferences.revision in cache keys.
     public let contentRevision: Int?
     /// Opaque, credential-free content identity, excluding occurrence, audio
-    /// delivery and preference revisions. It also covers source_data/quarantine
+    /// delivery and preference revisions. It also covers the source locator and
     /// that MusicRemoteTrack cannot express. Invalidate a cached song if it changes.
     public let contentFingerprint: String
     public let candidates: [MusicMetadataCandidate]

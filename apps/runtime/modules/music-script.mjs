@@ -1,15 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  createScriptHost, createNodeNetwork, createNodeSourceCapabilities, ScriptHostError,
+  createScriptHost, createNodeNetwork, ScriptHostError, SCRIPT_LIMITS, LX_CONTROL_BYTES,
 } from '@meowfilm/script-host';
-import {
-  createCapabilityClient, createLXNetworkFromCapabilities,
-} from '@meowfilm/source-runtime';
 
 export const musicScriptContract = 'music.script.v2';
-const sourceBytes = 512 * 1024, controlBytes = 512 * 1024, chunkBytes = 64 * 1024;
-const networkBytes = 2 * 1024 * 1024;
-const maxInstances = 32, stageBytes = 1024 * 1024, stageTTL = 300000;
+const controlBytes = LX_CONTROL_BYTES, chunkBytes = 64 * 1024;
+const stageTTL = 300000;
 const codes = new Set(['INVALID_REQUEST', 'CLOSED', 'CANCELLED', 'LIMIT', 'SCRIPT_INTEGRITY',
   'SCRIPT_ENCODING', 'STAGE_NOT_FOUND', 'STALE_SOURCE', 'SOURCE_NOT_FOUND', 'SOURCE_DISABLED',
   'CAPABILITY_UNAVAILABLE', 'PERMISSION_DENIED', 'TIMEOUT', 'SCRIPT_CLEANUP', 'SCRIPT_FAILURE',
@@ -99,23 +95,16 @@ function abortable(promise, signal) {
  * ScriptHost executes guest code in isolated QuickJS heaps.
  */
 export function createMusicScriptModule({ call, hostFactory = createScriptHost,
-  network = createNodeNetwork(), capabilityOwner, clock = Date.now } = {}) {
+  network = createNodeNetwork(), clock = Date.now,
+  setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
   requireValue(typeof call === 'function' && typeof hostFactory === 'function' &&
     typeof network === 'function' && typeof clock === 'function' &&
-    (capabilityOwner === undefined ||
-      typeof capabilityOwner?.invoke === 'function' &&
-      typeof capabilityOwner?.releaseProfiles === 'function'));
-  const owner = capabilityOwner ?? createNodeSourceCapabilities({ network });
+    typeof setTimer === 'function' && typeof clearTimer === 'function');
   const stages = new Map(), bindings = new Map(), candidates = new Map(), sessions = new Map();
   const generations = new Map(), usedGrants = new Set(), adapterTasks = new Set();
-  const profileInstallations = new Set();
   const lifetime = new AbortController();
-  let closed = false, closing, tail = Promise.resolve(), pending = 0;
-  const sourceCapabilities = createCapabilityClient({
-    maximumBytes: networkBytes,
-    invoke: (name, input, context) => owner.invoke(name, input, context),
-  });
-  const lxNetwork = createLXNetworkFromCapabilities(sourceCapabilities);
+  let closed = false, closing, tail = Promise.resolve();
+  let stageTimer, stageFailure;
   const sessionKey = (id, generation) => JSON.stringify([id, generation]);
   function track(input, promise, kind = 'network') {
     const task = { installationId: input.installationId, generation: input.generation,
@@ -126,11 +115,9 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
   }
   // Track actual adapter completion, not merely a cancelled Promise.race.
   const host = hostFactory({
-    network: input => track(input.scope, Promise.resolve().then(() => lxNetwork(input))),
+    network: input => track(input.scope, Promise.resolve().then(() => network(input))),
     storage: Object.fromEntries(['get', 'set', 'delete'].map(operation =>
       [operation, input => storage(operation, input)])),
-    limits: { maxInstances, maxSourceBytes: sourceBytes, maxBytes: controlBytes, syncTimeoutMs: 2000,
-      maxInFlight: 16, maxInstanceInFlight: 8, maxSiteInFlight: 4 },
   });
   function guard(signal) {
     requireValue(!closed, 'CLOSED');
@@ -142,12 +129,39 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
     return result;
   }
   function current(id) { return host.list().find(value => value.installationId === id); }
-  function release(token) {
+  function clearStageTimer() {
+    const timer = stageTimer;
+    stageTimer = undefined;
+    if (timer === undefined) return;
+    try { clearTimer(timer); }
+    catch (error) { stageFailure ??= error; }
+  }
+  function scheduleStages() {
+    clearStageTimer();
+    if (closed || !stages.size) return;
+    let expiresAt = Infinity;
+    for (const stage of stages.values()) expiresAt = Math.min(expiresAt, stage.expiresAt);
+    const timer = setTimer(expireStages, Math.max(1, expiresAt - clock()));
+    stageTimer = timer;
+    try { timer?.unref?.(); } catch { /* An active timer still owns expiry. */ }
+  }
+  function expireStages() {
+    if (closed) return;
+    try { sweep(); }
+    catch (error) {
+      stageFailure ??= error;
+      for (const token of [...stages.keys()]) release(token, false);
+    }
+  }
+  function release(token, reschedule = true) {
     const stage = stages.get(token);
-    if (stage) { stage.bytes.fill(0); stages.delete(token); }
+    if (stage) { for (const bytes of stage.chunks) bytes.fill(0); stages.delete(token); }
+    if (reschedule) scheduleStages();
   }
   function sweep() {
-    for (const [token, stage] of stages) if (stage.expiresAt <= clock()) release(token);
+    for (const [token, stage] of stages)
+      if (stage.expiresAt <= clock()) release(token, false);
+    scheduleStages();
   }
   function staged(token) {
     text(token); sweep();
@@ -205,11 +219,6 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
       if (operation === 'set') message.value = input.value;
       const captured = bounded(message);
       if (operation === 'set') requireValue(Object.hasOwn(captured, 'value'));
-      const activeStorage = [...adapterTasks].filter(task => task.kind === 'storage');
-      requireValue(activeStorage.length < 16 &&
-        activeStorage.filter(task => task.installationId === input.installationId).length < 8 &&
-        activeStorage.filter(task => task.installationId === input.installationId &&
-          task.siteId === input.siteId).length < 4, 'LIMIT');
       const signal = AbortSignal.any([lifetime.signal, auth.controller.signal, input.signal,
         ...(auth.phase === 'candidate' ? [auth.loadSignal] : [])]);
       const task = track(input, Promise.resolve().then(() => {
@@ -235,11 +244,6 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
       ![...adapterTasks].some(task => task.installationId === id && task.generation !== keepGeneration),
     'SCRIPT_CLEANUP');
   }
-  async function releaseProfiles(id, keepGeneration) {
-    const keep = keepGeneration === undefined ? '' : `music:${id}:${keepGeneration}`;
-    try { await owner.releaseProfiles(`music:${id}:`, keep); }
-    catch { throw new Failure('SCRIPT_CLEANUP'); }
-  }
   function instance(binding, live = current(binding.installationId)) {
     requireValue(live && live.generation === binding.generation, 'STALE_SOURCE');
     const capabilities = live.capabilities;
@@ -251,47 +255,37 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
   const failure = error => ({ ok: false, contract: musicScriptContract, code: errorCode(error) });
   function method(allowed, required, body) {
     return async (parameters = {}, context = {}) => {
-      let admitted = false;
       try {
         requireValue(object(context));
         const { signal } = context;
         requireValue(signal === undefined || signal instanceof AbortSignal);
         guard(signal); fields(parameters, allowed, required);
-        requireValue(pending < 16, 'LIMIT');
         const captured = bounded(parameters);
-        pending++; admitted = true;
         const active = signal ? AbortSignal.any([lifetime.signal, signal]) : lifetime.signal;
         const result = await body(captured, active);
         guard(active);
         return success(result);
       } catch (error) { return failure(error); }
-      finally { if (admitted) pending--; }
     };
   }
   async function shutdown() {
     if (closing) return closing;
     closed = true; lifetime.abort();
-    for (const token of stages.keys()) release(token);
+    clearStageTimer();
+    for (const token of stages.keys()) release(token, false);
     for (const auth of [...candidates.values(), ...sessions.values()]) revoke(auth);
     // Stop sessions immediately, including one awaiting a reverse callback.
     closing = (async () => {
-      let result, hostClosed = true, profilesReleased = true;
+      let result, cleanupFailure = stageFailure;
       try { result = await host.close(); }
-      catch { hostClosed = false; }
+      catch (error) { cleanupFailure ??= error; }
       finally {
         await tail;
-        for (const id of bindings.keys()) profileInstallations.add(id);
-        for (const id of candidates.keys()) profileInstallations.add(id);
-        for (const auth of sessions.values()) profileInstallations.add(auth.installationId);
-        const released = await Promise.allSettled(
-          [...profileInstallations].map(id => releaseProfiles(id)),
-        );
-        profilesReleased = released.every(value => value.status === 'fulfilled');
         bindings.clear(); candidates.clear(); sessions.clear(); generations.clear(); usedGrants.clear();
-        profileInstallations.clear();
       }
-      requireValue(hostClosed && result?.cleanupComplete &&
-        adapterTasks.size === 0 && profilesReleased, 'SCRIPT_CLEANUP');
+      stageFailure = null;
+      if (cleanupFailure) throw new Failure('SCRIPT_CLEANUP');
+      requireValue(result.cleanupComplete && adapterTasks.size === 0, 'SCRIPT_CLEANUP');
       return { closed: true, cleanupComplete: true };
     })();
     return closing;
@@ -305,12 +299,13 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
       text(params.basename, 255);
       requireValue(!/[\\/:*?"<>|]/.test(params.basename) && params.basename.toLowerCase().endsWith('.js'));
       integer(params.length, 1);
-      requireValue(params.length <= sourceBytes && stages.size < 2 &&
-        [...stages.values()].reduce((sum, stage) => sum + stage.length, 0) + params.length <= stageBytes, 'LIMIT');
+      requireValue(params.length <= SCRIPT_LIMITS.maxSourceBytes, 'LIMIT');
       requireValue(typeof params.sha256 === 'string' && /^[a-f0-9]{64}$/.test(params.sha256));
       const token = randomUUID();
-      stages.set(token, { bytes: Buffer.alloc(params.length), length: params.length,
+      stages.set(token, { chunks: [], length: params.length,
         hash: params.sha256, offset: 0, expiresAt: clock() + stageTTL });
+      try { scheduleStages(); }
+      catch (error) { release(token, false); throw error; }
       return { token, chunkBytes };
     }),
     'music.script.stage.chunk': method(['token', 'offset', 'data'], undefined, params => {
@@ -318,10 +313,23 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
       integer(params.offset); requireValue(params.offset === stage.offset, 'SCRIPT_INTEGRITY');
       requireValue(typeof params.data === 'string' && params.data.length <= Math.ceil(chunkBytes / 3) * 4, 'LIMIT');
       const bytes = Buffer.from(params.data, 'base64');
-      requireValue(bytes.length > 0 && bytes.length <= chunkBytes && bytes.toString('base64') === params.data &&
-        stage.offset + bytes.length <= stage.length, 'SCRIPT_INTEGRITY');
-      bytes.copy(stage.bytes, stage.offset); stage.offset += bytes.length;
-      return { next: stage.offset };
+      let retained = false;
+      try {
+        requireValue(bytes.length > 0 && bytes.length <= chunkBytes && bytes.toString('base64') === params.data &&
+          stage.offset + bytes.length <= stage.length, 'SCRIPT_INTEGRITY');
+        const previousExpires = stage.expiresAt;
+        stage.chunks.push(bytes); retained = true; stage.offset += bytes.length;
+        stage.expiresAt = clock() + stageTTL;
+        try { scheduleStages(); }
+        catch (error) {
+          stage.chunks.pop();
+          stage.offset -= bytes.length;
+          stage.expiresAt = previousExpires;
+          retained = false;
+          throw error;
+        }
+        return { next: stage.offset };
+      } finally { if (!retained) bytes.fill(0); }
     }),
     'music.script.stage.abort': method(['token'], undefined, params => {
       text(params.token); release(params.token); return { released: true };
@@ -331,8 +339,12 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
       guard(signal); identifier(params.installationId);
       integer(params.revision, 1); integer(params.expectedRevision); settings(params);
       const stage = staged(params.token);
-      requireValue(stage.offset === stage.length && digest(stage.bytes) === stage.hash, 'SCRIPT_INTEGRITY');
-      const source = decode(stage.bytes), contentHash = stage.hash;
+      requireValue(stage.offset === stage.length, 'SCRIPT_INTEGRITY');
+      const bytes = Buffer.concat(stage.chunks);
+      let source;
+      try { requireValue(digest(bytes) === stage.hash, 'SCRIPT_INTEGRITY'); source = decode(bytes); }
+      finally { bytes.fill(0); }
+      const contentHash = stage.hash;
       const signature = digest(canonical({ contentHash, version: params.version, config: params.config,
         permissions: params.permissions, grant: params.grant }));
       const id = params.installationId, old = bindings.get(id), live = current(id);
@@ -346,7 +358,6 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
         return { instance: instance(old, live) };
       }
       requireValue(!old || (live.state === 'ready' && live.generation === old.generation), 'SOURCE_DISABLED');
-      requireValue(old || bindings.size < maxInstances, 'LIMIT');
       const grantHash = digest(params.grant);
       requireValue(!usedGrants.has(grantHash), 'PERMISSION_DENIED');
       const candidate = { installationId: id, revision: params.revision, signature, contentHash,
@@ -354,7 +365,6 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
         generation: null, floor: Math.max(generations.get(id) ?? 0, old?.generation ?? 0),
         controller: new AbortController(), loadSignal: signal };
       // Register BEFORE install/update; storage never waits for this queue/load.
-      profileInstallations.add(id);
       candidates.set(id, candidate); usedGrants.add(grantHash); release(params.token);
       const spec = { installationId: id, protocol: 'lx', enabled: true, source,
         version: params.version, config: params.config, permissions: params.permissions };
@@ -370,8 +380,6 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
         // Preflight the whole response before publishing the authorization.
         const response = { instance: instance(candidate, next) };
         success(response);
-        await releaseProfiles(id, next.generation);
-        guard(signal);
         revoke(old);
         candidates.delete(id);
         candidate.phase = 'session'; candidate.loadSignal = null; candidate.capabilities = next.capabilities;
@@ -386,7 +394,6 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
             remaining.contentHash === old.contentHash) {
           // Public host.update failed its trial: preserve EXACT old generation/grant.
           cleanup(id, old.generation);
-          await releaseProfiles(id, old.generation);
         } else {
           // Never call rollback: it creates another generation and cannot reuse
           // Native's old grant/metadata. A post-publication failure retires the
@@ -395,15 +402,9 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
           revoke(old); bindings.delete(id);
           if (remaining) {
             generations.set(id, Math.max(generations.get(id) ?? 0, remaining.generation));
-            try { await host.uninstall(id); }
-            catch {
-              try { await releaseProfiles(id); } catch { /* Preserve cleanup failure below. */ }
-              throw new Failure('SCRIPT_CLEANUP');
-            }
+            try { await host.uninstall(id); } catch { throw new Failure('SCRIPT_CLEANUP'); }
           }
           cleanup(id);
-          await releaseProfiles(id);
-          profileInstallations.delete(id);
         }
         throw error;
       }
@@ -417,15 +418,10 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
         requireValue(binding.revision === params.revision && live.generation === binding.generation &&
           (params.generation === undefined || params.generation === binding.generation), 'STALE_SOURCE');
         revoke(binding);
-        let uninstalled = true;
         try { await host.uninstall(params.installationId); }
-        catch { uninstalled = false; }
         finally { bindings.delete(params.installationId); }
-        requireValue(uninstalled, 'SCRIPT_CLEANUP');
         requireValue(!current(params.installationId), 'SCRIPT_CLEANUP');
         cleanup(params.installationId);
-        await releaseProfiles(params.installationId);
-        profileInstallations.delete(params.installationId);
         return { unloaded: true, cleanupComplete: true };
       })),
     'music.script.invoke': method(['installationId', 'revision', 'generation', 'siteId', 'operation', 'payload'],
@@ -452,5 +448,5 @@ export function createMusicScriptModule({ call, hostFactory = createScriptHost,
       try { fields(params, []); return await close(); } catch (error) { return failure(error); }
     },
   };
-  return { id: 'music', version: '0.5.0', methods, close };
+  return { id: 'music', version: '0.6.0', methods, close };
 }

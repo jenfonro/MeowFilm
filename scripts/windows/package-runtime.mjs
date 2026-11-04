@@ -205,6 +205,7 @@ export async function packageWindowsRuntime({
     }
     const bootstrapImports = new Map([
       ['node:net', 'node:net'],
+      ['node:path', 'node:path'],
       ['@meowfilm/runtime-bridge', '@meowfilm/runtime-bridge'],
       ['@meowfilm/runtime-bridge/descriptor', '@meowfilm/runtime-bridge/descriptor'],
       ['../../runtime/bootstrap.mjs', '../bootstrap.mjs'],
@@ -212,6 +213,7 @@ export async function packageWindowsRuntime({
     const entryImports = new Map([
       ['../bootstrap.mjs', '../bootstrap.mjs'],
       ['../../../runtime/modules/music-script.mjs', '../../modules/music-script.mjs'],
+      ['../../../runtime/modules/cat-script.mjs', '../../modules/cat-script.mjs'],
       ['../../../runtime/modules/source-runtime.mjs', '../../modules/source-runtime.mjs'],
     ]);
     for (const [relative, imports, dynamicImports = new Map()] of [

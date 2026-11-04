@@ -10,11 +10,7 @@ enum MusicNativeKuwoLyrics {
     static let userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
     static let wordPattern = #"<(-?\d+),(-?\d+)(?:,-?\d+)?>"#
     static func request(info: MJ) throws -> MusicNativeHTTPRequest {
-        var keys = ["songmid", "musicId"].filter { !info[$0].id.isEmpty }
-        if keys.isEmpty { keys = ["id"] }
-        let ids = try keys.map { try nativeID(info[$0].id) }
-        try musicRequire(!ids.isEmpty && Set(ids).count == 1, .lyricIdentityMismatch)
-        return try request(id: ids[0])
+        try request(id: try nativeID(info["songmid"].id))
     }
     private static func nativeID(_ value: String) throws -> String {
         // Fixed meowmusic accepts the old MUSIC_ alias without changing the

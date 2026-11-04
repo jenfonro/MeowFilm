@@ -20,7 +20,13 @@ private actor BrowseActionService: MusicPublicBrowsing, MusicPublicBrowseQueueLo
     func publicDetail(_ collection: MusicPublicBrowseCollection, cursor: String?) async throws -> MusicPublicBrowseDetail {
         guard let readPage else { throw MusicServiceError.invalidResponse }
         let page = try await readPage(cursor)
-        return .init(collection: collection, tracks: page.items, total: 900,
+        let members = try page.items.map { track -> MusicPublicBrowseMember in
+            guard let position = Int(track.ref.id.split(separator: ":").last ?? "") else {
+                throw MusicServiceError.invalidResponse
+            }
+            return .init(nativeID: track.sources[0].nativeId, sourcePosition: position, track: track)
+        }
+        return .init(collection: collection, members: members, total: 900,
                      cursor: page.cursor, snapshot: "synthetic-snapshot")
     }
     func openPublicQueue(_ request: MusicPublicBrowseQueueRequest) -> MusicRemoteQueueSource {
@@ -30,7 +36,9 @@ private actor BrowseActionService: MusicPublicBrowsing, MusicPublicBrowseQueueLo
     }
     func publicQueueTracks(_ request: MusicPublicBrowseQueueRequest) -> [MusicNativeTrackData] { [] }
     func publicDiscovery(_ destination: MusicPublicBrowseDestination, cursor: String?) throws -> MusicPublicBrowsePage { throw MusicServiceError.unsupported }
-    func publicPlaylists(platform: MusicPublicBrowsePlatform, query: String, cursor: String?) throws -> MusicPublicBrowseCollectionPage { throw MusicServiceError.unsupported }
+    func publicPlaylists(platform: MusicPublicBrowsePlatform, query: String, cursor: String?) throws -> MusicPublicBrowseCollectionPage {
+        throw MusicServiceError.unsupported
+    }
 }
 @MainActor private final class BrowseActionPages {
     let sizes: [Int]

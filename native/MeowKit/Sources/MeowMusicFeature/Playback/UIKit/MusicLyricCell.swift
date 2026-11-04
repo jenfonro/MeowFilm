@@ -11,6 +11,7 @@ final class MusicLyricCell: UITableViewCell {
     private var theme = PageTheme()
     private var lyricSelected = false
     private var active = false
+    private var previewDragging = false
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
@@ -20,52 +21,80 @@ final class MusicLyricCell: UITableViewCell {
         translation.textAlignment = .center
         let stack = UIStackView(arrangedSubviews: [lyric, translation])
         stack.axis = .vertical
-        stack.spacing = 5
+        stack.spacing = 6
         contentView.addSubview(stack)
-        stack.pinEdges(to: contentView, insets: UIEdgeInsets(top: 13, left: 12, bottom: 13, right: 12))
+        stack.pinEdges(to: contentView, insets: UIEdgeInsets(top: 8, left: 64, bottom: 8, right: 64))
+        contentView.layer.cornerRadius = 12
+        contentView.layer.borderWidth = 1
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func configure(line: MusicLyricLine, selected: Bool, active: Bool, position: Double,
-                   rate: Double, playing: Bool, preferences: MusicAppearancePreferences, theme: PageTheme) {
+    func configure(line: MusicLyricLine, selected: Bool, active: Bool, timed: Bool,
+                   previewDragging: Bool, position: Double, rate: Double, playing: Bool,
+                   preferences: MusicAppearancePreferences, theme: PageTheme) {
         self.line = line; self.theme = theme
         lyricSelected = selected; self.active = active
-        lyric.configure(line: line, color: UIColor(theme.ink), muted: UIColor(theme.muted),
-                        font: lyricFont)
+        self.previewDragging = previewDragging
+        applyLyricStyle()
         translation.text = preferences.translation(line.translation, expanded: true)
         translation.isHidden = translation.text == nil
-        translation.font = UIFontMetrics(forTextStyle: .footnote).scaledFont(for: .systemFont(ofSize: 13))
-        translation.textColor = UIColor(theme.muted)
+        translation.font = UIFontMetrics(forTextStyle: .footnote).scaledFont(for: .systemFont(ofSize: 13.5))
+        updateSurfaceStyle()
         accessibilityLabel = preferences.lyricAccessibilityLabel(
             text: line.text, translation: line.translation, expanded: true)
-        lyric.update(position: position, active: active, playing: playing, rate: rate)
+        lyric.update(position: position, active: timed, playing: playing, rate: rate)
     }
 
     func updateTime(_ position: Double, playing: Bool, rate: Double, active: Bool) {
-        _ = updateState(selected: lyricSelected, active: active, position: position, playing: playing, rate: rate)
+        _ = updateState(selected: lyricSelected, active: active, timed: active,
+                        previewDragging: previewDragging, position: position, playing: playing, rate: rate)
     }
 
     @discardableResult
-    func updateState(selected: Bool, active: Bool, position: Double, playing: Bool, rate: Double) -> Bool {
-        let changed = (lyricSelected || self.active) != (selected || active)
+    func updateState(selected: Bool, active: Bool, timed: Bool, previewDragging: Bool,
+                     position: Double, playing: Bool, rate: Double) -> Bool {
+        let previousFont = lyricFont
+        let styleChanged = lyricSelected != selected || self.active != active ||
+            self.previewDragging != previewDragging
         lyricSelected = selected; self.active = active
-        if changed, let line {
-            lyric.configure(line: line, color: UIColor(theme.ink), muted: UIColor(theme.muted), font: lyricFont)
+        self.previewDragging = previewDragging
+        if styleChanged {
+            applyLyricStyle()
+            updateSurfaceStyle()
         }
-        lyric.update(position: position, active: active, playing: playing, rate: rate)
-        return changed
+        lyric.update(position: position, active: timed, playing: playing, rate: rate)
+        return previousFont != lyricFont
     }
 
     private var lyricFont: UIFont {
         UIFontMetrics(forTextStyle: .body).scaledFont(
-            for: .systemFont(ofSize: 20, weight: lyricSelected || active ? .semibold : .regular))
+            for: .systemFont(ofSize: 18, weight: lyricSelected || active ? .semibold : .medium))
+    }
+
+    private func applyLyricStyle() {
+        guard let line else { return }
+        let foreground = lyricSelected ? UIColor(theme.accent) : UIColor(theme.ink)
+        let muted = lyricSelected ? foreground : UIColor(theme.muted)
+        lyric.configure(line: line, color: foreground, muted: muted, font: lyricFont)
+    }
+
+    private func updateSurfaceStyle() {
+        let selectedSurface = lyricSelected && !previewDragging
+        contentView.backgroundColor = selectedSurface
+            ? UIColor(theme.accent).withAlphaComponent(0.08) : .clear
+        contentView.layer.borderColor = selectedSurface
+            ? UIColor(theme.accent).withAlphaComponent(0.28).cgColor : UIColor.clear.cgColor
+        translation.textColor = lyricSelected ? UIColor(theme.accent)
+            : active ? UIColor(theme.ink) : UIColor(theme.muted)
     }
 
     override func prepareForReuse() {
         super.prepareForReuse()
-        line = nil; lyricSelected = false; active = false
+        line = nil; lyricSelected = false; active = false; previewDragging = false
+        contentView.backgroundColor = .clear
+        contentView.layer.borderColor = UIColor.clear.cgColor
         lyric.reset()
     }
 }

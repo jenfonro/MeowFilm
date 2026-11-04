@@ -38,7 +38,6 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
         internal string Key { get; } = key;
         internal long Generation { get; } = generation;
         internal long Started { get; } = started;
-        internal int Polls;
         internal bool Consumed;
         internal MusicKgClientContext? Device;
         public override string ToString() => "MusicAccountQR (transient)";
@@ -59,15 +58,12 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
         internal MusicPlatformClientContext? Client;
         internal MusicWyClientContext WyClient => (MusicWyClientContext)Client!;
         internal MusicKgClientContext KgClient => (MusicKgClientContext)Client!;
-        private int requests;
-        private readonly int requestLimit;
-        internal Context(MusicAccountProtocol owner, string platform, long generation, CancellationToken external, int requestLimit,
+        internal Context(MusicAccountProtocol owner, string platform, long generation, CancellationToken external,
             bool detailsRead = false)
         {
             this.owner = owner; Platform = platform; Generation = generation; this.external = external;
-            this.requestLimit = requestLimit;
             this.detailsRead = detailsRead;
-            duration = detailsRead && owner.timeout > TimeSpan.FromSeconds(25) ? TimeSpan.FromSeconds(25) : owner.timeout;
+            duration = owner.timeout;
             started = owner.clock.GetTimestamp();
             timeoutCancellation = new(duration);
             cancellation = CancellationTokenSource.CreateLinkedTokenSource(external, timeoutCancellation.Token);
@@ -93,9 +89,9 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
         internal HttpRequestMessage Kg(string path, JsonObject parameters, string? cookie,
             string? router = null, JsonObject? body = null) =>
             MusicPlatformRequests.KgWithCookie(path, parameters, cookie, KgClient, router, body);
-        internal async Task<MusicPlatformHttpResult> Send(HttpRequestMessage request)
+        internal async Task<MusicPlatformHttpResult> Send(HttpRequestMessage request, bool accountDetails = false)
         {
-            var result = await SendCore(request, left => detailsRead
+            var result = await SendCore(request, left => detailsRead || accountDetails
                 ? owner.transport.SendAccountDetailsAsync(Platform, request, Token, left)
                 : owner.transport.SendAsync(Platform, request, Token, 1024 * 1024, left)).ConfigureAwait(false);
             Inspect(result.Body); Guard();
@@ -113,7 +109,6 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
             try
             {
                 Guard();
-                AccountRules.Require(++requests <= requestLimit, "LIMIT");
                 int bytes = Encoding.UTF8.GetByteCount(request.RequestUri!.AbsoluteUri) +
                     request.Headers.Sum(h => Encoding.UTF8.GetByteCount(h.Key) + h.Value.Sum(Encoding.UTF8.GetByteCount));
                 AccountRules.Require(bytes + (request.Content?.Headers.ContentLength ?? 0) <= 65536, "LIMIT");
@@ -122,7 +117,7 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
             var left = duration - owner.clock.GetElapsedTime(started);
             try
             {
-                var result = await send(TimeSpan.FromMilliseconds(Math.Clamp(left.TotalMilliseconds, 1, 60000))).ConfigureAwait(false);
+                var result = await send(TimeSpan.FromMilliseconds(Math.Max(left.TotalMilliseconds, 1))).ConfigureAwait(false);
                 Guard();
                 return result;
             }
@@ -162,7 +157,7 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
         this.transport = transport ?? throw new ArgumentNullException(nameof(transport));
         this.clients = clients ?? throw new ArgumentNullException(nameof(clients));
         this.leaveOpen = leaveOpen; this.timeout = timeout ?? TimeSpan.FromSeconds(25);
-        AccountRules.Require(this.timeout.TotalMilliseconds is >= 1 and <= 60000);
+        AccountRules.Require(this.timeout > TimeSpan.Zero);
         this.clock = clock ?? TimeProvider.System;
         ClientProtocol = clientProtocol ?? new(transport, this.clock);
     }
@@ -184,20 +179,21 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
         AccountRules.Platform(platform);
         lock (gate) { AccountRules.Require(!closed, "CLOSED"); Fence(states[platform], "CANCELLED"); }
     }
-    private async Task<T> Run<T>(string platform, CancellationToken token, Func<Context, Task<T>> action, bool replace = true, int requestLimit = 3,
+    private async Task<T> Run<T>(string platform, CancellationToken token, Func<Context, Task<T>> action, bool replace = true,
         bool detailsRead = false)
     {
         token.ThrowIfCancellationRequested();
         Context ctx;
+        var settled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (gate)
         {
             AccountRules.Require(!closed, "CLOSED");
-            AccountRules.Require(pending.Count < 8, "RATE_LIMITED");
             var state = states[platform];
             if (replace) Fence(state, "SUPERSEDED");
             else AccountRules.Require(state.Active is null, "BUSY");
-            ctx = new(this, platform, state.Generation, token, requestLimit, detailsRead);
+            ctx = new(this, platform, state.Generation, token, detailsRead);
             state.Active = ctx;
+            Track(settled.Task);
         }
         async Task<T> Physical()
         {
@@ -212,7 +208,6 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
             finally { lock (gate) if (ReferenceEquals(states[platform].Active, ctx)) states[platform].Active = null; }
         }
         var task = Physical();
-        Track(task);
         try
         {
             var result = detailsRead ? await task.ConfigureAwait(false) : await task.WaitAsync(ctx.Token).ConfigureAwait(false);
@@ -230,19 +225,31 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
         finally
         {
             // A trusted callback that ignores cancellation retains its resources until settled.
-            if (task.IsCompleted) ctx.Dispose();
-            else _ = task.ContinueWith(_ => ctx.Dispose(), CancellationToken.None,
+            void Release()
+            {
+                _ = task.Exception;
+                ctx.Dispose();
+                settled.TrySetResult();
+            }
+            if (task.IsCompleted) Release();
+            else _ = task.ContinueWith(_ => Release(), CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         }
     }
-    public Task<MusicAccountProfile> ValidateAsync(string platform, string cookie, CancellationToken cancellationToken = default)
+    public Task<MusicAccountDetailsObservation> ValidateAsync(string platform, string cookie, CancellationToken cancellationToken = default)
     {
         AccountRules.Platform(platform);
         var parts = AccountRules.Cookies(cookie);
-        return Run(platform, cancellationToken, ctx => platform switch
+        return Run(platform, cancellationToken, async ctx =>
         {
-            "wy" => ValidateWy(ctx, cookie, parts), "tx" => ValidateTx(ctx, cookie, parts),
-            "kg" => ValidateKg(ctx, cookie, parts), _ => throw new MusicAccountException("INVALID_REQUEST")
+            var profile = platform switch
+            {
+                "wy" => await ValidateWy(ctx, cookie, parts).ConfigureAwait(false),
+                "tx" => await ValidateTx(ctx, cookie, parts).ConfigureAwait(false),
+                "kg" => await ValidateKg(ctx, cookie, parts).ConfigureAwait(false),
+                _ => throw new MusicAccountException("INVALID_REQUEST")
+            };
+            return await ObserveAccountDetails(ctx, profile, cookie).ConfigureAwait(false);
         });
     }
     public Task<MusicAccountChallenge> BeginAsync(string platform, CancellationToken cancellationToken = default)
@@ -315,7 +322,9 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
             await ctx.AcceptWyCookies(result.SetCookieHeaders).ConfigureAwait(false);
             var account = await ValidateWy(ctx, cookie, AccountRules.Cookies(cookie)).ConfigureAwait(false);
             GuardQr();
-            await ctx.Accept(acceptSession!, new(platform, challengeId, cookie, account)).ConfigureAwait(false);
+            var details = await ObserveAccountDetails(ctx, account, cookie).ConfigureAwait(false);
+            GuardQr();
+            await ctx.Accept(acceptSession!, new(platform, challengeId, cookie, details)).ConfigureAwait(false);
             return new MusicAccountPoll(platform, challengeId, "authenticated");
         }, replace: false);
     }
@@ -336,6 +345,16 @@ public sealed partial class MusicAccountProtocol : IMusicAccountProtocol
             tasks = pending.ToArray();
         }
         if (!leaveOpen) transport.Dispose();
-        try { await Task.WhenAll(tasks).ConfigureAwait(false); } catch { /* Individual calls already have finite diagnostics. */ }
+        while (tasks.Length > 0)
+        {
+            try { await Task.WhenAll(tasks).ConfigureAwait(false); } catch { /* Results belong to the individual callers. */ }
+            lock (gate) tasks = pending.Where(task => !task.IsCompleted).ToArray();
+        }
+        lock (gate)
+        {
+            smsExpiry?.Dispose(); smsExpiry = null;
+            smsLimits.Clear();
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(smsLedgerKey);
+        }
     }
 }

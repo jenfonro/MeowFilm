@@ -51,7 +51,6 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
         try check()
         try musicRequire(UUID(uuidString: attemptID)?.uuidString.lowercased() == attemptID &&
             attemptID != previousAttemptID && !spent.contains(attemptID), .staleResult)
-        try musicRequire(spent.count < 16_384, .limit)
         try musicRequire(position.isFinite && (0...604_800).contains(position))
         guard let previous = attempt, previous.id == previousAttemptID, previous.ready,
               !previous.ended, !previous.endedConsumed, spent.contains(previousAttemptID),

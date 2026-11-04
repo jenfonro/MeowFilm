@@ -3,18 +3,18 @@ import MeowMusicFeature
 @testable import MeowMusicNativeService
 
 final class NativeMusicLegacyTests: XCTestCase {
-    // Synthetic old-schema vectors specified independently of the implementation.
+    // Synthetic import-to-compact-schema vectors specified independently of the implementation.
     // SHA-256 was frozen with Python hashlib, not by running the reference JS.
-    private let batch = "348dc9f4a03f698de411d215473ea4f7a4ce6f223f1d0cdb554c3606c0beaea3"
-    private let after = "f083807df66ad9a18b82c982f18b31f901a288c162f71d00006f11d4cd81bc37"
+    private let batch = "1e5cb64f577b86519ad0399631d6ed068aab2cb37e492ffed07522af86a49eac"
+    private let after = "f55d381355ebc62cac9cacfcc8c5774aff523e9b8b4aca5cb4018a58a5eaf740"
     private let collectionsJSON = #"""
     [{"id":"favorites","kind":"favorites","name":"Favorites","order":["2"],"revision":3,"manualOrder":false,"bindings":[],"intents":{},"creating":{}},{"id":"playlist:1","kind":"playlist","name":"Saved","order":["10","2"],"revision":4,"manualOrder":true,"locallyCreated":true,"bindings":[{"platform":"wy","accountId":"fixture-owner","id":"fixture-list","writable":false,"baseline":["77"],"map":{"2":"77"},"name":"Saved"}],"intents":{"2":{"present":true,"pending":true,"origin":"local","acknowledged":["[\"wy\",\"fixture-owner\",\"fixture-list\"]"]}},"creating":{"[\"wy\",\"fixture-owner\"]":{"before":["fixture-list"],"name":"Uncertain"}}},{"id":"playlist:2","kind":"playlist","name":"Removed","order":[],"revision":1,"manualOrder":true,"deleted":true,"bindings":[],"intents":{},"creating":{}}]
     """#
     private let expectedOnline = #"""
-    {"songId":"2","id":23,"title":"Frozen track","artist":"Fixture","album":"","duration":180,"cover_url":"","source_data":{"source":"wy","musicId":"77","songmid":"77","name":"Frozen track","singer":"Fixture","duration":180,"types":[{"type":"320k","hash":"ABC","size":100}]},"sources":[{"sourceKey":"[\"wy\",\"77\",\"\"]","source":"wy","source_data":{"source":"wy","musicId":"77","songmid":"77","name":"Frozen track","singer":"Fixture","duration":180,"types":[{"type":"320k","hash":"ABC","size":100}]},"title":"Frozen track","artist":"Fixture","album":"","duration":180,"cover_url":""}],"plugin_entry_path":"lxmusic","dedup_key":"wy:77","_libraryId":23,"_isOnlineObj":true}
+    {"songId":"2","title":"Frozen track","artist":"Fixture","album":"","duration":180,"cover_url":"","sources":[{"sourceKey":"[\"wy\",\"77\",\"\"]","source":"wy","musicInfo":{"source":"wy","songmid":"77","name":"Frozen track","singer":"Fixture","duration":180,"types":[{"type":"320k","hash":"ABC","size":100}]}}]}
     """#
     private let expectedLocal = #"""
-    {"songId":"10","id":10,"title":"Frozen local","artist":"Fixture","duration":0,"file_path":"Music/synthetic.wav","plugin_entry_path":"local","sources":[],"_isOnlineObj":false,"_libraryId":10,"source_data":{}}
+    {"songId":"10","title":"Frozen local","artist":"Fixture","album":"","duration":0,"cover_url":"","sources":[]}
     """#
     private func fixture(normalized: Bool) throws -> MJ {
         let songs: MJ
@@ -22,8 +22,9 @@ final class NativeMusicLegacyTests: XCTestCase {
             songs = .obj([("10", try MJ.parse(Data(expectedLocal.utf8))), ("2", try MJ.parse(Data(expectedOnline.utf8)))])
         } else {
             let local = try MJ.parse(Data(#"{"songId":"10","id":10,"title":"Frozen local","artist":"Fixture","duration":0,"file_path":"Music/synthetic.wav","plugin_entry_path":"local"}"#.utf8))
-            let native = #"{"songInfo":{"source":"wy","musicId":"77","name":"Frozen track","singer":"Fixture","duration":180,"types":[{"type":"320k","hash":"ABC","size":100,"discarded":"not-durable"},{"type":"obsolete"}]}}"#
-            let online = MJ.obj([("songId", .string("2")), ("id", .n(23)), ("plugin_entry_path", .string("legacy-catalog")), ("source_data", .string(native))])
+            let native = #"{"source":"wy","songmid":"77","name":"Frozen track","singer":"Fixture","duration":180,"types":[{"type":"320k","hash":"ABC","size":100,"discarded":"not-durable"},{"type":"obsolete"}]}"#
+            let online = MJ.obj([("songId", .string("2")), ("id", .n(23)), ("plugin_entry_path", .string("legacy-catalog")),
+                                 ("musicInfo", try MJ.parse(Data(native.utf8)))])
             songs = .obj([("10", local), ("2", online)])
         }
         return .obj([("version", .n(1)), ("ownerId", .string("frozen-owner")), ("revision", .n(7)), ("nextId", .n(3)),
@@ -33,18 +34,18 @@ final class NativeMusicLegacyTests: XCTestCase {
                 ("issues", .array([.obj([("code", .string("legacy_import_requires_rebinding"))])]))]) :
                 .obj([("phase", .string("synced")), ("at", .n(42)), ("issues", .array([]))]))])
     }
-    func testLegacySongNormalizationKeepsIDsAndFiltersUnknownQualityFields() throws {
+    func testCompactSongNormalizationKeepsIDsAndFiltersUnknownQualityFields() throws {
         let raw = try fixture(normalized: false), expected = try fixture(normalized: true)
         for id in ["2", "10"] {
             let clean = try MusicModel.cleanSong(raw["songs"][id])
             XCTAssertEqual(clean.stable, expected["songs"][id].stable)
             XCTAssertEqual(try MusicModel.cleanSong(clean).stable, clean.stable)
         }
-        let data = #"{"source":"wy","musicId":"77","name":"Frozen track","singer":"Fixture","duration":180}"#
-        let fromFile = try MusicModel.cleanSong(.obj([("songId", .string("fixed-id")), ("file_path", .string(data))]))
+        let data = #"{"source":"wy","songmid":"77","name":"Frozen track","singer":"Fixture","duration":180}"#
+        let fromFile = try MusicModel.cleanSong(.obj([("songId", .string("fixed-id")), ("musicInfo", try MJ.parse(Data(data.utf8)))]))
         XCTAssertEqual(fromFile["songId"].string, "fixed-id")
-        XCTAssertEqual(fromFile["source_data"]["musicId"].string, "77")
-        XCTAssertEqual(fromFile["file_path"].string, fromFile["source_data"].json)
+        XCTAssertEqual(fromFile["sources"].array.first?["musicInfo"]["songmid"].string, "77")
+        XCTAssertEqual(fromFile["file_path"].string, "")
         XCTAssertEqual(MusicModel.publicURL(.string("https://localhost./cover.jpg")), .string(""))
     }
     func testImportGoldenBatchReceiptMetadataAndRollback() async throws {
@@ -66,7 +67,7 @@ final class NativeMusicLegacyTests: XCTestCase {
         let empty = try await service.collections()
         XCTAssertEqual(empty.count, 1); XCTAssertEqual(empty[0].count, 0)
     }
-    func testExistingV1ReceiptIsNotRewrittenOrReimportedUnderNewIdentity() async throws {
+    func testCurrentCompactReceiptIsNotRewrittenOrReimportedUnderNewIdentity() async throws {
         var legacy = try fixture(normalized: true); legacy["ownerId"] = .string("device")
         XCTAssertEqual(legacy.stable.digest, after)
         let area = MJ.obj([("schema", .n(1)), ("scope", .string("device")), ("revision", .n(1)), ("library", legacy),
@@ -88,18 +89,51 @@ final class NativeMusicLegacyTests: XCTestCase {
         let value = try MJ.parse(Data(#"{"10":"ten","2":"two","01":"string","4294967295":"string","a":1e-7,"b":-1e-7,"c":1e-6}"#.utf8))
         XCTAssertEqual(value.stable.json, #"{"2":"two","10":"ten","01":"string","4294967295":"string","a":1e-7,"b":-1e-7,"c":0.000001}"#)
     }
-    func testExplicitQuarantineIsNeverResurrectedAndConflictingNativeRecordingRejected() async throws {
-        var value = try MJ.parse(Data(expectedOnline.utf8))
-        value["revision"] = .n(1); value["quarantinedSources"] = value["sources"]; value["sources"] = .array([])
-        let clean = try MusicModel.cleanSong(value)
-        XCTAssertTrue(clean["sources"].array.isEmpty); XCTAssertEqual(clean["quarantinedSources"].array.count, 1)
+    func testDurableFiltersSecretAndTransientFieldsWithoutLosingOrdinaryFields() {
+        let value = MJ.obj([
+            ("x-api-key", .string("secret")), ("apiKeyValue", .string("secret")),
+            ("Headers", .string("secret")), ("accessToken", .string("secret")),
+            ("AudioUrl", .string("https://example.invalid/audio")),
+            ("headersCount", .string("kept")), ("normal", .string("kept"))
+        ])
+        let clean = MusicModel.durable(value)
+        XCTAssertEqual(Set(clean.fields.map(\.0)), ["headersCount", "normal"])
+        XCTAssertEqual(MusicModel.durable(.string("HTTPS://host/a?Token=1")), .string(""))
+        XCTAssertEqual(MusicModel.durable(.string("blob:https://host/a")), .string(""))
+        XCTAssertEqual(MusicModel.durable(.string("DATA:text/plain,secret")), .string(""))
+    }
+    func testConflictingNativeRecordingIsRejectedWithoutDurableQuarantineTable() async throws {
         var legacy = try fixture(normalized: true)
         var accepted = legacy["songs"]["2"]["sources"].array
-        accepted[0]["artist"] = .string("Different recording")
+        accepted[0]["musicInfo"]["singer"] = .string("Different recording")
         legacy["songs"]["2"]["sources"] = .array(accepted)
         let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
         do { _ = try await service.prepareImport(data: legacy.bytes, sourceId: "fixed", ownerId: "frozen-owner"); XCTFail("conflicting source") }
         catch { XCTAssertEqual(error as? MusicServiceError, .nativeIDConflict) }
         XCTAssertNil(store.snapshot().0)
+    }
+    func testDuplicateSourceKeysRemainRejectedAfterOrdering() throws {
+        let song = try NativeMusicFixture.song()
+        let source = try XCTUnwrap(song["sources"].array.first)
+        var duplicate = song
+        duplicate["sources"] = .array([source, source])
+        XCTAssertThrowsError(try MusicModel.cleanSong(duplicate)) {
+            XCTAssertEqual($0 as? MusicServiceError, .nativeIDConflict)
+        }
+    }
+    func testCurrentCompactSourceWithoutSongmidFailsAsInvalidSource() throws {
+        var song = try NativeMusicFixture.song()
+        _ = try MusicModel.cleanSong(song)
+        var source = try XCTUnwrap(song["sources"].array.first)
+        var info = source["musicInfo"]
+        info.remove("songmid")
+        source["musicInfo"] = info
+        song["sources"] = .array([source])
+        XCTAssertThrowsError(try MusicModel.cleanSong(song)) {
+            XCTAssertEqual($0 as? MusicServiceError, .sourceUnavailable)
+        }
+        XCTAssertThrowsError(try MusicModel.cleanSource(source)) {
+            XCTAssertEqual($0 as? MusicServiceError, .sourceUnavailable)
+        }
     }
 }

@@ -51,7 +51,7 @@ extension QQMusicAccountAdapter {
         let uid = try MusicQQWire.id(auth["musicid"])
         let check = try await rpc("music.UserInfo.userInfoServer", "GetLoginUserInfo", auth: auth)
         for row in [check, check["userInfo"] as? [String: Any] ?? [:], check["data"] as? [String: Any] ?? [:]] {
-            if let value = row["musicid"] ?? row["musicId"], try MusicQQWire.id(value) != uid { throw MusicServiceError.targetChanged }
+            if let value = row["musicid"], try MusicQQWire.id(value) != uid { throw MusicServiceError.targetChanged }
         }
         let nickname: String
         if let euin = auth["encrypt_uin"] as? String {

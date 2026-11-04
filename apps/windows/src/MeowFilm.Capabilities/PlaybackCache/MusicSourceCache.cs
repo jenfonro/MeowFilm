@@ -32,8 +32,7 @@ internal sealed class MusicSourceCache(IProtectedDocumentStore store, TimeProvid
         "qualityPolicySignature", "recording"
     ];
     private static readonly HashSet<string> RecordingFields =
-        "sourceKey source source_data title artist album duration cover_url observedAt nextCheckAt revision"
-            .Split(' ').ToHashSet(StringComparer.Ordinal);
+        "sourceKey source musicInfo".Split(' ').ToHashSet(StringComparer.Ordinal);
     private readonly TimeProvider clock = time ?? TimeProvider.System;
     private readonly SemaphoreSlim gate = new(1, 1);
 
@@ -391,9 +390,8 @@ internal sealed class MusicSourceCache(IProtectedDocumentStore store, TimeProvid
         if (rawRecording.ValueKind != JsonValueKind.Object)
             throw MusicPlaybackCacheDataException.Corrupt();
         var names = rawRecording.EnumerateObject().Select(property => property.Name).ToArray();
-        string[] required = ["sourceKey", "source", "source_data", "title", "artist", "album", "duration", "cover_url"];
         if (names.Any(name => !RecordingFields.Contains(name)) ||
-            required.Any(field => !names.Contains(field, StringComparer.Ordinal)))
+            RecordingFields.Any(field => !names.Contains(field, StringComparer.Ordinal)))
             throw MusicPlaybackCacheDataException.Corrupt();
         var recording = JsonNode.Parse(rawRecording.GetRawText())!.AsObject();
         var canonical = NativeMusicSong.DurableSource(recording);

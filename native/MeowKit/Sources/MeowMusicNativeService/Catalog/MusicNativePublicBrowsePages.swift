@@ -8,6 +8,7 @@ struct MusicNativePublicBrowseWitness {
     let collectionID: String
     let head: String
     let total: Int
+    var firstCollection: MusicPublicBrowseCollection
     let expires: Date
     var members: [Int: String] = [:]
 }
@@ -21,12 +22,15 @@ extension MusicNativePlatforms {
                   witness.collectionID == collection.id else { throw MusicServiceError.staleResult }
         }
         let page: MusicPublicBrowseNativeCollectionPage
+        var witness: MusicNativePublicBrowseWitness?
+        if !snapshot.isEmpty { witness = detailWitnesses[snapshot] }
         switch collection.platform {
         case .qq:
             guard let provider = qq as? any MusicPublicBrowseQQProviding else { throw MusicServiceError.unsupported }
             page = try await provider.publicBrowsePlaylistPage(id: collection.nativeID, offset: offset)
         case .kugou:
-            page = try await browseKGPage(collection.nativeID, offset: offset, limit: 30)
+            page = try await browseKGPage(collection.nativeID, offset: offset, limit: 30,
+                                          metadata: witness?.firstCollection, total: witness?.total)
         default: throw MusicServiceError.unsupported
         }
         try Task.checkCancellation()
@@ -38,7 +42,7 @@ extension MusicNativePlatforms {
             (offset + $0.offset, MusicNativePublicBrowseSupport.digestData($0.element.data))
         })
         let key: String
-        var witness: MusicNativePublicBrowseWitness
+        var current: MusicNativePublicBrowseWitness
         if snapshot.isEmpty {
             // A fresh read of the same observed page renews action handles
             // without inventing a different resource identity. Refresh clears
@@ -47,26 +51,27 @@ extension MusicNativePlatforms {
                 entry.value.collectionID == collection.id && entry.value.head == page.headSignature &&
                     entry.value.total == page.total && observed.allSatisfy { entry.value.members[$0.key] == $0.value }
             }).max(by: { $0.value.expires < $1.value.expires }) {
-                key = saved.key; witness = saved.value
+                key = saved.key; current = saved.value
+                current.firstCollection = page.collection
             } else {
-                try musicRequire(detailWitnesses.count < 64, .busy)
                 key = MusicNativePublicBrowseSupport.digest(.array([.string(collection.id), .string(UUID().uuidString)]))
-                witness = .init(collectionID: collection.id, head: page.headSignature, total: page.total,
-                                expires: now().addingTimeInterval(600))
+                current = .init(collectionID: collection.id, head: page.headSignature, total: page.total,
+                                firstCollection: page.collection, expires: now().addingTimeInterval(600))
             }
         } else {
-            guard let previous = detailWitnesses[snapshot], previous.expires > now() else { throw MusicServiceError.staleResult }
-            key = snapshot; witness = previous
+            guard let previous = witness, previous.expires > now() else { throw MusicServiceError.staleResult }
+            key = snapshot; current = previous
         }
-        try musicRequire(witness.head == page.headSignature && witness.total == page.total, .staleResult)
+        try musicRequire(current.head == page.headSignature && current.total == page.total, .staleResult)
         for (position, digest) in observed {
-            try musicRequire(witness.members[position] == nil || witness.members[position] == digest, .staleResult)
-            witness.members[position] = digest
+            try musicRequire(current.members[position] == nil || current.members[position] == digest, .staleResult)
+            current.members[position] = digest
         }
         let otherMembers = detailWitnesses.reduce(0) { $0 + ($1.key == key ? 0 : $1.value.members.count) }
-        try musicRequire(otherMembers + witness.members.count <= 64_000, .limit)
-        detailWitnesses[key] = witness
-        return .init(collection: page.collection, tracks: page.tracks, total: page.total,
+        try musicRequire(otherMembers + current.members.count <= 64_000, .limit)
+        detailWitnesses[key] = current
+        return .init(collection: page.collection, tracks: page.tracks,
+                     sourcePositions: Array(offset..<(offset + page.tracks.count)), total: page.total,
                      more: page.more, snapshot: key, consumed: page.tracks.count)
     }
 
@@ -84,22 +89,46 @@ extension MusicNativePlatforms {
         } else { throw MusicServiceError.staleResult }
     }
 
-    func browseKGPage(_ id: String, offset: Int, limit: Int) async throws -> MusicPublicBrowseNativeCollectionPage {
+    func browseKGPage(_ id: String, offset: Int, limit: Int,
+                      metadata: MusicPublicBrowseCollection? = nil,
+                      total knownTotal: Int? = nil) async throws -> MusicPublicBrowseNativeCollectionPage {
         let root = try await browseKGDetail(id, offset: offset, limit: limit), data = root["data"], info = data["list_info"]
-        try musicRequire(info.isObject &&
-            (!info.contains("global_collection_id") || info["global_collection_id"].string == id), .targetChanged)
-        let count = try (info.contains("count") ? info["count"] : data["count"]).integer(20_000)
+        let end = root["error_code"].id == "149"
+        try musicRequire(data.isObject && (offset == 0 || info == .null || info.isObject), .upstreamInvalid)
+        if info != .null {
+            try musicRequire(info.isObject &&
+                (!info.contains("global_collection_id") || info["global_collection_id"].string == id), .targetChanged)
+        }
+        let count: Int
+        if end, let previous = knownTotal ?? metadata?.count {
+            count = previous
+        } else {
+            count = try data["count"].integer()
+            if info.contains("count") {
+                try musicRequire(info["count"].integer() == count, .upstreamInvalid)
+            }
+        }
         let version = info.contains("list_ver") ? info["list_ver"] : data.contains("list_ver") ? data["list_ver"] : root["list_ver"]
         try musicRequire(version == .null || version.isInteger, .upstreamInvalid)
         let rows = data.contains("songs") ? data["songs"] : data["info"]
-        try musicRequire(rows.isArray && rows.array.count <= limit && offset + rows.array.count <= count &&
-            (!rows.array.isEmpty || offset >= count), .upstreamInvalid)
-        var meta = info; meta["global_collection_id"] = .string(id); meta["count"] = .n(count)
-        let collection = try browseCollection(meta, platform: .kugou)
-        let head = MJ.array([.string(collection.id), .string(collection.title), .string(collection.creator),
-                            .string(collection.artwork?.absoluteString ?? ""), .n(count), version])
+        try musicRequire(rows.isArray && rows.array.count <= limit &&
+            (end ? rows.array.isEmpty : offset + rows.array.count <= count &&
+                (!rows.array.isEmpty || offset >= count)), .upstreamInvalid)
+        let collection: MusicPublicBrowseCollection
+        if info.isObject, offset == 0 || metadata == nil {
+            var meta = info; meta["global_collection_id"] = .string(id); meta["count"] = .n(count)
+            collection = try browseCollection(meta, platform: .kugou)
+        } else if let metadata {
+            collection = metadata
+        } else {
+            throw MusicServiceError.upstreamInvalid
+        }
+        // The head binds only the platform, collection ID and total. Later
+        // pages may omit list_info and reuse the first page's metadata.
+        let head = MJ.array([.string(MusicPublicBrowsePlatform.kugou.rawValue),
+                             .string(collection.nativeID), .n(count)])
         return .init(collection: collection,
-                     tracks: try rows.array.map(kugouSong), total: count, more: offset + rows.array.count < count,
+                     tracks: try rows.array.map(kugouSong), total: count, more: !end && offset + rows.array.count < count,
                      headSignature: MusicNativePublicBrowseSupport.digest(head))
     }
 }

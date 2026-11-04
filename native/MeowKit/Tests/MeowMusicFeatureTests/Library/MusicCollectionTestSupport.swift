@@ -22,13 +22,18 @@ actor MusicCollectionGate {
 }
 
 actor MusicCollectionService: MusicServing {
+    static func track(_ id: String) -> MusicRemoteTrack {
+        .init(ref: .init(kind: .library, id: id), songId: id, title: id,
+            artist: "Synthetic artist", duration: 180,
+            sources: [.init(sourceKey: "wy:" + id, platform: "wy", nativeId: id)])
+    }
     struct Row: Sendable {
         let collection: MusicCollection
         let tracks: [MusicRemoteTrack]
         init(id: String = "playlist:1", revision: Int = 1, title: String = "Synthetic",
              kind: String = "playlist", songs: [String] = ["a", "b", "c", "d"]) {
             collection = .init(id: id, title: title, kind: kind, count: songs.count, revision: revision)
-            tracks = songs.map { .init(ref: .init(kind: .library, id: $0), songId: $0, title: $0) }
+            tracks = songs.map(MusicCollectionService.track)
         }
     }
     struct Counts: Sendable {
@@ -50,10 +55,12 @@ actor MusicCollectionService: MusicServing {
     private var queueEntries: [MusicQueueEntry] = []
     private var queueRevision = 0
     private var current: String?
+    private var batchTargetHistory: [Int] = []
     init(rows: [Row] = [Row()]) { self.rows = rows }
     func replace(_ rows: [Row]) { self.rows = rows }
     func snapshotRows() -> [Row] { rows }
     func statistics() -> Counts { counts }
+    func batchTargetCounts() -> [Int] { batchTargetHistory }
     func blockTracks(_ gate: MusicCollectionGate, error: MusicServiceError? = nil) {
         trackGates.append(gate); trackError = error
     }
@@ -148,7 +155,7 @@ actor MusicCollectionService: MusicServing {
         if let gate = platformGate { platformGate = nil; await gate.wait() }
         return []
     }
-    func search(platform: String, query: String, page: Int) throws -> MusicSearchPage { throw MusicServiceError.unsupported }
+    func search(platform: String, query: String, page: Int, limit: Int) throws -> MusicSearchPage { throw MusicServiceError.unsupported }
     func createPlaylist(name: String, refs: [MusicReference]) throws -> MusicCollection {
         counts.createCalls += 1
         let next = (rows.compactMap { row -> Int? in
@@ -179,6 +186,22 @@ actor MusicCollectionService: MusicServing {
     func commitImport(_ preview: MusicImportPreview) throws -> MusicImportReport { throw MusicServiceError.unsupported }
     func releaseImport(_ preview: MusicImportPreview) {}
     func rollbackImport(batchId: String) throws { throw MusicServiceError.unsupported }
+}
+
+extension MusicCollectionService: MusicSearchBatchPlaying {
+    func searchRecording(_ request: MusicSearchBatchRequest) async throws -> MusicRemoteTrack {
+        try request.validate()
+        guard request.targets.count == 1 else { throw MusicServiceError.invalidRequest }
+        return request.targets[0].track
+    }
+    func replaceSearchBatch(_ request: MusicSearchBatchRequest, expectedRevision: Int,
+                            intent: MusicQueueAuthorization) async throws -> MusicPlaybackState {
+        try request.validate()
+        try intent.check()
+        guard queueRevision == expectedRevision else { throw MusicServiceError.staleRevision }
+        batchTargetHistory.append(request.targets.count)
+        return playbackState()
+    }
 }
 
 @MainActor final class MusicCollectionPlayer: MusicPlaybackDriving {

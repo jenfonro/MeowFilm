@@ -82,17 +82,13 @@ function fixture({ missing = [], omitFiles = [] } = {}) {
   }
   add('packages/runtime-bridge', '@meowfilm/runtime-bridge', '0.1.0',
     { dependencies: { shared: '^1.0.0' } }, true);
-  add('packages/source-runtime', '@meowfilm/source-runtime', '0.1.0',
-    { files: ['src'] }, true);
   add('packages/script-host', '@meowfilm/script-host', '0.2.0',
     { files: ['src'], dependencies: {
       '@meowfilm/source-runtime': '0.1.0',
-      'fixture-lib': '^1.0.0',
-      'host-lib': '1.x',
-      'music-lib': '~1.0.0',
-      'fixture-dom': '26.1.0',
-      acorn: '8.18.0',
+      'fixture-lib': '^1.0.0', 'host-lib': '1.x', 'music-lib': '~1.0.0', 'fixture-dom': '26.1.0', acorn: '8.18.0',
     } }, true);
+  add('packages/source-runtime', '@meowfilm/source-runtime', '0.1.0',
+    { files: ['src'] }, true);
   add('packages/unused-core', '@meowfilm/unused-core', '0.2.0',
     { dependencies: { 'music-lib': '~1.0.0' } }, true);
   add('packages/inactive-core', '@meowfilm/inactive-core', '0.1.0',
@@ -119,6 +115,7 @@ function fixture({ missing = [], omitFiles = [] } = {}) {
   file('node_modules/unlocked-dev-only/package.json', { name: 'unlocked-dev-only', version: '9.0.0' });
   file('apps/runtime/bootstrap.mjs', `import '@meowfilm/runtime-bridge';\n${sourceCode}`);
   file('apps/runtime/modules/music-script.mjs', sourceCode);
+  file('apps/runtime/modules/cat-script.mjs', sourceCode);
   file('apps/runtime/modules/source-runtime.mjs', sourceCode);
   function saveLock() { write(root, 'package-lock.json', lock); }
   function update(location, changes, updateLock = true) {
@@ -169,13 +166,13 @@ test('interpreted workspace files still reject unsupported negative rules', asyn
 test('one App packaging stages only the script dependency closure with exact hashes', async () => {
   const f = fixture(), manifest = await f.pack();
   assert.equal(manifest.product, 'aggregate');
-  assert.deepEqual(manifest.modules, ['music', 'source']);
+  assert.deepEqual(manifest.modules, ['music', 'cat', 'source']);
   assert.equal(manifest.schemaVersion, 1);
   assert.equal(manifest.status, 'platform-pending');
   assert.equal(manifest.entry, 'app/windows/entries/aggregate.mjs');
   assert.match(manifest.integrityScope, /not an upstream signature/);
   assert.deepEqual(manifest.files.filter(f => f.path.startsWith('app/')).map(f => f.path),
-    ['app/bootstrap.mjs', 'app/modules/music-script.mjs', 'app/modules/source-runtime.mjs']);
+    ['app/bootstrap.mjs', 'app/modules/cat-script.mjs', 'app/modules/music-script.mjs', 'app/modules/source-runtime.mjs']);
   assert.deepEqual(manifest.dependencies.map(p => p.path).sort(), [
     'node_modules/@meowfilm/runtime-bridge', 'node_modules/@meowfilm/script-host',
     'node_modules/@meowfilm/source-runtime',
@@ -235,6 +232,13 @@ test('extensionless Node main entries resolve locally without loading package co
   }
 });
 
+test('an explicitly disabled Node main does not invalidate exported package files', async () => {
+  const f = fixture();
+  f.update('node_modules/shared', { main: false });
+  const manifest = await f.pack('aggregate');
+  assert.ok(manifest.dependencies.some(item => item.name === 'shared'));
+});
+
 test('large payload files are streamed and their byte lengths and hashes are exact', async () => {
   const f = fixture();
   const payload = Buffer.from(`export const text = ${JSON.stringify('猫'.repeat(60_000))};\n`);
@@ -269,9 +273,11 @@ test('missing required bootstrap leaves an explicit failed payload', async () =>
   assert.equal(readJSON(join(f.output(), 'runtime-manifest.json')).status, 'failed');
 });
 
-for (const module of ['music-script.mjs', 'source-runtime.mjs']) {
-  test(`missing shared ${module} cannot leave a platform-pending assembly`, async () => {
-    await fails(fixture({ omitFiles: [`apps/runtime/modules/${module}`] }), 'MISSING_SOURCE');
+for (const [module, file] of [
+  ['music', 'music-script.mjs'], ['cat', 'cat-script.mjs'], ['source', 'source-runtime.mjs'],
+]) {
+  test(`missing shared ${module} module cannot leave a platform-pending assembly`, async () => {
+    await fails(fixture({ omitFiles: [`apps/runtime/modules/${file}`] }), 'MISSING_SOURCE');
   });
 }
 

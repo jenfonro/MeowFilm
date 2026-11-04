@@ -12,10 +12,18 @@ public sealed partial class MusicCapability
     private string? playbackInstallation, targetInstallation, targetPlatform;
     private long onlineSettingsRevision, onlineGeneration;
     private string lyricStatus = "";
+    private long officialSourcesRevision;
+    private bool officialSourcesLoaded;
     private MusicRecordingRow? selectedRecording;
     private readonly Dictionary<string, string> recordingChoices = [];
     private readonly Dictionary<string, string> recordingPlatforms = [];
     public ObservableCollection<MusicSourceRow> Sources { get; } = [];
+    public ObservableCollection<MusicOfficialSourceRow> OfficialSourceRows { get; } =
+    [
+        new("wy", "网易云音乐", true),
+        new("tx", "QQ 音乐", true),
+        new("kg", "酷狗音乐", true)
+    ];
     public ObservableCollection<MusicSourcePlatformRow> SourcePlatformRows { get; } = [];
     public ObservableCollection<MusicLyricRow> Lyrics { get; } = [];
     public ObservableCollection<MusicRecordingRow> RecordingCandidates { get; } = [];
@@ -45,9 +53,7 @@ public sealed partial class MusicCapability
             {
                 var platform = MusicDto.Text(source, "source");
                 var key = MusicDto.Text(source, "sourceKey");
-                var data = source.GetProperty("source_data");
-                var native = data.TryGetProperty("musicId", out var nativeId) ? nativeId.ToString() :
-                    data.TryGetProperty("songmid", out var mid) ? mid.ToString() : key;
+                var native = SongJson.InfoId(source.GetProperty("musicInfo")) is { Length: > 0 } id ? id : key;
                 var row = new MusicRecordingRow(subject.Id, key, platform, platform + " · " + native);
                 RecordingCandidates.Add(row);
                 if (recordingPlatforms.GetValueOrDefault(subject.Id) == platform &&
@@ -94,13 +100,14 @@ public sealed partial class MusicCapability
     public string PlaybackTarget => targetInstallation is null ? "官方音源" :
         $"{Sources.FirstOrDefault(source => source.InstallationId == targetInstallation)?.Name ?? "JS 音源"} · {PlatformName(targetPlatform)}";
     public bool CanCancelOnline => onlineCancellation is not null;
+    public bool CanEditOfficialSources => CanEdit && officialSourcesLoaded;
     private void OnlineBindings()
     {
         foreach (var property in new[] { nameof(HasSource), nameof(CanEditSource), nameof(CanLoadSource),
             nameof(CanRollbackSource), nameof(CanUseSelectedSource),
             nameof(UsesOfficialSources), nameof(IsLyrics), nameof(LyricStatus),
             nameof(ActiveLyricIndex), nameof(SourceCapabilities), nameof(SourcePlatforms), nameof(SelectedPlatform),
-            nameof(PlaybackTarget), nameof(CanCancelOnline) })
+            nameof(PlaybackTarget), nameof(CanCancelOnline), nameof(CanEditOfficialSources) })
             Changed(property);
     }
     private static string PlatformName(string? platform) => platform switch
@@ -139,11 +146,11 @@ public sealed partial class MusicCapability
     }
     private async Task<string> UploadScript(byte[] bytes, string hash, string basename, CancellationToken token)
     {
-        if (bytes.Length is < 1 or > 512 * 1024)
+        if (bytes.Length < 1 || bytes.Length > SelectedScriptSnapshot.MaximumBytes)
             throw new MusicOperationException("LIMIT");
         if (!StringComparer.Ordinal.Equals(hash, Convert.ToHexStringLower(SHA256.HashData(bytes))))
             throw new MusicOperationException("SCRIPT_INTEGRITY");
-        var begin = await Call("music.transfer.begin", new
+        var begin = await CallSettledReceipt("music.transfer.begin", new
         {
             kind = "script",
             length = bytes.Length,
@@ -151,15 +158,15 @@ public sealed partial class MusicCapability
             basename
         }, token);
         var transfer = MusicDto.Text(begin, "token");
-        var chunkBytes = MusicDto.Count(begin, "chunkBytes");
-        MusicDto.Require(chunkBytes is > 0 and <= 16 * 1024);
         try
         {
+            var chunkBytes = MusicDto.Count(begin, "chunkBytes");
+            MusicDto.Require(chunkBytes is > 0 and <= 16 * 1024);
             for (int offset = 0; offset < bytes.Length;)
             {
                 token.ThrowIfCancellationRequested();
                 var count = Math.Min(chunkBytes, bytes.Length - offset);
-                var reply = await Call("music.transfer.chunk", new { token = transfer, offset,
+                var reply = await CallSettledReceipt("music.transfer.chunk", new { token = transfer, offset,
                     data = Convert.ToBase64String(bytes, offset, count) }, token);
                 MusicDto.Require(MusicDto.Integer(reply, "next") == offset + count);
                 offset += count;
@@ -168,7 +175,7 @@ public sealed partial class MusicCapability
         }
         catch
         {
-            try { await Call("music.transfer.cancel", new { token = transfer }); } catch { }
+            try { await CallSettledReceipt("music.transfer.cancel", new { token = transfer }); } catch { }
             throw;
         }
     }
@@ -188,6 +195,62 @@ public sealed partial class MusicCapability
         await ReadOnlineSettings(lifetime.Token);
         await RefreshSources(lifetime.Token);
     });
+
+    public Task RefreshSourceManagementAsync() => RunAsync(async () =>
+    {
+        await RefreshOfficialSources(lifetime.Token);
+        await ReadOnlineSettings(lifetime.Token);
+        await RefreshSources(lifetime.Token);
+    });
+
+    private async Task RefreshOfficialSources(CancellationToken token)
+    {
+        try
+        {
+            var reply = await Call("music.officialSources.settings.get", cancellationToken: token);
+            PublishOfficialSources(reply.GetProperty("settings"));
+        }
+        catch
+        {
+            officialSourcesLoaded = false;
+            Changed(nameof(CanEditOfficialSources));
+            throw;
+        }
+    }
+
+    private void PublishOfficialSources(JsonElement value)
+    {
+        officialSourcesRevision = MusicDto.Integer(value, "revision");
+        officialSourcesLoaded = true;
+        var enabled = value.GetProperty("enabled").EnumerateArray().Select(item => item.GetString()).ToHashSet(StringComparer.Ordinal);
+        foreach (var row in OfficialSourceRows) row.SetEnabled(enabled.Contains(row.Platform));
+        Changed(nameof(CanEditOfficialSources));
+    }
+
+    public Task SetOfficialSourceEnabledAsync(MusicOfficialSourceRow? source, bool enabled)
+    {
+        if (!CanEditOfficialSources || source is null || !OfficialSourceRows.Contains(source)) return Task.CompletedTask;
+        return RunAsync(async () =>
+        {
+            var selected = OfficialSourceRows.Where(row => row.Enabled)
+                .Select(row => row.Platform).ToHashSet(StringComparer.Ordinal);
+            if (enabled) selected.Add(source.Platform); else selected.Remove(source.Platform);
+            try
+            {
+                var reply = await CallSettledReceipt("music.officialSources.settings.save", new
+                {
+                    ifRevision = officialSourcesRevision,
+                    enabled = OfficialSourceRows.Where(row => selected.Contains(row.Platform)).Select(row => row.Platform).ToArray()
+                }, lifetime.Token);
+                PublishOfficialSources(reply.GetProperty("settings"));
+            }
+            catch
+            {
+                try { await RefreshOfficialSources(lifetime.Token); } catch { }
+                throw;
+            }
+        });
+    }
     private async Task ReadOnlineSettings(CancellationToken token)
     {
         var reply = await QualityCall("music.quality.settings.get", null, token);
@@ -232,16 +295,40 @@ public sealed partial class MusicCapability
     public Task ImportSourceAsync()
     {
         if (dialogs.SelectScriptFiles() is not { Length: > 0 } paths) return Task.CompletedTask;
-        return Sources.Count + paths.Length <= 32
-            ? ChangeSourceFilesAsync(paths, null)
-            : RunAsync(() => throw new MusicOperationException("LIMIT"));
+        return ChangeSourceFilesAsync(paths, null);
     }
     public Task UpdateSourceAsync()
     {
-        var source = selectedSource;
-        return source is not null && dialogs.SelectScriptFile() is { } path
+        return UpdateSourceAsync(selectedSource);
+    }
+    public Task UpdateSourceAsync(MusicSourceRow? source)
+    {
+        return source is not null && Sources.Contains(source) && dialogs.SelectScriptFile() is { } path
             ? ChangeSourceFilesAsync([path], source)
             : Task.CompletedTask;
+    }
+    public Task ImportSourceFromUrlAsync(string address)
+    {
+        if (!CanEdit) return Task.CompletedTask;
+        return RunAsync(async () =>
+        {
+            using var request = BeginOnline(lifetime.Token);
+            byte[]? bytes = null;
+            string? installed = null;
+            try
+            {
+                var downloaded = await sourceNetworkDownload.ReadAsync(address, request.Token);
+                bytes = downloaded.Bytes;
+                string hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+                installed = await InstallSourceBytes(bytes, hash, downloaded.Basename, null, request.Token);
+            }
+            finally
+            {
+                if (bytes is not null) CryptographicOperations.ZeroMemory(bytes);
+                EndOnline(request);
+                if (installed is not null) await RefreshChangedSources(installed);
+            }
+        });
     }
     private Task ChangeSourceFilesAsync(string[] paths, MusicSourceRow? update)
     {
@@ -253,56 +340,69 @@ public sealed partial class MusicCapability
             {
                 foreach (var path in paths)
                 {
-                    string? transfer = null;
                     var snapshot = await SelectedScriptSnapshot.ReadAsync(path, request.Token);
                     try
                     {
-                        var inspection = MusicSourceScriptInspector.Inspect(snapshot.Bytes, snapshot.Basename, snapshot.Sha256);
-                        transfer = await UploadScript(snapshot.Bytes, snapshot.Sha256, snapshot.Basename, request.Token);
-                        if (update is not null)
-                        {
-                            var changed = await Call("music.sources.update", new { installationId = update.InstallationId,
-                                token = transfer, version = inspection.Version,
-                                permissions = SourcePermissions() }, request.Token);
-                            choose = MusicDto.Text(changed.GetProperty("item"), "installationId");
-                            await RevokeChangedMusicSource(update.InstallationId);
-                        }
-                        else
-                        {
-                            var installed = await Call("music.sources.install", new { token = transfer,
-                                name = inspection.Name, version = inspection.Version,
-                                permissions = SourcePermissions() }, request.Token);
-                            choose = MusicDto.Text(installed.GetProperty("item"), "installationId");
-                        }
+                        choose = await InstallSourceBytes(snapshot.Bytes, snapshot.Sha256, snapshot.Basename,
+                            update, request.Token);
                     }
                     finally
                     {
                         CryptographicOperations.ZeroMemory(snapshot.Bytes);
-                        if (transfer is not null)
-                        {
-                            try { await Call("music.transfer.cancel", new { token = transfer }); }
-                            catch { }
-                        }
                     }
                 }
-                await RefreshSources(lifetime.Token);
-                if (choose is not null && Sources.FirstOrDefault(source => source.InstallationId == choose) is { } selected &&
-                    !ReferenceEquals(selectedSource, selected))
-                {
-                    SelectedSource = selected;
-                }
             }
-            finally { EndOnline(request); }
+            finally
+            {
+                EndOnline(request);
+                await RefreshChangedSources(choose);
+            }
         });
+    }
+    private async Task RefreshChangedSources(string? choose)
+    {
+        await RefreshSources(lifetime.Token);
+        if (choose is not null && Sources.FirstOrDefault(source => source.InstallationId == choose) is { } selected)
+            SelectedSource = selected;
+    }
+    private async Task<string> InstallSourceBytes(byte[] bytes, string hash, string basename,
+        MusicSourceRow? update, CancellationToken token)
+    {
+        var inspection = MusicSourceScriptInspector.Inspect(bytes, basename, hash);
+        string transfer = await UploadScript(bytes, hash, basename, token);
+        try
+        {
+            token.ThrowIfCancellationRequested();
+            if (update is not null)
+            {
+                var changed = await CallSettledReceipt("music.sources.update", new { installationId = update.InstallationId,
+                    token = transfer, version = inspection.Version,
+                    permissions = SourcePermissions() }, token);
+                await RevokeChangedMusicSource(update.InstallationId);
+                return MusicDto.Text(changed.GetProperty("item"), "installationId");
+            }
+            var installed = await CallSettledReceipt("music.sources.install", new { token = transfer,
+                name = inspection.Name, version = inspection.Version,
+                permissions = SourcePermissions() }, token);
+            return MusicDto.Text(installed.GetProperty("item"), "installationId");
+        }
+        finally
+        {
+            try { await CallSettledReceipt("music.transfer.cancel", new { token = transfer }); } catch { }
+        }
     }
     public Task SourceActionAsync(string action)
     {
         var source = selectedSource;
+        return SourceActionAsync(source, action);
+    }
+    public Task SourceActionAsync(MusicSourceRow? source, string action)
+    {
         if (action is not ("enable" or "disable" or "rollback" or "remove")) return Task.CompletedTask;
         onlineCancellation?.Cancel();
         return RunAsync(async () =>
         {
-            if (source is null) return;
+            if (source is null || !Sources.Contains(source)) return;
             if (action == "remove" && !dialogs.Confirm($"删除音源“{source.Name}”？", "删除音源")) return;
             if (action == "rollback" && !dialogs.Confirm($"回退音源“{source.Name}”？", "回退音源")) return;
             if (playbackInstallation == source.InstallationId && action != "enable") await StopOwnedPlayback();
@@ -336,8 +436,11 @@ public sealed partial class MusicCapability
     }
     public Task UseSourcePlatformAsync(string platform)
     {
-        var source = selectedSource;
-        if (!CanEdit || source is null) return Task.CompletedTask;
+        return UseSourcePlatformAsync(selectedSource, platform);
+    }
+    public Task UseSourcePlatformAsync(MusicSourceRow? source, string platform)
+    {
+        if (!CanEdit || source is null || !Sources.Contains(source)) return Task.CompletedTask;
         if (!source.Enabled || !source.Platforms.Contains(platform))
             return RunAsync(() => throw new MusicOperationException("TARGET_REQUIRED"));
         return SaveOnlineTargetAsync(source, platform);

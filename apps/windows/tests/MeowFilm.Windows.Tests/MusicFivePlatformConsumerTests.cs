@@ -16,54 +16,44 @@ public static partial class MusicUiTests
 {
     internal static IEnumerable<TestCase> PublicCatalogConsumerCases()
     {
-        yield return Case("native KW and MG aggregate preserves grouped versions through WPF and native next page", async () =>
+        yield return Case("native KW and MG search preserves grouped versions through WPF and the next round", async () =>
         {
             await using var f = await PublicSearchScene.Create();
             await f.Search();
             // Provider completion precedes the asynchronous rank-fusion publication.
-            await SearchUntil(() => f.Module.SearchProgress.Count == 2 && f.Module.SearchProgress.All(p => !p.Loading) &&
-                f.Module.CanAggregateMore);
-            var mg = f.Module.SearchProgress.Single(p => p.Platform == "mg");
-            var kw = f.Module.SearchProgress.Single(p => p.Platform == "kw");
-            Equal(31, mg.Count); Equal(1, mg.Page); True(mg.More, "native group continuation retained");
-            Equal(1, kw.Count); Equal("", mg.Error); Equal("", kw.Error);
-            Equal(32, f.Module.Songs.Count); True(f.Module.CanAggregateMore, "actual next-page control");
-            await f.Module.MoreAggregateSearchAsync();
-            await SearchUntil(() => f.Module.SearchProgress.Single(p => p.Platform == "mg") is { Page: 2, Loading: false } &&
-                f.Module.Songs.Count == 34);
-            mg = f.Module.SearchProgress.Single(p => p.Platform == "mg");
-            Equal(33, mg.Count); True(!mg.More, "expanded count is not the group cursor");
-            Equal(34, f.Module.Songs.Count);
-            var state = await f.Call("music.search.start",
-                new { keyword = "版本搜索", kind = "songs", platforms = new[] { "kw", "mg" } });
-            var native = state.GetProperty("platforms").EnumerateArray().Single(p => p.GetProperty("platform").GetString() == "mg");
-            Equal("groups", native.GetProperty("totalUnit").GetString());
-            Equal(31L, native.GetProperty("total").GetInt64());
-            Equal(1, native.GetProperty("groupCount").GetInt32());
-            Equal(2, native.GetProperty("rawItemCount").GetInt32());
+            await SearchUntil(() => f.Module.Songs.Count == 32 && f.Module.CanSearchMore);
+            var state = await f.Snapshot();
+            var mg = Platform(state, "mg"); var kw = Platform(state, "kw");
+            Equal(31, mg.GetProperty("count").GetInt32()); Equal(1, mg.GetProperty("page").GetInt32());
+            True(mg.GetProperty("more").GetBoolean(), "native group continuation retained");
+            Equal(1, kw.GetProperty("count").GetInt32());
+            Equal("", mg.GetProperty("error").GetString()); Equal("", kw.GetProperty("error").GetString());
+            True(f.Module.CanSearchMore, "actual next-round control");
+            await f.Module.MoreSearchAsync();
+            await SearchUntil(() => f.Module.Songs.Count == 34 && !f.Module.CanSearchMore);
+            mg = Platform(await f.Snapshot(), "mg");
+            Equal(33, mg.GetProperty("count").GetInt32()); Equal(2, mg.GetProperty("page").GetInt32());
+            True(!mg.GetProperty("more").GetBoolean(), "expanded count is not the group cursor");
             Equal(2, f.Http.MgPages.Count); Equal(0, f.Runtime.Calls.Count);
         });
-        yield return Case("native public search retries only failed KW and keeps MG recording metadata in queue", async () =>
+        yield return Case("native public search retries failed KW in the next round and keeps MG recording metadata in queue", async () =>
         {
             await using var f = await PublicSearchScene.Create();
             f.Http.FailKw = true;
             await f.Search();
             // Completed providers may still have a rank-fusion publication in flight.
-            await SearchUntil(() => f.Module.SearchProgress.Count == 2 && f.Module.SearchProgress.All(p => !p.Loading) &&
-                f.Module.CanAggregateMore);
-            var failed = f.Module.SearchProgress.Single(p => p.Platform == "kw");
-            True(failed.CanRetry, "failed provider remains retryable");
-            Equal(31, f.Module.Songs.Count);
-            await f.Module.RetryAggregateSearchAsync(failed);
-            await SearchUntil(() => f.Module.SearchProgress.Single(p => p.Platform == "kw") is { Count: 1, Loading: false } &&
-                f.Module.CanAggregateMore);
-            Equal(32, f.Module.Songs.Count);
-            Equal(2, f.Http.KwRequests); Equal(1, f.Http.MgPages.Count);
+            await SearchUntil(() => f.Module.Songs.Count == 31 && f.Module.CanSearchMore);
+            True(Platform(await f.Snapshot(), "kw").GetProperty("error").GetString()!.Length > 0, "failed provider is reported");
+            await f.Module.MoreSearchAsync();
+            await SearchUntil(() => f.Module.Songs.Count == 34 && !f.Module.CanSearchMore);
+            var kw = Platform(await f.Snapshot(), "kw");
+            Equal(1, kw.GetProperty("count").GetInt32()); Equal("", kw.GetProperty("error").GetString());
+            Equal(2, f.Http.KwRequests); Equal(2, f.Http.MgPages.Count);
             var card = f.Module.CatalogSections.Single().Items.Single(c => c.Platform == "mg" &&
-                c.Song?.Raw.GetProperty("source_data").GetProperty("songId").GetString() == "S1001");
+                c.Song is { } song && MusicSongFixture.Info(song.Raw).GetProperty("songId").GetString() == "S1001");
             await f.Module.QueueCatalogCardAsync(card);
             var queue = await f.Call("music.queue.get", new { offset = 0, limit = 100 });
-            var source = queue.GetProperty("entries")[0].GetProperty("song").GetProperty("source_data");
+            var source = MusicSongFixture.Info(queue.GetProperty("entries")[0].GetProperty("song"));
             Equal("mg", source.GetProperty("source").GetString());
             Equal("S1001", source.GetProperty("songId").GetString());
             Equal("C1001", source.GetProperty("copyrightId").GetString());
@@ -72,6 +62,8 @@ public static partial class MusicUiTests
             Equal(0, f.Runtime.Calls.Count);
         });
     }
+    private static JsonElement Platform(JsonElement snapshot, string platform) =>
+        snapshot.GetProperty("platforms").EnumerateArray().Single(p => p.GetProperty("platform").GetString() == platform);
     private sealed class PublicSearchScene : IAsyncDisposable
     {
         private readonly DpapiDocumentStore store = ServiceStore();
@@ -79,9 +71,15 @@ public static partial class MusicUiTests
         internal readonly PublicSearchHttp Http = new();
         internal readonly MusicNativeApplication App;
         internal readonly MusicCapability Module;
+        private string? songQueryId;
         private PublicSearchScene()
         {
             App = new(store, Runtime, Http); Runtime.Register(App);
+            App.SearchChanged += snapshot =>
+            {
+                if (snapshot.GetProperty("kind").GetString() == "songs")
+                    Volatile.Write(ref songQueryId, snapshot.GetProperty("id").GetString());
+            };
             Module = new(App, store, new PlaybackProbe(), new Dialogs());
         }
         internal static async Task<PublicSearchScene> Create()
@@ -94,7 +92,6 @@ public static partial class MusicUiTests
                     await scene.Module.SetSearchPlatformEnabledAsync("songs", row, row.Platform is "kw" or "mg");
                 foreach (var row in scene.Module.PlaylistSearch.Platforms.ToArray())
                     await scene.Module.SetSearchPlatformEnabledAsync("playlists", row, false);
-                await scene.Module.SetSearchModeAsync("songs", "aggregate");
                 return scene;
             }
             catch { await scene.DisposeAsync(); throw; }
@@ -105,10 +102,13 @@ public static partial class MusicUiTests
             True(result.GetProperty("ok").GetBoolean(), method + ":" + result.GetRawText());
             return result;
         }
+        internal Task<JsonElement> Snapshot() => Call("music.search.get",
+            new { id = Volatile.Read(ref songQueryId) ?? throw new InvalidOperationException("No admitted song search") });
         internal async Task Search()
         {
             await Module.NavigateAsync("catalog-search", default);
             await Module.SearchAsync("版本搜索", default);
+            await Module.OpenSearchTabAsync("songs");
         }
         public async ValueTask DisposeAsync()
         {

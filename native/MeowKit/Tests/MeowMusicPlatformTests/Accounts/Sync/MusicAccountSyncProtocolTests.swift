@@ -108,7 +108,7 @@ import MeowMusicFeature
         _ = try await provider.syncWrite(.init(action: .delete, collectionID: c.id, before: c), credential: credential, guard: authorization)
         await http.replies("CgiGetTrackInfo", try MusicAccountFixture.rpc(["tracks": [MusicAccountFixture.song("NewMID", id: 202)]]))
         let addition = MusicLibrarySyncMember(nativeID: "NewMID", occurrenceID: "NewMID",
-            track: try MusicQQWire.json(["musicId": "NewMID", "qqSongId": "999"])) // Untrusted numeric hint is not used.
+            track: try MusicQQWire.json(["songmid": "NewMID", "qqSongId": "999"])) // Untrusted numeric hint is not used.
         _ = try await provider.syncWrite(.init(action: .add, collectionID: c.id, before: c, members: [addition]), credential: credential, guard: authorization)
         let requests = await http.recorded()
         let writes = try requests.filter { try ["AddPlaylist", "EditPlaylist", "DelSonglist", "DelPlaylist", "AddSonglist"].contains(MusicAccountTestHTTP.method($0)) }

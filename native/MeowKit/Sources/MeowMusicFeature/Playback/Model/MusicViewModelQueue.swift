@@ -4,6 +4,11 @@ import MeowContracts
 import MeowPlayback
 import MeowStorage
 
+struct MusicFMArtwork: Equatable {
+    let configuration: MusicHomeAction
+    let url: URL?
+}
+
 @MainActor
 extension MusicViewModel {
     public func play(_ track: MusicRemoteTrack) async { await queueAction(.replace([track.ref], index: 0), startPlayback: true) }
@@ -43,7 +48,7 @@ extension MusicViewModel {
     /// A search section/playlist preview is one queue transaction, not a series
     /// of single-song plays that replace each other or lose occurrence order.
     public func play(_ tracks: [MusicRemoteTrack], index: Int) async {
-        guard (1...2000).contains(tracks.count), tracks.indices.contains(index) else {
+        guard !tracks.isEmpty, tracks.indices.contains(index) else {
             error = MusicServiceError.invalidRequest.localizedDescription
             return
         }
@@ -54,6 +59,11 @@ extension MusicViewModel {
     }
     public func selectOccurrence(_ id: String) async { await queueAction(.select(id), startPlayback: true) }
     public func insertNext(_ track: MusicRemoteTrack) async { await queueAction(.append([track.ref], next: true), startPlayback: false) }
+    /// Inserts a selected batch as one queue transaction, preserving its order.
+    public func insertNext(_ tracks: [MusicRemoteTrack]) async {
+        guard !tracks.isEmpty else { return }
+        await queueAction(.append(tracks.map(\.ref), next: true), startPlayback: false)
+    }
     public func append(_ track: MusicRemoteTrack) async { await queueAction(.append([track.ref], next: false), startPlayback: false) }
     public func removeOccurrence(_ id: String) async {
         await queueAction(.remove(id), startPlayback: false)
@@ -72,14 +82,14 @@ extension MusicViewModel {
 
     public func openAccountQueue(platform: MusicAccountPlatform, kind: MusicAccountQueueKind,
                                  title: String) async throws -> MusicRemoteQueueSource {
-        let epoch = try enter(); defer { pending -= 1 }
+        let epoch = try enter()
         guard let remoteQueueService else { throw MusicServiceError.unavailable }
         let source = try await remoteQueueService.openAccountQueue(platform: platform, kind: kind, title: title)
         do { try check(epoch); return source }
         catch { source.revoke(); await source.close(); throw error }
     }
     public func openHomeActionQueue(_ action: MusicHomeAction, title: String) async throws -> MusicRemoteQueueSource {
-        let epoch = try enter(); defer { pending -= 1 }
+        let epoch = try enter()
         guard let provider = service as? any MusicHomeActionQueueServing else { throw MusicServiceError.unsupported }
         let source = try await provider.openHomeActionQueue(action, title: title)
         do { try check(epoch); return source }
@@ -110,19 +120,27 @@ extension MusicViewModel {
     /// Only the current occurrence of this exact live radio session can supply
     /// an entrance cover; an inserted/selected song is not implicitly an FM song.
     func currentFMArtwork(_ action: MusicHomeAction) -> URL? {
-        guard action.isPersonalFM, activeHomeFM?.fmConfiguration == action.fmConfiguration,
-              let fmSource, fmSource.authorization.isActive, current?.remoteSessionID == fmSource.id,
-              !isPreparingRemoteQueue, phase != .failed else { return nil }
-        return displayTrack?.artwork
+        guard let artwork = fmArtwork(configuration: activeHomeFM?.fmConfiguration, current: current,
+            metadataURL: metadataArtworkURL, metadataOccurrence: metadataOccurrenceID,
+            ready: isFMActive && !isPreparingRemoteQueue && phase != .failed),
+              action.isPersonalFM, artwork.configuration == action.fmConfiguration else { return nil }
+        return artwork.url
+    }
+    func fmArtwork(configuration: MusicHomeAction?, current: MusicQueueEntry?,
+                   metadataURL: URL?, metadataOccurrence: String?, ready: Bool) -> MusicFMArtwork? {
+        guard ready, let configuration, let current, let fmSource,
+              fmSource.authorization.isActive, current.remoteSessionID == fmSource.id else { return nil }
+        return .init(configuration: configuration,
+            url: metadataOccurrence == current.id ? metadataURL : current.track.artwork)
     }
     public func remoteQueuePage(_ source: MusicRemoteQueueSource, cursor: String?) async throws -> MusicBrowsePage {
-        let epoch = try enter(); defer { pending -= 1 }
+        let epoch = try enter()
         guard let remoteQueueService else { throw MusicServiceError.unavailable }
         let page = try await remoteQueueService.remoteQueuePage(source, cursor: cursor)
         try check(epoch); try source.authorization.check(); return page
     }
     public func filteredRemoteQueue(_ source: MusicRemoteQueueSource, query: String) async throws -> MusicRemoteQueueSource {
-        let epoch = try enter(); defer { pending -= 1 }
+        let epoch = try enter()
         guard let provider = service as? any MusicRemoteCollectionServing else { throw MusicServiceError.unsupported }
         let intent = MusicQueueAuthorization()
         defer { intent.revoke() }
@@ -133,7 +151,7 @@ extension MusicViewModel {
         catch { filtered.revoke(); await filtered.close(); throw error }
     }
     public func saveRemoteCollection(_ source: MusicRemoteQueueSource, name: String) async throws {
-        let epoch = try enter(); defer { pending -= 1 }
+        let epoch = try enter()
         guard let provider = service as? any MusicRemoteCollectionServing else { throw MusicServiceError.unsupported }
         let intent = MusicQueueAuthorization()
         defer { intent.revoke() }
@@ -169,7 +187,6 @@ extension MusicViewModel {
         cancelRemoteQueuePreparation(); cancelFMNavigation()
         let own: UUID
         do { own = try enter() } catch { return }
-        defer { pending -= 1 }
         guard !isChangingQueue, !isNavigating, let service, player != nil else {
             report(MusicServiceError.busy, epoch: own); return
         }
@@ -219,7 +236,6 @@ extension MusicViewModel {
     func prepareRemoteQueue(_ source: MusicRemoteQueueSource, start: MusicRemoteQueueStart) async throws {
         cancelRemoteQueuePreparation(); cancelFMNavigation()
         let epoch = try enter()
-        defer { pending -= 1 }
         guard !isChangingQueue, !isNavigating, let service, let remoteQueueService, player != nil else {
             throw MusicServiceError.busy
         }
@@ -324,7 +340,6 @@ extension MusicViewModel {
                          onSelection: (@MainActor (MusicQueueEntry) -> Void)? = nil) async {
         let epoch: UUID
         do { epoch = try enter() } catch { return }
-        defer { pending -= 1 }
         guard !isChangingQueue else { return }
         playbackState.isChangingQueue = true
         let navigation = navigationID

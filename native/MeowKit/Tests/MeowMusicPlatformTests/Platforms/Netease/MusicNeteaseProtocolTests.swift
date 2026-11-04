@@ -201,6 +201,33 @@ final class MusicNeteaseProtocolTests: XCTestCase {
         XCTAssertThrowsError(try MusicNeteaseWire.cookies(.init(status: 200, data: Data(),
             headers: ["set-cookie": "MUSIC_U=synthetic; Domain=evil.invalid"]), host: "music.163.com"))
     }
+    func testParallelExchangeResponsesMergeDeviceCookiesIntoTheCurrentOwnerValue() async throws {
+        let document = QQPublicPersistenceMemory()
+        let clients = NativeMusicClientService(documents: [.netease: document, .kugou: .init()])
+        try clients.setAccess(available: true, generation: 1)
+        let installed = try await clients.nativeClientDevice(platform: .netease)
+        let clock = MusicAccountTestClock(), http = MusicNeteaseTestHTTP(clock: clock)
+        await http.replies("/weapi/w/nuser/account/get", [
+            try MusicNeteaseFixture.response(["code": 200, "profile": ["userId": 42]],
+                headers: ["set-cookie": "_ntes_nuid=synthetic-exchange-a; Path=/; Domain=music.163.com"]),
+            try MusicNeteaseFixture.response(["code": 200, "profile": ["userId": 42]],
+                headers: ["set-cookie": "WNMCID=synthetic-exchange-b; Path=/; Domain=music.163.com"])
+        ])
+        let adapter = NeteaseMusicAccountAdapter(transport: http, now: { clock.now() }, clientContexts: clients)
+        let first = MusicNeteaseContext(device: installed.fields)
+        first.clientDevice = installed
+        let second = MusicNeteaseContext(device: installed.fields)
+        second.clientDevice = installed
+        async let a = adapter.request("/api/w/nuser/account/get", crypto: "weapi", context: first)
+        async let b = adapter.request("/api/w/nuser/account/get", crypto: "weapi", context: second)
+        _ = try await a
+        _ = try await b
+        let final = try await clients.nativeClientDevice(platform: .netease)
+        XCTAssertEqual(final.fields["_ntes_nuid"], "synthetic-exchange-a")
+        XCTAssertEqual(final.fields["WNMCID"], "synthetic-exchange-b")
+        XCTAssertEqual(final.fields["deviceId"], installed.fields["deviceId"])
+        clients.close()
+    }
     func testOfficialURLAllowlistRejectsLocalAndCredentialLocations() throws {
         for raw in ["http://127.0.0.1/x", "https://[::1]/x", "https://localhost/x",
                     "https://m801.music.126.net.evil.invalid/x", "https://name:pass@m801.music.126.net/x",

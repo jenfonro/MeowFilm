@@ -135,19 +135,23 @@ public final class NativeMusicClientService: MusicNativeClientContextProviding, 
         guard fields[key] == original.fields[key] else { throw MusicServiceError.targetChanged }
         return .init(platform: original.platform, fields: fields, admission: original.admission, revision: saved.revision)
     }
-    func update(_ original: MusicNativeClientDevice, fields: [String: String]) throws -> MusicNativeClientDevice {
-        let state = try state(original.platform), observed = try state.snapshot(original.admission)
-        guard observed.revision == original.revision, observed.value == original.fields else {
-            throw MusicServiceError.storageConflict
-        }
+    func update(_ original: MusicNativeClientDevice, fields: [String: String],
+                removing: Set<String> = []) throws -> MusicNativeClientDevice {
+        let state = try state(original.platform)
         let key = original.platform == .netease ? "deviceId" : "seed"
-        guard fields[key] == original.fields[key] else { throw MusicServiceError.verificationRequired }
-        do { try Self.validate(fields, platform: original.platform) }
-        catch { throw MusicServiceError.upstreamInvalid }
-        try state.save(fields, token: original.admission, expectedRevision: original.revision)
-        let saved = try state.snapshot(original.admission)
-        guard let value = saved.value else { throw MusicServiceError.storageFailed }
-        return .init(platform: original.platform, fields: value, admission: original.admission, revision: saved.revision)
+        let saved = try state.update(original.admission) { current in
+            guard current[key] == original.fields[key] else { throw MusicServiceError.verificationRequired }
+            guard fields[key] == nil || fields[key] == current[key] else { throw MusicServiceError.verificationRequired }
+            guard !removing.contains(key) else { throw MusicServiceError.verificationRequired }
+            var merged = current
+            for name in removing { merged.removeValue(forKey: name) }
+            for (name, value) in fields { merged[name] = value }
+            do { try Self.validate(merged, platform: original.platform) }
+            catch { throw MusicServiceError.upstreamInvalid }
+            return merged
+        }
+        return .init(platform: original.platform, fields: saved.value, admission: original.admission,
+                     revision: saved.revision)
     }
     public func acceptNativeClientResponse(_ device: MusicNativeClientDevice, url: URL,
                                           headers: [String: String]) async throws -> MusicNativeClientDevice {
@@ -158,9 +162,11 @@ public final class NativeMusicClientService: MusicNativeClientContextProviding, 
             throw MusicServiceError.invalidRequest
         }
         let cookies = try MusicNeteaseWire.cookies(.init(status: 200, data: Data(), headers: headers), host: host)
-        var fields = device.fields
-        for (key, value) in cookies where MusicNeteaseWire.deviceKeys.contains(key) { fields[key] = value }
-        if fields == device.fields { return try current(device) }
-        return try update(device, fields: fields)
+        var fields: [String: String] = [:], removing = Set<String>()
+        for (key, value) in cookies where MusicNeteaseWire.deviceKeys.contains(key) {
+            if let value { fields[key] = value } else { removing.insert(key) }
+        }
+        if fields.isEmpty && removing.isEmpty { return try current(device) }
+        return try update(device, fields: fields, removing: removing)
     }
 }

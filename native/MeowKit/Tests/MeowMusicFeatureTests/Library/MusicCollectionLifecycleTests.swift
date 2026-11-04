@@ -181,24 +181,28 @@ final class MusicCollectionLifecycleTests: XCTestCase {
         page.disappear(); await model.close()
     }
 
-    @MainActor func testReadBudgetDoesNotForgetCancelledNonCooperativeRequestsAndCanRecover() async throws {
+    @MainActor func testFreshPageBindingDoesNotWaitForRetiredNonCooperativeReads() async throws {
         let (service, model, page, _) = setup()
-        let a = expectation(description: "read A"), b = expectation(description: "read B")
-        let firstGate = MusicCollectionGate { a.fulfill() }, secondGate = MusicCollectionGate { b.fulfill() }
-        await service.blockTracks(firstGate)
-        let first = try XCTUnwrap(page.appear())
-        await fulfillment(of: [a], timeout: 2)
-        await service.blockTracks(secondGate)
-        let second = try XCTUnwrap(page.reload())
-        await fulfillment(of: [b], timeout: 2)
-        for _ in 0..<8 { XCTAssertNil(page.reload()) }
-        XCTAssertEqual(page.error, .busy); XCTAssertFalse(page.canAct)
-        let bounded = await service.statistics(); XCTAssertEqual(bounded.tracks, 2)
-        await secondGate.release(); await second.value
-        await firstGate.release(); await first.value
-        await page.reload()?.value
+        var gates: [MusicCollectionGate] = [], tasks: [Task<Void, Never>] = []
+        for index in 0..<4 {
+            let entered = expectation(description: "retired collection read \(index)")
+            let gate = MusicCollectionGate { entered.fulfill() }
+            gates.append(gate)
+            await service.blockTracks(gate)
+            tasks.append(try XCTUnwrap(index == 0 ? page.appear() : page.reload()))
+            await fulfillment(of: [entered], timeout: 2)
+        }
+        await service.replace([.init(title: "Fresh", songs: ["fresh"])])
+        let fresh = try XCTUnwrap(page.reload())
+        await fresh.value
         XCTAssertNil(page.error); XCTAssertTrue(page.canAct)
-        let recovered = await service.statistics(); XCTAssertEqual(recovered.tracks, 3)
+        let stamp = page.presentationID
+        XCTAssertEqual(page.tracks.map(\.songId), ["fresh"])
+        for gate in gates { await gate.release() }
+        for task in tasks { await task.value }
+        XCTAssertEqual(page.presentationID, stamp)
+        XCTAssertEqual(page.tracks.map(\.songId), ["fresh"])
+        XCTAssertNil(page.error); XCTAssertTrue(page.canAct)
         page.disappear(); await model.close()
     }
 

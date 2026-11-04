@@ -32,6 +32,18 @@
  <Style x:Key="Capability.Muted" TargetType="TextBlock" BasedOn="{StaticResource Capability.Text}">
   <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
  </Style>
+ <Style x:Key="Capability.FavoriteIcon" TargetType="Path">
+  <Setter Property="Data" Value="M12,21.35 C10.55,20.03 2,14.3 2,8.5 C2,5.42 4.42,3 7.5,3 C9.24,3 10.91,3.81 12,5.09 C13.09,3.81 14.76,3 16.5,3 C19.58,3 22,5.42 22,8.5 C22,14.3 13.45,20.03 12,21.35 Z"/>
+  <Setter Property="Width" Value="20"/>
+  <Setter Property="Height" Value="18"/>
+  <Setter Property="Stretch" Value="Fill"/>
+  <Setter Property="Fill" Value="Transparent"/>
+  <Setter Property="Stroke" Value="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
+  <Setter Property="StrokeThickness" Value="1.5"/>
+  <Setter Property="StrokeLineJoin" Value="Round"/>
+  <Setter Property="StrokeStartLineCap" Value="Round"/>
+  <Setter Property="StrokeEndLineCap" Value="Round"/>
+ </Style>
  <Style x:Key="Capability.Error" TargetType="TextBlock" BasedOn="{StaticResource Capability.Text}">
   <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Error}"/>
   <Setter Property="TextWrapping" Value="Wrap"/>

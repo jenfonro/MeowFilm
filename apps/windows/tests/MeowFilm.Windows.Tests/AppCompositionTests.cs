@@ -48,8 +48,13 @@ public static class AppCompositionTests
         Check(AppDataPaths.Current == AppDataPaths.ForIdentity("aggregate"));
         Check(AppDataPaths.Current.Documents == Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "meowfilm", "aggregate"));
-        Check(AppIdentity.ScriptModules.Select(m => m.Id).SequenceEqual(new[] { "music", "source" }));
-        Check(AppIdentity.ScriptModules.Select(m => m.Version).SequenceEqual(new[] { "0.5.0", "0.1.0" }));
+        Check(AppIdentity.ScriptModules.Select(m => (m.Id, m.Version)).SequenceEqual(new[]
+        {
+            ("music", "0.6.0"),
+            ("cat", "0.1.0"),
+            ("source", "0.1.0")
+        }));
+        Check(AppIdentity.NativeCollections.SequenceEqual(new[] { MusicLibraryOwner.ScriptContentCollection }));
         Check(AppIdentity.NativeNamespaces.Contains("music.accounts.v1"));
         Check(AppIdentity.NativeNamespaces.Contains("music.platform-context.v1"));
         return Task.CompletedTask;
@@ -57,14 +62,15 @@ public static class AppCompositionTests
     private static async Task Components()
     {
         string data = DataRoot();
-        await using var store = new DpapiDocumentStore(data, AppIdentity.NativeNamespaces);
+        await using var store = new DpapiDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections);
         await using var documents = new ProtectedDocumentBridge(store, []);
         IReadOnlyDictionary<string, Func<JsonElement, CancellationToken, Task<object?>>>? methods = null;
         await using var runtime = new OnDemandRuntimeClient(async token =>
             await NodeRuntime.StartAsync(Required("MEOWFILM_TEST_NODE"),
                 RuntimeBundle.Verify(Path.Combine(Required("MEOWFILM_TEST_RUNTIME_ROOT"), "aggregate"),
                     AppIdentity.RuntimeId, AppIdentity.ScriptModules), AppIdentity.ScriptModules,
-                methods ?? throw new InvalidOperationException("Capabilities not frozen"), token));
+                methods ?? throw new InvalidOperationException("Capabilities not frozen"),
+                Path.Combine(data, "script-runtime"), token));
         await using var playback = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
         await using var music = new MusicCapability(runtime, store, playback);
         var lifecycle = new AppShutdown([music], []);
@@ -94,7 +100,7 @@ public static class AppCompositionTests
         string data = DataRoot(); string? playlistId = null;
         for (int pass = 0; pass < 2; pass++)
         {
-            await using var store = new DpapiDocumentStore(data, AppIdentity.NativeNamespaces);
+            await using var store = new DpapiDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections);
             await using var documents = new ProtectedDocumentBridge(store, []);
             await using var runtime = new OnDemandRuntimeClient(_ => throw new InvalidOperationException("Node unavailable"));
             await using var owner = new MusicNativeApplication(store, runtime);
@@ -118,7 +124,7 @@ public static class AppCompositionTests
         string data = DataRoot();
         for (int pass = 0; pass < 2; pass++)
         {
-            await using var store = new DpapiDocumentStore(data, AppIdentity.NativeNamespaces);
+            await using var store = new DpapiDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections);
             await using var runtime = new OnDemandRuntimeClient(_ => throw new InvalidOperationException("Node must stay dormant"));
             await using var playback = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
             var transport = new StartupTransport();
@@ -183,7 +189,7 @@ public static class AppCompositionTests
     private static async Task RejectedShellStartup(string area, string value, string expected)
     {
         string data = DataRoot();
-        await using var store = new DpapiDocumentStore(data, AppIdentity.NativeNamespaces);
+        await using var store = new DpapiDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections);
         var document = LJ.Obj(("version", 1), ("entries", new JsonArray(LJ.Obj(
             ("key", LJ.Stringify(new JsonArray("meowfilm", "music", 1, "local", area))),
             ("value", JsonNode.Parse(value))))));

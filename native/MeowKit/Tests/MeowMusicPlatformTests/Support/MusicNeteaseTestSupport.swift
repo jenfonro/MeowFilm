@@ -122,23 +122,17 @@ enum MusicNeteaseFixture {
 
 actor MusicNeteaseTestHTTP: MusicAccountHTTPTransport {
     struct Record: Sendable { let request: MusicAccountHTTPRequest; let payload: Data? }
-    struct RateLimit: Sendable { let path: String; let retryAfter: String? }
     let clock: MusicAccountTestClock
     let peer = try! Curve25519.KeyAgreement.PrivateKey(rawRepresentation: Data(repeating: 7, count: 32))
     private var records: [Record] = []
     private var overrides: [String: [MusicAccountHTTPResponse]] = [:]
     private var block: (String, MusicAccountTestGate)?
     private var numericHandshakeTimestamp = true
-    private var limits: [RateLimit] = []
     init(clock: MusicAccountTestClock) { self.clock = clock }
     func useNumericHandshakeTimestamp(_ value: Bool) { numericHandshakeTimestamp = value }
     func replies(_ path: String, _ responses: [MusicAccountHTTPResponse]) { overrides[path] = responses }
     func hold(_ path: String, _ gate: MusicAccountTestGate) { block = (path, gate) }
     func recorded() -> [Record] { records }
-    func rateLimits() -> [RateLimit] { limits }
-    func recordRateLimit(for url: URL, retryAfter: String?) async {
-        limits.append(.init(path: url.path, retryAfter: retryAfter))
-    }
     func send(_ request: MusicAccountHTTPRequest) async throws -> MusicAccountHTTPResponse {
         let path = request.url.path, form = try MusicNeteaseFixture.form(request.body)
         guard request.method == "POST", request.headers["Cache-Control"] == "no-store" else { throw MusicServiceError.invalidRequest }

@@ -1,10 +1,12 @@
 # 来源运行时 capability ABI
 
-`@meowfilm/source-runtime` 通过版本化 capability ABI 请求宿主能力。协议 adapter 只依赖该 ABI，不导入 `node:*`、Windows API、JVM、文件系统或平台 WebView 类型。
+本文件是[共同契约索引](../common/README.md)中来源宿主能力的唯一来源。`@meowfilm/source-runtime` 的 Reader 与 CatVod Spider adapter 通过版本化 capability ABI 请求宿主能力；纯规则包不导入 `node:*`、Node／平台全局、JVM、文件系统或平台 WebView 类型。
+
+适用入口为 `source@0.1.0`／`source.runtime.v1`。LX 的原有网络适配器与请求 `context.storage`、CatNode 的有限 Node 兼容和私有卷继续遵循各自契约，不改由本 ABI 包装。Node-independent 只描述该纯规则包，不描述当前 script-host 或 CatNode 承载。
 
 ## 版本与调用
 
-当前版本为 `hostApiVersion = 1`。每个请求都包含 `version: 1`，业务输入和结果必须是有界 JSON；原始字节使用规范 Base64。取消信号和 installation／generation scope 由宿主调用上下文携带，不暴露为 guest 对象。Reader/Cat scope 固定含 `installationId`、`generation`、`protocol`、`siteId: source` 和宿主生成的 `requestId`；guest 输入不能覆盖这些字段。
+当前版本为 `hostApiVersion = 1`。每个请求都包含 `version: 1`，业务输入和结果必须是预算内的 JSON；原始字节使用规范 Base64。ABI 字节与宿主响应缓冲受单脚本内存预算约束，控制帧和源码分片另外遵守[共用运行时](script-runtime.md#quickjs-执行边界)的线协议大小。取消信号和 installation／generation scope 由宿主调用上下文携带，不暴露为 guest 对象。source scope 固定含 `installationId`、`generation`、`protocol`、`siteId: source` 和宿主生成的 `requestId`；guest 输入不能覆盖这些字段。
 
 当前能力：
 
@@ -22,27 +24,28 @@
 
 ## 作用域与生命周期
 
-profile 首段按领域隔离：
+profile 使用 source 领域及明确代次：
 
 ```text
 source:<installationId>:<generation>
-music:<installationId>:<generation>:<siteId|startup>
 ```
 
-Reader/Cat 的 HTTP 与显式 Cookie 操作共用 source profile 下的 `:http` Cookie jar，并与 `:storage`、`:web` 等状态分离。LX Cookie 按 installation、generation 和 site 隔离。相同 installationId 不会让 source 与 music 共用 Cookie、存储或虚拟路由。更新、失败候选、卸载和关闭必须通过 owner 的 `releaseProfiles(prefix, except)` 释放退休 generation；缺少清理能力的 owner 不能装配。虚拟路由注销失败属于清理失败。
+Reader/CatVod 的 HTTP 与显式 Cookie 操作共用 source profile 下的 `:http` Cookie jar，并与 `:storage`、`:web` 等状态分离。source 不与 LX 或 CatNode 共用 Cookie、存储或虚拟路由。更新、失败候选、卸载和关闭必须通过 owner 的 `releaseProfiles(prefix, except)` 释放退休 generation；缺少清理能力的 owner 不能装配。虚拟路由注销失败属于清理失败，不设置 profile 固定数量门槛。
 
-取消和超时只封闭逻辑结果。guest `AbortController` 可先结束脚本等待，但对应 capability 的物理 Promise 在真实完成前持续占用并发和清理预算；动作 scope 关闭只撤销回调，不返还该额度。来源初始化也使用有界启动 scope；轻悦时光远程 HTML 候选和其外部脚本都经 `http.request` 登记为 adapter 物理任务，并继承同一启动取消信号。关闭不能以 signal 已触发冒充资源已回收。默认 Node owner 对 storage、Cookie 和虚拟路由同时设置单项及累计内存预算；公共规则核心还限制来源字节、DOM 文档／节点／字符串、远程 HTML 候选数、会话变量和待注册虚拟路由元数据的累计大小，不能借 capability 循环绕过 QuickJS heap 上限。
+capability 由同一 WorkerSession 转交主线程中的平台 owner，物理 I/O 的归属保留至实际完成。取消和超时只封闭逻辑结果；guest `AbortController` 可先结束脚本等待，动作 scope 关闭会撤销回调，但不把不合作 I/O 算作已完成，也不通过固定并发或网络任务数拒绝新工作。来源初始化使用同一有界启动 scope；轻悦时光远程 HTML 候选和其外部脚本都经 `http.request` 登记为 adapter 物理任务，并继承同一启动取消信号。关闭不能以 signal 已触发冒充资源已回收，未排空的任务和退休 profile 清理失败保持可观察。
+
+默认 Node owner 对 storage、Cookie 和虚拟路由保留单项及累计内存预算；规则核心保留 DOM 文档／节点／字符串、分页、远程 HTML 候选和外部脚本等解析预算，以及会话变量和待注册路由元数据的累计字节预算。这些是解析资源边界或单脚本内存边界，不是实例、调用、timer、网络、method、stage 或 profile 的固定计数配额，不能借 capability 循环绕过内存预算。
 
 同一动作产生的一批虚拟路由在返回业务结果前统一注册。任一路由注册失败时，运行时注销本批已尝试项并丢弃未提交项；无法确认注销完成的项保留为清理债务，由 session close 再次回收。
 
 ## 网络与隔离
 
-ABI 不维护域名白名单。`http.request` 校验 HTTP(S) 语法、响应大小和重定向次数；Node owner 为每个请求建立一个覆盖完整重定向链的截止信号，跨 origin 重定向不转发 Authorization/Cookie。它不承诺阻断本机或私网地址。
+ABI 不维护域名白名单。`http.request` 校验 HTTP(S) 语法、预算内的响应字节和重定向次数；Node owner 为每个请求建立一个覆盖完整重定向链的截止信号，跨 origin 重定向不转发 Authorization/Cookie。它不承诺阻断本机或私网地址。source 调用与初始化的默认等待上限均为 60 秒，清理为 3 秒；单次 HTTP 截止受所属调用/启动信号约束，不延长整个动作生命周期。
 
 guest 只得到能力调用结果，不得到 Node socket、`fetch` 实现、Cookie jar、存储对象或宿主 callable。文件、进程、模块加载和任意 JVM 类不属于 ABI。
 
 ## 平台实现
 
-Windows 当前由 `createNodeSourceCapabilities` 实现 HTTP、Cookie、内存作用域存储、编码、加解密和虚拟路由；真实 `web.interact` 未注入时返回 `CAPABILITY_UNAVAILABLE`。自定义 storage 必须同时实现 get/set/delete 和 `releaseProfiles`，不能把未清理状态当作成功。Node 是 Windows 承载实现，不是公共协议依赖。
+Windows 当前由 `createNodeSourceCapabilities` 实现 HTTP、Cookie、内存作用域存储、编码、加解密和虚拟路由；真实 `web.interact` 未注入时返回 `CAPABILITY_UNAVAILABLE`。自定义 storage 必须同时实现 get/set/delete 和 `releaseProfiles`，不能把未清理状态当作成功。该实现不承诺原生永久落盘或向源开放 CatNode 私有卷。
 
-Android/iOS 后续实现相同 ABI 时，可替换网络、持久化、Keychain／Keystore 和 WebView broker，而不改 LX、Reader 或 Cat adapter。只有新增现有 ABI 无法表达的系统语义时才扩展 ABI，并需要各平台分别实现；协议内部规则或动作变化不要求平台重复改写。
+Android/iOS 接入需另行实现承载与相同 ABI 的网络、持久化和 WebView broker，当前未完成这些端侧接入。Reader/CatVod 的规则与动作维护一份；只有新增现有 ABI 无法表达的系统语义时才扩展 ABI，并由各平台分别实现。不能据此宣称 CatNode 的 Node 兼容层可脱离 Node。

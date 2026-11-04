@@ -12,7 +12,7 @@ final class MusicPlaybackSettingsViewController: MusicSettingsPageViewController
         super.init(appearance: appearance, content: MusicPlaybackSettingsContent(
             theme: PageTheme(palette: appearance.pageColorway)
         ))
-        title = "播放设置"
+        pageTitle = "播放设置"
     }
 
     override func applyTheme() {
@@ -37,10 +37,13 @@ struct MusicPlaybackSettingsContent: View {
             ForEach([false, true], id: \.self) { spatial in
                 Button { open(spatial) } label: {
                     MusicSettingsLinkRow(theme: theme) {
-                        Text(spatial ? "空间／全景音频设置" : "音质设置")
+                        MusicSettingsIconLabel(
+                            symbol: spatial ? "headphones" : "waveform",
+                            title: spatial ? "空间／全景音频设置" : "音质设置", theme: theme
+                        )
                     }
                 }
-                .listRowBackground(Color(uiColor: UIColor(theme.surface)).opacity(0.58))
+                .modifier(MusicSettingsRowStyle(theme: theme))
             }
         }
         .modifier(MusicSettingsListStyle(theme: theme))
@@ -60,7 +63,7 @@ final class MusicQualitySettingsViewController: MusicSettingsPageViewController<
         super.init(appearance: appearance, content: MusicQualitySettingsContent(
             state: state, spatial: spatial, theme: PageTheme(palette: appearance.pageColorway)
         ))
-        title = spatial ? "空间／全景音频设置" : "音质设置"
+        pageTitle = spatial ? "空间／全景音频设置" : "音质设置"
     }
 
     override func viewDidLoad() {
@@ -87,26 +90,53 @@ struct MusicQualitySettingsContent: View {
 
     var body: some View {
         List {
-            ForEach(order, id: \.self) { id in
-                Toggle(MusicQualityLabel.name(id), isOn: Binding(
-                    get: { state.enabled(id, spatial: spatial) },
-                    set: { state.setEnabled(id, $0, spatial: spatial) }
-                ))
-                .disabled(!state.available || state.busy || state.locked(id, spatial: spatial))
-                .moveDisabled(!state.available || state.busy)
-                .accessibilityIdentifier("music.settings." + (spatial ? "spatial." : "quality.") + id)
-                .listRowBackground(Color(uiColor: UIColor(theme.surface)).opacity(0.58))
+            Section(spatial ? "空间／全景音频优先级" : "音质优先级") {
+                ForEach(order, id: \.self) { id in
+                    Toggle(isOn: Binding(
+                        get: { state.enabled(id, spatial: spatial) },
+                        set: { state.setEnabled(id, $0, spatial: spatial) }
+                    )) {
+                        MusicQualityRowLabel(id: id, theme: theme)
+                    }
+                    .disabled(!state.available || state.busy || state.locked(id, spatial: spatial))
+                    .moveDisabled(!state.available || state.busy)
+                    .accessibilityIdentifier("music.settings." + (spatial ? "spatial." : "quality.") + id)
+                    .modifier(MusicSettingsRowStyle(theme: theme))
+                }
+                .onMove { offsets, destination in
+                    var values = order
+                    values.move(fromOffsets: offsets, toOffset: destination)
+                    state.reorder(values, spatial: spatial)
+                }
             }
-            .onMove { offsets, destination in
-                var values = order
-                values.move(fromOffsets: offsets, toOffset: destination)
-                state.reorder(values, spatial: spatial)
-            }
+            .headerProminence(.increased)
         }
         .environment(\.editMode, .constant(.active))
         .modifier(MusicSettingsListStyle(theme: theme))
     }
 
     private var order: [String] { state.order(spatial: spatial) }
+}
+
+private struct MusicQualityRowLabel: View {
+    let id: String
+    let theme: PageTheme
+
+    var body: some View {
+        let name = MusicQualityLabel.name(id)
+        let symbol = MusicQualityLabel.symbol(id)
+        HStack(spacing: 8) {
+            Text(name)
+                .fixedSize(horizontal: false, vertical: true)
+            if !symbol.isEmpty, symbol != name {
+                Spacer(minLength: 8)
+                Text(symbol)
+                    .font(.subheadline)
+                    .foregroundStyle(Color(uiColor: UIColor(theme.muted)))
+                    .lineLimit(1)
+                    .accessibilityHidden(true)
+            }
+        }
+    }
 }
 #endif

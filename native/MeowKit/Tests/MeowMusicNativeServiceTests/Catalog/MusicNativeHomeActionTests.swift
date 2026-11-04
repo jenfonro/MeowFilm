@@ -211,7 +211,7 @@ final class MusicNativeHomeActionTests: XCTestCase {
         row["songIds"] = .array((1...1000).map(MJ.n))
         XCTAssertEqual(try descriptor(row), .songCollection(ids: (1...1000).map(String.init)))
         row["songIds"] = .array(Array(repeating: .n(1), count: 1001))
-        try unavailable(row) // Budget applies before deduplication, never a silent truncation.
+        XCTAssertEqual(try descriptor(row), .songCollection(ids: ["1"]))
     }
 
     func testDescriptorCodableRoundTripsOnlyTypedFieldsAndValidatesBounds() throws {
@@ -246,7 +246,7 @@ final class MusicNativeHomeActionTests: XCTestCase {
             #"{"type":"url","url":"orpheus://privatefm"}"#
         ] { XCTAssertThrowsError(try JSONDecoder().decode(MusicHomeAction.self, from: Data(invalid.utf8))) }
         XCTAssertThrowsError(try JSONEncoder().encode(MusicHomeAction.similar(sourceIDs: Array(repeating: "1", count: 21), sourceName: "")))
-        XCTAssertThrowsError(try JSONEncoder().encode(MusicHomeAction.songCollection(ids: Array(repeating: "1", count: 1001))))
+        XCTAssertNoThrow(try JSONEncoder().encode(MusicHomeAction.songCollection(ids: Array(repeating: "1", count: 1001))))
     }
 
     func testArtistActivitySectionFieldsRemainAdditiveAndKeepTheKnownChannelKind() throws {

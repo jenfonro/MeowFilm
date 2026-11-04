@@ -7,10 +7,8 @@ import MeowMusicFeature
 /// No cookies, URL cache, credentials or redirects are shared with URLSession.
 final class MusicAccountSMSHTTP: NSObject, MusicAccountHTTPTransport, URLSessionDataDelegate, @unchecked Sendable {
     private let base: URLSessionMusicAccountTransport
-    private let admission: RequestAdmission
-    private let admissionScope = UUID()
-    init(admission: RequestAdmission = RequestAdmission()) {
-        self.admission = admission; base = URLSessionMusicAccountTransport(admission: admission)
+    override init() {
+        base = URLSessionMusicAccountTransport()
         super.init()
     }
     private final class Flight: @unchecked Sendable {
@@ -38,7 +36,6 @@ final class MusicAccountSMSHTTP: NSObject, MusicAccountHTTPTransport, URLSession
         config.urlCredentialStorage = nil; config.urlCache = nil
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         config.timeoutIntervalForRequest = 15; config.timeoutIntervalForResource = 30
-        config.httpMaximumConnectionsPerHost = 2
         let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
         sessionValue = session
         return session
@@ -60,19 +57,11 @@ final class MusicAccountSMSHTTP: NSObject, MusicAccountHTTPTransport, URLSession
         }
         try Task.checkCancellation()
         let trace = MusicRequestTrace(.accountAPI)
-        let lease: UUID
-        do { lease = try await admission.acquire(host: "music.163.com", scope: admissionScope, priority: trace.priority) }
-        catch { trace.failed(error); throw MusicServiceError.sanitized(error) }
-        defer { Task { await admission.release(lease) } }
         do {
             let response = try await transfer(value, trace: trace)
-            if response.status == 429 { await recordRateLimit(for: value.url, retryAfter: response.header("retry-after")) }
             trace.record(.completed, http: response.status)
             return response
         } catch { trace.failed(error); throw MusicServiceError.sanitized(error) }
-    }
-    func recordRateLimit(for url: URL, retryAfter: String?) async {
-        await base.recordRateLimit(for: url, retryAfter: retryAfter)
     }
     private func transfer(_ value: MusicAccountHTTPRequest, trace: MusicRequestTrace) async throws -> MusicAccountHTTPResponse {
         try Task.checkCancellation()
@@ -142,7 +131,6 @@ final class MusicAccountSMSHTTP: NSObject, MusicAccountHTTPTransport, URLSession
     }
     func close() {
         lock.lock(); closed = true; let session = sessionValue; sessionValue = nil; lock.unlock()
-        Task { await admission.close(scope: admissionScope) }
         base.close(); session?.invalidateAndCancel()
     }
 }

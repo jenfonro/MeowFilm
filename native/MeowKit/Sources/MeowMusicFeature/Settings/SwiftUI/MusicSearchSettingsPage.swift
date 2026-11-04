@@ -16,26 +16,39 @@ final class MusicSearchSettingsState: ObservableObject {
         subscription = store.$preferences.removeDuplicates().sink { [weak self] in self?.value = $0 }
     }
 
-    func setPlatform(_ platform: MusicPublicBrowsePlatform, enabled: Bool, songs: Bool) {
+    @discardableResult
+    func setPlatform(_ platform: MusicPublicBrowsePlatform, enabled: Bool, songs: Bool) -> Bool {
         var value = store.preferences
         var platforms = songs ? value.songPlatforms : value.playlistPlatforms
         if enabled { platforms.append(platform) }
         else { platforms.removeAll { $0 == platform } }
         if songs { value.songPlatforms = platforms }
         else { value.playlistPlatforms = platforms }
-        store.update(value)
+        return store.update(value)
     }
 
-    func setSearchPlaylists(_ enabled: Bool) {
+    @discardableResult
+    func setSearchPlaylists(_ enabled: Bool) -> Bool {
         var value = store.preferences
         value.searchPlaylists = enabled
-        store.update(value)
+        return store.update(value)
     }
 
-    func setPlaylistMode(_ mode: String) {
+    @discardableResult
+    func setAdvanced(_ kind: String, pages: Int, concurrency: Int, cacheMinutes: Int) -> Bool {
         var value = store.preferences
-        value.playlistMode = mode
-        store.update(value)
+        if kind == "songs" {
+            value.songs.pages = pages; value.songs.concurrency = concurrency; value.songs.cacheMinutes = cacheMinutes
+        } else {
+            value.playlists.pages = pages; value.playlists.concurrency = concurrency
+            value.playlists.cacheMinutes = cacheMinutes
+        }
+        return store.update(value)
+    }
+
+    func reload() {
+        store.reload()
+        value = store.preferences
     }
 }
 
@@ -47,7 +60,7 @@ final class MusicSearchSettingsViewController: MusicSettingsPageViewController<M
         super.init(appearance: appearance, content: MusicSearchSettingsContent(
             state: state, theme: PageTheme(palette: appearance.pageColorway)
         ))
-        title = "搜索设置"
+        pageTitle = "搜索设置"
     }
 
     override func applyTheme() {
@@ -66,35 +79,61 @@ struct MusicSearchSettingsContent: View {
         List {
             Section("歌曲搜索平台") {
                 ForEach(MusicSearchPreferences.platforms, id: \.rawValue) { platform in
-                    Toggle(platform.title, isOn: platformBinding(platform, songs: true))
+                    Toggle(isOn: platformBinding(platform, songs: true)) {
+                        MusicPlatformLabel(platform: platform, theme: theme)
+                    }
                         .accessibilityIdentifier("music.search.platform.\(platform.rawValue)")
+                        .modifier(MusicSettingsRowStyle(theme: theme))
                 }
             }
-            .listRowBackground(Color(uiColor: UIColor(theme.surface)).opacity(0.58))
+            .headerProminence(.increased)
             Section {
                 Toggle("搜索歌曲同时搜索歌单", isOn: Binding(
                     get: { state.value.searchPlaylists },
-                    set: { state.setSearchPlaylists($0) }
+                    set: { if !state.setSearchPlaylists($0) { state.reload() } }
                 ))
-                Picker("歌单搜索", selection: Binding(
-                    get: { state.value.playlistMode },
-                    set: { state.setPlaylistMode($0) }
-                )) {
-                    ForEach(MusicSearchPreferences.platforms, id: \.rawValue) { platform in
-                        Text(platform.title).tag(platform.rawValue)
-                    }
-                    Text("聚合").tag("aggregate")
-                }
-                .pickerStyle(.menu)
+                .modifier(MusicSettingsRowStyle(theme: theme))
             }
-            .listRowBackground(Color(uiColor: UIColor(theme.surface)).opacity(0.58))
-            if state.value.playlistMode == "aggregate" {
-                Section("歌单搜索聚合平台") {
-                    ForEach(MusicSearchPreferences.platforms, id: \.rawValue) { platform in
-                        Toggle(platform.title, isOn: platformBinding(platform, songs: false))
+            Section("歌单搜索平台") {
+                ForEach(MusicSearchPreferences.platforms, id: \.rawValue) { platform in
+                    Toggle(isOn: platformBinding(platform, songs: false)) {
+                        MusicPlatformLabel(platform: platform, theme: theme)
                     }
+                        .modifier(MusicSettingsRowStyle(theme: theme))
                 }
-                .listRowBackground(Color(uiColor: UIColor(theme.surface)).opacity(0.58))
+            }
+            .headerProminence(.increased)
+            ForEach(["songs", "playlists"], id: \.self) { kind in
+                Section(kind == "songs" ? "歌曲搜索" : "歌单搜索") {
+                    let settings = kind == "songs" ? state.value.songs : state.value.playlists
+                    Stepper("单次请求页数 \(settings.pages)", value: Binding(
+                        get: { kind == "songs" ? state.value.songs.pages : state.value.playlists.pages },
+                        set: { if !state.setAdvanced(kind, pages: $0,
+                            concurrency: kind == "songs" ? state.value.songs.concurrency : state.value.playlists.concurrency,
+                            cacheMinutes: kind == "songs" ? state.value.songs.cacheMinutes : state.value.playlists.cacheMinutes) {
+                            state.reload()
+                        } }
+                    ), in: 1...Int.max)
+                    Stepper("平台并发数 \(settings.concurrency)", value: Binding(
+                        get: { kind == "songs" ? state.value.songs.concurrency : state.value.playlists.concurrency },
+                        set: { if !state.setAdvanced(kind,
+                            pages: kind == "songs" ? state.value.songs.pages : state.value.playlists.pages,
+                            concurrency: $0,
+                            cacheMinutes: kind == "songs" ? state.value.songs.cacheMinutes : state.value.playlists.cacheMinutes) {
+                            state.reload()
+                        } }
+                    ), in: 1...Int.max)
+                    Stepper("结果缓存 \(settings.cacheMinutes) 分钟", value: Binding(
+                        get: { kind == "songs" ? state.value.songs.cacheMinutes : state.value.playlists.cacheMinutes },
+                        set: { if !state.setAdvanced(kind,
+                            pages: kind == "songs" ? state.value.songs.pages : state.value.playlists.pages,
+                            concurrency: kind == "songs" ? state.value.songs.concurrency : state.value.playlists.concurrency,
+                            cacheMinutes: $0) {
+                            state.reload()
+                        } }
+                    ), in: 1...MusicSearchPreferences.maximumCacheMinutes)
+                }
+                .headerProminence(.increased)
             }
         }
         .modifier(MusicSettingsListStyle(theme: theme))
@@ -105,7 +144,7 @@ struct MusicSearchSettingsContent: View {
             get: {
                 (songs ? state.value.songPlatforms : state.value.playlistPlatforms).contains(platform)
             },
-            set: { state.setPlatform(platform, enabled: $0, songs: songs) }
+            set: { if !state.setPlatform(platform, enabled: $0, songs: songs) { state.reload() } }
         )
     }
 }

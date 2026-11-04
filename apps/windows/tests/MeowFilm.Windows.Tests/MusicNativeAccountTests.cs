@@ -59,7 +59,7 @@ public static class MusicNativeAccountTests
         yield return Case("protocol.kg-device-context-RSA-signature-SSA", KgProtocol);
         yield return Case("protocol.response-budgets-malformed-duplicates-depth", ResponseBudgets);
         yield return Case("protocol.fixed-origin-and-redirect-observation", Origin);
-        yield return Case("protocol.timeout-and-real-physical-transport-slots", TransportBudget);
+        yield return Case("protocol.timeout-and-unthrottled-physical-transport", TransportBudget);
         yield return Case("protocol.no-secret-DTOS-errors-or-ToString", Redaction);
         yield return Case("qr.owner-one-query-per-click-trusted-validate-before-CAS", QrChain);
         yield return Case("qr.unsupported-account-platform-rejects-before-IO", UnsupportedQr);
@@ -106,10 +106,18 @@ public static class MusicNativeAccountTests
     }
     private static string WyProfile(string name = "Fixture user", string id = LargeId) =>
         "{\"code\":200,\"profile\":{\"userId\":" + id + ",\"nickname\":" + JsonSerializer.Serialize(name) + "},\"account\":{\"id\":" + id + "}}";
+    private static MusicAccountDetailsObservation Observation(MusicAccountProfile profile)
+    {
+        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        return new(profile, now, new(new(false, "none", null), now, now + AccountDetailsSnapshot.Day, []));
+    }
     private static async Task<HttpResponseMessage> Success(HttpRequestMessage request, CancellationToken _)
     {
         string host = request.RequestUri!.Host;
-        if (host == "music.163.com") return Json(WyProfile());
+        if (host == "music.163.com")
+            return request.RequestUri.AbsolutePath.EndsWith("/vip/info", StringComparison.Ordinal)
+                ? Json("""{"code":200,"data":{"userId":"9007199254740997","associator":{"expireTime":0}}}""")
+                : Json(WyProfile());
         if (host == "interfacepc.music.163.com")
             return request.RequestUri.AbsolutePath.EndsWith("/unikey", StringComparison.Ordinal)
                 ? Json("""{"code":200,"unikey":"SYNTHETIC_QR_KEY"}""")
@@ -117,10 +125,15 @@ public static class MusicNativeAccountTests
         if (host == "u.y.qq.com")
         {
             var payload = JsonNode.Parse(await request.Content!.ReadAsStringAsync())!;
-            return payload["req_0"]!["method"]!.GetValue<string>() == "GetLoginUserInfo"
+            string method = payload["req_0"]!["method"]!.GetValue<string>();
+            return method == "vip_login_base"
+                ? Json("""{"code":0,"req_0":{"code":0,"data":{"svip":0,"identity":{"vip":0}}}}""")
+                : method == "GetLoginUserInfo"
                 ? Json("""{"code":0,"req_0":{"code":0,"data":{"code":0}}}""")
                 : Json("""{"code":0,"req_0":{"code":0,"data":{"Info":{"BaseInfo":{"EncryptedUin":"SYNTHETIC_EUIN","Name":"Fixture user"}}}}}""");
         }
+        if (host == "kugouvip.kugou.com")
+            return Json("""{"status":1,"error_code":0,"data":{"userid":"9007199254740997","is_vip":0}}""");
         Check(host == "gateway.kugou.com");
         return Json("""{"status":1,"error_code":0,"data":{"nickname":"Fixture user"}}""");
     }
@@ -175,8 +188,8 @@ public static class MusicNativeAccountTests
         internal Func<string, CancellationToken, Task<MusicAccountChallenge>>? Begin;
         internal Func<string, string, MusicAccountSessionHandoff, CancellationToken, Task<MusicAccountPoll>>? Poll;
         internal int Validations, Disposals;
-        public Task<MusicAccountProfile> ValidateAsync(string p, string c, CancellationToken token = default)
-        { Validations++; return Validate(p, c, token); }
+        public async Task<MusicAccountDetailsObservation> ValidateAsync(string p, string c, CancellationToken token = default)
+        { Validations++; return Observation(await Validate(p, c, token)); }
         public Task<MusicAccountChallenge> BeginAsync(string p, CancellationToken token = default) =>
             Begin?.Invoke(p, token) ?? Task.FromException<MusicAccountChallenge>(new MusicAccountException("UNSUPPORTED"));
         public Task<MusicAccountPoll> PollAsync(string p, string id, MusicAccountSessionHandoff accept, CancellationToken token = default) =>
@@ -225,7 +238,7 @@ public static class MusicNativeAccountTests
         await using var f = new Fixture();
         Check(f.Handler.Calls == 0 && f.Store.Reads == 0);
         foreach (var platform in new[] { "wy", "tx", "kg" }) Ok(await Import(f.Owner, platform));
-        Check(f.Handler.Calls == 4 && f.Store.Writes == 3);
+        Check(f.Handler.Calls == 7 && f.Store.Writes == 3);
         var list = await List(f.Owner); Ok(list);
         foreach (var platform in new[] { "wy", "tx", "kg" }) Check(State(list, platform) == "verified");
         var session = (await f.Owner.AcquireAsync("wy", default))!;
@@ -278,7 +291,7 @@ public static class MusicNativeAccountTests
         var all = await Task.WhenAll(Import(f.Owner), Import(f.Owner, "tx"), Import(f.Owner, "kg"));
         foreach (var r in all) Ok(r);
         var doc = f.Store.Document();
-        Check(doc.Count == 2 && doc["entries"]!.AsArray().Count == 3);
+        Check(doc.Count == 2 && doc["entries"]!.AsArray().Count == 6);
         foreach (var platform in new[] { "wy", "tx", "kg" })
             Check(f.Store.Row(platform).Count == 6 && f.Store.Row(platform)["generation"]!.GetValue<long>() == 1);
     }
@@ -524,6 +537,8 @@ public static class MusicNativeAccountTests
         MusicWyClientContext? client = null;
         await using var f = new Fixture((r, _) =>
         {
+            if (r.RequestUri!.AbsolutePath.EndsWith("/vip/info", StringComparison.Ordinal))
+                return Task.FromResult(Json("""{"code":200,"data":{"userId":"18446744073709551615","associator":{"expireTime":0}}}"""));
             Check(r.RequestUri!.AbsolutePath == "/weapi/w/nuser/account/get");
             MusicClientContextFixture.VerifyLocalWyCookie(r, client!, Wy);
             return Task.FromResult(Json(body));
@@ -573,6 +588,8 @@ public static class MusicNativeAccountTests
         string expectedMid = "123456789";
         await using var f = new Fixture(async (r, _) =>
         {
+            if (r.RequestUri!.Host == "kugouvip.kugou.com")
+                return Json("""{"status":1,"data":{"userid":"9007199254740997","is_vip":0}}""");
             Check(r.RequestUri!.Host == "gateway.kugou.com" && r.RequestUri.AbsolutePath == "/v3/get_my_info");
             Check(r.Headers.GetValues("x-router").Single() == "usercenter.kugou.com" && !r.Headers.Contains("Cookie"));
             var bodyText = await r.Content!.ReadAsStringAsync(); var body = JsonNode.Parse(bodyText)!;
@@ -601,7 +618,7 @@ public static class MusicNativeAccountTests
         expectedMid = (await f.Clients.Owner.AcquireKgAsync()).Mid;
         int calls = f.Handler.Calls;
         Ok(await Import(f.Owner, "kg", "userid=" + LargeId + "; token=" + expectedToken));
-        Check(f.Handler.Calls == calls + 1, "valid account without legacy MID uses one profile read and no registration");
+        Check(f.Handler.Calls == calls + 2, "valid account without legacy MID uses one profile read, one rights read and no registration");
         calls = f.Handler.Calls;
         Error(await Import(f.Owner, "kg", "userid=1; token=SYNTHETIC; KUGOU_API_MID=bad"), "DEVICE_CONTEXT_REQUIRED");
         Error(await Import(f.Owner, "kg", "userid=1; token=" + new string('x', 200) + "; KUGOU_API_MID=123456789"), "INVALID_CREDENTIALS");
@@ -639,15 +656,16 @@ public static class MusicNativeAccountTests
         await using var protocol = clientContext9.CreateAccountProtocol(timeout: TimeSpan.FromMilliseconds(60));
         await Throws("TIMEOUT", () => protocol.ValidateAsync("wy", Wy)); await Wait(first.Task);
         await Throws("TIMEOUT", () => protocol.ValidateAsync("wy", Wy));
-        await Throws("RATE_LIMITED", () => protocol.ValidateAsync("wy", Wy));
-        Check(handler.Calls == 2); release.SetResult();
+        // Timed-out requests still draining do not block another request.
+        await Throws("TIMEOUT", () => protocol.ValidateAsync("wy", Wy));
+        Check(handler.Calls == 3); release.SetResult();
     }
     private static async Task Redaction()
     {
         await using var f = new Fixture((_, _) => throw new IOException("SYNTHETIC_UPSTREAM_SECRET"));
         var result = await Import(f.Owner); Error(result, "NETWORK_ERROR");
         Check(!result.GetRawText().Contains("SYNTHETIC", StringComparison.Ordinal));
-        var handoff = new MusicAccountHandoff("wy", Guid.NewGuid().ToString(), Wy, new("wy", LargeId, "Fixture"));
+        var handoff = new MusicAccountHandoff("wy", Guid.NewGuid().ToString(), Wy, Observation(new("wy", LargeId, "Fixture")));
         var session = new MusicPlatformSession("wy", "scope", 1, LargeId, Wy);
         Check(JsonSerializer.Serialize(handoff) == "{}" && JsonSerializer.Serialize(session) == "{}");
         Check(!handoff.ToString().Contains("SYNTHETIC") && !session.ToString().Contains("SYNTHETIC"));
@@ -678,9 +696,12 @@ public static class MusicNativeAccountTests
         await Task.Delay(40); Check(requests == 2); // No background loop.
         status = 802; var confirming = await Poll(f.Owner, id); Ok(confirming); Check(confirming.GetProperty("status").GetString() == "confirming");
         status = 803; var success = await Poll(f.Owner, id); Ok(success);
-        Check(success.GetProperty("status").GetString() == "authenticated" && requests == 5 && f.Store.Writes == 1);
+        Check(success.GetProperty("status").GetString() == "authenticated" && requests == 6 && f.Store.Writes == 1);
+        var details = await f.Owner.ReadDetailsAsync("wy");
+        Check(details.Membership.Vip == false && details.MembershipFreshness == MusicAccountDetailsFreshness.Fresh &&
+            details.Generation == success.GetProperty("account").GetProperty("generation").GetInt64());
         Check(!success.GetRawText().Contains("SYNTHETIC_QR") && (await f.Owner.AcquireAsync("wy", default))!.Cookie == "MUSIC_U=SYNTHETIC_QR");
-        Check((await Poll(f.Owner, id)).GetProperty("status").GetString() == "expired" && requests == 5);
+        Check((await Poll(f.Owner, id)).GetProperty("status").GetString() == "expired" && requests == 6);
     }
     private static async Task UnsupportedQr()
     {

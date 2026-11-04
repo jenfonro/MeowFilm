@@ -2,6 +2,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
+using MeowFilm.Platform.Files;
 
 namespace MeowFilm.Capabilities;
 
@@ -16,7 +17,7 @@ internal static class MusicSourceScriptInspector
 
     internal static MusicSourceScriptInspection Inspect(byte[] bytes, string basename, string sha256)
     {
-        if (bytes.Length is < 1 or > 512 * 1024 ||
+        if (bytes.Length is < 1 or > SelectedScriptSnapshot.MaximumBytes ||
             !StringComparer.Ordinal.Equals(sha256, Convert.ToHexStringLower(SHA256.HashData(bytes))))
             throw new MusicOperationException("SCRIPT_INTEGRITY");
         if (bytes.Length >= 3 && bytes[0] == 0xef && bytes[1] == 0xbb && bytes[2] == 0xbf)

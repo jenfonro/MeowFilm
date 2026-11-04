@@ -37,11 +37,11 @@ private actor NativeQQHTTP: MusicAccountHTTPTransport {
 final class NativeMusicQQDirectTests: XCTestCase {
     func testAnonymousQQCallsNativeDeviceSearchAndExactNumericLyricProtocol() async throws {
         let http = NativeQQHTTP(), publicQQ = NativeMusicQQPublicService(transport: http)
-        let page = try await publicQQ.search(query: "synthetic", page: 1)
+        let page = try await publicQQ.search(query: "synthetic", page: 1, limit: 30)
         XCTAssertEqual(page.items.count, 1)
         let row = try XCTUnwrap(JSONSerialization.jsonObject(with: page.items[0].data) as? [String: Any])
         XCTAssertEqual(row["qqSongId"] as? String, "9007199254740993")
-        XCTAssertEqual(row["musicId"] as? String, "SyntheticMID")
+        XCTAssertEqual(row["songmid"] as? String, "SyntheticMID")
         _ = try await publicQQ.lyrics(mid: "SyntheticMID")
         await http.mismatch()
         do { _ = try await publicQQ.lyrics(mid: "SyntheticMID"); XCTFail("numeric song ID mismatch") }

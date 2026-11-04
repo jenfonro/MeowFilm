@@ -95,7 +95,14 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     }
 
     func showPublicCollection(_ collection: MusicPublicBrowseCollection) {
-        showPublicBrowse(.detail(collection), title: collection.title)
+        guard let model = assembly.music, let browser = model.publicBrowser else { return }
+        navigation.pushViewController(MusicCollectionViewController(
+            model: model,
+            collection: collection,
+            browser: browser,
+            appearance: assembly.appearance,
+            router: self
+        ), animated: true)
     }
 
     func showLocalCollection(_ collection: MusicCollection) {
@@ -113,12 +120,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         }
         if destination == .queue {
             let page = MusicQueueViewController(model: model, appearance: assembly.appearance)
-            let wrapper = PageNavigationController(themeProvider: assembly.appearance)
-            wrapper.setViewControllers([page], animated: false)
-            wrapper.modalPresentationStyle = .pageSheet
-            wrapper.sheetPresentationController?.detents = [.medium(), .large()]
-            wrapper.sheetPresentationController?.prefersGrabberVisible = true
-            presenter().present(wrapper, animated: true)
+            presenter().present(page, animated: true)
             return
         }
         if let player {
@@ -170,7 +172,9 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             openMenu: { [weak self] in self?.root.showSidebar() },
             openSearch: { [weak self] in self?.showSearch() }
         )
-        page.onSelectionChanged = { [weak self] selected in self?.root.select(selected) }
+        page.onSelectionChanged = { [weak self] selected, duration in
+            self?.root.select(selected, duration: duration)
+        }
         main = page
         let content = MusicPlayerContentModel(model: model, playback: assembly.playback,
                                               appearance: appearance, presentation: primaryPlaybackPresentation)

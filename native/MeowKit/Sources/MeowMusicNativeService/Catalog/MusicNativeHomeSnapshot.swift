@@ -51,27 +51,41 @@ enum MusicNativeHomeSnapshot {
     private static func text(_ value: MJ, maximum: Int = 1024) throws -> String {
         try value.text(maximum, empty: true)
     }
+    private static func channel(_ value: MusicPublicBrowseChannel) -> MJ {
+        .obj([("id", .string(value.id)), ("title", .string(value.title)),
+              ("kind", .string(value.kind.rawValue)), ("pageCode", .string(value.pageCode)),
+              ("platform", .string(value.platform.rawValue))])
+    }
+    private static func channel(_ value: MJ, source: MusicPublicBrowsePlatform) throws -> MusicPublicBrowseChannel {
+        try value.requireFields(["id", "title", "kind", "pageCode", "platform"],
+                                required: ["id", "title", "kind", "pageCode", "platform"])
+        guard let kind = MusicPublicBrowseChannel.Kind(rawValue: value["kind"].string),
+              MusicPublicBrowsePlatform(rawValue: value["platform"].string) == source else {
+            throw MusicServiceError.invalidResponse
+        }
+        return .init(id: try value["id"].text(200), title: try text(value["title"]), kind: kind,
+                     pageCode: try text(value["pageCode"], maximum: 100), platform: source)
+    }
     private static func cleanTrack(_ raw: MusicNativeTrackData) throws -> MJ {
         try musicRequire(raw.platform == "wy", .invalidResponse)
         let song = try MusicModel.normalize(raw)
-        var locator = try MusicModel.locator(MusicModel.sourceData(song))
+        guard let row = song["sources"].array.first else { throw MusicServiceError.sourceRequired }
+        var locator = try MusicModel.locator(MusicModel.sourceData(row))
         locator["name"] = song["title"]; locator["singer"] = song["artist"]
-        locator["album"] = song["album"]; locator["duration"] = song["duration"]
+        locator["albumName"] = song["album"]; locator["duration"] = song["duration"]
         locator["img"] = image(MusicNativePublicBrowseSupport.artwork(song["cover_url"]))
         if locator["img"] == .null { locator.remove("img") }
         try MusicModel.rejectSecrets(locator)
         return locator
     }
-    static func encode(_ page: MusicNativePublicBrowseDiscovery, scope: String) throws -> Data {
+    static func encode(_ page: MusicNativePublicBrowseDiscovery, source: MusicPublicBrowsePlatform, scope: String) throws -> Data {
+        try musicRequire(source == .netease, .unsupported)
         try musicRequire(!scope.isEmpty && scope.utf8.count <= 256 && page.sections.count <= 60 &&
                          page.sections.reduce(0, { $0 + $1.items.count }) <= 600, .limit)
         let sections = try page.sections.map { section in
             MJ.obj([("id", .string(section.id)), ("title", .string(section.title)), ("layout", .string(section.layout.rawValue)),
                 ("avatars", .array(section.avatars.prefix(3).map { image($0) })),
-                ("channel", section.channel.map { channel in .obj([
-                    ("id", .string(channel.id)), ("title", .string(channel.title)),
-                    ("kind", .string(channel.kind.rawValue)), ("pageCode", .string(channel.pageCode))
-                ]) } ?? .null),
+                ("channel", section.channel.map { Self.channel($0) } ?? .null),
                 ("items", .array(try section.items.map { item in
                     var value = MJ.obj([("id", .string(item.id)), ("title", .string(item.title)),
                         ("subtitle", .string(item.subtitle)), ("artwork", image(item.artwork))])
@@ -101,8 +115,7 @@ enum MusicNativeHomeSnapshot {
                         value["kind"] = .string("song"); value["song"] = try cleanTrack(row)
                     case .channel(let row):
                         value["kind"] = .string("channel")
-                        value["channel"] = .obj([("id", .string(row.id)), ("title", .string(row.title)),
-                            ("kind", .string(row.kind.rawValue)), ("pageCode", .string(row.pageCode))])
+                        value["channel"] = Self.channel(row)
                     case .daily: value["kind"] = .string("daily")
                     case .unavailable: value["kind"] = .string("unavailable")
                     case .action(let action):
@@ -113,20 +126,22 @@ enum MusicNativeHomeSnapshot {
                     return value
                 }))])
         }
-        let root = MJ.obj([("schema", .n(1)), ("scope", .string(scope)), ("sections", .array(sections))])
+        let root = MJ.obj([("schema", .n(2)), ("source", .string(source.rawValue)),
+                           ("scope", .string(scope)), ("sections", .array(sections))])
         try MusicModel.rejectSecrets(root)
         let data = root.bytes
         try musicRequire(data.count <= maximumBytes, .limit)
         // Validate the complete serialized shape before replacing last success.
-        _ = try decode(data, scope: scope)
+        _ = try decode(data, source: source, scope: scope)
         return data
     }
-    static func decode(_ data: Data, scope: String) throws -> MusicNativePublicBrowseDiscovery? {
+    static func decode(_ data: Data, source: MusicPublicBrowsePlatform, scope: String) throws -> MusicNativePublicBrowseDiscovery? {
         let root = try MJ.parse(data, maximum: maximumBytes)
-        try root.requireFields(["schema", "scope", "sections"], required: ["schema", "scope", "sections"])
-        try musicRequire(root["schema"] == .n(1))
+        try root.requireFields(["schema", "source", "scope", "sections"], required: ["schema", "source", "scope", "sections"])
+        try musicRequire(root["schema"] == .n(2))
         try MusicModel.rejectSecrets(root)
-        guard root["scope"].string == scope else { return nil }
+        guard root["source"].string == source.rawValue, root["scope"].string == scope else { return nil }
+        try musicRequire(source == .netease, .unsupported)
         try musicRequire(!scope.isEmpty && scope.utf8.count <= 256 &&
                          root["sections"].isArray && root["sections"].array.count <= 60, .limit)
         var count = 0, ids = Set<String>()
@@ -159,11 +174,7 @@ enum MusicNativeHomeSnapshot {
                     let raw = MusicNativeTrackData(platform: "wy", data: item["song"].bytes)
                     _ = try cleanTrack(raw); content = .song(raw)
                 case "channel":
-                    let value = item["channel"]
-                    try value.requireFields(["id", "title", "kind", "pageCode"], required: ["id", "title", "kind", "pageCode"])
-                    guard let kind = MusicPublicBrowseChannel.Kind(rawValue: value["kind"].string) else { throw MusicServiceError.invalidResponse }
-                    content = .channel(.init(id: try value["id"].text(200), title: try text(value["title"]),
-                                             kind: kind, pageCode: try text(value["pageCode"], maximum: 100)))
+                    content = .channel(try Self.channel(item["channel"], source: source))
                 case "daily": content = .daily
                 case "unavailable": content = .unavailable
                 case "action":
@@ -212,11 +223,7 @@ enum MusicNativeHomeSnapshot {
             let channel: MusicPublicBrowseChannel?
             if section["channel"] == .null { channel = nil }
             else {
-                let value = section["channel"]
-                try value.requireFields(["id", "title", "kind", "pageCode"], required: ["id", "title", "kind", "pageCode"])
-                guard let kind = MusicPublicBrowseChannel.Kind(rawValue: value["kind"].string) else { throw MusicServiceError.invalidResponse }
-                channel = .init(id: try value["id"].text(200), title: try text(value["title"]), kind: kind,
-                                pageCode: try text(value["pageCode"], maximum: 100))
+                channel = try Self.channel(section["channel"], source: source)
             }
             return .init(id: id, title: title, items: items, layout: layout,
                          avatars: avatars.array.compactMap(MusicNativePublicBrowseSupport.artwork), channel: channel)

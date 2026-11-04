@@ -20,10 +20,7 @@ public static class MusicArtworkPolicy
                 foreach (var node in sources.OfType<JsonObject>()
                     .Where(row => LJ.S(row["source"]) == platform).Take(2))
                 {
-                    var row = LJ.Element(node);
-                    var data = row.GetProperty("source_data");
-                    string address = PublicUrl(Text(row, "cover_url"));
-                    if (address.Length == 0) address = PublicUrl(Text(data, "img"));
+                    string address = PublicUrl(NativeMusicSong.Display(node).Cover);
                     if (address.Length != 0) return address;
                 }
             }
@@ -31,9 +28,7 @@ public static class MusicArtworkPolicy
         }
         catch { return ""; }
     }
-    private static string Text(JsonElement value, string property) =>
-        value.ValueKind == JsonValueKind.Object && value.TryGetProperty(property, out var item) && item.ValueKind == JsonValueKind.String
-            ? item.GetString() ?? "" : "";
+
     private static string PublicUrl(string value) => value.Length <= 8192 && Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
         uri.Scheme is "http" or "https" && uri.UserInfo.Length == 0 && uri.Query.Length == 0 && uri.Fragment.Length == 0
         ? uri.AbsoluteUri : "";

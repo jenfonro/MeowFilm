@@ -12,7 +12,6 @@ public actor NativeMusicQQPublicService: MusicPublicQQProviding {
     private let owned: URLSessionMusicAccountTransport?
     private let clock: @Sendable () -> Date
     nonisolated let persistence: MusicQQPublicPersistenceState
-    private let operationAdmission = RequestAdmission(maximum: 4, perHost: 4, waitingLimit: 64)
     private var closed = false
     var closedForClient: Bool { closed }
     /// Explicit volatile-only construction. Production must use storeFactory.
@@ -24,12 +23,11 @@ public actor NativeMusicQQPublicService: MusicPublicQQProviding {
         qq = QQMusicAccountAdapter(transport: transport ?? owned!, now: clock, publicPersistence: state)
     }
     /// Passive, initially locked. The factory is first used by an explicitly
-    /// admitted search/lyrics call; granting access does not start HTTP.
+    /// requested search/lyrics call; granting access does not start HTTP.
     public init(storeFactory: @escaping @Sendable () throws -> EncryptedDocumentStore,
                 transport: (any MusicAccountHTTPTransport)? = nil,
-                clock: @escaping @Sendable () -> Date = { Date() },
-                requestAdmission: RequestAdmission? = nil) {
-        let owned = transport == nil ? URLSessionMusicAccountTransport(admission: requestAdmission ?? RequestAdmission()) : nil
+                clock: @escaping @Sendable () -> Date = { Date() }) {
+        let owned = transport == nil ? URLSessionMusicAccountTransport() : nil
         let state = MusicQQPublicPersistenceState(document: MusicQQPublicPersistenceDocument(storeFactory: storeFactory))
         self.owned = owned; self.clock = clock; persistence = state
         qq = QQMusicAccountAdapter(transport: transport ?? owned!, now: clock, publicPersistence: state)
@@ -49,63 +47,38 @@ public actor NativeMusicQQPublicService: MusicPublicQQProviding {
         guard !closed else { throw MusicServiceError.closed }
         try await qq.setPublicAccess(available: available, generation: generation)
     }
-    func begin() async throws -> (token: UUID, lease: UUID) {
+    func captureAccess() throws -> UUID {
         guard !closed else { throw MusicServiceError.closed }
+        try Task.checkCancellation()
         let token = try persistence.capture()
-        let time = clock().timeIntervalSince1970
-        guard time.isFinite, (0...253_402_300_799).contains(time) else { throw MusicServiceError.invalidRequest }
-        let admission = operationAdmission, registration = UUID()
-        let priority = MusicRequestTrace.current?.priority ?? .normal
-        let waiting = Task { try await admission.acquire(host: "qq", priority: priority) }
-        do { try persistence.register(registration, token: token) { waiting.cancel() } }
-        catch {
-            // Registration also cancels if revoke already won. If admission
-            // won first, release its physical slot before propagating failure.
-            waiting.cancel()
-            if let lease = try? await waiting.value { await admission.release(lease) }
-            throw MusicServiceError.sanitized(error)
-        }
-        defer { persistence.remove(registration) }
-        let lease: UUID
-        do {
-            lease = try await withTaskCancellationHandler { try await waiting.value } onCancel: { waiting.cancel() }
-        }
-        catch { throw MusicServiceError.sanitized(error) }
-        do {
-            try Task.checkCancellation()
-            guard !closed else { throw MusicServiceError.closed }
-            try persistence.check(token)
-            return (token, lease)
-        } catch {
-            await operationAdmission.release(lease)
-            throw MusicServiceError.sanitized(error)
-        }
+        try persistence.check(token)
+        return token
     }
-    func end(_ lease: UUID) {
-        // Called only after the full provider operation (including teardown)
-        // returns, never just because its caller lost interest.
-        Task { await operationAdmission.release(lease) }
-    }
-    /// Credential-free owner diagnostics; includes cancelled but unsettled I/O.
-    func operationCounts() async -> (active: Int, waiting: Int) { await operationAdmission.counts }
-    public func search(query: String, page: Int) async throws -> MusicNativeTrackPage {
+    public func search(query: String, page: Int, limit: Int) async throws -> MusicNativeTrackPage {
         _ = try MusicPlatformJSON.inputText(query, maximum: 800)
-        guard (1...200).contains(page) else { throw MusicServiceError.invalidRequest }
-        let (own, lease) = try await begin()
-        defer { end(lease) }
+        _ = try MusicSearchPagination.offset(platform: .qq, page: page, limit: limit)
+        let own = try captureAccess()
         let random = UInt64(UInt32.random(in: UInt32.min...UInt32.max))
-        let time = UInt64(max(0, clock().timeIntervalSince1970 * 1000)) % 86_400_000
+        let seconds = clock().timeIntervalSince1970
+        guard seconds.isFinite, (0...253_402_300_799).contains(seconds) else { throw MusicServiceError.invalidRequest }
+        let time = UInt64(seconds * 1000) % 86_400_000
         let searchID = String((random % 20 + 1) * (1 << 54) + (random % 4_194_305) * (1 << 32) + time)
         let data = try await qq.rpc("music.search.SearchCgiService", "DoSearchForQQMusicMobile",
-            ["searchid": searchID, "query": query, "search_type": 0, "num_per_page": 30, "page_num": page,
+            ["searchid": searchID, "query": query, "search_type": 0, "num_per_page": limit, "page_num": page,
              "highlight": 0, "grp": 1, "selectors": [String: String](), "vec_selectors": [String]()],
             publicAccess: own)
         try persistence.check(own)
         let meta = try MusicQQWire.object(data["meta"]), body = try MusicQQWire.object(data["body"])
-        let total = try MusicQQWire.integer(meta["sum"], maximum: 1_000_000)
-        let next = try MusicQQWire.integer(meta["nextpage"], maximum: 200, minimum: -1)
-        let rows = try await qq.array(body["item_song"], maximum: 30)
-        guard next == -1 || next > page && !rows.isEmpty else { throw MusicServiceError.upstreamInvalid }
+        let total = try MusicQQWire.integer(meta["sum"])
+        let next = try MusicQQWire.integer(meta["nextpage"], minimum: -1)
+        let rows = try await qq.array(body["item_song"], maximum: limit)
+        let nextPage: Int?
+        if next == -1 || rows.isEmpty {
+            nextPage = nil
+        } else {
+            guard next > page else { throw MusicServiceError.upstreamInvalid }
+            nextPage = page + 1
+        }
         var items: [MusicNativeTrackData] = []
         for raw in rows {
             let track = try MusicQQWire.object(raw)
@@ -125,11 +98,10 @@ public actor NativeMusicQQPublicService: MusicPublicQQProviding {
             items.append(.init(platform: "tx", data: try JSONEncoder().encode(JSONValue.object(value))))
         }
         try persistence.check(own)
-        return .init(items: items, total: total, nextPage: next == -1 ? nil : next)
+        return .init(items: items, total: total, nextPage: nextPage)
     }
     public func lyrics(mid: String) async throws -> MusicNativeLyrics {
-        let (own, lease) = try await begin()
-        defer { end(lease) }
+        let own = try captureAccess()
         let track = try await qq.publicTrack(mid, access: own)
         try persistence.check(own)
         guard try MusicQQWire.integer(track["type"]) == 1 else { throw MusicServiceError.lyricIdentityMismatch }
@@ -150,7 +122,6 @@ public actor NativeMusicQQPublicService: MusicPublicQQProviding {
     }
     public func close() async {
         closed = true; persistence.close(); owned?.close()
-        await operationAdmission.close()
         await qq.revoke()
     }
 }

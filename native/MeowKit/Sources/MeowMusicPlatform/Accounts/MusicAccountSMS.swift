@@ -25,28 +25,21 @@ enum MusicAccountSMSInput {
     }
 }
 
-/// Memory only, hashed phone keys, bounded lifetime. Reservations survive page
-/// switches, cancellation and logout; an uncertain send is NEVER replayed.
+/// Memory only, hashed phone keys. Sending keeps its own cooldown and single
+/// flight; there is no cross-login attempt quota. An uncertain send is never replayed.
 struct MusicAccountSMSLimits {
-    struct Entry { var until: Date; var sendAt = Date.distantPast; var attempts = 0; var busy = false }
+    struct Entry { var until: Date; var sendAt = Date.distantPast; var busy = false }
     var entries: [String: Entry] = [:]
-    var window = Date.distantPast
-    var sends = 0
     mutating func reserve(platform: MusicAccountPlatform, country: String, phone: String, send: Bool, at: Date) throws -> String {
         entries = entries.filter { $0.value.until > at || $0.value.busy }
-        if at.timeIntervalSince(window) >= 600 { window = at; sends = 0 }
         let key = Data(SHA256.hash(data: Data("\(platform.rawValue):\(country):\(phone)".utf8)))
             .map { String(format: "%02x", $0) }.joined()
-        guard entries[key] != nil || entries.count < 128 else {
-            throw MusicSMSFailure(reason: .rateLimited, retryAt: at.addingTimeInterval(60))
-        }
         var entry = entries[key] ?? Entry(until: at.addingTimeInterval(600))
-        guard !entry.busy, send ? entry.sendAt <= at && sends < 20 : entry.attempts < 8 else {
-            throw MusicSMSFailure(reason: .rateLimited,
-                                  retryAt: send && sends < 20 ? max(at.addingTimeInterval(1), entry.sendAt) : entry.until)
+        guard !entry.busy, send ? entry.sendAt <= at : true else {
+            throw MusicSMSFailure(reason: .rateLimited, retryAt: max(at.addingTimeInterval(1), entry.sendAt))
         }
         entry.busy = true
-        if send { entry.sendAt = at.addingTimeInterval(60); sends += 1 } else { entry.attempts += 1 }
+        if send { entry.sendAt = at.addingTimeInterval(60) }
         entries[key] = entry
         return key
     }

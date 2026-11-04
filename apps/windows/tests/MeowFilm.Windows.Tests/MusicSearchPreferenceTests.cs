@@ -13,10 +13,11 @@ public static class MusicSearchPreferenceTests
         {
             var store = new Store(); await using var owner = new MusicLibraryOwner(store);
             var settings = (await Call(owner, "music.search.settings.get")).GetProperty("settings");
-            Check(settings.GetProperty("schema").GetInt32() == 2 && settings.GetProperty("revision").GetInt64() == 0);
+            Check(settings.GetProperty("schema").GetInt32() == 3 && settings.GetProperty("revision").GetInt64() == 0);
             foreach (var kind in new[] { settings.GetProperty("songs"), settings.GetProperty("playlists") })
-                Check(kind.GetProperty("mode").GetString() == "aggregate" &&
-                    kind.GetProperty("platform").GetString() == "wy" &&
+                Check(!kind.TryGetProperty("mode", out _) && !kind.TryGetProperty("platform", out _) &&
+                    kind.GetProperty("pages").GetInt32() == 1 && kind.GetProperty("concurrency").GetInt32() == 1 &&
+                    kind.GetProperty("cacheMinutes").GetInt32() == 60 &&
                     kind.GetProperty("order").EnumerateArray().Select(x => x.GetString()).SequenceEqual(Platforms) &&
                     kind.GetProperty("enabled").EnumerateArray().Select(x => x.GetString()).SequenceEqual(Platforms));
             Check((await Call(owner, "music.search.history.get")).GetProperty("history").GetProperty("items").GetArrayLength() == 0);
@@ -37,16 +38,35 @@ public static class MusicSearchPreferenceTests
         {
             var store = new Store(); await using var owner = new MusicLibraryOwner(store);
             await Call(owner, "music.search.settings.save", Policy(0,
-                Kind(enabled: ["wy"]), Kind("single", "kg", enabled: ["kg"])));
+                Kind(enabled: ["wy"]), Kind(enabled: ["kg"], pages: 3, concurrency: 2, cacheMinutes: 5)));
             await Code(owner, "music.search.settings.save", Policy(0,
-                Kind(enabled: ["tx"]), Kind("single", "tx", enabled: ["tx"])), "REVISION_CONFLICT");
+                Kind(enabled: ["tx"]), Kind(enabled: ["tx"])), "REVISION_CONFLICT");
             Check(store.Writes == 1);
             Check((await Call(owner, "music.search.settings.get")).GetProperty("settings")
                 .GetProperty("songs").GetProperty("enabled")[0].GetString() == "wy");
+            var playlists = (await Call(owner, "music.search.settings.get")).GetProperty("settings").GetProperty("playlists");
+            Check(playlists.GetProperty("pages").GetInt32() == 3 && playlists.GetProperty("concurrency").GetInt32() == 2 &&
+                playlists.GetProperty("cacheMinutes").GetInt32() == 5);
         });
-        foreach (var invalid in new[] {
-            Policy(0, Kind(mode: "unknown"), Kind()),
-            Policy(0, Kind(platform: "unknown"), Kind()),
+        yield return Case("search page and concurrency accept any positive int while cache stays bounded", async () =>
+        {
+            var store = new Store(); await using var owner = new MusicLibraryOwner(store);
+            var saved = await Call(owner, "music.search.settings.save", Policy(0,
+                Kind(pages: 11, concurrency: 12), Kind(pages: int.MaxValue, concurrency: int.MaxValue)));
+            var songs = saved.GetProperty("settings").GetProperty("songs");
+            var playlists = saved.GetProperty("settings").GetProperty("playlists");
+            Check(songs.GetProperty("pages").GetInt32() == 11 && songs.GetProperty("concurrency").GetInt32() == 12 &&
+                playlists.GetProperty("pages").GetInt32() == int.MaxValue &&
+                playlists.GetProperty("concurrency").GetInt32() == int.MaxValue);
+            await Code(owner, "music.search.settings.save", Policy(1, Kind(pages: 0), Kind()), "INVALID_REQUEST");
+            await Code(owner, "music.search.settings.save", Policy(1, Kind(concurrency: 0), Kind()), "INVALID_REQUEST");
+            Check(store.Writes == 1);
+        });
+        foreach (var invalid in new object[] {
+            Policy(0, new { order = Platforms, enabled = Platforms, pages = 2147483648L, concurrency = 1, cacheMinutes = 60 }, Kind()),
+            Policy(0, new { order = Platforms, enabled = Platforms, pages = 1, concurrency = 2147483648L, cacheMinutes = 60 }, Kind()),
+            Policy(0, Kind(cacheMinutes: 0), Kind()),
+            Policy(0, Kind(cacheMinutes: 1441), Kind()),
             Policy(0, Kind(order: ["wy", "tx", "kw", "kg", "kg"]), Kind()),
             Policy(0, Kind(enabled: ["tx", "wy"]), Kind())
         })
@@ -62,8 +82,8 @@ public static class MusicSearchPreferenceTests
             await using (var owner = new MusicLibraryOwner(store))
             {
                 for (int i = 0; i < 65; i++) await Call(owner, "music.search.history.record",
-                    new { text = "词" + i, kind = "songs", platform = "aggregate" });
-                await Call(owner, "music.search.history.record", new { text = " 词20 ", kind = "playlists", platform = "wy" });
+                    new { text = "词" + i, kind = "songs" });
+                await Call(owner, "music.search.history.record", new { text = " 词20 ", kind = "playlists" });
             }
             await using var reopened = new MusicLibraryOwner(store);
             var history = (await Call(reopened, "music.search.history.get")).GetProperty("history");
@@ -76,7 +96,7 @@ public static class MusicSearchPreferenceTests
         yield return Case("history-clear-requires-current-revision-and-explicit-confirmation", async () =>
         {
             var store = new Store(); await using var owner = new MusicLibraryOwner(store);
-            await Call(owner, "music.search.history.record", new { text = "保留", kind = "local", platform = "local" });
+            await Call(owner, "music.search.history.record", new { text = "保留", kind = "local" });
             await Code(owner, "music.search.history.clear", new { ifRevision = 1, confirm = false }, "CONFIRMATION_REQUIRED");
             await Code(owner, "music.search.history.clear", new { ifRevision = 0, confirm = true }, "REVISION_CONFLICT");
             await Call(owner, "music.search.history.clear", new { ifRevision = 1, confirm = true });
@@ -87,7 +107,7 @@ public static class MusicSearchPreferenceTests
         {
             var store = new Store(); await using var owner = new MusicLibraryOwner(store);
             foreach (string text in new[] { "A", "B" })
-                await Call(owner, "music.search.history.record", new { text, kind = "songs", platform = "kg" });
+                await Call(owner, "music.search.history.record", new { text, kind = "songs" });
             await Code(owner, "music.search.history.remove", new { text = "A", ifRevision = 2 }, "CAPABILITY_UNAVAILABLE");
             var items = (await Call(owner, "music.search.history.get")).GetProperty("history").GetProperty("items");
             Check(items.GetArrayLength() == 2 && items[0].GetProperty("text").GetString() == "B");
@@ -97,7 +117,7 @@ public static class MusicSearchPreferenceTests
                 System.Text.Encoding.UTF8.GetBytes(text)))[..8], async () =>
             {
                 var store = new Store(); await using var owner = new MusicLibraryOwner(store);
-                await Code(owner, "music.search.history.record", new { text, kind = "songs", platform = "wy" }, "INVALID_REQUEST");
+                await Code(owner, "music.search.history.record", new { text, kind = "songs" }, "INVALID_REQUEST");
                 Check(store.Writes == 0);
             });
         yield return Case("lost-policy-ack-is-resolved-by-the-next-current-read-without-replaying-write", async () =>
@@ -120,7 +140,7 @@ public static class MusicSearchPreferenceTests
                 await Call(owner, "music.library.create", new { name = "保留歌单" });
                 await Call(owner, "music.search.settings.save", Policy(0,
                     Kind(enabled: ["mg"]), Kind(enabled: ["kw"])));
-                await Call(owner, "music.search.history.record", new { text = "本机", kind = "local", platform = "local" });
+                await Call(owner, "music.search.history.record", new { text = "本机", kind = "local" });
             }
             await using var reopened = new DpapiDocumentStore(root, [MusicLibraryOwner.DocumentNamespace]);
             await using var library = new MusicLibraryOwner(reopened);
@@ -136,9 +156,9 @@ public static class MusicSearchPreferenceTests
     private static TestCase Case(string name, Func<Task> run) => new("music.search-preferences." + name, run);
     private static void Check(bool condition) { if (!condition) throw new InvalidOperationException("Search preferences assertion"); }
     private static readonly string[] Platforms = ["wy", "tx", "kw", "kg", "mg"];
-    private static object Kind(string mode = "aggregate", string platform = "wy",
-        string[]? order = null, string[]? enabled = null) =>
-        new { mode, platform, order = order ?? Platforms, enabled = enabled ?? Platforms };
+    private static object Kind(string[]? order = null, string[]? enabled = null,
+        int pages = 1, int concurrency = 1, int cacheMinutes = 60) =>
+        new { order = order ?? Platforms, enabled = enabled ?? Platforms, pages, concurrency, cacheMinutes };
     private static object Policy(long revision, object songs, object playlists) =>
         new { ifRevision = revision, songs, playlists };
     private static async Task<JsonElement> Call(MusicLibraryOwner owner, string method, object? input = null)
@@ -203,7 +223,7 @@ public static partial class MusicUiTests
             var first = f.Module.ActivateSettingsAsync();
             await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
             await f.Rpc("music.search.history.record",
-                new { text = "当前快照", kind = "songs", platform = "aggregate" });
+                new { text = "当前快照", kind = "songs" });
             var leaving = f.Module.DeactivateSettingsAsync();
             await Drain();
             True(!leaving.IsCompleted, "retirement waits for the physical read");
@@ -239,7 +259,7 @@ public static partial class MusicUiTests
         {
             await using var f = await Fixture.Create();
             await f.Rpc("music.search.history.record",
-                new { text = "发现历史", kind = "songs", platform = "aggregate" });
+                new { text = "发现历史", kind = "songs" });
             Equal(0, f.Calls.Count("music.search.history.get"));
             await f.Module.NavigateAsync("catalog-discovery", default);
             await Until(() => f.Module.HasSearchHistory);
@@ -272,20 +292,16 @@ public static partial class MusicUiTests
                 await module.SetSearchPlatformEnabledAsync("songs", platform, false);
                 await Until(() => module.CanEditSearchPreferences);
             }
-            await module.SetSearchModeAsync("playlists", "single");
+            await module.SetSearchAdvancedAsync("playlists", 4, 3, 30);
             await Until(() => module.CanEditSearchPreferences);
-            await module.SetSearchPlatformAsync("playlists", "tx");
+            await module.SetSearchAdvancedAsync("playlists", 0, 3, 30); // Out of range: not saved.
             await Until(() => module.CanEditSearchPreferences);
             Equal("", module.SearchPreferenceStatus);
             True(module.SongSearch.Platforms.All(p => !p.Enabled), "each switch saved immediately");
-            Equal("single", module.PlaylistSearch.Mode); Equal("tx", module.PlaylistSearch.Platform);
+            Equal(4, module.PlaylistSearch.Pages); Equal(3, module.PlaylistSearch.Concurrency); Equal(30, module.PlaylistSearch.CacheMinutes);
+            Equal(1, module.SongSearch.Pages);
             await module.ClearSearchHistoryAsync();
             True(!module.HasSearchHistory, "history cleared"); Equal(0, runtime.Calls.Count);
-            module.SettingsView.Measure(new System.Windows.Size(1000, 1800));
-            module.SettingsView.Arrange(new System.Windows.Rect(0, 0, 1000, 1800)); module.SettingsView.UpdateLayout();
-            var tabs = Visuals(module.SettingsView).OfType<System.Windows.Controls.TabControl>()
-                .Single(tab => System.Windows.Automation.AutomationProperties.GetName(tab) == "设置分类");
-            tabs.SelectedIndex = 1;
             module.SettingsView.Measure(new System.Windows.Size(1000, 1800));
             module.SettingsView.Arrange(new System.Windows.Rect(0, 0, 1000, 1800)); module.SettingsView.UpdateLayout();
             var buttons = Visuals(module.SettingsView).OfType<System.Windows.Controls.Button>()

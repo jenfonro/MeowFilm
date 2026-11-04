@@ -38,7 +38,6 @@ public sealed partial class NativeMusicLyrics : INativeMusicLyrics
         internal MusicPlatformClientContext? Client;
         internal MusicWyClientContext WyClient => (MusicWyClientContext)Client!;
         internal MusicKgClientContext KgClient => (MusicKgClientContext)Client!;
-        internal int Requests;
         private int stale;
         internal void Fence() => Volatile.Write(ref stale, 1);
         internal void Cancel()
@@ -86,7 +85,6 @@ public sealed partial class NativeMusicLyrics : INativeMusicLyrics
             try
             {
                 await Check().ConfigureAwait(false);
-                L.Require(++Requests <= 2, "LIMIT");
                 var remaining = CallDeadline - Stopwatch.GetElapsedTime(started);
                 L.Require(remaining.TotalMilliseconds >= 1, "TIMEOUT");
                 dispatched = true;
@@ -115,11 +113,9 @@ public sealed partial class NativeMusicLyrics : INativeMusicLyrics
         var call = new Call(this, request, ct);
         lock (gate)
         {
-            if (active.Count >= 8) { call.Dispose(); throw new MusicPlatformException("RATE_LIMITED", request.Platform, "lyrics"); }
             active.Add(call);
         }
-        // Physical work owns its slot/CTS until settled, even if a trusted session
-        // source ignores cancellation. A timed-out caller cannot create unbounded work.
+        // Physical work owns its CTS until settled, including cancellation-ignoring dependencies.
         var token = call.Token;
         async Task<NativeLyricPayload?> Physical()
         {

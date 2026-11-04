@@ -58,7 +58,7 @@ internal static class MusicFeedbackIdentity
     {
         var data = NativeMusicSong.SourceData(row);
         if (Text(data["source"]) != platform || Text(row["source"]) is { Length: > 0 } p && p != platform) return null;
-        var id = Text(data["musicId"]); if (id.Length == 0) id = Text(data["songmid"]);
+        var id = Text(data["songmid"]);
         if (platform == "wy") return Positive(id) ? new(platform, id) : null;
         if (platform == "tx") return id.Length is >= 1 and <= 64 && id.All(char.IsAsciiLetterOrDigit) ? new(platform, id) : null;
         var hash = Text(data["hash"]);
@@ -66,16 +66,12 @@ internal static class MusicFeedbackIdentity
         var ids = new[] { data["albumAudioId"], data["album_audio_id"], data["mixsongid"] }
             .Select(Text).Where(s => s.Length > 0 && s != "0").ToArray();
         if (ids.Any(s => !Positive(s)) || ids.Distinct(StringComparer.Ordinal).Count() > 1) return null;
-        foreach (var key in new[] { "musicId", "songmid" })
-        {
-            string other = Text(data[key]);
-            if (other.Length == 32 && other.All(char.IsAsciiHexDigit) &&
-                !string.Equals(hash, other, StringComparison.OrdinalIgnoreCase)) return null;
-        }
+        if (id.Length == 32 && id.All(char.IsAsciiHexDigit) &&
+            !string.Equals(hash, id, StringComparison.OrdinalIgnoreCase)) return null;
         return new(platform, hash.ToUpperInvariant(), ids.FirstOrDefault());
     }
 
-    internal static MusicFeedbackStart Start(string instance, MusicFeedbackSelection selection,
+    internal static MusicFeedbackStart Start(MusicFeedbackAttempt instance, MusicFeedbackSelection selection,
         MusicFeedbackRecording recording, double duration, double position, double rate, string mode)
     {
         string source = "unknown", sourceId = "", sourceType = "", algorithm = "";

@@ -11,12 +11,13 @@ internal static class Program
     {
         NativePlayback? playback = null;
         AppLauncher.Run(new(AppIdentity.RuntimeId, AppIdentity.ScriptModules,
-            AppIdentity.NativeNamespaces, []),
+            AppIdentity.NativeNamespaces, [], AppIdentity.NativeCollections),
             (runtime, storage, capabilities) =>
             {
                 playback = new NativePlayback();
                 capabilities.Add(new MusicCapability(runtime, storage, playback,
                     Path.Combine(AppDataPaths.Current.Documents, "music-playback-cache")));
+                capabilities.Add(new FilmCapability());
             },
             async () => { if (playback is not null) await playback.DisposeAsync(); },
             (window, capabilities) =>

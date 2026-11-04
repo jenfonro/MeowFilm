@@ -7,7 +7,12 @@ import MeowStorage
 @MainActor
 extension MusicViewModel {
     public func add(_ track: MusicRemoteTrack, to collection: MusicCollection) async {
-        await updateLibrary(operation: "添加到歌单") { try await self.libraryActions.add(track, to: collection) }
+        await add([track], to: collection)
+    }
+    /// Adds a selected batch with one playlist write.
+    public func add(_ tracks: [MusicRemoteTrack], to collection: MusicCollection) async {
+        guard !tracks.isEmpty else { return }
+        await updateLibrary(operation: "添加到歌单") { try await self.libraryActions.add(tracks, to: collection) }
     }
     public func createPlaylist(_ title: String, tracks: [MusicRemoteTrack] = []) async {
         await updateLibrary(operation: "创建歌单") { try await self.libraryActions.create(title, tracks: tracks) }
@@ -25,7 +30,6 @@ extension MusicViewModel {
                                action: @MainActor () async throws -> [MusicCollection]?) async {
         let epoch: UUID
         do { epoch = try enter() } catch { return }
-        defer { pending -= 1 }
         do {
             let next = try await action()
             try check(epoch)
@@ -35,18 +39,19 @@ extension MusicViewModel {
     public func loadHistory() async {
         let epoch: UUID
         do { epoch = try enter() } catch { return }
-        defer { pending -= 1 }
+        let request = UUID()
+        libraryState.songsRead = request; libraryState.playlistsRead = request
         do {
             let value = try await libraryActions.history()
             try check(epoch)
-            libraryState.playedSongs = value.songs; libraryState.playedPlaylists = value.playlists
+            if libraryState.songsRead == request { libraryState.playedSongs = value.songs }
+            if libraryState.playlistsRead == request { libraryState.playedPlaylists = value.playlists }
         } catch { report(error, epoch: epoch, operation: "读取播放历史", kind: .library) }
     }
     public func restoreHistory(_ playlist: MusicPlayedPlaylist) async {
         cancelRemoteQueuePreparation(); cancelFMNavigation()
         let epoch: UUID
         do { epoch = try enter() } catch { return }
-        defer { pending -= 1 }
         guard !isChangingQueue, !isNavigating else { return }
         playbackState.isChangingQueue = true
         defer { if lifecycle == epoch { playbackState.isChangingQueue = false } }
@@ -61,7 +66,7 @@ extension MusicViewModel {
         } catch { report(error, epoch: epoch, operation: "恢复历史队列", kind: .queue) }
     }
     public func historyDetail(id: String) async throws -> MusicHistoryDetail {
-        let epoch = try enter(); defer { pending -= 1 }
+        let epoch = try enter()
         guard let provider = service as? any MusicHistoryManaging else { throw MusicServiceError.unsupported }
         let detail = try await provider.historyDetail(id: id)
         try check(epoch); return detail
@@ -69,20 +74,63 @@ extension MusicViewModel {
     public func removeHistory(detail: MusicHistoryDetail) async {
         let epoch: UUID
         do { epoch = try enter() } catch { return }
-        defer { pending -= 1 }
         do {
             guard let provider = service as? any MusicHistoryManaging else { throw MusicServiceError.unsupported }
-            try await provider.removeHistory(detail: detail); try check(epoch)
-            let next = try await requireService().playedPlaylists()
-            try check(epoch); libraryState.playedPlaylists = next
-        } catch { report(error, epoch: epoch, operation: "删除播放历史", kind: .library) }
+            try await provider.removeHistory(detail: detail)
+            try await refreshHistory(.playlists, epoch: epoch)
+        } catch {
+            if MusicServiceError.sanitized(error) == .commitUnconfirmed {
+                _ = try? beginHistoryRead(.playlists, epoch: epoch)
+            }
+            report(error, epoch: epoch, operation: "删除播放历史", kind: .library)
+        }
+    }
+    public func clearHistory(_ category: MusicHistoryCategory) async {
+        let epoch: UUID
+        do { epoch = try enter() } catch { return }
+        do {
+            guard let provider = service as? any MusicHistoryManaging else { throw MusicServiceError.unsupported }
+            if category == .songs { await flushPlaybackFacts(); try check(epoch) }
+            try await provider.clearHistory(category)
+            try await refreshHistory(category, epoch: epoch)
+        } catch {
+            if MusicServiceError.sanitized(error) == .commitUnconfirmed {
+                _ = try? beginHistoryRead(category, epoch: epoch)
+            }
+            report(error, epoch: epoch, operation: category == .songs ? "清空已播歌曲" : "清空已播歌单", kind: .library)
+        }
+    }
+    private func beginHistoryRead(_ category: MusicHistoryCategory, epoch: UUID) throws -> UUID {
+        guard lifecycle == epoch, isAvailable, !isClosed else { throw MusicServiceError.cancelled }
+        let request = UUID()
+        switch category {
+        case .songs: libraryState.songsRead = request
+        case .playlists: libraryState.playlistsRead = request
+        }
+        return request
+    }
+    private func refreshHistory(_ category: MusicHistoryCategory, epoch: UUID) async throws {
+        // Invalidate older reads only after the mutation commits. The two
+        // histories have independent reads, so clearing one cannot stale the other.
+        let request = try beginHistoryRead(category, epoch: epoch)
+        try check(epoch)
+        let service = try requireService()
+        switch category {
+        case .songs:
+            let next = try await service.playedSongs()
+            try check(epoch)
+            if libraryState.songsRead == request { libraryState.playedSongs = next }
+        case .playlists:
+            let next = try await service.playedPlaylists()
+            try check(epoch)
+            if libraryState.playlistsRead == request { libraryState.playedPlaylists = next }
+        }
     }
     /// Restores the selected history detail and explicitly continues playback.
     public func restoreHistory(detail: MusicHistoryDetail, startIndex: Int? = nil) async {
         cancelRemoteQueuePreparation(); cancelFMNavigation()
         let epoch: UUID
         do { epoch = try enter() } catch { return }
-        defer { pending -= 1 }
         guard !isChangingQueue, !isNavigating else { return }
         playbackState.isChangingQueue = true
         defer { if lifecycle == epoch { playbackState.isChangingQueue = false } }

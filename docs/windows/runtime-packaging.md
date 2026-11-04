@@ -4,34 +4,35 @@ Windows meowfilm App 的脚本载荷由以下两个阶段生成。打包参数 -
 
 ## 两个构建阶段
 
-- scripts/package-runtime.mjs：离线解析已安装且锁定的必要依赖，复制 `apps/runtime/bootstrap.mjs`、公共 music/source module、runtime-bridge、source-runtime、script-host、引擎与规则依赖及必要声明；当前组装 profile 为 windows-native，返回 platform-pending，不能把它当作可执行载荷。
+- scripts/package-runtime.mjs：离线解析已安装且锁定的必要依赖，复制 `apps/runtime/bootstrap.mjs`、`apps/runtime/modules/{music,cat}-script.mjs`、`apps/runtime/modules/source-runtime.mjs`、runtime-bridge、script-host、source-runtime、有限 Node 兼容和规则解析依赖、引擎依赖与必要声明；当前组装 profile 为 windows-native，返回 platform-pending，不能把它当作可执行载荷。
 - scripts/windows/package-runtime.mjs：只补齐 Windows 命名管道 bootstrap 与 `entries/aggregate.mjs`，将公共工厂导入重定位到同一共享模块，核对文件清单与所有哈希后才返回 complete；不复制 Windows 业务 module。
 
-完整 App 构建从根 build-windows.ps1 进入；它调用 scripts/windows/build.ps1，由同一个构建锁保护依赖准备、打包和 `build/windows` 覆盖安装。每次构建在 tmp/publish 重新生成暂存目录，并加入 `scripts/windows/node-runtime.json` 锁定的 Node 运行时与其许可；第三方许可见 `../licenses.md`。
+完整 App 构建从根 build-windows.ps1 进入；它调用 scripts/windows/build.ps1，由同一个构建锁保护依赖准备、打包和 `build/windows` 覆盖安装。每次构建在 tmp/publish 重新生成暂存目录，并加入 `scripts/windows/node-runtime.json` 锁定的 Node 运行时与其许可；第三方许可见[许可说明](../licenses.md)。
 
 目标电脑使用完整 `build/windows/`，原生 launcher 只从应用的 `runtime/node.exe` 启动，不查询 PATH 或借用系统 Node。默认发布同时包含 .NET Desktop Runtime；构建主机的 Node/npm/.NET SDK 不是运行依赖。此发布目录需要整体复制，不能仅分发 exe；`-FrameworkDependent` 才要求目标机另装匹配的 .NET Desktop Runtime。
 
 ## 输入闭包
 
-运行 descriptor 为 `music@0.5.0` 和 `source@0.1.0`，响应契约分别为 `music.script.v2` 和 `source.runtime.v1`；载荷清单 modules 为 `music`、`source`，product 保持 aggregate。
+运行 descriptor 为 `music@0.6.0`、`cat@0.1.0`、`source@0.1.0`，响应契约分别为 `music.script.v2`、`cat.script.v1`、`source.runtime.v1`；载荷清单 modules 为 `music, cat, source`，product 保持 aggregate。LX 保留 512 KiB 单帧，Cat 使用既有分片；source 控制帧为 1 MiB、源码分片为 64 KiB。三者共用同一 WorkerSession/worker 协议/QuickJS 后端。
 
 ```text
 app/bootstrap.mjs
+app/modules/cat-script.mjs
 app/modules/music-script.mjs
 app/modules/source-runtime.mjs
 app/windows/bootstrap.mjs
 app/windows/entries/aggregate.mjs
-node_modules/@meowfilm/{runtime-bridge,source-runtime,script-host}
+node_modules/@meowfilm/{runtime-bridge,script-host,source-runtime}
 node_modules/quickjs-emscripten-core
 node_modules/@jitl/{quickjs-wasmfile-release-sync,quickjs-ffi-types}
-node_modules/{acorn,fontoxpath,iconv-lite,linkedom及其纯 JS 传递依赖}
+node_modules/{buffer,events,path-browserify,readable-stream,supports-color,util,...}
 ```
 
 源码根由脚本自身位置解析。API root/output 都是显式本机绝对路径；output 是构建本次新建的暂存子目录，不接受 UNC、源树覆盖或有链接的祖先。
 
-workspace 必须在根 package/lock 中声明并安装为准确指向本仓库的 link，输出成为普通目录。只有选定的 runtime-bridge、source-runtime、script-host 及其实际运行/peer 依赖可以入包；不扫描未入闭包的开发依赖，不借用全局、NODE_PATH 或其他工作区。
+workspace 必须在根 package/lock 中声明并安装为准确指向本仓库的 link，输出成为普通目录。只有上述三个 workspace 包及其实际运行/peer依赖可以入包；不扫描未入闭包的开发依赖，不借用全局、NODE_PATH 或其他工作区。
 
-公共目录只允许当前 bootstrap 和共享 music/source 模块；Windows 目录只允许 bootstrap、薄 entry 和 entries 目录，额外文件／业务 modules 目录明确拒绝，不静默丢弃源码。共享模块保持原字节，只有平台入口导入需要重定位。
+公共目录只允许当前 bootstrap 和共享 music/Cat/source 模块；Windows 目录只允许 bootstrap、薄 entry 和 entries 目录，额外文件／业务 modules 目录明确拒绝，不静默丢弃源码。共享模块保持原字节，只有平台入口导入需要重定位。source-runtime 的纯规则依赖随根锁闭包打包；Node 无关的规则包不免除 script-host、CatNode 或本端 worker 对 Node 的承载依赖。
 
 ## 受信 QuickJS WASM
 
@@ -57,6 +58,6 @@ SHA-256 105c3bed22d457e43e3d1c3c1c6959fda62a8fe06f0fc8a985303c3a2be72232
 - 拒绝路径穿越、大小写/Unicode 冲突、额外链接/重解析、非受信 native/WASM 和非法公开文件目标。不会执行待打包代码、安装器或包脚本，也不会下载依赖或修锁。
 - 新文件独占创建、输入读取与输出身份复核、完整 byte/hash inventory；失败时保留 failed 清单，暂存目录由下次构建重新生成。runtime-manifest.json 不自哈希。
 
-除上述三个 QuickJS 包外，registry 闭包还包含规则解析、DOM/XPath 和字符编码依赖；版本、来源、SRI 与实际文件均由根锁和打包 inventory 约束，各包原始 LICENSE 随其目录保留。受审查引擎记录来自实际 registry tarball／安装文件核对；打包本身仍是离线校验，不重新拉取 tarball。构建 inventory 不等于全部上游 JS 的签名验证、发行签名或许可分发授权。
+除上述三个 QuickJS 包外，Cat 有限 Node 兼容层还使用锁定的纯 JavaScript 依赖闭包；直接依赖为 `@opentelemetry/api`、`buffer`、`events`、`path-browserify`、`readable-stream`、`supports-color` 和 `util`。其传递依赖按根 lock 实际解析，包内许可原文保留，中央归属见 `LICENSES/NOTICE.md` 和 `npm-node-compat-*.txt`。受审查引擎记录来自实际 registry tarball／安装文件核对；普通 JS 依赖仍执行来源/SRI/manifest/闭包检查，但不冒充独立上游签名。打包本身离线，不重新拉取 tarball。
 
-`scripts/windows/prepare-test-bundles.mjs` 在仓库 tmp 内的显式绝对测试目录调用同一闭包；已存在的 aggregate bundle 不覆盖。回归分别验证真实 release-sync 引擎离线初始化、Windows 入口／管道、音乐 v2 请求存储、Reader 搜索和受控 HTTP 服务访问，不冒充外部脚本验收。外部样本可通过 [验收工具的 `--payload`](../runtime/source-acceptance.md) 指向完整发布 runtime，并由其中的 node.exe 执行，以验证不借用工作区依赖。
+`scripts/windows/prepare-test-bundles.mjs` 在仓库 tmp 内的显式绝对测试目录调用同一闭包；已存在的 aggregate bundle 不覆盖。回归分别验证真实 release-sync 引擎离线初始化、Windows 入口／管道、v2 请求存储与受控 HTTP 服务访问，不冒充外部脚本验收。外部样本可通过 [验收工具的 `--payload`](../runtime/source-acceptance.md) 指向完整发布 runtime，并由其中的 node.exe 执行，以验证不借用工作区依赖。

@@ -49,6 +49,78 @@ private actor MusicReferenceHomeService: MusicPublicBrowsing {
 @MainActor final class MusicReferenceHomeStateTests: XCTestCase {
     private let chart = MusicPublicBrowseChannel(id: "chart", title: "排行榜", kind: .rankings)
 
+    func testFirstVisitStartsOnRankingAndLaterVisitsRestoreHistory() throws {
+        let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let playlists = MusicPublicBrowseChannel(id: "playlist", title: "歌单", kind: .playlists)
+        let catalogue = [playlists, chart]
+        let first = MusicChannelSelection(defaults: defaults)
+        first.restoreChannel(from: catalogue, catalogueLoaded: true)
+        XCTAssertEqual(first.channel, chart)
+        first.selectChannel(playlists)
+        let restored = MusicChannelSelection(defaults: defaults)
+        restored.restoreChannel(from: [chart, playlists], catalogueLoaded: true)
+        XCTAssertEqual(restored.channel, playlists)
+    }
+
+    func testFirstVisitWaitsForLoadedCatalogueBeforeSelectingRanking() throws {
+        let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let playlists = MusicPublicBrowseChannel(id: "playlist", title: "歌单", kind: .playlists)
+        let selection = MusicChannelSelection(defaults: defaults)
+        selection.restoreChannel(from: [playlists, chart], catalogueLoaded: false)
+        XCTAssertNil(selection.channel)
+        selection.restoreChannel(from: [playlists, chart], catalogueLoaded: true)
+        XCTAssertEqual(selection.channel, chart)
+    }
+
+    func testFirstVisitFallsBackToTheFirstDynamicChannelWithoutRanking() throws {
+        let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let playlists = MusicPublicBrowseChannel(id: "playlist", title: "歌单", kind: .playlists)
+        let cube = MusicPublicBrowseChannel(id: "cube", title: "欧美", kind: .cube)
+        let selection = MusicChannelSelection(defaults: defaults)
+        selection.restoreChannel(from: [playlists, cube], catalogueLoaded: true)
+        XCTAssertEqual(selection.channel, playlists)
+    }
+
+    func testUnknownHistoryFallsBackToRankingOnlyAfterCatalogueLoads() throws {
+        let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let missing = MusicPublicBrowseChannel(id: "missing", title: "已下架", kind: .playlists)
+        MusicChannelSelection(defaults: defaults).selectChannel(missing)
+        let restored = MusicChannelSelection(defaults: defaults)
+        restored.restoreChannel(from: [chart], catalogueLoaded: false)
+        XCTAssertNil(restored.channel)
+        restored.restoreChannel(from: [chart], catalogueLoaded: true)
+        XCTAssertEqual(restored.channel, chart)
+        let reloaded = MusicChannelSelection(defaults: defaults)
+        reloaded.restoreChannel(from: [chart], catalogueLoaded: true)
+        XCTAssertEqual(reloaded.channel, chart)
+        reloaded.selectChannel(MusicPublicBrowseChannel(id: "playlist", title: "歌单", kind: .playlists))
+        reloaded.restoreChannel(from: [chart], catalogueLoaded: true)
+        XCTAssertEqual(reloaded.channel?.id, "playlist")
+    }
+
+    func testRestoredChannelMigratesPersistedIdentityWhenStablePageCodeGetsANewID() throws {
+        let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let previous = MusicPublicBrowseChannel(id: "old", title: "电音", kind: .cube, pageCode: "electronic")
+        let current = MusicPublicBrowseChannel(id: "new", title: "电音", kind: .cube, pageCode: "electronic")
+        let selection = MusicChannelSelection(defaults: defaults)
+        selection.selectChannel(previous)
+        selection.restoreChannel(from: [current], catalogueLoaded: true)
+        XCTAssertEqual(selection.channel, current)
+        let restored = MusicChannelSelection(defaults: defaults)
+        restored.restoreChannel(from: [current], catalogueLoaded: true)
+        XCTAssertEqual(restored.channel, current)
+    }
+
     func testRememberedChannelGetsItsOwnFirstPageAfterCatalogueRestoration() async throws {
         let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -57,7 +129,7 @@ private actor MusicReferenceHomeService: MusicPublicBrowsing {
         let navigation = MusicChannelSelection(defaults: defaults)
         let service = MusicReferenceHomeService()
         let access = UUID()
-        navigation.restoreChannel(from: [chart])
+        navigation.restoreChannel(from: [chart], catalogueLoaded: true)
         XCTAssertEqual(navigation.channel, chart)
         let selected = try XCTUnwrap(navigation.channel)
         let page = MusicPublicBrowseViewModel(service: service, request: .discovery(.channel(selected, tag: "")))
@@ -67,6 +139,25 @@ private actor MusicReferenceHomeService: MusicPublicBrowsing {
         XCTAssertEqual(page.sections.map(\.id), ["chart"])
         let reads = await service.reads
         XCTAssertEqual(reads, 1)
+    }
+
+    func testChannelRestorationSeparatesEqualProviderCodesAndPageCodes() throws {
+        let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let original = MusicPublicBrowseChannel(id: "shared", title: "当前来源", kind: .cube,
+            pageCode: "shared_page", platform: .netease)
+        let foreign = MusicPublicBrowseChannel(id: "shared", title: "其他来源", kind: .cube,
+            pageCode: "shared_page", platform: .qq)
+        let selection = MusicChannelSelection(defaults: defaults)
+        selection.selectChannel(original)
+        selection.restoreChannel(from: [foreign], catalogueLoaded: true)
+        XCTAssertEqual(selection.channel, original)
+        let restored = MusicChannelSelection(defaults: defaults)
+        restored.restoreChannel(from: [foreign], catalogueLoaded: false); XCTAssertNil(restored.channel)
+        restored.restoreChannel(from: [foreign, original], catalogueLoaded: false)
+        XCTAssertEqual(restored.channel, original)
+        XCTAssertNotEqual(original.identity, foreign.identity)
     }
 
     func testExplicitRefreshReplacesCancelledUnfinishedChannelReadBeforeItUnwinds() async {

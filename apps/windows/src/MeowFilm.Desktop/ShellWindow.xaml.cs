@@ -193,7 +193,6 @@ public sealed partial class ShellWindow : Window
         finally { _suppressSelection = false; }
         Mount(session);
         BindNavigation(session);
-        ApplySearchDraft(session);
         ApplyPresentation();
     }
 
@@ -279,8 +278,7 @@ public sealed partial class ShellWindow : Window
         ApplyGlobalSurfacePresentation(current);
         _state.CanGoBack = _queueOpen || _playerDetailOpen || _currentPage is not null ||
             current.IsSettingsOpen || _history.Count > 1;
-        ApplySearchDraft(current, _activeRequest is { } request && ReferenceEquals(request.Plan.Session, current)
-            ? request.Plan.Destination : current.Current);
+        ApplySearchPresentation();
         foreach (var page in _pages) page.Host.Visibility = ReferenceEquals(page, _currentPage) ? Visibility.Visible : Visibility.Collapsed;
         AutomationProperties.SetName(SettingsButton, "设置");
         AutomationProperties.SetName(NavigationList, "内容导航");
@@ -289,20 +287,38 @@ public sealed partial class ShellWindow : Window
 
     private void ApplyPlayerPresentation(ModuleSession current)
     {
-        if (!ReferenceEquals(_playerSession, current))
+        var currentPlayer = current.Module.PlayerView;
+        if (currentPlayer is not null)
         {
-            PlayerHost.Content = null;
-            Volatile.Write(ref _playerSession, null);
+            if (!ReferenceEquals(PlayerHost.Content, currentPlayer))
+            {
+                PlayerHost.Content = null;
+                ValidateView(currentPlayer, PlayerHost);
+                PlayerHost.Content = currentPlayer;
+            }
+            Volatile.Write(ref _playerSession, current);
         }
-        var player = current.Module.PlayerView;
-        if (!ReferenceEquals(PlayerHost.Content, player))
+        else if (Volatile.Read(ref _playerSession) is { } owner)
         {
-            PlayerHost.Content = null;
-            if (player is not null) ValidateView(player, PlayerHost);
-            PlayerHost.Content = player;
+            var retainedPlayer = owner.Module.PlayerView;
+            if (retainedPlayer is null)
+            {
+                PlayerHost.Content = null;
+                Volatile.Write(ref _playerSession, null);
+            }
+            else if (!ReferenceEquals(PlayerHost.Content, retainedPlayer))
+            {
+                PlayerHost.Content = null;
+                ValidateView(retainedPlayer, PlayerHost);
+                PlayerHost.Content = retainedPlayer;
+            }
         }
-        Volatile.Write(ref _playerSession, player is null ? null : current);
-        PlayerFrame.Visibility = player is null ? Visibility.Collapsed : Visibility.Visible;
+        else if (PlayerHost.Content is not null)
+            PlayerHost.Content = null;
+
+        PlayerFrame.Visibility = !current.IsSettingsOpen && PlayerHost.Content is not null
+            ? Visibility.Visible
+            : Visibility.Collapsed;
     }
 
     private static string SearchKey(Destination? destination) => destination switch
@@ -323,6 +339,15 @@ public sealed partial class ShellWindow : Window
         _suppressSearch = true;
         try { SearchBox.Text = session.SearchDrafts.GetValueOrDefault(key) ?? ""; }
         finally { _suppressSearch = false; }
+    }
+
+    private void ApplySearchPresentation(bool force = false)
+    {
+        if (_searchOwnerSession is not { } owner) return;
+        var destination = _activeRequest is { } request && ReferenceEquals(request.Plan.Session, owner)
+            ? request.Plan.Destination
+            : owner.Current;
+        ApplySearchDraft(owner, destination, force);
     }
 
     private void ApplyModuleAccent(ModuleSession current)
@@ -381,10 +406,14 @@ public sealed partial class ShellWindow : Window
         });
     }
 
-    private bool MayNavigate(ModuleSession session, bool fromPlayer) => fromPlayer
-        ? Volatile.Read(ref _currentPage) is null && ReferenceEquals(Volatile.Read(ref _current), session) &&
-            ReferenceEquals(Volatile.Read(ref _playerSession), session)
-        : Volatile.Read(ref _currentPage) is null && ReferenceEquals(Volatile.Read(ref _current), session);
+    private bool MayNavigate(ModuleSession session, bool fromPlayer)
+    {
+        var current = Volatile.Read(ref _current);
+        return fromPlayer
+            ? current is { IsSettingsOpen: false } &&
+                ReferenceEquals(Volatile.Read(ref _playerSession), session)
+            : Volatile.Read(ref _currentPage) is null && ReferenceEquals(current, session);
+    }
 
     private Task NavigateFromUiAsync(ModuleSession session, string route)
     {
@@ -414,7 +443,8 @@ public sealed partial class ShellWindow : Window
         if (all || e.PropertyName == nameof(IDesktopModule.Navigation)) BindNavigation(session);
         if (all || e.PropertyName is nameof(IDesktopModule.View) or nameof(IDesktopModule.SettingsView))
             { if (session.Mounted) RefreshSuppliedViews(session); }
-        if (ReferenceEquals(session, _current)) ApplyPresentation();
+        if (ReferenceEquals(session, _current) || ReferenceEquals(session, _playerSession))
+            ApplyPresentation();
     });
 
     private void OnSettingsClick(object sender, RoutedEventArgs e) => RunUiAction(async () =>
@@ -492,8 +522,8 @@ public sealed partial class ShellWindow : Window
     }
     private void OnSearchTextChanged(object sender, TextChangedEventArgs e)
     {
-        if (!_suppressSearch && _current is { } current)
-            current.SearchDrafts[current.ActiveSearchKey] = SearchBox.Text;
+        if (!_suppressSearch && _searchSession is { } owner)
+            owner.SearchDrafts[owner.ActiveSearchKey] = SearchBox.Text;
     }
 
     private void OnSearchKeyDown(object sender, KeyEventArgs e)
@@ -508,11 +538,15 @@ public sealed partial class ShellWindow : Window
 
     private Task SearchAsync()
     {
-        if (_currentPage is not null || _current is not { } current || !SearchBox.IsEnabled ||
+        if (_current is not { } current || current.IsSettingsOpen ||
+            _searchOwnerSession is not { } owner || !SearchBox.IsEnabled ||
             string.IsNullOrWhiteSpace(SearchBox.Text)) return Task.CompletedTask;
-        current.SearchDrafts[current.ActiveSearchKey] = SearchBox.Text;
-        current.IsSettingsOpen = false;
-        return RunRequestAsync(new(current, new(SearchBox.Text.Trim(), IsSearch: true)));
+        owner.SearchDrafts[owner.ActiveSearchKey] = SearchBox.Text;
+        owner.IsSettingsOpen = false;
+        _settingsReturn = null;
+        if (_currentPage is not null || !ReferenceEquals(current, owner))
+            PreparePresentation(owner);
+        return RunRequestAsync(new(owner, new(SearchBox.Text.Trim(), IsSearch: true)));
     }
 
     private void OnPreviewKeyDown(object sender, KeyEventArgs e)
@@ -559,7 +593,8 @@ public sealed partial class ShellWindow : Window
         if (plan.Destination is { } target)
         {
             if (target.IsSearch) plan.Session.SearchDrafts[SearchKey(target)] = target.Value;
-            ApplySearchDraft(plan.Session, target, force: true);
+            if (ReferenceEquals(plan.Session, _searchOwnerSession))
+                ApplySearchDraft(plan.Session, target, force: true);
         }
         var request = new ShellRequest(plan);
         var token = request.GetToken();
@@ -587,9 +622,12 @@ public sealed partial class ShellWindow : Window
                 {
                     plan.Session.ActiveSearchKey = SearchKey(destination);
                     plan.Session.SearchDrafts[plan.Session.ActiveSearchKey] = destination.Value;
-                    _suppressSearch = true;
-                    try { SearchBox.Text = destination.Value; }
-                    finally { _suppressSearch = false; }
+                    if (ReferenceEquals(plan.Session, _searchOwnerSession))
+                    {
+                        _suppressSearch = true;
+                        try { SearchBox.Text = destination.Value; }
+                        finally { _suppressSearch = false; }
+                    }
                 }
             }
             RefreshSuppliedViews(plan.Session);
@@ -694,7 +732,7 @@ public sealed partial class ShellWindow : Window
         CancelActive();
         if (_currentPage is not null) _pageNavigation = new CancellationTokenSource();
         _retryPlan = null;
-        if (_current is { } current) ApplySearchDraft(current, current.Current, force: true);
+        ApplySearchPresentation(force: true);
         SetStatus("已取消");
         RestoreNavigationSelection();
     }

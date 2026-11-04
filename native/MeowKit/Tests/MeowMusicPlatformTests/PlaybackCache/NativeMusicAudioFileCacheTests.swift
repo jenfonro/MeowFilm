@@ -240,6 +240,26 @@ final class NativeMusicAudioFileCacheTests: XCTestCase {
         await cache.close()
     }
 
+    func testDistinctFillsShareByteBudgetAndFinishIndependently() async throws {
+        let f = try AudioCacheTestFixture()
+        defer { f.cleanup() }
+        let gate = AudioCacheTestGate(expectedEntries: 9), transport = AudioCacheTestTransport()
+        let cache = f.cache(transport: transport, inspector: AudioCacheTestInspector(gate: gate), capacity: 9 * 32)
+        let tasks = (0..<9).map { index in
+            Task { await cache.storeAfterPlayback(f.request(song: "song-\(index)")) }
+        }
+        await fulfillment(of: [gate.entered], timeout: 3)
+        let transfers = await transport.count
+        XCTAssertEqual(transfers, 9)
+        await gate.release()
+        for task in tasks { await task.value }
+        for index in 0..<9 {
+            let hit = await f.hit(cache, song: "song-\(index)")
+            XCTAssertNotNil(hit)
+        }
+        await cache.close()
+    }
+
     func testSongSwitchCancelsEvenExactByteCountUntilTransportEOF() async throws {
         let f = try AudioCacheTestFixture()
         defer { f.cleanup() }
@@ -507,13 +527,14 @@ final class AudioCacheTestClock: @unchecked Sendable {
 actor AudioCacheTestGate {
     nonisolated let entered = XCTestExpectation(description: "cache phase entered")
     private var released = false
-    private var waiter: CheckedContinuation<Void, Never>?
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    init(expectedEntries: Int = 1) { entered.expectedFulfillmentCount = expectedEntries }
     func hold() async {
         entered.fulfill()
         if released { return }
-        await withCheckedContinuation { waiter = $0 }
+        await withCheckedContinuation { waiters.append($0) }
     }
-    func release() { released = true; waiter?.resume(); waiter = nil }
+    func release() { released = true; waiters.forEach { $0.resume() }; waiters.removeAll() }
 }
 
 actor AudioCacheTestTransport: NativeMusicAudioCacheTransport {

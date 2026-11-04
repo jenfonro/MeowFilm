@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 @testable import MeowMusicFeature
 
 @MainActor final class MusicSearchActionsTests: XCTestCase {
@@ -14,7 +15,7 @@ import XCTest
         return (service, owner, actions, player)
     }
     private func song(_ id: String) throws -> MusicSearchSong {
-        let track = MusicRemoteTrack(ref: .init(kind: .library, id: id), songId: id, title: id)
+        let track = MusicCollectionService.track(id)
         return try XCTUnwrap(MusicSearchFusion.songs([.init(platform: .netease, items: [track])]).first)
     }
     func testReactivationWaitsForCancelledPhysicalActionBeforeNewWrites() async throws {
@@ -38,6 +39,53 @@ import XCTest
         XCTAssertEqual(counts.queueWrites, 0)
         XCTAssertTrue(player.resources.isEmpty)
         actions.suspend(); await model.close()
+    }
+
+    func testAccountChangeCancelsSearchActionBeforeAnyDurableWrite() async throws {
+        let (service, model, actions, player) = await setup(songs: ["kept"])
+        let entered = expectation(description: "old account favorite read entered")
+        let gate = MusicCollectionGate { entered.fulfill() }
+        await service.blockTracks(gate)
+        let old = try XCTUnwrap(actions.toggleFavorite(try song("new")))
+        await fulfillment(of: [entered], timeout: 2)
+        model.accountSessionsChanged(.netease)
+        XCTAssertTrue(actions.busy)
+        XCTAssertNil(actions.toggleFavorite(try song("other")))
+        await gate.release(); await old.value; await actions.finishPending()
+        let counts = await service.statistics()
+        XCTAssertEqual(counts.writes, 0)
+        XCTAssertEqual(counts.queueWrites, 0)
+        XCTAssertEqual(actions.favorites.map(\.songId), ["kept"])
+        XCTAssertTrue(player.resources.isEmpty)
+        actions.suspend(); await model.close()
+    }
+
+    func testNewFavoritesBindingPublishesBeforeRetiredReadsReturn() async throws {
+        let (service, model, actions, player) = await setup(songs: ["kept"])
+        var gates: [MusicCollectionGate] = []
+        for index in 0..<4 {
+            let entered = expectation(description: "retired search favorites read \(index)")
+            let gate = MusicCollectionGate { entered.fulfill() }
+            gates.append(gate)
+            await service.blockTracks(gate)
+            if index == 0 { actions.refreshFavorites() } else { actions.setActive(true) }
+            await fulfillment(of: [entered], timeout: 2)
+            actions.suspend()
+        }
+        await service.replace([.init(id: "favorites", kind: "favorites", songs: ["fresh"])])
+        let loaded = expectation(description: "fresh search favorites published")
+        let observation = actions.$favoritesLoaded.dropFirst().filter { $0 }.prefix(1).sink { _ in loaded.fulfill() }
+        actions.setActive(true)
+        await fulfillment(of: [loaded], timeout: 2)
+        XCTAssertEqual(actions.favorites.map(\.songId), ["fresh"])
+        XCTAssertFalse(actions.favoritesLoading); XCTAssertNil(actions.error)
+        for gate in gates { await gate.release() }
+        await actions.finishPending()
+        XCTAssertEqual(actions.favorites.map(\.songId), ["fresh"])
+        let counts = await service.statistics()
+        XCTAssertEqual(counts.writes, 0); XCTAssertEqual(counts.queueWrites, 0)
+        XCTAssertTrue(player.resources.isEmpty)
+        observation.cancel(); actions.suspend(); await model.close()
     }
 
     func testDisplayedQueueFenceRejectsFreshServiceRevisionWithoutRetargetingCommand() async throws {
@@ -130,13 +178,20 @@ import XCTest
     func testSingleRowActionPassesRenewedHandleToExistingQueueOwner() async throws {
         let (service, model, actions, player) = await setup()
         var reads = 0
-        let session = MusicSearchResultsModel(readSongs: { platform, query, page in
+        let session = MusicSearchResultsModel(readSongs: { platform, query, page, _ in
             reads += 1
-            let track = MusicRemoteTrack(ref: .init(kind: .handle, id: reads == 1 ? "expired" : "renewed"),
+            let track = MusicRemoteTrack(ref: .init(kind: .handle, id: "expired"),
                 songId: "recording", title: "Song", artist: "Artist", duration: 180,
                 sources: [.init(sourceKey: "wy:a", platform: "wy", nativeId: "a")])
-            return .init(platform: platform.rawValue, query: query, page: page, total: 1, nextPage: nil, items: [track])
-        }, readPlaylists: { _, _, _ in .init(items: [], total: 0) })
+            return .init(platform: platform.rawValue, query: query, page: page, limit: 30, total: 1, nextPage: nil, items: [track])
+        }, readPlaylists: { platform, query, page, limit in
+            .init(platform: platform, query: query, page: page, limit: limit, total: 0, nextPage: nil, items: [])
+        }, readRecording: { request in
+            reads += 1
+            let track = request.targets[0].track
+            return .init(ref: .init(kind: .handle, id: "renewed"), songId: track.songId,
+                title: track.title, artist: track.artist, duration: track.duration, sources: track.sources)
+        })
         session.setAccess(available: true, generation: model.accountAccessGeneration); session.appear()
         session.submit("q", preferences: .init(songPlatforms: [.netease], searchPlaylists: false))
         await session.finishPendingReads()
@@ -166,14 +221,18 @@ import XCTest
         let entered = expectation(description: "exact-page renewal entered")
         let gate = MusicCollectionGate { entered.fulfill() }
         var reads = 0
-        let session = MusicSearchResultsModel(readSongs: { platform, query, page in
+        let session = MusicSearchResultsModel(readSongs: { platform, query, page, _ in
             reads += 1
-            if reads > 1 { await gate.wait() }
             let track = MusicRemoteTrack(ref: .init(kind: .handle, id: "handle-\(reads)"),
                 songId: "recording", title: "Song", artist: "Artist", duration: 180,
                 sources: [.init(sourceKey: "wy:a", platform: "wy", nativeId: "a")])
-            return .init(platform: platform.rawValue, query: query, page: page, total: 1, nextPage: nil, items: [track])
-        }, readPlaylists: { _, _, _ in .init(items: [], total: 0) })
+            return .init(platform: platform.rawValue, query: query, page: page, limit: 30, total: 1, nextPage: nil, items: [track])
+        }, readPlaylists: { platform, query, page, limit in
+            .init(platform: platform, query: query, page: page, limit: limit, total: 0, nextPage: nil, items: [])
+        }, readRecording: { request in
+            await gate.wait()
+            return request.targets[0].track
+        })
         session.setAccess(available: true, generation: model.accountAccessGeneration); session.appear()
         session.submit("q", preferences: .init(songPlatforms: [.netease], searchPlaylists: false))
         await session.finishPendingReads()
@@ -188,28 +247,37 @@ import XCTest
         XCTAssertTrue(player.resources.isEmpty)
         await model.close()
     }
-    func testPlayAllOverTwoThousandReportsExplicitLimitAndKeepsEveryDisplayedResult() async throws {
+    func testPlayAllOverTwoThousandBuildsEveryDisplayedRequestWithinByteBudget() async throws {
         let (service, model, actions, _) = await setup()
-        let session = MusicSearchResultsModel(readSongs: { platform, query, page in
-            let tracks = (0..<30).map { index -> MusicRemoteTrack in
-                let id = "\(platform.rawValue)-\((page - 1) * 30 + index)"
+        let session = MusicSearchResultsModel(readSongs: { platform, query, page, limit in
+            let tracks = (0..<limit).map { index -> MusicRemoteTrack in
+                let id = "\(platform.rawValue)-\((page - 1) * limit + index)"
                 return .init(ref: .init(kind: .handle, id: id), songId: id, title: id,
                     artist: "Fixture", duration: 180,
                     sources: [.init(sourceKey: id, platform: platform.rawValue, nativeId: id)])
             }
-            return .init(platform: platform.rawValue, query: query, page: page, total: 1020,
+            return .init(platform: platform.rawValue, query: query, page: page, limit: limit, total: 1020,
                 nextPage: page < 34 ? page + 1 : nil, items: tracks)
-        }, readPlaylists: { _, _, _ in .init(items: [], total: 0) })
-        session.setAccess(available: true, generation: model.accountAccessGeneration); session.appear()
+        }, readPlaylists: { platform, query, page, limit in
+            .init(platform: platform, query: query, page: page, limit: limit, total: 0, nextPage: nil, items: [])
+        }, readRecording: { _ in throw MusicServiceError.unsupported })
+        session.setAccess(available: true, generation: model.searchAccessGeneration); session.appear()
         session.submit("q", preferences: .init(songPlatforms: [.netease, .qq], searchPlaylists: false))
         await session.finishPendingReads()
         for _ in 1..<34 { session.more(.songs); await session.finishPendingReads() }
         XCTAssertEqual(session.songs.count, 2040)
-        XCTAssertNil(actions.playAll(session: session))
-        XCTAssertEqual(actions.actionError, "最多播放2000首")
+        let request = try session.makeBatchRequest()
+        XCTAssertEqual(request.targets.count, 2040)
+        XCTAssertNoThrow(try request.validate())
+        let playback = actions.playAll(session: session)
+        XCTAssertNotNil(playback)
+        await playback?.value
+        XCTAssertNil(actions.actionError)
         XCTAssertEqual(session.songs.count, 2040)
         let counts = await service.statistics()
         XCTAssertEqual(counts.queueWrites, 0)
+        let batchTargets = await service.batchTargetCounts()
+        XCTAssertEqual(batchTargets, [2040])
         actions.suspend(); session.disappear(); await model.close()
     }
 }

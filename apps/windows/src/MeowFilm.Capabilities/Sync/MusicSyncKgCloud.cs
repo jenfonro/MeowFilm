@@ -66,10 +66,10 @@ internal static class MusicSyncKgCloud
             foreach (var (name, value) in new[] { ("x-router", "cloudlist.service.kugou.com"), ("mid", mid), ("dfid", dfid), ("clienttime", query["clienttime"]),
                 ("kg-rc", "1"), ("kg-thash", "5d816a0"), ("kg-rec", "1"), ("kg-rf", "B9EDA08A64250DEFFBCADDEE00F8F25F") }) request.Headers.TryAddWithoutValidation(name, value);
             using (request) { token.ThrowIfCancellationRequested(); raw = await transport(request, token).ConfigureAwait(false); }
-            token.ThrowIfCancellationRequested(); LJ.Require(raw.Length is > 0 and <= 1048576, "INVALID_RESPONSE");
+            token.ThrowIfCancellationRequested(); LJ.Require(raw.Length > 0, "INVALID_RESPONSE");
             try { decoded = aes.DecryptCbc(raw, iv, PaddingMode.PKCS7); }
             catch (CryptographicException) when (path == "/v1/modify_song_sort") { decoded = raw.ToArray(); }
-            _ = PlatformProtocols.KgSuccess(PJ.Parse(decoded, 1048576), path);
+            _ = PlatformProtocols.KgSuccess(PJ.Parse(decoded), path);
         }
         catch (MusicLibraryException) { throw; }
         catch (MusicPlatformException) { throw; }

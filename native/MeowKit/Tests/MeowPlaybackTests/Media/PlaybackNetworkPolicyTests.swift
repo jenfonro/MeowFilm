@@ -231,22 +231,22 @@ final class ProgressiveMediaResponseTests: XCTestCase {
 }
 
 final class PlaybackNetworkBudgetTests: XCTestCase {
-    func testGlobalAndPerHostBudgetsSurviveItemReplacementUntilActualCompletion() throws {
+    func testConcurrentReservationsUsePayloadCostAndCompleteIndependently() throws {
         var limits = PlaybackNetworkLimits()
-        limits.activeTasks = 2; limits.tasksPerHost = 1
+        limits.windowBytes = 256; limits.deliveryBytes = 256; limits.retainedPayloadBytes = 10 * 256
         let budget = PlaybackNetworkBudget(limits: limits)
-        let retired = try XCTUnwrap(budget.acquire(host: "a.invalid", bytes: 256))
-        XCTAssertNil(budget.acquire(host: "a.invalid", bytes: 256))
-        let other = try XCTUnwrap(budget.acquire(host: "b.invalid", bytes: 256))
-        XCTAssertNil(budget.acquire(host: "c.invalid", bytes: 256))
-        XCTAssertFalse(other.move(to: "a.invalid"))
-        XCTAssertEqual(budget.usage.activeTasks, 2)
-        // Merely retiring a generation does not release its reservation.
+        let tasks = try (0..<10).map { _ in try XCTUnwrap(budget.acquire(host: "a.invalid", bytes: 256)) }
+        XCTAssertEqual(budget.usage.activeTasks, 10)
+        XCTAssertEqual(budget.usage.reservedPayloadBytes, 10 * 256)
+        XCTAssertNil(budget.acquire(host: "b.invalid", bytes: 1))
+        for task in tasks { XCTAssertTrue(task.move(to: "b.invalid")) }
+        let retired = tasks[0]
         retired.complete()
         let next = try XCTUnwrap(budget.acquire(host: "a.invalid", bytes: 256))
-        retired.complete() // idempotent; cannot steal next's slot
-        XCTAssertEqual(budget.usage.activeTasks, 2)
-        other.complete(); next.complete()
+        retired.complete()
+        XCTAssertEqual(budget.usage.activeTasks, 10)
+        XCTAssertEqual(budget.usage.reservedPayloadBytes, 10 * 256)
+        tasks.forEach { $0.complete() }; next.complete()
         XCTAssertEqual(budget.usage, .init(activeTasks: 0, reservedPayloadBytes: 0))
     }
 

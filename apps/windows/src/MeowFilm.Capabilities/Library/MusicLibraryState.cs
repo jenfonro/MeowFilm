@@ -7,7 +7,7 @@ public sealed partial class MusicLibraryOwner
     private static readonly string[] CurrentAreas =
     [
         "library", LibrarySyncArea, "queue", "history", "lx-installations", "online-settings",
-        QualityPolicyArea, LyricDisplayArea, MetadataPolicyArea, AppearanceArea, DeviceSettingsArea,
+        OfficialSourcesArea, QualityPolicyArea, LyricDisplayArea, MetadataPolicyArea, AppearanceArea, DeviceSettingsArea,
         SearchPolicyArea, SearchHistoryArea, LocalLyricsArea, "playback-settings"
     ];
 
@@ -41,7 +41,6 @@ public sealed partial class MusicLibraryOwner
             LJ.Fields(doc, "version entries", "version entries");
             LJ.Require(LJ.I(doc["version"]) == 1, "CORRUPT_STORAGE");
             var entries = LJ.Array(doc["entries"]);
-            LJ.Require(entries.Count <= CurrentAreas.Length + 32 * MaximumScriptSites, "LIMIT");
             var keys = new HashSet<string>(StringComparer.Ordinal);
             var scriptKeys = new HashSet<string>(StringComparer.Ordinal);
             var scriptEntries = new List<(string Installation, string Site)>();
@@ -97,6 +96,8 @@ public sealed partial class MusicLibraryOwner
                 if (settings["target"] is JsonObject target)
                     LJ.Require(installations.Contains(LJ.S(target["installationId"])), "CORRUPT_STORAGE");
             }
+            if (HasValue(doc, OfficialSourcesArea))
+                ValidateOfficialSources(LJ.Object(Value(doc, OfficialSourcesArea), "CORRUPT_STORAGE"));
             if (HasValue(doc, QualityPolicyArea)) ValidateQualityPolicy(LJ.Object(Value(doc, QualityPolicyArea), "CORRUPT_STORAGE"));
             if (HasValue(doc, LyricDisplayArea)) ValidateLyricDisplay(LJ.Object(Value(doc, LyricDisplayArea), "CORRUPT_STORAGE"));
             if (HasValue(doc, MetadataPolicyArea)) ValidateMetadataPolicy(LJ.Object(Value(doc, MetadataPolicyArea), "CORRUPT_STORAGE"));
@@ -131,17 +132,8 @@ public sealed partial class MusicLibraryOwner
                 LJ.Require(LJ.Id(pair.Key) && LJ.S(song["songId"]) == pair.Key, "INVALID_SONG_ID");
                 var normalized = NativeMusicSong.Normalize(song);
                 LJ.Require(JsonNode.DeepEquals(song, normalized), "INVALID_SONG");
-                var sources = LJ.Array(song["sources"], "INVALID_SOURCE");
-                var quarantined = LJ.Array(song["quarantinedSources"], "INVALID_SOURCE");
-                var seen = new HashSet<string>(StringComparer.Ordinal);
-                foreach (var n in sources.Concat(quarantined))
+                foreach (var source in LJ.Array(song["sources"]).OfType<JsonObject>())
                 {
-                    var s = LJ.Object(n); string key = LJ.S(s["sourceKey"]);
-                    LJ.Require(LJ.Id(key) && key == NativeMusicSong.SourceKey(s) && seen.Add(key), "INVALID_SOURCE");
-                }
-                foreach (var source in sources.OfType<JsonObject>())
-                {
-                    LJ.Require(NativeMusicSong.Compatible(song, source) && sources.OfType<JsonObject>().All(other => NativeMusicSong.Compatible(source, other)), "RECORDING_CONFLICT");
                     string key = LJ.S(source["sourceKey"]);
                     LJ.Require(!nativeOwners.TryGetValue(key, out string? existing) || existing == pair.Key, "NATIVE_ID_CONFLICT"); nativeOwners[key] = pair.Key;
                 }

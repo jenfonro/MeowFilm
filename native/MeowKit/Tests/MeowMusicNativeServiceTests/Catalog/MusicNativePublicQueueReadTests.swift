@@ -84,11 +84,51 @@ final class MusicNativePublicQueueReadTests: XCTestCase {
         await reader.close()
         XCTAssertNil(retained)
     }
-    func testOversizedSnapshotIsRejectedBeforeAnyPageIsIssued() async {
-        let oversized = rows(2001)
+    func testByteOversizedSnapshotIsRejectedBeforeAnyPageIsIssued() async {
+        let oversized = (0..<((MusicRemoteQueueSource.maximumBytes / (64 * 1024)) + 1)).map { _ in
+            MusicNativeTrackData(platform: "wy", data: Data(repeating: 1, count: 64 * 1024))
+        }
         let reader = MusicNativePublicBrowseQueueRead { oversized }
         do { _ = try await reader.page(nil); XCTFail("Oversized snapshot admitted") }
         catch { XCTAssertEqual(error as? MusicServiceError, .limit) }
+        await reader.close()
+    }
+    func testSnapshotBeyondFormerTwoThousandRowsIsAccepted() async throws {
+        let values = rows(2001)
+        let reader = MusicNativePublicBrowseQueueRead { values }
+        let page = try await reader.page(nil)
+        XCTAssertEqual(page.items.count, 30); XCTAssertEqual(page.cursor, "30")
+        let last = try await reader.page("1980")
+        XCTAssertEqual(last.items.count, 21); XCTAssertNil(last.cursor)
+        XCTAssertEqual(last.items.last?.data, values.last?.data)
+        await reader.close()
+    }
+    func testSnapshotWithinByteBudgetKeepsAllRowsWithoutEarlyTruncation() async throws {
+        let rowBytes = 64 * 1024
+        let values = (0..<(MusicRemoteQueueSource.maximumBytes / rowBytes)).map {
+            MusicNativeTrackData(platform: "wy", data: Data(String($0).utf8) + Data(repeating: 1, count: rowBytes - String($0).utf8.count))
+        }
+        let reader = MusicNativePublicBrowseQueueRead { values }
+        let page = try await reader.page(nil)
+        XCTAssertEqual(page.items.count, 30); XCTAssertEqual(page.cursor, "30")
+        let last = try await reader.page(String(values.count - values.count % 30))
+        XCTAssertEqual(last.items.count, values.count % 30)
+        XCTAssertEqual(last.items.map(\.data), values.suffix(last.items.count).map(\.data))
+        XCTAssertNil(last.cursor)
+        await reader.close()
+    }
+    func testLargeSnapshotCursorIsRejectedBeforeInitialLoadButAcceptedAfterIt() async throws {
+        let gate = PublicQueueReadGate(), values = rows(10_021)
+        let reader = MusicNativePublicBrowseQueueRead { try await gate.load() }
+        do { _ = try await reader.page("10020"); XCTFail("unobserved initial cursor") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .staleResult) }
+        let untouched = await gate.calls
+        XCTAssertEqual(untouched, 0)
+        let task = Task { try await reader.page(nil) }
+        await fulfillment(of: [gate.entered], timeout: 3)
+        await gate.finish(.success(values)); _ = try await task.value
+        let last = try await reader.page("10020")
+        XCTAssertEqual(last.items.map(\.data), [values[10_020].data]); XCTAssertNil(last.cursor)
         await reader.close()
     }
 }

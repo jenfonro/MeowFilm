@@ -43,6 +43,9 @@ public static class MusicPlatformClientContextTests
         yield return Case("shutdown-awaits-physical-client-write-and-borrows-store", Close);
         yield return Case("cancelled-shutdown-preparation-does-not-revive-old-snapshots", Resume);
         yield return Case("WY-wire-composes-local-client-with-optional-account-no-credential-persistence", WyFields);
+        yield return Case("WY-concurrent-responses-merge-only-their-cookie-fields", ConcurrentWyFields);
+        yield return Case("WY-explicit-cookie-clear-is-ordered-after-an-inflight-write", ConcurrentWyClear);
+        yield return Case("WY-successful-parallel-search-is-not-invalidated-by-response-cookies", ParallelWySearch);
         yield return Case("empty-WY-device-field-uses-local-client-and-optional-cookie-clearing-is-not-account-expiry", WyOptional);
         yield return Case("foreign-WY-account-association-never-mixes-local-device-fields", ForeignWy);
         yield return Case("KG-request-identity-binding-and-query-body-headers-agree", KgFields);
@@ -76,6 +79,9 @@ public static class MusicPlatformClientContextTests
     private static void Check(bool condition, string message = "Client context invariant")
     { if (!condition) throw new InvalidOperationException(message); }
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private static bool SameWyValues(MusicWyClientContext a, MusicWyClientContext b) =>
+        (a.Generation, a.DeviceId, a.Nuid, a.Nnid, a.Wnmcid, a.Nmtid) ==
+        (b.Generation, b.DeviceId, b.Nuid, b.Nnid, b.Wnmcid, b.Nmtid);
     private static async Task Error(Func<Task> action, string code)
     {
         try { await action().WaitAsync(TimeSpan.FromSeconds(5)); }
@@ -126,7 +132,7 @@ public static class MusicPlatformClientContextTests
         Check(!f.Owner.IsCurrent(wy) && f.Store.Disposals == 0);
         await using var next = f.CreateOwner();
         var w = await next.AcquireWyAsync(); var k = await next.AcquireKgAsync(); var q = await next.AcquireQqAsync();
-        Check(w == wy && k == kg && q == qq && !ReferenceEquals(wy, w));
+        Check(SameWyValues(w, wy) && k == kg && q == qq && !ReferenceEquals(wy, w) && !next.IsCurrent(wy));
         Check(f.Store.ClientWrites == 1 && f.Store.ClientReads == 2);
     }
     private static async Task CancelLoad()
@@ -300,8 +306,10 @@ public static class MusicPlatformClientContextTests
         Check(!f.Owner.IsCurrent(old) && !initialize.IsCompleted);
         f.Store.Release.TrySetResult(); await Task.WhenAll(reload, initialize);
         var current = await f.Owner.AcquireWyAsync();
-        Check(current == old && !ReferenceEquals(current, old) && !f.Owner.IsCurrent(old) &&
+        Check(SameWyValues(current, old) && !ReferenceEquals(current, old) && !f.Owner.IsCurrent(old) &&
             f.Store.ClientReads == 2 && f.Store.ClientWrites == 1);
+        await Error(() => ChangeWy(f, old), "STORAGE_CONFLICT");
+        Check(f.Store.ClientWrites == 1);
     }
     private static async Task AccountFence()
     {
@@ -349,7 +357,7 @@ public static class MusicPlatformClientContextTests
         await f.Owner.PrepareShutdownAsync(); Check(!f.Owner.IsCurrent(old));
         await f.Owner.CancelShutdownPreparationAsync();
         var current = await f.Owner.AcquireWyAsync();
-        Check(current == old && !ReferenceEquals(current, old) && !f.Owner.IsCurrent(old) && f.Store.ClientWrites == 1);
+        Check(SameWyValues(current, old) && !ReferenceEquals(current, old) && !f.Owner.IsCurrent(old) && f.Store.ClientWrites == 1);
     }
     private static async Task WyFields()
     {
@@ -381,6 +389,64 @@ public static class MusicPlatformClientContextTests
             _ = MusicWyRequestContext.Cookies(wy, "MUSIC_U=SYNTHETIC_AUTH; deviceId=" + new string('A', 257));
             return Task.CompletedTask;
         }, "INVALID_CREDENTIALS");
+    }
+    private static async Task ConcurrentWyFields()
+    {
+        await using var f = new Fixture();
+        var before = await f.Owner.AcquireWyAsync();
+        f.Store.HoldWriteAt = 2;
+        var first = ChangeWy(f, before, "SYNTHETIC_PARALLEL_NMTID");
+        await f.Store.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var second = f.Owner.AcceptWyAsync(before, null,
+            ["_ntes_nuid=SYNTHETIC_PARALLEL_NUID; Domain=.music.163.com"], () => { }, default);
+        f.Store.Release.TrySetResult();
+        await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(5));
+        var current = await f.Owner.AcquireWyAsync();
+        Check(current.Generation == before.Generation + 2 &&
+            current.Nmtid == "SYNTHETIC_PARALLEL_NMTID" && current.Nuid == "SYNTHETIC_PARALLEL_NUID");
+        Check(f.Owner.IsCurrent(before) && f.Store.ClientWrites == 3 && f.Store.AccountWrites == 0);
+        Check(!f.Owner.IsCurrent(current with { DeviceId = "SYNTHETIC_OTHER_DEVICE" }));
+        var noChange = await f.Owner.AcceptWyAsync(before, null, [], () => { }, default);
+        Check(ReferenceEquals(current, noChange) && f.Store.ClientWrites == 3);
+        await f.Owner.AcceptWyAsync(before, null, ["NMTID=; Max-Age=0"], () => { }, default);
+        current = await f.Owner.AcquireWyAsync();
+        Check(current.Nmtid is null && current.Nuid == "SYNTHETIC_PARALLEL_NUID" && f.Store.ClientWrites == 4);
+    }
+    private static async Task ParallelWySearch()
+    {
+        await using var f = new Fixture();
+        var before = await f.Owner.AcquireWyAsync();
+        var handler = new ParallelSearchHandler();
+        using var http = MusicPlatformHttp.CreateWithHandler(handler);
+        using var catalog = new MusicPlatformCatalog(new Anonymous(), http, f.Owner);
+        try
+        {
+            var songs = catalog.SearchAsync(new("wy", "Synthetic", MusicSearchKind.Songs));
+            await handler.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var playlists = catalog.SearchAsync(new("wy", "Synthetic", MusicSearchKind.Playlists));
+            await handler.Both.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            handler.First.TrySetResult();
+            Check((await songs.WaitAsync(TimeSpan.FromSeconds(5))).GetProperty("items").GetArrayLength() == 1);
+            handler.Second.TrySetResult();
+            Check((await playlists.WaitAsync(TimeSpan.FromSeconds(5))).GetProperty("items").GetArrayLength() == 1);
+            Check(f.Owner.IsCurrent(before) && handler.Calls == 2 &&
+                (await f.Owner.AcquireWyAsync()).Nmtid == "SYNTHETIC_PARALLEL_SEARCH");
+        }
+        finally { handler.First.TrySetResult(); handler.Second.TrySetResult(); }
+    }
+    private static async Task ConcurrentWyClear()
+    {
+        await using var f = new Fixture();
+        var before = await f.Owner.AcquireWyAsync();
+        f.Store.HoldWriteAt = 2;
+        var first = ChangeWy(f, before);
+        await f.Store.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var clear = f.Owner.AcceptWyAsync(before, null, ["NMTID=; Max-Age=0"], () => { }, default);
+        Check(!clear.IsCompleted, "an explicit clear must not be dropped as an early no-op");
+        f.Store.Release.TrySetResult();
+        await Task.WhenAll(first, clear).WaitAsync(TimeSpan.FromSeconds(5));
+        var current = await f.Owner.AcquireWyAsync();
+        Check(current.Nmtid is null && current.Generation == before.Generation + 2 && f.Store.ClientWrites == 3);
     }
     private static async Task ForeignWy()
     {
@@ -499,6 +565,29 @@ public static class MusicPlatformClientContextTests
                 Content = new StringContent("{\"code\":200,\"data\":{\"cursor\":\"0\",\"hasMore\":false,\"blocks\":[]}}", Encoding.UTF8, "application/json") };
             response.Headers.TryAddWithoutValidation("Set-Cookie", "NMTID=SYNTHETIC_CACHE_CONTEXT; Domain=music.163.com");
             return Task.FromResult(response);
+        }
+    }
+    private sealed class ParallelSearchHandler : HttpMessageHandler
+    {
+        internal readonly TaskCompletionSource Entered = Signal(), Both = Signal(), First = Signal(), Second = Signal();
+        internal int Calls;
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        {
+            int call = Interlocked.Increment(ref Calls);
+            Entered.TrySetResult();
+            if (call == 2) Both.TrySetResult();
+            Check(call <= 2);
+            await (call == 1 ? First.Task : Second.Task).WaitAsync(token);
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""
+                    {"code":200,"result":{"songCount":1,"songs":[{"id":1001,"name":"Synthetic","dt":180000,"ar":[{"name":"Synthetic artist"}]}],
+                    "playlistCount":1,"playlists":[{"id":2001,"name":"Synthetic playlist","trackCount":1}]}}
+                    """, Encoding.UTF8, "application/json")
+            };
+            if (call == 1) response.Headers.TryAddWithoutValidation("Set-Cookie",
+                "NMTID=SYNTHETIC_PARALLEL_SEARCH; Domain=.music.163.com");
+            return response;
         }
     }
     private sealed class Fixture : IAsyncDisposable

@@ -22,13 +22,16 @@ final class NativeMusicProtocolTests: XCTestCase {
         let reply = try MJ.parse(Data(#"{"code":200,"result":{"songCount":31,"songs":[{"id":"9007199254740993","name":"WY","ar":[{"name":"Artist"}],"al":{"id":1,"name":"Album"},"dt":180000}]}}"#.utf8))
         let http = NativeMusicHTTPFixture([reply])
         let service = try await NativeMusicFixture.service(http: http)
-        let page = try await service.search(platform: "wy", query: "Synthetic", page: 2)
+        let page = try await service.search(platform: "wy", query: "Synthetic", page: 2, limit: 30)
         XCTAssertEqual(page.items[0].sources[0].nativeId, "9007199254740993")
         XCTAssertNil(page.nextPage)
         let requests = await http.calls()
         XCTAssertEqual(requests.count, 1)
         XCTAssertEqual(requests[0].url.path, "/eapi/cloudsearch/pc")
         XCTAssertEqual(requests[0].method, "POST")
+        let payload = try MusicNativePublicBrowseFixture.decryptEAPI(requests[0])
+        XCTAssertEqual(payload.1["limit"], .n(30))
+        XCTAssertEqual(payload.1["offset"], .n(30))
         XCTAssertFalse((requests[0].headers["Cookie"] ?? "").contains("MUSIC_U"))
     }
     func testNativeKGSignatureAndAmbiguousLyricsNeverFetchFirstCandidate() async throws {

@@ -22,7 +22,7 @@ final class MusicMetadataSettingsViewController: MusicSettingsPageViewController
         super.init(appearance: appearance, content: MusicMetadataSettingsContent(
             state: state, theme: PageTheme(palette: appearance.pageColorway)
         ))
-        title = "歌词／封面设置"
+        pageTitle = "歌词／封面设置"
     }
 
     override func viewDidLoad() {
@@ -96,20 +96,25 @@ private struct MusicMetadataPlatformsContent: View {
 
     var body: some View {
         List {
-            ForEach(state.value?.platforms ?? [], id: \.rawValue) { platform in
-                Toggle(platform.title, isOn: Binding(
-                    get: { state.value?.enabledPlatforms.contains(platform) == true },
-                    set: { state.setEnabled(platform, $0) }
-                ))
-                .disabled(state.busy)
-                .moveDisabled(state.busy)
-                .listRowBackground(Color(uiColor: UIColor(theme.surface)).opacity(0.58))
+            Section("平台优先级") {
+                ForEach(state.value?.platforms ?? [], id: \.rawValue) { platform in
+                    Toggle(isOn: Binding(
+                        get: { state.value?.enabledPlatforms.contains(platform) == true },
+                        set: { state.setEnabled(platform, $0) }
+                    )) {
+                        MusicPlatformLabel(platform: platform, theme: theme)
+                    }
+                    .disabled(state.busy)
+                    .moveDisabled(state.busy)
+                    .modifier(MusicSettingsRowStyle(theme: theme))
+                }
+                .onMove { offsets, destination in
+                    guard var platforms = state.value?.platforms else { return }
+                    platforms.move(fromOffsets: offsets, toOffset: destination)
+                    state.reorder(platforms)
+                }
             }
-            .onMove { offsets, destination in
-                guard var platforms = state.value?.platforms else { return }
-                platforms.move(fromOffsets: offsets, toOffset: destination)
-                state.reorder(platforms)
-            }
+            .headerProminence(.increased)
         }
         .environment(\.editMode, .constant(.active))
         .modifier(MusicSettingsListStyle(theme: theme))

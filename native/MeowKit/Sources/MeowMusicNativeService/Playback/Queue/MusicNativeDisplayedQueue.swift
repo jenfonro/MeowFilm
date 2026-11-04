@@ -7,7 +7,6 @@ extension NativeMusicService: MusicDisplayedQueuePlaying {
                                       intent: MusicQueueAuthorization) async throws -> MusicPlaybackState {
         try check(); try intent.check()
         try musicRequire(!tracks.isEmpty && tracks.indices.contains(index))
-        try musicRequire(tracks.count <= 2000, .limit)
         let own = epoch, before = try read()
         try musicRequire(before.queue["revision"].int == expectedRevision, .staleRevision)
         let context: MJ, binding: MusicNativeHomeBinding?
@@ -32,13 +31,25 @@ extension NativeMusicService: MusicDisplayedQueuePlaying {
         var resolved: [Int: MJ] = [:], missing: [(Int, String)] = [], bytes = 0
         var cached: [MJ] = []
         if historyDate == nil, let binding, let cache = homeCache,
-           cache.scope == binding.scope, cache.revision == binding.revision {
+           cache.source == .netease, cache.scope == binding.scope, cache.revision == binding.revision {
             for section in cache.page.sections {
                 for item in section.items {
                     if case .song(let raw) = item.content { cached.append(try MusicModel.normalize(raw)) }
                 }
             }
         }
+        var cachedByID: [Data: MJ] = [:]
+        for value in cached { cachedByID[Data(value["songId"].string.utf8)] = value }
+        let historySongs: [Data: MJ]
+        if let historyDate {
+            let rows = (before.history["days"].array.first {
+                $0["date"].string == historyDate
+            })?["songs"].array
+            var values: [Data: MJ] = [:]
+            for row in rows ?? [] { values[Data(row["song"]["songId"].string.utf8)] = row["song"] }
+            historySongs = values
+        } else { historySongs = [:] }
+        var resolvedByID: [Data: MJ] = [:]
         for (position, track) in tracks.enumerated() {
             try intent.check()
             try musicRequire(!track.songId.isEmpty && (1...16).contains(track.sources.count))
@@ -46,19 +57,21 @@ extension NativeMusicService: MusicDisplayedQueuePlaying {
             for source in track.sources { try requirePlatform(source.platform) }
             let raw: MJ?
             if let historyDate {
-                raw = before.history["days"].array.first(where: { $0["date"].string == historyDate })?["songs"]
-                    .array.first(where: { $0["song"]["songId"].string.utf8.elementsEqual(track.songId.utf8) })?["song"]
+                raw = historySongs[Data(track.songId.utf8)]
                 guard raw != nil else { throw MusicServiceError.notFound }
+            } else if let value = resolvedByID[Data(track.songId.utf8)] {
+                raw = value
             } else if let value = try? song(track.ref, before) {
                 raw = value
             } else {
-                raw = cached.first(where: { $0["songId"].string.utf8.elementsEqual(track.songId.utf8) })
+                raw = cachedByID[Data(track.songId.utf8)]
             }
             if let raw {
                 try Self.checkDisplayedIdentity(raw, track)
                 bytes += raw.bytes.count
                 try musicRequire(bytes <= 4 * 1024 * 1024, .limit)
                 resolved[position] = raw
+                resolvedByID[Data(track.songId.utf8)] = raw
             } else {
                 // Reference discovery songs are NetEase recordings. Re-fetch
                 // only that exact native ID, never title-search or another source.
@@ -90,10 +103,15 @@ extension NativeMusicService: MusicDisplayedQueuePlaying {
                 return try songs.map(MusicModel.normalize)
             }
             try check(own); try intent.check()
+            var fetchedByID: [Data: MJ] = [:]
+            for raw in rows {
+                if let source = try? MusicModel.sources(raw).first(where: { $0.platform == "wy" }) {
+                    fetchedByID[Data(source.nativeId.utf8)] = raw
+                }
+            }
             for (position, id) in missing {
-                guard let raw = rows.first(where: {
-                    (try? MusicModel.sources($0).contains { $0.platform == "wy" && $0.nativeId == id }) == true
-                }) else { throw MusicServiceError.notFound }
+                let raw = fetchedByID[Data(id.utf8)]
+                guard let raw else { throw MusicServiceError.notFound }
                 try Self.checkDisplayedIdentity(raw, tracks[position])
                 bytes += raw.bytes.count
                 try musicRequire(bytes <= 4 * 1024 * 1024, .limit)

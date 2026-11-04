@@ -2,7 +2,6 @@ export {
   base64ToBytes,
   bytesToBase64,
   createCapabilityClient,
-  createLXNetworkFromCapabilities,
   decodeHttpBody,
   encodeText,
   hostApiVersion,

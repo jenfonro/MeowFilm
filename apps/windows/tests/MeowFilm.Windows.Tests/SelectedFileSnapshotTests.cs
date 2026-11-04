@@ -109,7 +109,7 @@ internal sealed class SelectedSnapshotCases(bool script)
         yield return new(Prefix + "contract.dto-and-fixed-errors", Contract);
         yield return new(Prefix + "exact-bytes-sha-basename-owned", Exact);
         yield return new(Prefix + "empty-and-invalid-content-remain-bytes", OpaqueBytes);
-        yield return new(Prefix + (script ? "maximum-512-kib" : "maximum-eight-mib"), Maximum);
+        yield return new(Prefix + (script ? "maximum-sixteen-mib" : "maximum-eight-mib"), Maximum);
         yield return new(Prefix + "extension-policies-do-not-overlap", ExtensionPolicy);
         yield return new(Prefix + "no-ui-synchronization-context-capture", UiContext);
         yield return new(Prefix + "raw-script-is-not-executed", ScriptNotExecuted);
@@ -123,7 +123,11 @@ internal sealed class SelectedSnapshotCases(bool script)
 
     private Task Contract()
     {
-        Equal(script ? 512 * 1024 : 8 * 1024 * 1024, MaximumBytes);
+        if (script)
+            Equal(16 * 1024 * 1024,
+                (int)typeof(SelectedScriptSnapshot).GetField("MaximumBytes",
+                    BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!);
+        else Equal(8 * 1024 * 1024, MaximumBytes);
         string[] properties = (script ? typeof(SelectedScriptSnapshotData) : typeof(SelectedJsonSnapshotData)).GetProperties().Select(property => property.Name).Order().ToArray();
         Assert(properties.SequenceEqual(new[] { "Basename", "Bytes", "Sha256" }), "Snapshot exposes an unexpected property.");
         foreach (var code in Enum.GetValues<SelectedJsonSnapshotError>())
@@ -238,11 +242,12 @@ internal sealed class SelectedSnapshotCases(bool script)
     private async Task Maximum()
     {
         using var fixture = new Temp(Extension);
-        byte[] data = new byte[MaximumBytes];
+        int length = MaximumBytes;
+        byte[] data = new byte[length];
         for (int i = 0; i < data.Length; i++) data[i] = (byte)(i * 31 + 7);
         string path = fixture.Write("maximum" + Extension, data);
         var result = await ReadAsync(path);
-        Equal(MaximumBytes, result.Bytes.Length);
+        Equal(length, result.Bytes.Length);
         Bytes(data, result.Bytes);
         Equal(Hash(data), result.Sha256);
         fixture.AssertReleased(path);
@@ -251,14 +256,18 @@ internal sealed class SelectedSnapshotCases(bool script)
     private async Task Oversize()
     {
         using var fixture = new Temp(Extension);
-        string path = fixture.Write("oversize" + Extension, [17, 42]);
-        using (var file = new FileStream(path, FileMode.Open, FileAccess.Write))
+        string path = Path.Combine(fixture.Root, "oversize" + Extension);
+        using (var file = new FileStream(path, FileMode.CreateNew, FileAccess.Write))
+        {
             file.SetLength(MaximumBytes + 1);
-        byte[] before = SHA256.HashData(File.ReadAllBytes(path));
+            file.Position = 0;
+            file.Write([17, 42]);
+        }
+        string before = HashFile(path);
         var writeTime = File.GetLastWriteTimeUtc(path);
         await Error(() => ReadAsync(path), SelectedJsonSnapshotError.TooLarge);
         Equal(MaximumBytes + 1L, new FileInfo(path).Length);
-        Bytes(before, SHA256.HashData(File.ReadAllBytes(path)));
+        Equal(before, HashFile(path));
         Equal(writeTime, File.GetLastWriteTimeUtc(path));
         fixture.AssertReleased(path);
     }
@@ -784,6 +793,11 @@ internal sealed class SelectedSnapshotCases(bool script)
         throw new InvalidOperationException("Source mutation was not denied.");
     }
     private static string Hash(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
+    private static string HashFile(string path)
+    {
+        using var stream = File.OpenRead(path);
+        return Convert.ToHexStringLower(SHA256.HashData(stream));
+    }
     private static void Bytes(byte[] expected, byte[] actual) => Assert(expected.AsSpan().SequenceEqual(actual), "Snapshot bytes changed.");
     private static void Equal<T>(T expected, T actual) where T : IEquatable<T> => Assert(expected.Equals(actual), "Snapshot assertion mismatch.");
     private static void Assert(bool condition, string message = "Snapshot assertion failed.")

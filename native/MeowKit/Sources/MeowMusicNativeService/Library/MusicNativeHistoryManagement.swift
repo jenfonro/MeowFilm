@@ -28,6 +28,15 @@ extension NativeMusicService: MusicHistoryManaging {
         }
     }
 
+    public func clearHistory(_ category: MusicHistoryCategory) async throws {
+        try transaction(["history"]) { d in
+            switch category {
+            case .songs: d.history["days"] = .array([])
+            case .playlists: d.history["playlists"] = .array([])
+            }
+        }
+    }
+
     public func restoreHistory(detail: MusicHistoryDetail, startIndex: Int?,
                                expectedRevision: Int) async throws -> MusicPlaybackState {
         do {
@@ -83,7 +92,7 @@ extension NativeMusicService: MusicHistoryManaging {
     private func historyActionToken(_ snapshot: MJ) -> MusicHistoryActionToken {
         // Hash the entire stored snapshot, not the title/count/visible rows.
         // The private run/epoch binding rejects other owners and old access
-        // generations without retaining up to 2,000 temporary song handles.
+        // generations without retaining temporary handles for the song list.
         .init(rawValue: MJ.strings([
             "music.history.action.v1", runID, epoch.uuidString,
             snapshot.stable.digest
@@ -112,8 +121,7 @@ private struct MusicNativeHistorySnapshot {
 
     init(_ raw: MJ) throws {
         do {
-            try musicRequire(raw.isObject && raw["entries"].isArray &&
-                raw["entries"].array.count <= 2000, .corruptDocument)
+            try musicRequire(raw.isObject && raw["entries"].isArray, .corruptDocument)
             let id = try raw["id"].text()
             try musicRequire(raw["at"].isNumber && raw["at"].number.isFinite &&
                 (0...9_007_199_254_740_991).contains(raw["at"].number), .corruptDocument)

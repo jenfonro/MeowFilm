@@ -55,16 +55,16 @@ final class MusicCandidateDiscoveryConsumerTests: XCTestCase {
         let facts = await session.facts()
         XCTAssertEqual(facts.commits, 1); XCTAssertEqual(facts.targets.map(\.selection.sourceKey), ["new-source"])
     }
-    func testRepeatedSnapshotsDoNotRetrySameRequestAndTotalAttemptsStayBounded() async throws {
+    func testRepeatedSnapshotsDoNotRetrySameRequestOrTruncateValidCandidates() async throws {
         let options = (0..<32).map { MusicCandidateDiscoveryFixture.option("script-\($0)", qualities: ["flac"]) }
         let session = MusicCandidateDiscoveryTestSession(known: MusicCandidateDiscoveryFixture.snapshot(options),
             failures: Array(repeating: .upstreamFailed, count: 32))
         let consumer = MusicCandidateDiscoveryConsumer(provider: MusicCandidateDiscoveryTestProvider(session: session))
         do { _ = try await consumer.resolve(occurrenceID: "entry-1", expectedQueueRevision: 1, mode: .automatic()); XCTFail("no candidate") }
-        catch { XCTAssertEqual((error as? MusicCandidateDiscoveryFailure)?.attempts, 15) }
+        catch { XCTAssertEqual((error as? MusicCandidateDiscoveryFailure)?.attempts, 32) }
         let facts = await session.facts()
-        XCTAssertEqual(facts.targets.count, 15)
-        XCTAssertEqual(Set(facts.targets.map(\.selection.installationId)).count, 15)
+        XCTAssertEqual(facts.targets.count, 32)
+        XCTAssertEqual(Set(facts.targets.map(\.selection.installationId)).count, 32)
     }
     func testCancellationClosesScopeAndNeverPublishesLateResolution() async throws {
         let gate = MusicCandidateDiscoveryTestGate(), option = MusicCandidateDiscoveryFixture.option()

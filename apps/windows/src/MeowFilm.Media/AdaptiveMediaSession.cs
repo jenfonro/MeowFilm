@@ -20,8 +20,7 @@ internal sealed class AdaptiveMediaSession : IAsyncDisposable
     private AdaptiveLiveSession? _live;
     private readonly NativeHttpMediaOptions _options;
     private readonly ConcurrentDictionary<int, TcpClient> _clients = new();
-    private readonly List<Task> _handlers = [];
-    private readonly SemaphoreSlim _admission = new(16, 16);
+    private readonly HashSet<Task> _handlers = [];
     private Task _accept = Task.CompletedTask;
     private Task? _dispose;
     private string? _error;
@@ -42,7 +41,7 @@ internal sealed class AdaptiveMediaSession : IAsyncDisposable
         _lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
         Capability = "MeowAdaptive/" + Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
         _listener = new TcpListener(IPAddress.Loopback, 0);
-        _listener.Start(16);
+        _listener.Start();
         Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
         _transport = offline is null ? new(options, headers, origin, _lifetime.Token) : new(offline, _lifetime.Token);
         _manifest = new(_transport, new Uri($"http://127.0.0.1:{Port}/"), allowLive: offline is null);
@@ -109,15 +108,15 @@ internal sealed class AdaptiveMediaSession : IAsyncDisposable
             while (!_lifetime.IsCancellationRequested)
             {
                 var client = await _listener.AcceptTcpClientAsync(_lifetime.Token).ConfigureAwait(false);
-                if (!_admission.Wait(0)) { client.Dispose(); continue; }
                 int id = Interlocked.Increment(ref _nextClient);
                 _clients[id] = client;
                 var handler = HandleAsync(id, client);
-                lock (_handlers)
+                lock (_handlers) _handlers.Add(handler);
+                _ = handler.ContinueWith(task =>
                 {
-                    _handlers.RemoveAll(t => t.IsCompleted);
-                    _handlers.Add(handler);
-                }
+                    _ = task.Exception;
+                    lock (_handlers) _handlers.Remove(task);
+                }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
             }
         }
         catch (Exception error) { Fail(error); }
@@ -245,7 +244,7 @@ internal sealed class AdaptiveMediaSession : IAsyncDisposable
             await disconnect.ConfigureAwait(false);
             if (liveInitialization is not null) Array.Clear(liveInitialization);
             resource?.Release();
-            _clients.TryRemove(id, out _); _admission.Release();
+            _clients.TryRemove(id, out _);
         }
     }
     private void ReportRequestFailure(Exception error, bool authenticated, CancellationToken request)
@@ -420,6 +419,6 @@ internal sealed class AdaptiveMediaSession : IAsyncDisposable
         _manifest.Clear();
         lock (_handlers) _handlers.Clear();
         Capability = "";
-        _abort.Dispose(); _lifetime.Dispose(); _admission.Dispose();
+        _abort.Dispose(); _lifetime.Dispose();
     }
 }

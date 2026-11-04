@@ -285,19 +285,20 @@ final class MusicAccountSMSProfileTests: XCTestCase {
         }
     }
 
-    func testSMSLimitReservationsAreBoundedHashedAndEightSubmitsNeverImplicitlySend() throws {
+    func testSMSLimitReservationsAreHashedAndKeepSingleFlightWithoutCrossLoginQuota() throws {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         var limits = MusicAccountSMSLimits()
         let key = try limits.reserve(platform: .netease, country: "86", phone: phone, send: false, at: now)
         XCTAssertFalse(key.contains(phone)); XCTAssertEqual(key.count, 64)
         XCTAssertThrowsError(try limits.reserve(platform: .netease, country: "86", phone: phone, send: true, at: now))
         limits.release(key)
-        for _ in 1..<8 {
+        for _ in 1..<20 {
             let next = try limits.reserve(platform: .netease, country: "86", phone: phone, send: false, at: now)
             limits.release(next)
         }
-        XCTAssertThrowsError(try limits.reserve(platform: .netease, country: "86", phone: phone, send: false, at: now))
-        XCTAssertEqual(limits.sends, 0)
+        let afterQuotaWindow = now.addingTimeInterval(61)
+        XCTAssertNoThrow(try limits.reserve(platform: .netease, country: "86", phone: phone,
+                                           send: true, at: afterQuotaWindow))
         XCTAssertThrowsError(try MusicAccountSMSInput.validate(platform: .netease, countryCode: "86\n", phone: phone))
         XCTAssertThrowsError(try MusicAccountSMSInput.validate(platform: .netease, countryCode: "86", phone: phone, code: "000000\n"))
     }

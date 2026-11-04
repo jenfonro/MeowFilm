@@ -38,7 +38,7 @@ extension NativeMusicAccountService: MusicNativeAccountProviding {
         // public bytes merely because a JSON object enumerates keys differently.
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         return .init(items: try rows.map { .init(platform: platform.rawValue, data: try encoder.encode($0)) },
-                     total: try MusicPlatformJSON.integer(result["total"] ?? .number(0), maximum: 20_000),
+                     total: try MusicPlatformJSON.integer(result["total"] ?? .number(0)),
                      cursor: cursor, dailyStyle: dailyStyle)
     }
     public func nativeRecommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) async throws -> MusicNativeTrackPage {
@@ -51,7 +51,7 @@ extension NativeMusicAccountService: MusicNativeAccountProviding {
         let rows = try MusicPlatformJSON.array(result["items"], maximum: 30).map { value -> MusicAccountCollection in
             let row = try MusicPlatformJSON.object(value, keys: ["id", "title", "count", "owned"])
             return .init(id: try MusicPlatformJSON.string(row["id"], maximum: 64), title: try MusicPlatformJSON.string(row["title"], maximum: 600),
-                         count: row["count"] == .null ? nil : try MusicPlatformJSON.integer(row["count"], maximum: 20_000),
+                         count: row["count"] == .null ? nil : try MusicPlatformJSON.integer(row["count"]),
                          owned: try MusicPlatformJSON.bool(row["owned"]))
         }
         return .init(items: rows, cursor: try MusicPlatformJSON.nullableString(result["cursor"]))
@@ -123,7 +123,6 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicCredentialsIm
     private var login: (id: UUID, platform: MusicAccountPlatform, expires: Date, method: MusicAccountLoginMethod)?
     private var checking = Set<UUID>(), lastCreate: [MusicAccountPlatform: Date] = [:]
     private var operations: [UUID: (platform: MusicAccountPlatform, cancel: @Sendable () -> Void)] = [:]
-    private let operationAdmission = RequestAdmission(maximum: 6, perHost: 2, waitingLimit: 96)
     private var accessTransitions = 0
     private var pendingWrites = 0
     private var dailyStyleWrite: UUID?
@@ -279,14 +278,13 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicCredentialsIm
                 urlCacheStore: EncryptedDocumentStore? = nil,
                 cacheLifecycle: (@Sendable (MusicNativeCacheLifecycleEvent) async -> Void)? = nil,
                 clock: @escaping @Sendable () -> Date = { Date() },
-                requestAdmission: RequestAdmission? = nil,
                 clientContexts: NativeMusicClientService? = nil,
                 qqClient: NativeMusicQQPublicService? = nil) {
         self.accounts = accounts; self.scopes = scopes; self.now = clock
         self.cacheLifecycle = cacheLifecycle
         self.urlCache = MusicNativeAccountURLCache(store: urlCacheStore)
         self.chorusCache = MusicAccountChorusCache(store: urlCacheStore)
-        let owned = transport == nil ? MusicAccountSMSHTTP(admission: requestAdmission ?? RequestAdmission()) : nil
+        let owned = transport == nil ? MusicAccountSMSHTTP() : nil
         self.ownedTransport = owned
         let http = transport ?? owned!
         let clients = clientContexts ?? NativeMusicClientService(clock: clock)
@@ -366,18 +364,10 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicCredentialsIm
         try check()
         let id = UUID(), own = epoch, gate = MusicAccountOperation<T>()
         let task = Task {
-            do {
-                let lease = try await operationAdmission.acquire(host: platform.rawValue,
-                    priority: MusicRequestTrace.current?.priority ?? .normal)
-                let result: Result<T, Error>
-                do { try check(own); result = .success(try await operation()) }
-                catch { result = .failure(error) }
-                // Cancellation may complete the public gate early. The budget
-                // remains occupied until the provider's physical work returns.
-                await operationAdmission.release(lease)
-                gate.finish(result)
-            }
-            catch { gate.finish(.failure(error)) }
+            let result: Result<T, Error>
+            do { try check(own); result = .success(try await operation()) }
+            catch { result = .failure(error) }
+            gate.finish(result)
             operations.removeValue(forKey: id)
         }
         let cancel: @Sendable () -> Void = {
@@ -482,7 +472,6 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicCredentialsIm
             revokeCredentialImports()
             for lease in credentialUpdates.values { lease.revoke() }
             for operation in operations.values { operation.cancel() }
-            await operationAdmission.close()
             let old = login, oldToken = old.flatMap { tokens[$0.platform] }; login = nil
             for provider in providers.values { await provider.revoke() }
             if let oldToken { _ = try? await accounts.failLogin(oldToken, reason: .cancelled) }
@@ -595,7 +584,18 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicCredentialsIm
             return token
         }
         guard !restoring.contains(platform), login?.platform != platform else { throw MusicServiceError.busy }
-        // Revoke old business grants before any suspension. The account binding
+        if !force, inspected.contains(platform), tokens[platform] == nil {
+            let account = accountEpochs[platform], revision = revisions[platform, default: 0]
+            let snapshot = await accounts.snapshot(for: identity)
+            try check(own)
+            guard account == accountEpochs[platform], revision == revisions[platform, default: 0],
+                  !transitions.contains(platform), !localCacheRestoring.contains(platform),
+                  !restoring.contains(platform), login?.platform != platform else { throw MusicServiceError.staleResult }
+            // A locally confirmed guest has no session to restore or revoke.
+            // Business admission must not rotate its coordinator/display scope.
+            if snapshot.phase == .signedOut, tokens[platform] == nil { throw MusicServiceError.authRequired }
+        }
+        // Revoke old business grants before restore/validation can suspend. The account binding
         // itself stays stable; a successful update keeps the coordinator token.
         invalidateBusiness(platform)
         let revision = revisions[platform, default: 0], accountEpoch = accountEpochs[platform]
@@ -839,8 +839,14 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicCredentialsIm
         guard !transitions.contains(platform), login == nil else { throw MusicServiceError.busy }
         transitions.insert(platform)
         defer { transitions.remove(platform); notifyNativeHome(platform); notifyAccountSession(platform) }
-        if let at = lastCreate[platform], now().timeIntervalSince(at) < 3 { throw MusicServiceError.rateLimited }
-        lastCreate[platform] = now(); rotate(platform)
+        let createInterval: TimeInterval
+        switch platform {
+        case .kugou: createInterval = 5
+        case .netease, .qq: createInterval = 3
+        }
+        if let at = lastCreate[platform], now().timeIntervalSince(at) < createInterval { throw MusicServiceError.rateLimited }
+        lastCreate[platform] = now()
+        rotate(platform)
         requiresExplicitRestore.remove(platform); restoreNativeIDs.removeValue(forKey: platform)
         let own = epoch, id = UUID(), provider = providers[platform]!
         login = (id, platform, now().addingTimeInterval(180), .qr)
@@ -1438,7 +1444,6 @@ extension NativeMusicAccountService: MusicNativeFeedbackProviding {
         guard let token = tokens[platform], validated.contains(platform), !transitions.contains(platform),
               !requiresExplicitRestore.contains(platform), let provider = providers[platform] else { throw MusicServiceError.authRequired }
         playbackFeedbackLeases = playbackFeedbackLeases.filter { $0.value.authorization.isActive || $0.value.authorization.inFlight > 0 }
-        guard playbackFeedbackLeases.count < 128 else { throw MusicServiceError.busy }
         let own = epoch, revision = revisions[platform, default: 0]
         try await validToken(token, platform: platform, own: own, revision: revision)
         let credential = try await accounts.credentialUpdateLease(for: token)
@@ -1456,8 +1461,6 @@ extension NativeMusicAccountService: MusicNativeFeedbackProviding {
                     guard let self else { throw MusicServiceError.closed }
                     try await self.checkPlaybackFeedback(platform: platform, lease: credential, epoch: own, revision: revision)
                 }
-            // Reentrancy across credential checks must not bypass capacity.
-            guard playbackFeedbackLeases.count < 128 else { value.revoke(); throw MusicServiceError.busy }
             playbackFeedbackLeases[value.id] = value
             return value
         } catch { credential.revoke(); throw safe(error) }
@@ -1485,7 +1488,6 @@ extension NativeMusicAccountService: MusicNativeAccountQueueProviding {
             try check()
             let retired = accountQueueBindings.values.filter { !$0.lease.authorization.isActive }.map(\.lease)
             for lease in retired { endAccountQueue(lease) }
-            guard accountQueueBindings.count < 8 else { throw MusicServiceError.busy }
             // Only this explicit open may restore and verify an existing account.
             let token = try await session(platform), own = epoch, revision = revisions[platform, default: 0]
             try await validToken(token, platform: platform, own: own, revision: revision)
@@ -1494,7 +1496,6 @@ extension NativeMusicAccountService: MusicNativeAccountQueueProviding {
                 guard let provider = providers[platform] else { throw MusicServiceError.unsupported }
                 let nativeID = try await provider.nativeID(credential.credential)
                 try await validToken(token, platform: platform, own: own, revision: revision)
-                guard accountQueueBindings.count < 8 else { throw MusicServiceError.busy }
                 let lease = MusicAccountQueueLease(platform: platform)
                 accountQueueBindings[lease.id] = .init(lease: lease, credential: credential, epoch: own,
                     revision: revision, nativeID: nativeID)
@@ -2608,10 +2609,10 @@ extension NativeMusicAccountService: MusicNativeHomeActionQueueProviding {
                 }
             }
             try await checkAccountQueue(lease)
-            // This provider returns one bounded complete batch. It has no
+            // This provider returns one complete batch. It has no
             // remote-page parameter, so a claimed nextPage must not be silently
             // dropped or mapped to another fresh FM/heartbeat request.
-            guard value.rows.count <= MusicHomeAction.maximumCollectionSongs, value.nextPage == nil else {
+            guard value.nextPage == nil else {
                 throw MusicServiceError.invalidResponse
             }
             return try lease.authorization.perform {

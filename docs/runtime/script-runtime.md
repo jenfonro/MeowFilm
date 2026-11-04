@@ -1,105 +1,114 @@
-# 共用来源脚本运行时
+# 共用脚本运行时
 
-## 结构
+## 职责与目录
 
 ```text
 apps/runtime/bootstrap.mjs
   被动装配方法表、双向调用与模块关闭
 apps/runtime/modules/music-script.mjs
-  LX 暂存、安装身份、版本和原生存储会话
+  音乐脚本暂存、安装身份、版本与存储会话绑定
+apps/runtime/modules/cat-script.mjs
+  Cat 源码/结果分片、安装、设置刷新、调用与管理同步
 apps/runtime/modules/source-runtime.mjs
-  Reader／Cat 暂存、安装身份、动作调用和 profile 回收
-packages/source-runtime/
-  capability ABI、规则与结果语义、Legado／异次元／轻悦时光／Cat adapter
+  Reader/CatVod 来源暂存、版本绑定、调用与 profile 退休
 packages/script-host/
-  QuickJS/WASM 承载、guest SDK、实例管理和 Windows Node capability adapter
+  共用 WorkerSession、LX/CatNode/portable 来源适配、QuickJS 与资源回收
+packages/source-runtime/
+  Node 无关的 Reader 规则、CatVod Spider adapter 与来源 capability ABI
 packages/runtime-bridge/
   有界 JSON 帧、双向 RPC、取消与连接生命周期
 apps/windows/runtime/
   Windows 启动参数、命名管道 bootstrap 与薄 entry
 ```
 
-当前 runtime descriptor：
+公共层不依赖 Windows 源码、命名管道或原生业务私有实现。Windows entry 导入公共 `createMusicScriptModule`、`createCatScriptModule` 与 `createSourceRuntimeModule`，不保留平台目录中的业务模块副本。官方平台账号、目录、曲库、歌词、缓存和播放仍由原生业务 owner 承担，不因使用共用脚本核心而获得或改变权限。
 
-```text
-music@0.5.0  -> music.script.v2
-source@0.1.0 -> source.runtime.v1
-```
+当前装配 `music, cat, source` 三个 module：
 
-Windows 的 `aggregate` 是唯一 App 的 wire 身份，不是另一套协议。官方账号、目录、曲库、歌词、缓存和播放仍由原生 owner 承担。
+| descriptor | 响应契约 | 输入与职责 |
+| --- | --- | --- |
+| `music@0.6.0` | `music.script.v2` | 原始 LX 音源 |
+| `cat@0.1.0` | `cat.script.v1` | CatNode 的有限 Node 兼容、HTTP 服务、direct Spider、私有卷与管理同步 |
+| `source@0.1.0` | `source.runtime.v1` | Legado、异次元、轻悦时光及独立 CatVod Spider 输入 |
 
-## 一套内核与独立协议 adapter
+Windows 的 `aggregate` 只是当前 wire 身份，不是第二个产品或脚本协议。
 
-ScriptHost 统一管理 installation、generation、候选更新、取消、预算和回收。协议语义保持独立：
+## 一套核心与协议适配
 
-- LX adapter：声明 site、action、quality，并保留 LX 请求/返回模型。
-- Reader adapter：Legado 规则核心、异次元旧格式 importer、轻悦时光 HTML/bridge。
-- Cat adapter：CatVod JS Spider 动作与虚拟代理路由。
+LX 适配器处理 `lx` 事件、声明的 source/action/quality 和请求返回值；音乐模块处理安装、版本与定向调用。CatNode 适配器处理脚本启动、配置站点、HTTP 动作、私有卷、受控服务、标准 Cat 输出和管理协议。source adapter 处理 Reader 规则流程及 CatVod Spider。入口显式确定协议和业务归属，不通过作者、文件名、源码哈希或网络域名猜测。
 
-协议更新只修改对应公共 adapter。只有新增 capability ABI 无法表达的系统能力时，平台才需要各自适配。Cat、Reader 和 LX 不拆成三套 Node runner，也不把动作强行合并成一种业务格式。
+核心可以管理多份隔离实例。当前音乐模块拥有自己创建的 ScriptHost 及其会话，关闭回收这些资源，不销毁其他实例复用的编译模块缓存。协议的业务动作不是额外宿主权限，也不是宿主隔离边界；扩展动作必须核对声明、处理器和实际返回语义，不能因为不是 `musicUrl`／`lyric` 就直接判定不兼容。
 
-公共 `@meowfilm/source-runtime` 禁止 `node:*`、`Buffer`、`process`、`require`、真实 JVM 和平台私有 API。Windows 当前由 Node 承载 QuickJS 和 capability adapter；Android/iOS 后续可更换承载方式而复用协议包。共用代码不表示同一个 Node 可执行文件跨平台运行。
+CatNode 与 source 使用各自业务 owner，复用同一进程、WorkerSession、worker 协议和 QuickJS 后端，不另建 runner，也不把 Spider、账号或 Web 管理业务塞进 LX。`source.runtime.v1` 的 `cat` 只表示 portable CatVod Spider 输入；它不提供 `cat.script.v1` 的 Node 兼容、私有卷和服务能力，也不能代替该契约。
 
-## QuickJS 隔离边界
+Node-independent 只指 `@meowfilm/source-runtime` 的纯规则与 ABI 包：不导入 `node:*` 或 Node／平台全局。script-host 的 worker、QuickJS/WASM 加载和 CatNode 兼容层仍由 Node 承载，不声称其能无 Node 运行。来源能力的跨平台语义以[capability ABI](source-capability-abi.md)为唯一来源；LX 原有网络/存储与 CatNode 能力不改走这套 ABI。
 
-不可信脚本只在独立 QuickJS WebAssembly heap 中执行。每个 installation/generation 独立实例化 WASM 线性内存；编译后的受信模块可复用，但 guest 全局、堆、timer、回调和 profile 不共享。
+各平台仍负责运行环境的引入／嵌入、生命周期、通信和发布。本仓只实现 Windows 的接入，不据此声明 iOS 或 Android 已可运行，也不新增阅读 UI。
 
-宿主与 guest 只交换有界 JSON、规范 Base64 和回调 ID。不提供文件、进程、`require`、Node 模块、任意宿主 callable、真实 `Packages.*` 或任意 JVM 类；失败时不回退到 `node:vm`。
+## QuickJS 执行边界
 
-默认内存、栈、同步执行片段、请求截止时间、并发、来源字节、DOM 节点、外部脚本和虚拟路由均有上限。取消或超时封闭逻辑结果，但不把不合作 I/O 已收到 signal 当成物理完成；未排空任务继续计入清理债务。
+用户脚本只在 QuickJS WebAssembly guest heap 中执行；宿主调用交换 JSON 结构和独立字节帧，guest 回调通过 ID 引用，不把 Node 对象或任意宿主 callable 直接交给脚本。不提供任意文件、进程、`require` 或宿主模块加载接口，也不在失败时回退到 `node:vm`。
 
-隔离不依赖 AppContainer 或完整虚拟机。Node 子进程提供额外崩溃边界，但网络、编码和加解密 adapter 是受信宿主代码；仍需维护 QuickJS/WASM 和依赖安全更新。
+每个启用的 LX、CatNode 或 source installation 通过同一 WorkerSession 在独立 `worker_thread` 中执行会话和 QuickJS；ScriptHost 记录、Cat 网关及平台 capability 物理任务留在主线程。编译后的 `WebAssembly.Module` 由主线程共享给 worker，各实例不共享堆。guest 卡住不阻塞主线程或其他实例。调用等待默认为 60 秒；source 初始化也为 60 秒、清理为 3 秒，LX 保持自身初始化/清理时限。到期后探测对应 worker，清理预算内无响应才终止并报告 `TIMEOUT`，不自动重启卡死实例、不设单次同步执行时限或后台心跳。停用、卸载、更新和关闭先触达正在初始化的真实所有者，再等待串行事务和真实线程退出。`stats()` 同步返回最近事实快照，并按读取需求合并发起一次异步刷新，不同步阻塞 worker。
 
-## Capability ABI
+运行器的 60 秒不覆盖平台调用方自己的等待策略：runtime-bridge 默认 30 秒及 Windows C# 调用方超时保持不变，应用调用可能先结束等待。
 
-来源协议通过 `hostApiVersion = 1` 请求：
+桥接控制参数使用预先捕获的序列化方法和无原型信封，脚本修改 `JSON.stringify` 或继承的 `toJSON` 不能篡改内部请求身份；业务数据仍按 JSON 语义传递，不通过冻结脚本全局原型限制正常执行。
 
-```text
-http
-cookie
-storage
-encoding
-crypto
-web interaction
-virtual resource
-```
+受信 `quickjs-engine.js` 通过 `node:fs/promises` 与 `import.meta.resolve('@jitl/quickjs-wasmfile-release-sync/wasm')` 读取打包内的锁定引擎文件；这不向 guest 授予文件访问。`WebAssembly.compile` 编译模块只执行一次并缓存复用，但每个 installation／generation 独立实例化 WASM，不共享线性内存，避免某个堆或模块损坏影响其他实例。
 
-ABI 按系统语义命名，不出现 `lxRequest`、`legadoGet` 或 `catStartServer`。完整信封、作用域和平台责任见 [capability ABI](source-capability-abi.md)。
+ScriptHost 在 `host.js` 的 `SCRIPT_LIMITS` 一处定义脚本层限制，LX、CatNode 与 source 同值且按单个脚本计：源码最多 16 MiB（UTF-8 字节）、QuickJS 栈 256 KiB、单脚本内存上限 `maxMemoryBytes`。QuickJS 内部桥接与脚本内数据处理不设单次 8 MiB 字节上限，仍受单脚本内存约束。宿主整体缓冲且不受 guest 堆约束的位置以 `maxMemoryBytes` 为上界：Cat 聚合入口请求体、Cat 脚本 listener 响应汇总、LX 宿主网络响应体及解压输出；超出报 `RESOURCE_LIMIT`，请求失败而实例继续服务。source ABI 的请求/响应字节同样受单脚本内存预算约束，错误按 `source.runtime.v1` 契约返回。`maxMemoryBytes` 默认为 256 MiB；依据是 11 份真实脚本的 QuickJS 单脚本峰值约 77 MiB，默认值约为该峰值的 3.3 倍。所有协议均启用 `setMemoryLimit`，超限即判该实例失败。已就绪实例在运行中超限时由 ScriptHost 自动以同一 revision 重启一次（保留 CatNode 私有卷并记录结构化诊断）；初始化超限或重启后再次初始化超限停在 failed，不循环。用户 enable／update 后重启计数复位。
 
-Windows 的 HTTP adapter 允许语法合法的 HTTP(S)，不维护域名白名单；它限制超时、重定向、响应大小和并发，并在跨 origin 重定向时移除敏感请求头。此行为不等于阻断本机或私网。
+LX `music@0.6.0` 结果仍受 512 KiB 单帧线协议上限，原生桥接帧 1 MiB 不变；Cat `cat@0.1.0` 结果走分片传输。source 控制请求和响应各限 1 MiB，源码以 64 KiB 分片上传，暂存 TTL 为 5 分钟并由主动 timer 回收，不设 token 数量门槛。CatNode 原生桥的字节参数与返回值均以 ArrayBuffer 帧传输，JSON 只描述结构和帧索引。线协议帧与上传分片大小不等于源码、网络响应或 guest 堆的大小上限。
 
-## LX 请求存储
+不按实例、timer、网络、in-flight、storage、method pending、stage token 或 profile 固定数量配额拒绝工作，资源按请求和 session 生命周期回收。Reader 的 DOM 文档/节点/字符串、分页和规则解析预算仍是明确的解析资源边界，ABI JSON、HTTP 语法、重定向和截止时间仍是数据/协议边界。CatNode 的 `os.totalmem()` 返回单脚本内存上限，`os.freemem()` 为上限减当前 guest 堆占用；其余 `os` 字段仍是兼容元数据。公共引擎拒绝超过 1 MiB 的栈配置。取消、超时或卸载 fence 当前结果并按请求、服务和 session 生命周期回收资源；不把取消信号当作不合作外部 I/O 已完成的证明，无法排空时明确报告清理失败。source 的能力与 profile 退休规则见[capability ABI](source-capability-abi.md)。
 
-LX 请求处理器第二参数提供显式特权存储：
+隔离不依赖 AppContainer、完整虚拟机或 Node permission model；宿主网络／加解密适配是受信代码，不属于 guest 沙箱。JS 引擎/WASM 仍需维护与安全更新，不能承诺抵御引擎本身的漏洞。
+
+## v2 特权存储
+
+LX 请求处理器的第二参数提供显式请求能力：
 
 ```js
 lx.on(lx.EVENT_NAMES.request, async (payload, context) => {
-  return context.storage.get('key');
+  const value = await context.storage.get('key');
+  return value;
 });
 ```
 
-`context.storage` 绑定调用 ID、site、installation、generation 和原生 grant。全局 `meow.storage`、startup、timer 和 background 不继承请求权限；保存的旧 context 在请求结束或代次退休后失效。
+- `context.storage.get/set/delete` 绑定创建它的调用 ID、site、installation 和 generation，并核对显式 `permissions.storage` 的 read/write 权限。
+- 绑定在 guest `await` 后仍指向同一个调用；请求结束、取消或代次退休后，保存的引用不能借用后来调用的身份。
+- 全局 `meow.storage` 没有权限；startup、background 不会自动获得或继承请求存储权限，即使另一个请求正在执行。
+- QuickJS 没有 Node `AsyncLocalStorage` 的异步上下文钩子，因此不能用宿主的 ambient async scope 推断 guest Promise 的特权。显式 `context.storage` 是 v2 公开行为变化，不提供全局存储的兼容回退。
 
-Node 的异步上下文只用于记录宿主执行回合，不能推断 guest Promise 权限。存储物理任务占用预算直至 adapter 真正完成。详见 [LX 契约](music-script-runtime.md)。
+存储实例与业务作用域仍必须隔离。音乐宿主的原生存储回调与安装会话绑定见 [音乐脚本契约](music-script-runtime.md)；这里的存储 token 不是域名授权或网络隔离机制。
 
-## Reader 与 Cat
+存储物理任务归属实例及请求直至 adapter 真正完成；取消只撤销结果和 guest 回调引用，不提前遗弃不合作 I/O。已完成任务即时释放，不累计历史回调，也不设置全局／实例／site 请求数额度。
 
-Reader 统一执行搜索、发现、详情、目录、正文、登录状态和图片处理；Legado 外观同步的能力调用通过受控 AST 转换传播 `await`，无法安全转换时明确失败。轻悦时光获得隔离的来源 DOM、常用浏览器 API、jQuery 兼容层和 CryptoJS AES/DES/WordArray 子集；需要真实浏览器的动作转为可选 `web.interact`。详见 [Reader 运行时](reader-source-runtime.md)。
+Node 的异步上下文只记录宿主执行回合，不能当作 guest Promise 的权限传播。存储必须使用显式请求 context；网络／定时器的执行回合归属不授予特权。取消结果、网络截止时间、实例退休与物理排空分别核对，不把会话后台请求误报为已在初始化期间完成的请求。
 
-CatVod JS 支持 Spider 的 init/home/category/search/detail/play/proxy/action/destroy 等实际声明动作。`js2Proxy` 使用 generation 绑定的 `meow-source://` 虚拟路由，不允许脚本绑定端口或启动 Node HTTP 服务。详见 [Cat 运行时](cat-source-runtime.md)。
+## 网络边界
 
-JAR、DEX、TVBox Android JAR、任意动态 JVM 类加载不属于本运行时。
+Node 网络适配器接受：
 
-## 生命周期
+```js
+network({ url, options, signal, scope, validateURL })
+```
 
-- stage 只保存有界临时字节，按长度、顺序 Base64、严格 UTF-8 和 SHA-256 校验。
-- load/update 使用 revision CAS；候选在发布前失败不改变当前实例。
-- source 与 music 使用独立 profile 命名空间；发布后 profile 清理失败会回滚或退休无法证明安全的会话，不能把缺失清理接口视为成功。
-- unload/close 回收 QuickJS、timer、DOM registry、Cookie、存储 profile 和虚拟路由。
-- close 幂等；成功必须证明本 owner 的实例和物理任务已排空。
+LX 的 `validateURL` 检查 HTTP(S) URL 语法并拒绝 URL 中的用户信息，初始地址和每次重定向都重新检查；它不是域名或私网授权判断。接口不再叫 `authorizeURL`，安装记录也不维护 origin 白名单或按源码 SHA-256 补域名的策略。源码哈希仍用于脚本字节完整性与版本身份，不能误删其他业务的数据完整性校验。
 
-## 发布与验收
+LX 网络可以访问已开放的 HTTP(S) 服务，包括本机和私网地址；其受控桥接保留截止时间、取消、响应大小、重定向上限及跨 origin 不转发 Authorization/Cookie 的行为。
 
-公共载荷包含 bootstrap、music/source 两个 module、三个 workspace、锁定 QuickJS 引擎，以及 DOM、XPath、解析、编码所需的锁定传递依赖。Windows 只追加命名管道 bootstrap 和薄 entry，完整目录自带 `runtime/node.exe`。
+Cat 不维护域名授权名单，也不按公网／私网／链路本地／回环或局域网域名后缀过滤目标；DNS 答案直接返回。每个实例在独立 worker thread 中执行；实例已登记的 listener 端口和别名映射到该实例的实际回环端点，并附加实例访问头与请求作用域；未登记的回环端口直接连接真实 `127.0.0.1:port`，不附加实例凭据。HTTP、HTTPS、net、TLS 自调用仍核对 listener 协议。`socketPath`、fd 与 guest 自定义 `lookup`／`createConnection` 仍拒绝；平台网络适配器存在时 DNS 不可用。完整规则见 [Cat 契约](cat-script-runtime.md)。
 
-合成测试、离线初始化和真实联网动作是不同证据。外部验收按来源实际声明动作执行，并区分上游、账号/地区配置、宿主能力、引擎兼容、资源限制和清理失败；见[外部来源动态验收](source-acceptance.md)。
+LX 网络任务在 adapter 真正结束前保持登记；取消只回收结果和回调句柄，不设固定任务数量预算。`followRedirect` 接受布尔值，false 禁止自动跳转，true 仍受 `follow_max`／LX 宿主上限约束；`follow_max` 超过上限时按上限截断。`retry` 扩展字段兼容接受但不触发宿主自动重放，重试由脚本负责，不叠加非幂等请求的重放。Cat 同样按请求和 session 生命周期回收实际网络资源。
+
+## Cat 回环服务与持久卷
+
+Cat 安装启用后按需创建回环服务。每个脚本监听器由运行器分配实际端口并绑定 installation/generation；管理页面直接使用该实例端口，聚合入口只分派 Cat 业务请求及脚本代理 URL。停用、更新或关闭时回收端口和句柄并保留私有卷；卸载或从配置移除时在实例停止、资源回收后删除私有卷和不再被引用的源码，同一 id 重装从空卷开始，删除失败进入 `failures`，启动时不扫描残留卷。
+
+## 验证与发布
+
+打包闭包为公共 bootstrap、共享 music/Cat/source 模块、runtime-bridge、script-host、source-runtime、有限 Node 兼容与规则解析依赖，以及锁定的 release-sync 引擎；Windows 只补齐启动／管道 bootstrap 和薄 entry。WASM 的精确允许路径、来源、manifest／许可／文件哈希见 [Windows 打包](../windows/runtime-packaging.md)。
+
+引擎初始化、合成 LX 回归、Windows 管道集成与外部真实脚本的联网业务验收分别记录。语法或离线初始化通过不能代替声明动作、异步网络、加解密、取消和真实业务数据验收。外部脚本报告和退出条件见 [动态验收](source-acceptance.md)；任务进度及某批样本的数值写入临时工作记录，不作为协议或源码版本冻结条件。

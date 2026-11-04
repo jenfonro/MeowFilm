@@ -289,6 +289,7 @@ public static partial class MusicUiTests
             var surface = (Border)button.Template.FindName("FavoriteSurface", button);
             Equal(new CornerRadius(16), surface.CornerRadius);
             var heart = Visuals(button).OfType<System.Windows.Shapes.Path>().Single();
+            Equal(20d, heart.ActualWidth); Equal(18d, heart.ActualHeight);
             Equal(Color.FromRgb(0xFC, 0x3D, 0x49), ((SolidColorBrush)heart.Fill).Color);
             Equal(Color.FromRgb(0xFC, 0x3D, 0x49), ((SolidColorBrush)badge.Foreground).Color);
 
@@ -309,8 +310,8 @@ public static partial class MusicUiTests
             True(points.Length > 250, "favorite reference paints the heart and badge");
             var bounds = new Rect(new Point(points.Min(point => point.X), points.Min(point => point.Y)),
                 new Point(points.Max(point => point.X) + 1, points.Max(point => point.Y) + 1));
-            True(Math.Abs(bounds.Left - 4) <= 1 && Math.Abs(bounds.Top - 6) <= 1 &&
-                Math.Abs(bounds.Right - 40) <= 1 && Math.Abs(bounds.Bottom - 27) <= 1,
+            True(Math.Abs(bounds.Left - 3) <= 1 && Math.Abs(bounds.Top - 7) <= 1 &&
+                Math.Abs(bounds.Right - 40) <= 1 && Math.Abs(bounds.Bottom - 25) <= 1,
                 $"favorite ink bounds match reference: {bounds}");
         });
         yield return Case("transport glyph painted centroid stays centered at 100 150 and 200 percent DPI", async () =>

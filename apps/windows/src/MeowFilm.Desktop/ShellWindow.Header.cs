@@ -18,6 +18,7 @@ public sealed partial class ShellWindow
     private IDesktopHeaderSource? _headerSource;
     private EventHandler? _headerChanged;
     private CancellationTokenSource? _headerLifetime;
+    private ModuleSession? _searchOwnerSession;
     private long _headerGeneration;
 
     private void InitializeHeaderPresentation() => HeaderActions.ItemsSource = _headerActions;
@@ -35,17 +36,25 @@ public sealed partial class ShellWindow
                 : new DesktopHeaderContribution(current.Module.Title);
         var contribution = source?.Header ?? fallback;
 
+        bool settings = _currentPage is null && current.IsSettingsOpen;
+        var slotHost = settings ? SettingsHeaderSlot : HeaderSlot;
+        var otherHost = settings ? HeaderSlot : SettingsHeaderSlot;
+        otherHost.Content = null;
+        otherHost.Visibility = Visibility.Collapsed;
         var slot = contribution.Slot;
-        if (!ReferenceEquals(HeaderSlot.Content, slot))
+        if (!ReferenceEquals(slotHost.Content, slot))
         {
-            HeaderSlot.Content = null;
+            slotHost.Content = null;
             if (slot is not null &&
                 (LogicalTreeHelper.GetParent(slot) is not null ||
                  System.Windows.Media.VisualTreeHelper.GetParent(slot) is not null))
                 throw new InvalidOperationException("SHELL_HEADER_SLOT_ATTACHED");
-            HeaderSlot.Content = slot;
+            slotHost.Content = slot;
         }
-        HeaderSlot.Visibility = slot is null ? Visibility.Collapsed : Visibility.Visible;
+        slotHost.Visibility = slot is null ? Visibility.Collapsed : Visibility.Visible;
+        SettingsHeading.Text = string.IsNullOrWhiteSpace(contribution.Title) ? "设置" : contribution.Title;
+        SettingsHeading.Visibility = settings ? Visibility.Visible : Visibility.Collapsed;
+        ContentRegion.Margin = new Thickness(0);
 
         _headerActions.Clear();
         foreach (var action in contribution.HeaderActions)
@@ -66,12 +75,17 @@ public sealed partial class ShellWindow
                     () => !_isClosing, automationName: target.Page.Title)));
             }
 
-        var searchAvailable = _currentPage is null && !current.IsSettingsOpen &&
-            contribution.SearchVisible && contribution.SearchEnabled;
-        SearchInput.Visibility = contribution.SearchVisible && _currentPage is null && !current.IsSettingsOpen
-            ? Visibility.Visible : Visibility.Collapsed;
+        var previousSearchOwner = _searchOwnerSession;
+        if (_currentPage is null && !current.IsSettingsOpen && current.Mounted &&
+            contribution.SearchVisible && contribution.SearchEnabled)
+            _searchOwnerSession = current;
+        if (!ReferenceEquals(previousSearchOwner, _searchOwnerSession))
+            ApplySearchPresentation(force: true);
+
+        var searchAvailable = !current.IsSettingsOpen && _searchOwnerSession is not null;
+        SearchInput.Visibility = searchAvailable ? Visibility.Visible : Visibility.Collapsed;
         SearchBox.IsEnabled = SearchButton.IsEnabled = searchAvailable;
-        PageHeader.Visibility = slot is not null || _headerActions.Count > 0
+        PageHeader.Visibility = (!settings && slot is not null) || _headerActions.Count > 0
             ? Visibility.Visible : Visibility.Collapsed;
         var title = string.IsNullOrWhiteSpace(contribution.Title) ? current.Module.Title : contribution.Title;
         System.Windows.Automation.AutomationProperties.SetName(ContentDeck, title);
@@ -116,6 +130,8 @@ public sealed partial class ShellWindow
         _headerActions.Clear();
         HeaderSlot.Content = null;
         HeaderSlot.Visibility = Visibility.Collapsed;
+        SettingsHeaderSlot.Content = null;
+        SettingsHeaderSlot.Visibility = Visibility.Collapsed;
         if (previous is null) return;
         _ = RetireAsync(previous);
 

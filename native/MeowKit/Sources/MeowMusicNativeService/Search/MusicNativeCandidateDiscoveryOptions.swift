@@ -43,7 +43,6 @@ extension NativeMusicService {
             return result
         }
         try candidateCheck(seed)
-        try musicRequire(result.rows.count <= 512, .limit)
         return result
     }
 
@@ -60,7 +59,7 @@ extension NativeMusicService {
                 guard snapshot.capabilities.contains(where: { $0.siteID == source.platform && $0.actions.contains("musicUrl") }) else { continue }
                 let capability = try validate(snapshot, site: source.platform)
                 let row = song["sources"].array.first { $0["sourceKey"].string == source.sourceKey } ?? .null
-                let declared = row["source_data"]["types"].array.map { $0["type"].string }
+                let declared = MusicModel.sourceData(row)["types"].array.map { $0["type"].string }
                 let qualities = MusicModel.qualities(capability.qualities.filter {
                     ["128k", "320k", "flac", "flac24bit"].contains($0) && (declared.isEmpty || declared.contains($0))
                 }, prefs)

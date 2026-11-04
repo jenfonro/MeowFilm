@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Http;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -606,6 +607,9 @@ public static class PlaybackRecoveryTests
         private readonly Dictionary<string, byte[]> data = [];
         internal void SeedMusicSource()
         {
+            const string source = "// synthetic inert fixture; never executed";
+            byte[] sourceBytes = Encoding.UTF8.GetBytes(source);
+            string sourceHash = Convert.ToHexStringLower(SHA256.HashData(sourceBytes));
             var document = new
             {
                 version = 1,
@@ -616,7 +620,7 @@ public static class PlaybackRecoveryTests
                         key = """["meowfilm","music",1,"local","lx-installations"]""",
                         value = new
                         {
-                            schema = 3,
+                            schema = 4,
                             revision = 1,
                             installations = new[]
                             {
@@ -628,7 +632,8 @@ public static class PlaybackRecoveryTests
                                     previous = (object?)null,
                                     current = new
                                     {
-                                        source = "// synthetic inert fixture; never executed",
+                                        sourceHash,
+                                        sourceBytes = sourceBytes.Length,
                                         version = "1",
                                         permissions = new
                                         {
@@ -643,6 +648,7 @@ public static class PlaybackRecoveryTests
             };
             data[MusicLibraryOwner.DocumentNamespace] = LJ.Bytes(
                 JsonNode.Parse(JsonSerializer.Serialize(document, Json))!.AsObject());
+            data[$"{MusicLibraryOwner.ScriptContentCollection}.{sourceHash}.0"] = sourceBytes;
         }
         public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken cancellationToken = default)
         {
@@ -707,7 +713,7 @@ public static class PlaybackRecoveryTests
             return f;
         }
         internal Task Play() => Module.PlayOnlineSongAsync("wy", "合成歌曲", "fixture", "",
-            JsonSerializer.SerializeToElement(new { musicId = "42" }));
+            JsonSerializer.SerializeToElement(new { songmid = "42" }));
         public async ValueTask DisposeAsync()
         {
             App.ReleaseRefresh.TrySetResult();
@@ -758,7 +764,7 @@ public static class PlaybackRecoveryTests
             return f;
         }
         internal Task Play() => Module.PlayOnlineSongAsync("wy", "合成歌曲", "fixture", "",
-            JsonSerializer.SerializeToElement(new { musicId = "42" }));
+            JsonSerializer.SerializeToElement(new { songmid = "42" }));
         internal async Task PlayPair(string nextPlatform = "wy")
         {
             var first = MusicSongFixture.Online("wy", "First", "当前首", "fixture");
@@ -1138,8 +1144,8 @@ public static class PlaybackRecoveryTests
                 var songNode = JsonNode.Parse(song.GetRawText())!.AsObject();
                 string cache = LJ.Digest(LJ.Obj(("contract", "music.quality.cache.v1"), ("policy", policy),
                     ("installation", "fixture-source"), ("platform", "wy"), ("revision", 1), ("generation", 7),
-                    ("sourceKey", sourceKey), ("recording", source.GetProperty("source_data")),
-                    ("songId", songNode["songId"]), ("songRevision", songNode["revision"]),
+                    ("sourceKey", sourceKey), ("recording", source.GetProperty("musicInfo")),
+                    ("songId", songNode["songId"]),
                     ("duration", songNode["duration"]), ("quality", "320k")));
                 if (input.TryGetProperty("qualityPolicySignature", out var expectedPolicy) && expectedPolicy.GetString() != policy)
                     return Element(new { ok = false, code = "QUALITY_POLICY_CHANGED" });

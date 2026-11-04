@@ -7,23 +7,37 @@ import MeowUI
 public final class MusicSearchViewController: SearchPageViewController,
     UITableViewDelegate
 {
-    private enum RowID: Hashable { case history(Data), hot(Data), charts }
+    private enum RowID: Hashable { case history, suggestions, charts }
     private let model: MusicViewModel
     private let appearance: MusicAppearancePreferencesStore
     private weak var router: (any MusicUIRouting)?
-    private let history = SearchHistoryStore()
+    private let history: SearchHistoryStore
     private let table = UITableView(frame: .zero, style: .plain)
-    private var discovery: MusicSearchDiscoverySnapshot?
-    private var discoveryLoading = false
-    private var discoveryRequest = UUID()
-    private var discoveryAccess: UUID?
-    private var discoveryTask: Task<Void, Never>?
-    private var discoveryError: String?
-    private var shownDiscoveryError: String?
+    private let historyCell = MusicSearchHistoryCell(style: .default, reuseIdentifier: "history")
+    private let suggestionsCell = MusicSearchSuggestionsCell(style: .default, reuseIdentifier: "suggestions")
+    private let chartsCell = MusicSearchChartRailCell(style: .default, reuseIdentifier: "charts")
+    private let loading = UIActivityIndicatorView(style: .medium)
+    private let discoveryPage: MusicSearchDiscoveryModel?
+    private var historyExpanded = false
+    private var rowHeights: [RowID: CGFloat] = [:]
+    private var updatingHeights = false
+    private var applyingSnapshot = false, needsRender = false
+    private var renderedTheme: PageTheme?
+    private var renderedHistory: [String] = [], renderedSuggestions: [String] = []
+    private var renderedExpanded = false
+    private var renderedCards: [MusicSearchChartCardViewData] = []
+    private var shownFailures: [MusicSearchDiscoveryModel.Target: MusicServiceError] = [:]
     private var dataSource: UITableViewDiffableDataSource<Int, RowID>!
 
-    public init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore, router: any MusicUIRouting) {
+    public init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore, router: any MusicUIRouting,
+                history: SearchHistoryStore? = nil) {
         self.model = model; self.appearance = appearance; self.router = router
+        self.history = history ?? SearchHistoryStore()
+        if let provider = model.searchDiscoveryProvider, let browser = model.publicBrowser {
+            discoveryPage = MusicSearchDiscoveryModel(
+                provider: provider, browser: browser, hotPlayback: model.searchHotPlaybackProvider
+            )
+        } else { discoveryPage = nil }
         super.init(themeProvider: appearance, query: model.query, initialFocus: true)
     }
 
@@ -33,20 +47,43 @@ public final class MusicSearchViewController: SearchPageViewController,
         onSubmit = { [weak self] in self?.submit($0) }
         table.backgroundColor = .clear
         table.delegate = self
+        table.accessibilityIdentifier = "music.search.discovery"
+        table.keyboardDismissMode = .onDrag
         table.separatorStyle = .none
         table.sectionHeaderTopPadding = 0
         table.contentInset.top = PageLayoutMetrics.contentGap
-        table.register(UITableViewCell.self, forCellReuseIdentifier: "keyword")
-        table.register(MusicSearchChartsCell.self, forCellReuseIdentifier: "charts")
-        dataSource = UITableViewDiffableDataSource(tableView: table) { [weak self] view, path, id in
+        table.estimatedRowHeight = 100
+        loading.hidesWhenStopped = true
+        loading.accessibilityLabel = "搜索内容加载中"
+        table.backgroundView = loading
+        dataSource = UITableViewDiffableDataSource(tableView: table) { [weak self] _, _, id in
             guard let self else { return nil }
-            let cell = view.dequeueReusableCell(withIdentifier: id == .charts ? "charts" : "keyword", for: path)
-            self.configure(cell, id: id)
-            return cell
+            switch id {
+            case .history: return self.historyCell
+            case .suggestions: return self.suggestionsCell
+            case .charts: return self.chartsCell
+            }
         }
-        view.addSubview(table); table.pinEdges(to: view)
+        view.addSubview(table)
+        table.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            table.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            table.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            table.topAnchor.constraint(equalTo: contentTopAnchor),
+            table.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+        ])
         observe(history) { [weak self] in self?.render() }
         observe(model.accessChanges) { [weak self] in self?.reconcileAccess() }
+        if let discoveryPage {
+            observe(discoveryPage) { [weak self] in
+                self?.render()
+                self?.showDiscoveryError()
+            }
+        }
+        chartsCell.onViewportChanged = { [weak self] in self?.measureMemberDemand() }
+        registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) {
+            (page: MusicSearchViewController, _: UITraitCollection) in page.render()
+        }
         render()
     }
 
@@ -54,108 +91,45 @@ public final class MusicSearchViewController: SearchPageViewController,
         reconcileAccess()
         render()
     }
-    public override func pageDidBecomeVisible() { showDiscoveryError() }
-    public override func pageDidFinishAppearing() {
+    public override func pageDidBecomeVisible() {
+        discoveryPage?.appear()
+        measureMemberDemand()
         showDiscoveryError()
+    }
+    public override func pageDidFinishAppearing() {
+        discoveryPage?.appear()
+        measureMemberDemand()
+        showDiscoveryError()
+    }
+    public override func pageDidBecomeHidden() { discoveryPage?.disappear() }
+
+    public override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        updateRowHeights()
+        measureMemberDemand()
     }
 
     public override func pageDidBecomeInactive() {
-        discoveryRequest = UUID()
-        discoveryTask?.cancel(); discoveryTask = nil
+        discoveryPage?.close()
     }
 
     public override func applyTheme() {
         super.applyTheme()
         guard isViewLoaded, dataSource != nil else { return }
-        for path in table.indexPathsForVisibleRows ?? [] {
-            if let id = dataSource.itemIdentifier(for: path), let cell = table.cellForRow(at: path) {
-                configure(cell, id: id)
-            }
-        }
-        for section in 0..<table.numberOfSections {
-            guard let header = table.headerView(forSection: section) else { continue }
-            var configuration = header.defaultContentConfiguration()
-            configuration.text = self.tableView(table, titleForHeaderInSection: section)
-            configuration.textProperties.font = .systemFont(ofSize: 17, weight: .semibold)
-            configuration.textProperties.color = UIColor(theme.ink)
-            header.contentConfiguration = configuration
-            for button in header.contentView.subviews.compactMap({ $0 as? UIButton }) {
-                button.tintColor = UIColor(theme.muted)
-            }
-        }
-    }
-
-    public func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        switch sectionID(section) {
-        case 0: return "搜索历史"
-        case 1: return "热搜榜"
-        case 2: return "音乐榜单"
-        default: return nil
-        }
+        render()
     }
 
     public func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
-        if dataSource.itemIdentifier(for: indexPath) == .charts {
-            let count = discovery?.charts.map { min(20, $0.tracks.count) }.max() ?? 0
-            return CGFloat(max(288, count * 40 + 60))
-        }
-        return 42
-    }
-    public func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat { 44 }
-
-    private func configure(_ cell: UITableViewCell, id: RowID) {
-        if let cell = cell as? MusicSearchChartsCell {
-            cell.configure(discovery?.charts ?? [], theme: theme) { [weak self] chart, index in
-                guard let self else { return }
-                self.runPageTask { await self.model.play(chart.tracks, index: index) }
-            }
-            return
-        }
-        var configuration = cell.defaultContentConfiguration()
-        switch id {
-        case .history(let id): configuration.text = history.entries.first { Data($0.text.utf8) == id }?.text
-        case .hot(let id):
-            if let index = discovery?.hot.firstIndex(where: { Data($0.keyword.utf8) == id }),
-               let hot = discovery?.hot[index] {
-                configuration.text = "\(index + 1). \(hot.keyword)"
-            }
-        case .charts: break
-        }
-        configuration.textProperties.color = UIColor(theme.ink)
-        configuration.textProperties.font = .systemFont(ofSize: 14)
-        cell.contentConfiguration = configuration
-        cell.backgroundColor = .clear
-    }
-
-    public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        tableView.deselectRow(at: indexPath, animated: true)
         switch dataSource.itemIdentifier(for: indexPath) {
-        case .history(let id):
-            if let entry = history.entries.first(where: { Data($0.text.utf8) == id }) { submit(entry.text) }
-        case .hot(let id):
-            if let hot = discovery?.hot.first(where: { Data($0.keyword.utf8) == id }) { submit(hot.keyword) }
-        default: break
+        case .history: return historyCell.height(for: tableView.bounds.width)
+        case .suggestions: return suggestionsCell.height(for: tableView.bounds.width)
+        case .charts: return chartsCell.height(for: tableView.bounds.width)
+        case nil: return 0
         }
     }
 
-    public func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
-        guard let title = self.tableView(tableView, titleForHeaderInSection: section) else { return nil }
-        let header = UITableViewHeaderFooterView(reuseIdentifier: nil)
-        var configuration = header.defaultContentConfiguration()
-        configuration.text = title
-        configuration.textProperties.font = .systemFont(ofSize: 17, weight: .semibold)
-        configuration.textProperties.color = UIColor(theme.ink)
-        header.contentConfiguration = configuration
-        if sectionID(section) == 0 {
-            let clear = UIButton(type: .system)
-            clear.setTitle("清空", for: .normal); clear.tintColor = UIColor(theme.muted)
-            clear.frame = CGRect(x: max(0, table.bounds.width - 76), y: 0, width: 60, height: 44)
-            clear.autoresizingMask = [.flexibleLeftMargin]
-            clear.addAction(UIAction { [weak self] _ in self?.history.clear() }, for: .touchUpInside)
-            header.contentView.addSubview(clear)
-        }
-        return header
-    }
+    public func scrollViewDidScroll(_ scrollView: UIScrollView) { measureMemberDemand() }
+    public func scrollViewDidChangeAdjustedContentInset(_ scrollView: UIScrollView) { measureMemberDemand() }
 
     private func submit(_ keyword: String) {
         guard model.isAvailable, !model.isClosed else { return }
@@ -168,154 +142,246 @@ public final class MusicSearchViewController: SearchPageViewController,
         ), animated: true)
     }
 
-    private func loadDiscovery(force: Bool = false) {
-        guard isPageActive, model.isAvailable, !model.isClosed, !discoveryLoading,
-              force || discovery == nil || discovery!.validUntil <= Date(),
-              let provider = model.searchDiscoveryProvider else { return }
-        let access = model.accountAccessGeneration
-        let own = discoveryRequest
-        discoveryLoading = true; discoveryError = nil; shownDiscoveryError = nil
-        discoveryTask = Task { [weak self] in
-            defer {
-                if let self, self.discoveryRequest == own {
-                    self.discoveryLoading = false; self.discoveryTask = nil
-                }
-            }
-            do {
-                let result = try await provider.searchDiscovery()
-                guard !Task.isCancelled, let self, self.isPageActive, self.discoveryRequest == own,
-                      self.model.isAvailable, !self.model.isClosed,
-                      self.model.accountAccessGeneration == access else { return }
-                self.discovery = result
-                let failures = result.failures.map { failure -> String in
-                    let operation: String
-                    switch failure.component {
-                    case .hot: operation = "热搜榜读取"
-                    case .charts: operation = "音乐榜单读取"
-                    }
-                    return failure.error.message(operation: operation, platform: MusicPublicBrowsePlatform.netease.title)
-                }
-                self.discoveryError = failures.isEmpty ? nil : failures.joined(separator: "；")
-                self.render(discoveryChanged: true)
-                self.showDiscoveryError()
-            } catch {
-                if !Task.isCancelled, let self, self.discoveryRequest == own,
-                   self.model.accountAccessGeneration == access {
-                    self.discoveryError = MusicServiceError.sanitized(error).localizedDescription
-                    self.showDiscoveryError()
-                }
-            }
-        }
+    func retryDiscovery() {
+        guard let discoveryPage else { return }
+        let targets = Set(discoveryPage.failures.map(\.target))
+        for target in targets { shownFailures.removeValue(forKey: target) }
+        discoveryPage.retry(targets)
     }
 
-    func retryDiscovery() { loadDiscovery(force: true) }
-
     private func reconcileAccess() {
-        guard model.isAvailable, !model.isClosed else {
-            discoveryAccess = nil
-            discoveryRequest = UUID()
-            discoveryTask?.cancel(); discoveryTask = nil; discoveryLoading = false
-            discoveryError = nil; shownDiscoveryError = nil
-            discovery = nil
-            render()
-            return
+        discoveryPage?.setAccess(available: model.isAvailable && !model.isClosed,
+                                 generation: model.accountAccessGeneration)
+        shownFailures = shownFailures.filter { target, error in
+            discoveryPage?.failures.contains { $0.target == target && $0.error == error } == true
         }
-        let access = model.accountAccessGeneration
-        if discoveryAccess != access {
-            discoveryAccess = access
-            discoveryRequest = UUID()
-            discoveryTask?.cancel(); discoveryTask = nil; discoveryLoading = false
-            discoveryError = nil; shownDiscoveryError = nil
-            discovery = nil
-            render()
-        }
-        loadDiscovery()
+        render()
+        if isPageVisible { measureMemberDemand() }
     }
 
     private func showDiscoveryError() {
-        guard canPresentPageAlert, let discoveryError, shownDiscoveryError != discoveryError else { return }
-        let own = discoveryRequest
-        let alert = UIAlertController(title: "错误", message: discoveryError, preferredStyle: .alert)
+        guard canPresentPageAlert, let discoveryPage else { return }
+        let failures = discoveryPage.failures.filter { shownFailures[$0.target] != $0.error }
+        guard !failures.isEmpty else { return }
+        let access = model.accountAccessGeneration, targets = Set(failures.map(\.target))
+        let message = failures.map { failure -> String in
+            let operation = failure.target == .hot ? "热搜榜读取" : "音乐榜单读取"
+            return failure.error.message(operation: operation, platform: MusicPublicBrowsePlatform.netease.title)
+        }.joined(separator: "；")
+        let alert = UIAlertController(title: "错误", message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "取消", style: .cancel))
         alert.addAction(UIAlertAction(title: "重试", style: .default) { [weak self] _ in
-            guard let self, self.discoveryRequest == own else { return }
-            self.retryDiscovery()
+            guard let self, self.isPageActive, self.model.accountAccessGeneration == access else { return }
+            for target in targets { self.shownFailures.removeValue(forKey: target) }
+            self.discoveryPage?.retry(targets)
         })
-        shownDiscoveryError = discoveryError
+        for failure in failures { shownFailures[failure.target] = failure.error }
         present(alert, animated: true)
     }
 
-    private func render(discoveryChanged: Bool = false) {
+    private func render() {
         guard dataSource != nil else { return }
+        guard !applyingSnapshot else { needsRender = true; return }
+        if history.entries.isEmpty { historyExpanded = false }
+        let historyIDs = history.entries.map(\.id), suggestions = discoveryPage?.suggestions ?? []
+        let suggestionIDs = suggestions.map { Data($0.utf8).base64EncodedString() }
+        let themeChanged = renderedTheme != theme
+        if themeChanged || historyIDs != renderedHistory || renderedExpanded != historyExpanded {
+            historyCell.configure(entries: history.entries, expanded: historyExpanded, theme: theme,
+            onKeyword: { [weak self] in self?.submit($0) },
+            onToggle: { [weak self] in
+                guard let self else { return }
+                self.historyExpanded.toggle(); self.render()
+            }, onClear: { [weak self] in self?.history.clear() })
+            renderedHistory = historyIDs; renderedExpanded = historyExpanded
+        }
+        if themeChanged || suggestionIDs != renderedSuggestions {
+            suggestionsCell.configure(keywords: suggestions, theme: theme,
+                onKeyword: { [weak self] in self?.submit($0) },
+                onRotate: { [weak self] in self?.discoveryPage?.rotateSuggestions() })
+            renderedSuggestions = suggestionIDs
+        }
+        let cards = chartCards()
+        if themeChanged || cards != renderedCards {
+            chartsCell.configure(cards: cards, theme: theme,
+            onRow: { [weak self] chartID, rowID in
+                guard let self else { return }
+                if chartID == "search.hot" {
+                    if let hot = self.discoveryPage?.hot.first(where: { $0.id == rowID }) { self.submit(hot.keyword) }
+                } else { self.play(chartID: chartID, nativeID: rowID) }
+            }, onPlay: { [weak self] chartID in
+                if chartID == "search.hot" { self?.playHot() }
+                else { self?.play(chartID: chartID, nativeID: nil) }
+            })
+            renderedCards = cards
+        }
+        renderedTheme = theme
         var snapshot = NSDiffableDataSourceSnapshot<Int, RowID>()
-        if !history.entries.isEmpty {
-            snapshot.appendSections([0])
-            snapshot.appendItems(history.entries.map { .history(Data($0.text.utf8)) }, toSection: 0)
-        }
-        if let discovery, !discovery.hot.isEmpty {
-            snapshot.appendSections([1])
-            snapshot.appendItems(discovery.hot.prefix(20).map { .hot(Data($0.keyword.utf8)) }, toSection: 1)
-        }
-        if discovery?.charts.isEmpty == false {
-            snapshot.appendSections([2])
-            snapshot.appendItems([.charts], toSection: 2)
-        }
+        snapshot.appendSections([0])
+        if !history.entries.isEmpty { snapshot.appendItems([.history]) }
+        if discoveryPage?.loadedComponents.contains(.hot) == true { snapshot.appendItems([.suggestions]) }
+        if !cards.isEmpty { snapshot.appendItems([.charts]) }
+        if snapshot.itemIdentifiers.isEmpty, discoveryPage?.loadingComponents.isEmpty == false {
+            loading.startAnimating()
+        } else { loading.stopAnimating() }
         let previous = dataSource.snapshot()
-        if discoveryChanged {
-            snapshot.reconfigureItems(snapshot.itemIdentifiers.filter { previous.itemIdentifiers.contains($0) })
-        }
         if previous.sectionIdentifiers != snapshot.sectionIdentifiers ||
-            previous.itemIdentifiers != snapshot.itemIdentifiers || discoveryChanged {
-            dataSource.apply(snapshot, animatingDifferences: false)
+            previous.itemIdentifiers != snapshot.itemIdentifiers {
+            applyingSnapshot = true
+            dataSource.apply(snapshot, animatingDifferences: false) { [weak self] in
+                guard let self else { return }
+                self.applyingSnapshot = false
+                if self.needsRender {
+                    self.needsRender = false
+                    self.render()
+                } else { self.updateRowHeights(); self.measureMemberDemand() }
+            }
+        } else { updateRowHeights() }
+    }
+
+    private func chartCards() -> [MusicSearchChartCardViewData] {
+        guard let discoveryPage else { return [] }
+        var cards: [MusicSearchChartCardViewData] = []
+        if discoveryPage.loadedComponents.contains(.hot) {
+            cards.append(.init(id: "search.hot", title: "热搜榜",
+                rows: discoveryPage.hot.map {
+                    .init(id: $0.id, rank: $0.rank, title: $0.keyword)
+                }, rowsAreMusic: false, showsPlayButton: discoveryPage.hotCanPlay, state: .loaded))
+        }
+        for chart in discoveryPage.charts {
+            let state: MusicSearchChartCardViewData.State
+            switch discoveryPage.chartContent[chart.id] ?? .idle {
+            case .idle: state = .idle
+            case .loading: state = .loading
+            case .loaded: state = .loaded
+            case .failed: state = .failed
+            }
+            cards.append(.init(id: chart.id, title: chart.collection.title,
+                rows: discoveryPage.members(of: chart.id).map {
+                    .init(id: $0.nativeID, rank: $0.sourcePosition + 1, title: $0.track.title)
+                }, rowsAreMusic: true, showsPlayButton: true, state: state))
+        }
+        return cards
+    }
+
+    private func updateRowHeights() {
+        guard dataSource != nil, !updatingHeights, !applyingSnapshot, table.bounds.width > 0 else { return }
+        var heights: [RowID: CGFloat] = [:]
+        for row in dataSource.snapshot().itemIdentifiers {
+            switch row {
+            case .history: heights[row] = historyCell.height(for: table.bounds.width)
+            case .suggestions: heights[row] = suggestionsCell.height(for: table.bounds.width)
+            case .charts: heights[row] = chartsCell.height(for: table.bounds.width)
+            }
+        }
+        guard heights != rowHeights else { return }
+        rowHeights = heights; updatingHeights = true
+        UIView.performWithoutAnimation { table.beginUpdates(); table.endUpdates() }
+        updatingHeights = false
+    }
+
+    private func measureMemberDemand() {
+        guard isPageActive, isPageVisible, view.window != nil, chartsCell.superview != nil,
+              navigationController == nil || navigationController?.topViewController === self else { return }
+        let viewport = table.convert(table.bounds.inset(by: table.adjustedContentInset), to: view)
+            .intersection(view.safeAreaLayoutGuide.layoutFrame)
+        let ids = chartsCell.visibleMusicChartIDs(in: view.convert(viewport, to: chartsCell))
+        discoveryPage?.setVisibleCharts(ids)
+    }
+
+    private func play(chartID: String, nativeID: String?) {
+        guard let discoveryPage, !discoveryPage.isPreparingPlayback, isPageVisible else { return }
+        let access = model.accountAccessGeneration
+        runPageTask { [weak self] in
+            do {
+                let playback = try await discoveryPage.preparePlayback(chartID: chartID, nativeID: nativeID)
+                guard let self, !Task.isCancelled, self.isPageActive, self.isPageVisible,
+                      self.model.accountAccessGeneration == access else { return }
+                await self.model.play(playback.tracks, index: playback.index)
+            } catch {
+                guard let self, !Task.isCancelled, self.isPageVisible,
+                      self.model.accountAccessGeneration == access else { return }
+                guard MusicServiceError.sanitized(error) != .cancelled else { return }
+                self.model.report(error, epoch: access, operation: "播放榜单预览",
+                                  trace: MusicRequestTrace(.playback, platform: .netease))
+            }
         }
     }
 
-    private func sectionID(_ index: Int) -> Int? {
-        let ids = dataSource?.snapshot().sectionIdentifiers ?? []
-        return ids.indices.contains(index) ? ids[index] : nil
+    private func playHot() {
+        guard let discoveryPage, !discoveryPage.isPreparingPlayback, isPageVisible else { return }
+        let access = model.accountAccessGeneration
+        runPageTask { [weak self] in
+            do {
+                let playback = try await discoveryPage.prepareHotPlayback()
+                guard let self, !Task.isCancelled, self.isPageActive, self.isPageVisible,
+                      self.model.accountAccessGeneration == access else { return }
+                await self.model.play(playback.tracks, index: playback.index)
+            } catch {
+                guard let self, !Task.isCancelled, self.isPageVisible,
+                      self.model.accountAccessGeneration == access else { return }
+                guard MusicServiceError.sanitized(error) != .cancelled else { return }
+                self.model.report(error, epoch: access, operation: "播放热搜榜",
+                                  trace: MusicRequestTrace(.playback, platform: .netease))
+            }
+        }
     }
 
-    isolated deinit { discoveryTask?.cancel() }
+    isolated deinit { discoveryPage?.close() }
 }
 
 @MainActor
 private final class MusicSearchResultsViewController: SearchPageViewController,
     UIPageViewControllerDataSource, UIPageViewControllerDelegate, UITableViewDelegate
 {
-    private enum Kind: CaseIterable, Hashable { case all, songs, playlists }
+    private enum Kind: CaseIterable, Hashable {
+        case all, songs, playlists
+        var title: String {
+            switch self { case .all: return "综合"; case .songs: return "单曲"; case .playlists: return "歌单" }
+        }
+    }
     private let model: MusicViewModel
     private let appearance: MusicAppearancePreferencesStore
     private weak var router: (any MusicUIRouting)?
-    private let preferences = MusicSearchPreferencesStore()
+    private let preferences: MusicSearchPreferencesStore
     private let history: SearchHistoryStore
     private let results: MusicSearchResultsModel
     private let actions: MusicSearchActions
-    private let categories = UISegmentedControl(items: ["综合", "单曲", "歌单"])
+    private let categories = MusicSearchResultTabsView()
     private let pager = UIPageViewController(transitionStyle: .scroll, navigationOrientation: .horizontal)
+    private weak var pagerScrollView: UIScrollView?
+    private var pagerOffsetObservation: NSKeyValueObservation?
+    private var categoriesHeight: NSLayoutConstraint!
     private var pages: [Kind: MusicSearchTableController] = [:]
     private var selected = Kind.all
     private var paging = false
+    private var pagingOriginIndex: Int?
+    private var pagingTargetIndex: Int?
     private var pendingKind: Kind?
     private var songRows: [Data: (song: MusicSearchSong, index: Int)] = [:]
+    private var renderedSongs: [MusicSearchSong] = []
+    private var renderedPlaylists: [MusicPublicBrowseCollection] = []
+    private var renderedRequest: UUID?
     private var shownFailures: [Int: String] = [:]
+    private var submittedKeyword: String
     private var kinds: [Kind] { results.preferences.searchPlaylists ? Kind.allCases : [.songs] }
 
     init(model: MusicViewModel, query: String, appearance: MusicAppearancePreferencesStore,
          router: (any MusicUIRouting)?, history: SearchHistoryStore) {
+        submittedKeyword = query.trimmingCharacters(in: .whitespacesAndNewlines)
         self.model = model; self.appearance = appearance; self.router = router
         self.history = history
+        preferences = MusicSearchPreferencesStore()
         actions = MusicSearchActions(model: model)
-        results = MusicSearchResultsModel(readSongs: { [weak model] platform, query, page in
+        results = MusicSearchResultsModel(readSongs: { [weak model] platform, query, page, limit in
             guard let model else { throw MusicServiceError.closed }
-            return try await model.searchPage(platform: platform.rawValue, query: query, page: page)
-        }, readPlaylists: { [weak model] platform, query, cursor in
-            guard let model, model.isAvailable, !model.isClosed, let browser = model.publicBrowser else {
-                throw MusicServiceError.unavailable
-            }
-            let access = model.accountAccessGeneration
-            let value = try await browser.publicPlaylists(platform: platform, query: query, cursor: cursor)
-            guard access == model.accountAccessGeneration else { throw MusicServiceError.staleAccess }
-            return value
+            return try await model.searchPage(platform: platform.rawValue, query: query, page: page, limit: limit)
+        }, readPlaylists: { [weak model] platform, query, page, limit in
+            guard let model else { throw MusicServiceError.closed }
+            return try await model.searchPlaylistPage(platform: platform, query: query, page: page, limit: limit)
+        }, readRecording: { [weak model] request in
+            guard let model else { throw MusicServiceError.closed }
+            return try await model.searchRecording(request)
         })
         super.init(themeProvider: appearance, query: query)
     }
@@ -324,37 +390,46 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         super.viewDidLoad()
         searchField.placeholder = "搜索歌曲、歌手、歌单"
         onSubmit = { [weak self] _ in self?.submit() }
-        categories.selectedSegmentIndex = 0
-        categories.addAction(UIAction { [weak self] _ in
-            guard let self, self.kinds.indices.contains(self.categories.selectedSegmentIndex) else { return }
-            self.select(self.kinds[self.categories.selectedSegmentIndex], animated: true)
-        }, for: .valueChanged)
+        categories.onSelect = { [weak self] index in
+            guard let self, self.kinds.indices.contains(index) else { return }
+            self.select(self.kinds[index], animated: true)
+        }
         view.addSubview(categories)
         categories.translatesAutoresizingMaskIntoConstraints = false
         addChild(pager)
         pager.dataSource = self; pager.delegate = self
         view.addSubview(pager.view)
         pager.view.translatesAutoresizingMaskIntoConstraints = false
+        categoriesHeight = categories.heightAnchor.constraint(equalToConstant: 48)
         NSLayoutConstraint.activate([
             categories.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
             categories.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            categories.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor,
-                                            constant: PageLayoutMetrics.contentGap),
-            categories.heightAnchor.constraint(equalToConstant: 36),
+            categories.topAnchor.constraint(equalTo: contentTopAnchor),
+            categoriesHeight,
             pager.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             pager.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            pager.view.topAnchor.constraint(equalTo: categories.bottomAnchor, constant: 8),
+            pager.view.topAnchor.constraint(equalTo: categories.bottomAnchor),
             pager.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
         pager.didMove(toParent: self)
+        if let scroll = pager.view.subviews.compactMap({ $0 as? UIScrollView }).first {
+            pagerScrollView = scroll
+            pagerOffsetObservation = scroll.observe(\.contentOffset, options: [.new]) { [weak self] scroll, _ in
+                MainActor.assumeIsolated { self?.updatePagingProgress(scroll) }
+            }
+        }
         for (index, kind) in Kind.allCases.enumerated() {
             let page = MusicSearchTableController()
             page.table.tag = index
+            page.table.accessibilityIdentifier = "music.search.results.page.\(index)"
             page.table.delegate = self
             page.table.backgroundColor = .clear; page.table.separatorStyle = .none
             page.table.sectionHeaderTopPadding = 0
-            page.table.register(MusicTrackCell.self, forCellReuseIdentifier: MusicTrackCell.reuseIdentifier)
-            page.table.register(MusicCollectionCell.self, forCellReuseIdentifier: MusicCollectionCell.reuseIdentifier)
+            page.table.estimatedSectionHeaderHeight = 0
+            page.table.estimatedSectionFooterHeight = 0
+            page.table.register(MusicSearchSongCell.self, forCellReuseIdentifier: MusicSearchSongCell.reuseIdentifier)
+            page.table.register(MusicSearchSectionHeaderCell.self,
+                                forCellReuseIdentifier: MusicSearchSectionHeaderCell.reuseIdentifier)
             page.table.register(MusicSearchPlaylistCell.self, forCellReuseIdentifier: "Playlists")
             page.table.register(UITableViewCell.self, forCellReuseIdentifier: "Status")
             page.dataSource = UITableViewDiffableDataSource(tableView: page.table) { [weak self] view, path, id in
@@ -371,7 +446,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
             self?.updateVisibleSongs()
             self?.showActionError()
         }
-        observe(model.accessChanges) { [weak self] in self?.reconcileAccess() }
+        observe(model.searchAccessChanges) { [weak self] in self?.reconcileAccess() }
         observe(model.libraryChanges) { [weak self] in self?.actions.refreshFavorites() }
         observe(model.playbackChanges) { [weak self] in self?.updateVisibleSongs() }
         observe(appearance.$preferences.map(\.playlistView).removeDuplicates().dropFirst().eraseToAnyPublisher()) {
@@ -382,15 +457,21 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
 
     override func pageDidBecomeActive() {
         preferences.reload()
-        results.setAccess(available: model.isAvailable && !model.isClosed,
-                          generation: model.accountAccessGeneration)
+        _ = results.setAccess(available: model.isAvailable && !model.isClosed,
+                              generation: model.searchAccessGeneration)
         results.appear(); actions.setActive(true)
-        if results.query.isEmpty { submit() }
+        if results.query.isEmpty, model.isAvailable, !model.isClosed, !submittedKeyword.isEmpty {
+            results.submit(submittedKeyword, preferences: preferences.preferences)
+            results.holdPagination()
+        }
         render()
     }
 
     override func pageDidBecomeInactive() { results.disappear(); actions.suspend() }
-    override func pageDidBecomeHidden() { results.holdPagination() }
+    override func pageDidBecomeHidden() {
+        results.holdPagination()
+        finishPagingTransition(at: selected)
+    }
     override func pageDidBecomeVisible() { showActionError(); showSearchFailure() }
     override func pageDidFinishAppearing() {
         showActionError(); showSearchFailure()
@@ -398,18 +479,26 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
 
     override func applyTheme() {
         super.applyTheme()
-        categories.selectedSegmentTintColor = UIColor(theme.surface)
-        categories.setTitleTextAttributes([.foregroundColor: UIColor(theme.ink)], for: .normal)
-        updateVisibleSongs(force: true)
+        categories.applyTheme(theme)
+        updateVisibleSongs()
         for page in pages.values {
             for path in page.table.indexPathsForVisibleRows ?? [] {
                 guard let id = page.dataSource.itemIdentifier(for: path),
                       let cell = page.table.cellForRow(at: path) else { continue }
                 if case .playlists = id { configurePlaylistCell(cell, id: id, page: page) }
                 else if case .status(let section) = id { configureStatusCell(cell, in: page.table, section: section) }
+                else if case .heading(let section) = id,
+                        let cell = cell as? MusicSearchSectionHeaderCell {
+                    configureHeaderCell(cell, in: page.table, section: section)
+                }
             }
         }
-        updateHeaders()
+    }
+
+    override func shouldBeginInteractiveBack(at point: CGPoint, in view: UIView) -> Bool {
+        // UIPageViewController keeps the visible page at the middle offset.
+        // Its selected kind, not that implementation offset, owns admission.
+        kinds.firstIndex(of: selected) == 0 && !paging
     }
 
     func pageViewController(_ pageViewController: UIPageViewController, viewControllerBefore page: UIViewController)
@@ -417,51 +506,51 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
     func pageViewController(_ pageViewController: UIPageViewController, viewControllerAfter page: UIViewController)
         -> UIViewController? { neighbor(page, step: 1) }
     func pageViewController(_ pageViewController: UIPageViewController,
-                            willTransitionTo pendingViewControllers: [UIViewController]) { paging = true }
+                            willTransitionTo pendingViewControllers: [UIViewController]) {
+        guard let page = pendingViewControllers.first,
+              let kind = kinds.first(where: { pages[$0] === page }) else { return }
+        paging = true
+        beginPagingTransition(to: kind)
+    }
     func pageViewController(_ pageViewController: UIPageViewController, didFinishAnimating finished: Bool,
                             previousViewControllers: [UIViewController], transitionCompleted completed: Bool) {
-        paging = false
         if completed, let page = pager.viewControllers?.first,
            let kind = kinds.first(where: { pages[$0] === page }) { selected = kind }
-        render()
+        finishPagingTransition(at: selected)
+        paging = false
+        if !kinds.contains(selected) { select(.songs, animated: false) }
+        showSearchFailure()
         if let pending = pendingKind { pendingKind = nil; select(pending, animated: true) }
     }
 
-    func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        let kind = Kind.allCases[tableView.tag]
-        guard section == 0 ? kind != .playlists : kind != .songs else { return nil }
-        return section == 0 ? "单曲" : "歌单"
+    private func beginPagingTransition(to kind: Kind) {
+        results.holdPagination()
+        guard let origin = kinds.firstIndex(of: selected), let target = kinds.firstIndex(of: kind) else {
+            pagingOriginIndex = nil; pagingTargetIndex = nil
+            return
+        }
+        pagingOriginIndex = origin
+        pagingTargetIndex = target
+        categories.setSelectedIndex(origin)
+        categories.setPosition(CGFloat(origin))
     }
-    func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
-        guard self.tableView(tableView, titleForHeaderInSection: section) != nil else { return nil }
-        let header = UITableViewHeaderFooterView(reuseIdentifier: nil)
-        configureHeader(header, in: tableView, section: section)
-        return header
+
+    private func updatePagingProgress(_ scroll: UIScrollView) {
+        guard let origin = pagingOriginIndex, let target = pagingTargetIndex,
+              scroll.bounds.width > 0 else { return }
+        let progress = min(1, max(0, abs(scroll.contentOffset.x - scroll.bounds.width) / scroll.bounds.width))
+        categories.setPosition(CGFloat(origin) + CGFloat(target - origin) * progress)
     }
-    private func configureHeader(_ header: UITableViewHeaderFooterView, in tableView: UITableView, section: Int) {
-        guard let title = self.tableView(tableView, titleForHeaderInSection: section) else { return }
-        var content = header.defaultContentConfiguration()
-        content.text = title
-        content.textProperties.font = .systemFont(ofSize: 18, weight: .semibold)
-        content.textProperties.color = UIColor(theme.ink)
-        header.contentConfiguration = content
-        let existing = header.contentView.subviews.first { $0.accessibilityIdentifier == "music.search.playAll" }
-        if section == 0, !results.songs.isEmpty, existing == nil {
-            let play = musicSystemButton(symbol: "play.circle.fill", accessibilityLabel: "播放全部") { [weak self] in
-                guard let self else { return }
-                self.actions.playAll(session: self.results)
-            }
-            play.tintColor = UIColor(theme.accent)
-            play.accessibilityIdentifier = "music.search.playAll"
-            play.frame = CGRect(x: 62, y: 0, width: 44, height: 44)
-            header.contentView.addSubview(play)
-        } else if results.songs.isEmpty { existing?.removeFromSuperview() }
-        existing?.tintColor = UIColor(theme.accent)
-    }
-    func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
-        self.tableView(tableView, titleForHeaderInSection: section) == nil ? .leastNormalMagnitude : 44
+
+    private func finishPagingTransition(at kind: Kind) {
+        pagingOriginIndex = nil
+        pagingTargetIndex = nil
+        let index = kinds.firstIndex(of: kind) ?? 0
+        categories.setSelectedIndex(index)
+        categories.setPosition(CGFloat(index))
     }
     func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
+        if case .heading? = rowID(in: tableView, at: indexPath) { return 44 }
         if case .status(let section)? = rowID(in: tableView, at: indexPath) {
             guard let footer = statusView(in: tableView, section: section) else { return .leastNormalMagnitude }
             return max(52, footer.systemLayoutSizeFitting(CGSize(width: tableView.bounds.width, height: 0),
@@ -472,11 +561,22 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         return columns == 1 ? 80 : (tableView.bounds.width - 32 - CGFloat(columns - 1) * 12) /
             CGFloat(columns) + 60
     }
+    func tableView(_ tableView: UITableView, estimatedHeightForRowAt indexPath: IndexPath) -> CGFloat {
+        self.tableView(tableView, heightForRowAt: indexPath)
+    }
     private func makeCell(in tableView: UITableView, at indexPath: IndexPath,
                           id: MusicSearchResultRowID) -> UITableViewCell? {
+        if case .heading(let section) = id {
+            let cell = tableView.dequeueReusableCell(
+                withIdentifier: MusicSearchSectionHeaderCell.reuseIdentifier,
+                for: indexPath
+            ) as! MusicSearchSectionHeaderCell
+            configureHeaderCell(cell, in: tableView, section: section)
+            return cell
+        }
         if case .song(let id) = id, let row = songRows[id] {
-            let cell = tableView.dequeueReusableCell(withIdentifier: MusicTrackCell.reuseIdentifier,
-                                                     for: indexPath) as! MusicTrackCell
+            let cell = tableView.dequeueReusableCell(withIdentifier: MusicSearchSongCell.reuseIdentifier,
+                                                     for: indexPath) as! MusicSearchSongCell
             configureSongCell(cell, row: row)
             return cell
         }
@@ -520,39 +620,11 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         let request = results.requestID
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
             guard let self, self.results.requestID == request else { return nil }
-            var menu: [UIMenuElement] = [
-                UIAction(title: "下一首播放") { [weak self] _ in
-                    guard let self, self.results.requestID == request else { return }
-                    self.actions.perform(song: song, session: self.results) { [weak model = self.model] in
-                        await model?.insertNext($0)
-                    }
-                },
-                UIAction(title: "添加到播放队列") { [weak self] _ in
-                    guard let self, self.results.requestID == request else { return }
-                    self.actions.perform(song: song, session: self.results) { [weak model = self.model] in
-                        await model?.append($0)
-                    }
-                },
-                UIAction(title: "音源") { [weak self] _ in
-                    guard let self, self.results.requestID == request else { return }
-                    self.showSources(song)
-                },
-            ]
-            menu.append(UIMenu(title: "添加到歌单", children: self.model.collections.filter {
-                $0.kind != "favorites"
-            }.map { target in
-                UIAction(title: target.title) { [weak self] _ in
-                    guard let self, self.results.requestID == request else { return }
-                    self.actions.perform(song: song, session: self.results) { [weak model = self.model] in
-                        await model?.add($0, to: target)
-                    }
-                }
-            }))
-            return UIMenu(children: menu)
+            return self.songMenu(song, request: request)
         }
     }
     func tableView(_ tableView: UITableView, willDisplay cell: UITableViewCell, forRowAt indexPath: IndexPath) {
-        guard isPageVisible, Kind.allCases[tableView.tag] == selected, selected != .all else { return }
+        guard isPageVisible, !paging, Kind.allCases[tableView.tag] == selected, selected != .all else { return }
         if case .song? = rowID(in: tableView, at: indexPath), indexPath.row >= results.songs.count - 3 {
             results.more(.songs, automatic: true)
         }
@@ -561,87 +633,144 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
             results.more(.playlists, automatic: true)
         }
     }
-    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { results.resumePagination() }
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        guard isPageVisible, !paging, scrollView === pages[selected]?.table else { return }
+        results.resumePagination()
+    }
 
     private func submit() {
         let query = self.query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty, model.isAvailable, !model.isClosed else { return }
+        submittedKeyword = query
         preferences.reload()
         history.record(query)
         model.query = query
         actions.suspend()
         results.submit(query, preferences: preferences.preferences)
+        results.holdPagination()
         actions.setActive(true)
     }
     private func reconcileAccess() {
-        results.setAccess(available: model.isAvailable && !model.isClosed,
-                          generation: model.accountAccessGeneration)
+        let available = model.isAvailable && !model.isClosed
+        let keyword = submittedKeyword
+        guard results.setAccess(available: available, generation: model.searchAccessGeneration) else { return }
+        if isPageActive, available, !keyword.isEmpty {
+            preferences.reload()
+            results.submit(keyword, preferences: preferences.preferences)
+            results.holdPagination()
+        }
         actions.setActive(model.isAvailable && !model.isClosed)
         render()
     }
     private func render() {
         guard isViewLoaded else { return }
-        if categories.numberOfSegments != kinds.count {
-            categories.removeAllSegments()
-            for (index, kind) in kinds.enumerated() {
-                categories.insertSegment(withTitle: kind == .all ? "综合" : kind == .songs ? "单曲" : "歌单",
-                                         at: index, animated: false)
-            }
-        }
         if !paging, !kinds.contains(selected) { select(.songs, animated: false) }
-        categories.selectedSegmentIndex = kinds.firstIndex(of: selected) ?? 0
-        let previousSongs = songRows
-        songRows = Dictionary(uniqueKeysWithValues: results.songs.enumerated().map {
-            (Data($0.element.id.utf8), (song: $0.element, index: $0.offset))
-        })
-        let changedSongs = Set(songRows.keys.filter {
-            guard let previous = previousSongs[$0], let row = songRows[$0] else { return false }
-            return previous.song.track != row.song.track || previous.index != row.index
-        })
+        let titles = kinds.map(\.title)
+        categories.setTitles(titles, theme: theme)
+        categories.isHidden = titles.count <= 1
+        categoriesHeight.constant = categories.isHidden ? 0 : 48
+        if !paging {
+            let index = kinds.firstIndex(of: selected) ?? 0
+            categories.setSelectedIndex(index)
+            categories.setPosition(CGFloat(index))
+        }
+        let requestChanged = renderedRequest != results.requestID
+        let songsChanged = requestChanged || renderedSongs != results.songs
+        let playlistsChanged = requestChanged || renderedPlaylists != results.playlists
+        var changedSongs: Set<Data> = []
+        if songsChanged {
+            let previousSongs = songRows
+            songRows = Dictionary(uniqueKeysWithValues: results.songs.enumerated().map {
+                (Data($0.element.id.utf8), (song: $0.element, index: $0.offset))
+            })
+            changedSongs = Set(songRows.keys.filter {
+                guard let previous = previousSongs[$0], let row = songRows[$0] else { return false }
+                return requestChanged || previous.song != row.song || previous.index != row.index
+            })
+            renderedSongs = results.songs
+        }
+        if playlistsChanged { renderedPlaylists = results.playlists }
+        renderedRequest = results.requestID
         for (kind, page) in pages {
-            let previous = page.dataSource.snapshot()
-            let oldIDs = Set(previous.itemIdentifiers)
-            let previousPlaylists = page.playlistRows
-            let previousFooters = page.footerStates
-            let oldColumns = page.columns
-            page.columns = playlistColumns(page.table)
-            page.playlistRows = [:]
-            page.footerStates = [:]
-            var snapshot = NSDiffableDataSourceSnapshot<Int, MusicSearchResultRowID>()
-            snapshot.appendSections([0, 1])
-            if kind != .playlists {
-                let songs = kind == .all ? Array(results.songs.prefix(5)) : results.songs
-                snapshot.appendItems(songs.map { .song(Data($0.id.utf8)) }, toSection: 0)
+            let columns = playlistColumns(page.table)
+            let updateSongs = songsChanged && kind != .playlists
+            let updatePlaylists = (playlistsChanged || page.columns != columns) && kind != .songs
+            var headers: [Int: MusicSearchHeaderState] = [:]
+            var footers: [Int: MusicSearchFooterState] = [:]
+            for section in 0...1 {
+                if let title = headingTitle(kind: kind, section: section) {
+                    headers[section] = .init(title: title,
+                        showsPlay: section == 0 && !results.songs.isEmpty, request: results.requestID)
+                }
+                footers[section] = footerState(kind: kind, section: section)
             }
-            let count = playlistCount(kind)
-            for start in stride(from: 0, to: count, by: page.columns) {
-                let items = Array(results.playlists[start..<min(start + page.columns, count)])
-                let id = Data(items[0].id.utf8)
-                page.playlistRows[id] = items
-                snapshot.appendItems([.playlists(id)], toSection: 1)
+            guard updateSongs || updatePlaylists ||
+                    page.headerStates != headers || page.footerStates != footers else { continue }
+            let previous = page.dataSource.snapshot()
+            var snapshot = previous
+            if snapshot.sectionIdentifiers.isEmpty { snapshot.appendSections([0, 1]) }
+            var changed: [MusicSearchResultRowID] = []
+            if updateSongs {
+                let old = snapshot.itemIdentifiers(inSection: 0).filter {
+                    if case .song = $0 { return true }; return false
+                }
+                snapshot.deleteItems(old)
+                let songs = kind == .all ? Array(results.songs.prefix(5)) : results.songs
+                let ids = songs.map { MusicSearchResultRowID.song(Data($0.id.utf8)) }
+                if page.footerStates[0] != nil { snapshot.insertItems(ids, beforeItem: .status(0)) }
+                else { snapshot.appendItems(ids, toSection: 0) }
+                let oldIDs = Set(old)
+                changed += ids.filter {
+                    if case .song(let id) = $0 { return oldIDs.contains($0) && changedSongs.contains(id) }
+                    return false
+                }
+            }
+            if updatePlaylists {
+                let old = snapshot.itemIdentifiers(inSection: 1).filter {
+                    if case .playlists = $0 { return true }; return false
+                }
+                snapshot.deleteItems(old)
+                let previousRows = page.playlistRows
+                page.playlistRows = [:]
+                var ids: [MusicSearchResultRowID] = []
+                let count = playlistCount(kind)
+                for start in stride(from: 0, to: count, by: columns) {
+                    let items = Array(results.playlists[start..<min(start + columns, count)])
+                    let id = Data(items[0].id.utf8)
+                    page.playlistRows[id] = items
+                    ids.append(.playlists(id))
+                    if let oldItems = previousRows[id],
+                       requestChanged || page.columns != columns || oldItems != items {
+                        changed.append(.playlists(id))
+                    }
+                }
+                if page.footerStates[1] != nil { snapshot.insertItems(ids, beforeItem: .status(1)) }
+                else { snapshot.appendItems(ids, toSection: 1) }
             }
             for section in 0...1 {
-                if let footer = footerState(kind: kind, section: section) {
-                    page.footerStates[section] = footer
-                    snapshot.appendItems([.status(section)], toSection: section)
+                if headers[section] != page.headerStates[section] {
+                    if page.headerStates[section] == nil {
+                        if let first = snapshot.itemIdentifiers(inSection: section).first {
+                            snapshot.insertItems([.heading(section)], beforeItem: first)
+                        } else { snapshot.appendItems([.heading(section)], toSection: section) }
+                    } else { changed.append(.heading(section)) }
+                }
+                if footers[section] != page.footerStates[section] {
+                    if footers[section] == nil { snapshot.deleteItems([.status(section)]) }
+                    else if page.footerStates[section] == nil {
+                        snapshot.appendItems([.status(section)], toSection: section)
+                    } else { changed.append(.status(section)) }
                 }
             }
-            let changed = snapshot.itemIdentifiers.filter { id in
-                guard oldIDs.contains(id) else { return false }
-                switch id {
-                case .song(let id): return changedSongs.contains(id)
-                case .playlists(let id):
-                    return oldColumns != page.columns || previousPlaylists[id] != page.playlistRows[id]
-                case .status(let section): return previousFooters[section] != page.footerStates[section]
-                }
-            }
+            page.columns = columns
+            page.headerStates = headers
+            page.footerStates = footers
             snapshot.reconfigureItems(changed)
             if previous.sectionIdentifiers != snapshot.sectionIdentifiers ||
                 previous.itemIdentifiers != snapshot.itemIdentifiers || !changed.isEmpty {
                 page.dataSource.apply(snapshot, animatingDifferences: false)
             }
         }
-        updateHeaders()
         showActionError()
         showSearchFailure()
     }
@@ -655,22 +784,39 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         return songRows[id]?.song
     }
 
-    private func configureSongCell(_ cell: MusicTrackCell, row: (song: MusicSearchSong, index: Int)) {
+    private func configureSongCell(_ cell: MusicSearchSongCell, row: (song: MusicSearchSong, index: Int)) {
         let active = model.current.map { MusicSearchFusion.sameRecording($0.track, row.song.track) } == true
-        cell.configure(track: row.song.track, active: active, theme: theme, index: row.index)
-        cell.accessoryType = actions.isFavorite(row.song) ? .checkmark : .none
-        cell.accessibilityTraits = active ? [.button, .selected] : .button
+        let request = results.requestID
+        cell.configure(
+            song: row.song,
+            active: active,
+            favorite: actions.isFavorite(row.song),
+            enabled: !actions.busy,
+            theme: theme,
+            onPlay: { [weak self] in
+                guard let self, self.results.requestID == request else { return }
+                self.actions.playSingle(row.song, session: self.results)
+            },
+            onFavorite: { [weak self] in
+                guard let self, self.results.requestID == request else { return }
+                self.actions.toggleFavorite(row.song) { try await self.results.refreshTrack(row.song) }
+            },
+            onAppend: { [weak self] in
+                guard let self, self.results.requestID == request else { return }
+                self.actions.perform(song: row.song, session: self.results) { [weak model = self.model] in
+                    await model?.append($0)
+                }
+            },
+            menu: songMenu(row.song, request: request)
+        )
     }
 
-    private func updateVisibleSongs(force: Bool = false) {
+    private func updateVisibleSongs() {
         for page in pages.values {
             for path in page.table.indexPathsForVisibleRows ?? [] {
                 guard case .song(let id)? = page.dataSource.itemIdentifier(for: path), let row = songRows[id],
-                      let cell = page.table.cellForRow(at: path) as? MusicTrackCell else { continue }
-                let active = model.current.map { MusicSearchFusion.sameRecording($0.track, row.song.track) } == true
-                if force || cell.accessibilityTraits.contains(.selected) != active {
-                    configureSongCell(cell, row: row)
-                } else { cell.accessoryType = actions.isFavorite(row.song) ? .checkmark : .none }
+                      let cell = page.table.cellForRow(at: path) as? MusicSearchSongCell else { continue }
+                configureSongCell(cell, row: row)
             }
         }
     }
@@ -683,20 +829,56 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         cell.configure(items, columns: page.columns, theme: theme, open: { [weak self] in
             guard let self, self.results.requestID == request else { return }
             self.router?.showPublicCollection($0)
-        }, play: { [weak self] in
-            guard let self, self.results.requestID == request else { return }
-            self.playPlaylist($0)
         })
     }
 
-    private func updateHeaders() {
-        for page in pages.values {
-            for section in 0...1 {
-                if let header = page.table.headerView(forSection: section) {
-                    configureHeader(header, in: page.table, section: section)
+    private func headingTitle(kind: Kind, section: Int) -> String? {
+        if section == 0, kind != .playlists { return "单曲" }
+        if section == 1, kind == .all { return "歌单" }
+        return nil
+    }
+
+    private func configureHeaderCell(_ cell: MusicSearchSectionHeaderCell,
+                                     in tableView: UITableView, section: Int) {
+        let kind = Kind.allCases[tableView.tag]
+        guard let title = headingTitle(kind: kind, section: section) else { return }
+        let request = results.requestID
+        cell.configure(title: title, showsPlay: section == 0 && !results.songs.isEmpty,
+                       theme: theme) { [weak self] in
+            guard let self, self.results.requestID == request else { return }
+            self.actions.playAll(session: self.results)
+        }
+    }
+
+    private func songMenu(_ song: MusicSearchSong, request: UUID) -> UIMenu {
+        var menu: [UIMenuElement] = [
+            UIAction(title: "下一首播放") { [weak self] _ in
+                guard let self, self.results.requestID == request else { return }
+                self.actions.perform(song: song, session: self.results) { [weak model = self.model] in
+                    await model?.insertNext($0)
+                }
+            },
+            UIAction(title: "添加到播放队列") { [weak self] _ in
+                guard let self, self.results.requestID == request else { return }
+                self.actions.perform(song: song, session: self.results) { [weak model = self.model] in
+                    await model?.append($0)
+                }
+            },
+            UIAction(title: "音源") { [weak self] _ in
+                guard let self, self.results.requestID == request else { return }
+                self.showSources(song)
+            },
+        ]
+        let collections = model.collections.filter { $0.kind != "favorites" }.map { target in
+            UIAction(title: target.title) { [weak self] _ in
+                guard let self, self.results.requestID == request else { return }
+                self.actions.perform(song: song, session: self.results) { [weak model = self.model] in
+                    await model?.add($0, to: target)
                 }
             }
         }
+        if !collections.isEmpty { menu.append(UIMenu(title: "添加到歌单", children: collections)) }
+        return UIMenu(children: menu)
     }
 
     private func showActionError() { _ = showError(actions.actionError ?? actions.error?.localizedDescription) }
@@ -712,16 +894,14 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
             let message = failures.map { $0.error.message(operation: section == 0 ? "单曲搜索" : "歌单搜索",
                 platform: $0.platform.title, diagnosticID: $0.diagnosticID) }.joined(separator: "；")
             guard force || shownFailures[section] != message else { continue }
-            let restart = section == 1 && failures.contains { $0.error == .staleResult }
             let request = results.requestID
             let alert = UIAlertController(title: "错误", message: message, preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-            alert.addAction(UIAlertAction(title: restart ? "重新搜索歌单" : "重试", style: .default) {
+            alert.addAction(UIAlertAction(title: "重试", style: .default) {
                 [weak self] _ in
                 guard let self, self.results.requestID == request else { return }
                 self.shownFailures[section] = nil
-                if restart { self.results.restartPlaylists() }
-                else { self.results.retry(section == 0 ? .songs : .playlists) }
+                self.results.retry(section == 0 ? .songs : .playlists)
             })
             shownFailures[section] = message
             present(alert, animated: true)
@@ -729,19 +909,39 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         }
     }
     private func select(_ kind: Kind, animated: Bool) {
+        guard let target = kinds.firstIndex(of: kind), let page = pages[kind] else { return }
         if paging { pendingKind = kind; return }
-        let forward = (kinds.firstIndex(of: kind) ?? 0) >= (kinds.firstIndex(of: selected) ?? 0)
-        selected = kind
-        if let page = pages[kind] {
-            paging = animated
-            pager.setViewControllers([page], direction: forward ? .forward : .reverse, animated: animated) {
-                [weak self] _ in
-                guard let self else { return }
-                self.paging = false
-                if let pending = self.pendingKind { self.pendingKind = nil; self.select(pending, animated: true) }
+        let origin = selected
+        let originIndex = kinds.firstIndex(of: origin) ?? 0
+        if origin == kind, pager.viewControllers?.first === page {
+            finishPagingTransition(at: kind)
+            showSearchFailure()
+            return
+        }
+        let direction: UIPageViewController.NavigationDirection = target >= originIndex ? .forward : .reverse
+        guard animated else {
+            results.holdPagination()
+            selected = kind
+            pager.setViewControllers([page], direction: direction, animated: false)
+            finishPagingTransition(at: kind)
+            showSearchFailure()
+            return
+        }
+        paging = true
+        beginPagingTransition(to: kind)
+        pager.setViewControllers([page], direction: direction,
+                                 animated: !UIAccessibility.isReduceMotionEnabled) { [weak self] finished in
+            guard let self else { return }
+            self.selected = finished ? kind : origin
+            self.finishPagingTransition(at: self.selected)
+            self.paging = false
+            if !self.kinds.contains(self.selected) { self.select(.songs, animated: false) }
+            self.showSearchFailure()
+            if let pending = self.pendingKind {
+                self.pendingKind = nil
+                self.select(pending, animated: true)
             }
         }
-        categories.selectedSegmentIndex = kinds.firstIndex(of: kind) ?? 0
         showSearchFailure()
     }
     private func neighbor(_ page: UIViewController, step: Int) -> UIViewController? {
@@ -761,7 +961,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         guard canPresentPageAlert else { return }
         let request = results.requestID
         results.holdPagination()
-        let sources = MusicSourcesViewController(model: model, tracks: Array(song.variants.prefix(10)),
+        let sources = MusicSourcesViewController(model: model, tracks: song.variants,
             appearance: appearance, originIsCurrent: { [weak results] in results?.requestID == request },
             refresh: { [weak results] in
                 guard let results, results.requestID == request else { throw MusicServiceError.staleResult }
@@ -774,35 +974,6 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         navigation.sheetPresentationController?.prefersGrabberVisible = true
         present(navigation, animated: true)
     }
-    private func playPlaylist(_ item: MusicPublicBrowseCollection) {
-        guard let browser = model.publicBrowser else { return }
-        let request = results.requestID, access = model.accountAccessGeneration
-        results.holdPagination()
-        actions.perform { [weak self] in
-            guard let self, self.results.requestID == request, self.model.accountAccessGeneration == access else {
-                throw MusicServiceError.staleResult
-            }
-            let page = MusicPublicBrowseViewModel(service: browser, request: .detail(item),
-                queuePage: { [weak model = self.model] source, cursor in
-                    guard let model else { throw MusicServiceError.closed }
-                    return try await model.remoteQueuePage(source, cursor: cursor)
-                }, releaseSource: { [weak model = self.model] in model?.releaseRemoteQueueSource($0) })
-            page.setAccess(available: true, generation: access)
-            page.appear()
-            defer { page.disappear() }
-            await page.loadIfNeeded()
-            try Task.checkCancellation()
-            guard self.results.requestID == request, self.model.accountAccessGeneration == access else {
-                throw MusicServiceError.staleResult
-            }
-            if let error = page.error { throw error }
-            let (source, _) = try await page.playbackSource()
-            let firstPage = try await self.model.remoteQueuePage(source, cursor: nil)
-            guard let first = firstPage.items.first else { throw MusicServiceError.contentUnavailable }
-            await self.model.playRemoteQueue(source, start: .init(index: 0, track: first))
-        }
-    }
-
     private func statusView(in tableView: UITableView, section: Int) -> UIView? {
         let kind = Kind.allCases[tableView.tag]
         guard let state = footerState(kind: kind, section: section) else { return nil }
@@ -817,6 +988,14 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         if let label = state.label, let action = state.action {
             let button = UIButton(type: .system)
             button.setTitle(label, for: .normal); button.tintColor = UIColor(theme.ink)
+            button.titleLabel?.font = .systemFont(ofSize: 14, weight: action == .category ? .medium : .regular)
+            button.accessibilityIdentifier = "music.search.results.action.\(tableView.tag).\(section)"
+            if action == .category {
+                button.backgroundColor = UIColor(theme.chip)
+                button.layer.cornerRadius = 10
+                button.contentEdgeInsets = UIEdgeInsets(top: 9, left: 16, bottom: 9, right: 16)
+                button.heightAnchor.constraint(greaterThanOrEqualToConstant: 40).isActive = true
+            }
             button.addAction(UIAction { [weak self] _ in
                 guard let self, self.isPageActive, self.results.requestID == state.request else { return }
                 let type: MusicSearchSection = section == 0 ? .songs : .playlists
@@ -848,7 +1027,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         var action: MusicSearchFooterState.Action?
         if noPlatforms { message = "尚未启用搜索平台" }
         else if !failures.isEmpty {
-            label = section == 1 && failures.contains(where: { $0.error == .staleResult }) ? "重新搜索歌单" : "重试"
+            label = "重试"
             action = .failure
         } else if cancelled {
             message = "已取消"; label = "重试"; action = .retry
@@ -868,7 +1047,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
 }
 
 @MainActor
-private final class MusicSearchPlaylistCell: UITableViewCell {
+final class MusicSearchPlaylistCell: UITableViewCell {
     private var tiles: [MusicBrowseCell] = []
     private var columns = 1
     private var items: [MusicPublicBrowseCollection] = []
@@ -879,8 +1058,7 @@ private final class MusicSearchPlaylistCell: UITableViewCell {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func configure(_ items: [MusicPublicBrowseCollection], columns: Int, theme: PageTheme,
-                   open: @escaping (MusicPublicBrowseCollection) -> Void,
-                   play: @escaping (MusicPublicBrowseCollection) -> Void) {
+                   open: @escaping (MusicPublicBrowseCollection) -> Void) {
         self.columns = columns
         self.open = open
         let changed = self.items.map(\.id) != items.map(\.id)
@@ -901,7 +1079,8 @@ private final class MusicSearchPlaylistCell: UITableViewCell {
             tile.configure(item: .init(id: item.id, title: item.title,
                 subtitle: [item.count.map { "\($0)首" }, item.creator].compactMap { $0 }.joined(separator: " · "),
                 artwork: item.artwork, content: .collection(item)),
-                layout: columns == 1 ? .list : .grid, theme: theme, onPlay: { play(item) })
+                layout: columns == 1 ? .list : .grid, theme: theme,
+                showsPlayButton: false, onPlay: {})
         }
         setNeedsLayout()
     }
@@ -920,6 +1099,7 @@ private final class MusicSearchTableController: UIViewController {
     let table = UITableView(frame: .zero, style: .plain)
     var dataSource: UITableViewDiffableDataSource<Int, MusicSearchResultRowID>!
     var playlistRows: [Data: [MusicPublicBrowseCollection]] = [:]
+    var headerStates: [Int: MusicSearchHeaderState] = [:]
     var footerStates: [Int: MusicSearchFooterState] = [:]
     var columns = 1
     var onLayout: (() -> Void)?
@@ -927,7 +1107,13 @@ private final class MusicSearchTableController: UIViewController {
     override func viewDidLayoutSubviews() { super.viewDidLayoutSubviews(); onLayout?() }
 }
 
-private enum MusicSearchResultRowID: Hashable { case song(Data), playlists(Data), status(Int) }
+private enum MusicSearchResultRowID: Hashable { case heading(Int), song(Data), playlists(Data), status(Int) }
+
+private struct MusicSearchHeaderState: Equatable {
+    let title: String
+    let showsPlay: Bool
+    let request: UUID
+}
 
 private struct MusicSearchFooterState: Equatable {
     enum Action: Equatable { case failure, retry, cancel, more, category }
@@ -937,57 +1123,4 @@ private struct MusicSearchFooterState: Equatable {
     let request: UUID
 }
 
-@MainActor
-private final class MusicSearchChartsCell: UITableViewCell {
-    private let scroll = UIScrollView()
-    private let stack = UIStackView()
-    private var charts: [MusicSearchDiscoveryChart] = []
-    private var widths: [NSLayoutConstraint] = []
-    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
-        super.init(style: style, reuseIdentifier: reuseIdentifier)
-        backgroundColor = .clear; selectionStyle = .none
-        scroll.showsHorizontalScrollIndicator = false; scroll.isPagingEnabled = true
-        stack.axis = .horizontal; stack.spacing = 12
-        contentView.addSubview(scroll); scroll.pinEdges(to: contentView)
-        scroll.addSubview(stack)
-    }
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    func configure(_ charts: [MusicSearchDiscoveryChart], theme: PageTheme,
-                   play: @escaping (MusicSearchDiscoveryChart, Int) -> Void) {
-        self.charts = charts
-        widths.removeAll()
-        for item in stack.arrangedSubviews { stack.removeArrangedSubview(item); item.removeFromSuperview() }
-        for chart in charts {
-            let column = UIStackView()
-            column.axis = .vertical; column.spacing = 0
-            let heading = UIButton(type: .system)
-            heading.setTitle(chart.collection.title, for: .normal)
-            heading.tintColor = UIColor(theme.ink)
-            heading.addAction(UIAction { _ in if !chart.tracks.isEmpty { play(chart, 0) } }, for: .touchUpInside)
-            column.addArrangedSubview(heading)
-            for (index, track) in chart.tracks.prefix(20).enumerated() {
-                let button = UIButton(type: .system)
-                button.setTitle("\(index + 1). \(track.title)", for: .normal)
-                button.contentHorizontalAlignment = .leading
-                button.tintColor = UIColor(theme.ink)
-                button.heightAnchor.constraint(equalToConstant: 40).isActive = true
-                button.addAction(UIAction { _ in play(chart, index) }, for: .touchUpInside)
-                column.addArrangedSubview(button)
-            }
-            column.addArrangedSubview(UIView())
-            stack.addArrangedSubview(column)
-            let width = column.widthAnchor.constraint(equalToConstant: max(0, bounds.width - 32))
-            width.isActive = true
-            widths.append(width)
-        }
-        setNeedsLayout()
-    }
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        let width = max(0, bounds.width - 32)
-        for constraint in widths { constraint.constant = width }
-        stack.frame = CGRect(x: 16, y: 0, width: CGFloat(charts.count) * (width + 12), height: bounds.height)
-        scroll.contentSize = CGSize(width: stack.frame.maxX + 16, height: bounds.height)
-    }
-}
 #endif

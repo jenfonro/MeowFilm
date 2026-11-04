@@ -27,16 +27,16 @@ public static class MusicNativeWySmsTests
         { int c = code; yield return Case("fixed-error-" + c, () => BusinessError(c)); }
         yield return Case("send-cooldown-cancel-platform-and-clock-boundary", Cooldown);
         yield return Case("ledger-expiry-cannot-shorten-latest-send-cooldown", CooldownExpiry);
-        yield return Case("global-20-per-ten-minutes-and-reset", GlobalRate);
-        yield return Case("eight-login-attempts-then-ten-minute-reset", AttemptRate);
-        yield return Case("128-phone-hash-ledger-bounded-and-expiry", Ledger);
+        yield return Case("independent-numbers-do-not-share-a-send-quota", GlobalRate);
+        yield return Case("login-attempts-use-upstream-results-without-local-count-quota", AttemptRate);
+        yield return Case("completed-logins-do-not-accumulate-a-phone-ledger", Ledger);
         yield return Case("cancel-send-keeps-reservation-no-automatic-resend", () => Cancel("send"));
         yield return Case("cancel-login-no-late-session", () => Cancel("login"));
         yield return Case("cancel-identity-no-late-session", () => Cancel("status"));
         yield return Case("new-operation-rejects-old-result-and-handoff", Supersede);
         yield return Case("deadline-send-is-unconfirmed-not-recalled", Deadline);
         yield return Case("one-deadline-covers-login-and-identity", LoginDeadline);
-        yield return Case("physical-http-slots-not-released-by-cancelled-call", Budget);
+        yield return Case("held-physical-http-does-not-block-another-send", Budget);
         yield return Case("lost-durable-receipt-explicit-read-no-replay", Unknown);
         yield return Case("store-CAS-conflict-is-not-unknown-or-success", Conflict);
         yield return Case("other-owner-logout-fences-old-login-CAS", OtherOwner);
@@ -77,31 +77,35 @@ public static class MusicNativeWySmsTests
                 f.Store.Writes == 0 && f.Transport.Steps.SequenceEqual(["send"]));
             var login = await Login(f.Owner);
             Check(Ok(login) && login.GetProperty("account").GetProperty("state").GetString() == "verified" &&
-                f.Store.Writes == 1 && f.Transport.Steps.SequenceEqual(["send", "login", "status"]) && events >= 3);
+                f.Store.Writes == 1 && f.Transport.Steps.SequenceEqual(["send", "login", "status", "rights"]) && events >= 3);
             Check(!login.GetRawText().Contains(WySmsHandler.Phone) && !login.GetRawText().Contains(WySmsHandler.Captcha) &&
                 !login.GetRawText().Contains("SYNTHETIC_WY_SESSION"));
             var lease = await f.Owner.AcquireAsync("wy");
             Check(lease is not null && f.Owner.IsCurrent(lease) && lease.UserId == "42");
+            var details = await f.Owner.ReadDetailsAsync("wy");
+            Check(details.Membership.Vip == true && details.Generation == lease!.Generation &&
+                details.MembershipFreshness == MusicAccountDetailsFreshness.Fresh);
             Check(f.Owner.Revoke(lease!) && !f.Owner.IsCurrent(lease!) && await f.Owner.AcquireAsync("wy") is null);
             var rootDoc = await WySmsStore.ReadRoot(f.Store.Inner);
             string text = rootDoc.ToJsonString();
             Check(!text.Contains(WySmsHandler.Phone) && !text.Contains(WySmsHandler.Captcha) && !text.Contains("retryAfter"));
-            var row = rootDoc["entries"]!.AsArray().Single()!["value"]!.AsObject();
-            Check(row.Count == 6 && rootDoc["version"]!.GetValue<int>() == 1);
+            var row = rootDoc["entries"]!.AsArray().Single(r => r!["key"]!.GetValue<string>() == AccountDocument.Key("wy"))!["value"]!.AsObject();
+            Check(row.Count == 6 && rootDoc["entries"]!.AsArray().Count == 2 && rootDoc["version"]!.GetValue<int>() == 1);
         }
         foreach (string file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
             Check(!Encoding.UTF8.GetString(await File.ReadAllBytesAsync(file)).Contains("SYNTHETIC_WY_SESSION"));
         await using var reopen = new WySmsFixture(root);
         Check((await reopen.Owner.AcquireAsync("wy"))?.UserId == "42" && reopen.Transport.Calls == 0);
+        Check((await reopen.Owner.ReadDetailsAsync("wy")).Membership.Vip == true && reopen.Transport.Calls == 0);
         Check(Ok(await reopen.Owner.CallAsync("music.accounts.validate", new { platform = "wy" })));
         var old = await reopen.Owner.AcquireAsync("wy");
         Check(Ok(await reopen.Owner.CallAsync("music.accounts.logout", new { platform = "wy" })) &&
-            !reopen.Owner.IsCurrent(old!) && await reopen.Owner.AcquireAsync("wy") is null && reopen.Transport.Calls == 1);
+            !reopen.Owner.IsCurrent(old!) && await reopen.Owner.AcquireAsync("wy") is null && reopen.Transport.Calls == 2);
     }
     private static async Task ExistingCode()
     {
         await using var f = new WySmsFixture();
-        Check(Ok(await Login(f.Owner)) && f.Transport.Steps.SequenceEqual(["login", "status"]));
+        Check(Ok(await Login(f.Owner)) && f.Transport.Steps.SequenceEqual(["login", "status", "rights"]));
     }
     private static async Task ExistingSession()
     {
@@ -149,10 +153,8 @@ public static class MusicNativeWySmsTests
     private static async Task GlobalRate()
     {
         await using var f = new WySmsFixture();
-        for (int i = 0; i < 20; i++) Check(Ok(await Send(f.Owner, (10000000000L + i).ToString())));
-        var blocked = await Send(f.Owner, "10000000099");
-        Check(Code(blocked) == "RATE_LIMITED" && blocked.GetProperty("retryAfter").GetInt32() == 600 && f.Transport.Calls == 20);
-        f.Clock.Advance(600); Check(Ok(await Send(f.Owner)) && f.Transport.Calls == 21);
+        for (int i = 0; i < 40; i++) Check(Ok(await Send(f.Owner, (10000000000L + i).ToString())));
+        Check(Ok(await Send(f.Owner, "10000000099")) && f.Transport.Calls == 41);
     }
     private static async Task CooldownExpiry()
     {
@@ -166,9 +168,9 @@ public static class MusicNativeWySmsTests
     private static async Task AttemptRate()
     {
         await using var f = new WySmsFixture(); f.Transport.BusinessCode = 502;
-        for (int i = 0; i < 8; i++) Check(Code(await Login(f.Owner)) == "INVALID_CODE");
-        Check(Code(await Login(f.Owner)) == "RATE_LIMITED" && f.Transport.Calls == 8);
-        f.Clock.Advance(600); f.Transport.BusinessCode = 200; Check(Ok(await Login(f.Owner)));
+        for (int i = 0; i < 16; i++) Check(Code(await Login(f.Owner)) == "INVALID_CODE");
+        Check(f.Transport.Calls == 16);
+        f.Transport.BusinessCode = 200; Check(Ok(await Login(f.Owner)));
     }
     private static async Task Ledger()
     {
@@ -176,8 +178,8 @@ public static class MusicNativeWySmsTests
         for (int i = 0; i < 128; i++)
             Check(Code(await f.Owner.CallAsync("music.accounts.sms.login", new { platform = "wy",
                 phone = (10000000000L + i).ToString(), captcha = WySmsHandler.Captcha })) == "INVALID_CODE");
-        Check(Code(await Send(f.Owner, "10000000999")) == "RATE_LIMITED" && f.Transport.Calls == 128);
-        f.Clock.Advance(600); f.Transport.BusinessCode = 200; Check(Ok(await Send(f.Owner)));
+        Check(f.Transport.Calls == 128);
+        f.Transport.BusinessCode = 200; Check(Ok(await Send(f.Owner, "10000000999")) && f.Transport.Calls == 129);
     }
     private static async Task Cancel(string step)
     {
@@ -230,17 +232,17 @@ public static class MusicNativeWySmsTests
         f.Transport.HoldEverySend = true;
         var one = Send(f.Owner, "10000000001"); await f.Transport.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(4));
         var two = Send(f.Owner, "10000000002"); await Until(() => f.Transport.Calls == 2);
-        Check(Code(await Send(f.Owner, "10000000003")) == "RATE_LIMITED" && f.Transport.Calls == 2);
+        var three = Send(f.Owner, "10000000003"); await Until(() => f.Transport.Calls == 3);
         f.Transport.Release.TrySetResult();
-        Check(!Ok(await one) && !Ok(await two) && f.Store.Writes == 0);
+        Check(!Ok(await one) && !Ok(await two)); _ = await three; Check(f.Store.Writes == 0);
     }
     private static async Task Unknown()
     {
         await using var f = new WySmsFixture(); f.Store.LoseReceipt = true;
         Check(Code(await Login(f.Owner)) == "HANDOFF_UNCONFIRMED" && f.Store.Writes == 1);
         Check(await f.Owner.AcquireAsync("wy") is null);
-        Check(Code(await Send(f.Owner)) == "COMMIT_UNKNOWN" && f.Transport.Calls == 2);
-        Check(Ok(await f.Owner.CallAsync("music.accounts.list")) && f.Transport.Calls == 2);
+        Check(Code(await Send(f.Owner)) == "COMMIT_UNKNOWN" && f.Transport.Calls == 3);
+        Check(Ok(await f.Owner.CallAsync("music.accounts.list")) && f.Transport.Calls == 3);
         Check((await f.Owner.AcquireAsync("wy"))?.UserId == "42");
     }
     private static async Task Conflict()
@@ -265,7 +267,7 @@ public static class MusicNativeWySmsTests
         await f.Owner.CallAsync("music.accounts.cancel", new { platform = "wy" });
         Check(Code(await login) == "HANDOFF_UNCONFIRMED");
         var read = f.Owner.CallAsync("music.accounts.list"); await Task.Delay(50); Check(!read.IsCompleted);
-        f.Store.Release.TrySetResult(); Check(Ok(await read) && f.Store.Writes == 1 && f.Transport.Calls == 2);
+        f.Store.Release.TrySetResult(); Check(Ok(await read) && f.Store.Writes == 1 && f.Transport.Calls == 3);
         Check((await f.Owner.AcquireAsync("wy"))?.UserId == "42");
     }
     private static async Task ReadFailure()
@@ -414,14 +416,15 @@ internal sealed class WySmsHandler(IProtectedDocumentStore store) : HttpMessageH
         var uri = request.RequestUri!;
         string step = uri.AbsolutePath switch {
             "/weapi/sms/captcha/sent" => "send", "/weapi/w/login/cellphone" => "login",
-            "/weapi/w/nuser/account/get" => "status", "/eapi/login/qrcode/unikey" => "qr", _ => "unknown" };
+            "/weapi/w/nuser/account/get" => "status", "/eapi/login/qrcode/unikey" => "qr",
+            "/weapi/music-vip-membership/client/vip/info" => "rights", _ => "unknown" };
         lock (Steps) Steps.Add(step);
         MusicNativeWySmsTests.Check(step != "unknown" && uri.Scheme == "https" && uri.IsDefaultPort &&
             uri.Query.Length == 0 && request.Method == HttpMethod.Post);
         if (step == "qr") return Raw("{\"code\":200,\"unikey\":\"SYNTHETIC_WY_QR\"}");
         MusicNativeWySmsTests.Check(uri.Host == "music.163.com");
         var client = MusicClientContextDocument.Decode(await store.ReadAsync(MusicPlatformClientContextOwner.DocumentNamespace)).Wy;
-        MusicClientContextFixture.VerifyLocalWyCookie(request, client, step == "status" ? Cookie : null);
+        MusicClientContextFixture.VerifyLocalWyCookie(request, client, step is "status" or "rights" ? Cookie : null);
         string body = await request.Content!.ReadAsStringAsync();
         var fields = body.Split('&').ToDictionary(p => p.Split('=', 2)[0], p => Uri.UnescapeDataString(p.Split('=', 2)[1]));
         MusicNativeWySmsTests.Check(fields.Count == 2 && fields.ContainsKey("params") && fields["encSecKey"].Length == 256 &&
@@ -441,6 +444,9 @@ internal sealed class WySmsHandler(IProtectedDocumentStore store) : HttpMessageH
         if (step == "send" || BusinessCode != 200) return Raw(JsonSerializer.Serialize(new { code = BusinessCode,
             message = Phone + Captcha + "SYNTHETIC_UPSTREAM_DIAGNOSTIC" }),
             BusinessCode == 429 ? HttpStatusCode.TooManyRequests : HttpStatusCode.OK);
+        if (step == "rights") return Raw(JsonSerializer.Serialize(new { code = 200, data = new {
+            userId = "42", associator = new { expireTime = DateTimeOffset.UtcNow.AddDays(30).ToUnixTimeMilliseconds() },
+            musicPackage = new { expireTime = 0 }, redplus = new { expireTime = 0 } } }));
         string userId = Fault == "status-id" && step == "status" ? "43" : "42";
         string accountId = Fault == step + "-account" || Fault == step + "-id" && step == "login" ? "99" : userId;
         string name = Fault == step + "-secret" ? "SYNTHETIC_WY_SESSION" :

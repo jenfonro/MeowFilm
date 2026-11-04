@@ -1,3 +1,4 @@
+import { SourceRuntimeError } from '@meowfilm/source-runtime';
 import { clone, deferred, fault, requireValue, safeError } from './errors.js';
 import { QuickJSEngine } from './quickjs-engine.js';
 import { portableRealmSource } from './portable-realm.js';
@@ -11,12 +12,14 @@ export class PortableSandbox {
     return sandbox;
   }
 
-  constructor({ onCapability, onSync, onDiagnostic, limits }) {
+  constructor({ onCapability, onSync, onDiagnostic, onFailure, limits, wasmModule }) {
     requireValue(typeof onCapability === 'function' && typeof onSync === 'function');
     requireValue(onDiagnostic === undefined || typeof onDiagnostic === 'function');
     this.onCapability = onCapability;
     this.onSync = onSync;
     this.onDiagnostic = onDiagnostic;
+    this.onFailure = onFailure;
+    this.wasmModule = wasmModule;
     this.limits = limits;
     this.root = new ResourceScope();
     this.startup = new ResourceScope(this.root.signal, limits.initTimeoutMs);
@@ -30,16 +33,22 @@ export class PortableSandbox {
     this.live = true;
     this.activated = false;
     this.capabilities = {};
-    this.utils = createUtilities(limits.maxBytes);
+    this.utils = createUtilities(limits.maxMemoryBytes);
   }
 
   async start() {
-    this.engine = await QuickJSEngine.create({
-      source: portableRealmSource,
-      limits: this.limits,
-      bridge: (operation, args) => this.bridge(operation, args),
-    });
-    return this;
+    try {
+      this.engine = await QuickJSEngine.create({
+        source: portableRealmSource,
+        limits: this.limits,
+        wasmModule: this.wasmModule,
+        bridge: (operation, args) => this.bridge(operation, args),
+      });
+      return this;
+    } catch (error) {
+      if (error.memoryLimitExceeded) this.fail(error);
+      throw error;
+    }
   }
 
   assertLive() {
@@ -49,12 +58,18 @@ export class PortableSandbox {
   call(name, args, scope = this.root) {
     this.assertLive();
     scope.assertOpen();
-    const budget = Math.min(this.limits.syncTimeoutMs, scope.deadline - Date.now());
-    try { return this.engine.call(name, args, budget); }
+    try { return this.engine.call(name, args); }
     catch (error) {
-      if (this.engine.interrupted) this.close(safeError(error));
+      if (this.engine.memoryLimitExceeded) this.fail(error);
       throw error;
     }
+  }
+
+  fail(error) {
+    if (!this.live) return;
+    if (this.engine?.memoryLimitExceeded) error.memoryLimitExceeded = true;
+    this.close(safeError(error));
+    try { this.onFailure?.(error); } catch {}
   }
 
   load(kind, source, metadata) {
@@ -109,7 +124,14 @@ export class PortableSandbox {
       const task = this.tasks.get(args[0]);
       if (!task || task.scope.signal.aborted) return;
       if (args[1]) task.result.resolve(clone(args[2] ?? null));
-      else task.result.reject(fault(this.engine?.interrupted ? 'TIMEOUT' : args[2]));
+      else {
+        const error = fault(args[2] === 'MEMORY_LIMIT' ? 'RESOURCE_LIMIT' : args[2]);
+        task.result.reject(error);
+        if (args[2] === 'MEMORY_LIMIT') {
+          this.engine.memoryLimitExceeded = true;
+          this.fail(error);
+        }
+      }
       return;
     }
     if (operation === 'ready') {
@@ -125,14 +147,19 @@ export class PortableSandbox {
       return;
     }
     if (operation === 'startupFailure') {
-      const error = fault(args[0]);
+      const error = fault(args[0] === 'MEMORY_LIMIT' ? 'RESOURCE_LIMIT' : args[0]);
+      if (args[0] === 'MEMORY_LIMIT') {
+        this.engine.memoryLimitExceeded = true;
+        error.memoryLimitExceeded = true;
+      }
       this.ready.reject(error);
-      this.close(error);
+      if (error.memoryLimitExceeded) this.fail(error);
+      else this.close(error);
       return;
     }
     this.assertLive();
     switch (operation) {
-      case 'maxBytes': return this.limits.maxBytes;
+      case 'maxBytes': return this.limits.maxMemoryBytes;
       case 'util': return this.utils(...args);
       case 'sync': {
         const { scope, context } = this.taskContext(args[0]);
@@ -153,8 +180,6 @@ export class PortableSandbox {
     requireValue(Number.isSafeInteger(callbackId) && callbackId > 0 &&
       !this.callbacks.has(callbackId) && !this.timers.has(callbackId) &&
       typeof name === 'string' && input && typeof input === 'object');
-    requireValue(this.capabilityTasks.size < this.limits.maxNetworkRequests,
-      'RESOURCE_LIMIT');
     const detach = scope.add(() => this.forgetCallback(callbackId));
     this.callbacks.set(callbackId, { scope, detach, repeat: false, kind: 'capability' });
     const task = this.track(Promise.resolve().then(() => {
@@ -167,7 +192,8 @@ export class PortableSandbox {
     task.finally(() => this.capabilityTasks.delete(task)).catch(() => {});
     scope.race(task).then(
       value => this.settle(callbackId, { ok: true, value: clone(value ?? null) }, scope),
-      error => this.settle(callbackId, { ok: false, code: safeError(error, 'CAPABILITY_UNAVAILABLE').code }, scope),
+      error => this.settle(callbackId, { ok: false, code: error instanceof SourceRuntimeError
+        ? error.code : safeError(error, 'CAPABILITY_UNAVAILABLE').code }, scope),
     ).catch(() => {});
   }
 
@@ -179,7 +205,6 @@ export class PortableSandbox {
 
   timer(taskId, id, delay = 0, repeat = false) {
     requireValue(Number.isSafeInteger(id) && id > 0 && !this.callbacks.has(id));
-    requireValue(this.timers.size < this.limits.maxTimers, 'RESOURCE_LIMIT');
     const { scope } = this.taskContext(taskId);
     const detach = scope.add(() => this.clearTimer(id));
     this.callbacks.set(id, { scope, detach, repeat, kind: 'timer' });

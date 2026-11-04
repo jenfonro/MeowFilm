@@ -18,6 +18,27 @@
    <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
    <Setter Property="LineHeight" Value="24"/><Setter Property="LineStackingStrategy" Value="BlockLineHeight"/>
   </Style>
+  <Style x:Key="Catalog.SectionLoading" TargetType="Grid">
+   <Setter Property="Width" Value="14"/><Setter Property="Height" Value="14"/>
+   <Setter Property="Margin" Value="8,0,0,0"/><Setter Property="VerticalAlignment" Value="Center"/>
+   <Setter Property="Visibility" Value="Collapsed"/><Setter Property="IsHitTestVisible" Value="False"/>
+   <Setter Property="RenderTransformOrigin" Value=".5,.5"/>
+   <Style.Triggers>
+    <DataTrigger Binding="{Binding IsLoading}" Value="True">
+     <Setter Property="Visibility" Value="Visible"/>
+     <DataTrigger.EnterActions><BeginStoryboard x:Name="SectionLoadingSpin"><Storyboard RepeatBehavior="Forever">
+      <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
+                       From="0" To="360" Duration="0:0:0.8"/>
+     </Storyboard></BeginStoryboard></DataTrigger.EnterActions>
+     <DataTrigger.ExitActions><StopStoryboard BeginStoryboardName="SectionLoadingSpin"/></DataTrigger.ExitActions>
+    </DataTrigger>
+   </Style.Triggers>
+  </Style>
+  <Style x:Key="Catalog.SectionMore" TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}">
+   <Setter Property="Margin" Value="0"/><Setter Property="Padding" Value="12,4"/>
+   <Setter Property="MinHeight" Value="30"/><Setter Property="FontSize" Value="12"/>
+   <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Muted}"/>
+  </Style>
   <Style x:Key="Catalog.SongTitle" TargetType="TextBlock" BasedOn="{StaticResource Capability.Text}">
    <Setter Property="FontFamily" Value="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"/>
    <Setter Property="FontSize" Value="14"/><Setter Property="FontWeight" Value="Normal"/>
@@ -254,6 +275,10 @@
     </Grid>
    </Border>
   </DataTemplate>
+   <DataTemplate x:Key="Catalog.SongColumn">
+    <ItemsControl Height="252" VerticalAlignment="Top"
+                  ItemsSource="{Binding Items}" ItemTemplate="{StaticResource Catalog.SongRow}"/>
+   </DataTemplate>
    <DataTemplate x:Key="Catalog.ArtistCard">
     <Button Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.Flat}" IsEnabled="{Binding CanOpen}"
             Width="184" Margin="0,0,0,48" HorizontalAlignment="Center"
@@ -296,6 +321,18 @@
     <ItemsControl ItemsSource="{Binding Items}" ItemTemplate="{StaticResource Catalog.PlaylistRow}"
                   AutomationProperties.Name="封面列表"/>
    </DataTemplate>
+   <DataTemplate x:Key="Catalog.Section.PlaylistGrid">
+    <ItemsControl ItemsSource="{Binding Items}" ItemTemplate="{StaticResource Catalog.PlaylistCard}"
+                  AutomationProperties.Name="歌单搜索结果">
+     <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+     <ItemsControl.ItemContainerStyle><Style TargetType="ContentPresenter">
+      <Setter Property="Width" Value="168"/>
+      <Setter Property="Margin" Value="0,0,0,24"/>
+      <Setter Property="HorizontalAlignment" Value="Left"/>
+      <Setter Property="VerticalAlignment" Value="Top"/>
+     </Style></ItemsControl.ItemContainerStyle>
+    </ItemsControl>
+   </DataTemplate>
    <DataTemplate x:Key="Catalog.Section.Rankings">
     <ItemsControl ItemsSource="{Binding Items}" ItemTemplate="{StaticResource Catalog.Ranking}">
      <ItemsControl.ItemsPanel><ItemsPanelTemplate>
@@ -303,6 +340,10 @@
        Columns="{Binding ActualWidth,RelativeSource={RelativeSource AncestorType=ItemsControl},Converter={StaticResource Catalog.Columns}}"/>
      </ItemsPanelTemplate></ItemsControl.ItemsPanel>
     </ItemsControl>
+   </DataTemplate>
+   <DataTemplate x:Key="Catalog.Section.SongShelf">
+    <local:Shelf ItemsSource="{Binding SongColumns}" CardTemplate="{StaticResource Catalog.SongColumn}"
+                 MinimumCardWidth="400"/>
    </DataTemplate>
    <DataTemplate x:Key="Catalog.Section.Songs">
     <ItemsControl ItemsSource="{Binding Items}" ItemTemplate="{StaticResource Catalog.SongRow}">
@@ -334,6 +375,12 @@
      <DataTrigger Binding="{Binding IsSongSection}" Value="True">
       <Setter Property="ContentTemplate" Value="{StaticResource Catalog.Section.Songs}"/>
      </DataTrigger>
+     <DataTrigger Binding="{Binding DataContext.IsSearchPlaylists,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView}}" Value="True">
+      <Setter Property="ContentTemplate" Value="{StaticResource Catalog.Section.PlaylistGrid}"/>
+     </DataTrigger>
+     <DataTrigger Binding="{Binding IsSongShelfSection}" Value="True">
+      <Setter Property="ContentTemplate" Value="{StaticResource Catalog.Section.SongShelf}"/>
+     </DataTrigger>
       <DataTrigger Binding="{Binding IsArtistSection}" Value="True">
        <Setter Property="ContentTemplate" Value="{StaticResource Catalog.Section.Artists}"/>
       </DataTrigger>
@@ -341,31 +388,6 @@
    </Style>
  </ResourceDictionary></UserControl.Resources>
  <DockPanel>
-  <StackPanel DockPanel.Dock="Top" Visibility="{Binding IsAggregateSearch,Converter={StaticResource Visible}}" Margin="0,0,0,12">
-   <WrapPanel>
-    <ComboBox ItemsSource="{Binding CatalogSearchKinds}" SelectedItem="{Binding CatalogSearchKind}" Width="96"
-     SelectionChanged="Kind_Changed" Margin="0,0,12,8" AutomationProperties.Name="搜索结果类型"/>
-    <TextBlock Text="{Binding AggregateSearchSummary}" VerticalAlignment="Center" Margin="0,0,12,8" AutomationProperties.LiveSetting="Polite"/>
-    <Button Content="更多结果" Click="SearchMore_Click" IsEnabled="{Binding CanAggregateMore}"/>
-    <Button Content="取消搜索" Click="SearchCancel_Click" IsEnabled="{Binding CanCancelAggregateSearch}"/>
-    <ComboBox ItemsSource="{Binding RecordingCandidates}" DisplayMemberPath="Label" SelectedItem="{Binding SelectedRecording}"
-     MinWidth="140" MaxWidth="280" Margin="0,0,8,8" Visibility="{Binding HasRecordingCandidates,Converter={StaticResource Visible}}"
-     AutomationProperties.Name="指定歌曲录音"/>
-   </WrapPanel>
-   <desktop:NoticeOutlet Message="{Binding AggregateSearchStatus}"/>
-   <ItemsControl ItemsSource="{Binding SearchProgress}" AutomationProperties.Name="平台搜索进度">
-    <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
-    <ItemsControl.ItemTemplate><DataTemplate>
-     <StackPanel Margin="0,0,20,8" MaxWidth="240">
-      <TextBlock Text="{Binding Name}" FontWeight="SemiBold"/>
-      <TextBlock Text="{Binding Progress}"/>
-      <desktop:NoticeOutlet Message="{Binding ErrorText}"/>
-      <Button Content="重试" Click="SearchRetry_Click" Tag="{Binding}" HorizontalAlignment="Left"
-       Visibility="{Binding CanRetry,Converter={StaticResource Visible}}" IsEnabled="{Binding CanRetry}"/>
-     </StackPanel>
-    </DataTemplate></ItemsControl.ItemTemplate>
-   </ItemsControl>
-  </StackPanel>
   <DockPanel x:Name="ChannelHeader" DockPanel.Dock="Top" Margin="40,0,40,12" MaxWidth="1490" Height="36"
              LastChildFill="True" Visibility="{Binding HasChannelTabs,Converter={StaticResource Visible}}">
    <DockPanel>
@@ -392,7 +414,7 @@
    </DockPanel>
   </DockPanel>
   <WrapPanel DockPanel.Dock="Top" Visibility="{Binding IsCatalogUtilityPage,Converter={StaticResource Visible}}" Margin="0,0,0,12" >
-   <Button Content="返回搜索" Click="SearchBack_Click" Visibility="{Binding HasAggregateSearch,Converter={StaticResource Visible}}"/>
+   <Button Content="返回搜索" Click="SearchBack_Click" Visibility="{Binding HasSearchSession,Converter={StaticResource Visible}}"/>
    <ComboBox ItemsSource="{Binding CatalogPlatformChoices}" DisplayMemberPath="Name" SelectedItem="{Binding SelectedCatalogPlatform}"
     SelectionChanged="Platform_Changed" Width="150" Margin="0,0,12,8" IsEnabled="{Binding CanCatalogBrowse}" AutomationProperties.Name="内容平台"/>
    <TextBlock Text="{Binding CatalogAccountText}" VerticalAlignment="Center" Margin="0,0,8,8" AutomationProperties.Name="当前平台账号"/>
@@ -591,8 +613,19 @@
        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Visibility="{Binding DataContext.IsCatalogHome,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView},Converter={StaticResource Visible}}">
         <Button Click="BatchRefresh_Click" Style="{StaticResource Catalog.Refresh}" IsEnabled="{Binding DataContext.CanCatalogBrowse,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView}}" AutomationProperties.Name="刷新推荐"/>
        </StackPanel>
+       <Button DockPanel.Dock="Right" Content="查看更多" Tag="{Binding Title}" Click="SearchSectionMore_Click"
+               Style="{StaticResource Catalog.SectionMore}" HorizontalAlignment="Right"
+               Visibility="{Binding DataContext.IsSearchOverview,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView},Converter={StaticResource Visible}}"
+               AutomationProperties.Name="{Binding Title,StringFormat=查看更多{0}}"/>
        <StackPanel Orientation="Horizontal">
         <TextBlock Text="{Binding Title}" Style="{StaticResource Catalog.SectionTitle}" VerticalAlignment="Center"/>
+         <Grid Style="{StaticResource Catalog.SectionLoading}"
+               AutomationProperties.Name="{Binding Title,StringFormat={}{0}搜索中}">
+          <Grid.RenderTransform><RotateTransform/></Grid.RenderTransform>
+          <Ellipse Stroke="{DynamicResource MeowFilm.Brush.Border}" StrokeThickness="1.6"/>
+          <Path Data="M 7,1 A 6,6 0 0 1 13,7" Stroke="{DynamicResource MeowFilm.Brush.Accent}"
+                StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+         </Grid>
         <Button Content="&#xE76C;" Tag="{Binding Action}" Click="Card_Click" Width="24" Height="24" Style="{StaticResource MeowFilm.IconButton}" Visibility="{Binding Action.CanOpen,Converter={StaticResource Visible},FallbackValue=Collapsed}" IsEnabled="{Binding Action.CanOpen}" AutomationProperties.Name="更多内容"/>
        </StackPanel>
       </DockPanel>

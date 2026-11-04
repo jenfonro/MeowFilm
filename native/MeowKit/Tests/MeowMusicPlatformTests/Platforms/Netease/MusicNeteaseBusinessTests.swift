@@ -6,6 +6,39 @@ import MeowJSON
 @testable import MeowMusicPlatform
 
 final class MusicNeteaseBusinessTests: XCTestCase {
+    func testAccountCollectionReadsMoreThanTwoThousandSongsWithoutHydratingEveryPage() async throws {
+        let f = try MusicNeteaseNativeFixture(); try await f.enable()
+        let ids = Array(101..<2102)
+        var entry = MusicNeteaseFixture.collection(); entry["trackCount"] = ids.count
+        var detail = MusicNeteaseFixture.detail([])
+        var playlist = try XCTUnwrap(detail["playlist"] as? [String: Any])
+        playlist["trackCount"] = ids.count
+        playlist["trackIds"] = ids.map { ["id": $0] }
+        // Keep display metadata for every member without exceeding the
+        // production 256 KiB response bound. IDs alone would force hydration.
+        playlist["tracks"] = ids.map { ["id": $0, "name": "x", "ar": [["name": "x"]]] }
+        detail["playlist"] = playlist
+        await f.http.replies("/weapi/user/playlist", [
+            try MusicNeteaseFixture.response(["code": 200, "more": false, "playlist": [entry]])
+        ])
+        await f.http.replies("/eapi/v6/playlist/detail", [
+            try MusicNeteaseFixture.response(detail)
+        ])
+        let lease = try await f.service.beginAccountQueue(platform: .netease)
+        var cursor: String?, actual: [String] = []
+        repeat {
+            let page = try await f.service.accountQueuePage(lease, kind: .collection(id: "501"), cursor: cursor)
+            XCTAssertEqual(page.total, ids.count)
+            actual += try page.items.map { try MusicQQWire.string(MusicQQWire.decode($0.data)["songmid"]) }
+            cursor = page.cursor
+        } while cursor != nil
+        XCTAssertEqual(actual, ids.map(String.init))
+        let requests = await f.http.recorded()
+        XCTAssertEqual(requests.filter { $0.request.url.path == "/eapi/v6/playlist/detail" }.count, 2)
+        XCTAssertEqual(requests.filter { $0.request.url.path == "/weapi/v3/song/detail" }.count, 0)
+        await f.service.endAccountQueue(lease); _ = await f.service.close()
+    }
+
     private func displayFixture() async throws -> MusicNeteaseNativeFixture {
         let f = try MusicNeteaseNativeFixture(); try await f.enable()
         let ids = Array(101..<136)
@@ -42,7 +75,7 @@ final class MusicNeteaseBusinessTests: XCTestCase {
         XCTAssertEqual(second.items.map(\.data), replay.items.map(\.data))
         XCTAssertEqual(second.total, 35); XCTAssertNil(second.cursor)
         let rows = try second.items.map { try MusicQQWire.decode($0.data) }
-        XCTAssertEqual(rows.compactMap { $0["musicId"] as? String }, (131..<136).map(String.init))
+        XCTAssertEqual(rows.compactMap { $0["songmid"] as? String }, (131..<136).map(String.init))
         XCTAssertEqual(rows.compactMap { $0["name"] as? String }, (131..<136).map { "合成歌曲\($0)" })
         requests = await f.http.recorded()
         XCTAssertEqual(requests.filter { $0.request.url.path == "/weapi/v3/song/detail" }.count, 1)
@@ -100,7 +133,7 @@ final class MusicNeteaseBusinessTests: XCTestCase {
         await f.http.replies("/weapi/v3/song/detail", [.init(status: 503, data: Data())])
         let tracks = try await f.service.nativeTracks(platform: .netease, collectionID: "501", cursor: nil)
         let rows = try tracks.items.map { try MusicQQWire.decode($0.data) }
-        XCTAssertEqual(rows.compactMap { $0["musicId"] as? String }, ["102", "101"])
+        XCTAssertEqual(rows.compactMap { $0["songmid"] as? String }, ["102", "101"])
         XCTAssertTrue(rows.allSatisfy { $0["name"] as? String == "未知歌曲" })
         let requests = await f.http.recorded(), paths = requests.map(\.request.url.path)
         XCTAssertEqual(paths.filter { $0 == "/eapi/v6/playlist/detail" }.count, 2)

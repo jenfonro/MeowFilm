@@ -102,9 +102,6 @@ import MeowJSON
         await denied(.invalidRequest) {
             _ = try await f.owner.homeActionPage(lease, action: .similar(sourceIDs: [], sourceName: ""), cursor: nil)
         }
-        await denied(.limit) {
-            _ = try await f.owner.homeActionPage(lease, action: .songCollection(ids: Array(repeating: "1", count: 1001)), cursor: nil)
-        }
         let copied = MusicAccountQueueLease(id: lease.id, platform: .netease)
         await denied(.staleResult) { _ = try await f.owner.homeActionPage(copied, action: self.fm, cursor: nil) }
         XCTAssertTrue(lease.authorization.isActive)
@@ -193,7 +190,7 @@ private actor MusicHomeActionOwnerProvider: MusicAccountProvider, MusicAccountHo
     func refresh(_ credential: AccountCredential) async throws -> MusicQQVerified { try await account.refresh(credential) }
     private func rows(batch: Int) -> [JSONValue] {
         (0..<65).map { i in .object([
-            "musicId": .string(String(batch * 1000 + i + 1)), "name": .string("Synthetic \(batch) \(i)"),
+            "songmid": .string(String(batch * 1000 + i + 1)), "name": .string("Synthetic \(batch) \(i)"),
             "singer": .string("Synthetic"), "album": .string("Synthetic"), "duration": .number(180),
             "types": .array([.string("128k")])
         ]) }

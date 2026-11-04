@@ -62,7 +62,7 @@ public sealed partial class MusicLibraryOwner
     private static JsonObject EntryView(JsonNode? n)
     {
         var e = LJ.Object(n);
-        return LJ.Obj(("id", e["id"]), ("key", e["key"]), ("song", NativeMusicSong.View(e["song"])), ("context", ContextView(e["context"])));
+        return LJ.Obj(("id", e["id"]), ("key", e["key"]), ("song", NativeMusicSong.Normalize(e["song"])), ("context", ContextView(e["context"])));
     }
     private static void ValidateQueue(JsonObject q, bool schema)
     {
@@ -83,7 +83,7 @@ public sealed partial class MusicLibraryOwner
                 _ = LJ.I(q["at"], 1);
                 _ = LJ.Text(q["title"], 2048);
             }
-            var entries = LJ.Array(q["entries"]); LJ.Require(entries.Count <= 10000, "LIMIT");
+            var entries = LJ.Array(q["entries"]);
             var ids = new HashSet<string>();
             foreach (var n in entries)
             {
@@ -255,7 +255,6 @@ public sealed partial class MusicLibraryOwner
             case "music.queue.append":
             {
                 LJ.Fields(p, "songs context next", "songs"); LJ.Require(p["next"] is null || LJ.IsBool(p["next"])); var songs = Songs(p, false, full); var context = Context(p["context"]);
-                LJ.Require(entries.Count + songs.Length <= 10000, "LIMIT");
                 var added = songs.Select(s => MakeEntry(s, context)).ToArray();
                 int index = LJ.B(p["next"]) && current.Length > 0 ? entries.Select(e => LJ.S(e?["id"])).ToList().IndexOf(current) + 1 : entries.Count;
                 foreach (var entry in added) entries.Insert(index++, entry.DeepClone());
@@ -345,7 +344,7 @@ public sealed partial class MusicLibraryOwner
             string id = LJ.Text(p["id"]); var item = list.OfType<JsonObject>().FirstOrDefault(i => LJ.S(i[kind == "playlists" ? "id" : "date"]) == id)
                 ?? throw new MusicLibraryException("HISTORY_NOT_FOUND");
             return kind == "days" ? (LJ.Merge(LJ.Page(LJ.Array(item["songs"]).OfType<JsonObject>().Select(v =>
-                LJ.Obj(("song", NativeMusicSong.View(v["song"])), ("context", ContextView(v["context"])), ("at", v["at"]))), p), LJ.Obj(("id", id), ("date", id))), false) :
+                LJ.Obj(("song", NativeMusicSong.Normalize(v["song"])), ("context", ContextView(v["context"])), ("at", v["at"]))), p), LJ.Obj(("id", id), ("date", id))), false) :
                 (LJ.Merge(LJ.Page(LJ.Array(item["entries"]).Select(EntryView), p, "entries"), LJ.Obj(("id", id), ("title", item["title"]), ("at", item["at"]), ("currentId", item["currentId"]), ("source", SourceView(item["source"])))), false);
         }
         LJ.Require(pending is null, "PENDING_WRITE");
@@ -372,24 +371,17 @@ public sealed partial class MusicLibraryOwner
                 var days = LJ.Array(h["days"]); var day = days.OfType<JsonObject>().FirstOrDefault(d => LJ.S(d["date"]) == date);
                 if (day is null) { day = LJ.Obj(("date", date), ("songs", new JsonArray())); days.Add(day); }
                 var played = LJ.Obj(("song", current["song"]), ("context", current["context"]), ("at", at));
-                var merged = new List<JsonObject>();
+                var groups = new NativeMusicSongGroups();
+                var merged = new Dictionary<string, (JsonObject Row, NativeMusicSong.Recordings Song)>(StringComparer.Ordinal);
                 foreach (var row in new[] { played }.Concat(LJ.Array(day["songs"]).OfType<JsonObject>()).OrderByDescending(r => LJ.I(r["at"])))
                 {
-                    var existing = merged.FirstOrDefault(e => NativeMusicSong.Same(LJ.Object(e["song"]), LJ.Object(row["song"])));
-                    if (existing is null) merged.Add((JsonObject)row.DeepClone());
-                    else
-                    {
-                        var sources = new Dictionary<string, JsonNode?>();
-                        foreach (var s in (row["song"]?["sources"] as JsonArray ?? []).Concat(existing["song"]?["sources"] as JsonArray ?? []))
-                            sources[LJ.S(s?["sourceKey"])] = s;
-                        if (sources.Count > 0)
-                        {
-                            existing["song"]!["sources"] = LJ.Arr(sources.Values);
-                            existing["song"] = NativeMusicSong.Normalize(existing["song"]);
-                        }
-                    }
+                    var group = groups.Add(new(LJ.Object(row["song"])));
+                    // Newest occurrence owns the timestamp, context, display and equal-key recordings.
+                    merged.TryAdd(group.Id, (row, group));
                 }
-                day["songs"] = LJ.Arr(merged); h["days"] = LJ.Arr(days.OfType<JsonObject>().OrderByDescending(d => LJ.S(d["date"]), StringComparer.Ordinal).Take(7)); break;
+                day["songs"] = LJ.Arr(merged.Values.Select(item =>
+                    LJ.Obj(("song", item.Song.ToSong()), ("context", item.Row["context"]), ("at", item.Row["at"]))));
+                h["days"] = LJ.Arr(days.OfType<JsonObject>().OrderByDescending(d => LJ.S(d["date"]), StringComparer.Ordinal).Take(7)); break;
             }
             default: throw new MusicLibraryException("INVALID_REQUEST");
         }
