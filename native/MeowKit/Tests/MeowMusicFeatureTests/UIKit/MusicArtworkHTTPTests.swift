@@ -3,7 +3,7 @@ import XCTest
 @testable import MeowMusicFeature
 
 private final class MusicArtworkHTTPFixture: @unchecked Sendable {
-    let url = URL(string: "https://p1.music.126.net/synthetic-\(UUID().uuidString).jpg")!
+    let url: URL
     let status: Int
     let body: Data
     let length: Int?
@@ -16,8 +16,9 @@ private final class MusicArtworkHTTPFixture: @unchecked Sendable {
     private var didStop = false
     var requests: [URLRequest] { lock.lock(); defer { lock.unlock() }; return seen }
 
-    init(status: Int = 200, body: Data = Data([1, 2, 3]), length: Int? = nil, held: Bool = false,
+    init(host: String = "p1.music.126.net", status: Int = 200, body: Data = Data([1, 2, 3]), length: Int? = nil, held: Bool = false,
          started: (@Sendable () -> Void)? = nil, stopped: (@Sendable () -> Void)? = nil) {
+        url = URL(string: "https://\(host)/synthetic-\(UUID().uuidString).jpg")!
         self.status = status; self.body = body; self.length = length; self.held = held
         self.started = started; self.stopped = stopped
         MusicArtworkFixtureProtocol.register(self)
@@ -98,25 +99,49 @@ final class MusicArtworkHTTPTests: XCTestCase {
         }
         XCTAssertFalse(jar.cookies?.contains { $0.name == "synthetic-response" } ?? false)
     }
-    func testRedirectPolicyRebuildsAllowedRequestsAndRejectsOtherOrigins() async throws {
+    func testAnyHTTPSArtworkHostCanBeReadWithoutAPlatformDomainList() async throws {
+        for host in ["pic.kuwo.cn", "d.musicapp.migu.cn", "independent-cdn.invalid",
+                     "music.126.net.independent-cdn.invalid", "127.0.0.1"] {
+            let fixture = MusicArtworkHTTPFixture(host: host)
+            defer { fixture.close() }
+            let data = try await MusicArtworkHTTP(configuration: configuration()).read(fixture.url)
+            XCTAssertEqual(data, fixture.body)
+            XCTAssertEqual(fixture.requests.map(\.url), [fixture.url])
+        }
+    }
+    func testRedirectPolicyRebuildsAnyHTTPSHostAndRejectsUnsafeURLForms() async throws {
         let http = MusicArtworkHTTP(), session = URLSession(configuration: .ephemeral)
         defer { session.invalidateAndCancel() }
         let source = URL(string: "https://p1.music.126.net/synthetic.jpg")!
         let response = HTTPURLResponse(url: source, statusCode: 302, httpVersion: "HTTP/1.1", headerFields: nil)!
         let task = session.dataTask(with: source)
-        let allowed = URL(string: "https://y.gtimg.cn/music/synthetic.jpg")!
-        var inherited = URLRequest(url: allowed)
-        inherited.setValue("synthetic-secret", forHTTPHeaderField: "Cookie")
-        inherited.setValue("synthetic-auth", forHTTPHeaderField: "Authorization")
-        http.urlSession(session, task: task, willPerformHTTPRedirection: response, newRequest: inherited) { next in
-            XCTAssertEqual(next?.url, allowed); XCTAssertEqual(next?.httpShouldHandleCookies, false)
-            XCTAssertNil(next?.value(forHTTPHeaderField: "Cookie")); XCTAssertNil(next?.value(forHTTPHeaderField: "Authorization"))
+        for host in ["y.gtimg.cn", "pic.kuwo.cn", "d.musicapp.migu.cn", "independent-cdn.invalid",
+                     "music.126.net.independent-cdn.invalid", "127.0.0.1"] {
+            let allowed = URL(string: "https://\(host)/music/synthetic.jpg")!
+            var inherited = URLRequest(url: allowed)
+            for name in ["Cookie", "Authorization", "Proxy-Authorization"] {
+                inherited.setValue("synthetic-private", forHTTPHeaderField: name)
+            }
+            http.urlSession(session, task: task, willPerformHTTPRedirection: response, newRequest: inherited) { next in
+                XCTAssertEqual(next?.url, allowed); XCTAssertEqual(next?.httpShouldHandleCookies, false)
+                for name in ["Cookie", "Authorization", "Proxy-Authorization"] {
+                    XCTAssertNil(next?.value(forHTTPHeaderField: name))
+                }
+            }
         }
-        for text in ["http://y.gtimg.cn/synthetic.jpg", "https://untrusted.invalid/synthetic.jpg",
-                     "https://music.126.net.untrusted.invalid/synthetic.jpg", "https://127.0.0.1/synthetic.jpg",
-                     "https://user@p1.music.126.net/synthetic.jpg"] {
+        for text in ["http://y.gtimg.cn/synthetic.jpg", "file:///synthetic.jpg",
+                     "https://user@p1.music.126.net/synthetic.jpg", "https://p1.music.126.net/synthetic.jpg#fragment",
+                     "https://cdn.invalid:8443/synthetic.jpg"] {
             http.urlSession(session, task: task, willPerformHTTPRedirection: response,
                 newRequest: URLRequest(url: URL(string: text)!)) { XCTAssertNil($0) }
+        }
+    }
+    func testUnsafeInitialArtworkURLDoesNotStartTransport() async {
+        let http = MusicArtworkHTTP(configuration: configuration())
+        for text in ["http://cdn.invalid/a.jpg", "https://user:secret@cdn.invalid/a.jpg",
+                     "https://cdn.invalid/a.jpg#fragment", "https://cdn.invalid:8443/a.jpg"] {
+            do { _ = try await http.read(URL(string: text)!); XCTFail("Unsafe URL accepted: \(text)") }
+            catch { XCTAssertEqual((error as? URLError)?.code, .badURL) }
         }
     }
     func testArtworkCannotAnswerHTTPAuthenticationChallengesWithStoredCredentials() {

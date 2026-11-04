@@ -12,7 +12,7 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
     public var id: String { platform.rawValue }
 }
 
-/// Owns the query's independent song/playlist rounds, cursors and temporary cache.
+/// Owns the query's independent song/playlist rounds and cursors.
 /// Queue, account, library writes and playback remain with their existing owners.
 @MainActor public final class MusicSearchResultsModel: ObservableObject {
     public typealias SongRead = @MainActor @Sendable (MusicPublicBrowsePlatform, String, Int, Int) async throws -> MusicSearchPage
@@ -47,21 +47,12 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
         var error: MusicServiceError?
         var diagnosticID: String?
     }
-    private struct CacheKey: Hashable, Sendable {
-        let kind: MusicSearchSection
-        let platform: MusicPublicBrowsePlatform
-        let query: String
-        let request: MusicSearchPagination.Request
-    }
-    private enum CachedPage: Sendable {
-        case songs(MusicSearchPage)
-        case playlists(MusicPlaylistSearchPage)
-    }
+    private typealias CacheKey = MusicSearchResultsCache.Key
     private let readSongs: SongRead
     private let readPlaylists: PlaylistRead
     private let readRecording: RecordingRead
     private let timing: MusicCandidateDiscoveryTiming
-    private let now: @Sendable () -> Date
+    private let cacheProvider: @MainActor () -> MusicSearchResultsCache.Storage
     private var songStates: [MusicPublicBrowsePlatform: PlatformState<MusicRemoteTrack>] = [:]
     private var playlistStates: [MusicPublicBrowsePlatform: PlatformState<MusicPublicBrowseCollection>] = [:]
     private var songTask: Task<Void, Never>?, playlistTask: Task<Void, Never>?
@@ -70,25 +61,45 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
     private var access = UUID()
     private var available = false, visible = false
     private var songRound = 0, playlistRound = 0
-    private var cache: AsyncValueCache<CacheKey, CachedPage>
+    private var cache: MusicSearchResultsCache.Storage
     private enum ReadMode { case initial, more, retry }
     private var usable: Bool { available && visible && !query.isEmpty }
 
-    public init(readSongs: @escaping SongRead, readPlaylists: @escaping PlaylistRead,
+    public convenience init(readSongs: @escaping SongRead, readPlaylists: @escaping PlaylistRead,
                 readRecording: @escaping RecordingRead,
                 timing: MusicCandidateDiscoveryTiming = .init(),
                 clock: @escaping @Sendable () -> Date = { Date() }) {
+        self.init(readSongs: readSongs, readPlaylists: readPlaylists, readRecording: readRecording,
+                  timing: timing, cacheProvider: { MusicSearchResultsCache.make(clock: clock) })
+    }
+    init(readSongs: @escaping SongRead, readPlaylists: @escaping PlaylistRead,
+         readRecording: @escaping RecordingRead, timing: MusicCandidateDiscoveryTiming = .init(),
+         cacheProvider: @escaping @MainActor () -> MusicSearchResultsCache.Storage) {
         self.readSongs = readSongs; self.readPlaylists = readPlaylists
         self.readRecording = readRecording
-        self.timing = timing; now = clock; cache = Self.makeCache(clock)
+        self.timing = timing; self.cacheProvider = cacheProvider; cache = cacheProvider()
+    }
+    convenience init(owner: MusicViewModel) {
+        self.init(readSongs: { [weak owner] platform, query, page, limit in
+            guard let owner else { throw MusicServiceError.closed }
+            return try await owner.searchPage(platform: platform.rawValue, query: query, page: page, limit: limit)
+        }, readPlaylists: { [weak owner] platform, query, page, limit in
+            guard let owner else { throw MusicServiceError.closed }
+            return try await owner.searchPlaylistPage(platform: platform, query: query, page: page, limit: limit)
+        }, readRecording: { [weak owner] request in
+            guard let owner else { throw MusicServiceError.closed }
+            return try await owner.searchRecording(request)
+        }, cacheProvider: { [weak owner] in
+            owner?.searchResultsCache ?? MusicSearchResultsCache.make()
+        })
     }
     public var moreSongs: Bool { songStates.values.contains { $0.next != nil } }
     public var morePlaylists: Bool { playlistStates.values.contains { $0.next != nil } }
     public var songPlatformsEmpty: Bool { preferences.songPlatforms.isEmpty }
     public var playlistPlatformsEmpty: Bool { preferences.effectivePlaylistPlatforms.isEmpty }
 
-    /// Returns true only when the call actually cleared the previous account's
-    /// rows, cursors and cache.
+    /// Returns true only when access changed, clearing rows/cursors and binding
+    /// to that access generation's cache.
     @discardableResult
     public func setAccess(available: Bool, generation: UUID) -> Bool {
         guard access != generation || self.available != available else { return false }
@@ -96,7 +107,7 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
         if access != generation || !available {
             // An old loader retains only its old cache. It cannot refill the new
             // account's cache even if physical cancellation is non-cooperative.
-            cache = Self.makeCache(now)
+            cache = cacheProvider()
         }
         access = generation; self.available = available
         return true
@@ -456,30 +467,6 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
               result.items.allSatisfy({ $0.platform == platform && $0.kind == .playlist }) else {
             throw MusicServiceError.invalidResponse
         }
-    }
-    private nonisolated static func makeCache(_ clock: @escaping @Sendable () -> Date) -> AsyncValueCache<CacheKey, CachedPage> {
-        .init(capacity: nil, maximumCost: 32 * 1024 * 1024, cost: { (value: CachedPage) -> Int in
-            switch value {
-            case .songs(let page):
-                var cost = page.query.utf8.count + 256
-                for track in page.items {
-                    cost += track.songId.utf8.count + track.title.utf8.count
-                    cost += track.artist.utf8.count + track.album.utf8.count
-                    cost += (track.artwork?.absoluteString.utf8.count ?? 0) + 256
-                    for source in track.sources {
-                        cost += source.sourceKey.utf8.count + source.nativeId.utf8.count + 64
-                    }
-                }
-                return cost
-            case .playlists(let page):
-                var cost = page.query.utf8.count + 256
-                for playlist in page.items {
-                    cost += playlist.id.utf8.count + playlist.title.utf8.count
-                    cost += playlist.creator.utf8.count + (playlist.artwork?.absoluteString.utf8.count ?? 0) + 192
-                }
-                return cost
-            }
-        }, clock: clock)
     }
     deinit { songTask?.cancel(); playlistTask?.cancel() }
 }

@@ -14,36 +14,108 @@ public class MusicPageViewController: PageViewController {
 }
 
 @MainActor
-enum MusicArtworkImages {
-    nonisolated private static let http = MusicArtworkHTTP()
-    private static let cache: NSCache<NSURL, UIImage> = {
+final class MusicArtworkImages {
+    static let shared = MusicArtworkImages()
+    nonisolated private let http: MusicArtworkHTTP
+    private let cache: NSCache<NSURL, UIImage> = {
         let value = NSCache<NSURL, UIImage>()
         value.countLimit = 128
         value.totalCostLimit = 24 * 1_024 * 1_024
         return value
     }()
+    private final class Flight {
+        var consumers: [UUID: CheckedContinuation<(UIImage, Data?), Error>] = [:]
+        var task: Task<Void, Never>?
+        var abandoned = false
+        let cachedData: Data?
 
-    static func cached(_ url: URL) -> UIImage? { cache.object(forKey: url as NSURL) }
+        init(cachedData: Data?) { self.cachedData = cachedData }
+    }
+    private var flights: [URL: Flight] = [:]
 
-    static func read(_ url: URL, cachedData: Data? = nil) async throws -> (UIImage, Data?) {
-        if cachedData == nil, let image = cached(url) { return (image, nil) }
-        let (image, data) = try await readBytes(url, cachedData: cachedData)
+    init(http: MusicArtworkHTTP = MusicArtworkHTTP()) { self.http = http }
+
+    func cached(_ url: URL) -> UIImage? { cache.object(forKey: url as NSURL) }
+
+    func read(_ url: URL, cachedData: Data? = nil) async throws -> (UIImage, Data?) {
         try Task.checkCancellation()
+        if cachedData == nil, let image = cached(url) { return (image, nil) }
+
+        let consumerID = UUID()
+        let result = try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<(UIImage, Data?), Error>) in
+                guard !Task.isCancelled else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                if let flight = flights[url], !flight.abandoned {
+                    flight.consumers[consumerID] = continuation
+                    return
+                }
+                let flight = Flight(cachedData: cachedData)
+                flight.consumers[consumerID] = continuation
+                flights[url] = flight
+                flight.task = Task {
+                    do {
+                        let (image, data) = try await self.readBytes(url, cachedData: flight.cachedData)
+                        try Task.checkCancellation()
+                        self.complete(flight, for: url, with: .success((image, data)))
+                    } catch {
+                        self.complete(flight, for: url, with: .failure(error))
+                    }
+                }
+            }
+        } onCancel: {
+            Task { @MainActor in self.cancel(consumerID, for: url) }
+        }
+        try Task.checkCancellation()
+        return result
+    }
+
+    private func store(_ image: UIImage, for url: URL) {
         let cost = (image.cgImage?.width ?? 0) * (image.cgImage?.height ?? 0) * 4
         cache.setObject(image, forKey: url as NSURL, cost: cost)
-        return (image, data)
+    }
+
+    private func complete(
+        _ flight: Flight,
+        for url: URL,
+        with result: Result<(UIImage, Data), Error>
+    ) {
+        if flights[url] === flight { flights[url] = nil }
+        flight.task = nil
+        if !flight.abandoned, case .success(let (image, _)) = result { store(image, for: url) }
+        let value: Result<(UIImage, Data?), Error> = result.map { ($0.0, Optional($0.1)) }
+        let consumers = Array(flight.consumers.values)
+        flight.consumers.removeAll()
+        for continuation in consumers { continuation.resume(with: value) }
+    }
+
+    private func cancel(_ consumerID: UUID, for url: URL) {
+        guard let flight = flights[url], let continuation = flight.consumers.removeValue(forKey: consumerID)
+        else { return }
+        guard flight.consumers.isEmpty else {
+            continuation.resume(throwing: CancellationError())
+            return
+        }
+        // The last consumer settles only when the physical read has stopped.
+        flight.consumers[consumerID] = continuation
+        flight.abandoned = true
+        flight.task?.cancel()
     }
 
     /// Cancellation follows the physical read; decoding stays off the UI actor.
-    nonisolated private static func readBytes(_ url: URL, cachedData: Data?) async throws -> (UIImage, Data) {
+    nonisolated private func readBytes(_ url: URL, cachedData: Data?) async throws -> (UIImage, Data) {
         let maximum = MusicArtworkHTTP.maximumBytes
-        if let cachedData, cachedData.count <= maximum, let value = decode(cachedData) {
+        if let cachedData, cachedData.count <= maximum, let value = Self.decode(cachedData) {
             try Task.checkCancellation()
             return (value, cachedData)
         }
         let data = try await http.read(url)
         try Task.checkCancellation()
-        guard let value = decode(data) else { throw URLError(.cannotDecodeContentData) }
+        guard let value = Self.decode(data) else { throw URLError(.cannotDecodeContentData) }
         return (value, data)
     }
 
@@ -63,11 +135,14 @@ enum MusicArtworkImages {
 final class MusicArtworkView: UIImageView {
     var onImage: ((UIImage, Data?) -> Void)?
     var onFailure: ((URL) -> Void)?
+    private let images: MusicArtworkImages
     private var task: Task<Void, Never>?
     private var representedURL: URL?
     private var completed = false
+    private var failed = false
 
-    init(size: CGFloat = 48) {
+    init(size: CGFloat = 48, images: MusicArtworkImages = .shared) {
+        self.images = images
         super.init(frame: .zero)
         contentMode = .scaleAspectFill
         clipsToBounds = true
@@ -85,35 +160,61 @@ final class MusicArtworkView: UIImageView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func load(_ url: URL?, cachedData: Data? = nil) {
-        if representedURL == url, task != nil || completed { return }
+        if representedURL == url, task != nil || completed || failed { return }
         task?.cancel()
         task = nil
         representedURL = url
         completed = false
+        failed = false
         image = nil
         guard let url else { completed = true; return }
-        if cachedData == nil, let cached = MusicArtworkImages.cached(url) {
+        if cachedData == nil, let cached = images.cached(url) {
             image = cached
             completed = true
             onImage?(cached, nil)
             return
         }
+        let images = images
         task = Task { [weak self] in
             do {
-                let (value, data) = try await MusicArtworkImages.read(url, cachedData: cachedData)
+                let (value, data) = try await images.read(url, cachedData: cachedData)
                 try Task.checkCancellation()
                 guard self?.representedURL == url else { return }
                 self?.image = value
                 self?.task = nil
                 self?.completed = true
+                self?.failed = false
                 self?.onImage?(value, data)
             } catch {
                 guard !Task.isCancelled, self?.representedURL == url else { return }
                 self?.task = nil
-                self?.completed = true
+                self?.failed = true
                 self?.onFailure?(url)
             }
         }
+    }
+
+    func retryFailedLoad() {
+        guard failed, let representedURL else { return }
+        failed = false
+        load(representedURL)
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        Self.retryFailedLoads(in: self)
+    }
+
+    static func retryFailedLoads(in view: UIView) {
+        guard let window = view.window, !view.isHidden, view.alpha > 0,
+              view.convert(view.bounds, to: window).intersects(window.bounds) else { return }
+        var ancestor = view.superview
+        while let current = ancestor {
+            guard !current.isHidden, current.alpha > 0 else { return }
+            ancestor = current.superview
+        }
+        (view as? MusicArtworkView)?.retryFailedLoad()
+        for child in view.subviews { retryFailedLoads(in: child) }
     }
 
     deinit { task?.cancel() }

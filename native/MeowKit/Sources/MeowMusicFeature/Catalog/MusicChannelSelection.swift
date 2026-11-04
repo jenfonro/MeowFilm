@@ -37,8 +37,6 @@ import Combine
             }
         }
         guard catalogueLoaded else { return }
-        // The first visit starts on the directory's ranking channel. Once
-        // selected, the same persisted identity takes precedence forever.
-        selectChannel(catalogue.first(where: { $0.kind == .rankings }) ?? catalogue[0])
+        selectChannel(catalogue[0])
     }
 }
