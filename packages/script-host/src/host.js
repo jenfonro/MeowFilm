@@ -20,6 +20,16 @@ const protocolLimits = Object.freeze({
     requestTimeoutMs: 60_000,
     cleanupTimeoutMs: 3_000,
   }),
+  legado: Object.freeze({
+    initTimeoutMs: 60_000,
+    requestTimeoutMs: 60_000,
+    cleanupTimeoutMs: 3_000,
+  }),
+  qysg: Object.freeze({
+    initTimeoutMs: 60_000,
+    requestTimeoutMs: 60_000,
+    cleanupTimeoutMs: 3_000,
+  }),
 });
 
 const defaults = Object.freeze({

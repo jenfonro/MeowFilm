@@ -208,6 +208,26 @@ script-engine binary. Its exact package manifest, registry URL/integrity, licens
 length and SHA-256 are pinned in `scripts/quickjs-runtime.json`; no debug/asyncify
 engine variant or upstream reference script is bundled.
 
+### Task-context derivation — revision 1
+
+For task-context revision 1, the single-upstream-binary rule above is extended
+by exactly one reviewed derived WASM exception:
+`packages/script-host/src/quickjs/emscripten-module.wasm`, with its matching
+`emscripten-module.mjs` loader in the same directory. This pair derives from the
+same quickjs-emscripten `0.32.0` source at
+`df4efb9ef2cb25c417ecb57986da462d11b244ed`, built with Emscripten `5.0.1`.
+The upstream source archive SHA-256 is
+`b6f342ad8e18bcff29ab4e78467d6e33c53c9e1a47986e58b91a1462beb31a8e`.
+
+The local modifications in `scripts/quickjs/task-context.patch` propagate task
+identity through Promise reactions and queued jobs. Reproduction is described
+by `scripts/quickjs/build.py`; the patch, build script and generated pair are
+pinned in `scripts/quickjs-runtime.json`. The existing upstream copyrights and
+combined MIT license above also apply to the derived portions; the original
+license text is unchanged and is redistributed as
+`quickjs-emscripten-LICENSE.txt` and in the release-sync npm package's `LICENSE`.
+The three npm packages and their registry identities remain unmodified.
+
 ## Node compatibility npm dependencies
 
 The Cat finite Node-style bridge bundles the exact dependency closure recorded in
@@ -223,6 +243,27 @@ script does not expose framework route registration. It does not execute source.
 - MIT package notices and texts: `npm-node-compat-MIT.txt`.
 - BSD-3-Clause package text: `npm-node-compat-BSD-3-Clause.txt`.
 - ISC package text: `npm-node-compat-ISC.txt`.
+
+## Portable source runtime npm dependencies
+
+The runtime payload preserves each package's original `package.json` and license
+file. These packages are used as unmodified libraries; no source code from them is
+copied into the application's protocol adapters.
+
+- `acorn` 8.19.0 — MIT, used by `@meowfilm/source-runtime`; the Cat bridge keeps
+  its separate 8.15.0 dependency listed above.
+- `fontoxpath` 3.34.0 — MIT.
+- `linkedom` 0.18.14 — ISC.
+- `iconv-lite` 0.6.3 — MIT.
+- Transitive closure: `@acemir/cssom` 0.9.32 (MIT), `boolbase` 2.0.0 (ISC),
+  `css-select` 7.0.0 (BSD-2-Clause), `css-what` 8.0.0 (BSD-2-Clause),
+  `dom-serializer` 3.1.1 and 2.0.0 (MIT), `domelementtype` 3.0.0 and
+  2.3.0 (BSD-2-Clause), `domhandler` 6.0.1 and 5.0.3 (BSD-2-Clause),
+  `domutils` 4.0.2 and 3.2.2 (BSD-2-Clause), `entities` 8.1.0, 7.0.1,
+  and 4.5.0 (BSD-2-Clause), `html-escaper` 3.0.3 (MIT),
+  `htmlparser2` 10.1.0 (MIT), `nth-check` 3.0.1 (BSD-2-Clause),
+  `prsc` 4.0.0 (MIT), `safer-buffer` 2.1.2 (MIT), `uhyphen` 0.2.0 (ISC),
+  `whynot` 5.0.0 (MIT), and `xspattern` 3.1.0 (MIT).
 
 ## QR Code generator — MIT
 

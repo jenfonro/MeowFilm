@@ -1,5 +1,6 @@
 import {
-  constants, createHash, createCipheriv, createPublicKey, publicEncrypt, randomBytes,
+  constants, createHash, createCipheriv, createDecipheriv, createHmac,
+  createPublicKey, publicEncrypt, randomBytes,
 } from 'node:crypto';
 import { deflateSync, inflateSync } from 'node:zlib';
 import { fault, requireValue } from './errors.js';
@@ -20,6 +21,14 @@ export function createUtilities(maxMemoryBytes) {
       case 'encode': return [...bytes(args[0], args[1])];
       case 'decode': return bytes(args[0]).toString(args[1], args[2], args[3]);
       case 'md5': return createHash('md5').update(bytes(args[0])).digest('hex');
+      case 'digest': {
+        requireValue(['md5', 'sha1', 'sha256', 'sha512'].includes(args[0]), 'UNSUPPORTED_CRYPTO');
+        return createHash(args[0]).update(bytes(args[1])).digest('hex');
+      }
+      case 'hmac': {
+        requireValue(['md5', 'sha1', 'sha256', 'sha512'].includes(args[0]), 'UNSUPPORTED_CRYPTO');
+        return createHmac(args[0], bytes(args[1])).update(bytes(args[2])).digest(args[3] ?? 'hex');
+      }
       case 'random': {
         requireValue(Number.isSafeInteger(args[0]) && args[0] >= 0 &&
           args[0] <= maxMemoryBytes, 'RESOURCE_LIMIT');
@@ -31,6 +40,29 @@ export function createUtilities(maxMemoryBytes) {
         try {
           const cipher = createCipheriv(mode, bytes(key), mode.endsWith('ecb') ? null : bytes(iv));
           return [...Buffer.concat([cipher.update(bytes(input)), cipher.final()])];
+        } catch { throw fault('UNSUPPORTED_CRYPTO'); }
+      }
+      case 'aesDecrypt': {
+        const [input, mode, key, iv] = args;
+        requireValue(/^aes-(128|192|256)-(cbc|ecb)$/.test(mode), 'UNSUPPORTED_CRYPTO');
+        try {
+          const decipher = createDecipheriv(mode, bytes(key), mode.endsWith('ecb') ? null : bytes(iv));
+          return [...Buffer.concat([decipher.update(bytes(input)), decipher.final()])];
+        } catch { throw fault('UNSUPPORTED_CRYPTO'); }
+      }
+      case 'des':
+      case 'desDecrypt': {
+        const [input, mode, key, iv] = args;
+        requireValue(/^des-(cbc|ecb)$/.test(mode), 'UNSUPPORTED_CRYPTO');
+        try {
+          const shortKey = bytes(key);
+          requireValue(shortKey.length === 8, 'UNSUPPORTED_CRYPTO');
+          const expandedKey = Buffer.concat([shortKey, shortKey, shortKey]);
+          const algorithm = mode.endsWith('ecb') ? 'des-ede3' : 'des-ede3-cbc';
+          const transform = operation === 'des'
+            ? createCipheriv(algorithm, expandedKey, mode.endsWith('ecb') ? null : bytes(iv))
+            : createDecipheriv(algorithm, expandedKey, mode.endsWith('ecb') ? null : bytes(iv));
+          return [...Buffer.concat([transform.update(bytes(input)), transform.final()])];
         } catch { throw fault('UNSUPPORTED_CRYPTO'); }
       }
       case 'rsa': {
