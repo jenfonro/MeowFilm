@@ -74,7 +74,20 @@
       <Grid.ColumnDefinitions><ColumnDefinition Style="{StaticResource Settings.LabelColumn}"/><ColumnDefinition Style="{StaticResource Settings.GapColumn}"/><ColumnDefinition/></Grid.ColumnDefinitions>
       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
       <TextBlock Text="账号" Style="{StaticResource Settings.SectionLabel}"/>
-      <local:MusicAccountsView x:Name="AccountsPanel" Style="{StaticResource Settings.SectionContent}"/>
+      <StackPanel Style="{StaticResource Settings.SectionContent}">
+       <StackPanel Orientation="Horizontal" Margin="0,0,0,20">
+        <TextBlock Text="音乐数据源" VerticalAlignment="Center" Margin="0,0,22,0"/>
+        <ComboBox x:Name="CatalogSourcePicker" Width="190" Style="{StaticResource Settings.ComboBox}"
+                  ItemsSource="{Binding CatalogSourceChoices}" DisplayMemberPath="Name" SelectedValuePath="Key"
+                  SelectedValue="{Binding CatalogSourcePlatform,Mode=OneWay}" SelectionChanged="CatalogSource_Changed"
+                  IsEnabled="{Binding CanEditCatalogSource}" AutomationProperties.Name="音乐数据源"/>
+        <Button x:Name="CatalogSourceRetry" Content="重试" Style="{StaticResource Settings.QuietButton}" Margin="12,0,0,0"
+                Visibility="{Binding HasCatalogSourceError,Converter={StaticResource MeowFilm.BoolToVisibility}}"
+                IsEnabled="{Binding CanReadCatalogSource}" Click="CatalogSourceRetry_Click"/>
+       </StackPanel>
+       <desktop:NoticeOutlet Message="{Binding CatalogSourceStatus}"/>
+       <local:MusicAccountsView x:Name="AccountsPanel"/>
+      </StackPanel>
      </Grid>
     </Border>
     <Border x:Name="SearchSection" Style="{StaticResource Settings.Section}">

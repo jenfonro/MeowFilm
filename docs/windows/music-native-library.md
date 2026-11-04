@@ -70,6 +70,7 @@ queue
 history
 lx-installations
 online-settings
+native-catalog-source
 native-official-sources
 native-quality-policy
 native-lyric-display
@@ -124,6 +125,23 @@ playback-settings
 - 转换通过现有 owner gate 和完整文档 CAS 持久化。当前 schema 3 的普通读取和重启不再写入；未知 schema、缺字段、额外字段、损坏或悬空引用均拒绝，原文档不覆写。
 - 转换未知提交与在线设置保存采用相同 pending 规则：后续命令封闭，使用显式 `ReconcileAsync` 读回 before/after 指纹。强制加载和结算不转换、不重放写入，也不替换 pending；第三状态保持冲突。若结算确认转换尚未提交，下一次新业务调用才可重试转换，继续沿用原 revision。
 - 相关公开行为用例位于 `MusicNativeLibraryTests.cs` 和 `MusicOnlineSettingsTests.cs`；执行结果由集中验证记录。
+
+## 浏览数据源设置当前格式
+
+`native-catalog-source` 的当前格式为 schema 1：
+
+```json
+{
+  "schema": 1,
+  "revision": 0,
+  "platform": "wy"
+}
+```
+
+- `music.catalogSource.settings.get` 返回 `settings`；缺少该 area 时返回上述缺省值，读取不写盘。
+- `music.catalogSource.settings.save` 只接收 `ifRevision` 和 `platform`，平台仅允许 `wy/kg`；revision 不符返回 `REVISION_CONFLICT`，同值保存不写盘，改变平台只推进本设置的 revision。
+- 该偏好只控制首页与频道，不改详情资源平台、账号、搜索偏好、音源启停或在线设置；唯一 writer 仍是本 owner。
+- 未知 CAS 由本职责的权威 get 核对 before/after 指纹结算，不重放保存，也不替其他职责结算。测试归属为 `MusicCatalogSourceSettingsTests.cs`。
 
 ## 官方音源设置当前格式
 
@@ -231,6 +249,7 @@ music.history.recordPlayed
 
 ```text
 music.settings.get / save
+music.catalogSource.settings.get / save
 music.officialSources.settings.get / save
 music.quality.settings.get / save
 music.metadata.settings.get / save
@@ -248,7 +267,7 @@ music.online.song
 
 - 所有持久写入在同一 owner gate 内对完整 envelope 执行 CAS。
 - CAS 准入后不把取消解释为回滚；丢失写入回执时保留内存候选并阻止后续写。
-- `appearance`、`metadata`、`quality`、官方音源设置（`music.officialSources.settings.get`）、`queue` 和搜索策略在各自写入回执不确定时，只允许对应的权威 current read 在 owner gate 内读取实际文档并核对该次 CAS 的 before/after 指纹；该读取会结算同职责的未知 CAS 结果，不重放业务命令。官方音源设置的权威读取对应 `music.officialSources.settings.save`。
+- `appearance`、`metadata`、`quality`、浏览数据源、官方音源设置、`queue` 和搜索策略在各自写入回执不确定时，只允许对应的权威 current read 在 owner gate 内读取实际文档并核对该次 CAS 的 before/after 指纹；该读取会结算同职责的未知 CAS 结果，不重放业务命令。浏览数据源与官方音源分别通过 `music.catalogSource.settings.get`、`music.officialSources.settings.get` 结算对应 save。
 - 其他职责以及跨职责命令继续由显式 `ReconcileAsync` 协调；recommendation 使用其 nonce reconcile。一个职责的 current read 不得替另一个职责结算未知写入。
 - 第三状态保持 `STORAGE_CONFLICT`，不提供“丢弃旧数据后继续”的回退入口。
 - `PrepareShutdownAsync` 封闭新业务并要求未知写已结算；取消关闭只恢复当前 owner，不重放写入。

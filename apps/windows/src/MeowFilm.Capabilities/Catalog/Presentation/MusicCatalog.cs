@@ -6,19 +6,6 @@ namespace MeowFilm.Capabilities;
 
 public sealed partial class MusicCapability
 {
-    private static readonly string[] DirectChannelIds =
-        ["feature", "playlist", "chart", "artist", "vip", "euro", "djR", "huayu", "qingge", "acg"];
-    private static readonly HashSet<string> DirectChannelIdSet = new(DirectChannelIds, StringComparer.Ordinal);
-    private static readonly string[] MoreChannelIds =
-    [
-        "china", "yingshi", "rock", "music_top_tab_jpop", "paobu", "music_top_tab_game",
-        "yueyu", "music_top_tab_sunoai", "old_hat", "music_top_tab_dance", "hFlow", "music_top_tab_world",
-        "music_top_tab_dj", "rnb", "chuxing", "music_tab_drive", "music_top_tab_tipsy", "rap",
-        "xiangcun", "music_top_tab_french", "sleep", "music_top_tab_light_music", "classic", "music_top_tab_children",
-        "HiFi", "sir", "ballad", "music_top_tab_latin", "music_tab_pioneer", "funk",
-        "landiao", "yueqi", "study", "yinyueju", "music_top_tab_sport"
-    ];
-    private static readonly HashSet<string> MoreChannelIdSet = new(MoreChannelIds, StringComparer.Ordinal);
     public MusicCatalogPlatform[] CatalogPlatforms { get; } =
         [new("wy", "网易云音乐"), new("tx", "QQ 音乐"), new("kg", "酷狗音乐"),
          new("kw", "酷我音乐"), new("mg", "咪咕音乐")];
@@ -43,6 +30,7 @@ public sealed partial class MusicCapability
         (IsSearchOverview ? SearchSongsLoading || SearchPlaylistsLoading : SearchKindLoading(searchKind));
     private string? lastChannelRoute;
     private string channelEntryError = "";
+    private bool catalogSourceReload;
     private CatalogPageState? publishedHomeState, publishedChannelState;
     private readonly ObservableCollection<MusicCatalogSection> homeDisplaySections = [];
     private readonly Dictionary<MusicCatalogSection, MusicCatalogSection> homeProjection = new(ReferenceEqualityComparer.Instance);
@@ -53,10 +41,10 @@ public sealed partial class MusicCapability
     public bool IsVipChannel => location.Route == "catalog-channel/wy/vip";
     public string CurrentChannelKey => location.Route.StartsWith("catalog-channel/", StringComparison.Ordinal) ? location.Route[16..] : "";
     public IEnumerable<MusicCatalogCard> VisibleChannelTabs =>
-        ChannelTabs.Where(card => DirectChannelIdSet.Contains(card.ActionId)).OrderBy(card => Array.IndexOf(DirectChannelIds, card.ActionId));
+        ChannelTabs.Where(card => card.Placement == "primary");
     public IEnumerable<MusicCatalogCard> MoreChannelTabs =>
-        ChannelTabs.Where(card => MoreChannelIdSet.Contains(card.ActionId)).OrderBy(card => Array.IndexOf(MoreChannelIds, card.ActionId));
-    public bool HasMoreChannelTabs => ChannelTabs.Any(card => MoreChannelIdSet.Contains(card.ActionId));
+        ChannelTabs.Where(card => card.Placement == "more");
+    public bool HasMoreChannelTabs => MoreChannelTabs.Any();
     public bool HasChannelTabs => IsChannelLanding && ChannelTabs.Count > 0;
     public bool IsCatalogUtilityPage => IsCatalogBrowsePage && !IsCatalogLanding && !IsCatalogDetailPage;
     public bool IsCatalogLanding => location.Route is "catalog-home" or "catalog-channels" || IsChannelLanding;
@@ -216,6 +204,21 @@ public sealed partial class MusicCapability
     }
     private async Task CatalogNavigateAsync(string route, CancellationToken token)
     {
+        if (IsCatalogSourceRoute(route))
+        {
+            var submission = navigationSubmission;
+            try { await EnsureCatalogSourceSettingsAsync(token); }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+            catch
+            {
+                if (!stopping && submission == navigationSubmission) PublishCatalogSourceUnavailable(route);
+                return;
+            }
+            if (stopping || submission != navigationSubmission) return;
+            if (route.StartsWith("catalog-channel/", StringComparison.Ordinal) &&
+                route.Split('/', 3)[1] != catalogSourcePlatform)
+                route = "catalog-channels";
+        }
         if (route == "catalog-channels" || route == lastChannelRoute && channelEntryError.Length > 0)
         {
             if (lastChannelRoute is not null) route = lastChannelRoute;
@@ -230,10 +233,11 @@ public sealed partial class MusicCapability
             }
         }
         if (route == "catalog-search") { await RestoreSearchAsync(token); return; }
-        if (!route.Contains('/') && SelectedCatalogPlatform.Key is "kw" or "mg")
+        if (!IsCatalogSourceRoute(route) && !route.Contains('/') && SelectedCatalogPlatform.Key is "kw" or "mg")
             SelectedCatalogPlatform = CatalogPlatforms[0];
         InvalidateCatalogAction();
-        var platform = route.Split('/') is { Length: 3 } parts ? parts[1] : SelectedCatalogPlatform.Key;
+        var platform = route.Split('/') is { Length: 3 } parts ? parts[1] :
+            IsCatalogSourceRoute(route) ? catalogSourcePlatform : SelectedCatalogPlatform.Key;
         if (catalogLocations.TryGetValue(route + "/" + platform, out var saved) &&
             saved.Pages[saved.Page].Target?.Cacheable != false && RestoreCatalogPage(saved.Pages[saved.Page], platform))
         {
@@ -259,6 +263,60 @@ public sealed partial class MusicCapability
         RetireCatalogLoad();
         InvalidateCatalogAction();
         status = "已取消"; RefreshBindings(); CatalogBindings();
+    }
+    private static bool IsCatalogSourceRoute(string route) =>
+        route is "catalog-home" or "catalog-channels" || route.StartsWith("catalog-channel/", StringComparison.Ordinal);
+
+    private void RetireCatalogSourcePages()
+    {
+        // A shown or loading landing of the retired source reloads when the page is shown again.
+        catalogSourceReload |= IsCatalogLanding && catalogLoadedPlatform.Length > 0;
+        if (catalogLoadFlight is { } flight && IsCatalogSourceRoute(flight.Request.Key.Route))
+            RetireCatalogLoad();
+        foreach (var key in catalogLocations.Where(pair => IsCatalogSourceRoute(pair.Value.Route))
+            .Select(pair => pair.Key).ToArray())
+            catalogLocations.Remove(key);
+        foreach (var key in catalogChannelCodes.Keys.Where(key => key.StartsWith("catalog-channel/", StringComparison.Ordinal)).ToArray())
+            catalogChannelCodes.Remove(key);
+        homeSections.Clear(); homeDisplaySections.Clear(); homeProjection.Clear();
+        channelSections.Clear(); channelTags.Clear(); CatalogTagGroups = [];
+        ChannelTabs.Clear(); lastChannelRoute = null; channelEntryError = "";
+        publishedHomeState = publishedChannelState = null;
+        if (IsCatalogLanding)
+        {
+            AdvanceLoadGeneration();
+            InvalidateCatalogAction();
+            location = new(IsCatalogHome ? "catalog-home" : "catalog-channels");
+            catalogPages.Clear(); catalogCursors.Clear(); catalogCursors.Add(null);
+            catalogLoadedPlatform = catalogSnapshot = catalogTag = catalogPageCode = catalogQuery = catalogArtwork = "";
+            catalogAccountStamp = ""; catalogExpiresAt = null; catalogLoadedTarget = null;
+            catalogContinuation = null; catalogMore = false; catalogPage = 1;
+            catalogSongs.Clear(); selectedSong = null; total = 0;
+            heading = IsCatalogHome ? "发现音乐" : "音乐频道";
+        }
+        RefreshBindings();
+    }
+    // An unknown source admits no landing request: show the requested landing with the
+    // restore error instead of another page's or another source's content.
+    private void PublishCatalogSourceUnavailable(string route)
+    {
+        RetireCatalogLoad();
+        location = new(route == "catalog-home" ? "catalog-home" : "catalog-channels");
+        RetireCatalogSourcePages();
+        catalogSourceReload = true;
+        status = catalogSourceStatus;
+        RefreshBindings(); CatalogBindings();
+    }
+    // Settings hides the music page and the shell does not replay navigation on return.
+    // A landing retired by a source change, or left unavailable, reads once when the page
+    // is shown again with an authoritative source; a hidden page issues no read.
+    public Task ActivateCatalogLandingAsync()
+    {
+        if (!catalogSourceReload || stopping || !catalogSourceLoaded) return Task.CompletedTask;
+        catalogSourceReload = false;
+        if (!IsCatalogLanding || catalogLoadedPlatform == catalogSourcePlatform || loadCancellation is not null)
+            return Task.CompletedTask;
+        return LoadCatalogAsync(IsCatalogHome ? "catalog-home" : "catalog-channels", "", 1, null, lifetime.Token);
     }
     public void RetireCatalogSession()
     {
@@ -310,16 +368,31 @@ public sealed partial class MusicCapability
         try { cancellation.Cancel(); }
         catch (ObjectDisposedException) { }
     }
-    private Task LoadCatalogAsync(string route, string query, int pageNumber, JsonElement? continuation,
+    private async Task LoadCatalogAsync(string route, string query, int pageNumber, JsonElement? continuation,
         CancellationToken token, bool refresh = false, string tag = "")
     {
-        if (stopping) return Task.CompletedTask;
+        if (stopping) return;
         token.ThrowIfCancellationRequested();
+        if (IsCatalogSourceRoute(route) && !catalogSourceLoaded)
+        {
+            var submission = navigationSubmission;
+            try { await EnsureCatalogSourceSettingsAsync(token); }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+            catch
+            {
+                if (!stopping && submission == navigationSubmission) PublishCatalogSourceUnavailable(route);
+                return;
+            }
+            if (stopping || submission != navigationSubmission) return;
+        }
         var request = CaptureCatalogLoadRequest(route, query, pageNumber, continuation, refresh, tag);
         if (catalogLoadFlight is { } current && !current.Work.IsCompleted &&
             current.Generation == loadGeneration && !current.Cancellation.IsCancellationRequested &&
             current.Request.Key == request.Key)
-            return SubscribeCatalogLoad(current, token);
+        {
+            await SubscribeCatalogLoad(current, token);
+            return;
+        }
 
         InvalidateCatalogAction();
         var generation = AdvanceLoadGeneration();
@@ -347,13 +420,13 @@ public sealed partial class MusicCapability
         flight.Work = RunCatalogFlightAsync(flight);
         loadDrains.Add(flight.Work);
         _ = ObserveCatalogLoadAsync(flight);
-        return SubscribeCatalogLoad(flight, token);
+        await SubscribeCatalogLoad(flight, token);
     }
 
     private CatalogLoadRequest CaptureCatalogLoadRequest(string route, string query, int number,
         JsonElement? continuation, bool refresh, string tag)
     {
-        var platform = SelectedCatalogPlatform.Key;
+        var platform = IsCatalogSourceRoute(route) ? catalogSourcePlatform : SelectedCatalogPlatform.Key;
         var kind = CatalogSearchKind;
         var routeParts = route.Split('/', 3);
         if (routeParts.Length == 3) platform = routeParts[1];
@@ -555,8 +628,7 @@ public sealed partial class MusicCapability
             {
                 ChannelTabs.Clear();
                 foreach (var card in sections.SelectMany(s => s.Items).Where(c => c.Kind == "channel" &&
-                    c.Display &&
-                    (DirectChannelIdSet.Contains(c.ActionId) || MoreChannelIdSet.Contains(c.ActionId))))
+                    c.Display))
                     ChannelTabs.Add(card);
                 var first = VisibleChannelTabs.Concat(MoreChannelTabs).FirstOrDefault(c => c.CanOpen);
                 if (first is not null)

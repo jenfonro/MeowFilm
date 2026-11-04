@@ -9,6 +9,7 @@
 - 搜索没有模式选择，歌曲／歌单面板只显示平台列表；标题右侧“高级设置”打开气泡浮窗，编辑单次请求页数、平台并发数和缓存时长（分钟）。有效输入在失焦、回车或关闭浮窗时立即保存，越界输入恢复为已保存值，Esc 放弃编辑。搜索、音质、元数据、外观、缓存和真实账号操作继续调用既有 `MusicCapability` 与原生 owner，不新建偏好 writer、迁移或旧方案兼容层。
 - 派生的编辑可用状态由 `MusicCapability` 随实际忙碌状态发布；不依赖设置视图曾经 Loaded 或视图代替业务 owner 补发状态。
 - 分类切换、滚动与尺寸变化关闭账号临时浮层；设置激活、退休、取消与排空复用原生生命周期。
+- “账号与平台”提供数据源下拉框，复用现有控件样式；网易云／酷狗选择通过 `music.catalogSource.settings.get/save` 持久化。只在成功回执或权威读取确认后采用新平台，失败可重读，通知复用统一出口。来源偏好与账号、搜索、音源启停及在线设置独立；存储格式见[原生曲库](music-native-library.md)。
 
 ## 参考布局与资源
 
@@ -54,4 +55,5 @@
 - 官方候选与音频原生门禁覆盖自动候选过滤，以及手动录音选择和直接官方音频解析无法绕过关闭状态；关闭内置平台仍允许已启用脚本提供同平台录音，同时验证开关不改变账号、搜索、歌词与封面行为。门禁测试归属为 `MusicOfficialSelectionTests.cs`。`MusicOfficialAudioTests.cs`、`MusicOfficialStandardTests.cs` 保留为现有音频解析、音质与授权基线。
 - 脚本源覆盖本地多选、真实 `music.sources.*` 安装及后续管理、HTTPS 下载拒绝重定向、网络和本地内容共用检查安装流程，以及 16 MiB 含边界值；同时验证较大安装集合的本地多选和后续网络安装。测试归属为 `MusicOnlineTests.cs`、`MusicScriptIntegrationTests.cs`、`MusicNativeScriptTests.cs`、`SelectedFileSnapshotTests.cs`、`MusicSourceNetworkDownloadTests.cs` 和 `MusicSourcesSettingsTests.cs`。验证直接断言真实 API、下载安全及 UI 状态，不以本地导入或普通解析成功用例替代网络路径覆盖。
 - 原生 UI 回归覆盖锚点、末段置顶、页头标题与类别切换、两块平铺、优先列表尺寸与移动、让位拖动、整页滚轮、开关、键盘、高对比、取消／资源释放，以及账号和偏好消费者；布局用例位于 `MusicSettingsLayoutTests.cs`。
+- 数据源覆盖默认／重启恢复、保存确认、失败后权威回读与职责隔离（`MusicCatalogSourceSettingsTests.cs`），以及启动请求平台、切换旧结果隔离、跨平台详情、设置控件与窄窗布局（`MusicCatalogPersonalTests.cs`、`MusicSettingsLayoutTests.cs`）；酷狗协议与动作归属 `MusicKgDiscoveryTests.cs`。
 - 使用受控测试数据渲染真实 WPF PNG，对照参考检查 1440、1110 和最小 860×600 的完整桌面壳，以及独立内容区的窄宽度状态。Taste 的浏览器 DOM 检查器不适用于 WPF；不另造 HTML 冒充原生验证。编译、原生行为回归、截图和真实平台／扬声器／系统 DPI 验收分别记录，不能互相替代。

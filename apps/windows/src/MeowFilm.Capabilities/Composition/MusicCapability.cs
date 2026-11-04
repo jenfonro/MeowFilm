@@ -201,6 +201,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
             nameof(CanSelectCurrentRecording), nameof(CanTogglePlayback) })
             Changed(name);
         OnlineBindings();
+        CatalogSourceBindings();
         AccountBindings();
         CatalogBindings();
         DiscoveryBindings();
@@ -878,6 +879,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         AdvanceLoadGeneration(); playbackEpoch++;
         UnsubscribePlayback();
         loadCancellation?.Cancel(); // Only reads: never cancel admitted mutations/history writes.
+        catalogSourceReadCancellation?.Cancel(); // The shared startup source read is independent of its waiters.
         collectionPageCancellation?.Cancel();
         // Resolution may be a network read; cancel it before waiting for commandTail.
         onlineCancellation?.Cancel(); RetireLyrics(); CancelMusicPreload();
