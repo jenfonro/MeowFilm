@@ -49,6 +49,27 @@ public static class MusicCatalogLayoutTests
             card.Measure(new(pitch, double.PositiveInfinity));
             card.Arrange(new(0, 0, pitch, card.DesiredSize.Height)); card.UpdateLayout();
             Check(Math.Abs(first.Height - card.ActualHeight) < 1, "skeleton uses the real card's height");
+            if (!home)
+            {
+                var section = new MusicCatalogSection("", Enumerable.Range(1, 3).Select(i =>
+                    new MusicCatalogCard(i.ToString(), "横幅" + i, "", "", "playlist", "wy", ActionId: i.ToString()))
+                    .ToArray(), Type: "banner");
+                var shelf = new Shelf { DataContext = section, CardTemplate = (DataTemplate)template.FindResource(key) };
+                using var shelfScene = new Scene(shelf, width);
+                await Until(() => shelf.ScrollHost is not null && Math.Abs(shelf.CardWidth - pitch) < .5);
+                var items = (ListBox)shelf.FindName("ItemsHost");
+                // The card host carries its item; ArtworkImage also owns an internal retry button.
+                Button Banner(int index) => Descendants<Button>((ListBoxItem)items.ItemContainerGenerator.ContainerFromIndex(index))
+                    .Single(button => ReferenceEquals(button.Tag, section.Items[index]));
+                var firstBanner = Banner(0);
+                var secondBanner = Banner(1);
+                Check(Math.Abs(firstBanner.ActualWidth - first.Width) < .5 &&
+                    Math.Abs(firstBanner.ActualHeight - first.Height) < 1,
+                    "the real virtualized banner matches the shared skeleton width and height");
+                Check(Math.Abs(secondBanner.TranslatePoint(new(), shelf).X -
+                    firstBanner.TranslatePoint(new(firstBanner.ActualWidth, 0), shelf).X - 20) < .5,
+                    "the real virtualized banners use the same 20px gap as the skeleton");
+            }
             Check(shapes.All(s => s.TranslatePoint(new(), skeleton).X + s.ActualWidth <= width + .5),
                 "no placeholder extends beyond the content column");
             skeleton.Visibility = Visibility.Collapsed;

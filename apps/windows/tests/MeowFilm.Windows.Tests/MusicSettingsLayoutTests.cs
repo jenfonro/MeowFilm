@@ -21,11 +21,84 @@ public static partial class MusicUiTests
 {
     internal static IEnumerable<TestCase> SettingsReplicaCases()
     {
+        yield return Case("shared settings layout follows container breakpoints and retires resize on unload or disable", async () =>
+        {
+            var sections = new Grid { Width = 1100, Height = 80, HorizontalAlignment = HorizontalAlignment.Left };
+            var sectionChild = new Border(); sections.Children.Add(sectionChild);
+            var pair = new Grid { Width = 544, Height = 80, HorizontalAlignment = HorizontalAlignment.Left };
+            var pairChild = new Border(); pair.Children.Add(pairChild);
+            var host = new StackPanel(); host.Children.Add(sections); host.Children.Add(pair);
+            SettingsLayout.SetMode(sections, SettingsLayoutMode.Sections);
+            SettingsLayout.SetMode(pair, SettingsLayoutMode.Pair);
+            using var mount = new ReplicaMount(host);
+            void CheckLayout(bool compact, bool narrow, bool stacked)
+            {
+                Equal(compact, SettingsLayout.GetIsCompact(sections));
+                Equal(compact, SettingsLayout.GetIsCompact(sectionChild));
+                Equal(narrow, SettingsLayout.GetIsNarrow(sections));
+                Equal(narrow, SettingsLayout.GetIsNarrow(sectionChild));
+                Equal(stacked, SettingsLayout.GetIsStacked(pair));
+                Equal(stacked, SettingsLayout.GetIsStacked(pairChild));
+            }
+            await Drain(); mount.Window.UpdateLayout(); CheckLayout(false, false, false);
+            foreach (var size in new[]
+            {
+                (Sections: 1099d, Pair: 543d, Compact: true, Narrow: false, Stacked: true),
+                (Sections: 640d, Pair: 544d, Compact: true, Narrow: false, Stacked: false),
+                (Sections: 639d, Pair: 545d, Compact: true, Narrow: true, Stacked: false),
+                (Sections: 1100d, Pair: 544d, Compact: false, Narrow: false, Stacked: false)
+            })
+            {
+                sections.Width = size.Sections; pair.Width = size.Pair;
+                mount.Window.UpdateLayout(); await Drain();
+                Equal(size.Sections, sections.ActualWidth); Equal(size.Pair, pair.ActualWidth);
+                CheckLayout(size.Compact, size.Narrow, size.Stacked);
+            }
+            for (int cycle = 0; cycle < 2; cycle++)
+            {
+                mount.Window.Content = null; await Drain();
+                True(!sections.IsLoaded && !pair.IsLoaded, "both layout containers are actually unloaded");
+                var unmounted = new Border { Child = host };
+                sections.Width = 500; pair.Width = 400;
+                unmounted.Measure(new Size(1248, 820)); unmounted.Arrange(new Rect(0, 0, 1248, 820)); unmounted.UpdateLayout(); await Drain();
+                Equal(500d, sections.ActualWidth); Equal(400d, pair.ActualWidth);
+                CheckLayout(false, false, false);
+                True(!sections.IsLoaded && !pair.IsLoaded, "measuring detached content does not reactivate the behavior");
+                unmounted.Child = null;
+                mount.Window.Content = host; mount.Window.UpdateLayout(); await Drain();
+                True(sections.IsLoaded && pair.IsLoaded, "the same layout containers are reloaded");
+                CheckLayout(true, true, true);
+                sections.Width = 1100; pair.Width = 544;
+                mount.Window.UpdateLayout(); await Drain(); CheckLayout(false, false, false);
+            }
+            sections.Width = 500; pair.Width = 400;
+            mount.Window.UpdateLayout(); await Drain(); CheckLayout(true, true, true);
+            SettingsLayout.SetMode(sections, SettingsLayoutMode.None);
+            SettingsLayout.SetMode(pair, SettingsLayoutMode.None);
+            CheckLayout(false, false, false);
+            sections.Width = 501; pair.Width = 401;
+            mount.Window.UpdateLayout(); await Drain(); CheckLayout(false, false, false);
+            SettingsLayout.SetMode(sections, SettingsLayoutMode.Sections);
+            SettingsLayout.SetMode(pair, SettingsLayoutMode.Pair);
+            CheckLayout(true, true, true);
+        });
         yield return Case("replica settings keep six reference anchors and continuous groups with an independent source page", async () =>
         {
             await using var f = await Fixture.Create(); await f.Module.ActivateSettingsAsync();
             var view = (MusicSettingsView)f.Module.SettingsView;
             Render(view, 1200, 760); await Drain();
+            foreach (var surface in new Control[] { view, (MusicSourcesSettingsView)view.FindName("SourcesPage") })
+            {
+                Equal(SystemFonts.MessageFontFamily, surface.FontFamily);
+                Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(surface));
+                Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(surface));
+                True(surface.UseLayoutRounding && surface.SnapsToDevicePixels, "settings surfaces preserve pixel-aligned system typography");
+            }
+            var settingsText = Visuals(view).OfType<TextBlock>().Where(text => !string.IsNullOrWhiteSpace(text.Text)).ToArray();
+            True(settingsText.Length > 0 && settingsText.All(text =>
+                TextOptions.GetTextFormattingMode(text) == TextFormattingMode.Display &&
+                TextOptions.GetTextRenderingMode(text) == TextRenderingMode.Auto),
+                "actual settings labels and values use Display and Auto");
             var anchors = ReplicaAnchors(view);
             True(anchors.Select(anchor => (string)anchor.Content).SequenceEqual(new[] { "账号与平台", "搜索", "音质与缓存", "外观", "歌词与封面", "音源" }), "latest v2 section names");
             int calls = f.Calls.Log.Count;
@@ -51,10 +124,24 @@ public static partial class MusicUiTests
             await using var f = await Fixture.Create(); await f.Module.ActivateSettingsAsync();
             var view = (MusicSettingsView)f.Module.SettingsView;
             using var mount = new ReplicaMount(view);
-            foreach (int width in new[] { 1248, 908, 600 })
+            mount.Window.ResizeMode = ResizeMode.NoResize;
+            foreach (int width in new[] { 1248, 1164, 1163, 908, 704, 703, 600, 1248 })
             {
+                // Keep breakpoint inputs independent of native offscreen window constraints.
+                view.Width = width;
                 mount.Window.Width = width; mount.Window.Height = 760;
                 Render(view, width, 760); await Drain(); view.UpdateLayout();
+                True(Math.Abs(view.ActualWidth - width) <= .5 / VisualTreeHelper.GetDpi(view).DpiScaleX,
+                    "the content reaches the requested breakpoint width within one half display pixel");
+                var content = (Grid)view.FindName("MusicContent");
+                True(Math.Abs(content.ActualWidth - (view.ActualWidth - 64)) < .5 / VisualTreeHelper.GetDpi(view).DpiScaleX,
+                    "the responsive container keeps both 32 DIP page margins at the current DPI");
+                Equal(width < 1164, SettingsLayout.GetIsCompact(content));
+                Equal(width < 704, SettingsLayout.GetIsNarrow(content));
+                var accountGrid = (Grid)((Border)view.FindName("AccountsSection")).Child;
+                Equal(width < 704 ? 0d : width < 1164 ? 88d : 112d, accountGrid.ColumnDefinitions[0].ActualWidth);
+                Equal(width < 704 ? 0d : width < 1164 ? 24d : 32d, accountGrid.ColumnDefinitions[1].ActualWidth);
+                Equal(width < 704 ? 1 : 3, ((UniformGrid)view.FindName("AppearanceFields")).Columns);
                 var priority = (SettingsPriorityList)view.FindName("QualityPriorities");
                 var list = (ListBox)priority.FindName("PriorityItems");
                 Equal(7, list.Items.Count);
@@ -88,9 +175,18 @@ public static partial class MusicUiTests
                     Equal(stacked, SettingsLayout.GetIsStacked(panels)); Equal(width == 600, stacked);
                     var a = new Rect(left.TranslatePoint(new Point(), panels), left.RenderSize);
                     var b = new Rect(right.TranslatePoint(new Point(), panels), right.RenderSize);
+                    // Equal star columns distribute an odd physical pixel to one tile.
+                    double dpi = VisualTreeHelper.GetDpi(panels).DpiScaleX;
+                    double availablePixels = Math.Round((panels.ActualWidth - 24) * dpi);
+                    bool equalTiles = Math.Abs(Math.Min(a.Width, b.Width) * dpi - Math.Floor(availablePixels / 2)) < .01 &&
+                        Math.Abs(Math.Max(a.Width, b.Width) * dpi - Math.Ceiling(availablePixels / 2)) < .01;
                     True(stacked ? b.Top >= a.Bottom && Math.Abs(a.Width - panels.ActualWidth) < .5 :
-                        Math.Abs(b.Left - a.Right - 24) < .5 && Math.Abs(a.Width - b.Width) < .5 && Math.Abs(a.Top - b.Top) < .5,
-                        pair.Item1 + " splits into two equal tiles and stacks only below its threshold");
+                        Math.Abs(b.Left - a.Right - 24) < .5 && equalTiles && Math.Abs(a.Top - b.Top) < .5 &&
+                        Math.Abs(a.Left) < .5 && Math.Abs(b.Right - panels.ActualWidth) < .5,
+                        pair.Item1 + " splits into two equal tiles and stacks only below its threshold" +
+                        $"; width={width}; DPI=({VisualTreeHelper.GetDpi(panels).DpiScaleX}, {VisualTreeHelper.GetDpi(panels).DpiScaleY})" +
+                        $"; panelWidth={panels.ActualWidth}; columnsActual=({panels.ColumnDefinitions[0].ActualWidth}, {panels.ColumnDefinitions[1].ActualWidth}, {panels.ColumnDefinitions[2].ActualWidth})" +
+                        $"; left={a}; right={b}; IsStacked={SettingsLayout.GetIsStacked(panels)}");
                 }
             }
         });
@@ -212,7 +308,8 @@ public static partial class MusicUiTests
                 ((Button)shell.FindName("SettingsButton")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
                 await Drain(); await Until(() => f.Module.CanEdit);
                 var root = (FrameworkElement)shell.Content;
-                var heading = (TextBlock)shell.FindName("SettingsHeading"); var slot = (ContentControl)shell.FindName("SettingsHeaderSlot");
+                var header = (DesktopPageHeader)shell.FindName("PageHeaderHost");
+                var heading = (TextBlock)header.FindName("Heading"); var slot = (ContentControl)header.FindName("LeadingSlot");
                 var back = (Button)shell.FindName("BackButton");
                 True(heading.IsVisible && heading.Text == "设置" && slot.IsVisible && region.Margin == new Thickness(0) &&
                     !((FrameworkElement)shell.FindName("SearchInput")).IsVisible, "settings title and category sit in the header beside back");
@@ -240,7 +337,7 @@ public static partial class MusicUiTests
                         "settings remain inside the shell while the player footer is hidden");
                     if (size.Width == 860)
                     {
-                        True(SettingsLayout.GetIsNarrow(view), "sidebar-reduced content uses stacked section labels");
+                        True(SettingsLayout.GetIsNarrow((Grid)view.FindName("MusicContent")), "sidebar-reduced content uses stacked section labels");
                         var accountSection = (Border)view.FindName("AccountsSection");
                         var accountLabel = ((Grid)accountSection.Child).Children.OfType<TextBlock>().Single(text => text.Text == "账号");
                         var accounts = (MusicAccountsView)view.FindName("AccountsPanel");

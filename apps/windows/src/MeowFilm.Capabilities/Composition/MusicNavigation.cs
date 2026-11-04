@@ -19,7 +19,7 @@ public sealed partial class MusicCapability
     private long loadGeneration, libraryRead, libraryRevision = -1;
     private bool publishing;
 
-    private Location CaptureLocation() => location with { Selected = selectedSong?.SelectionKey, Scroll = page.CaptureScroll() };
+    private Location CaptureLocation() => location with { Selected = selectedSong?.SelectionKey, Scroll = Presentation.CaptureScroll() };
     private void RememberLocation()
     {
         locations[location.Key] = CaptureLocation();
@@ -274,9 +274,9 @@ public sealed partial class MusicCapability
                 RefreshBindings();
             }
             finally { publishing = false; }
-            _ = page.Dispatcher.InvokeAsync(() =>
+            _ = Presentation.Dispatcher.InvokeAsync(() =>
             {
-                if (!stopping && generation == loadGeneration) page.RestoreScroll(target.Scroll);
+                if (!stopping && generation == loadGeneration) Presentation.RestoreScroll(target.Scroll);
             }, DispatcherPriority.Loaded);
         }
         catch (OperationCanceledException) { throw; }
@@ -338,7 +338,7 @@ public sealed partial class MusicCapability
         NavigationItem[] items = [
             new("catalog-home", "推荐", "\uE80F"),
             new("catalog-channels", "频道", "\uE8A9"),
-            new("favorites", "我的收藏", "\uEB51", "我的", GroupAction: page.CreatePlaylistAction),
+            new("favorites", "我的收藏", "\uEB51", "我的", GroupAction: Presentation.CreatePlaylistAction),
             ..Playlists.Where(item => item.Kind == "playlist").Select(item =>
                 new NavigationItem("playlist/" + item.Id, item.Name, "\uE8D6", "我的")),
             // Declared routes remain reachable from content/settings and public-page handoff.

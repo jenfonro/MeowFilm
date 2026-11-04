@@ -159,7 +159,7 @@ public sealed partial class MusicCapability
                 state.RejectedSources.Clear(); state.RejectedUrls.Clear();
                 ScheduleMusicExpiry(state);
                 UpdateRecordingCandidates(); UpdateLyricSources();
-                Changed(nameof(CurrentSource)); Changed(nameof(CurrentQualityLabel));
+                PlaybackSourceBindings();
                 if (IsLyrics) _ = RestoreLyricsAsync();
                 if (alreadyStarted) ConfirmRecoveredSourceStarted(state);
             }
@@ -194,7 +194,7 @@ public sealed partial class MusicCapability
                         UpdateFeedbackSelection();
                         ScheduleMusicExpiry(state);
                         UpdateRecordingCandidates(); UpdateLyricSources();
-                        Changed(nameof(CurrentQualityLabel));
+                        PlaybackSourceBindings();
                         if (alreadyStarted) ConfirmRecoveredSourceStarted(state);
                     }
                     catch

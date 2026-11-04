@@ -134,6 +134,22 @@
             </MultiTrigger>
         </Style.Triggers>
     </Style>
+    <Style x:Key="MeowFilm.HeaderAction" TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}">
+        <Setter Property="Padding" Value="12,6" />
+        <Setter Property="Margin" Value="0,0,8,0" />
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding IsPrimary}" Value="True">
+                <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Accent}" />
+                <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.OnAccent}" />
+                <Setter Property="BorderBrush" Value="{DynamicResource MeowFilm.Brush.Accent}" />
+            </DataTrigger>
+            <Trigger Property="local:DesktopTheme.IsHighContrast" Value="True">
+                <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}" />
+                <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}" />
+                <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}" />
+            </Trigger>
+        </Style.Triggers>
+    </Style>
     <Style x:Key="MeowFilm.IconButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
         <Setter Property="Width" Value="36" />
         <Setter Property="Height" Value="36" />

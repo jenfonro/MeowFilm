@@ -534,7 +534,9 @@ public static class PlaybackRecoveryTests
             {
                 await using var f = await MusicFixture.Create(expiry: true);
                 f.App.HoldRefresh = true;
-                f.Module.SelectedSource = new("fixture-source", "fixture", "1", "", 7, true, "ready", false, ["wy"], "");
+                var source = new MusicSourceRow("fixture-source", "fixture", "1", "", 7, true, "ready", false, ["wy"], "");
+                f.Module.Sources.Add(source);
+                f.Module.SelectedSource = source;
                 await f.Play(); await Decoded(f.Native);
                 await f.App.RefreshEntered.Task.WaitAsync(TimeSpan.FromSeconds(8));
                 var changed = f.Module.SourceActionAsync(mutation);

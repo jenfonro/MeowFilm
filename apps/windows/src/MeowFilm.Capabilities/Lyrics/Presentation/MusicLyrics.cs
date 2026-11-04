@@ -17,6 +17,9 @@ public sealed partial class MusicCapability
     private MusicLyricSourceRow? selectedLyricSource;
     private string? lyricSongIdentity;
     private MusicLyricRow? lyricPreview;
+    private MusicLyricRow? publishedLyric;
+    private int publishedLyricIndex = -1, publishedLyricDisplayIndex = -1;
+    private bool publishedCanConfirmLyric;
     private bool hasLocalLyrics;
     public ObservableCollection<MusicLyricSourceRow> LyricSources { get; } = [];
     public bool CanCancelLyrics => lyricCancellation is not null;
@@ -41,11 +44,34 @@ public sealed partial class MusicCapability
         var movedTail = e.Action == NotifyCollectionChangedAction.Move && e.OldStartingIndex == Lyrics.Count - 1;
         if (e.Action == NotifyCollectionChangedAction.Reset || newTail || removedTail || movedTail)
             Changed(nameof(LastLyric));
+        LyricTimingBindings();
     }
+    internal void RefreshLyricPosition() => LyricTimingBindings();
     private void LyricTimingBindings()
     {
-        Changed(nameof(CurrentLyricWords)); Changed(nameof(LyricTimingLabel));
-        Changed(nameof(LyricDisplayIndex)); Changed(nameof(CanConfirmLyricPreview));
+        int index = ActiveLyricIndex;
+        var row = index >= 0 ? Lyrics[index] : null;
+        if (publishedLyricIndex != index)
+        {
+            publishedLyricIndex = index;
+            Changed(nameof(ActiveLyricIndex));
+        }
+        if (!ReferenceEquals(publishedLyric, row))
+        {
+            publishedLyric = row;
+            Changed(nameof(CurrentLyricWords)); Changed(nameof(LyricTimingLabel));
+        }
+        int display = lyricPreview is null ? index : Lyrics.IndexOf(lyricPreview);
+        if (publishedLyricDisplayIndex != display)
+        {
+            publishedLyricDisplayIndex = display;
+            Changed(nameof(LyricDisplayIndex));
+        }
+        if (publishedCanConfirmLyric != CanConfirmLyricPreview)
+        {
+            publishedCanConfirmLyric = CanConfirmLyricPreview;
+            Changed(nameof(CanConfirmLyricPreview));
+        }
     }
     public void PreviewLyric(MusicLyricRow row)
     {
@@ -56,7 +82,7 @@ public sealed partial class MusicCapability
     private void PreviewBindings()
     {
         Changed(nameof(HasLyricPreview)); Changed(nameof(LyricPreviewText));
-        Changed(nameof(CanConfirmLyricPreview)); Changed(nameof(LyricDisplayIndex));
+        LyricTimingBindings();
     }
     public async Task ConfirmLyricPreviewAsync()
     {

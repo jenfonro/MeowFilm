@@ -23,9 +23,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
     private readonly PlaybackCache.MusicAudioFileCache? audioFileCache;
     private readonly PlaybackCache.MusicChorusCache persistentChorus;
     private readonly CancellationTokenSource lifetime = new();
-    private readonly MusicView page;
-    private readonly MusicSettingsView settings;
-    private readonly MusicPlayerView player;
+    internal MusicPresentation Presentation { get; }
+    private readonly MusicPlaybackPresentation playbackPresentation;
     private Task commandTail = Task.CompletedTask;
     private readonly HashSet<Task> eventWrites = [];
     private Task? preparation, resumption, disposal, abortion;
@@ -61,6 +60,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         this.application = application ?? throw new ArgumentNullException(nameof(application));
         this.playback = playback; this.dialogs = dialogs ?? new MusicDialogs();
         this.sourceNetworkDownload = sourceNetworkDownload ?? new MusicSourceNetworkDownload();
+        Presentation = new(this);
+        playbackPresentation = new(this, property => Changed(property));
         audioFileCache = playbackCache;
         persistentChorus = new(store);
         files = new(store, "music.files.v1", [".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma"]);
@@ -68,7 +69,6 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         InitializeLibrarySync();
         vipPage = new(application, System.Windows.Threading.Dispatcher.CurrentDispatcher);
         InitializePlatformSettings();
-        page = new(this); settings = new(this); player = new(this);
         InitializeGlobalSurfaces();
         InitializeSearch();
         InitializeDiscovery();
@@ -91,14 +91,17 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
     public ObservableCollection<SongRow> CatalogSongsSource => catalogSongs;
     public ObservableCollection<string> HistoryDates { get; } = [];
     public ObservableCollection<ArchivedPlaylist> Archives { get; } = [];
-    public FrameworkElement View => page;
-    public FrameworkElement SettingsView => settings;
-    public FrameworkElement PlayerView => player;
-    public System.Windows.Media.Brush PlayerBackground => page.PlayerBackground;
-    public System.Windows.Media.Brush PlayerProgressBrush => page.PlayerProgress;
+    public FrameworkElement View => Presentation.Page;
+    public FrameworkElement SettingsView => Presentation.Settings;
+    public FrameworkElement PlayerView => Presentation.Player;
+    public System.Windows.Media.Brush PlayerBackground => Presentation.PlayerBackground;
+    public System.Windows.Media.Brush PlayerProgressBrush => Presentation.PlayerProgress;
     internal void RefreshPlayerBackground()
     { Changed(nameof(PlayerBackground)); Changed(nameof(PlayerProgressBrush)); }
-    internal void RefreshPlayerAppearance(System.Windows.Media.Brush sampled, bool animate = true) => page.RefreshAppearance(sampled, animate);
+    internal void RefreshPlayerAppearance(System.Windows.Media.Brush sampled, bool animate = true) => Presentation.RefreshAppearance(sampled, animate);
+    public MusicContentPage ContentPage => IsDiscovery ? MusicContentPage.Discovery :
+        IsArchives ? MusicContentPage.Archives : IsSearchSongs ? MusicContentPage.SearchSongs :
+        ShowsSongTable ? MusicContentPage.Songs : MusicContentPage.Catalog;
     public string Heading => heading;
     public string Status => status;
     public bool Busy => commands > 0 || loadCancellation is not null;
@@ -165,7 +168,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         : current is { IsOnline: false } ? "本地音乐" : "";
     public bool IsPlaying => OwnsCurrent && playback.IsPlaying;
     public bool HasCurrent => current is not null;
-    public bool CanPlay => CanEdit && HasCurrent && queueSaved;
+    public bool CanPlay => !stopping && commands == 0 && HasCurrent && queueSaved;
     public bool CanTogglePlayback => !stopping && HasCurrent && queueSaved &&
         (CanEdit || OwnsCurrent && (playback.HasMedia || musicRecovery?.Recovering == true));
     private bool OwnsCurrent => current is not null && playback.OwnerId == Id && playback.Identity == current.EntryId;
@@ -186,6 +189,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
     private void Changed([CallerMemberName] string? property = null) => PropertyChanged?.Invoke(this, new(property));
     private void RefreshBindings()
     {
+        Changed(nameof(ContentPage));
+        playbackPresentation.Refresh();
         foreach (var name in new[] { nameof(CatalogSelectedSong), nameof(SearchSelectedSong), nameof(Heading), nameof(Status), nameof(Busy), nameof(CanEdit), nameof(CanEditQuality),
             nameof(CanEditAppearance), nameof(CanClearPlaybackCache),
             nameof(IsHistory), nameof(IsArchives), nameof(IsSongList), nameof(IsCollectionPage), nameof(IsContentDetailPage), nameof(ShowsSongTable),
@@ -195,10 +200,9 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
             nameof(CanPreviousPage), nameof(CanNextPage), nameof(CountText), nameof(PageText), nameof(CollectionArtwork),
             nameof(CanPlayCollection), nameof(DetailArtwork), nameof(DetailCountText),
             nameof(DetailSectionTitle), nameof(DetailArtworkName), nameof(CanPlayContentDetail), nameof(CurrentTitle),
-            nameof(CurrentArtist), nameof(CurrentAlbum), nameof(CurrentSource), nameof(IsPlaying), nameof(HasCurrent), nameof(CurrentArtwork), nameof(CanPlay), nameof(CanSeek), nameof(PlayGlyph), nameof(Mode), nameof(ModeText),
+            nameof(CurrentArtist), nameof(CurrentAlbum), nameof(HasCurrent), nameof(CurrentArtwork), nameof(CanPlay), nameof(Mode), nameof(ModeText),
             nameof(PlaybackPresentationKey),
-            nameof(CanChangePlaybackRate), nameof(PlaybackRateText), nameof(AcceptedPlaybackRate),
-            nameof(CanSelectCurrentRecording), nameof(CanTogglePlayback) })
+            nameof(PlaybackRateText), nameof(CanSelectCurrentRecording) })
             Changed(name);
         OnlineBindings();
         AccountBindings();
@@ -747,13 +751,15 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
             musicRecovery is { Opening: false })
             TrackMusicRecovery(RetireMusicRecovery());
         SampleFeedback();
-        SyncChorus();
         ObserveRecommendationPlayback();
         ObserveMusicPreload();
-        foreach (var name in new[] { nameof(IsPlaying), nameof(CurrentSource), nameof(CurrentQualityLabel), nameof(PlayGlyph), nameof(PositionSeconds), nameof(DurationSeconds),
-            nameof(PositionText), nameof(DurationText), nameof(Volume), nameof(CanSeek), nameof(CanChangePlaybackRate),
-            nameof(AcceptedPlaybackRate), nameof(ActiveLyricIndex), nameof(CanTogglePlayback) }) Changed(name);
-        LyricTimingBindings();
+        if (args.PropertyName == nameof(IMusicPlayback.PositionSeconds))
+            playbackPresentation.RefreshPosition();
+        else
+        {
+            if (args.PropertyName != nameof(IMusicPlayback.Volume)) SyncChorus();
+            playbackPresentation.Refresh();
+        }
     }
     private void PlaybackStarted(object? sender, EventArgs args)
     {
@@ -837,7 +843,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
         FinishFeedback("interrupt");
         stopping = true; // Seal admission synchronously, before yielding to any callback.
         RetireQueueSurfaceRequest();
-        playerDetail.Deactivate();
+        Presentation.DeactivateDetail();
         SealRecommendations();
         TrackMusicRecovery(RetireMusicRecovery());
         searchEpoch++;
@@ -934,9 +940,9 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
             await RunAsync(() => RestorePlaybackRateAsync(surviving, epoch, lifetime.Token));
         }
         LibrarySyncChanged(); // A restarted fast round may have finished while the module was still sealed.
-        if (settings.IsLoaded && settings.IsVisible) await ActivateSettingsAsync();
+        if (Presentation.IsSettingsActive) await ActivateSettingsAsync();
         RefreshBindings();
-        if (page.IsLoaded && page.IsVisible && IsDiscovery) await ActivateDiscoveryViewAsync();
+        if (Presentation.IsPageActive && IsDiscovery) await ActivateDiscoveryViewAsync();
         await vipPage.CancelShutdownPreparationAsync();
     }
     public Task AbortAsync()

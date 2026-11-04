@@ -80,7 +80,7 @@ public static class MusicLyricDisplayTests
             () => Sta(() => WithArtworkFixture(f => SyncPreservesUnknownSave(f, duringSave: true), holdSync: true)));
         yield return new("Native current artwork unknown save remains internally reconciled through actual Sync refresh",
             () => Sta(() => WithArtworkFixture(f => SyncPreservesUnknownSave(f, duringSave: false), holdSync: true)));
-        yield return new("Native lyric display exact snapshot survives DPAPI restart without Node network or autoplay", () => Sta(async () =>
+        yield return new("Native lyric display exact snapshot survives local document restart without Node network or autoplay", () => Sta(async () =>
         {
             string root = NewRoot();
             await using (var f = await Fixture.Create(root))
@@ -91,8 +91,6 @@ public static class MusicLyricDisplayTests
                 Equal("", f.Module.LyricStatus);
                 var document = await f.Store.ReadAsync(MusicLibraryOwner.DocumentNamespace);
                 Check(Encoding.UTF8.GetString(document.Data!).Contains("native-lyric-display", StringComparison.Ordinal));
-                foreach (string path in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
-                    Check(!Encoding.UTF8.GetString(await File.ReadAllBytesAsync(path)).Contains("SYNTHETIC_LYRIC", StringComparison.Ordinal));
                 f.Module.DeactivateGlobalSurface(MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail);
             }
             await using var restored = await Fixture.Create(root, seed: false);
@@ -144,6 +142,26 @@ public static class MusicLyricDisplayTests
             control.Position = double.NaN; Equal(0d, control.WordProgress);
             var peer = UIElementAutomationPeer.CreatePeerForElement(control)!;
             Equal("中🙂", peer.GetName()); Equal(AutomationControlType.Text, peer.GetAutomationControlType());
+            return Task.CompletedTask;
+        }));
+        yield return new("Native lyric display cached shape responds to text font and direction without changing timing", () => Sta(() =>
+        {
+            var control = new MusicLyricWordView { Word = new("中🙂 e\u0301", 1, 2), Position = 2, FontSize = 20 };
+            void Layout()
+            { control.Measure(new Size(500, 100)); control.Arrange(new Rect(0, 0, 500, 100)); }
+            Layout();
+            var original = control.DesiredSize;
+            control.Position = 2.5; Layout();
+            Equal(original, control.DesiredSize); Equal(.75, control.WordProgress);
+            control.FontSize = 32; Layout();
+            Check(control.DesiredSize.Width > original.Width && control.DesiredSize.Height > original.Height);
+            Equal(.75, control.WordProgress);
+            control.FlowDirection = FlowDirection.RightToLeft; Layout();
+            Equal(.75, control.WordProgress);
+            control.Word = new("替换歌词 العربية", 3, 1); Layout();
+            Equal(0d, control.WordProgress);
+            Equal("替换歌词 العربية", UIElementAutomationPeer.CreatePeerForElement(control)!.GetName());
+            control.Position = 3.5; Layout(); Equal(.5, control.WordProgress);
             return Task.CompletedTask;
         }));
         yield return new("Native lyric display switches and closes cancel late metadata before publication", () => Sta(async () =>

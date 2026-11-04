@@ -952,8 +952,6 @@ public sealed partial class ShellWindow : Window
         }
         foreach (var (source, handler) in _navigationSubscriptions) source.NavigationRequested -= handler;
         _navigationSubscriptions.Clear();
-        if (_headerSource is not null && _headerChanged is not null) _headerSource.HeaderChanged -= _headerChanged;
-        _headerSource = null; _headerChanged = null;
         RetireHeaderPresentation();
         DisposeGlobalSurfaces();
         _nativeCaption?.Dispose();
