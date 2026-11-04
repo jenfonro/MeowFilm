@@ -17,6 +17,7 @@ public sealed partial class MusicNativeApplication
     private readonly OfficialMusicAudio officialAudio;
     private readonly MusicSourceCache sourceCache;
     private readonly Dictionary<string, MusicPlatformSession> officialAccepted = [];
+
     public bool IsOfficialPlaybackCurrent(string platform, string scope, long generation)
     {
         MusicPlatformSession? session;
@@ -25,7 +26,8 @@ public sealed partial class MusicNativeApplication
             if (stopping || closed) return false;
             officialAccepted.TryGetValue(platform, out session);
         }
-        return session is not null && session.Scope == scope && session.Generation == generation && accounts.IsOfficialCurrent(session);
+        return session is not null && session.Scope == scope && session.Generation == generation &&
+            library.IsOfficialSourceEnabled(platform) && accounts.IsOfficialCurrent(session);
     }
 
     private async Task<JsonElement> ExecuteOfficialAudioAsync(string method, object? parameters, CancellationToken token)
@@ -33,18 +35,25 @@ public sealed partial class MusicNativeApplication
         MusicPlatformSession? session = null;
         try
         {
+            LJ.Require(method is "music.official.resolve" or "music.official.cacheContext" or
+                "music.official.authorize" or "music.official.confirm", "CAPABILITY_UNAVAILABLE");
             var input = JsonSerializer.SerializeToNode(parameters) as JsonObject ?? throw new MusicLibraryException("INVALID_REQUEST");
             LJ.Require(LJ.Bytes(input).Length <= 512 * 1024, "LIMIT");
             LJ.Fields(input, "platform song sourceKey quality scope generation qualityPolicySignature refresh",
                 "platform song quality");
             string platform = LJ.S(input["platform"]);
             LJ.Require(platform is "wy" or "tx" or "kg");
+            using var officialPolicy = await library.AcquireOfficialSourcesAsync(token).ConfigureAwait(false);
+            officialPolicy.Check(platform);
+            using var officialRequest = CancellationTokenSource.CreateLinkedTokenSource(token, officialPolicy.Token);
+            token = officialRequest.Token;
             string request = LJ.S(input["quality"]);
             session = await accounts.AcquireOfficialAsync(platform, request is "128k" or "auto", token).ConfigureAwait(false);
             LJ.Require(session is not null, "AUTH_REQUIRED");
             void Current()
             {
                 token.ThrowIfCancellationRequested();
+                officialPolicy.Check(platform);
                 LJ.Require(accounts.IsOfficialCurrent(session!), "AUTH_CHANGED");
                 if (input["scope"] is not null) LJ.Require(LJ.S(input["scope"]) == session!.Scope &&
                     LJ.I(input["generation"]) == session.Generation, "AUTH_CHANGED");
@@ -77,11 +86,14 @@ public sealed partial class MusicNativeApplication
                 // Identity and policy only. This does not grant a new media URL or a new license:
                 // the cache consumer must also require its protected, full-file offline receipt.
                 await library.CheckQualityAsync(policy, token).ConfigureAwait(false);
-                Current();
-                lock (gate) officialAccepted[platform] = session;
-                return JsonSerializer.SerializeToElement(new { ok = true, platform, sourceKey, songId,
-                    scope = session.Scope, generation = session.Generation, qualityCacheSignature = signature,
-                    qualityPolicySignature = policy.Signature });
+                return officialPolicy.Publish(platform, () =>
+                {
+                    Current();
+                    lock (gate) officialAccepted[platform] = session;
+                    return JsonSerializer.SerializeToElement(new { ok = true, platform, sourceKey, songId,
+                        scope = session.Scope, generation = session.Generation, qualityCacheSignature = signature,
+                        qualityPolicySignature = policy.Signature });
+                });
             }
             if (method == "music.official.confirm")
             {
@@ -99,7 +111,11 @@ public sealed partial class MusicNativeApplication
                     confirmed["recording"] = recording.DeepClone();
                     await sourceCache.ConfirmAsync(session.Scope, songId, signature, confirmed, token).ConfigureAwait(false);
                 }
-                return JsonSerializer.SerializeToElement(new { ok = true });
+                return officialPolicy.Publish(platform, () =>
+                {
+                    Current();
+                    return JsonSerializer.SerializeToElement(new { ok = true });
+                });
             }
             // Standard WY access is decided by the official media response, not
             // by local membership. It never creates an offline license or login.
@@ -128,11 +144,14 @@ public sealed partial class MusicNativeApplication
                     _ = await officialAudio.ResolveAsync(session, NativeMusicSong.SourceData(recording),
                         qualities, rights, token, Current).ConfigureAwait(false);
                 await library.CheckQualityAsync(policy, token).ConfigureAwait(false);
-                Current();
-                lock (gate) officialAccepted[platform] = session;
-                return JsonSerializer.SerializeToElement(new { ok = true, platform, sourceKey, songId,
-                    scope = session.Scope, generation = session.Generation, qualityCacheSignature = signature,
-                    qualityPolicySignature = policy.Signature, licenseExpiresAt });
+                return officialPolicy.Publish(platform, () =>
+                {
+                    Current();
+                    lock (gate) officialAccepted[platform] = session;
+                    return JsonSerializer.SerializeToElement(new { ok = true, platform, sourceKey, songId,
+                        scope = session.Scope, generation = session.Generation, qualityCacheSignature = signature,
+                        qualityPolicySignature = policy.Signature, licenseExpiresAt });
+                });
             }
             LJ.Require(method == "music.official.resolve", "CAPABILITY_UNAVAILABLE");
             JsonObject? result = LJ.B(input["refresh"]) ? null :
@@ -178,8 +197,12 @@ public sealed partial class MusicNativeApplication
                 result["authorizationExpiresAt"] = null;
                 result["offlineAllowed"] = false;
             }
-            lock (gate) officialAccepted[platform] = session;
-            return JsonSerializer.SerializeToElement(result);
+            return officialPolicy.Publish(platform, () =>
+            {
+                Current();
+                lock (gate) officialAccepted[platform] = session;
+                return JsonSerializer.SerializeToElement(result);
+            });
         }
         catch (MusicLibraryException e) { return Failed(e.Code); }
         catch (MusicAccountException e)

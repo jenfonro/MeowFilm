@@ -9,6 +9,7 @@ using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.PlaybackCache;
 using MeowFilm.Desktop;
+using MeowFilm.Platform.Storage;
 using static MeowFilm.Windows.Tests.MusicOfficialAudioTests;
 
 namespace MeowFilm.Windows.Tests;
@@ -116,6 +117,165 @@ public static class MusicOfficialSelectionTests
                 discovered.GetProperty("candidates")[0].GetProperty("platform").GetString() == "tx");
             Check(discovered.GetProperty("song").GetProperty("songId").GetString() == input["songId"]!.GetValue<string>());
             Check(scene.Handler.Searches == 1 && scene.Runtime.Calls == 0 && scene.Store.Writes == writes);
+        });
+        yield return new("Disabled official QQ is excluded from discovery and rejects every audio and cache entry without HTTP", async () =>
+        {
+            await using var scene = await Scene.CreateAsync();
+            await scene.Login();
+            var song = SongObject("tx", "FixtureMID");
+            var input = new { platform = "tx", song, quality = "320k" };
+            var accepted = await scene.Ok("music.official.resolve", input);
+            string scope = accepted.GetProperty("scope").GetString()!;
+            long generation = accepted.GetProperty("generation").GetInt64();
+            Check(scene.App.IsOfficialPlaybackCurrent("tx", scope, generation));
+            await scene.Ok("music.official.confirm", input);
+            await scene.Ok("music.officialSources.settings.save",
+                new { ifRevision = 0, enabled = new[] { "wy", "kg" } });
+            Check(!scene.App.IsOfficialPlaybackCurrent("tx", scope, generation));
+            var policy = await scene.Ok("music.quality.settings.get");
+            int calls = scene.Handler.Calls, writes = scene.Store.Writes, vkeys = scene.Handler.Vkeys;
+            byte[] cached = scene.Store.Data[MusicSourceCache.Namespace].ToArray();
+            var candidates = await scene.Candidates(song, policy, true);
+            Check(candidates.GetProperty("candidates").GetArrayLength() == 0 && scene.Handler.Searches == 0);
+            foreach (string method in new[] { "resolve", "cacheContext", "authorize", "confirm" })
+                Code(await scene.App.ExecuteAsync("music.official." + method, input), "OFFICIAL_SOURCE_DISABLED");
+            Check(scene.Handler.Calls == calls && scene.Handler.Vkeys == vkeys && scene.Store.Writes == writes);
+            Check(scene.Store.Data[MusicSourceCache.Namespace].SequenceEqual(cached),
+                "disabled cache entry points cannot create candidates, authorization or confirmation");
+            await scene.Ok("music.officialSources.settings.save",
+                new { ifRevision = 1, enabled = new[] { "wy", "tx", "kg" } });
+            await scene.Ok("music.official.cacheContext", input);
+            Check(scene.App.IsOfficialPlaybackCurrent("tx", scope, generation) && scene.Handler.Calls == calls,
+                "reenabling must reuse the untouched account without a new login");
+            Check(scene.Runtime.Calls == 0);
+        });
+        yield return new("Empty official source selection retains independent QQ search account script and metadata settings", async () =>
+        {
+            await using var scene = await Scene.CreateAsync();
+            await scene.Login();
+            var before = await scene.Ok("music.accounts.list");
+            var quality = await scene.Ok("music.quality.settings.get");
+            var metadata = await scene.Ok("music.metadata.settings.get");
+            var online = await scene.Ok("music.settings.get");
+            var scripts = await scene.Ok("music.sources.list");
+            await scene.Ok("music.officialSources.settings.save",
+                new { ifRevision = 0, enabled = Array.Empty<string>() });
+            Check((await scene.Ok("music.accounts.list")).GetRawText() == before.GetRawText(),
+                "official source switches must not revoke an account");
+            Check((await scene.Ok("music.quality.settings.get")).GetRawText() == quality.GetRawText());
+            Check((await scene.Ok("music.metadata.settings.get")).GetRawText() == metadata.GetRawText());
+            Check((await scene.Ok("music.settings.get")).GetRawText() == online.GetRawText());
+            Check((await scene.Ok("music.sources.list")).GetRawText() == scripts.GetRawText());
+            var empty = await scene.Candidates(SongObject("tx", "FixtureMID"), quality, true);
+            Check(empty.GetProperty("candidates").GetArrayLength() == 0 && scene.Handler.Searches == 0);
+            var search = await scene.Ok("music.catalog.search", new {
+                platform = "tx", keyword = "independent search", kind = "songs"
+            });
+            Check(search.GetProperty("items").GetArrayLength() == 1 && scene.Handler.Searches == 1);
+            await scene.Ok("music.accounts.validate", new { platform = "tx" });
+            var account = (await scene.Ok("music.accounts.list")).GetProperty("items").EnumerateArray()
+                .Single(item => item.GetProperty("platform").GetString() == "tx");
+            Check(account.GetProperty("state").GetString() == "verified" && scene.Runtime.Calls == 0);
+        });
+        yield return new("Official source disable fences a noncooperative delayed QQ discovery even after reenabling", async () =>
+        {
+            await using var scene = await Scene.CreateAsync();
+            await scene.Login();
+            var policy = await scene.Ok("music.quality.settings.get");
+            scene.Handler.HoldSearch = true;
+            scene.Handler.IgnoreSearchCancellation = true;
+            var pending = scene.App.ExecuteAsync("music.official.candidates", new {
+                song = SongObject("wy", "1"), quality = "320k",
+                qualityPolicySignature = policy.GetProperty("signature").GetString(), discover = true
+            });
+            try
+            {
+                await scene.Handler.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await scene.Ok("music.officialSources.settings.save",
+                    new { ifRevision = 0, enabled = new[] { "wy", "kg" } });
+                await scene.Ok("music.officialSources.settings.save",
+                    new { ifRevision = 1, enabled = new[] { "wy", "tx", "kg" } });
+            }
+            finally { scene.Handler.Release.TrySetResult(); }
+            Code(await pending.WaitAsync(TimeSpan.FromSeconds(5)), "CANCELLED");
+            Check(scene.Handler.Searches == 1 && scene.Handler.MediaRequests == 0 && scene.Runtime.Calls == 0);
+            scene.Handler.HoldSearch = false;
+            var fresh = await scene.Candidates(SongObject("wy", "1"), policy, true);
+            Check(fresh.GetProperty("candidates").GetArrayLength() == 1,
+                "a fresh operation may use the reenabled platform; the retired one may not publish");
+        });
+        foreach (string operation in new[] { "resolve", "authorize" })
+        {
+            yield return new($"Official source disable during QQ rights fences delayed {operation} before any media request", async () =>
+            {
+                await using var scene = await Scene.CreateAsync();
+                await scene.Login();
+                scene.Handler.HoldMethod = "vip_login_base";
+                var pending = scene.App.ExecuteAsync("music.official." + operation, new {
+                    platform = "tx", song = SongObject("tx", "FixtureMID"), quality = "320k"
+                });
+                try
+                {
+                    await scene.Handler.MethodEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    await scene.Ok("music.officialSources.settings.save",
+                        new { ifRevision = 0, enabled = new[] { "wy", "kg" } });
+                }
+                finally { scene.Handler.MethodRelease.TrySetResult(); }
+                Code(await pending.WaitAsync(TimeSpan.FromSeconds(5)), "CANCELLED");
+                Check(scene.Handler.MediaRequests == 0 && !scene.Store.Data.ContainsKey(MusicSourceCache.Namespace),
+                    "a disabled late rights observation cannot create media URLs or cache grants");
+                Check(scene.Runtime.Calls == 0);
+            });
+        }
+        yield return new("Official source disable discards a late QQ media URL and cannot republish cache authority", async () =>
+        {
+            await using var scene = await Scene.CreateAsync();
+            await scene.Login();
+            var input = new { platform = "tx", song = SongObject("tx", "FixtureMID"), quality = "320k" };
+            var context = await scene.Ok("music.official.cacheContext", input);
+            scene.Handler.HoldMethod = "UrlGetVkey";
+            var pending = scene.App.ExecuteAsync("music.official.resolve", input);
+            try
+            {
+                await scene.Handler.MethodEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await scene.Ok("music.officialSources.settings.save",
+                    new { ifRevision = 0, enabled = new[] { "wy", "kg" } });
+            }
+            finally { scene.Handler.MethodRelease.TrySetResult(); }
+            Code(await pending.WaitAsync(TimeSpan.FromSeconds(5)), "CANCELLED");
+            Check(scene.Handler.Vkeys == 1 && !scene.Store.Data.ContainsKey(MusicSourceCache.Namespace));
+            Check(!scene.App.IsOfficialPlaybackCurrent("tx", context.GetProperty("scope").GetString()!,
+                context.GetProperty("generation").GetInt64()), "late native success cannot restore cache access");
+            Check(scene.Runtime.Calls == 0);
+        });
+        yield return new("Unknown official source CAS fails native admission closed until an explicit settings read", async () =>
+        {
+            await using var scene = await Scene.CreateAsync();
+            await scene.Login();
+            var song = SongObject("tx", "FixtureMID");
+            var input = new { platform = "tx", song, quality = "320k" };
+            var context = await scene.Ok("music.official.cacheContext", input);
+            var policy = await scene.Ok("music.quality.settings.get");
+            scene.Store.WriteReceipt = new DocumentFingerprint(true, 1, new string('0', 64));
+            Code(await scene.App.ExecuteAsync("music.officialSources.settings.save",
+                new { ifRevision = 0, enabled = new[] { "wy", "kg" } }), "COMMIT_UNKNOWN");
+            int calls = scene.Handler.Calls, writes = scene.Store.Writes;
+            Check(!scene.App.IsOfficialPlaybackCurrent("tx", context.GetProperty("scope").GetString()!,
+                context.GetProperty("generation").GetInt64()));
+            Code(await scene.App.ExecuteAsync("music.official.candidates", new {
+                song, quality = "320k", qualityPolicySignature = policy.GetProperty("signature").GetString(), discover = true
+            }), "PENDING_WRITE");
+            foreach (string method in new[] { "resolve", "cacheContext", "authorize", "confirm" })
+                Code(await scene.App.ExecuteAsync("music.official." + method, input), "PENDING_WRITE");
+            Check(scene.Handler.Calls == calls && scene.Store.Writes == writes,
+                "native readers must neither reconcile nor replay an unknown settings write");
+            scene.Store.WriteReceipt = null;
+            var settings = (await scene.Ok("music.officialSources.settings.get")).GetProperty("settings");
+            Check(settings.GetProperty("revision").GetInt64() == 1 &&
+                settings.GetProperty("enabled").EnumerateArray().All(value => value.GetString() != "tx"));
+            foreach (string method in new[] { "resolve", "cacheContext", "authorize", "confirm" })
+                Code(await scene.App.ExecuteAsync("music.official." + method, input), "OFFICIAL_SOURCE_DISABLED");
+            Check(scene.Handler.Calls == calls && scene.Store.Writes == writes && scene.Runtime.Calls == 0);
         });
         yield return new("Official candidate lookup reports incompatible current cache data without fallback or overwrite", async () =>
         {
@@ -259,6 +419,9 @@ public static class MusicOfficialSelectionTests
 
     private static JsonObject SongObject(string platform, string id, string title = "Same Song", double duration = 100)
         => Song(platform, id, title, duration);
+    private static void Code(JsonElement result, string expected) =>
+        Check(!result.GetProperty("ok").GetBoolean() && result.GetProperty("code").GetString() == expected,
+            $"Expected {expected}: {result.GetRawText()}");
     private sealed class Scene : IAsyncDisposable
     {
         internal readonly MemoryStore Store;
@@ -295,13 +458,16 @@ public static class MusicOfficialSelectionTests
     }
     private sealed class Transport : HttpMessageHandler
     {
-        internal int Calls, Searches;
-        internal bool FailSearch, HoldSearch;
+        internal int Calls, Searches, MediaRequests, Vkeys;
+        internal bool FailSearch, HoldSearch, IgnoreSearchCancellation;
         internal bool PagedSearch;
         internal bool Member = true;
         internal int LastPage;
+        internal string? HoldMethod;
         internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource MethodEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource MethodRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
             Interlocked.Increment(ref Calls);
@@ -312,12 +478,25 @@ public static class MusicOfficialSelectionTests
             {
                 Searches++;
                 LastPage = input["req_0"]!["param"]!["page_num"]!.GetValue<int>();
-                if (HoldSearch) { Entered.TrySetResult(); await Release.Task.WaitAsync(token); }
+                if (HoldSearch)
+                {
+                    Entered.TrySetResult();
+                    if (IgnoreSearchCancellation) await Release.Task;
+                    else await Release.Task.WaitAsync(token);
+                }
                 if (FailSearch) return new(HttpStatusCode.ServiceUnavailable);
                 return Qq(new { meta = new { sum = PagedSearch ? 31 : 1, nextpage = PagedSearch && LastPage == 1 ? 2 : -1 }, body = new { item_song = new[] {
                     new { mid = "FixtureMID", id = 10, type = 0, title = "Same Song", interval = 100,
                         singer = new[] { new { name = "Artist" } }, file = new { size_320mp3 = 120 } }
                 } } });
+            }
+            if (method is "CgiGetTrackInfo" or "UrlGetVkey") Interlocked.Increment(ref MediaRequests);
+            if (method == "UrlGetVkey") Interlocked.Increment(ref Vkeys);
+            if (method == HoldMethod && method is not null)
+            {
+                MethodEntered.TrySetResult();
+                // Deliberately ignore cancellation to exercise native publication fencing.
+                await MethodRelease.Task;
             }
             return method switch {
                 "GetLoginUserInfo" => Qq(new { code = 0 }),

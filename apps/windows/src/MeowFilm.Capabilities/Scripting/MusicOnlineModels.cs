@@ -8,6 +8,13 @@ public sealed record MusicSourceRow(string InstallationId, string Name, string V
 {
     public string Label => $"{Name} · {InstallationId[^8..]}";
     public string StateText => State switch { "ready" => "已启用", "idle" => "待加载", "disabled" => "已停用", _ => "失败" };
+    public string Metadata => $"版本 {Version}" + (Platforms.Length == 0 ? "" : " · " +
+        string.Join("、", Platforms.Select(PlatformName)));
+    internal static string PlatformName(string platform) => platform switch
+    {
+        "wy" => "网易云", "tx" => "QQ", "kg" => "酷狗", "kw" => "酷我", "mg" => "咪咕",
+        "local" => "本地", _ => platform
+    };
     internal static MusicSourceRow Read(JsonElement value)
     {
         var id = MusicDto.Text(value, "installationId");
