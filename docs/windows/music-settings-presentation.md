@@ -11,6 +11,7 @@
 - 分类切换、滚动与尺寸变化关闭账号临时浮层；设置激活、退休、取消与排空复用原生生命周期。
 - 响应断点由 `SettingsLayout.Mode` 附加行为拥有：`MusicContent` 启用 `Sections`，三个双面板容器启用 `Pair`；行为读取所附加容器的实际 DIP 宽度，并通过可继承的 `IsCompact`／`IsNarrow`／`IsStacked` 供样式消费。业务 owner 不保存窗口或容器宽度；外观控件列数由 `IsNarrow` trigger 决定。
 - 行为在初次布局及 Loaded 时更新；Unloaded 停止尺寸监听并保留最后的布局状态，重新 Loaded 按当前宽度刷新。设为 `None` 移除监听并清除该模式写入的状态，容器不依赖业务模块即可独立使用。
+- “账号与平台”提供数据源下拉框，复用现有控件样式；网易云／酷狗选择通过 `music.catalogSource.settings.get/save` 持久化。只在成功回执或权威读取确认后采用新平台，失败可重读，通知复用统一出口。来源偏好与账号、搜索、音源启停及在线设置独立；存储格式见[原生曲库](music-native-library.md)。
 
 ## 参考布局与资源
 
@@ -59,4 +60,5 @@
 - 脚本源覆盖本地多选、真实 `music.sources.*` 安装及后续管理、HTTPS 下载拒绝重定向、网络和本地内容共用检查安装流程，以及 16 MiB 含边界值；同时验证较大安装集合的本地多选和后续网络安装。测试归属为 `MusicOnlineTests.cs`、`MusicScriptIntegrationTests.cs`、`MusicNativeScriptTests.cs`、`SelectedFileSnapshotTests.cs`、`MusicSourceNetworkDownloadTests.cs` 和 `MusicSourcesSettingsTests.cs`。验证直接断言真实 API、下载安全及 UI 状态，不以本地导入或普通解析成功用例替代网络路径覆盖。
 - 原生 UI 回归覆盖锚点、末段置顶、页头标题与类别切换、两块平铺、优先列表尺寸与移动、让位拖动、整页滚轮、开关、键盘、高对比、取消／资源释放，以及账号和偏好消费者；布局用例位于 `MusicSettingsLayoutTests.cs`。
 - 布局组件回归覆盖 1100／640／544 DIP 临界值、宽窄连续切换、后代状态继承、卸载后停止响应、重载刷新及附加行为禁用／重新启用；设置视图同时检查原标签列、间距和外观列数。文字回归检查实际节点的 Display + Auto，有效模式负对照与原有非空／中性像素、对比度、字形底部及裁切断言继续保留；离屏位图 DPI 不代表物理显示器子像素或跨屏验收。
+- 数据源覆盖默认／重启恢复、保存确认、失败后权威回读与职责隔离（`MusicCatalogSourceSettingsTests.cs`），以及启动请求平台、切换旧结果隔离、跨平台详情、设置控件与窄窗布局（`MusicCatalogPersonalTests.cs`、`MusicSettingsLayoutTests.cs`）；酷狗协议与动作归属 `MusicKgDiscoveryTests.cs`。
 - 使用受控测试数据渲染真实 WPF PNG，对照参考检查 1440、1110 和最小 860×600 的完整桌面壳，以及独立内容区的窄宽度状态。Taste 的浏览器 DOM 检查器不适用于 WPF；不另造 HTML 冒充原生验证。编译、原生行为回归、截图和真实平台／扬声器／系统 DPI 验收分别记录，不能互相替代。

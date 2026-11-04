@@ -80,6 +80,8 @@ public static class AppCompositionTests
             methods = AppLauncher.ComposeScriptCapabilities(documents.Methods, [music]);
             await music.InitializeAsync(default);
             Check(music.Status.Length == 0);
+            Check(music.CatalogSourcePlatform == "wy" && music.CanEditCatalogSource && !music.HasCatalogSourceError,
+                "native startup restores the source preference without starting scripts");
             await music.NavigateAsync("favorites", default);
             Check(music.Status.Length == 0 && music.View != music.SettingsView);
             Check(music.Navigation.Count > 0 && music.Navigation.Select(n => n.Route).Distinct().Count() == music.Navigation.Count);
@@ -143,6 +145,8 @@ public static class AppCompositionTests
                     ((ListBox)shell.FindName("NavigationList")).SelectedItem is ShellNavigationEntry { Route: "catalog-home" });
                 Check(music.Status.Length == 0 && music.CatalogSections.Sum(section => section.Items.Count) > 0,
                     "default recommendation must contain native platform data");
+                Check(music.CatalogSourcePlatform == "wy" && !music.HasCatalogSourceError,
+                    "cold shell startup consumes the source settings get contract before home");
                 Check(((ListBox)shell.FindName("NavigationList")).SelectedItem is ShellNavigationEntry { Route: "catalog-home" },
                     "Shell must commit its actual default route");
                 RenderComponent((FrameworkElement)shell.Content, 1244, 848);

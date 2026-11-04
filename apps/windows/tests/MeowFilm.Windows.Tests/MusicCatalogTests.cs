@@ -1698,13 +1698,15 @@ public static class MusicCatalogTests
             Equal(count, f.Client.Log.Count);
             Equal("playlist", cards.Single(c => c.Kind == "playlist").Kind);
         });
-        yield return Case("channel descriptors expose implemented featured cube artists and VIP pages", async () =>
+        yield return Case("channel descriptors expose generic placement and preserve native artists and VIP pages", async () =>
         {
             await using var f = await Fixture.Create();
             await f.Module.NavigateAsync("catalog-channels", default);
             var cards = f.Module.ChannelTabs;
-            True(cards.Single(c => c.Id == "feature").CanOpen, "featured is channel descriptor kind");
-            True(cards.Single(c => c.Id == "rock").CanOpen, "cube is channel descriptor kind");
+            True(cards.All(c => c.Kind == "channel" && c.Placement is "primary" or "more"),
+                "native channel descriptors publish only neutral kinds and placements");
+            True(cards.Single(c => c.Id == "feature").CanOpen, "featured channel remains available");
+            True(cards.Single(c => c.Id == "rock").CanOpen, "rock channel remains available");
             True(cards.Single(c => c.Id == "artist").CanOpen, "artist directory has a native owner");
             True(cards.Single(c => c.Id == "vip").CanOpen, "VIP page has a native owner");
             Equal("feature,playlist,chart,artist,vip,euro,djR,huayu,qingge,acg",
@@ -2044,6 +2046,7 @@ public static class MusicCatalogTests
             yield return Case("actual " + platform + " provider song DTO and full cloud save", async () =>
             {
                 await using var f = await Fixture.Create();
+                Equal("wy", f.Module.CatalogSourcePlatform);
                 await f.Module.NavigateAsync("catalog-home", default);
                 await f.SearchPolicy(platform, playlists: false);
                 f.Module.SelectedCatalogPlatform = f.Module.CatalogPlatforms.Single(p => p.Key == platform);
@@ -2054,8 +2057,13 @@ public static class MusicCatalogTests
                 Equal(platform, MusicSongFixture.Info(card.Song!.Raw).GetProperty("source").GetString());
                 var id = platform == "kg" ? "global-test" : "500";
                 await f.Module.NavigateAsync("catalog-playlist/" + platform + "/" + id, default);
+                Equal(platform, f.Module.SelectedCatalogPlatform.Key);
+                Equal("wy", f.Module.CatalogSourcePlatform);
                 await f.Module.SaveCatalogPlaylistAsync();
                 Equal(205, f.Module.Playlists.Single(p => p.Kind == "playlist").Count);
+                await f.Module.NavigateAsync("catalog-home", default);
+                Equal("wy", f.Module.CatalogSourcePlatform);
+                Equal("wy", f.Module.SelectedCatalogPlatform.Key);
             });
         }
         yield return Case("back restores successful merged view without new requests", async () =>
@@ -2521,6 +2529,10 @@ public static class MusicCatalogTests
             try
             {
                 await f.Module.InitializeAsync(default);
+                Equal("wy", f.Module.CatalogSourcePlatform);
+                True(f.Module.CanEditCatalogSource && !f.Module.HasCatalogSourceError, "catalog fixture consumes the source restore contract");
+                Equal(1, f.Client.Count("music.catalogSource.settings.get"));
+                Equal(0, f.Client.Count("music.catalogSource.settings.save"));
                 True(!f.runtime.HasStarted, "ordinary native initialization is script-free");
                 return f;
             }

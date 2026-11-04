@@ -126,6 +126,8 @@ public static class MusicNativePlatformTests
             Equal("featured,playlists,rankings,new-songs,cube,artists,vip",
                 string.Join(",", wy.GetProperty("channelKinds").EnumerateArray().Select(kind => kind.GetString())));
             True(!d.GetProperty("platforms").GetProperty("tx").GetProperty("home").GetBoolean());
+            True(d.GetProperty("platforms").GetProperty("kg").GetProperty("home").GetBoolean());
+            True(d.GetProperty("platforms").GetProperty("kg").GetProperty("channels").GetBoolean());
             var limits = d.GetProperty("limits");
             Equal(100, limits.GetProperty("maxPageSize").GetInt32());
             Equal(4 * 1024 * 1024, limits.GetProperty("maxResponseBytes").GetInt32());
@@ -941,9 +943,12 @@ public static class MusicNativePlatformTests
             var r = await f.Catalog.ChannelsAsync(new("wy"));
             var items = r.GetProperty("items").EnumerateArray().ToArray();
             var rock = r.GetProperty("items").EnumerateArray().Single(c => c.GetProperty("id").GetString() == "rock");
-            Equal("cube", rock.GetProperty("kind").GetString()); Equal("MUSIC_ROCK", rock.GetProperty("pageCode").GetString());
+            Equal("channel", rock.GetProperty("kind").GetString()); Equal("MUSIC_ROCK", rock.GetProperty("pageCode").GetString());
+            Equal("more", rock.GetProperty("placement").GetString()); True(rock.GetProperty("available").GetBoolean());
             Equal("歌单广场", items.Single(c => c.GetProperty("id").GetString() == "playlist").GetProperty("name").GetString());
-            Equal("artists", items.Single(c => c.GetProperty("id").GetString() == "artist").GetProperty("kind").GetString());
+            var artist = items.Single(c => c.GetProperty("id").GetString() == "artist");
+            Equal("channel", artist.GetProperty("kind").GetString()); Equal("primary", artist.GetProperty("placement").GetString());
+            True(artist.GetProperty("available").GetBoolean());
             Equal("MUSIC_ACG", items.Single(c => c.GetProperty("id").GetString() == "acg").GetProperty("pageCode").GetString());
             True(!items.Any(c => c.GetProperty("id").GetString() == "music_top_tab_acg"));
             await Error("IDENTITY_MISMATCH", () => f.Catalog.ChannelAsync(new("wy", "rock", PageCode: "OTHER_PAGE")));

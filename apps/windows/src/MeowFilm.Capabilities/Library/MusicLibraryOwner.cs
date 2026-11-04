@@ -21,6 +21,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     private enum PendingOwner
     {
         Appearance,
+        CatalogSource,
         DeviceSettings,
         History,
         Library,
@@ -91,6 +92,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         if (method.StartsWith("music.queue.", StringComparison.Ordinal)) return PendingOwner.Queue;
         if (method.StartsWith("music.history.", StringComparison.Ordinal)) return PendingOwner.History;
         if (method is "music.settings.save") return PendingOwner.OnlineSettings;
+        if (method is "music.catalogSource.settings.save") return PendingOwner.CatalogSource;
         if (method is "music.officialSources.settings.save") return PendingOwner.OfficialSources;
         if (method is "music.quality.settings.save") return PendingOwner.Quality;
         if (method is "music.metadata.settings.save") return PendingOwner.Metadata;
@@ -105,6 +107,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     private static bool IsAuthoritativeRead(string method, PendingOwner owner) => owner switch
     {
         PendingOwner.Appearance => method == "music.appearance.get",
+        PendingOwner.CatalogSource => method == "music.catalogSource.settings.get",
         PendingOwner.Metadata => method == "music.metadata.settings.get",
         PendingOwner.Quality => method == "music.quality.settings.get",
         PendingOwner.OfficialSources => method == "music.officialSources.settings.get",
@@ -186,7 +189,8 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             JsonObject p;
             try { p = LJ.Parameters(parameters, full ? 16 * 1024 * 1024 : 512 * 1024); }
             catch (MusicLibraryException error) when (error.Code == "CORRUPT_STORAGE" &&
-                (method is "music.officialSources.settings.get" or "music.officialSources.settings.save"))
+                (method is "music.officialSources.settings.get" or "music.officialSources.settings.save" or
+                    "music.catalogSource.settings.get" or "music.catalogSource.settings.save"))
             { throw new MusicLibraryException("INVALID_REQUEST"); }
             await EnterAsync(token).ConfigureAwait(false); entered = true;
             recommendationStage = null;

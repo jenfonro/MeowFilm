@@ -84,8 +84,8 @@ internal static partial class PlatformSongs
     {
         var audio = PJ.At(raw, "audio_info");
         var album = PJ.First(PJ.At(raw, "albuminfo"), PJ.At(raw, "album_info"));
-        var id = KgHash(PJ.First(PJ.At(raw, "hash"), PJ.At(raw, "FileHash"), PJ.At(audio, "hash")));
-        var full = Regex.Replace(M(PJ.First(PJ.At(raw, "name"), PJ.At(raw, "FileName"))), @"\.(mp3|flac|m4a|wav|ape|ogg|aac|wma)$", "", RegexOptions.IgnoreCase);
+        var id = KgHash(PJ.First(PJ.At(raw, "hash"), PJ.At(raw, "FileHash"), PJ.At(audio, "hash"), PJ.At(audio, "hash_128")));
+        var full = Regex.Replace(M(PJ.First(PJ.At(raw, "name"), PJ.At(raw, "FileName"), PJ.At(raw, "filename"))), @"\.(mp3|flac|m4a|wav|ape|ogg|aac|wma)$", "", RegexOptions.IgnoreCase);
         var at = full.IndexOf(" - ", StringComparison.Ordinal);
         var singers = PJ.First(PJ.At(raw, "singerinfo"), PJ.At(raw, "Singers"));
         var artist = singers is JsonArray ? string.Join("、", PJ.Rows(singers, 100).Select(a => M(PJ.First(a["name"], a["author_name"]))))
@@ -104,7 +104,7 @@ internal static partial class PlatformSongs
         var mixId = OptionalId(PJ.At(raw, "mixsongid"), PJ.At(raw, "add_mixsongid"), PJ.At(raw, "album_audio_id"), PJ.At(raw, "MixSongID"));
         var types = new JsonArray(); var nativeTypes = new JsonObject();
         foreach (var (quality, h, size) in new (string, JsonNode?, JsonNode?)[] {
-            ("128k", JsonValue.Create(id), PJ.First(PJ.At(raw,"filesize"),PJ.At(raw,"FileSize"),PJ.At(raw,"size"),PJ.At(audio,"filesize"))),
+            ("128k", JsonValue.Create(id), PJ.First(PJ.At(raw,"filesize"),PJ.At(raw,"FileSize"),PJ.At(raw,"size"),PJ.At(audio,"filesize"),PJ.At(audio,"filesize_128"))),
             ("320k",PJ.First(PJ.At(raw,"hash_320"),PJ.At(raw,"HQFileHash"),PJ.At(audio,"hash_320")),PJ.First(PJ.At(raw,"filesize_320"),PJ.At(raw,"HQFileSize"),PJ.At(audio,"filesize_320"))),
             ("flac",PJ.First(PJ.At(raw,"hash_flac"),PJ.At(raw,"SQFileHash"),PJ.At(audio,"hash_flac")),PJ.First(PJ.At(raw,"filesize_flac"),PJ.At(raw,"SQFileSize"),PJ.At(audio,"filesize_flac"))),
             ("flac24bit",PJ.First(PJ.At(raw,"hash_high"),PJ.At(raw,"ResFileHash"),PJ.At(audio,"hash_high")),PJ.First(PJ.At(raw,"filesize_high"),PJ.At(raw,"ResFileSize"),PJ.At(audio,"filesize_high"))) })
@@ -114,9 +114,10 @@ internal static partial class PlatformSongs
             types.Add(PJ.Obj(("type", quality), ("hash", hash), ("size", sizeText)));
             nativeTypes[quality] = PJ.Obj(("hash", hash), ("size", sizeText));
         }
-        return Song("kg", id, title, artist, M(PJ.First(PJ.At(raw, "AlbumName"), PJ.At(album, "name"), PJ.At(album, "album_name"))),
-            PJ.At(raw, "Duration") is { } d ? PJ.Number(d) : PJ.Number(PJ.First(PJ.At(raw, "timelen"), PJ.At(raw, "timelength"), PJ.At(audio, "timelength"))) / 1000,
-            PJ.Image(PJ.First(PJ.At(raw, "cover"), PJ.At(raw, "Image"), PJ.At(raw, "trans_param", "union_cover"))),
+        return Song("kg", id, title, artist, M(PJ.First(PJ.At(raw, "AlbumName"), PJ.At(album, "name"), PJ.At(album, "album_name"), PJ.At(raw, "album_name"))),
+            PJ.At(raw, "Duration") is { } d ? PJ.Number(d) :
+                PJ.Number(PJ.First(PJ.At(raw, "timelen"), PJ.At(raw, "timelength"), PJ.At(audio, "timelength"), PJ.At(audio, "duration_128"))) / 1000,
+            PJ.Image(PJ.First(PJ.At(raw, "cover"), PJ.At(raw, "Image"), PJ.At(raw, "trans_param", "union_cover"), PJ.At(album, "sizable_cover"))),
             PJ.Obj(("hash", id), ("albumId", albumId), ("album_id", albumId), ("albumAudioId", mixId), ("types", types), ("_types", nativeTypes)));
     }
     internal static JsonObject Playlist(string platform, JsonNode raw)

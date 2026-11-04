@@ -28,7 +28,7 @@ public partial class MusicView : UserControl, MeowFilm.Desktop.IDesktopHeaderSou
         try
         {
             await Task.WhenAll(active ? module.ActivateDiscoveryViewAsync() : module.DeactivateDiscoveryViewAsync(),
-                module.UpdateVipPageAsync(active));
+                module.UpdateVipPageAsync(active), active ? module.ActivateCatalogLandingAsync() : Task.CompletedTask);
         }
         catch { /* Navigation and shutdown retain final drain ownership. */ }
     }

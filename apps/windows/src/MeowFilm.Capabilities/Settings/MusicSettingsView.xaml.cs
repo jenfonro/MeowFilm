@@ -184,6 +184,18 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         if (!IsLoaded || sender is not ComboBox { SelectedItem: string value } || value == module.PlaybackQualityRequest) return;
         await module.SetPlaybackQualityRequestAsync(value);
     }
+    private async void CatalogSource_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (!IsLoaded || !IsVisible || area != "music" ||
+            sender is not ComboBox { SelectedValue: string platform } picker ||
+            platform == module.CatalogSourcePlatform) return;
+        await module.SetCatalogSourceAsync(platform);
+        picker.GetBindingExpression(ComboBox.SelectedValueProperty)?.UpdateTarget();
+    }
+    private async void CatalogSourceRetry_Click(object sender, RoutedEventArgs e)
+    {
+        if (IsLoaded && IsVisible && area == "music") await module.ReadCatalogSourceSettingsAsync();
+    }
     private async void Appearance_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (!IsLoaded || sender is not ComboBox { Tag: string setting, SelectedValue: string value }) return;
