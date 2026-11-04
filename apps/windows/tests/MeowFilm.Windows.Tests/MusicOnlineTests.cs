@@ -37,7 +37,7 @@ public static partial class MusicUiTests
             Equal(180.125, song.GetProperty("sources")[0].GetProperty("musicInfo").GetProperty("duration").GetDouble());
             True(!song.GetRawText().Contains("\"interval\""), "dispatch does not mutate durable metadata");
         });
-        yield return Case("online safe JS selection, explicit quality and target, queue and native Started history", async () =>
+        yield return Case("online enabled network source participates with built-ins explicit quality queue and native Started history", async () =>
         {
             await using var f = await Fixture.Create();
             Equal(0, f.Calls.Count("music.quality.settings.get"));
@@ -88,7 +88,7 @@ public static partial class MusicUiTests
             Equal(0, f.Playback.Opens.Count); Equal(0, f.Calls.Count("music.history.recordPlayed"));
             await f.Module.TogglePlaybackAsync(); Equal(1, f.Playback.Opens.Count);
         });
-        yield return Case("only successful Native settings save cancels in-flight actual LX playback resolution", async () =>
+        yield return Case("lyric settings leave in-flight LX audio intact and explicit cancellation drains it", async () =>
         {
             await using var f = await Fixture.Create();
             await SetupOnline(f, "new Promise(() => {})");
@@ -100,9 +100,11 @@ public static partial class MusicUiTests
                 installationId = f.Module.Sources.Single().InstallationId, platform = "wy", song, quality = "320k" });
             await Until(() => f.Runtime.Calls.Contains("music.script.invoke"));
             var rejected = await f.Application.ExecuteAsync("music.settings.save", new {
-                ifRevision = revision + 1, lyrics = true, target = settings.GetProperty("target") });
+                ifRevision = revision + 1, lyrics = false });
             True(!rejected.GetProperty("ok").GetBoolean() && !resolution.IsCompleted, "rejected save does not cancel playback");
-            await f.Rpc("music.settings.save", new { ifRevision = revision, lyrics = true, target = settings.GetProperty("target") });
+            await f.Rpc("music.settings.save", new { ifRevision = revision, lyrics = false });
+            True(!resolution.IsCompleted, "lyric settings do not choose or cancel an audio provider");
+            await f.Rpc("music.online.cancel");
             var cancelled = await resolution.WaitAsync(TimeSpan.FromSeconds(5));
             Equal("CANCELLED", cancelled.GetProperty("code").GetString());
             Equal(0, f.Playback.Opens.Count);
@@ -240,12 +242,12 @@ public static partial class MusicUiTests
         await f.Module.LoadSourceAsync(f.Module.SelectedSource);
         await f.Module.SourceActionAsync("enable");
         await Until(() => f.Module.CanEdit);
-        await f.Module.UseSourcePlatformAsync("wy");
+        await f.Module.RefreshOnlineAsync();
         var saved = (await f.Rpc("music.settings.get")).GetProperty("settings");
-        Equal(f.Module.Sources.Single().InstallationId, saved.GetProperty("target").GetProperty("installationId").GetString());
-        Equal("wy", saved.GetProperty("target").GetProperty("platform").GetString());
+        True(f.Module.Sources.Single().Enabled, "the enabled network source is eligible without a global selection");
+        Equal(3, saved.GetProperty("schema").GetInt32());
         True(!saved.TryGetProperty("quality", out _), "online settings must not duplicate native quality policy");
-        True(f.Module.Status.Length == 0, "configured exact playback target");
+        True(f.Module.Status.Length == 0, "source activation and native settings refresh succeeded");
     }
     private static Task PlayOnlineSong(MusicCapability module) =>
         module.PlayOnlineSongAsync("wy", "合成歌曲", "合成艺人", "",

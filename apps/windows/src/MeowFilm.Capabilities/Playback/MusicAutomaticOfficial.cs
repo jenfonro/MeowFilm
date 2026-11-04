@@ -41,7 +41,8 @@ public sealed partial class MusicCapability
 
     private async Task<ResolvedMusic> ResolveAutomaticOfficial(SongRow song, string quality, string policy,
         CancellationToken token, IReadOnlySet<string>? rejectedSources = null,
-        IReadOnlySet<string>? rejectedUrls = null, bool requireNetwork = false)
+        IReadOnlySet<string>? rejectedUrls = null, bool requireNetwork = false,
+        Action<JsonElement, string[]>? planned = null)
     {
         using var request = CancellationTokenSource.CreateLinkedTokenSource(token);
         request.CancelAfter(TimeSpan.FromSeconds(35));
@@ -57,23 +58,31 @@ public sealed partial class MusicCapability
         }
         int bestRank = MusicQualityPolicy.RequestTypes.Concat(new[] { "jyeffect", "dolby", "sky", "vivid" })
             .Min(level => MusicQualityPolicy.Priority(level, settings));
+        JsonElement snapshot = KnownOfficialSong(song);
+        string[] preference = [];
+        void PublishPlan() => planned?.Invoke(snapshot, preference);
         async Task<MusicOnlineTarget[]> Plan(bool discover)
         {
             var reply = await QualityCall("music.official.candidates", new {
                 song = KnownOfficialSong(song), quality, qualityPolicySignature = policy, discover
             }, cancellation);
             MusicDto.Require(MusicDto.Text(reply, "qualityPolicySignature") == policy);
-            if (reply.TryGetProperty("authorizationRequired", out var required) && required.ValueKind == JsonValueKind.True)
-                throw new MusicOperationException("AUTH_REQUIRED");
             var decorated = SongRow.Read(reply.GetProperty("song"), song.EntryId);
             MusicDto.Require(decorated.Id == song.Id);
+            snapshot = decorated.Raw;
             var candidates = reply.GetProperty("candidates").EnumerateArray().ToArray();
             MusicDto.Require(candidates.Length <= 24);
-            return candidates.Where(row => rejectedSources?.Contains(MusicDto.Text(row, "sourceKey")) != true)
-                .Select(row => new MusicOnlineTarget(null, MusicDto.Text(row, "platform"),
+            preference = candidates.Select(row => MusicDto.Text(row, "sourceKey")).ToArray();
+            if (reply.TryGetProperty("authorizationRequired", out var required) && required.ValueKind == JsonValueKind.True)
+            {
+                PublishPlan();
+                throw new MusicOperationException("AUTH_REQUIRED");
+            }
+            return candidates.Select(row => new MusicOnlineTarget(null, MusicDto.Text(row, "platform"),
                 MusicDto.Integer(row, "generation"), MusicDto.Text(row, "sourceKey"),
                 PolicyRequest: quality, Quality: quality, QualityPolicySignature: policy,
-                AccountScope: MusicDto.Text(row, "scope"), RecordingSong: decorated.Raw, Automatic: true)).ToArray();
+                AccountScope: MusicDto.Text(row, "scope"), RecordingSong: decorated.Raw, Automatic: true))
+                .Where(target => rejectedSources?.Contains(SourceIdentity(target)) != true).ToArray();
         }
         try
         {
@@ -82,13 +91,19 @@ public sealed partial class MusicCapability
             // History is preference only; cacheContext still checks account generation and policy.
             foreach (var target in requireNetwork ? Array.Empty<MusicOnlineTarget>() : known)
             {
-                try { return await ResolveOfficialTarget(song, target, cancellation, initial: true, cacheOnly: true); }
+                try
+                {
+                    var cached = await ResolveOfficialTarget(song, target, cancellation, initial: true, cacheOnly: true);
+                    PublishPlan();
+                    return cached;
+                }
                 catch (MusicOperationException e) when (UnavailableOfficialCandidate(e.Code)) { }
             }
             var discovered = await Plan(true);
+            PublishPlan();
             if (discovered.Length == 0) throw new MusicOperationException("RECORDING_UNAVAILABLE");
             // At most three native platform workers; each tries its compatible recordings in preference order.
-            // Explicit script/recording choices never enter this coordinator.
+            // Manual recordings use the exact resolver instead of this discovery coordinator.
             var results = await Task.WhenAll(discovered.GroupBy(target => target.Platform).Select(async group =>
             {
                 ResolvedMusic? best = null;

@@ -68,7 +68,7 @@ public static partial class MusicUiTests
                 "refresh restores the saved switch");
         });
 
-        yield return Case("source settings update rollback select and remove the captured real installation", async () =>
+        yield return Case("source settings enable alongside built-ins update rollback and remove the captured installation", async () =>
         {
             await using var f = await Fixture.Create();
             await InstallSettingsSources(f, 1);
@@ -92,10 +92,14 @@ public static partial class MusicUiTests
             toggle.SetCurrentValue(ToggleButton.IsCheckedProperty, true);
             toggle.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
             await Until(() => f.Module.CanEdit && f.Module.Sources.Single().Enabled);
-            await Choose("使用 · 网易云");
-            True(!f.Module.UsesOfficialSources, "the native settings accepted the script platform");
-            Click(FindButton(view, "使用内置音源"));
-            await Until(() => f.Module.CanEdit && f.Module.UsesOfficialSources);
+            True(f.Module.OfficialSourceRows.All(row => row.Enabled),
+                "enabling a network source leaves all built-in sources eligible");
+            Equal(0, f.Calls.Count("music.settings.save"));
+            var enabled = f.Module.Sources.Single();
+            await f.Module.SetOfficialSourceEnabledAsync(f.Module.OfficialSourceRows[0], false);
+            await Until(() => f.Module.CanEdit);
+            True(enabled.Enabled && f.Module.Sources.Single().Enabled,
+                "disabling one built-in provider does not disable a network source for that platform");
             f.Dialogs.ScriptPath = Path.Combine(f.Root, "update.js");
             File.WriteAllText(f.Dialogs.ScriptPath, TestScript(version: "2"), new UTF8Encoding(false));
             await Choose("更新脚本");

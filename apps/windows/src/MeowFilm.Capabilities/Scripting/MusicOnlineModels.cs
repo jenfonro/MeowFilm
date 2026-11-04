@@ -8,7 +8,7 @@ public sealed record MusicSourceRow(string InstallationId, string Name, string V
 {
     public string Label => $"{Name} · {InstallationId[^8..]}";
     public string StateText => State switch { "ready" => "已启用", "idle" => "待加载", "disabled" => "已停用", _ => "失败" };
-    public string Metadata => $"版本 {Version}" + (Platforms.Length == 0 ? "" : " · " +
+    public string Metadata => $"网络源 · 版本 {Version}" + (Platforms.Length == 0 ? "" : " · " +
         string.Join("、", Platforms.Select(PlatformName)));
     internal static string PlatformName(string platform) => platform switch
     {
@@ -32,7 +32,6 @@ public sealed record MusicSourceRow(string InstallationId, string Name, string V
     }
 }
 
-public sealed record MusicSourcePlatformRow(string Key, string Name, bool Selected);
 public sealed record MusicLyricRow(double Time, string Text, string Translation, string Romanization = "",
     IReadOnlyList<MusicLyricWord>? Words = null, string Timing = "");
 public sealed record MusicLyricWord(string Text, double Time, double Duration);
