@@ -37,6 +37,7 @@ public partial class Shelf : UserControl
     private int? pendingVisibleCardCount;
     private int visibleCardCount = 1;
     private bool resizeAtEnd, applyingRestore, applyingSeek;
+    private bool presentationActive;
     private bool pointerPending, dragging, animating, restoring, seeking;
     private bool usesDataContextItems = true, settingDataContextItems;
     private int restoreAttempts, restoreStablePasses, seekAttempts;
@@ -65,16 +66,9 @@ public partial class Shelf : UserControl
             }
             if (!restoring && !dragging && !animating) SnapToNearest();
         };
-        Loaded += (_, _) =>
-        {
-            SystemParameters.StaticPropertyChanged += OnSystemSettingChanged;
-            AttachScrollHost();
-        };
-        Unloaded += (_, _) =>
-        {
-            SystemParameters.StaticPropertyChanged -= OnSystemSettingChanged;
-            DetachScrollHost();
-        };
+        Loaded += (_, _) => UpdatePresentation();
+        Unloaded += (_, _) => StopPresentation();
+        IsVisibleChanged += (_, _) => UpdatePresentation();
         DataContextChanged += (_, e) =>
         {
             CommitSettledOffset(e.OldValue as MusicCatalogSection);
@@ -88,9 +82,25 @@ public partial class Shelf : UserControl
             CancelRestore();
             CancelPointerInput();
             StopMotion();
-            UpdateCardWidth();
+            if (presentationActive) UpdateCardWidth();
             ScheduleRestore();
         };
+    }
+    private void UpdatePresentation()
+    {
+        if (!IsLoaded || !IsVisible) { StopPresentation(); return; }
+        if (presentationActive) return;
+        presentationActive = true;
+        SystemParameters.StaticPropertyChanged += OnSystemSettingChanged;
+        UpdateCardWidth();
+        AttachScrollHost();
+    }
+    private void StopPresentation()
+    {
+        if (!presentationActive) return;
+        presentationActive = false;
+        SystemParameters.StaticPropertyChanged -= OnSystemSettingChanged;
+        DetachScrollHost();
     }
     private void OnItemsSourceChanged()
     {
@@ -103,6 +113,7 @@ public partial class Shelf : UserControl
     }
     private void OnSizeChanged(object sender, SizeChangedEventArgs e)
     {
+        if (!IsVisible) return;
         if (!IsLoaded || rail is null)
         {
             UpdateCardWidth();
@@ -169,6 +180,7 @@ public partial class Shelf : UserControl
     }
     private void OnPreviewMouseWheel(object sender, MouseWheelEventArgs e)
     {
+        if (!presentationActive) return;
         if (Keyboard.Modifiers.HasFlag(ModifierKeys.Shift))
         {
             if (rail is null) return;
@@ -218,7 +230,7 @@ public partial class Shelf : UserControl
     }
     private void ScheduleRestore()
     {
-        if (!IsLoaded || rail is null) return;
+        if (!presentationActive || rail is null) return;
         CancelRestore();
         restoreOffset = DataContext is MusicCatalogSection section ? section.HorizontalOffset : 0;
         BeginRestore();
@@ -241,12 +253,13 @@ public partial class Shelf : UserControl
     }
     private void ScheduleSnap()
     {
-        if (restoring || seeking) return;
+        if (!presentationActive || restoring || seeking) return;
         settle.Stop();
         settle.Start();
     }
     private bool Page(int direction)
     {
+        if (!presentationActive) return false;
         if (PageTarget(direction) is not { } target) return false;
         AnimateTo(target);
         return true;

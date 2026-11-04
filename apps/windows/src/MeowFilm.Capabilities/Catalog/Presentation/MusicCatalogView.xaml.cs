@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
@@ -15,16 +16,58 @@ public partial class MusicCatalogView : UserControl
 {
     private readonly UserScrollIntent scrollIntent;
     private MusicCapability? observed;
-    private MusicCatalogCard? lastDefault;
-    private bool defaultScheduled;
     private bool loadingMore;
     private int channelMoreRevealGeneration;
+    private IReadOnlyList<MusicCatalogCard> searchPlaylistCards = [];
+    private readonly ObservableCollection<MusicCatalogPlaylistRow> searchPlaylistRows = [];
+    private double searchPlaylistOffset;
+    private long searchPlaylistHostGeneration;
+    private bool restoringSearchPlaylistOffset;
+    internal ScrollViewer ActiveScroll =>
+        Owner is { IsSearchPlaylists: true } ? SearchPlaylistScroll ?? CatalogScroll :
+        Owner is { IsCatalogHome: true } ? HomeScroll :
+        Owner is { IsSearchOverview: true } ? SearchOverviewScroll :
+        Owner is { IsChannelLanding: true } ? CatalogScroll : UtilityScroll;
+    private ScrollViewer? SearchPlaylistScroll
+    {
+        get
+        {
+            SearchPlaylistList.ApplyTemplate();
+            return SearchPlaylistList.Template.FindName("PART_ScrollViewer", SearchPlaylistList) as ScrollViewer ??
+                Descendant<ScrollViewer>(SearchPlaylistList);
+        }
+    }
     public MusicCatalogView()
     {
         scrollIntent = new(Dispatcher);
         InitializeComponent();
-        Loaded += (_, _) => Observe();
-        DataContextChanged += (_, _) => { if (IsLoaded) Observe(); };
+        AddHandler(ScrollBar.ScrollEvent, new ScrollEventHandler((_, args) =>
+        {
+            if (IsVisible && ActiveScroll is { } scroll) scrollIntent.ObserveScroll(scroll, args);
+        }), true);
+        Loaded += (_, _) =>
+        {
+            Observe();
+            RefreshSearchPlaylistHost();
+            RefreshSearchPlaylistRows();
+        };
+        DataContextChanged += (_, _) =>
+        {
+            DetachSearchPlaylistList();
+            ResetSearchPlaylistProjection();
+            if (IsLoaded) { Observe(); RefreshSearchPlaylistHost(); }
+        };
+        IsVisibleChanged += (_, _) =>
+        {
+            if (!IsVisible)
+            {
+                ChannelMorePopup.IsOpen = false;
+                ResetChannelMoreReveal();
+                scrollIntent.Clear();
+            }
+            else { RefreshSearchPlaylistHost(); RefreshSearchPlaylistRows(); }
+        };
+        SearchPlaylistList.SizeChanged += (_, _) => RefreshSearchPlaylistRows();
         Unloaded += (_, _) =>
         {
             ChannelMorePopup.IsOpen = false;
@@ -32,6 +75,8 @@ public partial class MusicCatalogView : UserControl
             scrollIntent.Clear();
             if (observed is not null) observed.PropertyChanged -= OnOwnerChanged;
             observed = null;
+            DetachSearchPlaylistList();
+            if (Owner is not { HasSearchSession: true }) ResetSearchPlaylistProjection();
         };
     }
     private void Observe()
@@ -39,25 +84,164 @@ public partial class MusicCatalogView : UserControl
         if (observed is not null) observed.PropertyChanged -= OnOwnerChanged;
         observed = Owner;
         if (observed is not null) observed.PropertyChanged += OnOwnerChanged;
-        ScheduleDefaultChannel();
     }
     private void OnOwnerChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
-    { if (e.PropertyName is nameof(MusicCapability.HasChannelTabs) or nameof(MusicCapability.CanCancelCatalog)) ScheduleDefaultChannel(); }
-    private void ScheduleDefaultChannel()
     {
-        if (!IsVisible || Owner is not { } owner) return;
-        if (!owner.IsChannelDirectory) return; // Keep the consumed snapshot on Back; do not bounce forward again.
-        if (owner.CanCancelCatalog || defaultScheduled) return;
-        var card = owner.ChannelTabs.FirstOrDefault(c => c.CanOpen);
-        if (card is null || ReferenceEquals(card, lastDefault)) return;
-        defaultScheduled = true;
-        _ = Dispatcher.InvokeAsync(async () =>
+        if (string.IsNullOrEmpty(e.PropertyName) || e.PropertyName is nameof(MusicCapability.IsSearchPlaylists) or
+            nameof(MusicCapability.HasSearchSession) or nameof(MusicCapability.CatalogSections))
+            RefreshSearchPlaylistHost();
+    }
+    private void RefreshSearchPlaylistHost()
+    {
+        bool searchPlaylists = Owner is { IsSearchPlaylists: true };
+        if (!searchPlaylists)
         {
-            defaultScheduled = false;
-            if (!IsVisible || !ReferenceEquals(Owner, owner) || !owner.IsChannelDirectory || owner.CanCancelCatalog || !owner.ChannelTabs.Contains(card)) return;
-            lastDefault = card; // One attempt per directory snapshot; errors never trigger a retry loop.
-            try { await owner.OpenCatalogCardAsync(card); } catch { }
-        }, System.Windows.Threading.DispatcherPriority.Background);
+            SearchPlaylistList.Visibility = Visibility.Collapsed;
+            if (Owner is not { HasSearchSession: true })
+                ResetSearchPlaylistProjection();
+            return;
+        }
+        if (Owner is not { HasSearchSession: true })
+            ResetSearchPlaylistProjection();
+        SearchPlaylistList.Visibility = Visibility.Visible;
+        if (!ReferenceEquals(SearchPlaylistList.ItemsSource, searchPlaylistRows))
+        {
+            SearchPlaylistList.ItemsSource = searchPlaylistRows;
+            RestoreSearchPlaylistOffset();
+        }
+        IReadOnlyList<MusicCatalogCard> cards = Owner!.CatalogSections.Count == 1
+            ? Owner.CatalogSections[0].Items : [];
+        if (ReferenceEquals(searchPlaylistCards, cards)) return;
+        searchPlaylistCards = cards;
+        RefreshSearchPlaylistRows();
+    }
+    private void RefreshSearchPlaylistRows()
+    {
+        if (Owner is not { IsSearchPlaylists: true } || !IsLoaded || !IsVisible) return;
+        double viewportWidth = SearchPlaylistList.ActualWidth;
+        if (viewportWidth <= 0) return;
+        int columns = Math.Max(1, (int)Math.Floor(viewportWidth / 168));
+        UpdateSearchPlaylistRows(columns);
+    }
+    private void UpdateSearchPlaylistRows(int columns)
+    {
+        int count = searchPlaylistCards.Count / columns +
+            (searchPlaylistCards.Count % columns == 0 ? 0 : 1);
+        int shared = Math.Min(searchPlaylistRows.Count, count);
+        for (int index = 0; index < shared; index++)
+        {
+            var row = searchPlaylistRows[index];
+            int start = index * columns, length = Math.Min(columns, searchPlaylistCards.Count - start);
+            bool same = row.Items.Count == length;
+            for (int item = 0; same && item < length; item++)
+                same = ReferenceEquals(row.Items[item], searchPlaylistCards[start + item]);
+            if (same) continue;
+            searchPlaylistRows[index] = new(SearchPlaylistRowCards(start, length));
+        }
+        while (searchPlaylistRows.Count > count) searchPlaylistRows.RemoveAt(searchPlaylistRows.Count - 1);
+        for (int index = searchPlaylistRows.Count; index < count; index++)
+        {
+            int start = index * columns, length = Math.Min(columns, searchPlaylistCards.Count - start);
+            searchPlaylistRows.Add(new(SearchPlaylistRowCards(start, length)));
+        }
+    }
+    private MusicCatalogCard[] SearchPlaylistRowCards(int start, int length)
+    {
+        var cards = new MusicCatalogCard[length];
+        for (int index = 0; index < length; index++) cards[index] = searchPlaylistCards[start + index];
+        return cards;
+    }
+    internal void ResetSearchPlaylistProjection()
+    {
+        ++searchPlaylistHostGeneration;
+        restoringSearchPlaylistOffset = false;
+        searchPlaylistCards = [];
+        searchPlaylistOffset = 0;
+        if (searchPlaylistRows.Count > 0) searchPlaylistRows.Clear();
+    }
+    private void DetachSearchPlaylistList()
+    {
+        if (SearchPlaylistList.ItemsSource is null) return;
+        if (!restoringSearchPlaylistOffset)
+            searchPlaylistOffset = SearchPlaylistScroll?.VerticalOffset ?? searchPlaylistOffset;
+        ++searchPlaylistHostGeneration;
+        restoringSearchPlaylistOffset = false;
+        SearchPlaylistList.ItemsSource = null;
+    }
+    private void RestoreSearchPlaylistOffset()
+    {
+        long generation = ++searchPlaylistHostGeneration;
+        restoringSearchPlaylistOffset = true;
+        _ = Dispatcher.InvokeAsync(() =>
+        {
+            if (generation != searchPlaylistHostGeneration)
+                return;
+            if (!IsLoaded || !IsVisible || Owner is not { IsSearchPlaylists: true })
+            {
+                restoringSearchPlaylistOffset = false;
+                return;
+            }
+            UpdateLayout();
+            var scroll = SearchPlaylistScroll;
+            scroll?.ScrollToVerticalOffset(searchPlaylistOffset);
+            if (scroll is not null) searchPlaylistOffset = scroll.VerticalOffset;
+            restoringSearchPlaylistOffset = false;
+        }, DispatcherPriority.Loaded);
+    }
+    private static T? Descendant<T>(DependencyObject parent) where T : DependencyObject
+    {
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, i);
+            if (child is T value) return value;
+            if (Descendant<T>(child) is { } nested) return nested;
+        }
+        return null;
+    }
+    private void SearchPlaylistList_ScrollChanged(object sender, ScrollChangedEventArgs e)
+    {
+        if (!IsVisible || !SearchPlaylistList.IsVisible) return;
+        if (e.OriginalSource is not ScrollViewer scroll || !ReferenceEquals(scroll, SearchPlaylistScroll)) return;
+        if (!restoringSearchPlaylistOffset) searchPlaylistOffset = scroll.VerticalOffset;
+        if (e.VerticalChange > 0 && scrollIntent.Accepts(SearchPlaylistList))
+            LoadMoreSearchPlaylistsNearEnd();
+    }
+    private void SearchPlaylistList_Wheel(object sender, MouseWheelEventArgs e)
+    {
+        if (!IsVisible || !SearchPlaylistList.IsVisible) return;
+        scrollIntent.Set(e.Delta < 0);
+        if (scrollIntent.Active) LoadMoreSearchPlaylistsNearEnd();
+    }
+    private void SearchPlaylistList_Key(object sender, KeyEventArgs e)
+    {
+        if (!IsVisible || !SearchPlaylistList.IsVisible) return;
+        var scroll = SearchPlaylistScroll;
+        if (scroll is null) return;
+        scrollIntent.Set(e.Key is Key.Down or Key.PageDown or Key.End);
+        switch (e.Key)
+        {
+            case Key.Down: scroll.LineDown(); break;
+            case Key.PageDown: scroll.PageDown(); break;
+            case Key.End: scroll.ScrollToEnd(); break;
+            case Key.Up: scroll.LineUp(); break;
+            case Key.PageUp: scroll.PageUp(); break;
+            case Key.Home: scroll.ScrollToHome(); break;
+            default: return;
+        }
+        e.Handled = true;
+        if (scrollIntent.Active) LoadMoreSearchPlaylistsNearEnd();
+    }
+    private async void LoadMoreSearchPlaylistsNearEnd()
+    {
+        if (loadingMore || !IsVisible || !SearchPlaylistList.IsVisible ||
+            Owner is not { CanLoadMoreSearchPlaylists: true } owner) return;
+        var scroll = SearchPlaylistScroll;
+        if (scroll is null || scroll.ScrollableHeight - scroll.VerticalOffset > 280) return;
+        loadingMore = true;
+        scrollIntent.Clear();
+        try { await owner.MoreSearchAsync(); }
+        catch { }
+        finally { loadingMore = false; scrollIntent.Clear(); }
     }
     private void ChannelMore_Click(object sender, RoutedEventArgs e)
     {
@@ -121,8 +305,8 @@ public partial class MusicCatalogView : UserControl
     }
     private void CatalogScroll_Changed(object sender, ScrollChangedEventArgs e)
     {
-        if (ReferenceEquals(e.OriginalSource, CatalogScroll) && e.VerticalChange > 0 &&
-            scrollIntent.Accepts(CatalogScroll))
+        if (ReferenceEquals(e.OriginalSource, ActiveScroll) && e.VerticalChange > 0 &&
+            scrollIntent.Accepts(ActiveScroll))
             LoadMoreNearEnd();
     }
     private void CatalogScroll_Wheel(object sender, MouseWheelEventArgs e)
@@ -135,14 +319,13 @@ public partial class MusicCatalogView : UserControl
     private async void LoadMoreNearEnd()
     {
         if (loadingMore || !IsVisible || Owner is not { } owner ||
-            (!owner.IsCatalogLanding || !owner.CanCatalogNext) && !owner.CanLoadMoreSearchPlaylists ||
-            CatalogScroll.ScrollableHeight - CatalogScroll.VerticalOffset > 280) return;
+            !owner.IsCatalogLanding || !owner.CanCatalogNext ||
+            ActiveScroll.ScrollableHeight - ActiveScroll.VerticalOffset > 280) return;
         loadingMore = true;
         scrollIntent.Clear();
         try
         {
-            if (owner.CanLoadMoreSearchPlaylists) await owner.MoreSearchAsync();
-            else await owner.CatalogPageAsync(1);
+            await owner.CatalogPageAsync(1);
         }
         catch { /* The owner publishes bounded business errors; never retry in a scroll loop. */ }
         finally { loadingMore = false; scrollIntent.Clear(); }
@@ -178,7 +361,7 @@ public partial class MusicCatalogView : UserControl
     private async void Account_Click(object sender, RoutedEventArgs e)
     { if (Owner is { } owner) await owner.ReadCatalogAccountAsync(); }
     private async void Options_Changed(object sender, SelectionChangedEventArgs e)
-    { if (IsLoaded && Owner is { } owner) await owner.CatalogOptionsChangedAsync(); }
+    { if (IsLoaded && IsVisible && Owner is { } owner) await owner.CatalogOptionsChangedAsync(); }
     private async void BatchRefresh_Click(object sender, RoutedEventArgs e)
     { if (Owner is { } owner) await owner.RefreshCatalogAsync(); }
     private async void VipSign_Click(object sender, RoutedEventArgs e)
@@ -189,12 +372,12 @@ public partial class MusicCatalogView : UserControl
     { if (Owner is { } owner) await owner.CatalogQueueRecommendationsAsync(); }
     private async void Platform_Changed(object sender, SelectionChangedEventArgs e)
     {
-        if (IsLoaded && Owner is { } owner)
+        if (IsLoaded && IsVisible && Owner is { } owner)
             try { await owner.ChangeCatalogPlatformAsync(); } catch { }
     }
     private async void Kind_Changed(object sender, SelectionChangedEventArgs e)
     {
-        if (IsLoaded && Owner is { IsSearchPage: false } owner)
+        if (IsLoaded && IsVisible && Owner is { IsSearchPage: false } owner)
             try { await owner.CatalogSearchKindAsync(); } catch { }
     }
     private async void Page_Click(object sender, RoutedEventArgs e)
@@ -225,7 +408,7 @@ public partial class MusicCatalogView : UserControl
         if (Owner is not { } owner || sender is not EntryCard { DataContext: MusicCatalogCard card } entry) return;
         var token = entry.PreviewCancellation;
         var titles = await owner.ReadCatalogCardPreviewAsync(card, token);
-        if (!token.IsCancellationRequested && entry.IsLoaded && ReferenceEquals(entry.DataContext, card)) entry.PreviewTitles = titles;
+        if (!token.IsCancellationRequested && entry.IsLoaded && entry.IsVisible && ReferenceEquals(entry.DataContext, card)) entry.PreviewTitles = titles;
     }
     private async void Favorite_Click(object sender, RoutedEventArgs e)
     {

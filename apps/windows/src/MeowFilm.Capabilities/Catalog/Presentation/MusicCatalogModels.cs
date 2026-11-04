@@ -46,6 +46,7 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     private string Identity => MemberId.Length > 0 ? MemberId : ActionId.Length > 0 ? ActionId : Song?.Id ?? Id;
 }
 public sealed record MusicCatalogSongColumn(IReadOnlyList<MusicCatalogCard> Items);
+public sealed record MusicCatalogPlaylistRow(IReadOnlyList<MusicCatalogCard> Items);
 public enum MusicCatalogSectionPresentation
 {
     Shelf,
@@ -110,12 +111,18 @@ public static class MusicCatalogDto
     public static MusicCatalogCard[] SearchResults(JsonElement items, string kind)
     {
         MusicDto.Require(kind is "songs" or "playlists" && items.ValueKind == JsonValueKind.Array);
-        return items.EnumerateArray().Select(item =>
-        {
-            string platform = kind == "songs" ? SongJson.Platform(item) : Text(item, "source");
-            MusicDto.Require(platform is "wy" or "tx" or "kw" or "kg" or "mg");
-            return Card(item, platform, kind == "songs" ? "song" : "playlist");
-        }).ToArray();
+        var cards = new MusicCatalogCard[items.GetArrayLength()];
+        int index = 0;
+        foreach (var item in items.EnumerateArray())
+            cards[index++] = SearchResult(item, kind);
+        return cards;
+    }
+    internal static MusicCatalogCard SearchResult(JsonElement item, string kind)
+    {
+        MusicDto.Require(kind is "songs" or "playlists");
+        string platform = kind == "songs" ? SongJson.Platform(item) : Text(item, "source");
+        MusicDto.Require(platform is "wy" or "tx" or "kw" or "kg" or "mg");
+        return Card(item, platform, kind == "songs" ? "song" : "playlist");
     }
 
     public static IReadOnlyList<MusicCatalogSection> Read(JsonElement reply, string platform, string operation,

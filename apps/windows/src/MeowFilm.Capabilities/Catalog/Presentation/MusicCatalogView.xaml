@@ -26,12 +26,24 @@
    <Style.Triggers>
     <DataTrigger Binding="{Binding IsLoading}" Value="True">
      <Setter Property="Visibility" Value="Visible"/>
-     <DataTrigger.EnterActions><BeginStoryboard x:Name="SectionLoadingSpin"><Storyboard RepeatBehavior="Forever">
+    </DataTrigger>
+    <MultiDataTrigger><MultiDataTrigger.Conditions>
+     <Condition Binding="{Binding (local:MusicCatalogSurface.IsOverview),RelativeSource={RelativeSource Self}}" Value="True"/>
+     <Condition Binding="{Binding Title}" Value="单曲"/>
+     <Condition Binding="{Binding DataContext.SearchSongsLoading,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView}}" Value="True"/>
+    </MultiDataTrigger.Conditions><Setter Property="Visibility" Value="Visible"/></MultiDataTrigger>
+    <MultiDataTrigger><MultiDataTrigger.Conditions>
+     <Condition Binding="{Binding (local:MusicCatalogSurface.IsOverview),RelativeSource={RelativeSource Self}}" Value="True"/>
+     <Condition Binding="{Binding Title}" Value="歌单"/>
+     <Condition Binding="{Binding DataContext.SearchPlaylistsLoading,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView}}" Value="True"/>
+    </MultiDataTrigger.Conditions><Setter Property="Visibility" Value="Visible"/></MultiDataTrigger>
+    <Trigger Property="IsVisible" Value="True">
+     <Trigger.EnterActions><BeginStoryboard x:Name="SectionLoadingSpin"><Storyboard RepeatBehavior="Forever">
       <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
                        From="0" To="360" Duration="0:0:0.8"/>
-     </Storyboard></BeginStoryboard></DataTrigger.EnterActions>
-     <DataTrigger.ExitActions><StopStoryboard BeginStoryboardName="SectionLoadingSpin"/></DataTrigger.ExitActions>
-    </DataTrigger>
+     </Storyboard></BeginStoryboard></Trigger.EnterActions>
+     <Trigger.ExitActions><StopStoryboard BeginStoryboardName="SectionLoadingSpin"/></Trigger.ExitActions>
+    </Trigger>
    </Style.Triggers>
   </Style>
   <Style x:Key="Catalog.SectionMore" TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}">
@@ -294,12 +306,44 @@
      </StackPanel>
     </Button>
    </DataTemplate>
+  <Style x:Key="Catalog.SearchPlaylistList" TargetType="ListBox">
+   <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Window}"/>
+   <Setter Property="BorderThickness" Value="0"/>
+   <Setter Property="Padding" Value="0"/>
+   <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled"/>
+   <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+   <Setter Property="ScrollViewer.CanContentScroll" Value="True"/>
+   <Setter Property="VirtualizingPanel.IsVirtualizing" Value="True"/>
+   <Setter Property="VirtualizingPanel.VirtualizationMode" Value="Recycling"/>
+   <Setter Property="VirtualizingPanel.ScrollUnit" Value="Pixel"/>
+   <Setter Property="ItemsPanel"><Setter.Value><ItemsPanelTemplate><VirtualizingStackPanel/></ItemsPanelTemplate></Setter.Value></Setter>
+   <Setter Property="ItemContainerStyle"><Setter.Value><Style TargetType="ListBoxItem">
+    <Setter Property="Padding" Value="0"/>
+    <Setter Property="Margin" Value="0"/>
+    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+    <Setter Property="Focusable" Value="False"/>
+    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem">
+     <ContentPresenter/>
+    </ControlTemplate></Setter.Value></Setter>
+   </Style></Setter.Value></Setter>
+   <Setter Property="ItemTemplate"><Setter.Value>
+    <DataTemplate>
+     <ItemsControl ItemsSource="{Binding Items}" HorizontalAlignment="Left">
+      <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+      <ItemsControl.ItemTemplate><DataTemplate>
+       <ContentControl Content="{Binding}" ContentTemplate="{StaticResource Catalog.PlaylistCard}" Width="168"
+                       Margin="0,0,0,24" HorizontalAlignment="Left" VerticalAlignment="Top"/>
+      </DataTemplate></ItemsControl.ItemTemplate>
+     </ItemsControl>
+    </DataTemplate>
+   </Setter.Value></Setter>
+  </Style>
    <DataTemplate x:Key="Catalog.Section.Shelf">
     <local:Shelf>
      <local:Shelf.Style><Style TargetType="local:Shelf">
       <Setter Property="CardTemplate" Value="{StaticResource Catalog.CoverCard}"/>
       <Style.Triggers>
-       <DataTrigger Binding="{Binding DataContext.IsCatalogHome,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView}}" Value="True">
+       <DataTrigger Binding="{Binding (local:MusicCatalogSurface.IsHome),RelativeSource={RelativeSource Self}}" Value="True">
         <Setter Property="CardTemplate" Value="{StaticResource Catalog.PlaylistCard}"/>
         <Setter Property="MinimumCardWidth" Value="124"/>
        </DataTrigger>
@@ -320,18 +364,6 @@
    <DataTemplate x:Key="Catalog.Section.PlaylistRows">
     <ItemsControl ItemsSource="{Binding Items}" ItemTemplate="{StaticResource Catalog.PlaylistRow}"
                   AutomationProperties.Name="封面列表"/>
-   </DataTemplate>
-   <DataTemplate x:Key="Catalog.Section.PlaylistGrid">
-    <ItemsControl ItemsSource="{Binding Items}" ItemTemplate="{StaticResource Catalog.PlaylistCard}"
-                  AutomationProperties.Name="歌单搜索结果">
-     <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
-     <ItemsControl.ItemContainerStyle><Style TargetType="ContentPresenter">
-      <Setter Property="Width" Value="168"/>
-      <Setter Property="Margin" Value="0,0,0,24"/>
-      <Setter Property="HorizontalAlignment" Value="Left"/>
-      <Setter Property="VerticalAlignment" Value="Top"/>
-     </Style></ItemsControl.ItemContainerStyle>
-    </ItemsControl>
    </DataTemplate>
    <DataTemplate x:Key="Catalog.Section.Rankings">
     <ItemsControl ItemsSource="{Binding Items}" ItemTemplate="{StaticResource Catalog.Ranking}">
@@ -365,7 +397,7 @@
       <MultiDataTrigger.Conditions>
        <Condition Binding="{Binding IsPlaylistSection}" Value="True"/>
        <Condition Binding="{Binding DataContext.PlaylistListView,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView}}" Value="True"/>
-       <Condition Binding="{Binding DataContext.IsCatalogLanding,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView}}" Value="False"/>
+       <Condition Binding="{Binding (local:MusicCatalogSurface.IsLanding),RelativeSource={RelativeSource Self}}" Value="False"/>
       </MultiDataTrigger.Conditions>
       <Setter Property="ContentTemplate" Value="{StaticResource Catalog.Section.PlaylistRows}"/>
      </MultiDataTrigger>
@@ -375,9 +407,6 @@
      <DataTrigger Binding="{Binding IsSongSection}" Value="True">
       <Setter Property="ContentTemplate" Value="{StaticResource Catalog.Section.Songs}"/>
      </DataTrigger>
-     <DataTrigger Binding="{Binding DataContext.IsSearchPlaylists,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView}}" Value="True">
-      <Setter Property="ContentTemplate" Value="{StaticResource Catalog.Section.PlaylistGrid}"/>
-     </DataTrigger>
      <DataTrigger Binding="{Binding IsSongShelfSection}" Value="True">
       <Setter Property="ContentTemplate" Value="{StaticResource Catalog.Section.SongShelf}"/>
      </DataTrigger>
@@ -386,7 +415,44 @@
       </DataTrigger>
     </Style.Triggers>
    </Style>
- </ResourceDictionary></UserControl.Resources>
+ <DataTemplate x:Key="Catalog.SectionsTemplate">
+      <StackPanel Margin="0,0,0,32">
+      <DockPanel Height="24" Margin="0,0,0,18"><DockPanel.Style><Style TargetType="DockPanel"><Style.Triggers><DataTrigger Binding="{Binding Title}" Value=""><Setter Property="Visibility" Value="Collapsed"/><Setter Property="Margin" Value="0"/></DataTrigger></Style.Triggers></Style></DockPanel.Style>
+       <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Visibility="{Binding (local:MusicCatalogSurface.IsHome),RelativeSource={RelativeSource Self},Converter={StaticResource Visible}}">
+        <Button Click="BatchRefresh_Click" Style="{StaticResource Catalog.Refresh}" IsEnabled="{Binding DataContext.CanCatalogBrowse,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView}}" AutomationProperties.Name="刷新推荐"/>
+       </StackPanel>
+       <Button DockPanel.Dock="Right" Content="查看更多" Tag="{Binding Title}" Click="SearchSectionMore_Click"
+               Style="{StaticResource Catalog.SectionMore}" HorizontalAlignment="Right"
+               Visibility="{Binding (local:MusicCatalogSurface.IsOverview),RelativeSource={RelativeSource Self},Converter={StaticResource Visible}}"
+               AutomationProperties.Name="{Binding Title,StringFormat=查看更多{0}}"/>
+       <StackPanel Orientation="Horizontal">
+        <TextBlock Text="{Binding Title}" Style="{StaticResource Catalog.SectionTitle}" VerticalAlignment="Center"/>
+         <Grid Style="{StaticResource Catalog.SectionLoading}"
+               AutomationProperties.Name="{Binding Title,StringFormat={}{0}搜索中}">
+          <Grid.RenderTransform><RotateTransform/></Grid.RenderTransform>
+          <Ellipse Stroke="{DynamicResource MeowFilm.Brush.Border}" StrokeThickness="1.6"/>
+          <Path Data="M 7,1 A 6,6 0 0 1 13,7" Stroke="{DynamicResource MeowFilm.Brush.Accent}"
+                StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+         </Grid>
+        <Button Content="&#xE76C;" Tag="{Binding Action}" Click="Card_Click" Width="24" Height="24" Style="{StaticResource MeowFilm.IconButton}" Visibility="{Binding Action.CanOpen,Converter={StaticResource Visible},FallbackValue=Collapsed}" IsEnabled="{Binding Action.CanOpen}" AutomationProperties.Name="更多内容"/>
+       </StackPanel>
+      </DockPanel>
+       <WrapPanel ClipToBounds="True">
+        <WrapPanel.Style><Style TargetType="WrapPanel"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers>
+         <MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding Items.Count}" Value="0"/><Condition Binding="{Binding Title}" Value="单曲"/><Condition Binding="{Binding (local:MusicCatalogSurface.IsOverview),RelativeSource={RelativeSource Self}}" Value="True"/><Condition Binding="{Binding DataContext.SearchSongsLoading,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView}}" Value="True"/></MultiDataTrigger.Conditions><Setter Property="Visibility" Value="Visible"/></MultiDataTrigger>
+         <MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding Items.Count}" Value="0"/><Condition Binding="{Binding Title}" Value="歌单"/><Condition Binding="{Binding (local:MusicCatalogSurface.IsOverview),RelativeSource={RelativeSource Self}}" Value="True"/><Condition Binding="{Binding DataContext.SearchPlaylistsLoading,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView}}" Value="True"/></MultiDataTrigger.Conditions><Setter Property="Visibility" Value="Visible"/></MultiDataTrigger>
+        </Style.Triggers></Style></WrapPanel.Style>
+        <desktop:LoadingSkeleton Width="152" Height="152" Margin="0,0,16,16" CornerRadius="8" IsActive="True"/>
+        <desktop:LoadingSkeleton Width="152" Height="152" Margin="0,0,16,16" CornerRadius="8" IsActive="True"/>
+        <desktop:LoadingSkeleton Width="152" Height="152" Margin="0,0,16,16" CornerRadius="8" IsActive="True"/>
+        <desktop:LoadingSkeleton Width="152" Height="152" Margin="0,0,16,16" CornerRadius="8" IsActive="True"/>
+        <desktop:LoadingSkeleton Width="152" Height="152" Margin="0,0,16,16" CornerRadius="8" IsActive="True"/>
+        <desktop:LoadingSkeleton Width="152" Height="152" Margin="0,0,16,16" CornerRadius="8" IsActive="True"/>
+       </WrapPanel>
+       <ContentControl Content="{Binding}" Style="{StaticResource Catalog.SectionPresenter}"/>
+     </StackPanel>
+    </DataTemplate>
+</ResourceDictionary></UserControl.Resources>
  <DockPanel>
   <DockPanel x:Name="ChannelHeader" DockPanel.Dock="Top" Margin="40,0,40,12" MaxWidth="1490" Height="36"
              LastChildFill="True" Visibility="{Binding HasChannelTabs,Converter={StaticResource Visible}}">
@@ -476,7 +542,42 @@
      </ItemsControl>
     </DataTemplate></ItemsControl.ItemTemplate>
   </ItemsControl>
-  <ScrollViewer x:Name="CatalogScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" ScrollChanged="CatalogScroll_Changed" PreviewMouseWheel="CatalogScroll_Wheel" PreviewKeyDown="CatalogScroll_Key">
+  <Grid>
+   <ScrollViewer x:Name="HomeScroll" local:MusicCatalogSurface.IsHome="True" local:MusicCatalogSurface.IsLanding="True" Visibility="{Binding IsCatalogHome,Converter={StaticResource Visible}}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource Capability.OverlayScrollViewer}" ScrollChanged="CatalogScroll_Changed" PreviewMouseWheel="CatalogScroll_Wheel" PreviewKeyDown="CatalogScroll_Key">
+    <ItemsControl ItemsSource="{Binding HomeSections}" ItemTemplate="{StaticResource Catalog.SectionsTemplate}" Margin="40,0,40,24" MaxWidth="1490"/>
+   </ScrollViewer>
+   <ScrollViewer x:Name="SearchOverviewScroll" local:MusicCatalogSurface.IsOverview="True" Visibility="{Binding IsSearchOverview,Converter={StaticResource Visible}}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource Capability.OverlayScrollViewer}" ScrollChanged="CatalogScroll_Changed" PreviewMouseWheel="CatalogScroll_Wheel" PreviewKeyDown="CatalogScroll_Key">
+    <ItemsControl ItemsSource="{Binding SearchOverviewSections}" ItemTemplate="{StaticResource Catalog.SectionsTemplate}" Margin="0,0,0,24" MaxWidth="1490"/>
+   </ScrollViewer>
+   <ScrollViewer x:Name="UtilityScroll" Visibility="{Binding IsUtilityCatalogSurface,Converter={StaticResource Visible}}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource Capability.OverlayScrollViewer}" ScrollChanged="CatalogScroll_Changed" PreviewMouseWheel="CatalogScroll_Wheel" PreviewKeyDown="CatalogScroll_Key">
+    <ItemsControl ItemsSource="{Binding UtilitySections}" ItemTemplate="{StaticResource Catalog.SectionsTemplate}" Margin="0,0,0,24" MaxWidth="1490"/>
+   </ScrollViewer>
+   <Grid Panel.ZIndex="2" IsHitTestVisible="False" ClipToBounds="True">
+    <Grid.Style><Style TargetType="Grid"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding ShowCatalogSkeleton}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger><MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding ShowSearchSkeleton}" Value="True"/><Condition Binding="{Binding IsSearchPlaylists}" Value="True"/></MultiDataTrigger.Conditions><Setter Property="Visibility" Value="Visible"/></MultiDataTrigger></Style.Triggers></Style></Grid.Style>
+    <WrapPanel Margin="40,0,40,0" VerticalAlignment="Top">
+     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+     <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
+    </WrapPanel>
+   </Grid>
+   <ListBox x:Name="SearchPlaylistList" Visibility="Collapsed" Style="{StaticResource Catalog.SearchPlaylistList}"
+            ScrollViewer.ScrollChanged="SearchPlaylistList_ScrollChanged"
+            PreviewMouseWheel="SearchPlaylistList_Wheel" PreviewKeyDown="SearchPlaylistList_Key"
+            AutomationProperties.Name="歌单搜索结果">
+    <ListBox.Resources>
+     <Style TargetType="ScrollViewer" BasedOn="{StaticResource Capability.OverlayScrollViewer}"/>
+    </ListBox.Resources>
+   </ListBox>
+   <ScrollViewer x:Name="CatalogScroll" local:MusicCatalogSurface.IsLanding="True" Visibility="{Binding IsChannelLanding,Converter={StaticResource Visible}}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" ScrollChanged="CatalogScroll_Changed" PreviewMouseWheel="CatalogScroll_Wheel" PreviewKeyDown="CatalogScroll_Key">
    <ScrollViewer.Style><Style TargetType="ScrollViewer" BasedOn="{StaticResource Capability.OverlayScrollViewer}">
     <Setter Property="Background" Value="{DynamicResource MeowFilm.Brush.Window}"/>
     <Style.Triggers>
@@ -605,35 +706,10 @@
        </Border>
       </Button>
      </Grid>
-    <ItemsControl ItemsSource="{Binding DisplayCatalogSections}" AutomationProperties.Name="音乐内容分区">
-    <ItemsControl.Style><Style TargetType="ItemsControl"><Setter Property="Margin" Value="0,0,0,24"/><Style.Triggers><DataTrigger Binding="{Binding IsCatalogLanding}" Value="True"><Setter Property="Margin" Value="40,0,40,24"/><Setter Property="MaxWidth" Value="1490"/></DataTrigger></Style.Triggers></Style></ItemsControl.Style>
-     <ItemsControl.ItemTemplate><DataTemplate>
-      <StackPanel Margin="0,0,0,32">
-      <DockPanel Height="24" Margin="0,0,0,18"><DockPanel.Style><Style TargetType="DockPanel"><Style.Triggers><DataTrigger Binding="{Binding Title}" Value=""><Setter Property="Visibility" Value="Collapsed"/><Setter Property="Margin" Value="0"/></DataTrigger></Style.Triggers></Style></DockPanel.Style>
-       <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Visibility="{Binding DataContext.IsCatalogHome,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView},Converter={StaticResource Visible}}">
-        <Button Click="BatchRefresh_Click" Style="{StaticResource Catalog.Refresh}" IsEnabled="{Binding DataContext.CanCatalogBrowse,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView}}" AutomationProperties.Name="刷新推荐"/>
-       </StackPanel>
-       <Button DockPanel.Dock="Right" Content="查看更多" Tag="{Binding Title}" Click="SearchSectionMore_Click"
-               Style="{StaticResource Catalog.SectionMore}" HorizontalAlignment="Right"
-               Visibility="{Binding DataContext.IsSearchOverview,RelativeSource={RelativeSource AncestorType=local:MusicCatalogView},Converter={StaticResource Visible}}"
-               AutomationProperties.Name="{Binding Title,StringFormat=查看更多{0}}"/>
-       <StackPanel Orientation="Horizontal">
-        <TextBlock Text="{Binding Title}" Style="{StaticResource Catalog.SectionTitle}" VerticalAlignment="Center"/>
-         <Grid Style="{StaticResource Catalog.SectionLoading}"
-               AutomationProperties.Name="{Binding Title,StringFormat={}{0}搜索中}">
-          <Grid.RenderTransform><RotateTransform/></Grid.RenderTransform>
-          <Ellipse Stroke="{DynamicResource MeowFilm.Brush.Border}" StrokeThickness="1.6"/>
-          <Path Data="M 7,1 A 6,6 0 0 1 13,7" Stroke="{DynamicResource MeowFilm.Brush.Accent}"
-                StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
-         </Grid>
-        <Button Content="&#xE76C;" Tag="{Binding Action}" Click="Card_Click" Width="24" Height="24" Style="{StaticResource MeowFilm.IconButton}" Visibility="{Binding Action.CanOpen,Converter={StaticResource Visible},FallbackValue=Collapsed}" IsEnabled="{Binding Action.CanOpen}" AutomationProperties.Name="更多内容"/>
-       </StackPanel>
-      </DockPanel>
-       <ContentControl Content="{Binding}" Style="{StaticResource Catalog.SectionPresenter}"/>
-     </StackPanel>
-    </DataTemplate></ItemsControl.ItemTemplate>
-   </ItemsControl>
+    <ItemsControl ItemsSource="{Binding ChannelSections}" ItemTemplate="{StaticResource Catalog.SectionsTemplate}" Margin="40,0,40,24" MaxWidth="1490"/>
+
    </StackPanel>
-  </ScrollViewer>
+   </ScrollViewer>
+  </Grid>
  </DockPanel>
 </UserControl>

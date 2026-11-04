@@ -21,6 +21,10 @@ public interface IDesktopModule : INotifyPropertyChanged, IDesktopShutdownPartic
     Task InitializeAsync(CancellationToken cancellationToken);
     Task NavigateAsync(string route, CancellationToken cancellationToken);
     Task SearchAsync(string query, CancellationToken cancellationToken);
+    // Capture the successful operation's opaque location, including owner-specific search origin.
+    string CaptureNavigationLocation();
+    // Only the owner interprets locations and validates stale/retired state.
+    Task RestoreNavigationAsync(string location, CancellationToken cancellationToken);
     // Only fixed, user-facing business errors; never return the raw exception message.
     string OperationErrorText(Exception error) => "暂时无法完成操作";
 }

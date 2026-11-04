@@ -304,9 +304,24 @@ public static class MusicEntryCardPresentationTests
             Check(f.Loader.Addresses.Count == reads && reads == 1 &&
                 f.Previews == 0 && f.Opens == 0 && f.Plays == 0,
                 $"{model.Presentation}: repeated render, hover and focus use only the acquired cover and embedded data");
+            var artwork = f.Cover;
+            var image = Visuals(artwork).OfType<Image>().Single();
+            var pixels = image.Source;
+            var palette = artwork.RawPaletteBrush;
+            Check(pixels is not null, "the retention check starts with acquired pixels");
             f.Entry.Visibility = Visibility.Collapsed;
             await Drain();
-            Check(f.Loader.Leases.All(lease => lease.Disposed), "hidden entries release their acquired cover");
+            Check(f.Entry.IsLoaded && f.Loader.Leases.All(lease => !lease.Disposed) &&
+                ReferenceEquals(pixels, image.Source) && ReferenceEquals(palette, artwork.RawPaletteBrush),
+                "hidden entries retain their acquired cover and palette");
+            Check(!f.Surface.HasAnimatedProperties, "hidden entries stop their hover clock");
+            f.Entry.Visibility = Visibility.Visible;
+            f.Window.UpdateLayout(); await Drain();
+            Check(f.Loader.Addresses.Count == reads && ReferenceEquals(pixels, image.Source) &&
+                ReferenceEquals(palette, artwork.RawPaletteBrush), "returning reuses the cover without a new request");
+            f.Root.Children.Remove(f.Entry); await Drain();
+            Check(f.Loader.Leases.All(lease => lease.Disposed) && image.Source is null,
+                "actual unmount releases the acquired cover");
         }
 
         using var lazy = new Fixture(DailyCard() with { Preview = null });

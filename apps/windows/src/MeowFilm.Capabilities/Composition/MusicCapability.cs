@@ -85,7 +85,10 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
     public string Version => "0.4.0";
     public ObservableCollection<NavigationItem> Navigation { get; } = [];
     public ObservableCollection<PlaylistRow> Playlists { get; } = [];
-    public ObservableCollection<SongRow> Songs { get; } = [];
+    private readonly ObservableCollection<SongRow> searchSongs = [], catalogSongs = [];
+    public ObservableCollection<SongRow> Songs => IsSearchPage ? searchSongs : catalogSongs;
+    public ObservableCollection<SongRow> SearchSongsSource => searchSongs;
+    public ObservableCollection<SongRow> CatalogSongsSource => catalogSongs;
     public ObservableCollection<string> HistoryDates { get; } = [];
     public ObservableCollection<ArchivedPlaylist> Archives { get; } = [];
     public FrameworkElement View => page;
@@ -122,6 +125,16 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
     public string DetailSectionTitle => IsCatalogArtist ? "热门歌曲" : "歌曲";
     public string DetailArtworkName => IsCatalogArtist ? "歌手头像" : "歌单封面";
     public bool CanPlayContentDetail => IsCatalogDetailPage ? CanPlayCatalogPlaylist : CanPlayCollection;
+    public SongRow? CatalogSelectedSong
+    {
+        get => IsSearchPage ? null : selectedSong;
+        set { if (!IsSearchPage) SelectedSong = value; }
+    }
+    public SongRow? SearchSelectedSong
+    {
+        get => IsSearchPage ? selectedSong : searchSongs.FirstOrDefault(song => song.SelectionKey == searchSelectedKey);
+        set { if (IsSearchPage) SelectedSong = value; }
+    }
     public SongRow? SelectedSong
     {
         get => selectedSong;
@@ -132,6 +145,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
             if (value is not null && !Songs.Any(row => ReferenceEquals(row, value))) { Changed(); return; }
             if (!publishing && value is not null && !ReferenceEquals(value, selectedSong)) InvalidateCatalogAction();
             selectedSong = value;
+            if (IsSearchPage) searchSelectedKey = value?.SelectionKey;
+            Changed(nameof(CatalogSelectedSong)); Changed(nameof(SearchSelectedSong));
             UpdateRecordingCandidates();
             Changed(); Changed(nameof(HasSelection)); Changed(nameof(CanRemoveSelection));
         }
@@ -171,7 +186,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
     private void Changed([CallerMemberName] string? property = null) => PropertyChanged?.Invoke(this, new(property));
     private void RefreshBindings()
     {
-        foreach (var name in new[] { nameof(Heading), nameof(Status), nameof(Busy), nameof(CanEdit), nameof(CanEditQuality),
+        foreach (var name in new[] { nameof(CatalogSelectedSong), nameof(SearchSelectedSong), nameof(Heading), nameof(Status), nameof(Busy), nameof(CanEdit), nameof(CanEditQuality),
             nameof(CanEditAppearance), nameof(CanClearPlaybackCache),
             nameof(IsHistory), nameof(IsArchives), nameof(IsSongList), nameof(IsCollectionPage), nameof(IsContentDetailPage), nameof(ShowsSongTable),
             nameof(ShowSongPager), nameof(HistoryDate),
@@ -919,9 +934,9 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
             await RunAsync(() => RestorePlaybackRateAsync(surviving, epoch, lifetime.Token));
         }
         LibrarySyncChanged(); // A restarted fast round may have finished while the module was still sealed.
-        if (settings.IsLoaded) await ActivateSettingsAsync();
+        if (settings.IsLoaded && settings.IsVisible) await ActivateSettingsAsync();
         RefreshBindings();
-        if (page.IsLoaded && IsDiscovery) await ActivateDiscoveryViewAsync();
+        if (page.IsLoaded && page.IsVisible && IsDiscovery) await ActivateDiscoveryViewAsync();
         await vipPage.CancelShutdownPreparationAsync();
     }
     public Task AbortAsync()

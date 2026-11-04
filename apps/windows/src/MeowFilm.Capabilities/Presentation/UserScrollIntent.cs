@@ -21,6 +21,15 @@ internal sealed class UserScrollIntent(Dispatcher dispatcher)
         return scrollBar?.Orientation == Orientation.Vertical && owner.IsAncestorOf(scrollBar);
     }
 
+    public void ObserveScroll(ScrollViewer owner, ScrollEventArgs args)
+    {
+        if (!owner.IsVisible || args.OriginalSource is not ScrollBar { IsVisible: true, Orientation: Orientation.Vertical } bar ||
+            !ReferenceEquals(bar.TemplatedParent, owner)) return;
+        if (args.ScrollEventType == ScrollEventType.EndScroll) { Clear(); return; }
+        Set(args.ScrollEventType is ScrollEventType.SmallIncrement or ScrollEventType.LargeIncrement or ScrollEventType.Last ||
+            args.ScrollEventType is ScrollEventType.ThumbTrack or ScrollEventType.ThumbPosition && args.NewValue > owner.VerticalOffset);
+    }
+
     public void Set(bool active)
     {
         var current = ++generation;

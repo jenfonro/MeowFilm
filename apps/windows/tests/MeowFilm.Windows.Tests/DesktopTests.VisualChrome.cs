@@ -142,8 +142,15 @@ public static partial class DesktopTests
                 Enumerable.Range(0, 45).Select(i => new NavigationItem("list-" + i, "测试歌单 " + i, "", "我的")))));
             await using var f = new Fixture([module]); await f.LoadAsync();
             var root = DetachChrome(f.Shell);
+            using var source = new HwndSource(new HwndSourceParameters("shell-sidebar-scroll-fixture")
+            {
+                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+                PositionX = -32000, PositionY = -32000, Width = 860, Height = 600
+            });
+            source.RootVisual = root;
             root.Measure(new(860, 600)); root.Arrange(new Rect(0, 0, 860, 600)); root.UpdateLayout(); await DrainAsync();
             var scroll = f.Element<ScrollViewer>("SidebarScroll");
+            True(scroll.IsLoaded && scroll.IsVisible, "sidebar has a real loaded visible presentation");
             var bar = (ScrollBar)scroll.Template.FindName("PART_VerticalScrollBar", scroll);
             True(OverlayScrollChrome.GetEnabled(scroll), "shared behavior mounted");
             True(scroll.ScrollableHeight > 0, "long collections overflow");

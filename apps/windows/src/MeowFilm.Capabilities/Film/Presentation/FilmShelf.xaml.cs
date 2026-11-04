@@ -36,6 +36,7 @@ public partial class FilmShelf : UserControl
         InitializeComponent();
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
+        IsVisibleChanged += OnVisibilityChanged;
         DataContextChanged += OnDataContextChanged;
     }
 
@@ -44,6 +45,25 @@ public partial class FilmShelf : UserControl
         AttachSection(DataContext as FilmHomeSection);
         AttachScrollHost();
         ScheduleRestore();
+    }
+
+    private void OnVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e)
+    {
+        if (!IsVisible)
+        {
+            CommitOffset();
+            StopMotion();
+            if (rail is not null) rail.ScrollChanged -= OnScrollChanged;
+        }
+        else if (IsLoaded)
+        {
+            if (rail is not null)
+            {
+                rail.ScrollChanged -= OnScrollChanged;
+                rail.ScrollChanged += OnScrollChanged;
+            }
+            ScheduleRestore();
+        }
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
@@ -97,18 +117,18 @@ public partial class FilmShelf : UserControl
         {
             if (rail is not null) rail.ScrollChanged -= OnScrollChanged;
             rail = next;
-            if (rail is not null) rail.ScrollChanged += OnScrollChanged;
+            if (rail is not null && IsVisible) rail.ScrollChanged += OnScrollChanged;
         }
     }
 
     private void ScheduleRestore()
     {
-        if (!IsLoaded || restoreQueued) return;
+        if (!IsLoaded || !IsVisible || restoreQueued) return;
         restoreQueued = true;
         _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
         {
             restoreQueued = false;
-            if (!IsLoaded) return;
+            if (!IsLoaded || !IsVisible) return;
             if (rail is null) AttachScrollHost();
             if (rail is null) return;
             restoring = true;
@@ -171,7 +191,7 @@ public partial class FilmShelf : UserControl
 
     private void AnimateTo(double target)
     {
-        if (rail is null) return;
+        if (rail is null || !IsVisible) return;
         target = Math.Clamp(target, 0, rail.ScrollableWidth);
         double from = StopMotion();
         long generation = motionGeneration;

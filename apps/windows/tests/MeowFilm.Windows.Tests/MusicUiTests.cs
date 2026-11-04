@@ -452,14 +452,12 @@ public static partial class MusicUiTests
                 scroll.ScrollToEnd(); await Drain();
                 Equal(0, Reads(100)); // Layout and programmatic scrolling are not request entrances.
                 scroll.ScrollToTop(); await Drain();
-                True(Mouse.Capture(unrelatedThumb), "unrelated thumb captures the pointer");
-                try
-                {
-                    scroll.ScrollToEnd();
-                    await Drain();
-                }
-                finally { Mouse.Capture(null); }
-                Equal(0, Reads(100)); // A Thumb outside this list does not grant scroll intent.
+                var captured = Mouse.Captured;
+                unrelatedThumb.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0)
+                    { RoutedEvent = Mouse.GotMouseCaptureEvent });
+                scroll.ScrollToEnd(); await Drain();
+                Equal(0, Reads(100)); // An unrelated capture notification does not grant scroll intent.
+                True(ReferenceEquals(captured, Mouse.Captured), "the routed test leaves OS capture unchanged");
                 f.Calls.FailNext("music.queue.get", "STORAGE_UNAVAILABLE");
                 RaiseKey(list, Key.End);
                 await Until(() => f.Module.QueueSurfaceStatus == "操作失败，请重试");
@@ -471,14 +469,18 @@ public static partial class MusicUiTests
                 Equal(2, Reads(100));
                 window.UpdateLayout(); scroll.ScrollToTop(); await Drain();
                 var bar = (ScrollBar)scroll.Template.FindName("PART_VerticalScrollBar", scroll);
-                var scrollThumb = Visuals(bar).OfType<Thumb>().Single();
-                True(Mouse.Capture(scrollThumb), "queue scrollbar thumb captures the pointer");
+                bar.RaiseEvent(new ScrollEventArgs(ScrollEventType.ThumbTrack, scroll.ScrollableHeight)
+                    { RoutedEvent = ScrollBar.ScrollEvent });
                 try
                 {
                     scroll.ScrollToEnd();
                     await Until(() => f.Module.QueueSurfaceRows.Count == 210);
                 }
-                finally { Mouse.Capture(null); }
+                finally
+                {
+                    bar.RaiseEvent(new ScrollEventArgs(ScrollEventType.EndScroll, scroll.ScrollableHeight)
+                        { RoutedEvent = ScrollBar.ScrollEvent });
+                }
                 Equal(1, Reads(200));
                 window.UpdateLayout(); scroll.ScrollToEnd(); await Drain();
                 list.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, 0, -120)
@@ -489,7 +491,6 @@ public static partial class MusicUiTests
             }
             finally
             {
-                Mouse.Capture(null);
                 f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayQueue);
                 window.Content = null;
                 window.Close();
