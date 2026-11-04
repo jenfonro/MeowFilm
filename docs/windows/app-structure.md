@@ -43,7 +43,7 @@ Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口�
 `AppIdentity` 集中定义产品名称、当前数据/运行时身份和当前原生命名空间：
 
 - 名称：`meowfilm`。
-- 数据根为 `%LOCALAPPDATA%/meowfilm/aggregate`；目录身份参与 DPAPI 绑定，不通过更换身份绕开当前格式约束。
+- 数据根为 `%LOCALAPPDATA%/meowfilm/aggregate`；仅应用账号与设备会话的敏感文档使用绑定目录身份的 DPAPI；普通文档和脚本源码以明文文件保存，原子写入、CAS 和文件隔离独立保留，见[本地文档存储](protected-storage.md)。
 - 脚本协议/清单字段 `product` 等于 `aggregate`，是当前 wire 身份。
 - 活动产品只读取和写入 `AppIdentity.NativeNamespaces` 列出的当前格式。
 - 当前提供可淘汰的播放缓存，未提供用户下载管理。

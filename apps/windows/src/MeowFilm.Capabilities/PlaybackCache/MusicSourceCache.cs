@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
@@ -12,7 +11,7 @@ namespace MeowFilm.Capabilities.PlaybackCache;
 /// Operational cache unavailability is a miss. Existing non-current data is an explicit
 /// failure and is never interpreted, replaced or rewritten.
 /// </summary>
-internal sealed class MusicSourceCache(IProtectedDocumentStore store, TimeProvider? time = null)
+internal sealed class MusicSourceCache(IDocumentStore store, TimeProvider? time = null)
 {
     internal const string Namespace = "music.playback-sources.v1";
     internal const long HistoryTtl = 30L * 86400000;
@@ -130,9 +129,7 @@ internal sealed class MusicSourceCache(IProtectedDocumentStore store, TimeProvid
         try
         {
             var saved = await store.ReadAsync(Namespace, token).ConfigureAwait(false);
-            JsonObject root;
-            try { root = Decode(saved); }
-            finally { if (saved.Data is { } bytes) CryptographicOperations.ZeroMemory(bytes); }
+            var root = Decode(saved);
 
             long now = Now;
             var scopes = root["scopes"]!.AsObject();
@@ -174,14 +171,14 @@ internal sealed class MusicSourceCache(IProtectedDocumentStore store, TimeProvid
             return result;
         }
         catch (OperationCanceledException) { throw; }
-        catch (ProtectedDocumentException error) when (MusicPlaybackCacheDataException.IsStoredFormatFailure(error))
+        catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsStoredFormatFailure(error))
         { throw MusicPlaybackCacheDataException.FromStore(error); }
-        catch (ProtectedDocumentException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error))
+        catch (DocumentStoreException error) when (MusicPlaybackCacheDataException.IsOptionalStoreFailure(error))
         { return null; }
         finally { gate.Release(); }
     }
 
-    private static JsonObject Decode(ProtectedDocument saved)
+    private static JsonObject Decode(DocumentSnapshot saved)
     {
         if (saved.Data is null)
         {
@@ -189,7 +186,7 @@ internal sealed class MusicSourceCache(IProtectedDocumentStore store, TimeProvid
                 throw MusicPlaybackCacheDataException.Corrupt();
             return Empty();
         }
-        if (saved.Data.Length == 0 || DocumentFingerprint.FromBytes(saved.Data) != saved.Fingerprint)
+        if (saved.Data.Length == 0)
             throw MusicPlaybackCacheDataException.Corrupt();
         if (saved.Data.Length > MaximumBytes) throw MusicPlaybackCacheDataException.Limit();
         try
@@ -229,30 +226,25 @@ internal sealed class MusicSourceCache(IProtectedDocumentStore store, TimeProvid
     {
         var scopes = root["scopes"]!.AsObject();
         byte[] encoded = JsonSerializer.SerializeToUtf8Bytes(root);
-        try
+        while (encoded.Length > MaximumBytes)
         {
-            while (encoded.Length > MaximumBytes)
+            if (scopes.Count > 1) scopes.Remove(scopes.First().Key);
+            else
             {
-                if (scopes.Count > 1) scopes.Remove(scopes.First().Key);
-                else
-                {
-                    var current = scopes.FirstOrDefault().Value as JsonObject;
-                    if (current?["urls"]?.AsObject() is { Count: > 0 } urls)
-                        urls.Remove(urls.First().Key);
-                    else if (current?["pointers"]?.AsObject() is { Count: > 0 } pointers)
-                        pointers.Remove(pointers.First().Key);
-                    else throw MusicPlaybackCacheDataException.Limit();
-                }
-                CryptographicOperations.ZeroMemory(encoded);
-                encoded = JsonSerializer.SerializeToUtf8Bytes(root);
+                var current = scopes.FirstOrDefault().Value as JsonObject;
+                if (current?["urls"]?.AsObject() is { Count: > 0 } urls)
+                    urls.Remove(urls.First().Key);
+                else if (current?["pointers"]?.AsObject() is { Count: > 0 } pointers)
+                    pointers.Remove(pointers.First().Key);
+                else throw MusicPlaybackCacheDataException.Limit();
             }
-            var expected = DocumentFingerprint.FromBytes(encoded);
-            _ = Decode(new ProtectedDocument(encoded, expected));
-            token.ThrowIfCancellationRequested();
-            var receipt = await store.WriteAsync(Namespace, encoded, before, token).ConfigureAwait(false);
-            if (receipt != expected) throw new MusicPlaybackCacheCommitException();
+            encoded = JsonSerializer.SerializeToUtf8Bytes(root);
         }
-        finally { CryptographicOperations.ZeroMemory(encoded); }
+        var expected = DocumentFingerprint.FromBytes(encoded);
+        _ = Decode(new DocumentSnapshot(encoded, expected));
+        token.ThrowIfCancellationRequested();
+        var receipt = await store.WriteAsync(Namespace, encoded, before, token).ConfigureAwait(false);
+        if (receipt != expected) throw new MusicPlaybackCacheCommitException();
     }
 
     private static JsonObject Empty() =>

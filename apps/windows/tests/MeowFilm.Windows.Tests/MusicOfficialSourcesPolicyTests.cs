@@ -224,19 +224,19 @@ public static class MusicOfficialSourcesPolicyTests
             throw new InvalidOperationException($"{expected}: {result.GetRawText()}");
     }
 
-    private sealed class PolicyStore : IProtectedDocumentStore
+    private sealed class PolicyStore : IDocumentStore
     {
         internal byte[]? Data;
         internal int Writes;
         internal bool FailAfterWrite, FailBeforeWrite, FailRead;
 
-        public Task<ProtectedDocument> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
+        public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
             Equal(MusicLibraryOwner.DocumentNamespace, documentNamespace);
-            if (FailRead) throw new ProtectedDocumentException(DocumentStoreError.Unavailable);
+            if (FailRead) throw new DocumentStoreException(DocumentStoreError.Unavailable);
             byte[]? copy = Data?.ToArray();
-            return Task.FromResult(new ProtectedDocument(copy,
+            return Task.FromResult(new DocumentSnapshot(copy,
                 copy is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(copy)));
         }
 
@@ -246,7 +246,7 @@ public static class MusicOfficialSourcesPolicyTests
             cancellationToken.ThrowIfCancellationRequested();
             Equal(MusicLibraryOwner.DocumentNamespace, documentNamespace);
             var actual = Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data);
-            if (actual != expected) throw new ProtectedDocumentException(DocumentStoreError.Conflict);
+            if (actual != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
             Writes++;
             if (FailBeforeWrite)
             {

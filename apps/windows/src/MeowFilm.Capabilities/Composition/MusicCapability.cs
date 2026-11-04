@@ -37,24 +37,24 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopNavigation
     private bool stopping, disposed, recorded, queueSaved = true, playbackSubscribed;
     private string? openedEntry;
 
-    public MusicCapability(IRuntimeClient runtime, IProtectedDocumentStore store, NativePlayback playback, string? playbackCacheRoot = null)
+    public MusicCapability(IRuntimeClient runtime, IDocumentStore store, NativePlayback playback, string? playbackCacheRoot = null)
         : this(new MusicNativeApplication(store, runtime), store, new NativeMusicPlayback(playback), playbackCacheRoot: playbackCacheRoot) { }
 
-    public MusicCapability(IMusicApplication application, IProtectedDocumentStore store, NativePlayback playback,
+    public MusicCapability(IMusicApplication application, IDocumentStore store, NativePlayback playback,
         IMusicDialogs? dialogs = null, string? playbackCacheRoot = null)
         : this(application, store, new NativeMusicPlayback(playback), dialogs, playbackCacheRoot) { }
 
-    public MusicCapability(IRuntimeClient runtime, IProtectedDocumentStore store, IMusicPlayback playback,
+    public MusicCapability(IRuntimeClient runtime, IDocumentStore store, IMusicPlayback playback,
         IMusicDialogs? dialogs = null)
         : this(new MusicNativeApplication(store, runtime), store, playback, dialogs) { }
 
-    public MusicCapability(IMusicApplication application, IProtectedDocumentStore store, IMusicPlayback playback,
+    public MusicCapability(IMusicApplication application, IDocumentStore store, IMusicPlayback playback,
         IMusicDialogs? dialogs = null, string? playbackCacheRoot = null)
         : this(application, store, playback,
             playbackCacheRoot is null ? null : new PlaybackCache.MusicAudioFileCache(playbackCacheRoot, store),
             dialogs) { }
 
-    internal MusicCapability(IMusicApplication application, IProtectedDocumentStore store, IMusicPlayback playback,
+    internal MusicCapability(IMusicApplication application, IDocumentStore store, IMusicPlayback playback,
         PlaybackCache.MusicAudioFileCache? playbackCache, IMusicDialogs? dialogs = null,
         MusicSourceNetworkDownload? sourceNetworkDownload = null)
     {

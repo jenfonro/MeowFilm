@@ -34,7 +34,7 @@ public static partial class MusicNativeLibraryTests
         yield return new("Native music replace archives five queues and restores occurrences", Archives);
         yield return new("Native music actual-play history deduplicates and retains seven local days", Played);
         yield return new("Native music queue and history restart preserve selection not session clocks", Restart);
-        yield return new("Native music DPAPI real restart native only without Node", Dpapi);
+        yield return new("Native music plain files reopen without Node", PlainFiles);
         yield return new("Native music before commit failure reads the actual durable outcome without replay", () => UnknownCommit(false));
         yield return new("Native music after commit failure reads the actual durable outcome without replay", () => UnknownCommit(true));
         yield return new("Native music third-party CAS conflict stays fenced without a discard fallback", Conflict);
@@ -54,7 +54,7 @@ public static partial class MusicNativeLibraryTests
         yield return new("Native music source metadata malformed input never commits", InvalidSource);
         yield return new("Native music arbitrary bounded script sites retain installation isolation and quotas", DeclaredSiteStorage);
         yield return new("Native music complete bounded script-site storage coexists with ordinary owned areas", CompleteSiteStorage);
-        yield return new("Native music source supported large script restores exact bytes", SourceBudget);
+        yield return new("Native music source files read edits and preserve the single-script size bound", SourceBudget);
         yield return new("Native music candidate overlay new disabled installation atomic restart", Overlay);
         yield return new("Native music candidate overlay detects intervening live storage without metadata change", OverlayConflict);
         yield return new("Native music candidate overlay cannot change another installation", OverlayIsolation);
@@ -99,7 +99,7 @@ public static partial class MusicNativeLibraryTests
         throw new InvalidOperationException("Expected " + code);
     }
     private static JsonObject Parsed(JsonElement e) => JsonNode.Parse(e.GetRawText())!.AsObject();
-    private sealed class Store : IProtectedDocumentStore
+    private sealed class Store : IDocumentStore
     {
         private readonly object sync = new();
         private readonly Dictionary<string, byte[]> documents = new(StringComparer.Ordinal);
@@ -115,17 +115,13 @@ public static partial class MusicNativeLibraryTests
         internal int Writes, Failure;
         internal int FailAtWrite;
         internal bool FailRead, Disposed;
-        internal DocumentFingerprint? ReadFingerprint;
         internal TaskCompletionSource? Entered, Release;
         private static bool ContentNamespace(string value)
         {
             string prefix = MusicLibraryOwner.ScriptContentCollection + ".";
             if (!value.StartsWith(prefix, StringComparison.Ordinal)) return false;
-            string[] parts = value[prefix.Length..].Split('.');
-            return parts.Length == 2 && parts[0].Length == 64 &&
-                parts[0].All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f') &&
-                int.TryParse(parts[1], out int index) && index >= 0 &&
-                parts[1] == index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            string hash = value[prefix.Length..];
+            return hash.Length == 64 && hash.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
         }
         private static void Namespace(string value) =>
             Check(value == MusicLibraryOwner.DocumentNamespace || ContentNamespace(value), "Unexpected document namespace");
@@ -134,22 +130,16 @@ public static partial class MusicNativeLibraryTests
             Namespace(documentNamespace);
             lock (sync) documents[documentNamespace] = bytes.ToArray();
         }
-        internal byte[] Document(string documentNamespace)
-        {
-            Namespace(documentNamespace);
-            lock (sync) return documents[documentNamespace].ToArray();
-        }
-        public Task<ProtectedDocument> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
+        public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
         {
             Namespace(documentNamespace);
             cancellationToken.ThrowIfCancellationRequested();
             lock (sync)
             {
-                if (FailRead) throw new ProtectedDocumentException(DocumentStoreError.Storage);
+                if (FailRead) throw new DocumentStoreException(DocumentStoreError.Storage);
                 byte[]? bytes = documents.TryGetValue(documentNamespace, out var value) ? value.ToArray() : null;
-                var fingerprint = documentNamespace == MusicLibraryOwner.DocumentNamespace && ReadFingerprint is not null
-                    ? ReadFingerprint : bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes);
-                return Task.FromResult(new ProtectedDocument(bytes, fingerprint));
+                var fingerprint = bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes);
+                return Task.FromResult(new DocumentSnapshot(bytes, fingerprint));
             }
         }
         public async Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected, CancellationToken cancellationToken = default)
@@ -160,14 +150,14 @@ public static partial class MusicNativeLibraryTests
             {
                 byte[]? prior = documents.TryGetValue(documentNamespace, out var value) ? value : null;
                 var current = prior is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(prior);
-                if (current != expected) throw new ProtectedDocumentException(DocumentStoreError.Conflict);
+                if (current != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
                 int attempt = ++Writes;
                 int failure = Failure;
                 if (FailAtWrite == attempt) { failure = 1; FailAtWrite = 0; }
                 Failure = 0;
-                if (failure == 1) throw new ProtectedDocumentException(DocumentStoreError.Storage);
+                if (failure == 1) throw new DocumentStoreException(DocumentStoreError.Storage);
                 documents[documentNamespace] = bytes.ToArray();
-                if (failure == 2) throw new ProtectedDocumentException(DocumentStoreError.Storage);
+                if (failure == 2) throw new DocumentStoreException(DocumentStoreError.Storage);
                 return DocumentFingerprint.FromBytes(documents[documentNamespace]);
             }
         }
@@ -183,7 +173,7 @@ public static partial class MusicNativeLibraryTests
     {
         internal readonly Store Store = new();
         private readonly List<MusicLibraryOwner> owners = [];
-        internal MusicLibraryOwner Owner(IProtectedDocumentStore? store = null, string scope = "local")
+        internal MusicLibraryOwner Owner(IDocumentStore? store = null, string scope = "local")
         { var owner = new MusicLibraryOwner(store ?? Store, scope); owners.Add(owner); return owner; }
         public async ValueTask DisposeAsync() { foreach (var o in owners) await o.AbortAsync(); await Store.DisposeAsync(); }
     }
@@ -398,24 +388,24 @@ public static partial class MusicNativeLibraryTests
         var q = await Ok(restored, "music.queue.get"); Check(q.GetProperty("mode").GetInt32() == 0 && q.GetProperty("currentId").GetString() == id);
         Check(!f.Store.State("queue").ContainsKey("history") && !Encoding.UTF8.GetString(f.Store.Bytes!).Contains("currentTime"));
     }
-    private static async Task Dpapi()
+    private static async Task PlainFiles()
     {
         string root = Environment.GetEnvironmentVariable("MEOWFILM_TEST_DATA_ROOT") ?? throw new InvalidOperationException("Test data root required");
         Check(Path.IsPathFullyQualified(root) && Directory.Exists(root)); string path = Path.Combine(root, "native-music-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(path);
-        byte[] source = Encoding.UTF8.GetBytes("// DPAPI source\n" + new string('猫', 600_000));
+        byte[] source = Encoding.UTF8.GetBytes("// plain source\n" + new string('猫', 600_000));
         MusicScriptContent content;
-        await using (var store = new DpapiDocumentStore(path, [MusicLibraryOwner.DocumentNamespace],
+        await using (var store = new LocalDocumentStore(path, [MusicLibraryOwner.DocumentNamespace],
             [MusicLibraryOwner.ScriptContentCollection]))
         await using (var first = new MusicLibraryOwner(store))
         {
-            await Ok(first, "music.library.create", new { name = "DPAPI", songs = new[] { Song() } });
+            await Ok(first, "music.library.create", new { name = "Plain files", songs = new[] { Song() } });
             content = await first.StoreScriptContentAsync(source);
         }
-        await using var reopened = new DpapiDocumentStore(path, [MusicLibraryOwner.DocumentNamespace],
+        await using var reopened = new LocalDocumentStore(path, [MusicLibraryOwner.DocumentNamespace],
             [MusicLibraryOwner.ScriptContentCollection]);
         await using var second = new MusicLibraryOwner(reopened);
         Check((await Ok(second, "music.library.list")).GetProperty("total").GetInt32() == 2);
-        byte[] restored = await second.ReadScriptContentAsync(content.Sha256, content.Length);
+        byte[] restored = await second.ReadScriptContentAsync(content.Sha256);
         try { Check(source.SequenceEqual(restored)); }
         finally { CryptographicOperations.ZeroMemory(restored); CryptographicOperations.ZeroMemory(source); }
     }
@@ -557,8 +547,8 @@ public static partial class MusicNativeLibraryTests
         disabled["current"]!["permissions"]!["storage"] = new JsonArray();
         sources["installations"]!.AsArray().Add(disabled);
         await using var f = new Fixture();
-        f.Store.Seed(ContentKey(currentContent.Sha256, 0), currentBytes);
-        f.Store.Seed(ContentKey(previousContent.Sha256, 0), previousBytes);
+        f.Store.Seed(ContentKey(currentContent.Sha256), currentBytes);
+        f.Store.Seed(ContentKey(previousContent.Sha256), previousBytes);
         f.Store.Bytes = Document(
             ("lx-installations", sources),
             ("library", CurrentLibraryState()), ("queue", CurrentQueue()), ("history", CurrentHistory()),
@@ -582,8 +572,8 @@ public static partial class MusicNativeLibraryTests
         Check((await restored.ReadSourceScriptDataAsync("test-install-a", 7)).Sha256 == before.Sha256);
         Check((await restored.ReadSourceScriptDataAsync("test-install-b", 7)).Sites.GetProperty("wy")
             .GetProperty("values")[0].GetProperty("value").GetString() == "source-b");
-        byte[] currentSource = await restored.ReadScriptContentAsync(currentContent.Sha256, currentContent.Length);
-        byte[] previousSource = await restored.ReadScriptContentAsync(previousContent.Sha256, previousContent.Length);
+        byte[] currentSource = await restored.ReadScriptContentAsync(currentContent.Sha256);
+        byte[] previousSource = await restored.ReadScriptContentAsync(previousContent.Sha256);
         try
         {
             Check(currentSource.SequenceEqual(currentBytes));
@@ -721,8 +711,7 @@ public static partial class MusicNativeLibraryTests
         try { return new(Convert.ToHexStringLower(SHA256.HashData(bytes)), bytes.Length); }
         finally { CryptographicOperations.ZeroMemory(bytes); }
     }
-    private static string ContentKey(string hash, int index) =>
-        $"{MusicLibraryOwner.ScriptContentCollection}.{hash}.{index.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+    private static string ContentKey(string hash) => $"{MusicLibraryOwner.ScriptContentCollection}.{hash}";
     private static JsonObject Installation(string id = "test-install-a", bool enabled = true,
         MusicScriptContent? content = null)
     {
@@ -796,12 +785,10 @@ public static partial class MusicNativeLibraryTests
         await o.CommitSourceMetadataAsync(E(state), old.Sha256);
         await Throws("PERMISSION_DENIED", async () => await o.ReadScriptValueAsync("test-install-a", "wy", "same", 2));
     }
-    private static async Task RejectDocument(byte[] bytes, string expected = "CORRUPT_STORAGE",
-        DocumentFingerprint? fingerprint = null)
+    private static async Task RejectDocument(byte[] bytes, string expected = "CORRUPT_STORAGE")
     {
         await using var f = new Fixture();
         f.Store.Bytes = bytes.ToArray();
-        f.Store.ReadFingerprint = fingerprint;
         byte[] original = f.Store.Bytes.ToArray();
         var owner = f.Owner();
         await Error(owner, "music.library.list", null, expected);
@@ -917,9 +904,6 @@ public static partial class MusicNativeLibraryTests
             lyrics = true,
             target = new { installationId = "missing-installation", platform = "wy" }
         }))));
-
-        byte[] current = Encoding.UTF8.GetBytes("""{"version":1,"entries":[]}""");
-        await RejectDocument(current, fingerprint: new DocumentFingerprint(true, current.Length, new string('0', 64)));
     }
     private static async Task InvalidSource()
     {
@@ -949,28 +933,27 @@ public static partial class MusicNativeLibraryTests
         var reopened = f.Owner();
         await Throws("LIMIT", async () =>
             await reopened.StoreScriptContentAsync(new byte[SelectedScriptSnapshot.MaximumBytes + 1]));
-        await Throws("CORRUPT_STORAGE", async () =>
-            await reopened.ReadScriptContentAsync(content.Sha256, SelectedScriptSnapshot.MaximumBytes + 1));
-        byte[] restored = await reopened.ReadScriptContentAsync(content.Sha256, content.Length);
-        try { Check(source.SequenceEqual(restored)); }
-        finally { CryptographicOperations.ZeroMemory(restored); }
+        byte[] restored = await reopened.ReadScriptContentAsync(content.Sha256);
+        Check(source.SequenceEqual(restored));
+        byte[] edited = Encoding.UTF8.GetBytes("// manually edited source with a different length");
+        f.Store.Seed(ContentKey(content.Sha256), edited);
+        Check((await reopened.ReadScriptContentAsync(content.Sha256)).SequenceEqual(edited));
+        f.Store.Seed(ContentKey(content.Sha256), new byte[SelectedScriptSnapshot.MaximumBytes + 1]);
+        await Throws("LIMIT", async () => await reopened.ReadScriptContentAsync(content.Sha256));
+        f.Store.Seed(ContentKey(content.Sha256), edited);
+        var reimported = await reopened.StoreScriptContentAsync(source);
+        Check(reimported.Sha256 == content.Sha256 &&
+            (await reopened.ReadScriptContentAsync(content.Sha256)).SequenceEqual(source));
+        await Throws("NOT_FOUND", async () => await reopened.ReadScriptContentAsync(new string('b', 64)));
 
-        int beforeInterrupted = f.Store.Writes;
-        byte[] interrupted = Encoding.UTF8.GetBytes("// interrupted\n" + new string('中', 800_000));
-        f.Store.FailAtWrite = beforeInterrupted + 2;
-        await Throws("STORAGE_ERROR", async () => await reopened.StoreScriptContentAsync(interrupted));
-        Check((await reopened.ReadSourceMetadataAsync()).State.GetProperty("revision").GetInt64() == 1);
+        byte[] interrupted = Encoding.UTF8.GetBytes("// interrupted write");
+        f.Store.FailAtWrite = f.Store.Writes + 1;
+        bool failed = false;
+        try { await reopened.StoreScriptContentAsync(interrupted); }
+        catch (DocumentStoreException error) { Check(error.Error == DocumentStoreError.Storage); failed = true; }
+        Check(failed && (await reopened.ReadSourceMetadataAsync()).State.GetProperty("revision").GetInt64() == 1);
         var resumed = await reopened.StoreScriptContentAsync(interrupted);
-        Check(resumed.Sha256 == Convert.ToHexStringLower(SHA256.HashData(interrupted)));
-
-        byte[] corrupt = f.Store.Document(ContentKey(content.Sha256, 0));
-        corrupt[0] ^= 0xff;
-        f.Store.Seed(ContentKey(content.Sha256, 0), corrupt);
-        await Throws("CORRUPT_STORAGE", async () => await reopened.ReadScriptContentAsync(content.Sha256, content.Length));
-        await Throws("CORRUPT_STORAGE", async () => await reopened.StoreScriptContentAsync(source));
-        CryptographicOperations.ZeroMemory(corrupt);
-        CryptographicOperations.ZeroMemory(interrupted);
-        CryptographicOperations.ZeroMemory(source);
+        Check((await reopened.ReadScriptContentAsync(resumed.Sha256)).SequenceEqual(interrupted));
     }
     private static JsonObject Sites(string value) => O(new { wy = new { schema = 1, values = new[] { new { key = "shared-key", value } } } });
     private static JsonObject NextMetadata(MusicSourceMetadataSnapshot old)

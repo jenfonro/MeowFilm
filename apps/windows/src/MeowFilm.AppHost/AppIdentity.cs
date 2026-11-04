@@ -14,7 +14,9 @@ public static class AppIdentity
     public static IReadOnlyList<RuntimeModule> ScriptModules { get; } =
         Array.AsReadOnly(new[] { new RuntimeModule("music", "0.7.0"), new RuntimeModule("cat", "0.1.0") });
     public static IReadOnlyList<string> NativeCollections { get; } =
-        Array.AsReadOnly(new[] { "music.script-sources.v1" });
+        Array.AsReadOnly(new[] { "music.script-sources.v2" });
+    public static IReadOnlyList<string> ProtectedNamespaces { get; } =
+        Array.AsReadOnly(new[] { "music.accounts.v1", "music.platform-context.v1" });
     public static IReadOnlyList<string> NativeNamespaces { get; } = Array.AsReadOnly(new[]
     {
         "music.library.v1", "music.files.v1", "music.accounts.v1", "music.feedback.v1",

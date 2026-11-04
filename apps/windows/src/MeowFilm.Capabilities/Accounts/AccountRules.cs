@@ -27,7 +27,7 @@ internal static class AccountRules
         MeowFilm.Capabilities.Platforms.MusicPlatformException known =>
             SafeCode(known.Code == "AUTH_REQUIRED" ? "AUTH_EXPIRED" : known.Code),
         OperationCanceledException => "CANCELLED",
-        ProtectedDocumentException e => e.Error switch
+        DocumentStoreException e => e.Error switch
         {
             DocumentStoreError.Conflict => "STORAGE_CONFLICT",
             DocumentStoreError.Unavailable => "STORAGE_UNAVAILABLE",

@@ -261,20 +261,20 @@ public static partial class MusicUiTests
     private sealed class DiscoveryScene : IAsyncDisposable
     {
         internal readonly string Root = NewRoot();
-        private readonly IProtectedDocumentStore store;
+        private readonly IDocumentStore store;
         internal readonly NativeMusicScriptTestRuntime Runtime = new();
         internal readonly DiscoveryHttp Http = new();
         internal readonly PlaybackProbe Playback = new();
         internal readonly Dialogs Dialog = new();
         internal readonly MusicNativeApplication App;
         internal readonly MusicCapability Module;
-        private DiscoveryScene(IProtectedDocumentStore? selectedStore = null)
+        private DiscoveryScene(IDocumentStore? selectedStore = null)
         {
             store = selectedStore ?? ServiceStore();
             App = new(store, Runtime, Http); Runtime.Register(App);
             Module = new(App, store, Playback, Dialog);
         }
-        internal static async Task<DiscoveryScene> Create(IProtectedDocumentStore? store = null)
+        internal static async Task<DiscoveryScene> Create(IDocumentStore? store = null)
         {
             var f = new DiscoveryScene(store);
             try { await f.Module.InitializeAsync(default); await Drain(); return f; }
@@ -315,14 +315,14 @@ public static partial class MusicUiTests
             finally { await Runtime.DisposeAsync(); await store.DisposeAsync(); }
         }
     }
-    private sealed class DiscoveryHeldStore(IProtectedDocumentStore inner) : IProtectedDocumentStore
+    private sealed class DiscoveryHeldStore(IDocumentStore inner) : IDocumentStore
     {
         private int target, reads, active;
         internal int Active => Volatile.Read(ref active);
         internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal void Arm(int number) { reads = 0; target = number; }
-        public async Task<ProtectedDocument> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
+        public async Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
         {
             if (documentNamespace == "music.accounts.v1" && target > 0 && Interlocked.Increment(ref reads) == target)
             {

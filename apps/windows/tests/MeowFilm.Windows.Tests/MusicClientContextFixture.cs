@@ -15,9 +15,9 @@ internal sealed class MusicClientContextFixture : IAsyncDisposable, IDisposable
     internal readonly MusicPlatformClientContextOwner Owner;
     internal readonly MusicPlatformClientProtocol Protocol;
     internal readonly MusicPlatformHttp Http;
-    private readonly IProtectedDocumentStore store;
+    private readonly IDocumentStore store;
     private readonly bool ownsStore, ownsHttp;
-    internal MusicClientContextFixture(MusicPlatformHttp? http = null, IProtectedDocumentStore? store = null,
+    internal MusicClientContextFixture(MusicPlatformHttp? http = null, IDocumentStore? store = null,
         bool importAccounts = false, TimeProvider? clock = null, Func<string>? registrationEntropy = null)
     {
         this.store = store ?? new MemoryStore(); ownsStore = store is null;
@@ -27,7 +27,7 @@ internal sealed class MusicClientContextFixture : IAsyncDisposable, IDisposable
     }
     internal MusicAccountProtocol CreateAccountProtocol(TimeSpan? timeout = null, TimeProvider? clock = null) =>
         new(Http, Owner, timeout: timeout, clock: clock ?? Protocol.Clock, clientProtocol: Protocol);
-    internal MusicAccountOwner CreateAccountOwner(IProtectedDocumentStore accountStore, IMusicAccountProtocol? protocol = null,
+    internal MusicAccountOwner CreateAccountOwner(IDocumentStore accountStore, IMusicAccountProtocol? protocol = null,
         TimeSpan? timeout = null, TimeProvider? clock = null) =>
         new(accountStore, protocol ?? CreateAccountProtocol(timeout, clock), Owner, Protocol, clock ?? Protocol.Clock);
     internal async Task SeedQqAsync(TimeProvider? clock = null)
@@ -41,7 +41,7 @@ internal sealed class MusicClientContextFixture : IAsyncDisposable, IDisposable
             "SYNTHETIC_UID", "SYNTHETIC_SID", now.ToUnixTimeMilliseconds(), qimei.Generation);
         await Owner.SaveQqAsync(device, qimei, session);
     }
-    internal static async Task SeedQqAsync(IProtectedDocumentStore store, TimeProvider? clock = null)
+    internal static async Task SeedQqAsync(IDocumentStore store, TimeProvider? clock = null)
     {
         await using var fixture = new MusicClientContextFixture(store: store, clock: clock);
         await fixture.SeedQqAsync();
@@ -66,13 +66,13 @@ internal sealed class MusicClientContextFixture : IAsyncDisposable, IDisposable
         if (actual.Count != expected.Count || expected.Any(part => actual.GetValueOrDefault(part.Key) != part.Value))
             throw new InvalidOperationException("Synthetic WY cookie scope mismatch");
     }
-    internal static async Task<JsonObject> ReadDocument(IProtectedDocumentStore store)
+    internal static async Task<JsonObject> ReadDocument(IDocumentStore store)
     {
         var document = await store.ReadAsync(MusicPlatformClientContextOwner.DocumentNamespace);
         try { return JsonNode.Parse(document.Data!)!.AsObject(); }
         finally { if (document.Data is not null) CryptographicOperations.ZeroMemory(document.Data); }
     }
-    internal static async Task ConcurrentClientWrite(IProtectedDocumentStore store)
+    internal static async Task ConcurrentClientWrite(IDocumentStore store)
     {
         var before = await store.ReadAsync(MusicPlatformClientContextOwner.DocumentNamespace);
         var current = before.Data is null ? MusicClientContextDocument.Create(new()) : MusicClientContextDocument.Decode(before);
@@ -85,7 +85,7 @@ internal sealed class MusicClientContextFixture : IAsyncDisposable, IDisposable
             if (before.Data is not null) CryptographicOperations.ZeroMemory(before.Data);
         }
     }
-    internal static async Task MutateDocument(IProtectedDocumentStore store, Action<JsonObject> change)
+    internal static async Task MutateDocument(IDocumentStore store, Action<JsonObject> change)
     {
         var before = await store.ReadAsync(MusicPlatformClientContextOwner.DocumentNamespace);
         try
@@ -109,15 +109,15 @@ internal sealed class MusicClientContextFixture : IAsyncDisposable, IDisposable
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) =>
             throw new InvalidOperationException("Unexpected client network request in isolated fixture");
     }
-    internal sealed class MemoryStore : IProtectedDocumentStore
+    internal sealed class MemoryStore : IDocumentStore
     {
         private readonly object gate = new();
         private readonly Dictionary<string, byte[]> documents = [];
-        public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken token = default)
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
         {
             token.ThrowIfCancellationRequested();
             lock (gate) return Task.FromResult(documents.TryGetValue(ns, out var bytes)
-                ? new ProtectedDocument(bytes.ToArray(), DocumentFingerprint.FromBytes(bytes))
+                ? new DocumentSnapshot(bytes.ToArray(), DocumentFingerprint.FromBytes(bytes))
                 : new(null, DocumentFingerprint.Missing));
         }
         public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected,
@@ -127,7 +127,7 @@ internal sealed class MusicClientContextFixture : IAsyncDisposable, IDisposable
             lock (gate)
             {
                 var before = documents.TryGetValue(ns, out var bytes) ? DocumentFingerprint.FromBytes(bytes) : DocumentFingerprint.Missing;
-                if (before != expected) throw new ProtectedDocumentException(DocumentStoreError.Conflict);
+                if (before != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
                 if (bytes is not null) CryptographicOperations.ZeroMemory(bytes);
                 documents[ns] = data.ToArray();
                 return Task.FromResult(DocumentFingerprint.FromBytes(data.Span));

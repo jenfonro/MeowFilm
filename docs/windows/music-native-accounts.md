@@ -6,7 +6,8 @@
 
 - `MusicAccountOwner` 是 `music.accounts.v1` 的唯一 writer，拥有账号会话、登录交接、资料权益及账号绑定的 QQ 反馈 lease；不拥有安装标识、QIMEI 或匿名设备登记 writer。
 - 网易云、QQ、酷狗的固定平台请求由 `MeowFilm.Capabilities.Accounts` 与 `MeowFilm.Capabilities.Platforms` 原生实现；账号业务不经 Node、脚本 RPC 或本地服务。
-- `IProtectedDocumentStore` 由 App 持有并借给账号 owner。构造 owner 不读磁盘、不联网、不启动 Node。
+- `IDocumentStore` 由 App 持有并借给账号 owner。构造 owner 不读磁盘、不联网、不启动 Node。
+- `music.accounts.v1` 仍使用 DPAPI，原命名空间、存储路径和密文格式保持不变；普通本地数据的明文存储不改变应用账号 Cookie 的保护。
 - 账号 owner 与协议默认使用 `TimeProvider.System`；注入确定性时钟时装配须向两者传入同一时钟，资料取得时间校验与缓存新鲜度使用同一时间基准。
 - 页面只调用原生能力接口，不读取 Cookie、设备材料或保护文档，也不拥有第二份账号状态。
 

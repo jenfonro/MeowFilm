@@ -14,12 +14,12 @@ public sealed record GrantedFile(string Id, string Path, string Title);
 public sealed class GrantedMediaFiles
 {
     private const int MaximumDocumentBytes = 8 * 1024 * 1024, MaximumItems = 100_000;
-    private readonly IProtectedDocumentStore store;
+    private readonly IDocumentStore store;
     private readonly string documentNamespace;
     private readonly HashSet<string> extensions;
     private readonly SemaphoreSlim gate = new(1, 1);
 
-    public GrantedMediaFiles(IProtectedDocumentStore store, string documentNamespace, IEnumerable<string> extensions)
+    public GrantedMediaFiles(IDocumentStore store, string documentNamespace, IEnumerable<string> extensions)
     {
         this.store = store ?? throw new ArgumentNullException(nameof(store));
         this.documentNamespace = !DocumentRules.ValidNamespace(documentNamespace)
@@ -85,19 +85,17 @@ public sealed class GrantedMediaFiles
     private async Task<(List<GrantedFile> Items, DocumentFingerprint Fingerprint)> ReadLockedAsync(CancellationToken token)
     {
         var saved = await store.ReadAsync(documentNamespace, token).ConfigureAwait(false);
-        try { return (Decode(saved), saved.Fingerprint); }
-        finally { if (saved.Data is not null) CryptographicOperations.ZeroMemory(saved.Data); }
+        return (Decode(saved), saved.Fingerprint);
     }
 
-    private List<GrantedFile> Decode(ProtectedDocument document)
+    private List<GrantedFile> Decode(DocumentSnapshot document)
     {
         if (document.Data is null)
         {
             if (document.Fingerprint != DocumentFingerprint.Missing) throw Corrupt();
             return [];
         }
-        if (document.Data.Length == 0 || document.Data.Length > MaximumDocumentBytes ||
-            DocumentFingerprint.FromBytes(document.Data) != document.Fingerprint) throw Corrupt();
+        if (document.Data.Length == 0 || document.Data.Length > MaximumDocumentBytes) throw Corrupt();
         try
         {
             using var json = JsonDocument.Parse(document.Data, new JsonDocumentOptions { MaxDepth = 4 });
@@ -137,14 +135,10 @@ public sealed class GrantedMediaFiles
             array.Add(new JsonObject { ["Id"] = item.Id, ["Path"] = item.Path, ["Title"] = item.Title });
         }
         byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(new JsonObject { ["Schema"] = 1, ["Items"] = array });
-        try
-        {
-            if (bytes.Length > MaximumDocumentBytes) throw new InvalidDataException("FILE_LIMIT");
-            var expected = DocumentFingerprint.FromBytes(bytes);
-            var written = await store.WriteAsync(documentNamespace, bytes, before, token).ConfigureAwait(false);
-            if (written != expected) throw new InvalidDataException("COMMIT_UNKNOWN");
-        }
-        finally { CryptographicOperations.ZeroMemory(bytes); }
+        if (bytes.Length > MaximumDocumentBytes) throw new InvalidDataException("FILE_LIMIT");
+        var expected = DocumentFingerprint.FromBytes(bytes);
+        var written = await store.WriteAsync(documentNamespace, bytes, before, token).ConfigureAwait(false);
+        if (written != expected) throw new InvalidDataException("COMMIT_UNKNOWN");
     }
 
     private void ValidateCurrent(GrantedFile file)

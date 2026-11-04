@@ -906,7 +906,7 @@ public static partial class MusicUiTests
             .AddTicks(Interlocked.Read(ref ticks));
         internal void Advance(TimeSpan duration) => Interlocked.Add(ref ticks, duration.Ticks);
     }
-    private sealed class SearchStore(IProtectedDocumentStore inner) : IProtectedDocumentStore
+    private sealed class SearchStore(IDocumentStore inner) : IDocumentStore
     {
         private AccountReadHold? nextAccountRead;
         internal int AccountReads;
@@ -920,7 +920,7 @@ public static partial class MusicUiTests
             return hold;
         }
 
-        public async Task<ProtectedDocument> ReadAsync(string documentNamespace,
+        public async Task<DocumentSnapshot> ReadAsync(string documentNamespace,
             CancellationToken cancellationToken = default)
         {
             if (documentNamespace == "music.accounts.v1")
@@ -939,7 +939,7 @@ public static partial class MusicUiTests
         public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
             DocumentFingerprint expected, CancellationToken cancellationToken = default)
         {
-            if (FailNextWrite) { FailNextWrite = false; throw new ProtectedDocumentException(DocumentStoreError.Storage); }
+            if (FailNextWrite) { FailNextWrite = false; throw new DocumentStoreException(DocumentStoreError.Storage); }
             return inner.WriteAsync(documentNamespace, data, expected, cancellationToken);
         }
 

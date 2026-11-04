@@ -210,19 +210,6 @@ public static class MusicPlaybackFeedbackTests
                     Check(!settings.IsEnabled("wy") && store.Writes == 0 &&
                         store.Data.SequenceEqual(original));
                 });
-        yield return Case("settings-reject-wrong-read-fingerprint-without-write", async () =>
-        {
-            byte[] data = Encoding.UTF8.GetBytes("{\"version\":1,\"revision\":0,\"enabled\":[]}");
-            var store = new MemoryStore
-            {
-                Data = data.ToArray(),
-                ReadFingerprint = new DocumentFingerprint(true, data.Length, new string('0', 64))
-            };
-            await using var settings = new MusicFeedbackSettingsOwner(store);
-            await Error("CORRUPT_STORAGE", () => settings.ReadAsync());
-            await Error("CORRUPT_STORAGE", () => settings.SaveAsync(0, ["wy"]));
-            Check(store.Writes == 0 && store.Data.SequenceEqual(data));
-        });
         yield return Case("settings-reject-unknown-write-receipt-without-retry-or-success", async () =>
         {
             var store = new MemoryStore
@@ -236,16 +223,16 @@ public static class MusicPlaybackFeedbackTests
             await Error("COMMIT_UNKNOWN", () => settings.ReadAsync());
             Check(store.Writes == 1 && store.Data is null && !settings.IsEnabled("wy"));
         });
-        yield return Case("durable-DPAPI-policy-reopen-only-native-document", async () =>
+        yield return Case("durable-policy-reopen-only-native-document", async () =>
         {
             string root = DataPath();
             Directory.CreateDirectory(root);
-            await using (var store = new DpapiDocumentStore(root, [MusicFeedbackSettingsOwner.DocumentNamespace]))
+            await using (var store = new LocalDocumentStore(root, [MusicFeedbackSettingsOwner.DocumentNamespace]))
             await using (var settings = new MusicFeedbackSettingsOwner(store))
             {
                 await settings.ReadAsync(); await settings.SaveAsync(0, ["kg", "wy"]);
             }
-            await using var second = new DpapiDocumentStore(root, [MusicFeedbackSettingsOwner.DocumentNamespace]);
+            await using var second = new LocalDocumentStore(root, [MusicFeedbackSettingsOwner.DocumentNamespace]);
             await using var reopened = new MusicFeedbackSettingsOwner(second);
             var value = await reopened.ReadAsync();
             Check(value.Revision == 1 && value.Enabled.ToHashSet().SetEquals(["kg", "wy"]));
@@ -446,27 +433,27 @@ public static class MusicPlaybackFeedbackTests
                 { Content = new System.Net.Http.StringContent(body, Encoding.UTF8, "application/json") });
         }
     }
-    private sealed class MemoryStore : IProtectedDocumentStore
+    private sealed class MemoryStore : IDocumentStore
     {
         internal byte[]? Data;
         internal int Reads, Writes, Disposals;
         internal bool Lose, SkipWrite;
-        internal DocumentFingerprint? ReadFingerprint, WriteReceipt;
+        internal DocumentFingerprint? WriteReceipt;
         internal TaskCompletionSource? Arrived, Release;
-        public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken token = default)
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
         {
             Check(ns == MusicFeedbackSettingsOwner.DocumentNamespace); Interlocked.Increment(ref Reads);
-            return Task.FromResult(new ProtectedDocument(Data?.ToArray(),
-                ReadFingerprint ?? (Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data))));
+            return Task.FromResult(new DocumentSnapshot(Data?.ToArray(),
+                Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data)));
         }
         public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken token = default)
         {
             Check(ns == MusicFeedbackSettingsOwner.DocumentNamespace); Interlocked.Increment(ref Writes);
             Arrived?.TrySetResult(); if (Release is not null) await Release.Task;
             var before = Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data);
-            if (before != expected) throw new ProtectedDocumentException(DocumentStoreError.Conflict);
+            if (before != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
             if (!SkipWrite) Data = data.ToArray();
-            if (Lose) { Lose = false; throw new ProtectedDocumentException(DocumentStoreError.Storage); }
+            if (Lose) { Lose = false; throw new DocumentStoreException(DocumentStoreError.Storage); }
             return WriteReceipt ?? DocumentFingerprint.FromBytes(data.Span);
         }
         public ValueTask DisposeAsync() { Disposals++; return ValueTask.CompletedTask; }

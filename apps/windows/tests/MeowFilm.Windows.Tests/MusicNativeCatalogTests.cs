@@ -157,7 +157,7 @@ public static class MusicNativeCatalogTests
         public void Invalidate(string? platform = null) { lock (gate) Invalidations.Add(platform); }
         public void Dispose() => Disposed = true;
     }
-    private sealed class Store : IProtectedDocumentStore
+    private sealed class Store : IDocumentStore
     {
         private readonly object gate = new();
         internal byte[]? Bytes;
@@ -165,10 +165,10 @@ public static class MusicNativeCatalogTests
         internal bool Disposed;
         internal TaskCompletionSource? Entered, Release;
         internal bool WriteWasUncancellable;
-        public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken t = default)
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken t = default)
         {
             Check(ns == MusicLibraryOwner.DocumentNamespace); t.ThrowIfCancellationRequested();
-            lock (gate) return Task.FromResult(new ProtectedDocument(Bytes?.ToArray(),
+            lock (gate) return Task.FromResult(new DocumentSnapshot(Bytes?.ToArray(),
                 Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes)));
         }
         public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes,
@@ -179,12 +179,12 @@ public static class MusicNativeCatalogTests
             lock (gate)
             {
                 var current = Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes);
-                if (current != expected) throw new ProtectedDocumentException(DocumentStoreError.Conflict);
+                if (current != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
                 Writes++;
                 int failure = Failure; Failure = 0;
-                if (failure == 1) throw new ProtectedDocumentException(DocumentStoreError.Storage);
+                if (failure == 1) throw new DocumentStoreException(DocumentStoreError.Storage);
                 Bytes = bytes.ToArray();
-                if (failure == 2) throw new ProtectedDocumentException(DocumentStoreError.Storage);
+                if (failure == 2) throw new DocumentStoreException(DocumentStoreError.Storage);
                 return DocumentFingerprint.FromBytes(Bytes);
             }
         }

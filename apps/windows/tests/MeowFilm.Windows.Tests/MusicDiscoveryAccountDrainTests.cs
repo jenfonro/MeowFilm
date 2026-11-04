@@ -132,7 +132,7 @@ public static class MusicDiscoveryAccountDrainTests
             }
         }
     }
-    private sealed class Store : IProtectedDocumentStore
+    private sealed class Store : IDocumentStore
     {
         internal byte[]? Data = Document();
         internal readonly ConcurrentDictionary<int, Hold> Holds = new();
@@ -143,7 +143,7 @@ public static class MusicDiscoveryAccountDrainTests
         {
             var value = new Hold(); Check(Holds.TryAdd(number, value)); return value;
         }
-        public async Task<ProtectedDocument> ReadAsync(string ns, CancellationToken token = default)
+        public async Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
         {
             Check(ns == MusicAccountOwner.DocumentNamespace);
             int count = Interlocked.Increment(ref Reads), active = Interlocked.Increment(ref Active);
