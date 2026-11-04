@@ -1,3 +1,4 @@
+using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -48,6 +49,304 @@ public static class MusicNativeScriptTests
         yield return new("Native LX: suspended old grant cannot write while a replacement is loading", SuspendedGrant);
         yield return new("Native LX: runtime recovery fences old grants until explicit source activation", RecoveredGrants);
         yield return new("Native LX: current script response contract is required before activation", ScriptContract);
+        yield return new("Native LX transport: direct boundary preserves parameters and original values", TransportSmall);
+        yield return new("Native LX transport: complete JSON crosses 512 KiB one MiB and eight MiB", TransportLarge);
+        yield return new("Native LX transport: corrupt blob cannot publish and always releases", TransportCorruption);
+        yield return new("Native LX transport: cancelled timed out and failed calls reclaim owned tokens", TransportCleanup);
+    }
+    private static async Task TransportSmall()
+    {
+        foreach (int length in new[] { 2, 65536, 65537 })
+        {
+            // A serialized string contributes two quote bytes.
+            object parameters = new string('x', length - 2);
+            var runtime = new TransportRuntime();
+            var transport = new MusicScriptTransport(runtime);
+            var result = await transport.CallAsync("invoke", parameters, default);
+            Check(result.GetProperty("value").GetProperty("blob").GetString() == "business field");
+            Check(runtime.BusinessCalls == 1 && runtime.Uploads.Count == 0 && runtime.Blobs.Count == 0);
+            if (length <= 65536)
+                Check(runtime.Calls.SequenceEqual(["music.script.invoke"]) && ReferenceEquals(parameters, runtime.DirectParameters));
+            else Check(runtime.Calls.Contains("music.script.control.call") && runtime.Aborts == 1);
+        }
+        foreach (string operation in new[] { "stage.chunk", "control.chunk", "blob.read" })
+        {
+            object parameters = new { data = new string('x', 100_000) };
+            string? called = null;
+            var runtime = new CallbackRuntime((method, input, _) =>
+            {
+                called = method; Check(ReferenceEquals(parameters, input));
+                return Task.FromResult(J(new { ok = true, contract = "music.script.v2" }));
+            });
+            await new MusicScriptTransport(runtime).CallAsync(operation, parameters, default);
+            Check(called == "music.script." + operation);
+        }
+        foreach (object? value in new object?[] { null, false, 7, "raw", new object?[] { null, false, 0 },
+            new { blob = new { token = "business data", length = 900000 } } })
+        {
+            var expected = J(new { ok = true, contract = "music.script.v2", value });
+            var runtime = new CallbackRuntime((_, _, _) => Task.FromResult(expected));
+            Check((await new MusicScriptTransport(runtime).CallAsync("invoke", new { }, default)).GetRawText() == expected.GetRawText());
+        }
+        foreach (string invalid in new[] { """{"a":1,"\u0061":2}""", """{"音乐":1}""",
+            """{"value":9007199254740992}""", """{"value":"\ud800"}""" })
+        {
+            using var document = JsonDocument.Parse(invalid);
+            var runtime = new TransportRuntime();
+            await TransportError("INVALID_MESSAGE", () => new MusicScriptTransport(runtime).CallAsync("invoke", document.RootElement, default));
+            Check(runtime.Calls.Count == 0, "invalid logical input must not reach business");
+        }
+    }
+
+    private static async Task TransportLarge()
+    {
+        // Exact full request and response JSON sizes, including JSON overhead.
+        const int exact = 512 * 1024;
+        var boundary = new TransportRuntime();
+        string exactRequest = new('x', exact - 2);
+        boundary.Response = BridgeCodec.EncodeJSONValue(new { ok = true, contract = "music.script.v2",
+            value = new string('x', exact - Encoding.UTF8.GetByteCount("""{"ok":true,"contract":"music.script.v2","value":""}""")) });
+        Check(boundary.Response.Length == exact);
+        var exactResult = await new MusicScriptTransport(boundary).CallAsync("invoke", exactRequest, default);
+        Check(BridgeCodec.EncodeJSONValue(boundary.Received!.Value).Length == exact &&
+            BridgeCodec.EncodeJSONValue(exactResult).Length == exact && boundary.Releases == 1 && boundary.Aborts == 1);
+        foreach (int size in new[] { 512 * 1024, 512 * 1024 + 1, 1024 * 1024 + 1, 8 * 1024 * 1024 + 1 })
+        {
+            var runtime = new TransportRuntime();
+            // Multibyte text and escapes straddle byte chunk boundaries.
+            string text = string.Concat(Enumerable.Repeat("音乐🎵\"\\", size / 8 + 1));
+            var value = new { text, rows = new object?[] { null, false, 0, 1.5, new { blob = "raw" } } };
+            runtime.Response = BridgeCodec.EncodeJSONValue(new { ok = true, contract = "music.script.v2", value });
+            var result = await new MusicScriptTransport(runtime).CallAsync("invoke", value, default);
+            Check(JsonNode.DeepEquals(JsonNode.Parse(result.GetProperty("value").GetRawText()), JsonSerializer.SerializeToNode(value)));
+            Check(runtime.Received is { } received &&
+                JsonNode.DeepEquals(JsonNode.Parse(received.GetRawText()), JsonSerializer.SerializeToNode(value)));
+            Check(runtime.BusinessCalls == 1 && runtime.Aborts == 1 && runtime.Releases == 1 &&
+                runtime.Uploads.Count == 0 && runtime.Blobs.Count == 0);
+            Check(runtime.MaximumFrame <= BridgeCodec.MaximumFrameBytes);
+        }
+    }
+
+    private static async Task TransportCorruption()
+    {
+        foreach (string fault in new[]
+        {
+            "next", "short", "long", "empty", "base64", "noncanonical", "hash", "length-short", "length-long",
+            "chunk-size", "hash-case", "utf8", "json", "duplicate", "unicode-key", "unsafe-number", "surrogate",
+            "depth", "envelope", "contract", "recursive"
+        })
+        {
+            var runtime = new TransportRuntime { Fault = fault,
+                Response = BridgeCodec.EncodeJSONValue(new { ok = true, contract = "music.script.v2", value = new string('x', 70_001) }) };
+            runtime.Response = fault switch
+            {
+                "utf8" => [0xff],
+                "json" => Encoding.UTF8.GetBytes("{"),
+                "duplicate" => Encoding.UTF8.GetBytes("""{"ok":true,"contract":"music.script.v2","value":{"a":1,"\u0061":2}}"""),
+                "unicode-key" => Encoding.UTF8.GetBytes("""{"ok":true,"contract":"music.script.v2","value":{"音乐":1}}"""),
+                "unsafe-number" => Encoding.UTF8.GetBytes("""{"ok":true,"contract":"music.script.v2","value":9007199254740992}"""),
+                "surrogate" => Encoding.UTF8.GetBytes("""{"ok":true,"contract":"music.script.v2","value":"\ud800"}"""),
+                "depth" => Encoding.UTF8.GetBytes(new string('[', 65) + "0" + new string(']', 65)),
+                "envelope" => Encoding.UTF8.GetBytes("""{"value":false}"""),
+                "contract" => Encoding.UTF8.GetBytes("""{"ok":true,"contract":"wrong","value":false}"""),
+                "recursive" => Encoding.UTF8.GetBytes("""{"ok":true,"contract":"music.script.v2","blob":{}}"""),
+                _ => runtime.Response
+            };
+            await TransportError("INVALID_RESPONSE", () => new MusicScriptTransport(runtime).CallAsync("invoke", new { }, default));
+            Check(runtime.Releases == 1 && runtime.Blobs.Count == 0, fault);
+            runtime.Fault = "";
+            runtime.Response = null;
+            Check((await new MusicScriptTransport(runtime).CallAsync("status", new { }, default)).GetProperty("ok").GetBoolean());
+        }
+    }
+
+    private static async Task TransportCleanup()
+    {
+        foreach (string at in new[] { "control.chunk", "control.call", "blob.read" })
+            foreach (string failure in new[] { "CANCELLED", "TIMEOUT" })
+            {
+                using var cancelled = new CancellationTokenSource();
+                int visits = 0;
+                var runtime = new TransportRuntime { Response = BridgeCodec.EncodeJSONValue(
+                    new { ok = true, contract = "music.script.v2", value = new string('x', 80_000) }) };
+                runtime.Before = (method, token) =>
+                {
+                    if (method != "music.script." + at) return;
+                    if (++visits < (at == "control.call" ? 1 : 2)) return;
+                    if (failure == "TIMEOUT") throw new BridgeException("TIMEOUT");
+                    cancelled.Cancel(); token.ThrowIfCancellationRequested();
+                };
+                await TransportError(failure, () => new MusicScriptTransport(runtime).CallAsync(
+                    "invoke", new { text = new string('x', 80_000) }, cancelled.Token));
+                Check(runtime.Aborts == 1 && runtime.Uploads.Count == 0);
+                Check(runtime.Releases == (at == "blob.read" ? 1 : 0) && runtime.Blobs.Count == 0);
+                Check(runtime.BusinessCalls == (at == "blob.read" ? 1 : 0), "uncertain business is never retried");
+                Check(runtime.CleanupTokens.All(token => token.CanBeCanceled && !token.IsCancellationRequested && token != cancelled.Token));
+            }
+        foreach (string fault in new[] { "begin", "upload-next", "business" })
+        {
+            var runtime = new TransportRuntime { Fault = fault };
+            if (fault == "business")
+            {
+                var result = await new MusicScriptTransport(runtime).CallAsync("invoke", new string('x', 80_000), default);
+                Check(!result.GetProperty("ok").GetBoolean() && result.GetProperty("code").GetString() == "SCRIPT_EXCEPTION");
+            }
+            else await TransportError("INVALID_RESPONSE", () =>
+                new MusicScriptTransport(runtime).CallAsync("invoke", new string('x', 80_000), default));
+            Check(runtime.Aborts == 1 && runtime.Uploads.Count == 0);
+            Check(runtime.BusinessCalls == (fault == "business" ? 1 : 0));
+        }
+        // A receipt received concurrently with cancellation still belongs to this call.
+        foreach (bool duringBegin in new[] { true, false })
+        {
+            using var cancelled = new CancellationTokenSource();
+            var runtime = new TransportRuntime { AfterReceipt = cancelled.Cancel, CancelBegin = duringBegin,
+                Response = BridgeCodec.EncodeJSONValue(new { ok = true, contract = "music.script.v2", value = false }) };
+            await TransportError("CANCELLED", () => new MusicScriptTransport(runtime).CallAsync(
+                "invoke", new string('x', 80_000), cancelled.Token));
+            Check(runtime.Aborts == 1 && runtime.Uploads.Count == 0 && runtime.Blobs.Count == 0);
+            Check(runtime.Releases == (duringBegin ? 0 : 1));
+        }
+        // An unknown begin receipt cannot be aborted locally and is never retried.
+        var unknown = new TransportRuntime();
+        unknown.Before = (method, _) => { if (method == "music.script.control.begin") throw new BridgeException("TIMEOUT"); };
+        await TransportError("TIMEOUT", () => new MusicScriptTransport(unknown).CallAsync("invoke", new string('x', 80_000), default));
+        Check(unknown.Aborts == 0 && unknown.BusinessCalls == 0 && unknown.Calls.Count == 1);
+        // Cleanup failure must not replace the original operation failure.
+        var brokenCleanup = new TransportRuntime { Fault = "upload-next" };
+        brokenCleanup.Before = (method, _) => { if (method == "music.script.control.abort") throw new BridgeException("CLOSED"); };
+        await TransportError("INVALID_RESPONSE", () => new MusicScriptTransport(brokenCleanup).CallAsync("invoke", new string('x', 80_000), default));
+        Check(brokenCleanup.Calls.Count(method => method == "music.script.control.abort") == 1);
+        foreach (var buffer in brokenCleanup.Uploads.Values) buffer.Dispose();
+        var brokenRelease = new TransportRuntime { Fault = "next",
+            Response = BridgeCodec.EncodeJSONValue(new { ok = true, contract = "music.script.v2", value = false }) };
+        brokenRelease.Before = (method, _) => { if (method == "music.script.blob.release") throw new BridgeException("CLOSED"); };
+        await TransportError("INVALID_RESPONSE", () => new MusicScriptTransport(brokenRelease).CallAsync("invoke", new { }, default));
+        Check(brokenRelease.Calls.Count(method => method == "music.script.blob.release") == 1);
+        foreach (string cleanup in new[] { "control.abort", "blob.release" })
+        {
+            using var cancelled = new CancellationTokenSource();
+            var runtime = new TransportRuntime { Response = BridgeCodec.EncodeJSONValue(
+                new { ok = true, contract = "music.script.v2", value = false }) };
+            runtime.Before = (method, _) => { if (method == "music.script." + cleanup) cancelled.Cancel(); };
+            await TransportError("CANCELLED", () => new MusicScriptTransport(runtime).CallAsync("invoke", new string('x', 80_000), cancelled.Token));
+            Check(runtime.Aborts == 1 && runtime.Releases == 1 && runtime.Uploads.Count == 0 && runtime.Blobs.Count == 0);
+        }
+    }
+
+    private static async Task TransportError(string code, Func<Task<JsonElement>> call)
+    {
+        try { await call(); }
+        catch (MusicLibraryException error) when (error.Code == code) { return; }
+        catch (BridgeException error) when (error.Code == code) { return; }
+        catch (OperationCanceledException) when (code == "CANCELLED") { return; }
+        throw new InvalidOperationException("Expected transport failure: " + code);
+    }
+
+    private sealed class CallbackRuntime(Func<string, object?, CancellationToken, Task<JsonElement>> call) : IRuntimeClient
+    {
+        public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default) =>
+            call(method, parameters, cancellationToken);
+    }
+
+    private sealed class TransportRuntime : IRuntimeClient
+    {
+        internal readonly List<string> Calls = [];
+        internal readonly Dictionary<string, MemoryStream> Uploads = [];
+        internal readonly Dictionary<string, byte[]> Blobs = [];
+        internal readonly List<CancellationToken> CleanupTokens = [];
+        internal object? DirectParameters;
+        internal JsonElement? Received;
+        internal byte[]? Response;
+        internal string Fault = "";
+        internal int BusinessCalls, Aborts, Releases, MaximumFrame;
+        internal Action<string, CancellationToken>? Before;
+        internal Action? AfterReceipt;
+        internal bool CancelBegin;
+        private int length;
+        private string hash = "";
+
+        public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Calls.Add(method);
+            var p = BridgeCodec.Value(parameters);
+            Frame(new { version = 1, session = "transport-test", id = 1, kind = "request", method, @params = p });
+            Before?.Invoke(method, cancellationToken);
+            JsonElement result;
+            switch (method)
+            {
+                case "music.script.control.begin":
+                    length = p.GetProperty("length").GetInt32(); hash = p.GetProperty("sha256").GetString()!;
+                    Uploads.Add("upload", new());
+                    result = Reply(new { token = "upload", chunkBytes = Fault == "begin" ? 1 : 65536 });
+                    if (CancelBegin) AfterReceipt?.Invoke();
+                    break;
+                case "music.script.control.chunk":
+                    var buffer = Uploads[p.GetProperty("token").GetString()!];
+                    Check(p.GetProperty("offset").GetInt64() == buffer.Length);
+                    string data = p.GetProperty("data").GetString()!;
+                    byte[] bytes = Convert.FromBase64String(data);
+                    Check(Convert.ToBase64String(bytes) == data && bytes.Length is > 0 and <= 65536 && buffer.Length + bytes.Length <= length);
+                    buffer.Write(bytes);
+                    result = Reply(new { next = buffer.Length + (Fault == "upload-next" ? 1 : 0) });
+                    break;
+                case "music.script.control.call":
+                    string upload = p.GetProperty("token").GetString()!;
+                    var complete = Uploads[upload].ToArray();
+                    Check(complete.Length == length && Convert.ToHexStringLower(SHA256.HashData(complete)) == hash);
+                    Check(p.GetProperty("operation").GetString() is "load" or "unload" or "invoke" or "status");
+                    Received = BridgeCodec.DecodeJSONValue(complete); Uploads[upload].Dispose(); Uploads.Remove(upload);
+                    result = Business();
+                    break;
+                case "music.script.control.abort":
+                    CleanupTokens.Add(cancellationToken); Aborts++;
+                    if (Uploads.Remove(p.GetProperty("token").GetString()!, out var pending)) pending.Dispose();
+                    result = Reply(new { released = true });
+                    break;
+                case "music.script.blob.read":
+                    byte[] body = Blobs[p.GetProperty("token").GetString()!];
+                    int offset = p.GetProperty("offset").GetInt32();
+                    int count = Math.Min(65536, body.Length - offset);
+                    string encoded = Convert.ToBase64String(body, offset, count);
+                    if (Fault == "short") encoded = Convert.ToBase64String(body, offset, count - 1);
+                    if (Fault == "long") encoded = Convert.ToBase64String(new byte[65537]);
+                    if (Fault == "empty") encoded = "";
+                    if (Fault == "base64") encoded = "%%%=";
+                    if (Fault == "noncanonical") encoded += "\n";
+                    result = Reply(new { data = encoded, next = offset + count + (Fault == "next" ? 1 : 0) });
+                    break;
+                case "music.script.blob.release":
+                    CleanupTokens.Add(cancellationToken); Releases++; Check(Blobs.Remove(p.GetProperty("token").GetString()!));
+                    result = Reply(new { released = true });
+                    break;
+                default:
+                    Check(method is "music.script.invoke" or "music.script.status");
+                    DirectParameters = parameters; Received = p; result = Business();
+                    break;
+            }
+            Frame(new { version = 1, session = "transport-test", id = 1, kind = "result", value = result });
+            return Task.FromResult(result);
+        }
+        private JsonElement Business()
+        {
+            BusinessCalls++;
+            if (Fault == "business") return J(new { ok = false, contract = "music.script.v2", code = "SCRIPT_EXCEPTION" });
+            if (Response is not { } bytes) return Reply(new { value = new { blob = "business field", flags = new object?[] { null, false, 0 } } });
+            Blobs.Add("blob", bytes);
+            var result = Reply(new { blob = new { token = "blob",
+                length = bytes.Length + (Fault == "length-short" ? -1 : Fault == "length-long" ? 1 : 0),
+                sha256 = Fault == "hash" ? new string('0', 64) : Fault == "hash-case"
+                    ? new string('A', 64) : Convert.ToHexStringLower(SHA256.HashData(bytes)),
+                chunkBytes = Fault == "chunk-size" ? 1 : 65536 } });
+            if (!CancelBegin) AfterReceipt?.Invoke();
+            return result;
+        }
+        private void Frame(object value) => MaximumFrame = Math.Max(MaximumFrame, BridgeCodec.Encode(value).Length - 4);
+        private static JsonElement Reply(object value)
+        {
+            var result = O(value); result["ok"] = true; result["contract"] = "music.script.v2"; return J(result);
+        }
     }
     private static JsonElement J(object value) => JsonSerializer.SerializeToElement(value);
     private static JsonObject O(object value) => JsonNode.Parse(JsonSerializer.Serialize(value))!.AsObject();

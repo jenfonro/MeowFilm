@@ -12,7 +12,7 @@ public static class AppIdentity
     public const string StorageId = "aggregate";
     public const string RuntimeId = "aggregate";
     public static IReadOnlyList<RuntimeModule> ScriptModules { get; } =
-        Array.AsReadOnly(new[] { new RuntimeModule("music", "0.6.0"), new RuntimeModule("cat", "0.1.0") });
+        Array.AsReadOnly(new[] { new RuntimeModule("music", "0.7.0"), new RuntimeModule("cat", "0.1.0") });
     public static IReadOnlyList<string> NativeCollections { get; } =
         Array.AsReadOnly(new[] { "music.script-sources.v1" });
     public static IReadOnlyList<string> NativeNamespaces { get; } = Array.AsReadOnly(new[]

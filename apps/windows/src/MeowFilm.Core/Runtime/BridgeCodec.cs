@@ -27,13 +27,12 @@ public static partial class BridgeCodec
             reader.GetString()!;
         public override void Write(Utf8JsonWriter writer, string value, JsonSerializerOptions options)
         {
-            if (StrictUtf8.GetByteCount(value) > MaximumFrameBytes) throw new BridgeException("LIMIT");
+            _ = StrictUtf8.GetByteCount(value);
             writer.WriteStringValue(value);
         }
         public override void WriteAsPropertyName(Utf8JsonWriter writer, string value, JsonSerializerOptions options)
         {
             if (value.Any(c => c > 127)) Invalid();
-            if (value.Length > MaximumFrameBytes) throw new BridgeException("LIMIT");
             writer.WritePropertyName(value);
         }
     }
@@ -70,7 +69,6 @@ public static partial class BridgeCodec
                     foreach (var (key, value) in obj)
                     {
                         if (key.Any(c => c > 127)) Invalid();
-                        if (key.Length > MaximumFrameBytes) throw new BridgeException("LIMIT");
                         writer.WritePropertyName(key);
                         WriteNode(writer, value, options);
                     }
@@ -82,7 +80,7 @@ public static partial class BridgeCodec
                     writer.WriteEndArray();
                     break;
                 case JsonValue value when value.TryGetValue<string>(out var text):
-                    if (StrictUtf8.GetByteCount(text) > MaximumFrameBytes) throw new BridgeException("LIMIT");
+                    _ = StrictUtf8.GetByteCount(text);
                     writer.WriteStringValue(text);
                     break;
                 case JsonValue value when value.TryGetValue<char>(out var character):
@@ -120,6 +118,33 @@ public static partial class BridgeCodec
         catch { throw new BridgeException("INVALID_MESSAGE"); }
     }
 
+    public static byte[] EncodeJSONValue(object? value)
+    {
+        try
+        {
+            var bytes = JsonSerializer.SerializeToUtf8Bytes(value, Serializer);
+            _ = DecodeJSONValue(bytes);
+            return bytes;
+        }
+        catch (BridgeException) { throw; }
+        catch { throw new BridgeException("INVALID_MESSAGE"); }
+    }
+
+    public static JsonElement DecodeJSONValue(ReadOnlyMemory<byte> body)
+    {
+        try
+        {
+            _ = StrictUtf8.GetCharCount(body.Span);
+            // Match JS TextDecoder's default initial UTF-8 BOM handling.
+            if (body.Span.StartsWith(new byte[] { 0xef, 0xbb, 0xbf })) body = body[3..];
+            using var document = JsonDocument.Parse(body, new JsonDocumentOptions { MaxDepth = 67 });
+            ValidateValue(document.RootElement, 0);
+            return document.RootElement.Clone();
+        }
+        catch (BridgeException) { throw; }
+        catch { throw new BridgeException("INVALID_MESSAGE"); }
+    }
+
     [GeneratedRegex(@"\A[a-zA-Z0-9_.:-]{1,80}\z", RegexOptions.CultureInvariant)]
     private static partial Regex SessionPattern();
     [GeneratedRegex(@"\A[a-zA-Z][a-zA-Z0-9_.-]{0,127}\z", RegexOptions.CultureInvariant)]
@@ -130,15 +155,7 @@ public static partial class BridgeCodec
 
     public static JsonElement Value(object? value)
     {
-        try
-        {
-            using var document = JsonDocument.Parse(Serialize(value, MaximumFrameBytes),
-                new JsonDocumentOptions { MaxDepth = 67 });
-            ValidateValue(document.RootElement, 0);
-            return document.RootElement.Clone();
-        }
-        catch (BridgeException) { throw; }
-        catch { throw new BridgeException("INVALID_MESSAGE"); }
+        return DecodeJSONValue(Serialize(value, MaximumFrameBytes));
     }
 
     public static byte[] Encode(object message, int maximumBytes = MaximumFrameBytes)
@@ -157,13 +174,7 @@ public static partial class BridgeCodec
         if (body.Length is 0 or > MaximumFrameBytes) throw new BridgeException("LIMIT");
         try
         {
-            _ = StrictUtf8.GetCharCount(body.Span);
-            // Match JS TextDecoder's default initial UTF-8 BOM handling. Size
-            // was checked on the actual wire bytes, before discarding the BOM.
-            if (body.Span.StartsWith(new byte[] { 0xef, 0xbb, 0xbf })) body = body[3..];
-            using var document = JsonDocument.Parse(body, new JsonDocumentOptions { MaxDepth = 67 });
-            var message = document.RootElement;
-            ValidateValue(message, 0);
+            var message = DecodeJSONValue(body);
             if (message.ValueKind != JsonValueKind.Object
                 || !message.TryGetProperty("version", out var version) || version.GetDouble() != 1
                 || !message.TryGetProperty("session", out var session) || !ValidSession(session.GetString()!)
@@ -183,7 +194,7 @@ public static partial class BridgeCodec
                 || fields.Any(field => !message.TryGetProperty(field, out _))) Invalid();
             if (kind.GetString() == "request" && !ValidMethod(message.GetProperty("method").GetString()!)) Invalid();
             if (kind.GetString() == "error" && !BridgeException.Codes.Contains(message.GetProperty("code").GetString()!)) Invalid();
-            return message.Clone();
+            return message;
         }
         catch (BridgeException) { throw; }
         catch { throw new BridgeException("INVALID_MESSAGE"); }

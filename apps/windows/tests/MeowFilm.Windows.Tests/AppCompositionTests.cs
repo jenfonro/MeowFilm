@@ -50,7 +50,7 @@ public static class AppCompositionTests
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "meowfilm", "aggregate"));
         Check(AppIdentity.ScriptModules.Select(m => (m.Id, m.Version)).SequenceEqual(new[]
         {
-            ("music", "0.6.0"),
+            ("music", "0.7.0"),
             ("cat", "0.1.0")
         }));
         Check(AppIdentity.NativeCollections.SequenceEqual(new[] { MusicLibraryOwner.ScriptContentCollection }));

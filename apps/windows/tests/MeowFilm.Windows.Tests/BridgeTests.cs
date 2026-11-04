@@ -158,6 +158,40 @@ public static class BridgeTests
                 value = new string('音', BridgeCodec.MaximumFrameBytes / 3 + 1) }));
             return Task.CompletedTask;
         });
+        yield return new("bridge: logical JSON exceeds former budgets while physical values stay bounded", () =>
+        {
+            string text = new string('x', 8 * 1024 * 1024) + "音乐🎵\"\\";
+            foreach (object value in new object[] { text, new System.Text.Json.Nodes.JsonObject { ["text"] = text } })
+            {
+                byte[] bytes = BridgeCodec.EncodeJSONValue(value);
+                var decoded = BridgeCodec.DecodeJSONValue(bytes);
+                Equal(text, decoded.ValueKind == JsonValueKind.String ? decoded.GetString() : decoded.GetProperty("text").GetString());
+                Throws("LIMIT", () => BridgeCodec.Value(value));
+                Throws("LIMIT", () => BridgeCodec.Encode(new { version = 1, session = "s", id = 1, kind = "result", value }));
+            }
+            // Many small values exceed the persistent document parser's node budget.
+            var array = Enumerable.Repeat(false, 250_001).ToArray();
+            Equal(array.Length, BridgeCodec.DecodeJSONValue(BridgeCodec.EncodeJSONValue(array)).GetArrayLength());
+            return Task.CompletedTask;
+        });
+        yield return new("bridge: logical JSON retains strict bridge semantics and depth 64", () =>
+        {
+            foreach (string json in new[]
+            {
+                """{"a":1,"\u0061":2}""", """{"歌曲":1}""", "\"\\ud800\"", "\"\\udfff\"",
+                "9007199254740992", "1e309", "[", new string('[', 65) + "0" + new string(']', 65)
+            })
+                Throws("INVALID_MESSAGE", () => BridgeCodec.DecodeJSONValue(Encoding.UTF8.GetBytes(json)));
+            Throws("INVALID_MESSAGE", () => BridgeCodec.DecodeJSONValue(new byte[] { 0xff }));
+            foreach (object value in new object[] { "\ud800", '\udfff',
+                System.Text.Json.Nodes.JsonValue.Create("\ud800")!,
+                new Dictionary<string, object> { ["歌曲"] = 1 }, double.NaN, 9007199254740992L })
+                Throws("INVALID_MESSAGE", () => BridgeCodec.EncodeJSONValue(value));
+            _ = BridgeCodec.DecodeJSONValue(Encoding.UTF8.GetBytes(new string('[', 64) + "0" + new string(']', 64)));
+            _ = BridgeCodec.DecodeJSONValue(new byte[] { 0xef, 0xbb, 0xbf, (byte)'0' });
+            Equal(JsonValueKind.Null, BridgeCodec.DecodeJSONValue(BridgeCodec.EncodeJSONValue(null)).ValueKind);
+            return Task.CompletedTask;
+        });
         yield return new("bridge: fragmented coalesced and truncated framing", Framing);
         yield return new("bridge: codec corpus agrees with actual JS decoder", JsCodecParity);
         yield return new("bridge: actual JS pipe concurrent bidirectional calls and cancellation", JsPipe);

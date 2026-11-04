@@ -16,6 +16,7 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
 {
     private readonly MusicLibraryOwner library;
     private readonly IRuntimeClient runtime;
+    private readonly MusicScriptTransport scriptTransport;
     private readonly MusicNativeTransfers transfers;
     private readonly TimeProvider clock;
     private readonly SemaphoreSlim gate = new(1, 1), storageGate = new(1, 1);
@@ -50,6 +51,7 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
     {
         this.library = library ?? throw new ArgumentNullException(nameof(library));
         this.runtime = runtime ?? throw new ArgumentNullException(nameof(runtime));
+        scriptTransport = new(runtime);
         this.clock = clock ?? TimeProvider.System;
         transfers = new(this.clock);
         ScriptCapabilities = new Dictionary<string, Func<JsonElement, CancellationToken, Task<object?>>>(StringComparer.Ordinal)
@@ -64,8 +66,11 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
     private static TaskCompletionSource Complete() { var result = new TaskCompletionSource(); result.SetResult(); return result; }
     private static JsonObject Parse(object? value)
     {
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(value ?? new { }, LJ.Json);
-        try { return LJ.Object(LJ.Parse(bytes, 512 * 1024)); }
+        var bytes = BridgeCodec.EncodeJSONValue(value ?? new { });
+        try
+        {
+            return LJ.Object(JsonNode.Parse(bytes, documentOptions: new() { MaxDepth = 67 }));
+        }
         finally { CryptographicOperations.ZeroMemory(bytes); }
     }
     private static string Code(Exception error) => error switch
@@ -81,8 +86,7 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
     private static JsonElement Okay(JsonObject result)
     {
         result["ok"] = true;
-        LJ.Require(LJ.Bytes(result).Length <= 512 * 1024, "LIMIT");
-        return LJ.Element(result);
+        return BridgeCodec.DecodeJSONValue(BridgeCodec.EncodeJSONValue(result));
     }
     private static JsonElement Fail(string code) => JsonSerializer.SerializeToElement(new { ok = false, code });
     private void Admit()
@@ -288,14 +292,14 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
     }
     private static JsonObject RequireSuccess(JsonElement reply)
     {
-        var value = LJ.Object(JsonNode.Parse(reply.GetRawText()));
+        var value = LJ.Object(JsonNode.Parse(reply.GetRawText(), documentOptions: new() { MaxDepth = 67 }));
         LJ.Require(LJ.IsBool(value["ok"]), "INVALID_RESPONSE");
         if (!LJ.B(value["ok"])) throw new MusicLibraryException(LJ.Text(value["code"]));
         value.Remove("ok"); return value;
     }
     private async Task<JsonObject> ScriptAsync(string operation, object parameters, CancellationToken token)
     {
-        var reply = await runtime.CallAsync("music.script." + operation, parameters, token).ConfigureAwait(false);
+        var reply = await scriptTransport.CallAsync(operation, parameters, token).ConfigureAwait(false);
         var result = RequireSuccess(reply);
         LJ.Require(LJ.S(result["contract"]) == "music.script.v2", "INVALID_RESPONSE");
         result.Remove("contract"); return result;
