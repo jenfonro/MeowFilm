@@ -1,4 +1,5 @@
 using System.IO;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -21,6 +22,116 @@ public static partial class MusicUiTests
 {
     internal static IEnumerable<TestCase> SettingsReplicaCases()
     {
+        yield return Case("replica catalog source saves only its authority and preserves search audio sources queue and media", async () =>
+        {
+            await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
+            await f.Module.ActivateSettingsAsync();
+            var view = (MusicSettingsView)f.Module.SettingsView; using var mount = new ReplicaMount(view);
+            await Until(() => f.Module.CanEditCatalogSource);
+            var picker = (ComboBox)view.FindName("CatalogSourcePicker");
+            Equal("音乐数据源", AutomationProperties.GetName(picker));
+            True(ReferenceEquals(picker.Style, view.FindResource("Settings.ComboBox")), "source picker reuses the established control style");
+            True(picker.Items.Cast<MusicCatalogChoice>().Select(item => (item.Key, item.Name))
+                .SequenceEqual(new[] { ("wy", "网易云音乐"), ("kg", "酷狗音乐") }), "only supported discovery sources are offered");
+            Equal("wy", picker.SelectedValue); Equal(0, f.Calls.Count("music.catalogSource.settings.save"));
+            var search = (await f.Rpc("music.search.settings.get")).GetProperty("settings").GetRawText();
+            var audio = (await f.Rpc("music.officialSources.settings.get")).GetProperty("settings").GetRawText();
+            var online = (await f.Rpc("music.settings.get")).GetProperty("settings").GetRawText();
+            var queue = await f.Rpc("music.queue.get");
+            var identity = f.Playback.Identity; int opens = f.Playback.Opens.Count;
+            var hold = f.Calls.HoldNext("music.catalogSource.settings.save");
+            True(picker.Focusable && picker.Focus(), "the source selector accepts native keyboard focus");
+            var input = new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(view)!, 0, Key.Down)
+                { RoutedEvent = Keyboard.KeyDownEvent };
+            picker.RaiseEvent(input); await hold.Arrived.Task; await Drain();
+            True(input.Handled, "native ComboBox keyboard selection owns the source change");
+            Equal("wy", f.Module.CatalogSourcePlatform);
+            True(!picker.IsEnabled, "an in-flight receipt cannot admit another source save");
+            hold.Release(); await Until(() => f.Module.CanEditCatalogSource && Equals(picker.SelectedValue, "kg"));
+            Equal("kg", f.Module.CatalogSourcePlatform); Equal(1, f.Calls.Count("music.catalogSource.settings.save"));
+            Equal("kg", f.Calls.Last("music.catalogSource.settings.save").GetProperty("platform").GetString());
+            Equal(search, (await f.Rpc("music.search.settings.get")).GetProperty("settings").GetRawText());
+            Equal(audio, (await f.Rpc("music.officialSources.settings.get")).GetProperty("settings").GetRawText());
+            Equal(online, (await f.Rpc("music.settings.get")).GetProperty("settings").GetRawText());
+            var after = await f.Rpc("music.queue.get");
+            Equal(queue.GetProperty("version").GetInt64(), after.GetProperty("version").GetInt64());
+            Equal(queue.GetProperty("entries").GetRawText(), after.GetProperty("entries").GetRawText());
+            Equal(identity, f.Playback.Identity); Equal(opens, f.Playback.Opens.Count);
+            True(f.Playback.HasMedia && !f.Runtime.HasStarted, "source selection neither replaces media nor starts scripts");
+        });
+        yield return Case("replica catalog source rejected and unknown saves use notices rollback and authoritative readback", async () =>
+        {
+            await using var f = await Fixture.Create(); await f.Module.ActivateSettingsAsync();
+            var view = (MusicSettingsView)f.Module.SettingsView; using var mount = new ReplicaMount(view);
+            var notices = new List<string>();
+            mount.Window.AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, notice) => notices.Add(notice.Message)));
+            await Until(() => f.Module.CanEditCatalogSource);
+            var picker = (ComboBox)view.FindName("CatalogSourcePicker");
+            f.Calls.FailNext("music.catalogSource.settings.save", "STORAGE_UNAVAILABLE");
+            picker.SetCurrentValue(ComboBox.SelectedValueProperty, "kg");
+            await Until(() => f.Module.CanEditCatalogSource && f.Module.HasCatalogSourceError && Equals(picker.SelectedValue, "wy"));
+            Equal("wy", f.Module.CatalogSourcePlatform);
+            True(notices.Contains("数据源设置保存失败"), "save rejection is published through the existing notice outlet");
+            var saved = await f.Rpc("music.catalogSource.settings.get");
+            Equal("wy", saved.GetProperty("settings").GetProperty("platform").GetString());
+            f.Calls.TransformNext("music.catalogSource.settings.save", _ => JsonSerializer.SerializeToElement(new { ok = false, code = "COMMIT_UNKNOWN" }));
+            int reads = f.Calls.Count("music.catalogSource.settings.get");
+            picker.SetCurrentValue(ComboBox.SelectedValueProperty, "kg");
+            await Until(() => f.Module.CanEditCatalogSource && f.Module.CatalogSourcePlatform == "kg" && Equals(picker.SelectedValue, "kg"));
+            Equal(reads + 1, f.Calls.Count("music.catalogSource.settings.get"));
+            True(!f.Module.HasCatalogSourceError, "unknown receipt is successful only after a matching authoritative read");
+            Equal(2, f.Calls.Count("music.catalogSource.settings.save"));
+        });
+        yield return Case("replica catalog source failed reads expose retry and remain inside narrow account layout", async () =>
+        {
+            await using var f = await Fixture.Create(); await f.Module.ActivateSettingsAsync();
+            var view = (MusicSettingsView)f.Module.SettingsView; using var mount = new ReplicaMount(view);
+            await Until(() => f.Module.CanEditCatalogSource);
+            f.Calls.FailNext("music.catalogSource.settings.get", "STORAGE_UNAVAILABLE");
+            await f.Module.ReadCatalogSourceSettingsAsync(); await Drain();
+            var picker = (ComboBox)view.FindName("CatalogSourcePicker");
+            var retry = (Button)view.FindName("CatalogSourceRetry");
+            True(!picker.IsEnabled && retry.IsVisible && retry.IsEnabled, "a failed restore requires a visible explicit retry");
+            foreach (int width in new[] { 1248, 908, 600 })
+            {
+                mount.Window.Width = width; mount.Window.UpdateLayout(); await Drain();
+                var section = (Border)view.FindName("AccountsSection");
+                var label = Visuals(section).OfType<TextBlock>().Single(text => text.Text == "音乐数据源");
+                var text = new Rect(label.TranslatePoint(new Point(), section), label.RenderSize);
+                var choice = new Rect(picker.TranslatePoint(new Point(), section), picker.RenderSize);
+                var action = new Rect(retry.TranslatePoint(new Point(), section), retry.RenderSize);
+                True(text.Right <= choice.Left && choice.Right <= action.Left && action.Right <= section.ActualWidth,
+                    "source label picker and retry remain separate and within the account section");
+            }
+            int reads = f.Calls.Count("music.catalogSource.settings.get");
+            retry.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            await Until(() => picker.IsEnabled && !retry.IsVisible);
+            Equal(reads + 1, f.Calls.Count("music.catalogSource.settings.get"));
+            Equal("wy", picker.SelectedValue); Equal(0, f.Calls.Count("music.catalogSource.settings.save"));
+        });
+        yield return Case("replica hidden unloaded and nonmusic source controls cannot save", async () =>
+        {
+            await using var f = await Fixture.Create(); await f.Module.ActivateSettingsAsync();
+            var view = (MusicSettingsView)f.Module.SettingsView; using var mount = new ReplicaMount(view);
+            await Until(() => f.Module.CanEditCatalogSource);
+            var picker = (ComboBox)view.FindName("CatalogSourcePicker");
+            int saves = f.Calls.Count("music.catalogSource.settings.save");
+            view.Visibility = Visibility.Collapsed; await Drain();
+            picker.SetCurrentValue(ComboBox.SelectedValueProperty, "kg"); await Drain();
+            Equal(saves, f.Calls.Count("music.catalogSource.settings.save"));
+            view.Visibility = Visibility.Visible; await Drain();
+            picker.GetBindingExpression(ComboBox.SelectedValueProperty)!.UpdateTarget();
+            var areas = ((Panel)view.Header.Slot!).Children.OfType<RadioButton>().ToArray();
+            areas[1].IsChecked = true; await Drain();
+            picker.SetCurrentValue(ComboBox.SelectedValueProperty, "kg"); await Drain();
+            Equal(saves, f.Calls.Count("music.catalogSource.settings.save"));
+            areas[0].IsChecked = true; await Drain();
+            picker.GetBindingExpression(ComboBox.SelectedValueProperty)!.UpdateTarget();
+            mount.Window.Content = null; await Drain();
+            picker.SetCurrentValue(ComboBox.SelectedValueProperty, "kg"); await Drain();
+            Equal(saves, f.Calls.Count("music.catalogSource.settings.save"));
+            Equal("wy", f.Module.CatalogSourcePlatform);
+        });
         yield return Case("replica settings keep six reference anchors and continuous groups with an independent source page", async () =>
         {
             await using var f = await Fixture.Create(); await f.Module.ActivateSettingsAsync();

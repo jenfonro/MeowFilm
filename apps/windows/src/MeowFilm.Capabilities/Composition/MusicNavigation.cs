@@ -41,6 +41,9 @@ public sealed partial class MusicCapability
         {
             // Restore App state without navigating or publishing a content page.
             await RefreshPlaylists(token);
+            try { await EnsureCatalogSourceSettingsAsync(token); }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+            catch { /* No catalog request is admitted until its source has been restored. */ }
             await ReadMetadataSettings(token);
             await ReadQueue(token);
             if (stopping) return;

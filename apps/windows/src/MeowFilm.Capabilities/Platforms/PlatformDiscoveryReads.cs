@@ -46,14 +46,14 @@ public sealed partial class MusicPlatformCatalog
         Walk(page);
         if (page["continuation"] is JsonObject next)
         {
-            var cursor = PJ.Scalar(PJ.First(next["cursor"], next["before"], next["offset"]));
-            var old = PJ.Scalar(PJ.First(PJ.At(previous, "cursor"), PJ.At(previous, "before"), PJ.At(previous, "offset")));
+            var cursor = PJ.Scalar(PJ.First(next["cursor"], next["before"], next["offset"], next["page"]));
+            var old = PJ.Scalar(PJ.First(PJ.At(previous, "cursor"), PJ.At(previous, "before"), PJ.At(previous, "offset"), PJ.At(previous, "page")));
             if (cursor.Length > 0) PJ.Require(cursor != old, "PAGINATION_STALLED");
             var count = PJ.Array(page["entries"]).Count() + PJ.Array(page["sections"]).Sum(s => PJ.Array(PJ.At(s, "items")).Count());
             PJ.Require(count > 0, "PAGINATION_STALLED");
             next["scope"] = c.Scope; next["target"] = target;
         }
-        page["platform"] = "wy";
+        page["platform"] = c.Platform;
         return page;
     }
     private static Task<JsonObject> Content(Call c, JsonElement? continuation, string kind, string target)
@@ -104,6 +104,7 @@ public sealed partial class MusicPlatformCatalog
         PJ.Require(request is not null); var p = request! with { Continuation = CloneContinuation(request!.Continuation) };
         return RunAsync(p.Platform, "home", p, p.Refresh, c =>
         {
+            if (c.Platform == "kg") return KgHome(c, p);
             PJ.Require(c.Platform == "wy", c.Session is null ? "AUTH_REQUIRED" : "UNSUPPORTED");
             return Content(c, p.Continuation, "home", "wy:home");
         }, cancellationToken);
@@ -111,7 +112,12 @@ public sealed partial class MusicPlatformCatalog
     public Task<JsonElement> ChannelsAsync(MusicChannelsRequest request, CancellationToken cancellationToken = default)
     {
         PJ.Require(request is not null); var p = request!;
-        return RunAsync(p.Platform, "channels", p, p.Refresh, c => { PJ.Require(c.Platform == "wy", "UNSUPPORTED"); return Directory(c); }, cancellationToken);
+        return RunAsync(p.Platform, "channels", p, p.Refresh, async c =>
+        {
+            if (c.Platform == "kg") return PlatformKgDiscovery.Directory(await KgTags(c));
+            PJ.Require(c.Platform == "wy", "UNSUPPORTED");
+            return PlatformDiscovery.ChannelDirectory(await Directory(c));
+        }, cancellationToken);
     }
     public Task<JsonElement> ChannelAsync(MusicChannelRequest request, CancellationToken cancellationToken = default)
     {
@@ -119,6 +125,7 @@ public sealed partial class MusicPlatformCatalog
         PJ.Input(p.Id); if (p.PageCode is not null) PJ.Input(p.PageCode, 100); if (p.Tag is { Length: > 0 }) PJ.Input(p.Tag);
         return RunAsync(p.Platform, "channel", p, p.Refresh, async c =>
         {
+            if (c.Platform == "kg") return await KgChannel(c, p);
             PJ.Require(c.Platform == "wy", c.Session is null ? "AUTH_REQUIRED" : "UNSUPPORTED");
             var descriptor = PJ.Array((await Directory(c))["items"]).OfType<JsonObject>().FirstOrDefault(d => PJ.S(d, "id") == p.Id);
             PJ.Require(descriptor is not null, "NOT_FOUND");
@@ -198,7 +205,8 @@ public sealed partial class MusicPlatformCatalog
                 case "artist-activity": throw new MusicPlatformException(c.Session is null ? "AUTH_REQUIRED" : "UNSUPPORTED");
                 default: throw new MusicPlatformException("UNSUPPORTED");
             }
-            page["channel"] = descriptor!.DeepClone(); page["title"] = descriptor["name"]?.DeepClone();
+            page["channel"] = PlatformDiscovery.ChannelDescriptor(descriptor!);
+            page["title"] = descriptor!["name"]?.DeepClone();
             return page;
         }, cancellationToken);
     }

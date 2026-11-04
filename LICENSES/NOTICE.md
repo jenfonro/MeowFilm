@@ -149,6 +149,10 @@ Adapted portions:
   `util/{helper,request}.js`, `util/config.json`; `module/song_url.js`; the `song_climax`
   chorus recipe; `ClientContexts/MusicKgClientProtocol.cs` adapts `module/register_dev.js`
   and its fixed crypto/request helpers with the same retained MIT notice.
+- Discovery: `Platforms/PlatformKgDiscovery*.cs` adapts
+  `module/{top_playlist,top_song,playlist_tags,rank_list,rank_audio}.js` and the fixed
+  signing helpers above; the directory, tags and rank-audio recipes remain data-only
+  native calls, without a generic upstream module dispatcher.
 - Lyrics: `module/{search_lyric,lyric}.js` and `util/{request,util}.js`; system ZLibStream
   replaces pako.
 - Feedback: the KG send path was audited but is unavailable; the position-contract patch over

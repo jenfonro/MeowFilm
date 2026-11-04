@@ -116,6 +116,13 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
                 Client is MusicQqClientContext ? Owner.clientProtocol.Clock.GetUtcNow() : null), PlatformProtocols.TxSuccess);
         internal Task<JsonObject> Kg(string path, JsonObject parameters, string? router = null, JsonObject? body = null) =>
             Read(PlatformProtocols.Kg(path, parameters, Session, KgClient, router, body), d => PlatformProtocols.KgSuccess(d, path));
+        internal Task<JsonObject> KgRank(JsonObject body)
+        {
+            const string path = "/openapi/kmr/v2/rank/audio";
+            var request = PlatformProtocols.Kg(path, new(), Session, KgClient, body: body);
+            request.Headers.TryAddWithoutValidation("kg-tid", "369");
+            return Read(request, d => PlatformProtocols.KgSuccess(d, path));
+        }
         internal async Task<T> Xeapi<T>(string path, JsonObject parameters, Func<JsonObject, T> decode)
         {
             Auth();
@@ -298,7 +305,7 @@ public sealed partial class MusicPlatformCatalog : IMusicPlatformCatalog
                 ("personalPlaylists", true), ("daily", true), ("dailyStyle", true), ("dailyRequiresDeviceContext", true),
                 ("xeapiV1", true), ("fm", true), ("similar", true), ("artist", true))),
             ("tx", PJ.Obj(("search", new[] { "songs", "playlists" }), ("song", true), ("playlist", true), ("home", false), ("channels", false), ("personalPlaylists", true))),
-            ("kg", PJ.Obj(("search", new[] { "songs", "playlists" }), ("song", true), ("playlist", true), ("home", false), ("channels", false),
+            ("kg", PJ.Obj(("search", new[] { "songs", "playlists" }), ("song", true), ("playlist", true), ("home", true), ("channels", true),
                 ("personalPlaylists", true), ("songTLSRouteVerifiedLive", false))),
             ("kw", PJ.Obj(("search", new[] { "songs", "playlists" }), ("song", true), ("playlist", true),
                 ("home", false), ("channels", false), ("personalPlaylists", false), ("accounts", false), ("anonymousMetadataHttp", true))),

@@ -20,7 +20,7 @@
 | 歌单搜索 | 是 | 是 | 是 | 是 | 是 |
 | 单曲元数据 | 是 | 是 | 是 | 是 | 是 |
 | 歌单与成员分页 | 是 | 是 | 是 | 是 | 是 |
-| 首页／频道 | 是 | 否 | 否 | 否 | 否 |
+| 首页／频道 | 是 | 否 | 是 | 否 | 否 |
 | 歌手详情／热门歌曲 | 是 | 否 | 否 | 否 | 否 |
 | 个人歌单 | 是 | 是 | 是 | 否 | 否 |
 | 每日推荐／风格推荐 | 是 | 否 | 否 | 否 | 否 |
@@ -86,6 +86,10 @@ Invalidate
 - 搜索、歌单、推荐和频道返回的歌曲都经过同一 `NativeMusicSong` 校验，不能把原始平台对象直接送入 UI 或持久化。
 - 歌单卡片保留平台、原生 ID、名称、封面、数量、创建者和可用动作。个人目录额外返回绑定当前账号的 locator；locator 不是凭据或可转移授权。
 - 酷狗公开歌单使用真实全局 ID：搜索响应 `gid` 与详情响应 `global_collection_id` 对应同一身份；两字段同时出现须一致。`specialid`、个人 `listid` 或 LX `id_*` 不替代全局 ID。搜索 `img`／`song_count` 和详情 `pic` 直接归一到当前卡片字段，详情分页仍请求 `global_collection_id` 并核对响应身份。成员分页允许后续页缺少 `list_info`，此时以 `data.count` 为总量，名称和封面为空；分页 snapshot 只绑定平台、scope、请求 ID 和总量，不包含名称、版本或当前页内容。`list_info` 存在时，其 `global_collection_id` 若出现须等于请求 ID；其 `count` 与 `data.count` 同时出现时必须一致，缺少 `count` 时使用 `data.count`。
+- `ChannelsAsync` 发布中性描述符 `id/name/kind=channel/placement/available/pageCode`；`placement` 为 `primary|more`，各组沿响应数组顺序展示。网易专属 ID、上游种类与分组名单只存在于平台适配器，页面不据其筛选。
+- 酷狗首页由 `/v2/special_recommend`（`specialrec.service.kugou.com` router）、`newsong_publish` 和 `/ocean/v6/rank/list` 组成；续页只读推荐歌单。歌单以 `has_next` 推进，默认推荐可能多于请求页长，不按页长截断或伪造总量。
+- 酷狗分类直接读取 `/pubsongs/v1/get_tags_by_type` 的组与标签；主栏为精选、歌单广场、排行榜、新歌，更多为有标签的 `category-{tag_id}` 组。歌单广场默认推荐，分类组默认首标签；continuation 绑定会话 scope、平台目标、页码与所选标签，换标签从第一页开始。
+- 酷狗榜单摘要只使用目录附带的 `songinfo`，没有 hash 的摘要不是可播歌曲。卡片动作是 `channel`，身份为 `rank-{rankid}`，`pageCode=rank_cid`；打开后核对当前榜单身份，以固定 `kg-tid:369` 请求 `/openapi/kmr/v2/rank/audio`，分页绑定 `rank_cid` 与 total，不走公开歌单读取。榜单录音使用 `audio_info.hash_128`，新歌使用 `hash`，毫秒时长统一转为秒。
 - 网易云歌手频道返回独立 `area`、`type`、`initial` 标签组、当前组合 token、圆形歌手卡数据和绑定该 token 的 offset continuation；换筛选从首批重新读取，旧 continuation 不能跨组合复用。
 - 网易云 Cube 页面先读取当前 `pageProtocol.pages`，再按页面声明的 `ruleId` 读取推荐歌曲。`algTagInfos: null` 是当前“无算法标签”结果，等价于空集合；其他非数组、非空形态仍明确失败。
 - 网易云歌手详情严格核对请求 ID、响应歌手 ID、非空名称、有效头像和 `hotSongs` 数组；热门歌曲经过同一 `PlatformSongs.Wy`／`NativeMusicSong` 归一化，并拒绝重复录音身份。一次详情读取不附带专辑扇出。

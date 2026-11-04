@@ -1128,6 +1128,10 @@ public static partial class MusicUiTests
                     ? new MusicCapability(calls, store, output ?? playback, null, dialogs, sourceNetworkDownload)
                     : new MusicCapability(calls, store, native, dialogs);
                 await module.InitializeAsync(default);
+                Equal("wy", module.CatalogSourcePlatform);
+                True(module.CanEditCatalogSource && !module.HasCatalogSourceError, "shared UI fixture restores the native catalog source");
+                Equal(1, calls.Count("music.catalogSource.settings.get"));
+                Equal(0, calls.Count("music.catalogSource.settings.save"));
                 await module.NavigateAsync("favorites", default);
                 True(!runtime.HasStarted, "native initialization never starts Node");
                 return new(playback, dialogs) { Root = root, Store = store, Runtime = runtime, Application = application, Calls = calls, Module = module };
