@@ -128,7 +128,7 @@ public static class MusicMetadataPolicyTests
             var song = LocalSong();
             Ok(await owner.ExecuteAsync("music.queue.replace", new { songs = new[] { song }, index = 0 }));
             Ok(await owner.ExecuteAsync("music.lyrics.local.save", new { song, text = "[00:01]saved" }));
-            Ok(await owner.ExecuteAsync("music.settings.save", new { ifRevision = 0, lyrics = false, target = (object?)null }));
+            Ok(await owner.ExecuteAsync("music.settings.save", new { ifRevision = 0, lyrics = false }));
             var result = Ok(await owner.ExecuteAsync("music.lyrics.local.get", new { song }));
             Equal("disabled", result.GetProperty("state").GetString()); Equal(0, result.GetProperty("lines").GetArrayLength());
             Check(result.GetProperty("available").GetBoolean());

@@ -29,8 +29,10 @@ public static class MusicQualityPolicyTests
         yield return new("quality no recording types or unavailable spatial never invokes LX", Unavailable);
         yield return new("quality definite miss bounded fallback but manual never changes type", Fallback);
         yield return new("quality unknown script response denial and malformed media never retry", NoRetry);
+        yield return new("quality lyric settings save preserves pending LX and accepted cache signatures", LyricsPreservePlayback);
         yield return new("quality changed policy cancels and physically drains pending LX", PolicyDrain);
         yield return new("quality external cancellation and close physically drain LX", CloseDrain);
+        yield return new("quality internal 25s deadline waits for LX drain and returns timeout without retry", InternalDeadline);
         yield return new("quality cache signature stable and refresh pins type policy recording and generation", Signatures);
         yield return new("quality missing recording metadata permits only explicit declared requests and preserves contrary evidence", RecordingEvidence);
         yield return new("quality native WY catalog missing types reaches authored LX for explicit 320k without claiming verification", WyCatalogUnknown);
@@ -60,10 +62,17 @@ public static class MusicQualityPolicyTests
         var read = await f.Ok("music.quality.settings.get");
         Check(read.GetProperty("settings").GetProperty("request").GetString() == "320k");
         Check(f.Store.Writes == 0 && f.Runtime.Calls.Count == 0);
-        await f.Ok("music.settings.save", new { ifRevision = 0, lyrics = false, target = (object?)null });
+        var before = read;
+        await f.Ok("music.settings.save", new { ifRevision = 0, lyrics = false });
         read = await f.Ok("music.quality.settings.get");
         Check(read.GetProperty("settings").GetProperty("request").GetString() == "320k" &&
             !read.GetProperty("onlineSettings").GetProperty("lyrics").GetBoolean());
+        Check(read.GetProperty("settings").GetRawText() == before.GetProperty("settings").GetRawText() &&
+            read.GetProperty("signature").GetString() == before.GetProperty("signature").GetString(),
+            "saving lyrics must leave the complete quality policy and signature unchanged");
+        Check(read.GetProperty("onlineSettings").GetProperty("schema").GetInt32() == 3 &&
+            read.GetProperty("onlineSettings").GetProperty("revision").GetInt64() == 1);
+        Check(f.Store.Writes == 1 && f.Runtime.Calls.Count == 0);
     }
     private static async Task Invalid()
     {
@@ -94,7 +103,7 @@ public static class MusicQualityPolicyTests
     {
         await using var f = new QualityFixture();
         var online = await f.Ok("music.settings.save", new
-            { ifRevision = 0, lyrics = false, target = (object?)null });
+            { ifRevision = 0, lyrics = false });
         var request = await f.SaveParameters("master");
         var reply = await f.Ok("music.quality.settings.save", request);
         Check(f.Store.Writes == 2 &&
@@ -205,6 +214,29 @@ public static class MusicQualityPolicyTests
         await f.Error("music.online.resolve", f.Args(id, "auto"), "INVALID_MEDIA_CANDIDATE");
         Check(f.Runtime.Qualities.Count == 1);
     }
+    private static async Task LyricsPreservePlayback()
+    {
+        await using var f = new QualityFixture(); string id = await f.Install();
+        var first = await f.Resolve(id, "320k");
+        var refresh = f.Args(id, "320k");
+        refresh["qualityPolicySignature"] = first.GetProperty("qualityPolicySignature").GetString();
+        refresh["qualityCacheSignature"] = first.GetProperty("qualityCacheSignature").GetString();
+        f.Runtime.Hold = true;
+        var pending = f.App.ExecuteAsync("music.online.resolve", refresh);
+        await f.Runtime.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var saved = await f.Ok("music.settings.save", new { ifRevision = 0, lyrics = false });
+        Check(!saved.GetProperty("settings").GetProperty("lyrics").GetBoolean());
+        Check(!pending.IsCompleted && !f.Runtime.Cancelled.Task.IsCompleted,
+            "lyric settings save must not cancel or complete an in-flight audio resolve");
+        f.Runtime.Release.TrySetResult();
+        var result = await pending.WaitAsync(TimeSpan.FromSeconds(5));
+        Check(result.GetProperty("ok").GetBoolean(), result.GetRawText());
+        Check(result.GetProperty("qualityPolicySignature").GetString() == first.GetProperty("qualityPolicySignature").GetString() &&
+            result.GetProperty("qualityCacheSignature").GetString() == first.GetProperty("qualityCacheSignature").GetString(),
+            "accepted policy and audio cache signatures survive a lyric setting change");
+        Check(!f.Runtime.Cancelled.Task.IsCompleted && f.Runtime.Invoked.SequenceEqual([id, id]) &&
+            f.Runtime.Qualities.SequenceEqual(["320k", "320k"]));
+    }
     private static async Task PolicyDrain()
     {
         await using var f = new QualityFixture(); string id = await f.Install();
@@ -228,6 +260,20 @@ public static class MusicQualityPolicyTests
         var close = f.App.PrepareShutdownAsync(); Check(!request.IsCompleted && !close.IsCompleted);
         f.Runtime.Release.TrySetResult(); QualityFixture.Code(await request, "CANCELLED");
         await close; Check(!f.Store.Disposed); await f.App.CancelShutdownPreparationAsync();
+    }
+    private static async Task InternalDeadline()
+    {
+        await using var f = new QualityFixture(); string id = await f.Install();
+        f.Runtime.Hold = true;
+        var request = f.App.ExecuteAsync("music.online.resolve", f.Args(id, "auto"));
+        await f.Runtime.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        // Only MusicScriptOwner's real 25s deadline cancels this request.
+        await f.Runtime.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        Check(!request.IsCompleted, "deadline cancellation must await actual runtime settle");
+        f.Runtime.Release.TrySetResult();
+        QualityFixture.Code(await request.WaitAsync(TimeSpan.FromSeconds(5)), "TIMEOUT");
+        Check(f.Runtime.Invoked.SequenceEqual([id]) && f.Runtime.Qualities.SequenceEqual(["master"]),
+            "an internal deadline must not retry another quality or installation");
     }
     private static async Task Signatures()
     {

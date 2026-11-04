@@ -8,11 +8,12 @@ namespace MeowFilm.Capabilities;
 public sealed partial class MusicCapability
 {
     private sealed record LyricRequestIdentity(string EntryId, string Song, string PlaybackSong,
-        string SourceKey, string TargetInstallation, string TargetPlatform, bool Enabled);
+        string SourceKey, long SourcesRevision, bool Enabled);
 
     private CancellationTokenSource? lyricCancellation;
     private Task lyricLoadTail = Task.CompletedTask;
     private long lyricEpoch;
+    private long lyricSourcesRevision;
     private LyricRequestIdentity? lyricLoadingIdentity, lyricPublishedIdentity;
     private MusicLyricSourceRow? selectedLyricSource;
     private string? lyricSongIdentity;
@@ -136,6 +137,12 @@ public sealed partial class MusicCapability
         CancelLyricPreview();
         Lyrics.Clear(); lyricStatus = ""; OnlineBindings(); LyricTimingBindings();
     }
+    private void NotifyMusicSourcesChanged()
+    {
+        lyricSourcesRevision = checked(lyricSourcesRevision + 1);
+        RetireLyrics();
+        if (IsLyrics && !stopping) _ = RestoreLyricsAsync();
+    }
     public void CancelLyrics()
     {
         if (lyricCancellation is null &&
@@ -209,8 +216,7 @@ public sealed partial class MusicCapability
         var rawSong = selected.Raw.Clone();
         var playbackSong = PlaybackSong(selected).Clone();
         var identity = new LyricRequestIdentity(selected.EntryId ?? "", rawSong.GetRawText(),
-            playbackSong.GetRawText(), sourceKey ?? "", targetInstallation ?? "",
-            targetPlatform ?? "", LyricsEnabled);
+            playbackSong.GetRawText(), sourceKey ?? "", lyricSourcesRevision, LyricsEnabled);
         if (restore)
         {
             if (identity == lyricLoadingIdentity && !lyricLoadTail.IsCompleted)
@@ -254,12 +260,6 @@ public sealed partial class MusicCapability
                 {
                     // A saved display is local text, not permission to re-use a
                     // media URL, account or script. Refresh uses current grants.
-                    if (identity.TargetInstallation.Length > 0 && identity.TargetPlatform.Length > 0)
-                        parameters["scriptTarget"] = new
-                        {
-                            installationId = identity.TargetInstallation,
-                            platform = identity.TargetPlatform
-                        };
                     reply = await CallSettled("music.lyrics.lookup", parameters, request.Token);
                 }
                 if (!CurrentRequest()) return;
@@ -319,8 +319,7 @@ public sealed partial class MusicCapability
                 var currentPlayback = PlaybackSong(selected);
                 return identity == new LyricRequestIdentity(selected.EntryId ?? "",
                     selected.Raw.GetRawText(), currentPlayback.GetRawText(),
-                    selectedLyricSource?.SourceKey ?? "", targetInstallation ?? "",
-                    targetPlatform ?? "", LyricsEnabled);
+                    selectedLyricSource?.SourceKey ?? "", lyricSourcesRevision, LyricsEnabled);
             }
         }
     }

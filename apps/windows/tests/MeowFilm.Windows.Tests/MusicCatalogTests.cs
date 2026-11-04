@@ -2559,10 +2559,10 @@ public static class MusicCatalogTests
             var result = await Rpc("music.sources.install", new { token, name = "合成源", version = "1",
                 permissions = new { storage = Array.Empty<string>() } });
             var installationId = result.GetProperty("item").GetProperty("installationId").GetString();
-            await Rpc("music.sources.enable", new { installationId });
+            var enabled = await Rpc("music.sources.enable", new { installationId });
+            True(enabled.GetProperty("item").GetProperty("enabled").GetBoolean(), "enabled script participates in catalog playback");
             await Module.RefreshOnlineAsync();
             Module.SelectedSource = Module.Sources.Single(); await Module.LoadSourceAsync(Module.SelectedSource);
-            await Module.UseSourcePlatformAsync("wy");
         }
         public async ValueTask DisposeAsync()
         {

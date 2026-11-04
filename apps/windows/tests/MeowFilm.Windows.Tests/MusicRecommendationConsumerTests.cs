@@ -6,6 +6,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Windows.Controls;
+using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Capabilities.Feedback;
@@ -271,33 +272,27 @@ public static partial class MusicUiTests
         }
         internal async Task EnableScript()
         {
+            var before = await Call("music.quality.settings.get");
             Dialog.ScriptPath = Path.Combine(Root, "recommendation-authored-lx.js");
             File.WriteAllText(Dialog.ScriptPath, TestScript(), new UTF8Encoding(false));
             await Module.ImportSourceAsync(); Equal(1, Module.Sources.Count);
             Module.SelectedSource = Module.Sources.Single();
             await Module.LoadSourceAsync(Module.SelectedSource); await Module.SourceActionAsync("enable");
-            // Source setup does not load the native quality snapshot. The new
-            // SaveOnlineSettings guard correctly refuses an uninitialized draft.
             await Module.RefreshOnlineAsync();
-            True(Module.CanEditQuality, "recommendation setup loaded native quality policy before target save");
-            var before = await Call("music.quality.settings.get");
-            string installation = Module.SelectedSource!.InstallationId;
-            await Module.UseSourcePlatformAsync("wy");
-            True(Module.Status.Length == 0, "script target accepted");
-            // Read the real owner's receipt; an empty UI status alone cannot
-            // prove the save was admitted or that a playback target exists.
+            True(Module.CanEditQuality, "recommendation setup loaded native quality policy");
+            var installed = (await Call("music.sources.list")).GetProperty("items").EnumerateArray().Single();
+            Equal(Module.Sources.Single().InstallationId, installed.GetProperty("installationId").GetString());
+            True(installed.GetProperty("enabled").GetBoolean(), "enabled script participates in recommendation playback");
+            True(Module.Status.Length == 0, "script enable accepted");
             var saved = await Call("music.quality.settings.get");
-            Equal(before.GetProperty("settings").GetProperty("revision").GetInt64(),
-                saved.GetProperty("settings").GetProperty("revision").GetInt64());
-            True(saved.GetProperty("signature").GetString() != before.GetProperty("signature").GetString(),
-                "recommendation setup accepted a new native quality signature");
+            Equal(before.GetProperty("settings").GetRawText(), saved.GetProperty("settings").GetRawText());
+            Equal(before.GetProperty("signature").GetString(), saved.GetProperty("signature").GetString());
             Equal("320k", saved.GetProperty("settings").GetProperty("request").GetString());
             var online = saved.GetProperty("onlineSettings");
-            True(online.GetProperty("target").ValueKind == JsonValueKind.Object,
-                "recommendation setup persisted an explicit native playback target");
-            Equal(installation, online.GetProperty("target").GetProperty("installationId").GetString());
-            Equal("wy", online.GetProperty("target").GetProperty("platform").GetString());
-            True(!online.TryGetProperty("quality", out _), "online target must not duplicate native quality policy");
+            Equal(3, online.GetProperty("schema").GetInt32());
+            True(online.EnumerateObject().Select(field => field.Name).ToHashSet()
+                .SetEquals(["schema", "revision", "lyrics"]), "online settings contain only the lyric setting and its version");
+            Equal(before.GetProperty("onlineSettings").GetRawText(), online.GetRawText());
         }
         public async ValueTask DisposeAsync()
         {

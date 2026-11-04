@@ -764,7 +764,6 @@ public static class MusicCatalogPersonalTests
         public ConcurrentQueue<Invocation> Log { get; } = new();
         public bool Authenticated = true;
         public long AccountGeneration = 1;
-        public string TargetPlatform = "wy";
         public Func<Task>? BeforeCommit;
         private readonly Dictionary<string, (Held Hold, bool Before)> holds = [];
         private readonly List<Held> allHolds = [];
@@ -838,27 +837,33 @@ public static class MusicCatalogPersonalTests
             var reply = await Library.ExecuteAsync("music.quality.settings.get", cancellationToken: token);
             if (!reply.GetProperty("ok").GetBoolean()) return reply;
             var result = JsonNode.Parse(reply.GetRawText())!.AsObject();
-            // Preserve the original write-count assertions: the fixture target
-            // is a read-only port view, not a new persistent settings mutation.
+            // Keep lyrics disabled in this port fixture without adding a library write.
+            // The real owner's quality policy and signature remain authoritative.
             result["onlineSettings"] = JsonSerializer.SerializeToNode(new {
-                schema = 2, revision = 1, lyrics = false,
-                target = new { installationId = "fixture-script", platform = TargetPlatform } });
-            result["signature"] = LJ.Digest(LJ.Obj(("contract", "music.quality.v1"), ("scope", "local"),
-                ("policy", result["settings"]), ("online", result["onlineSettings"])));
+                schema = 3, revision = 0, lyrics = false });
             return E(result);
         }
+        private static JsonElement ScriptSource() => E(new {
+            installationId = "fixture-script", name = "Catalog fixture", version = "1",
+            contentHash = new string('c', 64), executionHash = new string('d', 64), sourceRevision = 1,
+            generation = 1, enabled = true, state = "ready", rollbackAvailable = false, lastFailure = (string?)null,
+            capabilities = new[] { "wy", "tx", "kg" }.Select(platform => new {
+                platform, actions = new[] { "musicUrl" }, qualitys = new[] { "320k" } }) });
         private async Task<JsonElement> Resolve(JsonElement p, CancellationToken token)
         {
             var quality = await ReadQualitySettings(token);
             if (!quality.GetProperty("ok").GetBoolean()) return quality;
             if (S(p, "quality") != "320k") return E(new { ok = false, code = "CAPABILITY_UNAVAILABLE" });
             string policy = S(quality, "signature");
+            string platform = S(p, "platform");
+            Check(S(p, "installationId") == "fixture-script" && N(p, "generation") == 1,
+                "resolution uses the enabled fixture installation and its live generation");
             var song = p.GetProperty("song");
-            var source = song.GetProperty("sources").EnumerateArray().Single(s => S(s, "source") == TargetPlatform);
+            var source = song.GetProperty("sources").EnumerateArray().Single(s => S(s, "source") == platform);
             var songNode = JsonNode.Parse(song.GetRawText())!.AsObject();
             string sourceKey = S(source, "sourceKey");
             string cache = LJ.Digest(LJ.Obj(("contract", "music.quality.cache.v1"), ("policy", policy),
-                ("installation", "fixture-script"), ("platform", TargetPlatform), ("revision", 1), ("generation", 1),
+                ("installation", "fixture-script"), ("platform", platform), ("revision", 1), ("generation", 1),
                 ("sourceKey", sourceKey), ("recording", source.GetProperty("musicInfo")),
                 ("songId", songNode["songId"]),
                 ("duration", songNode["duration"]), ("quality", S(p, "quality"))));
@@ -866,7 +871,7 @@ public static class MusicCatalogPersonalTests
                 return E(new { ok = false, code = "QUALITY_POLICY_CHANGED" });
             if (p.TryGetProperty("qualityCacheSignature", out var expectedCache) && expectedCache.GetString() != cache)
                 return E(new { ok = false, code = "QUALITY_CACHE_CHANGED" });
-            return E(new { ok = true, installationId = "fixture-script", platform = TargetPlatform,
+            return E(new { ok = true, installationId = "fixture-script", platform,
                 songId = S(song, "songId"), generation = 1, quality = S(p, "quality"), sourceKey,
                 qualityPolicySignature = policy, qualityCacheSignature = cache, qualityVerified = false,
                 url = "https://media.invalid/synthetic", headers = new { }, playbackVerified = false });
@@ -900,8 +905,14 @@ public static class MusicCatalogPersonalTests
                     result = await Catalog.ExecuteAsync(method, p, cancellationToken);
             }
             else if (method == "music.quality.settings.get") result = await ReadQualitySettings(cancellationToken);
-            else if (method == "music.sources.detail") result = E(new { ok = true, item = new {
-                enabled = true, generation = 1, executionHash = new string('d', 64) } });
+            else if (method.StartsWith("music.official.", StringComparison.Ordinal))
+                result = E(new { ok = false, code = "CAPABILITY_UNAVAILABLE" });
+            else if (method == "music.sources.list")
+                result = E(new { ok = true, revision = 1, items = new[] { ScriptSource() } });
+            else if (method == "music.sources.detail")
+                result = S(p, "installationId") == "fixture-script"
+                    ? E(new { ok = true, item = ScriptSource(), permissions = new { storage = Array.Empty<string>() } })
+                    : E(new { ok = false, code = "NOT_FOUND" });
             else if (method == "music.online.resolve") result = await Resolve(p, cancellationToken);
             else result = await recommendationQueue.ExecuteAsync(method, p, cancellationToken);
             if (held.Hold is not null && !held.Before) await held.Hold.Wait();
@@ -1002,7 +1013,7 @@ public static class MusicCatalogPersonalTests
             var f = new Fixture(); try { await f.Module.InitializeAsync(default); return f; } catch { await f.DisposeAsync(); throw; }
         }
         public void Select(string platform)
-        { Module.SelectedCatalogPlatform = Module.CatalogPlatforms.Single(p => p.Key == platform); App.TargetPlatform = platform; }
+        { Module.SelectedCatalogPlatform = Module.CatalogPlatforms.Single(p => p.Key == platform); }
         public async Task OpenPersonalPlaylist()
         {
             await Module.NavigateAsync("catalog-personal", default);

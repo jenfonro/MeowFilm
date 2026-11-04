@@ -110,11 +110,6 @@ public partial class MusicSourcesSettingsView : UserControl
         if (Active && Module!.CanCancelOnline) _ = Module.CancelOnlineAsync();
     }
 
-    private void UseOfficial_Click(object sender, RoutedEventArgs e)
-    {
-        if (Ready) _ = Module!.UseOfficialSourcesAsync();
-    }
-
     private void More_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { DataContext: MusicSourceRow source } anchor ||
@@ -143,10 +138,6 @@ public partial class MusicSourcesSettingsView : UserControl
             };
             opened.Items.Add(item);
         }
-        foreach (var platform in source.Platforms)
-            Add("使用 · " + MusicSourceRow.PlatformName(platform),
-                () => owner.UseSourcePlatformAsync(source, platform), source.Enabled);
-        if (source.Platforms.Length > 0) opened.Items.Add(new Separator());
         if (source is { Enabled: true, State: "idle" })
             Add("加载音源", () => owner.SourceActionAsync(source, "enable"));
         Add("更新脚本", () => owner.UpdateSourceAsync(source));
