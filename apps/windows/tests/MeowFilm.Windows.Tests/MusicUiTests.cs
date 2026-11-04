@@ -452,14 +452,12 @@ public static partial class MusicUiTests
                 scroll.ScrollToEnd(); await Drain();
                 Equal(0, Reads(100)); // Layout and programmatic scrolling are not request entrances.
                 scroll.ScrollToTop(); await Drain();
-                True(Mouse.Capture(unrelatedThumb), "unrelated thumb captures the pointer");
-                try
-                {
-                    scroll.ScrollToEnd();
-                    await Drain();
-                }
-                finally { Mouse.Capture(null); }
-                Equal(0, Reads(100)); // A Thumb outside this list does not grant scroll intent.
+                var captured = Mouse.Captured;
+                unrelatedThumb.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0)
+                    { RoutedEvent = Mouse.GotMouseCaptureEvent });
+                scroll.ScrollToEnd(); await Drain();
+                Equal(0, Reads(100)); // An unrelated capture notification does not grant scroll intent.
+                True(ReferenceEquals(captured, Mouse.Captured), "the routed test leaves OS capture unchanged");
                 f.Calls.FailNext("music.queue.get", "STORAGE_UNAVAILABLE");
                 RaiseKey(list, Key.End);
                 await Until(() => f.Module.QueueSurfaceStatus == "操作失败，请重试");
@@ -471,14 +469,18 @@ public static partial class MusicUiTests
                 Equal(2, Reads(100));
                 window.UpdateLayout(); scroll.ScrollToTop(); await Drain();
                 var bar = (ScrollBar)scroll.Template.FindName("PART_VerticalScrollBar", scroll);
-                var scrollThumb = Visuals(bar).OfType<Thumb>().Single();
-                True(Mouse.Capture(scrollThumb), "queue scrollbar thumb captures the pointer");
+                bar.RaiseEvent(new ScrollEventArgs(ScrollEventType.ThumbTrack, scroll.ScrollableHeight)
+                    { RoutedEvent = ScrollBar.ScrollEvent });
                 try
                 {
                     scroll.ScrollToEnd();
                     await Until(() => f.Module.QueueSurfaceRows.Count == 210);
                 }
-                finally { Mouse.Capture(null); }
+                finally
+                {
+                    bar.RaiseEvent(new ScrollEventArgs(ScrollEventType.EndScroll, scroll.ScrollableHeight)
+                        { RoutedEvent = ScrollBar.ScrollEvent });
+                }
                 Equal(1, Reads(200));
                 window.UpdateLayout(); scroll.ScrollToEnd(); await Drain();
                 list.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, 0, -120)
@@ -489,7 +491,6 @@ public static partial class MusicUiTests
             }
             finally
             {
-                Mouse.Capture(null);
                 f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayQueue);
                 window.Content = null;
                 window.Close();
@@ -696,7 +697,7 @@ public static partial class MusicUiTests
                 await f.Module.RefreshAsync(); Equal(1, f.Module.Songs.Count); Equal("操作失败，请重试", f.Module.Status);
                 Equal(0, f.Playback.Opens.Count);
             }
-            var root = NewRoot(); await using var store = new DpapiDocumentStore(root, ["music.files.v1"]);
+            var root = NewRoot(); await using var store = new LocalDocumentStore(root, ["music.files.v1"]);
             await using var native = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
             var runtime = new FailedApplication(); var module = new MusicCapability(runtime, store, native);
             await Failure(() => module.InitializeAsync(default), "STORAGE_UNAVAILABLE");
@@ -1103,7 +1104,7 @@ public static partial class MusicUiTests
     private sealed class Fixture : IAsyncDisposable
     {
         public required string Root;
-        public required IProtectedDocumentStore Store;
+        public required IDocumentStore Store;
         public required NativeMusicScriptTestRuntime Runtime;
         public required MusicNativeApplication Application;
         public required ObservedApplication Calls;
@@ -1115,8 +1116,8 @@ public static partial class MusicUiTests
             IMusicPlayback? output = null, MusicSourceNetworkDownload? sourceNetworkDownload = null)
         {
             root ??= NewRoot();
-            IProtectedDocumentStore store = persistent
-                ? new DpapiDocumentStore(root, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections) : new DocumentProbe();
+            IDocumentStore store = persistent
+                ? new LocalDocumentStore(root, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces) : new DocumentProbe();
             var runtime = new NativeMusicScriptTestRuntime(); MusicCapability? module = null;
             var application = new MusicNativeApplication(store, runtime, new NoUpstream());
             try
@@ -1186,18 +1187,18 @@ public static partial class MusicUiTests
         protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request, CancellationToken cancellationToken)
             => throw new InvalidOperationException("No upstream request allowed in local UI fixture");
     }
-    private sealed class DocumentProbe : IProtectedDocumentStore
+    private sealed class DocumentProbe : IDocumentStore
     {
         private readonly Dictionary<string, byte[]> values = [];
         private readonly object gate = new();
         private bool closed;
-        public Task<ProtectedDocument> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
+        public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
         {
             lock (gate)
             {
                 Check(documentNamespace, cancellationToken);
                 var bytes = values.GetValueOrDefault(documentNamespace)?.ToArray();
-                return Task.FromResult(new ProtectedDocument(bytes, bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes)));
+                return Task.FromResult(new DocumentSnapshot(bytes, bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes)));
             }
         }
         public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken cancellationToken = default)
@@ -1207,7 +1208,7 @@ public static partial class MusicUiTests
                 Check(documentNamespace, cancellationToken);
                 var old = values.GetValueOrDefault(documentNamespace);
                 var actual = old is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(old);
-                if (actual != expected) throw new ProtectedDocumentException(DocumentStoreError.Conflict);
+                if (actual != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
                 values[documentNamespace] = data.ToArray();
                 return Task.FromResult(DocumentFingerprint.FromBytes(data.Span));
             }
@@ -1215,19 +1216,15 @@ public static partial class MusicUiTests
         private void Check(string ns, CancellationToken token)
         {
             token.ThrowIfCancellationRequested();
-            if (closed) throw new ProtectedDocumentException(DocumentStoreError.Closed);
+            if (closed) throw new DocumentStoreException(DocumentStoreError.Closed);
             bool content = AppIdentity.NativeCollections.Any(collection =>
             {
                 if (!ns.StartsWith(collection + ".", StringComparison.Ordinal)) return false;
-                string[] suffix = ns[(collection.Length + 1)..].Split('.');
-                return suffix.Length == 2 && suffix[0].Length == 64 &&
-                    suffix[0].All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f') &&
-                    int.TryParse(suffix[1], System.Globalization.NumberStyles.None,
-                        System.Globalization.CultureInfo.InvariantCulture, out int index) && index >= 0 &&
-                    suffix[1] == index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                string hash = ns[(collection.Length + 1)..];
+                return hash.Length == 64 && hash.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
             });
             if (!AppIdentity.NativeNamespaces.Contains(ns, StringComparer.Ordinal) && !content)
-                throw new ProtectedDocumentException(DocumentStoreError.InvalidRequest);
+                throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
         }
         public ValueTask DisposeAsync() { lock (gate) { closed = true; values.Clear(); } return ValueTask.CompletedTask; }
     }

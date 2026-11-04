@@ -2,7 +2,7 @@
 
 ## 责任
 
-`MeowFilm.Capabilities.Library.MusicLibraryOwner` 是音乐曲库、队列、历史、相关设置和脚本源元数据的唯一受保护文档写入者。
+`MeowFilm.Capabilities.Library.MusicLibraryOwner` 是音乐曲库、队列、历史、相关设置和脚本源元数据的唯一原生文档写入者。
 
 - 文档命名空间固定为 `music.library.v1`。
 - 默认 scope 为 `local`。
@@ -12,8 +12,8 @@
 ## 公开边界
 
 ```csharp
-MusicLibraryOwner(IProtectedDocumentStore store)
-MusicLibraryOwner(IProtectedDocumentStore store, string scope)
+MusicLibraryOwner(IDocumentStore store)
+MusicLibraryOwner(IDocumentStore store, string scope)
 
 Task<JsonElement> ExecuteAsync(
     string method,
@@ -98,8 +98,10 @@ playback-settings
 - 每个 `current`／`previous` 只包含 `sourceHash`、`sourceBytes`、`version`、`permissions`。
 - `permissions` 仅含 `storage`，值为不重复的 `read`／`write` 数组。
 - metadata 总量最多 3 MiB；单个脚本源码最多 16 MiB，与公共 ScriptHost 上限一致。
-- 源码位于受保护 collection `music.script-sources.v1`，按 1 MiB、内容 hash 和 chunk index 保存为不可变字节。发布 metadata 前必须已完整写入；读取核对每片 fingerprint、长度和整份 hash。
-- 中断或并发的相同不可变分片写入可通过读回相同字节结算；冲突或损坏明确失败。未被 metadata 引用的内容不会被静默删除或当作安装实例。
+- 源码位于普通文件 collection `music.script-sources.v2`，每份源码是完整的 `<导入内容hash>.js`；没有源码加密或落盘分片。hash 仅用于文件引用和导入内容标识，`sourceBytes` 记录导入时大小，不要求当前文件与历史内容或长度相同。
+- 发布 metadata 前先原子写入源码文件；激活时直接读取当前文件，按实际长度执行单脚本 16 MiB 上限，不做历史源码哈希门禁。编辑后重新启用或重启可执行新内容；语法与运行错误由引擎报告。显式重新导入可原子替换同一引用的文件，仍受当前文件 CAS 保护。
+- 曲库、设置和 LX 脚本 KV 随普通 `music.library.v1` JSON 明文存储；脚本自行保存的 Cookie 等值不由运行器特殊加密。文件和会话隔离、整文档 CAS 与未知提交恢复继续生效。未被 metadata 引用的源码不会被静默删除或当作安装实例。
+- 开发阶段不迁移旧加密文档或 `music.script-sources.v1` 分片，不提供读取回退，也不自动删除旧数据。
 - 安装启停或删除不修改在线设置及其 revision；删除安装实例仍在同一 CAS 中移除该实例的私有 storage。
 - 安装元数据本身不因读取而写入；安装 schema 3、内联源码和其他不符合当前安装格式的记录明确失败，不迁移、转换、删除或回退。文档内合法的旧在线设置按下一节转换。
 

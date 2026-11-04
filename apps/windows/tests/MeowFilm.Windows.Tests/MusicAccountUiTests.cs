@@ -166,9 +166,9 @@ public static class MusicAccountUiTests
             return Task.FromResult(BridgeCodec.Value(new { ok = true }));
         }
     }
-    private sealed class NoStore : IProtectedDocumentStore
+    private sealed class NoStore : IDocumentStore
     {
-        public Task<ProtectedDocument> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default) =>
+        public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("No document operation expected");
         public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
             DocumentFingerprint expected, CancellationToken cancellationToken = default) =>

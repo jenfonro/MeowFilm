@@ -202,6 +202,41 @@ public sealed partial class MusicPlatformCatalog
             return page;
         }, cancellationToken);
     }
+    private static async Task CompleteCubePlaylists(Call c, JsonObject page)
+    {
+        var sections = PJ.Array(page["sections"]).ToArray();
+        var visible = sections.SelectMany(section => PJ.Array(PJ.At(section, "items")))
+            .OfType<JsonObject>().Where(card => PJ.S(card, "action", "type") == "playlist").ToArray();
+        var cards = visible.Concat(sections.SelectMany(section => PJ.Array(PJ.At(section, "tabs"))
+                .SelectMany(tab => PJ.Array(PJ.At(tab, "items")))).OfType<JsonObject>())
+            .Where(card => PJ.S(card, "action", "type") == "playlist").ToArray();
+        var ids = visible.Where(card => PJ.S(card, "name").Length == 0 || PJ.S(card, "cover").Length == 0)
+            .Select(card => PJ.S(card, "action", "id")).Distinct(StringComparer.Ordinal).ToArray();
+        foreach (var batch in ids.Chunk(100))
+        {
+            var summaries = await c.Wy("/api/tag/tab/playlists", PJ.Obj(("ids", string.Join(",", batch))), raw =>
+            {
+                var rows = PJ.Rows(raw["data"], batch.Length);
+                PJ.Require(rows.Count == batch.Length, "NOT_FOUND");
+                var result = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+                foreach (var row in rows)
+                {
+                    var summary = PlatformSongs.Playlist("wy", row);
+                    var id = PJ.S(summary, "id");
+                    PJ.Require(batch.Contains(id, StringComparer.Ordinal) && result.TryAdd(id, summary), "IDENTITY_MISMATCH");
+                    if (PJ.S(summary, "creator").Length == 0) summary["creator"] = PJ.Metadata(row["userName"]);
+                }
+                return result;
+            });
+            foreach (var card in cards)
+            {
+                if (!summaries.TryGetValue(PJ.S(card, "action", "id"), out var summary)) continue;
+                foreach (var field in new[] { "name", "cover", "creator" })
+                    if (PJ.S(card, field).Length == 0) card[field] = summary[field]?.DeepClone();
+                if (card["count"] is null) card["count"] = summary["count"]?.DeepClone();
+            }
+        }
+    }
     private static async Task<JsonObject> Cube(Call c, MusicChannelRequest p, JsonObject descriptor, string target)
     {
         var code = PJ.S(descriptor, "pageCode"); PJ.Require(Regex.IsMatch(code, "^[a-zA-Z0-9_-]{6,100}$"), "INVALID_RESPONSE");
@@ -228,6 +263,7 @@ public sealed partial class MusicPlatformCatalog
             return (Page: cubePage, LayoutTag: isLayoutTag);
         }, true);
         var page = layout.Page; var layoutTag = layout.LayoutTag;
+        await CompleteCubePlaylists(c, page);
         if (PJ.At(page, "feed", "request") is JsonObject req)
         {
             var offset = prev["offset"] is null ? 0 : PJ.Count(prev["offset"]); PJ.Require(offset <= 3000);

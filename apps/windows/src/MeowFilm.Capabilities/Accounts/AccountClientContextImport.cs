@@ -7,13 +7,13 @@ namespace MeowFilm.Capabilities.Accounts;
 // One-time, read-only import of the published account-v1 device records.
 internal static class AccountClientContextImport
 {
-    internal static async Task<MusicClientContextSeeds> ReadAsync(IProtectedDocumentStore store, CancellationToken token)
+    internal static async Task<MusicClientContextSeeds> ReadAsync(IDocumentStore store, CancellationToken token)
     {
         try { return await ReadCoreAsync(store, token).ConfigureAwait(false); }
-        catch (Exception error) when (error is MusicAccountException or ProtectedDocumentException)
+        catch (Exception error) when (error is MusicAccountException or DocumentStoreException)
         { throw new MusicPlatformException(AccountRules.Error(error)); }
     }
-    private static async Task<MusicClientContextSeeds> ReadCoreAsync(IProtectedDocumentStore store, CancellationToken token)
+    private static async Task<MusicClientContextSeeds> ReadCoreAsync(IDocumentStore store, CancellationToken token)
     {
         var document = AccountDocument.Decode(await store.ReadAsync(MusicAccountOwner.DocumentNamespace, token).ConfigureAwait(false));
         token.ThrowIfCancellationRequested();

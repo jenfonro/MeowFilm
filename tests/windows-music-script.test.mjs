@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { createScriptHost, ScriptHostError, SCRIPT_LIMITS } from '@meowfilm/script-host';
+import { encodeJSONValue, decodeJSONValue } from '@meowfilm/runtime-bridge';
 import { createMusicScriptModule, musicScriptContract } from '../apps/runtime/modules/music-script.mjs';
 
 const limit = 512 * 1024;
@@ -30,7 +31,6 @@ const storageOptions = (...args) => ({
 function okay(reply) {
   assert.equal(reply.ok, true, JSON.stringify(reply));
   assert.equal(reply.contract, musicScriptContract);
-  assert.ok(Buffer.byteLength(JSON.stringify(reply)) <= limit);
   return reply;
 }
 function denied(reply, code) {
@@ -82,8 +82,44 @@ function setup(t, extra = {}) {
         assert.equal(key in host, false, key);
     }
   });
-  return { module, native, host: () => host,
-    rpc: (name, params = {}, context) => module.methods[`music.script.${name}`](params, context) };
+  const direct = (name, params = {}, context) => module.methods[`music.script.${name}`](params, context);
+  async function rpc(name, params = {}, context) {
+    let reply;
+    const bytes = encodeJSONValue(params);
+    let token;
+    try {
+      if (['load', 'unload', 'invoke', 'status'].includes(name) && bytes.length > 65536) {
+        const begin = okay(await direct('control.begin', { length: bytes.length, sha256: hash(bytes) }, context));
+        token = begin.token;
+        for (let offset = 0; offset < bytes.length; offset += begin.chunkBytes)
+          okay(await direct('control.chunk', { token, offset,
+            data: bytes.subarray(offset, offset + begin.chunkBytes).toString('base64') }, context));
+        reply = await direct('control.call', { operation: name, token }, context);
+      } else reply = await direct(name, params, context);
+    } finally {
+      bytes.fill(0);
+      if (token) okay(await direct('control.abort', { token }));
+    }
+    if (!reply.ok || !reply.blob) return reply;
+    const blob = reply.blob, chunks = [];
+    try {
+      for (let offset = 0; offset < blob.length;) {
+        const part = okay(await direct('blob.read', { token: blob.token, offset }, context));
+        const bytes = Buffer.from(part.data, 'base64');
+        assert.equal(bytes.toString('base64'), part.data);
+        assert.equal(bytes.length, Math.min(blob.chunkBytes, blob.length - offset));
+        assert.equal(part.next, offset + bytes.length);
+        chunks.push(bytes); offset = part.next;
+      }
+      const bytes = Buffer.concat(chunks);
+      assert.equal(bytes.length, blob.length); assert.equal(hash(bytes), blob.sha256);
+      const restored = decodeJSONValue(bytes);
+      assert.equal(restored.ok, true); assert.equal(restored.contract, musicScriptContract);
+      assert.equal(Object.hasOwn(restored, 'blob'), false);
+      return restored;
+    } finally { okay(await direct('blob.release', { token: blob.token })); }
+  }
+  return { module, native, host: () => host, rpc };
 }
 async function upload(rpc, source = fixture()) {
   const bytes = Buffer.isBuffer(source) ? source : Buffer.from(source);
@@ -158,11 +194,12 @@ function callback(installationId, generation, siteId = 'kw', extra = {}) {
     isCurrent: () => true, ...extra };
 }
 
-test('descriptor exposes only eight script RPCs, factory injection and enveloped close', async t => {
+test('descriptor exposes script and transfer RPCs, factory injection and enveloped close', async t => {
   const { module, rpc } = setup(t);
-  assert.equal(module.id, 'music'); assert.equal(module.version, '0.6.0');
+  assert.equal(module.id, 'music'); assert.equal(module.version, '0.7.0');
   assert.deepEqual(Object.keys(module.methods).sort(), [
     'stage.begin', 'stage.chunk', 'stage.abort', 'load', 'unload', 'invoke', 'status', 'close',
+    'control.begin', 'control.chunk', 'control.abort', 'control.call', 'blob.read', 'blob.release',
   ].map(name => `music.script.${name}`).sort());
   assert.deepEqual(okay(await rpc('status')), {
     ok: true, contract: musicScriptContract, documentAccess: false, instances: [],
@@ -637,7 +674,7 @@ test('cancel after host publication retires new generation rather than reusing t
   assert.ok(recovered.generation > old.generation);
 });
 
-test('reverse errors are sanitized, result shapes are checked, and response size is bounded', async t => {
+test('reverse errors are sanitized, result shapes are checked, and large responses are snapshotted', async t => {
   let response = { ok: false, code: 'PERMISSION_DENIED' };
   const { rpc } = setup(t, { call: async () => {
     if (response instanceof Error) throw response;
@@ -654,21 +691,27 @@ test('reverse errors are sanitized, result shapes are checked, and response size
     assert.ok(!JSON.stringify(reply).includes('private-token'));
   }
   response = { ok: true, value: 'x'.repeat(limit) };
-  denied(await rpc('invoke', request(instance)), 'LIMIT');
+  assert.equal(await value(rpc, instance), response.value);
   response = { ok: true, value: null };
   assert.equal(await value(rpc, instance), null);
 });
 
-test('control envelope counts toward 512KiB, oversized input/config/reverse writes do not reach consumers', async t => {
-  const { rpc, native } = setup(t);
+test('large control envelopes retain content, config and native storage keep independent limits', async t => {
+  const writes = [];
+  const { rpc } = setup(t, { call: async (_method, message) => {
+    writes.push(message);
+    return { ok: false, code: 'LIMIT' };
+  } });
   const instance = await load(rpc, options(), fixture({
     handler: `async ({info}) => 'x'.repeat(info.musicInfo.length)`,
   }));
   const overhead = Buffer.byteLength(JSON.stringify({ ok: true, contract: musicScriptContract, value: '' }));
   const exact = okay(await rpc('invoke', request(instance, 'kw', { length: limit - overhead })));
   assert.equal(Buffer.byteLength(JSON.stringify(exact)), limit);
-  denied(await rpc('invoke', request(instance, 'kw', { length: limit - overhead + 1 })), 'LIMIT');
-  denied(await rpc('invoke', request(instance, 'kw', { data: 'x'.repeat(limit) })), 'LIMIT');
+  const above = okay(await rpc('invoke', request(instance, 'kw', { length: limit - overhead + 1 })));
+  assert.equal(Buffer.byteLength(JSON.stringify(above)), limit + 1);
+  const input = await load(rpc, options('input'), fixture({ handler: 'async ({info}) => info.musicInfo.data' }));
+  assert.equal(await value(rpc, input, 'kw', { data: 'x'.repeat(limit) }), 'x'.repeat(limit));
   const token = await upload(rpc);
   denied(await rpc('load', { ...options('config'), token, config: { data: 'x'.repeat(32768) } }), 'LIMIT');
   okay(await rpc('stage.abort', { token }));
@@ -676,7 +719,8 @@ test('control envelope counts toward 512KiB, oversized input/config/reverse writ
     handler: `async (_request, {storage}) => storage.set('big','x'.repeat(${limit}))`,
   }));
   denied(await rpc('invoke', request(storage)), 'LIMIT');
-  assert.equal(native.calls.length, 0);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].value, 'x'.repeat(limit));
 });
 
 test('instances have no fixed count quota, updates advance generations, and unload releases a binding', async t => {
@@ -732,17 +776,38 @@ test('LX handles a 12 MiB script buffer and a network response above the externa
     });
   });
 
-test('LX invokeResult above the single-frame control limit still reports LIMIT and serves the session',
+test('real LX input and invokeResult above 512 KiB, 1 MiB and 8 MiB are restored and serve the session',
   { timeout: 60000 }, async t => {
-    const size = limit + 1;
     const { rpc } = setup(t);
     const instance = await load(rpc, options(), fixture({
-      handler: `async ({info}) => 'x'.repeat(info.musicInfo.size)`,
+      handler: `async ({info}) => info.musicInfo.data ?? 'x'.repeat(info.musicInfo.size)`,
     }));
-    denied(await rpc('invoke', request(instance, 'kw', { size })), 'LIMIT');
+    for (const size of [limit + 1, 1024 * 1024 + 1, 8 * 1024 * 1024 + 1]) {
+      const data = 'x'.repeat(size);
+      assert.equal(await value(rpc, instance, 'kw', { data }), data);
+      assert.equal(await value(rpc, instance, 'kw', { size }), data);
+    }
     assert.equal(await value(rpc, instance, 'kw', { size: 8 }), 'x'.repeat(8));
     assert.equal(okay(await rpc('status')).instances[0].state, 'ready');
   });
+
+test('real LX load and status preserve large valid source declarations through result blobs', async t => {
+  const { rpc } = setup(t);
+  const sources = Object.fromEntries(Array.from({ length: 32 }, (_, index) => [`s${index}`, {
+    name: '猫'.repeat(256), type: 'music',
+    actions: Array.from({ length: 32 }, (_, item) => `a${item}`.padEnd(128, 'a')),
+    qualitys: Array.from({ length: 32 }, (_, item) => `q${item}`.padEnd(64, 'q')),
+  }]));
+  const instance = await load(rpc, options('declarations'), fixture({
+    sources, handler: 'async ({info}) => info',
+  }));
+  assert.ok(encodeJSONValue(instance).length > 65536);
+  assert.deepEqual(instance.capabilities, sources);
+  assert.deepEqual(okay(await rpc('status')).instances, [instance]);
+  assert.deepEqual(await value(rpc, instance, 's0', {}, {
+    operation: sources.s0.actions[0], payload: { expected: 'raw' },
+  }), { expected: 'raw' });
+});
 
 test('extended source actions preserve payload and returned values without a platform whitelist', async t => {
   const { rpc } = setup(t);
@@ -818,7 +883,9 @@ test('pre-cancelled requests do not stage/load, cancellation fences reverse comp
   denied(await rpc('load', { ...spec, token }, { signal: cancelled.signal }), 'CANCELLED');
   const instance = okay(await rpc('load', { ...spec, token })).instance;
   const controller = new AbortController();
-  const requestPromise = rpc('invoke', request(instance, 'kw', { op: 'set', value: 'no' }),
+  const requestPromise = rpc('invoke', request(instance, 'kw', {
+    op: 'set', value: 'no', padding: 'x'.repeat(65536),
+  }),
     { signal: controller.signal });
   await entered.promise;
   controller.abort();

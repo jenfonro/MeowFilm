@@ -80,16 +80,94 @@ private actor MusicSearchTestPages {
               title: title ?? songID ?? id, artist: artist, duration: duration,
               sources: [.init(sourceKey: platform + ":" + id, platform: platform, nativeId: id)])
     }
-    private func session(_ pages: MusicSearchTestPages, clock: @escaping @Sendable () -> Date = { Date() }) -> MusicSearchResultsModel {
+    private func session(_ pages: MusicSearchTestPages, clock: @escaping @Sendable () -> Date = { Date() },
+                         sharedCache: MusicSearchResultsCache.Storage? = nil) -> MusicSearchResultsModel {
         let value = MusicSearchResultsModel(readSongs: { platform, query, page, limit in
             try await pages.readSongs(platform, query: query, page: page, limit: limit)
         }, readPlaylists: { platform, query, page, limit in
             try await pages.readPlaylists(platform, query: query, page: page, limit: limit)
         }, readRecording: { request in
             try await pages.readRecording(request)
-        }, clock: clock)
+        }, cacheProvider: { sharedCache ?? MusicSearchResultsCache.make(clock: clock) })
         value.setAccess(available: true, generation: UUID()); value.appear()
         return value
+    }
+    func testNewSearchSessionReusesSongAndPlaylistPagesButNotQueryOrPlatform() async {
+        let pages = MusicSearchTestPages(), cache = MusicSearchResultsCache.make()
+        let playlist = MusicPublicBrowseCollection(platform: .netease, nativeID: "one", title: "Playlist")
+        await pages.song("q|wy|1", .init(tracks: [track("a")], next: 2))
+        await pages.song("q|wy|2", .init(tracks: [track("b")]))
+        await pages.song("q|tx|1", .init(tracks: [track("c", platform: "tx")]))
+        await pages.playlist("lists|q|wy|1", .init(items: [playlist], total: 1))
+        let settings = MusicSearchPreferences(songPlatforms: [.netease], playlistPlatforms: [.netease])
+        let first = session(pages, sharedCache: cache)
+        first.submit("q", preferences: settings); await first.finishPendingReads()
+        first.more(.songs); await first.finishPendingReads()
+        first.disappear()
+        let second = session(pages, sharedCache: cache)
+        second.submit("q", preferences: settings); await second.finishPendingReads()
+        XCTAssertEqual(second.songs.map(\.id), ["a"])
+        XCTAssertEqual(second.playlists, [playlist])
+        XCTAssertTrue(second.moreSongs)
+        XCTAssertFalse(first.requestID == second.requestID)
+        second.more(.songs); await second.finishPendingReads()
+        XCTAssertEqual(second.songs.map(\.id), ["a", "b"])
+        second.submit("other", preferences: .init(songPlatforms: [.netease], searchPlaylists: false))
+        await second.finishPendingReads()
+        second.submit("q", preferences: .init(songPlatforms: [.qq], searchPlaylists: false))
+        await second.finishPendingReads()
+        XCTAssertEqual(second.songs.map(\.id), ["c"])
+        let reads = await pages.log()
+        XCTAssertEqual(reads.count, 5)
+        XCTAssertEqual(Set(reads), Set(["q|wy|1", "q|wy|2", "lists|q|wy|1", "other|wy|1", "q|tx|1"]))
+        second.disappear()
+    }
+
+    func testSharedCacheKeepsExistingExpiryAcrossNewPagesAndDurationChanges() async {
+        let pages = MusicSearchTestPages(), clock = MusicSearchCacheClock()
+        let cache = MusicSearchResultsCache.make(clock: { clock.read() })
+        await pages.song("q|wy|1", .init(tracks: [track("a")]))
+        var settings = MusicSearchPreferences(songPlatforms: [.netease], searchPlaylists: false)
+        let first = session(pages, sharedCache: cache)
+        first.submit("q", preferences: settings); await first.finishPendingReads(); first.disappear()
+        clock.advance(3599)
+        settings.songs.cacheMinutes = 1
+        let second = session(pages, sharedCache: cache)
+        second.submit("q", preferences: settings); await second.finishPendingReads()
+        var reads = await pages.log(); XCTAssertEqual(reads.count, 1)
+        clock.advance(2)
+        let third = session(pages, sharedCache: cache)
+        third.submit("q", preferences: settings); await third.finishPendingReads()
+        reads = await pages.log(); XCTAssertEqual(reads.count, 2)
+        clock.advance(61)
+        second.submit("q", preferences: settings); await second.finishPendingReads()
+        reads = await pages.log(); XCTAssertEqual(reads.count, 3)
+        second.disappear(); third.disappear()
+    }
+
+    func testCancellingOnePageDoesNotCancelAnotherPagesCoalescedRead() async {
+        let pages = MusicSearchTestPages(), cache = MusicSearchResultsCache.make()
+        let entered = expectation(description: "shared physical search entered")
+        let joined = expectation(description: "second page joined the physical read")
+        let gate = MusicCollectionGate { entered.fulfill() }
+        await pages.song("q|wy|1", .init(tracks: [track("a")]))
+        await pages.gate("q|wy|1", gate)
+        let first = session(pages, sharedCache: cache), second = session(pages, sharedCache: cache)
+        let settings = MusicSearchPreferences(songPlatforms: [.netease], searchPlaylists: false)
+        first.submit("q", preferences: settings)
+        await fulfillment(of: [entered], timeout: 2)
+        MusicRequestTrace.$observer.withValue({ event in
+            if event.operation == .search, event.phase == .coalesced { joined.fulfill() }
+        }) { second.submit("q", preferences: settings) }
+        await fulfillment(of: [joined], timeout: 2)
+        first.disappear()
+        await gate.release()
+        await second.finishPendingReads()
+        XCTAssertEqual(second.songs.map(\.id), ["a"])
+        XCTAssertTrue(second.songFailures.isEmpty)
+        XCTAssertTrue(first.songs.isEmpty)
+        let reads = await pages.log(); XCTAssertEqual(reads, ["q|wy|1"])
+        second.disappear()
     }
     func testDefaultFivePlatformRequestsStartConcurrentlyAndFusionWaitsForNoPreferredPlatform() async {
         let pages = MusicSearchTestPages(), model = session(pages)

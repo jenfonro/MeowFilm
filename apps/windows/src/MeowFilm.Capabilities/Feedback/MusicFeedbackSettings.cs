@@ -1,6 +1,5 @@
 using System.Collections.ObjectModel;
 using System.Globalization;
-using System.Security.Cryptography;
 using System.Text.Json;
 using MeowFilm.Platform.Storage;
 
@@ -9,7 +8,7 @@ namespace MeowFilm.Capabilities.Feedback;
 public sealed record MusicFeedbackSettings(long Revision, IReadOnlyList<string> Enabled);
 
 /// <summary>One native-only preferences owner. It never stores listening instances or credentials.</summary>
-public sealed class MusicFeedbackSettingsOwner(IProtectedDocumentStore store) : IAsyncDisposable
+public sealed class MusicFeedbackSettingsOwner(IDocumentStore store) : IAsyncDisposable
 {
     public const string DocumentNamespace = "music.feedback.v1";
     public const string ContractVersion = "1.0.0";
@@ -41,17 +40,13 @@ public sealed class MusicFeedbackSettingsOwner(IProtectedDocumentStore store) : 
                 }
             }
             var saved = await store.ReadAsync(DocumentNamespace, token).ConfigureAwait(false);
-            try
+            var decoded = Decode(saved);
+            lock (sync)
             {
-                var decoded = Decode(saved);
-                lock (sync)
-                {
-                    if (closed) throw Error("CLOSED");
-                    current = decoded; fingerprint = saved.Fingerprint; loaded = true; uncertain = false;
-                }
-                Notify(); return decoded;
+                if (closed) throw Error("CLOSED");
+                current = decoded; fingerprint = saved.Fingerprint; loaded = true; uncertain = false;
             }
-            finally { if (saved.Data is not null) CryptographicOperations.ZeroMemory(saved.Data); }
+            Notify(); return decoded;
         }
         catch
         {
@@ -96,15 +91,14 @@ public sealed class MusicFeedbackSettingsOwner(IProtectedDocumentStore store) : 
                 lock (sync) { current = next; fingerprint = actual; uncertain = false; }
                 Notify(); return next;
             }
-            catch (ProtectedDocumentException error) when (error.Error == DocumentStoreError.Conflict)
+            catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Conflict)
             { throw Error("STORAGE_CONFLICT"); }
             catch { throw Error("COMMIT_UNKNOWN"); }
-            finally { CryptographicOperations.ZeroMemory(data); }
         }
         finally { lane.Release(); }
     }
 
-    private static MusicFeedbackSettings Decode(ProtectedDocument saved)
+    private static MusicFeedbackSettings Decode(DocumentSnapshot saved)
     {
         if (saved.Data is null)
         {
@@ -113,7 +107,7 @@ public sealed class MusicFeedbackSettingsOwner(IProtectedDocumentStore store) : 
         }
         try
         {
-            if (saved.Data.Length > 1024 || DocumentFingerprint.FromBytes(saved.Data) != saved.Fingerprint)
+            if (saved.Data.Length > 1024)
                 throw Error("CORRUPT_STORAGE");
             using var doc = JsonDocument.Parse(saved.Data, new() { MaxDepth = 4 });
             var root = doc.RootElement;

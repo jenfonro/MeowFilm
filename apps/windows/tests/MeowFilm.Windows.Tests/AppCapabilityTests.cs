@@ -28,8 +28,23 @@ public static class AppCapabilityTests
         public FrameworkElement? PlayerView => null;
         public event PropertyChangedEventHandler? PropertyChanged { add { } remove { } }
         public Task InitializeAsync(CancellationToken cancellationToken) => Task.CompletedTask;
-        public Task NavigateAsync(string route, CancellationToken cancellationToken) => Task.CompletedTask;
-        public Task SearchAsync(string query, CancellationToken cancellationToken) => Task.CompletedTask;
+        private string _location = "initial";
+        public Task NavigateAsync(string route, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _location = "route:" + route; return Task.CompletedTask;
+        }
+        public Task SearchAsync(string query, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _location = "search:" + query; return Task.CompletedTask;
+        }
+        public string CaptureNavigationLocation() => _location;
+        public Task RestoreNavigationAsync(string location, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            _location = location; return Task.CompletedTask;
+        }
         public Task PrepareShutdownAsync() => Task.CompletedTask;
         public Task CancelShutdownPreparationAsync() => Task.CompletedTask;
         public Task AbortAsync() => Task.CompletedTask;

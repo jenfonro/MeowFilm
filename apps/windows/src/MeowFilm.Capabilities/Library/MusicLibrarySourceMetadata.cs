@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -260,7 +259,7 @@ public sealed partial class MusicLibraryOwner
             await CommitAsync(doc, PendingOwner.ScriptData, token).ConfigureAwait(false);
             return JsonSerializer.SerializeToElement<object?>(null);
         }
-        finally { CryptographicOperations.ZeroMemory(supplied); if (entered) gate.Release(); }
+        finally { if (entered) gate.Release(); }
     }
     private (JsonObject Result, bool Mutate) SettingsCommand(string method, JsonObject p, JsonObject doc)
     {

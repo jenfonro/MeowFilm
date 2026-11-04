@@ -68,25 +68,25 @@ public sealed partial class MusicNativeApplication : IMusicApplication
     private bool stopping, closed, accountReceiptUnknown;
     private long accountReceiptEpoch;
 
-    public MusicNativeApplication(IProtectedDocumentStore store, IRuntimeClient scriptRuntime)
+    public MusicNativeApplication(IDocumentStore store, IRuntimeClient scriptRuntime)
         : this(store, scriptRuntime, null) { }
 
     /// <summary>
     /// Trusted synthetic-transport seam. Fixed platform origins, redirect rejection and
     /// credential scopes still apply. The application owns the supplied handler.
     /// </summary>
-    public MusicNativeApplication(IProtectedDocumentStore store, IRuntimeClient scriptRuntime,
+    public MusicNativeApplication(IDocumentStore store, IRuntimeClient scriptRuntime,
         HttpMessageHandler? transportHandler)
         : this(store, scriptRuntime, transportHandler, null) { }
 
-    public MusicNativeApplication(IProtectedDocumentStore store, IRuntimeClient scriptRuntime,
+    public MusicNativeApplication(IDocumentStore store, IRuntimeClient scriptRuntime,
         HttpMessageHandler? transportHandler,
         Func<IMusicPlatformSessionSource, MusicPlatformHttp, IMusicFeedbackProtocol>? feedbackFactory)
         : this(store, scriptRuntime, transportHandler, feedbackFactory, null) { }
 
     // Internal deterministic lifecycle seam; public constructors always assemble
     // the real service with the same account owner and restricted HTTP transport.
-    internal MusicNativeApplication(IProtectedDocumentStore store, IRuntimeClient scriptRuntime,
+    internal MusicNativeApplication(IDocumentStore store, IRuntimeClient scriptRuntime,
         HttpMessageHandler? transportHandler,
         Func<IMusicPlatformSessionSource, MusicPlatformHttp, IMusicFeedbackProtocol>? feedbackFactory,
         Func<IMusicPlatformSessionSource, MusicPlatformHttp, IMusicSearchDiscovery>? discoveryFactory,

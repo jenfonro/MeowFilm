@@ -570,17 +570,17 @@ internal static class RecommendationTest
         { using var registration = ct.Register(() => Cancelled.TrySetResult()); Entered.TrySetResult(); return await result.Task; }
         internal void Complete(string kind, params string[] ids) => result.TrySetResult(Batch(kind, ids));
     }
-    internal sealed class Store : IProtectedDocumentStore
+    internal sealed class Store : IDocumentStore
     {
         private readonly object gate = new();
         internal byte[]? Bytes;
         internal int Writes, Failure;
         internal Action? AfterRead;
         internal TaskCompletionSource? Entered, Release;
-        public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken ct = default)
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken ct = default)
         {
             ct.ThrowIfCancellationRequested(); Check(ns == MusicLibraryOwner.DocumentNamespace);
-            ProtectedDocument result;
+            DocumentSnapshot result;
             lock (gate) result = new(Bytes?.ToArray(), Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes));
             AfterRead?.Invoke();
             return Task.FromResult(result);
@@ -593,9 +593,9 @@ internal static class RecommendationTest
             {
                 Check((Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes)) == expected, "CAS expected");
                 int fail = Failure; Failure = 0; Writes++;
-                if (fail == 1) throw new ProtectedDocumentException(DocumentStoreError.Storage);
+                if (fail == 1) throw new DocumentStoreException(DocumentStoreError.Storage);
                 Bytes = bytes.ToArray();
-                if (fail == 2) throw new ProtectedDocumentException(DocumentStoreError.Storage);
+                if (fail == 2) throw new DocumentStoreException(DocumentStoreError.Storage);
                 return DocumentFingerprint.FromBytes(Bytes);
             }
         }

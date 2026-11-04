@@ -456,14 +456,14 @@ public static class MusicLyricApplicationTests
         public override DateTimeOffset GetUtcNow() => now;
         internal void Advance(TimeSpan time) => now += time;
     }
-    private sealed class Store : IProtectedDocumentStore
+    private sealed class Store : IDocumentStore
     {
         private byte[]? data;
         internal int Writes;
-        public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken ct = default)
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken ct = default)
         {
             ct.ThrowIfCancellationRequested(); Equal(MusicLibraryOwner.DocumentNamespace, ns);
-            return Task.FromResult(new ProtectedDocument(data?.ToArray(),
+            return Task.FromResult(new DocumentSnapshot(data?.ToArray(),
                 data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(data)));
         }
         public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes,
@@ -471,7 +471,7 @@ public static class MusicLyricApplicationTests
         {
             ct.ThrowIfCancellationRequested(); Equal(MusicLibraryOwner.DocumentNamespace, ns);
             var before = data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(data);
-            if (expected != before) throw new ProtectedDocumentException(DocumentStoreError.Conflict);
+            if (expected != before) throw new DocumentStoreException(DocumentStoreError.Conflict);
             Writes++; data = bytes.ToArray(); return Task.FromResult(DocumentFingerprint.FromBytes(data));
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;

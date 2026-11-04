@@ -50,18 +50,19 @@ public static class AppCompositionTests
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "meowfilm", "aggregate"));
         Check(AppIdentity.ScriptModules.Select(m => (m.Id, m.Version)).SequenceEqual(new[]
         {
-            ("music", "0.6.0"),
+            ("music", "0.7.0"),
             ("cat", "0.1.0")
         }));
         Check(AppIdentity.NativeCollections.SequenceEqual(new[] { MusicLibraryOwner.ScriptContentCollection }));
         Check(AppIdentity.NativeNamespaces.Contains("music.accounts.v1"));
         Check(AppIdentity.NativeNamespaces.Contains("music.platform-context.v1"));
+        Check(AppIdentity.ProtectedNamespaces.SequenceEqual(new[] { "music.accounts.v1", "music.platform-context.v1" }));
         return Task.CompletedTask;
     }
     private static async Task Components()
     {
         string data = DataRoot();
-        await using var store = new DpapiDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections);
+        await using var store = new LocalDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
         await using var documents = new ProtectedDocumentBridge(store, []);
         IReadOnlyDictionary<string, Func<JsonElement, CancellationToken, Task<object?>>>? methods = null;
         await using var runtime = new OnDemandRuntimeClient(async token =>
@@ -99,7 +100,7 @@ public static class AppCompositionTests
         string data = DataRoot(); string? playlistId = null;
         for (int pass = 0; pass < 2; pass++)
         {
-            await using var store = new DpapiDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections);
+            await using var store = new LocalDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
             await using var documents = new ProtectedDocumentBridge(store, []);
             await using var runtime = new OnDemandRuntimeClient(_ => throw new InvalidOperationException("Node unavailable"));
             await using var owner = new MusicNativeApplication(store, runtime);
@@ -123,7 +124,7 @@ public static class AppCompositionTests
         string data = DataRoot();
         for (int pass = 0; pass < 2; pass++)
         {
-            await using var store = new DpapiDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections);
+            await using var store = new LocalDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
             await using var runtime = new OnDemandRuntimeClient(_ => throw new InvalidOperationException("Node must stay dormant"));
             await using var playback = new NativePlayback(audioOutput: NativeAudioOutput.Dummy);
             var transport = new StartupTransport();
@@ -188,7 +189,7 @@ public static class AppCompositionTests
     private static async Task RejectedShellStartup(string area, string value, string expected)
     {
         string data = DataRoot();
-        await using var store = new DpapiDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections);
+        await using var store = new LocalDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
         var document = LJ.Obj(("version", 1), ("entries", new JsonArray(LJ.Obj(
             ("key", LJ.Stringify(new JsonArray("meowfilm", "music", 1, "local", area))),
             ("value", JsonNode.Parse(value))))));

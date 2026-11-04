@@ -301,12 +301,12 @@ public static partial class MusicUiTests
             finally { await Runtime.DisposeAsync(); await Store.DisposeAsync(); }
         }
     }
-    private sealed class RecommendationStore : IProtectedDocumentStore
+    private sealed class RecommendationStore : IDocumentStore
     {
-        private readonly DpapiDocumentStore inner = new(NewRoot(), AppIdentity.NativeNamespaces, AppIdentity.NativeCollections);
+        private readonly LocalDocumentStore inner = ServiceStore();
         internal bool? UnknownNextLibraryWrite;
         internal int LibraryWrites;
-        public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken cancellationToken = default) =>
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken cancellationToken = default) =>
             inner.ReadAsync(ns, cancellationToken);
         public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> value,
             DocumentFingerprint expected, CancellationToken cancellationToken = default)
@@ -315,9 +315,9 @@ public static partial class MusicUiTests
                 return await inner.WriteAsync(ns, value, expected, cancellationToken);
             LibraryWrites++;
             bool? unknown = UnknownNextLibraryWrite; UnknownNextLibraryWrite = null;
-            if (unknown == false) throw new ProtectedDocumentException(DocumentStoreError.Storage);
+            if (unknown == false) throw new DocumentStoreException(DocumentStoreError.Storage);
             var receipt = await inner.WriteAsync(ns, value, expected, cancellationToken);
-            if (unknown == true) throw new ProtectedDocumentException(DocumentStoreError.Storage);
+            if (unknown == true) throw new DocumentStoreException(DocumentStoreError.Storage);
             return receipt;
         }
         public ValueTask DisposeAsync() => inner.DisposeAsync();

@@ -125,6 +125,17 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
         cancellationToken.ThrowIfCancellationRequested();
     }
 
+    public string CaptureNavigationLocation() => route;
+
+    public Task RestoreNavigationAsync(string location, CancellationToken token) =>
+        NavigateAsync(location, token);
+
+    internal void SuspendPresentation()
+    {
+        navigationGeneration++;
+        RetireRequests();
+    }
+
     public Task SearchAsync(string query, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -229,6 +240,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
             try
             {
                 await Task.Yield();
+                request.Token.ThrowIfCancellationRequested();
                 var items = await source.LoadAsync(section.Definition, request.Token);
                 request.Token.ThrowIfCancellationRequested();
                 if (CanPublish(section, request, generation)) section.Complete(items);
@@ -283,6 +295,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
             try
             {
                 await Task.Yield();
+                request.Token.ThrowIfCancellationRequested();
                 var items = await source.LoadAsync(definition, start, limit, request.Token);
                 request.Token.ThrowIfCancellationRequested();
                 if (CanPublishData(section, request, generation))
@@ -324,6 +337,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
     private void RetireRequests()
     {
         var retired = requests.Values.ToArray();
+        foreach (var section in requests.Keys) section.Cancel();
         requests.Clear();
         foreach (var request in retired)
         {
@@ -336,6 +350,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource
     private void RetireDataRequest()
     {
         var retiredData = dataRequest;
+        if (retiredData is not null) dataRequestSection?.Cancel();
         dataRequest = null;
         dataRequestSection = null;
         if (retiredData is not null)

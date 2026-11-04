@@ -113,8 +113,8 @@ public static partial class MusicNativeLibraryTests
             installed["installations"] = new JsonArray(Installation(content: current), Installation("test-install-b", false));
             installed["installations"]![0]!["previous"] = Installation(content: previous)["current"]!.DeepClone();
             installed["installations"]![0]!["previous"]!["permissions"]!["storage"] = new JsonArray("read");
-            f.Store.Seed(ContentKey(current.Sha256, 0), currentBytes);
-            f.Store.Seed(ContentKey(previous.Sha256, 0), previousBytes);
+            f.Store.Seed(ContentKey(current.Sha256), currentBytes);
+            f.Store.Seed(ContentKey(previous.Sha256), previousBytes);
             var target = targetId is null ? null : O(new { installationId = targetId, platform });
             var original = JsonNode.Parse(OnlineSettingsDocument(LegacyOnlineSettings(target, lyrics, revision)))!.AsObject();
             var entries = original["entries"]!.AsArray();
@@ -143,12 +143,14 @@ public static partial class MusicNativeLibraryTests
             Check((await owner.ReadSourceScriptDataAsync("test-install-b", 9)).Sites.GetProperty("tx")
                 .GetProperty("values")[0].GetProperty("value").GetString() == "disabled-private");
             await Throws("PERMISSION_DENIED", async () => await owner.ReadScriptValueAsync("test-install-b", "tx", "keep", 9));
-            var currentContent = await owner.ReadScriptContentAsync(current.Sha256, current.Length);
-            var previousContent = await owner.ReadScriptContentAsync(previous.Sha256, previous.Length);
+            var currentContent = await owner.ReadScriptContentAsync(current.Sha256);
+            var previousContent = await owner.ReadScriptContentAsync(previous.Sha256);
             Check(currentBytes.SequenceEqual(currentContent));
             Check(previousBytes.SequenceEqual(previousContent));
-            Check(currentBytes.SequenceEqual(f.Store.Document(ContentKey(current.Sha256, 0))));
-            Check(previousBytes.SequenceEqual(f.Store.Document(ContentKey(previous.Sha256, 0))));
+            byte[] storedCurrent = (await f.Store.ReadAsync(ContentKey(current.Sha256))).Data!;
+            byte[] storedPrevious = (await f.Store.ReadAsync(ContentKey(previous.Sha256))).Data!;
+            Check(currentBytes.SequenceEqual(storedCurrent));
+            Check(previousBytes.SequenceEqual(storedPrevious));
             Check(f.Store.WriteCalls == 1 && f.Store.Writes == 1);
             byte[] converted = f.Store.Bytes!.ToArray();
 
@@ -281,7 +283,7 @@ public static partial class MusicNativeLibraryTests
         f.Store.FailRead = true;
         bool readFailed = false;
         try { await owner.ReconcileAsync(); }
-        catch (ProtectedDocumentException error) when (error.Error == DocumentStoreError.Storage) { readFailed = true; }
+        catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Storage) { readFailed = true; }
         Check(readFailed);
         f.Store.FailRead = false;
         using (var cancel = new CancellationTokenSource())
@@ -363,9 +365,9 @@ public static partial class MusicNativeLibraryTests
         CheckOtherOnlineSettingsAreas(before, f.Store);
     }
 
-    private sealed class OnlineSettingsReadCancellation(Store store, CancellationTokenSource cancel) : IProtectedDocumentStore
+    private sealed class OnlineSettingsReadCancellation(Store store, CancellationTokenSource cancel) : IDocumentStore
     {
-        public async Task<ProtectedDocument> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
+        public async Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
         {
             var document = await store.ReadAsync(documentNamespace, cancellationToken);
             cancel.Cancel();

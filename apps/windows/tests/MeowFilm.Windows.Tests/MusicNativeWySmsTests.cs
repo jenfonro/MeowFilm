@@ -342,7 +342,7 @@ internal sealed class WySmsFixture : IAsyncDisposable
     internal readonly MusicClientContextFixture Clients;
     internal WySmsFixture(string? root = null, TimeSpan? timeout = null)
     {
-        Store = new(new DpapiDocumentStore(root ?? MusicNativeWySmsTests.Root(), ["music.accounts.v1", MusicPlatformClientContextOwner.DocumentNamespace]));
+        Store = new(new LocalDocumentStore(root ?? MusicNativeWySmsTests.Root(), ["music.accounts.v1", MusicPlatformClientContextOwner.DocumentNamespace], protectedNamespaces: ["music.accounts.v1", MusicPlatformClientContextOwner.DocumentNamespace]));
         Transport = new(Store.Inner);
         Http = MusicPlatformHttp.CreateWithHandler(Transport);
         Clients = new(Http, Store.Inner, importAccounts: true, clock: Clock);
@@ -355,21 +355,21 @@ internal sealed class WySmsFixture : IAsyncDisposable
         finally { await Clients.DisposeAsync(); Http.Dispose(); await Store.DisposeAsync(); }
     }
 }
-internal sealed class WySmsStore(DpapiDocumentStore inner) : IProtectedDocumentStore
+internal sealed class WySmsStore(LocalDocumentStore inner) : IDocumentStore
 {
-    internal DpapiDocumentStore Inner => inner;
+    internal LocalDocumentStore Inner => inner;
     internal int Writes, Disposals;
     internal bool LoseReceipt, Conflict, HoldWrite, FailRead;
     internal TaskCompletionSource Arrived = new(TaskCreationOptions.RunContinuationsAsynchronously),
         Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    internal static async Task<JsonObject> ReadRoot(IProtectedDocumentStore store)
+    internal static async Task<JsonObject> ReadRoot(IDocumentStore store)
     {
         var document = await store.ReadAsync("music.accounts.v1");
         try { return document.Data is null ? new() { ["version"] = 1, ["entries"] = new JsonArray() } : JsonNode.Parse(document.Data)!.AsObject(); }
         finally { if (document.Data is not null) CryptographicOperations.ZeroMemory(document.Data); }
     }
-    public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken token = default) =>
-        FailRead ? throw new ProtectedDocumentException(DocumentStoreError.Unavailable) : inner.ReadAsync(ns, token);
+    public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) =>
+        FailRead ? throw new DocumentStoreException(DocumentStoreError.Unavailable) : inner.ReadAsync(ns, token);
     public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken token = default)
     {
         if (ns == "music.accounts.v1")
@@ -391,12 +391,12 @@ internal sealed class WySmsStore(DpapiDocumentStore inner) : IProtectedDocumentS
             }
         }
         var result = await inner.WriteAsync(ns, data, expected, token);
-        if (ns == "music.accounts.v1" && LoseReceipt) throw new ProtectedDocumentException(DocumentStoreError.Storage);
+        if (ns == "music.accounts.v1" && LoseReceipt) throw new DocumentStoreException(DocumentStoreError.Storage);
         return result;
     }
     public async ValueTask DisposeAsync() { Disposals++; await inner.DisposeAsync(); }
 }
-internal sealed class WySmsHandler(IProtectedDocumentStore store) : HttpMessageHandler
+internal sealed class WySmsHandler(IDocumentStore store) : HttpMessageHandler
 {
     // Deliberately synthetic, never sent to a network. Every request is intercepted.
     internal const string Phone = "10000000000", Captcha = "864209", Cookie = "MUSIC_U=SYNTHETIC_WY_SESSION";

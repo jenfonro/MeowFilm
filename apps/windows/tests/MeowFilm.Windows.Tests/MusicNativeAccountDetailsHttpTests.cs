@@ -19,6 +19,7 @@ public static partial class MusicNativeAccountDetailsTests
         { var f = fault; yield return Case("HTTP-denies-" + f, () => HttpDenied(f)); }
         yield return Case("HTTP-header-request-response-byte-budgets", HttpBudgets);
         yield return Case("HTTP-redirect-non2xx-ssa-invalid-json-finite", HttpResponses);
+        yield return Case("HTTP-provider-JSON-uses-final-fields", HttpRepeatedFields);
         yield return Case("HTTP-cancelled-body-producer-drains-without-blocking-requests", HttpProducer);
         foreach (string mutation in new[] { "uri", "header", "content" })
         { var m = mutation; yield return Case("HTTP-awaiting-producer-cannot-mutate-" + m, () => HttpMutation(m)); }
@@ -149,16 +150,27 @@ public static partial class MusicNativeAccountDetailsTests
                 Task.FromResult(new HttpResponseMessage((HttpStatusCode)entry.Item1) { Content = new StringContent("{}") })));
             await Error(() => http.SendAccountDetailsAsync("tx", Request("tx"), default, TimeSpan.FromSeconds(1)), entry.Item2);
         }
-        foreach (var fault in new[] { "redirected", "ssa", "duplicate", "empty", "non-json" })
+        foreach (var fault in new[] { "redirected", "ssa", "empty", "non-json" })
         {
             using var http = MusicPlatformHttp.CreateWithHandler(new DetailsHandler((_, _) => {
-                var response = Response(fault == "duplicate" ? """{"code":0,"code":0}""" : fault == "empty" ? "" : fault == "non-json" ? "secret-error" : "{}");
+                var response = Response(fault == "empty" ? "" : fault == "non-json" ? "secret-error" : "{}");
                 if (fault == "redirected") response.RequestMessage = new(HttpMethod.Get, "https://untrusted.invalid/");
                 if (fault == "ssa") response.Headers.TryAddWithoutValidation("ssa-code", "SYNTHETIC");
                 return Task.FromResult(response);
             }));
             await Error(() => http.SendAccountDetailsAsync("tx", Request("tx"), default, TimeSpan.FromSeconds(1)),
                 fault == "ssa" ? "VERIFICATION_REQUIRED" : fault == "redirected" ? "REDIRECT_DENIED" : "INVALID_RESPONSE");
+        }
+    }
+    private static async Task HttpRepeatedFields()
+    {
+        using var http = MusicPlatformHttp.CreateWithHandler(new DetailsHandler((_, _) => Task.FromResult(
+            Response("""{"code":500,"code":200,"profile":{"name":"old","name":"final"}}"""))));
+        foreach (var platform in new[] { "wy", "tx" })
+        {
+            var result = await http.SendAccountDetailsAsync(platform, Request(platform), default, TimeSpan.FromSeconds(1));
+            Check(result.Body["code"]!.GetValue<int>() == 200);
+            Check(result.Body["profile"]!["name"]!.GetValue<string>() == "final");
         }
     }
     private sealed class Producer(byte[] bytes, Task release, Action entered) : HttpContent

@@ -272,7 +272,7 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
                 var receipt = await store.WriteAsync(DocumentNamespace, bytes, document.Fingerprint, flight.Deadline.Token).ConfigureAwait(false);
                 AccountRules.Require(receipt == DocumentFingerprint.FromBytes(bytes), "COMMIT_UNKNOWN");
             }
-            catch (ProtectedDocumentException e) when (e.Error == DocumentStoreError.Conflict)
+            catch (DocumentStoreException e) when (e.Error == DocumentStoreError.Conflict)
             {
                 lock (gate) { detailsUncertain.Remove(flight.Session.Platform); flight.Admitted = false; }
                 throw new MusicAccountException("STORAGE_CONFLICT");

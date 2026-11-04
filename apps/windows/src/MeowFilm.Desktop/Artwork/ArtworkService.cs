@@ -28,6 +28,7 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
     private readonly CancellationTokenSource lifetime = new();
     private readonly Dictionary<string, Flight> flights = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Entry> cache = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Entry> leased = new(StringComparer.Ordinal);
     private TaskCompletionSource drained = Completed(), released = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int pending;
     private long bytes, clock;
@@ -43,12 +44,18 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
         internal readonly BitmapSource Image = image;
         internal readonly long Cost = cost;
         internal long Used;
+        internal int Leases;
     }
-    private sealed class Lease(Entry entry) : IArtworkLease
+    private sealed class Lease(ArtworkService owner, string key, Entry entry) : IArtworkLease
     {
         private Entry? value = entry;
+        private ArtworkService? service = owner;
         public BitmapSource Image => Volatile.Read(ref value)?.Image ?? throw new ObjectDisposedException(nameof(Lease));
-        public void Dispose() => Interlocked.Exchange(ref value, null);
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref value, null) is { } prior)
+                Interlocked.Exchange(ref service, null)!.Release(key, prior);
+        }
     }
     public ArtworkService(HttpMessageHandler? handler = null) => http = new(handler);
 
@@ -61,7 +68,7 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
         lock (gate)
         {
             CheckOpen();
-            if (cache.TryGetValue(key, out var hit)) return Own(hit);
+            if (cache.TryGetValue(key, out var hit) || leased.TryGetValue(key, out hit)) return Own(key, hit);
             if (!flights.TryGetValue(key, out flight!))
             {
                 flight = new(lifetime.Token);
@@ -73,7 +80,8 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
                     _ = t.Exception;
                     lock (gate)
                     {
-                        if (flights.TryGetValue(key, out var current) && ReferenceEquals(current, flight)) flights.Remove(key);
+                        if (flight.Readers == 0 && flights.TryGetValue(key, out var current) && ReferenceEquals(current, flight))
+                            flights.Remove(key);
                         flight.Cancellation.Dispose();
                         if (--pending == 0) drained.TrySetResult();
                     }
@@ -87,7 +95,7 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
             lock (gate)
             {
                 CheckOpen(); cancellationToken.ThrowIfCancellationRequested();
-                return Own(entry);
+                return Own(key, entry);
             }
         }
         finally
@@ -96,7 +104,8 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
             lock (gate)
             {
                 cancel = --flight.Readers == 0 && !flight.Work.IsCompleted;
-                if (cancel && flights.TryGetValue(key, out var current) && ReferenceEquals(current, flight)) flights.Remove(key);
+                if (flight.Readers == 0 && flights.TryGetValue(key, out var current) && ReferenceEquals(current, flight))
+                    flights.Remove(key);
             }
             if (cancel) Cancel(flight.Cancellation);
         }
@@ -141,7 +150,21 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
         catch { throw new ArtworkException("ARTWORK_FAILED"); }
     }
 
-    private IArtworkLease Own(Entry entry) { entry.Used = ++clock; return new Lease(entry); }
+    private IArtworkLease Own(string key, Entry entry)
+    {
+        entry.Used = ++clock;
+        entry.Leases++;
+        leased[key] = entry;
+        return new Lease(this, key, entry);
+    }
+    private void Release(string key, Entry entry)
+    {
+        lock (gate)
+        {
+            if (--entry.Leases == 0 && leased.TryGetValue(key, out var current) && ReferenceEquals(current, entry))
+                leased.Remove(key);
+        }
+    }
     private static void Cancel(CancellationTokenSource source)
     {
         try { source.Cancel(); }
@@ -162,7 +185,7 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
             Cancel(lifetime);
             await drain.ConfigureAwait(false);
             http.Dispose();
-            lock (gate) { cache.Clear(); bytes = 0; }
+            lock (gate) { cache.Clear(); leased.Clear(); bytes = 0; }
             lifetime.Dispose();
             released.TrySetResult();
         }

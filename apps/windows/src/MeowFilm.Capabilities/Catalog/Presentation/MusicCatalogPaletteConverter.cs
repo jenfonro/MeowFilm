@@ -4,11 +4,6 @@ using System.Windows.Media;
 
 namespace MeowFilm.Capabilities;
 
-public enum MusicCatalogPaletteRole
-{
-    Entry,
-    CoverFooter
-}
 public enum MusicEntryTitlePaletteRole
 {
     Shade,
@@ -19,22 +14,13 @@ public sealed class MusicCatalogPaletteConverter : IMultiValueConverter
 {
     private static readonly Color EntryTint = Color.FromRgb(75, 56, 50);
 
-    public MusicCatalogPaletteRole Role { get; set; }
-
     public object Convert(object[] values, Type targetType, object parameter, CultureInfo culture)
     {
-        if (values.Length == 0 || values[0] is not SolidColorBrush source) return Brushes.DimGray;
-        var color = Role switch
-        {
-            MusicCatalogPaletteRole.Entry when values.Length > 1 &&
-                values[1] is MusicCatalogEntryPresentation presentation =>
-                presentation == MusicCatalogEntryPresentation.Preview
-                    ? LimitLuminance(source.Color, 170)
-                    : LimitLuminance(Blend(source.Color, EntryTint, .65), 96),
-            MusicCatalogPaletteRole.CoverFooter =>
-                LimitLuminance(Blend(source.Color, Colors.Black, .22), 108),
-            _ => Colors.DimGray
-        };
+        if (values.Length < 2 || values[0] is not SolidColorBrush source ||
+            values[1] is not MusicCatalogEntryPresentation presentation) return Brushes.DimGray;
+        var color = presentation == MusicCatalogEntryPresentation.Preview
+            ? LimitLuminance(source.Color, 170)
+            : LimitLuminance(Blend(source.Color, EntryTint, .65), 96);
         var brush = new SolidColorBrush(color);
         brush.Freeze();
         return brush;

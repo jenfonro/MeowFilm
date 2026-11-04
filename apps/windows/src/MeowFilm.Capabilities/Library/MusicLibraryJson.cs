@@ -155,12 +155,8 @@ internal static class LJ
     {
         var document = Object(Parse(bytes), "CORRUPT_STORAGE");
         byte[] canonical = Bytes(document);
-        try
-        {
-            Require(bytes.Span.SequenceEqual(canonical), "CORRUPT_STORAGE");
-            return document;
-        }
-        finally { CryptographicOperations.ZeroMemory(canonical); }
+        Require(bytes.Span.SequenceEqual(canonical), "CORRUPT_STORAGE");
+        return document;
     }
     internal static JsonObject Parameters(object? value, int max = 512 * 1024)
     {

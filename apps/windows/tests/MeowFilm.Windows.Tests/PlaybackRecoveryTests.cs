@@ -964,7 +964,7 @@ public static class PlaybackRecoveryTests
         internal readonly string[] Platforms = platforms ?? ["wy"];
         internal long Generation = 7;
     }
-    private sealed class MemoryStore : IProtectedDocumentStore
+    private sealed class MemoryStore : IDocumentStore
     {
         private readonly Dictionary<string, byte[]> data = [];
         internal void SeedMusicSources(ScriptSource[] sources)
@@ -1007,13 +1007,13 @@ public static class PlaybackRecoveryTests
             };
             data[MusicLibraryOwner.DocumentNamespace] = LJ.Bytes(
                 JsonNode.Parse(JsonSerializer.Serialize(document, Json))!.AsObject());
-            data[$"{MusicLibraryOwner.ScriptContentCollection}.{sourceHash}.0"] = sourceBytes;
+            data[$"{MusicLibraryOwner.ScriptContentCollection}.{sourceHash}"] = sourceBytes;
         }
-        public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken cancellationToken = default)
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
             lock (data) return Task.FromResult(data.TryGetValue(ns, out var bytes)
-                ? new ProtectedDocument(bytes.ToArray(), DocumentFingerprint.FromBytes(bytes)) : new(null, DocumentFingerprint.Missing));
+                ? new DocumentSnapshot(bytes.ToArray(), DocumentFingerprint.FromBytes(bytes)) : new(null, DocumentFingerprint.Missing));
         }
         public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected,
             CancellationToken cancellationToken = default)
@@ -1022,7 +1022,7 @@ public static class PlaybackRecoveryTests
             lock (data)
             {
                 var actual = data.TryGetValue(ns, out var old) ? DocumentFingerprint.FromBytes(old) : DocumentFingerprint.Missing;
-                if (actual != expected) throw new ProtectedDocumentException(DocumentStoreError.Conflict);
+                if (actual != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
                 data[ns] = bytes.ToArray(); return Task.FromResult(DocumentFingerprint.FromBytes(bytes.Span));
             }
         }

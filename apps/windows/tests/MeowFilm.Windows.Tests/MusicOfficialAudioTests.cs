@@ -250,7 +250,7 @@ public static class MusicOfficialAudioTests
                 SourceInfo("scope", "song", signature, Hash('b'), DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()), default);
             Check(store.Data.Count == 0);
         });
-        yield return new("Music protected cache data failure is explicit across source and chorus owners", async () =>
+        yield return new("Music local cache data failure is explicit across source and chorus owners", async () =>
         {
             await using var store = new MemoryStore { Failure = DocumentStoreError.Protection };
             Check(await CacheDataError(() => new MusicSourceCache(store).ReadAsync(
@@ -273,19 +273,17 @@ public static class MusicOfficialAudioTests
             missingInfo["scopes"]!["scope"]!["urls"]!["song"]!["info"]!.AsObject().Remove("delivery");
             var nonCanonicalGeneration = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(current)
                 .Replace("\"generation\":7", "\"generation\":7.0", StringComparison.Ordinal));
-            foreach (var item in new (byte[] Bytes, DocumentStoreError Error, DocumentFingerprint? Fingerprint)[]
+            foreach (var item in new (byte[] Bytes, DocumentStoreError Error)[]
             {
-                (Encoding.UTF8.GetBytes("""{"schema":2,"scopes":{}}"""), DocumentStoreError.UnsupportedVersion, null),
-                (Encoding.UTF8.GetBytes("""{"schema":1.0,"scopes":{}}"""), DocumentStoreError.UnsupportedVersion, null),
-                (Encoding.UTF8.GetBytes("""{"schema":1,"schema":1,"scopes":{}}"""), DocumentStoreError.Corrupt, null),
-                (Encoding.UTF8.GetBytes("""{"schema":1,"scopes":{"scope":{"at":1.0,"urls":{},"pointers":{}}}}"""), DocumentStoreError.Corrupt, null),
-                (JsonSerializer.SerializeToUtf8Bytes(malformedInfo), DocumentStoreError.Corrupt, null),
-                (JsonSerializer.SerializeToUtf8Bytes(missingInfo), DocumentStoreError.Corrupt, null),
-                (nonCanonicalGeneration, DocumentStoreError.Corrupt, null),
-                (current, DocumentStoreError.Corrupt,
-                    new DocumentFingerprint(true, current.Length, new string('0', 64)))
+                (Encoding.UTF8.GetBytes("""{"schema":2,"scopes":{}}"""), DocumentStoreError.UnsupportedVersion),
+                (Encoding.UTF8.GetBytes("""{"schema":1.0,"scopes":{}}"""), DocumentStoreError.UnsupportedVersion),
+                (Encoding.UTF8.GetBytes("""{"schema":1,"schema":1,"scopes":{}}"""), DocumentStoreError.Corrupt),
+                (Encoding.UTF8.GetBytes("""{"schema":1,"scopes":{"scope":{"at":1.0,"urls":{},"pointers":{}}}}"""), DocumentStoreError.Corrupt),
+                (JsonSerializer.SerializeToUtf8Bytes(malformedInfo), DocumentStoreError.Corrupt),
+                (JsonSerializer.SerializeToUtf8Bytes(missingInfo), DocumentStoreError.Corrupt),
+                (nonCanonicalGeneration, DocumentStoreError.Corrupt),
             })
-                await RejectSourceDocument(item.Bytes, item.Error, item.Fingerprint, candidate, history);
+                await RejectSourceDocument(item.Bytes, item.Error, candidate, history);
         });
         yield return new("Music source cache rejects non-current producer shapes instead of sanitizing them", async () =>
         {
@@ -318,22 +316,19 @@ public static class MusicOfficialAudioTests
         yield return new("Music chorus cache rejects every non-current document entry without side effects", async () =>
         {
             string key = Hash('a');
-            byte[] current = ChorusDocument(key, """{"at":1,"start":20,"end":30}""");
-            foreach (var item in new (byte[] Bytes, DocumentStoreError Error, DocumentFingerprint? Fingerprint)[]
+            foreach (var item in new (byte[] Bytes, DocumentStoreError Error)[]
             {
-                (Encoding.UTF8.GetBytes("""{"schema":2,"entries":{}}"""), DocumentStoreError.UnsupportedVersion, null),
-                (Encoding.UTF8.GetBytes("""{"schema":1.0,"entries":{}}"""), DocumentStoreError.UnsupportedVersion, null),
-                (Encoding.UTF8.GetBytes("""{"schema":1,"schema":1,"entries":{}}"""), DocumentStoreError.Corrupt, null),
-                (ChorusDocument(key, """{"at":1.0,"start":20,"end":30}"""), DocumentStoreError.Corrupt, null),
-                (ChorusDocument(key, """{"at":1,"start":20.0,"end":30}"""), DocumentStoreError.Corrupt, null),
-                (ChorusDocument(key, """{"at":1,"start":20}"""), DocumentStoreError.Corrupt, null),
-                (ChorusDocument(key, """{"at":1,"start":20,"end":30,"extra":true}"""), DocumentStoreError.Corrupt, null),
-                (current, DocumentStoreError.Corrupt,
-                    new DocumentFingerprint(true, current.Length, new string('0', 64)))
+                (Encoding.UTF8.GetBytes("""{"schema":2,"entries":{}}"""), DocumentStoreError.UnsupportedVersion),
+                (Encoding.UTF8.GetBytes("""{"schema":1.0,"entries":{}}"""), DocumentStoreError.UnsupportedVersion),
+                (Encoding.UTF8.GetBytes("""{"schema":1,"schema":1,"entries":{}}"""), DocumentStoreError.Corrupt),
+                (ChorusDocument(key, """{"at":1.0,"start":20,"end":30}"""), DocumentStoreError.Corrupt),
+                (ChorusDocument(key, """{"at":1,"start":20.0,"end":30}"""), DocumentStoreError.Corrupt),
+                (ChorusDocument(key, """{"at":1,"start":20}"""), DocumentStoreError.Corrupt),
+                (ChorusDocument(key, """{"at":1,"start":20,"end":30,"extra":true}"""), DocumentStoreError.Corrupt),
             })
-                await RejectChorusDocument(item.Bytes, item.Error, item.Fingerprint, key);
+                await RejectChorusDocument(item.Bytes, item.Error, key);
         });
-        yield return new("Music protected cache owners reject unknown write receipts without retrying or inventing success", async () =>
+        yield return new("Music local cache owners reject unknown write receipts without retrying or inventing success", async () =>
         {
             string signature = Hash('a');
             await using (var store = new MemoryStore
@@ -479,9 +474,9 @@ public static class MusicOfficialAudioTests
         return JsonSerializer.SerializeToUtf8Bytes(root);
     }
     private static async Task RejectSourceDocument(byte[] bytes, DocumentStoreError expected,
-        DocumentFingerprint? fingerprint, JsonObject candidate, JsonObject confirmation)
+        JsonObject candidate, JsonObject confirmation)
     {
-        await using var store = new MemoryStore { ReadFingerprint = fingerprint };
+        await using var store = new MemoryStore();
         store.Data[MusicSourceCache.Namespace] = bytes.ToArray();
         byte[] original = store.Data[MusicSourceCache.Namespace].ToArray();
         var cache = new MusicSourceCache(store, new Clock());
@@ -498,10 +493,9 @@ public static class MusicOfficialAudioTests
             Check(await CacheDataError(operation) == expected);
         Check(store.Writes == 0 && store.Data[MusicSourceCache.Namespace].SequenceEqual(original));
     }
-    private static async Task RejectChorusDocument(byte[] bytes, DocumentStoreError expected,
-        DocumentFingerprint? fingerprint, string key)
+    private static async Task RejectChorusDocument(byte[] bytes, DocumentStoreError expected, string key)
     {
-        await using var store = new MemoryStore { ReadFingerprint = fingerprint };
+        await using var store = new MemoryStore();
         store.Data[MusicChorusCache.Namespace] = bytes.ToArray();
         byte[] original = store.Data[MusicChorusCache.Namespace].ToArray();
         var cache = new MusicChorusCache(store, new Clock());
@@ -540,31 +534,31 @@ public static class MusicOfficialAudioTests
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) => run(request);
     }
-    internal sealed class MemoryStore : IProtectedDocumentStore
+    internal sealed class MemoryStore : IDocumentStore
     {
         internal readonly Dictionary<string, byte[]> Data = [];
         internal bool Fail; internal DocumentStoreError? Failure; internal int Writes;
-        internal DocumentFingerprint? ReadFingerprint, WriteReceipt;
+        internal DocumentFingerprint? WriteReceipt;
         internal bool SkipWrite;
         internal JsonObject Root(string ns) => JsonNode.Parse(Data[ns])!.AsObject();
-        public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken token = default)
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
         {
             token.ThrowIfCancellationRequested();
-            if (Failure is { } failure) throw new ProtectedDocumentException(failure);
-            if (Fail) throw new ProtectedDocumentException(DocumentStoreError.Storage);
+            if (Failure is { } failure) throw new DocumentStoreException(failure);
+            if (Fail) throw new DocumentStoreException(DocumentStoreError.Storage);
             lock (Data) return Task.FromResult(Data.TryGetValue(ns, out var bytes)
-                ? new ProtectedDocument(bytes.ToArray(), ReadFingerprint ?? DocumentFingerprint.FromBytes(bytes))
-                : new(null, ReadFingerprint ?? DocumentFingerprint.Missing));
+                ? new DocumentSnapshot(bytes.ToArray(), DocumentFingerprint.FromBytes(bytes))
+                : new(null, DocumentFingerprint.Missing));
         }
         public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected, CancellationToken token = default)
         {
             token.ThrowIfCancellationRequested();
-            if (Failure is { } failure) throw new ProtectedDocumentException(failure);
-            if (Fail) throw new ProtectedDocumentException(DocumentStoreError.Storage);
+            if (Failure is { } failure) throw new DocumentStoreException(failure);
+            if (Fail) throw new DocumentStoreException(DocumentStoreError.Storage);
             lock (Data)
             {
                 var before = Data.TryGetValue(ns, out var old) ? DocumentFingerprint.FromBytes(old) : DocumentFingerprint.Missing;
-                if (before != expected) throw new ProtectedDocumentException(DocumentStoreError.Conflict);
+                if (before != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
                 Writes++;
                 if (!SkipWrite) Data[ns] = bytes.ToArray();
                 return Task.FromResult(WriteReceipt ?? DocumentFingerprint.FromBytes(bytes.Span));

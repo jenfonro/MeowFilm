@@ -193,7 +193,10 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     var collectionConsumers: [UUID: WeakMusicCollectionConsumer] = [:]
     var collectionCatalogueID = UUID()
     public var accountAccessGeneration: UUID { lifecycle }
-    public private(set) var searchAccessGeneration = UUID()
+    public private(set) var searchAccessGeneration = UUID() {
+        didSet { searchResultsCache = MusicSearchResultsCache.make() }
+    }
+    var searchResultsCache = MusicSearchResultsCache.make()
     var resolutionTask: Task<MusicPlaybackCandidate, Error>?
     var candidateDiscoveryTask: Task<MusicCandidateDiscoveryResolution, Error>?
     var lyricTask: Task<MusicLyricsSnapshot, Error>?

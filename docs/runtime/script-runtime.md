@@ -6,7 +6,7 @@
 apps/runtime/bootstrap.mjs
   被动装配方法表、双向调用与模块关闭
 apps/runtime/modules/music-script.mjs
-  音乐脚本暂存、安装身份、版本与存储会话绑定
+  音乐源码／控制参数／结果分片、安装身份、版本与存储会话绑定
 apps/runtime/modules/cat-script.mjs
   Cat 源码/结果分片、安装、设置刷新、调用与管理同步
 packages/script-host/
@@ -19,7 +19,7 @@ apps/windows/runtime/
 
 公共层不依赖 Windows 源码、命名管道或原生业务私有实现。Windows entry 导入公共 `createMusicScriptModule` 与 `createCatScriptModule`，不保留平台目录中的业务模块副本。官方平台账号、目录、曲库、歌词、缓存和播放仍由原生业务 owner 承担，不因使用共用脚本核心而获得或改变权限。
 
-当前 descriptor 为 `music@0.6.0` 与 `cat@0.1.0`，业务响应契约分别是 `music.script.v2` 与 `cat.script.v1`。Windows 的 `aggregate` 只是当前 wire 身份，不是第二个产品或脚本协议。
+当前 descriptor 为 `music@0.7.0` 与 `cat@0.1.0`，业务响应契约分别是 `music.script.v2` 与 `cat.script.v1`。Windows 的 `aggregate` 只是当前 wire 身份，不是第二个产品或脚本协议。
 
 ## 一套核心与协议适配
 
@@ -43,7 +43,7 @@ Cat 使用独立业务 owner 和协议适配器，复用同一进程、隔离、
 
 受信 `quickjs-engine.js` 通过 `node:fs/promises` 与 `import.meta.resolve('@jitl/quickjs-wasmfile-release-sync/wasm')` 读取打包内的锁定引擎文件；这不向 guest 授予文件访问。`WebAssembly.compile` 编译模块只执行一次并缓存复用，但每个 installation／generation 独立实例化 WASM，不共享线性内存，避免某个堆或模块损坏影响其他实例。
 
-ScriptHost 在 `host.js` 一处定义脚本层限制，LX 与 Cat 同值且按单个脚本计：源码最多 16 MiB（UTF-8 字节）、QuickJS 栈 256 KiB、单脚本内存上限 `maxMemoryBytes`。脚本运行器不设对外单次消息或结果字节上限；QuickJS 内部桥接与脚本内数据处理只受单脚本内存上限约束。宿主整体缓冲且不受 guest 堆约束的位置以 `maxMemoryBytes` 为上界：Cat 聚合入口请求体、Cat 脚本 listener 响应汇总、LX 宿主网络响应体及解压输出；超出报 `RESOURCE_LIMIT`，请求失败而实例继续服务。`maxMemoryBytes` 默认为 256 MiB；依据是 11 份真实脚本的 QuickJS 单脚本峰值约 77 MiB，默认值约为该峰值的 3.3 倍。所有协议均启用 `setMemoryLimit`，超限即判该实例失败。已就绪实例在运行中超限时由 ScriptHost 自动以同一 revision 重启一次（保留私有卷并记录结构化诊断）；初始化超限或重启后再次初始化超限停在 failed，不循环。用户 enable／update 后重启计数复位。LX 结果单帧仍受 512 KiB 线协议上限，原生桥接帧 1 MiB 不变；Cat 结果走分片传输。Cat 原生桥的字节参数与返回值均以 ArrayBuffer 帧传输，JSON 只描述结构和帧索引。不按实例、timer、网络、in-flight、storage、method pending 等固定数量配额拒绝工作，资源按请求和 session 生命周期回收。Cat 的 `os.totalmem()` 返回单脚本内存上限，`os.freemem()` 为上限减当前 guest 堆占用；其余 `os` 字段仍是兼容元数据。公共引擎拒绝超过 1 MiB 的栈配置。取消、超时或卸载 fence 当前结果并按请求、服务和 session 生命周期回收资源；不把取消信号当作不合作外部 I/O 已完成的证明，无法排空时明确报告清理失败。
+ScriptHost 在 `host.js` 一处定义脚本层限制，LX 与 Cat 同值且按单个脚本计：源码最多 16 MiB（UTF-8 字节）、QuickJS 栈 256 KiB、单脚本内存上限 `maxMemoryBytes`。脚本运行器不设对外单次消息或结果字节上限；QuickJS 内部桥接与脚本内数据处理只受单脚本内存上限约束。宿主整体缓冲且不受 guest 堆约束的位置以 `maxMemoryBytes` 为上界：Cat 聚合入口请求体、Cat 脚本 listener 响应汇总、LX 宿主网络响应体及解压输出；超出报 `RESOURCE_LIMIT`，请求失败而实例继续服务。`maxMemoryBytes` 默认为 256 MiB；依据是 11 份真实脚本的 QuickJS 单脚本峰值约 77 MiB，默认值约为该峰值的 3.3 倍。所有协议均启用 `setMemoryLimit`，超限即判该实例失败。已就绪实例在运行中超限时由 ScriptHost 自动以同一 revision 重启一次（保留私有卷并记录结构化诊断）；初始化超限或重启后再次初始化超限停在 failed，不循环。用户 enable／update 后重启计数复位。LX 与 Cat 的大控制参数／结果均走 64 KiB 字节分片，不设独立逻辑总量上限；原生桥接的 1 MiB 物理帧边界不变。LX 小请求和结果保持原有业务信封，大数据由传输适配层透明还原，见 [LX 传输契约](music-script-runtime.md#控制数据传输)。Cat 原生桥的字节参数与返回值均以 ArrayBuffer 帧传输，JSON 只描述结构和帧索引。不按实例、timer、网络、in-flight、storage、method pending 等固定数量配额拒绝工作，资源按请求和 session 生命周期回收。Cat 的 `os.totalmem()` 返回单脚本内存上限，`os.freemem()` 为上限减当前 guest 堆占用；其余 `os` 字段仍是兼容元数据。公共引擎拒绝超过 1 MiB 的栈配置。取消、超时或卸载 fence 当前结果并按请求、服务和 session 生命周期回收资源；不把取消信号当作不合作外部 I/O 已完成的证明，无法排空时明确报告清理失败。
 
 隔离不依赖 AppContainer、完整虚拟机或 Node permission model；宿主网络／加解密适配是受信代码，不属于 guest 沙箱。JS 引擎/WASM 仍需维护与安全更新，不能承诺抵御引擎本身的漏洞。
 
@@ -77,7 +77,7 @@ Node 网络适配器接受：
 network({ url, options, signal, scope, validateURL })
 ```
 
-LX 的 `validateURL` 检查 HTTP(S) URL 语法并拒绝 URL 中的用户信息，初始地址和每次重定向都重新检查；它不是域名或私网授权判断。接口不再叫 `authorizeURL`，安装记录也不维护 origin 白名单或按源码 SHA-256 补域名的策略。源码哈希仍用于脚本字节完整性与版本身份，不能误删其他业务的数据完整性校验。
+LX 的 `validateURL` 检查 HTTP(S) URL 语法并拒绝 URL 中的用户信息，初始地址和每次重定向都重新检查；它不是域名或私网授权判断。接口不再叫 `authorizeURL`，安装记录也不维护 origin 白名单或按源码 SHA-256 补域名的策略。源码哈希可用于导入文件引用、更新标识及本次分片传输完整性；激活读取保存的源码不比较历史内容哈希，编辑后可重新启用或重启执行。其他业务的并发 CAS 和格式检查不因此移除。
 
 LX 网络可以访问已开放的 HTTP(S) 服务，包括本机和私网地址；其受控桥接保留截止时间、取消、响应大小、重定向上限及跨 origin 不转发 Authorization/Cookie 的行为。
 

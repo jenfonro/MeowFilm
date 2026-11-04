@@ -942,17 +942,17 @@ public static class MusicCatalogPersonalTests
             await Library.DisposeAsync();
         }
     }
-    private sealed class Store : IProtectedDocumentStore
+    private sealed class Store : IDocumentStore
     {
         private readonly object gate = new();
         private readonly Dictionary<string, byte[]> data = [];
         public int LibraryWrites;
         public bool UnknownAfterNextLibraryWrite;
-        public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken cancellationToken = default)
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
             lock (gate) return Task.FromResult(data.TryGetValue(ns, out var value)
-                ? new ProtectedDocument(value.ToArray(), DocumentFingerprint.FromBytes(value)) : new(null, DocumentFingerprint.Missing));
+                ? new DocumentSnapshot(value.ToArray(), DocumentFingerprint.FromBytes(value)) : new(null, DocumentFingerprint.Missing));
         }
         public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> value, DocumentFingerprint expected,
             CancellationToken cancellationToken = default)
@@ -961,12 +961,12 @@ public static class MusicCatalogPersonalTests
             lock (gate)
             {
                 var previous = data.TryGetValue(ns, out var bytes) ? DocumentFingerprint.FromBytes(bytes) : DocumentFingerprint.Missing;
-                if (previous != expected) throw new ProtectedDocumentException(DocumentStoreError.Conflict);
+                if (previous != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
                 data[ns] = value.ToArray();
                 if (ns == MusicLibraryOwner.DocumentNamespace)
                 {
                     LibraryWrites++;
-                    if (UnknownAfterNextLibraryWrite) { UnknownAfterNextLibraryWrite = false; throw new ProtectedDocumentException(DocumentStoreError.Storage); }
+                    if (UnknownAfterNextLibraryWrite) { UnknownAfterNextLibraryWrite = false; throw new DocumentStoreException(DocumentStoreError.Storage); }
                 }
                 return Task.FromResult(DocumentFingerprint.FromBytes(value.Span));
             }

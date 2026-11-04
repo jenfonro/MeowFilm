@@ -185,7 +185,7 @@ public static partial class MusicUiTests
     // Only app/source/media ports are substituted. Queue versions, occurrences,
     // persistence flags and all library/history reads and writes use one actual
     // MusicLibraryOwner. No Node, network, reflection or second writer.
-    private sealed class RecommendationRaceApplication(IProtectedDocumentStore store) : MusicApplicationTestDouble
+    private sealed class RecommendationRaceApplication(IDocumentStore store) : MusicApplicationTestDouble
     {
         private readonly MusicLibraryOwner library = new(store);
         private readonly HashSet<Task> selections = [];

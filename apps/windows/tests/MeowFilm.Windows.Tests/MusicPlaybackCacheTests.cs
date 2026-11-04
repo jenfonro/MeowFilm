@@ -172,54 +172,41 @@ public static class MusicPlaybackCacheTests
                     "incompatible index must remain untouched and cannot start a producer");
             }
         });
-        yield return new("Music file cache rejects non-canonical numbers and wrong fingerprints at every entry point", async () =>
+        yield return new("Music file cache rejects non-canonical numbers at every entry point", async () =>
         {
-            foreach (string failure in new[] { "number", "fingerprint" })
+            await using var f = new Fixture();
+            await f.Cache.StorePlayedAsync("scope", "song", CacheSignature, f.Info(), () => true, default);
+            byte[] valid = f.Store.Data[MusicAudioFileCache.Namespace];
+            string current = Encoding.UTF8.GetString(valid);
+            string changed = current.Replace("\"duration\":1,", "\"duration\":1.0,", StringComparison.Ordinal);
+            Check(changed != current, "duration fixture must change");
+            byte[] invalid = Encoding.UTF8.GetBytes(changed);
+            f.Store.Data[MusicAudioFileCache.Namespace] = invalid.ToArray();
+            int requests = f.Requests, writes = f.Store.Writes;
+            string[] files = Directory.EnumerateFiles(f.Root, "*.audio")
+                .Select(path => Path.GetFileName(path) + ":" + new FileInfo(path).Length)
+                .OrderBy(value => value, StringComparer.Ordinal).ToArray();
+            foreach (Func<Task> operation in new Func<Task>[]
             {
-                await using var f = new Fixture();
-                await f.Cache.StorePlayedAsync("scope", "song", CacheSignature, f.Info(), () => true, default);
-                byte[] valid = f.Store.Data[MusicAudioFileCache.Namespace];
-                byte[] invalid;
-                if (failure == "number")
-                {
-                    string current = Encoding.UTF8.GetString(valid);
-                    string changed = current.Replace("\"duration\":1,", "\"duration\":1.0,", StringComparison.Ordinal);
-                    Check(changed != current, "duration fixture must change");
-                    invalid = Encoding.UTF8.GetBytes(changed);
-                    f.Store.Data[MusicAudioFileCache.Namespace] = invalid.ToArray();
-                }
-                else
-                {
-                    invalid = valid.ToArray();
-                    f.Store.ReadFingerprint = new MeowFilm.Platform.Storage.DocumentFingerprint(
-                        true, invalid.Length, new string('0', 64));
-                }
-                int requests = f.Requests, writes = f.Store.Writes;
-                string[] files = Directory.EnumerateFiles(f.Root, "*.audio")
-                    .Select(path => Path.GetFileName(path) + ":" + new FileInfo(path).Length)
-                    .OrderBy(value => value, StringComparer.Ordinal).ToArray();
-                foreach (Func<Task> operation in new Func<Task>[]
-                {
-                    async () => _ = await f.Cache.ReadInfoAsync("scope", "song", CacheSignature, default),
-                    async () => { await using var lease = await f.Cache.OpenAsync("scope", "song", CacheSignature, default); },
-                    () => f.Cache.TouchAsync("scope", "song", CacheSignature, default),
-                    () => f.Cache.EraseAsync("scope", "song", default),
-                    () => f.Cache.StorePlayedAsync("scope", "song", CacheSignature, f.Info(), () => true, default)
-                })
-                    Check(await CacheDataError(operation) == MeowFilm.Platform.Storage.DocumentStoreError.Corrupt);
-                using (var prepared = f.Cache.Prepare("scope", "song", CacheSignature, f.Info(), () => true, default))
-                {
-                    Check(await CacheDataError(() => prepared.Work) ==
-                        MeowFilm.Platform.Storage.DocumentStoreError.Corrupt);
-                    Check(await prepared.Ready.Task is null);
-                }
-                Check(f.Requests == requests && f.Store.Writes == writes &&
-                    f.Store.Data[MusicAudioFileCache.Namespace].SequenceEqual(invalid) &&
-                    Directory.EnumerateFiles(f.Root, "*.audio")
-                        .Select(path => Path.GetFileName(path) + ":" + new FileInfo(path).Length)
-                        .OrderBy(value => value, StringComparer.Ordinal).SequenceEqual(files),
-                    "invalid index must remain untouched");
+                async () => _ = await f.Cache.ReadInfoAsync("scope", "song", CacheSignature, default),
+                async () => { await using var lease = await f.Cache.OpenAsync("scope", "song", CacheSignature, default); },
+                () => f.Cache.TouchAsync("scope", "song", CacheSignature, default),
+                () => f.Cache.EraseAsync("scope", "song", default),
+                () => f.Cache.StorePlayedAsync("scope", "song", CacheSignature, f.Info(), () => true, default)
+            })
+                Check(await CacheDataError(operation) == MeowFilm.Platform.Storage.DocumentStoreError.Corrupt);
+            using (var prepared = f.Cache.Prepare("scope", "song", CacheSignature, f.Info(), () => true, default))
+            {
+                Check(await CacheDataError(() => prepared.Work) ==
+                    MeowFilm.Platform.Storage.DocumentStoreError.Corrupt);
+                Check(await prepared.Ready.Task is null);
             }
+            Check(f.Requests == requests && f.Store.Writes == writes &&
+                f.Store.Data[MusicAudioFileCache.Namespace].SequenceEqual(invalid) &&
+                Directory.EnumerateFiles(f.Root, "*.audio")
+                    .Select(path => Path.GetFileName(path) + ":" + new FileInfo(path).Length)
+                    .OrderBy(value => value, StringComparer.Ordinal).SequenceEqual(files),
+                "invalid index must remain untouched");
         });
         yield return new("Music file cache binds every persisted entry to its key receipt and outer facts", async () =>
         {

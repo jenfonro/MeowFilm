@@ -13,7 +13,7 @@ Windows meowfilm App 的脚本载荷由以下两个阶段生成。打包参数 -
 
 ## 输入闭包
 
-运行 descriptor 为 `music@0.6.0` 与 `cat@0.1.0`，响应契约为 `music.script.v2` 与 `cat.script.v1`；载荷清单 modules 固定为 `music, cat`，product 保持 aggregate。
+运行 descriptor 为 `music@0.7.0` 与 `cat@0.1.0`，响应契约为 `music.script.v2` 与 `cat.script.v1`；载荷清单 modules 固定为 `music, cat`，product 保持 aggregate。
 
 ```text
 app/bootstrap.mjs

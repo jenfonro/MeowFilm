@@ -19,7 +19,7 @@ createMusicScriptModule({
 
 ```text
 id: music
-version: 0.6.0
+version: 0.7.0
 contract: music.script.v2
 ```
 
@@ -34,11 +34,26 @@ contract: music.script.v2
 | `stage.begin` | 创建有限期源码暂存，校验 basename、长度和 SHA-256 |
 | `stage.chunk` | 按 offset 顺序写入规范 Base64 分片 |
 | `stage.abort` | 幂等释放暂存并清零内存 |
+| `control.begin/chunk/abort` | 暂存完整控制参数 JSON，与源码暂存分离 |
+| `control.call` | 消费控制参数 token，调用明确的原有业务方法 |
+| `blob.read/release` | 分片读取并释放完整业务成功信封 |
 | `load` | 完整源码校验后安装或更新一个明确实例 |
 | `unload` | 按 installation、revision 和可选 generation 卸载 |
 | `invoke` | 定向调用实例、site 和声明动作 |
 | `status` | 返回当前实例，不访问原生文档 |
 | `close` | 封闭新请求并回收本模块拥有的实例和任务 |
+
+## 控制数据传输
+
+控制请求和结果不设独立总字节上限；通用 bridge 的 1 MiB 是物理单帧边界，不是 LX 业务数据上限。小请求和结果保持原有 JSON 形状，大数据由传输适配层透明上传或读回，上层仍使用相同的 `music.script.v2` 业务值。
+
+- 完整参数 JSON 不超过 64 KiB 时直接调用原方法；更大时，先以 `control.begin({length,sha256})` 取得 token，通过 `control.chunk({token,offset,data})` 连续上传，再以 `control.call({operation,token})` 执行。`operation` 仅为 `load`、`unload`、`invoke` 或 `status`；不得递归分派分片方法。
+- 完整业务成功信封不超过 64 KiB 时直接返回；更大时返回 `{ok:true,contract:"music.script.v2",blob:{token,length,sha256,chunkBytes}}`。blob 内容是原始完整成功信封的 UTF-8 JSON，不是仅 `value`。业务 `value` 内的 `blob` 字段不会被当作传输描述符。
+- `blob.read({token,offset})` 返回普通小信封中的 `data`（规范 Base64）和 `next`。调用方核对每片长度、next、完整长度和 SHA-256，解析原信封并核对契约后恢复业务结果，不向上层暴露分片元数据。
+- 上传和读取的字节块均最多 64 KiB；字符串可跨块拆开，整份完成后才严格解码。逻辑 JSON 与直接 bridge JSON 采用相同的 Unicode、重复键、ASCII 属性名、安全整数和深度校验，不借分片绕过数据契约。
+- 每个调用在成功、失败、取消或超时后释放其已知上传 token／结果 token。失去收据的未完成暂存、未领取结果按最近有效活动起五分钟主动回收；模块关闭清空全部传输，并继续关闭脚本 host，不以取消调用代替实际资源回收。
+
+源码 `stage.*` 与控制暂存相互独立；物理分片帧和释放回包不再套一层分片。控制分片不改变 generation、grant、定向调用和原生持久事务的校验。
 
 ## 暂存与加载
 
@@ -82,7 +97,7 @@ LX 请求数据保留 `{source,action,info}`：
 - 其他声明动作保留自身数据语义；`search` 与 `musicSearch` 不被强行视作所有脚本通用的别名。
 - 返回数据按 LX 处理器实际值传递，不改成未来 Cat 的业务格式。
 
-控制请求和响应各不超过 512 KiB（LX 单帧线协议上限，不是脚本单次数据量）；脚本内部字节处理、桥接与 `invokeResult` 不设 8 MiB 上限，只受单脚本内存上限约束；宿主缓冲网络响应体及解压输出以单脚本内存上限为上界。不设全局／实例／site 调用数量预算。没有单次同步执行时限；初始化等待上限为 5 秒，调用等待与请求内截止均为 60 秒。调用或初始化等待到期后由主线程探测对应 worker，`cleanupTimeoutMs` 内无回应才终止并判 `TIMEOUT`。
+脚本内部字节处理、桥接与 `invokeResult` 受单脚本内存上限约束；宿主缓冲网络响应体及解压输出以同一内存上限为上界。不设全局／实例／site 调用数量预算。没有单次同步执行时限；初始化等待上限为 5 秒，调用等待与请求内截止均为 60 秒。调用或初始化等待到期后由主线程探测对应 worker，`cleanupTimeoutMs` 内无回应才终止并判 `TIMEOUT`。
 
 ## 请求绑定的存储
 

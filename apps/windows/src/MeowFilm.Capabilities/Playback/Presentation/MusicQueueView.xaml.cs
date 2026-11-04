@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 
@@ -17,6 +18,11 @@ public partial class MusicQueueView : UserControl
         scrollIntent = new(Dispatcher);
         InitializeComponent();
         DataContext = module;
+        AddHandler(ScrollBar.ScrollEvent, new ScrollEventHandler((_, args) =>
+        {
+            if (IsVisible && Descendant<ScrollViewer>(QueueList) is { } scroll)
+                scrollIntent.ObserveScroll(scroll, args);
+        }), true);
         Unloaded += (_, _) => scrollIntent.Clear();
     }
 

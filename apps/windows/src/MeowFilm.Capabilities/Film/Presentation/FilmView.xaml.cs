@@ -15,6 +15,10 @@ public partial class FilmView : UserControl, IDesktopHeaderSource
         InitializeComponent();
         DataContext = module;
         module.PropertyChanged += OnModulePropertyChanged;
+        IsVisibleChanged += (_, _) =>
+        {
+            if (!IsVisible) module.SuspendPresentation();
+        };
     }
 
     public DesktopHeaderContribution Header =>

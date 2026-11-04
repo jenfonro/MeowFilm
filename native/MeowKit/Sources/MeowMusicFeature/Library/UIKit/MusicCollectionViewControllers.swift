@@ -168,6 +168,7 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
     }
 
     public override func pageDidBecomeVisible() {
+        MusicArtworkView.retryFailedLoads(in: view)
         if let local = localContent, local.page.editor == nil {
             if canPresentPageAlert { navigationController?.popViewController(animated: false) }
             return
@@ -259,6 +260,11 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
         ) as! MusicCollectionEditorTrackCell
         configure(cell, track: track)
         return cell
+    }
+
+    public func tableView(_ tableView: UITableView, willDisplay cell: UITableViewCell,
+                          forRowAt indexPath: IndexPath) {
+        if isPageVisible { MusicArtworkView.retryFailedLoads(in: cell) }
     }
 
     public func tableView(

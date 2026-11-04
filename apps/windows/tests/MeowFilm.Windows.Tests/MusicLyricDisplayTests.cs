@@ -91,8 +91,14 @@ public static class MusicLyricDisplayTests
                 Equal("", f.Module.LyricStatus);
                 var document = await f.Store.ReadAsync(MusicLibraryOwner.DocumentNamespace);
                 Check(Encoding.UTF8.GetString(document.Data!).Contains("native-lyric-display", StringComparison.Ordinal));
+                // music.library.v1 is plaintext JSON; the snapshot text may live only in that owner document.
+                byte[] library = document.Data!;
                 foreach (string path in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
-                    Check(!Encoding.UTF8.GetString(await File.ReadAllBytesAsync(path)).Contains("SYNTHETIC_LYRIC", StringComparison.Ordinal));
+                {
+                    byte[] bytes = await File.ReadAllBytesAsync(path);
+                    Check(!Encoding.UTF8.GetString(bytes).Contains("SYNTHETIC_LYRIC", StringComparison.Ordinal) ||
+                        bytes.SequenceEqual(library));
+                }
                 f.Module.DeactivateGlobalSurface(MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail);
             }
             await using var restored = await Fixture.Create(root, seed: false);
@@ -597,7 +603,7 @@ public static class MusicLyricDisplayTests
     }
     private sealed class Fixture : IAsyncDisposable
     {
-        internal readonly DpapiDocumentStore Store;
+        internal readonly LocalDocumentStore Store;
         internal readonly WriteFaultStore Access;
         internal readonly LyricRuntime Runtime = new();
         internal readonly Handler Http = new();
@@ -614,7 +620,7 @@ public static class MusicLyricDisplayTests
         private Fixture(string root, bool holdSync)
         {
             ScriptPath = Path.Combine(root, "lyric-source.js");
-            Store = new(root, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections);
+            Store = new(root, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
             Access = new(Store);
             Application = new(Access, Runtime, Http);
             if (holdSync) Application.LibrarySyncChanged += HoldSyncNotice;
@@ -668,12 +674,12 @@ public static class MusicLyricDisplayTests
             finally { try { await Module.DisposeAsync(); } finally { await Store.DisposeAsync(); } }
         }
     }
-    private sealed class WriteFaultStore(IProtectedDocumentStore store) : IProtectedDocumentStore
+    private sealed class WriteFaultStore(IDocumentStore store) : IDocumentStore
     {
         internal bool FailAfterLibraryWrite;
         internal int LibraryWrites;
         internal Func<Task>? BeforeLibraryReceipt;
-        public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken token = default) => store.ReadAsync(ns, token);
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) => store.ReadAsync(ns, token);
         public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes,
             DocumentFingerprint expected, CancellationToken token = default)
         {
@@ -683,7 +689,7 @@ public static class MusicLyricDisplayTests
                 LibraryWrites++;
                 if (BeforeLibraryReceipt is { } beforeReceipt) await beforeReceipt().ConfigureAwait(false);
                 if (FailAfterLibraryWrite)
-                { FailAfterLibraryWrite = false; throw new ProtectedDocumentException(DocumentStoreError.Unavailable); }
+                { FailAfterLibraryWrite = false; throw new DocumentStoreException(DocumentStoreError.Unavailable); }
             }
             return result;
         }
@@ -787,15 +793,15 @@ public static class MusicLyricDisplayTests
         public Task StopAsync() { HasMedia = false; Changed(); return Task.CompletedTask; }
         public Task SeekAsync(double seconds) { Position = seconds; Seeks++; return Task.CompletedTask; }
     }
-    private sealed class MemoryStore : IProtectedDocumentStore
+    private sealed class MemoryStore : IDocumentStore
     {
         private byte[]? data;
         internal int Writes;
         internal bool FailAfterWrite;
-        public Task<ProtectedDocument> ReadAsync(string documentNamespace, CancellationToken token = default)
+        public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken token = default)
         {
             token.ThrowIfCancellationRequested(); Equal(MusicLibraryOwner.DocumentNamespace, documentNamespace);
-            return Task.FromResult(new ProtectedDocument(data?.ToArray(), data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(data)));
+            return Task.FromResult(new DocumentSnapshot(data?.ToArray(), data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(data)));
         }
         public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> bytes,
             DocumentFingerprint expected, CancellationToken token = default)
@@ -803,7 +809,7 @@ public static class MusicLyricDisplayTests
             Equal(MusicLibraryOwner.DocumentNamespace, documentNamespace); token.ThrowIfCancellationRequested();
             Equal(data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(data), expected);
             Writes++; data = bytes.ToArray();
-            if (FailAfterWrite) { FailAfterWrite = false; throw new ProtectedDocumentException(DocumentStoreError.Unavailable); }
+            if (FailAfterWrite) { FailAfterWrite = false; throw new DocumentStoreException(DocumentStoreError.Unavailable); }
             return Task.FromResult(DocumentFingerprint.FromBytes(data));
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;

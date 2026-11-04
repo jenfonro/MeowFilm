@@ -243,7 +243,7 @@ public static class MusicQqAccountUiTests
         internal MusicCapability Module;
         private Fixture()
         {
-            Store = new(new DpapiDocumentStore(MusicNativeQqAccountTests.DataPath(), AppIdentity.NativeNamespaces));
+            Store = new(new LocalDocumentStore(MusicNativeQqAccountTests.DataPath(), AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
             Application = new(Store, Runtime, Transport);
             Module = new(Application, Store, new Output(), new Dialogs());
         }

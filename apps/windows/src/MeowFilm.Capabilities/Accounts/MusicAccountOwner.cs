@@ -17,7 +17,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
 {
     public const string DocumentNamespace = "music.accounts.v1";
     public const string Version = "1.3.0";
-    private readonly IProtectedDocumentStore store;
+    private readonly IDocumentStore store;
     private readonly IMusicAccountProtocol protocol;
     private readonly MusicPlatformClientContextOwner clients;
     private readonly MusicPlatformClientProtocol clientProtocol;
@@ -34,7 +34,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
     /// <summary>Synchronous invalidation only; subscriber errors cannot change a committed result.</summary>
     public event Action<string>? SessionChanged;
 
-    internal MusicAccountOwner(IProtectedDocumentStore store, IMusicAccountProtocol protocol,
+    internal MusicAccountOwner(IDocumentStore store, IMusicAccountProtocol protocol,
         MusicPlatformClientContextOwner clients, MusicPlatformClientProtocol clientProtocol, TimeProvider? clock = null)
     {
         this.store = store ?? throw new ArgumentNullException(nameof(store));
@@ -174,7 +174,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
                 return await action().ConfigureAwait(false);
             }
             catch (MusicAccountException) { throw; }
-            catch (ProtectedDocumentException error) { throw new MusicAccountException(AccountRules.Error(error)); }
+            catch (DocumentStoreException error) { throw new MusicAccountException(AccountRules.Error(error)); }
             catch (OperationCanceledException) { throw new MusicAccountException("CANCELLED"); }
             catch { throw new MusicAccountException("STORAGE"); }
             finally { if (entered) disk.Release(); Leave(isPhysical: true); }
@@ -359,7 +359,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
                     actual = await store.WriteAsync(DocumentNamespace, bytes, document.Fingerprint, writeToken).ConfigureAwait(false);
                     AccountRules.Require(actual == DocumentFingerprint.FromBytes(bytes), "COMMIT_UNKNOWN");
                 }
-                catch (ProtectedDocumentException e) when (e.Error == DocumentStoreError.Conflict)
+                catch (DocumentStoreException e) when (e.Error == DocumentStoreError.Conflict)
                 {
                     lock (gate) if (states[op.Platform].Epoch == op.Epoch) states[op.Platform].Uncertain = false;
                     throw new MusicAccountException("STORAGE_CONFLICT");

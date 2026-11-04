@@ -52,14 +52,14 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 - `apps/windows/app/` — Windows 应用入口与装配
 - `apps/windows/src/` — Windows 原生库
   - `MeowFilm.Core` — 基础契约
-  - `MeowFilm.Platform` — 受保护存储、命名管道、子进程、文件授权
+  - `MeowFilm.Platform` — 本地文档存储与敏感信息保护、命名管道、子进程、文件授权
   - `MeowFilm.Desktop` — 窗口、导航、设置入口、主题、通知
   - `MeowFilm.Media` — 媒体播放与自适应流
   - `MeowFilm.SystemMedia` — 系统媒体传输控件
   - `MeowFilm.AppHost` — 启动、注入与关闭
   - `MeowFilm.Capabilities` — 按职责组织的业务能力（Accounts、Platforms、Catalog、Search、Recommendations、Library、Sync、Playback、PlaybackCache、Lyrics、Scripting、Feedback、Settings、Presentation、Composition）
 - `apps/windows/tests/` — Windows 原生测试
-- `apps/runtime/` — 公共脚本传输装配与 `modules/{music,cat}-script.mjs` 业务 owner，当前契约为 music.script.v2／music@0.6.0 和 cat.script.v1／cat@0.1.0
+- `apps/runtime/` — 公共脚本传输装配与 `modules/{music,cat}-script.mjs` 业务 owner，当前契约为 music.script.v2／music@0.7.0 和 cat.script.v1／cat@0.1.0
 - `apps/windows/runtime/` — 仅 Windows 启动／命名管道 `bootstrap.mjs` 与薄 `entries/aggregate.mjs`，从公共目录导入业务模块，不保留 module 副本
 - `packages/` — 共用 script-host（LX、Cat、有限 Node 风格能力、QuickJS 执行）与 runtime-bridge 工作区包；其他平台接入复用同一核心，但各自负责运行环境引入和生命周期
 - `scripts/` — iOS 工程生成、结构检查、测试、构建打包与发布，`scripts/tests/` 为脚本测试；Node 共用工具

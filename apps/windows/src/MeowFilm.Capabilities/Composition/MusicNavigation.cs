@@ -91,7 +91,8 @@ public sealed partial class MusicCapability
             string query = Uri.UnescapeDataString(route[13..]);
             if (query.Length is < 1 or > 200 || query.Any(char.IsControl))
                 throw new ArgumentException("Invalid search route", nameof(route));
-            return LoadAsync(new("search", query), cancellationToken, publishStatus: false);
+            var target = new Location("search", query);
+            return LoadAsync(locations.GetValueOrDefault(target.Key) ?? target, cancellationToken, publishStatus: false);
         }
         if (IsCatalogRoute(route))
             return CatalogNavigateAsync(route, cancellationToken);
@@ -99,6 +100,39 @@ public sealed partial class MusicCapability
             !(route.StartsWith("playlist/", StringComparison.Ordinal) && route.Length > 9))
             throw new ArgumentException("Unknown music route", nameof(route));
         return LoadAsync(locations.GetValueOrDefault(route) ?? new(route), cancellationToken, publishStatus: false);
+    }
+    public string CaptureNavigationLocation() => location.Route switch
+    {
+        "search" => "search-local/" + Uri.EscapeDataString(location.Query),
+        "catalog-search" => "catalog-search/" + Uri.EscapeDataString(searchKeyword),
+        _ => location.Route
+    };
+    public async Task RestoreNavigationAsync(string navigationLocation, CancellationToken token)
+    {
+        if (stopping) return;
+        token.ThrowIfCancellationRequested();
+        bool local = navigationLocation.StartsWith("search-local/", StringComparison.Ordinal);
+        bool online = navigationLocation.StartsWith("catalog-search/", StringComparison.Ordinal);
+        if (!local && !online) { await NavigateAsync(navigationLocation, token); return; }
+        string encoded = navigationLocation[(local ? 13 : 15)..];
+        string query = Uri.UnescapeDataString(encoded);
+        if (query.Length is < 1 or > 200 || query.Any(char.IsControl))
+            throw new ArgumentException("Invalid search location", nameof(navigationLocation));
+        if (local) { await NavigateAsync("search-local/" + Uri.EscapeDataString(query), token); return; }
+        RetireOperationStatus();
+        InvalidateCatalogAction();
+        RememberLocation();
+        long submission = ++navigationSubmission;
+        if (IsDiscovery || discoveryRequest is not null) await RetireDiscoveryPageAsync();
+        token.ThrowIfCancellationRequested();
+        if (stopping || submission != navigationSubmission) return;
+        if (HasSearchSession && searchKeyword == query && searchAccountEpoch == accountEpoch)
+        {
+            await RestoreSearchAsync(token);
+            return;
+        }
+        // Only the current valid online search is retained. Retired history uses the domain start path.
+        await BeginSearchAsync(query, token);
     }
     public async Task SearchAsync(string query, CancellationToken cancellationToken)
     {

@@ -32,7 +32,7 @@ internal sealed class ModuleSession(IDesktopModule module)
     };
 }
 
-internal sealed record Destination(string Value, bool IsSearch = false);
+internal sealed record Destination(string Value, bool IsSearch = false, string? Location = null);
 internal sealed record RequestPlan(ModuleSession Session, Destination? Destination = null, bool IsBack = false);
 
 internal sealed class ShellRequest(RequestPlan plan) : IDisposable
