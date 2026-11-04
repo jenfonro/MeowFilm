@@ -6,10 +6,12 @@ import MeowMusicFeature
 extension NativeMusicService {
     func nextID(_ d: MusicDocument, direction: MusicDirection, reason: MusicAdvanceReason = .manual, preview: Bool = false) -> String? {
         let q = d.queue, rows = q["entries"].array, current = q["currentId"].string, mode = d.playback["mode"].int
-        let valid = rows.map { $0["id"].string }.filter { !q["failed"].strings.contains($0) }
+        let failed = Set(q["failed"].strings)
+        let valid = rows.map { $0["id"].string }.filter { !failed.contains($0) }
+        let validSet = Set(valid)
         if rows.isEmpty || valid.isEmpty { return nil }
-        if direction == .previous && mode == 2 { return q["history"].strings.reversed().first { $0 != current && valid.contains($0) } }
-        if direction == .next, let priority = q["priority"].strings.first(where: valid.contains) { return priority }
+        if direction == .previous && mode == 2 { return q["history"].strings.reversed().first { $0 != current && validSet.contains($0) } }
+        if direction == .next, let priority = q["priority"].strings.first(where: validSet.contains) { return priority }
         if direction == .next, mode == 1, similarMode.active?.pending != nil,
            similarMode.active?.pendingTail == current, rows.last?["id"].string == current { return nil }
         if direction == .next && mode == 3 && reason == .ended && valid.contains(current) { return current }
@@ -27,7 +29,7 @@ extension NativeMusicService {
             if mode == 0 && !(0..<rows.count).contains(i) { return nil }
             i = (i % rows.count + rows.count) % rows.count
             let id = rows[i]["id"].string
-            if valid.contains(id) { return id }
+            if validSet.contains(id) { return id }
         }
         return nil
     }
@@ -37,7 +39,8 @@ extension NativeMusicService {
         let previous = nextID(d, direction: .previous, preview: true)
         // Availability may inspect a deterministic candidate, but a visual
         // preview must never pretend it is shuffle's eventual random result.
-        let hasPriority = next.map { d.queue["priority"].strings.contains($0) } ?? false
+        let priority = Set(d.queue["priority"].strings)
+        let hasPriority = next.map { priority.contains($0) } ?? false
         let randomNext = d.playback["mode"].int == MusicPlaybackMode.shuffle.rawValue && !hasPriority
         return .init(revision: d.queue["revision"].int, settingsRevision: d.playback["revision"].int,
             mode: MusicPlaybackMode(rawValue: d.playback["mode"].int) ?? .loop, qualityEnabled: policy.enabled,
@@ -53,16 +56,29 @@ extension NativeMusicService {
     public func state() async throws -> MusicPlaybackState { stateDTO(try read()) }
     public func queue() async throws -> MusicQueueSnapshot {
         let d = try read()
+        var tracks: [Data: (song: MJ, track: MusicRemoteTrack)] = [:]
         return .init(revision: d.queue["revision"].int, currentId: d.queue["currentId"] == .null ? nil : d.queue["currentId"].string,
-            entries: try d.queue["entries"].array.map {
-                let title = MusicModel.firstText($0["context"]["sourceTitle"], $0["context"]["playlist"],
+            entries: try d.queue["entries"].array.map { entry in
+                let id = entry["id"].string, song = entry["song"]
+                let title = MusicModel.firstText(entry["context"]["sourceTitle"], entry["context"]["playlist"],
                                                 d.queue["source"]["title"])
-                return .init(id: $0["id"].string,
-                    track: try MusicModel.track($0["song"], .init(kind: .queue, id: $0["id"].string)),
+                let ref = MusicReference(kind: .queue, id: id)
+                let key = Data(song["songId"].string.utf8)
+                let track: MusicRemoteTrack
+                if !key.isEmpty, let cached = tracks[key], cached.song == song {
+                    track = .init(ref: ref, songId: cached.track.songId, title: cached.track.title,
+                        artist: cached.track.artist, album: cached.track.album, duration: cached.track.duration,
+                        sources: cached.track.sources, artwork: cached.track.artwork)
+                } else {
+                    track = try MusicModel.track(song, ref)
+                    if !key.isEmpty { tracks[key] = (song, track) }
+                }
+                return .init(id: id,
+                    track: track,
                     sourceTitle: title.isEmpty ? nil : title,
-                    remoteSessionID: UUID(uuidString: $0["context"]["remoteSession"].string),
+                    remoteSessionID: UUID(uuidString: entry["context"]["remoteSession"].string),
                     displayIdentity: MusicNativeQueueDisplayIdentity.make(
-                        song: $0["song"], occurrence: $0["id"].string, context: $0["context"]))
+                        song: song, occurrence: id, context: entry["context"]))
             })
     }
     func archive(_ queue: MJ, into d: inout MusicDocument) {
@@ -84,9 +100,20 @@ extension NativeMusicService {
     }
     func makeEntries(_ songs: [MJ], queue: inout MJ, context: MJ = .obj()) throws -> [MJ] {
         var serial = queue["serial"].int
-        try musicRequire(songs.count <= 2000 && serial < 9_007_199_254_738_000, .limit)
+        let maximumSerial = 9_007_199_254_740_991
+        try musicRequire((0...maximumSerial).contains(serial) && songs.count <= maximumSerial - serial, .limit)
+        var cleaned: [Data: MJ] = [:]
         let rows = try songs.map { raw -> MJ in
-            let song = try MusicModel.cleanSong(raw)
+            let songID = raw["songId"].string
+            let song: MJ
+            if !songID.isEmpty, let value = cleaned[Data(songID.utf8)],
+               value["title"] == raw["title"], value["artist"] == raw["artist"],
+               value["album"] == raw["album"], value["duration"] == raw["duration"],
+               value["cover_url"] == raw["cover_url"], value["sources"] == raw["sources"] { song = value }
+            else {
+                song = try MusicModel.cleanSong(raw)
+                if !songID.isEmpty { cleaned[Data(songID.utf8)] = song }
+            }
             serial += 1
             return .obj([("id", .string("entry-\(serial)")), ("key", song["songId"]), ("song", song), ("context", context)])
         }
@@ -104,10 +131,17 @@ extension NativeMusicService {
         let result = try similarQueueTransaction(["queue", "playback", "history"]) { d -> MusicPlaybackState in
             try musicRequire(d.queue["revision"].int == expectedRevision, .staleRevision)
             let old = d.queue, previous = old["currentId"]
+            var resolvedSongs: [MusicReference: MJ] = [:]
+            func resolved(_ ref: MusicReference) throws -> MJ {
+                if let value = resolvedSongs[ref] { return value }
+                let value = try song(ref, d)
+                resolvedSongs[ref] = value
+                return value
+            }
             switch change {
             case .replace(let refs, let index):
                 try musicRequire(!refs.isEmpty && refs.indices.contains(index))
-                let songs = try refs.map { try song($0, d) }
+                let songs = try refs.map(resolved)
                 let rows = try makeEntries(songs, queue: &d.queue, context: .obj([
                     ("sourceTitle", .string("搜索")), ("sourceType", .string("search"))
                 ]))
@@ -127,7 +161,7 @@ extension NativeMusicService {
                 for key in ["history", "priority", "failed"] { d.queue[key] = .array([]) }
                 d.queue["source"] = .obj([("id", .string(id)), ("title", c["name"])])
             case .append(let refs, let next):
-                let songs = try refs.map { try song($0, d) }
+                let songs = try refs.map(resolved)
                 let added = try makeEntries(songs, queue: &d.queue)
                 var rows = d.queue["entries"].array
                 let currentIndex = rows.firstIndex { $0["id"] == d.queue["currentId"] }
@@ -149,12 +183,13 @@ extension NativeMusicService {
             case .reorder(let ids):
                 let rows = d.queue["entries"].array
                 try musicRequire(ids.count == rows.count && Set(ids).count == ids.count && Set(ids) == Set(rows.map { $0["id"].string }))
-                d.queue["entries"] = .array(ids.map { id in rows.first { $0["id"].string == id }! })
+                var byID: [Data: MJ] = [:]
+                for row in rows { byID[Data(row["id"].string.utf8)] = row }
+                d.queue["entries"] = .array(ids.map { byID[Data($0.utf8)]! })
             case .clear:
                 for key in ["entries", "priority", "history", "failed"] { d.queue[key] = .array([]) }
                 d.queue["currentId"] = .null; d.queue["source"] = .null
             }
-            try musicRequire(d.queue["entries"].array.count <= 2000, .limit)
             changesCurrent = changesCurrent || previous != d.queue["currentId"]
             if changesCurrent { d.resetPosition() }
             similarWillChangeQueue(similarChange, queue: &d.queue)

@@ -9,7 +9,7 @@ public final class MusicPlaybackFeedbackConsumer {
     private let clock: @Sendable () -> TimeInterval
     private var tail: Task<Void, Never>?
     private var generation = UUID(), nativeID: UUID?, attemptID: String?
-    private var sequence: UInt64 = 0, pending = 0
+    private var sequence: UInt64 = 0
     private var played = false, broken = false
     public init(service: (any MusicPlaybackFeedbackConsuming)?,
                 clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
@@ -36,8 +36,8 @@ public final class MusicPlaybackFeedbackConsumer {
         case .replaced, .stopped: kind = .stopped
         case .preparing, .prepared: return
         }
-        // Bounded backlog: missing observations break continuity, never pad it.
-        guard pending < 64, sequence < UInt64.max else { broken = true; return }
+        // Missing observations break continuity, never pad it.
+        guard sequence < UInt64.max else { broken = true; return }
         sequence += 1
         let sample = MusicPlaybackFeedbackSample(attemptID: candidate.attemptId, occurrenceID: candidate.occurrenceId,
             resourceID: candidate.resourceId, nativeAttemptID: event.attempt.id, sequence: sequence,
@@ -45,11 +45,9 @@ public final class MusicPlaybackFeedbackConsumer {
             running: event.snapshot.phase == .playing, hasPlayed: played, discontinuity: broken, automatic: automatic)
         broken = false
         let previous = tail, own = generation
-        pending += 1
         tail = Task { [weak self] in
             await previous?.value
             guard let self else { return }
-            defer { self.pending -= 1 }
             guard own == self.generation, !Task.isCancelled else { return }
             await service.consumePlaybackFeedback(sample)
         }

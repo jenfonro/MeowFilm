@@ -19,9 +19,14 @@ enum MusicNeteaseWire {
         guard let n = value as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else { throw MusicServiceError.upstreamInvalid }
         return n.boolValue
     }
-    static func rows(_ value: Any?, maximum: Int = 2000) throws -> [[String: Any]] {
-        guard let rows = value as? [Any], rows.count <= maximum else { throw MusicServiceError.upstreamInvalid }
+    static func rows(_ value: Any?) throws -> [[String: Any]] {
+        guard let rows = value as? [Any] else { throw MusicServiceError.upstreamInvalid }
         return try rows.map(MusicQQWire.object)
+    }
+    static func rows(_ value: Any?, maximum: Int) throws -> [[String: Any]] {
+        let rows = try self.rows(value)
+        guard rows.count <= maximum else { throw MusicServiceError.upstreamInvalid }
+        return rows
     }
     static func cookieValue(_ value: Any?, empty: Bool = false) throws -> String {
         let s = try MusicQQWire.string(value, maximum: 8192, empty: empty)
@@ -174,36 +179,25 @@ actor NeteaseMusicAccountAdapter: MusicAccountProvider {
         if context.device["_ntes_nnid"] == nil { context.device["_ntes_nnid"] = context.device["_ntes_nuid"]! + ",\(Int(now().timeIntervalSince1970 * 1000))" }
     }
     func exchange(_ url: URL, form: [String: String], headers: [String: String],
-                  context: MusicNeteaseContext, qr: Bool = false, smsPath: String? = nil,
-                  audio: Bool = false) async throws -> [String: Any] {
+                  context: MusicNeteaseContext, qr: Bool = false, smsPath: String? = nil) async throws -> [String: Any] {
         let own = epoch; try check(context, epoch: own)
         var headers = headers
         headers["Content-Type"] = "application/x-www-form-urlencoded;charset=utf-8"
         headers["Cache-Control"] = "no-store"
-        let readDevice = context.device, readCookies = context.cookies, clientRead = context.clientDevice
+        let readCookies = context.cookies
         let response = try await transport.send(.init(url: url, method: "POST", headers: headers, body: MusicQQWire.form(form)))
         try check(context, epoch: own)
-        let body: [String: Any]
-        do { body = try MusicNeteaseWire.response(response, qr: qr, smsPath: smsPath) }
-        catch {
-            if MusicServiceError.sanitized(error) == .rateLimited {
-                await transport.recordRateLimit(for: url, retryAfter: response.header("retry-after"))
-            }
-            throw error
-        }
-        // The audio endpoint carries per-recording failures in its one-row
-        // array. Bind cooldown evidence to THIS response, never a shared
-        // "last response" header that concurrent calls could overwrite.
-        if audio, let rows = body["data"] as? [[String: Any]], rows.count == 1,
-           let code = try? MusicNeteaseWire.code(rows[0]["code"]), [429, 509].contains(code) {
-            await transport.recordRateLimit(for: url, retryAfter: response.header("retry-after"))
-        }
-        var nextDevice = readDevice, nextCookies = readCookies
+        let body = try MusicNeteaseWire.response(response, qr: qr, smsPath: smsPath)
+        var devicePatch: [String: String] = [:], deviceRemovals = Set<String>()
+        var nextCookies = context.cookies
         for (key, value) in try MusicNeteaseWire.cookies(response, host: url.host!) {
             if MusicNeteaseWire.deviceKeys.contains(key) {
-                if context.qrID == nil, !context.accountID.isEmpty, !context.permitsCredentialUpdate,
-                   clientRead == nil, readDevice[key] != value { throw MusicServiceError.verificationRequired }
-                nextDevice[key] = value
+                if key == "deviceId", context.qrID == nil, !context.accountID.isEmpty,
+                   !context.permitsCredentialUpdate, context.clientDevice == nil,
+                   context.device[key] != value {
+                    throw MusicServiceError.verificationRequired
+                }
+                if let value { devicePatch[key] = value } else { deviceRemovals.insert(key) }
             }
             else {
                 if context.qrID == nil, !context.accountID.isEmpty, MusicNeteaseWire.credentialKeys.contains(key),
@@ -218,13 +212,13 @@ actor NeteaseMusicAccountAdapter: MusicAccountProvider {
             guard !id.isEmpty, id.utf8.count <= 512,
                   [16, 24, 32].contains(key.utf8.count) else { throw MusicServiceError.upstreamInvalid }
         }
-        guard context.cookies == readCookies else { throw MusicServiceError.staleResult }
-        if let client = clientRead, let clientContexts {
-            let saved = try nextDevice == readDevice ? clientContexts.current(client) : clientContexts.update(client, fields: nextDevice)
+        if let client = context.clientDevice, let clientContexts {
+            let saved = devicePatch.isEmpty && deviceRemovals.isEmpty ? try clientContexts.current(client)
+                : try clientContexts.update(client, fields: devicePatch, removing: deviceRemovals)
             context.clientDevice = saved; context.device = saved.fields
         } else {
-            guard context.device == readDevice else { throw MusicServiceError.staleResult }
-            context.device = nextDevice
+            for key in deviceRemovals { context.device.removeValue(forKey: key) }
+            for (key, value) in devicePatch { context.device[key] = value }
         }
         context.cookies = nextCookies
         if let id = response.header("x-encr-ssid"), let key = response.header("x-encr-sskey") {
@@ -265,7 +259,7 @@ actor NeteaseMusicAccountAdapter: MusicAccountProvider {
            context.clientDevice != nil || context.accountID.isEmpty || context.permitsCredentialUpdate {
             context.device["NMTID"] = "00O" + (try MusicQQWire.randomHex(19))
             if let client = context.clientDevice, let clientContexts {
-                let saved = try clientContexts.update(client, fields: context.device)
+                let saved = try clientContexts.update(client, fields: ["NMTID": context.device["NMTID"]!])
                 context.clientDevice = saved; context.device = saved.fields
             }
         }
@@ -305,7 +299,6 @@ actor NeteaseMusicAccountAdapter: MusicAccountProvider {
         headers["Cookie"] = MusicNeteaseWire.cookieHeader(cookies)
         return try await exchange(URL(string: "https://" + domain + "/" + crypto + "/" + path.dropFirst(5))!,
                                   form: form, headers: headers, context: context, qr: qr,
-                                  smsPath: ["/api/sms/captcha/sent", "/api/w/login/cellphone"].contains(path) ? path : nil,
-                                  audio: path == "/api/song/enhance/player/url/v1")
+                                  smsPath: ["/api/sms/captcha/sent", "/api/w/login/cellphone"].contains(path) ? path : nil)
     }
 }

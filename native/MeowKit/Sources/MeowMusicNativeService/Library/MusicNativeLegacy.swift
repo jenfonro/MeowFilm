@@ -6,35 +6,12 @@ import MeowMusicFeature
 
 extension MusicModel {
     static func sourceData(_ song: MJ) -> MJ {
-        func decode(_ value: MJ) -> MJ {
-            if value.isObject { return value }
-            if value.isString, let decoded = try? MJ.parse(Data(value.string.utf8)), decoded.isObject { return decoded }
-            return .obj()
-        }
-        var data = decode(song["source_data"])
-        if data.fields.isEmpty {
-            let encoded = [song["file_path"], song["dedup_key"]].first { $0.string.hasPrefix("{") } ?? .null
-            data = decode(encoded)
-        }
-        if data.fields.isEmpty && (sites.contains(song["source"].string) || song["musicId"].truthy || song["songmid"].truthy) {
-            let excluded = ["sources", "songId", "libraryIds", "memberLibraryIds", "revision", "nextCheckAt", "plugin_entry_path", "dedup_key"]
-            data = .obj(song.fields.filter { !excluded.contains($0.0) && !$0.0.hasPrefix("_") })
-        }
-        if !data["source"].truthy && song["plugin_entry_path"].string == "lxmusic" {
-            let parts = song["dedup_key"].string.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
-            if parts.count == 2, sites.contains(String(parts[0])), !parts[1].isEmpty {
-                data["source"] = .string(String(parts[0])); data["musicId"] = .string(String(parts[1]))
-                data["songmid"] = data["musicId"]
-            }
-        }
-        if data["songInfo"].isObject {
-            var inner = data["songInfo"]
-            inner["source"] = inner["source"].truthy ? inner["source"] : data["platform"].truthy ? data["platform"] : data["source"]
-            data = inner
-        }
-        return data
+        if let source = song["sources"].array.first { return sourceData(source) }
+        return song["musicInfo"].isObject ? song["musicInfo"] : .obj()
     }
-    static func nativeKey(_ song: MJ) -> String { (try? sourceKey(sourceData(song))) ?? "" }
+    static func nativeKey(_ song: MJ) -> String {
+        (try? sourceKey(sourceData(song))) ?? ""
+    }
     static func firstText(_ values: MJ...) -> String { values.first { $0.isString && !$0.string.isEmpty }?.string ?? "" }
     static func nativeNumber(_ value: MJ) -> Double {
         if value.isNumber { return value.number }
@@ -48,90 +25,72 @@ extension MusicModel {
             try musicRequire(value[key].number.rounded() == value[key].number &&
                 abs(value[key].number) <= 9_007_199_254_740_991, .invalidImport)
         }
-        if value.contains("songInfo") { try validateNativeNumbers(value["songInfo"]) }
     }
     static func normalizeSong(_ raw: MJ) throws -> MJ {
         try musicRequire(raw.isObject, .invalidImport)
         try validateNativeNumbers(raw)
+        // Current songs already own their source list. Re-reading a compact
+        // song must not reinterpret it as a local import or rebuild a removed ID.
+        if raw.contains("sources") {
+            try musicRequire(raw["sources"].isArray && raw["sources"].array.count <= 16, .invalidImport)
+            _ = try raw["songId"].text()
+            _ = try raw["title"].text(1024)
+            for field in ["artist", "album"] {
+                try musicRequire(raw[field].isString && raw[field].string.utf8.count <= 1024, .invalidImport)
+            }
+            try musicRequire(!raw.contains("cover_url") || raw["cover_url"].isString, .invalidImport)
+            try musicRequire(raw["duration"].isNumber && raw["duration"].number.isFinite &&
+                (0...604_800).contains(raw["duration"].number), .invalidImport)
+            return raw
+        }
         var song = raw, data = sourceData(raw)
         try validateNativeNumbers(data)
         if sites.contains(data["source"].string) {
-            let native = [data["musicId"], data["songmid"], data["id"], song["id"]].first { $0 != .null } ?? .null
+            let native = data["songmid"]
             try musicRequire(!native.id.isEmpty, .invalidImport)
-            data["musicId"] = native
-            if data["songmid"] == .null { data["songmid"] = native }
             let title = firstText(song["title"], song["name"], data["name"])
             let artist = firstText(song["artist"], song["singer"], data["singer"])
             song["title"] = .string(title.isEmpty ? "未知歌曲" : title)
             song["artist"] = .string(artist.isEmpty ? "未知歌手" : artist)
-            song["album"] = .string(firstText(song["album"], data["album"]))
+            song["album"] = .string(firstText(song["album"], data["albumName"]))
             song["duration"] = .number(nativeNumber(song["duration"].truthy ? song["duration"] : data["duration"]))
             song["cover_url"] = .string(firstText(song["cover_url"], song["img"], data["img"]))
-            if !song["_isOnlineObj"].truthy && song["plugin_entry_path"].truthy && numericLibraryID(song["id"]) {
-                if !song["_libraryId"].truthy { song["_libraryId"] = song["id"] }
-            }
-            if song["id"] == .null { song["id"] = native }
-            song["plugin_entry_path"] = .string("lxmusic"); song["_isOnlineObj"] = .bool(true)
-            song["source_data"] = data
-            if !song["dedup_key"].truthy { song["dedup_key"] = .string(data["source"].string + ":" + native.id) }
             let key = try sourceKey(data), fp = fingerprint(song)
             if !song["songId"].truthy { song["songId"] = .string("song:" + hash(!fp.isEmpty && song["duration"].number > 0 ? fp : key)) }
-            let nativeSource = MJ.obj([("sourceKey", .string(key)), ("source", data["source"]), ("source_data", data),
-                ("title", song["title"]), ("artist", song["artist"]), ("album", song["album"]),
-                ("duration", song["duration"]), ("cover_url", song["cover_url"])])
-            var accepted: [MJ] = [], quarantined = song["quarantinedSources"].array
-            func includes(_ rows: [MJ], _ key: String) -> Bool { rows.contains { musicSame($0["sourceKey"].string, key) } }
-            for source in song["sources"].array {
-                let k = source["sourceKey"].string
-                if k.isEmpty || !sites.contains(source["source"].string) || includes(quarantined, k) { continue }
-                if musicSame(k, nativeKey(source)) && compatible(song, source) { accepted.append(source) }
-                else { quarantined.append(source) }
-            }
-            if !includes(quarantined, key) && !(song["revision"].number > 0 && raw["sources"].isArray) {
-                if let i = accepted.firstIndex(where: { musicSame($0["sourceKey"].string, key) }) { accepted[i] = nativeSource }
-                else { accepted.append(nativeSource) }
-            }
-            if !quarantined.isEmpty { song["quarantinedSources"] = .array(quarantined) }
-            // Keep the old localeCompare-style source ordering independent of
-            // the device locale. Cross-platform ICU edge cases remain part of
-            // the frozen multi-source compatibility gate.
-            song["sources"] = .array(accepted.sorted {
-                $0["sourceKey"].string.compare($1["sourceKey"].string, locale: Locale(identifier: "en_US")) == .orderedAscending
-            })
+            let nativeSource = MJ.obj([("sourceKey", .string(key)), ("source", data["source"]), ("musicInfo", data)])
+            song["sources"] = .array([nativeSource])
         } else {
+            // An old online row without a compact source list is no longer an
+            // import format. Local rows have no platform locator fields.
+            try musicRequire(!sites.contains(song["source"].string) && song["songmid"] == .null &&
+                song["musicInfo"] == .null, .invalidImport)
             if !song["songId"].truthy {
-                if song["plugin_entry_path"].string == "iwebplus", let id = [data["catalogSongId"], data["sourceSongId"]].first(where: \.truthy) {
-                    song["songId"] = id
-                } else {
-                    let plugin = song["plugin_entry_path"].string.isEmpty ? "local" : song["plugin_entry_path"].string
-                    let id = [song["_libraryId"], song["id"]].first(where: \.truthy)?.id ??
-                        hash(MJ.array([data, song["file_path"], song["title"], song["artist"]]).json)
-                    song["songId"] = .string("library:" + plugin + ":" + id)
-                }
+                let plugin = song["plugin_entry_path"].string.isEmpty ? "local" : song["plugin_entry_path"].string
+                let id = [song["_libraryId"], song["id"]].first(where: \.truthy)?.id ??
+                    hash(MJ.array([data, song["file_path"], song["title"], song["artist"]]).json)
+                song["songId"] = .string("library:" + plugin + ":" + id)
             }
-            song["_isOnlineObj"] = .bool(false); song["sources"] = .array([])
-            if numericLibraryID(song["id"]) && !song["_libraryId"].truthy { song["_libraryId"] = song["id"] }
+            song["sources"] = .array([])
+            song["title"] = .string(firstText(song["title"], song["name"]).isEmpty ? "未知歌曲" : firstText(song["title"], song["name"]))
+            song["artist"] = .string(firstText(song["artist"], song["singer"]))
+            song["album"] = .string(song["album"].string)
+            song["duration"] = .number(nativeNumber(song["duration"]))
+            song["cover_url"] = .string(firstText(song["cover_url"], song["img"]))
         }
         return song
     }
-    private static func numericLibraryID(_ value: MJ) -> Bool {
-        if value.isNumber { return value.number.rounded() == value.number }
-        if value.isString, let n = Double(value.string), n.isFinite { return n.rounded() == n }
-        return false
-    }
-    /// Snapshot cleaning is deliberately separate from strict executable LX
-    /// locator validation. Unknown legacy quality fields are filtered, not an
-    /// excuse to reject or erase the user's whole library.
-    static func legacyNative(_ raw: MJ) throws -> MJ {
+    /// Snapshot cleaning filters unknown quality fields; the compact song
+    /// document still requires a valid `songmid` for every source.
+    static func cleanNative(_ raw: MJ) throws -> MJ {
         try validateNativeNumbers(raw)
         var out = MJ.obj()
-        let keys = ["source", "musicId", "songmid", "mid", "id", "songId", "qqSongId", "songType", "type", "copyrightId",
-            "mediaMid", "strMediaMid", "hash", "hash128", "hash320", "hashflac", "albumId", "album_id", "albumMid", "albumAudioId",
-            "mixsongid", "fileid", "name", "singer", "album", "albumName", "duration", "size", "interval", "catalogSongId", "sourceSongId"]
+        let keys = ["source", "songmid", "mid", "id", "songId", "qqSongId", "songType", "type", "copyrightId",
+            "strMediaMid", "hash", "albumId", "album_id", "albumMid", "albumAudioId",
+            "mixsongid", "fileid", "fileId", "name", "singer", "albumName", "duration", "size"]
         func scalar(_ v: MJ, _ bound: Int) -> Bool { v.isString && v.string.utf16.count <= bound || v.isNumber && v.number.isFinite }
         func resource(_ v: MJ) -> Bool {
             v.isNumber && v.number >= 0 || v.isString &&
-                v.string.range(of: "^[a-zA-Z0-9_. -]{1,128}$", options: .regularExpression) != nil
+                MusicNativePattern.matches(MusicNativePattern.resourceScalar, v.string)
         }
         for key in keys where scalar(raw[key], 4096) { out[key] = raw[key] }
         if !publicURL(raw["img"]).string.isEmpty { out["img"] = raw["img"] }
@@ -151,8 +110,8 @@ extension MusicModel {
                 }
                 out[key] = .array(rows)
             }
-            for key in ["lrcUrl", "mrcUrl", "trcUrl"] where !publicURL(raw[key]).string.isEmpty { out[key] = raw[key] }
         }
+        if raw["qualityKnown"].isBool { out["qualityKnown"] = raw["qualityKnown"] }
         func quality(_ row: MJ) -> MJ {
             var clean = MJ.obj()
             if row["hash"].isString && row["hash"].string.utf16.count <= 128 { clean["hash"] = row["hash"] }
@@ -175,26 +134,55 @@ extension MusicModel {
     static func durable(_ value: MJ, field: String = "") -> MJ {
         if value.isString {
             let s = value.string
-            if ["source_data", "file_path", "dedup_key"].contains(field) && (s.hasPrefix("{") || s.hasPrefix("[")) {
+            if ["file_path", "dedup_key"].contains(field) && (s.hasPrefix("{") || s.hasPrefix("[")) {
                 guard let json = try? MJ.parse(Data(s.utf8)) else { return .string("") }
                 return .string(durable(json).json)
             }
-            if s.range(of: "^(blob:|data:)", options: [.regularExpression, .caseInsensitive]) != nil { return .string("") }
-            if s.range(of: "^(https?://|/)", options: [.regularExpression, .caseInsensitive]) != nil &&
-                s.range(of: "[?&](?:access_token|token|signature|sign|auth|expires|x-amz-[^=]*|x-goog-[^=]*)=", options: [.regularExpression, .caseInsensitive]) != nil {
+            if s.range(of: "blob:", options: [.anchored, .caseInsensitive]) != nil ||
+                s.range(of: "data:", options: [.anchored, .caseInsensitive]) != nil { return .string("") }
+            if (s.range(of: "http://", options: [.anchored, .caseInsensitive]) != nil ||
+                s.range(of: "https://", options: [.anchored, .caseInsensitive]) != nil || s.hasPrefix("/")) &&
+                MusicDurablePattern.matches(MusicDurablePattern.secretQuery, s) {
                 return .string("")
             }
             return value
         }
         if value.isArray { return .array(value.array.map { durable($0) }) }
         if value.isObject {
-            let transient = "^(url|audioUrl|playUrl|currentTime|sessionTime|resumeTime|seekTime|progress|activeSource|activeSourceKey|activeQuality|actualLevel|qualityVerified|qualityUnrecognized|lxScriptId|lxScriptName|lxScriptVersion|_recommendation|recommendation|fm|fmManual|reportInstance|reportScope)$"
             return .obj(value.fields.filter {
-                $0.0.range(of: transient, options: [.regularExpression, .caseInsensitive]) == nil &&
-                $0.0.range(of: "cookie|token|password|secret|credential|authorization|api[-_]?key|^headers$", options: [.regularExpression, .caseInsensitive]) == nil
+                !MusicDurablePattern.transient.contains($0.0.lowercased()) &&
+                !MusicDurablePattern.isSecretField($0.0)
             }.map { ($0.0, durable($0.1, field: $0.0)) })
         }
         return value
+    }
+}
+
+private enum MusicNativePattern {
+    static let resourceScalar = try! NSRegularExpression(pattern: "^[a-zA-Z0-9_. -]{1,128}$")
+    static func matches(_ expression: NSRegularExpression, _ value: String) -> Bool {
+        expression.firstMatch(in: value, range: NSRange(value.startIndex..<value.endIndex, in: value)) != nil
+    }
+}
+
+private enum MusicDurablePattern {
+    static let secretQuery = try! NSRegularExpression(
+        pattern: "[?&](?:access_token|token|signature|sign|auth|expires|x-amz-[^=]*|x-goog-[^=]*)=",
+        options: [.caseInsensitive])
+    static let transient: Set<String> = Set([
+        "url", "audiourl", "playurl", "currenttime", "sessiontime", "resumetime", "seektime", "progress",
+        "activesource", "activesourcekey", "activequality", "actuallevel", "qualityverified",
+        "qualityunrecognized", "lxscriptid", "lxscriptname", "lxscriptversion", "_recommendation",
+        "recommendation", "fm", "fmmanual", "reportinstance", "reportscope"
+    ])
+    static let secretFields = ["cookie", "token", "password", "secret", "credential", "authorization"]
+    static func isSecretField(_ field: String) -> Bool {
+        let lower = field.lowercased()
+        return secretFields.contains(where: lower.contains) || lower == "headers" ||
+            lower.contains("apikey") || lower.contains("api_key") || lower.contains("api-key")
+    }
+    static func matches(_ expression: NSRegularExpression, _ value: String) -> Bool {
+        expression.firstMatch(in: value, range: NSRange(value.startIndex..<value.endIndex, in: value)) != nil
     }
 }
 

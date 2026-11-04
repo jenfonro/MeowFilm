@@ -104,7 +104,7 @@ actor MusicAccountQueueOwnerProvider: MusicAccountProvider {
         let batch = reads.count, uid = try await nativeID(credential)
         let result: [JSONValue] = (0..<count).map { index in
             .object([
-                "musicId": .string("\(platform.rawValue)B\(batch)P\(page)I\(index)"),
+                "songmid": .string("\(platform.rawValue)B\(batch)P\(page)I\(index)"),
                 "name": .string("Synthetic \(uid) \(argument) \(batch)"),
                 "singer": .string("Synthetic"), "album": .string("Synthetic"),
                 "duration": .number(180), "types": .array([.string("128k")])

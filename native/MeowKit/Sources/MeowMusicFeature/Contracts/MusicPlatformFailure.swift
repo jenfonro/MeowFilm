@@ -64,17 +64,14 @@ public struct MusicRequestTrace: Sendable {
     public let logicalID: String
     public let operation: Operation
     public let platform: MusicPublicBrowsePlatform?
-    public let foreground: Bool
     private let started = Date()
     private let sink: (@Sendable (Event) -> Void)?
     public init(_ operation: Operation, platform: MusicPublicBrowsePlatform? = nil) {
         self.operation = operation; id = String(UUID().uuidString.prefix(8))
         self.platform = platform ?? Self.current?.platform
         logicalID = Self.current?.logicalID ?? id
-        foreground = Self.current?.foreground == true || operation == .audio || operation == .playback
         sink = Self.observer
     }
-    public var priority: RequestAdmission.Priority { foreground ? .foreground : .normal }
     public func record(_ phase: Phase, http: Int? = nil, code: Int? = nil, failure: MusicServiceError? = nil) {
         let elapsed = Int(min(86_400, max(0, Date().timeIntervalSince(started))) * 1000)
         sink?(.init(id: id, logicalID: logicalID, operation: operation, phase: phase,

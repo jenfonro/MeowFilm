@@ -343,7 +343,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
     private let model: MusicViewModel
     private let appearance: MusicAppearancePreferencesStore
     private weak var router: (any MusicUIRouting)?
-    private let preferences = MusicSearchPreferencesStore()
+    private let preferences: MusicSearchPreferencesStore
     private let history: SearchHistoryStore
     private let results: MusicSearchResultsModel
     private let actions: MusicSearchActions
@@ -360,24 +360,25 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
     private var pendingKind: Kind?
     private var songRows: [Data: (song: MusicSearchSong, index: Int)] = [:]
     private var shownFailures: [Int: String] = [:]
+    private var submittedKeyword: String
     private var kinds: [Kind] { results.preferences.searchPlaylists ? Kind.allCases : [.songs] }
 
     init(model: MusicViewModel, query: String, appearance: MusicAppearancePreferencesStore,
          router: (any MusicUIRouting)?, history: SearchHistoryStore) {
+        submittedKeyword = query.trimmingCharacters(in: .whitespacesAndNewlines)
         self.model = model; self.appearance = appearance; self.router = router
         self.history = history
+        preferences = MusicSearchPreferencesStore()
         actions = MusicSearchActions(model: model)
-        results = MusicSearchResultsModel(readSongs: { [weak model] platform, query, page in
+        results = MusicSearchResultsModel(readSongs: { [weak model] platform, query, page, limit in
             guard let model else { throw MusicServiceError.closed }
-            return try await model.searchPage(platform: platform.rawValue, query: query, page: page)
-        }, readPlaylists: { [weak model] platform, query, cursor in
-            guard let model, model.isAvailable, !model.isClosed, let browser = model.publicBrowser else {
-                throw MusicServiceError.unavailable
-            }
-            let access = model.accountAccessGeneration
-            let value = try await browser.publicPlaylists(platform: platform, query: query, cursor: cursor)
-            guard access == model.accountAccessGeneration else { throw MusicServiceError.staleAccess }
-            return value
+            return try await model.searchPage(platform: platform.rawValue, query: query, page: page, limit: limit)
+        }, readPlaylists: { [weak model] platform, query, page, limit in
+            guard let model else { throw MusicServiceError.closed }
+            return try await model.searchPlaylistPage(platform: platform, query: query, page: page, limit: limit)
+        }, readRecording: { [weak model] request in
+            guard let model else { throw MusicServiceError.closed }
+            return try await model.searchRecording(request)
         })
         super.init(themeProvider: appearance, query: query)
     }
@@ -440,7 +441,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
             self?.updateVisibleSongs()
             self?.showActionError()
         }
-        observe(model.accessChanges) { [weak self] in self?.reconcileAccess() }
+        observe(model.searchAccessChanges) { [weak self] in self?.reconcileAccess() }
         observe(model.libraryChanges) { [weak self] in self?.actions.refreshFavorites() }
         observe(model.playbackChanges) { [weak self] in self?.updateVisibleSongs() }
         observe(appearance.$preferences.map(\.playlistView).removeDuplicates().dropFirst().eraseToAnyPublisher()) {
@@ -451,10 +452,12 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
 
     override func pageDidBecomeActive() {
         preferences.reload()
-        results.setAccess(available: model.isAvailable && !model.isClosed,
-                          generation: model.accountAccessGeneration)
+        _ = results.setAccess(available: model.isAvailable && !model.isClosed,
+                              generation: model.searchAccessGeneration)
         results.appear(); actions.setActive(true)
-        if results.query.isEmpty { submit() }
+        if results.query.isEmpty, model.isAvailable, !model.isClosed, !submittedKeyword.isEmpty {
+            results.submit(submittedKeyword, preferences: preferences.preferences)
+        }
         render()
     }
 
@@ -625,6 +628,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
     private func submit() {
         let query = self.query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty, model.isAvailable, !model.isClosed else { return }
+        submittedKeyword = query
         preferences.reload()
         history.record(query)
         model.query = query
@@ -633,8 +637,13 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         actions.setActive(true)
     }
     private func reconcileAccess() {
-        results.setAccess(available: model.isAvailable && !model.isClosed,
-                          generation: model.accountAccessGeneration)
+        let available = model.isAvailable && !model.isClosed
+        let keyword = submittedKeyword
+        guard results.setAccess(available: available, generation: model.searchAccessGeneration) else { return }
+        if isPageActive, available, !keyword.isEmpty {
+            preferences.reload()
+            results.submit(keyword, preferences: preferences.preferences)
+        }
         actions.setActive(model.isAvailable && !model.isClosed)
         render()
     }
@@ -842,16 +851,14 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
             let message = failures.map { $0.error.message(operation: section == 0 ? "单曲搜索" : "歌单搜索",
                 platform: $0.platform.title, diagnosticID: $0.diagnosticID) }.joined(separator: "；")
             guard force || shownFailures[section] != message else { continue }
-            let restart = section == 1 && failures.contains { $0.error == .staleResult }
             let request = results.requestID
             let alert = UIAlertController(title: "错误", message: message, preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-            alert.addAction(UIAlertAction(title: restart ? "重新搜索歌单" : "重试", style: .default) {
+            alert.addAction(UIAlertAction(title: "重试", style: .default) {
                 [weak self] _ in
                 guard let self, self.results.requestID == request else { return }
                 self.shownFailures[section] = nil
-                if restart { self.results.restartPlaylists() }
-                else { self.results.retry(section == 0 ? .songs : .playlists) }
+                self.results.retry(section == 0 ? .songs : .playlists)
             })
             shownFailures[section] = message
             present(alert, animated: true)
@@ -909,7 +916,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         guard canPresentPageAlert else { return }
         let request = results.requestID
         results.holdPagination()
-        let sources = MusicSourcesViewController(model: model, tracks: Array(song.variants.prefix(10)),
+        let sources = MusicSourcesViewController(model: model, tracks: song.variants,
             appearance: appearance, originIsCurrent: { [weak results] in results?.requestID == request },
             refresh: { [weak results] in
                 guard let results, results.requestID == request else { throw MusicServiceError.staleResult }
@@ -975,7 +982,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         var action: MusicSearchFooterState.Action?
         if noPlatforms { message = "尚未启用搜索平台" }
         else if !failures.isEmpty {
-            label = section == 1 && failures.contains(where: { $0.error == .staleResult }) ? "重新搜索歌单" : "重试"
+            label = "重试"
             action = .failure
         } else if cancelled {
             message = "已取消"; label = "重试"; action = .retry

@@ -7,12 +7,20 @@ extension NativeMusicService {
     func fmNext(_ d: MusicDocument, direction: MusicDirection) -> String? {
         let q = d.queue, rows = q["entries"].array, current = q["currentId"].string
         let failed = Set(q["failed"].strings)
-        if direction == .next, let priority = q["priority"].strings.first(where: { id in
-            id != current && !failed.contains(id) && rows.contains(where: { $0["id"].string == id })
-        }) { return priority }
+        if direction == .next, !q["priority"].strings.isEmpty {
+            let priorities = q["priority"].strings
+            let ids = Set(rows.compactMap { $0["id"].string })
+            if let priority = priorities.first(where: { id in
+                id != current && !failed.contains(id) && ids.contains(id)
+            }) { return priority }
+        }
         guard let index = rows.firstIndex(where: { $0["id"].string == current }) else { return nil }
-        let positions: [Int] = direction == .next ? Array((index + 1)..<rows.count) : Array((0..<index).reversed())
-        return positions.map { rows[$0]["id"].string }.first { !failed.contains($0) }
+        if direction == .next {
+            return rows.dropFirst(index + 1).lazy.map { $0["id"].string }
+                .first { !failed.contains($0) }
+        }
+        return rows.prefix(index).reversed().lazy.map { $0["id"].string }
+            .first { !failed.contains($0) }
     }
     public func advanceFM(_ source: MusicRemoteQueueSource, direction: MusicDirection, reason: MusicAdvanceReason,
                           expectedRevision: Int, intent: MusicQueueAuthorization) async throws -> MusicAdvanceResult {
@@ -46,7 +54,6 @@ extension NativeMusicService {
                     try musicRequire(d.queue["revision"].int == expectedRevision &&
                         d.queue["source"]["remoteSession"].string == session, .staleRevision)
                     if !added.isEmpty {
-                        try musicRequire(d.queue["entries"].array.count + added.count <= MusicRemoteQueueSource.maximumTracks, .limit)
                         let rows = try makeEntries(added, queue: &d.queue, context: context)
                         d.queue["entries"] = .array(d.queue["entries"].array + rows)
                     }

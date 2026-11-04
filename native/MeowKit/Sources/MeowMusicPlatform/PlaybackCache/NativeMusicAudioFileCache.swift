@@ -116,13 +116,12 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
                 }
                 return .init(rawValue: old.file)
             }
-            // Like the reference stream owner, at most eight ephemeral fills;
-            // all reservations share ONE 256 MiB budget. Cancelled work stays
-            // charged until it has actually released its pinned descriptors.
+            // Reservations share the actual byte budget. Cancelled work stays
+            // charged until it has released its pinned descriptors.
             for value in pending.values where value.key == key && value.identity != request.identity {
                 cancelCapture(value)
             }
-            guard pending.count < 8, !pending.values.contains(where: { $0.key == key }) else { return nil }
+            guard !pending.values.contains(where: { $0.key == key }) else { return nil }
             let id = UUID(), fence = NativeMusicAudioCacheFence(authorization: request.authorization, timing: timing)
             let sink = try NativeMusicAudioCacheSink(directory: directory, fence: fence,
                 playbackAuthorization: request.playbackAuthorization,

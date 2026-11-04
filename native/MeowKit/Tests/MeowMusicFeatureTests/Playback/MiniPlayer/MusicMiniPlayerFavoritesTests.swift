@@ -87,6 +87,27 @@ final class MusicMiniPlayerFavoritesTests: XCTestCase {
         await model.close()
     }
 
+    @MainActor func testFreshFavoritesReadDoesNotWaitForRetiredReads() async throws {
+        let (service, model, favorites) = await setup()
+        var gates: [MusicCollectionGate] = [], tasks: [Task<Void, Never>] = []
+        for index in 0..<4 {
+            let entered = expectation(description: "retired favorites read \(index)")
+            let gate = MusicCollectionGate { entered.fulfill() }
+            gates.append(gate)
+            await service.blockTracks(gate)
+            tasks.append(try XCTUnwrap(favorites.reload()))
+            await fulfillment(of: [entered], timeout: 2)
+        }
+        let fresh = try XCTUnwrap(favorites.reload())
+        await fresh.value
+        XCTAssertTrue(favorites.loaded); XCTAssertFalse(favorites.loading)
+        XCTAssertEqual(favorites.tracks.map(\.songId), ["a", "b"]); XCTAssertNil(favorites.error)
+        for gate in gates { await gate.release() }
+        for task in tasks { await task.value }
+        XCTAssertTrue(favorites.loaded); XCTAssertNil(favorites.error)
+        await model.close()
+    }
+
     @MainActor func testSameTitleDoesNotConflateVersionsButExplicitSourceAliasesMatch() {
         let album = track("album", title: "歌曲")
         let live = track("live", title: "歌曲")

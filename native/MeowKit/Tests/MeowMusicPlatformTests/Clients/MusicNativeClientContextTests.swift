@@ -59,11 +59,9 @@ final class MusicNativeClientContextTests: XCTestCase {
         let next = try await value.acceptNativeClientResponse(first, url: url,
             headers: ["set-cookie": "NMTID=synthetic-new; Path=/; Domain=music.163.com"])
         XCTAssertEqual(next.fields["NMTID"], "synthetic-new"); XCTAssertEqual(next.fields["deviceId"], first.fields["deviceId"])
+        let late = try await value.acceptNativeClientResponse(first, url: url, headers: ["set-cookie": "NMTID=synthetic-late"])
+        XCTAssertEqual(late.fields["NMTID"], "synthetic-late")
         let baseline = document.peek()
-        do {
-            _ = try await value.acceptNativeClientResponse(first, url: url, headers: ["set-cookie": "NMTID=synthetic-late"])
-            XCTFail("Old read overwrote a newer revision")
-        } catch { XCTAssertEqual(error as? MusicServiceError, .storageConflict) }
         do {
             _ = try await value.acceptNativeClientResponse(next, url: URL(string: "https://untrusted.invalid/")!,
                 headers: ["set-cookie": "NMTID=synthetic-foreign"])
@@ -74,13 +72,66 @@ final class MusicNativeClientContextTests: XCTestCase {
             XCTFail("Bound installation identity replaced")
         } catch { XCTAssertEqual(error as? MusicServiceError, .verificationRequired) }
         let clean = try await value.acceptNativeClientResponse(next, url: url, headers: ["set-cookie": "MUSIC_U=synthetic-auth"])
-        XCTAssertNil(clean.fields["MUSIC_U"]); XCTAssertEqual(document.peek(), baseline)
+        XCTAssertNil(clean.fields["MUSIC_U"])
+        let beforeRevoke = document.peek()
+        XCTAssertEqual(beforeRevoke, baseline)
         value.revokeAccess(generation: 1); try value.setAccess(available: true, generation: 2)
         do {
             _ = try await value.acceptNativeClientResponse(next, url: url, headers: ["set-cookie": "NMTID=synthetic-old-admission"])
             XCTFail("Revoked admission wrote")
         } catch { XCTAssertEqual(error as? MusicServiceError, .staleAccess) }
-        XCTAssertEqual(document.peek(), baseline); value.close()
+        XCTAssertEqual(document.peek(), beforeRevoke); value.close()
+    }
+    func testParallelResponsesMergeTheirOwnDeviceCookiesWithoutLosingTheOther() async throws {
+        let document = QQPublicPersistenceMemory(), value = try owner(document)
+        let first = try await value.nativeClientDevice(platform: .netease)
+        let url = try XCTUnwrap(URL(string: "https://music.163.com/weapi/v3/song/detail"))
+        async let a = value.acceptNativeClientResponse(first, url: url,
+            headers: ["set-cookie": "_ntes_nuid=synthetic-parallel-a; Path=/; Domain=music.163.com"])
+        async let b = value.acceptNativeClientResponse(first, url: url,
+            headers: ["set-cookie": "WNMCID=synthetic-parallel-b; Path=/; Domain=music.163.com"])
+        let firstResult = try await a
+        let secondResult = try await b
+        let final = try value.current(firstResult)
+        _ = secondResult
+        XCTAssertEqual(final.fields["_ntes_nuid"], "synthetic-parallel-a")
+        XCTAssertEqual(final.fields["WNMCID"], "synthetic-parallel-b")
+        XCTAssertEqual(final.fields["deviceId"], first.fields["deviceId"])
+        do {
+            _ = try await value.acceptNativeClientResponse(first, url: url,
+                headers: ["set-cookie": "deviceId=synthetic-other; Path=/; Domain=music.163.com"])
+            XCTFail("Identity change accepted")
+        } catch { XCTAssertEqual(error as? MusicServiceError, .verificationRequired) }
+        value.close()
+    }
+    func testExpiredBoundIdentityIsRejectedWithoutPartiallyCommittingOtherCookies() async throws {
+        let document = QQPublicPersistenceMemory(), value = try owner(document)
+        let first = try await value.nativeClientDevice(platform: .netease)
+        let url = try XCTUnwrap(URL(string: "https://music.163.com/weapi/v3/song/detail"))
+        let baseline = document.peek()
+        do {
+            _ = try await value.acceptNativeClientResponse(first, url: url, headers: ["set-cookie":
+                "deviceId=; Path=/; Max-Age=0; Domain=music.163.com, NMTID=synthetic-bound-new; Path=/"])
+            XCTFail("Expired bound identity committed other fields")
+        } catch { XCTAssertEqual(error as? MusicServiceError, .verificationRequired) }
+        XCTAssertEqual(try value.current(first).fields, first.fields)
+        XCTAssertEqual(document.peek(), baseline)
+        XCTAssertEqual(document.counts().commits, 1)
+        value.close()
+    }
+    func testExpiredOrdinaryDeviceCookieRemovesWithoutRemovingOthers() async throws {
+        let document = QQPublicPersistenceMemory(), value = try owner(document)
+        let first = try await value.nativeClientDevice(platform: .netease)
+        let url = try XCTUnwrap(URL(string: "https://music.163.com/weapi/v3/song/detail"))
+        let next = try await value.acceptNativeClientResponse(first, url: url, headers: ["set-cookie":
+            "NMTID=synthetic-ordinary; Path=/"])
+        let expired = try await value.acceptNativeClientResponse(next, url: url, headers: ["set-cookie":
+            "NMTID=; Path=/; Max-Age=0; Domain=music.163.com, WNMCID=synthetic-ordinary-next; Path=/"])
+        XCTAssertNil(expired.fields["NMTID"])
+        XCTAssertEqual(expired.fields["WNMCID"], "synthetic-ordinary-next")
+        XCTAssertEqual(expired.fields["deviceId"], first.fields["deviceId"])
+        XCTAssertEqual(try value.current(expired).fields, expired.fields)
+        value.close()
     }
     func testAccountAdapterUsesInstallationOwnerButPreservesAnImportedDifferentBinding() async throws {
         let document = QQPublicPersistenceMemory(), clients = try owner(document)

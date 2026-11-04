@@ -80,12 +80,14 @@ actor MusicKugouTestHTTP: MusicAccountHTTPTransport {
     private var blocks: [String: MusicAccountTestGate] = [:]
     private var failing: String?
     private var cancelled = 0
+    private var requestObserver: (@Sendable () -> Void)?
     init(clock: MusicAccountTestClock) { self.clock = clock }
     func respond(_ path: String, _ values: [MusicAccountHTTPResponse]) { replies[path] = values }
     func hold(_ path: String, _ gate: MusicAccountTestGate) { blocks[path] = gate }
     func fail(_ path: String) { failing = path }
     func recorded() -> [MusicAccountHTTPRequest] { history }
     func cancellationCount() -> Int { cancelled }
+    func observeRequests(_ observer: @escaping @Sendable () -> Void) { requestObserver = observer }
     func send(_ request: MusicAccountHTTPRequest) async throws -> MusicAccountHTTPResponse {
         guard MusicKugouRoute.permits(request), request.headers["Cache-Control"] == "no-store",
               request.headers.keys.allSatisfy({ $0.lowercased() != "cookie" && $0.lowercased() != "authorization" }) else {
@@ -93,6 +95,7 @@ actor MusicKugouTestHTTP: MusicAccountHTTPTransport {
         }
         try MusicKugouFixture.validateSignature(request)
         history.append(request)
+        requestObserver?()
         let path = request.url.path, q = try MusicKugouFixture.fields(request)
         if let gate = blocks[path] { await gate.wait() } // Deliberately ignores cancellation.
         if Task.isCancelled { cancelled += 1 }
@@ -130,7 +133,7 @@ actor MusicKugouTestHTTP: MusicAccountHTTPTransport {
         case "/v7/get_all_list": return try MusicKugouFixture.directory()
         case "/v4/get_list_all_file_v3": return try MusicKugouFixture.members()
         case "/pubsongs/v2/get_other_list_file_nofilt":
-            return try MusicKugouFixture.response(["status": 1, "data": ["songs": [MusicKugouFixture.song()],
+            return try MusicKugouFixture.response(["status": 1, "data": ["songs": [MusicKugouFixture.song()], "count": 1,
                 "list_info": ["global_collection_id": "synthetic-global", "count": 1, "list_ver": 5]]])
         case "/v1/get_union_vip":
             let at = Int(clock.now().timeIntervalSince1970)

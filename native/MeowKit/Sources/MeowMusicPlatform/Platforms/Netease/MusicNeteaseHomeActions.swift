@@ -145,7 +145,6 @@ extension NeteaseMusicAccountAdapter: MusicAccountHomeActionProvider {
     }
     private func homeActionMetadata(_ ids: [String], context: MusicNeteaseContext, own: UUID,
                                     authorize: @escaping @Sendable () async throws -> Void) async throws -> [[String: Any]] {
-        guard ids.count <= 1000 else { throw MusicServiceError.limit }
         var byID: [String: [String: Any]] = [:]
         for offset in stride(from: 0, to: ids.count, by: 100) {
             try await authorize(); try check(own)

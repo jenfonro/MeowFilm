@@ -14,11 +14,9 @@ struct MeowfilmResources: Sendable {
     let musicAccountGate: MusicAccountAccessGate?
     let musicAudioCache: NativeMusicAudioFileCache?
     let musicDisplayCache: MusicNativePlaybackDisplayCache
+    let musicSourceDiscoveryCache: MusicNativeEncryptedSourceDiscoveryCache
     let musicPublicQQ: NativeMusicQQPublicService
     let musicClients: NativeMusicClientService
-    // Shared API budget only. Cover art and AVPlayer/media-cache transfers
-    // retain their own byte/resource limits and never consume these slots.
-    let musicRequests = RequestAdmission()
 
     init() throws {
         // A sideloading host may rewrite the installed bundle identifier while
@@ -48,16 +46,24 @@ struct MeowfilmResources: Sendable {
                 namespace: MusicNativePlaybackDisplayCache.namespace, keyProvider: keys,
                 limits: .init(maximumDocumentBytes: 16 * 1024 * 1024))
         })
+        let discoveryKey = MeowfilmIdentity.bundleIdentifier + "." + MusicNativeEncryptedSourceDiscoveryCache.namespace
+        musicSourceDiscoveryCache = MusicNativeEncryptedSourceDiscoveryCache(storeFactory: {
+            try FileManager.default.createDirectory(at: musicRoot, withIntermediateDirectories: true)
+            let keys = try KeychainEncryptedDocumentKeyProvider(service: discoveryKey)
+            return try EncryptedDocumentStore(baseURL: musicRoot,
+                namespace: MusicNativeEncryptedSourceDiscoveryCache.namespace, keyProvider: keys,
+                limits: .init(maximumDocumentBytes: 4 * 1024 * 1024,
+                              maximumNamespaceBytes: 8 * 1024 * 1024))
+        })
         let clientRoot = root
         musicClients = NativeMusicClientService(storeFactory: { platform in
             try Self.documentFactory(root: clientRoot, namespace: NativeMusicClientService.namespace(platform))()
         })
         musicPublicQQ = NativeMusicQQPublicService(
-            storeFactory: Self.documentFactory(root: clientRoot, namespace: MusicQQPublicPersistenceDocument.namespace),
-            requestAdmission: musicRequests)
+            storeFactory: Self.documentFactory(root: clientRoot, namespace: MusicQQPublicPersistenceDocument.namespace))
         musicAccountGate = try? MusicAccountAccessGate(
             bundleIdentifier: MeowfilmIdentity.bundleIdentifier, cacheDocumentRoot: musicRoot,
-            audioCache: musicAudioCache, displayCache: musicDisplayCache, requestAdmission: musicRequests,
+            audioCache: musicAudioCache, displayCache: musicDisplayCache,
             clientContexts: musicClients, qqClient: musicPublicQQ
         )
         musicAccounts = musicAccountGate?.service

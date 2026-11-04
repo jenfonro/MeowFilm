@@ -18,14 +18,15 @@ enum MusicNativePublicBrowseFiveFixture {
         }
         return .obj([("songId", .string(id)), ("copyrightId", .string(copyright ?? ("600" + id))),
             ("songName", .string("Synthetic " + id)), ("contentId", .string("900" + id)),
-            ("singerList", .array([.obj([("name", .string("A"))])])), ("album", .string("Album")),
+            ("singerList", .array([.obj([("name", .string("A"))])])), ("albumName", .string("Album")),
             ("albumId", .string("10")), ("duration", .n(180)), ("img3", .string("/synthetic.jpg")),
             ("audioFormats", .array([.obj([("formatType", .string("PQ")), ("asize", .string("1234567")),
                 ("aformat", .string("020010")), ("url", .string("https://private.invalid/do-not-retain"))])]))])
     }
-    static func search(_ platform: MusicPublicBrowsePlatform, page: Int, total: Int) -> MJ {
+    static func search(_ platform: MusicPublicBrowsePlatform, page: Int, total: Int, rows: Int? = nil) -> MJ {
         let offset = (page - 1) * 30
-        let rows = (0..<min(30, max(0, total - offset))).map { index -> MJ in
+        let count = rows ?? min(30, max(0, total - offset))
+        let rows = (0..<count).map { index -> MJ in
             let id = offset + index == 0 ? playlistID : String(offset + index + 1)
             if platform == .kuwo {
                 return .obj([("playlistid", .string(id)), ("name", .string("Synthetic &amp; mix")),

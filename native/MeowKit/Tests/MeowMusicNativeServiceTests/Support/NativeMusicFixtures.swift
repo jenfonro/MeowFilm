@@ -17,6 +17,7 @@ final class NativeMusicMemoryDocument: MusicNativeDocumentStoring, @unchecked Se
         value = replacement; writes += 1
     }
     func fail(_ value: MusicServiceError?) { lock.lock(); failure = value; lock.unlock() }
+    func replace(_ value: Data?) { lock.lock(); self.value = value; lock.unlock() }
     func snapshot() -> (Data?, Int, Int) { lock.lock(); defer { lock.unlock() }; return (value, reads, writes) }
 }
 actor NativeMusicGate {
@@ -40,9 +41,9 @@ enum NativeMusicFixture {
     static let installation = "11111111-1111-4111-8111-111111111111"
     static let date = Date(timeIntervalSince1970: 1_800_000_000)
     static func track(_ mid: String = "SyntheticMID") -> MusicNativeTrackData {
-        .init(platform: "tx", data: MJ.obj([("musicId", .string(mid)), ("songmid", .string(mid)),
+        .init(platform: "tx", data: MJ.obj([("songmid", .string(mid)),
             ("qqSongId", .string("9007199254740993")), ("name", .string("Synthetic " + mid)), ("singer", .string("Fixture")),
-            ("album", .string("Synthetic album")), ("albumMid", .string("SyntheticAlbum")), ("duration", .n(180)),
+            ("albumName", .string("Synthetic album")), ("albumMid", .string("SyntheticAlbum")), ("duration", .n(180)),
             ("types", .array([.obj([("type", .string("128k"))]), .obj([("type", .string("flac"))])]))]).bytes)
     }
     static func song(_ mid: String = "SyntheticMID") throws -> MJ { try MusicModel.normalize(track(mid)) }
@@ -51,18 +52,20 @@ enum NativeMusicFixture {
               contentHash: hash, revisionHash: hash, capabilities: [.init(siteID: "tx", title: "LX synthetic", actions: ["musicUrl", "lyric"], qualities: ["128k", "flac"])])
     }
     static func legacy() throws -> MJ {
-        let song = try song(), id = song["songId"].string
+        let song = try song()
         var library = MusicModel.emptyLibrary; library["ownerId"] = .string("legacy-owner")
-        library["songs"] = .obj([(id, song)])
-        var favorites = library["collections"].array[0]; favorites["order"] = .strings([id])
+        library["songs"] = .obj([(song["songId"].string, song)])
+        var favorites = library["collections"].array[0]; favorites["order"] = .strings([song["songId"].string])
         library["collections"] = .array([favorites]); return library
     }
     static func service(_ store: NativeMusicMemoryDocument = .init(), scripts: (any MusicScriptResolving)? = nil,
                         accounts: (any MusicNativeAccountProviding)? = nil,
                         qq: any MusicPublicQQProviding = NativeMusicQQFixture(),
                         http: any MusicNativeHTTPTransport = NativeMusicNoNetwork(),
+                        sourceDiscovery: (any MusicSourceDiscoveryCaching)? = nil,
                         clock: @escaping @Sendable () -> Date = { date }) async throws -> NativeMusicService {
-        let service = NativeMusicService(document: store, scripts: scripts, accounts: accounts, qq: qq, transport: http, clock: clock, random: { 0 })
+        let service = NativeMusicService(document: store, scripts: scripts, accounts: accounts, qq: qq,
+            sourceDiscovery: sourceDiscovery, transport: http, clock: clock, random: { 0 })
         try await service.setAccess(available: true, generation: 1); return service
     }
 }
@@ -72,7 +75,7 @@ struct NativeMusicNoNetwork: MusicNativeHTTPTransport {
 actor NativeMusicQQFixture: MusicPublicQQProviding {
     var gate: NativeMusicGate?
     func suspend(_ gate: NativeMusicGate) { self.gate = gate }
-    func search(query: String, page: Int) async throws -> MusicNativeTrackPage {
+    func search(query: String, page: Int, limit: Int) async throws -> MusicNativeTrackPage {
         if let gate { await gate.wait() }
         return .init(items: [NativeMusicFixture.track(query)], total: 1)
     }

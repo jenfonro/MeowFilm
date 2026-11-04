@@ -71,7 +71,7 @@ final class MusicNativePublicBrowseDiscoveryTests: XCTestCase {
         XCTAssertEqual(enriched.sections[0].items.count, 30)
         let retained = try enriched.sections[0].items.map { item -> String in
             guard case .song(let value) = item.content else { throw MusicServiceError.invalidResponse }
-            return try MJ.parse(value.data)["musicId"].string
+            return try MJ.parse(value.data)["songmid"].string
         }
         XCTAssertEqual(retained, ids)
         guard case .songID("31") = enriched.sections[0].tabs[1].items[0].content else {
@@ -226,6 +226,50 @@ final class MusicNativePublicBrowseDiscoveryTests: XCTestCase {
     }
     private func feedResponse(_ id: String, more: Bool = false) -> MJ {
         .obj([("code", .n(200)), ("songs", .array([MusicNativePublicBrowseFixture.song(id)])), ("hasMore", .bool(more))])
+    }
+    func testRecommendationFeedContinuesBeyondFormerOffsetLimitAndStopsOnEmptyPage() async throws {
+        let tags = MJ.obj([("code", .n(200)), ("data", .obj([("algTagInfos", .null)]))])
+        let pages = [feedResponse("6", more: true), feedResponse("7", more: true), feedResponse("8", more: true),
+            .obj([("code", .n(200)), ("songs", .array([])), ("hasMore", .bool(true))])]
+        let http = NativeMusicHTTPFixture(pages.flatMap { [feedProtocol, tags, $0] })
+        let port = MusicNativePlatforms(transport: http, qq: NativeMusicQQFixture(), clock: { NativeMusicFixture.date })
+        let offsets = [5970, 6000, 6030, 6060]
+        var remote = MJ.obj([("offset", .n(offsets[0]))])
+        for (index, offset) in offsets.enumerated() {
+            let page = try await port.browseCube(feedChannel, tag: "", remote: remote)
+            let section = try XCTUnwrap(page.sections.first)
+            XCTAssertNil(section.error)
+            XCTAssertEqual(section.items.map(\.id), index < pages.count - 1 ? [String(index + 6)] : [])
+            if index < pages.count - 1 {
+                remote = try XCTUnwrap(page.next)
+                XCTAssertEqual(try remote["offset"].integer(), offset + 30)
+                XCTAssertFalse(remote["snapshot"].string.isEmpty)
+            } else { XCTAssertNil(page.next) }
+        }
+        let calls = await http.calls()
+        XCTAssertEqual(calls.count, offsets.count * 3)
+        let requests = calls.filter { $0.url.path == "/eapi/tag/tab/alg/recommends" }
+        let requestedOffsets = try requests.map { try MusicNativePublicBrowseFixture.decryptEAPI($0).1["offset"].integer() }
+        XCTAssertEqual(requestedOffsets, offsets)
+    }
+    func testRecommendationFeedStillRejectsUnrepresentableContinuationOffset() async throws {
+        let tags = MJ.obj([("code", .n(200)), ("data", .obj([("algTagInfos", .null)]))])
+        let http = NativeMusicHTTPFixture([feedProtocol, tags, feedResponse("6", more: true),
+                                          feedProtocol, tags, feedResponse("7", more: true)])
+        let port = MusicNativePlatforms(transport: http, qq: NativeMusicQQFixture(), clock: { NativeMusicFixture.date })
+        let lastOffset = 9_007_199_254_740_990
+        let first = try await port.browseCube(feedChannel, tag: "", remote: .obj([("offset", .n(lastOffset - 30))]))
+        let remote = try XCTUnwrap(first.next)
+        XCTAssertEqual(try remote["offset"].integer(), lastOffset)
+        do {
+            _ = try await port.browseCube(feedChannel, tag: "", remote: remote)
+            XCTFail("Unrepresentable continuation offset")
+        } catch { XCTAssertEqual(error as? MusicServiceError, .limit) }
+        let calls = await http.calls()
+        XCTAssertEqual(calls.count, 6)
+        let requests = calls.filter { $0.url.path == "/eapi/tag/tab/alg/recommends" }
+        let requestedOffsets = try requests.map { try MusicNativePublicBrowseFixture.decryptEAPI($0).1["offset"].integer() }
+        XCTAssertEqual(requestedOffsets, [lastOffset - 30, lastOffset])
     }
     func testNullOrFailedOptionalAlgorithmTagsStillFetchActualSongs() async throws {
         for response in [MJ.obj([("code", .n(200)), ("data", .obj([("algTagInfos", .null)]))]),

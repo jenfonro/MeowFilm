@@ -28,7 +28,7 @@ final class MusicPlatformFailureTests: XCTestCase {
         for (code, expected) in business { XCTAssertEqual(MusicPlatformFailure.netease(code), expected) }
     }
 
-    func testTransportAndAdmissionKeepExactFailureWithoutUpstreamText() {
+    func testTransportKeepsExactFailureWithoutUpstreamText() {
         let network: [(URLError.Code, MusicServiceError)] = [
             (.timedOut, .timeout), (.notConnectedToInternet, .networkOffline),
             (.cannotConnectToHost, .connectionFailed), (.dnsLookupFailed, .connectionFailed),
@@ -37,10 +37,6 @@ final class MusicPlatformFailureTests: XCTestCase {
         for (code, expected) in network {
             XCTAssertEqual(MusicServiceError.sanitized(URLError(code)), expected)
         }
-        let admission: [(RequestAdmission.Failure, MusicServiceError)] = [
-            (.queueFull, .busy), (.timedOut, .timeout), (.coolingDown, .rateLimited), (.closed, .closed)
-        ]
-        for (failure, expected) in admission { XCTAssertEqual(MusicServiceError.sanitized(failure), expected) }
         let untrusted = NSError(domain: "untrusted-origin", code: 123,
             userInfo: [NSLocalizedDescriptionKey: "untrusted-response-body"])
         let safe = MusicServiceError.sanitized(untrusted)
@@ -72,7 +68,7 @@ final class MusicPlatformFailureTests: XCTestCase {
             diagnosticID: "https://untrusted.invalid/path").contains("untrusted"))
     }
 
-    func testTraceSharesOnlyLogicalIdentityAndExplicitForegroundPriority() {
+    func testTraceSharesLogicalIdentityAndPlatformButKeepsEachOperation() {
         let events = MusicTraceEvents()
         MusicRequestTrace.$observer.withValue({ events.append($0) }) {
             let root = MusicRequestTrace(.playback, platform: .netease)
@@ -82,16 +78,13 @@ final class MusicPlatformFailureTests: XCTestCase {
                 XCTAssertEqual(api.logicalID, root.logicalID)
                 XCTAssertNotEqual(api.id, root.id)
                 XCTAssertEqual(api.platform, .netease)
-                XCTAssertEqual(api.priority, .foreground)
+                XCTAssertEqual(api.operation, .publicAPI)
                 api.record(.networkAttempt)
                 api.record(.failed, http: 200, code: 429, failure: .rateLimited)
                 MusicRequestTrace(.playlist).record(.coalesced)
             }
             root.record(.completed)
-            XCTAssertEqual(MusicRequestTrace(.browse).priority, .normal)
-            XCTAssertEqual(MusicRequestTrace(.library).priority, .normal)
-            XCTAssertEqual(MusicRequestTrace(.accountAPI).priority, .normal)
-            XCTAssertEqual(MusicRequestTrace(.audio).priority, .foreground)
+            XCTAssertEqual(root.operation, .playback)
         }
         let values = events.snapshot()
         XCTAssertEqual(values.map(\.phase), [.started, .networkAttempt, .failed, .coalesced, .completed])

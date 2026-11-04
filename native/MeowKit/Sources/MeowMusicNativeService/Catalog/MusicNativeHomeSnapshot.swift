@@ -69,9 +69,10 @@ enum MusicNativeHomeSnapshot {
     private static func cleanTrack(_ raw: MusicNativeTrackData) throws -> MJ {
         try musicRequire(raw.platform == "wy", .invalidResponse)
         let song = try MusicModel.normalize(raw)
-        var locator = try MusicModel.locator(MusicModel.sourceData(song))
+        guard let row = song["sources"].array.first else { throw MusicServiceError.sourceRequired }
+        var locator = try MusicModel.locator(MusicModel.sourceData(row))
         locator["name"] = song["title"]; locator["singer"] = song["artist"]
-        locator["album"] = song["album"]; locator["duration"] = song["duration"]
+        locator["albumName"] = song["album"]; locator["duration"] = song["duration"]
         locator["img"] = image(MusicNativePublicBrowseSupport.artwork(song["cover_url"]))
         if locator["img"] == .null { locator.remove("img") }
         try MusicModel.rejectSecrets(locator)

@@ -219,8 +219,10 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
         let controller = MusicSearchViewController(model: model, appearance: MusicAppearancePreferencesStore(),
                                                    router: MusicUIKitRegressionRouter(), history: history)
-        let window = mount(controller)
-        defer { release(controller, window: window) }
+        let navigation = PageNavigationController(themeProvider: MusicAppearancePreferencesStore())
+        navigation.setViewControllers([controller], animated: false)
+        let window = mount(navigation)
+        defer { release(navigation, window: window) }
         let table = try XCTUnwrap(controller.view.subviews.compactMap { $0 as? UITableView }.first)
         let failure = expectation(for: NSPredicate { _, _ in
             MainActor.assumeIsolated {
@@ -389,6 +391,221 @@ final class MusicUIKitRegressionTests: XCTestCase {
         XCTAssertEqual(counts.details, 2)
         let detailCalls = await service.detailCallIDs()
         XCTAssertEqual(detailCalls, charts.map(\.id))
+        await model.close()
+    }
+
+    func testSearchResultsPagePushesOnceAndKeepsSingleHistoryEntry() async throws {
+        let suite = "MusicUIKitRegressionTests.search-access." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let history = SearchHistoryStore(defaults: defaults)
+        history.record("原关键词")
+        let service = MusicUIKitRegressionService()
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let controller = MusicSearchViewController(model: model, appearance: MusicAppearancePreferencesStore(),
+                                                   router: MusicUIKitRegressionRouter(), history: history)
+        let navigation = PageNavigationController(themeProvider: MusicAppearancePreferencesStore())
+        navigation.setViewControllers([controller], animated: false)
+        let window = mount(navigation)
+        defer { release(navigation, window: window) }
+        let searchResultsShown = expectation(description: "search results navigation completed")
+        navigation.didShowPage = { page in
+            if page !== controller, page is SearchPageViewController {
+                searchResultsShown.fulfill()
+            }
+        }
+        defer { navigation.didShowPage = nil }
+        controller.query = "原关键词"
+        controller.onSubmit?("原关键词")
+        await fulfillment(of: [searchResultsShown], timeout: 2)
+        let results = try XCTUnwrap(navigation.topViewController as? SearchPageViewController)
+        XCTAssertFalse(results === controller)
+        XCTAssertEqual(navigation.viewControllers.count, 2)
+        XCTAssertEqual(history.entries.map(\.text), ["原关键词"])
+        XCTAssertTrue(results.isPageActive)
+        XCTAssertEqual(results.query, "原关键词")
+        XCTAssertEqual(history.entries.map(\.text), ["原关键词"])
+        XCTAssertEqual(results.searchField.text, "原关键词")
+        await model.close()
+    }
+
+    func testSearchResultsResubmitsRetainedKeywordWithoutAddingHistoryAfterAccountChange() async throws {
+        let suite = "MusicUIKitRegressionTests.search-resubmit." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let restorePreferences = try useSearchResultPreferences()
+        defer { restorePreferences() }
+        let history = SearchHistoryStore(defaults: defaults)
+        let service = MusicUIKitRegressionService()
+        let firstReads = expectation(description: "initial song and playlist searches")
+        firstReads.expectedFulfillmentCount = 2
+        await service.allowResultSearch { firstReads.fulfill() }
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let controller = MusicSearchViewController(model: model, appearance: MusicAppearancePreferencesStore(),
+                                                   router: MusicUIKitRegressionRouter(), history: history)
+        let navigation = PageNavigationController(themeProvider: MusicAppearancePreferencesStore())
+        navigation.setViewControllers([controller], animated: false)
+        let window = mount(navigation)
+        defer { release(navigation, window: window) }
+        controller.query = "原关键词"
+        controller.onSubmit?("原关键词")
+        await fulfillment(of: [firstReads], timeout: 2)
+        await deliverMainRunLoop()
+        let results = try XCTUnwrap(navigation.topViewController as? SearchPageViewController)
+        XCTAssertEqual(history.entries.map(\.text), ["原关键词"])
+        XCTAssertEqual(results.query, "原关键词")
+        results.query = "尚未提交的新关键词"
+        history.record("较新的关键词")
+        let entries = history.entries, storedHistory = defaults.data(forKey: SearchHistoryStore.storageKey)
+        var historyChanges = 0
+        let historyObservation = history.$entries.dropFirst().sink { _ in historyChanges += 1 }
+        defer { historyObservation.cancel() }
+        let repeatedReads = expectation(description: "new generation replays both searches once")
+        repeatedReads.expectedFulfillmentCount = 2
+        await service.allowResultSearch { repeatedReads.fulfill() }
+        model.accountSessionsChanged()
+        await fulfillment(of: [repeatedReads], timeout: 2)
+        await deliverMainRunLoop()
+        let reads = await service.resultReads()
+        XCTAssertEqual(reads.count, 4)
+        XCTAssertEqual(reads.filter { $0.section == .songs }.count, 2)
+        XCTAssertEqual(reads.filter { $0.section == .playlists }.count, 2)
+        XCTAssertTrue(reads.allSatisfy { $0.query == "原关键词" && $0.page == 1 && $0.limit == 30 })
+        XCTAssertTrue(results.isPageActive)
+        XCTAssertEqual(results.query, "尚未提交的新关键词")
+        XCTAssertEqual(history.entries, entries)
+        XCTAssertEqual(defaults.data(forKey: SearchHistoryStore.storageKey), storedHistory)
+        XCTAssertEqual(historyChanges, 0)
+        await model.close()
+    }
+    func testUnavailableActiveSearchResultsClearAndOnlyResubmitAfterAccessReturns() async throws {
+        let suite = "MusicUIKitRegressionTests.search-unavailable." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let restorePreferences = try useSearchResultPreferences()
+        defer { restorePreferences() }
+        let history = SearchHistoryStore(defaults: defaults), service = MusicUIKitRegressionService()
+        let firstReads = expectation(description: "initial search reads")
+        firstReads.expectedFulfillmentCount = 2
+        await service.allowResultSearch { firstReads.fulfill() }
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let controller = MusicSearchViewController(model: model, appearance: MusicAppearancePreferencesStore(),
+                                                   router: MusicUIKitRegressionRouter(), history: history)
+        let navigation = PageNavigationController(themeProvider: MusicAppearancePreferencesStore())
+        navigation.setViewControllers([controller], animated: false)
+        let window = mount(navigation)
+        defer { release(navigation, window: window) }
+        controller.query = "原关键词"; controller.onSubmit?("原关键词")
+        await fulfillment(of: [firstReads], timeout: 2)
+        let results = try XCTUnwrap(navigation.topViewController as? SearchPageViewController)
+        let table = try XCTUnwrap(identified("music.search.results.page.0", in: results.view) as? UITableView)
+        let loaded = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                results.view.layoutIfNeeded()
+                return table.visibleCells.contains { $0 is MusicSearchSongCell }
+            }
+        }, evaluatedWith: table)
+        await fulfillment(of: [loaded], timeout: 2)
+        history.record("较新的关键词")
+        let reads = await service.resultReads(), entries = history.entries
+        results.query = "尚未提交的新关键词"
+        model.setAvailable(false)
+        let cleared = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                results.view.layoutIfNeeded()
+                return table.numberOfSections == 2 && table.numberOfRows(inSection: 0) == 1 &&
+                    table.numberOfRows(inSection: 1) == 1 &&
+                    !table.visibleCells.contains { $0 is MusicSearchSongCell }
+            }
+        }, evaluatedWith: table)
+        await fulfillment(of: [cleared], timeout: 2)
+        model.accountSessionsChanged()
+        await deliverMainRunLoop()
+        let unavailableReads = await service.resultReads()
+        XCTAssertEqual(unavailableReads, reads)
+        XCTAssertTrue(results.isPageActive); XCTAssertEqual(results.query, "尚未提交的新关键词")
+        XCTAssertEqual(history.entries, entries)
+        let restoredReads = expectation(description: "search resumes only when access returns")
+        restoredReads.expectedFulfillmentCount = 2
+        await service.allowResultSearch { restoredReads.fulfill() }
+        model.setAvailable(true)
+        await fulfillment(of: [restoredReads], timeout: 2)
+        let restored = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                results.view.layoutIfNeeded()
+                return table.visibleCells.contains { $0 is MusicSearchSongCell }
+            }
+        }, evaluatedWith: table)
+        await fulfillment(of: [restored], timeout: 2)
+        await deliverMainRunLoop()
+        let availableReads = await service.resultReads()
+        XCTAssertEqual(availableReads.count, reads.count + 2)
+        XCTAssertTrue(availableReads.suffix(2).allSatisfy { $0.query == "原关键词" })
+        XCTAssertEqual(results.query, "尚未提交的新关键词")
+        XCTAssertEqual(history.entries, entries)
+        await model.close()
+    }
+    func testInactiveSearchResultsDoNotResubmitAfterAccountGenerationChanges() async throws {
+        let suite = "MusicUIKitRegressionTests.search-inactive." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let restorePreferences = try useSearchResultPreferences()
+        defer { restorePreferences() }
+        let history = SearchHistoryStore(defaults: defaults), service = MusicUIKitRegressionService()
+        let firstReads = expectation(description: "initial search reads")
+        firstReads.expectedFulfillmentCount = 2
+        await service.allowResultSearch { firstReads.fulfill() }
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let controller = MusicSearchViewController(model: model, appearance: MusicAppearancePreferencesStore(),
+                                                   router: MusicUIKitRegressionRouter(), history: history)
+        let navigation = PageNavigationController(themeProvider: MusicAppearancePreferencesStore())
+        navigation.setViewControllers([controller], animated: false)
+        let window = mount(navigation)
+        defer { release(navigation, window: window) }
+        controller.query = "原关键词"; controller.onSubmit?("原关键词")
+        await fulfillment(of: [firstReads], timeout: 2)
+        await deliverMainRunLoop()
+        let results = try XCTUnwrap(navigation.topViewController as? SearchPageViewController)
+        let reads = await service.resultReads(), entries = history.entries
+        navigation.popViewController(animated: false)
+        navigation.view.layoutIfNeeded()
+        await deliverMainRunLoop()
+        XCTAssertFalse(results.isPageActive)
+        model.accountSessionsChanged()
+        await deliverMainRunLoop()
+        let inactiveReads = await service.resultReads()
+        XCTAssertEqual(inactiveReads, reads); XCTAssertEqual(history.entries, entries)
+        await model.close()
+    }
+    func testPlaylistStaleResultFooterUsesTheUnifiedRetryLabel() async throws {
+        let suite = "MusicUIKitRegressionTests.search-retry." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let restorePreferences = try useSearchResultPreferences()
+        defer { restorePreferences() }
+        let service = MusicUIKitRegressionService()
+        let firstReads = expectation(description: "song result and stale playlist failure")
+        firstReads.expectedFulfillmentCount = 2
+        await service.allowResultSearch(playlistFailure: .staleResult) { firstReads.fulfill() }
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let controller = MusicSearchViewController(model: model, appearance: MusicAppearancePreferencesStore(),
+            router: MusicUIKitRegressionRouter(), history: SearchHistoryStore(defaults: defaults))
+        let navigation = PageNavigationController(themeProvider: MusicAppearancePreferencesStore())
+        navigation.setViewControllers([controller], animated: false)
+        let window = mount(navigation)
+        defer { release(navigation, window: window) }
+        controller.query = "原关键词"; controller.onSubmit?("原关键词")
+        await fulfillment(of: [firstReads], timeout: 2)
+        let results = try XCTUnwrap(navigation.topViewController as? SearchPageViewController)
+        let footer = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                results.view.layoutIfNeeded()
+                return self.identified("music.search.results.action.0.1", in: results.view) != nil
+            }
+        }, evaluatedWith: results)
+        await fulfillment(of: [footer], timeout: 2)
+        let button = try XCTUnwrap(identified("music.search.results.action.0.1", in: results.view) as? UIButton)
+        XCTAssertEqual(button.title(for: .normal), "重试")
         await model.close()
     }
 
@@ -2157,6 +2374,13 @@ final class MusicUIKitRegressionTests: XCTestCase {
             RunLoop.main.perform { continuation.resume() }
         }
     }
+    private func useSearchResultPreferences() throws -> @MainActor () -> Void {
+        let defaults = UserDefaults.standard, key = MusicSearchPreferencesStore.preferencesKey
+        let saved = defaults.object(forKey: key)
+        defaults.set(try JSONEncoder().encode(MusicSearchPreferences(songPlatforms: [.netease],
+            playlistPlatforms: [.netease])), forKey: key)
+        return { defaults.set(saved, forKey: key) }
+    }
     private func mount(_ controller: UIViewController) -> UIWindow {
         let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
         let window = scene.map { UIWindow(windowScene: $0) }
@@ -2604,8 +2828,15 @@ private final class MusicUIKitRegressionRouter: MusicUIRouting {
     }
 }
 
-private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, MusicPublicBrowsing,
+private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, MusicPublicBrowsing, MusicPublicPlaylistSearching,
     MusicSearchDiscoveryProviding, MusicSearchHotPlaybackProviding, MusicChorusProviding, MusicHomeBrowsing {
+    struct ResultRead: Equatable, Sendable {
+        let section: MusicSearchSection
+        let platform: String
+        let query: String
+        let page: Int
+        let limit: Int
+    }
     private let discovery: [MusicSearchDiscoverySnapshot]
     private var browse: MusicPublicBrowsePage
     private let nextBrowse: MusicPublicBrowsePage?
@@ -2623,6 +2854,9 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     private var chorusCalls: [String] = [], chorusActive = 0, chorusPeak = 0
     private var chorusGate: MusicUIKitChorusGate?
     private var chorusFailure: MusicServiceError?
+    private var resultSearchObserver: (@Sendable () -> Void)?
+    private var requestedResultReads: [ResultRead] = []
+    private var playlistSearchFailure: MusicServiceError?
     private var homeContinuations: [UUID: AsyncStream<Void>.Continuation] = [:]
     var isObservingHome: Bool { !homeContinuations.isEmpty }
     init(discovery: [MusicSearchDiscoverySnapshot] = [], browse: MusicPublicBrowsePage = .init(sections: []),
@@ -2642,6 +2876,10 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
         (discoveryCalls, browseCalls, trackCalls, requestedDetails.count)
     }
     func searchCalls() -> [Set<MusicSearchDiscoveryFailure.Component>] { requestedDiscovery }
+    func allowResultSearch(playlistFailure: MusicServiceError? = nil, onRead: @escaping @Sendable () -> Void) {
+        playlistSearchFailure = playlistFailure; resultSearchObserver = onRead
+    }
+    func resultReads() -> [ResultRead] { requestedResultReads }
     func detailCallIDs() -> [String] { requestedDetails }
     func detailReadCount() -> Int { requestedDetails.count }
     func updateBrowse(_ page: MusicPublicBrowsePage) {
@@ -2697,6 +2935,16 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
         return cursor == nil ? browse : nextBrowse ?? browse
     }
     func publicPlaylists(platform: MusicPublicBrowsePlatform, query: String, cursor: String?) throws -> MusicPublicBrowseCollectionPage { throw MusicServiceError.unsupported }
+    func searchPublicPlaylists(platform: MusicPublicBrowsePlatform, query: String,
+                               page: Int, limit: Int) throws -> MusicPlaylistSearchPage {
+        guard let observe = resultSearchObserver else { throw MusicServiceError.unsupported }
+        requestedResultReads.append(.init(section: .playlists, platform: platform.rawValue,
+            query: query, page: page, limit: limit))
+        observe()
+        if let failure = playlistSearchFailure { throw failure }
+        return .init(platform: platform, query: query, page: page, limit: limit,
+                     total: 0, nextPage: nil, items: [])
+    }
     func publicDetail(_ collection: MusicPublicBrowseCollection, cursor: String?) throws
         -> MusicPublicBrowseDetail {
         if let detail, detail.collection.id == collection.id {
@@ -2718,7 +2966,17 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     func accountTracks(platform: MusicAccountPlatform, collectionID: String, cursor: String?) throws -> MusicBrowsePage { throw MusicServiceError.unsupported }
     func state() -> MusicPlaybackState { .init() }
     func platforms() -> [MusicPlatform] { [] }
-    func search(platform: String, query: String, page: Int) throws -> MusicSearchPage { throw MusicServiceError.unsupported }
+    func search(platform: String, query: String, page: Int, limit: Int) throws -> MusicSearchPage {
+        guard let observe = resultSearchObserver else { throw MusicServiceError.unsupported }
+        requestedResultReads.append(.init(section: .songs, platform: platform, query: query, page: page, limit: limit))
+        let id = "result-\(platform)-\(requestedResultReads.count)"
+        let track = MusicRemoteTrack(ref: .init(kind: .handle, id: id), songId: id,
+            title: "Synthetic \(id)", artist: "Fixture", duration: 180,
+            sources: [.init(sourceKey: id, platform: platform, nativeId: id)])
+        observe()
+        return .init(platform: platform, query: query, page: page, limit: limit,
+                     total: 1, nextPage: nil, items: [track])
+    }
     func collections() -> [MusicCollection] {
         localTracks.isEmpty ? [] : [.init(id: collectionKind == "favorites" ? "favorites" : "playlist:1",
             title: "歌单", kind: collectionKind, count: localTracks.count, revision: 1)]

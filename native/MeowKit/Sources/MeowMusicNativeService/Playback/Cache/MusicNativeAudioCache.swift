@@ -68,7 +68,7 @@ extension NativeMusicService: MusicCachedPlaybackServing {
         let own = epoch, d = try read()
         try musicRequire(d.queue["currentId"].string == occurrenceID, .targetChanged)
         try musicRequire(UUID(uuidString: attemptID)?.uuidString.lowercased() == attemptID &&
-            !spent.contains(attemptID) && spent.count < 16_384, .staleResult)
+            !spent.contains(attemptID), .staleResult)
         let song = try self.song(.init(kind: .queue, id: occurrenceID), d)
         let sources = try MusicModel.sources(song).filter { platformEnabled($0.platform) }
         let signature = Self.audioCacheSignature(song: song, playback: d.playback)
@@ -158,7 +158,6 @@ extension NativeMusicService: MusicCachedPlaybackServing {
         else if [.paused, .ended, .failed, .stopped].contains(fact.kind) { current.isPlaying = false }
         let at = now()
         if fact.kind == .playing, let audio = current.audio, !current.captured {
-            guard audioCacheCaptures.count < 8 else { return }
             current.captured = true
             let request = MusicAudioFileCacheRequest(identity: current.identity, audio: audio,
                 expectedDuration: current.expectedDuration, confirmedAt: at, authorization: current.authorization,

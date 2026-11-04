@@ -7,7 +7,7 @@ import MeowStorage
 @MainActor
 extension MusicViewModel {
     public func collectionTracks(_ collection: MusicCollection) async throws -> [MusicRemoteTrack] {
-        let epoch = try enter(); defer { pending -= 1 }
+        let epoch = try enter()
         let values = try await requireService().tracks(in: collection); try check(epoch); return values
     }
 
@@ -27,7 +27,7 @@ extension MusicViewModel {
     }
     func readCollectionPage(id: String, binding: MusicCollectionPageBinding) async throws -> MusicCollectionPageSnapshot? {
         try binding.check(self)
-        let epoch = try enter(); defer { pending -= 1 }
+        let epoch = try enter()
         let service = try requireService()
         if let current = collections.first(where: { $0.id.utf8.elementsEqual(id.utf8) }) {
             do {
@@ -67,7 +67,7 @@ extension MusicViewModel {
     func editCollectionPage(_ ticket: MusicCollectionEditTicket, name: String?,
                             refs: [MusicReference]?, order: [String]?) async throws {
         try ticket.check(self)
-        let epoch = try enter(); defer { pending -= 1 }
+        let epoch = try enter()
         // Do not let an earlier root load overwrite the post-edit catalogue.
         loadID = UUID(); libraryState.isLoading = false
         let service = try requireService()
@@ -80,7 +80,7 @@ extension MusicViewModel {
     }
     func addCollectionPage(_ ticket: MusicCollectionEditTicket, ref: MusicReference, to target: MusicCollection) async throws {
         try ticket.check(self)
-        let epoch = try enter(); defer { pending -= 1 }
+        let epoch = try enter()
         let service = try requireService(), tracks = try await service.tracks(in: target)
         try check(epoch); try ticket.check(self)
         loadID = UUID(); libraryState.isLoading = false
@@ -110,7 +110,6 @@ extension MusicViewModel {
         cancelFMNavigation()
         let epoch: UUID
         do { epoch = try enter() } catch { return }
-        defer { pending -= 1 }
         guard !isChangingQueue, !isNavigating else {
             report(MusicServiceError.busy, epoch: epoch, operation: "更新播放队列", kind: .queue); return
         }

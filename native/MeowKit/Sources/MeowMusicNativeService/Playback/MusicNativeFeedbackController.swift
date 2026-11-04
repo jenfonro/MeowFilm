@@ -1,7 +1,7 @@
 import Foundation
 import MeowMusicFeature
 
-/// Product-lifetime, bounded, non-persistent feedback state. The music actor
+/// Current-playback, non-persistent feedback state. The music actor
 /// admits observations; this lock only protects asynchronous feedback outcomes.
 final class MusicNativeFeedbackController: @unchecked Sendable {
     private final class Listen: @unchecked Sendable {
@@ -24,9 +24,11 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
     private var current: String?, nativeID: UUID?, sequence: UInt64 = 0
     private var active: [MusicAccountPlatform: Listen] = [:]
     private var work: [UUID: Listen] = [:]
+    // The settings generation of the start already attempted per platform in
+    // this playback attempt. It prevents replaying an unknown submission; an
+    // explicit new generation may start, and a new attempt clears the record.
     private var spent: [MusicAccountPlatform: Int] = [:]
     private var terminal = false
-    private var reservations: [TimeInterval] = []
     private var idleWaiters: [CheckedContinuation<Void, Never>] = []
     private func locked<T>(_ body: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return body() }
     /// Finite logical drain for deterministic adapter checks. The playback
@@ -169,16 +171,14 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
                 }
                 active.removeAll()
             } else if sample.hasPlayed, sample.running {
-                reservations.removeAll { sample.observedAt - $0 >= 60 }
                 for target in targets {
                     let setting = settings.platforms[target.platform] ?? .init()
                     guard setting.enabled, active[target.platform] == nil, spent[target.platform] != setting.generation,
-                          work.count < 128, reservations.count < 20,
                           target.platform != .kugou || sample.duration > 0 && sample.rate >= 0.25 else { continue }
                     let gate = MusicPlaybackFeedbackAuthorization { try await authorize(target.platform, setting.generation) }
                     let item = Listen(target: target, setting: setting, authorization: gate)
                     active[target.platform] = item; work[item.id] = item
-                    spent[target.platform] = setting.generation; reservations.append(sample.observedAt)
+                    spent[target.platform] = setting.generation
                     starts.append((item, report(item, sample: sample, event: .start)))
                 }
             }

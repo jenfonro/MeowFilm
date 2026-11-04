@@ -7,21 +7,22 @@ import MeowMusicFeature
 enum MusicNativePublicBrowseMigu {
     static let switches = #"{"song":0,"album":0,"singer":0,"tagSong":0,"mvSong":0,"bestShow":0,"songlist":1,"lyricSong":0}"#
     static let searchFixed = ["isCorrect": "1", "isCopyright": "1", "searchSwitch": switches,
-        "pageSize": "30", "sort": "0", "sid": "USS"]
+        "sort": "0", "sid": "USS"]
     static let detailHeaders = [
         "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1",
         "Referer": "https://m.music.migu.cn/", "channel": "0146921"]
     static let headPath = "/MIGUM3.0/resource/playlist/v2.0", songsPath = "/MIGUM3.0/resource/playlist/song/v2.0"
 
-    static func search(query: String, page: Int, now: Date) throws -> MusicNativeHTTPRequest {
+    static func search(query: String, page: Int, limit: Int = 30, now: Date) throws -> MusicNativeHTTPRequest {
         // Reuse the same anonymous signature/encoding, but not the song switch.
-        let signed = try MusicNativeMiguSearch.request(query: query, page: page, now: now)
+        let signed = try MusicNativeMiguSearch.request(query: query, page: page, limit: limit, now: now)
         guard let timestamp = signed.headers["timestamp"] else { throw MusicServiceError.invalidRequest }
-        return try search(query: query, page: page, timestamp: timestamp)
+        return try search(query: query, page: page, limit: limit, timestamp: timestamp)
     }
-    static func search(query: String, page: Int, timestamp: String) throws -> MusicNativeHTTPRequest {
-        let signed = try MusicNativeMiguSearch.request(query: query, page: page, timestamp: timestamp)
+    static func search(query: String, page: Int, limit: Int = 30, timestamp: String) throws -> MusicNativeHTTPRequest {
+        let signed = try MusicNativeMiguSearch.request(query: query, page: page, limit: limit, timestamp: timestamp)
         var values = searchFixed; values["text"] = query; values["pageNo"] = String(page)
+        values["pageSize"] = String(limit)
         return try MusicNativePublicBrowseWire.get(host: MusicNativeMiguSearch.host, path: MusicNativeMiguSearch.path,
             values: values, headers: signed.headers)
     }
@@ -29,7 +30,9 @@ enum MusicNativePublicBrowseMigu {
         _ = try MusicNativePublicBrowseWire.playlistID(.string(id))
         var values = ["playlistId": id]
         if let page {
-            try musicRequire((1...40).contains(page))
+            // Page numbers are not a song-count budget; this bound only keeps
+            // the page-to-offset arithmetic from overflowing.
+            try musicRequire(page >= 1 && page < Int.max / 50)
             values["pageNo"] = String(page); values["pageSize"] = "50"
         }
         return try MusicNativePublicBrowseWire.get(host: page == nil ? "c.musicapp.migu.cn" : "app.c.nf.migu.cn",
@@ -38,9 +41,10 @@ enum MusicNativePublicBrowseMigu {
     static func permits(_ value: MusicNativeHTTPRequest) -> Bool {
         let expected: MusicNativeHTTPRequest?
         if let q = MusicNativeSearchProtocol.query(value, host: MusicNativeMiguSearch.host, path: MusicNativeMiguSearch.path,
-            keys: Set(searchFixed.keys).union(["text", "pageNo"])), let page = Int(q["pageNo"] ?? ""),
+            keys: Set(searchFixed.keys).union(["text", "pageNo", "pageSize"])), let page = Int(q["pageNo"] ?? ""),
+           let limit = Int(q["pageSize"] ?? ""),
            let timestamp = value.headers["timestamp"] {
-            expected = try? search(query: q["text"] ?? "", page: page, timestamp: timestamp)
+            expected = try? search(query: q["text"] ?? "", page: page, limit: limit, timestamp: timestamp)
         } else if let q = MusicNativeSearchProtocol.query(value, host: "c.musicapp.migu.cn", path: headPath, keys: ["playlistId"]) {
             expected = try? detail(id: q["playlistId"] ?? "", page: nil)
         } else if let q = MusicNativeSearchProtocol.query(value, host: "app.c.nf.migu.cn", path: songsPath,
@@ -55,10 +59,10 @@ enum MusicNativePublicBrowseMigu {
             MusicNativeSearchProtocol.first(root, "code", "returnCode").id == "000000", .upstreamInvalid)
         return root["data"].isObject ? root["data"] : root
     }
-    static func searchPage(_ root: MJ, page: Int) throws -> MusicPublicBrowseQQSearch {
+    static func searchPage(_ root: MJ, page: Int, limit: Int = 30) throws -> MusicPublicBrowseQQSearch {
         let data = try checked(root), result = data["songListResultData"]
         let total = try MusicNativePublicBrowseWire.count(result["totalCount"])
-        try musicRequire(result["result"].isArray && result["result"].array.count <= 30, .upstreamInvalid)
+        try musicRequire(result["result"].isArray && result["result"].array.count <= limit, .upstreamInvalid)
         let items = try result["result"].array.map { row in
             MusicPublicBrowseCollection(platform: .migu, nativeID: try MusicNativePublicBrowseWire.playlistID(row["id"]),
                 title: try row["name"].text(600),
@@ -66,7 +70,7 @@ enum MusicNativePublicBrowseMigu {
                 artwork: MusicNativePublicBrowseWire.artwork(row["musicListPicUrl"], platform: .migu),
                 count: row["musicNum"] == .null ? nil : try MusicNativePublicBrowseWire.count(row["musicNum"]))
         }
-        return try MusicNativePublicBrowseWire.searchPage(items, total: total, page: page)
+        return try MusicNativePublicBrowseWire.searchPage(items, total: total, page: page, limit: limit)
     }
 }
 
@@ -77,7 +81,7 @@ extension MusicNativePlatforms {
         let head = try await request(headWire)
         let info = try MusicNativePublicBrowseMigu.checked(head)
         try musicRequire(try MusicNativePublicBrowseWire.playlistID(info["musicListId"]) == id, .targetChanged)
-        let total = try MusicNativePublicBrowseWire.count(info["musicNum"], maximum: 2000)
+        let total = try MusicNativePublicBrowseWire.count(info["musicNum"])
         let title = try info["title"].text(600)
         let creator = info["ownerName"] == .null ? "" : try info["ownerName"].text(600, empty: true)
         let collection = MusicPublicBrowseCollection(platform: .migu, nativeID: id, title: title, creator: creator,
@@ -85,12 +89,13 @@ extension MusicNativePlatforms {
         let summary = MJ.array([.string("mg"), .string(id), info["title"], info["ownerId"], .n(total)])
         var ids: [MJ] = [], tracks: [MusicNativeTrackData] = [], published: MJ?, bytes = 0
         var copyrightIDs: [String: String] = [:], songIDs: [String: String] = [:]
-        for page in 1...max(1, (total + 49) / 50) {
+        var page = 1
+        while true {
             try Task.checkCancellation(); try musicRequire(own == epoch, .staleResult)
             let wire = try MusicNativePublicBrowseMigu.detail(id: id, page: page)
             let root = try await request(wire)
             let data = try MusicNativePublicBrowseMigu.checked(root)
-            let count = try MusicNativePublicBrowseWire.count(data["totalCount"], maximum: 2000)
+            let count = try MusicNativePublicBrowseWire.count(data["totalCount"])
             try musicRequire(count == total, .staleResult)
             if let published { try musicRequire(published == data["publishTime"], .staleResult) }
             else { published = data["publishTime"] }
@@ -106,10 +111,13 @@ extension MusicNativePlatforms {
                 ids.append(.array([.string(trackID), .string(copyrightID)])) // No occurrence deduplication.
                 if retainingTracks {
                     let track = try MusicNativeMiguSearch.song(row)
-                    bytes += track.data.count; try musicRequire(bytes <= 6 * 1024 * 1024, .limit)
+                    bytes += track.data.count; try musicRequire(bytes <= MusicRemoteQueueSource.maximumBytes, .limit)
                     tracks.append(track)
                 }
             }
+            if ids.count == total { break }
+            try musicRequire(ids.count < total && !data["songList"].array.isEmpty, .staleResult)
+            page += 1
         }
         try musicRequire(ids.count == total && own == epoch, .staleResult)
         return .init(collection: collection, tracks: tracks,

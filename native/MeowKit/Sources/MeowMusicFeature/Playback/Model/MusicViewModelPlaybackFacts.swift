@@ -151,18 +151,12 @@ extension MusicViewModel {
         // UI gets each clock sample. Persistent progress is coalesced at five
         // seconds plus pause/end/exit; request targets aren't playback facts.
         if fact.kind == .progress, let lastProgressWrite, abs(fact.position - lastProgressWrite) < 5 { return }
-        if pendingFacts >= 8 {
-            if fact.kind != .progress { error = MusicServiceError.busy.localizedDescription }
-            return
-        }
         if [.ended, .failed, .stopped].contains(fact.kind) { terminalAttempt = fact.attemptId }
         let epoch = lifecycle, token = selectionID, navigation = navigationID, prior = eventTail
         guard let service else { return }
-        pendingFacts += 1
         eventTail = Task { [weak self] in
             await prior?.value
             guard let self else { return }
-            defer { self.pendingFacts -= 1 }
             do {
                 try self.check(epoch)
                 guard token == self.selectionID, self.candidate?.attemptId == fact.attemptId else { return }

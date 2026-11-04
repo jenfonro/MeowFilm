@@ -11,19 +11,7 @@ public extension MusicViewModel {
     var scriptSourceError: String? { playbackState.scriptSourceError }
     var collections: [MusicCollection] { libraryState.collections }
     var queue: [MusicQueueEntry] { playbackState.queue }
-    var searchResults: [MusicRemoteTrack] { searchState.results }
-    var nextSearchPage: Int? { searchState.nextPage }
-    var hasSearched: Bool { searchState.hasSearched }
-    var query: String {
-        get { searchState.query }
-        set { searchState.query = newValue }
-    }
-    var selectedPlatform: String {
-        get { searchState.platform }
-        set { searchState.platform = newValue }
-    }
     var isLoading: Bool { libraryState.isLoading }
-    var isSearching: Bool { searchState.isSearching }
     var isResolving: Bool { playbackState.isResolving }
     var isNavigating: Bool { playbackState.isNavigating }
     var isChangingQueue: Bool { playbackState.isChangingQueue }

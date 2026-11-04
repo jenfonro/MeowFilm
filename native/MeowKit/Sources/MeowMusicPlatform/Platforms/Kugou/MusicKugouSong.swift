@@ -104,10 +104,10 @@ struct MusicKugouSong: Sendable {
             native[quality] = .object(["hash": .string(resource.hash), "size": .number(Double(resource.size))])
         }
         return .object([
-            "source": .string("kg"), "musicId": .string(hash), "hash": .string(hash), "songmid": .string(audioID),
-            "name": .string(title), "singer": .string(artist), "album": .string(album), "albumName": .string(album),
+            "source": .string("kg"), "hash": .string(hash), "songmid": .string(hash),
+            "name": .string(title), "singer": .string(artist), "albumName": .string(album),
             "albumId": .string(albumID), "album_id": .string(albumID), "albumAudioId": .string(albumAudioID),
-            "duration": .number(duration), "img": .string(image), "types": .array(types), "_types": .object(native), "typeUrl": .object([:])
+            "duration": .number(duration), "img": .string(image), "types": .array(types), "_types": .object(native)
         ])
     }
 }

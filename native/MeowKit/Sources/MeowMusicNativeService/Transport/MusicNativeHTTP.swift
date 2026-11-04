@@ -25,10 +25,6 @@ public struct MusicNativeHTTPResponse: Sendable {
 }
 public protocol MusicNativeHTTPTransport: Sendable {
     func send(_ request: MusicNativeHTTPRequest) async throws -> MusicNativeHTTPResponse
-    func recordRateLimit(for url: URL, retryAfter: String?) async
-}
-public extension MusicNativeHTTPTransport {
-    func recordRateLimit(for url: URL, retryAfter: String?) async {}
 }
 
 /// One instance per native public-platform service, not per request. No CookieJar,
@@ -54,15 +50,12 @@ public final class URLSessionMusicNativeHTTPTransport: NSObject, MusicNativeHTTP
     private var sessionValue: URLSession?
     private var closed = false
     private var transfers: [Int: Transfer] = [:]
-    private let admission: RequestAdmission
-    private let admissionScope = UUID()
     private let routes: [String: Set<String>] = [
         "interfacepc.music.163.com": ["/eapi/cloudsearch/pc", "/eapi/song/lyric/v1"],
         "gateway.kugou.com": ["/v2/search/song"],
         "lyrics.kugou.com": ["/v1/search", "/download"]
     ]
-    public override convenience init() { self.init(admission: RequestAdmission()) }
-    public init(admission: RequestAdmission) { self.admission = admission; super.init() }
+    public override init() { super.init() }
     private func session() throws -> URLSession {
         lock.lock(); defer { lock.unlock() }
         guard !closed else { throw MusicServiceError.closed }
@@ -72,7 +65,6 @@ public final class URLSessionMusicNativeHTTPTransport: NSObject, MusicNativeHTTP
         config.urlCredentialStorage = nil; config.urlCache = nil
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         config.timeoutIntervalForRequest = 15; config.timeoutIntervalForResource = 30
-        config.httpMaximumConnectionsPerHost = 2
         let value = URLSession(configuration: config, delegate: self, delegateQueue: nil)
         sessionValue = value
         return value
@@ -93,22 +85,11 @@ public final class URLSessionMusicNativeHTTPTransport: NSObject, MusicNativeHTTP
         else { throw MusicServiceError.invalidRequest }
         try Task.checkCancellation()
         let trace = MusicRequestTrace(.publicAPI)
-        let lease: UUID
-        do { lease = try await admission.acquire(host: host, scope: admissionScope, priority: trace.priority) }
-        catch { trace.failed(error); throw MusicServiceError.sanitized(error) }
-        defer { Task { await admission.release(lease) } }
         do {
             let response = try await transfer(value, trace: trace)
-            if response.status == 429 {
-                await recordRateLimit(for: value.url, retryAfter: response.header("retry-after"))
-            }
             trace.record(.completed, http: response.status)
             return response
         } catch { trace.failed(error); throw MusicServiceError.sanitized(error) }
-    }
-    public func recordRateLimit(for url: URL, retryAfter: String?) async {
-        guard let host = url.host else { return }
-        await admission.coolDown(host: host, seconds: RequestAdmission.retryAfter(retryAfter) ?? 2)
     }
     private func transfer(_ value: MusicNativeHTTPRequest, trace: MusicRequestTrace) async throws -> MusicNativeHTTPResponse {
         try Task.checkCancellation()
@@ -190,7 +171,6 @@ public final class URLSessionMusicNativeHTTPTransport: NSObject, MusicNativeHTTP
     /// Product service owns this transport, not any shared URLSession.
     public func close() {
         lock.lock(); closed = true; let value = sessionValue; sessionValue = nil; lock.unlock()
-        Task { await admission.close(scope: admissionScope) }
         value?.invalidateAndCancel()
     }
 }

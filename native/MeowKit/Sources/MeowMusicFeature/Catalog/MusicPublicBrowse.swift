@@ -226,6 +226,12 @@ public protocol MusicPublicBrowsing: Sendable {
     func publicDetail(_ collection: MusicPublicBrowseCollection, cursor: String?) async throws -> MusicPublicBrowseDetail
     func publicDiscovery(_ destination: MusicPublicBrowseDestination, cursor: String?) async throws -> MusicPublicBrowsePage
 }
+/// Search-only page reads. Browsing keeps its opaque cursor contract; the
+/// search session owns page numbers so each platform can fetch them in parallel.
+public protocol MusicPublicPlaylistSearching: Sendable {
+    func searchPublicPlaylists(platform: MusicPublicBrowsePlatform, query: String,
+                               page: Int, limit: Int) async throws -> MusicPlaylistSearchPage
+}
 public protocol MusicPublicBrowseRefreshing: Sendable {
     func refreshPublicCollection(_ collection: MusicPublicBrowseCollection) async
 }
@@ -252,7 +258,7 @@ public protocol MusicPublicBrowseQueueLoading: Sendable {
 
 /// Optional extension of the already assembled anonymous QQ owner.
 public protocol MusicPublicBrowseQQProviding: MusicPublicQQProviding {
-    func publicBrowsePlaylists(query: String, page: Int) async throws -> MusicPublicBrowseQQSearch
+    func publicBrowsePlaylists(query: String, page: Int, limit: Int) async throws -> MusicPublicBrowseQQSearch
     func publicBrowsePlaylistPage(id: String, offset: Int) async throws -> MusicPublicBrowseNativeCollectionPage
     func publicBrowsePlaylist(id: String) async throws -> MusicPublicBrowseNativeCollection
 }

@@ -27,7 +27,7 @@ enum MusicNeteaseSimilarModeRequest {
             guard (1...20).contains(ids.count) else { throw MusicServiceError.invalidRequest }
             try ids.forEach(id)
         case .queueRecommendations(let ids, let current):
-            guard (1...1000).contains(ids.count), ids.contains(current) else { throw MusicServiceError.invalidRequest }
+            guard !ids.isEmpty, ids.contains(current) else { throw MusicServiceError.invalidRequest }
             try ids.forEach(id); try id(current)
         }
     }

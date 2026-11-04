@@ -5,7 +5,7 @@ import MeowMusicFeature
 final class MusicNativeFeedbackTests: XCTestCase {
     func testOptionalSettingsDefaultOffPreserveLibraryUnknownPlaybackFieldsAndColdReadTrue() async throws {
         let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
-        let page = try await service.search(platform: "tx", query: "Synthetic", page: 1)
+        let page = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30)
         let collection = try await service.createPlaylist(name: "Retained", refs: page.items.map(\.ref))
         let old = try await service.playbackFeedbackSettings()
         XCTAssertEqual(old.platforms.count, 3)
@@ -51,7 +51,7 @@ final class MusicNativeFeedbackTests: XCTestCase {
 
     func testMalformedFeedbackFailsClosedWithoutMakingOtherLibraryDataEmpty() async throws {
         let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
-        let page = try await service.search(platform: "tx", query: "Synthetic", page: 1)
+        let page = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30)
         let collection = try await service.createPlaylist(name: "Retained", refs: page.items.map(\.ref))
         let before = store.snapshot().0
         var draft = try MusicDocument(before, runID: "synthetic")
@@ -67,7 +67,7 @@ final class MusicNativeFeedbackTests: XCTestCase {
     }
 
     private func ready(_ service: NativeMusicService) async throws -> MusicPlaybackCandidate {
-        let page = try await service.search(platform: "tx", query: "SyntheticMID", page: 1)
+        let page = try await service.search(platform: "tx", query: "SyntheticMID", page: 1, limit: 30)
         let state = try await service.changeQueue(.replace(page.items.map(\.ref), index: 0), expectedRevision: 0)
         let options = try await service.playbackOptions(for: page.items[0].ref)
         let option = try XCTUnwrap(options.first { $0.installationId == NativeMusicFixture.installation })
@@ -155,22 +155,31 @@ final class MusicNativeFeedbackTests: XCTestCase {
         await service.close()
     }
 
-    func testMappingRespectsAuthoritativeEmptySourcesQuarantineAndExactKGIdentity() throws {
+    func testMappingRespectsAuthoritativeEmptySourcesAndExactKGIdentity() throws {
         var song = try NativeMusicFixture.song()
         XCTAssertEqual(try MusicNativeFeedbackMapping.targets(song: song, context: .obj()), NativeFeedbackFixture.targets)
         let automatic = try MusicNativeFeedbackMapping.targets(song: song, context: .obj([("automatic", .bool(true))]))
         XCTAssertEqual(automatic.first?.automatic, true)
-        let source = try XCTUnwrap(song["sources"].array.first)
-        song["quarantinedSources"] = .array([.obj([("sourceKey", source["sourceKey"])])])
+        song["sources"] = .array([])
         XCTAssertTrue(try MusicNativeFeedbackMapping.targets(song: song, context: .obj()).isEmpty)
-        song["quarantinedSources"] = .array([]); song["sources"] = .array([])
-        XCTAssertTrue(try MusicNativeFeedbackMapping.targets(song: song, context: .obj()).isEmpty)
-        var kg = MJ.obj([("source", .string("kg")), ("musicId", .string(String(repeating: "A", count: 32))),
-            ("hash", .string(String(repeating: "A", count: 32))), ("albumAudioId", .string("22"))])
+        let hash = String(repeating: "A", count: 32)
+        let info = MJ.obj([("source", .string("kg")), ("songmid", .string(hash)),
+            ("hash", .string(hash)), ("albumAudioId", .string("22"))])
+        var kg = MJ.obj([("sourceKey", .string(try MusicModel.sourceKey(info))),
+            ("source", .string("kg")), ("musicInfo", info)])
         XCTAssertEqual(MusicNativeFeedbackMapping.recording(kg, platform: .kugou)?.mixsongID, "22")
-        kg["mixsongid"] = .string("23")
+        kg["musicInfo"]["mixsongid"] = .string("23")
         XCTAssertNil(MusicNativeFeedbackMapping.recording(kg, platform: .kugou))
-        kg.remove("mixsongid"); kg["hash"] = .string(String(repeating: "B", count: 32))
+        var changed = kg["musicInfo"]
+        changed.remove("mixsongid")
+        kg["musicInfo"] = changed
+        kg["musicInfo"]["hash"] = .string(String(repeating: "B", count: 32))
+        kg["sourceKey"] = .string(try MusicModel.sourceKey(kg["musicInfo"]))
         XCTAssertNil(MusicNativeFeedbackMapping.recording(kg, platform: .kugou))
+        kg["musicInfo"]["hash"] = .string(hash)
+        kg["sourceKey"] = .string(try MusicModel.sourceKey(kg["musicInfo"]))
+        kg["musicInfo"]["albumAudioId"] = .string("0")
+        kg["musicInfo"]["mixsongid"] = .string("22")
+        XCTAssertEqual(MusicNativeFeedbackMapping.recording(kg, platform: .kugou)?.mixsongID, "22")
     }
 }

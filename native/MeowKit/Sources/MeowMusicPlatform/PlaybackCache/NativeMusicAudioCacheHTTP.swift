@@ -87,7 +87,6 @@ enum NativeMusicAudioCacheHTTPPolicy {
         value.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         value.timeoutIntervalForRequest = transferIdle
         value.timeoutIntervalForResource = transferMaximum
-        value.httpMaximumConnectionsPerHost = 1
         return value
     }
 

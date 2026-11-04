@@ -3,6 +3,21 @@ import MeowMusicFeature
 @testable import MeowMusicNativeService
 
 final class MusicNativeFilteredRemoteQueueTests: XCTestCase {
+    func testFilteredSourceKeepsLongSongListsAndFiveDigitContinuationOffsets() async throws {
+        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let row = NativeMusicFixture.track(), count = 10_021
+        let parent = MusicRemoteCollectionActionsFixture.source(
+            MusicRemoteCollectionActionsFixture.pages(Array(repeating: row, count: count)))
+        let child = try await service.filteredRemoteQueue(source: parent, query: "Synthetic", intent: .init())
+        let rows = try await child.collectionTracks(intent: .init())
+        XCTAssertEqual(rows.count, count)
+        XCTAssertTrue(rows.allSatisfy { $0.data == row.data })
+        let last = try await child.page(cursor: "10020")
+        XCTAssertEqual(last.items.count, 1); XCTAssertNil(last.cursor)
+        XCTAssertNil(store.snapshot().0); XCTAssertEqual(store.snapshot().2, 0)
+        await child.close(); await parent.close(); await service.close()
+    }
+
     func testFilterCompletesSourceAndPlaysAll631MatchesWithDuplicatesAndFilteredOccurrenceIndex() async throws {
         let store = NativeMusicMemoryDocument(), scripts = NativeMusicScriptFixture()
         let service = try await NativeMusicFixture.service(store, scripts: scripts)
@@ -172,7 +187,7 @@ final class MusicNativeFilteredRemoteQueueTests: XCTestCase {
     func testFilterValidatesExcludedRowsAndRejectsOversizedQueryBeforeReading() async throws {
         let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
         let invalid = MusicNativeTrackData(platform: "tx", data: MJ.obj([
-            ("musicId", .string("Invalid")), ("name", .string("Does not match")), ("duration", .n(-1))
+            ("songmid", .string("Invalid")), ("name", .string("Does not match")), ("duration", .n(-1))
         ]).bytes)
         let pages = MusicRemoteCollectionActionsFixture.pages([NativeMusicFixture.track(), invalid])
         let parent = MusicRemoteCollectionActionsFixture.source(pages)

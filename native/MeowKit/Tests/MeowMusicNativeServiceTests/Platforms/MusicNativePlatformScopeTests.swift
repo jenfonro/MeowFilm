@@ -5,7 +5,7 @@ import MeowMusicFeature
 
 /// Deterministic native boundary checks only: no JS runtime, account, or network.
 final class MusicNativePlatformScopeTests: XCTestCase {
-    private let production: Set<MusicPublicBrowsePlatform> = [.netease, .qq, .kugou]
+    private let threePlatformScope: Set<MusicPublicBrowsePlatform> = [.netease, .qq, .kugou]
 
     private func service(_ store: NativeMusicMemoryDocument = .init(),
                          enabled: Set<MusicPublicBrowsePlatform> = [.netease, .qq, .kugou],
@@ -13,7 +13,7 @@ final class MusicNativePlatformScopeTests: XCTestCase {
                          accounts: (any MusicNativeAccountProviding)? = nil,
                          qq: any MusicPublicQQProviding = NativeMusicQQFixture(),
                          http: any MusicNativeHTTPTransport = NativeMusicNoNetwork()) async throws -> NativeMusicService {
-        // Match production's label order; scripts are omitted by default.
+        // Explicit three-platform scope; scripts are omitted by default.
         let value = NativeMusicService(document: store, scripts: scripts, accounts: accounts, qq: qq,
             enabledPlatforms: enabled, transport: http, clock: { NativeMusicFixture.date }, random: { 0 })
         try await value.setAccess(available: true, generation: 1)
@@ -48,7 +48,7 @@ final class MusicNativePlatformScopeTests: XCTestCase {
         let configured = try await service()
         let selected = try await configured.platforms()
         XCTAssertEqual(selected, Array(original.prefix(3)))
-        XCTAssertEqual(configured.enabledPlatforms, production)
+        XCTAssertEqual(configured.enabledPlatforms, threePlatformScope)
         await configured.close()
 
         let empty = try await service(enabled: [])
@@ -63,7 +63,7 @@ final class MusicNativePlatformScopeTests: XCTestCase {
         for platform in [MusicPublicBrowsePlatform.kuwo, .migu] {
             let collection = MusicPublicBrowseCollection(platform: platform, nativeID: "9007199254740993", title: "Saved")
             let request = MusicPublicBrowseQueueRequest(collection: collection, snapshot: String(repeating: "a", count: 64))
-            await rejected { try await owner.search(platform: platform.rawValue, query: "Synthetic", page: 1) }
+            await rejected { try await owner.search(platform: platform.rawValue, query: "Synthetic", page: 1, limit: 30) }
             await rejected { try await owner.publicPlaylists(platform: platform, query: "Synthetic", cursor: nil) }
             await rejected { try await owner.publicDetail(collection, cursor: nil) }
             await rejected { try await owner.publicQueueTracks(request) }
@@ -83,7 +83,7 @@ final class MusicNativePlatformScopeTests: XCTestCase {
             }
             await source.close()
         }
-        await rejected { try await owner.search(platform: "unknown", query: "Synthetic", page: 1) }
+        await rejected { try await owner.search(platform: "unknown", query: "Synthetic", page: 1, limit: 30) }
         let calls = await http.calls()
         XCTAssertTrue(calls.isEmpty)
         XCTAssertNil(store.snapshot().0); XCTAssertEqual(store.snapshot().2, 0)
@@ -112,11 +112,11 @@ final class MusicNativePlatformScopeTests: XCTestCase {
         await owner.close()
     }
 
-    func testProductionSearchStillUsesAllThreeNativeAdapters() async throws {
+    func testExplicitThreePlatformScopeStillUsesAllThreeNativeAdapters() async throws {
         let http = MusicNativeCandidateDiscoveryHTTP(), qq = MusicNativeCandidateDiscoveryQQ()
         let owner = try await service(qq: qq, http: http)
         for platform in ["wy", "tx", "kg"] {
-            let page = try await owner.search(platform: platform, query: "Synthetic recording", page: 1)
+            let page = try await owner.search(platform: platform, query: "Synthetic recording", page: 1, limit: 30)
             XCTAssertEqual(page.items.count, 1)
             XCTAssertEqual(page.items.first?.sources.first?.platform, platform)
         }
@@ -175,6 +175,68 @@ final class MusicNativePlatformScopeTests: XCTestCase {
         await session.close(retainingAttemptID: nil); await owner.close()
     }
 
+    func testFivePlatformScopeKeepsAccountOptionsFeedbackAndSyncAtThreeAccountPlatforms() async throws {
+        let song = try mixedSong(), store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
+        let accounts = MusicPlatformScopeAccounts()
+        let owner = try await service(store, enabled: Set(MusicPublicBrowsePlatform.allCases), accounts: accounts)
+        // Without a script host, KW/MG have public search, lyrics and saved
+        // sources but no account playback candidate.
+        let availability = try await owner.sourceAvailability(for: .init(kind: .queue, id: "entry-1"))
+        XCTAssertEqual(availability.scriptState, .notConfigured)
+        XCTAssertEqual(availability.options.count, 3)
+        XCTAssertEqual(Set(availability.options.map(\.siteId)), Set(["wy", "tx", "kg"]))
+        XCTAssertFalse(availability.options.contains { ["kw", "mg"].contains($0.siteId) },
+                       "KW/MG have no account playback candidate")
+        let optionCalls = await accounts.events()
+        XCTAssertEqual(Set(optionCalls.filter { $0.hasPrefix("options:") }),
+                       Set(["options:wy", "options:tx", "options:kg"]))
+
+        // Enabled scope alone must not invent an official KW/MG account path.
+        let sources = try MusicModel.sources(song)
+        for platform in ["kw", "mg"] {
+            let source = try XCTUnwrap(sources.first { $0.platform == platform })
+            let option = MusicPlaybackOption(installationId: "official:scope", generation: 1, siteId: platform,
+                sourceKey: source.sourceKey, qualities: ["128k"], title: "Saved", version: "1",
+                contentHash: String(repeating: "a", count: 64))
+            do {
+                _ = try await owner.resolve(attemptId: UUID().uuidString.lowercased(), occurrenceId: "entry-1",
+                                            selection: option.selection(quality: "128k"))
+                XCTFail("KW/MG have no official account playback")
+            } catch { XCTAssertEqual(error as? MusicServiceError, .sourceUnavailable) }
+        }
+        let afterResolve = await accounts.events()
+        XCTAssertFalse(afterResolve.contains { $0.hasPrefix("resolve:") })
+
+        // Feedback settings and mapping targets stay on the three account
+        // platforms even though five platforms are enabled.
+        let settings = try await owner.playbackFeedbackSettings()
+        XCTAssertEqual(Set(settings.platforms.keys.map(\.rawValue)), Set(["wy", "tx", "kg"]))
+        let stored = try MusicDocument(store.snapshot().0, runID: "fixture").queue["entries"].array[0]["song"]
+        let targets = try MusicNativeFeedbackMapping.targets(song: stored, context: .obj())
+        XCTAssertEqual(Set(targets.map(\.platform)), Set(MusicAccountPlatform.allCases))
+
+        // KW/MG sources remain durable in the queue and favorites; sync
+        // selections are constrained by MusicAccountPlatform itself.
+        let queue = try await owner.queue(), track = try XCTUnwrap(queue.entries.first?.track)
+        XCTAssertEqual(Set(track.sources.map(\.platform)), Set(["wy", "tx", "kg", "kw", "mg"]))
+        let collections = try await owner.collections()
+        let favorites = try XCTUnwrap(collections.first { $0.kind == "favorites" })
+        let saved = try await owner.editPlaylist(favorites, name: nil, refs: [track.ref], order: nil)
+        let tracks = try await owner.tracks(in: saved)
+        XCTAssertEqual(Set(tracks.first?.sources.map(\.platform) ?? []), Set(["wy", "tx", "kg", "kw", "mg"]))
+        await owner.close()
+
+        // Five-platform enablement must not block or widen account sync: a real
+        // selection still syncs, and no KW/MG account identity exists to select.
+        let peer = NativeSyncPeer(platform: .netease), syncStore = NativeMusicMemoryDocument()
+        let syncOwner = try await service(syncStore, enabled: Set(MusicPublicBrowsePlatform.allCases), accounts: peer)
+        let synced = try await syncOwner.synchronizeLibrary(NativeSyncFixture.request(.netease))
+        XCTAssertEqual(synced.phase, .synced)
+        XCTAssertEqual(synced.selections.map(\.platform), [.netease])
+        XCTAssertEqual(MusicAccountPlatform.allCases.map(\.rawValue), ["wy", "tx", "kg"])
+        await syncOwner.close()
+    }
+
     func testDisabledPinnedResolveAndLyricsFailBeforeNativeOrScriptCalls() async throws {
         let song = try mixedSong(), store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
         let scripts = MusicPlatformScopeScripts(), accounts = MusicPlatformScopeAccounts(), http = NativeMusicHTTPFixture([])
@@ -203,7 +265,7 @@ final class MusicNativePlatformScopeTests: XCTestCase {
         await session.close(retainingAttemptID: nil); await owner.close()
     }
 
-    func testNoScriptProductionAssemblyKeepsOfficialOptionsAndBothResolveEntrypoints() async throws {
+    func testExplicitThreePlatformScopeKeepsOfficialOptionsAndBothResolveEntrypoints() async throws {
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: mixedSong())
         let accounts = MusicPlatformScopeAccounts(), owner = try await service(store, accounts: accounts)
         let availability = try await owner.sourceAvailability(for: .init(kind: .queue, id: "entry-1"))
@@ -264,7 +326,7 @@ final class MusicNativePlatformScopeTests: XCTestCase {
         try document.validate()
         let bytes = try document.encode(changed: ["library", "queue", "playback", "history"])
         let store = NativeMusicMemoryDocument(bytes)
-        for enabled in [production, Set<MusicPublicBrowsePlatform>(), Set(MusicPublicBrowsePlatform.allCases)] {
+        for enabled in [threePlatformScope, Set<MusicPublicBrowsePlatform>(), Set(MusicPublicBrowsePlatform.allCases)] {
             let owner = try await service(store, enabled: enabled)
             let collections = try await owner.collections()
             let library = try await owner.tracks(in: XCTUnwrap(collections.first))
@@ -293,7 +355,7 @@ final class MusicNativePlatformScopeTests: XCTestCase {
             draft.queue["source"] = .obj([("sourceType", .string("fm")), ("platform", .string(platform.rawValue)),
                 ("remoteSession", .string(source.id.uuidString.lowercased()))])
             let store = NativeMusicMemoryDocument(try draft.encode(changed: ["queue", "playback"]))
-            let owner = try await service(store, enabled: production.subtracting([.init(accountPlatform: platform)]),
+            let owner = try await service(store, enabled: threePlatformScope.subtracting([.init(accountPlatform: platform)]),
                                           accounts: accounts)
             let before = store.snapshot()
             await rejected { try await owner.openAccountQueue(platform: platform, kind: .collection(id: "favorites"), title: "Saved") }
@@ -315,7 +377,7 @@ final class MusicNativePlatformScopeTests: XCTestCase {
         }
     }
 
-    func testProductionAccountQueuesAndNativeFMRemainEnabled() async throws {
+    func testExplicitThreePlatformScopeKeepsAccountQueuesAndNativeFMEnabled() async throws {
         for platform in MusicAccountPlatform.allCases {
             let accounts = MusicPlatformScopeAccounts(), owner = try await service(accounts: accounts)
             let source = try await owner.openAccountQueue(platform: platform,
@@ -346,10 +408,10 @@ final class MusicNativePlatformScopeTests: XCTestCase {
             let original = try await service(store, accounts: peer)
             let request = NativeSyncFixture.request(platform)
             let synced = try await original.synchronizeLibrary(request)
-            XCTAssertEqual(synced.phase, .synced, "all three production platforms retain native sync")
+            XCTAssertEqual(synced.phase, .synced, "all three account platforms retain native sync")
             await original.close()
             let before = store.snapshot(), callsBefore = await peer.counts()
-            let owner = try await service(store, enabled: production.subtracting([.init(accountPlatform: platform)]), accounts: peer)
+            let owner = try await service(store, enabled: threePlatformScope.subtracting([.init(accountPlatform: platform)]), accounts: peer)
             let restored = try await owner.librarySyncState()
             XCTAssertEqual(restored.selections, request.selections, "saved preferences stay readable, not rewritten")
             let allowed = try XCTUnwrap(MusicAccountPlatform.allCases.first { $0 != platform })
@@ -370,7 +432,7 @@ final class MusicNativePlatformScopeTests: XCTestCase {
     }
 
     func testFeedbackFiltersDisabledTargetsAndRechecksAuthorizationWithoutChangingSavedFlags() async throws {
-        let scopes: [Set<MusicPublicBrowsePlatform>] = [production, [.netease], [.qq], [.kugou], []]
+        let scopes: [Set<MusicPublicBrowsePlatform>] = [threePlatformScope, [.netease], [.qq], [.kugou], []]
         for enabled in scopes {
             let seed = try MusicNativeCandidateDiscoveryFixture.store(song: mixedSong())
             var draft = try MusicDocument(seed.snapshot().0, runID: "fixture")

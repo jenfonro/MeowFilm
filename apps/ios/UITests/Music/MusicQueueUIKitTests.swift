@@ -396,7 +396,7 @@ private actor QueueUIKitService: MusicServing, MusicSimilarModeServing, MusicHis
     func platforms() -> [MusicPlatform] { [.init(id: "wy", title: "网易云音乐", accountState: "unauthorized")] }
     func collections() -> [MusicCollection] { [] }
     func tracks(in collection: MusicCollection) -> [MusicRemoteTrack] { [] }
-    func search(platform: String, query: String, page: Int) throws -> MusicSearchPage { throw MusicServiceError.unsupported }
+    func search(platform: String, query: String, page: Int, limit: Int) throws -> MusicSearchPage { throw MusicServiceError.unsupported }
     func createPlaylist(name: String, refs: [MusicReference]) throws -> MusicCollection { throw MusicServiceError.unsupported }
     func editPlaylist(_ collection: MusicCollection, name: String?, refs: [MusicReference]?, order: [String]?) throws -> MusicCollection { throw MusicServiceError.unsupported }
     func removePlaylist(_ collection: MusicCollection) throws { throw MusicServiceError.unsupported }

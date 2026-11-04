@@ -96,10 +96,8 @@ public actor MusicCandidateDiscoveryConsumer {
                         try await session.commitDiscovery()
                     }
                     let plan = try policy.plan(snapshot, preferred: preferred)
-                    guard plan.count <= 15 else { throw MusicServiceError.limit }
                     for target in plan where !attempted.contains(where: { $0.sameRequest(as: target) }) {
                         try Task.checkCancellation()
-                        if attempted.count == 15 { break }
                         // An injected policy cannot invent a target or disabled quality.
                         guard snapshot.options.contains(target.option), target.option.playback.qualities.contains(target.quality) else {
                             throw MusicServiceError.targetChanged
@@ -123,7 +121,7 @@ public actor MusicCandidateDiscoveryConsumer {
                             }
                         }
                     }
-                    if winner != nil || attempted.count == 15 { break }
+                    if winner != nil { break }
                 }
                 guard let winner else {
                     throw MusicCandidateDiscoveryFailure(failure: .sourceUnavailable, issues: issues, attempts: attempted.count)

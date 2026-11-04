@@ -1,6 +1,6 @@
 import Foundation
 
-/// A user-opened, bounded read snapshot shared by browsing and queue commit.
+/// A user-opened read snapshot shared by browsing and queue commit.
 /// Loaders return public music locators, never account credentials or media URLs.
 /// Public playlist/album consumers can construct this without an account module.
 public actor MusicRemoteQueueSource {
@@ -16,10 +16,7 @@ public actor MusicRemoteQueueSource {
     private var savingStyle = false
     private var contentRevision = UUID()
     private var closed = false
-    private var itemCount = 0
     private var byteCount = 0
-    public static let maximumTracks = 2000
-    public static let maximumPages = 100
     public static let maximumBytes = 6 * 1024 * 1024
 
     public init(context: MusicRemoteQueueContext,
@@ -58,16 +55,14 @@ public actor MusicRemoteQueueSource {
             guard pages.values.contains(where: { $0.cursor == cursor }) else { throw MusicServiceError.staleResult }
         }
         guard !loading else { throw MusicServiceError.busy }
-        guard pages.count < Self.maximumPages else { throw MusicServiceError.limit }
         loading = true; defer { loading = false }
         let value = try await load(cursor)
         try await validate()
         let bytes = try checked(value)
         guard value.cursor != cursor || cursor == nil,
               value.cursor == nil || pages[value.cursor!] == nil else { throw MusicServiceError.invalidResponse }
-        guard itemCount + value.items.count <= Self.maximumTracks,
-              byteCount + bytes <= Self.maximumBytes else { throw MusicServiceError.limit }
-        pages[key] = value; itemCount += value.items.count; byteCount += bytes
+        guard byteCount + bytes <= Self.maximumBytes else { throw MusicServiceError.limit }
+        pages[key] = value; byteCount += bytes
         return value
     }
     public func completeTracks(intent: MusicQueueAuthorization) async throws -> [MusicNativeTrackData] {
@@ -85,17 +80,15 @@ public actor MusicRemoteQueueSource {
         var expected: Int?
         repeat {
             try intent.check()
-            guard visited.insert(cursor ?? "").inserted, visited.count <= Self.maximumPages else { throw MusicServiceError.limit }
+            guard visited.insert(cursor ?? "").inserted else { throw MusicServiceError.invalidResponse }
             let value = try await page(cursor: cursor)
             guard revision == contentRevision else { throw MusicServiceError.staleResult }
             if requireAllMembers {
-                guard value.total <= Self.maximumTracks else { throw MusicServiceError.limit }
                 guard value.total >= value.items.count,
                       expected == nil || expected == value.total else { throw MusicServiceError.invalidResponse }
                 expected = value.total
             }
             rows += value.items; cursor = value.cursor
-            guard rows.count <= Self.maximumTracks else { throw MusicServiceError.limit }
         } while cursor != nil
         try intent.check(); try await validate()
         guard revision == contentRevision else { throw MusicServiceError.staleResult }
@@ -112,13 +105,14 @@ public actor MusicRemoteQueueSource {
         // The write may succeed remotely even if its acknowledgement or the
         // subsequent read fails. Never expose pre-write pages under a new style
         // revision, and never POST again merely to reconcile that uncertainty.
-        pages.removeAll(); itemCount = 0; byteCount = 0
+        pages.removeAll(); byteCount = 0
         defer { savingStyle = false }
         let result = try await dailyStyle.save(selection)
         try await validate()
         let bytes = try checked(result.page)
-        guard bytes <= Self.maximumBytes, result.page.dailyStyle != nil else { throw MusicServiceError.invalidResponse }
-        pages = ["": result.page]; itemCount = result.page.items.count; byteCount = bytes
+        guard bytes <= Self.maximumBytes else { throw MusicServiceError.limit }
+        guard result.page.dailyStyle != nil else { throw MusicServiceError.invalidResponse }
+        pages = ["": result.page]; byteCount = bytes
         return result
     }
     /// Only a live FM boundary invokes this. It does not reuse the preview batch,
@@ -131,11 +125,11 @@ public actor MusicRemoteQueueSource {
         var rows: [MusicNativeTrackData] = [], cursor: String?, bytes = 0, visited = Set<String>()
         repeat {
             try intent.check(); try await validate()
-            guard visited.insert(cursor ?? "").inserted, visited.count <= Self.maximumPages else { throw MusicServiceError.limit }
+            guard visited.insert(cursor ?? "").inserted else { throw MusicServiceError.invalidResponse }
             let value = try await load(cursor)
             try intent.check(); try await validate()
             bytes += try checked(value); rows += value.items; cursor = value.cursor
-            guard rows.count <= Self.maximumTracks, bytes <= Self.maximumBytes else { throw MusicServiceError.limit }
+            guard bytes <= Self.maximumBytes else { throw MusicServiceError.limit }
         } while cursor != nil
         guard !rows.isEmpty else { throw MusicServiceError.upstreamInvalid }
         return rows
@@ -144,7 +138,7 @@ public actor MusicRemoteQueueSource {
     public func close() async {
         revoke()
         guard !closed else { return }
-        closed = true; pages.removeAll(); itemCount = 0; byteCount = 0
+        closed = true; pages.removeAll(); byteCount = 0
         await release()
     }
 }

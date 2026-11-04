@@ -113,13 +113,10 @@ enum MusicNativeHomePresentation {
         return result
     }
 
-    enum SongCollection { case none, overLimit, ids([String]) }
+    enum SongCollection { case none, ids([String]) }
     static func songCollection(_ row: MJ, play: MJ) -> SongCollection {
         let declared = play["playAction"]["songIds"] == .null ? row["songIds"] : play["playAction"]["songIds"]
         guard declared.isArray, !declared.array.isEmpty else { return .none }
-        // Like the reference, an oversized declared collection stays unavailable,
-        // never silently truncated or converted to an invented playlist.
-        if declared.array.count > MusicHomeAction.maximumCollectionSongs { return .overLimit }
         var seen = Set<String>()
         let ids = declared.array.compactMap { positiveID($0) }.filter { seen.insert($0).inserted }
         return ids.isEmpty ? .none : .ids(ids)

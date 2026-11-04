@@ -129,7 +129,7 @@ final class HLSLoopbackRouteTests: XCTestCase {
             client.observe(count: index * chunk.count) { delivered.fulfill() }
             fixture.send(chunk)
             await fulfillment(of: [delivered], timeout: 5)
-            XCTAssertLessThanOrEqual(budget.usage.activeTasks, 2)
+            XCTAssertLessThanOrEqual(budget.usage.reservedPayloadBytes, limits.retainedPayloadBytes)
             route.synchronized {
                 XCTAssertTrue(route.transfers.values.allSatisfy { $0.buffered <= limits.windowBytes / 2 })
             }
@@ -144,8 +144,7 @@ final class HLSLoopbackRouteTests: XCTestCase {
         let fixture = HLSHTTPFixture(["/master.m3u8": .held(mime: "application/vnd.apple.mpegurl")],
                                      onHold: { started.fulfill() })
         defer { fixture.close() }
-        var limits = PlaybackNetworkLimits(); limits.activeTasks = 1
-        let budget = PlaybackNetworkBudget(limits: limits)
+        let budget = PlaybackNetworkBudget()
         let route = try HLSLoopbackRoute(plan: hlsPlan(fixture.url), budget: budget, configuration: fixture.configuration()) {
             _ in XCTFail("Explicit retirement is not a playback failure")
         }
@@ -163,7 +162,8 @@ final class HLSLoopbackRouteTests: XCTestCase {
         route.synchronized {
             route.invalidate()
             XCTAssertEqual(budget.usage.activeTasks, 1)
-            XCTAssertNil(budget.acquire(host: "successor.invalid", bytes: 1))
+            let successor = budget.acquire(host: "successor.invalid", bytes: 1)
+            XCTAssertNotNil(successor); successor?.complete()
             XCTAssertTrue(route.clients.values.allSatisfy(\.closed))
         }
         await fulfillment(of: [finished, drained], timeout: 5)

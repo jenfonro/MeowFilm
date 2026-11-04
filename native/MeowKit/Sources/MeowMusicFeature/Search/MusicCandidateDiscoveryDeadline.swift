@@ -9,7 +9,7 @@ public struct MusicCandidateDiscoveryTiming: Sendable {
 }
 
 /// Does not wait for an uncooperative dependency to unwind. The native owner
-/// still accounts for its underlying work in its existing operations budget.
+/// still tracks its underlying work until actual completion.
 public enum MusicCandidateDiscoveryDeadline {
     public static func run<T: Sendable>(seconds: Double, timing: MusicCandidateDiscoveryTiming = .init(),
         operation: @escaping @Sendable () async throws -> T) async throws -> T {

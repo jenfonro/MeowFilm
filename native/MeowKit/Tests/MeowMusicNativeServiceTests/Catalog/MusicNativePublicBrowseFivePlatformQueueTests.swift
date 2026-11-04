@@ -41,6 +41,28 @@ final class MusicNativePublicBrowseFivePlatformQueueTests: XCTestCase {
         }
     }
 
+    func testWholeQueueKeepsMoreThanFormerTwoThousandOccurrences() async throws {
+        for platform in MusicNativePublicBrowseFiveFixture.platforms {
+            let http = MusicNativePublicBrowseFiveHTTP(platform, total: 2001), store = NativeMusicMemoryDocument()
+            let service = try await NativeMusicFixture.service(store, http: http)
+            let detail = try await service.publicDetail(MusicNativePublicBrowseFiveFixture.collection(platform), cursor: nil)
+            let source = try await service.openPublicQueue(.init(collection: detail.collection, snapshot: detail.snapshot))
+            let rows = try await source.collectionTracks(intent: .init())
+            XCTAssertEqual(rows.count, 2001)
+            let last = try await service.remoteQueuePage(source, cursor: "1980")
+            let selected = try XCTUnwrap(last.items.last)
+            let state = try await service.replaceRemoteQueue(source, start: .init(index: 2000, track: selected),
+                                                             expectedRevision: 0, intent: .init())
+            let queue = try await service.queue()
+            XCTAssertEqual(state.total, 2001); XCTAssertEqual(queue.entries.count, 2001)
+            XCTAssertEqual(state.currentId, queue.entries.last?.id)
+            XCTAssertEqual(queue.entries.last?.track.songId, selected.songId)
+            XCTAssertEqual(Set(queue.entries.map(\.id)).count, 2001)
+            XCTAssertEqual(store.snapshot().2, 1)
+            await source.close(); await service.close()
+        }
+    }
+
     func testQueueOpenRejectsLaterStableButDifferentSnapshotWithoutMutatingExistingQueue() async throws {
         for platform in MusicNativePublicBrowseFiveFixture.platforms {
             let http = MusicNativePublicBrowseFiveHTTP(platform, fault: "tail", changeFrom: 3)

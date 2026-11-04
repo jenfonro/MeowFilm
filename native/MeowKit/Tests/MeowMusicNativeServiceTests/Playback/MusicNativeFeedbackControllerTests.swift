@@ -58,7 +58,7 @@ final class MusicNativeFeedbackControllerTests: XCTestCase {
         let active = await accounts.activeCount(); XCTAssertEqual(active, 0)
     }
 
-    func testUnknownOrFailedStartIsSpentAndNeverCreatesEndOrAutomaticRetry() async {
+    func testUnknownOrFailedStartNeverCreatesEndOrAutomaticRetryButNewPlaybackMayStart() async {
         for failure in [nil, MusicServiceError.upstreamFailed] {
             let controller = MusicNativeFeedbackController(), accounts = NativeFeedbackAccounts()
             await accounts.configure(result: .unconfirmed, failure: failure)
@@ -71,6 +71,14 @@ final class MusicNativeFeedbackControllerTests: XCTestCase {
             controller.finishCurrent(reason: .ui); await controller.flush()
             let reports = await accounts.recorded(), count = await accounts.beginCount()
             XCTAssertEqual(reports.map(\.event), [.start]); XCTAssertEqual(count, 1)
+            await accounts.configure(result: .confirmed, failure: nil)
+            NativeFeedbackFixture.feed(controller, accounts, NativeFeedbackFixture.sample(1, at: 10, position: 0,
+                kind: .playing, attempt: UUID().uuidString.lowercased()))
+            await controller.flush()
+            let next = await accounts.recorded(), nextCount = await accounts.beginCount()
+            XCTAssertEqual(next.map(\.event), [.start, .start])
+            XCTAssertNotEqual(next[0].instanceID, next[1].instanceID)
+            XCTAssertEqual(nextCount, 2)
         }
     }
 

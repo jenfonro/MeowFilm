@@ -48,7 +48,6 @@ final class HLSLoopbackRoute: NSObject, @unchecked Sendable {
         config.httpCookieStorage = nil; config.httpShouldSetCookies = false; config.urlCredentialStorage = nil
         config.urlCache = nil; config.httpAdditionalHeaders = nil; config.requestCachePolicy = .reloadIgnoringLocalCacheData
         config.timeoutIntervalForRequest = 30; config.timeoutIntervalForResource = 60
-        config.httpMaximumConnectionsPerHost = budget.limits.tasksPerHost
         self.configuration = config
         super.init()
         queue.setSpecific(key: queueKey, value: true)
@@ -79,7 +78,6 @@ final class HLSLoopbackRoute: NSObject, @unchecked Sendable {
                     port = number
                     startupTimeout?.cancel(); startupTimeout = nil
                     let callback = startup; startup = nil
-                    refreshConnectionLimit()
                     callback?(.success(url))
                 case .failed, .waiting:
                     if !invalidated { fail(.loopbackUnavailable) }
@@ -91,7 +89,6 @@ final class HLSLoopbackRoute: NSObject, @unchecked Sendable {
                 }
             }
             listener.newConnectionHandler = { [self] connection in accept(connection) }
-            refreshConnectionLimit()
             let timeout = DispatchWorkItem { [weak self] in
                 guard let self, self.startup != nil else { return }
                 self.fail(.loopbackUnavailable)
@@ -127,16 +124,10 @@ final class HLSLoopbackRoute: NSObject, @unchecked Sendable {
         onFailure(error)
     }
 
-    func refreshConnectionLimit() {
-        guard !invalidated else { return }
-        let remaining = max(0, budget.limits.hlsConnections - budget.usage.activeConnections)
-        listener?.newConnectionLimit = min(remaining, max(0, 8 - clients.count))
-    }
-
     func accept(_ connection: NWConnection) {
-        guard !invalidated, clients.count < 8,
+        guard !invalidated,
               let lease = budget.acquireAuxiliary(.connection, bytes: 64 * 1024) else {
-            connection.cancel(); refreshConnectionLimit(); return
+            connection.cancel(); return
         }
         let client = HLSClient(connection: connection, lease: lease)
         clients[client.id] = client
@@ -149,13 +140,11 @@ final class HLSLoopbackRoute: NSObject, @unchecked Sendable {
                 client.connection.stateUpdateHandler = nil
                 clients[client.id] = nil
                 client.lease.complete()
-                refreshConnectionLimit()
             default: break
             }
         }
         armDeadline(client, seconds: 10)
         connection.start(queue: queue)
-        refreshConnectionLimit()
     }
 
     func armDeadline(_ client: HLSClient, seconds: TimeInterval) {

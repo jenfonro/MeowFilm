@@ -52,16 +52,6 @@ public final class MusicMetadataState: ObservableObject {
 }
 
 @MainActor
-public final class MusicSearchState: ObservableObject {
-    @Published public internal(set) var results: [MusicRemoteTrack] = []
-    @Published public internal(set) var nextPage: Int?
-    @Published public internal(set) var hasSearched = false
-    @Published public var query = ""
-    @Published public var platform = "wy"
-    @Published public internal(set) var isSearching = false
-}
-
-@MainActor
 public final class MusicNoticeState: ObservableObject {
     @Published public var error: String?
     @Published public internal(set) var queueNotice: String?
@@ -127,6 +117,10 @@ public extension MusicViewModel {
         merged(distinctChanges(accessState.$isAvailable),
                distinctChanges(accessState.$isClosed),
                distinctChanges(accessState.$generation))
+    }
+
+    var searchAccessChanges: AnyPublisher<Void, Never> {
+        merged(accessChanges, accountChanges.map { _ in () }.eraseToAnyPublisher())
     }
 
     var libraryChanges: AnyPublisher<Void, Never> {
