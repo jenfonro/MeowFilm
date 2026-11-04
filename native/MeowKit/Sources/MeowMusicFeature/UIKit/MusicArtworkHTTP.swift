@@ -27,10 +27,8 @@ final class MusicArtworkHTTP: NSObject, URLSessionDataDelegate, @unchecked Senda
     }
     static func permits(_ url: URL?) -> Bool {
         guard let url, url.scheme == "https", url.user == nil, url.password == nil, url.fragment == nil,
-              url.port == nil || url.port == 443, let host = url.host?.lowercased() else { return false }
-        let roots = ["music.126.net", "music.163.net", "music.163.com", "qpic.cn", "qq.com",
-                     "qlogo.cn", "gtimg.cn", "kugou.com"]
-        return roots.contains { host == $0 || host.hasSuffix("." + $0) }
+              url.port == nil || url.port == 443, let host = url.host, !host.isEmpty else { return false }
+        return true
     }
     private static func request(_ url: URL) -> URLRequest {
         var request = URLRequest(url: url)
