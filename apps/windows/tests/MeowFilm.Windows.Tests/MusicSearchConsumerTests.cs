@@ -14,7 +14,8 @@ namespace MeowFilm.Windows.Tests;
 
 public static class MusicSearchConsumerTests
 {
-    public static IEnumerable<TestCase> Cases() => MusicUiTests.SearchConsumerCases();
+    public static IEnumerable<TestCase> Cases() =>
+        MusicUiTests.SearchConsumerCases().Concat(MusicUiTests.SearchPlaylistPresentationCases());
 }
 public static class MusicSyncConsumerLifecycleTests
 {
@@ -25,6 +26,98 @@ public static partial class MusicUiTests
 {
     internal static IEnumerable<TestCase> SearchConsumerCases()
     {
+        yield return Case("captured local and online searches isolate identical path-like keywords", async () =>
+        {
+            foreach (string query in new[] { "同词", "search-local/catalog-search/词%2F/尾" })
+            {
+                await using var f = await SearchScene.Create();
+                await f.Policy(["wy"], []);
+                await f.Call("music.library.create", new { name = "本地位置", songs = Enumerable.Range(0, 210)
+                    .Select(index => Song("restore:" + index, query + index.ToString("D3"))).ToArray() });
+                await f.Module.NavigateAsync("favorites", default);
+                await f.Module.SearchAsync(query, default); await f.Module.PageAsync(1);
+                f.Module.SelectedSong = f.Module.Songs[4];
+                string selected = f.Module.SelectedSong.SelectionKey;
+                var window = SearchPlaylistWindow(f.Module.View, 1042, 420);
+                try
+                {
+                    window.Show(); window.UpdateLayout(); await Drain();
+                    var grid = (DataGrid)f.Module.View.FindName("SongsGrid");
+                    var scroll = Visuals(grid).OfType<ScrollViewer>().First();
+                    scroll.ScrollToVerticalOffset(10); await Drain();
+                    double offset = scroll.VerticalOffset;
+                    True(offset > 0, "local location has a non-top scroll anchor");
+                    string local = f.Module.CaptureNavigationLocation();
+                    Equal("search-local/" + Uri.EscapeDataString(query), local);
+                    Equal(0, f.Http.SearchRequests);
+                    await f.Search(query); await f.Module.OpenSearchTabAsync("songs");
+                    await SearchUntil(() => f.Module.Songs.Count == 1 && !f.Module.SearchSongsLoading);
+                    string online = f.Module.CaptureNavigationLocation();
+                    Equal("catalog-search/" + Uri.EscapeDataString(query), online);
+                    True(local != online, "same keyword has distinct domain positions");
+                    var source = f.Module.Songs;
+                    var song = source[0];
+                    int reads = f.Http.SearchRequests;
+                    for (int round = 0; round < 2; round++)
+                    {
+                        await f.Module.RestoreNavigationAsync(local, default); window.UpdateLayout(); await Drain();
+                        True(f.Module.IsSongList && !f.Module.IsSearchPage, "local history restores local library search");
+                        Equal("101–200 / 210", f.Module.PageText);
+                        Equal(selected, f.Module.SelectedSong?.SelectionKey);
+                        True(Math.Abs(offset - scroll.VerticalOffset) < 1, "local history restores saved scroll");
+                        Equal(local, f.Module.CaptureNavigationLocation());
+                        Equal(reads, f.Http.SearchRequests);
+                        await f.Module.RestoreNavigationAsync(online, default); window.UpdateLayout(); await Drain();
+                        True(f.Module.IsSearchSongs, "online history restores the retained selected tab");
+                        True(ReferenceEquals(source, f.Module.Songs) && ReferenceEquals(song, f.Module.Songs[0]),
+                            "online source and row survive local search restoration");
+                        Equal(online, f.Module.CaptureNavigationLocation());
+                        Equal(reads, f.Http.SearchRequests);
+                    }
+                }
+                finally { window.Content = null; window.Close(); }
+            }
+        });
+        yield return Case("restored search locations reject empty oversized and control queries", async () =>
+        {
+            await using var f = await SearchScene.Create();
+            foreach (string prefix in new[] { "search-local/", "catalog-search/" })
+            foreach (string query in new[] { "", new string('x', 201), "a\nb" })
+            {
+                bool rejected = false;
+                try { await f.Module.RestoreNavigationAsync(prefix + Uri.EscapeDataString(query), default); }
+                catch (ArgumentException) { rejected = true; }
+                True(rejected, "invalid restored keyword is rejected by domain validation");
+            }
+            Equal(0, f.Http.SearchRequests);
+        });
+        yield return Case("search skeletons follow overview sections and dedicated playlist or song layout", async () =>
+        {
+            await using var f = await SearchScene.Create();
+            await f.Policy(["wy"], ["wy"]); f.Http.Hold = true;
+            var window = SearchPlaylistWindow(f.Module.View, 1042, 800);
+            try
+            {
+                window.Show(); await f.Search("骨架");
+                await SearchUntil(() => f.Http.SearchRequests == 2 && f.Module.CatalogSections.Count == 2);
+                window.UpdateLayout(); await Drain();
+                var catalog = (MusicCatalogView)f.Module.View.FindName("CatalogView");
+                var overview = (ScrollViewer)catalog.FindName("SearchOverviewScroll");
+                var visible = Visuals(f.Module.View).OfType<MeowFilm.Desktop.LoadingSkeleton>().Where(s => s.IsVisible).ToArray();
+                True(visible.Length > 0, "empty overview has section skeletons");
+                True(visible.All(skeleton => Visuals(overview).Contains(skeleton)), "overview has no global skeleton overlay");
+                await f.Module.OpenSearchTabAsync("playlists"); window.UpdateLayout(); await Drain();
+                True(Visuals(f.Module.View).OfType<MeowFilm.Desktop.LoadingSkeleton>().Any(s => s.IsVisible), "playlist page has card skeletons");
+                await f.Module.OpenSearchTabAsync("songs"); window.UpdateLayout(); await Drain();
+                visible = Visuals(f.Module.View).OfType<MeowFilm.Desktop.LoadingSkeleton>().Where(s => s.IsVisible).ToArray();
+                True(visible.Length > 0 && visible.All(s => s.Height == 34), "song page only shows row skeletons");
+                f.Http.Release.TrySetResult();
+                await SearchUntil(() => !f.Module.SearchSongsLoading && !f.Module.SearchPlaylistsLoading);
+                window.UpdateLayout(); await Drain();
+                True(!Visuals(f.Module.View).OfType<MeowFilm.Desktop.LoadingSkeleton>().Any(s => s.IsVisible), "settled results remove all skeletons");
+            }
+            finally { f.Http.Release.TrySetResult(); window.Content = null; window.Close(); }
+        });
         yield return Case("native search saved policy rejects draft targets before any HTTP", async () =>
         {
             await using var f = await SearchScene.Create();
@@ -45,11 +138,12 @@ public static partial class MusicUiTests
             f.Http.Hold = true;
             await f.Search("原生");
             await SearchUntil(() => f.Http.SearchRequests == 2 && f.Module.CatalogSections.Count == 2);
-            True(f.Module.CatalogSections.All(section => section.IsLoading),
-                "both visible kinds publish loading sections before either physical search settles");
+            True(f.Module.SearchSongsLoading && f.Module.SearchPlaylistsLoading,
+                "both visible kinds publish loading state before either physical search settles");
             f.Http.Release.TrySetResult();
             await SearchUntil(() => f.Module.Songs.Count == 1 &&
-                f.Module.CatalogSections.All(section => !section.IsLoading && section.Items.Count == 1));
+                !f.Module.SearchSongsLoading && !f.Module.SearchPlaylistsLoading &&
+                f.Module.CatalogSections.All(section => section.Items.Count == 1));
             Equal(2, f.Http.SearchRequests); Equal(0, f.Http.HomeRequests);
             True(f.Module.IsSearchOverview && f.Module.HasSearchSession, "actual comprehensive page");
             Equal(1, f.Module.CatalogSections.Single(section => section.Title == "单曲").Items.Count);
@@ -81,7 +175,8 @@ public static partial class MusicUiTests
             Equal(0, f.Http.SearchRequests);
             hold.Release();
             await Task.WhenAll(first, duplicate).WaitAsync(TimeSpan.FromSeconds(5));
-            await SearchUntil(() => f.Module.Songs.Count == 1 && f.Module.CatalogSections.All(s => !s.IsLoading));
+            await SearchUntil(() => f.Module.Songs.Count == 1 &&
+                !f.Module.SearchSongsLoading && !f.Module.SearchPlaylistsLoading);
             Equal(1, f.Http.SearchRequests);
             Equal(accountReads + 2, f.Store.AccountReads);
         });
@@ -91,9 +186,11 @@ public static partial class MusicUiTests
             await using var f = await SearchScene.Create(clock);
             await f.Policy(["wy"], ["wy"]);
             await f.Search("缓存");
-            await SearchUntil(() => f.Http.SearchRequests == 2 && f.Module.CatalogSections.All(s => !s.IsLoading));
+            await SearchUntil(() => f.Http.SearchRequests == 2 &&
+                !f.Module.SearchSongsLoading && !f.Module.SearchPlaylistsLoading);
             await f.Module.SearchAsync("缓存", default);
-            await SearchUntil(() => f.Module.CatalogSections.Count == 2 && f.Module.CatalogSections.All(s => !s.IsLoading));
+            await SearchUntil(() => f.Module.CatalogSections.Count == 2 &&
+                !f.Module.SearchSongsLoading && !f.Module.SearchPlaylistsLoading);
             Equal(2, f.Http.SearchRequests);
             await f.Module.NavigateAsync("favorites", default);
             clock.Advance(TimeSpan.FromMinutes(61));
@@ -102,9 +199,42 @@ public static partial class MusicUiTests
             await f.Module.OpenSearchTabAsync("overview");
             Equal(2, f.Http.SearchRequests);
             await f.Module.SearchAsync("缓存", default);
-            await SearchUntil(() => f.Http.SearchRequests == 4 && f.Module.CatalogSections.All(s => !s.IsLoading));
+            await SearchUntil(() => f.Http.SearchRequests == 4 &&
+                !f.Module.SearchSongsLoading && !f.Module.SearchPlaylistsLoading);
             Equal(1, f.Module.Songs.Count);
             Equal(1, f.Module.CatalogSections.Single(s => s.Title == "歌单").Items.Count);
+        });
+        yield return Case("refresh keeps the selected search row while replacement results are pending", async () =>
+        {
+            await using var f = await SearchScene.Create();
+            await f.Policy(["wy"], ["wy"]);
+            await f.Search("保留选择");
+            await SearchUntil(() => f.Module.Songs.Count == 1 &&
+                !f.Module.SearchSongsLoading && !f.Module.SearchPlaylistsLoading);
+            await f.Module.OpenSearchTabAsync("songs");
+            var selected = f.Module.Songs[0];
+            f.Module.SelectedSong = selected;
+            string key = selected.SelectionKey;
+            Equal(key, f.Module.SearchSelectedSong?.SelectionKey);
+
+            var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            f.Http.BeforeSearchReply = _ => gate.Task;
+            int requests = f.Http.SearchRequests;
+            var refresh = f.Module.RefreshCatalogAsync();
+            try
+            {
+                await SearchUntil(() => f.Http.SearchRequests == requests + 1 &&
+                    f.Module.SearchSongsLoading && !f.Module.SearchPlaylistsLoading);
+                True(ReferenceEquals(selected, f.Module.SelectedSong),
+                    "the existing selected row remains selected during refresh");
+                Equal(key, f.Module.SearchSelectedSong?.SelectionKey);
+            }
+            finally { gate.TrySetResult(); }
+            await refresh.WaitAsync(TimeSpan.FromSeconds(5));
+            await SearchUntil(() => !f.Module.SearchSongsLoading && !f.Module.SearchPlaylistsLoading);
+            Equal(key, f.Module.SelectedSong?.SelectionKey);
+            True(ReferenceEquals(selected, f.Module.SelectedSong),
+                "same result identity reuses the selected row after refresh");
         });
         yield return Case("resubmitting an active initial search shares physical requests without cancellation", async () =>
         {
@@ -115,9 +245,9 @@ public static partial class MusicUiTests
             await f.Http.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             await f.Module.SearchAsync("进行中", default).WaitAsync(TimeSpan.FromSeconds(5));
             Equal(1, f.Http.SearchRequests);
-            True(!f.Http.Release.Task.IsCompleted && f.Module.CatalogSections[0].IsLoading, "same live request");
+            True(!f.Http.Release.Task.IsCompleted && f.Module.SearchSongsLoading, "same live request");
             f.Http.Release.TrySetResult();
-            await SearchUntil(() => f.Module.Songs.Count == 1 && f.Module.CatalogSections.All(s => !s.IsLoading));
+            await SearchUntil(() => f.Module.Songs.Count == 1 && !f.Module.SearchSongsLoading);
             Equal(1, f.Http.SearchRequests);
         });
         yield return Case("native search card favorite and queue preserve recording and search provenance", async () =>
@@ -168,21 +298,215 @@ public static partial class MusicUiTests
             Equal(3, f.Http.SearchRequests); Equal(0, f.Runtime.Calls.Count);
             True(!f.Module.CanLoadMoreSearchSongs, "final native page ends the search");
         });
+        yield return Case("search song snapshots append in place and merge existing sources", async () =>
+        {
+            await using var f = await SearchScene.Create();
+            await f.Policy(["wy"], [], automaticPlaylists: false);
+            f.Http.SearchResult = count => new { code = 200, result = new { songCount = 58,
+                songs = SearchSongPage(count).ToArray() } };
+            await f.Search("追加");
+            await f.Module.OpenSearchTabAsync("songs");
+            await SearchUntil(() => f.Module.Songs.Count == 30 && f.Module.CanLoadMoreSearchSongs);
+            var oldRows = f.Module.Songs.ToArray();
+            f.Module.SelectedSong = oldRows[0];
+            string selectedKey = oldRows[0].SelectionKey;
+            var oldSources = oldRows.Select(row => row.Raw.GetProperty("sources").Clone()).ToArray();
+            var events = new List<(System.Collections.Specialized.NotifyCollectionChangedAction Action,
+                int? NewStartingIndex, int? OldStartingIndex, int? NewCount)>();
+            f.Module.Songs.CollectionChanged += (_, e) =>
+                events.Add((e.Action, e.NewStartingIndex, e.OldStartingIndex, e.NewItems?.Count));
+            await f.Module.MoreSearchAsync();
+            await SearchUntil(() => f.Module.Songs.Count == 58 && !f.Module.SearchSongsLoading);
+            Equal(2, f.Http.SearchRequests);
+            for (int index = 2; index < oldRows.Length; index++)
+                True(ReferenceEquals(oldRows[index], f.Module.Songs[index]),
+                    "an unchanged row keeps its identity and position");
+            Equal(selectedKey, f.Module.Songs[0].SelectionKey);
+            True(!ReferenceEquals(oldRows[0], f.Module.Songs[0]), "a merged row is replaced in place");
+            Equal(2, f.Module.Songs[0].Raw.GetProperty("sources").GetArrayLength());
+            Equal(1, oldSources[0].GetArrayLength());
+            True(!ReferenceEquals(oldRows[1], f.Module.Songs[1]), "the second merged row is replaced in place");
+            Equal(2, f.Module.Songs[1].Raw.GetProperty("sources").GetArrayLength());
+            for (int index = 0; index < oldRows.Length; index++)
+                True(JsonElement.DeepEquals(oldSources[index],
+                    oldRows[index].Raw.GetProperty("sources")),
+                    "the original row payload remains the old snapshot");
+            var nativeIds = f.Module.Songs.Take(2)
+                .Select(row => row.Raw.GetProperty("sources").EnumerateArray()
+                    .Select(source => source.GetProperty("musicInfo").GetProperty("songmid").GetString()))
+                .ToArray();
+            True(nativeIds[0].SequenceEqual(["1001", "2001"]),
+                "the first merged row retains both native sources in order");
+            True(nativeIds[1].SequenceEqual(["1002", "2002"]),
+                "the second merged row retains both native sources in order");
+            var changedIndexes = events.Where(change =>
+                change.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Replace)
+                .Select(change => change.OldStartingIndex).ToArray();
+            Equal(2, changedIndexes.Length);
+            True(changedIndexes.SequenceEqual([0, 1]), "the two merged rows are replaced in place");
+            var added = events.Where(change =>
+                change.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Add)
+                .ToArray();
+            Equal(28, added.Length);
+            for (int index = 0; index < added.Length; index++)
+            {
+                Equal(30 + index, added[index].NewStartingIndex);
+                Equal(1, added[index].NewCount);
+            }
+            True(!events.Any(change =>
+                change.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Reset),
+                "a prefix append does not reset the song collection");
+            True(ReferenceEquals(f.Module.SelectedSong, f.Module.Songs[0]),
+                "the selected object belongs to the current collection");
+            var currentCards = f.Module.CatalogSections.Single().Items;
+            var mergedCard = currentCards[0];
+            await f.Module.FavoriteCatalogCardAsync(mergedCard);
+            var newCard = f.Module.CatalogSections.Single().Items[^1];
+            await f.Module.QueueCatalogCardAsync(newCard);
+            var favorites = await f.Call("music.library.detail", new { id = "favorites", offset = 0, limit = 100 });
+            Equal(1, favorites.GetProperty("songs").GetArrayLength());
+            Equal(2, favorites.GetProperty("songs")[0].GetProperty("sources").GetArrayLength());
+            var queue = await f.Call("music.queue.get", new { offset = 0, limit = 100 });
+            Equal(1, queue.GetProperty("entries").GetArrayLength());
+            True(MusicSongFixture.NativeId(queue.GetProperty("entries")[0].GetProperty("song")) is "2030",
+                "a newly appended song is available from its current card");
+            int eventCount = events.Count;
+            await f.Module.OpenSearchTabAsync("overview");
+            await f.Module.OpenSearchTabAsync("songs");
+            Equal(58, f.Module.Songs.Count); Equal(2, f.Http.SearchRequests);
+            True(Equals(eventCount, events.Count), "tab switching does not touch Songs");
+            True(!events.Any(change =>
+                change.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Reset),
+                "tab switching reuses the song rows");
+        });
+        yield return Case("unchanged search snapshots including loading keep collections stable", async () =>
+        {
+            await using var f = await SearchScene.Create();
+            await f.Policy(["wy"], ["wy"]);
+            f.Http.SearchResult = count => new { code = 200, result = new { songCount = 60,
+                songs = SearchSongPage(1).ToArray(), playlistCount = 60,
+                playlists = SearchPlaylistPage(1).ToArray() } };
+            await f.Search("稳定");
+            await SearchUntil(() => f.Module.Songs.Count == 30 && f.Module.CatalogSections.Count == 2 &&
+                f.Module.CatalogSections.All(section => section.Items.Count == 6) &&
+                !f.Module.SearchSongsLoading && !f.Module.SearchPlaylistsLoading);
+            Equal(2, f.Http.SearchRequests);
+            var songSection = f.Module.CatalogSections.Single(section => section.Title == "单曲");
+            var playlistSection = f.Module.CatalogSections.Single(section => section.Title == "歌单");
+            var songItems = songSection.Items.ToArray();
+            var playlistItems = playlistSection.Items.ToArray();
+            var events = new List<System.Collections.Specialized.NotifyCollectionChangedAction>();
+            f.Module.Songs.CollectionChanged += (_, e) => events.Add(e.Action);
+            var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            f.Http.BeforeSearchReply = _ => gate.Task;
+            int eventCount = events.Count;
+            try
+            {
+                await f.Module.OpenSearchTabAsync("songs");
+                await f.Module.MoreSearchAsync();
+                await SearchUntil(() => f.Http.SearchRequests == 3 && f.Module.SearchSongsLoading);
+                await f.Module.OpenSearchTabAsync("overview");
+                var overviewSongSection = f.Module.CatalogSections.Single(section => section.Title == "单曲");
+                var overviewPlaylistSection = f.Module.CatalogSections.Single(section => section.Title == "歌单");
+                gate.TrySetResult();
+                await SearchUntil(() => f.Http.SearchRequests == 3 &&
+                    !f.Module.SearchSongsLoading && !f.Module.SearchPlaylistsLoading);
+                True(f.Module.CatalogSections.SelectMany(section => section.Items).Count() == 12,
+                    "the repeated snapshot retains both overview result sets");
+                True(Equals(0, events.Count), "an unchanged songs snapshot does not touch Songs");
+                True(ReferenceEquals(overviewSongSection,
+                    f.Module.CatalogSections.Single(section => section.Title == "单曲")),
+                    "the song section is not replaced for an unchanged snapshot");
+                True(ReferenceEquals(overviewPlaylistSection,
+                    f.Module.CatalogSections.Single(section => section.Title == "歌单")),
+                    "the playlist section is not replaced for an unchanged snapshot");
+                True(f.Module.CatalogSections.Single(section => section.Title == "单曲").Items
+                    .SequenceEqual(songItems), "song items remain unchanged");
+                True(f.Module.CatalogSections.Single(section => section.Title == "歌单").Items
+                    .SequenceEqual(playlistItems), "playlist items remain unchanged");
+                await f.Module.OpenSearchTabAsync("songs");
+                await f.Module.OpenSearchTabAsync("overview");
+                Equal(3, f.Http.SearchRequests);
+                True(Equals(eventCount, events.Count), "tab switching does not touch Songs");
+            }
+            finally { gate.TrySetResult(); }
+        });
+        yield return Case("first search results reset Songs and capture the current song-table scroll", async () =>
+        {
+            await using var store = ServiceStore();
+            await using var runtime = new NativeMusicScriptTestRuntime();
+            var http = new SearchHttp { SearchResult = count => new { code = 200, result =
+                new { songCount = 30, songs = SearchSongPage(count).ToArray() } } };
+            var inner = new MusicNativeApplication(store, runtime, http);
+            var forwarder = new SearchSnapshotForwarder(inner);
+            runtime.Register(inner);
+            await using var module = new MusicCapability(forwarder, store, new PlaybackProbe(), new Dialogs());
+            await module.InitializeAsync(default); await Drain();
+            await SetSearchPolicy(module, ["wy"], []);
+            await module.NavigateAsync("catalog-search", default);
+            await module.SearchAsync("重排", default);
+            await SearchUntil(() => module.Songs.Count == 30 && !module.SearchSongsLoading);
+            var initial = (await forwarder.ExecuteAsync("music.search.get",
+                new { id = forwarder.SearchIds["songs"] })).Clone();
+            await module.OpenSearchTabAsync("songs");
+            var view = (MusicView)module.View;
+            var window = new Window { Content = view, Width = 1042, Height = 700,
+                Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false };
+            try
+            {
+                window.Show(); window.UpdateLayout(); await Drain();
+                var grid = (DataGrid)view.FindName("SearchSongsGrid");
+                var scroll = Visuals(grid).OfType<ScrollViewer>()
+                    .Single(viewScroll => viewScroll.IsVisible && viewScroll.ScrollableHeight > 0);
+                double target = Math.Min(scroll.ScrollableHeight, scroll.ViewportHeight * 1.5);
+                scroll.ScrollToVerticalOffset(target); await Drain(); window.UpdateLayout();
+                module.SelectedSong = module.Songs[15];
+                await Drain(); window.UpdateLayout();
+                double offset = scroll.VerticalOffset;
+                True(offset > 0, "the song table starts at a real non-top offset");
+                string selected = module.Songs[15].SelectionKey;
+                int resets = 0;
+                double? atReset = null;
+                module.Songs.CollectionChanged += (_, e) =>
+                {
+                    if (e.Action != System.Collections.Specialized.NotifyCollectionChangedAction.Reset) return;
+                    resets++;
+                    atReset ??= scroll.VerticalOffset;
+                };
+                var reordered = SearchReorderedSnapshot(initial);
+                forwarder.Publish(reordered);
+                await SearchUntil(() => resets == 1 && module.SelectedSong is not null);
+                Equal(selected, module.SelectedSong.SelectionKey);
+                True(module.Songs.Any(song => ReferenceEquals(song, module.SelectedSong)),
+                    "the selected row is projected into the current collection");
+                window.UpdateLayout(); await Drain();
+                True(Math.Abs(scroll.VerticalOffset - offset) < 1,
+                    "the reset restores the actual song-table offset");
+                True(atReset.HasValue && Math.Abs(atReset.Value - offset) < 1,
+                    "the reset captures the actual scroll before replacing rows");
+            }
+            finally { window.Content = null; window.Close(); }
+        });
         yield return Case("native search playlist back restores song and playlist tabs without refetch", async () =>
         {
             await using var f = await SearchScene.Create();
             await f.Policy(["wy"], ["wy"]);
             await f.Search("返回");
+            await SearchUntil(() => !f.Module.SearchSongsLoading && !f.Module.SearchPlaylistsLoading &&
+                f.Module.Songs.Count == 1 &&
+                f.Module.CatalogSections.SelectMany(s => s.Items).Any(c => c.Kind == "playlist"));
+            var song = f.Module.Songs.Single();
             await f.Module.OpenSearchTabAsync("playlists");
-            await SearchUntil(() => f.Module.CatalogSections.SelectMany(s => s.Items).Any(c => c.Kind == "playlist"));
             await f.Module.OpenCatalogCardAsync(f.Module.CatalogSections.Single().Items.Single());
             True(f.Module.IsCatalogPlaylist && f.Module.Songs.Count == 1, "native playlist opened");
             int searches = f.Http.SearchRequests;
+            Equal(2, searches);
             await f.Module.ReturnToSearchAsync();
             True(f.Module.IsSearchPlaylists && f.Module.SearchTab == "playlists", "same result tab");
             Equal(searches, f.Http.SearchRequests);
             await f.Module.OpenSearchTabAsync("songs");
             Equal(1, f.Module.Songs.Count); Equal(searches, f.Http.SearchRequests);
+            True(ReferenceEquals(song, f.Module.Songs.Single()), "return reuses the completed search song row");
         });
         yield return Case("native search policy changes save immediately and retire old results", async () =>
         {
@@ -213,7 +537,8 @@ public static partial class MusicUiTests
             await cancel.WaitAsync(TimeSpan.FromSeconds(5));
             await Drain();
             Equal(0, f.Module.Songs.Count); Equal("已取消", f.Module.SearchStatus);
-            True(f.Module.CatalogSections.All(s => !s.IsLoading), "actual loading drained");
+            True(!f.Module.SearchSongsLoading && !f.Module.SearchPlaylistsLoading,
+                "actual loading drained");
         });
         yield return Case("native search background result cannot reopen a later local page", async () =>
         {
@@ -340,7 +665,7 @@ public static partial class MusicUiTests
             True(buttons.Contains("综合") && buttons.Contains("单曲") && buttons.Contains("歌单") &&
                 buttons.Count(text => text == "查看更多") == 2, "real result tabs and section actions");
             True(!buttons.Contains("更多结果") && !buttons.Contains("取消搜索"), "retired utility controls");
-            var grid = Visuals(f.Module.View).OfType<DataGrid>().Single();
+            var grid = Visuals(f.Module.View).OfType<DataGrid>().Single(grid => grid.Name == "SearchSongsGrid");
             var catalog = Visuals(f.Module.View).OfType<MusicCatalogView>().Single();
             var moreStyle = (Style)catalog.FindResource("Catalog.SectionMore");
             var moreButtons = Visuals(catalog).OfType<Button>()
@@ -438,6 +763,80 @@ public static partial class MusicUiTests
             await ServiceCall(inner, "music.library.create", new { name = "恢复时已同步" });
             EarlyNotifications++; LibrarySyncChanged?.Invoke();
             await Drain(); // Deliver it while MusicCapability.stopping is still true.
+        }
+    }
+
+    private sealed class SearchSnapshotForwarder(MusicNativeApplication inner) : MusicApplicationForwarder(inner)
+    {
+        private event Action<JsonElement>? replayed;
+        public override event Action<JsonElement>? SearchChanged
+        {
+            add { replayed += value; Inner.SearchChanged += value; }
+            remove { replayed -= value; Inner.SearchChanged -= value; }
+        }
+        internal readonly Dictionary<string, string> SearchIds = new(StringComparer.Ordinal);
+
+        public override async Task<JsonElement> ExecuteAsync(string method, object? parameters = null,
+            CancellationToken cancellationToken = default)
+        {
+            var reply = await Inner.ExecuteAsync(method, parameters, cancellationToken);
+            if (method == "music.search.start" && reply.TryGetProperty("id", out var id) &&
+                reply.TryGetProperty("kind", out var kind) && id.ValueKind == JsonValueKind.String &&
+                kind.ValueKind == JsonValueKind.String && reply.TryGetProperty("ok", out var ok) &&
+                ok.ValueKind == JsonValueKind.True)
+                SearchIds[kind.GetString()!] = id.GetString()!;
+            return reply;
+        }
+
+        internal void Publish(JsonElement snapshot) => replayed?.Invoke(snapshot);
+    }
+
+    private static JsonElement SearchReorderedSnapshot(JsonElement snapshot)
+    {
+        var node = JsonNode.Parse(snapshot.GetRawText())!.AsObject();
+        node["revision"] = snapshot.GetProperty("revision").GetInt64() + 1;
+        node["items"] = new JsonArray(node["items"]!.AsArray().Reverse().Select(item => item!.DeepClone()).ToArray());
+        return JsonSerializer.SerializeToElement(node);
+    }
+
+    private static IEnumerable<object> SearchSongPage(int requestIndex)
+    {
+        if (requestIndex is not (1 or 2))
+            throw new ArgumentOutOfRangeException(nameof(requestIndex));
+        for (int index = 0; index < 30; index++)
+        {
+            int ordinal = requestIndex == 1 ? index : index < 2 ? index : index + 28;
+            int id = requestIndex == 1 ? 1001 + index : 2001 + index;
+            yield return SearchHttp.WyTrack(id, "歌曲" + ordinal.ToString("D2"),
+                "歌手" + ordinal, "专辑" + ordinal);
+        }
+    }
+
+    private static IEnumerable<object> SearchPlaylistPage(int requestIndex)
+    {
+        int start = 500 + (requestIndex - 1) * 30;
+        for (int index = 0; index < 30; index++)
+            yield return new
+            {
+                id = (start + index).ToString(System.Globalization.CultureInfo.InvariantCulture),
+                name = "歌单" + requestIndex + "-" + index,
+                trackCount = 1
+            };
+    }
+
+    private static async Task SetSearchPolicy(MusicCapability module, string[] songs, string[] playlists)
+    {
+        var songSet = songs.ToHashSet(StringComparer.Ordinal);
+        var playlistSet = playlists.ToHashSet(StringComparer.Ordinal);
+        foreach (var row in module.SongSearch.Platforms.ToArray())
+        {
+            await module.SetSearchPlatformEnabledAsync("songs", row, songSet.Contains(row.Platform));
+            await Until(() => module.CanEditSearchPreferences);
+        }
+        foreach (var row in module.PlaylistSearch.Platforms.ToArray())
+        {
+            await module.SetSearchPlatformEnabledAsync("playlists", row, playlistSet.Contains(row.Platform));
+            await Until(() => module.CanEditSearchPreferences);
         }
     }
 
@@ -568,8 +967,10 @@ public static partial class MusicUiTests
         internal bool Hold, HoldDispose, FailOnce;
         internal int SearchRequests, HomeRequests, Completions;
         internal Func<int, object>? SearchResult;
-        internal static object Track(int id = 1001) => new { id, name = "合成歌曲", dt = 180000, fee = 0,
-            ar = new[] { new { id = 1, name = "歌手" } }, al = new { id = 2, name = "专辑", picUrl = "" },
+        internal Func<int, Task>? BeforeSearchReply;
+        internal static object Track(int id = 1001) => WyTrack(id, "合成歌曲", "歌手", "专辑");
+        internal static object WyTrack(int id, string name, string artist, string album) => new { id, name, dt = 180000, fee = 0,
+            ar = new[] { new { id = 1, name = artist } }, al = new { id = 2, name = album, picUrl = "" },
             h = new { br = 320000 }, m = new { br = 192000 }, l = new { br = 128000 } };
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
@@ -584,6 +985,7 @@ public static partial class MusicUiTests
                 if (FailOnce) { FailOnce = false; return new(HttpStatusCode.ServiceUnavailable) { Content = new StringContent("{}") }; }
                 body = SearchResult?.Invoke(count) ?? new { code = 200, result = new { songCount = 1, songs = new[] { Track() },
                     playlistCount = 1, playlists = new[] { new { id = "500", name = "合成歌单", trackCount = 1 } } } };
+                if (BeforeSearchReply is { } before) await before(count);
             }
             else if (uri.AbsolutePath.Contains("/playlist/detail", StringComparison.Ordinal))
                 body = new { code = 200, playlist = new { id = "500", name = "合成歌单", trackCount = 1,

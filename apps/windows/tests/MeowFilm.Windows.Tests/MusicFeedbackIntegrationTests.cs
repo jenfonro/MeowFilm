@@ -18,7 +18,8 @@ public static class MusicFeedbackIntegrationTests
 // No private implementation from another business module is accessed.
 public static partial class MusicUiTests
 {
-    private static DpapiDocumentStore ServiceStore() => new(NewRoot(), AppIdentity.NativeNamespaces);
+    private static DpapiDocumentStore ServiceStore() =>
+        new(NewRoot(), AppIdentity.NativeNamespaces, AppIdentity.NativeCollections);
 
     internal static IEnumerable<TestCase> NativeServiceIntegrationCases()
     {

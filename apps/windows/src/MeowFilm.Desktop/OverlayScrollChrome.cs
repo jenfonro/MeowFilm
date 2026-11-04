@@ -45,7 +45,8 @@ public static class OverlayScrollChrome
         {
             this.scroll = scroll;
             scroll.Loaded += Loaded; scroll.Unloaded += Unloaded;
-            Attach();
+            scroll.IsVisibleChanged += VisibilityChanged;
+            UpdatePresentation();
         }
         private ScrollBar? VerticalBar => scroll.Template?.FindName("PART_VerticalScrollBar", scroll) as ScrollBar;
         private bool Owns(Thumb thumb) => VerticalBar?.IsAncestorOf(thumb) == true;
@@ -74,8 +75,14 @@ public static class OverlayScrollChrome
             scroll.RemoveHandler(Mouse.GotMouseCaptureEvent, new MouseEventHandler(CaptureChanged));
             scroll.RemoveHandler(Mouse.LostMouseCaptureEvent, new MouseEventHandler(CaptureChanged));
         }
-        private void Loaded(object sender, RoutedEventArgs e) => Attach();
+        private void Loaded(object sender, RoutedEventArgs e) => UpdatePresentation();
         private void Unloaded(object sender, RoutedEventArgs e) { Detach(); Reset(); }
+        private void VisibilityChanged(object sender, DependencyPropertyChangedEventArgs e) => UpdatePresentation();
+        private void UpdatePresentation()
+        {
+            if (scroll.IsLoaded && scroll.IsVisible) Attach();
+            else { Detach(); Reset(); }
+        }
         private void Wheel(object sender, MouseWheelEventArgs e) { if (e.Delta != 0) RememberIntent(); }
         private void Manipulated(object? sender, ManipulationDeltaEventArgs e)
         { if (e.DeltaManipulation.Translation.Y != 0) RememberIntent(); }
@@ -186,6 +193,7 @@ public static class OverlayScrollChrome
         public void Dispose()
         {
             scroll.Loaded -= Loaded; scroll.Unloaded -= Unloaded;
+            scroll.IsVisibleChanged -= VisibilityChanged;
             Detach(); Reset();
         }
     }

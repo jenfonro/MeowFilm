@@ -7,8 +7,10 @@ public sealed partial class MusicCapability
 {
     private const string SearchOverview = "overview";
     private readonly Dictionary<string, JsonElement> searchSnapshots = [];
+    private readonly Dictionary<string, SearchCardsCache> searchCardCache = [];
     private readonly Dictionary<string, double> searchScroll = [];
     private readonly Dictionary<string, string> searchIds = [];
+    private string? searchSelectedKey;
     private string searchKeyword = "", searchKind = "songs", searchView = SearchOverview;
     private long searchEpoch, searchAccountEpoch;
     private bool searchStarting, searchRefresh;
@@ -22,6 +24,7 @@ public sealed partial class MusicCapability
         internal long Epoch { get; } = epoch;
         internal Task Work { get; set; } = Task.CompletedTask;
     }
+    private sealed record SearchCardsCache(JsonElement Items, MusicCatalogCard[] Cards);
     public bool IsSearchPage => location.Route == "catalog-search";
     public string SearchTab => searchView;
     public bool IsSearchOverview => IsSearchPage && searchView == SearchOverview;
@@ -35,6 +38,8 @@ public sealed partial class MusicCapability
         !snapshot.GetProperty("loading").GetBoolean() && snapshot.GetProperty("more").GetBoolean();
     public bool CanLoadMoreSearchSongs => IsSearchSongs && CanSearchMore;
     public bool CanLoadMoreSearchPlaylists => IsSearchPlaylists && CanSearchMore;
+    public bool SearchSongsLoading => SearchKindLoading("songs");
+    public bool SearchPlaylistsLoading => SearchKindLoading("playlists");
     public string SearchStatus { get; private set; } = "";
 
     private void InitializeSearch() => application.SearchChanged += SearchChanged;
@@ -52,14 +57,18 @@ public sealed partial class MusicCapability
     private void SearchBindings()
     {
         foreach (string name in new[] { nameof(IsSearchPage), nameof(IsCatalogBrowsePage), nameof(HasSearchSession),
-            nameof(SearchTab), nameof(IsSearchOverview), nameof(IsSearchSongs), nameof(IsSearchPlaylists),
+            nameof(CatalogSections), nameof(ShowSearchSkeleton), nameof(Songs), nameof(SearchTab), nameof(IsSearchOverview), nameof(IsSearchSongs), nameof(IsSearchPlaylists),
             nameof(CanSearchMore), nameof(CanLoadMoreSearchSongs), nameof(CanLoadMoreSearchPlaylists),
-            nameof(SearchStatus) })
+            nameof(SearchSongsLoading), nameof(SearchPlaylistsLoading), nameof(SearchStatus) })
             Changed(name);
     }
     private void RememberSearch()
     {
-        if (IsSearchPage) searchScroll[searchView] = page.CaptureScroll();
+        if (IsSearchPage)
+        {
+            searchScroll[searchView] = page.CaptureScroll();
+            if (selectedSong is not null) searchSelectedKey = selectedSong.SelectionKey;
+        }
     }
 
     private Task BeginSearchAsync(string keyword, CancellationToken token, bool refresh = false)
@@ -87,15 +96,24 @@ public sealed partial class MusicCapability
         var previous = searchStartTail;
         long epoch = ++searchEpoch, navigation = AdvanceLoadGeneration();
         loadCancellation?.Cancel();
-        searchIds.Clear(); searchSnapshots.Clear(); searchScroll.Clear();
+        bool retainContent = refresh && searchKeyword == keyword && searchAccountEpoch == accountEpoch;
+        searchIds.Clear(); searchSnapshots.Clear();
+        if (!retainContent)
+        {
+            searchCardCache.Clear(); searchScroll.Clear();
+            foreach (var sections in searchSections.Values) sections.Clear();
+            searchSongs.Clear(); searchSelectedKey = null; page.ResetSearchPresentation();
+        }
         searchStarts.Clear();
         searchKeyword = keyword; searchKind = kind; searchAccountEpoch = accountEpoch;
         searchStarting = true; searchRefresh = refresh; SearchStatus = "";
         location = new("catalog-search", keyword); heading = keyword;
         catalogQuery = keyword; catalogLoadedKind = CatalogSearchKind;
         catalogLoadedPlatform = ""; catalogLoadedTarget = null; catalogExpiresAt = null;
-        CatalogSections.Clear(); CatalogTags.Clear(); Songs.Clear();
-        collection = null; selectedSong = null; total = 0; status = "";
+        CatalogTags.Clear();
+        collection = null;
+        if (!retainContent) selectedSong = null;
+        total = 0; status = "";
         var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         loadDrains.Add(done.Task);
         var flight = new SearchStartFlight(key, epoch);
@@ -208,10 +226,35 @@ public sealed partial class MusicCapability
         SearchBindings();
     }
 
-    private MusicCatalogCard[] SearchCards(string kind) =>
-        searchSnapshots.TryGetValue(kind, out var snapshot)
-            ? MusicCatalogDto.SearchResults(snapshot.GetProperty("items"), kind)
-            : [];
+    private MusicCatalogCard[] SearchCards(string kind)
+    {
+        if (!searchSnapshots.TryGetValue(kind, out var snapshot))
+            return searchCardCache.TryGetValue(kind, out var retained) ? retained.Cards : [];
+        var items = snapshot.GetProperty("items");
+        if (searchRefresh && snapshot.GetProperty("loading").GetBoolean() && items.GetArrayLength() == 0 &&
+            searchCardCache.TryGetValue(kind, out var refreshing)) return refreshing.Cards;
+        if (searchCardCache.TryGetValue(kind, out var cached) && JsonElement.DeepEquals(cached.Items, items))
+        {
+            searchCardCache[kind] = new(items, cached.Cards);
+            return cached.Cards;
+        }
+        if (!searchCardCache.TryGetValue(kind, out cached))
+        {
+            searchCardCache[kind] = new(items, MusicCatalogDto.SearchResults(items, kind));
+            return searchCardCache[kind].Cards;
+        }
+        var cards = new MusicCatalogCard[items.GetArrayLength()];
+        var previous = cached.Items.EnumerateArray();
+        int index = 0;
+        foreach (var item in items.EnumerateArray())
+        {
+            bool unchanged = previous.MoveNext() && JsonElement.DeepEquals(previous.Current, item);
+            cards[index] = unchanged ? cached.Cards[index] : MusicCatalogDto.SearchResult(item, kind);
+            index++;
+        }
+        searchCardCache[kind] = new(items, cards);
+        return cards;
+    }
     private bool SearchKindLoading(string kind) =>
         searchStarts.TryGetValue(kind, out var start) && start.Epoch == searchEpoch ||
         searchSnapshots.TryGetValue(kind, out var snapshot) &&
@@ -222,8 +265,13 @@ public sealed partial class MusicCapability
         var songCards = SearchCards("songs");
         var playlistCards = SearchCards("playlists");
         RetireCatalogPreviewSurface();
-        string? selected = selectedSong?.SelectionKey;
-        double scroll = restore ? searchScroll.GetValueOrDefault(searchView) : page.CaptureScroll();
+        string? selected = restore || searchRefresh ? searchSelectedKey : selectedSong?.SelectionKey;
+        var nextSongs = SearchSongs(songCards);
+        var (prefix, songsChanged) = SearchSongDelta(nextSongs);
+        bool reset = !restore && songsChanged && !prefix && IsSearchSongs;
+        double scroll = reset ? page.CaptureScroll() : searchScroll.GetValueOrDefault(searchView);
+        bool restoreScroll = restore || reset;
+        var sections = SearchSections(songCards, playlistCards);
         publishing = true;
         try
         {
@@ -231,38 +279,104 @@ public sealed partial class MusicCapability
             catalogAccountStamp = ""; catalogExpiresAt = null; catalogMore = false; catalogContinuation = null;
             catalogLoadedKind = CatalogSearchKind = searchKind == "songs" ? "歌曲" : "歌单";
             heading = searchKeyword; collection = null;
-            CatalogSections.Clear();
-            if (searchView == SearchOverview)
+            bool sectionsChanged = ApplySearchSections(sections);
+            total = searchView == SearchOverview ? songCards.Length + playlistCards.Length :
+                searchView == "songs" ? songCards.Length : playlistCards.Length;
+            if (CatalogTags.Count > 0) CatalogTags.Clear();
+            if (songsChanged) ApplySearchSongs(nextSongs, prefix);
+            if (restore || searchRefresh || songsChanged || sectionsChanged)
             {
-                CatalogSections.Add(new("单曲", songCards.Take(6).ToArray(),
-                    IsLoading: SearchKindLoading("songs")));
-                CatalogSections.Add(new("歌单", playlistCards.Take(6).ToArray(),
-                    IsLoading: SearchKindLoading("playlists")));
-                total = songCards.Length + playlistCards.Length;
+                var restored = Songs.FirstOrDefault(song => song.SelectionKey == selected);
+                if (!ReferenceEquals(selectedSong, restored)) SelectedSong = restored;
             }
-            else if (searchView == "songs")
-            {
-                CatalogSections.Add(new("", songCards));
-                total = songCards.Length;
-            }
-            else
-            {
-                CatalogSections.Add(new("", playlistCards));
-                total = playlistCards.Length;
-            }
-            CatalogTags.Clear();
-            Songs.Clear(); foreach (var card in songCards) if (card.Song is { } song) Songs.Add(song);
-            SelectedSong = Songs.FirstOrDefault(s => s.SelectionKey == selected);
             SearchStatus = SearchViewStatus();
             status = ""; RefreshBindings();
+            if (sectionsChanged) Changed(nameof(CatalogSections));
         }
         finally { publishing = false; }
+        if (!restoreScroll) return;
         long generation = loadGeneration, epoch = searchEpoch;
+        string view = searchView;
         _ = page.Dispatcher.InvokeAsync(() =>
         {
-            if (!stopping && generation == loadGeneration && epoch == searchEpoch && IsSearchPage)
+            if (!stopping && generation == loadGeneration && epoch == searchEpoch && IsSearchPage && view == searchView)
                 page.RestoreScroll(scroll);
         }, DispatcherPriority.Loaded);
+    }
+
+    private (bool Prefix, bool Changed) SearchSongDelta(SongRow[] next)
+    {
+        bool prefix = next.Length >= Songs.Count, changed = next.Length != Songs.Count;
+        for (int index = 0; index < Math.Min(next.Length, Songs.Count); index++)
+        {
+            if (ReferenceEquals(next[index], Songs[index])) continue;
+            changed = true;
+            if (prefix && next[index].SelectionKey != Songs[index].SelectionKey) prefix = false;
+        }
+        return (prefix, changed);
+    }
+
+    private static SongRow[] SearchSongs(MusicCatalogCard[] cards) =>
+        cards.Select(card => card.Song).OfType<SongRow>().ToArray();
+
+    private MusicCatalogSection[] SearchSections(MusicCatalogCard[] songCards,
+        MusicCatalogCard[] playlistCards)
+    {
+        if (searchView == SearchOverview)
+        {
+            return
+            [
+                Section("单曲", songCards.Take(6).ToArray()),
+                Section("歌单", playlistCards.Take(6).ToArray())
+            ];
+        }
+        if (searchView == "songs")
+        {
+            return [Section("", songCards)];
+        }
+        return [Section("", playlistCards)];
+    }
+
+    private MusicCatalogSection Section(string title, MusicCatalogCard[] cards)
+    {
+        if (CatalogSections.FirstOrDefault(section => section.Title == title) is { } existing &&
+            existing.Items.SequenceEqual(cards, ReferenceEqualityComparer.Instance))
+            return existing;
+        return new(title, cards);
+    }
+
+    private bool ApplySearchSections(MusicCatalogSection[] sections)
+    {
+        bool changed = false;
+        bool sameLayout = CatalogSections.Count == sections.Length &&
+            sections.Select((section, index) => CatalogSections[index].Title == section.Title &&
+                CatalogSections[index].Id == section.Id && CatalogSections[index].Type == section.Type).All(same => same);
+        if (!sameLayout)
+        {
+            CatalogSections.Clear();
+            foreach (var section in sections) CatalogSections.Add(section);
+            return true;
+        }
+        for (int index = 0; index < sections.Length; index++)
+        {
+            if (ReferenceEquals(CatalogSections[index], sections[index])) continue;
+            CatalogSections[index] = sections[index];
+            changed = true;
+        }
+        return changed;
+    }
+
+    private void ApplySearchSongs(SongRow[] next, bool prefix)
+    {
+        if (prefix)
+        {
+            for (int index = 0; index < Songs.Count; index++)
+                if (!ReferenceEquals(Songs[index], next[index])) Songs[index] = next[index];
+            for (int index = Songs.Count; index < next.Length; index++) Songs.Add(next[index]);
+            return;
+        }
+        Songs.Clear();
+        foreach (var song in next) Songs.Add(song);
     }
 
     private string SearchViewStatus()
@@ -384,7 +498,10 @@ public sealed partial class MusicCapability
         ++searchEpoch; searchStarting = false;
         RetireCatalogPreviewSurface();
         string[] ids = searchIds.Values.ToArray();
-        searchIds.Clear(); searchSnapshots.Clear(); searchScroll.Clear(); searchKeyword = "";
+        searchIds.Clear(); searchSnapshots.Clear(); searchCardCache.Clear(); searchScroll.Clear(); searchKeyword = "";
+        foreach (var sections in searchSections.Values) sections.Clear();
+        searchSongs.Clear(); searchSelectedKey = null;
+        page.ResetSearchPresentation();
         searchView = SearchOverview; searchKind = "songs";
         SearchBindings();
         await searchStartTail;
@@ -408,7 +525,7 @@ public sealed partial class MusicCapability
         RetireCatalogPreviewSurface();
         CatalogSections.Clear();
         CatalogTags.Clear();
-        Songs.Clear();
+        if (IsSearchSongs || !HasSearchSession) searchSongs.Clear();
         SelectedSong = null;
         total = 0;
         SearchStatus = "";

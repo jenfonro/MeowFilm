@@ -16,10 +16,66 @@ public static class FilmPresentationTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        yield return new("film-presentation: first load uses card skeletons and results or errors end them",
+            () => MusicQualityConsumerTests.Sta(SkeletonPresentation));
         yield return new("film-presentation: transparent four-rail home matches card and paging interactions",
             () => MusicQualityConsumerTests.Sta(HomePresentation));
         yield return new("film-presentation: more opens data while all cards open empty Douban detail",
             () => MusicQualityConsumerTests.Sta(DataNavigation));
+    }
+
+    private static async Task SkeletonPresentation()
+    {
+        var source = new GatedFilmSource();
+        await using var module = new FilmCapability(source);
+        var view = (FilmView)module.View;
+        var window = WindowFor(view, 1160, 760);
+        try
+        {
+            await module.InitializeAsync(default);
+            window.Show();
+            window.UpdateLayout();
+            await Drain();
+            Check(source.Calls == 0, "mounting the initial page does not read business data");
+            var abandoned = module.NavigateAsync(FilmCapability.HomeRoute, default);
+            view.Visibility = Visibility.Collapsed;
+            await abandoned;
+            Check(source.Calls == 0 && module.Sections.All(section => !section.ShowSkeleton),
+                "hiding before queued source reads cancels them and finishes loading state");
+            view.Visibility = Visibility.Visible;
+            await Drain();
+            Check(source.Calls == 0, "visibility alone does not start business reads");
+            var navigation = module.RestoreNavigationAsync(FilmCapability.HomeRoute, default);
+            await Drain();
+            var skeletons = Visuals(view).OfType<LoadingSkeleton>().Where(item => item.IsVisible).ToArray();
+            Check(skeletons.Length > 0 && !Visuals(view).OfType<FilmCard>().Any(),
+                "first pending load presents image-free poster and title placeholders");
+            source.Completion.SetResult();
+            await navigation;
+            window.UpdateLayout();
+            await Drain();
+            Check(skeletons.All(item => !item.IsVisible && !item.IsSweeping),
+                "success and failure both remove active skeletons");
+            Check(module.Sections.Sum(section => section.Items.Count) == 3 &&
+                module.Sections.Single(section => section.Key == "anime").CanRetry,
+                "real result counts replace placeholders and errors retain retry");
+        }
+        finally { source.Completion.TrySetResult(); window.Content = null; window.Close(); }
+    }
+
+    private sealed class GatedFilmSource : IFilmHomeSource
+    {
+        internal TaskCompletionSource Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal int Calls { get; private set; }
+        public async Task<IReadOnlyList<FilmCardItem>> LoadAsync(
+            FilmSectionDefinition section, int start, int limit, CancellationToken cancellationToken)
+        {
+            Calls++;
+            await Completion.Task.WaitAsync(cancellationToken);
+            if (section.Key == "anime") throw new InvalidOperationException("fixture failure");
+            return [new FilmCardItem(section.Key, section.Title, "", "")];
+        }
+        public void Dispose() { }
     }
 
     private static async Task HomePresentation()
@@ -107,8 +163,27 @@ public static class FilmPresentationTests
             await Until(() => Math.Abs(rail.HorizontalOffset - rail.ScrollableWidth) < .5 &&
                 shelf.IsSettled, "End reaches the final boundary");
             Check(next.Visibility == Visibility.Collapsed, "forward arrow disappears at the boundary");
+            var retainedCard = Visuals(shelf).OfType<FilmCard>().First();
+            double retainedOffset = rail.HorizontalOffset;
+            view.Visibility = Visibility.Collapsed;
+            await Drain();
+            Check(shelf.IsSettled && ReferenceEquals(rail, shelf.ScrollHost),
+                "hidden rail stops motion while retaining its scroll host");
+            view.Visibility = Visibility.Visible;
+            await module.RestoreNavigationAsync(FilmCapability.HomeRoute, default);
+            await Drain();
+            Check(ReferenceEquals(rail, shelf.ScrollHost) &&
+                Visuals(shelf).OfType<FilmCard>().Contains(retainedCard) &&
+                Math.Abs(rail.HorizontalOffset - retainedOffset) < .5,
+                "returning to film preserves the rail, realized card and horizontal offset");
             RaiseKey(shelf, Key.Home);
             await Until(() => rail.HorizontalOffset < .5 && shelf.IsSettled, "Home restores the first boundary");
+            next.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            view.Visibility = Visibility.Collapsed;
+            double pausedOffset = rail.HorizontalOffset;
+            await Drain();
+            Check(shelf.IsSettled && Math.Abs(rail.HorizontalOffset - pausedOffset) < .5,
+                "hiding during paging stops the offset clock immediately");
         }
         finally
         {
@@ -211,6 +286,22 @@ public static class FilmPresentationTests
             Check(items.Items.Count == 48 &&
                 source.Calls.Last() is { Key: "movie", Start: 24, Limit: 24 },
                 "the rendered list and source both advance by 24");
+            data.ScrollToVerticalOffset(220);
+            await Drain();
+            double dataOffset = data.VerticalOffset;
+            var retainedDataCard = Visuals(items).OfType<FilmCard>().First();
+            int retainedCalls = source.Calls.Count;
+            string dataLocation = module.CaptureNavigationLocation();
+            Check(dataLocation == FilmCapability.DataRoute, "capture identifies the retained data page");
+            await module.RestoreNavigationAsync(FilmCapability.HomeRoute, default);
+            await module.RestoreNavigationAsync(dataLocation, default);
+            await Drain();
+            Check(source.Calls.Count == retainedCalls &&
+                ReferenceEquals(items, view.FindName("DataItems")) &&
+                Visuals(items).OfType<FilmCard>().Contains(retainedDataCard) &&
+                Math.Abs(data.VerticalOffset - dataOffset) < .5 &&
+                module.ActiveData.FilterRows[0].Options.Single(option => option.Label == "最新电影").IsSelected,
+                "restoration preserves data controls, filter, scroll and request count");
             Check(((IDesktopHeaderSource)view).Header is
                 { Title: "影片数据", SearchVisible: false, SearchEnabled: false },
                 "shell header contribution follows the data route");
@@ -237,18 +328,24 @@ public static class FilmPresentationTests
         }
     }
 
-    private static Window WindowFor(FrameworkElement content, double width, double height) => new()
+    private static Window WindowFor(FrameworkElement content, double width, double height)
     {
-        Content = content,
-        Width = width,
-        Height = height,
-        WindowStyle = WindowStyle.None,
-        ResizeMode = ResizeMode.NoResize,
-        Left = -10000,
-        Top = -10000,
-        ShowActivated = false,
-        ShowInTaskbar = false
-    };
+        // Windows can constrain the offscreen window to the session's display width.
+        // Keep the tested content width independent of that native window constraint.
+        content.Width = width;
+        return new()
+        {
+            Content = content,
+            Width = width,
+            Height = height,
+            WindowStyle = WindowStyle.None,
+            ResizeMode = ResizeMode.NoResize,
+            Left = -10000,
+            Top = -10000,
+            ShowActivated = false,
+            ShowInTaskbar = false
+        };
+    }
 
     private static IEnumerable<DependencyObject> Visuals(DependencyObject root)
     {
