@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Scripting;
@@ -23,6 +24,8 @@ public static class MusicScriptIntegrationTests
         yield return new("Native LX real pipe: concurrent request contexts preserve site and installation storage across awaits", ConcurrentStorage);
         yield return new("Native LX real pipe: startup global and completed request contexts cannot borrow storage authority", ScopedStorage);
         yield return new("Native LX real pipe: response envelope preserves original raw value", RawValue);
+        yield return new("Native LX real pipe: internal transport preserves large arbitrary LX JSON", LargeTransport);
+        yield return new("Native LX real pipe: owner transports legal large recordings and declarations", LargeOwner);
     }
     private const string SourceTemplate = """
         const label = __LABEL__;
@@ -65,7 +68,7 @@ public static class MusicScriptIntegrationTests
                     ?? throw new InvalidOperationException("Packaged runtime root required.");
                 string node = Environment.GetEnvironmentVariable("MEOWFILM_TEST_NODE")
                     ?? throw new InvalidOperationException("Verified Node required.");
-                RuntimeModule[] modules = [new("music", "0.6.0"), new("cat", "0.1.0")];
+                RuntimeModule[] modules = [new("music", "0.7.0"), new("cat", "0.1.0")];
                 var capabilities = owner!.ScriptCapabilities.ToDictionary(pair => pair.Key,
                     pair => new Func<JsonElement, CancellationToken, Task<object?>>(async (input, cancellationToken) =>
                     {
@@ -120,14 +123,15 @@ public static class MusicScriptIntegrationTests
     }
     private static async Task<JsonElement> InvokeRaw(Fixture f, string id, string site, string operation, object payload)
     {
-        var status = await f.Runtime.CallAsync("music.script.status", new { });
+        var transport = new MusicScriptTransport(f.Runtime);
+        var status = await transport.CallAsync("status", new { }, default);
         Check(status.GetProperty("contract").GetString() == "music.script.v2");
         var instance = status.GetProperty("instances").EnumerateArray().Single(item => item.GetProperty("installationId").GetString() == id);
-        var reply = await f.Runtime.CallAsync("music.script.invoke", new
+        var reply = await transport.CallAsync("invoke", new
         {
             installationId = id, revision = instance.GetProperty("revision").GetInt64(),
             generation = instance.GetProperty("generation").GetInt64(), siteId = site, operation, payload
-        });
+        }, default);
         Check(reply.GetProperty("ok").GetBoolean(), "raw script invocation: " +
             (reply.TryGetProperty("code", out var code) ? code.GetString() : "missing"));
         Check(reply.GetProperty("contract").GetString() == "music.script.v2");
@@ -325,5 +329,90 @@ public static class MusicScriptIntegrationTests
                 Check(System.Text.Json.Nodes.JsonNode.DeepEquals(System.Text.Json.Nodes.JsonNode.Parse(raw.GetRawText()),
                     JsonSerializer.SerializeToNode(expected)), "raw extension value must retain its original JSON shape");
             }
+    }
+
+    private static async Task LargeTransport()
+    {
+        const string source = """
+            lx.on('request', async ({info}) => info.value);
+            lx.send('inited',{sources:{wy:{type:'music',actions:['probe'],qualitys:[]}}});
+            """;
+        await using var f = new Fixture(Data());
+        string id = await InstallSource(f, source);
+        await Ok(f, "music.sources.enable", new { installationId = id });
+        var transport = new MusicScriptTransport(f.Runtime);
+        foreach (int size in new[] { 512 * 1024, 512 * 1024 + 1, 1024 * 1024 + 1, 8 * 1024 * 1024 + 1 })
+        {
+            string text = new string('x', size) + "音乐🎵\"\\";
+            var expected = new { text, blob = new { token = "ordinary LX value" },
+                rows = new object?[] { null, false, 0, 1.25, new[] { "qs", "qsvip" } } };
+            var value = await InvokeRaw(f, id, "wy", "probe", new { value = expected });
+            Check(JsonNode.DeepEquals(JsonNode.Parse(value.GetRawText()), JsonSerializer.SerializeToNode(expected)),
+                "large LX value must retain all bytes and JSON types");
+            Check(Convert.ToHexStringLower(SHA256.HashData(BridgeCodec.EncodeJSONValue(value))) ==
+                Convert.ToHexStringLower(SHA256.HashData(BridgeCodec.EncodeJSONValue(expected))));
+        }
+        // A fresh small call remains usable after all result blobs were released.
+        var status = await transport.CallAsync("status", new { }, default);
+        Check(status.GetProperty("instances").GetArrayLength() == 1);
+        Check(!(await InvokeRaw(f, id, "wy", "probe", new { value = false })).GetBoolean());
+    }
+
+    private static async Task LargeOwner()
+    {
+        const string source = """
+            const fields=['mid','id','songId','qqSongId','songType','type','copyrightId','strMediaMid',
+              'hash','albumId','album_id','albumMid','albumAudioId','mixsongid','fileid','fileId','size'];
+            lx.on('request',async ({info})=>{
+              for(const field of fields)
+                if(info.musicInfo[field] !== 'x'.repeat(4096)) throw Error('recording changed');
+              return {url:'https://media.invalid/large.mp3',headers:{'X-Checked':String(fields.length)}};
+            });
+            const sources={};
+            for(let site=0;site<32;site++) {
+              const actions=['musicUrl'],qualitys=['320k'];
+              for(let i=1;i<32;i++) {
+                actions.push('action'+String(i).padStart(3,'0')+'a'.repeat(119));
+                qualitys.push('音'.repeat(61)+String(i).padStart(3,'0'));
+              }
+              sources[site===0?'wy':'site'+site]={type:'music',actions,qualitys:site===0?['320k']:qualitys};
+            }
+            lx.send('inited',{sources});
+            """;
+        await using var f = new Fixture(Data());
+        string id = await InstallSource(f, source);
+        var enabled = await Ok(f, "music.sources.enable", new { installationId = id });
+        Check(BridgeCodec.EncodeJSONValue(enabled).Length > 65536, "owner must restore the large load result");
+        Check(enabled.GetProperty("item").GetProperty("capabilities").GetArrayLength() == 32);
+        var cap = enabled.GetProperty("item").GetProperty("capabilities")[0];
+        Check(cap.GetProperty("actions")[31].GetString() == "action031" + new string('a', 119));
+        Check(cap.GetProperty("qualitys").EnumerateArray().Select(value => value.GetString()).SequenceEqual(["320k"]));
+        var extension = enabled.GetProperty("item").GetProperty("capabilities").EnumerateArray()
+            .Single(item => item.GetProperty("platform").GetString() == "site1");
+        Check(extension.GetProperty("qualitys")[31].GetString() == new string('音', 61) + "031");
+
+        var native = new JsonObject();
+        foreach (string field in new[] { "mid", "id", "songId", "qqSongId", "songType", "type", "copyrightId", "strMediaMid",
+            "hash", "albumId", "album_id", "albumMid", "albumAudioId", "mixsongid", "fileid", "fileId", "size" })
+            native[field] = new string('x', 4096);
+        var song = MusicSongFixture.Online("wy", "selected", "Track", "Fixture", duration: 180, native: native);
+        var recordings = song["sources"]!.AsArray();
+        // Distinct same-recording locators are legal; only wy is selected.
+        // This checks the owner's parser above the old persistent JSON budget
+        // while the selected recording itself crosses the control threshold.
+        for (int index = 0; index < 125; index++)
+            recordings.Add(MusicSongFixture.Online("tx", "other-" + index, "Track", "Fixture",
+                duration: 180, native: native)["sources"]![0]!.DeepClone());
+        Check(BridgeCodec.EncodeJSONValue(song).Length > 8 * 1024 * 1024);
+        var resolved = await Ok(f, "music.online.resolve", new { installationId = id, platform = "wy", quality = "320k", song });
+        Check(resolved.GetProperty("url").GetString() == "https://media.invalid/large.mp3" &&
+            resolved.GetProperty("headers").GetProperty("X-Checked").GetString() == "17");
+        // Two legal full declaration sets also exercise the owner's response
+        // path above its former 512 KiB ceiling without inventing capabilities.
+        string second = await InstallSource(f, source);
+        await Ok(f, "music.sources.enable", new { installationId = second });
+        var listed = await Ok(f, "music.sources.list");
+        Check(BridgeCodec.EncodeJSONValue(listed).Length > 512 * 1024);
+        Check(listed.GetProperty("items").EnumerateArray().All(item => item.GetProperty("capabilities").GetArrayLength() == 32));
     }
 }

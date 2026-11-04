@@ -55,7 +55,7 @@ Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口�
 
 网易云、QQ、酷狗官方业务独立于 LX。账号、平台 API、搜索、曲库、缓存和播放在 .NET 内执行；无脚本操作时不启动 Node。
 
-Windows 的唯一 Node 入口是 `apps/windows/runtime/entries/aggregate.mjs`，从公共 `apps/runtime/modules/{music,cat}-script.mjs` 装配 `music@0.6.0`／`music.script.v2` 与 `cat@0.1.0`／`cat.script.v1`。公共层复用一套 script-host／QuickJS 核心；Windows 目录只有启动／命名管道 bootstrap 与薄 entry，没有业务 module 副本。
+Windows 的唯一 Node 入口是 `apps/windows/runtime/entries/aggregate.mjs`，从公共 `apps/runtime/modules/{music,cat}-script.mjs` 装配 `music@0.7.0`／`music.script.v2` 与 `cat@0.1.0`／`cat.script.v1`。公共层复用一套 script-host／QuickJS 核心；Windows 目录只有启动／命名管道 bootstrap 与薄 entry，没有业务 module 副本。
 
 载荷包含公共 bootstrap、共享 music/Cat 模块、Windows 两个入口文件、runtime-bridge、script-host、有限 Node 兼容依赖、锁定的 QuickJS release-sync 引擎和必要许可，没有普通业务文档桥授权。Cat 设置、源码和私有卷位于 App 固定 `script-runtime` 数据根；公共执行、存储与网络边界见 [共用运行时](../runtime/script-runtime.md)。
 

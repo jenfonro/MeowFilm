@@ -24,7 +24,7 @@ public static class RuntimeTests
         return path;
     }
     private const string Identity = "aggregate";
-    private static RuntimeModule[] Modules => [new("music", "0.6.0"), new("cat", "0.1.0")];
+    private static RuntimeModule[] Modules => [new("music", "0.7.0"), new("cat", "0.1.0")];
     private static string[] Namespaces => ["music.library.v1", "music.accounts.v1"];
     private static string ScriptData() => Path.Combine(NewData(), "script-runtime");
 
