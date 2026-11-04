@@ -609,6 +609,285 @@ final class MusicUIKitRegressionTests: XCTestCase {
         await model.close()
     }
 
+    func testSearchSourceMergeRefreshesVisibleRowMenuAndActions() async throws {
+        let service = MusicUIKitRegressionService()
+        let primary = resultTrack("wy", "primary", title: "同一录音")
+        let added = resultTrack("tx", "added", title: "同一录音")
+        await service.configureResultPages(songs: [
+            "wy": [[primary]], "tx": [[resultTrack("tx", "other")], [added]],
+        ])
+        try await withSearchResults(service, preferences: .init(songPlatforms: [.netease, .qq],
+            playlistPlatforms: [])) { results, _, _ in
+            let table = try self.resultTable(0, in: results)
+            let cell = try XCTUnwrap(table.visibleCells.compactMap { $0 as? MusicSearchSongCell }
+                .first { self.descendants($0).compactMap { $0 as? UILabel }.contains { $0.text == primary.title } })
+            let more = try self.resultButton(prefix: "music.search.song.more.", in: cell)
+            let oldMenu = try XCTUnwrap(more.menu)
+            try self.resultButton(id: "music.search.results.action.0.0", in: results.view)
+                .sendActions(for: .touchUpInside)
+            await self.waitForResult { more.menu !== oldMenu }
+            XCTAssertTrue(table.visibleCells.contains { $0 === cell }, "来源补入不能靠滚出复用才生效")
+
+            let sourceAction = try XCTUnwrap(more.menu?.children.compactMap { $0 as? UIAction }
+                .first { $0.title == "音源" })
+            let sourceRead = self.expectation(description: "source inspection consumes both origins")
+            await service.observeRecordingReads { sourceRead.fulfill() }
+            self.invoke(sourceAction)
+            await self.waitForResult {
+                (results.presentedViewController as? UINavigationController)?
+                    .topViewController is MusicSourcesViewController
+            }
+            NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+            await self.fulfillment(of: [sourceRead], timeout: 3)
+            await self.waitForResult { results.presentedViewController?.isBeingPresented == false }
+            await service.observeRecordingReads(nil)
+            let inspected = await service.recordingReads()
+            XCTAssertEqual(inspected.first?.targets.first?.origins.map(\.platform), [.netease, .qq])
+            await withCheckedContinuation { continuation in
+                results.dismiss(animated: false) { continuation.resume() }
+            }
+            let closes = await service.inspectionCloseCount()
+            XCTAssertGreaterThan(closes, 0, "关闭音源页必须释放检查会话")
+            await self.waitForResult { results.canPresentPageAlert }
+
+            let appended = self.expectation(description: "append resolves updated sources")
+            await service.observeRecordingReads { appended.fulfill() }
+            try self.resultButton(prefix: "music.search.song.append.", in: cell)
+                .sendActions(for: .touchUpInside)
+            await self.fulfillment(of: [appended], timeout: 3)
+            await service.observeRecordingReads(nil)
+            await self.deliverMainRunLoop(); await self.deliverMainRunLoop()
+            await self.waitForResult {
+                self.matchingResultButton(prefix: "music.search.song.append.", in: cell)?.isEnabled == true
+            }
+            let favorited = self.expectation(description: "favorite resolves updated sources")
+            await service.observeRecordingReads { favorited.fulfill() }
+            try self.resultButton(prefix: "music.search.song.favorite.", in: cell)
+                .sendActions(for: .touchUpInside)
+            await self.fulfillment(of: [favorited], timeout: 3)
+            await service.observeRecordingReads(nil)
+            await self.deliverMainRunLoop(); await self.deliverMainRunLoop()
+            await self.waitForResult {
+                self.matchingResultButton(prefix: "music.search.song.info.", in: cell)?.isEnabled == true
+            }
+            let played = self.expectation(description: "single play consumes updated sources")
+            await service.observeBatchPlays { played.fulfill() }
+            try self.resultButton(prefix: "music.search.song.info.", in: cell)
+                .sendActions(for: .touchUpInside)
+            await self.fulfillment(of: [played], timeout: 3)
+            let recordings = await service.recordingReads(), batches = await service.batchPlays()
+            XCTAssertEqual(recordings.count, 3)
+            XCTAssertTrue(recordings.allSatisfy { $0.targets.first?.origins.map(\.platform) == [.netease, .qq] })
+            XCTAssertEqual(batches.first?.targets.first?.origins.map(\.platform), [.netease, .qq])
+        }
+    }
+
+    func testUnchangedSearchStateAndPlaylistLoadingDoNotReconfigureSongHeadingOrRows() async throws {
+        let service = MusicUIKitRegressionService()
+        let entered = expectation(description: "playlist next page pending")
+        let gate = MusicUIKitSearchGate { entered.fulfill() }
+        await service.configureResultPages(songs: ["tx": [[resultTrack("tx", "kept")]]],
+            playlists: ["tx": [[resultPlaylist("one")], [resultPlaylist("two")]]])
+        await service.blockResultPage(.playlists, page: 2, gate: gate)
+        try await withSearchResults(service) { results, _, _ in
+            let table = try self.resultTable(0, in: results)
+            let heading = try XCTUnwrap(self.identified("music.search.results.section.title", in: table) as? UILabel)
+            let song = try XCTUnwrap(table.visibleCells.first { $0 is MusicSearchSongCell })
+            let menu = try XCTUnwrap(self.resultButton(prefix: "music.search.song.more.", in: song).menu)
+            var headingWrites = 0
+            let observation = heading.observe(\.text) { _, _ in
+                MainActor.assumeIsolated { headingWrites += 1 }
+            }
+            defer { observation.invalidate() }
+            table.delegate?.scrollViewWillBeginDragging?(table)
+            table.delegate?.scrollViewWillBeginDragging?(table)
+            await self.deliverMainRunLoop(); await self.deliverMainRunLoop()
+            XCTAssertEqual(headingWrites, 0, "同等状态不能重复配置标题")
+            try self.resultButton(id: "music.search.results.action.0.1", in: results.view)
+                .sendActions(for: .touchUpInside)
+            await self.fulfillment(of: [entered], timeout: 3)
+            await self.waitForResult {
+                (self.identified("music.search.results.action.0.1",
+                                 in: results.view) as? UIButton)?.title(for: .normal) == "取消"
+            }
+            XCTAssertEqual(headingWrites, 0, "歌单加载状态不能重配单曲标题")
+            XCTAssertTrue(try self.resultButton(prefix: "music.search.song.more.", in: song).menu === menu)
+            await gate.release()
+            await self.waitForResult { table.numberOfRows(inSection: 1) == 3 }
+            XCTAssertEqual(headingWrites, 0)
+            let reads = await service.resultReads()
+            XCTAssertEqual(reads.filter { $0.section == .songs }.count, 1)
+            XCTAssertEqual(reads.filter { $0.section == .playlists }.count, 2)
+        }
+    }
+
+    func testSearchTabSwitchingDoesNotPageShortListsUntilNewVerticalDrag() async throws {
+        let service = MusicUIKitRegressionService()
+        await service.configureResultPages(songs: ["tx": [
+            [resultTrack("tx", "one")],
+            [resultTrack("tx", "two")] + (2..<30).map { resultTrack("tx", "row-\($0)") },
+            [resultTrack("tx", "three")],
+        ]], playlists: ["tx": [[resultPlaylist("one")], [resultPlaylist("two")]]])
+        try await withSearchResults(service) { results, _, _ in
+            for index in [1, 2, 0, 1] {
+                let table = try await self.selectResultTab(index, in: results)
+                self.displayLastResult(in: table, section: index == 2 ? 1 : 0)
+                await self.deliverMainRunLoop(); await self.deliverMainRunLoop()
+            }
+            let before = await service.resultReads()
+            XCTAssertEqual(before.count, 2, "切标签或显示末行不产生下一轮请求")
+            let table = try self.resultTable(1, in: results)
+            let next = self.expectation(description: "vertical drag permits song pagination")
+            await service.allowResultSearch { next.fulfill() }
+            table.delegate?.scrollViewWillBeginDragging?(table)
+            self.displayLastResult(in: table, section: 0)
+            await self.fulfillment(of: [next], timeout: 3)
+            await service.allowResultSearch {}
+            await self.waitForResult {
+                self.descendants(table).compactMap { $0 as? UILabel }.contains { $0.text == "two" }
+            }
+            _ = try await self.selectResultTab(2, in: results)
+            _ = try await self.selectResultTab(1, in: results)
+            self.displayLastResult(in: table, section: 0)
+            await self.deliverMainRunLoop(); await self.deliverMainRunLoop()
+            let after = await service.resultReads()
+            XCTAssertEqual(after.count, 3)
+            XCTAssertEqual(after.last?.section, .songs)
+            XCTAssertEqual(after.last?.page, 2)
+        }
+    }
+
+    func testSearchAppendPreservesVisibleRowsOffsetAndTabReturn() async throws {
+        let service = MusicUIKitRegressionService()
+        let entered = expectation(description: "song next page pending")
+        let gate = MusicUIKitSearchGate { entered.fulfill() }
+        await service.configureResultPages(songs: ["tx": [
+            (0..<30).map { resultTrack("tx", "row-\($0)") },
+            (30..<60).map { resultTrack("tx", "row-\($0)") },
+        ]])
+        await service.blockResultPage(.songs, page: 2, gate: gate)
+        try await withSearchResults(service) { results, _, _ in
+            let table = try await self.selectResultTab(1, in: results)
+            table.scrollToRow(at: IndexPath(row: table.numberOfRows(inSection: 0) - 1, section: 0),
+                              at: .bottom, animated: false)
+            table.layoutIfNeeded()
+            await self.deliverMainRunLoop()
+            let offset = table.contentOffset
+            let visible = table.indexPathsForVisibleRows ?? []
+            let cells = visible.compactMap { table.cellForRow(at: $0) as? MusicSearchSongCell }
+            let songPaths = visible.filter { table.cellForRow(at: $0) is MusicSearchSongCell }
+            let frames = songPaths.map { table.rectForRow(at: $0) }
+            let titles = cells.map { self.descendants($0).compactMap { $0 as? UILabel }.compactMap(\.text) }
+            let next = try self.resultButton(id: "music.search.results.action.1.0", in: table)
+            next.sendActions(for: .touchUpInside)
+            await self.fulfillment(of: [entered], timeout: 3)
+            await self.deliverMainRunLoop(); table.layoutIfNeeded()
+            XCTAssertEqual(table.contentOffset.y, offset.y, accuracy: 0.5)
+            XCTAssertEqual(songPaths.map { table.rectForRow(at: $0) }, frames)
+            await gate.release()
+            await self.waitForResult { table.numberOfRows(inSection: 0) == 61 }
+            table.layoutIfNeeded()
+            XCTAssertEqual(table.contentOffset.y, offset.y, accuracy: 0.5)
+            XCTAssertEqual(songPaths.map { table.rectForRow(at: $0) }, frames)
+            XCTAssertEqual(cells.map { self.descendants($0).compactMap { $0 as? UILabel }.compactMap(\.text) }, titles)
+            XCTAssertTrue(cells.allSatisfy { cell in table.visibleCells.contains { $0 === cell } })
+            _ = try await self.selectResultTab(2, in: results)
+            _ = try await self.selectResultTab(1, in: results)
+            XCTAssertEqual(table.contentOffset.y, offset.y, accuracy: 0.5)
+            let reads = await service.resultReads()
+            XCTAssertEqual(reads.filter { $0.section == .songs }.map(\.page), [1, 2])
+        }
+    }
+
+    func testSearchHorizontalTabTransitionDoesNotReadAndOldMenuCannotCrossNewQuery() async throws {
+        let service = MusicUIKitRegressionService()
+        await service.configureResultPages(songs: ["tx": [[resultTrack("tx", "one")], [resultTrack("tx", "two")]]],
+            playlists: ["tx": [[resultPlaylist("one")], [resultPlaylist("two")]]])
+        try await withSearchResults(service) { results, _, _ in
+            let songs = try await self.selectResultTab(1, in: results)
+            let oldMenu = try XCTUnwrap(self.resultButton(prefix: "music.search.song.more.", in: songs).menu)
+            songs.delegate?.scrollViewWillBeginDragging?(songs)
+            let pager = try XCTUnwrap(results.children.compactMap { $0 as? UIPageViewController }.first)
+            let previous = try XCTUnwrap(pager.viewControllers?.first)
+            let target = try XCTUnwrap(pager.dataSource?.pageViewController(pager, viewControllerAfter: previous))
+            pager.delegate?.pageViewController?(pager, willTransitionTo: [target])
+            pager.setViewControllers([target], direction: .forward, animated: false)
+            pager.delegate?.pageViewController?(pager, didFinishAnimating: true,
+                previousViewControllers: [previous], transitionCompleted: true)
+            results.view.layoutIfNeeded()
+            let playlists = try self.resultTable(2, in: results)
+            self.displayLastResult(in: playlists, section: 1)
+            await self.deliverMainRunLoop(); await self.deliverMainRunLoop()
+            let before = await service.resultReads()
+            XCTAssertEqual(before.count, 2, "横向分页不能继承上一分类的纵向加载意图")
+
+            let newReads = self.expectation(description: "new query reads both types once")
+            newReads.expectedFulfillmentCount = 2
+            await service.allowResultSearch { newReads.fulfill() }
+            results.query = "新关键词"; results.onSubmit?("新关键词")
+            await self.fulfillment(of: [newReads], timeout: 3)
+            await service.allowResultSearch {}
+            _ = try await self.selectResultTab(1, in: results)
+            await self.waitForResult {
+                guard let menu = self.matchingResultButton(prefix: "music.search.song.more.", in: songs)?.menu else {
+                    return false
+                }
+                return menu !== oldMenu
+            }
+            let oldSource = try XCTUnwrap(oldMenu.children.compactMap { $0 as? UIAction }
+                .first { $0.title == "音源" })
+            self.invoke(oldSource)
+            await self.deliverMainRunLoop()
+            XCTAssertNil(results.presentedViewController)
+            let recordings = await service.recordingReads()
+            XCTAssertTrue(recordings.isEmpty)
+            let reads = await service.resultReads()
+            XCTAssertEqual(reads.map(\.query), ["测试录音", "测试录音", "新关键词", "新关键词"])
+        }
+    }
+
+    func testSearchPlaylistLayoutAndAccessClearUpdateAllRetainedPages() async throws {
+        let service = MusicUIKitRegressionService()
+        await service.configureResultPages(songs: ["tx": [[resultTrack("tx", "same")]]],
+            playlists: ["tx": [(0..<8).map { resultPlaylist("list-\($0)") }]])
+        try await withSearchResults(service) { results, model, appearance in
+            let all = try self.resultTable(0, in: results)
+            let oldMenu = try XCTUnwrap(self.resultButton(prefix: "music.search.song.more.", in: all).menu)
+            let songs = try await self.selectResultTab(1, in: results)
+            let playlists = try await self.selectResultTab(2, in: results)
+            XCTAssertLessThan(playlists.numberOfRows(inSection: 1), 8)
+            appearance.set(\.playlistView, .list)
+            await self.waitForResult { playlists.numberOfRows(inSection: 1) == 8 }
+            appearance.set(\.playlistView, .grid)
+            await self.waitForResult { playlists.numberOfRows(inSection: 1) < 8 }
+
+            model.setAvailable(false)
+            await self.waitForResult {
+                [all, songs].allSatisfy { $0.numberOfRows(inSection: 0) == 1 } &&
+                    playlists.numberOfRows(inSection: 1) == 0
+            }
+            let oldSource = try XCTUnwrap(oldMenu.children.compactMap { $0 as? UIAction }
+                .first { $0.title == "音源" })
+            self.invoke(oldSource)
+            await self.deliverMainRunLoop()
+            XCTAssertNil(results.presentedViewController)
+            let reads = await service.recordingReads()
+            XCTAssertTrue(reads.isEmpty)
+            _ = try await self.selectResultTab(0, in: results)
+            let play = try self.resultButton(id: "music.search.results.section.play", in: all)
+            XCTAssertTrue(play.isHidden)
+            model.setAvailable(true)
+            await self.waitForResult {
+                all.visibleCells.contains {
+                    (self.identified("music.search.results.section.play", in: $0) as? UIButton)?.isHidden == false
+                }
+            }
+            XCTAssertTrue(all.visibleCells.contains {
+                (self.identified("music.search.results.section.play", in: $0) as? UIButton)?.isHidden == false
+            })
+        }
+    }
+
     func testChannelTabsKeepDirectoryOrderAndCenterTheCurrentChannel() throws {
         let channels: [MusicPublicBrowseChannel] = [
             .init(id: "chart", title: "排行榜", kind: .rankings),
@@ -2374,6 +2653,113 @@ final class MusicUIKitRegressionTests: XCTestCase {
             RunLoop.main.perform { continuation.resume() }
         }
     }
+    private func resultTrack(_ platform: String, _ id: String, title: String? = nil) -> MusicRemoteTrack {
+        .init(ref: .init(kind: .handle, id: platform + ":" + id), songId: id,
+            title: title ?? id, artist: "Fixture", album: "Album", duration: 180,
+            sources: [.init(sourceKey: platform + ":" + id, platform: platform, nativeId: id)])
+    }
+    private func resultPlaylist(_ id: String) -> MusicPublicBrowseCollection {
+        .init(platform: .qq, nativeID: id, title: id)
+    }
+    private func resultTable(_ index: Int, in results: UIViewController) throws -> UITableView {
+        try XCTUnwrap(identified("music.search.results.page.\(index)", in: results.view) as? UITableView)
+    }
+    private func resultButton(id: String, in view: UIView) throws -> UIButton {
+        try XCTUnwrap(identified(id, in: view) as? UIButton, id)
+    }
+    private func resultButton(prefix: String, in view: UIView) throws -> UIButton {
+        try XCTUnwrap(matchingResultButton(prefix: prefix, in: view), prefix)
+    }
+    private func matchingResultButton(prefix: String, in view: UIView) -> UIButton? {
+        descendants(view).compactMap { $0 as? UIButton }
+            .first { $0.accessibilityIdentifier?.hasPrefix(prefix) == true }
+    }
+    private func invoke(_ action: UIAction) {
+        let sender = UIButton(type: .system)
+        sender.addAction(action, for: .touchUpInside)
+        sender.sendActions(for: .touchUpInside)
+    }
+    private func waitForResult(file: StaticString = #filePath, line: UInt = #line,
+                               _ predicate: @escaping @MainActor () -> Bool) async {
+        let ready = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated { predicate() } },
+                                evaluatedWith: nil)
+        let outcome = await XCTWaiter.fulfillment(of: [ready], timeout: 4)
+        XCTAssertEqual(outcome, .completed, file: file, line: line)
+    }
+    private func selectResultTab(_ index: Int, in results: SearchPageViewController) async throws -> UITableView {
+        let button = try resultButton(id: "music.search.results.tab.\(index)", in: results.view)
+        button.sendActions(for: .touchUpInside)
+        await waitForResult {
+            button.accessibilityTraits.contains(.selected) &&
+                results.shouldBeginInteractiveBack(at: .zero, in: results.view) == (index == 0)
+        }
+        results.view.layoutIfNeeded()
+        await deliverMainRunLoop()
+        return try resultTable(index, in: results)
+    }
+    private func displayLastResult(in table: UITableView, section: Int) {
+        // UIKit can redisplay a retained row after a tab transition or relayout,
+        // without a new vertical drag. Exercise that delegate event explicitly.
+        let rows = table.indexPathsForVisibleRows?.filter { $0.section == section } ?? []
+        let last = rows.reversed().first {
+            guard let cell = table.cellForRow(at: $0) else { return false }
+            return cell is MusicSearchSongCell || cell is MusicSearchPlaylistCell
+        }
+        guard let last, let cell = table.cellForRow(at: last) else { XCTFail("Expected a visible result"); return }
+        table.delegate?.tableView?(table, willDisplay: cell, forRowAt: last)
+    }
+    private func withSearchResults(_ service: MusicUIKitRegressionService,
+        preferences: MusicSearchPreferences = .init(songPlatforms: [.qq], playlistPlatforms: [.qq]),
+        run: (SearchPageViewController, MusicViewModel, MusicAppearancePreferencesStore) async throws -> Void) async throws {
+        let suite = "MusicUIKitRegressionTests.result-update." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let key = MusicSearchPreferencesStore.preferencesKey, saved = UserDefaults.standard.object(forKey: key)
+        UserDefaults.standard.set(try JSONEncoder().encode(preferences), forKey: key)
+        defer {
+            UserDefaults.standard.set(saved, forKey: key)
+            defaults.removePersistentDomain(forName: suite)
+        }
+        let appearance = MusicAppearancePreferencesStore(defaults: defaults)
+        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        await model.load()
+        await service.allowResultSearch {}
+        let root = MusicSearchViewController(model: model, appearance: appearance,
+            router: MusicUIKitRegressionRouter(), history: SearchHistoryStore(defaults: defaults))
+        let navigation = PageNavigationController(themeProvider: appearance)
+        navigation.setViewControllers([root], animated: false)
+        let window = mount(navigation)
+        defer { release(navigation, window: window) }
+        let shown = expectation(description: "result navigation completed")
+        navigation.didShowPage = { page in
+            if page !== root, page is SearchPageViewController { shown.fulfill() }
+        }
+        root.query = "测试录音"; root.onSubmit?("测试录音")
+        await fulfillment(of: [shown], timeout: 3)
+        navigation.didShowPage = nil
+        // The component runner may itself be inactive. Deliver the foreground
+        // event after the pushed page has installed its lifecycle observers.
+        NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        await waitForResult {
+            guard let results = navigation.topViewController as? SearchPageViewController, results !== root else { return false }
+            results.view.layoutIfNeeded()
+            guard let table = self.identified("music.search.results.page.0", in: results.view) as? UITableView else {
+                return false
+            }
+            let cells = table.visibleCells
+            return results.canPresentPageAlert && cells.contains { $0 is MusicSearchSongCell } &&
+                !cells.flatMap(self.descendants).compactMap { $0 as? UIButton }
+                    .contains { $0.title(for: .normal) == "取消" }
+        }
+        let results = try XCTUnwrap(navigation.topViewController as? SearchPageViewController)
+        XCTAssertTrue(results.canPresentPageAlert,
+            "active=\(results.isPageActive) visible=\(results.isPageVisible) " +
+            "alert=\((results.presentedViewController as? UIAlertController)?.message ?? "none") " +
+            "navigationPresented=\(String(describing: navigation.presentedViewController))")
+        await deliverMainRunLoop(); await deliverMainRunLoop()
+        do { try await run(results, model, appearance) }
+        catch { await model.close(); throw error }
+        await model.close()
+    }
     private func useSearchResultPreferences() throws -> @MainActor () -> Void {
         let defaults = UserDefaults.standard, key = MusicSearchPreferencesStore.preferencesKey
         let saved = defaults.object(forKey: key)
@@ -2829,7 +3215,8 @@ private final class MusicUIKitRegressionRouter: MusicUIRouting {
 }
 
 private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, MusicPublicBrowsing, MusicPublicPlaylistSearching,
-    MusicSearchDiscoveryProviding, MusicSearchHotPlaybackProviding, MusicChorusProviding, MusicHomeBrowsing {
+    MusicSearchDiscoveryProviding, MusicSearchHotPlaybackProviding, MusicChorusProviding, MusicHomeBrowsing,
+    MusicSearchBatchPlaying, MusicResolvedSourcesServing {
     struct ResultRead: Equatable, Sendable {
         let section: MusicSearchSection
         let platform: String
@@ -2857,6 +3244,14 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     private var resultSearchObserver: (@Sendable () -> Void)?
     private var requestedResultReads: [ResultRead] = []
     private var playlistSearchFailure: MusicServiceError?
+    private var songResultPages: [String: [[MusicRemoteTrack]]]?
+    private var playlistResultPages: [String: [[MusicPublicBrowseCollection]]] = [:]
+    private var resultPageGate: (section: MusicSearchSection, page: Int, gate: MusicUIKitSearchGate)?
+    private var requestedRecordings: [MusicSearchBatchRequest] = [], playedBatches: [MusicSearchBatchRequest] = []
+    private var recordingObserver: (@Sendable () -> Void)?, batchObserver: (@Sendable () -> Void)?
+    private var resolvedResultTracks: [MusicReference: MusicRemoteTrack] = [:]
+    private var resultFavorites: [MusicRemoteTrack] = []
+    private let resultInspection = MusicUIKitResultInspectionSession()
     private var homeContinuations: [UUID: AsyncStream<Void>.Continuation] = [:]
     var isObservingHome: Bool { !homeContinuations.isEmpty }
     init(discovery: [MusicSearchDiscoverySnapshot] = [], browse: MusicPublicBrowsePage = .init(sections: []),
@@ -2880,6 +3275,40 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
         playlistSearchFailure = playlistFailure; resultSearchObserver = onRead
     }
     func resultReads() -> [ResultRead] { requestedResultReads }
+    func configureResultPages(songs: [String: [[MusicRemoteTrack]]],
+                              playlists: [String: [[MusicPublicBrowseCollection]]] = [:]) {
+        songResultPages = songs; playlistResultPages = playlists
+    }
+    func blockResultPage(_ section: MusicSearchSection, page: Int, gate: MusicUIKitSearchGate) {
+        resultPageGate = (section, page, gate)
+    }
+    func observeRecordingReads(_ observer: (@Sendable () -> Void)?) { recordingObserver = observer }
+    func observeBatchPlays(_ observer: (@Sendable () -> Void)?) { batchObserver = observer }
+    func recordingReads() -> [MusicSearchBatchRequest] { requestedRecordings }
+    func batchPlays() -> [MusicSearchBatchRequest] { playedBatches }
+    func searchRecording(_ request: MusicSearchBatchRequest) throws -> MusicRemoteTrack {
+        guard songResultPages != nil, let origins = request.targets.first?.origins,
+              let primary = origins.first?.track else { throw MusicServiceError.unsupported }
+        requestedRecordings.append(request)
+        recordingObserver?()
+        let track = MusicRemoteTrack(ref: primary.ref, songId: primary.songId, title: primary.title,
+            artist: primary.artist, album: primary.album, duration: primary.duration,
+            sources: origins.flatMap { $0.track.sources })
+        resolvedResultTracks[track.ref] = track
+        return track
+    }
+    func replaceSearchBatch(_ request: MusicSearchBatchRequest, expectedRevision: Int,
+                            intent: MusicQueueAuthorization) throws -> MusicPlaybackState {
+        guard songResultPages != nil else { throw MusicServiceError.unsupported }
+        try intent.check()
+        playedBatches.append(request); batchObserver?()
+        return .init()
+    }
+    func inspectSources(for reference: MusicReference) throws -> any MusicSourceInspectionSession {
+        guard songResultPages != nil else { throw MusicServiceError.unsupported }
+        return resultInspection
+    }
+    func inspectionCloseCount() async -> Int { await resultInspection.closeCount }
     func detailCallIDs() -> [String] { requestedDetails }
     func detailReadCount() -> Int { requestedDetails.count }
     func updateBrowse(_ page: MusicPublicBrowsePage) {
@@ -2936,12 +3365,21 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     }
     func publicPlaylists(platform: MusicPublicBrowsePlatform, query: String, cursor: String?) throws -> MusicPublicBrowseCollectionPage { throw MusicServiceError.unsupported }
     func searchPublicPlaylists(platform: MusicPublicBrowsePlatform, query: String,
-                               page: Int, limit: Int) throws -> MusicPlaylistSearchPage {
+                               page: Int, limit: Int) async throws -> MusicPlaylistSearchPage {
         guard let observe = resultSearchObserver else { throw MusicServiceError.unsupported }
         requestedResultReads.append(.init(section: .playlists, platform: platform.rawValue,
             query: query, page: page, limit: limit))
         observe()
+        if let pending = resultPageGate, pending.section == .playlists, pending.page == page {
+            await pending.gate.wait()
+        }
         if let failure = playlistSearchFailure { throw failure }
+        if songResultPages != nil {
+            let pages = playlistResultPages[platform.rawValue] ?? []
+            return .init(platform: platform, query: query, page: page, limit: limit,
+                total: pages.reduce(0) { $0 + $1.count }, nextPage: page < pages.count ? page + 1 : nil,
+                items: pages.indices.contains(page - 1) ? pages[page - 1] : [])
+        }
         return .init(platform: platform, query: query, page: page, limit: limit,
                      total: 0, nextPage: nil, items: [])
     }
@@ -2966,9 +3404,19 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     func accountTracks(platform: MusicAccountPlatform, collectionID: String, cursor: String?) throws -> MusicBrowsePage { throw MusicServiceError.unsupported }
     func state() -> MusicPlaybackState { .init() }
     func platforms() -> [MusicPlatform] { [] }
-    func search(platform: String, query: String, page: Int, limit: Int) throws -> MusicSearchPage {
+    func search(platform: String, query: String, page: Int, limit: Int) async throws -> MusicSearchPage {
         guard let observe = resultSearchObserver else { throw MusicServiceError.unsupported }
         requestedResultReads.append(.init(section: .songs, platform: platform, query: query, page: page, limit: limit))
+        if let pages = songResultPages {
+            observe()
+            if let pending = resultPageGate, pending.section == .songs, pending.page == page {
+                await pending.gate.wait()
+            }
+            let values = pages[platform] ?? []
+            return .init(platform: platform, query: query, page: page, limit: limit,
+                total: values.reduce(0) { $0 + $1.count }, nextPage: page < values.count ? page + 1 : nil,
+                items: values.indices.contains(page - 1) ? values[page - 1] : [])
+        }
         let id = "result-\(platform)-\(requestedResultReads.count)"
         let track = MusicRemoteTrack(ref: .init(kind: .handle, id: id), songId: id,
             title: "Synthetic \(id)", artist: "Fixture", duration: 180,
@@ -2978,15 +3426,28 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
                      total: 1, nextPage: nil, items: [track])
     }
     func collections() -> [MusicCollection] {
-        localTracks.isEmpty ? [] : [.init(id: collectionKind == "favorites" ? "favorites" : "playlist:1",
+        if songResultPages != nil {
+            return [.init(id: "favorites", title: "收藏", kind: "favorites", count: resultFavorites.count, revision: 1)]
+        }
+        return localTracks.isEmpty ? [] : [.init(id: collectionKind == "favorites" ? "favorites" : "playlist:1",
             title: "歌单", kind: collectionKind, count: localTracks.count, revision: 1)]
     }
-    func tracks(in collection: MusicCollection) -> [MusicRemoteTrack] { trackCalls += 1; return localTracks }
+    func tracks(in collection: MusicCollection) -> [MusicRemoteTrack] {
+        trackCalls += 1
+        return songResultPages != nil ? resultFavorites : localTracks
+    }
     func createPlaylist(name: String, refs: [MusicReference]) throws -> MusicCollection { throw MusicServiceError.unsupported }
-    func editPlaylist(_ collection: MusicCollection, name: String?, refs: [MusicReference]?, order: [String]?) throws -> MusicCollection { throw MusicServiceError.unsupported }
+    func editPlaylist(_ collection: MusicCollection, name: String?, refs: [MusicReference]?, order: [String]?) throws -> MusicCollection {
+        guard songResultPages != nil else { throw MusicServiceError.unsupported }
+        if let refs { resultFavorites = refs.compactMap { resolvedResultTracks[$0] } }
+        return collection
+    }
     func removePlaylist(_ collection: MusicCollection) throws { throw MusicServiceError.unsupported }
     func queue() -> MusicQueueSnapshot { .init(revision: 0, currentId: nil, entries: []) }
-    func changeQueue(_ change: MusicQueueChange, expectedRevision: Int) throws -> MusicPlaybackState { throw MusicServiceError.unsupported }
+    func changeQueue(_ change: MusicQueueChange, expectedRevision: Int) throws -> MusicPlaybackState {
+        guard songResultPages != nil else { throw MusicServiceError.unsupported }
+        return .init()
+    }
     func advance(_ direction: MusicDirection, reason: MusicAdvanceReason, expectedRevision: Int) throws -> MusicAdvanceResult { throw MusicServiceError.unsupported }
     func updateSettings(_ change: MusicSettingsChange) throws -> MusicPlaybackState { throw MusicServiceError.unsupported }
     func playbackOptions(for ref: MusicReference) -> [MusicPlaybackOption] { [] }
@@ -3001,6 +3462,17 @@ private actor MusicUIKitRegressionService: MusicServing, MusicAccountBrowsing, M
     func commitImport(_ preview: MusicImportPreview) throws -> MusicImportReport { throw MusicServiceError.unsupported }
     func releaseImport(_ preview: MusicImportPreview) {}
     func rollbackImport(batchId: String) throws { throw MusicServiceError.unsupported }
+}
+
+private actor MusicUIKitResultInspectionSession: MusicSourceInspectionSession {
+    private let pair = AsyncThrowingStream<MusicResolvedSourcesSnapshot, Error>.makeStream()
+    private(set) var closeCount = 0
+    func updates() -> AsyncThrowingStream<MusicResolvedSourcesSnapshot, Error> { pair.stream }
+    func loadMore(refresh: Bool) -> MusicResolvedSourcesSnapshot { .init(sources: [], hasMore: false) }
+    func adopt(sourceID: String, occurrenceID: String, expectedQueueRevision: Int) throws -> MusicPlaybackSelection {
+        throw MusicServiceError.unsupported
+    }
+    func close() { closeCount += 1; pair.continuation.finish() }
 }
 
 private actor MusicUIKitImportHistoryFixture: MusicImportHistoryProviding {

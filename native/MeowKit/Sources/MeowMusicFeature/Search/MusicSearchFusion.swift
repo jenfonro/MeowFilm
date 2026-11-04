@@ -2,7 +2,7 @@
 // Native DTO projection of iWebPlus rank-fusion.js.
 import Foundation
 
-public struct MusicSearchSong: Sendable, Identifiable {
+public struct MusicSearchSong: Equatable, Sendable, Identifiable {
     public let id: String
     public let track: MusicRemoteTrack
     /// Each variant retains the real reference registered by its native owner.
