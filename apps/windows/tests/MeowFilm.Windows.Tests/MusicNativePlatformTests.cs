@@ -19,6 +19,19 @@ public static class MusicNativePlatformTests
     private const string KgHash = "ABCDEF0123456789ABCDEF0123456789";
     public static IEnumerable<TestCase> Cases()
     {
+        yield return Case("platform response uses the last JSON field at every object without stripping provider metadata", async () =>
+        {
+            using var http = MusicPlatformHttp.CreateWithHandler(new Handler((_, _) => Task.FromResult(
+                new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(
+                    """{"code":500,"code":200,"alg":null,"alg":"root","data":{"id":1,"id":2,"rows":[{"alg":null,"alg":"track","meta":{"name":"old","name":"new"}}]}}""",
+                    Encoding.UTF8, "application/json") })));
+            var result = await http.SendAsync("wy", new(HttpMethod.Post,
+                "https://interfacepc.music.163.com/eapi/v6/playlist/detail"), default);
+            Equal("200", S(result.Body["code"])); Equal("root", S(result.Body["alg"]));
+            Equal("2", S(result.Body["data"]!["id"]));
+            Equal("track", S(result.Body["data"]!["rows"]![0]!["alg"]));
+            Equal("new", S(result.Body["data"]!["rows"]![0]!["meta"]!["name"]));
+        });
         yield return Case("official WY audio uses XEAPI and separates requested from delivered quality", async () =>
         {
             foreach (bool trial in new[] { false, true })
@@ -618,28 +631,26 @@ public static class MusicNativePlatformTests
             }
             Equal(1, f.Calls);
         });
-        yield return Case("wy playlist duplicate exception does not allow ambiguous identity or other response fields", async () =>
+        yield return Case("wy final response fields still enforce playlist and recording identity", async () =>
         {
-            foreach (var json in new[]
+            foreach (var (json, error) in new[]
             {
-                """{"code":200,"code":200,"playlist":{}}""",
-                """{"code":200,"playlist":{"id":"500","id":"501"}}""",
-                """{"code":200,"playlist":{"trackIds":[],"trackIds":[]}}""",
-                """{"code":200,"playlist":{"tracks":[{"id":"1","id":"2","alg":null,"alg":"x"}]}}""",
-                """{"code":200,"playlist":{"tracks":[{"ar":[{"alg":null,"alg":"x"}]}]}}""",
-                """{"code":200,"playlist":{"alg":null,"alg":"x"}}"""
+                ("""{"code":200,"playlist":{"id":"500","id":"501"}}""", "IDENTITY_MISMATCH"),
+                ("""{"code":200,"playlist":{"id":"500","trackIds":[{"id":"1"}],"trackCount":1,"tracks":[{"id":"1","id":"2","name":"other"}]}}""", "IDENTITY_MISMATCH"),
+                ("""{"code":200,"code":500,"playlist":{}}""", "UPSTREAM_ERROR")
             })
             {
                 using var f = new Fixture(_ => new(HttpStatusCode.OK)
                     { Content = new StringContent(json, Encoding.UTF8, "application/json") });
-                await Error("INVALID_RESPONSE", () => f.Catalog.PlaylistAsync(new("wy", "500", Limit: 3)));
+                await Error(error, () => f.Catalog.PlaylistAsync(new("wy", "500", Limit: 3)));
                 Equal(1, f.Calls);
             }
             using var other = new Fixture(_ => new(HttpStatusCode.OK)
             {
                 Content = new StringContent("""{"code":200,"alg":null,"alg":"x","data":{"blocks":[]}}""", Encoding.UTF8, "application/json")
             });
-            await Error("INVALID_RESPONSE", () => other.Catalog.HomeAsync(new("wy")));
+            var home = await other.Catalog.HomeAsync(new("wy"));
+            Equal(0, home.GetProperty("sections").GetArrayLength());
             Equal(1, other.Calls);
         });
         yield return Case("wy playlist batches only missing current page display members once", async () =>
@@ -1051,6 +1062,79 @@ public static class MusicNativePlatformTests
             await Error("SNAPSHOT_CHANGED", () => f.Catalog.ChannelAsync(new("wy", "artist",
                 Continuation: continuation, Tag: "96:1:65")));
             await Error("INVALID_REQUEST", () => f.Catalog.ChannelAsync(new("wy", "artist", Tag: "96:x:65")));
+        });
+        yield return Case("artist list and details prefer square artwork and do not lose a fallback behind empty metadata", async () =>
+        {
+            foreach (var square in new[] { "", "http://p1.music.126.net/avatar/109951100000001.jpg" })
+            {
+                var row = J(new { id = "30", name = "歌手", picUrl = "https://images.invalid/portrait.jpg", img1v1Url = square });
+                using var f = new Fixture(req =>
+                    req.RequestUri!.AbsolutePath.Contains("position/show", StringComparison.Ordinal) ? Directory() :
+                    req.RequestUri.AbsolutePath.EndsWith("/list", StringComparison.Ordinal)
+                        ? Json(J(new { code = 200, artists = new[] { row }, more = false }))
+                        : Json(J(new { code = 200, artist = row, hotSongs = Array.Empty<object>() })));
+                var expected = square.Length == 0 ? "https://images.invalid/portrait.jpg" :
+                    "https://p1.music.126.net/avatar/109951100000001.jpg";
+                var channel = await f.Catalog.ChannelAsync(new("wy", "artist"));
+                Equal(expected, channel.GetProperty("sections")[0].GetProperty("items")[0].GetProperty("cover").GetString());
+                Equal(expected, (await f.Catalog.ArtistAsync(new("wy", "30"))).GetProperty("cover").GetString());
+            }
+        });
+        yield return Case("wy home and search use later real display fields when optional image and title fields are empty", async () =>
+        {
+            using var f = new Fixture(_ => Home(false, "1", J(new
+            {
+                resourceType = "playlist", resourceId = "500", name = "", title = "真实歌单",
+                cover = "", coverImg = "", picUrl = "https://images.invalid/real.jpg"
+            })));
+            var card = MusicCatalogDto.Read(await f.Catalog.HomeAsync(new("wy")), "wy", "home", "")
+                .SelectMany(section => section.Items).Single();
+            Equal("真实歌单", card.Title); Equal("https://images.invalid/real.jpg", card.Cover);
+
+            using var search = new Fixture(_ => Json(J(new { code = 200, result = new
+            {
+                playlistCount = 1,
+                playlists = new[] { new { id = "500", name = "", title = "真实歌单", picUrl = "", coverImgUrl = "https://images.invalid/real.jpg" } }
+            } })));
+            var item = (await search.Catalog.SearchAsync(new("wy", "x", Kind: MusicSearchKind.Playlists))).GetProperty("items")[0];
+            Equal("真实歌单", item.GetProperty("name").GetString());
+            Equal("https://images.invalid/real.jpg", item.GetProperty("cover").GetString());
+        });
+        yield return Case("wy song search and embedded playlist use real title and cover behind empty optional fields", async () =>
+        {
+            var raw = Wy("1"); raw["name"] = ""; raw["title"] = "真实歌曲";
+            raw["al"]!["picUrl"] = ""; raw["picUrl"] = ""; raw["coverUrl"] = "https://images.invalid/real.jpg";
+            using var search = new Fixture(_ => WySearch([raw], 1));
+            var song = (await search.Catalog.SearchAsync(new("wy", "x"))).GetProperty("items")[0];
+            Equal("真实歌曲", song.GetProperty("title").GetString());
+            Equal("https://images.invalid/real.jpg", song.GetProperty("cover_url").GetString());
+            using var playlist = new Fixture(req =>
+            {
+                True(req.RequestUri!.AbsolutePath.Contains("/playlist/", StringComparison.Ordinal));
+                return WyList(["1"], [raw]);
+            });
+            var member = (await playlist.Catalog.PlaylistAsync(new("wy", "500"))).GetProperty("items")[0];
+            Equal("真实歌曲", member.GetProperty("title").GetString());
+            Equal("https://images.invalid/real.jpg", member.GetProperty("cover_url").GetString());
+            Equal(1, playlist.Calls);
+        });
+        yield return Case("wy home consumes final fields in embedded provider JSON without executing templates", async () =>
+        {
+            using var f = new Fixture(_ => Json(J(new { code = 200, data = new { blocks = new[] {
+                new { positionCode = "PLAYLIST", dslData =
+                    """
+                    {"blockResource":{"header":{"title":"旧栏目","title":"推荐"},"items":[
+                      {"resourceType":"playlist","resourceId":"500","name":"旧歌单","name":"真实歌单",
+                       "cover":"https://images.invalid/real.jpg",
+                       "playBtnData":"{\"detailUrl\":\"orpheus://playlist/499\",\"detailUrl\":\"orpheus://playlist/500\"}"}
+                    ]}}
+                    """ }
+            } } })));
+            var section = MusicCatalogDto.Read(await f.Catalog.HomeAsync(new("wy")), "wy", "home", "").Single();
+            var card = section.Items.Single();
+            Equal("推荐", section.Title); Equal("真实歌单", card.Title);
+            Equal("500", card.ActionId); Equal("https://images.invalid/real.jpg", card.Cover);
+            Equal(1, f.Calls);
         });
         yield return Case("artist continuation supports large offsets without truncation or integer overflow", async () =>
         {
@@ -1645,11 +1729,14 @@ public static class MusicNativePlatformTests
                 Content = new StreamContent(new System.IO.MemoryStream(Encoding.UTF8.GetBytes("{\"tooLong\":\"1234567890\"}"))) })));
             await Error("LIMIT", () => http.SendAsync("wy", new(HttpMethod.Get, "https://music.163.com/api/x"), default, maxResponseBytes: 8));
         });
-        foreach (var body in new[] { "{\"code\":200,\"code\":500}", "{\"code\":200,\"result\":null}", "not JSON" })
-            yield return Case("invalid raw response " + Array.IndexOf(new[] { "{\"code\":200,\"code\":500}", "{\"code\":200,\"result\":null}", "not JSON" }, body), async () =>
+        foreach (var (name, body, error) in new[] {
+            ("final-business-status", "{\"code\":200,\"code\":500}", "UPSTREAM_ERROR"),
+            ("missing-result", "{\"code\":200,\"result\":null}", "INVALID_RESPONSE"),
+            ("invalid-json", "not JSON", "INVALID_RESPONSE") })
+            yield return Case("raw response preserves final business or schema error " + name, async () =>
             {
                 using var f = new Fixture(_ => new(HttpStatusCode.OK) { Content = new StringContent(body) });
-                await Error("INVALID_RESPONSE", () => f.Catalog.SearchAsync(new("wy", "x")));
+                await Error(error, () => f.Catalog.SearchAsync(new("wy", "x")));
             });
         yield return Case("no secret signed artwork enters durable song metadata", async () =>
         {
@@ -1754,7 +1841,9 @@ public static class MusicNativePlatformTests
                 ("http://p1.music.126.net/synthetic/cover.jpg?imageView&type=webp&thumbnail=300y300",
                     "https://p1.music.126.net/synthetic/cover.jpg"),
                 ("http://p2.music.163.net/synthetic/cover.jpg?imageView=1&type=png",
-                    "https://p2.music.163.net/synthetic/cover.jpg")
+                    "https://p2.music.163.net/synthetic/cover.jpg"),
+                ("http://p3.music.126.net/synthetic/cover.png?param=200y200",
+                    "https://p3.music.126.net/synthetic/cover.png")
             })
             {
                 using var f = new Fixture(_ => Home(false, "1", J(new

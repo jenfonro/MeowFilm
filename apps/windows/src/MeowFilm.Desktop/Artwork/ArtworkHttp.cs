@@ -2,6 +2,7 @@ using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
+using System.Text.RegularExpressions;
 
 namespace MeowFilm.Desktop.Artwork;
 
@@ -69,6 +70,14 @@ internal sealed class ArtworkHttp : IDisposable
 
     internal async Task<byte[]> ReadAsync(Uri uri, CancellationToken token)
     {
+        // Metadata keeps the original public image identity; only the transport
+        // requests a bounded rendition from NetEase's static image CDN.
+        if (uri.Query.Length == 0 && uri.IsDefaultPort &&
+            Regex.IsMatch(uri.Host, @"^p[1-4]\.music\.(?:126|163)\.net$",
+                RegexOptions.CultureInvariant | RegexOptions.IgnoreCase) &&
+            Regex.IsMatch(uri.AbsolutePath, @"^/[A-Za-z0-9_=-]+/[0-9]+\.(?:jpg|jpeg|png|gif)$",
+                RegexOptions.CultureInvariant | RegexOptions.IgnoreCase))
+            uri = new UriBuilder(uri) { Query = "param=512y512" }.Uri;
         var visited = new HashSet<string>(StringComparer.Ordinal);
         for (int hop = 0; hop <= 5; hop++)
         {
