@@ -23,14 +23,22 @@ const object = value => value && typeof value === 'object' && !Array.isArray(val
 const managementOrigin = Symbol('cat-management-origin');
 const atOrigin = (descriptor, origin) =>
   Object.defineProperty(descriptor, managementOrigin, { value: origin });
-export async function detectCatManagement(session) {
+export async function detectCatManagement(session, { signal = null } = {}) {
   const origins = [...new Set([session.services.endpoint().origin,
     ...session.services.endpoints().map(endpoint => endpoint.origin)])];
   for (const origin of origins) {
     for (const [protocol, path] of [['website-api-v1', '/website/api/credentials'],
       ['website-v1', '/website/pans/list']]) {
+      signal?.throwIfAborted();
       let response;
-      try { response = await session.management(path, {}, 'GET', { origin }); } catch { continue; }
+      try {
+        response = await session.management(path, {}, 'GET', {
+          origin, ...(signal ? { signal } : {}),
+        });
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason ?? fault('CANCELLED');
+        continue;
+      }
       if (!successfulManagement(response)) continue;
       const data = response.data;
       if (protocol === 'website-v1') {
@@ -49,9 +57,9 @@ export async function detectCatManagement(session) {
   return { protocol: 'unknown', fields: {} };
 }
 
-export async function syncCatManagement(session, { provider, credentials }) {
+export async function syncCatManagement(session, { provider, credentials }, { signal = null } = {}) {
   requireValue(object(credentials));
-  const descriptor = await detectCatManagement(session);
+  const descriptor = await detectCatManagement(session, { signal });
   const providerKey = provider === '189' ? 'tianyi' : provider;
   const rule = (descriptor.protocol === 'website-api-v1' ? newPaths : oldPaths)[providerKey];
   if (!rule || descriptor.protocol === 'unknown') return { status: 'unsupported' };
@@ -65,18 +73,24 @@ export async function syncCatManagement(session, { provider, credentials }) {
     if (!required.every(name => descriptor.fields[descriptorKey]?.includes(name))) return { status: 'unsupported' };
   } else {
     let probe;
-    try { probe = await session.management(path, {}, 'GET', { origin: descriptor[managementOrigin] }); }
-    catch { return { status: 'unsupported' }; }
+    try {
+      probe = await session.management(path, {}, 'GET',
+        { origin: descriptor[managementOrigin], ...(signal ? { signal } : {}) });
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? fault('CANCELLED');
+      return { status: 'unsupported' };
+    }
     if (!successfulManagement(probe) || !(account
       ? object(probe.data) && source.every(name => typeof probe.data[name] === 'string')
       : typeof probe.data === 'string')) return { status: 'unsupported' };
   }
+  signal?.throwIfAborted();
   const body = account ? { [field]: credentials.username, password: credentials.password }
     : { [field]: credentials.cookie };
   // The SDK requires durable writes before confirming this save. Values and
   // arbitrary source response messages are never retained in the descriptor.
   const response = await session.management(path, body, 'PUT', {
-    requireWrite: true, origin: descriptor[managementOrigin],
+    requireWrite: true, origin: descriptor[managementOrigin], ...(signal ? { signal } : {}),
   });
   if (!successfulManagement(response)) throw fault('STORAGE_ERROR');
   return { status: 'saved', protocol: descriptor.protocol };

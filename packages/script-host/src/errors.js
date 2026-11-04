@@ -3,6 +3,7 @@ const messages = Object.freeze({
   NOT_FOUND: 'Installation not found',
   ALREADY_EXISTS: 'Installation already exists',
   DISABLED: 'Installation is disabled',
+  STARTING: 'Installation is starting',
   HOST_CLOSED: 'Host is closed',
   STALE_SESSION: 'Session is no longer current',
   CANCELLED: 'Operation cancelled',

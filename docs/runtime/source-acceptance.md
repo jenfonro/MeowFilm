@@ -20,7 +20,7 @@ node scripts/accept-sources.mjs --kind cat --scripts <绝对路径> --records <J
 - 不制造其他平台的 ID，不以网络歌曲替代 `local` 输入，不将缺少输入写成已执行。特殊平台／扩展动作需要调用方提供其实际协议数据。
 - `--probe-media` 对 LX `musicUrl` 或 Cat `play` 返回的 HTTP(S) URL 发起有界字节探测；它不下载完整媒体，不证明整首播放或所有画质可用。
 - `--output` 必须是仓库 `tmp/` 内的绝对路径；默认报告为 `tmp/test-results/script-sources/acceptance.json`，运行中滚动替换。
-- Cat 每份脚本使用独立临时 dataRoot；关闭运行器后递归清理。源码通过 64 KiB 分片安装，大结果通过 `blob.read` 校验长度/SHA-256 后释放，不把整份源码或结果塞进单个 bridge 帧。
+- Cat 每份脚本使用独立临时 dataRoot；关闭运行器后递归清理。源码通过 64 KiB 分片安装，声明长度超过 16 MiB 时在暂存入口拒绝；大结果通过 `blob.read` 校验长度/SHA-256 后释放，不把整份源码或结果塞进单个 bridge 帧。
 
 ## 发布闭包
 
@@ -48,9 +48,11 @@ node scripts/accept-sources.mjs --kind cat --scripts <绝对路径> --records <J
 
 来源分类是依据有限诊断作出的归因，不是对第三方服务或脚本正确性的担保。宿主能力失败优先保留，不因同时出现上游错误而掩盖。
 
+产品 `onDiagnostic` 只提供稳定错误码／结构字段。验收工具显式启用 `onScriptError`，在回调内按本工具的规则分类原始消息，随即丢弃正文；普通产品运行不启用这个原文观察通道。初始化无论由 RPC 错误还是返回实例的 failed 状态失败，都保留原始 `code`，另记 `initializationFailure` 分类；不重试或改写成一次成功。没有因果网络证据的 `TIMEOUT` 保留 `requires_diagnosis`，不能自动归为上游失败。
+
 Cat 已声明路由的 HTTP 404 不属于 `host_failure`；HTTP 500 也不自动证明上游失效。结合请求作用域网络记录及脚本脱敏诊断分类；服务 JSON 的 `message/msg/err/error` 等明确错误字段只贡献固定分类，包括 Axios 的 `ECONNABORTED` 超时，异常原文不进入报告。缺少证据时保留 `requires_diagnosis`。无正文成功响应记录为 `returned/empty`，不等同有有效搜索或播放数据。
 
-固定分类还覆盖未配置 Cookie／需要登录／尚未添加频道、无直播源、缺失或无效媒体标识，以及明确的 JSON 解析失败。JSON 解析错误只在有本请求上游响应时归上游数据；空输入的 JSON 解析错误才归输入，无响应证据的非法 JSON 不自动归因。未登记的本地目标或宿主权限拒绝属于脚本拒绝，不能为通过验收而开放宿主回环网络或虚构 listener。
+固定分类还覆盖未配置 Cookie／需要登录／尚未添加频道、无直播源、缺失或无效媒体标识，以及明确的 JSON 解析失败。JSON 解析错误只在有本请求上游响应时归上游数据；空输入的 JSON 解析错误才归输入，无响应证据的非法 JSON 不自动归因。Cat 的网络目标不按公网、私网、回环或局域网域名分类过滤；未登记的本地目标本身不是宿主拒绝证据，实际失败时应按真实网络错误或响应归因。已登记 listener 的端点映射属于路由处理，不改变这一网络规则。
 
 网络记录标明宿主执行回合的 `request`／`session` 归属；初始化快照区分 pending／completed，初始化时未完成的会话请求在清理后的 background 记录中保留最终状态，不能用 Node 的 ambient scope 推断 guest Promise 身份或权限。
 

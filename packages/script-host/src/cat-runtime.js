@@ -3,39 +3,21 @@ import { request as httpsRequest } from 'node:https';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { randomBytes, createHash } from 'node:crypto';
-import { readFileSync, existsSync, mkdirSync, lstatSync, realpathSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, lstatSync, realpathSync, rmSync } from 'node:fs';
 import { resolve, join, isAbsolute, relative, sep } from 'node:path';
 import { ScriptHost } from './host.js';
-import { LXSession } from './lx-session.js';
-import { CatSession } from './cat-session.js';
+import { WorkerSession, workerResult } from './worker-session.js';
 import { CatSettingsFile, normalizeCatConfig } from './cat-settings.js';
-import { atomicWrite } from './private-volume.js';
+import { atomicWrite, removePrivateVolume } from './private-volume.js';
 import { scriptAccessHeader } from './script-services.js';
-import { syncCatManagement, detectCatManagement } from './cat-management.js';
-import { fault, identifier, requireValue, safeError } from './errors.js';
+import { clone, fault, identifier, requireValue, safeError } from './errors.js';
 import { ResourceScope } from './scope.js';
-import { addExtension, mergeExtension, ownedExtension, parseM3U8Metadata } from './cat-output.js';
+import { ownedExtension } from './cat-output.js';
+import { allowedProxyPath, fixedOriginURL, mapLocalSnapshot } from './cat-proxy.js';
+import { closeResource } from './resource-close.js';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-const blockedProxyPath = path => /^\/(?:website|admin|__meow|config|full-config)(?:\/|$)/i.test(path);
-function allowedProxyPath(path) {
-  if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) return false;
-  let decoded = path;
-  for (;;) {
-    const next = decoded.replace(/%([0-9a-f]{2})/gi,
-      (_, value) => String.fromCharCode(Number.parseInt(value, 16)));
-    if (next === decoded) break;
-    decoded = next;
-  }
-  if (!decoded.startsWith('/') || decoded.startsWith('//') ||
-    /[\\\u0000-\u001f\u007f]/.test(decoded)) return false;
-  let normalized;
-  try { normalized = new URL(decoded, 'http://127.0.0.1').pathname; }
-  catch { return false; }
-  return normalized.startsWith('/') && !normalized.startsWith('//') &&
-    !blockedProxyPath(normalized);
-}
 const hopByHop = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
   'te', 'trailer', 'transfer-encoding', 'upgrade']);
 const inside = (root, path) => {
@@ -73,61 +55,6 @@ function stripPrivateSetCookieHeader(headers) {
     else headers[key] = Array.isArray(headers[key]) ? values : values[0];
   }
 }
-function fixedOriginURL(origin, path, search = '', hash = '') {
-  requireValue(typeof path === 'string' && path.startsWith('/') && !path.startsWith('//'),
-    'PERMISSION_DENIED');
-  const target = new URL(origin);
-  target.pathname = path;
-  target.search = search;
-  target.hash = hash;
-  return target;
-}
-function beginServerClose(server) {
-  const state = {
-    server, failure: null, settled: false, promise: null, finish: null, retry: null,
-  };
-  state.promise = new Promise(resolve => {
-    const finish = error => {
-      if (state.settled) return;
-      if (error && error.code !== 'ERR_SERVER_NOT_RUNNING') state.failure ??= error;
-      let listening = false;
-      try { listening = Boolean(server.listening); } catch (failure) { state.failure ??= failure; }
-      if (error && listening) return;
-      state.settled = true;
-      try { server.off?.('close', finish); } catch (failure) { state.failure ??= failure; }
-      try { server.removeAllListeners?.(); } catch (failure) { state.failure ??= failure; }
-      state.server = null;
-      state.finish = null;
-      state.retry = () => {};
-      resolve();
-    };
-    state.finish = finish;
-    try { server.once?.('close', finish); } catch (error) { state.failure ??= error; }
-    state.retry = () => {
-      if (state.settled) return;
-      try { server.closeAllConnections?.(); } catch (error) { state.failure ??= error; }
-      try {
-        server.close(error => {
-          if (error && error.code !== 'ERR_SERVER_NOT_RUNNING') state.failure ??= error;
-          let listening = false;
-          try { listening = Boolean(server.listening); }
-          catch (failure) { state.failure ??= failure; }
-          if (!listening) finish(error);
-        });
-      } catch (error) {
-        if (error?.code === 'ERR_SERVER_NOT_RUNNING') finish(error);
-        else {
-          state.failure ??= error;
-          let listening = true;
-          try { listening = Boolean(server.listening); }
-          catch (failure) { state.failure ??= failure; }
-          if (!listening) finish(error);
-        }
-      }
-    };
-  });
-  return state;
-}
 function guardClientRequestErrors(client) {
   const state = {
     client, active: true, failure: null, error: () => {}, closed: null,
@@ -147,18 +74,6 @@ function guardClientRequestErrors(client) {
   try { if (client.closed) state.closed(); } catch (error) { state.failure ??= error; }
   return state;
 }
-async function waitServerClose(state, timeoutMs = 3000) {
-  let timer;
-  const complete = await Promise.race([
-    state.promise.then(() => true),
-    new Promise(resolve => {
-      timer = setTimeout(() => resolve(false), timeoutMs);
-    }),
-  ]);
-  clearTimeout(timer);
-  if (complete && state.failure) throw state.failure;
-  return complete;
-}
 function decodeSource(bytes) {
   try {
     const source = new TextDecoder('utf8', { fatal: true, ignoreBOM: true }).decode(bytes);
@@ -171,82 +86,92 @@ function decodeSource(bytes) {
 /** Shared Cat owner. Platform supplies only the stable data directory; source,
  * settings, sandbox, Cat routing and management remain in this package. */
 export class CatRuntime {
-  constructor({ dataRoot, network, onDiagnostic, onNetwork } = {}) {
+  constructor({ dataRoot, network, onDiagnostic, onScriptError, onNetwork, limits } = {}) {
     requireValue(typeof dataRoot === 'string' && isAbsolute(dataRoot));
     this.dataRoot = resolve(dataRoot);
-    this.network = network; this.onDiagnostic = onDiagnostic; this.onNetwork = onNetwork;
-    this.sessions = new Map(); this.proxies = new Map();
-    this.serverClosures = new Map();
+    this.network = network; this.onDiagnostic = onDiagnostic; this.onScriptError = onScriptError;
+    this.onNetwork = onNetwork; this.limits = limits;
+    this.sessions = new Map(); this.snapshots = new Map(); this.proxies = new Map();
+    this.aggregatePort = 0;
+    this.serverClosures = new WeakMap();
+    this.pendingServerClosures = new Set();
+    this.serverCloseFailure = null;
     this.tail = Promise.resolve(); this.closed = false;
+    this.startupQueue = []; this.startupScheduled = false; this.settled = new Set();
+    this.initialStartSignal = new AbortController();
+    this.initialization = null;
     this.access = randomBytes(32).toString('hex');
     this.applied = new Map();
     this.failures = new Map();
   }
-  serverClosure(server) {
+  serverClosure(server, timeoutMs = 3000) {
     let state = this.serverClosures.get(server);
     if (!state) {
-      state = beginServerClose(server);
+      state = closeResource(server, {
+        stop: () => {
+          let failure;
+          try { server.closeAllConnections?.(); } catch (error) { failure = error; }
+          try { server.close(() => {}); } catch (error) {
+            if (error?.code !== 'ERR_SERVER_NOT_RUNNING') failure ??= error;
+          }
+          if (failure) throw failure;
+        },
+        release: () => server.removeAllListeners?.(),
+        timeoutMs,
+        closed: value => !value.listening,
+      });
       this.serverClosures.set(server, state);
+      this.pendingServerClosures.add(state);
       const ownerRef = new WeakRef(this);
-      state.promise.finally(() => {
+      state.then(result => {
         const owner = ownerRef.deref();
-        if (owner?.serverClosures.get(server) === state) owner.serverClosures.delete(server);
+        if (!owner) return;
+        owner.pendingServerClosures.delete(state);
+        if (result.error) owner.serverCloseFailure ??= safeError(result.error);
       }).catch(() => {});
     }
-    state.retry?.();
     return state;
   }
   async closeOwnedServer(server, timeoutMs = 3000) {
     if (!server) return true;
-    const state = this.serverClosure(server);
-    const complete = await waitServerClose(state, timeoutMs);
-    if (!complete && state.failure) throw state.failure;
-    return complete;
+    const result = await this.serverClosure(server, timeoutMs);
+    if (result.error) throw result.error;
+    return result.complete;
   }
-  async drainServerClosures(timeoutMs = 3000) {
-    const states = [...this.serverClosures.values()];
-    for (const state of states) state.retry();
-    const results = await Promise.allSettled(states.map(async state => {
-      const complete = await waitServerClose(state, timeoutMs);
-      if (!complete) throw fault('TIMEOUT');
-    }));
+  async drainServerClosures() {
+    const results = await Promise.allSettled([...this.pendingServerClosures]);
     const rejected = results.find(result => result.status === 'rejected');
     if (rejected) throw rejected.reason;
+    const timeout = results.some(result => result.status === 'fulfilled' &&
+      (!result.value.complete || result.value.error?.code === 'TIMEOUT'));
+    if (timeout) throw fault('TIMEOUT');
+    if (this.serverCloseFailure) throw this.serverCloseFailure;
   }
   async start() {
     requireValue(!this.closed, 'HOST_CLOSED');
-    if (this.initialization) return this.initialization;
-    this.initialization = this.serial(async () => {
-      mkdirSync(this.dataRoot, { recursive: true });
-      const rootState = lstatSync(this.dataRoot);
-      requireValue(rootState.isDirectory() && !rootState.isSymbolicLink(), 'PERMISSION_DENIED');
-      this.dataRoot = realpathSync(this.dataRoot);
-      this.sourcesRoot = join(this.dataRoot, 'sources');
-      mkdirSync(this.sourcesRoot, { recursive: true });
-      const sources = lstatSync(this.sourcesRoot);
-      requireValue(sources.isDirectory() && !sources.isSymbolicLink() &&
-        inside(this.dataRoot, realpathSync(this.sourcesRoot)), 'PERMISSION_DENIED');
-      this.sourcesIdentity = { dev: sources.dev, ino: sources.ino };
-      this.settings = new CatSettingsFile(this.dataRoot);
-      this.host = new ScriptHost({ adapters: {
-        lx: input => new LXSession(input),
-        cat: input => {
-          const session = new CatSession({ ...input, dataRoot: this.dataRoot, settings: this.settings, onNetwork: this.onNetwork,
-            mapUrl: (session, value, baseOrigin) => this.mapProxy(session, value, baseOrigin),
-            onActivate: current => this.sessions.set(input.installationId, current),
-            onEndpointsChanged: current => this.sweepProxies(current),
-            onStop: current => {
-              if (this.sessions.get(input.installationId) === current)
-                this.sessions.delete(input.installationId);
-              this.sweepProxies(current);
-            } });
-          return session;
-        },
-      }, network: this.network, onDiagnostic: this.onDiagnostic,
-      lifecycleManagedProtocols: ['cat'], limits: { requestTimeoutMs: 30000 } });
-      return await this.apply(this.settings.read());
-    });
-    return this.initialization;
+    if (!this.initialization) {
+      this.initialization = this.serial(async () => {
+        mkdirSync(this.dataRoot, { recursive: true });
+        const rootState = lstatSync(this.dataRoot);
+        requireValue(rootState.isDirectory() && !rootState.isSymbolicLink(), 'PERMISSION_DENIED');
+        this.dataRoot = realpathSync(this.dataRoot);
+        this.sourcesRoot = join(this.dataRoot, 'sources');
+        mkdirSync(this.sourcesRoot, { recursive: true });
+        const sources = lstatSync(this.sourcesRoot);
+        requireValue(sources.isDirectory() && !sources.isSymbolicLink() &&
+          inside(this.dataRoot, realpathSync(this.sourcesRoot)), 'PERMISSION_DENIED');
+        this.sourcesIdentity = { dev: sources.dev, ino: sources.ino };
+        this.settings = new CatSettingsFile(this.dataRoot);
+        this.host = new ScriptHost({ adapters: {
+          cat: input => this.workerSession(input),
+        }, network: this.network, onDiagnostic: this.onDiagnostic,
+        onScriptError: this.onScriptError, limits: this.limits });
+        this.aggregatePort = 0;
+        await this.apply(this.settings.read(), { background: true });
+      });
+    }
+    await this.initialization;
+    return this.statusSnapshot();
   }
   serial(body) {
     requireValue(!this.closed, 'HOST_CLOSED');
@@ -255,6 +180,104 @@ export class CatRuntime {
     });
     this.tail = task.catch(() => {});
     return task;
+  }
+  workerSession(input) {
+    return new WorkerSession({
+      ...input,
+      protocol: 'cat',
+      startSignal: this.initialStartSignal?.signal,
+      startParams: {
+        dataRoot: this.dataRoot,
+        settings: { value: clone(this.startingSettings ?? this.settings.value) },
+        aggregate: { port: this.startingAggregatePort ?? this.aggregatePort },
+      },
+      processWorkerResult: (method, value, session) => {
+        if (method !== 'invoke' && method !== 'enhanceM3U8') return undefined;
+        const result = clone(value?.result);
+        if (Array.isArray(value?.newProxies))
+          this.registerProxyMappings(session, value.newProxies);
+        // The worker's structured boundary cannot carry the ownership Symbol.
+        // Restore it only as a non-enumerable internal marker on the same result.
+        if (value?.owned && result && typeof result === 'object')
+          Object.defineProperty(result, ownedExtension, { value: true });
+        return workerResult(result);
+      },
+      onStart: (session, cat) => {
+        if (!session.live || !cat?.endpoint || !Array.isArray(cat.endpoints)) return;
+        // Keep the lifecycle owner while initialization is in flight, but do
+        // not publish endpoints or proxy routes until activation completes.
+        this.sessions.set(session.installationId, session);
+      },
+      onActivated: (session, cat) => {
+        if (!session.live || !cat ||
+          this.sessions.get(session.installationId) !== session) return;
+        this.sessions.set(session.installationId, session);
+        this.registerProxyMappings(session, cat.endpoints);
+        this.snapshots.set(session.installationId, this.catSnapshot(cat));
+        this.sweepProxies();
+      },
+      onEndpointsChanged: (session, cat) => {
+        if (!session.live || !session.activated || !cat ||
+          this.sessions.get(session.installationId) !== session) return;
+        this.registerProxyMappings(session, cat.endpoints);
+        this.snapshots.set(session.installationId, this.catSnapshot(cat));
+        this.sweepProxies(session);
+      },
+      onNetwork: value => {
+        try { this.onNetwork?.(value); } catch { /* Observation cannot alter networking. */ }
+      },
+      onStopped: session => {
+        if (this.sessions.get(session.installationId) !== session) return;
+        this.sessions.delete(session.installationId);
+        this.snapshots.delete(session.installationId);
+        this.sweepProxies();
+      },
+    });
+  }
+  registerProxyMappings(session, entries) {
+    for (const entry of entries) {
+      const id = entry?.id ?? entry?.proxyId;
+      if (typeof id !== 'string' || typeof entry.origin !== 'string') continue;
+      const current = this.proxies.get(id);
+      if (current && current.session !== session) continue;
+      this.proxies.set(id, { session, origin: entry.origin });
+    }
+  }
+  catSnapshot(cat) {
+    return {
+      endpoint: clone(cat.endpoint),
+      access: cat.access,
+      endpoints: clone(cat.endpoints),
+      aggregatePort: this.startingAggregatePort ?? this.aggregatePort,
+    };
+  }
+  mapSnapshotProxy(session, snapshot, value) {
+    const mapped = mapLocalSnapshot(value, snapshot.endpoints);
+    if (!mapped) return value;
+    requireValue(allowedProxyPath(mapped.pathname), 'PERMISSION_DENIED');
+    const endpoint = snapshot.endpoints.find(item => item.origin === mapped.origin);
+    requireValue(endpoint && typeof endpoint.proxyId === 'string', 'UNMAPPED_LOCAL_URL');
+    const proxyId = endpoint.proxyId;
+    const registered = this.proxies.get(proxyId);
+    requireValue(registered?.session === session && registered.origin === mapped.origin,
+      'UNMAPPED_LOCAL_URL');
+    return `http://127.0.0.1:${snapshot.aggregatePort}/proxy/${session.installationId}/${session.generation}/${proxyId}${mapped.pathname}${mapped.search}${mapped.hash}`;
+  }
+  publishSettingsSnapshot(next) {
+    const settings = clone(next);
+    const aggregate = { port: this.aggregatePort };
+    const sessions = new Set([...(this.host?.initializingSessions?.() ?? []),
+      ...this.sessions.values()]);
+    for (const session of sessions) {
+      const snapshot = this.snapshots.get(session.installationId);
+      if (snapshot && this.sessions.get(session.installationId) === session)
+        snapshot.aggregatePort = aggregate.port;
+      try { session.publishSettings({ settings, aggregate }); }
+      catch { /* Settings observation cannot block publication. */ }
+    }
+  }
+  limit(name) {
+    return this.limits?.[name] ?? this.host.limits[name];
   }
   sourcePath(sourceHash) {
     try {
@@ -277,7 +300,19 @@ export class CatRuntime {
       return bytes;
     } catch (error) { throw safeError(error, 'CORRUPT_STORAGE'); }
   }
-  async apply(next) {
+  deleteSource(sourceHash) {
+    try {
+      requireValue(/^[a-f0-9]{64}$/.test(sourceHash), 'CORRUPT_STORAGE');
+      const file = this.sourcePath(sourceHash);
+      let state;
+      try { state = lstatSync(file); }
+      catch (error) { if (error.code === 'ENOENT') return; throw error; }
+      requireValue(state.isFile() && !state.isSymbolicLink() && state.nlink === 1 &&
+        inside(this.sourcesRoot, realpathSync(file)), 'CORRUPT_STORAGE');
+      rmSync(file, { maxRetries: 3, retryDelay: 100 });
+    } catch (error) { throw safeError(error, 'STORAGE_ERROR'); }
+  }
+  async apply(next, { background = false, only = null } = {}) {
     // Validate all referenced inputs before touching any live source/config.
     const sources = new Map();
     for (const spec of next.scripts) {
@@ -286,41 +321,93 @@ export class CatRuntime {
     const candidate = !this.server || next.port !== this.settings.value.port
       ? await this.listen(next.port) : null;
     const gateway = candidate ?? this.server;
+    const aggregatePort = gateway.address().port;
+    this.startingAggregatePort = aggregatePort;
+    this.startingSettings = next;
     let committed = false;
     try {
+      requireValue(!this.closed, 'HOST_CLOSED');
       const current = new Map(this.host.list().map(state => [state.installationId, state]));
-      let removalFailure;
+      const removed = new Map();
+      const removing = installationId => (!only || only.has(installationId)) &&
+        !next.scripts.some(spec => spec.installationId === installationId);
       for (const old of current.values()) {
-        if (!next.scripts.some(spec => spec.installationId === old.installationId)) {
-          try { await this.host.uninstall(old.installationId); }
-          catch (error) { removalFailure ??= safeError(error, 'SERVICE_ERROR'); }
-          current.delete(old.installationId);
-          this.applied.delete(old.installationId); this.failures.delete(old.installationId);
-          this.sessions.delete(old.installationId);
+        if (!removing(old.installationId)) continue;
+        removed.set(old.installationId, {
+          state: old, sourceHashes: new Set(old.contentHash ? [old.contentHash] : []),
+        });
+      }
+      const oldSettings = this.settings.value.scripts;
+      for (const spec of oldSettings) {
+        if (!removing(spec.installationId)) continue;
+        const entry = removed.get(spec.installationId) ??
+          { state: null, sourceHashes: new Set() };
+        entry.sourceHashes.add(spec.sourceHash);
+        removed.set(spec.installationId, entry);
+      }
+      let removalFailure;
+      for (const [installationId, entry] of removed) {
+        let stopped = true;
+        const owner = this.sessions.get(installationId) ??
+          this.host.initializingSessions().find(session =>
+            session.installationId === installationId);
+        try { if (entry.state) await this.host.uninstall(installationId); }
+        catch (error) {
+          stopped = Boolean(owner?.stopped && !owner.worker);
+          removalFailure ??= safeError(error, 'SERVICE_ERROR');
+        }
+        current.delete(installationId);
+        this.applied.delete(installationId); this.failures.delete(installationId);
+        this.sessions.delete(installationId);
+        this.snapshots.delete(installationId);
+        if (!stopped) continue;
+        try { removePrivateVolume(this.dataRoot, installationId); }
+        catch (error) { this.failures.set(installationId, safeError(error, 'STORAGE_ERROR').code); }
+        for (const sourceHash of entry.sourceHashes) {
+          if (next.scripts.some(spec => spec.sourceHash === sourceHash)) continue;
+          try { this.deleteSource(sourceHash); }
+          catch (error) {
+            this.failures.set(installationId, safeError(error, 'STORAGE_ERROR').code);
+          }
         }
       }
+      const changes = [];
       for (const spec of next.scripts) {
+        if (only && !only.has(spec.installationId)) continue;
         const old = this.applied.get(spec.installationId), state = current.get(spec.installationId);
         if (old && state && same(old, spec) && !this.failures.has(spec.installationId) &&
           state.state !== 'failed') continue;
-        try {
-          if (state) {
-            // Stop only this affected instance. Two generations must never write
-            // the same persistent volume concurrently during an update.
-            await this.host.disable(spec.installationId);
-            await this.host.update(spec.installationId, { source: sources.get(spec.installationId),
-              config: spec.config, version: spec.version });
-          } else await this.host.install({ ...spec, source: sources.get(spec.installationId),
-            protocol: 'cat', enabled: false });
-          if (spec.enabled) await this.host.enable(spec.installationId);
-          this.failures.delete(spec.installationId);
-        } catch (error) { this.failures.set(spec.installationId, safeError(error).code); }
-        this.applied.set(spec.installationId, spec);
+        changes.push({ spec, source: sources.get(spec.installationId), existing: !!state });
       }
+      if (background) {
+        for (const change of changes) {
+          if (change.spec.enabled) this.settled.delete(change.spec.installationId);
+          else {
+            await this.applyChange(change);
+            requireValue(!this.closed, 'HOST_CLOSED');
+          }
+        }
+      } else {
+        for (const change of changes) {
+          await this.applyChange(change);
+          requireValue(!this.closed, 'HOST_CLOSED');
+        }
+      }
+      for (const installationId of [...this.startupQueue]) {
+        if (!next.scripts.some(spec => spec.installationId === installationId))
+          this.startupQueue.splice(this.startupQueue.indexOf(installationId), 1);
+      }
+      for (const spec of next.scripts) {
+        if (!spec.enabled && this.startupQueue.includes(spec.installationId))
+          this.startupQueue.splice(this.startupQueue.indexOf(spec.installationId), 1);
+      }
+      requireValue(!this.closed, 'HOST_CLOSED');
       this.settings.publish(next);
       const previous = this.server;
       this.server = gateway;
+      this.aggregatePort = aggregatePort;
       committed = true;
+      this.publishSettingsSnapshot(next);
       if (previous && previous !== gateway) {
         try {
           if (!await this.closeOwnedServer(previous)) {
@@ -333,11 +420,19 @@ export class CatRuntime {
         }
       }
       this.sweepProxies();
-      const result = { applied: !this.failures.size,
-        failures: [...this.failures].map(([installationId, code]) => ({ installationId, code })) };
+      if (background) {
+        for (const { spec } of changes) {
+          if (!this.closed && spec.enabled && !this.startupQueue.includes(spec.installationId))
+            this.startupQueue.push(spec.installationId);
+        }
+        this.scheduleStartup();
+      } else this.sweepProxies();
+      const result = this.applyResult();
       if (removalFailure) throw removalFailure;
       return result;
     } finally {
+      this.startingAggregatePort = null;
+      this.startingSettings = null;
       if (candidate && !committed) {
         try {
           if (!await this.closeOwnedServer(candidate)) {
@@ -351,9 +446,83 @@ export class CatRuntime {
       }
     }
   }
+  applyResult() {
+    return { applied: !this.failures.size,
+      failures: [...this.failures].map(([installationId, code]) => ({ installationId, code })) };
+  }
+  async applyChange({ spec, source, existing }) {
+    this.settled.delete(spec.installationId);
+    try {
+      if (existing) {
+        // Stop only this affected instance. Two generations must never write
+        // the same persistent volume concurrently during an update.
+        await this.host.disable(spec.installationId);
+        await this.host.update(spec.installationId, { source,
+          config: spec.config, version: spec.version });
+      } else await this.host.install({ ...spec, source, protocol: 'cat', enabled: false });
+      if (spec.enabled) await this.host.enable(spec.installationId);
+      this.failures.delete(spec.installationId);
+    } catch (error) { this.failures.set(spec.installationId, safeError(error).code); }
+    finally {
+      this.settled.add(spec.installationId);
+      this.applied.set(spec.installationId, spec);
+    }
+  }
+  scheduleStartup() {
+    if (this.closed || this.startupScheduled || !this.startupQueue.length) return;
+    this.startupScheduled = true;
+    const task = this.serial(async () => {
+      const installationId = this.startupQueue.shift();
+      const spec = this.settings.value.scripts.find(script =>
+        script.installationId === installationId);
+      if (spec && !this.settled.has(installationId)) {
+        let source;
+        try { source = decodeSource(this.readSource(spec.sourceHash)); }
+        catch (error) { this.failures.set(spec.installationId, safeError(error).code); }
+        const state = this.hostState(spec.installationId);
+        const old = this.applied.get(spec.installationId);
+        if (source && !(old && state && same(old, spec) &&
+          !this.failures.has(spec.installationId) && state.state !== 'failed')) {
+          await this.applyChange({ spec, source, existing: !!state });
+        }
+      }
+    });
+    task.finally(() => {
+      this.startupScheduled = false;
+      this.scheduleStartup();
+    }).catch(() => {});
+  }
+  hostState(installationId) {
+    try { return this.host.get(installationId); }
+    catch (error) {
+      if (safeError(error).code === 'NOT_FOUND') return null;
+      throw error;
+    }
+  }
+  stopInitializingSessions() {
+    this.host?.stopInitializingSessions?.();
+    this.initialStartSignal.abort(fault('HOST_CLOSED'));
+  }
   async refresh() {
     await this.start();
-    return this.serial(() => this.apply(this.settings.read()));
+    const diskSettings = this.settings.read();
+    const previousSettings = new Map(this.settings.value.scripts.map(script =>
+      [script.installationId, script]));
+    const diskScripts = new Map(diskSettings.scripts.map(script => [script.installationId, script]));
+    for (const id of new Set([...previousSettings.keys(), ...diskScripts.keys()])) {
+      if (!same(previousSettings.get(id), diskScripts.get(id)))
+        this.host.stopInitializingSessions(id);
+    }
+    return this.serial(() => {
+      const next = this.settings.read();
+      const previous = new Map(this.settings.value.scripts.map(script =>
+        [script.installationId, script]));
+      const current = new Map(next.scripts.map(script => [script.installationId, script]));
+      const only = new Set([...new Set([...previous.keys(), ...current.keys()])]
+        .filter(id => !same(previous.get(id), current.get(id)) ||
+          this.failures.has(id) || this.hostState(id)?.state === 'failed'));
+      return this.apply(next, { only });
+    });
   }
   async install({ installationId, source, config = {}, version = '0.0.0', enabled = false }) {
     identifier(installationId);
@@ -361,9 +530,37 @@ export class CatRuntime {
       typeof version === 'string' && version.length > 0 && version.length <= 128);
     config = normalizeCatConfig(config);
     await this.start();
+    const bytes = Buffer.from(source), sourceHash = hash(bytes);
+    decodeSource(bytes);
+    requireValue(bytes.length <= this.limit('maxSourceBytes'), 'RESOURCE_LIMIT');
+    const requested = { installationId, sourceHash, config, version, enabled };
+    const previous = this.settings.read().scripts.find(script =>
+      script.installationId === installationId);
+    if (this.hostState(installationId) && (!previous || !same(previous, requested)))
+      this.host.stopInitializingSessions(installationId);
     return this.serial(async () => {
-      const bytes = Buffer.from(source), sourceHash = hash(bytes);
-      decodeSource(bytes);
+      const current = this.settings.read();
+      const previous = current.scripts.find(script =>
+        script.installationId === installationId);
+      if (!previous) {
+        if (this.hostState(installationId)) {
+          try { await this.host.uninstall(installationId); }
+          catch (error) {
+            const failure = safeError(error, 'SERVICE_ERROR');
+            this.failures.set(installationId, failure.code);
+            throw failure;
+          }
+          this.applied.delete(installationId);
+          this.sessions.delete(installationId);
+          this.snapshots.delete(installationId);
+        }
+        try { removePrivateVolume(this.dataRoot, installationId); }
+        catch (error) {
+          const failure = safeError(error, 'STORAGE_ERROR');
+          this.failures.set(installationId, failure.code);
+          throw failure;
+        }
+      }
       const file = this.sourcePath(sourceHash);
       if (!existsSync(file)) atomicWrite(file, bytes);
       requireValue(this.readSource(sourceHash).equals(bytes), 'CORRUPT_STORAGE');
@@ -371,93 +568,107 @@ export class CatRuntime {
         ...value.scripts.filter(script => script.installationId !== installationId),
         { installationId, sourceHash, config, version, enabled },
       ] }));
-      await this.apply(next);
+      await this.apply(next, { only: new Set([installationId]) });
       if (this.failures.has(installationId)) throw fault(this.failures.get(installationId));
+      if (previous && previous.sourceHash !== sourceHash &&
+        !next.scripts.some(spec => spec.sourceHash === previous.sourceHash)) {
+        try { this.deleteSource(previous.sourceHash); }
+        catch (error) { this.failures.set(installationId, safeError(error, 'STORAGE_ERROR').code); }
+        if (this.failures.has(installationId)) throw fault(this.failures.get(installationId));
+      }
       return this.instance(installationId);
     });
   }
   async setEnabled(installationId, enabled) {
     identifier(installationId); requireValue(typeof enabled === 'boolean');
     await this.start();
+    if (!enabled) this.host.stopInitializingSessions(installationId);
     return this.serial(async () => {
       requireValue(this.settings.read().scripts.some(script => script.installationId === installationId), 'NOT_FOUND');
       const next = this.settings.save(value => ({ ...value, scripts: value.scripts.map(script =>
         script.installationId === installationId ? { ...script, enabled } : script) }));
-      await this.apply(next);
+      await this.apply(next, { only: new Set([installationId]) });
       if (this.failures.has(installationId)) throw fault(this.failures.get(installationId));
       return this.instance(installationId);
     });
   }
   async uninstall(installationId) {
     identifier(installationId); await this.start();
+    this.host.stopInitializingSessions(installationId);
     return this.serial(async () => {
       const next = this.settings.save(value => ({ ...value,
         scripts: value.scripts.filter(script => script.installationId !== installationId) }));
-      return this.apply(next);
+      return this.apply(next, { only: new Set([installationId]) });
     });
   }
+  starting(installationId, state = this.hostState(installationId),
+    snapshot = this.snapshots.get(installationId)) {
+    if (this.failures.has(installationId)) return false;
+    const spec = (this.startingSettings ?? this.settings.value).scripts.find(script =>
+      script.installationId === installationId);
+    if (!spec?.enabled) return false;
+    if (!this.settled.has(installationId) || !state) return true;
+    if (!state.enabled) return false;
+    return state.state === 'ready' && !snapshot;
+  }
   instance(installationId) {
-    const state = this.host.get(installationId), session = this.sessions.get(installationId);
-    return { installationId, generation: state.generation, state: this.failures.has(installationId) ? 'failed' : state.state,
-      version: state.version, sourceHash: state.contentHash,
-      error: this.failures.get(installationId) ?? state.lastFailure ?? null,
-      sites: Object.entries(state.capabilities).map(([key, value]) => ({ key, ...value })),
-      ...(state.state === 'ready' ? { managementUrl: session.endpoint().managementUrl,
-        endpoints: session.services.endpoints() } : {}) };
+    const spec = this.settings.value.scripts.find(script =>
+      script.installationId === installationId);
+    const state = this.hostState(installationId), snapshot = this.snapshots.get(installationId);
+    const failure = this.failures.get(installationId);
+    const status = failure ? 'failed'
+      : this.starting(installationId, state, snapshot) ? 'starting'
+        : !state ? 'disabled'
+          : !state.enabled ? 'disabled' : state.state;
+    return { installationId, generation: state?.generation ?? 0, state: status,
+      version: state?.version ?? spec?.version ?? '0.0.0',
+      sourceHash: state?.contentHash ?? spec?.sourceHash ?? null,
+      error: failure ?? state?.lastFailure ?? null,
+      sites: state ? Object.entries(state.capabilities).map(([key, value]) => ({ key, ...value })) : [],
+      ...(status === 'ready' && snapshot ? {
+        ...(snapshot.endpoint ? { managementUrl: snapshot.endpoint.managementUrl } : {}),
+        endpoints: snapshot.endpoints.map(({ proxyId, ...endpoint }) => endpoint) } : {}) };
   }
   getSession(installationId, generation) {
-    const state = this.host.get(installationId), session = this.sessions.get(installationId);
-    requireValue(state.state === 'ready' && session?.live, 'DISABLED');
+    requireValue(!this.starting(installationId), 'STARTING');
+    const state = this.host.get(installationId), snapshot = this.snapshots.get(installationId);
+    requireValue(state.state === 'ready' && snapshot, 'DISABLED');
     requireValue(generation === undefined || state.generation === generation, 'STALE_SESSION');
+    const session = this.sessions.get(installationId);
+    requireValue(session, 'DISABLED');
     return session;
   }
   async invoke(target, options) {
     await this.start();
-    let result = await this.host.invoke(target, options);
+    requireValue(!this.starting(target.installationId), 'STARTING');
+    const result = await this.host.invoke(target, options);
     if (!result || typeof result !== 'object' || typeof result.url !== 'string' ||
-      !/\.m3u8(?:\?|$)/i.test(result.url) || result._meow && !result[ownedExtension]) return result;
-    // Optional metadata enrichment is never a playback/provider parser.
+      !/\.m3u8(?:\?|$)/i.test(result.url) ||
+      result._meow && !result[ownedExtension]) return result;
+    // Optional metadata enhancement is never a playback/provider parser.
     try {
-      const session = this.getSession(target.installationId, target.generation);
-      const source = this.proxyTarget(session, result.url) ?? result.url;
-      const variants = parseM3U8Metadata(
-        await session.readText(source, result.header ?? result.headers, 3000), source)
-        .map(variant => ({ ...variant, url: this.mapProxy(session, variant.url) }));
-      if (variants.length) {
-        const extension = {
-          media: [...(Array.isArray(result._meow?.media) ? result._meow.media : []), { variants }],
-        };
-        result = result[ownedExtension] ? mergeExtension(result, extension) : addExtension(result, extension);
-      }
-      return result;
+      return await this.getSession(target.installationId, target.generation)
+        .request('enhanceM3U8', {
+          value: result, owned: Boolean(result[ownedExtension]),
+        }, { timeoutMs: 3000 });
     } catch { return result; }
   }
-  proxyTarget(session, value) {
-    let url;
-    try { url = new URL(value); } catch { return null; }
-    if (url.hostname !== '127.0.0.1' || Number(url.port) !== this.server?.address()?.port) return null;
-    const parts = url.pathname.split('/').filter(Boolean);
-    if (parts[0] !== 'proxy' || parts.length < 4) return null;
-    const entry = this.proxies.get(parts[3]);
-    if (!entry || entry.session !== session || parts[1] !== session.installationId ||
-      Number(parts[2]) !== session.generation) return null;
-    const prefix = `/proxy/${parts[1]}/${parts[2]}/${parts[3]}`;
-    try {
-      return fixedOriginURL(entry.origin, url.pathname.slice(prefix.length) || '/',
-        url.search, url.hash).href;
-    } catch { return null; }
-  }
   async management(installationId, generation) {
-    await this.start(); return detectCatManagement(this.getSession(installationId, generation));
+    await this.start();
+    return this.getSession(installationId, generation).request('management.detect', {});
   }
   async sync(installationId, generation, input) {
-    await this.start(); return syncCatManagement(this.getSession(installationId, generation), input);
+    await this.start();
+    return this.getSession(installationId, generation).request('management.sync', { input });
   }
   async status() {
     await this.start();
+    return this.statusSnapshot();
+  }
+  statusSnapshot() {
     return { settingsPath: this.settings.path, aggregate: {
       origin: `http://127.0.0.1:${this.server.address().port}`, access: this.access },
-      instances: this.host.list().map(state => this.instance(state.installationId)) };
+      instances: this.settings.value.scripts.map(spec => this.instance(spec.installationId)) };
   }
   async listen(port) {
     const ownerRef = new WeakRef(this);
@@ -477,6 +688,7 @@ export class CatRuntime {
           if (response.destroyed || response.writableEnded) return;
           if (!response.headersSent) {
             const status = error?.code === 'PERMISSION_DENIED' ? 403
+              : error?.code === 'STARTING' ? 503
               : error?.code === 'RESOURCE_LIMIT' ? 413
                 : ['INVALID_ARGUMENT', 'INVALID_JSON'].includes(error?.code) ? 400 : 502;
             response.writeHead(status, { 'content-type': 'application/json' });
@@ -522,27 +734,13 @@ export class CatRuntime {
     }
     return server;
   }
-  mapProxy(session, value, baseOrigin) {
-    const webPrefix = 'js2p://_WEB_';
-    if (value.startsWith(webPrefix)) {
-      value = new URL(value.slice(webPrefix.length), baseOrigin ?? session.endpoint().origin).href;
-    } else if (value.startsWith('/') && !value.startsWith('//')) {
-      value = new URL(value, baseOrigin ?? session.endpoint().origin).href;
-    }
-    const local = session.services.mapLocal(value);
-    if (!local) return value;
-    requireValue(allowedProxyPath(local.pathname), 'PERMISSION_DENIED');
-    const existing = [...this.proxies].find(([, entry]) => entry.session === session && entry.origin === local.origin);
-    let id;
-    if (existing) id = existing[0];
-    else { id = randomBytes(24).toString('hex'); this.proxies.set(id, { session, origin: local.origin }); }
-    return `http://127.0.0.1:${this.server.address().port}/proxy/${session.installationId}/${session.generation}/${id}${local.pathname}${local.search}${local.hash}`;
-  }
   sweepProxies(session) {
-    const origins = session?.live
-      ? new Set(session.services.endpoints().map(endpoint => endpoint.origin)) : null;
+    const snapshot = session ? this.snapshots.get(session.installationId) : null;
+    const origins = snapshot ? new Set(snapshot.endpoints.map(endpoint => endpoint.origin)) : null;
     for (const [id, entry] of this.proxies) {
-      if (!entry.session.live ||
+      const current = this.snapshots.get(entry.session.installationId);
+      if (!current || !entry.session.live || entry.session.stopped || !entry.session.worker ||
+        entry.session !== this.sessions.get(entry.session.installationId) ||
         session && entry.session === session && !origins?.has(entry.origin)) this.proxies.delete(id);
     }
   }
@@ -557,7 +755,7 @@ export class CatRuntime {
     try { decoded = parts.map(decodeURIComponent); }
     catch { throw fault('INVALID_ARGUMENT'); }
     const [_, installationId, siteId, operation] = decoded;
-    const scope = new ResourceScope(undefined, 30000);
+    const scope = new ResourceScope(undefined, this.limit('requestTimeoutMs'));
     const abort = () => scope.close(fault('CANCELLED'));
     const responseClosed = () => { if (!response.writableFinished) abort(); };
     let requestListening = false, responseListening = false;
@@ -568,12 +766,26 @@ export class CatRuntime {
       requestListening = true;
       response.once('close', responseClosed);
       responseListening = true;
-      let length = 0;
-      for await (const chunk of request) {
-        length += chunk.length;
-        requireValue(length <= this.host.limits.maxBytes * 4, 'RESOURCE_LIMIT');
-        chunks.push(chunk);
-      }
+      scope.add(() => {
+        if (!request.complete && !request.destroyed) request.destroy();
+      });
+      await scope.race((async () => {
+        const maximum = this.limit('maxMemoryBytes');
+        let length = 0, oversized = false;
+        for await (const chunk of request) {
+          length += chunk.length;
+          if (length > maximum) {
+            if (!oversized) {
+              for (const retained of chunks) retained.fill(0);
+              chunks.length = 0;
+              oversized = true;
+            }
+            continue;
+          }
+          chunks.push(chunk);
+        }
+        requireValue(!oversized, 'RESOURCE_LIMIT');
+      })());
       let payload;
       let combined;
       try {
@@ -603,14 +815,18 @@ export class CatRuntime {
   async forwardProxy(request, response, url, parts) {
     const [_, installationId, generation, id] = parts;
     const entry = this.proxies.get(id);
-    requireValue(entry && entry.session.installationId === installationId &&
-      entry.session.generation === Number(generation) && entry.session.live, 'STALE_SESSION');
+    const snapshot = this.snapshots.get(installationId);
+    requireValue(entry && snapshot && entry.session.installationId === installationId &&
+      entry.session.generation === Number(generation) &&
+      entry.session === this.sessions.get(installationId) && entry.session.live &&
+      !entry.session.stopped && entry.session.worker, 'STALE_SESSION');
     requireValue(['GET', 'HEAD'].includes(request.method), 'PERMISSION_DENIED');
     const prefix = `/proxy/${installationId}/${generation}/${id}`;
     const path = url.pathname.slice(prefix.length) || '/';
     requireValue(allowedProxyPath(path), 'PERMISSION_DENIED');
     const target = fixedOriginURL(entry.origin, path, url.search);
-    const scope = new ResourceScope(entry.session.root.signal);
+    const scope = new ResourceScope(entry.session.proxyLifecycle.signal,
+      this.limit('requestTimeoutMs'));
     let client, clientGuard, upstream;
     const abort = () => scope.close(fault('CANCELLED'));
     const responseClosed = () => { if (!response.writableFinished) abort(); };
@@ -622,7 +838,7 @@ export class CatRuntime {
         'x-meow-runtime-access']) deleteHeader(headers, name);
       stripPrivateCookieHeader(headers);
       headers.host = target.host;
-      headers[scriptAccessHeader] = entry.session.services.access;
+      headers[scriptAccessHeader] = snapshot.access;
       headers['accept-encoding'] = 'identity';
       response.once('close', responseClosed);
       responseListening = true;
@@ -688,7 +904,7 @@ export class CatRuntime {
       stripPrivateSetCookieHeader(outHeaders);
       if (outHeaders.location) {
         const next = new URL(outHeaders.location, target);
-        if (entry.session.services.mapLocal(next.href)) outHeaders.location = this.mapProxy(entry.session, next.href);
+        outHeaders.location = this.mapSnapshotProxy(entry.session, snapshot, next.href);
       }
       const playlist = request.method === 'GET' && upstream.statusCode === 200 &&
         !request.headers.range && !outHeaders['content-range'] &&
@@ -708,8 +924,7 @@ export class CatRuntime {
             let candidate;
             try { candidate = new URL(value, target); }
             catch { return value; }
-            return entry.session.services.mapLocal(candidate.href)
-              ? this.mapProxy(entry.session, candidate.href) : value;
+            return this.mapSnapshotProxy(entry.session, snapshot, candidate.href);
           };
           if (trimmed && !trimmed.startsWith('#') && !trimmed.startsWith('<')) return map(trimmed);
           return text.replace(/(URI|media|initialization|sourceURL)="([^"]+)"/g, (_, key, value) => `${key}="${map(value)}"`)
@@ -753,25 +968,41 @@ export class CatRuntime {
     this.closed = true;
     this.closing = (async () => {
       let failure;
+      this.startupQueue.length = 0;
+      this.stopInitializingSessions();
+      const host = this.host;
+      const hostClosing = Promise.resolve().then(() => host?.close()).then(
+        result => ({ result }),
+        error => ({ error: safeError(error, 'SERVICE_ERROR') }),
+      );
+      // Stop workers before waiting for serialized runtime work that may be
+      // waiting on one of those workers to initialize or answer an RPC.
       await this.tail.catch(() => {});
       try {
-        const result = await this.host?.close();
+        const outcome = await hostClosing;
+        if (outcome.error) failure ??= outcome.error;
+        const result = outcome.result;
         if (result?.cleanupComplete === false) {
           const timedOut = result.pendingAdapterTasks > 0 ||
             result.cleanupIssues?.some(issue => issue.code === 'TIMEOUT');
           failure ??= fault(timedOut ? 'TIMEOUT' : 'SERVICE_ERROR');
         }
       } catch (error) { failure ??= safeError(error, 'SERVICE_ERROR'); }
+      this.sessions.clear();
+      this.snapshots.clear();
       if (this.server) this.serverClosure(this.server);
       this.server = null;
       try { await this.drainServerClosures(); }
       catch (error) { failure ??= safeError(error, 'SERVICE_ERROR'); }
-      this.serverClosures = new Map();
-      this.proxies.clear(); this.sessions.clear();
+      this.serverClosures = new WeakMap();
+      this.pendingServerClosures.clear();
+      this.serverCloseFailure = null;
+      this.proxies.clear();
       this.applied.clear(); this.failures.clear();
-      this.host = null; this.settings = null;
-      this.network = null; this.onDiagnostic = null; this.onNetwork = null;
+      this.settled.clear();
       this.initialization = null;
+      this.host = null; this.settings = null;
+      this.network = null; this.onDiagnostic = null; this.onScriptError = null; this.onNetwork = null;
       if (failure) throw failure;
     })();
     return this.closing;

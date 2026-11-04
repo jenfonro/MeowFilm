@@ -41,7 +41,6 @@ public sealed partial class MusicLibraryOwner
             LJ.Fields(doc, "version entries", "version entries");
             LJ.Require(LJ.I(doc["version"]) == 1, "CORRUPT_STORAGE");
             var entries = LJ.Array(doc["entries"]);
-            LJ.Require(entries.Count <= CurrentAreas.Length + 32 * MaximumScriptSites, "LIMIT");
             var keys = new HashSet<string>(StringComparer.Ordinal);
             var scriptKeys = new HashSet<string>(StringComparer.Ordinal);
             var scriptEntries = new List<(string Installation, string Site)>();

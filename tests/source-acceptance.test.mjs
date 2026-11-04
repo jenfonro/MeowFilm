@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { temporaryRoot, assertOwnedPath } from '../scripts/windows/working-paths.mjs';
-import { classifySourceFailure } from '../scripts/source-acceptance-diagnostics.mjs';
+import { classifyGuestMessage, classifySourceFailure, sourceDiagnosticObservers } from '../scripts/source-acceptance-diagnostics.mjs';
 import { describeScriptError } from '../packages/script-host/src/script-diagnostic.js';
 
 test('source diagnostics classify known configuration and data errors without retaining text', () => {
@@ -20,10 +20,60 @@ test('source diagnostics classify known configuration and data errors without re
     ['Unexpected end of JSON input', 'empty_json'],
     ['Unexpected token < in JSON at position 0', 'invalid_json'],
   ]) {
-    assert.deepEqual(describeScriptError({ name: 'Error', message }), { kind: 'Error', reason });
+    assert.equal(classifyGuestMessage(message), reason);
   }
   assert.deepEqual(describeScriptError({ name: 'TypeError', code: 'ERR_INVALID_PROTOCOL',
     message: 'SYNTHETIC-PRIVATE-URL' }), { kind: 'TypeError', reason: 'input', code: 'ERR_INVALID_PROTOCOL' });
+  for (const message of ['config required: SYNTHETIC-PRIVATE', 'upstream HTTP request failed',
+    '请先登录', 'Unexpected end of JSON input']) {
+    assert.deepEqual(describeScriptError({ name: 'Error', message }), { kind: 'Error', reason: 'script' });
+  }
+});
+
+test('acceptance-only observation classifies text without retaining it or replacing structured errors', () => {
+  const diagnostics = [], observer = sourceDiagnosticObservers(diagnostics);
+  observer.onDiagnostic({ kind: 'Error', reason: 'script' });
+  observer.onScriptError({ kind: 'Error', reason: 'script', message: 'config required: SYNTHETIC-PRIVATE' });
+  observer.onDiagnostic({ kind: 'ScriptHostError', reason: 'host', code: 'SCRIPT_EXCEPTION' });
+  observer.onScriptError({ kind: 'Error', reason: 'upstream', code: 'ECONNABORTED',
+    message: 'SYNTHETIC-PRIVATE' });
+  observer.onScriptError({ kind: 'ReferenceError', reason: 'reference', reference: 'Buffer',
+    message: 'Buffer is not defined: SYNTHETIC-PRIVATE' });
+  observer.onScriptError({ kind: 'TypeError', reason: 'input', member: 'final',
+    message: 'final is not a function: SYNTHETIC-PRIVATE' });
+  assert.deepEqual(diagnostics, [
+    { kind: 'Error', reason: 'configuration' },
+    { kind: 'ScriptHostError', reason: 'host', code: 'SCRIPT_EXCEPTION' },
+    { kind: 'Error', reason: 'upstream', code: 'ECONNABORTED' },
+    { kind: 'ReferenceError', reason: 'reference', reference: 'Buffer' },
+    { kind: 'TypeError', reason: 'script', member: 'final' },
+  ]);
+  assert.equal(JSON.stringify(diagnostics).includes('SYNTHETIC-PRIVATE'), false);
+});
+
+test('timeout attribution needs causal network evidence and preserves host failures', () => {
+  const reply = { code: 'TIMEOUT' }, upstream = { scope: 'startup', code: 'NETWORK_ERROR' };
+  assert.equal(classifySourceFailure('cat', reply, [], []), 'requires_diagnosis');
+  assert.equal(classifySourceFailure('cat', reply, [upstream], []), 'upstream_failure');
+  assert.equal(classifySourceFailure('cat', reply, [{ ...upstream, scope: 'session' }], []),
+    'requires_diagnosis');
+  assert.equal(classifySourceFailure('cat', reply, [upstream], [
+    { reason: 'host', code: 'SCRIPT_EXCEPTION' },
+  ]), 'requires_diagnosis');
+  assert.equal(classifySourceFailure('cat', { code: 'SCRIPT_EXCEPTION' }, [], [
+    { kind: 'Error', reason: 'upstream', code: 'ECONNABORTED' },
+  ]), 'upstream_failure');
+});
+
+test('session failure notifications retain the guest cause without concealing real host failures', () => {
+  const reply = { code: 'SCRIPT_EXCEPTION' };
+  const notification = { reason: 'host', operation: 'session.failed', code: 'SCRIPT_EXCEPTION' };
+  const guest = { kind: 'Error', reason: 'upstream', code: 'ECONNABORTED' };
+  assert.equal(classifySourceFailure('cat', reply, [], [guest, notification]), 'upstream_failure');
+  assert.equal(classifySourceFailure('cat', reply, [], [notification]), 'requires_diagnosis');
+  assert.equal(classifySourceFailure('cat', reply, [], [
+    guest, { ...notification, operation: 'worker.exit' },
+  ]), 'requires_diagnosis');
 });
 
 test('source JSON error attribution needs request evidence and cannot conceal host failures', () => {
@@ -189,7 +239,11 @@ test('HTTP 200 provider error bodies remain upstream failures and local data is 
     lx.on('request',async ({action}) => {
       if(action==='search') return {list:[{songmid:'synthetic'}]};
       return await new Promise((resolve,reject) => lx.request(${JSON.stringify(endpoint)}, {},
-        (_error,_response,body) => reject(Error(String(body.err_code)))));
+        (error,_response,body) => {
+          if (error) return reject(error);
+          const payload = typeof body === 'string' ? JSON.parse(body) : body;
+          reject(Error(String(payload.err_code)));
+        }));
     });
     lx.send('inited',{sources:{
       wy:{type:'music',actions:['search','musicUrl'],qualitys:['128k']},
@@ -221,7 +275,11 @@ test('six-digit provider business errors are diagnosed without exposing response
     lx.on('request',async ({action}) => {
       if(action==='search') return {list:[{songmid:'synthetic'}]};
       return await new Promise((resolve,reject) => lx.request(${JSON.stringify(endpoint)}, {},
-        (_error,_response,body) => reject(Error(body.info))));
+        (error,_response,body) => {
+          if (error) return reject(error);
+          const payload = typeof body === 'string' ? JSON.parse(body) : body;
+          reject(Error(payload.info));
+        }));
     });
     lx.send('inited',{sources:{mg:{type:'music',actions:['search','musicUrl'],qualitys:['128k']}}});
   `);
@@ -476,6 +534,26 @@ test('Cat acceptance reports an enabled site whose actions cannot be discovered'
     state: 'requires_diagnosis', reason: 'actions_undiscovered',
   });
   assert.equal(report.rows[0].cleanup, 'complete');
+});
+
+test('Cat acceptance preserves failed initialization codes and separately attributes the cause', async t => {
+  const { directory, output } = area(t);
+  writeFileSync(join(directory, 'source.js'), `
+    module.exports.start = async () => {
+      const error = new Error('SYNTHETIC-PRIVATE-TIMEOUT');
+      error.code = 'ECONNABORTED';
+      throw error;
+    };
+  `);
+  const result = await run(['--kind', 'cat', '--scripts', directory, '--output', output, '--live']);
+  assert.notEqual(result.code, 0);
+  const text = readFileSync(output, 'utf8'), report = JSON.parse(text);
+  assert.equal(report.rows[0].initialization, 'failed');
+  assert.equal(report.rows[0].code, 'SCRIPT_EXCEPTION');
+  assert.equal(report.rows[0].initializationFailure, 'upstream_failure');
+  assert.equal(report.rows[0].cleanup, 'complete');
+  assert.equal(report.summary.initialized, 0);
+  assert.equal(text.includes('SYNTHETIC-PRIVATE'), false);
 });
 
 test('Cat acceptance classifies structured service failures without logging exception text', async t => {

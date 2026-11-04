@@ -33,13 +33,17 @@ Cat 使用独立业务 owner 和协议适配器，复用同一进程、隔离、
 
 ## QuickJS 执行边界
 
-用户脚本只在 QuickJS WebAssembly guest heap 中执行；宿主调用交换受限 JSON 数据，guest 回调通过 ID 引用，不把 Node 对象或任意宿主 callable 直接交给脚本。不提供任意文件、进程、`require` 或宿主模块加载接口，也不在失败时回退到 `node:vm`。
+用户脚本只在 QuickJS WebAssembly guest heap 中执行；宿主调用交换 JSON 结构和独立字节帧，guest 回调通过 ID 引用，不把 Node 对象或任意宿主 callable 直接交给脚本。不提供任意文件、进程、`require` 或宿主模块加载接口，也不在失败时回退到 `node:vm`。
+
+每个启用的 LX／Cat installation 由独立 `worker_thread` 执行会话和 QuickJS；ScriptHost 记录、Cat 网关及平台适配器留在主线程。编译后的 `WebAssembly.Module` 由主线程共享给 worker，各实例不共享堆。调用等待统一为 60 秒；到期后探测对应 worker，清理预算内无响应才终止并报告 `TIMEOUT`，不自动重启卡死实例、不设单次同步执行时限或后台心跳。停用、卸载、更新和关闭先触达正在初始化的真实所有者，再等待串行事务和真实线程退出。`stats()` 同步返回最近事实快照，并按读取需求合并发起一次异步刷新，不同步阻塞 worker。
+
+运行器的 60 秒不覆盖平台调用方自己的等待策略：runtime-bridge 默认 30 秒及 Windows C# 调用方超时保持不变，应用调用可能先结束等待。
 
 桥接控制参数使用预先捕获的序列化方法和无原型信封，脚本修改 `JSON.stringify` 或继承的 `toJSON` 不能篡改内部请求身份；业务数据仍按 JSON 语义传递，不通过冻结脚本全局原型限制正常执行。
 
 受信 `quickjs-engine.js` 通过 `node:fs/promises` 与 `import.meta.resolve('@jitl/quickjs-wasmfile-release-sync/wasm')` 读取打包内的锁定引擎文件；这不向 guest 授予文件访问。`WebAssembly.compile` 编译模块只执行一次并缓存复用，但每个 installation／generation 独立实例化 WASM，不共享线性内存，避免某个堆或模块损坏影响其他实例。
 
-LX 默认 `maxMemoryBytes` 为 64 MiB、`maxStackBytes` 为 64 KiB，并保留既有实例、回调和未结束任务预算。Cat 不设置固定 QuickJS heap、活动句柄、回调、Promise、暂存 token 或调用并发数量门槛；其 256 KiB guest 栈、同步执行片段、请求截止时间和取消边界用于阻止失控执行，不按累计资源数量拒绝正常工作。Cat 的虚拟 `os.totalmem()` 返回兼容性数值，不是引擎内存配额。公共引擎拒绝超过 1 MiB 的栈配置。取消、超时或卸载 fence 当前结果并按请求、服务和 session 生命周期回收资源；不把取消信号当作不合作外部 I/O 已完成的证明，无法排空时明确报告清理失败。
+ScriptHost 在 `host.js` 一处定义脚本层限制，LX 与 Cat 同值且按单个脚本计：源码最多 16 MiB（UTF-8 字节）、QuickJS 栈 256 KiB、单脚本内存上限 `maxMemoryBytes`。脚本运行器不设对外单次消息或结果字节上限；QuickJS 内部桥接与脚本内数据处理只受单脚本内存上限约束。宿主整体缓冲且不受 guest 堆约束的位置以 `maxMemoryBytes` 为上界：Cat 聚合入口请求体、Cat 脚本 listener 响应汇总、LX 宿主网络响应体及解压输出；超出报 `RESOURCE_LIMIT`，请求失败而实例继续服务。`maxMemoryBytes` 默认为 256 MiB；依据是 11 份真实脚本的 QuickJS 单脚本峰值约 77 MiB，默认值约为该峰值的 3.3 倍。所有协议均启用 `setMemoryLimit`，超限即判该实例失败。已就绪实例在运行中超限时由 ScriptHost 自动以同一 revision 重启一次（保留私有卷并记录结构化诊断）；初始化超限或重启后再次初始化超限停在 failed，不循环。用户 enable／update 后重启计数复位。LX 结果单帧仍受 512 KiB 线协议上限，原生桥接帧 1 MiB 不变；Cat 结果走分片传输。Cat 原生桥的字节参数与返回值均以 ArrayBuffer 帧传输，JSON 只描述结构和帧索引。不按实例、timer、网络、in-flight、storage、method pending 等固定数量配额拒绝工作，资源按请求和 session 生命周期回收。Cat 的 `os.totalmem()` 返回单脚本内存上限，`os.freemem()` 为上限减当前 guest 堆占用；其余 `os` 字段仍是兼容元数据。公共引擎拒绝超过 1 MiB 的栈配置。取消、超时或卸载 fence 当前结果并按请求、服务和 session 生命周期回收资源；不把取消信号当作不合作外部 I/O 已完成的证明，无法排空时明确报告清理失败。
 
 隔离不依赖 AppContainer、完整虚拟机或 Node permission model；宿主网络／加解密适配是受信代码，不属于 guest 沙箱。JS 引擎/WASM 仍需维护与安全更新，不能承诺抵御引擎本身的漏洞。
 
@@ -77,13 +81,13 @@ LX 的 `validateURL` 检查 HTTP(S) URL 语法并拒绝 URL 中的用户信息�
 
 LX 网络可以访问已开放的 HTTP(S) 服务，包括本机和私网地址；其受控桥接保留截止时间、取消、响应大小、重定向上限及跨 origin 不转发 Authorization/Cookie 的行为。
 
-Cat 不维护域名授权名单，但有限 Node 风格网络层只允许公网目标和本实例登记的回环监听：字面私网、链路本地、保留地址、局域网域名后缀、未登记 loopback 均拒绝；DNS 在连接时核对完整结果，任一非公网地址使请求失败。脚本硬编码的本地端口只作为实例内别名映射到运行器分配的实际回环端口。完整规则见 [Cat 契约](cat-script-runtime.md)。
+Cat 不维护域名授权名单，也不按公网／私网／链路本地／回环或局域网域名后缀过滤目标；DNS 答案直接返回。每个实例在独立 worker thread 中执行；实例已登记的 listener 端口和别名映射到该实例的实际回环端点，并附加实例访问头与请求作用域；未登记的回环端口直接连接真实 `127.0.0.1:port`，不附加实例凭据。HTTP、HTTPS、net、TLS 自调用仍核对 listener 协议。`socketPath`、fd 与 guest 自定义 `lookup`／`createConnection` 仍拒绝；平台网络适配器存在时 DNS 不可用。完整规则见 [Cat 契约](cat-script-runtime.md)。
 
-LX 网络物理任务通过 `adapterTasks` 跟踪至 adapter 真正结束，不设置 `maxNetworkRequests` 数量额度；取消只回收结果和回调句柄，不伪造已排空。`followRedirect` 接受布尔值，false 禁止自动跳转，true 仍受 `follow_max`／LX 宿主上限约束。`retry` 扩展字段兼容接受但不触发宿主自动重放，重试由脚本负责，不叠加非幂等请求的重放。Cat 同样按请求和 session 生命周期回收实际网络资源。
+LX 网络任务在 adapter 真正结束前保持登记；取消只回收结果和回调句柄，不设固定任务数量预算。`followRedirect` 接受布尔值，false 禁止自动跳转，true 仍受 `follow_max`／LX 宿主上限约束；`follow_max` 超过上限时按上限截断。`retry` 扩展字段兼容接受但不触发宿主自动重放，重试由脚本负责，不叠加非幂等请求的重放。Cat 同样按请求和 session 生命周期回收实际网络资源。
 
 ## Cat 回环服务与持久卷
 
-Cat 安装启用后按需创建回环服务。每个脚本监听器由运行器分配实际端口并绑定 installation/generation；管理页面直接使用该实例端口，聚合入口只分派 Cat 业务请求及脚本代理 URL。停用、卸载、更新或关闭时回收端口和句柄，不删除以 installationId 绑定的私有卷。
+Cat 安装启用后按需创建回环服务。每个脚本监听器由运行器分配实际端口并绑定 installation/generation；管理页面直接使用该实例端口，聚合入口只分派 Cat 业务请求及脚本代理 URL。停用、更新或关闭时回收端口和句柄并保留私有卷；卸载或从配置移除时在实例停止、资源回收后删除私有卷和不再被引用的源码，同一 id 重装从空卷开始，删除失败进入 `failures`，启动时不扫描残留卷。
 
 ## 验证与发布
 

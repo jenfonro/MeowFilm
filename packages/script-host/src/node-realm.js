@@ -1,6 +1,7 @@
 import { realmSource } from './realm.js';
-import { nativeRoles, nativeConstructorRoles } from './native-roles.js';
-import { discoverSourceRoutes } from './cat-source-routes.js';
+import { nativeRoles, nativeConstructorRoles, httpRequestOptionNames,
+  projectFields, projectHttpRequestOptions } from './native-roles.js';
+import { discoverSourceRoutes, createLocalStartupLookup, startupWrapperTarget } from './cat-source-routes.js';
 import { createHttpMessageClasses } from './node-http-realm.js';
 
 /** CommonJS and Node-shaped SDK execute inside QuickJS. Native capabilities
@@ -16,12 +17,19 @@ export const nodeRealmSource = String.raw`
   delete globalThis.meow;
   const parse = JSON.parse.bind(JSON), stringify = JSON.stringify.bind(JSON);
   const nativeHandles = new WeakMap(), nativeCache = new Map(), guestCallbacks = new Map();
+  const pendingNativeReleases = new Set();
+  let lastNativeCacheScan = 0, bridgeDepth = 0, releasingNativeHandles = false;
   const keyValues = new WeakMap();
   const promises = new Map(), settled = new Map(), modules = new Map(), errors = new WeakMap(), core={};
   const roleMethods = ` + JSON.stringify(Object.fromEntries(Object.entries(nativeRoles)
     .map(([key, role]) => [key, [...role.methods]]))) + String.raw`;
   const constructorRoles = ` + JSON.stringify(nativeConstructorRoles) + String.raw`;
+  const httpRequestOptionNames = ` + JSON.stringify(httpRequestOptionNames) + String.raw`;
+  const projectFields = ` + projectFields.toString() + String.raw`;
+  const projectHttpRequestOptions = ` + projectHttpRequestOptions.toString() + String.raw`;
   const discoverSourceRoutes = ` + discoverSourceRoutes.toString() + String.raw`;
+  const createLocalStartupLookup = ` + createLocalStartupLookup.toString() + String.raw`;
+  const startupWrapperTarget = ` + startupWrapperTarget.toString() + String.raw`;
   const createHttpMessageClasses = ` + createHttpMessageClasses.toString() + String.raw`;
   const rolePrototypes=new Map(), handleRoles=new WeakMap(), handleStates=new WeakMap(), callbackIds=new WeakMap();
   const roleInstance=(expected,actual)=>expected===actual||(expected==='blob'&&actual==='file');
@@ -60,14 +68,19 @@ export const nodeRealmSource = String.raw`
       if(key!==0&&!contextActive(candidate))asyncContexts.delete(key);
     if(!contextActive(asyncContext))asyncContext=rootContext;
   }
+  function forgetContext(input){
+    const id=typeof input==='object'?input?.id:Number(input);
+    if(!Number.isSafeInteger(id)||id<=0)return;
+    asyncContexts.delete(id);
+  }
   function runContext(context,fn,receiver,args){const previous=asyncContext;asyncContext=context;
     try{
       if(!contextActive(context))return undefined;
       return Reflect.apply(fn,receiver,args);
     }finally{asyncContext=contextActive(previous)?previous:rootContext;}}
-  const own = Object.prototype.hasOwnProperty, savedBuffer = globalThis.Buffer;
+  const own = Object.prototype.hasOwnProperty;
   let nextCallback = 0;
-  function encode(value, seen = new Set()) {
+  function encode(value, seen = new Set(), frames = []) {
     if (value === undefined) return {$:'undefined'};
     if (typeof value === 'bigint') return {$:'bigint',value:String(value)};
     if (value === null || ['string','number','boolean'].includes(typeof value)) return value;
@@ -80,15 +93,20 @@ export const nodeRealmSource = String.raw`
       if (!id) { id = ++nextCallback; bindings.set(asyncContext,id);guestCallbacks.set(id,{fn:value,context:asyncContext}); }
       return {$:'callback',id,context:registerContext(asyncContext)};
     }
-    if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer)
-      return {$:'bytes',value:savedBuffer.from(value instanceof ArrayBuffer
-        ?new Uint8Array(value):new Uint8Array(value.buffer,value.byteOffset,value.byteLength)).toString('base64')};
+    if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) {
+      const frame = frames.length;
+      frames.push(value instanceof ArrayBuffer
+        ? value.slice(0)
+        : value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+      return {$:'bytes',frame};
+    }
     if (value instanceof Error) return {$:'error',code:value.code||'SCRIPT_EXCEPTION'};
     if (value instanceof Date) return {$:'date',value:value.toISOString()};
     if (seen.has(value)) throw new TypeError('Cyclic native argument');
     seen.add(value);
-    const result = Array.isArray(value) ? value.map(item => encode(item,seen))
-      : {$:'object',value:Object.fromEntries(Object.entries(value).map(([key,item])=>[key,encode(item,seen)]))};
+    const result = Array.isArray(value) ? value.map(item => encode(item,seen,frames))
+      : {$:'object',value:Object.fromEntries(Object.entries(value)
+        .map(([key,item])=>[key,encode(item,seen,frames)]))};
     seen.delete(value); return result;
   }
   function nodeError(code) {
@@ -99,7 +117,31 @@ export const nodeRealmSource = String.raw`
       'ERR_INVALID_PROTOCOL'].includes(code) ? code : 'SCRIPT_EXCEPTION');
     return error;
   }
-  function rpcAt(input,context) {
+  function callbackFailureCode(error) {
+    return errors.get(error) || (error?.name === 'InternalError' &&
+      /out of memory|allocation failed/i.test(error.message) ? 'MEMORY_LIMIT'
+      : error?.name === 'InternalError' && /stack overflow/i.test(error.message)
+        ? 'RESOURCE_LIMIT' : 'SCRIPT_EXCEPTION');
+  }
+  function bridge(input, frames = []) {
+    bridgeDepth++;
+    try{return rawBridge('node',stringify(input),...frames);}
+    finally{bridgeDepth--;}
+  }
+  function flushReleasedHandles() {
+    if(releasingNativeHandles||bridgeDepth!==0||!pendingNativeReleases.size)return;
+    const ids=[];
+    for(const id of [...pendingNativeReleases]){
+      pendingNativeReleases.delete(id);
+      if(!nativeCache.get(id)?.deref())ids.push(id);
+    }
+    if(!ids.length)return;
+    releasingNativeHandles=true;
+    try{rpcAt({operation:'releaseHandles',ids},rootContext);}
+    catch{for(const id of ids)pendingNativeReleases.add(id);}
+    finally{releasingNativeHandles=false;}
+  }
+  function rpcAt(input,context,frames = []) {
     if(!contextActive(context))throw nodeError('CANCELLED');
     let originContext=0;
     if(context!==rootContext){
@@ -107,41 +149,52 @@ export const nodeRealmSource = String.raw`
       while(parent&&parent!==rootContext&&asyncContexts.get(parent.id)!==parent)parent=parent.parent;
       originContext=parent&&parent!==rootContext?parent.id:context.id;
     }
-    const outer = parse(rawBridge('node',stringify({...input,context:registerContext(context),
-      originContext})));
+    const packet = bridge({...input,context:registerContext(context),
+      originContext},frames);
+    const outer = parse(Array.isArray(packet) ? packet[0] : packet);
+    const outputFrames = Array.isArray(packet) ? packet.slice(1) : [];
     if (!outer.ok) throw nodeError(outer.code);
     const response = outer.value;
-    if (!response.ok) throw decode(response.value);
-    return response;
+    if (!response.ok) throw decode(response.value,outputFrames);
+    return {...response,frames:outputFrames};
   }
-  function rpc(input) {
+  function rpc(input,frames = []) {
+    flushReleasedHandles();
     if(!contextActive(asyncContext))throw nodeError('CANCELLED');
-    return rpcAt(input,asyncContext);
+    return rpcAt(input,asyncContext,frames);
   }
   const symbolKey = symbol => symbol === Symbol.iterator ? '@@iterator'
     : symbol === Symbol.asyncIterator ? '@@asyncIterator'
     : symbol === Symbol.toStringTag ? '@@toStringTag'
     : symbol === Symbol.hasInstance ? '@@hasInstance'
     : Symbol.keyFor(symbol) === 'nodejs.util.inspect.custom' ? '@@nodejs.util.inspect.custom' : null;
-  function decode(value) {
+  function decode(value, frames, owner) {
     if (value === null || typeof value !== 'object') return value;
-    if (Array.isArray(value)) return value.map(decode);
+    if (Array.isArray(value)) return value.map(item=>decode(item,frames));
     if (!value.$) return value;
     switch(value.$) {
       case 'undefined': return undefined;
       case 'bigint': return BigInt(value.value);
       case 'date': return new Date(value.value);
-      case 'bytes': return globalThis.Buffer.from(value.value,'base64');
+      case 'bytes':
+        if(!Number.isSafeInteger(value.frame)||value.frame<0||
+          !frames||value.frame>=frames.length)throw nodeError('SCRIPT_EXCEPTION');
+        return globalThis.Buffer.from(frames[value.frame]);
       case 'error': return nodeError(value.code);
-      case 'object': return Object.fromEntries(Object.entries(value.value).map(([key,item])=>[key,decode(item)]));
+      case 'object': return Object.fromEntries(Object.entries(value.value)
+        .map(([key,item])=>[key,decode(item,frames)]));
       case 'promise': return new Promise((resolve,reject)=>{
         promises.set(value.id,{resolve,reject});
-        if (settled.has(value.id)) { const response=settled.get(value.id); settled.delete(value.id); finish(value.id,response); }
+        if (settled.has(value.id)) {
+          const response=settled.get(value.id); settled.delete(value.id);
+          finish(value.id,response.response,response.frames);
+        }
       });
-      case 'handle': return proxy(value);
+      case 'handle': return proxy(value, value.callable ? owner : undefined);
       case 'key': {
         const result=Object.create(KeyObject.prototype);
-        keyValues.set(result,{wire:{$:'key',type:value.type,data:value.data},fields:decode(value.fields)});
+        keyValues.set(result,{wire:{$:'key',type:value.type,data:value.data},
+          fields:decode(value.fields,frames)});
         return result;
       }
       case 'guestCallback': return guestCallbacks.get(value.id)?.fn;
@@ -154,7 +207,9 @@ export const nodeRealmSource = String.raw`
     return record;
   }
   function keyCall(receiver,method,args) {
-    return decode(rpc({operation:'key',method,key:keyValue(receiver).wire,args:encode(args)}).value);
+    const frames=[];const response=rpc({operation:'key',method,
+      key:keyValue(receiver).wire,args:encode(args,new Set(),frames)},frames);
+    return decode(response.value,response.frames);
   }
   class KeyObject {
     constructor(){throw new TypeError('Illegal constructor');}
@@ -169,14 +224,19 @@ export const nodeRealmSource = String.raw`
   function releaseNative(json) {
     let packet;
     try { packet=parse(json); } catch { return; }
+    for(const id of Array.isArray(packet?.collectHandles)?packet.collectHandles:[]){
+      const key=String(id);
+      if(!nativeCache.get(key)?.deref())pendingNativeReleases.add(key);
+    }
     for(const id of Array.isArray(packet?.handles)?packet.handles:[]){
-      const key=String(id),cached=nativeCache.get(key);
+      const key=String(id),cached=nativeCache.get(key)?.deref();
       const state=cached&&handleStates.get(cached);
       if(state){
         for(const cleanup of [...state.pipes.values()]){try{cleanup();}catch{}}
         state.released=true;
       }
       nativeCache.delete(key);
+      pendingNativeReleases.delete(key);
     }
     for(const id of Array.isArray(packet?.callbacks)?packet.callbacks:[]){
       const key=Number(id),entry=guestCallbacks.get(key);
@@ -187,6 +247,9 @@ export const nodeRealmSource = String.raw`
     }
     for(const id of Array.isArray(packet?.contexts)?packet.contexts:[]){
       releaseContext(Number(id));
+    }
+    for(const id of Array.isArray(packet?.forgetContexts)?packet.forgetContexts:[]){
+      forgetContext(Number(id));
     }
     for(const id of Array.isArray(packet?.promises)?packet.promises:[]){
       const key=String(id),pending=promises.get(key);
@@ -202,30 +265,37 @@ export const nodeRealmSource = String.raw`
     }
     if(ids.length)rpc({operation:'releaseCallbacks',ids:[...new Set(ids)]});
   }
-  function proxy(meta) {
-    if (nativeCache.has(meta.id)) return nativeCache.get(meta.id);
+  function proxy(meta, owner) {
+    const key=String(meta.id),cached=nativeCache.get(key)?.deref();
+    if (cached) return cached;
+    if (nativeCache.has(key)) nativeCache.delete(key);
     const shadow = new Map();
     const state={released:false,pipes:new Map()};
     const active=()=>{if(state.released)throw nodeError('CANCELLED');};
     const call = (operation, receiver, args) => {
       active();
+      if(owner&&handleStates.get(owner)?.released)throw nodeError('CANCELLED');
       if(meta.argumentFields)args=args.map((arg,index)=>{
-        const fields=meta.argumentFields[index];
-        if(!fields||!arg||typeof arg!=='object'||Array.isArray(arg)||nativeHandles.has(arg)||
+        if(!arg||typeof arg!=='object'||Array.isArray(arg)||nativeHandles.has(arg)||
           ArrayBuffer.isView(arg)||arg instanceof ArrayBuffer||arg instanceof Date||arg instanceof Error)return arg;
-        const agentManaged=fields.includes('agent')&&(arg.agent===false||nativeHandles.has(arg.agent));
-        return Object.fromEntries(fields.filter(key=>(key!=='createConnection'||!agentManaged)&&
-          Object.prototype.propertyIsEnumerable.call(arg,key))
-          .map(key=>[key,arg[key]]));
+        const {kind,fields,options}=meta.argumentFields;
+        return kind==='http'?projectHttpRequestOptions(arg,
+          agent=>agent===false||handleRoles.get(agent)==='agent'):
+          projectFields(arg,kind==='urlFormat'&&index===1?options:fields);
       });
-      const response = rpc({operation,id:meta.id,args:encode(args),receiver:receiver&&nativeHandles.has(receiver)?encode(receiver):null});
+      const frames=[];
+      const encodedArgs=encode(args,new Set(),frames);
+      const encodedReceiver=receiver&&nativeHandles.has(receiver)
+        ?encode(receiver,new Set(),frames):null;
+      const response = rpc({operation,id:meta.id,args:encodedArgs,
+        receiver:encodedReceiver},frames);
       for (const update of response.updates || []) {
         const buffer=args[update.index]; if (ArrayBuffer.isView(buffer)) {
           const target=new Uint8Array(buffer.buffer,buffer.byteOffset,buffer.byteLength);
-          target.set(decode(update.value).subarray(0,target.length));
+          target.set(decode(update.value,response.frames).subarray(0,target.length));
         }
       }
-      return decode(response.value);
+      return decode(response.value,response.frames);
     };
     const target = meta.callable ? function(...args) {
       return call(new.target?'construct':'call',this,args);
@@ -246,30 +316,63 @@ export const nodeRealmSource = String.raw`
         }
         if(!meta.callable&&key==='pipe')return destination=>{
           active();state.pipes.get(destination)?.();
+          const source=resultRef.deref();
+          if(!source)throw nodeError('CANCELLED');
+          if(nativeHandles.has(source)&&nativeHandles.has(destination)){
+            let cleaned=false;
+            const failed=error=>{if(!cleaned){cleanup();destination.destroy(error);}};
+            const closed=()=>{if(!cleaned&&!source.readableEnded)
+              failed(nodeError('ERR_STREAM_PREMATURE_CLOSE'));};
+            const cleanup=()=>{
+              if(cleaned)return;cleaned=true;state.pipes.delete(destination);
+              const frames=[];try{rpc({operation:'invoke',id:meta.id,key:'unpipeTo',
+                args:encode([destination],new Set(),frames)},frames);}catch{}
+              try{releaseCallbacks([failed,closed]);}catch{}
+            };
+            state.pipes.set(destination,cleanup);
+            try{
+              source.once('error',failed);source.once('close',closed);
+              const frames=[];if(rpc({operation:'invoke',id:meta.id,key:'pipeTo',
+                args:encode([destination],new Set(),frames)},frames).value===true){
+                destination.once('finish',cleanup);destination.once('close',cleanup);
+                destination.emit?.('pipe',source);
+                return destination;
+              }
+              cleanup();
+            }catch(error){cleanup();throw error;}
+          }
           let cleaned=false,draining=false;
           const cleanup=()=>{if(cleaned)return;cleaned=true;state.pipes.delete(destination);
-            try{result.off('data',data);}catch{}try{result.off('end',end);}catch{}
-            try{result.off('error',failed);}catch{}try{result.off('close',closed);}catch{}
+            const current=resultRef.deref();
+            try{current?.off('data',data);}catch{}try{current?.off('end',end);}catch{}
+            try{current?.off('error',failed);}catch{}try{current?.off('close',closed);}catch{}
             try{destination.off?.('drain',drain);}catch{}
             try{destination.off?.('finish',cleanup);}catch{}try{destination.off?.('close',cleanup);}catch{}
             try{releaseCallbacks([data,end,failed,closed,drain,cleanup]);}catch{}};
-          const drain=()=>{draining=false;if(!cleaned)result.resume();};
-          const data=chunk=>{try{if(destination.write(chunk)===false&&!draining){
-            draining=true;result.pause();destination.once('drain',drain);}}catch(error){failed(error);}};
+          const drain=()=>{draining=false;if(!cleaned)resultRef.deref()?.resume();};
+          const data=chunk=>{try{const current=resultRef.deref();if(!current)return;
+            if(destination.write(chunk)===false&&!draining){
+            draining=true;current.pause();destination.once('drain',drain);}}catch(error){failed(error);}};
           const end=()=>{cleanup();destination.end();};
           const failed=error=>{cleanup();destination.destroy(error);};
           const closed=()=>{cleanup();destination.destroy(nodeError('ERR_STREAM_PREMATURE_CLOSE'));};
           state.pipes.set(destination,cleanup);
           try{
-            result.on('data',data);result.once('end',end);result.once('error',failed);
-            result.once('close',closed);
+            source.on('data',data);source.once('end',end);source.once('error',failed);
+            source.once('close',closed);
             destination.once('finish',cleanup);destination.once('close',cleanup);
-            destination.emit?.('pipe',result);return destination;
+            destination.emit?.('pipe',source);
+            // Match Node's Readable.pipe: attaching a data listener alone does
+            // not start a paused stream. Without resume the source can end
+            // empty while the destination reports finish.
+            source.resume();return destination;
           }catch(error){cleanup();throw error;}};
         if(!meta.callable&&key==='unpipe')return destination=>{
           if(destination!==undefined)state.pipes.get(destination)?.();
           else for(const cleanup of [...state.pipes.values()])cleanup();
-          result.pause();return result;};
+          const source=resultRef.deref();
+          if(!source)throw nodeError('CANCELLED');
+          source.pause();return source;};
         if(!meta.callable&&key==='emit')return (...args)=>{const emitter=shadow.get('localEmitter');
           return emitter?emitter.emit(...args):false;};
         if(key==='toJSON'&&!['url','x509'].includes(meta.role))return undefined;
@@ -277,7 +380,10 @@ export const nodeRealmSource = String.raw`
         if (key==='then') return undefined;
         active();
         try {
-          const value=decode(rpc({operation:'get',id:meta.id,key}).value);
+          const response=rpc({operation:'get',id:meta.id,key});
+          // Bound methods retain their receiver in their own closure, not in
+          // a WeakMap value that keeps the receiver until a guest cycle GC.
+          const value=decode(response.value,response.frames,resultRef.deref());
           if(meta.role==='incoming'&&['headers','rawHeaders'].includes(key))shadow.set(key,value);
           return value;
         }
@@ -286,7 +392,8 @@ export const nodeRealmSource = String.raw`
       set(target,key,value) {
         if (!meta.callable) {
           active();
-          try{rpc({operation:'set',id:meta.id,key,value:encode(value)});return true;}
+          const frames=[];try{rpc({operation:'set',id:meta.id,key,
+            value:encode(value,new Set(),frames)},frames);return true;}
           catch(error){if(error.code!=='PERMISSION_DENIED')throw error;}
         }
         shadow.set(key,value);
@@ -296,7 +403,8 @@ export const nodeRealmSource = String.raw`
         ...(meta.callable?[]:rpc({operation:'keys',id:meta.id}).value),...shadow.keys()])]; },
       getOwnPropertyDescriptor(target,key) {
         const local=Reflect.getOwnPropertyDescriptor(target,key);
-        return local || {enumerable:true,configurable:true,writable:true,value:result[key]};
+        return local || {enumerable:true,configurable:true,writable:true,
+          value:resultRef.deref()?.[key]};
       },
       getPrototypeOf(target) {
         if(meta.callable)return Function.prototype;
@@ -307,23 +415,35 @@ export const nodeRealmSource = String.raw`
             prototype[key]=function(...args){
               const id=nativeHandles.get(this);
               if(!id||handleStates.get(this)?.released)throw nodeError('CANCELLED');
-              return decode(rpc({operation:'invoke',id,key,args:encode(args)}).value);};
+              const frames=[];const response=rpc({operation:'invoke',id,key,
+                args:encode(args,new Set(),frames)},frames);
+              return decode(response.value,response.frames);};
           }
           rolePrototypes.set(meta.role,prototype);
         }
         return rolePrototypes.get(meta.role);
       },
     });
+    const resultRef = new WeakRef(result);
     nativeHandles.set(result,meta.id); handleRoles.set(result,meta.role);handleStates.set(result,state);
-    nativeCache.set(meta.id,result); return result;
+    nativeCache.set(key,new WeakRef(result));
+    if(nativeCache.size>=Math.max(64,lastNativeCacheScan*2)){
+      for(const [id,ref] of nativeCache)if(!ref.deref()){nativeCache.delete(id);pendingNativeReleases.add(id);}
+      lastNativeCacheScan=nativeCache.size;
+    }
+    return result;
   }
-  function finish(id,response) {
+  function finish(id,response,frames=[]) {
     const promise=promises.get(id);
-    if(!promise) { settled.set(id,response); return; }
+    if(!promise) { settled.set(id,{response,frames}); return; }
     promises.delete(id);
-    if(response.ok) promise.resolve(decode(response.value)); else promise.reject(decode(response.value));
+    if(response.ok) promise.resolve(decode(response.value,frames));
+    else promise.reject(decode(response.value,frames));
   }
-  const builtin = name => decode(rpc({operation:'module',name}).value);
+  const builtin = name => {
+    const response=rpc({operation:'module',name});
+    return decode(response.value,response.frames);
+  };
   const sdkNativeModules=new Set(['fs/promises','crypto','zlib','url','util/types',
     'stream/web','http2','dns','dns/promises','net','tls','os','perf_hooks','tty',
     'worker_threads','constants']);
@@ -357,6 +477,34 @@ export const nodeRealmSource = String.raw`
   process.hrtime.bigint=()=>BigInt(Date.now())*1000000n;
   globalThis.process=process; globalThis.global=globalThis;
   const buffers=loadSdk('buffer');
+  {
+    // The guest buffer package predates Node's base64url encoding. Its base64
+    // decoder already accepts both alphabets; only the name and output differ.
+    const Buffer=buffers.Buffer,proto=Buffer.prototype;
+    const from=Buffer.from,isEncoding=Buffer.isEncoding,byteLength=Buffer.byteLength;
+    const toString=proto.toString,write=proto.write,fill=proto.fill,lastIndexOf=proto.lastIndexOf;
+    const urlEncoding=value=>typeof value==='string'&&value.length===9&&value.toLowerCase()==='base64url';
+    const encoding=value=>urlEncoding(value)?'base64':value;
+    Buffer.from=function(value,format,length){return from(value,encoding(format),length);};
+    Buffer.isEncoding=function(value){return urlEncoding(value)||isEncoding(value);};
+    Buffer.byteLength=function(value,format,mustMatch){return byteLength(value,encoding(format),mustMatch);};
+    proto.toString=function(format,start,end){
+      if(arguments.length===0)return toString.call(this);
+      const value=toString.call(this,encoding(format),start,end);
+      return urlEncoding(format)?value.replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''):value;
+    };
+    proto.toLocaleString=proto.toString;
+    proto.write=function(value,offset,length,format){
+      return write.call(this,value,encoding(offset),encoding(length),encoding(format));
+    };
+    proto.fill=function(value,start,end,format){
+      return fill.call(this,value,encoding(start),encoding(end),encoding(format));
+    };
+    proto.lastIndexOf=function(value,offset,format){
+      if(typeof offset==='string'){format=offset;offset=undefined;}
+      return lastIndexOf.call(this,value,offset,encoding(format));
+    };
+  }
   Object.defineProperty(globalThis,'Buffer',{value:buffers.Buffer,writable:true,configurable:true});
   const util=loadSdk('util');
   util.types=builtin('util/types');
@@ -461,14 +609,21 @@ export const nodeRealmSource = String.raw`
   };
   core.vm=vm;
   const nativeTimeout=globalThis.setTimeout,nativeInterval=globalThis.setInterval,nativeClear=globalThis.clearTimeout;
-  function timer(fn,delay,repeat,args){const id=(repeat?nativeInterval:nativeTimeout)(fn,delay,...args);
+  function reportCallbackError(error){try{
+    rawBridge('nodeCallbackError',stringify([errors.get(error)||'SCRIPT_EXCEPTION']));
+  }catch{}}
+  function timer(fn,delay,repeat,args){
+    const guarded=(...values)=>{try{return fn(...values);}
+      catch(error){reportCallbackError(error);}};
+    const id=(repeat?nativeInterval:nativeTimeout)(guarded,delay,...args);
     return {id,ref(){return this;},unref(){return this;},hasRef:()=>true,refresh(){return this;},[Symbol.toPrimitive](){return id;}};}
   const bindAsync=fn=>{const context=asyncContext;return function(...args){
     return runContext(context,fn,this,args);};};
   globalThis.setTimeout=(fn,delay,...args)=>timer(bindAsync(fn),delay,false,args);
   globalThis.setInterval=(fn,delay,...args)=>timer(bindAsync(fn),delay,true,args);
   const microtask=globalThis.queueMicrotask;
-  globalThis.queueMicrotask=fn=>microtask(bindAsync(fn));
+  globalThis.queueMicrotask=fn=>microtask(bindAsync(()=>{try{return fn();}
+    catch(error){reportCallbackError(error);}}));
   globalThis.clearTimeout=globalThis.clearInterval=id=>nativeClear(typeof id==='object'?id.id:id);
   globalThis.setImmediate=(fn,...args)=>globalThis.setTimeout(fn,0,...args);
   globalThis.clearImmediate=globalThis.clearTimeout;
@@ -523,7 +678,9 @@ export const nodeRealmSource = String.raw`
             if(!id){if(typeof fallback==='function')return Reflect.apply(fallback,this,args);
               throw nodeError('PERMISSION_DENIED');}
             if(handleStates.get(this)?.released)throw nodeError('CANCELLED');
-            return decode(rpc({operation:'invoke',id,key,args:encode(args)}).value);};}return sample;};
+            const frames=[];const response=rpc({operation:'invoke',id,key,
+              args:encode(args,new Set(),frames)},frames);
+            return decode(response.value,response.frames);};}return sample;};
         if(name==='http')Object.assign(ServerResponse.prototype,remoteProto('response',ServerResponse.prototype));
         rolePrototypes.set('incoming',IncomingMessage.prototype);rolePrototypes.set('response',ServerResponse.prototype);
         Object.assign(module.Server.prototype,remoteProto('server'));
@@ -741,10 +898,17 @@ export const nodeRealmSource = String.raw`
   const nodeCrypto=requireModule('crypto'),webcrypto=nodeCrypto.webcrypto;
   const nativeGetRandomValues=webcrypto.getRandomValues;
   webcrypto.getRandomValues=value=>{nativeGetRandomValues(value);return value;};
+  const nativeDigest=webcrypto.subtle.digest;
+  webcrypto.subtle.digest=async(...args)=>{
+    const value=await nativeDigest(...args);
+    return ArrayBuffer.isView(value)
+      ?value.buffer.slice(value.byteOffset,value.byteOffset+value.byteLength):value;
+  };
   if(typeof nodeCrypto.getRandomValues==='function'){
     const fill=nodeCrypto.getRandomValues;
     nodeCrypto.getRandomValues=value=>{fill(value);return value;};
   }
+  nodeCrypto.subtle=webcrypto.subtle;
   globalThis.crypto=webcrypto;
   const AbortSignal=class extends EventTarget {
     constructor(){super();this.aborted=false;this.reason=undefined;this._onabort=null;}
@@ -1041,110 +1205,61 @@ export const nodeRealmSource = String.raw`
       (/\.stop\s*=\s*(?:!0|true)/.test(text)?8:0)+(/=\s*null\b/.test(text)?2:0)+
       (/(?:clearTimeout|clearInterval)\s*\(/.test(text)?1:0);
   };
-  const wrapperTarget=text=>{
-    if(typeof text!=='string')return null;
-    const match=text.match(/^(?:async\s+)?function(?:\s+[A-Za-z_$][\w$]*)?\s*\([^)]*\)\s*\{\s*(?:return\s+await\s+|return\s+|await\s+)?([A-Za-z_$][\w$]*)\s*\([^;{}]*\)\s*;?\s*\}$/s)
-      ||text.match(/^(?:async\s*)?\([^)]*\)\s*=>\s*(?:await\s+)?([A-Za-z_$][\w$]*)\s*\([^;{}]*\)\s*;?$/s);
-    return match?.[1]||null;
-  };
-  const quotedEnd=(source,index,quote,limit)=>{
-    for(let i=index+1;i<limit;i++){
-      if(source[i]==='\\'){i++;continue;}
-      if(source[i]===quote)return i;
-    }
-    return limit-1;
-  };
-  const bodyText=(source,start)=>{
-    const headerLimit=source.length;
-    let parens=0,open=-1;
-    for(let index=start;index<headerLimit;index++){
-      const char=source[index],next=source[index+1];
-      if(char==="'"||char==='"\"'||char.charCodeAt(0)===96){index=quotedEnd(source,index,char,headerLimit);continue;}
-      if(char==='/'&&next==='/'){const end=source.indexOf('\n',index+2);index=end<0?headerLimit-1:end;continue;}
-      if(char==='/'&&next==='*'){const end=source.indexOf('*/',index+2);index=end<0?headerLimit-1:end+1;continue;}
-      if(char==='(')parens++;
-      else if(char===')')parens=Math.max(0,parens-1);
-      else if(char==='{'&&parens===0){open=index;break;}
-      else if(char===';'&&parens===0)return source.slice(start,index+1);
-    }
-    if(open<0)return '';
-    const bodyLimit=source.length;
-    let depth=0;
-    for(let index=open;index<bodyLimit;index++){
-      const char=source[index],next=source[index+1];
-      if(char==="'"||char==='"\"'||char.charCodeAt(0)===96){index=quotedEnd(source,index,char,bodyLimit);continue;}
-      if(char==='/'&&next==='/'){const end=source.indexOf('\n',index+2);index=end<0?bodyLimit-1:end;continue;}
-      if(char==='/'&&next==='*'){const end=source.indexOf('*/',index+2);index=end<0?bodyLimit-1:end+1;continue;}
-      if(char==='{')depth++;
-      else if(char==='}'&&--depth===0)return source.slice(start,index+1);
-    }
-    return '';
-  };
-  const sourceStartup=(source,name,wrapper)=>{
-    if(typeof source!=='string'||!name||!/^[A-Za-z_$][\w$]*$/.test(name)||
-      typeof wrapper!=='string'||!wrapper.length)return false;
-    if(!source.includes(wrapper))return false;
-    const escaped=name.replace(/[$]/g,'\\$&');
-    const patterns=[
-      new RegExp('\\b(?:async\\s+)?function\\s+'+escaped+'\\s*\\(','g'),
-      new RegExp('\\b(?:const|let|var)\\s+'+escaped+
-        '\\s*=\\s*(?:async\\s*)?(?:\\([^)]*\\)|[A-Za-z_$][\\w$]*)\\s*=>','g'),
-    ];
-    for(const pattern of patterns){
-      pattern.lastIndex=0;
-      let match;
-      while((match=pattern.exec(source))){
-        const text=bodyText(source,match.index);
-        if(text&&startupSignals(text).strong)return true;
+  const linkedStartup=(text,resolve,lookup)=>{
+    try{
+      const acorn=loadSdk('acorn');
+      const target=startupWrapperTarget(acorn.parseExpressionAt(text,0,{ecmaVersion:'latest'}));
+      if(!target)return false;
+      if(typeof resolve==='function'){
+        const fn=resolve(target);
+        if(typeof fn==='function')return startupSignals(functionText(fn)).strong;
       }
-    }
-    return false;
-  };
-  const linkedStartup=(text,resolve,source)=>{
-    const target=wrapperTarget(text);
-    if(!target)return false;
-    if(typeof resolve==='function'){
-      try{if(startupSignals(functionText(resolve(target))).strong)return true;}catch{}
-    }
-    return sourceStartup(source,target,text);
+      return lookup(target);
+    }catch{return false;}
   };
   return {
-    ...base,errorCode:error=>errors.get(error)||base.errorCode(error),
+    ...base,errorCode:error=>{
+      const code=errors.get(error)||base.errorCode(error);
+      return code==='MEMORY_LIMIT'?'RESOURCE_LIMIT':code;
+    },
     nativeReleased(json){releaseNative(json);},
-    nativeCallback(id,json,receiverJSON,fresh){
+    nativeCallback(id,json,receiverJSON,fresh,...frames){
       const callback=guestCallbacks.get(Number(id));
-      if(!callback)return stringify({context:0,value:{$:'undefined'}});
+      if(!callback)return [stringify({context:0,value:{$:'undefined'}})];
       const context=Number(fresh)?contextSnapshot():callback.context;
-      const answer=value=>contextActive(context)
-        ?stringify({context:registerContext(context),value})
-        :stringify({context:0,value:{$:'undefined'}});
+      const answer=(value,outFrames=[])=>contextActive(context)
+        ?[stringify({context:registerContext(context),value}),...outFrames]
+        :[stringify({context:0,value:{$:'undefined'}})];
       if(!contextActive(context))
-        return stringify({context:0,value:{$:'undefined'}});
+        return answer({$:'undefined'});
       try{return runContext(context,()=>{
-        const value=Reflect.apply(callback.fn,decode(parse(receiverJSON)),decode(parse(json)));
+        const value=Reflect.apply(callback.fn,
+          decode(parse(receiverJSON),frames),decode(parse(json),frames));
         if(value&&typeof value.then==='function'){
           const receipt=++nextCallback;
           const done=(ok,value)=>{
-            if(context!==rootContext&&
-              (!contextActive(context)||asyncContexts.get(context.id)!==context))return;
-            try{rpcAt({operation:'callbackDone',id:receipt,ok,value:encode(value)},context);}
+            if(context!==rootContext&&!contextActive(context))return;
+            if(!ok)try{rawBridge('nodeCallbackError',stringify([value.code]));}catch{}
+            const outFrames=[];try{rpcAt({operation:'callbackDone',id:receipt,ok,
+              value:encode(value,new Set(),outFrames)},context,outFrames);}
             catch(error){rawBridge('nodeCallbackError',stringify([errors.get(error)||'SCRIPT_EXCEPTION']));}
           };
           Reflect.apply(then,Promise.resolve(value),[
             result=>done(true,result),
-            error=>done(false,{code:error.code||'SCRIPT_EXCEPTION'}),
+            error=>done(false,{code:callbackFailureCode(error)}),
           ]);
           return answer({$:'callbackPromise',id:receipt});
         }
-        return answer(encode(value));
+        const outFrames=[];const encoded=encode(value,new Set(),outFrames);
+        return answer(encoded,outFrames);
       },undefined,[]);
-      }catch(error){rawBridge('nodeCallbackError',stringify([errors.get(error)||'SCRIPT_EXCEPTION']));
+      }catch(error){rawBridge('nodeCallbackError',stringify([callbackFailureCode(error)]));
         return answer({$:'undefined'});}
     },
-    nativeSettled(id,json,context){const selected=Number(context)||0;
+    nativeSettled(id,json,context,...frames){const selected=Number(context)||0;
       const target=asyncContexts.get(selected)??rootContext;
       return runContext(contextActive(target)?target:rootContext,
-        finish,undefined,[id,parse(json)]);},
+        finish,undefined,[id,parse(json),frames]);},
     catDescribe(json){
       booting=false;
       const sites=parse(json);
@@ -1199,16 +1314,23 @@ export const nodeRealmSource = String.raw`
         const ranked=added.map(meta=>({...meta,...startupSignals(meta.text)}))
           .filter(meta=>meta.strong).sort((left,right)=>right.score-left.score||left.order-right.order);
         const exported=typeof value.exports==='function'?value.exports:null;
-        const namedStartup=['Ndr','hongguo','wpr'].map(name=>
-          Object.getOwnPropertyDescriptor(globalThis,name)?.value).find(fn=>{
-           if(typeof fn!=='function')return false;
-           const text=functionText(fn);
-            return startupSignals(text).strong||linkedStartup(text,value.resolve,source);
-         });
-        const explicit=[value.exports?.start,value.start,exported,namedStartup]
+        const ordered=added.filter(meta=>meta.fn!==exported).sort((left,right)=>left.order-right.order);
+        const directActions=value.exports&&['object','function'].includes(typeof value.exports)
+          ?Object.entries(Object.getOwnPropertyDescriptors(value.exports))
+            .filter(([key,descriptor])=>actionName(key)&&!blockedAction(key)&&
+              !['start','stop'].includes(key)&&own.call(descriptor,'value')&&
+              typeof descriptor.value==='function').map(([key])=>key):[];
+        const explicit=[value.exports?.start,value.start,exported]
           .find(fn=>typeof fn==='function');
         let selected=explicit?(added.find(meta=>meta.fn===explicit)||
           {fn:explicit,text:functionText(explicit),order:-1}):ranked[0];
+        // Evaluated startup evidence and direct exports do not need a bundle
+        // scan. Only otherwise-unresolved closure wrappers use the lazy index.
+        if(!selected&&!directActions.length){
+          const lookup=createLocalStartupLookup(source,loadSdk('acorn'),
+            text=>startupSignals(text).strong,startupWrapperTarget);
+          selected=ordered.find(meta=>linkedStartup(meta.text,value.resolve,lookup));
+        }
         let anchor=selected;
         const referenced=selected&&ranked.find(meta=>meta.fn!==selected.fn&&meta.fn.name&&
           selected.text.includes(meta.fn.name+'('));
@@ -1233,11 +1355,6 @@ export const nodeRealmSource = String.raw`
           }).filter(meta=>meta.score>0).sort((left,right)=>right.score-left.score||left.order-right.order)[0]?.fn;
         }
         let result;
-        const directActions=value.exports&&['object','function'].includes(typeof value.exports)
-          ?Object.entries(Object.getOwnPropertyDescriptors(value.exports))
-            .filter(([key,descriptor])=>actionName(key)&&!blockedAction(key)&&
-              !['start','stop'].includes(key)&&own.call(descriptor,'value')&&
-              typeof descriptor.value==='function').map(([key])=>key):[];
         const directActionSet=new Set(directActions);
         if(typeof start==='function')result=start({sites:{list:[]},pans:{list:[]},color:[],...(options.config||{})});
         else if(directActions.length){

@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Platform.Files;
 
 namespace MeowFilm.Capabilities.Scripting;
 
@@ -20,19 +21,9 @@ internal sealed class MusicNativeTransfers(TimeProvider clock) : IDisposable
         internal int Offset;
         internal DateTimeOffset Expires = expires;
     }
-    private sealed class StageTimer(long generation)
-    {
-        internal readonly long Generation = generation;
-        internal ITimer? Handle;
-        internal bool Active = true, Armed, Fired;
-    }
-    private sealed record TimerCallback(WeakReference<MusicNativeTransfers> Owner, StageTimer Timer);
     private readonly Dictionary<string, Stage> stages = new(StringComparer.Ordinal);
     private readonly object sync = new();
-    private readonly HashSet<StageTimer> timers = [];
-    private readonly Dictionary<StageTimer, Exception> timerFailures = [];
-    private StageTimer? timer;
-    private long timerGeneration;
+    private ITimer? timer;
     private Exception? backgroundFailure;
     private bool closed;
     private bool SweepLocked()
@@ -48,75 +39,38 @@ internal sealed class MusicNativeTransfers(TimeProvider clock) : IDisposable
     }
     private void ScheduleLocked()
     {
-        long generation = timerGeneration + 1;
-        StageTimer? next = null;
-        if (!closed && stages.Count != 0)
+        if (closed || stages.Count == 0)
         {
-            DateTimeOffset now = clock.GetUtcNow();
-            DateTimeOffset expires = stages.Values.Min(stage => stage.Expires);
-            var created = new StageTimer(generation);
-            timers.Add(created);
-            try
-            {
-                var callback = new TimerCallback(new(this), created);
-                created.Handle = clock.CreateTimer(static state =>
-                {
-                    var callback = (TimerCallback)state!;
-                    if (callback.Owner.TryGetTarget(out var owner)) owner.Expire(callback.Timer);
-                }, callback,
-                    expires > now ? expires - now : TimeSpan.Zero, Timeout.InfiniteTimeSpan);
-                created.Armed = true;
-                next = created;
-            }
-            catch
-            {
-                if (created.Handle is null) DeactivateTimerLocked(created);
-                else CancelTimerLocked(created);
-                throw;
-            }
+            ClearTimerLocked();
+            return;
         }
-        StageTimer? previous = timer;
-        timerGeneration = generation;
-        timer = next;
-        if (previous is not null && !ReferenceEquals(previous, next)) CancelTimerLocked(previous);
-        foreach (StageTimer candidate in timers.ToArray())
-            if (!ReferenceEquals(candidate, timer)) CancelTimerLocked(candidate);
-        if (next is { Fired: true } fired) Expire(fired);
+        DateTimeOffset now = clock.GetUtcNow();
+        DateTimeOffset expires = stages.Values.Min(stage => stage.Expires);
+        TimeSpan delay = expires > now ? expires - now : TimeSpan.Zero;
+        if (timer is null)
+            timer = clock.CreateTimer(static state => ((MusicNativeTransfers)state!).Expire(), this,
+                delay, Timeout.InfiniteTimeSpan);
+        else timer.Change(delay, Timeout.InfiniteTimeSpan);
     }
-    private void DeactivateTimerLocked(StageTimer value)
+    private void ClearTimerLocked()
     {
-        if (!value.Active) return;
-        value.Active = false;
-        timers.Remove(value);
-        timerFailures.Remove(value);
-        if (ReferenceEquals(timer, value)) timer = null;
-    }
-    private bool CancelTimerLocked(StageTimer value)
-    {
-        if (!value.Active) return true;
+        ITimer? current = timer;
+        timer = null;
+        if (current is null) return;
         try
         {
-            value.Handle?.Dispose();
-            DeactivateTimerLocked(value);
-            return true;
+            current.Dispose();
         }
         catch (Exception error)
         {
-            timerFailures[value] = error;
-            return false;
+            backgroundFailure ??= error;
         }
     }
-    private void Expire(StageTimer value)
+    private void Expire()
     {
         lock (sync)
         {
-            if (!value.Armed) { value.Fired = true; return; }
-            if (!value.Active) return;
-            bool current = !closed && ReferenceEquals(timer, value) &&
-                value.Generation == timerGeneration;
-            if (current) timer = null;
-            CancelTimerLocked(value);
-            if (!current) return;
+            if (closed) return;
             try
             {
                 SweepLocked();
@@ -147,12 +101,13 @@ internal sealed class MusicNativeTransfers(TimeProvider clock) : IDisposable
             SweepAndScheduleLocked(); LJ.Fields(input, "kind length sha256 basename", "kind length sha256 basename");
             string kind = LJ.Text(input["kind"]), hash = LJ.Text(input["sha256"]), basename = LJ.Text(input["basename"], 255);
             LJ.Require(kind == "script");
-            int length = (int)LJ.I(input["length"], 1, Array.MaxLength);
+            long length = LJ.I(input["length"], 1);
+            LJ.Require(length <= SelectedScriptSnapshot.MaximumBytes, "LIMIT");
             LJ.Require(hash.Length == 64 && hash.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f'));
             LJ.Require(!basename.Any(c => "\\/:*?\"<>|".Contains(c)) &&
                 basename.EndsWith(".js", StringComparison.OrdinalIgnoreCase));
             string token = Guid.NewGuid().ToString("D");
-            stages[token] = new(kind, length, hash, basename, clock.GetUtcNow().AddMinutes(5));
+            stages[token] = new(kind, (int)length, hash, basename, clock.GetUtcNow().AddMinutes(5));
             try { ScheduleLocked(); }
             catch { Release(token); throw; }
             return LJ.Obj(("token", token), ("installationId", "lx-" + token), ("chunkBytes", ChunkBytes));
@@ -227,25 +182,14 @@ internal sealed class MusicNativeTransfers(TimeProvider clock) : IDisposable
         {
             if (closed) return;
             closed = true;
-            timerGeneration++;
-            timer = null;
             Exception? failure = backgroundFailure;
-            for (int attempt = 0; attempt < 2; attempt++)
-                foreach (StageTimer value in timers.ToArray())
-                    CancelTimerLocked(value);
-            foreach (Exception error in timerFailures.Values) failure ??= error;
+            ClearTimerLocked();
+            failure ??= backgroundFailure;
             foreach (string token in stages.Keys.ToArray())
             {
                 try { Release(token); }
                 catch (Exception error) { failure ??= error; }
             }
-            foreach (StageTimer value in timers)
-            {
-                value.Active = false;
-                value.Handle = null;
-            }
-            timers.Clear();
-            timerFailures.Clear();
             backgroundFailure = null;
             if (failure is not null) throw failure;
         }

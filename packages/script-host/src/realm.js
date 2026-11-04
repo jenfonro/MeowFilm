@@ -28,11 +28,14 @@ export const realmSource = String.raw`
     return e;
   };
   const failureCode = e => trustedErrors.get(e) ||
-    (e && e.name === 'InternalError' && /out of memory|stack overflow/i.test(e.message)
-      ? 'RESOURCE_LIMIT' : 'SCRIPT_EXCEPTION');
+    (e && e.name === 'InternalError' && /out of memory|allocation failed/i.test(e.message)
+      ? 'MEMORY_LIMIT' : e && e.name === 'InternalError' && /stack overflow/i.test(e.message)
+        ? 'RESOURCE_LIMIT' : 'SCRIPT_EXCEPTION');
   function diagnose(e, id) {
     if (trustedErrors.has(e)) return;
-    try { call('diagnostic',id,describeDiagnostic(e)); } catch (_) {}
+    try {
+      call('diagnostic',id,describeDiagnostic(e),observeScriptErrors?String(e?.message??''):undefined);
+    } catch (_) {}
   }
   const call = (op, ...args) => {
     // Control arguments must not inherit a guest toJSON or use its serializer.
@@ -42,14 +45,16 @@ export const realmSource = String.raw`
     if (!response.ok) throw error({code:response.code});
     return response.value;
   };
-  const maxBytes = call('maxBytes');
+  const observeScriptErrors = call('observeScriptErrors');
   const size = n => {
-    if (!Number.isSafeInteger(n) || n < 0 || n > maxBytes) throw error({code:'RESOURCE_LIMIT'});
+    if (!Number.isSafeInteger(n) || n < 0) throw error({code:'RESOURCE_LIMIT'});
     return n;
   };
   class ScriptBuffer extends Uint8Array {
     static from(input, encoding = 'utf8', length) {
-      if (typeof input === 'string') return new ScriptBuffer(call('util', 'encode', [input, encoding]));
+      if (typeof input === 'string') {
+        return new ScriptBuffer(call('util', 'encode', [input, encoding]));
+      }
       if (input instanceof ArrayBuffer) {
         const offset = typeof encoding === 'number' ? encoding : 0;
         const count = length === undefined ? input.byteLength - offset : length;

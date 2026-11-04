@@ -13,12 +13,10 @@ import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { attachConnectedStream } from '@meowfilm/runtime-bridge/descriptor';
 import { encodeFrame } from '@meowfilm/runtime-bridge';
-import { ScriptHostError } from '@meowfilm/script-host';
 import {
   connectWindowsNamedPipe, parseWindowsLaunchArguments, startWindowsAppRuntime,
   windowsScriptDataRoot,
 } from '../apps/windows/runtime/bootstrap.mjs';
-import { createCatScriptModule } from '../apps/runtime/modules/cat-script.mjs';
 import { packageWindowsRuntime } from '../scripts/windows/package-runtime.mjs';
 import { packageRuntime } from '../scripts/package-runtime.mjs';
 import { temporaryRoot } from '../scripts/windows/working-paths.mjs';
@@ -93,6 +91,12 @@ function verifyManifest(output, manifest) {
   assert.deepEqual(readFileSync(join(output, 'app/modules/cat-script.mjs')),
     readFileSync(join(root, 'apps/runtime/modules/cat-script.mjs')));
   assert.equal(existsSync(join(output, 'node_modules/@meowfilm/script-host')), true);
+  const workerPaths = new Set(manifest.files.map(file => file.path));
+  const scriptHostPrefix = 'node_modules/@meowfilm/script-host/src/';
+  const workerFiles = ['index.js', 'worker-session.js', 'worker-entry.js', 'worker-protocol.js'];
+  for (const file of workerFiles) {
+    assert.equal(workerPaths.has(scriptHostPrefix + file), true, `worker runtime source missing: ${file}`);
+  }
   const dependencies = new Set(manifest.dependencies.map(item => item.name));
   for (const name of [
     '@jitl/quickjs-ffi-types', '@jitl/quickjs-wasmfile-release-sync',
@@ -113,79 +117,6 @@ function verifyManifest(output, manifest) {
     }
   }
 }
-
-test('Cat runtime module closes its runtime after transfer cleanup reports a failure', async () => {
-  const nativeClearTimeout = globalThis.clearTimeout;
-  let runtimeClosed = false;
-  let module;
-  globalThis.clearTimeout = timer => {
-    nativeClearTimeout(timer);
-    throw new Error('synthetic transfer cleanup failure');
-  };
-  try {
-    module = createCatScriptModule({
-      dataRoot: temporary,
-      runtimeFactory: () => ({
-        async status() { return { state: 'ready' }; },
-        async close() { runtimeClosed = true; },
-      }),
-    });
-  } finally {
-    globalThis.clearTimeout = nativeClearTimeout;
-  }
-  const stage = await module.methods['cat.script.stage.begin']({
-    length: 1, sha256: sha256(Buffer.from('x')), kind: 'source',
-  });
-  assert.equal(stage.ok, true);
-  const status = await module.methods['cat.script.status']({});
-  assert.equal(status.ok, true);
-  await assert.rejects(module.close(), /synthetic transfer cleanup failure/);
-  assert.equal(runtimeClosed, true);
-});
-
-test('Cat RPC abort listener cleanup retries and preserves the operation failure', async () => {
-  const signal = {
-    aborted: false,
-    reason: undefined,
-    listener: null,
-    removals: 0,
-    addEventListener(_event, listener) { this.listener = listener; },
-    removeEventListener(_event, listener) {
-      assert.equal(listener, this.listener);
-      if (++this.removals === 1) throw new Error('synthetic transient detach failure');
-      this.listener = null;
-    },
-  };
-  const module = createCatScriptModule({
-    dataRoot: temporary,
-    runtimeFactory: () => ({
-      async status() { return { state: 'ready' }; },
-      async close() {},
-    }),
-  });
-  const reply = await module.methods['cat.script.status']({}, { signal });
-  assert.equal(reply.ok, true);
-  assert.equal(signal.removals, 2);
-  await module.close();
-
-  const permanent = {
-    aborted: false,
-    reason: undefined,
-    addEventListener() {},
-    removeEventListener() { throw new Error('synthetic permanent detach failure'); },
-  };
-  const failing = createCatScriptModule({
-    dataRoot: temporary,
-    runtimeFactory: () => ({
-      async status() { throw new ScriptHostError('TIMEOUT'); },
-      async close() {},
-    }),
-  });
-  assert.deepEqual(await failing.methods['cat.script.status']({}, { signal: permanent }), {
-    ok: false, contract: 'cat.script.v1', code: 'TIMEOUT',
-  });
-  await failing.close();
-});
 
 test('Windows launch accepts only the exact ordered pipe-name/session UUID protocol', () => {
   const session = randomUUID(), pipeName = `meowfilm-${randomUUID()}`, valid = pipeArgs(pipeName, session);

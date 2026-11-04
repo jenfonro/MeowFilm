@@ -25,6 +25,23 @@ export const tlsOptionNames = Object.freeze(['servername', 'rejectUnauthorized',
 export const httpRequestOptionNames = Object.freeze(['protocol', 'hostname', 'host', 'port', 'path',
   'method', 'headers', 'auth', 'timeout', 'agent', 'socketPath', 'fd', 'createConnection', 'lookup',
   ...tlsOptionNames]);
+/** The one projection rule shared by the guest encoder, host bridge and HTTP
+ * service. A managed Agent owns connection creation; its per-request callback
+ * is unused metadata, never an alternate transport. */
+export function projectFields(value, fields) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  return Object.fromEntries(fields
+    .filter(key => Object.prototype.propertyIsEnumerable.call(value, key))
+    .map(key => [key, value[key]]));
+}
+export function projectHttpRequestOptions(value,
+  managedAgent = agent => agent === false) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const managed = managedAgent(value.agent);
+  return projectFields(value, managed
+    ? httpRequestOptionNames.filter(key => key !== 'createConnection')
+    : httpRequestOptionNames);
+}
 // This is an allow-list of public operations, not a traversal of a native
 // prototype. In particular no constructor, connect, createConnection, fd,
 // binding, native prototype, callback receiver or unknown native object is a
@@ -115,6 +132,15 @@ export const nativeConstructorRoles = Object.freeze({
 export const nativeSymbols = new Map([
   ['@@iterator', Symbol.iterator], ['@@asyncIterator', Symbol.asyncIterator],
 ]);
+
+/** Native stream endpoints that can cross the host-side pipe fast path.
+ * Readable roles expose pipe/read semantics; writable roles expose write/end. */
+export const pipeReadableRoles = Object.freeze(new Set([
+  'stream', 'incoming', 'socket', 'tlsSocket', 'http2Stream',
+]));
+export const pipeWritableRoles = Object.freeze(new Set([
+  'stream', 'request', 'response', 'socket', 'tlsSocket', 'http2Stream',
+]));
 
 const instanceOf = (value, constructor) =>
   typeof constructor === 'function' && value instanceof constructor;

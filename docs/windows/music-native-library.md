@@ -93,10 +93,10 @@ playback-settings
 }
 ```
 
-- 最多 32 个安装实例。
+- 不设固定安装实例数量或根文档 entries 数量上限；仍受 metadata 的 3 MiB 和根文档的 8 MiB 字节边界约束。
 - 每个 `current`／`previous` 只包含 `sourceHash`、`sourceBytes`、`version`、`permissions`。
 - `permissions` 仅含 `storage`，值为不重复的 `read`／`write` 数组。
-- metadata 总量最多 3 MiB；不设置人为整份脚本大小上限。
+- metadata 总量最多 3 MiB；单个脚本源码最多 16 MiB，与公共 ScriptHost 上限一致。
 - 源码位于受保护 collection `music.script-sources.v1`，按 1 MiB、内容 hash 和 chunk index 保存为不可变字节。发布 metadata 前必须已完整写入；读取核对每片 fingerprint、长度和整份 hash。
 - 中断或并发的相同不可变分片写入可通过读回相同字节结算；冲突或损坏明确失败。未被 metadata 引用的内容不会被静默删除或当作安装实例。
 - 禁用或删除当前播放目标时，在同一文档 CAS 中把 `online-settings.target` 置空并推进其 revision。

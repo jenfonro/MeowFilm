@@ -229,7 +229,6 @@ public sealed partial class MusicScriptOwner : IScriptPlatformCapabilities, IAsy
         if (method == "music.sources.install")
         {
             LJ.Fields(p, "token name version permissions", "token name version permissions");
-            LJ.Require(Installations.Count < 32, "LIMIT");
             string name = LJ.Text(p["name"], 255), version = LJ.Text(p["version"], 128);
             var permissions = Permissions(p["permissions"]);
             using var snapshot = transfers.Take(LJ.Text(p["token"]), "script");

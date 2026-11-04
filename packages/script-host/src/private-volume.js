@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { dirname, isAbsolute, join, relative, resolve, sep, posix } from 'node:path';
 import { identifier, requireValue } from './errors.js';
+import { closeResource } from './resource-close.js';
 
 const ignoreError = () => {};
 const volumeOwner = Symbol('private-volume-owner');
@@ -21,86 +22,21 @@ function syncDirectory(path) {
   finally { if (fd !== undefined) fs.closeSync(fd); }
 }
 function syncMetadata(path) {
-  if (fs.statSync(path).isFile()) {
-    const fd = fs.openSync(path, fs.constants.O_RDONLY);
+  const stat = fs.statSync(path);
+  // Windows FlushFileBuffers needs a writable handle; native metadata changes
+  // on read-only files must not acquire an extra write-permission requirement.
+  if (stat.isFile() && (process.platform !== 'win32' || (stat.mode & 0o222))) {
+    const fd = fs.openSync(path, process.platform === 'win32' ? 'r+' : fs.constants.O_RDONLY);
     try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   }
   syncDirectory(dirname(path));
 }
-function closingStreams(streams) {
-  let resolveAll;
-  const aggregate = {
-    remaining: streams.length,
-    promise: new Promise(resolve => { resolveAll = resolve; }),
-  };
-  if (!aggregate.remaining) resolveAll();
-  const waits = streams.map(stream => {
-    const wait = { stream, promise: null, finish: null, error: null, settled: false };
-    wait.promise = new Promise(resolve => {
-      wait.finish = () => {
-        if (wait.settled) return;
-        wait.settled = true;
-        try { stream.off('close', wait.finish); } catch (error) { wait.error ??= error; }
-        resolve();
-      };
-      let closed = false;
-      try { closed = Boolean(stream.closed); } catch (error) { wait.error ??= error; }
-      if (closed) wait.finish();
-      else {
-        try { stream.once('close', wait.finish); }
-        catch (error) { wait.error ??= error; wait.finish(); }
-      }
-    });
-    wait.promise.then(() => {
-      aggregate.remaining--;
-      if (!aggregate.remaining) resolveAll();
-    });
-    return wait;
-  });
-  return { waits, promise: aggregate.promise };
-}
-async function waitForStreams(closing, timeoutMs) {
-  if (!closing.waits.length) return true;
-  let timer;
-  const complete = await Promise.race([
-    closing.promise.then(() => true),
-    new Promise(resolve => {
-      timer = setTimeout(() => resolve(false), timeoutMs);
-    }),
-  ]);
-  clearTimeout(timer);
-  return complete;
-}
-function guardDetachedStream(stream) {
-  let failure, guardAttached = false, closeAttached = false;
-  const guard = () => {};
-  const closed = () => {
-    if (closeAttached) {
-      try { stream.off?.('close', closed); } catch {}
-      closeAttached = false;
-    }
-    if (guardAttached) {
-      try { stream.off?.('error', guard); } catch {}
-      guardAttached = false;
-    }
-  };
-  try {
-    stream.on?.('error', guard);
-    guardAttached = true;
-  } catch (error) { failure ??= error; }
-  try {
-    stream.once?.('close', closed);
-    closeAttached = true;
-  } catch (error) { failure ??= error; }
-  try { if (stream.closed) closed(); } catch (error) { failure ??= error; }
-  return failure;
-}
-
 /** Script paths are virtual POSIX paths. No host path, descriptor, link or
  * loader can be selected by guest code. The installation owns this volume,
  * independently of its source revision, generation and listening port. */
 export class PrivateVolume {
-  constructor(dataRoot, installationId, onWrite, source, currentScope, cleanupTimeoutMs = 3000) {
+  constructor(dataRoot, installationId, onWrite, source, currentScope, cleanupTimeoutMs = 3000,
+    currentResource = currentScope) {
     requireValue(typeof dataRoot === 'string' && isAbsolute(dataRoot));
     identifier(installationId);
     this.root = resolve(dataRoot, 'volumes', installationId);
@@ -118,6 +54,7 @@ export class PrivateVolume {
     this.closed = false;
     this.onWrite = onWrite;
     this.currentScope = currentScope;
+    this.currentResource = currentResource;
     this.failure = null;
     this.source = Buffer.from(source ?? '');
     this.roles = new WeakMap();
@@ -170,12 +107,23 @@ export class PrivateVolume {
   }
 
   ownerScope() {
-    try { return this.currentScope?.() ?? null; }
+    try { return this.currentScope?.() ?? this.currentResource?.() ?? null; }
     catch { return null; }
+  }
+
+  resourceScope() {
+    try { return this.currentResource?.() ?? this.ownerScope(); }
+    catch { return this.ownerScope(); }
   }
 
   written(scope = this.ownerScope()) {
     this.onWrite?.(scope);
+  }
+
+  /** A management RPC observes writes made by its request transport scope. */
+  writeScope() {
+    const scope = this.ownerScope();
+    return scope;
   }
 
   closeDescriptor(id, report = true) {
@@ -193,9 +141,10 @@ export class PrivateVolume {
       if (validFd && descriptor.dirty) {
         fs.fsyncSync(descriptor.fd);
         descriptor.dirty = false;
-        this.written(descriptor.scope);
+        this.written(descriptor.observation?.failureScope ?? descriptor.observation);
       }
     } catch (error) { failure ??= error; }
+    descriptor.observation = null;
     descriptor.scope = null;
     let closed = false;
     if (validFd) {
@@ -223,39 +172,28 @@ export class PrivateVolume {
         closeAttached: false, persistedAttached: false, errorAttached: false,
       };
       const persistedListener = () => state.persisted?.();
-      const cleanup = (forced = false) => {
+      const cleanup = () => {
         if (!state.active) return;
         const owner = state.owner;
         let failure;
-        for (let attempt = 0; attempt < 2; attempt++) {
-          if (state.closeAttached) {
-            try { stream.off('close', closed); state.closeAttached = false; }
-            catch (error) { failure ??= error; }
-          }
-          if (state.persistedAttached) {
-            try { stream.off('close', persistedListener); state.persistedAttached = false; }
-            catch (error) { failure ??= error; }
-          }
-          if (state.errorAttached) {
-            try { stream.off('error', ignoreError); state.errorAttached = false; }
-            catch (error) { failure ??= error; }
-          }
+        if (state.closeAttached) {
+          try { stream.off('close', closed); state.closeAttached = false; }
+          catch (error) { failure ??= error; }
+        }
+        if (state.persistedAttached) {
+          try { stream.off('close', persistedListener); state.persistedAttached = false; }
+          catch (error) { failure ??= error; }
+        }
+        if (state.errorAttached) {
+          try { stream.off('error', ignoreError); state.errorAttached = false; }
+          catch (error) { failure ??= error; }
         }
         const detach = state.detach;
         state.detach = null;
         try { detach?.(); } catch (error) { failure ??= error; }
         streams.delete(stream);
         cleanups.delete(stream);
-        try { delete stream[volumeOwner]; } catch (error) {
-          failure ??= error;
-          try { stream[volumeOwner] = null; } catch (next) { failure ??= next; }
-        }
-        let closedNow = false;
-        try { closedNow = Boolean(stream.closed); } catch (error) { failure ??= error; }
-        if (forced && !closedNow) {
-          const guardFailure = guardDetachedStream(stream);
-          failure ??= guardFailure;
-        }
+        try { delete stream[volumeOwner]; } catch (error) { failure ??= error; }
         state.persisted = null;
         state.owner = null;
         state.active = false;
@@ -284,9 +222,7 @@ export class PrivateVolume {
         this.failure ??= error;
         try { if (!stream.destroyed) stream.destroy(); }
         catch (failure) { this.failure ??= failure; }
-        let closedNow = false;
-        try { closedNow = Boolean(stream.closed); } catch (failure) { this.failure ??= failure; }
-        try { cleanup(!closedNow); } catch (failure) { this.failure ??= failure; }
+        try { cleanup(); } catch (failure) { this.failure ??= failure; }
         throw error;
       }
       return stream;
@@ -294,7 +230,8 @@ export class PrivateVolume {
     const acknowledge = descriptor => {
       if (!descriptor.dirty) return;
       descriptor.dirty = false;
-      this.written(descriptor.scope);
+      const observed = descriptor.observation ?? descriptor.scope;
+      this.written(observed?.failureScope ?? observed);
     };
     const withPath = (name, position = 0, missing = false) => (...args) => {
       if (isSource(args[position])) {
@@ -337,7 +274,7 @@ export class PrivateVolume {
       if (descriptor) { descriptor.dirty = true; acknowledge(descriptor); }
       else {
         if (!existed) syncDirectory(dirname(target));
-        this.written();
+        this.written(this.writeScope());
       }
     };
     api.appendFileSync = (input, data, options) =>
@@ -349,7 +286,7 @@ export class PrivateVolume {
       const created = fs.mkdirSync(path, options);
       if (!existed) {
         syncDirectory(dirname(created ?? path));
-        this.written();
+        this.written(this.writeScope());
       }
       return options?.recursive && created !== undefined
         ? '/' + relative(this.root, created).split(sep).join('/') : undefined;
@@ -371,7 +308,7 @@ export class PrivateVolume {
       const result = fs[name](path, options);
       if (existed) {
         syncDirectory(dirname(path));
-        this.written();
+        this.written(this.writeScope());
       }
       return result;
     };
@@ -380,17 +317,14 @@ export class PrivateVolume {
       const source = this.path(from), target = this.path(to, { missing: true });
       if (source === this.root || target === this.root) throw nativeError('EPERM');
       fs[name](source, target, ...args);
-      if (fs.statSync(target).isFile()) {
-        const fd = fs.openSync(target, 'r');
-        try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-      }
-      syncDirectory(dirname(source));
-      if (dirname(target) !== dirname(source)) syncDirectory(dirname(target));
-      this.written();
+      syncMetadata(target);
+      if (dirname(target) !== dirname(source)) syncDirectory(dirname(source));
+      this.written(this.writeScope());
     };
     api.openSync = (input, flags = 'r', mode) => {
       if (isSource(input)) throw nativeError('EPERM');
-      const scope = this.ownerScope();
+      const observation = this.ownerScope();
+      const scope = this.resourceScope();
       scope?.assertOpen?.();
       const target = this.path(input, { missing: true });
       const existed = fs.existsSync(target);
@@ -401,7 +335,7 @@ export class PrivateVolume {
         if (!stat.isFile() || stat.nlink !== 1) throw nativeError('EPERM');
         id = ++this.nextDescriptor;
         const descriptor = {
-          fd, dirty: mutatesOnOpen(flags, existed), scope, detach: null,
+          fd, dirty: mutatesOnOpen(flags, existed), scope, observation, detach: null,
         };
         this.descriptors.set(id, descriptor);
         registered = true;
@@ -452,7 +386,7 @@ export class PrivateVolume {
       const path = this.path(input);
       const result = fs[name](path, ...args);
       syncMetadata(path);
-      this.written();
+      this.written(this.writeScope());
       return result;
     };
     for (const name of ['createReadStream', 'createWriteStream']) api[name] = (input, options = {}) => {
@@ -460,14 +394,15 @@ export class PrivateVolume {
       if (isSource(input)) {
         if (name !== 'createReadStream') throw nativeError('EPERM');
         // A source mount has no host filename or descriptor.
-        return ownStream(new SourceReadable(this.source, settings), this.ownerScope());
+        return ownStream(new SourceReadable(this.source, settings), this.resourceScope());
       }
       const path = this.path(input, { missing: name === 'createWriteStream' });
       if (settings.fd !== undefined || settings.fs !== undefined) throw nativeError('EPERM');
       const existed = fs.existsSync(path);
       const dirtyOnOpen = name === 'createWriteStream' &&
         mutatesOnOpen(settings.flags ?? 'w', existed);
-      const scope = this.ownerScope();
+      const observation = this.ownerScope();
+      const scope = this.resourceScope();
       const stream = fs[name](path, { ...settings,
         autoClose: true, emitClose: true,
         ...(name === 'createWriteStream' ? { flush: true } : {}) });
@@ -476,7 +411,7 @@ export class PrivateVolume {
         try {
           if (stream.errored || !dirtyOnOpen && stream.bytesWritten === 0) return;
           if (!existed) syncDirectory(dirname(path));
-          this.written(scope);
+          this.written(observation?.failureScope ?? observation);
         } catch (error) { this.failure ??= error; }
       };
       return ownStream(stream, scope, name === 'createWriteStream' ? persisted : null);
@@ -567,40 +502,21 @@ export class PrivateVolume {
         try { closed = Boolean(stream.closed); } catch (error) { this.failure ??= error; }
         if (!closed) pending.push(stream);
       }
-      const closing = closingStreams(pending);
-      for (const stream of pending) {
-        try {
+      const results = await Promise.all(pending.map(stream => closeResource(stream, {
+        stop: () => {
           if (stream.writable) {
             if (!stream.writableEnded && !stream.destroyed) stream.end();
           } else if (!stream.destroyed) stream.destroy();
-        } catch (error) {
-          this.failure ??= error;
-          try { if (!stream.destroyed) stream.destroy(); }
-          catch (failure) { this.failure ??= failure; }
-        }
+        },
+        release: () => this.streamCleanup.get(stream)?.(),
+        timeoutMs: this.cleanupTimeoutMs,
+        closed: value => value.closed,
+      })));
+      for (const result of results) {
+        this.failure ??= result.error?.code === 'TIMEOUT' ? nativeError('ETIMEDOUT') : result.error;
       }
-      let complete = false;
-      try {
-        complete = await waitForStreams(closing, this.cleanupTimeoutMs);
-      }
-      catch (error) { this.failure ??= error; }
-      for (const wait of closing.waits) this.failure ??= wait.error;
-      if (!complete) {
-        this.failure ??= nativeError('ETIMEDOUT');
-        for (const stream of pending) {
-          try {
-            if (!stream.closed && !stream.destroyed) stream.destroy(this.failure);
-          } catch (error) { this.failure ??= error; }
-        }
-        try {
-          complete = await waitForStreams(closing, this.cleanupTimeoutMs);
-        } catch (error) { this.failure ??= error; }
-        for (const wait of closing.waits) this.failure ??= wait.error;
-      }
-      for (const stream of new Set([...pending, ...this.streams])) {
-        let closed = false;
-        try { closed = Boolean(stream.closed); } catch (error) { this.failure ??= error; }
-        try { this.streamCleanup.get(stream)?.(!closed); }
+      for (const stream of this.streams) {
+        try { this.streamCleanup.get(stream)?.(); }
         catch (error) { this.failure ??= error; }
       }
       this.streams.clear();
@@ -608,13 +524,11 @@ export class PrivateVolume {
       for (const id of [...this.descriptors.keys()]) {
         try { this.closeDescriptor(id, false); } catch (error) { this.failure ??= error; }
       }
-      for (const id of [...this.descriptors.keys()]) {
-        try { this.closeDescriptor(id, false); } catch (error) { this.failure ??= error; }
-      }
       try { this.source.fill(0); } catch (error) { this.failure ??= error; }
       this.source = Buffer.alloc(0);
       this.onWrite = null;
       this.currentScope = null;
+      this.currentResource = null;
       this.roles = new WeakMap();
       if (this.failure) throw this.failure;
     })();
@@ -666,4 +580,29 @@ export function atomicWrite(path, bytes) {
     catch (error) { failure ??= error; }
   }
   if (failure) throw failure;
+}
+
+/** Delete one installation volume without following links at the volume root
+ * or target. Missing roots/targets mean there is nothing to remove. */
+export function removePrivateVolume(dataRoot, installationId) {
+  requireValue(typeof dataRoot === 'string' && isAbsolute(dataRoot));
+  identifier(installationId);
+  const root = resolve(dataRoot);
+  const rootState = fs.lstatSync(root);
+  requireValue(rootState.isDirectory() && !rootState.isSymbolicLink(), 'PERMISSION_DENIED');
+  const volumes = resolve(root, 'volumes');
+  let volumesState;
+  try { volumesState = fs.lstatSync(volumes); }
+  catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+  requireValue(volumesState.isDirectory() && !volumesState.isSymbolicLink() &&
+    inside(root, fs.realpathSync(volumes)), 'PERMISSION_DENIED');
+  const target = resolve(volumes, installationId);
+  requireValue(dirname(target) === volumes, 'INVALID_ARGUMENT');
+  let targetState;
+  try { targetState = fs.lstatSync(target); }
+  catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+  requireValue(!targetState.isSymbolicLink() &&
+    inside(fs.realpathSync(volumes), fs.realpathSync(target)), 'PERMISSION_DENIED');
+  fs.rmSync(target, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  return true;
 }

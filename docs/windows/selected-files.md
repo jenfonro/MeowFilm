@@ -7,10 +7,10 @@
 | 入口 | 扩展名 | 最大字节 | 结果 |
 | --- | --- | ---: | --- |
 | `SelectedJsonSnapshot` | `.json` | 8 MiB | 原始字节、SHA-256、文件名 |
-| `SelectedScriptSnapshot` | `.js` | 无应用固定上限 | 原始字节、SHA-256、文件名 |
+| `SelectedScriptSnapshot` | `.js` | 16 MiB | 原始字节、SHA-256、文件名 |
 | `SelectedLyricSnapshot` | `.lrc`、`.qrc`、`.yrc`、`.txt` | 256 KiB | 严格解码文本、SHA-256、文件名 |
 
-JSON 与脚本入口只创建字节快照；脚本快照仍受 `.NET byte[]`、`Array.MaxLength` 和实际可用内存限制，但不把历史 512 KiB 门槛当成兼容条件。脚本 owner 随后执行严格无 BOM UTF-8、源码字节完整性和安装事务校验，不提取域名授权名单或按源码哈希补网络 origin。歌词接受 UTF-8，或带 BOM 的 UTF-8／UTF-16；最多 65536 个字符并拒绝非法控制字符。
+JSON 与脚本入口只创建字节快照；脚本快照与公共 ScriptHost 使用同一个 16 MiB 单脚本源码上限，读取和后续原生导入入口均提前拒绝超限输入，不把历史 512 KiB 门槛当成兼容条件。脚本 owner 随后执行严格无 BOM UTF-8、源码字节完整性和安装事务校验，不提取域名授权名单或按源码哈希补网络 origin。歌词接受 UTF-8，或带 BOM 的 UTF-8／UTF-16；最多 65536 个字符并拒绝非法控制字符。
 
 ## 路径与文件边界
 

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { fault, requireValue } from './errors.js';
+import { SCRIPT_LIMITS } from './host.js';
 
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 /** A frame bound is not a source bound. Staging retains received chunks rather
@@ -9,74 +10,32 @@ export class SourceTransfers {
     setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
     this.clock = clock; this.ttl = ttl; this.setTimer = setTimer; this.clearTimer = clearTimer;
     this.entries = new Map(); this.closed = false; this.chunkBytes = 64 * 1024;
-    this.timerGeneration = 0; this.failure = null;
-    this.timers = new Set(); this.timerFailures = new Map();
-  }
-  deactivateTimer(record) {
-    if (!record?.active) return;
-    record.active = false;
-    this.timers.delete(record);
-    this.timerFailures.delete(record);
-    if (this.timer === record) this.timer = undefined;
-  }
-  cancelTimer(record) {
-    if (!record?.active) return true;
-    try {
-      this.clearTimer(record.handle);
-      this.deactivateTimer(record);
-      return true;
-    } catch (error) {
-      this.timerFailures.set(record, error);
-      return false;
-    }
-  }
-  createTimer(generation, delay) {
-    const record = {
-      generation, handle: undefined, active: true, armed: false, fired: false,
-    };
-    const ownerRef = new WeakRef(this);
-    const fire = () => {
-      if (!record.armed) { record.fired = true; return; }
-      if (!record.active) return;
-      const owner = ownerRef.deref();
-      if (!owner) { record.active = false; return; }
-      owner.deactivateTimer(record);
-      if (generation !== owner.timerGeneration || owner.closed) return;
-      try { owner.sweep(); }
-      catch (error) {
-        owner.failure ??= error;
-        for (const token of [...owner.entries.keys()]) {
-          try { owner.release(token, false); }
-          catch (cleanupError) { owner.failure ??= cleanupError; }
-        }
-      }
-    };
-    this.timers.add(record);
-    try {
-      record.handle = this.setTimer(fire, delay);
-      record.armed = true;
-    } catch (error) {
-      this.deactivateTimer(record);
-      throw error;
-    }
-    try { record.handle?.unref?.(); } catch { /* The tracked timer still owns expiry. */ }
-    if (record.fired) queueMicrotask(fire);
-    return record;
+    this.timer = undefined; this.failure = null;
   }
   schedule() {
-    const generation = this.timerGeneration + 1;
-    let next;
-    if (!this.closed && this.entries.size) {
-      let expires = Infinity;
-      for (const entry of this.entries.values()) expires = Math.min(expires, entry.expires);
-      next = this.createTimer(generation, Math.max(1, expires - this.clock()));
-    }
     const previous = this.timer;
-    this.timerGeneration = generation;
-    this.timer = next;
-    if (previous && previous !== next) this.cancelTimer(previous);
-    for (const record of [...this.timers])
-      if (record !== this.timer) this.cancelTimer(record);
+    this.timer = undefined;
+    if (previous !== undefined) {
+      try { this.clearTimer(previous); }
+      catch (error) { this.failure ??= error; }
+    }
+    if (this.closed || !this.entries.size) return;
+    let expires = Infinity;
+    for (const entry of this.entries.values()) expires = Math.min(expires, entry.expires);
+    const handle = this.setTimer(() => this.expire(), Math.max(1, expires - this.clock()));
+    this.timer = handle;
+    try { handle?.unref?.(); } catch { /* The tracked timer still owns expiry. */ }
+  }
+  expire() {
+    if (this.closed) return;
+    try { this.sweep(); }
+    catch (error) {
+      this.failure ??= error;
+      for (const token of [...this.entries.keys()]) {
+        try { this.release(token, false); }
+        catch (cleanupError) { this.failure ??= cleanupError; }
+      }
+    }
   }
   sweep() {
     requireValue(!this.closed, 'HOST_CLOSED');
@@ -89,6 +48,7 @@ export class SourceTransfers {
     this.sweep();
     requireValue(Number.isSafeInteger(length) && length > 0 &&
       /^[a-f0-9]{64}$/.test(sha256) && ['source', 'json'].includes(kind));
+    requireValue(kind !== 'source' || length <= SCRIPT_LIMITS.maxSourceBytes, 'RESOURCE_LIMIT');
     const token = randomUUID();
     this.entries.set(token, { kind, length, sha256, offset: 0, chunks: [], expires: this.clock() + this.ttl });
     try { this.schedule(); }
@@ -164,22 +124,19 @@ export class SourceTransfers {
     if (reschedule) this.schedule();
   }
   close() {
+    if (this.closed) return;
     this.closed = true;
-    this.timerGeneration++;
     let failure = this.failure;
+    const previous = this.timer;
     this.timer = undefined;
-    for (const record of [...this.timers]) this.cancelTimer(record);
-    for (const record of [...this.timers]) this.cancelTimer(record);
-    for (const error of this.timerFailures.values()) failure ??= error;
+    if (previous !== undefined) {
+      try { this.clearTimer(previous); }
+      catch (error) { failure ??= error; }
+    }
+    failure ??= this.failure;
     for (const token of [...this.entries.keys()]) {
       try { this.release(token, false); } catch (error) { failure ??= error; }
     }
-    for (const record of this.timers) {
-      record.active = false;
-      record.handle = undefined;
-    }
-    this.timers.clear();
-    this.timerFailures.clear();
     this.failure = null;
     if (failure) throw failure;
   }

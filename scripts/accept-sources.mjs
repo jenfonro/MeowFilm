@@ -3,7 +3,7 @@ import { readFile, readdir, stat, mkdir, mkdtemp, writeFile, rename, realpath, r
 import { registerHooks } from 'node:module';
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { classifySourceFailure } from './source-acceptance-diagnostics.mjs';
+import { classifySourceFailure, sourceDiagnosticObservers } from './source-acceptance-diagnostics.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const defaultOutput = join(root, 'tmp/test-results/script-sources/acceptance.json');
@@ -259,7 +259,7 @@ async function acceptLx(file, index) {
   const network = createNodeNetwork();
   const module = createMusicScriptModule({
     call: async () => ({ ok: false, code: 'PERMISSION_DENIED' }),
-    hostFactory: input => createScriptHost({ ...input, onDiagnostic: event => diagnostics.push(event) }),
+    hostFactory: input => createScriptHost({ ...input, ...sourceDiagnosticObservers(diagnostics) }),
     network: async input => {
       const event = { requestId: input.scope.requestId, siteId: input.scope.siteId,
         mode: options.live ? 'live' : 'blocked', finished: false };
@@ -419,7 +419,7 @@ async function acceptCat(file, index) {
     module = createCatScriptModule({
       dataRoot,
       runtimeFactory: input => createCatRuntime({ ...input, onNetwork: observeNetwork,
-        onDiagnostic: event => diagnostics.push(event) }),
+        ...sourceDiagnosticObservers(diagnostics) }),
     });
     const rpc = (name, params = {}) => module.methods[`cat.script.${name}`](params);
     const bytes = await readFile(join(directory, file));
@@ -520,6 +520,10 @@ async function acceptCat(file, index) {
   } catch (error) {
     row.initialization ??= 'failed';
     row.code = error.code ?? 'HOST_ERROR';
+    if (row.initialization === 'failed') row.initializationFailure = classifySourceFailure('cat',
+      { code: row.code }, audit.slice(0, initializationAuditEnd ?? audit.length)
+        .map(event => ({ ...event, scope: 'startup' })),
+      diagnostics.slice(0, initializationDiagnosticsEnd ?? diagnostics.length));
   } finally {
     try {
       await module?.close();

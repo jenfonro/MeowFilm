@@ -37,7 +37,7 @@ Windows 上运行 Python 脚本时将 `python3` 换为 `python -X utf8`。iOS �
 
 ## 脚本运行时
 
-原始 LX 音源与 Cat 脚本共用一套 script-host／QuickJS WebAssembly 核心，当前模块为 `music@0.6.0`／`music.script.v2` 和 `cat@0.1.0`／`cat.script.v1`。Windows 只保留按需启动、命名管道、持久数据根和平台打包；官方原生业务无脚本操作时不启动 Node。LX 特权存储使用请求第二参数 `context.storage`；Cat 只获得安装实例私有卷、有限 Node 风格能力和受控回环服务，不获得宿主任意 `require`、文件、进程或私网访问。见 [公共运行时](docs/runtime/script-runtime.md)。
+原始 LX 音源与 Cat 脚本共用一套 script-host／QuickJS WebAssembly 核心，当前模块为 `music@0.6.0`／`music.script.v2` 和 `cat@0.1.0`／`cat.script.v1`。Windows 只保留按需启动、命名管道、持久数据根和平台打包；官方原生业务无脚本操作时不启动 Node。LX 特权存储使用请求第二参数 `context.storage`；Cat 只获得安装实例私有卷和有限 Node 风格能力，不获得宿主任意 `require`、文件或进程访问。Cat 网络不按公网、私网、回环或局域网域名分类拒绝目标。见 [公共运行时](docs/runtime/script-runtime.md)。
 
 外部 LX/Cat 脚本验收使用 [实际声明动作与联网报告](docs/runtime/source-acceptance.md)，不会修改或把用户脚本打包进应用。
 

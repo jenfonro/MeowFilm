@@ -26,10 +26,12 @@ public sealed class SelectedScriptSnapshotException : Exception
 /// </summary>
 public static class SelectedScriptSnapshot
 {
+    public const int MaximumBytes = 16 * 1024 * 1024;
+
     /// <summary>
-    /// Same local-only safety and lifecycle policy as SelectedJsonSnapshot, without an
-    /// application source-size gate. The owned byte[] remains subject to .NET allocation
-    /// and available memory. Empty/invalid bytes are preserved, not marked valid LX.
+    /// Same local-only safety and lifecycle policy as SelectedJsonSnapshot, with the same
+    /// 16 MiB single-script source bound as ScriptHost. Empty/invalid bytes are preserved,
+    /// not marked valid LX.
     /// Cancellation is cooperative between bounded OS calls; no partial snapshot escapes.
     /// </summary>
     public static async Task<SelectedScriptSnapshotData> ReadAsync(string selectedPath,
@@ -37,7 +39,7 @@ public static class SelectedScriptSnapshot
     {
         try
         {
-            var data = await SelectedFileSnapshot.ReadAsync(selectedPath, ".js", Array.MaxLength, cancellationToken)
+            var data = await SelectedFileSnapshot.ReadAsync(selectedPath, ".js", MaximumBytes, cancellationToken)
                 .ConfigureAwait(false);
             return new SelectedScriptSnapshotData(data.Bytes, data.Sha256, data.Basename);
         }

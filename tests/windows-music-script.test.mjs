@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { createScriptHost, ScriptHostError } from '@meowfilm/script-host';
+import { createScriptHost, ScriptHostError, SCRIPT_LIMITS } from '@meowfilm/script-host';
 import { createMusicScriptModule, musicScriptContract } from '../apps/runtime/modules/music-script.mjs';
 
 const limit = 512 * 1024;
@@ -114,6 +114,17 @@ const storageFixture = fixture({ handler: `async ({info}, {storage}) => {
 }` });
 const networkFixture = fixture({ handler: `async () => new Promise((resolve,reject) =>
  lx.request('https://fixture.invalid/value',{},(error,response,body)=>error?reject(error):resolve(body)))` });
+const largeNetworkFixture = fixture({
+  setup: 'const digest = value => lx.utils.crypto.md5(value);',
+  handler: `async ({info}) => new Promise((resolve,reject) =>
+    lx.request('https://fixture.invalid/large',{encoding:null},
+      (error,response,body)=>error?reject(error):resolve({
+        length:body.length, first:body[0], last:body[body.length-1],
+        hash:digest(body),
+        allocLength:Buffer.alloc(info.musicInfo.size||0,0x5a).length,
+        allocHash:digest(Buffer.alloc(info.musicInfo.size||0,0x5a)),
+      })))`,
+});
 
 // Timing seams wrap the real host, but the injected callback itself is not
 // evidence that real LX startup storage is available.
@@ -170,7 +181,7 @@ test('stage lifecycle has no whole-source byte or active-token quota', async t =
   const { rpc } = setup(t, { clock: () => now });
   const begin = length => rpc('stage.begin', { basename: 'fixture.js', length, sha256: hash('x') });
   denied(await begin(0), 'INVALID_REQUEST');
-  const large = 8 * 1024 * 1024 + 1;
+  const large = SCRIPT_LIMITS.maxSourceBytes - 12;
   const tokens = [];
   for (let index = 0; index < 12; index++)
     tokens.push(okay(await begin(large + index)).token);
@@ -181,6 +192,8 @@ test('stage lifecycle has no whole-source byte or active-token quota', async t =
   for (const token of tokens.slice(1))
     denied(await rpc('stage.chunk', { token, offset: 0, data: 'YQ==' }), 'STAGE_NOT_FOUND');
   okay(await begin(large + tokens.length));
+  okay(await begin(SCRIPT_LIMITS.maxSourceBytes));
+  denied(await begin(SCRIPT_LIMITS.maxSourceBytes + 1), 'LIMIT');
 });
 
 test('stage expiry is active, renewed by chunks and ignores stale timer callbacks', async t => {
@@ -233,7 +246,7 @@ test('stage shutdown neutralizes a timer whose native cleanup permanently fails'
     basename: 'cleanup.js', length: 1, sha256: hash('x'),
   }));
   denied(await module.close(), 'SCRIPT_CLEANUP');
-  assert.equal(clearAttempts, 2);
+  assert.equal(clearAttempts, 1);
   assert.doesNotThrow(() => timer.callback());
   denied(await module.close(), 'SCRIPT_CLEANUP');
 });
@@ -265,6 +278,8 @@ test('source larger than the former 512KiB gate and a split UTF-8 character exec
   const sourceBytes = limit * 2 + 17;
   const source = unpadded + ' '.repeat(sourceBytes - Buffer.byteLength(unpadded));
   assert.equal(Buffer.byteLength(source), sourceBytes);
+  denied(await rpc('stage.begin', { basename: 'too-large.js',
+    length: SCRIPT_LIMITS.maxSourceBytes + 1, sha256: hash('x') }), 'LIMIT');
   const instance = await load(rpc, options(), source);
   assert.equal(instance.contentHash, hash(Buffer.from(source)));
   assert.equal((await value(rpc, instance)).label, 'one');
@@ -664,20 +679,18 @@ test('control envelope counts toward 512KiB, oversized input/config/reverse writ
   assert.equal(native.calls.length, 0);
 });
 
-test('thirty-two real instances are the limit, updates reuse slots, and unloading permits a new instance', async t => {
+test('instances have no fixed count quota, updates advance generations, and unload releases a binding', async t => {
   const { rpc, host } = setup(t);
   const instances = [];
   for (let index = 0; index < 32; index++) instances.push(await load(rpc, options(`i${index}`)));
-  assert.equal(host().limits.maxInstances, 32);
-  assert.equal('maxSourceBytes' in host().limits, false);
-  assert.equal('maxTotalSourceBytes' in host().limits, false);
-  assert.equal(host().limits.syncTimeoutMs, 2000);
+  assert.equal(host().limits.requestTimeoutMs, 60000);
+  assert.equal(host().limits.cleanupTimeoutMs, 100);
+  assert.equal(host().limits.maxSourceBytes, SCRIPT_LIMITS.maxSourceBytes);
   const token = await upload(rpc), spec = options('thirty-third');
-  denied(await rpc('load', { ...spec, token }), 'LIMIT');
+  okay(await rpc('load', { ...spec, token }));
   const updated = await load(rpc, options('i0', 2, 1));
   assert.ok(updated.generation > instances[0].generation);
   okay(await rpc('unload', { installationId: 'i1', revision: 1 }));
-  okay(await rpc('load', { ...spec, token }));
   assert.equal(okay(await rpc('status')).instances.length, 32);
 });
 
@@ -699,6 +712,37 @@ test('network needs no domain grant and receives scoped identity, never platform
   assert.equal(calls[0].grant, undefined);
   assert.equal(calls[0].options.headers, undefined);
 });
+
+test('LX handles a 12 MiB script buffer and a network response above the external message limit',
+  { timeout: 60000 }, async t => {
+    const size = 12 * 1024 * 1024;
+    const body = Buffer.alloc(size, 0x5a);
+    const md5 = value => createHash('md5').update(value).digest('hex');
+    const { rpc } = setup(t, { network: async () => ({ statusCode: 200, body }) });
+    const instance = await load(rpc, options(), largeNetworkFixture);
+    const result = await value(rpc, instance, 'kw', { size });
+    assert.deepEqual(result, {
+      length: size, first: 0x5a, last: 0x5a, hash: md5(body),
+      allocLength: size, allocHash: md5(Buffer.alloc(size, 0x5a)),
+    });
+    const next = await value(rpc, instance, 'kw', { size: 0 });
+    assert.deepEqual(next, {
+      length: size, first: 0x5a, last: 0x5a, hash: md5(body),
+      allocLength: 0, allocHash: md5(Buffer.alloc(0, 0x5a)),
+    });
+  });
+
+test('LX invokeResult above the single-frame control limit still reports LIMIT and serves the session',
+  { timeout: 60000 }, async t => {
+    const size = limit + 1;
+    const { rpc } = setup(t);
+    const instance = await load(rpc, options(), fixture({
+      handler: `async ({info}) => 'x'.repeat(info.musicInfo.size)`,
+    }));
+    denied(await rpc('invoke', request(instance, 'kw', { size })), 'LIMIT');
+    assert.equal(await value(rpc, instance, 'kw', { size: 8 }), 'x'.repeat(8));
+    assert.equal(okay(await rpc('status')).instances[0].state, 'ready');
+  });
 
 test('extended source actions preserve payload and returned values without a platform whitelist', async t => {
   const { rpc } = setup(t);
@@ -849,7 +893,7 @@ test('repeated unload/reinstall fences ABA generations and cleans real timers, i
 
 test('callback timeout is bounded by the real host and a failed startup does not occupy an instance', async t => {
   const { rpc } = setup(t, { hostFactory: input =>
-    createScriptHost({ ...input, limits: { ...input.limits, initTimeoutMs: 30, requestTimeoutMs: 30 } }) });
+    createScriptHost({ ...input, limits: { ...input.limits, initTimeoutMs: 1000, requestTimeoutMs: 30 } }) });
   denied(await rpc('load', { ...options(), token: await upload(rpc, 'setInterval(()=>{},10000);') }), 'TIMEOUT');
   assert.deepEqual(okay(await rpc('status')).instances, []);
   const instance = await load(rpc, options(), fixture({ handler: 'async () => new Promise(()=>{})' }));

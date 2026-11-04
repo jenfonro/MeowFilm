@@ -1,8 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, createCipheriv, publicEncrypt, generateKeyPairSync, constants } from 'node:crypto';
-import { createScriptHost } from '../src/index.js';
+import { createScriptHost, SCRIPT_LIMITS } from '../src/index.js';
 import { lxScript, target, deferred, turn, memoryStorage } from './fixtures.js';
+
+async function waitFor(predicate, message, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (predicate()) return;
+    if (Date.now() >= deadline) throw new Error(message);
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+}
 
 function hostFor(t, options) {
   const host = createScriptHost(options);
@@ -26,6 +35,30 @@ test('host validates options and storage permissions', async t => {
     permissions: {}, enabled: true });
   assert.equal(value.state, 'ready');
   assert.equal((await host.invoke(target())).action, 'musicUrl');
+});
+
+test('host applies shared script limits and protocol-specific timeout defaults', async t => {
+  const host = hostFor(t);
+  assert.equal(host.limits.maxSourceBytes, 16 * 1024 * 1024);
+  assert.equal(host.limits.maxMemoryBytes, SCRIPT_LIMITS.maxMemoryBytes);
+  assert.equal(host.limits.maxStackBytes, 256 * 1024);
+  assert.equal(host.limits.initTimeoutMs, 5000);
+  assert.equal(host.limits.requestTimeoutMs, 60000);
+  assert.equal(host.limits.cleanupTimeoutMs, 100);
+});
+
+test('install and update reject sources over the shared 16 MiB UTF-8 boundary', async t => {
+  const host = hostFor(t);
+  const exact = 'x'.repeat(SCRIPT_LIMITS.maxSourceBytes);
+  const installed = await host.install({ installationId: 'boundary', source: exact });
+  assert.equal(installed.contentHash, createHash('sha256').update(exact).digest('hex'));
+  assert.throws(() => host.install({ installationId: 'too-large',
+    source: 'x'.repeat(SCRIPT_LIMITS.maxSourceBytes + 1) }), { code: 'RESOURCE_LIMIT' });
+  assert.throws(() => host.get('too-large'), { code: 'NOT_FOUND' });
+  await assert.rejects(host.update('boundary', {
+    source: 'x'.repeat(SCRIPT_LIMITS.maxSourceBytes + 1),
+  }), { code: 'RESOURCE_LIMIT' });
+  assert.equal(host.get('boundary').contentHash, installed.contentHash);
 });
 
 test('import is inert; enable is explicit; SDK payload and metadata stay exact', async t => {
@@ -114,23 +147,59 @@ for (const [name, source, code] of [
   ['synchronous runaway init', "while (true) {}", 'TIMEOUT'],
 ]) {
   test(`initialization rejects ${name}, leaves no resources and retains import`, async t => {
-    const host = hostFor(t, { limits: { initTimeoutMs: 50, syncTimeoutMs: 20 } });
+    const host = hostFor(t, { limits: { initTimeoutMs: 1000, cleanupTimeoutMs: 20 } });
     await assert.rejects(host.install({ installationId: 'a', source, enabled: true }), { code });
-    assert.equal(host.get('a').enabled, false);
+    if (code === 'TIMEOUT') {
+      assert.equal(host.get('a').enabled, true);
+      assert.equal(host.get('a').state, 'failed');
+    } else assert.equal(host.get('a').enabled, false);
     assert.equal(host.get('a').lastFailure, code);
     assert.equal(host.stats().liveSessions, 0);
     assert.equal(host.stats().timers, 0);
   });
 }
 
-test('a synchronous handler timeout does not grant a false success', async t => {
-  const host = hostFor(t, { limits: { syncTimeoutMs: 20 } });
-  await host.install({ installationId: 'a', enabled: true, source: lxScript({ handler: 'async () => { while (true) {} }' }) });
-  await assert.rejects(host.invoke(target()), { code: 'TIMEOUT' });
+test('an unresponsive synchronous handler times out, fails its worker and can be re-enabled', async t => {
+  const diagnostics = [];
+  const host = createScriptHost({ limits: { cleanupTimeoutMs: 20, requestTimeoutMs: 60000 },
+    onDiagnostic: event => diagnostics.push(event) });
+  t.after(async () => {
+    await host.close();
+    assert.equal(host.stats().liveSessions, 0);
+    assert.equal(host.stats().timers, 0);
+    assert.equal(host.stats().networkRequests, 0);
+  });
+  await host.install({ installationId: 'a', enabled: true, source: lxScript({
+    handler: `async ({info}) => {
+      if (info.musicInfo.stuck) {
+        lx.send('updateAlert', { log: 'loop-entered' });
+        while (true) {}
+      }
+      return { action: 'musicUrl' };
+    }`,
+  }) });
+  const timedOut = assert.rejects(host.invoke(target('a', 'kw', { stuck: true }),
+    { timeoutMs: 20 }), { code: 'TIMEOUT' });
+  await waitFor(() => host.get('a').updateAlert?.log === 'loop-entered',
+    'the synchronous handler did not enter its loop');
+  await timedOut;
+  await waitFor(() => host.get('a').state === 'failed',
+    'an unresponsive worker was not marked failed');
+  assert.equal(host.get('a').lastFailure, 'TIMEOUT');
+  await waitFor(() => diagnostics.some(event =>
+    event.installationId === 'a' && event.operation === 'worker.unresponsive' &&
+    event.code === 'TIMEOUT' && event.phase === 'running'),
+  'missing running worker.unresponsive diagnostic');
+  const failure = host.get('a');
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(host.get('a').state, 'failed');
+  assert.equal(host.get('a').generation, failure.generation);
   assert.equal(host.stats().activeRequests, 0);
+  assert.equal((await host.enable('a')).state, 'ready');
+  assert.equal((await host.invoke(target())).action, 'musicUrl');
 });
 
-test('timer ownership clears request timers and intervals on cancel, timeout, and success', async t => {
+test('timer ownership keeps script timers after request cancellation and timeout', async t => {
   const host = hostFor(t);
   await host.install({ installationId: 'a', enabled: true, source: lxScript({
     setup: 'let fired = 0;',
@@ -144,15 +213,23 @@ test('timer ownership clears request timers and intervals on cancel, timeout, an
   const controller = new AbortController();
   const pending = host.invoke(target(), { signal: controller.signal });
   const rejected = assert.rejects(pending, { code: 'CANCELLED' });
-  assert.equal(host.stats().timers, 2);
+  await waitFor(() => host.stats().timers === 2,
+    'the stub live callback timers did not reach the host snapshot');
   controller.abort();
   await rejected;
-  assert.equal(host.stats().timers, 0);
+  // Cancellation ends the request wait and transport, not script-owned work.
+  await waitFor(() => host.stats().timers === 2,
+    'cancellation retired script-owned timers or the snapshot did not update');
   assert.equal(await host.invoke(target('a', 'kw', { probe: true })), 0);
   await assert.rejects(host.invoke(target(), { timeoutMs: 20 }), { code: 'TIMEOUT' });
-  assert.equal(host.stats().timers, 0);
+  // The timed-out invocation and its timer stay script-owned.
+  await waitFor(() => host.stats().timers === 4,
+    'timeout did not retain its script-owned timer in the host snapshot');
   assert.equal(await host.invoke(target('a', 'kw', { done: true })), 'done');
-  assert.equal(host.stats().timers, 0);
+  // The done turn adds its own interval and returns without clearing any
+  // script-owned timers; cancellation and timeout did not retire prior ones.
+  await waitFor(() => host.stats().timers === 5,
+    'completed turn did not expose all script-owned timers');
 });
 
 test('injected network accepts dynamically constructed origins without an origin grant', async t => {
@@ -181,7 +258,7 @@ test('non-HTTP input is rejected before injected network access', async t => {
   assert.equal(calls, 0);
 });
 
-test('cancel propagates AbortSignal; late network completion cannot call old callbacks', async t => {
+test('request cancellation keeps session-owned network work; late completion cannot call old callbacks', async t => {
   const started = deferred(), response = deferred();
   let outbound;
   const host = hostFor(t, { network: request => { outbound = request; started.resolve(); return response.promise; } });
@@ -198,11 +275,17 @@ test('cancel propagates AbortSignal; late network completion cannot call old cal
   await started.promise;
   controller.abort();
   await rejected;
-  assert.equal(outbound.signal.aborted, true);
-  assert.equal(host.stats().networkRequests, 0);
+  // Request cancellation terminates the transport, while the session-owned
+  // network task keeps its own lifetime until the adapter settles.
+  assert.equal(outbound.signal.aborted, false);
+  await waitFor(() => host.stats().networkRequests === 1,
+    'the live network request did not reach the worker snapshot');
+  assert.equal(host.stats().networkRequests, 1);
   response.resolve({ statusCode: 200, body: 'too late' });
   await turn();
-  assert.equal(await host.invoke(target('a', 'kw', { probe: true })), 0);
+  // The late response may settle the session-owned callback, but the cancelled
+  // request's result must not become a successful invocation.
+  assert.equal(await host.invoke(target('a', 'kw', { probe: true })), 1);
 });
 
 test('LX abort closure is idempotent and invokes one AbortError callback', async t => {
@@ -378,8 +461,9 @@ test('closing during pending initialization aborts startup and cannot publish a 
     source: `lx.request('https://fixture.invalid/init',{},()=>{});` });
   const rejected = assert.rejects(installing, { code: 'STALE_SESSION' });
   await started.promise;
-  await host.close();
+  const closed = await host.close();
   await rejected;
+  assert.equal(closed.pendingAdapterTasks, 1);
   assert.equal(host.stats().liveSessions, 0);
   assert.throws(() => host.enable('a'), { code: 'HOST_CLOSED' });
 });
@@ -418,12 +502,12 @@ test('uncooperative adapter tasks stay visible after bounded close, then retire 
   assert.deepEqual(await host.close(), closed);
 });
 
-test('timer isolation and request-owned network cleanup remain independent', async t => {
-  const host = hostFor(t, { limits: { maxTimers: 1 } });
+test('timer/network handles have no fixed quota and release request-owned handles', async t => {
+  const host = hostFor(t);
   await host.install({ installationId: 'a', enabled: true, source: lxScript({
     handler: `async ({info}) => {
       if(info.musicInfo.timer) {
-        setInterval(()=>{},10000);setInterval(()=>{},10000);
+        const first=setInterval(()=>{},10000);setInterval(()=>{},10000);clearInterval(first);
       } else {
         lx.request('https://fixture.invalid/1',{},()=>{});
         lx.request('https://fixture.invalid/2',{},()=>{});
@@ -431,10 +515,15 @@ test('timer isolation and request-owned network cleanup remain independent', asy
       }
     }`,
   }) });
-  await assert.rejects(host.invoke(target('a', 'kw', { timer: true })), { code: 'RESOURCE_LIMIT' });
-  assert.equal(host.stats().timers, 0);
-  assert.equal(await host.invoke(target()), 'queued');
-  assert.equal(host.stats().networkRequests, 0);
+  await host.invoke(target('a', 'kw', { timer: true }));
+  await waitFor(() => host.stats().timers === 1,
+    'script timer did not reach the host stats snapshot');
+  await host.invoke(target());
+  await waitFor(() => host.stats().networkRequests === 0,
+    'immediate aborts left request-owned network work visible');
+  await host.disable('a');
+  await waitFor(() => host.stats().timers === 0,
+    'disable did not retire the script timer');
 });
 
 test('simultaneous storage calls keep their original site after awaits', async t => {

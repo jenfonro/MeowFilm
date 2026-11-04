@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using MeowFilm.Platform.Files;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Library;
@@ -14,16 +15,17 @@ public sealed partial class MusicLibraryOwner
         $"{ScriptContentCollection}.{hash}.{chunk.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
     private static void ContentIdentity(string hash, int length) =>
         LJ.Require(hash.Length == 64 && hash.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f') &&
-            length > 0 && length <= Array.MaxLength,
+            length > 0 && length <= SelectedScriptSnapshot.MaximumBytes,
             "CORRUPT_STORAGE");
 
     /// <summary>Durable, immutable protected chunks. Only metadata publication
     /// selects a source. Orphaned content is never silently deleted or treated
-    /// as an installation. No whole-library/source-string size gate applies.</summary>
+    /// as an installation. The single-script source bound applies.</summary>
     public async Task<MusicScriptContent> StoreScriptContentAsync(ReadOnlyMemory<byte> source,
         CancellationToken cancellationToken = default)
     {
         LJ.Require(source.Length > 0, "SCRIPT_ENCODING");
+        LJ.Require(source.Length <= SelectedScriptSnapshot.MaximumBytes, "LIMIT");
         byte[] owned = source.ToArray();
         try
         {

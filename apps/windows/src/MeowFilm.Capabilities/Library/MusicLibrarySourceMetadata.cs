@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using MeowFilm.Platform.Files;
 
 namespace MeowFilm.Capabilities.Library;
 
@@ -26,7 +27,7 @@ public sealed partial class MusicLibraryOwner
     {
         LJ.Fields(state, "schema revision installations", "schema revision installations");
         LJ.Require(LJ.I(state["schema"]) == 4, "CORRUPT_STORAGE"); _ = Revision(state);
-        var installations = LJ.Array(state["installations"]); LJ.Require(installations.Count <= 32, "LIMIT");
+        var installations = LJ.Array(state["installations"]);
         var ids = new HashSet<string>();
         foreach (var n in installations)
         {
@@ -35,7 +36,8 @@ public sealed partial class MusicLibraryOwner
             void Check(JsonNode? n)
             {
                 var r = LJ.Object(n); LJ.Fields(r, "sourceHash sourceBytes version permissions", "sourceHash sourceBytes version permissions");
-                ContentIdentity(LJ.S(r["sourceHash"]), (int)LJ.I(r["sourceBytes"], 1, Array.MaxLength));
+                ContentIdentity(LJ.S(r["sourceHash"]),
+                    (int)LJ.I(r["sourceBytes"], 1, SelectedScriptSnapshot.MaximumBytes));
                 _ = LJ.Text(r["version"], 128);
                 var permissions = LJ.Object(r["permissions"]);
                 LJ.Fields(permissions, "storage", "storage");

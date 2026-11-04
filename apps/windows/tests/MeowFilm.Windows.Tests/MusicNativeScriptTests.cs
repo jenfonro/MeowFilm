@@ -2,10 +2,12 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Reflection;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Scripting;
+using MeowFilm.Platform.Files;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -16,9 +18,9 @@ public static class MusicNativeScriptTests
     {
         yield return new("Native LX: ordinary source and settings workflows never call Node", Ordinary);
         yield return new("Native LX: bounded snapshot rejects altered chunks and content hash", Transfer);
-        yield return new("Native LX: abandoned transfers actively expire and stale timers cannot retire renewed stages", TransferExpiry);
-        yield return new("Native LX: lookup after an overdue sweep reschedules remaining transfers", TransferSweepReschedule);
-        yield return new("Native LX: transfer shutdown retries a transient timer disposal failure", TransferTimerCleanup);
+        yield return new("Native LX: abandoned transfers actively expire and stale callbacks cannot retire renewed stages", TransferExpiry);
+        yield return new("Native LX: lookup after an overdue sweep reschedules the remaining transfer", TransferSweepReschedule);
+        yield return new("Native LX: transfer shutdown reports one timer disposal failure after releasing transfers", TransferTimerCleanup);
         yield return new("Native LX: source content storage failures retain native storage error semantics", SourceStorageErrors);
         yield return new("Native LX: disposal preserves the first shutdown failure while releasing transfers", DisposeFirstFailure);
         yield return new("Native LX: explicit enable then invoke targets one selected installation", Target);
@@ -36,7 +38,7 @@ public static class MusicNativeScriptTests
         yield return new("Native LX: shutdown drains owned calls and never disposes borrowed owners", Shutdown);
         yield return new("Native LX: candidate storage transaction cannot leak on failed trial", CandidateStorage);
         yield return new("Native LX: candidate storage cannot persist an undeclared site", CandidateSite);
-        yield return new("Native LX: bounded installation count remains native and Node-free", Limits);
+        yield return new("Native LX: more than 32 installations persist and reopen Node-free", InstallationCount);
         yield return new("Native LX: selected script inspection preserves metadata encoding and integrity", Inspection);
         yield return new("Native LX: installation and update accept only explicit storage permissions", PermissionShape);
         yield return new("Native LX: actual extension declarations survive without expanding standard music UI", Declarations);
@@ -138,6 +140,9 @@ public static class MusicNativeScriptTests
         Check(active.Distinct(StringComparer.Ordinal).Count() == active.Count);
         foreach (string pending in active)
             await Ok(f.Owner, "music.transfer.cancel", new { token = pending });
+        await Error(f.Owner, "music.transfer.begin", new { kind = "script",
+            length = SelectedScriptSnapshot.MaximumBytes + 1, sha256 = new string('0', 64),
+            basename = "oversize.js" }, "LIMIT");
         var stage = await Ok(f.Owner, "music.transfer.begin", new { kind = "script", length = 1, sha256 = new string('0', 64), basename = "x.js" });
         string token = stage.GetProperty("token").GetString()!;
         await Error(f.Owner, "music.transfer.chunk", new { token, offset = 1, data = "YQ==" }, "TRANSFER_OFFSET");
@@ -205,9 +210,22 @@ public static class MusicNativeScriptTests
             basename = "cleanup.js"
         }));
         clock.DisposeFailures = 1;
+        try
+        {
+            transfers.Dispose();
+            Check(false, "expected timer disposal failure");
+        }
+        catch (InvalidOperationException error)
+        {
+            Check(error.Message == "synthetic timer disposal failure", error.Message);
+        }
+        Check(clock.DisposeAttempts == 1, "timer disposal was retried");
+        var stages = typeof(MusicNativeTransfers)
+            .GetField("stages", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(transfers)!;
+        Check((int)stages.GetType().GetProperty("Count")!.GetValue(stages)! == 0,
+            "staging entries survived a timer disposal failure");
         transfers.Dispose();
-        Check(clock.DisposeAttempts >= 2, "timer disposal was not retried");
-        Check(clock.ActiveTimers == 0, "timer remained active after retry");
+        Check(clock.DisposeAttempts == 1, "timer disposal was retried after close");
         return Task.CompletedTask;
     }
     private static Task TransferSweepReschedule()
@@ -224,8 +242,6 @@ public static class MusicNativeScriptTests
         string first = Begin("first.js")["token"]!.GetValue<string>();
         clock.Jump(TimeSpan.FromMinutes(1));
         string second = Begin("second.js")["token"]!.GetValue<string>();
-        var dormant = clock.Last!;
-        dormant.SuppressCallback();
         clock.Jump(TimeSpan.FromMinutes(4));
         try
         {
@@ -233,13 +249,12 @@ public static class MusicNativeScriptTests
             Check(false, "expired transfer survived lookup sweep");
         }
         catch (MusicLibraryException error) { Check(error.Code == "TRANSFER_NOT_FOUND", error.Code); }
-        Check(!ReferenceEquals(clock.Last, dormant), "remaining transfer did not receive a new timer");
-        Check(clock.ActiveTimers == 1, "overdue timer was not replaced");
+        Check(clock.ActiveTimers == 1, "remaining transfer did not keep exactly one timer");
         clock.Advance(TimeSpan.FromMinutes(1));
         try
         {
             transfers.Chunk(O(new { token = second, offset = 0, data = "eA==" }));
-            Check(false, "remaining transfer did not expire on the replacement timer");
+            Check(false, "remaining transfer did not expire on the rescheduled timer");
         }
         catch (MusicLibraryException error) { Check(error.Code == "TRANSFER_NOT_FOUND", error.Code); }
         return Task.CompletedTask;
@@ -280,14 +295,15 @@ public static class MusicNativeScriptTests
             });
             f.Runtime.FailUnload = true;
             int disposeAttempts = clock.DisposeAttempts;
-            clock.DisposeFailures = 2;
+            clock.DisposeFailures = 1;
             try
             {
                 await f.Owner.DisposeAsync();
                 Check(false, "expected shutdown failure");
             }
             catch (MusicLibraryException error) { Check(error.Code == "SCRIPT_EXCEPTION", error.Code); }
-            Check(clock.DisposeAttempts - disposeAttempts == 2, "transfer timer disposal was not attempted after shutdown failure");
+            Check(clock.DisposeAttempts - disposeAttempts == 1,
+                "transfer timer disposal was attempted more than once after shutdown failure");
         }
         finally { await f.Library.DisposeAsync(); }
     }
@@ -474,15 +490,26 @@ public static class MusicNativeScriptTests
         Check(!(await f.Library.ReadSourceScriptDataAsync(id, metadata.State.GetProperty("revision").GetInt64())).Sites.EnumerateObject().Any());
         Check((await f.Runtime.Storage("get", f.Runtime.LastCandidate!, "late", site: "undeclared")).GetProperty("code").GetString() == "STALE_SESSION");
     }
-    private static async Task Limits()
+    private static async Task InstallationCount()
     {
         await using var f = new Fixture();
-        for (int index = 0; index < 32; index++) _ = await Install(f);
-        string token = await Upload(f);
-        await Error(f.Owner, "music.sources.install", new { token, name = "overflow", version = "1",
-            permissions = Permissions() }, "LIMIT");
-        await Ok(f.Owner, "music.transfer.cancel", new { token });
+        var ids = new List<string>();
+        for (int index = 0; index < 33; index++)
+        {
+            ids.Add(await Install(f));
+            Check(f.Runtime.Calls.Count == 0);
+        }
+        var list = await Ok(f.Owner, "music.sources.list");
+        Check(list.GetProperty("items").EnumerateArray()
+            .Select(item => item.GetProperty("installationId").GetString()).SequenceEqual(ids));
         Check(f.Runtime.Calls.Count == 0);
+        await f.Owner.DisposeAsync(); await f.Library.DisposeAsync();
+        await using var restored = new Fixture(f.Store);
+        var reopened = await Ok(restored.Owner, "music.sources.list");
+        Check(reopened.GetProperty("items").EnumerateArray()
+            .Select(item => item.GetProperty("installationId").GetString()).SequenceEqual(ids));
+        Check(reopened.GetProperty("revision").GetInt64() == list.GetProperty("revision").GetInt64());
+        Check(f.Runtime.Calls.Count == 0 && restored.Runtime.Calls.Count == 0);
     }
     private static Task Inspection()
     {
@@ -515,6 +542,13 @@ public static class MusicNativeScriptTests
             throw new InvalidOperationException("BOM accepted");
         }
         catch (MusicOperationException error) { Check(error.Code == "SCRIPT_ENCODING"); }
+        try
+        {
+            MusicSourceScriptInspector.Inspect(new byte[SelectedScriptSnapshot.MaximumBytes + 1],
+                "oversize.js", new string('0', 64));
+            throw new InvalidOperationException("Oversize source accepted");
+        }
+        catch (MusicOperationException error) { Check(error.Code == "SCRIPT_INTEGRITY"); }
         return Task.CompletedTask;
     }
     private static async Task PermissionShape()
@@ -721,13 +755,6 @@ public static class MusicNativeScriptTests
                 callback(state);
             }
             internal void FireStale() => callback(state);
-            internal void SuppressCallback()
-            {
-                lock (owner.timers)
-                {
-                    if (!disposed) Due = null;
-                }
-            }
             public void Dispose()
             {
                 lock (owner.timers)

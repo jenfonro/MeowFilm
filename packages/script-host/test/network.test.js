@@ -149,6 +149,21 @@ test('redirect loops have a finite hop budget', async t => {
   assert.equal(contacts, 3);
 });
 
+test('follow_max above the shared redirect ceiling is truncated instead of rejected', async t => {
+  let contacts = 0;
+  const destination = await serverFor(t, (_req, res) => { contacts++; res.end('arrived'); });
+  const redirect = await serverFor(t, (_req, res) => {
+    res.writeHead(302, { Location: destination.origin + '/target' }); res.end();
+  });
+  const host = await networkHost(t, [redirect, destination], `async () => {
+    const response = await new Promise((resolve,reject) => lx.request(${JSON.stringify(redirect.origin)},
+      {follow_max:6},(error,response)=>error?reject(error):resolve(response)));
+    return {status:response.statusCode,body:response.body};
+  }`, { maxRedirects: 5 });
+  assert.deepEqual(await host.invoke(target()), { status: 200, body: 'arrived' });
+  assert.equal(contacts, 1);
+});
+
 test('compressed response limit applies after real gzip inflation', async t => {
   const server = await serverFor(t, (_req, res) => {
     res.setHeader('Content-Encoding', 'gzip');
@@ -159,6 +174,33 @@ test('compressed response limit applies after real gzip inflation', async t => {
   await assert.rejects(host.invoke(target()), { code: 'RESOURCE_LIMIT' });
 });
 
+test('decoded gzip response headers describe the decoded bytes', async t => {
+  const body = Buffer.from('compressed-fixture');
+  const compressed = gzipSync(body);
+  const server = await serverFor(t, (_req, res) => {
+    res.writeHead(200, { 'content-encoding': 'gzip', 'content-length': compressed.length });
+    res.end(compressed);
+  });
+  const host = await networkHost(t, [server], `async () => {
+    const response = await ${requestExpression(server.origin)};
+    return {body:response.raw.toString(), encoding:response.headers['content-encoding'] ?? null,
+      length:response.headers['content-length'] ?? null};
+  }`);
+  assert.deepEqual(await host.invoke(target()), {
+    body: body.toString(), encoding: null, length: null,
+  });
+});
+
+test('corrupt compressed upstream data is a network failure, not a memory limit', async t => {
+  const server = await serverFor(t, (_req, res) => {
+    res.setHeader('content-encoding', 'gzip');
+    res.end('invalid gzip');
+  });
+  const host = await networkHost(t, [server],
+    `async () => ${requestExpression(server.origin)}`);
+  await assert.rejects(host.invoke(target()), { code: 'NETWORK_ERROR' });
+});
+
 test('stream response size is bounded before full buffering', async t => {
   const server = await serverFor(t, (_req, res) => res.end(Buffer.alloc(2048)));
   const host = await networkHost(t, [server],
@@ -166,20 +208,35 @@ test('stream response size is bounded before full buffering', async t => {
   await assert.rejects(host.invoke(target()), { code: 'RESOURCE_LIMIT' });
 });
 
-test('cancel physically closes the real HTTP request socket', async t => {
+test('explicit LX abort physically closes a session-owned real HTTP request socket', async t => {
   const reached = deferred(), closed = deferred();
   const server = await serverFor(t, (req, _res) => {
     req.socket.once('close', () => closed.resolve());
     reached.resolve();
   });
   const host = await networkHost(t, [server],
-    `async () => ${requestExpression(server.origin)}`);
+    `(() => {
+      let abort;
+      return async ({info}) => {
+        if (info.musicInfo.abort) { abort(); return 'aborted'; }
+        return new Promise((resolve, reject) => {
+          abort = lx.request(${JSON.stringify(server.origin)}, {},
+            (error, response) => error ? reject(error) : resolve(response));
+        });
+      };
+    })()`);
   const controller = new AbortController();
   const rejected = assert.rejects(host.invoke(target(), { signal: controller.signal }), { code: 'CANCELLED' });
   await reached.promise;
   controller.abort();
   await rejected;
+  assert.equal(await host.invoke(target('a', 'kw', { abort: true })), 'aborted');
   await closed.promise;
+  const deadline = Date.now() + 3000;
+  while (host.stats().networkRequests !== 0) {
+    assert.ok(Date.now() < deadline, 'aborted network request did not retire from the worker snapshot');
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
   assert.equal(host.stats().networkRequests, 0);
 });
 

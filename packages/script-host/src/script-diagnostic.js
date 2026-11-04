@@ -1,4 +1,7 @@
-/** Fixed diagnostic vocabulary only: never return exception text or a URL. */
+/** Fixed diagnostic vocabulary only: never return exception text or a URL.
+ *
+ * Product diagnostics report stable JavaScript/Node evidence. Acceptance-only
+ * text attribution lives in `scripts/source-acceptance-diagnostics.mjs`. */
 export function describeScriptError(error) {
   const text = String(error?.message ?? '');
   const kind = ['Error', 'TypeError', 'ReferenceError', 'SyntaxError', 'RangeError', 'InternalError']
@@ -25,13 +28,7 @@ export function describeScriptError(error) {
     .match(/(?:installed-script|source|script-sdk)\.js:(\d+)(?::(\d+))?/);
   const reason = reference ? 'reference'
     : code ? codeReasons[code]
-    : /api.?key|密钥|未配置|无API配置|config.*(?:required|missing|not found)|token.*missing|cookie.*(?:required|missing)|账号.*(?:为空|未|无效)|(?:没有|尚未|还未)配置.{0,40}(?:cookie|token|账号)|需要(?:登录|登陆)|请先.{0,60}(?:配置|登录|登陆|设置.*添加频道)/i.test(text) ? 'configuration'
-    : /^unexpected end of JSON input$/i.test(text) ? 'empty_json'
-    : /^unexpected character$|not valid JSON|unexpected token.*JSON/i.test(text) ? 'invalid_json'
-    : /缺少|missing|参数|信息不完整|undefined|null|(?:标识|标记|页码).{0,24}(?:无效|失效|超出范围)/i.test(text) ? 'input'
-    : /unsupported|not implemented|不支持|action not support|unknown (?:action|source)|未知(?:动作|音源)|未实现/i.test(text) ? 'unsupported'
-    : /api|接口|获取|请求|HTTP|找不到|不存在|为空|解析.*失败|所有(?:音源|音质)均失败|无歌词|no.*url|not found|invalid.*response|没有.*可用|暂无(?:直播)?(?:源|资源)|response/i.test(text)
-      ? 'upstream' : 'script';
+    : /^(?:TypeError|RangeError)$/.test(kind) ? 'input' : 'script';
   return { kind, reason, ...(code ? { code } : {}),
     ...(reference ? { reference: reference[1] } : {}),
     ...(member ? { member: member[1] } : {}),

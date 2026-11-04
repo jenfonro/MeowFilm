@@ -5,6 +5,7 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Platform.Files;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -614,7 +615,7 @@ public static partial class MusicNativeLibraryTests
     private static async Task CompleteSiteStorage()
     {
         var sources = CurrentSources();
-        sources["installations"] = new JsonArray(Enumerable.Range(0, 32)
+        sources["installations"] = new JsonArray(Enumerable.Range(0, 34)
             .Select(index => (JsonNode)Installation("test-install-" + index)).ToArray());
         var entries = new List<(string Area, JsonNode Value)>
         {
@@ -622,15 +623,42 @@ public static partial class MusicNativeLibraryTests
             ("queue", CurrentQueue()), ("history", CurrentHistory())
         };
         foreach (var item in sources["installations"]!.AsArray())
-            for (int site = 0; site < 32; site++)
+        {
+            string id = item!["id"]!.GetValue<string>();
+            for (int site = 0; site < (id == "test-install-33" ? 31 : 32); site++)
             {
-                string area = new JsonArray("lx-data", item!["id"]!.GetValue<string>(), "site-" + site).ToJsonString();
-                entries.Add((area, O(new { schema = 1, values = Array.Empty<object>() })));
+                string area = new JsonArray("lx-data", id, "site-" + site).ToJsonString();
+                entries.Add((area, O(new { schema = 1, values = new[] { new { key = "same", value = id } } })));
             }
+        }
         await using var f = new Fixture(); f.Store.Bytes = Document(entries.ToArray()); var o = f.Owner();
         await Ok(o, "music.library.list");
-        Check((await o.ReadSourceScriptDataAsync("test-install-0", 1)).Sites.EnumerateObject().Count() == 32);
+        for (int index = 0; index < 34; index++)
+        {
+            string id = "test-install-" + index;
+            Check((await o.ReadSourceScriptDataAsync(id, 1)).Sites.EnumerateObject().Count() == (index == 33 ? 31 : 32));
+            Check((await o.ReadScriptValueAsync(id, "site-0", "same", 1)).GetString() == id);
+        }
         Check(f.Store.Writes == 0);
+        await o.CommitScriptValueAsync("test-install-0", "site-0", "same", 1, E("updated"), false);
+        await Ok(o, "music.settings.save", new { ifRevision = 0, lyrics = false, target = (object?)null });
+        await o.CommitScriptValueAsync("test-install-33", "site-31", "same", 1, E("new-site"), false);
+        int writes = f.Store.Writes; byte[] original = f.Store.Bytes!.ToArray();
+        await Throws("LIMIT", async () => await o.CommitScriptValueAsync("test-install-33", "site-overflow", "same", 1, E("overflow"), false));
+        Check(f.Store.Writes == writes && original.SequenceEqual(f.Store.Bytes!));
+        await o.DisposeAsync();
+        var restored = f.Owner();
+        Check((await restored.ReadSourceMetadataAsync()).State.GetProperty("installations").GetArrayLength() == 34);
+        await Ok(restored, "music.library.list");
+        Check(!(await Ok(restored, "music.settings.get")).GetProperty("settings").GetProperty("lyrics").GetBoolean());
+        for (int index = 0; index < 34; index++)
+        {
+            string id = "test-install-" + index;
+            Check((await restored.ReadSourceScriptDataAsync(id, 1)).Sites.EnumerateObject().Count() == 32);
+            Check((await restored.ReadScriptValueAsync(id, "site-0", "same", 1)).GetString() == (index == 0 ? "updated" : id));
+            Check((await restored.ReadScriptValueAsync(id, "site-31", "same", 1)).GetString() == (index == 33 ? "new-site" : id));
+        }
+        Check(f.Store.Writes == writes && original.SequenceEqual(f.Store.Bytes!));
     }
     private static async Task NullAreas()
     {
@@ -870,6 +898,8 @@ public static partial class MusicNativeLibraryTests
             Changed(sources, state => state["installations"]![0]!["current"]!["config"] = new JsonObject()),
             Changed(sources, state => state["installations"]![0]!["current"]!["sourceHash"] = new string('0', 63)),
             Changed(sources, state => state["installations"]![0]!["current"]!["sourceBytes"] = 0),
+            Changed(sources, state => state["installations"]![0]!["current"]!["sourceBytes"] =
+                SelectedScriptSnapshot.MaximumBytes + 1),
             Changed(sources, state => state["installations"]![0]!["current"]!["source"] = SyntheticSource),
             Changed(sources, state => state["installations"]![0]!["current"]!["permissions"]!["unsupported"] = new JsonArray()),
             Changed(sources, state => state["installations"]![0]!["current"]!["permissions"]!.AsObject().Remove("storage")),
@@ -909,8 +939,18 @@ public static partial class MusicNativeLibraryTests
         var next = Parsed(metadata.State); next["revision"] = 1;
         next["installations"]!.AsArray().Add(Installation(content: content));
         await owner.CommitSourceMetadataAsync(E(next), metadata.Sha256);
+        var committed = await owner.ReadSourceMetadataAsync();
+        var oversized = Parsed(committed.State); oversized["revision"] = 2;
+        oversized["installations"]!.AsArray().Add(Installation("oversized",
+            content: new MusicScriptContent(new string('a', 64), SelectedScriptSnapshot.MaximumBytes + 1)));
+        await Throws("INVALID_REQUEST", async () =>
+            await owner.CommitSourceMetadataAsync(E(oversized), committed.Sha256));
         await owner.DisposeAsync();
         var reopened = f.Owner();
+        await Throws("LIMIT", async () =>
+            await reopened.StoreScriptContentAsync(new byte[SelectedScriptSnapshot.MaximumBytes + 1]));
+        await Throws("CORRUPT_STORAGE", async () =>
+            await reopened.ReadScriptContentAsync(content.Sha256, SelectedScriptSnapshot.MaximumBytes + 1));
         byte[] restored = await reopened.ReadScriptContentAsync(content.Sha256, content.Length);
         try { Check(source.SequenceEqual(restored)); }
         finally { CryptographicOperations.ZeroMemory(restored); }

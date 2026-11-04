@@ -26,15 +26,13 @@ function linkedSignal(external, lifetime) {
   let released = false;
   const release = () => {
     if (released) return;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      for (const entry of entries) {
-        if (!entry.attached) continue;
-        try {
-          entry.signal.removeEventListener('abort', entry.abort);
-          entry.attached = false;
-          entry.failure = null;
-        } catch (error) { entry.failure = error; }
-      }
+    for (const entry of entries) {
+      if (!entry.attached) continue;
+      try {
+        entry.signal.removeEventListener('abort', entry.abort);
+        entry.attached = false;
+        entry.failure = null;
+      } catch (error) { entry.failure = error; }
     }
     const failure = entries.find(entry => entry.attached)?.failure;
     state.controller = null;

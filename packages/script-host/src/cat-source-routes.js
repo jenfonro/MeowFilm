@@ -132,3 +132,68 @@ export function discoverSourceRoutes(source, parse) {
   }
   return { paths, patterns };
 }
+
+/** A wrapper is one direct call, optionally returned/awaited. */
+export function startupWrapperTarget(node) {
+  if (!node || !['FunctionExpression', 'ArrowFunctionExpression'].includes(node.type)) return null;
+  let expression = node.body;
+  if (expression.type === 'BlockStatement') {
+    const statements = expression.body.filter(statement => statement.type !== 'EmptyStatement');
+    if (statements.length !== 1) return null;
+    const statement = statements[0];
+    expression = statement.type === 'ReturnStatement' ? statement.argument
+      : statement.type === 'ExpressionStatement' ? statement.expression : null;
+  }
+  if (expression?.type === 'AwaitExpression') expression = expression.argument;
+  return expression?.type === 'CallExpression' && expression.callee.type === 'Identifier'
+    ? expression.callee.name : null;
+}
+
+/** Lazy source lookup only for unresolved closure-local startup wrappers.
+ * Acorn tokenizes once to exclude strings/comments, then parses only matching
+ * function expressions. It never constructs an AST for the entire bundle or
+ * follows arbitrary business calls. The lookup/cache belong to this boot. */
+export function createLocalStartupLookup(source, parser, strong, wrapperTarget) {
+  const options = { ecmaVersion: 'latest', allowReturnOutsideFunction: true };
+  const cache = new Map();
+  let declarations;
+  const index = () => {
+    declarations = new Map();
+    const record = (name, start) => {
+      const positions = declarations.get(name) ?? [];
+      positions.push(start);
+      declarations.set(name, positions);
+    };
+    let previous, beforePrevious;
+    for (const token of parser.tokenizer(source, options)) {
+      if (token.type.label === 'name' && previous?.type.keyword === 'function')
+        record(token.value, beforePrevious?.value === 'async' ? beforePrevious.start : previous.start);
+      if (token.type.label === '=' && previous?.type.label === 'name')
+        record(previous.value, token.end);
+      beforePrevious = previous;
+      previous = token;
+    }
+  };
+  const lookup = (name, visiting = new Set()) => {
+    if (typeof name !== 'string' || !/^[A-Za-z_$][\w$]*$/.test(name) || visiting.has(name)) return false;
+    if (cache.has(name)) return cache.get(name);
+    if (!declarations) {
+      try { index(); } catch { declarations = new Map(); }
+    }
+    visiting.add(name);
+    let found = false;
+    for (const start of declarations.get(name) ?? []) {
+      let node;
+      try { node = parser.parseExpressionAt(source, start, options); } catch { continue; }
+      if (!['FunctionExpression', 'ArrowFunctionExpression'].includes(node.type)) continue;
+      if (strong(source.slice(node.start, node.end)) || lookup(wrapperTarget(node), visiting)) {
+        found = true;
+        break;
+      }
+    }
+    visiting.delete(name);
+    cache.set(name, found);
+    return found;
+  };
+  return lookup;
+}

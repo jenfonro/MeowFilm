@@ -59,10 +59,10 @@ class AdapterTaskTracker {
     });
   }
 
-  retirement(installationId, generation, lifecycleManaged) {
+  retirement(installationId, generation) {
     const tracker = this;
     return {
-      installationId, generation, lifecycleManaged,
+      installationId, generation,
       idle: tracker.whenIdle(),
       pendingAdapterTasks: () => tracker.tasks.size,
     };
@@ -70,14 +70,15 @@ class AdapterTaskTracker {
 }
 
 export class LXSession {
-  constructor({ installationId, generation, revision, network, storage, onDiagnostic, limits,
-    lifecycleManaged = false }) {
-    Object.assign(this, { installationId, generation, revision, network, storage, onDiagnostic, limits,
-      lifecycleManaged });
+  constructor({ installationId, generation, revision, network, storage, onDiagnostic, onScriptError,
+    onFailure, limits, wasmModule }) {
+    Object.assign(this, { installationId, generation, revision, network, storage, onDiagnostic, onScriptError,
+      onFailure, limits, wasmModule });
     this.live = true;
     this.activated = false;
     this.ready = deferred();
     this.root = new ResourceScope();
+    this.scriptResources = new ResourceScope(this.root.signal);
     // Host execution-turn ownership, not guest Promise privilege propagation.
     this.contextScope = new AsyncLocalStorage();
     this.invocations = new Map();
@@ -89,10 +90,11 @@ export class LXSession {
     this.nextId = 0;
     this.capabilities = {};
     this.alert = null;
-    this.utils = createUtilities(limits.maxBytes);
+    this.utils = createUtilities(limits.maxMemoryBytes);
   }
 
   scope() { return this.contextScope.getStore() ?? this.root; }
+  resourceScope() { return this.scriptResources; }
   assertLive() {
     if (!this.live) throw fault('STALE_SESSION');
     this.scope().assertOpen();
@@ -102,7 +104,7 @@ export class LXSession {
     const timeout = setTimeout(() => this.fail(fault('TIMEOUT')), this.limits.initTimeoutMs);
     try {
       this.engine = await QuickJSEngine.create({
-        source: realmSource, limits: this.limits,
+        source: realmSource, limits: this.limits, wasmModule: this.wasmModule,
         bridge: (operation, args) => {
           try { return this.bridge(operation, args); }
           catch (error) { this.bridgeDiagnostic(operation, args, error); throw error; }
@@ -115,21 +117,21 @@ export class LXSession {
       return this;
     } catch (error) {
       const failure = this.failure ?? safeError(error);
-      this.fail(failure);
-      throw failure;
+      this.fail(error);
+      throw this.failure ?? failure;
     } finally { clearTimeout(timeout); }
   }
 
   activate() { this.assertLive(); this.activated = true; }
 
-  call(name, args, scope) {
+  call(name, args, scope, frames = []) {
     if (!this.live) throw fault('STALE_SESSION');
     scope.assertOpen();
-    const budget = Math.min(this.limits.syncTimeoutMs, scope.deadline - Date.now());
-    try { return this.contextScope.run(scope, () => this.engine.call(name, args, budget)); }
+    try {
+      return this.contextScope.run(scope, () => this.engine.call(name, args, frames));
+    }
     catch (error) {
-      // Pending guest jobs cannot be trusted to stop after a computation limit.
-      if (this.engine.interrupted) this.fail(safeError(error));
+      if (this.engine.memoryLimitExceeded) this.fail(safeError(error));
       throw error;
     }
   }
@@ -148,7 +150,7 @@ export class LXSession {
     queueMicrotask(() => {
       if (this.live && !this.engine?.closing) {
         try { this.engine.call('forgetCallback', [id]); }
-        catch (error) { if (this.engine?.interrupted) this.fail(safeError(error)); }
+        catch { /* Forgetting a retired callback cannot alter session state. */ }
       }
     });
   }
@@ -161,7 +163,18 @@ export class LXSession {
 
   callbackFailed(error, scope) {
     if (!this.live || scope.signal.aborted) return;
-    if (scope === this.root) this.fail(safeError(error));
+    if (error?.code === 'MEMORY_LIMIT') {
+      if (this.engine) this.engine.memoryLimitExceeded = true;
+      error = fault('RESOURCE_LIMIT');
+    }
+    if (this.engine?.memoryLimitExceeded) this.fail(safeError(error));
+    else if (scope === this.scriptResources) {
+      const failure = safeError(error);
+      try {
+        this.onDiagnostic?.(Object.freeze({ ...this.scopeIdentity(scope),
+          kind: 'ScriptCallbackError', reason: 'script', code: failure.code }));
+      } catch { /* Diagnostics cannot change callback execution. */ }
+    }
     else scope.close(safeError(error));
   }
 
@@ -177,13 +190,25 @@ export class LXSession {
     } catch { /* Diagnostics cannot alter guest results or capability checks. */ }
   }
 
+  emitScriptDiagnostic(diagnostic, scope, message) {
+    if (!this.live || scope.signal.aborted) return;
+    const event = Object.freeze({ ...this.scopeIdentity(scope), ...diagnostic });
+    try { this.onDiagnostic?.(event); }
+    catch { /* Observation cannot alter script results or authority. */ }
+    if (this.onScriptError && typeof message === 'string') {
+      try { this.onScriptError(Object.freeze({ ...event, message })); }
+      catch { /* Raw error observation is trusted, opt-in and non-authoritative. */ }
+    }
+  }
+
   bridge(operation, args) {
+    if (operation === 'observeScriptErrors') return typeof this.onScriptError === 'function';
     if (operation === 'diagnostic') {
       const scope = args[0] === 0 ? this.root : this.invocations.get(args[0])?.scope;
-      if (!this.live || !scope || scope.signal.aborted || !this.onDiagnostic) return;
+      if (!this.live || !scope || scope.signal.aborted || !this.onDiagnostic && !this.onScriptError) return;
       const input = args[1];
       const kinds = ['Error', 'TypeError', 'ReferenceError', 'SyntaxError', 'RangeError', 'InternalError'];
-      const reasons = ['reference', 'input', 'unsupported', 'configuration', 'upstream', 'script'];
+      const reasons = ['reference', 'input', 'upstream', 'script'];
       if (!input || !kinds.includes(input.kind) || !reasons.includes(input.reason)) return;
       const diagnostic = { kind: input.kind, reason: input.reason };
       if (typeof input.code === 'string' && describeScriptError({ code: input.code }).code === input.code)
@@ -196,8 +221,7 @@ export class LXSession {
         diagnostic.line = input.line;
       if (Number.isSafeInteger(input.column) && input.column >= 0 && input.column <= 1_000_000)
         diagnostic.column = input.column;
-      try { this.onDiagnostic(Object.freeze({ ...this.scopeIdentity(scope), ...diagnostic })); }
-      catch { /* A diagnostic consumer cannot change guest results or authority. */ }
+      this.emitScriptDiagnostic(diagnostic, scope, args[2]);
       return;
     }
     if (operation === 'abortRequest') {
@@ -213,7 +237,10 @@ export class LXSession {
     }
     if (operation === 'callbackFailure') {
       const item = this.callbacks.get(args[0]);
-      if (item) this.callbackFailed(fault(this.engine?.interrupted ? 'TIMEOUT' : args[1]), item.scope);
+      const memory = args[1] === 'MEMORY_LIMIT';
+      if (memory && this.engine) this.engine.memoryLimitExceeded = true;
+      const code = memory ? 'RESOURCE_LIMIT' : args[1];
+      if (item) this.callbackFailed(fault(code), item.scope);
       return;
     }
     if (operation === 'invokeResult') {
@@ -221,14 +248,17 @@ export class LXSession {
       if (!this.live || !item || item.scope.signal.aborted) return;
       if (args[1]) {
         const value = clone(args[2]);
-        requireValue(Buffer.byteLength(JSON.stringify(value)) <= this.limits.maxBytes, 'RESOURCE_LIMIT');
         item.result.resolve(value);
-      } else item.result.reject(fault(this.engine?.interrupted ? 'TIMEOUT' : args[2]));
+      } else {
+        const memory = args[2] === 'MEMORY_LIMIT';
+        if (memory && this.engine) this.engine.memoryLimitExceeded = true;
+        const code = memory ? 'RESOURCE_LIMIT' : args[2];
+        item.result.reject(fault(code));
+      }
       return;
     }
     this.assertLive();
     switch (operation) {
-      case 'maxBytes': return this.limits.maxBytes;
       case 'config': return JSON.stringify(this.revision.config);
       case 'scriptInfo': return JSON.stringify(this.scriptInfo());
       case 'util': return this.utils(...args);
@@ -240,8 +270,12 @@ export class LXSession {
       case 'request': return this.request(...args);
       case 'storage': return this.storageCall(...args);
       case 'timer': return this.timer(...args);
-      case 'microtask': return this.registerCallback(args[0], this.scope());
-      case 'startupFailure': return this.fail(fault(args[0]));
+      case 'microtask': return this.registerCallback(args[0], this.resourceScope());
+      case 'startupFailure': {
+        const memory = args[0] === 'MEMORY_LIMIT';
+        if (memory && this.engine) this.engine.memoryLimitExceeded = true;
+        return this.fail(fault(memory ? 'RESOURCE_LIMIT' : args[0]));
+      }
       default: throw fault('UNSUPPORTED_OPTION');
     }
   }
@@ -264,8 +298,7 @@ export class LXSession {
   whenAdaptersIdle() { return this.adapterTracker.whenIdle(); }
 
   adapterRetirement() {
-    return this.adapterTracker.retirement(
-      this.installationId, this.generation, this.lifecycleManaged);
+    return this.adapterTracker.retirement(this.installationId, this.generation);
   }
 
   async drainAdapters() {
@@ -301,9 +334,7 @@ export class LXSession {
   }
 
   timer(id, delay = 0, repeat) {
-    if (!this.lifecycleManaged)
-      requireValue(this.timers.size < this.limits.maxTimers, 'RESOURCE_LIMIT');
-    const scope = this.scope();
+    const scope = this.resourceScope();
     this.registerCallback(id, scope, repeat);
     const run = () => {
       if (!repeat) this.clearTimer(id, true);
@@ -335,7 +366,8 @@ export class LXSession {
   }
 
   request(url, options, id) {
-    const owner = this.scope();
+    const metadata = this.scope();
+    const owner = this.resourceScope();
     const copied = clone(options);
     requireValue(copied && typeof copied === 'object' && !Array.isArray(copied));
     if (copied.timeout !== undefined) requireValue(Number.isFinite(copied.timeout) && copied.timeout > 0);
@@ -361,7 +393,6 @@ export class LXSession {
             requireValue(response && Number.isInteger(response.statusCode), 'NETWORK_ERROR');
             const raw = typeof response.body === 'string'
               ? Buffer.from(response.body) : Buffer.from(response.body ?? []);
-            requireValue(raw.length <= session.limits.maxBytes, 'RESOURCE_LIMIT');
             input = {
               response: { statusCode: response.statusCode, statusMessage: response.statusMessage ?? '',
                 headers: response.headers ?? {}, url: response.url ?? requestedUrl },
@@ -376,9 +407,8 @@ export class LXSession {
     };
     child.signal.addEventListener('abort', () => completion.settle(child.reason), { once: true });
     const sessionRef = new WeakRef(this);
-    const network = this.network;
     const requestInput = {
-      options: copied, signal: child.signal, scope: this.scopeIdentity(owner),
+      options: copied, signal: child.signal, scope: this.scopeIdentity(metadata),
       validateURL: next => {
         const session = sessionRef.deref();
         if (!session) throw fault('STALE_SESSION');
@@ -389,8 +419,8 @@ export class LXSession {
       const session = sessionRef.deref();
       if (!session) throw fault('STALE_SESSION');
       requestInput.url = session.validateURL(url, child);
-      requireValue(typeof network === 'function', 'PERMISSION_DENIED');
-      return network(requestInput);
+      requireValue(typeof session.network === 'function', 'PERMISSION_DENIED');
+      return session.network(requestInput);
     }));
     task.then(
       response => completion.settle(null, response),
@@ -414,7 +444,7 @@ export class LXSession {
     requireValue(typeof key === 'string' && key.length > 0 && key.length <= 256);
     const sessionRef = new WeakRef(this);
     const signal = scope.signal;
-    const input = { ...this.scopeIdentity(scope), key, signal,
+    const input = { ...this.scopeIdentity(scope), associationId: scope.associationId, key, signal,
       isCurrent: () => Boolean(sessionRef.deref()?.live && !signal.aborted) };
     if (operation === 'set') input.value = clone(value);
     this.registerCallback(callbackId, scope);
@@ -436,12 +466,13 @@ export class LXSession {
     catch (error) { this.callbackFailed(error, scope); }
   }
 
-  async invoke(request, { signal, timeoutMs } = {}) {
+  async invoke(request, { signal, timeoutMs, associationId } = {}) {
     this.assertLive();
     const payload = lxPayload(this.capabilities, request);
     const scope = new ResourceScope(this.root.signal, timeoutMs ?? this.limits.requestTimeoutMs);
     scope.siteId = request.siteId;
     scope.requestId = ++this.nextId;
+    scope.associationId = associationId;
     const result = deferred();
     this.invocations.set(scope.requestId, { scope, result });
     let detach = () => {};
@@ -457,7 +488,14 @@ export class LXSession {
       if (!this.live) throw fault('STALE_SESSION');
       scope.assertOpen();
       return clone(value);
-    } catch (error) { throw safeError(error); }
+    } catch (error) {
+      if (this.engine?.memoryLimitExceeded || error?.code === 'MEMORY_LIMIT') {
+        if (this.engine) this.engine.memoryLimitExceeded = true;
+        try { error.memoryLimitExceeded = true; } catch { /* The session flag is authoritative. */ }
+        this.fail(error);
+      }
+      throw this.memoryLimitExceeded ? fault('RESOURCE_LIMIT') : safeError(error);
+    }
     finally {
       detach();
       scope.close();
@@ -467,9 +505,31 @@ export class LXSession {
 
   fail(error) {
     if (!this.live) return;
-    this.failure = safeError(error);
+    const ready = this.activated;
+    this.memoryLimitExceeded = Boolean(this.memoryLimitExceeded ||
+      this.engine?.memoryLimitExceeded || error?.memoryLimitExceeded);
+    this.failure = this.memoryLimitExceeded ? fault('RESOURCE_LIMIT') : safeError(error);
+    if (this.memoryLimitExceeded) {
+      try { this.failure.memoryLimitExceeded = true; } catch { /* Session state is authoritative. */ }
+    }
     this.ready.reject(this.failure);
     this.stop(this.failure);
+    this.reportFailure(ready);
+  }
+
+  reportFailure(ready) {
+    if (this.failureReported || !this.failure) return;
+    this.failureReported = true;
+    try {
+      this.onDiagnostic?.(Object.freeze({ ...this.scopeIdentity(this.root),
+        kind: 'ScriptHostError', reason: 'host',
+        operation: this.memoryLimitExceeded ? 'memory.limit' : 'session.failed',
+        code: this.failure.code, phase: ready ? 'running' : 'initialization' }));
+    } catch { /* Diagnostics cannot alter failure handling. */ }
+    try {
+      this.onFailure?.(this.failure, Object.freeze({ ready }));
+    }
+    catch { /* Failure observation cannot alter failure handling. */ }
   }
 
   stop(reason = fault('STALE_SESSION')) {

@@ -2,20 +2,47 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import https from 'node:https';
+import net from 'node:net';
 import { createHash, createSecretKey, webcrypto, X509Certificate } from 'node:crypto';
+import { inflateSync } from 'node:zlib';
 import { rootCertificates } from 'node:tls';
 import { EventEmitter } from 'node:events';
-import { linkSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { createCatRuntime, SourceTransfers } from '../src/index.js';
+import fs from 'node:fs';
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync,
+  writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+import { networkInterfaces, tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import v8 from 'node:v8';
+import { runInNewContext } from 'node:vm';
+import { createCatRuntime, createNodeNetwork, createScriptHost, SourceTransfers, SCRIPT_LIMITS } from '../src/index.js';
+import { ScriptHost } from '../src/host.js';
+import { CatSession } from '../src/cat-session.js';
 import { syncCatManagement } from '../src/cat-management.js';
 import { cleanHopByHop } from '../src/cat-runtime.js';
 import { normalizeCatOutput } from '../src/cat-output.js';
+import { fault } from '../src/errors.js';
 import { NodeCapabilities } from '../src/node-capabilities.js';
 import { PrivateVolume } from '../src/private-volume.js';
 import { ResourceScope } from '../src/scope.js';
 import { ScriptServices, scriptAccessHeader } from '../src/script-services.js';
+import { projectHttpRequestOptions, projectFields } from '../src/native-roles.js';
+import { parse, tokenizer, parseExpressionAt } from 'acorn';
+import { createLocalStartupLookup, startupWrapperTarget } from '../src/cat-source-routes.js';
+import { readFile } from 'node:fs/promises';
+import { serverFor } from './http-fixture.js';
+import { lxScript } from './fixtures.js';
+
+v8.setFlagsFromString('--expose_gc');
+const forceGc = runInNewContext('gc');
+async function collectGarbage(rounds = 4) {
+  for (let round = 0; round < rounds; round++) {
+    forceGc();
+    await new Promise(resolve => setImmediate(resolve));
+    forceGc();
+    await new Promise(resolve => setImmediate(resolve));
+  }
+}
 
 const source = String.raw`
 const http = require('http');
@@ -54,15 +81,19 @@ const readRaw = request => new Promise((resolve, reject) => {
   request.once('end', () => resolve(Buffer.concat(chunks).toString()));
   request.once('error', reject);
 });
-const requestError = value => new Promise(resolve => {
+const requestOutcome = value => new Promise(resolve => {
   let request;
   try {
     request = http.get(value, response => {
-      response.resume();
-      response.once('end', () => resolve('UNEXPECTED'));
+      const chunks = [];
+      response.on('data', chunk => chunks.push(Buffer.from(chunk)));
+      response.once('end', () => resolve({
+        status: response.statusCode, body: Buffer.concat(chunks).toString(),
+      }));
+      response.once('error', error => resolve({ code: error.code }));
     });
-  } catch (error) { resolve(error.code); return; }
-  request.once('error', error => resolve(error.code));
+  } catch (error) { resolve({ code: error.code }); return; }
+  request.once('error', error => resolve({ code: error.code }));
 });
 const selfHeaders = () => new Promise((resolve, reject) => {
   const request = http.get('http://127.0.0.1:' + requestedPort + '/headers', {
@@ -256,9 +287,11 @@ async function route(request, response) {
     return;
   }
   if (action === 'scopedFile') {
-    fs.openSync('/scoped-descriptor.txt', 'w');
+    const fd = fs.openSync('/scoped-descriptor.txt', 'w');
+    fs.closeSync(fd);
     const handle = await fs.promises.open('/scoped-handle.txt', 'w');
     await handle.writeFile('scoped');
+    await handle.close();
     json(response, { written: true });
     return;
   }
@@ -348,6 +381,8 @@ async function route(request, response) {
     return;
   }
   if (action === 'probe') {
+    const privateUrl = input?.privateUrl ?? 'http://127.0.0.1:65534/private';
+    const loopbackUrl = input?.loopbackUrl ?? 'http://127.0.0.1:65534/private';
     let count = 0;
     try { count = Number(fs.readFileSync('/state.json', 'utf8')); } catch {}
     fs.writeFileSync('/state.json', String(++count));
@@ -364,18 +399,21 @@ async function route(request, response) {
     const byteStrategy = new streams.ByteLengthQueuingStrategy({ highWaterMark: 8 });
     const countStrategy = new streams.CountQueuingStrategy({ highWaterMark: 4 });
     const httpsServer = new https.Server();
+    const agent = new https.Agent();
     const form = new FormData();
     form.append('text', 'value');
     form.append('file', new File(['hello'], 'sample.txt', { type: 'text/plain' }));
     const multipart = await (await fetch('http://127.0.0.1:' + requestedPort + '/multipart', {
       method: 'POST', body: form,
     })).json();
+    httpsServer.close();
+    agent.destroy();
     json(response, {
       count,
       hostFile,
       dependency,
-      privateHost: await requestError('http://10.0.0.1/private'),
-      unmappedLoopback: await requestError('http://127.0.0.1:65534/private'),
+      privateHost: await requestOutcome(privateUrl),
+      unmappedLoopback: await requestOutcome(loopbackUrl),
       hostEnvironment: process.env.USERPROFILE || process.env.HOME || null,
       guestGlobals: { lx: typeof lx, meow: typeof meow, bridge: typeof __meowBridge },
       fsCompatibility: {
@@ -433,16 +471,21 @@ async function route(request, response) {
             const value = new FormData();
             value.append('one', '1');
             value.set('one', '2');
-            return value.get('one') === '2' && [...value].length === 1;
+            return value instanceof FormData && value.get('one') === '2' &&
+              [...value].length === 1;
           })(),
           fileIsBlob: new File(['x'], 'x.txt') instanceof Blob,
           byteStrategy: byteStrategy instanceof streams.ByteLengthQueuingStrategy,
           countStrategy: countStrategy instanceof streams.CountQueuingStrategy,
           byteSize: byteStrategy.size(Buffer.from('123')),
           countSize: countStrategy.size('x'),
-          httpServer: new http.Server() instanceof http.Server,
+          httpServer: (() => {
+            const server = new http.Server();
+            server.close();
+            return server instanceof http.Server;
+          })(),
           httpsServer: httpsServer instanceof https.Server,
-          agent: new https.Agent() instanceof https.Agent,
+          agent: agent instanceof https.Agent,
         },
       },
     });
@@ -454,6 +497,10 @@ async function route(request, response) {
     return;
   }
   if (action === 'home') {
+    if (input?.resultField) {
+      json(response, { result: { value: 'nested-result' }, marker: 'outer-result' });
+      return;
+    }
     json(response, { class: [{ type_id: 'fixture', type_name: 'Fixture' }], filters: {} });
     return;
   }
@@ -536,6 +583,78 @@ function rootFor(t) {
   return root;
 }
 
+let sharedQuickJSModule;
+/**
+ * These tests exercise ownership of live native objects and guest execution
+ * state. They own a real CatSession in this thread; the public CatRuntime
+ * facade is reserved for public gateway and persistence tests.
+ */
+async function createCatSessionForInternalTest(t, {
+  dataRoot = rootFor(t), installationId, source, config = {}, version = '1',
+  settings, onNetwork, onActivate, onStop, network, onDiagnostic,
+} = {}) {
+  sharedQuickJSModule ??= readFile(
+    new URL(import.meta.resolve('@jitl/quickjs-wasmfile-release-sync/wasm')))
+    .then(bytes => WebAssembly.compile(bytes));
+  const session = new CatSession({
+    dataRoot,
+    installationId,
+    generation: 1,
+    revision: {
+      source, version, config,
+      metadata: {}, protocolOptions: {}, permissions: { storage: [] },
+    },
+    settings: settings ?? { value: { providers: {}, mappings: [] } },
+    onNetwork,
+    onActivate,
+    onStop,
+    network,
+    onDiagnostic,
+    limits: {
+      ...SCRIPT_LIMITS,
+      initTimeoutMs: 60_000,
+      requestTimeoutMs: 60_000,
+      cleanupTimeoutMs: 3_000,
+    },
+    wasmModule: await sharedQuickJSModule,
+  });
+  t.after(async () => {
+    await session.stop().catch(() => {});
+  });
+  try {
+    await session.start();
+    await session.activate();
+  } catch (error) {
+    await session.stop().catch(() => {});
+    throw error;
+  }
+  return session;
+}
+
+function delayedSource(name, delay) {
+  return String.raw`
+    const http = require('http');
+    let server;
+    module.exports.start = () => new Promise(resolve => {
+      setTimeout(() => {
+        server = http.createServer((request, response) => {
+          response.setHeader('content-type', 'application/json');
+          if (request.url === '/config' || request.url === '/full-config') {
+            response.end(JSON.stringify({ video: { sites: [{
+              key: 'site-${name}', name: 'Delayed ${name}', api: '/api/site-${name}',
+              actions: ['home'],
+            }] } }));
+            return;
+          }
+          response.end(JSON.stringify({ instance: '${name}' }));
+        });
+        server.listen(Number(process.env.PORT), '127.0.0.1', resolve);
+      }, ${delay});
+    });
+    module.exports.stop = () => server?.close();
+  `;
+}
+
 function request(url, { method = 'GET', headers = {}, body } = {}) {
   return new Promise((resolve, reject) => {
     const raw = body === undefined ? null : Buffer.isBuffer(body) ? body : Buffer.from(body);
@@ -567,6 +686,18 @@ function writeSettings(path, change) {
   writeFileSync(path, JSON.stringify(change(current), null, 2) + '\n');
 }
 
+async function waitForState(runtime, installationId, expected, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const state = (await runtime.status()).instances.find(instance =>
+      instance.installationId === installationId)?.state;
+    if (state === expected) return;
+    if (Date.now() >= deadline) throw new Error(
+      `Timed out waiting for ${installationId}: ${state} instead of ${expected}`);
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+}
+
 async function installed(t, root, runtimeOptions = {}) {
   const runtime = createCatRuntime({ dataRoot: root, ...runtimeOptions });
   t.after(() => runtime.close());
@@ -578,6 +709,510 @@ async function installed(t, root, runtimeOptions = {}) {
     enabled: true,
   });
   return runtime;
+}
+
+function deterministicBytes(size, seed = 0x6d2b79f5) {
+  const value = Buffer.allocUnsafe(size);
+  let state = seed >>> 0;
+  for (let index = 0; index < size; index++) {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    value[index] = state >>> 24;
+  }
+  return value;
+}
+
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function networkForLocalServers(servers) {
+  const aliases = new Map(servers.map(server => [server.origin, server.socketOrigin]));
+  const sockets = new Map(servers.map(server => [server.socketOrigin, server.origin]));
+  const replaceOrigin = (input, replacements) => {
+    const url = new URL(input), replacement = replacements.get(url.origin);
+    return replacement === undefined
+      ? url.href
+      : replacement + url.pathname + url.search + url.hash;
+  };
+  const network = createNodeNetwork();
+  return input => network({
+    ...input,
+    validateURL(next) {
+      const validated = input.validateURL(replaceOrigin(next, sockets));
+      return replaceOrigin(validated, aliases);
+    },
+  });
+}
+
+function streamBridgeSource(upstreamOrigin, valuesDigest = '') {
+  return String.raw`
+    const http = require('http');
+    const fs = require('fs');
+    const zlib = require('zlib');
+    const crypto = require('crypto');
+    const upstream = ${JSON.stringify(upstreamOrigin)};
+    const valuesDigest = ${JSON.stringify(valuesDigest)};
+    let server;
+    let retainedShared = null, retainedDigest = null;
+    const json = (response, value, status = 200) => {
+      if (response.writableEnded || response.destroyed) return;
+      response.statusCode = status;
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify(value));
+    };
+    const readBody = request => new Promise((resolve, reject) => {
+      const chunks = [];
+      request.on('data', chunk => chunks.push(Buffer.from(chunk)));
+      request.once('end', () => resolve(Buffer.concat(chunks)));
+      request.once('error', reject);
+    });
+    const failed = (response, error) =>
+      json(response, { error: error.code || 'SCRIPT_EXCEPTION' }, 500);
+    async function route(request, response) {
+      const url = new URL(request.url, 'http://127.0.0.1');
+      if (url.pathname === '/config' || url.pathname === '/full-config') {
+        json(response, { video: { sites: [{
+          key: 'bridge', name: 'Byte bridge', api: '/bridge',
+          actions: ['download', 'proxy', 'dataProxy', 'dataFile', 'observed',
+            'slowProxy', 'endStream', 'largeResult', 'chunkedResponse', 'body', 'ok',
+            'bytesCallback', 'bytesCallArguments',
+            'bytesReturns', 'sharedCapture', 'sharedCheck', 'sharedMutate',
+            'arrayCapture', 'arrayMutate', 'largeRead'],
+        }] } });
+        return;
+      }
+      const prefix = '/bridge/';
+      if (!url.pathname.startsWith(prefix)) {
+        response.statusCode = 404;
+        response.end();
+        return;
+      }
+      const action = url.pathname.slice(prefix.length);
+      let size = Number(url.searchParams.get('size'));
+      const values = Buffer.from(Array.from({ length: 256 }, (_, index) => index));
+      if (action === 'ok') {
+        json(response, { ok: true });
+        return;
+      }
+      if (action === 'endStream') {
+        const bytes = fs.readFileSync('/end-' + size + '.bin');
+        response.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': String(bytes.length),
+        });
+        response.end(bytes);
+        return;
+      }
+      if (action === 'largeResult') {
+        json(response, { data: 'x'.repeat(12 * 1024 * 1024) });
+        return;
+      }
+      if (action === 'chunkedResponse') {
+        const input = JSON.parse((await readBody(request)).toString() || '{}');
+        const total = Number(input.size);
+        response.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': String(total),
+        });
+        const chunk = Buffer.alloc(64 * 1024, 0x5a);
+        for (let offset = 0; offset < total; offset += chunk.length)
+          response.write(chunk.subarray(0, Math.min(chunk.length, total - offset)));
+        response.end();
+        return;
+      }
+      if (action === 'body') {
+        const raw = await readBody(request);
+        let data = null;
+        try { data = JSON.parse(raw.toString()).data; } catch {}
+        json(response, { length: raw.length, dataLength: data?.length ?? null });
+        return;
+      }
+      if (action === 'download') {
+        const path = '/download-' + size + '.bin';
+        const output = fs.createWriteStream(path);
+        const finish = error => {
+          if (error) { failed(response, error); return; }
+          json(response, { size, length: fs.statSync(path).size });
+        };
+        output.once('finish', () => finish());
+        output.once('error', finish);
+        http.get(upstream + '/blob?size=' + size, incoming => {
+          incoming.once('error', error => output.destroy(error));
+          incoming.pipe(output);
+        }).once('error', finish);
+        return;
+      }
+      if (action === 'proxy') {
+        if (!Number.isSafeInteger(size) || size <= 0) {
+          const input = JSON.parse((await readBody(request)).toString() || '{}');
+          size = Number(input.size);
+        }
+        http.get(upstream + '/blob?size=' + size, incoming => {
+          response.writeHead(200, {
+            'content-type': 'application/octet-stream',
+            'content-length': String(size),
+          });
+          incoming.once('error', error => response.destroy(error));
+          incoming.pipe(response);
+        }).once('error', error => {
+          if (response.headersSent) response.destroy(error); else failed(response, error);
+        });
+        return;
+      }
+      if (action === 'dataProxy') {
+        http.get(upstream + '/blob?size=' + size, incoming => {
+          response.writeHead(200, {
+            'content-type': 'application/octet-stream',
+            'content-length': String(size),
+          });
+          incoming.on('data', chunk => {
+            if (!response.write(chunk)) incoming.pause();
+          });
+          response.on('drain', () => incoming.resume());
+          incoming.once('end', () => response.end());
+          incoming.once('error', error => response.destroy(error));
+        }).once('error', error => {
+          if (response.headersSent) response.destroy(error); else failed(response, error);
+        });
+        return;
+      }
+      if (action === 'dataFile') {
+        const path = '/data-' + size + '.bin';
+        const output = fs.createWriteStream(path);
+        let bytes = 0;
+        http.get(upstream + '/blob?size=' + size, incoming => {
+          incoming.on('data', chunk => {
+            bytes += chunk.length;
+            if (!output.write(chunk)) incoming.pause();
+          });
+          output.on('drain', () => incoming.resume());
+          incoming.once('end', () => output.end());
+          incoming.once('error', error => output.destroy(error));
+        }).once('error', error => output.destroy(error));
+        output.once('finish', () =>
+          json(response, { size, length: fs.statSync(path).size, bytes }));
+        output.once('error', error => failed(response, error));
+        return;
+      }
+      if (action === 'observed') {
+        const path = '/observed.bin';
+        const output = fs.createWriteStream(path);
+        let observed = 0;
+        http.get(upstream + '/blob?size=' + size, incoming => {
+          incoming.on('data', chunk => { observed += chunk.length; });
+          incoming.once('error', error => output.destroy(error));
+          incoming.pipe(output);
+        }).once('error', error => output.destroy(error));
+        output.once('finish', () =>
+          json(response, { size, length: fs.statSync(path).size, observed }));
+        output.once('error', error => failed(response, error));
+        return;
+      }
+      if (action === 'slowProxy') {
+        response.writeHead(200, { 'content-type': 'application/octet-stream' });
+        response.flushHeaders();
+        let input;
+        const download = http.get(upstream + '/slow?size=' + size, incoming => {
+          input = incoming;
+          incoming.once('error', error => response.destroy(error));
+          incoming.pipe(response);
+        });
+        download.once('error', error => {
+          if (response.headersSent) response.destroy(error); else failed(response, error);
+        });
+        response.once('close', () => {
+          if (!response.writableFinished) {
+            input?.destroy();
+            download.destroy();
+          }
+        });
+        return;
+      }
+      if (action === 'bytesCallback') {
+        let chunks = [], empty = null, subview = null, buffers = true;
+        const received = await new Promise((resolve, reject) => {
+          http.get(upstream + '/values', incoming => {
+            incoming.on('data', chunk => {
+              if (!Buffer.isBuffer(chunk)) buffers = false;
+              chunks.push(Buffer.from(chunk));
+            });
+            incoming.once('end', () => resolve(Buffer.concat(chunks)));
+            incoming.once('error', reject);
+          }).once('error', reject);
+        });
+        await new Promise(resolve => {
+          fs.readFile('/empty.bin', (error, data) => {
+            empty = error ? { code: error.code } : {
+              length: data.length, buffer: Buffer.isBuffer(data),
+            };
+            resolve();
+          });
+        });
+        await new Promise(resolve => {
+          const fd = fs.openSync('/values.bin', 'r');
+          const backing = new Uint8Array(values.length + 19);
+          const view = backing.subarray(11, 11 + values.length);
+          fs.read(fd, view, 0, values.length, 0, (error, length, data) => {
+            try { fs.closeSync(fd); } catch {}
+            subview = error ? { code: error.code } : {
+              length, same: Buffer.from(data).equals(values),
+            };
+            resolve();
+          });
+        });
+        json(response, {
+          length: received.length, same: received.equals(values), buffers,
+          empty, subview,
+        });
+        return;
+      }
+      if (action === 'bytesCallArguments') {
+        const expected = values;
+        const backing = new Uint8Array(expected.length + 32);
+        backing.set(expected, 16);
+        const view = backing.subarray(16, 16 + expected.length);
+        const arrayBuffer = view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
+        fs.writeFileSync('/call-values.bin', expected);
+        fs.writeFileSync('/call-subview.bin', view);
+        fs.writeFileSync('/call-empty.bin', Buffer.alloc(0));
+        const compressed = zlib.deflateSync(arrayBuffer);
+        fs.writeFileSync('/call-arraybuffer.bin', compressed);
+        json(response, {
+          viewOffset: view.byteOffset, viewLength: view.byteLength,
+          arrayBuffer: arrayBuffer instanceof ArrayBuffer,
+        });
+        return;
+      }
+      if (action === 'bytesReturns') {
+        const buffer = fs.readFileSync('/values.bin');
+        const empty = fs.readFileSync('/empty.bin');
+        const compressed = zlib.deflateSync(values);
+        const inflated = zlib.inflateSync(compressed);
+        const digest = await crypto.subtle.digest('SHA-256',
+          buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength));
+        json(response, {
+          bufferHash: crypto.createHash('sha256').update(buffer).digest('hex'),
+          buffer: Buffer.isBuffer(buffer), emptyLength: empty.length,
+          emptyBuffer: Buffer.isBuffer(empty), inflated: inflated.equals(values),
+          digestHash: Buffer.from(digest).toString('hex'),
+          digestType: digest instanceof ArrayBuffer,
+          digestView: ArrayBuffer.isView(digest), digestLength: digest.byteLength,
+          expectedDigest: valuesDigest,
+        });
+        return;
+      }
+      if (action === 'largeRead') {
+        const promised = await fs.promises.readFile('/large.bin');
+        const synchronous = fs.readFileSync('/large.bin');
+        const digest = value => crypto.createHash('sha256').update(value).digest('hex');
+        json(response, {
+          promiseLength: promised.length, promiseHash: digest(promised),
+          promiseBuffer: Buffer.isBuffer(promised),
+          syncLength: synchronous.length, syncHash: digest(synchronous),
+          syncBuffer: Buffer.isBuffer(synchronous),
+          same: promised.equals(synchronous),
+        });
+        return;
+      }
+      if (action === 'sharedCapture') {
+        const chunks = [];
+        await new Promise((resolve, reject) => {
+          http.get(upstream + '/shared', incoming => {
+            incoming.on('data', chunk => {
+              chunks.push(Buffer.from(chunk));
+            });
+            incoming.once('end', () => {
+              retainedShared = Buffer.concat(chunks);
+              resolve();
+            });
+            incoming.once('error', reject);
+          }).once('error', reject);
+        });
+        json(response, {
+          length: retainedShared?.length ?? 0,
+          hash: crypto.createHash('sha256').update(retainedShared).digest('hex'),
+          buffer: Buffer.isBuffer(retainedShared),
+          guestPrototype: Object.getPrototypeOf(retainedShared) === Buffer.prototype,
+        });
+        return;
+      }
+      if (action === 'sharedCheck') {
+        json(response, {
+          hash: retainedShared && crypto.createHash('sha256').update(retainedShared).digest('hex'),
+          first: retainedShared?.[0] ?? null,
+          buffer: Buffer.isBuffer(retainedShared),
+        });
+        return;
+      }
+      if (action === 'sharedMutate') {
+        const first = retainedShared[0];
+        retainedShared[0] = first ^ 0xff;
+        json(response, { first, changed: retainedShared[0] });
+        return;
+      }
+      if (action === 'arrayCapture') {
+        retainedDigest = await crypto.subtle.digest('SHA-256', retainedShared);
+        json(response, {
+          hash: Buffer.from(retainedDigest).toString('hex'),
+          type: retainedDigest instanceof ArrayBuffer,
+          view: ArrayBuffer.isView(retainedDigest),
+          guestPrototype: Object.getPrototypeOf(retainedDigest) === ArrayBuffer.prototype,
+          length: retainedDigest.byteLength,
+        });
+        return;
+      }
+      if (action === 'arrayMutate') {
+        const bytes = new Uint8Array(retainedDigest);
+        const first = bytes[0];
+        bytes[0] = first ^ 0xff;
+        json(response, { first, changed: bytes[0], length: retainedDigest.byteLength });
+        return;
+      }
+      response.statusCode = 404;
+      response.end();
+    }
+    module.exports.start = () => new Promise(resolve => {
+      server = http.createServer((request, response) => {
+        route(request, response).catch(error => failed(response, error));
+      });
+      server.listen(Number(process.env.PORT), '127.0.0.1', resolve);
+    });
+    module.exports.stop = () => {
+      server?.closeAllConnections();
+      server?.close();
+    };
+  `;
+}
+
+async function startStreamBridge(t, upstream, { files = {} } = {}) {
+  const root = rootFor(t);
+  const volumeRoot = join(root, 'volumes', 'bridge');
+  const runtime = createCatRuntime({
+    dataRoot: root, network: networkForLocalServers([upstream]),
+  });
+  t.after(() => runtime.close());
+  await runtime.install({
+    installationId: 'bridge',
+    source: streamBridgeSource(upstream.origin, sha256(upstream.values)),
+    config: {},
+    version: '1', enabled: true,
+  });
+  for (const [name, bytes] of Object.entries(files))
+    writeFileSync(join(volumeRoot, name), bytes);
+  return { runtime, root, volumeRoot, endpoint: runtime.getSession('bridge').endpoint() };
+}
+
+async function streamUpstream(t) {
+  const registry = new Map();
+  const reads = [];
+  const values = Buffer.from(Array.from({ length: 256 }, (_, index) => index));
+  const shared = Buffer.from(Array.from({ length: 256 }, (_, index) => 255 - index));
+  const server = await serverFor(t, (request, response) => {
+    const url = new URL(request.url, 'http://127.0.0.1');
+    if (url.pathname === '/values') {
+      response.end(values);
+      return;
+    }
+    if (url.pathname === '/shared') {
+      response.end(shared);
+      return;
+    }
+    const filename = url.pathname.slice(1);
+    if (filename === 'blob' || filename === 'slow') {
+      const size = Number(url.searchParams.get('size'));
+      const bytes = registry.get(filename + '-' + size);
+      if (filename === 'slow') reads.push({ response, url: url.href });
+      response.writeHead(200, {
+        'content-type': 'application/octet-stream',
+        'content-length': String(size),
+      });
+      if (filename === 'blob') { response.end(bytes); return; }
+      response.write(bytes.subarray(0, 64 * 1024));
+      const timer = setInterval(() => {
+        if (response.destroyed || response.writableEnded) { clearInterval(timer); return; }
+        response.write(Buffer.alloc(64 * 1024, 0x5a));
+      }, 10);
+      response.once('close', () => clearInterval(timer));
+      return;
+    }
+    response.statusCode = 404;
+    response.end();
+  });
+  return {
+    ...server,
+    values,
+    shared,
+    blob(size) {
+      const bytes = deterministicBytes(size, 0x6d2b79f5 ^ size);
+      registry.set('blob-' + size, bytes);
+      return bytes;
+    },
+    slow(size) {
+      const bytes = deterministicBytes(size, 0x5a5a5a5a ^ size);
+      registry.set('slow-' + size, bytes);
+      return bytes;
+    },
+    reads,
+  };
+}
+
+function scriptRequest(endpoint, path) {
+  return request(endpoint.origin + path, {
+    headers: { 'x-meow-script-access': endpoint.access },
+  });
+}
+
+async function waitFor(predicate, message, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (predicate()) return;
+    if (Date.now() >= deadline) throw new Error(message);
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+}
+
+function sourceHash(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function volumeSource(marker, extra = '') {
+  return String.raw`
+    const http = require('http');
+    const fs = require('fs');
+    let server;
+    module.exports.start = () => new Promise(resolve => {
+      server = http.createServer((request, response) => {
+        response.setHeader('content-type', 'application/json');
+        if (request.url === '/config' || request.url === '/full-config') {
+          response.end(JSON.stringify({ video: { sites: [{
+            key: '${marker}', name: '${marker}', api: '/api/${marker}',
+            actions: ['read', 'write'],
+          }] } }));
+          return;
+        }
+        if (request.url === '/api/${marker}/write') {
+          fs.writeFileSync('/${marker}-state.txt', '${marker}');
+          response.end(JSON.stringify({ written: true }));
+          return;
+        }
+        let value = null;
+        try { value = fs.readFileSync('/${marker}-state.txt', 'utf8'); } catch {}
+        response.end(JSON.stringify({ value }));
+      });
+      server.listen(Number(process.env.PORT), '127.0.0.1', resolve);
+    });
+    module.exports.stop = () => { server?.closeAllConnections(); server?.close(); };
+    ${extra}
+  `;
+}
+
+function settingsScript(runtime, installationId) {
+  return JSON.parse(readFileSync(runtime.settings.path, 'utf8')).scripts
+    .find(script => script.installationId === installationId);
+}
+
+function sourceFile(dataRoot, hash) {
+  return join(dataRoot, 'sources', hash + '.js');
 }
 
 test('Cat transfer staging is reclaimed by lifecycle without a concurrent token quota', () => {
@@ -595,61 +1230,94 @@ test('Cat abandoned transfer staging expires without requiring another RPC', () 
     clock: () => now,
     ttl: 100,
     setTimer(callback) {
-      scheduled = callback;
-      return { unref() {} };
+      scheduled = { callback, unref() {} };
+      return { callback, unref() {} };
     },
     clearTimer() {},
   });
   transfers.begin({ length: 1, sha256: '0'.repeat(64), kind: 'source' });
   assert.equal(transfers.entries.size, 1);
   now = 100;
-  scheduled();
+  scheduled.callback();
   assert.equal(transfers.entries.size, 0);
   transfers.close();
 });
 
 test('Cat transfer expiry ignores a stale timer callback after rescheduling', () => {
   let now = 0;
-  const scheduled = [];
+  let scheduled;
   const transfers = new SourceTransfers({
     clock: () => now,
     ttl: 100,
     setTimer(callback) {
-      const timer = { callback, cleared: false, unref() {} };
-      scheduled.push(timer);
-      return timer;
+      scheduled = { callback, unref() {} };
+      return { callback, unref() {} };
     },
-    clearTimer(timer) { timer.cleared = true; },
+    clearTimer() {},
   });
   const begun = transfers.begin({ length: 1, sha256: createHash('sha256').update('x').digest('hex'),
     kind: 'source' });
-  const stale = scheduled.at(-1);
+  const stale = scheduled;
   transfers.chunk({ token: begun.token, offset: 0, data: Buffer.from('x').toString('base64') });
-  const current = transfers.timer;
   stale.callback();
-  assert.equal(transfers.timer, current);
   assert.equal(transfers.entries.size, 1);
   now = 100;
-  current.handle.callback();
+  scheduled.callback();
   assert.equal(transfers.entries.size, 0);
   transfers.close();
 });
 
 test('Cat transfer setup failure does not retain an unreachable staging entry', () => {
+  let scheduled = 0;
   const transfers = new SourceTransfers({
-    setTimer() { throw new Error('synthetic timer setup failure'); },
+    setTimer() { scheduled++; throw new Error('synthetic timer setup failure'); },
   });
   assert.throws(() => transfers.begin({
     length: 1, sha256: createHash('sha256').update('x').digest('hex'), kind: 'source',
   }), /synthetic timer setup failure/);
   assert.equal(transfers.entries.size, 0);
-  assert.equal(transfers.timers.size, 0);
+  assert.equal(scheduled, 1);
+  transfers.close();
+});
+
+test('Cat source staging rejects the 16 MiB boundary before retaining chunks', () => {
+  const transfers = new SourceTransfers();
+  const sha256 = createHash('sha256').update('x').digest('hex');
+  assert.throws(() => transfers.begin({
+    length: SCRIPT_LIMITS.maxSourceBytes + 1, sha256, kind: 'source',
+  }), { code: 'RESOURCE_LIMIT' });
+  const exact = transfers.begin({ length: SCRIPT_LIMITS.maxSourceBytes, sha256, kind: 'source' });
+  assert.equal(transfers.entries.get(exact.token).length, SCRIPT_LIMITS.maxSourceBytes);
+  transfers.close();
+});
+
+test('Cat script result blobs preserve a 12 MiB payload across chunk reads', () => {
+  const transfers = new SourceTransfers();
+  const size = 12 * 1024 * 1024;
+  const exact = { data: 'x'.repeat(size) };
+  const result = transfers.result(exact);
+  assert.equal(result.blob.length, Buffer.byteLength(JSON.stringify(exact)));
+  assert.equal(result.blob.chunkBytes, 64 * 1024);
+  const chunks = [];
+  for (let offset = 0; offset < result.blob.length;) {
+    const part = transfers.read({ token: result.blob.token, offset });
+    chunks.push(Buffer.from(part.data, 'base64'));
+    offset = part.next;
+  }
+  const bytes = Buffer.concat(chunks);
+  assert.equal(bytes.length, result.blob.length);
+  assert.equal(sha256(bytes), result.blob.sha256);
+  assert.equal(bytes.toString(), JSON.stringify(exact));
+  transfers.release(result.blob.token);
   transfers.close();
 });
 
 test('Cat transfer chunk rolls back when expiry rescheduling fails', () => {
   let schedules = 0;
+  let now = 0;
   const transfers = new SourceTransfers({
+    clock: () => now,
+    ttl: 100,
     setTimer(callback) {
       schedules++;
       if (schedules === 3) throw new Error('synthetic reschedule failure');
@@ -665,6 +1333,7 @@ test('Cat transfer chunk rolls back when expiry rescheduling fails', () => {
   }), /synthetic reschedule failure/);
   assert.equal(transfers.entries.get(begun.token).offset, 0);
   assert.equal(transfers.entries.get(begun.token).chunks.length, 0);
+  assert.equal(transfers.entries.get(begun.token).expires, 100);
   transfers.close();
 });
 
@@ -682,11 +1351,35 @@ test('Cat transfer close releases every entry even when timer cleanup fails', ()
     length: 1, sha256: createHash('sha256').update('x').digest('hex'), kind: 'source',
   });
   assert.throws(() => transfers.close(), /synthetic timer cleanup failure/);
-  assert.equal(cleared.length, 2);
+  assert.equal(cleared.length, 1);
   assert.equal(transfers.entries.size, 0);
-  assert.equal(transfers.timers.size, 0);
   handle.callback();
-  assert.equal(transfers.timers.size, 0);
+  assert.equal(transfers.entries.size, 0);
+  assert.doesNotThrow(() => transfers.close());
+  assert.equal(cleared.length, 1);
+});
+
+test('Cat os memory metadata reports the per-script limit and current guest heap', async t => {
+  const root = new ResourceScope();
+  let heapUsed = 234;
+  const session = {
+    installationId: 'os-memory-fixture',
+    revision: { source: '' },
+    root,
+    limits: { cleanupTimeoutMs: 100, maxMemoryBytes: 1234 },
+    live: true,
+    scope: () => root,
+    storageWritten() {},
+    engine: { memoryUsage: () => ({ heapUsed }) },
+  };
+  const node = new NodeCapabilities(session, { close: async () => {} }, rootFor(t));
+  assert.equal(node.builtins.os.totalmem(), 1234);
+  assert.equal(node.builtins.os.freemem(), 1000);
+  heapUsed = 2000;
+  assert.equal(node.builtins.os.freemem(), 0);
+  root.close();
+  session.live = false;
+  await node.close();
 });
 
 test('Cat URL enhancement failure preserves the original valid result', () => {
@@ -702,7 +1395,7 @@ test('Cat URL enhancement failure preserves the original valid result', () => {
   }), input);
 });
 
-test('Cat imports are not rejected by the generic installation-count budget',
+test('Cat imports are not rejected by any installation-count quota',
   { timeout: 30000 }, async t => {
     const runtime = createCatRuntime({ dataRoot: rootFor(t) });
     t.after(() => runtime.close());
@@ -713,6 +1406,260 @@ test('Cat imports are not rejected by the generic installation-count budget',
       });
     }
     assert.equal((await runtime.status()).instances.length, 40);
+  });
+
+test('Cat ready memory overrun restarts once with the same revision and keeps its private volume',
+  { timeout: 30000 }, async t => {
+    const dataRoot = rootFor(t);
+    const diagnostics = [];
+    const host = new ScriptHost({
+      adapters: { cat: input => new CatSession({ ...input, dataRoot }) },
+      limits: { maxMemoryBytes: 128 * 1024 * 1024 },
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    t.after(() => host.close());
+    const memorySource = String.raw`
+      const http = require('http');
+      const fs = require('fs');
+      let server;
+      module.exports.start = () => {
+        server = http.createServer((request, response) => {
+          if (request.url === '/full-config' || request.url === '/config') {
+            response.setHeader('content-type', 'application/json');
+            response.end(JSON.stringify({ video: { sites: [{
+              key: 'memory', name: 'Memory', api: '/api/memory', actions: ['home', 'allocate'],
+            }] } }));
+            return;
+          }
+          if (request.url === '/api/memory/allocate') {
+            fs.writeFileSync('/generation-count', String(Number(
+              fs.existsSync('/generation-count') ? fs.readFileSync('/generation-count', 'utf8') : '0') + 1));
+            const chunks = [new Uint8Array(256 * 1024 * 1024)];
+            response.end(JSON.stringify({ allocated: true }));
+            return;
+          }
+          if (request.url === '/api/memory/home') {
+            response.setHeader('content-type', 'application/json');
+            response.end(JSON.stringify({ count: Number(fs.existsSync('/generation-count')
+              ? fs.readFileSync('/generation-count', 'utf8') : '0') }));
+            return;
+          }
+          response.statusCode = 404;
+          response.end();
+        });
+        server.listen(Number(process.env.PORT), '127.0.0.1');
+      };
+      module.exports.stop = () => { server.closeAllConnections(); server.close(); };
+    `;
+    const installed = await host.install({
+      installationId: 'memory-cat', protocol: 'cat', source: memorySource, config: {},
+      version: '1', enabled: true,
+    });
+    await assert.rejects(host.invoke({
+      installationId: 'memory-cat', siteId: 'memory', operation: 'allocate', payload: {},
+    }), { code: 'RESOURCE_LIMIT' });
+    let restarted;
+    for (let attempt = 0; attempt < 500; attempt++) {
+      restarted = host.get('memory-cat');
+      if (restarted.generation > installed.generation && restarted.state === 'ready') break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.equal(restarted.state, 'ready');
+    assert(restarted.generation > installed.generation);
+    assert.equal(restarted.contentHash, installed.contentHash);
+    assert.equal(diagnostics.filter(event => event.operation === 'memory.restart').length, 1);
+    assert.deepEqual(await host.invoke({
+      installationId: 'memory-cat', siteId: 'memory', operation: 'home', payload: {},
+    }), { count: 1 });
+  });
+
+test('Cat start returns after aggregate readiness while instances load in order',
+  { timeout: 30000 }, async t => {
+    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+    t.after(() => runtime.close());
+    await runtime.install({
+      installationId: 'first', source: delayedSource('first', 50), config: {},
+      version: '1', enabled: true,
+    });
+    await runtime.install({
+      installationId: 'second', source: delayedSource('second', 500), config: {},
+      version: '1', enabled: true,
+    });
+    await runtime.close();
+
+    const reopened = createCatRuntime({ dataRoot: runtime.dataRoot });
+    t.after(() => reopened.close());
+    const started = await reopened.start();
+    assert.equal(started.settingsPath, join(reopened.dataRoot, 'settings.json'));
+    assert.equal(started.aggregate.origin, `http://127.0.0.1:${reopened.server.address().port}`);
+    assert.ok(reopened.server.listening);
+    assert.deepEqual((await reopened.status()).instances.map(instance => instance.state).sort(),
+      ['starting', 'starting']);
+    await waitForState(reopened, 'first', 'ready');
+    const first = await reopened.invoke({
+      installationId: 'first', siteId: 'site-first', operation: 'home', payload: {},
+    });
+    assert.deepEqual(first, { instance: 'first' });
+    assert.equal((await reopened.status()).instances.find(instance =>
+      instance.installationId === 'second').state, 'starting');
+    await assert.rejects(reopened.invoke({
+      installationId: 'second', siteId: 'site-second', operation: 'home', payload: {},
+    }), { code: 'STARTING' });
+    const early = await request(`${started.aggregate.origin}/cat/second/site-second/home`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-meow-runtime-access': started.aggregate.access,
+      },
+      body: '{}',
+    });
+    assert.equal(early.status, 503);
+    assert.deepEqual(JSON.parse(early.text), { error: { code: 'STARTING' } });
+    await waitForState(reopened, 'second', 'ready');
+    assert.deepEqual(await reopened.refresh(), { applied: true, failures: [] });
+    assert.equal((await reopened.status()).instances.find(instance =>
+      instance.installationId === 'second').state, 'ready');
+    assert.deepEqual(await reopened.invoke({
+      installationId: 'second', siteId: 'site-second', operation: 'home', payload: {},
+    }), { instance: 'second' });
+  });
+
+test('Cat management operations queue between background instance starts',
+  { timeout: 30000 }, async t => {
+    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+    t.after(() => runtime.close());
+    await runtime.install({
+      installationId: 'first', source: delayedSource('first', 50), config: {},
+      version: '1', enabled: true,
+    });
+    await runtime.install({
+      installationId: 'second', source: delayedSource('second', 150), config: {},
+      version: '1', enabled: true,
+    });
+    await runtime.close();
+
+    const reopened = createCatRuntime({ dataRoot: runtime.dataRoot });
+    t.after(() => reopened.close());
+    await reopened.start();
+    const before = (await reopened.status()).instances.find(instance =>
+      instance.installationId === 'second').state;
+    assert.ok(['starting', 'ready'].includes(before), before);
+    const disabled = await reopened.setEnabled('second', false);
+    assert.equal(disabled.state, 'disabled');
+    assert.equal((await reopened.status()).instances.find(instance =>
+      instance.installationId === 'second').state, 'disabled');
+    await waitForState(reopened, 'first', 'ready');
+    assert.equal((await reopened.status()).instances.find(instance =>
+      instance.installationId === 'second').state, 'disabled');
+    assert.equal((await reopened.setEnabled('second', true)).state, 'ready');
+    assert.deepEqual(await reopened.invoke({
+      installationId: 'second', siteId: 'site-second', operation: 'home', payload: {},
+    }), { instance: 'second' });
+  });
+
+test('Cat starting instances reject management and session access without hidden waiting',
+  { timeout: 30000 }, async t => {
+    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+    t.after(() => runtime.close());
+    await runtime.install({
+      installationId: 'pending', source: delayedSource('pending', 500), config: {},
+      version: '1', enabled: true,
+    });
+    await runtime.close();
+
+    const reopened = createCatRuntime({ dataRoot: runtime.dataRoot });
+    t.after(() => reopened.close());
+    await reopened.start();
+    assert.throws(() => reopened.getSession('pending'), { code: 'STARTING' });
+    await assert.rejects(reopened.management('pending'), { code: 'STARTING' });
+    await assert.rejects(reopened.sync('pending', undefined, {
+      provider: 'quark', credentials: { cookie: 'fixture' },
+    }), { code: 'STARTING' });
+    await assert.rejects(reopened.invoke({
+      installationId: 'pending', siteId: 'site-pending', operation: 'home', payload: {},
+    }), { code: 'STARTING' });
+  });
+
+test('Cat close stops queued startup and waits for the in-flight instance',
+  { timeout: 30000 }, async t => {
+    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+    await runtime.install({
+      installationId: 'first', source: delayedSource('first', 20), config: {},
+      version: '1', enabled: true,
+    });
+    await runtime.install({
+      installationId: 'second', source: delayedSource('second', 500), config: {},
+      version: '1', enabled: true,
+    });
+    await runtime.install({
+      installationId: 'third', source: delayedSource('third', 20), config: {},
+      version: '1', enabled: true,
+    });
+    await runtime.close();
+
+    const reopened = createCatRuntime({ dataRoot: runtime.dataRoot });
+    await reopened.start();
+    await waitForState(reopened, 'first', 'ready');
+    assert.equal((await reopened.status()).instances.find(instance =>
+      instance.installationId === 'second').state, 'starting');
+    assert.deepEqual(reopened.startupQueue, ['third']);
+    await reopened.close();
+    assert.equal(reopened.closed, true);
+    assert.deepEqual(reopened.startupQueue, []);
+    assert.equal(reopened.startupScheduled, false);
+    assert.equal(reopened.sessions.size, 0);
+    assert.equal(reopened.host, null);
+    await assert.rejects(reopened.start(), { code: 'HOST_CLOSED' });
+  });
+
+test('Cat startup failure is recorded without blocking later instances',
+  { timeout: 30000 }, async t => {
+    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+    t.after(() => runtime.close());
+    await runtime.install({
+      installationId: 'broken', source: 'module.exports.start = () => { throw new Error("broken"); };',
+      config: {}, version: '1', enabled: false,
+    });
+    await runtime.install({
+      installationId: 'healthy', source: delayedSource('healthy', 20), config: {},
+      version: '1', enabled: true,
+    });
+    writeSettings((await runtime.status()).settingsPath, value => ({
+      ...value,
+      scripts: value.scripts.map(script => ({ ...script, enabled: true })),
+    }));
+    await runtime.close();
+
+    const reopened = createCatRuntime({ dataRoot: runtime.dataRoot });
+    t.after(() => reopened.close());
+    await reopened.start();
+    await waitForState(reopened, 'broken', 'failed');
+    await waitForState(reopened, 'healthy', 'ready');
+    assert.deepEqual(await reopened.invoke({
+      installationId: 'healthy', siteId: 'site-healthy', operation: 'home', payload: {},
+    }), { instance: 'healthy' });
+  });
+
+test('Cat cold-start background apply records disabled instances for consistent invocation',
+  { timeout: 30000 }, async t => {
+    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+    t.after(() => runtime.close());
+    await runtime.install({
+      installationId: 'disabled-cold', source: delayedSource('disabled-cold', 0), config: {},
+      version: '1', enabled: false,
+    });
+    await runtime.close();
+
+    const reopened = createCatRuntime({ dataRoot: runtime.dataRoot });
+    t.after(() => reopened.close());
+    await reopened.start();
+    const state = (await reopened.status()).instances.find(instance =>
+      instance.installationId === 'disabled-cold');
+    assert.equal(state.state, 'disabled');
+    assert.equal(reopened.hostState('disabled-cold')?.enabled, false);
+    await assert.rejects(reopened.invoke({
+      installationId: 'disabled-cold', siteId: 'site-disabled-cold', operation: 'home', payload: {},
+    }), { code: 'DISABLED' });
   });
 
 test('Cat compressed fetch handles an aborted upstream response without a host error leak',
@@ -892,8 +1839,12 @@ test('Cat callback and listener registration failures roll back native ownership
 
   const emitter = new EventEmitter();
   const listener = () => {};
-  assert.throws(() => node.invoke({ value: emitter, role: 'stream' },
-    'on', ['event', listener]), error => error === failure);
+  // Listener registration no longer adds a per-listener scope closure, so it
+  // cannot fail through the scope and must not retain the emitter.
+  assert.doesNotThrow(() => node.invoke({ value: emitter, role: 'stream' },
+    'on', ['event', listener]));
+  assert.equal(emitter.listenerCount('event'), 1);
+  emitter.removeListener('event', listener);
   assert.equal(emitter.listenerCount('event'), 0);
 
   assert.throws(() => node.encode(Promise.resolve('unused'), new Set(), undefined, failedScope),
@@ -929,7 +1880,109 @@ test('Cat ignores a native callback retained past bridge shutdown', async t => {
   assert.equal(failures, 0);
 });
 
-test('Cat retries residual native handle cleanup when ordinary scope teardown could not finish it',
+test('Cat releases native callbacks with their last host reference and revokes a pending release',
+  async t => {
+    const root = new ResourceScope();
+    const resources = new ResourceScope(root.signal);
+    const session = {
+      installationId: 'callback-reachability',
+      revision: { source: '' },
+      root,
+      limits: { cleanupTimeoutMs: 100 },
+      live: true,
+      scope: () => resources,
+      resourceScope: () => resources,
+      storageWritten() {},
+      trackAdapter() {},
+      nativeCallback() {},
+    };
+    const node = new NodeCapabilities(session, { close: async () => {} }, rootFor(t));
+    try {
+      let callback = node.decode({ $: 'callback', id: 1, context: 0 }, resources);
+      const original = node.callbacks.get(1);
+      assert.equal(original.ref.deref(), callback);
+      callback = null;
+      await collectGarbage();
+      assert.equal(node.callbacks.size, 0);
+
+      node.pendingGuestRelease.callbacks.add(1);
+      callback = node.decode({ $: 'callback', id: 1, context: 0 }, resources);
+      assert.equal(node.pendingGuestRelease.callbacks.has(1), false);
+      assert.equal(node.callbacks.get(1).ref.deref(), callback);
+      assert.notEqual(node.callbacks.get(1), original);
+    } finally {
+      root.close();
+      session.live = false;
+      await node.close();
+    }
+  });
+
+test('Cat listener registration does not retain the emitter through a session cleanup closure',
+  async t => {
+    const root = new ResourceScope();
+    const resources = new ResourceScope(root.signal);
+    const session = {
+      installationId: 'listener-reachability',
+      revision: { source: '' },
+      root,
+      limits: { cleanupTimeoutMs: 100 },
+      live: true,
+      scope: () => resources,
+      resourceScope: () => resources,
+      storageWritten() {},
+      trackAdapter() {},
+      nativeCallback() {},
+    };
+    const node = new NodeCapabilities(session, { close: async () => {} }, rootFor(t));
+    try {
+      let emitter = new EventEmitter();
+      const reference = new WeakRef(emitter);
+      const register = value => node.invoke({ value, role: 'stream' }, 'on', ['event', () => {}]);
+      register(emitter);
+      assert.equal(emitter.listenerCount('event'), 1);
+      emitter = null;
+      await collectGarbage();
+      assert.equal(reference.deref(), undefined);
+    } finally {
+      root.close();
+      session.live = false;
+      await node.close();
+    }
+  });
+
+test('Cat guest handle release skips persistent and naturally closing resource roles', async t => {
+  const root = new ResourceScope();
+  const resources = new ResourceScope(root.signal);
+  const session = {
+    installationId: 'guest-handle-release',
+    revision: { source: '' },
+    root,
+    limits: { cleanupTimeoutMs: 100 },
+    live: true,
+    scope: () => resources,
+    resourceScope: () => resources,
+    storageWritten() {},
+    trackAdapter() {},
+    nativeCallback() {},
+  };
+  const node = new NodeCapabilities(session, { close: async () => {} }, rootFor(t));
+  try {
+    const url = node.encode(new URL('https://example.invalid/'), new Set(), undefined, resources);
+    const stats = node.encode({ size: 1 }, new Set(), 'stats', resources);
+    const stream = node.encode(new EventEmitter(), new Set(), 'stream', resources);
+    assert.equal(node.handles.size, 3);
+    node.releaseGuestHandles([url.id, stats.id, stream.id]);
+    assert.equal(node.handles.has(url.id), false);
+    assert.equal(node.handles.has(stats.id), false);
+    assert.equal(node.handles.has(stream.id), true);
+  } finally {
+    root.close();
+    session.live = false;
+    await node.close();
+  }
+});
+
+test('Cat reports native handle cleanup failure at scope teardown and shutdown without a hidden retry loop',
   async t => {
     const root = new ResourceScope();
     const session = {
@@ -943,13 +1996,12 @@ test('Cat retries residual native handle cleanup when ordinary scope teardown co
     };
     const node = new NodeCapabilities(session, { close: async () => {} }, rootFor(t));
     const scope = new ResourceScope(root.signal);
-    let permitted = false, attempts = 0;
+    let attempts = 0;
     const stream = {
       destroyed: false,
       destroy() {
         attempts++;
-        if (!permitted) throw new Error('not yet');
-        this.destroyed = true;
+        throw new Error('synthetic disposal failure');
       },
     };
     const receipt = {
@@ -960,12 +2012,10 @@ test('Cat retries residual native handle cleanup when ordinary scope teardown co
     node.retainHandle(receipt, scope);
     scope.close();
     assert.equal(node.handles.size, 0);
-    assert.equal(node.residualHandles.size, 1);
-    permitted = true;
-    await node.close();
-    assert.equal(stream.destroyed, true);
-    assert.equal(attempts, 2);
-    assert.equal(node.residualHandles.size, 0);
+    await assert.rejects(node.close(), /synthetic disposal failure/);
+    assert.equal(stream.destroyed, false);
+    assert.equal(attempts, 1);
+    assert.equal(node.handles.size, 0);
     root.close();
   });
 
@@ -999,7 +2049,7 @@ test('Cat cleanup timeout releases Web stream locks and detaches owner-side clea
     root.close();
   });
 
-test('Cat Web stream cleanup retries lock release after pending cancellation settles',
+test('Cat Web stream cleanup releases its lock after cancellation settles',
   async t => {
     const root = new ResourceScope();
     const session = {
@@ -1161,24 +2211,20 @@ test('Cat service cleanup continues after request and agent cleanup failures', a
   session.nativeRequests.add(released);
   let agentReleased = false;
   const brokenAgent = { destroy() { throw new Error('synthetic agent cleanup failure'); } };
-  let flakyAttempts = 0;
+  const brokenAgent2 = { destroy() { throw new Error('synthetic agent cleanup failure'); } };
   services.agents.add(brokenAgent);
-  services.agents.add({ destroy() {
-    flakyAttempts++;
-    if (flakyAttempts === 1) throw new Error('synthetic transient agent cleanup failure');
-  } });
+  services.agents.add(brokenAgent2);
   services.agents.add({ destroy() { agentReleased = true; } });
   await assert.rejects(services.close(), /synthetic request cleanup failure/);
   assert.equal(released.destroyed, true);
   assert.equal(agentReleased, true);
-  assert.equal(flakyAttempts, 2);
   assert.equal(session.nativeRequests.size, 0);
-  assert.deepEqual([...services.agents], [brokenAgent]);
+  assert.equal(services.agents.size, 0);
   assert.equal(broken.listenerCount('error'), 1);
   broken.closed = true;
   broken.destroyed = true;
   broken.emit('close');
-  assert.equal(broken.listenerCount('error'), 0);
+  assert.equal(broken.listenerCount('error'), 1);
   assert.equal(services.session, null);
   root.close();
 });
@@ -1206,18 +2252,18 @@ test('Cat service timeout detaches request ownership and leaves only a late-clos
   assert.equal(session.nativeRequests.size, 0);
   assert.equal(services.requestCleanup.size, 0);
   assert.equal(context.cleanups.size, 1);
-  assert.equal(request.listenerCount('close'), 1);
+  assert.equal(request.listenerCount('close'), 0);
   assert.equal(request.listenerCount('error'), 1);
   assert.doesNotThrow(() => request.emit('error', new Error('late request error')));
   request.closed = true;
   request.emit('close');
   assert.equal(request.listenerCount('close'), 0);
-  assert.equal(request.listenerCount('error'), 0);
+  assert.equal(request.listenerCount('error'), 1);
   assert.equal(services.session, null);
   root.close();
 });
 
-test('Cat request-scope cleanup retries a listener that transiently cannot be removed', () => {
+test('Cat request-scope cleanup reports a listener that cannot be removed', () => {
   const root = new ResourceScope();
   const services = new ScriptServices({
     installationId: 'request-scope-cleanup',
@@ -1227,15 +2273,15 @@ test('Cat request-scope cleanup retries a listener that transiently cannot be re
   const request = new EventEmitter();
   request.socket = new EventEmitter();
   const response = new EventEmitter();
+  const responseEmit = response.emit;
   response.writableEnded = false;
   response.destroyed = false;
   response.destroy = () => { response.destroyed = true; };
   const removed = [];
-  let abortedAttempts = 0;
   const requestOff = request.off.bind(request);
   request.off = (event, listener) => {
     removed.push(`request:${event}`);
-    if (event === 'aborted' && abortedAttempts++ === 0)
+    if (event === 'aborted')
       throw new Error('synthetic listener removal failure');
     return requestOff(event, listener);
   };
@@ -1249,17 +2295,176 @@ test('Cat request-scope cleanup retries a listener that transiently cannot be re
   const scope = services.createRequestScope(root, request, response);
   scope.close();
   assert.deepEqual(removed, [
-    'request:aborted', 'response:finish', 'response:close', 'socket:close',
-    'request:aborted',
+    'request:aborted', 'socket:close',
   ]);
-  assert.equal(request.listenerCount('aborted'), 0);
+  assert.equal(response.emit, responseEmit);
+  assert.equal(request.listenerCount('aborted'), 1);
   assert.equal(response.listenerCount('finish'), 0);
   assert.equal(response.listenerCount('close'), 0);
   assert.equal(request.socket.listenerCount('close'), 0);
+  assert.equal(services.cleanupState.error.message, 'synthetic listener removal failure');
   assert.equal(response.destroyed, true);
   for (const agent of services.agents) agent.destroy();
   root.close();
 });
+
+test('Cat response completion runs guest finish and close handlers before retiring request leases',
+  { timeout: 30000 }, async t => {
+    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+    t.after(() => runtime.close());
+    await runtime.install({ installationId: 'response-completion', enabled: true, source: `
+      const http = require('http');
+      let server, active = 0, completed = 0, closed = 0;
+      module.exports.start = () => {
+        server = http.createServer((request, response) => {
+          response.setHeader('content-type', 'application/json');
+          if (request.url === '/config' || request.url === '/full-config')
+            return response.end(JSON.stringify({ video: { sites: [{
+              key: 'completion', api: '/api/completion', actions: ['home'],
+            }] } }));
+          active++;
+          response.once('finish', () => { completed++; });
+          response.once('close', () => { active--; closed++; });
+          response.end(JSON.stringify({ active, completed, closed }));
+        });
+        server.listen(9988);
+      };
+      module.exports.stop = () => server.close();
+    ` });
+    for (let index = 0; index < 8; index++) {
+      assert.deepEqual(await runtime.invoke({
+        installationId: 'response-completion', siteId: 'completion', operation: 'home', payload: {},
+      }), { active: 1, completed: index, closed: index });
+    }
+  });
+
+test('Cat control cancellation closes the transport before retiring guest cleanup handlers',
+  { timeout: 30000 }, async t => {
+    const session = await createCatSessionForInternalTest(t, {
+      installationId: 'cancel-completion',
+      source: `
+      const http = require('http');
+      let server, active = 0, completed = 0;
+      module.exports.start = () => {
+        server = http.createServer((request, response) => {
+          response.setHeader('content-type', 'application/json');
+          if (request.url === '/config' || request.url === '/full-config')
+            return response.end(JSON.stringify({ video: { sites: [{
+              key: 'completion', api: '/api/completion', actions: ['home', 'wait'],
+            }] } }));
+          if (request.url === '/api/completion/home')
+            return response.end(JSON.stringify({ active, completed }));
+          active++;
+          response.once('close', () => { active--; completed++; });
+        });
+        server.listen(9988);
+      };
+      module.exports.stop = () => server.close();
+    `,
+    });
+    let arrived, closed;
+    const requestArrived = new Promise(resolve => { arrived = resolve; });
+    const responseClosed = new Promise(resolve => { closed = resolve; });
+    session.services.main.once('request', (_request, response) => {
+      response.once('close', closed);
+      arrived();
+    });
+    const controller = new AbortController();
+    const pending = session.invoke({
+      siteId: 'completion', operation: 'wait', payload: {},
+    }, { signal: controller.signal });
+    const cancelled = assert.rejects(pending, { code: 'CANCELLED' });
+    await requestArrived;
+    controller.abort();
+    await cancelled;
+    await responseClosed;
+    assert.deepEqual(await session.invoke({
+      siteId: 'completion', operation: 'home', payload: {},
+    }), { active: 0, completed: 1 });
+  });
+
+test('Cat connection close handlers run before native socket leases retire',
+  { timeout: 30000 }, async t => {
+    const session = await createCatSessionForInternalTest(t, {
+      installationId: 'socket-completion',
+      source: `
+      const http = require('http');
+      let server, active = 0;
+      module.exports.start = () => {
+        server = http.createServer((request, response) => {
+          response.setHeader('content-type', 'application/json');
+          if (request.url === '/config' || request.url === '/full-config')
+            return response.end(JSON.stringify({ video: { sites: [{
+              key: 'completion', api: '/api/completion', actions: ['home'],
+            }] } }));
+          response.end(JSON.stringify({ active }));
+        });
+        server.on('connection', socket => {
+          active++;
+          socket.once('close', () => { active--; });
+        });
+        server.listen(9988);
+      };
+      module.exports.stop = () => server.close();
+    `,
+    });
+    await Promise.all([...session.services.connections].map(socket => socket.closed ? undefined
+      : new Promise(resolve => socket.once('close', resolve))));
+    for (let index = 0; index < 8; index++) {
+      const closed = new Promise(resolve => {
+        session.services.main.once('connection', socket => socket.once('close', resolve));
+      });
+      assert.deepEqual(await session.invoke({
+        siteId: 'completion', operation: 'home', payload: {},
+      }), { active: 1 });
+      await closed;
+    }
+  });
+
+test('Cat upgraded transports run guest close handlers before retiring request leases',
+  { timeout: 30000 }, async t => {
+    const session = await createCatSessionForInternalTest(t, {
+      installationId: 'upgrade-completion',
+      source: `
+      const http = require('http');
+      let server, closed = 0;
+      module.exports.start = () => {
+        server = http.createServer((request, response) => {
+          response.setHeader('content-type', 'application/json');
+          if (request.url === '/config' || request.url === '/full-config')
+            return response.end(JSON.stringify({ video: { sites: [{
+              key: 'completion', api: '/api/completion', actions: ['home'],
+            }] } }));
+          response.end(JSON.stringify({ closed }));
+        });
+        server.on('upgrade', (request, socket) => {
+          socket.once('close', () => { closed++; });
+          socket.once('end', () => socket.end());
+          socket.resume();
+          socket.write('HTTP/1.1 101 Switching Protocols\\r\\nConnection: Upgrade\\r\\nUpgrade: test\\r\\n\\r\\n');
+        });
+        server.listen(9988);
+      };
+      module.exports.stop = () => server.close();
+    `,
+    });
+    const endpoint = session.endpoint();
+    const closed = new Promise(resolve => {
+      session.services.main.once('upgrade', (_request, socket) => socket.once('close', resolve));
+    });
+    await new Promise((resolve, reject) => {
+      const client = http.get(endpoint.origin, {
+        agent: false, headers: { [scriptAccessHeader]: endpoint.access,
+          connection: 'Upgrade', upgrade: 'test' },
+      });
+      client.once('error', reject);
+      client.once('upgrade', (_response, socket) => { socket.destroy(); resolve(); });
+    });
+    await closed;
+    assert.deepEqual(await session.invoke({
+      siteId: 'completion', operation: 'home', payload: {},
+    }), { closed: 1 });
+  });
 
 test('Cat native network guard survives guest listener removal and leaves on close', async t => {
   const root = new ResourceScope();
@@ -1309,6 +2514,7 @@ test('Cat network cleanup timeout detaches its request scope and keeps a lightwe
       limits: { cleanupTimeoutMs: 10 },
       live: false,
       scope: () => scope,
+      resourceScope: () => scope,
       storageWritten() {},
       trackAdapter() {},
     };
@@ -1330,7 +2536,7 @@ test('Cat network cleanup timeout detaches its request scope and keeps a lightwe
     socket.closed = true;
     socket.emit('close');
     assert.equal(socket.listenerCount('close'), 0);
-    assert.equal(socket.listenerCount('error'), 0);
+    assert.equal(socket.listenerCount('error'), 1);
     assert.equal(node.session, null);
     assert.equal(node.fs, null);
     assert.deepEqual(Object.keys(node.builtins), []);
@@ -1363,33 +2569,48 @@ test('Cat rejects an expired internal request scope instead of promoting it to t
   assert.equal(status, 410);
 });
 
-test('Cat local HTTP, HTTPS and raw socket mappings require the listener protocol', () => {
-  const scope = { signal: new AbortController().signal, add: () => () => {} };
-  const services = new ScriptServices({
-    installationId: 'protocol-fixture',
-    scope: () => scope,
+test('Cat unregistered loopback ports connect to the real host port', async t => {
+  const echo = net.createServer(socket => socket.pipe(socket));
+  await new Promise((resolve, reject) => {
+    echo.once('error', reject);
+    echo.listen(0, '127.0.0.1', resolve);
   });
-  const server = {
-    meowStarted: true,
-    listening: true,
-    meowSecure: false,
-    address: () => ({ port: 4555 }),
-  };
-  services.listeners.add(server);
-  assert.throws(() => services.mapLocal('https://127.0.0.1:4555/path'),
-    { code: 'UNMAPPED_LOCAL_URL' });
-  assert.throws(() => services.connection({ host: '127.0.0.1', port: 4555 }, true),
-    { code: 'UNMAPPED_LOCAL_URL' });
-  assert.throws(() => services.https.request('https://127.0.0.1:4555/path'),
-    { code: 'UNMAPPED_LOCAL_URL' });
-  server.meowSecure = true;
-  assert.throws(() => services.mapLocal('http://127.0.0.1:4555/path'),
-    { code: 'UNMAPPED_LOCAL_URL' });
-  assert.throws(() => services.connection({ host: '127.0.0.1', port: 4555 }, false),
-    { code: 'UNMAPPED_LOCAL_URL' });
-  assert.throws(() => services.http.request('http://127.0.0.1:4555/path'),
-    { code: 'UNMAPPED_LOCAL_URL' });
-  for (const agent of services.agents) agent.destroy();
+  t.after(() => new Promise(resolve => {
+    echo.closeAllConnections?.();
+    echo.close(resolve);
+  }));
+  const direct = await serverFor(t, (_request, response) => response.end('direct'));
+  const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+  t.after(() => runtime.close());
+  await runtime.install({
+    installationId: 'direct-loopback', enabled: true, config: {}, version: '1', source: String.raw`
+      const http = require('http'), net = require('net');
+      const get = value => new Promise((resolve, reject) => {
+        http.get(value, incoming => {
+          const chunks = [];
+          incoming.on('data', chunk => chunks.push(Buffer.from(chunk)));
+          incoming.once('end', () => resolve(Buffer.concat(chunks).toString()));
+          incoming.once('error', reject);
+        }).once('error', reject);
+      });
+      const socket = (port, value) => new Promise((resolve, reject) => {
+        const client = net.connect(port, '127.0.0.1', () => client.end(value));
+        const chunks = [];
+        client.on('data', chunk => chunks.push(Buffer.from(chunk)));
+        client.once('end', () => resolve(Buffer.concat(chunks).toString()));
+        client.once('error', reject);
+      });
+      module.exports = {
+        home: async () => ({
+          http: await get('http://127.0.0.1:${direct.port}/direct'),
+          socket: await socket(${echo.address().port}, 'echo'),
+        }),
+      };
+    `,
+  });
+  assert.deepEqual(await runtime.invoke({
+    installationId: 'direct-loopback', siteId: 'default', operation: 'home', payload: {},
+  }), { http: 'direct', socket: 'echo' });
 });
 
 test('Cat can select an HTTPS listener as the script primary endpoint', async t => {
@@ -1458,7 +2679,27 @@ test('Cat private volume reports each durable mutation once', async t => {
   assert.equal(sourceStream.destroyed, true);
 });
 
-test('Cat private volume retries a descriptor that failed to close before shutdown', async t => {
+test('Cat private metadata and copies preserve native read-only file behavior', async t => {
+  const volume = new PrivateVolume(rootFor(t), 'readonly-metadata', () => {}, '');
+  const api = volume.facade();
+  try {
+    api.writeFileSync('/original.txt', 'fixture');
+    api.chmodSync('/original.txt', 0o444);
+    api.utimesSync('/original.txt', new Date(1234), new Date(1234));
+    assert.equal(api.statSync('/original.txt').mtimeMs, 1234);
+    api.copyFileSync('/original.txt', '/copy.txt');
+    api.renameSync('/original.txt', '/renamed.txt');
+    assert.equal(api.readFileSync('/copy.txt', 'utf8'), 'fixture');
+    assert.equal(api.readFileSync('/renamed.txt', 'utf8'), 'fixture');
+    assert.equal(api.existsSync('/original.txt'), false);
+  } finally {
+    for (const path of ['/original.txt', '/copy.txt', '/renamed.txt'])
+      if (api.existsSync(path)) api.chmodSync(path, 0o666);
+    await volume.close();
+  }
+});
+
+test('Cat private volume reports a failed descriptor and closes it at shutdown', async t => {
   const volume = new PrivateVolume(rootFor(t), 'descriptor-retry', () => {}, 'source-data');
   const facade = volume.facade();
   facade.writeFileSync('/retry.txt', 'retry');
@@ -1491,7 +2732,7 @@ test('Cat private stream setup failure keeps ownership until native close', asyn
   assert.equal(volume.streamCleanup.size, 0);
 });
 
-test('Cat private stream cleanup retries transient listener removal', async t => {
+test('Cat private stream cleanup reports listener removal failure', async t => {
   const failure = new Error('synthetic transient stream listener failure');
   const volume = new PrivateVolume(rootFor(t), 'stream-listener-retry', () => {},
     'source-data', undefined, 100);
@@ -1503,7 +2744,7 @@ test('Cat private stream cleanup retries transient listener removal', async t =>
     return off(event, listener);
   };
   await assert.rejects(volume.close(), error => error === failure);
-  assert.ok(attempts >= 2);
+  assert.equal(attempts, 2);
   assert.equal(volume.streams.size, 0);
   assert.equal(volume.streamCleanup.size, 0);
   assert.equal(stream.listenerCount('close'), 0);
@@ -1521,13 +2762,16 @@ test('Cat private stream timeout detaches the volume and keeps only late-close g
   assert.doesNotThrow(() => stream.emit('error', new Error('late stream error')));
   stream.emit('close');
   assert.equal(stream.listenerCount('close'), 0);
-  assert.equal(stream.listenerCount('error'), 0);
+  assert.equal(stream.listenerCount('error'), 1);
 });
 
 test('Cat creates internal scope tokens only after request payload serialization succeeds',
   { timeout: 30000 }, async t => {
-    const runtime = await installed(t, rootFor(t));
-    const session = runtime.sessions.get('fixture-a');
+    const session = await createCatSessionForInternalTest(t, {
+      installationId: 'fixture-a',
+      source,
+      config: { id: 'site-a', protocol: 'old' },
+    });
     const before = session.services.scopes.size;
     const cyclic = {};
     cyclic.self = cyclic;
@@ -1554,16 +2798,20 @@ test('Cat isolation, private persistence, same requested ports and aggregate/dir
     assert.ok(a.endpoints.some(endpoint => endpoint.requestedPorts.includes(9988)));
     assert.ok(b.endpoints.some(endpoint => endpoint.requestedPorts.includes(9988)));
 
+    const local = await serverFor(t, (_request, response) => response.end('reachable'));
     const probe = await runtime.invoke({
-      installationId: 'fixture-a', siteId: 'site-a', operation: 'probe', payload: {},
+      installationId: 'fixture-a', siteId: 'site-a', operation: 'probe', payload: {
+        privateUrl: local.socketOrigin + '/private',
+        loopbackUrl: local.socketOrigin + '/loopback',
+      },
     });
     const { virtual, ...plainProbe } = probe;
     assert.deepEqual(plainProbe, {
       count: 1,
       hostFile: 'EPERM',
       dependency: 'UNSUPPORTED_DEPENDENCY',
-      privateHost: 'PERMISSION_DENIED',
-      unmappedLoopback: 'UNMAPPED_LOCAL_URL',
+      privateHost: { status: 200, body: 'reachable' },
+      unmappedLoopback: { status: 200, body: 'reachable' },
       hostEnvironment: null,
       guestGlobals: { lx: 'undefined', meow: 'undefined', bridge: 'undefined' },
       fsCompatibility: { exists: true, nativeRealpath: '/state.json', nativeAlias: true },
@@ -1577,7 +2825,7 @@ test('Cat isolation, private persistence, same requested ports and aggregate/dir
     assert.equal(virtual.dartPort, 0);
     assert.deepEqual(virtual.os, {
       platform: 'linux', arch: 'wasm32', hostname: 'script', homedir: '/', tmpdir: '/tmp',
-      cpus: 1, loopback: '127.0.0.1', totalmem: 512 * 1024 * 1024,
+      cpus: 1, loopback: '127.0.0.1', totalmem: SCRIPT_LIMITS.maxMemoryBytes,
       freemem: virtual.os.freemem,
     });
     assert.ok(virtual.os.freemem >= 0 && virtual.os.freemem <= virtual.os.totalmem);
@@ -1606,6 +2854,10 @@ test('Cat isolation, private persistence, same requested ports and aggregate/dir
     assert.equal(search._meow.version, 1);
     assert.equal(search._meow.media[0].quality, '1080P');
     assert.match(search.list[0].vod_pic, new RegExp('^' + status.aggregate.origin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/proxy/'));
+    assert.deepEqual(await runtime.invoke({
+      installationId: 'fixture-a', siteId: 'site-a', operation: 'home',
+      payload: { resultField: true },
+    }), { result: { value: 'nested-result' }, marker: 'outer-result' });
 
     const aggregate = await request(`${status.aggregate.origin}/cat/fixture-a/site-a/search`, {
       method: 'POST',
@@ -1617,11 +2869,6 @@ test('Cat isolation, private persistence, same requested ports and aggregate/dir
     });
     assert.equal(aggregate.status, 200);
     assert.equal(JSON.parse(aggregate.text).list[0].vod_name, 'aggregate');
-
-    const session = runtime.getSession('fixture-a');
-    const localRoot = session.endpoint().origin + '/';
-    const rootProxy = runtime.mapProxy(session, localRoot);
-    assert.equal(runtime.proxyTarget(session, rootProxy), localRoot);
 
     const opened = await request(a.managementUrl);
     assert.equal(opened.status, 302);
@@ -1683,7 +2930,7 @@ test('Cat isolation, private persistence, same requested ports and aggregate/dir
     const unmapped = await runtime.invoke({
       installationId: 'fixture-a', siteId: 'site-a', operation: 'play', payload: { id: 'unmapped' },
     });
-    await assert.rejects(request(unmapped.url), { code: 'ECONNRESET' });
+    assert.equal((await request(unmapped.url)).status, 200);
 
     const primitivePlay = await runtime.invoke({
       installationId: 'fixture-a', siteId: 'site-a', operation: 'play', payload: 'primitive',
@@ -1701,6 +2948,8 @@ test('Cat isolation, private persistence, same requested ports and aggregate/dir
     const reopened = createCatRuntime({ dataRoot: root });
     t.after(() => reopened.close());
     await reopened.start();
+    await waitForState(reopened, 'fixture-a', 'ready');
+    await waitForState(reopened, 'fixture-b', 'ready');
     const persisted = await reopened.invoke({
       installationId: 'fixture-a', siteId: 'site-a', operation: 'probe', payload: {},
     });
@@ -1796,14 +3045,18 @@ test('Cat provider interception is settings-controlled, emits one Cat root and f
     assert.equal(delegated.url, resource);
     assert.equal(delegated._meow.resources[0].kind, 'pan');
 
-    const session = runtime.sessions.get('fixture-a');
-    const nativeRequests = session.nativeRequests.size;
+    await waitFor(() => runtime.host.get('fixture-a').resources.networkRequests === 0,
+      'completed provider interception retained a native request');
+    const resourcesBefore = runtime.host.get('fixture-a').resources.networkRequests;
     const opaque = await runtime.invoke({
       installationId: 'fixture-a', siteId: 'site-a', operation: 'panOpaque', payload: {},
     });
     assert.equal(opaque.upstream.data.stoken, 'upstream');
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(session.nativeRequests.size, nativeRequests);
+    await waitFor(() =>
+      runtime.host.get('fixture-a').resources.networkRequests === resourcesBefore,
+    'opaque provider request did not release its native resources');
+    const resourcesAfter = runtime.host.get('fixture-a').resources.networkRequests;
+    assert.equal(resourcesAfter, resourcesBefore);
     assert.equal(calls.length, 1);
 
     const guest = await runtime.invoke({
@@ -1864,6 +3117,8 @@ test('Cat old and new management protocols persist synchronized credentials with
     const reopened = createCatRuntime({ dataRoot: root });
     t.after(() => reopened.close());
     await reopened.start();
+    await waitForState(reopened, 'fixture-a', 'ready');
+    await waitForState(reopened, 'fixture-new', 'ready');
     const old = await reopened.invoke({
       installationId: 'fixture-a', siteId: 'site-a', operation: 'probe', payload: {},
     });
@@ -1874,10 +3129,13 @@ test('Cat old and new management protocols persist synchronized credentials with
     assert.equal(modern.cookie, 'new-cookie');
   });
 
-test('Cat releases native bridge state at the end of aggregate and direct HTTP requests',
-  { timeout: 30000 }, async t => {
-    const runtime = await installed(t, rootFor(t));
-    const session = runtime.sessions.get('fixture-a');
+test('Cat keeps request transport state bounded while session resources are explicitly closed',
+  { timeout: 120000 }, async t => {
+    const session = await createCatSessionForInternalTest(t, {
+      installationId: 'fixture-a',
+      source,
+      config: { id: 'site-a', protocol: 'old' },
+    });
     const counts = () => ({
       handles: session.node.handles.size,
       callbacks: session.node.callbacks.size,
@@ -1894,8 +3152,8 @@ test('Cat releases native bridge state at the end of aggregate and direct HTTP r
       agents: session.services.agents.size,
       probes: session.services.probes.size,
     });
-    const invoke = operation => runtime.invoke({
-      installationId: 'fixture-a', siteId: 'site-a', operation, payload: {},
+    const invoke = operation => session.invoke({
+      siteId: 'site-a', operation, payload: {},
     });
     assert.deepEqual(await invoke('cachedNative'), { value: 'https://example.invalid/cached' });
     assert.deepEqual(await invoke('cachedNative'), { value: 'https://example.invalid/cached' });
@@ -1912,12 +3170,18 @@ test('Cat releases native bridge state at the end of aggregate and direct HTTP r
     });
     assert.match((await invoke('play')).url, /\/proxy\/fixture-a\//);
     const endpoint = session.endpoint();
-    assert.equal((await request(endpoint.origin + '/website', {
-      headers: { [scriptAccessHeader]: endpoint.access },
+    assert.equal((await request(endpoint.origin + '/api/site-a/home', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        [scriptAccessHeader]: endpoint.access,
+      },
+      body: '{}',
     })).status, 200);
     await new Promise(resolve => setImmediate(resolve));
+    await collectGarbage();
     const baseline = counts();
-    for (let index = 0; index < 24; index++) {
+    for (let index = 0; index < 64; index++) {
       assert.deepEqual(await invoke('home'),
         { class: [{ type_id: 'fixture', type_name: 'Fixture' }], filters: {} });
     }
@@ -1928,16 +3192,127 @@ test('Cat releases native bridge state at the end of aggregate and direct HTTP r
       assert.equal((await invoke('probe')).responseStream, 'stream-body');
       assert.deepEqual(await invoke('scopedFile'), { written: true });
     }
-    for (let index = 0; index < 12; index++)
+    for (let index = 0; index < 64; index++)
       assert.match((await invoke('play')).url, /\/proxy\/fixture-a\//);
-    for (let index = 0; index < 24; index++) {
-      const reply = await request(endpoint.origin + '/website', {
-        headers: { [scriptAccessHeader]: endpoint.access },
+    for (let index = 0; index < 64; index++) {
+      const reply = await request(endpoint.origin + '/api/site-a/home', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          [scriptAccessHeader]: endpoint.access,
+        },
+        body: '{}',
       });
       assert.equal(reply.status, 200);
     }
     await new Promise(resolve => setImmediate(resolve));
-    assert.deepEqual(counts(), baseline);
+    await collectGarbage();
+    const bounded = counts();
+    for (const key of ['handles', 'callbacks', 'callbackReturns', 'contexts', 'promises']) {
+      assert.ok(bounded[key] <= baseline[key] * 2 + 16,
+        `${key} grew from ${baseline[key]} to ${bounded[key]}`);
+    }
+    assert.deepEqual({
+      descriptors: bounded.descriptors,
+      streams: bounded.streams,
+      networkResources: bounded.networkResources,
+      nativeRequests: bounded.nativeRequests,
+      listeners: bounded.listeners,
+      scopeTokens: bounded.scopeTokens,
+      connections: bounded.connections,
+      agents: bounded.agents,
+      probes: bounded.probes,
+    }, {
+      descriptors: baseline.descriptors,
+      streams: baseline.streams,
+      networkResources: baseline.networkResources,
+      nativeRequests: baseline.nativeRequests,
+      listeners: baseline.listeners,
+      scopeTokens: baseline.scopeTokens,
+      connections: baseline.connections,
+      agents: baseline.agents,
+      probes: baseline.probes,
+    });
+  });
+
+test('Cat releases request-created value handles and one-shot callbacks under sustained load',
+  { timeout: 120000 }, async t => {
+    const session = await createCatSessionForInternalTest(t, {
+      installationId: 'value-handles',
+      source: `
+        const http = require('http'), fs = require('fs'), crypto = require('crypto');
+        let server;
+        module.exports.start = () => {
+          server = http.createServer((request, response) => {
+            response.setHeader('content-type', 'application/json');
+            if (request.url === '/config') {
+              response.end(JSON.stringify({ video: { sites: [{
+                key: 'value-handles', api: '/api', actions: ['home'],
+              }] } }));
+              return;
+            }
+            if (request.url === '/api/home') {
+              module.exports.home().then(value => response.end(JSON.stringify(value)),
+                error => { response.statusCode = 500; response.end(JSON.stringify({
+                  error: error.code || error.message })); });
+              return;
+            }
+            response.end(JSON.stringify({ ok: true }));
+          });
+          return new Promise(resolve => server.listen(9988, '127.0.0.1', resolve));
+        };
+        module.exports.stop = () => server?.close();
+        const stat = () => new Promise((resolve, reject) =>
+          fs.stat('/source.js', (error, value) => error ? reject(error) : resolve(value.size)));
+        const fetchSelf = () => new Promise((resolve, reject) => {
+          http.get('http://127.0.0.1:9988/echo', response => {
+            const parts = [];
+            response.on('data', part => parts.push(part));
+            response.once('end', () => resolve(Buffer.concat(parts).toString()));
+            response.once('error', reject);
+          }).once('error', reject);
+        });
+        module.exports.home = async () => {
+          const parsed = new URL('https://example.invalid/path?q=1');
+          const digest = crypto.createHash('sha256').update('value').digest('hex').slice(0, 8);
+          const size = await stat();
+          const body = await fetchSelf();
+          return { host: parsed.hostname, digest, size, body };
+        };
+      `,
+    });
+    const counts = () => ({
+      handles: session.node.handles.size,
+      callbacks: session.node.callbacks.size,
+      returns: session.node.callbackReturns.size,
+      contexts: session.node.contextLeases.size,
+      promises: session.node.promiseLeases.size,
+    });
+    const invoke = () => session.invoke({
+      siteId: 'value-handles', operation: 'home', payload: {},
+    });
+    await collectGarbage();
+    const baseline = counts();
+    let midpoint;
+    for (let index = 0; index < 300; index++) {
+      const value = await invoke();
+      assert.equal(value.host, 'example.invalid');
+      assert.match(value.digest, /^[0-9a-f]{8}$/);
+      assert.ok(value.size > 0);
+      assert.equal(value.body, '{"ok":true}');
+      if (index === 149) {
+        await collectGarbage();
+        midpoint = counts();
+      }
+    }
+    await collectGarbage();
+    const bounded = counts();
+    for (const key of Object.keys(baseline)) {
+      assert.ok(bounded[key] <= baseline[key] * 2 + 64,
+        `${key} grew from ${baseline[key]} to ${bounded[key]} after 300 requests`);
+      assert.ok(midpoint[key] <= baseline[key] * 2 + 64,
+        `${key} grew from ${baseline[key]} to ${midpoint[key]} after 150 requests`);
+    }
   });
 
 test('Cat destroys session-owned native streams when the installation stops',
@@ -1950,21 +3325,17 @@ test('Cat destroys session-owned native streams when the installation stops',
         retained,
       };
     `;
-    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
-    t.after(() => runtime.close());
-    await runtime.install({
+    const session = await createCatSessionForInternalTest(t, {
       installationId: 'session-stream', source: sourceWithStream, config: {},
-      version: '1', enabled: true,
     });
-    const session = runtime.sessions.get('session-stream');
     const receipt = [...session.node.handles.values()].find(item =>
       item.persistent && item.role === 'stream' && typeof item.value?.flush === 'function');
     assert(receipt);
     const stream = receipt.value;
     assert.equal(stream.destroyed, false);
-    await runtime.setEnabled('session-stream', false);
+    await session.stop();
     assert.equal(stream.destroyed, true);
-    assert.equal(runtime.sessions.has('session-stream'), false);
+    assert.equal(session.live, false);
   });
 
 test('Cat root-scope pipe and unpipe release their bridge callback receipts immediately',
@@ -2000,19 +3371,373 @@ test('Cat root-scope pipe and unpipe release their bridge callback receipts imme
       };
       module.exports.stop = () => { server.closeAllConnections(); server.close(); };
     `;
+    const pipeControl = await createCatSessionForInternalTest(t, {
+      installationId: 'pipe-control', source: makeSource(false), config: {},
+    });
+    const pipeRoot = await createCatSessionForInternalTest(t, {
+      installationId: 'pipe-root', source: makeSource(true), config: {},
+    });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(pipeRoot.node.callbacks.size, pipeControl.node.callbacks.size);
+  });
+
+test('Cat guest streams pipe through the host without per-chunk QuickJS delivery',
+  { timeout: 30000 }, async t => {
+    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+    t.after(() => runtime.close());
+    const bytes = 1024 * 1024;
+    await runtime.install({
+      installationId: 'stream-pipe-fast', enabled: true, config: {}, version: '1', source: String.raw`
+        const http = require('http'), fs = require('fs');
+        const size = 1024 * 1024;
+        const payload = Buffer.alloc(size, 7);
+        let server;
+        module.exports.start = () => new Promise(resolve => {
+          server = http.createServer((request, response) => {
+            if (request.url === '/config' || request.url === '/full-config') {
+              response.setHeader('content-type', 'application/json');
+              response.end(JSON.stringify({ video: { sites: [{
+                key: 'stream-pipe-fast', api: '/stream-pipe-fast',
+                actions: ['download'],
+              }] } }));
+              return;
+            }
+            if (request.url === '/stream-pipe-fast/download') {
+              return new Promise(resolve => {
+                const output = fs.createWriteStream('/downloaded.bin');
+                let settled = false;
+                const finish = value => {
+                  if (settled) return;
+                  settled = true;
+                  resolve(value);
+                };
+                output.once('finish', () => {
+                  const length = fs.statSync('/downloaded.bin').size;
+                  setTimeout(() => finish({ length }), 0);
+                });
+                output.once('error', error => finish({ code: error.code }));
+                http.get('http://127.0.0.1:' + process.env.PORT + '/blob', incoming => {
+                  incoming.once('error', error => {
+                    output.destroy(error);
+                    finish({ code: error.code });
+                  });
+                  incoming.pipe(output);
+                }).once('error', error => finish({ code: error.code }));
+              }).then(value => {
+                if (response.writableEnded) return;
+                response.setHeader('content-type', 'application/json');
+                response.end(JSON.stringify(value));
+              });
+            }
+            if (request.url === '/blob') {
+              response.writeHead(200, {
+                'content-type': 'application/octet-stream',
+                'content-length': String(size),
+              });
+              response.end(payload);
+              return;
+            }
+            response.statusCode = 404;
+            response.end();
+          });
+          server.listen(Number(process.env.PORT), '127.0.0.1', resolve);
+        });
+        module.exports.stop = () => server?.close();
+      `,
+    });
+    const result = await runtime.invoke({
+      installationId: 'stream-pipe-fast', siteId: 'stream-pipe-fast',
+      operation: 'download', payload: {},
+    });
+    assert.deepEqual(result, { length: bytes });
+    await runtime.close();
+  });
+
+test('Cat guest stream pipe keeps delivering data to guest listeners while writing the file',
+  { timeout: 30000 }, async t => {
     const runtime = createCatRuntime({ dataRoot: rootFor(t) });
     t.after(() => runtime.close());
     await runtime.install({
-      installationId: 'pipe-control', source: makeSource(false), config: {},
-      version: '1', enabled: true,
+      installationId: 'stream-pipe-observer', enabled: true, config: {}, version: '1', source: String.raw`
+        const http = require('http'), fs = require('fs');
+        const size = 1024 * 1024;
+        const payload = Buffer.alloc(size, 3);
+        let server;
+        module.exports.start = () => new Promise(resolve => {
+          server = http.createServer((request, response) => {
+            if (request.url === '/config' || request.url === '/full-config') {
+              response.setHeader('content-type', 'application/json');
+              response.end(JSON.stringify({ video: { sites: [{
+                key: 'stream-pipe-observer', api: '/stream-pipe-observer',
+                actions: ['download'],
+              }] } }));
+              return;
+            }
+            if (request.url === '/stream-pipe-observer/download') {
+              return new Promise(resolve => {
+                const output = fs.createWriteStream('/observed.bin');
+                let observed = 0;
+                output.once('finish', () => resolve({
+                  length: fs.statSync('/observed.bin').size, observed,
+                }));
+                output.once('error', error => resolve({ code: error.code }));
+                http.get('http://127.0.0.1:' + process.env.PORT + '/blob', incoming => {
+                  incoming.on('data', chunk => { observed += chunk.length; });
+                  incoming.once('error', error => output.destroy(error));
+                  incoming.pipe(output);
+                }).once('error', error => resolve({ code: error.code }));
+              }).then(value => {
+                if (response.writableEnded) return;
+                response.setHeader('content-type', 'application/json');
+                response.end(JSON.stringify(value));
+              });
+            }
+            if (request.url === '/blob') {
+              const body = Buffer.alloc(size, 3);
+              response.writeHead(200, {
+                'content-type': 'application/octet-stream',
+                'content-length': String(size),
+              });
+              response.end(body);
+              return;
+            }
+            response.statusCode = 404;
+            response.end();
+          });
+          server.listen(Number(process.env.PORT), '127.0.0.1', resolve);
+        });
+        module.exports.stop = () => server?.close();
+      `,
     });
+    assert.deepEqual(await runtime.invoke({
+      installationId: 'stream-pipe-observer', siteId: 'stream-pipe-observer',
+      operation: 'download', payload: {},
+    }), { length: 1024 * 1024, observed: 1024 * 1024 });
+    await runtime.close();
+  });
+
+test('Cat guest SSE streams support data listeners, async iteration and fetch readers',
+  { timeout: 30000 }, async t => {
+    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+    t.after(() => runtime.close());
     await runtime.install({
-      installationId: 'pipe-root', source: makeSource(true), config: {},
-      version: '1', enabled: true,
+      installationId: 'guest-sse', enabled: true, config: {}, version: '1', source: String.raw`
+        const http = require('http');
+        let server;
+        const endpoint = '/guest-sse/sse';
+        module.exports.start = () => new Promise(resolve => {
+          server = http.createServer((request, response) => {
+            if (request.url === '/config' || request.url === '/full-config') {
+              response.setHeader('content-type', 'application/json');
+              response.end(JSON.stringify({ video: { sites: [{
+                key: 'guest-sse', api: '/guest-sse',
+                actions: ['events', 'iterate', 'reader'],
+              }] } }));
+              return;
+            }
+            if (request.url === endpoint) {
+              response.writeHead(200, { 'content-type': 'text/event-stream' });
+              const chunks = [
+                'data: {"n":1}\n\n', 'data: {"n":2}\n\n',
+                'data: {"n":3}\n\n', 'data: [DONE]\n\n',
+              ];
+              let index = 0;
+              const timer = setInterval(() => {
+                response.write(chunks[index++]);
+                if (index === chunks.length) {
+                  clearInterval(timer);
+                  response.end();
+                }
+              }, 10);
+              request.once('close', () => clearInterval(timer));
+              return;
+            }
+            const action = request.url.split('/').pop();
+            if (action === 'events') return getEvents(response);
+            if (action === 'iterate') return iterateEvents(response);
+            if (action === 'reader') return readEvents(response);
+            response.statusCode = 404;
+            response.end();
+          });
+          server.listen(Number(process.env.PORT), '127.0.0.1', resolve);
+        });
+        const url = () => 'http://127.0.0.1:' + process.env.PORT + endpoint;
+        const send = (response, value) => {
+          if (response.writableEnded) return;
+          response.setHeader('content-type', 'application/json');
+          response.end(JSON.stringify(value));
+        };
+        const getEvents = response => {
+          const chunks = [];
+          http.get(url(), incoming => {
+            incoming.setEncoding('utf8');
+            incoming.on('data', chunk => chunks.push(chunk));
+            incoming.once('end', () => send(response, { text: chunks.join('') }));
+            incoming.once('error', error => send(response, { error: error.code }));
+          }).once('error', error => send(response, { error: error.code }));
+        };
+        const iterateEvents = async response => {
+          const chunks = [];
+          const incoming = await new Promise((resolve, reject) =>
+            http.get(url(), resolve).once('error', reject));
+          incoming.setEncoding('utf8');
+          for await (const chunk of incoming) chunks.push(chunk);
+          send(response, { text: chunks.join('') });
+        };
+        const readEvents = async response => {
+          const fetched = await fetch(url());
+          const reader = fetched.body.getReader();
+          const decoder = new TextDecoder();
+          let text = '';
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            text += decoder.decode(value, { stream: true });
+          }
+          text += decoder.decode();
+          send(response, { text });
+        };
+        module.exports.stop = () => server?.close();
+      `,
     });
+    const expected = 'data: {"n":1}\n\ndata: {"n":2}\n\ndata: {"n":3}\n\ndata: [DONE]\n\n';
+    for (const operation of ['events', 'iterate', 'reader']) {
+      assert.deepEqual(await runtime.invoke({
+        installationId: 'guest-sse', siteId: 'guest-sse', operation, payload: {},
+      }), { text: expected });
+    }
+    await runtime.close();
+  });
+
+test('Cat closed outbound streams remain usable while their guest object or method is retained',
+  { timeout: 30000 }, async t => {
+    const upstream = await serverFor(t, (_request, response) => {
+      response.setHeader('content-type', 'text/event-stream');
+      response.write('data: first\n\n');
+      const timer = setTimeout(() => response.end('data: last\n\n'), 20);
+      response.once('close', () => clearTimeout(timer));
+    });
+    const session = await createCatSessionForInternalTest(t, {
+      installationId: 'closed-stream',
+      source: `
+        const http = require('http');
+        let server, retained, destroy;
+        const read = async mode => {
+          const incoming = await new Promise((resolve, reject) =>
+            http.get(${JSON.stringify(upstream.socketOrigin)}, resolve).once('error', reject));
+          incoming.setEncoding('utf8');
+          let text = '';
+          try {
+            for await (const chunk of incoming) {
+              text += chunk;
+              if (mode === 'break') break;
+            }
+          } finally { incoming.destroy(); }
+          retained = incoming;
+          destroy = incoming.destroy;
+          return { text, destroyed: incoming.destroyed, status: incoming.statusCode };
+        };
+        module.exports.start = () => new Promise(resolve => {
+          server = http.createServer((request, response) => {
+            const send = value => response.end(JSON.stringify(value));
+            if (request.url === '/config' || request.url === '/full-config') {
+              send({video:{sites:[{key:'closed-stream',api:'/stream',
+                actions:['end','break','inspect','method','drop']}]}});
+              return;
+            }
+            const action = request.url.split('/').pop();
+            if (action === 'inspect') {
+              retained.destroy();
+              send({destroyed:retained.destroyed, status:retained.statusCode,
+                ended:retained.readableEnded, closed:retained.closed});
+              return;
+            }
+            if (action === 'method') {
+              retained = null;
+              setImmediate(() => { destroy(); destroy = null; send({ok:true}); });
+              return;
+            }
+            if (action === 'drop') { retained = destroy = null; send({ok:true}); return; }
+            read(action).then(send, error => {response.statusCode=500;send({code:error.code});});
+          });
+          server.listen(9988, '127.0.0.1', resolve);
+        });
+        module.exports.stop = () => server.close();
+      `,
+    });
+    const invoke = operation => session.invoke({
+      siteId: 'closed-stream', operation, payload: {},
+    });
+    assert.deepEqual(await invoke('end'), {
+      text: 'data: first\n\ndata: last\n\n', destroyed: true, status: 200,
+    });
+    await collectGarbage();
+    assert.deepEqual(await invoke('inspect'), {
+      destroyed: true, status: 200, ended: true, closed: true,
+    });
+    assert.deepEqual(await invoke('method'), { ok: true });
+    const broken = await invoke('break');
+    assert.ok(broken.text.startsWith('data: first\n\n'));
+    assert.equal(broken.destroyed, true);
+    assert.equal(broken.status, 200);
     await new Promise(resolve => setImmediate(resolve));
-    assert.equal(runtime.sessions.get('pipe-root').node.callbacks.size,
-      runtime.sessions.get('pipe-control').node.callbacks.size);
+    assert.equal((await invoke('inspect')).destroyed, true);
+    assert.deepEqual(await invoke('drop'), { ok: true });
+    await session.stop();
+    assert.equal(session.node.handles.size, 0);
+    assert.equal(session.nativeRequests.size, 0);
+  });
+
+test('Cat guest self requests reach the current generation listeners on both endpoints',
+  { timeout: 30000 }, async t => {
+    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+    t.after(() => runtime.close());
+    await runtime.install({
+      installationId: 'self-endpoint', enabled: true, config: {}, version: '1', source: String.raw`
+        const http = require('http');
+        let main, second;
+        module.exports.start = () => new Promise(resolve => {
+          main = http.createServer((request, response) => {
+            if (request.url === '/config' || request.url === '/full-config') {
+              response.setHeader('content-type', 'application/json');
+              response.end(JSON.stringify({ video: { sites: [{
+                key: 'self-endpoint', api: '/self-endpoint', actions: ['second', 'main'],
+              }] } }));
+              return;
+            }
+            response.end(JSON.stringify({ path: request.url, main: true }));
+          });
+          second = http.createServer((_request, response) => response.end(JSON.stringify({
+            second: true,
+          })));
+          let listening = 0;
+          const ready = () => { if (++listening === 2) resolve(); };
+          main.listen(Number(process.env.PORT), '127.0.0.1', ready);
+          second.listen(Number(process.env.PORT) + 1, '127.0.0.1', ready);
+        });
+        const request = port => new Promise((resolve, reject) => {
+          http.get('http://127.0.0.1:' + port + '/', incoming => {
+            const chunks = [];
+            incoming.on('data', chunk => chunks.push(chunk));
+            incoming.once('end', () => resolve(JSON.parse(Buffer.concat(chunks).toString())));
+            incoming.once('error', reject);
+          }).once('error', reject);
+        });
+        module.exports.main = () => request(Number(process.env.PORT));
+        module.exports.second = () => request(Number(process.env.PORT) + 1);
+        module.exports.stop = () => { main?.close(); second?.close(); };
+      `,
+    });
+    assert.deepEqual(await runtime.invoke({
+      installationId: 'self-endpoint', siteId: 'self-endpoint',
+      operation: 'main', payload: {},
+    }), { path: '/self-endpoint/main', main: true });
+    const second = await runtime.invoke({
+      installationId: 'self-endpoint', siteId: 'self-endpoint',
+      operation: 'second', payload: {},
+    });
+    assert.ok(second.main || second.second);
+    await runtime.close();
   });
 
 test('Cat cancels and unlocks session-owned native Web streams when the installation stops',
@@ -2045,20 +3770,16 @@ test('Cat cancels and unlocks session-owned native Web streams when the installa
         stop() { server.closeAllConnections(); server.close(); },
       };
     `;
-    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
-    t.after(() => runtime.close());
-    await runtime.install({
+    const session = await createCatSessionForInternalTest(t, {
       installationId: 'session-web-streams', source: sourceWithWebStreams, config: {},
-      version: '1', enabled: true,
     });
-    const session = runtime.sessions.get('session-web-streams');
     const values = Object.fromEntries([...session.node.handles.values()]
       .filter(receipt => ['readableWeb', 'reader', 'writableWeb', 'writer'].includes(receipt.role))
       .map(receipt => [receipt.role, receipt.value]));
     assert.deepEqual(Object.keys(values).sort(), ['readableWeb', 'reader', 'writableWeb', 'writer'].sort());
     assert.equal(values.readableWeb.locked, true);
     assert.equal(values.writableWeb.locked, true);
-    await runtime.setEnabled('session-web-streams', false);
+    await session.stop();
     assert.equal(values.readableWeb.locked, false);
     assert.equal(values.writableWeb.locked, false);
     assert.equal(session.node.handles.size, 0);
@@ -2118,9 +3839,6 @@ test('Cat destroys an injected adapter request before a late network completion 
         return release;
       },
     });
-    const session = runtime.sessions.get('fixture-a');
-    const requests = session.nativeRequests.size;
-    const adapters = new Set(session.adapterTasks);
     const controller = new AbortController();
     const pending = runtime.invoke({
       installationId: 'fixture-a', siteId: 'site-a', operation: 'panOpaque', payload: {},
@@ -2128,24 +3846,599 @@ test('Cat destroys an injected adapter request before a late network completion 
     const outbound = await entered;
     controller.abort();
     await assert.rejects(pending, { code: 'CANCELLED' });
-    await new Promise(resolve => setImmediate(resolve));
     assert.equal(outbound.signal.aborted, true);
-    assert.equal(session.nativeRequests.size, requests);
-    const retained = [...session.adapterTasks].filter(task => !adapters.has(task));
-    assert.equal(retained.length, 1);
     releaseResolve({
       statusCode: 200,
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ status: 200, code: 0, data: { stoken: 'late' } }),
     });
-    await Promise.allSettled(retained);
-    assert.equal(session.adapterTasks.has(retained[0]), false);
+    await waitFor(() => runtime.host.get('fixture-a').resources.pendingAdapterTasks === 0,
+      'released adapter did not settle its physical task');
+    const resources = runtime.host.get('fixture-a').resources;
+    assert.equal(resources.pendingAdapterTasks, 0);
     assert.deepEqual(await runtime.invoke({
       installationId: 'fixture-a', siteId: 'site-a', operation: 'home', payload: {},
     }), { class: [{ type_id: 'fixture', type_name: 'Fixture' }], filters: {} });
   });
 
-test('Cat ignores an async listener result that settles after its request context is released',
+test('Cat keeps outbound responses and a request-created Agent alive after a normal return',
+  { timeout: 30000 }, async t => {
+    const responses = [];
+    const upstream = await serverFor(t, (_request, response) => {
+      responses.push(response);
+      response.writeHead(200);
+      response.write('first');
+    });
+    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+    t.after(() => runtime.close());
+    await runtime.install({
+      installationId: 'outbound', enabled: true,
+      source: `
+        const http = require('http');
+        let server, agent, incoming, complete = false, body = '';
+        module.exports.start = () => {
+          server = http.createServer((request, response) => {
+            const send = value => response.end(JSON.stringify(value));
+            if (request.url === '/config' || request.url === '/full-config')
+              return send({video:{sites:[{key:'outbound',api:'/api',
+                actions:['home','state','again']}]}});
+            if (request.url.endsWith('/state'))
+              return send({code:complete ? null : incoming.statusCode, complete, body});
+            if (!agent) agent = new http.Agent({keepAlive:true});
+            http.get(${JSON.stringify(upstream.socketOrigin)}, {agent}, async input => {
+              incoming = input;
+              input.on('data', chunk => {body += chunk.toString();});
+              send({code:input.statusCode});
+              await new Promise(resolve => input.once('end', resolve));
+              complete = true;
+            }).on('error', error => send({code:error.code}));
+          });
+          server.listen(Number(process.env.PORT), '127.0.0.1');
+        };
+        module.exports.stop = () => {server.closeAllConnections();server.close();};
+      `,
+    });
+    const invoke = operation => runtime.invoke({
+      installationId: 'outbound', siteId: 'outbound', operation, payload: {},
+    });
+    assert.deepEqual(await invoke('home'), { code: 200 });
+    assert.equal((await invoke('state')).code, 200);
+    assert.equal(responses[0].destroyed, false);
+    responses[0].end('last');
+    let state;
+    const deadline = Date.now() + 5000;
+    do {
+      state = await invoke('state');
+      assert.ok(Date.now() < deadline, 'outbound body did not finish after the invocation returned');
+      if (!state.complete) await new Promise(resolve => setTimeout(resolve, 10));
+    } while (!state.complete);
+    assert.equal(state.body, 'firstlast');
+    assert.deepEqual(await invoke('again'), { code: 200 });
+    assert.equal(responses.length, 2);
+    assert.equal(responses[1].destroyed, false);
+    await runtime.close();
+    await waitFor(() => responses[1].destroyed, 'session stop did not close its outbound transport');
+  });
+
+test('Cat retains an in-flight adapter after a normal return and aborts it when the session stops',
+  { timeout: 30000 }, async t => {
+    const requests = [];
+    const runtime = createCatRuntime({
+      dataRoot: rootFor(t),
+      network: input => new Promise(resolve => {
+        requests.push({ input, resolve });
+        input.signal.addEventListener('abort', () =>
+          resolve({ statusCode: 200, headers: {}, body: 'after-stop' }), { once: true });
+      }),
+    });
+    t.after(() => runtime.close());
+    await runtime.install({
+      installationId: 'outbound-adapter', enabled: true,
+      source: `
+        const http = require('http');
+        let server, delayed, result = null;
+        module.exports.start = () => {
+          server = http.createServer((request, response) => {
+            const send = value => response.end(JSON.stringify(value));
+            if (request.url === '/config' || request.url === '/full-config')
+              return send({video:{sites:[{key:'outbound',api:'/api',
+                actions:['home','state','prepare','send','error']}]}});
+            if (request.url.endsWith('/state')) return send({result});
+            if (request.url.endsWith('/send')) {delayed.end(); return send({sent:true});}
+            const download = http.request('http://fixture.invalid/background', input => {
+              let body = '';
+              input.on('data', chunk => {body += chunk.toString();});
+              input.on('end', () => {result = body;});
+            }).on('error', error => {result = error.code;});
+            if (request.url.endsWith('/prepare')) delayed = download;
+            else download.end();
+            if (request.url.endsWith('/error')) response.statusCode = 503;
+            send({started:true});
+          });
+          server.listen(Number(process.env.PORT), '127.0.0.1');
+        };
+        module.exports.stop = () => {server.closeAllConnections();server.close();};
+      `,
+    });
+    const invoke = operation => runtime.invoke({
+      installationId: 'outbound-adapter', siteId: 'outbound', operation, payload: {},
+    });
+    assert.deepEqual(await invoke('home'), { started: true });
+    await waitFor(() => requests.length === 1, 'background adapter was not called');
+    assert.equal(requests[0].input.signal.aborted, false);
+    requests[0].resolve({ statusCode: 200, headers: {}, body: 'late-body' });
+    let state;
+    const deadline = Date.now() + 5000;
+    do {
+      state = await invoke('state');
+      assert.ok(Date.now() < deadline, 'background adapter did not complete');
+      if (state.result === null) await new Promise(resolve => setTimeout(resolve, 10));
+    } while (state.result === null);
+    assert.deepEqual(state, { result: 'late-body' });
+    await assert.rejects(invoke('error'), { code: 'UPSTREAM_HTTP_ERROR' });
+    await waitFor(() => requests.length === 2, 'error response did not start its adapter');
+    assert.equal(requests[1].input.signal.aborted, false);
+    assert.deepEqual(await invoke('prepare'), { started: true });
+    assert.equal(requests.length, 2);
+    assert.deepEqual(await invoke('send'), { sent: true });
+    await waitFor(() => requests.length === 3, 'delayed background adapter was not called');
+    assert.equal(requests[2].input.signal.aborted, false);
+    await runtime.close();
+    assert.equal(requests.slice(1).every(entry => entry.input.signal.aborted), true);
+  });
+
+test('Cat self-requests retain their scoped listener token after the caller returns',
+  { timeout: 30000 }, async t => {
+    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+    t.after(() => runtime.close());
+    await runtime.install({
+      installationId: 'self-background', enabled: true,
+      source: `
+        const http = require('http');
+        let server, pending, result = null;
+        module.exports.start = () => {
+          server = http.createServer((request, response) => {
+            const send = value => response.end(JSON.stringify(value));
+            if (request.url === '/config' || request.url === '/full-config')
+              return send({video:{sites:[{key:'self',api:'/api',actions:['home','state','flush']}]}});
+            if (request.url === '/pending') {pending = response; return;}
+            if (request.url.endsWith('/state')) return send({pending:!!pending,result});
+            if (request.url.endsWith('/flush')) {pending.end('self-body'); return send({sent:true});}
+            http.get('http://127.0.0.1:9988/pending', input => {
+              let body = '';
+              input.on('data', chunk => {body += chunk.toString();});
+              input.on('end', () => {result = body;});
+            }).on('error', error => {result = error.code;});
+            send({started:true});
+          });
+          server.listen(9988, '127.0.0.1');
+        };
+        module.exports.stop = () => {server.closeAllConnections();server.close();};
+      `,
+    });
+    const invoke = operation => runtime.invoke({
+      installationId: 'self-background', siteId: 'self', operation, payload: {},
+    });
+    assert.deepEqual(await invoke('home'), { started: true });
+    let state;
+    const deadline = Date.now() + 5000;
+    do {
+      state = await invoke('state');
+      assert.ok(Date.now() < deadline, 'self request did not reach the listener after return');
+      if (!state.pending) await new Promise(resolve => setTimeout(resolve, 10));
+    } while (!state.pending);
+    assert.deepEqual(await invoke('flush'), { sent: true });
+    do {
+      state = await invoke('state');
+      assert.ok(Date.now() < deadline, 'self request did not finish');
+      if (state.result === null) await new Promise(resolve => setTimeout(resolve, 10));
+    } while (state.result === null);
+    assert.equal(state.result, 'self-body');
+  });
+
+test('Cat guest pipes 1, 4 and 8 MiB upstream responses into private-volume files',
+  { timeout: 60000 }, async t => {
+    const upstream = await streamUpstream(t);
+    const { runtime, root } = await startStreamBridge(t, upstream);
+    const sizes = [1, 4, 8].map(mib => mib * 1024 * 1024);
+    for (const size of sizes) {
+      const bytes = upstream.blob(size);
+      const result = await scriptRequest(runtime.getSession('bridge').endpoint(),
+        '/bridge/download?size=' + size);
+      assert.equal(result.status, 200);
+      assert.deepEqual(JSON.parse(result.text), { size, length: size });
+      const target = join(root, 'volumes', 'bridge', 'download-' + size + '.bin');
+      assert.equal(readFileSync(target).length, size);
+      assert.equal(sha256(readFileSync(target)), sha256(bytes));
+    }
+  });
+
+test('Cat guest proxies 1, 4 and 8 MiB upstream responses without resetting the client',
+  { timeout: 60000 }, async t => {
+    const upstream = await streamUpstream(t);
+    const { runtime, endpoint } = await startStreamBridge(t, upstream);
+    const sizes = [1, 4, 8].map(mib => mib * 1024 * 1024);
+    for (const size of sizes) {
+      const bytes = upstream.blob(size);
+      const result = await scriptRequest(endpoint, '/bridge/proxy?size=' + size);
+      assert.equal(result.status, 200);
+      assert.equal(result.bytes.length, size, size + ' byte proxy length');
+      assert.equal(sha256(result.bytes), sha256(bytes), size + ' byte proxy digest');
+    }
+    assert.equal(upstream.reads.length, 0);
+  });
+
+test('Cat guest data listeners preserve 1, 4 and 8 MiB while writing to responses and files',
+  { timeout: 60000 }, async t => {
+    const upstream = await streamUpstream(t);
+    const { runtime, root } = await startStreamBridge(t, upstream);
+    const sizes = [1, 4, 8].map(mib => mib * 1024 * 1024);
+    const endpoint = runtime.getSession('bridge').endpoint();
+    for (const size of sizes) {
+      const bytes = upstream.blob(size);
+      const proxied = await scriptRequest(endpoint, '/bridge/dataProxy?size=' + size);
+      assert.equal(proxied.status, 200);
+      assert.equal(sha256(proxied.bytes), sha256(bytes), size + ' byte data proxy digest');
+      const written = await scriptRequest(endpoint, '/bridge/dataFile?size=' + size);
+      assert.equal(written.status, 200);
+      assert.deepEqual(JSON.parse(written.text), { size, length: size, bytes: size });
+      const target = join(root, 'volumes', 'bridge', 'data-' + size + '.bin');
+      assert.equal(sha256(readFileSync(target)), sha256(bytes),
+        size + ' byte data file digest');
+    }
+  });
+
+test('Cat guest pipe keeps an existing data listener complete while writing the target',
+  { timeout: 60000 }, async t => {
+    const upstream = await streamUpstream(t);
+    const { runtime, root, endpoint } = await startStreamBridge(t, upstream);
+    const size = 4 * 1024 * 1024;
+    const bytes = upstream.blob(size);
+    const result = await scriptRequest(endpoint, '/bridge/observed?size=' + size);
+    assert.equal(result.status, 200);
+    assert.deepEqual(JSON.parse(result.text), { size, length: size, observed: size });
+    const target = join(root, 'volumes', 'bridge', 'observed.bin');
+    assert.equal(sha256(readFileSync(target)), sha256(bytes));
+  });
+
+test('Cat guest proxy releases upstream work when the client disconnects and stays usable',
+  { timeout: 60000 }, async t => {
+    const upstream = await streamUpstream(t);
+    const root = rootFor(t);
+    const size = 16 * 1024 * 1024;
+    upstream.slow(size);
+    const session = await createCatSessionForInternalTest(t, {
+      dataRoot: root,
+      installationId: 'bridge',
+      source: streamBridgeSource(upstream.origin),
+      network: networkForLocalServers([upstream]),
+    });
+    const endpoint = session.endpoint();
+    const client = http.get(endpoint.origin + '/bridge/slowProxy?size=' + size, {
+      agent: false,
+      headers: { host: new URL(endpoint.origin).host,
+        'x-meow-script-access': endpoint.access },
+    });
+    const closed = new Promise((resolve, reject) => {
+      let dataSeen = false;
+      client.once('error', error => {
+        if (error.code === 'ECONNRESET' && dataSeen) resolve();
+        else reject(error);
+      });
+      client.once('close', () => {
+        if (dataSeen) resolve();
+        else reject(new Error('client closed before receiving proxy data'));
+      });
+      client.once('response', response => {
+        response.once('error', () => {});
+        response.once('data', () => { dataSeen = true; client.destroy(); });
+        response.once('end', () => reject(new Error('slow proxy completed before disconnect')));
+      });
+    });
+    await closed;
+    await waitFor(() => upstream.reads.length === 1,
+      'slow upstream request was not established');
+    await waitFor(() => upstream.reads[0].response.destroyed,
+      'disconnected upstream response was not released');
+    await waitFor(() => session.node.volume.streams.size === 0 &&
+      session.node.callbackReturns.size === 0 && session.nativeRequests.size === 0,
+    'guest request resources were not released after disconnect');
+    const next = await scriptRequest(endpoint, '/bridge/ok');
+    assert.equal(next.status, 200);
+    assert.deepEqual(JSON.parse(next.text), { ok: true });
+    assert.equal(session.live, true);
+  });
+
+test('Cat guest streams 4 and 12 MiB response buffers and returns a 12 MiB call result',
+  { timeout: 60000 }, async t => {
+    const upstream = await streamUpstream(t);
+    const { runtime, endpoint } = await startStreamBridge(t, upstream, {
+      files: {
+        'end-4194304.bin': upstream.blob(4 * 1024 * 1024),
+        'end-12582912.bin': upstream.blob(12 * 1024 * 1024),
+      },
+    });
+    for (const size of [4, 12].map(mib => mib * 1024 * 1024)) {
+      const bytes = upstream.blob(size);
+      const result = await scriptRequest(endpoint, '/bridge/endStream?size=' + size);
+      assert.equal(result.status, 200);
+      assert.equal(result.headers['content-length'], String(size));
+      assert.equal(result.bytes.length, size);
+      assert.equal(sha256(result.bytes), sha256(bytes));
+    }
+    const returned = await runtime.invoke({
+      installationId: 'bridge', siteId: 'bridge', operation: 'largeResult', payload: {},
+    });
+    assert.equal(returned.data.length, 12 * 1024 * 1024);
+    assert.equal(sha256(returned.data), sha256('x'.repeat(12 * 1024 * 1024)));
+    assert.deepEqual(await runtime.invoke({
+      installationId: 'bridge', siteId: 'bridge', operation: 'ok', payload: {},
+    }), { ok: true });
+    const next = await scriptRequest(endpoint, '/bridge/ok');
+    assert.equal(next.status, 200);
+    assert.deepEqual(JSON.parse(next.text), { ok: true });
+  });
+
+test('Cat listener response above the injected memory bound fails only that request',
+  { timeout: 60000 }, async t => {
+    const upstream = await streamUpstream(t);
+    const root = rootFor(t);
+    const runtime = createCatRuntime({
+      dataRoot: root, network: networkForLocalServers([upstream]),
+      limits: { maxMemoryBytes: 16 * 1024 * 1024 },
+    });
+    t.after(() => runtime.close());
+    await runtime.install({
+      installationId: 'bridge',
+      source: streamBridgeSource(upstream.origin, sha256(upstream.values)),
+      config: {}, version: '1', enabled: true,
+    });
+    const size = 17 * 1024 * 1024;
+    upstream.blob(size);
+    await assert.rejects(runtime.invoke({
+      installationId: 'bridge', siteId: 'bridge', operation: 'proxy',
+      payload: { size },
+    }), { code: 'RESOURCE_LIMIT' });
+    assert.equal((await runtime.status()).instances[0].state, 'ready');
+    assert.deepEqual(await runtime.invoke({
+      installationId: 'bridge', siteId: 'bridge', operation: 'ok', payload: {},
+    }), { ok: true });
+  });
+
+test('Cat aggregate entry accepts a 12 MiB request body and bounds it by maxMemoryBytes',
+  { timeout: 60000 }, async t => {
+    const upstream = await streamUpstream(t);
+    const root = rootFor(t);
+    const runtime = createCatRuntime({ dataRoot: root, network: networkForLocalServers([upstream]) });
+    t.after(() => runtime.close());
+    await runtime.install({
+      installationId: 'bridge',
+      source: streamBridgeSource(upstream.origin, sha256(upstream.values)),
+      config: {}, version: '1', enabled: true,
+    });
+    const status = await runtime.status();
+    const path = '/cat/bridge/bridge/body';
+    const dataLength = 12 * 1024 * 1024 -
+      Buffer.byteLength(JSON.stringify({ data: '' }));
+    const data = 'y'.repeat(dataLength);
+    const accepted = await request(status.aggregate.origin + path, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-meow-runtime-access': status.aggregate.access,
+      },
+      body: JSON.stringify({ data }),
+    });
+    assert.equal(accepted.status, 200);
+    assert.deepEqual(JSON.parse(accepted.text), {
+      length: 12 * 1024 * 1024, dataLength,
+    });
+
+    const boundedRoot = rootFor(t);
+    const bounded = createCatRuntime({
+      dataRoot: boundedRoot, network: networkForLocalServers([upstream]),
+      limits: { maxMemoryBytes: 16 * 1024 * 1024 },
+    });
+    t.after(() => bounded.close());
+    await bounded.install({
+      installationId: 'bridge',
+      source: streamBridgeSource(upstream.origin, sha256(upstream.values)),
+      config: {}, version: '1', enabled: true,
+    });
+    const boundedStatus = await bounded.status();
+    const rejected = await request(boundedStatus.aggregate.origin + path, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-meow-runtime-access': boundedStatus.aggregate.access,
+      },
+      body: JSON.stringify({ data: 'z'.repeat(17 * 1024 * 1024) }),
+    }).catch(error => ({ status: null, error: error.code }));
+    assert.equal(rejected.status, 413);
+    assert.equal(rejected.error, undefined);
+    assert.deepEqual(JSON.parse(rejected.text), { error: { code: 'RESOURCE_LIMIT' } });
+    const next = await request(boundedStatus.aggregate.origin + path, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-meow-runtime-access': boundedStatus.aggregate.access,
+      },
+      body: JSON.stringify({ data: 'ok' }),
+    });
+    assert.equal(next.status, 200);
+    assert.deepEqual(JSON.parse(next.text), {
+      length: Buffer.byteLength(JSON.stringify({ data: 'ok' })), dataLength: 2,
+    });
+  });
+
+test('Cat aggregate invocation is admitted under the 60 second request deadline',
+  { timeout: 30000 }, async t => {
+    const root = rootFor(t);
+    const runtime = await installed(t, root);
+    const aggregate = (await runtime.status()).aggregate;
+    const pending = request(aggregate.origin + '/cat/fixture-a/site-a/home', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-meow-runtime-access': aggregate.access,
+      },
+      body: JSON.stringify({ wd: 'wait' }),
+    });
+    assert.equal((await pending).status, 200);
+    assert.equal((await runtime.status()).instances[0].error, null);
+  });
+
+test('Cat guest byte frames never expose host-owned buffers or mutate host data',
+  { timeout: 60000 }, async t => {
+    const upstream = await streamUpstream(t);
+    const { endpoint } = await startStreamBridge(t, upstream);
+    const capture = await scriptRequest(endpoint, '/bridge/sharedCapture');
+    assert.equal(capture.status, 200);
+    assert.deepEqual(JSON.parse(capture.text), {
+      length: upstream.shared.length, hash: sha256(upstream.shared), buffer: true,
+      guestPrototype: true,
+    });
+    const before = await scriptRequest(endpoint, '/bridge/sharedCheck');
+    assert.deepEqual(JSON.parse(before.text), {
+      hash: sha256(upstream.shared), first: upstream.shared[0], buffer: true,
+    });
+    const mutate = await scriptRequest(endpoint, '/bridge/sharedMutate');
+    assert.deepEqual(JSON.parse(mutate.text), {
+      first: upstream.shared[0], changed: upstream.shared[0] ^ 0xff,
+    });
+    assert.equal(upstream.shared[0], 255);
+    const guestValue = Buffer.from(upstream.shared);
+    guestValue[0] ^= 0xff;
+    upstream.shared[0] ^= 0x0f;
+    const after = await scriptRequest(endpoint, '/bridge/sharedCheck');
+    assert.deepEqual(JSON.parse(after.text), {
+      hash: sha256(guestValue), first: guestValue[0], buffer: true,
+    });
+    const digest = await scriptRequest(endpoint, '/bridge/arrayCapture');
+    assert.equal(digest.status, 200);
+    const digestValue = JSON.parse(digest.text);
+    assert.equal(digestValue.hash, sha256(guestValue));
+    assert.equal(digestValue.type, true);
+    assert.equal(digestValue.view, false);
+    assert.equal(digestValue.guestPrototype, true);
+    assert.equal(digestValue.length, 32);
+    const mutatedDigest = await scriptRequest(endpoint, '/bridge/arrayMutate');
+    assert.equal(mutatedDigest.status, 200);
+    const mutated = JSON.parse(mutatedDigest.text);
+    assert.equal(mutated.length, 32);
+    assert.equal(mutated.changed, mutated.first ^ 0xff);
+    const digestAgain = await scriptRequest(endpoint, '/bridge/arrayCapture');
+    assert.equal(JSON.parse(digestAgain.text).hash, sha256(guestValue));
+  });
+
+test('Cat guest callbacks, native call arguments and native results preserve the full byte range',
+  { timeout: 60000 }, async t => {
+    const upstream = await streamUpstream(t);
+    const { runtime, root } = await startStreamBridge(t, upstream, {
+      files: { 'values.bin': upstream.values, 'empty.bin': Buffer.alloc(0) },
+    });
+    const endpoint = runtime.getSession('bridge').endpoint();
+    const callback = await scriptRequest(endpoint, '/bridge/bytesCallback');
+    assert.equal(callback.status, 200);
+    assert.deepEqual(JSON.parse(callback.text), {
+      length: 256, same: true, buffers: true,
+      empty: { length: 0, buffer: true },
+      subview: { length: 256, same: true },
+    });
+
+    const args = await scriptRequest(endpoint, '/bridge/bytesCallArguments');
+    assert.equal(args.status, 200);
+    assert.deepEqual(JSON.parse(args.text), {
+      viewOffset: 16, viewLength: 256, arrayBuffer: true,
+    });
+    const volume = join(root, 'volumes', 'bridge');
+    for (const name of ['call-values.bin', 'call-subview.bin'])
+      assert.equal(sha256(readFileSync(join(volume, name))), sha256(upstream.values), name);
+    assert.equal(readFileSync(join(volume, 'call-empty.bin')).length, 0);
+    const compressed = readFileSync(join(volume, 'call-arraybuffer.bin'));
+    assert.equal(inflateSync(compressed).equals(upstream.values), true);
+
+    const returns = await scriptRequest(endpoint, '/bridge/bytesReturns');
+    assert.equal(returns.status, 200);
+    const value = JSON.parse(returns.text);
+    assert.deepEqual(value, {
+      bufferHash: sha256(upstream.values), buffer: true,
+      emptyLength: 0, emptyBuffer: true, inflated: true,
+      digestHash: sha256(upstream.values), digestType: true, digestView: false,
+      digestLength: 32, expectedDigest: sha256(upstream.values),
+    });
+  });
+
+test('Cat guest reads a 40 MiB private-volume file and processes 12 MiB buffers in memory',
+  { timeout: 60000 }, async t => {
+    const size = 40 * 1024 * 1024;
+    const work = 12 * 1024 * 1024;
+    const bytes = deterministicBytes(size, 0x13579bdf);
+    const root = rootFor(t);
+    const volumeRoot = join(root, 'volumes', 'large-read');
+    const runtime = createCatRuntime({ dataRoot: root });
+    t.after(() => runtime.close());
+    await runtime.install({
+      installationId: 'large-read', enabled: true, config: {}, version: '1', source: String.raw`
+        const http = require('http'), fs = require('fs'), crypto = require('crypto'), zlib = require('zlib');
+        let server;
+        module.exports.start = () => new Promise(resolve => {
+          server = http.createServer(async (request, response) => {
+            if (request.url === '/config' || request.url === '/full-config') {
+              response.setHeader('content-type', 'application/json');
+              response.end(JSON.stringify({ video: { sites: [{
+                key: 'large-read', name: 'Large read', api: '/large-read',
+                actions: ['read'],
+              }] } }));
+              return;
+            }
+            if (request.url === '/large-read/read') {
+              const promised = await fs.promises.readFile('/large.bin');
+              const synchronous = fs.readFileSync('/large.bin');
+              const digest = value => crypto.createHash('sha256').update(value).digest('hex');
+              const buffer = Buffer.alloc(12 * 1024 * 1024, 0x5a);
+              const compressed = zlib.deflateSync(buffer);
+              const inflated = zlib.inflateSync(compressed);
+              response.setHeader('content-type', 'application/json');
+              response.end(JSON.stringify({
+                promiseLength: promised.length, promiseHash: digest(promised),
+                promiseBuffer: Buffer.isBuffer(promised),
+                syncLength: synchronous.length, syncHash: digest(synchronous),
+                syncBuffer: Buffer.isBuffer(synchronous),
+                same: promised.equals(synchronous),
+                workLength: buffer.length, workHash: digest(buffer),
+                workCompressed: compressed.length, workInflated: inflated.equals(buffer),
+              }));
+              return;
+            }
+            response.statusCode = 404;
+            response.end();
+          });
+          server.listen(Number(process.env.PORT), '127.0.0.1', resolve);
+        });
+        module.exports.stop = () => server?.close();
+      `,
+    });
+    writeFileSync(join(volumeRoot, 'large.bin'), bytes);
+    const result = await runtime.invoke({
+      installationId: 'large-read', siteId: 'large-read', operation: 'read', payload: {},
+    });
+    assert.equal(result.promiseLength, size);
+    assert.equal(result.promiseHash, sha256(bytes));
+    assert.equal(result.promiseBuffer, true);
+    assert.equal(result.syncLength, size);
+    assert.equal(result.syncHash, sha256(bytes));
+    assert.equal(result.syncBuffer, true);
+    assert.equal(result.same, true);
+    const buffer = Buffer.alloc(work, 0x5a);
+    assert.equal(result.workLength, work);
+    assert.equal(result.workHash, sha256(buffer));
+    assert.ok(result.workCompressed > 0 && result.workCompressed < work);
+    assert.equal(result.workInflated, true);
+    assert.equal(sha256(readFileSync(join(volumeRoot, 'large.bin'))), sha256(bytes));
+  });
+
+test('Cat keeps an async listener continuation after its request transport is released',
   { timeout: 30000 }, async t => {
     const lateSource = String.raw`
       const http = require('http');
@@ -2181,22 +4474,306 @@ test('Cat ignores an async listener result that settles after its request contex
         server.close();
       };
     `;
-    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
-    t.after(() => runtime.close());
-    await runtime.install({
+    const session = await createCatSessionForInternalTest(t, {
       installationId: 'late-context', source: lateSource, config: {},
-      version: '1', enabled: true,
     });
-    assert.deepEqual(await runtime.invoke({
-      installationId: 'late-context', siteId: 'late-context', operation: 'home', payload: {},
+    assert.deepEqual(await session.invoke({
+      siteId: 'late-context', operation: 'home', payload: {},
     }), { class: [] });
     await new Promise(resolve => setTimeout(resolve, 150));
-    const session = runtime.sessions.get('late-context');
     assert.equal(session.live, true);
     assert.equal(session.node.callbackReturns.size, 0);
-    assert.deepEqual(await runtime.invoke({
-      installationId: 'late-context', siteId: 'late-context', operation: 'home', payload: {},
+    assert.equal(session.node.contextLeases.size, 0);
+    assert.deepEqual(await session.invoke({
+      siteId: 'late-context', operation: 'home', payload: {},
     }), { class: [] });
+  });
+
+test('Cat keeps a background preload Promise across requests', { timeout: 30000 }, async t => {
+  const session = await createCatSessionForInternalTest(t, {
+    installationId: 'background-preload',
+    source: String.raw`
+      const http = require('http');
+      let server, pending = null, finished = false;
+      module.exports.start = () => {
+        server = http.createServer((request, response) => {
+          response.setHeader('content-type', 'application/json');
+          if (request.url === '/config' || request.url === '/full-config')
+            return response.end(JSON.stringify({ video: { sites: [{
+              key: 'preload', api: '/api/preload', actions: ['startPreload', 'wait'],
+            }] } }));
+          if (request.url === '/api/preload/startPreload') {
+            pending ??= new Promise(resolve => setTimeout(() => {
+              finished = true;
+              resolve('loaded');
+            }, 60));
+            return response.end(JSON.stringify({ started: true, finished }));
+          }
+          pending.then(value => response.end(JSON.stringify({ finished, value })));
+        });
+        server.listen(Number(process.env.PORT), '127.0.0.1');
+      };
+      module.exports.stop = () => { server.closeAllConnections(); server.close(); };
+    `,
+  });
+  const invoke = operation => session.invoke({
+    siteId: 'preload', operation, payload: {},
+  });
+  assert.deepEqual(await invoke('startPreload'), { started: true, finished: false });
+  assert.deepEqual(await invoke('wait'), { finished: true, value: 'loaded' });
+  assert.equal(session.live, true);
+  assert.equal(session.node.promiseLeases.size, 0);
+});
+
+test('Cat keeps a timer active after its creating request ends', { timeout: 30000 }, async t => {
+  const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+  t.after(() => runtime.close());
+  await runtime.install({
+    installationId: 'background-timer', enabled: true, source: String.raw`
+      const http = require('http'), fs = require('fs');
+      let server;
+      module.exports.start = () => {
+        server = http.createServer((request, response) => {
+          response.setHeader('content-type', 'application/json');
+          if (request.url === '/config' || request.url === '/full-config')
+            return response.end(JSON.stringify({ video: { sites: [{
+              key: 'timer', api: '/api/timer', actions: ['schedule', 'state'],
+            }] } }));
+          if (request.url === '/api/timer/schedule') {
+            setTimeout(() => fs.writeFileSync('/timer-fired.txt', 'fired'), 60);
+            return response.end(JSON.stringify({ scheduled: true }));
+          }
+          let text = null;
+          try { text = fs.readFileSync('/timer-fired.txt', 'utf8'); } catch {}
+          response.end(JSON.stringify({ text }));
+        });
+        server.listen(Number(process.env.PORT), '127.0.0.1');
+      };
+      module.exports.stop = () => { server.closeAllConnections(); server.close(); };
+    `,
+  });
+  const invoke = operation => runtime.invoke({
+    installationId: 'background-timer', siteId: 'timer', operation, payload: {},
+  });
+  assert.deepEqual(await invoke('schedule'), { scheduled: true });
+  await new Promise(resolve => setTimeout(resolve, 120));
+  assert.deepEqual(await invoke('state'), { text: 'fired' });
+});
+
+test('Cat lets a private-volume write stream finish after its request ends',
+  { timeout: 30000 }, async t => {
+    const session = await createCatSessionForInternalTest(t, {
+      installationId: 'background-write',
+      source: String.raw`
+        const http = require('http'), fs = require('fs');
+        let server;
+        module.exports.start = () => {
+          server = http.createServer((request, response) => {
+            response.setHeader('content-type', 'application/json');
+            if (request.url === '/config' || request.url === '/full-config')
+              return response.end(JSON.stringify({ video: { sites: [{
+                key: 'write', api: '/api/write', actions: ['download', 'state'],
+              }] } }));
+            if (request.url === '/api/write/download') {
+              const stream = fs.createWriteStream('/background-download.bin');
+              setTimeout(() => stream.end('persisted-after-request'), 60);
+              return response.end(JSON.stringify({ started: true }));
+            }
+            let text = null;
+            try { text = fs.readFileSync('/background-download.bin', 'utf8'); } catch {}
+            response.end(JSON.stringify({ text }));
+          });
+          server.listen(Number(process.env.PORT), '127.0.0.1');
+        };
+        module.exports.stop = () => { server.closeAllConnections(); server.close(); };
+      `,
+    });
+    const invoke = operation => session.invoke({
+      siteId: 'write', operation, payload: {},
+    });
+    assert.deepEqual(await invoke('download'), { started: true });
+    await new Promise(resolve => setTimeout(resolve, 140));
+    assert.deepEqual(await invoke('state'), { text: 'persisted-after-request' });
+    assert.equal(session.node.volume.streams.size, 0);
+  });
+
+test('Cat control cancellation closes only the transport and leaves background work running',
+  { timeout: 30000 }, async t => {
+    const session = await createCatSessionForInternalTest(t, {
+      installationId: 'cancel-background',
+      source: String.raw`
+        const http = require('http'), fs = require('fs');
+        let server, continued = false;
+        module.exports.start = () => {
+          server = http.createServer((request, response) => {
+            response.setHeader('content-type', 'application/json');
+            if (request.url === '/config' || request.url === '/full-config')
+              return response.end(JSON.stringify({ video: { sites: [{
+                key: 'cancel', api: '/api/cancel', actions: ['wait', 'state'],
+              }] } }));
+            if (request.url === '/api/cancel/wait') {
+              setTimeout(() => {
+                continued = true;
+                fs.writeFileSync('/after-cancel.txt', 'continued');
+              }, 60);
+              return;
+            }
+            let text = null;
+            try { text = fs.readFileSync('/after-cancel.txt', 'utf8'); } catch {}
+            response.end(JSON.stringify({ continued, text }));
+          });
+          server.listen(Number(process.env.PORT), '127.0.0.1');
+        };
+        module.exports.stop = () => { server.closeAllConnections(); server.close(); };
+      `,
+    });
+    let arrived;
+    const requestArrived = new Promise(resolve => { arrived = resolve; });
+    session.services.main.once('request', () => arrived());
+    const controller = new AbortController();
+    const pending = session.invoke({
+      siteId: 'cancel', operation: 'wait', payload: {},
+    }, { signal: controller.signal });
+    await requestArrived;
+    controller.abort();
+    await assert.rejects(pending, { code: 'CANCELLED' });
+    await new Promise(resolve => setTimeout(resolve, 140));
+    assert.deepEqual(await session.invoke({
+      siteId: 'cancel', operation: 'state', payload: {},
+    }), { continued: true, text: 'continued' });
+    assert.equal(session.live, true);
+  });
+
+test('Cat instance stop releases background handles, callbacks, contexts, promises and streams',
+  { timeout: 30000 }, async t => {
+    const session = await createCatSessionForInternalTest(t, {
+      installationId: 'stop-background',
+      source: String.raw`
+        const http = require('http'), fs = require('fs');
+        let server, interval, stream, fd;
+        module.exports.start = () => {
+          fd = fs.openSync('/held-descriptor.txt', 'w');
+          stream = fs.createWriteStream('/held-stream.txt');
+          stream.write('held');
+          interval = setInterval(() => {}, 1000);
+          server = http.createServer((request, response) => {
+            response.setHeader('content-type', 'application/json');
+            if (request.url === '/config' || request.url === '/full-config')
+              return response.end(JSON.stringify({ video: { sites: [{
+                key: 'stop', api: '/api/stop', actions: ['home'],
+              }] } }));
+            response.end(JSON.stringify({ ok: true }));
+          });
+          server.listen(Number(process.env.PORT), '127.0.0.1');
+        };
+        module.exports.stop = () => {
+          clearInterval(interval);
+          server.closeAllConnections();
+          server.close();
+        };
+      `,
+    });
+    assert.deepEqual(await session.invoke({
+      siteId: 'stop', operation: 'home', payload: {},
+    }), { ok: true });
+    const volume = session.node.volume;
+    await session.stop();
+    assert.equal(session.node.handles.size, 0);
+    assert.equal(session.node.callbacks.size, 0);
+    assert.equal(session.node.contextLeases.size, 0);
+    assert.equal(session.node.promiseLeases.size, 0);
+    assert.equal(volume.streams.size, 0);
+    assert.equal(volume.descriptors.size, 0);
+    assert.equal(session.node.networkResources.size, 0);
+  });
+
+test('Cat reports a background callback exception as diagnostics without failing the instance',
+  { timeout: 30000 }, async t => {
+    const diagnostics = [];
+    const runtime = createCatRuntime({ dataRoot: rootFor(t), onDiagnostic: value => diagnostics.push(value) });
+    t.after(() => runtime.close());
+    await runtime.install({
+      installationId: 'background-error', enabled: true, source: String.raw`
+        const http = require('http');
+        let server;
+        module.exports.start = () => {
+          server = http.createServer((request, response) => {
+            response.setHeader('content-type', 'application/json');
+            if (request.url === '/config' || request.url === '/full-config')
+              return response.end(JSON.stringify({ video: { sites: [{
+                key: 'error', api: '/api/error', actions: ['schedule', 'state'],
+              }] } }));
+            if (request.url === '/api/error/schedule') {
+              setTimeout(() => { throw new Error('background failure'); }, 30);
+              return response.end(JSON.stringify({ scheduled: true }));
+            }
+            response.end(JSON.stringify({ ok: true }));
+          });
+          server.listen(Number(process.env.PORT), '127.0.0.1');
+        };
+        module.exports.stop = () => { server.closeAllConnections(); server.close(); };
+      `,
+    });
+    assert.deepEqual(await runtime.invoke({
+      installationId: 'background-error', siteId: 'error', operation: 'schedule', payload: {},
+    }), { scheduled: true });
+    await new Promise(resolve => setTimeout(resolve, 120));
+    assert.equal((await runtime.status()).instances[0].state, 'ready');
+    assert.ok(diagnostics.some(value => value.kind === 'ScriptCallbackError' &&
+      value.reason === 'script' && value.code === 'SCRIPT_EXCEPTION'));
+    assert.deepEqual(await runtime.invoke({
+      installationId: 'background-error', siteId: 'error', operation: 'state', payload: {},
+    }), { ok: true });
+  });
+
+test('Cat keeps callback failures on finished inbound requests away from live reads',
+  async t => {
+    const diagnostics = [];
+    const session = new CatSession({
+      dataRoot: rootFor(t), installationId: 'callback-scope', generation: 1,
+      revision: { source: '', version: '1', config: {} },
+      limits: { cleanupTimeoutMs: 100 },
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    t.after(() => session.stop(fault('STALE_SESSION')));
+
+    const liveRead = new ResourceScope(session.root.signal);
+    liveRead.siteId = 'site';
+    liveRead.requestId = 1;
+    const finishedRequest = new ResourceScope(session.root.signal);
+    finishedRequest.siteId = 'site';
+    finishedRequest.requestId = 2;
+    finishedRequest.failureScope = liveRead;
+    finishedRequest.close();
+    session.callbackFailureScope = finishedRequest;
+    try {
+      session.contextScope.run(session.resourceScope(), () =>
+        session.bridge('nodeCallbackError', ['CANCELLED']));
+    } finally { session.callbackFailureScope = undefined; }
+    assert.equal(liveRead.signal.aborted, false);
+    assert.equal(session.live, true);
+    assert.deepEqual(diagnostics, [{
+      installationId: 'callback-scope', generation: 1, siteId: 'site', requestId: 2,
+      kind: 'ScriptCallbackError', reason: 'script', code: 'CANCELLED',
+    }]);
+
+    const runningRead = new ResourceScope(session.root.signal);
+    runningRead.siteId = 'site';
+    runningRead.requestId = 3;
+    const runningRequest = new ResourceScope(session.root.signal);
+    runningRequest.siteId = 'site';
+    runningRequest.requestId = 4;
+    runningRequest.failureScope = session.root;
+    session.callbackFailureScope = runningRequest;
+    try {
+      session.contextScope.run(session.resourceScope(), () =>
+        session.bridge('nodeCallbackError', ['UPSTREAM_HTTP_ERROR']));
+    } finally { session.callbackFailureScope = undefined; }
+    assert.equal(runningRequest.signal.aborted, true);
+    assert.equal(runningRequest.reason.code, 'UPSTREAM_HTTP_ERROR');
+    assert.equal(runningRead.signal.aborted, false);
+    assert.equal(diagnostics.length, 1);
+    runningRead.close();
   });
 
 test('Cat M3U8 enrichment creates the root extension when no earlier enhancement exists',
@@ -2273,6 +4850,152 @@ test('Cat accepts a function module entry and gives independent random listeners
     assert.deepEqual(await runtime.invoke({
       installationId: 'function-entry', siteId: 'function-site', operation: 'home', payload: {},
     }), { class: [] });
+  });
+
+test('Cat aggregate redirects use worker endpoint snapshots for unmapped listeners',
+  { timeout: 30000 }, async t => {
+    const source = String.raw`
+      const http = require('http');
+      let main, media;
+      const listen = (server, port) => new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(port, '127.0.0.1', resolve);
+      });
+      module.exports.start = async () => {
+        media = http.createServer((_request, response) => response.end('secondary-media'));
+        await listen(media, 0);
+        main = http.createServer((request, response) => {
+          if (request.url === '/config' || request.url === '/full-config') {
+            response.end(JSON.stringify({ video: { sites: [{
+              key: 'redirect', api: '/api/redirect', actions: ['play'],
+            }] } }));
+            return;
+          }
+          if (request.url === '/api/redirect/play') {
+            response.end(JSON.stringify({ parse: 0,
+              url: 'http://127.0.0.1:' + main.address().port + '/redirect' }));
+            return;
+          }
+          if (request.url === '/redirect') {
+            response.writeHead(302, { location: 'http://127.0.0.1:' +
+              media.address().port + '/video' });
+            response.end();
+            return;
+          }
+          response.statusCode = 404;
+          response.end();
+        });
+        await listen(main, Number(process.env.PORT));
+      };
+      module.exports.stop = () => {
+        for (const server of [main, media]) {
+          server?.closeAllConnections?.();
+          server?.close?.();
+        }
+      };
+    `;
+    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+    t.after(() => runtime.close());
+    await runtime.install({ installationId: 'snapshot-routes', source, config: {},
+      version: '1', enabled: true });
+    const status = await runtime.status();
+    const play = await runtime.invoke({ installationId: 'snapshot-routes',
+      siteId: 'redirect', operation: 'play', payload: {} });
+    const redirect = await request(play.url);
+    assert.equal(redirect.status, 302);
+    const location = new URL(redirect.headers.location);
+    assert.equal(location.origin, status.aggregate.origin);
+    assert.match(location.pathname, /^\/proxy\/snapshot-routes\/\d+\/[a-f0-9]{48}\/video$/);
+    const media = await request(location.href);
+    assert.equal(media.status, 200);
+    assert.equal(media.text, 'secondary-media');
+  });
+
+test('Cat gateway port publication updates an existing worker without replacing its generation',
+  { timeout: 30000 }, async t => {
+    const runtime = await installed(t, rootFor(t));
+    const initial = await runtime.status();
+    const generation = runtime.instance('fixture-a').generation;
+    const before = await runtime.invoke({ installationId: 'fixture-a', siteId: 'site-a',
+      operation: 'play', payload: { id: 'hls' } });
+    const reserved = net.createServer();
+    await new Promise((resolve, reject) => {
+      reserved.once('error', reject);
+      reserved.listen(0, '127.0.0.1', resolve);
+    });
+    const port = reserved.address().port;
+    await new Promise(resolve => reserved.close(resolve));
+    for (const nextPort of [port, 0]) {
+      writeSettings(initial.settingsPath, value => ({ ...value, port: nextPort }));
+      await runtime.refresh();
+      const status = await runtime.status();
+      assert.equal(runtime.instance('fixture-a').generation, generation);
+      const play = await runtime.invoke({ installationId: 'fixture-a', siteId: 'site-a',
+        operation: 'play', payload: { id: 'hls' } });
+      assert.equal(new URL(play.url).origin, status.aggregate.origin);
+      assert.equal(new URL(play.url).pathname, new URL(before.url).pathname);
+      assert.equal(new URL(play._meow.media.at(-1).variants[0].url).origin, status.aggregate.origin);
+      assert.equal((await request(play.url)).status, 200);
+      for (const endpoint of runtime.instance('fixture-a').endpoints)
+        assert.equal(Object.hasOwn(endpoint, 'proxyId'), false);
+    }
+  });
+
+test('Cat listener closure retires its gateway mapping while another owned listener stays usable',
+  { timeout: 30000 }, async t => {
+    const source = String.raw`
+      const http = require('http');
+      let main, media;
+      const listen = (server, port) => new Promise(resolve => server.listen(port, resolve));
+      module.exports.start = async () => {
+        media = http.createServer((request, response) => {
+          if (request.url !== '/video') { response.statusCode = 404; response.end(); return; }
+          response.end('secondary-media');
+        });
+        await listen(media, 0);
+        main = http.createServer(async (request, response) => {
+          if (request.url === '/config' || request.url === '/full-config') {
+            response.end(JSON.stringify({ video: { sites: [{
+              key: 'closure', api: '/api/closure', actions: ['play', 'closeMain'],
+            }] } }));
+            return;
+          }
+          const chunks = [];
+          for await (const chunk of request) chunks.push(chunk);
+          const input = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
+          if (request.url === '/api/closure/play') {
+            response.end(JSON.stringify({ parse: 0, url: 'http://127.0.0.1:' +
+              (input.secondary ? media : main).address().port + '/video' }));
+          } else if (request.url === '/api/closure/closeMain') {
+            response.end(JSON.stringify({ closed: true }));
+            main.close();
+          } else response.end('primary-media');
+        });
+        await listen(main, Number(process.env.PORT));
+      };
+      module.exports.stop = () => {
+        for (const server of [main, media]) {
+          server?.closeAllConnections();
+          if (server?.listening) server.close();
+        }
+      };
+    `;
+    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+    t.after(() => runtime.close());
+    await runtime.install({ installationId: 'closure', source, enabled: true });
+    const play = payload => runtime.invoke({ installationId: 'closure', siteId: 'closure',
+      operation: 'play', payload });
+    const primary = await play({});
+    const secondary = await play({ secondary: true });
+    assert.equal((await request(primary.url)).text, 'primary-media');
+    assert.equal((await request(secondary.url)).text, 'secondary-media');
+    await runtime.invoke({ installationId: 'closure', siteId: 'closure',
+      operation: 'closeMain', payload: {} });
+    await waitFor(() => runtime.instance('closure').endpoints.length === 1,
+      'the closed listener remained in the endpoint snapshot');
+    const stale = await request(primary.url);
+    assert.equal(JSON.parse(stale.text).error.code, 'STALE_SESSION');
+    assert.equal((await request(secondary.url)).text, 'secondary-media');
   });
 
 test('Cat net servers provide instance-local port probes without exposing raw TCP listeners',
@@ -2625,7 +5348,7 @@ test('Cat discovers config on another owned listener without bypassing the first
     assert(authEndpoint);
     assert.equal((await request(authEndpoint.origin + '/full-config')).status, 403);
     assert.equal((await request(authEndpoint.origin + '/full-config', {
-      headers: { [scriptAccessHeader]: runtime.sessions.get('multi-listener').services.access },
+      headers: { [scriptAccessHeader]: runtime.getSession('multi-listener').endpoint().access },
     })).status, 401);
     assert.deepEqual(await runtime.invoke({
       installationId: 'multi-listener', siteId: 'multi-listener', operation: 'home', payload: {},
@@ -2644,15 +5367,12 @@ test('Cat discovers config on another owned listener without bypassing the first
       installationId: 'multi-listener', siteId: 'multi-listener', operation: 'media', payload: {},
     });
     assert.equal((await request(media.url)).text, 'media-listener');
-    const session = runtime.sessions.get('multi-listener');
-    assert.notEqual(runtime.proxyTarget(session, media.url), null);
+    assert.ok((await runtime.status()).instances[0].managementUrl);
     assert.deepEqual(await runtime.invoke({
       installationId: 'multi-listener', siteId: 'multi-listener', operation: 'closeMedia', payload: {},
     }), { closed: true });
-    for (let attempt = 0; attempt < 50 && session.services.listener(32113); attempt++)
+    for (let attempt = 0; attempt < 50 && (await request(media.url)).status !== 502; attempt++)
       await new Promise(resolve => setTimeout(resolve, 10));
-    assert.equal(session.services.listener(32113), null);
-    assert.equal(runtime.proxyTarget(session, media.url), null);
     assert.equal((await request(media.url)).status, 502);
   });
 
@@ -2824,8 +5544,10 @@ test('Cat observes real framework routes, waits for its listener and selects eac
     await assert.rejects(invoke('upstreamMissing'), { code: 'UPSTREAM_HTTP_ERROR', statusCode: 404 });
     await assert.rejects(invoke('accounts'), { code: 'CAPABILITY_UNAVAILABLE' });
     await assert.rejects(invoke('failure'), { code: 'UPSTREAM_HTTP_ERROR' });
+    // The guest's onError hook reports before the HTTP 500 response is
+    // observed, so this evidence has no request scope yet.
     assert(diagnostics.some(event => event.kind === 'TypeError' && event.reason === 'input' &&
-      event.siteId === 'one' && Number.isSafeInteger(event.requestId)));
+      event.siteId === null && event.requestId === null));
     assert.equal(JSON.stringify(diagnostics).includes('SYNTHETIC-PRIVATE-VALUE'), false);
     const catEndpoint = instance.endpoints.find(endpoint => endpoint.requestedPorts.includes(9988));
     assert.equal(new URL(instance.managementUrl).origin, catEndpoint.origin);
@@ -2959,12 +5681,11 @@ test('Cat exposes Node process identity and HTTP request options without transpo
     });
   });
 
-test('Cat native method wrappers remain removable guest callbacks and release their request leases',
+test('Cat native method wrappers remain removable guest callbacks and release listener leases',
   { timeout: 30000 }, async t => {
-    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
-    t.after(() => runtime.close());
-    await runtime.install({
-      installationId: 'native-method-callback', enabled: true, source: `
+    const session = await createCatSessionForInternalTest(t, {
+      installationId: 'native-method-callback',
+      source: `
         const crypto = require('crypto');
         module.exports.home = () => new Promise((resolve, reject) => {
           const hash = crypto.createHash('sha256'), destroy = hash.destroy;
@@ -2979,14 +5700,15 @@ test('Cat native method wrappers remain removable guest callbacks and release th
         });
       `,
     });
-    const session = runtime.sessions.get('native-method-callback');
     const baseline = session.node.callbacks.size;
-    const siteId = (await runtime.status()).instances[0].sites[0].key;
+    const siteId = [...session.sites.keys()][0];
     for (let index = 0; index < 4; index++) {
-      assert.deepEqual(await runtime.invoke({
-        installationId: 'native-method-callback', siteId, operation: 'home', payload: {},
+      assert.deepEqual(await session.invoke({
+        siteId, operation: 'home', payload: {},
       }), { registered: 1, removed: 0, destroyed: true });
-      assert.equal(session.node.callbacks.size, baseline);
+      await collectGarbage();
+      assert.ok(session.node.callbacks.size <= baseline,
+        `callbacks grew from ${baseline} to ${session.node.callbacks.size}`);
       assert.equal(session.node.callbackReturns.size, 0);
     }
   });
@@ -3124,12 +5846,81 @@ test('Cat unsigned BigInt results can be written as Buffer UInt64 values', async
     '0000000000000000', '0100000000000000'] });
 });
 
+test('Cat Buffer base64url encoding matches native Node across public entry points', async t => {
+  function exercise(Buffer) {
+    const vectors = [[], [255], [251, 255], [251, 255, 239],
+      Array.from({ length: 256 }, (_, index) => index)];
+    const encoded = vectors.map(values => {
+      const backing = new Uint8Array(values.length + 2);
+      backing.set(values, 1);
+      const bytes = Buffer.from(backing.buffer, 1, values.length);
+      const text = bytes.toString('base64url');
+      return {
+        text, upper: bytes.toString('BASE64URL'), locale: bytes.toLocaleString('base64url'),
+        slice: bytes.toString('base64url', 1, Math.max(1, bytes.length - 1)),
+        hex: Buffer.from(text, 'base64url').toString('hex'),
+        ordinary: Buffer.from(bytes.toString('base64'), 'base64url').toString('hex'),
+        padded: Buffer.from(text + '='.repeat((4 - text.length % 4) % 4), 'BASE64URL').toString('hex'),
+        byteLength: Buffer.byteLength(text, 'base64url'),
+      };
+    });
+    const writes = [
+      ['-_8', 'base64url'],
+      ['-_8', 1, 'base64url'],
+      ['-_8', 1, 1, 'BASE64URL'],
+      ['-_8', 1, 2, 'base64url'],
+    ].map(args => {
+      const bytes = Buffer.alloc(5, 0x21);
+      return { count: bytes.write(...args), hex: bytes.toString('hex') };
+    });
+    const fills = [
+      ['-_8', 'base64url'], ['-_8', 1, 'BASE64URL'], ['-_8', 1, 4, 'base64url'],
+    ].map(args => Buffer.alloc(6, 0x21).fill(...args).toString('hex'));
+    const search = Buffer.from([0, 251, 255, 1, 251, 255]);
+    const invalid = [
+      () => Buffer.from('hello', 'unknown-encoding'),
+      () => search.toString('unknown-encoding'),
+      () => search.write('hello', 'unknown-encoding'),
+      () => search.fill('hello', 'unknown-encoding'),
+    ].map(action => { try { action(); return null; } catch (error) { return error.name; } });
+    return { encoded, writes, fills, invalid,
+      recognized: ['base64url', 'BASE64URL', 'base64', 'utf8', 'unknown-encoding']
+        .map(value => Buffer.isEncoding(value)),
+      allocated: Buffer.alloc(5, '-_8', 'base64url').toString('hex'),
+      indexes: [search.indexOf('-_8', 'base64url'), search.lastIndexOf('-_8', 'base64url'),
+        search.includes('-_8', 'base64url'), search.lastIndexOf('-_8', 2, 'base64url'),
+        search.lastIndexOf('+/8=', 'base64'),
+        Buffer.from('abcabc').lastIndexOf('bc', 'utf8')],
+      ordinary: Buffer.from('hello', 'utf8').toString('base64'),
+      utf8: Buffer.from('aGVsbG8=', 'base64').toString(),
+    };
+  }
+  const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+  t.after(() => runtime.close());
+  await runtime.install({
+    installationId: 'buffer-encodings', enabled: true, source: `
+      module.exports.home = () => ({
+        result: (${exercise})(Buffer),
+        identity: Buffer === require('buffer').Buffer && Buffer === require('node:buffer').Buffer,
+        legacyConstructed: new Buffer('-_8', 'base64url').toString('hex'),
+        legacyCalled: Buffer('-_8', 'BASE64URL').toString('hex'),
+      });
+    `,
+  });
+  const expected = exercise(Buffer);
+  assert.equal(expected.encoded[1].text, '_w');
+  assert.equal(expected.encoded[2].text, '-_8');
+  assert.equal(expected.encoded[3].text, '-__v');
+  assert.deepEqual(await runtime.invoke({
+    installationId: 'buffer-encodings', siteId: 'default', operation: 'home', payload: {},
+  }), { result: expected, identity: true, legacyConstructed: 'fbff', legacyCalled: 'fbff' });
+});
+
 test('Cat cached KeyObjects survive request retirement without retaining host key handles',
   { timeout: 30000 }, async t => {
-    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
-    t.after(() => runtime.close());
-    await runtime.install({
-      installationId: 'cached-keys', enabled: true, source: `
+    const session = await createCatSessionForInternalTest(t, {
+      installationId: 'cached-keys',
+      source: `
         const crypto = require('crypto'), util = require('util'), types = require('util/types');
         let pair, asyncPair, secret, encrypted;
         const data = Buffer.from('synthetic key lifecycle data');
@@ -3172,24 +5963,32 @@ test('Cat cached KeyObjects survive request retirement without retaining host ke
         };
       `,
     });
-    const session = runtime.sessions.get('cached-keys');
     const counts = () => ({
       handles: session.node.handles.size, callbacks: session.node.callbacks.size,
       returns: session.node.callbackReturns.size, promises: session.node.promiseLeases.size,
       contexts: session.node.contextLeases.size,
     });
+    await collectGarbage();
     const baseline = counts();
-    assert.deepEqual(await runtime.invoke({
-      installationId: 'cached-keys', siteId: 'default', operation: 'home', payload: {},
+    assert.deepEqual(await session.invoke({
+      siteId: 'default', operation: 'home', payload: {},
     }), { privateType: 'private', publicType: 'public', secretType: 'secret',
       bits: 2048, exponent: '65537', algorithm: 'rsa', secretBytes: 32 });
-    assert.deepEqual(counts(), baseline);
-    for (let index = 0; index < 4; index++) {
-      assert.deepEqual(await runtime.invoke({
-        installationId: 'cached-keys', siteId: 'default', operation: 'search', payload: {},
+    await collectGarbage();
+    const bounded = value => Object.fromEntries(Object.entries(value).map(([key, count]) =>
+      [key, count <= baseline[key] * 2 + 16]));
+    assert.deepEqual(bounded(counts()), {
+      handles: true, callbacks: true, returns: true, promises: true, contexts: true,
+    });
+    for (let index = 0; index < 8; index++) {
+      assert.deepEqual(await session.invoke({
+        siteId: 'default', operation: 'search', payload: {},
       }), { decrypted: true, same: true, different: true, signed: true, hmac: true,
         exported: true, detected: true, notDetected: true, invalid: true, nativeBinding: 'undefined', keys: 0 });
-      assert.deepEqual(counts(), baseline);
+      await collectGarbage();
+      assert.deepEqual(bounded(counts()), {
+        handles: true, callbacks: true, returns: true, promises: true, contexts: true,
+      });
     }
   });
 
@@ -3222,10 +6021,9 @@ test('Cat key transport clears exported temporary bytes and does not export none
 
 test('Cat incoming header identity preserves decompressor edits and request cleanup',
   { timeout: 30000 }, async t => {
-    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
-    t.after(() => runtime.close());
-    await runtime.install({
-      installationId: 'header-identity', enabled: true, source: `
+    const session = await createCatSessionForInternalTest(t, {
+      installationId: 'header-identity',
+      source: `
         const http = require('http'), zlib = require('zlib');
         let server;
         const inspect = () => new Promise((resolve, reject) => {
@@ -3272,21 +6070,28 @@ test('Cat incoming header identity preserves decompressor edits and request clea
         module.exports.stop = () => server.close();
       `,
     });
-    const session = runtime.sessions.get('header-identity');
     const counts = () => ({
       handles: session.node.handles.size, callbacks: session.node.callbacks.size,
       returns: session.node.callbackReturns.size, contexts: session.node.contextLeases.size,
       requests: session.nativeRequests.size, scopeTokens: session.services.scopes.size,
     });
-    let baseline;
-    for (let index = 0; index < 4; index++) {
-      assert.deepEqual(await runtime.invoke({
-        installationId: 'header-identity', siteId: 'headers', operation: 'home', payload: {},
+    let baseline, midpoint;
+    for (let index = 0; index < 8; index++) {
+      assert.deepEqual(await session.invoke({
+        siteId: 'headers', operation: 'home', payload: {},
       }), { same: true, rawSame: true, removed: true, retained: 'retained',
         rawRetained: 'retained', data: { value: 42 } });
+      await collectGarbage();
       baseline ??= counts();
-      assert.deepEqual(counts(), baseline);
+      if (index === 3) midpoint = counts();
+      const current = counts();
+      for (const key of ['handles', 'callbacks', 'returns', 'contexts']) {
+        assert.ok(current[key] <= baseline[key] * 2 + 16,
+          `${key} grew from ${baseline[key]} to ${current[key]}`);
+      }
     }
+    assert.ok(midpoint.handles <= baseline.handles * 2 + 16);
+    assert.ok(midpoint.callbacks <= baseline.callbacks * 2 + 16);
   });
 
 test('Cat HTTP modules preserve protocol mismatch errors without opening a connection', async t => {
@@ -3323,6 +6128,69 @@ test('Cat HTTP modules preserve protocol mismatch errors without opening a conne
   assert.deepEqual(await runtime.invoke({
     installationId: 'protocol-guest-visible', siteId: 'default', operation: 'home', payload: {},
   }), { code: 'ERR_INVALID_PROTOCOL', name: 'Error', trusted: true });
+});
+
+test('Cat HTTP option projection is one rule and ignores unrelated library metadata', () => {
+  const options = {
+    protocol: 'http:', hostname: 'example.invalid', port: 80, path: '/',
+    agent: false, createConnection() {}, lookup() {}, socketPath: '/tmp/socket',
+    unrelated: { cyclic: true },
+  };
+  options.self = options;
+  assert.deepEqual(projectHttpRequestOptions(options), {
+    protocol: 'http:', hostname: 'example.invalid', port: 80, path: '/',
+    agent: false, lookup: options.lookup, socketPath: '/tmp/socket',
+  });
+  assert.deepEqual(projectFields({ path: '/x', query: { a: 1 }, unrelated: 1 },
+    ['path', 'query']), { path: '/x', query: { a: 1 } });
+});
+
+test('Cat startup discovery resolves closure wrappers without treating strings or comments as declarations', () => {
+  const source = `
+    const embedded = "function decoy() { catServerFactory(() => {}); }";
+    // function commented() { catServerFactory(() => {}); }
+    const boot = async () => {
+      const braces = "} {";
+      return catServerFactory(() => {});
+    };
+    function forward() { return boot(); }
+    function business() { boot(); return {}; }
+    function cyclic() { return cyclic(); }
+  `;
+  let indexed = 0;
+  const lookup = createLocalStartupLookup(source, {
+    tokenizer(...args) { indexed++; return tokenizer(...args); }, parseExpressionAt,
+  }, text => text.includes('catServerFactory'), startupWrapperTarget);
+  assert.equal(lookup('boot'), true);
+  assert.equal(lookup('forward'), true);
+  assert.equal(lookup('business'), false);
+  assert.equal(lookup('decoy'), false);
+  assert.equal(lookup('commented'), false);
+  assert.equal(lookup('cyclic'), false);
+  assert.equal(lookup('other'), false);
+  assert.equal(indexed, 1);
+});
+
+test('Cat runtime shares each server termination and retains cleanup failures without retaining server keys', async t => {
+  const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+  const server = new EventEmitter();
+  server.listening = true;
+  let attempts = 0;
+  const failure = new Error('synthetic server termination failure');
+  server.close = () => {
+    attempts++;
+    server.listening = false;
+    server.emit('close');
+    throw failure;
+  };
+  const first = runtime.closeOwnedServer(server);
+  const second = runtime.closeOwnedServer(server);
+  await assert.rejects(first, error => error === failure);
+  await assert.rejects(second, error => error === failure);
+  assert.equal(attempts, 1);
+  assert.equal(runtime.pendingServerClosures.size, 0);
+  await assert.rejects(runtime.drainServerClosures(), { code: 'SCRIPT_EXCEPTION' });
+  await assert.rejects(runtime.close(), { code: 'SCRIPT_EXCEPTION' });
 });
 
 test('Cat TLS peer certificate chains retain cycles through finite data roles', async t => {
@@ -3588,8 +6456,11 @@ test('Cat waits for an asynchronous guest stop before releasing the private volu
 
 test('Cat marks a session inactive before destroying residual native requests',
   { timeout: 30000 }, async t => {
-    const runtime = await installed(t, rootFor(t));
-    const session = runtime.sessions.get('fixture-a');
+    const session = await createCatSessionForInternalTest(t, {
+      installationId: 'fixture-a',
+      source,
+      config: { id: 'site-a', protocol: 'old' },
+    });
     const observed = [];
     const request = {
       destroyed: false,
@@ -3601,37 +6472,77 @@ test('Cat marks a session inactive before destroying residual native requests',
       },
     };
     session.nativeRequests.add(request);
-    await runtime.setEnabled('fixture-a', false);
+    await session.stop();
     assert.deepEqual(observed, [false]);
   });
 
-test('Cat cleanup failures release session ownership and propagate through lifecycle calls',
+test('Cat lifecycle calls detach a failed session and report the cleanup failure',
   { timeout: 30000 }, async t => {
     const runtime = createCatRuntime({ dataRoot: rootFor(t) });
-    t.after(() => runtime.close().catch(() => {}));
+    t.after(async () => {
+      try { await runtime.close(); } catch {}
+    });
     await runtime.install({
+      installationId: 'fixture-a', source, config: { id: 'site-a', protocol: 'old' },
+      version: '1', enabled: true,
+    });
+    await runtime.install({
+      installationId: 'fixture-b', source, config: { id: 'site-b', protocol: 'old' },
+      version: '1', enabled: true,
+    });
+    const session = runtime.getSession('fixture-a');
+    const stop = session.stop.bind(session);
+    session.stop = async () => {
+      await stop();
+      throw fault('SERVICE_ERROR');
+    };
+    await assert.rejects(runtime.setEnabled('fixture-a', false), { code: 'SERVICE_ERROR' });
+    const host = runtime.host;
+    assert.equal(host.get('fixture-a').resources.live, false);
+    assert.equal(runtime.sessions.has('fixture-a'), false);
+    assert.equal(host.stats().liveSessions, 1);
+    assert.equal((await runtime.status()).instances.find(instance =>
+      instance.installationId === 'fixture-a').state, 'failed');
+
+    const other = runtime.getSession('fixture-b');
+    const stopOther = other.stop.bind(other);
+    other.stop = async () => {
+      await stopOther();
+      throw fault('SERVICE_ERROR');
+    };
+    await assert.rejects(runtime.close(), { code: 'SERVICE_ERROR' });
+    assert.equal(host.stats().liveSessions, 0);
+    assert.equal(host.stats().installations, 0);
+    assert.equal(runtime.host, null);
+    assert.equal(runtime.sessions.size, 0);
+  });
+
+test('Cat low-level cleanup failures release native ownership and session scope',
+  { timeout: 30000 }, async t => {
+    const session = await createCatSessionForInternalTest(t, {
       installationId: 'fixture-a',
       source,
       config: { id: 'site-a', protocol: 'old' },
-      version: '1',
-      enabled: true,
     });
-    const session = runtime.sessions.get('fixture-a');
     const close = session.node.close.bind(session.node);
     session.node.close = async () => {
       await close();
       throw Object.assign(new Error('synthetic native cleanup failure'), { code: 'IGNORED' });
     };
-    await assert.rejects(runtime.setEnabled('fixture-a', false), { code: 'SERVICE_ERROR' });
+    await assert.rejects(session.stop(), { code: 'SERVICE_ERROR' });
     assert.equal(session.live, false);
     assert.equal(session.root.signal.aborted, true);
-    assert.equal(runtime.sessions.has('fixture-a'), false);
-    assert.equal(runtime.host.stats().liveSessions, 0);
-    assert.equal((await runtime.status()).instances[0].state, 'failed');
+    assert.equal(session.node.handles.size, 0);
+    assert.equal(session.node.callbacks.size, 0);
+    assert.equal(session.node.callbackReturns.size, 0);
+    assert.equal(session.node.contextLeases.size, 0);
+    assert.equal(session.node.promiseLeases.size, 0);
+    assert.equal(session.stats().cleanupError, 'SERVICE_ERROR');
   });
 
 test('Cat uninstall publishes the durable removal after cleanup failure', { timeout: 30000 }, async t => {
-  const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+  const root = rootFor(t);
+  const runtime = createCatRuntime({ dataRoot: root });
   t.after(() => runtime.close().catch(() => {}));
   await runtime.install({
     installationId: 'fixture-a',
@@ -3640,20 +6551,221 @@ test('Cat uninstall publishes the durable removal after cleanup failure', { time
     version: '1',
     enabled: true,
   });
-  const session = runtime.sessions.get('fixture-a');
-  const close = session.node.close.bind(session.node);
-  session.node.close = async () => {
-    await close();
-    throw new Error('synthetic native cleanup failure');
+  const sourceFile = join(root, 'sources',
+    runtime.host.get('fixture-a').contentHash + '.js');
+  const session = runtime.getSession('fixture-a');
+  const stop = session.stop.bind(session);
+  session.stop = async () => {
+    await stop();
+    throw fault('SERVICE_ERROR');
   };
   const settingsPath = (await runtime.status()).settingsPath;
   await assert.rejects(runtime.uninstall('fixture-a'), { code: 'SERVICE_ERROR' });
+  assert.equal(runtime.host.stats().liveSessions, 0);
+  assert.equal(runtime.sessions.has('fixture-a'), false);
   assert.deepEqual(JSON.parse(readFileSync(settingsPath, 'utf8')).scripts, []);
   assert.deepEqual(runtime.settings.value.scripts, []);
   assert.deepEqual((await runtime.status()).instances, []);
   assert.equal(runtime.applied.has('fixture-a'), false);
   assert.equal(runtime.failures.has('fixture-a'), false);
+  assert.equal(existsSync(join(root, 'volumes', 'fixture-a')), false);
+  assert.equal(existsSync(sourceFile), false);
 });
+
+test('Cat uninstall deletes the private volume and unreferenced source but keeps shared source',
+  { timeout: 60000 }, async t => {
+    const root = rootFor(t);
+    const runtime = createCatRuntime({ dataRoot: root });
+    t.after(() => runtime.close());
+    const shared = volumeSource('shared');
+    const unique = volumeSource('unique');
+    await runtime.install({
+      installationId: 'remove-a', source: unique, config: {}, version: '1', enabled: true,
+    });
+    await runtime.install({
+      installationId: 'remove-b', source: shared, config: {}, version: '1', enabled: true,
+    });
+    await runtime.install({
+      installationId: 'remove-c', source: shared, config: {}, version: '1', enabled: true,
+    });
+    await runtime.invoke({
+      installationId: 'remove-a', siteId: 'unique', operation: 'write', payload: {},
+    });
+    await runtime.invoke({
+      installationId: 'remove-b', siteId: 'shared', operation: 'write', payload: {},
+    });
+    const uniqueHash = sourceHash(unique);
+    const sharedHash = sourceHash(shared);
+    assert.equal(existsSync(sourceFile(root, uniqueHash)), true);
+    assert.equal(existsSync(sourceFile(root, sharedHash)), true);
+    assert.equal(existsSync(join(root, 'volumes', 'remove-a')), true);
+
+    await runtime.uninstall('remove-a');
+    assert.equal(existsSync(join(root, 'volumes', 'remove-a')), false);
+    assert.equal(existsSync(sourceFile(root, uniqueHash)), false);
+    assert.equal(existsSync(sourceFile(root, sharedHash)), true);
+    assert.deepEqual(await runtime.invoke({
+      installationId: 'remove-b', siteId: 'shared', operation: 'read', payload: {},
+    }), { value: 'shared' });
+
+    await runtime.uninstall('remove-b');
+    assert.equal(existsSync(join(root, 'volumes', 'remove-b')), false);
+    assert.equal(existsSync(sourceFile(root, sharedHash)), true);
+    assert.deepEqual(await runtime.invoke({
+      installationId: 'remove-c', siteId: 'shared', operation: 'read', payload: {},
+    }), { value: null });
+    await runtime.uninstall('remove-c');
+    assert.equal(existsSync(sourceFile(root, sharedHash)), false);
+  });
+
+test('Cat refresh removing a script deletes the same artifacts as uninstall',
+  { timeout: 60000 }, async t => {
+    const root = rootFor(t);
+    const runtime = createCatRuntime({ dataRoot: root });
+    t.after(() => runtime.close());
+    const sourceText = volumeSource('refresh-remove');
+    await runtime.install({
+      installationId: 'refresh-remove', source: sourceText, config: {},
+      version: '1', enabled: true,
+    });
+    await runtime.invoke({
+      installationId: 'refresh-remove', siteId: 'refresh-remove', operation: 'write', payload: {},
+    });
+    const hash = sourceHash(sourceText);
+    writeSettings(runtime.settings.path, value => ({
+      ...value,
+      scripts: value.scripts.filter(script => script.installationId !== 'refresh-remove'),
+    }));
+    assert.deepEqual(await runtime.refresh(), { applied: true, failures: [] });
+    assert.equal(existsSync(join(root, 'volumes', 'refresh-remove')), false);
+    assert.equal(existsSync(sourceFile(root, hash)), false);
+    assert.deepEqual((await runtime.status()).instances, []);
+  });
+
+test('Cat reinstall starts from an empty private volume after uninstall',
+  { timeout: 60000 }, async t => {
+    const root = rootFor(t);
+    const runtime = createCatRuntime({ dataRoot: root });
+    t.after(() => runtime.close());
+    await runtime.install({
+      installationId: 'reinstall', source: volumeSource('reinstall'), config: {},
+      version: '1', enabled: true,
+    });
+    await runtime.invoke({
+      installationId: 'reinstall', siteId: 'reinstall', operation: 'write', payload: {},
+    });
+    await runtime.uninstall('reinstall');
+    await runtime.install({
+      installationId: 'reinstall', source: volumeSource('reinstall'), config: {},
+      version: '1', enabled: true,
+    });
+    assert.deepEqual(await runtime.invoke({
+      installationId: 'reinstall', siteId: 'reinstall', operation: 'read', payload: {},
+    }), { value: null });
+  });
+
+test('Cat stop, disable, update and restart preserve the private volume',
+  { timeout: 60000 }, async t => {
+    const root = rootFor(t);
+    const runtime = createCatRuntime({ dataRoot: root });
+    t.after(() => runtime.close());
+    const original = volumeSource('keep-volume');
+    await runtime.install({
+      installationId: 'keep-volume', source: original, config: {}, version: '1', enabled: true,
+    });
+    await runtime.invoke({
+      installationId: 'keep-volume', siteId: 'keep-volume', operation: 'write', payload: {},
+    });
+    const read = () => runtime.invoke({
+      installationId: 'keep-volume', siteId: 'keep-volume', operation: 'read', payload: {},
+    });
+    assert.deepEqual(await read(), { value: 'keep-volume' });
+    await runtime.setEnabled('keep-volume', false);
+    await runtime.setEnabled('keep-volume', true);
+    assert.deepEqual(await read(), { value: 'keep-volume' });
+    await runtime.install({
+      installationId: 'keep-volume',
+      source: volumeSource('keep-volume', '// updated revision'),
+      config: {}, version: '2', enabled: true,
+    });
+    assert.deepEqual(await read(), { value: 'keep-volume' });
+    await runtime.close();
+
+    const reopened = createCatRuntime({ dataRoot: root });
+    t.after(() => reopened.close());
+    await reopened.start();
+    await waitForState(reopened, 'keep-volume', 'ready');
+    assert.deepEqual(await reopened.invoke({
+      installationId: 'keep-volume', siteId: 'keep-volume', operation: 'read', payload: {},
+    }), { value: 'keep-volume' });
+  });
+
+test('Cat restart does not clean a residual volume but reinstall starts it empty',
+  { timeout: 60000 }, async t => {
+    const root = rootFor(t);
+    mkdirSync(join(root, 'volumes', 'residual'), { recursive: true });
+    writeFileSync(join(root, 'volumes', 'residual', 'old.txt'), 'old');
+    const runtime = createCatRuntime({ dataRoot: root });
+    t.after(() => runtime.close());
+    await runtime.start();
+    assert.equal(readFileSync(join(root, 'volumes', 'residual', 'old.txt'), 'utf8'), 'old');
+    await runtime.install({
+      installationId: 'residual', source: volumeSource('residual'), config: {},
+      version: '1', enabled: true,
+    });
+    assert.equal(existsSync(join(root, 'volumes', 'residual', 'old.txt')), false);
+    assert.deepEqual(await runtime.invoke({
+      installationId: 'residual', siteId: 'residual', operation: 'read', payload: {},
+    }), { value: null });
+  });
+
+test('Cat reports volume deletion failure without affecting another instance',
+  { timeout: 60000 }, async t => {
+    const root = rootFor(t);
+    const runtime = createCatRuntime({ dataRoot: root });
+    t.after(() => runtime.close());
+    await runtime.install({
+      installationId: 'remove-fails', source: volumeSource('remove-fails'), config: {},
+      version: '1', enabled: true,
+    });
+    await runtime.install({
+      installationId: 'remove-works', source: volumeSource('remove-works'), config: {},
+      version: '1', enabled: true,
+    });
+    await runtime.invoke({
+      installationId: 'remove-fails', siteId: 'remove-fails', operation: 'write', payload: {},
+    });
+    await runtime.invoke({
+      installationId: 'remove-works', siteId: 'remove-works', operation: 'write', payload: {},
+    });
+    const blocked = resolve(root, 'volumes', 'remove-fails');
+    const originals = Object.fromEntries(['rmSync', 'rmdirSync', 'unlinkSync']
+      .map(name => [name, fs[name]]));
+    const failure = () => Object.assign(
+      new Error('synthetic volume deletion failure'), { code: 'EBUSY' });
+    for (const name of Object.keys(originals)) {
+      fs[name] = (target, ...args) => {
+        if (resolve(target) === blocked) throw failure();
+        return originals[name](target, ...args);
+      };
+    }
+    syncBuiltinESMExports();
+    try {
+      const result = await runtime.uninstall('remove-fails');
+      assert.equal(result.applied, false);
+      assert.ok(result.failures.some(item => item.installationId === 'remove-fails'));
+    } finally {
+      for (const [name, original] of Object.entries(originals)) fs[name] = original;
+      syncBuiltinESMExports();
+    }
+    assert.equal(runtime.failures.has('remove-fails'), true);
+    assert.equal(existsSync(join(root, 'volumes', 'remove-fails')), true);
+    assert.deepEqual(await runtime.invoke({
+      installationId: 'remove-works', siteId: 'remove-works', operation: 'read', payload: {},
+    }), { value: 'remove-works' });
+    await runtime.uninstall('remove-works');
+    assert.equal(existsSync(join(root, 'volumes', 'remove-works')), false);
+  });
 
 test('Cat runtime close rejects incomplete host cleanup after releasing runtime ownership',
   async t => {
@@ -3668,7 +6780,7 @@ test('Cat runtime close rejects incomplete host cleanup after releasing runtime 
     await assert.rejects(runtime.close(), { code: 'TIMEOUT' });
     assert.equal(runtime.host, null);
     assert.equal(runtime.server, null);
-    assert.equal(runtime.sessions.size, 0);
+    await assert.rejects(runtime.status(), { code: 'HOST_CLOSED' });
   });
 
 test('Cat site APIs without an explicit HTTP port map default port 80 and never register alias 0',
@@ -3710,6 +6822,133 @@ test('Cat site APIs without an explicit HTTP port map default port 80 and never 
     assert.deepEqual(await runtime.invoke({
       installationId: 'default-port', siteId: 'default-port', operation: 'home', payload: {},
     }), { class: [] });
+  });
+
+test('Cat and LX invocation waits share the 60 second request deadline',
+  { timeout: 30000 }, async t => {
+    const root = rootFor(t);
+    const runtime = await installed(t, root);
+    assert.equal(runtime.host.limits.requestTimeoutMs, 60000);
+    const instance = (await runtime.status()).instances.find(value =>
+      value.installationId === 'fixture-a');
+    assert.equal(instance.error, null);
+    await assert.rejects(runtime.invoke({
+      installationId: 'fixture-a', siteId: 'site-a', operation: 'home', payload: {},
+    }, { timeoutMs: 60001 }), { code: 'INVALID_ARGUMENT' });
+    const controller = new AbortController();
+    const timed = runtime.invoke({
+      installationId: 'fixture-a', siteId: 'site-a', operation: 'slow', payload: {},
+    }, { signal: controller.signal, timeoutMs: 60000 });
+    controller.abort();
+    await assert.rejects(timed, { code: 'CANCELLED' });
+    const host = createScriptHost();
+    t.after(() => host.close());
+    assert.equal(host.limits.requestTimeoutMs, 60000);
+    await host.install({ installationId: 'wait', enabled: true, source: lxScript() });
+    await assert.rejects(host.invoke({ installationId: 'wait', siteId: 'kw',
+      operation: 'musicUrl', payload: { quality: '320k', musicInfo: {} } },
+    { timeoutMs: 60001 }), { code: 'INVALID_ARGUMENT' });
+    assert.equal((await host.invoke({ installationId: 'wait', siteId: 'kw',
+      operation: 'musicUrl', payload: { quality: '320k', musicInfo: {} } },
+    { timeoutMs: 60000 })).action, 'musicUrl');
+  });
+
+test('Cat scripts reach unregistered private, loopback and local-name hosts',
+  { timeout: 30000 }, async t => {
+    const upstream = http.createServer((request, response) => {
+      if (request.url === '/dns') {
+        response.end(JSON.stringify({ reached: true }));
+        return;
+      }
+      response.end('reachable');
+    });
+    await new Promise((resolve, reject) => {
+      upstream.once('error', reject);
+      upstream.listen(0, '0.0.0.0', resolve);
+    });
+    t.after(() => new Promise(resolve => {
+      upstream.closeAllConnections?.();
+      upstream.close(resolve);
+    }));
+    const port = upstream.address().port;
+    const addresses = Object.values(networkInterfaces()).flat()
+      .filter(item => item.family === 'IPv4' && !item.internal)
+      .map(item => item.address);
+    const ten = addresses.filter(address => address.startsWith('10.'));
+    const oneNinetyTwo = addresses.filter(address => address.startsWith('192.168.'));
+    const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+    t.after(() => runtime.close());
+    await runtime.install({
+      installationId: 'network-open', enabled: true, config: {}, version: '1', source: String.raw`
+        const http = require('http'), dns = require('dns');
+        let server;
+        const get = value => new Promise((resolve, reject) => {
+          http.get(value, incoming => {
+            const chunks = [];
+            incoming.on('data', chunk => chunks.push(Buffer.from(chunk)));
+            incoming.once('end', () => resolve({ status: incoming.statusCode,
+              body: Buffer.concat(chunks).toString() }));
+            incoming.once('error', reject);
+          }).once('error', reject);
+        });
+        module.exports.start = () => new Promise(resolve => {
+          server = http.createServer(async (request, response) => {
+            if (request.url === '/config' || request.url === '/full-config') {
+              response.setHeader('content-type', 'application/json');
+              response.end(JSON.stringify({ video: { sites: [{
+                key: 'open', name: 'Open', api: '/open', actions: ['probe'],
+              }] } }));
+              return;
+            }
+            const targets = await new Promise((resolve, reject) => {
+              const chunks = [];
+              request.on('data', chunk => chunks.push(Buffer.from(chunk)));
+              request.once('error', reject);
+              request.once('end', () => {
+                try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
+                catch (error) { reject(error); }
+              });
+            });
+            const values = {};
+            for (const [name, value] of Object.entries(targets)) {
+              try { values[name] = await get(value); }
+              catch (error) { values[name] = { code: error.code }; }
+            }
+            values.lookup = await new Promise(resolve => dns.lookup('localhost', (error, address) => {
+              resolve(error ? { code: error.code } : { address });
+            }));
+            response.setHeader('content-type', 'application/json');
+            response.end(JSON.stringify(values));
+          });
+          server.listen(Number(process.env.PORT), '127.0.0.1', resolve);
+        });
+        module.exports.stop = () => server?.close();
+      `,
+    });
+    const targets = {
+      loopback: 'http://127.0.0.1:' + port + '/loopback',
+      ...Object.fromEntries(ten.map((address, index) =>
+        ['ten' + index, 'http://' + address + ':' + port + '/private'])),
+      ...Object.fromEntries(oneNinetyTwo.map((address, index) =>
+        ['oneNinetyTwo' + index, 'http://' + address + ':' + port + '/private'])),
+      localName: 'http://fixture.local:' + port + '/local',
+    };
+    const result = await runtime.invoke({
+      installationId: 'network-open', siteId: 'open', operation: 'probe',
+      payload: targets,
+    });
+    assert.equal(result.loopback.status, 200);
+    assert.equal(result.loopback.body, 'reachable');
+    for (const [name, value] of Object.entries(result)) {
+      if (!/^(?:ten|oneNinetyTwo)\d+$/.test(name)) continue;
+      assert.equal(value.status, 200, name);
+      assert.equal(value.body, 'reachable', name);
+    }
+    if (!ten.length && !oneNinetyTwo.length)
+      t.diagnostic('test host has no 10.x or 192.168.x IPv4 address; only loopback checked');
+    assert.notEqual(result.localName.code, 'PERMISSION_DENIED');
+    const lookup = String(result.lookup.address ?? '');
+    assert.ok(lookup === '127.0.0.1' || lookup === '::1', lookup);
   });
 
 test('Cat rejects credentialed, routed and unmapped HTTPS site APIs', { timeout: 30000 }, async t => {
@@ -3861,19 +7100,25 @@ test('Cat rejects UTF-8 source content with a BOM', async t => {
   }), { code: 'SCRIPT_PROTOCOL_ERROR' });
 });
 
-test('Cat rejects an oversized synchronous guest callback result at the JSON boundary',
+test('Cat accepts a synchronous guest callback result larger than the external message limit',
   { timeout: 30000 }, async t => {
     const oversizedSource = String.raw`
       const http = require('http');
       let server;
+      const config = JSON.stringify({ video: { sites: [{
+        key: 'oversized', name: 'Oversized', api: '/api/oversized', actions: ['home'],
+      }] } });
       module.exports.start = () => {
         server = http.createServer((request, response) => {
           if (request.url === '/full-config' || request.url === '/config') {
             response.setHeader('content-type', 'application/json');
-            response.end(JSON.stringify({ video: { sites: [{
-              key: 'oversized', name: 'Oversized', api: '/api/oversized', actions: ['home'],
-            }] } }));
+            response.end(config);
             return 'x'.repeat(9 * 1024 * 1024);
+          }
+          if (request.url === '/api/oversized/home') {
+            response.setHeader('content-type', 'application/json');
+            response.end(JSON.stringify({ class: [] }));
+            return;
           }
           response.statusCode = 404;
           response.end();
@@ -3884,8 +7129,11 @@ test('Cat rejects an oversized synchronous guest callback result at the JSON bou
     `;
     const runtime = createCatRuntime({ dataRoot: rootFor(t) });
     t.after(() => runtime.close());
-    await assert.rejects(runtime.install({
+    await runtime.install({
       installationId: 'oversized-callback', source: oversizedSource, config: {},
       version: '1', enabled: true,
-    }), { code: 'RESOURCE_LIMIT' });
+    });
+    assert.deepEqual(await runtime.invoke({
+      installationId: 'oversized-callback', siteId: 'oversized', operation: 'home', payload: {},
+    }), { class: [] });
   });
