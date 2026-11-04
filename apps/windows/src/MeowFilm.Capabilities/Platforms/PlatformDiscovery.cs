@@ -90,6 +90,18 @@ internal static class PlatformDiscovery
         if (Cover(s).Length == 0 && resourceCover.Length > 0) copy["coverUrl"] = resourceCover;
         return PlatformSongs.Wy(copy);
     }
+    private static JsonObject Entry(JsonObject resource)
+    {
+        var kind = S(resource, "action", "type") is { Length: > 0 } actionKind ? actionKind : S(resource, "kind");
+        resource["presentation"] = kind switch
+        {
+            "playlist" or "daily" or "album" => "preview",
+            "similar" => "overlay",
+            "fm" or "heartbeat" => "animated",
+            _ => "static"
+        };
+        return resource;
+    }
     internal static JsonObject? Resource(JsonNode? raw, bool modern = false, bool banner = false, bool channel = false)
     {
         if (raw is not JsonObject r) return null;
@@ -300,15 +312,7 @@ internal static class PlatformDiscovery
                     for (var i = 0; i < unique.Count; i++)
                     {
                         var x = unique[i]; x["key"] = $"{baseId}:entry:{S(x, "kind")}:{(S(x, "id").Length > 0 ? S(x, "id") : i.ToString())}:{S(x, "action", "branch")}";
-                        var entryKind = S(x, "action", "type") is { Length: > 0 } actionKind ? actionKind : S(x, "kind");
-                        x["presentation"] = entryKind switch
-                        {
-                            "playlist" or "daily" or "album" => "preview",
-                            "similar" => "overlay",
-                            "fm" or "heartbeat" => "animated",
-                            _ => "static"
-                        };
-                        entries.Add(x);
+                        entries.Add(Entry(x));
                     }
                     continue;
                 }
@@ -538,18 +542,21 @@ internal static class PlatformDiscovery
                 var tabs = new JsonArray();
                 for (var i = 0; i < modules.Count; i++)
                 {
-                    var g = modules[i]; var items = PJ.Arr(PJ.Array(A(g, "modules")).OfType<JsonObject>().Select(x =>
+                    var g = modules[i]; var items = PJ.Arr(PJ.Array(A(g, "modules")).OfType<JsonObject>().Select((x, index) =>
                     {
                         var row = (JsonObject)x.DeepClone(); row["resourceType"] = x["type"]?.DeepClone();
                         if (S(x, "type") == "fm" && PJ.Scalar(x["tabTagId"]).Length == 0) row["tabTagId"] = A(p, "tab")?.DeepClone();
-                        return Resource(row, channel: true);
+                        var resource = Resource(row, channel: true);
+                        if (resource is null) return null;
+                        resource["key"] = $"{target}:{(S(n, "id").Length > 0 ? S(n, "id") : sections.Count.ToString())}:entry:{i}:{index}";
+                        return Entry(resource);
                     }).Where(x => x is not null));
                     if (items.Count > 0) tabs.Add(PJ.Obj(("id", $"{S(n, "id")}:group:{i}"), ("name", S(g, "title")), ("selected", PJ.True(A(g, "isDefaultTab"))), ("items", items)));
                 }
                 if (tabs.Count > 0)
                 {
                     var tab = tabs.FirstOrDefault(t => PJ.True(A(t, "selected"))) ?? tabs[0];
-                    Add(n, "playlists", PJ.Array(A(tab, "items")), title: S(p, "title"));
+                    Add(n, "entries", PJ.Array(A(tab, "items")), title: S(p, "title"));
                     if (tabs.Count > 1 && sections.LastOrDefault() is JsonObject section) { section["tabs"] = tabs.DeepClone(); section["selectedTab"] = S(tab, "id"); }
                 }
                 return;

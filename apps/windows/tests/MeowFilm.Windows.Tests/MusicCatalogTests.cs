@@ -314,24 +314,20 @@ public static class MusicCatalogTests
         yield return Case("catalog card types derive distinct colors from one artwork sample", () =>
         {
             var raw = new SolidColorBrush(Color.FromRgb(83, 74, 85));
-            var entry = new MusicCatalogPaletteConverter { Role = MusicCatalogPaletteRole.Entry };
-            var footer = new MusicCatalogPaletteConverter { Role = MusicCatalogPaletteRole.CoverFooter };
+            var entry = new MusicCatalogPaletteConverter();
             SolidColorBrush Entry(MusicCatalogEntryPresentation presentation) =>
                 (SolidColorBrush)entry.Convert([raw, presentation], typeof(Brush), null!,
                     System.Globalization.CultureInfo.InvariantCulture);
             var preview = Entry(MusicCatalogEntryPresentation.Preview);
             var overlay = Entry(MusicCatalogEntryPresentation.Overlay);
             var animated = Entry(MusicCatalogEntryPresentation.Animated);
-            var cover = (SolidColorBrush)footer.Convert([raw], typeof(Brush), null!,
-                System.Globalization.CultureInfo.InvariantCulture);
             Equal(Color.FromRgb(83, 74, 85), preview.Color);
             Equal(Color.FromRgb(78, 62, 62), overlay.Color);
             Equal(overlay.Color, animated.Color);
-            Equal(Color.FromRgb(65, 58, 66), cover.Color);
-            True(preview.IsFrozen && overlay.IsFrozen && animated.IsFrozen && cover.IsFrozen,
+            True(preview.IsFrozen && overlay.IsFrozen && animated.IsFrozen,
                 "catalog palette results are immutable");
-            True(preview.Color != overlay.Color && preview.Color != cover.Color && overlay.Color != cover.Color,
-                "preview, overlay entry and ordinary cover own separate palette policies");
+            True(preview.Color != overlay.Color,
+                "preview and overlay entries own separate palette policies");
 
             var daily = new SolidColorBrush(Color.FromRgb(169, 149, 142));
             Equal(daily.Color, ((SolidColorBrush)entry.Convert(
@@ -1548,14 +1544,79 @@ public static class MusicCatalogTests
             await WithMountedShelf(shelf, 1000, () =>
                 True(shelf.CardWidth is >= 140 and <= 146, "ordinary covers use seven columns at 1000 pixels"));
             var view = new MusicCatalogView();
-            var card = (FrameworkElement)((DataTemplate)view.FindResource("Catalog.CoverCard")).LoadContent();
+            var card = (FrameworkElement)((DataTemplate)view.FindResource("Catalog.PlaylistCard")).LoadContent();
             card.DataContext = section.Items[0];
             card.Measure(new Size(168, 300)); card.Arrange(new Rect(0, 0, 168, 300)); card.UpdateLayout();
+            Equal(1, Descendants<TextBlock>(card).Count(text => text.Text == section.Items[0].Title));
             True(!Descendants<TextBlock>(card).Any(t =>
                 t.GetBindingExpression(TextBlock.TextProperty)?.ParentBinding.Path?.Path == "ErrorText"),
                 "business errors must not be inserted in card layout");
             Equal("ErrorText", card.GetBindingExpression(FrameworkElement.ToolTipProperty)?.ParentBinding.Path?.Path);
 
+        });
+        yield return Case("channel entry shelves reuse shared cards and supplied song previews", async () =>
+        {
+            await using var f = await Fixture.Create();
+            f.Client.Transform("music.catalog.channel", reply => Edit(reply, node =>
+                node["sections"] = JsonSerializer.SerializeToNode(new[] {
+                    new { id = "electronic", title = "电音旗舰", type = "entries", layout = "rail", items = new object[] {
+                        new { id = "800", name = "电音歌单", subtitle = "精选电子音乐",
+                            cover = "https://art.example.test/channel-playlist.jpg", presentation = "preview",
+                            action = new { type = "playlist", id = "800" },
+                            preview = new[] {
+                                new { title = "第一首电音", artist = "歌手一", cover = "", rank = 1, lastRank = 0 },
+                                new { title = "第二首电音", artist = "歌手二", cover = "", rank = 2, lastRank = 0 } } },
+                        new { id = "801", name = "无副标题歌单", subtitle = "",
+                            cover = "https://art.example.test/channel-empty-subtitle.jpg", presentation = "preview",
+                            action = new { type = "playlist", id = "801" } },
+                        new { id = "radio", name = "电音电台", subtitle = "连续播放",
+                            cover = "https://art.example.test/channel-radio.jpg", presentation = "static",
+                            action = new { type = "unsupported", id = "radio" } }
+                    } }
+                })));
+            await f.Module.NavigateAsync("catalog-channel/wy/rock", default);
+            var section = f.Module.ChannelSections.Single();
+            True(section.IsEntrySection, "channel resource groups use the existing entry presentation");
+            var card = section.Items[0];
+            True(card.CanRequestPreview && card.CanPlay && card.ActionId == "800",
+                "the supplied playlist identity owns preview and playback");
+            var loader = new CatalogArtworkLoader();
+            ArtworkScope.SetLoader(f.Module.View, loader);
+            var window = new Window { Content = f.Module.View, Width = 1108, Height = 760,
+                Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false };
+            try
+            {
+                window.Show(); window.UpdateLayout(); await Drain(); window.UpdateLayout();
+                var view = (MusicCatalogView)f.Module.View.FindName("CatalogView");
+                var scroll = (ScrollViewer)view.FindName("CatalogScroll");
+                var entries = Descendants<EntryCard>(scroll).ToArray();
+                Equal(3, entries.Length);
+                foreach (var entry in entries)
+                {
+                    var item = (MusicCatalogCard)entry.DataContext;
+                    Equal(1, Descendants<TextBlock>(entry).Count(text => text.IsVisible && text.Text == item.Title));
+                    Equal(item.Cover, ((ArtworkImage)entry.FindName("Cover")).Address);
+                }
+                await Until(() => loader.Addresses.Count == 3, "channel cover addresses reach the shared artwork loader");
+                var preview = entries.Single(entry => ReferenceEquals(entry.DataContext, card));
+                True(preview.PreviewTitles.SequenceEqual(new[] { "1 第一首电音", "2 第二首电音" }),
+                    "the response's ordered song summaries reach the shared card");
+                int reads = f.Client.Log.Count;
+                preview.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, Environment.TickCount) { RoutedEvent = Mouse.MouseEnterEvent });
+                True(preview.PreviewTitles.SequenceEqual(await f.Module.ReadCatalogCardPreviewAsync(card, default)),
+                    "preloaded previews keep the supplied titles");
+                Equal(reads, f.Client.Log.Count);
+                var surface = (Grid)preview.FindName("Surface");
+                CardMotion.Transition(surface, true, false); await Drain();
+                True(((TranslateTransform)((StackPanel)preview.FindName("Caption")).RenderTransform).Y < 0,
+                    "channel hover uses the shared rising preview");
+                Equal(Visibility.Visible, ((Button)preview.FindName("PlayButton")).Visibility);
+                var passive = entries.Single(entry => ((MusicCatalogCard)entry.DataContext).Id == "radio");
+                Equal(Visibility.Collapsed, ((Button)passive.FindName("PlayButton")).Visibility);
+                Equal(0, f.Client.Count("music.catalog.playlist"));
+                Equal(0, f.Client.Count("music.queue.replace")); Equal(0, f.Playback.Opens.Count);
+            }
+            finally { window.Content = null; window.Close(); }
         });
         yield return Case("entry presentation DTO is strict while ordinary cards remain static", async () =>
         {
@@ -1582,6 +1643,13 @@ public static class MusicCatalogTests
                 new { id = "1", name = "缺失展示类型", action = new { type = "playlist", id = "1" } } } }));
             Rejected(JsonSerializer.SerializeToElement(new { platform = "wy", entries = new[] {
                 new { song, presentation = "Preview" } } }));
+            Rejected(JsonSerializer.SerializeToElement(new { platform = "wy", sections = new[] {
+                new { id = "entries", type = "entries", items = new[] {
+                    new { id = "1", name = "分组缺失展示类型", action = new { type = "playlist", id = "1" } } } } } }));
+            Rejected(JsonSerializer.SerializeToElement(new { platform = "wy", sections = new[] {
+                new { id = "entries", type = "entries", items = new[] {
+                    new { id = "1", name = "分组展示类型错误", presentation = "Preview",
+                        action = new { type = "playlist", id = "1" } } } } } }));
             var valid = JsonSerializer.SerializeToElement(new { platform = "wy", entries = new[] {
                 new { song, presentation = "static" } } });
             Equal(MusicCatalogEntryPresentation.Static,
