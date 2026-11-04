@@ -36,7 +36,7 @@ workspace 必须在根 package/lock 中声明并安装为准确指向本仓库�
 
 ## 受信 QuickJS WASM
 
-`scripts/quickjs-runtime.json` 固定 `0.32.0` 的 core、release-sync 和传递依赖 ffi-types，记录实际 npm tarball URL／SRI、package.json SHA-256、许可原文 SHA-256 和唯一必要 WASM：
+`scripts/quickjs-runtime.json` 固定 `0.32.0` 的 core、release-sync 和传递依赖 ffi-types，记录实际 npm tarball URL／SRI、package.json SHA-256、许可原文 SHA-256 和原包 WASM：
 
 ```text
 @jitl/quickjs-wasmfile-release-sync/dist/emscripten-module.wasm
@@ -44,11 +44,15 @@ workspace 必须在根 package/lock 中声明并安装为准确指向本仓库�
 SHA-256 105c3bed22d457e43e3d1c3c1c6959fda62a8fe06f0fc8a985303c3a2be72232
 ```
 
-引擎依赖声明须是精确版本；安装 manifest、根锁身份／来源／SRI、MIT 声明、包 LICENSE 与中央 `LICENSES/quickjs-emscripten-LICENSE.txt` 均需匹配受审查记录。只在受信 package 的精确相对路径放行上述 WASM，并流式复核长度和真实文件哈希；同包额外 `.wasm`、其他包／workspace 中的同名 WASM、native binary、链接或错误版本仍拒绝。不安装 debug／asyncify 引擎变体，不全局放行二进制。
+任务上下文 revision 1 的实际执行产物位于 `packages/script-host/src/quickjs/emscripten-module.mjs`／`.wasm`，发布时对应 `node_modules/@meowfilm/script-host/src/quickjs/`。它从同一上游提交 `df4efb9ef2cb25c417ecb57986da462d11b244ed` 的固定源码归档派生，仅修改任务身份传播及可信 SDK 私有入口；npm 原包、根锁和 registry SRI 不变。
 
-可信 `quickjs-engine.js` 使用 `node:fs/promises`，通过 `import.meta.resolve('@jitl/quickjs-wasmfile-release-sync/wasm')` 读取该锁定文件；包 exports／公开文件目标与实际 payload 必须对应。文件读取属于可信引擎，不向 guest 开放。
+引擎依赖声明须是精确版本；安装 manifest、根锁身份／来源／SRI、MIT 声明、包 LICENSE 与中央 `LICENSES/quickjs-emscripten-LICENSE.txt` 均需匹配受审查记录。policy 另固定派生源码归档 SHA-256、Emscripten 5.0.1、`scripts/quickjs/task-context.patch`／`build.py` 哈希及产物 pair 的真实字节数和 SHA-256；复制前与流式复制时均复核。仅原 npm 与上述 script-host 精确路径的两份 WASM 放行；同包额外 `.wasm`、其他路径／包中的同名文件、native binary、链接或错误版本仍拒绝。不安装 debug／asyncify 变体，不全局放行二进制。
 
-输出 dependencies 记录引擎 manifest／license 哈希，`trustedWasm` 记录唯一允许文件及其许可；inputs 包含 engine policy、中央许可、根 manifest／lock 以及每个复制源码／依赖文件的哈希，并在完成时重新核对输入未改变。runtime 文件和每个引擎包原始 LICENSE 都进入逐字节 inventory，中央许可同时进入 App 的 licenses 清单。
+复现需 Emscripten 5.0.1（含 Closure compiler；ARM 主机需可用的 Java 回退）、Python、make 和 patch；在仓库运行 `python3 scripts/quickjs/build.py --emcc <emsdk内emcc路径>`，可通过 `EM_CONFIG` 指定工具链配置。脚本核对固定归档和补丁、按上游 release-sync 选取同一 FFI 导出，复用默认 `tmp/quickjs-build` 下的 make 缓存，生成本地 pair 并输出真实 hash／bytes；不安装 npm 依赖、不自动修改 policy。产物变化必须审查并同步 pin，不在打包时重建或下载引擎。
+
+可信 `quickjs-engine.js` 与 WorkerSession 从本地派生路径读取、编译并共享同一 module，loader 与 WASM 成对使用；文件读取属于可信引擎，不向 guest 开放。所有 SDK 安装后、用户脚本前移除私有任务入口。
+
+输出 dependencies 记录原引擎 manifest／license 哈希，`trustedWasm` 记录两份允许文件，派生项另标 revision／source／gitHead，许可引用指向 payload 内真实原包 LICENSE。inputs 包含 engine policy、复现补丁／脚本、中央许可、根 manifest／lock 以及每个复制源码／依赖文件的哈希，并在完成时重新核对输入未改变。runtime 文件和每个引擎包原始 LICENSE 都进入逐字节 inventory，中央许可同时进入 App 的 licenses 清单。
 
 ## 保留的安全约束
 

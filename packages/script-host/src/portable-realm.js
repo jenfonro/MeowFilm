@@ -7,15 +7,21 @@ export const portableRealmSource = String.raw`
   'use strict';
   const bridge = globalThis.__meowBridge;
   delete globalThis.__meowBridge;
+  const taskContext = globalThis.__meowTaskContext;
+  delete globalThis.__meowTaskContext;
   const parse = JSON.parse.bind(JSON);
   const stringify = JSON.stringify.bind(JSON);
   const setPrototypeOf = Object.setPrototypeOf;
   const isView = ArrayBuffer.isView;
   const arrayFrom = Array.from.bind(Array);
+  const apply = Reflect.apply;
+  const promiseThen = Promise.prototype.then;
+  const then = (promise, fulfilled, rejected) =>
+    apply(promiseThen, promise, [fulfilled, rejected]);
   const pending = new Map();
   const callbacks = new Map();
   const trustedErrors = new WeakMap();
-  let nextId = 0, protocol = '', exportsObject = null, realm, activeTaskId = 0;
+  let nextId = 0, protocol = '', exportsObject = null, realm;
   const documentRoots = new Map();
   const startupPromises = new Set();
 
@@ -26,10 +32,15 @@ export const portableRealmSource = String.raw`
     trustedErrors.set(value, code);
     return value;
   };
-  const errorCode = value => trustedErrors.get(value)
-    || (value && value.name === 'InternalError' && /out of memory|allocation failed/i.test(value.message)
-      ? 'MEMORY_LIMIT' : value && value.name === 'InternalError' && /stack overflow/i.test(value.message)
-        ? 'RESOURCE_LIMIT' : 'SCRIPT_EXCEPTION');
+  const errorCode = value => {
+    const trusted = trustedErrors.get(value);
+    if (trusted) return trusted;
+    try {
+      return value && value.name === 'InternalError' && /out of memory|allocation failed/i.test(value.message)
+        ? 'MEMORY_LIMIT' : value && value.name === 'InternalError' && /stack overflow/i.test(value.message)
+          ? 'RESOURCE_LIMIT' : 'SCRIPT_EXCEPTION';
+    } catch (_) { return 'SCRIPT_EXCEPTION'; }
+  };
   const call = (operation, ...args) => {
     setPrototypeOf(args, null);
     const response = parse(bridge(operation, stringify(args, (_key, value) =>
@@ -141,7 +152,13 @@ export const portableRealmSource = String.raw`
   globalThis.btoa = value => ScriptBuffer.from(String(value), 'latin1').toString('base64');
   globalThis.atob = value => ScriptBuffer.from(String(value), 'base64').toString('latin1');
 
-  const sync = (taskId, name, input = {}) => call('sync', taskId, name, input);
+  const assertTask = taskId => {
+    if (taskId !== taskContext()) throw error('STALE_SESSION');
+  };
+  const sync = (taskId, name, input = {}) => {
+    assertTask(taskId);
+    return call('sync', taskId, name, input);
+  };
   const decodeQuery = value => {
     try { return decodeURIComponent(String(value).replace(/\+/g, ' ')); }
     catch (_) { return String(value); }
@@ -222,8 +239,7 @@ export const portableRealmSource = String.raw`
   }
   class PortableURL {
     constructor(value, base) {
-      this.__taskId = activeTaskId;
-      this.__apply(sync(this.__taskId, 'common.url', {
+      this.__apply(sync(taskContext(), 'common.url', {
         value:String(value), ...(base === undefined ? {} : { base:String(base) }),
       }));
       this.searchParams = new PortableURLSearchParams(this.search, query => {
@@ -236,12 +252,12 @@ export const portableRealmSource = String.raw`
       if (this.searchParams) this.searchParams.__replace(this.__search);
     }
     __set(name, value) {
-      this.__apply(sync(activeTaskId || this.__taskId, 'common.url', {
+      this.__apply(sync(taskContext(), 'common.url', {
         value:this.__href, set:{ name, value:String(value) },
       }));
     }
     get href() { return this.__href; } set href(value) {
-      this.__apply(sync(activeTaskId || this.__taskId, 'common.url', { value:String(value) }));
+      this.__apply(sync(taskContext(), 'common.url', { value:String(value) }));
     }
     get protocol() { return this.__protocol; } set protocol(value) { this.__set('protocol', value); }
     get username() { return this.__username; } set username(value) { this.__set('username', value); }
@@ -260,37 +276,32 @@ export const portableRealmSource = String.raw`
   globalThis.URLSearchParams = PortableURLSearchParams;
 
   const runTask = (taskId, body) => {
-    const previous = activeTaskId;
-    activeTaskId = taskId;
-    try {
-      const value = body();
-      if (value && typeof value.then === 'function') return Promise.resolve(value).finally(() => {
-        if (activeTaskId === taskId) activeTaskId = previous;
-      });
-      activeTaskId = previous;
-      return value;
-    } catch (failure) {
-      activeTaskId = previous;
-      throw failure;
-    }
+    const previous = taskContext();
+    taskContext(taskId);
+    try { return body(); }
+    finally { taskContext(previous); }
   };
   const capability = (taskId, name, input = {}) => {
     const promise = new Promise((resolve, reject) => {
       const id = ++nextId;
       pending.set(id, { resolve, reject, taskId });
-      try { call('capability', taskId, id, name, input); }
+      try {
+        assertTask(taskId);
+        call('capability', taskId, id, name, input);
+      }
       catch (failure) { pending.delete(id); reject(failure); }
     });
     if (taskId === 0) {
       startupPromises.add(promise);
-      promise.finally(() => startupPromises.delete(promise)).catch(() => {});
+      then(promise, () => startupPromises.delete(promise),
+        () => startupPromises.delete(promise));
     }
     return promise;
   };
   const timer = (fn, delay, repeat, args) => {
     if (typeof fn !== 'function') throw error('INVALID_ARGUMENT');
     const id = ++nextId;
-    const taskId = activeTaskId;
+    const taskId = taskContext();
     callbacks.set(id, { fn, repeat, args, taskId });
     try { call('timer', taskId, id, delay || 0, repeat); }
     catch (failure) { callbacks.delete(id); throw failure; }
@@ -821,8 +832,8 @@ export const portableRealmSource = String.raw`
     [Symbol.iterator]() { return this.values[Symbol.iterator](); }
   }
 
-  function createDomScope(taskId) {
-    const currentTask = () => activeTaskId || taskId;
+  function createDomScope() {
+    const currentTask = () => taskContext();
     const parseNodes = (owner, html) => {
       const parsed = sync(owner, 'dom.parse', { html:String(html ?? '') });
       const root = new NodeHandle(owner, parsed.rootId);
@@ -1104,16 +1115,19 @@ export const portableRealmSource = String.raw`
     return new Promise((resolve, reject) => {
       const abort = () => reject(signal.reason || error('CANCELLED'));
       signal.addEventListener('abort', abort, { once:true });
-      promise.then(resolve, reject).finally(() =>
-        signal.removeEventListener('abort', abort)).catch(() => {});
+      then(then(promise, resolve, reject),
+        () => signal.removeEventListener('abort', abort),
+        () => signal.removeEventListener('abort', abort));
     });
   };
   globalThis.Headers = PortableHeaders;
   globalThis.Response = PortableResponse;
   globalThis.fetch = async (input, options = {}) => {
     options = options || {};
-    const taskId = activeTaskId;
-    const url = String(input?.url ?? input);
+    const taskId = taskContext();
+    const inputUrl = String(input?.url ?? input);
+    const url = protocol === 'qysg'
+      ? new PortableURL(inputUrl, globalThis.location.href).href : inputUrl;
     const method = String(options.method ?? input?.method ?? 'GET').toUpperCase();
     const headers = new PortableHeaders(options.headers ?? input?.headers ?? {});
     const rawBody = options.body ?? input?.body ?? '';
@@ -1644,7 +1658,7 @@ export const portableRealmSource = String.raw`
     const CryptoJS = {
       enc:{ Hex:encoder('hex'), Base64:encoder('base64'), Utf8:encoder('utf8'), Latin1:encoder('latin1') },
       lib:{ WordArray:{
-        create:(value = [], sigBytes) => Array.isArray(value) && sigBytes !== undefined
+        create:(value = [], sigBytes) => Array.isArray(value)
           ? fromWords(value, sigBytes) : word(value),
         random:length => word(call('util','random',[size(length)])),
       } },
@@ -1703,10 +1717,10 @@ export const portableRealmSource = String.raw`
     },
   });
 
-  function createCommonScope(taskId, metadata = {}) {
-    const dom = createDomScope(taskId);
+  function createCommonScope(metadata = {}) {
+    const dom = createDomScope();
     const callHandler = (name, ...args) =>
-      capability(activeTaskId || taskId, 'bridge.call', { name:String(name), args });
+      capability(taskContext(), 'bridge.call', { name:String(name), args });
     const window = globalThis;
     window.window = window;
     window.global = window;
@@ -1761,25 +1775,37 @@ export const portableRealmSource = String.raw`
     return { ...dom, window, callHandler };
   }
 
-  function normalizeResult(value) {
+  function normalizeResult(value, seen = new Set()) {
     if (value instanceof NodeHandle) {
       return {
         __meowMarkup:value.outerHTML,
         __meowNodeType:value.nodeType,
       };
     }
-    if (value instanceof MiniQuery) return value.toArray().map(normalizeResult);
-    if (value instanceof JsoupSelection) return value.__values.map(normalizeResult);
-    if (Array.isArray(value)) return value.map(normalizeResult);
     if (value && typeof value === 'object') {
       if (value instanceof ScriptBuffer) return value.toJSON();
-      const output = {};
-      for (const [key, child] of Object.entries(value)) {
-        if (typeof child !== 'function') output[key] = normalizeResult(child);
+      if (seen.has(value)) throw error('SCRIPT_EXCEPTION');
+      seen.add(value);
+      try {
+        const values = value instanceof MiniQuery ? value.toArray()
+          : value instanceof JsoupSelection ? value.__values : value;
+        if (Array.isArray(values)) return values.map(child => normalizeResult(child, seen));
+        const output = {};
+        for (const [key, child] of Object.entries(values)) {
+          if (typeof child !== 'function') output[key] = normalizeResult(child, seen);
+        }
+        return output;
+      } finally {
+        seen.delete(value);
       }
-      return output;
     }
+    if (typeof value === 'bigint') throw error('SCRIPT_EXCEPTION');
     return value;
+  }
+
+  function publishResult(id, value) {
+    try { call('result', id, true, normalizeResult(value)); }
+    catch (failure) { call('result', id, false, errorCode(failure)); }
   }
 
   function hydrateValue(taskId, value) {
@@ -1803,8 +1829,8 @@ export const portableRealmSource = String.raw`
     return value;
   }
 
-  function compileProtocol(source, names, taskId, metadata) {
-    createCommonScope(taskId, metadata);
+  function compileProtocol(source, names, metadata) {
+    createCommonScope(metadata);
     const capture = names.map(name =>
       JSON.stringify(name)+':(typeof '+name+'==="undefined"?undefined:'+name+')').join(',');
     const module = { exports:{} };
@@ -1820,8 +1846,8 @@ export const portableRealmSource = String.raw`
     }
   }
 
-  function installCatScope(taskId) {
-    const currentTask = () => activeTaskId || taskId;
+  function installCatScope() {
+    const currentTask = () => taskContext();
     globalThis.req = globalThis.request = async (url, options = {}) =>
       capability(currentTask(), 'cat.request', { url:String(url), options });
     globalThis.post = async (url, options = {}) =>
@@ -1880,7 +1906,7 @@ export const portableRealmSource = String.raw`
     globalThis.md5 = value => call('util', 'md5', [ScriptBuffer.from(String(value ?? ''))]);
   }
 
-  async function dispatchProtocol(action, payload, taskId) {
+  async function dispatchProtocol(action, payload) {
     if (!exportsObject) throw error('SCRIPT_PROTOCOL_ERROR');
     if (protocol === 'qysg') {
       const table = {
@@ -1924,7 +1950,7 @@ export const portableRealmSource = String.raw`
           ? [payload.segments ?? payload.params ?? payload, payload.headers ?? {}]
           : [payload]
         : configuredArgs;
-      installCatScope(taskId);
+      installCatScope();
       return fn.apply(spider, args);
     }
     throw error('UNSUPPORTED_PROTOCOL');
@@ -1934,18 +1960,18 @@ export const portableRealmSource = String.raw`
   return realm = Object.freeze({
     errorCode,
     watchStartup(value) {
-      if (value && typeof value.then === 'function') Promise.resolve(value)
-        .catch(failure => call('startupFailure', errorCode(failure)));
+      if (value && typeof value.then === 'function') then(Promise.resolve(value),
+        undefined, failure => call('startupFailure', errorCode(failure)));
     },
     load(kind, source, metadataJSON) {
       try {
         protocol = kind;
         const metadata = parse(metadataJSON);
-        if (kind === 'cat') installCatScope(0);
+        if (kind === 'cat') installCatScope();
         if (kind === 'qysg' && !('toc' in globalThis)) globalThis.toc = undefined;
         exportsObject = kind === 'legado'
           ? {}
-          : compileProtocol(source, metadata.entries || [], 0, metadata);
+          : compileProtocol(source, metadata.entries || [], metadata);
         if (kind === 'cat') {
           let spider = exportsObject.__meowCat || exportsObject.__JS_SPIDER__
             || exportsObject.__jsEvalReturn || exportsObject.spider || exportsObject.Spider || exportsObject.rule
@@ -1981,11 +2007,11 @@ export const portableRealmSource = String.raw`
         const announce = () => {
           const waiting = [...startupPromises];
           if (waiting.length) {
-            Promise.allSettled(waiting).then(announce,
+            then(Promise.allSettled(waiting), announce,
               failure => call('startupFailure', errorCode(failure)));
             return;
           }
-          Promise.resolve().then(() => {
+          then(Promise.resolve(), () => {
             if (startupPromises.size) announce();
             else call('ready', { actions });
           });
@@ -1996,16 +2022,16 @@ export const portableRealmSource = String.raw`
       }
     },
     invoke(id, action, payloadJSON) {
-      Promise.resolve().then(() =>
-        runTask(id, () => dispatchProtocol(action, parse(payloadJSON), id))).then(
-        value => call('result', id, true, normalizeResult(value)),
+      runTask(id, () => then(then(Promise.resolve(), () =>
+        dispatchProtocol(action, parse(payloadJSON))),
+        value => publishResult(id, value),
         failure => call('result', id, false, errorCode(failure)),
-      );
+      ));
     },
     evaluate(id, source, bindingsJSON) {
-      Promise.resolve().then(() => runTask(id, async () => {
+      runTask(id, () => then(then(Promise.resolve(), async () => {
         const bindings = hydrateValue(id, parse(bindingsJSON));
-        const dom = createDomScope(id);
+        const dom = createDomScope();
         const built = createJava(id, bindings, dom);
         const scope = Object.assign(Object.create(null), bindings, built, {
           JavaImporter:function(){ throw error('UNSUPPORTED_DEPENDENCY'); },
@@ -2030,10 +2056,10 @@ export const portableRealmSource = String.raw`
             else delete globalThis[name];
           }
         }
-      })).then(
-        value => call('result', id, true, normalizeResult(value)),
+      }),
+        value => publishResult(id, value),
         failure => call('result', id, false, errorCode(failure)),
-      );
+      ));
     },
     settle(id, payloadJSON) {
       const item = pending.get(id);
@@ -2050,13 +2076,17 @@ export const portableRealmSource = String.raw`
       const item = callbacks.get(id);
       if (!item) return;
       if (!item.repeat) callbacks.delete(id);
-      Promise.resolve().then(() => runTask(item.taskId, () => item.fn(...item.args))).then(
+      runTask(item.taskId, () => then(then(Promise.resolve(), () => item.fn(...item.args)),
         () => call('callbackDone', id),
         failure => call('callbackFailure', id, errorCode(failure)),
-      );
+      ));
     },
     forget(id) { pending.delete(id); callbacks.delete(id); },
-    releaseTask(id) { documentRoots.delete(id); },
+    releaseTask(id) {
+      documentRoots.delete(id);
+      for (const [key, item] of pending) if (item.taskId === id) pending.delete(key);
+      for (const [key, item] of callbacks) if (item.taskId === id) callbacks.delete(key);
+    },
   });
 })()
 `;

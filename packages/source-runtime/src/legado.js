@@ -138,7 +138,7 @@ export class LegadoAdapter {
         transform: {
           asyncRoots: ['java', 'cookie', 'cache', 'source'],
           asyncMethods: [
-            'ajax', 'ajaxAll', 'connect', 'connectUrl', 'get', 'head', 'post',
+            'ajax', 'ajaxAll', 'connect', 'connectUrl', 'get', 'head', 'post', 'execute',
             'aJax', 'fetch', 'postForm', 'postJson',
             'downloadFile', 'importScript', 'startBrowser', 'startBrowserAwait',
             'showBrowser', 'openUrl', 'getVerificationCode',

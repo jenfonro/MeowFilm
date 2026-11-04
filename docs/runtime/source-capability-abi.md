@@ -32,11 +32,13 @@ source:<installationId>:<generation>
 
 Reader/CatVod 的 HTTP 与显式 Cookie 操作共用 source profile 下的 `:http` Cookie jar，并与 `:storage`、`:web` 等状态分离。source 不与 LX 或 CatNode 共用 Cookie、存储或虚拟路由。更新、失败候选、卸载和关闭必须通过 owner 的 `releaseProfiles(prefix, except)` 释放退休 generation；缺少清理能力的 owner 不能装配。虚拟路由注销失败属于清理失败，不设置 profile 固定数量门槛。
 
-capability 由同一 WorkerSession 转交主线程中的平台 owner，物理 I/O 的归属保留至实际完成。取消和超时只封闭逻辑结果；guest `AbortController` 可先结束脚本等待，动作 scope 关闭会撤销回调，但不把不合作 I/O 算作已完成，也不通过固定并发或网络任务数拒绝新工作。来源初始化使用同一有界启动 scope；轻悦时光远程 HTML 候选和其外部脚本都经 `http.request` 登记为 adapter 物理任务，并继承同一启动取消信号。关闭不能以 signal 已触发冒充资源已回收，未排空的任务和退休 profile 清理失败保持可观察。
+capability 由同一 WorkerSession 转交主线程中的平台 owner，物理 I/O 的归属保留至实际完成。取消和超时只封闭逻辑结果；guest `AbortController` 可先结束脚本等待，动作 scope 关闭会撤销回调，但不把不合作 I/O 算作已完成，也不通过固定并发或网络任务数拒绝新工作。HTTP owner 在真实 I/O 完成后、写回 Cookie 或发布成功前再次检查取消与截止；迟到响应不能覆盖或重建退休 profile，内部截止保留 `TIMEOUT`。来源初始化使用同一有界启动 scope；轻悦时光远程 HTML 候选和其外部脚本都经 `http.request` 登记为 adapter 物理任务，并继承同一启动取消信号。关闭不能以 signal 已触发冒充资源已回收，未排空的任务和退休 profile 清理失败保持可观察。
+
+Promise／原生 await／异步迭代与清理回调保留登记任务身份；A 已结束或取消后由 B 唤醒的旧延续仍属 A，发能力时返回 `STALE_SESSION`，不会进入 B 的 owner scope。初始化保存的 Cat `req`／`local` 按有效当前动作工作；Legado 动作 helper 与 DOM handle 仍绑定所属请求，旧延续也不能借取 B 的 helper／handle 绕过身份检查。纯 JavaScript 计算不因此被禁用，正常动作内的 await／then／timer 及 thenable 继续工作。
 
 默认 Node owner 对 storage、Cookie 和虚拟路由保留单项及累计内存预算；规则核心保留 DOM 文档／节点／字符串、分页、远程 HTML 候选和外部脚本等解析预算，以及会话变量和待注册路由元数据的累计字节预算。这些是解析资源边界或单脚本内存边界，不是实例、调用、timer、网络、method、stage 或 profile 的固定计数配额，不能借 capability 循环绕过内存预算。
 
-同一动作产生的一批虚拟路由在返回业务结果前统一注册。任一路由注册失败时，运行时注销本批已尝试项并丢弃未提交项；无法确认注销完成的项保留为清理债务，由 session close 再次回收。
+同一动作产生的一批虚拟路由在返回业务结果前统一注册。任一路由注册失败时，运行时注销本批已尝试项并丢弃未提交项；只有注销明确返回 `true` 才清除债务，`false` 或抛错的项由 session close 再次回收，仍失败则报告清理失败。
 
 ## 网络与隔离
 

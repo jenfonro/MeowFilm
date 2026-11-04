@@ -42,10 +42,14 @@ function normalizeScript(value) {
     if (statement.type === 'ExportDefaultDeclaration') {
       sourceRequire(!defaultExport, 'SCRIPT_PROTOCOL_ERROR');
       defaultExport = true;
+      const declaration = statement.declaration;
+      const named = ['ClassDeclaration', 'FunctionDeclaration'].includes(declaration.type) &&
+        declaration.id?.type === 'Identifier';
+      if (named) defaultAlias = declaration.id.name;
       replacements.push({
         start: statement.start,
-        end: statement.declaration.start,
-        value: 'globalThis.__meowCat = ',
+        end: declaration.start,
+        value: named ? '' : 'globalThis.__meowCat = ',
       });
       continue;
     }

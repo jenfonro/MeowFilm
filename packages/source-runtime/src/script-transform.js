@@ -41,15 +41,6 @@ function parseProgram(source) {
   } catch { throw sourceFault('SCRIPT_PROTOCOL_ERROR'); }
 }
 
-function functionName(node, parent) {
-  if (node.id?.type === 'Identifier') return node.id.name;
-  if (parent?.type === 'VariableDeclarator' && parent.id?.type === 'Identifier') return parent.id.name;
-  if (parent?.type === 'Property' && !parent.computed) {
-    return parent.key?.name ?? String(parent.key?.value ?? '');
-  }
-  return '';
-}
-
 function isAlreadyAwaited(node, parentByNode) {
   let current = node, parent = parentByNode.get(current);
   while (parent?.type === 'ChainExpression') {
@@ -149,7 +140,7 @@ export function transformCapabilityScript(source, {
   asyncRoots = ['java'],
   asyncGlobals = [],
   asyncMethods = [
-    'ajax', 'ajaxAll', 'connect', 'connectUrl', 'get', 'head', 'post',
+    'ajax', 'ajaxAll', 'connect', 'connectUrl', 'get', 'head', 'post', 'execute',
     'downloadFile', 'importScript', 'startBrowser', 'startBrowserAwait',
     'webView', 'webViewGetOverrideUrl', 'webViewGetSource',
   ],
@@ -172,34 +163,100 @@ export function transformCapabilityScript(source, {
   };
   const parentByNode = new WeakMap();
   const ownerByNode = new WeakMap();
-  const functionNames = new Map();
+  const scopeByNode = new WeakMap();
+  const assignments = [];
   const calls = [];
   const constructions = [];
-  const functions = [];
-  const registerFunctionName = (name, node) => {
-    if (!name) return;
-    if (!functionNames.has(name)) functionNames.set(name, new Set());
-    functionNames.get(name).add(node);
+  const blockTypes = new Set([
+    'BlockStatement', 'CatchClause', 'ForStatement', 'ForInStatement',
+    'ForOfStatement', 'SwitchStatement', 'StaticBlock', 'ClassDeclaration', 'ClassExpression',
+  ]);
+  const createScope = (parent, variable = false) => ({
+    parent, variable, bindings: new Map(), methods: new Map(),
+  });
+  const variableScope = scope => {
+    while (scope.parent && !scope.variable) scope = scope.parent;
+    return scope;
   };
-  function visit(node, parent = null, owner = null) {
+  const bind = (scope, pattern, value = null) => {
+    if (!pattern) return;
+    if (pattern.type === 'Identifier') {
+      if (!scope.bindings.has(pattern.name)) scope.bindings.set(pattern.name, new Set());
+      if (value) scope.bindings.get(pattern.name).add(value);
+    } else if (pattern.type === 'RestElement') bind(scope, pattern.argument);
+    else if (pattern.type === 'AssignmentPattern') bind(scope, pattern.left);
+    else if (pattern.type === 'ArrayPattern') {
+      for (const element of pattern.elements) bind(scope, element);
+    } else if (pattern.type === 'ObjectPattern') {
+      for (const property of pattern.properties) {
+        bind(scope, property.type === 'RestElement' ? property.argument : property.value);
+      }
+    }
+  };
+  function visit(node, parent = null, owner = null, scope = null) {
     parentByNode.set(node, parent);
-    if (functionTypes.has(node.type)) {
+    const isFunction = functionTypes.has(node.type);
+    if (node.type === 'FunctionDeclaration' || node.type === 'ClassDeclaration') {
+      const container = parentByNode.get(parent);
+      const target = node.type === 'FunctionDeclaration' &&
+        parent?.type === 'BlockStatement' && functionTypes.has(container?.type) &&
+        container.body === parent ? variableScope(scope) : scope;
+      bind(target, node.id, node);
+    }
+    if (node.type === 'FunctionExpression' && node.id) {
+      scope = createScope(scope);
+      bind(scope, node.id, node);
+    }
+    if (node.type === 'Program' || isFunction || blockTypes.has(node.type)) {
+      scope = createScope(scope, node.type === 'Program' || isFunction || node.type === 'StaticBlock');
+    }
+    scopeByNode.set(node, scope);
+    if (isFunction) {
       owner = node;
-      functions.push(node);
-      registerFunctionName(functionName(node, parent), node);
+      for (const parameter of node.params) bind(scope, parameter);
+      if (parent?.type === 'Property' && !parent.computed) {
+        const name = parent.key?.name ?? String(parent.key?.value ?? '');
+        const enclosing = scopeByNode.get(parent);
+        if (!enclosing.methods.has(name)) enclosing.methods.set(name, new Set());
+        enclosing.methods.get(name).add(node);
+      }
     }
     ownerByNode.set(node, owner);
+    if (node.type === 'VariableDeclarator') {
+      bind(parent.kind === 'var' ? variableScope(scope) : scope, node.id, node.init);
+    }
+    if (node.type === 'CatchClause') bind(scope, node.param);
+    if (['ClassDeclaration', 'ClassExpression'].includes(node.type)) bind(scope, node.id, node);
+    if (node.type === 'AssignmentExpression' && node.operator === '=' &&
+        node.left.type === 'Identifier') assignments.push(node);
     if (node.type === 'CallExpression') calls.push(node);
     if (node.type === 'NewExpression') constructions.push(node);
-    for (const [child] of children(node)) visit(child, node, owner);
+    for (const [child] of children(node)) visit(child, node, owner, scope);
   }
   visit(ast);
-  const referencedFunction = callee => {
-    let name = '';
-    if (callee?.type === 'Identifier') name = callee.name;
-    else if (callee?.type === 'MemberExpression') name = propertyName(callee);
-    const candidates = functionNames.get(name);
-    return candidates?.size === 1 ? [...candidates][0] : null;
+  for (const assignment of assignments) {
+    let scope = scopeByNode.get(assignment);
+    while (scope.parent && !scope.bindings.has(assignment.left.name)) scope = scope.parent;
+    bind(scope, assignment.left, assignment.right);
+  }
+  const referencedFunctions = (callee, seen = new Set(), result = new Set()) => {
+    if (!callee || seen.has(callee)) return result;
+    seen.add(callee);
+    if (functionTypes.has(callee.type)) {
+      result.add(callee);
+      return result;
+    }
+    if (callee.type === 'ChainExpression') return referencedFunctions(callee.expression, seen, result);
+    const identifier = callee.type === 'Identifier';
+    if (!identifier && callee.type !== 'MemberExpression') return result;
+    const name = identifier ? callee.name : propertyName(callee);
+    for (let scope = scopeByNode.get(callee); scope; scope = scope.parent) {
+      const bindings = identifier ? scope.bindings : scope.methods;
+      if (!bindings.has(name)) continue;
+      for (const candidate of bindings.get(name)) referencedFunctions(candidate, seen, result);
+      return result;
+    }
+    return result;
   };
 
   const asyncFunctions = new Set();
@@ -217,12 +274,17 @@ export function transformCapabilityScript(source, {
     const owner = ownerByNode.get(call);
     if (owner) asyncFunctions.add(owner);
   }
+  const requiresAwait = callee => {
+    for (const fn of referencedFunctions(callee)) {
+      if (asyncFunctions.has(fn)) return true;
+    }
+    return false;
+  };
   let changed = true;
   while (changed) {
     changed = false;
     for (const call of calls) {
-      const callee = referencedFunction(call.callee);
-      if (!callee || !asyncFunctions.has(callee)) continue;
+      if (!requiresAwait(call.callee)) continue;
       const parent = parentByNode.get(call);
       if (parent?.type === 'CallExpression' && parent.callee?.type === 'MemberExpression' &&
           parent.callee.object === call && ['then', 'catch', 'finally'].includes(propertyName(parent.callee))) continue;
@@ -232,8 +294,13 @@ export function transformCapabilityScript(source, {
     }
   }
 
+  for (const call of calls) {
+    if (call.callee?.type !== 'MemberExpression' ||
+        !['forEach', 'some', 'every', 'filter', 'find', 'findIndex', 'map', 'flatMap',
+          'reduce', 'reduceRight', 'sort'].includes(propertyName(call.callee))) continue;
+    if (requiresAwait(call.arguments[0])) throw sourceFault('UNSUPPORTED_SCRIPT_ASYNC');
+  }
   for (const fn of asyncFunctions) {
-    const parent = parentByNode.get(fn);
     if (fn.params.some(parameter => {
       let unsupported = false;
       const inspect = node => {
@@ -243,17 +310,9 @@ export function transformCapabilityScript(source, {
       inspect(parameter);
       return unsupported;
     })) throw sourceFault('UNSUPPORTED_SCRIPT_ASYNC');
-    if (parent?.type === 'CallExpression' && parent.arguments.includes(fn) &&
-        parent.callee?.type === 'MemberExpression') {
-      const method = propertyName(parent.callee);
-      if (['forEach', 'some', 'every', 'filter', 'find', 'findIndex', 'map', 'flatMap',
-        'reduce', 'reduceRight', 'sort'].includes(method)) {
-        throw sourceFault('UNSUPPORTED_SCRIPT_ASYNC');
-      }
-    }
   }
   for (const construction of constructions) {
-    if (asyncFunctions.has(referencedFunction(construction.callee))) {
+    if (requiresAwait(construction.callee)) {
       throw sourceFault('UNSUPPORTED_SCRIPT_ASYNC');
     }
   }

@@ -57,23 +57,33 @@ function listValue(value, keys = []) {
   return [];
 }
 
-function bookValue(value, source, maximumNodes) {
+function absolute(value, base) {
+  if (!value) return '';
+  try { return new URL(String(value), base || undefined).href; }
+  catch { return String(value); }
+}
+
+function bookValue(value, source, maximumNodes, baseUrl) {
   const parsed = parseValue(value);
   const input = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-  return normalizeBook({
+  const book = normalizeBook({
     ...input,
     bookUrl: input.bookUrl ?? input.url,
     tocUrl: input.tocUrl ?? input.bookUrl ?? input.url,
     latestChapterTitle: input.latestChapterTitle ?? input.lastChapter,
   }, source, maximumNodes);
+  book.bookUrl = absolute(book.bookUrl, baseUrl);
+  book.tocUrl = absolute(book.tocUrl, baseUrl);
+  book.coverUrl = absolute(book.coverUrl, baseUrl);
+  return book;
 }
 
-function chapterValue(value, index) {
+function chapterValue(value, index, baseUrl) {
   const parsed = parseValue(value);
   const input = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
   return {
     name: String(input.name ?? input.title ?? ''),
-    chapterUrl: String(input.chapterUrl ?? input.chapterId ?? input.url ?? ''),
+    chapterUrl: absolute(input.chapterUrl ?? input.chapterId ?? input.url, baseUrl),
     index: Number.isSafeInteger(input.index) ? input.index : index,
     isPay: Boolean(input.isPay),
     isVip: Boolean(input.isVip),
@@ -245,6 +255,7 @@ export class QysgAdapter {
   async start() {
     sourceRequire(typeof this.source.html === 'string' && this.source.html.length > 0);
     const definition = await this.sourceDefinition();
+    this.baseUrl = definition.baseUrl;
     this.kernel.setInitialDocument(definition.program.document);
     const descriptor = await this.kernel.loadSandbox('qysg', definition.code, {
       entries: guestEntries,
@@ -273,9 +284,10 @@ export class QysgAdapter {
 
   async search(payload, invocation) {
     const value = await this.guest('search', payload, invocation);
+    const baseUrl = absolute(payload.baseUrl, this.baseUrl) || this.baseUrl;
     return {
       books: listValue(value, ['books', 'list'])
-        .map(item => bookValue(item, this.source, this.limits.maximumNodes)),
+        .map(item => bookValue(item, this.source, this.limits.maximumNodes, baseUrl)),
       page: Number(payload.page ?? 1),
     };
   }
@@ -298,21 +310,28 @@ export class QysgAdapter {
 
   async explore(payload, invocation) {
     const value = await this.guest('find', payload, invocation);
+    const baseUrl = absolute(payload.url ?? payload.baseUrl, this.baseUrl) || this.baseUrl;
     return {
       books: listValue(value, ['books', 'list'])
-        .map(item => bookValue(item, this.source, this.limits.maximumNodes)),
+        .map(item => bookValue(item, this.source, this.limits.maximumNodes, baseUrl)),
       page: Number(payload.page ?? 1),
     };
   }
 
   async bookInfo(payload, invocation) {
     const value = await this.guest('info', payload, invocation);
-    return { book: bookValue(value, this.source, this.limits.maximumNodes) };
+    const baseUrl = absolute(payload.bookUrl ?? payload.url ?? payload.book?.bookUrl ??
+      payload.baseUrl, this.baseUrl) || this.baseUrl;
+    return { book: bookValue(value, this.source, this.limits.maximumNodes, baseUrl) };
   }
 
   async toc(payload, invocation) {
     const value = await this.guest('chapter', payload, invocation);
-    const chapters = listValue(value, ['chapters', 'list']).map(chapterValue)
+    const bookUrl = absolute(payload.bookUrl ?? payload.book?.bookUrl, this.baseUrl) || this.baseUrl;
+    const baseUrl = absolute(payload.tocUrl ?? payload.book?.tocUrl ?? payload.url ??
+      payload.baseUrl, bookUrl) || bookUrl;
+    const chapters = listValue(value, ['chapters', 'list'])
+      .map((item, index) => chapterValue(item, index, baseUrl))
       .filter(chapter => chapter.name || chapter.chapterUrl);
     chapters.forEach((chapter, index) => { chapter.index = index; });
     return { chapters };

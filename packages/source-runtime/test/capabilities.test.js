@@ -6,6 +6,7 @@ import {
   createCapabilityClient,
   hostApiVersion,
 } from '../src/index.js';
+import { SourceHttpClient } from '../src/http.js';
 
 const encoded = value => bytesToBase64(new TextEncoder().encode(value));
 
@@ -74,6 +75,96 @@ test('capability ABI normalizes HTTP envelopes and validates returned bytes', as
     url: 'https://fixture.invalid/start',
     headers: { Host: 'other.invalid' },
   }), { code: 'PERMISSION_DENIED' });
+});
+
+test('source HTTP uses the effective Content-Type for both headers and body encoding', async t => {
+  const calls = [];
+  const capabilities = createCapabilityClient({
+    invoke(name, input) {
+      assert.equal(name, 'http.request');
+      calls.push(input);
+      return {
+        version: hostApiVersion,
+        status: 200,
+        url: input.url,
+        headers: {},
+        body: encoded('ok'),
+      };
+    },
+  });
+  const http = new SourceHttpClient({
+    capabilities,
+    profile: 'source:http:1',
+    scope: { installationId: 'http', generation: 1, protocol: 'qysg', siteId: 'source' },
+  });
+  for (const scenario of [
+    {
+      name: 'standalone form type',
+      input: { contentType: 'application/x-www-form-urlencoded',
+        body: { key: 'a b', tag: ['x y', 'z'] } },
+      type: 'application/x-www-form-urlencoded',
+      body: 'key=a+b&tag=x+y&tag=z',
+    },
+    {
+      name: 'standalone JSON type',
+      input: { contentType: 'application/json; charset=utf-8', body: { key: 'a b' } },
+      type: 'application/json; charset=utf-8',
+      body: '{"key":"a b"}',
+    },
+    {
+      name: 'explicit lowercase form header overrides standalone JSON type',
+      input: { headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        contentType: 'application/json', body: { key: 'a b' } },
+      type: 'application/x-www-form-urlencoded',
+      body: 'key=a+b',
+    },
+    {
+      name: 'explicit mixed-case JSON header overrides standalone form type',
+      input: { headers: { 'cOnTeNt-TyPe': ['application/json'] },
+        contentType: 'application/x-www-form-urlencoded', body: { key: 'a b' } },
+      type: 'application/json',
+      body: '{"key":"a b"}',
+    },
+    {
+      name: 'standalone type is also sent with text bodies',
+      input: { contentType: 'text/plain', body: 'a b' },
+      type: 'text/plain',
+      body: 'a b',
+    },
+    {
+      name: 'objects without a type keep the JSON default',
+      input: { body: { key: 'a b' } },
+      type: 'application/json',
+      body: '{"key":"a b"}',
+    },
+    {
+      name: 'an explicit empty header is retained without a duplicate default',
+      input: { headers: { 'content-type': '' },
+        contentType: 'application/x-www-form-urlencoded', body: { key: 'a b' } },
+      type: '',
+      body: '{"key":"a b"}',
+    },
+  ]) {
+    await t.test(scenario.name, async () => {
+      const response = await http.request({
+        url: 'https://fixture.invalid/post',
+        ...scenario.input,
+      });
+      const request = calls.at(-1);
+      assert.equal(request.method, 'POST');
+      assert.deepEqual(request.headers, { 'content-type': [scenario.type] });
+      assert.equal(new TextDecoder().decode(base64ToBytes(request.body)), scenario.body);
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.data, 'ok');
+    });
+  }
+  const beforeInvalid = calls.length;
+  await assert.rejects(http.request({
+    url: 'https://fixture.invalid/post',
+    body: 'fixture',
+    contentType: 'text/plain\r\nX-Injected: yes',
+  }), { code: 'INVALID_ARGUMENT' });
+  assert.equal(calls.length, beforeInvalid);
 });
 
 test('cookie, text and AES arguments are bounded before reaching a host adapter', async () => {

@@ -1359,6 +1359,33 @@ test('Cat transfer close releases every entry even when timer cleanup fails', ()
   assert.equal(cleared.length, 1);
 });
 
+test('CatNode cannot access the private native task-context hook at startup or in dynamic code', async t => {
+  const inspect = `({
+    type: typeof __meowTaskContext,
+    own: Object.hasOwn(globalThis, '__meowTaskContext'),
+    dynamic: Function('return typeof __meowTaskContext')(),
+    nested: require('vm').runInNewContext('typeof __meowTaskContext'),
+  })`;
+  const runtime = createCatRuntime({ dataRoot: rootFor(t) });
+  t.after(() => runtime.close());
+  await runtime.install({
+    installationId: 'private-task-context', enabled: true, version: '1',
+    source: `
+      const startup = ${inspect};
+      module.exports = {
+        home() { return { startup, action: ${inspect} }; },
+      };
+    `,
+    config: {},
+  });
+  const expected = { type: 'undefined', own: false, dynamic: 'undefined', nested: 'undefined' };
+  const result = await runtime.invoke({
+    installationId: 'private-task-context', siteId: 'default',
+    operation: 'home', payload: {},
+  });
+  assert.deepEqual(result, { startup: expected, action: expected });
+});
+
 test('Cat os memory metadata reports the per-script limit and current guest heap', async t => {
   const root = new ResourceScope();
   let heapUsed = 234;

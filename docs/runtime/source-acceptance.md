@@ -132,6 +132,8 @@ Reader 保留原 schema 2、`runtime`、`protocolOverride`、`rows` 和汇总字
 | `cleanup_failure` | 卸载、关闭、profile、虚拟路由或物理任务回收失败 |
 | `not_exercised` | 无真实动作输入且无法从前序结果推导 |
 
-Reader 分别记录初始化、unload、close、文件字节是否变化、声明动作数和实际调用数。初始化失败、任一宿主／引擎／资源／清理失败、文件变化或 live 中有 `not_exercised` 均返回非零；初始化成功后的抛错仍计入失败，后续 close 成功不能抹去 unload 失败。已归因的动作级上游或账号／地区配置失败会保留，但不算 `returned`。`NETWORK_ERROR/HTTP_ERROR/INVALID_RESPONSE` 的远程 HTML 初始化失败保留原始码并归为上游失败，仍返回非零。
+Reader 分别记录初始化、unload、close、文件字节是否变化、声明动作数和实际调用数。初始化失败、任一宿主／引擎／资源／清理失败、文件变化或 live 中有 `not_exercised` 均返回非零；初始化成功后的抛错仍计入失败，后续 close 成功不能抹去 unload 失败。live 中没有业务动作（空动作或只有 `init/destroy`）标记 `NO_BUSINESS_ACTIONS`／`engine_incompatible` 并返回非零；离线初始化不增加此门禁。
+
+网络证据只用于已明确的 HTTP／网络失败归因；同一动作曾收到失败响应，不能把随后未知函数、任意脚本抛错或非法 guest 结果改判为上游失败。已归因的动作级上游或账号／地区配置失败会保留，但不算 `returned`。`NETWORK_ERROR/HTTP_ERROR/INVALID_RESPONSE` 的远程 HTML 初始化失败保留原始码并归为上游失败，仍返回非零。
 
 Reader 与 LX/Cat Node 采用相同的隐私要求：报告和标准输出只保留结构及固定分类，不保留正文、配置或完整 URL。离线初始化、合成夹具和真实联网业务动作是不同证据。

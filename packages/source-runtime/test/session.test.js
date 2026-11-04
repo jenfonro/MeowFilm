@@ -515,6 +515,125 @@ test('QYSG remote HTML reports exhausted HTTP candidates as an upstream HTTP fai
   await session.close();
 });
 
+test('QYSG normalizes result URLs against the final page and action URLs', async t => {
+  const books = [
+    { name: 'Root', bookUrl: '/book/1', coverUrl: '/cover.jpg', tocUrl: '/toc/1' },
+    { name: 'Relative', bookUrl: './book/2', coverUrl: './cover.jpg', tocUrl: './toc/2' },
+    {
+      name: 'Absolute',
+      bookUrl: 'https://other.invalid/book/3',
+      coverUrl: 'https://images.invalid/cover.jpg',
+      tocUrl: 'https://other.invalid/toc/3',
+    },
+    { name: 'Empty', bookUrl: '', coverUrl: '', tocUrl: '' },
+  ];
+  const bookUrls = value => [value.bookUrl, value.coverUrl, value.tocUrl];
+  for (const remote of [false, true]) {
+    const finalPage = remote
+      ? 'https://cdn.invalid/rules/source.html'
+      : 'https://books.invalid/base/';
+    const session = new SourceSession({
+      installationId: remote ? 'qysg-result-remote' : 'qysg-result-inline',
+      source: {
+        bookSourceName: 'QYSG result URLs',
+        bookSourceUrl: 'https://books.invalid/base/',
+        html: remote
+          ? 'https://rules.invalid/source.html'
+          : '<script>function search(){return []}</script>',
+      },
+      protocol: 'qysg',
+      capabilities: createCapabilityClient({
+        async invoke(name, input) {
+          assert.equal(name, 'http.request');
+          assert.equal(input.url, 'https://rules.invalid/source.html');
+          return {
+            version: hostApiVersion,
+            status: 200,
+            statusText: 'OK',
+            headers: { 'content-type': ['text/html; charset=utf-8'] },
+            url: finalPage,
+            body: body('<script>function search(){return []}</script>'),
+          };
+        },
+      }),
+      createSandbox: sandboxFactory({
+        actions: ['search', 'find', 'info', 'chapter'],
+        async invoke(_sandbox, action) {
+          if (action === 'search' || action === 'find') return { list: books };
+          if (action === 'info') {
+            return {
+              name: 'Info', bookUrl: './details', coverUrl: './cover.jpg', tocUrl: './toc',
+            };
+          }
+          if (action === 'chapter') {
+            return [
+              { name: 'Root', chapterUrl: '/chapter/1' },
+              { name: 'Relative', chapterId: './chapter/2' },
+              { name: 'Absolute', url: 'https://other.invalid/chapter/3' },
+              { name: 'Empty', chapterUrl: '' },
+            ];
+          }
+          assert.fail(`unexpected guest action: ${action}`);
+        },
+      }),
+    });
+    t.after(() => session.close());
+    await session.start();
+    session.activate();
+    const pageOrigin = new URL(finalPage).origin;
+    const pageDirectory = remote ? `${pageOrigin}/rules` : `${pageOrigin}/base`;
+    const search = await session.invoke('search', { keyword: 'fixture' });
+    assert.deepEqual(search.books.map(bookUrls), [
+      [`${pageOrigin}/book/1`, `${pageOrigin}/cover.jpg`, `${pageOrigin}/toc/1`],
+      [`${pageDirectory}/book/2`, `${pageDirectory}/cover.jpg`, `${pageDirectory}/toc/2`],
+      bookUrls(books[2]),
+      ['', '', ''],
+    ]);
+
+    const explore = await session.invoke('explore', {
+      url: 'https://catalog.invalid/lists/index.html', page: 2,
+    });
+    assert.equal(explore.page, 2);
+    assert.deepEqual(explore.books.map(bookUrls), [
+      ['https://catalog.invalid/book/1', 'https://catalog.invalid/cover.jpg',
+        'https://catalog.invalid/toc/1'],
+      ['https://catalog.invalid/lists/book/2', 'https://catalog.invalid/lists/cover.jpg',
+        'https://catalog.invalid/lists/toc/2'],
+      bookUrls(books[2]),
+      ['', '', ''],
+    ]);
+    const relativeExplore = await session.invoke('explore', { url: './lists/index.html' });
+    assert.deepEqual(bookUrls(relativeExplore.books[1]), [
+      `${pageDirectory}/lists/book/2`, `${pageDirectory}/lists/cover.jpg`,
+      `${pageDirectory}/lists/toc/2`,
+    ]);
+
+    const info = await session.invoke('bookInfo', {
+      bookUrl: 'https://catalog.invalid/series/one/index.html',
+    });
+    assert.deepEqual(bookUrls(info.book), [
+      'https://catalog.invalid/series/one/details', 'https://catalog.invalid/series/one/cover.jpg',
+      'https://catalog.invalid/series/one/toc',
+    ]);
+    const toc = await session.invoke('toc', {
+      bookUrl: 'https://catalog.invalid/series/one/index.html',
+      tocUrl: './toc/index.html',
+    });
+    assert.deepEqual(toc.chapters.map(chapter => chapter.chapterUrl), [
+      'https://catalog.invalid/chapter/1',
+      'https://catalog.invalid/series/one/toc/chapter/2',
+      'https://other.invalid/chapter/3',
+      '',
+    ]);
+    const bookToc = await session.invoke('toc', {
+      book: { bookUrl: 'https://catalog.invalid/series/one/index.html' },
+    });
+    assert.equal(bookToc.chapters[1].chapterUrl,
+      'https://catalog.invalid/series/one/chapter/2');
+    await session.close();
+  }
+});
+
 test('QYSG external script HTTP failures retain the upstream HTTP error', async () => {
   const session = new SourceSession({
     installationId: 'qysg-script-http-failure',

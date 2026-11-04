@@ -6,7 +6,7 @@
 
 ## 脚本入口与动作
 
-支持常见 `export default`、导出声明、`export { Spider as default }`、`__JS_SPIDER__`、`__jsEvalReturn`、`spider`、`Spider` 和 `rule` 入口，并按脚本实际方法声明：
+支持常见 `export default`（具名 class/function 保留声明绑定）、导出声明、`export { Spider as default }`、`__JS_SPIDER__`、`__jsEvalReturn`、`spider`、`Spider` 和 `rule` 入口，并按脚本实际方法声明：
 
 | 公共动作 | Spider 方法 |
 | --- | --- |
@@ -21,13 +21,15 @@
 | `action` | `action` |
 | `destroy` | `destroy` |
 
-返回字符串若是 JSON 对象或数组会解析为结构化值；其他返回值按 JSON 边界透传。
+返回字符串若是 JSON 对象或数组会解析为结构化值；其他返回值按 JSON 边界透传。BigInt、循环结构或抛错 getter 明确报 `SCRIPT_EXCEPTION`，不等待动作超时。
 
 ## Guest SDK
 
 QuickJS realm 提供受限 `Buffer`、URL、定时器、HTTP helper、作用域存储、DOM helper 和 CryptoJS 常用摘要/HMAC/AES/DES 子集。Cat 源先以 Acorn AST 识别并改写真实模块语法；注释或字符串中的 `require(`、`process.`、`import(` 不会误报。真实静态/动态 import、外部 re-export、`import.meta`、`require(...)` 和 Node/Deno/Bun 成员调用明确拒绝。
 
 脚本在初始化期保存的 `req`、`local`、DOM helper 或 `js2Proxy` 不保留 startup 权限；后续只在当前动作的 task scope 内执行。动作结束后再次使用旧异步回调会因 scope 失效而失败。
+
+`setInterval` 持续执行至显式清除或所属动作结束；动作完成、取消、超时和 session close 均释放真实 timer 句柄及 guest 回调。`fetch` 的 ArrayBuffer／typed-array 请求体按原始视图字节发送。
 
 外部依赖不能通过 npm 或系统路径加载。需要新增兼容 helper 时，应在 source CatVod adapter／guest SDK 中实现并加入平台无关测试；不能让脚本绕过 ABI 调用 Node。该限制属于 source 输入契约，不限制 CatNode 契约中已实现的受控 `require`。
 

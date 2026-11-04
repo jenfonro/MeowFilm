@@ -203,6 +203,26 @@ script-engine binary. Its exact package manifest, registry URL/integrity, licens
 length and SHA-256 are pinned in `scripts/quickjs-runtime.json`; no debug/asyncify
 engine variant or upstream reference script is bundled.
 
+### Task-context derivation — revision 1
+
+For task-context revision 1, the single-upstream-binary rule above is extended
+by exactly one reviewed derived WASM exception:
+`packages/script-host/src/quickjs/emscripten-module.wasm`, with its matching
+`emscripten-module.mjs` loader in the same directory. This pair derives from the
+same quickjs-emscripten `0.32.0` source at
+`df4efb9ef2cb25c417ecb57986da462d11b244ed`, built with Emscripten `5.0.1`.
+The upstream source archive SHA-256 is
+`b6f342ad8e18bcff29ab4e78467d6e33c53c9e1a47986e58b91a1462beb31a8e`.
+
+The local modifications in `scripts/quickjs/task-context.patch` propagate task
+identity through Promise reactions and queued jobs. Reproduction is described
+by `scripts/quickjs/build.py`; the patch, build script and generated pair are
+pinned in `scripts/quickjs-runtime.json`. The existing upstream copyrights and
+combined MIT license above also apply to the derived portions; the original
+license text is unchanged and is redistributed as
+`quickjs-emscripten-LICENSE.txt` and in the release-sync npm package's `LICENSE`.
+The three npm packages and their registry identities remain unmodified.
+
 ## Node compatibility npm dependencies
 
 The Cat finite Node-style bridge bundles the exact dependency closure recorded in

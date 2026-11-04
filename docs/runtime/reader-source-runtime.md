@@ -32,13 +32,15 @@ image
 
 ## 规则与脚本
 
-公共层实现 HTML/CSS、XPath、JSONPath、正则、切片、属性、`@put`／`@get`、变量、请求模板、Header、字符集和阶段上下文。Legado 外观同步的宿主调用通过 AST 转换为异步 capability 调用；无法安全传播 `await` 的回调、构造器或其他结构返回 `UNSUPPORTED_SCRIPT_ASYNC`，不返回空值冒充兼容。
+公共层实现 HTML/CSS、XPath、JSONPath、正则、切片、属性、`@put`／`@get`、变量、请求模板、Header、字符集和阶段上下文。正则匹配接替换时使用匹配文本，未替换时保留匹配结构。Legado 外观同步的宿主调用通过 AST 转换为异步 capability 调用；无法安全传播 `await` 的回调（含命名函数／函数变量传入同步 Array 方法）、构造器或其他结构返回 `UNSUPPORTED_SCRIPT_ASYNC`，不返回 Promise 真值或空值冒充兼容。
 
-受限 `java`／`Packages` 只提供已审计的兼容对象，例如请求、Cookie、缓存、规则、URL 和 Jsoup 子集；常见 URL 后缀请求选项、`java.setContent`、Cookie 方法、Jsoup base URL／`abs:` 属性和 Elements 深克隆在该边界内实现。它们不映射真实 JVM 类。JAR、DEX、Rhino ClassShutter、任意反射和文件路径均不支持。
+受限 `java`／`Packages` 只提供已审计的兼容对象，例如请求、Cookie、缓存、规则、URL 和 Jsoup 子集；常见 URL 后缀请求选项、`java.setContent`、Cookie 方法、Jsoup base URL／`abs:` 属性、Elements 深克隆及 `Jsoup.connect(...).execute().body()` 的异步转换在该边界内实现。它们不映射真实 JVM 类。JAR、DEX、Rhino ClassShutter、任意反射和文件路径均不支持。
+
+请求的独立 `contentType` 在未显式给出同名 Header 时写入实际请求头；大小写无关的显式 Header 优先，正文编码采用最终类型。`fetch` 的 ArrayBuffer／typed-array 视图按原始字节发送，保留视图 offset，不发送内部 JSON 标记。
 
 轻悦时光 bridge 的 HTTP、Cookie、缓存、编码和静态 DOM 能力可直接执行；来源页面的非脚本 DOM 会作为每次动作的隔离文档。远程 HTML 只通过公共 `http.request` 获取，默认按声明顺序回退最多 8 个候选；非 2xx、网络失败、单次请求超时、无有效脚本响应或候选外部脚本失败可尝试下一候选，资源超限、取消、宿主能力失败和整体启动截止立即终止。最终响应 URL 是相对外部脚本、`fetch` 和 `location` 的基准，不使用定义文件 URL 冒充页面地址。
 
-guest 提供实际样本使用的 `fetch`、`Headers`、`Response`、`AbortController`、URL、DOMParser、location、performance、`matchMedia`、受限 `document.write`、随机数、SHA-1、jQuery 常用遍历/克隆和 CryptoJS 摘要、HMAC、AES、DES/WordArray 子集。缺失属性分别保持 DOM `null`、jQuery `undefined` 和 Jsoup 空字符串语义。
+guest 提供实际样本使用的 `fetch`、`Headers`、`Response`、`AbortController`、URL、DOMParser、location、performance、`matchMedia`、受限 `document.write`、随机数、SHA-1、jQuery 常用遍历/克隆和 CryptoJS 摘要、HMAC、AES、DES/WordArray 子集。同一文档节点跨查询保持身份，重复查询不重复消耗句柄，同父 jQuery `parent()` 去重；缺失属性分别保持 DOM `null`、jQuery `undefined` 和 Jsoup 空字符串语义。WordArray 的普通数组按 32-bit words 解释，缺省长度为每 word 四字节；typed array 仍按字节解释。结果中的 BigInt、循环结构或抛错 getter 明确报 `SCRIPT_EXCEPTION`，不拖成超时或归为上游响应错误。
 
 浏览器全局预留轻悦时光旧脚本使用的可选 `toc` 别名；它仅避免脚本把未声明别名回写到 `window` 时在初始化阶段崩溃，不新增动作，目录动作仍由协议函数 `chapter` 提供。
 
@@ -64,6 +66,8 @@ source.runtime.close
 上传接受 `.json`、`.js`、`.html`、`.htm`，整份源码限 16 MiB，按长度、连续 offset、最多 64 KiB 的规范 Base64 分片、严格 UTF-8 和 SHA-256 校验。暂存从创建或最近有效分片起 5 分钟过期，由主动 timer 按最早过期时间回收；abort、加载消费和 close 释放暂存并重排/取消 timer，不设活动 token 数量门槛。控制请求和响应各限 1 MiB；这是 source 线协议边界，不是脚本网络响应大小。
 
 加载使用 installation、revision、expectedRevision 和 generation 做 CAS；候选失败保留原实例，发布后清理失败触发回滚或明确 `SOURCE_CLEANUP`。开发版不提供旧数据迁移或旧契约兼容层。
+
+卸载清理失败仍报告 `SOURCE_CLEANUP`；host 已移除的实例不再保留 RPC binding，其他实例的状态与调用不受影响。退休 profile 和物理任务的清理债务独立保留，不因 binding 删除冒充完成。应用关闭同时检查模块抛错与失败信封，仍等待全部模块清理，并以固定 `INTERNAL` 报告失败；重复关闭复用同一结果。
 
 每个实例使用独立 worker、QuickJS/WASM heap、profile、DOM registry、变量和虚拟路由。源码、heap 和栈采用公共 `SCRIPT_LIMITS`：16 MiB、256 MiB 和 256 KiB；初始化和请求默认 60 秒，清理 3 秒。不设单段同步执行时限，也不按实例、并发、timer、网络任务、method 或 profile 固定数量拒绝工作。guest 卡住时由主线程按同一 WorkerSession 机制探测/终止，关闭等待真实线程退出；就绪实例的 OOM 一次重启行为见[共用运行时](script-runtime.md#quickjs-执行边界)。
 

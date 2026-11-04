@@ -310,6 +310,7 @@ export function htmlToText(value, maximumNodes = defaultMaximumNodes) {
 export class DocumentRegistry {
   #next = 0;
   #nodes = new Map();
+  #nodeIds = new WeakMap();
   #documents = new Map();
   #documentSizes = new Map();
   #documentBytes = new Map();
@@ -369,9 +370,12 @@ export class DocumentRegistry {
   }
 
   #store(node, documentId) {
+    const existing = this.#nodeIds.get(node);
+    if (existing !== undefined) return existing;
     sourceRequire(this.#nodes.size < this.#maximumNodes, 'RESOURCE_LIMIT');
     const id = ++this.#next;
     this.#nodes.set(id, { node, documentId });
+    this.#nodeIds.set(node, id);
     return id;
   }
 
@@ -429,7 +433,11 @@ export class DocumentRegistry {
     this.#domBytes -= this.#documentBytes.get(documentId) ?? 0;
     this.#documentSizes.delete(documentId);
     this.#documentBytes.delete(documentId);
-    for (const [id, entry] of this.#nodes) if (entry.documentId === documentId) this.#nodes.delete(id);
+    for (const [id, entry] of this.#nodes) {
+      if (entry.documentId !== documentId) continue;
+      this.#nodeIds.delete(entry.node);
+      this.#nodes.delete(id);
+    }
     return true;
   }
 
@@ -580,6 +588,7 @@ export class DocumentRegistry {
         const nodeId = this.#store(node, owner.documentId);
         try { this.#refresh(owner.documentId); }
         catch (error) {
+          this.#nodeIds.delete(node);
           this.#nodes.delete(nodeId);
           throw error;
         }
@@ -592,6 +601,7 @@ export class DocumentRegistry {
         const nodeId = this.#store(node, owner.documentId);
         try { this.#refresh(owner.documentId); }
         catch (error) {
+          this.#nodeIds.delete(node);
           this.#nodes.delete(nodeId);
           throw error;
         }
@@ -604,6 +614,7 @@ export class DocumentRegistry {
         const nodeId = this.#store(node, owner.documentId);
         try { this.#refresh(owner.documentId); }
         catch (error) {
+          this.#nodeIds.delete(node);
           this.#nodes.delete(nodeId);
           throw error;
         }
@@ -723,6 +734,7 @@ export class DocumentRegistry {
 
   close() {
     this.#nodes.clear();
+    this.#nodeIds = new WeakMap();
     this.#documents.clear();
     this.#documentSizes.clear();
     this.#documentBytes.clear();

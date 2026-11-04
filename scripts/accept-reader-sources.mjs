@@ -323,15 +323,13 @@ function classify(code, network, diagnostics) {
           .includes(event.code))) {
     return 'host_capability_missing';
   }
-  const networkState = networkFailure(network);
-  if (networkState) return networkState;
   if (code === 'WEB_INTERACTION_REQUIRED' ||
       diagnostics.some(event => event.reason === 'configuration')) {
     return 'account_region_configuration_required';
   }
   if (['NETWORK_ERROR', 'HTTP_ERROR', 'UPSTREAM_HTTP', 'UPSTREAM_FORMAT', 'INVALID_RESPONSE']
     .includes(code)) {
-    return 'upstream_failure';
+    return networkFailure(network) ?? 'upstream_failure';
   }
   return 'engine_incompatible';
 }
@@ -674,6 +672,10 @@ async function accept(item, index) {
     if (options.live) {
       const capability = instance.capabilities.source;
       const state = { protocol: item.protocol };
+      if (!capability.actions.some(operation => !['init', 'destroy'].includes(operation))) {
+        row.code = 'NO_BUSINESS_ACTIONS';
+        row.failure = 'engine_incompatible';
+      }
       for (const operation of orderedActions(item, capability.actions)) {
         failureAuditStart = audit.length;
         failureDiagnosticsStart = diagnostics.length;

@@ -9,6 +9,9 @@ test('Windows input inventory covers shared packaging, locked configuration and 
   for (const path of [
     'scripts/package-runtime.mjs', 'scripts/test-root.mjs', 'scripts/windows/test.ps1',
     'scripts/quickjs-runtime.json', 'apps/runtime/modules/music-script.mjs',
+    'scripts/quickjs/task-context.patch', 'scripts/quickjs/build.py',
+    'packages/script-host/src/quickjs/emscripten-module.mjs',
+    'packages/script-host/src/quickjs/emscripten-module.wasm',
     'apps/runtime/modules/cat-script.mjs',
     'apps/runtime/modules/source-runtime.mjs', 'packages/source-runtime/src/index.js',
     'apps/windows/NuGet.Config', 'apps/windows/global.json',

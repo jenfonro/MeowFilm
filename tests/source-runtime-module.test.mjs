@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createSourceRuntimeModule, sourceRuntimeContract } from '../apps/runtime/modules/source-runtime.mjs';
-import { createNodeSourceCapabilities } from '@meowfilm/script-host';
+import { createNodeSourceCapabilities, createScriptHost } from '@meowfilm/script-host';
 
 const fixtureSource = {
   bookSourceName: 'Fixture',
@@ -22,7 +22,7 @@ const catSource = `
   };
 `;
 
-function setup(t, { owner: suppliedOwner } = {}) {
+function setup(t, { owner: suppliedOwner, hostFactory } = {}) {
   const network = async input => ({
     statusCode: 200,
     statusMessage: 'OK',
@@ -35,6 +35,7 @@ function setup(t, { owner: suppliedOwner } = {}) {
     call: async () => ({ ok: false, code: 'PERMISSION_DENIED' }),
     network,
     capabilityOwner: owner,
+    hostFactory,
     platform: 'test',
   });
   t.after(() => module.close());
@@ -215,6 +216,34 @@ test('source close reports host shutdown failures as cleanup failures', async ()
   denied(await module.close(), 'SOURCE_CLEANUP');
 });
 
+for (const hostFailure of ['throw', 'incomplete']) {
+  test(`source direct and RPC close preserve the ${hostFailure} cleanup failure and run once`, async () => {
+    let closes = 0;
+    const module = createSourceRuntimeModule({
+      call: async () => assert.fail('close must not make outbound RPC calls'),
+      network: async () => assert.fail('close must not use the network'),
+      hostFactory: () => ({
+        list: () => [],
+        async close() {
+          closes++;
+          if (hostFailure === 'throw') throw new Error('private host cleanup diagnostics');
+          return { cleanupComplete: false };
+        },
+      }),
+    });
+    const direct = module.close();
+    const rpc = module.methods['source.runtime.close']({});
+    for (const reply of await Promise.all([direct, rpc])) {
+      assert.deepEqual(reply, {
+        ok: false, contract: sourceRuntimeContract, code: 'SOURCE_CLEANUP',
+      });
+    }
+    denied(await module.close(), 'SOURCE_CLEANUP');
+    denied(await module.methods['source.runtime.close']({}), 'SOURCE_CLEANUP');
+    assert.equal(closes, 1);
+  });
+}
+
 test('source profile cleanup debt remains tracked until close retries it', async t => {
   const base = createNodeSourceCapabilities({
     network: async input => ({
@@ -248,6 +277,215 @@ test('source profile cleanup debt remains tracked until close retries it', async
   assert.deepEqual(okay(await rpc('status')).instances, []);
   okay(await module.close());
   assert.ok(releases >= 3);
+});
+
+test('failed route cleanup removes the retired RPC binding and keeps other instances usable', {
+  timeout: 15000,
+}, async t => {
+  const base = createNodeSourceCapabilities({
+    network: async () => assert.fail('virtual route cleanup must not use the network'),
+  });
+  const releases = [];
+  let host;
+  const owner = {
+    invoke(name, input, context) {
+      if (name === 'virtual.unregister' && input.profile.startsWith('source:retired:')) return false;
+      return base.invoke(name, input, context);
+    },
+    async releaseProfiles(prefix, except) {
+      releases.push({ prefix, except });
+      await base.releaseProfiles(prefix, except);
+    },
+  };
+  const { module, rpc } = setup(t, {
+    owner,
+    hostFactory: options => { host = createScriptHost(options); return host; },
+  });
+  const retired = await load(rpc, {
+    installationId: 'retired',
+    protocol: 'cat',
+    source: `export default {
+      async playerContent() {
+        return { url: js2Proxy(false, 0, 'fixture', 'https://media.invalid/one', {}) };
+      }
+    };`,
+  });
+  const healthy = await load(rpc, {
+    installationId: 'healthy', protocol: 'cat', source: catSource,
+  });
+  const identity = ({ installationId, revision, generation }) =>
+    ({ installationId, revision, generation });
+  okay(await rpc('invoke', { ...identity(retired), action: 'play', payload: {} }));
+  const profile = `source:retired:${retired.generation}`;
+  assert.ok(base.resolveVirtual(profile, 'route-1'));
+  denied(await rpc('unload', identity(retired)), 'SOURCE_CLEANUP');
+  assert.deepEqual(host.list().map(value => value.installationId), ['healthy']);
+  assert.deepEqual(host.stats().cleanupIssues, [{
+    installationId: 'retired', generation: retired.generation, code: 'CAPABILITY_UNAVAILABLE',
+  }]);
+  assert.deepEqual(okay(await rpc('status')).instances, [healthy]);
+  assert.deepEqual(okay(await rpc('invoke', {
+    ...identity(healthy), action: 'search', payload: { keyword: 'still-live' },
+  })).value, { list: [{ vod_id: 'still-live', vod_name: 'still-live' }] });
+  denied(await rpc('invoke', {
+    ...identity(retired), action: 'play', payload: {},
+  }), 'SOURCE_NOT_FOUND');
+  assert.ok(base.resolveVirtual(profile, 'route-1'));
+  assert.equal(releases.some(value => value.prefix === 'source:retired:' && value.except === ''), false);
+
+  denied(await module.close(), 'SOURCE_CLEANUP');
+  assert.ok(releases.some(value => value.prefix === 'source:retired:' && value.except === ''));
+  assert.equal(base.resolveVirtual(profile, 'route-1'), null);
+});
+
+test('failed unload profile release keeps cleanup debt without keeping a live RPC binding', async t => {
+  const base = createNodeSourceCapabilities({
+    network: async () => assert.fail('profile cleanup must not use the network'),
+  });
+  const releases = [];
+  let refuseRelease = true;
+  let host;
+  const owner = {
+    invoke: (name, input, context) => base.invoke(name, input, context),
+    async releaseProfiles(prefix, except) {
+      releases.push({ prefix, except });
+      if (prefix === 'source:retired:' && except === '' && refuseRelease) {
+        refuseRelease = false;
+        throw new Error('synthetic profile cleanup failure');
+      }
+      await base.releaseProfiles(prefix, except);
+    },
+  };
+  const { module, rpc } = setup(t, {
+    owner,
+    hostFactory: options => { host = createScriptHost(options); return host; },
+  });
+  const retired = await load(rpc, {
+    installationId: 'retired',
+    protocol: 'cat',
+    source: `export default {
+      async searchContent(keyword) {
+        await local.set('retained', keyword);
+        return { list: [{ vod_id: keyword, vod_name: keyword }] };
+      }
+    };`,
+  });
+  const healthy = await load(rpc, {
+    installationId: 'healthy', protocol: 'cat', source: catSource,
+  });
+  okay(await rpc('invoke', {
+    installationId: retired.installationId, revision: retired.revision, generation: retired.generation,
+    action: 'search', payload: { keyword: 'profile-debt' },
+  }));
+  const stored = () => base.invoke('storage.get', {
+    version: 1, profile: `source:retired:${retired.generation}:storage`, key: 'retained',
+  });
+  assert.equal(await stored(), 'profile-debt');
+  denied(await rpc('unload', {
+    installationId: retired.installationId, revision: retired.revision, generation: retired.generation,
+  }), 'SOURCE_CLEANUP');
+  assert.deepEqual(host.list().map(value => value.installationId), ['healthy']);
+  assert.deepEqual(okay(await rpc('status')).instances, [healthy]);
+  assert.equal(okay(await rpc('invoke', {
+    installationId: healthy.installationId, revision: healthy.revision, generation: healthy.generation,
+    action: 'search', payload: { keyword: 'still-live' },
+  })).value.list[0].vod_name, 'still-live');
+  assert.equal(releases.filter(value =>
+    value.prefix === 'source:retired:' && value.except === '').length, 1);
+  assert.equal(await stored(), 'profile-debt');
+  okay(await module.close());
+  assert.equal(releases.filter(value =>
+    value.prefix === 'source:retired:' && value.except === '').length, 2);
+  assert.equal(await stored(), null);
+});
+
+test('unloaded source physical work remains tracked independently of healthy RPC instances', {
+  timeout: 15000,
+}, async t => {
+  let releaseNetwork;
+  const pendingNetwork = new Promise(resolve => { releaseNetwork = resolve; });
+  let entered;
+  const networkEntered = new Promise(resolve => { entered = resolve; });
+  const response = {
+    statusCode: 200, headers: { 'content-type': 'text/plain' },
+    body: '', url: 'https://books.invalid/pending',
+  };
+  t.after(() => releaseNetwork(response));
+  const base = createNodeSourceCapabilities({
+    async network(input) {
+      if (input.url.endsWith('/pending')) {
+        entered();
+        return pendingNetwork;
+      }
+      assert.equal(input.url, 'https://books.invalid/entered');
+      await networkEntered;
+      return { ...response, url: input.url };
+    },
+  });
+  const releases = [];
+  let host, retiredSession;
+  const { module, rpc } = setup(t, {
+    owner: {
+      invoke: (name, input, context) => base.invoke(name, input, context),
+      async releaseProfiles(prefix, except) {
+        releases.push({ prefix, except });
+        await base.releaseProfiles(prefix, except);
+      },
+    },
+    hostFactory: options => {
+      const adapter = options.adapters.cat;
+      host = createScriptHost({
+        ...options,
+        adapters: {
+          ...options.adapters,
+          cat: input => {
+            const session = adapter(input);
+            if (input.installationId === 'retired') retiredSession = session;
+            return session;
+          },
+        },
+      });
+      return host;
+    },
+  });
+  const retired = await load(rpc, {
+    installationId: 'retired',
+    protocol: 'cat',
+    source: `export default {
+      async searchContent() {
+        const controller = new AbortController();
+        const pending = fetch('https://books.invalid/pending', { signal: controller.signal })
+          .then(() => 'unexpected', error => error.code);
+        await fetch('https://books.invalid/entered');
+        controller.abort();
+        return { list: [{ vod_id: 'pending', vod_name: await pending }] };
+      }
+    };`,
+  });
+  const healthy = await load(rpc, {
+    installationId: 'healthy', protocol: 'cat', source: catSource,
+  });
+  const identity = ({ installationId, revision, generation }) =>
+    ({ installationId, revision, generation });
+  assert.equal(okay(await rpc('invoke', {
+    ...identity(retired), action: 'search', payload: {},
+  })).value.list[0].vod_name, 'CANCELLED');
+  assert.equal(host.stats().pendingAdapterTasks, 1);
+  denied(await rpc('unload', identity(retired)), 'SOURCE_CLEANUP');
+  assert.deepEqual(host.list().map(value => value.installationId), ['healthy']);
+  assert.equal(host.cleanupPending('retired'), 1);
+  assert.equal(host.stats().pendingAdapterTasks, 1);
+  assert.deepEqual(okay(await rpc('status')).instances, [healthy]);
+  assert.equal(okay(await rpc('invoke', {
+    ...identity(healthy), action: 'search', payload: { keyword: 'still-live' },
+  })).value.list[0].vod_name, 'still-live');
+
+  releaseNetwork(response);
+  await retiredSession.whenAdaptersIdle();
+  assert.equal(host.cleanupPending('retired'), 0);
+  assert.equal(host.stats().pendingAdapterTasks, 0);
+  okay(await module.close());
+  assert.ok(releases.some(value => value.prefix === 'source:retired:' && value.except === ''));
 });
 
 test('a failed candidate keeps the exact live revision and generation', async t => {

@@ -272,10 +272,11 @@ function memoryStorage({ maximumBytes, maximumProfileBytes }) {
 function requestDeadline(parent, timeoutMs) {
   requireValue(parent instanceof AbortSignal &&
     Number.isSafeInteger(timeoutMs) && timeoutMs > 0);
+  const expiresAt = Date.now() + timeoutMs;
   const controller = new AbortController();
   const abort = () => {
     if (!controller.signal.aborted) {
-      controller.abort(parent.reason ?? fault('CANCELLED'));
+      controller.abort(safeError(parent.reason, 'CANCELLED'));
     }
   };
   if (parent.aborted) abort();
@@ -285,6 +286,12 @@ function requestDeadline(parent, timeoutMs) {
   }, timeoutMs);
   return {
     signal: controller.signal,
+    assertOpen() {
+      if (!controller.signal.aborted && Date.now() >= expiresAt) {
+        controller.abort(fault('TIMEOUT'));
+      }
+      if (controller.signal.aborted) throw controller.signal.reason ?? fault('CANCELLED');
+    },
     close() {
       clearTimeout(timer);
       parent.removeEventListener('abort', abort);
@@ -331,12 +338,12 @@ export function createNodeSourceCapabilities({
       let body = input.body ? base64(input.body) : undefined;
       let headers = headerObject(input.headers);
       for (let hop = 0; ; hop++) {
-        if (deadline.signal.aborted) throw deadline.signal.reason ?? fault('CANCELLED');
         const outbound = { ...headers };
         if (input.cookieProfile && !outbound.cookie) {
           const cookie = cookies.get(input.cookieProfile, url);
           if (cookie) outbound.cookie = cookie;
         }
+        deadline.assertOpen();
         const response = await network({
           url,
           options: {
@@ -352,6 +359,7 @@ export function createNodeSourceCapabilities({
           scope,
           validateURL,
         });
+        deadline.assertOpen();
         const responseUrl = validateURL(response.url ?? url);
         const outputHeaders = responseHeaders(response.headers);
         if (input.cookieProfile && outputHeaders['set-cookie']) {
@@ -385,6 +393,9 @@ export function createNodeSourceCapabilities({
         }
         url = next;
       }
+    } catch (error) {
+      deadline.assertOpen();
+      throw error;
     } finally {
       deadline.close();
     }

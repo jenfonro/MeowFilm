@@ -111,16 +111,20 @@ export class SourceHttpClient {
     sourceRequire(input.cookieProfile === undefined, 'PERMISSION_DENIED');
     const trustedContext = trustedCapabilityContext(this.scope, context);
     const headers = normalizeHeaders(input.headers);
+    const hasContentType = Object.keys(headers).some(key => key.toLowerCase() === 'content-type');
+    if (!hasContentType && input.contentType) {
+      headers['Content-Type'] = normalizeHeaders({ 'Content-Type': input.contentType })['Content-Type'];
+    }
     const method = String(input.method ?? (input.body !== undefined || input.data !== undefined ? 'POST' : 'GET'))
       .toUpperCase();
-    const contentType = input.contentType || headerValue(headers, 'content-type');
+    const contentType = headerValue(headers, 'content-type');
     let body = input.body ?? input.data;
     if (body !== undefined && body !== null && typeof body !== 'string' &&
         !(body instanceof Uint8Array) && !ArrayBuffer.isView(body)) {
       if (/application\/x-www-form-urlencoded/i.test(contentType)) body = formBody(body);
       else {
         body = JSON.stringify(body);
-        if (!contentType) headers['Content-Type'] = ['application/json'];
+        if (!contentType && !hasContentType) headers['Content-Type'] = ['application/json'];
       }
     }
     let bytes = new Uint8Array();

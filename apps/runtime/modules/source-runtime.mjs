@@ -457,7 +457,9 @@ export function createSourceRuntimeModule({
         'STALE_SOURCE');
         try { await host.uninstall(params.installationId); }
         catch { throw new Failure('SOURCE_CLEANUP'); }
-        bindings.delete(params.installationId);
+        finally {
+          if (!current(params.installationId)) bindings.delete(params.installationId);
+        }
         requireValue(!current(params.installationId), 'SOURCE_CLEANUP');
         cleanup(params.installationId);
         await releaseProfiles(params.installationId);

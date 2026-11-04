@@ -124,7 +124,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 
 - 按风险覆盖实际受影响的契约与消费者：编译、静态检查、单元、组件或集成测试；必要时覆盖失败、取消、恢复和资源释放路径。
 - 可机械核对的目录、依赖和契约约束接入 `scripts`（Windows 为 `scripts/windows`）中的现有检查。
-- 引擎 WASM 仅按 `scripts/quickjs-runtime.json` 的受审查 release-sync 包、精确版本／路径、根锁、真实 manifest／文件／许可哈希放行；其他 native/WASM 仍拒绝，不全局放行二进制或在打包中安装／修锁。
+- 引擎 WASM 仅按 `scripts/quickjs-runtime.json` 的受审查 release-sync 包及任务上下文派生产物、精确版本／路径、根锁、源码补丁／构建输入及真实文件／许可哈希放行；其他 native/WASM 仍拒绝，不全局放行二进制或在打包中安装／修锁。
 - 长期测试验证现行行为与契约；删除／重构后的旧实现及引用清理检查只做当次验证，通过后移除，不堆入长期测试。功能、安全、取消与资源释放等有效回归保留。
 - 编译成功、测试替身和真实业务验证分别记录，不互相冒充；不为刷绿删除有效断言、隐藏失败或用空测试集代替验证。
 - 外部脚本由 `scripts/accept-sources.mjs` 按实际声明动作验收；未归因、宿主缺失能力、资源超限或清理失败不能因初始化成功而放行。报告只保留脱敏结构和固定分类，见 `docs/runtime/source-acceptance.md`。

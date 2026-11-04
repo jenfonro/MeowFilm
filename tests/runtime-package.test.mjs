@@ -537,6 +537,13 @@ for (const extension of ['node', 'NODE', 'dylib', 'wasm']) {
   });
 }
 
+test('the task-context WASM path alone cannot grant a workspace binary exception', async () => {
+  const f = fixture(), path = 'packages/script-host/src/quickjs/emscripten-module.wasm';
+  f.file(path, readFileSync(join(repository, path)));
+  await fails(f, 'NATIVE_PAYLOAD');
+  assert.equal(existsSync(join(f.output(), 'node_modules/@meowfilm/script-host/src/quickjs/emscripten-module.wasm')), false);
+});
+
 test('an installed optional native peer is rejected, not silently treated as absent', async () => {
   const f = fixture();
   f.add('packages/script-host/node_modules/canvas', 'canvas', '3.1.0');

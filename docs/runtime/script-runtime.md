@@ -55,7 +55,9 @@ Node-independent 只指 `@meowfilm/source-runtime` 的纯规则与 ABI 包：不
 
 桥接控制参数使用预先捕获的序列化方法和无原型信封，脚本修改 `JSON.stringify` 或继承的 `toJSON` 不能篡改内部请求身份；业务数据仍按 JSON 语义传递，不通过冻结脚本全局原型限制正常执行。
 
-受信 `quickjs-engine.js` 通过 `node:fs/promises` 与 `import.meta.resolve('@jitl/quickjs-wasmfile-release-sync/wasm')` 读取打包内的锁定引擎文件；这不向 guest 授予文件访问。`WebAssembly.compile` 编译模块只执行一次并缓存复用，但每个 installation／generation 独立实例化 WASM，不共享线性内存，避免某个堆或模块损坏影响其他实例。
+受信引擎读取 script-host 内 `src/quickjs/emscripten-module.mjs`／`.wasm` 的任务上下文派生产物；npm core／FFI／release-sync 保持原版 `0.32.0`。固定源码、补丁、工具链、产物与许可校验见 [Windows 打包](../windows/runtime-packaging.md#受信-quickjs-wasm)。文件读取不向 guest 授予文件访问。`WebAssembly.compile` 编译模块只执行一次并缓存复用，但每个 installation／generation 独立实例化 WASM，不共享线性内存，避免某个堆或模块损坏影响其他实例。
+
+派生引擎在 Promise reaction、原生 await、异步生成器请求及 FinalizationRegistry 登记时保存 SDK 的任务身份，在执行期间切入并于返回／异常后恢复；不包装公开 `Promise.prototype.then`，不新增微任务或改变排队顺序。portable 来源以此保留旧异步工作的身份，不能借后续动作发 capability；原生入口仅供可信 SDK 初始化捕获，任何用户代码执行前从全局删除。该机制不改变 LX 的显式特权存储契约，也不授予 CatNode 新权限。
 
 ScriptHost 在 `host.js` 的 `SCRIPT_LIMITS` 一处定义脚本层限制，LX、CatNode 与 source 同值且按单个脚本计：源码最多 16 MiB（UTF-8 字节）、QuickJS 栈 256 KiB、单脚本内存上限 `maxMemoryBytes`。QuickJS 内部桥接与脚本内数据处理不设单次 8 MiB 字节上限，仍受单脚本内存约束。宿主整体缓冲且不受 guest 堆约束的位置以 `maxMemoryBytes` 为上界：Cat 聚合入口请求体、Cat 脚本 listener 响应汇总、LX 宿主网络响应体及解压输出；超出报 `RESOURCE_LIMIT`，请求失败而实例继续服务。source ABI 的请求/响应字节同样受单脚本内存预算约束，错误按 `source.runtime.v1` 契约返回。`maxMemoryBytes` 默认为 256 MiB；依据是 11 份真实脚本的 QuickJS 单脚本峰值约 77 MiB，默认值约为该峰值的 3.3 倍。所有协议均启用 `setMemoryLimit`，超限即判该实例失败。已就绪实例在运行中超限时由 ScriptHost 自动以同一 revision 重启一次（保留 CatNode 私有卷并记录结构化诊断）；初始化超限或重启后再次初始化超限停在 failed，不循环。用户 enable／update 后重启计数复位。
 
@@ -79,7 +81,7 @@ lx.on(lx.EVENT_NAMES.request, async (payload, context) => {
 - `context.storage.get/set/delete` 绑定创建它的调用 ID、site、installation 和 generation，并核对显式 `permissions.storage` 的 read/write 权限。
 - 绑定在 guest `await` 后仍指向同一个调用；请求结束、取消或代次退休后，保存的引用不能借用后来调用的身份。
 - 全局 `meow.storage` 没有权限；startup、background 不会自动获得或继承请求存储权限，即使另一个请求正在执行。
-- QuickJS 没有 Node `AsyncLocalStorage` 的异步上下文钩子，因此不能用宿主的 ambient async scope 推断 guest Promise 的特权。显式 `context.storage` 是 v2 公开行为变化，不提供全局存储的兼容回退。
+- Node `AsyncLocalStorage` 不能推断 guest Promise 的特权；派生引擎的任务身份也不授予 LX ambient 存储权限。显式 `context.storage` 是 v2 公开行为变化，不提供全局存储的兼容回退。
 
 存储实例与业务作用域仍必须隔离。音乐宿主的原生存储回调与安装会话绑定见 [音乐脚本契约](music-script-runtime.md)；这里的存储 token 不是域名授权或网络隔离机制。
 

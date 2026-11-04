@@ -40,6 +40,13 @@ function jsonBytes(value) {
   return textEncoder.encode(json).length;
 }
 
+function decodeRequestBody(value) {
+  return value && typeof value === 'object' && Object.keys(value).length === 1 &&
+    Object.hasOwn(value, '__meowBodyBase64') && typeof value.__meowBodyBase64 === 'string'
+    ? base64ToBytes(value.__meowBodyBase64)
+    : value;
+}
+
 class BoundedState {
   #entries = new Map();
   #bytes = 0;
@@ -419,7 +426,10 @@ class SessionKernel {
     }, trustedContext);
     switch (name) {
       case 'legado.request': return this.http.request({
-        ...input, baseUrl: this.source.bookSourceUrl,
+        ...input,
+        body: decodeRequestBody(input.body),
+        data: decodeRequestBody(input.data),
+        baseUrl: this.source.bookSourceUrl,
       }, trustedContext);
       case 'legado.cookieGet':
         return call('cookie.get', {
@@ -459,7 +469,7 @@ class SessionKernel {
           url: input.url,
           method: options.method,
           headers: options.headers,
-          body: options.body ?? options.data,
+          body: decodeRequestBody(options.body ?? options.data),
           timeout: options.timeout,
           followRedirect: options.redirect ?? options.followRedirect,
           follow_max: options.follow_max,
@@ -491,12 +501,8 @@ class SessionKernel {
       case 'CookieJar': return true;
       case 'http': {
         const [method, url, body, headers, followRedirects, contentType] = args;
-        const requestBody = body && typeof body === 'object' &&
-            Object.keys(body).length === 1 && typeof body.__meowBodyBase64 === 'string'
-          ? base64ToBytes(body.__meowBodyBase64)
-          : body;
         return this.http.request({
-          method, url, body: requestBody, headers, followRedirects, contentType,
+          method, url, body: decodeRequestBody(body), headers, followRedirects, contentType,
           baseUrl: this.source.bookSourceUrl,
         }, trustedContext);
       }
@@ -705,7 +711,7 @@ class SessionKernel {
         }))));
       for (let index = 0; index < attempted.length; index++) {
         const route = attempted[index];
-        if (rollback[index].status === 'fulfilled') {
+        if (rollback[index].status === 'fulfilled' && rollback[index].value === true) {
           this.registeredVirtualRoutes.delete(route);
           this.dropVirtualRoute(route);
         } else {

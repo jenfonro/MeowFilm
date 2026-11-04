@@ -451,6 +451,13 @@ function normalizeValues(values) {
     .filter(value => value !== null && value !== undefined && value !== '');
 }
 
+function ruleValue(value) {
+  if (isDomNode(value)) return domText(value);
+  if (value && typeof value === 'object' && typeof value.value === 'string' &&
+      Array.isArray(value.groups) && Number.isSafeInteger(value.index)) return value.value;
+  return value;
+}
+
 async function singleRule(rule, content, context) {
   const expanded = (await replaceTemplates(rule, content, context)).trim();
   if (!expanded || expanded === '@') return [content];
@@ -501,7 +508,7 @@ function readStaticRuleValuesCore(raw, content, context) {
   const replacement = applyReplacement('', raw);
   const values = replacement.rule ? singleStaticRule(replacement.rule, content, context) : [content];
   return normalizeValues(values.map(value => replacement.changed
-    ? applyReplacement(isDomNode(value) ? domText(value) : value, raw).value
+    ? applyReplacement(ruleValue(value), raw).value
     : value));
 }
 
@@ -560,7 +567,7 @@ async function readRuleValuesCore(raw, content, context) {
   const replacement = applyReplacement('', raw);
   const values = replacement.rule ? await singleRule(replacement.rule, content, context) : [content];
   return normalizeValues(values.map(value => replacement.changed
-    ? applyReplacement(isDomNode(value) ? domText(value) : value, raw).value
+    ? applyReplacement(ruleValue(value), raw).value
     : value));
 }
 
@@ -575,9 +582,7 @@ export async function readRuleValues(rule, content, context = {}) {
 }
 
 function valueText(value) {
-  if (isDomNode(value)) return domText(value);
-  if (value && typeof value === 'object' && typeof value.value === 'string' &&
-      Array.isArray(value.groups) && Number.isSafeInteger(value.index)) return value.value;
+  value = ruleValue(value);
   if (typeof value === 'object' && value !== null) return JSON.stringify(value);
   return toText(value);
 }

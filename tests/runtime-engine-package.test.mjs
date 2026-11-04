@@ -19,6 +19,14 @@ const policy = readJSON(join(repository, policyPath));
 const repositoryLock = readJSON(join(repository, 'package-lock.json'));
 const engine = policy.packages.find(pkg => pkg.name === '@jitl/quickjs-wasmfile-release-sync');
 const wasmPath = `node_modules/${engine.name}/${engine.wasm.path}`;
+const taskContext = policy.taskContext;
+const localLoader = taskContext.artifacts.find(artifact => artifact.path.endsWith('.mjs'));
+const localWasm = taskContext.artifacts.find(artifact => artifact.path.endsWith('.wasm'));
+const payloadArtifactPath = artifact =>
+  artifact.path.replace('packages/script-host/', 'node_modules/@meowfilm/script-host/');
+const localWasmPath = payloadArtifactPath(localWasm);
+const localLoaderPath = payloadArtifactPath(localLoader);
+const wasmPaths = [wasmPath, localWasmPath].sort();
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const inert = 'throw new Error("Synthetic workspace code must never execute");\n';
 
@@ -65,6 +73,8 @@ function fixture(t) {
   }
   write(policyPath, readFileSync(join(repository, policyPath)));
   write(policy.license.path, readFileSync(join(repository, policy.license.path)));
+  for (const input of [taskContext.patch, taskContext.build, ...taskContext.artifacts])
+    write(input.path, readFileSync(join(repository, input.path)));
   write('apps/runtime/bootstrap.mjs', inert);
   write('apps/runtime/modules/music-script.mjs', inert);
   write('apps/runtime/modules/cat-script.mjs', inert);
@@ -99,12 +109,22 @@ test('engine packaging pins real lock/manifest/license/WASM bytes without execut
   assert.deepEqual(manifest.trustedWasm, [{
     package: engine.name, version: engine.version, ...engine.wasm, path: wasmPath,
     licensePath: `node_modules/${engine.name}/LICENSE`, licenseSha256: engine.licenseSha256,
+  }, {
+    package: '@meowfilm/script-host', version: '1.0.0', ...localWasm, path: localWasmPath,
+    taskContext: { revision: 1, source: policy.source, gitHead: taskContext.gitHead },
+    licensePath: `node_modules/${engine.name}/LICENSE`, licenseSha256: engine.licenseSha256,
   }]);
-  assert.deepEqual(manifest.files.filter(file => /\.wasm$/i.test(file.path)).map(file => file.path), [wasmPath]);
-  const wasm = readFileSync(join(f.output, wasmPath));
-  assert.equal(wasm.length, engine.wasm.bytes);
-  assert.equal(hash(wasm), engine.wasm.sha256);
-  assert.deepEqual(wasm.subarray(0, 8), Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]));
+  assert.deepEqual(manifest.files.filter(file => /\.wasm$/i.test(file.path)).map(file => file.path), wasmPaths);
+  for (const trusted of manifest.trustedWasm) {
+    const wasm = readFileSync(join(f.output, trusted.path));
+    assert.equal(wasm.length, trusted.bytes);
+    assert.equal(hash(wasm), trusted.sha256);
+    assert.deepEqual(wasm.subarray(0, 8), Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]));
+    assert.equal(hash(readFileSync(join(f.output, trusted.licensePath))), trusted.licenseSha256);
+  }
+  const loader = readFileSync(join(f.output, localLoaderPath));
+  assert.equal(loader.length, localLoader.bytes);
+  assert.equal(hash(loader), localLoader.sha256);
   for (const pkg of policy.packages) {
     const dependency = manifest.dependencies.find(value => value.name === pkg.name);
     assert.equal(dependency.version, pkg.version);
@@ -113,17 +133,24 @@ test('engine packaging pins real lock/manifest/license/WASM bytes without execut
     assert.equal(dependency.manifestSha256, hash(readFileSync(join(f.output, dependency.path, 'package.json'))));
     assert.equal(dependency.licenseSha256, hash(readFileSync(join(f.output, dependency.path, 'LICENSE'))));
   }
-  for (const path of [policyPath, policy.license.path, wasmPath,
+  for (const path of [policyPath, policy.license.path, wasmPath, taskContext.patch.path, taskContext.build.path,
+    localLoader.path, localWasm.path,
     'apps/runtime/bootstrap.mjs', 'apps/runtime/modules/music-script.mjs',
     'apps/runtime/modules/cat-script.mjs', 'apps/runtime/modules/source-runtime.mjs']) {
     assert.deepEqual(manifest.inputs.find(input => input.path === path), {
       path, sha256: hash(readFileSync(join(f.root, path))),
     });
+    assert.equal(manifest.inputs.filter(input => input.path === path).length, 1);
   }
+  assert.ok(!manifest.files.some(file => file.path === taskContext.patch.path || file.path === taskContext.build.path));
 });
 
-test('packaged WASM export compiles offline and instantiates independent memory from one compiled module', async t => {
+test('packaged task-context engine isolates memory and exposes its native hook only to trusted SDK initialization', async t => {
   const f = fixture(t);
+  for (const file of ['quickjs-engine.js', 'errors.js']) {
+    const path = `packages/script-host/src/${file}`;
+    f.write(path, readFileSync(join(repository, path)));
+  }
   await f.pack();
   const hook = `
     import { registerHooks } from 'node:module';
@@ -144,21 +171,51 @@ test('packaged WASM export compiles offline and instantiates independent memory 
     const { readFile } = await import('node:fs/promises');
     const { newQuickJSWASMModuleFromVariant, newVariant } = await import('quickjs-emscripten-core');
     const { default: variant } = await import('@jitl/quickjs-wasmfile-release-sync');
-    const wasm = await readFile(new URL(import.meta.resolve('@jitl/quickjs-wasmfile-release-sync/wasm')));
+    const { default: loader } = await import(${JSON.stringify(`./${localLoaderPath}`)});
+    const localVariant = { ...variant, importModuleLoader: async () => loader };
+    const wasm = await readFile(new URL(${JSON.stringify(`./${localWasmPath}`)}, import.meta.url));
     const compiled = await WebAssembly.compile(wasm);
-    const first = await newQuickJSWASMModuleFromVariant(newVariant(variant, { wasmModule: compiled }));
-    const second = await newQuickJSWASMModuleFromVariant(newVariant(variant, { wasmModule: compiled }));
+    const first = await newQuickJSWASMModuleFromVariant(newVariant(localVariant, { wasmModule: compiled }));
+    const second = await newQuickJSWASMModuleFromVariant(newVariant(localVariant, { wasmModule: compiled }));
     const context = first.newContext(), other = second.newContext();
+    let output;
     try {
       const value = context.unwrapResult(context.evalCode(
         'globalThis.fixtureInstallationMarker = 1; JSON.stringify({ value: 2 + 3, process: typeof process })'));
       const isolated = other.unwrapResult(other.evalCode('typeof fixtureInstallationMarker'));
       try {
-        console.log(JSON.stringify({ ...JSON.parse(context.getString(value)),
+        output = { ...JSON.parse(context.getString(value)),
           isolatedMemory: first.getWasmMemory().buffer !== second.getWasmMemory().buffer,
-          otherInstallation: other.getString(isolated) }));
+          otherInstallation: other.getString(isolated) };
       } finally { isolated.dispose(); value.dispose(); }
     } finally { other.dispose(); context.dispose(); }
+    const { QuickJSEngine } = await import('./node_modules/@meowfilm/script-host/src/quickjs-engine.js');
+    const engine = await QuickJSEngine.create({
+      source: \`(() => {
+        const nativeTaskContext = globalThis.__meowTaskContext;
+        return {
+          watchStartup() {},
+          inspectTaskContext() {
+            return JSON.stringify({
+              captured: typeof nativeTaskContext,
+              current: nativeTaskContext(),
+              installed: globalThis.fixtureTaskContext,
+            });
+          },
+        };
+      })()\`,
+      bridge: () => null,
+      limits: { maxMemoryBytes: 16 * 1024 * 1024, maxStackBytes: 128 * 1024,
+        initTimeoutMs: 10000, cleanupTimeoutMs: 1000 },
+    });
+    try {
+      engine.evaluate(\`globalThis.fixtureTaskContext = {
+        type: typeof globalThis.__meowTaskContext,
+        own: Object.prototype.hasOwnProperty.call(globalThis, '__meowTaskContext'),
+      };\`);
+      output.taskContext = engine.callJSON('inspectTaskContext', []);
+    } finally { engine.close(); }
+    console.log(JSON.stringify(output));
   `;
   const result = spawnSync(process.execPath,
     ['--import', `data:text/javascript,${encodeURIComponent(hook)}`, '--input-type=module', '-e', program], {
@@ -169,7 +226,86 @@ test('packaged WASM export compiles offline and instantiates independent memory 
   assert.equal(result.stderr, '');
   assert.deepEqual(JSON.parse(result.stdout), {
     value: 5, process: 'undefined', isolatedMemory: true, otherInstallation: 'undefined',
+    taskContext: { captured: 'function', current: 0, installed: { type: 'undefined', own: false } },
   });
+});
+
+for (const input of [taskContext.patch, taskContext.build, ...taskContext.artifacts]) {
+  test(`task-context input drift is rejected before copying: ${input.path}`, async t => {
+    const f = fixture(t), bytes = readFileSync(join(f.root, input.path));
+    bytes[bytes.length - 1] ^= 1;
+    f.write(input.path, bytes);
+    const manifest = await rejected(f, 'ENGINE_HASH_MISMATCH');
+    assert.deepEqual(manifest.files, []);
+  });
+  test(`missing task-context input is rejected before copying: ${input.path}`, async t => {
+    const f = fixture(t);
+    rmSync(assertOwnedPath(f.area, join(f.root, input.path)));
+    const manifest = await rejected(f, 'MISSING_SOURCE');
+    assert.deepEqual(manifest.files, []);
+  });
+}
+
+for (const artifact of taskContext.artifacts) {
+  test(`task-context artifact byte count is independently pinned: ${artifact.path}`, async t => {
+    const f = fixture(t), altered = structuredClone(policy);
+    altered.taskContext.artifacts.find(input => input.path === artifact.path).bytes += 1;
+    f.write(policyPath, altered);
+    const manifest = await rejected(f, 'ENGINE_HASH_MISMATCH');
+    assert.deepEqual(manifest.files, []);
+  });
+}
+
+test('a matching policy hash cannot admit a task-context artifact without WASM v1 magic', async t => {
+  const f = fixture(t), altered = structuredClone(policy), bytes = readFileSync(join(f.root, localWasm.path));
+  bytes[0] ^= 1;
+  f.write(localWasm.path, bytes);
+  altered.taskContext.artifacts.find(artifact => artifact.path === localWasm.path).sha256 = hash(bytes);
+  f.write(policyPath, altered);
+  const manifest = await rejected(f, 'ENGINE_WASM_MAGIC');
+  assert.deepEqual(manifest.files, []);
+});
+
+for (const [label, change] of [
+  ['revision', value => { value.taskContext.revision = 2; }],
+  ['upstream source', value => { value.source = 'https://example.invalid/quickjs'; }],
+  ['upstream gitHead', value => { value.gitHead = '0'.repeat(40); }],
+  ['task-context gitHead', value => { value.taskContext.gitHead = '0'.repeat(40); }],
+  ['upstream archive', value => { value.taskContext.upstreamArchiveSha256 = '0'.repeat(64); }],
+  ['toolchain', value => { value.taskContext.toolchainVersion = '5.0.2'; }],
+  ['patch path', value => { value.taskContext.patch.path = 'scripts/quickjs/other.patch'; }],
+  ['build path traversal', value => { value.taskContext.build.path = '../build.py'; }],
+  ['loader path', value => { value.taskContext.artifacts[0].path = 'packages/script-host/src/other.mjs'; }],
+  ['WASM path', value => { value.taskContext.artifacts[1].path = 'packages/script-host/src/other.wasm'; }],
+  ['extra WASM', value => {
+    value.taskContext.artifacts.push({ ...localWasm, path: 'packages/script-host/src/quickjs/extra.wasm' });
+  }],
+  ['extra task-context field', value => { value.taskContext.otherWasm = { ...localWasm }; }],
+  ['extra reproduction field', value => { value.taskContext.build.args = ['unreviewed']; }],
+  ['extra artifact field', value => { value.taskContext.artifacts[0].package = 'unreviewed'; }],
+  ['duplicate artifact', value => { value.taskContext.artifacts[0] = { ...localWasm }; }],
+  ['missing loader', value => {
+    value.taskContext.artifacts = value.taskContext.artifacts.filter(artifact => artifact.path !== localLoader.path);
+  }],
+  ['unfilled patch hash', value => { value.taskContext.patch.sha256 = null; }],
+  ['unfilled artifact hash', value => { value.taskContext.artifacts[0].sha256 = null; }],
+  ['unfilled artifact bytes', value => { value.taskContext.artifacts[0].bytes = null; }],
+]) {
+  test(`task-context policy cannot change the reviewed ${label}`, async t => {
+    const f = fixture(t), altered = structuredClone(policy);
+    change(altered);
+    f.write(policyPath, altered);
+    const manifest = await rejected(f, 'INVALID_ENGINE_POLICY');
+    assert.deepEqual(manifest.files, []);
+  });
+}
+
+test('workspace files pruning cannot omit the reviewed task-context artifact pair', async t => {
+  const f = fixture(t);
+  f.editManifest('packages/script-host', { files: ['src/index.js'] });
+  const manifest = await f.pack();
+  for (const path of [localLoaderPath, localWasmPath]) assert.ok(manifest.files.some(file => file.path === path));
+  assert.deepEqual(manifest.files.filter(file => /\.wasm$/i.test(file.path)).map(file => file.path), wasmPaths);
 });
 
 for (const pkg of policy.packages) {
@@ -256,6 +392,11 @@ for (const path of [
   `node_modules/${engine.name}/dist/binding.node`,
   'node_modules/quickjs-emscripten-core/dist/emscripten-module.wasm',
   'packages/script-host/src/emscripten-module.wasm',
+  'packages/script-host/src/quickjs/extra.wasm',
+  'packages/script-host/src/quickjs/extra.WASM',
+  'packages/script-host/src/quickjs/binding.node',
+  'packages/script-host/src/quickjs/engine.dll',
+  'packages/source-runtime/src/quickjs/emscripten-module.wasm',
 ]) {
   test(`only the reviewed engine artifact may be binary: ${path}`, async t => {
     const f = fixture(t);
@@ -279,6 +420,17 @@ test('trusted WASM ancestor junctions are rejected rather than dereferenced', as
   await rejected(f, 'UNSAFE_SYMLINK');
 });
 
+for (const path of ['packages/script-host/src/quickjs', 'scripts/quickjs']) {
+  test(`task-context input ancestor junctions are rejected before copying: ${path}`, async t => {
+    const f = fixture(t), target = assertOwnedPath(f.area, join(f.root, path));
+    const saved = assertOwnedPath(f.area, join(f.area, 'saved-inputs'), { allowMissing: true });
+    renameSync(target, saved);
+    symlinkSync(saved, target, process.platform === 'win32' ? 'junction' : 'dir');
+    const manifest = await rejected(f, 'UNSAFE_SYMLINK');
+    assert.deepEqual(manifest.files, []);
+  });
+}
+
 test('Windows wrapper relocates its entry onto the same common module/engine closure', async t => {
   const f = fixture(t);
   const manifest = await packageWindowsRuntime({ ...f, product: 'aggregate' });
@@ -297,7 +449,7 @@ test('Windows wrapper relocates its entry onto the same common module/engine clo
   assert.ok(readFileSync(join(f.output, manifest.entry), 'utf8').includes("from '../../modules/music-script.mjs'"));
   assert.ok(readFileSync(join(f.output, manifest.entry), 'utf8').includes("from '../../modules/cat-script.mjs'"));
   assert.ok(readFileSync(join(f.output, manifest.entry), 'utf8').includes("from '../../modules/source-runtime.mjs'"));
-  assert.deepEqual(manifest.files.filter(file => /\.wasm$/i.test(file.path)).map(file => file.path), [wasmPath]);
+  assert.deepEqual(manifest.files.filter(file => /\.wasm$/i.test(file.path)).map(file => file.path), wasmPaths);
 });
 
 test('native test bundles use the verified closure and never overwrite an existing bundle', async t => {
@@ -305,6 +457,8 @@ test('native test bundles use the verified closure and never overwrite an existi
   const manifest = await prepareWindowsTestBundles({ root: f.root, output });
   assert.equal(manifest.status, 'complete');
   assert.equal(hash(readFileSync(join(output, 'aggregate', wasmPath))), engine.wasm.sha256);
+  assert.equal(hash(readFileSync(join(output, 'aggregate', localWasmPath))), localWasm.sha256);
+  assert.equal(hash(readFileSync(join(output, 'aggregate', localLoaderPath))), localLoader.sha256);
   const before = readFileSync(join(output, 'aggregate/runtime-manifest.json'));
   await assert.rejects(prepareWindowsTestBundles({ root: f.root, output }), { code: 'OUTPUT_EXISTS' });
   assert.deepEqual(readFileSync(join(output, 'aggregate/runtime-manifest.json')), before);

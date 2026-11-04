@@ -111,7 +111,7 @@ export class PortableSandbox {
 
   bridge(operation, args) {
     if (operation === 'callbackDone') {
-      this.forgetCallback(args[0]);
+      if (!this.callbacks.get(args[0])?.repeat) this.forgetCallback(args[0]);
       return;
     }
     if (operation === 'callbackFailure') {
@@ -308,8 +308,8 @@ export class PortableSandbox {
     this.ready.reject(reason);
     this.startup.close(reason);
     this.root.close(reason);
+    for (const id of this.timers.keys()) this.clearTimer(id);
     this.callbacks.clear();
-    this.timers.clear();
     this.engine?.close();
   }
 

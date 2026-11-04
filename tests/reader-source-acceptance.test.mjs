@@ -248,6 +248,37 @@ test('unavailable QYSG remote HTML is classified as upstream failure, not engine
   assert.equal(report.summary.engine_incompatible, 0);
 });
 
+test('Reader preserves configuration attribution for an actual rejected HTTP response', async t => {
+  const { directory, output } = area(t);
+  const server = createServer((_request, response) => {
+    response.statusCode = 403;
+    response.setHeader('Content-Type', 'application/json');
+    response.end(JSON.stringify({ message: 'api_key invalid SYNTHETIC-PRIVATE-KEY' }));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const file = join(directory, 'source.json');
+  writeFileSync(file, JSON.stringify({
+    bookSourceName: 'Configuration fixture',
+    bookSourceUrl: origin,
+    html: `${origin}/source.html`,
+  }));
+  const result = await run(['--scripts', file, '--output', output, '--live']);
+  assert.notEqual(result.code, 0);
+  const text = readFileSync(output, 'utf8'), report = JSON.parse(text);
+  assert.equal(report.rows[0].initialization, 'failed');
+  assert.equal(report.rows[0].code, 'HTTP_ERROR');
+  assert.equal(report.rows[0].failure, 'account_region_configuration_required');
+  assert.equal(report.summary.account_region_configuration_required, 1);
+  assert.equal(report.summary.upstream_failure, 0);
+  assert.equal(report.summary.engine_incompatible, 0);
+  assert.equal(report.rows[0].cleanup, 'complete');
+  assert.equal(text.includes(origin), false);
+  assert.equal(text.includes('SYNTHETIC-PRIVATE-KEY'), false);
+  assert.equal((result.stdout + result.stderr).includes('SYNTHETIC-PRIVATE-KEY'), false);
+});
+
 test('empty source inventories and invalid protocol overrides cannot satisfy acceptance', async t => {
   const { directory, output } = area(t);
   const empty = await run(['--scripts', directory, '--output', output]);
@@ -258,6 +289,44 @@ test('empty source inventories and invalid protocol overrides cannot satisfy acc
     '--protocol', 'unknown',
   ]);
   assert.notEqual(invalid.code, 0);
+});
+
+test('live Spider acceptance requires business actions while offline initialization remains valid', async t => {
+  for (const [name, script, actions] of [
+    ['empty', 'export default {};', []],
+    ['lifecycle', 'export default { init(){ return true; }, destroy(){ return true; } };',
+      ['init', 'destroy']],
+  ]) {
+    await t.test(name, async t => {
+      const { directory, output } = area(t);
+      const file = join(directory, 'spider.js');
+      writeFileSync(file, script);
+      const offline = await run(['--scripts', file, '--output', output]);
+      assert.equal(offline.code, 0, offline.stderr);
+      const initialized = JSON.parse(readFileSync(output, 'utf8'));
+      assert.equal(initialized.mode, 'offline-init');
+      assert.equal(initialized.summary.initialized, 1);
+      assert.equal(initialized.summary.invokedActions, 0);
+      assert.equal(initialized.summary.engine_incompatible, 0);
+      assert.equal(initialized.rows[0].failure, undefined);
+
+      const live = await run(['--scripts', file, '--output', output, '--live']);
+      assert.notEqual(live.code, 0);
+      const report = JSON.parse(readFileSync(output, 'utf8'));
+      assert.equal(report.summary.initialized, 1);
+      assert.equal(report.summary.declaredActions, actions.length);
+      assert.equal(report.summary.invokedActions, actions.length);
+      assert.equal(report.summary.returned, actions.length);
+      assert.equal(report.summary.engine_incompatible, 1);
+      assert.equal(report.rows[0].code, 'NO_BUSINESS_ACTIONS');
+      assert.equal(report.rows[0].failure, 'engine_incompatible');
+      assert.deepEqual(report.rows[0].actions.map(action => [action.operation, action.state]),
+        actions.map(action => [action, 'returned']));
+      assert.equal(report.rows[0].unload, 'complete');
+      assert.equal(report.rows[0].cleanup, 'complete');
+      assert.equal(report.rows[0].sourceUnchanged, true);
+    });
+  }
 });
 
 for (const protocol of ['legado', 'yiciyuan']) {
@@ -523,7 +592,7 @@ test('missing Reader action input stays unexercised and makes live acceptance no
   });
 });
 
-test('Reader reports retain upstream, account, host and engine failures without logging private data', async t => {
+test('Reader reports keep unknown script failures fatal despite HTTP or account evidence', async t => {
   const { directory, output } = area(t);
   const privateValue = 'SYNTHETIC-PRIVATE-READER';
   const server = createServer((request, response) => {
@@ -569,15 +638,220 @@ test('Reader reports retain upstream, account, host and engine failures without 
   assert.notEqual(result.code, 0);
   const text = readFileSync(output, 'utf8'), report = JSON.parse(text);
   assert.equal(report.summary.returned, 3);
-  assert.equal(report.summary.upstream_failure, 1);
-  assert.equal(report.summary.account_region_configuration_required, 1);
+  assert.equal(report.summary.upstream_failure, 0);
+  assert.equal(report.summary.account_region_configuration_required, 0);
   assert.equal(report.summary.host_capability_missing, 1);
-  assert.equal(report.summary.engine_incompatible, 1);
+  assert.equal(report.summary.engine_incompatible, 3);
+  assert.deepEqual(report.rows[0].actions.filter(action => action.code).map(action =>
+    [action.operation, action.state]), [
+    ['exploreKinds', 'engine_incompatible'],
+    ['bookInfo', 'engine_incompatible'],
+    ['toc', 'host_capability_missing'],
+    ['content', 'engine_incompatible'],
+  ]);
   assert.equal(report.summary.not_exercised, 0);
   assert.equal(report.summary.cleanupFailures, 0);
   assert.equal(text.includes(privateValue), false);
   assert.equal(text.includes(origin), false);
   assert.equal((result.stdout + result.stderr).includes(privateValue), false);
+});
+
+test('a same-action HTTP 503 cannot make an unknown Reader function pass live acceptance', async t => {
+  const { directory, output } = area(t);
+  let requests = 0;
+  const server = createServer((_request, response) => {
+    requests++;
+    response.statusCode = 503;
+    response.end('SYNTHETIC-PRIVATE-UPSTREAM');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const file = join(directory, 'source.html');
+  writeFileSync(file, `<script>
+    async function search() {
+      await fetch(${JSON.stringify(`${origin}/unavailable`)});
+      return missingFixtureFunction();
+    }
+  </script>`);
+  const records = join(directory, 'records.json');
+  writeFileSync(records, JSON.stringify({
+    source: { 'source.html': { actions: { image: { body: '' } } } },
+  }));
+  const result = await run([
+    '--scripts', file, '--records', records, '--output', output, '--live',
+  ]);
+  assert.notEqual(result.code, 0);
+  const text = readFileSync(output, 'utf8'), report = JSON.parse(text);
+  assert.equal(requests, 1);
+  assert.equal(report.summary.invokedActions, 3);
+  assert.equal(report.summary.returned, 2);
+  assert.equal(report.summary.upstream_failure, 0);
+  assert.equal(report.summary.engine_incompatible, 1);
+  assert.equal(report.summary.not_exercised, 0);
+  const search = report.rows[0].actions.find(action => action.operation === 'search');
+  assert.equal(search.code, 'SOURCE_FAILURE');
+  assert.equal(search.state, 'engine_incompatible');
+  assert.deepEqual(search.network.map(event => event.statusCode), [503]);
+  assert.equal(report.rows[0].unload, 'complete');
+  assert.equal(report.rows[0].cleanup, 'complete');
+  assert.equal(report.rows[0].sourceUnchanged, true);
+  assert.equal(text.includes(origin), false);
+  assert.equal(text.includes('SYNTHETIC-PRIVATE-UPSTREAM'), false);
+});
+
+test('Cat guest BigInt results are fatal CLI engine errors with or without same-action HTTP failures', async t => {
+  const requests = [];
+  const server = createServer((request, response) => {
+    requests.push(request.url);
+    response.statusCode = 503;
+    response.end('SYNTHETIC-PRIVATE-UPSTREAM');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  for (const afterHttp of [false, true]) {
+    await t.test(afterHttp ? 'HTTP 503 then BigInt' : 'direct BigInt', async t => {
+      const { directory, output } = area(t);
+      const file = join(directory, 'spider.js');
+      const before = requests.length;
+      writeFileSync(file, `export default {
+        ${afterHttp ? 'async ' : ''}searchContent() {
+          ${afterHttp ? `await fetch(${JSON.stringify(`${origin}/unavailable`)});` : ''}
+          return 1n;
+        }
+      };`);
+      const result = await run(['--scripts', file, '--output', output, '--live']);
+      assert.notEqual(result.code, 0);
+      const text = readFileSync(output, 'utf8'), report = JSON.parse(text);
+      assert.equal(report.rows[0].protocol, 'cat');
+      assert.equal(report.rows[0].initialization, 'ready');
+      assert.equal(report.summary.declaredActions, 1);
+      assert.equal(report.summary.invokedActions, 1);
+      assert.equal(report.summary.returned, 0);
+      assert.equal(report.summary.engine_incompatible, 1);
+      assert.equal(report.summary.upstream_failure, 0);
+      assert.equal(report.summary.runtime_limit, 0);
+      assert.equal(report.summary.not_exercised, 0);
+      assert.equal(report.summary.cleanupFailures, 0);
+      assert.equal(report.rows[0].actions.length, 1);
+      const search = report.rows[0].actions[0];
+      assert.equal(search.operation, 'search');
+      assert.equal(search.code, 'SOURCE_FAILURE');
+      assert.equal(search.state, 'engine_incompatible');
+      assert.deepEqual(search.network.map(event => event.statusCode), afterHttp ? [503] : []);
+      assert.deepEqual(requests.slice(before), afterHttp ? ['/unavailable'] : []);
+      assert.equal(report.rows[0].unload, 'complete');
+      assert.equal(report.rows[0].cleanup, 'complete');
+      assert.equal(report.rows[0].sourceUnchanged, true);
+      assert.equal(text.includes(origin), false);
+      assert.equal(text.includes('SYNTHETIC-PRIVATE-UPSTREAM'), false);
+      assert.equal((result.stdout + result.stderr).includes('SYNTHETIC-PRIVATE-UPSTREAM'), false);
+    });
+  }
+});
+
+test('Reader live acceptance preserves genuine network and configuration error attribution', async t => {
+  const { directory, output } = area(t);
+  const server = createServer((_request, response) => response.destroy());
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const file = join(directory, 'source.json');
+  writeFileSync(file, JSON.stringify({
+    bookSourceName: 'Network and login fixture',
+    bookSourceUrl: origin,
+    login: true,
+    html: `<script>
+      async function search() { await fetch(${JSON.stringify(`${origin}/network`)}); return []; }
+      function getloginurl() { return ''; }
+    </script>`,
+  }));
+  const records = join(directory, 'records.json');
+  writeFileSync(records, JSON.stringify({
+    source: { 'source.json': { actions: { image: { body: '' } } } },
+  }));
+  const result = await run([
+    '--scripts', file, '--records', records, '--output', output, '--live',
+  ]);
+  assert.equal(result.code, 0, result.stderr);
+  const report = JSON.parse(readFileSync(output, 'utf8'));
+  assert.deepEqual(report.rows[0].actions.map(action => [action.operation, action.state, action.code]), [
+    ['search', 'upstream_failure', 'NETWORK_ERROR'],
+    ['loginStatus', 'returned', undefined],
+    ['login', 'account_region_configuration_required', 'WEB_INTERACTION_REQUIRED'],
+    ['image', 'returned', undefined],
+  ]);
+  assert.equal(report.summary.upstream_failure, 1);
+  assert.equal(report.summary.account_region_configuration_required, 1);
+  assert.equal(report.summary.engine_incompatible, 0);
+  assert.equal(report.summary.not_exercised, 0);
+  assert.equal(report.rows[0].unload, 'complete');
+  assert.equal(report.rows[0].cleanup, 'complete');
+});
+
+test('QYSG HTTP bridge sends standalone contentType and honors explicit headers on the wire', async t => {
+  const { directory, output } = area(t);
+  const requests = [];
+  const server = createServer((request, response) => {
+    const chunks = [];
+    request.on('data', chunk => chunks.push(chunk));
+    request.on('end', () => {
+      requests.push({
+        path: request.url,
+        method: request.method,
+        contentType: request.headers['content-type'],
+        contentTypeHeaders: request.rawHeaders.filter((value, index) =>
+          index % 2 === 0 && value.toLowerCase() === 'content-type').length,
+        body: Buffer.concat(chunks).toString(),
+      });
+      response.setHeader('Content-Type', 'application/json');
+      response.end('[]');
+    });
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const file = join(directory, 'source.html');
+  writeFileSync(file, `<script>
+    async function search() {
+      await window.flutter_inappwebview.callHandler(
+        'http', 'POST', ${JSON.stringify(`${origin}/form`)},
+        { key: 'a b' }, {}, true, 'application/x-www-form-urlencoded'
+      );
+      await window.flutter_inappwebview.callHandler(
+        'http', 'POST', ${JSON.stringify(`${origin}/json`)},
+        { key: 'a b' }, {}, true, 'application/json'
+      );
+      await window.flutter_inappwebview.callHandler(
+        'http', 'POST', ${JSON.stringify(`${origin}/explicit`)},
+        { key: 'a b' }, { 'cOnTeNt-TyPe': 'application/json' },
+        true, 'application/x-www-form-urlencoded'
+      );
+      return [];
+    }
+  </script>`);
+  const records = join(directory, 'records.json');
+  writeFileSync(records, JSON.stringify({
+    source: { 'source.html': { actions: { image: { body: '' } } } },
+  }));
+  const result = await run([
+    '--scripts', file, '--records', records, '--output', output, '--live',
+  ]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(requests, [
+    { path: '/form', method: 'POST', contentType: 'application/x-www-form-urlencoded',
+      contentTypeHeaders: 1, body: 'key=a+b' },
+    { path: '/json', method: 'POST', contentType: 'application/json',
+      contentTypeHeaders: 1, body: '{"key":"a b"}' },
+    { path: '/explicit', method: 'POST', contentType: 'application/json',
+      contentTypeHeaders: 1, body: '{"key":"a b"}' },
+  ]);
+  const report = JSON.parse(readFileSync(output, 'utf8'));
+  assert.equal(report.summary.returned, 3);
+  assert.equal(report.summary.engine_incompatible, 0);
+  assert.equal(report.rows[0].unload, 'complete');
+  assert.equal(report.rows[0].cleanup, 'complete');
 });
 
 test('Reader protocol override accepts ambiguous Spider input and never falls back to LX or Cat Node', async t => {

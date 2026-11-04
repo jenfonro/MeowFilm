@@ -12,7 +12,7 @@ export function workerResult(value) {
 
 function wasmModule() {
   compiledModule ??= Promise.resolve().then(() =>
-    WebAssembly.compile(readFileSync(new URL(import.meta.resolve('@jitl/quickjs-wasmfile-release-sync/wasm')))));
+    WebAssembly.compile(readFileSync(new URL('./quickjs/emscripten-module.wasm', import.meta.url))));
   return compiledModule;
 }
 

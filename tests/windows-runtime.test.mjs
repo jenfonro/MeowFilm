@@ -76,11 +76,18 @@ function verifyManifest(output, manifest) {
   ]);
   assert.deepEqual(manifest.fileHashExcludes, ['runtime-manifest.json']);
   assert.ok(!paths.some(path => /\.(?:exe|dll|node)$/i.test(path)));
-  const engine = readJSON(join(root, 'scripts/quickjs-runtime.json')).packages
-    .find(pkg => pkg.name === '@jitl/quickjs-wasmfile-release-sync');
+  const policy = readJSON(join(root, 'scripts/quickjs-runtime.json'));
+  const engine = policy.packages.find(pkg => pkg.name === '@jitl/quickjs-wasmfile-release-sync');
+  const localWasm = policy.taskContext.artifacts.find(artifact => artifact.path.endsWith('.wasm'));
+  const host = readJSON(join(root, 'packages/script-host/package.json'));
   assert.deepEqual(manifest.trustedWasm, [{
     package: engine.name, version: engine.version,
     ...engine.wasm, path: `node_modules/${engine.name}/${engine.wasm.path}`,
+    licensePath: `node_modules/${engine.name}/LICENSE`, licenseSha256: engine.licenseSha256,
+  }, {
+    package: host.name, version: host.version, bytes: localWasm.bytes, sha256: localWasm.sha256,
+    path: localWasm.path.replace('packages/script-host/', `node_modules/${host.name}/`),
+    taskContext: { revision: policy.taskContext.revision, source: policy.source, gitHead: policy.taskContext.gitHead },
     licensePath: `node_modules/${engine.name}/LICENSE`, licenseSha256: engine.licenseSha256,
   }]);
   assert.deepEqual(paths.filter(path => /\.wasm$/i.test(path)), manifest.trustedWasm.map(file => file.path));
