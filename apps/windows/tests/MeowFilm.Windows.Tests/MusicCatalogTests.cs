@@ -2395,14 +2395,14 @@ public static class MusicCatalogTests
     }
     private sealed class Fixture : IAsyncDisposable
     {
-        private readonly DpapiDocumentStore store;
+        private readonly LocalDocumentStore store;
         private readonly NativeMusicScriptTestRuntime runtime = new();
         private readonly CatalogTransport transport = new();
         public Client Client { get; }
         public Output Playback { get; } = new();
         public MusicCapability Module { get; }
         public VipApplication? Vip { get; }
-        private Fixture(DpapiDocumentStore store, bool vipAccount)
+        private Fixture(LocalDocumentStore store, bool vipAccount)
         {
             this.store = store;
             var native = new MusicNativeApplication(store, runtime, transport);
@@ -2415,7 +2415,7 @@ public static class MusicCatalogTests
         {
             var data = Environment.GetEnvironmentVariable("MEOWFILM_TEST_DATA_ROOT") ?? throw new InvalidOperationException("Isolated test data required");
             var dir = Path.Combine(data, "catalog-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(dir);
-            var store = new DpapiDocumentStore(dir, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections);
+            var store = new LocalDocumentStore(dir, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
             await MusicClientContextFixture.SeedQqAsync(store);
             var f = new Fixture(store, vipAccount);
             try

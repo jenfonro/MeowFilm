@@ -52,7 +52,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 - `apps/windows/app/` — Windows 应用入口与装配
 - `apps/windows/src/` — Windows 原生库
   - `MeowFilm.Core` — 基础契约
-  - `MeowFilm.Platform` — 受保护存储、命名管道、子进程、文件授权
+  - `MeowFilm.Platform` — 本地文档存储与敏感信息保护、命名管道、子进程、文件授权
   - `MeowFilm.Desktop` — 窗口、导航、设置入口、主题、通知
   - `MeowFilm.Media` — 媒体播放与自适应流
   - `MeowFilm.SystemMedia` — 系统媒体传输控件

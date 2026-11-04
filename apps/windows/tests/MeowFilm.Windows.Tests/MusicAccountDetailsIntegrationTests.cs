@@ -106,7 +106,7 @@ public static partial class MusicUiTests
 
     private sealed class DetailsScene : IAsyncDisposable
     {
-        internal readonly DpapiDocumentStore Store = ServiceStore();
+        internal readonly LocalDocumentStore Store = ServiceStore();
         internal readonly NativeMusicScriptTestRuntime Runtime = new();
         internal readonly DetailsConsumerHttp Http = new();
         internal readonly MusicNativeApplication App;

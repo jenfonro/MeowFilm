@@ -279,7 +279,7 @@ public static class MusicKgAccountUiTests
         internal readonly MusicCapability Module;
         private Fixture()
         {
-            Store = new(new DpapiDocumentStore(Root, AppIdentity.NativeNamespaces));
+            Store = new(new LocalDocumentStore(Root, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
             Dialogs = new() { Path = System.IO.Path.Combine(Root, "explicit-qr.png") };
             Module = new(new MusicNativeApplication(Store, Runtime, Transport), Store, new Output(), Dialogs);
         }

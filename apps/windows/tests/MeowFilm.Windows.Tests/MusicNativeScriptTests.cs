@@ -1073,7 +1073,7 @@ public static class MusicNativeScriptTests
             public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
         }
     }
-    private sealed class Store : IProtectedDocumentStore
+    private sealed class Store : IDocumentStore
     {
         private readonly Dictionary<string, byte[]> documents = new(StringComparer.Ordinal);
         internal int Writes;
@@ -1084,24 +1084,21 @@ public static class MusicNativeScriptTests
         {
             string prefix = MusicLibraryOwner.ScriptContentCollection + ".";
             if (!value.StartsWith(prefix, StringComparison.Ordinal)) return false;
-            string[] parts = value[prefix.Length..].Split('.');
-            return parts.Length == 2 && parts[0].Length == 64 &&
-                parts[0].All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f') &&
-                int.TryParse(parts[1], out int index) && index >= 0 &&
-                parts[1] == index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            string hash = value[prefix.Length..];
+            return hash.Length == 64 && hash.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
         }
         private static void Namespace(string value) =>
             Check(value == MusicLibraryOwner.DocumentNamespace || ContentNamespace(value), "Unexpected document namespace");
-        public Task<ProtectedDocument> ReadAsync(string name, CancellationToken cancellationToken = default)
+        public Task<DocumentSnapshot> ReadAsync(string name, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested(); Namespace(name); Namespaces.Add(name);
             if (ContentNamespace(name) && ContentReadFailure is { } error)
             {
                 ContentReadFailure = null;
-                throw new ProtectedDocumentException(error);
+                throw new DocumentStoreException(error);
             }
             byte[]? bytes = documents.TryGetValue(name, out var value) ? value.ToArray() : null;
-            return Task.FromResult(new ProtectedDocument(bytes,
+            return Task.FromResult(new DocumentSnapshot(bytes,
                 bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes)));
         }
         public Task<DocumentFingerprint> WriteAsync(string name, ReadOnlyMemory<byte> data, DocumentFingerprint expected,
@@ -1110,7 +1107,7 @@ public static class MusicNativeScriptTests
             cancellationToken.ThrowIfCancellationRequested(); Namespace(name); Namespaces.Add(name);
             byte[]? prior = documents.TryGetValue(name, out var value) ? value : null;
             var before = prior is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(prior);
-            if (before != expected) throw new ProtectedDocumentException(DocumentStoreError.Conflict);
+            if (before != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
             documents[name] = data.ToArray(); Writes++;
             if (FailAfter) { FailAfter = false; throw new InvalidOperationException("synthetic commit receipt loss"); }
             return Task.FromResult(DocumentFingerprint.FromBytes(documents[name]));

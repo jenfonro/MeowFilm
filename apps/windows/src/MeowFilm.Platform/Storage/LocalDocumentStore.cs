@@ -12,18 +12,20 @@ using Microsoft.Win32.SafeHandles;
 namespace MeowFilm.Platform.Storage;
 
 /// <summary>
-/// CurrentUser DPAPI for opaque business documents, not account/credential discovery.
-/// Root must be an existing dedicated local directory. All cooperating instances use
-/// its exclusive lock file; no unprotected fallback or blind overwrite is supported.
+/// Local documents and complete collection source files. Only explicitly configured
+/// sensitive namespaces use CurrentUser DPAPI. All cooperating instances use the
+/// existing dedicated root's exclusive lock file; no blind overwrite is supported.
 /// </summary>
-public sealed class DpapiDocumentStore : IProtectedDocumentStore
+public sealed class LocalDocumentStore : IDocumentStore
 {
     public const int MaximumDocumentBytes = DocumentRules.MaximumDocumentBytes;
+    public const int MaximumSourceBytes = DocumentRules.MaximumSourceBytes;
     private const string DocumentName = "document.mfdp";
     private const int EnvelopeHeaderBytes = 13, PlaintextHeaderBytes = 44;
     private readonly WindowsDocumentFiles.Root root;
     private readonly HashSet<string> namespaces;
     private readonly HashSet<string> collections;
+    private readonly HashSet<string> protectedNamespaces;
     private readonly SemaphoreSlim serial = new(1, 1);
     private readonly object gate = new();
     private int pending;
@@ -32,44 +34,51 @@ public sealed class DpapiDocumentStore : IProtectedDocumentStore
     private readonly CancellationTokenSource lifetime = new();
     private int closed;
 
-    public DpapiDocumentStore(string productRoot, IEnumerable<string> allowedNamespaces,
-        IEnumerable<string>? allowedCollections = null)
+    public LocalDocumentStore(string productRoot, IEnumerable<string> allowedNamespaces,
+        IEnumerable<string>? allowedCollections = null, IEnumerable<string>? protectedNamespaces = null)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Windows required.");
         try
         {
             namespaces = DocumentRules.Namespaces(allowedNamespaces);
             collections = DocumentRules.Namespaces(allowedCollections ?? []);
-            if (collections.Any(value => value.Length > 48))
-                throw new ProtectedDocumentException(DocumentStoreError.InvalidRequest);
+            this.protectedNamespaces = DocumentRules.Namespaces(protectedNamespaces ?? []);
+            if (!this.protectedNamespaces.IsSubsetOf(namespaces))
+                throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
             root = new WindowsDocumentFiles.Root(productRoot);
         }
-        catch (ProtectedDocumentException) { throw; }
-        catch { throw new ProtectedDocumentException(DocumentStoreError.InvalidRequest); }
+        catch (DocumentStoreException) { throw; }
+        catch { throw new DocumentStoreException(DocumentStoreError.InvalidRequest); }
     }
 
-    public Task<ProtectedDocument> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default) =>
-        RunAsync(documentNamespace, null, token => ReadLocked(documentNamespace, token), cancellationToken);
+    public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
+    {
+        var location = Locate(documentNamespace);
+        return RunAsync(location, null, token => ReadLocked(location, token), cancellationToken);
+    }
 
     public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
         DocumentFingerprint expected, CancellationToken cancellationToken = default)
     {
-        if (data.Length > MaximumDocumentBytes) throw new ProtectedDocumentException(DocumentStoreError.Limit);
-        if (expected is null || !expected.IsValid) throw new ProtectedDocumentException(DocumentStoreError.InvalidRequest);
+        var location = Locate(documentNamespace);
+        if (data.Length > location.MaximumBytes) throw new DocumentStoreException(DocumentStoreError.Limit);
+        if (expected is null || !expected.IsValidFor(location.MaximumBytes))
+            throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
         // Take an immediate owned snapshot before waiting for the serial writer.
-        return RunAsync(documentNamespace, data, token => WriteLocked(documentNamespace, expected, token), cancellationToken);
+        return RunAsync(location, data, token => WriteLocked(location, expected, token), cancellationToken);
     }
 
+    private sealed record DocumentLocation(string Namespace, string Directory, string FileName,
+        bool Protected, int MaximumBytes);
     private sealed record Operation(CancellationToken Cancellation, byte[]? Data);
 
-    private async Task<T> RunAsync<T>(string ns, ReadOnlyMemory<byte>? data, Func<Operation, T> operation,
+    private async Task<T> RunAsync<T>(DocumentLocation location, ReadOnlyMemory<byte>? data, Func<Operation, T> operation,
         CancellationToken cancellationToken)
     {
-        ValidateNamespace(ns);
         cancellationToken.ThrowIfCancellationRequested();
         lock (gate)
         {
-            if (closed != 0) throw new ProtectedDocumentException(DocumentStoreError.Closed);
+            if (closed != 0) throw new DocumentStoreException(DocumentStoreError.Closed);
             if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
         }
         byte[]? owned = null;
@@ -81,7 +90,7 @@ public sealed class DpapiDocumentStore : IProtectedDocumentStore
             owned = data?.ToArray();
             await serial.WaitAsync(linked.Token).ConfigureAwait(false);
             entered = true;
-            if (Volatile.Read(ref closed) != 0) throw new ProtectedDocumentException(DocumentStoreError.Closed);
+            if (Volatile.Read(ref closed) != 0) throw new DocumentStoreException(DocumentStoreError.Closed);
             return await Task.Run(() =>
             {
                 linked.Token.ThrowIfCancellationRequested();
@@ -92,34 +101,39 @@ public sealed class DpapiDocumentStore : IProtectedDocumentStore
             }, CancellationToken.None).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (Volatile.Read(ref closed) != 0)
-        { throw new ProtectedDocumentException(DocumentStoreError.Closed); }
+        { throw new DocumentStoreException(DocumentStoreError.Closed); }
         catch (OperationCanceledException) { throw new OperationCanceledException(cancellationToken); }
-        catch (ProtectedDocumentException) { throw; }
-        catch { throw new ProtectedDocumentException(DocumentStoreError.Storage); }
+        catch (DocumentStoreException) { throw; }
+        catch { throw new DocumentStoreException(DocumentStoreError.Storage); }
         finally
         {
-            if (owned is not null) CryptographicOperations.ZeroMemory(owned);
+            if (location.Protected && owned is not null) CryptographicOperations.ZeroMemory(owned);
             if (entered) serial.Release();
             linked?.Dispose();
             lock (gate) if (--pending == 0) drained!.TrySetResult();
         }
     }
 
-    private void ValidateNamespace(string ns)
+    private DocumentLocation Locate(string ns)
     {
-        if (!DocumentRules.ValidNamespace(ns)) throw new ProtectedDocumentException(DocumentStoreError.InvalidRequest);
-        // Collection access is trusted-native only. ProtectedDocumentBridge
-        // still accepts only its separate exact namespace list.
-        bool member = collections.Any(collection =>
+        if (!DocumentRules.ValidNamespace(ns)) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+        if (namespaces.Contains(ns))
         {
-            if (!ns.StartsWith(collection + ".", StringComparison.Ordinal)) return false;
-            string[] suffix = ns[(collection.Length + 1)..].Split('.');
-            return suffix.Length == 2 && DocumentRules.ValidHash(suffix[0]) &&
-                int.TryParse(suffix[1], System.Globalization.NumberStyles.None,
-                    System.Globalization.CultureInfo.InvariantCulture, out int index) && index >= 0 &&
-                index.ToString(System.Globalization.CultureInfo.InvariantCulture) == suffix[1];
-        });
-        if (!namespaces.Contains(ns) && !member) throw new ProtectedDocumentException(DocumentStoreError.Unavailable);
+            bool protect = protectedNamespaces.Contains(ns);
+            string directory = Path.Combine(root.Path, protect ? "n-" + NamespaceHash(ns) : "n-" + ns + "-" + NamespaceHash(ns));
+            return new(ns, directory, protect ? DocumentName : "document.json", protect, MaximumDocumentBytes);
+        }
+        // Collection access is trusted-native only. The bridge retains its exact
+        // namespace grants and 8 MiB document/transfer contract.
+        foreach (string collection in collections)
+        {
+            if (!ns.StartsWith(collection + ".", StringComparison.Ordinal)) continue;
+            string hash = ns[(collection.Length + 1)..];
+            if (DocumentRules.ValidHash(hash))
+                return new(ns, Path.Combine(root.Path, "c-" + collection + "-" + NamespaceHash(collection)),
+                    hash + ".js", false, MaximumSourceBytes);
+        }
+        throw new DocumentStoreException(DocumentStoreError.Unavailable);
     }
 
     private SafeFileHandle AcquireRootLock(CancellationToken cancellation)
@@ -136,19 +150,19 @@ public sealed class DpapiDocumentStore : IProtectedDocumentStore
                 if (WindowsDocumentFiles.FileLength(handle) != 0)
                 {
                     handle.Dispose();
-                    throw new ProtectedDocumentException(DocumentStoreError.Corrupt);
+                    throw new DocumentStoreException(DocumentStoreError.Corrupt);
                 }
                 return handle;
             }
             if (Stopwatch.GetElapsedTime(start) >= TimeSpan.FromSeconds(5))
-                throw new ProtectedDocumentException(DocumentStoreError.Storage);
+                throw new DocumentStoreException(DocumentStoreError.Storage);
             // Bounded waiting for another cooperating process; no service/port/global mutex.
             if (cancellation.WaitHandle.WaitOne(10)) cancellation.ThrowIfCancellationRequested();
         }
     }
 
-    private string NamespacePath(string ns) => Path.Combine(root.Path,
-        "n-" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(ns))));
+    private static string NamespaceHash(string ns) =>
+        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(ns)));
 
     private byte[] Entropy(string ns)
     {
@@ -161,92 +175,94 @@ public sealed class DpapiDocumentStore : IProtectedDocumentStore
         return SHA256.HashData(material);
     }
 
-    // Unknown files (including interrupted stages) require explicit recovery. Never
-    // read unknown contents, delete them automatically, or infer a fresh empty store.
+    // Sensitive namespaces retain their strict inventory check. Unknown files
+    // (including interrupted stages) require explicit recovery, never automatic deletion.
     private static void CheckInventory(string directory)
     {
         int count = 0;
         foreach (string path in Directory.EnumerateFileSystemEntries(directory))
             if (++count > 1 || !StringComparer.Ordinal.Equals(Path.GetFileName(path), DocumentName))
-                throw new ProtectedDocumentException(DocumentStoreError.Corrupt);
+                throw new DocumentStoreException(DocumentStoreError.Corrupt);
     }
 
-    private ProtectedDocument ReadLocked(string ns, Operation operation)
+    private DocumentSnapshot ReadLocked(DocumentLocation location, Operation operation)
     {
         operation.Cancellation.ThrowIfCancellationRequested();
-        string directory = NamespacePath(ns);
+        string directory = location.Directory;
         using var folder = WindowsDocumentFiles.OpenDirectory(directory, true);
-        if (folder is null) return new ProtectedDocument(null, DocumentFingerprint.Missing);
-        CheckInventory(directory);
-        return ReadDocument(Path.Combine(directory, DocumentName), ns, operation.Cancellation);
+        if (folder is null) return new DocumentSnapshot(null, DocumentFingerprint.Missing);
+        if (location.Protected) CheckInventory(directory);
+        return ReadDocument(Path.Combine(directory, location.FileName), location, operation.Cancellation);
     }
 
-    private ProtectedDocument ReadDocument(string path, string ns, CancellationToken cancellation)
+    private DocumentSnapshot ReadDocument(string path, DocumentLocation location, CancellationToken cancellation)
     {
         using var handle = WindowsDocumentFiles.OpenFile(path, WindowsDocumentFiles.Read,
             WindowsDocumentFiles.ShareRead, WindowsDocumentFiles.OpenExisting, allowMissing: true);
-        if (handle is null) return new ProtectedDocument(null, DocumentFingerprint.Missing);
+        if (handle is null) return new DocumentSnapshot(null, DocumentFingerprint.Missing);
         long length = WindowsDocumentFiles.FileLength(handle);
-        if (length < EnvelopeHeaderBytes) throw new ProtectedDocumentException(DocumentStoreError.Corrupt);
+        if (!location.Protected)
+        {
+            if (length > location.MaximumBytes) throw new DocumentStoreException(DocumentStoreError.Limit);
+            var data = new byte[(int)length];
+            using (var file = new FileStream(handle, FileAccess.Read))
+            {
+                file.ReadExactly(data);
+                if (file.ReadByte() != -1) throw new DocumentStoreException(DocumentStoreError.Corrupt);
+            }
+            cancellation.ThrowIfCancellationRequested();
+            return new DocumentSnapshot(data, DocumentFingerprint.FromBytes(data));
+        }
+        if (length < EnvelopeHeaderBytes) throw new DocumentStoreException(DocumentStoreError.Corrupt);
         if (length > CurrentUserDpapi.MaximumCiphertextBytes + EnvelopeHeaderBytes)
-            throw new ProtectedDocumentException(DocumentStoreError.Limit);
+            throw new DocumentStoreException(DocumentStoreError.Limit);
         var encrypted = new byte[(int)length];
         using (var file = new FileStream(handle, FileAccess.Read))
         {
             file.ReadExactly(encrypted);
-            if (file.ReadByte() != -1) throw new ProtectedDocumentException(DocumentStoreError.Corrupt);
+            if (file.ReadByte() != -1) throw new DocumentStoreException(DocumentStoreError.Corrupt);
         }
         cancellation.ThrowIfCancellationRequested();
         if (!encrypted.AsSpan(0, 8).SequenceEqual("MEOWDPAP"u8))
-            throw new ProtectedDocumentException(DocumentStoreError.Corrupt);
-        if (encrypted[8] != 1) throw new ProtectedDocumentException(DocumentStoreError.UnsupportedVersion);
+            throw new DocumentStoreException(DocumentStoreError.Corrupt);
+        if (encrypted[8] != 1) throw new DocumentStoreException(DocumentStoreError.UnsupportedVersion);
         if (BinaryPrimitives.ReadInt32LittleEndian(encrypted.AsSpan(9, 4)) != encrypted.Length - EnvelopeHeaderBytes)
-            throw new ProtectedDocumentException(DocumentStoreError.Corrupt);
-        byte[] plain = CurrentUserDpapi.Transform(encrypted[EnvelopeHeaderBytes..], Entropy(ns), false);
+            throw new DocumentStoreException(DocumentStoreError.Corrupt);
+        byte[] plain = CurrentUserDpapi.Transform(encrypted[EnvelopeHeaderBytes..], Entropy(location.Namespace), false);
         try
         {
             cancellation.ThrowIfCancellationRequested();
             if (plain.Length < PlaintextHeaderBytes || !plain.AsSpan(0, 8).SequenceEqual("MFDPDOC1"u8))
-                throw new ProtectedDocumentException(DocumentStoreError.Corrupt);
+                throw new DocumentStoreException(DocumentStoreError.Corrupt);
             int count = BinaryPrimitives.ReadInt32LittleEndian(plain.AsSpan(8, 4));
             if (count < 0 || count > MaximumDocumentBytes || count != plain.Length - PlaintextHeaderBytes ||
                 !CryptographicOperations.FixedTimeEquals(plain.AsSpan(12, 32), SHA256.HashData(plain.AsSpan(PlaintextHeaderBytes))))
-                throw new ProtectedDocumentException(DocumentStoreError.Corrupt);
+                throw new DocumentStoreException(DocumentStoreError.Corrupt);
             byte[] data = plain[PlaintextHeaderBytes..];
-            return new ProtectedDocument(data, DocumentFingerprint.FromBytes(data));
+            return new DocumentSnapshot(data, DocumentFingerprint.FromBytes(data));
         }
         finally { CryptographicOperations.ZeroMemory(plain); }
     }
 
-    private DocumentFingerprint WriteLocked(string ns, DocumentFingerprint expected, Operation operation)
+    private DocumentFingerprint WriteLocked(DocumentLocation location, DocumentFingerprint expected, Operation operation)
     {
         byte[] data = operation.Data!;
         var cancellation = operation.Cancellation;
         var next = DocumentFingerprint.FromBytes(data);
-        string directory = NamespacePath(ns);
+        string directory = location.Directory;
         using var folder = WindowsDocumentFiles.OpenDirectory(directory, true) ?? WindowsDocumentFiles.CreateDirectory(directory);
-        CheckInventory(directory);
-        string destination = Path.Combine(directory, DocumentName);
-        ProtectedDocument previous = ReadDocument(destination, ns, cancellation);
+        if (location.Protected) CheckInventory(directory);
+        string destination = Path.Combine(directory, location.FileName);
+        DocumentSnapshot previous = ReadDocument(destination, location, cancellation);
         try
         {
-            if (previous.Fingerprint != expected) throw new ProtectedDocumentException(DocumentStoreError.Conflict);
+            if (previous.Fingerprint != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
         }
-        finally { if (previous.Data is not null) CryptographicOperations.ZeroMemory(previous.Data); }
+        finally { if (location.Protected && previous.Data is not null) CryptographicOperations.ZeroMemory(previous.Data); }
         cancellation.ThrowIfCancellationRequested();
-        byte[] plain = new byte[PlaintextHeaderBytes + data.Length];
-        byte[] encrypted;
-        try
-        {
-            "MFDPDOC1"u8.CopyTo(plain);
-            BinaryPrimitives.WriteInt32LittleEndian(plain.AsSpan(8, 4), data.Length);
-            SHA256.HashData(data).CopyTo(plain, 12);
-            data.CopyTo(plain, PlaintextHeaderBytes);
-            encrypted = CurrentUserDpapi.Transform(plain, Entropy(ns), true);
-        }
-        finally { CryptographicOperations.ZeroMemory(plain); }
+        byte[] contents = location.Protected ? Protect(data, location.Namespace) : data;
         cancellation.ThrowIfCancellationRequested();
-        string staging = Path.Combine(directory, "stage-" + Guid.NewGuid().ToString("N") + ".mfdp");
+        string staging = Path.Combine(directory, "stage-" + Guid.NewGuid().ToString("N") + Path.GetExtension(location.FileName));
         using var stage = WindowsDocumentFiles.OpenFile(staging,
             WindowsDocumentFiles.Read | WindowsDocumentFiles.Write | WindowsDocumentFiles.Delete,
             WindowsDocumentFiles.ShareRead, WindowsDocumentFiles.CreateNew)!;
@@ -254,12 +270,15 @@ public sealed class DpapiDocumentStore : IProtectedDocumentStore
         bool committed = false;
         try
         {
-            byte[] header = new byte[EnvelopeHeaderBytes];
-            "MEOWDPAP"u8.CopyTo(header);
-            header[8] = 1;
-            BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(9, 4), encrypted.Length);
-            file.Write(header);
-            file.Write(encrypted);
+            if (location.Protected)
+            {
+                byte[] header = new byte[EnvelopeHeaderBytes];
+                "MEOWDPAP"u8.CopyTo(header);
+                header[8] = 1;
+                BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(9, 4), contents.Length);
+                file.Write(header);
+            }
+            file.Write(contents);
             file.Flush(flushToDisk: true);
             root.Check();
             cancellation.ThrowIfCancellationRequested();
@@ -270,6 +289,20 @@ public sealed class DpapiDocumentStore : IProtectedDocumentStore
             return next;
         }
         finally { if (!committed && !stage.IsClosed) WindowsDocumentFiles.DiscardStage(stage); }
+    }
+
+    private byte[] Protect(byte[] data, string ns)
+    {
+        byte[] plain = new byte[PlaintextHeaderBytes + data.Length];
+        try
+        {
+            "MFDPDOC1"u8.CopyTo(plain);
+            BinaryPrimitives.WriteInt32LittleEndian(plain.AsSpan(8, 4), data.Length);
+            SHA256.HashData(data).CopyTo(plain, 12);
+            data.CopyTo(plain, PlaintextHeaderBytes);
+            return CurrentUserDpapi.Transform(plain, Entropy(ns), true);
+        }
+        finally { CryptographicOperations.ZeroMemory(plain); }
     }
 
     public ValueTask DisposeAsync()

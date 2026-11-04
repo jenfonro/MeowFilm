@@ -4,7 +4,7 @@
 
 ## 所有者与依赖
 
-- `MusicNativeApplication` 装配一个 `MusicPlatformClientContextOwner`，借用 App 的 `IProtectedDocumentStore`。构造无 I/O；显式 `InitializeAsync` 只加载或初始化本地身份，不要求账号，不登记平台、不领取网络密钥。
+- `MusicNativeApplication` 装配一个 `MusicPlatformClientContextOwner`，借用 App 的 `IDocumentStore`。构造无 I/O；显式 `InitializeAsync` 只加载或初始化本地身份，不要求账号，不登记平台、不领取网络密钥。
 - 唯一活动客户端 writer 是该 owner；唯一活动客户端文档是 `music.platform-context.v1`。账号和账号详情仍由 `MusicAccountOwner` 写入 `music.accounts.v1`，两份文档不双向同步。
 - `Platforms/ClientContexts` 管理本地标识、匿名登记、快照、受信响应更新及真实物理任务；账号流程只消费所需客户端能力并核对授权。
 - 固定签名／加密请求构造在 `Platforms`；请求临时密钥、nonce 和时间戳不进入客户端文档。HTTP 不使用 Cookie jar，不隐式保存状态。
@@ -13,6 +13,8 @@
 ## 文档与首次导入
 
 `music.platform-context.v1` 使用当前 `aggregate` 产品身份下的 DPAPI 保护存储，64 KiB 上限；原生 namespace 对脚本不可见。
+
+App 通过 `LocalDocumentStore` 的敏感命名空间配置保留此保护，原命名空间、存储路径和密文格式保持不变；`IDocumentStore` 的中性名称不改变设备会话的加密边界。
 
 根对象严格包含 `version=1`、`wy`、`kg`、`tx`：
 

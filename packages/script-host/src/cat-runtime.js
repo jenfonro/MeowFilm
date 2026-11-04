@@ -295,8 +295,9 @@ export class CatRuntime {
       const state = lstatSync(file);
       requireValue(state.isFile() && !state.isSymbolicLink() && state.nlink === 1 &&
         inside(this.sourcesRoot, realpathSync(file)), 'CORRUPT_STORAGE');
+      requireValue(state.size <= this.limit('maxSourceBytes'), 'RESOURCE_LIMIT');
       const bytes = readFileSync(file);
-      requireValue(hash(bytes) === sourceHash, 'CORRUPT_STORAGE');
+      requireValue(bytes.length <= this.limit('maxSourceBytes'), 'RESOURCE_LIMIT');
       return bytes;
     } catch (error) { throw safeError(error, 'CORRUPT_STORAGE'); }
   }
@@ -312,12 +313,7 @@ export class CatRuntime {
       rmSync(file, { maxRetries: 3, retryDelay: 100 });
     } catch (error) { throw safeError(error, 'STORAGE_ERROR'); }
   }
-  async apply(next, { background = false, only = null } = {}) {
-    // Validate all referenced inputs before touching any live source/config.
-    const sources = new Map();
-    for (const spec of next.scripts) {
-      sources.set(spec.installationId, decodeSource(this.readSource(spec.sourceHash)));
-    }
+  async apply(next, { background = false, only = null, force = false } = {}) {
     const candidate = !this.server || next.port !== this.settings.value.port
       ? await this.listen(next.port) : null;
     const gateway = candidate ?? this.server;
@@ -333,8 +329,9 @@ export class CatRuntime {
         !next.scripts.some(spec => spec.installationId === installationId);
       for (const old of current.values()) {
         if (!removing(old.installationId)) continue;
+        const sourceHash = this.applied.get(old.installationId)?.sourceHash;
         removed.set(old.installationId, {
-          state: old, sourceHashes: new Set(old.contentHash ? [old.contentHash] : []),
+          state: old, sourceHashes: new Set(sourceHash ? [sourceHash] : []),
         });
       }
       const oldSettings = this.settings.value.scripts;
@@ -375,9 +372,9 @@ export class CatRuntime {
       for (const spec of next.scripts) {
         if (only && !only.has(spec.installationId)) continue;
         const old = this.applied.get(spec.installationId), state = current.get(spec.installationId);
-        if (old && state && same(old, spec) && !this.failures.has(spec.installationId) &&
-          state.state !== 'failed') continue;
-        changes.push({ spec, source: sources.get(spec.installationId), existing: !!state });
+        if (!force && old && (!spec.enabled || state) && same(old, spec) &&
+          !this.failures.has(spec.installationId) && state?.state !== 'failed') continue;
+        changes.push({ spec, existing: !!state });
       }
       if (background) {
         for (const change of changes) {
@@ -408,6 +405,18 @@ export class CatRuntime {
       this.aggregatePort = aggregatePort;
       committed = true;
       this.publishSettingsSnapshot(next);
+      for (const spec of oldSettings) {
+        if (only && !only.has(spec.installationId)) continue;
+        const replacement = next.scripts.find(script =>
+          script.installationId === spec.installationId);
+        if (!replacement || replacement.sourceHash === spec.sourceHash ||
+          this.failures.has(spec.installationId) ||
+          next.scripts.some(script => script.sourceHash === spec.sourceHash)) continue;
+        try { this.deleteSource(spec.sourceHash); }
+        catch (error) {
+          this.failures.set(spec.installationId, safeError(error, 'STORAGE_ERROR').code);
+        }
+      }
       if (previous && previous !== gateway) {
         try {
           if (!await this.closeOwnedServer(previous)) {
@@ -450,17 +459,22 @@ export class CatRuntime {
     return { applied: !this.failures.size,
       failures: [...this.failures].map(([installationId, code]) => ({ installationId, code })) };
   }
-  async applyChange({ spec, source, existing }) {
+  async applyChange({ spec, existing }) {
     this.settled.delete(spec.installationId);
     try {
+      // A disabled installation needs no source or host revision. Stop an
+      // existing generation before loading the current file for activation.
+      if (existing) await this.host.disable(spec.installationId);
+      if (!spec.enabled) {
+        this.failures.delete(spec.installationId);
+        return;
+      }
+      const source = decodeSource(this.readSource(spec.sourceHash));
       if (existing) {
-        // Stop only this affected instance. Two generations must never write
-        // the same persistent volume concurrently during an update.
-        await this.host.disable(spec.installationId);
         await this.host.update(spec.installationId, { source,
           config: spec.config, version: spec.version });
       } else await this.host.install({ ...spec, source, protocol: 'cat', enabled: false });
-      if (spec.enabled) await this.host.enable(spec.installationId);
+      await this.host.enable(spec.installationId);
       this.failures.delete(spec.installationId);
     } catch (error) { this.failures.set(spec.installationId, safeError(error).code); }
     finally {
@@ -475,15 +489,12 @@ export class CatRuntime {
       const installationId = this.startupQueue.shift();
       const spec = this.settings.value.scripts.find(script =>
         script.installationId === installationId);
-      if (spec && !this.settled.has(installationId)) {
-        let source;
-        try { source = decodeSource(this.readSource(spec.sourceHash)); }
-        catch (error) { this.failures.set(spec.installationId, safeError(error).code); }
+      if (spec?.enabled && !this.settled.has(installationId)) {
         const state = this.hostState(spec.installationId);
         const old = this.applied.get(spec.installationId);
-        if (source && !(old && state && same(old, spec) &&
+        if (!(old && state && same(old, spec) &&
           !this.failures.has(spec.installationId) && state.state !== 'failed')) {
-          await this.applyChange({ spec, source, existing: !!state });
+          await this.applyChange({ spec, existing: !!state });
         }
       }
     });
@@ -533,11 +544,7 @@ export class CatRuntime {
     const bytes = Buffer.from(source), sourceHash = hash(bytes);
     decodeSource(bytes);
     requireValue(bytes.length <= this.limit('maxSourceBytes'), 'RESOURCE_LIMIT');
-    const requested = { installationId, sourceHash, config, version, enabled };
-    const previous = this.settings.read().scripts.find(script =>
-      script.installationId === installationId);
-    if (this.hostState(installationId) && (!previous || !same(previous, requested)))
-      this.host.stopInitializingSessions(installationId);
+    if (this.hostState(installationId)) this.host.stopInitializingSessions(installationId);
     return this.serial(async () => {
       const current = this.settings.read();
       const previous = current.scripts.find(script =>
@@ -562,20 +569,13 @@ export class CatRuntime {
         }
       }
       const file = this.sourcePath(sourceHash);
-      if (!existsSync(file)) atomicWrite(file, bytes);
-      requireValue(this.readSource(sourceHash).equals(bytes), 'CORRUPT_STORAGE');
+      atomicWrite(file, bytes);
       const next = this.settings.save(value => ({ ...value, scripts: [
         ...value.scripts.filter(script => script.installationId !== installationId),
         { installationId, sourceHash, config, version, enabled },
       ] }));
-      await this.apply(next, { only: new Set([installationId]) });
+      await this.apply(next, { only: new Set([installationId]), force: true });
       if (this.failures.has(installationId)) throw fault(this.failures.get(installationId));
-      if (previous && previous.sourceHash !== sourceHash &&
-        !next.scripts.some(spec => spec.sourceHash === previous.sourceHash)) {
-        try { this.deleteSource(previous.sourceHash); }
-        catch (error) { this.failures.set(installationId, safeError(error, 'STORAGE_ERROR').code); }
-        if (this.failures.has(installationId)) throw fault(this.failures.get(installationId));
-      }
       return this.instance(installationId);
     });
   }
@@ -621,7 +621,7 @@ export class CatRuntime {
         : !state ? 'disabled'
           : !state.enabled ? 'disabled' : state.state;
     return { installationId, generation: state?.generation ?? 0, state: status,
-      version: state?.version ?? spec?.version ?? '0.0.0',
+      version: spec?.version ?? state?.version ?? '0.0.0',
       sourceHash: state?.contentHash ?? spec?.sourceHash ?? null,
       error: failure ?? state?.lastFailure ?? null,
       sites: state ? Object.entries(state.capabilities).map(([key, value]) => ({ key, ...value })) : [],
@@ -630,6 +630,8 @@ export class CatRuntime {
         endpoints: snapshot.endpoints.map(({ proxyId, ...endpoint }) => endpoint) } : {}) };
   }
   getSession(installationId, generation) {
+    requireValue(this.settings.value.scripts.find(script =>
+      script.installationId === installationId)?.enabled !== false, 'DISABLED');
     requireValue(!this.starting(installationId), 'STARTING');
     const state = this.host.get(installationId), snapshot = this.snapshots.get(installationId);
     requireValue(state.state === 'ready' && snapshot, 'DISABLED');
@@ -640,6 +642,8 @@ export class CatRuntime {
   }
   async invoke(target, options) {
     await this.start();
+    requireValue(this.settings.value.scripts.find(script =>
+      script.installationId === target.installationId)?.enabled !== false, 'DISABLED');
     requireValue(!this.starting(target.installationId), 'STARTING');
     const result = await this.host.invoke(target, options);
     if (!result || typeof result !== 'object' || typeof result.url !== 'string' ||

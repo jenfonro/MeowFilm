@@ -13,12 +13,12 @@ namespace MeowFilm.AppHost;
 
 public sealed record AppDefinition(string Id, IReadOnlyList<RuntimeModule> RuntimeModules,
     IReadOnlyList<string> NativeNamespaces, IReadOnlyList<string> BridgeNamespaces,
-    IReadOnlyList<string>? NativeCollections = null);
+    IReadOnlyList<string>? NativeCollections = null, IReadOnlyList<string>? ProtectedNamespaces = null);
 
 public static class AppLauncher
 {
     public static void Run(AppDefinition definition,
-        Func<IRuntimeClient, IProtectedDocumentStore, IReadOnlyList<IDesktopModule>> createModules,
+        Func<IRuntimeClient, IDocumentStore, IReadOnlyList<IDesktopModule>> createModules,
         Func<ValueTask>? disposeResources = null,
         Func<Window, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null)
         => Run(definition, (runtime, store, modules) =>
@@ -31,7 +31,7 @@ public static class AppLauncher
     /// later capability constructor fails. It is not a global service locator.
     /// </summary>
     public static void Run(AppDefinition definition,
-        Action<IRuntimeClient, IProtectedDocumentStore, ICollection<IDesktopModule>> createModules,
+        Action<IRuntimeClient, IDocumentStore, ICollection<IDesktopModule>> createModules,
         Func<ValueTask>? disposeResources = null,
         Func<Window, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null)
     {
@@ -112,7 +112,7 @@ public static class AppLauncher
 
         async Task<StartupOutcome> StartCoreAsync(CancellationToken cancellationToken)
         {
-            DpapiDocumentStore? store = null;
+            LocalDocumentStore? store = null;
             ProtectedDocumentBridge? documents = null;
             OnDemandRuntimeClient? runtime = null;
             ArtworkService? artwork = null;
@@ -141,7 +141,8 @@ public static class AppLauncher
             {
                 var paths = AppDataPaths.Current;
                 Directory.CreateDirectory(paths.Documents);
-                store = new DpapiDocumentStore(paths.Documents, definition.NativeNamespaces, definition.NativeCollections);
+                store = new LocalDocumentStore(paths.Documents, definition.NativeNamespaces,
+                    definition.NativeCollections, definition.ProtectedNamespaces);
                 documents = new ProtectedDocumentBridge(store, definition.BridgeNamespaces);
                 runtime = new OnDemandRuntimeClient(async token =>
                 {

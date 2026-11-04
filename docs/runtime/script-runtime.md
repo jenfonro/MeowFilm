@@ -77,7 +77,7 @@ Node 网络适配器接受：
 network({ url, options, signal, scope, validateURL })
 ```
 
-LX 的 `validateURL` 检查 HTTP(S) URL 语法并拒绝 URL 中的用户信息，初始地址和每次重定向都重新检查；它不是域名或私网授权判断。接口不再叫 `authorizeURL`，安装记录也不维护 origin 白名单或按源码 SHA-256 补域名的策略。源码哈希仍用于脚本字节完整性与版本身份，不能误删其他业务的数据完整性校验。
+LX 的 `validateURL` 检查 HTTP(S) URL 语法并拒绝 URL 中的用户信息，初始地址和每次重定向都重新检查；它不是域名或私网授权判断。接口不再叫 `authorizeURL`，安装记录也不维护 origin 白名单或按源码 SHA-256 补域名的策略。源码哈希可用于导入文件引用、更新标识及本次分片传输完整性；激活读取保存的源码不比较历史内容哈希，编辑后可重新启用或重启执行。其他业务的并发 CAS 和格式检查不因此移除。
 
 LX 网络可以访问已开放的 HTTP(S) 服务，包括本机和私网地址；其受控桥接保留截止时间、取消、响应大小、重定向上限及跨 origin 不转发 Authorization/Cookie 的行为。
 

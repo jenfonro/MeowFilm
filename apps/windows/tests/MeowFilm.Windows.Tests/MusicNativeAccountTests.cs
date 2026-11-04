@@ -143,7 +143,7 @@ public static class MusicNativeAccountTests
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         { Interlocked.Increment(ref Calls); return send(request, cancellationToken); }
     }
-    private sealed class MemoryStore : IProtectedDocumentStore
+    private sealed class MemoryStore : IDocumentStore
     {
         private readonly object gate = new();
         internal byte[]? Bytes;
@@ -151,7 +151,7 @@ public static class MusicNativeAccountTests
         internal bool BadFingerprint;
         internal Func<byte[], DocumentFingerprint, CancellationToken, Task<DocumentFingerprint>>? OnWrite;
         internal Func<Task>? OnRead;
-        public async Task<ProtectedDocument> ReadAsync(string ns, CancellationToken cancellationToken = default)
+        public async Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken cancellationToken = default)
         {
             Check(ns == MusicAccountOwner.DocumentNamespace);
             Interlocked.Increment(ref Reads);
@@ -163,7 +163,7 @@ public static class MusicNativeAccountTests
         {
             lock (gate)
             {
-                if (Fingerprint() != expected) throw new ProtectedDocumentException(DocumentStoreError.Conflict);
+                if (Fingerprint() != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
                 Bytes = data.ToArray(); return Fingerprint();
             }
         }
@@ -261,7 +261,7 @@ public static class MusicNativeAccountTests
         string path = Path.Combine(Root, Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(path);
         using var http = MusicPlatformHttp.CreateWithHandler(new Handler(Success));
-        await using (var store = new DpapiDocumentStore(path, [MusicAccountOwner.DocumentNamespace]))
+        await using (var store = new LocalDocumentStore(path, [MusicAccountOwner.DocumentNamespace], protectedNamespaces: [MusicAccountOwner.DocumentNamespace]))
         {
             await using var clientContext1 = new MusicClientContextFixture(http);
             await using var owner = clientContext1.CreateAccountOwner(store);
@@ -271,7 +271,7 @@ public static class MusicNativeAccountTests
             var saved = await store.ReadAsync(MusicAccountOwner.DocumentNamespace);
             Check(saved.Fingerprint.Exists); CryptographicOperations.ZeroMemory(saved.Data!);
         }
-        await using (var store = new DpapiDocumentStore(path, [MusicAccountOwner.DocumentNamespace]))
+        await using (var store = new LocalDocumentStore(path, [MusicAccountOwner.DocumentNamespace], protectedNamespaces: [MusicAccountOwner.DocumentNamespace]))
         {
             await using var clientContext2 = new MusicClientContextFixture(http);
             await using var owner = clientContext2.CreateAccountOwner(store);
@@ -309,7 +309,7 @@ public static class MusicNativeAccountTests
     private static async Task FingerprintConflict()
     {
         await using var f = new Fixture();
-        f.Store.OnWrite = (_, _, _) => Task.FromException<DocumentFingerprint>(new ProtectedDocumentException(DocumentStoreError.Conflict));
+        f.Store.OnWrite = (_, _, _) => Task.FromException<DocumentFingerprint>(new DocumentStoreException(DocumentStoreError.Conflict));
         Error(await Import(f.Owner), "STORAGE_CONFLICT");
         Check(f.Store.Writes == 1 && f.Store.Bytes is null);
         Ok(await List(f.Owner));
@@ -424,7 +424,7 @@ public static class MusicNativeAccountTests
     private static async Task StorageFailure()
     {
         await using var f = new Fixture();
-        f.Store.OnRead = () => Task.FromException(new ProtectedDocumentException(DocumentStoreError.Unavailable));
+        f.Store.OnRead = () => Task.FromException(new DocumentStoreException(DocumentStoreError.Unavailable));
         Error(await Import(f.Owner), "STORAGE_UNAVAILABLE"); Error(await List(f.Owner), "STORAGE_UNAVAILABLE");
         Check(f.Handler.Calls == 0 && f.Store.Writes == 0);
     }

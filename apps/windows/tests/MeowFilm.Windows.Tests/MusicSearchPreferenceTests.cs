@@ -134,7 +134,7 @@ public static class MusicSearchPreferenceTests
             string root = System.IO.Path.Combine(Environment.GetEnvironmentVariable("MEOWFILM_TEST_DATA_ROOT")
                 ?? throw new InvalidOperationException("Isolated root required"), "search-" + Guid.NewGuid().ToString("N"));
             System.IO.Directory.CreateDirectory(root);
-            await using (var store = new DpapiDocumentStore(root, [MusicLibraryOwner.DocumentNamespace]))
+            await using (var store = new LocalDocumentStore(root, [MusicLibraryOwner.DocumentNamespace]))
             await using (var owner = new MusicLibraryOwner(store))
             {
                 await Call(owner, "music.library.create", new { name = "保留歌单" });
@@ -142,7 +142,7 @@ public static class MusicSearchPreferenceTests
                     Kind(enabled: ["mg"]), Kind(enabled: ["kw"])));
                 await Call(owner, "music.search.history.record", new { text = "本机", kind = "local" });
             }
-            await using var reopened = new DpapiDocumentStore(root, [MusicLibraryOwner.DocumentNamespace]);
+            await using var reopened = new LocalDocumentStore(root, [MusicLibraryOwner.DocumentNamespace]);
             await using var library = new MusicLibraryOwner(reopened);
             Check((await Call(library, "music.library.list")).GetProperty("items").GetArrayLength() == 2);
             Check((await Call(library, "music.search.settings.get")).GetProperty("settings")
@@ -171,23 +171,23 @@ public static class MusicSearchPreferenceTests
         var result = await owner.ExecuteAsync(method, input);
         Check(!result.GetProperty("ok").GetBoolean() && result.GetProperty("code").GetString() == code);
     }
-    private sealed class Store : IProtectedDocumentStore
+    private sealed class Store : IDocumentStore
     {
         private byte[]? bytes;
         internal bool Lose;
         internal int Writes;
-        public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken cancellationToken = default)
+        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken cancellationToken = default)
         {
             Check(ns == MusicLibraryOwner.DocumentNamespace); cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(new ProtectedDocument(bytes?.ToArray(), bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes)));
+            return Task.FromResult(new DocumentSnapshot(bytes?.ToArray(), bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes)));
         }
         public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> value, DocumentFingerprint expected, CancellationToken cancellationToken = default)
         {
             Check(ns == MusicLibraryOwner.DocumentNamespace);
             var actual = bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes);
-            if (actual != expected) throw new ProtectedDocumentException(DocumentStoreError.Conflict);
+            if (actual != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
             Writes++; bytes = value.ToArray();
-            if (Lose) { Lose = false; throw new ProtectedDocumentException(DocumentStoreError.Storage); }
+            if (Lose) { Lose = false; throw new DocumentStoreException(DocumentStoreError.Storage); }
             return Task.FromResult(DocumentFingerprint.FromBytes(bytes));
         }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;

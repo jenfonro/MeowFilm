@@ -2632,7 +2632,7 @@ public static class MusicNativePlatformTests
                 throw new InvalidOperationException("Isolated test data required");
             var path = Path.Combine(root, "vip-native-" + Guid.NewGuid().ToString("N"));
             System.IO.Directory.CreateDirectory(path);
-            var store = new VipApplicationStore(new DpapiDocumentStore(path, AppIdentity.NativeNamespaces));
+            var store = new VipApplicationStore(new LocalDocumentStore(path, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
             var fixture = new VipApplicationFixture(store, new());
             try
             {
@@ -2661,7 +2661,7 @@ public static class MusicNativePlatformTests
         }
     }
 
-    private sealed class VipApplicationStore(DpapiDocumentStore inner) : IProtectedDocumentStore
+    private sealed class VipApplicationStore(LocalDocumentStore inner) : IDocumentStore
     {
         private readonly object gate = new();
         private int accountReadsToFail;
@@ -2676,7 +2676,7 @@ public static class MusicNativePlatformTests
             }
         }
 
-        public Task<ProtectedDocument> ReadAsync(string documentNamespace,
+        public Task<DocumentSnapshot> ReadAsync(string documentNamespace,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -2685,8 +2685,8 @@ public static class MusicNativePlatformTests
                 if (documentNamespace == "music.accounts.v1" && accountReadsToFail > 0)
                 {
                     accountReadsToFail--;
-                    return Task.FromException<ProtectedDocument>(
-                        new ProtectedDocumentException(DocumentStoreError.Unavailable));
+                    return Task.FromException<DocumentSnapshot>(
+                        new DocumentStoreException(DocumentStoreError.Unavailable));
                 }
             }
             return inner.ReadAsync(documentNamespace, cancellationToken);

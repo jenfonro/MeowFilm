@@ -211,7 +211,7 @@ public static class MusicNativeQqAccountTests
     {
         string path = DataPath();
         using var http = MusicPlatformHttp.CreateWithHandler(new QqAccountFixtureHandler());
-        await using var store = new DpapiDocumentStore(path, ["music.accounts.v1"]);
+        await using var store = new LocalDocumentStore(path, ["music.accounts.v1"], protectedNamespaces: ["music.accounts.v1"]);
         await using var clientContext1 = new MusicClientContextFixture(http);
         await using (var owner = clientContext1.CreateAccountOwner(store))
         {
@@ -236,7 +236,7 @@ public static class MusicNativeQqAccountTests
     {
         var handler = new QqAccountFixtureHandler();
         using var http = MusicPlatformHttp.CreateWithHandler(handler);
-        await using var store = new QqAccountStore(new DpapiDocumentStore(DataPath(), ["music.accounts.v1"])) { LoseReceipt = true };
+        await using var store = new QqAccountStore(new LocalDocumentStore(DataPath(), ["music.accounts.v1"], protectedNamespaces: ["music.accounts.v1"])) { LoseReceipt = true };
         await using var clientContext3 = new MusicClientContextFixture(http);
         await using var owner = clientContext3.CreateAccountOwner(store);
         var begin = await owner.CallAsync("music.accounts.qr.begin", new { platform = "tx" });
@@ -252,7 +252,7 @@ public static class MusicNativeQqAccountTests
     private static async Task InvalidSave()
     {
         using var http = MusicPlatformHttp.CreateWithHandler(new QqAccountFixtureHandler { Fault = "profile-identity" });
-        await using var store = new QqAccountStore(new DpapiDocumentStore(DataPath(), ["music.accounts.v1"]));
+        await using var store = new QqAccountStore(new LocalDocumentStore(DataPath(), ["music.accounts.v1"], protectedNamespaces: ["music.accounts.v1"]));
         await using var clientContext4 = new MusicClientContextFixture(http);
         await using var owner = clientContext4.CreateAccountOwner(store);
         Check(!Ok(await Login(owner)) && store.Writes == 0 && await owner.AcquireAsync("tx") is null);
@@ -260,7 +260,7 @@ public static class MusicNativeQqAccountTests
     private static async Task AdmittedCancel()
     {
         using var http = MusicPlatformHttp.CreateWithHandler(new QqAccountFixtureHandler());
-        await using var store = new QqAccountStore(new DpapiDocumentStore(DataPath(), ["music.accounts.v1"])) { HoldWrite = true };
+        await using var store = new QqAccountStore(new LocalDocumentStore(DataPath(), ["music.accounts.v1"], protectedNamespaces: ["music.accounts.v1"])) { HoldWrite = true };
         await using var clientContext5 = new MusicClientContextFixture(http);
         await using var owner = clientContext5.CreateAccountOwner(store);
         var pending = Login(owner);
@@ -282,7 +282,7 @@ public static class MusicNativeQqAccountTests
     {
         var handler = new QqAccountFixtureHandler(); var clock = new Clock();
         using var http = MusicPlatformHttp.CreateWithHandler(handler);
-        await using var store = new QqAccountStore(new DpapiDocumentStore(DataPath(), ["music.accounts.v1"]));
+        await using var store = new QqAccountStore(new LocalDocumentStore(DataPath(), ["music.accounts.v1"], protectedNamespaces: ["music.accounts.v1"]));
         await using var clientContext6 = new MusicClientContextFixture(http, clock: clock);
         await using var owner = clientContext6.CreateAccountOwner(store, clock: clock);
         int changes = 0; owner.SessionChanged += p => { Check(p == "tx"); changes++; };
@@ -317,7 +317,7 @@ public static class MusicNativeQqAccountTests
     {
         var handler = new QqAccountFixtureHandler();
         using var http = MusicPlatformHttp.CreateWithHandler(handler);
-        await using var store = new QqAccountStore(new DpapiDocumentStore(DataPath(), ["music.accounts.v1"]));
+        await using var store = new QqAccountStore(new LocalDocumentStore(DataPath(), ["music.accounts.v1"], protectedNamespaces: ["music.accounts.v1"]));
         await using var clientContext7 = new MusicClientContextFixture(http);
         var owner = clientContext7.CreateAccountOwner(store);
         Check(Ok(await Login(owner))); await owner.DisposeAsync();
@@ -346,13 +346,13 @@ public static class MusicNativeQqAccountTests
     }
 }
 
-internal sealed class QqAccountStore(DpapiDocumentStore inner) : IProtectedDocumentStore
+internal sealed class QqAccountStore(LocalDocumentStore inner) : IDocumentStore
 {
     internal bool LoseReceipt, HoldWrite;
     internal int Writes, Disposals;
     internal TaskCompletionSource Arrived = new(TaskCreationOptions.RunContinuationsAsynchronously),
         Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    public Task<ProtectedDocument> ReadAsync(string ns, CancellationToken token = default) => inner.ReadAsync(ns, token);
+    public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) => inner.ReadAsync(ns, token);
     public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken token = default)
     {
         if (ns != "music.accounts.v1") return await inner.WriteAsync(ns, data, expected, token);
@@ -363,7 +363,7 @@ internal sealed class QqAccountStore(DpapiDocumentStore inner) : IProtectedDocum
             token = default; // Simulates an already-admitted physical CAS, not a rollback on caller cancellation.
         }
         var result = await inner.WriteAsync(ns, data, expected, token);
-        if (LoseReceipt) { LoseReceipt = false; throw new ProtectedDocumentException(DocumentStoreError.Storage); }
+        if (LoseReceipt) { LoseReceipt = false; throw new DocumentStoreException(DocumentStoreError.Storage); }
         return result;
     }
     public async ValueTask DisposeAsync() { Disposals++; await inner.DisposeAsync(); }

@@ -25,7 +25,7 @@ MusicFeedbackController
 它借用 App 提供的：
 
 ```text
-IProtectedDocumentStore
+IDocumentStore
 IRuntimeClient
 播放内核
 ```
@@ -113,5 +113,8 @@ public interface IMusicApplication : IAsyncDisposable, IScriptPlatformCapabiliti
 ## 数据格式
 
 - 当前 App 保持现有 `aggregate` 数据身份。
+- App 通过 `LocalDocumentStore` 的精确命名空间配置，仅对 `music.accounts.v1` 和 `music.platform-context.v1` 使用 DPAPI；应用账号 Cookie 与设备会话保留原命名空间、存储路径及密文格式。
+- 曲库、偏好和缓存等普通本地文档直接保存 JSON 字节；存储提供当前文件指纹、原子写入、CAS 与文件隔离。开发阶段不迁移旧普通加密文档，也不自动清理旧数据。
+- 脚本自行保存的 Cookie 等运行产物不由运行器特殊加密；运行器继续提供文件与实例隔离。
 - 每个原生 owner 只支持唯一当前格式。
 - 不兼容数据保持原样并明确失败。

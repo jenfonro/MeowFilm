@@ -223,7 +223,7 @@ public static class MusicRecommendationLibraryTests
         Check(Path.IsPathFullyQualified(root) && Directory.Exists(root));
         string directory = Path.Combine(root, "recommendation-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
-        await using var store = new DpapiDocumentStore(directory, [MusicLibraryOwner.DocumentNamespace]);
+        await using var store = new LocalDocumentStore(directory, [MusicLibraryOwner.DocumentNamespace]);
         string checkpoint;
         await using (var first = new MusicLibraryOwner(store)) checkpoint = S(await Enter(first), "checkpoint");
         await using var second = new MusicLibraryOwner(store);
