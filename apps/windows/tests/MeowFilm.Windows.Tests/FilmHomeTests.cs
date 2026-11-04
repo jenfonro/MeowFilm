@@ -153,9 +153,9 @@ public static class FilmHomeTests
         module.Sections[0].HorizontalOffset = 192;
         string homeLocation = module.CaptureNavigationLocation();
         Check(homeLocation == FilmCapability.HomeRoute, "capture retains the current film route");
-        await module.RestoreNavigationAsync(FilmCapability.DoubanRoute, default);
-        Check(module.CaptureNavigationLocation() == FilmCapability.DoubanRoute,
-            "capture follows the restored destination");
+        await module.RestoreNavigationAsync(FilmCapability.PlaybackRoute, default);
+        Check(module.CaptureNavigationLocation().StartsWith(FilmCapability.PlaybackRoute + ":", StringComparison.Ordinal),
+            "capture follows the restored playback destination and film identity");
         await module.RestoreNavigationAsync(homeLocation, default);
         Check(source.Calls.Count == 4 && ReferenceEquals(retainedItems, module.Sections[0].Items) &&
             ReferenceEquals(retainedCard, retainedItems[0]) && module.Sections[0].HorizontalOffset == 192,
@@ -182,20 +182,20 @@ public static class FilmHomeTests
         Check(module.ActiveData.Key == "show" && module.ActiveData.Title == "热门综艺",
             "the selected section context is retained for shell navigation");
         var card = show.Items.Single();
-        await module.OpenDoubanAsync(card);
-        Check(routes.SequenceEqual([FilmCapability.DataRoute, FilmCapability.DoubanRoute]) &&
-            ReferenceEquals(module.ActiveDoubanItem, card),
-            "film cards retain their Douban identity and request the hidden detail route");
+        await module.OpenPlaybackAsync(card);
+        Check(routes.SequenceEqual([FilmCapability.DataRoute, FilmCapability.PlaybackRoute]) &&
+            ReferenceEquals(module.Playback?.Item, card),
+            "film cards retain their catalog identity and request the hidden playback route");
         Check(module.Navigation.Count == 3 &&
             module.Navigation.Single(item => item.Route == FilmCapability.HomeRoute).ShowInSidebar &&
             module.Navigation.Where(item => item.Route != FilmCapability.HomeRoute)
                 .All(item => !item.ShowInSidebar),
             "only the film home is exposed in the sidebar");
         int calls = source.Calls.Count;
-        await module.NavigateAsync(FilmCapability.DoubanRoute, default);
-        Check(module.IsDouban && !module.IsHome && !module.IsData &&
-            module.Heading == "豆瓣" && source.Calls.Count == calls,
-            "the empty Douban route publishes context without another data request");
+        await module.NavigateAsync(FilmCapability.PlaybackRoute, default);
+        Check(module.IsPlayback && !module.IsHome && !module.IsData &&
+            module.Heading == "播放页" && source.Calls.Count == calls,
+            "the playback route publishes local preview context without another data request");
     }
 
     private static async Task DataPagination()

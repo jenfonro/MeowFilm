@@ -43,7 +43,7 @@ public partial class FilmView : UserControl, IDesktopHeaderSource
     private async void Shelf_ItemActivated(object? sender, FilmCardActivatedEventArgs e)
     {
         if (sender is FilmShelf)
-            await module.OpenDoubanAsync(e.Item);
+            await module.OpenPlaybackAsync(e.Item);
     }
 
     private async void Shelf_RetryRequested(object? sender, EventArgs e)
@@ -67,8 +67,11 @@ public partial class FilmView : UserControl, IDesktopHeaderSource
     private async void DataCard_Activated(object? sender, FilmCardActivatedEventArgs e)
     {
         if (sender is FilmCard)
-            await module.OpenDoubanAsync(e.Item);
+            await module.OpenPlaybackAsync(e.Item);
     }
+
+    private async void Playback_RecommendationRequested(object? sender, FilmCardActivatedEventArgs e) =>
+        await module.OpenRecommendationAsync(e.Item);
 
     private async void Filter_Click(object sender, RoutedEventArgs e)
     {
