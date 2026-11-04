@@ -144,6 +144,7 @@ public partial class Shelf : UserControl
             return;
         if (animating) StopMotion();
         if (!restoring && !dragging) SnapToNearest();
+        PageIndicator.InvalidateVisual();
     }
     private bool UpdateCardWidth()
     {
@@ -157,8 +158,12 @@ public partial class Shelf : UserControl
     private (int Count, double Width) CardLayout()
     {
         var (target, gap) = LayoutMetrics();
-        var count = Math.Max(1, (int)Math.Floor((ActualWidth + gap) / (target + gap)));
-        return (count, Math.Max(1, (ActualWidth + gap) / count));
+        return MeasureCards(ActualWidth, target, gap, DataContext is MusicCatalogSection { IsBannerSection: true });
+    }
+    internal static (int Count, double Width) MeasureCards(double width, double target, double gap, bool banner = false)
+    {
+        var count = banner ? 2 : Math.Max(1, (int)Math.Floor((width + gap) / (target + gap)));
+        return (count, Math.Max(1, (width + gap) / count));
     }
     private (double Target, double Gap) LayoutMetrics() =>
         DataContext is MusicCatalogSection { IsBannerSection: true } ? (260, 20) :
@@ -397,6 +402,13 @@ public partial class Shelf : UserControl
     private double NearestOffset(double offset, double maximum)
     {
         var pitch = Math.Max(1, CardWidth);
+        if (DataContext is MusicCatalogSection { IsBannerSection: true })
+        {
+            var page = VisibleCardCount() * pitch;
+            var before = Math.Floor(offset / page) * page;
+            var after = Math.Min(maximum, before + page);
+            return Math.Clamp(offset - before < after - offset ? before : after, 0, maximum);
+        }
         return Math.Clamp(Math.Round(offset / pitch, MidpointRounding.AwayFromZero) * pitch, 0, maximum);
     }
     private void UpdateButtons()
@@ -408,6 +420,24 @@ public partial class Shelf : UserControl
         Next.Visibility = next ? Visibility.Visible : Visibility.Collapsed;
         Previous.IsEnabled = previous;
         Next.IsEnabled = next;
+        UpdatePageIndicator();
+    }
+    private void UpdatePageIndicator()
+    {
+        var maximum = LogicalMaxOffset();
+        if (DataContext is not MusicCatalogSection { IsBannerSection: true } || maximum <= .5)
+        {
+            PageIndicator.Visibility = Visibility.Collapsed;
+            return;
+        }
+        double page = VisibleCardCount() * Math.Max(1, CardWidth);
+        double offset = Math.Clamp(PresentedOffset, 0, maximum);
+        double fullPages = Math.Floor(maximum / page);
+        double remainder = maximum - fullPages * page;
+        PageIndicator.PageCount = (int)Math.Ceiling(maximum / page) + 1;
+        PageIndicator.Position = remainder > .5 && offset > fullPages * page
+            ? fullPages + (offset - fullPages * page) / remainder : offset / page;
+        PageIndicator.Visibility = Visibility.Visible;
     }
     private double? PageTarget(int direction)
     {

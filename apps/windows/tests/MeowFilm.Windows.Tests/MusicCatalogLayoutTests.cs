@@ -1,0 +1,188 @@
+using System.Diagnostics;
+using System.Windows;
+using System.Windows.Automation;
+using System.Windows.Controls;
+using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using System.Windows.Threading;
+using MeowFilm.Capabilities;
+using MeowFilm.Desktop;
+using MeowFilm.Desktop.Artwork;
+
+namespace MeowFilm.Windows.Tests;
+
+public static class MusicCatalogLayoutTests
+{
+    public static IEnumerable<TestCase> Cases()
+    {
+        yield return Case("first-load templates match real two-banner and card geometry without artwork", SkeletonGeometry);
+        yield return Case("two-banner paging retains final resources resize and indicator position", BannerPaging);
+        yield return Case("indicator keeps the active anchor while neighboring dots slide and scale", IndicatorDrawing);
+    }
+
+    private static TestCase Case(string name, Func<Task> run) =>
+        new("music-catalog-layout: " + name, () => MusicQualityConsumerTests.Sta(run));
+
+    private static async Task SkeletonGeometry()
+    {
+        var template = new MusicCatalogView();
+        foreach (var width in new[] { 560d, 826d, 1490d })
+        foreach (var home in new[] { false, true })
+        {
+            var skeleton = new MusicCatalogSkeleton { IsHome = home };
+            using var scene = new Scene(skeleton, width);
+            await Drain(); scene.Layout(width);
+            Check(!Descendants<ArtworkImage>(skeleton).Any(), "placeholder cannot request artwork");
+            var shapes = skeleton.Children.Cast<LoadingSkeleton>().ToArray();
+            var first = shapes[0].TransformToAncestor(skeleton).TransformBounds(new Rect(shapes[0].RenderSize));
+            if (!home)
+            {
+                Check(Math.Abs(first.Width - (width - 20) / 2) < .5, "exactly two equal banners fit with a 20px gap");
+                var second = shapes[1].TranslatePoint(new Point(), skeleton);
+                Check(Math.Abs(second.X - first.Right - 20) < .5, "banner gap matches content");
+            }
+            string key = home ? "Catalog.Entry" : "Catalog.Banner";
+            var card = (FrameworkElement)((DataTemplate)template.FindResource(key)).LoadContent();
+            card.DataContext = new MusicCatalogCard("1", "测试", "描述", "", "playlist", "wy", ActionId: "1");
+            double pitch = first.Width + (home ? 16 : 20);
+            card.Measure(new(pitch, double.PositiveInfinity));
+            card.Arrange(new(0, 0, pitch, card.DesiredSize.Height)); card.UpdateLayout();
+            Check(Math.Abs(first.Height - card.ActualHeight) < 1, "skeleton uses the real card's height");
+            Check(shapes.All(s => s.TranslatePoint(new(), skeleton).X + s.ActualWidth <= width + .5),
+                "no placeholder extends beyond the content column");
+            skeleton.Visibility = Visibility.Collapsed;
+            Check(shapes.All(s => !s.IsSweeping), "hidden placeholders stop their sweep");
+        }
+    }
+
+    private static async Task BannerPaging()
+    {
+        var template = new MusicCatalogView();
+        var section = new MusicCatalogSection("", Enumerable.Range(1, 9).Select(i =>
+            new MusicCatalogCard(i.ToString(), "横幅" + i, "", "", "playlist", "wy", ActionId: i.ToString())).ToArray(), Type: "banner");
+        var shelf = new Shelf { DataContext = section, CardTemplate = (DataTemplate)template.FindResource("Catalog.Banner") };
+        using var scene = new Scene(shelf, 826);
+        await Until(() => shelf.ScrollHost is not null && shelf.MaximumOffset > 0);
+        await Drain(); scene.Layout(826);
+        var indicator = (ShelfPageIndicator)shelf.FindName("PageIndicator");
+        var next = (Button)shelf.FindName("Next");
+        var previous = (Button)shelf.FindName("Previous");
+        var rail = shelf.ScrollHost!;
+        Check(Math.Abs(shelf.CardWidth - 423) < .5, "826px viewport holds two banners, not three");
+        Check(indicator.PageCount == 5 && indicator.Visibility == Visibility.Visible, "nine banners have five reachable groups");
+        var cards = section.Items;
+        for (int page = 1; page <= 4; page++)
+        {
+            next.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await Until(() => Math.Abs(indicator.Position - page) < .01 &&
+                Math.Abs(section.HorizontalOffset - rail.HorizontalOffset) < .5,
+                () => $"page={page}, indicator={indicator.Position}, scroll={rail.HorizontalOffset}, saved={section.HorizontalOffset}, max={shelf.MaximumOffset}");
+        }
+        Check(Math.Abs(rail.HorizontalOffset - shelf.MaximumOffset) < .5 && next.Visibility == Visibility.Collapsed,
+            "last odd banner is reachable without an empty page");
+        Check(ReferenceEquals(cards, section.Items), "view paging never replaces resources");
+        scene.Layout(560);
+        await Until(() => Math.Abs(shelf.CardWidth - 290) < .5 && Math.Abs(rail.HorizontalOffset - shelf.MaximumOffset) < .5 &&
+            previous.IsEnabled && previous.Visibility == Visibility.Visible,
+            () => $"resized pitch={shelf.CardWidth}, scroll={rail.HorizontalOffset}, max={shelf.MaximumOffset}, previous={previous.IsEnabled}");
+        Check(Math.Abs(indicator.Position - 4) < .01, "resize keeps the end and active group");
+        previous.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        await Until(() => Math.Abs(indicator.Position - 3) < .01 && Math.Abs(section.HorizontalOffset - rail.HorizontalOffset) < .5,
+            () => $"back indicator={indicator.Position}, scroll={rail.HorizontalOffset}, saved={section.HorizontalOffset}");
+        shelf.Visibility = Visibility.Collapsed;
+        double saved = section.HorizontalOffset;
+        await Drain();
+        shelf.Visibility = Visibility.Visible;
+        scene.Layout(560);
+        await Until(() => Math.Abs(section.HorizontalOffset - saved) < .5 && Math.Abs(indicator.Position - 3) < .01);
+        shelf.DataContext = section with { Items = section.Items.Take(2).ToArray(), HorizontalOffset = 0 };
+        await Until(() => indicator.Visibility == Visibility.Collapsed);
+        Check(shelf.MaximumOffset == 0, "no overflow means no fake pages");
+    }
+
+    private static Task IndicatorDrawing()
+    {
+        var dots = new ShelfPageIndicator { PageCount = 9, Position = 3 };
+        dots.Resources["MeowFilm.Brush.Text"] = Brushes.Black;
+        dots.Measure(new(72, 12)); dots.Arrange(new(0, 0, 72, 12));
+        var first = Pixels(dots);
+        dots.Position = 4;
+        var next = Pixels(dots);
+        Check(first.SequenceEqual(next), "middle active dot stays anchored as page identity advances");
+        Check(Alpha(first, 36, 6) > Alpha(first, 46, 6), "active dot is darker than its neighbor");
+        Check(Alpha(first, 36, 3) > Alpha(first, 46, 3), "active dot is larger than its neighbor");
+        dots.Position = 3.5;
+        var middle = Pixels(dots);
+        Check(!first.SequenceEqual(middle) && Alpha(middle, 31, 6) > 0 && Alpha(middle, 41, 6) > 0,
+            "dots slide between pages rather than swapping only a static highlight");
+        dots.Position = 0;
+        var start = Pixels(dots);
+        Check(Alpha(start, 26, 6) == 0 && Alpha(start, 46, 6) > 0, "first page has no nonexistent preceding dot");
+        dots.Position = 8;
+        var end = Pixels(dots);
+        Check(Alpha(end, 46, 6) == 0 && Alpha(end, 26, 6) > 0, "last page has no nonexistent following dot");
+        Check(AutomationProperties.GetName(dots) == "第 9 / 9 组", "current group is available to accessibility");
+        DesktopTheme.SetIsHighContrast(dots, true);
+        Check(Alpha(Pixels(dots), 36, 6) == 255, "high contrast uses solid indicators");
+        return Task.CompletedTask;
+    }
+
+    private static byte[] Pixels(FrameworkElement control)
+    {
+        control.UpdateLayout();
+        var bitmap = new RenderTargetBitmap(72, 12, 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(control);
+        var pixels = new byte[72 * 12 * 4]; bitmap.CopyPixels(pixels, 72 * 4, 0);
+        return pixels;
+    }
+    private static byte Alpha(byte[] pixels, int x, int y) => pixels[(y * 72 + x) * 4 + 3];
+    private static IEnumerable<T> Descendants<T>(DependencyObject parent) where T : DependencyObject
+    {
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, i);
+            if (child is T match) yield return match;
+            foreach (var nested in Descendants<T>(child)) yield return nested;
+        }
+    }
+    private static void Check(bool condition, string message)
+    { if (!condition) throw new InvalidOperationException(message); }
+    private static async Task Drain()
+    { for (int i = 0; i < 3; i++) await Dispatcher.Yield(DispatcherPriority.ApplicationIdle); }
+    private static async Task Until(Func<bool> done, Func<string>? details = null,
+        [System.Runtime.CompilerServices.CallerLineNumber] int line = 0)
+    {
+        var clock = Stopwatch.StartNew();
+        while (!done())
+        {
+            if (clock.Elapsed > TimeSpan.FromSeconds(8)) throw new TimeoutException($"Catalog layout did not settle at line {line}: {details?.Invoke()}");
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            if (!done()) await Task.Delay(1);
+        }
+        await Drain();
+    }
+    private sealed class Scene : IDisposable
+    {
+        private readonly HwndSource source;
+        private readonly Grid root = new();
+        internal Scene(FrameworkElement content, double width)
+        {
+            root.Resources.MergedDictionaries.Add(new()
+                { Source = new("/MeowFilm.Desktop;component/Theme.xaml", UriKind.Relative) });
+            root.Children.Add(content); content.VerticalAlignment = VerticalAlignment.Top;
+            source = new(new HwndSourceParameters("catalog-layout-fixture")
+            {
+                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
+                Width = 1600, Height = 900, PositionX = -32000, PositionY = -32000
+            });
+            source.RootVisual = root; Layout(width);
+        }
+        internal void Layout(double width)
+        {
+            root.Width = width; root.Height = 900;
+            root.Measure(new(width, 900)); root.Arrange(new(0, 0, width, 900)); root.UpdateLayout();
+        }
+        public void Dispose() { source.RootVisual = null; source.Dispose(); }
+    }
+}

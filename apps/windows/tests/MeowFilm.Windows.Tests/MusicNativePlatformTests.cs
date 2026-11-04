@@ -596,6 +596,52 @@ public static class MusicNativePlatformTests
             var beyond = await f.Catalog.PlaylistAsync(new("wy", "500", 3, 2, snapshot));
             Equal(0, beyond.GetProperty("items").GetArrayLength()); Equal(3, f.Calls);
         });
+        yield return Case("wy recommended playlist accepts repeated unused track alg and retains preview songs", async () =>
+        {
+            var tracks = Enumerable.Range(1, 3).Select(i =>
+                Wy(i.ToString()).ToJsonString().Insert(1, "\"alg\":null,\"alg\":\"recommendation\",")).ToArray();
+            var json = "{\"code\":200,\"playlist\":{\"id\":\"500\",\"name\":\"推荐歌单\",\"trackCount\":3," +
+                "\"trackIds\":[{\"id\":\"1\"},{\"id\":\"2\"},{\"id\":\"3\"}],\"tracks\":[" + string.Join(",", tracks) + "]}}";
+            using var f = new Fixture(req =>
+            {
+                var (path, body) = Eapi(req);
+                Equal("/api/v6/playlist/detail", path); Equal("3", S(body["n"]));
+                return new(HttpStatusCode.OK) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
+            });
+            var reply = await f.Catalog.PlaylistAsync(new("wy", "500", Limit: 3));
+            var cards = MusicCatalogDto.Read(reply, "wy", "playlist", "").SelectMany(section => section.Items).ToArray();
+            Equal(3, cards.Length);
+            for (int i = 0; i < cards.Length; i++)
+            {
+                Song(reply.GetProperty("items")[i], "wy", (i + 1).ToString());
+                Equal("测试曲", cards[i].Title);
+            }
+            Equal(1, f.Calls);
+        });
+        yield return Case("wy playlist duplicate exception does not allow ambiguous identity or other response fields", async () =>
+        {
+            foreach (var json in new[]
+            {
+                """{"code":200,"code":200,"playlist":{}}""",
+                """{"code":200,"playlist":{"id":"500","id":"501"}}""",
+                """{"code":200,"playlist":{"trackIds":[],"trackIds":[]}}""",
+                """{"code":200,"playlist":{"tracks":[{"id":"1","id":"2","alg":null,"alg":"x"}]}}""",
+                """{"code":200,"playlist":{"tracks":[{"ar":[{"alg":null,"alg":"x"}]}]}}""",
+                """{"code":200,"playlist":{"alg":null,"alg":"x"}}"""
+            })
+            {
+                using var f = new Fixture(_ => new(HttpStatusCode.OK)
+                    { Content = new StringContent(json, Encoding.UTF8, "application/json") });
+                await Error("INVALID_RESPONSE", () => f.Catalog.PlaylistAsync(new("wy", "500", Limit: 3)));
+                Equal(1, f.Calls);
+            }
+            using var other = new Fixture(_ => new(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"code":200,"alg":null,"alg":"x","data":{"blocks":[]}}""", Encoding.UTF8, "application/json")
+            });
+            await Error("INVALID_RESPONSE", () => other.Catalog.HomeAsync(new("wy")));
+            Equal(1, other.Calls);
+        });
         yield return Case("wy playlist batches only missing current page display members once", async () =>
         {
             var embedded = Wy(Huge); embedded["name"] = "歌单原曲"; embedded.Remove("dt");
