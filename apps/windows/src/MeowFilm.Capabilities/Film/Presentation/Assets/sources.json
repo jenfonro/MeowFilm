@@ -1,0 +1,489 @@
+{
+  "previewBoundary": "输入 FilmCardItem 的 Id、Title、原 Poster 和 Score 原样保留；除上述输入字段外，年份、国家、季集数、类型、导演、演员、剧情简介、单集标题、单集简介、单集时长与推荐均为本地预览数据，可能与所选现实影片不对应。所有栏目的预览剧照均复用《漫长的季节》设计素材，不声称对应所选影片或真实集数。相关推荐统一为剧集，使用本地公开海报并按 tv 打开。无观看进度、真实播放、详情请求或持久化。图片版权归原权利人；来源记录仅用于追溯。",
+  "images": [
+    {
+      "file": "episode-01.jpg",
+      "sourceFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/still-11.jpg",
+      "sourceUrl": "https://img9.doubanio.com/view/photo/l/public/p2891299445.jpg",
+      "originalFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/still-11.jpg",
+      "originalBytes": 133045,
+      "sourceBytes": 133045,
+      "sourceDimensions": [
+        1920,
+        1080
+      ],
+      "crop": [
+        0,
+        138,
+        1920,
+        942
+      ],
+      "bytes": 96674,
+      "dimensions": [
+        1280,
+        720
+      ],
+      "sha256": "c6735cbc45d3d927c17f92b2f2551cb250ec3ae0dd640aa29e7e108eeeb498f7",
+      "encoding": "RGB JPEG, quality 79, optimized, 4:2:0",
+      "derivation": "Remove neutral letterbox rows using existing design thumbnail rule; center fit to 16:9 with Lanczos; resize and recompress. Stills are illustrative, not verified episode frames.",
+      "sourceSha256": "9827f029cfbb700aa5ce52f5bb915d28f64b749c1bfd16750f8140df9baae363"
+    },
+    {
+      "file": "episode-02.jpg",
+      "sourceFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/still-3.jpg",
+      "sourceUrl": "https://img9.doubanio.com/view/photo/l/public/p2891065176.jpg",
+      "originalFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/still-3.jpg",
+      "originalBytes": 50066,
+      "sourceBytes": 50066,
+      "sourceDimensions": [
+        1404,
+        582
+      ],
+      "crop": [
+        0,
+        0,
+        1404,
+        582
+      ],
+      "bytes": 62145,
+      "dimensions": [
+        1280,
+        720
+      ],
+      "sha256": "1efd6f3c7111ec458c73f09cef355d3a58ef5aa12eec6f56ce3ff4ed51b9c081",
+      "encoding": "RGB JPEG, quality 79, optimized, 4:2:0",
+      "derivation": "Remove neutral letterbox rows using existing design thumbnail rule; center fit to 16:9 with Lanczos; resize and recompress. Stills are illustrative, not verified episode frames.",
+      "sourceSha256": "fc9cb15727268a4bde9d87f48f0a465824822f7d2b06decdfae322edaf5e3531"
+    },
+    {
+      "file": "episode-03.jpg",
+      "sourceFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/player-frame.jpg",
+      "sourceUrl": "https://img9.doubanio.com/view/photo/l/public/p2891421355.jpg",
+      "originalFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/still-15.jpg",
+      "originalBytes": 220477,
+      "sourceBytes": 444787,
+      "sourceDimensions": [
+        1920,
+        1080
+      ],
+      "crop": [
+        0,
+        0,
+        1920,
+        1080
+      ],
+      "bytes": 135220,
+      "dimensions": [
+        1280,
+        720
+      ],
+      "sha256": "3cd5f03d853e2930f54f80a5a4ff2303f77bdcddd192ff2487141b0910a99957",
+      "encoding": "RGB JPEG, quality 79, optimized, 4:2:0",
+      "derivation": "Remove neutral letterbox rows using existing design thumbnail rule; center fit to 16:9 with Lanczos; resize and recompress. Stills are illustrative, not verified episode frames.",
+      "intermediateDerivation": "Existing player-frame.jpg derives from still-15.jpg: crop (0,225,1888,942), center fit to 1920x1080 with Lanczos, JPEG quality 94; removes source subtitle/player chrome.",
+      "sourceSha256": "0ab96f0b5ce52c1ef6bbfce00950c267be27fcfda2a16daac0d9f4b5f7a21158"
+    },
+    {
+      "file": "episode-04.jpg",
+      "sourceFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/still-4.jpg",
+      "sourceUrl": "https://img3.doubanio.com/view/photo/l/public/p2891364512.jpg",
+      "originalFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/still-4.jpg",
+      "originalBytes": 82127,
+      "sourceBytes": 82127,
+      "sourceDimensions": [
+        1920,
+        1080
+      ],
+      "crop": [
+        0,
+        138,
+        1920,
+        942
+      ],
+      "bytes": 53250,
+      "dimensions": [
+        1280,
+        720
+      ],
+      "sha256": "b94ca75cdc9042875c022ec6dfa84668dddf96a4b6128dd809af2fbf551dbdf8",
+      "encoding": "RGB JPEG, quality 79, optimized, 4:2:0",
+      "derivation": "Remove neutral letterbox rows using existing design thumbnail rule; center fit to 16:9 with Lanczos; resize and recompress. Stills are illustrative, not verified episode frames.",
+      "sourceSha256": "8efda7a077bfb03b19d8b526dc0d0e5894b41deb7a83fc33cd7ccc3758170253"
+    },
+    {
+      "file": "episode-05.jpg",
+      "sourceFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/still-20.jpg",
+      "sourceUrl": "https://img3.doubanio.com/view/photo/l/public/p2891415972.jpg",
+      "originalFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/still-20.jpg",
+      "originalBytes": 227064,
+      "sourceBytes": 227064,
+      "sourceDimensions": [
+        2579,
+        1080
+      ],
+      "crop": [
+        0,
+        0,
+        2579,
+        1080
+      ],
+      "bytes": 103766,
+      "dimensions": [
+        1280,
+        720
+      ],
+      "sha256": "e823c9a9b65309cdf9b64977b91515df25d10547eea96804f0e02688d726ea86",
+      "encoding": "RGB JPEG, quality 79, optimized, 4:2:0",
+      "derivation": "Remove neutral letterbox rows using existing design thumbnail rule; center fit to 16:9 with Lanczos; resize and recompress. Stills are illustrative, not verified episode frames.",
+      "sourceSha256": "9d497fd243121bf0cc14e11907bd6d5d31573f0db3701bdd51f6fa3fe06ac93f"
+    },
+    {
+      "file": "episode-06.jpg",
+      "sourceFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/still-8.jpg",
+      "sourceUrl": "https://img9.doubanio.com/view/photo/l/public/p2891505165.jpg",
+      "originalFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/still-8.jpg",
+      "originalBytes": 136457,
+      "sourceBytes": 136457,
+      "sourceDimensions": [
+        1920,
+        1080
+      ],
+      "crop": [
+        0,
+        138,
+        1920,
+        942
+      ],
+      "bytes": 97617,
+      "dimensions": [
+        1280,
+        720
+      ],
+      "sha256": "ce5cbae71aaaed00b8a228f8e87aa02a84eb839817e6e962e6025ab8dd43994a",
+      "encoding": "RGB JPEG, quality 79, optimized, 4:2:0",
+      "derivation": "Remove neutral letterbox rows using existing design thumbnail rule; center fit to 16:9 with Lanczos; resize and recompress. Stills are illustrative, not verified episode frames.",
+      "sourceSha256": "8c5a94112cce793675a4ebf70f459999dbdb08e299837fcba8c3d9bd9b7ca74c"
+    },
+    {
+      "file": "episode-07.jpg",
+      "sourceFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/still-7.jpg",
+      "sourceUrl": "https://img9.doubanio.com/view/photo/l/public/p2891809986.jpg",
+      "originalFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/still-7.jpg",
+      "originalBytes": 166061,
+      "sourceBytes": 166061,
+      "sourceDimensions": [
+        1920,
+        1080
+      ],
+      "crop": [
+        0,
+        138,
+        1920,
+        942
+      ],
+      "bytes": 69869,
+      "dimensions": [
+        1280,
+        720
+      ],
+      "sha256": "bbc803fc1cc043d075a6583fe008c0a87270159bb41844acd90832b4cdcd5bf2",
+      "encoding": "RGB JPEG, quality 79, optimized, 4:2:0",
+      "derivation": "Remove neutral letterbox rows using existing design thumbnail rule; center fit to 16:9 with Lanczos; resize and recompress. Stills are illustrative, not verified episode frames.",
+      "sourceSha256": "5a7002329f6fda8ccf9d1ebcb8ebf717264e4c83a9b2c36186693b33eef38731"
+    },
+    {
+      "file": "episode-08.jpg",
+      "sourceFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/still-12.jpg",
+      "sourceUrl": "https://img3.doubanio.com/view/photo/l/public/p2891232798.jpg",
+      "originalFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/still-12.jpg",
+      "originalBytes": 70847,
+      "sourceBytes": 70847,
+      "sourceDimensions": [
+        1920,
+        1080
+      ],
+      "crop": [
+        0,
+        138,
+        1920,
+        942
+      ],
+      "bytes": 45908,
+      "dimensions": [
+        1280,
+        720
+      ],
+      "sha256": "ade43d06735dde0b0a135d86bc88c1bb1f89a15abe7f8be16d45443c00965670",
+      "encoding": "RGB JPEG, quality 79, optimized, 4:2:0",
+      "derivation": "Remove neutral letterbox rows using existing design thumbnail rule; center fit to 16:9 with Lanczos; resize and recompress. Stills are illustrative, not verified episode frames.",
+      "sourceSha256": "9ba029216436be811066201e58f804fab82471e69a1f3f7b1ad33c37a9fc84dd"
+    },
+    {
+      "file": "episode-09.jpg",
+      "sourceFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/still-13.jpg",
+      "sourceUrl": "https://img9.doubanio.com/view/photo/l/public/p2891417766.jpg",
+      "originalFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/still-13.jpg",
+      "originalBytes": 63453,
+      "sourceBytes": 63453,
+      "sourceDimensions": [
+        1920,
+        1080
+      ],
+      "crop": [
+        0,
+        138,
+        1920,
+        942
+      ],
+      "bytes": 43259,
+      "dimensions": [
+        1280,
+        720
+      ],
+      "sha256": "1822783ff81937406e50525c570289123f8c9c857b7f6bcc6577c9bf6e874ec0",
+      "encoding": "RGB JPEG, quality 79, optimized, 4:2:0",
+      "derivation": "Remove neutral letterbox rows using existing design thumbnail rule; center fit to 16:9 with Lanczos; resize and recompress. Stills are illustrative, not verified episode frames.",
+      "sourceSha256": "14399e8605730861945eedf3e7b6df42052fd4891b74f1c1a45ce9bcd86ad5ee"
+    },
+    {
+      "file": "episode-10.jpg",
+      "sourceFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/still-16.jpg",
+      "sourceUrl": "https://img3.doubanio.com/view/photo/l/public/p2891165169.jpg",
+      "originalFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/still-16.jpg",
+      "originalBytes": 1003677,
+      "sourceBytes": 1003677,
+      "sourceDimensions": [
+        2400,
+        1080
+      ],
+      "crop": [
+        0,
+        37,
+        2400,
+        1042
+      ],
+      "bytes": 89162,
+      "dimensions": [
+        1280,
+        720
+      ],
+      "sha256": "79ed8d2db789925764d6c963d80260415314fc8bfa314f2a955bb33ff77671c3",
+      "encoding": "RGB JPEG, quality 79, optimized, 4:2:0",
+      "derivation": "Remove neutral letterbox rows using existing design thumbnail rule; center fit to 16:9 with Lanczos; resize and recompress. Stills are illustrative, not verified episode frames.",
+      "sourceSha256": "b720b3fd4c2e6555118707db28110ba4a797ad2fe2c2aa9f91e8bea9688458ec"
+    },
+    {
+      "file": "episode-11.jpg",
+      "sourceFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/still-19.jpg",
+      "sourceUrl": "https://img3.doubanio.com/view/photo/l/public/p2891363562.jpg",
+      "originalFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/still-19.jpg",
+      "originalBytes": 129218,
+      "sourceBytes": 129218,
+      "sourceDimensions": [
+        1920,
+        1080
+      ],
+      "crop": [
+        0,
+        138,
+        1920,
+        942
+      ],
+      "bytes": 90641,
+      "dimensions": [
+        1280,
+        720
+      ],
+      "sha256": "89e327dd2afd3a9e72bd2bfe9d347dd6f8fda6f20aa14fd23edc1f525a4352e6",
+      "encoding": "RGB JPEG, quality 79, optimized, 4:2:0",
+      "derivation": "Remove neutral letterbox rows using existing design thumbnail rule; center fit to 16:9 with Lanczos; resize and recompress. Stills are illustrative, not verified episode frames.",
+      "sourceSha256": "201032cdef67f4ec19b3c7279859c10113c0f8140ffac7c95e990e1abfe80e5e"
+    },
+    {
+      "file": "episode-12.jpg",
+      "sourceFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/still-1.jpg",
+      "sourceUrl": "https://img9.doubanio.com/view/photo/l/public/p2920127134.jpg",
+      "originalFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/still-1.jpg",
+      "originalBytes": 98178,
+      "sourceBytes": 98178,
+      "sourceDimensions": [
+        1417,
+        591
+      ],
+      "crop": [
+        0,
+        0,
+        1417,
+        591
+      ],
+      "bytes": 118258,
+      "dimensions": [
+        1280,
+        720
+      ],
+      "sha256": "80043679e28461bbdcd88b18e9986470ccc0ed104b7e0da113a7ad80a9f4d9ac",
+      "encoding": "RGB JPEG, quality 79, optimized, 4:2:0",
+      "derivation": "Remove neutral letterbox rows using existing design thumbnail rule; center fit to 16:9 with Lanczos; resize and recompress. Stills are illustrative, not verified episode frames.",
+      "sourceSha256": "930a089cf2300947e06cb0152e32b617e8b35aaad08620d4b14cdba4b1dffebb"
+    },
+    {
+      "file": "poster-long-season.jpg",
+      "sourceBytes": 37160,
+      "sourceDimensions": [
+        270,
+        405
+      ],
+      "bytes": 35931,
+      "dimensions": [
+        270,
+        405
+      ],
+      "sha256": "2ced652377301d982f2e1cf605c90939385f5c7ccbc3e64c0bd802c2954e94e2",
+      "encoding": "RGB JPEG, quality 82, optimized, 4:2:0",
+      "title": "漫长的季节",
+      "section": "tv",
+      "subjectId": "35588177",
+      "sourceFile": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets/long-season-poster.jpg",
+      "sourceUrl": "https://img9.doubanio.com/view/photo/s_ratio_poster/public/p2890906384.jpg",
+      "metadataUrl": "https://m.douban.com/rexxar/api/v2/movie/35588177?for_mobile=1",
+      "derivation": "Reuse existing 270x405 design poster; RGB JPEG recompression only.",
+      "sourceSha256": "6b339327410e05780d5e43f63d972b53b5b8f79944882e88ca34189a121ea520",
+      "sourceVerification": "Public s_ratio_poster image retrieved without credentials on 2026-11-04: 37160 bytes; SHA-256 matches the retained design source exactly."
+    },
+    {
+      "file": "poster-bad-kids.jpg",
+      "sourceBytes": 90512,
+      "sourceDimensions": [
+        540,
+        809
+      ],
+      "bytes": 32148,
+      "dimensions": [
+        270,
+        405
+      ],
+      "sha256": "1b27d5c2e824e0934b2b3ba7d569566377371638c15b1573be7b9395e507b35c",
+      "encoding": "RGB JPEG, quality 82, optimized, 4:2:0",
+      "section": "tv",
+      "title": "隐秘的角落",
+      "subjectId": "33404425",
+      "sourceUrl": "https://img3.doubanio.com/view/photo/m_ratio_poster/public/p2609064048.jpg",
+      "metadataUrl": "https://m.douban.com/rexxar/api/v2/movie/33404425?for_mobile=1",
+      "derivation": "Fetch public poster without credentials; center fit to 2:3 with Lanczos; resize to 270x405 and recompress. No runtime fetch."
+    },
+    {
+      "file": "poster-long-night.jpg",
+      "sourceBytes": 118403,
+      "sourceDimensions": [
+        540,
+        810
+      ],
+      "bytes": 26119,
+      "dimensions": [
+        270,
+        405
+      ],
+      "sha256": "f3232522a6315fd5e733c4caec713ae3e4cf077a7bb72b034c017e63ab8ec3b9",
+      "encoding": "RGB JPEG, quality 82, optimized, 4:2:0",
+      "section": "tv",
+      "title": "沉默的真相",
+      "subjectId": "33447642",
+      "sourceUrl": "https://img3.doubanio.com/view/photo/m_ratio_poster/public/p2620780603.jpg",
+      "metadataUrl": "https://m.douban.com/rexxar/api/v2/movie/33447642?for_mobile=1",
+      "derivation": "Fetch public poster without credentials; center fit to 2:3 with Lanczos; resize to 270x405 and recompress. No runtime fetch."
+    },
+    {
+      "file": "poster-day-and-night.jpg",
+      "sourceBytes": 102109,
+      "sourceDimensions": [
+        540,
+        810
+      ],
+      "bytes": 28471,
+      "dimensions": [
+        270,
+        405
+      ],
+      "sha256": "a316e762cf4178a1ef0bd7bb7b241ba3792e0aca3a9057be2168fe1e917384d5",
+      "encoding": "RGB JPEG, quality 82, optimized, 4:2:0",
+      "section": "tv",
+      "title": "白夜追凶",
+      "subjectId": "26883064",
+      "sourceUrl": "https://img3.doubanio.com/view/photo/m_ratio_poster/public/p2483150767.jpg",
+      "metadataUrl": "https://m.douban.com/rexxar/api/v2/movie/26883064?for_mobile=1",
+      "derivation": "Fetch public poster without credentials; center fit to 2:3 with Lanczos; resize to 270x405 and recompress. No runtime fetch."
+    },
+    {
+      "file": "poster-burning-ice.jpg",
+      "sourceBytes": 79343,
+      "sourceDimensions": [
+        540,
+        787
+      ],
+      "bytes": 28646,
+      "dimensions": [
+        270,
+        405
+      ],
+      "sha256": "37ab14371ff33275ed976ca56f84f8302a6142db526e65e3ba0eb62ecab98d67",
+      "encoding": "RGB JPEG, quality 82, optimized, 4:2:0",
+      "section": "tv",
+      "title": "无证之罪",
+      "subjectId": "26930540",
+      "sourceUrl": "https://img3.doubanio.com/view/photo/m_ratio_poster/public/p2497732763.jpg",
+      "metadataUrl": "https://m.douban.com/rexxar/api/v2/movie/26930540?for_mobile=1",
+      "derivation": "Fetch public poster without credentials; center fit to 2:3 with Lanczos; resize to 270x405 and recompress. No runtime fetch."
+    },
+    {
+      "file": "poster-reset.jpg",
+      "sourceBytes": 93273,
+      "sourceDimensions": [
+        540,
+        766
+      ],
+      "bytes": 30047,
+      "dimensions": [
+        270,
+        405
+      ],
+      "sha256": "7410e475bf347dca9e031da3eed6f0c64477dd31972fcdcdcc7660711ae405e0",
+      "encoding": "RGB JPEG, quality 82, optimized, 4:2:0",
+      "section": "tv",
+      "title": "开端",
+      "subjectId": "35332289",
+      "sourceUrl": "https://img3.doubanio.com/view/photo/m_ratio_poster/public/p2843045720.jpg",
+      "metadataUrl": "https://m.douban.com/rexxar/api/v2/movie/35332289?for_mobile=1",
+      "derivation": "Fetch public poster without credentials; center fit to 2:3 with Lanczos; resize to 270x405 and recompress. No runtime fetch."
+    },
+    {
+      "file": "poster-knockout.jpg",
+      "sourceBytes": 154961,
+      "sourceDimensions": [
+        540,
+        809
+      ],
+      "bytes": 44656,
+      "dimensions": [
+        270,
+        405
+      ],
+      "sha256": "a1f954732f471cabc5b694dec0b87df625e356cbef15cb9c5274c50e9301ef37",
+      "encoding": "RGB JPEG, quality 82, optimized, 4:2:0",
+      "section": "tv",
+      "title": "狂飙",
+      "subjectId": "35465232",
+      "sourceUrl": "https://img2.doubanio.com/view/photo/m_ratio_poster/public/p2886376181.jpg",
+      "metadataUrl": "https://m.douban.com/rexxar/api/v2/movie/35465232?for_mobile=1",
+      "derivation": "Fetch public poster without credentials; center fit to 2:3 with Lanczos; resize to 270x405 and recompress. No runtime fetch."
+    }
+  ],
+  "totalJpegBytes": 1231787,
+  "sampleData": {
+    "selectedItem": "FilmPlaybackPage.Item is the original FilmCardItem instance. Title, Poster and Item.Score are direct projections; they are never replaced by preview values.",
+    "metadata": "All metadata other than the input card title, original poster and score is local sample data and may not describe the selected real film. Movie/anime/show profiles are authored category samples; the tv profile borrows year, country, genre and credits from retained The Long Season subject.json. No current film lookup occurs.",
+    "episodes": "Movie has one feature; tv/anime/show each have a 12-episode sample season. All episode titles and Chinese overviews are locally authored illustrative text, not verified real episode synopses. Durations are fixed samples (movie 118, tv 60, anime 24, show 90 minutes).",
+    "recommendations": "Six local tv recommendations from seven crime/mystery series. A same-title candidate is omitted; The Long Season supplies the seventh candidate. Preview ids begin preview:tv:. Recommendation scores are empty rather than invented.",
+    "ui": "No explanatory preview notice is added to page metadata or UI. Document this boundary in the Windows documentation during main-session integration."
+  },
+  "designReference": "ui-design/01a18c9a-323d-75a0-80a5-e9e90dd48ac0/work/film-assets"
+}

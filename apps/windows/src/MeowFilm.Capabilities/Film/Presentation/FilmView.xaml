@@ -224,13 +224,15 @@
             Click="DataPageAction_Click" AutomationProperties.Name="加载更多影片"/>
    </StackPanel>
   </ScrollViewer>
-   <Grid x:Name="DoubanPage" Background="Transparent">
+   <Grid x:Name="PlaybackPage" Background="Transparent">
     <Grid.Style><Style TargetType="Grid">
      <Setter Property="Visibility" Value="Collapsed"/>
-     <Style.Triggers><DataTrigger Binding="{Binding IsDouban}" Value="True">
+     <Style.Triggers><DataTrigger Binding="{Binding IsPlayback}" Value="True">
       <Setter Property="Visibility" Value="Visible"/>
      </DataTrigger></Style.Triggers>
     </Style></Grid.Style>
+    <local:FilmPlaybackView x:Name="PlaybackView" DataContext="{Binding Playback}"
+                            RecommendationRequested="Playback_RecommendationRequested"/>
    </Grid>
  </Grid>
 </UserControl>
