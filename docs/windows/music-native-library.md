@@ -59,7 +59,7 @@ ValueTask DisposeAsync();
 - UTF-8 字节必须等于当前 canonical JSON 编码；重复属性、非规范持久整数、额外根字段和未知 entry 均拒绝。
 - entry key 必须属于当前 owner 的明确 area，或属于当前已安装脚本实例的精确私有 storage key。
 - 缺少可选 area 表示该 area 尚未创建；entry 已存在但值为 `null`、错误类型或错误 schema 时不是空状态。
-- 不兼容文档保持原字节不变并明确失败，不自动修复、删除、覆盖或转换。
+- 不兼容文档保持原字节不变并明确失败；唯一支持的旧格式转换是下述 `online-settings` schema 2 → 3，转换前仍须验证完整文档。
 
 当前普通 area：
 
@@ -100,8 +100,28 @@ playback-settings
 - metadata 总量最多 3 MiB；单个脚本源码最多 16 MiB，与公共 ScriptHost 上限一致。
 - 源码位于受保护 collection `music.script-sources.v1`，按 1 MiB、内容 hash 和 chunk index 保存为不可变字节。发布 metadata 前必须已完整写入；读取核对每片 fingerprint、长度和整份 hash。
 - 中断或并发的相同不可变分片写入可通过读回相同字节结算；冲突或损坏明确失败。未被 metadata 引用的内容不会被静默删除或当作安装实例。
-- 禁用或删除当前播放目标时，在同一文档 CAS 中把 `online-settings.target` 置空并推进其 revision。
-- 读取不写入文档；schema 3、内联源码和其他不符合当前格式的记录明确失败，不迁移、转换、删除或回退。
+- 安装启停或删除不修改在线设置及其 revision；删除安装实例仍在同一 CAS 中移除该实例的私有 storage。
+- 安装元数据本身不因读取而写入；安装 schema 3、内联源码和其他不符合当前安装格式的记录明确失败，不迁移、转换、删除或回退。文档内合法的旧在线设置按下一节转换。
+
+## 在线设置当前格式与定点转换
+
+`online-settings` 的当前格式为 schema 3，字段仅有：
+
+```json
+{
+  "schema": 3,
+  "revision": 0,
+  "lyrics": true
+}
+```
+
+- 缺少该 area 时，`music.settings.get` 返回上述缺省 `settings`，不制造 area 或文档。
+- `music.settings.save` 必须且只能携带 `ifRevision` 和 `lyrics`；成功保存推进一次 revision，旧 revision 返回 `REVISION_CONFLICT`。当前读写格式均不包含全局音源选择。
+- 旧 schema 2 必须精确包含 `schema revision lyrics target`。`revision` 必须是合法持久整数，`lyrics` 必须是布尔值；旧 `target` 只能为 `null` 或精确包含 `installationId platform` 的对象，安装 ID 须合法并引用已存在实例，平台只允许 `wy/tx/kw/kg/mg/local`。引用禁用实例仍属于合法旧数据，不改变该实例的启停状态。
+- 读取旧文档时，先校验 canonical envelope、全部 area、安装 schema 4、私有 storage 及旧设置 shape/引用，再仅将在线设置的 schema 改为 3 并移除旧 `target`。转换保留原有 `lyrics` 和 `revision`，也保留曲库、队列、历史、安装版本/权限/启停、私有 storage、其他设置以及独立存储的源码内容。
+- 转换通过现有 owner gate 和完整文档 CAS 持久化。当前 schema 3 的普通读取和重启不再写入；未知 schema、缺字段、额外字段、损坏或悬空引用均拒绝，原文档不覆写。
+- 转换未知提交与在线设置保存采用相同 pending 规则：后续命令封闭，使用显式 `ReconcileAsync` 读回 before/after 指纹。强制加载和结算不转换、不重放写入，也不替换 pending；第三状态保持冲突。若结算确认转换尚未提交，下一次新业务调用才可重试转换，继续沿用原 revision。
+- 相关公开行为用例位于 `MusicNativeLibraryTests.cs` 和 `MusicOnlineSettingsTests.cs`；执行结果由集中验证记录。
 
 ## 官方音源设置当前格式
 
@@ -118,7 +138,7 @@ playback-settings
 - `enabled` 是 `wy`、`tx`、`kg` 的无重复子集；空数组表示三平台全部关闭。
 - 缺少该 area 时，`music.officialSources.settings.get` 返回上述 revision 0、三平台全开的缺省 `settings`，不为读取创建或写入文档。
 - `music.officialSources.settings.save` 必须携带 `ifRevision` 和 `enabled`；`ifRevision` 与当前 revision 不符时返回 `REVISION_CONFLICT`，成功保存只推进本设置的 revision。
-- 该设置独立于 `online-settings`、`native-quality-policy` 和 `native-metadata-policy`，不复用它们的启停字段或改写播放目标、音质、歌词／封面设置。
+- 该设置独立于 `online-settings`、`native-quality-policy` 和 `native-metadata-policy`，不复用它们的启停字段或改写音质、歌词／封面设置。
 - 持久化覆盖契约与测试归属见 `MusicOfficialSourcesPolicyTests.cs`，包括缺省读取、独立启停与全关、重启恢复及同职责未知 CAS 结算；测试执行结果另行记录。
 
 ## 曲库当前格式

@@ -12,12 +12,12 @@ public static class MusicLyricApplicationTests
 {
     public static IEnumerable<TestCase> Cases()
     {
-        yield return Case("official exact lyrics work without LX target or ordinary Node business", async f =>
+        yield return Case("official exact lyrics work without script discovery or ordinary Node business", async f =>
         {
             var result = await f.Lookup(Song());
             Ready(result); Equal("wy", f.Provider.Requests.Single().Platform);
             Equal("42", f.Provider.Requests.Single().RecordingId);
-            Equal(0, f.ScriptCalls); Equal(0, f.Store.Writes);
+            Equal(0, f.ScriptCalls); Equal(0, f.SourceReads); Equal(0, f.Store.Writes);
             Equal("translation", result.GetProperty("lines")[0].GetProperty("translation").GetString());
             Equal("romanized", result.GetProperty("lines")[0].GetProperty("romanization").GetString());
         });
@@ -41,49 +41,87 @@ public static class MusicLyricApplicationTests
             Code(result, "TARGET_CHANGED"); Equal(0, f.Provider.Requests.Count); Equal(0, f.ScriptCalls);
         });
 
-        yield return Case("metadata request does not inherit the chosen audio delivery platform", async f =>
+        yield return Case("enabled script platforms do not replace exact official lyric identity", async f =>
         {
-            var result = await f.Owner.ExecuteAsync(new { song = Song(),
-                scriptTarget = new { installationId = "selected-audio-script", platform = "kg" } });
+            f.AddSource("kugou-script", "kg");
+            f.AddSource("netease-script", "wy");
+            var result = await f.Lookup(Song());
             Ready(result); Equal("wy", f.Provider.Requests.Single().Platform); Equal(0, f.ScriptCalls);
+            Equal(0, f.SourceReads);
         });
-        yield return Case("WY missing official lyric permits only explicit same-platform LX fallback", async f =>
+        foreach (var platform in new[] { "wy", "kw", "mg" })
+            yield return Case(platform + " uses enabled same-platform scripts for missing native lyrics", async f =>
+            {
+                f.Provider.Handler = (_, _) => Task.FromResult<NativeLyricPayload?>(null);
+                f.AddSource("disabled-script", platform, enabled: false);
+                f.AddSource("other-platform", "kg");
+                f.AddSource("enabled-script", platform);
+                var result = await f.Lookup(Song(platform));
+                Ready(result); Equal(1, f.ScriptCalls);
+                Equal("enabled-script", f.ScriptInput.GetProperty("installationId").GetString());
+                Equal(platform, f.ScriptInput.GetProperty("platform").GetString());
+                Equal(1L, f.ScriptInput.GetProperty("generation").GetInt64());
+                True(f.ScriptInput.GetProperty("sourceKey").GetString()!.Length > 0);
+                Equal(platform == "wy" ? 1 : 0, f.Provider.Requests.Count);
+            });
+        yield return Case("idle enabled scripts activate sequentially only until exact lyrics are found", async f =>
         {
             f.Provider.Handler = (_, _) => Task.FromResult<NativeLyricPayload?>(null);
-            var result = await f.Owner.ExecuteAsync(new { song = Song(),
-                scriptTarget = new { installationId = "chosen-script", platform = "wy" } });
-            Ready(result); Equal(1, f.ScriptCalls);
-            Equal("chosen-script", f.ScriptInput.GetProperty("installationId").GetString());
-            Equal("wy", f.ScriptInput.GetProperty("platform").GetString());
-            True(f.ScriptInput.GetProperty("sourceKey").GetString()!.Length > 0);
+            f.AddSource("disabled", "wy", enabled: false, idle: true);
+            f.AddSource("no-lyrics", "wy", idle: true, lyrics: false);
+            f.AddSource("empty", "wy", idle: true).Text = "";
+            f.AddSource("match", "wy", idle: true).Text = "accepted";
+            f.AddSource("unused", "wy", idle: true);
+            Equal(0, f.ScriptCalls); Equal(0, f.Activated.Count);
+            var result = await f.Lookup(Song());
+            Ready(result); Equal("accepted", result.GetProperty("lines")[0].GetProperty("text").GetString());
+            True(f.Activated.SequenceEqual(["no-lyrics", "empty", "match"]));
+            True(f.ScriptRequests.Select(input => input.GetProperty("installationId").GetString())
+                .SequenceEqual(["no-lyrics", "empty", "match"]));
+            True(f.ScriptRequests.All(input => input.GetProperty("generation").GetInt64() == 0));
+            Equal(1, f.Provider.Requests.Count);
         });
         foreach (var platform in new[] { "tx", "kg" })
             yield return Case(platform + " never falls back to LX even if the script advertises lyrics", async f =>
             {
                 f.Provider.Handler = (_, _) => Task.FromResult<NativeLyricPayload?>(null);
-                var result = await f.Owner.ExecuteAsync(new { song = Song(platform, platform == "tx" ? "mid42" : new string('A', 32)),
-                    scriptTarget = new { installationId = "not-used", platform } });
+                f.AddSource("not-used", platform);
+                var result = await f.Lookup(Song(platform, platform == "tx" ? "mid42" : new string('A', 32)));
                 Equal("none", result.GetProperty("state").GetString()); Equal(0, f.ScriptCalls);
+                Equal(0, f.SourceReads);
             });
-        yield return Case("no implicit script selection or cross-platform fallback on empty official result", async f =>
+        yield return Case("disabled or mismatched scripts cannot supply missing official lyrics", async f =>
         {
             f.Provider.Handler = (_, _) => Task.FromResult<NativeLyricPayload?>(null);
+            f.AddSource("disabled", "wy", enabled: false);
+            f.AddSource("other-platform", "kg");
             Equal("none", (await f.Lookup(Song())).GetProperty("state").GetString());
-            Equal("none", (await f.Owner.ExecuteAsync(new { song = Song(),
-                scriptTarget = new { installationId = "not-used", platform = "kg" } })).GetProperty("state").GetString());
+            Equal("none", (await f.Lookup(Song())).GetProperty("state").GetString());
             Equal(0, f.ScriptCalls); Equal(2, f.Provider.Requests.Count); // Empty results are not cached.
         });
+        foreach (var code in new[] { "CANCELLED", "STALE_SESSION", "CORRUPT_STORAGE", "PENDING_WRITE",
+            "COMMIT_UNKNOWN", "PERMISSION_DENIED", "SCRIPT_EXCEPTION" })
+            yield return Case("script " + code + " cannot silently continue to another installation", async f =>
+            {
+                f.Provider.Handler = (_, _) => Task.FromResult<NativeLyricPayload?>(null);
+                f.AddSource("failed", "wy").Error = code;
+                f.AddSource("unused", "wy", idle: true);
+                Code(await f.Lookup(Song()), code);
+                Equal(1, f.ScriptCalls); Equal(0, f.Activated.Count);
+            });
         yield return Case("disabled native lyric preference causes zero provider and script calls", async f =>
         {
+            f.AddSource("enabled-script", "wy");
             var saved = await f.Library.ExecuteAsync("music.settings.save", new {
-                ifRevision = 0, lyrics = false, target = (object?)null
+                ifRevision = 0, lyrics = false
             });
             True(saved.GetProperty("ok").GetBoolean());
             Equal("disabled", (await f.Lookup(Song())).GetProperty("state").GetString());
-            Equal(0, f.Provider.Requests.Count); Equal(0, f.ScriptCalls);
+            Equal(0, f.Provider.Requests.Count); Equal(0, f.ScriptCalls); Equal(0, f.SourceReads);
         });
-        yield return Case("metadata order consumes only exact enabled editions rather than the playback target", async f =>
+        yield return Case("metadata order consumes only exact enabled editions independently of scripts", async f =>
         {
+            f.AddSource("netease-script", "wy");
             var song = Song();
             var qq = await f.Library.ExecuteAsync("music.online.song", new { platform = "tx",
                 musicInfo = MusicSongFixture.Info(Song("tx", "004exact")), title = "Fixture song",
@@ -96,14 +134,14 @@ public static class MusicLyricApplicationTests
                 platforms = new[] { "tx", "wy", "kg", "kw", "mg" }, enabled = new[] { "wy", "tx" } })).GetProperty("ok").GetBoolean());
             Ready(await f.Lookup(song)); Equal("tx", f.Provider.Requests.Single().Platform);
         });
-        yield return Case("empty metadata enabled subset blocks both official and explicit LX fallback", async f =>
+        yield return Case("empty metadata enabled subset blocks both official and enabled LX lookup", async f =>
         {
+            f.AddSource("enabled-script", "wy");
             True((await f.Library.ExecuteAsync("music.metadata.settings.save", new { ifRevision = 0,
                 platforms = new[] { "wy", "tx", "kg", "kw", "mg" }, enabled = Array.Empty<string>() })).GetProperty("ok").GetBoolean());
-            var result = await f.Owner.ExecuteAsync(new { song = Song(),
-                scriptTarget = new { installationId = "explicit-script", platform = "wy" } });
+            var result = await f.Lookup(Song());
             Equal("disabled", result.GetProperty("state").GetString());
-            Equal(0, f.Provider.Requests.Count); Equal(0, f.ScriptCalls);
+            Equal(0, f.Provider.Requests.Count); Equal(0, f.ScriptCalls); Equal(0, f.SourceReads);
         });
         yield return Case("explicit disabled source never bypasses the persisted policy through a warm cache", async f =>
         {
@@ -123,20 +161,22 @@ public static class MusicLyricApplicationTests
         });
         yield return Case("saved local timed text is returned without any provider and is not a fabricated source key", async f =>
         {
+            f.AddSource("enabled-script", "wy", idle: true);
             True((await f.Library.ExecuteAsync("music.queue.replace", new { songs = new[] { Song() }, index = 0 })).GetProperty("ok").GetBoolean());
             True((await f.Library.ExecuteAsync("music.lyrics.local.save", new { song = Song(), text = "[00:01]chosen\n[00:20]second" })).GetProperty("ok").GetBoolean());
             var result = await f.Lookup(Song());
             Equal("local", result.GetProperty("state").GetString());
             Equal("chosen", result.GetProperty("lines")[0].GetProperty("text").GetString());
             True(!result.TryGetProperty("sourceKey", out _)); Equal(0, f.Provider.Requests.Count); Equal(0, f.ScriptCalls);
+            Equal(0, f.SourceReads); Equal(0, f.Activated.Count);
         });
-        yield return Case("a late explicit script result cannot publish after native metadata policy changes", async f =>
+        yield return Case("a late enabled script result cannot publish after native metadata policy changes", async f =>
         {
             var arrived = Signal(); var release = f.ReleaseGate();
             f.Provider.Handler = (_, _) => Task.FromResult<NativeLyricPayload?>(null);
-            f.ScriptHandler = async () => { arrived.TrySetResult(); await release.Task; };
-            var read = f.Owner.ExecuteAsync(new { song = Song(),
-                scriptTarget = new { installationId = "chosen-script", platform = "wy" } });
+            f.AddSource("enabled-script", "wy");
+            f.ScriptHandler = async _ => { arrived.TrySetResult(); await release.Task; };
+            var read = f.Lookup(Song());
             await arrived.Task;
             True((await f.Library.ExecuteAsync("music.metadata.settings.save", new { ifRevision = 0,
                 platforms = new[] { "wy", "tx", "kg", "kw", "mg" }, enabled = Array.Empty<string>() })).GetProperty("ok").GetBoolean());
@@ -144,6 +184,45 @@ public static class MusicLyricApplicationTests
             Code(await read, "STALE_SESSION");
             Equal("disabled", (await f.Lookup(Song())).GetProperty("state").GetString());
             Equal(1, f.ScriptCalls);
+        });
+        foreach (var mutation in new[] { "disable", "update" })
+            yield return Case("source " + mutation + " rejects late script lyrics and uses current grants on retry", async f =>
+            {
+                var arrived = Signal(); var release = f.ReleaseGate();
+                f.Provider.Handler = (_, _) => Task.FromResult<NativeLyricPayload?>(null);
+                var first = f.AddSource("changed", "wy"); first.Text = "old";
+                f.AddSource("remaining", "wy").Text = "remaining";
+                f.ScriptHandler = async _ => { arrived.TrySetResult(); await release.Task; };
+                var read = f.Lookup(Song()); await arrived.Task;
+                if (mutation == "disable") first.Enabled = false;
+                else { first.Generation++; first.Text = "updated"; }
+                f.Owner.Invalidate();
+                release.TrySetResult(); Code(await read, "STALE_SESSION");
+                f.ScriptHandler = null;
+                var fresh = await f.Lookup(Song());
+                Ready(fresh);
+                Equal(mutation == "disable" ? "remaining" : "updated",
+                    fresh.GetProperty("lines")[0].GetProperty("text").GetString());
+                Equal(mutation == "disable" ? "remaining" : "changed",
+                    f.ScriptInput.GetProperty("installationId").GetString());
+                Equal(mutation == "disable" ? 1L : 2L, f.ScriptInput.GetProperty("generation").GetInt64());
+                Equal(2, f.ScriptCalls);
+            });
+        yield return Case("cancelled script lookup drains its request and never starts the next installation", async f =>
+        {
+            var arrived = Signal(); var release = f.ReleaseGate(); var cancelled = Signal();
+            f.Provider.Handler = (_, _) => Task.FromResult<NativeLyricPayload?>(null);
+            f.AddSource("first", "wy"); f.AddSource("unused", "wy", idle: true);
+            f.ScriptHandler = async token => {
+                using var registration = token.Register(() => cancelled.TrySetResult());
+                arrived.TrySetResult(); await release.Task;
+            };
+            using var cancellation = new CancellationTokenSource();
+            var read = f.Lookup(Song(), cancellation.Token); await arrived.Task;
+            cancellation.Cancel(); await cancelled.Task;
+            True(!read.IsCompleted); Equal(1, f.ScriptCalls);
+            release.TrySetResult(); Code(await read, "CANCELLED");
+            Equal(1, f.ScriptCalls); Equal(0, f.Activated.Count);
         });
         yield return Case("coalesced subscribers cancel independently until the last one leaves", async f =>
         {
@@ -292,9 +371,12 @@ public static class MusicLyricApplicationTests
         internal readonly Clock Clock = new();
         internal readonly MusicLibraryOwner Library;
         internal readonly MusicLyricApplication Owner;
-        internal int ScriptCalls;
+        internal int ScriptCalls, SourceReads;
         internal JsonElement ScriptInput;
-        internal Func<Task>? ScriptHandler;
+        internal Func<CancellationToken, Task>? ScriptHandler;
+        internal readonly List<JsonElement> ScriptRequests = [];
+        internal readonly List<string> Activated = [];
+        private readonly List<ScriptSource> sources = [];
         private readonly List<TaskCompletionSource> releaseOnClose = [];
         internal TaskCompletionSource ReleaseGate()
         { var value = Signal(); releaseOnClose.Add(value); return value; }
@@ -302,18 +384,61 @@ public static class MusicLyricApplicationTests
         {
             Library = new(Store); Owner = new(Library, Provider, Script, Clock);
         }
+        internal ScriptSource AddSource(string id, string platform, bool enabled = true, bool idle = false, bool lyrics = true)
+        {
+            var source = new ScriptSource(id, platform, enabled, idle, lyrics);
+            sources.Add(source); return source;
+        }
         private async Task<JsonElement> Script(string method, object? input, CancellationToken ct)
         {
-            ct.ThrowIfCancellationRequested(); Equal("music.online.lyrics", method);
+            ct.ThrowIfCancellationRequested();
+            if (method == "music.sources.list")
+            {
+                SourceReads++;
+                return JsonSerializer.SerializeToElement(new { ok = true, revision = 1,
+                    items = sources.Select(value => value.View()).ToArray() });
+            }
+            var parameters = JsonSerializer.SerializeToElement(input);
+            string id = parameters.GetProperty("installationId").GetString()!;
+            var source = sources.Single(value => value.Id == id);
+            if (method == "music.sources.detail")
+            {
+                SourceReads++;
+                return JsonSerializer.SerializeToElement(new { ok = true, item = source.View() });
+            }
+            Equal("music.online.lyrics", method);
             ScriptCalls++; ScriptInput = JsonSerializer.SerializeToElement(input);
-            if (ScriptHandler is { } handler) await handler();
-            return JsonSerializer.SerializeToElement(new { ok = true, state = "ready",
-                lines = new[] { new { time = 1, text = "script" } } });
+            ScriptRequests.Add(ScriptInput);
+            True(source.Enabled); Equal(source.Generation, parameters.GetProperty("generation").GetInt64());
+            if (source.Generation == 0) { source.Generation = 1; Activated.Add(id); }
+            if (parameters.GetProperty("platform").GetString() != source.Platform || !source.Lyrics)
+                return JsonSerializer.SerializeToElement(new { ok = false, code = "CAPABILITY_UNAVAILABLE" });
+            string text = source.Text;
+            if (ScriptHandler is { } handler) await handler(ct);
+            if (source.Error is { } code) return JsonSerializer.SerializeToElement(new { ok = false, code });
+            return JsonSerializer.SerializeToElement(new { ok = true, state = text.Length > 0 ? "ready" : "none",
+                lines = text.Length > 0 ? new[] { new { time = 1, text } } : [] });
         }
         internal Task<JsonElement> Lookup(JsonObject song, CancellationToken ct = default) =>
             Owner.ExecuteAsync(new { song }, ct);
         public async ValueTask DisposeAsync()
         { foreach (var value in releaseOnClose) value.TrySetResult(); await Owner.DisposeAsync(); await Library.AbortAsync(); }
+    }
+    private sealed class ScriptSource(string id, string platform, bool enabled, bool idle, bool lyrics)
+    {
+        internal readonly string Id = id, Platform = platform;
+        internal readonly bool Lyrics = lyrics;
+        internal bool Enabled = enabled;
+        internal long Generation = idle ? 0 : 1;
+        internal string Text = "script";
+        internal string? Error;
+        internal object View() => new {
+            installationId = Id, enabled = Enabled, generation = Generation,
+            state = !Enabled ? "disabled" : Generation == 0 ? "idle" : "ready",
+            capabilities = Generation == 0 ? [] : new[] {
+                new { platform = Platform, actions = Lyrics ? new[] { "lyric" } : new[] { "musicUrl" } }
+            }
+        };
     }
     private sealed class Provider : INativeMusicLyrics
     {

@@ -69,24 +69,29 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         LJ.Require(await gate.WaitAsync(TimeSpan.FromSeconds(10), token).ConfigureAwait(false), "TIMEOUT");
     private async Task LoadAsync(CancellationToken token, bool force = false)
     {
-        if (document is not null && !force) return;
-        var saved = await store.ReadAsync(DocumentNamespace, token).ConfigureAwait(false);
-        try
+        if (document is null || force)
         {
-            JsonObject candidate;
-            if (saved.Data is null) { LJ.Require(saved.Fingerprint == DocumentFingerprint.Missing, "CORRUPT_STORAGE"); candidate = LJ.Obj(("version", 1), ("entries", new JsonArray())); }
-            else
+            var saved = await store.ReadAsync(DocumentNamespace, token).ConfigureAwait(false);
+            try
             {
-                LJ.Require(DocumentFingerprint.FromBytes(saved.Data) == saved.Fingerprint, "CORRUPT_STORAGE");
-                candidate = LJ.PersistedDocument(saved.Data);
+                JsonObject candidate;
+                if (saved.Data is null) { LJ.Require(saved.Fingerprint == DocumentFingerprint.Missing, "CORRUPT_STORAGE"); candidate = LJ.Obj(("version", 1), ("entries", new JsonArray())); }
+                else
+                {
+                    LJ.Require(DocumentFingerprint.FromBytes(saved.Data) == saved.Fingerprint, "CORRUPT_STORAGE");
+                    candidate = LJ.PersistedDocument(saved.Data);
+                }
+                ValidateDocument(candidate, allowLegacyOnlineSettings: true);
+                if (Value(candidate, "queue") is JsonObject q) RestoreRuntime(q, false);
+                else if (force) RestoreRuntime(Queue(candidate), false);
+                document = candidate; fingerprint = saved.Fingerprint;
+                if (pending is null && recommendationUnknown is null) RefreshOfficialSources(candidate);
             }
-            ValidateDocument(candidate);
-            if (Value(candidate, "queue") is JsonObject q) RestoreRuntime(q, false);
-            else if (force) RestoreRuntime(Queue(candidate), false);
-            document = candidate; fingerprint = saved.Fingerprint;
-            if (pending is null && recommendationUnknown is null) RefreshOfficialSources(candidate);
+            finally { if (saved.Data is not null) CryptographicOperations.ZeroMemory(saved.Data); }
         }
-        finally { if (saved.Data is not null) CryptographicOperations.ZeroMemory(saved.Data); }
+        // Reconciliation observes the attempted CAS before/after bytes without issuing
+        // another write. A new admitted call may retry a conversion that did not commit.
+        if (!force) await ConvertLegacyOnlineSettingsAsync(token).ConfigureAwait(false);
     }
     private static PendingOwner CommandOwner(string method)
     {

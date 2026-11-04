@@ -2161,7 +2161,7 @@ public static class MusicCatalogTests
         {
             var data = Environment.GetEnvironmentVariable("MEOWFILM_TEST_DATA_ROOT") ?? throw new InvalidOperationException("Isolated test data required");
             var dir = Path.Combine(data, "catalog-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(dir);
-            var store = new DpapiDocumentStore(dir, AppIdentity.NativeNamespaces);
+            var store = new DpapiDocumentStore(dir, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections);
             await MusicClientContextFixture.SeedQqAsync(store);
             var f = new Fixture(store, vipAccount);
             try
@@ -2205,10 +2205,10 @@ public static class MusicCatalogTests
             var result = await Rpc("music.sources.install", new { token, name = "合成源", version = "1",
                 permissions = new { storage = Array.Empty<string>() } });
             var installationId = result.GetProperty("item").GetProperty("installationId").GetString();
-            await Rpc("music.sources.enable", new { installationId });
+            var enabled = await Rpc("music.sources.enable", new { installationId });
+            True(enabled.GetProperty("item").GetProperty("enabled").GetBoolean(), "enabled script participates in catalog playback");
             await Module.RefreshOnlineAsync();
             Module.SelectedSource = Module.Sources.Single(); await Module.LoadSourceAsync(Module.SelectedSource);
-            await Module.UseSourcePlatformAsync("wy");
         }
         public async ValueTask DisposeAsync()
         {

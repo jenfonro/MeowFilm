@@ -34,7 +34,7 @@ public static class MusicNativeScriptTests
         yield return new("Native LX: pending resolve cannot publish after cancel or source mutation", Cancel);
         yield return new("Native LX: invalid media expiry flags headers and identity rejected", MediaCandidates);
         yield return new("Native LX: lyric parsing remains native and respects persisted setting", Lyrics);
-        yield return new("Native LX: no global target fallback for mismatched recording or generation", BadTarget);
+        yield return new("Native LX: explicit resolve rejects mismatched recording or generation", RecordingIdentity);
         yield return new("Native LX: shutdown drains owned calls and never disposes borrowed owners", Shutdown);
         yield return new("Native LX: candidate storage transaction cannot leak on failed trial", CandidateStorage);
         yield return new("Native LX: candidate storage cannot persist an undeclared site", CandidateSite);
@@ -439,13 +439,13 @@ public static class MusicNativeScriptTests
         f.Runtime.Value = J(new { lyric = "[00:01.00]Hello", tlyric = "[00:01.00]你好" });
         var response = await Ok(f.Owner, "music.online.lyrics", new { installationId = id, platform = "wy", song = Song() });
         Check(response.GetProperty("lines")[0].GetProperty("translation").GetString() == "你好");
-        var settings = await f.Library.ExecuteAsync("music.settings.save", new { ifRevision = 0, lyrics = false, target = (object?)null });
+        var settings = await f.Library.ExecuteAsync("music.settings.save", new { ifRevision = 0, lyrics = false });
         Check(settings.GetProperty("ok").GetBoolean());
         int calls = f.Runtime.Invoked.Count;
         response = await Ok(f.Owner, "music.online.lyrics", new { installationId = id, platform = "wy", song = Song() });
         Check(response.GetProperty("state").GetString() == "disabled" && calls == f.Runtime.Invoked.Count);
     }
-    private static async Task BadTarget()
+    private static async Task RecordingIdentity()
     {
         await using var f = new Fixture(); string id = await Install(f, true);
         await Error(f.Owner, "music.online.resolve", new { installationId = id, platform = "tx", song = Song(), quality = "320k" }, "TARGET_CHANGED");

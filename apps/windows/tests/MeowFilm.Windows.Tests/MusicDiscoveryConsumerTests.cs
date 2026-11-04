@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Search;
 using MeowFilm.Platform.Storage;
@@ -270,7 +271,7 @@ public static partial class MusicUiTests
         internal readonly MusicCapability Module;
         private DiscoveryScene(IProtectedDocumentStore? selectedStore = null)
         {
-            store = selectedStore ?? ServiceStore();
+            store = selectedStore ?? new DpapiDocumentStore(NewRoot(), AppIdentity.NativeNamespaces, AppIdentity.NativeCollections);
             App = new(store, Runtime, Http); Runtime.Register(App);
             Module = new(App, store, Playback, Dialog);
         }
@@ -295,17 +296,20 @@ public static partial class MusicUiTests
         }
         internal async Task EnableScript()
         {
+            var before = (await Call("music.settings.get")).GetProperty("settings");
             Dialog.ScriptPath = Path.Combine(Root, "discovery-authored-lx.js");
             File.WriteAllText(Dialog.ScriptPath, TestScript(), new UTF8Encoding(false));
             await Module.ImportSourceAsync(); Equal(1, Module.Sources.Count);
             Module.SelectedSource = Module.Sources.Single();
             await Module.LoadSourceAsync(Module.SelectedSource); await Module.SourceActionAsync("enable");
             await Until(() => Module.CanEdit);
-            await Module.UseSourcePlatformAsync("wy");
+            var installed = (await Call("music.sources.list")).GetProperty("items").EnumerateArray().Single();
+            Equal(Module.Sources.Single().InstallationId, installed.GetProperty("installationId").GetString());
+            True(installed.GetProperty("enabled").GetBoolean(), "enabled script participates in discovery playback");
             var saved = (await Call("music.settings.get")).GetProperty("settings");
-            Equal(Module.Sources.Single().InstallationId, saved.GetProperty("target").GetProperty("installationId").GetString());
-            Equal("wy", saved.GetProperty("target").GetProperty("platform").GetString());
-            True(Module.Status.Length == 0, "specific script target accepted");
+            Equal(3, saved.GetProperty("schema").GetInt32());
+            Equal(before.GetRawText(), saved.GetRawText());
+            True(Module.Status.Length == 0, "script enable accepted");
         }
         public async ValueTask DisposeAsync()
         {

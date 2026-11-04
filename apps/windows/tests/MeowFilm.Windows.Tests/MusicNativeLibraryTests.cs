@@ -15,6 +15,7 @@ public static partial class MusicNativeLibraryTests
     public static IEnumerable<TestCase> Cases()
     {
         foreach (var test in RecordingConsumerCases()) yield return test;
+        foreach (var test in OnlineSettingsCases()) yield return test;
         yield return new("Native music library contract version and storage identity", Contract);
         yield return new("Native music library initial reads never manufacture a document", Initial);
         yield return new("Native music collection member edits exact ordering revisions and tombstones", Collections);
@@ -48,7 +49,7 @@ public static partial class MusicNativeLibraryTests
         yield return new("Native music source metadata single owner CAS alongside library", SourceMetadata);
         yield return new("Native music source snapshots preserve both versions and never write on reads or restart", SourceSnapshots);
         yield return new("Native music source metadata unknown commit and atomic private storage removal", SourceFailure);
-        yield return new("Native music online settings revision and target validation", Settings);
+        yield return new("Native music online settings revision and independent source enablement", Settings);
         yield return new("Native music script storage permissions revisions scope and quotas", ScriptStorage);
         yield return new("Native music non-current envelopes fail every owner entry without writes", NonCurrentDocuments);
         yield return new("Native music source metadata malformed input never commits", InvalidSource);
@@ -112,7 +113,7 @@ public static partial class MusicNativeLibraryTests
                 else documents[MusicLibraryOwner.DocumentNamespace] = value;
             }
         }
-        internal int Writes, Failure;
+        internal int Writes, WriteCalls, Failure;
         internal int FailAtWrite;
         internal bool FailRead, Disposed;
         internal DocumentFingerprint? ReadFingerprint;
@@ -155,6 +156,7 @@ public static partial class MusicNativeLibraryTests
         public async Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected, CancellationToken cancellationToken = default)
         {
             Namespace(documentNamespace);
+            Interlocked.Increment(ref WriteCalls);
             if (Release is { } release) { Entered!.TrySetResult(); await release.Task; }
             lock (sync)
             {
@@ -562,7 +564,7 @@ public static partial class MusicNativeLibraryTests
         f.Store.Bytes = Document(
             ("lx-installations", sources),
             ("library", CurrentLibraryState()), ("queue", CurrentQueue()), ("history", CurrentHistory()),
-            ("online-settings", O(new { schema = 2, revision = 3, lyrics = false, target = new { installationId = "test-install-a", platform = "wy" } })),
+            ("online-settings", O(new { schema = 3, revision = 3, lyrics = false })),
             ("[\"lx-data\",\"test-install-a\",\"wy\"]", O(new { schema = 1, values = new[] { new { key = "keep", value = "source-a" } } })),
             ("[\"lx-data\",\"test-install-a\",\"tx\"]", O(new { schema = 1, values = new[] { new { key = "keep", value = "source-a-tx" } } })),
             ("[\"lx-data\",\"test-install-b\",\"wy\"]", O(new { schema = 1, values = new[] { new { key = "keep", value = "source-b" } } })));
@@ -641,7 +643,7 @@ public static partial class MusicNativeLibraryTests
         }
         Check(f.Store.Writes == 0);
         await o.CommitScriptValueAsync("test-install-0", "site-0", "same", 1, E("updated"), false);
-        await Ok(o, "music.settings.save", new { ifRevision = 0, lyrics = false, target = (object?)null });
+        await Ok(o, "music.settings.save", new { ifRevision = 0, lyrics = false });
         await o.CommitScriptValueAsync("test-install-33", "site-31", "same", 1, E("new-site"), false);
         int writes = f.Store.Writes; byte[] original = f.Store.Bytes!.ToArray();
         await Throws("LIMIT", async () => await o.CommitScriptValueAsync("test-install-33", "site-overflow", "same", 1, E("overflow"), false));
@@ -763,25 +765,38 @@ public static partial class MusicNativeLibraryTests
     {
         await using var f = new Fixture(); var o = f.Owner();
         var settings = (await Ok(o, "music.settings.get")).GetProperty("settings");
-        Check(settings.GetProperty("schema").GetInt32() == 2 &&
+        Check(settings.GetProperty("schema").GetInt32() == 3 &&
             settings.GetProperty("revision").GetInt64() == 0 &&
             settings.GetProperty("lyrics").GetBoolean() &&
-            settings.GetProperty("target").ValueKind == JsonValueKind.Null &&
-            !settings.TryGetProperty("quality", out _));
+            settings.EnumerateObject().Count() == 3);
         int writes = f.Store.Writes;
-        await Error(o, "music.settings.save", new { ifRevision = 0, quality = "flac", lyrics = true, target = (object?)null }, "INVALID_REQUEST");
+        await Error(o, "music.settings.save", new { ifRevision = 0, quality = "flac", lyrics = true }, "INVALID_REQUEST");
+        await Error(o, "music.settings.save", new { ifRevision = 0 }, "INVALID_REQUEST");
+        await Error(o, "music.settings.save", new { lyrics = true }, "INVALID_REQUEST");
+        await Error(o, "music.settings.save", new { ifRevision = 0, lyrics = true, target = (object?)null }, "INVALID_REQUEST");
+        await Error(o, "music.settings.save", new { ifRevision = 0, lyrics = true, target = new { installationId = "missing", platform = "wy" } }, "INVALID_REQUEST");
         Check(f.Store.Writes == writes);
-        await Error(o, "music.settings.save", new { ifRevision = 0, lyrics = true, target = new { installationId = "missing", platform = "wy" } }, "NOT_FOUND");
         await Install(o, Installation());
-        await Ok(o, "music.settings.save", new { ifRevision = 0, lyrics = false, target = new { installationId = "test-install-a", platform = "wy" } });
-        await Error(o, "music.settings.save", new { ifRevision = 0, lyrics = true, target = (object?)null }, "REVISION_CONFLICT");
+        writes = f.Store.Writes;
+        await Error(o, "music.settings.save", new { ifRevision = 0, lyrics = true, target = new { installationId = "test-install-a", platform = "wy" } }, "INVALID_REQUEST");
+        Check(f.Store.Writes == writes);
+        var saved = (await Ok(o, "music.settings.save", new { ifRevision = 0, lyrics = false })).GetProperty("settings");
+        Check(saved.GetProperty("schema").GetInt32() == 3 && saved.GetProperty("revision").GetInt64() == 1 &&
+            !saved.GetProperty("lyrics").GetBoolean() && saved.EnumerateObject().Count() == 3);
+        await Error(o, "music.settings.save", new { ifRevision = 0, lyrics = true }, "REVISION_CONFLICT");
+        foreach (bool enabled in new[] { false, true })
+        {
+            var source = await o.ReadSourceMetadataAsync();
+            var next = NextMetadata(source); next["installations"]![0]!["enabled"] = enabled;
+            await o.CommitSourceMetadataAsync(E(next), source.Sha256);
+            Check((await Ok(o, "music.settings.get")).GetProperty("settings").GetRawText() == saved.GetRawText());
+        }
         var metadata = await o.ReadSourceMetadataAsync();
-        var disabled = NextMetadata(metadata); disabled["installations"]![0]!["enabled"] = false;
-        await o.CommitSourceMetadataAsync(E(disabled), metadata.Sha256);
-        var cleared = (await Ok(o, "music.settings.get")).GetProperty("settings");
-        Check(cleared.GetProperty("revision").GetInt64() == 2 &&
-            cleared.GetProperty("target").ValueKind == JsonValueKind.Null);
-        await o.DisposeAsync(); Check(!(await Ok(f.Owner(), "music.settings.get")).GetProperty("settings").GetProperty("lyrics").GetBoolean());
+        var removed = NextMetadata(metadata); removed["installations"] = new JsonArray();
+        await o.CommitSourceMetadataAsync(E(removed), metadata.Sha256);
+        Check((await Ok(o, "music.settings.get")).GetProperty("settings").GetRawText() == saved.GetRawText());
+        await o.DisposeAsync();
+        Check((await Ok(f.Owner(), "music.settings.get")).GetProperty("settings").GetRawText() == saved.GetRawText());
     }
     private static async Task ScriptStorage()
     {
