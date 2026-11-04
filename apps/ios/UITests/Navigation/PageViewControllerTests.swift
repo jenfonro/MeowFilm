@@ -339,6 +339,37 @@ final class PageViewControllerTests: XCTestCase {
         XCTAssertEqual(page.inactiveCount, 1)
     }
 
+    func testAllValidPageTasksStartAndInvalidateTogether() async {
+        let page = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())
+        page.beginAppearanceTransition(true, animated: false)
+        page.endAppearanceTransition()
+        let started = expectation(description: "page tasks started")
+        let finished = expectation(description: "page tasks cancelled")
+        started.expectedFulfillmentCount = 10
+        finished.expectedFulfillmentCount = 10
+        var continuations: [Int: CheckedContinuation<Void, Never>] = [:]
+        for index in 0..<10 {
+            page.runPageTask {
+                await withCheckedContinuation { continuations[index] = $0; started.fulfill() }
+                XCTAssertTrue(Task.isCancelled)
+                finished.fulfill()
+            }
+        }
+        await fulfillment(of: [started], timeout: 2)
+        XCTAssertEqual(continuations.count, 10)
+        PageViewController.invalidatePages(in: page)
+        continuations.values.forEach { $0.resume() }
+        continuations.removeAll()
+        await fulfillment(of: [finished], timeout: 2)
+        XCTAssertFalse(page.isPageActive)
+        var restarted = false
+        page.runPageTask { restarted = true }
+        let drained = expectation(description: "invalidated tasks drained")
+        RunLoop.main.perform { drained.fulfill() }
+        await fulfillment(of: [drained], timeout: 2)
+        XCTAssertFalse(restarted)
+    }
+
     func testModalWrapperDismissalWaitsForCommitAndIgnoresCancellation() async {
         let wrapper = PageLifecycleTestModalWrapper()
         let page = PageLifecycleTestPage(themeProvider: PageLifecycleTestTheme())

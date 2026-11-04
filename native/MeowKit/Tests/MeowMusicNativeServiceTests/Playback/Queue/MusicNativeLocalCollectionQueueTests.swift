@@ -12,7 +12,7 @@ final class MusicNativeLocalCollectionQueueTests: XCTestCase {
         let service = try await NativeMusicFixture.service(store, accounts: accounts)
         var refs: [MusicReference] = []
         for name in ["CollectionAlpha", "CollectionBeta", "CollectionGamma"] {
-            let page = try await service.search(platform: "tx", query: name, page: 1)
+            let page = try await service.search(platform: "tx", query: name, page: 1, limit: 30)
             refs.append(try XCTUnwrap(page.items.first).ref)
         }
         let collection = try await service.createPlaylist(name: "Stored collection", refs: refs)
@@ -92,7 +92,7 @@ final class MusicNativeLocalCollectionQueueTests: XCTestCase {
 
     func testMalformedSubsetDoesNotChangeAnyDocumentOrConsumeSerial() async throws {
         let (store, service, collection, tracks) = try await setup()
-        let outsiderSearch = try await service.search(platform: "tx", query: "NotInCollection", page: 1)
+        let outsiderSearch = try await service.search(platform: "tx", query: "NotInCollection", page: 1, limit: 30)
         let outside = try await service.createPlaylist(name: "Other", refs: outsiderSearch.items.map(\.ref))
         let outsider = try await service.tracks(in: outside)[0].ref
         let before = store.snapshot()
@@ -105,7 +105,7 @@ final class MusicNativeLocalCollectionQueueTests: XCTestCase {
             ([.init(kind: .library, id: "")], 0, .invalidRequest),
             ([.init(kind: .handle, id: tracks[0].ref.id)], 0, .invalidRequest),
             ([.init(kind: .queue, id: tracks[0].ref.id)], 0, .invalidRequest),
-            (Array(repeating: tracks[0].ref, count: 2001), 0, .limit)
+            (Array(repeating: tracks[0].ref, count: 2001), 0, .invalidRequest)
         ]
         for request in cases {
             do {
@@ -119,6 +119,42 @@ final class MusicNativeLocalCollectionQueueTests: XCTestCase {
         let valid = try await service.changeCollectionQueue(collection: collection, refs: [tracks[1].ref],
                                                             index: 0, expectedRevision: 0)
         XCTAssertEqual(valid.currentId, "entry-1")
+        await service.close()
+    }
+
+    func testCollectionQueueKeepsMoreThanFormerTwoThousandOccurrences() async throws {
+        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let songs = try (0..<2001).map { try NativeMusicFixture.song("BULK\($0)") }
+        let ids = songs.map { $0["songId"].string }
+        try await service.transaction(["library"]) { d in
+            var library = d.library["library"]
+            library["songs"] = .obj(songs.map { ($0["songId"].string, $0) })
+            var collection = MusicModel.freshCollection("playlist:1", "Bulk")
+            collection["order"] = .strings(ids)
+            collection["revision"] = .n(1)
+            collection["manualOrder"] = .bool(true)
+            library["collections"] = .array(library["collections"].array + [collection])
+            library["nextId"] = .n(2)
+            d.library["library"] = library
+        }
+        let collection = MusicCollection(id: "playlist:1", title: "Bulk", count: 2001, revision: 1)
+        let state = try await service.changeCollectionQueue(collection: collection,
+            refs: ids.map { .init(kind: .library, id: $0) }, index: 2000, expectedRevision: 0)
+        XCTAssertEqual(state.total, 2001)
+        let queue = try await service.queue()
+        XCTAssertEqual(queue.entries.count, 2001)
+        XCTAssertEqual(queue.entries.map(\.track.songId), ids)
+        XCTAssertEqual(state.currentId, queue.entries.last?.id)
+        let full = try await service.changeQueue(.collection(id: collection.id, revision: collection.revision, index: 2000),
+                                                expectedRevision: state.revision)
+        let unfiltered = try await service.queue()
+        XCTAssertEqual(full.total, 2001)
+        XCTAssertEqual(unfiltered.entries.map(\.track.songId), ids)
+        XCTAssertEqual(full.currentId, unfiltered.entries.last?.id)
+        let cold = try await NativeMusicFixture.service(store)
+        let restored = try await cold.queue()
+        XCTAssertEqual(restored.entries, unfiltered.entries)
+        await cold.close()
         await service.close()
     }
 

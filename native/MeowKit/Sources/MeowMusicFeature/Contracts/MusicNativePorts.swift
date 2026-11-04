@@ -47,7 +47,7 @@ public struct MusicNativeAudio: Sendable {
 
 /// Anonymous native QQ HTTP/device protocol; never consults an account coordinator.
 public protocol MusicPublicQQProviding: Sendable {
-    func search(query: String, page: Int) async throws -> MusicNativeTrackPage
+    func search(query: String, page: Int, limit: Int) async throws -> MusicNativeTrackPage
     func lyrics(mid: String) async throws -> MusicNativeLyrics
 }
 /// Native account adapter. Login/control remains MusicAccountsServing.

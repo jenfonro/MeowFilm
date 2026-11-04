@@ -15,7 +15,7 @@ private let musicOfficialSelection = MusicPlaybackSelection(installationId: "off
 
 /// Business-port fixture, not a real platform, document or media engine.
 private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
-    MusicCachedPlaybackRecoveryServing, MusicResolvedSourcesServing {
+    MusicCachedPlaybackRecoveryServing, MusicResolvedSourcesServing, MusicAccountBrowsing {
     var entries: [MusicQueueEntry] = (1...3).map { index in
         MusicQueueEntry(id: "entry-\(index)", track: MusicRemoteTrack(
             ref: MusicReference(kind: .queue, id: "entry-\(index)"), songId: "same-song",
@@ -33,6 +33,7 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
     var held: (MusicPlaybackCandidate, CheckedContinuation<MusicPlaybackCandidate, Never>)?
     var searchBegan: (@Sendable () -> Void)?
     var heldSearch: CheckedContinuation<MusicSearchPage, Never>?
+    var searchReads = 0
     var stateBegan: (@Sendable () -> Void)?
     var heldState: CheckedContinuation<MusicPlaybackState, Never>?
     var stateReads = 0
@@ -42,9 +43,11 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
     var remoteAuthorization: MusicQueueAuthorization?
     var importGate: MusicCollectionGate?
     var importCommitGate: MusicCollectionGate?
+    var recordGate: MusicCollectionGate?
     var releasedImports: [String] = []
     func blockImport(_ gate: MusicCollectionGate) { importGate = gate }
     func blockImportCommit(_ gate: MusicCollectionGate) { importCommitGate = gate }
+    func blockRecord(_ gate: MusicCollectionGate) { recordGate = gate }
     func releasedImportIDs() -> [String] { releasedImports }
     func enableRemoteAuthorization() -> MusicQueueAuthorization {
         let value = MusicQueueAuthorization(); remoteAuthorization = value; return value
@@ -90,12 +93,22 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
     func queue() async throws -> MusicQueueSnapshot { MusicQueueSnapshot(revision: revision, currentId: current, entries: entries) }
     func platforms() async throws -> [MusicPlatform] { [MusicPlatform(id: "wy", title: "网易云音乐")] }
     func collections() async throws -> [MusicCollection] { [MusicCollection(id: "favorites", title: "收藏", kind: "favorites")] }
-    func search(platform: String, query: String, page: Int) async throws -> MusicSearchPage {
+    func search(platform: String, query: String, page: Int, limit: Int) async throws -> MusicSearchPage {
+        searchReads += 1
         if let searchBegan {
             return await withCheckedContinuation { value in heldSearch = value; searchBegan() }
         }
-        return MusicSearchPage(platform: platform, query: query, page: page, total: 0, nextPage: nil, items: [])
+        return MusicSearchPage(platform: platform, query: query, page: page, limit: limit, total: 0,
+                               nextPage: nil, items: [])
     }
+    // Search admission casts the injected owner to MusicAccountBrowsing before
+    // reaching MusicServing.search. These account reads are not used here.
+    func recommendations(platform: MusicAccountPlatform, kind: String,
+                         cursor: String?) async throws -> MusicBrowsePage { throw MusicServiceError.unsupported }
+    func accountCollections(platform: MusicAccountPlatform,
+                            cursor: String?) async throws -> MusicAccountCollectionPage { throw MusicServiceError.unsupported }
+    func accountTracks(platform: MusicAccountPlatform, collectionID: String,
+                       cursor: String?) async throws -> MusicBrowsePage { throw MusicServiceError.unsupported }
     func tracks(in collection: MusicCollection) async throws -> [MusicRemoteTrack] { entries.map(\.track) }
     func createPlaylist(name: String, refs: [MusicReference]) async throws -> MusicCollection { throw MusicServiceError.unsupported }
     func editPlaylist(_ collection: MusicCollection, name: String?, refs: [MusicReference]?, order: [String]?) async throws -> MusicCollection { throw MusicServiceError.unsupported }
@@ -104,6 +117,20 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
         if failChange { throw MusicServiceError.storageFailed }
         guard expectedRevision == revision else { throw MusicServiceError.staleRevision }
         switch change {
+        case .replace(let refs, let index):
+            guard !refs.isEmpty, refs.indices.contains(index) else { throw MusicServiceError.invalidRequest }
+            let known = Dictionary(uniqueKeysWithValues: entries.map { ($0.track.ref, $0.track) })
+            let tracks = try refs.map { ref -> MusicRemoteTrack in
+                guard let track = known[ref] else { throw MusicServiceError.notFound }
+                return track
+            }
+            entries = tracks.enumerated().map { position, track in
+                let id = "entry-\(position + 1)"
+                return .init(id: id, track: .init(ref: .init(kind: .queue, id: id), songId: track.songId,
+                    title: track.title, artist: track.artist, album: track.album, duration: track.duration,
+                    sources: track.sources, artwork: track.artwork))
+            }
+            current = entries[index].id
         case .select(let id):
             guard entries.contains(where: { $0.id == id }) else { throw MusicServiceError.notFound }
             current = id
@@ -154,7 +181,10 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
         return candidate
     }
     func cancel(attemptId: String?) async throws {}
-    func record(_ fact: MusicPlaybackFact) async throws -> Bool { facts.append(fact); return true }
+    func record(_ fact: MusicPlaybackFact) async throws -> Bool {
+        if let gate = recordGate { recordGate = nil; await gate.wait() }
+        facts.append(fact); return true
+    }
     func lyrics(occurrenceId: String, sourceKey: String) async throws -> MusicLyricsSnapshot {
         lyricCalls += 1
         return MusicLyricsSnapshot(occurrenceId: occurrenceId, state: hasLyrics ? .ready : .none,
@@ -189,7 +219,8 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
     func releaseResolve() { if let held { self.held = nil; held.1.resume(returning: held.0) } }
     func blockSearch(_ began: @escaping @Sendable () -> Void) { searchBegan = began }
     func releaseSearch() {
-        heldSearch?.resume(returning: MusicSearchPage(platform: "wy", query: "synthetic", page: 1, total: 1, nextPage: nil, items: [entries[0].track]))
+        heldSearch?.resume(returning: MusicSearchPage(platform: "wy", query: "synthetic", page: 1,
+            limit: 30, total: 1, nextPage: nil, items: [entries[0].track]))
         heldSearch = nil; searchBegan = nil
     }
     func blockState(_ began: @escaping @Sendable () -> Void) { stateBegan = began }
@@ -198,6 +229,26 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
         heldState = nil
     }
     func stateReadCount() -> Int { stateReads }
+    func searchReadCount() -> Int { searchReads }
+}
+
+private actor MusicModelAccountSessions: MusicAccountsServing, MusicAccountSessionsObserving {
+    private let changes: AsyncStream<MusicAccountPlatform>
+    private let continuation: AsyncStream<MusicAccountPlatform>.Continuation
+    private let observed: @Sendable () -> Void
+    init(observed: @escaping @Sendable () -> Void) {
+        let pair = AsyncStream<MusicAccountPlatform>.makeStream()
+        changes = pair.stream; continuation = pair.continuation; self.observed = observed
+    }
+    func accountSessionChanges() -> AsyncStream<MusicAccountPlatform> { observed(); return changes }
+    func send(_ platform: MusicAccountPlatform) { continuation.yield(platform) }
+    func finish() { continuation.finish() }
+    func statuses() -> [MusicAccountStatus] { [] }
+    func validate(platform: MusicAccountPlatform) throws -> MusicAccountStatus { throw MusicServiceError.unsupported }
+    func beginLogin(platform: MusicAccountPlatform) throws -> MusicLoginChallenge { throw MusicServiceError.unsupported }
+    func checkLogin(challengeID: UUID) throws -> MusicLoginProgress { throw MusicServiceError.unsupported }
+    func cancelLogin(challengeID: UUID) {}
+    func logout(platform: MusicAccountPlatform) throws { throw MusicServiceError.unsupported }
 }
 
 @MainActor private final class MusicModelPlayer: MusicPlaybackDriving {
@@ -558,6 +609,31 @@ final class MusicViewModelTests: XCTestCase {
         await model.close()
     }
 
+    @MainActor func testPlaylistPreviewPlayKeepsMoreThanFormerTwoThousandOccurrences() async throws {
+        let (service, _, model) = setup(); await model.load()
+        let track = try XCTUnwrap(model.queue.first).track
+        await model.play(Array(repeating: track, count: 2001), index: 2000)
+        let queue = try await service.queue()
+        XCTAssertNil(model.error)
+        XCTAssertEqual(model.queue.count, 2001); XCTAssertEqual(model.state.total, 2001)
+        XCTAssertEqual(model.state.currentId, queue.entries.last?.id)
+        XCTAssertEqual(model.queue, queue.entries)
+        await model.close()
+    }
+
+    @MainActor func testPlaylistPreviewPlayStillRejectsEmptyAndOutOfRangeSelection() async throws {
+        let (service, _, model) = setup(); await model.load()
+        let track = try XCTUnwrap(model.queue.first).track
+        let before = try await service.queue()
+        for (tracks, index) in [([MusicRemoteTrack](), 0), ([track], -1), ([track], 1)] {
+            await model.play(tracks, index: index)
+            XCTAssertEqual(model.error, MusicServiceError.invalidRequest.localizedDescription)
+        }
+        let after = try await service.queue()
+        XCTAssertEqual(after.revision, before.revision); XCTAssertEqual(after.entries, before.entries)
+        await model.close()
+    }
+
     @MainActor func testOptionsNeverAutomaticallyPickFirstScriptAndActualPlayingAloneRecordsStart() async throws {
         let (service, player, model) = setup()
         var requests: [MusicPlaybackDestination] = []
@@ -661,11 +737,73 @@ final class MusicViewModelTests: XCTestCase {
         let (service, _, model) = setup(); await model.load(); model.query = "synthetic"
         let began = expectation(description: "search began")
         await service.blockSearch { began.fulfill() }
-        let task = Task { await model.search() }
+        let task = Task { try await model.searchPage(platform: "wy", query: model.query, page: 1) }
         await fulfillment(of: [began], timeout: 2)
-        model.setAvailable(false); await service.releaseSearch(); await task.value
-        XCTAssertTrue(model.searchResults.isEmpty); XCTAssertFalse(model.hasSearched)
+        model.setAvailable(false); await service.releaseSearch()
+        do { _ = try await task.value; XCTFail("Revoked metadata escaped the search access boundary") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .accessUnavailable) }
         await model.close()
+    }
+
+    @MainActor func testAccountChangeRejectsLateSearchWithoutRevokingCurrentPlayback() async throws {
+        let (service, player, model) = setup()
+        await model.load(); await model.choose(musicSelection)
+        let playbackGeneration = model.accountAccessGeneration, searchGeneration = model.searchAccessGeneration
+        let resource = model.activeResourceID, queue = model.queue
+        let began = expectation(description: "old account search began")
+        await service.blockSearch { began.fulfill() }
+        let task = Task { try await model.searchPage(platform: "wy", query: "synthetic", page: 1) }
+        await fulfillment(of: [began], timeout: 2)
+        var notifications: [UUID] = []
+        let observation = model.searchAccessChanges.sink { notifications.append(model.searchAccessGeneration) }
+        model.accountSessionsChanged(.netease)
+        XCTAssertNotEqual(model.searchAccessGeneration, searchGeneration)
+        XCTAssertEqual(notifications, [model.searchAccessGeneration])
+        XCTAssertEqual(model.accountAccessGeneration, playbackGeneration)
+        XCTAssertEqual(model.activeResourceID, resource)
+        XCTAssertEqual(model.queue, queue)
+        XCTAssertTrue(player.stopped.isEmpty)
+        await service.releaseSearch()
+        do { _ = try await task.value; XCTFail("An old account read cannot escape the search boundary") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .staleAccess) }
+        observation.cancel()
+        await model.close()
+    }
+
+    @MainActor func testAuthoritativeAccountEventIsolatesSearchCacheWithoutUIEcho() async throws {
+        let observed = expectation(description: "authoritative account stream observed")
+        let accounts = MusicModelAccountSessions { observed.fulfill() }
+        let service = MusicModelService(), player = MusicModelPlayer()
+        let model = MusicViewModel(service: service, player: player, accounts: accounts)
+        await fulfillment(of: [observed], timeout: 2)
+        let results = MusicSearchResultsModel(readSongs: { platform, query, page, limit in
+            try await model.searchPage(platform: platform.rawValue, query: query, page: page, limit: limit)
+        }, readPlaylists: { _, _, _, _ in throw MusicServiceError.unsupported },
+           readRecording: { _ in throw MusicServiceError.unsupported })
+        results.setAccess(available: true, generation: model.searchAccessGeneration); results.appear()
+        let preferences = MusicSearchPreferences(songPlatforms: [.netease], searchPlaylists: false)
+        results.submit("synthetic", preferences: preferences); await results.finishPendingReads()
+        results.submit("synthetic", preferences: preferences); await results.finishPendingReads()
+        let firstReads = await service.searchReadCount()
+        XCTAssertEqual(firstReads, 1)
+        let generation = model.searchAccessGeneration, playbackGeneration = model.accountAccessGeneration
+        model.accountSessionsChanged(.netease)
+        XCTAssertEqual(model.searchAccessGeneration, generation, "The authoritative stream suppresses an extra UI echo")
+        let changed = expectation(description: "search account generation published")
+        let observation = model.searchAccessChanges.sink {
+            results.setAccess(available: model.isAvailable && !model.isClosed, generation: model.searchAccessGeneration)
+            changed.fulfill()
+        }
+        await accounts.send(.netease)
+        await fulfillment(of: [changed], timeout: 2)
+        XCTAssertNotEqual(model.searchAccessGeneration, generation)
+        XCTAssertEqual(model.accountAccessGeneration, playbackGeneration)
+        XCTAssertTrue(results.query.isEmpty)
+        results.submit("synthetic", preferences: preferences); await results.finishPendingReads()
+        let nextReads = await service.searchReadCount()
+        XCTAssertEqual(nextReads, 2)
+        observation.cancel(); results.disappear()
+        await model.close(); await accounts.finish()
     }
 
     @MainActor func testProgressCoalescesAndNeverFabricatesPlayedFacts() async throws {
@@ -677,6 +815,26 @@ final class MusicViewModelTests: XCTestCase {
         model.onPlayback(try fact(model, .paused, position: 5)); await model.flushPlaybackFacts()
         let facts = await service.recordedFacts()
         XCTAssertEqual(facts.map(\.kind), [.progress, .progress, .paused]); XCTAssertEqual(model.position, 5)
+        await model.close()
+    }
+
+    @MainActor func testPendingPlaybackFactsRemainOrderedThroughTerminalStop() async throws {
+        let (service, _, model) = setup(); await model.load(); await model.choose(musicSelection)
+        let started = expectation(description: "first fact awaiting persistence")
+        let gate = MusicCollectionGate { started.fulfill() }
+        await service.blockRecord(gate)
+        model.onPlayback(try fact(model, .progress, position: 0))
+        await fulfillment(of: [started], timeout: 2)
+        for index in 1...9 {
+            model.onPlayback(try fact(model, .progress, position: Double(index * 5)))
+        }
+        model.onPlayback(try fact(model, .stopped, position: 50))
+        XCTAssertNil(model.error)
+        await gate.release(); await model.flushPlaybackFacts()
+        let facts = await service.recordedFacts()
+        XCTAssertEqual(facts.map(\.kind), Array(repeating: .progress, count: 10) + [.stopped])
+        XCTAssertEqual(facts.map(\.position), (0...10).map { Double($0 * 5) })
+        XCTAssertNil(model.error)
         await model.close()
     }
 

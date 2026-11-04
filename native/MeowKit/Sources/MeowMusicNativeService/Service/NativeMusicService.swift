@@ -44,14 +44,21 @@ struct MusicDocument {
         try MusicLibraryValidation.validate(library["library"], owner: "device")
         _ = try MusicNativeSyncLedger.load(library)
         try musicRequire(queue["schema"] == .n(1) && queue["revision"].isInteger && queue["serial"].isInteger &&
-                         queue["entries"].isArray && queue["entries"].array.count <= 2000, .corruptDocument)
+                         queue["entries"].isArray, .corruptDocument)
         var seen = Set<String>(), serial = queue["serial"].int
+        var validated: [Data: MJ] = [:]
         for entry in queue["entries"].array {
             let id = entry["id"].string
+            let song = entry["song"]
             try musicRequire(id.range(of: "^entry-[1-9][0-9]*$", options: .regularExpression) != nil &&
-                Int(id.dropFirst(6)) != nil && seen.insert(id).inserted && entry["song"].isObject, .corruptDocument)
+                Int(id.dropFirst(6)) != nil && seen.insert(id).inserted &&
+                song.isObject && song["sources"].isArray, .corruptDocument)
             serial = max(serial, Int(id.dropFirst(6))!)
-            _ = try MusicModel.track(entry["song"], .init(kind: .queue, id: id))
+            let key = Data(song["songId"].string.utf8)
+            if key.isEmpty || validated[key] != song {
+                _ = try MusicModel.track(song, .init(kind: .queue, id: id))
+                if !key.isEmpty { validated[key] = song }
+            }
         }
         try musicRequire(serial <= 9_007_199_254_740_991 && queue["serial"].int >= serial &&
             (queue["currentId"] == .null || seen.contains(queue["currentId"].string)), .corruptDocument)
@@ -87,7 +94,17 @@ struct MusicDocument {
         }
         try musicRequire(envelope["revision"].int < 9_007_199_254_740_991, .limit)
         envelope["records"] = records; envelope["revision"] = .n(envelope["revision"].int + 1)
-        let data = envelope.bytes
+        var data = envelope.bytes
+        while data.count > 8 * 1024 * 1024, !history["playlists"].array.isEmpty {
+            // Archives are newest-first. Evict only the oldest archive before
+            // rejecting an oversized queue/library write.
+            var playlists = history["playlists"].array
+            playlists.removeLast()
+            history["playlists"] = .array(playlists)
+            records[MusicModel.key("history")] = history
+            envelope["records"] = records
+            data = envelope.bytes
+        }
         try musicRequire(data.count <= 8 * 1024 * 1024, .limit); return data
     }
 }
@@ -104,6 +121,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
     let scripts: (any MusicScriptResolving)?
     let accounts: (any MusicNativeAccountProviding)?
     let publicPlatforms: MusicNativePlatforms
+    let sourceDiscovery: any MusicSourceDiscoveryCaching
     let homeSnapshot: (any MusicHomeSnapshotStoring)?
     let audioFileCache: (any MusicAudioFileCaching)?
     var audioCacheAttempt: MusicNativeAudioCacheAttempt?
@@ -122,10 +140,10 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
     let random: @Sendable () -> Double
     let runID = UUID().uuidString.lowercased()
     private var sessionPosition = MusicModel.playback["position"]
+    private var parsedDocument: (data: Data, runID: String, state: MusicDocument)?
     var available = false, generation: UInt64 = 0, closed = false, epoch = UUID()
     struct Handle { let song: MJ; let at: Date; let bytes: Int }
     var handles: [String: Handle] = [:]
-    var searchEpochs: [String: UUID] = [:]
     var lyricEpoch = UUID()
     struct Attempt: Sendable {
         let id: String, occurrence: String, sourceKey: String
@@ -143,10 +161,9 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
     var publicQueueSources: [UUID: (collectionID: String, authorization: MusicQueueAuthorization,
                                    reader: MusicNativePublicBrowseQueueRead, bytes: Int, expires: Date)] = [:]
     var spent = Set<String>()
-    struct Import { let library: MJ; let sourceID: String; let ownerID: String; let batch: String; let at: Date }
+    struct Import { let library: MJ; let bytes: Int; let sourceID: String; let ownerID: String; let batch: String; let at: Date }
     var prepared: [String: Import] = [:]
     var operations: [UUID: @Sendable () -> Void] = [:]
-    private let operationAdmission = RequestAdmission(maximum: 12, perHost: 12, waitingLimit: 96)
     var operationLabels: [UUID: String] = [:]
     var librarySyncRun: (id: UUID, cancel: @Sendable () -> Void)?
     var automaticLibrarySyncRuntime = MusicNativeAutomaticSyncRuntime()
@@ -155,25 +172,25 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
     var similarMode = MusicNativeSimilarRuntime()
     var fmPreviews: [MusicHomeAction: MusicNativeFMPreviewEntry] = [:]
     var fmPreviewOrder: [MusicHomeAction] = []
-    var fmPreviewTail: Task<MusicNativeFMResponse?, Never>?
     var fmQueues: [UUID: (MusicHomeAction, MusicQueueAuthorization)] = [:]
 
     public init(document: any MusicNativeDocumentStoring, scripts: (any MusicScriptResolving)? = nil,
                 accounts: (any MusicNativeAccountProviding)? = nil, qq: any MusicPublicQQProviding,
+                sourceDiscovery: (any MusicSourceDiscoveryCaching)? = nil,
                 enabledPlatforms: Set<MusicPublicBrowsePlatform> = Set(MusicPublicBrowsePlatform.allCases),
                 homeSnapshot: (any MusicHomeSnapshotStoring)? = nil,
                 audioFileCache: (any MusicAudioFileCaching)? = nil,
                 transport: (any MusicNativeHTTPTransport)? = nil,
                 clock: @escaping @Sendable () -> Date = { Date() },
                 random: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) },
-                requestAdmission: RequestAdmission? = nil,
                 clientContexts: (any MusicNativeClientContextProviding)? = nil) {
         self.document = document; self.scripts = scripts; self.accounts = accounts; self.homeSnapshot = homeSnapshot
         self.audioFileCache = audioFileCache
+        self.sourceDiscovery = sourceDiscovery ?? MusicNativeMemorySourceDiscoveryCache(clock: clock)
         now = clock; self.random = random
         self.enabledPlatforms = enabledPlatforms
         selectedHomeSource = enabledPlatforms.contains(.netease) ? .netease : nil
-        let owned = transport == nil ? URLSessionMusicNativeHTTPTransport(admission: requestAdmission ?? RequestAdmission()) : nil
+        let owned = transport == nil ? URLSessionMusicNativeHTTPTransport() : nil
         ownedTransport = owned
         publicPlatforms = MusicNativePlatforms(transport: transport ?? owned!, qq: qq, clock: clock, clients: clientContexts)
         // The existing nonisolated protection fence must also revoke feedback
@@ -199,7 +216,6 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
         access.revoke(generation: generation, close: true)
         closed = true; available = false; epoch = UUID(); clearTransient()
         for cancel in operations.values { cancel() }
-        await operationAdmission.close()
         await publicPlatforms.revoke()
         await audioFileCache?.close()
         ownedTransport?.close()
@@ -229,7 +245,8 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
         playbackFeedbackAdmission = nil
         librarySyncRun?.cancel()
         handles.removeAll(); prepared.removeAll(); attempt = nil; spent.removeAll()
-        searchEpochs.removeAll(); lyricEpoch = UUID()
+        parsedDocument = nil
+        lyricEpoch = UUID()
     }
     func invalidatePlayback() {
         retireCachedPlaybackRecovery()
@@ -263,7 +280,13 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
         catch { throw MusicServiceError.storageFailed }
     }
     private func documentState(_ data: Data?) throws -> MusicDocument {
-        var state = try MusicDocument(data, runID: runID)
+        var state: MusicDocument
+        if let data, let cached = parsedDocument, cached.runID == runID, cached.data == data {
+            state = cached.state
+        } else {
+            state = try MusicDocument(data, runID: runID)
+            parsedDocument = data.map { ($0, runID, state) }
+        }
         if sessionPosition["occurrenceId"] == state.queue["currentId"] {
             state.playback["position"] = sessionPosition
         } else { state.resetPosition() }
@@ -297,15 +320,10 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
         try check()
         let own = epoch, id = UUID(), gate = MusicNativeOperation<T>()
         let task = Task {
-            do {
-                let lease = try await operationAdmission.acquire(host: "business",
-                    priority: MusicRequestTrace.current?.priority ?? .normal)
-                let result: Result<T, Error>
-                do { try check(own); result = .success(try await body()) }
-                catch { result = .failure(error) }
-                await operationAdmission.release(lease)
-                gate.finish(result)
-            } catch { gate.finish(.failure(error)) }
+            let result: Result<T, Error>
+            do { try check(own); result = .success(try await body()) }
+            catch { result = .failure(error) }
+            gate.finish(result)
             operations.removeValue(forKey: id)
             operationLabels.removeValue(forKey: id)
             access.remove(id)
@@ -338,11 +356,11 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
             return handle.song
         }
     }
-    func remember(_ song: MJ) throws -> MusicRemoteTrack {
+    func remember(_ song: MJ, maximumHandles: Int = 600) throws -> MusicRemoteTrack {
         handles = handles.filter { now().timeIntervalSince($0.value.at) < 600 }
         let bytes = song.bytes.count
         try musicRequire(bytes <= 64 * 1024, .limit)
-        while handles.count >= 600 || handles.values.reduce(0, { $0 + $1.bytes }) + bytes > 4 * 1024 * 1024 {
+        while handles.count >= maximumHandles || handles.values.reduce(0, { $0 + $1.bytes }) + bytes > 4 * 1024 * 1024 {
             guard let oldest = handles.min(by: { $0.value.at < $1.value.at })?.key else { throw MusicServiceError.limit }
             handles.removeValue(forKey: oldest)
         }
@@ -351,7 +369,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
         return try MusicModel.track(song, .init(kind: .handle, id: id))
     }
     func page(_ value: MusicNativeTrackPage, maximumItems: Int = 30) throws -> MusicBrowsePage {
-        try musicRequire((1...200).contains(maximumItems) && value.items.count <= maximumItems, .limit)
+        try musicRequire(maximumItems >= 0 && value.items.count <= maximumItems, .limit)
         if let cursor = value.cursor { _ = try musicText(cursor, maximum: 64) }
         let songs = try value.items.map(MusicModel.normalize)
         let sizes = songs.map { $0.bytes.count }, bytes = sizes.reduce(0, +)
@@ -360,12 +378,13 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
         // Otherwise a Migu edition page (or an equal-timestamp eviction tie)
         // could evict its own first rows while later rows are being registered.
         handles = handles.filter { now().timeIntervalSince($0.value.at) < 600 }
-        while handles.count + songs.count > 600 ||
+        let capacity = max(600, songs.count)
+        while handles.count + songs.count > capacity ||
             handles.values.reduce(0, { $0 + $1.bytes }) + bytes > 4 * 1024 * 1024 {
             guard let oldest = handles.min(by: { $0.value.at < $1.value.at })?.key else { throw MusicServiceError.limit }
             handles.removeValue(forKey: oldest)
         }
-        return .init(items: try songs.map(remember), cursor: value.cursor)
+        return .init(items: try songs.map { try remember($0, maximumHandles: capacity) }, cursor: value.cursor)
     }
     public func platforms() async throws -> [MusicPlatform] {
         try check()
@@ -374,17 +393,23 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
             .init(id: "mg", title: "咪咕音乐", lyrics: true, accountState: "unsupported")]
         return inventory.filter { platformEnabled($0.id) }
     }
-    public func search(platform: String, query: String, page: Int) async throws -> MusicSearchPage {
+    public func search(platform: String, query: String, page: Int, limit: Int) async throws -> MusicSearchPage {
         try check(); try requirePlatform(platform)
-        _ = try musicText(query, maximum: 800); try musicRequire((1...200).contains(page))
-        let serial = UUID(); searchEpochs[platform] = serial; let port = publicPlatforms
-        let result = try await work { try await port.search(platform: platform, query: query, page: page) }
-        try musicRequire(searchEpochs[platform] == serial, .staleResult)
-        try musicRequire((0...1_000_000).contains(result.total) && result.items.count <= MusicNativeSearchProtocol.maximumItems(platform) &&
+        _ = try musicText(query, maximum: 800)
+        guard let kind = MusicPublicBrowsePlatform(rawValue: platform) else { throw MusicServiceError.unsupported }
+        _ = try MusicSearchPagination.offset(platform: kind, page: page, limit: limit)
+        let port = publicPlatforms
+        let result = try await work {
+            try await port.search(platform: platform, query: query, page: page, limit: limit)
+        }
+        try musicRequire(result.total >= 0 &&
+            (kind == .migu || result.items.count <= limit) &&
             result.items.allSatisfy { $0.platform == platform } &&
-            (result.nextPage == nil || result.nextPage! > page && result.nextPage! <= 200 && !result.items.isEmpty), .invalidResponse)
-        let items = try self.page(result, maximumItems: MusicNativeSearchProtocol.maximumItems(platform)).items
-        return .init(platform: platform, query: query, page: page, total: result.total, nextPage: result.nextPage, items: items)
+            MusicSearchPagination.validNextPage(page: page, limit: limit,
+                next: result.nextPage, hasItems: !result.items.isEmpty), .invalidResponse)
+        let items = try self.page(result, maximumItems: result.items.count).items
+        return .init(platform: platform, query: query, page: page, limit: limit, total: result.total,
+                     nextPage: result.nextPage, items: items)
     }
     public func recommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) async throws -> MusicBrowsePage {
         try check(); try requirePlatform(platform.rawValue)
@@ -400,7 +425,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
         try musicRequire(result.items.count <= 30 && musicIDs(result.items.map(\.id)).count == result.items.count, .invalidResponse)
         for item in result.items {
             _ = try musicText(item.id, maximum: 64); _ = try musicText(item.title, maximum: 600)
-            if let count = item.count { try musicRequire((0...20_000).contains(count), .invalidResponse) }
+            if let count = item.count { try musicRequire(count >= 0, .invalidResponse) }
         }
         if let cursor = result.cursor { _ = try musicText(cursor, maximum: 64) }
         return result
@@ -414,8 +439,8 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
     }
 }
 
-/// Logical cancellation is prompt. The physical operation remains budgeted
-/// until it settles, including a non-cooperative injected adapter.
+/// Logical cancellation is prompt. The owner tracks physical work until it
+/// settles, including a non-cooperative injected adapter.
 final class MusicNativeOperation<T: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
     private var result: Result<T, Error>?

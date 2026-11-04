@@ -6,14 +6,71 @@ import MeowJSON
 @testable import MeowMusicPlatform
 
 final class MusicKugouBusinessTests: XCTestCase {
+    func testOwnedCollectionDoubleReadKeepsMoreThanTwoThousandSongOccurrences() async throws {
+        let s = MusicKugouTestSystem(), count = 2001
+        await s.http.respond("/v7/get_all_list", [
+            try MusicKugouFixture.directory([MusicKugouFixture.collection(count: count)])
+        ])
+        let responses = try stride(from: 0, to: count, by: 30).map { start in
+            try MusicKugouFixture.members((start..<min(start + 30, count)).map {
+                MusicKugouFixture.song(fileID: $0 + 501, order: $0)
+            }, count: count)
+        }
+        await s.http.respond("/v4/get_list_all_file_v3", responses + responses)
+        let rows = try await s.provider.tracks(collectionID: "0:7", credential: MusicKugouFixture.credential())
+        XCTAssertEqual(rows.count, count)
+        let fileIDs = try rows.map { try XCTUnwrap(MusicKugouFixture.object($0)["fileid"]) }
+        XCTAssertEqual(fileIDs, (501..<2502).map { JSONValue.string(String($0)) })
+        let requests = await s.http.recorded()
+        XCTAssertEqual(requests.filter { $0.url.path == "/v4/get_list_all_file_v3" }.count, 134)
+        XCTAssertEqual(requests.filter { $0.url.path == "/v7/get_all_list" }.count, 2)
+    }
+
+    func testParallelReadsTrackCancellationAndRevocationUntilTransportReturns() async throws {
+        for revoke in [false, true] {
+            let s = MusicKugouTestSystem(), gate = MusicAccountTestGate()
+            let context = try await s.provider.context(MusicKugouFixture.credential())
+            let started = expectation(description: "parallel read transports entered")
+            started.expectedFulfillmentCount = 8
+            await s.http.observeRequests { started.fulfill() }
+            await s.http.hold(MusicKugouRoute.chorus.path, gate)
+            await s.http.respond(MusicKugouRoute.chorus.path, [try MusicKugouFixture.response(["status": 1])])
+            let tasks = (0..<8).map { _ in
+                Task { try await s.provider.raw(.chorus, context: context, query: ["hash": MusicKugouFixture.baseHash]) }
+            }
+            await fulfillment(of: [started], timeout: 3)
+            let entered = await s.provider.flights.count
+            XCTAssertEqual(entered, 8)
+            if revoke { await s.provider.revoke() }
+            else { tasks[0].cancel() }
+            let retiring = await s.provider.flights.count
+            XCTAssertEqual(retiring, 8, "Cancellation is not physical completion")
+            await gate.release()
+            for (index, task) in tasks.enumerated() {
+                do {
+                    let response = try await task.value
+                    XCTAssertFalse(revoke || index == 0)
+                    XCTAssertEqual(response.status, 200)
+                } catch {
+                    XCTAssertTrue(revoke || index == 0)
+                    XCTAssertTrue(error is CancellationError || error as? MusicServiceError == .staleResult)
+                }
+            }
+            let remaining = await s.provider.flights.count
+            let cancellations = await s.http.cancellationCount()
+            XCTAssertEqual(remaining, 0)
+            XCTAssertEqual(cancellations, revoke ? 8 : 1)
+        }
+    }
+
     func testDailyAndFMUseExactRoutesAndDoNotPublishPrivateContextOrContinuation() async throws {
         let s = MusicKugouTestSystem(), credential = try MusicKugouFixture.credential()
         for kind in ["daily", "fm"] {
             let result = try await s.provider.recommendations(kind: kind, page: 1, credential: credential)
             XCTAssertNil(result.nextPage); XCTAssertNil(result.expiresAt); XCTAssertEqual(result.rows.count, 1)
             let row = try MusicKugouFixture.object(result.rows[0])
-            XCTAssertEqual(row["musicId"], .string(MusicKugouFixture.baseHash))
-            XCTAssertEqual(row["songmid"], .string("21")); XCTAssertEqual(row["albumAudioId"], .string("22"))
+            XCTAssertEqual(row["songmid"], .string(MusicKugouFixture.baseHash))
+            XCTAssertEqual(row["albumAudioId"], .string("22"))
             let text = String(decoding: try JSONEncoder().encode(result.rows), as: UTF8.self)
             for secret in [MusicKugouFixture.token, "synthetic-private-vip", "must-not-be-forwarded", "not-a-continuation", "synthetic-dfid"] {
                 XCTAssertFalse(text.contains(secret))
@@ -116,10 +173,41 @@ final class MusicKugouBusinessTests: XCTestCase {
             XCTAssertEqual(try MusicKugouFixture.fields(request)["global_collection_id"], "synthetic-global")
         }
         await s.http.respond("/pubsongs/v2/get_other_list_file_nofilt", [
-            try MusicKugouFixture.response(["status": 1, "data": ["songs": [], "list_info": ["global_collection_id": "wrong", "count": 0]]])
+            try MusicKugouFixture.response(["status": 1, "data": ["songs": [], "count": 0,
+                "list_info": ["global_collection_id": "wrong", "count": 0]]])
         ])
         do { _ = try await s.provider.tracks(collectionID: "1:9", credential: MusicKugouFixture.credential()); XCTFail("Wrong subscription accepted") }
         catch { XCTAssertEqual(error as? MusicServiceError, .targetChanged) }
+    }
+    func testSubscriptionLaterPagesAllowMissingListInfoButKeepDataCountAndVersionChecks() async throws {
+        let s = MusicKugouTestSystem()
+        await s.http.respond("/v7/get_all_list", [try MusicKugouFixture.directory([
+            MusicKugouFixture.collection(listID: 9, type: 1, owner: 99, name: "订阅", special: 0, count: 31)])])
+        func row(_ index: Int) -> [String: Any] {
+            var value = MusicKugouFixture.song(fileID: index, order: index)
+            value["hash"] = String(format: "%032X", index)
+            return value
+        }
+        let first = try MusicKugouFixture.response(["status": 1, "data": ["count": 31,
+            "songs": (1...30).map(row), "list_info": ["global_collection_id": "synthetic-global", "count": 31, "list_ver": 5]]])
+        let second = try MusicKugouFixture.response(["status": 1, "data": ["count": 31, "songs": [row(31)]]])
+        await s.http.respond("/pubsongs/v2/get_other_list_file_nofilt", [first, second, first, second])
+        let values = try await s.provider.tracks(collectionID: "1:9", credential: MusicKugouFixture.credential())
+        XCTAssertEqual(values.count, 31)
+        XCTAssertNil(try MusicKugouFixture.object(values[0])["fileid"])
+    }
+    func testSubscriptionDataAndListCountsMustAgreeWhenBothExist() async throws {
+        let s = MusicKugouTestSystem()
+        await s.http.respond("/v7/get_all_list", [try MusicKugouFixture.directory([
+            MusicKugouFixture.collection(listID: 9, type: 1, owner: 99, name: "订阅", special: 0, count: 1)])])
+        await s.http.respond("/pubsongs/v2/get_other_list_file_nofilt", [
+            try MusicKugouFixture.response(["status": 1, "data": ["songs": [MusicKugouFixture.song()], "count": 2,
+                "list_info": ["global_collection_id": "synthetic-global", "count": 1, "list_ver": 5]]]),
+            try MusicKugouFixture.response(["status": 1, "data": ["songs": [MusicKugouFixture.song()], "count": 2,
+                "list_info": ["global_collection_id": "synthetic-global", "count": 1, "list_ver": 5]]])
+        ])
+        do { _ = try await s.provider.tracks(collectionID: "1:9", credential: MusicKugouFixture.credential()); XCTFail("Conflicting counts accepted") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .upstreamInvalid) }
     }
     func testPagingCountVersionAndDuplicateFileIDAreNotPartialSuccess() async throws {
         for mode in ["version", "count", "duplicate", "early-end"] {

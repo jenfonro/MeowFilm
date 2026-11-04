@@ -18,7 +18,7 @@ final class MusicNativeRecordPreviewTests: XCTestCase {
         try await service.setAccess(available: true, generation: 1)
         var refs: [MusicReference] = []
         for query in ["First", "Second", "Third"] {
-            refs.append(try await service.search(platform: "tx", query: query, page: 1).items[0].ref)
+            refs.append(try await service.search(platform: "tx", query: query, page: 1, limit: 30).items[0].ref)
         }
         let initial = try await service.changeQueue(.replace(refs, index: 1), expectedRevision: 0)
         let entries = try await service.queue().entries
@@ -44,8 +44,8 @@ final class MusicNativeRecordPreviewTests: XCTestCase {
     }
     func testPriorityAndManualSingleLoopPreviewAreExactButFMTailDoesNotWrap() async throws {
         let service = try await NativeMusicFixture.service()
-        let first = try await service.search(platform: "tx", query: "First", page: 1).items[0]
-        let next = try await service.search(platform: "tx", query: "Next", page: 1).items[0]
+        let first = try await service.search(platform: "tx", query: "First", page: 1, limit: 30).items[0]
+        let next = try await service.search(platform: "tx", query: "Next", page: 1, limit: 30).items[0]
         let initial = try await service.changeQueue(.replace([first.ref, next.ref], index: 1), expectedRevision: 0)
         let entries = try await service.queue().entries
         let single = try await service.updateSettings(.init(ifRevision: 0, mode: .single))

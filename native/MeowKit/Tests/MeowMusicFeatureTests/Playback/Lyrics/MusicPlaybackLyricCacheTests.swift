@@ -70,9 +70,8 @@ final class MusicPlaybackLyricCacheTests: XCTestCase {
     private func cacheKey(_ song: String = "song") throws -> Cache.Key {
         try .init(track: track(song), selection: selection())
     }
-    private func owner(_ generation: UUID, clock: PlaybackLyricClock = .init(),
-                       producers: Int = 4, waiters: Int = 32) -> Cache {
-        let cache = Cache(maximumProducers: producers, maximumWaiters: waiters, now: { clock.read() })
+    private func owner(_ generation: UUID, clock: PlaybackLyricClock = .init()) -> Cache {
+        let cache = Cache(now: { clock.read() })
         cache.setAccess(available: true, generation: generation)
         return cache
     }
@@ -282,47 +281,57 @@ final class MusicPlaybackLyricCacheTests: XCTestCase {
         XCTAssertEqual(cache.usage.entries, 1); XCTAssertEqual(cache.usage.producers, 0)
     }
 
-    func testCancelledUncooperativeProducersRemainBoundedAcrossScopeRotation() async throws {
+    func testScopeRotationTracksRetiredProducersWithoutBlockingFreshReads() async throws {
         var generation = UUID()
-        let cache = owner(generation, producers: 2), key = try cacheKey(), value = snapshot()
-        let firstStarted = expectation(description: "first held producer"), secondStarted = expectation(description: "second held producer")
-        let gate = PlaybackLyricGate(started: [firstStarted, secondStarted])
+        let cache = owner(generation), key = try cacheKey()
+        let started = (0..<6).map { expectation(description: "held producer \($0)") }
+        let gate = PlaybackLyricGate(started: started)
         defer { gate.releaseAll(); cache.close() }
-        let first = try cache.request(for: key, occurrenceID: "first", generation: generation) { try await gate.load(value) }
-        await fulfillment(of: [firstStarted], timeout: 2)
-        generation = UUID(); cache.setAccess(available: true, generation: generation)
-        let second = try cache.request(for: key, occurrenceID: "first", generation: generation) { try await gate.load(value) }
-        await fulfillment(of: [secondStarted], timeout: 2)
-        generation = UUID(); cache.setAccess(available: true, generation: generation)
-        await assertCancelled(first); await assertCancelled(second)
-        XCTAssertEqual(cache.usage.producers, 2); XCTAssertEqual(cache.usage.waiters, 0)
-        XCTAssertThrowsError(try cache.request(for: key, occurrenceID: "first", generation: generation) { value }) {
-            XCTAssertEqual($0 as? MusicServiceError, .busy)
+        for index in started.indices {
+            let value = snapshot("old-\(index)")
+            let request = try cache.request(for: key, occurrenceID: "first", generation: generation) { try await gate.load(value) }
+            await fulfillment(of: [started[index]], timeout: 2)
+            generation = UUID(); cache.setAccess(available: true, generation: generation)
+            await assertCancelled(request)
+            XCTAssertEqual(cache.usage.producers, index + 1)
+            XCTAssertEqual(cache.usage.waiters, 0)
         }
-        XCTAssertEqual(gate.calls, 2)
+        let current = snapshot("current")
+        _ = try await put(cache, key: key, generation: generation, value: current)
+        XCTAssertEqual(gate.calls, 6); XCTAssertEqual(gate.cancellations, 6)
         gate.releaseAll(); await cache.flush()
-        XCTAssertEqual(cache.usage.producers, 0); XCTAssertEqual(cache.usage.entries, 0)
-        _ = try await put(cache, key: key, generation: generation, value: value)
-        XCTAssertEqual(cache.usage.entries, 1)
+        let cached = try await hit(cache, key: key, generation: generation)
+        XCTAssertEqual(cached.lines, current.lines)
+        XCTAssertEqual(cache.usage.producers, 0); XCTAssertEqual(cache.usage.entries, 1)
     }
 
-    func testSharedWaiterAdmissionIsBoundedAndReleasedOnCancellation() async throws {
-        let generation = UUID(), cache = owner(generation, waiters: 2), key = try cacheKey(), value = snapshot()
-        let started = expectation(description: "bounded shared producer"), gate = PlaybackLyricGate(started: [started])
+    func testManyOccurrencesShareOneProducerAndCancelIndependently() async throws {
+        let generation = UUID(), cache = owner(generation), key = try cacheKey(), value = snapshot()
+        let started = expectation(description: "shared producer"), gate = PlaybackLyricGate(started: [started])
         defer { gate.releaseAll(); cache.close() }
         let first = try cache.request(for: key, occurrenceID: "first", generation: generation) { try await gate.load(value) }
-        let second = try cache.request(for: key, occurrenceID: "second", generation: generation) { value }
-        XCTAssertThrowsError(try cache.request(for: key, occurrenceID: "third", generation: generation) { value }) {
-            XCTAssertEqual($0 as? MusicServiceError, .busy)
+        var requests: [(String, Cache.Request)] = []
+        for index in 1..<40 {
+            let occurrence = "occurrence-\(index)"
+            let request = try cache.request(for: key, occurrenceID: occurrence, generation: generation) {
+                throw MusicServiceError.invalidRequest
+            }
+            requests.append((occurrence, request))
         }
+        XCTAssertEqual(cache.usage.waiters, 40); XCTAssertEqual(cache.usage.producers, 1)
         await fulfillment(of: [started], timeout: 2)
         first.cancel(); await assertCancelled(first)
-        let third = try cache.request(for: key, occurrenceID: "third", generation: generation) { value }
-        XCTAssertEqual(cache.usage.waiters, 2); XCTAssertEqual(cache.usage.producers, 1)
+        let added = try cache.request(for: key, occurrenceID: "added", generation: generation) { value }
+        requests.append(("added", added))
+        XCTAssertEqual(cache.usage.waiters, 40); XCTAssertEqual(cache.usage.producers, 1)
+        XCTAssertEqual(gate.cancellations, 0)
         gate.releaseAll()
-        let b = try await second.value(), c = try await third.value()
-        XCTAssertEqual(b.occurrenceId, "second"); XCTAssertEqual(c.occurrenceId, "third")
+        for (occurrence, request) in requests {
+            let result = try await request.value()
+            XCTAssertEqual(result.occurrenceId, occurrence); XCTAssertEqual(result.lines, value.lines)
+        }
         XCTAssertEqual(gate.calls, 1)
+        XCTAssertEqual(cache.usage.waiters, 0); XCTAssertEqual(cache.usage.producers, 0)
     }
 
     func testErrorsEmptyAndDisabledResponsesAreNeverNegativeCached() async throws {

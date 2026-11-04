@@ -8,7 +8,7 @@ private enum MusicAccountFlightContext {
 /// Deduplicates one exact read, not the permissions of its callers. Each caller
 /// still validates its own account/selection before and after waiting.
 /// Cancellation is per waiter; only the final departure cancels the work.
-/// The account owner's run() retains the physical HTTP slot until I/O settles.
+/// The account owner tracks physical work until I/O settles.
 final class MusicAccountSingleFlight<Key: Hashable & Sendable, Value: Sendable>: @unchecked Sendable {
     private final class Flight {
         let id = UUID()
@@ -28,14 +28,12 @@ final class MusicAccountSingleFlight<Key: Hashable & Sendable, Value: Sendable>:
         return flights.values.reduce(0) { $0 + $1.waiters.count }
     }
 
-    private func enroll(_ key: Key, id: UUID, gate: MusicAccountOperation<Value>) throws -> (UUID, Bool) {
+    private func enroll(_ key: Key, id: UUID, gate: MusicAccountOperation<Value>) -> (UUID, Bool) {
         lock.lock(); defer { lock.unlock() }
         if let flight = flights[key] {
-            guard flight.waiters.count < 64 else { throw MusicServiceError.busy }
             flight.waiters[id] = gate
             return (flight.id, false)
         }
-        guard flights.count < 24 else { throw MusicServiceError.busy }
         let flight = Flight()
         flight.waiters[id] = gate; flights[key] = flight
         return (flight.id, true)
@@ -83,7 +81,7 @@ final class MusicAccountSingleFlight<Key: Hashable & Sendable, Value: Sendable>:
                operation: @escaping @Sendable () async throws -> Value) async throws -> Value {
         try Task.checkCancellation()
         let waiterID = UUID(), gate = MusicAccountOperation<Value>()
-        let (flightID, start) = try enroll(key, id: waiterID, gate: gate)
+        let (flightID, start) = enroll(key, id: waiterID, gate: gate)
         trace?.record(start ? .cacheMiss : .coalesced)
         joined?(key)
         if start {

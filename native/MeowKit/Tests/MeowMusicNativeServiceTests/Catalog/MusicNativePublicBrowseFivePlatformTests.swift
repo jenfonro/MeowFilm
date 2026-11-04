@@ -11,6 +11,7 @@ final class MusicNativePublicBrowseFivePlatformTests: XCTestCase {
             let query = "A + B & 中文"
             let first = try await service.publicPlaylists(platform: platform, query: query, cursor: nil)
             XCTAssertEqual(first.items.count, 30); XCTAssertEqual(first.total, 31)
+            XCTAssertNotNil(first.cursor)
             XCTAssertEqual(first.items[0].nativeID, MusicNativePublicBrowseFiveFixture.playlistID)
             XCTAssertEqual(first.items[0].id, platform.rawValue + ":playlist:" + MusicNativePublicBrowseFiveFixture.playlistID)
             XCTAssertEqual(first.items[0].artwork?.scheme, "https")
@@ -45,7 +46,7 @@ final class MusicNativePublicBrowseFivePlatformTests: XCTestCase {
 
     func testNewRouteAllowlistIsActuallyAdmittedByClosedNativeTransportAndRejectsEscapes() async throws {
         let requests = [
-            try MusicNativePublicBrowseKuwo.search(query: "A + B", page: 2),
+            try MusicNativePublicBrowseKuwo.search(query: "A + B", page: 2, limit: 30),
             try MusicNativePublicBrowseKuwo.detail(id: "42", page: 1),
             try MusicNativePublicBrowseMigu.search(query: "A + B", page: 2, now: NativeMusicFixture.date),
             try MusicNativePublicBrowseMigu.detail(id: "42", page: nil),
@@ -74,6 +75,17 @@ final class MusicNativePublicBrowseFivePlatformTests: XCTestCase {
                 catch { XCTAssertEqual(error as? MusicServiceError, .invalidRequest) }
             }
         }
+    }
+
+    func testKuwoPlaylistSearchRejectsUntrustedPageAndSongOffsetOverflow() throws {
+        let good = try MusicNativePublicBrowseKuwo.search(query: "Synthetic", page: 1)
+        var url = try XCTUnwrap(URLComponents(url: good.url, resolvingAgainstBaseURL: false))
+        url.queryItems = url.queryItems?.map { $0.name == "pn" ? .init(name: "pn", value: String(Int.max)) : $0 }
+        let malformed = MusicNativeHTTPRequest(url: try XCTUnwrap(url.url), headers: good.headers)
+        XCTAssertFalse(MusicNativePublicBrowseKuwo.permits(malformed))
+        XCTAssertFalse(MusicNativePublicBrowseRoutes.allows(malformed))
+        XCTAssertThrowsError(try MusicNativePublicBrowseKuwo.detail(id: "42", page: Int.max / 1000))
+        XCTAssertThrowsError(try MusicNativePublicBrowseMigu.detail(id: "42", page: Int.max / 50))
     }
 
     func testFullDoubleReadIncludesTailAndDetectsMembershipOwnerCountAndMissingMetadata() async throws {
@@ -123,7 +135,7 @@ final class MusicNativePublicBrowseFivePlatformTests: XCTestCase {
         }
     }
 
-    func testEmptyListIsVerifiedAndOverLimitOrUnsupportedAlbumFailsWithoutTruncation() async throws {
+    func testEmptyListIsVerifiedAndLargePlaylistIsAcceptedWhileUnsupportedAlbumFails() async throws {
         for platform in MusicNativePublicBrowseFiveFixture.platforms {
             let empty = MusicNativePublicBrowseFiveHTTP(platform, total: 0, searchTotal: 0)
             let service = try await NativeMusicFixture.service(http: empty)
@@ -139,27 +151,34 @@ final class MusicNativePublicBrowseFivePlatformTests: XCTestCase {
             let unchanged = await empty.calls(); XCTAssertEqual(unchanged.count, calls.count)
             await service.close()
             let large = MusicNativePublicBrowseFiveHTTP(platform, total: 2001)
-            let limited = try await NativeMusicFixture.service(http: large)
-            do { _ = try await limited.publicDetail(MusicNativePublicBrowseFiveFixture.collection(platform), cursor: nil); XCTFail("truncation") }
-            catch { XCTAssertEqual(error as? MusicServiceError, .limit) }
-            let one = await large.calls(); XCTAssertEqual(one.count, 1)
-            await limited.close()
+            let complete = try await NativeMusicFixture.service(http: large)
+            let largePage = try await complete.publicDetail(MusicNativePublicBrowseFiveFixture.collection(platform), cursor: nil)
+            XCTAssertEqual(largePage.total, 2001); XCTAssertEqual(largePage.tracks.count, 30)
+            await complete.close()
         }
     }
 
-    func testShortSearchPagesMissingResultsAndSearchCeilingAreErrorsNotEndOfList() throws {
+    func testShortAndEmptySearchPagesEndWhileFullPagesKeepAccurateCursors() throws {
         for platform in MusicNativePublicBrowseFiveFixture.platforms {
-            var raw = MusicNativePublicBrowseFiveFixture.search(platform, page: 1, total: 31)
-            if platform == .kuwo { raw["abslist"] = .array([]) }
-            else { var data = raw["data"], result = data["songListResultData"]; result["result"] = .array([]); data["songListResultData"] = result; raw["data"] = data }
             func decode(_ root: MJ, page: Int) throws -> MusicPublicBrowseQQSearch {
                 if platform == .kuwo { return try MusicNativePublicBrowseKuwo.searchPage(root.bytes, page: page) }
                 return try MusicNativePublicBrowseMigu.searchPage(root, page: page)
             }
-            XCTAssertThrowsError(try decode(raw, page: 1))
-            XCTAssertThrowsError(try decode(MusicNativePublicBrowseFiveFixture.search(platform, page: 200, total: 6001), page: 200)) {
-                XCTAssertEqual($0 as? MusicServiceError, .limit)
+            let short = try decode(MusicNativePublicBrowseFiveFixture.search(platform, page: 1, total: 31, rows: 2), page: 1)
+            XCTAssertEqual(short.items.count, 2); XCTAssertNil(short.nextPage)
+            let empty = try decode(MusicNativePublicBrowseFiveFixture.search(platform, page: 1, total: 31, rows: 0), page: 1)
+            XCTAssertTrue(empty.items.isEmpty); XCTAssertNil(empty.nextPage)
+            XCTAssertThrowsError(try decode(MusicNativePublicBrowseFiveFixture.search(platform, page: 1, total: 31, rows: 31), page: 1)) {
+                XCTAssertEqual($0 as? MusicServiceError, .upstreamInvalid)
             }
+            let fullEnd = try decode(MusicNativePublicBrowseFiveFixture.search(platform, page: 200, total: 6000), page: 200)
+            XCTAssertEqual(fullEnd.items.count, 30); XCTAssertNil(fullEnd.nextPage)
+            let exceeded = try decode(MusicNativePublicBrowseFiveFixture.search(platform, page: 200, total: 5999, rows: 30), page: 200)
+            XCTAssertEqual(exceeded.items.count, 30); XCTAssertNil(exceeded.nextPage)
+            let later = try decode(MusicNativePublicBrowseFiveFixture.search(platform, page: 200, total: 6001), page: 200)
+            XCTAssertEqual(later.items.count, 30); XCTAssertEqual(later.nextPage, 201)
+            let last = try decode(MusicNativePublicBrowseFiveFixture.search(platform, page: 201, total: 6001), page: 201)
+            XCTAssertEqual(last.items.count, 1); XCTAssertEqual(last.total, 6001); XCTAssertNil(last.nextPage)
         }
     }
     func testKWPlaylistLexicalCompatibilityIsDataOnlyAndMGFailureNeverBecomesAnEmptySuccess() throws {

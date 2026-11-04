@@ -54,14 +54,14 @@ extension NativeMusicService {
     func syncDispatch(_ mutation: MusicLibrarySyncMutation, local: MJ, session: MusicLibrarySyncSession,
                       selection: MusicLibrarySyncSelection, round: inout MusicNativeSyncRound) async throws -> Bool {
         try await syncCurrent(round)
-        try musicRequire(round.writes < 128 && round.ledger.fences.count < 512, .limit)
+        try musicRequire(round.ledger.fences.count < 512, .limit)
         var fence = MusicNativeSyncFence(platform: session.platform, accountID: session.accountID, scope: session.scope,
             localID: local["id"].string, localRevision: local["revision"].int, mutation: mutation)
         round.ledger.fences.append(fence)
         // Durable "dispatched" fence precedes the external boundary. Even an
         // ambiguous document CAS prevents calling the provider.
         try syncCheckpoint(&round)
-        try await syncCurrent(round); round.writes += 1
+        try await syncCurrent(round)
         do {
             let result = try await round.port.writeLibrarySync(session, mutation: mutation)
             try await syncCurrent(round)
@@ -105,7 +105,8 @@ extension NativeMusicService {
             for selection in round.request.selections {
                 let platform = selection.platform.rawValue, session = round.sessions[platform]!
                 if round.ledger.fences.contains(where: { $0.platform == selection.platform && $0.localID == id }) { continue }
-                for _ in 0..<130 {
+                var dispatched = Set<String>()
+                while true {
                     try await syncCurrent(round)
                     let c = round.library["collections"].array.first { $0["id"].string == id }!
                     guard selection.kinds.contains(MusicLibrarySyncKind(rawValue: c["kind"].string)!) else { break }
@@ -119,6 +120,11 @@ extension NativeMusicService {
                         if c["creating"].contains(key) { round.issue("unconfirmed", platform: selection.platform, collection: id); break }
                         let mutation = MusicLibrarySyncMutation(action: .create, name: c["name"].string,
                             directoryRevision: round.snapshots[platform]!.revision)
+                        let mutationKey = MusicNativeSyncLogic.mutationKey(mutation)
+                        guard dispatched.insert(mutationKey).inserted else {
+                            round.issue("stalled", platform: selection.platform, collection: id)
+                            break
+                        }
                         if !(try await syncDispatch(mutation, local: c, session: session, selection: selection, round: &round)) { break }
                         continue
                     }
@@ -137,7 +143,10 @@ extension NativeMusicService {
                         if candidate != nil { break }
                     }
                     guard let candidate else { break }
-                    if round.writes >= 128 { round.issue("limit", platform: selection.platform, collection: id); return }
+                    guard dispatched.insert(MusicNativeSyncLogic.mutationKey(candidate)).inserted else {
+                        round.issue("stalled", platform: selection.platform, collection: id)
+                        break
+                    }
                     if !(try await syncDispatch(candidate, local: c, session: session, selection: selection, round: &round)) { break }
                 }
             }
@@ -158,7 +167,9 @@ extension NativeMusicService {
             let existing = remote.members.filter { mapping[$0.occurrenceID].string == id || mapping[$0.nativeID].string == id }
             if !existing.isEmpty { desired += existing; continue }
             let song = round.library["songs"][id]
-            if let source = song["sources"].array.first(where: { MusicModel.sourceData($0)["source"].string == selection.platform.rawValue }),
+            if let source = song["sources"].array.first(where: {
+                   $0["source"].string == selection.platform.rawValue
+               }),
                let locator = try MusicModel.sources(song).first(where: { $0.sourceKey == source["sourceKey"].string }) {
                 let data = MusicModel.sourceData(source)
                 desired.append(.init(nativeID: locator.nativeId, occurrenceID: locator.nativeId, track: data.bytes))

@@ -117,11 +117,10 @@ final class MusicNativeRemoteCollectionActionsTests: XCTestCase {
         }
     }
 
-    func testSaveRejectsMalformedMixedPlatformAndOversizedSourcesWithoutPartialWrites() async throws {
+    func testSaveRejectsMalformedMixedPlatformSourcesWithoutPartialWrites() async throws {
         let cases: [([MusicNativeTrackData], MusicServiceError)] = [
             ([.init(platform: "tx", data: Data("{}".utf8))], .invalidResponse),
-            ([NativeMusicFixture.track(), .init(platform: "wy", data: NativeMusicFixture.track().data)], .invalidResponse),
-            (Array(repeating: NativeMusicFixture.track(), count: MusicRemoteQueueSource.maximumTracks + 1), .limit)
+            ([NativeMusicFixture.track(), .init(platform: "wy", data: NativeMusicFixture.track().data)], .invalidResponse)
         ]
         for (rows, expected) in cases {
             let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
@@ -131,6 +130,19 @@ final class MusicNativeRemoteCollectionActionsTests: XCTestCase {
             XCTAssertNil(store.snapshot().0); XCTAssertEqual(store.snapshot().2, 0)
             await source.close()
         }
+    }
+
+    func testSaveKeepsMoreThanFormerTwoThousandSongLimitWithoutPartialWrites() async throws {
+        let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
+        let rows = (0..<2001).map { MusicRemoteCollectionActionsFixture.track("BULK\($0)") }
+        let source = MusicRemoteCollectionActionsFixture.source(MusicRemoteCollectionActionsFixture.pages(rows))
+        let saved = try await service.saveRemoteCollection(source: source, name: "Bulk", intent: .init())
+        XCTAssertEqual(saved.count, 2001)
+        let tracks = try await service.tracks(in: saved)
+        XCTAssertEqual(tracks.count, 2001)
+        XCTAssertEqual(tracks.first?.sources.first?.nativeId, "BULK0")
+        XCTAssertEqual(tracks.last?.sources.first?.nativeId, "BULK2000")
+        await source.close()
     }
 
     func testEmptyCollectionIsSavedButBlankNameFailsBeforeAnySourceRead() async throws {

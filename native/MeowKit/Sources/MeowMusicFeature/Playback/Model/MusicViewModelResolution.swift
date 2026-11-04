@@ -23,7 +23,6 @@ extension MusicViewModel {
         do { try admission?.check() } catch { report(error, epoch: lifecycle); return }
         let epoch: UUID
         do { epoch = try enter() } catch { return }
-        defer { pending -= 1 }
         guard let current else { return }
         if forceSelection, service is any MusicResolvedSourcesServing {
             // Inspection never cancels the current resolver/player and never
@@ -283,7 +282,6 @@ extension MusicViewModel {
         let admission = admission ?? fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
         let epoch: UUID
         do { epoch = try enter() } catch { return }
-        defer { pending -= 1 }
         guard let current, player != nil else { return }
         let oldAttempt = resolvingAttempt ?? candidate?.attemptId
         let replacement = nativeAttempt == nil ? nil : SourceReplacementIntent(
@@ -393,7 +391,6 @@ extension MusicViewModel {
     func recoverCachedAudio(_ fact: MusicPlaybackFact) -> Bool {
         guard fact.kind == .failed, let recovery = cachedAudioRecovery,
               recovery.attemptID == fact.attemptId, candidate?.isCachedAudio == true,
-              recoveryDrains.count < 8,
               let service, let cache = service as? any MusicCachedPlaybackRecoveryServing else { return false }
         cachedAudioRecovery = nil; terminalAttempt = fact.attemptId; playbackState.isResolving = true
         cachedAudioObservation?.cancel(); cachedAudioObservation = nil
@@ -443,7 +440,6 @@ extension MusicViewModel {
     /// do not mark the whole queue item failed before this bounded retry.
     func recoverRemoteAudio(_ fact: MusicPlaybackFact) -> Bool {
         guard fact.kind == .failed, !remoteAudioRecoveryTried,
-              recoveryDrains.count < 8,
               let previous = candidate, !previous.isCachedAudio, !previous.url.isFileURL,
               let service, let recovery = service as? any MusicPlaybackRecoveryServing else { return false }
         remoteAudioRecoveryTried = true; terminalAttempt = fact.attemptId; playbackState.isResolving = true

@@ -272,7 +272,7 @@ extension NativeMusicService: MusicHomeBrowsing {
         let sections = try publicSections(value, prefix: prefix, binding: binding)
         let consumed = value.consumed ?? sections.reduce(0) { $0 + $1.items.count }
         let next = try value.next.map { remote in
-            try musicRequire(consumed > 0 && remote != position.remote && position.offset < 199, .limit)
+            try musicRequire(consumed > 0 && remote != position.remote, .limit)
             return try position.encode(key: key, epoch: own, offset: position.offset + 1, remote: remote)
         }
         return .init(sections: sections, cursor: next, filters: value.filters, selectedFilter: value.selected,

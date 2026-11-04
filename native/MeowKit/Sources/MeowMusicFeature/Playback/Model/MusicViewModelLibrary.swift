@@ -30,7 +30,6 @@ extension MusicViewModel {
                                action: @MainActor () async throws -> [MusicCollection]?) async {
         let epoch: UUID
         do { epoch = try enter() } catch { return }
-        defer { pending -= 1 }
         do {
             let next = try await action()
             try check(epoch)
@@ -40,7 +39,6 @@ extension MusicViewModel {
     public func loadHistory() async {
         let epoch: UUID
         do { epoch = try enter() } catch { return }
-        defer { pending -= 1 }
         let request = UUID()
         libraryState.songsRead = request; libraryState.playlistsRead = request
         do {
@@ -54,7 +52,6 @@ extension MusicViewModel {
         cancelRemoteQueuePreparation(); cancelFMNavigation()
         let epoch: UUID
         do { epoch = try enter() } catch { return }
-        defer { pending -= 1 }
         guard !isChangingQueue, !isNavigating else { return }
         playbackState.isChangingQueue = true
         defer { if lifecycle == epoch { playbackState.isChangingQueue = false } }
@@ -69,7 +66,7 @@ extension MusicViewModel {
         } catch { report(error, epoch: epoch, operation: "恢复历史队列", kind: .queue) }
     }
     public func historyDetail(id: String) async throws -> MusicHistoryDetail {
-        let epoch = try enter(); defer { pending -= 1 }
+        let epoch = try enter()
         guard let provider = service as? any MusicHistoryManaging else { throw MusicServiceError.unsupported }
         let detail = try await provider.historyDetail(id: id)
         try check(epoch); return detail
@@ -77,7 +74,6 @@ extension MusicViewModel {
     public func removeHistory(detail: MusicHistoryDetail) async {
         let epoch: UUID
         do { epoch = try enter() } catch { return }
-        defer { pending -= 1 }
         do {
             guard let provider = service as? any MusicHistoryManaging else { throw MusicServiceError.unsupported }
             try await provider.removeHistory(detail: detail)
@@ -92,7 +88,6 @@ extension MusicViewModel {
     public func clearHistory(_ category: MusicHistoryCategory) async {
         let epoch: UUID
         do { epoch = try enter() } catch { return }
-        defer { pending -= 1 }
         do {
             guard let provider = service as? any MusicHistoryManaging else { throw MusicServiceError.unsupported }
             if category == .songs { await flushPlaybackFacts(); try check(epoch) }
@@ -136,7 +131,6 @@ extension MusicViewModel {
         cancelRemoteQueuePreparation(); cancelFMNavigation()
         let epoch: UUID
         do { epoch = try enter() } catch { return }
-        defer { pending -= 1 }
         guard !isChangingQueue, !isNavigating else { return }
         playbackState.isChangingQueue = true
         defer { if lifecycle == epoch { playbackState.isChangingQueue = false } }

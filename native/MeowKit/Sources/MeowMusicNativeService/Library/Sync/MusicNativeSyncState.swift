@@ -75,7 +75,6 @@ struct MusicNativeSyncLedger: Codable {
                   wrapper["library"]["collections"].array.contains(where: { $0["id"].string == fence.localID }),
                   wrapper["library"]["accounts"][fence.platform.rawValue].string == fence.accountID,
                   value.scopes[fence.platform.rawValue] == fence.scope,
-                  fence.mutation.members.count <= 20_000,
                   Set(fence.mutation.before?.members.map(\.occurrenceID) ?? []).count == (fence.mutation.before?.members.count ?? 0) else {
                 throw MusicServiceError.corruptDocument
             }
@@ -86,7 +85,7 @@ struct MusicNativeSyncLedger: Codable {
                       fence.acknowledgedID == nil || fence.acknowledgedID?.isEmpty == false else { throw MusicServiceError.corruptDocument }
             } else {
                 guard let before = mutation.before, before.id == mutation.collectionID, !before.id.isEmpty,
-                      before.writable, before.members.count <= 20_000, !before.revision.isEmpty,
+                      before.writable, !before.revision.isEmpty,
                       fence.acknowledgedID == nil, fence.acknowledgedName == nil else { throw MusicServiceError.corruptDocument }
                 switch mutation.action {
                 case .create: break
@@ -172,7 +171,6 @@ struct MusicNativeSyncRound {
     var library: MJ
     var ledger: MusicNativeSyncLedger
     var revision: Int
-    var writes = 0
     mutating func issue(_ code: String, platform: MusicAccountPlatform? = nil, collection: String? = nil) {
         let issue = MusicLibrarySyncIssue(platform: platform, collectionID: collection, code: code)
         if !ledger.issues.contains(issue), ledger.issues.count < 128 { ledger.issues.append(issue) }
@@ -203,6 +201,16 @@ enum MusicNativeSyncLogic {
     }
     static func bindingKey(_ binding: MJ) -> String {
         MJ.array([binding["platform"], binding["accountId"], binding["id"]]).json
+    }
+    /// A mutation's semantic content, excluding its random request UUID.
+    /// Re-planning the same content without local progress is a stalled round.
+    static func mutationKey(_ mutation: MusicLibrarySyncMutation) -> String {
+        MJ.array([
+            .string(mutation.action.rawValue),
+            mutation.collectionID.map(MJ.string) ?? .null,
+            mutation.name.map(MJ.string) ?? .null,
+            .strings(mutation.members.map(\.nativeID))
+        ]).json
     }
     static func map(_ binding: MJ, songs: MJ) throws -> MJ {
         var result = MJ.obj()

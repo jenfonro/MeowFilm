@@ -48,7 +48,7 @@ extension MusicViewModel {
     /// A search section/playlist preview is one queue transaction, not a series
     /// of single-song plays that replace each other or lose occurrence order.
     public func play(_ tracks: [MusicRemoteTrack], index: Int) async {
-        guard (1...2000).contains(tracks.count), tracks.indices.contains(index) else {
+        guard !tracks.isEmpty, tracks.indices.contains(index) else {
             error = MusicServiceError.invalidRequest.localizedDescription
             return
         }
@@ -82,14 +82,14 @@ extension MusicViewModel {
 
     public func openAccountQueue(platform: MusicAccountPlatform, kind: MusicAccountQueueKind,
                                  title: String) async throws -> MusicRemoteQueueSource {
-        let epoch = try enter(); defer { pending -= 1 }
+        let epoch = try enter()
         guard let remoteQueueService else { throw MusicServiceError.unavailable }
         let source = try await remoteQueueService.openAccountQueue(platform: platform, kind: kind, title: title)
         do { try check(epoch); return source }
         catch { source.revoke(); await source.close(); throw error }
     }
     public func openHomeActionQueue(_ action: MusicHomeAction, title: String) async throws -> MusicRemoteQueueSource {
-        let epoch = try enter(); defer { pending -= 1 }
+        let epoch = try enter()
         guard let provider = service as? any MusicHomeActionQueueServing else { throw MusicServiceError.unsupported }
         let source = try await provider.openHomeActionQueue(action, title: title)
         do { try check(epoch); return source }
@@ -134,13 +134,13 @@ extension MusicViewModel {
             url: metadataOccurrence == current.id ? metadataURL : current.track.artwork)
     }
     public func remoteQueuePage(_ source: MusicRemoteQueueSource, cursor: String?) async throws -> MusicBrowsePage {
-        let epoch = try enter(); defer { pending -= 1 }
+        let epoch = try enter()
         guard let remoteQueueService else { throw MusicServiceError.unavailable }
         let page = try await remoteQueueService.remoteQueuePage(source, cursor: cursor)
         try check(epoch); try source.authorization.check(); return page
     }
     public func filteredRemoteQueue(_ source: MusicRemoteQueueSource, query: String) async throws -> MusicRemoteQueueSource {
-        let epoch = try enter(); defer { pending -= 1 }
+        let epoch = try enter()
         guard let provider = service as? any MusicRemoteCollectionServing else { throw MusicServiceError.unsupported }
         let intent = MusicQueueAuthorization()
         defer { intent.revoke() }
@@ -151,7 +151,7 @@ extension MusicViewModel {
         catch { filtered.revoke(); await filtered.close(); throw error }
     }
     public func saveRemoteCollection(_ source: MusicRemoteQueueSource, name: String) async throws {
-        let epoch = try enter(); defer { pending -= 1 }
+        let epoch = try enter()
         guard let provider = service as? any MusicRemoteCollectionServing else { throw MusicServiceError.unsupported }
         let intent = MusicQueueAuthorization()
         defer { intent.revoke() }
@@ -187,7 +187,6 @@ extension MusicViewModel {
         cancelRemoteQueuePreparation(); cancelFMNavigation()
         let own: UUID
         do { own = try enter() } catch { return }
-        defer { pending -= 1 }
         guard !isChangingQueue, !isNavigating, let service, player != nil else {
             report(MusicServiceError.busy, epoch: own); return
         }
@@ -237,7 +236,6 @@ extension MusicViewModel {
     func prepareRemoteQueue(_ source: MusicRemoteQueueSource, start: MusicRemoteQueueStart) async throws {
         cancelRemoteQueuePreparation(); cancelFMNavigation()
         let epoch = try enter()
-        defer { pending -= 1 }
         guard !isChangingQueue, !isNavigating, let service, let remoteQueueService, player != nil else {
             throw MusicServiceError.busy
         }
@@ -342,7 +340,6 @@ extension MusicViewModel {
                          onSelection: (@MainActor (MusicQueueEntry) -> Void)? = nil) async {
         let epoch: UUID
         do { epoch = try enter() } catch { return }
-        defer { pending -= 1 }
         guard !isChangingQueue else { return }
         playbackState.isChangingQueue = true
         let navigation = navigationID

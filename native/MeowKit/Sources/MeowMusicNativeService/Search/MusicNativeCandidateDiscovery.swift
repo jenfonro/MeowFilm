@@ -37,7 +37,7 @@ extension NativeMusicService: MusicCandidateDiscoveryServing {
         let seed = MusicNativeCandidateDiscoverySeed(occurrenceID: occurrenceID,
             song: try song(.init(kind: .queue, id: occurrenceID), d), state: stateDTO(d), epoch: epoch,
             lifetime: MusicNativeCandidateDiscoveryLifetime(), cacheRecovery: cacheRecovery)
-        return MusicNativeCandidateDiscoverySession(owner: self, seed: seed, timing: timing, clock: now)
+        return MusicNativeCandidateDiscoverySession(owner: self, seed: seed, timing: timing)
     }
 
     @discardableResult
@@ -58,11 +58,12 @@ extension NativeMusicService: MusicCandidateDiscoveryServing {
         try candidateCheck(seed)
         try requirePlatform(platform)
         let port = publicPlatforms
-        // Do not call the interactive search API: its one-search UI epoch would
-        // incorrectly cancel other platforms and a concurrent foreground search.
-        let page = try await work(label: label) { try await port.search(platform: platform, query: query, page: 1) }
+        // Discovery reads native rows without registering display handles.
+        let page = try await work(label: label) {
+            try await port.search(platform: platform, query: query, page: 1, limit: 30)
+        }
         try candidateCheck(seed)
-        try musicRequire(page.items.count <= MusicNativeSearchProtocol.maximumItems(platform) && (0...1_000_000).contains(page.total) &&
+        try musicRequire(page.total >= 0 &&
             page.items.allSatisfy { $0.platform == platform }, .upstreamInvalid)
         return page
     }
@@ -88,7 +89,7 @@ extension NativeMusicService: MusicCandidateDiscoveryServing {
             let knownSongs = d.library["library"]["songs"].fields.map(\.1) + d.queue["entries"].array.map { $0["song"] }
             for proposed in clean["sources"].array {
                 for known in knownSongs {
-                    for source in known["sources"].array + known["quarantinedSources"].array
+                    for source in known["sources"].array
                         where source["sourceKey"] == proposed["sourceKey"] {
                         try musicRequire(MusicModel.compatible(source, proposed), .nativeIDConflict)
                     }
@@ -115,7 +116,6 @@ extension NativeMusicService: MusicCandidateDiscoveryServing {
 actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
     let owner: NativeMusicService
     let timing: MusicCandidateDiscoveryTiming
-    let clock: @Sendable () -> Date
     let label = "candidate:" + UUID().uuidString.lowercased()
     var seed: MusicNativeCandidateDiscoverySeed
     var staged: MJ
@@ -126,8 +126,8 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
     var resolutionTask: Task<MusicPlaybackCandidate, Error>?
 
     init(owner: NativeMusicService, seed: MusicNativeCandidateDiscoverySeed,
-         timing: MusicCandidateDiscoveryTiming, clock: @escaping @Sendable () -> Date) {
-        self.owner = owner; self.seed = seed; staged = seed.song; self.timing = timing; self.clock = clock
+         timing: MusicCandidateDiscoveryTiming) {
+        self.owner = owner; self.seed = seed; staged = seed.song; self.timing = timing
     }
     func check() throws {
         if closed { throw MusicServiceError.closed }
@@ -137,16 +137,20 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
         try check()
         try await owner.candidateCheck(seed)
         try check()
-        if discover, !searched, MusicNativeCandidateDiscoveryMerge.needsDiscovery(staged, now: clock(), force: force) {
+        if discover, force || !searched {
             guard !discovering else { throw MusicServiceError.busy }
             discovering = true
             defer { discovering = false }
+            let cached = await owner.sourceDiscoveryEntries(seed.song)
+            staged = await owner.mergeSourceDiscoveryCache(seed.song, entries: cached)
+            try check(); try await owner.candidateCheck(seed); try check()
             let captured = seed, owner = owner, label = label, timing = timing
             let query = String((seed.song["title"].string + " " + seed.song["artist"].string).prefix(200))
-            let platforms = MusicNativeSearchProtocol.platforms.filter {
-                owner.platformEnabled($0) &&
-                    MusicNativeCandidateDiscoveryMerge.needsPlatform($0, song: captured.song, now: clock(), force: force)
-            }
+            let platforms = MusicNativeCandidateDiscoveryMerge.needsDiscovery(staged, force: force, cache: cached)
+                ? MusicNativeSearchProtocol.platforms.filter {
+                    owner.platformEnabled($0) &&
+                        MusicNativeCandidateDiscoveryMerge.needsPlatform($0, song: staged, force: force, cache: cached[$0])
+                } : []
             let results = try await withThrowingTaskGroup(of: MusicNativeCandidateDiscoveryObservation.self) { group in
                 for platform in platforms {
                     group.addTask {
@@ -168,12 +172,19 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
                 return values
             }
             try check(); try await owner.candidateCheck(seed); try check()
-            // An empty scope (or no enabled platform due for refresh) is not a
+            // An empty scope (or no enabled platform needing discovery) is not a
             // completed search. Keep durable five-platform evidence unchanged;
             // never manufacture empty successes for disabled platforms.
+            searchIssues = []; searched = false
             if !results.isEmpty {
-                let merged = try MusicNativeCandidateDiscoveryMerge.merge(seed.song, observations: results, now: clock())
-                staged = merged.song; searchIssues = merged.issues; searched = true
+                let merged = try MusicNativeCandidateDiscoveryMerge.merge(staged, observations: results)
+                for observation in results {
+                    guard let page = observation.page else { continue }
+                    await owner.recordSourceDiscovery(staged, platform: observation.platform, page: page)
+                    try check(); try await owner.candidateCheck(seed); try check()
+                }
+                staged = merged.song; searchIssues = merged.issues
+                searched = results.contains(where: { $0.page != nil })
             }
         }
         let song = discover ? staged : seed.song, captured = seed
@@ -194,9 +205,6 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
     }
     func resolve(_ target: MusicCandidateDiscoveryTarget, attemptID: String) async throws -> MusicPlaybackCandidate {
         try check()
-        try musicRequire(!staged["quarantinedSources"].array.contains(where: {
-            $0["sourceKey"].string == target.selection.sourceKey
-        }), .targetChanged)
         guard !resolving, !committing else { throw MusicServiceError.busy }
         resolving = true; ownedAttempt = attemptID; resolvingID = attemptID
         let owner = owner, captured = seed, label = label
@@ -208,9 +216,6 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
         do {
             let result = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
             try check()
-            try musicRequire(!staged["quarantinedSources"].array.contains(where: {
-                $0["sourceKey"].string == target.selection.sourceKey
-            }), .targetChanged)
             return result
         } catch {
             await owner.cancelCandidateAttempt(attemptID)

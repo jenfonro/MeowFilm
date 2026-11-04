@@ -41,7 +41,6 @@ extension NativeMusicService {
                     ("sourceType", .string("similar")), ("sourceTitle", .string(title)),
                     ("similar", .obj([("batchId", .string(batchID)), ("basedOn", MusicModel.durable(item.seed))]))
                 ]))
-                try musicRequire(rows.count + (seed == nil ? 0 : 1) <= 2000, .limit)
                 archive(old, into: &d)
                 d.queue["entries"] = .array((seed.map { [$0] } ?? []) + rows)
                 let selected = candidateIndex.map { rows[$0]["id"] } ?? seed?["id"] ?? rows[0]["id"]
@@ -139,9 +138,6 @@ extension NativeMusicService {
         guard !sourceIDs.isEmpty, session.provider == .songRoaming || current != nil else {
             session.status = .empty; try persistSimilarSession(session); emitSimilar(); return
         }
-        if session.provider != .songRoaming && sourceIDs.count > 1000 {
-            session.status = .error; session.error = .limit; try persistSimilarSession(session); emitSimilar(); return
-        }
         let request: MusicNativeSimilarModeRequest = session.provider == .songRoaming ?
             .songRoaming(sourceIDs: sourceIDs) : .queueRecommendations(songIDs: sourceIDs, currentPlaySongID: current!)
         let requestID = UUID()
@@ -179,7 +175,7 @@ extension NativeMusicService {
             let d = try read()
             guard d.queue["entries"].array.last?["id"].string == tailID,
                   session.provider == .songRoaming || d.queue["entries"].stable.digest == fingerprint else { return }
-            try musicRequire(response.items.count <= 2000 && response.items.allSatisfy { $0.platform == "wy" }, .invalidResponse)
+            try musicRequire(response.items.allSatisfy { $0.platform == "wy" }, .invalidResponse)
             let incoming = try response.items.map(MusicModel.normalize)
             let recommendations = try MusicNativeSimilarData.recommendations(response.items)
             let songs = MusicNativeSimilarData.unique(incoming, excluding: d.queue["entries"].array.map { $0["song"] }, maximum: 3)
@@ -191,7 +187,6 @@ extension NativeMusicService {
                 try similarQueueTransaction(["queue"]) { draft in
                     try musicRequire(draft.queue["entries"].array.last?["id"].string == tailID &&
                         (session.provider == .songRoaming || draft.queue["entries"].stable.digest == fingerprint), .targetChanged)
-                    try musicRequire(draft.queue["entries"].array.count + songs.count <= 2000, .limit)
                     if !songs.isEmpty {
                         let batchID = UUID().uuidString.lowercased()
                         let title = provider == .queueRecommendations ? "更多推荐" : "根据 \(MusicNativeSimilarData.display(basedOn).title) 推荐"
@@ -226,7 +221,7 @@ extension NativeMusicService {
             let failure = MusicServiceError.sanitized(error)
             session.status = failure == .cancelled ? .ready : .error
             session.error = failure == .cancelled ? nil : failure
-            // A failed append never replaces the queue. Persist just its bounded
+            // A failed append never replaces the queue. Persist just its
             // retry state; storage failure is retained as an error, not success.
             do { try persistSimilarSession(session) }
             catch { session.error = MusicServiceError.sanitized(error); session.status = .error }

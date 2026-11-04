@@ -30,8 +30,8 @@ import MeowJSON
         XCTAssertThrowsError(try MusicNeteaseSimilarModeRequest.validate(.songRoaming(sourceIDs: Array(repeating: "101", count: 21))))
         XCTAssertThrowsError(try MusicNeteaseSimilarModeRequest.validate(
             .queueRecommendations(songIDs: ["101"], currentPlaySongID: "102")))
-        XCTAssertThrowsError(try MusicNeteaseSimilarModeRequest.validate(
-            .queueRecommendations(songIDs: Array(repeating: "101", count: 1001), currentPlaySongID: "101")))
+        XCTAssertNoThrow(try MusicNeteaseSimilarModeRequest.validate(
+            .queueRecommendations(songIDs: Array(repeating: "101", count: 2001), currentPlaySongID: "101")))
     }
 
     func testHeartbeatReadsActualFavoriteSeedAndUsesExplicitContinuationContext() async throws {
@@ -71,7 +71,7 @@ import MeowJSON
         })
         let lease = try await f.service.beginAccountQueue(platform: .netease)
         let before = f.store.peek(f.identity)
-        let ids = (1...1000).map(String.init)
+        let ids = (1...2001).map(String.init)
         let request = MusicNativeSimilarModeRequest.queueRecommendations(songIDs: ids, currentPlaySongID: "500")
         let first = try await f.service.similarModeBatch(lease, request: request)
         let second = try await f.service.similarModeBatch(lease, request: request)

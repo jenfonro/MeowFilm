@@ -279,7 +279,7 @@ open class PageViewController: UIViewController {
     }
 
     public func runPageTask(_ operation: @escaping @MainActor () async -> Void) {
-        guard isPageActive, tasks.count < 8 else { return }
+        guard isPageActive else { return }
         let id = UUID()
         tasks[id] = Task { [weak self] in
             defer { self?.tasks[id] = nil }

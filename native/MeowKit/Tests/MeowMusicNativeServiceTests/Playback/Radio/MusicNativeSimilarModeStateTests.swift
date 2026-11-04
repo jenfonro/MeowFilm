@@ -3,6 +3,67 @@ import MeowMusicFeature
 @testable import MeowMusicNativeService
 
 final class MusicNativeSimilarModeStateTests: XCTestCase {
+    func testSimilarRestoreAndTailAppendKeepLargeQueueReturnQueueBatchesAndAttempts() async throws {
+        var document = try MusicDocument(fixtureDocument(count: 2001), runID: "fixture")
+        let original = document.queue["entries"].array
+        let seed = original[0]["song"], returning = MusicNativeSimilarData.queueSnapshot(document.queue)
+        document.queue["currentId"] = original.last?["id"] ?? .null
+        document.queue["serial"] = .n(10_000)
+        document.queue["similar"] = .obj([
+            ("schema", .n(2)), ("seed", seed), ("seedEntryId", original[0]["id"]), ("returnQueue", returning),
+            ("sourceIds", .strings(["100"])), ("fromHome", .bool(false)), ("provider", .string("heartbeat")),
+            ("providerContext", .null), ("continue", .bool(true)), ("scope", .string("synthetic-scope")),
+            ("status", .string("ready")),
+            ("batches", .array(original.enumerated().map {
+                MusicNativeSimilarData.batch("batch-\($0.offset)", basedOn: seed, provider: .heartbeat, rows: [$0.element])
+            })),
+            ("attempted", .strings((3000...5000).map { "entry-\($0)" }))
+        ])
+        let store = NativeMusicMemoryDocument(try document.encode(changed: ["queue", "history", "playback"]))
+        let owner = SimilarModeAccountFixture([["301", "302", "303", "304"]])
+        let service = try await NativeMusicFixture.service(store, accounts: owner)
+        let initialValue = try await service.similarModeSnapshot(), initial = try XCTUnwrap(initialValue)
+        XCTAssertTrue(initial.active); XCTAssertEqual(initial.batches.count, 2001)
+        let attemptedBefore = await service.similarMode.active?.attempted.count
+        XCTAssertEqual(attemptedBefore, 2001)
+        let candidate = try await resolve(service, id: "entry-2001")
+        _ = try await service.recordSimilarPlaybackFact(fact(candidate, .playing))
+        let pending = await service.similarMode.active?.pending
+        await pending?.value
+        let queue = try await service.queue(), saved = try MusicDocument(store.snapshot().0, runID: "saved")
+        XCTAssertEqual(queue.entries.count, 2004)
+        XCTAssertEqual(queue.entries.prefix(2001).map(\.id), original.map { $0["id"].string })
+        XCTAssertEqual(queue.entries.suffix(3).compactMap { $0.track.sources.first?.nativeId }, ["301", "302", "303"])
+        XCTAssertEqual(saved.queue["similar"]["batches"].array.count, 2002)
+        XCTAssertEqual(saved.queue["similar"]["attempted"].array.count, 2002)
+        let requests = await owner.requests
+        XCTAssertEqual(requests, [.queueRecommendations(songIDs: ["100"] + Array(repeating: "200", count: 2000),
+                                                       currentPlaySongID: "200")])
+        await service.close()
+        let cold = try await NativeMusicFixture.service(store, accounts: owner)
+        let restoredValue = try await cold.similarModeSnapshot(), restored = try XCTUnwrap(restoredValue)
+        XCTAssertTrue(restored.active); XCTAssertEqual(restored.batches.count, 2002)
+        let exited = try await cold.exitSimilarMode(), returningQueue = try await cold.queue()
+        XCTAssertEqual(exited.state.total, 2001)
+        XCTAssertEqual(returningQueue.entries.map(\.id), original.map { $0["id"].string })
+        XCTAssertEqual(returningQueue.currentId, returning["currentId"].string)
+        let after = await owner.count()
+        XCTAssertEqual(after, 1, "cold restore and exit do not fetch another recommendation")
+        await cold.close()
+    }
+
+    func testSimilarSingleResponseOverTwoThousandIsAcceptedAndCommitted() async throws {
+        let owner = SimilarModeAccountFixture([(1000..<3001).map(String.init)])
+        let store = NativeMusicMemoryDocument(try fixtureDocument())
+        let service = try await NativeMusicFixture.service(store, accounts: owner), before = store.snapshot()
+        let entered = try await service.enterSimilarMode()
+        XCTAssertEqual(entered.state.total, 2002)
+        XCTAssertEqual(store.snapshot().2, before.2 + 1)
+        let queue = try await service.queue()
+        XCTAssertEqual(queue.entries.count, 2002)
+        await service.close()
+    }
+
     func testPreviewEnterAndSeedExitPreserveMediaOwnerAndReturnQueue() async throws {
         let owner = SimilarModeAccountFixture([["100", "201", "201", "202"]])
         let store = NativeMusicMemoryDocument(try fixtureDocument())
@@ -164,14 +225,15 @@ final class MusicNativeSimilarModeStateTests: XCTestCase {
         XCTAssertNil(afterUnconfirmed)
     }
 
-    private func fixtureDocument() throws -> Data {
+    private func fixtureDocument(count: Int = 2) throws -> Data {
         var d = try MusicDocument(nil, runID: "fixture")
-        d.queue["entries"] = .array(try ["100", "200"].enumerated().map { index, id in
+        d.queue["entries"] = .array(try (0..<count).map { index in
+            let id = index == 0 ? "100" : "200"
             let song = try MusicModel.normalize(SimilarModeAccountFixture.track(id))
             return .obj([("id", .string("entry-\(index + 1)")), ("key", song["songId"]),
                          ("song", song), ("context", .obj())])
         })
-        d.queue["currentId"] = .string("entry-1"); d.queue["serial"] = .n(2)
+        d.queue["currentId"] = .string("entry-1"); d.queue["serial"] = .n(count)
         return try d.encode(changed: ["queue", "history", "playback"])
     }
     private func resolve(_ service: NativeMusicService, id: String) async throws -> MusicPlaybackCandidate {
@@ -192,9 +254,9 @@ private actor SimilarModeAccountFixture: MusicNativeAccountProviding, MusicNativ
     var leases: [UUID: MusicAccountQueueLease] = [:]
     init(_ batches: [[String]]) { self.batches = batches }
     nonisolated static func track(_ id: String) -> MusicNativeTrackData {
-        .init(platform: "wy", data: MJ.obj([("musicId", .string(id)), ("songmid", .string(id)),
+        .init(platform: "wy", data: MJ.obj([("songmid", .string(id)),
             ("name", .string("Song " + id)), ("singer", .string("Synthetic")),
-            ("album", .string("Album")), ("duration", .n(180)),
+            ("albumName", .string("Album")), ("duration", .n(180)),
             ("types", .array([.obj([("type", .string("128k"))])]))]).bytes)
     }
     func count() -> Int { requests.count }

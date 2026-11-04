@@ -88,9 +88,14 @@ enum MusicKugouWire {
               text != String(repeating: "0", count: 32) else { throw MusicServiceError.upstreamInvalid }
         return text.uppercased()
     }
-    static func rows(_ raw: Any?, maximum: Int = 2000) throws -> [[String: Any]] {
-        guard let rows = raw as? [Any], rows.count <= maximum else { throw MusicServiceError.upstreamInvalid }
+    static func rows(_ raw: Any?) throws -> [[String: Any]] {
+        guard let rows = raw as? [Any] else { throw MusicServiceError.upstreamInvalid }
         return try rows.map(MusicQQWire.object)
+    }
+    static func rows(_ raw: Any?, maximum: Int) throws -> [[String: Any]] {
+        let rows = try self.rows(raw)
+        guard rows.count <= maximum else { throw MusicServiceError.upstreamInvalid }
+        return rows
     }
     static func first(_ values: Any?...) -> Any? {
         values.first { value in
@@ -280,7 +285,7 @@ actor KugouMusicAccountAdapter: MusicAccountProvider {
     func revoke() {
         epoch = UUID(); qr.removeAll(); sms.removeAll()
         for flight in flights.values { flight.task.cancel() }
-        // Slots stay occupied until their physical transport has returned.
+        // Requests stay tracked until their physical transport has returned.
     }
     func cancelQR(_ id: UUID) {
         qr.removeValue(forKey: id)
@@ -298,7 +303,6 @@ actor KugouMusicAccountAdapter: MusicAccountProvider {
     func raw(_ route: MusicKugouRoute, context: MusicKugouContext, query: [String: String] = [:],
              body: Data? = nil, legacy: Bool = false) async throws -> MusicAccountHTTPResponse {
         try check(context)
-        guard flights.count < 6 else { throw MusicServiceError.busy }
         let seconds = String(Int(now().timeIntervalSince1970)), dfid = context.device.dfid ?? "-"
         var params = ["dfid": dfid, "mid": context.device.mid, "uuid": "-", "appid": "1005", "clientver": "20489", "clienttime": seconds]
         if let auth = context.auth { params["userid"] = auth.uid; params["token"] = auth.token }

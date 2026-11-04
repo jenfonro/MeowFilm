@@ -3,12 +3,7 @@
 import Foundation
 
 public struct MusicCandidateDiscoveryPolicy: MusicCandidateDiscoverySelecting {
-    public let maximumSources: Int
-    public let maximumAttempts: Int
-    public init(maximumSources: Int = 10, maximumAttempts: Int = 15) {
-        self.maximumSources = min(10, max(1, maximumSources))
-        self.maximumAttempts = min(15, max(1, maximumAttempts))
-    }
+    public init() {}
     private static let groups = ["master", "spatial", "enhanced", "hires", "lossless", "high", "standard"]
     private static let spatial = ["dolby", "dts_x", "sony360", "sky", "vivid", "qq_atmos", "viper_atmos"]
     private static let levels = ["128k": "standard", "192k": "high", "320k": "high", "flac": "lossless",
@@ -17,7 +12,7 @@ public struct MusicCandidateDiscoveryPolicy: MusicCandidateDiscoverySelecting {
 
     public func plan(_ snapshot: MusicCandidateDiscoverySnapshot,
                      preferred: MusicCandidateDiscoveryTarget? = nil) throws -> [MusicCandidateDiscoveryTarget] {
-        guard snapshot.options.count <= 512, snapshot.track.sources.count <= 16 else { throw MusicServiceError.limit }
+        guard snapshot.track.sources.count <= 16 else { throw MusicServiceError.limit }
         let state = snapshot.state
         let order = state.qualityOrder + Self.groups.filter { !state.qualityOrder.contains($0) }
         let spatialOrder = state.spatialOrder + Self.spatial.filter { !state.spatialOrder.contains($0) }
@@ -28,23 +23,7 @@ public struct MusicCandidateDiscoveryPolicy: MusicCandidateDiscoverySelecting {
             return index * 32 + (group == "spatial" ? spatialOrder.firstIndex(of: target.quality) ?? 16 :
                 target.quality == "192k" ? 1 : 0)
         }
-        // Round-robin editions by platform before imposing the ten-source bound.
-        var buckets = Dictionary(grouping: snapshot.track.sources, by: \.platform)
-            .mapValues { $0.sorted { $0.sourceKey < $1.sourceKey } }
-        let platforms = buckets.keys.sorted()
-        var keys: [String] = []
-        if let preferred, snapshot.track.sources.contains(where: { $0.sourceKey == preferred.selection.sourceKey }) {
-            keys.append(preferred.selection.sourceKey)
-        }
-        while keys.count < maximumSources {
-            var consumed = false
-            for platform in platforms {
-                guard var rows = buckets[platform], !rows.isEmpty else { continue }
-                let row = rows.removeFirst(); buckets[platform] = rows; consumed = true
-                if !keys.contains(row.sourceKey), keys.count < maximumSources { keys.append(row.sourceKey) }
-            }
-            if !consumed { break }
-        }
+        let keys = Set(snapshot.track.sources.map(\.sourceKey))
         var candidates: [MusicCandidateDiscoveryTarget] = []
         for option in snapshot.options where keys.contains(option.playback.sourceKey) {
             guard option.playback.qualities.count <= 10,
@@ -97,6 +76,6 @@ public struct MusicCandidateDiscoveryPolicy: MusicCandidateDiscoverySelecting {
         if let preferred, let index = plan.firstIndex(where: { $0.sameRequest(as: preferred) }) {
             plan.insert(plan.remove(at: index), at: 0)
         }
-        return Array(plan.prefix(maximumAttempts))
+        return plan
     }
 }

@@ -16,7 +16,7 @@ private actor NativeOfficialAccountPeer: MusicNativeAccountProviding {
     func nativeRecommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) throws -> MusicNativeTrackPage {
         guard platform == self.platform else { throw MusicServiceError.targetChanged }
         return .init(items: [.init(platform: platform.rawValue, data: Data(
-            #"{"musicId":"101","songmid":"101","name":"合成音乐","singer":"合成歌手","duration":180,"hash":"1234567890ABCDEF1234567890ABCDEF"}"#.utf8))])
+            #"{"songmid":"101","name":"合成音乐","singer":"合成歌手","duration":180,"hash":"1234567890ABCDEF1234567890ABCDEF"}"#.utf8))])
     }
     func nativeCollections(platform: MusicAccountPlatform, cursor: String?) -> MusicAccountCollectionPage { .init(items: [], cursor: nil) }
     func nativeTracks(platform: MusicAccountPlatform, collectionID: String, cursor: String?) throws -> MusicNativeTrackPage {

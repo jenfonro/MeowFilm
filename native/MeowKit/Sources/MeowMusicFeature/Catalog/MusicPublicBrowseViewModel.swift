@@ -83,10 +83,6 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     }
     private var trackPageOccurrences: [MusicReference: PageOccurrence] = [:]
     private var detailSourcePositions: [MusicReference: Int] = [:]
-    private var paginationLimit: Int {
-        if case .detail = request { return 667 }
-        return 200
-    }
     private var requestPlatform: MusicPublicBrowsePlatform? {
         switch request {
         case .detail(let collection): return collection.platform
@@ -427,7 +423,6 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                 return (source, count + index)
             }
             count += page.items.count
-            guard count <= 2000 else { throw MusicServiceError.limit }
             cursor = page.cursor
             if let cursor { guard seen.insert(cursor).inserted else { throw MusicServiceError.staleResult } }
         } while cursor != nil
@@ -437,7 +432,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
     /// (possibly paginated) rows. Duplicates keep their occurrence position.
     public func filteredQueueIndex(source: MusicRemoteQueueSource, index: Int,
                                    track: MusicRemoteTrack, query: String) async throws -> Int {
-        guard let queuePage, remoteSource?.id == source.id, (0..<2000).contains(index) else {
+        guard let queuePage, remoteSource?.id == source.id, index >= 0 else {
             throw MusicServiceError.staleResult
         }
         let own = pageEpoch, access = generation
@@ -455,7 +450,6 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                 if included { matches += 1 }
                 offset += 1
             }
-            guard offset <= 2000 else { throw MusicServiceError.limit }
             cursor = page.cursor
             if let cursor { guard seen.insert(cursor).inserted else { throw MusicServiceError.staleResult } }
         } while cursor != nil
@@ -468,13 +462,11 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         else { await load(cursor: currentCursor, direction: 0) }
     }
     public func next() async {
-        guard let nextCursor, !isLoading, back.count < paginationLimit else {
-            if back.count >= paginationLimit { error = .limit }; return
-        }
+        guard let nextCursor, !isLoading else { return }
         await load(cursor: nextCursor, direction: 1)
     }
     public func appendNext() async {
-        guard let cursor = nextCursor, !isLoading, sections.allSatisfy({ $0.error == nil }), back.count < paginationLimit else { return }
+        guard let cursor = nextCursor, !isLoading, sections.allSatisfy({ $0.error == nil }) else { return }
         if usesPageNavigation { await next(); return }
         await load(cursor: cursor, direction: 2)
     }
@@ -575,6 +567,9 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                       requestOverride: MusicPublicBrowseRequest? = nil) async {
         guard available, visible, !isLoading else { return }
         guard let offset = cursorOffsets[cursor ?? ""] else { error = .staleResult; return }
+        if direction > 0, let cursor, back.contains(where: { $0 == cursor }) {
+            error = .invalidResponse; return
+        }
         let own = UUID(), access = generation, request = requestOverride ?? request, service = service
         let day = Calendar.current.startOfDay(for: Date())
         if isDaily, cursor == nil, remoteSource == nil { contentDay = day }
@@ -713,7 +708,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             }
             let count = result.page.sections.reduce(0) { $0 + $1.items.count }
             guard count <= (request == .discovery(.home) ? 600 : 300), result.page.filters.count <= 300,
-                  result.consumed == nil || (0...20_000).contains(result.consumed!),
+                  result.consumed == nil || result.consumed! >= 0,
                   result.page.sections.reduce(0, { count, section in
                       count + (section.tabs.isEmpty ? section.items.count : section.tabs.reduce(0) { $0 + $1.items.count })
                   }) <= 600,
@@ -761,7 +756,6 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                 return
             }
             if direction == 2 {
-                guard sections.reduce(0, { $0 + $1.items.count }) + count <= 2000 else { throw MusicServiceError.limit }
                 merged = sections
                 for section in result.page.sections {
                     if let index = merged.firstIndex(where: { $0.id == section.id && $0.layout == section.layout }) {
@@ -805,9 +799,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             }
             currentCursor = cursor; nextCursor = result.page.cursor; sections = merged
             if requestOverride != nil { loadedPages = [:] }
-            if loadedPages.count < paginationLimit || loadedPages[cursor ?? ""] != nil {
-                loadedPages[cursor ?? ""] = result
-            }
+            loadedPages[cursor ?? ""] = result
             self.request = request
             notice = result.page.notice
             filters = result.page.filters; selectedFilter = result.page.selectedFilter
@@ -815,9 +807,7 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             contentIsCurrent = true
             if case .discovery = request { requiresExplicitNext = false }
             else { requiresExplicitNext = count == 0 && result.page.cursor != nil }
-            if result.consumed != nil, merged.reduce(0, { $0 + $1.items.count }) > 1970 {
-                usesPageNavigation = true
-            }
+            if direction == 1 { usesPageNavigation = true }
             if cursor == nil || result.dailyStyle != nil { dailyStyle = result.dailyStyle }
             failedPage = nil; failedRequest = nil
             watchSource()

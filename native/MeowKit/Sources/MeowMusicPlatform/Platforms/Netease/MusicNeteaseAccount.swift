@@ -117,7 +117,7 @@ extension NeteaseMusicAccountAdapter {
     func createQR(id: UUID) async throws -> MusicLoginChallenge {
         try check(epoch)
         qr = qr.filter { $0.value.expires > now() }
-        guard qr[id] == nil, qr.count < 128 else { throw MusicServiceError.busy }
+        guard qr[id] == nil else { throw MusicServiceError.busy }
         let context = MusicNeteaseContext(), expires = now().addingTimeInterval(180)
         context.qrID = id; qr[id] = .init(expires: expires, context: context)
         do {

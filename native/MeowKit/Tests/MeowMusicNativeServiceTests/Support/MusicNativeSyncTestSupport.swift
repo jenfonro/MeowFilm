@@ -9,8 +9,8 @@ enum NativeSyncFixture {
         let data: Data
         if platform == .qq { data = NativeMusicFixture.track(id).data }
         else {
-            var row = MJ.obj([("musicId", .string(id)), ("name", .string("Synthetic " + id)),
-                ("singer", .string("Fixture")), ("duration", .n(180)), ("album", .string("Album"))])
+            var row = MJ.obj([("songmid", .string(id)), ("name", .string("Synthetic " + id)),
+                ("singer", .string("Fixture")), ("duration", .n(180)), ("albumName", .string("Album"))])
             if platform == .kugou { row["hash"] = .string(id); row["albumId"] = .string("11"); row["albumAudioId"] = .string("22") }
             data = row.bytes
         }
@@ -45,7 +45,7 @@ enum NativeSyncFixture {
 }
 
 actor NativeSyncPeer: MusicNativeAccountProviding, MusicNativeLibrarySyncProviding {
-    enum Fault { case none, lostCreateResponse, failedReadback, acknowledgedWithoutChange, appliedThenThrow }
+    enum Fault { case none, lostCreateResponse, failedReadback, acknowledgedWithoutChange, appliedThenThrow, oscillatingRename }
     let platform: MusicAccountPlatform
     private var rows: [MusicLibrarySyncCollection]
     private var revision = 1, next = 600
@@ -68,6 +68,7 @@ actor NativeSyncPeer: MusicNativeAccountProviding, MusicNativeLibrarySyncProvidi
     }
     func replace(_ rows: [MusicLibrarySyncCollection]) { self.rows = rows; revision += 1 }
     func calls() -> [MusicLibrarySyncMutation] { mutations }
+    func clearCalls() { mutations = [] }
     func counts() -> (Int, Int) { (begins, reads) }
     func contents() -> [MusicLibrarySyncCollection] { rows }
     func beginLibrarySync(platform: MusicAccountPlatform) throws -> MusicLibrarySyncSession {
@@ -116,6 +117,13 @@ actor NativeSyncPeer: MusicNativeAccountProviding, MusicNativeLibrarySyncProvidi
                 }
                 rows[index] = NativeSyncFixture.collection(old.id, name: name, kind: old.kind, members: members,
                     writable: old.writable, order: old.canOrder, revision: String(revision))
+                if fault == .oscillatingRename, mutation.action == .rename {
+                    for other in rows.indices where other != index {
+                        let row = rows[other]
+                        rows[other] = NativeSyncFixture.collection(row.id, name: old.name, kind: row.kind,
+                            members: row.members, writable: row.writable, order: row.canOrder, revision: String(revision))
+                    }
+                }
             }
         }
         if fault == .failedReadback { readFailure = true; fault = .none }

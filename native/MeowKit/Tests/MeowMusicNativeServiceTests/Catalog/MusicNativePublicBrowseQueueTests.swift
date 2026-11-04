@@ -9,14 +9,19 @@ private actor MusicNativePublicBrowseQQFixture: MusicPublicBrowseQQProviding {
     var pageReads: [Int] = []
     var changed = false
     let collection = MusicPublicBrowseCollection(platform: .qq, nativeID: "42", title: "Synthetic remote list")
-    init(count: Int, pageSize: Int = 30) { self.count = count; self.pageSize = pageSize }
+    init(count: Int, pageSize: Int = 30) {
+        self.count = count; self.pageSize = pageSize
+    }
     func changeFirst() { changed = true }
     private func tracks() -> [MusicNativeTrackData] {
-        (0..<count).map { NativeMusicFixture.track(changed && $0 == 0 ? "ChangedMID" : "MID\($0 % 2)") }
+        (0..<count).map {
+            let track = NativeMusicFixture.track(changed && $0 == 0 ? "ChangedMID" : "MID\($0 % 2)")
+            return track
+        }
     }
-    func search(query: String, page: Int) -> MusicNativeTrackPage { .init(items: []) }
+    func search(query: String, page: Int, limit: Int) -> MusicNativeTrackPage { .init(items: []) }
     func lyrics(mid: String) -> MusicNativeLyrics { .init(text: "") }
-    func publicBrowsePlaylists(query: String, page: Int) -> MusicPublicBrowseQQSearch {
+    func publicBrowsePlaylists(query: String, page: Int, limit: Int) -> MusicPublicBrowseQQSearch {
         .init(items: [collection], total: 1, nextPage: nil)
     }
     func publicBrowsePlaylist(id: String) -> MusicPublicBrowseNativeCollection {
@@ -128,18 +133,16 @@ final class MusicNativePublicBrowseQueueTests: XCTestCase {
         XCTAssertEqual(retained, 0, "A failed open must not publish source authority")
         await service.close()
     }
-    func testPublicSourceCountIsBoundedAndCloseRefreshAndExpiryReleaseRegistrations() async throws {
+    func testPublicSourcesReleaseIndependentlyOnCloseRefreshAndExpiry() async throws {
         let qq = MusicNativePublicBrowseQQFixture(count: 1), clock = NativeMusicFixtureClock()
         let service = try await NativeMusicFixture.service(qq: qq, clock: { clock.now() })
         let collection = await qq.collection
         let request = MusicPublicBrowseQueueRequest(collection: collection, snapshot: String(repeating: "a", count: 64))
         var sources: [MusicRemoteQueueSource] = []
-        for _ in 0..<32 { sources.append(try await service.openPublicQueue(request)) }
-        do { _ = try await service.openPublicQueue(request); XCTFail("Unbounded public sources") }
-        catch { XCTAssertEqual(error as? MusicServiceError, .busy) }
+        for _ in 0..<33 { sources.append(try await service.openPublicQueue(request)) }
         await sources[0].close()
         sources.append(try await service.openPublicQueue(request))
-        let full = await service.publicQueueSources.count; XCTAssertEqual(full, 32)
+        let full = await service.publicQueueSources.count; XCTAssertEqual(full, 33)
         clock.advance(601)
         let fresh = try await service.openPublicQueue(request)
         XCTAssertTrue(sources.allSatisfy { !$0.authorization.isActive })

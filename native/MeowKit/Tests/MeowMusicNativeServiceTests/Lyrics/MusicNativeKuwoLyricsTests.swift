@@ -60,7 +60,7 @@ final class MusicNativeKuwoLyricsTests: XCTestCase {
     }
 
     func testAnonymousFixedEndpointIDAndClosedTransportAdmissionWithoutNetworking() async throws {
-        let info = MJ.obj([("songmid", .string("9007199254740993")), ("musicId", .string("9007199254740993"))])
+        let info = MJ.obj([("songmid", .string("9007199254740993"))])
         let good = try MusicNativeKuwoLyrics.request(info: info)
         XCTAssertEqual(good.url.scheme, "https"); XCTAssertEqual(good.url.host, "mlyric.kuwo.cn")
         XCTAssertEqual(good.url.path, "/mobi.s"); XCTAssertEqual(good.method, "GET"); XCTAssertNil(good.body)
@@ -69,9 +69,9 @@ final class MusicNativeKuwoLyricsTests: XCTestCase {
         XCTAssertEqual(query, ["f": "web", "type": "lyric", "lrcx": "1", "rid": "9007199254740993", "encode": "utf8"])
         XCTAssertEqual(Set(good.headers.keys), ["User-Agent"])
         XCTAssertTrue(MusicNativeKuwoLyrics.permits(good))
-        XCTAssertEqual(try MusicNativeKuwoLyrics.request(info: .obj([("id", .string("MUSIC_9007199254740993"))])).url, good.url)
+        XCTAssertThrowsError(try MusicNativeKuwoLyrics.request(info: .obj([("id", .string("MUSIC_9007199254740993"))])))
         XCTAssertEqual(try MusicNativeKuwoLyrics.request(info: .obj([
-            ("songmid", .string("MUSIC_9007199254740993")), ("musicId", .string("9007199254740993"))])).url, good.url)
+            ("songmid", .string("MUSIC_9007199254740993"))])).url, good.url)
         let transport = URLSessionMusicNativeHTTPTransport(); transport.close()
         do { _ = try await transport.send(good); XCTFail("closed") }
         catch { XCTAssertEqual(error as? MusicServiceError, .closed) }
@@ -89,7 +89,9 @@ final class MusicNativeKuwoLyricsTests: XCTestCase {
             do { _ = try await transport.send(request); XCTFail("invalid") }
             catch { XCTAssertEqual(error as? MusicServiceError, .invalidRequest) }
         }
-        XCTAssertThrowsError(try MusicNativeKuwoLyrics.request(info: .obj([("songmid", .string("123")), ("musicId", .string("124"))])))
+        let selected = try MusicNativeKuwoLyrics.request(info: .obj([("songmid", .string("123")), ("id", .string("124"))]))
+        XCTAssertEqual(URLComponents(url: selected.url, resolvingAgainstBaseURL: false)?.queryItems?
+            .first { $0.name == "rid" }?.value, "123")
         XCTAssertThrowsError(try MusicNativeKuwoLyrics.request(id: "../123"))
     }
 }

@@ -12,7 +12,6 @@ extension NativeMusicService: MusicCollectionQueueServing {
             let source = try collection(requested.id, d)
             try musicRequire(source["revision"].int == requested.revision, .staleRevision)
             try musicRequire(!refs.isEmpty && refs.indices.contains(index))
-            try musicRequire(refs.count <= 2000, .limit)
             try musicRequire(expectedRevision < 9_007_199_254_740_991, .limit)
 
             // A queue occurrence or transient handle that happens to resolve

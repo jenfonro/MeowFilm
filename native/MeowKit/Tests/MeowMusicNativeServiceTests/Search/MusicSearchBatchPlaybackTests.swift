@@ -10,7 +10,7 @@ private final class MusicSearchBatchClock: @unchecked Sendable {
 }
 
 private actor MusicSearchBatchQQ: MusicPublicQQProviding {
-    struct Call: Equatable, Sendable { let query: String; let page: Int }
+    struct Call: Equatable, Sendable { let query: String; let page: Int; let limit: Int }
     let count: Int
     private var calls: [Call] = []
     private var replacement: Int?
@@ -21,11 +21,11 @@ private actor MusicSearchBatchQQ: MusicPublicQQProviding {
     func fail(_ page: Int?) { failedPage = page }
     func suspend(_ gate: NativeMusicGate) { self.gate = gate }
     func log() -> [Call] { calls }
-    func search(query: String, page: Int) async throws -> MusicNativeTrackPage {
-        calls.append(.init(query: query, page: page))
+    func search(query: String, page: Int, limit: Int) async throws -> MusicNativeTrackPage {
+        calls.append(.init(query: query, page: page, limit: limit))
         if let gate { self.gate = nil; await gate.wait() }
         if page == failedPage { throw MusicServiceError.upstreamFailed }
-        let lower = (page - 1) * 30, upper = min(page * 30, count)
+        let lower = (page - 1) * limit, upper = min(page * limit, count)
         guard lower < upper else { return .init(items: [], total: count) }
         let items = (lower..<upper).map { index in
             // Same title/artist/duration is not authority to choose a new ID.
@@ -48,7 +48,7 @@ private actor MusicSearchBatchQQ: MusicPublicQQProviding {
     private func capture(_ service: NativeMusicService, count: Int) async throws -> [MusicSearchBatchTarget] {
         var targets: [MusicSearchBatchTarget] = []
         for page in 1...((count + 29) / 30) {
-            let result = try await service.search(platform: "tx", query: "original query", page: page)
+            let result = try await service.search(platform: "tx", query: "original query", page: page, limit: 30)
             targets += result.items.map { .init(platform: .qq, page: page, track: $0) }
         }
         return targets
@@ -109,18 +109,86 @@ private actor MusicSearchBatchQQ: MusicPublicQQProviding {
         XCTAssertEqual(document.snapshot().2, before.2)
         await service.close()
     }
-    func testOverTwoThousandFailsBeforeReadingOrTruncating() async throws {
+    func testOverTwoThousandSelectionRemainsValidWithoutTruncation() async throws {
         let (service, document, qq, _) = try await setup(1)
         let song = try MusicModel.normalize(NativeMusicFixture.track("Track0"))
         let track = try MusicModel.track(song, .init(kind: .handle, id: "not-a-registered-handle"))
         let target = MusicSearchBatchTarget(platform: .qq, page: 1, track: track)
-        do {
-            _ = try await service.replaceSearchBatch(.init(query: "original query",
-                targets: Array(repeating: target, count: 2001)), expectedRevision: 0, intent: .init())
-            XCTFail("The complete selection cannot silently become a prefix")
-        } catch { XCTAssertEqual(error as? MusicServiceError, .limit) }
+        let request = MusicSearchBatchRequest(query: "original query",
+            targets: Array(repeating: target, count: 2001), startIndex: 2000)
+        XCTAssertNoThrow(try request.validate())
+        XCTAssertEqual(request.targets.count, 2001)
+        XCTAssertEqual(request.startIndex, 2000)
         let calls = await qq.log()
         XCTAssertTrue(calls.isEmpty)
+        XCTAssertEqual(document.snapshot().2, 0)
+        await service.close()
+    }
+    func testOversizedSingleRecordingStillFailsTheExistingByteBudget() async throws {
+        let song = try MusicModel.normalize(NativeMusicFixture.track("Track0"))
+        let track = try MusicModel.track(song, .init(kind: .handle, id: "not-a-registered-handle"))
+        let oversized = MusicRemoteTrack(ref: track.ref, songId: track.songId,
+            title: String(repeating: "x", count: 65 * 1024), artist: track.artist,
+            album: track.album, duration: track.duration, sources: track.sources)
+        let target = MusicSearchBatchTarget(platform: .qq, page: 1, track: oversized)
+        let request = MusicSearchBatchRequest(query: "original query", targets: [target])
+        XCTAssertThrowsError(try request.validate()) {
+            XCTAssertEqual($0 as? MusicServiceError, .limit)
+        }
+    }
+    func testAggregateByteBudgetStillRejectsOtherwiseValidRecordings() throws {
+        let song = try MusicModel.normalize(NativeMusicFixture.track("Track0"))
+        let original = try MusicModel.track(song, .init(kind: .handle, id: "synthetic-handle"))
+        let track = MusicRemoteTrack(ref: original.ref, songId: original.songId,
+            title: String(repeating: "x", count: 60 * 1024), artist: original.artist,
+            album: original.album, duration: original.duration, sources: original.sources)
+        let target = MusicSearchBatchTarget(platform: .qq, page: 1, track: track)
+        let size = try JSONEncoder().encode(track).count
+        XCTAssertLessThanOrEqual(size, 64 * 1024)
+        XCTAssertGreaterThan(size * 70, 4 * 1024 * 1024)
+        XCTAssertNoThrow(try MusicSearchBatchRequest(query: "q", targets: [target]).validate())
+        XCTAssertThrowsError(try MusicSearchBatchRequest(query: "q", targets: Array(repeating: target, count: 70)).validate()) {
+            XCTAssertEqual($0 as? MusicServiceError, .limit)
+        }
+    }
+    func testRenewalPreservesEachOriginsOnePageLimitAndOffset() async throws {
+        let (service, document, qq, clock) = try await setup(8)
+        let first = try await service.search(platform: "tx", query: "original query", page: 1, limit: 4)
+        let second = try await service.search(platform: "tx", query: "original query", page: 2, limit: 4)
+        let targets = first.items.map { MusicSearchBatchTarget(platform: .qq, page: 1, limit: 4, track: $0) } +
+            second.items.map { MusicSearchBatchTarget(platform: .qq, page: 2, limit: 4, track: $0) }
+        clock.advance(601)
+        _ = try await service.replaceSearchBatch(.init(query: "original query", targets: targets),
+            expectedRevision: 0, intent: .init())
+        let calls = await qq.log(), queue = try await service.queue()
+        XCTAssertEqual(calls.map(\.page), [1, 2, 1, 2])
+        XCTAssertEqual(calls.map(\.limit), [4, 4, 4, 4])
+        XCTAssertEqual(queue.entries.map(\.track.songId), targets.map(\.track.songId))
+        XCTAssertEqual(document.snapshot().2, 1)
+        await service.close()
+    }
+    func testMiguExpiredOriginRenewsOneRawGroupPageWithEveryEditionAvailable() async throws {
+        let rows = (0..<40).map {
+            MusicNativeMiguSearchFixture.song(id: String(1000 + $0), copyrightID: String(600000 + $0),
+                title: "Synthetic \($0)")
+        }
+        let page = MusicNativeMiguSearchFixture.page([Array(rows.prefix(20)), Array(rows.suffix(20))], total: 100)
+        let http = NativeMusicHTTPFixture([page, page]), clock = MusicSearchBatchClock()
+        let document = NativeMusicMemoryDocument()
+        let service = try await NativeMusicFixture.service(document, http: http, clock: { clock.read() })
+        let first = try await service.search(platform: "mg", query: "Synthetic", page: 1, limit: 30)
+        XCTAssertEqual(first.items.count, 40); XCTAssertNil(first.nextPage)
+        let target = MusicSearchBatchTarget(platform: .migu, page: 1, track: try XCTUnwrap(first.items.last))
+        clock.advance(601)
+        let renewed = try await service.searchRecording(.init(query: "Synthetic", targets: [target]))
+        XCTAssertEqual(renewed.sources.map(\.nativeId), target.track.sources.map(\.nativeId))
+        let calls = await http.calls()
+        XCTAssertEqual(calls.count, 2)
+        for call in calls {
+            let query = URLComponents(url: call.url, resolvingAgainstBaseURL: false)?.queryItems
+            XCTAssertEqual(query?.first { $0.name == "pageNo" }?.value, "1")
+            XCTAssertEqual(query?.first { $0.name == "pageSize" }?.value, "30")
+        }
         XCTAssertEqual(document.snapshot().2, 0)
         await service.close()
     }
@@ -146,7 +214,7 @@ private actor MusicSearchBatchQQ: MusicPublicQQProviding {
         try await service.setAccess(available: true, generation: 1)
         var targets: [MusicSearchBatchTarget] = []
         for platform in [MusicPublicBrowsePlatform.kugou, .qq, .netease] {
-            let page = try await service.search(platform: platform.rawValue, query: "original query", page: 1)
+            let page = try await service.search(platform: platform.rawValue, query: "original query", page: 1, limit: 30)
             targets.append(.init(platform: platform, page: 1, track: try XCTUnwrap(page.items.first)))
         }
         _ = try await service.replaceSearchBatch(.init(query: "original query", targets: targets),
@@ -166,6 +234,79 @@ private actor MusicSearchBatchQQ: MusicPublicQQProviding {
         XCTAssertEqual(singleSaved.queue["entries"].array.count, 1)
         XCTAssertEqual(singleSaved.queue["entries"].array.first?["context"]["sourceType"].string, "search-song")
         XCTAssertEqual(singleSaved.queue["entries"].array.first?["context"]["searchKeyword"].string, "original query")
+        await service.close()
+    }
+    func testFusedRecordingPersistsAllFiveRealPlatformIDsForQueueAndFavorites() async throws {
+        let document = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(document)
+        let order: [MusicPublicBrowsePlatform] = [.migu, .qq, .netease, .kuwo, .kugou]
+        let expectedPlatforms = ["mg", "kg", "kw", "tx", "wy"]
+        let expectedNativeIDs = ["600123", String(repeating: "A", count: 32), "789012", "QQMID01", "123456"]
+        var origins: [MusicSearchBatchOrigin] = []
+        for platform in order {
+            let id: String
+            switch platform {
+            case .migu: id = "600123"
+            case .qq: id = "QQMID01"
+            case .netease: id = "123456"
+            case .kuwo: id = "789012"
+            case .kugou: id = String(repeating: "A", count: 32)
+            }
+            let song = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(platform.rawValue, id: id))
+            let handle = try await service.remember(song)
+            origins.append(.init(platform: platform, page: 1, track: handle))
+        }
+        let request = MusicSearchBatchRequest(query: "original query", targets: [try .init(origins: origins)])
+        let recording = try await service.searchRecording(request)
+        XCTAssertEqual(recording.sources.map(\.platform), expectedPlatforms)
+        XCTAssertEqual(recording.sources.map(\.nativeId), expectedNativeIDs)
+        let favorites = try await service.collections().first { $0.kind == "favorites" }
+        let favorite = try XCTUnwrap(favorites)
+        _ = try await service.editPlaylist(favorite, name: nil, refs: [recording.ref], order: nil)
+        let savedFavorite = try await service.collections().first { $0.kind == "favorites" }
+        let favoritesTracks = try await service.tracks(in: XCTUnwrap(savedFavorite))
+        XCTAssertEqual(favoritesTracks.first?.sources, recording.sources)
+        _ = try await service.replaceSearchBatch(request, expectedRevision: 0, intent: .init())
+        let queue = try await service.queue()
+        XCTAssertEqual(queue.entries.count, 1)
+        XCTAssertEqual(queue.entries.first?.track.sources, recording.sources)
+        let stored = try MusicDocument(document.snapshot().0, runID: "fixture").queue["entries"].array[0]["song"]
+        XCTAssertEqual(stored.fields.map(\.0).sorted(), ["album", "artist", "cover_url", "duration", "songId", "sources", "title"])
+        for source in stored["sources"].array {
+            XCTAssertEqual(Set(source.fields.map(\.0)), ["source", "sourceKey", "musicInfo"])
+            XCTAssertFalse(source["musicInfo"]["songmid"].id.isEmpty)
+            XCTAssertEqual(source["musicInfo"]["name"].string, "Synthetic recording")
+        }
+        XCTAssertEqual(stored["sources"].array.map { $0["source"].string }, expectedPlatforms)
+        XCTAssertEqual(stored["sources"].array.map { $0["musicInfo"]["songmid"].string }, expectedNativeIDs)
+        let feedback = try MusicNativeFeedbackMapping.targets(song: stored, context: .obj())
+        XCTAssertEqual(Set(feedback.map(\.platform)), Set(MusicAccountPlatform.allCases))
+        XCTAssertEqual(try XCTUnwrap(feedback.first { $0.platform == .netease }).nativeID, "123456")
+        XCTAssertEqual(try XCTUnwrap(feedback.first { $0.platform == .qq }).nativeID, "QQMID01")
+        let kugou = try XCTUnwrap(feedback.first { $0.platform == .kugou })
+        XCTAssertEqual(kugou.nativeID, String(repeating: "A", count: 32))
+        XCTAssertNil(kugou.mixsongID)
+        await service.close()
+    }
+    func testSamePlatformSourcesRemainDistinctInFavoritesAndBatchQueue() async throws {
+        let document = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(document)
+        var origins: [MusicSearchBatchOrigin] = []
+        for id in ["101", "102"] {
+            let song = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: id))
+            let track = try await service.remember(song)
+            origins.append(.init(platform: .netease, page: 1, track: track))
+        }
+        let request = MusicSearchBatchRequest(query: "original query", targets: [try .init(origins: origins)])
+        let recording = try await service.searchRecording(request)
+        XCTAssertEqual(recording.sources.map(\.nativeId), ["101", "102"])
+        let collections = try await service.collections()
+        let favorites = try XCTUnwrap(collections.first { $0.kind == "favorites" })
+        let saved = try await service.editPlaylist(favorites, name: nil, refs: [recording.ref], order: nil)
+        let tracks = try await service.tracks(in: saved)
+        XCTAssertEqual(tracks.first?.sources, recording.sources)
+        _ = try await service.replaceSearchBatch(request, expectedRevision: 0, intent: .init())
+        let queue = try await service.queue()
+        XCTAssertEqual(queue.entries.count, 1)
+        XCTAssertEqual(queue.entries.first?.track.sources, recording.sources)
         await service.close()
     }
     func testRevokedIntentDuringRefreshPreventsTheCAS() async throws {
@@ -239,11 +380,34 @@ private actor MusicSearchBatchQQ: MusicPublicQQProviding {
         await service.close()
     }
 
+    func testNonPreferredKnownSourceKeepsExistingLibraryIdentityDuringMetadataEnrichment() async throws {
+        let document = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(document)
+        let incomplete = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track(
+            "tx", id: "known-id", artist: "未知歌手", duration: 0))
+        let old = try await service.remember(incomplete)
+        let collections = try await service.collections()
+        let favorites = try XCTUnwrap(collections.first { $0.kind == "favorites" })
+        let saved = try await service.editPlaylist(favorites, name: nil, refs: [old.ref], order: nil)
+        let known = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("tx", id: "known-id"))
+        let preferred = try MusicModel.normalize(MusicNativeCandidateDiscoveryFixture.track("wy", id: "new-id"))
+        let combined = try MusicModel.mergeSources(preferred, adding: known["sources"].array)
+        let incoming = try await service.remember(combined)
+        let updated = try await service.editPlaylist(saved, name: nil, refs: [incoming.ref], order: nil)
+        let tracks = try await service.tracks(in: updated)
+        XCTAssertEqual(tracks.count, 1)
+        XCTAssertEqual(tracks.first?.songId, old.songId)
+        XCTAssertEqual(tracks.first?.artist, "Fixture")
+        XCTAssertEqual(tracks.first?.sources.map(\.platform), ["wy", "tx"])
+        let library = try MusicDocument(document.snapshot().0, runID: "fixture").library["library"]
+        XCTAssertEqual(library["songs"].fields.count, 1)
+        await service.close()
+    }
+
     func testMixedLiveAndExpiredResultsRenewOnlyTheMissingExactPage() async throws {
         let (service, document, qq, clock) = try await setup(31)
-        let first = try await service.search(platform: "tx", query: "original query", page: 1)
+        let first = try await service.search(platform: "tx", query: "original query", page: 1, limit: 30)
         clock.advance(601)
-        let second = try await service.search(platform: "tx", query: "original query", page: 2)
+        let second = try await service.search(platform: "tx", query: "original query", page: 2, limit: 30)
         let targets = first.items.map { MusicSearchBatchTarget(platform: .qq, page: 1, track: $0) } +
             second.items.map { MusicSearchBatchTarget(platform: .qq, page: 2, track: $0) }
         await qq.fail(2)

@@ -53,7 +53,7 @@ extension NeteaseMusicAccountAdapter {
         if let value = album["id"], !(value is NSNull), String(describing: value) != "0" {
             albumID = try MusicNeteaseWire.id(value)
         } else { albumID = "" }
-        return .object(["musicId": .string(id), "songmid": .string(id),
+        return .object(["songmid": .string(id),
             "name": .string(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "未知歌曲" : name),
             "singer": .string(singer.isEmpty ? "未知歌手" : singer),
             "album": .string(try MusicQQWire.string(album["name"] ?? "", maximum: 1024, empty: true)),
@@ -100,7 +100,7 @@ extension NeteaseMusicAccountAdapter {
     }
     static func collection(_ raw: [String: Any]) throws -> MusicNeteaseCollection {
         let count: Int?
-        if let value = raw["trackCount"] { count = try MusicQQWire.integer(value, maximum: 20_000) }
+        if let value = raw["trackCount"] { count = try MusicQQWire.integer(value) }
         else { count = nil }
         return .init(id: try MusicNeteaseWire.id(raw["id"]),
             owner: try MusicNeteaseWire.id(MusicQQWire.object(raw["creator"])["userId"]),
@@ -147,9 +147,9 @@ extension NeteaseMusicAccountAdapter {
         return row
     }
     static func orderedIDs(_ row: [String: Any]) throws -> [String] {
-        let ids = try MusicNeteaseWire.rows(row["trackIds"], maximum: 20_000).map { try MusicNeteaseWire.id($0["id"]) }
+        let ids = try MusicNeteaseWire.rows(row["trackIds"]).map { try MusicNeteaseWire.id($0["id"]) }
         guard Set(ids).count == ids.count,
-              try MusicQQWire.integer(row["trackCount"], maximum: 20_000) == ids.count else { throw MusicServiceError.upstreamInvalid }
+              try MusicQQWire.integer(row["trackCount"]) == ids.count else { throw MusicServiceError.upstreamInvalid }
         return ids
     }
     func metadata(_ ids: [String], context: MusicNeteaseContext) async throws -> [[String: Any]] {
@@ -181,7 +181,7 @@ extension NeteaseMusicAccountAdapter {
               entry.count == nil || entry.count == firstEntry.count else { throw MusicServiceError.staleResult }
         let ids = try Self.orderedIDs(first), members = Set(ids)
         var songs: [String: [String: Any]] = [:]
-        for raw in try MusicNeteaseWire.rows(first["tracks"] ?? [], maximum: 20_000) {
+        for raw in try MusicNeteaseWire.rows(first["tracks"] ?? []) {
             let id = try MusicNeteaseWire.id(raw["id"])
             guard members.contains(id), songs[id] == nil else { throw MusicServiceError.upstreamInvalid }
             songs[id] = raw

@@ -66,7 +66,7 @@ import Combine
         needsReload = false
         for task in reads.values { task.cancel() }
         write?.task.cancel()
-        // Keep physical task slots until non-cooperative operations settle.
+        // Keep cancelled work tracked until non-cooperative operations settle.
         tracks = []; loaded = false; loading = false; pending = nil; error = nil
         busy = write != nil
     }
@@ -89,7 +89,6 @@ import Combine
 
     @discardableResult public func reload() -> Task<Void, Never>? {
         guard let model, visible, let own = binding, own.matches(model), write == nil else { return nil }
-        guard reads.count < 2 else { needsReload = true; return nil }
         needsReload = false
         let id = UUID()
         if let readID { reads[readID]?.cancel() }
@@ -99,7 +98,7 @@ import Combine
             defer {
                 self.reads[id] = nil
                 if self.readID == id { self.readID = nil; self.loading = false }
-                if self.visible, self.reads.count < 2,
+                if self.visible,
                    self.needsReload || (self.binding !== own && !self.loaded && !self.loading) {
                     self.reload()
                 }

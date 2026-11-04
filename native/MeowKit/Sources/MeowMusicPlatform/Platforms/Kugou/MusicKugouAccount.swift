@@ -133,8 +133,7 @@ extension KugouMusicAccountAdapter {
         guard dfid.range(of: "^[A-Za-z0-9_-]{8,128}$", options: .regularExpression) != nil else { throw MusicServiceError.upstreamInvalid }
         var next = context; next.device.dfid = dfid
         if let client = next.clientDevice, let clientContexts {
-            let fields = try next.device.fields.mapValues { try MusicQQWire.string($0, maximum: 4096) }
-            let saved = try clientContexts.update(client, fields: fields)
+            let saved = try clientContexts.update(client, fields: ["dfid": dfid])
             next.clientDevice = saved; next.device = try MusicKugouDevice(saved: saved.fields)
         }
         return next

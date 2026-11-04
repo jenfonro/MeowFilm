@@ -193,8 +193,8 @@ enum MusicCollectionOwnerChange {
     private var needsReload = false
     private var binding: MusicCollectionPageBinding?
     private var renameConfirmation: MusicCollectionEditTicket?
-    // Cancelled, non-cooperative reads still occupy their slots until they
-    // return. Repeated navigation/retry cannot create an unbounded task tail.
+    // Cancellation revokes publication immediately; physical reads remain
+    // tracked until they return without blocking a new valid page binding.
     private var reads: [UUID: Task<Void, Never>] = [:]
     private var action: (id: UUID, task: Task<Void, Never>, filterSensitive: Bool)?
     private var favoriteSnapshot: MusicCollectionPageSnapshot?
@@ -280,7 +280,6 @@ enum MusicCollectionOwnerChange {
         // browse.js refreshDetail retains the same owner's content during a
         // refresh. Retained data is display-only until the fresh read succeeds.
         if let retained { collection = retained.collection; tracks = retained.tracks }
-        guard reads.count < 2 else { error = .busy; needsReload = true; return nil }
         let own = MusicCollectionPageBinding(owner: model)
         binding = own; presentationID = own.id; isLoading = true
         let task = Task { [weak self] in
@@ -328,7 +327,6 @@ enum MusicCollectionOwnerChange {
             favoriteSnapshot = .init(collection: target, tracks: tracks); favoritesLoaded = true
             return nil
         }
-        guard reads.count < 2 else { favoritesError = .busy; return nil }
         let id = UUID(); favoriteReadID = id; favoritesLoading = true
         let task = Task { [weak self] in
             guard let self else { return }

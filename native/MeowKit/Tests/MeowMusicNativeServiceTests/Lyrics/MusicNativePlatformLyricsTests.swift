@@ -13,7 +13,7 @@ final class MusicNativePlatformLyricsTests: XCTestCase {
             let capabilities = try await service.platforms()
             XCTAssertEqual(capabilities.filter { ["kw", "mg"].contains($0.id) }.map(\.lyrics), [true, true])
             let untouched = await http.calls(); XCTAssertTrue(untouched.isEmpty)
-            let search = try await service.search(platform: platform, query: "Synthetic", page: 1)
+            let search = try await service.search(platform: platform, query: "Synthetic", page: 1, limit: 30)
             let track = try XCTUnwrap(search.items.first)
             let queued = try await service.changeQueue(.replace([track.ref], index: 0), expectedRevision: 0)
             let before = store.snapshot(), scriptCalls = await scripts.calls()
@@ -39,7 +39,7 @@ final class MusicNativePlatformLyricsTests: XCTestCase {
                 let http = MusicNativeLyricsTransport(MusicNativeLyricsFixture.responses(platform: platform),
                     gate: gate, gatedCall: platform == "kw" ? 2 : 3)
                 let service = try await NativeMusicFixture.service(store, http: http)
-                let search = try await service.search(platform: platform, query: "Synthetic", page: 1)
+                let search = try await service.search(platform: platform, query: "Synthetic", page: 1, limit: 30)
                 let track = try XCTUnwrap(search.items.first)
                 let queued = try await service.changeQueue(.replace([track.ref, track.ref], index: 0), expectedRevision: 0)
                 let occurrence = try XCTUnwrap(queued.currentId), source = track.sources[0].sourceKey
@@ -75,7 +75,7 @@ final class MusicNativePlatformLyricsTests: XCTestCase {
             responses[failedIndex] = .init(status: 503, data: Data())
             let http = MusicNativeLyricsTransport(responses)
             let service = try await NativeMusicFixture.service(scripts: scripts, http: http)
-            let search = try await service.search(platform: platform, query: "Synthetic", page: 1)
+            let search = try await service.search(platform: platform, query: "Synthetic", page: 1, limit: 30)
             let track = try XCTUnwrap(search.items.first)
             let queued = try await service.changeQueue(.replace([track.ref], index: 0), expectedRevision: 0)
             let prior = await scripts.calls()
@@ -98,7 +98,7 @@ enum MusicNativeLyricsFixture {
     // fixed meowmusic migu/client_test.go; never encrypted by this Swift decoder.
     static let mrc = "23345d6d70eb4614dd6d67fe21e85fa279918709c10d9fbc24fc3652996322208d46cdd8b9ea9cd84d689a7ef80b5230694439ca54dffd6bf1deb48135f7449880b41f63ad753fdabd334ae3abb54e65e21f4661891b80ff58cd20b90f5d4fe4e3e82bc7fe3eb10ac4ebf81edaed3972"
     static let expansionBomb = "eJztwYEAAAAAwyC2+Usd4QJVAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABwDUvceug=="
-    static var miguIdentity: MJ { .obj([("songmid", .string("123")), ("musicId", .string("123")), ("copyrightId", .string("600123"))]) }
+    static var miguIdentity: MJ { .obj([("songmid", .string("123")), ("copyrightId", .string("600123"))]) }
     static func miguResource(mrc: Bool = true) -> MJ {
         var row = MJ.obj([("songId", .string("123")), ("copyrightId", .string("600123")),
             ("lrcUrl", .string("https://d.musicapp.migu.cn/fixture.lrc")), ("trcUrl", .string("https://tyqk.migu.cn/fixture.trc"))])

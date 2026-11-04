@@ -86,18 +86,20 @@ final class HLSNetworkPolicyTests: XCTestCase {
         XCTAssertThrowsError(try HLSUpstreamResponse.parse(response(200, ["Content-Length": "100"]), kind: .media, request: request))
     }
 
-    func testSharedListenerConnectionAndPayloadBudgetsIncludeRetiringAttempts() throws {
-        var limits = PlaybackNetworkLimits(); limits.hlsListeners = 1; limits.hlsConnections = 1
+    func testListenerConnectionAndTransferPayloadsKeepActualReservations() throws {
+        var limits = PlaybackNetworkLimits()
+        limits.windowBytes = 1024; limits.deliveryBytes = 512; limits.retainedPayloadBytes = 5220
         let budget = PlaybackNetworkBudget(limits: limits)
         let listener = try XCTUnwrap(budget.acquireAuxiliary(.listener, bytes: 0))
         let client = try XCTUnwrap(budget.acquireAuxiliary(.connection, bytes: 100))
         let task = try XCTUnwrap(budget.acquire(host: "fixture.invalid", bytes: 1024, additionalStorageBytes: 4096))
-        XCTAssertNil(budget.acquireAuxiliary(.listener, bytes: 0))
+        let successor = try XCTUnwrap(budget.acquireAuxiliary(.listener, bytes: 0))
         XCTAssertNil(budget.acquireAuxiliary(.connection, bytes: 1))
         XCTAssertEqual(budget.usage.reservedPayloadBytes, 5220)
         task.complete()
         XCTAssertEqual(budget.usage.activeConnections, 1)
-        client.complete(); listener.complete(); listener.complete()
+        XCTAssertEqual(budget.usage.activeListeners, 2)
+        client.complete(); listener.complete(); listener.complete(); successor.complete()
         XCTAssertEqual(budget.usage, .init(activeTasks: 0, reservedPayloadBytes: 0))
     }
 }

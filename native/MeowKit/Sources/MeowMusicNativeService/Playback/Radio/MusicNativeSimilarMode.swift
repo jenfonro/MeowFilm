@@ -262,7 +262,7 @@ extension NativeMusicService {
             try check(own); try lease.authorization.check()
             guard similarEntranceIsCurrent(item, try read()) else { return }
             try musicRequire(!scope.isEmpty && scope.utf8.count <= 512, .invalidResponse)
-            try musicRequire(response.items.count <= 2000 && response.items.allSatisfy { $0.platform == "wy" }, .invalidResponse)
+            try musicRequire(response.items.allSatisfy { $0.platform == "wy" }, .invalidResponse)
             let songs = try response.items.map(MusicModel.normalize)
             item.recommendations = try MusicNativeSimilarData.recommendations(response.items)
             if item.provider == .heartbeat {

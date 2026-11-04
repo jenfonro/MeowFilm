@@ -26,7 +26,6 @@ final class ProgressiveMediaLoaderTests: XCTestCase {
     private func makeLimits() -> PlaybackNetworkLimits {
         var value = PlaybackNetworkLimits()
         value.windowBytes = 4096; value.deliveryBytes = 1024
-        value.tasksPerHost = 1
         return value
     }
 
@@ -95,6 +94,32 @@ final class ProgressiveMediaLoaderTests: XCTestCase {
         XCTAssertEqual(fixture.requests.first?.value(forHTTPHeaderField: "Range"), "bytes=0-1")
     }
 
+    func testParallelNativeRangeRequestsSharePayloadBudgetAndCancelTogether() async throws {
+        let started = expectation(description: "native range requests entered")
+        started.expectedFulfillmentCount = 10
+        let fixture = PlaybackHTTPFixture(body: Data(), mode: .hold, onStart: { started.fulfill() })
+        defer { fixture.close() }
+        let budget = PlaybackNetworkBudget(limits: makeLimits())
+        let loader = ProgressiveMediaLoader(plan: try plan(fixture.url), budget: budget,
+                                            configuration: configuration()) { _ in XCTFail("unexpected failure") }
+        defer { loader.invalidate() }
+        let sinks = try (0..<10).map { index in
+            TestProgressiveSink(range: try .init(requestedOffset: Int64(index * 10), currentOffset: Int64(index * 10),
+                                                requestedLength: 10, toEnd: false), finished: nil)
+        }
+        sinks.forEach { loader.enqueue($0) }
+        await fulfillment(of: [started], timeout: 5)
+        XCTAssertEqual(budget.usage.activeTasks, 10)
+        XCTAssertEqual(budget.usage.reservedPayloadBytes, 100)
+        let drained = expectation(description: "range requests physically completed")
+        let observation = budget.observe { if budget.usage.activeTasks == 0 { drained.fulfill() } }
+        defer { budget.unobserve(observation) }
+        loader.invalidate()
+        await fulfillment(of: [drained], timeout: 5)
+        XCTAssertTrue(sinks.allSatisfy { $0.result.finishes == 0 && $0.result.bytes.isEmpty })
+        XCTAssertEqual(budget.usage.reservedPayloadBytes, 0)
+    }
+
     func testCancellationFencesDeliveryButDoesNotReleaseTaskBeforeDidComplete() async throws {
         let started = expectation(description: "task started")
         let fixture = PlaybackHTTPFixture(body: Data(), mode: .hold, onStart: { started.fulfill() })
@@ -103,8 +128,7 @@ final class ProgressiveMediaLoaderTests: XCTestCase {
         neverFinished.isInverted = true
         let sink = TestProgressiveSink(range: try .init(requestedOffset: 0, currentOffset: 0,
                                                         requestedLength: 1000, toEnd: false), finished: neverFinished)
-        var limits = makeLimits(); limits.activeTasks = 1
-        let budget = PlaybackNetworkBudget(limits: limits)
+        let budget = PlaybackNetworkBudget(limits: makeLimits())
         let loader = ProgressiveMediaLoader(plan: try plan(fixture.url), budget: budget,
                                             configuration: configuration()) { _ in XCTFail("cancellation is not failure") }
         defer { loader.invalidate() }
@@ -119,7 +143,8 @@ final class ProgressiveMediaLoaderTests: XCTestCase {
             loader.cancel(sink)
             // didComplete cannot run midway through this serial operation.
             XCTAssertEqual(budget.usage.activeTasks, 1)
-            XCTAssertNil(budget.acquire(host: "successor.invalid", bytes: 1))
+            let successor = budget.acquire(host: "successor.invalid", bytes: 1)
+            XCTAssertNotNil(successor); successor?.complete()
         }
         await fulfillment(of: [settled], timeout: 5)
         await fulfillment(of: [neverFinished], timeout: 0.05)
@@ -151,7 +176,7 @@ final class ProgressiveMediaLoaderTests: XCTestCase {
     }
 
     func testBudgetWaitIsBoundedAndCannotStartAHiddenUnaccountedTask() async throws {
-        var limits = makeLimits(); limits.activeTasks = 1; limits.budgetWaitSeconds = 0.05
+        var limits = makeLimits(); limits.retainedPayloadBytes = 4096; limits.budgetWaitSeconds = 0.05
         let budget = PlaybackNetworkBudget(limits: limits)
         let oldTask = try XCTUnwrap(budget.acquire(host: "retired.invalid", bytes: 4096))
         defer { oldTask.complete() }

@@ -301,8 +301,10 @@ final class MusicSourcesViewController: MusicPageViewController,
         else { loadMore(refresh: true) }
     }
 
-    isolated deinit {
-        if let session { Task { await session.close() } }
+    nonisolated deinit {
+        MainActor.assumeIsolated {
+            if let session { Task { await session.close() } }
+        }
     }
 }
 #endif

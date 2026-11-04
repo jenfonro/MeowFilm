@@ -105,26 +105,21 @@ extension NativeMusicService: MusicMetadataPreferencesServing {
         let song = try self.song(ref, d), track = try MusicModel.track(song, ref)
         let prefs = try NativeMetadataPreferences(d.playback)
             .visible(revision: d.playback["revision"].int, available: enabledPlatforms)
-        if song.contains("revision") {
-            try musicRequire(song["revision"].isInteger, .corruptDocument)
-        }
-        let quarantined = Set(song["quarantinedSources"].array.map { Data($0["sourceKey"].string.utf8) })
         let sources = try MusicModel.sources(song)
         let rows = song["sources"].array.filter { row in
             let key = row["sourceKey"].string, info = MusicModel.sourceData(row)
-            return !key.isEmpty && !quarantined.contains(Data(key.utf8)) &&
-                musicSame(key, MusicModel.nativeKey(row)) && MusicModel.compatible(song, row) &&
+            return !key.isEmpty && musicSame(key, MusicModel.nativeKey(row)) && MusicModel.compatible(song, row) &&
                 platformEnabled(info["source"].string)
         }
         var candidates: [MusicMetadataCandidate] = []
         for platform in prefs.platforms where prefs.enabledPlatforms.contains(platform) {
-            let ordered = rows.filter { MusicModel.sourceData($0)["source"].string == platform.rawValue }
+            let ordered = rows.filter { $0["source"].string == platform.rawValue }
                 .sorted { $0["sourceKey"].string.compare($1["sourceKey"].string,
                     locale: Locale(identifier: "en_US")) == .orderedAscending }
             for row in ordered.prefix(2) {
                 guard let source = sources.first(where: { musicSame($0.sourceKey, row["sourceKey"].string) }) else { continue }
                 let info = MusicModel.sourceData(row)
-                let cover = row["cover_url"].string.isEmpty ? info["img"] : row["cover_url"]
+                let cover = info["img"]
                 let artwork = platform == .kuwo || platform == .migu
                     ? MusicNativePublicBrowseWire.artwork(cover, platform: platform)
                     : MusicNativePublicBrowseSupport.artwork(cover)
@@ -132,15 +127,15 @@ extension NativeMusicService: MusicMetadataPreferencesServing {
             }
         }
         // Exclude transient discovery timestamps and occurrence identity, while
-        // retaining every source's public locator and the quarantine boundary.
-        let fields = ["songId", "revision", "title", "artist", "album", "duration", "source_data", "quarantinedSources"]
-        let sourceFields = ["sourceKey", "source", "source_data", "title", "artist", "album", "duration", "cover_url"]
+        // retaining every source's public locator.
+        let fields = ["songId", "title", "artist", "album", "duration", "cover_url"]
+        let sourceFields = ["sourceKey", "source", "musicInfo"]
         var identity = MJ.obj(fields.filter(song.contains).map { ($0, song[$0]) })
         identity["sources"] = .array(song["sources"].array.map { row in
             .obj(sourceFields.filter(row.contains).map { ($0, row[$0]) })
         })
         let result = MusicMetadataCandidates(occurrenceID: occurrenceID, queueRevision: d.queue["revision"].int,
-            preferences: prefs, track: track, contentRevision: song.contains("revision") ? song["revision"].int : nil,
+            preferences: prefs, track: track, contentRevision: nil,
             contentFingerprint: identity.stable.digest, candidates: candidates)
         try check(own)
         return result

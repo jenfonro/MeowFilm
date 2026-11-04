@@ -343,7 +343,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
     private let model: MusicViewModel
     private let appearance: MusicAppearancePreferencesStore
     private weak var router: (any MusicUIRouting)?
-    private let preferences = MusicSearchPreferencesStore()
+    private let preferences: MusicSearchPreferencesStore
     private let history: SearchHistoryStore
     private let results: MusicSearchResultsModel
     private let actions: MusicSearchActions
@@ -359,25 +359,29 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
     private var pagingTargetIndex: Int?
     private var pendingKind: Kind?
     private var songRows: [Data: (song: MusicSearchSong, index: Int)] = [:]
+    private var renderedSongs: [MusicSearchSong] = []
+    private var renderedPlaylists: [MusicPublicBrowseCollection] = []
+    private var renderedRequest: UUID?
     private var shownFailures: [Int: String] = [:]
+    private var submittedKeyword: String
     private var kinds: [Kind] { results.preferences.searchPlaylists ? Kind.allCases : [.songs] }
 
     init(model: MusicViewModel, query: String, appearance: MusicAppearancePreferencesStore,
          router: (any MusicUIRouting)?, history: SearchHistoryStore) {
+        submittedKeyword = query.trimmingCharacters(in: .whitespacesAndNewlines)
         self.model = model; self.appearance = appearance; self.router = router
         self.history = history
+        preferences = MusicSearchPreferencesStore()
         actions = MusicSearchActions(model: model)
-        results = MusicSearchResultsModel(readSongs: { [weak model] platform, query, page in
+        results = MusicSearchResultsModel(readSongs: { [weak model] platform, query, page, limit in
             guard let model else { throw MusicServiceError.closed }
-            return try await model.searchPage(platform: platform.rawValue, query: query, page: page)
-        }, readPlaylists: { [weak model] platform, query, cursor in
-            guard let model, model.isAvailable, !model.isClosed, let browser = model.publicBrowser else {
-                throw MusicServiceError.unavailable
-            }
-            let access = model.accountAccessGeneration
-            let value = try await browser.publicPlaylists(platform: platform, query: query, cursor: cursor)
-            guard access == model.accountAccessGeneration else { throw MusicServiceError.staleAccess }
-            return value
+            return try await model.searchPage(platform: platform.rawValue, query: query, page: page, limit: limit)
+        }, readPlaylists: { [weak model] platform, query, page, limit in
+            guard let model else { throw MusicServiceError.closed }
+            return try await model.searchPlaylistPage(platform: platform, query: query, page: page, limit: limit)
+        }, readRecording: { [weak model] request in
+            guard let model else { throw MusicServiceError.closed }
+            return try await model.searchRecording(request)
         })
         super.init(themeProvider: appearance, query: query)
     }
@@ -421,6 +425,8 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
             page.table.delegate = self
             page.table.backgroundColor = .clear; page.table.separatorStyle = .none
             page.table.sectionHeaderTopPadding = 0
+            page.table.estimatedSectionHeaderHeight = 0
+            page.table.estimatedSectionFooterHeight = 0
             page.table.register(MusicSearchSongCell.self, forCellReuseIdentifier: MusicSearchSongCell.reuseIdentifier)
             page.table.register(MusicSearchSectionHeaderCell.self,
                                 forCellReuseIdentifier: MusicSearchSectionHeaderCell.reuseIdentifier)
@@ -440,7 +446,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
             self?.updateVisibleSongs()
             self?.showActionError()
         }
-        observe(model.accessChanges) { [weak self] in self?.reconcileAccess() }
+        observe(model.searchAccessChanges) { [weak self] in self?.reconcileAccess() }
         observe(model.libraryChanges) { [weak self] in self?.actions.refreshFavorites() }
         observe(model.playbackChanges) { [weak self] in self?.updateVisibleSongs() }
         observe(appearance.$preferences.map(\.playlistView).removeDuplicates().dropFirst().eraseToAnyPublisher()) {
@@ -451,10 +457,13 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
 
     override func pageDidBecomeActive() {
         preferences.reload()
-        results.setAccess(available: model.isAvailable && !model.isClosed,
-                          generation: model.accountAccessGeneration)
+        _ = results.setAccess(available: model.isAvailable && !model.isClosed,
+                              generation: model.searchAccessGeneration)
         results.appear(); actions.setActive(true)
-        if results.query.isEmpty { submit() }
+        if results.query.isEmpty, model.isAvailable, !model.isClosed, !submittedKeyword.isEmpty {
+            results.submit(submittedKeyword, preferences: preferences.preferences)
+            results.holdPagination()
+        }
         render()
     }
 
@@ -484,7 +493,6 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
                 }
             }
         }
-        updateHeaders()
     }
 
     override func shouldBeginInteractiveBack(at point: CGPoint, in view: UIView) -> Bool {
@@ -510,11 +518,13 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
            let kind = kinds.first(where: { pages[$0] === page }) { selected = kind }
         finishPagingTransition(at: selected)
         paging = false
-        render()
+        if !kinds.contains(selected) { select(.songs, animated: false) }
+        showSearchFailure()
         if let pending = pendingKind { pendingKind = nil; select(pending, animated: true) }
     }
 
     private func beginPagingTransition(to kind: Kind) {
+        results.holdPagination()
         guard let origin = kinds.firstIndex(of: selected), let target = kinds.firstIndex(of: kind) else {
             pagingOriginIndex = nil; pagingTargetIndex = nil
             return
@@ -550,6 +560,9 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         let columns = playlistColumns(tableView)
         return columns == 1 ? 80 : (tableView.bounds.width - 32 - CGFloat(columns - 1) * 12) /
             CGFloat(columns) + 60
+    }
+    func tableView(_ tableView: UITableView, estimatedHeightForRowAt indexPath: IndexPath) -> CGFloat {
+        self.tableView(tableView, heightForRowAt: indexPath)
     }
     private func makeCell(in tableView: UITableView, at indexPath: IndexPath,
                           id: MusicSearchResultRowID) -> UITableViewCell? {
@@ -611,7 +624,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         }
     }
     func tableView(_ tableView: UITableView, willDisplay cell: UITableViewCell, forRowAt indexPath: IndexPath) {
-        guard isPageVisible, Kind.allCases[tableView.tag] == selected, selected != .all else { return }
+        guard isPageVisible, !paging, Kind.allCases[tableView.tag] == selected, selected != .all else { return }
         if case .song? = rowID(in: tableView, at: indexPath), indexPath.row >= results.songs.count - 3 {
             results.more(.songs, automatic: true)
         }
@@ -620,21 +633,32 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
             results.more(.playlists, automatic: true)
         }
     }
-    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { results.resumePagination() }
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        guard isPageVisible, !paging, scrollView === pages[selected]?.table else { return }
+        results.resumePagination()
+    }
 
     private func submit() {
         let query = self.query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty, model.isAvailable, !model.isClosed else { return }
+        submittedKeyword = query
         preferences.reload()
         history.record(query)
         model.query = query
         actions.suspend()
         results.submit(query, preferences: preferences.preferences)
+        results.holdPagination()
         actions.setActive(true)
     }
     private func reconcileAccess() {
-        results.setAccess(available: model.isAvailable && !model.isClosed,
-                          generation: model.accountAccessGeneration)
+        let available = model.isAvailable && !model.isClosed
+        let keyword = submittedKeyword
+        guard results.setAccess(available: available, generation: model.searchAccessGeneration) else { return }
+        if isPageActive, available, !keyword.isEmpty {
+            preferences.reload()
+            results.submit(keyword, preferences: preferences.preferences)
+            results.holdPagination()
+        }
         actions.setActive(model.isAvailable && !model.isClosed)
         render()
     }
@@ -650,65 +674,103 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
             categories.setSelectedIndex(index)
             categories.setPosition(CGFloat(index))
         }
-        let previousSongs = songRows
-        songRows = Dictionary(uniqueKeysWithValues: results.songs.enumerated().map {
-            (Data($0.element.id.utf8), (song: $0.element, index: $0.offset))
-        })
-        let changedSongs = Set(songRows.keys.filter {
-            guard let previous = previousSongs[$0], let row = songRows[$0] else { return false }
-            return previous.song.track != row.song.track || previous.index != row.index
-        })
+        let requestChanged = renderedRequest != results.requestID
+        let songsChanged = requestChanged || renderedSongs != results.songs
+        let playlistsChanged = requestChanged || renderedPlaylists != results.playlists
+        var changedSongs: Set<Data> = []
+        if songsChanged {
+            let previousSongs = songRows
+            songRows = Dictionary(uniqueKeysWithValues: results.songs.enumerated().map {
+                (Data($0.element.id.utf8), (song: $0.element, index: $0.offset))
+            })
+            changedSongs = Set(songRows.keys.filter {
+                guard let previous = previousSongs[$0], let row = songRows[$0] else { return false }
+                return requestChanged || previous.song != row.song || previous.index != row.index
+            })
+            renderedSongs = results.songs
+        }
+        if playlistsChanged { renderedPlaylists = results.playlists }
+        renderedRequest = results.requestID
         for (kind, page) in pages {
+            let columns = playlistColumns(page.table)
+            let updateSongs = songsChanged && kind != .playlists
+            let updatePlaylists = (playlistsChanged || page.columns != columns) && kind != .songs
+            var headers: [Int: MusicSearchHeaderState] = [:]
+            var footers: [Int: MusicSearchFooterState] = [:]
+            for section in 0...1 {
+                if let title = headingTitle(kind: kind, section: section) {
+                    headers[section] = .init(title: title,
+                        showsPlay: section == 0 && !results.songs.isEmpty, request: results.requestID)
+                }
+                footers[section] = footerState(kind: kind, section: section)
+            }
+            guard updateSongs || updatePlaylists ||
+                    page.headerStates != headers || page.footerStates != footers else { continue }
             let previous = page.dataSource.snapshot()
-            let oldIDs = Set(previous.itemIdentifiers)
-            let previousPlaylists = page.playlistRows
-            let previousFooters = page.footerStates
-            let oldColumns = page.columns
-            page.columns = playlistColumns(page.table)
-            page.playlistRows = [:]
-            page.footerStates = [:]
-            var snapshot = NSDiffableDataSourceSnapshot<Int, MusicSearchResultRowID>()
-            snapshot.appendSections([0, 1])
-            if headingTitle(kind: kind, section: 0) != nil {
-                snapshot.appendItems([.heading(0)], toSection: 0)
-            }
-            if kind != .playlists {
+            var snapshot = previous
+            if snapshot.sectionIdentifiers.isEmpty { snapshot.appendSections([0, 1]) }
+            var changed: [MusicSearchResultRowID] = []
+            if updateSongs {
+                let old = snapshot.itemIdentifiers(inSection: 0).filter {
+                    if case .song = $0 { return true }; return false
+                }
+                snapshot.deleteItems(old)
                 let songs = kind == .all ? Array(results.songs.prefix(5)) : results.songs
-                snapshot.appendItems(songs.map { .song(Data($0.id.utf8)) }, toSection: 0)
+                let ids = songs.map { MusicSearchResultRowID.song(Data($0.id.utf8)) }
+                if page.footerStates[0] != nil { snapshot.insertItems(ids, beforeItem: .status(0)) }
+                else { snapshot.appendItems(ids, toSection: 0) }
+                let oldIDs = Set(old)
+                changed += ids.filter {
+                    if case .song(let id) = $0 { return oldIDs.contains($0) && changedSongs.contains(id) }
+                    return false
+                }
             }
-            if headingTitle(kind: kind, section: 1) != nil {
-                snapshot.appendItems([.heading(1)], toSection: 1)
-            }
-            let count = playlistCount(kind)
-            for start in stride(from: 0, to: count, by: page.columns) {
-                let items = Array(results.playlists[start..<min(start + page.columns, count)])
-                let id = Data(items[0].id.utf8)
-                page.playlistRows[id] = items
-                snapshot.appendItems([.playlists(id)], toSection: 1)
+            if updatePlaylists {
+                let old = snapshot.itemIdentifiers(inSection: 1).filter {
+                    if case .playlists = $0 { return true }; return false
+                }
+                snapshot.deleteItems(old)
+                let previousRows = page.playlistRows
+                page.playlistRows = [:]
+                var ids: [MusicSearchResultRowID] = []
+                let count = playlistCount(kind)
+                for start in stride(from: 0, to: count, by: columns) {
+                    let items = Array(results.playlists[start..<min(start + columns, count)])
+                    let id = Data(items[0].id.utf8)
+                    page.playlistRows[id] = items
+                    ids.append(.playlists(id))
+                    if let oldItems = previousRows[id],
+                       requestChanged || page.columns != columns || oldItems != items {
+                        changed.append(.playlists(id))
+                    }
+                }
+                if page.footerStates[1] != nil { snapshot.insertItems(ids, beforeItem: .status(1)) }
+                else { snapshot.appendItems(ids, toSection: 1) }
             }
             for section in 0...1 {
-                if let footer = footerState(kind: kind, section: section) {
-                    page.footerStates[section] = footer
-                    snapshot.appendItems([.status(section)], toSection: section)
+                if headers[section] != page.headerStates[section] {
+                    if page.headerStates[section] == nil {
+                        if let first = snapshot.itemIdentifiers(inSection: section).first {
+                            snapshot.insertItems([.heading(section)], beforeItem: first)
+                        } else { snapshot.appendItems([.heading(section)], toSection: section) }
+                    } else { changed.append(.heading(section)) }
+                }
+                if footers[section] != page.footerStates[section] {
+                    if footers[section] == nil { snapshot.deleteItems([.status(section)]) }
+                    else if page.footerStates[section] == nil {
+                        snapshot.appendItems([.status(section)], toSection: section)
+                    } else { changed.append(.status(section)) }
                 }
             }
-            let changed = snapshot.itemIdentifiers.filter { id in
-                guard oldIDs.contains(id) else { return false }
-                switch id {
-                case .heading: return true
-                case .song(let id): return changedSongs.contains(id)
-                case .playlists(let id):
-                    return oldColumns != page.columns || previousPlaylists[id] != page.playlistRows[id]
-                case .status(let section): return previousFooters[section] != page.footerStates[section]
-                }
-            }
+            page.columns = columns
+            page.headerStates = headers
+            page.footerStates = footers
             snapshot.reconfigureItems(changed)
             if previous.sectionIdentifiers != snapshot.sectionIdentifiers ||
                 previous.itemIdentifiers != snapshot.itemIdentifiers || !changed.isEmpty {
                 page.dataSource.apply(snapshot, animatingDifferences: false)
             }
         }
-        updateHeaders()
         showActionError()
         showSearchFailure()
     }
@@ -768,16 +830,6 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
             guard let self, self.results.requestID == request else { return }
             self.router?.showPublicCollection($0)
         })
-    }
-
-    private func updateHeaders() {
-        for page in pages.values {
-            for path in page.table.indexPathsForVisibleRows ?? [] {
-                guard case .heading(let section)? = page.dataSource.itemIdentifier(for: path),
-                      let cell = page.table.cellForRow(at: path) as? MusicSearchSectionHeaderCell else { continue }
-                configureHeaderCell(cell, in: page.table, section: section)
-            }
-        }
     }
 
     private func headingTitle(kind: Kind, section: Int) -> String? {
@@ -842,16 +894,14 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
             let message = failures.map { $0.error.message(operation: section == 0 ? "单曲搜索" : "歌单搜索",
                 platform: $0.platform.title, diagnosticID: $0.diagnosticID) }.joined(separator: "；")
             guard force || shownFailures[section] != message else { continue }
-            let restart = section == 1 && failures.contains { $0.error == .staleResult }
             let request = results.requestID
             let alert = UIAlertController(title: "错误", message: message, preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-            alert.addAction(UIAlertAction(title: restart ? "重新搜索歌单" : "重试", style: .default) {
+            alert.addAction(UIAlertAction(title: "重试", style: .default) {
                 [weak self] _ in
                 guard let self, self.results.requestID == request else { return }
                 self.shownFailures[section] = nil
-                if restart { self.results.restartPlaylists() }
-                else { self.results.retry(section == 0 ? .songs : .playlists) }
+                self.results.retry(section == 0 ? .songs : .playlists)
             })
             shownFailures[section] = message
             present(alert, animated: true)
@@ -870,6 +920,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         }
         let direction: UIPageViewController.NavigationDirection = target >= originIndex ? .forward : .reverse
         guard animated else {
+            results.holdPagination()
             selected = kind
             pager.setViewControllers([page], direction: direction, animated: false)
             finishPagingTransition(at: kind)
@@ -884,7 +935,8 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
             self.selected = finished ? kind : origin
             self.finishPagingTransition(at: self.selected)
             self.paging = false
-            self.render()
+            if !self.kinds.contains(self.selected) { self.select(.songs, animated: false) }
+            self.showSearchFailure()
             if let pending = self.pendingKind {
                 self.pendingKind = nil
                 self.select(pending, animated: true)
@@ -909,7 +961,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         guard canPresentPageAlert else { return }
         let request = results.requestID
         results.holdPagination()
-        let sources = MusicSourcesViewController(model: model, tracks: Array(song.variants.prefix(10)),
+        let sources = MusicSourcesViewController(model: model, tracks: song.variants,
             appearance: appearance, originIsCurrent: { [weak results] in results?.requestID == request },
             refresh: { [weak results] in
                 guard let results, results.requestID == request else { throw MusicServiceError.staleResult }
@@ -975,7 +1027,7 @@ private final class MusicSearchResultsViewController: SearchPageViewController,
         var action: MusicSearchFooterState.Action?
         if noPlatforms { message = "尚未启用搜索平台" }
         else if !failures.isEmpty {
-            label = section == 1 && failures.contains(where: { $0.error == .staleResult }) ? "重新搜索歌单" : "重试"
+            label = "重试"
             action = .failure
         } else if cancelled {
             message = "已取消"; label = "重试"; action = .retry
@@ -1047,6 +1099,7 @@ private final class MusicSearchTableController: UIViewController {
     let table = UITableView(frame: .zero, style: .plain)
     var dataSource: UITableViewDiffableDataSource<Int, MusicSearchResultRowID>!
     var playlistRows: [Data: [MusicPublicBrowseCollection]] = [:]
+    var headerStates: [Int: MusicSearchHeaderState] = [:]
     var footerStates: [Int: MusicSearchFooterState] = [:]
     var columns = 1
     var onLayout: (() -> Void)?
@@ -1055,6 +1108,12 @@ private final class MusicSearchTableController: UIViewController {
 }
 
 private enum MusicSearchResultRowID: Hashable { case heading(Int), song(Data), playlists(Data), status(Int) }
+
+private struct MusicSearchHeaderState: Equatable {
+    let title: String
+    let showsPlay: Bool
+    let request: UUID
+}
 
 private struct MusicSearchFooterState: Equatable {
     enum Action: Equatable { case failure, retry, cancel, more, category }

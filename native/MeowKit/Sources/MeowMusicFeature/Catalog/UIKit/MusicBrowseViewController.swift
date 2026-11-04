@@ -692,7 +692,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
 
     private func playSource(_ source: MusicRemoteQueueSource, selected: MusicRemoteTrack?) async throws {
         var cursor: String?, offset = 0, seen = Set<String>()
-        for _ in 0..<100 {
+        while true {
             let page = try await model.remoteQueuePage(source, cursor: cursor)
             try Task.checkCancellation()
             let index = selected.flatMap { selected in page.items.firstIndex {
@@ -704,10 +704,9 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             }
             offset += page.items.count
             guard let next = page.cursor else { throw MusicServiceError.notFound }
-            guard !page.items.isEmpty, offset < 2000, seen.insert(next).inserted else { throw MusicServiceError.limit }
+            guard !page.items.isEmpty, seen.insert(next).inserted else { throw MusicServiceError.invalidResponse }
             cursor = next
         }
-        throw MusicServiceError.limit
     }
 
     private func showSources(_ track: MusicRemoteTrack) {

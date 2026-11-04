@@ -8,7 +8,6 @@ extension NativeMusicService {
         seed: MusicNativeCandidateDiscoverySeed, label: String) async throws -> MusicPlaybackCandidate {
         let d = try candidateCheck(seed), selection = target.selection
         try musicRequire(UUID(uuidString: attemptID)?.uuidString.lowercased() == attemptID && !spent.contains(attemptID), .staleResult)
-        try musicRequire(spent.count < 16_384, .limit)
         let (source, info) = try self.target(seed.song, selection.sourceKey)
         try musicRequire(source.platform == selection.siteId && target.option.playback.qualities.contains(selection.quality), .targetChanged)
         try requirePlatform(source.platform)

@@ -376,7 +376,7 @@ private actor MusicSettingsServiceFixture: MusicServing, MusicAccountsServing {
 
     func state() -> MusicPlaybackState { .init() }
     func platforms() -> [MusicPlatform] { [] }
-    func search(platform: String, query: String, page: Int) throws -> MusicSearchPage { throw MusicServiceError.unsupported }
+    func search(platform: String, query: String, page: Int, limit: Int) throws -> MusicSearchPage { throw MusicServiceError.unsupported }
     func collections() -> [MusicCollection] { [] }
     func tracks(in collection: MusicCollection) -> [MusicRemoteTrack] { [] }
     func createPlaylist(name: String, refs: [MusicReference]) throws -> MusicCollection { throw MusicServiceError.unsupported }

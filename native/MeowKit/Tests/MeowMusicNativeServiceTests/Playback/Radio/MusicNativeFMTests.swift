@@ -3,6 +3,74 @@ import MeowMusicFeature
 @testable import MeowMusicNativeService
 
 final class MusicNativeFMTests: XCTestCase {
+    func testFMNextSkipsFailedEntriesAndHonorsDirectionPriorityAndBoundaries() async throws {
+        let service = try await NativeMusicFixture.service()
+        var document = try MusicDocument(nil, runID: "fixture")
+        document.queue["entries"] = .array(try (1...4).map { number in
+            .obj([("id", .string("entry-\(number)")), ("song", try NativeMusicFixture.song("ID-\(number)"))])
+        })
+        document.queue["currentId"] = .string("entry-2")
+        document.queue["failed"] = .strings(["entry-3"])
+        document.queue["priority"] = .strings(["entry-4", "missing", "entry-2"])
+        document.queue["serial"] = .n(4); document.queue["revision"] = .n(1)
+
+        var next = await service.fmNext(document, direction: .next)
+        XCTAssertEqual(next, "entry-4")
+        document.queue["priority"] = .strings(["missing", "entry-2"])
+        next = await service.fmNext(document, direction: .next)
+        XCTAssertEqual(next, "entry-4")
+        document.queue["priority"] = .strings(["entry-1"])
+        next = await service.fmNext(document, direction: .next)
+        XCTAssertEqual(next, "entry-1")
+        document.queue["priority"] = .strings(["entry-4"])
+        var previous = await service.fmNext(document, direction: .previous)
+        XCTAssertEqual(previous, "entry-1")
+        document.queue["failed"] = .strings(["entry-3", "entry-4"])
+        next = await service.fmNext(document, direction: .next)
+        XCTAssertNil(next)
+        document.queue["currentId"] = .string("entry-1")
+        next = await service.fmNext(document, direction: .next)
+        XCTAssertEqual(next, "entry-2")
+        previous = await service.fmNext(document, direction: .previous)
+        XCTAssertNil(previous)
+        document.queue["currentId"] = .string("entry-4")
+        next = await service.fmNext(document, direction: .next)
+        XCTAssertNil(next)
+        document.queue["currentId"] = .string("missing")
+        document.queue["priority"] = .strings(["missing"])
+        next = await service.fmNext(document, direction: .next)
+        XCTAssertNil(next)
+        previous = await service.fmNext(document, direction: .previous)
+        XCTAssertNil(previous)
+        await service.close()
+    }
+
+    func testFMBoundaryAppendsBeyondFormerTwoThousandQueueLimit() async throws {
+        let service = try await NativeMusicFixture.service()
+        let loader = MusicAccountQueuePages(roots: [[NativeMusicFixture.track("A")], [NativeMusicFixture.track("B")]])
+        let source = MusicAccountQueueFixture.source(loader, kind: .fm)
+        let start = try await MusicAccountQueueFixture.start(service, source)
+        let initial = try await service.replaceRemoteQueue(source, start: start, expectedRevision: 0, intent: .init())
+        try await service.transaction(["queue"]) { document in
+            let first = document.queue["entries"].array[0]
+            document.queue["entries"] = .array((1...2000).map { number in
+                var row = first; row["id"] = .string("entry-\(number)"); return row
+            })
+            document.queue["currentId"] = .string("entry-2000"); document.queue["serial"] = .n(2000)
+        }
+        let before = try await service.queue()
+        let next = try await service.advanceFM(source, direction: .next, reason: .manual,
+                                               expectedRevision: initial.revision, intent: .init())
+        let queue = try await service.queue()
+        XCTAssertEqual(next.state.total, 2001); XCTAssertEqual(queue.entries.count, 2001)
+        XCTAssertEqual(Array(queue.entries.prefix(2000)), before.entries)
+        XCTAssertEqual(next.selectedId, queue.entries.last?.id)
+        XCTAssertEqual(queue.entries.last?.track.sources.first?.nativeId, "B")
+        let calls = await loader.events()
+        XCTAssertEqual(calls, ["root", "root"])
+        await source.close(); await service.close()
+    }
+
     func testManualBoundaryAppendsFreshBatchInOrderWithoutChangingSavedSingleModeOrOldIDs() async throws {
         let store = NativeMusicMemoryDocument(), service = try await NativeMusicFixture.service(store)
         let loader = MusicAccountQueuePages(roots: [[NativeMusicFixture.track("A"), NativeMusicFixture.track("B")],
