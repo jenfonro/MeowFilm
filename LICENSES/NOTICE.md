@@ -54,7 +54,12 @@ Adapted portions:
 - iOS: music interface and behavior in `native/MeowKit/Sources/MeowMusicFeature` and
   `native/MeowKit/Sources/MeowUI`; queue appearance and drag admission follow
   `static/queue-sheet.{js,css}` and `static/list-reorder.js`, with native UIKit
-  movement and presentation. Ported files keep their SPDX and author notices.
+  movement and presentation. Record and tonearm artwork adapts
+  `static/themes/starlight/{disc,tonearm}.svg`, `scripts/generate-starlight-assets.mjs`
+  and `static/{player-layout.css,player-theme.js,themes/starlight.css}` with native
+  Core Graphics and Core Animation. The theme-colored default record cover follows
+  `static/utils.js` (`iwebplus-default-cover`) and `static/app-colors.css`.
+  Ported files keep their SPDX and author notices.
 
 ## MeowMusic — GPL-3.0-only
 
