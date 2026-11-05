@@ -75,16 +75,8 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
     }
     private void View_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        double contentWidth = Math.Max(0, e.NewSize.Width - 64);
-        SettingsLayout.SetIsCompact(this, contentWidth < 1100);
-        SettingsLayout.SetIsNarrow(this, contentWidth < 640);
-        if (AppearanceFields is not null) AppearanceFields.Columns = contentWidth < 640 ? 1 : 3;
         AccountsPanel?.CloseTransientPopups();
         UpdateLayoutMetrics();
-    }
-    private void Pair_SizeChanged(object sender, SizeChangedEventArgs e)
-    {
-        if (sender is Grid grid) SettingsLayout.SetIsStacked(grid, e.NewSize.Width < 544);
     }
     private void UpdateLayoutMetrics()
     {
@@ -191,6 +183,18 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
     {
         if (!IsLoaded || sender is not ComboBox { SelectedItem: string value } || value == module.PlaybackQualityRequest) return;
         await module.SetPlaybackQualityRequestAsync(value);
+    }
+    private async void CatalogSource_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (!IsLoaded || !IsVisible || area != "music" ||
+            sender is not ComboBox { SelectedValue: string platform } picker ||
+            platform == module.CatalogSourcePlatform) return;
+        await module.SetCatalogSourceAsync(platform);
+        picker.GetBindingExpression(ComboBox.SelectedValueProperty)?.UpdateTarget();
+    }
+    private async void CatalogSourceRetry_Click(object sender, RoutedEventArgs e)
+    {
+        if (IsLoaded && IsVisible && area == "music") await module.ReadCatalogSourceSettingsAsync();
     }
     private async void Appearance_Changed(object sender, SelectionChangedEventArgs e)
     {

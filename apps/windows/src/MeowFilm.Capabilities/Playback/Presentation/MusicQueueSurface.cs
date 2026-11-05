@@ -17,8 +17,6 @@ public sealed record MusicQueueSurfaceRow(SongRow Song, bool IsCurrent)
 public sealed partial class MusicCapability : IDesktopGlobalSurfaceSource
 {
     private readonly ObservableCollection<MusicQueueSurfaceRow> queueSurfaceRows = [];
-    private MusicPlayerDetailView playerDetail = null!;
-    private MusicQueueView queueSurface = null!;
     private CancellationTokenSource? queueSurfaceCancellation;
     private Task? queueSurfacePending;
     private long queueSurfaceGeneration;
@@ -47,14 +45,12 @@ public sealed partial class MusicCapability : IDesktopGlobalSurfaceSource
     private void InitializeGlobalSurfaces()
     {
         QueueSurfaceRows = new(queueSurfaceRows);
-        playerDetail = new(this);
-        queueSurface = new(this);
     }
 
     public FrameworkElement GetGlobalSurface(DesktopGlobalSurface surface) => surface switch
     {
-        DesktopGlobalSurface.PlayerDetail => playerDetail,
-        DesktopGlobalSurface.PlayQueue => queueSurface,
+        DesktopGlobalSurface.PlayerDetail => Presentation.Detail,
+        DesktopGlobalSurface.PlayQueue => Presentation.Queue,
         _ => throw new ArgumentOutOfRangeException(nameof(surface))
     };
 
@@ -64,9 +60,9 @@ public sealed partial class MusicCapability : IDesktopGlobalSurfaceSource
         switch (surface)
         {
             case DesktopGlobalSurface.PlayerDetail:
-                player.Deactivate();
+                Presentation.DeactivatePlayer();
                 playerDetailOpen = true;
-                await playerDetail.ActivateAsync(cancellationToken);
+                await Presentation.Detail.ActivateAsync(cancellationToken);
                 break;
             case DesktopGlobalSurface.PlayQueue:
                 queueSurfaceOpen = true;
@@ -85,7 +81,7 @@ public sealed partial class MusicCapability : IDesktopGlobalSurfaceSource
         {
             case DesktopGlobalSurface.PlayerDetail:
                 playerDetailOpen = false;
-                playerDetail.Deactivate();
+                Presentation.DeactivateDetail();
                 CancelLyrics();
                 break;
             case DesktopGlobalSurface.PlayQueue:

@@ -59,7 +59,7 @@ ValueTask DisposeAsync();
 - UTF-8 字节必须等于当前 canonical JSON 编码；重复属性、非规范持久整数、额外根字段和未知 entry 均拒绝。
 - entry key 必须属于当前 owner 的明确 area，或属于当前已安装脚本实例的精确私有 storage key。
 - 缺少可选 area 表示该 area 尚未创建；entry 已存在但值为 `null`、错误类型或错误 schema 时不是空状态。
-- 不兼容文档保持原字节不变并明确失败，不自动修复、删除、覆盖或转换。
+- 不兼容文档保持原字节不变并明确失败；唯一支持的旧格式转换是下述 `online-settings` schema 2 → 3，转换前仍须验证完整文档。
 
 当前普通 area：
 
@@ -70,6 +70,7 @@ queue
 history
 lx-installations
 online-settings
+native-catalog-source
 native-official-sources
 native-quality-policy
 native-lyric-display
@@ -102,8 +103,45 @@ playback-settings
 - 发布 metadata 前先原子写入源码文件；激活时直接读取当前文件，按实际长度执行单脚本 16 MiB 上限，不做历史源码哈希门禁。编辑后重新启用或重启可执行新内容；语法与运行错误由引擎报告。显式重新导入可原子替换同一引用的文件，仍受当前文件 CAS 保护。
 - 曲库、设置和 LX 脚本 KV 随普通 `music.library.v1` JSON 明文存储；脚本自行保存的 Cookie 等值不由运行器特殊加密。文件和会话隔离、整文档 CAS 与未知提交恢复继续生效。未被 metadata 引用的源码不会被静默删除或当作安装实例。
 - 开发阶段不迁移旧加密文档或 `music.script-sources.v1` 分片，不提供读取回退，也不自动删除旧数据。
-- 禁用或删除当前播放目标时，在同一文档 CAS 中把 `online-settings.target` 置空并推进其 revision。
-- 读取不写入文档；schema 3、内联源码和其他不符合当前格式的记录明确失败，不迁移、转换、删除或回退。
+- 安装启停或删除不修改在线设置及其 revision；删除安装实例仍在同一 CAS 中移除该实例的私有 storage。
+- 安装元数据本身不因读取而写入；安装 schema 3、内联源码和其他不符合当前安装格式的记录明确失败，不迁移、转换、删除或回退。文档内合法的旧在线设置按下一节转换。
+
+## 在线设置当前格式与定点转换
+
+`online-settings` 的当前格式为 schema 3，字段仅有：
+
+```json
+{
+  "schema": 3,
+  "revision": 0,
+  "lyrics": true
+}
+```
+
+- 缺少该 area 时，`music.settings.get` 返回上述缺省 `settings`，不制造 area 或文档。
+- `music.settings.save` 必须且只能携带 `ifRevision` 和 `lyrics`；成功保存推进一次 revision，旧 revision 返回 `REVISION_CONFLICT`。当前读写格式均不包含全局音源选择。
+- 旧 schema 2 必须精确包含 `schema revision lyrics target`。`revision` 必须是合法持久整数，`lyrics` 必须是布尔值；旧 `target` 只能为 `null` 或精确包含 `installationId platform` 的对象，安装 ID 须合法并引用已存在实例，平台只允许 `wy/tx/kw/kg/mg/local`。引用禁用实例仍属于合法旧数据，不改变该实例的启停状态。
+- 读取旧文档时，先校验 canonical envelope、全部 area、安装 schema 4、私有 storage 及旧设置 shape/引用，再仅将在线设置的 schema 改为 3 并移除旧 `target`。转换保留原有 `lyrics` 和 `revision`，也保留曲库、队列、历史、安装版本/权限/启停、私有 storage、其他设置以及独立存储的源码内容。
+- 转换通过现有 owner gate 和完整文档 CAS 持久化。当前 schema 3 的普通读取和重启不再写入；未知 schema、缺字段、额外字段、损坏或悬空引用均拒绝，原文档不覆写。
+- 转换未知提交与在线设置保存采用相同 pending 规则：后续命令封闭，使用显式 `ReconcileAsync` 读回 before/after 指纹。强制加载和结算不转换、不重放写入，也不替换 pending；第三状态保持冲突。若结算确认转换尚未提交，下一次新业务调用才可重试转换，继续沿用原 revision。
+- 相关公开行为用例位于 `MusicNativeLibraryTests.cs` 和 `MusicOnlineSettingsTests.cs`；执行结果由集中验证记录。
+
+## 浏览数据源设置当前格式
+
+`native-catalog-source` 的当前格式为 schema 1：
+
+```json
+{
+  "schema": 1,
+  "revision": 0,
+  "platform": "wy"
+}
+```
+
+- `music.catalogSource.settings.get` 返回 `settings`；缺少该 area 时返回上述缺省值，读取不写盘。
+- `music.catalogSource.settings.save` 只接收 `ifRevision` 和 `platform`，平台仅允许 `wy/kg`；revision 不符返回 `REVISION_CONFLICT`，同值保存不写盘，改变平台只推进本设置的 revision。
+- 该偏好只控制首页与频道，不改详情资源平台、账号、搜索偏好、音源启停或在线设置；唯一 writer 仍是本 owner。
+- 未知 CAS 由本职责的权威 get 核对 before/after 指纹结算，不重放保存，也不替其他职责结算。测试归属为 `MusicCatalogSourceSettingsTests.cs`。
 
 ## 官方音源设置当前格式
 
@@ -120,7 +158,7 @@ playback-settings
 - `enabled` 是 `wy`、`tx`、`kg` 的无重复子集；空数组表示三平台全部关闭。
 - 缺少该 area 时，`music.officialSources.settings.get` 返回上述 revision 0、三平台全开的缺省 `settings`，不为读取创建或写入文档。
 - `music.officialSources.settings.save` 必须携带 `ifRevision` 和 `enabled`；`ifRevision` 与当前 revision 不符时返回 `REVISION_CONFLICT`，成功保存只推进本设置的 revision。
-- 该设置独立于 `online-settings`、`native-quality-policy` 和 `native-metadata-policy`，不复用它们的启停字段或改写播放目标、音质、歌词／封面设置。
+- 该设置独立于 `online-settings`、`native-quality-policy` 和 `native-metadata-policy`，不复用它们的启停字段或改写音质、歌词／封面设置。
 - 持久化覆盖契约与测试归属见 `MusicOfficialSourcesPolicyTests.cs`，包括缺省读取、独立启停与全关、重启恢复及同职责未知 CAS 结算；测试执行结果另行记录。
 
 ## 曲库当前格式
@@ -211,6 +249,7 @@ music.history.recordPlayed
 
 ```text
 music.settings.get / save
+music.catalogSource.settings.get / save
 music.officialSources.settings.get / save
 music.quality.settings.get / save
 music.metadata.settings.get / save
@@ -228,7 +267,7 @@ music.online.song
 
 - 所有持久写入在同一 owner gate 内对完整 envelope 执行 CAS。
 - CAS 准入后不把取消解释为回滚；丢失写入回执时保留内存候选并阻止后续写。
-- `appearance`、`metadata`、`quality`、官方音源设置（`music.officialSources.settings.get`）、`queue` 和搜索策略在各自写入回执不确定时，只允许对应的权威 current read 在 owner gate 内读取实际文档并核对该次 CAS 的 before/after 指纹；该读取会结算同职责的未知 CAS 结果，不重放业务命令。官方音源设置的权威读取对应 `music.officialSources.settings.save`。
+- `appearance`、`metadata`、`quality`、浏览数据源、官方音源设置、`queue` 和搜索策略在各自写入回执不确定时，只允许对应的权威 current read 在 owner gate 内读取实际文档并核对该次 CAS 的 before/after 指纹；该读取会结算同职责的未知 CAS 结果，不重放业务命令。浏览数据源与官方音源分别通过 `music.catalogSource.settings.get`、`music.officialSources.settings.get` 结算对应 save。
 - 其他职责以及跨职责命令继续由显式 `ReconcileAsync` 协调；recommendation 使用其 nonce reconcile。一个职责的 current read 不得替另一个职责结算未知写入。
 - 第三状态保持 `STORAGE_CONFLICT`，不提供“丢弃旧数据后继续”的回退入口。
 - `PrepareShutdownAsync` 封闭新业务并要求未知写已结算；取消关闭只恢复当前 owner，不重放写入。

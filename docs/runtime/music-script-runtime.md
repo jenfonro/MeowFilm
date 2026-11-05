@@ -95,7 +95,7 @@ LX 请求数据保留 `{source,action,info}`：
 - source 为明确 siteId，action 为明确 operation。
 - `musicUrl` 将 `payload.type` 或 `payload.quality` 映射为 `info.type`，保留 `musicInfo`；非 local source 仍需匹配声明音质。
 - 其他声明动作保留自身数据语义；`search` 与 `musicSearch` 不被强行视作所有脚本通用的别名。
-- 返回数据按 LX 处理器实际值传递，不改成未来 Cat 的业务格式。
+- 返回数据按 LX 处理器实际值传递，不改成 Cat 或 Reader 的业务格式。
 
 脚本内部字节处理、桥接与 `invokeResult` 受单脚本内存上限约束；宿主缓冲网络响应体及解压输出以同一内存上限为上界。不设全局／实例／site 调用数量预算。没有单次同步执行时限；初始化等待上限为 5 秒，调用等待与请求内截止均为 60 秒。调用或初始化等待到期后由主线程探测对应 worker，`cleanupTimeoutMs` 内无回应才终止并判 `TIMEOUT`。
 
@@ -133,6 +133,8 @@ grant installationId siteId generation key value?
 LX `request` 的回调、返回体和取消语义保留；`follow_max` 在 Node 适配器中受最大重定向次数约束，不等于任意 LX 版本都定义该字段。`showConfigView` 等扩展事件也不等于当前已提供 Web 管理服务，需依脚本实际路径单独验收。
 
 已遇到的扩展选项 `followRedirect` 按布尔值控制自动跳转；false 优先关闭跳转，true 仍遵守重定向上限，`follow_max` 超过上限时按上限截断。`retry` 兼容接受，不额外启动宿主重试或重放 POST；与核对的 LX 桌面 request 封装不消费该字段的行为一致。网络任务在取消后仍保持登记，直至底层确认结束。
+
+LX 继续使用原有网络适配器及请求绑定的原生 storage grant，不套用 source 的 capability 网络包装。Reader/CatVod 的[capability ABI](source-capability-abi.md)属于独立输入契约；三类 module 只共用 WorkerSession、worker 协议和 QuickJS 机制，不互换 site/action/quality 或数据权限。
 
 ## 取消与关闭
 

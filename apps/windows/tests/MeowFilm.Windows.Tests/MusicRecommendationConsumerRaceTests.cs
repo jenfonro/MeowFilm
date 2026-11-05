@@ -293,22 +293,30 @@ public static partial class MusicUiTests
             var reply = await library.ExecuteAsync("music.quality.settings.get", cancellationToken: token);
             if (!reply.GetProperty("ok").GetBoolean()) return reply;
             var result = JsonNode.Parse(reply.GetRawText())!.AsObject();
-            // Keep the existing synthetic source target without adding a Library
-            // write. Sign that exact online view with the native policy contract.
+            // Keep lyrics disabled without adding a library write or replacing
+            // the real owner's quality policy signature.
             result["onlineSettings"] = JsonSerializer.SerializeToNode(new {
-                schema = 2, revision = 0, lyrics = false,
-                target = new { installationId = "recommendation-consumer-race", platform = "wy" } });
-            result["signature"] = LJ.Digest(LJ.Obj(("contract", "music.quality.v1"), ("scope", "local"),
-                ("policy", result["settings"]), ("online", result["onlineSettings"])));
+                schema = 3, revision = 0, lyrics = false });
             return JsonSerializer.SerializeToElement(result);
         }
+        private static JsonElement ScriptSource() => JsonSerializer.SerializeToElement(new {
+            installationId = "recommendation-consumer-race", name = "Recommendation race fixture", version = "1",
+            contentHash = new string('c', 64), executionHash = new string('d', 64), sourceRevision = 1,
+            generation = 1, enabled = true, state = "ready", rollbackAvailable = false, lastFailure = (string?)null,
+            capabilities = new[] { new { platform = "wy", actions = new[] { "musicUrl" }, qualitys = new[] { "320k" } } } });
         public override async Task<JsonElement> ExecuteAsync(string method, object? parameters = null,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (method == "music.quality.settings.get") return await ReadQualitySettings(cancellationToken);
+            if (method.StartsWith("music.official.", StringComparison.Ordinal))
+                return JsonSerializer.SerializeToElement(new { ok = false, code = "CAPABILITY_UNAVAILABLE" });
+            if (method == "music.sources.list")
+                return JsonSerializer.SerializeToElement(new { ok = true, revision = 1, items = new[] { ScriptSource() } });
             if (method == "music.sources.detail")
-                return JsonSerializer.SerializeToElement(new { ok = true, item = new { generation = 1 } });
+                return JsonSerializer.SerializeToElement(parameters).GetProperty("installationId").GetString() == "recommendation-consumer-race"
+                    ? JsonSerializer.SerializeToElement(new { ok = true, item = ScriptSource(), permissions = new { storage = Array.Empty<string>() } })
+                    : JsonSerializer.SerializeToElement(new { ok = false, code = "NOT_FOUND" });
             if (method == "music.online.resolve")
             {
                 ResolveCalls++;
@@ -318,6 +326,9 @@ public static partial class MusicUiTests
                 if (!quality.GetProperty("ok").GetBoolean()) return quality;
                 if (request.GetProperty("quality").GetString() != "320k")
                     return JsonSerializer.SerializeToElement(new { ok = false, code = "CAPABILITY_UNAVAILABLE" });
+                True(request.GetProperty("installationId").GetString() == "recommendation-consumer-race" &&
+                    request.GetProperty("platform").GetString() == "wy" && request.GetProperty("generation").GetInt64() == 1,
+                    "resolution uses the enabled fixture installation and its live declaration");
                 string policy = quality.GetProperty("signature").GetString()!;
                 var source = song.GetProperty("sources")[0];
                 var songNode = JsonNode.Parse(song.GetRawText())!.AsObject();

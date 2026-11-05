@@ -9,8 +9,8 @@ public sealed partial class MusicCapability
 {
     private CancellationTokenSource? onlineCancellation;
     private MusicSourceRow? selectedSource;
-    private string? playbackInstallation, targetInstallation, targetPlatform;
-    private long onlineSettingsRevision, onlineGeneration;
+    private string? playbackInstallation;
+    private long onlineGeneration;
     private string lyricStatus = "";
     private long officialSourcesRevision;
     private bool officialSourcesLoaded;
@@ -24,7 +24,6 @@ public sealed partial class MusicCapability
         new("tx", "QQ 音乐", true),
         new("kg", "酷狗音乐", true)
     ];
-    public ObservableCollection<MusicSourcePlatformRow> SourcePlatformRows { get; } = [];
     public ObservableCollection<MusicLyricRow> Lyrics { get; } = [];
     public ObservableCollection<MusicRecordingRow> RecordingCandidates { get; } = [];
     public bool HasRecordingCandidates => RecordingCandidates.Count > 0;
@@ -64,15 +63,12 @@ public sealed partial class MusicCapability
         UpdateCurrentRecordings();
     }
     public bool LyricsEnabled { get; set; } = true;
-    public string SelectedPlatform { get; private set; } = "";
     public MusicSourceRow? SelectedSource
     {
         get => selectedSource;
         set
         {
             selectedSource = value;
-            SelectedPlatform = value?.InstallationId == targetInstallation ? targetPlatform ?? "" : "";
-            RebuildSourcePlatforms();
             Changed();
             OnlineBindings();
         }
@@ -81,47 +77,35 @@ public sealed partial class MusicCapability
     public bool CanEditSource => CanEdit && selectedSource is not null;
     public bool CanLoadSource => CanEdit && selectedSource is { Enabled: true, State: "idle" };
     public bool CanRollbackSource => CanEdit && selectedSource?.RollbackAvailable == true;
-    public bool CanUseSelectedSource => CanEdit && selectedSource is { Enabled: true } &&
-        selectedSource.Platforms.Length > 0;
-    public bool UsesOfficialSources => targetInstallation is null;
     public bool IsLyrics => playerDetailOpen;
     public string LyricStatus => lyricStatus;
     public int ActiveLyricIndex
     {
         get
         {
-            var result = -1;
-            for (var i = 0; i < Lyrics.Count && Lyrics[i].Time <= PositionSeconds; i++) result = i;
-            return result;
+            var position = PositionSeconds;
+            int low = 0, high = Lyrics.Count;
+            while (low < high)
+            {
+                int middle = low + (high - low) / 2;
+                if (Lyrics[middle].Time <= position) low = middle + 1;
+                else high = middle;
+            }
+            return low - 1;
         }
     }
     public string SourceCapabilities => selectedSource?.Capabilities ?? "";
     public string[] SourcePlatforms => selectedSource?.Platforms ?? [];
-    public string PlaybackTarget => targetInstallation is null ? "官方音源" :
-        $"{Sources.FirstOrDefault(source => source.InstallationId == targetInstallation)?.Name ?? "JS 音源"} · {PlatformName(targetPlatform)}";
     public bool CanCancelOnline => onlineCancellation is not null;
     public bool CanEditOfficialSources => CanEdit && officialSourcesLoaded;
     private void OnlineBindings()
     {
         foreach (var property in new[] { nameof(HasSource), nameof(CanEditSource), nameof(CanLoadSource),
-            nameof(CanRollbackSource), nameof(CanUseSelectedSource),
-            nameof(UsesOfficialSources), nameof(IsLyrics), nameof(LyricStatus),
-            nameof(ActiveLyricIndex), nameof(SourceCapabilities), nameof(SourcePlatforms), nameof(SelectedPlatform),
-            nameof(PlaybackTarget), nameof(CanCancelOnline), nameof(CanEditOfficialSources) })
+            nameof(CanRollbackSource), nameof(IsLyrics), nameof(LyricStatus),
+            nameof(SourceCapabilities), nameof(SourcePlatforms),
+            nameof(CanCancelOnline), nameof(CanEditOfficialSources) })
             Changed(property);
-    }
-    private static string PlatformName(string? platform) => platform switch
-    {
-        "wy" => "网易云音乐", "tx" => "QQ 音乐", "kg" => "酷狗音乐",
-        "kw" => "酷我音乐", "mg" => "咪咕音乐", "local" => "本地", _ => ""
-    };
-    private void RebuildSourcePlatforms()
-    {
-        SourcePlatformRows.Clear();
-        if (selectedSource is not null)
-            foreach (var platform in selectedSource.Platforms)
-                SourcePlatformRows.Add(new(platform, PlatformName(platform),
-                    selectedSource.InstallationId == targetInstallation && platform == targetPlatform));
+        LyricTimingBindings();
     }
     private CancellationTokenSource BeginOnline(CancellationToken token)
     {
@@ -260,18 +244,12 @@ public sealed partial class MusicCapability
     }
     private void PublishOnlineSettings(JsonElement value)
     {
-        onlineSettingsRevision = MusicDto.Integer(value, "revision");
         LyricsEnabled = value.GetProperty("lyrics").GetBoolean();
-        var target = value.GetProperty("target");
-        targetInstallation = target.ValueKind == JsonValueKind.Null ? null : MusicDto.Text(target, "installationId");
-        targetPlatform = target.ValueKind == JsonValueKind.Null ? null : MusicDto.Text(target, "platform");
-        SelectedPlatform = selectedSource?.InstallationId == targetInstallation ? targetPlatform ?? "" : "";
-        RebuildSourcePlatforms();
         Changed(nameof(LyricsEnabled)); OnlineBindings();
     }
     private async Task RefreshSources(CancellationToken token)
     {
-        var chosen = selectedSource?.InstallationId ?? targetInstallation;
+        var chosen = selectedSource?.InstallationId;
         var reply = await Call("music.sources.list", cancellationToken: token);
         var rows = reply.GetProperty("items").EnumerateArray().Select(MusicSourceRow.Read).ToArray();
         Sources.Clear(); foreach (var row in rows) Sources.Add(row);
@@ -373,12 +351,14 @@ public sealed partial class MusicCapability
         try
         {
             token.ThrowIfCancellationRequested();
+            NotifyMusicSourcesChanged();
+            CancelMusicPreload();
             if (update is not null)
             {
+                await RevokeChangedMusicSource(update.InstallationId);
                 var changed = await CallSettledReceipt("music.sources.update", new { installationId = update.InstallationId,
                     token = transfer, version = inspection.Version,
                     permissions = SourcePermissions() }, token);
-                await RevokeChangedMusicSource(update.InstallationId);
                 return MusicDto.Text(changed.GetProperty("item"), "installationId");
             }
             var installed = await CallSettledReceipt("music.sources.install", new { token = transfer,
@@ -389,6 +369,7 @@ public sealed partial class MusicCapability
         finally
         {
             try { await CallSettledReceipt("music.transfer.cancel", new { token = transfer }); } catch { }
+            NotifyMusicSourcesChanged();
         }
     }
     public Task SourceActionAsync(string action)
@@ -405,45 +386,15 @@ public sealed partial class MusicCapability
             if (source is null || !Sources.Contains(source)) return;
             if (action == "remove" && !dialogs.Confirm($"删除音源“{source.Name}”？", "删除音源")) return;
             if (action == "rollback" && !dialogs.Confirm($"回退音源“{source.Name}”？", "回退音源")) return;
+            NotifyMusicSourcesChanged();
+            CancelMusicPreload();
             if (playbackInstallation == source.InstallationId && action != "enable") await StopOwnedPlayback();
-            await Call("music.sources." + action, new { installationId = source.InstallationId }, lifetime.Token);
+            else if (action != "enable") await RevokeChangedMusicSource(source.InstallationId);
+            try { await Call("music.sources." + action, new { installationId = source.InstallationId }, lifetime.Token); }
+            finally { NotifyMusicSourcesChanged(); }
             await ReadOnlineSettings(lifetime.Token);
             await RefreshSources(lifetime.Token);
         });
-    }
-    public Task SaveOnlineSettingsAsync() => SaveOnlineTargetAsync(selectedSource, SelectedPlatform);
-    private Task SaveOnlineTargetAsync(MusicSourceRow? source, string platform)
-    {
-        var lyrics = LyricsEnabled; var revision = onlineSettingsRevision;
-        if (!CanEdit) return Task.CompletedTask;
-        if (source is not null && (!source.Enabled || !source.Platforms.Contains(platform)))
-            return RunAsync(() => throw new MusicOperationException("TARGET_REQUIRED"));
-        return RunAsync(async () =>
-        {
-            var reply = await Call("music.settings.save", new
-            {
-                ifRevision = revision,
-                lyrics,
-                target = source is null ? null : new { installationId = source.InstallationId, platform }
-            }, lifetime.Token);
-            PublishOnlineSettings(reply.GetProperty("settings"));
-        });
-    }
-    public Task UseOfficialSourcesAsync()
-    {
-        if (!CanEdit) return Task.CompletedTask;
-        return SaveOnlineTargetAsync(null, "");
-    }
-    public Task UseSourcePlatformAsync(string platform)
-    {
-        return UseSourcePlatformAsync(selectedSource, platform);
-    }
-    public Task UseSourcePlatformAsync(MusicSourceRow? source, string platform)
-    {
-        if (!CanEdit || source is null || !Sources.Contains(source)) return Task.CompletedTask;
-        if (!source.Enabled || !source.Platforms.Contains(platform))
-            return RunAsync(() => throw new MusicOperationException("TARGET_REQUIRED"));
-        return SaveOnlineTargetAsync(source, platform);
     }
     public Task PlayOnlineSongAsync(string platform, string title, string artist, string album, JsonElement musicInfo)
     {
@@ -475,30 +426,10 @@ public sealed partial class MusicCapability
     private async Task<ResolvedMusic> ResolveOnline(SongRow song, CancellationToken token)
     {
         await ReadOnlineSettings(token);
-        if (targetInstallation is null)
-        {
-            var raw = System.Text.Json.Nodes.JsonNode.Parse(song.Raw.GetRawText())!.AsObject();
-            var native = Library.NativeMusicSong.SourceData(raw);
-            string platform = recordingPlatforms.GetValueOrDefault(song.Id) ?? Library.LJ.S(native["source"]);
-            recordingChoices.TryGetValue(song.Id + "\0" + platform, out var chosen);
-            if (chosen is null)
-                return await ResolveAutomaticOfficial(song, Library.LJ.S(savedQualityPolicy!["request"]),
-                    savedQualitySignature!, token);
-            if (platform is not ("wy" or "tx" or "kg")) throw new MusicOperationException("CAPABILITY_UNAVAILABLE");
-            return await ResolveMusicTarget(song, new(null, platform, 0, chosen,
-                PolicyRequest: Library.LJ.S(savedQualityPolicy!["request"]),
-                Quality: Library.LJ.S(savedQualityPolicy!["request"]),
-                QualityPolicySignature: savedQualitySignature,
-                RecordingSong: KnownOfficialSong(song)), token, initial: true);
-        }
-        if (targetPlatform is null) throw new MusicOperationException("TARGET_REQUIRED");
-        var source = (await Call("music.sources.detail", new { installationId = targetInstallation }, token)).GetProperty("item");
-        recordingChoices.TryGetValue(song.Id + "\0" + targetPlatform, out var sourceKey);
-        return await ResolveMusicTarget(song, new(targetInstallation, targetPlatform,
-            MusicDto.Integer(source, "generation"), sourceKey,
-            PolicyRequest: Library.LJ.S(savedQualityPolicy!["request"]),
-            Quality: Library.LJ.S(savedQualityPolicy!["request"]),
-            QualityPolicySignature: savedQualitySignature), token, initial: true);
+        string? platform = recordingPlatforms.GetValueOrDefault(song.Id);
+        string? key = platform is null ? null : recordingChoices.GetValueOrDefault(song.Id + "\0" + platform);
+        return await ResolveAutomaticSources(song, Library.LJ.S(savedQualityPolicy!["request"]),
+            savedQualitySignature!, token, recordingPlatform: platform, recordingKey: key);
     }
     public Task ShowLyricsAsync() => OpenPlayerDetailAsync();
 }

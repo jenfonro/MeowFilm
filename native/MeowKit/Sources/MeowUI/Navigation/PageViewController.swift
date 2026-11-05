@@ -221,7 +221,7 @@ open class PageViewController: UIViewController {
     public var contentTopAnchor: NSLayoutYAxisAnchor {
         hasOwnHeader ? pageHeader.bottomAnchor : view.topAnchor
     }
-    /// A page nested in a retained tab shell shares the shell's single header.
+    /// False for a page nested under a page that uses a header; it shares that header.
     public var hasOwnPageHeader: Bool { hasOwnHeader }
     open override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()

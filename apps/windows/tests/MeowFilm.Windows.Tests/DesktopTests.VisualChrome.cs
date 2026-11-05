@@ -21,7 +21,7 @@ public static partial class DesktopTests
             await using var f = new Fixture([new ProbeModule("typography")]); await f.LoadAsync();
             Equal(SystemFonts.MessageFontFamily, f.Shell.FontFamily, "Windows system body font");
             Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(f.Shell), "display text metrics");
-            Equal(TextRenderingMode.Grayscale, TextOptions.GetTextRenderingMode(f.Shell), "grayscale text rendering");
+            Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(f.Shell), "native surface chooses text rendering");
             True(f.Shell.UseLayoutRounding && f.Shell.SnapsToDevicePixels, "native display pixels own text layout");
             Equal(64d, WindowChrome.GetWindowChrome(f.Shell)!.CaptionHeight,
                 "compact header remains the complete draggable caption");
@@ -52,6 +52,15 @@ public static partial class DesktopTests
             var search = f.Element<TextBox>("SearchBox");
             var action = f.Element<Button>("SearchButton");
             Equal(f.Shell.FontFamily, search.FontFamily, "search follows the body font");
+            Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(search), "search inherits display metrics");
+            Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(search), "ordinary search uses automatic rendering");
+            var navigationText = ChromeVisuals(navigation).OfType<TextBlock>().ToArray();
+            True(navigationText.Length > 0, "typography checks inspect rendered navigation labels");
+            foreach (var text in navigationText)
+            {
+                Equal(TextFormattingMode.Display, TextOptions.GetTextFormattingMode(text), "navigation display metrics");
+                Equal(TextRenderingMode.Auto, TextOptions.GetTextRenderingMode(text), "navigation automatic rendering");
+            }
             True(search.Focusable && action.Focusable, "both search entry and submit remain keyboard accessible");
             var origin = action.TranslatePoint(new Point(), search);
             True(origin.X >= 0 && origin.Y >= 0 &&
@@ -323,6 +332,10 @@ public static partial class DesktopTests
         root.Resources.MergedDictionaries.Add(shell.Resources); root.DataContext = shell.DataContext;
         root.Background = shell.Background; TextElement.SetForeground(root, shell.Foreground);
         TextElement.SetFontFamily(root, shell.FontFamily); TextElement.SetFontSize(root, shell.FontSize);
+        TextOptions.SetTextFormattingMode(root, TextOptions.GetTextFormattingMode(shell));
+        TextOptions.SetTextRenderingMode(root, TextOptions.GetTextRenderingMode(shell));
+        root.UseLayoutRounding = shell.UseLayoutRounding;
+        root.SnapsToDevicePixels = shell.SnapsToDevicePixels;
         return root;
     }
     private static IEnumerable<T> VisualDescendants<T>(DependencyObject root) where T : DependencyObject

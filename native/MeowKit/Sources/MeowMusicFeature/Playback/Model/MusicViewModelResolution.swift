@@ -111,7 +111,8 @@ extension MusicViewModel {
     }
 
     func prepareAutomaticCandidate(_ provider: any MusicCandidateDiscoveryServing, epoch: UUID,
-        automatic: Bool, admission: QueuePlaybackAdmission?, useAudioCache: Bool = true) async {
+        automatic: Bool, admission: QueuePlaybackAdmission?, useAudioCache: Bool = true,
+        replacement: SourceReplacementIntent? = nil) async {
         guard let current, let service, player != nil else { return }
         do { try admission?.check() } catch { report(error, epoch: epoch); return }
         let before = state, entries = queue, oldAttempt = resolvingAttempt ?? candidate?.attemptId
@@ -131,7 +132,8 @@ extension MusicViewModel {
             if let oldAttempt { try await service.cancel(attemptId: oldAttempt) }
             try checkSelection(epoch, token: token, occurrenceID: current.id, admission: admission)
             if useAudioCache, try await startCachedAudio(selection: nil, automatic: automatic,
-                epoch: epoch, token: token, occurrenceID: current.id, admission: admission) { return }
+                epoch: epoch, token: token, occurrenceID: current.id, admission: admission,
+                replacement: replacement) { return }
             // One scoped consumer per request. Its synchronous Task cancellation
             // cannot become a delayed actor cancel of a newer selection.
             let consumer = MusicCandidateDiscoveryConsumer(provider: provider)
@@ -155,7 +157,8 @@ extension MusicViewModel {
                 $0.sourceKey == result.target.selection.sourceKey && $0.platform == result.target.selection.siteId
             }) == true else { throw MusicServiceError.targetChanged }
             accepted = try acceptResolvedCandidate(result.candidate, selection: result.target.selection,
-                attemptID: result.candidate.attemptId, occurrenceID: current.id, epoch: epoch, token: token, admission: admission)
+                attemptID: result.candidate.attemptId, occurrenceID: current.id, epoch: epoch, token: token,
+                admission: admission, replacement: replacement)
             if accepted { beginPlaybackMetadata(fallbackSourceKey: result.target.selection.sourceKey) }
         } catch {
             if selectionID == token {
@@ -266,6 +269,29 @@ extension MusicViewModel {
             // bypass complete local bytes for this explicitly selected quality.
             await choose(selection, automatic: false, admission: admission, useAudioCache: true)
         } catch { report(error, epoch: own) }
+    }
+    /// "Not this song" for a non-primary source of the current occurrence. When
+    /// that source is playing, the existing automatic selection replaces it and
+    /// keeps the live position and paused intent.
+    func rejectInspectedSource(_ source: MusicResolvedSource, session: any MusicSourceInspectionSession) async {
+        guard let current, let service else { return }
+        let own = lifecycle, token = selectionID, before = state, entries = queue
+        let admission = fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
+        let key = source.selection.sourceKey
+        let playing = nativeAttempt != nil && candidate?.occurrenceId == current.id && lastSelection?.sourceKey == key
+        let replacement = playing ? SourceReplacementIntent(occurrenceID: current.id, position: position,
+                                                            remainsPaused: phase == .paused) : nil
+        error = nil
+        do {
+            try checkSelection(own, token: token, occurrenceID: current.id, admission: admission)
+            try await session.reject(sourceKey: key, occurrenceID: current.id, expectedQueueRevision: before.revision)
+            try checkSelection(own, token: token, occurrenceID: current.id, admission: admission)
+            try await refreshCandidateQueue(service, epoch: own, token: token, before: before,
+                                            entries: entries, admission: admission)
+        } catch { report(error, epoch: own); return }
+        guard playing, let provider = service as? any MusicCandidateDiscoveryServing else { return }
+        await prepareAutomaticCandidate(provider, epoch: own, automatic: false, admission: admission,
+                                        replacement: replacement)
     }
     func choose(_ selection: MusicPlaybackSelection, automatic: Bool, admission: QueuePlaybackAdmission? = nil,
                         useAudioCache: Bool = true) async {

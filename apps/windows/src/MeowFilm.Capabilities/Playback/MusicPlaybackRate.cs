@@ -86,6 +86,6 @@ public sealed partial class MusicCapability
     private void PlaybackRateBindings()
     {
         Changed(nameof(PlaybackRate)); Changed(nameof(PlaybackRateText));
-        Changed(nameof(CanChangePlaybackRate)); Changed(nameof(AcceptedPlaybackRate));
+        playbackPresentation.Refresh();
     }
 }

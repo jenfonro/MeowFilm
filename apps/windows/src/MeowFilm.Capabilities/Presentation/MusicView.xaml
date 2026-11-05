@@ -231,10 +231,10 @@
    <desktop:NoticeOutlet Message="{Binding Status}"/>
     <desktop:NoticeOutlet Message="{Binding SearchStatus}"/>
   </StackPanel>
-   <Grid Grid.Row="2">
-   <local:MusicCatalogView x:Name="CatalogView" Visibility="{Binding IsCatalogContent,Converter={StaticResource Visible}}"/>
-   <local:MusicDiscoveryView x:Name="DiscoveryView" Visibility="{Binding IsDiscovery,Converter={StaticResource Visible}}"/>
-   <ScrollViewer x:Name="ArchiveScroll" VerticalScrollBarVisibility="Auto" Visibility="{Binding IsArchives,Converter={StaticResource Visible}}">
+   <Grid x:Name="BodyPages" Grid.Row="2">
+   <local:MusicCatalogView x:Name="CatalogView"/>
+   <local:MusicDiscoveryView x:Name="DiscoveryView"/>
+   <ScrollViewer x:Name="ArchiveScroll" VerticalScrollBarVisibility="Auto">
     <ItemsControl ItemsSource="{Binding Archives}"><ItemsControl.ItemTemplate><DataTemplate>
      <Border Style="{StaticResource MeowFilm.Surface}" Margin="0,0,0,12">
       <DockPanel><StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
@@ -263,9 +263,7 @@
       <EventSetter Event="Loaded" Handler="SongsGridScroll_Loaded"/>
      </Style>
     </DataGrid.Resources>
-    <DataGrid.Style><Style TargetType="DataGrid" BasedOn="{StaticResource Playlist.Grid}">
-     <Style.Triggers><DataTrigger Binding="{Binding ShowsSongTable}" Value="False"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger><DataTrigger Binding="{Binding IsSearchSongs}" Value="True"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers>
-    </Style></DataGrid.Style>
+    <DataGrid.Style><Style TargetType="DataGrid" BasedOn="{StaticResource Playlist.Grid}"/></DataGrid.Style>
     <DataGrid.ContextMenu><ContextMenu DataContext="{Binding PlacementTarget.Tag,RelativeSource={RelativeSource Self}}">
      <MenuItem Header="播放" Click="Play_Click" IsEnabled="{Binding HasSelection}"/><MenuItem Header="下一首播放" Click="NextInQueue_Click" IsEnabled="{Binding HasSelection}"/>
      <MenuItem Header="收藏" Click="Favorite_Click" IsEnabled="{Binding HasSelection}"/>
@@ -341,6 +339,7 @@
      </DataGridTemplateColumn>
     </DataGrid.Columns>
    </DataGrid>
+   <Grid x:Name="SearchSongsPage">
    <StackPanel Panel.ZIndex="3" IsHitTestVisible="False" VerticalAlignment="Top">
     <StackPanel.Style><Style TargetType="StackPanel"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding ShowSearchSkeleton}" Value="True"/><Condition Binding="{Binding IsSearchSongs}" Value="True"/></MultiDataTrigger.Conditions><Setter Property="Visibility" Value="Visible"/></MultiDataTrigger></Style.Triggers></Style></StackPanel.Style>
     <desktop:LoadingSkeleton Height="34" Margin="0,8,0,8" CornerRadius="4" IsActive="True"/>
@@ -372,9 +371,7 @@
       <EventSetter Event="Loaded" Handler="SongsGridScroll_Loaded"/>
      </Style>
     </DataGrid.Resources>
-    <DataGrid.Style><Style TargetType="DataGrid" BasedOn="{StaticResource Playlist.Grid}">
-     <Style.Triggers><DataTrigger Binding="{Binding IsSearchSongs}" Value="False"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers>
-    </Style></DataGrid.Style>
+    <DataGrid.Style><Style TargetType="DataGrid" BasedOn="{StaticResource Playlist.Grid}"/></DataGrid.Style>
     <DataGrid.ContextMenu><ContextMenu DataContext="{Binding PlacementTarget.Tag,RelativeSource={RelativeSource Self}}">
      <MenuItem Header="播放" Click="Play_Click" IsEnabled="{Binding HasSelection}"/><MenuItem Header="下一首播放" Click="NextInQueue_Click" IsEnabled="{Binding HasSelection}"/>
      <MenuItem Header="收藏" Click="Favorite_Click" IsEnabled="{Binding HasSelection}"/>
@@ -450,6 +447,7 @@
      </DataGridTemplateColumn>
     </DataGrid.Columns>
    </DataGrid>
+   </Grid>
   </Grid>
    <DockPanel Grid.Row="3" Margin="0,16,0,0" Visibility="{Binding ShowSongPager,Converter={StaticResource Visible}}">
     <TextBlock Text="{Binding PageText}" Style="{StaticResource Capability.Muted}" VerticalAlignment="Center"/>

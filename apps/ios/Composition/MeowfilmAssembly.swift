@@ -8,6 +8,11 @@ import MeowMusicNativeService
 import MeowFilmFeature
 import MeowUI
 
+/// Music services are admitted once per process and revoked only on shutdown.
+/// Documents, credentials and device sessions stay readable after first unlock,
+/// so locking the device does not withdraw playback.
+private let musicAccessGeneration: UInt64 = 1
+
 @MainActor
 final class MeowfilmAssembly: ObservableObject {
     let playback = PlaybackController(volumePreferences: PlaybackVolumePreferences())
@@ -24,9 +29,6 @@ final class MeowfilmAssembly: ObservableObject {
     private var startup: Task<Void, Never>?
     private var accessTask: Task<Void, Never>?
     private var loading: Task<Void, Never>?
-    private var accessEpoch = UUID()
-    private var accessGeneration: UInt64 = 0
-    private var protectedAvailable = false
     private var closed = false
     private var observers: [NSObjectProtocol] = []
     private var service: NativeMusicService?
@@ -41,17 +43,6 @@ final class MeowfilmAssembly: ObservableObject {
 
     init() {
         let center = NotificationCenter.default
-        // Synchronous withdrawal precedes any asynchronous acknowledgement.
-        observers.append(center.addObserver(
-            forName: UIApplication.protectedDataWillBecomeUnavailableNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.setProtection(false) }
-        })
-        observers.append(center.addObserver(
-            forName: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.setProtection(UIApplication.shared.isProtectedDataAvailable) }
-        })
         observers.append(center.addObserver(
             forName: UIApplication.willTerminateNotification, object: nil, queue: .main
         ) { [weak self] _ in
@@ -102,9 +93,7 @@ final class MeowfilmAssembly: ObservableObject {
             document: resources.musicDocument, accounts: resources.musicAccounts, qq: publicQQ,
             sourceDiscovery: resources.musicSourceDiscoveryCache,
             enabledPlatforms: [.netease, .qq, .kugou, .kuwo, .migu],
-            homeSnapshot: MusicNativeHomeSnapshotDocument(
-                storeFactory: resources.documentFactory(MusicNativeHomeSnapshotDocument.namespace)
-            ),
+            homeSnapshot: resources.musicHomeSnapshot,
             audioFileCache: resources.musicAudioCache,
             clientContexts: resources.musicClients
         )
@@ -117,35 +106,19 @@ final class MeowfilmAssembly: ObservableObject {
             await model?.load()
         })
         bindPlayback(model)
-        setProtection(UIApplication.shared.isProtectedDataAvailable)
+        admit(resources)
     }
 
-    private func setProtection(_ available: Bool) {
-        let epoch = UUID()
-        accessEpoch = epoch
-        protectedAvailable = false
-        guard !closed, let resources else { return }
-        guard accessGeneration <= MeowfilmIdentity.maximumAccessGeneration - 2 else {
-            shutdown(); return
-        }
-        accessGeneration += 2
-        let generation = accessGeneration
-        if !available {
-            service?.revokeAccess(generation: generation)
-            publicQQ?.revokeAccess(generation: generation)
-            resources.musicClients.revokeAccess(generation: generation)
-        }
+    /// The model stays unavailable until every owner acknowledges the single grant.
+    private func admit(_ resources: MeowfilmResources) {
         music?.setAvailable(false)
-        automaticSync?.stop()
-        loading?.cancel()
         refreshCommands()
-        let service = service, publicQQ = publicQQ, previous = accessTask
+        let generation = musicAccessGeneration, service = service, publicQQ = publicQQ
         accessTask = Task { [weak self] in
-            await previous?.value
-            var admitted = available
+            var admitted = true
             do {
-                try resources.musicClients.setAccess(available: available, generation: generation)
-                try await publicQQ?.setAccess(available: available, generation: generation)
+                try resources.musicClients.setAccess(available: true, generation: generation)
+                try await publicQQ?.setAccess(available: true, generation: generation)
             } catch {
                 admitted = false
                 resources.musicClients.revokeAccess(generation: generation)
@@ -154,12 +127,11 @@ final class MeowfilmAssembly: ObservableObject {
             await resources.musicAccountGate?.setAvailable(admitted)
             do { try await service?.setAccess(available: admitted, generation: generation) }
             catch { admitted = false }
-            guard let self, !self.closed, self.accessEpoch == epoch, available else { return }
-            self.protectedAvailable = admitted
-            self.music?.setAvailable(admitted)
+            guard let self, !self.closed, admitted else { return }
+            self.music?.setAvailable(true)
             self.refreshCommands()
             self.refreshAutomaticSync()
-            if admitted, let model = self.music {
+            if let model = self.music {
                 self.loading = Task { await model.load() }
             }
         }
@@ -188,8 +160,8 @@ final class MeowfilmAssembly: ObservableObject {
 
     private func refreshCommands() {
         guard let music, let lease else { return }
-        let canPrevious = protectedAvailable && music.canPrevious
-        let canNext = protectedAvailable && music.canNext
+        let canPrevious = music.canPrevious
+        let canNext = music.canNext
         if let current = navigationCommands, current.0 == canPrevious, current.1 == canNext { return }
         navigationCommands = (canPrevious, canNext)
         let previous: (@MainActor (PlayAttempt) -> Bool)?
@@ -206,18 +178,18 @@ final class MeowfilmAssembly: ObservableObject {
     private func refreshAutomaticSync() {
         guard let music else { automaticSync?.stop(); return }
         automaticSync?.activate(
-            isAvailable: protectedAvailable && music.isAvailable && !music.isClosed && !closed,
+            isAvailable: music.isAvailable && !music.isClosed && !closed,
             accessGeneration: music.accountAccessGeneration, isForeground: foreground
         )
     }
 
     private func shutdown() {
         guard !closed else { return }
-        closed = true; protectedAvailable = false; accessEpoch = UUID()
+        closed = true
         automaticSync?.stop()
         startup?.cancel(); loading?.cancel(); commandRefresh?.cancel()
-        service?.revokeAccess(generation: accessGeneration)
-        publicQQ?.revokeAccess(generation: accessGeneration)
+        service?.revokeAccess(generation: musicAccessGeneration)
+        publicQQ?.revokeAccess(generation: musicAccessGeneration)
         resources?.musicClients.close()
         systemMetadata?.close(); systemMetadata = nil
         commandObservation?.cancel()
@@ -241,8 +213,8 @@ final class MeowfilmAssembly: ObservableObject {
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
         startup?.cancel(); loading?.cancel(); commandRefresh?.cancel()
         let service = service, publicQQ = publicQQ, resources = resources, pendingAccess = accessTask
-        service?.revokeAccess(generation: accessGeneration)
-        publicQQ?.revokeAccess(generation: accessGeneration)
+        service?.revokeAccess(generation: musicAccessGeneration)
+        publicQQ?.revokeAccess(generation: musicAccessGeneration)
         resources?.musicClients.close()
         Task {
             await pendingAccess?.value

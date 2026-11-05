@@ -19,9 +19,11 @@ function fixture(t) {
   write('apps/runtime/bootstrap.mjs', "import './modules/music-script.mjs';");
   write('apps/runtime/modules/music-script.mjs', 'export {};');
   write('apps/runtime/modules/cat-script.mjs', 'export {};');
+  write('apps/runtime/modules/source-runtime.mjs', 'export {};');
   write('apps/windows/runtime/bootstrap.mjs', "import '../../runtime/bootstrap.mjs';");
   write('apps/windows/runtime/entries/aggregate.mjs',
-    "import '../bootstrap.mjs';\nimport '../../../runtime/modules/music-script.mjs';\nimport '../../../runtime/modules/cat-script.mjs';");
+    "import '../bootstrap.mjs';\nimport '../../../runtime/modules/music-script.mjs';\n" +
+    "import '../../../runtime/modules/cat-script.mjs';\nimport '../../../runtime/modules/source-runtime.mjs';");
   write('apps/windows/src/MeowFilm.Desktop/Page.xaml',
     '<UserControl x:Class="MeowFilm.Desktop.Page"><ResourceDictionary Source="Theme.xaml"/></UserControl>');
   write('apps/windows/src/MeowFilm.Desktop/Theme.xaml', '<ResourceDictionary/>');
@@ -30,7 +32,7 @@ function fixture(t) {
 
 test('checks relative imports and resources in the declared source tree', t => {
   const result = verifyAppStructure(fixture(t).source);
-  assert.equal(result.relativeImports, 5);
+  assert.equal(result.relativeImports, 6);
   assert.equal(result.resourceReferences, 1);
 });
 

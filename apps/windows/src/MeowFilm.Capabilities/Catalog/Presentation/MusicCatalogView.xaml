@@ -4,12 +4,11 @@
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
  xmlns:art="clr-namespace:MeowFilm.Desktop.Artwork;assembly=MeowFilm.Desktop"
  FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="14"
- TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Grayscale"
+ TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Auto"
  UseLayoutRounding="True" SnapsToDevicePixels="True">
  <UserControl.Resources><ResourceDictionary>
   <ResourceDictionary.MergedDictionaries><ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/></ResourceDictionary.MergedDictionaries>
   <BooleanToVisibilityConverter x:Key="Visible"/>
-  <local:MusicCatalogPaletteConverter x:Key="Catalog.CoverFooterPalette" Role="CoverFooter"/>
   <SolidColorBrush x:Key="MeowFilm.Brush.Text" Color="#343845"/>
   <SolidColorBrush x:Key="MeowFilm.Brush.Muted" Color="#6C7280"/>
   <Style x:Key="Catalog.SectionTitle" TargetType="TextBlock" BasedOn="{StaticResource Capability.Text}">
@@ -175,10 +174,11 @@
    </Style.Triggers>
   </Style>
   <DataTemplate x:Key="Catalog.Entry">
-   <local:EntryCard Margin="0,0,16,0" OpenRequested="Entry_Open" PlayRequested="CardPlay_Click" PreviewRequested="Entry_Preview"/>
+   <local:EntryCard Margin="0,0,16,0" OpenRequested="Entry_Open" PlayRequested="CardPlay_Click" PreviewRequested="Entry_Preview"
+                    ToolTip="{Binding ErrorText}" ToolTipService.ShowOnDisabled="True"/>
   </DataTemplate>
   <DataTemplate x:Key="Catalog.PlaylistCard">
-   <Button x:Name="PlaylistHost" local:CardMotion.Enabled="True" Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.Flat}" Margin="0,0,16,0" IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}">
+   <Button x:Name="PlaylistHost" local:CardMotion.Enabled="True" Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.Flat}" Margin="0,0,16,0" IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}" ToolTip="{Binding ErrorText}" ToolTipService.ShowOnDisabled="True">
     <StackPanel>
      <Grid Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" Background="#E7EAF0" local:CardClip.Radius="8">
       <art:ArtworkImage Address="{Binding Cover}"/>
@@ -213,27 +213,6 @@
      </StackPanel>
     </Grid>
    </Button>
-  </DataTemplate>
-  <DataTemplate x:Key="Catalog.CoverCard">
-   <Grid x:Name="CoverHost" Margin="0,0,16,0" local:CardMotion.Enabled="True" ToolTip="{Binding ErrorText}" ToolTipService.ShowOnDisabled="True">
-    <Button Tag="{Binding}" Click="Card_Click" Style="{StaticResource Catalog.Flat}" IsEnabled="{Binding CanOpen}" AutomationProperties.Name="{Binding Title}">
-     <StackPanel local:CardClip.Radius="8">
-      <Grid x:Name="CoverFrame" Height="{Binding ActualWidth,RelativeSource={RelativeSource Self}}" Background="#E7EAF0">
-       <art:ArtworkImage x:Name="CardCover" Address="{Binding Cover}" AutomationProperties.Name="{Binding Title}"/>
-       <Border VerticalAlignment="Bottom" Padding="10,26,10,10"><Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#00000000"/><GradientStop Color="#A0000000" Offset="1"/></LinearGradientBrush></Border.Background>
-        <TextBlock Text="{Binding Title}" Foreground="White" FontSize="17" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" TextWrapping="Wrap" MaxHeight="48"/>
-       </Border>
-       <Button Click="CardPlay_Click" Style="{StaticResource Catalog.CoverPlay}" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=CoverHost}"/>
-      </Grid>
-       <Border Padding="10,6" Height="48" CornerRadius="0,0,8,8">
-        <Border.Background><MultiBinding Converter="{StaticResource Catalog.CoverFooterPalette}">
-         <Binding Path="RawPaletteBrush" ElementName="CardCover"/>
-        </MultiBinding></Border.Background>
-       <TextBlock Foreground="White" FontSize="12" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" MaxHeight="36"><TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Text" Value="{Binding Subtitle}"/><Style.Triggers><DataTrigger Binding="{Binding Subtitle}" Value=""><Setter Property="Text" Value="{Binding Title}"/></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock>
-      </Border>
-     </StackPanel>
-    </Button>
-   </Grid>
   </DataTemplate>
   <local:MusicChannelSelectionConverter x:Key="Catalog.ChannelSelected"/>
   <local:ColumnsConverter x:Key="Catalog.Columns"/>
@@ -341,10 +320,9 @@
    <DataTemplate x:Key="Catalog.Section.Shelf">
     <local:Shelf>
      <local:Shelf.Style><Style TargetType="local:Shelf">
-      <Setter Property="CardTemplate" Value="{StaticResource Catalog.CoverCard}"/>
+      <Setter Property="CardTemplate" Value="{StaticResource Catalog.PlaylistCard}"/>
       <Style.Triggers>
        <DataTrigger Binding="{Binding (local:MusicCatalogSurface.IsHome),RelativeSource={RelativeSource Self}}" Value="True">
-        <Setter Property="CardTemplate" Value="{StaticResource Catalog.PlaylistCard}"/>
         <Setter Property="MinimumCardWidth" Value="124"/>
        </DataTrigger>
        <DataTrigger Binding="{Binding IsRankingCoverSection}" Value="True">
@@ -552,8 +530,14 @@
    <ScrollViewer x:Name="UtilityScroll" Visibility="{Binding IsUtilityCatalogSurface,Converter={StaticResource Visible}}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource Capability.OverlayScrollViewer}" ScrollChanged="CatalogScroll_Changed" PreviewMouseWheel="CatalogScroll_Wheel" PreviewKeyDown="CatalogScroll_Key">
     <ItemsControl ItemsSource="{Binding UtilitySections}" ItemTemplate="{StaticResource Catalog.SectionsTemplate}" Margin="0,0,0,24" MaxWidth="1490"/>
    </ScrollViewer>
+   <local:MusicCatalogSkeleton Panel.ZIndex="2" Margin="40,0,40,0" MaxWidth="1490" VerticalAlignment="Top"
+                               IsHome="{Binding IsCatalogHome}">
+    <local:MusicCatalogSkeleton.Style><Style TargetType="local:MusicCatalogSkeleton"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers>
+     <MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding ShowCatalogSkeleton}" Value="True"/><Condition Binding="{Binding IsCatalogLanding}" Value="True"/></MultiDataTrigger.Conditions><Setter Property="Visibility" Value="Visible"/></MultiDataTrigger>
+    </Style.Triggers></Style></local:MusicCatalogSkeleton.Style>
+   </local:MusicCatalogSkeleton>
    <Grid Panel.ZIndex="2" IsHitTestVisible="False" ClipToBounds="True">
-    <Grid.Style><Style TargetType="Grid"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding ShowCatalogSkeleton}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger><MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding ShowSearchSkeleton}" Value="True"/><Condition Binding="{Binding IsSearchPlaylists}" Value="True"/></MultiDataTrigger.Conditions><Setter Property="Visibility" Value="Visible"/></MultiDataTrigger></Style.Triggers></Style></Grid.Style>
+    <Grid.Style><Style TargetType="Grid"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding ShowCatalogSkeleton}" Value="True"/><Condition Binding="{Binding IsCatalogLanding}" Value="False"/></MultiDataTrigger.Conditions><Setter Property="Visibility" Value="Visible"/></MultiDataTrigger><MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding ShowSearchSkeleton}" Value="True"/><Condition Binding="{Binding IsSearchPlaylists}" Value="True"/></MultiDataTrigger.Conditions><Setter Property="Visibility" Value="Visible"/></MultiDataTrigger></Style.Triggers></Style></Grid.Style>
     <WrapPanel Margin="40,0,40,0" VerticalAlignment="Top">
      <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>
      <StackPanel Width="152" Margin="0,0,16,28"><desktop:LoadingSkeleton Height="152" CornerRadius="8" IsActive="True"/><desktop:LoadingSkeleton Height="16" Margin="0,12,20,0" CornerRadius="4" IsActive="True"/><desktop:LoadingSkeleton Height="12" Margin="0,8,50,0" CornerRadius="4" IsActive="True"/></StackPanel>

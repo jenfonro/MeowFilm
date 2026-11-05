@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import XCTest
 @testable import MeowAccounts
 
@@ -14,6 +15,25 @@ final class KeychainCredentialStoreTests: XCTestCase {
         XCTAssertEqual(Set(CredentialAccessibility.allCases), [
             .whenUnlockedThisDeviceOnly, .afterFirstUnlockThisDeviceOnly
         ])
+    }
+
+    func testStoredAccessibilityMustMatchConfiguredPolicy() {
+        let unlocked = kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String
+        let background = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String
+        XCTAssertTrue(SystemKeychainDriver.matchesAccessibility(
+            background, configured: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly))
+        XCTAssertFalse(SystemKeychainDriver.matchesAccessibility(
+            unlocked, configured: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly))
+        XCTAssertTrue(SystemKeychainDriver.matchesAccessibility(
+            unlocked, configured: kSecAttrAccessibleWhenUnlockedThisDeviceOnly))
+        XCTAssertFalse(SystemKeychainDriver.matchesAccessibility(
+            background, configured: kSecAttrAccessibleWhenUnlockedThisDeviceOnly))
+        for stored in [nil, kSecAttrAccessibleAfterFirstUnlock as String, "unknown"] {
+            XCTAssertFalse(SystemKeychainDriver.matchesAccessibility(
+                stored, configured: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly))
+            XCTAssertFalse(SystemKeychainDriver.matchesAccessibility(
+                stored, configured: kSecAttrAccessibleWhenUnlockedThisDeviceOnly))
+        }
     }
 
     func testInvalidConfigurationNeverCallsDriver() {

@@ -3,8 +3,8 @@ using System.Windows;
 namespace MeowFilm.Desktop;
 
 /// <summary>
-/// Narrow page contribution consumed by the one shell-owned header.
-/// Contributors never supply another header, search box, or back button.
+/// Page contribution consumed by a shared presentation host.
+/// A slot can compose page-specific controls without duplicating navigation or window chrome.
 /// A mounted ordinary capability with enabled search becomes the owner of the retained shell search.
 /// </summary>
 public interface IDesktopHeaderSource
@@ -22,7 +22,12 @@ public sealed record DesktopHeaderContribution(
     FrameworkElement? Slot = null)
 {
     public IReadOnlyList<DesktopHeaderAction> HeaderActions => Actions ?? [];
+
+    // Automatic preserves existing consumers: beside a visible heading, otherwise before actions.
+    public DesktopHeaderSlotPlacement SlotPlacement { get; init; } = DesktopHeaderSlotPlacement.Automatic;
 }
+
+public enum DesktopHeaderSlotPlacement { Automatic, Leading, Trailing }
 
 public sealed class DesktopHeaderAction
 {

@@ -6,6 +6,8 @@
  Loaded="View_Loaded" Unloaded="View_Unloaded" IsVisibleChanged="View_IsVisibleChanged"
  DataContextChanged="View_DataContextChanged" SizeChanged="View_SizeChanged"
  FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}" FontSize="14"
+ TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Auto"
+ UseLayoutRounding="True" SnapsToDevicePixels="True"
  Foreground="{DynamicResource Settings.Brush.Text}" ClipToBounds="True">
  <UserControl.Resources>
   <ResourceDictionary>
@@ -28,7 +30,7 @@
       </Grid.ColumnDefinitions>
       <StackPanel VerticalAlignment="Center">
        <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis"/>
-       <TextBlock Text="内置" Style="{StaticResource Source.Muted}" Margin="0,4,0,0"/>
+       <TextBlock Text="内置源" Style="{StaticResource Source.Muted}" Margin="0,4,0,0"/>
       </StackPanel>
       <TextBlock Grid.Column="1" Text="{Binding StateText}" Style="{StaticResource Source.Muted}"
                  VerticalAlignment="Center" HorizontalAlignment="Center"/>
@@ -66,7 +68,7 @@
  </UserControl.Resources>
  <Grid x:Name="ManagementContent" MaxWidth="1248" Margin="28,24,28,20">
   <Grid.RowDefinitions>
-   <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+   <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
    <RowDefinition Height="Auto"/><RowDefinition Height="*"/>
   </Grid.RowDefinitions>
   <Grid x:Name="SourceTitleRow" Margin="0,0,0,18">
@@ -89,14 +91,7 @@
    <Button Grid.Column="3" Content="取消" Style="{StaticResource Settings.Button32}"
            Margin="8,0,0,0" Click="Cancel_Click" IsEnabled="{Binding CanCancelOnline}"/>
   </Grid>
-  <Grid Grid.Row="2" Margin="0,0,0,12">
-   <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-   <TextBlock Text="{Binding PlaybackTarget,StringFormat='当前使用：{0}'}" Style="{StaticResource Source.Muted}"
-              VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
-   <Button Grid.Column="1" Content="使用内置音源" Style="{StaticResource Settings.QuietButton}" Click="UseOfficial_Click"
-           IsEnabled="{Binding CanEdit}"/>
-  </Grid>
-  <Grid Grid.Row="3" Height="36" Margin="14,0">
+  <Grid Grid.Row="2" Height="36" Margin="14,0">
    <Grid.ColumnDefinitions>
     <ColumnDefinition/><ColumnDefinition Width="90"/><ColumnDefinition Width="56"/><ColumnDefinition Width="80"/>
    </Grid.ColumnDefinitions>
@@ -105,7 +100,7 @@
    <TextBlock Grid.Column="2" Text="启用" Style="{StaticResource Source.Muted}" VerticalAlignment="Center" HorizontalAlignment="Center"/>
    <TextBlock Grid.Column="3" Text="操作" Style="{StaticResource Source.Muted}" VerticalAlignment="Center" HorizontalAlignment="Center"/>
   </Grid>
-  <Border Grid.Row="4" ClipToBounds="True" Style="{StaticResource Settings.PopupSurface}">
+  <Border Grid.Row="3" ClipToBounds="True" Style="{StaticResource Settings.PopupSurface}">
    <ItemsControl x:Name="SourceList" AutomationProperties.Name="音源列表">
     <ItemsControl.ItemsPanel><ItemsPanelTemplate><VirtualizingStackPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
     <ItemsControl.Style><Style TargetType="ItemsControl">

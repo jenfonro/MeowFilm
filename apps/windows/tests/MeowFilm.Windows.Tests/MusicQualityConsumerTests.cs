@@ -59,6 +59,18 @@ public static class MusicQualityConsumerTests
         await f.Play("11");
         Check(f.Output.Opens == 1 && f.Fixture.Runtime.Qualities.SequenceEqual(["master"]));
         Check(f.Module.PlaybackQualityRequest == "auto");
+        var before = await f.Fixture.Ok("music.quality.settings.get");
+        await f.Fixture.Ok("music.settings.save", new {
+            ifRevision = before.GetProperty("onlineSettings").GetProperty("revision").GetInt64(), lyrics = true });
+        await f.Module.RefreshOnlineAsync(); await Editable(f.Module);
+        var after = await f.Fixture.Ok("music.quality.settings.get");
+        Check(after.GetProperty("settings").GetRawText() == before.GetProperty("settings").GetRawText() &&
+            after.GetProperty("signature").GetString() == before.GetProperty("signature").GetString(),
+            "saving lyrics leaves the complete audio policy and signature unchanged");
+        Check(f.Module.LyricsEnabled && f.Module.PlaybackQualityRequest == "auto");
+        Check(f.Output.Opens == 1 && f.Output.HasMedia && f.Output.Revocations == 0 &&
+            f.Fixture.Runtime.Qualities.SequenceEqual(["master"]),
+            "saving lyrics neither revokes open audio nor resolves or reopens it");
         await f.Module.SetPlaybackQualityRequestAsync("128k"); await Editable(f.Module);
         Check(f.Module.PlaybackQualityRequest == "128k");
         Check(f.Output.Opens == 1 && f.Output.HasMedia && f.Output.Revocations == 0,
@@ -152,8 +164,10 @@ public static class MusicQualityConsumerTests
         internal async Task Configure()
         {
             string id = await Fixture.Install();
-            await Fixture.Ok("music.settings.save", new { ifRevision = 0, lyrics = false,
-                target = new { installationId = id, platform = "wy" } });
+            var source = (await Fixture.Ok("music.sources.list")).GetProperty("items").EnumerateArray().Single();
+            Check(source.GetProperty("installationId").GetString() == id && source.GetProperty("enabled").GetBoolean(),
+                "enabled script participates in native quality selection");
+            await Fixture.Ok("music.settings.save", new { ifRevision = 0, lyrics = false });
         }
         internal async Task Play(string id)
         {

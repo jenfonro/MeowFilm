@@ -53,7 +53,7 @@ private struct AccountURLCacheFixture {
     let provider: AccountURLCacheProvider
     let accounts: AccountSessionCoordinator
     let service: NativeMusicAccountService
-    init(store: EncryptedDocumentStore? = nil) throws {
+    init(store: DocumentStore? = nil) throws {
         identity = try MusicAccountFixture.identity("wy")
         provider = AccountURLCacheProvider(at: clock.now())
         accounts = AccountSessionCoordinator(store: credentials)
@@ -77,12 +77,11 @@ private struct AccountURLCacheFixture {
             "expiresAt": expires.map { .number($0.timeIntervalSince1970 * 1000) } ?? .null,
             "qualityVerified": .bool(false)])
     }
-    private func disk() throws -> (URL, EncryptedDocumentStore) {
+    private func disk() throws -> (URL, DocumentStore) {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("music-url-cache-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
                                                 attributes: [.posixPermissions: 0o700])
-        return (directory, try EncryptedDocumentStore(baseURL: directory, namespace: "music-url-cache-test",
-                                                      keyProvider: QQPublicPersistenceKeys()))
+        return (directory, try DocumentStore(baseURL: directory, namespace: "music-url-cache-test"))
     }
 
     func testPersistentURLReusesOnlyAfterFreshAccountAndQualityGrant() async throws {

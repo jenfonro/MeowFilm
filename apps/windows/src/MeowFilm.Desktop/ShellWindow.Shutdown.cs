@@ -15,6 +15,7 @@ public sealed partial class ShellWindow
         if (_forceShutdown is null) throw new InvalidOperationException("SHUTDOWN_FAILED");
         _isClosing = _forceStarted = true;
         _state.IsInteractive = false;
+        RetireHeaderPresentation();
         CancelActive(); CancelPageActivation();
         var work = _forceShutdown() ?? throw new InvalidOperationException("SHUTDOWN_FAILED");
         _ = ShellRequest.ObserveAsync(work);

@@ -193,7 +193,10 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     var collectionConsumers: [UUID: WeakMusicCollectionConsumer] = [:]
     var collectionCatalogueID = UUID()
     public var accountAccessGeneration: UUID { lifecycle }
-    public private(set) var searchAccessGeneration = UUID()
+    public private(set) var searchAccessGeneration = UUID() {
+        didSet { searchResultsCache = MusicSearchResultsCache.make() }
+    }
+    var searchResultsCache = MusicSearchResultsCache.make()
     var resolutionTask: Task<MusicPlaybackCandidate, Error>?
     var candidateDiscoveryTask: Task<MusicCandidateDiscoveryResolution, Error>?
     var lyricTask: Task<MusicLyricsSnapshot, Error>?
@@ -366,14 +369,14 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     }
 
     /// Gate/UI revocation is synchronous and never attempts a domain read.
-    /// Remote stream lock-screen policy belongs to product assembly. Protected
-    /// local-file admission is stopped here; new business operations also stop.
+    /// An already-held remote stream continues. Local-file admission is
+    /// stopped here; new business operations also stop.
     public func setAvailable(_ available: Bool) {
         guard isAvailable != available, !isClosed else { return }
         notifyCollectionPages(.revoking)
         favoritesStorage?.suspend()
-        // Unlike an already-held remote stream, a protected local file has
-        // an explicitly revocable file admission. Never retain it on lock.
+        // Unlike an already-held remote stream, a local cached file has an
+        // explicitly revocable file admission. Never retain it on revocation.
         cancelRemoteQueuePreparation(); stopFM()
         stopSimilarObservation()
         if candidate?.isCachedAudio == true { stopOwned() }

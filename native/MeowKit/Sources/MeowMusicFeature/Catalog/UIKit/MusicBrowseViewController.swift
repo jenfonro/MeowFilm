@@ -42,7 +42,24 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     private var renderedFilters: [MusicPublicBrowseFilter] = []
     private var renderedFilter = ""
     private var automaticPaginationHeld = false
+    private var moreButton: PageHeaderButton?
+    private var renderedActionsKey: BrowseActionsKey?
+    private var appearanceNeedsUpdate = false
+    private let statusView = UILabel()
+    private let loadingSkeleton = MusicLoadingSkeletonView()
     private lazy var collection = MusicBrowseCollectionView(frame: .zero, collectionViewLayout: makeLayout())
+
+    private struct BrowseActionsKey: Equatable {
+        let pageID: UUID
+        let request: MusicPublicBrowseRequest
+        let hasError: Bool
+        let canSave: Bool
+        let hasDailyStyle: Bool
+        let canPrevious: Bool
+        let nextTitle: String?
+        let filters: [MusicPublicBrowseFilter]
+        let selectedFilter: String
+    }
 
     public init(title: String, model: MusicViewModel, browser: (any MusicPublicBrowsing)?,
                 request: MusicPublicBrowseRequest, appearance: MusicAppearancePreferencesStore,
@@ -82,6 +99,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             guard let self else { return }
             guard let page = self.page else { self.collection.refreshControl?.endRefreshing(); return }
             self.automaticPaginationHeld = false
+            MusicArtworkView.retryFailedLoads(in: self.view)
             self.runPageTask { [weak self] in
                 await page.refresh()
                 self?.collection.refreshControl?.endRefreshing()
@@ -130,6 +148,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     public override func pageDidBecomeActive() { activatePage() }
 
     public override func pageDidBecomeInactive() {
+        loadingSkeleton.setDisplayVisible(false)
         observationNeedsRestart = true
         observation?.cancel()
         for task in previewTasks.values { task.cancel() }
@@ -139,6 +158,10 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     }
 
     public override func pageDidBecomeVisible() {
+        activatePage()
+        if appearanceNeedsUpdate { applyTheme() }
+        updateFMArtwork()
+        MusicArtworkView.retryFailedLoads(in: view)
         for cell in collection.visibleCells.compactMap({ $0 as? MusicBannerCarouselCell }) {
             cell.setActive(!tags.isExpanded)
         }
@@ -147,9 +170,11 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     }
 
     public override func pageDidBecomeHidden() {
+        loadingSkeleton.setDisplayVisible(false)
         automaticPaginationHeld = true
         tags.collapse()
         for cell in collection.visibleCells.compactMap({ $0 as? MusicBrowseCell }) { cell.resetPressFeedback() }
+        page?.setDisplayVisible(false)
         for cell in collection.visibleCells.compactMap({ $0 as? MusicBannerCarouselCell }) { cell.setActive(false) }
     }
 
@@ -161,6 +186,8 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     public override func applyTheme() {
         super.applyTheme()
         if isViewLoaded {
+            guard isPageVisible else { appearanceNeedsUpdate = true; return }
+            appearanceNeedsUpdate = false
             updateVisibleCells()
             updateVisibleHeaders()
             if tagsHeight != nil { configureTags(force: true) }
@@ -249,6 +276,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
 
     public func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell,
                                forItemAt indexPath: IndexPath) {
+        if isPageVisible { MusicArtworkView.retryFailedLoads(in: cell) }
         (cell as? MusicBannerCarouselCell)?.setActive(isPageVisible && !tags.isExpanded)
         guard let row = row(at: indexPath) else { return }
         let item = row.item
@@ -337,6 +365,11 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             for task in previewTasks.values { task.cancel() }
         }
         page.appear()
+        page.setDisplayVisible(isPageVisible)
+        guard isPageVisible else {
+            render()
+            return
+        }
         if observation == nil {
             let id = UUID()
             observationID = id
@@ -353,13 +386,17 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
                         if restart { self.activatePage() }
                     }
                 }
-                await page.restoreHomeIfNeeded()
-                await page.loadIfNeeded()
+                if self?.isPageVisible == true { await page.restoreHomeIfNeeded() }
+                if self?.isPageVisible == true { await page.loadIfNeeded() }
                 guard !Task.isCancelled, self?.isPageActive == true else { return }
                 await page.observeHomeChanges()
             }
         } else if !observationNeedsRestart, !page.loaded, !page.isLoading, page.error == nil {
-            runPageTask { await page.loadIfNeeded() }
+            runPageTask { [weak self] in
+                guard self?.isPageVisible == true else { return }
+                await page.restoreHomeIfNeeded()
+                if self?.isPageVisible == true { await page.loadIfNeeded() }
+            }
         }
         render()
         loadVisibleFMPreviews()
@@ -373,17 +410,22 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             fmPreviews.removeAll(); previewRequests.removeAll()
             for task in previewTasks.values { task.cancel() }
             updateFMArtwork()
-            loadVisibleFMPreviews()
+            if isPageVisible { loadVisibleFMPreviews() }
         }
         guard let page, page.invalidateAccount(platform) else { return }
         render()
-        if isPageActive, model.isAvailable, !model.isClosed {
-            runPageTask { await page.loadIfNeeded() }
+        if isPageActive, isPageVisible, model.isAvailable, !model.isClosed {
+            runPageTask { [weak self] in
+                if self?.isPageVisible == true { await page.loadIfNeeded() }
+            }
         }
     }
 
     private func render() {
         guard isViewLoaded else { return }
+        // Revocation still removes stale pixels immediately while a retained
+        // page is hidden; nonempty display updates wait for the next appearance.
+        guard isPageVisible || page?.sections.isEmpty != false else { return }
         let previousSections = sections
         let previousRows = rows
         sections = page?.sections ?? []
@@ -425,10 +467,15 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     }
 
     private func renderState() {
-        guard isViewLoaded, tagsHeight != nil else { return }
+        guard isViewLoaded, isPageVisible, tagsHeight != nil else { return }
         configureTags()
         if sections.isEmpty || sections.allSatisfy({ $0.items.isEmpty }) {
-            setStatus(page?.isLoading == true ? "加载中" : page?.loaded == true && page?.nextCursor == nil ? "暂无内容" : nil)
+            if page?.isLoading == true, page?.loaded == false {
+                loadingSkeleton.configure(loading: true, visible: isPageVisible, theme: theme)
+                collection.backgroundView = loadingSkeleton
+            } else {
+                setStatus(page?.isLoading == true ? "加载中" : page?.loaded == true && page?.nextCursor == nil ? "暂无内容" : nil)
+            }
             loadAutomaticNextPage()
         } else {
             collection.backgroundView = nil
@@ -524,7 +571,8 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         for path in collection.indexPathsForVisibleItems {
             if let row = row(at: path), case .action(let action) = row.item.content,
                action.isPersonalFM, let cell = collection.cellForItem(at: path) as? MusicBrowseCell {
-                cell.updateArtwork(artworkURL(for: row.item))
+                let url = artworkURL(for: row.item)
+                if isPageVisible || url == nil { cell.updateArtwork(url) }
             }
         }
     }
@@ -558,60 +606,104 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
 
     private func configureActions() {
         guard !embedded, let page else { return }
+        let hasError = page.error != nil || sections.contains(where: { $0.error != nil })
+        let nextTitle: String? = page.nextCursor.map { _ in
+            page.usesPageNavigation ? "下一页" : "继续加载"
+        }
+        let key = BrowseActionsKey(
+            pageID: page.actionPageID, request: page.request,
+            hasError: hasError, canSave: page.canSaveCollection,
+            hasDailyStyle: page.dailyStyle != nil && page.remoteSource != nil,
+            canPrevious: page.canPrevious, nextTitle: nextTitle,
+            filters: page.filters, selectedFilter: page.selectedFilter
+        )
+        if moreButton == nil {
+            moreButton = PageHeaderButton(
+                image: PageIcon.image(.more), accessibilityLabel: "更多",
+                menu: UIMenu(children: [])
+            )
+        }
+        guard let moreButton else { return }
+        if renderedActionsKey == key {
+            pageHeader.setTrailing([moreButton])
+            return
+        }
         var actions: [UIMenuElement] = [
             UIAction(title: "刷新", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
-                self?.automaticPaginationHeld = false
-                self?.runPageTask { await page.refresh() }
+                guard let self, page.actionPageID == key.pageID else { return }
+                self.automaticPaginationHeld = false
+                MusicArtworkView.retryFailedLoads(in: self.view)
+                self.runMenuAction(pageID: key.pageID) { await page.refresh() }
             },
         ]
-        if page.error != nil || sections.contains(where: { $0.error != nil }) {
+        if hasError {
             actions.append(UIAction(title: "重试") { [weak self] _ in
-                self?.runPageTask { await page.retry() }
+                self?.runMenuAction(pageID: key.pageID) { await page.retry() }
             })
         }
         if page.canSaveCollection {
             actions.append(UIAction(title: "保存到我的歌单", image: UIImage(systemName: "square.and.arrow.down")) {
-                [weak self] _ in self?.saveCollection()
+                [weak self] _ in
+                guard page.actionPageID == key.pageID else { return }
+                self?.saveCollection()
             })
         }
         if page.dailyStyle != nil, page.remoteSource != nil {
-            actions.append(UIAction(title: "选择推荐风格") { [weak self] _ in self?.openDailyStyle() })
+            actions.append(UIAction(title: "选择推荐风格") { [weak self] _ in
+                guard page.actionPageID == key.pageID else { return }
+                self?.openDailyStyle()
+            })
         }
         if page.canPrevious {
-            actions.append(UIAction(title: "上一页") { [weak self] _ in self?.runPageTask { await page.previous() } })
+            actions.append(UIAction(title: "上一页") { [weak self] _ in
+                self?.runMenuAction(pageID: key.pageID) { await page.previous() }
+            })
         }
         if page.nextCursor != nil {
             actions.append(UIAction(title: page.usesPageNavigation ? "下一页" : "继续加载") { [weak self] _ in
-                self?.runPageTask { await page.appendNext() }
+                self?.runMenuAction(pageID: key.pageID) { await page.appendNext() }
             })
         }
         if case .homeAction(.daily, _) = page.request {
             actions.append(UIAction(title: "每日推荐") { [weak self] _ in
-                self?.runPageTask { await page.selectDailyBranch(.default) }
+                self?.runMenuAction(pageID: key.pageID) { await page.selectDailyBranch(.default) }
             })
             actions.append(UIAction(title: "风格推荐") { [weak self] _ in
-                self?.runPageTask { await page.selectDailyBranch(.style) }
+                self?.runMenuAction(pageID: key.pageID) { await page.selectDailyBranch(.style) }
             })
         }
         if !page.filters.isEmpty {
             actions.append(UIMenu(title: "筛选", children: page.filters.map { value in
                 UIAction(title: value.title, state: value.id == page.selectedFilter ? .on : .off) {
-                    [weak self] _ in self?.runPageTask { await page.selectFilter(value.id) }
+                    [weak self] _ in
+                    self?.runMenuAction(pageID: key.pageID) { await page.selectFilter(value.id) }
                 }
             }))
         }
-        pageHeader.setTrailing([PageHeaderButton(
-            image: PageIcon.image(.more), accessibilityLabel: "更多",
-            menu: UIMenu(children: actions)
-        )])
+        moreButton.menu = UIMenu(children: actions)
+        renderedActionsKey = key
+        pageHeader.setTrailing([moreButton])
+    }
+
+    private func runMenuAction(pageID: UUID, _ action: @escaping @MainActor () async -> Void) {
+        guard page?.actionPageID == pageID else { return }
+        runPageTask { [weak self] in
+            guard self?.page?.actionPageID == pageID else { return }
+            await action()
+        }
     }
 
     private func setStatus(_ text: String?) {
-        guard let text else { collection.backgroundView = nil; return }
-        let label = UILabel()
-        label.text = text; label.numberOfLines = 0; label.textAlignment = .center
-        label.textColor = UIColor(theme.muted)
-        collection.backgroundView = label
+        guard let text else {
+            statusView.text = nil
+            collection.backgroundView = nil
+            return
+        }
+        statusView.text = text
+        statusView.numberOfLines = 0
+        statusView.textAlignment = .center
+        statusView.textColor = UIColor(theme.muted)
+        collection.backgroundView = statusView
     }
 
     private func selectChoice(_ id: String, section: MusicPublicBrowseSection) {
@@ -766,12 +858,11 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     }
 
     private func loadFMPreview(_ item: MusicPublicBrowseItem, action: MusicHomeAction) {
-        guard isPageActive, model.isAvailable, !model.isClosed,
+        guard isPageActive, isPageVisible, model.isAvailable, !model.isClosed,
               item.artwork == nil, model.currentFMArtwork(action) == nil,
               !previewRequests.contains(item.id), previewTasks[item.id] == nil,
               let provider = model.publicBrowser as? any MusicFMPreviewServing else { return }
         let access = model.accountAccessGeneration
-        previewRequests.insert(item.id)
         previewTasks[item.id] = Task { [weak self] in
             defer {
                 if let self {
@@ -780,6 +871,9 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
                 }
             }
             do {
+                guard !Task.isCancelled, self?.isPageVisible == true,
+                      self?.model.accountAccessGeneration == access else { return }
+                self?.previewRequests.insert(item.id)
                 let value = try await provider.fmPreview(action)
                 guard let self, !Task.isCancelled, self.isPageActive,
                       self.model.accountAccessGeneration == access else { return }
@@ -800,6 +894,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     }
 
     private func loadVisibleFMPreviews() {
+        guard isPageVisible else { return }
         for indexPath in collection.indexPathsForVisibleItems {
             guard let row = row(at: indexPath) else { continue }
             loadVisibleFMPreview(row.item.id)
@@ -807,7 +902,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     }
 
     private func loadVisibleFMPreview(_ id: String) {
-        guard isPageActive else { return }
+        guard isPageActive, isPageVisible else { return }
         for indexPath in collection.indexPathsForVisibleItems {
             guard let row = row(at: indexPath) else { continue }
             let item = row.item

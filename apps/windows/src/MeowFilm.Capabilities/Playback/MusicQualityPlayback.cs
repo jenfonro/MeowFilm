@@ -13,7 +13,7 @@ public sealed partial class MusicCapability
         var parameters = new Dictionary<string, object>
         {
             ["installationId"] = target.Installation ?? throw new MusicOperationException("TARGET_REQUIRED"), ["platform"] = target.Platform,
-            ["generation"] = target.Generation, ["song"] = song.Raw, ["quality"] = target.Quality
+            ["generation"] = target.Generation, ["song"] = target.RecordingSong ?? song.Raw, ["quality"] = target.Quality
         };
         if (target.SourceKey is not null) parameters["sourceKey"] = target.SourceKey;
         if (target.QualityPolicySignature is not null) parameters["qualityPolicySignature"] = target.QualityPolicySignature;

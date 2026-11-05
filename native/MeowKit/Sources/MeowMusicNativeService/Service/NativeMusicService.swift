@@ -122,6 +122,10 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
     let accounts: (any MusicNativeAccountProviding)?
     let publicPlatforms: MusicNativePlatforms
     let sourceDiscovery: any MusicSourceDiscoveryCaching
+    var sourceDiscoveryPersistTask: Task<Void, Never>?
+    var sourceDiscoveryPersistPending = false
+    /// Descriptor inputs -> recording for current library members only.
+    var sourceDiscoveryRecordingMemo: [String: MusicSourceDiscoveryRecording] = [:]
     let homeSnapshot: (any MusicHomeSnapshotStoring)?
     let audioFileCache: (any MusicAudioFileCaching)?
     var audioCacheAttempt: MusicNativeAudioCacheAttempt?
@@ -194,7 +198,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
         ownedTransport = owned
         publicPlatforms = MusicNativePlatforms(transport: transport ?? owned!, qq: qq, clock: clock, clients: clientContexts)
         // The existing nonisolated protection fence must also revoke feedback
-        // before the service actor can acknowledge a lock-screen transition.
+        // before the service actor can acknowledge an access transition.
         let feedback = playbackFeedback
         access.register(UUID()) { feedback.invalidate() }
     }
@@ -212,6 +216,9 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
         await audioFileCache?.cancelPending()
     }
     public func close() async {
+        if closed { return }
+        // Library recordings reach disk before access is revoked.
+        await flushSourceDiscoveryPersist()
         if closed { return }
         access.revoke(generation: generation, close: true)
         closed = true; available = false; epoch = UUID(); clearTransient()
@@ -308,6 +315,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing, MusicSource
         // commits; a failed write must not silently advance or rewind it.
         sessionPosition = draft.playback["position"]
         playbackFeedbackAdmission = nil
+        if areas.contains("library") { scheduleSourceDiscoveryPersist() }
         // Synchronous CAS cannot interleave setAccess on this actor. Task
         // cancellation can race the commit; do not claim that it rolled back.
         if reportingCancellationAfterCommit && Task.isCancelled { throw MusicServiceError.commitUnconfirmed }

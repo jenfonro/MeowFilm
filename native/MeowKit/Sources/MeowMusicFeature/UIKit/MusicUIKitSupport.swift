@@ -2,6 +2,7 @@
 import UIKit
 import Combine
 import MeowUI
+import ImageIO
 
 @MainActor
 public class MusicPageViewController: PageViewController {
@@ -13,27 +14,46 @@ public class MusicPageViewController: PageViewController {
 }
 
 @MainActor
-enum MusicArtworkImages {
-    nonisolated private static let http = MusicArtworkHTTP()
-    fileprivate static let images = ArtworkImages(maximumBytes: MusicArtworkHTTP.maximumBytes) {
-        try await http.read($0)
+final class MusicArtworkImages {
+    static let shared = MusicArtworkImages()
+    fileprivate let images: ArtworkImages
+
+    init(http: MusicArtworkHTTP = MusicArtworkHTTP()) {
+        images = ArtworkImages(maximumBytes: MusicArtworkHTTP.maximumBytes) { try await http.read($0) }
     }
 
-    static func cached(_ url: URL) -> UIImage? { images.cached(url) }
+    func cached(_ url: URL) -> UIImage? { images.cached(url) }
 
-    static func read(_ url: URL, cachedData: Data? = nil) async throws -> (UIImage, Data?) {
+    func read(_ url: URL, cachedData: Data? = nil) async throws -> (UIImage, Data?) {
         try await images.read(url, cachedData: cachedData)
     }
 }
 
 @MainActor
 final class MusicArtworkView: ArtworkView {
-    init(size: CGFloat = 48) {
-        super.init(size: size, images: MusicArtworkImages.images)
+    init(size: CGFloat = 48, images: MusicArtworkImages = .shared) {
+        super.init(size: size, images: images.images)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        Self.retryFailedLoads(in: self)
+    }
+
+    static func retryFailedLoads(in view: UIView) {
+        guard let window = view.window, !view.isHidden, view.alpha > 0,
+              view.convert(view.bounds, to: window).intersects(window.bounds) else { return }
+        var ancestor = view.superview
+        while let current = ancestor {
+            guard !current.isHidden, current.alpha > 0 else { return }
+            ancestor = current.superview
+        }
+        (view as? MusicArtworkView)?.retryFailedLoad()
+        for child in view.subviews { retryFailedLoads(in: child) }
+    }
 }
 
 @MainActor

@@ -96,6 +96,7 @@ private actor MusicModelService: MusicServing, MusicCachedPlaybackServing,
     func search(platform: String, query: String, page: Int, limit: Int) async throws -> MusicSearchPage {
         searchReads += 1
         if let searchBegan {
+            self.searchBegan = nil
             return await withCheckedContinuation { value in heldSearch = value; searchBegan() }
         }
         return MusicSearchPage(platform: platform, query: query, page: page, limit: limit, total: 0,
@@ -776,10 +777,7 @@ final class MusicViewModelTests: XCTestCase {
         let service = MusicModelService(), player = MusicModelPlayer()
         let model = MusicViewModel(service: service, player: player, accounts: accounts)
         await fulfillment(of: [observed], timeout: 2)
-        let results = MusicSearchResultsModel(readSongs: { platform, query, page, limit in
-            try await model.searchPage(platform: platform.rawValue, query: query, page: page, limit: limit)
-        }, readPlaylists: { _, _, _, _ in throw MusicServiceError.unsupported },
-           readRecording: { _ in throw MusicServiceError.unsupported })
+        let results = MusicSearchResultsModel(owner: model)
         results.setAccess(available: true, generation: model.searchAccessGeneration); results.appear()
         let preferences = MusicSearchPreferences(songPlatforms: [.netease], searchPlaylists: false)
         results.submit("synthetic", preferences: preferences); await results.finishPendingReads()
@@ -804,6 +802,61 @@ final class MusicViewModelTests: XCTestCase {
         XCTAssertEqual(nextReads, 2)
         observation.cancel(); results.disappear()
         await model.close(); await accounts.finish()
+    }
+
+    @MainActor private func searchSession(_ owner: MusicViewModel) -> MusicSearchResultsModel {
+        let results = MusicSearchResultsModel(owner: owner)
+        results.setAccess(available: owner.isAvailable && !owner.isClosed, generation: owner.searchAccessGeneration)
+        results.appear()
+        results.submit("synthetic", preferences: .init(songPlatforms: [.netease], searchPlaylists: false))
+        return results
+    }
+
+    @MainActor func testSearchPagesShareOnlyTheirBusinessOwnersCurrentCache() async {
+        let (service, _, owner) = setup()
+        let first = searchSession(owner); await first.finishPendingReads(); first.disappear()
+        let second = searchSession(owner); await second.finishPendingReads()
+        var reads = await service.searchReadCount(); XCTAssertEqual(reads, 1)
+        let other = MusicViewModel(service: service, player: MusicModelPlayer())
+        let foreign = searchSession(other); await foreign.finishPendingReads()
+        reads = await service.searchReadCount(); XCTAssertEqual(reads, 2)
+        XCTAssertTrue(second.songsLoaded); XCTAssertTrue(foreign.songsLoaded)
+        second.disappear(); foreign.disappear()
+        await owner.close(); await other.close()
+    }
+
+    @MainActor func testSearchCacheIsRetiredOnAccountChangeEvenWithoutAnyResultPageAlive() async {
+        let (service, _, owner) = setup()
+        var first: MusicSearchResultsModel? = searchSession(owner)
+        await first?.finishPendingReads(); first?.disappear(); first = nil
+        owner.accountSessionsChanged(.netease)
+        let second = searchSession(owner); await second.finishPendingReads()
+        var reads = await service.searchReadCount(); XCTAssertEqual(reads, 2)
+        second.disappear()
+        owner.setAvailable(false); owner.setAvailable(true)
+        let third = searchSession(owner); await third.finishPendingReads()
+        reads = await service.searchReadCount(); XCTAssertEqual(reads, 3)
+        third.disappear(); await owner.close()
+        let closed = searchSession(owner); await closed.finishPendingReads()
+        XCTAssertFalse(closed.songsLoaded); XCTAssertTrue(closed.songs.isEmpty)
+        reads = await service.searchReadCount(); XCTAssertEqual(reads, 3)
+        closed.disappear()
+    }
+
+    @MainActor func testRetiredSearchLoaderCannotRefillNewPagesCache() async {
+        let (service, _, owner) = setup()
+        let entered = expectation(description: "retired account read entered")
+        await service.blockSearch { entered.fulfill() }
+        let first = searchSession(owner)
+        await fulfillment(of: [entered], timeout: 2)
+        owner.accountSessionsChanged(.netease)
+        let second = searchSession(owner); await second.finishPendingReads()
+        XCTAssertTrue(second.songsLoaded); XCTAssertTrue(second.songs.isEmpty)
+        await service.releaseSearch(); await first.finishPendingReads()
+        let third = searchSession(owner); await third.finishPendingReads()
+        XCTAssertTrue(third.songsLoaded); XCTAssertTrue(third.songs.isEmpty)
+        let reads = await service.searchReadCount(); XCTAssertEqual(reads, 2)
+        first.disappear(); second.disappear(); third.disappear(); await owner.close()
     }
 
     @MainActor func testProgressCoalescesAndNeverFabricatesPlayedFacts() async throws {
@@ -917,6 +970,9 @@ private actor MusicModelInspectionSession: MusicSourceInspectionSession {
         return try await service.adoptInspected(musicOfficialSelection,
                                                 occurrenceID: occurrenceID,
                                                 expectedQueueRevision: expectedQueueRevision)
+    }
+    func reject(sourceKey: String, occurrenceID: String, expectedQueueRevision: Int) async throws {
+        throw MusicServiceError.unsupported
     }
     func close() async {}
 }

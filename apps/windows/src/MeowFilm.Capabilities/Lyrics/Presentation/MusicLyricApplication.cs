@@ -10,15 +10,15 @@ namespace MeowFilm.Capabilities;
 
 /// <summary>
 /// Native metadata orchestration. Platform priority is independent of the audio
-/// delivery source. Only an explicitly supplied same-platform LX target may be
-/// used after an empty WY/KW/MG native result; no title search or global source.
+/// delivery source. Enabled scripts are tried in installation order for exact
+/// WY/KW/MG recordings after the available native protocol returns no lyrics.
 /// </summary>
 public sealed class MusicLyricApplication(
     MusicLibraryOwner library, INativeMusicLyrics official,
     Func<string, object?, CancellationToken, Task<JsonElement>> script,
     TimeProvider? timeProvider = null) : IAsyncDisposable
 {
-    public const int ContractVersion = 2;
+    public const int ContractVersion = 3;
     private readonly TimeProvider clock = timeProvider ?? TimeProvider.System;
     private readonly object gate = new();
     private readonly Dictionary<string, long> epochs = new(StringComparer.Ordinal);
@@ -51,7 +51,7 @@ public sealed class MusicLyricApplication(
             long policy;
             lock (gate) { LJ.Require(!closed, "CLOSED"); policy = policyEpoch; }
             var p = LJ.Parameters(parameters);
-            LJ.Fields(p, "song sourceKey scriptTarget", "song");
+            LJ.Fields(p, "song sourceKey", "song");
             var song = NativeMusicSong.Normalize(p["song"]);
             var settings = await library.ExecuteAsync("music.settings.get", cancellationToken: cancellationToken).ConfigureAwait(false);
             if (!settings.GetProperty("ok").GetBoolean()) return settings;
@@ -87,14 +87,7 @@ public sealed class MusicLyricApplication(
                 if (enabled.Count == 0 || rows.Length == 0 && LJ.Array(song["sources"]).Count > 0)
                     return Success("disabled");
             }
-            JsonObject? scriptTarget = null;
-            if (p["scriptTarget"] is not null)
-            {
-                scriptTarget = LJ.Object(p["scriptTarget"]);
-                LJ.Fields(scriptTarget, "installationId platform", "installationId platform");
-                LJ.Text(scriptTarget["installationId"], 128);
-                LJ.Require(NativeMusicSong.Platforms.Contains(LJ.Text(scriptTarget["platform"])));
-            }
+            JsonElement? installations = null;
             foreach (var row in rows)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -117,22 +110,50 @@ public sealed class MusicLyricApplication(
                     CheckEpoch(policy, platform, epoch);
                     if (value is { } found) return WithTarget(found, sourceKey);
                 }
-                // TX/KG are official-only, even when the selected LX advertises
+                // TX/KG are official-only, even when an enabled LX advertises
                 // lyric. A missing official result does not authorize bypass.
-                if (platform is not ("wy" or "kw" or "mg") || scriptTarget is null ||
-                    LJ.S(scriptTarget["platform"]) != platform) continue;
-                var result = await script("music.online.lyrics", new {
-                    installationId = LJ.S(scriptTarget["installationId"]), platform, sourceKey, song
-                }, cancellationToken).ConfigureAwait(false);
-                cancellationToken.ThrowIfCancellationRequested();
-                CheckEpoch(policy, platform, epoch);
-                if (!result.GetProperty("ok").GetBoolean())
+                if (platform is not ("wy" or "kw" or "mg")) continue;
+                if (installations is null)
                 {
-                    var code = result.GetProperty("code").GetString();
-                    if (code == "CAPABILITY_UNAVAILABLE") continue;
-                    return result;
+                    var listed = await script("music.sources.list", null, cancellationToken).ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    CheckEpoch(policy, platform, epoch);
+                    if (!listed.GetProperty("ok").GetBoolean()) return listed;
+                    installations = listed;
                 }
-                if (result.GetProperty("lines").GetArrayLength() > 0) return WithTarget(result, sourceKey);
+                foreach (var installation in installations.Value.GetProperty("items").EnumerateArray())
+                {
+                    if (!installation.GetProperty("enabled").GetBoolean()) continue;
+                    cancellationToken.ThrowIfCancellationRequested();
+                    CheckEpoch(policy, platform, epoch);
+                    string id = installation.GetProperty("installationId").GetString()!;
+                    var detail = await script("music.sources.detail", new { installationId = id },
+                        cancellationToken).ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    CheckEpoch(policy, platform, epoch);
+                    if (!detail.GetProperty("ok").GetBoolean()) return detail;
+                    var item = detail.GetProperty("item");
+                    if (!item.GetProperty("enabled").GetBoolean()) continue;
+                    // Idle installations have no live capabilities. Only the
+                    // actual lyric request may activate the next installation.
+                    if (item.GetProperty("state").GetString() == "ready" &&
+                        !item.GetProperty("capabilities").EnumerateArray().Any(capability =>
+                            capability.GetProperty("platform").GetString() == platform &&
+                            capability.GetProperty("actions").EnumerateArray().Any(action => action.GetString() == "lyric")))
+                        continue;
+                    var result = await script("music.online.lyrics", new {
+                        installationId = id, platform, sourceKey, song,
+                        generation = item.GetProperty("generation").GetInt64()
+                    }, cancellationToken).ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    CheckEpoch(policy, platform, epoch);
+                    if (!result.GetProperty("ok").GetBoolean())
+                    {
+                        if (result.GetProperty("code").GetString() == "CAPABILITY_UNAVAILABLE") continue;
+                        return result;
+                    }
+                    if (result.GetProperty("lines").GetArrayLength() > 0) return WithTarget(result, sourceKey);
+                }
             }
             CheckPolicy(policy);
             return Success("none");

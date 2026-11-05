@@ -1,6 +1,22 @@
 import XCTest
 import MeowMusicFeature
 
+private actor HomeLifecycleGate {
+    private var entered = false, released = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+    func wait() async {
+        entered = true; startWaiters.forEach { $0.resume() }; startWaiters.removeAll()
+        if !released { await withCheckedContinuation { releaseWaiters.append($0) } }
+    }
+    func didStart() async {
+        if !entered { await withCheckedContinuation { startWaiters.append($0) } }
+    }
+    func release() {
+        released = true; releaseWaiters.forEach { $0.resume() }; releaseWaiters.removeAll()
+    }
+}
+
 private actor HomeLifecycleFixture: MusicHomeBrowsing {
     var failure: MusicServiceError?
     var restored: MusicPublicBrowsePage?
@@ -10,6 +26,9 @@ private actor HomeLifecycleFixture: MusicHomeBrowsing {
     var waiters: [CheckedContinuation<Void, Never>] = []
     var source: MusicPublicBrowsePlatform = .netease
     var emptyFirstPage = false
+    var gate: HomeLifecycleGate?
+    var snapshotReads = 0
+    func hold(_ gate: HomeLifecycleGate) { self.gate = gate }
     func homeSourceSelection() -> MusicHomeSourceSelection { .init(selected: source, available: [.netease, .qq]) }
     func selectHomeSource(_ value: MusicPublicBrowsePlatform) throws {
         guard homeSourceSelection().available.contains(value) else { throw MusicServiceError.unsupported }
@@ -24,9 +43,10 @@ private actor HomeLifecycleFixture: MusicHomeBrowsing {
     }
     func fail(_ value: MusicServiceError?) { failure = value }
     func setSnapshot(_ value: MusicPublicBrowsePage) { restored = value }
-    func restoredHome() -> MusicPublicBrowsePage? { restored }
-    func homePage(cursor: String?, refresh: Bool) throws -> MusicPublicBrowsePage {
+    func restoredHome() -> MusicPublicBrowsePage? { snapshotReads += 1; return restored }
+    func homePage(cursor: String?, refresh: Bool) async throws -> MusicPublicBrowsePage {
         calls.append((cursor, refresh))
+        if let gate { await gate.wait() }
         if let failure { throw failure }
         if cursor == nil, emptyFirstPage { return .init(sections: [], cursor: "next", consumed: 1) }
         return cursor == nil ? Self.page(["1"], cursor: "next", source: source) : Self.page(["1", "2"], source: source)
@@ -42,8 +62,8 @@ private actor HomeLifecycleFixture: MusicHomeBrowsing {
     }
     func change() { subscription?.yield(()) }
     func end() { subscription?.finish() }
-    func publicDiscovery(_ destination: MusicPublicBrowseDestination, cursor: String?) throws -> MusicPublicBrowsePage {
-        try homePage(cursor: cursor, refresh: false)
+    func publicDiscovery(_ destination: MusicPublicBrowseDestination, cursor: String?) async throws -> MusicPublicBrowsePage {
+        try await homePage(cursor: cursor, refresh: false)
     }
     func publicPlaylists(platform: MusicPublicBrowsePlatform, query: String, cursor: String?) throws -> MusicPublicBrowseCollectionPage {
         throw MusicServiceError.unsupported
@@ -134,5 +154,48 @@ private actor HomeLifecycleFixture: MusicHomeBrowsing {
         XCTAssertNil(value.error); XCTAssertNil(value.nextCursor)
         let calls = await service.calls
         XCTAssertEqual(calls.map { $0.0 }, [nil, "next"])
+    }
+    func testHiddenHomeAndCatalogueRevokeChangedScopeWithoutStartingReplacementReads() async throws {
+        for destination in [MusicPublicBrowseDestination.home, .channels] {
+            let service = HomeLifecycleFixture()
+            let value = MusicPublicBrowseViewModel(service: service, request: .discovery(destination))
+            value.setAccess(available: true, generation: UUID()); value.appear()
+            await value.loadIfNeeded()
+            let observation = Task { await value.observeHomeChanges() }
+            await service.waitForSubscription()
+            value.setDisplayVisible(false)
+            try await service.selectHomeSource(.qq)
+            await service.end(); await observation.value
+            XCTAssertTrue(value.sections.isEmpty, "Hidden content from the revoked scope must clear immediately")
+            XCTAssertFalse(value.loaded); XCTAssertFalse(value.contentIsCurrent)
+            let hiddenCalls = await service.calls
+            XCTAssertEqual(hiddenCalls.count, 1, "A retained owner is not new display demand")
+            await value.restoreHomeIfNeeded()
+            let snapshotReads = await service.snapshotReads
+            XCTAssertEqual(snapshotReads, 0)
+            value.setDisplayVisible(true)
+            await value.loadIfNeeded(); await value.loadIfNeeded()
+            let returnedCalls = await service.calls
+            XCTAssertEqual(returnedCalls.count, 2)
+            guard case .collection(let collection) = value.sections.first?.items.first?.content else {
+                return XCTFail("Returning must display the current scope")
+            }
+            XCTAssertEqual(collection.platform, .qq)
+            value.disappear()
+        }
+    }
+    func testOrdinaryHidingDoesNotCancelOrDiscardAnAlreadyAdmittedHomeRead() async {
+        let service = HomeLifecycleFixture(), value = model(service), gate = HomeLifecycleGate()
+        await service.hold(gate)
+        let read = Task { await value.loadIfNeeded() }
+        await gate.didStart()
+        value.setDisplayVisible(false)
+        await gate.release(); await read.value
+        XCTAssertTrue(value.loaded); XCTAssertTrue(value.contentIsCurrent)
+        XCTAssertEqual(value.sections.first?.items.map(\.id), ["1"])
+        value.setDisplayVisible(true)
+        await value.loadIfNeeded()
+        let calls = await service.calls
+        XCTAssertEqual(calls.count, 1)
     }
 }

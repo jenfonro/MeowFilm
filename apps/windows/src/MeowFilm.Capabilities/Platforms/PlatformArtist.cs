@@ -25,7 +25,8 @@ public sealed partial class MusicPlatformCatalog : IMusicArtistCatalog
                 var artist = data["artist"];
                 PJ.Require(artist is JsonObject && PJ.Id(PJ.At(artist, "id")) == p.Id, "IDENTITY_MISMATCH");
                 var name = PJ.Metadata(PJ.At(artist, "name"));
-                var cover = PJ.Image(PJ.First(PJ.At(artist, "picUrl"), PJ.At(artist, "img1v1Url")));
+                var cover = new[] { PJ.At(artist, "img1v1Url"), PJ.At(artist, "picUrl") }
+                    .Select(PJ.Image).FirstOrDefault(address => address.Length > 0) ?? "";
                 PJ.Require(name.Length > 0 && cover.Length > 0, "INVALID_RESPONSE");
                 var songs = PJ.Rows(data["hotSongs"], 1000).Select(PlatformSongs.Wy).ToArray();
                 PJ.Require(songs.Select(NativeMusicSong.NativeId).Distinct(StringComparer.Ordinal).Count() == songs.Length,

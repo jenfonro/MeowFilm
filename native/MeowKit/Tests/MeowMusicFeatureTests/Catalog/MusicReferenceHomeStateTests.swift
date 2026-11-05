@@ -49,7 +49,7 @@ private actor MusicReferenceHomeService: MusicPublicBrowsing {
 @MainActor final class MusicReferenceHomeStateTests: XCTestCase {
     private let chart = MusicPublicBrowseChannel(id: "chart", title: "排行榜", kind: .rankings)
 
-    func testFirstVisitStartsOnRankingAndLaterVisitsRestoreHistory() throws {
+    func testFirstVisitStartsOnDirectoryFirstItemAndLaterVisitsRestoreHistory() throws {
         let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -57,14 +57,14 @@ private actor MusicReferenceHomeService: MusicPublicBrowsing {
         let catalogue = [playlists, chart]
         let first = MusicChannelSelection(defaults: defaults)
         first.restoreChannel(from: catalogue, catalogueLoaded: true)
-        XCTAssertEqual(first.channel, chart)
-        first.selectChannel(playlists)
+        XCTAssertEqual(first.channel, playlists)
+        first.selectChannel(chart)
         let restored = MusicChannelSelection(defaults: defaults)
         restored.restoreChannel(from: [chart, playlists], catalogueLoaded: true)
-        XCTAssertEqual(restored.channel, playlists)
+        XCTAssertEqual(restored.channel, chart)
     }
 
-    func testFirstVisitWaitsForLoadedCatalogueBeforeSelectingRanking() throws {
+    func testFirstVisitWaitsForLoadedCatalogueBeforeSelectingFirstItem() throws {
         let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -73,10 +73,10 @@ private actor MusicReferenceHomeService: MusicPublicBrowsing {
         selection.restoreChannel(from: [playlists, chart], catalogueLoaded: false)
         XCTAssertNil(selection.channel)
         selection.restoreChannel(from: [playlists, chart], catalogueLoaded: true)
-        XCTAssertEqual(selection.channel, chart)
+        XCTAssertEqual(selection.channel, playlists)
     }
 
-    func testFirstVisitFallsBackToTheFirstDynamicChannelWithoutRanking() throws {
+    func testFirstVisitUsesTheFirstDynamicChannelWithoutRanking() throws {
         let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -87,20 +87,21 @@ private actor MusicReferenceHomeService: MusicPublicBrowsing {
         XCTAssertEqual(selection.channel, playlists)
     }
 
-    func testUnknownHistoryFallsBackToRankingOnlyAfterCatalogueLoads() throws {
+    func testUnknownHistoryFallsBackToFirstItemOnlyAfterCatalogueLoads() throws {
         let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let missing = MusicPublicBrowseChannel(id: "missing", title: "已下架", kind: .playlists)
         MusicChannelSelection(defaults: defaults).selectChannel(missing)
+        let playlists = MusicPublicBrowseChannel(id: "playlist", title: "歌单", kind: .playlists)
         let restored = MusicChannelSelection(defaults: defaults)
-        restored.restoreChannel(from: [chart], catalogueLoaded: false)
+        restored.restoreChannel(from: [playlists, chart], catalogueLoaded: false)
         XCTAssertNil(restored.channel)
-        restored.restoreChannel(from: [chart], catalogueLoaded: true)
-        XCTAssertEqual(restored.channel, chart)
+        restored.restoreChannel(from: [playlists, chart], catalogueLoaded: true)
+        XCTAssertEqual(restored.channel, playlists)
         let reloaded = MusicChannelSelection(defaults: defaults)
-        reloaded.restoreChannel(from: [chart], catalogueLoaded: true)
-        XCTAssertEqual(reloaded.channel, chart)
+        reloaded.restoreChannel(from: [chart, playlists], catalogueLoaded: true)
+        XCTAssertEqual(reloaded.channel, playlists)
         reloaded.selectChannel(MusicPublicBrowseChannel(id: "playlist", title: "歌单", kind: .playlists))
         reloaded.restoreChannel(from: [chart], catalogueLoaded: true)
         XCTAssertEqual(reloaded.channel?.id, "playlist")

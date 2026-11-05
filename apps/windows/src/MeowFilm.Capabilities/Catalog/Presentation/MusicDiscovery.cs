@@ -48,8 +48,8 @@ public sealed partial class MusicCapability
     }
     private void DiscoveryInvalidated()
     {
-        if (page.Dispatcher.HasShutdownStarted || page.Dispatcher.HasShutdownFinished) return;
-        _ = page.Dispatcher.InvokeAsync(() =>
+        if (Presentation.Dispatcher.HasShutdownStarted || Presentation.Dispatcher.HasShutdownFinished) return;
+        _ = Presentation.Dispatcher.InvokeAsync(() =>
         {
             if (disposed || stopping) return;
             // Initial hydration may precede this callback but a new valid read may
@@ -110,8 +110,8 @@ public sealed partial class MusicCapability
                 if (!application.IsDiscoveryCurrent(result.Generation)) throw new MusicOperationException("STALE_SESSION");
                 PublishDiscovery(result);
                 var target = locations.GetValueOrDefault("catalog-discovery");
-                if (target is not null) _ = page.Dispatcher.InvokeAsync(() =>
-                { if (epoch == discoveryEpoch && navigation == loadGeneration && IsDiscovery) page.RestoreScroll(target.Scroll); });
+                if (target is not null) _ = Presentation.Dispatcher.InvokeAsync(() =>
+                { if (epoch == discoveryEpoch && navigation == loadGeneration && IsDiscovery) Presentation.RestoreScroll(target.Scroll); });
             }
             catch (OperationCanceledException)
             { if (epoch == discoveryEpoch && IsDiscovery) discoveryStatus = "已取消"; }

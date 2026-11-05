@@ -7,7 +7,7 @@ public sealed partial class MusicLibraryOwner
     private static readonly string[] CurrentAreas =
     [
         "library", LibrarySyncArea, "queue", "history", "lx-installations", "online-settings",
-        OfficialSourcesArea, QualityPolicyArea, LyricDisplayArea, MetadataPolicyArea, AppearanceArea, DeviceSettingsArea,
+        CatalogSourceArea, OfficialSourcesArea, QualityPolicyArea, LyricDisplayArea, MetadataPolicyArea, AppearanceArea, DeviceSettingsArea,
         SearchPolicyArea, SearchHistoryArea, LocalLyricsArea, "playback-settings"
     ];
 
@@ -34,7 +34,7 @@ public sealed partial class MusicLibraryOwner
         return false;
     }
 
-    private void ValidateDocument(JsonObject doc)
+    private void ValidateDocument(JsonObject doc, bool allowLegacyOnlineSettings = false)
     {
         try
         {
@@ -92,10 +92,12 @@ public sealed partial class MusicLibraryOwner
             if (HasValue(doc, "online-settings"))
             {
                 var settings = LJ.Object(Value(doc, "online-settings"), "CORRUPT_STORAGE");
-                ValidateSettings(settings);
-                if (settings["target"] is JsonObject target)
-                    LJ.Require(installations.Contains(LJ.S(target["installationId"])), "CORRUPT_STORAGE");
+                if (allowLegacyOnlineSettings && LJ.I(settings["schema"]) == 2)
+                    ValidateLegacyOnlineSettings(settings, installations);
+                else ValidateSettings(settings);
             }
+            if (HasValue(doc, CatalogSourceArea))
+                ValidateCatalogSource(LJ.Object(Value(doc, CatalogSourceArea), "CORRUPT_STORAGE"));
             if (HasValue(doc, OfficialSourcesArea))
                 ValidateOfficialSources(LJ.Object(Value(doc, OfficialSourcesArea), "CORRUPT_STORAGE"));
             if (HasValue(doc, QualityPolicyArea)) ValidateQualityPolicy(LJ.Object(Value(doc, QualityPolicyArea), "CORRUPT_STORAGE"));

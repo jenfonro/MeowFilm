@@ -10,6 +10,7 @@ open class ArtworkView: UIImageView {
     private var representedURL: URL?
     private var generation: UInt64 = 0
     private var completed = false
+    private var failed = false
 
     public init(size: CGFloat = 48, images: ArtworkImages) {
         self.images = images
@@ -30,13 +31,14 @@ open class ArtworkView: UIImageView {
     required public init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     public func load(_ url: URL?, cachedData: Data? = nil) {
-        if representedURL == url, task != nil || completed { return }
+        if representedURL == url, task != nil || completed || failed { return }
         task?.cancel()
         task = nil
         generation &+= 1
         let expected = generation
         representedURL = url
         completed = false
+        failed = false
         image = nil
         guard let url else { completed = true; return }
         if cachedData == nil, let cached = images.cached(url) {
@@ -54,15 +56,22 @@ open class ArtworkView: UIImageView {
                 self.image = value
                 self.task = nil
                 self.completed = true
+                self.failed = false
                 self.onImage?(value, data)
             } catch {
                 guard !Task.isCancelled, let self,
                       self.generation == expected, self.representedURL == url else { return }
                 self.task = nil
-                self.completed = true
+                self.failed = true
                 self.onFailure?(url)
             }
         }
+    }
+
+    public func retryFailedLoad() {
+        guard failed, let representedURL else { return }
+        failed = false
+        load(representedURL)
     }
 
     deinit { task?.cancel() }

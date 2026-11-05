@@ -4,7 +4,7 @@
  xmlns:local="clr-namespace:MeowFilm.Capabilities"
  xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
  FontFamily="{DynamicResource {x:Static SystemFonts.MessageFontFamilyKey}}"
- TextOptions.TextFormattingMode="Ideal" TextOptions.TextRenderingMode="Grayscale">
+ TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="Auto">
  <UserControl.Style>
   <Style TargetType="UserControl">
    <!-- The page's only backdrop; detail content and footer stay transparent over it. -->
@@ -142,7 +142,11 @@
      </StackPanel>
     </Border>
    <Grid Grid.Row="2">
-    <ListBox Background="Transparent" BorderThickness="0" Padding="0"
+    <!-- OpacityMask composites the lyric viewport into an intermediate surface: use grayscale here only. -->
+    <local:MusicLyricList Background="Transparent" BorderThickness="0" Padding="0"
+     TextOptions.TextRenderingMode="Grayscale"
+     Position="{Binding PositionSeconds}" IsPlaying="{Binding IsPlaying}"
+     PlaybackRate="{Binding AcceptedPlaybackRate}" PresentationKey="{Binding PlaybackPresentationKey}"
      ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto"
      ScrollViewer.CanContentScroll="True" VirtualizingPanel.IsVirtualizing="True"
      VirtualizingPanel.VirtualizationMode="Recycling" VirtualizingPanel.ScrollUnit="Pixel"
@@ -196,8 +200,7 @@
          <ItemsControl ItemsSource="{Binding Words}" AutomationProperties.Name="逐字歌词">
           <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
           <ItemsControl.ItemTemplate><DataTemplate>
-           <local:MusicLyricWordView Word="{Binding}" FontSize="20" Foreground="#8B898C" Highlight="#F4F3F6"
-                                     Position="{Binding DataContext.PositionSeconds,RelativeSource={RelativeSource AncestorType=local:MusicPlayerDetailView}}"/>
+           <local:MusicLyricWordView Word="{Binding}" FontSize="20" Foreground="#8B898C" Highlight="#F4F3F6"/>
           </DataTemplate></ItemsControl.ItemTemplate>
          </ItemsControl>
          <TextBlock Text="{Binding Translation}" Style="{StaticResource Player.OptionalText}" TextWrapping="Wrap"/>
@@ -217,7 +220,7 @@
        </Button>
       </Grid>
      </DataTemplate></ListBox.ItemTemplate>
-    </ListBox>
+    </local:MusicLyricList>
     <Grid VerticalAlignment="Center" IsHitTestVisible="False"
           Visibility="{Binding HasLyricPreview,Converter={StaticResource MeowFilm.BoolToVisibility}}">
      <Border Height="1" Background="#48FFFFFF" Margin="0,0,0,0"/>

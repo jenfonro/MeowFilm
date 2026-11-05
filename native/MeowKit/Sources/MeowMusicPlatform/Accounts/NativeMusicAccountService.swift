@@ -90,6 +90,19 @@ extension NativeMusicAccountService: MusicNativeAccountProviding {
         return try authorizedAudio(value, platform: platform)
     }
 }
+// Local facts only: no restore, validation or request. A platform not yet
+// inspected may still restore a token, so it stays eligible (at most one search).
+extension NativeMusicAccountService: MusicNativeCandidateScopeProviding {
+    public func candidatePlatforms() -> Set<MusicAccountPlatform> {
+        guard !closed, available, accessTransitions == 0 else { return [] }
+        return Set(MusicAccountPlatform.allCases.filter { platform in
+            guard (try? configured(platform)) != nil, !requiresExplicitRestore.contains(platform),
+                  !transitions.contains(platform) else { return false }
+            if platform == .netease, providers[platform] is any MusicNeteasePublicAudioProvider { return true }
+            return tokens[platform] != nil || !inspected.contains(platform)
+        })
+    }
+}
 public struct MusicAccountCloseReport: Sendable, Equatable {
     public let cleanupComplete: Bool
     public let inFlight: Int
@@ -275,7 +288,7 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicCredentialsIm
 
     public init(accounts: AccountSessionCoordinator, scopes: [MusicAccountPlatform: AccountIdentity],
                 transport: (any MusicAccountHTTPTransport)? = nil,
-                urlCacheStore: EncryptedDocumentStore? = nil,
+                urlCacheStore: DocumentStore? = nil,
                 cacheLifecycle: (@Sendable (MusicNativeCacheLifecycleEvent) async -> Void)? = nil,
                 clock: @escaping @Sendable () -> Date = { Date() },
                 clientContexts: NativeMusicClientService? = nil,
@@ -296,7 +309,7 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicCredentialsIm
     // Product construction still registers only the fixed native providers above.
     init(accounts: AccountSessionCoordinator, scopes: [MusicAccountPlatform: AccountIdentity],
          providers: [MusicAccountPlatform: any MusicAccountProvider],
-         urlCacheStore: EncryptedDocumentStore? = nil,
+         urlCacheStore: DocumentStore? = nil,
          cacheLifecycle: (@Sendable (MusicNativeCacheLifecycleEvent) async -> Void)? = nil,
          clock: @escaping @Sendable () -> Date = { Date() }) {
         self.accounts = accounts; self.scopes = scopes; self.providers = providers
@@ -442,7 +455,7 @@ public actor NativeMusicAccountService: MusicAccountsServing, MusicCredentialsIm
         if let oldToken { _ = try? await accounts.failLogin(oldToken, reason: .cancelled) }
         await drainCacheLifecycle()
         // A dispatched coordinator write can complete first; never claim that
-        // cancellation rolled it back. No business grant is issued while locked.
+        // cancellation rolled it back. No business grant is issued while access is unavailable.
         return .init(ok: true, available: value, generation: generation)
     }
     public func close() async -> MusicAccountCloseReport {

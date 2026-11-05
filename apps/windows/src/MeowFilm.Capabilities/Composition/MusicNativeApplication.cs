@@ -236,7 +236,13 @@ public sealed partial class MusicNativeApplication : IMusicApplication
             if (method.StartsWith("music.sources.", StringComparison.Ordinal) ||
                 method.StartsWith("music.online.", StringComparison.Ordinal) ||
                 method.StartsWith("music.transfer.", StringComparison.Ordinal))
-                return await scripts.ExecuteAsync(method, parameters, token).ConfigureAwait(false);
+            {
+                bool changesSource = method.StartsWith("music.sources.", StringComparison.Ordinal) &&
+                    method is not ("music.sources.list" or "music.sources.detail");
+                if (changesSource) lyrics.Invalidate();
+                try { return await scripts.ExecuteAsync(method, parameters, token).ConfigureAwait(false); }
+                finally { if (changesSource) lyrics.Invalidate(); }
+            }
 
             bool changesLyrics = method is "music.settings.save" or "music.metadata.settings.save" or
                 "music.lyrics.local.save" or "music.lyrics.local.remove";
@@ -245,8 +251,6 @@ public sealed partial class MusicNativeApplication : IMusicApplication
             // Native recommendation commands stay private.
             var reply = await recommendationQueue.ExecuteAsync(method, parameters, token).ConfigureAwait(false);
             if (changesLyrics) lyrics.Invalidate();
-            if (method == "music.settings.save" && reply.TryGetProperty("ok", out var saved) && saved.ValueKind == JsonValueKind.True)
-                scripts.CancelPlayback();
             return reply;
         }
         catch (OperationCanceledException) { return Failed("CANCELLED"); }

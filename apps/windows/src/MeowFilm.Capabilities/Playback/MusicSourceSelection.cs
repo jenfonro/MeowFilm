@@ -12,7 +12,7 @@ public sealed partial class MusicCapability
     private bool recordingMore;
     public ObservableCollection<MusicRecordingRow> CurrentRecordings { get; } = [];
     public bool CanSelectCurrentRecording => CanEdit && musicRecovery is { Recovering: false } state &&
-        CurrentRecovery(state) && state.Media?.Target?.Official == true &&
+        CurrentRecovery(state) && state.Media?.Target is not null &&
         playback is INativePlaybackContinuation && OwnsCurrent;
     public bool HasCurrentRecordings => CurrentRecordings.Count > 0;
 
@@ -37,7 +37,7 @@ public sealed partial class MusicCapability
     private void UpdateCurrentRecordings()
     {
         CurrentRecordings.Clear();
-        if (musicRecovery is { Media.Target.Official: true } state && current is { } song && CurrentRecovery(state))
+        if (musicRecovery is { Media.Target: not null } state && current is { } song && CurrentRecovery(state))
         {
             CurrentRecordings.Add(new(song.Id, "", "", state.Media.Target.Automatic ? "自动选择 ✓" : "自动选择"));
             var snapshot = KnownOfficialSong(song);
@@ -45,8 +45,8 @@ public sealed partial class MusicCapability
                 foreach (var source in sources.EnumerateArray())
                 {
                     string platform = MusicDto.Text(source, "source"), key = MusicDto.Text(source, "sourceKey");
-                    if (platform is not ("wy" or "tx" or "kg")) continue;
-                    string name = platform switch { "wy" => "网易云音乐", "tx" => "QQ 音乐", _ => "酷狗音乐" };
+                    if (!Library.NativeMusicSong.Platforms.Contains(platform)) continue;
+                    string name = MusicSourceRow.PlatformName(platform);
                     string locator = SongJson.InfoId(source.GetProperty("musicInfo"));
                     CurrentRecordings.Add(new(song.Id, key, platform,
                         name + " · " + locator + (state.Media.Target.SourceKey == key ? " ✓" : "")));
@@ -70,7 +70,7 @@ public sealed partial class MusicCapability
     public Task LoadCurrentRecordingsAsync()
     {
         if (recordingDiscovery is not null || !recordingMore || recordingPage >= 3 ||
-            musicRecovery is not { Media.Target.Official: true } state || !CurrentRecovery(state) ||
+            musicRecovery is not { Media.Target: not null } state || !CurrentRecovery(state) ||
             state.Song.EntryId != recordingEntry) return Task.CompletedTask;
         var request = CancellationTokenSource.CreateLinkedTokenSource(state.Token);
         recordingDiscovery = request;
@@ -123,21 +123,17 @@ public sealed partial class MusicCapability
                 request.CancelAfter(TimeSpan.FromSeconds(40));
                 var target = old.Target!;
                 // Resolve/validate before capturing or retiring the still-playing input.
-                var next = choice.SourceKey.Length == 0
-                    ? await ResolveAutomaticOfficial(state.Song, target.PolicyRequest,
-                        target.QualityPolicySignature!, request.Token, requireNetwork: true)
-                    : await ResolveOfficialTarget(state.Song, new(null, choice.Platform, 0, choice.SourceKey,
-                        PolicyRequest: target.PolicyRequest, Quality: target.PolicyRequest,
-                        QualityPolicySignature: target.QualityPolicySignature,
-                        RecordingSong: KnownOfficialSong(state.Song)), request.Token, initial: true, useCache: false);
+                var next = await ResolveAutomaticSources(state.Song, target.PolicyRequest,
+                    target.QualityPolicySignature!, request.Token, requireNetwork: true,
+                    recordingPlatform: choice.SourceKey.Length == 0 ? null : choice.Platform,
+                    recordingKey: choice.SourceKey.Length == 0 ? null : choice.SourceKey);
                 request.Token.ThrowIfCancellationRequested();
                 if (!CurrentRecovery(state)) throw new OperationCanceledException(request.Token);
                 if (state.RecoveryDisabled ||
                     next.Target?.QualityPolicySignature is { } policy && policy != savedQualitySignature)
                     throw new MusicOperationException("QUALITY_POLICY_CHANGED");
                 var point = port.CaptureContinuation() ?? throw new MusicOperationException("CONTINUATION_UNAVAILABLE");
-                bool changedSource = old.Target!.Platform != next.Target!.Platform ||
-                    old.Target.SourceKey != next.Target.SourceKey;
+                bool changedSource = SourceIdentity(old.Target!) != SourceIdentity(next.Target!);
                 var pending = BeginPendingMedia(state, next, changedSource, request.Token);
                 await ReopenPendingMedia(port, point, state, pending);
                 replacementCompleted = true;
@@ -159,7 +155,7 @@ public sealed partial class MusicCapability
                 state.RejectedSources.Clear(); state.RejectedUrls.Clear();
                 ScheduleMusicExpiry(state);
                 UpdateRecordingCandidates(); UpdateLyricSources();
-                Changed(nameof(CurrentSource)); Changed(nameof(CurrentQualityLabel));
+                PlaybackSourceBindings();
                 if (IsLyrics) _ = RestoreLyricsAsync();
                 if (alreadyStarted) ConfirmRecoveredSourceStarted(state);
             }
@@ -194,7 +190,7 @@ public sealed partial class MusicCapability
                         UpdateFeedbackSelection();
                         ScheduleMusicExpiry(state);
                         UpdateRecordingCandidates(); UpdateLyricSources();
-                        Changed(nameof(CurrentQualityLabel));
+                        PlaybackSourceBindings();
                         if (alreadyStarted) ConfirmRecoveredSourceStarted(state);
                     }
                     catch

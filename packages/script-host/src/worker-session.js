@@ -12,7 +12,7 @@ export function workerResult(value) {
 
 function wasmModule() {
   compiledModule ??= Promise.resolve().then(() =>
-    WebAssembly.compile(readFileSync(new URL(import.meta.resolve('@jitl/quickjs-wasmfile-release-sync/wasm')))));
+    WebAssembly.compile(readFileSync(new URL('./quickjs/emscripten-module.wasm', import.meta.url))));
   return compiledModule;
 }
 
@@ -60,6 +60,7 @@ export class WorkerSession {
     const worker = new Worker(new URL('./worker-entry.js', import.meta.url), {
       workerData: {
         wasmModule: module,
+        protocol: this.input.protocol ?? 'lx',
       },
       stdout: false,
       stderr: false,
@@ -504,6 +505,12 @@ export class WorkerSession {
   }
 
   #adapter(message) {
+    if (message.method === 'capability' && this.input.protocol === 'source' &&
+        this.worker && !this.#termination &&
+        (this.live && !this.stopRequested || message.params?.name === 'virtual.unregister')) {
+      this.#trackAdapter(this.#capability(message));
+      return;
+    }
     if (!this.worker || this.stopRequested || !this.live || this.#termination) {
       this.#sendSafely({ version: 1, kind: 'response', id: message.id, ok: false,
         code: 'STALE_SESSION' });
@@ -523,6 +530,31 @@ export class WorkerSession {
     const settled = () => this.adapterTasks.delete(task);
     Promise.resolve(task).then(settled, settled).catch(() => {});
     return task;
+  }
+
+  async #capability(message) {
+    const params = message.params ?? {};
+    const controller = new AbortController();
+    this.adapters.set(message.id, { controller });
+    try {
+      const context = clone(params.context ?? {});
+      const scope = context.scope;
+      requireValue(scope?.installationId === this.installationId &&
+        scope.generation === this.generation &&
+        scope.protocol === this.revision.protocol && scope.siteId === 'source',
+      'PERMISSION_DENIED');
+      requireValue(typeof this.input.capabilitiesClient?.call === 'function',
+        'CAPABILITY_UNAVAILABLE');
+      const result = await this.input.capabilitiesClient.call(params.name, clone(params.input), {
+        ...context, signal: controller.signal,
+      });
+      this.#sendSafely(response(message.id, clone(result ?? null)));
+    } catch (error) {
+      this.#sendSafely({ version: 1, kind: 'response', id: message.id, ok: false,
+        code: safeError(error, 'CAPABILITY_UNAVAILABLE').code });
+    } finally {
+      this.adapters.delete(message.id);
+    }
   }
 
   async #network(message) {

@@ -17,15 +17,22 @@ internal static class PlatformDiscovery
     private static JsonNode? A(JsonNode? n, params string[] path) => PJ.At(n, path);
     private static JsonNode? Pick(JsonNode? n, params string[] names) => PJ.First(names.Select(k => A(n, k)).ToArray());
     private static IEnumerable<JsonNode?> Children(JsonNode? n) => PJ.Array(A(n, "children"));
-    private static string Title(JsonNode? n) => PJ.Metadata(PJ.First(Pick(n, "name", "title"), A(n, "uiElement", "mainTitle", "title")));
-    private static string Cover(JsonNode? n) => PJ.Image(PJ.First(Pick(n, "cover", "coverImg", "coverUrl", "picUrl", "coverImgUrl", "background"),
-        A(n, "uiElement", "image", "imageUrl"), PJ.Array(A(n, "uiElement", "images")).Select(x => Pick(x, "imageUrl", "url")).FirstOrDefault()));
+    private static string Title(JsonNode? n) => new[] { A(n, "name"), A(n, "title"), A(n, "uiElement", "mainTitle", "title") }
+        .Select(PJ.Metadata).FirstOrDefault(text => text.Length > 0) ?? "";
+    private static string Cover(JsonNode? n) => new[] { A(n, "cover"), A(n, "coverImg"), A(n, "coverUrl"),
+        A(n, "picUrl"), A(n, "coverImgUrl"), A(n, "img1v1Url"), A(n, "background"), A(n, "uiElement", "image", "imageUrl") }
+        .Concat(PJ.Array(A(n, "uiElement", "images")).Select(x => Pick(x, "imageUrl", "url")))
+        .Select(PJ.Image).FirstOrDefault(address => address.Length > 0) ?? "";
     private static JsonNode? Nested(JsonNode? n)
     {
         if (n is JsonObject or JsonArray) return n;
         var s = PJ.Text(n);
         if (s.Length is 0 or >= 50000) return null;
-        try { return JsonNode.Parse(s, documentOptions: new JsonDocumentOptions { MaxDepth = 25 }); }
+        try
+        {
+            using var document = JsonDocument.Parse(s, new JsonDocumentOptions { MaxDepth = 25 });
+            return PJ.Read(document.RootElement);
+        }
         catch (JsonException) { return null; }
     }
     private static Dictionary<string, string[]> Query(Uri uri) => uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries)
@@ -89,6 +96,18 @@ internal static class PlatformDiscovery
         if (copy["al"] is null && copy["album"] is null) copy["al"] = PJ.Obj(("name", ""), ("picUrl", Cover(s)));
         if (Cover(s).Length == 0 && resourceCover.Length > 0) copy["coverUrl"] = resourceCover;
         return PlatformSongs.Wy(copy);
+    }
+    private static JsonObject Entry(JsonObject resource)
+    {
+        var kind = S(resource, "action", "type") is { Length: > 0 } actionKind ? actionKind : S(resource, "kind");
+        resource["presentation"] = kind switch
+        {
+            "playlist" or "daily" or "album" => "preview",
+            "similar" => "overlay",
+            "fm" or "heartbeat" => "animated",
+            _ => "static"
+        };
+        return resource;
     }
     internal static JsonObject? Resource(JsonNode? raw, bool modern = false, bool banner = false, bool channel = false)
     {
@@ -300,15 +319,7 @@ internal static class PlatformDiscovery
                     for (var i = 0; i < unique.Count; i++)
                     {
                         var x = unique[i]; x["key"] = $"{baseId}:entry:{S(x, "kind")}:{(S(x, "id").Length > 0 ? S(x, "id") : i.ToString())}:{S(x, "action", "branch")}";
-                        var entryKind = S(x, "action", "type") is { Length: > 0 } actionKind ? actionKind : S(x, "kind");
-                        x["presentation"] = entryKind switch
-                        {
-                            "playlist" or "daily" or "album" => "preview",
-                            "similar" => "overlay",
-                            "fm" or "heartbeat" => "animated",
-                            _ => "static"
-                        };
-                        entries.Add(x);
+                        entries.Add(Entry(x));
                     }
                     continue;
                 }
@@ -356,6 +367,39 @@ internal static class PlatformDiscovery
             items.Add(item);
         }
         if (ids.Add("artist")) items.Add(PJ.Obj(("id", "artist"), ("name", "歌手"), ("kind", "artists")));
+        return PJ.Obj(("platform", "wy"), ("items", items));
+    }
+    private static readonly string[] PrimaryWyChannels =
+        ["feature", "playlist", "chart", "artist", "vip", "euro", "djR", "huayu", "qingge", "acg"];
+    private static readonly string[] MoreWyChannels =
+    [
+        "china", "yingshi", "rock", "music_top_tab_jpop", "paobu", "music_top_tab_game",
+        "yueyu", "music_top_tab_sunoai", "old_hat", "music_top_tab_dance", "hFlow", "music_top_tab_world",
+        "music_top_tab_dj", "rnb", "chuxing", "music_tab_drive", "music_top_tab_tipsy", "rap",
+        "xiangcun", "music_top_tab_french", "sleep", "music_top_tab_light_music", "classic", "music_top_tab_children",
+        "HiFi", "sir", "ballad", "music_top_tab_latin", "music_tab_pioneer", "funk",
+        "landiao", "yueqi", "study", "yinyueju", "music_top_tab_sport"
+    ];
+    internal static JsonObject ChannelDescriptor(JsonObject source)
+    {
+        var descriptor = (JsonObject)source.DeepClone();
+        descriptor["available"] = S(source, "kind") is "featured" or "cube" or "playlists" or "rankings" or
+            "new-songs" or "artists" or "vip";
+        descriptor["kind"] = "channel";
+        return descriptor;
+    }
+    internal static JsonObject ChannelDirectory(JsonObject directory)
+    {
+        var channels = PJ.RowsAll(directory["items"]).ToDictionary(item => S(item, "id"), StringComparer.Ordinal);
+        var items = new JsonArray();
+        foreach (var (ids, placement) in new[] { (PrimaryWyChannels, "primary"), (MoreWyChannels, "more") })
+            foreach (var id in ids)
+                if (channels.TryGetValue(id, out var channel))
+                {
+                    var descriptor = ChannelDescriptor(channel);
+                    descriptor["placement"] = placement;
+                    items.Add(descriptor);
+                }
         return PJ.Obj(("platform", "wy"), ("items", items));
     }
     internal static JsonObject Rankings(JsonObject data, string target)
@@ -427,7 +471,8 @@ internal static class PlatformDiscovery
             PJ.Require(id.Length > 0 && name.Length > 0);
             var count = PJ.OptionalCount(Pick(artist, "musicSize", "songCount"));
             return PJ.Obj(("id", id), ("name", name), ("subtitle", count is null ? "" : "单曲：" + count),
-                ("cover", Cover(artist)), ("kind", "artist"), ("source", "wy"));
+                ("cover", new[] { artist["img1v1Url"], artist["picUrl"] }.Select(PJ.Image)
+                    .FirstOrDefault(address => address.Length > 0) ?? Cover(artist)), ("kind", "artist"), ("source", "wy"));
         }).ToArray();
         var moreNode = PJ.First(data["more"], raw["more"]);
         var more = moreNode is not null && PJ.Bool(moreNode);
@@ -538,18 +583,21 @@ internal static class PlatformDiscovery
                 var tabs = new JsonArray();
                 for (var i = 0; i < modules.Count; i++)
                 {
-                    var g = modules[i]; var items = PJ.Arr(PJ.Array(A(g, "modules")).OfType<JsonObject>().Select(x =>
+                    var g = modules[i]; var items = PJ.Arr(PJ.Array(A(g, "modules")).OfType<JsonObject>().Select((x, index) =>
                     {
                         var row = (JsonObject)x.DeepClone(); row["resourceType"] = x["type"]?.DeepClone();
                         if (S(x, "type") == "fm" && PJ.Scalar(x["tabTagId"]).Length == 0) row["tabTagId"] = A(p, "tab")?.DeepClone();
-                        return Resource(row, channel: true);
+                        var resource = Resource(row, channel: true);
+                        if (resource is null) return null;
+                        resource["key"] = $"{target}:{(S(n, "id").Length > 0 ? S(n, "id") : sections.Count.ToString())}:entry:{i}:{index}";
+                        return Entry(resource);
                     }).Where(x => x is not null));
                     if (items.Count > 0) tabs.Add(PJ.Obj(("id", $"{S(n, "id")}:group:{i}"), ("name", S(g, "title")), ("selected", PJ.True(A(g, "isDefaultTab"))), ("items", items)));
                 }
                 if (tabs.Count > 0)
                 {
                     var tab = tabs.FirstOrDefault(t => PJ.True(A(t, "selected"))) ?? tabs[0];
-                    Add(n, "playlists", PJ.Array(A(tab, "items")), title: S(p, "title"));
+                    Add(n, "entries", PJ.Array(A(tab, "items")), title: S(p, "title"));
                     if (tabs.Count > 1 && sections.LastOrDefault() is JsonObject section) { section["tabs"] = tabs.DeepClone(); section["selectedTab"] = S(tab, "id"); }
                 }
                 return;

@@ -32,12 +32,13 @@ final class MusicNativeCandidateDiscoveryLifecycleTests: XCTestCase {
             expectedQueueRevision: state.revision, mode: .automatic())
         XCTAssertEqual(result.target.selection.siteId, "wy")
         let calls = await http.calls(), qqCalls = await qq.calls()
-        XCTAssertEqual(Set(calls), ["wy", "kg", "kw", "mg"]); XCTAssertEqual(calls.count, 4)
+        // Only the platform the injected script can play is searched, once.
+        XCTAssertEqual(calls, ["wy"])
         XCTAssertTrue(qqCalls.isEmpty)
         let discovered = try await service.queue()
         XCTAssertEqual(discovered.entries.count, 40)
         XCTAssertEqual(discovered.revision, state.revision + 1)
-        XCTAssertEqual(discovered.entries[7].track.sources.count, 5)
+        XCTAssertEqual(discovered.entries[7].track.sources.count, 2)
         for index in discovered.entries.indices where index != 7 {
             XCTAssertEqual(discovered.entries[index].track.sources, queued.entries[index].track.sources)
             let song = try MusicModel.normalize(tracks[index])
@@ -52,7 +53,8 @@ final class MusicNativeCandidateDiscoveryLifecycleTests: XCTestCase {
     func testQueueAndSettingsRevisionChangesRejectStagedCommit() async throws {
         for settings in [true, false] {
             let store = try MusicNativeCandidateDiscoveryFixture.store()
-            let service = try await NativeMusicFixture.service(store, qq: MusicNativeCandidateDiscoveryQQ(), http: MusicNativeCandidateDiscoveryHTTP())
+            let service = try await NativeMusicFixture.service(store, scripts: MusicNativeCandidateDiscoveryScripts(),
+                qq: MusicNativeCandidateDiscoveryQQ(), http: MusicNativeCandidateDiscoveryHTTP())
             let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
             _ = try await session.snapshot(discover: true, force: false)
             if settings { _ = try await service.updateSettings(.init(ifRevision: 0, mode: .shuffle)) }
@@ -66,8 +68,8 @@ final class MusicNativeCandidateDiscoveryLifecycleTests: XCTestCase {
     }
     func testLockCancelsConcurrentNoncooperativeSearchWithoutWritingLateMatches() async throws {
         let barrier = MusicNativeCandidateDiscoveryBarrier(), store = try MusicNativeCandidateDiscoveryFixture.store()
-        let service = try await NativeMusicFixture.service(store, qq: MusicNativeCandidateDiscoveryQQ(barrier: barrier),
-            http: MusicNativeCandidateDiscoveryHTTP(barrier: barrier))
+        let service = try await NativeMusicFixture.service(store, scripts: MusicNativeCandidateDiscoveryScripts(),
+            qq: MusicNativeCandidateDiscoveryQQ(barrier: barrier), http: MusicNativeCandidateDiscoveryHTTP(barrier: barrier))
         let before = store.snapshot().0
         let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
         let task = Task { try await session.snapshot(discover: true, force: false) }
@@ -83,8 +85,8 @@ final class MusicNativeCandidateDiscoveryLifecycleTests: XCTestCase {
     }
     func testClosedSessionCannotCommitOrResolveEvenIfItsCallbacksArriveLater() async throws {
         let barrier = MusicNativeCandidateDiscoveryBarrier(), store = try MusicNativeCandidateDiscoveryFixture.store()
-        let service = try await NativeMusicFixture.service(store, qq: MusicNativeCandidateDiscoveryQQ(barrier: barrier),
-            http: MusicNativeCandidateDiscoveryHTTP(barrier: barrier))
+        let service = try await NativeMusicFixture.service(store, scripts: MusicNativeCandidateDiscoveryScripts(),
+            qq: MusicNativeCandidateDiscoveryQQ(barrier: barrier), http: MusicNativeCandidateDiscoveryHTTP(barrier: barrier))
         let session = try await service.beginCandidateDiscovery(occurrenceID: "entry-1", expectedQueueRevision: 1)
         let before = store.snapshot().0
         let task = Task { try await session.snapshot(discover: true, force: false) }

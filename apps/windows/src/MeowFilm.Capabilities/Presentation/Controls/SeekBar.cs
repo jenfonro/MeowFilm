@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Windows;
 using System.Windows.Automation.Peers;
 using System.Windows.Automation.Provider;
@@ -32,6 +33,15 @@ public sealed class SeekBar : Slider
     private static readonly DependencyProperty ExpansionProperty = DependencyProperty.Register(
         "Expansion", typeof(double), typeof(SeekBar),
         new FrameworkPropertyMetadata(0d, FrameworkPropertyMetadataOptions.AffectsRender));
+    public static readonly DependencyProperty IsPlayingProperty = DependencyProperty.Register(
+        nameof(IsPlaying), typeof(bool), typeof(SeekBar), new PropertyMetadata(false, PlaybackChanged));
+    public static readonly DependencyProperty PlaybackRateProperty = DependencyProperty.Register(
+        nameof(PlaybackRate), typeof(double?), typeof(SeekBar), new PropertyMetadata(null, PlaybackChanged));
+    public static readonly DependencyProperty PresentationKeyProperty = DependencyProperty.Register(
+        nameof(PresentationKey), typeof(string), typeof(SeekBar), new PropertyMetadata("", PlaybackChanged));
+    private static readonly DependencyProperty DisplayValueProperty = DependencyProperty.Register(
+        "DisplayValue", typeof(double), typeof(SeekBar),
+        new FrameworkPropertyMetadata(0d, FrameworkPropertyMetadataOptions.AffectsRender));
     private readonly ToolTip preview = new()
     {
         Placement = PlacementMode.Relative, StaysOpen = true,
@@ -45,6 +55,10 @@ public sealed class SeekBar : Slider
     public Brush PlayedBrush { get => (Brush)GetValue(PlayedBrushProperty); set => SetValue(PlayedBrushProperty, value); }
     public Brush RailBrush { get => (Brush)GetValue(RailBrushProperty); set => SetValue(RailBrushProperty, value); }
     public bool RailAtTop { get => (bool)GetValue(RailAtTopProperty); set => SetValue(RailAtTopProperty, value); }
+    public bool IsPlaying { get => (bool)GetValue(IsPlayingProperty); set => SetValue(IsPlayingProperty, value); }
+    public double? PlaybackRate { get => (double?)GetValue(PlaybackRateProperty); set => SetValue(PlaybackRateProperty, value); }
+    public string PresentationKey { get => (string)GetValue(PresentationKeyProperty); set => SetValue(PresentationKeyProperty, value); }
+    internal double DisplayValue => (double)GetValue(DisplayValueProperty);
     internal bool IsScrubbing { get; private set; }
     public event EventHandler? ScrubStarted;
     public event EventHandler? ScrubCommitted;
@@ -62,8 +76,19 @@ public sealed class SeekBar : Slider
         SmallChange = 5;
         LargeChange = 15;
         preview.PlacementTarget = this;
-        Loaded += (_, _) => preview.Style = TryFindResource("Capability.SeekPreview") as Style;
-        Unloaded += (_, _) => { CancelScrub(); preview.IsOpen = false; BeginAnimation(ExpansionProperty, null); };
+        Loaded += (_, _) =>
+        {
+            SystemParameters.StaticPropertyChanged += OnSystemSettingChanged;
+            preview.Style = TryFindResource("Capability.SeekPreview") as Style;
+            SynchronizePlayback();
+        };
+        Unloaded += (_, _) =>
+        {
+            SystemParameters.StaticPropertyChanged -= OnSystemSettingChanged;
+            CancelScrub(); preview.IsOpen = false;
+            BeginAnimation(ExpansionProperty, null); BeginAnimation(DisplayValueProperty, null);
+        };
+        IsVisibleChanged += (_, _) => SynchronizePlayback();
         IsEnabledChanged += (_, _) => { if (!IsEnabled) CancelScrub(); UpdateExpansion(); };
     }
 
@@ -78,7 +103,7 @@ public sealed class SeekBar : Slider
         double expansion = Math.Clamp((double)GetValue(ExpansionProperty), 0, 1);
         Brush rail = highContrast ? SystemColors.WindowTextBrush : RailBrush;
         double thickness = 2 + expansion * 3, y = RailAtTop ? 1 : height / 2;
-        double end = Fraction(Value) * width;
+        double end = Fraction(DisplayValue) * width;
         dc.PushOpacity(1);
         dc.DrawRectangle(rail, null, new Rect(0, y - thickness / 2, width, thickness));
         dc.Pop();
@@ -102,12 +127,36 @@ public sealed class SeekBar : Slider
     internal double ValueAt(double x) => Minimum + Math.Clamp(x / Math.Max(1, ActualWidth), 0, 1) * (Maximum - Minimum);
 
     protected override void OnValueChanged(double oldValue, double newValue)
-    { base.OnValueChanged(oldValue, newValue); InvalidateVisual(); if (preview.IsOpen) UpdatePreview(); }
+    { base.OnValueChanged(oldValue, newValue); SynchronizePlayback(); if (preview.IsOpen) UpdatePreview(); }
+    private static void PlaybackChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        var bar = (SeekBar)d;
+        if (e.Property == PresentationKeyProperty) bar.CancelScrub();
+        bar.SynchronizePlayback();
+    }
+    private void SynchronizePlayback()
+    {
+        BeginAnimation(DisplayValueProperty, null);
+        SetValue(DisplayValueProperty, Value);
+        if (IsScrubbing || !IsLoaded || !IsVisible || !IsPlaying ||
+            string.IsNullOrEmpty(PresentationKey) ||
+            !SystemParameters.ClientAreaAnimation || DesktopTheme.GetIsHighContrast(this) ||
+            PlaybackRate is not { } rate || !double.IsFinite(rate) || rate <= 0 ||
+            !double.IsFinite(Maximum) || Maximum <= Value) return;
+        // Animate only the painted rail, never Slider.Value or application state.
+        BeginAnimation(DisplayValueProperty, new DoubleAnimation(Value, Maximum,
+            TimeSpan.FromSeconds((Maximum - Value) / rate)) { FillBehavior = FillBehavior.HoldEnd });
+    }
+    private void OnSystemSettingChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is nameof(SystemParameters.ClientAreaAnimation) or nameof(SystemParameters.HighContrast))
+        { SynchronizePlayback(); UpdateExpansion(); }
+    }
     protected override void OnPropertyChanged(DependencyPropertyChangedEventArgs e)
     {
         base.OnPropertyChanged(e);
         if (e.Property == DesktopTheme.IsHighContrastProperty ||
-            e.Property == MaximumProperty || e.Property == MinimumProperty) InvalidateVisual();
+            e.Property == MaximumProperty || e.Property == MinimumProperty) SynchronizePlayback();
         if (e.Property == IsKeyboardFocusWithinProperty || e.Property == DesktopTheme.IsHighContrastProperty) UpdateExpansion();
     }
     private void UpdateExpansion()
@@ -177,6 +226,7 @@ public sealed class SeekBar : Slider
     {
         if (IsScrubbing || !IsEnabled) return;
         IsScrubbing = true;
+        SynchronizePlayback();
         ScrubStarted?.Invoke(this, EventArgs.Empty);
         UpdateExpansion();
     }
@@ -192,6 +242,7 @@ public sealed class SeekBar : Slider
         // Subscribers read the final value before restoring its playback binding.
         if (commit && IsEnabled) ScrubCommitted?.Invoke(this, EventArgs.Empty);
         else ScrubCancelled?.Invoke(this, EventArgs.Empty);
+        SynchronizePlayback();
         preview.IsOpen = false; UpdateExpansion();
     }
     internal void CancelScrub() => EndScrub(commit: false);

@@ -21,6 +21,7 @@ public static partial class DesktopTests
     {
         foreach (var test in VisualChromeCases()) yield return test;
         foreach (var test in PresentationCases()) yield return test;
+        foreach (var test in HeaderPresentationCases()) yield return test;
         yield return Case("unified sidebar retains visited visual trees and back crosses content types", async () =>
         {
             var a = new ProbeModule("music"); var b = new ProbeModule("film", hasPlayer: false);
@@ -103,9 +104,9 @@ public static partial class DesktopTests
             var before = module.Calls.Count;
             f.Search.Text = "blocked"; Click(f.Button("搜索")); await DrainAsync();
             Equal(before, module.Calls.Count, "settings cannot submit global search");
-            var actions = f.Element<ItemsControl>("HeaderActions");
+            var actions = f.HeaderElement<ItemsControl>("HeaderActions");
             Equal(1, actions.Items.Count, "settings-only page is exposed by the one header");
-            var item = actions.Items.Cast<ShellHeaderActionItem>().Single();
+            var item = actions.Items.Cast<DesktopHeaderActionItem>().Single();
             Equal(hidden.Title, item.Label, "explicit settings entry");
             InvokeHeaderAction(f.Shell, item);
             await UntilAsync(() => hidden.Activations == 1, "settings public page activates");
@@ -166,13 +167,13 @@ public static partial class DesktopTests
             await using var f = new Fixture([module], pages: [first, second]); await f.LoadAsync();
             f.Element<ListBox>("PublicNavigationList").SelectedItem = first;
             await UntilAsync(() => AutomationProperties.GetName(f.Element<Grid>("ContentDeck")) == "first", "first header");
-            Equal(1, LogicalDescendants(f.Element<Border>("WindowFrame")).OfType<StackPanel>().Count(x => x.Name == "PageHeader"),
-                "one shell-owned header");
-            var stale = f.Element<ItemsControl>("HeaderActions").Items.Cast<ShellHeaderActionItem>().Single();
+            Equal(1, LogicalDescendants(f.Element<Border>("WindowFrame")).OfType<DesktopPageHeader>().Count(),
+                "one shared contribution host");
+            var stale = f.HeaderElement<ItemsControl>("HeaderActions").Items.Cast<DesktopHeaderActionItem>().Single();
             first.Publish("first-updated");
             await UntilAsync(() => AutomationProperties.GetName(f.Element<Grid>("ContentDeck")) == "first-updated",
                 "same source header refresh");
-            var refreshed = f.Element<ItemsControl>("HeaderActions").Items.Cast<ShellHeaderActionItem>().Single();
+            var refreshed = f.HeaderElement<ItemsControl>("HeaderActions").Items.Cast<DesktopHeaderActionItem>().Single();
             InvokeHeaderAction(f.Shell, stale); await DrainAsync();
             Equal(0, first.Executions, "replaced action wrapper cannot execute");
             InvokeHeaderAction(f.Shell, refreshed);
@@ -302,7 +303,7 @@ public static partial class DesktopTests
             Same(playerHost, Host(first.PlayerView!), "idempotent player host");
             True(LogicalTreeHelper.GetParent(first.SettingsView) is null, "inactive settings view is not mounted");
 
-            Equal(Visibility.Collapsed, f.Element<StackPanel>("PageHeader").Visibility,
+            Equal(Visibility.Collapsed, f.HeaderElement<StackPanel>("TrailingHeader").Visibility,
                 "header chrome collapses when the page contributes no slot or actions");
         });
         yield return Case("one player host swaps only the current player view", async () =>
@@ -975,11 +976,11 @@ public static partial class DesktopTests
         await DrainAsync();
     }
     private static void Click(Button button) => button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent, button));
-    private static void InvokeHeaderAction(ShellWindow shell, ShellHeaderActionItem item)
+    private static void InvokeHeaderAction(ShellWindow shell, DesktopHeaderActionItem item)
     {
         var button = new Button { Tag = item };
-        typeof(ShellWindow).GetMethod("OnHeaderActionClick", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
-            .Invoke(shell, [button, new RoutedEventArgs(Button.ClickEvent)]);
+        typeof(DesktopPageHeader).GetMethod("OnActionClick", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .Invoke(shell.FindName("PageHeaderHost"), [button, new RoutedEventArgs(Button.ClickEvent)]);
     }
     private static ContentControl Host(FrameworkElement view) => LogicalTreeHelper.GetParent(view) as ContentControl
         ?? throw new InvalidOperationException("Expected retained ContentControl host");
@@ -1022,6 +1023,9 @@ public static partial class DesktopTests
         f.Shell.Content = null; root.Resources.MergedDictionaries.Add(f.Shell.Resources); root.DataContext = f.Shell.DataContext;
         root.Background = background; TextElement.SetForeground(root, f.Shell.Foreground);
         TextElement.SetFontFamily(root, f.Shell.FontFamily); TextElement.SetFontSize(root, f.Shell.FontSize);
+        TextOptions.SetTextFormattingMode(root, TextOptions.GetTextFormattingMode(f.Shell));
+        TextOptions.SetTextRenderingMode(root, TextOptions.GetTextRenderingMode(f.Shell));
+        root.UseLayoutRounding = f.Shell.UseLayoutRounding; root.SnapsToDevicePixels = f.Shell.SnapsToDevicePixels;
         DesktopTheme.SetIsHighContrast(root, DesktopTheme.GetIsHighContrast(f.Shell));
         root.Measure(size); root.Arrange(new Rect(size)); root.UpdateLayout();
         var content = f.Element<Grid>("ContentDeck"); var player = f.Element<Border>("PlayerFrame");
@@ -1068,6 +1072,9 @@ public static partial class DesktopTests
         }
         public T Element<T>(string name) where T : FrameworkElement => Shell.FindName(name) as T
             ?? throw new InvalidOperationException("Missing shell element: " + name);
+        public T HeaderElement<T>(string name) where T : FrameworkElement =>
+            Element<DesktopPageHeader>("PageHeaderHost").FindName(name) as T
+            ?? throw new InvalidOperationException("Missing header element: " + name);
         public Button Button(string name) => LogicalDescendants(Shell.Content as DependencyObject ?? Element<Border>("WindowFrame"))
             .OfType<Button>().Single(button => AutomationProperties.GetName(button) == name);
         public async Task LoadAsync()
@@ -1219,13 +1226,13 @@ public static partial class DesktopTests
         public List<string> Calls { get; } = [];
         public Func<CancellationToken, Task>? InitializeHook { get; set; }
         public Func<string, CancellationToken, Task>? NavigateHook { get; set; }
-        public ProbeModule(string id, bool hasPlayer = true, bool supportsSearch = true)
+        public ProbeModule(string id, bool hasPlayer = true, bool supportsSearch = true, FrameworkElement? view = null)
         {
             Id = id;
             Navigation = new(new[] { "one", "two", "three", "slow", "broken" }.Select(route => new NavigationItem(route, "test-" + route, "")));
-            View = supportsSearch
+            View = view ?? (supportsSearch
                 ? new TextBox { Text = "test-view", VerticalAlignment = VerticalAlignment.Top, MinHeight = 80 }
-                : new SearchlessProbeView();
+                : new SearchlessProbeView());
             SettingsView = new TextBox { Text = "test-settings", VerticalAlignment = VerticalAlignment.Top, MinHeight = 80 };
             playerView = hasPlayer ? new Border { Height = 64, Background = Brushes.DarkSlateGray, Child = new TextBlock { Text = "test-player" } } : null;
         }
