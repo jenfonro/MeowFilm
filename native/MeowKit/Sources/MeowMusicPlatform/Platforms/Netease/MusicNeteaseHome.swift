@@ -2,6 +2,7 @@
 // iWebPlus b900c259 src/netease.ts discoveryRequest; the module-backed artist
 // request maps to /api/sub/artist/new/works/song-mv/list/v2 (eapi).
 import Foundation
+import MeowJSON
 import MeowAccounts
 import MeowMusicFeature
 
@@ -140,7 +141,7 @@ enum MusicNeteaseHomePayload {
     static func encode(_ root: [String: Any], secrets: [String]) throws -> Data {
         var remaining = 60_000
         let value = try clean(root, secrets: secrets.filter { !$0.isEmpty }, depth: 0, remaining: &remaining)
-        let bytes = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .fragmentsAllowed])
+        let bytes = try JSONObject.encode(value)
         guard bytes.count <= 2 * 1024 * 1024 else { throw MusicServiceError.limit }
         return bytes
     }
@@ -161,7 +162,7 @@ enum MusicNeteaseHomePayload {
             return try values.map { try clean($0, secrets: secrets, depth: depth + 1, remaining: &remaining) }
         }
         if let text = value as? String { return try MusicAccountPublicText.profile(text, secrets: secrets) }
-        if value is NSNull || value is NSNumber { return value }
+        if value is NSNull || value is NSNumber || value is JSONNumber { return value }
         throw MusicServiceError.upstreamInvalid
     }
 }

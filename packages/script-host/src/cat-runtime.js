@@ -76,7 +76,7 @@ function guardClientRequestErrors(client) {
 }
 function decodeSource(bytes) {
   try {
-    const source = new TextDecoder('utf8', { fatal: true, ignoreBOM: true }).decode(bytes);
+    const source = bytes.toString('utf8');
     requireValue(!source.startsWith('\uFEFF') && source.trim().length > 0 &&
       Buffer.from(source).equals(bytes));
     return source;

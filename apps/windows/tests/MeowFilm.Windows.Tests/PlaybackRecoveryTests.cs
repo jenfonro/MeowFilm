@@ -247,8 +247,9 @@ public static class PlaybackRecoveryTests
                 f.App.HistoryWrites == 2 && f.App.ConfirmWrites == 2,
                 "prepared next occurrence");
             await prepared.Work.WaitAsync(TimeSpan.FromSeconds(5));
+            // One resolve per occurrence: the next song's existing WY mapping is accepted without discovering QQ.
             Check(f.Output.NetworkOpens == networkOpens && f.Origin.Requests.Count == transfers &&
-                f.Module.CurrentTitle == "下一首" && f.App.Resolutions.Count == 3,
+                f.Module.CurrentTitle == "下一首" && f.App.Resolutions.Count == 2,
                 $"next occurrence reused bytes after a current exact authorization: opens={f.Output.NetworkOpens}/{networkOpens} " +
                 $"transfers={f.Origin.Requests.Count}/{transfers} title={f.Module.CurrentTitle} resolves={f.App.Resolutions.Count}");
             await using var persisted = await f.Cache!.OpenAsync(
@@ -414,6 +415,25 @@ public static class PlaybackRecoveryTests
             Check(fixture.Origin.Requests.Any(row => row.Path == "/new.wav" && row.Authorized), "fresh headers native direct");
             Check(fixture.Runtime.Calls == 0, "ordinary domain and media never Node");
         });
+        yield return Test("music script refresh carries the matched recording without changing the queue song", async () =>
+        {
+            await using var fixture = await MusicFixture.Create(firstFails: true);
+            fixture.App.ExpandRecording = true;
+            var song = MusicSongFixture.Online("wy", "42", "合成歌曲", "fixture", "", 100);
+            Check((await fixture.App.ExecuteAsync("music.queue.replace", new { songs = new[] { song }, index = 0 }))
+                .GetProperty("ok").GetBoolean(), "script queue");
+            await fixture.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, default);
+            await fixture.Module.PlayQueueSurfaceItemAsync(fixture.Module.QueueSurfaceRows.Single());
+            await Decoded(fixture.Native);
+            static bool Matched(JsonElement input) => input.GetProperty("song").GetProperty("sources").EnumerateArray()
+                .Any(source => source.GetProperty("source").GetString() == "kw");
+            Check(fixture.App.Resolutions.Count == 2 && !Matched(fixture.App.Resolutions[0]) && Matched(fixture.App.Resolutions[1]),
+                "the exact refresh uses the accepted matched recording");
+            var queue = await fixture.App.ExecuteAsync("music.queue.get");
+            Check(queue.GetProperty("current").GetProperty("song").GetProperty("sources").GetArrayLength() == 1,
+                "the queue keeps its original song snapshot");
+            fixture.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayQueue);
+        });
         yield return Test("music repeated HTTP failure stops after one re-resolution", async () =>
         {
             await using var fixture = await MusicFixture.Create(firstFails: true, bothFail: true);
@@ -558,8 +578,8 @@ public static class PlaybackRecoveryTests
     private static IEnumerable<TestCase> UnifiedSourcesCases()
     {
         foreach (bool scriptWins in new[] { false, true })
-            yield return Test("unified enabled sources choose the better available quality from " +
-                (scriptWins ? "script" : "official"), async () =>
+            yield return Test("unified known official playback skips " +
+                (scriptWins ? "higher quality script" : "lower quality script"), async () =>
             {
                 var script = new ScriptSource("enabled-script", quality: scriptWins ? "flac" : "320k");
                 await using var f = await ControlledMusicFixture.Create(
@@ -577,20 +597,16 @@ public static class PlaybackRecoveryTests
                     "real stored installation list retains revision and independent enablement");
                 await f.Play();
                 await Until(() => f.App.HistoryWrites == 1, "mixed quality playback");
-                Check(f.App.Resolutions.Any(row => Installation(row) is null) &&
-                    f.App.Resolutions.Any(row => Installation(row) == script.Id) &&
+                Check(f.App.Resolutions.Count == 1 && f.App.Resolutions.All(row => Installation(row) is null) &&
                     f.App.Resolutions.All(row => Installation(row) != "disabled-script"),
-                    "both enabled types participate while a disabled higher-quality script cannot resolve");
-                Check(f.App.Resolutions.Where(row => Installation(row) == script.Id).All(row =>
-                    row.GetProperty("generation").GetInt64() == 19),
-                    "resolution uses current detail generation after the earlier source listing");
+                    "a usable known recording completes playback without resolving any script");
                 Check(f.Output.NetworkOpens == 1 && f.Output.ReadOpens == 0 &&
                     f.Output.OpenedUris.Single().AbsolutePath ==
-                        (scriptWins ? "/enabled-script-wy-flac.wav" : "/official-wy-flac.wav") &&
+                        (scriptWins ? "/official-wy-320k.wav" : "/official-wy-flac.wav") &&
                     f.Runtime.Calls == 0,
                     "only the chosen quality opens media; listing and synthetic resolution never activate Node");
             });
-        yield return Test("unified source quality follows the saved category order", async () =>
+        yield return Test("unified known quality remains acceptable without probing a preferred unknown provider", async () =>
         {
             await using var f = await ControlledMusicFixture.Create(
                 scripts: [new("high-script")], qualityRequest: "auto", officialQuality: "flac");
@@ -605,9 +621,36 @@ public static class PlaybackRecoveryTests
             Check(Array.IndexOf(order, "high") < Array.IndexOf(order, "lossless"), "user quality order persisted");
             await f.Play();
             await Until(() => f.App.HistoryWrites == 1, "custom unified quality playback");
-            Check(f.Output.OpenedUris.Single().AbsolutePath == "/high-script-wy-320k.wav",
-                "saved high-before-lossless preference selects the script despite available official lossless");
+            Check(f.Output.OpenedUris.Single().AbsolutePath == "/official-wy-flac.wav" &&
+                f.App.Resolutions.All(row => Installation(row) is null),
+                "enabled lossless remains acceptable; ordering does not require a request to the unknown script");
         });
+        foreach (bool mapped in new[] { false, true })
+            yield return Test("unified script target " + (mapped ? "reuses an existing recording" : "matches only its missing platform"), async () =>
+            {
+                var script = new ScriptSource("target-script", platforms: ["tx"]) { Generation = 19 };
+                await using var f = await ControlledMusicFixture.Create(official: false, scripts: [script]);
+                f.App.MatchMissing = true;
+                var song = MusicSongFixture.Online("wy", "Original", "目标平台", "fixture");
+                if (mapped)
+                    song["sources"]!.AsArray().Add(MusicSongFixture.Online("tx", "Matched", "目标平台", "fixture")
+                        ["sources"]![0]!.DeepClone());
+                Check((await f.App.ExecuteAsync("music.queue.replace", new { songs = new[] { song }, index = 0 }))
+                    .GetProperty("ok").GetBoolean(), "target recording queue");
+                string original = (await f.App.ExecuteAsync("music.queue.get")).GetProperty("current").GetRawText();
+                await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, default);
+                await f.Module.PlayQueueSurfaceItemAsync(f.Module.QueueSurfaceRows.Single());
+                await Until(() => f.App.HistoryWrites == 1, "target script playback");
+                Check(f.App.Resolutions.Count == 1 && Installation(f.App.Resolutions.Single()) == script.Id &&
+                    f.App.Resolutions.Single().GetProperty("platform").GetString() == "tx" &&
+                    f.App.Resolutions.Single().GetProperty("generation").GetInt64() == 19 &&
+                    f.App.MatchPlatforms.SequenceEqual(mapped ? Array.Empty<string>() : new[] { "tx" }) &&
+                    f.App.Discoveries == 0,
+                    "the unified entry uses the current target generation and matches only a missing target");
+                Check(f.Output.OpenedUris.Single().AbsolutePath == "/target-script-tx-320k.wav" &&
+                    (await f.App.ExecuteAsync("music.queue.get")).GetProperty("current").GetRawText() == original,
+                    "matched playback does not replace queue identity or metadata");
+            });
         foreach (bool scriptFirst in new[] { false, true })
             yield return Test("unified HTTP recovery crosses from " +
                 (scriptFirst ? "script to official" : "official to script") + " on the same recording", async () =>
@@ -615,14 +658,17 @@ public static class PlaybackRecoveryTests
                 await using var f = await ControlledMusicFixture.Create(
                     scripts: [new("recovery-script", quality: scriptFirst ? "flac" : "320k")],
                     qualityRequest: "auto", officialQuality: scriptFirst ? "320k" : "flac");
+                if (scriptFirst)
+                    f.App.ResolutionFailure = row => Installation(row) is null ? "RECORDING_UNAVAILABLE" : null;
                 await f.Play();
+                f.App.ResolutionFailure = null;
                 await Until(() => f.App.HistoryWrites == 1 && f.App.FeedbackProbe.Starts == 1,
                     "mixed accepted source");
                 string identity = f.Output.Identity!;
                 string title = f.Module.CurrentTitle;
                 string firstPath = scriptFirst ? "/recovery-script-wy-flac.wav" : "/official-wy-flac.wav";
                 string fallbackPath = scriptFirst ? "/official-wy-320k.wav" : "/recovery-script-wy-320k.wav";
-                Check(f.Output.OpenedUris.Single().AbsolutePath == firstPath, "higher-quality initial source");
+                Check(f.Output.OpenedUris.Single().AbsolutePath == firstPath, "first usable initial source");
                 await f.Module.SeekAsync(37);
                 await f.Module.TogglePlaybackAsync();
                 f.Output.Plan(failure: PlaybackError.HttpUnauthorized);
@@ -719,15 +765,14 @@ public static class PlaybackRecoveryTests
                 Check(f.Output.OpenedUris.Single().AbsolutePath ==
                     (scriptFails ? "/official-wy-320k.wav" : "/available-script-wy-320k.wav") &&
                     f.App.Resolutions.Any(row => Installation(row) is null) &&
-                    f.App.Resolutions.Any(row => Installation(row) == "available-script"),
-                    "candidate unavailability cannot suppress a valid result from the other type");
+                    f.App.Resolutions.Any(row => Installation(row) == "available-script") == !scriptFails,
+                    "an available built-in result skips scripts; a built-in miss allows script fallback");
             });
         yield return Test("unified scripts can play a compatible recording discovered during the current resolution", async () =>
         {
             await using var f = await ControlledMusicFixture.Create(
                 scripts: [new("discovery-script", platforms: ["wy", "tx"])]);
             f.App.OfferAlternate = true;
-            f.App.DiscoverAlternateInitially = true;
             f.App.ResolutionFailure = row => Installation(row) == "discovery-script" &&
                 row.GetProperty("platform").GetString() == "tx" ? null : "RECORDING_UNAVAILABLE";
             var song = MusicSongFixture.Online("wy", "Original", "本次发现录音", "fixture",
@@ -811,20 +856,20 @@ public static class PlaybackRecoveryTests
                     row.GetProperty("sourceKey").GetString() == choice.SourceKey),
                 "manual recording compares source types while excluding the better-quality unselected recording");
             Check(f.Output.Identity == identity && f.Module.CurrentTitle == title &&
-                f.Output.Reopens == 1 && f.App.ConfirmWrites == 0 && f.App.HistoryWrites == 1,
+                    f.Output.Reopens == 1 && f.App.ConfirmWrites == 1 && f.App.HistoryWrites == 1,
                 "manual recording choice retains the current queue song");
         });
         foreach (string action in new[] { "selection", "cancel" })
             yield return Test("unified held script resolution cannot open late media after " + action, async () =>
             {
-                await using var f = await ControlledMusicFixture.Create(
+                await using var f = await ControlledMusicFixture.Create(official: false,
                     scripts: [new("held-script", quality: "flac")], qualityRequest: "auto");
                 f.App.HoldResolution = row => Installation(row) == "held-script" &&
                     row.GetProperty("song").GetProperty("title").GetString() == "合成歌曲";
                 var playing = f.Play();
                 await f.App.RefreshEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 Check(f.Output.NetworkOpens == 0 && f.App.HistoryWrites == 0,
-                    "a pending higher-quality script keeps the unresolved selection from opening media");
+                    "the only available script remains owned while its resolution is pending");
                 Task changed = action == "selection"
                     ? f.Module.PlayOnlineSongAsync("wy", "替换歌曲", "fixture", "",
                         Element(QualityInfo("replacement")))
@@ -845,18 +890,18 @@ public static class PlaybackRecoveryTests
                         "cancellation cannot publish or open either resolved type");
             });
         foreach (string failure in new[] { "CORRUPT_STORAGE", "COMMIT_UNKNOWN", "QUALITY_POLICY_CHANGED", "CANCELLED" })
-            yield return Test("unified candidate " + failure + " is terminal despite an available other type", async () =>
+            yield return Test("unified candidate " + failure + " is terminal despite another available provider", async () =>
             {
-                await using var f = await ControlledMusicFixture.Create(scripts: [new("failed-script")]);
+                await using var f = await ControlledMusicFixture.Create(official: false,
+                    scripts: [new("failed-script"), new("available-script")]);
                 f.App.ResolutionFailure = row => Installation(row) == "failed-script" ? failure : null;
                 await f.Play();
-                Check(f.App.Resolutions.Any(row => Installation(row) is null) &&
-                    f.App.Resolutions.Any(row => Installation(row) == "failed-script") &&
+                Check(f.App.Resolutions.Count == 1 && Installation(f.App.Resolutions.Single()) == "failed-script" &&
                     f.Output.NetworkOpens == 0 && !f.Output.HasMedia && f.App.HistoryWrites == 0,
-                    "storage policy and cancellation failures cannot be converted into candidate fallback");
+                    "storage policy and cancellation failures cannot be converted into fallback to the next provider");
             });
         foreach (bool scriptWins in new[] { false, true })
-            yield return Test("unified mixed preload " + (scriptWins ? "cannot override a better script" : "retains official cache reuse"), async () =>
+            yield return Test("unified mixed preload " + (scriptWins ? "skips a higher quality script" : "retains official cache reuse"), async () =>
             {
                 await using var f = await ControlledMusicFixture.Create(playbackCache: true,
                     scripts: [new("preload-script", quality: scriptWins ? "master" : "320k")],
@@ -876,15 +921,10 @@ public static class PlaybackRecoveryTests
                     "only official media participates in protected preload transfers");
                 await using var persisted = await f.Cache!.OpenAsync(
                     "fixture", f.NextSongId!, new string('a', 64), default);
-                if (scriptWins)
-                    Check(f.Output.ReadOpens == 0 && f.Output.NetworkOpens == networkOpens + 1 &&
-                        f.Output.OpenedUris.Last().AbsolutePath == "/preload-script-wy-master.wav" &&
-                        persisted is null && f.App.Authorizations == 0,
-                        "better current script selection cannot consume or publish official prepared bytes");
-                else
-                    Check(f.Output.ReadOpens == 1 && f.Output.NetworkOpens == networkOpens &&
-                        f.App.Authorizations == 1 && persisted is not null,
-                        "current official selection reauthorizes and publishes the existing prepared bytes");
+                Check(f.Output.ReadOpens == 1 && f.Output.NetworkOpens == networkOpens &&
+                    f.App.Authorizations == 1 && persisted is not null &&
+                    f.App.Resolutions.All(row => Installation(row) is null),
+                    "playable prepared bytes are authorized and published without requesting scripts");
             });
     }
 
@@ -1379,8 +1419,10 @@ public static class PlaybackRecoveryTests
         internal bool HoldRefresh;
         internal bool RejectAlternate;
         internal bool RepeatExpiry;
+        internal bool ExpandRecording, MatchMissing;
+        internal readonly List<string> MatchPlatforms = [];
+        internal int Discoveries;
         internal bool DistinctSourceUrls, OfferAlternate = true;
-        internal bool DiscoverAlternateInitially;
         internal string QualityRequest = "320k", OfficialQuality = "320k";
         internal Func<JsonElement, bool>? HoldResolution;
         internal Func<JsonElement, string?>? ResolutionFailure;
@@ -1391,7 +1433,6 @@ public static class PlaybackRecoveryTests
         internal readonly FeedbackProbe FeedbackProbe = new();
         private readonly HashSet<string> revokedOfficial = [];
         private event Action<string>? accountInvalidated;
-        private int candidatePlans;
         internal readonly TaskCompletionSource RefreshEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource ReleaseRefresh = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private Task? initialization;
@@ -1496,11 +1537,12 @@ public static class PlaybackRecoveryTests
             }
             if (method == "music.official.candidates")
             {
-                candidatePlans++;
+                if (input.GetProperty("discover").GetBoolean()) Discoveries++;
                 var enabled = await EnabledOfficial(cancellationToken);
+                // Discovery supplies the alternate recording regardless of how many local
+                // plans preceded it; cache/known playback no longer performs an initial search.
                 bool includeAlternate = input.GetProperty("discover").GetBoolean() &&
-                    OfferAlternate && enabled.Contains("tx") &&
-                    (DiscoverAlternateInitially || candidatePlans >= 3);
+                    OfferAlternate && enabled.Contains("tx");
                 var raw = JsonNode.Parse(input.GetProperty("song").GetRawText())!.AsObject();
                 var recordings = raw["sources"]!.AsArray();
                 if (includeAlternate &&
@@ -1520,10 +1562,13 @@ public static class PlaybackRecoveryTests
                     candidates = recordings.OfType<JsonObject>().Where(r => enabled.Contains(LJ.S(r["source"])))
                         .Select(r => new { platform = LJ.S(r["source"]),
                         sourceKey = LJ.S(r["sourceKey"]), generation = 7, scope = "fixture" }),
+                    authorizationRequired = enabled.Length == 0,
                     failures = Array.Empty<object>(), hasMore = false });
             }
             if (method == "music.official.resolve")
             {
+                if (input.TryGetProperty("cacheOnly", out var cacheOnly) && cacheOnly.GetBoolean())
+                    return Element(new { ok = false, code = "CACHE_MISS" });
                 Resolutions.Add(input);
                 string platform = input.GetProperty("platform").GetString()!;
                 await WaitForResolution(input, Resolutions.Count(row => Installation(row) is null) > 1, cancellationToken);
@@ -1593,6 +1638,18 @@ public static class PlaybackRecoveryTests
                     return Element(new { ok = false, code = "STALE_GENERATION" });
                 string policy = quality.GetProperty("signature").GetString()!;
                 var song = input.GetProperty("song");
+                bool missing = !song.GetProperty("sources").EnumerateArray()
+                    .Any(row => row.GetProperty("source").GetString() == platform);
+                bool matched = MatchMissing && !input.TryGetProperty("sourceKey", out _) && missing;
+                if (missing && !matched) return Element(new { ok = false, code = "RECORDING_UNAVAILABLE" });
+                if (matched)
+                {
+                    MatchPlatforms.Add(platform);
+                    var expanded = JsonNode.Parse(song.GetRawText())!.AsObject();
+                    expanded["sources"]!.AsArray().Add(MusicSongFixture.Online(platform, "Matched", LJ.S(expanded["title"]),
+                        LJ.S(expanded["artist"]), LJ.S(expanded["album"]), LJ.N(expanded["duration"]))["sources"]![0]!.DeepClone());
+                    song = Element(NativeMusicSong.Normalize(expanded));
+                }
                 var source = song.GetProperty("sources").EnumerateArray().Single(s =>
                     s.GetProperty("source").GetString() == platform &&
                     (!input.TryGetProperty("sourceKey", out var key) || s.GetProperty("sourceKey").GetString() == key.GetString()));
@@ -1619,6 +1676,15 @@ public static class PlaybackRecoveryTests
                     expiresAt = expiry && (!fresh || RepeatExpiry) ? (long?)DateTimeOffset.UtcNow.AddSeconds(3).ToUnixTimeMilliseconds() : null,
                     playbackVerified = false }, Json)!.AsObject();
                 if (fresh && Poison is not null) result[Poison] = Poison == "generation" ? JsonValue.Create(8) : JsonValue.Create("other");
+                if (matched) result["recordingSong"] = songNode.DeepClone();
+                if (!fresh && ExpandRecording)
+                {
+                    // Synthetic script owner response after matching one missing platform.
+                    var expanded = songNode.DeepClone().AsObject();
+                    expanded["sources"]!.AsArray().Add(MusicSongFixture.Online("kw", "matched", LJ.S(songNode["title"]),
+                        LJ.S(songNode["artist"]), "", LJ.N(songNode["duration"]))["sources"]![0]!.DeepClone());
+                    result["recordingSong"] = NativeMusicSong.Normalize(expanded);
+                }
                 return JsonSerializer.SerializeToElement(result, Json);
             }
             if (method == "music.history.recordPlayed") HistoryWrites++;

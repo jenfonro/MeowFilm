@@ -6,6 +6,30 @@ import MeowJSON
 @testable import MeowMusicPlatform
 
 final class MusicQQProtocolTests: XCTestCase {
+    func testRawResponseUsesFinalBusinessCodeAndPreservesByteBudget() throws {
+        let valid = try MusicQQWire.decode(Data(#"{"code":1000,"code":0,"data":{"pic":null,"pic":"final"},"unused":1e400}"#.utf8))
+        XCTAssertNoThrow(try MusicQQWire.codes(valid, requireCode: true))
+        XCTAssertEqual((valid["data"] as? [String: Any])?["pic"] as? String, "final")
+        let denied = try MusicQQWire.decode(Data(#"{"code":0,"code":1000}"#.utf8))
+        XCTAssertThrowsError(try MusicQQWire.codes(denied, requireCode: true)) {
+            XCTAssertEqual($0 as? MusicServiceError, .authRequired)
+        }
+        XCTAssertThrowsError(try MusicQQWire.decode(Data(repeating: 32, count: 2 * 1024 * 1024 + 1))) {
+            XCTAssertEqual($0 as? MusicServiceError, .limit)
+        }
+    }
+
+    func testFinalProfileIdentityCannotBeHiddenBehindEarlierMatchingIdentity() async throws {
+        let f = try MusicNativeFixture(); try await f.enable()
+        let raw = #"{"code":0,"req_0":{"code":0,"data":{"musicid":101,"musicid":202,"unused":1e400}}}"#
+        await f.http.replies("GetLoginUserInfo", .init(status: 200, data: Data(raw.utf8)))
+        let before = f.store.peek(f.identity)
+        do { _ = try await f.service.validate(platform: .qq); XCTFail("Final mismatching identity ignored") }
+        catch { XCTAssertEqual(error as? MusicServiceError, .targetChanged) }
+        XCTAssertEqual(f.store.peek(f.identity), before)
+        _ = await f.service.close()
+    }
+
     func testCBCVectorAndPrivateCallbackParsingDoNotExecuteJavaScript() throws {
         // Independent Node crypto vector, generated locally, not reference execution.
         XCTAssertEqual(try MusicQQWire.aes("synthetic-device", key: "lvcwmSYVr2Axv1gn", iv: "Zs0ntDqG2jyhKN0c"),

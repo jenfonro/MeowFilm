@@ -38,14 +38,7 @@ extension NativeMusicQQPublicService: MusicPublicBrowseQQProviding {
         let title = try MusicQQWire.string(raw["title"] ?? raw["dissname"] ?? raw["name"], maximum: 600)
         let creator = try MusicQQWire.string(raw["nickname"] ?? raw["creator_nick"] ?? "", maximum: 600, empty: true)
         let count = try (raw["songnum"] ?? raw["song_count"]).map { try MusicQQWire.integer($0) }
-        var artwork: URL?
-        if let text = raw["picurl"] as? String ?? raw["logo"] as? String,
-           text.utf8.count <= 4096, var url = URLComponents(string: text),
-           url.scheme == "https" || url.scheme == "http", url.user == nil, url.password == nil,
-           url.port == nil || url.port == 443, url.fragment == nil, let host = url.host,
-           host == "y.gtimg.cn" || host.hasSuffix(".qpic.cn") || host == "qpic.cn" {
-            url.scheme = "https"; artwork = url.url
-        }
+        let artwork = MusicArtworkURL.normalized(raw["picurl"] as? String ?? raw["logo"] as? String ?? "")
         return .init(platform: .qq, nativeID: id, title: title, creator: creator, artwork: artwork, count: count)
     }
     func browseTrack(_ raw: Any) async throws -> MusicNativeTrackData {

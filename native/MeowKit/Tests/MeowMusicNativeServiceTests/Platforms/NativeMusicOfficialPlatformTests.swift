@@ -15,8 +15,12 @@ private actor NativeOfficialAccountPeer: MusicNativeAccountProviding {
     func recorded() -> [MusicAccountPlatform] { requests }
     func nativeRecommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) throws -> MusicNativeTrackPage {
         guard platform == self.platform else { throw MusicServiceError.targetChanged }
-        return .init(items: [.init(platform: platform.rawValue, data: Data(
-            #"{"songmid":"101","name":"合成音乐","singer":"合成歌手","duration":180,"hash":"1234567890ABCDEF1234567890ABCDEF"}"#.utf8))])
+        let id = platform == .kugou ? "1234567890ABCDEF1234567890ABCDEF" : "101"
+        // Native platform rows carry the playback locator in songmid (KG hash).
+        return .init(items: [.init(platform: platform.rawValue, data: MJ.obj([
+            ("songmid", .string(id)), ("name", .string("合成音乐")), ("singer", .string("合成歌手")),
+            ("duration", .n(180)), ("hash", .string("1234567890ABCDEF1234567890ABCDEF")),
+        ]).bytes)])
     }
     func nativeCollections(platform: MusicAccountPlatform, cursor: String?) -> MusicAccountCollectionPage { .init(items: [], cursor: nil) }
     func nativeTracks(platform: MusicAccountPlatform, collectionID: String, cursor: String?) throws -> MusicNativeTrackPage {

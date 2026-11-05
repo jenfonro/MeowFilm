@@ -130,15 +130,7 @@ extension NeteaseMusicAccountAdapter: MusicAccountHomeActionProvider {
         }
         let rows = try ids.compactMap { id -> JSONValue? in
             guard let row = metadata[id] else { return nil }
-            guard case .object(var value) = try Self.song(row, id: id) else { throw MusicServiceError.upstreamInvalid }
-            let album = (row["al"] ?? row["album"]) as? [String: Any]
-            if let text = album?["picUrl"] as? String,
-               let url = URL(string: text), ["http", "https"].contains(url.scheme ?? ""),
-               url.user == nil, url.password == nil, url.fragment == nil,
-               let host = url.host, host == "music.126.net" || host.hasSuffix(".music.126.net") {
-                value["img"] = .string(text)
-            }
-            return .object(value)
+            return try Self.song(row, id: id)
         }
         try await authorize(); try check(own)
         return rows

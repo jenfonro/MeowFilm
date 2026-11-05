@@ -6,10 +6,9 @@ import MeowMusicFeature
 /// sortedKeys must not reorder an existing platform locator object.
 indirect enum MJ: Sendable, Equatable {
     case object([(String, MJ)]), array([MJ]), string(String), number(Double), bool(Bool), null
-    /// Upstream-only numeric lexeme, never a rounded Double or a document number.
+    /// Numeric lexeme that cannot be represented exactly as a Double.
     /// Unconsumed metadata can remain opaque; ID consumers use exact decimal text.
     case upstreamNumber(String)
-    enum ParseMode { case document, upstream }
 
     static func == (a: MJ, b: MJ) -> Bool {
         switch (a, b) {
@@ -156,21 +155,15 @@ indirect enum MJ: Sendable, Equatable {
         case .object(let v): return "{" + Self.enumeration(v).map { Self.quote($0.0) + ":" + $0.1.json }.joined(separator: ",") + "}"
         }
     }
-    /// Documents, imports and normalized locators retain the strict default.
-    /// Only a transport boundary may explicitly opt into upstream numbers.
-    static func parse(_ data: Data, maximum: Int = 8 * 1024 * 1024, mode: ParseMode = .document,
-                      ignoringUpstreamKeys: Set<String> = []) throws -> MJ {
-        guard mode == .upstream || ignoringUpstreamKeys.isEmpty else { throw MusicServiceError.invalidRequest }
+    static func parse(_ data: Data, maximum: Int = 8 * 1024 * 1024) throws -> MJ {
         guard data.count <= maximum, String(data: data, encoding: .utf8) != nil else { throw MusicServiceError.limit }
-        var parser = Parser(bytes: Array(data), mode: mode, ignoredKeys: ignoringUpstreamKeys)
+        var parser = Parser(bytes: Array(data))
         let value = try parser.value(0)
         parser.space(); guard parser.i == parser.bytes.count else { throw MusicServiceError.corruptDocument }
         return value
     }
     private struct Parser {
         let bytes: [UInt8]
-        let mode: ParseMode
-        let ignoredKeys: Set<String>
         var i = 0, nodes = 0
         mutating func space() { while i < bytes.count && [9, 10, 13, 32].contains(bytes[i]) { i += 1 } }
         mutating func take(_ c: UInt8) -> Bool { space(); if i < bytes.count && bytes[i] == c { i += 1; return true }; return false }
@@ -194,20 +187,17 @@ indirect enum MJ: Sendable, Equatable {
             switch bytes[i] {
             case 34: return .string(try string())
             case 123:
-                i += 1; var rows: [(String, MJ)] = [], seen = Set<Data>()
+                i += 1; var rows: [(String, MJ)] = [], positions: [Data: Int] = [:]
                 if take(125) { return .obj() }
                 repeat {
                     let key = try string()
-                    // JSON keys are byte identities, not Swift's canonical
-                    // Unicode equivalence. Ordered storage preserves both.
-                    // Only a protocol boundary can discard known unused
-                    // upstream metadata. Identity-bearing and document keys
-                    // remain strict; their duplicates are never normalized.
-                    let ignored = ignoredKeys.contains(key)
-                    guard ignored || seen.insert(Data(key.utf8)).inserted else { throw MusicServiceError.corruptDocument }
                     guard take(58) else { throw MusicServiceError.corruptDocument }
                     let child = try value(depth + 1)
-                    if !ignored { rows.append((key, child)) }
+                    // Keep insertion order and byte-exact Unicode keys while
+                    // using the last value of a repeated JSON member.
+                    let identity = Data(key.utf8)
+                    if let position = positions[identity] { rows[position].1 = child }
+                    else { positions[identity] = rows.count; rows.append((key, child)) }
                 } while take(44)
                 guard take(125) else { throw MusicServiceError.corruptDocument }; return .object(rows)
             case 91:
@@ -223,20 +213,11 @@ indirect enum MJ: Sendable, Equatable {
                 guard token.range(of: #"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$"#, options: .regularExpression) != nil else {
                     throw MusicServiceError.corruptDocument
                 }
-                if mode == .upstream {
-                    // Preserve out-of-range/overflowing metadata at any path.
-                    // Also keep tokens that would round a fractional value into
-                    // an integer ID (or underflow into zero) opaque.
-                    guard let n = Double(token), n.isFinite, abs(n) <= 9_007_199_254_740_991,
-                          n < 0 || n.rounded() != n || MJ.exactIntegerID(token) == String(Int64(n)) else {
-                        return .upstreamNumber(token)
-                    }
-                    return .number(n)
-                }
-                guard let n = Double(token), n.isFinite, abs(n) <= 9_007_199_254_740_991 else { throw MusicServiceError.corruptDocument }
-                // Integer tokens may not round into a neighbouring native ID.
-                if !token.contains(".") && !token.lowercased().contains("e") {
-                    guard let exact = Int64(token), Double(exact) == n else { throw MusicServiceError.corruptDocument }
+                // Unused numeric metadata never rejects a response. Consumers
+                // still obtain exact decimal IDs rather than rounded Doubles.
+                guard let n = Double(token), n.isFinite, abs(n) <= 9_007_199_254_740_991,
+                      n < 0 || n.rounded() != n || MJ.exactIntegerID(token) == String(Int64(n)) else {
+                    return .upstreamNumber(token)
                 }
                 return .number(n)
             }

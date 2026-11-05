@@ -73,7 +73,11 @@ extension NativeMusicService: MusicCachedPlaybackServing {
         // A file of a source confirmed as another recording is not this song.
         let excluded = await sourceDiscoveryExcluded(song)
         try check(own)
-        let sources = try MusicModel.sources(song).filter { platformEnabled($0.platform) && !excluded.contains($0.sourceKey) }
+        // Complete files are official audio; a disabled built-in source is not reused.
+        let sources = try MusicModel.sources(song).filter {
+            platformEnabled($0.platform) && !excluded.contains($0.sourceKey) &&
+                Self.officialEnabled($0.platform, d.playback)
+        }
         let signature = Self.audioCacheSignature(song: song, playback: d.playback)
         let scope: MusicNativeCacheScope
         do { scope = try await cacheScope(provider) }

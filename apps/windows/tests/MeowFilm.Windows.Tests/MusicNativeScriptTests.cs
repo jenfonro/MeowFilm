@@ -36,6 +36,9 @@ public static class MusicNativeScriptTests
         yield return new("Native LX: invalid media expiry flags headers and identity rejected", MediaCandidates);
         yield return new("Native LX: lyric parsing remains native and respects persisted setting", Lyrics);
         yield return new("Native LX: explicit resolve rejects mismatched recording or generation", RecordingIdentity);
+        yield return new("Native LX: missing target platform matches only that platform once and keeps the queue identity", MatchedTarget);
+        yield return new("Native LX: existing mappings explicit recordings and lyrics never start target matching", MatchScope);
+        yield return new("Native LX: failed changed or cancelled target matching never invokes the script", MatchFailure);
         yield return new("Native LX: shutdown drains owned calls and never disposes borrowed owners", Shutdown);
         yield return new("Native LX: candidate storage transaction cannot leak on failed trial", CandidateStorage);
         yield return new("Native LX: candidate storage cannot persist an undeclared site", CandidateSite);
@@ -374,9 +377,10 @@ public static class MusicNativeScriptTests
         internal readonly Runtime Runtime = new();
         internal readonly MusicLibraryOwner Library;
         internal readonly MusicScriptOwner Owner;
-        internal Fixture(Store? store = null, TimeProvider? clock = null)
+        internal Fixture(Store? store = null, TimeProvider? clock = null,
+            Func<JsonObject, string, CancellationToken, Task<JsonObject>>? matchSong = null)
         {
-            Store = store ?? new(); Library = new(Store); Owner = new(Library, Runtime, clock);
+            Store = store ?? new(); Library = new(Store); Owner = new(Library, Runtime, clock, matchSong);
             Runtime.Capabilities = Owner.ScriptCapabilities;
         }
         public async ValueTask DisposeAsync() { await Owner.DisposeAsync(); await Library.DisposeAsync(); }
@@ -750,6 +754,86 @@ public static class MusicNativeScriptTests
         await Error(f.Owner, "music.online.resolve", new { installationId = id, platform = "tx", song = Song(), quality = "320k" }, "TARGET_CHANGED");
         await Error(f.Owner, "music.online.resolve", new { installationId = id, platform = "wy", song = Song(), quality = "320k", generation = 999 }, "STALE_SESSION");
         Check(f.Runtime.Invoked.Count == 0);
+    }
+    private static readonly JsonObject BothSites = O(new {
+        wy = new { actions = new[] { "musicUrl", "lyric" }, qualitys = new[] { "320k" } },
+        tx = new { actions = new[] { "musicUrl", "lyric" }, qualitys = new[] { "320k" } } });
+    // The same recording identity on QQ: equal normalized title, artist and duration.
+    private static JsonObject Mapped(JsonObject song, string title = "Test track")
+    {
+        var tx = MusicSongFixture.Online("tx", "matched-tx", title, "Test artist", "", 120,
+            native: JsonSerializer.SerializeToNode(new { name = title, singer = "Test artist", duration = 120 })!.AsObject());
+        var expanded = song.DeepClone().AsObject();
+        expanded["sources"]!.AsArray().Add(tx["sources"]![0]!.DeepClone());
+        return title == "Test track" ? NativeMusicSong.Normalize(expanded) : tx;
+    }
+    private static async Task MatchedTarget()
+    {
+        var calls = new List<(string SongId, string Platform)>();
+        await using var f = new Fixture(matchSong: (song, platform, _) =>
+        {
+            lock (calls) calls.Add((LJ.S(song["songId"]), platform));
+            return Task.FromResult(Mapped(song));
+        });
+        f.Runtime.Declarations = BothSites;
+        string id = await Install(f, true);
+        var queued = Song();
+        string matchedKey = LJ.S(Mapped(queued)["sources"]!.AsArray().OfType<JsonObject>()
+            .Single(source => LJ.S(source["source"]) == "tx")["sourceKey"]);
+        var first = await Ok(f.Owner, "music.online.resolve", new { installationId = id, platform = "tx", song = queued, quality = "320k" });
+        Check(calls.SequenceEqual([(LJ.S(queued["songId"]), "tx")]) && f.Runtime.Invoked.SequenceEqual([id]),
+            "one missing target platform is matched once before one script request");
+        Check(first.GetProperty("sourceKey").GetString() == matchedKey &&
+            first.GetProperty("songId").GetString() == LJ.S(queued["songId"]), "the script receives the matched recording");
+        var recording = first.GetProperty("recordingSong");
+        Check(recording.GetProperty("songId").GetString() == LJ.S(queued["songId"]) &&
+            recording.GetProperty("sources").EnumerateArray().Any(source => source.GetProperty("source").GetString() == "tx") &&
+            queued["sources"]!.AsArray().Count == 1, "the queue song identity and snapshot stay unchanged");
+        var refreshed = await Ok(f.Owner, "music.online.resolve", new { installationId = id, platform = "tx",
+            song = recording, sourceKey = matchedKey, quality = "320k",
+            qualityPolicySignature = first.GetProperty("qualityPolicySignature").GetString(),
+            qualityCacheSignature = first.GetProperty("qualityCacheSignature").GetString() });
+        Check(calls.Count == 1 && f.Runtime.Invoked.Count == 2 && !refreshed.TryGetProperty("recordingSong", out _) &&
+            refreshed.GetProperty("qualityCacheSignature").GetString() == first.GetProperty("qualityCacheSignature").GetString(),
+            "an exact refresh reuses the accepted recording without matching again");
+    }
+    private static async Task MatchScope()
+    {
+        int calls = 0;
+        await using var f = new Fixture(matchSong: (song, _, _) =>
+        {
+            Interlocked.Increment(ref calls);
+            return Task.FromResult(Mapped(song));
+        });
+        f.Runtime.Declarations = BothSites;
+        string id = await Install(f, true);
+        var resolved = await Ok(f.Owner, "music.online.resolve", new { installationId = id, platform = "wy", song = Song(), quality = "320k" });
+        Check(!resolved.TryGetProperty("recordingSong", out _), "an existing mapping is not expanded");
+        await Error(f.Owner, "music.online.resolve", new { installationId = id, platform = "tx", song = Song(),
+            sourceKey = """["tx","explicit",""]""", quality = "320k" }, "TARGET_CHANGED");
+        await Error(f.Owner, "music.online.lyrics", new { installationId = id, platform = "tx", song = Song() }, "TARGET_CHANGED");
+        Check(calls == 0 && f.Runtime.Invoked.Count == 1, "only an implicit missing audio target may match");
+    }
+    private static async Task MatchFailure()
+    {
+        Func<JsonObject, string, CancellationToken, Task<JsonObject>> behavior = (_, _, _) =>
+            throw new MusicLibraryException("TIMEOUT");
+        await using var f = new Fixture(matchSong: (song, platform, token) => behavior(song, platform, token));
+        f.Runtime.Declarations = BothSites;
+        string id = await Install(f, true);
+        object Input() => new { installationId = id, platform = "tx", song = Song(), quality = "320k" };
+        await Error(f.Owner, "music.online.resolve", Input(), "TIMEOUT");
+        behavior = (song, _, _) => Task.FromResult(song);
+        await Error(f.Owner, "music.online.resolve", Input(), "RECORDING_UNAVAILABLE");
+        behavior = (song, _, _) => Task.FromResult(Mapped(song, "Another track"));
+        await Error(f.Owner, "music.online.resolve", Input(), "TARGET_CHANGED");
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        behavior = async (_, _, token) => { entered.TrySetResult(); await Task.Delay(Timeout.Infinite, token); return null!; };
+        var pending = f.Owner.ExecuteAsync("music.online.resolve", Input());
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Ok(f.Owner, "music.online.cancel");
+        Check((await pending.WaitAsync(TimeSpan.FromSeconds(5))).GetProperty("code").GetString() == "CANCELLED");
+        Check(f.Runtime.Invoked.Count == 0, "a failed or retired match never reaches the script");
     }
     private static async Task Shutdown()
     {

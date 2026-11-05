@@ -82,14 +82,55 @@ final class MusicCredentialImportParserTests: XCTestCase {
         kg.removeValue(forKey: "__private_kugou_device")
         XCTAssertEqual(try parse(kg, .kugou).deviceState, .requiresVerification)
     }
-    func testDuplicateKeysEscapedAliasesDepthInvalidUTF8AndTrailingJSONRejected() throws {
-        for text in ["{\"a\":1,\"a\":2}", "{\"uid\":1,\"\\u0075id\":2}", "{}{}", "[{}]", "{\"x\":\"\\uD800\"}",
-                     "{\"musicid\":9007199254740991.1}", "{\"musicid\":1e2}", "{\"musicid\":9007199254740992}",
-                     String(repeating: "{\"x\":", count: 18) + "0" + String(repeating: "}", count: 18)] {
+    func testJSONImportAcceptsRepeatedKeysAndUnusedMetadata() throws {
+        for text in [#"{"uid":1,"uid":2}"#, #"{"uid":1,"\u0075id":2}"#] {
+            let object = try MusicCredentialImportJSON.object(Data(text.utf8))
+            XCTAssertEqual(object["uid"] as? Int, 2)
+        }
+        let raw = #"{"说明":{"score":1.25,"exponent":1e400,"id":18446744073709551617}}"#
+        XCTAssertNotNil(try MusicCredentialImportJSON.object(Data(raw.utf8))["说明"])
+    }
+    func testFinalImportedIdentityAndCredentialWinButMustStillMatch() throws {
+        let raw = #"{"format":"meowfilm.music.credentials","version":1,"source":"meowmusic","platform":"tx","accountId":"99","accountId":42,"credentials":{"musicid":"99","musicid":42,"musickey":null,"musickey":"synthetic-final-key"},"device":{}}"#
+        let result = try MusicCredentialImportParser.parse(Data(raw.utf8), platform: .qq, format: .meowMusicRecord)
+        XCTAssertEqual(result.nativeID, "42")
+        let credential = try MusicQQWire.decode(result.credential.dataRepresentation())
+        XCTAssertEqual((credential["auth"] as? [String: Any])?["musickey"] as? String, "synthetic-final-key")
+        for invalid in [raw.replacingOccurrences(of: #""accountId":42"#, with: #""accountId":43"#),
+                        raw.replacingOccurrences(of: #""musicid":42"#, with: #""musicid":43"#),
+                        raw.replacingOccurrences(of: #""musickey":null,"musickey":"synthetic-final-key""#,
+                                                 with: #""musickey":"synthetic-final-key","musickey":null"#)] {
+            XCTAssertThrowsError(try MusicCredentialImportParser.parse(Data(invalid.utf8),
+                platform: .qq, format: .meowMusicRecord))
+        }
+    }
+    func testStringifiedSnapshotUsesFinalMembersAndIgnoresLargeUnusedProfileMetadata() throws {
+        var root = MusicCredentialImportFixture.snapshot(.netease)
+        root["__private_netease_profile_v1"] =
+            #"{"scope":"synthetic-scope","loggedIn":false,"loggedIn":true,"profile":{"userId":99,"\u0075serId":42,"unused":1e400}}"#
+        let parsed = try parse(root, .netease)
+        XCTAssertEqual(parsed.nativeID, "42")
+    }
+    func testInvalidJSONAndOversizedImportRemainRejected() throws {
+        for text in ["{}{}", "[{}]", "{\"x\":\"\\uD800\"}"] {
             XCTAssertThrowsError(try MusicCredentialImportJSON.object(Data(text.utf8)))
         }
         XCTAssertThrowsError(try MusicCredentialImportJSON.object(Data([0xFF, 0xFE])))
         XCTAssertThrowsError(try MusicCredentialImportInput(data: Data(repeating: 32, count: MusicCredentialImportInput.maximumBytes + 1)))
+    }
+    func testConsumedAccountIDsRejectFractionalExponentAndUnsafeNumbersWithoutRounding() throws {
+        func record(accountID: String, musicID: String) -> Data {
+            Data(#"{"format":"meowfilm.music.credentials","version":1,"source":"meowmusic","platform":"tx","accountId":\#(accountID),"credentials":{"musicid":\#(musicID),"musickey":"synthetic-key"},"device":{}}"#.utf8)
+        }
+        XCTAssertEqual(try MusicCredentialImportParser.parse(record(accountID: "42", musicID: "42"),
+                                                             platform: .qq, format: .meowMusicRecord).nativeID, "42")
+        for token in ["1.25", "42.0", "4.2e1", "9007199254740991.1", "9007199254740992",
+                      "1.00000000000000001", "1e400", "1e-400", "18446744073709551617"] {
+            XCTAssertThrowsError(try MusicCredentialImportParser.parse(record(accountID: token, musicID: "42"),
+                                                                       platform: .qq, format: .meowMusicRecord), token)
+            XCTAssertThrowsError(try MusicCredentialImportParser.parse(record(accountID: "42", musicID: token),
+                                                                       platform: .qq, format: .meowMusicRecord), token)
+        }
     }
     func testOpaqueInputIsSingleUseRevocableAndPendingRecordRequiresExplicitValidation() throws {
         let input = try MusicCredentialImportFixture.input()

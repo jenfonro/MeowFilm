@@ -26,6 +26,10 @@ public enum MusicServiceError: String, Error, Sendable, LocalizedError {
     case networkOffline = "NETWORK_OFFLINE", connectionFailed = "CONNECTION_FAILED"
     case requestRejected = "REQUEST_REJECTED", audioUnavailable = "AUDIO_UNAVAILABLE"
     case contentUnavailable = "CONTENT_UNAVAILABLE"
+    case invalidScript = "INVALID_SCRIPT", insecureScriptURL = "INSECURE_SCRIPT_URL"
+    case scriptRedirect = "SCRIPT_REDIRECT", scriptDownloadFailed = "SCRIPT_DOWNLOAD_FAILED"
+    case scriptFailed = "SCRIPT_FAILED", scriptRuntimeUnavailable = "SCRIPT_RUNTIME_UNAVAILABLE"
+    case scriptCleanupFailed = "SCRIPT_CLEANUP_FAILED"
 
     public var errorDescription: String? {
         switch self {
@@ -65,6 +69,13 @@ public enum MusicServiceError: String, Error, Sendable, LocalizedError {
         case .invalidRequest: return "请求参数无效"
         case .closed: return "服务已关闭"
         case .unsupported: return "平台不支持此操作"
+        case .invalidScript: return "音源脚本无效"
+        case .insecureScriptURL: return "仅支持 HTTPS 地址"
+        case .scriptRedirect: return "音源地址发生重定向"
+        case .scriptDownloadFailed: return "音源下载失败"
+        case .scriptFailed: return "音源脚本运行失败"
+        case .scriptRuntimeUnavailable: return "音源运行环境不可用"
+        case .scriptCleanupFailed: return "音源运行资源未能完全释放"
         default: return "请求未完成（\(rawValue)）"
         }
     }
@@ -175,6 +186,8 @@ public struct MusicPlaybackState: Codable, Equatable, Sendable {
     public let spatialOrder: [String]
     public let lyricsEnabled: Bool
     public let showTranslation: Bool
+    /// Built-in audio-source admission; it never changes accounts, search, lyrics or artwork.
+    public let officialSources: [MusicAccountPlatform]
     public let currentId: String?
     public let total: Int
     public let position: Double
@@ -191,7 +204,8 @@ public struct MusicPlaybackState: Codable, Equatable, Sendable {
     public init(revision: Int = 0, settingsRevision: Int = 0, mode: MusicPlaybackMode = .loop,
                 qualityEnabled: [String] = ["standard"], qualityOrder: [String] = ["standard"],
                 spatialEnabled: [String] = [], spatialOrder: [String] = [],
-                lyricsEnabled: Bool = true, showTranslation: Bool = true, currentId: String? = nil,
+                lyricsEnabled: Bool = true, showTranslation: Bool = true,
+                officialSources: [MusicAccountPlatform] = MusicAccountPlatform.allCases, currentId: String? = nil,
                 total: Int = 0, position: Double = 0, canNext: Bool = false, canPrevious: Bool = false,
                 nextPreviewID: String? = nil, previousPreviewID: String? = nil,
                 fmNextPreviewID: String? = nil, fmPreviousPreviewID: String? = nil,
@@ -200,6 +214,7 @@ public struct MusicPlaybackState: Codable, Equatable, Sendable {
         self.qualityEnabled = qualityEnabled; self.qualityOrder = qualityOrder
         self.spatialEnabled = spatialEnabled; self.spatialOrder = spatialOrder
         self.lyricsEnabled = lyricsEnabled; self.showTranslation = showTranslation
+        self.officialSources = officialSources
         self.currentId = currentId; self.total = total; self.position = position
         self.canNext = canNext; self.canPrevious = canPrevious
         self.nextPreviewID = nextPreviewID; self.previousPreviewID = previousPreviewID
@@ -280,12 +295,15 @@ public struct MusicSettingsChange: Sendable {
     public var spatialOrder: [String]?
     public var lyricsEnabled: Bool?
     public var showTranslation: Bool?
+    public var officialSources: [MusicAccountPlatform]?
     public init(ifRevision: Int, mode: MusicPlaybackMode? = nil, qualityEnabled: [String]? = nil,
                 qualityOrder: [String]? = nil, spatialEnabled: [String]? = nil, spatialOrder: [String]? = nil,
-                lyricsEnabled: Bool? = nil, showTranslation: Bool? = nil) {
+                lyricsEnabled: Bool? = nil, showTranslation: Bool? = nil,
+                officialSources: [MusicAccountPlatform]? = nil) {
         self.ifRevision = ifRevision; self.mode = mode; self.qualityEnabled = qualityEnabled; self.qualityOrder = qualityOrder
         self.spatialEnabled = spatialEnabled; self.spatialOrder = spatialOrder
         self.lyricsEnabled = lyricsEnabled; self.showTranslation = showTranslation
+        self.officialSources = officialSources
     }
 }
 

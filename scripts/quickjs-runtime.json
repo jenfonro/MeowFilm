@@ -36,6 +36,27 @@
   },
   "packages": [
     {
+      "name": "@jitl/quickjs-asmjs-mjs-release-sync",
+      "version": "0.32.0",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/@jitl/quickjs-asmjs-mjs-release-sync/-/quickjs-asmjs-mjs-release-sync-0.32.0.tgz",
+      "integrity": "sha512-fI2PLbEgrNbdK8cr3JkINTiVFQ0DmargzTrSnBG/k8hzN17RleDGfZd0SH2fiNdByvGS1WGM9rawr8WZ7gV4DA==",
+      "manifestSha256": "0c8680ccab7960e392a2280073de37cc163d210cd61d93615bd9fb265547b977",
+      "licenseSha256": "446a69ae534aa8612d8b16d3bfc670c5a5050597dca3ce9820441a60d5d04fbb",
+      "files": [
+        {
+          "path": "dist/index.mjs",
+          "bytes": 1104470,
+          "sha256": "e8841c6d8e42ee1b0c049c3c184bdd1d9d69b9c601a12534b9c8d17660aab67b"
+        },
+        {
+          "path": "dist/emscripten-module.mjs",
+          "bytes": 1016131,
+          "sha256": "27d6bf29246f5f1a0ab444b9f8e00695836374bb783bae2596c7cce4619d6858"
+        }
+      ]
+    },
+    {
       "name": "@jitl/quickjs-ffi-types",
       "version": "0.32.0",
       "license": "MIT",

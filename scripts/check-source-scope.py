@@ -6,21 +6,23 @@ import sys
 # App source directories are declared by the project generator, not duplicated here.
 import runpy
 APPLICATION_DIRECTORIES = set(runpy.run_path(str(Path(__file__).with_name("generate-ios-project.py")))["APPLICATION_DIRECTORIES"])
-SHARED_TARGETS = {"MeowContracts", "MeowJSON", "MeowStorage", "MeowAccounts", "MeowPlayback", "MeowUI"}
+SHARED_TARGETS = {"MeowContracts", "MeowJSON", "MeowStorage", "MeowAccounts", "MeowPlayback", "MeowUI", "MeowRuntime"}
 
 def application_membership(base, project_text):
     """Exact source closure in each target, not just PBXFileReference presence."""
     failures = []
-    expected_app, expected_test = set(), set()
+    expected_app, expected_test, expected_runtime = set(), set(), set()
     for path in base.rglob("*.swift"):
         relative = path.relative_to(base)
         if relative.parts[0] in APPLICATION_DIRECTORIES:
             expected_app.add(relative.as_posix())
         elif relative.parts[0] == "UITests":
             expected_test.add(relative.as_posix())
+        elif relative.parts[0] == "RuntimeTests":
+            expected_runtime.add(relative.as_posix())
         else:
             failures.append("Unowned App source: " + relative.as_posix())
-    for directory in APPLICATION_DIRECTORIES | {"UITests"}:
+    for directory in APPLICATION_DIRECTORIES | {"UITests", "RuntimeTests"}:
         if not any((base / directory).rglob("*.swift")):
             failures.append("Empty App source directory: " + directory)
     objects = dict(re.findall(r"^\s*([A-F0-9]{24}) = \{ (.*) \};$", project_text, re.M))
@@ -28,6 +30,7 @@ def application_membership(base, project_text):
     for target_name, expected in (
         ("Meowfilm", expected_app),
         ("MeowfilmAcceptanceUITests", expected_test),
+        ("MeowfilmRuntimeTests", expected_runtime),
     ):
         targets = [text for text in objects.values()
                    if "isa = PBXNativeTarget;" in text and "name = " + target_name + ";" in text]

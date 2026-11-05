@@ -84,7 +84,9 @@ extension NativeMusicService {
         }
         if let accounts {
             for row in rows {
-                guard let platform = MusicAccountPlatform(rawValue: row.platform) else { continue }
+                // A disabled built-in source never becomes an official candidate.
+                guard let platform = MusicAccountPlatform(rawValue: row.platform),
+                      Self.officialEnabled(row.platform, d.playback) else { continue }
                 do {
                     let values = try await work { try await accounts.nativeOptions(platform: platform, nativeID: row.nativeId, sourceKey: row.sourceKey) }
                     try musicRequire(values.count <= 1, .invalidResponse)
@@ -146,6 +148,8 @@ extension NativeMusicService {
         try musicRequire(source.platform == selection.siteId, .targetChanged)
         try requirePlatform(source.platform)
         try musicRequire(selectedQualityEnabled(selection, d.playback), .qualityDisabled)
+        try musicRequire(!selection.installationId.hasPrefix("official:") ||
+            Self.officialEnabled(source.platform, d.playback), .sourceUnavailable)
         retireCachedPlaybackRecovery()
         playbackFeedback.finishCurrent(reason: .ui)
         playbackFeedback.invalidate(preservingEnds: true)
@@ -176,6 +180,8 @@ extension NativeMusicService {
             try musicRequire(attempt?.id == attemptId && current.queue["currentId"].string == occurrenceId, .staleResult)
             _ = try target(self.song(.init(kind: .queue, id: occurrenceId), current), selection.sourceKey)
             try musicRequire(selectedQualityEnabled(selection, current.playback), .qualityDisabled)
+            try musicRequire(!selection.installationId.hasPrefix("official:") ||
+                Self.officialEnabled(source.platform, current.playback), .sourceUnavailable)
             let valid = try media(audio)
             try validateDelivery(valid.delivery, song: song, playback: current.playback)
             let candidate = MusicPlaybackCandidate(attemptId: attemptId, occurrenceId: occurrenceId, resourceId: "music:" + attemptId,
@@ -275,11 +281,17 @@ extension NativeMusicService {
         if !d.playback["lyricsEnabled"].bool { return .init(occurrenceId: occurrenceId, state: .disabled, lines: []) }
         try requirePlatform(source.platform)
         let serial = UUID(); lyricEpoch = serial; cancelWork("lyrics")
-        let payload: MusicNativeLyrics
+        var lines: [MusicLyricLine]
         if ["wy", "tx", "kg", "kw", "mg"].contains(source.platform) {
             let port = publicPlatforms
-            // Public platform lyrics never require Node, even when playback uses LX.
-            payload = try await work(label: "lyrics") { try await port.lyrics(platform: source.platform, info: info) }
+            // Native lyrics come first and never start Node. Only an empty wy/kw/mg
+            // result tries enabled same-platform scripts; tx/kg stay native-only.
+            let payload = try await work(label: "lyrics") { try await port.lyrics(platform: source.platform, info: info) }
+            lines = try MusicNativeLyricsParser.parse(payload, duration: song["duration"].number)
+            if lines.isEmpty, ["wy", "kw", "mg"].contains(source.platform) {
+                lines = try await scriptLyrics(platform: source.platform, sourceKey: sourceKey, info: info,
+                                               duration: song["duration"].number)
+            }
         } else {
             // Only non-public script platforms use their explicitly selected LX.
             // Public-platform failures never fall through to scripts or another song.
@@ -291,15 +303,38 @@ extension NativeMusicService {
             try musicRequire(live.installationID == selection.installationId && live.generation == selection.generation, .targetChanged)
             let request = MusicScriptRequest(installationID: live.installationID, generation: live.generation, siteID: source.platform,
                 sourceKey: sourceKey, quality: selection.quality, musicInfo: info.bytes)
-            payload = try await work(label: "lyrics") { try await scripts.lyrics(request: request) }
+            let payload = try await work(label: "lyrics") { try await scripts.lyrics(request: request) }
             let current = try await work(label: "lyrics") { try await scripts.source(installationID: live.installationID) }
             try sameSource(current, live); _ = try validate(current, site: source.platform, action: "lyric")
             try musicRequire(attempt?.id == chosen.id, .staleResult)
+            lines = try MusicNativeLyricsParser.parse(payload, duration: song["duration"].number)
         }
-        let lines = try MusicNativeLyricsParser.parse(payload, duration: song["duration"].number)
         let current = try read()
         try musicRequire(serial == lyricEpoch && current.queue["currentId"].string == occurrenceId &&
             current.playback["lyricsEnabled"].bool, .staleResult)
         return .init(occurrenceId: occurrenceId, state: lines.isEmpty ? .none : .ready, lines: lines)
+    }
+
+    /// Enabled scripts in install order. An empty result or an undeclared or
+    /// unavailable action continues; any other failure keeps its own meaning.
+    private func scriptLyrics(platform: String, sourceKey: String, info: MJ, duration: Double) async throws -> [MusicLyricLine] {
+        guard let scripts else { return [] }
+        let snapshots: [MusicScriptSource]
+        do { snapshots = try await work(label: "lyrics") { try await scripts.sources() } }
+        catch MusicServiceError.sourceUnavailable { return [] }
+        for snapshot in snapshots where snapshot.enabled && snapshot.ready &&
+            snapshot.capabilities.contains(where: { $0.siteID == platform && $0.actions.contains("lyric") }) {
+            _ = try validate(snapshot, site: platform, action: "lyric")
+            let request = MusicScriptRequest(installationID: snapshot.installationID, generation: snapshot.generation,
+                siteID: platform, sourceKey: sourceKey, quality: "", musicInfo: info.bytes)
+            let payload: MusicNativeLyrics
+            do { payload = try await work(label: "lyrics") { try await scripts.lyrics(request: request) } }
+            catch MusicServiceError.sourceUnavailable { continue }
+            let current = try await work(label: "lyrics") { try await scripts.source(installationID: snapshot.installationID) }
+            try sameSource(current, snapshot)
+            let lines = try MusicNativeLyricsParser.parse(payload, duration: duration)
+            if !lines.isEmpty { return lines }
+        }
+        return []
     }
 }

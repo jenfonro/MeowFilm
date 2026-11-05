@@ -57,7 +57,8 @@ extension NeteaseMusicAccountAdapter {
             "name": .string(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "未知歌曲" : name),
             "singer": .string(singer.isEmpty ? "未知歌手" : singer),
             "album": .string(try MusicQQWire.string(album["name"] ?? "", maximum: 1024, empty: true)),
-            "albumId": .string(albumID), "duration": .number(Double(duration) / 1000), "types": .array(types)])
+            "albumId": .string(albumID), "duration": .number(Double(duration) / 1000), "types": .array(types),
+            "img": .string(MusicArtworkURL.normalized(album["picUrl"] as? String ?? "")?.absoluteString ?? "")])
     }
     static func nextDailyBoundary(_ date: Date) -> Date {
         let seconds = date.timeIntervalSince1970, day: Double = 86_400

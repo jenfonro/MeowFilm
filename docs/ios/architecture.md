@@ -13,25 +13,30 @@ meowfilm 是单一 iPhone App。窗口、导航、呈现与手势由 UIKit 持�
 | `apps/ios/Navigation` | 根容器、普通页面导航、播放器及其他非导航呈现的路由 |
 | `apps/ios/Presentation` | 主页面外壳、页头、底部导航和播放器停靠区 |
 | `apps/ios/UITests` | UIKit 与音乐 UI 组件测试，复用已有 UIKit runner，不属于 App 源成员 |
+| `apps/ios/RuntimeTests` | `TEST_HOST` 指向 App 的运行器集成测试，实际链接、启动内嵌 Node |
+| `apps/ios/runtime` | iOS socketpair 启动参数／失败边界与 music/Cat 薄 entry，复用公共 JS 模块 |
 
-工程文件由 `scripts/generate-ios-project.py` 生成。App 只编译上述四个职责目录；UITests 使用独立测试 target。
+工程文件由 `scripts/generate-ios-project.py` 生成。App 只编译上述四个职责目录；UITests、RuntimeTests 使用独立测试 target。NodeMobile.xcframework 链接并嵌入签名，完整 JS 载荷作为 `Runtime` 资源随包签名；构建输入准备见[发布](release.md)。
 
 ## Swift Package
 
 | 模块 | 职责 | 依赖 |
 | --- | --- | --- |
 | `MeowContracts` | 通用请求、生命周期和错误契约 | 无 |
-| `MeowJSON` | 有界 JSON 值与严格解码 | 无 |
+| `MeowJSON` | Codable DTO 值、外部字典 JSON 解析与数字原文转发 | 无 |
 | `MeowStorage` | 普通及加密文档存储 | Contracts |
 | `MeowAccounts` | 凭据与账号状态基础设施 | Contracts |
 | `MeowPlayback` | 系统播放、媒体会话、播放所有权 | Contracts |
 | `MeowUI` | 中性主题、窗口渐变、页面生命周期、自绘页头、导航栈与转场、搜索页与呈现机制 | 无 |
+| `MeowRuntime` | 协议 1 帧与专用 JSON 校验、双向 fd RPC／取消／关闭与单次内嵌启动机制 | JSON |
 | `MeowMusicFeature` | 音乐界面、交互、公开业务契约与音乐外观策略 | Contracts、Storage、Playback、UI |
 | `MeowMusicPlatform` | 网易、QQ、酷狗协议、账号、加密、HTTP 与文件缓存 | Feature、Contracts、JSON、Accounts、Storage |
-| `MeowMusicNativeService` | 曲库、队列、搜索、推荐、歌词、缓存编排和持久化 | Contracts、Feature、Storage |
+| `MeowMusicNativeService` | 曲库、队列、搜索、推荐、歌词、缓存编排、音源持久化及脚本 owner | Contracts、JSON、Feature、Runtime、Storage |
 | `MeowFilmFeature` | 影视数据源、首页、详情与收藏，见[影视能力](film.md) | UI |
 
 共享模块不依赖音乐模块。业务差异通过显式参数、契约或注入实现表达；模块边界由 `scripts/check-source-scope.py` 检查。
+
+平台响应与普通业务 JSON 使用 `MeowJSON.JSONObject`／`JSONValue` 的现行语义。运行器的 ASCII 对象键、安全整数、重复键和深度约束仅由 `MeowRuntime.RuntimeBridgeJSON` 在 RPC／脚本传输边界执行，不作为通用 JSON 限制。
 
 ## UI 技术选型
 

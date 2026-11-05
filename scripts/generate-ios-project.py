@@ -7,6 +7,10 @@ import plistlib
 ROOT = Path(__file__).resolve().parents[1]
 
 APPLICATION_DIRECTORIES = ("Application", "Composition", "Navigation", "Presentation")
+# Prepared by scripts/prepare-ios-runtime.py; regenerable inputs, not sources.
+NODE_MOBILE_FRAMEWORK = "../../.cache/nodejs-mobile/ios/NodeMobile.xcframework"
+RUNTIME_PAYLOAD = "../../.cache/ios-runtime/Runtime"
+NODE_MOBILE_LICENSE = "../../LICENSES/nodejs-mobile-LICENSE.txt"
 
 
 def source_paths(root, directories):
@@ -46,10 +50,11 @@ def generate():
     product, name = "meowfilm", "Meowfilm"
     app_sources = source_paths(ROOT, APPLICATION_DIRECTORIES)
     test_sources = source_paths(ROOT, ("UITests",))
+    runtime_test_sources = source_paths(ROOT, ("RuntimeTests",))
     all_sources = {p.relative_to(ROOT / "apps/ios").as_posix()
                    for p in (ROOT / "apps/ios").rglob("*.swift")}
-    if all_sources != set(app_sources + test_sources):
-        raise ValueError("App Swift sources must belong to an application responsibility or UITests directory")
+    if all_sources != set(app_sources + test_sources + runtime_test_sources):
+        raise ValueError("App Swift sources must belong to an application responsibility or a test directory")
     bundle_identifier = "dev.meowfilm.aggregate"
     base_info = plistlib.loads((ROOT / "apps/ios/Info.plist").read_bytes())
     project = ROOT / f"apps/ios/{name}.xcodeproj"
@@ -65,7 +70,14 @@ def generate():
         "uiTestSources", "uiTestFrameworks", "uiTestConfigs", "uiTestDebug", "uiTestRelease",
         "uiTestDependency", "uiTestProxy", "uiPlatformFramework",
     ]})
-    libraries = ["MeowContracts", "MeowStorage", "MeowPlayback", "MeowAccounts", "MeowUI",
+    runtime_test_name = "MeowfilmRuntimeTests"
+    ids.update({key: identifier(f"{product}:{key}") for key in [
+        "nodeFramework", "nodeFrameworkLink", "nodeFrameworkEmbed", "embedFrameworks",
+        "runtimePayload", "runtimePayloadBuild", "nodeLicense", "nodeLicenseBuild",
+        "runtimeTests", "runtimeTestGroup", "runtimeTestTarget", "runtimeTestSources",
+        "runtimeTestConfigs", "runtimeTestDebug", "runtimeTestRelease", "runtimeTestDependency", "runtimeTestProxy",
+    ]})
+    libraries = ["MeowContracts", "MeowStorage", "MeowPlayback", "MeowAccounts", "MeowUI", "MeowRuntime",
                  "MeowMusicFeature", "MeowMusicPlatform", "MeowMusicNativeService", "MeowFilmFeature"]
     objects = []
     def obj(key, content):
@@ -83,11 +95,22 @@ def generate():
         return references, builds
     app_references, app_builds = source_objects(app_sources)
     test_references, test_builds = source_objects(test_sources)
+    runtime_test_references, runtime_test_builds = source_objects(runtime_test_sources)
     obj("assets", 'isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>";')
     obj("assetsBuild", f"isa = PBXBuildFile; fileRef = {ids['assets']};")
+    # The embedded runtime: the pinned Node Mobile framework (linked, embedded and
+    # re-signed), the complete JS payload copied verbatim, and its license text.
+    obj("nodeFramework", f'isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = NodeMobile.xcframework; path = {quoted(NODE_MOBILE_FRAMEWORK)}; sourceTree = "<group>";')
+    obj("nodeFrameworkLink", f"isa = PBXBuildFile; fileRef = {ids['nodeFramework']};")
+    obj("nodeFrameworkEmbed", f"isa = PBXBuildFile; fileRef = {ids['nodeFramework']}; settings = {{ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }};")
+    obj("embedFrameworks", f'isa = PBXCopyFilesBuildPhase; buildActionMask = 2147483647; dstPath = ""; dstSubfolderSpec = 10; files = ({ids["nodeFrameworkEmbed"]},); name = "Embed Frameworks"; runOnlyForDeploymentPostprocessing = 0;')
+    obj("runtimePayload", f'isa = PBXFileReference; lastKnownFileType = folder; name = Runtime; path = {quoted(RUNTIME_PAYLOAD)}; sourceTree = "<group>";')
+    obj("runtimePayloadBuild", f"isa = PBXBuildFile; fileRef = {ids['runtimePayload']};")
+    obj("nodeLicense", f'isa = PBXFileReference; lastKnownFileType = text; name = nodejs-mobile-LICENSE.txt; path = {quoted(NODE_MOBILE_LICENSE)}; sourceTree = "<group>";')
+    obj("nodeLicenseBuild", f"isa = PBXBuildFile; fileRef = {ids['nodeLicense']};")
     obj("app", f'isa = PBXFileReference; explicitFileType = wrapper.application; path = {name}.app; sourceTree = BUILT_PRODUCTS_DIR;')
-    obj("productsGroup", f'isa = PBXGroup; children = ({ids["app"]}, {ids["uiTests"]},); name = Products; sourceTree = "<group>";')
-    obj("mainGroup", f'isa = PBXGroup; children = {seq(app_references + [ids["assets"], ids["uiTestGroup"], ids["productsGroup"]])}; sourceTree = "<group>";')
+    obj("productsGroup", f'isa = PBXGroup; children = ({ids["app"]}, {ids["uiTests"]}, {ids["runtimeTests"]},); name = Products; sourceTree = "<group>";')
+    obj("mainGroup", f'isa = PBXGroup; children = {seq(app_references + [ids["assets"], ids["nodeFramework"], ids["runtimePayload"], ids["nodeLicense"], ids["uiTestGroup"], ids["runtimeTestGroup"], ids["productsGroup"]])}; sourceTree = "<group>";')
     obj("sources", f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = {seq(app_builds)}; runOnlyForDeploymentPostprocessing = 0;')
     package_ids, framework_ids = [], []
     for library in libraries:
@@ -97,8 +120,8 @@ def generate():
         framework_ids.append(build_id)
         objects.append(f"\t\t{dependency_id} = {{ isa = XCSwiftPackageProductDependency; package = {ids['package']}; productName = {library}; }};")
         objects.append(f"\t\t{build_id} = {{ isa = PBXBuildFile; productRef = {dependency_id}; }};")
-    obj("frameworks", f"isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = {seq(framework_ids)}; runOnlyForDeploymentPostprocessing = 0;")
-    obj("resources", f'isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = ({ids["assetsBuild"]},); runOnlyForDeploymentPostprocessing = 0;')
+    obj("frameworks", f"isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = {seq(framework_ids + [ids['nodeFrameworkLink']])}; runOnlyForDeploymentPostprocessing = 0;")
+    obj("resources", f'isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = ({ids["assetsBuild"]}, {ids["runtimePayloadBuild"]}, {ids["nodeLicenseBuild"]},); runOnlyForDeploymentPostprocessing = 0;')
     obj("package", 'isa = XCLocalSwiftPackageReference; relativePath = ../../native/MeowKit;')
     common_project = "CLANG_ENABLE_MODULES = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; SDKROOT = iphoneos; SWIFT_VERSION = 5.0;"
     conditions = "FEATURE_MUSIC"
@@ -148,12 +171,12 @@ def generate():
     )
     for config in ["Debug", "Release"]:
         obj("project" + config, f'isa = XCBuildConfiguration; name = {config}; buildSettings = {{ {common_project} }};')
-        debug = 'SWIFT_OPTIMIZATION_LEVEL = "-Onone"; DEBUG_INFORMATION_FORMAT = dwarf;' if config == "Debug" else 'SWIFT_OPTIMIZATION_LEVEL = "-O";'
+        debug = 'SWIFT_OPTIMIZATION_LEVEL = "-Onone"; DEBUG_INFORMATION_FORMAT = dwarf; ENABLE_TESTABILITY = YES;' if config == "Debug" else 'SWIFT_OPTIMIZATION_LEVEL = "-O";'
         active = ("DEBUG " if config == "Debug" else "") + conditions
         obj("target" + config, f'isa = XCBuildConfiguration; name = {config}; buildSettings = {{ {target_settings} {debug} SWIFT_ACTIVE_COMPILATION_CONDITIONS = {quoted(active)}; }};')
     obj("projectConfigs", f'isa = XCConfigurationList; buildConfigurations = ({ids["projectDebug"]}, {ids["projectRelease"]},); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;')
     obj("targetConfigs", f'isa = XCConfigurationList; buildConfigurations = ({ids["targetDebug"]}, {ids["targetRelease"]},); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;')
-    obj("target", f'isa = PBXNativeTarget; buildConfigurationList = {ids["targetConfigs"]}; buildPhases = ({ids["sources"]}, {ids["frameworks"]}, {ids["resources"]},); buildRules = (); dependencies = (); name = {name}; productName = {name}; productReference = {ids["app"]}; productType = "com.apple.product-type.application"; packageProductDependencies = {seq(package_ids)};')
+    obj("target", f'isa = PBXNativeTarget; buildConfigurationList = {ids["targetConfigs"]}; buildPhases = ({ids["sources"]}, {ids["frameworks"]}, {ids["resources"]}, {ids["embedFrameworks"]},); buildRules = (); dependencies = (); name = {name}; productName = {name}; productReference = {ids["app"]}; productType = "com.apple.product-type.application"; packageProductDependencies = {seq(package_ids)};')
     # The component runner links the host package products for App-owned symbols.
     ui_packages = [identifier(f"{product}:dependency:{library}") for library in libraries]
     ui_build_files = []
@@ -183,10 +206,36 @@ def generate():
         obj("uiTest" + config, f'isa = XCBuildConfiguration; name = {config}; buildSettings = {{ {test_settings} SWIFT_OPTIMIZATION_LEVEL = "{optimization}"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = {quoted(active)}; }};')
     obj("uiTestConfigs", f'isa = XCConfigurationList; buildConfigurations = ({ids["uiTestDebug"]}, {ids["uiTestRelease"]},); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;')
     obj("uiTestTarget", f'isa = PBXNativeTarget; buildConfigurationList = {ids["uiTestConfigs"]}; buildPhases = ({ids["uiTestSources"]}, {ids["uiTestFrameworks"]},); buildRules = (); dependencies = ({ids["uiTestDependency"]},); name = {test_name}; productName = {test_name}; productReference = {ids["uiTests"]}; productType = "com.apple.product-type.bundle.ui-testing"; packageProductDependencies = {seq(ui_packages)};')
-    test_targets = f' {ids["uiTestTarget"]},'
+    # Hosted in the real App process: no package products are linked again, so
+    # the App's single copy of each module (and of Node Mobile) is exercised.
+    obj("runtimeTestGroup", f'isa = PBXGroup; children = {seq(runtime_test_references)}; name = RuntimeTests; sourceTree = "<group>";')
+    obj("runtimeTests", f'isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = {runtime_test_name}.xctest; sourceTree = BUILT_PRODUCTS_DIR;')
+    obj("runtimeTestSources", f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = {seq(runtime_test_builds)}; runOnlyForDeploymentPostprocessing = 0;')
+    obj("runtimeTestProxy", f'isa = PBXContainerItemProxy; containerPortal = {ids["project"]}; proxyType = 1; remoteGlobalIDString = {ids["target"]}; remoteInfo = {name};')
+    obj("runtimeTestDependency", f'isa = PBXTargetDependency; target = {ids["target"]}; targetProxy = {ids["runtimeTestProxy"]};')
+    runtime_test_settings = (
+        f'PRODUCT_BUNDLE_IDENTIFIER = {bundle_identifier}.runtime-tests; PRODUCT_NAME = {runtime_test_name}; '
+        'GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; TARGETED_DEVICE_FAMILY = 1; '
+        'SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = NO; CODE_SIGN_STYLE = Automatic; '
+        # The test shares the App's products directory, so the host and its
+        # processed NodeMobile.framework are both found under BUILT_PRODUCTS_DIR.
+        f'TEST_HOST = "$(BUILT_PRODUCTS_DIR)/{name}.app/{name}"; BUNDLE_LOADER = "$(TEST_HOST)"; '
+        'SWIFT_INCLUDE_PATHS = ("$(inherited)", "$(BUILD_DIR)/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)",); '
+        'FRAMEWORK_SEARCH_PATHS = ("$(inherited)", "$(BUILT_PRODUCTS_DIR)",); '
+        'LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks"; '
+        f'{build_directory}'
+    )
+    for config in ["Debug", "Release"]:
+        optimization = "-Onone" if config == "Debug" else "-O"
+        active = ("DEBUG " if config == "Debug" else "") + conditions
+        obj("runtimeTest" + config, f'isa = XCBuildConfiguration; name = {config}; buildSettings = {{ {runtime_test_settings} SWIFT_OPTIMIZATION_LEVEL = "{optimization}"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = {quoted(active)}; }};')
+    obj("runtimeTestConfigs", f'isa = XCConfigurationList; buildConfigurations = ({ids["runtimeTestDebug"]}, {ids["runtimeTestRelease"]},); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;')
+    obj("runtimeTestTarget", f'isa = PBXNativeTarget; buildConfigurationList = {ids["runtimeTestConfigs"]}; buildPhases = ({ids["runtimeTestSources"]},); buildRules = (); dependencies = ({ids["runtimeTestDependency"]},); name = {runtime_test_name}; productName = {runtime_test_name}; productReference = {ids["runtimeTests"]}; productType = "com.apple.product-type.bundle.unit-test";')
+    test_targets = f' {ids["uiTestTarget"]}, {ids["runtimeTestTarget"]},'
     test_attributes = (
         f' TargetAttributes = {{ '
         f'{ids["uiTestTarget"]} = {{ TestTargetID = {ids["target"]}; }}; '
+        f'{ids["runtimeTestTarget"]} = {{ TestTargetID = {ids["target"]}; }}; '
         '};'
     )
     obj("project", f'isa = PBXProject; attributes = {{ BuildIndependentTargetsInParallel = YES; LastUpgradeCheck = 2610;{test_attributes} }}; buildConfigurationList = {ids["projectConfigs"]}; compatibilityVersion = "Xcode 14.0"; developmentRegion = zh_CN; knownRegions = (en, zh_CN, Base,); mainGroup = {ids["mainGroup"]}; productRefGroup = {ids["productsGroup"]}; projectDirPath = ""; projectRoot = ""; targets = ({ids["target"]},{test_targets}); packageReferences = ({ids["package"]},);')
@@ -207,9 +256,12 @@ def generate():
 '''
     write_lf(scheme_dir / f"{name}.xcscheme", scheme)
     test_reference = f'<BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{ids["uiTestTarget"]}" BuildableName="{test_name}.xctest" BlueprintName="{test_name}" ReferencedContainer="container:{name}.xcodeproj"/>'
-    test_entry = f'<BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="YES">{test_reference}</BuildActionEntry>'
+    runtime_test_reference = f'<BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{ids["runtimeTestTarget"]}" BuildableName="{runtime_test_name}.xctest" BlueprintName="{runtime_test_name}" ReferencedContainer="container:{name}.xcodeproj"/>'
+    test_entry = "".join(
+        f'<BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="YES">{value}</BuildActionEntry>'
+        for value in (test_reference, runtime_test_reference))
     test_action = f'''  <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES">
-    <Testables><TestableReference skipped="NO" parallelizable="NO">{test_reference}</TestableReference></Testables>
+    <Testables><TestableReference skipped="NO" parallelizable="NO">{test_reference}</TestableReference><TestableReference skipped="NO" parallelizable="NO">{runtime_test_reference}</TestableReference></Testables>
     <MacroExpansion>{reference}</MacroExpansion>
   </TestAction>
 '''

@@ -72,6 +72,9 @@ public partial class MusicPlayerView : UserControl
         QualityPopup.IsOpen = !QualityPopup.IsOpen;
         if (!QualityPopup.IsOpen) return;
         await module.ActivateQualitySettingsAsync();
+    }
+    private async void SourceSearch_Click(object sender, RoutedEventArgs e)
+    {
         if (QualityPopup.IsOpen) await module.RefreshCurrentRecordingsAsync();
     }
     private async void PlaybackQuality_Changed(object sender, SelectionChangedEventArgs e)

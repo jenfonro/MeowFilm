@@ -47,7 +47,7 @@ extension MusicNativePlatforms {
         guard let account else { return .failure(.authRequired) }
         do {
             let bytes = try await account.nativeHomePayload(.vipSongs, binding: binding)
-            let root = try MJ.parse(bytes, maximum: 2 * 1024 * 1024, mode: .upstream)
+            let root = try MJ.parse(bytes, maximum: 2 * 1024 * 1024)
             let result = try vipRecommendationRows(root)
             let enriched = try await browseEnrich(result, metadata: { request in
                 switch request {

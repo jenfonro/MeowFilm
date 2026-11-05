@@ -14,6 +14,7 @@ extension NativeMusicService {
         let official = selection.installationId.hasPrefix("official:")
         let enabled = official ? Self.officialQualities([selection.quality], d.playback) : MusicModel.qualities([selection.quality], d.playback)
         try musicRequire(!enabled.isEmpty, .qualityDisabled)
+        try musicRequire(!official || Self.officialEnabled(source.platform, d.playback), .sourceUnavailable)
         if !official {
             let declared = info["types"].array.map { $0["type"].string }
             try musicRequire(["128k", "320k", "flac", "flac24bit"].contains(selection.quality) &&

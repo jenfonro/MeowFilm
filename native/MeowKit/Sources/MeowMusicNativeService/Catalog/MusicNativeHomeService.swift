@@ -297,7 +297,7 @@ extension MusicNativePlatforms {
             request = destination == .home ? .home(continuation: continuation) : .featured(continuation: continuation)
         }
         let root = try MJ.parse(await account.nativeHomePayload(request, binding: binding),
-                                maximum: 2 * 1024 * 1024, mode: .upstream)
+                                maximum: 2 * 1024 * 1024)
         var result: MusicNativePublicBrowseDiscovery
         if case .artistActivity = request { result = try MusicNativePublicBrowseParser.artistActivity(root) }
         else { result = try MusicNativePublicBrowseParser.blocks(root, previous: remote,
@@ -306,7 +306,7 @@ extension MusicNativePlatforms {
            !result.sections.contains(where: { $0.layout == .artistUpdates || $0.channel?.kind == .artistActivity }) {
             try await account.checkNativeHomeBinding(binding)
             let activity = try MJ.parse(await account.nativeHomePayload(.artistActivity(), binding: binding),
-                                       maximum: 2 * 1024 * 1024, mode: .upstream)
+                                       maximum: 2 * 1024 * 1024)
             result.sections += try MusicNativePublicBrowseParser.artistActivity(activity).sections
         }
         result = try await browseEnrich(result, metadata: { request in

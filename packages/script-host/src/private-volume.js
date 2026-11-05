@@ -31,6 +31,25 @@ function syncMetadata(path) {
   }
   syncDirectory(dirname(path));
 }
+function writeBytes(data, options) {
+  // Validate before opening a path: its flags may truncate an existing file.
+  const encoding = options.encoding || 'utf8';
+  if (encoding !== 'buffer' && !Buffer.isEncoding(encoding))
+    throw Object.assign(new TypeError('Invalid encoding'), { code: 'ERR_INVALID_ARG_VALUE' });
+  const signal = options.signal;
+  if (signal !== undefined &&
+    (signal === null || typeof signal !== 'object' || !('aborted' in signal)))
+    throw Object.assign(new TypeError('Invalid AbortSignal'), { code: 'ERR_INVALID_ARG_TYPE' });
+  if (typeof data === 'string') return Buffer.from(data, encoding);
+  if (!ArrayBuffer.isView(data))
+    throw Object.assign(new TypeError('Invalid write data'), { code: 'ERR_INVALID_ARG_TYPE' });
+  return data;
+}
+function syncAndClose(fd, callback) {
+  fs.fsync(fd, error => {
+    fs.close(fd, closeError => callback(closeError ?? error));
+  });
+}
 /** Script paths are virtual POSIX paths. No host path, descriptor, link or
  * loader can be selected by guest code. The installation owns this volume,
  * independently of its source revision, generation and listening port. */
@@ -270,8 +289,16 @@ export class PrivateVolume {
       const target = descriptor?.fd ?? this.path(input, { missing: true });
       const existed = Boolean(descriptor) || fs.existsSync(target);
       const settings = typeof options === 'string' ? { encoding: options } : { ...options };
-      fs.writeFileSync(target, data, { ...settings, flush: true });
-      if (descriptor) { descriptor.dirty = true; acknowledge(descriptor); }
+      const bytes = writeBytes(data, settings);
+      const fd = descriptor?.fd ?? fs.openSync(target, settings.flag || 'w', settings.mode);
+      try {
+        fs.writeFileSync(fd, bytes);
+        if (descriptor) descriptor.dirty = true;
+        fs.fsyncSync(fd);
+      } finally {
+        if (!descriptor) fs.closeSync(fd);
+      }
+      if (descriptor) acknowledge(descriptor);
       else {
         if (!existed) syncDirectory(dirname(target));
         this.written(this.writeScope());
@@ -403,9 +430,12 @@ export class PrivateVolume {
         mutatesOnOpen(settings.flags ?? 'w', existed);
       const observation = this.ownerScope();
       const scope = this.resourceScope();
+      if (name === 'createWriteStream') delete settings.flush;
       const stream = fs[name](path, { ...settings,
         autoClose: true, emitClose: true,
-        ...(name === 'createWriteStream' ? { flush: true } : {}) });
+        ...(name === 'createWriteStream' ? { fs: {
+          open: fs.open, write: fs.write, writev: fs.writev, close: syncAndClose,
+        } } : {}) });
       // The native path and fs implementation are never public capability fields.
       const persisted = () => {
         try {

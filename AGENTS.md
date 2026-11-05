@@ -10,6 +10,7 @@ meowfilm 的 iPhone 与 Windows 原生客户端：
 
 ```sh
 python3 -I -B scripts/generate-ios-project.py         # 生成 apps/ios/Meowfilm.xcodeproj
+python3 -I -B scripts/prepare-ios-runtime.py          # Node 24 + npm ci：准备内嵌运行器构建输入
 python3 -I -B scripts/check-source-scope.py           # 源码、依赖与工程成员检查
 python3 -I -B -m unittest discover -s scripts/tests -p "test_<area>.py" -v
 bash scripts/test-native.sh test --filter <pattern> # macOS：受影响的 Swift 测试
@@ -19,7 +20,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 ```
 
 - Windows 将 `python3` 换为 `python -X utf8`。
-- 需要 macOS 与 Xcode；参考环境为 Xcode 26.1.1。iOS 部署目标 17.0，macOS 仅用于原生单测执行。
+- 需要 macOS、Xcode、Node 24 与 `npm ci --ignore-scripts`；参考环境为 Xcode 26.1.1。iOS 部署目标 17.0，macOS 仅用于原生单测执行。
 
 ### Windows
 
@@ -46,8 +47,10 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
   - `Navigation` — 根容器、页面导航与呈现路由
   - `Presentation` — 主页面外壳、页头、底部导航和播放器停靠区
   - `UITests` — 共享 UIKit 组件测试
+  - `RuntimeTests` — 真实 App 宿主的内嵌运行器测试
+  - `runtime` — iOS socketpair bootstrap 与薄 entry
 - `native/MeowKit/` — iOS Swift Package
-  - `MeowContracts`、`MeowJSON`、`MeowStorage`、`MeowAccounts`、`MeowPlayback`、`MeowUI` — 共享能力
+  - `MeowContracts`、`MeowJSON`、`MeowStorage`、`MeowAccounts`、`MeowPlayback`、`MeowUI`、`MeowRuntime` — 共享能力
   - `MeowMusicFeature`、`MeowMusicPlatform`、`MeowMusicNativeService` — 音乐界面、平台和原生业务
   - `MeowFilmFeature` — 影视数据源、首页、详情和收藏
 - `apps/windows/app/` — Windows 应用入口与装配
@@ -72,7 +75,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 - `LICENSES/` — 全部第三方许可与来源声明（`NOTICE.md`）；Windows 构建时复制到 `build/windows/licenses`
 - `build/ios/`、`build/windows/` — 各平台最新一份产物，每次构建成功后整体覆盖；不入 Git
 - `tmp/` — 日志、测试结果、构建暂存与任务工作记录（`tmp/working/`），可随时整体删除；不入 Git
-- 许可文件只放在 `LICENSES/`，每种许可正文一份；改编新的上游代码时在 `NOTICE.md` 补充来源，增删文件时同步 `scripts/windows/package-licenses.mjs`。
+- 许可文件只放在 `LICENSES/`，每种许可正文一份；改编新的上游代码时在 `NOTICE.md` 补充来源，增删时同步使用该组件的平台打包清单（Windows 为 `scripts/windows/package-licenses.mjs`，iOS 为工程资源及构建输入策略）。
 
 ## 代码组织
 
@@ -125,7 +128,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 
 - 按风险覆盖实际受影响的契约与消费者：编译、静态检查、单元、组件或集成测试；必要时覆盖失败、取消、恢复和资源释放路径。
 - 可机械核对的目录、依赖和契约约束接入 `scripts`（Windows 为 `scripts/windows`）中的现有检查。
-- 引擎 WASM 仅按 `scripts/quickjs-runtime.json` 的受审查 release-sync 包及任务上下文派生产物、精确版本／路径、根锁、源码补丁／构建输入及真实文件／许可哈希放行；其他 native/WASM 仍拒绝，不全局放行二进制或在打包中安装／修锁。
+- 引擎仅按 `scripts/quickjs-runtime.json` 的受审查 release-sync 包及任务上下文派生产物、精确版本／路径、根锁、源码补丁／构建输入及真实文件／许可哈希放行；Windows 固定任务上下文派生 WASM，iOS 固定原版 release-sync asmjs，不按运行失败自动降级。其他 native/WASM 仍拒绝，不全局放行二进制或在打包中安装／修锁。
 - 长期测试验证现行行为与契约；删除／重构后的旧实现及引用清理检查只做当次验证，通过后移除，不堆入长期测试。功能、安全、取消与资源释放等有效回归保留。
 - 编译成功、测试替身和真实业务验证分别记录，不互相冒充；不为刷绿删除有效断言、隐藏失败或用空测试集代替验证。
 - 外部脚本由 `scripts/accept-sources.mjs` 按实际声明动作验收；未归因、宿主缺失能力、资源超限或清理失败不能因初始化成功而放行。报告只保留脱敏结构和固定分类，见 `docs/runtime/source-acceptance.md`。

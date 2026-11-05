@@ -15,7 +15,9 @@ public sealed partial class MusicScriptOwner
         string id = LJ.Text(p["installationId"], 128), platform = LJ.Text(p["platform"]);
         LJ.Require(NativeMusicSong.Platforms.Append("local").Contains(platform));
         var song = NativeMusicSong.Normalize(p["song"]);
-        var selected = SelectRecording(song, platform, p["sourceKey"]);
+        bool needsMatch = !isLyrics && platform != "local" && p["sourceKey"] is null && matchSong is not null &&
+            !LJ.Array(song["sources"]).OfType<JsonObject>().Any(source => LJ.S(source["source"]) == platform);
+        var selected = needsMatch ? (Key: "", Data: new JsonObject()) : SelectRecording(song, platform, p["sourceKey"]);
         string quality = isLyrics ? "" : LJ.Text(p["quality"]);
         LJ.Require(isLyrics || quality == "auto" || MusicQualityPolicy.LxTypes.Contains(quality));
         using var policy = isLyrics ? null : await library.AcquireQualityAsync(external).ConfigureAwait(false);
@@ -55,13 +57,34 @@ public sealed partial class MusicScriptOwner
                 var capability = active.Capabilities[platform] as JsonObject;
                 LJ.Require(capability is not null && LJ.Array(capability["actions"])
                     .Any(a => LJ.S(a) == (isLyrics ? "lyric" : "musicUrl")), "CAPABILITY_UNAVAILABLE");
-                if (!isLyrics)
+                if (!isLyrics && !needsMatch)
                     choices = MusicQualityPolicy.Select(policy?.Policy ?? MusicQualityPolicy.Default(), quality,
                         selected.Data, capability!, platform == "local");
             }
             finally { gate.Release(); }
+            if (needsMatch)
+            {
+                // Only the missing target platform is matched, outside the owner gate and inside this deadline.
+                var original = song;
+                song = NativeMusicSong.Normalize(await matchSong!(song, platform, token).ConfigureAwait(false));
+                token.ThrowIfCancellationRequested();
+                LJ.Require(LJ.S(song["songId"]) == LJ.S(original["songId"]) &&
+                    new NativeMusicSong.Recordings(original).CanMerge(new(song)), "TARGET_CHANGED");
+                await library.CheckQualityAsync(policy!, token).ConfigureAwait(false);
+                await CheckQualitySourceAsync(id, active, token).ConfigureAwait(false);
+                var first = LJ.Array(song["sources"]).OfType<JsonObject>().Where(source => LJ.S(source["source"]) == platform)
+                    .OrderBy(source => LJ.S(source["sourceKey"]), StringComparer.Ordinal).FirstOrDefault();
+                LJ.Require(first is not null, "RECORDING_UNAVAILABLE");
+                selected = SelectRecording(song, platform, first!["sourceKey"]);
+                choices = MusicQualityPolicy.Select(policy!.Policy, quality, selected.Data,
+                    active.Capabilities[platform]!.AsObject(), false);
+            }
             if (!isLyrics)
-                return await ResolveQualityAsync(p, song, selected, id, platform, active, choices, policy, token).ConfigureAwait(false);
+            {
+                var media = await ResolveQualityAsync(p, song, selected, id, platform, active, choices, policy, token).ConfigureAwait(false);
+                if (needsMatch) media["recordingSong"] = song.DeepClone();
+                return media;
+            }
             var payload = ScriptPayload(selected.Data);
             var result = await ScriptAsync("invoke", new { installationId = id, revision = active.Revision,
                 generation = active.Generation, siteId = platform, operation = "lyric", payload }, token).ConfigureAwait(false);

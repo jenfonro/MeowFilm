@@ -6,6 +6,7 @@ import CommonCrypto
 import Security
 import MeowAccounts
 import MeowMusicFeature
+import MeowJSON
 
 enum MusicQQWire {
     static func object(_ value: Any?) throws -> [String: Any] {
@@ -47,16 +48,7 @@ enum MusicQQWire {
     }
     static func decode(_ bytes: Data) throws -> [String: Any] {
         guard bytes.count <= 2 * 1024 * 1024 else { throw MusicServiceError.limit }
-        let result: Any
-        do { result = try JSONSerialization.jsonObject(with: bytes) } catch { throw MusicServiceError.upstreamInvalid }
-        var nodes = 0
-        func check(_ item: Any, _ depth: Int) throws {
-            nodes += 1; guard depth <= 24, nodes <= 100_000 else { throw MusicServiceError.limit }
-            if let values = item as? [String: Any] { for (key, child) in values {
-                guard key.utf8.count <= 512 else { throw MusicServiceError.limit }; try check(child, depth + 1)
-            } } else if let values = item as? [Any] { for child in values { try check(child, depth + 1) } }
-        }
-        try check(result, 0); return try object(result)
+        do { return try JSONObject.decode(bytes) } catch { throw MusicServiceError.upstreamInvalid }
     }
     static func codes(_ object: [String: Any], requireCode: Bool = false) throws {
         if requireCode && object["code"] == nil { throw MusicServiceError.upstreamInvalid }

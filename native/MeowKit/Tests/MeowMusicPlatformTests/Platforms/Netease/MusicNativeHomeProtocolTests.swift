@@ -1,6 +1,7 @@
 import XCTest
 import Foundation
 import MeowMusicFeature
+import MeowJSON
 @testable import MeowMusicPlatform
 
 /// Synthetic transport only. These declarations have not been executed on
@@ -8,6 +9,24 @@ import MeowMusicFeature
 final class MusicNativeHomeProtocolTests: XCTestCase {
     private let homePath = "/eapi/link/page/rcmd/resource/show"
     private let artistPath = "/eapi/sub/artist/new/works/song-mv/list/v2"
+
+    func testAuthenticatedHomeForwardsFinalArtworkAndOpaqueNumericMetadataWithoutSecrets() async throws {
+        let f = try MusicNeteaseNativeFixture(); try await f.enable()
+        let binding = try await f.service.nativeHomeBinding()
+        let raw = #"{"code":200,"cookie":"synthetic-user-42","data":{"blocks":[{"picUrl":null,"picUrl":"https://p1.music.126.net/synthetic.jpg","unused":1e400,"largeID":18446744073709551617}],"authorization":"synthetic-csrf"}}"#
+        await f.http.replies(homePath, [.init(status: 200, data: Data(raw.utf8))])
+        let bytes = try await f.service.nativeHomePayload(.home(), binding: binding)
+        let root = try MusicQQWire.decode(bytes)
+        let data = try MusicQQWire.object(root["data"])
+        let row = try XCTUnwrap((data["blocks"] as? [[String: Any]])?.first)
+        XCTAssertEqual(row["picUrl"] as? String, "https://p1.music.126.net/synthetic.jpg")
+        XCTAssertEqual((row["unused"] as? JSONNumber)?.literal, "1e400")
+        XCTAssertEqual((row["largeID"] as? JSONNumber)?.literal, "18446744073709551617")
+        XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains("synthetic-user-42"))
+        XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains("synthetic-csrf"))
+        XCTAssertNil(root["cookie"]); XCTAssertNil(data["authorization"])
+        _ = await f.service.close()
+    }
 
     func testHomeFeaturedAndContinuationUseExactAuthenticatedEAPI() async throws {
         let f = try MusicNeteaseNativeFixture(); try await f.enable()

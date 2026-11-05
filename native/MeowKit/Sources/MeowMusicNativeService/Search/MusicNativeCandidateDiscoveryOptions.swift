@@ -13,11 +13,14 @@ extension NativeMusicService {
         try candidateCheck(seed)
         // A source confirmed as another recording is never offered for playback.
         let excluded = await sourceDiscoveryExcluded(seed.song)
-        try candidateCheck(seed)
+        let playback = try candidateCheck(seed).playback
         let rows = try MusicModel.sources(song).filter { platformEnabled($0.platform) && !excluded.contains($0.sourceKey) }
         // Do not probe accounts or a script host for disabled-only saved rows.
+        // A disabled built-in source is skipped; scripts may still serve that platform.
         let platforms = (scripts != nil && !rows.isEmpty ? ["lx"] : []) +
-            ["wy", "tx", "kg"].filter { platform in rows.contains { $0.platform == platform } }
+            ["wy", "tx", "kg"].filter { platform in
+                Self.officialEnabled(platform, playback) && rows.contains { $0.platform == platform }
+            }
         let result = try await withThrowingTaskGroup(of: MusicNativeCandidateDiscoveryOptions.self) { group in
             for platform in platforms {
                 group.addTask {
@@ -55,9 +58,18 @@ extension NativeMusicService {
         guard let scripts else { return .init() }
         let snapshots = try await work(label: label) { try await scripts.sources() }
         try candidateCheck(seed)
-        try musicRequire(snapshots.count <= 32 && Set(snapshots.map(\.installationID)).count == snapshots.count, .limit)
         var result = MusicNativeCandidateDiscoveryOptions(scriptState: .ready)
         let prefs = try candidateCheck(seed).playback
+        result.rows = try scriptOptions(song: song, playback: prefs, snapshots: snapshots, excluded: excluded)
+        return result
+    }
+
+    /// The one rule for script playback options, shared by automatic candidates
+    /// and the explicit source picker: enabled, ready, declared musicUrl, quality.
+    func scriptOptions(song: MJ, playback prefs: MJ, snapshots: [MusicScriptSource],
+                       excluded: Set<String>) throws -> [MusicCandidateDiscoveryOption] {
+        try musicRequire(snapshots.count <= 32 && Set(snapshots.map(\.installationID)).count == snapshots.count, .limit)
+        var rows: [MusicCandidateDiscoveryOption] = []
         for snapshot in snapshots where snapshot.enabled && snapshot.ready {
             for source in try MusicModel.sources(song) where platformEnabled(source.platform) && !excluded.contains(source.sourceKey) {
                 guard snapshot.capabilities.contains(where: { $0.siteID == source.platform && $0.actions.contains("musicUrl") }) else { continue }
@@ -68,14 +80,14 @@ extension NativeMusicService {
                     ["128k", "320k", "flac", "flac24bit"].contains($0) && (declared.isEmpty || declared.contains($0))
                 }, prefs)
                 if !qualities.isEmpty {
-                    result.rows.append(.init(playback: .init(installationId: snapshot.installationID, generation: snapshot.generation,
+                    rows.append(.init(playback: .init(installationId: snapshot.installationID, generation: snapshot.generation,
                         siteId: source.platform, sourceKey: source.sourceKey, qualities: qualities,
                         title: capability.title, version: snapshot.version, contentHash: snapshot.contentHash),
                         revisionHash: snapshot.revisionHash))
                 }
             }
         }
-        return result
+        return rows
     }
 
     private func candidateAccountOptions(rows: [MusicNativeSource], platform: String,

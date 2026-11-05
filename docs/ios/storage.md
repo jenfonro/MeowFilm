@@ -5,6 +5,7 @@
 | 数据 | 存储 | 位置 |
 | --- | --- | --- |
 | 曲库、队列、历史、设置（`music.library.v1`） | 普通文档 | Application Support 下 `meowfilm/documents`，参与备份 |
+| 脚本目录、源码与私有数据（`music.scripts.v1`） | 普通文档 | Application Support 下 `meowfilm/documents`，参与备份 |
 | 播放展示、来源发现、首页快照、账号 URL 与副歌点缓存 | 普通文档 | Caches 下 `meowfilm/documents` |
 | 客户端设备会话（`music.client-context.<平台>.v1`）、QQ 设备身份（`music.qq-public.v1`） | 加密文档 | Application Support 下 `meowfilm/encrypted-documents-v1`，排除备份 |
 | 账号凭据（`<bundle>.music.accounts.v1`） | `MeowAccounts` Keychain 凭据 | `afterFirstUnlockThisDeviceOnly`，不同步 |
@@ -52,3 +53,14 @@
 - 音频缓存只接受 class C，保护等级不符按缓存未命中处理，不在打开时修改已有文件的等级。
 - 不提供旧凭据、密钥、加密文件或音频缓存保护等级的兼容、迁移或读取时修复。
 - 普通数据曾以加密文档保存在 `encrypted-documents-v1`。升级后不读取、不迁移、不删除这些旧文档及其 Keychain 密钥，曲库从空开始。
+
+## 音源文档
+
+`NativeMusicScriptService` 唯一持有普通 `DocumentStore` 命名空间 `music.scripts.v1`，目录、源码和私有数据全部明文存储，不使用 Keychain 或加密文档。安装目录与脚本源码不混入曲库同步：
+
+- `catalog`：schema 1、revision、安装 UUID、有界头部元数据、源码 SHA-256／字节数、启用状态、上次声明平台及安装时间；上限 1 MiB。
+- `source.<sha256>`：严格 UTF-8 原始脚本字节，相同内容复用；单源 16 MiB。
+- `storage.<installationId>`：按 site／key 的 JSON 值，与当前 grant、installation、generation 绑定。每安装 512 KiB，每 site 64 KiB／64 项，每值 16 KiB、最多 32 sites；这些是私有数据资源边界，与 Windows owner 一致。
+- 文件位于 `documents/music.scripts.v1/<key>.json`，其中 source 文件保存原始源码字节而非 JSON。单文档资源上限为 16 MiB，不限制命名空间文档数与总字节。安装／启停操作串行完成；读取或导入不执行脚本。删除先撤销运行授权并清除私有存储，再删除目录条目与最后一个引用的源码。
+
+内置官方源开关仍属于 `music.library.v1` 的 playback 记录 `officialSources`，值为 `wy`／`tx`／`kg` 的无重复数组；缺失默认全部启用，空数组全部关闭，不接受 null 或未知平台。写入使用既有 settingsRevision／文档 CAS，不创建第二份设置事实来源。

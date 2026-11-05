@@ -15,6 +15,14 @@ enum MusicModel {
     private static let secretField = try! NSRegularExpression(
         pattern: "cookie|token|password|secret|credential|authorization|api[-_]?key|^headers$|^url$|^audioUrl$|^playUrl$",
         options: [.caseInsensitive])
+    /// Platform account and playback-grant field names, compared without case
+    /// or separators. A durable image URL carrying one is not public artwork.
+    private static let credentialQueryNames: Set<String> = [
+        "musicu", "musica", "csrf", "csrftoken", "nmtid", "rememberme",
+        "uin", "wxuin", "puin", "qqmusicuin", "musicid", "strmusicid", "euin", "encryptuin",
+        "musickey", "qqmusickey", "qmkeyst", "wxkey", "vkey",
+        "userid", "t1", "dfid", "sid", "sessionid", "jsessionid"
+    ]
     static func key(_ area: String) -> String { MJ.array([.string("meowfilm"), .string("music"), .n(1), .string("device"), .string(area)]).json }
     static func freshCollection(_ id: String, _ name: String, _ kind: String = "playlist") -> MJ {
         .obj([("id", .string(id)), ("name", .string(name)), ("kind", .string(kind)), ("order", .array([])),
@@ -103,12 +111,13 @@ enum MusicModel {
         expression.firstMatch(in: value, range: NSRange(value.startIndex..<value.endIndex, in: value)) != nil
     }
     static func publicURL(_ raw: MJ) -> MJ {
-        guard let url = URL(string: raw.string), ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
-              url.user == nil, url.password == nil, url.query == nil, url.fragment == nil,
-              let rawHost = url.host?.lowercased(), raw.string.utf16.count <= 4096 else { return .string("") }
-        let host = rawHost.hasSuffix(".") ? String(rawHost.dropLast()) : rawHost
-        guard !["local", "localhost"].contains(host), !host.hasSuffix(".local"), !host.hasSuffix(".localhost") else { return .string("") }
-        return raw
+        guard let url = MusicArtworkURL.normalized(raw.string),
+              let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              !(parts.queryItems ?? []).contains(where: {
+                  matches(secretField, $0.name) ||
+                      credentialQueryNames.contains($0.name.lowercased().filter { $0.isLetter || $0.isNumber })
+              }) else { return .string("") }
+        return .string(url.absoluteString)
     }
     static func cleanSong(_ raw: MJ) throws -> MJ {
         let normalized = try normalizeSong(raw)
@@ -242,6 +251,12 @@ enum MusicModel {
         var spatial = q.contains("spatialEnabled") ? q["spatialEnabled"].strings : spatialOrder
         if !enabled.contains(where: { $0 != "spatial" || !spatial.isEmpty }) { enabled = qualityOrder; spatial = spatialOrder }
         return (order.filter(enabled.contains), order, spOrder.filter(spatial.contains), spOrder)
+    }
+    /// Built-in audio-source admission. A missing field is the default (all on).
+    static func officialSources(_ prefs: MJ) -> [MusicAccountPlatform] {
+        guard prefs.contains("officialSources") else { return MusicAccountPlatform.allCases }
+        let enabled = Set(prefs["officialSources"].strings)
+        return MusicAccountPlatform.allCases.filter { enabled.contains($0.rawValue) }
     }
     static func qualities(_ qualities: [String], _ prefs: MJ) -> [String] {
         let p = policy(prefs), map = ["128k": "standard", "320k": "high", "flac": "lossless", "flac24bit": "hires", "master": "master"]

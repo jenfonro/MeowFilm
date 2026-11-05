@@ -15,11 +15,16 @@ public sealed partial class MusicNativeApplication
         {
             var input = JsonSerializer.SerializeToNode(parameters) as JsonObject ?? throw new MusicLibraryException("INVALID_REQUEST");
             LJ.Require(LJ.Bytes(input).Length <= 512 * 1024, "LIMIT");
-            LJ.Fields(input, "song quality qualityPolicySignature discover page", "song quality qualityPolicySignature discover");
+            LJ.Fields(input, "song quality qualityPolicySignature discover page refresh rejectedSourceKeys", "song quality qualityPolicySignature discover");
             LJ.Require(LJ.IsBool(input["discover"]));
+            LJ.Require(input["refresh"] is null || LJ.IsBool(input["refresh"]));
+            bool refresh = LJ.B(input["refresh"]);
+            var rejected = input["rejectedSourceKeys"] is null ? new HashSet<string>(StringComparer.Ordinal) :
+                LJ.Array(input["rejectedSourceKeys"]).Select(value => LJ.Text(value)).ToHashSet(StringComparer.Ordinal);
             int pageNumber = input["page"] is null ? 1 : checked((int)LJ.I(input["page"]));
             LJ.Require(pageNumber is >= 1 and <= 3, "LIMIT");
             var song = NativeMusicSong.Normalize(input["song"]);
+            var originalSong = song;
             string songId = LJ.S(song["songId"]), request = LJ.S(input["quality"]);
             LJ.Require(request == "auto" || MusicQualityPolicy.RequestTypes.Contains(request), "QUALITY_UNAVAILABLE");
             using var officialPolicy = await library.AcquireOfficialSourcesAsync(token).ConfigureAwait(false);
@@ -42,6 +47,8 @@ public sealed partial class MusicNativeApplication
                 foreach (var owner in owners.Values.OfType<MusicPlatformSession>())
                     LJ.Require(accounts.IsOfficialCurrent(owner), "AUTH_CHANGED");
             }
+            // Local accepted mappings only, after authoritative policy checks; discovery below is the sole catalog path.
+            song = await songMatcher.KnownAsync(song, token).ConfigureAwait(false);
             Current();
             var plan = new MusicOfficialCandidates(song);
             foreach (var (platform, owner) in owners)
@@ -50,16 +57,14 @@ public sealed partial class MusicNativeApplication
                 var remembered = await sourceCache.ReadHistoryAsync(owner.Scope, songId, policy.Signature,
                     request, owner.Generation, token).ConfigureAwait(false);
                 Current();
-                if (remembered is not null) plan.Remember(remembered, platform);
+                if (remembered is not null && !songMatcher.IsExcluded(originalSong, LJ.S(remembered["sourceKey"])))
+                    plan.Remember(remembered, platform);
             }
             var failures = new JsonArray();
             bool hasMore = false;
             if (LJ.B(input["discover"]) && NativeMusicSong.Fingerprint(song).Length > 0)
             {
-                string keyword = (LJ.S(song["title"]) + " " + LJ.S(song["artist"])).Trim();
-                if (keyword.Length > 256) keyword = keyword[..256];
                 using var discovery = CancellationTokenSource.CreateLinkedTokenSource(token);
-                discovery.CancelAfter(TimeSpan.FromSeconds(12));
                 var available = owners.Where(pair => pair.Value is not null).Select(pair => pair.Key).ToArray();
                 // Automatic playback uses the first page. The player source layer
                 // can request up to three bounded pages, without mutating search history.
@@ -67,25 +72,24 @@ public sealed partial class MusicNativeApplication
                 {
                     try
                     {
-                        var result = await SearchCatalogAsync(new(platform, keyword, MusicSearchKind.Songs, Page: pageNumber, Limit: 30),
-                            discovery.Token).ConfigureAwait(false);
-                        return (Platform: platform, Page: (JsonElement?)result, Error: (string?)null);
+                        var result = await songMatcher.MatchAsync(originalSong, platform, MatchingContext(platform, owners[platform]),
+                            discovery.Token, refresh, pageNumber, rejected).ConfigureAwait(false);
+                        return (Platform: platform, Match: result);
                     }
-                    catch (MusicPlatformException e) { return (Platform: platform, Page: (JsonElement?)null, Error: (string?)e.Code); }
+                    catch (MusicPlatformException e)
+                    { return (Platform: platform, Match: new MusicSongMatcher.MatchResult(song, Error: e.Code)); }
                     catch (OperationCanceledException) when (!token.IsCancellationRequested)
-                    { return (Platform: platform, Page: (JsonElement?)null, Error: (string?)"TIMEOUT"); }
+                    { return (Platform: platform, Match: new MusicSongMatcher.MatchResult(song, Error: "TIMEOUT")); }
                 })).ConfigureAwait(false);
                 Current();
                 foreach (var page in pages)
                 {
-                    if (page.Page is not { } result)
+                    if (page.Match.Error is { } error)
                     {
-                        failures.Add(LJ.Obj(("platform", page.Platform), ("code", page.Error)));
-                        continue;
+                        failures.Add(LJ.Obj(("platform", page.Platform), ("code", error)));
                     }
-                    foreach (var item in result.GetProperty("items").EnumerateArray())
-                        plan.Discover(JsonNode.Parse(item.GetRawText())!.AsObject(), page.Platform);
-                    hasMore |= result.TryGetProperty("more", out var more) && more.ValueKind == JsonValueKind.True;
+                    plan.Discover(page.Match.Song, page.Platform);
+                    hasMore |= page.Match.More;
                 }
             }
             await library.CheckQualityAsync(policy, token).ConfigureAwait(false);
@@ -93,6 +97,9 @@ public sealed partial class MusicNativeApplication
             {
                 Current();
                 var response = plan.Snapshot(owners.Where(pair => pair.Value is not null).Select(pair => pair.Key));
+                response["candidates"] = LJ.Arr(response["candidates"]!.AsArray().OfType<JsonObject>().Where(candidate =>
+                    !rejected.Contains(LJ.S(candidate["sourceKey"])) &&
+                    !songMatcher.IsExcluded(originalSong, LJ.S(candidate["sourceKey"]))));
                 foreach (var candidate in response["candidates"]!.AsArray().OfType<JsonObject>())
                 {
                     var owner = owners[LJ.S(candidate["platform"])]!;
@@ -112,6 +119,7 @@ public sealed partial class MusicNativeApplication
         catch (MusicAccountException e) { return Failed(e.Code); }
         catch (MusicPlatformException e) { return Failed(e.Code); }
         catch (MusicPlaybackCacheDataException) { return Failed("CACHE_DATA_INCOMPATIBLE"); }
+        catch (MusicPlaybackCacheCommitException) { return Failed("CACHE_COMMIT_UNKNOWN"); }
         catch (JsonException) { return Failed("INVALID_REQUEST"); }
         catch (Exception e) when (e is InvalidOperationException or ArgumentException or FormatException or OverflowException)
         { return Failed("INVALID_RESPONSE"); }

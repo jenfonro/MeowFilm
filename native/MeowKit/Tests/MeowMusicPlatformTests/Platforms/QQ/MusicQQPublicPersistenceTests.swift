@@ -171,8 +171,7 @@ final class MusicQQPublicPersistenceTests: XCTestCase {
         let newer = try JSONSerialization.data(withJSONObject: root)
         root["version"] = 1; root["auth"] = ["musickey": "synthetic-not-a-public-device"]
         let secret = try JSONSerialization.data(withJSONObject: root)
-        let duplicate = Data(String(decoding: valid, as: UTF8.self).replacingOccurrences(of: "\"version\":1", with: "\"version\":1,\"version\":1").utf8)
-        for bad in [Data(), Data("broken".utf8), newer, secret, duplicate, Data(repeating: 0x20, count: 16 * 1024 + 1)] {
+        for bad in [Data(), Data("broken".utf8), newer, secret, Data(repeating: 0x20, count: 16 * 1024 + 1)] {
             let f = QQPublicPersistenceFixture(document: .init(bad))
             try await f.enable()
             do { try await f.search(); XCTFail("Corrupt document accepted") }
@@ -181,6 +180,26 @@ final class MusicQQPublicPersistenceTests: XCTestCase {
             let methods = try await f.http.methods()
             XCTAssertTrue(methods.isEmpty)
             await f.service.close()
+        }
+    }
+
+    func testFinalDeviceVersionAndNestedFieldWinWithoutMergingEarlierObjects() throws {
+        let seed = QQPublicPersistenceFixture.seed()
+        let valid = String(decoding: try MusicQQPublicPersistenceCodec.encode(seed), as: UTF8.self)
+        let duplicate = valid.replacingOccurrences(of: "\"version\":1", with: "\"version\":2,\"version\":1")
+            .replacingOccurrences(of: "\"brand\":\"vivo\"", with: "\"brand\":null,\"brand\":\"vivo\"")
+        XCTAssertNotEqual(duplicate, valid)
+        let restored = try MusicQQPublicPersistenceCodec.decode(Data(duplicate.utf8))
+        XCTAssertEqual(restored["brand"] as? String, "vivo")
+        XCTAssertEqual(restored["open_udid"] as? String, seed["open_udid"] as? String)
+        for bad in [
+            valid.replacingOccurrences(of: "\"version\":1", with: "\"version\":1,\"version\":2"),
+            valid.replacingOccurrences(of: "\"brand\":\"vivo\"", with: "\"brand\":\"vivo\",\"brand\":null"),
+            String(valid.dropLast()) + #","device":{}}"#
+        ] {
+            XCTAssertThrowsError(try MusicQQPublicPersistenceCodec.decode(Data(bad.utf8))) {
+                XCTAssertEqual($0 as? MusicServiceError, .corruptDocument)
+            }
         }
     }
 

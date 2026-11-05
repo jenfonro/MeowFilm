@@ -62,3 +62,30 @@ test('logical JSON enforces bridge depth 64 while leaving frame validation uncha
   assert.throws(() => decode('['.repeat(65) + 'null' + ']'.repeat(65)), { code: 'INVALID_MESSAGE' });
   assert.throws(() => decode('['.repeat(500) + 'null' + ']'.repeat(500)), { code: 'INVALID_MESSAGE' });
 });
+
+test('strict logical and frame UTF-8 decoding works without an ICU-backed fatal TextDecoder', () => {
+  // Node builds without ICU (Node Mobile on iOS) reject the fatal option.
+  const original = globalThis.TextDecoder;
+  globalThis.TextDecoder = class extends original {
+    constructor(label, options) {
+      if (options?.fatal) throw Object.assign(new TypeError('fatal decoding needs ICU'), { code: 'ERR_NO_ICU' });
+      super(label, options);
+    }
+  };
+  try {
+    const value = { text: '猫😀\uFEFF\uFFFD' };
+    const body = Buffer.from(JSON.stringify(value));
+    assert.deepEqual(decodeJSONValue(Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), body])), value);
+    const backing = new Uint8Array(body.length + 2);
+    backing.set(body, 1);
+    assert.deepEqual(decodeJSONValue(backing.subarray(1, body.length + 1)), value);
+    const template = JSON.stringify({ text: '@' }).split('@');
+    for (const bytes of [[0xff], [0xc0, 0xaf], [0xed, 0xa0, 0x80], [0xe2, 0x82], [0xf4, 0x90, 0x80, 0x80]]) {
+      const malformed = Buffer.concat([Buffer.from(template[0]), Buffer.from(bytes), Buffer.from(template[1])]);
+      assert.throws(() => decodeJSONValue(malformed), { code: 'INVALID_MESSAGE' });
+    }
+    let message;
+    new FrameDecoder().push(encodeFrame(wire(value)), decoded => { message = decoded; });
+    assert.deepEqual(message.value, value);
+  } finally { globalThis.TextDecoder = original; }
+});
