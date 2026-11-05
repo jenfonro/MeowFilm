@@ -48,12 +48,12 @@ public partial class MusicCatalogView : UserControl
         Loaded += (_, _) =>
         {
             Observe();
-            RefreshSearchPlaylistHost();
+            RefreshSearchPlaylistHost(restoreOffset: true);
             RefreshSearchPlaylistRows();
         };
         DataContextChanged += (_, _) =>
         {
-            DetachSearchPlaylistList();
+            SearchPlaylistList.ItemsSource = null;
             ResetSearchPlaylistProjection();
             if (IsLoaded) { Observe(); RefreshSearchPlaylistHost(); }
         };
@@ -75,7 +75,7 @@ public partial class MusicCatalogView : UserControl
             scrollIntent.Clear();
             if (observed is not null) observed.PropertyChanged -= OnOwnerChanged;
             observed = null;
-            DetachSearchPlaylistList();
+            SuspendSearchPlaylistList();
             if (Owner is not { HasSearchSession: true }) ResetSearchPlaylistProjection();
         };
     }
@@ -91,7 +91,7 @@ public partial class MusicCatalogView : UserControl
             nameof(MusicCapability.HasSearchSession) or nameof(MusicCapability.CatalogSections))
             RefreshSearchPlaylistHost();
     }
-    private void RefreshSearchPlaylistHost()
+    private void RefreshSearchPlaylistHost(bool restoreOffset = false)
     {
         bool searchPlaylists = Owner is { IsSearchPlaylists: true };
         if (!searchPlaylists)
@@ -103,12 +103,14 @@ public partial class MusicCatalogView : UserControl
         }
         if (Owner is not { HasSearchSession: true })
             ResetSearchPlaylistProjection();
+        restoreOffset |= SearchPlaylistList.Visibility != Visibility.Visible;
         SearchPlaylistList.Visibility = Visibility.Visible;
         if (!ReferenceEquals(SearchPlaylistList.ItemsSource, searchPlaylistRows))
         {
             SearchPlaylistList.ItemsSource = searchPlaylistRows;
-            RestoreSearchPlaylistOffset();
+            restoreOffset = true;
         }
+        if (restoreOffset) RestoreSearchPlaylistOffset();
         IReadOnlyList<MusicCatalogCard> cards = Owner!.CatalogSections.Count == 1
             ? Owner.CatalogSections[0].Items : [];
         if (ReferenceEquals(searchPlaylistCards, cards)) return;
@@ -159,14 +161,13 @@ public partial class MusicCatalogView : UserControl
         searchPlaylistOffset = 0;
         if (searchPlaylistRows.Count > 0) searchPlaylistRows.Clear();
     }
-    private void DetachSearchPlaylistList()
+    private void SuspendSearchPlaylistList()
     {
-        if (SearchPlaylistList.ItemsSource is null) return;
-        if (!restoringSearchPlaylistOffset)
+        // A detached body can return with the same session and generated containers.
+        if (SearchPlaylistList.ItemsSource is not null && !restoringSearchPlaylistOffset)
             searchPlaylistOffset = SearchPlaylistScroll?.VerticalOffset ?? searchPlaylistOffset;
         ++searchPlaylistHostGeneration;
         restoringSearchPlaylistOffset = false;
-        SearchPlaylistList.ItemsSource = null;
     }
     private void RestoreSearchPlaylistOffset()
     {

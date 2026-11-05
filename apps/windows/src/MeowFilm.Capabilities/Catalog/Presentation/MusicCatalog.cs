@@ -115,7 +115,7 @@ public sealed partial class MusicCapability
         if (IsDiscovery) return;
         if (IsSearchPage) { RememberSearch(); return; }
         if (!IsCatalogPage || !catalogPages.TryGetValue(catalogPage, out var state)) return;
-        catalogPages[catalogPage] = state with { Scroll = page.CaptureScroll() };
+        catalogPages[catalogPage] = state with { Scroll = Presentation.CaptureScroll() };
         var key = location.Route + "/" + catalogLoadedPlatform;
         catalogLocations.Remove(key);
         catalogLocations[key] = new(location.Route, catalogLoadedPlatform, catalogQuery, catalogLoadedKind,
@@ -622,7 +622,7 @@ public sealed partial class MusicCapability
                 MusicCatalogDto.Text(reply, "cover"), more, next,
                 reply.TryGetProperty("total", out var sum) && sum.ValueKind != JsonValueKind.Null
                     ? MusicDto.Count(reply, "total") : sections.Sum(s => s.Items.Count),
-                Scroll: number > 1 && operation is ("home" or "channel" or "playlist") ? page.CaptureScroll() : 0,
+                Scroll: number > 1 && operation is ("home" or "channel" or "playlist") ? Presentation.CaptureScroll() : 0,
                 Target: target, AccountStamp: accountStamp, ExpiresAt: CatalogExpiry(reply));
             if (operation == "channels")
             {
@@ -752,6 +752,6 @@ public sealed partial class MusicCapability
         }
         finally { publishing = false; }
         var generation = loadGeneration;
-        _ = page.Dispatcher.InvokeAsync(() => { if (!stopping && generation == loadGeneration) page.RestoreScroll(state.Scroll); }, DispatcherPriority.Loaded);
+        _ = Presentation.Dispatcher.InvokeAsync(() => { if (!stopping && generation == loadGeneration) Presentation.RestoreScroll(state.Scroll); }, DispatcherPriority.Loaded);
     }
 }

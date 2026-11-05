@@ -665,7 +665,7 @@ public static partial class MusicUiTests
             True(buttons.Contains("综合") && buttons.Contains("单曲") && buttons.Contains("歌单") &&
                 buttons.Count(text => text == "查看更多") == 2, "real result tabs and section actions");
             True(!buttons.Contains("更多结果") && !buttons.Contains("取消搜索"), "retired utility controls");
-            var grid = Visuals(f.Module.View).OfType<DataGrid>().Single(grid => grid.Name == "SearchSongsGrid");
+            True(!Visuals(f.Module.View).OfType<DataGrid>().Any(), "overview does not mount the song table");
             var catalog = Visuals(f.Module.View).OfType<MusicCatalogView>().Single();
             var moreStyle = (Style)catalog.FindResource("Catalog.SectionMore");
             var moreButtons = Visuals(catalog).OfType<Button>()
@@ -680,10 +680,15 @@ public static partial class MusicUiTests
             True(loadingIndicators.All(element => element.Visibility == Visibility.Collapsed),
                 "settled section spinners are hidden");
             await f.Module.OpenSearchTabAsync("songs"); await Drain();
-            True(grid.Visibility == Visibility.Visible && catalog.Visibility == Visibility.Collapsed,
-                "song tab reuses the playlist song table");
+            f.Module.View.UpdateLayout();
+            var grid = Visuals(f.Module.View).OfType<DataGrid>().Single();
+            True(ReferenceEquals(grid, f.Module.View.FindName("SearchSongsGrid")) &&
+                !Visuals(f.Module.View).OfType<MusicCatalogView>().Any(),
+                "song tab restores the retained search song table");
             await f.Module.OpenSearchTabAsync("playlists"); await Drain();
-            True(grid.Visibility == Visibility.Collapsed && catalog.Visibility == Visibility.Visible,
+            f.Module.View.UpdateLayout();
+            True(!Visuals(f.Module.View).OfType<DataGrid>().Any() &&
+                ReferenceEquals(catalog, Visuals(f.Module.View).OfType<MusicCatalogView>().Single()),
                 "playlist tab uses the card surface");
         });
         yield return Case("native search shutdown resume drops old sessions but retains saved history", async () =>

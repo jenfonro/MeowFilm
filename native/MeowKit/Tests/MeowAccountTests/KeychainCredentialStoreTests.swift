@@ -17,22 +17,22 @@ final class KeychainCredentialStoreTests: XCTestCase {
         ])
     }
 
-    func testStoredAccessibilityMustMatchExceptEarlierStricterItemsForBackgroundPolicy() {
+    func testStoredAccessibilityMustMatchConfiguredPolicy() {
         let unlocked = kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String
         let background = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String
-        XCTAssertEqual(KeychainAccessibilityAdmission.classify(
-            stored: background, configured: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly), .current)
-        XCTAssertEqual(KeychainAccessibilityAdmission.classify(
-            stored: unlocked, configured: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly), .adopt)
-        XCTAssertEqual(KeychainAccessibilityAdmission.classify(
-            stored: unlocked, configured: kSecAttrAccessibleWhenUnlockedThisDeviceOnly), .current)
-        XCTAssertEqual(KeychainAccessibilityAdmission.classify(
-            stored: background, configured: kSecAttrAccessibleWhenUnlockedThisDeviceOnly), .rejected)
+        XCTAssertTrue(SystemKeychainDriver.matchesAccessibility(
+            background, configured: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly))
+        XCTAssertFalse(SystemKeychainDriver.matchesAccessibility(
+            unlocked, configured: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly))
+        XCTAssertTrue(SystemKeychainDriver.matchesAccessibility(
+            unlocked, configured: kSecAttrAccessibleWhenUnlockedThisDeviceOnly))
+        XCTAssertFalse(SystemKeychainDriver.matchesAccessibility(
+            background, configured: kSecAttrAccessibleWhenUnlockedThisDeviceOnly))
         for stored in [nil, kSecAttrAccessibleAfterFirstUnlock as String, "unknown"] {
-            XCTAssertEqual(KeychainAccessibilityAdmission.classify(
-                stored: stored, configured: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly), .rejected)
-            XCTAssertEqual(KeychainAccessibilityAdmission.classify(
-                stored: stored, configured: kSecAttrAccessibleWhenUnlockedThisDeviceOnly), .rejected)
+            XCTAssertFalse(SystemKeychainDriver.matchesAccessibility(
+                stored, configured: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly))
+            XCTAssertFalse(SystemKeychainDriver.matchesAccessibility(
+                stored, configured: kSecAttrAccessibleWhenUnlockedThisDeviceOnly))
         }
     }
 

@@ -47,8 +47,8 @@ public sealed partial class MusicCapability
     private void ChorusAccountChanged()
     {
         Interlocked.Increment(ref chorusAccountEpoch); // Fence before queued UI work.
-        if (!page.Dispatcher.HasShutdownStarted)
-            _ = page.Dispatcher.InvokeAsync(() => { ClearChorus(); if (!stopping) SyncChorus(); });
+        if (!Presentation.Dispatcher.HasShutdownStarted)
+            _ = Presentation.Dispatcher.InvokeAsync(() => { ClearChorus(); if (!stopping) SyncChorus(); });
     }
     private void SyncChorus()
     {

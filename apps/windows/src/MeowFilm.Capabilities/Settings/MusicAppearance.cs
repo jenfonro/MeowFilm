@@ -67,7 +67,7 @@ public sealed partial class MusicCapability
         appearanceStatus = "";
         Changed(nameof(PlaylistListView));
         AppearanceBindings();
-        page.ReapplyAppearance();
+        Presentation.ReapplyAppearance();
     }
 
     private async Task ReadAppearance(CancellationToken token)

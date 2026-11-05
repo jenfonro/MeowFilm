@@ -91,6 +91,10 @@ public static class FilmPresentationTests
             await Drain();
 
             Check(view.Background is SolidColorBrush { Color.A: 0 }, "page background is transparent");
+            Check(TextOptions.GetTextFormattingMode(view) == TextFormattingMode.Display &&
+                TextOptions.GetTextRenderingMode(view) == TextRenderingMode.Auto &&
+                view.FontFamily.Equals(SystemFonts.MessageFontFamily) && view.UseLayoutRounding && view.SnapsToDevicePixels,
+                "film pages inherit system typography and let WPF choose text antialiasing");
             Check(module.Sections.Select(section => section.Title)
                 .SequenceEqual(["热门电影", "热门剧集", "新番放送", "热门综艺"]),
                 "fixed section order");
@@ -109,6 +113,10 @@ public static class FilmPresentationTests
             Check(sectionTitles.Length == 4 &&
                 sectionTitles.All(title => ReferenceEquals(title.Style, sharedHeading)),
                 "film section typography reuses the shared music heading role");
+            Check(sectionTitles.All(title =>
+                TextOptions.GetTextFormattingMode(title) == TextFormattingMode.Display &&
+                TextOptions.GetTextRenderingMode(title) == TextRenderingMode.Auto),
+                "actual film headings use Display and Auto");
             foreach (var button in more)
             {
                 button.ApplyTemplate();
@@ -121,6 +129,12 @@ public static class FilmPresentationTests
             }
 
             var card = Visuals(shelves[0]).OfType<FilmCard>().First();
+            var cardText = Visuals(card).OfType<TextBlock>().Where(text => !string.IsNullOrWhiteSpace(text.Text)).ToArray();
+            Check(cardText.Length > 0 && cardText.All(text =>
+                TextOptions.GetTextFormattingMode(text) == TextFormattingMode.Display &&
+                TextOptions.GetTextRenderingMode(text) == TextRenderingMode.Auto &&
+                text.FontFamily.Equals(SystemFonts.MessageFontFamily)) && card.UseLayoutRounding && card.SnapsToDevicePixels,
+                "film card captions and scores retain system fonts and Auto through artwork composition");
             Check(Math.Abs(card.ActualWidth - 176) < .5 && Math.Abs(card.ActualHeight - 294) < .5,
                 "desktop card dimensions");
             var poster = (Grid)card.FindName("PosterFrame");
@@ -317,6 +331,11 @@ public static class FilmPresentationTests
                 playback.Background is SolidColorBrush { Color.A: 0 } &&
                 Visuals(playback).OfType<FilmPlaybackView>().Single().DataContext == module.Playback,
                 "playback route presents its selected film through the native page");
+            var playbackText = Visuals(playback).OfType<TextBlock>().Where(text => !string.IsNullOrWhiteSpace(text.Text)).ToArray();
+            Check(playbackText.Length > 0 && playbackText.All(text =>
+                TextOptions.GetTextFormattingMode(text) == TextFormattingMode.Display &&
+                TextOptions.GetTextRenderingMode(text) == TextRenderingMode.Auto),
+                "playback page text uses Display and Auto instead of page-wide grayscale");
             Check(((IDesktopHeaderSource)view).Header is
                 { Title: "播放页", SearchVisible: false, SearchEnabled: false },
                 "shell header contribution follows the playback route");

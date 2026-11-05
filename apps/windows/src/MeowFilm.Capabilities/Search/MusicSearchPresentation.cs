@@ -46,8 +46,8 @@ public sealed partial class MusicCapability
     private void UnsubscribeSearch() => application.SearchChanged -= SearchChanged;
     private void SearchChanged(JsonElement snapshot)
     {
-        if (page.Dispatcher.HasShutdownStarted || page.Dispatcher.HasShutdownFinished) return;
-        _ = page.Dispatcher.InvokeAsync(() =>
+        if (Presentation.Dispatcher.HasShutdownStarted || Presentation.Dispatcher.HasShutdownFinished) return;
+        _ = Presentation.Dispatcher.InvokeAsync(() =>
         {
             if (disposed || stopping) return;
             try { AcceptSearchSnapshot(snapshot); }
@@ -56,6 +56,7 @@ public sealed partial class MusicCapability
     }
     private void SearchBindings()
     {
+        Changed(nameof(ContentPage));
         foreach (string name in new[] { nameof(IsSearchPage), nameof(IsCatalogBrowsePage), nameof(HasSearchSession),
             nameof(CatalogSections), nameof(ShowSearchSkeleton), nameof(Songs), nameof(SearchTab), nameof(IsSearchOverview), nameof(IsSearchSongs), nameof(IsSearchPlaylists),
             nameof(CanSearchMore), nameof(CanLoadMoreSearchSongs), nameof(CanLoadMoreSearchPlaylists),
@@ -66,7 +67,7 @@ public sealed partial class MusicCapability
     {
         if (IsSearchPage)
         {
-            searchScroll[searchView] = page.CaptureScroll();
+            searchScroll[searchView] = Presentation.CaptureScroll();
             if (selectedSong is not null) searchSelectedKey = selectedSong.SelectionKey;
         }
     }
@@ -102,7 +103,7 @@ public sealed partial class MusicCapability
         {
             searchCardCache.Clear(); searchScroll.Clear();
             foreach (var sections in searchSections.Values) sections.Clear();
-            searchSongs.Clear(); searchSelectedKey = null; page.ResetSearchPresentation();
+            searchSongs.Clear(); searchSelectedKey = null; Presentation.ResetSearchPresentation();
         }
         searchStarts.Clear();
         searchKeyword = keyword; searchKind = kind; searchAccountEpoch = accountEpoch;
@@ -269,7 +270,7 @@ public sealed partial class MusicCapability
         var nextSongs = SearchSongs(songCards);
         var (prefix, songsChanged) = SearchSongDelta(nextSongs);
         bool reset = !restore && songsChanged && !prefix && IsSearchSongs;
-        double scroll = reset ? page.CaptureScroll() : searchScroll.GetValueOrDefault(searchView);
+        double scroll = reset ? Presentation.CaptureScroll() : searchScroll.GetValueOrDefault(searchView);
         bool restoreScroll = restore || reset;
         var sections = SearchSections(songCards, playlistCards);
         publishing = true;
@@ -297,10 +298,10 @@ public sealed partial class MusicCapability
         if (!restoreScroll) return;
         long generation = loadGeneration, epoch = searchEpoch;
         string view = searchView;
-        _ = page.Dispatcher.InvokeAsync(() =>
+        _ = Presentation.Dispatcher.InvokeAsync(() =>
         {
             if (!stopping && generation == loadGeneration && epoch == searchEpoch && IsSearchPage && view == searchView)
-                page.RestoreScroll(scroll);
+                Presentation.RestoreScroll(scroll);
         }, DispatcherPriority.Loaded);
     }
 
@@ -501,7 +502,7 @@ public sealed partial class MusicCapability
         searchIds.Clear(); searchSnapshots.Clear(); searchCardCache.Clear(); searchScroll.Clear(); searchKeyword = "";
         foreach (var sections in searchSections.Values) sections.Clear();
         searchSongs.Clear(); searchSelectedKey = null;
-        page.ResetSearchPresentation();
+        Presentation.ResetSearchPresentation();
         searchView = SearchOverview; searchKind = "songs";
         SearchBindings();
         await searchStartTail;

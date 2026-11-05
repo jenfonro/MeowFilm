@@ -36,13 +36,32 @@
 
 ## 播放与交互
 
-- 当前媒体时钟驱动行高亮和逐字高亮，不为每帧创建业务请求。
+- 当前媒体的低频真实位置驱动行选择并校准逐字高亮，不为每帧创建业务通知。`MusicLyricList` 是歌词视口的呈现 owner，保留原生 `ListBox` 的像素滚动和回收虚拟化。
 - 手动滚动只改变预览行；只有用户明确确认“从此处播放”才提交 seek。
 - 选曲、换源、关闭播放器或离开详情会取消旧歌词请求和手动预览；旧手势不能 seek 新媒体。
 - 暂停、播放、跳转和恢复均绑定当前播放 occurrence，不能仅按 song id 判断。
 - 播放器详情只呈现歌词、逐字高亮、手动预览及“播放此处”；不提供歌词工具齿轮或刷新、来源选择、导入／移除本地歌词浮层。本地歌词、来源选择与持久展示契约保持不变。
-- 详情文字跟随 Windows 系统字体并使用灰度抗锯齿。首尾留白属于首尾真实歌词行的滚动范围，不作为 `ItemsPresenter` 外边距占用视口；不插入占位歌词，也不关闭虚拟化。自动跟随以实际行中心和完整视口计算阅读位置，手动滚动的恢复仍由原有有界计时与动画拥有。
+- 详情文字跟随 Windows 系统字体并使用 `Display + Auto`；只有带渐隐 `OpacityMask` 的歌词列表明确使用 `Grayscale`。遮罩需要中间透明合成面，不能假定文字下方是不透明像素并强制 ClearType；普通标题、元数据和底栏继承 Auto。无需 Ideal，歌词宽度与原生 Display 排版、DPI 共同计算。
+- 首尾留白属于首尾真实歌词行的滚动范围，不作为 `ItemsPresenter` 外边距占用视口；不插入占位歌词，也不关闭虚拟化。自动跟随以实际行中心和完整视口计算阅读位置；相同行目标不会因持续进度或 `CanConfirmLyricPreview` 通知重启动画。换行、集合变更、播放 occurrence、阅读位置与视口几何变化才使目标失效。手动输入保持四秒跟随暂停，超时没有新媒体 tick 也恢复；确认预览仍走现有 seek／resume 链。
 - 首尾身份由当前 `Lyrics` 集合派生为 `FirstLyric`／`LastLyric`，集合增删、重排、替换与重置通知受影响的边界；行边距只按实际条目引用比较，不把 `AlternationIndex` 当完整列表行号，也不复制歌词状态。长列表验证检查实际实现数量、容器回收、首尾往返与换歌后边界。
+
+## Windows 逐字呈现接口与生命周期
+
+`MusicPlayerDetailView` 在列表上集中绑定以下 DP，不在每个词上绑定业务进度：
+
+| `MusicLyricList` 输入 | `MusicCapability` 来源 | 语义 |
+| --- | --- | --- |
+| `Position: double` | `PositionSeconds` | 当前 occurrence 的真实位置样本，seek 同样通过此输入校准 |
+| `IsPlaying: bool` | `IsPlaying` | 暂停移除时钟并显示真实样本；恢复重新建立呈现时间基准 |
+| `PlaybackRate: double?` | `AcceptedPlaybackRate` | 仅使用当前媒体已接受的倍速；null 或非法值不推算，不使用请求值 `PlaybackRate` 代替 |
+| `PresentationKey: string` | `PlaybackPresentationKey` | occurrence 身份变化立即移除旧时钟，再使用同批最新绑定值重建 |
+
+- 模块负责样本及 accepted rate 的身份一致性。列表合并同一 Dispatcher 批次内的输入变化；它不请求播放、不写模块状态，也不测量或声称已验证媒体实际输出倍速。
+- 当前 `NativePlayback` 没有 buffer 状态通知。若真实媒体停滞且仍报告 `IsPlaying=true`，没有新 Position 事件本身无法区分缓冲与样本间隔，呈现会继续外推至后续词边界；下一份真实位置、暂停或身份变化会重新校准。此机制没有覆盖真实缓冲时长，不以任意超时推测媒体暂停。
+- `MusicLyricWordView` 仅在文本、字体、语言、方向、排版模式或 DPI 变化时用 `FormattedText` 整形，缓存原生 `GlyphRun` 绘制树、尺寸及可动画裁剪几何；颜色／高对比变化只替换已有字形的画刷。WPF `RectAnimation` 直接推进保留的高亮裁剪，无 `CompositionTarget.Rendering`、自建帧定时器或每帧 FormattedText。
+- 列表仅给实际视口内、当前时间落在词时段内的词挂高亮动画；完成词、未来词、缓存页和卸载词不持有高亮动画。列表至多持有一个用于下一个词开始／结束边界的 WPF `Clock`，完成事件交接高亮，即使没有新的媒体样本也能跨词；此边界时钟不绑定属性，没有逐帧属性写入或业务回调。
+- 隐藏／卸载停止词与边界时钟并取消排队刷新；再次显示使用最新样本。容器回收、字体与布局变化会重新核对视口；未知倍速、高对比或系统减少动画模式只更新真实样本。独立使用 `MusicLyricWordView.Position` 仍显示有界静态进度并提供完整自动化文本。
+- `MusicLyricAnimationTests` 覆盖框架推进、暂停／恢复、seek、accepted rate、身份、隐藏／卸载、边界交接、实际回收、高对比，以及重复居中请求的原定时长和取消；`MusicUiTests` 覆盖持续 200ms 样本下居中、手动／预览四秒恢复及既有首尾／首次准备契约。代码用例的 HWND 与计时断言不替代真实媒体、物理 DPI 或 GPU 帧时间验证。
 
 ## 格式与错误
 

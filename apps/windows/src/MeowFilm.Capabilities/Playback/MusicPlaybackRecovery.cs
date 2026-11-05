@@ -377,7 +377,7 @@ public sealed partial class MusicCapability
                     AcceptOfficialSong(state.Song, refreshed.Target);
                     if (changedSource) SelectFeedback(state.Song, currentFeedbackAutomatic, currentRecommendationFeedback);
                     UpdateFeedbackSelection(); UpdateRecordingCandidates(); UpdateLyricSources();
-                    Changed(nameof(CurrentSource)); Changed(nameof(CurrentQualityLabel));
+                    PlaybackSourceBindings();
                     if (IsLyrics) _ = RestoreLyricsAsync();
                     ScheduleMusicExpiry(state);
                     if (alreadyStarted) ConfirmRecoveredSourceStarted(state);

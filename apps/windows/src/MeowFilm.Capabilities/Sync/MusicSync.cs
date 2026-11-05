@@ -24,8 +24,8 @@ public sealed partial class MusicCapability
     {
         // The native coordinator can finish on a pool thread. Coalesce refreshes
         // on the existing UI command lane, never create another library writer.
-        if (page.Dispatcher.HasShutdownStarted || page.Dispatcher.HasShutdownFinished) return;
-        _ = page.Dispatcher.InvokeAsync(() =>
+        if (Presentation.Dispatcher.HasShutdownStarted || Presentation.Dispatcher.HasShutdownFinished) return;
+        _ = Presentation.Dispatcher.InvokeAsync(() =>
         {
             if (stopping || disposed) return;
             syncRefreshRequested = true;
@@ -48,7 +48,7 @@ public sealed partial class MusicCapability
                             (location.Route is "favorites" or "search" ||
                              location.Route.StartsWith("playlist/", StringComparison.Ordinal)))
                             await LoadAsync(CaptureLocation(), lifetime.Token, publishStatus: false);
-                        if (settings.IsLoaded && LibrarySync.CanEdit)
+                        if (Presentation.IsSettingsActive && LibrarySync.CanEdit)
                             await LibrarySync.RefreshStatusAsync();
                     }
                 }

@@ -165,23 +165,7 @@ public final class EncryptedDocumentStore: @unchecked Sendable {
         guard try checkDirectories(), let bytes = try envelope(at: destination) else { return nil }
         // Validate the format before consulting protected storage.
         try EncryptedDocumentFormat.validate(bytes)
-        let plaintext = try decrypt(bytes, material: requiredKey(), key: key)
-        adoptProtection(destination)
-        return plaintext
-    }
-
-    /// Files and directories written by an earlier release carry a stricter class that is
-    /// unreadable while locked. A successful read proves access, so converge them to the
-    /// current class; a failure leaves the readable file unchanged for the next read.
-    private func adoptProtection(_ document: URL) {
-        #if os(iOS)
-        for (url, directory) in [(root, true), (document, false)] {
-            let saved = try? FileManager.default.attributesOfItem(atPath: url.path)[.protectionKey]
-            if NativeFileProtectionVerification.inspect(saved) == .rejected {
-                try? protect(url, directory: directory)
-            }
-        }
-        #endif
+        return try decrypt(bytes, material: requiredKey(), key: key)
     }
 
     private func writeUnlocked(_ data: Data, key: String) throws {
